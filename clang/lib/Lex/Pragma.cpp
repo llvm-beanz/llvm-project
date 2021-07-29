@@ -1911,6 +1911,45 @@ struct PragmaRegionHandler : public PragmaHandler {
   }
 };
 
+/// This handles parsing pragmas that take a macro name and optional message
+static IdentifierInfo *HandleMacroAnnotationPragma(Preprocessor &PP, Token &Tok,
+                                                   const char *Pragma,
+                                                   std::string &MessageString) {
+  std::string Macro;
+
+  PP.Lex(Tok);
+  if (Tok.isNot(tok::l_paren)) {
+    PP.Diag(Tok, diag::err_expected) << "(";
+    return nullptr;
+  }
+
+  PP.LexUnexpandedToken(Tok);
+  if (!Tok.is(tok::identifier)) {
+    PP.Diag(Tok, diag::err_expected) << tok::identifier;
+    return nullptr;
+  }
+  IdentifierInfo *II = Tok.getIdentifierInfo();
+
+  if (!II->hasMacroDefinition()) {
+    PP.Diag(Tok, diag::err_pp_visibility_non_macro) << II->getName();
+    return nullptr;
+  }
+
+  PP.Lex(Tok);
+  if (Tok.is(tok::comma)) {
+    PP.Lex(Tok);
+    if (!PP.FinishLexStringLiteral(Tok, MessageString, Pragma,
+                                   /*AllowMacroExpansion=*/true))
+      return nullptr;
+  }
+
+  if (Tok.isNot(tok::r_paren)) {
+    PP.Diag(Tok, diag::err_expected) << ")";
+    return nullptr;
+  }
+  return II;
+}
+
 /// "\#pragma clang deprecated(...)"
 ///
 /// The syntax is
@@ -1922,43 +1961,35 @@ struct PragmaDeprecatedHandler : public PragmaHandler {
 
   void HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
                     Token &Tok) override {
-    std::string Macro, MessageString;
+    std::string MessageString;
 
-    PP.Lex(Tok);
-    if (Tok.isNot(tok::l_paren)) {
-      PP.Diag(Tok, diag::err_expected) << "(";
-      return;
+    if (IdentifierInfo *II = HandleMacroAnnotationPragma(
+            PP, Tok, "#pragma clang deprecated", MessageString)) {
+      II->setIsDeprecatedMacro(true);
+      if (!MessageString.empty())
+        PP.addMacroDeprecationMsg(II, std::move(MessageString));
     }
+  }
+};
 
-    PP.LexUnexpandedToken(Tok);
-    if (!Tok.is(tok::identifier)) {
-      PP.Diag(Tok, diag::err_expected) << tok::identifier;
-      return;
+/// "\#pragma clang header_unsafe(...)"
+///
+/// The syntax is
+/// \code
+///   #pragma clang header_unsafe(MACRO_NAME [, Message])
+/// \endcode
+struct PragmaHeaderUnsafeHandler : public PragmaHandler {
+  PragmaHeaderUnsafeHandler() : PragmaHandler("header_unsafe") {}
+
+  void HandlePragma(Preprocessor &PP, PragmaIntroducer Introducer,
+                    Token &Tok) override {
+    std::string MessageString;
+
+    if (IdentifierInfo *II = HandleMacroAnnotationPragma(
+            PP, Tok, "#pragma clang header_unsafe", MessageString)) {
+      II->setIsHeaderUnsafe(true);
+      PP.addHeaderUnsafeMsg(II, std::move(MessageString), Tok.getLocation());
     }
-    IdentifierInfo *II = Tok.getIdentifierInfo();
-
-    if (!II->hasMacroDefinition()) {
-      PP.Diag(Tok, diag::err_pp_visibility_non_macro) << II->getName();
-      return;
-    }
-
-    PP.Lex(Tok);
-    if (Tok.is(tok::comma)) {
-      PP.Lex(Tok);
-      if (!PP.FinishLexStringLiteral(Tok, MessageString,
-                                     "#pragma clang deprecated",
-                                     /*AllowMacroExpansion=*/true))
-        return;
-    }
-
-    if (Tok.isNot(tok::r_paren)) {
-      PP.Diag(Tok, diag::err_expected) << ")";
-      return;
-    }
-
-    II->setIsDeprecatedMacro(true);
-    if (!MessageString.empty())
-      PP.addMacroDeprecationMsg(II, std::move(MessageString));
   }
 };
 
@@ -1991,6 +2022,7 @@ void Preprocessor::RegisterBuiltinPragmas() {
   AddPragmaHandler("clang", new PragmaARCCFCodeAuditedHandler());
   AddPragmaHandler("clang", new PragmaAssumeNonNullHandler());
   AddPragmaHandler("clang", new PragmaDeprecatedHandler());
+  AddPragmaHandler("clang", new PragmaHeaderUnsafeHandler());
 
   // #pragma clang module ...
   auto *ModuleHandler = new PragmaNamespace("module");

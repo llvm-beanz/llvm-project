@@ -15,6 +15,7 @@
 #define LLVM_CLANG_LEX_PREPROCESSOR_H
 
 #include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/LangOptions.h"
@@ -791,8 +792,17 @@ private:
   using WarnUnusedMacroLocsTy = llvm::SmallDenseSet<SourceLocation, 32>;
   WarnUnusedMacroLocsTy WarnUnusedMacroLocs;
 
-  /// Deprecation messages for macros provided in #pragma clang deprecated
+  /// This is a pair of an optional message and source location used for pragmas
+  /// that annotate macros like pragma clang header_unsafe and pragma clang
+  /// deprecated. This pair stores the optional message and the location of the
+  /// annotation pragma for use producing diagnostics and notes.
+  using MsgLocationPair = std::pair<std::string, SourceLocation>;
+
+  /// Deprecation messages for macros provided in #pragma clang deprecated.
   llvm::DenseMap<const IdentifierInfo *, std::string> MacroDeprecationMsgs;
+
+  /// Usage warning for macros marked by #pragma clang header_unsafe.
+  llvm::DenseMap<const IdentifierInfo *, MsgLocationPair> HeaderUnsafeMacroMsgs;
 
   /// A "freelist" of MacroArg objects that can be
   /// reused for quick allocation.
@@ -2406,9 +2416,29 @@ public:
     return MsgEntry->second;
   }
 
-  void emitMacroExpansionWarnings(const Token &Identifier);
+  void addHeaderUnsafeMsg(const IdentifierInfo *II, std::string Msg,
+                          SourceLocation AnnotationLoc) {
+    HeaderUnsafeMacroMsgs.insert(
+        std::make_pair(II, std::make_pair(std::move(Msg), AnnotationLoc)));
+  }
+
+  MsgLocationPair getHeaderUnsafeMsg(const IdentifierInfo *II) {
+    return HeaderUnsafeMacroMsgs.find(II)->second;
+  }
+
+  void emitMacroExpansionWarnings(const Token &Identifier) {
+    if (Identifier.getIdentifierInfo()->isDeprecatedMacro())
+      emitMacroDeprecationWarning(Identifier);
+
+    if (Identifier.getIdentifierInfo()->isHeaderUnsafe() &&
+        !SourceMgr.isInMainFile(Identifier.getLocation()))
+      emitMacroUnsafeHeaderWarning(Identifier);
+  }
 
 private:
+  void emitMacroDeprecationWarning(const Token &Identifier);
+  void emitMacroUnsafeHeaderWarning(const Token &Identifier);
+
   Optional<unsigned>
   getSkippedRangeForExcludedConditionalBlock(SourceLocation HashLoc);
 
