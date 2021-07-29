@@ -530,6 +530,12 @@ def warn_pragma_header_unsafe_macro_use :
           "%select{|: %2}1">,
   InGroup<PedanticMacros>;
 
+// - #pragma clang final(...)
+def warn_pragma_final_macro :
+  ExtWarn<"macro %0 has been marked as final and should not be "
+          "%select{un|re}1defined">,
+  InGroup<PedanticMacros>;
+
 // - #pragma execution_character_set(...)
 def warn_pragma_exec_charset_expected :
   ExtWarn<"#pragma execution_character_set expected '%0'">,

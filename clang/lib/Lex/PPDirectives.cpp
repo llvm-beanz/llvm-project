@@ -2861,6 +2861,12 @@ void Preprocessor::HandleDefineDirective(
   if (MacroNameTok.is(tok::eod))
     return;
 
+  IdentifierInfo *II = MacroNameTok.getIdentifierInfo();
+  // Issue a final pragma warning if we're defining a macro that was has been
+  // undefined and is being redefined.
+  if (!II->hasMacroDefinition() && II->hadMacroDefinition() && II->isFinal())
+    Diag(MacroNameTok, diag::warn_pragma_final_macro) << II << 1;
+
   // If we are supposed to keep comments in #defines, reenable comment saving
   // mode.
   if (CurLexer) CurLexer->SetCommentRetentionState(KeepMacroComments);
@@ -3008,6 +3014,9 @@ void Preprocessor::HandleUndefDirective() {
   auto *II = MacroNameTok.getIdentifierInfo();
   auto MD = getMacroDefinition(II);
   UndefMacroDirective *Undef = nullptr;
+
+  if (II->isFinal())
+    Diag(MacroNameTok, diag::warn_pragma_final_macro) << II << 0;
 
   // If the macro is not defined, this is a noop undef.
   if (const MacroInfo *MI = MD.getMacroInfo()) {

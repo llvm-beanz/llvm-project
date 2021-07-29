@@ -3929,6 +3929,24 @@ headers with ABI stability requirements. For example:
 
 This warning is controlled by ``-Wpedantic-macros``.
 
+Final Macros
+============
+
+Clang supports the pragma ``#pragma clang final``, which can be used to
+mark macros as final, meaning they cannot be undef'd or re-defined. For example:
+
+.. code-block:: c
+   #define FINAL_MACRO 1
+   #pragma clang final(FINAL_MACRO)
+
+   #undef FINAL_MACRO  // warning: FINAL_MACRO is marked final and should not be undefined
+   #define FINAL_MACRO // warning: FINAL_MACRO is marked final and should not be redefined
+
+This is useful for enforcing system-provided macros that should not be altered
+in user headers or code. This is controlled by ``-Wpedantic-macros`` which also
+includes the related ``-Wmacro-redefined``, which warns on redefinition of
+macros without undefining them first.
+
 Extended Integer Types
 ======================
 
