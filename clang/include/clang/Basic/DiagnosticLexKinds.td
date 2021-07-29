@@ -524,6 +524,12 @@ def warn_pragma_deprecated_macro_use :
   ExtWarn<"macro %0 has been marked as deprecated%select{|: %2}1">,
   InGroup<DeprecatedPragma>;
 
+// - #pragma clang header_unsafe(...)
+def warn_pragma_header_unsafe_macro_use :
+  ExtWarn<"macro %0 has been marked as unsafe for use in headers"
+          "%select{|: %2}1">,
+  InGroup<PedanticMacros>;
+
 // - #pragma execution_character_set(...)
 def warn_pragma_exec_charset_expected :
   ExtWarn<"#pragma execution_character_set expected '%0'">,

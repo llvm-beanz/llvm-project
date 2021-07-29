@@ -3906,6 +3906,29 @@ provide deprecation warnings for macro uses. For example:
 ``#pragma GCC warning`` because the warning can be controlled with
 ``-Wdeprecated``.
 
+Header Unsafe Macros
+====================
+
+Clang supports the pragma ``#pragma clang header_unsafe``, which can be used to
+mark macros as unsafe to use in headers. This can be valuable when providing
+headers with ABI stability requirements. For example:
+
+.. code-block:: c
+
+   #define TARGET_ARM 1
+   #pragma clang header_unsafe(TARGET_ARM, "<reason>")
+
+   /// Foo.h
+   struct Foo {
+   #if TARGET_ARM // warning: TARGET_ARM is marked unsafe in headers: <reason>
+     uint32_t X;
+   #else
+     uint64_t X;
+   #endif
+   };
+
+This warning is controlled by ``-Wpedantic-macros``.
+
 Extended Integer Types
 ======================
 

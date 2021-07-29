@@ -1305,3 +1305,7 @@ def WebAssemblyExceptionSpec : DiagGroup<"wasm-exception-spec">;
 def RTTI : DiagGroup<"rtti">;
 
 def OpenCLCoreFeaturesDiagGroup : DiagGroup<"pedantic-core-features">;
+
+// Warnings and extensions to make preprocessor macro usage pedantic
+def PedanticMacros : DiagGroup<"pedantic-macros",
+                    [DeprecatedPragma, MacroRedefined, BuiltinMacroRedefined]>;

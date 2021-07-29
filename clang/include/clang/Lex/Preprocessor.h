@@ -15,6 +15,7 @@
 #define LLVM_CLANG_LEX_PREPROCESSOR_H
 
 #include "clang/Basic/Diagnostic.h"
+#include "clang/Basic/DiagnosticIDs.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/LLVM.h"
 #include "clang/Basic/LangOptions.h"
@@ -793,6 +794,9 @@ private:
 
   /// Deprecation messages for macros provided in #pragma clang deprecated
   llvm::DenseMap<const IdentifierInfo *, std::string> MacroDeprecationMsgs;
+
+  /// Usage warning for macros marked by #pragma clang header_unsafe
+  llvm::DenseMap<const IdentifierInfo *, std::string> HeaderUnsafeMacroMsgs;
 
   /// A "freelist" of MacroArg objects that can be
   /// reused for quick allocation.
@@ -2406,9 +2410,30 @@ public:
     return MsgEntry->second;
   }
 
-  void emitMacroExpansionWarnings(const Token &Identifier);
+  void addHeaderUnsafeMsg(const IdentifierInfo *II, std::string Msg) {
+    HeaderUnsafeMacroMsgs.insert(std::make_pair(II, Msg));
+  }
+
+  llvm::Optional<std::string> getHeaderUnsafeMsg(const IdentifierInfo *II) {
+    auto MsgEntry = HeaderUnsafeMacroMsgs.find(II);
+    if (MsgEntry == HeaderUnsafeMacroMsgs.end())
+      return llvm::None;
+    return MsgEntry->second;
+  }
+
+  void emitMacroExpansionWarnings(const Token &Identifier) {
+    if (Identifier.getIdentifierInfo()->isDeprecatedMacro())
+      emitMacroDeprecationWarning(Identifier);
+
+    if (Identifier.getIdentifierInfo()->isHeaderUnsafe() &&
+        !SourceMgr.isInMainFile(Identifier.getLocation()))
+      emitMacroUnsafeHeaderWarning(Identifier);
+  }
 
 private:
+  void emitMacroDeprecationWarning(const Token &Identifier);
+  void emitMacroUnsafeHeaderWarning(const Token &Identifier);
+
   Optional<unsigned>
   getSkippedRangeForExcludedConditionalBlock(SourceLocation HashLoc);
 
