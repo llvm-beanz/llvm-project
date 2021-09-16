@@ -53,3 +53,7 @@ foreach(p ${LLVM_EXTERNAL_PROJECTS})
 endforeach(p)
 
 set(LLVM_COMMON_DEPENDS ${LLVM_COMMON_DEPENDS} PARENT_SCOPE)
+
+# This is explicitly added at the end _after_ all tool projects so that it can
+# scrape up tools from other projects into itself.
+add_subdirectory(llvm-driver)

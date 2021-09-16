@@ -1,0 +1,10 @@
+## Don't make symlinks on Windows.
+# UNSUPPORTED: system-windows
+# REQUIRES: llvm-driver
+
+# RUN: rm -rf %t
+# RUN: mkdir %t
+# RUN: ln -s %llvm %t/llvm-cxxfilt
+# RUN: %t/llvm-cxxfilt --help
+
+# CHECK: USAGE: llvm-cxxfilt
