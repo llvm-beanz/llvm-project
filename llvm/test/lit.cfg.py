@@ -90,6 +90,7 @@ config.substitutions.append(('%llvmshlibdir', config.llvm_shlib_dir))
 config.substitutions.append(('%shlibext', config.llvm_shlib_ext))
 config.substitutions.append(('%pluginext', config.llvm_plugin_ext))
 config.substitutions.append(('%exeext', config.llvm_exe_ext))
+config.substitutions.append(('%diff', 'diff --strip-trailing-cr'))
 
 
 lli_args = []
