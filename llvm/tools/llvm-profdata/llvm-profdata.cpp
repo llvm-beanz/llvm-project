@@ -661,8 +661,10 @@ static void populateProfileSymbolList(MemoryBuffer *Buffer,
   StringRef Data = Buffer->getBuffer();
   Data.split(SymbolVec, '\n', /*MaxSplit=*/-1, /*KeepEmpty=*/false);
 
-  for (StringRef symbol : SymbolVec)
-    PSL.add(symbol);
+  for (StringRef SymbolStr : SymbolVec) {
+    StringRef SanitizedSymbol = SymbolStr.trim(" \t\v\f\r");
+    PSL.add(SanitizedSymbol);
+  }
 }
 
 static void handleExtBinaryWriter(sampleprof::SampleProfileWriter &Writer,
