@@ -1,5 +1,5 @@
 # binary files
-test/Object/Inputs/*.a-* binary
+test/Object/Inputs/*.a* binary
 test/tools/dsymutil/Inputs/*.o binary
 test/tools/dsymutil/Inputs/*.a binary
 test/tools/dsymutil/Inputs/*.i386 binary
