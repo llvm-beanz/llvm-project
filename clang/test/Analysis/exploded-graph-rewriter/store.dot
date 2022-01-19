@@ -44,7 +44,7 @@ Node0x1 [shape=record,label=
               "items": [
                 {
                   "kind": "Default",
-                  "offset": 0,
+                  "offset": {{[0-9]+}},
                   "value": "Undefined"
                 }
               ]
