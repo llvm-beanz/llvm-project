@@ -1109,6 +1109,29 @@ TEST(StringRefTest, GTestPrinter) {
   EXPECT_EQ(R"("foo")", ::testing::PrintToString(StringRef("foo")));
 }
 
+TEST(StringRefTest, LFLineEnding) {
+  constexpr StringRef Cases[] = {"\nDoggo\nPupper", "Floofer\n", "Woofer"};
+  for (const auto &Entry : Cases) {
+    EXPECT_EQ(StringRef("\n"), Entry.detectEOL());
+  }
+}
+
+TEST(StringRefTest, CRLFLineEnding) {
+  constexpr StringRef Cases[] = {"\r\nDoggo\r\nPupper", "Floofer\r\n",
+                                 "Woofer\r\nSubWoofer\n"};
+  for (const auto &Entry : Cases) {
+    EXPECT_EQ(StringRef("\r\n"), Entry.detectEOL());
+  }
+}
+
+TEST(StringRefTest, LFCRLineEnding) {
+  constexpr StringRef Cases[] = {"\n\rDoggo\n\rPupper", "Floofer\n\r",
+                                 "Woofer\n\rSubWoofer\n"};
+  for (const auto &Entry : Cases) {
+    EXPECT_EQ(StringRef("\n\r"), Entry.detectEOL());
+  }
+}
+
 static_assert(std::is_trivially_copyable<StringRef>::value,
               "trivially copyable");
 

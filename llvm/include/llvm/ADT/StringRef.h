@@ -877,6 +877,23 @@ namespace llvm {
       return ltrim(Chars).rtrim(Chars);
     }
 
+    /// Detect the line ending style of the string.
+    ///
+    /// If the string contains a line ending, return the line ending character
+    /// sequence that is detected. Otherwise return '\n' for unix line endings.
+    ///
+    /// \return - The line ending character sequence.
+    LLVM_NODISCARD
+    StringRef detectEOL() const {
+      size_t Pos = find('\n');
+      if (Pos == npos)
+        return "\n"; // Default assume Unix
+      if (Pos > 0 && Data[Pos - 1] == '\r')
+        return "\r\n"; // Windows
+      if (Pos + 1 < Length && Data[Pos + 1] == '\r')
+        return "\n\r"; // Classic Mac
+      return "\n";     // Unix
+    }
     /// @}
   };
 
