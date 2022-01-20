@@ -1,0 +1,4 @@
+ARCMT/* text eol=lf
+Analysis/diagnostics/sarif-* text eol=lf
+Analysis/diagnostics/Inputs/expected-sarif/* text eol=lf
+Analysis/exploded-graph-rewriter/store*.dot text eol=lf
