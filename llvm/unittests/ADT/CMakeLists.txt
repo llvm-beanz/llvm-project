@@ -23,6 +23,7 @@ add_llvm_unittest(ADTTests
   DepthFirstIteratorTest.cpp
   DirectedGraphTest.cpp
   EnumeratedArrayTest.cpp
+  EnumMatcherTests.cpp
   EquivalenceClassesTest.cpp
   FallibleIteratorTest.cpp
   FloatingPointMode.cpp

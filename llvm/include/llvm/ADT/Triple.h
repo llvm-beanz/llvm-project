@@ -104,6 +104,7 @@ public:
     renderscript32, // 32-bit RenderScript
     renderscript64, // 64-bit RenderScript
     ve,             // NEC SX-Aurora Vector Engine
+    dxil,           // DXIL - DirectX bytecode
     LastArchType = ve
   };
   enum SubArchType {
@@ -208,6 +209,7 @@ public:
     Hurd,       // GNU/Hurd
     WASI,       // Experimental WebAssembly OS
     Emscripten,
+    ShaderModel, // DirectX ShaderModel
     LastOSType = Emscripten
   };
   enum EnvironmentType {
@@ -235,7 +237,25 @@ public:
     CoreCLR,
     Simulator, // Simulator variants of other systems, e.g., Apple's iOS
     MacABI, // Mac Catalyst variant of Apple's iOS deployment target.
-    LastEnvironmentType = MacABI
+    
+    // Shader Stages
+    Pixel,
+    Vertex,
+    Geometry,
+    Hull,
+    Domain,
+    Compute,
+    Library,
+    RayGeneration,
+    Intersection,
+    AnyHit,
+    ClosestHit,
+    Miss,
+    Callable,
+    Mesh,
+    Amplification,
+
+    LastEnvironmentType = Amplification
   };
   enum ObjectFormatType {
     UnknownObjectFormat,
@@ -677,6 +697,11 @@ public:
            getEnvironment() == Triple::MuslEABI ||
            getEnvironment() == Triple::MuslEABIHF ||
            getEnvironment() == Triple::MuslX32;
+  }
+
+  /// Tests whether the target is SPIR (32- or 64-bit).
+  bool isDXIL() const {
+    return getArch() == Triple::dxil;
   }
 
   /// Tests whether the target is SPIR (32- or 64-bit).

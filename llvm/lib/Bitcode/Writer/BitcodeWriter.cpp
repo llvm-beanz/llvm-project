@@ -4461,6 +4461,8 @@ void ModuleBitcodeWriter::write() {
   Stream.ExitBlock();
 }
 
+#include "DXILBitcodeWriter.inc"
+
 static void writeInt32ToBuffer(uint32_t Value, SmallVectorImpl<char> &Buffer,
                                uint32_t &Position) {
   support::endian::write32le(&Buffer[Position], Value);
@@ -4621,6 +4623,14 @@ void BitcodeWriter::writeModule(const Module &M,
   assert(M.isMaterialized());
   Mods.push_back(const_cast<Module *>(&M));
 
+  Triple TT(M.getTargetTriple());
+  if (TT.isDXIL()) {
+    DXILBitcodeWriter DXILWriter(M, Buffer, StrtabBuilder, *Stream,
+                                 ShouldPreserveUseListOrder, Index,
+                                 GenerateHash, ModHash);
+    DXILWriter.write();
+    return;
+  }
   ModuleBitcodeWriter ModuleWriter(M, Buffer, StrtabBuilder, *Stream,
                                    ShouldPreserveUseListOrder, Index,
                                    GenerateHash, ModHash);
