@@ -11538,4 +11538,14 @@ def err_riscv_builtin_requires_extension : Error<
   "builtin requires at least one of the following extensions support to be enabled : %0">;
 def err_riscv_builtin_invalid_lmul : Error<
   "LMUL argument must be in the range [0,3] or [5,7]">;
+
+
+// HLSL Diagnostics
+def err_hlsl_attr_unsupported_in_stage : Error<"attribute %0 is unsupported in %select{Pixel|Vertex|Geometry|Hull|Domain|Compute|Library|RayGeneration|Intersection|AnyHit|ClosestHit|Miss|Callable|Mesh|Amplification|Invalid}1 shaders, requires %2">;
+def err_hlsl_numthreads_argument_oor : Error<"argument to numthreads attribute must be in range 0-1024">;
+
+def err_hlsl_numthreads_invalid : Error<"total number of threads must not exceed 1024">;
+
+
 } // end of sema component.
+

@@ -336,6 +336,8 @@ def ObjCAutoRefCount : LangOpt<"ObjCAutoRefCount">;
 def ObjCNonFragileRuntime
     : LangOpt<"", "LangOpts.ObjCRuntime.allowsClassStubs()">;
 
+def HLSL : LangOpt<"HLSL">;
+
 // Language option for CMSE extensions
 def Cmse : LangOpt<"Cmse">;
 
@@ -3937,3 +3939,5 @@ def Error : InheritableAttr {
   let Subjects = SubjectList<[Function], ErrorDiag>;
   let Documentation = [ErrorAttrDocs];
 }
+
+include "clang/Basic/HLSLAttr.td"

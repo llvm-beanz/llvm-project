@@ -371,6 +371,54 @@ static void InitializeStandardPredefinedMacros(const TargetInfo &TI,
                                                const LangOptions &LangOpts,
                                                const FrontendOptions &FEOpts,
                                                MacroBuilder &Builder) {
+  if (LangOpts.HLSL) {
+    Builder.defineMacro("__hlsl_clang");
+    // TODO: HLSL Fill in compiler version info
+    // DXC Version information
+    /*
+    Builder.defineMacro("__DXC_VERSION_MAJOR", STRINGIFY(RC_VERSION_FIELD_1));
+    Builder.defineMacro("__DXC_VERSION_MINOR", STRINGIFY(RC_VERSION_FIELD_2));
+    Builder.defineMacro("__DXC_VERSION_RELEASE", STRINGIFY(RC_VERSION_FIELD_3));
+    Builder.defineMacro("__DXC_VERSION_COMMITS", STRINGIFY(RC_VERSION_FIELD_4));
+    */
+    // HLSL Version
+    Builder.defineMacro("__HLSL_VERSION",
+                        Twine((unsigned)LangOpts.getHLSLVersion()));
+
+    // Shader target information
+    // "enums" for shader stages
+    Builder.defineMacro("__SHADER_STAGE_VERTEX",
+                        Twine((uint32_t)ShaderStage::Vertex));
+    Builder.defineMacro("__SHADER_STAGE_PIXEL",
+                        Twine((uint32_t)ShaderStage::Pixel));
+    Builder.defineMacro("__SHADER_STAGE_GEOMETRY",
+                        Twine((uint32_t)ShaderStage::Geometry));
+    Builder.defineMacro("__SHADER_STAGE_HULL",
+                        Twine((uint32_t)ShaderStage::Hull));
+    Builder.defineMacro("__SHADER_STAGE_DOMAIN",
+                        Twine((uint32_t)ShaderStage::Domain));
+    Builder.defineMacro("__SHADER_STAGE_COMPUTE",
+                        Twine((uint32_t)ShaderStage::Compute));
+    Builder.defineMacro("__SHADER_STAGE_AMPLIFICATION",
+                        Twine((uint32_t)ShaderStage::Amplification));
+    Builder.defineMacro("__SHADER_STAGE_MESH",
+                        Twine((uint32_t)ShaderStage::Mesh));
+    Builder.defineMacro("__SHADER_STAGE_LIBRARY",
+                        Twine((uint32_t)ShaderStage::Library));
+    // The current shader stage itself
+
+    Builder.defineMacro("__SHADER_TARGET_STAGE",
+                        Twine((uint32_t)TI.getTriple().getEnvironment() -
+                              (uint32_t)llvm::Triple::Pixel));
+    // Add target versions
+    // TODO: HLSL Shader model versions
+    /*
+    const hlsl::ShaderModel *SM = hlsl::ShaderModel::GetByName(LangOpts.HLSLProfile.c_str());
+    Builder.defineMacro("__SHADER_TARGET_MAJOR", Twine(SM->GetMajor()));
+    Builder.defineMacro("__SHADER_TARGET_MINOR", Twine(SM->GetMinor()));
+    */
+    return;
+  }
   // C++ [cpp.predefined]p1:
   //   The following macro names shall be defined by the implementation:
 

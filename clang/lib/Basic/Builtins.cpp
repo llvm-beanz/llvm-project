@@ -84,11 +84,13 @@ bool Builtin::Context::builtinIsSupported(const Builtin::Info &BuiltinInfo,
   bool CUDAUnsupported = !LangOpts.CUDA && BuiltinInfo.Langs == CUDA_LANG;
   bool CPlusPlusUnsupported =
       !LangOpts.CPlusPlus && BuiltinInfo.Langs == CXX_LANG;
+  bool HLSLUnsupported =
+      !LangOpts.HLSL && BuiltinInfo.Langs == HLSL_LANG;
   return !BuiltinsUnsupported && !CorBuiltinsUnsupported &&
          !MathBuiltinsUnsupported && !OclCUnsupported && !OclGASUnsupported &&
          !OclPipeUnsupported && !OclDSEUnsupported && !OpenMPUnsupported &&
          !GnuModeUnsupported && !MSModeUnsupported && !ObjCUnsupported &&
-         !CPlusPlusUnsupported && !CUDAUnsupported;
+         !CPlusPlusUnsupported && !CUDAUnsupported && !HLSLUnsupported;
 }
 
 /// initializeBuiltins - Mark the identifiers for all the builtins with their

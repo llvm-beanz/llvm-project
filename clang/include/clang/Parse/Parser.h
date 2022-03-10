@@ -2841,8 +2841,18 @@ private:
       Sema::AttributeCompletion Completion = Sema::AttributeCompletion::None,
       const IdentifierInfo *EnclosingScope = nullptr);
 
+  void MaybeParseHLSLSemantics(ParsedAttributes &attrs,
+                               SourceLocation *endLoc = nullptr) {
+    if (getLangOpts().HLSL && Tok.is(tok::colon))
+      ParseHLSLSemantics(attrs, endLoc);
+  }
+
+  void ParseHLSLSemantics(ParsedAttributes &attrs,
+                          SourceLocation *endLoc = nullptr);
+
   void MaybeParseMicrosoftAttributes(ParsedAttributes &Attrs) {
-    if (getLangOpts().MicrosoftExt && Tok.is(tok::l_square)) {
+    if ((getLangOpts().MicrosoftExt || getLangOpts().HLSL) &&
+        Tok.is(tok::l_square)) {
       ParsedAttributesWithRange AttrsWithRange(AttrFactory);
       ParseMicrosoftAttributes(AttrsWithRange);
       Attrs.takeAllFrom(AttrsWithRange);

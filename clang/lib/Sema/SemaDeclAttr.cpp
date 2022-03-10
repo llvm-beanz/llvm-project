@@ -24,6 +24,7 @@
 #include "clang/AST/Type.h"
 #include "clang/Basic/CharInfo.h"
 #include "clang/Basic/DarwinSDKInfo.h"
+#include "clang/Basic/LangOptions.h"
 #include "clang/Basic/SourceLocation.h"
 #include "clang/Basic/SourceManager.h"
 #include "clang/Basic/TargetBuiltins.h"
@@ -37,6 +38,7 @@
 #include "clang/Sema/Scope.h"
 #include "clang/Sema/ScopeInfo.h"
 #include "clang/Sema/SemaInternal.h"
+#include "llvm/ADT/EnumMatcher.h"
 #include "llvm/ADT/Optional.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
@@ -6828,6 +6830,57 @@ static void handleUuidAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
     D->addAttr(UA);
 }
 
+static void handleHLSLNumThreadsAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  using llvm::Triple;
+  if (!llvm::isInEnumSet<Triple::EnvironmentType, Triple::Compute, Triple::Mesh,
+                         Triple::Amplification, Triple::Library>(
+          S.Context.getTargetInfo().getTriple().getEnvironment())) {
+    uint32_t Pipeline =
+        (uint32_t)S.Context.getTargetInfo().getTriple().getEnvironment() -
+        (uint32_t)llvm::Triple::Pixel;
+    S.Diag(AL.getLoc(), diag::err_hlsl_attr_unsupported_in_stage)
+        << AL << Pipeline << "Compute, Amplification, Mesh or Library";
+    return;
+  }
+
+  // TODO: HLSL validation per-shader model version
+  uint32_t X;
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(0), X))
+    return;
+  if (X > 1024) {
+    S.Diag(AL.getArgAsExpr(0)->getExprLoc(),
+           diag::err_hlsl_numthreads_argument_oor);
+    return;
+  }
+  uint32_t Y;
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(1), Y))
+    return;
+  if (Y > 1024) {
+    S.Diag(AL.getArgAsExpr(1)->getExprLoc(),
+           diag::err_hlsl_numthreads_argument_oor);
+    return;
+  }
+  uint32_t Z;
+  if (!checkUInt32Argument(S, AL, AL.getArgAsExpr(2), Z))
+    return;
+  if (Z > 1024) {
+    S.Diag(AL.getArgAsExpr(2)->getExprLoc(),
+           diag::err_hlsl_numthreads_argument_oor);
+    return;
+  }
+
+  if (X * Y * Z > 1024) {
+    S.Diag(AL.getLoc(), diag::err_hlsl_numthreads_invalid);
+    return;
+  }
+
+  D->addAttr(::new (S.Context) HLSLNumThreadsAttr(S.Context, AL, X, Y, Z));
+}
+
+static void handleHLSLSVGroupIndexAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
+  D->addAttr(::new (S.Context) HLSLSV_GroupIndexAttr(S.Context, AL));
+}
+
 static void handleMSInheritanceAttr(Sema &S, Decl *D, const ParsedAttr &AL) {
   if (!S.LangOpts.CPlusPlus) {
     S.Diag(AL.getLoc(), diag::err_attribute_not_supported_in_lang)
@@ -8688,6 +8741,14 @@ static void ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D,
     break;
   case ParsedAttr::AT_Thread:
     handleDeclspecThreadAttr(S, D, AL);
+    break;
+  
+  // HLSL attributes:
+  case ParsedAttr::AT_HLSLNumThreads:
+    handleHLSLNumThreadsAttr(S, D, AL);
+    break;
+  case ParsedAttr::AT_HLSLSV_GroupIndex:
+    handleHLSLSVGroupIndexAttr(S, D, AL);
     break;
 
   case ParsedAttr::AT_AbiTag:
