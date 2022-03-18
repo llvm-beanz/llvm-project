@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "ValueEnumerator.h"
+#include "llvm/Bitcode/ValueEnumerator.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/Argument.h"

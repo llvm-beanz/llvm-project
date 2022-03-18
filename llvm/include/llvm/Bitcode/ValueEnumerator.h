@@ -1,4 +1,4 @@
-//===- Bitcode/Writer/ValueEnumerator.h - Number values ---------*- C++ -*-===//
+//===- llvm/Bitcode/ValueEnumerator.h - Number values -----------*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
@@ -10,8 +10,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIB_BITCODE_WRITER_VALUEENUMERATOR_H
-#define LLVM_LIB_BITCODE_WRITER_VALUEENUMERATOR_H
+#ifndef LLVM_BITCODE_VALUEENUMERATOR_H
+#define LLVM_BITCODE_VALUEENUMERATOR_H
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
