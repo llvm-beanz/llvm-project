@@ -28,7 +28,13 @@ namespace llvm {
 class BitstreamWriter;
 class Module;
 class raw_ostream;
+class ModuleBitcodeWriterBase;
 
+using CreateModuleWriterFn = std::unique_ptr<ModuleBitcodeWriterBase> (*)(
+  const Module &M, SmallVectorImpl<char> &Buffer,
+  StringTableBuilder &StrtabBuilder, BitstreamWriter &Stream,
+  bool ShouldPreserveUseListOrder, const ModuleSummaryIndex *Index,
+  bool GenerateHash, ModuleHash *ModHash);
   class BitcodeWriter {
     SmallVectorImpl<char> &Buffer;
     std::unique_ptr<BitstreamWriter> Stream;
@@ -88,8 +94,8 @@ class raw_ostream;
     /// be used in the backend.
     void writeModule(const Module &M, bool ShouldPreserveUseListOrder = false,
                      const ModuleSummaryIndex *Index = nullptr,
-                     bool GenerateHash = false, ModuleHash *ModHash = nullptr);
-
+                     bool GenerateHash = false, ModuleHash *ModHash = nullptr,
+                     CreateModuleWriterFn CreateWriter = nullptr);
     /// Write the specified thin link bitcode file (i.e., the minimized bitcode
     /// file) to the buffer specified at construction time. The thin link
     /// bitcode file is used for thin link, and it only contains the necessary
@@ -130,7 +136,8 @@ class raw_ostream;
                           bool ShouldPreserveUseListOrder = false,
                           const ModuleSummaryIndex *Index = nullptr,
                           bool GenerateHash = false,
-                          ModuleHash *ModHash = nullptr);
+                          ModuleHash *ModHash = nullptr,
+                          CreateModuleWriterFn CreateWriter = nullptr);
 
   /// Write the specified thin link bitcode file (i.e., the minimized bitcode
   /// file) to the given raw output stream, where it will be written in a new

@@ -1,4 +1,4 @@
-; RUN: llvm-as %s -o - | dxil-dis -o - | FileCheck %s
+; RUN: llc --filetype=obj %s -o - | dxil-dis -o - | FileCheck %s
 target triple = "dxil-unknown-unknown"
 
 !llvm.used = !{!0}

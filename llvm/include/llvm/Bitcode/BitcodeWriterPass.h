@@ -15,6 +15,7 @@
 #define LLVM_BITCODE_BITCODEWRITERPASS_H
 
 #include "llvm/IR/PassManager.h"
+#include "llvm/Bitcode/BitcodeWriter.h"
 
 namespace llvm {
 class Module;
@@ -34,10 +35,10 @@ class raw_ostream;
 ///
 /// If \c EmitModuleHash, compute and emit the module hash in the bitcode
 /// (currently for use in ThinLTO incremental build).
-ModulePass *createBitcodeWriterPass(raw_ostream &Str,
-                                    bool ShouldPreserveUseListOrder = false,
-                                    bool EmitSummaryIndex = false,
-                                    bool EmitModuleHash = false);
+ModulePass *createBitcodeWriterPass(
+    raw_ostream &Str, bool ShouldPreserveUseListOrder = false,
+    bool EmitSummaryIndex = false, bool EmitModuleHash = false,
+    CreateModuleWriterFn CreateWriter = nullptr);
 
 /// Check whether a pass is a BitcodeWriterPass.
 bool isBitcodeWriterPass(Pass *P);
@@ -51,6 +52,7 @@ class BitcodeWriterPass : public PassInfoMixin<BitcodeWriterPass> {
   bool ShouldPreserveUseListOrder;
   bool EmitSummaryIndex;
   bool EmitModuleHash;
+  CreateModuleWriterFn CreateWriter;
 
 public:
   /// Construct a bitcode writer pass around a particular output stream.
@@ -63,9 +65,11 @@ public:
   explicit BitcodeWriterPass(raw_ostream &OS,
                              bool ShouldPreserveUseListOrder = false,
                              bool EmitSummaryIndex = false,
-                             bool EmitModuleHash = false)
+                             bool EmitModuleHash = false,
+                             CreateModuleWriterFn CreateWriterFn = nullptr)
       : OS(OS), ShouldPreserveUseListOrder(ShouldPreserveUseListOrder),
-  EmitSummaryIndex(EmitSummaryIndex), EmitModuleHash(EmitModuleHash) {}
+        EmitSummaryIndex(EmitSummaryIndex), EmitModuleHash(EmitModuleHash),
+        CreateWriter(CreateWriterFn) {}
 
   /// Run the bitcode writer pass, and output the module to the selected
   /// output stream.

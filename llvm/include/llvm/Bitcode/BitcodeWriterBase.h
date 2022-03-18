@@ -128,6 +128,8 @@ protected:
   uint64_t VSTOffsetPlaceholder = 0;
 
 public:
+  virtual ~ModuleBitcodeWriterBase() {}
+  
   /// Constructs a ModuleBitcodeWriterBase object for the given Module,
   /// writing to the provided \p Buffer.
   ModuleBitcodeWriterBase(const Module &M, StringTableBuilder &StrtabBuilder,
@@ -156,6 +158,8 @@ public:
             if (!CallEdge.first.haveGVs() || !CallEdge.first.getValue())
               assignValueId(CallEdge.first.getGUID());
   }
+
+  virtual void write() = 0;
 
 protected:
   void writePerModuleGlobalValueSummary();
@@ -226,7 +230,7 @@ public:
         BitcodeStartBit(Stream.GetCurrentBitNo()) {}
 
   /// Emit the current module to the bitstream.
-  void write();
+  void write() override;
 
 private:
   uint64_t bitcodeStartBit() { return BitcodeStartBit; }

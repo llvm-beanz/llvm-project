@@ -23,7 +23,8 @@ PreservedAnalyses BitcodeWriterPass::run(Module &M, ModuleAnalysisManager &AM) {
   const ModuleSummaryIndex *Index =
       EmitSummaryIndex ? &(AM.getResult<ModuleSummaryIndexAnalysis>(M))
                        : nullptr;
-  WriteBitcodeToFile(M, OS, ShouldPreserveUseListOrder, Index, EmitModuleHash);
+  WriteBitcodeToFile(M, OS, ShouldPreserveUseListOrder, Index, EmitModuleHash,
+                     nullptr, CreateWriter);
   return PreservedAnalyses::all();
 }
 
@@ -33,18 +34,21 @@ namespace {
     bool ShouldPreserveUseListOrder;
     bool EmitSummaryIndex;
     bool EmitModuleHash;
+    CreateModuleWriterFn CreateWriter;
 
   public:
     static char ID; // Pass identification, replacement for typeid
-    WriteBitcodePass() : ModulePass(ID), OS(dbgs()) {
+    WriteBitcodePass() : ModulePass(ID), OS(dbgs()), CreateWriter(nullptr) {
       initializeWriteBitcodePassPass(*PassRegistry::getPassRegistry());
     }
 
     explicit WriteBitcodePass(raw_ostream &o, bool ShouldPreserveUseListOrder,
-                              bool EmitSummaryIndex, bool EmitModuleHash)
+                              bool EmitSummaryIndex, bool EmitModuleHash,
+                              CreateModuleWriterFn CreateWriterFn)
         : ModulePass(ID), OS(o),
           ShouldPreserveUseListOrder(ShouldPreserveUseListOrder),
-          EmitSummaryIndex(EmitSummaryIndex), EmitModuleHash(EmitModuleHash) {
+          EmitSummaryIndex(EmitSummaryIndex), EmitModuleHash(EmitModuleHash),
+          CreateWriter(CreateWriterFn) {
       initializeWriteBitcodePassPass(*PassRegistry::getPassRegistry());
     }
 
@@ -56,7 +60,7 @@ namespace {
               ? &(getAnalysis<ModuleSummaryIndexWrapperPass>().getIndex())
               : nullptr;
       WriteBitcodeToFile(M, OS, ShouldPreserveUseListOrder, Index,
-                         EmitModuleHash);
+                         EmitModuleHash, nullptr, CreateWriter);
       return false;
     }
     void getAnalysisUsage(AnalysisUsage &AU) const override {
@@ -76,9 +80,11 @@ INITIALIZE_PASS_END(WriteBitcodePass, "write-bitcode", "Write Bitcode", false,
 
 ModulePass *llvm::createBitcodeWriterPass(raw_ostream &Str,
                                           bool ShouldPreserveUseListOrder,
-                                          bool EmitSummaryIndex, bool EmitModuleHash) {
-  return new WriteBitcodePass(Str, ShouldPreserveUseListOrder,
-                              EmitSummaryIndex, EmitModuleHash);
+                                          bool EmitSummaryIndex,
+                                          bool EmitModuleHash,
+                                          CreateModuleWriterFn CreateWriter) {
+  return new WriteBitcodePass(Str, ShouldPreserveUseListOrder, EmitSummaryIndex,
+                              EmitModuleHash, CreateWriter);
 }
 
 bool llvm::isBitcodeWriterPass(Pass *P) {

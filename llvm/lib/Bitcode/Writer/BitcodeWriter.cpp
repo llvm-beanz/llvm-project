@@ -4304,7 +4304,8 @@ void BitcodeWriter::copyStrtab(StringRef Strtab) {
 void BitcodeWriter::writeModule(const Module &M,
                                 bool ShouldPreserveUseListOrder,
                                 const ModuleSummaryIndex *Index,
-                                bool GenerateHash, ModuleHash *ModHash) {
+                                bool GenerateHash, ModuleHash *ModHash,
+                                CreateModuleWriterFn CreateWriter) {
   assert(!WroteStrtab);
 
   // The Mods vector is used by irsymtab::build, which requires non-const
@@ -4314,7 +4315,12 @@ void BitcodeWriter::writeModule(const Module &M,
   assert(M.isMaterialized());
   Mods.push_back(const_cast<Module *>(&M));
 
-  Triple TT(M.getTargetTriple());
+  if (CreateWriter) {
+    std::unique_ptr<ModuleBitcodeWriterBase> ModuleWriter =
+        CreateWriter(M, Buffer, StrtabBuilder, *Stream,
+                     ShouldPreserveUseListOrder, Index, GenerateHash, ModHash);
+    ModuleWriter->write();
+  }
   ModuleBitcodeWriter ModuleWriter(M, Buffer, StrtabBuilder, *Stream,
                                    ShouldPreserveUseListOrder, Index,
                                    GenerateHash, ModHash);
@@ -4333,7 +4339,8 @@ void BitcodeWriter::writeIndex(
 void llvm::WriteBitcodeToFile(const Module &M, raw_ostream &Out,
                               bool ShouldPreserveUseListOrder,
                               const ModuleSummaryIndex *Index,
-                              bool GenerateHash, ModuleHash *ModHash) {
+                              bool GenerateHash, ModuleHash *ModHash,
+                              CreateModuleWriterFn CreateWriter) {
   SmallVector<char, 0> Buffer;
   Buffer.reserve(256*1024);
 
@@ -4345,7 +4352,7 @@ void llvm::WriteBitcodeToFile(const Module &M, raw_ostream &Out,
 
   BitcodeWriter Writer(Buffer, dyn_cast<raw_fd_stream>(&Out));
   Writer.writeModule(M, ShouldPreserveUseListOrder, Index, GenerateHash,
-                     ModHash);
+                     ModHash, CreateWriter);
   Writer.writeSymtab();
   Writer.writeStrtab();
 

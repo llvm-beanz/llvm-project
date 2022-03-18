@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DirectXTargetMachine.h"
+#include "DXILBitcodeWriter.h"
 #include "DirectX.h"
 #include "DirectXSubtarget.h"
 #include "DirectXTargetTransformInfo.h"
@@ -92,7 +93,8 @@ bool DirectXTargetMachine::addPassesToEmitFile(
     PM.add(createPrintModulePass(Out, "", true));
     break;
   case CGFT_ObjectFile:
-    PM.add(createBitcodeWriterPass(Out, true, false, false));
+    PM.add(createBitcodeWriterPass(Out, true, false, false,
+                                   &DXILBitcodeWriter::Create));
     break;
   case CGFT_Null:
     break;
@@ -122,5 +124,5 @@ DirectXTargetMachine::getTargetTransformInfo(const Function &F) const {
 }
 
 DirectXTargetLowering::DirectXTargetLowering(const DirectXTargetMachine &TM,
-                                 const DirectXSubtarget &STI)
-      : TargetLowering(TM), TM(TM), STI(STI) {}
+                                             const DirectXSubtarget &STI)
+    : TargetLowering(TM), TM(TM), STI(STI) {}

@@ -1,4 +1,4 @@
-; RUN: llvm-as < %s | dxil-dis 
+; RUN: llc --filetype=obj %s -o - | dxil-dis 
 target triple = "dxil-unknown-unknown"
 
 !llvm.foo = !{!0}

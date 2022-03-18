@@ -1,4 +1,4 @@
-; RUN: llvm-as %s -o - | dxil-dis -o - | FileCheck %s
+; RUN: llc --filetype=obj %s -o - | dxil-dis -o - | FileCheck %s
 
 ; CHECK: define i32 @foo(i32 %X, i32 %Y) {
 ; CHECK:   %Z = sub i32 %X, %Y
