@@ -12,6 +12,7 @@
 
 #include "DXILBitcodeWriter.h"
 #include "DXILValueEnumerator.h"
+#include "PointerTypeAnalysis.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Bitcode/BitcodeCommon.h"
 #include "llvm/Bitcode/BitcodeReader.h"
@@ -88,6 +89,10 @@ class DXILBitcodeWriter {
     FUNCTION_INST_GEP_ABBREV,
   };
 
+  // Cache some types
+  Type *I8Ty;
+  Type *I8PtrTy;
+
   /// The stream created and owned by the client.
   BitstreamWriter &Stream;
 
@@ -117,15 +122,24 @@ class DXILBitcodeWriter {
   /// The start bit of the identification block.
   uint64_t BitcodeStartBit;
 
+  /// This maps values to their typed pointers
+  PointerTypeMap PointerMap;
+
 public:
   /// Constructs a ModuleBitcodeWriter object for the given Module,
   /// writing to the provided \p Buffer.
   DXILBitcodeWriter(const Module &M, SmallVectorImpl<char> &Buffer,
                     StringTableBuilder &StrtabBuilder, BitstreamWriter &Stream)
-      : Stream(Stream), StrtabBuilder(StrtabBuilder), M(M),
-        VE(M, true), Buffer(Buffer),
-        BitcodeStartBit(Stream.GetCurrentBitNo()) {
+      : I8Ty(Type::getInt8Ty(M.getContext())),
+        I8PtrTy(TypedPointerType::get(I8Ty, 0)),
+        Stream(Stream), StrtabBuilder(StrtabBuilder), M(M), VE(M, I8PtrTy),
+        Buffer(Buffer), BitcodeStartBit(Stream.GetCurrentBitNo()),
+        PointerMap(PointerTypeAnalysis::run(M))
+         {
     GlobalValueId = VE.getValues().size();
+    // Enumerate the typed pointers
+    for (auto El : PointerMap)
+      VE.EnumerateType(El.second);
   }
 
   /// Emit the current module to the bitstream.
@@ -330,6 +344,9 @@ private:
   unsigned getEncodedSyncScopeID(SyncScope::ID SSID) { return unsigned(SSID); }
 
   unsigned getEncodedAlign(MaybeAlign Alignment) { return encode(Alignment); }
+
+  unsigned getTypeID(Type *T, const Value *V = nullptr);
+  unsigned getTypeID(Type *T, const Function *F);
 };
 
 } // namespace dxil
@@ -342,7 +359,8 @@ using namespace llvm::dxil;
 /// Begin dxil::BitcodeWriter Implementation
 ////////////////////////////////////////////////////////////////////////////////
 
-dxil::BitcodeWriter::BitcodeWriter(SmallVectorImpl<char> &Buffer, raw_fd_stream *FS)
+dxil::BitcodeWriter::BitcodeWriter(SmallVectorImpl<char> &Buffer,
+                                   raw_fd_stream *FS)
     : Buffer(Buffer), Stream(new BitstreamWriter(Buffer, FS, 512)) {
   // Emit the file header.
   Stream->Emit((unsigned)'B', 8);
@@ -530,6 +548,22 @@ unsigned DXILBitcodeWriter::getEncodedBinaryOpcode(unsigned Opcode) {
   case Instruction::Xor:
     return bitc::BINOP_XOR;
   }
+}
+
+unsigned DXILBitcodeWriter::getTypeID(Type *T, const Value *V) {
+  if (!T->isOpaquePointerTy())
+    return VE.getTypeID(T);
+  auto It = PointerMap.find(V);
+  if (It != PointerMap.end())
+    return VE.getTypeID(It->second);
+  return VE.getTypeID(I8PtrTy);
+}
+
+unsigned DXILBitcodeWriter::getTypeID(Type *T, const Function *F) {
+  auto It = PointerMap.find(F);
+  if (It != PointerMap.end())
+    return VE.getTypeID(It->second);
+  return VE.getTypeID(T);
 }
 
 unsigned DXILBitcodeWriter::getEncodedRMWOperation(AtomicRMWInst::BinOp Op) {
@@ -861,29 +895,40 @@ unsigned DXILBitcodeWriter::getEncodedLinkage(const GlobalValue &GV) {
 
 unsigned DXILBitcodeWriter::getEncodedVisibility(const GlobalValue &GV) {
   switch (GV.getVisibility()) {
-  case GlobalValue::DefaultVisibility:   return 0;
-  case GlobalValue::HiddenVisibility:    return 1;
-  case GlobalValue::ProtectedVisibility: return 2;
+  case GlobalValue::DefaultVisibility:
+    return 0;
+  case GlobalValue::HiddenVisibility:
+    return 1;
+  case GlobalValue::ProtectedVisibility:
+    return 2;
   }
   llvm_unreachable("Invalid visibility");
 }
 
 unsigned DXILBitcodeWriter::getEncodedDLLStorageClass(const GlobalValue &GV) {
   switch (GV.getDLLStorageClass()) {
-  case GlobalValue::DefaultStorageClass:   return 0;
-  case GlobalValue::DLLImportStorageClass: return 1;
-  case GlobalValue::DLLExportStorageClass: return 2;
+  case GlobalValue::DefaultStorageClass:
+    return 0;
+  case GlobalValue::DLLImportStorageClass:
+    return 1;
+  case GlobalValue::DLLExportStorageClass:
+    return 2;
   }
   llvm_unreachable("Invalid DLL storage class");
 }
 
 unsigned DXILBitcodeWriter::getEncodedThreadLocalMode(const GlobalValue &GV) {
   switch (GV.getThreadLocalMode()) {
-    case GlobalVariable::NotThreadLocal:         return 0;
-    case GlobalVariable::GeneralDynamicTLSModel: return 1;
-    case GlobalVariable::LocalDynamicTLSModel:   return 2;
-    case GlobalVariable::InitialExecTLSModel:    return 3;
-    case GlobalVariable::LocalExecTLSModel:      return 4;
+  case GlobalVariable::NotThreadLocal:
+    return 0;
+  case GlobalVariable::GeneralDynamicTLSModel:
+    return 1;
+  case GlobalVariable::LocalDynamicTLSModel:
+    return 2;
+  case GlobalVariable::InitialExecTLSModel:
+    return 3;
+  case GlobalVariable::LocalExecTLSModel:
+    return 4;
   }
   llvm_unreachable("Invalid TLS model");
 }
@@ -1049,7 +1094,6 @@ void DXILBitcodeWriter::writeTypeTable() {
     case Type::BFloatTyID:
     case Type::X86_AMXTyID:
     case Type::TokenTyID:
-    case Type::DXILPointerTyID:
       llvm_unreachable("These should never be used!!!");
       break;
     case Type::VoidTyID:
@@ -1087,15 +1131,36 @@ void DXILBitcodeWriter::writeTypeTable() {
       Code = bitc::TYPE_CODE_INTEGER;
       TypeVals.push_back(cast<IntegerType>(T)->getBitWidth());
       break;
-    case Type::PointerTyID: {
-      PointerType *PTy = cast<PointerType>(T);
+    case Type::DXILPointerTyID: {
+      TypedPointerType *PTy = cast<TypedPointerType>(T);
       // POINTER: [pointee type, address space]
       Code = bitc::TYPE_CODE_POINTER;
-      TypeVals.push_back(VE.getTypeID(PTy->getNonOpaquePointerElementType()));
+      TypeVals.push_back(getTypeID(PTy->getElementType()));
       unsigned AddressSpace = PTy->getAddressSpace();
       TypeVals.push_back(AddressSpace);
       if (AddressSpace == 0)
         AbbrevToUse = PtrAbbrev;
+      break;
+    }
+    case Type::PointerTyID: {
+      PointerType *PTy = cast<PointerType>(T);
+      // POINTER: [pointee type, address space]
+      Code = bitc::TYPE_CODE_POINTER;
+      // Emitting an empty struct type for the opaque pointer's type allows
+      // this to be order-independent. Non-struct types must be emitted in
+      // bitcode before they can be referenced.
+      if (PTy->isOpaquePointerTy()) {
+        TypeVals.push_back(false);
+        Code = bitc::TYPE_CODE_OPAQUE;
+        writeStringRecord(Stream, bitc::TYPE_CODE_STRUCT_NAME,
+                          "dxilOpaquePtrReservedName", StructNameAbbrev);
+      } else {
+        TypeVals.push_back(getTypeID(PTy->getNonOpaquePointerElementType()));
+        unsigned AddressSpace = PTy->getAddressSpace();
+        TypeVals.push_back(AddressSpace);
+        if (AddressSpace == 0)
+          AbbrevToUse = PtrAbbrev;
+      }
       break;
     }
     case Type::FunctionTyID: {
@@ -1103,9 +1168,9 @@ void DXILBitcodeWriter::writeTypeTable() {
       // FUNCTION: [isvararg, retty, paramty x N]
       Code = bitc::TYPE_CODE_FUNCTION;
       TypeVals.push_back(FT->isVarArg());
-      TypeVals.push_back(VE.getTypeID(FT->getReturnType()));
+      TypeVals.push_back(getTypeID(FT->getReturnType()));
       for (Type *PTy : FT->params())
-        TypeVals.push_back(VE.getTypeID(PTy));
+        TypeVals.push_back(getTypeID(PTy));
       AbbrevToUse = FunctionAbbrev;
       break;
     }
@@ -1115,7 +1180,7 @@ void DXILBitcodeWriter::writeTypeTable() {
       TypeVals.push_back(ST->isPacked());
       // Output all of the element types.
       for (Type *ElTy : ST->elements())
-        TypeVals.push_back(VE.getTypeID(ElTy));
+        TypeVals.push_back(getTypeID(ElTy));
 
       if (ST->isLiteral()) {
         Code = bitc::TYPE_CODE_STRUCT_ANON;
@@ -1140,7 +1205,7 @@ void DXILBitcodeWriter::writeTypeTable() {
       // ARRAY: [numelts, eltty]
       Code = bitc::TYPE_CODE_ARRAY;
       TypeVals.push_back(AT->getNumElements());
-      TypeVals.push_back(VE.getTypeID(AT->getElementType()));
+      TypeVals.push_back(getTypeID(AT->getElementType()));
       AbbrevToUse = ArrayAbbrev;
       break;
     }
@@ -1150,7 +1215,7 @@ void DXILBitcodeWriter::writeTypeTable() {
       // VECTOR [numelts, eltty]
       Code = bitc::TYPE_CODE_VECTOR;
       TypeVals.push_back(VT->getElementCount().getKnownMinValue());
-      TypeVals.push_back(VE.getTypeID(VT->getElementType()));
+      TypeVals.push_back(getTypeID(VT->getElementType()));
       break;
     }
     }
@@ -1195,8 +1260,8 @@ void DXILBitcodeWriter::writeModuleInfo() {
     writeStringRecord(Stream, bitc::MODULE_CODE_ASM, M.getModuleInlineAsm(),
                       0 /*TODO*/);
 
-  // Emit information about sections and GC, computing how many there are. Also
-  // compute the maximum alignment value.
+  // Emit information about sections and GC, computing how many there are.
+  // Also compute the maximum alignment value.
   std::map<std::string, unsigned> SectionMap;
   std::map<std::string, unsigned> GCMap;
   MaybeAlign MaxAlignment;
@@ -1207,7 +1272,7 @@ void DXILBitcodeWriter::writeModuleInfo() {
   };
   for (const GlobalVariable &GV : M.globals()) {
     UpdateMaxAlignment(GV.getAlign());
-    MaxGlobalType = std::max(MaxGlobalType, VE.getTypeID(GV.getValueType()));
+    MaxGlobalType = std::max(MaxGlobalType, getTypeID(GV.getValueType(), &GV));
     if (GV.hasSection()) {
       // Give section names unique ID's.
       unsigned &Entry = SectionMap[std::string(GV.getSection())];
@@ -1243,7 +1308,8 @@ void DXILBitcodeWriter::writeModuleInfo() {
   // Emit abbrev for globals, now that we know # sections and max alignment.
   unsigned SimpleGVarAbbrev = 0;
   if (!M.global_empty()) {
-    // Add an abbrev for common globals with no visibility or thread localness.
+    // Add an abbrev for common globals with no visibility or thread
+    // localness.
     auto Abbv = std::make_shared<BitCodeAbbrev>();
     Abbv->Add(BitCodeAbbrevOp(bitc::MODULE_CODE_GLOBALVAR));
     Abbv->Add(BitCodeAbbrevOp(BitCodeAbbrevOp::Fixed,
@@ -1278,7 +1344,7 @@ void DXILBitcodeWriter::writeModuleInfo() {
     //             linkage, alignment, section, visibility, threadlocal,
     //             unnamed_addr, externally_initialized, dllstorageclass,
     //             comdat]
-    Vals.push_back(VE.getTypeID(GV.getValueType()));
+    Vals.push_back(getTypeID(GV.getValueType(), &GV));
     Vals.push_back(
         GV.getType()->getAddressSpace() << 2 | 2 |
         (GV.isConstant() ? 1 : 0)); // HLSL Change - bitwise | was used with
@@ -1314,7 +1380,7 @@ void DXILBitcodeWriter::writeModuleInfo() {
     // FUNCTION:  [type, callingconv, isproto, linkage, paramattrs, alignment,
     //             section, visibility, gc, unnamed_addr, prologuedata,
     //             dllstorageclass, comdat, prefixdata, personalityfn]
-    Vals.push_back(VE.getTypeID(F.getFunctionType()));
+    Vals.push_back(getTypeID(F.getFunctionType(), &F));
     Vals.push_back(F.getCallingConv());
     Vals.push_back(F.isDeclaration());
     Vals.push_back(getEncodedLinkage(F));
@@ -1342,7 +1408,7 @@ void DXILBitcodeWriter::writeModuleInfo() {
   // Emit the alias information.
   for (const GlobalAlias &A : M.aliases()) {
     // ALIAS: [alias type, aliasee val#, linkage, visibility]
-    Vals.push_back(VE.getTypeID(A.getValueType()));
+    Vals.push_back(getTypeID(A.getValueType(), &A));
     Vals.push_back(VE.getValueID(A.getAliasee()));
     Vals.push_back(getEncodedLinkage(A));
     Vals.push_back(getEncodedVisibility(A));
@@ -1359,7 +1425,7 @@ void DXILBitcodeWriter::writeValueAsMetadata(
     const ValueAsMetadata *MD, SmallVectorImpl<uint64_t> &Record) {
   // Mimic an MDNode with a value as one operand.
   Value *V = MD->getValue();
-  Record.push_back(VE.getTypeID(V->getType()));
+  Record.push_back(getTypeID(V->getType()));
   Record.push_back(VE.getValueID(V));
   Stream.EmitRecord(bitc::METADATA_VALUE, Record, 0);
   Record.clear();
@@ -1793,8 +1859,8 @@ void DXILBitcodeWriter::writeModuleMetadata() {
 
   Stream.EnterSubblock(bitc::METADATA_BLOCK_ID, 5);
 
-  // Emit all abbrevs upfront, so that the reader can jump in the middle of the
-  // block and load any metadata.
+  // Emit all abbrevs upfront, so that the reader can jump in the middle of
+  // the block and load any metadata.
   std::vector<unsigned> MDAbbrevs;
 
   MDAbbrevs.resize(MetadataAbbrev::LastPlusOne);
@@ -1963,7 +2029,7 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
     // If we need to switch types, do so now.
     if (V->getType() != LastTy) {
       LastTy = V->getType();
-      Record.push_back(VE.getTypeID(LastTy));
+      Record.push_back(getTypeID(LastTy));
       Stream.EmitRecord(bitc::CST_CODE_SETTYPE, Record,
                         CONSTANTS_SETTYPE_ABBREV);
       Record.clear();
@@ -2098,7 +2164,7 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
         if (Instruction::isCast(CE->getOpcode())) {
           Code = bitc::CST_CODE_CE_CAST;
           Record.push_back(getEncodedCastOpcode(CE->getOpcode()));
-          Record.push_back(VE.getTypeID(C->getOperand(0)->getType()));
+          Record.push_back(getTypeID(C->getOperand(0)->getType()));
           Record.push_back(VE.getValueID(C->getOperand(0)));
           AbbrevToUse = CONSTANTS_CE_CAST_Abbrev;
         } else {
@@ -2117,9 +2183,9 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
         const auto *GO = cast<GEPOperator>(C);
         if (GO->isInBounds())
           Code = bitc::CST_CODE_CE_INBOUNDS_GEP;
-        Record.push_back(VE.getTypeID(GO->getSourceElementType()));
+        Record.push_back(getTypeID(GO->getSourceElementType()));
         for (unsigned i = 0, e = CE->getNumOperands(); i != e; ++i) {
-          Record.push_back(VE.getTypeID(C->getOperand(i)->getType()));
+          Record.push_back(getTypeID(C->getOperand(i)->getType()));
           Record.push_back(VE.getValueID(C->getOperand(i)));
         }
         break;
@@ -2132,16 +2198,16 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
         break;
       case Instruction::ExtractElement:
         Code = bitc::CST_CODE_CE_EXTRACTELT;
-        Record.push_back(VE.getTypeID(C->getOperand(0)->getType()));
+        Record.push_back(getTypeID(C->getOperand(0)->getType()));
         Record.push_back(VE.getValueID(C->getOperand(0)));
-        Record.push_back(VE.getTypeID(C->getOperand(1)->getType()));
+        Record.push_back(getTypeID(C->getOperand(1)->getType()));
         Record.push_back(VE.getValueID(C->getOperand(1)));
         break;
       case Instruction::InsertElement:
         Code = bitc::CST_CODE_CE_INSERTELT;
         Record.push_back(VE.getValueID(C->getOperand(0)));
         Record.push_back(VE.getValueID(C->getOperand(1)));
-        Record.push_back(VE.getTypeID(C->getOperand(2)->getType()));
+        Record.push_back(getTypeID(C->getOperand(2)->getType()));
         Record.push_back(VE.getValueID(C->getOperand(2)));
         break;
       case Instruction::ShuffleVector:
@@ -2153,7 +2219,7 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
           Code = bitc::CST_CODE_CE_SHUFFLEVEC;
         } else {
           Code = bitc::CST_CODE_CE_SHUFVEC_EX;
-          Record.push_back(VE.getTypeID(C->getOperand(0)->getType()));
+          Record.push_back(getTypeID(C->getOperand(0)->getType()));
         }
         Record.push_back(VE.getValueID(C->getOperand(0)));
         Record.push_back(VE.getValueID(C->getOperand(1)));
@@ -2162,7 +2228,7 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
       case Instruction::ICmp:
       case Instruction::FCmp:
         Code = bitc::CST_CODE_CE_CMP;
-        Record.push_back(VE.getTypeID(C->getOperand(0)->getType()));
+        Record.push_back(getTypeID(C->getOperand(0)->getType()));
         Record.push_back(VE.getValueID(C->getOperand(0)));
         Record.push_back(VE.getValueID(C->getOperand(1)));
         Record.push_back(CE->getPredicate());
@@ -2170,7 +2236,7 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
       }
     } else if (const BlockAddress *BA = dyn_cast<BlockAddress>(C)) {
       Code = bitc::CST_CODE_BLOCKADDRESS;
-      Record.push_back(VE.getTypeID(BA->getFunction()->getType()));
+      Record.push_back(getTypeID(BA->getFunction()->getType()));
       Record.push_back(VE.getValueID(BA->getFunction()));
       Record.push_back(VE.getGlobalBasicBlockID(BA->getBasicBlock()));
     } else {
@@ -2189,8 +2255,8 @@ void DXILBitcodeWriter::writeConstants(unsigned FirstVal, unsigned LastVal,
 void DXILBitcodeWriter::writeModuleConstants() {
   const ValueEnumerator::ValueList &Vals = VE.getValues();
 
-  // Find the first constant to emit, which is the first non-globalvalue value.
-  // We know globalvalues have been emitted by WriteModuleInfo.
+  // Find the first constant to emit, which is the first non-globalvalue
+  // value. We know globalvalues have been emitted by WriteModuleInfo.
   for (unsigned i = 0, e = Vals.size(); i != e; ++i) {
     if (!isa<GlobalValue>(Vals[i].first)) {
       writeConstants(i, Vals.size(), true);
@@ -2201,19 +2267,20 @@ void DXILBitcodeWriter::writeModuleConstants() {
 
 /// pushValueAndType - The file has to encode both the value and type id for
 /// many values, because we need to know what type to create for forward
-/// references.  However, most operands are not forward references, so this type
-/// field is not needed.
+/// references.  However, most operands are not forward references, so this
+/// type field is not needed.
 ///
-/// This function adds V's value ID to Vals.  If the value ID is higher than the
-/// instruction ID, then it is a forward reference, and it also includes the
-/// type ID.  The value ID that is written is encoded relative to the InstID.
+/// This function adds V's value ID to Vals.  If the value ID is higher than
+/// the instruction ID, then it is a forward reference, and it also includes
+/// the type ID.  The value ID that is written is encoded relative to the
+/// InstID.
 bool DXILBitcodeWriter::pushValueAndType(const Value *V, unsigned InstID,
                                          SmallVectorImpl<unsigned> &Vals) {
   unsigned ValID = VE.getValueID(V);
   // Make encoding relative to the InstID.
   Vals.push_back(InstID - ValID);
   if (ValID >= InstID) {
-    Vals.push_back(VE.getTypeID(V->getType()));
+    Vals.push_back(getTypeID(V->getType(), V));
     return true;
   }
   return false;
@@ -2246,7 +2313,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
       Code = bitc::FUNC_CODE_INST_CAST;
       if (!pushValueAndType(I.getOperand(0), InstID, Vals))
         AbbrevToUse = (unsigned)FUNCTION_INST_CAST_ABBREV;
-      Vals.push_back(VE.getTypeID(I.getType()));
+      Vals.push_back(getTypeID(I.getType(), &I));
       Vals.push_back(getEncodedCastOpcode(I.getOpcode()));
     } else {
       assert(isa<BinaryOperator>(I) && "Unknown instruction!");
@@ -2269,7 +2336,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
     AbbrevToUse = (unsigned)FUNCTION_INST_GEP_ABBREV;
     auto &GEPInst = cast<GetElementPtrInst>(I);
     Vals.push_back(GEPInst.isInBounds());
-    Vals.push_back(VE.getTypeID(GEPInst.getSourceElementType()));
+    Vals.push_back(getTypeID(GEPInst.getSourceElementType()));
     for (unsigned i = 0, e = I.getNumOperands(); i != e; ++i)
       pushValueAndType(I.getOperand(i), InstID, Vals);
     break;
@@ -2350,7 +2417,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
   case Instruction::Switch: {
     Code = bitc::FUNC_CODE_INST_SWITCH;
     const SwitchInst &SI = cast<SwitchInst>(I);
-    Vals.push_back(VE.getTypeID(SI.getCondition()->getType()));
+    Vals.push_back(getTypeID(SI.getCondition()->getType()));
     pushValue(SI.getCondition(), InstID, Vals);
     Vals.push_back(VE.getValueID(SI.getDefaultDest()));
     for (auto Case : SI.cases()) {
@@ -2360,7 +2427,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
   } break;
   case Instruction::IndirectBr:
     Code = bitc::FUNC_CODE_INST_INDIRECTBR;
-    Vals.push_back(VE.getTypeID(I.getOperand(0)->getType()));
+    Vals.push_back(getTypeID(I.getOperand(0)->getType()));
     // Encode the address operand as relative, but not the basic blocks.
     pushValue(I.getOperand(0), InstID, Vals);
     for (unsigned i = 1, e = I.getNumOperands(); i != e; ++i)
@@ -2377,7 +2444,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
     Vals.push_back(II->getCallingConv() | 1 << 13);
     Vals.push_back(VE.getValueID(II->getNormalDest()));
     Vals.push_back(VE.getValueID(II->getUnwindDest()));
-    Vals.push_back(VE.getTypeID(FTy));
+    Vals.push_back(getTypeID(FTy));
     pushValueAndType(Callee, InstID, Vals);
 
     // Emit value #'s for the fixed parameters.
@@ -2408,7 +2475,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
     // negative valued IDs.  This is most common for PHIs, so we use
     // signed VBRs.
     SmallVector<uint64_t, 128> Vals64;
-    Vals64.push_back(VE.getTypeID(PN.getType()));
+    Vals64.push_back(getTypeID(PN.getType()));
     for (unsigned i = 0, e = PN.getNumIncomingValues(); i != e; ++i) {
       pushValueSigned(PN.getIncomingValue(i), InstID, Vals64);
       Vals64.push_back(VE.getValueID(PN.getIncomingBlock(i)));
@@ -2422,7 +2489,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
   case Instruction::LandingPad: {
     const LandingPadInst &LP = cast<LandingPadInst>(I);
     Code = bitc::FUNC_CODE_INST_LANDINGPAD;
-    Vals.push_back(VE.getTypeID(LP.getType()));
+    Vals.push_back(getTypeID(LP.getType()));
     Vals.push_back(LP.isCleanup());
     Vals.push_back(LP.getNumClauses());
     for (unsigned I = 0, E = LP.getNumClauses(); I != E; ++I) {
@@ -2438,8 +2505,8 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
   case Instruction::Alloca: {
     Code = bitc::FUNC_CODE_INST_ALLOCA;
     const AllocaInst &AI = cast<AllocaInst>(I);
-    Vals.push_back(VE.getTypeID(AI.getAllocatedType()));
-    Vals.push_back(VE.getTypeID(I.getOperand(0)->getType()));
+    Vals.push_back(getTypeID(AI.getAllocatedType()));
+    Vals.push_back(getTypeID(I.getOperand(0)->getType()));
     Vals.push_back(VE.getValueID(I.getOperand(0))); // size.
     using APV = AllocaPackedValues;
     unsigned Record = 0;
@@ -2462,7 +2529,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
       if (!pushValueAndType(I.getOperand(0), InstID, Vals)) // ptr
         AbbrevToUse = (unsigned)FUNCTION_INST_LOAD_ABBREV;
     }
-    Vals.push_back(VE.getTypeID(I.getType()));
+    Vals.push_back(getTypeID(I.getType()));
     Vals.push_back(Log2_32(cast<LoadInst>(I).getAlignment()) + 1);
     Vals.push_back(cast<LoadInst>(I).isVolatile());
     if (cast<LoadInst>(I).isAtomic()) {
@@ -2524,7 +2591,7 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
     Vals.push_back(VE.getAttributeListID(CI.getAttributes()));
     Vals.push_back((CI.getCallingConv() << 1) | unsigned(CI.isTailCall()) |
                    unsigned(CI.isMustTailCall()) << 14 | 1 << 15);
-    Vals.push_back(VE.getTypeID(FTy));
+    Vals.push_back(getTypeID(FTy, CI.getCalledFunction()));
     pushValueAndType(CI.getCalledOperand(), InstID, Vals); // Callee
 
     // Emit value #'s for the fixed parameters.
@@ -2545,9 +2612,9 @@ void DXILBitcodeWriter::writeInstruction(const Instruction &I, unsigned InstID,
   }
   case Instruction::VAArg:
     Code = bitc::FUNC_CODE_INST_VAARG;
-    Vals.push_back(VE.getTypeID(I.getOperand(0)->getType())); // valistty
-    pushValue(I.getOperand(0), InstID, Vals);                 // valist.
-    Vals.push_back(VE.getTypeID(I.getType()));                // restype.
+    Vals.push_back(getTypeID(I.getOperand(0)->getType())); // valistty
+    pushValue(I.getOperand(0), InstID, Vals);              // valist.
+    Vals.push_back(getTypeID(I.getType()));                // restype.
     break;
   }
 
@@ -2638,9 +2705,6 @@ void DXILBitcodeWriter::writeUseList(UseListOrder &&Order) {
 }
 
 void DXILBitcodeWriter::writeUseListBlock(const Function *F) {
-  assert(VE.shouldPreserveUseListOrder() &&
-         "Expected to be preserving use-list order");
-
   auto hasMore = [&]() {
     return !VE.UseListOrders.empty() && VE.UseListOrders.back().F == F;
   };
@@ -2723,8 +2787,8 @@ void DXILBitcodeWriter::writeFunction(const Function &F) {
 
   if (NeedsMetadataAttachment)
     writeFunctionMetadataAttachment(F);
-  if (VE.shouldPreserveUseListOrder())
-    writeUseListBlock(&F);
+  
+  writeUseListBlock(&F);
   VE.purgeFunction();
   Stream.ExitBlock();
 }
@@ -2909,9 +2973,8 @@ void DXILBitcodeWriter::writeModuleVersion() {
 
 /// WriteModule - Emit the specified module to the bitstream.
 void DXILBitcodeWriter::write() {
-  // The identification block is new since llvm-3.7, but the old bitcode reader
-  // will skip it.
-  // writeIdentificationBlock(Stream);
+  // The identification block is new since llvm-3.7, but the old bitcode
+  // reader will skip it. writeIdentificationBlock(Stream);
 
   Stream.EnterSubblock(bitc::MODULE_BLOCK_ID, 3);
 
@@ -2933,8 +2996,8 @@ void DXILBitcodeWriter::write() {
 
   writeComdats();
 
-  // Emit top-level description of module, including target triple, inline asm,
-  // descriptors for global variables, and function prototype info.
+  // Emit top-level description of module, including target triple, inline
+  // asm, descriptors for global variables, and function prototype info.
   writeModuleInfo();
 
   // Emit constants.
@@ -2952,8 +3015,7 @@ void DXILBitcodeWriter::write() {
   writeFunctionLevelValueSymbolTable(M.getValueSymbolTable());
 
   // Emit module-level use-lists.
-  if (VE.shouldPreserveUseListOrder())
-    writeUseListBlock(nullptr);
+  writeUseListBlock(nullptr);
 
   // Emit function bodies.
   for (const Function &F : M)
