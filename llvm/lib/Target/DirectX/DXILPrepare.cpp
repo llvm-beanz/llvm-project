@@ -12,6 +12,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "DirectX.h"
+#include "PointerTypeAnalysis.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/Passes.h"
@@ -25,6 +26,7 @@
 #define DEBUG_TYPE "dxil-prepare"
 
 using namespace llvm;
+using namespace llvm::dxil;
 
 namespace {
 
@@ -80,6 +82,7 @@ constexpr bool isValidForDXIL(Attribute::AttrKind Attr) {
 class DXILPrepareModule : public ModulePass {
 public:
   bool runOnModule(Module &M) override {
+    PointerTypeMap PointerTypes = PointerTypeAnalysis::run(M);
     AttributeMask AttrMask;
     for (Attribute::AttrKind I = Attribute::None; I != Attribute::EndAttrKinds;
          I = Attribute::AttrKind(I + 1)) {
@@ -101,6 +104,63 @@ public:
             Value *Zero = ConstantFP::get(In->getType(), -0.0);
             I.replaceAllUsesWith(Builder.CreateFSub(Zero, In));
             I.eraseFromParent();
+            continue;
+          }
+          // Only insert bitcasts if the IR is using opaque pointers
+          if (!M.getContext().hasSetOpaquePointersValue())
+            continue;
+
+          // Emtting NoOp bitcast instructions allows the ValueEnumerator to be
+          // unmodified as it reserves instruction IDs during contruction.
+          if (auto Inst = dyn_cast_or_null<LoadInst>(&I)) {
+            // Omit bitcasts if the incoming value matches the instruction type
+            auto It = PointerTypes.find(Inst->getPointerOperand());
+            if (It != PointerTypes.end()) {
+              if (cast<TypedPointerType>(It->second)->getElementType() ==
+                  Inst->getType())
+                continue;
+            }
+            // Insert bitcasts where we are removing the instruction.
+            Builder.SetInsertPoint(Inst);
+            Value *NoOpBitcast = Builder.Insert(CastInst::Create(
+                Instruction::BitCast, Inst->getPointerOperand(),
+                Inst->getPointerOperandType()));
+            Inst->replaceAllUsesWith(
+                Builder.CreateLoad(Inst->getType(), NoOpBitcast));
+            Inst->eraseFromParent();
+            continue;
+          }
+          if (auto Inst = dyn_cast_or_null<StoreInst>(&I)) {
+            // Omit bitcasts if the incoming value matches the instruction type
+            auto It = PointerTypes.find(Inst->getPointerOperand());
+            if (It != PointerTypes.end()) {
+              if (cast<TypedPointerType>(It->second)->getElementType() ==
+                  Inst->getValueOperand()->getType())
+                continue;
+            }
+            Builder.SetInsertPoint(Inst);
+            Value *NoOpBitcast = Builder.Insert(CastInst::Create(
+                Instruction::BitCast, Inst->getPointerOperand(),
+                Inst->getPointerOperandType()));
+            Inst->replaceAllUsesWith(
+                Builder.CreateStore(Inst->getValueOperand(), NoOpBitcast));
+            Inst->eraseFromParent();
+            continue;
+          }
+          if (auto Inst = dyn_cast_or_null<GetElementPtrInst>(&I)) {
+            // Omit bitcasts if the incoming value matches the instruction type
+            auto It = PointerTypes.find(Inst->getPointerOperand());
+            if (It != PointerTypes.end()) {
+              if (cast<TypedPointerType>(It->second)->getElementType() ==
+                  Inst->getResultElementType())
+                continue;
+            }
+            Builder.SetInsertPoint(Inst);
+            Value *NoOpBitcast = Builder.Insert(CastInst::Create(
+                Instruction::BitCast, Inst->getPointerOperand(),
+                Inst->getPointerOperandType()));
+            Inst->setOperand(0, NoOpBitcast);
+            continue;
           }
         }
       }
