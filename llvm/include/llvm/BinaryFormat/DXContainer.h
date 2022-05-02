@@ -82,6 +82,8 @@ struct Header {
 struct PartHeader {
   uint8_t Name[4];
   uint32_t Size;
+
+  void byteSwap() { sys::swapByteOrder(Size); }
   // Structure is followed directly by part data: uint8_t PartData[PartSize].
 };
 
