@@ -75,6 +75,7 @@ Expected<DXContainer> DXContainer::create(MemoryBufferRef Object) {
 void DXContainer::PartIterator::updateIterator() {
   if (OffsetIt == Container.PartOffsets.end())
     return;
+  IteratorState.Offset = *OffsetIt;
   StringRef Buffer = Container.Data.getBuffer();
   const char *Current = Buffer.data() + *OffsetIt;
   // Offsets are validated during parsing, so all offsets in the container are
