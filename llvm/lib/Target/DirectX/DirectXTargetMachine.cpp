@@ -91,6 +91,9 @@ bool DirectXTargetMachine::addPassesToEmitFile(
   PM.add(createDXILTranslateMetadataPass());
   switch (FileType) {
   case CGFT_AssemblyFile:
+    if (TargetPassConfig::willCompleteCodeGenPipeline()) {
+      PM.add(createDXILEmbedderPass());
+    }
     PM.add(createPrintModulePass(Out, "", true));
     break;
   case CGFT_ObjectFile:
