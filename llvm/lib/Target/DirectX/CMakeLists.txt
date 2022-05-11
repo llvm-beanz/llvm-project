@@ -7,6 +7,7 @@ tablegen(LLVM DirectXGenSubtargetInfo.inc -gen-subtarget)
 add_public_tablegen_target(DirectXCommonTableGen)
 
 add_llvm_target(DirectXCodeGen
+  DirectXAsmPrinter.cpp
   DirectXSubtarget.cpp
   DirectXTargetMachine.cpp
   DXILOpLowering.cpp

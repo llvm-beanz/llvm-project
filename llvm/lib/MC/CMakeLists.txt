@@ -16,6 +16,7 @@ add_llvm_component_library(LLVMMC
   MCCodeView.cpp
   MCContext.cpp
   MCDwarf.cpp
+  MCDXContainerStreamer.cpp
   MCELFObjectTargetWriter.cpp
   MCELFStreamer.cpp
   MCExpr.cpp

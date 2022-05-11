@@ -17,6 +17,7 @@
 #include "DirectXSubtarget.h"
 #include "DirectXTargetTransformInfo.h"
 #include "TargetInfo/DirectXTargetInfo.h"
+#include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/IRPrintingPasses.h"
@@ -97,8 +98,12 @@ bool DirectXTargetMachine::addPassesToEmitFile(
     PM.add(createPrintModulePass(Out, "", true));
     break;
   case CGFT_ObjectFile:
-    // TODO: Use MC Object streamer to write DXContainer
-    PM.add(createDXILWriterPass(Out));
+    if (TargetPassConfig::willCompleteCodeGenPipeline()) {
+      if (addAsmPrinter(PM, Out, DwoOut, FileType,
+                        MMIWP->getMMI().getContext()))
+        return true;
+    } else
+      PM.add(createDXILWriterPass(Out));
     break;
   case CGFT_Null:
     break;
