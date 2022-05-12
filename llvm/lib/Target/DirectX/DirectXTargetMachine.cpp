@@ -79,7 +79,9 @@ DirectXTargetMachine::DirectXTargetMachine(const Target &T, const Triple &TT,
                         TT, CPU, FS, Options, Reloc::Static, CodeModel::Small,
                         OL),
       TLOF(std::make_unique<DXILTargetObjectFile>()),
-      Subtarget(std::make_unique<DirectXSubtarget>(TT, CPU, FS, *this)) {}
+      Subtarget(std::make_unique<DirectXSubtarget>(TT, CPU, FS, *this)) {
+  initAsmInfo();
+}
 
 DirectXTargetMachine::~DirectXTargetMachine() {}
 
@@ -99,6 +101,10 @@ bool DirectXTargetMachine::addPassesToEmitFile(
     break;
   case CGFT_ObjectFile:
     if (TargetPassConfig::willCompleteCodeGenPipeline()) {
+      if (!MMIWP) {
+        MMIWP = new MachineModuleInfoWrapperPass(this);
+        PM.add(MMIWP);
+      }
       if (addAsmPrinter(PM, Out, DwoOut, FileType,
                         MMIWP->getMMI().getContext()))
         return true;
