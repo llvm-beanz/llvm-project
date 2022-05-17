@@ -103,8 +103,8 @@ bool DirectXTargetMachine::addPassesToEmitFile(
     if (TargetPassConfig::willCompleteCodeGenPipeline()) {
       if (!MMIWP) {
         MMIWP = new MachineModuleInfoWrapperPass(this);
-        PM.add(MMIWP);
       }
+      PM.add(MMIWP);
       if (addAsmPrinter(PM, Out, DwoOut, FileType,
                         MMIWP->getMMI().getContext()))
         return true;

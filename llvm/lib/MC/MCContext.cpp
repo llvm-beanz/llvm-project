@@ -26,6 +26,7 @@
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCLabel.h"
 #include "llvm/MC/MCSectionCOFF.h"
+#include "llvm/MC/MCSectionDXContainer.h"
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSectionGOFF.h"
 #include "llvm/MC/MCSectionMachO.h"
@@ -145,6 +146,7 @@ void MCContext::reset() {
 
   // Call the destructors so the fragments are freed
   COFFAllocator.DestroyAll();
+  DXCAllocator.DestroyAll();
   ELFAllocator.DestroyAll();
   GOFFAllocator.DestroyAll();
   MachOAllocator.DestroyAll();
@@ -176,6 +178,7 @@ void MCContext::reset() {
   COFFUniquingMap.clear();
   WasmUniquingMap.clear();
   XCOFFUniquingMap.clear();
+  DXCUniquingMap.clear();
 
   ELFEntrySizeMap.clear();
   ELFSeenGenericMergeableSections.clear();
@@ -833,6 +836,20 @@ MCSectionSPIRV *MCContext::getSPIRVSection() {
     Begin->setFragment(F);
 
   return Result;
+}
+
+MCSectionDXContainer *MCContext::getDXContainerSection(StringRef Section,
+                                                       SectionKind K) {
+  // Do the lookup, if we have a hit, return it.
+  auto R = DXCUniquingMap.try_emplace(Section);
+  if (!R.second)
+    return R.first->second;
+
+  StringRef Name = R.first->first();
+  R.first->second =
+      new (DXCAllocator.Allocate()) MCSectionDXContainer(Name, K, nullptr);
+
+  return R.first->second;
 }
 
 MCSubtargetInfo &MCContext::getSubtargetCopy(const MCSubtargetInfo &STI) {

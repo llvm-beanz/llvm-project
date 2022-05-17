@@ -12,8 +12,12 @@
 
 #include "TargetInfo/DirectXTargetInfo.h"
 #include "llvm/CodeGen/AsmPrinter.h"
+#include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Module.h"
 #include "llvm/MC/MCStreamer.h"
+#include "llvm/MC/SectionKind.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Target/TargetLoweringObjectFile.h"
 
 using namespace llvm;
 
@@ -30,20 +34,20 @@ public:
       : AsmPrinter(TM, std::move(Streamer)) {}
 
   StringRef getPassName() const override { return "DXIL Assembly Printer"; }
-
-  /*void emitInstruction(const MachineInstr *MI) override {}
-  void emitFunctionEntryLabel() override {}
-  void emitFunctionHeader() override {}
-  void emitFunctionBodyStart() override {}
-  void emitFunctionBodyEnd() override {}
-  void emitBasicBlockStart(const MachineBasicBlock &MBB) override {}
-  void emitBasicBlockEnd(const MachineBasicBlock &MBB) override {}
-  void emitGlobalVariable(const GlobalVariable *GV) override {}
-  void emitEndOfAsmFile(Module &M) override {}
-  bool doInitialization(Module &M) override {}
-  void getAnalysisUsage(AnalysisUsage &AU) const override {}*/
+  void emitGlobalVariable(const GlobalVariable *GV) override;
+  bool runOnMachineFunction(MachineFunction &MF) override { return false; }
 };
 } // namespace
+
+void DXILAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
+  // If there is no initializer or the section is implicit, do nothing
+  if (!GV->hasInitializer() || GV->hasImplicitSection())
+    return;
+  SectionKind GVKind = TargetLoweringObjectFile::getKindForGlobal(GV, TM);
+  MCSection *TheSection = getObjFileLowering().SectionForGlobal(GV, GVKind, TM);
+  OutStreamer->SwitchSection(TheSection);
+  emitGlobalConstant(GV->getParent()->getDataLayout(), GV->getInitializer());
+}
 
 extern "C" LLVM_EXTERNAL_VISIBILITY void LLVMInitializeDirectXAsmPrinter() {
   RegisterAsmPrinter<DXILAsmPrinter> X(getTheDirectXTarget());

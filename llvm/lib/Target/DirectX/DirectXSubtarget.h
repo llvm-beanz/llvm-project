@@ -14,6 +14,7 @@
 #define LLVM_DIRECTX_DIRECTXSUBTARGET_H
 
 #include "DirectXInstrInfo.h"
+#include "DirectXFrameLowering.h"
 #include "DirectXTargetLowering.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/IR/DataLayout.h"
@@ -27,6 +28,7 @@ namespace llvm {
 class DirectXTargetMachine;
 
 class DirectXSubtarget : public DirectXGenSubtargetInfo {
+  DirectXFrameLowering FL;
   DirectXTargetLowering TL;
   DirectXInstrInfo InstrInfo;
 
@@ -40,6 +42,10 @@ public:
 
   const DirectXTargetLowering *getTargetLowering() const override {
     return &TL;
+  }
+
+  const DirectXFrameLowering *getFrameLowering() const override {
+    return &FL;
   }
 
   const DirectXInstrInfo *getInstrInfo() const override { return &InstrInfo; }

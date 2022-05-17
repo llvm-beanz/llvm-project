@@ -10,7 +10,6 @@ add_public_tablegen_target(DirectXCommonTableGen)
 
 add_llvm_target(DirectXCodeGen
   DirectXAsmPrinter.cpp
-  DirectXContainerObjectWriter.cpp
   DirectXInstrInfo.cpp
   DirectXRegisterInfo.cpp
   DirectXSubtarget.cpp
