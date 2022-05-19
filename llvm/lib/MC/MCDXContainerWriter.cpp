@@ -7,7 +7,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/MC/MCDXContainerWriter.h"
+#include "llvm/BinaryFormat/DXContainer.h"
+#include "llvm/MC/MCAsmLayout.h"
+#include "llvm/MC/MCAssembler.h"
+#include "llvm/MC/MCSection.h"
 #include "llvm/MC/MCValue.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/Support/EndianStream.h"
 
 using namespace llvm;
@@ -34,11 +39,70 @@ private:
   void executePostLayoutBinding(MCAssembler &Asm,
                                 const MCAsmLayout &Layout) override {}
 
-  uint64_t writeObject(MCAssembler &Asm, const MCAsmLayout &Layout) override {
-    return 0;
-  }
+  uint64_t writeObject(MCAssembler &Asm, const MCAsmLayout &Layout) override;
 };
 } // namespace
+
+uint64_t DXContainerObjectWriter::writeObject(MCAssembler &Asm,
+                                              const MCAsmLayout &Layout) {
+  // Start the file size as the header plus the size of the part offsets.
+  llvm::SmallVector<uint64_t, 16> PartOffsets;
+  uint64_t PartOffset = 0;
+  for (const MCSection &Sec : Asm) {
+    uint64_t SectionSize = Layout.getSectionAddressSize(&Sec);
+    // Skip empty sections...
+    if (SectionSize == 0)
+      continue;
+
+    assert(SectionSize < std::numeric_limits<uint32_t>::max() &&
+           "Section size too large for DXContainer");
+
+    PartOffsets.push_back(PartOffset);
+    PartOffset += sizeof(dxbc::PartHeader) + SectionSize;
+    PartOffset = alignTo(PartOffset, Align(4ul));
+  }
+  assert(PartOffset < std::numeric_limits<uint32_t>::max() &&
+         "Part data too large for DXContainer");
+
+  uint64_t PartStart = sizeof(dxbc::Header) +
+                      (PartOffsets.size() * sizeof(uint32_t));
+  uint64_t FileSize = PartStart + PartOffset;
+  assert(FileSize < std::numeric_limits<uint32_t>::max() &&
+         "File size too large for DXContainer");
+
+  // Write the header
+  W.write<char>({'D', 'X', 'B', 'C'});
+  // Hash 16-bytes of 0's
+  W.OS.write_zeros(16);
+  // Version
+  W.write<uint16_t>(1u);
+  W.write<uint16_t>(0u);
+  // FileSize
+  W.write<uint32_t>(static_cast<uint32_t>(FileSize));
+  // Part count
+  W.write<uint32_t>(static_cast<uint32_t>(PartOffsets.size()));
+  // Offsets
+  for (uint64_t Offset : PartOffsets)
+    W.write<uint32_t>(static_cast<uint32_t>(PartStart + Offset));
+
+  for (const MCSection &Sec : Asm) {
+    uint64_t SectionSize = Layout.getSectionAddressSize(&Sec);
+    // Skip empty sections...
+    if (SectionSize == 0)
+      continue;
+
+    unsigned Start = W.OS.tell();
+    // Write section header
+    W.write<char>(ArrayRef<char>(Sec.getName().data(), 4));
+
+    uint64_t PartSize = SectionSize + sizeof(dxbc::PartHeader);
+    W.write<uint32_t>(static_cast<uint32_t>(PartSize));
+    Asm.writeSectionData(W.OS, &Sec, Layout);
+    unsigned Size = W.OS.tell() - Start;
+    W.OS.write_zeros(offsetToAlignment(Size, Align(4)));
+  }
+  return 0;
+}
 
 std::unique_ptr<MCObjectWriter> llvm::createDXContainerObjectWriter(
     std::unique_ptr<MCDXContainerTargetWriter> MOTW, raw_pwrite_stream &OS) {

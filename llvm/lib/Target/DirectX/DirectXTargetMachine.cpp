@@ -22,6 +22,7 @@
 #include "llvm/CodeGen/TargetPassConfig.h"
 #include "llvm/IR/IRPrintingPasses.h"
 #include "llvm/IR/LegacyPassManager.h"
+#include "llvm/MC/MCSectionDXContainer.h"
 #include "llvm/MC/SectionKind.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CodeGen.h"
@@ -45,7 +46,7 @@ public:
 
   MCSection *getExplicitSectionGlobal(const GlobalObject *GO, SectionKind Kind,
                                       const TargetMachine &TM) const override {
-    llvm_unreachable("Not supported!");
+    return getContext().getDXContainerSection(GO->getSection(), Kind);
   }
 
 protected:
@@ -92,11 +93,11 @@ bool DirectXTargetMachine::addPassesToEmitFile(
   PM.add(createDXILOpLoweringLegacyPass());
   PM.add(createDXILPrepareModulePass());
   PM.add(createDXILTranslateMetadataPass());
+  if (TargetPassConfig::willCompleteCodeGenPipeline()) {
+    PM.add(createDXILEmbedderPass());
+  }
   switch (FileType) {
   case CGFT_AssemblyFile:
-    if (TargetPassConfig::willCompleteCodeGenPipeline()) {
-      PM.add(createDXILEmbedderPass());
-    }
     PM.add(createPrintModulePass(Out, "", true));
     break;
   case CGFT_ObjectFile:

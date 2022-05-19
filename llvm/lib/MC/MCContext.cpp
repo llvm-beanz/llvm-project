@@ -849,6 +849,11 @@ MCSectionDXContainer *MCContext::getDXContainerSection(StringRef Section,
   R.first->second =
       new (DXCAllocator.Allocate()) MCSectionDXContainer(Name, K, nullptr);
 
+  // The first fragment will store the header
+  auto *F = new MCDataFragment();
+  R.first->second->getFragmentList().insert(R.first->second->begin(), F);
+  F->setParent(R.first->second);
+  
   return R.first->second;
 }
 
