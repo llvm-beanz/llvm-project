@@ -64,8 +64,8 @@ uint64_t DXContainerObjectWriter::writeObject(MCAssembler &Asm,
   assert(PartOffset < std::numeric_limits<uint32_t>::max() &&
          "Part data too large for DXContainer");
 
-  uint64_t PartStart = sizeof(dxbc::Header) +
-                      (PartOffsets.size() * sizeof(uint32_t));
+  uint64_t PartStart =
+      sizeof(dxbc::Header) + (PartOffsets.size() * sizeof(uint32_t));
   uint64_t FileSize = PartStart + PartOffset;
   assert(FileSize < std::numeric_limits<uint32_t>::max() &&
          "File size too large for DXContainer");
@@ -96,7 +96,22 @@ uint64_t DXContainerObjectWriter::writeObject(MCAssembler &Asm,
     W.write<char>(ArrayRef<char>(Sec.getName().data(), 4));
 
     uint64_t PartSize = SectionSize + sizeof(dxbc::PartHeader);
+
+    if (Sec.getName() == "DXIL")
+      PartSize += sizeof(dxbc::ProgramHeader);
     W.write<uint32_t>(static_cast<uint32_t>(PartSize));
+    if (Sec.getName() == "DXIL") {
+      dxbc::ProgramHeader Header;
+      bzero(reinterpret_cast<void *>(&Header), sizeof(dxbc::ProgramHeader));
+      Header.Size = SectionSize + sizeof(dxbc::ProgramHeader);
+      memcpy(Header.Bitcode.Magic, "DXIL", 4);
+      Header.Bitcode.Offset = sizeof(dxbc::BitcodeHeader);
+      Header.Bitcode.Size = SectionSize;
+      if (sys::IsBigEndianHost)
+        Header.byteSwap();
+      W.write<char>(ArrayRef<char>(reinterpret_cast<char *>(&Header),
+                                   sizeof(dxbc::ProgramHeader)));
+    }
     Asm.writeSectionData(W.OS, &Sec, Layout);
     unsigned Size = W.OS.tell() - Start;
     W.OS.write_zeros(offsetToAlignment(Size, Align(4)));
