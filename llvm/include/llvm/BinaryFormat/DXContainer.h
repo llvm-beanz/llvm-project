@@ -92,6 +92,39 @@ struct PartHeader {
   // Structure is followed directly by part data: uint8_t PartData[PartSize].
 };
 
+struct BitcodeHeader {
+  uint8_t Magic[4];   // ACSII "DXIL".
+  uint8_t MajorVersion; // DXIL version.
+  uint8_t MinorVersion; // DXIL version.
+  uint16_t Unused;
+  uint32_t Offset;  // Offset to LLVM bitcode (from start of header).
+  uint32_t Size;    // Size of LLVM bitcode.
+  // Followed by uint8_t[BitcodeHeader.BitcodeOffset]
+
+  void byteSwap() {
+    sys::swapByteOrder(MinorVersion);
+    sys::swapByteOrder(MajorVersion);
+    sys::swapByteOrder(Offset);
+    sys::swapByteOrder(Size);
+  }
+};
+struct ProgramHeader {
+  uint8_t MinorVersion : 4;
+  uint8_t MajorVersion : 4;
+  uint8_t Unused;
+  uint16_t ShaderKind;
+  uint32_t Size;    // Size in uint32_t units including this header.
+  BitcodeHeader Bitcode;
+
+  void byteSwap() {
+    sys::swapByteOrder(ShaderKind);
+    sys::swapByteOrder(Size);
+    Bitcode.byteSwap();
+  }
+};
+
+static_assert(sizeof(ProgramHeader) == 24, "ProgramHeader Size incorrect!");
+
 } // namespace dxbc
 } // namespace llvm
 
