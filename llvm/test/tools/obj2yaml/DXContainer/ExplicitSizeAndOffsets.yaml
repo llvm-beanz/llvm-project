@@ -23,7 +23,7 @@ Parts:
     Size:            8
   - Name:            HASH
     Size:            8
-  - Name:            DXIL
+  - Name:            CXIL
     Size:            8
 ...
 
@@ -50,6 +50,6 @@ Parts:
 # CHECK-NEXT:     Size:            8
 # CHECK-NEXT:   - Name:            HASH
 # CHECK-NEXT:     Size:            8
-# CHECK-NEXT:   - Name:            DXIL
+# CHECK-NEXT:   - Name:            CXIL
 # CHECK-NEXT:     Size:            8
 # CHECK-NEXT: ...
