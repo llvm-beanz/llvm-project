@@ -427,6 +427,63 @@ CheckExtVectorComponent(Sema &S, QualType baseType, ExprValueKind &VK,
   return VT; // should never get here (a typedef type should always be found).
 }
 
+static QualType CheckMatrixComponent(Sema &S, QualType BaseType,
+                                     ExprValueKind &VK, SourceLocation OpLoc,
+                                     const IdentifierInfo *CompName,
+                                     SourceLocation CompLoc) {
+  // HLSL matrix components are underscore separated coordinates. Depending on
+  // by default matrices are column major, but can be overridden to row major.
+  // Since clang doesn't yet support row major matrices, our initial
+  // implementation here will be column-major only (see:
+  // https://clang.llvm.org/docs/MatrixTypes.html).
+
+  // TODO: Support row major matrices.
+
+  // All components start with an _, so the first character must be an _
+  // otherwise this is an invalid component access.
+  if (CompName->getName()[0] != '_')
+    return QualType();
+
+  llvm::SmallVector<llvm::StringRef> Components;
+  // Since the first character is an _ the first component would be empty.
+  // Splitting on the substring starting with character 1 prevents the empty
+  // element from being in the list.
+  CompName->getName().substr(1).split(Components, '_');
+
+  // Components should take the form m## or ##. Components prefixed by m use
+  // 0-based indexing, non prefixed components use 1-based indexing.
+  bool InvalidIndex = false;
+  for (auto Comp : Components) {
+    int Idx = 0;
+    int ExpectedSize = 2;
+    int Min = 1;
+    // If the first character is m, we are zero-indexed and have a longer
+    // expected string.
+    if (Comp[Idx] == 'm') {
+      Idx++;
+      ExpectedSize = 3;
+      Min = 0;
+    }
+    if (Comp.size() != ExpectedSize) {
+      InvalidIndex = True;
+      continue;
+    }
+    if (ExtVectorType::getNumericAccessorIdx(Comp[Idx]) < Min ||
+        ExtVectorType::getNumericAccessorIdx(Comp[++Idx]) < Min)
+      InvalidIndex = True;
+  }
+
+  // TODO: Emit diagnostics
+  if (InvalidIndex)
+    return QualType();
+
+  auto MatTy = BaseType->getAs<MatrixType>();
+  if (Components.size() == 1)
+    return MatTy->getElementType();
+
+  return S.Context.getExtVectorType(MatTy->getElementType(), Components.size());
+}
+
 static Decl *FindGetterSetterNameDeclFromProtocolList(const ObjCProtocolDecl*PDecl,
                                                 IdentifierInfo *Member,
                                                 const Selector &Sel,
@@ -1641,6 +1698,14 @@ static ExprResult LookupMemberExpr(Sema &S, LookupResult &R,
 
     return new (S.Context)
         ExtVectorElementExpr(ret, VK, BaseExpr.get(), *Member, MemberLoc);
+  }
+
+  // Handle HLSL Matrix component access and swizzles
+  if (getLangOpts().HLSL && BaseType->isMatrixType()) {
+    IdentifierInfo *Member = MemberName.getAsIdentifierInfo();
+
+    QualType ret = CheckMatrixComponent(
+        S, BaseType, BaseExpr.get()->getValueKind(), OpLoc, Member, MemberLoc);
   }
 
   // Adjust builtin-sel to the appropriate redefinition type if that's
