@@ -20,6 +20,7 @@
 
 using namespace clang;
 using namespace CodeGen;
+using namespace hlsl;
 using namespace llvm;
 
 namespace {
@@ -49,4 +50,10 @@ void CGHLSLRuntime::finishCodeGen() {
 
   llvm::Module &M = CGM.getModule();
   addDxilValVersion(TargetOpts.DxilValidatorVersion, M);
+}
+
+llvm::Value *CGHLSLRuntime::emitGenerateResourceID(const CallExpr *E) {
+  APSInt APVal = *E->getArg(0)->getIntegerConstantExpr(CGM.getContext());
+  return ConstantInt::get(CGM.getLLVMContext(),
+                          APInt(32, ResourceCounters[APVal.getExtValue()]++));
 }

@@ -12,6 +12,7 @@
 
 #include "CGCUDARuntime.h"
 #include "CGCXXABI.h"
+#include "CGHLSLRuntime.h"
 #include "CGObjCRuntime.h"
 #include "CGOpenCLRuntime.h"
 #include "CGRecordLayout.h"
@@ -5238,6 +5239,8 @@ RValue CodeGenFunction::EmitBuiltinExpr(const GlobalDecl GD, unsigned BuiltinID,
                                                      Str.getPointer(), Zeros);
     return RValue::get(Ptr);
   }
+  case Builtin::BI__builtin_hlsl_generate_resource_id:
+    return RValue::get(CGM.getHLSLRuntime().emitGenerateResourceID(E));
   }
 
   // If this is an alias for a lib function (e.g. __builtin_sin), emit
