@@ -1700,6 +1700,8 @@ LANGBUILTIN(__builtin_get_device_side_mangled_name, "cC*.", "ncT", CUDA_LANG)
 
 // HLSL
 LANGBUILTIN(__builtin_hlsl_wave_active_count_bits, "Uib", "nc", HLSL_LANG)
+LANGBUILTIN(__builtin_hlsl_generate_resource_id, "UiUc", "nc", HLSL_LANG)
+LANGBUILTIN(__builtin_hlsl_create_handle, "v*UcUi", "nc", HLSL_LANG)
 
 // Builtins for XRay
 BUILTIN(__xray_customevent, "vcC*z", "")
