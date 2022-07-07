@@ -6467,6 +6467,24 @@ where shaders must be compiled into a library and linked at runtime.
   }];
 }
 
+def HLSLResourceDocs : Documentation {
+  let Category = DocCatType;
+  let Content = [{
+The HLSL ``resource`` attribute is not valid to manually specify in
+HLSL. It is applied by the compiler to HLSL resource type objects enabling them
+to be handled appropriately in CodeGen.
+
+Resource objects must be resolvable at compile time to a single declared
+resource. Resources can only be declared in global scope, but local copies are
+allowed as long as they can be optimized away. This allows dynamic indexing of
+resources in loops and resources to be passed as parameters to functions as long
+as the functions are inlined.
+
+The simplest way to view this restriction is that the default constructor for a
+resource can only be used at translation unit scope.
+  }];
+}
+
 def ClangRandomizeLayoutDocs : Documentation {
   let Category = DocCatDecl;
   let Heading = "randomize_layout, no_randomize_layout";

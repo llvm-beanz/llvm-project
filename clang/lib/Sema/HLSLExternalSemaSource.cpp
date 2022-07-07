@@ -11,6 +11,7 @@
 
 #include "clang/Sema/HLSLExternalSemaSource.h"
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/Basic/AttrKinds.h"
 #include "clang/Basic/HLSLRuntime.h"
@@ -103,6 +104,13 @@ struct BuiltinTypeDeclBuilder {
   BuiltinTypeDeclBuilder &
   addHandleMember(AccessSpecifier Access = AccessSpecifier::AS_private) {
     return addMemberVariable("h", Record->getASTContext().VoidPtrTy, Access);
+  }
+
+  BuiltinTypeDeclBuilder &
+  annotateResourceClass(HLSLResourceAttr::ResourceClass RC) {
+    Record->addAttr(
+        HLSLResourceAttr::CreateImplicit(Record->getASTContext(), RC));
+    return *this;
   }
 
   static DeclRefExpr *lookupBuiltinFunction(ASTContext &AST, Sema &S,
@@ -369,5 +377,6 @@ void HLSLExternalSemaSource::completeBufferType(CXXRecordDecl *Record) {
   BuiltinTypeDeclBuilder(Record)
       .addHandleMember()
       .addDefaultHandleConstructor(*SemaPtr, ResourceClass::UAV)
+      .annotateResourceClass(HLSLResourceAttr::UAV)
       .completeDefinition();
 }
