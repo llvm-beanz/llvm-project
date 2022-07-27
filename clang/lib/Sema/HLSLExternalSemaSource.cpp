@@ -104,7 +104,14 @@ struct BuiltinTypeDeclBuilder {
 
   BuiltinTypeDeclBuilder &
   addHandleMember(AccessSpecifier Access = AccessSpecifier::AS_private) {
-    return addMemberVariable("h", Record->getASTContext().VoidPtrTy, Access);
+    QualType Ty = Record->getASTContext().VoidPtrTy;
+    if (Template) {
+      if (auto TTD = dyn_cast<TemplateTypeParmDecl>(
+              Template->getTemplateParameters()->getParam(0)))
+        Ty = Record->getASTContext().getPointerType(
+            QualType(TTD->getTypeForDecl(), 0));
+    }
+    return addMemberVariable("h", Ty, Access);
   }
 
   BuiltinTypeDeclBuilder &
@@ -157,16 +164,25 @@ struct BuiltinTypeDeclBuilder {
     DeclRefExpr *Fn =
         lookupBuiltinFunction(AST, S, "__builtin_hlsl_create_handle");
 
-    CallExpr *Call = CallExpr::Create(
-        AST, Fn,
-        {emitResourceClassExpr(AST, RC)},
-        AST.VoidPtrTy, VK_PRValue, SourceLocation(), FPOptionsOverride());
+    Expr *Call = CallExpr::Create(AST, Fn, {emitResourceClassExpr(AST, RC)},
+                                  AST.VoidPtrTy, VK_PRValue, SourceLocation(),
+                                  FPOptionsOverride());
 
     CXXThisExpr *This = new (AST)
         CXXThisExpr(SourceLocation(), Constructor->getThisType(), true);
-    MemberExpr *Handle = MemberExpr::CreateImplicit(
-        AST, This, true, Fields["h"], Fields["h"]->getType(), VK_LValue,
-        OK_Ordinary);
+    Expr *Handle = MemberExpr::CreateImplicit(AST, This, true, Fields["h"],
+                                              Fields["h"]->getType(), VK_LValue,
+                                              OK_Ordinary);
+
+    // If the handle isn't a void pointer, cast the builtin result to the
+    // correct type.
+    if (Handle->getType().getCanonicalType() != AST.VoidPtrTy) {
+      Call = CXXReinterpretCastExpr::Create(
+          AST, Handle->getType(), VK_PRValue, CK_Dependent, Call, nullptr,
+          AST.getTrivialTypeSourceInfo(Handle->getType(), SourceLocation()),
+          SourceLocation(), SourceLocation(), SourceRange());
+    }
+
     BinaryOperator *Assign = BinaryOperator::Create(
         AST, Handle, Call, BO_Assign, Handle->getType(), VK_LValue, OK_Ordinary,
         SourceLocation(), FPOptionsOverride());
@@ -176,6 +192,81 @@ struct BuiltinTypeDeclBuilder {
                              SourceLocation(), SourceLocation()));
     Constructor->setAccess(AccessSpecifier::AS_public);
     Record->addDecl(Constructor);
+    return *this;
+  }
+
+  BuiltinTypeDeclBuilder &addArraySubscriptOperators() {
+    addArraySubscriptOperator(true);
+    // addArraySubscriptOperator(false);
+    return *this;
+  }
+
+  BuiltinTypeDeclBuilder &addArraySubscriptOperator(bool IsConst) {
+    assert(Fields.count("h") > 0 &&
+           "Subscript operator must be added after the handle.");
+
+    FieldDecl *Handle = Fields["h"];
+    ASTContext &AST = Record->getASTContext();
+
+    assert(Handle->getType().getCanonicalType() != AST.VoidPtrTy &&
+           "Not yet supported for void pointer handles.");
+
+    QualType ReturnTy =
+        QualType(Handle->getType()->getPointeeOrArrayElementType(), 0);
+
+    FunctionProtoType::ExtProtoInfo ExtInfo;
+
+    // Const subscript operators return copies of elements, non-const return a
+    // reference so that they are assignable.
+    if (IsConst)
+      ExtInfo.TypeQuals.addConst();
+
+    QualType MethodTy =
+        AST.getFunctionType(ReturnTy, {AST.UnsignedIntTy}, ExtInfo);
+    auto TSInfo = AST.getTrivialTypeSourceInfo(MethodTy, SourceLocation());
+    auto MethodDecl = CXXMethodDecl::Create(
+        AST, Record, SourceLocation(),
+        DeclarationNameInfo(
+            AST.DeclarationNames.getCXXOperatorName(OO_Subscript),
+            SourceLocation()),
+        MethodTy, TSInfo, SC_None, false, false, ConstexprSpecKind::Unspecified,
+        SourceLocation());
+
+    IdentifierInfo &II = AST.Idents.get("Idx", tok::TokenKind::identifier);
+    auto IdxParam = ParmVarDecl::Create(
+        AST, MethodDecl->getDeclContext(), SourceLocation(), SourceLocation(),
+        &II, AST.UnsignedIntTy,
+        AST.getTrivialTypeSourceInfo(AST.UnsignedIntTy, SourceLocation()),
+        SC_None, nullptr);
+    MethodDecl->setParams({IdxParam});
+
+    // Also add the parameter to the function prototype.
+    auto FnProtoLoc = TSInfo->getTypeLoc().getAs<FunctionProtoTypeLoc>();
+    FnProtoLoc.setParam(0, IdxParam);
+
+    CXXThisExpr *This = new (AST)
+        CXXThisExpr(SourceLocation(), MethodDecl->getThisType(), true);
+    Expr *HandleAccess = MemberExpr::CreateImplicit(
+        AST, This, true, Handle, Handle->getType(), VK_LValue, OK_Ordinary);
+
+    Expr *IndexExpr = DeclRefExpr::Create(
+        AST, NestedNameSpecifierLoc(), SourceLocation(), IdxParam, false,
+        DeclarationNameInfo(IdxParam->getDeclName(), SourceLocation()),
+        AST.UnsignedIntTy, VK_PRValue);
+
+    Expr *Array =
+        new (AST) ArraySubscriptExpr(HandleAccess, IndexExpr, ReturnTy,
+                                     VK_LValue, OK_Ordinary, SourceLocation());
+
+    Stmt *Return = ReturnStmt::Create(AST, SourceLocation(), Array, nullptr);
+
+    MethodDecl->setBody(CompoundStmt::Create(AST, {Return}, FPOptionsOverride(),
+                                             SourceLocation(),
+                                             SourceLocation()));
+    MethodDecl->setLexicalDeclContext(Record);
+    MethodDecl->setAccess(AccessSpecifier::AS_public);
+    Record->addDecl(MethodDecl);
+
     return *this;
   }
 
@@ -368,6 +459,7 @@ void HLSLExternalSemaSource::completeBufferType(CXXRecordDecl *Record) {
   BuiltinTypeDeclBuilder(Record)
       .addHandleMember()
       .addDefaultHandleConstructor(*SemaPtr, ResourceClass::UAV)
+      .addArraySubscriptOperators()
       .annotateResourceClass(HLSLResourceAttr::UAV)
       .completeDefinition();
 }
