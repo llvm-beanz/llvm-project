@@ -20,6 +20,7 @@
 namespace llvm {
 class Value;
 class GlobalVariable;
+class Function;
 } // namespace llvm
 namespace clang {
 class CallExpr;
@@ -41,6 +42,7 @@ public:
   virtual ~CGHLSLRuntime() {}
 
   void annotateHLSLResource(const VarDecl *D, llvm::GlobalVariable *GV);
+  void generateGlobalCtorCalls(llvm::Function *Fn);
 
   void finishCodeGen();
 };

@@ -86,3 +86,20 @@ void CGHLSLRuntime::annotateHLSLResource(const VarDecl *D, GlobalVariable *GV) {
       Ctx, {ValueAsMetadata::get(GV), MDString::get(Ctx, QT.getAsString()),
             ConstantAsMetadata::get(B.getInt32(Counter))}));
 }
+
+void CGHLSLRuntime::generateGlobalCtorCalls(llvm::Function *Fn) {
+  // TODO: Handle global initialization for library entry points.
+  if (CGM.getTriple().getEnvironment() == llvm::Triple::Library)
+    return;
+
+  // Insert a call to the global constructor at the beginning of the entry block
+  // to externally exported functions. This is a bit of a hack, but HLSL allows
+  // global constructors, but doesn't support driver initialization of globals.
+  llvm::Module &M = CGM.getModule();
+  for (auto &F : M.functions()) {
+    if (!F.hasExternalLinkage() || F.empty())
+      continue;
+    IRBuilder<> B(&F.getEntryBlock(), F.getEntryBlock().begin());
+    B.CreateCall(FunctionCallee(Fn));
+  }
+}

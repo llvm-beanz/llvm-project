@@ -888,6 +888,9 @@ CodeGenModule::EmitCXXGlobalInitFunc() {
     Fn->addFnAttr("device-init");
   }
 
+  if (getLangOpts().HLSL)
+    getHLSLRuntime().generateGlobalCtorCalls(Fn);
+
   ModuleInits.clear();
 }
 

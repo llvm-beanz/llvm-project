@@ -560,8 +560,13 @@ void CodeGenModule::Release() {
     if (PGOStats.hasDiagnostics())
       PGOStats.reportDiagnostics(getDiags(), getCodeGenOpts().MainFileName);
   }
-  EmitCtorList(GlobalCtors, "llvm.global_ctors");
-  EmitCtorList(GlobalDtors, "llvm.global_dtors");
+  // HLSL global constructors are called by main, and the global destructors are
+  // not run. Since HLSL doesn't allow user-defined types to have constructors
+  // or destructors, this is known to be safe.
+  if (!Context.getLangOpts().HLSL) {
+    EmitCtorList(GlobalCtors, "llvm.global_ctors");
+    EmitCtorList(GlobalDtors, "llvm.global_dtors");
+  }
   EmitGlobalAnnotations();
   EmitStaticExternCAliases();
   checkAliases();
