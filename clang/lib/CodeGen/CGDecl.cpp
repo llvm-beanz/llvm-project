@@ -14,6 +14,7 @@
 #include "CGCXXABI.h"
 #include "CGCleanup.h"
 #include "CGDebugInfo.h"
+#include "CGHLSLRuntime.h"
 #include "CGOpenCLRuntime.h"
 #include "CGOpenMPRuntime.h"
 #include "CodeGenFunction.h"
@@ -2588,6 +2589,10 @@ void CodeGenFunction::EmitParmDecl(const VarDecl &D, ParamValue Arg,
     }
   }
 
+  // Emit HLSL specific initialization for parameters with attributes
+  if (getLangOpts().HLSL && D.hasAttrs())
+    DoStore = DoStore && !CGM.getHLSLRuntime().emitParamAttrs(*this, D, lv);
+  
   // Store the initial value into the alloca.
   if (DoStore)
     EmitStoreOfScalar(ArgVal, lv, /* isInitialization */ true);

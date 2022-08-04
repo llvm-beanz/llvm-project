@@ -27,8 +27,13 @@ class Type;
 class VarDecl;
 
 namespace CodeGen {
+class LValue;
+}
+
+namespace CodeGen {
 
 class CodeGenModule;
+class CodeGenFunction;
 
 class CGHLSLRuntime {
 protected:
@@ -41,6 +46,9 @@ public:
   virtual ~CGHLSLRuntime() {}
 
   void annotateHLSLResource(const VarDecl *D, llvm::GlobalVariable *GV);
+
+  /// Returns true if an attribute was handled, false otherwise.
+  bool emitParamAttrs(CodeGenFunction &CGF, const VarDecl &D, LValue &LV);
 
   void finishCodeGen();
 };

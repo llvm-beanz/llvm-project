@@ -13,8 +13,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "CGHLSLRuntime.h"
+#include "CGValue.h"
+#include "CodeGenFunction.h"
 #include "CodeGenModule.h"
 #include "clang/Basic/TargetOptions.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
@@ -82,4 +85,16 @@ void CGHLSLRuntime::annotateHLSLResource(const VarDecl *D, GlobalVariable *GV) {
   ResourceMD->addOperand(MDNode::get(
       Ctx, {ValueAsMetadata::get(GV), MDString::get(Ctx, QT.getAsString()),
             ConstantAsMetadata::get(B.getInt32(Counter))}));
+}
+
+bool CGHLSLRuntime::emitParamAttrs(CodeGenFunction &CGF, const VarDecl &D,
+                                   LValue &LV) {
+  if (D.hasAttr<HLSLSV_GroupIndexAttr>()) {
+    llvm::Function *DxGroupIndex =
+        CGM.getIntrinsic(Intrinsic::dx_flattened_thread_id_in_group);
+    CallInst *CI = CGF.Builder.CreateCall(FunctionCallee(DxGroupIndex));
+    CGF.Builder.CreateStore(CI, LV.getAddress(CGF));
+    return true;
+  }
+  return false;
 }
