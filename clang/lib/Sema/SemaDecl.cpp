@@ -11870,6 +11870,13 @@ void Sema::CheckHLSLEntryPoint(FunctionDecl *FD) {
     }
     break;
   }
+
+  for (const auto Param : FD->parameters()) {
+    if (!Param->hasAttr<HLSLAnnotationAttr>()) {
+      Diag(Param->getLocation(), diag::err_hlsl_missing_parameter_annotation) << Param;
+      Param->setInvalidDecl();
+    }
+  }
 }
 
 bool Sema::CheckForConstantInitializer(Expr *Init, QualType DclT) {
