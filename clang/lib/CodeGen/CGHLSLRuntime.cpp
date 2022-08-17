@@ -89,13 +89,13 @@ void CGHLSLRuntime::annotateHLSLResource(const VarDecl *D, GlobalVariable *GV) {
             ConstantAsMetadata::get(B.getInt32(Counter))}));
 }
 
-void clang::CodeGen::CGHLSLRuntime::setHLSLFunctionAttributes(
+void clang::CodeGen::CGHLSLRuntime::setHLSLEntryAttributes(
     llvm::Function *F, const FunctionDecl *FD) {
-  if (HLSLShaderAttr *ShaderAttr = FD->getAttr<HLSLShaderAttr>()) {
-    const StringRef ShaderAttrKindStr = "dx.shader";
-    F->addFnAttr(ShaderAttrKindStr,
-                 ShaderAttr->ConvertShaderTypeToStr(ShaderAttr->getType()));
-  }
+  HLSLShaderAttr *ShaderAttr = FD->getAttr<HLSLShaderAttr>();
+  assert(ShaderAttr && "All entry functions must have a HLSLShaderAttr");
+  const StringRef ShaderAttrKindStr = "dx.shader";
+  F->addFnAttr(ShaderAttrKindStr,
+               ShaderAttr->ConvertShaderTypeToStr(ShaderAttr->getType()));
 }
 
 llvm::Value *CGHLSLRuntime::emitInputSemantic(IRBuilder<> &B,
@@ -118,6 +118,15 @@ void CGHLSLRuntime::emitEntryFunction(const FunctionDecl *FD,
   auto *EntryTy = llvm::FunctionType::get(llvm::Type::getVoidTy(Ctx), false);
   Function *EntryFn =
       Function::Create(EntryTy, Function::ExternalLinkage, FD->getName(), &M);
+
+  // Copy function attributes over, we have no argument or return attributes
+  // that can be valid on the real entry
+  AttributeList NewAttrs = AttributeList::get(Ctx, AttributeList::FunctionIndex,
+                                              Fn->getAttributes().getFnAttrs());
+  EntryFn->setAttributes(NewAttrs);
+  setHLSLEntryAttributes(EntryFn, FD);
+  Fn->setLinkage(GlobalValue::InternalLinkage);
+
   BasicBlock *BB = BasicBlock::Create(Ctx, "entry", EntryFn);
   IRBuilder<> B(BB);
   llvm::SmallVector<Value *> Args;

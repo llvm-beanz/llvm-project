@@ -908,9 +908,6 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
   if (D && D->hasAttr<NoProfileFunctionAttr>())
     Fn->addFnAttr(llvm::Attribute::NoProfile);
 
-  if (D && D->hasAttr<HLSLShaderAttr>())
-    CGM.getHLSLRuntime().emitEntryFunction(FD, Fn);
-
   if (D) {
     // Function attributes take precedence over command line flags.
     if (auto *A = D->getAttr<FunctionReturnThunksAttr>()) {
@@ -1140,6 +1137,10 @@ void CodeGenFunction::StartFunction(GlobalDecl GD, QualType RetTy,
   // Emit OpenMP specific initialization of the device functions.
   if (getLangOpts().OpenMP && CurCodeDecl)
     CGM.getOpenMPRuntime().emitFunctionProlog(*this, CurCodeDecl);
+
+  // Handle emitting HLSL entry functions.
+  if (D && D->hasAttr<HLSLShaderAttr>())
+    CGM.getHLSLRuntime().emitEntryFunction(FD, Fn);
 
   EmitFunctionProlog(*CurFnInfo, CurFn, Args);
 

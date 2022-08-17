@@ -52,7 +52,7 @@ public:
 
   void finishCodeGen();
 
-  void setHLSLFunctionAttributes(llvm::Function *, const FunctionDecl *);
+  void setHLSLEntryAttributes(llvm::Function *, const FunctionDecl *);
 
   void emitEntryFunction(const FunctionDecl *FD, llvm::Function *Fn);
 };
