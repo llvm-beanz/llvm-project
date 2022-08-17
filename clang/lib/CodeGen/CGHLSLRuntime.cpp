@@ -14,7 +14,9 @@
 
 #include "CGHLSLRuntime.h"
 #include "CodeGenModule.h"
+#include "clang/AST/Decl.h"
 #include "clang/Basic/TargetOptions.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
@@ -94,4 +96,37 @@ void clang::CodeGen::CGHLSLRuntime::setHLSLFunctionAttributes(
     F->addFnAttr(ShaderAttrKindStr,
                  ShaderAttr->ConvertShaderTypeToStr(ShaderAttr->getType()));
   }
+}
+
+llvm::Value *CGHLSLRuntime::emitInputSemantic(IRBuilder<> &B,
+                                              const ParmVarDecl &D) {
+  assert(D.hasAttrs() && "Entry parameter missing annotation attribute!");
+  if (D.hasAttr<HLSLSV_GroupIndexAttr>()) {
+    llvm::Function *DxGroupIndex =
+        CGM.getIntrinsic(Intrinsic::dx_flattened_thread_id_in_group);
+    CallInst *CI = B.CreateCall(FunctionCallee(DxGroupIndex));
+    return CI;
+  }
+  assert(false && "Unhandled parameter attribute");
+  return nullptr;
+}
+
+void CGHLSLRuntime::emitEntryFunction(const FunctionDecl *FD,
+                                      llvm::Function *Fn) {
+  llvm::Module &M = CGM.getModule();
+  llvm::LLVMContext &Ctx = M.getContext();
+  auto *EntryTy = llvm::FunctionType::get(llvm::Type::getVoidTy(Ctx), false);
+  Function *EntryFn =
+      Function::Create(EntryTy, Function::ExternalLinkage, FD->getName(), &M);
+  BasicBlock *BB = BasicBlock::Create(Ctx, "entry", EntryFn);
+  IRBuilder<> B(BB);
+  llvm::SmallVector<Value *> Args;
+  for (const auto Param : FD->parameters()) {
+    Args.push_back(emitInputSemantic(B, *Param));
+  }
+
+  CallInst *CI = B.CreateCall(FunctionCallee(Fn), Args);
+  (void)CI;
+  // FIXME: Handle codegen for return type semantics
+  B.CreateRetVoid();
 }
