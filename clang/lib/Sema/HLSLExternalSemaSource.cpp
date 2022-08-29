@@ -339,14 +339,19 @@ void HLSLExternalSemaSource::defineTrivialHLSLTypes() {
 
 void HLSLExternalSemaSource::forwardDeclareHLSLTypes() {
   CXXRecordDecl *Decl;
-  Decl = BuiltinTypeDeclBuilder(*SemaPtr, HLSLNamespace, "RWBuffer")
-             .addTemplateArgumentList()
-             .addTypeParameter("element_type", SemaPtr->getASTContext().FloatTy)
-             .finalizeTemplateArgs()
-             .Record;
-  Completions.insert(std::make_pair(
-      Decl, std::bind(&HLSLExternalSemaSource::completeBufferType, this,
-                      std::placeholders::_1)));
+  LookupResult Result(*SemaPtr, &SemaPtr->Context.Idents.get("RWBuffer"),
+                      SourceLocation(), Sema::LookupOrdinaryName);
+  if (!SemaPtr->LookupName(Result, SemaPtr->getCurScope())) {
+    Decl =
+        BuiltinTypeDeclBuilder(*SemaPtr, HLSLNamespace, "RWBuffer")
+            .addTemplateArgumentList()
+            .addTypeParameter("element_type", SemaPtr->getASTContext().FloatTy)
+            .finalizeTemplateArgs()
+            .Record;
+    Completions.insert(std::make_pair(
+        Decl, std::bind(&HLSLExternalSemaSource::completeBufferType, this,
+                        std::placeholders::_1)));
+  }
 }
 
 void HLSLExternalSemaSource::CompleteType(TagDecl *Tag) {
