@@ -647,7 +647,7 @@ IntrusiveRefCntPtr<ASTReader> CompilerInstance::createPCHExternalASTSource(
 
   // We need the external source to be set up before we read the AST, because
   // eagerly-deserialized declarations may use it.
-  Context.setExternalSource(Reader.get());
+  Context.setExternalSource(Reader);
 
   Reader->setDeserializationListener(
       static_cast<ASTDeserializationListener *>(DeserializationListener),
@@ -752,9 +752,11 @@ void CompilerInstance::createSema(TranslationUnitKind TUKind,
   TheSema.reset(new Sema(getPreprocessor(), getASTContext(), getASTConsumer(),
                          TUKind, CompletionConsumer));
   // Attach the external sema source if there is any.
-  if (ExternalSemaSrc) {
-    TheSema->addExternalSource(ExternalSemaSrc.get());
-    ExternalSemaSrc->InitializeSema(*TheSema);
+  if (!ExternalSemaSrc.empty()) {
+    for (auto &ESS : ExternalSemaSrc) {
+      TheSema->addExternalSource(ESS.get());
+      ESS->InitializeSema(*TheSema);
+    }
   }
 }
 
@@ -2295,7 +2297,7 @@ CompilerInstance::lookupMissingImports(StringRef Name,
 }
 void CompilerInstance::resetAndLeakSema() { llvm::BuryPointer(takeSema()); }
 
-void CompilerInstance::setExternalSemaSource(
+void CompilerInstance::addExternalSemaSource(
     IntrusiveRefCntPtr<ExternalSemaSource> ESS) {
-  ExternalSemaSrc = std::move(ESS);
+  ExternalSemaSrc.emplace_back(std::move(ESS));
 }

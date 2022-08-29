@@ -98,7 +98,7 @@ class CompilerInstance : public ModuleLoader {
   IntrusiveRefCntPtr<ASTContext> Context;
 
   /// An optional sema source that will be attached to sema.
-  IntrusiveRefCntPtr<ExternalSemaSource> ExternalSemaSrc;
+  llvm::SmallVector<IntrusiveRefCntPtr<ExternalSemaSource>> ExternalSemaSrc;
 
   /// The AST consumer.
   std::unique_ptr<ASTConsumer> Consumer;
@@ -812,7 +812,7 @@ public:
     DependencyCollectors.push_back(std::move(Listener));
   }
 
-  void setExternalSemaSource(IntrusiveRefCntPtr<ExternalSemaSource> ESS);
+  void addExternalSemaSource(IntrusiveRefCntPtr<ExternalSemaSource> ESS);
 
   InMemoryModuleCache &getModuleCache() const { return *ModuleCache; }
 };

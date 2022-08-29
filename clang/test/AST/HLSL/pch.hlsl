@@ -7,7 +7,7 @@
 // Make sure PCH works by using function declared in PCH header and declare a RWBuffer in current file.
 // CHECK:FunctionDecl 0x[[FOO:[0-9a-f]+]] <{{.*}}:2:1, line:4:1> line:2:8 imported used foo 'float2 (float2, float2)'
 // CHECK:VarDecl 0x{{[0-9a-f]+}} <{{.*}}:10:1, col:23> col:23 Buffer 'hlsl::RWBuffer<float>':'hlsl::RWBuffer<>'
-hlsl::RWBuffer<float> Buffer;
+RWBuffer<float> Buffer;
 
 float2 bar(float2 a, float2 b) {
 // CHECK:CallExpr 0x{{[0-9a-f]+}} <col:10, col:18> 'float2':'float __attribute__((ext_vector_type(2)))'

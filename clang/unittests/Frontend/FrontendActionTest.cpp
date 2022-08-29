@@ -246,7 +246,7 @@ TEST(ASTFrontendAction, ExternalSemaSource) {
   Compiler.setInvocation(std::move(Invocation));
   auto *TDC = new TypoDiagnosticConsumer;
   Compiler.createDiagnostics(TDC, /*ShouldOwnClient=*/true);
-  Compiler.setExternalSemaSource(new TypoExternalSemaSource(Compiler));
+  Compiler.addExternalSemaSource(new TypoExternalSemaSource(Compiler));
 
   SyntaxOnlyAction TestAction;
   ASSERT_TRUE(Compiler.ExecuteAction(TestAction));
