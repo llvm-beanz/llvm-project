@@ -194,6 +194,7 @@ public:
   friend class ASTDeclReader;
   friend class ASTDeclWriter;
   friend class IncrementalParser;
+  friend class HLSLExternalSemaSource;
 
   Redeclarable(const ASTContext &Ctx)
       : RedeclLink(LatestDeclLink(Ctx)),

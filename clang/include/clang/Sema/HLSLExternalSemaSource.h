@@ -48,6 +48,8 @@ public:
   using ExternalASTSource::CompleteType;
   /// Complete an incomplete HLSL builtin type
   void CompleteType(TagDecl *Tag) override;
+
+  static void SetAsLatestDecl(TagDecl *Existing, TagDecl *New);
 };
 
 } // namespace clang

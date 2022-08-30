@@ -43,9 +43,14 @@ struct BuiltinTypeDeclBuilder {
     ASTContext &AST = S.getASTContext();
     IdentifierInfo &II = AST.Idents.get(Name, tok::TokenKind::identifier);
 
+    LookupResult Result(S, &II, SourceLocation(), Sema::LookupTagName);
+    CXXRecordDecl *PrevDecl = nullptr;
+    if (S.LookupQualifiedName(Result, HLSLNamespace))
+      PrevDecl = Result.getAsSingle<CXXRecordDecl>();
+
     Record = CXXRecordDecl::Create(AST, TagDecl::TagKind::TTK_Class,
                                    HLSLNamespace, SourceLocation(),
-                                   SourceLocation(), &II, nullptr, true);
+                                   SourceLocation(), &II, PrevDecl, true);
     Record->setImplicit(true);
     Record->setLexicalDeclContext(HLSLNamespace);
     Record->setHasExternalLexicalStorage();
@@ -54,6 +59,7 @@ struct BuiltinTypeDeclBuilder {
     Record->addAttr(FinalAttr::CreateImplicit(AST, SourceRange(),
                                               AttributeCommonInfo::AS_Keyword,
                                               FinalAttr::Keyword_final));
+    HLSLExternalSemaSource::SetAsLatestDecl(PrevDecl, Record);
   }
 
   ~BuiltinTypeDeclBuilder() {
@@ -253,12 +259,23 @@ HLSLExternalSemaSource::~HLSLExternalSemaSource() {}
 void HLSLExternalSemaSource::InitializeSema(Sema &S) {
   SemaPtr = &S;
   ASTContext &AST = SemaPtr->getASTContext();
+  if (AST.getTranslationUnitDecl()->hasExternalLexicalStorage())
+    (void)AST.getTranslationUnitDecl()->decls_begin(); // force external decls to load
+  
   IdentifierInfo &HLSL = AST.Idents.get("hlsl", tok::TokenKind::identifier);
+  LookupResult Result(S, &HLSL, SourceLocation(), Sema::LookupNamespaceName);
+  NamespaceDecl *PrevDecl = nullptr;
+  if (S.LookupQualifiedName(Result, AST.getTranslationUnitDecl()))
+    PrevDecl = Result.getAsSingle<NamespaceDecl>();
   HLSLNamespace =
       NamespaceDecl::Create(AST, AST.getTranslationUnitDecl(), false,
-                            SourceLocation(), SourceLocation(), &HLSL, nullptr);
+                            SourceLocation(), SourceLocation(), &HLSL, PrevDecl);
   HLSLNamespace->setImplicit(true);
+  HLSLNamespace->setHasExternalLexicalStorage();
   AST.getTranslationUnitDecl()->addDecl(HLSLNamespace);
+
+  // Force external decls to load
+  (void)HLSLNamespace->getCanonicalDecl()->decls_begin();
   defineTrivialHLSLTypes();
   forwardDeclareHLSLTypes();
 
@@ -329,8 +346,15 @@ void HLSLExternalSemaSource::defineHLSLVectorAlias() {
 
 void HLSLExternalSemaSource::defineTrivialHLSLTypes() {
   defineHLSLVectorAlias();
-
-  ResourceDecl = BuiltinTypeDeclBuilder(*SemaPtr, HLSLNamespace, "Resource")
+  
+  ASTContext &AST = SemaPtr->getASTContext();
+  IdentifierInfo &II = AST.Idents.get("Resource", tok::TokenKind::identifier);
+  LookupResult Result(*SemaPtr, &II, SourceLocation(), Sema::LookupTagName);
+  
+  if (SemaPtr->LookupQualifiedName(Result, HLSLNamespace))
+    ResourceDecl = Result.getAsSingle<CXXRecordDecl>();
+  else
+    ResourceDecl = BuiltinTypeDeclBuilder(*SemaPtr, HLSLNamespace, "Resource")
                      .startDefinition()
                      .addHandleMember(AccessSpecifier::AS_public)
                      .completeDefinition()
@@ -339,19 +363,14 @@ void HLSLExternalSemaSource::defineTrivialHLSLTypes() {
 
 void HLSLExternalSemaSource::forwardDeclareHLSLTypes() {
   CXXRecordDecl *Decl;
-  LookupResult Result(*SemaPtr, &SemaPtr->Context.Idents.get("RWBuffer"),
-                      SourceLocation(), Sema::LookupOrdinaryName);
-  if (!SemaPtr->LookupName(Result, SemaPtr->getCurScope())) {
-    Decl =
-        BuiltinTypeDeclBuilder(*SemaPtr, HLSLNamespace, "RWBuffer")
-            .addTemplateArgumentList()
-            .addTypeParameter("element_type", SemaPtr->getASTContext().FloatTy)
-            .finalizeTemplateArgs()
-            .Record;
-    Completions.insert(std::make_pair(
-        Decl, std::bind(&HLSLExternalSemaSource::completeBufferType, this,
-                        std::placeholders::_1)));
-  }
+  Decl = BuiltinTypeDeclBuilder(*SemaPtr, HLSLNamespace, "RWBuffer")
+             .addTemplateArgumentList()
+             .addTypeParameter("element_type", SemaPtr->getASTContext().FloatTy)
+             .finalizeTemplateArgs()
+             .Record;
+  Completions.insert(std::make_pair(
+      Decl, std::bind(&HLSLExternalSemaSource::completeBufferType, this,
+                      std::placeholders::_1)));
 }
 
 void HLSLExternalSemaSource::CompleteType(TagDecl *Tag) {
@@ -363,6 +382,7 @@ void HLSLExternalSemaSource::CompleteType(TagDecl *Tag) {
   // declaration and complete that.
   if (auto TDecl = dyn_cast<ClassTemplateSpecializationDecl>(Record))
     Record = TDecl->getSpecializedTemplate()->getTemplatedDecl();
+  Record = Record->getCanonicalDecl();
   auto It = Completions.find(Record);
   if (It == Completions.end())
     return;
@@ -375,4 +395,9 @@ void HLSLExternalSemaSource::completeBufferType(CXXRecordDecl *Record) {
       .addDefaultHandleConstructor(*SemaPtr, ResourceClass::UAV)
       .annotateResourceClass(HLSLResourceAttr::UAV)
       .completeDefinition();
+}
+
+void HLSLExternalSemaSource::SetAsLatestDecl(TagDecl *Existing, TagDecl *New) {
+  if (Existing)
+    Existing->getCanonicalDecl()->RedeclLink.setLatest(New);
 }
