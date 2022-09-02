@@ -23,6 +23,17 @@
 using namespace clang;
 using namespace hlsl;
 
+static NamedDecl *findDecl(Sema &S, IdentifierInfo &II,
+                           Sema::LookupNameKind Kind) {
+  DeclarationNameInfo NameInfo{DeclarationName{&II}, SourceLocation()};
+  LookupResult R(S, NameInfo, Kind);
+  S.LookupName(R, S.getCurScope());
+  NamedDecl *D = nullptr;
+  if (!R.isAmbiguous() && !R.empty())
+    D = R.getRepresentativeDecl();
+  return D;
+}
+
 namespace {
 
 struct TemplateParameterListBuilder;
@@ -30,10 +41,16 @@ struct TemplateParameterListBuilder;
 struct BuiltinTypeDeclBuilder {
   CXXRecordDecl *Record = nullptr;
   ClassTemplateDecl *Template = nullptr;
+  ClassTemplateDecl *PrevTemplate = nullptr;
   NamespaceDecl *HLSLNamespace = nullptr;
   llvm::StringMap<FieldDecl *> Fields;
+  bool ReusePrevDecl = false;
 
   BuiltinTypeDeclBuilder(CXXRecordDecl *R) : Record(R) {
+    if (Record->isCompleteDefinition()) {
+      ReusePrevDecl = true;
+      return;
+    }
     Record->startDefinition();
     Template = Record->getDescribedClassTemplate();
   }
@@ -42,6 +59,30 @@ struct BuiltinTypeDeclBuilder {
       : HLSLNamespace(Namespace) {
     ASTContext &AST = S.getASTContext();
     IdentifierInfo &II = AST.Idents.get(Name, tok::TokenKind::identifier);
+    CXXRecordDecl *PrevRecord = nullptr;
+    if (NamedDecl *PrevDecl =
+            findDecl(S, II, Sema::LookupNameKind::LookupOrdinaryName))
+      if (PrevDecl->getDeclContext() == HLSLNamespace->getPreviousDecl()) {
+        PrevRecord = llvm::dyn_cast<CXXRecordDecl>(PrevDecl);
+        if (!PrevRecord) {
+          if ((PrevTemplate = llvm::dyn_cast<ClassTemplateDecl>(PrevDecl))) {
+            PrevTemplate = PrevTemplate->getCanonicalDecl();
+            Template = PrevTemplate;
+            PrevRecord = Template->getTemplatedDecl();
+          }
+        }
+        if (PrevRecord) {
+          PrevRecord = PrevRecord->getCanonicalDecl();
+          // Mark ExternalLexicalStorage so complete type will be called for
+          // ExternalAST path.
+          // PrevRecord->setHasExternalLexicalStorage();
+          if (PrevRecord->isCompleteDefinition()) {
+            Record = PrevRecord;
+            ReusePrevDecl = true;
+            return;
+          }
+        }
+      }
 
     Record = CXXRecordDecl::Create(AST, TagDecl::TagKind::TTK_Class,
                                    HLSLNamespace, SourceLocation(),
@@ -54,15 +95,20 @@ struct BuiltinTypeDeclBuilder {
     Record->addAttr(FinalAttr::CreateImplicit(AST, SourceRange(),
                                               AttributeCommonInfo::AS_Keyword,
                                               FinalAttr::Keyword_final));
+    if (PrevRecord)
+      Record->setPreviousDecl(PrevRecord);
   }
 
   ~BuiltinTypeDeclBuilder() {
-    if (HLSLNamespace && !Template)
+    if (HLSLNamespace && !Template && !ReusePrevDecl)
       HLSLNamespace->addDecl(Record);
   }
 
   BuiltinTypeDeclBuilder &
   addTemplateArgumentList(llvm::ArrayRef<NamedDecl *> TemplateArgs) {
+    if (ReusePrevDecl)
+      return *this;
+
     ASTContext &AST = Record->getASTContext();
 
     auto *ParamList =
@@ -283,8 +329,8 @@ struct BuiltinTypeDeclBuilder {
   BuiltinTypeDeclBuilder &completeDefinition() {
     assert(Record->isBeingDefined() &&
            "Definition must be started before completing it.");
-
-    Record->completeDefinition();
+    if (!Record->isCompleteDefinition())
+      Record->completeDefinition();
     return *this;
   }
 
@@ -303,6 +349,9 @@ struct TemplateParameterListBuilder {
 
   TemplateParameterListBuilder &
   addTypeParameter(StringRef Name, QualType DefaultValue = QualType()) {
+    if (Builder.ReusePrevDecl)
+      return *this;
+
     unsigned Position = static_cast<unsigned>(Params.size());
     auto *Decl = TemplateTypeParmDecl::Create(
         AST, Builder.Record->getDeclContext(), SourceLocation(),
@@ -317,7 +366,7 @@ struct TemplateParameterListBuilder {
   }
 
   BuiltinTypeDeclBuilder &finalizeTemplateArgs() {
-    if (Params.empty())
+    if (Params.empty() || Builder.ReusePrevDecl)
       return Builder;
     auto *ParamList =
         TemplateParameterList::Create(AST, SourceLocation(), SourceLocation(),
@@ -334,7 +383,8 @@ struct TemplateParameterListBuilder {
 
     QualType T = Builder.Template->getInjectedClassNameSpecialization();
     T = AST.getInjectedClassNameType(Builder.Record, T);
-
+    if (Builder.PrevTemplate)
+      Builder.Template->setPreviousDecl(Builder.PrevTemplate);
     return Builder;
   }
 };
@@ -349,12 +399,29 @@ HLSLExternalSemaSource::~HLSLExternalSemaSource() {}
 void HLSLExternalSemaSource::InitializeSema(Sema &S) {
   SemaPtr = &S;
   ASTContext &AST = SemaPtr->getASTContext();
+
   IdentifierInfo &HLSL = AST.Idents.get("hlsl", tok::TokenKind::identifier);
-  HLSLNamespace =
-      NamespaceDecl::Create(AST, AST.getTranslationUnitDecl(), false,
-                            SourceLocation(), SourceLocation(), &HLSL, nullptr);
+  NamespaceDecl *PrevHLSLNamespace = nullptr;
+  if (ExternalSema) {
+    // If the translation unit has external storage force external decls to
+    // load.
+    if (AST.getTranslationUnitDecl()->hasExternalLexicalStorage())
+      (void)AST.getTranslationUnitDecl()->decls_begin();
+
+    PrevHLSLNamespace = llvm::dyn_cast_if_present<NamespaceDecl>(
+        findDecl(S, HLSL, Sema::LookupNameKind::LookupNamespaceName));
+    // Try to initailize from ExternalSema.
+    if (PrevHLSLNamespace &&
+        !isa<TranslationUnitDecl>(PrevHLSLNamespace->getParent()))
+      PrevHLSLNamespace = nullptr;
+  }
+
+  HLSLNamespace = NamespaceDecl::Create(
+      AST, AST.getTranslationUnitDecl(), false, SourceLocation(),
+      SourceLocation(), &HLSL, PrevHLSLNamespace);
   HLSLNamespace->setImplicit(true);
   AST.getTranslationUnitDecl()->addDecl(HLSLNamespace);
+
   defineTrivialHLSLTypes();
   forwardDeclareHLSLTypes();
 
@@ -374,6 +441,12 @@ void HLSLExternalSemaSource::InitializeSema(Sema &S) {
 
 void HLSLExternalSemaSource::defineHLSLVectorAlias() {
   ASTContext &AST = SemaPtr->getASTContext();
+  IdentifierInfo &II = AST.Idents.get("vector", tok::TokenKind::identifier);
+  auto *PrevVector = llvm::dyn_cast_if_present<TypeAliasTemplateDecl>(
+      findDecl(*SemaPtr, II, Sema::LookupNameKind::LookupOrdinaryName));
+  if (PrevVector &&
+      PrevVector->getDeclContext() == HLSLNamespace->getPreviousDecl())
+    return;
 
   llvm::SmallVector<NamedDecl *> TemplateParams;
 
@@ -397,8 +470,6 @@ void HLSLExternalSemaSource::defineHLSLVectorAlias() {
   auto *ParamList =
       TemplateParameterList::Create(AST, SourceLocation(), SourceLocation(),
                                     TemplateParams, SourceLocation(), nullptr);
-
-  IdentifierInfo &II = AST.Idents.get("vector", tok::TokenKind::identifier);
 
   QualType AliasType = AST.getDependentSizedExtVectorType(
       AST.getTemplateTypeParmType(0, 0, false, TypeParam),
@@ -440,9 +511,11 @@ void HLSLExternalSemaSource::forwardDeclareHLSLTypes() {
              .addTypeParameter("element_type", SemaPtr->getASTContext().FloatTy)
              .finalizeTemplateArgs()
              .Record;
-  Completions.insert(std::make_pair(
-      Decl, std::bind(&HLSLExternalSemaSource::completeBufferType, this,
-                      std::placeholders::_1)));
+  Decl = Decl->getCanonicalDecl();
+  if (!Decl->isCompleteDefinition())
+    Completions.insert(std::make_pair(
+        Decl, std::bind(&HLSLExternalSemaSource::completeBufferType, this,
+                        std::placeholders::_1)));
 }
 
 void HLSLExternalSemaSource::CompleteType(TagDecl *Tag) {

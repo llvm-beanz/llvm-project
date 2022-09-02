@@ -15,6 +15,7 @@
 #include "llvm/ADT/DenseMap.h"
 
 #include "clang/Sema/ExternalSemaSource.h"
+#include "clang/Sema/MultiplexExternalSemaSource.h"
 
 namespace clang {
 class NamespaceDecl;
@@ -22,8 +23,9 @@ class Sema;
 
 class HLSLExternalSemaSource : public ExternalSemaSource {
   Sema *SemaPtr = nullptr;
-  NamespaceDecl *HLSLNamespace;
+  NamespaceDecl *HLSLNamespace = nullptr;
   CXXRecordDecl *ResourceDecl;
+  ExternalSemaSource *ExternalSema = nullptr;
 
   using CompletionFunction = std::function<void(CXXRecordDecl *)>;
   llvm::DenseMap<CXXRecordDecl *, CompletionFunction> Completions;
@@ -35,6 +37,7 @@ class HLSLExternalSemaSource : public ExternalSemaSource {
   void completeBufferType(CXXRecordDecl *Record);
 
 public:
+  HLSLExternalSemaSource(ExternalSemaSource *ExtSema) : ExternalSema(ExtSema) {}
   ~HLSLExternalSemaSource() override;
 
   /// Initialize the semantic source with the Sema instance
