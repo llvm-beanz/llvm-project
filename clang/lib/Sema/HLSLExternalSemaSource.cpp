@@ -61,32 +61,22 @@ struct BuiltinTypeDeclBuilder {
     IdentifierInfo &II = AST.Idents.get(Name, tok::TokenKind::identifier);
     CXXRecordDecl *PrevRecord = nullptr;
     if (NamedDecl *PrevDecl =
-            findDecl(S, II, Sema::LookupNameKind::LookupOrdinaryName))
-      if (PrevDecl->getDeclContext() == HLSLNamespace->getPreviousDecl()) {
-        PrevRecord = llvm::dyn_cast<CXXRecordDecl>(PrevDecl);
-        if (!PrevRecord) {
-          if ((PrevTemplate = llvm::dyn_cast<ClassTemplateDecl>(PrevDecl))) {
-            PrevTemplate = PrevTemplate->getCanonicalDecl();
-            Template = PrevTemplate;
-            PrevRecord = Template->getTemplatedDecl();
-          }
-        }
-        if (PrevRecord) {
-          PrevRecord = PrevRecord->getCanonicalDecl();
-          // Mark ExternalLexicalStorage so complete type will be called for
-          // ExternalAST path.
-          // PrevRecord->setHasExternalLexicalStorage();
-          if (PrevRecord->isCompleteDefinition()) {
-            Record = PrevRecord;
-            ReusePrevDecl = true;
-            return;
-          }
-        }
+            findDecl(S, II, Sema::LookupNameKind::LookupTagName)) {
+      if (auto *TD = dyn_cast<ClassTemplateDecl>(PrevDecl)) {
+        PrevRecord = TD->getTemplatedDecl();
+        PrevTemplate = TD;
+      } else
+        PrevRecord = dyn_cast<CXXRecordDecl>(PrevDecl);
+      if (PrevRecord && PrevRecord->getCanonicalDecl()->isCompleteDefinition()) {
+        ReusePrevDecl = true;
+        Record = PrevRecord->getCanonicalDecl();
+        return;
       }
+    }
 
     Record = CXXRecordDecl::Create(AST, TagDecl::TagKind::TTK_Class,
                                    HLSLNamespace, SourceLocation(),
-                                   SourceLocation(), &II, nullptr, true);
+                                   SourceLocation(), &II, PrevRecord, true);
     Record->setImplicit(true);
     Record->setLexicalDeclContext(HLSLNamespace);
     Record->setHasExternalLexicalStorage();
@@ -95,8 +85,6 @@ struct BuiltinTypeDeclBuilder {
     Record->addAttr(FinalAttr::CreateImplicit(AST, SourceRange(),
                                               AttributeCommonInfo::AS_Keyword,
                                               FinalAttr::Keyword_final));
-    if (PrevRecord)
-      Record->setPreviousDecl(PrevRecord);
   }
 
   ~BuiltinTypeDeclBuilder() {
@@ -402,19 +390,13 @@ void HLSLExternalSemaSource::InitializeSema(Sema &S) {
 
   IdentifierInfo &HLSL = AST.Idents.get("hlsl", tok::TokenKind::identifier);
   NamespaceDecl *PrevHLSLNamespace = nullptr;
-  if (ExternalSema) {
-    // If the translation unit has external storage force external decls to
-    // load.
-    if (AST.getTranslationUnitDecl()->hasExternalLexicalStorage())
-      (void)AST.getTranslationUnitDecl()->decls_begin();
+  // If the translation unit has external storage force external decls to
+  // load.
+  if (AST.getTranslationUnitDecl()->hasExternalLexicalStorage())
+    (void)AST.getTranslationUnitDecl()->decls_begin();
 
-    PrevHLSLNamespace = llvm::dyn_cast_if_present<NamespaceDecl>(
-        findDecl(S, HLSL, Sema::LookupNameKind::LookupNamespaceName));
-    // Try to initailize from ExternalSema.
-    if (PrevHLSLNamespace &&
-        !isa<TranslationUnitDecl>(PrevHLSLNamespace->getParent()))
-      PrevHLSLNamespace = nullptr;
-  }
+  PrevHLSLNamespace = llvm::dyn_cast_if_present<NamespaceDecl>(
+      findDecl(S, HLSL, Sema::LookupNameKind::LookupNamespaceName));
 
   HLSLNamespace = NamespaceDecl::Create(
       AST, AST.getTranslationUnitDecl(), false, SourceLocation(),
@@ -527,6 +509,7 @@ void HLSLExternalSemaSource::CompleteType(TagDecl *Tag) {
   // declaration and complete that.
   if (auto TDecl = dyn_cast<ClassTemplateSpecializationDecl>(Record))
     Record = TDecl->getSpecializedTemplate()->getTemplatedDecl();
+  Record = Record->getCanonicalDecl();
   auto It = Completions.find(Record);
   if (It == Completions.end())
     return;

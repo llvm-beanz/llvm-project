@@ -1029,13 +1029,13 @@ bool FrontendAction::BeginSourceFile(CompilerInstance &CI,
     if (auto *SemaSource = dyn_cast_if_present<ExternalSemaSource>(
             CI.getASTContext().getExternalSource())) {
       IntrusiveRefCntPtr<ExternalSemaSource> HLSLSema(
-          new HLSLExternalSemaSource(SemaSource));
+          new HLSLExternalSemaSource());
       IntrusiveRefCntPtr<ExternalSemaSource> MultiSema(
           new MultiplexExternalSemaSource(SemaSource, HLSLSema.get()));
       CI.getASTContext().setExternalSource(MultiSema);
     } else {
       IntrusiveRefCntPtr<ExternalSemaSource> HLSLSema(
-          new HLSLExternalSemaSource(nullptr));
+          new HLSLExternalSemaSource());
       CI.getASTContext().setExternalSource(HLSLSema);
     }
   }
