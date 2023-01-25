@@ -245,10 +245,12 @@ Parts:
 ...
 )";
 
-  SmallVector<char, 512> BinaryData;
-  DXContainer C = llvm::cantFail(generateDXContainer(Yaml, BinaryData));
+  SmallVector<char, 256> BinaryData;
+  auto C = generateDXContainer(Yaml, BinaryData);
 
-  const auto &PSVInfo = C.getPSVInfo();
+  ASSERT_THAT_EXPECTED(C, Succeeded());
+
+  const auto &PSVInfo = C->getPSVInfo();
   ASSERT_TRUE(PSVInfo.has_value());
 
   EXPECT_EQ(PSVInfo->getResourceCount(), 3u);
@@ -317,6 +319,6 @@ Parts:
   --It;
   Binding = *It;
 
-  EXPECT_EQ(Binding.Type, 4u);
+  EXPECT_EQ(Binding.Type, 3u);
   EXPECT_EQ(Binding.Flags, 0u);
 }

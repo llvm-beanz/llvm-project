@@ -42,10 +42,11 @@ class PSVRuntimeInfo {
     using value_type = dxbc::PSV::v2::ResourceBindInfo;
 
     struct iterator {
-      const ResourceArray &Array;
+      StringRef Data;
+      size_t Stride; // size of each element in the list.
       const char *Current;
 
-      iterator(const ResourceArray &A, const char *C) : Array(A), Current(C) {}
+      iterator(const ResourceArray &A, const char *C) : Data(A.Data), Stride(A.Stride), Current(C) {}
       iterator(const iterator &) = default;
 
       value_type operator*() {
@@ -53,17 +54,17 @@ class PSVRuntimeInfo {
         // up to the user to know if the fields are used by verifying the PSV
         // version.
         value_type Val = {{0, 0, 0, 0}, 0, 0};
-        if (Current >= Array.Data.end())
+        if (Current >= Data.end())
           return Val;
-        memcpy(static_cast<void *>(&Val), Current, Array.Stride);
+        memcpy(static_cast<void *>(&Val), Current, Stride);
         if (sys::IsBigEndianHost)
           Val.swapBytes();
         return Val;
       }
 
       iterator operator++() {
-        if (Current < Array.Data.end())
-          Current += Array.Stride;
+        if (Current < Data.end())
+          Current += Stride;
         return *this;
       }
 
@@ -74,8 +75,8 @@ class PSVRuntimeInfo {
       }
 
       iterator operator--() {
-        if (Current > Array.Data.begin())
-          Current -= Array.Stride;
+        if (Current > Data.begin())
+          Current -= Stride;
         return *this;
       }
 
