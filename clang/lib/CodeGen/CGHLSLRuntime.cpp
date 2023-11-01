@@ -102,8 +102,7 @@ GlobalVariable *replaceBuffer(CGHLSLRuntime::Buffer &Buf) {
     Value *GEP =
         B.CreateGEP(Buf.LayoutStruct, CBGV, {ZeroIdx, B.getInt32(Offset)});
 
-    assert(Buf.LayoutStruct->getElementType(Offset) == GV->getValueType() &&
-           "constant type mismatch");
+    assert(Buf.LayoutStruct->getElementType(Offset) == GV->getValueType() && "constant type mismatch");
 
     // Replace.
     GV->replaceAllUsesWith(GEP);
