@@ -6235,6 +6235,12 @@ void InitializationSequence::InitializeFrom(Sema &S,
     return;
   }
 
+  if (S.getLangOpts().HLSL && DestType->isArrayParameterType() &&
+      DestType == SourceType) {
+    AddArrayInitStep(DestType, /*IsGNUExtension*/ false);
+    return;
+  }
+
   //     - If the destination type is an array of characters, an array of
   //       char16_t, an array of char32_t, or an array of wchar_t, and the
   //       initializer is a string literal, see 8.5.2.

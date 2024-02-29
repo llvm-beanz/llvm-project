@@ -258,6 +258,8 @@ class ASTContext : public RefCountedBase<ASTContext> {
                                      ASTContext&>
     SubstTemplateTemplateParmPacks;
 
+  mutable llvm::FoldingSet<ArrayParameterType> ArrayParameterTypes;
+
   /// The set of nested name specifiers.
   ///
   /// This set is managed by the NestedNameSpecifier class.
@@ -1359,6 +1361,10 @@ public:
   /// Return the uniqued reference to a specified decay from the original
   /// type to the decayed type.
   QualType getDecayedType(QualType Orig, QualType Decayed) const;
+
+  /// Return the uniqued reference to a specified array parameter type from the
+  /// original array type.
+  QualType getArrayParameterType(QualType Ty) const;
 
   /// Return the uniqued reference to the atomic type for the specified
   /// type.

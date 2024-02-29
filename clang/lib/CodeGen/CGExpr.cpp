@@ -5208,6 +5208,7 @@ LValue CodeGenFunction::EmitCastLValue(const CastExpr *E) {
   case CK_LValueToRValue:
     return EmitLValue(E->getSubExpr());
 
+  case CK_ArrayParamNoOp:
   case CK_NoOp: {
     // CK_NoOp can model a qualification conversion, which can remove an array
     // bound and change the IR type.

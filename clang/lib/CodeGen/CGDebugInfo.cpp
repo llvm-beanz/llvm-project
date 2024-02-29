@@ -3663,6 +3663,7 @@ llvm::DIType *CGDebugInfo::CreateTypeNode(QualType Ty, llvm::DIFile *Unit) {
   case Type::BTFTagAttributed:
   case Type::Adjusted:
   case Type::Decayed:
+  case Type::ArrayParameter:
   case Type::DeducedTemplateSpecialization:
   case Type::Elaborated:
   case Type::Using:

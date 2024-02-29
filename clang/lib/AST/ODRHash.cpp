@@ -933,6 +933,11 @@ public:
     VisitAdjustedType(T);
   }
 
+  void VisitArrayParameterType(const ArrayParameterType *T) {
+    AddQualType(T->getArrayType());
+    VisitType(T);
+  }
+
   void VisitArrayType(const ArrayType *T) {
     AddQualType(T->getElementType());
     ID.AddInteger(llvm::to_underlying(T->getSizeModifier()));

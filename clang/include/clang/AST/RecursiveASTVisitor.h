@@ -987,6 +987,9 @@ DEF_TRAVERSE_TYPE(AdjustedType, { TRY_TO(TraverseType(T->getOriginalType())); })
 
 DEF_TRAVERSE_TYPE(DecayedType, { TRY_TO(TraverseType(T->getOriginalType())); })
 
+DEF_TRAVERSE_TYPE(ArrayParameterType,
+                  { TRY_TO(TraverseType(T->getArrayType())); })
+
 DEF_TRAVERSE_TYPE(ConstantArrayType, {
   TRY_TO(TraverseType(T->getElementType()));
   if (T->getSizeExpr())
@@ -1240,6 +1243,9 @@ DEF_TRAVERSE_TYPELOC(AdjustedType,
                      { TRY_TO(TraverseTypeLoc(TL.getOriginalLoc())); })
 
 DEF_TRAVERSE_TYPELOC(DecayedType,
+                     { TRY_TO(TraverseTypeLoc(TL.getOriginalLoc())); })
+
+DEF_TRAVERSE_TYPELOC(ArrayParameterType,
                      { TRY_TO(TraverseTypeLoc(TL.getOriginalLoc())); })
 
 template <typename Derived>

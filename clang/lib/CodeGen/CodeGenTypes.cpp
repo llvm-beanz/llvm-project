@@ -590,6 +590,9 @@ llvm::Type *CodeGenTypes::ConvertType(QualType T) {
     ResultType = llvm::ArrayType::get(ResultType, 0);
     break;
   }
+  case Type::ArrayParameter:
+    Ty = cast<ArrayParameterType>(Ty)->getArrayType().getTypePtr();
+    [[fallthrough]];
   case Type::ConstantArray: {
     const ConstantArrayType *A = cast<ConstantArrayType>(Ty);
     llvm::Type *EltTy = ConvertTypeForMem(A->getElementType());

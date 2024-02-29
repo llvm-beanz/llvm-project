@@ -46,6 +46,14 @@ let Class = DecayedType in {
   def : Creator<[{ return ctx.getAdjustedParameterType(originalType); }]>;
 }
 
+let Class = ArrayParameterType in {
+  def : Property<"arrayTy", QualType> {
+    let Read = [{ node->getArrayType() }];
+  }
+
+  def : Creator<[{ return ctx.getAdjustedParameterType(arrayTy); }]>;
+}
+
 let Class = BlockPointerType in {
   def : Property<"pointeeType", QualType> {
     let Read = [{ node->getPointeeType() }];

@@ -1236,6 +1236,11 @@ class DecayedTypeLoc : public InheritingConcreteTypeLoc<
                            AdjustedTypeLoc, DecayedTypeLoc, DecayedType> {
 };
 
+/// Wrapper for source info for array parameter types.
+class ArrayParameterTypeLoc
+    : public InheritingConcreteTypeLoc<AdjustedTypeLoc, ArrayParameterTypeLoc,
+                                       ArrayParameterType> {};
+
 struct PointerLikeLocInfo {
   SourceLocation StarLoc;
 };

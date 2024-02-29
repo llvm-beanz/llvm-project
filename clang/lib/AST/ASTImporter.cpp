@@ -1145,6 +1145,15 @@ ExpectedType ASTNodeImporter::VisitDecayedType(const DecayedType *T) {
   return Importer.getToContext().getDecayedType(*ToOriginalTypeOrErr);
 }
 
+ExpectedType
+ASTNodeImporter::VisitArrayParameterType(const ArrayParameterType *T) {
+  ExpectedType ToArrayTypeOrErr = import(T->getArrayType());
+  if (!ToArrayTypeOrErr)
+    return ToArrayTypeOrErr.takeError();
+
+  return Importer.getToContext().getArrayParameterType(*ToArrayTypeOrErr);
+}
+
 ExpectedType ASTNodeImporter::VisitComplexType(const ComplexType *T) {
   ExpectedType ToElementTypeOrErr = import(T->getElementType());
   if (!ToElementTypeOrErr)

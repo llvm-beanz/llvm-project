@@ -4410,6 +4410,13 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
                .get();
     break;
 
+  case ICK_Array_Param_NoOp:
+    FromType = Context.getArrayParameterType(FromType);
+    From = ImpCastExprToType(From, FromType, CK_ArrayParamNoOp, VK_PRValue,
+                             /*BasePath=*/nullptr, CCK)
+               .get();
+    break;
+
   case ICK_Function_To_Pointer:
     FromType = Context.getPointerType(FromType);
     From = ImpCastExprToType(From, FromType, CK_FunctionToPointerDecay,
@@ -4787,6 +4794,7 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
   case ICK_Num_Conversion_Kinds:
   case ICK_C_Only_Conversion:
   case ICK_Incompatible_Pointer_Conversion:
+  case ICK_Array_Param_NoOp:
     llvm_unreachable("Improper second standard conversion");
   }
 

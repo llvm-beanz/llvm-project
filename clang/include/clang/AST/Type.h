@@ -2277,6 +2277,7 @@ public:
   bool isConstantArrayType() const;
   bool isIncompleteArrayType() const;
   bool isVariableArrayType() const;
+  bool isArrayParameterType() const;
   bool isDependentSizedArrayType() const;
   bool isRecordType() const;
   bool isClassType() const;
@@ -3237,6 +3238,38 @@ public:
   static bool classof(const Type *T) {
     return T->getTypeClass() == ConstantArray;
   }
+};
+
+/// Represents a constant array type that does not decay to a pointer when used
+/// as a function parameter.
+class ArrayParameterType : public Type, public llvm::FoldingSetNode {
+  friend class ASTContext; // ASTContext creates these.
+  QualType ArrayTy;
+
+  ArrayParameterType(QualType ArrTy, QualType CanTy)
+      : Type(ArrayParameter, CanTy, ArrTy->getDependence()), ArrayTy(ArrTy) {}
+
+public:
+  void Profile(llvm::FoldingSetNodeID &ID) {
+    ID.AddPointer(getArrayType().getAsOpaquePtr());
+  }
+
+  static void Profile(llvm::FoldingSetNodeID &ID, QualType Array) {
+    ID.AddPointer(Array.getAsOpaquePtr());
+  }
+
+  static bool classof(const Type *T) {
+    return T->getTypeClass() == ArrayParameter;
+  }
+
+  QualType getArrayType() const { return ArrayTy; }
+
+  QualType getElementType() const {
+    return cast<ArrayType>(getArrayType())->getElementType();
+  }
+
+  bool isSugared() const { return false; }
+  QualType desugar() const { return QualType(this, 0); }
 };
 
 /// Represents a C array with an unspecified size.  For example 'int A[]' has
@@ -7230,6 +7263,10 @@ inline bool Type::isIncompleteArrayType() const {
 
 inline bool Type::isVariableArrayType() const {
   return isa<VariableArrayType>(CanonicalType);
+}
+
+inline bool Type::isArrayParameterType() const {
+  return isa<ArrayParameterType>(CanonicalType);
 }
 
 inline bool Type::isDependentSizedArrayType() const {

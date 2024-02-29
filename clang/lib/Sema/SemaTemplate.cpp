@@ -6525,6 +6525,11 @@ bool UnnamedLocalNoLinkageFinder::VisitBitIntType(const BitIntType *T) {
   return false;
 }
 
+bool UnnamedLocalNoLinkageFinder::VisitArrayParameterType(
+    const ArrayParameterType *T) {
+  return VisitConstantArrayType(cast<ConstantArrayType>(T->getArrayType()));
+}
+
 bool UnnamedLocalNoLinkageFinder::VisitDependentBitIntType(
     const DependentBitIntType *T) {
   return false;

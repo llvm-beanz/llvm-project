@@ -2248,6 +2248,9 @@ TypeInfo ASTContext::getTypeInfoImpl(const Type *T) const {
   case Type::Adjusted:
   case Type::Decayed:
     return getTypeInfo(cast<AdjustedType>(T)->getAdjustedType().getTypePtr());
+  case Type::ArrayParameter:
+    return getTypeInfo(
+        cast<ArrayParameterType>(T)->getArrayType().getTypePtr());
   case Type::ObjCInterface: {
     const auto *ObjCI = cast<ObjCInterfaceType>(T);
     if (ObjCI->getDecl()->isInvalidDecl()) {
@@ -3367,6 +3370,32 @@ QualType ASTContext::getDecayedType(QualType T) const {
   return getDecayedType(T, Decayed);
 }
 
+QualType ASTContext::getArrayParameterType(QualType Ty) const {
+  assert(Ty->isConstantArrayType() && "Ty must be an array type.");
+  llvm::FoldingSetNodeID ID;
+  ArrayParameterType::Profile(ID, Ty);
+  void *InsertPos = nullptr;
+  ArrayParameterType *AT =
+      ArrayParameterTypes.FindNodeOrInsertPos(ID, InsertPos);
+  if (AT)
+    return QualType(AT, 0);
+
+  QualType Canonical;
+  if (!Ty.isCanonical()) {
+    Canonical = getArrayParameterType(getCanonicalType(Ty));
+
+    // Get the new insert position for the node we care about.
+    AT = ArrayParameterTypes.FindNodeOrInsertPos(ID, InsertPos);
+    assert(!AT && "Shouldn't be in the map!");
+  }
+
+  AT = new (*this, alignof(ArrayParameterType))
+      ArrayParameterType(Ty, Canonical);
+  Types.push_back(AT);
+  ArrayParameterTypes.InsertNode(AT, InsertPos);
+  return QualType(AT, 0);
+}
+
 /// getBlockPointerType - Return the uniqued reference to the type for
 /// a pointer to the specified block.
 QualType ASTContext::getBlockPointerType(QualType T) const {
@@ -3616,6 +3645,7 @@ QualType ASTContext::getVariableArrayDecayedType(QualType type) const {
   case Type::PackIndexing:
   case Type::BitInt:
   case Type::DependentBitInt:
+  case Type::ArrayParameter:
     llvm_unreachable("type should never be variably-modified");
 
   // These types can be variably-modified but should never need to
@@ -6947,6 +6977,8 @@ const ArrayType *ASTContext::getAsArrayType(QualType T) const {
 }
 
 QualType ASTContext::getAdjustedParameterType(QualType T) const {
+  if (getLangOpts().HLSL && T->isConstantArrayType())
+    return getArrayParameterType(T);
   if (T->isArrayType() || T->isFunctionType())
     return getDecayedType(T);
   return T;
@@ -8557,6 +8589,7 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string &S,
   case Type::DeducedTemplateSpecialization:
     return;
 
+  case Type::ArrayParameter:
   case Type::Pipe:
 #define ABSTRACT_TYPE(KIND, BASE)
 #define TYPE(KIND, BASE)
@@ -10900,6 +10933,10 @@ QualType ASTContext::mergeTypes(QualType LHS, QualType RHS, bool OfBlockPointer,
     assert(LHS != RHS &&
            "Equivalent pipe types should have already been handled!");
     return {};
+  case Type::ArrayParameter:
+    if (RHS != LHS)
+      return {}; // If these aren't equivalent we should fail.
+    return LHS;
   case Type::BitInt: {
     // Merge two bit-precise int types, while trying to preserve typedef info.
     bool LHSUnsigned = LHS->castAs<BitIntType>()->isUnsigned();
@@ -13027,6 +13064,13 @@ static QualType getCommonNonSugarTypeNode(ASTContext &Ctx, const Type *X,
         TX->getDepth(), TX->getIndex(), TX->isParameterPack(),
         getCommonDecl(TX->getDecl(), TY->getDecl()));
   }
+  case Type::ArrayParameter: {
+    const auto *AX = cast<ArrayParameterType>(X),
+               *AY = cast<ArrayParameterType>(Y);
+    auto ArrayTy =
+        Ctx.getCommonSugaredType(AX->getArrayType(), AY->getArrayType());
+    return Ctx.getArrayParameterType(ArrayTy);
+  }
   }
   llvm_unreachable("Unknown Type Class");
 }
@@ -13090,6 +13134,15 @@ static QualType getCommonSugarTypeNode(ASTContext &Ctx, const Type *X,
     // FIXME: It's inefficient to have to unify the original types.
     return Ctx.getDecayedType(Ctx.getCommonSugaredType(OX, OY),
                               Ctx.getQualifiedType(Underlying));
+  }
+  case Type::ArrayParameter: {
+    const auto *DX = cast<ArrayParameterType>(X),
+               *DY = cast<ArrayParameterType>(Y);
+    QualType OX = DX->getArrayType(), OY = DY->getArrayType();
+    if (!Ctx.hasSameType(OX, OY))
+      return QualType();
+    // FIXME: It's inefficient to have to unify the original types.
+    return Ctx.getArrayParameterType(Ctx.getCommonSugaredType(OX, OY));
   }
   case Type::Attributed: {
     const auto *AX = cast<AttributedType>(X), *AY = cast<AttributedType>(Y);

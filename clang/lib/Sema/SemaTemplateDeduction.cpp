@@ -2277,6 +2277,7 @@ static TemplateDeductionResult DeduceTemplateArgumentsByTypeMatch(
     case Type::DependentTemplateSpecialization:
     case Type::PackExpansion:
     case Type::Pipe:
+    case Type::ArrayParameter:
       // No template argument deduction for these types
       return TemplateDeductionResult::Success;
 
@@ -6327,6 +6328,10 @@ MarkUsedTemplateParameters(ASTContext &Ctx, QualType T,
                                OnlyDeduced, Depth, Used);
     break;
 
+  case Type::ArrayParameter:
+    MarkUsedTemplateParameters(Ctx, cast<ArrayParameterType>(T)->getArrayType(),
+                               OnlyDeduced, Depth, Used);
+    break;
   case Type::Vector:
   case Type::ExtVector:
     MarkUsedTemplateParameters(Ctx,

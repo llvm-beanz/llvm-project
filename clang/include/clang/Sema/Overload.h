@@ -198,6 +198,9 @@ class Sema;
     /// HLSL vector truncation.
     ICK_HLSL_Vector_Truncation,
 
+    /// Non-decaying array parameter conversion.
+    ICK_Array_Param_NoOp,
+
     /// The number of conversion kinds
     ICK_Num_Conversion_Kinds,
   };

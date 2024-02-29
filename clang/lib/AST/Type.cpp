@@ -1154,6 +1154,17 @@ public:
     return Ctx.getDecayedType(originalType);
   }
 
+  QualType VisitArrayParameterType(const ArrayParameterType *T) {
+    QualType ArrTy = recurse(T->getArrayType());
+    if (ArrTy.isNull())
+      return {};
+
+    if (ArrTy.getAsOpaquePtr() == T->getArrayType().getAsOpaquePtr())
+      return QualType(T, 0);
+
+    return Ctx.getArrayParameterType(ArrTy);
+  }
+
   SUGARED_TYPE_CLASS(TypeOfExpr)
   SUGARED_TYPE_CLASS(TypeOf)
   SUGARED_TYPE_CLASS(Decltype)
@@ -4395,6 +4406,8 @@ static CachedProperties computeCachedProperties(const Type *T) {
     return Cache::get(cast<AtomicType>(T)->getValueType());
   case Type::Pipe:
     return Cache::get(cast<PipeType>(T)->getElementType());
+  case Type::ArrayParameter:
+    return Cache::get(cast<ArrayParameterType>(T)->getArrayType());
   }
 
   llvm_unreachable("unhandled type class");
@@ -4483,6 +4496,8 @@ LinkageInfo LinkageComputer::computeTypeLinkageInfo(const Type *T) {
     return computeTypeLinkageInfo(cast<AtomicType>(T)->getValueType());
   case Type::Pipe:
     return computeTypeLinkageInfo(cast<PipeType>(T)->getElementType());
+  case Type::ArrayParameter:
+    return computeTypeLinkageInfo(cast<ArrayParameterType>(T)->getArrayType());
   }
 
   llvm_unreachable("unhandled type class");
@@ -4650,6 +4665,7 @@ bool Type::canHaveNullability(bool ResultIfUnknown) const {
   case Type::Pipe:
   case Type::BitInt:
   case Type::DependentBitInt:
+  case Type::ArrayParameter:
     return false;
   }
   llvm_unreachable("bad type kind!");
