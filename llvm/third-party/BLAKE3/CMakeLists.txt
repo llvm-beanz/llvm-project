@@ -80,4 +80,5 @@ endif()
 
 add_library(LLVMSupportBlake3 OBJECT EXCLUDE_FROM_ALL ${LLVM_BLAKE3_FILES})
 set_target_properties(LLVMSupportBlake3 PROPERTIES FOLDER "LLVM/Libraries")
+set_target_properties(LLVMSupportBlake3 PROPERTIES LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
 llvm_update_compile_flags(LLVMSupportBlake3)

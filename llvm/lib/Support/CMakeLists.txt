@@ -125,8 +125,6 @@ if (UNIX AND ${CMAKE_SYSTEM_NAME} MATCHES "AIX")
   remove_definitions("-D_XOPEN_SOURCE=700")
 endif()
 
-add_subdirectory(BLAKE3)
-
 add_llvm_component_library(LLVMSupport
   ABIBreak.cpp
   AMDGPUMetadata.cpp

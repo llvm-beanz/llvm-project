@@ -1206,6 +1206,9 @@ if(LLVM_INCLUDE_TESTS)
   umbrella_lit_testsuite_begin(check-all)
 endif()
 
+# Process third-party dependencies first: these are always leaf projects.
+add_subdirectory(third-party)
+
 # Put this before tblgen. Else we have a circular dependence.
 add_subdirectory(lib/Demangle)
 add_subdirectory(lib/Support)
