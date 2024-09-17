@@ -1950,6 +1950,22 @@ bool SemaHLSL::IsScalarizedLayoutCompatible(QualType T1, QualType T2) const {
                      });
 }
 
+bool SemaHLSL::IsVectorLayoutCompatible(QualType T) const {
+  llvm::SmallVector<QualType, 4> Types;
+  BuildFlattenedTypeList(T, Types);
+  if (Types.empty() || Types.size() > 4)
+    return false;
+  if (Types.size() == 1)
+    return Types[0]->isArithmeticType();
+  if (std::equal(Types.begin() + 1, Types.end(), Types.begin(),
+                 [this](QualType LHS, QualType RHS) -> bool {
+                   return SemaRef.getASTContext().hasSameUnqualifiedType(LHS,
+                                                                         RHS);
+                 }))
+    return Types[0]->isArithmeticType();
+  return false;
+}
+
 bool SemaHLSL::CheckCompatibleParameterABI(FunctionDecl *New,
                                            FunctionDecl *Old) {
   if (New->getNumParams() != Old->getNumParams())

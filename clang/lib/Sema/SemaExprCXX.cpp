@@ -5116,6 +5116,10 @@ static bool CheckUnaryTypeTraitTypeCompleteness(Sema &S, TypeTrait UTT,
 
     return !S.RequireCompleteType(
         Loc, ArgTy, diag::err_incomplete_type_used_in_type_trait_expr);
+  // HLSL vector layout compatability can only be evaluated on complete types.
+  case UTT_IsVectorLayoutCompatible:
+    return !S.RequireCompleteType(
+        Loc, ArgTy, diag::err_incomplete_type_used_in_type_trait_expr);
   }
 }
 
@@ -5707,6 +5711,12 @@ static bool EvaluateUnaryTypeTrait(Sema &Self, TypeTrait UTT,
                                   tok::kw___builtin_hlsl_is_intangible))
       return false;
     return Self.HLSL().IsIntangibleType(T);
+
+  case UTT_IsVectorLayoutCompatible:
+    if (DiagnoseVLAInCXXTypeTrait(
+            Self, TInfo, tok::kw___builtin_hlsl_is_vector_layout_compatible))
+      return false;
+    return Self.HLSL().IsVectorLayoutCompatible(T);
   }
 }
 

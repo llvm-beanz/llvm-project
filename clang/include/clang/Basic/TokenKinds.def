@@ -659,6 +659,7 @@ KEYWORD(out                         , KEYHLSL)
 
 // HLSL Type traits
 TYPE_TRAIT_2(__builtin_hlsl_is_scalarized_layout_compatible, IsScalarizedLayoutCompatible, KEYHLSL)
+TYPE_TRAIT_1(__builtin_hlsl_is_vector_layout_compatible, IsVectorLayoutCompatible, KEYHLSL)
 TYPE_TRAIT_1(__builtin_hlsl_is_intangible, IsIntangibleType, KEYHLSL)
 
 // OpenMP Type Traits
