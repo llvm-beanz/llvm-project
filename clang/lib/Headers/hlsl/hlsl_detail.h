@@ -33,6 +33,29 @@ constexpr enable_if_t<sizeof(U) == sizeof(T), U> bit_cast(T F) {
   return __builtin_bit_cast(U, F);
 }
 
+template<typename T>
+struct is_vector_type {
+  constexpr static bool value = false;
+};
+
+template <typename T, unsigned N>
+struct is_vector_type<T __attribute__((ext_vector_type(N)))> {
+  constexpr static bool value = true;
+};
+
+template <typename T>
+struct vector_type_info;
+
+template <typename T, unsigned N>
+struct vector_type_info<T __attribute__((ext_vector_type(N)))> {
+  using Type = T;
+  constexpr static unsigned Size = N;
+};
+
+template <typename T>
+concept is_line_vector = sizeof(T) <= 16 && is_vector_type<T>::value
+                         && vector_type_info<T>::Size <= 4;
+
 } // namespace __detail
 } // namespace hlsl
 #endif //_HLSL_HLSL_DETAILS_H_
