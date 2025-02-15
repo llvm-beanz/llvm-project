@@ -4789,8 +4789,9 @@ static void TryListInitialization(Sema &S,
   QualType DestType = Entity.getType();
 
   if (S.getLangOpts().HLSL &&
-      !S.HLSL().TransformInitList(Entity, Kind, InitList))
-    return;
+      S.getLangOpts().getHLSLVersion() < LangOptions::HLSL_202y)
+    if (!S.HLSL().TransformInitList(Entity, Kind, InitList))
+      return;
 
   // C++ doesn't allow scalar initialization with more than one argument.
   // But C99 complex numbers are scalars and it makes sense there.

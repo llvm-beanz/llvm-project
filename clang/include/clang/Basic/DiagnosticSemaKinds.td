@@ -12667,6 +12667,7 @@ def err_hlsl_expect_arg_const_int_one_or_neg_one: Error<
   "argument %0 must be constant integer 1 or -1">;
 def err_invalid_hlsl_resource_type: Error<
   "invalid __hlsl_resource_t type attributes">;
+def err_hlsl_unsupported_ctor_dtor: Error<"constructors and destructors are unsupported in HLSL before 202y">;
 
 // Layout randomization diagnostics.
 def err_non_designated_init_used : Error<

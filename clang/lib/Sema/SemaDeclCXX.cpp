@@ -3460,6 +3460,15 @@ Sema::ActOnCXXMemberDeclarator(Scope *S, AccessSpecifier AS, Declarator &D,
     }
   }
 
+  if (getLangOpts().HLSL &&
+      getLangOpts().getHLSLVersion() < LangOptions::HLSL_202y) {
+    if (Name.getNameKind() == DeclarationName::CXXConstructorName ||
+        Name.getNameKind() == DeclarationName::CXXDestructorName) {
+      Diag(Loc, diag::err_hlsl_unsupported_ctor_dtor);
+      return nullptr;
+    }
+  }
+
   // C++ 9.2p6: A member shall not be declared to have automatic storage
   // duration (auto, register) or with the extern storage-class-specifier.
   // C++ 7.1.1p8: The mutable specifier can be applied only to names of class

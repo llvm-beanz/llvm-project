@@ -1472,7 +1472,8 @@ void CXXRecordDecl::addedMember(Decl *D) {
   // relevant HLSL feature proposals that will depend on this changing:
   // * 0005-strict-initializer-lists.md
   // * https://github.com/microsoft/hlsl-specs/pull/325
-  if (getLangOpts().HLSL)
+  if (getLangOpts().HLSL &&
+      getLangOpts().getHLSLVersion() < LangOptions::HLSL_202y)
     data().Aggregate = data().UserDeclaredSpecialMembers == 0;
 }
 
