@@ -43,6 +43,7 @@ public:
 
 private:
   void defineTrivialHLSLTypes();
+  void defineHLSLVectorTypeAdapter();
   void defineHLSLVectorAlias();
   void defineHLSLTypesWithForwardDeclarations();
   void onCompletion(CXXRecordDecl *Record, CompletionFunction Fn);

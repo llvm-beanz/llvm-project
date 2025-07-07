@@ -66,43 +66,200 @@ void HLSLExternalSemaSource::InitializeSema(Sema &S) {
   AST.getTranslationUnitDecl()->addDecl(UsingDecl);
 }
 
-void HLSLExternalSemaSource::defineHLSLVectorAlias() {
-  ASTContext &AST = SemaPtr->getASTContext();
-
+static TemplateParameterList *
+defineVectorTypeArguments(Sema &S, NamespaceDecl *NS, bool SetDefaults,
+                          bool FirstOnly = false) {
   llvm::SmallVector<NamedDecl *> TemplateParams;
-
+  ASTContext &AST = S.getASTContext();
   auto *TypeParam = TemplateTypeParmDecl::Create(
-      AST, HLSLNamespace, SourceLocation(), SourceLocation(), 0, 0,
+      AST, NS, SourceLocation(), SourceLocation(), 0, 0,
       &AST.Idents.get("element", tok::TokenKind::identifier), false, false);
-  TypeParam->setDefaultArgument(
-      AST, SemaPtr->getTrivialTemplateArgumentLoc(
-               TemplateArgument(AST.FloatTy), QualType(), SourceLocation()));
+  if (SetDefaults)
+    TypeParam->setDefaultArgument(
+        AST, S.getTrivialTemplateArgumentLoc(TemplateArgument(AST.FloatTy),
+                                             QualType(), SourceLocation()));
 
   TemplateParams.emplace_back(TypeParam);
 
-  auto *SizeParam = NonTypeTemplateParmDecl::Create(
-      AST, HLSLNamespace, SourceLocation(), SourceLocation(), 0, 1,
-      &AST.Idents.get("element_count", tok::TokenKind::identifier), AST.IntTy,
-      false, AST.getTrivialTypeSourceInfo(AST.IntTy));
-  llvm::APInt Val(AST.getIntWidth(AST.IntTy), 4);
-  TemplateArgument Default(AST, llvm::APSInt(std::move(Val)), AST.IntTy,
-                           /*IsDefaulted=*/true);
-  SizeParam->setDefaultArgument(
-      AST, SemaPtr->getTrivialTemplateArgumentLoc(Default, AST.IntTy,
-                                                  SourceLocation(), SizeParam));
-  TemplateParams.emplace_back(SizeParam);
+  if (!FirstOnly) {
+    auto *SizeParam = NonTypeTemplateParmDecl::Create(
+        AST, NS, SourceLocation(), SourceLocation(), 0, 1,
+        &AST.Idents.get("element_count", tok::TokenKind::identifier), AST.IntTy,
+        false, AST.getTrivialTypeSourceInfo(AST.IntTy));
 
+    if (SetDefaults) {
+      llvm::APInt Val(AST.getIntWidth(AST.IntTy), 4);
+      TemplateArgument Default(AST, llvm::APSInt(std::move(Val)), AST.IntTy,
+                               /*IsDefaulted=*/true);
+      SizeParam->setDefaultArgument(
+          AST, S.getTrivialTemplateArgumentLoc(Default, AST.IntTy,
+                                               SourceLocation(), SizeParam));
+    }
+    TemplateParams.emplace_back(SizeParam);
+  }
+
+  return TemplateParameterList::Create(AST, SourceLocation(), SourceLocation(),
+                                       TemplateParams, SourceLocation(),
+                                       nullptr);
+}
+
+// This function declares a `vector_scalar_adapter` template which enables
+// mapping single element vectors to scalar types. This can be used in
+// conjunction with the `vector` type alias to make `vector<T,1>` the same type
+// as `T`. The AST generated here matches the C++ source:
+//
+//   template <typename T, int N>
+//   struct vector_scalar_adapter {
+//       using Type = __attribute__((ext_vector_type(N))) T;
+//   };
+//
+//   template <typename T>
+//   struct vector_scalar_adapter<T,1> {
+//       using Type = T;
+//   };
+//
+//   template <typename T, int N>
+//   using vector = typename vector_scalar_adapter<T,N>::Type;
+void HLSLExternalSemaSource::defineHLSLVectorTypeAdapter() {
+  ASTContext &AST = SemaPtr->getASTContext();
+
+  IdentifierInfo &II =
+      AST.Idents.get("vector_scalar_adapter", tok::TokenKind::identifier);
+  IdentifierInfo &TypeII = AST.Idents.get("Type", tok::TokenKind::identifier);
+
+  CXXRecordDecl *Record;
+  ClassTemplateDecl *Template;
+
+  {
+    Record = CXXRecordDecl::Create(AST, TagDecl::TagKind::Struct, HLSLNamespace,
+                                   SourceLocation(), SourceLocation(), &II,
+                                   nullptr, true);
+    Record->setImplicit(true);
+    Record->addAttr(FinalAttr::CreateImplicit(AST, SourceRange(),
+                                              FinalAttr::Keyword_final));
+    Record->startDefinition();
+
+    auto *ParamList = defineVectorTypeArguments(*SemaPtr, HLSLNamespace, false);
+
+    Template = ClassTemplateDecl::Create(
+        AST, Record->getDeclContext(), SourceLocation(),
+        DeclarationName(Record->getIdentifier()), ParamList, Record);
+    Record->setDescribedClassTemplate(Template);
+    Template->setImplicit(true);
+    Record->getDeclContext()->addDecl(Template);
+
+    QualType T = Template->getInjectedClassNameSpecialization();
+    T = AST.getInjectedClassNameType(Record, T);
+
+    QualType DependentType = AST.getTemplateTypeParmType(
+        0, 0, false, cast<TemplateTypeParmDecl>(ParamList->getParam(0)));
+
+    QualType AliasType = AST.getDependentSizedExtVectorType(
+        DependentType,
+        DeclRefExpr::Create(
+            AST, NestedNameSpecifierLoc(), SourceLocation(),
+            cast<ValueDecl>(ParamList->getParam(1)), false,
+            DeclarationNameInfo(ParamList->getParam(1)->getDeclName(),
+                                SourceLocation()),
+            AST.IntTy, VK_LValue),
+        SourceLocation());
+
+    auto *AliasDecl = TypeAliasDecl::Create(
+        AST, Record->getDeclContext(), SourceLocation(), SourceLocation(),
+        &TypeII, AST.getTrivialTypeSourceInfo(AliasType));
+    AliasDecl->setImplicit(true);
+    AliasDecl->setLexicalDeclContext(Record);
+    Record->addDecl(AliasDecl);
+    Record->completeDefinition();
+  }
+
+  // Create a new param list for the specialization.
   auto *ParamList =
-      TemplateParameterList::Create(AST, SourceLocation(), SourceLocation(),
-                                    TemplateParams, SourceLocation(), nullptr);
+      defineVectorTypeArguments(*SemaPtr, HLSLNamespace, false, true);
+  QualType DependentType = AST.getTemplateTypeParmType(
+      0, 0, false, cast<TemplateTypeParmDecl>(ParamList->getParam(0)));
+  llvm::SmallVector<TemplateArgument> TemplateArgs;
+  TemplateArgs.push_back(TemplateArgument(DependentType));
+
+  llvm::APInt One(AST.getIntWidth(AST.IntTy), 1);
+  TemplateArgument DefaultOne(AST, llvm::APSInt(std::move(One)), AST.IntTy);
+  TemplateArgs.push_back(DefaultOne);
+
+  auto ArgListInfo =
+      TemplateArgumentListInfo(SourceLocation(), SourceLocation());
+
+  ArgListInfo.addArgument(TemplateArgumentLoc(
+      TemplateArgs[0],
+      AST.getTrivialTypeSourceInfo(TemplateArgs[0].getAsType())));
+  ArgListInfo.addArgument(
+      TemplateArgumentLoc(TemplateArgs[1], TemplateArgumentLocInfo()));
+
+  // Check that the template argument list is well-formed for this
+  // template.
+  Sema::CheckTemplateArgumentInfo CTAI;
+  if (SemaPtr->CheckTemplateArgumentList(Template, SourceLocation(),
+                                         ArgListInfo,
+                                         /*DefaultArgs=*/{},
+                                         /*PartialTemplateArgs=*/false, CTAI,
+                                         /*UpdateArgsWithConversions=*/true))
+    return;
+
+  // Find the class template (partial) specialization declaration that
+  // corresponds to these arguments.
+  if (SemaPtr->CheckTemplatePartialSpecializationArgs(
+          SourceLocation(), Template, TemplateArgs.size(),
+          CTAI.CanonicalConverted))
+    return;
+
+  void *InsertPos = nullptr;
+  ClassTemplateSpecializationDecl *PrevDecl =
+      Template->findPartialSpecialization(CTAI.CanonicalConverted,
+                                          Template->getTemplateParameters(),
+                                          InsertPos);
+
+  TypeSourceInfo *WrittenTy = AST.getTemplateSpecializationTypeInfo(
+      TemplateName(Template), SourceLocation(), ArgListInfo,
+      CTAI.CanonicalConverted, QualType());
+  auto *Partial = ClassTemplatePartialSpecializationDecl::Create(
+      AST, TagTypeKind::Struct, HLSLNamespace, SourceLocation(),
+      SourceLocation(), ParamList, Template, CTAI.CanonicalConverted,
+      WrittenTy->getType(), nullptr);
+  Partial->setImplicit(true);
+  Partial->setTemplateArgsAsWritten(ArgListInfo);
+  Partial->startDefinition();
+
+  auto *AliasDecl = TypeAliasDecl::Create(
+      AST, Partial->getDeclContext(), SourceLocation(), SourceLocation(),
+      &TypeII, AST.getTrivialTypeSourceInfo(DependentType));
+  AliasDecl->setImplicit(true);
+  AliasDecl->setLexicalDeclContext(Partial);
+  Partial->addDecl(AliasDecl);
+  Partial->setSpecializationKind(TSK_ExplicitSpecialization);
+  Partial->completeDefinition();
+
+  Template->AddPartialSpecialization(Partial, InsertPos);
+  SemaPtr->CheckTemplatePartialSpecialization(Partial);
+
+  HLSLNamespace->addDecl(Partial);
+}
+
+void HLSLExternalSemaSource::defineHLSLVectorAlias() {
+  defineHLSLVectorTypeAdapter();
+  ASTContext &AST = SemaPtr->getASTContext();
+
+  auto *ParamList = defineVectorTypeArguments(*SemaPtr, HLSLNamespace,
+                                              /* SetDefaults */ true);
 
   IdentifierInfo &II = AST.Idents.get("vector", tok::TokenKind::identifier);
 
   QualType AliasType = AST.getDependentSizedExtVectorType(
-      AST.getTemplateTypeParmType(0, 0, false, TypeParam),
+      AST.getTemplateTypeParmType(
+          0, 0, false, cast<TemplateTypeParmDecl>(ParamList->getParam(0))),
       DeclRefExpr::Create(
-          AST, NestedNameSpecifierLoc(), SourceLocation(), SizeParam, false,
-          DeclarationNameInfo(SizeParam->getDeclName(), SourceLocation()),
+          AST, NestedNameSpecifierLoc(), SourceLocation(),
+          cast<ValueDecl>(ParamList->getParam(1)), false,
+          DeclarationNameInfo(ParamList->getParam(1)->getDeclName(),
+                              SourceLocation()),
           AST.IntTy, VK_LValue),
       SourceLocation());
 
