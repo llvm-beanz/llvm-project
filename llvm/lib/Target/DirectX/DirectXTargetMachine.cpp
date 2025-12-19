@@ -81,6 +81,7 @@ LLVMInitializeDirectXTarget() {
   initializeDXILForwardHandleAccessesLegacyPass(*PR);
   initializeDSELegacyPassPass(*PR);
   initializeDXILCBufferAccessLegacyPass(*PR);
+  initializeDXILStringLoweringModulePass(*PR);
 }
 
 class DXILTargetObjectFile : public TargetLoweringObjectFile {
@@ -112,6 +113,7 @@ public:
   void addCodeGenPrepare() override {
     addPass(createDXILFinalizeLinkageLegacyPass());
     addPass(createGlobalDCEPass());
+    addPass(createDXILStringLoweringModulePass());
     addPass(createDXILMemIntrinsicsLegacyPass());
     addPass(createDXILCBufferAccessLegacyPass());
     addPass(createDXILResourceAccessLegacyPass());

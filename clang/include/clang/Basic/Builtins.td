@@ -5247,6 +5247,12 @@ def HLSLClip: LangBuiltin<"HLSL_LANG"> {
   let Prototype = "void(...)";
 }
 
+def HLSLStringToOffset : LangBuiltin<"HLSL_LANG"> {
+  let Spellings = ["__builtin_hlsl_string_to_offset"];
+  let Attributes = [NoThrow, Const];
+  let Prototype = "uint32_t(__hlsl_string)";
+}
+
 def HLSLGroupMemoryBarrierWithGroupSync: LangBuiltin<"HLSL_LANG"> {
   let Spellings = ["__builtin_hlsl_group_memory_barrier_with_group_sync"];
   let Attributes = [NoThrow, Const];

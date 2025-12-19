@@ -8496,8 +8496,8 @@ ExprResult InitializationSequence::Perform(Sema &S,
     }
     case SK_HLSLStringConversion: {
       CurInit = S.ImpCastExprToType(CurInit.get(), Step->Type,
-                          CK_HLSLStringConversion,
-                          CurInit.get()->getValueKind());
+                                    CK_HLSLStringConversion,
+                                    CurInit.get()->getValueKind());
       break;
     }
 

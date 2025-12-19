@@ -12555,6 +12555,10 @@ static QualType DecodeTypeFromStr(const char *&Str, const ASTContext &Context,
       Type = Context.HLSLResourceTy;
       break;
     }
+    case 's': {
+      Type = Context.HLSLStringTy;
+      break;
+    }
     default:
       llvm_unreachable("Unexpected target builtin type");
     }

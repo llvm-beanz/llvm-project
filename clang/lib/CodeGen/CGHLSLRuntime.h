@@ -173,6 +173,7 @@ public:
   GENERATE_HLSL_INTRINSIC_FUNCTION(DdyCoarse, ddy_coarse)
   GENERATE_HLSL_INTRINSIC_FUNCTION(DdxFine, ddx_fine)
   GENERATE_HLSL_INTRINSIC_FUNCTION(DdyFine, ddy_fine)
+  GENERATE_HLSL_INTRINSIC_FUNCTION(StringToOffset, string_to_offset)
 
   //===----------------------------------------------------------------------===//
   // End of reserved area for HLSL intrinsic getters.

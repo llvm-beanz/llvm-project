@@ -29,6 +29,11 @@ void initializeDXILPrepareModulePass(PassRegistry &);
 /// Pass to convert modules into DXIL-compatable modules
 ModulePass *createDXILPrepareModulePass();
 
+/// Initializer for DXIL String Lowering Pass
+void initializeDXILStringLoweringModulePass(PassRegistry &);
+
+ModulePass *createDXILStringLoweringModulePass();
+
 /// Initializer for DXIL Intrinsic Expansion
 void initializeDXILIntrinsicExpansionLegacyPass(PassRegistry &);
 

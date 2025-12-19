@@ -331,6 +331,7 @@ private:
                                .Case("__float128", "LLd")
                                .Case("__fp16", "h")
                                .Case("__hlsl_resource_t", "Qr")
+                               .Case("__hlsl_string", "Qs")
                                .Case("__int128_t", "LLLi")
                                .Case("_Float16", "x")
                                .Case("__bf16", "y")

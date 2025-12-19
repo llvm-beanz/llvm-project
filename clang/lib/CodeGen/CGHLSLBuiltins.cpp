@@ -1003,6 +1003,13 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
                                    ArrayRef<Value *>{Op0}, nullptr,
                                    "hlsl.ddy.fine");
   }
+  case Builtin::BI__builtin_hlsl_string_to_offset: {
+    Value *String = EmitScalarExpr(E->getArg(0));
+    llvm::Type *RetTy = llvm::Type::getInt32Ty(getLLVMContext());
+    return Builder.CreateIntrinsic(
+        RetTy, CGM.getHLSLRuntime().getStringToOffsetIntrinsic(),
+        ArrayRef<Value *>{String});
+  }
   case Builtin::BI__builtin_get_spirv_spec_constant_bool:
   case Builtin::BI__builtin_get_spirv_spec_constant_short:
   case Builtin::BI__builtin_get_spirv_spec_constant_ushort:
