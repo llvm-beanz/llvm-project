@@ -1044,6 +1044,7 @@ void AggExprEmitter::VisitCastExpr(CastExpr *E) {
   case CK_FixedPointToBoolean:
   case CK_FixedPointToIntegral:
   case CK_IntegralToFixedPoint:
+  case CK_HLSLStringConversion:
     llvm_unreachable("cast kind invalid for aggregate types");
   }
 }
@@ -1605,6 +1606,7 @@ static bool castPreservesZero(const CastExpr *CE) {
   case CK_LValueToRValueBitCast:
   case CK_UncheckedDerivedToBase:
   case CK_HLSLArrayRValue:
+  case CK_HLSLStringConversion:
     return false;
   }
   llvm_unreachable("Unhandled clang::CastKind enum");

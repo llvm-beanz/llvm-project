@@ -4812,6 +4812,13 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
                .get();
     break;
 
+  case ICK_HLSL_String_Conversion:
+    From = ImpCastExprToType(From, ToType, CK_HLSLStringConversion, VK_PRValue,
+                             /*BasePath=*/nullptr, CCK)
+               .get();
+    FromType = From->getType();
+    break;
+
   case ICK_Function_To_Pointer:
     FromType = Context.getPointerType(FromType);
     From = ImpCastExprToType(From, FromType, CK_FunctionToPointerDecay,
@@ -5213,6 +5220,7 @@ Sema::PerformImplicitConversion(Expr *From, QualType ToType,
   case ICK_HLSL_Matrix_Truncation:
   case ICK_HLSL_Vector_Splat:
   case ICK_HLSL_Matrix_Splat:
+  case ICK_HLSL_String_Conversion:
     llvm_unreachable("Improper second standard conversion");
   }
 

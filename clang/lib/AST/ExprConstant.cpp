@@ -9037,6 +9037,12 @@ public:
     case CK_UserDefinedConversion:
       return StmtVisitorTy::Visit(E->getSubExpr());
 
+    case CK_HLSLStringConversion: {
+      APValue Val;
+      if (!Evaluate(Val, Info, E->getSubExpr()))
+        return false;
+      return DerivedSuccess(Val, E);
+    }
     case CK_HLSLArrayRValue: {
       const Expr *SubExpr = E->getSubExpr();
       if (!SubExpr->isGLValue()) {
@@ -18624,6 +18630,7 @@ bool IntExprEvaluator::VisitCastExpr(const CastExpr *E) {
   case CK_IntegralToFixedPoint:
   case CK_MatrixCast:
   case CK_HLSLAggregateSplatCast:
+  case CK_HLSLStringConversion:
     llvm_unreachable("invalid cast kind for integral value");
 
   case CK_BitCast:
@@ -19549,6 +19556,7 @@ bool ComplexExprEvaluator::VisitCastExpr(const CastExpr *E) {
   case CK_HLSLMatrixTruncation:
   case CK_HLSLElementwiseCast:
   case CK_HLSLAggregateSplatCast:
+  case CK_HLSLStringConversion:
     llvm_unreachable("invalid cast kind for complex value");
 
   case CK_LValueToRValue:

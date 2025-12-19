@@ -1001,6 +1001,7 @@ static bool rewriteToNumericBoxedExpression(const ObjCMessageExpr *Msg,
     case CK_NoOp:
     case CK_UserDefinedConversion:
     case CK_HLSLArrayRValue:
+    case CK_HLSLStringConversion:
       break;
 
     case CK_IntegralCast: {

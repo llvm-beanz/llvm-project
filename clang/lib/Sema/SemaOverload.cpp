@@ -166,6 +166,7 @@ ImplicitConversionRank clang::GetConversionRank(ImplicitConversionKind Kind) {
       ICR_Conversion,
       ICR_HLSL_Scalar_Widening,
       ICR_HLSL_Scalar_Widening,
+      ICR_Exact_Match,
   };
   static_assert(std::size(Rank) == (int)ICK_Num_Conversion_Kinds);
   return Rank[(int)Kind];
@@ -230,6 +231,7 @@ static const char *GetImplicitConversionName(ImplicitConversionKind Kind) {
       "Non-decaying array conversion",
       "HLSL vector splat",
       "HLSL matrix splat",
+      "HLSL string conversion",
   };
   static_assert(std::size(Name) == (int)ICK_Num_Conversion_Kinds);
   return Name[Kind];
@@ -2380,7 +2382,13 @@ static bool IsStandardConversion(Sema &S, Expr* From, QualType ToType,
   // do not decay and when handling HLSLOutArgExprs and
   // the From expression is an LValue.
   if (S.getLangOpts().HLSL && FromType->isConstantArrayType() &&
-      ToType->isConstantArrayType()) {
+      (ToType->isConstantArrayType() || ToType->isHLSLStringType())) {
+    if (ToType->isHLSLStringType()) {
+      // HLSL array to string conversion.
+      SCS.First = ICK_HLSL_String_Conversion;
+      SCS.setAllToTypes(ToType);
+      return true;
+    }
     // HLSL constant array parameters do not decay, so if the argument is a
     // constant array and the parameter is an ArrayParameterType we have special
     // handling here.
@@ -6330,6 +6338,7 @@ static bool CheckConvertedConstantConversions(Sema &S,
   case ICK_Array_To_Pointer:
   case ICK_Function_To_Pointer:
   case ICK_HLSL_Array_RValue:
+  case ICK_HLSL_String_Conversion:
     llvm_unreachable("found a first conversion kind in Second");
 
   case ICK_Function_Conversion:

@@ -12447,6 +12447,8 @@ static ImplicitConversionKind castKindToImplicitConversionKind(CastKind CK) {
     return ICK_Complex_Real;
   case CK_HLSLArrayRValue:
     return ICK_HLSL_Array_RValue;
+  case CK_HLSLStringConversion:
+    return ICK_HLSL_String_Conversion;
   }
 }
 

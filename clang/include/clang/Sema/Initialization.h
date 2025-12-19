@@ -947,7 +947,10 @@ public:
 
     /// Initialize an aggreagate with parenthesized list of values.
     /// This is a C++20 feature.
-    SK_ParenthesizedListInit
+    SK_ParenthesizedListInit,
+
+    /// Initialize a HLSL string from a string literal.
+    SK_HLSLStringConversion,
   };
 
   /// A single step in the initialization sequence.
@@ -1358,6 +1361,9 @@ public:
 
   /// Add a string init step.
   void AddStringInitStep(QualType T);
+
+  /// Add a HLSL string conversion step converting char array to HLSL string.
+  void AddHLSLStringConversionStep(QualType T);
 
   /// Add an Objective-C object conversion step, which is
   /// always a no-op.

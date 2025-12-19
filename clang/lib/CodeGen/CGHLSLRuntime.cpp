@@ -274,6 +274,11 @@ CGHLSLRuntime::convertHLSLSpecificType(const Type *T,
                                        const CGHLSLOffsetInfo &OffsetInfo) {
   assert(T->isHLSLSpecificType() && "Not an HLSL specific type!");
 
+  if (T->isHLSLStringType()) {
+    // HLSL string type is just a pointer to the string.
+    return CGM.Int8PtrTy;
+  }
+
   // Check if the target has a specific translation for this type first.
   if (llvm::Type *TargetTy =
           CGM.getTargetCodeGenInfo().getHLSLType(CGM, T, OffsetInfo))

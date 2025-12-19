@@ -3913,6 +3913,7 @@ void InitializationSequence::Step::Destroy() {
   case SK_OCLSamplerInit:
   case SK_OCLZeroOpaqueType:
   case SK_ParenthesizedListInit:
+  case SK_HLSLStringConversion:
     break;
 
   case SK_ConversionSequence:
@@ -4137,6 +4138,13 @@ void InitializationSequence::AddCAssignmentStep(QualType T) {
 void InitializationSequence::AddStringInitStep(QualType T) {
   Step S;
   S.Kind = SK_StringInit;
+  S.Type = T;
+  Steps.push_back(S);
+}
+
+void InitializationSequence::AddHLSLStringConversionStep(QualType T) {
+  Step S;
+  S.Kind = SK_HLSLStringConversion;
   S.Type = T;
   Steps.push_back(S);
 }
@@ -6842,6 +6850,16 @@ void InitializationSequence::InitializeFrom(Sema &S,
     return;
   }
 
+  // HLSL has special handling for string types, which can be initialized
+  // either from other string types or from string literals.
+  if (S.getLangOpts().HLSL && DestType->isHLSLStringType()) {
+    if (Initializer && isa<StringLiteral>(Initializer->IgnoreParens())) {
+      AddStringInitStep(Initializer->getType());
+      AddHLSLStringConversionStep(DestType);
+      return;
+    }
+  }
+
   assert(S.getLangOpts().CPlusPlus);
 
   //     - If the destination type is a (possibly cv-qualified) class type:
@@ -7947,7 +7965,8 @@ ExprResult InitializationSequence::Perform(Sema &S,
   case SK_ProduceObjCObject:
   case SK_StdInitializerList:
   case SK_OCLSamplerInit:
-  case SK_OCLZeroOpaqueType: {
+  case SK_OCLZeroOpaqueType:
+  case SK_HLSLStringConversion: {
     assert(Args.size() == 1 || IsHLSLVectorOrMatrixInit);
     CurInit = Args[0];
     if (!CurInit.get()) return ExprError();
@@ -8473,6 +8492,12 @@ ExprResult InitializationSequence::Perform(Sema &S,
                       S.Context.getAsArrayType(Ty), S, Entity,
                       S.getLangOpts().C23 &&
                           initializingConstexprVariable(Entity));
+      break;
+    }
+    case SK_HLSLStringConversion: {
+      CurInit = S.ImpCastExprToType(CurInit.get(), Step->Type,
+                          CK_HLSLStringConversion,
+                          CurInit.get()->getValueKind());
       break;
     }
 
@@ -9732,6 +9757,10 @@ void InitializationSequence::dump(raw_ostream &OS) const {
       break;
     case SK_ParenthesizedListInit:
       OS << "initialization from a parenthesized list of values";
+      break;
+
+    case SK_HLSLStringConversion:
+      OS << "HLSL string conversion";
       break;
     }
 

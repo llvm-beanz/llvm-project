@@ -2746,6 +2746,7 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
     return CGF.EmitDynamicCast(V, DCE);
   }
 
+  case CK_HLSLStringConversion:
   case CK_ArrayToPointerDecay:
     return CGF.getAsNaturalPointerTo(CGF.EmitArrayToPointerDecay(E),
                                      CE->getType()->getPointeeType());

@@ -1015,6 +1015,7 @@ public:
     case CK_HLSLMatrixTruncation:
     case CK_HLSLElementwiseCast:
     case CK_HLSLAggregateSplatCast:
+    case CK_HLSLStringConversion:
       return {};
     }
     llvm_unreachable("Invalid CastKind");

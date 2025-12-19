@@ -543,6 +543,7 @@ mlir::Value ComplexExprEmitter::emitCast(CastKind ck, Expr *op,
   case CK_HLSLArrayRValue:
   case CK_HLSLElementwiseCast:
   case CK_HLSLAggregateSplatCast:
+  case CK_HLSLStringConversion:
     llvm_unreachable("invalid cast kind for complex value");
 
   case CK_FloatingRealToComplex:

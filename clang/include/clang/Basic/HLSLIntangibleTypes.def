@@ -7,7 +7,7 @@
 //===--------------------------------------------------------------------------===//
 //
 // This file defines HLSL standard intangible types. These are implementation-
-// defined types such as handle types that have no defined object 
+// defined types such as handle types that have no defined object
 // representation or value representation and their size is unknown at compile
 // time.
 //
@@ -29,5 +29,6 @@
 //===----------------------------------------------------------------------===//
 
 HLSL_INTANGIBLE_TYPE(__hlsl_resource_t, HLSLResource, HLSLResourceTy)
+HLSL_INTANGIBLE_TYPE(string, HLSLString, HLSLStringTy)
 
 #undef HLSL_INTANGIBLE_TYPE
