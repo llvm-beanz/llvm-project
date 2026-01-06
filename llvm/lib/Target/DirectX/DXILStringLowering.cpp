@@ -32,15 +32,12 @@ class DXILStringLoweringModule : public ModulePass {
 
   StringTableBuilder StrTabBuilder;
 
-  void addString(GlobalVariable *GV) {
-    ConstantDataArray *CDA = cast<ConstantDataArray>(GV->getInitializer());
+  void addString(ConstantDataArray *CDA) {
     StringRef Str = CDA->getAsString();
     StrTabBuilder.add(Str);
   }
 
-  Value *convertStringToOffset(GlobalVariable *GV, IRBuilder<> &Builder) {
-    ConstantDataArray *CDA = cast<ConstantDataArray>(GV->getInitializer());
-    StringRef Str = CDA->getAsString();
+  Value *convertStringToOffset(StringRef Str, IRBuilder<> &Builder) {
     size_t Offset = StrTabBuilder.getOffset(Str);
     Constant *CastPtr = ConstantInt::get(Builder.getInt32Ty(), Offset);
     return CastPtr;
@@ -48,17 +45,21 @@ class DXILStringLoweringModule : public ModulePass {
 
 public:
   bool runOnModule(Module &M) override {
-    SmallVector<IntrinsicInst *> WorkList;
+    SmallVector<std::pair<IntrinsicInst *,StringRef>> WorkList;
     for (Function &F : M)
       for (BasicBlock &BB : make_early_inc_range(F))
         for (Instruction &I : make_early_inc_range(BB))
           if (auto *II = dyn_cast<IntrinsicInst>(&I))
             if (II->getIntrinsicID() == Intrinsic::dx_string_to_offset) {
-              if (!isa<GlobalVariable>(II->getArgOperand(0)))
+              Value *StrOperand = II->getArgOperand(0);
+              if (auto *GV = dyn_cast<GlobalVariable>(StrOperand))
+                StrOperand = GV->getInitializer();
+              ConstantDataArray *CVA = dyn_cast<ConstantDataArray>(StrOperand);
+              if (!CVA)
                 report_fatal_error(
-                    "dx.string.to.offset argument must be a global string");
-              addString(cast<GlobalVariable>(II->getArgOperand(0)));
-              WorkList.push_back(II);
+                    "dx.string.to.offset argument must be a constant string");
+              addString(CVA);
+              WorkList.push_back(std::make_pair(II, CVA->getAsString()));
             }
     if (WorkList.empty())
       return false;
@@ -74,12 +75,11 @@ public:
                                         StrTabContent, "dx.strtab");
     GV->setSection("STAB");
     GV->setAlignment(Align(4));
-    for (IntrinsicInst *II : WorkList) {
-      IRBuilder<> Builder(II);
-      Value *OffsetPtr = convertStringToOffset(
-          cast<GlobalVariable>(II->getArgOperand(0)), Builder);
-      II->replaceAllUsesWith(OffsetPtr);
-      II->eraseFromParent();
+    for (auto Item : WorkList) {
+      IRBuilder<> Builder(Item.first);
+      Value *OffsetPtr = convertStringToOffset(Item.second, Builder);
+      Item.first->replaceAllUsesWith(OffsetPtr);
+      Item.first->eraseFromParent();
     }
     return true;
   }
