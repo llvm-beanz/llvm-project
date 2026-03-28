@@ -268,7 +268,7 @@ def prompt_linker_choice(found, default_ld):
     # If only one linker, do not prompt and do not set any CMake options
     if len(options) == 1:
         print(f"\nOnly one linker detected ({options[0]}), not setting LLVM_USE_LINKER.")
-        return options[0]  # Return the only linker so main() can check for ld.bfd warning
+        return None
 
     print("\nDetected linkers:")
     is_linux = sys.platform.startswith("linux")
@@ -475,6 +475,10 @@ def main():
     # Prompt for linker
 
     linker_choice = prompt_linker_choice(found_linkers, default_ld)
+    # If the user chose the system default linker (or pressed enter for default),
+    # we should not set LLVM_USE_LINKER explicitly.
+    if linker_choice and default_ld and linker_choice == default_ld:
+        linker_choice = None
 
     # If ld.bfd is selected or is the only linker, and build type is not Release, warn and require explicit confirmation
     only_one_linker = len(found_linkers) <= 1
