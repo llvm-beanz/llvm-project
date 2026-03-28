@@ -1,0 +1,11 @@
+{
+  "Targets": { "Values": ["NATIVE", "X86", "ARM", "AArch64"],
+               "Option": "LLVM_TARGETS_TO_BUILD",
+               "Default": "NATIVE",
+               "Description": "The list of targets to build. Use 'NATIVE' to build only the host target.",
+               "MultipleValues": true },
+  "BuildType": { "Values": ["Debug", "Release", "RelWithDebInfo", "MinSizeRel"],
+                 "Option": "CMAKE_BUILD_TYPE",
+                 "Default": "Release",
+                 "Description": "The build type to build." }
+}

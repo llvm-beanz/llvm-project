@@ -1,0 +1,26 @@
+{
+  "CMake": {
+    "required": true,
+    "file": "cmake",
+    "apt": "cmake",
+    "brew": "cmake",
+    "pkg": "cmake",
+    "url": "https://cmake.org/download/"
+  },
+  "Ninja": {
+    "required": false,
+    "file": "ninja",
+    "apt": "ninja-build",
+    "brew": "ninja",
+    "pkg": "ninja",
+    "url": "https://github.com/ninja-build/ninja/releases"
+  },
+  "LLD": {
+    "message": "LLD is strongly encouraged on ELF platforms (Linux & BSD)",
+    "file": "lld",
+    "apt": "lld",
+    "brew": "lld",
+    "pkg": "lld",
+    "url": "https://github.com/llvm/llvm-project/releases"
+  }
+}
