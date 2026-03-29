@@ -36,6 +36,7 @@
     },
     "Ninja": {
       "required": false,
+      "recommend": true,
       "file": "ninja",
       "apt": "ninja-build",
       "brew": "ninja",
@@ -43,8 +44,32 @@
       "url": "https://github.com/ninja-build/ninja/releases",
       "category": "build tool"
     },
+    "Make": {
+      "required": false,
+      "file": "make",
+      "apt": "make",
+      "brew": "make",
+      "pkg": "make",
+      "url": "https://www.gnu.org/software/make/",
+      "category": "build tool"
+    },
+    "Xcode": {
+      "required": false,
+      "hide": "sys.platform != 'darwin'",
+      "file": "xcodebuild",
+      "url": "https://developer.apple.com/xcode/",
+      "category": "build tool"
+    },
+    "Visual Studio": {
+      "required": false,
+      "hide": "sys.platform != 'win32'",
+      "file": "devenv",
+      "url": "https://visualstudio.microsoft.com/",
+      "category": "build tool"
+    },
     "LLD": {
-      "required": "sys.platform == 'darwin'",
+      "hide": "sys.platform == 'darwin'",
+      "recommend": "sys.platform != 'darwin'",
       "message": "LLD is strongly encouraged on ELF platforms (Linux & BSD)",
       "file": "lld",
       "apt": "lld",

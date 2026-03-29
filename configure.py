@@ -352,7 +352,21 @@ def configure_guided_env(deps):
 
     # Group entries by category. Each dep entry may include 'category'.
     categories = {}
+    def eval_expr(val):
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            try:
+                return bool(eval(val, {"__builtins__": None}, {"sys": sys, "os": os, "shutil": shutil, "platform": __import__("platform")}))
+            except Exception as e:
+                print(f"Warning: failed to evaluate expression '{val}': {e}; treating as False.")
+                return False
+        return False
+
     for dep_name, meta in deps.items():
+        # If a dependency is marked hidden via an expression, skip it entirely
+        if eval_expr(meta.get("hide")):
+            continue
         cat = meta.get("category") or "misc"
         categories.setdefault(cat, []).append((dep_name, meta))
 
@@ -376,25 +390,24 @@ def configure_guided_env(deps):
         # No tool installed for this category — ask user which one to install
         print("  No tool from this category is installed.")
         # Present options (only one will be chosen)
-        def eval_required_field(val):
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                try:
-                    return bool(eval(val, {"__builtins__": None}, {"sys": sys, "os": os, "shutil": shutil, "platform": __import__("platform")}))
-                except Exception as e:
-                    print(f"Warning: failed to evaluate required expression '{val}': {e}; treating as not required.")
-                    return False
-            return False
-
         for i, (dep_name, meta) in enumerate(items, start=1):
-            req_flag = eval_required_field(meta.get("required"))
+            req_flag = eval_expr(meta.get("required"))
+            rec_flag = eval_expr(meta.get("recommend"))
             req = " [required]" if req_flag else ""
+            rec = " [recommended]" if rec_flag else ""
             pkg_hint = meta.get(pm_name) if pm_name else meta.get("url") or "no package name"
-            print(f"    {i}) {dep_name}: {pkg_hint}{req}")
+            print(f"    {i}) {dep_name}: {pkg_hint}{req}{rec}")
+
+        # If there are recommended tools, auto-select them (they are suggestions
+        # the script will recommend installing when not present).
+        recommended_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if eval_expr(m.get("recommend"))]
+        if recommended_items:
+            for idx, dep_name, meta in recommended_items:
+                print(f"  Recommended tool for this category: {dep_name} — selecting automatically.")
+                selected_to_install.append((dep_name, meta))
 
         # If there are required tools, prefer prompting only for them
-        required_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if eval_required_field(m.get("required"))]
+        required_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if eval_expr(m.get("required"))]
         if required_items:
             if len(required_items) == 1:
                 idx, dep_name, meta = required_items[0]
