@@ -2,14 +2,64 @@
   "CMakeOptions": {
     "Targets": {
       "Values": [
-        "NATIVE",
-        "X86",
+        "Native",
+        "AArch64",
+        "AMDGPU",
         "ARM",
-        "AArch64"
+        "AVR",
+        "BPF",
+        "Hexagon",
+        "Lanai",
+        "LoongArch",
+        "Mips",
+        "MSP430",
+        "NVPTX",
+        "PowerPC",
+        "RISCV",
+        "Sparc",
+        "SPIRV",
+        "SystemZ",
+        "VE",
+        "WebAssembly",
+        "X86",
+        "XCore"
       ],
       "Option": "LLVM_TARGETS_TO_BUILD",
-      "Default": "NATIVE",
-      "Description": "The list of targets to build. Use 'NATIVE' to build only the host target.",
+      "Default": "Native",
+      "Description": "The list of targets to build. Use 'Native' to build only the host target.",
+      "MultipleValues": true
+    },
+    "Projects": {
+      "Values": [
+        "all",
+        "bolt",
+        "clang",
+        "clang-tools-extra",
+        "cross-project-tests",
+        "lldb",
+        "mlir",
+        "polly",
+        "lld"
+      ],
+      "Option": "LLVM_ENABLE_PROJECTS",
+      "Default": "",
+      "Description": "The list of projects to build. Use 'all' to build all projects. Defaults to building only the LLVM core libraries.",
+      "MultipleValues": true
+    },
+    "Runtimes": {
+      "Values": [
+        "",
+        "all",
+        "compiler-rt",
+        "libcxx",
+        "libcxxabi",
+        "libunwind",
+        "libclc",
+        "openmp"
+      ],
+      "Option": "LLVM_ENABLE_RUNTIMES",
+      "Default": "",
+      "Description": "The list of runtimes to build. Defaults to building no runtimes.",
       "MultipleValues": true
     },
     "BuildType": {

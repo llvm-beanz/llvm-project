@@ -523,7 +523,9 @@ def main():
         if "Values" not in info or "Option" not in info:
             continue
         option, choice = prompt_choice(key, info)
-        defines.append(f"-D{option}={choice}")
+        # If the chosen value is an empty string, do not set the option.
+        if choice is not None and choice != "":
+            defines.append(f"-D{option}={choice}")
         # Track build type for later warning
         if option == "CMAKE_BUILD_TYPE":
             build_type = choice
