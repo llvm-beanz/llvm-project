@@ -326,6 +326,18 @@ def detect_package_manager():
     return None, None
 
 
+def detect_compiler_cache():
+    """Detect a compiler cache launcher on PATH (prefer sccache over ccache).
+
+    Returns the executable name to use for CMake's `*_COMPILER_LAUNCHER` or
+    `None` if none found.
+    """
+    for tool in ("sccache", "ccache"):
+        if shutil.which(tool):
+            return tool
+    return None
+
+
 # Guided experience entry point (placeholder)
 def configure_guided_env():
     deps_path = os.path.join(os.path.dirname(__file__), "Dependencies.json")
@@ -340,82 +352,113 @@ def configure_guided_env():
         print(f"\nFailed to read Dependencies.json: {e}")
         return
 
-    name, path = detect_package_manager()
-    if name:
-        print(f"\nDetected package manager: {name} ({path})")
+    pm_name, pm_path = detect_package_manager()
+    if pm_name:
+        print(f"\nDetected package manager: {pm_name} ({pm_path})")
     else:
         print("\nNo package manager found")
 
-    required = []
-    recommended = []
-    install_cmd = "Manual installation required"
-    if name:
-        if name == "brew":
-            install_cmd = f"{name} install"
-        else:
-            install_cmd = f"sudo {name} install"
-
+    # Group entries by category. Each dep entry may include 'category'.
+    categories = {}
     for dep_name, meta in deps.items():
-        exe = meta.get("file")
-        installed = shutil.which(exe) is not None if exe else False
+        cat = meta.get("category") or "misc"
+        categories.setdefault(cat, []).append((dep_name, meta))
+
+    selected_to_install = []
+
+    for cat, items in sorted(categories.items()):
+        print(f"\nCategory: {cat}")
+        # Determine if any tool from this category is already installed
+        installed = []
+        for dep_name, meta in items:
+            exe = meta.get("file")
+            if exe and shutil.which(exe):
+                installed.append((dep_name, meta))
+
         if installed:
-            print(f"{dep_name}: installed ({exe})")
+            for dep_name, meta in installed:
+                print(f"  {dep_name}: installed ({meta.get('file')})")
+            # since a tool of this category is present, do not recommend others
             continue
 
-        pkgname = None
-        if name:
-            pkgname = meta.get(name)
+        # No tool installed for this category — ask user which one to install
+        print("  No tool from this category is installed.")
+        # Present options (only one will be chosen)
+        for i, (dep_name, meta) in enumerate(items, start=1):
+            req = " [required]" if meta.get("required") else ""
+            pkg_hint = meta.get(pm_name) if pm_name else meta.get("url") or "no package name"
+            print(f"    {i}) {dep_name}: {pkg_hint}{req}")
 
-        entry = {"name": dep_name, "pkg": pkgname, "url": meta.get("url"), "message": meta.get("message")}
-        if bool(meta.get("required", False)):
-            required.append(entry)
+        # If there are required tools, prefer prompting only for them
+        required_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if m.get("required")]
+        if required_items:
+            if len(required_items) == 1:
+                idx, dep_name, meta = required_items[0]
+                print(f"  Required tool for this category: {dep_name} — selecting automatically.")
+                selected_to_install.append((dep_name, meta))
+                continue
+            else:
+                print("  Multiple required options available — please choose one:")
+                choices = [str(i) for i, _, _ in required_items]
+                resp = input(f"Choose number ({'/'.join(choices)}) or leave blank to skip: ").strip()
+                if resp.isdigit() and resp in choices:
+                    sel = int(resp)
+                    _, dep_name, meta = next(t for t in required_items if t[0] == sel)
+                    selected_to_install.append((dep_name, meta))
+                    continue
+                print("  No selection made for required items — continuing.")
+
+        # Otherwise prompt user to select one tool (or skip)
+        resp = input(f"Choose tool to install for category '{cat}' by number, or leave blank to skip: ").strip()
+        if resp.isdigit():
+            idx = int(resp)
+            if 1 <= idx <= len(items):
+                dep_name, meta = items[idx - 1]
+                selected_to_install.append((dep_name, meta))
+
+    # Aggregate package names for the chosen installs
+    if not selected_to_install:
+        print("\nNo packages selected for installation.")
+        return
+
+    pkgnames = [m.get(pm_name) for _, m in selected_to_install if pm_name and m.get(pm_name)]
+    no_pkg_entries = [(d, m) for d, m in selected_to_install if not (pm_name and m.get(pm_name))]
+
+    if pkgnames:
+        if pm_name == "brew":
+            cmd = ["brew", "install"] + pkgnames
+        elif pm_name == "apt":
+            cmd = ["sudo", "apt", "install", "-y"] + pkgnames
+        elif pm_name == "pkg":
+            cmd = ["sudo", "pkg", "install", "-y"] + pkgnames
         else:
-            recommended.append(entry)
+            cmd = [pm_name, "install"] + pkgnames
 
-    def process_group(title, items):
-        print(f"\n{title}")
-        if not items:
-            print("  (none)")
-            return
-
-        if name:
-            pkgnames = [i["pkg"] for i in items if i.get("pkg")]
-            if pkgnames:
-                print(f"  Install with: {install_cmd} {' '.join(pkgnames)}")
-                do_install = input("Install these packages now? [y/N]: ").strip().lower()
-                if do_install in ("y", "yes"):
-                    if name == "Homebrew":
-                        cmd = ["brew", "install"] + pkgnames
-                    elif name == "apt":
-                        cmd = ["sudo", "apt", "install", "-y"] + pkgnames
-                    elif name == "pkg":
-                        cmd = ["sudo", "pkg", "install", "-y"] + pkgnames
-                    else:
-                        # Generic fallback
-                        cmd = [name, "install"] + pkgnames
-                    print(f"Running: {' '.join(cmd)}")
-                    try:
-                        rc = subprocess.call(cmd)
-                        if rc == 0:
-                            print("Installation completed successfully.")
-                        else:
-                            print(f"Installation finished with exit code {rc}.")
-                    except FileNotFoundError:
-                        print("Package manager command not found; cannot install.")
-                    except Exception as e:
-                        print(f"Installation failed: {e}")
-
-            for i in items:
-                if not i.get("pkg"):
-                    print(f"  - {i['name']}: {i.get('url') or 'no package name available'}")
+        print(f"\nSelected packages to install with {pm_name}: {' '.join(pkgnames)}")
+        do_install = input("Install these packages now? [y/N]: ").strip().lower()
+        if do_install in ("y", "yes"):
+            # If using sudo, prompt for credentials first
+            if cmd[0] == "sudo":
+                try:
+                    subprocess.check_call(["sudo", "-v"], stdin=sys.stdin)
+                except subprocess.CalledProcessError:
+                    print("sudo authentication failed; aborting installation.")
+                    return
+            try:
+                rc = subprocess.call(cmd, stdin=sys.stdin)
+                if rc == 0:
+                    print("Installation completed successfully.")
                 else:
-                    print(f"  - {i['name']}: {i['pkg']}{' - ' + i['message'] if i.get('message') else ''}")
-        else:
-            for i in items:
-                print(f"  - {i['name']}: {i.get('url') or i.get('pkg') or 'manual installation required'}")
+                    print(f"Installation finished with exit code {rc}.")
+            except FileNotFoundError:
+                print("Package manager command not found; cannot install.")
+            except Exception as e:
+                print(f"Installation failed: {e}")
 
-    process_group("Required packages to install:", required)
-    process_group("Recommended packages to install:", recommended)
+    if no_pkg_entries:
+        print("\nThe following selected tools did not have a package name for this package manager:")
+        for d, m in no_pkg_entries:
+            print(f"  - {d}: {m.get('url') or 'manual installation required'}")
 
 
 def main():
@@ -492,6 +535,16 @@ def main():
     # If there is only one linker don't set the linker option.
     if only_one_linker:
       linker_choice = None
+
+    # Detect compiler cache launcher (sccache/ccache) and set CMake launcher options
+    cache_tool = detect_compiler_cache()
+    if cache_tool:
+        print(f"\nDetected compiler cache launcher: {cache_tool}")
+        # Only add if not already present in defines
+        if not any(d.startswith("-DCMAKE_C_COMPILER_LAUNCHER=") for d in defines):
+            defines.append(f"-DCMAKE_C_COMPILER_LAUNCHER={cache_tool}")
+        if not any(d.startswith("-DCMAKE_CXX_COMPILER_LAUNCHER=") for d in defines):
+            defines.append(f"-DCMAKE_CXX_COMPILER_LAUNCHER={cache_tool}")
 
     # Quote each argument safely
     parts = ["cmake", "-S", shlex.quote(src_dir), "-B", shlex.quote(build_dir)]
