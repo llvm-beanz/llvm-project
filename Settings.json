@@ -48,7 +48,6 @@
     },
     "Runtimes": {
       "Values": [
-        "",
         "all",
         "compiler-rt",
         "libcxx",
