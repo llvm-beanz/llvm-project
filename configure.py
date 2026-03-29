@@ -384,7 +384,20 @@ def configure_guided_env(deps):
         if installed:
             for dep_name, meta in installed:
                 print(f"  {dep_name}: installed ({meta.get('file')})")
-            # since a tool of this category is present, do not recommend others
+            # Even if a tool of this category is present, check for recommended
+            # tools that are not installed and offer to install them.
+            recommended_missing = []
+            for dep_name, meta in items:
+                if eval_expr(meta.get("recommend")):
+                    exe = meta.get("file")
+                    if not (exe and shutil.which(exe)):
+                        recommended_missing.append((dep_name, meta))
+            if recommended_missing:
+                for dep_name, meta in recommended_missing:
+                    pkg_hint = meta.get(pm_name) if pm_name else meta.get("url") or "no package name"
+                    resp = input(f"Recommended tool '{dep_name}' is not installed ({pkg_hint}). Install now? [y/N]: ").strip().lower()
+                    if resp in ("y", "yes"):
+                        selected_to_install.append((dep_name, meta))
             continue
 
         # No tool installed for this category — ask user which one to install
@@ -397,14 +410,6 @@ def configure_guided_env(deps):
             rec = " [recommended]" if rec_flag else ""
             pkg_hint = meta.get(pm_name) if pm_name else meta.get("url") or "no package name"
             print(f"    {i}) {dep_name}: {pkg_hint}{req}{rec}")
-
-        # If there are recommended tools, auto-select them (they are suggestions
-        # the script will recommend installing when not present).
-        recommended_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if eval_expr(m.get("recommend"))]
-        if recommended_items:
-            for idx, dep_name, meta in recommended_items:
-                print(f"  Recommended tool for this category: {dep_name} — selecting automatically.")
-                selected_to_install.append((dep_name, meta))
 
         # If there are required tools, prefer prompting only for them
         required_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if eval_expr(m.get("required"))]
