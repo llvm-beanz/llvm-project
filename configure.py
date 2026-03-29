@@ -339,17 +339,9 @@ def detect_compiler_cache():
 
 
 # Guided experience entry point (placeholder)
-def configure_guided_env():
-    deps_path = os.path.join(os.path.dirname(__file__), "Dependencies.json")
-    if not os.path.exists(deps_path):
-        print("\nNo dependency manifest found (Dependencies.json).")
-        return
-
-    try:
-        with open(deps_path, "r", encoding="utf-8") as f:
-            deps = json.load(f)
-    except Exception as e:
-        print(f"\nFailed to read Dependencies.json: {e}")
+def configure_guided_env(deps):
+    if not deps:
+        print("\nNo dependency manifest found in settings.")
         return
 
     pm_name, pm_path = detect_package_manager()
@@ -384,13 +376,25 @@ def configure_guided_env():
         # No tool installed for this category — ask user which one to install
         print("  No tool from this category is installed.")
         # Present options (only one will be chosen)
+        def eval_required_field(val):
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                try:
+                    return bool(eval(val, {"__builtins__": None}, {"sys": sys, "os": os, "shutil": shutil, "platform": __import__("platform")}))
+                except Exception as e:
+                    print(f"Warning: failed to evaluate required expression '{val}': {e}; treating as not required.")
+                    return False
+            return False
+
         for i, (dep_name, meta) in enumerate(items, start=1):
-            req = " [required]" if meta.get("required") else ""
+            req_flag = eval_required_field(meta.get("required"))
+            req = " [required]" if req_flag else ""
             pkg_hint = meta.get(pm_name) if pm_name else meta.get("url") or "no package name"
             print(f"    {i}) {dep_name}: {pkg_hint}{req}")
 
         # If there are required tools, prefer prompting only for them
-        required_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if m.get("required")]
+        required_items = [(i, d, m) for i, (d, m) in enumerate(items, start=1) if eval_required_field(m.get("required"))]
         if required_items:
             if len(required_items) == 1:
                 idx, dep_name, meta = required_items[0]
@@ -465,9 +469,6 @@ def main():
     here = os.path.dirname(__file__)
     default_path = os.path.join(here, "Settings.json")
 
-    resp = input("Do you want a guided experience configuring the recommended development environment? [y/N]: ").strip().lower()
-    if resp in ("y", "yes"):
-        configure_guided_env()
     parser = argparse.ArgumentParser(description="Generate a cmake command from a JSON settings file")
     parser.add_argument("-s", "--settings", help="Path to settings JSON file", default=None)
     args = parser.parse_args()
@@ -490,11 +491,15 @@ def main():
         return
 
     data = read_settings(settings_path)
+
+    resp = input("Do you want a guided experience configuring the recommended development environment? [y/N]: ").strip().lower()
+    if resp in ("y", "yes"):
+        configure_guided_env(data.get("Dependencies", {}))
     defines = []
 
 
     build_type = None
-    for key, info in data.items():
+    for key, info in data.get("CMakeOptions", {}).items():
         if not isinstance(info, dict):
             continue
         if "Values" not in info or "Option" not in info:
