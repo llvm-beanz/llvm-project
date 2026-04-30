@@ -81,3 +81,68 @@ The rubber duck review caught two important integration points I had initially m
 - `DirectXTargetTransformInfo.cpp`: needed for correct scalarization (index arg stays scalar)
 - `DXILShaderFlags.cpp`: needed to set wave ops flag
 Both were added to the implementation.
+
+---
+
+# Agent Thoughts: Expanding QuadReadLaneAt Test Coverage
+
+## Issue
+The initial QuadReadLaneAt implementation lacked tests for: boolean types, 16-bit
+types, 64-bit types, and user-defined structures. The offload-test-suite had zero
+QuadReadLaneAt tests.
+
+## Phase 1: Adding Bool Support
+
+### Problem
+The initial implementation explicitly rejected booleans via `CheckNotBoolScalarOrVector`
+in `SemaHLSL.cpp`, and `HLSLIntrinsics.td` used `AllNumericTypes` (excluding bool).
+However, DXC accepts bool types for `QuadReadLaneAt`.
+
+### Changes Made
+1. **`HLSLIntrinsics.td`**: Changed `VaryingTypes = AllNumericTypes` → `AllTypesWithBool`
+2. **`SemaHLSL.cpp`**: Removed `CheckNotBoolScalarOrVector` call from QuadReadLaneAt
+3. **`QuadReadLaneAt-errors.hlsl`**: Removed bool error test cases
+4. **`DXIL.td`**: Added `Int1Ty` to QuadReadLaneAt overloads (following WaveReadLaneAt)
+5. **`DirectX/QuadReadLaneAt.ll`**: Added i1 scalar test
+6. **`SPIRV/hlsl-intrinsics/QuadReadLaneAt.ll`**: Added bool test with `OpTypeBool`
+7. **`clang/test/CodeGenHLSL/builtins/QuadReadLaneAt.hlsl`**: Added bool codegen test
+
+### Bool FileCheck Note
+For bool types, Clang generates a named SSA value `%loadedv` (from `icmp ne i32 %0, 0`)
+instead of a numeric value like `%0`. FileCheck's `%[[#]]` pattern only matches numeric
+SSA values, so `{{.*}}` must be used for bool patterns in codegen tests.
+
+## Phase 2: Offload Test Suite Coverage
+
+Created 7 new test files in `offload-test-suite/test/WaveOps/`:
+
+### Test Design
+All tests use `numthreads(2,2,1)` with `DispatchSize: [1,1,1]` creating one quad of
+4 threads. Thread `(x,y,0)` is at quad lane index `y*2+x`. Most tests read from quad
+lane 2 (thread at (0,1,0)) whose input data is `{9, 10, 11, 12}`, so all threads
+receive `{9, 10, 11, 12}` — a non-trivial constant lane index validates cross-lane reads.
+
+### Tests Created
+- **QuadReadLaneAt.32.test**: int/uint/float x scalar/vec2/vec3/vec4 from lane 2
+- **QuadReadLaneAt.fp16.test**: half x scalar/vec2/vec3/vec4 (`REQUIRES: Half`)
+- **QuadReadLaneAt.fp64.test**: double x scalar/vec2/vec3/vec4 (`REQUIRES: Double`)
+- **QuadReadLaneAt.int16.test**: int16/uint16 x scalar/vec2/vec3/vec4 (`REQUIRES: Half, Int16`)
+- **QuadReadLaneAt.int64.test**: int64/uint64 x scalar/vec2/vec3/vec4 (`REQUIRES: Int64`)
+- **QuadReadLaneAt.Bool.test**: bool4 with constant lane 2 (passes with both DXC and Clang)
+- **QuadReadLaneAt.udt.test**: struct member access with dynamic own-lane index
+
+### Key Discovery: Bool Works with Clang
+The Bool test initially had `# XFAIL: Clang` (following WaveReadLaneAt.Bool.test
+pattern for bug #140824). However, QuadReadLaneAt.Bool.test passes with Clang
+(XPASS), so the annotation was removed. The bool4 SPIRV path for QuadReadLaneAt
+works correctly unlike WaveReadLaneAt.Bool.
+
+### Dynamic Index Coverage
+The `udt.test` uses `QuadReadLaneAt(v.member, index)` where `index = dtid.y * 2 + dtid.x`
+(a dynamic value), validating that dynamic lane indices work. Each thread reads from
+its own lane so output equals input.
+
+### Verified Results
+All 7 tests pass with both:
+- `check-hlsl-vk` (DXC -> DXIL -> DirectX 12)
+- `check-hlsl-clang-vk` (Clang -> SPIRV -> Vulkan)
