@@ -1512,6 +1512,16 @@ Value *CodeGenFunction::EmitHLSLBuiltinExpr(unsigned BuiltinID,
                                &CGM.getModule(), ID, {OpExpr->getType()}),
                            ArrayRef{OpExpr}, "hlsl.quad.read.across.y");
   }
+  case Builtin::BI__builtin_hlsl_quad_read_lane_at: {
+    Value *OpExpr = EmitScalarExpr(E->getArg(0));
+    Value *OpIndex = EmitScalarExpr(E->getArg(1));
+    return EmitRuntimeCall(
+        Intrinsic::getOrInsertDeclaration(
+            &CGM.getModule(),
+            CGM.getHLSLRuntime().getQuadReadLaneAtIntrinsic(),
+            {OpExpr->getType()}),
+        ArrayRef{OpExpr, OpIndex}, "hlsl.quad.read.lane.at");
+  }
   case Builtin::BI__builtin_hlsl_elementwise_sign: {
     auto *Arg0 = E->getArg(0);
     Value *Op0 = EmitScalarExpr(Arg0);
