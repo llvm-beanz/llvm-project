@@ -5,11 +5,22 @@
 
 ; CHECK: OpCapability GroupNonUniformQuad
 
+; CHECK-DAG:   %[[#bool:]] = OpTypeBool
 ; CHECK-DAG:   %[[#f16:]] = OpTypeFloat 16
 ; CHECK-DAG:   %[[#f32:]] = OpTypeFloat 32
 ; CHECK-DAG:   %[[#uint:]] = OpTypeInt 32 0
 ; CHECK-DAG:   %[[#v4_float:]] = OpTypeVector %[[#f32]] 4
 ; CHECK-DAG:   %[[#scope:]] = OpConstant %[[#uint]] 3
+
+; CHECK-LABEL: Begin function test_bool
+; CHECK:   %[[#bexpr:]] = OpFunctionParameter %[[#bool]]
+; CHECK:   %[[#idx0:]] = OpFunctionParameter %[[#uint]]
+define i1 @test_bool(i1 %bexpr, i32 %idx) {
+entry:
+; CHECK:   %[[#bret:]] = OpGroupNonUniformQuadBroadcast %[[#bool]] %[[#scope]] %[[#bexpr]] %[[#idx0]]
+  %0 = call i1 @llvm.spv.quad.read.lane.at.i1(i1 %bexpr, i32 %idx)
+  ret i1 %0
+}
 
 ; CHECK-LABEL: Begin function test_float
 ; CHECK:   %[[#fexpr:]] = OpFunctionParameter %[[#f32]]
@@ -51,6 +62,7 @@ entry:
   ret <4 x float> %0
 }
 
+declare i1 @llvm.spv.quad.read.lane.at.i1(i1, i32)
 declare float @llvm.spv.quad.read.lane.at.f32(float, i32)
 declare i32 @llvm.spv.quad.read.lane.at.i32(i32, i32)
 declare half @llvm.spv.quad.read.lane.at.f16(half, i32)

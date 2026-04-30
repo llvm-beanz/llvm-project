@@ -4478,10 +4478,8 @@ bool SemaHLSL::CheckBuiltinFunctionCall(unsigned BuiltinID, CallExpr *TheCall) {
       return true;
     }
 
-    // Ensure input expr type is a non-bool scalar/vector
+    // Ensure input expr type is a scalar/vector
     if (CheckAnyScalarOrVector(&SemaRef, TheCall, 0))
-      return true;
-    if (CheckNotBoolScalarOrVector(&SemaRef, TheCall, 0))
       return true;
 
     ExprResult Expr = TheCall->getArg(0);

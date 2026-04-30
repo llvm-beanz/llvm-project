@@ -32,16 +32,6 @@ float3 test_index_S_type_check(float3 p0, S idx) {
   // expected-error@-1 {{passing 'S' to parameter of incompatible type 'unsigned int'}}
 }
 
-bool test_expr_bool_type_check(bool p0, uint idx) {
-  return __builtin_hlsl_quad_read_lane_at(p0, idx);
-  // expected-error@-1 {{invalid operand of type 'bool'}}
-}
-
-bool2 test_expr_bool_vec_type_check(bool2 p0, uint idx) {
-  return __builtin_hlsl_quad_read_lane_at(p0, idx);
-  // expected-error@-1 {{invalid operand of type 'bool2' (aka 'vector<bool, 2>')}}
-}
-
 S test_expr_struct_type_check(S p0, int idx) {
   return __builtin_hlsl_quad_read_lane_at(p0, idx);
   // expected-error@-1 {{invalid operand of type 'S' where a scalar or vector is required}}

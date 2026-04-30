@@ -2,6 +2,13 @@
 
 ; Test that for scalar values, QuadReadLaneAt maps down to the DirectX op
 
+define noundef i1 @quad_read_lane_at_i1(i1 noundef %expr, i32 noundef %idx) {
+entry:
+; CHECK: call i1 @dx.op.quadReadLaneAt.i1(i32 122, i1 %expr, i32 %idx)
+  %ret = call i1 @llvm.dx.quad.read.lane.at.i1(i1 %expr, i32 %idx)
+  ret i1 %ret
+}
+
 define noundef half @quad_read_lane_at_half(half noundef %expr, i32 noundef %idx) {
 entry:
 ; CHECK: call half @dx.op.quadReadLaneAt.f16(i32 122, half %expr, i32 %idx)
@@ -44,6 +51,7 @@ entry:
   ret i64 %ret
 }
 
+declare i1 @llvm.dx.quad.read.lane.at.i1(i1, i32)
 declare half @llvm.dx.quad.read.lane.at.f16(half, i32)
 declare float @llvm.dx.quad.read.lane.at.f32(float, i32)
 declare double @llvm.dx.quad.read.lane.at.f64(double, i32)

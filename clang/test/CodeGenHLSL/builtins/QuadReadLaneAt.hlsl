@@ -167,3 +167,7 @@ uint16_t3 test_uint16_t3(uint16_t3 expr, uint idx) { return QuadReadLaneAt(expr,
 // CHECK-NATIVE_HALF: ret <4 x i16> %[[RET]]
 uint16_t4 test_uint16_t4(uint16_t4 expr, uint idx) { return QuadReadLaneAt(expr, idx); }
 #endif
+
+// CHECK: %[[RET:.*]] = call {{.*}}i1 @llvm.[[TARGET]].quad.read.lane.at.i1(i1 {{.*}}, i32 {{.*}})
+// CHECK: ret i1 %[[RET]]
+bool test_bool(bool expr, uint idx) { return QuadReadLaneAt(expr, idx); }

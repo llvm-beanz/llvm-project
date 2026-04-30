@@ -1360,7 +1360,7 @@ ID within the current quad.
 \param Index The quad lane index (0-3).
 }];
   let Args = [Varying, UIntTy];
-  let VaryingTypes = AllNumericTypes;
+  let VaryingTypes = AllTypesWithBool;
   let IsConvergent = 1;
   let Availability = SM6_0;
   let VaryingMatDims = [];
