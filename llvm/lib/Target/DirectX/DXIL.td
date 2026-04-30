@@ -1266,6 +1266,18 @@ def QuadOp : DXILOp<123, quadOp> {
   let attributes = [Attributes<DXIL1_0, []>];
 }
 
+def QuadReadLaneAt : DXILOp<122, quadReadLaneAt> {
+  let Doc = "returns the value from the lane identified by the lane ID within the current quad";
+  let intrinsics = [IntrinSelect<int_dx_quad_read_lane_at>];
+  let arguments = [OverloadTy, Int32Ty];
+  let result = OverloadTy;
+  let overloads = [
+    Overloads<DXIL1_0, [HalfTy, FloatTy, DoubleTy, Int1Ty, Int16Ty, Int32Ty, Int64Ty]>
+  ];
+  let stages = [Stages<DXIL1_0, [all_stages]>];
+  let attributes = [Attributes<DXIL1_0, []>];
+}
+
 def WavePrefixBitCount : DXILOp<136, wavePrefixOp> {
   let Doc = "returns the count of bits of Expr set to 1 on prior lanes";
   let intrinsics = [IntrinSelect<int_dx_wave_prefix_bit_count>];

@@ -1349,6 +1349,23 @@ def hlsl_quad_read_across_y :
   let VaryingMatDims = [];
 }
 
+// Returns the specified source value from the lane identified by the lane ID
+// within the current quad.
+def hlsl_quad_read_lane_at :
+    HLSLTwoArgBuiltin<"QuadReadLaneAt", "__builtin_hlsl_quad_read_lane_at"> {
+  let Doc = [{
+\brief Returns the specified source value from the lane identified by the lane
+ID within the current quad.
+\param Val The input value.
+\param Index The quad lane index (0-3).
+}];
+  let Args = [Varying, UIntTy];
+  let VaryingTypes = AllTypesWithBool;
+  let IsConvergent = 1;
+  let Availability = SM6_0;
+  let VaryingMatDims = [];
+}
+
 // Converts the specified value from degrees to radians.
 def hlsl_radians : HLSLOneArgBuiltin<"radians", "__builtin_hlsl_elementwise_radians"> {
   let Doc = [{

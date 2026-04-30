@@ -195,3 +195,10 @@ entry:
   %ret = call i32 @llvm.dx.quad.read.across.y.i32(i32 %expr)
   ret i32 %ret
 }
+
+define noundef i32 @quad_read_lane_at_i32(i32 noundef %expr, i32 noundef %idx) {
+entry:
+  ; CHECK: Function quad_read_lane_at_i32 : [[WAVE_FLAG]]
+  %ret = call i32 @llvm.dx.quad.read.lane.at.i32(i32 %expr, i32 %idx)
+  ret i32 %ret
+}
