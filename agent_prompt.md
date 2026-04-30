@@ -8,8 +8,4 @@ Break your changes into small code changes, with each change committed separatel
 
 # Request
 
-Can you implement the QuadReadLaneAt function for HLSL as referenced in this issue (https://github.com/llvm/llvm-project/issues/99174)?
-
-Before starting the Clang changes, generate test cases for the new intrinsics in the offload-test-suite repository at ~/dev/offload-test-suite. You can verify that they work correctly with DXC by building the check-hlsl-vk target. You should do this before making any changes to the clang or LLVM code.
-
-Once you have working tests, add support to Clang and LLVM lowering the changes through to the DirectX and SPIRV backends.
+The tests you've added in the offload-test-suite do not cover all the supported overloads for QuadReadLaneAt. DXC supports arithmetic types of varying sizes as well as boolean types and user-defined structures. Please add complete test coverage in the offload-test-suite, LLVM and Clang and address any issues that arise.
