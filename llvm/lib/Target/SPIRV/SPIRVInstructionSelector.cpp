@@ -5028,6 +5028,9 @@ bool SPIRVInstructionSelector::selectIntrinsic(Register ResVReg,
   case Intrinsic::spv_quad_read_across_y: {
     return selectQuadSwap(ResVReg, ResType, I, /*Direction*/ 1);
   }
+  case Intrinsic::spv_quad_read_lane_at:
+    return selectWaveOpInst(ResVReg, ResType, I,
+                            SPIRV::OpGroupNonUniformQuadBroadcast);
   case Intrinsic::spv_step:
     return selectExtInst(ResVReg, ResType, I, CL::step, GL::Step);
   case Intrinsic::spv_radians:
