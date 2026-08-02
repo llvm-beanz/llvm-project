@@ -20,4 +20,6 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-Can you produce usage docs in markdown format for each of the tools being added?
+The SPIRV import fuzzer is now just a stub, but now that we have that part of
+the project implemented we can flesh out that implementation. Please get the
+spirv import fuzzer up and running.
