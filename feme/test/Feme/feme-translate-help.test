@@ -1,0 +1,3 @@
+// RUN: feme-translate --help | FileCheck %s
+
+// CHECK: FeMe import/export testing driver

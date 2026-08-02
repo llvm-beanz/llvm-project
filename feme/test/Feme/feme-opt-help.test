@@ -1,0 +1,3 @@
+// RUN: feme-opt --help | FileCheck %s
+
+// CHECK: FeMe pass-pipeline testing driver

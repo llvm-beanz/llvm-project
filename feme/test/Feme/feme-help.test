@@ -1,0 +1,4 @@
+// RUN: feme --help | FileCheck %s
+
+// CHECK: OVERVIEW: FeMe: FrontEnd for the MiddleEnd
+// CHECK: USAGE: feme
