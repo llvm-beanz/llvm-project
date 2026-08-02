@@ -765,6 +765,10 @@ feme/
   test/                    (lit + FileCheck)
   unittests/               (gtest)
   cmake/
+    caches/
+      feme.cmake             (CMake cache script setting the variables
+                              needed to build feme in-tree, e.g.
+                              LLVM_ENABLE_PROJECTS=feme)
 ```
 
 ## Build System Integration
