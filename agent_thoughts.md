@@ -1141,3 +1141,145 @@ Split into three commits, each independently reviewable:
 2. Document the build configuration needed for a real libFuzzer binary,
    and point the examples at the new seed corpus.
 3. This `agent_thoughts.md` entry.
+
+# Session: DXIL import support
+
+## Task
+
+Add DXIL import support to feme (roadmap step 4 in `feme/docs/Design.md`).
+Per the user's request, DXIL passed into the driver may arrive either as a
+raw LLVM bitcode file, or as a DX container file with an embedded DXIL
+bitcode part.
+
+## Investigation
+
+Read `feme/docs/Design.md`'s DXIL section closely first: DXIL *is* LLVM
+bitcode (frozen at an old IR version), optionally wrapped in a
+`DXContainer`, with `dx.op.*` calls standing in for what would otherwise be
+ordinary LLVM IR constructs. The design calls for three sub-steps: (1)
+container parsing, (2) bitcode parsing, (3) "op raising" (the inverse of
+`DXILOpLowering`) back to idiomatic LLVM IR. The user's request was
+specifically scoped to the *input format handling* ("passed in as an LLVM
+bitcode file, or as a DX container file"), i.e. steps 1+2, not step 3 (op
+raising is a substantial, separate pass — rewriting every `dx.op.*` call
+family back to standard LLVM IR/intrinsics — and doing it justice would be
+its own multi-week piece of work, not something to bolt onto an importer
+in the same change). I implemented steps 1+2 and explicitly flagged step 3
+as not-yet-done in both the importer's doc comment and `Design.md`, rather
+than silently scoping it out.
+
+Explored existing LLVM infrastructure before writing anything:
+- `llvm::object::DXContainer` (`llvm/include/llvm/Object/DXContainer.h`)
+  already parses the container format and exposes `getDXIL(bool Debug)`,
+  which returns a `(ProgramHeader, const char*)` pair where the pointer
+  already points at the start of the embedded bitcode (verified by reading
+  `DXContainer::parseDXILHeader` in `llvm/lib/Object/DXContainer.cpp`).
+- `llvm::isBitcode`/`isRawBitcode`/`isBitcodeWrapper`
+  (`llvm/include/llvm/Bitcode/BitcodeReader.h`) are the standard way to
+  detect (possibly-wrapped) raw bitcode without a container.
+- `llvm::parseBitcodeFile` (same header) does the actual parse, with
+  auto-upgrade already handling the old-IR-version concern the design doc
+  raises.
+- `llc --filetype=obj` with a `dxil-...` triple already emits a real,
+  spec-compliant `DXContainer` with an embedded DXIL bitcode part directly
+  from textual `.ll` (confirmed via `llvm/test/CodeGen/DirectX/embed-dxil.ll`
+  and by running it locally) — this became the basis for lit test fixtures
+  instead of hand-writing `DXContainerYAML`.
+- `llvm::DXContainerYAML`/`llvm::yaml::yaml2dxcontainer`
+  (`llvm/include/llvm/ObjectYAML/DXContainerYAML.h`,
+  `llvm/lib/ObjectYAML/DXContainerEmitter.cpp`) let a container be built
+  in-process from a small C++-populated object graph, which became the
+  basis for the `gtest` fixture (no need to shell out or depend on the
+  `DirectX` LLVM target being configured into the build just to unit-test
+  the importer's unwrapping logic).
+
+## Implementation
+
+Modeled directly on the existing `feme::SPIRVImporter` for structure and
+conventions (same `Importer` interface, same "thin wrapper around existing
+LLVM/MLIR infra, don't reinvent" philosophy), but the shape of the result
+differs: DXIL import produces a plain `llvm::Module` (`Module::fromLLVMIR`),
+not MLIR, per `Design.md`.
+
+1. **`feme::DXILImporter`** (`feme/include/feme/Import/DXIL/DXILImporter.h`,
+   `feme/lib/Import/DXIL/DXILImporter.cpp`): checks the input's leading
+   bytes for the `DXBC` container magic; if present, parses it with
+   `llvm::object::DXContainer::create` and unwraps to the embedded `DXIL`
+   program part's bitcode (falling back to the debug `ILDB` part if that's
+   all that's present); otherwise requires the raw buffer itself to already
+   be (possibly wrapper-prefixed) bitcode via `llvm::isBitcode`, rejecting
+   anything that's neither with a clear `llvm::Error` rather than an opaque
+   bitcode-reader failure or (worse) reading out of bounds. Either way, the
+   resulting bitcode buffer goes through `llvm::parseBitcodeFile` against
+   the session's `Context::getLLVMContext()`.
+2. **`unittests/Import/DXIL/DXILImporterTest.cpp`**: assembles a minimal
+   module via `llvm::parseAssemblyString` + `llvm::WriteBitcodeToFile` (no
+   checked-in binary fixture), tests the raw-bitcode path directly, and
+   wraps the same bitcode in a `DXContainerYAML::Object` fed through
+   `yaml2dxcontainer` for the container path. Also covers a container with
+   no DXIL part, and input that's neither encoding. One gotcha: the outer
+   container `Part.Size` (the `PartHeader.Size` field) is *not*
+   auto-computed by `yaml2dxcontainer` the way the inner `Program.Size` is
+   — it must be set explicitly to `sizeof(ProgramHeader) + bitcode size`,
+   or the reader fails with "Reading structure out of file bounds" (hit and
+   fixed this during iteration).
+3. **`feme-translate --import-dxil`**
+   (`feme/lib/Import/DXIL/TranslateRegistration.{h,cpp}`): registered via
+   the generic `mlir::TranslateRegistration` (not
+   `TranslateToMLIRRegistration`, since there's no MLIR operation to
+   produce) — parses with a private `feme::Context` and prints the
+   resulting `llvm::Module` as textual IR.
+4. **lit tests** (`test/Feme/dxil-import.ll`,
+   `test/Feme/dxil-import-container.ll`, `test/Feme/dxil-import-invalid.test`):
+   round-trip a minimal module through both encodings using `llvm-as` and
+   `llc --filetype=obj` respectively (see Design.md deviation note above),
+   plus an error-path test. Added `llc`/`llvm-as` to
+   `feme/test/lit.cfg.py`'s tool substitutions and
+   `feme/test/CMakeLists.txt`'s `FEME_TEST_DEPENDS` so they resolve/build
+   as part of `check-feme`.
+5. **`feme-dxil-import-fuzzer`**: a straight copy of
+   `feme-spirv-import-fuzzer`'s structure (same dummy-main pattern, same
+   fresh-`Context`-per-input discipline) targeting `DXILImporter` instead,
+   with a small seed corpus (`minimal.bc`/`minimal.dxcontainer`, both
+   generated from `minimal.ll`) and a matching `CommandGuide` page.
+6. Updated `Design.md`: added a "Status" note under the DXIL section
+   describing what's implemented vs. not (op raising), a roadmap-step-4
+   status note, the new fuzzer in the directory layout, and a deviation
+   note explaining the `llc`/`llvm-as`-based lit fixtures instead of the
+   originally-sketched `DXContainerYAML` + `yaml2obj` pipeline.
+
+## Validation
+
+- Reconfigured the existing build (`build/`) to add the `DirectX`
+  experimental target (`cmake -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=DirectX .`),
+  needed for `llc --filetype=obj` with a `dxil-...` triple; this matches
+  what `feme/cmake/caches/feme.cmake` already specifies, so it was a
+  pre-existing gap in this particular build directory's cache, not a new
+  requirement. Build already had `LLVM_ENABLE_ASSERTIONS=ON` and ccache
+  (`CMAKE_CXX_COMPILER_LAUNCHER=ccache`) configured.
+- `ninja check-feme`: all 13 lit tests pass (10 pre-existing + 3 new).
+- `FeMeImportDXILTests` (new): all 5 cases pass.
+- `FeMeImportSPIRVTests`, `FeMeCoreTests`, `FeMeFrontendTests`: all still
+  pass (no regressions).
+- Manually ran `feme-translate --import-dxil` against both an
+  `llvm-as`-produced `.bc` and an `llc --filetype=obj`-produced
+  `.dxcontainer` and confirmed correct LLVM IR text output for both, plus
+  the expected error message for malformed input.
+- Ran `feme-dxil-import-fuzzer` (dummy build) against the seed corpus and a
+  garbage-bytes file: no crashes, exit 0.
+- `clang-format --style=llvm` diffed against every new/modified C++ file;
+  applied the two files it flagged (`DXILImporter.cpp`,
+  `DXILImporterTest.cpp`) and rebuilt/retested to confirm no behavior
+  change.
+
+## Commits
+
+Split into six commits, each independently reviewable:
+
+1. `feme::DXILImporter` itself (header, implementation, CMake wiring).
+2. Unit tests for `DXILImporter`.
+3. `feme-translate --import-dxil` registration.
+4. lit tests for `--import-dxil`.
+5. `feme-dxil-import-fuzzer` (harness, seed corpus, docs).
+6. `Design.md` updates reflecting the above.
+7. This `agent_thoughts.md` entry.
