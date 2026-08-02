@@ -20,9 +20,11 @@ Module::Module(mlir::OwningOpRef<mlir::Operation *> M)
 Module::Module(std::unique_ptr<llvm::Module> M)
     : ModKind(Kind::LLVMIR), LLVMModule(std::move(M)) {}
 
-// Out-of-line so that the destructor is emitted where mlir::Operation and
-// llvm::Module are complete types.
+// Out-of-line so that the destructor and move operations are emitted where
+// mlir::Operation and llvm::Module are complete types.
 Module::~Module() = default;
+Module::Module(Module &&) noexcept = default;
+Module &Module::operator=(Module &&) noexcept = default;
 
 Module Module::fromLLVMIR(std::unique_ptr<llvm::Module> M) {
   return Module(std::move(M));

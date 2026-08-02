@@ -41,14 +41,16 @@ class Module {
 public:
   enum class Kind { MLIR, LLVMIR };
 
-  template <typename OpTy>
-  static Module fromMLIR(mlir::OwningOpRef<OpTy> M) {
+  template <typename OpTy> static Module fromMLIR(mlir::OwningOpRef<OpTy> M) {
     return Module(mlir::OwningOpRef<mlir::Operation *>(std::move(M)));
   }
   static Module fromLLVMIR(std::unique_ptr<llvm::Module> M);
 
-  Module(Module &&) = default;
-  Module &operator=(Module &&) = default;
+  // Out-of-line (see Module.cpp) so that unique_ptr<llvm::Module>'s
+  // implicit move operations are instantiated where llvm::Module is a
+  // complete type.
+  Module(Module &&) noexcept;
+  Module &operator=(Module &&) noexcept;
 
   Module(const Module &) = delete;
   Module &operator=(const Module &) = delete;
