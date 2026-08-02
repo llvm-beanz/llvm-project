@@ -40,7 +40,110 @@ define i32 @wave_get_lane_index() {
   ret i32 %1
 }
 
+; CHECK-LABEL: define i32 @countbits_i32(
+define i32 @countbits_i32(i32 %a) {
+  ; CHECK: call i32 @llvm.ctpop.i32(i32 %a)
+  %1 = call i32 @llvm.ctpop.i32(i32 %a)
+  ret i32 %1
+}
+
+; CHECK-LABEL: define float @fmax_f32(
+define float @fmax_f32(float %a, float %b) {
+  ; CHECK: call float @llvm.maxnum.f32(float %a, float %b)
+  %1 = call float @llvm.maxnum.f32(float %a, float %b)
+  ret float %1
+}
+
+; CHECK-LABEL: define i32 @umin_i32(
+define i32 @umin_i32(i32 %a, i32 %b) {
+  ; CHECK: call i32 @llvm.umin.i32(i32 %a, i32 %b)
+  %1 = call i32 @llvm.umin.i32(i32 %a, i32 %b)
+  ret i32 %1
+}
+
+; CHECK-LABEL: define float @fmad_f32(
+define float @fmad_f32(float %a, float %b, float %c) {
+  ; CHECK: call float @llvm.fmuladd.f32(float %a, float %b, float %c)
+  %1 = call float @llvm.fmuladd.f32(float %a, float %b, float %c)
+  ret float %1
+}
+
+; CHECK-LABEL: define i32 @umad_i32(
+define i32 @umad_i32(i32 %a, i32 %b, i32 %c) {
+  ; CHECK: call i32 @llvm.dx.umad.i32(i32 %a, i32 %b, i32 %c)
+  %1 = call i32 @llvm.dx.umad.i32(i32 %a, i32 %b, i32 %c)
+  ret i32 %1
+}
+
+; CHECK-LABEL: define float @dot2_f32(
+define float @dot2_f32(float %ax, float %ay, float %bx, float %by) {
+  ; CHECK: call float @llvm.dx.dot2.f32(float %ax, float %ay, float %bx, float %by)
+  %1 = call float @llvm.dx.dot2.f32(float %ax, float %ay, float %bx, float %by)
+  ret float %1
+}
+
+; CHECK-LABEL: define double @asdouble(
+define double @asdouble(i32 %lo, i32 %hi) {
+  ; CHECK: call double @llvm.dx.asdouble.i32(i32 %lo, i32 %hi)
+  %1 = call double @llvm.dx.asdouble.i32(i32 %lo, i32 %hi)
+  ret double %1
+}
+
+; CHECK-LABEL: define i1 @wave_all_equal_i32(
+define i1 @wave_all_equal_i32(i32 %a) {
+  ; CHECK: call i1 @llvm.dx.wave.all.equal.i32(i32 %a)
+  %1 = call i1 @llvm.dx.wave.all.equal.i32(i32 %a)
+  ret i1 %1
+}
+
+; CHECK-LABEL: define i32 @wave_readlane_i32(
+define i32 @wave_readlane_i32(i32 %a, i32 %lane) {
+  ; CHECK: call i32 @llvm.dx.wave.readlane.i32(i32 %a, i32 %lane)
+  %1 = call i32 @llvm.dx.wave.readlane.i32(i32 %a, i32 %lane)
+  ret i32 %1
+}
+
+; CHECK-LABEL: define i32 @wave_active_countbits(
+define i32 @wave_active_countbits(i1 %a) {
+  ; CHECK: call i32 @llvm.dx.wave.active.countbits(i1 %a)
+  %1 = call i32 @llvm.dx.wave.active.countbits(i1 %a)
+  ret i32 %1
+}
+
+; CHECK-LABEL: define i32 @dot4add_i8packed(
+define i32 @dot4add_i8packed(i32 %acc, i32 %a, i32 %b) {
+  ; CHECK: call i32 @llvm.dx.dot4add.i8packed(i32 %acc, i32 %a, i32 %b)
+  %1 = call i32 @llvm.dx.dot4add.i8packed(i32 %acc, i32 %a, i32 %b)
+  ret i32 %1
+}
+
+; CHECK-LABEL: define i1 @is_finite_f32(
+define i1 @is_finite_f32(float %a) {
+  ; CHECK: call i1 @llvm.is.fpclass.f32(float %a, {{.*}}i32 504)
+  %1 = call i1 @llvm.is.fpclass.f32(float %a, i32 504)
+  ret i1 %1
+}
+
+; CHECK-LABEL: define i1 @is_normal_f32(
+define i1 @is_normal_f32(float %a) {
+  ; CHECK: call i1 @llvm.is.fpclass.f32(float %a, {{.*}}i32 264)
+  %1 = call i1 @llvm.is.fpclass.f32(float %a, i32 264)
+  ret i1 %1
+}
+
 declare float @llvm.sin.f32(float)
 declare float @llvm.dx.frac.f32(float)
 declare i32 @llvm.dx.group.id(i32)
 declare i32 @llvm.dx.wave.getlaneindex()
+declare i32 @llvm.ctpop.i32(i32)
+declare float @llvm.maxnum.f32(float, float)
+declare i32 @llvm.umin.i32(i32, i32)
+declare float @llvm.fmuladd.f32(float, float, float)
+declare i32 @llvm.dx.umad.i32(i32, i32, i32)
+declare float @llvm.dx.dot2.f32(float, float, float, float)
+declare double @llvm.dx.asdouble.i32(i32, i32)
+declare i1 @llvm.dx.wave.all.equal.i32(i32)
+declare i32 @llvm.dx.wave.readlane.i32(i32, i32)
+declare i32 @llvm.dx.wave.active.countbits(i1)
+declare i32 @llvm.dx.dot4add.i8packed(i32, i32, i32)
+declare i1 @llvm.is.fpclass.f32(float, i32)
