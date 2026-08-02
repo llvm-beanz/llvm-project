@@ -694,7 +694,12 @@ ever testing through the full `feme` driver end to end:
   `feme::SPIRVToLLVMTranslator` is registered as the `--spirv-to-llvmir`
   flag (`feme/lib/Translate/SPIRV/TranslateRegistration.cpp`), so it can be
   `lit`/`FileCheck`-tested the same way as `--import-spirv` rather than via
-  `gtest` (see the deviation note under Testing Strategy below).
+  `gtest` (see the deviation note under Testing Strategy below). Likewise,
+  `feme::TargetMachineBackend` is registered as the `--llvm-backend` flag
+  (`feme/lib/Target/TranslateRegistration.cpp`; parses `.ll`/bitcode input,
+  writes the `Backend`'s binary output), letting the SPIR-V "null pipeline"
+  be composed and `lit`-tested one stage at a time instead of via `gtest`
+  (see the deviation note under Testing Strategy below).
 - Both tools are testing-only entrypoints in the sense of the Core
   Architectural Principle above: they may use `llvm::cl::opt` (matching
   `mlir-opt`/`mlir-translate` convention) precisely because that principle
@@ -909,6 +914,21 @@ feme/
   (`test/Feme/spirv-to-llvmir*.mlir`) driven through `feme-translate`'s new
   `--spirv-to-llvmir` flag instead, and the `gtest` versions removed to
   avoid duplicate, lower-signal coverage of the same behavior.
+- Deviation: `feme::TargetMachineBackend` (the SPIR-V "null pipeline"
+  `Backend`, see above) was likewise initially covered by
+  `unittests/Target` `gtest` cases driving the whole
+  import→translate→backend→re-import pipeline in one C++ test function.
+  Since a `Backend` invoked on textual LLVM IR input is exactly the kind of
+  stage `feme-translate` exists to exercise, feme-translate gained a new
+  `--llvm-backend` flag (parses `.ll`/bitcode input, runs
+  `feme::TargetMachineBackend`, writes the resulting binary) so the null
+  pipeline can be composed and lit-tested one stage at a time
+  (`test/Feme/spirv-backend-null-pipeline.mlir`,
+  `test/Feme/llvm-backend-unknown-target.ll`), and the `gtest` versions
+  were removed. `test/lit.cfg.py` gained a per-target
+  `<arch>-registered-target` feature (mirroring `llvm/test/lit.cfg.py`) so
+  the null-pipeline test can `REQUIRES: spirv-registered-target` instead of
+  unconditionally requiring LLVM's `SPIRV` target to be configured in.
 - Given FeMe consumes externally-defined binary formats supplied by
   untrusted sources at driver runtime, fuzzing the `Importer`s is a **v1
   requirement, not a fast-follow**: an `llvm-fuzzer`-style harness lands
