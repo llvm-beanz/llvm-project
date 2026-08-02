@@ -1001,3 +1001,143 @@ Split into four commits, each independently buildable/testable:
 2. Add the `--llvm-backend` feme-translate hook (new files + CMake wiring).
 3. Add the two new lit tests and remove the obsolete gtest directory.
 4. Document the deviation in `feme/docs/Design.md`.
+
+# Agent thoughts: "not correctly connected to libFuzzer" for feme-spirv-import-fuzzer
+
+This records the investigation and work behind the request:
+
+> The feme-spirv-import-fuzzer is not correctly connected to libFuzzer, so
+> I cannot run it locally and have it actually do anything. Can you please
+> update the fuzzer so that it can be used to fuzz the spirv import path,
+> and draft some documentation about how to use the fuzzer.
+
+## Re-verifying the "not connected" premise
+
+A previous entry in this file ("get the SPIR-V import fuzzer up and
+running") already established that `feme-spirv-import-fuzzer.cpp` and its
+`CMakeLists.txt` are a complete, correctly-wired `add_llvm_fuzzer` harness,
+not a stub. This request is different in kind, though: it's about *build
+configuration*, not harness completeness, so I re-verified from scratch
+rather than assuming the prior conclusion covers it.
+
+`feme/tools/feme-spirv-import-fuzzer/CMakeLists.txt` uses `add_llvm_fuzzer`
+exactly like every other in-tree fuzzer (`llvm-dis-fuzzer`,
+`mlir-text-parser-fuzzer`, etc.): it links a real libFuzzer only when the
+build is configured with `LLVM_USE_SANITIZE_COVERAGE` or
+`LLVM_LIB_FUZZING_ENGINE`; otherwise it falls back to `DUMMY_MAIN`
+(`DummyImporterFuzzer.cpp`), a single-shot driver from
+`llvm::runFuzzerOnInputs`. This repo's `build/` tree has neither set, so
+`ninja feme-spirv-import-fuzzer` produces the dummy binary. Running that
+dummy binary the way one would naturally try to run a fuzzer --
+`feme-spirv-import-fuzzer some-corpus-dir/` -- fails immediately, because
+`runFuzzerOnInputs` calls `MemoryBuffer::getFile` on each positional
+argument and a directory is not a readable file:
+
+```
+*** This tool was not linked to libFuzzer.
+*** No fuzzing will be performed.
+Error reading file: some-corpus-dir: Is a directory
+```
+
+This reproduces the reported symptom exactly ("cannot run it locally and
+have it actually do anything") and confirms it is a build-configuration/
+documentation gap, not a bug in the harness or its `CMakeLists.txt` --
+every other in-tree `add_llvm_fuzzer` target has the exact same fallback
+behavior when built without the right flags.
+
+## Confirming a real libFuzzer build actually works
+
+To be sure the harness really does work once correctly configured (not
+just "probably fine by analogy"), I built a real libFuzzer-linked binary
+two ways:
+
+1. Attempted the documented, standard path,
+   `-DLLVM_USE_SANITIZER=Address -DLLVM_USE_SANITIZE_COVERAGE=On`. This
+   sandbox's clang (Ubuntu clang 18.1.3, aarch64) does not ship
+   `libclang_rt.fuzzer-aarch64.a` in its resource directory, so the final
+   link step fails here with "cannot find
+   .../libclang_rt.fuzzer-aarch64.a". This is an environment/toolchain
+   limitation (confirmed by trying a trivial `-fsanitize=fuzzer` "hello
+   world" outside the LLVM build, which fails the same way), not something
+   in FeMe's control, and would not occur on a typical x86_64 Linux/macOS
+   clang install that bundles the fuzzer runtime.
+2. Built libFuzzer standalone from `compiler-rt/lib/fuzzer/build.sh`
+   (`CXX=clang++ sh build.sh`, producing `libFuzzer.a`) and reconfigured
+   with `-DLLVM_LIB_FUZZING_ENGINE=/path/to/libFuzzer.a`. This is the same
+   `add_llvm_fuzzer` mechanism, just choosing its other supported branch,
+   and is also how OSS-Fuzz-style out-of-tree fuzzing engines get linked
+   in. `ninja feme-spirv-import-fuzzer` then produced a binary that:
+   - Prints the full libFuzzer `-help=1` flag set (`-runs`, `-max_len`,
+     `-jobs`, ...), unlike the dummy binary.
+   - Actually fuzzes: `-max_total_time=15` over an empty corpus ran
+     ~300k execs in 16s with no crashes, and the same over the new seed
+     corpus (below) round-tripped both seeds through
+     `SPIRVImporter::import` cleanly.
+   - Reverted the build back to `LLVM_LIB_FUZZING_ENGINE=` (empty) and
+     rebuilt afterwards, restoring the shared `build/` tree to its
+     original dummy-binary state so this investigation doesn't leave a
+     surprising, half-configured build behind for other work in this
+     environment.
+
+This is enough to be confident the harness itself needs no source changes
+to "work" -- it was already correct -- but a real local dev trying the
+naive `cmake ... -DLLVM_ENABLE_PROJECTS=feme && ninja feme-spirv-import-fuzzer`
+invocation would hit exactly the dummy-binary trap described above with no
+in-tree documentation explaining why, which is the actual, fixable gap.
+
+## What I changed
+
+1. **Seed corpus** (`feme/tools/feme-spirv-import-fuzzer/seed-corpus/`):
+   two small, valid SPIR-V binaries (`minimal.spv`, `constant.spv`), each
+   generated from a checked-in, human-readable `.mlir` source via
+   `feme-translate --serialize-spirv` (same technique
+   `SPIRVImporterTest.cpp` uses to avoid checked-in-binary provenance
+   questions). `docs/Design.md`'s "Avoiding binary test fixtures" section
+   already carves out exactly this exception ("Fuzzing seed corpora ...
+   are expected to contain real binary samples, and live outside `test/`
+   ... alongside each fuzz harness"), so this isn't a new policy, just the
+   first fuzz target to actually use it. The prior "up and running" entry
+   in this file noted no other in-tree fuzzer checks in a seed corpus
+   (they rely on OSS-Fuzz-managed corpora instead) and concluded none was
+   needed *for that request*; this request is specifically about local
+   usability, where an empty corpus works but is far less useful than a
+   couple of valid starting points, so I added a small one here rather
+   than leaving local runs to start from nothing. This is additive and
+   doesn't change what CI/OSS-Fuzz would do with their own managed
+   corpora.
+2. **Documentation** (`feme/docs/CommandGuide/feme-spirv-import-fuzzer.md`):
+   added a "BUILDING" section spelling out the dummy-vs-real-libFuzzer
+   distinction, the two working CMake configurations above (with the
+   `LLVM_LIB_FUZZING_ENGINE` fallback specifically called out for
+   toolchains missing a bundled fuzzer runtime), and how to tell which
+   kind of binary you have (`-help=1`). Updated the first `EXAMPLES` entry
+   to seed the corpus dir from the new `seed-corpus/` directory.
+
+No changes were made to `feme-spirv-import-fuzzer.cpp`, `DummyImporterFuzzer.cpp`,
+or the fuzzer's `CMakeLists.txt` -- they were already correct.
+
+## Validation
+
+- `cmake -DLLVM_LIB_FUZZING_ENGINE=<standalone libFuzzer.a> . && ninja
+  feme-spirv-import-fuzzer`: real libFuzzer binary confirmed via `-help=1`
+  and a short fuzzing run (see above); reverted afterwards.
+- `ninja check-feme`: all 10 lit tests pass (unaffected by this change).
+- Ran `FeMeImportSPIRVTests`, `FeMeCoreTests`, `FeMeFrontendTests` directly:
+  all pass.
+- Regenerated `seed-corpus/*.spv` from their `.mlir` sources with
+  `feme-translate --no-implicit-module --serialize-spirv` and confirmed
+  round-tripping back through `feme-translate --import-spirv` reproduces
+  the original `spirv` dialect text.
+- No C++ source changed, so `clang-format` was not needed; the new
+  `.mlir`/`.md` files were written by hand following existing conventions
+  in `test/Feme/spirv-import.mlir` and the other `CommandGuide/*.md` pages.
+
+## Commits
+
+Split into three commits, each independently reviewable:
+
+1. Add the seed corpus (`.mlir` sources + generated `.spv` binaries +
+   `README.md`).
+2. Document the build configuration needed for a real libFuzzer binary,
+   and point the examples at the new seed corpus.
+3. This `agent_thoughts.md` entry.
