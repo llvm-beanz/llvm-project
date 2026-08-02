@@ -7,7 +7,7 @@
 #   cmake -G Ninja -C feme/cmake/caches/feme.cmake -B build llvm
 #   ninja -C build check-feme
 
-set(LLVM_ENABLE_PROJECTS "feme" CACHE STRING "")
+set(LLVM_ENABLE_PROJECTS "feme;mlir" CACHE STRING "")
 
 # FeMe's own tests need the host's native target (for FeMe's general-purpose
 # retargeting -- see Roadmap in feme/docs/Design.md) plus SPIRV, which
@@ -18,6 +18,7 @@ set(LLVM_ENABLE_PROJECTS "feme" CACHE STRING "")
 # enabling additional projects can override this to add more targets.
 set(LLVM_TARGETS_TO_BUILD "Native;SPIRV" CACHE STRING "")
 
-set(LLVM_INCLUDE_TESTS ON CACHE BOOL "")
-set(LLVM_BUILD_TESTS ON CACHE BOOL "")
+# Include the DirectX target for DXIL code generation.
+set(LLVM_EXPERIMENTAL_TARGETS_TO_BUILD "DirectX" CACHE STRING "")
+
 set(LLVM_ENABLE_ASSERTIONS ON CACHE BOOL "")
