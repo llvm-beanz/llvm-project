@@ -43,6 +43,11 @@ tools = [
     # feme/docs/Design.md).
     "llc",
     "llvm-as",
+    # Used by dxil-raise-ops-roundtrip.ll to produce a fixture with LLVM's
+    # own `-dxil-op-lower` pass, so that test validates feme's op-raising
+    # pass against real DXIL-lowering output rather than only hand-written
+    # `dx.op.*` calls.
+    "opt",
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
