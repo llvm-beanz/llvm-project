@@ -1,3 +1,5 @@
 // RUN: feme-translate --help | FileCheck %s
 
 // CHECK: FeMe import/export testing driver
+// CHECK-DAG: --import-spirv
+// CHECK-DAG: --spirv-to-llvmir
