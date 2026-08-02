@@ -20,7 +20,8 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-The feme-spirv-import-fuzzer is not correctly connected to libFuzzer, so I
-cannot run it locally and have it actually do anything. Can you please update
-the fuzzer so that it can be used to fuzz the spriv import path, and draft some
-documentation about how to use the fuzzer.
+Now let's move on to the DXIL import support. Please add support for DXIL
+importing.
+
+When DXIL is passed into the feme driver it may either be passed in as an LLVM
+bitcode file, or as a DX container file containing a DXIL part.
