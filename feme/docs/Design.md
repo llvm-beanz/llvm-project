@@ -455,6 +455,29 @@ For that case, DXIL's `llvm::Module` is imported into the MLIR `llvm` dialect
 via existing `mlir::translateLLVMIRToModule`, bridging into MLIR only at the
 point of need rather than as the default path.
 
+#### Status: `feme::DXILImporter` (container/bitcode parsing implemented; op raising not yet)
+
+`feme::DXILImporter` (`feme/include/feme/Import/DXIL/DXILImporter.h`,
+`feme/lib/Import/DXIL/DXILImporter.cpp`) implements step 1 and 2 above:
+given a buffer, it detects whether the input is a raw LLVM bitcode file (the
+"DXIL bitcode file" case above driver users may pass directly) or a full
+`DXContainer` (detected via its `DXBC` magic), and in the latter case
+unwraps it down to the embedded DXIL bitcode part using
+`llvm::object::DXContainer` (falling back to the debug `ILDB` part if a
+non-debug `DXIL` part isn't present), before handing the resulting bitcode
+buffer to LLVM's standard `llvm::parseBitcodeFile`. Either encoding produces
+an `llvm::Module` wrapped in `feme::Module::fromLLVMIR`. Malformed input in
+either the container or the bitcode is a recoverable `llvm::Error`, not a
+crash, per "Diagnostics and Error Handling" below.
+
+Step 3 ("op raising", the semantic inverse of `DXILOpLowering`) is **not**
+implemented yet: the `llvm::Module` `DXILImporter` currently produces still
+has DXIL's `dx.op.*` calling convention in it, unmodified from what LLVM's
+bitcode reader loaded. This is expected to land as a later, separate FeMe
+pass (likely via `feme-opt`, see "Testing Tools" below), not as part of
+`DXILImporter` itself, matching how `Importer`s are format-parsing-only
+elsewhere in this document.
+
 ### DXBC → new MLIR `dxsa` dialect (migrate existing prototype, then extend)
 
 DXBC (Shader Model 5.0 and earlier bytecode) is a register-based ISA with
@@ -760,6 +783,22 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
   itself authored as textual `.ll` and assembled via `llvm-as`, then piped
   through `yaml2obj` to produce the binary container at test time. No new
   tooling needed here, just following existing LLVM convention.
+
+  Deviation: `test/Feme/dxil-import.ll` uses plain `llvm-as` (no container),
+  and `test/Feme/dxil-import-container.ll` uses `llc <input>.ll
+  --filetype=obj` (targeting a `dxil-...` triple) instead of hand-written
+  `DXContainerYAML` `.yaml` + `yaml2obj`. LLVM's `DirectX` backend
+  (`llvm/lib/Target/DirectX`) already emits a real, spec-compliant
+  `DXContainer` with an embedded DXIL bitcode part directly from textual
+  `.ll` input (see `llvm/test/CodeGen/DirectX/embed-dxil.ll` for prior art
+  of this pattern), which is both simpler (one existing tool instead of an
+  additionally hand-maintained YAML part layout) and exercises the exact
+  container shape a real DXIL toolchain produces, rather than one
+  hand-assembled to match `DXILImporter`'s expectations. `feme::DXILImporter`'s
+  `gtest` coverage (`unittests/Import/DXIL/DXILImporterTest.cpp`) does use
+  the `DXContainerYAML`/`yaml2dxcontainer` API directly (in-process, not via
+  the `yaml2obj` binary) for a lighter-weight fixture not requiring the
+  `DirectX` target to be configured into the build at all.
 - **DXBC**: use `dxbc-as` (see above) to assemble human-readable,
   Microsoft/`fxc`-style DXBC assembly text into a binary blob at test
   time, piped into `feme-translate --import-dxbc=-`/`feme` as needed. This
@@ -853,6 +892,8 @@ feme/
                                Importer; per-format fuzz targets like this
                                are added alongside each Importer, see
                                "Testing Strategy" below)
+    feme-dxil-import-fuzzer/ (llvm-fuzzer-style harness for the DXIL
+                              Importer, matching feme-spirv-import-fuzzer)
     dxbc-as/               (standalone DXBC assembler, testing tool; see
                            Testing Tools above)
   test/                    (lit + FileCheck)
@@ -981,6 +1022,11 @@ This is a rough sequencing, not a schedule:
    bitcode reader, expected to load DXIL bitcode as-is per the DXIL section
    above) + "op raising" pass to plain LLVM IR; add a fuzzing harness for
    the DXIL importer.
+
+   Status: `DXContainer`/bitcode parsing (`feme::DXILImporter`) and its
+   fuzzing harness (`feme-dxil-import-fuzzer`) are implemented (see the
+   "Status" note under the DXIL section above); the "op raising" pass is
+   not yet implemented and remains open for a follow-up change.
 5. **DXIL retargeting**: reuse step 3's backend glue for DXIL-derived
    `llvm::Module`s.
 6. **DXIL ⇄ SPIR-V translation**: DXIL (LLVM IR) → LLVM `SPIRV` target;
