@@ -141,7 +141,9 @@ set(LLVM_ALL_PROJECTS "bolt;clang;clang-tools-extra;cross-project-tests;lld;lldb
 # it is preferred to use LLVM_ENABLE_RUNTIMES for them instead.
 #
 # The flang project is not yet part of "all" projects (see C++ requirements).
-set(LLVM_EXTRA_PROJECTS "flang" "libc" "compiler-rt")
+# feme is likewise not yet part of "all" projects while it is still under
+# initial development (see feme/docs/Design.md).
+set(LLVM_EXTRA_PROJECTS "flang" "feme" "libc" "compiler-rt")
 # List of all known projects in the mono repo
 set(LLVM_KNOWN_PROJECTS "${LLVM_ALL_PROJECTS};${LLVM_EXTRA_PROJECTS}")
 set(LLVM_ENABLE_PROJECTS "" CACHE STRING
@@ -199,6 +201,13 @@ if ("flang" IN_LIST LLVM_ENABLE_PROJECTS)
     message(STATUS "Enabling Flang-RT as a dependency of Flang")
     list(APPEND LLVM_ENABLE_RUNTIMES "flang-rt")
   endif ()
+endif()
+
+if ("feme" IN_LIST LLVM_ENABLE_PROJECTS)
+  if (NOT "mlir" IN_LIST LLVM_ENABLE_PROJECTS)
+    message(STATUS "Enabling MLIR as a dependency to feme")
+    list(APPEND LLVM_ENABLE_PROJECTS "mlir")
+  endif()
 endif()
 
 if ("lldb" IN_LIST LLVM_ENABLE_PROJECTS)

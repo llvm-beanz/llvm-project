@@ -42,10 +42,11 @@ add_llvm_tool_subdirectory(llvm-readobj)
 # specified.
 add_llvm_external_project(lld)
 add_llvm_external_project(mlir)
-# ClangIR and Flang depend on mlir, lldb and Flang depend on clang, sort them
-# accordingly so place them afterwards
+# ClangIR, Flang, and feme depend on mlir, lldb and Flang depend on clang,
+# sort them accordingly so place them afterwards
 add_llvm_external_project(clang)
 add_llvm_external_project(flang)
+add_llvm_external_project(feme)
 add_llvm_external_project(lldb)
 add_llvm_external_project(bolt)
 
