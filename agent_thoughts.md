@@ -1283,3 +1283,92 @@ Split into six commits, each independently reviewable:
 5. `feme-dxil-import-fuzzer` (harness, seed corpus, docs).
 6. `Design.md` updates reflecting the above.
 7. This `agent_thoughts.md` entry.
+
+# Agent thoughts: Fix incomplete-`llvm::Module`-type build failure in `DXILImporter.cpp`
+
+## Problem
+
+A build failure was reported on macOS/libc++:
+
+```
+error: invalid application of 'sizeof' to an incomplete type 'llvm::Module'
+```
+
+pointing at `Module::fromLLVMIR(std::move(*LLVMModule))` in
+`feme/lib/Import/DXIL/DXILImporter.cpp`, with the note chain showing the
+failure occurs while instantiating `std::unique_ptr<llvm::Module>`'s
+destructor (via `default_delete<llvm::Module>::operator()`).
+
+## Root cause
+
+`feme/include/feme/Core/Module.h` only forward-declares `llvm::Module`
+(it holds a `std::unique_ptr<llvm::Module>` data member, and the destructor
+is deliberately defined out-of-line in `Module.cpp` specifically so that
+`llvm::Module` doesn't need to be complete at that point — see the comment
+on `Module`'s special members). That's fine by itself.
+
+The bug is in `DXILImporter.cpp`, which:
+- calls `llvm::parseBitcodeFile(...)`, returning
+  `llvm::Expected<std::unique_ptr<llvm::Module>>`, and
+- stores that in a local variable, then moves the `unique_ptr<llvm::Module>`
+  out of it via `Module::fromLLVMIR(std::move(*LLVMModule))`.
+
+The local `Expected<std::unique_ptr<llvm::Module>>`'s destructor needs to
+destroy its contained `unique_ptr<llvm::Module>`, which requires
+`llvm::Module` to be a *complete* type in this translation unit. But
+`DXILImporter.cpp` never actually included `llvm/IR/Module.h`:
+`llvm/Bitcode/BitcodeReader.h` (which it does include, for
+`parseBitcodeFile`) only forward-declares `llvm::Module` too — it doesn't
+pull in the full definition. So `llvm::Module` stayed incomplete for the
+whole TU, and instantiating `unique_ptr<llvm::Module>`'s destructor failed.
+
+This didn't reproduce in this Linux/libstdc++ build environment (apparently
+libstdc++'s more lazily-instantiated `unique_ptr`/`default_delete` avoided
+triggering the `static_assert` here, or some other transitively-included
+header happened to complete `llvm::Module` first), which is why the
+inconsistency wasn't caught earlier — it's a real latent bug, not
+environment-specific to macOS/libc++, since nothing in the TU actually
+guarantees `llvm::Module` completeness.
+
+## Fix
+
+Added `#include "llvm/IR/Module.h"` to `DXILImporter.cpp`, right next to
+the other `llvm/IR/*` include (`LLVMContext.h`), matching the existing
+convention already used by `DXIL/TranslateRegistration.cpp`,
+`Translate/SPIRV/SPIRVToLLVMTranslator.cpp`, `Core/Module.cpp`, and the
+unit tests (`DXILImporterTest.cpp`, `ModuleTest.cpp`) — every other file
+in the tree that names `llvm::Module` by value/dereference already
+includes this header; `DXILImporter.cpp` was the one outlier relying on
+transitively-forward-declared `llvm::Module`.
+
+I confirmed no other file in `feme/` has the same gap: grepped for
+`unique_ptr<llvm::Module>`/`parseBitcodeFile`/`parseIR` usage across
+`feme/lib` and `feme/include` and checked each hit already includes
+`llvm/IR/Module.h`.
+
+No design-doc deviation here — this is a plain missing-include compile fix
+with no behavioral or architectural change, so `feme/docs/Design.md` was
+not touched.
+
+## Validation
+
+- Reproduced the underlying gap by inspecting `llvm/Bitcode/BitcodeReader.h`,
+  which confirms it only forward-declares `class Module;` (does not include
+  `llvm/IR/Module.h`).
+- Rebuilt `obj.FeMeImportDXIL` after touching `DXILImporter.cpp` (using the
+  existing `build/` directory, which already has `LLVM_ENABLE_ASSERTIONS=ON`
+  and `CMAKE_CXX_COMPILER_LAUNCHER=ccache` configured) — builds cleanly
+  before and after on this Linux/libstdc++ toolchain (the failure is
+  libc++-specific), so the fix is a no-op here but closes the actual gap
+  that fails elsewhere.
+- Ran all `feme` unit test binaries after the change to check for
+  regressions: `FeMeImportDXILTests` (5/5), `FeMeImportSPIRVTests` (4/4),
+  `FeMeTargetTests` (2/2), `FeMeTranslateSPIRVTests` (4/4), `FeMeCoreTests`
+  (8/8), `FeMeFrontendTests` (8/8) — all pass.
+- `clang-format` diffed against the modified file: no additional changes
+  needed beyond the added `#include` line.
+
+## Commits
+
+Single commit for the one-line include fix, plus this `agent_thoughts.md`
+entry as its own commit.
