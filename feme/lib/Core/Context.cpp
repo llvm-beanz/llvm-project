@@ -15,16 +15,24 @@ using namespace feme;
 
 Context::Context(ContextOptions Options)
     : LLVMCtx(std::make_unique<llvm::LLVMContext>()),
-      MLIRCtx(std::make_unique<mlir::MLIRContext>()) {
+      OwnedMLIRCtx(std::make_unique<mlir::MLIRContext>()),
+      MLIRCtx(OwnedMLIRCtx.get()) {
   // TODO: Eagerly register the MLIR dialects FeMe needs (spirv, llvm, func,
   // gpu, target-specific dialects, feme's own dialects) once those pipeline
   // stages exist; see the "feme::Context" section of feme/docs/Design.md.
   (void)Options;
 }
 
-// Out-of-line so that the destructor is emitted where llvm::LLVMContext and
-// mlir::MLIRContext are complete types, per the pimpl-with-unique_ptr idiom.
+Context::Context(mlir::MLIRContext &ExternalMLIRCtx)
+    : LLVMCtx(std::make_unique<llvm::LLVMContext>()),
+      MLIRCtx(&ExternalMLIRCtx) {}
+
+// Out-of-line so that the destructor and move operations are emitted where
+// llvm::LLVMContext and mlir::MLIRContext are complete types, per the
+// pimpl-with-unique_ptr idiom.
 Context::~Context() = default;
+Context::Context(Context &&) noexcept = default;
+Context &Context::operator=(Context &&) noexcept = default;
 
 llvm::LLVMContext &Context::getLLVMContext() { return *LLVMCtx; }
 

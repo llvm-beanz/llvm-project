@@ -45,10 +45,24 @@ struct ContextOptions {};
 class Context {
 public:
   explicit Context(ContextOptions Options = {});
+
+  /// Wraps an externally-owned MLIRContext instead of constructing a new
+  /// one, while still owning its own LLVMContext. This is for embedding
+  /// into a host that already manages its own MLIRContext (e.g. an
+  /// mlir-translate/mlir-opt-style tool, which configures dialect
+  /// registration, printing flags, and threading on a context it owns) —
+  /// see the "Owns (or wraps caller-provided) ... instances" bullet in the
+  /// "feme::Context" section of feme/docs/Design.md. The caller must keep
+  /// ExternalMLIRCtx alive for at least as long as this Context.
+  explicit Context(mlir::MLIRContext &ExternalMLIRCtx);
+
   ~Context();
 
-  Context(Context &&) = default;
-  Context &operator=(Context &&) = default;
+  // Out-of-line (see Context.cpp) so that these are emitted where
+  // llvm::LLVMContext and mlir::MLIRContext are complete types, matching
+  // the destructor below.
+  Context(Context &&) noexcept;
+  Context &operator=(Context &&) noexcept;
 
   Context(const Context &) = delete;
   Context &operator=(const Context &) = delete;
@@ -63,7 +77,11 @@ public:
 
 private:
   std::unique_ptr<llvm::LLVMContext> LLVMCtx;
-  std::unique_ptr<mlir::MLIRContext> MLIRCtx;
+  // Null when wrapping an externally-owned MLIRContext (see the wrapping
+  // constructor above); MLIRCtx always points at the context in use
+  // either way.
+  std::unique_ptr<mlir::MLIRContext> OwnedMLIRCtx;
+  mlir::MLIRContext *MLIRCtx;
 };
 
 } // namespace feme

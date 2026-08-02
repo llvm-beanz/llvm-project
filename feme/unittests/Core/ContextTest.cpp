@@ -34,4 +34,10 @@ TEST(ContextTest, EachContextOwnsIndependentLLVMContext) {
   EXPECT_NE(&A.getMLIRContext(), &B.getMLIRContext());
 }
 
+TEST(ContextTest, WrapsExternallyOwnedMLIRContext) {
+  mlir::MLIRContext External;
+  Context Ctx(External);
+  EXPECT_EQ(&Ctx.getMLIRContext(), &External);
+}
+
 } // namespace
