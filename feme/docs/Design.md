@@ -706,6 +706,15 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
 
 Mirroring sibling in-tree projects (`mlir/`, `offload/`):
 
+Note: the options-parsing component described in "Core Architectural
+Principle: No Global State" above lives under `Frontend/` (not `Options/`
+as in an earlier draft of this document), matching Flang's
+`include/flang/Frontend`/`lib/Frontend` naming for the analogous
+"argv → explicit options struct" component, since feme's CLI and an
+embedding driver's options are broader than just the `OptTable`/`Options.td`
+pair (e.g. `FrontendOptions.h`'s `DriverOptions` struct and `parseArgs`
+entry point also live here).
+
 ```
 feme/
   CMakeLists.txt
@@ -719,9 +728,10 @@ feme/
         Context.h
         Module.h
         Diagnostics.h
-      Options/
+      Frontend/
         Options.td            (llvm::opt OptTable definitions)
         Options.h
+        FrontendOptions.h     (DriverOptions struct, argv -> options parsing)
       Import/
         Importer.h
         DXBC/
@@ -742,8 +752,9 @@ feme/
       Context.cpp
       Module.cpp
       Diagnostics.cpp
-    Options/
+    Frontend/
       Options.cpp
+      FrontendOptions.cpp
     Import/DXBC/...
     Import/DXIL/...
     Import/SPIRV/...
