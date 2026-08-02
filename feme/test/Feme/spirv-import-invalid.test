@@ -1,0 +1,8 @@
+// RUN: not feme-translate --import-spirv %s 2>&1 | FileCheck %s
+
+// Not a valid SPIR-V binary (word-aligned garbage, not real MLIR text
+// either) - feme::SPIRVImporter must report an error, not crash, per
+// "Diagnostics and Error Handling" in feme/docs/Design.md.
+badd
+
+// CHECK: error:

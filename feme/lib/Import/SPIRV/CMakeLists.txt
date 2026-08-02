@@ -1,5 +1,6 @@
 add_mlir_library(FeMeImportSPIRV
   SPIRVImporter.cpp
+  TranslateRegistration.cpp
 
   LINK_COMPONENTS
   Support
@@ -9,4 +10,5 @@ add_mlir_library(FeMeImportSPIRV
   MLIRIR
   MLIRSPIRVDialect
   MLIRSPIRVDeserialization
+  MLIRTranslateLib
   )

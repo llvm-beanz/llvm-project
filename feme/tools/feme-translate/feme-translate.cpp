@@ -11,22 +11,23 @@
 // import/export stage in isolation with textual (not final-binary-ISA)
 // output (see the "Testing Tools" section of feme/docs/Design.md).
 //
-// This is currently a scaffolding-only skeleton (roadmap step 1) that
-// registers no FeMe-specific translations yet; later roadmap steps will
-// register e.g. `--import-spirv`/`--import-dxbc` here, migrating the
+// `--import-spirv` (roadmap step 2) wraps feme::SPIRVImporter; later
+// roadmap steps will register e.g. `--import-dxbc` here, migrating the
 // registration pattern from the `wip/dxsa-mlir` prototype's
 // TranslateRegistration.cpp.
 //
 //===----------------------------------------------------------------------===//
 
+#include "feme/Import/SPIRV/TranslateRegistration.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllTranslations.h"
 #include "mlir/Tools/mlir-translate/MlirTranslateMain.h"
 
 int main(int argc, char **argv) {
   mlir::registerAllTranslations();
-  // TODO: Register FeMe's own import/export translations (SPIR-V, DXIL,
-  // DXBC) here as they are implemented.
+  feme::registerSPIRVImportTranslation();
+  // TODO: Register FeMe's other import/export translations (DXIL, DXBC)
+  // here as they are implemented.
 
   return mlir::failed(
       mlir::mlirTranslateMain(argc, argv, "FeMe import/export testing driver"));
