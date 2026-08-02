@@ -29,6 +29,17 @@ TEST(ModuleTest, WrapsMLIROperation) {
   EXPECT_EQ(M.getMLIROperation(), RawOp);
 }
 
+TEST(ModuleTest, TakeMLIROperationTransfersOwnership) {
+  mlir::MLIRContext MLIRCtx;
+  mlir::OwningOpRef<mlir::ModuleOp> Op =
+      mlir::ModuleOp::create(mlir::UnknownLoc::get(&MLIRCtx));
+  mlir::Operation *RawOp = Op.get();
+
+  Module M = Module::fromMLIR(std::move(Op));
+  mlir::OwningOpRef<mlir::Operation *> Taken = M.takeMLIROperation();
+  EXPECT_EQ(Taken.get(), RawOp);
+}
+
 TEST(ModuleTest, WrapsLLVMModule) {
   llvm::LLVMContext LLVMCtx;
   auto LLVMMod = std::make_unique<llvm::Module>("test", LLVMCtx);

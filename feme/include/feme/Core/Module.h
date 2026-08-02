@@ -62,6 +62,14 @@ public:
   /// Returns the underlying MLIR operation. Asserts getKind() == MLIR.
   mlir::Operation *getMLIROperation() const;
 
+  /// Releases ownership of the underlying MLIR operation to the caller,
+  /// e.g. to hand it back to generic MLIR tooling (such as
+  /// mlir-translate-style translation registries) that expects to manage
+  /// the operation's lifetime itself. Asserts getKind() == MLIR. This
+  /// Module must not be used again afterwards except to be destroyed or
+  /// reassigned.
+  mlir::OwningOpRef<mlir::Operation *> takeMLIROperation();
+
   /// Returns the underlying llvm::Module. Asserts getKind() == LLVMIR.
   llvm::Module &getLLVMModule() const;
 

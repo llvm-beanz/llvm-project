@@ -35,6 +35,11 @@ mlir::Operation *Module::getMLIROperation() const {
   return MLIRModule.get();
 }
 
+mlir::OwningOpRef<mlir::Operation *> Module::takeMLIROperation() {
+  assert(ModKind == Kind::MLIR && "not an MLIR module");
+  return std::move(MLIRModule);
+}
+
 llvm::Module &Module::getLLVMModule() const {
   assert(ModKind == Kind::LLVMIR && "not an LLVM IR module");
   return *LLVMModule;
