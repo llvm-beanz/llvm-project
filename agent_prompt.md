@@ -20,9 +20,4 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-Please add a cmake cache script at feme/cmake/caches/feme.cmake that sets the
-Cmake variables required to include feme in the LLVM build.
-
-The feme frontend tool shouldn't handle argument parsing, we should have a
-lib/Frontend library that uses libOption's tablegen approach to handle that.
-Please create those stubs.
+Can you please move on to stage 2 of the desig document **SPIR-V import**?
