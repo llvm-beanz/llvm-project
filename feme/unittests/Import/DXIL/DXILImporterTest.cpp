@@ -29,8 +29,8 @@ namespace {
 // dialect of LLVM IR rather than current LLVM IR, a real `DXContainer`
 // produced by an actual DXIL-targeting backend (`llc` with a `dxil-...`
 // triple) is a materially better fixture than one hand-assembled in-process
-// from current-LLVM-IR bitcode; see `test/Feme/dxil-import.ll` and
-// `test/Feme/dxil-import-container.ll`.
+// from current-LLVM-IR bitcode; see `test/Feme/Import/DXIL/dxil-import.ll`
+// and `test/Feme/Import/DXIL/dxil-import-container.ll`.
 
 TEST(DXILImporterTest, GetFormatName) {
   DXILImporter Importer;
