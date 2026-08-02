@@ -235,3 +235,187 @@ the CHECK lines would still match.
   `--from=dxil` against a known set of formats) — today `From`/`To`/
   `Target` are plain strings; that validation belongs with the importers/
   backends that will actually interpret them.
+
+# Agent thoughts: FeMe roadmap step 2 (SPIR-V import)
+
+This records the reasoning behind the follow-on changes implementing
+roadmap step 2 from `feme/docs/Design.md`:
+
+> **SPIR-V import**: wrap MLIR's existing `spirv` deserializer behind
+> FeMe's `Importer` interface; round-trip test (SPIR-V in → `spirv` dialect
+> text out); add a fuzzing harness for the SPIR-V importer.
+
+## Approach
+
+I re-read the whole design doc (particularly "Pipeline Abstraction:
+Importers, Translators, Exporters, Backends", "`feme::Module`", "SPIR-V →
+MLIR `spirv` dialect (reuse, do not reinvent)", "Testing Tools", "Avoiding
+binary test fixtures", and "Testing Strategy") plus `feme/.instructions.md`
+before writing anything, then worked bottom-up through the primitives the
+roadmap item actually needs: `feme::Module` (the currency type `Importer`
+hands back), `feme::Importer` (the interface), `feme::SPIRVImporter` (the
+concrete wrapper around `mlir::spirv::deserialize`), wiring into
+`feme-translate`, then the fuzzer. I looked at MLIR's own
+`mlir/lib/Target/SPIRV/TranslateRegistration.cpp` as the reference
+implementation for the deserialize-and-report-errors shape, and
+`mlir/tools/mlir-parser-fuzzer` as the reference for the fuzzer harness
+shape.
+
+## `feme::Module`: three deviations from the design sketch, each documented
+
+1. **`fromMLIR` is a function template, not `OwningOpRef<mlir::ModuleOp>`.**
+   The design sketch has `fromMLIR` take the builtin `mlir::ModuleOp`
+   specifically. But `mlir::spirv::deserialize` returns an
+   `mlir::spirv::ModuleOp` — SPIR-V's own top-level op, not wrapped in a
+   builtin module — and future formats (DXBC's `dxsa` dialect) will have
+   their own top-level ops too. Making `fromMLIR` a template accepting any
+   op type, type-erasing internally to `OwningOpRef<mlir::Operation *>`,
+   avoids forcing every format through a builtin `ModuleOp` it doesn't
+   actually produce. `getMLIRModule()` becomes `getMLIROperation()`
+   returning `mlir::Operation *`; callers that know the concrete format
+   `mlir::cast`/`dyn_cast` it back. Documented in Module.h's class comment
+   and in Design.md.
+2. **`takeMLIROperation()` was added** (not in the original sketch) once I
+   started wiring `feme-translate`: MLIR's `TranslateToMLIRRegistration`
+   expects the translation function to return an `OwningOpRef<Operation *>`
+   it will own from then on, but `feme::Module` (and the `Context`/
+   `Importer` it was constructed from) go out of scope at the end of the
+   registration lambda. Without a way to release ownership out of `Module`,
+   the temporary `Module`'s destructor would `erase()` the very operation
+   just handed back to the caller (a use-after-free). `takeMLIROperation()`
+   moves the `OwningOpRef` out, mirroring `OwningOpRef::release()`'s own
+   semantics. Documented in Module.h and Design.md, with a dedicated gtest
+   case (`TakeMLIROperationTransfersOwnership`).
+3. **A latent header bug, found and fixed before it could bite `SPIRVImporter`:**
+   `Module`'s implicitly-defaulted move constructor/assignment (`= default`
+   inline in the header) instantiated `std::unique_ptr<llvm::Module>`'s move
+   operations wherever `Module.h` was included — which only happened to
+   compile in TUs that also (transitively) included `llvm/IR/Module.h`.
+   `SPIRVImporter.cpp` doesn't need `llvm/IR/Module.h` directly and hit a
+   "sizeof application to incomplete type" error building `FeMeImportSPIRV`.
+   Fixed by declaring the move operations in the header and defining them
+   `= default` out-of-line in `Module.cpp` (same pattern already used for
+   the destructor). I then proactively applied the identical fix to
+   `feme::Context` in the same batch of work, since it had the exact same
+   shape of bug (unique_ptr<LLVMContext>/<MLIRContext> members with an
+   inline-defaulted move assignment) even though nothing currently
+   triggered it — better to fix it now while making an unrelated,
+   API-compatible `Context` change (see next) than leave a landmine for
+   whoever moves a `Context` from a TU that hasn't pulled in the full
+   LLVMContext/MLIRContext headers.
+
+## `feme::Importer`/`ImportOptions`: one deviation, forced by the no-RTTI rule
+
+The design sketch has `Importer::import` take a single `const ImportOptions
+&Opts`, implying (though not stating outright) that different formats might
+want their own options subtype. `feme/.instructions.md` bans RTTI, though,
+so `Importer::import` implementations cannot safely
+`static_cast`/`dynamic_cast` a base `ImportOptions&` down to a
+format-specific subtype without either RTTI or a hand-rolled type tag (which
+would just be RTTI by another name). Rather than fight this, I made
+`ImportOptions` a single plain, non-polymorphic struct shared by all
+formats, holding one field per format-specific knob (currently just SPIR-V's
+control-flow-structurization toggle, prefixed `SPIRV*` to make the
+provenance obvious). This is explicitly flagged as "expected to grow" in
+both `Importer.h` and Design.md, so future format authors know the pattern
+to follow (add a field, don't add a subtype).
+
+## `feme::Context`: added a wrapping constructor (not strictly a deviation — Design.md already anticipated this)
+
+Design.md's "feme::Context" section already says Context "Owns (or wraps
+caller-provided) LLVMContext and MLIRContext instances", but the step-1
+implementation only ever constructed its own. Wiring `SPIRVImporter` into
+`feme-translate` needed this: `mlir::TranslateToMLIRRegistration`'s callback
+is handed an `MLIRContext *` that `MlirTranslateMain` already configured
+(dialect registry from `dialectRegistration`, `-mlir-print-op-generic`/
+threading/etc. command-line flags) — constructing a private, disconnected
+`MLIRContext` inside the callback (as I first considered, to avoid touching
+`Context` at all) would silently ignore all of that tool-level
+configuration and produce a `spirv.module` op belonging to the wrong
+context entirely. Added
+`Context(mlir::MLIRContext &ExternalMLIRCtx)`, which wraps the caller's
+`MLIRContext` (non-owning) but still owns its own fresh `LLVMContext` (SPIR-V
+import never touches the LLVM side yet, so a private one is fine there).
+Internally this meant switching `Context`'s `MLIRCtx` member from
+`unique_ptr<MLIRContext>` to a raw `MLIRContext *` plus a separate
+`OwnedMLIRCtx` that's null when wrapping. Covered by a new
+`WrapsExternallyOwnedMLIRContext` gtest case.
+
+## `feme-translate --import-spirv`: the round-trip test
+
+`feme/lib/Import/SPIRV/TranslateRegistration.cpp` registers `import-spirv`
+with MLIR's translation registry (same registry `mlir::registerAllTranslations()`
+already populated with `deserialize-spirv`/`serialize-spirv`/etc.), wrapping
+the tool's `MLIRContext` in a `feme::Context`, running `feme::SPIRVImporter`
+through it, and using `takeMLIROperation()` to hand the result back. This
+goes through FeMe's own `Importer`/`Module`/`Context` primitives end to
+end — not just coincidentally reusing MLIR's generic `deserialize-spirv`
+registration — which is the actual point of this roadmap step ("wrap MLIR's
+existing spirv deserializer behind FeMe's Importer interface").
+
+For the round-trip lit test (`spirv-import.mlir`), I followed "Avoiding
+binary test fixtures" in Design.md: the test file's own `spirv` dialect text
+is serialized to a real SPIR-V binary using `feme-translate`'s own,
+generically-registered `--serialize-spirv` (no need for a separate
+`mlir-translate` invocation, since `feme-translate` already registers every
+MLIR translation), then that binary is piped through `--import-spirv` and
+the resulting text is `FileCheck`ed — no binary blob is checked into the
+repo. A second lit test (`spirv-import-invalid.test`) checks that malformed
+input produces a diagnostic and a non-zero exit rather than a crash, per
+"Diagnostics and Error Handling" in Design.md.
+
+## Fuzzing harness
+
+`feme-spirv-import-fuzzer` fuzzes `feme::SPIRVImporter::import` directly
+(constructing a fresh `feme::Context` per input, mirroring how
+`llvm-dis-fuzzer` uses a fresh `LLVMContext` per input — Importers must not
+rely on state surviving across calls, per the "No Global State" principle).
+I chose to follow `mlir/tools/mlir-parser-fuzzer`'s `DUMMY_MAIN` pattern
+(`llvm::runFuzzerOnInputs`) rather than `llvm-dis-fuzzer`'s
+libFuzzer-only-build pattern, specifically so the harness is buildable and
+runnable as a plain CLI tool in this dev environment (no
+`LLVM_USE_SANITIZE_COVERAGE`/`LLVM_LIB_FUZZING_ENGINE` configured) — this
+let me actually exercise it rather than merely getting it to compile.
+
+## Validation
+
+- Enabled `ccache` (`CMAKE_C_COMPILER_LAUNCHER`/`CMAKE_CXX_COMPILER_LAUNCHER`)
+  on the existing dev build directory, which already had
+  `LLVM_ENABLE_ASSERTIONS=ON` and `LLVM_ENABLE_PROJECTS=feme` from the
+  step-1 work; confirmed `ninja check-feme` passed (4/4) before making any
+  changes, to establish a clean baseline.
+- Built and ran every affected target after each incremental change, not
+  just at the end: `FeMeCore`/`FeMeCoreTests`, `FeMeImportSPIRV`/
+  `FeMeImportSPIRVTests`, `feme-translate` (manually round-tripping a
+  hand-written `spirv.module` through `--serialize-spirv`/`--import-spirv`,
+  and separately checking a malformed-input error path), `check-feme`
+  (6/6 lit tests after adding the two new ones), and
+  `feme-spirv-import-fuzzer` (run over a hand-built valid module, hand-built
+  invalid inputs, and 200 randomly-generated byte strings — zero crashes).
+- Ran `clang-format` (LLVM style) over every new/modified `.cpp`/`.h` file
+  before each commit.
+- Split the work into ten small, independently-buildable-and-testable
+  commits (Module wrapper → Module move-op fix → Importer interface →
+  SPIRVImporter+gtests → Module::takeMLIROperation → Context wrapping
+  fix+ctor → feme-translate wiring+lit tests → fuzzer → Design.md updates),
+  rebuilding and rerunning the relevant tests after each one, matching the
+  granularity precedent set by roadmap step 1's commits.
+
+## Deliberately deferred to later roadmap steps
+
+- `feme::Diagnostics`/`Context::setDiagnosticHandler`/`diagnose()`: SPIR-V
+  import errors currently surface as `llvm::Expected<Module>` failures (and,
+  via `mlir::spirv::deserialize`'s own internal diagnostics, on stderr
+  through MLIR's default handler) rather than through a FeMe-level
+  `DiagnosticHandler`. Design.md's "feme::Context" section lists this as a
+  `Context` responsibility, but nothing in the "SPIR-V import" roadmap item
+  itself requires it, and step 1 already deferred it ("empty feme::Context").
+  Left as a TODO rather than building speculative infrastructure with no
+  current consumer.
+- `feme::Context::getFormatRegistry()` / a registry of statically-linked
+  Importers: `feme-translate`'s registration wires `SPIRVImporter` directly
+  rather than through a registry, since there's exactly one `Importer` so
+  far and no `Driver` yet to consult such a registry. This belongs with
+  `feme::Driver` (still not implemented) in a later roadmap step.
+- SPIR-V *export* (the `Exporter` direction) and retargeting to LLVM IR via
+  `SPIRVToLLVM` — that's roadmap step 3 ("SPIR-V retargeting"), not this one.
