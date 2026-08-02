@@ -26,7 +26,7 @@
 using namespace feme;
 
 llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
-                                                         Context &Ctx) const {
+                                                        Context &Ctx) const {
   if (M.getKind() != Module::Kind::MLIR)
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
