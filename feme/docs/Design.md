@@ -482,21 +482,52 @@ manager) that rewrites `dx.op.*` calls it recognizes back into the
 `llvm.dx.*`/standard LLVM intrinsic calls `DXILOpLowering` lowered them
 from, exercised via `feme-opt` (see "Testing Tools" below).
 
-This is intentionally **incremental, not full DXIL opcode coverage**: it
-currently covers the DXIL opcodes with a direct, context-free 1:1 mapping
-back to a single LLVM intrinsic call -- scalar unary math (`Sin`, `Cos`,
-`Sqrt`, `Saturate`, `Frac`, `IsNaN`, ...) and thread/wave queries
-(`ThreadId`, `GroupId`, `WaveIsFirstLane`, ...). Resource-handle-related
-opcodes (`CreateHandle`, `AnnotateHandle`, buffer/texture loads and stores,
-etc.) are not yet covered -- those need the DXIL "op raising" pass to also
-reconstruct `llvm::hlsl`-style resource metadata (see
-`llvm/include/llvm/Frontend/HLSL/HLSLResource.h`), which is a larger, more
-involved follow-up left for a later change, not attempted here. Opcodes this
-pass doesn't (yet) recognize are left as unmodified `dx.op.*` calls rather
-than erroring, so it composes safely with modules that mix raised and
-not-yet-raised operations, and so opcode coverage can keep growing
-incrementally the same way `dxsa`'s opcode coverage does (see the DXBC
-section below).
+This is intentionally **incremental, not full DXIL opcode coverage**, though
+it now covers the two largest opcode families:
+
+- Every DXIL opcode with a direct, context-free mapping back to a single
+  LLVM intrinsic call: scalar/vector math (`Sin`, `Sqrt`, `FMax`, `Dot3`,
+  `FMad`, `CountBits`, `FirstbitLo`, ...), screen-space derivatives, and
+  thread/wave/quad queries (`ThreadId`, `WaveActiveAllEqual`,
+  `WaveReadLaneAt`, ...), plus `IsFinite`/`IsNormal` (raised via the generic
+  `llvm.is.fpclass` intrinsic, keyed off its `FPClassTest` mask operand,
+  rather than a dedicated per-op intrinsic like `IsNaN`/`IsInf`).
+- Resource-handle creation: a `dx.op.annotateHandle` call over a
+  `dx.op.createHandleFromBinding` call is rewritten into a single
+  `llvm.dx.resource.handlefrombinding` intrinsic call, reconstructing the
+  resource's `target("dx.")` handle type from the two ops' constant
+  `%dx.types.ResBind`/`%dx.types.ResourceProperties` operands -- this is the
+  `llvm::hlsl`-style resource metadata reconstruction this section
+  previously called out as unimplemented. It's narrowly scoped to the two
+  resource kinds whose handle type is fully recoverable from that metadata
+  alone (`TypedBuffer`, and unstructured `RawBuffer`/`ByteAddressBuffer`);
+  `StructuredBuffer`/`CBuffer` need their original element/layout struct
+  type (the binding metadata only carries size/alignment), and
+  textures/samplers need dimension/multi-sample/feedback bits not yet
+  decoded. Since the buffer/texture *load and store* ops that actually
+  consume a resource handle aren't raised yet either (see below), the
+  reconstructed handle is bridged back to the legacy `%dx.types.Handle` type
+  via `llvm.dx.resource.casthandle` -- the same "temporary" cast
+  `DXILOpLowering` itself uses for this purpose -- so mixed raised/
+  not-yet-raised IR stays valid.
+
+Still not covered, and left for later changes: buffer/texture *load and
+store* ops (`BufferLoad`/`BufferStore`, `RawBufferLoad`/`RawBufferStore`,
+`CBufferLoadLegacy`, `TextureLoad`, `Sample*`, ...) -- these need
+`dx.types.ResRet`/`extractvalue` reconstruction into the corresponding
+`llvm.dx.resource.load.*`/`.store.*` intrinsics, a comparably sized
+follow-up to resource-handle creation itself; `StructuredBuffer`/`CBuffer`/
+texture/sampler resource kinds (need more than `ResourceProperties` alone
+supplies, as above); ops that return an aggregate needing `extractvalue`
+reconstruction outside of resources (`IMul`/`UMul`, `UAddc`, `SplitDouble`,
+`WaveActiveBallot`); and ops that pick their source intrinsic from an extra
+"kind"/flag operand rather than the opcode alone (`WaveActiveOp`,
+`WaveActiveBit`, `WavePrefixOp`, `QuadOp`, `Barrier`). Opcodes this pass
+doesn't (yet) recognize -- resource or otherwise -- are left as unmodified
+`dx.op.*` calls rather than erroring, so it composes safely with modules
+that mix raised and not-yet-raised operations, and so opcode coverage can
+keep growing incrementally the same way `dxsa`'s opcode coverage does (see
+the DXBC section below).
 
 The DXIL opcode numbers `OpRaisingPass` matches on are hard-coded rather
 than reusing `llvm::dxil::OpCode` (`llvm/lib/Target/DirectX/DXILConstants.h`):
@@ -1138,12 +1169,17 @@ This is a rough sequencing, not a schedule:
 
    Status: `DXContainer`/bitcode parsing (`feme::DXILImporter`) and its
    fuzzing harness (`feme-dxil-import-fuzzer`) are implemented; the "op
-   raising" pass (`feme::dxil::OpRaisingPass`) is now implemented for a
-   curated, incrementally-growing subset of opcodes (scalar math,
-   thread/wave queries) -- see the "Status" note under the DXIL section
-   above. Resource-handle opcodes (and the corresponding
-   `LLVMFrontendHLSL` resource metadata reconstruction) remain open for a
-   follow-up change.
+   raising" pass (`feme::dxil::OpRaisingPass`) now covers all direct-mapped
+   scalar/vector math and thread/wave/quad-query opcodes, plus
+   resource-handle *creation* for `TypedBuffer`/unstructured `RawBuffer` --
+   see the "Status" note under the DXIL section above. Buffer/texture load
+   and store ops (the actual consumers of a resource handle), the
+   `StructuredBuffer`/`CBuffer`/texture/sampler resource kinds, and a
+   handful of opcode families needing more than a 1:1 intrinsic mapping
+   (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`'s flag-selected
+   variants, `Barrier`, and the aggregate-returning `IMul`/`UMul`/
+   `UAddc`/`SplitDouble`/`WaveActiveBallot`) remain open for follow-up
+   changes.
 5. **DXIL retargeting**: reuse step 3's backend glue for DXIL-derived
    `llvm::Module`s.
 6. **DXIL ⇄ SPIR-V translation**: DXIL (LLVM IR) → LLVM `SPIRV` target;
