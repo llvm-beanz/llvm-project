@@ -11,6 +11,8 @@ tool has its own page:
   import/export stages in isolation.
 - [`feme-spirv-import-fuzzer`](feme-spirv-import-fuzzer.md) — libFuzzer
   harness for `feme::SPIRVImporter`.
+- [`feme-dxil-import-fuzzer`](feme-dxil-import-fuzzer.md) — libFuzzer
+  harness for `feme::DXILImporter`.
 
 `feme-opt` and `feme-translate` are testing-only entry points (see the "Core
 Architectural Principle: No Global State" and "Testing Tools" sections of
