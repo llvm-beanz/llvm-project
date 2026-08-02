@@ -794,11 +794,33 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
   of this pattern), which is both simpler (one existing tool instead of an
   additionally hand-maintained YAML part layout) and exercises the exact
   container shape a real DXIL toolchain produces, rather than one
-  hand-assembled to match `DXILImporter`'s expectations. `feme::DXILImporter`'s
-  `gtest` coverage (`unittests/Import/DXIL/DXILImporterTest.cpp`) does use
-  the `DXContainerYAML`/`yaml2dxcontainer` API directly (in-process, not via
-  the `yaml2obj` binary) for a lighter-weight fixture not requiring the
-  `DirectX` target to be configured into the build at all.
+  hand-assembled to match `DXILImporter`'s expectations.
+
+  `feme::DXILImporter`'s "imports a real binary" cases (raw bitcode and
+  bitcode wrapped in a `DXContainer`) were initially covered by `gtest`
+  (`unittests/Import/DXIL/DXILImporterTest.cpp`, using
+  `llvm::parseAssemblyString`/`WriteBitcodeToFile` and the
+  `DXContainerYAML`/`yaml2dxcontainer` API in-process to build fixtures);
+  those cases were migrated to the `lit`/`FileCheck` tests above
+  (`test/Feme/dxil-import.ll`, `test/Feme/dxil-import-container.ll`) and the
+  `gtest` versions removed, per the "Deviation" entries under Testing
+  Strategy below. This trades away the one advantage the in-process
+  `gtest` fixture had — not requiring the `DirectX` target to be configured
+  into the build — for a fixture built by real FeMe/LLVM command-line
+  tools, matching how every other importer/translator round trip is tested.
+  `DXILImporterTest.cpp`'s remaining `gtest` cases (malformed/absent-DXIL
+  inputs) don't depend on a real DXIL/DXContainer fixture and so keep no
+  such tradeoff.
+
+  Note this doesn't fully close the gap the deviation above already flags:
+  DXIL is a distinct, frozen-version dialect of LLVM IR, not current LLVM
+  IR, so even a real `DXContainer` built by `llc`/`llvm-as` from
+  hand-written *current*-syntax `.ll` only exercises `DXILImporter`'s
+  reliance on LLVM's bitcode auto-upgrade path (see the DXIL section
+  above), not a genuinely historical DXIL module as a real toolchain would
+  emit. No textual, human-readable way to author a truly historical-format
+  fixture exists yet; closing that gap is future work, not a regression
+  introduced by this migration.
 - **DXBC**: use `dxbc-as` (see above) to assemble human-readable,
   Microsoft/`fxc`-style DXBC assembly text into a binary blob at test
   time, piped into `feme-translate --import-dxbc=-`/`feme` as needed. This
@@ -970,6 +992,24 @@ feme/
   `<arch>-registered-target` feature (mirroring `llvm/test/lit.cfg.py`) so
   the null-pipeline test can `REQUIRES: spirv-registered-target` instead of
   unconditionally requiring LLVM's `SPIRV` target to be configured in.
+- Deviation: `feme::SPIRVImporter`'s "imports a valid SPIR-V binary" case
+  and `feme::DXILImporter`'s "imports raw bitcode"/"imports bitcode wrapped
+  in a `DXContainer`" cases were likewise initially covered by `gtest`
+  (`unittests/Import/SPIRV/SPIRVImporterTest.cpp`,
+  `unittests/Import/DXIL/DXILImporterTest.cpp`), each building its binary
+  fixture in-process (MLIR's SPIR-V serializer; LLVM's assembler/bitcode
+  writer and the `DXContainerYAML`/`yaml2dxcontainer` API). An `Importer`
+  invoked on a real binary is exactly the kind of stage `feme-translate`
+  exists to exercise, and equivalent `lit`/`FileCheck` coverage already
+  existed (`test/Feme/spirv-import.mlir`, `test/Feme/dxil-import.ll`,
+  `test/Feme/dxil-import-container.ll`, all driven through
+  `feme-translate`'s `--import-spirv`/`--import-dxil` flags), so the
+  duplicate `gtest` cases (and their now-unused fixture-building helpers)
+  were removed to avoid lower-signal coverage of the same behavior; see the
+  "Avoiding binary test fixtures" deviation note above for the DXIL-specific
+  tradeoff this involves. Each `Importer`'s remaining `gtest` cases (format
+  name, malformed/ill-formed input) don't depend on a real binary fixture
+  and were left in place.
 - Given FeMe consumes externally-defined binary formats supplied by
   untrusted sources at driver runtime, fuzzing the `Importer`s is a **v1
   requirement, not a fast-follow**: an `llvm-fuzzer`-style harness lands
