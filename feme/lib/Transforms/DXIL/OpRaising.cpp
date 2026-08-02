@@ -15,6 +15,8 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Module.h"
+#include "llvm/Support/DXILABI.h"
+#include <optional>
 
 using namespace llvm;
 using namespace feme::dxil;
@@ -181,6 +183,177 @@ bool raiseIsFPClassCall(CallInst &CI, unsigned Opcode) {
   return true;
 }
 
+/// Maps a DXIL `dxil::ElementType` (the wire-format element type encoded in
+/// `AnnotateHandle`'s `ResourceProperties` operand, see
+/// `llvm/include/llvm/Support/DXILABI.h`) to the LLVM scalar type used as a
+/// resource target extension type's element type parameter (see
+/// `llvm/include/llvm/Analysis/DXILResource.h`'s `TypedBufferExtType`).
+/// Returns nullptr for element kinds this pass doesn't (yet) reconstruct: the
+/// UNORM/SNORM/packed-8x32 formats, which need extra format metadata beyond a
+/// plain LLVM scalar type to round-trip faithfully.
+Type *getElementLLVMType(dxil::ElementType ET, LLVMContext &Ctx) {
+  switch (ET) {
+  case dxil::ElementType::I1:
+    return Type::getInt1Ty(Ctx);
+  case dxil::ElementType::I16:
+  case dxil::ElementType::U16:
+    return Type::getInt16Ty(Ctx);
+  case dxil::ElementType::I32:
+  case dxil::ElementType::U32:
+    return Type::getInt32Ty(Ctx);
+  case dxil::ElementType::I64:
+  case dxil::ElementType::U64:
+    return Type::getInt64Ty(Ctx);
+  case dxil::ElementType::F16:
+    return Type::getHalfTy(Ctx);
+  case dxil::ElementType::F32:
+    return Type::getFloatTy(Ctx);
+  case dxil::ElementType::F64:
+    return Type::getDoubleTy(Ctx);
+  default:
+    return nullptr;
+  }
+}
+
+/// `TypedBufferExtType::isSigned()` distinguishes signed/unsigned *integer*
+/// formats (`I32` vs `U32`), which `dxil::ElementType` already encodes
+/// directly -- so this only needs to special-case the `U*` element kinds.
+/// For non-integer element types (float, and the not-yet-reconstructed
+/// norm/packed kinds) DXIL's wire format has no separate signedness bit at
+/// all, so `true` here is an inherent-to-the-format best effort, not a
+/// recoverable fact -- it doesn't affect codegen for those element types.
+bool isSignedElementType(dxil::ElementType ET) {
+  switch (ET) {
+  case dxil::ElementType::U16:
+  case dxil::ElementType::U32:
+  case dxil::ElementType::U64:
+    return false;
+  default:
+    return true;
+  }
+}
+
+/// Reads \p V as a constant `i32`/`i8`, or returns `std::nullopt` if it isn't
+/// one (e.g. because the resource binding isn't fully constant-folded, which
+/// this pass doesn't attempt to reason about further).
+std::optional<uint64_t> getConstInt(const Value *V) {
+  if (const auto *CI = dyn_cast<ConstantInt>(V))
+    return CI->getZExtValue();
+  return std::nullopt;
+}
+
+/// Raises a `dx.op.annotateHandle` (opcode 216) call whose handle operand is
+/// a `dx.op.createHandleFromBinding` (opcode 217) call back into a single
+/// `llvm.dx.resource.handlefrombinding` intrinsic call, reconstructing the
+/// resource's `target("dx.")` handle type from the two ops' constant
+/// `%dx.types.ResBind`/`%dx.types.ResourceProperties` struct operands -- the
+/// `llvm::hlsl`-style resource metadata reconstruction called out as future
+/// work in an earlier version of this pass (see feme/docs/Design.md).
+///
+/// This is intentionally narrow: it only reconstructs the two resource kinds
+/// whose target extension type is fully recoverable from that metadata alone
+/// (`TypedBuffer`, and unstructured `RawBuffer` i.e. `ByteAddressBuffer`).
+/// `StructuredBuffer`/`CBuffer` need their *original* element/layout struct
+/// type, which DXIL's binding metadata doesn't carry (only its size and
+/// alignment); textures and samplers need dimension/multi-sample/feedback
+/// information this pass doesn't yet decode. Those, and raising the
+/// buffer/texture load and store ops that would actually consume this
+/// handle, are left for later changes (see feme/docs/Design.md); since nothing
+/// in this pass raises those consumers yet, the reconstructed handle is
+/// bridged back to the legacy `%dx.types.Handle` type via
+/// `llvm.dx.resource.casthandle` -- the same "temporary" cast
+/// `DXILOpLowering` itself uses for this exact purpose (see
+/// `DXILOpLowering::createTmpHandleCast`) -- so the result stays valid IR.
+bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
+  if (AnnotateCI.arg_size() != 3)
+    return false;
+  auto *HandleCI = dyn_cast<CallInst>(AnnotateCI.getArgOperand(1));
+  Function *HandleFn = HandleCI ? HandleCI->getCalledFunction() : nullptr;
+  if (!HandleFn ||
+      !HandleFn->getName().starts_with("dx.op.createHandleFromBinding") ||
+      HandleCI->arg_size() != 4)
+    return false;
+  std::optional<uint64_t> HandleOpcode =
+      getConstInt(HandleCI->getArgOperand(0));
+  if (HandleOpcode != 217)
+    return false;
+
+  auto *ResBind = dyn_cast<ConstantStruct>(HandleCI->getArgOperand(1));
+  auto *ResProps = dyn_cast<ConstantStruct>(AnnotateCI.getArgOperand(2));
+  if (!ResBind || ResBind->getNumOperands() != 4 || !ResProps ||
+      ResProps->getNumOperands() != 2)
+    return false;
+
+  std::optional<uint64_t> LowerBound = getConstInt(ResBind->getOperand(0));
+  std::optional<uint64_t> UpperBound = getConstInt(ResBind->getOperand(1));
+  std::optional<uint64_t> Space = getConstInt(ResBind->getOperand(2));
+  std::optional<uint64_t> Word0 = getConstInt(ResProps->getOperand(0));
+  std::optional<uint64_t> Word1 = getConstInt(ResProps->getOperand(1));
+  if (!LowerBound || !UpperBound || !Space || !Word0 || !Word1)
+    return false;
+
+  // See ResourceInfo::getAnnotateProps (llvm/lib/Analysis/DXILResource.cpp)
+  // for this bit layout -- it's the exact forward direction this inverts.
+  auto Kind = static_cast<dxil::ResourceKind>(*Word0 & 0xFF);
+  bool IsUAV = (*Word0 >> 12) & 1;
+  bool IsROV = (*Word0 >> 13) & 1;
+
+  LLVMContext &Ctx = AnnotateCI.getContext();
+  TargetExtType *HandleTy = nullptr;
+  if (Kind == dxil::ResourceKind::TypedBuffer) {
+    auto ElemKind = static_cast<dxil::ElementType>(*Word1 & 0xFF);
+    Type *ElemTy = getElementLLVMType(ElemKind, Ctx);
+    if (!ElemTy)
+      return false;
+    HandleTy = TargetExtType::get(
+        Ctx, "dx.TypedBuffer", {ElemTy},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV),
+         static_cast<unsigned>(isSignedElementType(ElemKind))});
+  } else if (Kind == dxil::ResourceKind::RawBuffer && *Word1 == 0) {
+    HandleTy = TargetExtType::get(
+        Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
+  } else {
+    return false; // Unsupported resource kind: leave both ops unmodified.
+  }
+
+  uint32_t Size = *UpperBound == std::numeric_limits<uint32_t>::max()
+                      ? 0
+                      : static_cast<uint32_t>(*UpperBound - *LowerBound + 1);
+
+  IRBuilder<> Builder(&AnnotateCI);
+  // `DXILOpLowering` biases the binding-relative index it passes to
+  // `CreateHandleFromBinding` by `LowerBound` (see
+  // `DXILOpLowering::lowerToBindAndAnnotateHandle`); undo that here rather
+  // than pattern-matching the `add` it emits to do so, since subtracting a
+  // known constant is exact regardless of whether the original index was
+  // itself a constant (already folded away) or a runtime value.
+  Value *Index = HandleCI->getArgOperand(2);
+  if (*LowerBound != 0)
+    Index = Builder.CreateSub(Index, Builder.getInt32(*LowerBound));
+
+  Function *HandleFromBindingFn = Intrinsic::getOrInsertDeclaration(
+      AnnotateCI.getModule(), Intrinsic::dx_resource_handlefrombinding,
+      {HandleTy});
+  Value *NewHandle = Builder.CreateCall(
+      HandleFromBindingFn,
+      {Builder.getInt32(*Space), Builder.getInt32(*LowerBound),
+       Builder.getInt32(Size), Index,
+       ConstantPointerNull::get(PointerType::getUnqual(Ctx))});
+
+  Function *CastFn = Intrinsic::getOrInsertDeclaration(
+      AnnotateCI.getModule(), Intrinsic::dx_resource_casthandle,
+      {AnnotateCI.getType(), HandleTy});
+  Value *CastBack =
+      Builder.CreateCall(CastFn, {NewHandle}, AnnotateCI.getName());
+
+  AnnotateCI.replaceAllUsesWith(CastBack);
+  AnnotateCI.eraseFromParent();
+  if (HandleCI->use_empty())
+    HandleCI->eraseFromParent();
+  return true;
+}
+
 /// Rewrites a single `dx.op.*` call to the LLVM intrinsic call it was
 /// lowered from, per \p RaiseAs. Returns false (leaving \p CI untouched) if
 /// the call's shape doesn't match what's expected for \p RaiseAs (e.g. a
@@ -241,6 +414,10 @@ PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
 
       if (Opcode == 10 || Opcode == 11) { // IsFinite, IsNormal
         Changed |= raiseIsFPClassCall(*CI, Opcode);
+        continue;
+      }
+      if (Opcode == 216) { // AnnotateHandle
+        Changed |= raiseResourceHandleFromBinding(*CI);
         continue;
       }
 
