@@ -20,8 +20,4 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-The tests you added under unittests/Translate don't make sense to me as
-googletest test cases, wouldn't it be better to drive these through lit?
-
-Please update these to be lit test cases and build out the feme-translate and
-feme-opt tools as appropriate.
+Can you produce usage docs in markdown format for each of the tools being added?
