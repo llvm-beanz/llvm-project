@@ -20,6 +20,7 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-The tests in the TargetMachineBackendTest don't make sense as googletest test
-cases, they should be done via LIT, can you please update the test cases and
-infrastructure appropriately?
+The feme-spirv-import-fuzzer is not correctly connected to libFuzzer, so I
+cannot run it locally and have it actually do anything. Can you please update
+the fuzzer so that it can be used to fuzz the spriv import path, and draft some
+documentation about how to use the fuzzer.
