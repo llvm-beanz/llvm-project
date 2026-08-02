@@ -20,11 +20,20 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-The tests in the SPIRVImporterTest.cpp file that cover actual valid modules
-(buildMinimalSPIRVBinary), should be lit tests running against the command-line
-testing tools with LIT. Please rewrite them as such.
+One of our output formats for translation should be "llvm", which is updating
+the input file to normalized LLVM IR that could be fed into llc/opt and other
+LLVM tools or backends.
 
-The same is true for the DXILImporterTest.cpp tests that depend on valid DXIL IR
-(buildMinimalBitcode), but it is even more significant for the DXIL case because
-DXIL is not LLVM IR, so you cannot test it by using modern LLVM to parse textual
-IR.
+For DXIL, this will require some translation and fixup passes that will replace
+dx.op function calls with DirectX backend or LLVM intrinsics, and transform IR
+metadata from the DXIL format to the formats used in the LLVMFrontendHLSL
+library to describe IR metadata.
+
+For SPIRV, we need to do a similar translation of SPIRV instructions into LLVM
+IR and SPIRV backend intrinsics, and produce correct LLVMFrontendHLSL metadata
+(as appropriate).
+
+You can use the test cases in the offlooad-test-suite as test collateral for
+this next phase by compiling the tests to DXIL or SPIRV and using that as inputs
+to the testing tools to flesh out all the transformations required to convert
+DXIL -> LLVM IR, and SPIRV -> LLVM IR.
