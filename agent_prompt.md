@@ -9,10 +9,20 @@ conform to the [LLVM Coding Standards](llvm/docs/CodingStandards.rst).
 
 Also please review the feme/.instructions.md file.
 
+When you build and test ensure that you are using object file caching, and
+building with assertions enabled.
+
+When you deviate from the design document please update the design document.
+
 Break your changes into small code changes with each change committed
 spearately. Record your thought process into a file named "agent_thoughts.md" at
 the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-I'd like you to build out the first step on the roadmap of the [FeMe design document](/feme/docs/Design.md).
+Please add a cmake cache script at feme/cmake/caches/feme.cmake that sets the
+Cmake variables required to include feme in the LLVM build.
+
+The feme frontend tool shouldn't handle argument parsing, we should have a
+lib/Frontend library that uses libOption's tablegen approach to handle that.
+Please create those stubs.
