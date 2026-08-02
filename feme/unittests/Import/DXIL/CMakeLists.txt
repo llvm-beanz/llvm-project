@@ -1,0 +1,19 @@
+set(LLVM_LINK_COMPONENTS
+  AsmParser
+  BitReader
+  BitWriter
+  Core
+  Object
+  ObjectYAML
+  Support
+  TestingSupport
+  )
+
+add_feme_unittest(FeMeImportDXILTests
+  DXILImporterTest.cpp
+  )
+target_link_libraries(FeMeImportDXILTests
+  PRIVATE
+  FeMeCore
+  FeMeImportDXIL
+  )
