@@ -1479,3 +1479,215 @@ migration fixes it.
 Three commits: the `SPIRVImporterTest.cpp` migration, the
 `DXILImporterTest.cpp` migration, and the `Design.md` update, followed by
 this `agent_thoughts.md` entry as its own commit.
+
+# Agent thoughts: DXIL "op raising" pass (roadmap step 4 continuation)
+
+## Problem
+
+The request was broad and product-shaped: add an "llvm" output format that
+produces normalized LLVM IR, with DXIL requiring "translation and fixup
+passes that will replace dx.op function calls with DirectX backend or LLVM
+intrinsics, and transform IR metadata from the DXIL format to the formats
+used in the LLVMFrontendHLSL library", and an analogous SPIR-V ask, using
+offload-test-suite-compiled shaders as test collateral.
+
+Before writing anything I re-read `feme/.instructions.md` and all of
+`feme/docs/Design.md` (it's long -- read it in sections). This mapped the
+request onto an already-identified, explicitly-tracked gap: roadmap step 4
+("DXIL import") is marked done for `DXContainer`/bitcode parsing but
+explicitly calls out "op raising" (`dx.op.*` calls -> `llvm.dx.*`/standard
+LLVM IR, the semantic inverse of LLVM's own `DXILOpLowering` pass) as **not
+yet implemented**, expected to land "as a later, separate FeMe pass (likely
+via `feme-opt`)". That's a precisely-scoped, already-designed piece of the
+much larger ask, so I focused this change there rather than attempting the
+full breadth of the request in one pass.
+
+## Scope decision (and what I deliberately did *not* do)
+
+The full request is enormous: DXIL op raising across the *entire* DXIL
+opcode set (100+ ops, including resource handles/loads/stores which need
+real `LLVMFrontendHLSL` resource metadata reconstruction), a whole SPIR-V
+raising story (SPIR-V ops -> LLVM `SPIRV` target intrinsics, not just
+`ConvertSPIRVToLLVMPass`'s existing `spirv` dialect -> `llvm` dialect
+conversion), and a `Driver`/`--to=llvm` end-user-facing "output format"
+concept that doesn't exist yet (only individual `feme-translate`
+stages/flags exist today -- `Driver` itself is unimplemented). Attempting
+all of that in one change would mean either a shallow, unvalidated pass
+over everything or silently dropping most of it while claiming completion.
+
+Instead I implemented one real, fully-tested, incrementally-extensible
+slice: `feme::dxil::OpRaisingPass`, covering the DXIL opcodes with a direct,
+context-free 1:1 mapping to a single LLVM intrinsic call -- scalar unary
+math (`Sin`, `Cos`, `Tan`, `ACos`, `ASin`, `ATan`, `HCos`, `HSin`, `HTan`,
+`Exp2`, `Frac`, `Log2`, `Sqrt`, `RSqrt`, `Round`/`Floor`/`Ceil`/`Trunc`,
+`Rbits`, `Abs`, `Saturate`, `IsNaN`, `IsInf`) and thread/wave queries
+(`ThreadId`, `GroupId`, `ThreadIdInGroup`, `FlattenedThreadIdInGroup`,
+`WaveIsFirstLane`, `WaveGetLaneIndex`). Opcodes outside that set (notably
+every resource-handle-related op, which is where `LLVMFrontendHLSL` metadata
+actually comes in) are deliberately left untouched rather than raised
+incorrectly or causing an error -- matching how `dxsa`'s opcode coverage in
+this same design doc is explicitly meant to grow "opcode-family by
+opcode-family" rather than blocking on full coverage up front. I recorded
+this explicitly as the scope boundary in both `Design.md` and this entry,
+rather than describing the change as "the DXIL op raising pass" (implying
+completeness) or silently narrowing scope without saying so.
+
+I did not touch SPIR-V raising, `Export/`, or `Driver` in this change --
+SPIR-V's "raise to LLVM `SPIRV` target intrinsics" side is a comparably
+sized, separate follow-up (today's `SPIRVToLLVMTranslator` produces the
+`llvm` dialect via MLIR's generic `ConvertSPIRVToLLVMPass`, not
+target-specific intrinsic calls), and I didn't want to give it a token,
+unvalidated implementation just to say I'd "started" it. I also did not
+attempt to fetch/build `offload-test-suite` shaders as test collateral in
+this change: real DXIL from that suite would still hit the exact same
+"resource ops aren't covered yet" wall as any other real shader (almost
+every non-trivial HLSL shader touches resources), so it wouldn't have
+exercised anything past what this change's own opcode set covers, and
+pulling in an external test-suite dependency is a larger decision (network
+access, licensing, build wiring) I didn't think appropriate to make
+unilaterally inside an otherwise-scoped-down change. That gap is called out
+explicitly below and in Design.md rather than glossed over.
+
+## Design questions I had to resolve
+
+1. **Where do the DXIL opcode numbers come from?** LLVM's own
+   `llvm::dxil::OpCode` enum (`llvm/lib/Target/DirectX/DXILConstants.h`) is
+   generated from `DXIL.td` via a private, `DirectX`-target-only tablegen
+   backend (`DXILOperation.inc`, not installed/exported). Depending on it
+   from `feme/` would mean reaching into another target's private
+   generated headers -- a layering violation per `feme/.instructions.md`
+   ("Maintain proper library layering ... Keep internal headers private to
+   modules"). I confirmed by reading `DXIL.td` that the opcode numbers
+   themselves (e.g. `Sin = 13`, `ThreadId = 93`) are DXIL's frozen
+   wire-format encoding -- literal integers in each `DXILOp<N, ...>`
+   definition, which cannot change without breaking DXIL's own backward-
+   compatibility contract -- so hard-coding the handful this pass covers in
+   feme's own small table is a legitimate, stable choice, not a fragile
+   guess. I documented this tradeoff explicitly in Design.md (a maintenance
+   cost as coverage grows, versus a build-layering violation) rather than
+   silently picking one without recording why.
+2. **How does this get tested, given the design's stated intent
+   ("`feme-opt`, run just the DXIL op raising pass on hand-written
+   `dx.op.*` IR")?** `feme-opt` was MLIR-only (`MlirOptMain`) -- there was
+   no way to run an LLVM `ModulePass` through it at all. Rather than
+   spinning up a second binary (contrary to Design.md's own description of
+   `feme-opt` as *the* pass-pipeline testing tool) or building a full `opt`
+   clone, I added a minimal `opt`-style new-pass-manager mode gated on a
+   leading `--llvm` argument, just large enough to parse IR, run a
+   `-passes=` pipeline (with FeMe's own passes registered by name), and
+   print the result. This is a real, if small, design deviation from the
+   original feme-opt skeleton, so I recorded it as such in Design.md's
+   Testing Tools section rather than treating it as an invisible
+   implementation detail.
+3. **gtest or lit?** Per the already-established deviation pattern in this
+   tree (SPIRVToLLVMTranslator, TargetMachineBackend, the importer "real
+   binary" cases -- all migrated from gtest to lit because their
+   input/output is textual IR/MLIR with no fixture-construction cost gtest
+   was buying), `OpRaisingPass`'s input and output are *both* plain textual
+   LLVM IR from day one, so I skipped gtest entirely and added only lit
+   coverage, recording this explicitly as a deviation (applied from
+   introduction rather than as a later migration) so it doesn't read as an
+   oversight next to the DXIL/SPIR-V importers' existing gtest cases.
+
+## Changes
+
+1. `feme/include/feme/Transforms/DXIL/OpRaising.h`,
+   `feme/lib/Transforms/DXIL/OpRaising.cpp` (+ `CMakeLists.txt` wiring):
+   `feme::dxil::OpRaisingPass`, an `llvm::PassInfoMixin` module pass. For
+   each `dx.op.*` call, reads the opcode from its first (always-constant)
+   operand, looks it up in a small table mapping opcode -> LLVM/`llvm.dx.*`
+   intrinsic ID (+ whether it's overloaded on the remaining operand's
+   type), and rebuilds an equivalent intrinsic call, copying fast-math
+   flags where applicable (guarded with `isa<FPMathOperator>` on both sides
+   -- integer/predicate ops like `ThreadId`/`IsNaN`'s `i1` result aren't
+   `FPMathOperator`s, and unconditionally calling `copyFastMathFlags`
+   asserts on those; caught this via a real crash while manually testing,
+   see Validation). Unrecognized opcodes are left alone. Once a `dx.op.*`
+   function has no more callers, it's erased.
+2. `feme/tools/feme-opt/feme-opt.cpp` (+ `CMakeLists.txt`): added the
+   `--llvm` new-pass-manager mode described above, registering
+   `OpRaisingPass` (and, going forward, any other FeMe LLVM IR pass) by
+   name via `PassBuilder::registerPipelineParsingCallback`.
+3. `feme/test/Feme/dxil-raise-ops.ll`: hand-written `dx.op.*` IR (in the
+   exact shape `DXILOpLowering` produces, cross-checked against
+   `llvm/test/CodeGen/DirectX/sin.ll` and `comput_ids.ll`) covering a
+   representative sample of every opcode class this pass handles, plus an
+   unrecognized-opcode case proving it's left untouched.
+4. `feme/test/Feme/dxil-raise-ops-roundtrip.ll`: a stronger, end-to-end
+   check -- starts from `llvm.*`/`llvm.dx.*` intrinsic calls, runs LLVM's
+   real `opt -dxil-op-lower`, then feeds that through `feme-opt --llvm
+   -passes=feme-dxil-raise-ops` and checks it matches the original
+   intrinsic calls. `REQUIRES: directx-registered-target`, since it needs
+   the real `-dxil-op-lower` pass. Added `opt` to `test/lit.cfg.py`'s tool
+   substitutions and `test/CMakeLists.txt`'s `FEME_TEST_DEPENDS` for this.
+5. `feme/docs/Design.md`: updated the DXIL section's "Status" note, roadmap
+   step 4, the Testing Tools description of `feme-opt`, a new Testing
+   Strategy deviation note (the gtest-skipping rationale above), and the
+   Directory/Library Layout to include `Transforms/DXIL`.
+6. `feme/docs/CommandGuide/feme-opt.md`: documented the new `--llvm` mode
+   and its options.
+
+## Validation
+
+- Manually exercised the pass end to end before writing the lit tests:
+  hand-wrote a small `.ll` with `dx.op.unary.f32`/`dx.op.threadId.i32`
+  calls and ran `feme-opt --llvm -passes=feme-dxil-raise-ops -S` on it.
+  First attempt crashed (`copyFastMathFlags` assertion on the integer
+  `ThreadId` call) -- fixed by gating the copy on `isa<FPMathOperator>`,
+  confirmed fixed by rerunning.
+- Ran a genuine round-trip using LLVM's own pass: wrote a `.ll` with
+  `llvm.sin.f32`/`llvm.sqrt.f32`/`llvm.dx.thread.id`/
+  `llvm.dx.flattened.thread.id.in.group` calls, ran `opt -S -dxil-op-lower`
+  on it (confirming it actually produces `dx.op.*` calls, e.g. `call float
+  @dx.op.unary.f32(i32 13, float %a), !dx.precise !0`), then ran
+  `feme-opt --llvm -passes=feme-dxil-raise-ops -S` on that output and
+  confirmed it reproduces the original intrinsic calls exactly (module
+  `!dx.precise` metadata / attribute-group cosmetics, which no importer/
+  raiser in this tree round-trips today and isn't part of this change's
+  scope).
+- Hit and fixed a second real bug this way: the initial `IsNaN`/`IsInf`
+  handling used the *call's result type* (`i1`) as the intrinsic overload
+  key, but `llvm.dx.isnan`/`llvm.dx.isinf` are overloaded on their *operand*
+  type (float-family), not their `i1` result -- this produced a type
+  mismatch assertion in `CallInst::init` ("bad signature") the first time I
+  ran the full `dxil-raise-ops.ll` test (not caught by the smaller manual
+  check above, which didn't include an `IsNaN`/`IsInf` case). Fixed by
+  keying the overload type off the operand instead of the result, and this
+  is exactly the kind of bug the roundtrip test is meant to catch for
+  cases it does cover -- a reminder of why the roundtrip test exists
+  alongside the hand-written one.
+- `ninja check-feme` (existing `build/` directory: `LLVM_ENABLE_ASSERTIONS=ON`,
+  `CMAKE_CXX_COMPILER_LAUNCHER=ccache` already configured, ran a fresh
+  `cmake .` reconfigure first since new `CMakeLists.txt` files were added):
+  15/15 `lit` tests pass (13 pre-existing + the 2 new ones).
+- Rebuilt and reran all pre-existing `gtest` unit binaries to check for
+  regressions from the `lib/CMakeLists.txt`/`test/CMakeLists.txt` changes:
+  `FeMeImportDXILTests` (3/3), `FeMeImportSPIRVTests` (3/3), `FeMeTargetTests`
+  (2/2), `FeMeTranslateSPIRVTests` (4/4), `FeMeCoreTests` (8/8),
+  `FeMeFrontendTests` (8/8) -- all pass, no regressions.
+- `clang-format --style=file -output-replacements-xml` on all new/edited
+  `.cpp`/`.h` files, then `-i` to apply the (purely whitespace) diffs it
+  found in `feme-opt.cpp` and the new `Transforms/DXIL` files.
+
+## Follow-up work (not attempted here, left for later changes)
+
+- Resource-handle DXIL opcodes (`CreateHandle`, `AnnotateHandle`, buffer/
+  texture loads and stores, etc.) and the corresponding `LLVMFrontendHLSL`
+  metadata reconstruction -- the part of the original request this change
+  does *not* yet address, and the natural next opcode family to raise.
+- SPIR-V raising to LLVM `SPIRV`-target intrinsics (today's
+  `SPIRVToLLVMTranslator` only reaches the generic `llvm` dialect via
+  `ConvertSPIRVToLLVMPass`).
+- A `Driver`/end-user `--to=llvm` "output format" surfaced through `feme`
+  itself, once enough of the above exists to make it meaningful; today the
+  equivalent is composing `feme-translate --import-dxil` with `feme-opt
+  --llvm -passes=feme-dxil-raise-ops` by hand.
+- Using real `offload-test-suite`-compiled shaders as test collateral, once
+  resource-op raising exists to make them exercise more than the "left
+  untouched" path.
+
+## Commits
+
+Four commits (the `OpRaisingPass` library, the `feme-opt` `--llvm` mode, the
+lit tests, and the `Design.md`/`feme-opt.md` doc updates), followed by this
+`agent_thoughts.md` entry as its own commit.
