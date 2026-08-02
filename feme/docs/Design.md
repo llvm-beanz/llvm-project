@@ -1,9 +1,5 @@
 # FeMe: FrontEnd for the MiddleEnd — Design Document
 
-> Status: **Draft / Work in progress**. This document describes the intended
-> architecture for the FeMe project. Sections marked **[Open Question]**
-> indicate decisions that still need to be made.
-
 ## Summary
 
 FeMe ("FrontEnd for the MiddleEnd") is a library and command line tool for
@@ -845,7 +841,9 @@ This is a rough sequencing, not a schedule:
    monorepo build, empty `feme::Context`, `feme` skeleton with
    `--help` only, plus `feme-opt` and `feme-translate` testing-tool
    skeletons (see Testing Tools above) so subsequent steps have a way to
-   `lit`-test passes/stages in isolation from the start.
+   `lit`-test passes/stages in isolation from the start. Should include setting
+   up the lit testing environment and adding the `check-feme` target to the
+   build.
 2. **SPIR-V import**: wrap MLIR's existing `spirv` deserializer behind
    FeMe's `Importer` interface; round-trip test (SPIR-V in → `spirv` dialect
    text out); add a fuzzing harness for the SPIR-V importer.
