@@ -419,3 +419,208 @@ let me actually exercise it rather than merely getting it to compile.
   `feme::Driver` (still not implemented) in a later roadmap step.
 - SPIR-V *export* (the `Exporter` direction) and retargeting to LLVM IR via
   `SPIRVToLLVM` — that's roadmap step 3 ("SPIR-V retargeting"), not this one.
+
+# Agent thoughts: SPIR-V retargeting, take 1 -- a "null pipeline" instead of X86
+
+The request was to start on roadmap step 3 ("SPIR-V retargeting"), but with
+a deliberate deviation from Design.md's original phrasing ("`spirv` dialect
+-> `SPIRVToLLVM` -> `llvm::Module` -> `TargetMachine` for at least one
+target (e.g. X86, as the easiest to validate)"): build a **null pipeline**
+first -- SPIR-V -> `spirv` dialect -> LLVM IR -> back to SPIR-V through
+LLVM's own `SPIRV` backend -- rather than X86, to validate the
+`Translator`/`Backend` plumbing itself before worrying about any particular
+real ISA's ABI/calling-convention details.
+
+## Why a null pipeline is the right first step here
+
+The interesting, risky part of this roadmap step is the `spirv` dialect ->
+`llvm` dialect -> `llvm::Module` conversion (`SPIRVToLLVM`) and the general
+`Backend` abstraction wrapping `llvm::TargetMachine` -- *not* which specific
+target that `llvm::Module` eventually gets lowered to. Retargeting straight
+to X86 would conflate two different things that can fail: bugs in the
+SPIR-V->LLVM-IR conversion itself, and X86-specific codegen/ABI concerns
+that have nothing to do with FeMe's own code. LLVM already ships its own
+in-tree `SPIRV` backend (`llvm/lib/Target/SPIRV`) that lowers `llvm::Module`
+back into real SPIR-V binaries -- it's a normal, non-experimental target
+(listed in `LLVM_ALL_TARGETS` in `llvm/CMakeLists.txt`, not
+`LLVM_ALL_EXPERIMENTAL_TARGETS`). Retargeting a SPIR-V-derived `llvm::Module`
+back to SPIR-V through that backend gives a self-checking round trip: the
+output can be re-run through the already-implemented `SPIRVImporter` and
+compared structurally against the input, with no real ISA involved at all.
+If that round trip works, the `Translator`/`Backend` plumbing is trustworthy
+and X86 (or AArch64, AMDGPU, NVPTX) becomes "just pick a different
+`BackendOptions::TargetTriple`" -- not a redesign.
+
+## Validating the underlying MLIR/LLVM plumbing by hand first
+
+Before writing any FeMe code, I reconfigured the existing build to add
+`SPIRV` to `LLVM_TARGETS_TO_BUILD` (alongside the existing `X86`) and walked
+the whole chain manually with `mlir-opt`/`mlir-translate`/`feme-translate`/
+`llc` on a hand-written `spirv` dialect module, to de-risk the design before
+committing to it in code:
+
+```
+spirv text -> mlir-translate --serialize-spirv -> .spv
+.spv -> feme-translate --import-spirv -> spirv dialect text
+spirv dialect (wrapped in a throwaway builtin.module) -> mlir-opt
+  -convert-spirv-to-llvm -> nested builtin.module w/ llvm dialect
+(extract inner module) -> mlir-translate --mlir-to-llvmir -> .ll
+.ll -> llc -march=spirv64 -filetype=obj -> .spv
+.spv -> feme-translate --import-spirv -> spirv dialect text (round-tripped!)
+```
+
+This caught a real, non-obvious gotcha before it became a debugging session
+inside gtest: `ConvertSPIRVToLLVMPass` anchors on a builtin `ModuleOp` and
+converts a *nested* `spirv.module` in place into a *nested* `builtin.module`
+(see `mlir/test/Conversion/SPIRVToLLVM/module-ops-to-llvm.mlir`) -- it does
+not convert a top-level `spirv::ModuleOp` in place into a top-level
+`builtin.module`. Feeding the pass's output directly to
+`translateModuleToLLVMIR` on the *outer* wrapper produces an empty
+`llvm::Module` (translation doesn't recurse into an arbitrary nested
+`builtin.module` operation) with no error -- a silent-failure trap that
+would have been much more confusing to debug from inside a gtest assertion
+than from a quick manual `mlir-translate` invocation.
+
+## What I built
+
+- **`feme::Translator`** (`feme/include/feme/Translate/Translator.h`): the
+  pipeline-stage interface from Design.md's "Pipeline Abstraction" section,
+  not yet implemented by any previous roadmap step. Takes its input `Module`
+  by rvalue reference (`Module &&`) rather than by non-const lvalue
+  reference (as `Importer`/existing code implicitly suggested via
+  `takeMLIROperation()`'s "must not be used again" comment) to make the
+  ownership transfer explicit at the call site, forcing callers to
+  `std::move` in.
+- **`feme::SPIRVToLLVMTranslator`**
+  (`feme/lib/Translate/SPIRV/SPIRVToLLVMTranslator.cpp`): wraps the
+  hand-validated pipeline above -- host the input `spirv.module` inside a
+  throwaway outer `builtin.module`, run `createConvertSPIRVToLLVMPass()`,
+  extract the single resulting nested module, register the builtin/LLVM
+  dialect translation interfaces on the `Context`'s `MLIRContext` (needed
+  because this `Translator` may run against a bare `feme::Context`, not one
+  that an `mlir-translate`-style host has already configured), and call
+  `translateModuleToLLVMIR`. Rejects non-MLIR and non-`spirv::ModuleOp`
+  inputs with an `Error` rather than asserting, per Design.md's "must not
+  crash on malformed input" principle -- even though this input comes from
+  FeMe's own `SPIRVImporter` today, not raw untrusted bytes, a `Translator`
+  is a public, reusable interface and shouldn't assume a particular caller.
+- **`feme::Backend`** (`feme/include/feme/Target/Backend.h`): the
+  ISA-retargeting interface from Design.md's "Backend (retargeting)"
+  section. `BackendOptions` is a single plain struct (matching
+  `ImportOptions`'s established no-RTTI rationale) holding a target-triple
+  string and a `CodeGenFileType`, deliberately not SPIR-V- or X86-specific.
+- **`feme::TargetMachineBackend`**
+  (`feme/lib/Target/TargetMachineBackend.cpp`): a generic `Backend` on top
+  of `llvm::TargetRegistry::lookupTarget`/`createTargetMachine`/
+  `addPassesToEmitFile`, mirroring `llc`'s own `compileModule` shape but
+  trimmed to FeMe's needs (no help-printing, no PGO/LTO/remarks options --
+  those are `llc`-CLI concerns, not `Backend`'s). Deliberately does not call
+  `llvm::InitializeAllTargets()`/friends itself and does not link any
+  specific target's codegen library: that would force every consumer of
+  `FeMeTarget` to pull in every configured target whether or not they need
+  it. Target initialization/linking is the caller's responsibility (as it
+  already is for `llc` itself), documented on the class.
+- **`FeMeTargetTests`** (gtest): a `TargetMachineBackendSpirvNullPipelineTest`
+  fixture that calls the SPIR-V target's own `LLVMInitializeSPIRV*` init
+  hooks directly (declared `extern "C"`, not
+  `llvm::InitializeAllTargets()`) precisely to keep this test's link
+  dependencies to just the `SPIRV` target component, not every target this
+  LLVM build happens to have configured. `RoundTripsThroughLLVMIR` runs the
+  full null pipeline end to end (`SPIRVImporter` ->
+  `SPIRVToLLVMTranslator` -> `TargetMachineBackend("spirv64-unknown-unknown")`
+  -> `SPIRVImporter` again) and asserts the re-imported module still
+  contains the original `@foo` function symbol; `RejectsUnknownTargetTriple`
+  covers the `lookupTarget` failure path. Gated the whole
+  `feme/unittests/Target/CMakeLists.txt` on
+  `LLVM_TARGETS_TO_BUILD MATCHES "SPIRV"` (the same pattern
+  `llvm/unittests/tools/llvm-exegesis`/`llvm-mca` use for `X86`) so building
+  `feme` without `SPIRV` configured doesn't fail outright -- it just skips
+  this one test binary, matching how `feme/cmake/caches/feme.cmake` now
+  requests `LLVM_TARGETS_TO_BUILD=Native;SPIRV` for feme's own development
+  builds, without forcing that requirement on every other in-tree consumer
+  of the monorepo build.
+- **`SPIRVToLLVMTranslatorTest`** (gtest, no `Backend` involved): a narrower
+  unit test of just the `spirv` dialect -> `llvm::Module` step in isolation
+  (parses `spirv` dialect text directly via `mlir::parseSourceString`,
+  skipping the binary round trip since that's the SPIRVImporter's own test's
+  job), plus the two input-validation rejection cases.
+
+## What I decided *not* to build (and why)
+
+- **No `feme-translate` flag for `SPIRVToLLVMTranslator`.** I looked at
+  wiring a `--spirv-to-llvmir` translation registration (mirroring
+  `--import-spirv`'s `TranslateFromMLIRRegistration`-adjacent pattern) for
+  lit-test coverage, since Design.md's "Testing Tools" section explicitly
+  wants `feme-translate` to expose pipeline stages individually. But
+  `mlir-translate`'s `TranslateFromMLIRRegistration` callback receives a
+  non-owning `Operation *` (owned by `mlirTranslateMain`'s own
+  `OwningOpRef`), while `Translator::translate` takes `Module &&` and
+  *detaches/reparents* the underlying operation (moving it into a throwaway
+  wrapper module for `ConvertSPIRVToLLVMPass` to run on). Handing a
+  non-owned `Operation *` to something that reparents/erases it would leave
+  the original `OwningOpRef` holding a dangling pointer it will later try to
+  erase again -- a real double-free, not a hypothetical one. Fixing this
+  properly (e.g. having the registration clone the op first) felt like
+  scope creep for a "first validate the pipeline" step; Design.md's own
+  "Testing Strategy" section already says `unittests/` is the right place
+  for "library internals not easily expressed as CLI/lit tests," and the
+  gtest coverage above (including the full round trip) already exercises
+  everything a lit test would, end to end, without the ownership footgun.
+  Revisit this once `Driver` exists and there's a real caller-owns-nothing
+  invocation shape to build the registration against.
+- **No `feme` CLI wiring / `Driver`.** `Driver` still doesn't exist (no
+  prior roadmap step built it); wiring `--target=spirv64-...` into a CLI
+  that doesn't have a `Driver` to dispatch through yet would mean bypassing
+  the actual abstraction Design.md describes. Left for whichever roadmap
+  step actually builds `Driver`.
+- **No real-ISA (X86/AArch64) `Backend` test.** `TargetMachineBackend`
+  itself is already target-agnostic (it never mentions SPIR-V), so an X86
+  smoke test would exercise the exact same code path as the SPIR-V one, just
+  with different `BackendOptions::TargetTriple`/lookup-table entries under
+  the hood -- it wouldn't add real coverage today. Worth adding once a real
+  DXIL- or DXBC-derived `llvm::Module` needs retargeting for real (roadmap
+  steps 5/8), where an X86 test's assertions (beyond "didn't return an
+  Error") would actually mean something.
+
+## Validation
+
+- Reconfigured the existing build (`cmake -DLLVM_TARGETS_TO_BUILD="X86;SPIRV"
+  .`) with `LLVM_ENABLE_ASSERTIONS=ON` already set and ccache
+  (`LLVM_CCACHE_BUILD=ON`) already configured from prior sessions, rather
+  than starting a fresh build -- confirmed via `CMakeCache.txt` before
+  touching anything.
+- Manually walked the whole null pipeline with `mlir-opt`/`mlir-translate`/
+  `feme-translate`/`llc` (see above) before writing any FeMe code, which is
+  what surfaced the nested-module gotcha ahead of time.
+- Built and ran each new library/test incrementally after every commit
+  (`ninja FeMeTranslateSPIRV && ./FeMeTranslateSPIRVTests`, then
+  `ninja FeMeTarget FeMeTargetTests && ./FeMeTargetTests`), all green,
+  including the full `RoundTripsThroughLLVMIR` null-pipeline test.
+- Ran `ninja check-feme` (6/6 lit tests) and every `FeMe*Tests` gtest binary
+  (`FeMeCoreTests`, `FeMeFrontendTests`, `FeMeImportSPIRVTests`,
+  `FeMeTranslateSPIRVTests`, `FeMeTargetTests`) after the full set of
+  changes -- all passing, confirming nothing in prior roadmap steps
+  regressed.
+- Test-configured (not built) `feme/cmake/caches/feme.cmake` from scratch
+  into a throwaway build directory after editing it to add `SPIRV`, to
+  confirm the cache script itself still configures cleanly, then deleted
+  that scratch directory.
+- Ran `clang-format` (LLVM style) over every new/modified `.cpp`/`.h` file;
+  it left the `Target`/`Translate` files as-authored, and made one
+  whitespace-only fix to `SPIRVToLLVMTranslator.cpp`'s continuation
+  indentation (committed separately, non-functional).
+- Split the work into small, independently-buildable-and-testable commits
+  (`Translator` interface -> `SPIRVToLLVMTranslator` + tests -> `Backend`
+  interface -> `TargetMachineBackend` + null-pipeline test -> Design.md
+  update -> `feme.cmake` update), rebuilding/retesting after each one,
+  matching the granularity precedent set by prior roadmap steps.
+
+## Deliberately deferred to later roadmap steps
+
+- Real-ISA (X86/AArch64/AMDGPU/NVPTX) `Backend` validation -- see above.
+- `feme::Driver` and `feme` CLI `--target=`/`--to=` wiring (no roadmap step
+  has built `Driver` yet).
+- `feme-translate` exposure of `Translator` stages (see the ownership
+  footgun discussion above) -- revisit once `Driver` exists.
+- DXIL/DXBC import, and DXIL <-> SPIR-V translation (roadmap steps 4, 6-8) --
+  unrelated to this step.
