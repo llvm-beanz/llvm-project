@@ -12,6 +12,8 @@ set(FEME_TEST_DEPENDS
   feme
   feme-opt
   feme-translate
+  llc
+  llvm-as
   )
 
 add_lit_testsuite(check-feme "Running the feme regression tests"

@@ -1,0 +1,8 @@
+// RUN: not feme-translate --import-dxil %s 2>&1 | FileCheck %s
+
+// Not a DXContainer (no "DXBC" magic) and not LLVM bitcode either (no "BC"
+// magic, wrapped or not) -- feme::DXILImporter must report an error, not
+// crash, per "Diagnostics and Error Handling" in feme/docs/Design.md.
+this is neither a DXContainer nor LLVM bitcode
+
+// CHECK: error: input is neither a DXContainer nor LLVM bitcode

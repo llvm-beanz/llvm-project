@@ -36,6 +36,13 @@ tools = [
     "feme",
     "feme-opt",
     "feme-translate",
+    # DXIL (see feme/docs/Design.md's DXIL section) is plain LLVM bitcode,
+    # optionally wrapped in a DXContainer; tests build fixtures at test time
+    # with these existing, upstream LLVM tools instead of checking in
+    # binary fixtures (see "Avoiding binary test fixtures" in
+    # feme/docs/Design.md).
+    "llc",
+    "llvm-as",
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
