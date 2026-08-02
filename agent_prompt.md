@@ -20,4 +20,6 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-Can you please move on to stage 2 of the desig document **SPIR-V import**?
+Let's start working on SPIR-V re-targeting. Rather than re-targeting to x86 as
+the design document suggests can first build a null-pipeline that allows SPIRV
+to convert to LLVM IR, then back to SPIRV through the LLVM SPIRV backend?
