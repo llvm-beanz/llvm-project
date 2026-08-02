@@ -455,7 +455,7 @@ For that case, DXIL's `llvm::Module` is imported into the MLIR `llvm` dialect
 via existing `mlir::translateLLVMIRToModule`, bridging into MLIR only at the
 point of need rather than as the default path.
 
-#### Status: `feme::DXILImporter` (container/bitcode parsing implemented; op raising not yet)
+#### Status: `feme::DXILImporter` (container/bitcode parsing implemented); `feme::dxil::OpRaisingPass` (op raising, partial)
 
 `feme::DXILImporter` (`feme/include/feme/Import/DXIL/DXILImporter.h`,
 `feme/lib/Import/DXIL/DXILImporter.cpp`) implements step 1 and 2 above:
@@ -470,13 +470,47 @@ an `llvm::Module` wrapped in `feme::Module::fromLLVMIR`. Malformed input in
 either the container or the bitcode is a recoverable `llvm::Error`, not a
 crash, per "Diagnostics and Error Handling" below.
 
-Step 3 ("op raising", the semantic inverse of `DXILOpLowering`) is **not**
-implemented yet: the `llvm::Module` `DXILImporter` currently produces still
-has DXIL's `dx.op.*` calling convention in it, unmodified from what LLVM's
-bitcode reader loaded. This is expected to land as a later, separate FeMe
-pass (likely via `feme-opt`, see "Testing Tools" below), not as part of
-`DXILImporter` itself, matching how `Importer`s are format-parsing-only
-elsewhere in this document.
+Step 3 ("op raising", the semantic inverse of `DXILOpLowering`) has now
+landed as a separate FeMe pass, `feme::dxil::OpRaisingPass`
+(`feme/include/feme/Transforms/DXIL/OpRaising.h`,
+`feme/lib/Transforms/DXIL/OpRaising.cpp`), matching how `Importer`s are
+format-parsing-only elsewhere in this document: `DXILImporter` itself is
+unchanged, and still produces an `llvm::Module` with DXIL's `dx.op.*`
+calling convention in it, unmodified from what LLVM's bitcode reader loaded.
+`OpRaisingPass` is a separate, composable `llvm::ModulePass` (new pass
+manager) that rewrites `dx.op.*` calls it recognizes back into the
+`llvm.dx.*`/standard LLVM intrinsic calls `DXILOpLowering` lowered them
+from, exercised via `feme-opt` (see "Testing Tools" below).
+
+This is intentionally **incremental, not full DXIL opcode coverage**: it
+currently covers the DXIL opcodes with a direct, context-free 1:1 mapping
+back to a single LLVM intrinsic call -- scalar unary math (`Sin`, `Cos`,
+`Sqrt`, `Saturate`, `Frac`, `IsNaN`, ...) and thread/wave queries
+(`ThreadId`, `GroupId`, `WaveIsFirstLane`, ...). Resource-handle-related
+opcodes (`CreateHandle`, `AnnotateHandle`, buffer/texture loads and stores,
+etc.) are not yet covered -- those need the DXIL "op raising" pass to also
+reconstruct `llvm::hlsl`-style resource metadata (see
+`llvm/include/llvm/Frontend/HLSL/HLSLResource.h`), which is a larger, more
+involved follow-up left for a later change, not attempted here. Opcodes this
+pass doesn't (yet) recognize are left as unmodified `dx.op.*` calls rather
+than erroring, so it composes safely with modules that mix raised and
+not-yet-raised operations, and so opcode coverage can keep growing
+incrementally the same way `dxsa`'s opcode coverage does (see the DXBC
+section below).
+
+The DXIL opcode numbers `OpRaisingPass` matches on are hard-coded rather
+than reusing `llvm::dxil::OpCode` (`llvm/lib/Target/DirectX/DXILConstants.h`):
+that enum (and the per-opcode metadata table backing it,
+`DXILOperation.inc`) is generated from `DXIL.td` but private to the
+`DirectX` target library (not installed/exported, and depending on it would
+mean feme's build reaching into another target's private generated
+headers, contrary to "Maintain proper library layering" in
+`feme/.instructions.md`). The opcode numbers themselves are DXIL's frozen
+wire-format encoding -- they cannot change without breaking DXIL's own
+backward compatibility guarantees -- so hard-coding the handful this pass
+currently covers is stable, at the cost of needing to keep them in sync by
+hand as coverage grows; this is called out here as a deliberate,
+revisitable tradeoff rather than an oversight.
 
 ### DXBC → new MLIR `dxsa` dialect (migrate existing prototype, then extend)
 
@@ -701,6 +735,22 @@ ever testing through the full `feme` driver end to end:
   binary importer in the loop at all. This is the primary way FeMe's own
   passes get tested, since most pass bugs have nothing to do with binary
   parsing.
+
+  Deviation: FeMe passes come in two shapes that don't share a pass
+  manager -- MLIR passes (e.g. the eventual `dxsa` lowering) run through
+  `MlirOptMain`, as originally scaffolded, but passes operating on a plain
+  `llvm::Module` (e.g. `feme::dxil::OpRaisingPass`, see the DXIL section
+  above) have no MLIR operation to run `MlirOptMain` over. Rather than
+  splitting these into a second binary, `feme-opt` gained a small,
+  `opt`-style new-pass-manager mode selected by a leading `--llvm` argument
+  (`feme-opt --llvm -passes=<pipeline> input.ll`): it parses textual/bitcode
+  LLVM IR, runs an `llvm::PassBuilder` pipeline (FeMe's own LLVM IR passes
+  are registered with it by name, alongside any in-tree LLVM pass a test
+  pipeline names), and prints the resulting module. Deliberately far
+  smaller than LLVM's own `opt` (no legacy pass manager, no IR-linking or
+  analysis/debug flags) -- it only needs to cover what lit-testing a single
+  FeMe module pass in isolation requires. Without `--llvm`, `feme-opt`
+  behaves exactly as before.
 - **`feme-translate`**: an `mlir-translate`-style tool exposing each
   format's `Importer`/`Exporter` as individual `--import-<format>=.../
   --export-<format>=...` translation flags, for testing one
@@ -881,6 +931,10 @@ feme/
         DXIL/
       Translate/
       Target/              (retargeting glue)
+      Transforms/
+        DXIL/               (feme::dxil::OpRaisingPass, LLVM IR passes over
+                             DXIL-derived llvm::Modules; not MLIR passes,
+                             see the DXBC Dialect/ Transforms/ split below)
       Dialect/
         DXSA/
           IR/               (ODS .td + generated dialect; migrated from
@@ -903,6 +957,7 @@ feme/
                            BinaryWriter implemented new, see DXBC section
                            above)
     Target/...
+    Transforms/DXIL/...    (feme::dxil::OpRaisingPass)
     DXBC/
       Assembler/           (dxbc-as's lexer/parser/encoder; LLVM-only,
                            no MLIR or feme::Context dependency)
@@ -1016,6 +1071,19 @@ feme/
   alongside each importer as it's implemented (SPIR-V, DXIL, DXBC), matching
   how other LLVM binary-format parsers are fuzzed, and is run in CI
   alongside the `lit`/`gtest` suites.
+- Deviation: `feme::dxil::OpRaisingPass` (see the DXIL section above) has no
+  `gtest` coverage at all, by design rather than omission: unlike an
+  `Importer`/`Translator`/`Backend`, its input and output are both plain
+  textual LLVM IR with no binary encoding or MLIR operation involved, so
+  there is no fixture-construction cost `feme-opt` doesn't already remove --
+  the same rationale the deviations above give for migrating existing
+  `gtest` cases to `lit`, but applied from this pass's introduction instead
+  of as a later migration. Coverage lives entirely in
+  `test/Feme/dxil-raise-ops.ll` (hand-written `dx.op.*` IR covering each
+  opcode this pass raises, plus an unrecognized-opcode case) and
+  `test/Feme/dxil-raise-ops-roundtrip.ll` (real `-dxil-op-lower` output,
+  validating this pass is a genuine inverse of LLVM's own lowering, not just
+  of hand-written IR matching this pass's own assumptions).
 
 ## Coding Conventions
 
@@ -1064,9 +1132,13 @@ This is a rough sequencing, not a schedule:
    the DXIL importer.
 
    Status: `DXContainer`/bitcode parsing (`feme::DXILImporter`) and its
-   fuzzing harness (`feme-dxil-import-fuzzer`) are implemented (see the
-   "Status" note under the DXIL section above); the "op raising" pass is
-   not yet implemented and remains open for a follow-up change.
+   fuzzing harness (`feme-dxil-import-fuzzer`) are implemented; the "op
+   raising" pass (`feme::dxil::OpRaisingPass`) is now implemented for a
+   curated, incrementally-growing subset of opcodes (scalar math,
+   thread/wave queries) -- see the "Status" note under the DXIL section
+   above. Resource-handle opcodes (and the corresponding
+   `LLVMFrontendHLSL` resource metadata reconstruction) remain open for a
+   follow-up change.
 5. **DXIL retargeting**: reuse step 3's backend glue for DXIL-derived
    `llvm::Module`s.
 6. **DXIL ⇄ SPIR-V translation**: DXIL (LLVM IR) → LLVM `SPIRV` target;
