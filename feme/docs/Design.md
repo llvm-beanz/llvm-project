@@ -191,6 +191,14 @@ class Context {
 public:
   explicit Context(ContextOptions Options = {});
 
+  // Wraps an externally-owned MLIRContext instead of constructing a new
+  // one (still owns its own LLVMContext); added in the "SPIR-V import"
+  // roadmap step so feme-translate's format registrations can run inside
+  // the same MLIRContext an mlir-translate/mlir-opt-style tool already
+  // configured (dialect registry, printing flags, threading), per the
+  // "Owns (or wraps caller-provided) ... instances" bullet below.
+  explicit Context(mlir::MLIRContext &ExternalMLIRCtx);
+
   llvm::LLVMContext &getLLVMContext();
   mlir::MLIRContext &getMLIRContext();
 
@@ -204,7 +212,8 @@ public:
 
 private:
   std::unique_ptr<llvm::LLVMContext> LLVMCtx;
-  std::unique_ptr<mlir::MLIRContext> MLIRCtx;
+  std::unique_ptr<mlir::MLIRContext> OwnedMLIRCtx; // null when wrapping
+  mlir::MLIRContext *MLIRCtx;
   DiagnosticHandlerTy DiagHandler;
   FormatRegistry Registry;
 };
@@ -272,6 +281,14 @@ public:
   virtual llvm::StringRef getFormatName() const = 0;
 };
 ```
+
+`ImportOptions` (implemented starting with the SPIR-V `Importer`) is a
+single plain, non-polymorphic struct shared by all formats, growing one
+field per format-specific knob (e.g. SPIR-V's control-flow
+structurization toggle), rather than a per-format options subtype:
+FeMe does not use RTTI (see feme/.instructions.md), so `Importer::import`
+could not safely downcast a base `ImportOptions&` to a format-specific
+subclass.
 
 ### `Exporter`
 
@@ -345,17 +362,30 @@ class Module {
 public:
   enum class Kind { MLIR, LLVMIR };
 
-  static Module fromMLIR(mlir::OwningOpRef<mlir::ModuleOp> M);
+  template <typename OpTy>
+  static Module fromMLIR(mlir::OwningOpRef<OpTy> M);
   static Module fromLLVMIR(std::unique_ptr<llvm::Module> M);
 
   Kind getKind() const;
-  mlir::ModuleOp getMLIRModule() const;   // asserts getKind() == MLIR
-  llvm::Module &getLLVMModule() const;    // asserts getKind() == LLVMIR
+  mlir::Operation *getMLIROperation() const;             // asserts getKind() == MLIR
+  mlir::OwningOpRef<mlir::Operation *> takeMLIROperation(); // asserts getKind() == MLIR
+  llvm::Module &getLLVMModule() const;                    // asserts getKind() == LLVMIR
 };
 ```
 
 This is intentionally a thin, low-ceremony wrapper — it is not a new IR, it's
 a tagged union over the two IRs FeMe actually produces.
+
+Deviates from an earlier draft of this sketch, which had `fromMLIR` take an
+`mlir::OwningOpRef<mlir::ModuleOp>` specifically and `getMLIRModule()` return
+`mlir::ModuleOp`: implemented starting with the SPIR-V `Importer`, whose
+top-level op is `mlir::spirv::ModuleOp` (not the builtin `mlir::ModuleOp`),
+`fromMLIR` is instead a function template accepting any top-level op type,
+and `Module` type-erases to `mlir::OwningOpRef<mlir::Operation *>`
+internally; callers that know the concrete format cast the result back with
+`mlir::cast`/`mlir::dyn_cast`. `takeMLIROperation()` was added for handing
+ownership back to generic MLIR tooling that manages its own operation
+lifetime (e.g. feme-translate's translation registrations).
 
 ## Per-Format Representation Strategy
 
@@ -771,6 +801,10 @@ feme/
     feme/
     feme-opt/
     feme-translate/
+    feme-spirv-import-fuzzer/ (llvm-fuzzer-style harness for the SPIR-V
+                               Importer; per-format fuzz targets like this
+                               are added alongside each Importer, see
+                               "Testing Strategy" below)
     dxbc-as/               (standalone DXBC assembler, testing tool; see
                            Testing Tools above)
   test/                    (lit + FileCheck)
