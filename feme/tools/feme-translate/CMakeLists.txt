@@ -13,6 +13,7 @@ target_link_libraries(feme-translate
   PRIVATE
   ${dialect_libs}
   ${translation_libs}
+  FeMeImportDXIL
   FeMeImportSPIRV
   FeMeTarget
   FeMeTranslateSPIRV

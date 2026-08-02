@@ -37,6 +37,16 @@ current list; only FeMe-specific translations are documented here.
   `--deserialize-spirv`, but goes through FeMe's own importer/`Context`
   rather than the generic MLIR one.
 
+* `--import-dxil`
+
+  Imports a DXIL module via `feme::DXILImporter`, producing textual LLVM
+  IR. Accepts either a raw (optionally wrapper-prefixed) LLVM bitcode file,
+  or a `DXContainer` with an embedded DXIL bitcode part — see the "DXIL"
+  section of [../Design.md](../Design.md) for why both encodings are
+  accepted. Unlike `--import-spirv`, the output is plain LLVM IR text (via
+  `llvm::Module::print`), not MLIR: DXIL import does not go through MLIR at
+  all (see [../Design.md](../Design.md)).
+
 * `--spirv-to-llvmir`
 
   Translates a `spirv` dialect module to LLVM IR via
@@ -58,6 +68,13 @@ Round-trip a `spirv` dialect module through binary SPIR-V and back, via
 ```shell
 feme-translate --no-implicit-module --serialize-spirv input.mlir -o input.spv
 feme-translate --import-spirv input.spv
+```
+
+Import a DXIL bitcode file or `DXContainer` via `feme::DXILImporter`:
+
+```shell
+feme-translate --import-dxil input.bc
+feme-translate --import-dxil input.dxcontainer
 ```
 
 Translate a `spirv` dialect module directly to LLVM IR via
