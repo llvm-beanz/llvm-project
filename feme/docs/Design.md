@@ -685,6 +685,12 @@ ever testing through the full `feme` driver end to end:
   itself: `feme` resolves a full `Driver`-level `--from`/`--to`/`--target`
   chain and only produces final binary/ISA output, while `feme-translate`
   stops at a single stage and can emit human-readable intermediate IR.
+  The same pattern also applies to `feme::Translator`s that consume and
+  produce MLIR/LLVM IR rather than a binary format: e.g.
+  `feme::SPIRVToLLVMTranslator` is registered as the `--spirv-to-llvmir`
+  flag (`feme/lib/Translate/SPIRV/TranslateRegistration.cpp`), so it can be
+  `lit`/`FileCheck`-tested the same way as `--import-spirv` rather than via
+  `gtest` (see the deviation note under Testing Strategy below).
 - Both tools are testing-only entrypoints in the sense of the Core
   Architectural Principle above: they may use `llvm::cl::opt` (matching
   `mlir-opt`/`mlir-translate` convention) precisely because that principle
@@ -891,6 +897,14 @@ feme/
 - `unittests/`: `gtest`-based unit tests for library internals not easily
   expressed as CLI/lit tests (e.g. `Context` construction/isolation,
   `Module` variant behavior, error propagation).
+- Deviation: `feme::SPIRVToLLVMTranslator` (see the SPIR-V "null pipeline"
+  deviation above) was initially covered by `unittests/Translate/SPIRV`
+  `gtest` cases, but a `Translator` invoked on textual MLIR input/output is
+  exactly the kind of stage `feme-translate` (see Testing Tools above)
+  exists to exercise; those cases were migrated to `lit`/`FileCheck` tests
+  (`test/Feme/spirv-to-llvmir*.mlir`) driven through `feme-translate`'s new
+  `--spirv-to-llvmir` flag instead, and the `gtest` versions removed to
+  avoid duplicate, lower-signal coverage of the same behavior.
 - Given FeMe consumes externally-defined binary formats supplied by
   untrusted sources at driver runtime, fuzzing the `Importer`s is a **v1
   requirement, not a fast-follow**: an `llvm-fuzzer`-style harness lands
