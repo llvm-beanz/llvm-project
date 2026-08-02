@@ -801,3 +801,94 @@ Steps taken:
   the `README.md`/`Design.md` cross-links, per this project's established
   small-commit convention; this final commit adds this `agent_thoughts.md`
   entry on its own.
+
+# Agent thoughts: "get the SPIR-V import fuzzer up and running"
+
+This records the investigation behind the request:
+
+> The SPIRV import fuzzer is now just a stub, but now that we have that part
+> of the project implemented we can flesh out that implementation. Please
+> get the spirv import fuzzer up and running.
+
+## Finding: the fuzzer is not a stub
+
+Before writing any code, I re-read `feme/.instructions.md`,
+`feme/docs/Design.md` (particularly the "SPIR-V import" roadmap step and the
+"Testing Strategy" section's fuzzing requirement), and the full history of
+`feme/tools/feme-spirv-import-fuzzer/`.
+
+`git log --oneline --all -- feme/tools/feme-spirv-import-fuzzer` shows a
+single commit, "[feme] Add a fuzzing harness for feme::SPIRVImporter", which
+already:
+
+- Registers `feme-spirv-import-fuzzer` via `add_llvm_fuzzer` in
+  `feme/tools/feme-spirv-import-fuzzer/CMakeLists.txt`, linking
+  `FeMeCore`/`FeMeImportSPIRV`/`MLIRIR`.
+- Implements `LLVMFuzzerTestOneInput` in `feme-spirv-import-fuzzer.cpp` to
+  construct a fresh `feme::Context`, wrap the raw fuzzer bytes in a
+  `MemoryBufferRef`, and call the real `feme::SPIRVImporter::import`
+  (consuming/discarding the `Expected<Module>` result), exactly the shape
+  described in this roadmap step and in the "No Global State" principle
+  (fresh `Context` per input, mirroring `llvm-dis-fuzzer`'s fresh
+  `LLVMContext` per input).
+- Adds `DummyImporterFuzzer.cpp` with a `DUMMY_MAIN`, following
+  `mlir/tools/mlir-parser-fuzzer`'s pattern so the harness is a normal,
+  always-buildable CLI tool (runnable over a list of input files) even
+  without a `LLVM_USE_SANITIZE_COVERAGE`/`LLVM_LIB_FUZZING_ENGINE` build,
+  and only becomes a real coverage-guided libFuzzer target when built with
+  those options enabled -- matching every other `add_llvm_fuzzer` target in
+  the monorepo (none of them are "stubs" either; the `DUMMY_MAIN` is the
+  fallback entry point, not a placeholder implementation).
+
+In other words, `feme::SPIRVImporter::import` (the real MLIR
+`spirv::deserialize`-backed implementation, not a stub) was already wired
+in, and the fuzz target already calls it, not some placeholder. There was no
+stub left to flesh out.
+
+## Verification performed (no source changes needed)
+
+Since the harness already looked complete, I verified rather than rewrote
+it, using the existing `build/` tree (confirmed via `CMakeCache.txt` to
+already have `LLVM_ENABLE_ASSERTIONS=ON` and `LLVM_CCACHE_BUILD=ON` /
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache` from earlier sessions, per this
+project's build requirements):
+
+- `ninja feme-spirv-import-fuzzer`: no work to do (already built and
+  up to date against current sources).
+- `ninja check-feme`: all 8 lit tests still pass.
+- `ninja FeMeUnitTests` and ran `FeMeImportSPIRVTests` directly: all 4
+  `SPIRVImporterTest` cases pass, including the malformed/misaligned-input
+  rejection paths the fuzzer also exercises.
+- Ran the built `feme-spirv-import-fuzzer` binary (its `DUMMY_MAIN` CLI
+  mode) over a hand-crafted corpus: an empty file, 50 random byte strings
+  of varying lengths (seeded Python `random`, 0-64 bytes), and a real valid
+  SPIR-V binary assembled with `spirv-as` from a minimal shader. It ran
+  cleanly over every input (exit code 0, no crashes/ASan reports), printing
+  the importer's expected `Expected<Error>` messages (`"SPIR-V binary
+  module must have a 5-word header"`, `"incorrect magic number"`) for
+  malformed/random inputs and silently succeeding on the valid module and
+  on inputs that happen to parse as (empty/near-empty) valid modules.
+- Ran `clang-format --style=file -output-replacements-xml` over both
+  `.cpp` files in the fuzzer directory: zero replacements, confirming they
+  already match the project's LLVM-style formatting.
+- Checked `feme/tools/CMakeLists.txt`: `feme-spirv-import-fuzzer` is already
+  in the `add_subdirectory()` list, so it's already part of the normal
+  build graph, not gated behind an extra opt-in.
+- Cross-checked `feme/docs/Design.md`'s "Testing Strategy" note that
+  "fuzzing corpora ... live outside `test/` ... not as lit tests" against
+  every other in-tree LLVM fuzzer (`llvm/tools/*-fuzzer`,
+  `mlir/tools/mlir-parser-fuzzer`, `clang/tools/clang-fuzzer`): none of them
+  check a seed corpus into the monorepo either (corpora are managed
+  out-of-tree by oss-fuzz), so there's no missing "seed corpus" deliverable
+  here either.
+
+## Conclusion
+
+No code changes were made: the SPIR-V import fuzzer described as "just a
+stub" in the request is, as of this branch's current `HEAD`, already a
+complete, working, correctly-wired libFuzzer-style harness satisfying the
+"SPIR-V import" roadmap step's fuzzing deliverable and the "Testing
+Strategy" section's v1 fuzzing requirement. This entry documents that
+verification so the discrepancy between the request's premise and the
+actual repository state is on record, rather than silently duplicating or
+regressing already-working code.
