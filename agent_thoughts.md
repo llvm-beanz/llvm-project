@@ -1372,3 +1372,110 @@ not touched.
 
 Single commit for the one-line include fix, plus this `agent_thoughts.md`
 entry as its own commit.
+
+# Agent thoughts: Migrate SPIRVImporter/DXILImporter "real binary" gtest cases to lit
+
+## Problem
+
+The request: the `SPIRVImporterTest.cpp` cases that exercise an actual valid
+module (`buildMinimalSPIRVBinary`) should become `lit` tests running against
+the command-line tools instead of `gtest`, and likewise for
+`DXILImporterTest.cpp`'s cases depending on `buildMinimalBitcode` -- called
+out as *more* significant for DXIL, since DXIL isn't current LLVM IR, so it
+can't be validated by simply parsing textual IR with modern LLVM.
+
+## Investigation
+
+Before writing anything I re-read `feme/.instructions.md` and the relevant
+`feme/docs/Design.md` sections ("Testing Tools", "Avoiding binary test
+fixtures", "Testing Strategy"), then checked git history
+(`git log --oneline -- feme/`). This turned up something important: the
+requested lit tests *already exist* --
+`test/Feme/spirv-import.mlir` (added in `302d094c7d5c`, alongside
+`feme::SPIRVImporter` itself) already round-trips a hand-written `spirv`
+dialect module through `feme-translate --serialize-spirv` +
+`feme-translate --import-spirv`, and `test/Feme/dxil-import.ll` /
+`test/Feme/dxil-import-container.ll` (added in `ffebd86aea30`) already
+round-trip hand-written `.ll` through `llvm-as`/`llc` +
+`feme-translate --import-dxil`, covering exactly the raw-bitcode and
+DXContainer-wrapped cases. I confirmed all of these already pass
+(`ninja check-feme`: 13/13), including the `directx-registered-target`-gated
+container case, since this build has the `DirectX` target configured in.
+
+So the actual gap wasn't "write the lit tests" -- it was that nobody had
+gone back and removed the now-duplicate `gtest` cases
+(`SPIRVImporterTest.ImportsValidBinaryIntoSpirvModuleOp`,
+`DXILImporterTest.ImportsRawBitcode`,
+`DXILImporterTest.ImportsBitcodeWrappedInDXContainer`) and their
+fixture-building helpers (`buildMinimalSPIRVBinary`, `buildMinimalBitcode`,
+`buildDXContainer`), the way prior migrations in this tree did for
+`SPIRVToLLVMTranslator` (`5a5724511320`) and `TargetMachineBackend`
+(`126ec8da4611`) -- both of which explicitly removed the superseded `gtest`
+cases as part of the same change, recorded as "Deviation" notes under
+Testing Strategy in Design.md. This migration follows that established
+pattern instead of leaving both forms of coverage in place indefinitely.
+
+## Changes
+
+1. `SPIRVImporterTest.cpp`: removed `buildMinimalSPIRVBinary` and
+   `ImportsValidBinaryIntoSpirvModuleOp`; the now-unused MLIR
+   parser/serializer includes went with them. Left `GetFormatName`,
+   `RejectsNonWordAlignedInput`, `RejectsMalformedBinary` in place -- none
+   of those need a real serialized SPIR-V module.
+2. `DXILImporterTest.cpp`: removed `buildMinimalBitcode`, `buildDXContainer`,
+   `ImportsRawBitcode`, `ImportsBitcodeWrappedInDXContainer`, and the
+   now-unused assembler/bitcode-writer includes. Left `GetFormatName`,
+   `RejectsDXContainerWithNoDXILPart` (only needs the `DXContainerYAML`
+   header-only shape, no embedded DXIL bitcode),
+   `RejectsInputThatIsNeitherContainerNorBitcode` in place.
+3. `feme/docs/Design.md`: updated the DXIL entry under "Avoiding binary test
+   fixtures" (it previously said the `gtest` coverage deliberately kept the
+   in-process `DXContainerYAML` fixture specifically to avoid requiring the
+   `DirectX` target -- no longer true, so I recorded the migration and its
+   tradeoff explicitly there instead of leaving a stale claim), and added a
+   new "Deviation" bullet under "Testing Strategy" matching the shape of the
+   existing `SPIRVToLLVMTranslator`/`TargetMachineBackend` deviation
+   entries.
+
+## On the "DXIL isn't current LLVM IR" point
+
+This is a real, pre-existing limitation that this change does not solve
+(and isn't a regression it introduces): `feme::DXILImporter` accepts any
+bitcode LLVM's reader can parse (relying on LLVM's auto-upgrade path for
+truly old bitcode -- see the comment in `DXILImporter.cpp`), and neither the
+`gtest` fixtures nor the `lit` tests being kept ever constructed bitcode
+using a historical, frozen-version LLVM IR grammar; both used
+current-syntax `.ll` text assembled by current LLVM tools
+(`llvm::parseAssemblyString`+`WriteBitcodeToFile` in the removed `gtest`
+code; `llvm-as`/`llc` in the `lit` tests). Migrating to `lit` does not
+change this: `llc`'s `dxil-...` triple pointed at hand-written *current*
+`.ll` syntax is a *better* fixture than the in-process assembly (it's a real
+`DXContainer` emitted by LLVM's actual `DirectX` backend, not one hand-typed
+to match `DXILImporter`'s expectations), but it's still not a genuinely
+historical/frozen-version DXIL module. There's no existing textual,
+human-readable tooling in the tree today to author one (constructing it
+would need either a DXIL-specific historical IR grammar/assembler or a
+byte-for-byte hex dump, neither of which is diffable/reviewable the way
+`.ll`/`.mlir` text is), so closing that gap is out of scope here and left as
+future work; I did not silently skip it, but called it out explicitly in
+both this note and the Design.md update above rather than claim the
+migration fixes it.
+
+## Validation
+
+- Rebuilt `FeMeImportSPIRVTests`/`FeMeImportDXILTests` (existing `build/`
+  directory: `LLVM_ENABLE_ASSERTIONS=ON`, `CMAKE_CXX_COMPILER_LAUNCHER=ccache`
+  already configured) after the edits: both compile cleanly with no unused-
+  include warnings, and 3/3 and 3/3 cases pass respectively (down from 4/4
+  and 5/5 before, with only the duplicated-by-lit cases removed).
+- `ninja check-feme`: 13/13 `lit` tests still pass, including
+  `dxil-import-container.ll` (this build has `DirectX` registered, so that
+  `REQUIRES:`-gated test actually ran, not just got skipped).
+- `clang-format -output-replacements-xml` on both edited `.cpp` files: no
+  replacements needed.
+
+## Commits
+
+Three commits: the `SPIRVImporterTest.cpp` migration, the
+`DXILImporterTest.cpp` migration, and the `Design.md` update, followed by
+this `agent_thoughts.md` entry as its own commit.
