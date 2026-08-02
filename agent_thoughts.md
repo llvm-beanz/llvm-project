@@ -119,3 +119,119 @@ authored already conformed.
   steps 2+).
 - Fuzzing harnesses (introduced alongside each importer, per the Testing
   Strategy section — there is no importer yet).
+
+# Agent thoughts: CMake cache script + lib/Frontend stubs
+
+This records the reasoning behind a follow-up set of changes, prompted by a
+request to (1) add a CMake cache script for building feme in-tree, and
+(2) start a `lib/Frontend` library, built on `llvm::opt`'s TableGen
+approach, so `feme` itself stops hand-rolling argument parsing.
+
+## CMake cache script
+
+`feme/cmake/caches/feme.cmake` follows the shape of existing single-purpose
+cache files I found across the monorepo (`offload/cmake/caches/Offload.cmake`
+being the closest precedent: a short, flat list of `set(... CACHE ...)`
+calls, no macros/functions). Since `llvm/CMakeLists.txt` already adds `mlir`
+as an implicit dependency whenever `"feme"` is in `LLVM_ENABLE_PROJECTS`
+(added in roadmap step 1), the cache file only needs to set
+`LLVM_ENABLE_PROJECTS=feme` itself, plus `LLVM_TARGETS_TO_BUILD=Native`
+(feme doesn't retarget to native ISA yet) and
+`LLVM_INCLUDE_TESTS`/`LLVM_BUILD_TESTS`/`LLVM_ENABLE_ASSERTIONS=ON` for a
+development-shaped build. I verified this by actually running
+`cmake -G Ninja -C feme/cmake/caches/feme.cmake -S llvm -B <dir>` against a
+scratch build directory and confirming it configures cleanly, rather than
+just eyeballing the syntax.
+
+## `lib/Frontend`: options parsing without `cl::opt`
+
+The request explicitly asked for a `lib/Frontend` library, which is a
+deliberate deviation from Design.md's original `include/feme/Options/` /
+`lib/Options/` naming (roadmap step 1 predates this work and never
+implemented that directory anyway — it was aspirational). I chose to keep
+the user's requested name and update Design.md to match, rather than
+silently doing `Options/` instead, per the "when you deviate from the
+design document, update it" instruction. I picked `Frontend` (not
+`Options`) as a deliberate parallel to Flang's own
+`include/flang/Frontend`/`lib/Frontend`, which plays the same role there
+(the "argv into an explicit options struct, independent of the CLI binary"
+component) — this also leaves room for `FrontendOptions.h`'s
+`DriverOptions` struct and `parseArgs` entry point to live alongside the
+raw `OptTable`, which a directory named merely `Options/` would have made
+feel out of place.
+
+Implementation-wise, I modeled `Options.td`/`Options.h`/`Options.cpp` on
+two existing precedents: `clang/include/clang/Options/Options.h` (for the
+public `enum ID { ... #include "Options.inc" ... }` pattern, so consumers
+can write `Args.hasArg(OPT_help)`) and `llvm/tools/llvm-objcopy`'s
+`ObjcopyOptions.cpp` (for the simpler `GenericOptTable`-based
+implementation — it computes prefix tables at construction time rather
+than requiring the newer `PrecomputedOptTable` machinery, which is
+overkill for feme's handful of options). I did consider whether the
+`static const FeMeOptTable Table` inside `getOptTable()` violates
+Design.md's "No function-local static mutable state, no Meyer's-singleton
+managers" principle; I concluded it doesn't, because that principle (per
+its own surrounding text about "the same statically-linked component
+instance can be safely invoked concurrently... built once and shared
+read-only") is specifically about *mutable* state and manager objects, not
+about a `static const` table of immutable, TableGen-generated data — and
+this is exactly the pattern already used by `clang/lib/Options`.
+
+`Options.td` declares the CLI shape sketched in Design.md's "Command Line
+Tool(s)" section (`--from=`, `--to=`, `--target=`, `-o`, `--help`/`-h`,
+`--version`) using `OptParser.td`'s `Joined`/`JoinedOrSeparate`/`Flag`
+classes; I initially added an explicit `def INPUT : Option<[], "<input>",
+KIND_INPUT>;` before realizing `OptParser.td` itself already declares
+`INPUT` and `UNKNOWN` (TableGen's "def already exists" error caught this
+immediately when I tried to build).
+
+`FrontendOptions.h`/`.cpp` add the layer above the raw `OptTable`: a plain
+`DriverOptions` struct (deliberately not `cl::opt` globals, per the "No
+Global State" principle) and `parseArgs`, which validates argument counts,
+flags unknown options, and populates the struct — except it doesn't yet
+feed into anything, since `feme::Driver` doesn't exist yet (that's a later
+roadmap step). This is intentionally still "stub"-shaped: it recognizes
+the CLI surface and does basic validation, but there's no import/
+translate/export pipeline behind it.
+
+Finally, `feme.cpp` itself was updated to call `parseArgs`/`getOptTable`
+instead of its previous hand-rolled `-h`/`--help` scan, since the request
+was explicit that `feme` itself shouldn't handle argument parsing. The
+existing `feme-help.test`/`feme-noargs.test` lit tests kept passing
+unmodified, because `OptTable::printHelp`'s
+`"OVERVIEW: <title>\n\nUSAGE: <usage>..."` output shape happens to satisfy
+their existing `CHECK: OVERVIEW: FeMe...` / `CHECK: USAGE: feme` lines —
+I verified this by actually running `ninja check-feme` rather than assuming
+the CHECK lines would still match.
+
+## Validation
+
+- Configured a fresh build with `feme/cmake/caches/feme.cmake` to confirm
+  it works standalone, then reconfigured the main dev build (assertions
+  on, ccache on) to pick up the new `feme/lib/Frontend`,
+  `feme/include/feme/Frontend`, and `feme/unittests/Frontend`
+  `CMakeLists.txt` files.
+- Built and ran `FeMeFrontendTests` (`OptionsTest` + `FrontendOptionsTest`,
+  8 gtest cases) and `FeMeCoreTests` (unaffected, still passing) after each
+  change.
+- Ran `ninja check-feme` (4/4 lit tests) after wiring `feme.cpp` to the new
+  library.
+- Before committing each of the three `lib/Frontend`-related commits, I
+  temporarily removed the not-yet-committed files from the working tree
+  (LLVM's build system errors out — "Found erroneous configuration for
+  source file..." — if a `.cpp`/`.h` exists in a directory but isn't listed
+  in that directory's `CMakeLists.txt`) and rebuilt, to confirm each commit
+  is independently buildable and testable, not just that the final state
+  works.
+- Ran `clang-format` (LLVM style) over every new/modified `.cpp`/`.h` file;
+  no changes were made, meaning the files as authored already conformed.
+
+## Deliberately deferred to later roadmap steps
+
+- `feme::Driver` to actually consume a parsed `DriverOptions` and run an
+  import → translate → retarget/export chain (roadmap steps 2+, once
+  there's a pipeline to drive).
+- Marshalling `DriverOptions` fields into typed enums (e.g. validating
+  `--from=dxil` against a known set of formats) — today `From`/`To`/
+  `Target` are plain strings; that validation belongs with the importers/
+  backends that will actually interpret them.
