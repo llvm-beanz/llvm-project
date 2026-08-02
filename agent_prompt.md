@@ -20,20 +20,6 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-One of our output formats for translation should be "llvm", which is updating
-the input file to normalized LLVM IR that could be fed into llc/opt and other
-LLVM tools or backends.
-
-For DXIL, this will require some translation and fixup passes that will replace
-dx.op function calls with DirectX backend or LLVM intrinsics, and transform IR
-metadata from the DXIL format to the formats used in the LLVMFrontendHLSL
-library to describe IR metadata.
-
-For SPIRV, we need to do a similar translation of SPIRV instructions into LLVM
-IR and SPIRV backend intrinsics, and produce correct LLVMFrontendHLSL metadata
-(as appropriate).
-
-You can use the test cases in the offlooad-test-suite as test collateral for
-this next phase by compiling the tests to DXIL or SPIRV and using that as inputs
-to the testing tools to flesh out all the transformations required to convert
-DXIL -> LLVM IR, and SPIRV -> LLVM IR.
+The test folder is going to get unwieldy the way that all the tests are just
+getting dropped in a single folder. Can you update the organization of the test
+folder to group tests by roughly the component library or tool they are testing.
