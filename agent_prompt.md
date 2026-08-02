@@ -20,6 +20,6 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-The SPIRV import fuzzer is now just a stub, but now that we have that part of
-the project implemented we can flesh out that implementation. Please get the
-spirv import fuzzer up and running.
+The tests in the TargetMachineBackendTest don't make sense as googletest test
+cases, they should be done via LIT, can you please update the test cases and
+infrastructure appropriately?
