@@ -892,3 +892,112 @@ Strategy" section's v1 fuzzing requirement. This entry documents that
 verification so the discrepancy between the request's premise and the
 actual repository state is on record, rather than silently duplicating or
 regressing already-working code.
+
+# Agent thoughts: migrating TargetMachineBackendTest from gtest to lit
+
+## Task
+
+`feme/unittests/Target/TargetMachineBackendTest.cpp` contained two gtest
+cases exercising `feme::TargetMachineBackend`:
+
+1. `RoundTripsThroughLLVMIR` -- the SPIR-V "null pipeline" documented in
+   `feme/docs/Design.md`'s "Deviation: validating Backend/Translator with a
+   SPIR-V 'null pipeline'" section: SPIR-V binary -> `SPIRVImporter` ->
+   `spirv` dialect -> `SPIRVToLLVMTranslator` -> `llvm::Module` ->
+   `TargetMachineBackend("spirv64-unknown-unknown")` -> SPIR-V binary ->
+   `SPIRVImporter` again, checking the entry point survives.
+2. `RejectsUnknownTargetTriple` -- `TargetMachineBackend::run` returning an
+   `Error` for an unregistered target triple.
+
+The request was to move these to `lit`/`FileCheck` tests instead, since a
+single C++ test function driving an entire multi-stage pipeline end to end
+is a poor fit for gtest and hides which stage actually broke on failure.
+
+## Why this made sense
+
+`feme/docs/Design.md` already had a precedent for exactly this kind of
+migration: `feme::SPIRVToLLVMTranslator` was originally covered by
+`unittests/Translate/SPIRV` gtest cases, then migrated to
+`test/Feme/spirv-to-llvmir*.mlir` lit tests once `feme-translate` grew a
+`--spirv-to-llvmir` flag exposing that one stage in isolation. The design
+doc's own reasoning ("a Translator invoked on textual MLIR input/output is
+exactly the kind of stage feme-translate exists to exercise") applies
+identically to `Backend`: it's invoked on textual LLVM IR in, binary out,
+which is squarely `feme-translate`'s job, not gtest's.
+
+The only piece of test infrastructure that didn't already exist was a
+`feme-translate` flag wrapping `TargetMachineBackend`. Everything else
+needed for the null pipeline (`--serialize-spirv` from MLIR itself,
+`--import-spirv`, `--spirv-to-llvmir`) was already exposed.
+
+## Design decisions
+
+- **New `--llvm-backend` flag**, registered via a plain
+  `mlir::TranslateRegistration` (not `TranslateFromMLIRRegistration`/
+  `TranslateToMLIRRegistration`, since `Backend` operates on `llvm::Module`,
+  not MLIR) in `feme/lib/Target/TranslateRegistration.cpp`. It parses the
+  input buffer as LLVM IR (`.ll` or bitcode, via `llvm::parseIR`), runs
+  `feme::TargetMachineBackend` targeting a `--target-triple` `cl::opt`, and
+  writes the resulting bytes out. This makes the null pipeline fully
+  composable from `feme-translate` invocations in `RUN:` lines, one stage
+  at a time, exactly like `--spirv-to-llvmir` before it.
+- **`--target-triple` as a scoped `cl::opt`**: allowed under the "No Global
+  State" principle's explicit carve-out for "narrowly-scoped, testing-only
+  entrypoints" -- `feme::Backend`/`BackendOptions` themselves never use
+  `cl::opt`; only this test-tool hook does.
+- **Target initialization**: rather than hand-picking SPIR-V's
+  `LLVMInitializeSPIRV*` hooks the way the old gtest did (to avoid linking
+  every target into a narrow unit test binary), `feme-translate` is already
+  a broad testing tool, so it now calls `llvm::InitializeAllTarget{Infos,s,
+  MCs}()`/`InitializeAllAsmPrinters()` once, like `llc` does, and links
+  `AllTargets{AsmParsers,CodeGens,Descs,Infos}`. This makes `--llvm-backend`
+  usable for any target configured into the build, not just SPIR-V --
+  matching `TargetMachineBackend`'s own genuinely target-agnostic design.
+- **Output buffering**: `mlir::TranslateFunction` hands the callback a
+  plain `llvm::raw_ostream&`, but `Backend::run` requires a
+  `raw_pwrite_stream&` (some targets patch in a header once the output size
+  is known). Rather than trying to downcast the given stream, the hook
+  writes to an in-memory `raw_svector_ostream` buffer and copies the result
+  to the real output stream afterward.
+- **`spirv-registered-target` lit feature**: `test/lit.cfg.py` gained the
+  same per-target `<arch>-registered-target` feature loop that
+  `llvm/test/lit.cfg.py` already has (fed by `TARGETS_TO_BUILD`, which
+  `configure_lit_site_cfg` already substitutes for every LLVM subproject),
+  letting the new null-pipeline test `REQUIRES: spirv-registered-target`
+  instead of unconditionally requiring LLVM's SPIRV target -- mirroring
+  the old gtest's own CMake-level guard
+  (`if(LLVM_TARGETS_TO_BUILD MATCHES "SPIRV")`).
+- **Loosened the null-pipeline `CHECK`s**: my first draft `CHECK`-matched
+  the entire re-imported `spirv.module` header, copying the pattern from
+  `test/Feme/spirv-import.mlir` (a *pure* round trip that never goes
+  through `llvm::Module`). That test failed: LLVM's SPIRV target derives
+  the module's addressing/memory model and capabilities from the
+  `llvm::Module` it's given, independent of the original module's
+  execution environment (`Logical`/`GLSL450`/`Shader` in, `Physical64`/
+  `OpenCL`/`Kernel,Addresses,Linkage` out -- no `spirv.EntryPoint` survives
+  either, since the function isn't emitted as an OpenCL kernel). This is
+  expected and matches what the original gtest actually checked
+  (`lookupSymbol<mlir::spirv::FuncOp>("foo")` -- presence of the function,
+  not exact module-header fidelity), so I narrowed the `CHECK`s to just the
+  recovered `spirv.func @foo`/`spirv.Return`, with a comment explaining why,
+  and updated `feme/docs/Design.md`'s Testing Tools/Testing Strategy
+  sections accordingly.
+
+## Verification
+
+- `cmake --build . --target check-feme` (ccache + `LLVM_ENABLE_ASSERTIONS=ON`,
+  both already configured in this build tree): 10/10 lit tests pass,
+  including the two new ones and the pre-existing eight.
+- Rebuilt and re-ran the remaining `FeMeUnitTests` gtest binaries (Core,
+  Frontend, Import/SPIRV) to confirm removing `unittests/Target` didn't
+  break the `unittests/CMakeLists.txt` subdirectory wiring for the others.
+- `clang-format -i` on all new/modified C++ files.
+
+## Commits
+
+Split into four commits, each independently buildable/testable:
+
+1. Add the `<arch>-registered-target` lit feature infrastructure.
+2. Add the `--llvm-backend` feme-translate hook (new files + CMake wiring).
+3. Add the two new lit tests and remove the obsolete gtest directory.
+4. Document the deviation in `feme/docs/Design.md`.
