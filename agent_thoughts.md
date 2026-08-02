@@ -624,3 +624,93 @@ than from a quick manual `mlir-translate` invocation.
   footgun discussion above) -- revisit once `Driver` exists.
 - DXIL/DXBC import, and DXIL <-> SPIR-V translation (roadmap steps 4, 6-8) --
   unrelated to this step.
+
+## Follow-up: converting `SPIRVToLLVMTranslatorTest` (gtest) to lit
+
+User feedback: the `unittests/Translate/SPIRV/SPIRVToLLVMTranslatorTest.cpp`
+gtest cases don't read as meaningful unit tests -- they're really testing a
+CLI-shaped pipeline stage (parse text -> translate -> print text), which is
+exactly what `feme-translate`/lit is for. Asked to convert them to lit tests
+and build out `feme-translate`/`feme-opt` as needed to support that.
+
+- Revisited the "ownership footgun" I flagged as the reason for deferring
+  `--spirv-to-llvmir` (see "What I decided not to build" above): the fix
+  really is as simple as it looked -- clone the non-owned `spirv.module`
+  `Operation *` that `TranslateFromMLIRRegistration` hands the callback
+  before wrapping it in a `feme::Module`/handing it to
+  `SPIRVToLLVMTranslator::translate` (which reparents/erases its input).
+  `mlir::spirv::ModuleOp::clone()` is cheap for these tiny hand-written test
+  modules and sidesteps the double-free entirely; the previous "scope creep"
+  judgment call was wrong in hindsight given how small the actual fix is.
+- Added `feme/{include,lib}/Translate/SPIRV/TranslateRegistration.{h,cpp}`,
+  mirroring `feme/{include,lib}/Import/SPIRV/TranslateRegistration.{h,cpp}`
+  (`--import-spirv`) exactly: same file layout, same
+  `DialectRegistrationFunction` pattern, same "wrap a `feme::Context` around
+  the already-configured `MLIRContext`" approach. Used the
+  `TranslateFromMLIRRegistration` overload that takes a typed
+  `mlir::spirv::ModuleOp` callback (rather than raw `Operation *`) so the
+  "wrong top-level op" rejection (`RejectsNonSpirvMLIROperation` in the old
+  gtest) is handled by MLIR's own registration machinery's `dyn_cast` +
+  diagnostic, for free, instead of hand-rolled checking.
+- Did **not** carry forward `RejectsNonMLIRInput`: that gtest case
+  constructed a `feme::Module::fromLLVMIR(...)` directly in C++ and fed it
+  to `Translator::translate` -- there's no way to reach that state through
+  `feme-translate`'s text-in/text-out CLI (its input is always parsed MLIR),
+  so it wasn't a meaningful lit test candidate. The check it exercised
+  (`SPIRVToLLVMTranslator::translate`'s `Module::Kind::MLIR` guard) is still
+  in the production code, just no longer separately unit-tested -- this is
+  the same kind of internal defensive check Design.md's "Testing Strategy"
+  section already carves out `unittests/` for, and this one instance wasn't
+  worth keeping a whole test file around for.
+- New lit tests (`test/Feme/spirv-to-llvmir.mlir`,
+  `spirv-to-llvmir-invalid.mlir`) follow the exact shape of the existing
+  `spirv-import.mlir`/`spirv-import-invalid.test`: hand-written `spirv`
+  dialect text in, `FileCheck`-verified LLVM IR (or diagnostic) out, no
+  binary fixtures, per "Avoiding binary test fixtures" in Design.md.
+  Extended `feme-translate-help.test` to also check `--spirv-to-llvmir` (and
+  `--import-spirv`, previously unchecked) show up in `--help` output, since
+  that's now effectively the "format names" registration-smoke-test that
+  `SPIRVToLLVMTranslatorTest.FormatNames` used to cover.
+- Removed `unittests/Translate/` entirely (`CMakeLists.txt` at both levels,
+  the test `.cpp`) and dropped `add_subdirectory(Translate)` from
+  `unittests/CMakeLists.txt`. Deliberately did *not* touch
+  `feme/lib/Translate/SPIRV/SPIRVToLLVMTranslator.{h,cpp}` itself -- this is
+  purely a test-surface change, not a behavior change.
+- `feme-opt` needed no changes: this Translator operates on textual
+  MLIR/LLVM IR via `feme-translate`'s translation-registry model, not a
+  pass/pipeline, so there's nothing for `feme-opt` (an `MlirOptMain`-driven
+  pass runner) to register here. Confirmed this is the right split by
+  re-reading Design.md's Testing Tools section, which draws exactly this
+  line between the two tools.
+- Updated `docs/Design.md`: noted the new `--spirv-to-llvmir` flag under
+  Testing Tools (next to the existing `--import-<format>` description), and
+  added a short deviation note under Testing Strategy recording that
+  `SPIRVToLLVMTranslator`'s tests moved from `gtest` to `lit` and why,
+  rather than silently deleting the earlier "decided not to build this"
+  reasoning above -- that section still accurately describes what was
+  originally decided and why the decision was later revisited.
+
+### Validation
+
+- Reconfigured the existing build (`cmake . -G Ninja` in `build/`, which
+  already has `LLVM_ENABLE_ASSERTIONS=ON` and `LLVM_CCACHE_BUILD=ON` from
+  prior sessions) after adding the new source files, so CMake would notice
+  them.
+- Built `feme-translate` standalone first and manually exercised both the
+  success and failure paths (`feme-translate --spirv-to-llvmir` on a valid
+  `spirv.module` and on a plain `module {}`) before writing the lit tests
+  against it, confirming the diagnostic text lit would need to `FileCheck`
+  against.
+- Ran `ninja check-feme`: all 8 lit tests pass (6 pre-existing + 2 new).
+- Ran `ninja FeMeUnitTests` and every remaining `FeMe*Tests` gtest binary
+  (`FeMeCoreTests`, `FeMeFrontendTests`, `FeMeImportSPIRVTests`,
+  `FeMeTargetTests`) individually -- all still passing, confirming removing
+  `FeMeTranslateSPIRVTests` didn't break the `unittests/CMakeLists.txt`
+  wiring for its siblings.
+- Ran `clang-format` (LLVM style) over the new/edited `.cpp`/`.h` files,
+  then rebuilt + reran `check-feme` again afterwards to confirm formatting
+  didn't change behavior.
+- Split into four small commits: (1) the `--spirv-to-llvmir` registration +
+  CMake/tool wiring, (2) the new lit tests, (3) removing the now-redundant
+  gtest file/CMake, (4) the Design.md update -- rebuilding/retesting after
+  each, matching this project's established commit granularity.
