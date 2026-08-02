@@ -1691,3 +1691,74 @@ explicitly below and in Design.md rather than glossed over.
 Four commits (the `OpRaisingPass` library, the `feme-opt` `--llvm` mode, the
 lit tests, and the `Design.md`/`feme-opt.md` doc updates), followed by this
 `agent_thoughts.md` entry as its own commit.
+
+# Agent thoughts: Group lit tests by component under test/Feme
+
+## Request
+
+The user pointed out that `feme/test/Feme/` was a single flat directory with
+all 15 lit tests dropped in together (importer round-trips, translator
+tests, the DXIL op-raising pass test, tool `--help` smoke tests, and the
+SPIR-V retargeting/backend tests all side by side), and asked for it to be
+reorganized to group tests by roughly the component library or tool each
+one exercises, before that becomes unwieldy.
+
+## Approach
+
+I read every test file's `RUN:` lines and header comment to determine which
+library or tool each one actually exercises (not just which binary it
+invokes on the command line, since most tests drive `feme-translate` or
+`feme-opt` as a thin CLI wrapper around the real unit under test), then
+mirrored the grouping `lib/` and `unittests/` already use so the three
+trees line up:
+
+- `Tools/feme`, `Tools/feme-opt`, `Tools/feme-translate`: the `--help`/
+  no-args smoke tests for each driver binary itself (these genuinely test
+  the tool's CLI, not a specific library).
+- `Import/DXIL`, `Import/SPIRV`: `DXILImporter`/`SPIRVImporter` round-trip
+  and error-handling tests, driven through `feme-translate --import-*`.
+- `Translate/SPIRV`: `SPIRVToLLVMTranslator` tests, driven through
+  `feme-translate --spirv-to-llvmir`.
+- `Transforms/DXIL`: `feme::dxil::OpRaisingPass` tests, driven through
+  `feme-opt --llvm -passes=feme-dxil-raise-ops`.
+- `Target`: `TargetMachineBackend`/retargeting tests (the SPIR-V "null
+  pipeline" end-to-end test and the unknown-target-triple error test),
+  driven through `feme-translate --llvm-backend`.
+
+This matches `unittests/`'s existing `Import/DXIL`, `Import/SPIRV`, `Core`,
+`Frontend` layout (and the `Translate/SPIRV`/`Target` `gtest` suites
+referenced in `docs/Design.md`'s migration notes), so a reader can find the
+lit coverage for any given library by looking for the same relative path
+under `test/Feme/` that its unit tests live under.
+
+## Verification
+
+- Checked LLVM's `add_lit_testsuites()` (`llvm/cmake/modules/AddLLVM.cmake`)
+  before moving anything: it `GLOB_RECURSE`s `test/Feme` at CMake configure
+  time and creates one `check-feme-<path>` target per subdirectory
+  containing tests, so subdividing the directory needed no
+  `test/CMakeLists.txt` changes -- only a fresh `cmake .` reconfigure to
+  pick up the new subdirectories (confirmed with `ninja -t targets | grep
+  check-feme`, which went from just `check-feme`/`check-feme-feme` before
+  reconfiguring to also include `check-feme-feme-import-dxil`,
+  `check-feme-feme-import-spirv`, `check-feme-feme-transforms-dxil`,
+  `check-feme-feme-translate-spirv`, `check-feme-feme-target`, and the
+  three `check-feme-feme-tools-*` targets after).
+- Used `git mv` for every file (not delete+recreate) so history/blame
+  follows each test through the move.
+- `ninja check-feme` (existing `build/` directory: `LLVM_ENABLE_ASSERTIONS=ON`,
+  `CMAKE_CXX_COMPILER_LAUNCHER=ccache` already configured): 15/15 lit tests
+  still pass, unchanged from before the move.
+- Rebuilt and reran `FeMeImportDXILTests` (3/3) and `FeMeImportSPIRVTests`
+  (3/3) -- the two unittest binaries whose comments reference `test/Feme`
+  paths -- to confirm the comment-only edits there didn't break anything.
+- Grepped the whole `feme/` tree for remaining `test/Feme/<old-flat-path>`
+  references after the move and updated the stale ones: nine spots in
+  `docs/Design.md`'s testing-strategy/deviation notes, plus one comment
+  each in `DXILImporterTest.cpp` and `SPIRVImporterTest.cpp`.
+
+## Commits
+
+Three commits: the `git mv` reorganization itself (no content changes),
+the `docs/Design.md` path updates, and the unittest comment path updates
+-- followed by this `agent_thoughts.md` entry as its own commit.
