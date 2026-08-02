@@ -10,11 +10,6 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
-#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
-#include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
-#include "mlir/IR/MLIRContext.h"
-#include "mlir/Parser/Parser.h"
-#include "mlir/Target/SPIRV/Serialization.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
@@ -23,53 +18,16 @@ using namespace feme;
 
 namespace {
 
-// Builds a minimal, valid SPIR-V binary module by parsing hand-written
-// `spirv` dialect text and serializing it with MLIR's own serializer,
-// avoiding a checked-in binary fixture (see "Avoiding binary test fixtures"
-// in feme/docs/Design.md).
-static std::string buildMinimalSPIRVBinary() {
-  mlir::MLIRContext ParseCtx;
-  ParseCtx.loadDialect<mlir::spirv::SPIRVDialect>();
-
-  static constexpr llvm::StringLiteral SourceText = R"mlir(
-    spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
-      spirv.func @foo() -> () "Inline" {
-        spirv.Return
-      }
-      spirv.EntryPoint "Vertex" @foo
-    }
-  )mlir";
-
-  mlir::ParserConfig Config(&ParseCtx);
-  mlir::OwningOpRef<mlir::spirv::ModuleOp> SourceModule =
-      mlir::parseSourceString<mlir::spirv::ModuleOp>(SourceText, Config);
-  EXPECT_TRUE(SourceModule);
-
-  llvm::SmallVector<uint32_t, 0> Binary;
-  EXPECT_TRUE(mlir::succeeded(mlir::spirv::serialize(*SourceModule, Binary)));
-
-  return std::string(reinterpret_cast<const char *>(Binary.data()),
-                     Binary.size() * sizeof(uint32_t));
-}
+// Note: the "imports a valid SPIR-V binary into a `spirv.module`" case is
+// deliberately not covered here. It requires building a real serialized
+// SPIR-V binary, which is exactly the kind of binary-format round trip
+// `feme-translate` exists to exercise via `lit`/`FileCheck` instead (see
+// "Testing Strategy" in feme/docs/Design.md); see
+// `test/Feme/spirv-import.mlir`.
 
 TEST(SPIRVImporterTest, GetFormatName) {
   SPIRVImporter Importer;
   EXPECT_EQ(Importer.getFormatName(), "spirv");
-}
-
-TEST(SPIRVImporterTest, ImportsValidBinaryIntoSpirvModuleOp) {
-  std::string Binary = buildMinimalSPIRVBinary();
-
-  Context Ctx;
-  SPIRVImporter Importer;
-  llvm::Expected<Module> Result = Importer.import(
-      llvm::MemoryBufferRef(Binary, "spirv-test"), ImportOptions{}, Ctx);
-  ASSERT_THAT_EXPECTED(Result, llvm::Succeeded());
-
-  EXPECT_EQ(Result->getKind(), Module::Kind::MLIR);
-  auto SpirvModule =
-      mlir::dyn_cast<mlir::spirv::ModuleOp>(Result->getMLIROperation());
-  EXPECT_TRUE(SpirvModule);
 }
 
 TEST(SPIRVImporterTest, RejectsNonWordAlignedInput) {
