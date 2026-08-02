@@ -14,6 +14,7 @@ target_link_libraries(feme-translate
   ${dialect_libs}
   ${translation_libs}
   FeMeImportSPIRV
+  FeMeTranslateSPIRV
   MLIRIR
   MLIRParser
   MLIRPass

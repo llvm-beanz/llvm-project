@@ -14,11 +14,15 @@
 // `--import-spirv` (roadmap step 2) wraps feme::SPIRVImporter; later
 // roadmap steps will register e.g. `--import-dxbc` here, migrating the
 // registration pattern from the `wip/dxsa-mlir` prototype's
-// TranslateRegistration.cpp.
+// TranslateRegistration.cpp. `--spirv-to-llvmir` (roadmap step 3) wraps
+// feme::SPIRVToLLVMTranslator, so that it can be lit-tested like any other
+// stage instead of only via gtest (see feme/docs/Design.md's "Testing
+// Tools" section).
 //
 //===----------------------------------------------------------------------===//
 
 #include "feme/Import/SPIRV/TranslateRegistration.h"
+#include "feme/Translate/SPIRV/TranslateRegistration.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllTranslations.h"
 #include "mlir/Tools/mlir-translate/MlirTranslateMain.h"
@@ -26,6 +30,7 @@
 int main(int argc, char **argv) {
   mlir::registerAllTranslations();
   feme::registerSPIRVImportTranslation();
+  feme::registerSPIRVToLLVMIRTranslation();
   // TODO: Register FeMe's other import/export translations (DXIL, DXBC)
   // here as they are implemented.
 
