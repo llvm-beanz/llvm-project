@@ -1,4 +1,5 @@
 add_subdirectory(Core)
 add_subdirectory(Frontend)
 add_subdirectory(Import)
+add_subdirectory(Target)
 add_subdirectory(Translate)
