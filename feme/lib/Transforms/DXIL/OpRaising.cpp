@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/DXIL/OpRaising.h"
 
+#include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -36,9 +37,36 @@ struct RaisableOp {
   bool Overloaded;
 };
 
+// All entries below were confirmed against LLVM's own `-dxil-op-lower` pass
+// (the forward direction this pass inverts): for each row, a small `.ll`
+// with the listed intrinsic call was run through `opt -S -dxil-op-lower`
+// and the resulting `dx.op.*` call's opcode/signature cross-checked against
+// `llvm/lib/Target/DirectX/DXIL.td`, rather than trusting the `.td` file's
+// opcode-to-intrinsic-name association alone (a handful of ops -- e.g.
+// `FMad`/`Fma`, both `tertiary`-shaped -- select their source intrinsic via
+// dedicated C++ in `DXILOpLowering.cpp`, not a declarative `intrinsics =`
+// list, so reading the `.td` file alone would have been insufficient).
+//
+// This covers every DXIL op with a direct, context-free mapping to a single
+// LLVM intrinsic call, regardless of arity (unary/binary/tertiary/wider,
+// e.g. `Dot2`..`Dot4`) or DXIL's "class" grouping (`unary`, `binary`,
+// `tertiary`, `dot2`, ... are grouping-only; this pass doesn't need to
+// distinguish them, since `raiseCall` below handles any argument count
+// uniformly). Opcodes intentionally NOT covered here (documented in
+// feme/docs/Design.md) either:
+//  - return an aggregate/multiple values that would need `extractvalue`
+//    reconstruction (`IMul`/`UMul`, `UAddc`, `SplitDouble`,
+//    `WaveActiveBallot`),
+//  - pick their source intrinsic based on an extra "kind"/flag operand
+//    rather than the opcode alone (`WaveActiveOp`, `WaveActiveBit`,
+//    `WavePrefixOp`, `QuadOp`, `Barrier`'s mode flags), or
+//  - are resource-handle ops, which need `llvm::hlsl`-style resource
+//    metadata reconstruction (`CreateHandle`, `AnnotateHandle`,
+//    `CreateHandleFromBinding`, buffer/texture loads and stores, ...) --
+//    those are covered by the separate `ResourceOps` table below instead.
 // clang-format off
-static const RaisableOp UnaryOps[] = {
-    // Scalar math raised to a standard LLVM intrinsic.
+static const RaisableOp DirectOps[] = {
+    // Scalar unary math raised to a standard LLVM intrinsic.
     {6, Intrinsic::fabs, true},              // Abs
     {7, Intrinsic::dx_saturate, true},       // Saturate
     {8, Intrinsic::dx_isnan, true},          // IsNan
@@ -62,27 +90,95 @@ static const RaisableOp UnaryOps[] = {
     {28, Intrinsic::ceil, true},             // Ceil
     {29, Intrinsic::trunc, true},            // Trunc
     {30, Intrinsic::bitreverse, true},       // Rbits
-};
+    {31, Intrinsic::ctpop, true},            // CountBits
+    {32, Intrinsic::dx_firstbitlow, true},   // FirstbitLo
+    {33, Intrinsic::dx_firstbituhigh, true}, // FirstbitHi
+    {34, Intrinsic::dx_firstbitshigh, true}, // FirstbitSHi
 
-// Thread/wave queries: fixed i32 (or no) operands, never overloaded.
-static const RaisableOp ThreadWaveOps[] = {
-    {93, Intrinsic::dx_thread_id, false},                     // ThreadId
-    {94, Intrinsic::dx_group_id, false},                      // GroupId
-    {95, Intrinsic::dx_thread_id_in_group, false},             // ThreadIdInGroup
-    {96, Intrinsic::dx_flattened_thread_id_in_group, false},   // FlattenedThreadIdInGroup
-    {110, Intrinsic::dx_wave_is_first_lane, false},            // WaveIsFirstLane
-    {111, Intrinsic::dx_wave_getlaneindex, false},             // WaveGetLaneIndex
+    // Scalar binary math, overloaded on the (shared) operand type.
+    {35, Intrinsic::maxnum, true}, // FMax
+    {36, Intrinsic::minnum, true}, // FMin
+    {37, Intrinsic::smax, true},   // SMax
+    {38, Intrinsic::smin, true},   // SMin
+    {39, Intrinsic::umax, true},   // UMax
+    {40, Intrinsic::umin, true},   // UMin
+
+    // Scalar tertiary (multiply-add family) math.
+    {46, Intrinsic::fmuladd, true}, // FMad
+    {47, Intrinsic::fma, true},     // Fma (DXIL1_0: double-only overload)
+    {48, Intrinsic::dx_imad, true}, // IMad
+    {49, Intrinsic::dx_umad, true}, // UMad
+
+    // Vector dot products: fixed arg count (2/3/4 float pairs), overloaded
+    // on the (shared) operand type.
+    {54, Intrinsic::dx_dot2, true}, // Dot2
+    {55, Intrinsic::dx_dot3, true}, // Dot3
+    {56, Intrinsic::dx_dot4, true}, // Dot4
+
+    // Pixel-shader-family screen-space derivatives. Like the arithmetic ops
+    // above, raising doesn't need to re-validate DXIL's stage restrictions
+    // (pixel/library/mesh/amplification/node) -- these calls are only
+    // reachable here if `DXILOpLowering` already legally produced them.
+    {83, Intrinsic::dx_ddx_coarse, true}, // DerivCoarseX
+    {84, Intrinsic::dx_ddy_coarse, true}, // DerivCoarseY
+    {85, Intrinsic::dx_ddx_fine, true},   // DerivFineX
+    {86, Intrinsic::dx_ddy_fine, true},   // DerivFineY
+
+    // Thread/wave/quad queries: fixed i32 (or no) operands, never overloaded.
+    {93, Intrinsic::dx_thread_id, false},                    // ThreadId
+    {94, Intrinsic::dx_group_id, false},                     // GroupId
+    {95, Intrinsic::dx_thread_id_in_group, false},            // ThreadIdInGroup
+    {96, Intrinsic::dx_flattened_thread_id_in_group, false},  // FlattenedThreadIdInGroup
+    {101, Intrinsic::dx_asdouble, true},                      // MakeDouble (overloaded on the i32 operand type)
+    {110, Intrinsic::dx_wave_is_first_lane, false},           // WaveIsFirstLane
+    {111, Intrinsic::dx_wave_getlaneindex, false},            // WaveGetLaneIndex
+    {113, Intrinsic::dx_wave_any, false},                     // WaveActiveAnyTrue
+    {114, Intrinsic::dx_wave_all, false},                     // WaveActiveAllTrue
+    {115, Intrinsic::dx_wave_all_equal, true},                // WaveActiveAllEqual (overloaded on the operand, not the i1 result)
+    {117, Intrinsic::dx_wave_readlane, true},                 // WaveReadLaneAt
+    {130, Intrinsic::dx_legacyf32tof16, true},                // LegacyF32ToF16 (overloaded on the float operand, though DXIL only uses f32)
+    {131, Intrinsic::dx_legacyf16tof32, true},                // LegacyF16ToF32 (overloaded on the int operand, though DXIL only uses i32)
+    {135, Intrinsic::dx_wave_active_countbits, false},        // WaveAllBitCount
+    {136, Intrinsic::dx_wave_prefix_bit_count, false},        // WavePrefixBitCount
+
+    // Fixed-shape ops with no overload at all.
+    {82, Intrinsic::dx_discard, false},          // Discard
+    {162, Intrinsic::dx_dot2add, false},         // Dot2AddHalf
+    {163, Intrinsic::dx_dot4add_i8packed, false}, // Dot4AddI8Packed
+    {164, Intrinsic::dx_dot4add_u8packed, false}, // Dot4AddU8Packed
 };
 // clang-format on
 
 const RaisableOp *lookupRaisableOp(unsigned Opcode) {
-  for (const RaisableOp &Op : UnaryOps)
-    if (Op.Opcode == Opcode)
-      return &Op;
-  for (const RaisableOp &Op : ThreadWaveOps)
+  for (const RaisableOp &Op : DirectOps)
     if (Op.Opcode == Opcode)
       return &Op;
   return nullptr;
+}
+
+/// Raises the `IsFinite` (opcode 10) and `IsNormal` (opcode 11) DXIL ops.
+/// Unlike `IsNaN`/`IsInf` (which round-trip through their own dedicated
+/// `llvm.dx.isnan`/`llvm.dx.isinf` intrinsics), `DXILOpLowering` lowers both
+/// of these from the generic `llvm.is.fpclass` intrinsic, selecting the
+/// DXIL op via the `FPClassTest` bitmask in `is.fpclass`'s second operand
+/// (`fcFinite` -> `IsFinite`, `fcNormal` -> `IsNormal`; see
+/// `DXILOpLowering::lowerIsFPClass`). Raising therefore has to reconstruct
+/// that second (mask) operand rather than a simple opcode -> intrinsic
+/// lookup, so it doesn't fit the table-driven `raiseCall` path above.
+bool raiseIsFPClassCall(CallInst &CI, unsigned Opcode) {
+  if (CI.arg_size() != 2)
+    return false;
+  FPClassTest Mask = Opcode == 10 ? fcFinite : fcNormal;
+
+  Module &M = *CI.getModule();
+  IRBuilder<> Builder(&CI);
+  Function *IsFPClassFn = Intrinsic::getOrInsertDeclaration(
+      &M, Intrinsic::is_fpclass, {CI.getArgOperand(1)->getType()});
+  CallInst *NewCall = Builder.CreateCall(
+      IsFPClassFn, {CI.getArgOperand(1), Builder.getInt32(Mask)}, CI.getName());
+  CI.replaceAllUsesWith(NewCall);
+  CI.eraseFromParent();
+  return true;
 }
 
 /// Rewrites a single `dx.op.*` call to the LLVM intrinsic call it was
@@ -97,10 +193,12 @@ bool raiseCall(CallInst &CI, const RaisableOp &RaiseAs) {
     return false;
   SmallVector<Value *, 2> Args(llvm::drop_begin(CI.args()));
 
-  // The overload key is the (sole) operand's type, not necessarily the
+  // The overload key is the *first* operand's type, not necessarily the
   // call's result type: e.g. IsNan/IsInf take a float-family operand but
   // return i1, and it's the operand type that selects the intrinsic
-  // overload (`llvm.dx.isnan.f32`, not `.i1`).
+  // overload (`llvm.dx.isnan.f32`, not `.i1`). For multi-operand ops
+  // (Dot2..Dot4, FMax/FMin, ...) DXIL only ever overloads on a single shared
+  // operand type, so the first operand's type is always the right key.
   Module &M = *CI.getModule();
   Function *IntrinFn = RaiseAs.Overloaded
                            ? Intrinsic::getOrInsertDeclaration(
@@ -139,8 +237,14 @@ PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
       auto *OpcodeConst = dyn_cast<ConstantInt>(CI->getArgOperand(0));
       if (!OpcodeConst)
         continue;
+      uint64_t Opcode = OpcodeConst->getZExtValue();
 
-      const RaisableOp *RaiseAs = lookupRaisableOp(OpcodeConst->getZExtValue());
+      if (Opcode == 10 || Opcode == 11) { // IsFinite, IsNormal
+        Changed |= raiseIsFPClassCall(*CI, Opcode);
+        continue;
+      }
+
+      const RaisableOp *RaiseAs = lookupRaisableOp(Opcode);
       if (!RaiseAs)
         continue;
 

@@ -13,13 +13,22 @@
 // IR / `llvm.dx.*` intrinsic calls `DXILOpLowering` lowered them from.
 //
 // This is deliberately incremental (see the Design.md "Status" note this
-// pass's introduction updates): it covers a curated, growing subset of DXIL
-// opcodes -- initially the operations with a direct, context-free 1:1
-// mapping back to a single LLVM intrinsic call (scalar math and thread/wave
-// queries) -- not the full DXIL opcode set. Opcodes not (yet) covered are
-// left as unmodified `dx.op.*` calls rather than erroring, so this pass can
-// be used incrementally on modules that mix raised and not-yet-raised
-// operations.
+// pass's introduction updates): it covers every DXIL opcode with a direct,
+// context-free 1:1 mapping back to a single LLVM intrinsic call -- scalar/
+// vector math, bit-manipulation, screen-space derivatives, thread/wave/quad
+// queries, and so on -- plus `IsFinite`/`IsNormal` (raised via the generic
+// `llvm.is.fpclass` intrinsic, the one pair of opcodes that needs to
+// reconstruct an extra constant operand rather than a bare 1:1 call). It
+// does not yet cover: ops that return an aggregate needing `extractvalue`
+// reconstruction (`IMul`/`UMul`, `UAddc`, `SplitDouble`, `WaveActiveBallot`),
+// ops that pick their source intrinsic from an extra "kind"/flag operand
+// rather than the opcode alone (`WaveActiveOp`, `WaveActiveBit`,
+// `WavePrefixOp`, `QuadOp`, `Barrier`), or resource-handle ops
+// (`CreateHandle`, `AnnotateHandle`, buffer/texture loads and stores, ...),
+// which need `llvm::hlsl`-style resource metadata reconstruction. Opcodes
+// not (yet) covered are left as unmodified `dx.op.*` calls rather than
+// erroring, so this pass can be used incrementally on modules that mix
+// raised and not-yet-raised operations.
 //
 //===----------------------------------------------------------------------===//
 
