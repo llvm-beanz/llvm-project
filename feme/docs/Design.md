@@ -568,6 +568,39 @@ FeMe's own contribution here is a thin `Backend` interface plus the glue to
 select/configure the right `TargetMachine`/pass pipeline — it does not
 reimplement target-specific codegen.
 
+### Deviation: validating `Backend`/`Translator` with a SPIR-V "null pipeline"
+
+Roadmap step 3 (below) originally proposed X86 as the first `Backend`
+target for SPIR-V retargeting, as the easiest ISA to validate against. In
+practice, the `Translator`/`Backend` interfaces and the SPIR-V →
+`SPIRVToLLVM` → `llvm::Module` conversion are what actually need validating
+first — which target that `llvm::Module` is subsequently lowered to is
+orthogonal. Since LLVM already ships its own in-tree `SPIRV` backend
+(`llvm/lib/Target/SPIRV`, a normal, non-experimental target producing real
+SPIR-V binaries from `llvm::Module`, not merely an experimental/example
+target), retargeting an `llvm::Module` produced from SPIR-V import back to
+SPIR-V via that backend gives a **null pipeline**:
+
+```
+SPIR-V binary -> SPIRVImporter -> `spirv` dialect
+              -> SPIRVToLLVMTranslator -> llvm::Module
+              -> TargetMachineBackend("spirv64-unknown-unknown")
+              -> SPIR-V binary
+```
+
+The re-emitted binary can then be re-run through the already-implemented
+`SPIRVImporter` and checked structurally (e.g. the original entry point is
+recovered), giving an end-to-end self-checking test of the `Translator`
+(`feme::SPIRVToLLVMTranslator`, spirv dialect → LLVM IR) and `Backend`
+(`feme::TargetMachineBackend`, a generic `llvm::TargetMachine`-driven
+`Backend` that is not itself SPIR-V-specific) plumbing, without depending on
+a real ISA's ABI/calling-convention details (which SPIR-V shader modules
+don't straightforwardly have) to define "success." Real ISA retargeting
+(X86, AArch64, AMDGPU, NVPTX) is unaffected by this: `TargetMachineBackend`
+is the same `Backend` implementation either way, selected purely by
+`BackendOptions::TargetTriple` — this is not a SPIR-V-specific `Backend`,
+just a SPIR-V-specific validation path for it.
+
 ## Library API Shape
 
 - Primary API surface is C++ (matching MLIR/LLVM conventions:
@@ -897,8 +930,15 @@ This is a rough sequencing, not a schedule:
    FeMe's `Importer` interface; round-trip test (SPIR-V in → `spirv` dialect
    text out); add a fuzzing harness for the SPIR-V importer.
 3. **SPIR-V retargeting**: `spirv` dialect → `SPIRVToLLVM` → `llvm::Module`
-   → `TargetMachine` for at least one target (e.g. X86, as the easiest to
-   validate) end to end.
+   → `TargetMachine`, implemented as the `feme::Translator`
+   (`SPIRVToLLVMTranslator`) and `feme::Backend`
+   (`TargetMachineBackend`) interfaces. Deviates from an earlier draft of
+   this roadmap step, which proposed X86 as the first validation target:
+   validated first end to end as a **null pipeline** retargeting back to
+   SPIR-V itself via LLVM's own in-tree `SPIRV` backend (see "Deviation:
+   validating `Backend`/`Translator` with a SPIR-V 'null pipeline'" under
+   Retargeting to Native ISA above), since that is what actually needs
+   validating before a real ISA target (X86, next) is attempted.
 4. **DXIL import**: `DXContainer`/bitcode parsing (using LLVM's standard
    bitcode reader, expected to load DXIL bitcode as-is per the DXIL section
    above) + "op raising" pass to plain LLVM IR; add a fuzzing harness for
