@@ -714,3 +714,90 @@ and build out `feme-translate`/`feme-opt` as needed to support that.
   CMake/tool wiring, (2) the new lit tests, (3) removing the now-redundant
   gtest file/CMake, (4) the Design.md update -- rebuilding/retesting after
   each, matching this project's established commit granularity.
+
+# Agent thoughts: usage docs for FeMe's command line tools
+
+This records the reasoning behind producing per-tool usage docs for FeMe's
+four tool binaries: `feme`, `feme-opt`, `feme-translate`, and
+`feme-spirv-import-fuzzer`.
+
+## Approach
+
+This is a docs-only task (no library/tool code changes), so there was no
+new C++ to write and no unit/lit tests to add — the "small, individually
+testable commit" guidance from `.instructions.md` still applies, but
+"tested" here means verifying each doc's accuracy against the tool's actual
+`--help` output (and, for the fuzzer, against its actual harness code and
+LLVM's existing `LibFuzzer.md`), not adding new automated tests.
+
+Steps taken:
+
+- Re-read `feme/docs/Design.md`'s "Command Line Tool(s)" and "Testing
+  Tools" sections (the closest thing to a design-level source of truth for
+  each tool's intended purpose) and `feme/.instructions.md`.
+- Read each tool's actual source (`feme/tools/*/*.cpp`) rather than relying
+  purely on Design.md prose, since Design.md describes intent while the
+  `.cpp` files (plus `Options.td`/`FrontendOptions.h` for `feme` itself)
+  are the actual current behavior.
+- Ran the already-built `feme`/`feme-translate`/`feme-opt` binaries with
+  `--help` (using the existing `build/` directory, which already has
+  assertions and ccache enabled from prior sessions) to confirm the exact
+  option names/help text documented match reality, rather than trusting
+  memory of the `.td`/`.cpp` files. Cross-checked against the existing
+  `test/Feme/*-help.test` lit tests, which already pin down a subset of
+  this text via `FileCheck`.
+- Looked at existing LLVM/Clang doc conventions before picking a format:
+  `llvm/docs/CommandGuide/*.rst` (Sphinx/RST, man-page-oriented, integrated
+  into the Sphinx build) vs. plain Markdown READMEs like
+  `clang/tools/clang-fuzzer/README.txt`. Since feme's own docs
+  (`Design.md`) are plain Markdown with no Sphinx integration (confirmed no
+  `conf.py`/toctree references `feme/docs/`), and the user explicitly asked
+  for Markdown, wrote `.md` files rather than adopting the RST
+  `CommandGuide` machinery — same "CommandGuide" *directory name* for
+  discoverability/precedent, but plain Markdown content, consistent with
+  the rest of `feme/docs/`.
+- One doc per tool (`feme.md`, `feme-opt.md`, `feme-translate.md`,
+  `feme-spirv-import-fuzzer.md`) plus an `index.md` linking all four,
+  mirroring the one-man-page-per-tool shape of `llvm/docs/CommandGuide`
+  without literally reusing its RST templating.
+- Each doc follows the same shape: SYNOPSIS / DESCRIPTION / OPTIONS /
+  EXAMPLES / EXIT STATUS, with DESCRIPTION explicitly noting testing-only
+  tools' place in the Core Architectural Principle's carve-out (`feme-opt`,
+  `feme-translate`) versus `feme` being the only end-user-facing tool.
+- For `feme`, documented today's actual (scaffolding-only, no real
+  translation yet) behavior, but included the `--from`/`--to`/`--target`
+  end-to-end examples straight from Design.md's "Command Line Tool(s)"
+  section as the intended future usage, clearly framed as "once translation
+  support lands" rather than implying it works today.
+- For `feme-translate`, only documented the FeMe-specific flags
+  (`--import-spirv`, `--spirv-to-llvmir`) in detail rather than
+  transcribing MLIR's large generic `--help` output (which is
+  MLIR/mlir-translate's own documented surface, not feme's), pointing
+  readers at `--help` for the rest.
+- For `feme-opt`, similarly deferred to `--help` for the generic
+  MlirOptMain/PassPipelineCLParser surface, since it currently registers no
+  FeMe-specific dialects/passes to document (roadmap step 1 is still
+  scaffolding-only there).
+- For `feme-spirv-import-fuzzer`, documented it as a libFuzzer harness with
+  no options of its own (matching its actual `LLVMFuzzerTestOneInput`-only
+  source), linking to `llvm/docs/LibFuzzer.md` for the generic libFuzzer
+  CLI rather than duplicating it.
+- Linked the new `docs/CommandGuide/index.md` from both `feme/README.md`
+  and `feme/docs/Design.md`'s "Command Line Tool(s)" section, so the docs
+  are actually discoverable rather than orphaned.
+
+## Validation
+
+- No code/build changes were made, so there was nothing new to compile;
+  confirmed the existing `build/` tree (assertions + ccache already
+  enabled from earlier sessions) still has working
+  `feme`/`feme-opt`/`feme-translate` binaries and used their live
+  `--help` output as the primary accuracy check for each doc's OPTIONS
+  section.
+- Double-checked relative Markdown links resolve to real files/anchors
+  (`../Design.md`, `../../../llvm/docs/LibFuzzer.md#options`, sibling
+  `docs/CommandGuide/*.md` files).
+- Split into one commit per new doc file, plus separate small commits for
+  the `README.md`/`Design.md` cross-links, per this project's established
+  small-commit convention; this final commit adds this `agent_thoughts.md`
+  entry on its own.
