@@ -637,6 +637,10 @@ just a SPIR-V-specific validation path for it.
 
 ## Command Line Tool(s)
 
+See [docs/CommandGuide](CommandGuide/index.md) for detailed, per-tool usage
+docs (synopsis, options, and examples) for every tool mentioned in this and
+the following section.
+
 - `feme`: the primary CLI entry point, modeled after
   `mlir-translate`/`llvm-dis`-style tools:
 
