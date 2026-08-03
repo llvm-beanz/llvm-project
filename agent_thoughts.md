@@ -3563,3 +3563,129 @@ intrinsics mean anything; entry points as `hlsl.*` attributes; builtin
 variables; resource handles; image accesses (with the end-to-end round trip);
 the `Driver` change to keep a SPIR-V input's own environment; and the design
 doc updates, plus this entry.
+
+# Agent thoughts: matching `llvm.spv.*` in the AMDGPU lowering passes
+
+This closes the gap the previous entry's "What I did not do" section flagged:
+`feme::amdgpu::RaisedLoweringPass` and `feme::amdgpu::ResourceLoweringPass`
+only matched the `llvm.dx.*` half of each raised, format-agnostic intrinsic
+family, so a SPIR-V-originated shader reached them in a recognizable form but
+came out the other side with those calls unresolved.
+
+## Framing
+
+Before writing anything I re-read `feme/docs/Design.md`'s "Raised LLVM IR ->
+AMDGPU" section and re-derived, from the actual `IntrinsicsSPIRV.td`
+definitions and `feme::SPIRVToLLVMTranslator`'s own patterns
+(`SPIRVToLLVMPatterns.cpp`), exactly what the `llvm.spv.*` half of each family
+looks like, rather than assuming it mirrors `llvm.dx.*` structurally just
+because the design doc calls the two families "parallel by construction."
+That assumption turned out to be right for the thread/group index queries and
+wrong for resource ops, so checking first mattered.
+
+**Thread/group index queries** are genuinely parallel: `llvm.spv.group.id`,
+`llvm.spv.thread.id.in.group`, `llvm.spv.thread.id`, and
+`llvm.spv.flattened.thread.id.in.group` take the same arguments and mean the
+same thing as their `llvm.dx.*` counterparts. The one wrinkle is that three of
+the four are overloaded on return width (`llvm_anyint_ty`) where DXIL's are
+fixed `i32` -- `RaisedLoweringPass` never itself produces anything but
+AMDGPU's fixed-`i32` intrinsics, so I added a width guard rather than
+generalizing the rewrite to other widths nothing asks for yet. Entry point
+handling needed no changes at all: it already keyed off the format-agnostic
+`hlsl.shader`/`hlsl.numthreads` attributes, not `llvm.dx.*` calls.
+
+**Resource ops are not parallel in shape**, only in what they let a shader
+do. I found this by checking what `feme::SPIRVToLLVMTranslator` actually
+emits for an image read/write (`ImageReadPattern`/`ImageWritePattern` in
+`SPIRVToLLVMPatterns.cpp`, and the `spirv-to-llvm-image-access.mlir` test),
+rather than assuming a `llvm.spv.resource.load.typedbuffer`/
+`store.typedbuffer` pair mirroring DX's dedicated intrinsics -- LLVM upstream
+does define those, but FeMe's own conversion does not use them. It instead
+emits `llvm.spv.resource.getpointer(handle, coordinate)` returning a pointer,
+which an ordinary `load`/`store` then goes through directly. This is also
+what `feme/docs/Design.md` already named as the relevant op
+(`llvm.spv.resource.getpointer`) in its "not yet covered" note, which I had
+read past the first time before checking the emitter myself. I built and ran
+a throwaway SPIR-V resource test through `feme-opt --feme-convert-spirv-to-llvm`
+to confirm this before writing any lowering code, the same empirical-first
+habit the previous entry used for the conversion pass itself.
+
+## Design decisions worth recording
+
+**`ResourceLoweringPass` dispatches on op family rather than unifying the
+rewrite.** I considered forcing SPIR-V's `getpointer` into DX's shape (wrap it
+as a synthetic load/store pair) or vice versa, but the shapes differ where it
+matters: DX's load intrinsic returns a `{value, checkbit}` struct with no
+memory counterpart, while SPIR-V's `getpointer` returns a plain pointer real
+`load`/`store` instructions already use. Forcing one into the other would
+have meant either inventing a checkbit for SPIR-V or synthesizing a
+`{value, i1}` load for DX out of nothing, both fake and each specific to one
+family anyway. Two per-family rewrite functions sharing only the GEP/kernel-
+argument glue was the honest shape; a `ResourceFamily` enum and per-op-ID
+dispatch table (`ResourceOps`) picks between them without duplicating
+`collectBindings`/`addBindingArguments`.
+
+**Element type comes from the access, not always the handle type.** DX's
+`target("dx.TypedBuffer", ElemTy, ...)` spells the element type directly as a
+type parameter. SPIR-V's `target("spirv.Image", ...)` does not -- its
+parameters describe the underlying image (sampled type, dimensionality,
+format), not a particular access's (possibly vector) type. Rather than adding
+a SPIR-V-specific "guess the vector width" heuristic, I read it off the first
+`load`/`store` found through the handle's accesses, which is exactly the type
+already available at the one place that needs it.
+
+**`setOperand`, not `replaceAllUsesWith`, for rewiring the `getpointer`
+result.** My first attempt at `lowerSPIRVAccess` called
+`Access.replaceAllUsesWith(Elem)`, which asserts inside LLVM: `Elem` is a
+`ptr addrspace(1)` GEP into the new kernel argument, where `getpointer`'s
+result is the generic `ptr` (addrspace 0) type; opaque pointer types encode
+address space, so these are different types and `replaceAllUsesWith` refuses
+to substitute one for the other. This only reproduced by actually running the
+pass on a test module (the DX path never hits it, since DX's rewrite replaces
+`extractvalue` results with same-typed values) -- another point for testing
+each new path immediately rather than trusting the DX precedent to carry
+over. The fix is to `setOperand` the pointer operand of the single `load`/
+`store` directly instead of touching every use generically, which is also
+required anyway now that `hasOnlySupportedUses` guarantees exactly one such
+use per `getpointer` call.
+
+**Left as a single-use restriction rather than generalizing.** A `getpointer`
+call used more than once (e.g. read-modify-write through the same address)
+is rejected outright rather than deduplicating the GEP, matching this pass's
+existing "leave the whole entry point untouched rather than partially
+rewrite" precedent for anything it cannot model cleanly -- this is a
+real gap (an entry point doing a compute-shader read-modify-write on a
+`RWBuffer` would hit it), not an oversight; closing it needs teaching
+`collectBindings` to reason about multiple accesses sharing one address
+rather than assuming one binding pointer is only ever referenced once.
+
+## What I did not do
+
+Wave/quad ops (`llvm.dx.wave.*`/`llvm.spv.wave.*`) are still unmapped, per
+`Design.md`'s own existing scoping -- the two formats' wave ops are not
+always 1:1 with AMDGPU's cross-lane intrinsics and need their own pass to get
+right, not a name-matching exercise like this change. A `getpointer` call
+used more than once (see above) is also still rejected rather than handled;
+real compute shaders doing read-modify-write on the same binding will hit
+this until it is taught to reason about that.
+
+## Verification
+
+Extended both existing `feme-opt` lit tests with SPIR-V-flavored siblings
+(`amdgpu-lower-raised-spirv.ll`, `amdgpu-lower-resources-spirv.ll`) covering
+the same cases as the `llvm.dx.*` originals plus the SPIR-V-specific ones
+(overloaded-width guard; a `getpointer` call used more than once). Updated
+`feme-spirv-to-amdgpu.mlir` from a trivial no-op shader (the previous entry's
+placeholder, justified there by exactly this gap) to the same
+read-a-builtin/read-and-write-a-resource shape `feme-dxil-to-amdgpu.ll` uses
+for DXIL, retargeted through the full `feme` CLI to a real AMDGPU object
+file. Ran the full `check-feme` suite (409 tests, all passing) after each
+change, with assertions enabled and `ccache` for iteration speed, per this
+task's own instructions.
+
+## Commits
+
+Four: `RaisedLoweringPass`'s `llvm.spv.*` matching with its test; separately,
+`ResourceLoweringPass`'s (different-shaped) `llvm.spv.*` matching with its
+test; the `feme-spirv-to-amdgpu.mlir` end-to-end update; and the `Design.md`
+update, plus this entry.
