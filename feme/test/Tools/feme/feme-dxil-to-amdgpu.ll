@@ -13,26 +13,24 @@
 ; test/Import/DXIL/dxil-import-container.ll does, per "Avoiding binary test
 ; fixtures" in feme/docs/Design.md.
 ;
-; Deliberately uses only the one opcode family feme::amdgpu::RaisedLoweringPass
-; currently covers (thread/group index queries, see the "Raised LLVM IR ->
-; AMDGPU" section of feme/docs/Design.md) plus a directly-mapped math op
-; (both fully covered by feme::dxil::OpRaisingPass): real shaders' resource
-; load/store calls are not yet raised (see the DXIL section of
-; feme/docs/Design.md), so are out of scope for this plumbing-validation
-; test, matching the SPIR-V "null pipeline"'s own precedent of validating
-; Driver/Translator/Backend wiring without depending on coverage that
-; doesn't exist yet.
+; This is the shape of a real compute shader: it writes its dispatch-wide
+; result to a `RWBuffer<float4>` (so the DXIL resource ops have to be raised
+; and then re-expressed as an AMDGPU kernel pointer argument), indexes that
+; write by `SV_DispatchThreadID` (which has no single AMDGPU intrinsic), and
+; uses an HLSL-specific math op with no AMDGPU equivalent (`frac`).
 
 target triple = "dxil-unknown-shadermodel6.5-compute"
 
 define void @main() #0 {
-  %1 = call i32 @llvm.dx.thread.id.in.group(i32 0)
-  %2 = call float @llvm.sin.f32(float 1.000000e+00)
+  %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
+      @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+  %id = call i32 @llvm.dx.thread.id(i32 0)
+  %f = call float @llvm.dx.frac.f32(float 1.500000e+00)
+  %v = insertelement <4 x float> zeroinitializer, float %f, i32 0
+  call void @llvm.dx.resource.store.typedbuffer(
+      target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h, i32 %id, <4 x float> %v)
   ret void
 }
-
-declare i32 @llvm.dx.thread.id.in.group(i32)
-declare float @llvm.sin.f32(float)
 
 attributes #0 = { "hlsl.numthreads"="1024,1,1" "hlsl.shader"="compute" }
 

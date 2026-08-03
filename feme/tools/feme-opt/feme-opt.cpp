@@ -25,6 +25,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
+#include "feme/Transforms/AMDGPU/ResourceLowering.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
@@ -82,6 +83,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::amdgpu::RaisedLoweringPass::name())
           return false;
         MPM.addPass(feme::amdgpu::RaisedLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::amdgpu::ResourceLoweringPass::name())
+          return false;
+        MPM.addPass(feme::amdgpu::ResourceLoweringPass());
         return true;
       });
 }

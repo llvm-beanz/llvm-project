@@ -15,6 +15,7 @@
 #include "feme/Target/Backend.h"
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
+#include "feme/Transforms/AMDGPU/ResourceLowering.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
@@ -165,6 +166,10 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
   // understands (see "Raised LLVM IR -> AMDGPU" in feme/docs/Design.md).
   if (TheTriple.isAMDGCN()) {
     llvm::ModuleAnalysisManager MAM;
+    // Resource lowering runs first: it rewrites each entry point's signature
+    // to take its bindings as kernel arguments, which the rest of the AMDGPU
+    // lowering then sees as an ordinary function.
+    feme::amdgpu::ResourceLoweringPass().run(M, MAM);
     feme::amdgpu::RaisedLoweringPass().run(M, MAM);
   }
 
