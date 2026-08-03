@@ -20,13 +20,9 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-I'd like you to build out the `dxbc-as` tool described in the design document.
-While this is a testing tool so it doesn't need to be fully production-quality I
-would like it to be well engineered.
-
-Specifically I'd like to see the structure follow traditional compiler design,
-lexing, parsing, and building out a stack of instructions which then get dumped
-either to binary or text.
-
-I'd also like you to build a fuzzing frontend for it so that we can ensure that
-it can handle a wide array of inputs gracefully.
+Now that we have dxbc-as, can you integrate the dxsa dialect from the
+wip/dxsa-mlir branch of the access softek fork of LLVM
+(https://github.com/access-softek/llvm-project). Please integrate the dialect
+under the feme project rather than as a part of the mlir project, and migrate
+the tests to use the dxbc-as tool wherever possible to avoid binary and
+hex-encoded files as test collateral.
