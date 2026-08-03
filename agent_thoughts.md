@@ -2153,3 +2153,89 @@ comments, (2) add `test/Unit/lit.cfg.py`/`lit.site.cfg.py.in` and wire
 `FeMeUnitTests` into `FEME_TEST_DEPENDS` so `check-feme` runs the gtest
 suite, (3) document that integration in `docs/Design.md`. This
 `agent_thoughts.md` entry is committed separately, as its own commit.
+
+# Agent thoughts: Fix `feme-opt` build failure (`llvm/Passes/PassPlugin.h` not found)
+
+The user reported that `feme-opt` fails to build on their machine with:
+
+```
+feme/tools/feme-opt/feme-opt.cpp:40:10: fatal error: 'llvm/Passes/PassPlugin.h' file not found
+```
+
+and asked how this wasn't caught by testing, and whether `check-feme` is
+actually being run.
+
+## Root cause
+
+`llvm/Passes/PassPlugin.h` was moved upstream (out from under
+`llvm/tools/opt/opt.cpp`'s original location) to `llvm/Plugins/PassPlugin.h`
+by `d87b47d3a893` / `f54df0d09e19` ("[LLVM][NFC] Move PassPlugin from Passes
+to separate library"), well before this line was added to `feme-opt.cpp` in
+`b06fb768425c` ("[feme] Give feme-opt an LLVM IR pass-pipeline mode"). So the
+in-tree header this `#include` names has not existed at that path for a
+while.
+
+Critically, grepping `feme-opt.cpp` shows the header is *never actually
+used* -- no `PassPlugin`, `PassPluginLibraryInfo`, or plugin-loading symbol
+appears anywhere in the file. It was almost certainly pulled in by copying
+`llvm/tools/opt/opt.cpp`'s include block (which genuinely uses
+`PassPlugin.h` for its `-load-pass-plugin` support) when scaffolding
+`runLLVMIRMode`, but `feme-opt` never implemented (or needed) plugin
+loading, so the include was always dead weight.
+
+**Why this built here despite the header being genuinely missing from the
+tree:** this sandbox has a distro package (`llvm-18-dev`-equivalent)
+installed system-wide, which drops its own copy of
+`llvm/Passes/PassPlugin.h` under `/usr/include/llvm-18/`. Because the
+`#include "llvm/Passes/PassPlugin.h"` uses quoted-include syntax, once
+quoted-form lookup (relative to the including file, then the `-I` list)
+fails, Clang falls back to the same search Clang would use for `#include
+<...>`, which includes the system's default `/usr/include` paths -- so it
+silently resolved to the unrelated system package's copy instead of failing.
+I confirmed this directly: temporarily moving `/usr/include/llvm-18` aside
+and rebuilding reproduced the user's exact `fatal error` from a clean
+`ninja check-feme`/`ninja feme-opt`; restoring it made the (unfixed) file
+build again with no diagnostic at all. So the previous change compiled by
+accident in whatever environment it was authored/tested in (this one, or
+another with similar system LLVM dev headers installed), and the stale
+`#include` was never exercised against a clean toolchain the way the user's
+machine is. This is exactly the failure mode `check-feme` is supposed to
+catch, and it *would* have caught it on a clean system -- the gap was that
+"clean" and "this sandbox" aren't the same environment when the sandbox has
+leftover system dev packages that quietly satisfy a bad quoted include.
+
+## Fix
+
+Removed the unused `#include "llvm/Passes/PassPlugin.h"` line from
+`feme/tools/feme-opt/feme-opt.cpp`. No functional change -- the file only
+ever used `llvm/Passes/PassBuilder.h` (already included) for its
+`PassBuilder`/`ModulePassManager` pipeline-parsing use in `runLLVMIRMode`.
+If/when `feme-opt` grows real `-load-pass-plugin`-style plugin loading, the
+include should be re-added as `llvm/Plugins/PassPlugin.h` (the current
+upstream path) rather than the stale `llvm/Passes/...` one.
+
+## Validation
+
+- Reproduced the exact reported failure first: temporarily renamed
+  `/usr/include/llvm-18` out of the way, `touch`ed `feme-opt.cpp` to force a
+  rebuild, and `ninja feme-opt` failed with the identical `fatal error:
+  'llvm/Passes/PassPlugin.h' file not found` at the same line/column as the
+  user's report.
+- Applied the one-line fix, rebuilt: `ninja feme-opt` succeeded.
+- Restored `/usr/include/llvm-18` and ran the full `ninja check-feme`:
+  **39/39** tests passing (matching the count from the prior
+  `check-feme`-wiring entry above), confirming the fix doesn't regress
+  anything and that `check-feme` does in fact build/run `feme-opt` as part
+  of its test dependencies (`feme/test/CMakeLists.txt`'s
+  `FEME_TEST_DEPENDS`).
+- Used the pre-existing `build/` directory throughout, which already has
+  `LLVM_CCACHE_BUILD=ON`/`ccache` and `LLVM_ENABLE_ASSERTIONS=ON` configured
+  (`cmake -C feme/cmake/caches/feme.cmake`), so no new build configuration
+  was introduced.
+
+## Commits
+
+Two commits: (1) the one-line fix removing the stale, unused
+`llvm/Passes/PassPlugin.h` include from `feme-opt.cpp`, (2) this
+`agent_thoughts.md` entry, committed separately per the standing convention
+in this file.
