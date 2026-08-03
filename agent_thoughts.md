@@ -2026,3 +2026,130 @@ raising and a `Driver`; real `offload-test-suite` shader collateral.
 
 Three commits (widened resource-handle raising, its lit tests, a
 `Design.md` update) plus this `agent_thoughts.md` entry as its own commit.
+
+# Agent thoughts: Flatten test/Feme and wire unittests into check-feme
+
+## Task
+
+Two test-layout complaints from the user:
+
+1. `feme/test/Feme/` puts all lit tests under an extra `Feme/` layer that
+   isn't needed and doesn't match how other in-tree LLVM subprojects (clang,
+   mlir, etc.) lay out `test/`: they put suites directly under `test/`, with
+   no repeated-project-name subdirectory.
+2. `feme/unittests/` (gtest) isn't connected to `lit`, so `ninja check-feme`
+   only runs the 17 lit/FileCheck tests and silently skips the `gtest`
+   coverage in `Core`, `Frontend`, and `Import/{DXIL,SPIRV}` unless someone
+   remembers to separately build/run `FeMeUnitTests`.
+
+## Investigation
+
+- Confirmed `feme/test/lit.cfg.py`'s `test_source_root` is already
+  `os.path.dirname(__file__)`, i.e. it doesn't hardcode the `Feme/`
+  subdirectory name anywhere -- the extra layer is purely a directory
+  layout artifact, not something baked into the lit config. Safe to `git mv`
+  without touching `lit.cfg.py`.
+- Compared against `llvm/test/` and `clang/test/`: both put suites directly
+  under `test/` (e.g. `clang/test/Analysis`, `clang/test/Sema`, no
+  `clang/test/Clang/...` layer). Confirms the "extra layer" complaint and
+  that flattening is the right fix, not a rename to something else.
+- For wiring unittests into `check-feme`, looked at how `llvm/test/Unit` and
+  `clang/test/Unit` do it:
+  - A `test/Unit/lit.cfg.py` + `lit.site.cfg.py.in` pair, using
+    `lit.formats.GoogleTest` and `test_exec_root` pointed at the build
+    tree's `unittests/` directory (where `add_unittest`'s
+    `set_output_directory` actually places the gtest binaries).
+  - `clang/test/CMakeLists.txt` doesn't even need an
+    `add_subdirectory(Unit)` or a `test/Unit/CMakeLists.txt` -- `lit`
+    auto-discovers the generated `Unit/lit.site.cfg.py` as a nested test
+    suite when it recurses through the build-tree `test/` directory, purely
+    because a config file exists there. The only wiring needed is (a)
+    `configure_lit_site_cfg` for the new site config, and (b) adding the
+    unittest aggregate target (`ClangUnitTests`/`UnitTests`) to the relevant
+    `*_TEST_DEPENDS` list so `ninja check-<x>` builds the gtest binaries
+    before lit tries to run them. Confirmed clang wires
+    `ClangUnitTests` into `CLANG_TEST_DEPS` from the top-level
+    `clang/CMakeLists.txt`, gated on `CLANG_INCLUDE_TESTS`.
+  - feme already has an equivalent aggregate target,
+    `FeMeUnitTests` (`add_custom_target(FeMeUnitTests)` in
+    `feme/unittests/CMakeLists.txt`), and `feme/CMakeLists.txt` already
+    does `add_subdirectory(unittests)` before `add_subdirectory(test)` when
+    `FEME_INCLUDE_TESTS` is set, so no new plumbing was needed at that
+    layer -- just add `FeMeUnitTests` to `FEME_TEST_DEPENDS` in
+    `feme/test/CMakeLists.txt`.
+
+## Changes
+
+1. **Flatten `test/Feme/*` to `test/*`.** `git mv` each subdirectory
+   (`Import`, `Target`, `Tools`, `Transforms`, `Translate`) up one level and
+   remove the now-empty `Feme/` directory. Updated the few places that
+   spelled out the old `test/Feme/...` paths in prose/comments:
+   `docs/Design.md` and the two importer unittest files
+   (`unittests/Import/DXIL/DXILImporterTest.cpp`,
+   `unittests/Import/SPIRV/SPIRVImporterTest.cpp`), which each had a
+   comment cross-referencing the corresponding lit test. No change needed
+   to `lit.cfg.py`/`lit.site.cfg.py.in`, `CMakeLists.txt` (`add_lit_testsuite`
+   already just points at `${CMAKE_CURRENT_BINARY_DIR}`, i.e. the whole
+   `test/` tree, not a `Feme/` subpath), since nothing there named the
+   subdirectory explicitly.
+2. **Wire `unittests/` into `check-feme` via `lit`.** Added
+   `feme/test/Unit/lit.cfg.py` and `lit.site.cfg.py.in`, modeled closely on
+   `llvm/test/Unit` (same `GoogleTest` format, same environment-propagation
+   boilerplate for temp dirs and sanitizer options), with
+   `test_exec_root = os.path.join(config.feme_obj_root, "unittests")` so it
+   matches where `add_unittest` actually places `FeMeCoreTests`,
+   `FeMeFrontendTests`, `FeMeImportDXILTests`, and `FeMeImportSPIRVTests` in
+   the build tree (`<build>/tools/feme/unittests/...`, since
+   `FEME_BINARY_DIR` is `<build>/tools/feme`). Updated
+   `feme/test/CMakeLists.txt` to `configure_lit_site_cfg` this new site
+   config and add `FeMeUnitTests` to `FEME_TEST_DEPENDS`, so `ninja
+   check-feme` both builds the gtest binaries and picks them up as a nested
+   `lit` suite (named `FeMe-Unit` to distinguish from the `FEME` lit/
+   FileCheck suite in output).
+3. Added a short note to `docs/Design.md`'s Testing Strategy section
+   (the `unittests/` bullet) documenting that `test/Unit/lit.cfg.py` is
+   what makes `ninja check-feme` run the gtest suite too, so the design
+   doc doesn't go stale relative to what `check-feme` actually covers.
+
+## Validation
+
+- Baseline before any changes: `ninja check-feme` -> 17/17 lit tests (no
+  unittests run). Confirmed with a plain `bin/llvm-lit ../feme/test -v`
+  too.
+- After flattening `test/Feme/*` -> `test/*` (commit 1): re-ran `ninja
+  check-feme` and `bin/llvm-lit ../feme/test -v` -- still 17/17, and the
+  test names in `-v` output now read e.g. `FEME :: Import/DXIL/
+  dxil-import.ll` instead of `FEME :: Feme/Import/DXIL/dxil-import.ll`,
+  confirming the directory move alone doesn't require a `lit.cfg.py`/CMake
+  change and lit picks up the new locations without a manual
+  reconfigure (ninja's build-file regeneration step handled it).
+- After wiring `test/Unit` (commit 2): `ninja check-feme` first rebuilt
+  `FeMeImportDXILTests`/`FeMeImportSPIRVTests` (already-built
+  `FeMeCoreTests`/`FeMeFrontendTests` were reused from ccache/incremental
+  build) and then reported **45** discovered tests, all passing. Noticed
+  the extra count included stale `FeMeTargetTests`/`FeMeTranslateSPIRVTests`
+  binaries left over in the build tree from an earlier (already-reverted)
+  iteration of this repo's history that no longer has corresponding
+  `unittests/Target`/`unittests/Translate` source directories or CMake
+  targets -- these were pre-existing build-directory cruft unrelated to
+  this change, not a bug in the new wiring. Removed those two stale build
+  subdirectories and re-ran: **39/39** passing (17 lit + 22 gtest cases:
+  `FeMeCoreTests` 8, `FeMeFrontendTests` 8, `FeMeImportDXILTests` 3,
+  `FeMeImportSPIRVTests` 3), matching the actual set of unittest source
+  files in the tree.
+- Grepped the whole tree (excluding `build/` and this file's own historical
+  entries) for leftover `test/Feme` path references after the move: none
+  found outside `agent_thoughts.md`'s own prior entries, which are a
+  historical record and intentionally left unedited.
+- All builds used the existing ccache + assertions-enabled build
+  configuration already present in `build/` (`LLVM_CCACHE_BUILD=ON`,
+  `LLVM_ENABLE_ASSERTIONS=ON`); no new build flags were introduced.
+
+## Commits
+
+Three commits: (1) flatten `test/Feme/*` to `test/*` and fix up the stale
+path references in `docs/Design.md` and the two importer unittest
+comments, (2) add `test/Unit/lit.cfg.py`/`lit.site.cfg.py.in` and wire
+`FeMeUnitTests` into `FEME_TEST_DEPENDS` so `check-feme` runs the gtest
+suite, (3) document that integration in `docs/Design.md`. This
+`agent_thoughts.md` entry is committed separately, as its own commit.
