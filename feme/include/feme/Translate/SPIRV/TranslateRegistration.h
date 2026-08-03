@@ -6,9 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares the registration hook exposing
-// feme::SPIRVToLLVMTranslator to feme-translate as the `--spirv-to-llvmir`
-// flag (see the "Testing Tools" / `feme-translate` section of
+// This file declares the registration hooks exposing
+// feme::SPIRVToLLVMTranslator and feme::SPIRVToLLVMDialectTranslator to
+// feme-translate as the `--spirv-to-llvmir` and `--spirv-to-llvmdialect`
+// flags (see the "Testing Tools" / `feme-translate` section of
 // feme/docs/Design.md).
 //
 //===----------------------------------------------------------------------===//
@@ -22,6 +23,11 @@ namespace feme {
 /// under the `spirv-to-llvmir` name, for use by feme-translate and any other
 /// tool linking MLIRTranslateLib.
 void registerSPIRVToLLVMIRTranslation();
+
+/// Registers feme::SPIRVToLLVMDialectTranslator with MLIR's translation
+/// registry under the `spirv-to-llvmdialect` name, for use by feme-translate
+/// and any other tool linking MLIRTranslateLib.
+void registerSPIRVToLLVMDialectTranslation();
 
 } // namespace feme
 

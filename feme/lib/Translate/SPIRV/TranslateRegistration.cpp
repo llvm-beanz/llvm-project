@@ -10,6 +10,7 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Translate/SPIRV/SPIRVToLLVMDialectTranslator.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
@@ -47,12 +48,45 @@ translateSPIRVToLLVMIR(mlir::spirv::ModuleOp SpirvModule,
   return mlir::success();
 }
 
+// Runs feme::SPIRVToLLVMDialectTranslator on `SpirvModule`, printing the
+// resulting `llvm` dialect module as textual MLIR to `Output`. Same cloning
+// rationale as translateSPIRVToLLVMIR above.
+static mlir::LogicalResult
+translateSPIRVToLLVMDialect(mlir::spirv::ModuleOp SpirvModule,
+                            llvm::raw_ostream &Output) {
+  mlir::MLIRContext *MLIRCtx = SpirvModule.getContext();
+  Context Ctx(*MLIRCtx);
+
+  mlir::OwningOpRef<mlir::spirv::ModuleOp> Cloned(SpirvModule.clone());
+  Module Input = Module::fromMLIR(std::move(Cloned));
+
+  SPIRVToLLVMDialectTranslator Translator;
+  llvm::Expected<Module> Result = Translator.translate(std::move(Input), Ctx);
+  if (!Result) {
+    mlir::emitError(SpirvModule.getLoc()) << llvm::toString(Result.takeError());
+    return mlir::failure();
+  }
+
+  Result->getMLIROperation()->print(Output);
+  return mlir::success();
+}
+
 void feme::registerSPIRVToLLVMIRTranslation() {
   mlir::TranslateFromMLIRRegistration Registration(
       "spirv-to-llvmir",
       "translate a `spirv` dialect module to LLVM IR via "
       "feme::SPIRVToLLVMTranslator",
       translateSPIRVToLLVMIR, [](mlir::DialectRegistry &Registry) {
+        Registry.insert<mlir::spirv::SPIRVDialect>();
+      });
+}
+
+void feme::registerSPIRVToLLVMDialectTranslation() {
+  mlir::TranslateFromMLIRRegistration Registration(
+      "spirv-to-llvmdialect",
+      "translate a `spirv` dialect module to the `llvm` dialect via "
+      "feme::SPIRVToLLVMDialectTranslator",
+      translateSPIRVToLLVMDialect, [](mlir::DialectRegistry &Registry) {
         Registry.insert<mlir::spirv::SPIRVDialect>();
       });
 }

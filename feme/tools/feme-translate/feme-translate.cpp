@@ -20,12 +20,19 @@
 // so that each stage of the SPIR-V "null pipeline" (see
 // feme/docs/Design.md's Retargeting to Native ISA section) can be
 // lit-tested in isolation instead of only via gtest.
+// `--spirv-to-llvmdialect` and `--llvmdialect-to-llvmir` further split
+// `--spirv-to-llvmir` into its two component stages (`spirv` dialect ->
+// `llvm` dialect, then `llvm` dialect -> LLVM IR), so that the intermediate
+// `llvm` dialect representation SPIR-V import reaches on its way to LLVM IR
+// can also be lit-tested on its own -- see the "SPIR-V -> MLIR llvm dialect
+// -> LLVM IR" section of feme/docs/Design.md.
 //
 //===----------------------------------------------------------------------===//
 
 #include "feme/Import/DXIL/TranslateRegistration.h"
 #include "feme/Import/SPIRV/TranslateRegistration.h"
 #include "feme/Target/TranslateRegistration.h"
+#include "feme/Translate/LLVMIR/TranslateRegistration.h"
 #include "feme/Translate/SPIRV/TranslateRegistration.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllTranslations.h"
@@ -35,7 +42,9 @@ int main(int argc, char **argv) {
   mlir::registerAllTranslations();
   feme::registerSPIRVImportTranslation();
   feme::registerDXILImportTranslation();
+  feme::registerSPIRVToLLVMDialectTranslation();
   feme::registerSPIRVToLLVMIRTranslation();
+  feme::registerLLVMDialectToLLVMIRTranslation();
   feme::registerTargetMachineBackendTranslation();
   // TODO: Register FeMe's other import/export translations (DXBC) here as
   // they are implemented.

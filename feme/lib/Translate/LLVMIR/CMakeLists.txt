@@ -1,6 +1,5 @@
-add_mlir_library(FeMeTranslateSPIRV
-  SPIRVToLLVMDialectTranslator.cpp
-  SPIRVToLLVMTranslator.cpp
+add_mlir_library(FeMeTranslateLLVMIR
+  LLVMDialectToLLVMIRTranslator.cpp
   TranslateRegistration.cpp
 
   LINK_COMPONENTS
@@ -8,14 +7,10 @@ add_mlir_library(FeMeTranslateSPIRV
 
   LINK_LIBS PUBLIC
   FeMeCore
-  FeMeTranslateLLVMIR
   MLIRIR
   MLIRLLVMDialect
-  MLIRSPIRVDialect
-  MLIRSPIRVToLLVM
   MLIRTargetLLVMIRExport
   MLIRBuiltinToLLVMIRTranslation
   MLIRLLVMToLLVMIRTranslation
-  MLIRPass
   MLIRTranslateLib
   )

@@ -6,13 +6,17 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares feme::SPIRVToLLVMTranslator, a thin Translator wrapper
-// around MLIR's existing `spirv` -> `llvm` dialect conversion plus
-// translateModuleToLLVMIR. See the deviation note on SPIR-V retargeting in
-// feme/docs/Design.md: this is the first stage of the "null pipeline"
-// (SPIR-V -> `spirv` dialect -> (this) -> llvm::Module -> feme::Backend
-// using LLVM's own `SPIRV` target -> SPIR-V binary) used to validate this
-// Translator round-trips before real ISA retargeting is attempted.
+// This file declares feme::SPIRVToLLVMTranslator, a convenience Translator
+// composing feme::SPIRVToLLVMDialectTranslator (`spirv` dialect -> `llvm`
+// dialect) and feme::LLVMDialectToLLVMIRTranslator (`llvm` dialect ->
+// llvm::Module) into a single end-to-end step. See the "SPIR-V -> MLIR llvm
+// dialect -> LLVM IR" section of feme/docs/Design.md for why the
+// intermediate `llvm` dialect stage is also exposed as its own Translator,
+// and the deviation note on SPIR-V retargeting: this is the first stage of
+// the "null pipeline" (SPIR-V -> `spirv` dialect -> (this) -> llvm::Module
+// -> feme::Backend using LLVM's own `SPIRV` target -> SPIR-V binary) used to
+// validate this Translator round-trips before real ISA retargeting is
+// attempted.
 //
 //===----------------------------------------------------------------------===//
 
@@ -24,9 +28,9 @@
 namespace feme {
 
 /// Translates a Module holding an `mlir::spirv::ModuleOp` into a Module
-/// holding an llvm::Module, via MLIR's `convert-spirv-to-llvm` conversion
-/// pass followed by `mlir::translateModuleToLLVMIR`. Does not itself produce
-/// a SPIR-V binary or retarget to any ISA -- that is feme::Backend's job.
+/// holding an llvm::Module, by composing feme::SPIRVToLLVMDialectTranslator
+/// and feme::LLVMDialectToLLVMIRTranslator. Does not itself produce a
+/// SPIR-V binary or retarget to any ISA -- that is feme::Backend's job.
 class SPIRVToLLVMTranslator : public Translator {
 public:
   llvm::Expected<Module> translate(Module &&M, Context &Ctx) const override;
