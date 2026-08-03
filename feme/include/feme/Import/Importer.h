@@ -38,6 +38,16 @@ struct ImportOptions {
   /// `spirv.mlir.loop` ops during deserialization. See
   /// mlir::spirv::DeserializationOptions.
   bool SPIRVEnableControlFlowStructurization = true;
+
+  /// SPIR-V only: if structurized deserialization fails, retry with
+  /// structurization disabled rather than reporting the failure. MLIR's
+  /// structurizer does not yet handle every legal SPIR-V control flow graph
+  /// (notably an `OpPhi` in a loop merge block, which any loop with a
+  /// `break` produces), while its unstructured mode -- which keeps the
+  /// original CFG as block arguments and branches -- handles them fine and
+  /// maps at least as directly onto LLVM IR. Ignored when
+  /// `SPIRVEnableControlFlowStructurization` is already false.
+  bool SPIRVFallBackToUnstructuredControlFlow = true;
 };
 
 /// Parses a format's binary encoding into an in-memory Module. Implementors

@@ -12,6 +12,7 @@
 #include "feme/Core/Module.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Target/SPIRV/Deserialization.h"
 #include "llvm/Support/Error.h"
@@ -41,8 +42,26 @@ llvm::Expected<Module> SPIRVImporter::import(llvm::MemoryBufferRef Buffer,
   DeserOpts.enableControlFlowStructurization =
       Opts.SPIRVEnableControlFlowStructurization;
 
-  mlir::OwningOpRef<mlir::spirv::ModuleOp> SpirvModule =
-      mlir::spirv::deserialize(Binary, &MLIRCtx, DeserOpts);
+  bool MayRetry = DeserOpts.enableControlFlowStructurization &&
+                  Opts.SPIRVFallBackToUnstructuredControlFlow;
+
+  mlir::OwningOpRef<mlir::spirv::ModuleOp> SpirvModule;
+  {
+    // Only the *final* attempt's diagnostics should reach the caller: a
+    // structurization failure that the retry below recovers from is not an
+    // error the user needs to hear about.
+    mlir::ScopedDiagnosticHandler Swallow(
+        &MLIRCtx, [MayRetry](mlir::Diagnostic &) {
+          return MayRetry ? mlir::success() : mlir::failure();
+        });
+    SpirvModule = mlir::spirv::deserialize(Binary, &MLIRCtx, DeserOpts);
+  }
+
+  if (!SpirvModule && MayRetry) {
+    DeserOpts.enableControlFlowStructurization = false;
+    SpirvModule = mlir::spirv::deserialize(Binary, &MLIRCtx, DeserOpts);
+  }
+
   if (!SpirvModule)
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "failed to deserialize SPIR-V module");
