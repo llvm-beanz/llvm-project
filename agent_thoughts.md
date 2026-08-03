@@ -2516,3 +2516,123 @@ test; (4) the `Design.md` "Raised LLVM IR -> AMDGPU" section plus the
 cross-reference from "Retargeting to Native ISA". This `agent_thoughts.md`
 entry is committed on its own after these, per the standing instruction to
 record thought process and commit it separately once the change is done.
+
+
+# Populating the `feme` driver tool: import -> raise -> retarget
+
+This entry records the change set implementing `feme::Driver` and wiring
+the `feme` CLI up to it, per the request to take an input DXContainer/
+SPIR-V file and retarget it to DXIL, SPIR-V, or AMDGPU based on a target
+triple, using the provided Mandelbrot HLSL shader (compiled via `dxc`) as
+an end-to-end validation vehicle.
+
+## Starting point
+
+Before this change: `Importer`s existed for `dxil`/`spirv`; a `Translator`
+existed for `spirv` -> `llvm::Module`; `TargetMachineBackend` existed and
+was validated via the SPIR-V "null pipeline"; `feme::dxil::OpRaisingPass`
+and `feme::amdgpu::RaisedLoweringPass` existed but were each deliberately
+incomplete (documented in `Design.md`). `feme::Driver` itself did not
+exist -- `feme`'s `main()` parsed `DriverOptions` and then always printed
+"does not yet implement any translation." That's exactly the gap to fill.
+
+## Design decisions
+
+- **New `Driver/` library, not folded into `Core/`.** Every existing
+  `Importer`/`Translator`/`Backend` library already depends on `FeMeCore`.
+  `Driver` needs all of those, so putting it in `Core/` would make
+  `FeMeCore` depend back on libraries that depend on it -- an actual
+  circular dependency (`feme/.instructions.md` explicitly calls out to
+  avoid this). A new top-level `Driver/` library, mirroring how Clang's
+  `Driver` sits above `Frontend`/`CodeGen` rather than inside either, avoids
+  it.
+- **Reuse `feme::frontend::DriverOptions`**, not a second identical struct:
+  `Design.md`'s "Library API Shape" explicitly calls for the CLI and an
+  embedding consumer to share one `DriverOptions` shape.
+- **No `Ctx.getFormatRegistry()` yet** (a deviation from the design
+  sketch): with only two `Importer`s existing, `Driver` looks them up
+  directly rather than through a registry abstraction that has nothing
+  else to generalize over yet. Documented as revisitable.
+- **`--to`/`--target` resolve to one concrete triple**: `--target` wins if
+  set; otherwise `--to` is used, with `"dxil"`/`"spirv"` special-cased to
+  that format's own established default triple (the DXIL module's own
+  embedded triple if already modern, else `dxil-unknown-shadermodel6.5-
+  library`; `spirv64-unknown-unknown`, matching the existing null-pipeline
+  test's precedent) -- anything else passes straight to
+  `TargetMachineBackend`.
+
+## What real-world testing surfaced (not just reading the design doc)
+
+Per the instructions to build/test at each phase and to validate against
+`dxc`/`clang`-compiled output of the provided HLSL shader, I actually
+compiled it (`dxc -T cs_6_5`) to both DXIL and SPIR-V and ran them through
+the new `Driver`. This surfaced three real issues:
+
+1. A trivial bug in my own code (`llvm::Triple::amdgcn` doesn't exist; the
+   enumerator is `amdgpu` -- `isAMDGCN()` is the intended accessor), caught
+   immediately by the build.
+2. A real, previously-latent `DXILImporter` bug: real `dxc`-compiled DXIL
+   embeds a historical `i8:32` data layout that modern LLVM's `DataLayout`
+   parser now rejects (`i8` must be 1-byte aligned) -- independent of the
+   bitcode auto-upgrade path this importer already relies on for
+   everything else. This is exactly the risk `Design.md`'s DXIL section
+   already flagged as open ("no textual way to author a truly
+   historical-format fixture exists yet" -- confirmed only by testing
+   against a *real* `dxc` binary, not an `llc`-assembled current-syntax
+   fixture). Fixed with a `DataLayoutCallback` normalizing `i8`'s alignment
+   to 8 bits on read -- lossless, since modern LLVM cannot represent (and
+   DXIL's own struct layouts do not depend on) any other value.
+3. A deeper, pre-existing gap: I initially assumed re-emitting DXIL back to
+   DXIL (`--to=dxil`) wouldn't need `OpRaisingPass` at all (the DirectX
+   target's `DXILOpLowering` would just no-op on an already-lowered
+   module). Testing against a real container showed LLVM's
+   `DXILShaderFlags` analysis (also part of that same standard codegen
+   pipeline) asserts if it ever sees *any* `dx.op.*` declaration, so
+   retargeting to *any* target -- DXIL included -- needs every `dx.op.*`
+   call raised first. `OpRaisingPass`'s documented incremental coverage
+   (leaving unrecognized opcodes unmodified) is right for its own
+   `feme-opt`-level pass testing, but isn't sufficient for a full backend
+   retarget: real shaders using resource loads/stores (the Mandelbrot
+   shader's `RWBuffer` write) or I/O signature ops hit this.
+4. A pre-existing MLIR limitation, unrelated to feme: importing the real
+   `dxc`-compiled SPIR-V for the same shader hits `mlir::spirv::
+   deserialize`'s own "OpPhi in loop merge block unimplemented" error (the
+   shader's `for` loop produces this shape) -- a gap in MLIR's `spirv`
+   dialect itself, well outside feme's code.
+
+Items 3 and 4 are real but are pre-existing gaps `Driver` merely exercises
+for the first time end to end, not regressions it introduces; fully
+closing them is separately-scoped, substantial follow-up work already
+called out in `Design.md`'s own status/roadmap text. I updated `Design.md`
+to record precisely what was found rather than gloss over it.
+
+## What was validated end to end
+
+SPIR-V -> SPIR-V (null pipeline, through the full CLI); SPIR-V -> AMDGPU
+and DXIL -> AMDGPU for the opcodes `OpRaisingPass`/`RaisedLoweringPass`
+currently cover (validated with synthetic fixtures built the same way
+existing feme tests do -- `llc` targeting a `dxil-...` triple from textual
+IR -- per "Avoiding binary test fixtures"); and clean, non-crashing
+diagnostics for an unsupported `--from=dxbc` and a missing `--to`/
+`--target`. All covered by `test/Tools/feme/feme-*.{ll,mlir,test}` and
+`unittests/Driver/DriverTest.cpp`. The real `dxc`-compiled DXIL/SPIR-V used
+to drive the investigation above were built in `/tmp` during this session
+and are intentionally not checked in, per the existing "Avoiding binary
+test fixtures" convention.
+
+## Build/test setup
+
+Built via the existing `build/` CMake cache (already `CMAKE_BUILD_TYPE=
+Release`, `LLVM_ENABLE_ASSERTIONS=ON`, `ccache` launcher configured -- no
+new cache flags needed). Ran `clang-format` on every new/modified C++ file.
+`check-feme` (lit + `check-feme-unit` gtest) run after every functional
+change; 53/53 passing at the end of this change set.
+
+## Commits
+
+Split into five: (1) the new `Driver/` library plus its unit tests; (2)
+the `DXILImporter` data-layout fix (an independently meaningful bug fix,
+found while validating (1) but not caused by it); (3) wiring the `feme`
+CLI up to `Driver` plus `feme.md` doc updates; (4) the end-to-end lit
+tests; (5) the `Design.md` updates. This `agent_thoughts.md` entry is
+committed on its own after these, per the standing instruction.
