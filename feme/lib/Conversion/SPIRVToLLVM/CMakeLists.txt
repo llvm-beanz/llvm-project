@@ -1,0 +1,16 @@
+add_mlir_library(FeMeConversionSPIRVToLLVM
+  ConvertSPIRVToLLVMPass.cpp
+
+  LINK_COMPONENTS
+  Core
+  Support
+  TargetParser
+
+  LINK_LIBS PUBLIC
+  MLIRIR
+  MLIRLLVMDialect
+  MLIRPass
+  MLIRSPIRVDialect
+  MLIRSPIRVToLLVM
+  MLIRTransforms
+  )

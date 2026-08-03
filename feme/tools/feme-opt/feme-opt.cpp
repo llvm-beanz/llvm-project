@@ -24,6 +24,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
@@ -34,6 +35,8 @@
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/InitAllDialects.h"
 #include "mlir/InitAllPasses.h"
+#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -189,8 +192,8 @@ int main(int argc, char **argv) {
   }
 
   mlir::registerAllPasses();
-  // TODO: Register FeMe's own MLIR passes (e.g. dxsa lowering) here as they
-  // are implemented.
+  // FeMe's own MLIR passes; grows one line per pass as they are added.
+  mlir::registerPass(feme::spirv::createConvertSPIRVToLLVMPass);
 
   mlir::DialectRegistry Registry;
   mlir::registerAllDialects(Registry);

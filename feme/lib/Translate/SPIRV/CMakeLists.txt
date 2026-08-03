@@ -7,12 +7,12 @@ add_mlir_library(FeMeTranslateSPIRV
   Support
 
   LINK_LIBS PUBLIC
+  FeMeConversionSPIRVToLLVM
   FeMeCore
   FeMeTranslateLLVMIR
   MLIRIR
   MLIRLLVMDialect
   MLIRSPIRVDialect
-  MLIRSPIRVToLLVM
   MLIRTargetLLVMIRExport
   MLIRBuiltinToLLVMIRTranslation
   MLIRLLVMToLLVMIRTranslation

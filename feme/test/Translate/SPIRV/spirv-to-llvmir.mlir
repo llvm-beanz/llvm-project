@@ -2,8 +2,9 @@
 
 // Runs feme::SPIRVToLLVMTranslator (via feme-translate's `--spirv-to-llvmir`,
 // see feme/docs/Design.md's "Testing Tools" section) on a minimal hand-written
-// `spirv` dialect module, and checks that the resulting LLVM IR defines the
-// original entry point as a real (non-declaration) function.
+// `spirv` dialect module, and checks that the resulting LLVM IR is targeted at
+// the SPIR-V environment the module was compiled for, and defines the original
+// entry point as a real (non-declaration) function.
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.func @foo() -> () "Inline" {
@@ -12,6 +13,8 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.EntryPoint "Vertex" @foo
 }
 
+// CHECK: target datalayout = "e-ve-i64:64-n8:16:32:64-G10"
+// CHECK: target triple = "spirv-unknown-vulkan-vertex"
 // CHECK: define void @foo()
 // CHECK-NEXT: ret void
 // CHECK-NEXT: }

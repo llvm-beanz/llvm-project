@@ -8,9 +8,9 @@
 
 #include "feme/Translate/SPIRV/SPIRVToLLVMDialectTranslator.h"
 
+#include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
-#include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVMPass.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -39,7 +39,7 @@ SPIRVToLLVMDialectTranslator::translate(Module &&M, Context &Ctx) const {
   mlir::MLIRContext &MLIRCtx = Ctx.getMLIRContext();
   MLIRCtx.loadDialect<mlir::LLVM::LLVMDialect>();
 
-  // ConvertSPIRVToLLVMPass anchors on a builtin ModuleOp (it converts a
+  // The conversion pass anchors on a builtin ModuleOp (it converts a
   // nested spirv.module in-place into a nested builtin.module -- see
   // mlir/test/Conversion/SPIRVToLLVM/module-ops-to-llvm.mlir), so host the
   // (now-detached) spirv.module inside a throwaway outer module for the
@@ -49,7 +49,7 @@ SPIRVToLLVMDialectTranslator::translate(Module &&M, Context &Ctx) const {
   Outer->push_back(InputOp.release());
 
   mlir::PassManager PM(&MLIRCtx);
-  PM.addPass(mlir::createConvertSPIRVToLLVMPass());
+  PM.addPass(feme::spirv::createConvertSPIRVToLLVMPass());
   if (mlir::failed(PM.run(*Outer)))
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
@@ -59,14 +59,14 @@ SPIRVToLLVMDialectTranslator::translate(Module &&M, Context &Ctx) const {
   if (!llvm::hasSingleElement(*OuterBody))
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
-        "expected convert-spirv-to-llvm to produce exactly one nested "
-        "module operation");
+        "expected the spirv-to-llvm conversion to produce exactly one "
+        "nested module operation");
   auto InnerModule = mlir::dyn_cast<mlir::ModuleOp>(OuterBody->front());
   if (!InnerModule)
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
-        "expected convert-spirv-to-llvm to produce a nested builtin.module "
-        "operation");
+        "expected the spirv-to-llvm conversion to produce a nested "
+        "builtin.module operation");
 
   // Detach InnerModule from the throwaway Outer module so it can be handed
   // back as an owned Module without cloning it.
