@@ -2381,3 +2381,138 @@ without staging around files still physically present in the working tree);
 (2) the new lit tests; (3) the `Design.md` documentation updates (a new
 per-format "Status" subsection, an updated Testing Tools bullet, and a new
 Testing Strategy deviation note); (4) this `agent_thoughts.md` entry.
+
+# Raised LLVM IR -> AMDGPU translation pass
+
+## Request
+
+"I'd now like a pass that translates the raised modern LLVM IR
+representation of a DXIL or SPIRV shader into LLVM IR for the AMD GPU
+backend."
+
+## Understanding the starting point
+
+I first re-read `feme/docs/Design.md`'s "Pipeline Abstraction" and
+"Per-Format Representation Strategy" sections to confirm what "raised" IR
+actually is before designing anything: DXIL import already produces a plain
+`llvm::Module` still in DXIL's `dx.op.*` calling convention, and
+`feme::dxil::OpRaisingPass` (a separate, already-landed pass) rewrites the
+subset of `dx.op.*` calls it recognizes into standard `llvm.dx.*`/generic
+LLVM intrinsic calls, leaving anything it doesn't (yet) recognize alone
+rather than erroring. SPIR-V's path (`SPIRVToLLVMTranslator` and its two
+component stages) similarly bottoms out at a plain `llvm::Module`, though
+via MLIR's `spirv`/`llvm` dialects rather than a DXIL-specific pass.
+
+The key realization driving this change: neither of those "raised"
+`llvm::Module`s is valid input to the in-tree `AMDGPU` `TargetMachine` as
+persisted today. `feme::TargetMachineBackend` (the existing generic
+`Backend`) already works for the SPIR-V "null pipeline" only because that
+retargets *back to SPIR-V*, whose target happens to understand the exact
+same `llvm` dialect output MLIR's `SPIRVToLLVM` conversion produces. AMDGPU
+has no notion of DXIL's raised `llvm.dx.*` intrinsics (thread/group id
+queries, resource handles, wave ops, ...) at all -- those need to be
+re-expressed in AMDGPU's own vocabulary (`llvm.amdgcn.*` intrinsics,
+buffer-descriptor conventions) before `TargetMachineBackend` can do
+anything useful with an `amdgcn-*` triple. So the request is for a new
+translation pass/stage sitting between "raised" and "ready to retarget",
+mirroring the DXIL section's own "op raising" pattern rather than something
+that belongs inside `TargetMachineBackend` itself.
+
+## Scoping the first increment
+
+Given the DXIL section of Design.md explicitly documents `OpRaisingPass` as
+incremental (covering only ops with a *direct, context-free* mapping first,
+leaving aggregate-returning/flag-selected/resource-handle ops for later), I
+followed the same discipline here rather than attempting full resource
+descriptor / buffer-fat-pointer lowering (`ptr addrspace(7)`/`addrspace(8)`,
+`llvm.amdgcn.make.buffer.rsrc`) in one pass, which would be a much larger,
+under-verified change without a concrete resource-handle-load/store test
+case to validate against (buffer/texture load/store raising itself isn't
+implemented yet in `OpRaisingPass`, per its own header comment).
+
+The one class of ops with an unambiguous, single-call mapping I found by
+reading `IntrinsicsDirectX.td` and `IntrinsicsAMDGPU.td` side by side:
+DXIL's `llvm.dx.group.id`/`llvm.dx.thread.id.in.group` (SV_GroupID/
+SV_GroupThreadID) are *exactly* AMDGPU's per-component
+`llvm.amdgcn.workgroup.id.{x,y,z}`/`llvm.amdgcn.workitem.id.{x,y,z}` reads
+-- no reconstruction needed beyond picking the right component from the
+constant operand DXIL's raised form already carries. I deliberately did
+NOT map `llvm.dx.thread.id` (the dispatch-wide index): unlike the other
+two, that one is `workgroup_id * group_size + workitem_id`, which needs the
+group's dimensions (not generally available as a single value at this
+IR level without more plumbing) to reconstruct -- exactly the kind of
+non-1:1 case `OpRaisingPass`'s own precedent says to leave unmodified
+rather than guessing at.
+
+## Implementation
+
+- `feme::amdgpu::RaisedLoweringPass`
+  (`feme/include/feme/Transforms/AMDGPU/RaisedLowering.h`,
+  `feme/lib/Transforms/AMDGPU/RaisedLowering.cpp`): a `ModulePass` (new pass
+  manager), structurally modeled on `OpRaisingPass` -- a small table mapping
+  a raised intrinsic ID to its three per-component AMDGPU intrinsic IDs,
+  and a `lowerComponentQuery` helper that only rewrites a call when its
+  component operand is a compile-time constant in `[0, 3)`, leaving
+  anything else (dynamic component, out-of-range constant, unrecognized
+  intrinsic) untouched.
+- Registered with `feme-opt` as `feme-amdgpu-lower-raised`, exactly like
+  `feme-dxil-raise-ops` is registered, so it's `lit`-testable in isolation
+  the same way.
+- New `FeMeTransformsAMDGPU` library, wired into `feme/lib/Transforms/
+  CMakeLists.txt` and linked into `feme-opt`, mirroring
+  `FeMeTransformsDXIL`'s existing wiring exactly.
+
+## Build environment
+
+The pre-existing `build/` only had `X86;SPIRV` in `LLVM_TARGETS_TO_BUILD`
+(plus the experimental `DirectX` target) -- AMDGPU wasn't registered at
+all, so `feme::TargetMachineBackend` couldn't yet target `amdgcn-*` even
+though the pass itself doesn't depend on the target being registered
+(`RaisedLoweringPass` only emits intrinsic calls; it doesn't need
+`AMDGPUTargetMachine` to run). Since this whole line of work exists to
+eventually retarget to AMDGPU, and future follow-ups to this pass will want
+`FileCheck`-testable `-mtriple=amdgcn-*` codegen output, I added `AMDGPU` to
+`feme/cmake/caches/feme.cmake`'s target list now rather than deferring it,
+then reconfigured and confirmed `LLVMAMDGPUCodeGen` builds cleanly before
+touching any FeMe code.
+
+## Testing
+
+`test/Transforms/AMDGPU/amdgpu-lower-raised.ll`, run via `feme-opt --llvm
+-passes=feme-amdgpu-lower-raised`, covering:
+- All three components of both lowered ops (`group.id`/`thread.id.in.group`
+  x/y/z) map to the right per-component AMDGPU intrinsic.
+- `llvm.dx.thread.id` (dispatch-wide) is left unmodified (not yet covered).
+- A non-constant component operand is left unmodified (can't map to a
+  single per-component intrinsic).
+- An out-of-range constant component (3) is left unmodified rather than
+  indexing past the 3-entry table.
+
+I manually ran `feme-opt` on the test file first to confirm the exact
+output shape (including the `range`/`speculatable` attributes LLVM's own
+`Intrinsic::getOrInsertDeclaration` attaches to the AMDGPU intrinsics)
+before writing the `CHECK` lines, then ran the full `check-feme` suite
+(45/45 passing, up from the pre-existing 44/44 baseline) and re-ran it
+again after `clang-format`.
+
+## Validation
+
+- Baseline `ninja check-feme` before any change: 44/44 passing.
+- After adding `AMDGPU` to the target list and confirming
+  `LLVMAMDGPUCodeGen` builds: no test change yet (cmake/build-only).
+- After the new pass + `feme-opt` registration + tests: 45/45 passing.
+- Ran `clang-format` over every new/modified C++ file, rebuilt, and
+  reran `check-feme` to confirm formatting didn't change behavior.
+
+## Commits
+
+Split into four: (1) the `feme.cmake` `AMDGPU` target addition (a build
+prerequisite, independently meaningful/revertible); (2) the pass itself,
+its header, `CMakeLists.txt` wiring, and its `feme-opt` registration
+(kept together since the registration is a one-line addition to an
+existing shared file, not something that can be split further without
+leaving `feme-opt` referencing a not-yet-existing symbol); (3) the new lit
+test; (4) the `Design.md` "Raised LLVM IR -> AMDGPU" section plus the
+cross-reference from "Retargeting to Native ISA". This `agent_thoughts.md`
+entry is committed on its own after these, per the standing instruction to
+record thought process and commit it separately once the change is done.
