@@ -3,6 +3,7 @@ add_llvm_library(FeMeDXBCAssembler
   Parser.cpp
   Instruction.cpp
   Encoder.cpp
+  AsmPrinter.cpp
 
   LINK_COMPONENTS
   Support
