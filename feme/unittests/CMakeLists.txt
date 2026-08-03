@@ -6,5 +6,6 @@ function(add_feme_unittest test_dirname)
 endfunction()
 
 add_subdirectory(Core)
+add_subdirectory(Driver)
 add_subdirectory(Frontend)
 add_subdirectory(Import)
