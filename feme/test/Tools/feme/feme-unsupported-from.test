@@ -1,0 +1,8 @@
+// RUN: echo 'not real dxbc' > %t.dxbc
+// RUN: not feme --from=dxbc --to=dxil %t.dxbc -o %t.dxil 2>&1 | FileCheck %s
+
+// `feme` should reject an unsupported --from format cleanly (a diagnostic
+// and non-zero exit), not crash: DXBC import is not yet implemented (see
+// the Roadmap / Milestones section of feme/docs/Design.md).
+
+// CHECK: feme: unsupported --from format 'dxbc'
