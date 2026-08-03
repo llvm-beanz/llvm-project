@@ -3314,3 +3314,147 @@ back empty.
 
 Two commits: the `od -w4` portability fix, and this `agent_thoughts.md`
 entry.
+
+# Agent thoughts: completing the `dxbc-as` migration of the `dxsa` hex tests
+
+The task was the one the previous session scoped but deliberately deferred
+(see the "Scoping" entry above): extend `dxbc-as` until every
+`feme/test/Target/DXSA` fixture can be written as assembly text, convert
+all of them, and delete `--import-dxsa-hex` and its supporting code.
+
+## Why the previous estimate was right about the size but wrong about the shape
+
+The earlier assessment framed the remaining work as "add one operand
+feature at a time, converting whichever tests become expressible after
+each" — i.e. as a long series of incremental extensions to a curated
+opcode table. Re-deriving the numbers agreed with its measurements (234
+files, 527 `--split-input-file` chunks, 3287 instructions, ~215 distinct
+opcode values), but not with its conclusion that this is "closer to
+writing a second, much more complete DXBC assembler". The reason is that
+the tokenized format is far more *uniform* than a mnemonic count suggests:
+
+- Every instruction encodes as an opcode token carrying opcode-specific
+  control bits, optional extended opcode tokens, operand tokens, then
+  trailing raw DWORDs. That one shape covers ALU, texture, atomic, memory,
+  control flow *and* every declaration; the kinds only differ in how the
+  assembly text spells the control bits and trailing DWORDs.
+- Operand tokens are entirely uniform: storage class, component count and
+  selection mode, index dimension and per-index representation, and one
+  optional extended token for modifiers. Writing that decoder/encoder once
+  gets relative addressing, `cb<>`, indexable temps, `null`/`vPrim`,
+  double immediates and min-precision all at the same time, rather than
+  one feature per commit as the earlier plan assumed.
+
+So the cost is dominated by getting the *tables* right, not by writing
+per-mnemonic code — and the tables already existed in the tree, in the
+`dxsa` importer this work is meant to feed. `Opcodes.def` was generated
+from `BinaryParser.cpp`'s own `SET(...)` instruction table (mnemonic,
+operand count) plus its `SATURABLE_OP`/`PLAIN_OP` dispatch switch
+(destination/source split, saturability) and the opcode enum in
+`d3d12TokenizedProgramFormat.hpp`. Deriving the assembler's table from the
+importer's does not make the tests circular: the tests still check what
+the importer *produces*, and every value in the table is a fact about the
+D3D format rather than about either implementation.
+
+## Design decisions worth recording
+
+**Control fields are spelled as mnemonic families, not positional
+keywords.** `callc_z`/`callc_nz`, `resinfo`/`resinfo_rcp`/`resinfo_uint`,
+`dcl_sampler`/`dcl_sampler_comparison`, `dcl_resource_texture2d`/
+`dcl_resource_texture3d` are separate rows in `Opcodes.def` differing only
+in `Controls`. This is what `fxc` disassembly does, and it kept `Parser.cpp`
+from growing a mode-keyword grammar per declaration family. The fields that
+genuinely are open-ended (system-value names, input primitives, tessellator
+enums, global/sync flags, interpolation modes) stayed keywords.
+
+**Component suffixes are resolved by operand position.** `.x` is a one-bit
+write mask on a destination and a single-component select on a source; four
+letters on a source are a swizzle. That is exactly the rule real DXBC
+assembly relies on, and it is why `OpcodeInfo` carries a destination/source
+*split* rather than a single operand count. The corpus does contain
+operands that break the rule (a source in mask mode, a `vPrim` with one
+component where the same type is usually a bare handle), so operands also
+take a `{...}` modifier list that can force the selection mode and the
+component count — and that list was needed anyway for min-precision and
+non-uniform, which have no bare syntax at all.
+
+**Two directives, both deliberate deviations from `fxc` output.**
+`.shader_model` makes the program header opt-in: 359 of the 362 module
+fixtures are bare instruction sequences, and "header present" vs "header
+absent" is itself something the importer's tests check, so it has to be
+sayable per file rather than being a tool flag. `.dword` emits raw tokens,
+which is unavoidable: several fixtures exist precisely to feed the importer
+bytecode it must *reject* (unknown opcodes, wrong instruction lengths, a
+truncated instruction at EOF, a corrupted operand type field), and by
+construction no well-formed mnemonic can express those. Exactly 7 `.dword`
+directives survive across all 234 converted files, all in tests whose
+expected output is `dxsa.unknown`.
+
+**Merging `--split-input-file` chunks.** `dxbc-as` assembles one shader per
+file, so the 101 per-instruction tests that used `--split-input-file` to put
+each instruction in its own module could not keep that structure. They now
+list the instructions in a single module: the instructions were already
+independent, and `CHECK-NEXT` chains still pin the exact order, so no
+coverage is lost while each file stays one `dxbc-as` invocation.
+
+## How the conversion was validated
+
+Converting 234 files by hand would have been both slow and untrustworthy, so
+I wrote a throwaway decoder/converter (kept out of the repository, in the
+session workspace) that decodes each fixture's DWORDs and re-emits them in
+the new grammar. The useful part is the check, not the conversion: for every
+one of the 527 chunks, I compared
+
+    feme-translate --import-dxsa-hex <original hex>
+
+against
+
+    dxbc-as <converted asm> | feme-translate --import-dxsa-bin -
+
+and required byte-identical IR *and* the same number of diagnostics. That is
+a stronger invariant than "the CHECK lines still pass" — it catches a
+conversion that happens to still satisfy a loose `CHECK` — and it is what
+justifies leaving all the CHECK lines untouched.
+
+Three fixtures do not re-encode to byte-identical DWORDs, and that is
+correct rather than a gap: they carry stray bits (bit 23 next to the
+`precise` mask, bit 13 next to an operand's min-precision field) that the
+importer ignores. The IR comparison passes, so the conversion preserves what
+the tests actually assert. I chose the semantic comparison over byte
+equality precisely because byte equality would have forced me to either
+reproduce meaningless bits or weaken those three tests.
+
+This loop also found seven real bugs in the assembler that unit tests would
+not have: `dcl_input_ps_sgv` carries an interpolation mode;
+`dcl_function_body`/`_table`/`dcl_interface` take payload DWORDs rather than
+an operand; `callc`, `dcl_constantbuffer` and `sample_c_lz_s` had the wrong
+destination/source split (and `dcl_constantbuffer`'s operand uses swizzle,
+not mask, mode); a `(` after a multisampled resource mnemonic is ambiguous
+with the return-type list; and real `samplepos` bytecode carries a trailing
+DWORD past its operands. Every one came from a real `fxc`-compiled shader.
+
+## Review follow-up
+
+A review pass over the diff found three places where a value parsed as a
+64-bit integer was masked or shifted into a narrow token field without a
+range check. Two were silent truncation; the third, the control-point count,
+shifted straight out of the 13-bit opcode-specific control range into the
+instruction length field and corrupted the opcode token. All three are now
+diagnosed, with tests.
+
+## What I did not do
+
+`dxsa::serialize` (`BinaryWriter`) is still the stub it was; nothing here
+depends on it, and it remains the prerequisite for real DXBC export that
+`Design.md` already describes. `dxbc-as` also still does not compute the
+`DXContainer` checksum, for the same reason as before: no in-tree consumer
+validates it.
+
+## Commits
+
+Nine commits: the lexer additions the operand grammar needed; the assembler
+generalization itself; the operand-shape fixes found by assembling real
+shaders; three test-migration commits (fxc-derived shaders, larger asm
+shaders, per-instruction tests); the deletion of the hex import path; the
+documentation update; the fuzzer seed-corpus update; the control-field range
+checks; and this `agent_thoughts.md` entry.
