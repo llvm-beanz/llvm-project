@@ -12,6 +12,7 @@
 #include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/SmallVector.h"
@@ -383,6 +384,87 @@ public:
   }
 };
 
+/// Appends \p Value's scalar leaves, in element order, to \p Out. A SPIR-V
+/// array constant's constituents are either a further nested array (itself
+/// an `ArrayAttr`, for a multi-dimensional array or an array of vectors), or
+/// a vector leaf (a `DenseElementsAttr`); this descends through both so the
+/// result is the same flat scalar sequence regardless of how deeply the
+/// array is nested.
+void flattenConstantElements(mlir::Attribute Value,
+                             llvm::SmallVectorImpl<mlir::Attribute> &Out) {
+  if (auto Elements = mlir::dyn_cast<mlir::DenseElementsAttr>(Value)) {
+    llvm::append_range(Out, Elements.getValues<mlir::Attribute>());
+    return;
+  }
+  if (auto Array = mlir::dyn_cast<mlir::ArrayAttr>(Value)) {
+    for (mlir::Attribute Element : Array.getValue())
+      flattenConstantElements(Element, Out);
+    return;
+  }
+  Out.push_back(Value);
+}
+
+/// Returns the scalar type at the bottom of \p Type's `!llvm.array`/
+/// `vector` nesting, e.g. `f32` for `!llvm.array<8 x vector<3xf32>>`.
+mlir::Type getFlatElementType(mlir::Type Type) {
+  while (auto Array = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Type))
+    Type = Array.getElementType();
+  if (auto Vector = mlir::dyn_cast<mlir::VectorType>(Type))
+    return Vector.getElementType();
+  return Type;
+}
+
+/// Converts SPIR-V `ConstantOp` with `spirv.array` type -- MLIR's own
+/// `ConstantScalarAndVectorPattern` only matches a scalar or vector `spirv.
+/// Constant` (see its `srcType` check), leaving an array constant illegal,
+/// which is exactly the shape a `const static` HLSL array (e.g. a palette of
+/// `float3`s) compiles down to. `llvm.mlir.constant` has no such
+/// restriction: it accepts one flat `DenseElementsAttr` for a whole
+/// `!llvm.array<... x vector<...>>` so long as its element count and scalar
+/// element type match (see `LLVM::ConstantOp::verify`'s `ElementsAttr`
+/// case), whatever the array's rank or whether its leaves are vectors or
+/// scalars -- so this pattern only has to flatten the SPIR-V constant's
+/// (possibly nested) constituents to match, rather than reproduce its
+/// nesting as `llvm.mlir.constant`'s alternative, structurally-nested
+/// `ArrayAttr` encoding.
+class ArrayConstantPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ConstantOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ConstantOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ConstantOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (!mlir::isa<mlir::spirv::ArrayType>(Op.getType()))
+      return Rewriter.notifyMatchFailure(Op, "not an array constant");
+
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    llvm::SmallVector<mlir::Attribute, 16> Elements;
+    flattenConstantElements(Op.getValue(), Elements);
+
+    // Integer leaves need the same signed/unsigned -> signless retyping
+    // `ConstantScalarAndVectorPattern` gives a top-level scalar/vector
+    // constant; float leaves need none, since SPIR-V and LLVM float types
+    // already coincide.
+    mlir::Type LeafType = getFlatElementType(DstType);
+    if (mlir::isa<mlir::IntegerType>(LeafType)) {
+      for (mlir::Attribute &Element : Elements)
+        Element = mlir::IntegerAttr::get(
+            LeafType, mlir::cast<mlir::IntegerAttr>(Element).getValue());
+    }
+
+    auto ShapeType = mlir::RankedTensorType::get(
+        static_cast<int64_t>(Elements.size()), LeafType);
+    auto FlatAttr = mlir::DenseElementsAttr::get(ShapeType, Elements);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ConstantOp>(Op, DstType, FlatAttr);
+    return mlir::success();
+  }
+};
+
 /// Drops `spirv.ExecutionMode`, whose contents FeMe instead reads before
 /// conversion and re-emits as function attributes on the entry point (see
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
@@ -460,10 +542,11 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
 void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources) {
-  Patterns.add<BuiltInAddressOfPattern, BuiltInGlobalVariablePattern,
-               ExecutionModePattern, ImageQuerySizePattern, ImageReadPattern,
-               ImageWritePattern, LoadValuePattern>(Patterns.getContext(),
-                                                    TypeConverter, FeMeBenefit);
+  Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
+               BuiltInGlobalVariablePattern, ExecutionModePattern,
+               ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
+               LoadValuePattern>(Patterns.getContext(), TypeConverter,
+                                 FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
 }
