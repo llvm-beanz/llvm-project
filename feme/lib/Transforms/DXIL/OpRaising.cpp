@@ -8,8 +8,11 @@
 
 #include "feme/Transforms/DXIL/OpRaising.h"
 
+#include "ResourceMetadata.h"
+
 #include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -473,10 +476,305 @@ bool raiseCall(CallInst &CI, const RaisableOp &RaiseAs) {
   return true;
 }
 
+/// Returns the `target("dx.")` handle \p V was bridged back from, if \p V is
+/// a `llvm.dx.resource.casthandle` call producing a legacy
+/// `%dx.types.Handle` -- the bridge `raiseResourceHandleFromBinding`/
+/// `raiseLegacyCreateHandle` leave behind so not-yet-raised consumers of the
+/// handle stay valid IR. Returns nullptr otherwise.
+Value *lookThroughCastHandle(Value *V) {
+  auto *CI = dyn_cast<CallInst>(V);
+  Function *F = CI ? CI->getCalledFunction() : nullptr;
+  if (!F || F->getIntrinsicID() != Intrinsic::dx_resource_casthandle)
+    return nullptr;
+  return CI->getArgOperand(0);
+}
+
+/// Returns the number of leading components \p Mask selects, or 0 if it isn't
+/// a contiguous low-order mask (DXIL's typed buffer stores always write a
+/// contiguous run of components starting at 0, so anything else is a shape
+/// this pass doesn't model).
+unsigned getContiguousMaskWidth(uint64_t Mask) {
+  unsigned Width = llvm::countr_one(Mask);
+  return (Mask >> Width) == 0 ? Width : 0;
+}
+
+/// Infers the number of components in a typed buffer's element type from the
+/// `dx.op.bufferStore`/`dx.op.bufferLoad` calls consuming \p HandleCI's
+/// result. DXIL's metadata only records a typed buffer's *component* type
+/// (`float`), never its vector width (`<4 x float>`), so the width has to be
+/// recovered from how the resource is actually accessed: a store's write mask
+/// names it directly, and a load's `%dx.types.ResRet` components are only
+/// extracted up to it. Defaults to 4 (DXIL's widest typed buffer element)
+/// when the handle has no accesses to learn from.
+unsigned inferTypedBufferWidth(const CallInst &HandleCI) {
+  unsigned Width = 0;
+  for (const User *U : HandleCI.users()) {
+    const auto *CI = dyn_cast<CallInst>(U);
+    const Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+    if (!Callee)
+      continue;
+
+    if (Callee->getName().starts_with("dx.op.bufferStore") &&
+        CI->arg_size() == 9) {
+      if (std::optional<uint64_t> Mask = getConstInt(CI->getArgOperand(8)))
+        Width = std::max(Width, getContiguousMaskWidth(*Mask));
+      continue;
+    }
+
+    if (!Callee->getName().starts_with("dx.op.bufferLoad"))
+      continue;
+    for (const User *LoadUser : CI->users())
+      if (const auto *EV = dyn_cast<ExtractValueInst>(LoadUser))
+        if (EV->getNumIndices() == 1 && EV->getIndices()[0] < 4)
+          Width = std::max(Width, EV->getIndices()[0] + 1);
+  }
+  return Width ? Width : 4;
+}
+
+/// Builds the `target("dx.")` handle type for \p Binding, or returns nullptr
+/// for resource kinds this pass doesn't yet reconstruct (textures, samplers,
+/// and the norm/packed typed buffer element formats -- see
+/// `getElementLLVMType`). \p VectorWidth is the typed buffer element vector
+/// width recovered by `inferTypedBufferWidth`.
+TargetExtType *buildHandleType(LLVMContext &Ctx, const ResourceBinding &Binding,
+                               unsigned VectorWidth) {
+  bool IsUAV = Binding.Class == dxil::ResourceClass::UAV;
+  switch (Binding.Kind) {
+  case dxil::ResourceKind::TypedBuffer: {
+    Type *ScalarTy = getElementLLVMType(Binding.ElementType, Ctx);
+    if (!ScalarTy)
+      return nullptr;
+    Type *ElemTy = VectorWidth > 1
+                       ? cast<Type>(FixedVectorType::get(ScalarTy, VectorWidth))
+                       : ScalarTy;
+    return TargetExtType::get(
+        Ctx, "dx.TypedBuffer", {ElemTy},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(Binding.IsROV),
+         static_cast<unsigned>(isSignedElementType(Binding.ElementType))});
+  }
+  case dxil::ResourceKind::RawBuffer:
+    return TargetExtType::get(
+        Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(Binding.IsROV)});
+  case dxil::ResourceKind::StructuredBuffer:
+    // `!dx.resources` records a structured buffer's element stride but not
+    // its alignment, so there is nothing to recover beyond size here (see
+    // `getOpaqueSizedType`).
+    return TargetExtType::get(
+        Ctx, "dx.RawBuffer", {getOpaqueSizedType(Ctx, Binding.StrideOrSize, 0)},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(Binding.IsROV)});
+  case dxil::ResourceKind::CBuffer:
+    return TargetExtType::get(
+        Ctx, "dx.CBuffer", {getOpaqueSizedType(Ctx, Binding.StrideOrSize, 0)});
+  default:
+    return nullptr;
+  }
+}
+
+/// Raises a pre-SM6.6 `dx.op.createHandle` (opcode 57) call into a
+/// `llvm.dx.resource.handlefrombinding` intrinsic call. Unlike the newer
+/// `CreateHandleFromBinding`/`AnnotateHandle` pair (see
+/// `raiseResourceHandleFromBinding`), this op carries no binding information
+/// inline: it names its resource indirectly, by (resource class, range ID),
+/// which is why \p MD -- the module's `!dx.resources` metadata -- is needed.
+///
+/// The reconstructed handle is bridged back to `%dx.types.Handle` via
+/// `llvm.dx.resource.casthandle` so that any consumer this pass does not
+/// raise stays valid IR; `raiseTypedBufferAccess` looks back through that
+/// bridge, and dead bridges are cleaned up afterwards.
+bool raiseLegacyCreateHandle(CallInst &CI, const ResourceMetadata &MD) {
+  if (CI.arg_size() != 5)
+    return false;
+  std::optional<uint64_t> Class = getConstInt(CI.getArgOperand(1));
+  std::optional<uint64_t> RangeID = getConstInt(CI.getArgOperand(2));
+  if (!Class ||
+      *Class > static_cast<uint64_t>(dxil::ResourceClass::LastEntry) ||
+      !RangeID)
+    return false;
+
+  std::optional<ResourceBinding> Binding =
+      MD.lookup(static_cast<dxil::ResourceClass>(*Class),
+                static_cast<uint32_t>(*RangeID));
+  if (!Binding)
+    return false;
+
+  LLVMContext &Ctx = CI.getContext();
+  TargetExtType *HandleTy =
+      buildHandleType(Ctx, *Binding, inferTypedBufferWidth(CI));
+  if (!HandleTy)
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  // `CreateHandle`'s index operand is the resource's absolute register index,
+  // while `llvm.dx.resource.handlefrombinding`'s is relative to the binding's
+  // lower bound; rebase it rather than pattern-matching whatever computed it.
+  Value *Index = CI.getArgOperand(3);
+  if (Binding->LowerBound != 0)
+    Index = Builder.CreateSub(Index, Builder.getInt32(Binding->LowerBound));
+
+  Function *HandleFromBindingFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_handlefrombinding, {HandleTy});
+  Value *NewHandle = Builder.CreateCall(
+      HandleFromBindingFn,
+      {Builder.getInt32(Binding->Space), Builder.getInt32(Binding->LowerBound),
+       Builder.getInt32(Binding->RangeSize), Index,
+       ConstantPointerNull::get(PointerType::getUnqual(Ctx))});
+
+  Function *CastFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_casthandle,
+      {CI.getType(), HandleTy});
+  Value *CastBack = Builder.CreateCall(CastFn, {NewHandle}, CI.getName());
+  CI.replaceAllUsesWith(CastBack);
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises a `dx.op.bufferStore` (opcode 69) call on an already-raised typed
+/// buffer handle into `llvm.dx.resource.store.typedbuffer`, reassembling the
+/// four scalar component operands DXIL splits the stored value into back into
+/// the handle's element type.
+bool raiseTypedBufferStore(CallInst &CI) {
+  if (CI.arg_size() != 9)
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || HandleTy->getName() != "dx.TypedBuffer")
+    return false;
+
+  std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(8));
+  if (!Mask)
+    return false;
+  unsigned Width = getContiguousMaskWidth(*Mask);
+  Type *ElemTy = HandleTy->getTypeParameter(0);
+  auto *VecTy = dyn_cast<FixedVectorType>(ElemTy);
+  if (Width != (VecTy ? VecTy->getNumElements() : 1))
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  Value *Stored = CI.getArgOperand(4);
+  if (VecTy) {
+    Stored = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I != Width; ++I)
+      Stored = Builder.CreateInsertElement(Stored, CI.getArgOperand(4 + I),
+                                           Builder.getInt32(I));
+  }
+  if (Stored->getType() != ElemTy)
+    return false;
+
+  Function *StoreFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_store_typedbuffer,
+      {HandleTy, ElemTy});
+  Builder.CreateCall(StoreFn, {Handle, CI.getArgOperand(2), Stored});
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises a `dx.op.bufferLoad` (opcode 68) call on an already-raised typed
+/// buffer handle into `llvm.dx.resource.load.typedbuffer`, rewriting the
+/// `extractvalue`s of DXIL's `%dx.types.ResRet` return struct into
+/// `extractelement`s of the loaded vector. Loads whose result is consumed in
+/// any other way -- notably ones reading `ResRet`'s trailing status field,
+/// which has no equivalent in the raised intrinsic's `i1` "checkbit" -- are
+/// left unraised.
+bool raiseTypedBufferLoad(CallInst &CI) {
+  if (CI.arg_size() != 4)
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || HandleTy->getName() != "dx.TypedBuffer")
+    return false;
+
+  Type *ElemTy = HandleTy->getTypeParameter(0);
+  auto *VecTy = dyn_cast<FixedVectorType>(ElemTy);
+  unsigned Width = VecTy ? VecTy->getNumElements() : 1;
+
+  SmallVector<ExtractValueInst *, 4> Extracts;
+  for (User *U : CI.users()) {
+    auto *EV = dyn_cast<ExtractValueInst>(U);
+    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] >= Width)
+      return false;
+    Extracts.push_back(EV);
+  }
+
+  IRBuilder<> Builder(&CI);
+  Function *LoadFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_load_typedbuffer,
+      {ElemTy, HandleTy});
+  Value *Loaded = Builder.CreateCall(LoadFn, {Handle, CI.getArgOperand(2)});
+  Value *Value0 = Builder.CreateExtractValue(Loaded, 0);
+
+  for (ExtractValueInst *EV : Extracts) {
+    Builder.SetInsertPoint(EV);
+    Value *Component =
+        VecTy ? Builder.CreateExtractElement(Value0, EV->getIndices()[0])
+              : Value0;
+    EV->replaceAllUsesWith(Component);
+    EV->eraseFromParent();
+  }
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Runs the resource-op raising phases in dependency order over \p M: handle
+/// creation first (so that the accesses below have a `target("dx.")` handle
+/// to consume), then the buffer accesses that consume those handles, then
+/// cleanup of the `llvm.dx.resource.casthandle` bridges left unused once
+/// every consumer of a handle has been raised.
+bool raiseResourceOps(Module &M) {
+  bool Changed = false;
+  ResourceMetadata MD = ResourceMetadata::read(M);
+
+  auto forEachDXOpCall = [&M](unsigned Opcode, auto Raise) {
+    bool Changed = false;
+    for (Function &F : llvm::make_early_inc_range(M.functions())) {
+      if (!F.isDeclaration() || !F.getName().starts_with("dx.op."))
+        continue;
+      for (User *U : llvm::make_early_inc_range(F.users())) {
+        auto *CI = dyn_cast<CallInst>(U);
+        if (!CI || CI->getCalledFunction() != &F || CI->arg_size() == 0)
+          continue;
+        if (getConstInt(CI->getArgOperand(0)) != Opcode)
+          continue;
+        Changed |= Raise(*CI);
+      }
+    }
+    return Changed;
+  };
+
+  Changed |= forEachDXOpCall(216, [](CallInst &CI) { // AnnotateHandle
+    return raiseResourceHandleFromBinding(CI);
+  });
+  Changed |= forEachDXOpCall(57, [&MD](CallInst &CI) { // CreateHandle
+    return raiseLegacyCreateHandle(CI, MD);
+  });
+  Changed |= forEachDXOpCall(69, [](CallInst &CI) { // BufferStore
+    return raiseTypedBufferStore(CI);
+  });
+  Changed |= forEachDXOpCall(68, [](CallInst &CI) { // BufferLoad
+    return raiseTypedBufferLoad(CI);
+  });
+
+  for (Function &F : llvm::make_early_inc_range(M.functions())) {
+    if (F.getIntrinsicID() != Intrinsic::dx_resource_casthandle)
+      continue;
+    for (User *U : llvm::make_early_inc_range(F.users()))
+      if (auto *CI = dyn_cast<CallInst>(U); CI && CI->use_empty()) {
+        CI->eraseFromParent();
+        Changed = true;
+      }
+    if (F.use_empty())
+      F.eraseFromParent();
+  }
+
+  return Changed;
+}
+
 } // namespace
 
 PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
-  bool Changed = false;
+  bool Changed = raiseResourceOps(M);
 
   // Snapshot the function list: raising erases `dx.op.*` declarations once
   // they have no more callers, and inserts new intrinsic declarations, both
@@ -497,10 +795,6 @@ PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
 
       if (Opcode == 10 || Opcode == 11) { // IsFinite, IsNormal
         Changed |= raiseIsFPClassCall(*CI, Opcode);
-        continue;
-      }
-      if (Opcode == 216) { // AnnotateHandle
-        Changed |= raiseResourceHandleFromBinding(*CI);
         continue;
       }
 
