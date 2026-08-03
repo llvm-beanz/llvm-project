@@ -1065,7 +1065,11 @@ feme/
   binary fixtures (see Avoiding binary test fixtures above).
 - `unittests/`: `gtest`-based unit tests for library internals not easily
   expressed as CLI/lit tests (e.g. `Context` construction/isolation,
-  `Module` variant behavior, error propagation).
+  `Module` variant behavior, error propagation). `test/Unit/lit.cfg.py`
+  (mirroring `llvm/test/Unit` and `clang/test/Unit`) lets `lit`
+  auto-discover the built `gtest` binaries as a nested suite, so `ninja
+  check-feme` runs `unittests/` alongside `test/` from one entry point
+  rather than requiring a separate target.
 - Deviation: `feme::SPIRVToLLVMTranslator` (see the SPIR-V "null pipeline"
   deviation above) was initially covered by `unittests/Translate/SPIRV`
   `gtest` cases, but a `Translator` invoked on textual MLIR input/output is
