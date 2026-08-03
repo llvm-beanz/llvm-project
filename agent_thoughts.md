@@ -3073,3 +3073,146 @@ table/instruction model; the lexer; the parser; the encoder; the asm
 printer; the `dxbc-as` CLI tool; the fuzzer harness and seed corpus; the
 `lit` tests; then the `Design.md`/`CommandGuide` documentation. This
 `agent_thoughts.md` entry is its own, tenth commit.
+
+# Agent thoughts: Integrating the `dxsa` MLIR dialect from `wip/dxsa-mlir`
+
+This records the reasoning behind migrating the `dxsa` MLIR dialect (and its
+`BinaryParser`/stubbed `BinaryWriter`) from the `wip/dxsa-mlir` branch of the
+[`access-softek/llvm-project`](https://github.com/access-softek/llvm-project)
+fork into feme's own tree, per the "DXBC -> new MLIR `dxsa` dialect" section
+of `feme/docs/Design.md` (already written in an earlier session, before any
+of this code existed).
+
+## Approach
+
+I started by re-reading `feme/docs/Design.md` end to end (particularly the
+DXBC dialect section, the Directory/Library Layout target
+(`feme/{include,lib}/feme/Dialect/DXSA`, `feme/lib/Target/DXSA`), and
+"Avoiding binary test fixtures") and `feme/.instructions.md`, then cloned
+the fork's `wip/dxsa-mlir` branch to inspect the actual prototype rather
+than working from the design doc's description alone -- it's ~16k lines
+across a dialect (`DXSAOps.td` and friends), a `BinaryParser.cpp` decoding
+real DXBC tokenized bytecode into the dialect, a stubbed `BinaryWriter.cpp`,
+and an extensive `lit` suite mixing dialect-syntax tests, inline-hex
+`import-dxsa-hex` tests, and ~150 tests backed by checked-in binary/hex
+fixtures (`inputs/*.bin`, `hlsl/inputs/*.shex`).
+
+## What I built
+
+- **Dialect migration** (`feme/{include,lib}/feme/Dialect/DXSA`): copied the
+  `.td`/`.h`/`.cpp` files over largely verbatim, then mechanically rehomed
+  the C++ namespace from `mlir::dxsa` to `feme::dxsa` (this dialect is
+  deliberately *not* part of MLIR proper -- see Design.md's rationale for
+  not upstreaming it) and every `mlir/Dialect/DXSA`/`mlir/Target/DXSA`
+  include path to the `feme/` equivalent. This surfaced a real ODS
+  correctness issue: `DXSAOperand.td` referenced a handful of *built-in*
+  MLIR attribute types (`IntegerAttr`, `UnitAttr`, `DenseI32ArrayAttr`,
+  `DenseI64ArrayAttr`) unqualified as raw C++ parameter-type strings, which
+  only resolved because the dialect used to live inside `namespace
+  mlir::dxsa` (so unqualified lookup found `mlir::IntegerAttr` etc. via the
+  enclosing `mlir` namespace automatically). Once rehomed to `feme::dxsa`,
+  that implicit resolution broke; I fixed it by fully qualifying those four
+  as `::mlir::*` in the `.td` (the dialect's *own* custom attrs, e.g.
+  `SrcOperandAttr`, correctly stay unqualified since they resolve within
+  `feme::dxsa` itself). The same class of bug showed up in hand-written
+  C++ (`BinaryParser.h`'s declarations, and bare `dxsa::Foo` references at
+  file scope in `BinaryParser.cpp` that used to resolve via `using
+  namespace mlir;` exposing nested `mlir::dxsa` as `dxsa`) -- fixed by
+  fully qualifying the header and adding `using namespace feme;` alongside
+  the existing `using namespace mlir;`/`using namespace llvm;` in
+  `BinaryParser.cpp`, rather than guessing this would "just work" from a
+  find-and-replace.
+- **`BinaryParser`/`BinaryWriter`/`TranslateRegistration`**
+  (`feme/lib/Target/DXSA`): migrated similarly, plus the Microsoft
+  `d3d12TokenizedProgramFormat.hpp` token-layout header they depend on.
+  `TranslateRegistration.cpp`'s three registration functions moved from ad
+  hoc free functions in `namespace mlir` to `feme::registerDXSAImport*`/
+  `registerDXSAExport*`, declared in a new
+  `feme/include/feme/Target/DXSA/TranslateRegistration.h`, matching feme's
+  existing convention (e.g. `feme/include/feme/Import/DXIL/
+  TranslateRegistration.h`) instead of copying the prototype's ad hoc
+  shape. `BinaryWriter::serialize` stays the inherited stub (`return
+  failure();`) -- implementing it is Design.md's own separately-tracked
+  roadmap item, not something this migration's scope covers.
+- **Wiring**: `feme-opt` now registers `feme::dxsa::DXSADialect` (so
+  `--verify-roundtrip` works on `dxsa` textual IR); `feme-translate` now
+  registers `--import-dxsa-bin`, `--import-dxsa-hex`, and
+  `--export-dxsa-bin`. Both TODOs these replace were already sitting in the
+  tool source, left there by the earlier scaffolding session specifically
+  for this migration.
+- **`dxbc-as` fix required for test migration**: comparing
+  `BinaryParser.cpp`'s `DCL_GLOBAL_FLAGS` decoding (which uses the *real*
+  `D3D1[01]_SB_GLOBAL_FLAG_*` bit positions from the newly-available
+  `d3d12TokenizedProgramFormat.hpp`) against `dxbc-as`'s own
+  `DclGlobalFlags` encoder turned up that `dxbc-as`'s 5 existing flag bits
+  happened to already match the real spec (its own comment called them "not
+  Microsoft-verified" -- they were actually right), so I filled in the 4
+  missing flags with the same real values and dropped that now-inaccurate
+  deviation note, as its own small, separately-committed fix.
+
+## Test migration (`feme/test/Target/DXSA`)
+
+Design.md's existing "Avoiding binary test fixtures" section had predicted
+`dxbc-as` would fully supersede the prototype's `import-dxsa-hex` text
+convention. Migrating the actual ~390-test suite showed this doesn't hold
+in practice: `dxbc-as` is a deliberately curated subset (`Opcodes.def`
+comment: "not an exhaustive reimplementation"), and most of this suite's
+binary-backed fixtures exercise opcodes/operand shapes it doesn't support
+(GS/HS/DS-stage-specific declarations, the `precise` modifier, program
+header edge cases, the unknown-opcode fallback, `d()`/indexable/`cb`/`null`/
+`vPrim` operand forms, and ~130 real `fxc`-compiled-shader fixtures). Rather
+than silently leaving this as a discrepancy, I updated Design.md's own text
+to describe what's actually true now and why (see the "Update Design.md"
+commit). Concretely:
+- The two tests fully within `dxbc-as`'s existing coverage (`dcl_temps`,
+  `dcl_globalFlags`) became `.dxasm` files assembled via `dxbc-as` at test
+  time.
+- Every other binary/hex-file-backed test (18 `inputs/*.bin` +
+  6 `asm/inputs/*.shex` + 127 `hlsl/inputs/*.shex`) was converted to the
+  suite's own pre-existing `import-dxsa-hex` convention: a small Python
+  script (`struct.unpack` each file as little-endian `u32`s, one
+  `0x%08X,`-formatted line per 8 words) inlined the hex directly into the
+  test file, and the checked-in binary/hex files were deleted -- this is
+  still diffable/reviewable/`FileCheck`-able, unlike an opaque blob, even
+  though it isn't semantic assembly text. I did not attempt to hand-write
+  `dxbc-as`-compatible assembly reproducing what a real compiled shader's
+  binary encodes; extending `dxbc-as`'s opcode coverage to close this gap
+  is called out as explicit follow-up work in Design.md rather than
+  silently left as a stale claim.
+- All RUN lines were mechanically rewritten from `mlir-translate`/
+  `mlir-opt` to `feme-translate`/`feme-opt`, and `inputs/` directories
+  renamed to `Inputs/` to match broader LLVM test-tree convention.
+
+I did not add new `gtest` unit tests for the dialect/parser: this matches
+an existing, explicit repo convention (documented in Design.md's own
+Testing Strategy "Deviation" entries for SPIR-V/backend translation
+stages) of preferring `lit`/`FileCheck` tests over `gtest` for
+translation-stage code exercised through a CLI tool, and the migrated
+`lit` suite already exercises the dialect's parser/printer/verifier and the
+`BinaryParser`'s decoding across virtually every migrated instruction
+family.
+
+## Validation
+
+- Configured/built incrementally after each logical change (dialect ->
+  parser/writer -> tool wiring -> dxbc-as fix -> test migration), fixing
+  compile errors as they surfaced rather than writing everything then
+  debugging in bulk.
+- Manually spot-checked several translation stages against expected output
+  before trusting the bulk test migration: `feme-translate
+  --import-dxsa-hex`/`--import-dxsa-bin` on hand-built inputs, `feme-opt
+  --verify-roundtrip` on the result, and `dxbc-as | feme-translate
+  --import-dxsa-bin -` for the two dxbc-as-based tests, each compared
+  token-for-token against the original prototype's expected `FileCheck`
+  output before converting the rest of the suite in bulk.
+- `ninja check-feme` (Release, `LLVM_ENABLE_ASSERTIONS=ON`, `ccache`
+  launcher, existing `build/` cache): 390/390 tests passing after the full
+  migration.
+
+## Commits
+
+Six commits: dialect migration; `BinaryParser`/`BinaryWriter`/
+`TranslateRegistration` migration; `feme-opt`/`feme-translate` wiring;
+the `dxbc-as` `DCL_GLOBAL_FLAGS` fix; the `feme/test/Target/DXSA` test
+suite migration; `Design.md`/`CommandGuide` documentation updates. This
+`agent_thoughts.md` entry is its own, seventh commit.
