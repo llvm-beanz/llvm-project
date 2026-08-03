@@ -1,0 +1,18 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.dcl_index_range v<1, <x>>, 3
+0x0400005b, 0x00101012, 0x00000001, 0x00000003
+
+// CHECK-NEXT:   dxsa.dcl_index_range v<4>, 6
+0x0400005b, 0x001010f2, 0x00000004, 0x00000006
+
+// CHECK-NEXT:   dxsa.dcl_index_range o<0, <x>>, 4
+0x0400005b, 0x00102012, 0x00000000, 0x00000004
+
+// CHECK-NEXT:   dxsa.dcl_index_range vpc<7, <x, y, z>>, 3
+0x0400005b, 0x0011b072, 0x00000007, 0x00000003
+
+// CHECK-NEXT: }

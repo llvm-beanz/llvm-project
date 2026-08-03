@@ -1,0 +1,13 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<0>[1], 1
+0x04000069, 0x00000000, 0x00000001, 0x00000001
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<1>[23], 2
+0x04000069, 0x00000001, 0x00000017, 0x00000002
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<2>[16]
+0x04000069, 0x00000002, 0x00000010, 0x00000004
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<7>[4096]
+0x04000069, 0x00000007, 0x00001000, 0x00000004
+// CHECK-NEXT: }

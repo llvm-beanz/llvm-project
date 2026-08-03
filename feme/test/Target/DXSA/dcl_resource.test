@@ -1,0 +1,39 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 0>, <dim = buffer>, <x = unorm, y = snorm, z = sint, w = uint>
+0x04000858, 0x00107000, 0x00000000, 0x00004321
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 1>, <dim = texture1d>, <x = float, y = float, z = float, w = float>
+0x04001058, 0x00107000, 0x00000001, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 2>, <dim = texture1darray>, <x = float, y = float, z = float, w = float>
+0x04003858, 0x00107000, 0x00000002, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 3>, <dim = texture2d>, <x = float, y = float, z = float, w = float>
+0x04001858, 0x00107000, 0x00000003, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 4>, <dim = texture2darray>, <x = float, y = float, z = float, w = float>
+0x04004058, 0x00107000, 0x00000004, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 5>, <dim = texture2dms, sample_count = 4>, <x = float, y = float, z = float, w = float>
+0x04042058, 0x00107000, 0x00000005, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 6>, <dim = texture2dmsarray, sample_count = 8>, <x = float, y = float, z = float, w = float>
+0x04084858, 0x00107000, 0x00000006, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 7>, <dim = texture3d>, <x = float, y = float, z = float, w = float>
+0x04002858, 0x00107000, 0x00000007, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 8>, <dim = texturecube>, <x = float, y = float, z = float, w = float>
+0x04003058, 0x00107000, 0x00000008, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 9>, <dim = texturecubearray>, <x = float, y = float, z = float, w = float>
+0x04005058, 0x00107000, 0x00000009, 0x00005555
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 0, lbound = 0, ubound = 3, space = 1>, <dim = texture3d>, <x = float, y = float, z = float, w = float>
+0x07002858, 0x00307000, 0x00000000, 0x00000000, 0x00000003, 0x00005555, 0x00000001
+
+// CHECK-NEXT: }

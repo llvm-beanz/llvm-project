@@ -1,0 +1,10 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_tessellator_domain domain_isoline
+// CHECK-NEXT:   dxsa.dcl_tessellator_domain domain_tri
+// CHECK-NEXT:   dxsa.dcl_tessellator_domain domain_quad
+// CHECK-NEXT: }
+
+0x01000895, 0x01001095, 0x01001895,

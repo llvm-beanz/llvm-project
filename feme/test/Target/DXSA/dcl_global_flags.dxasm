@@ -1,0 +1,34 @@
+; RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+; RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+; Built via dxbc-as (see feme/docs/Design.md's "Avoiding binary test
+; fixtures" section) instead of a checked-in binary fixture.
+;
+; 9 individual flags (one per instruction), then multi-flag combo, then all
+; flags.
+
+dcl_globalFlags refactoringAllowed
+dcl_globalFlags enableDoublePrecisionFloatOps
+dcl_globalFlags forceEarlyDepthStencil
+dcl_globalFlags enableRawAndStructuredBuffers
+dcl_globalFlags skipOptimization
+dcl_globalFlags enableMinimumPrecision
+dcl_globalFlags enableDoubleExtensions
+dcl_globalFlags enableShaderExtensions
+dcl_globalFlags allResourcesBound
+dcl_globalFlags refactoringAllowed | skipOptimization | allResourcesBound
+dcl_globalFlags refactoringAllowed | enableDoublePrecisionFloatOps | forceEarlyDepthStencil | enableRawAndStructuredBuffers | skipOptimization | enableMinimumPrecision | enableDoubleExtensions | enableShaderExtensions | allResourcesBound
+
+; CHECK:      dxsa.module pixel_shader 5 0 {
+; CHECK-NEXT:   dxsa.dcl_global_flags <refactoringAllowed>
+; CHECK-NEXT:   dxsa.dcl_global_flags <enableDoublePrecisionFloatOps>
+; CHECK-NEXT:   dxsa.dcl_global_flags <forceEarlyDepthStencil>
+; CHECK-NEXT:   dxsa.dcl_global_flags <enableRawAndStructuredBuffers>
+; CHECK-NEXT:   dxsa.dcl_global_flags <skipOptimization>
+; CHECK-NEXT:   dxsa.dcl_global_flags <enableMinimumPrecision>
+; CHECK-NEXT:   dxsa.dcl_global_flags <enableDoubleExtensions>
+; CHECK-NEXT:   dxsa.dcl_global_flags <enableShaderExtensions>
+; CHECK-NEXT:   dxsa.dcl_global_flags <allResourcesBound>
+; CHECK-NEXT:   dxsa.dcl_global_flags <refactoringAllowed|skipOptimization|allResourcesBound>
+; CHECK-NEXT:   dxsa.dcl_global_flags <refactoringAllowed|enableDoublePrecisionFloatOps|forceEarlyDepthStencil|enableRawAndStructuredBuffers|skipOptimization|enableMinimumPrecision|enableDoubleExtensions|enableShaderExtensions|allResourcesBound>
+; CHECK-NEXT: }

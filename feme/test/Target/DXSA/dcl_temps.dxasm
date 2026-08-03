@@ -1,0 +1,15 @@
+; RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+; RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+; Built via dxbc-as (see feme/docs/Design.md's "Avoiding binary test
+; fixtures" section) instead of a checked-in binary fixture.
+
+dcl_temps 1
+dcl_temps 16
+dcl_temps 4096
+
+; CHECK:      dxsa.module pixel_shader 5 0 {
+; CHECK-NEXT:   dxsa.dcl_temps 1
+; CHECK-NEXT:   dxsa.dcl_temps 16
+; CHECK-NEXT:   dxsa.dcl_temps 4096
+; CHECK-NEXT: }

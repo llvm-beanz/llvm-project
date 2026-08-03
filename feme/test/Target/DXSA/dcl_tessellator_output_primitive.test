@@ -1,0 +1,11 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_tessellator_output_primitive output_point
+// CHECK-NEXT:   dxsa.dcl_tessellator_output_primitive output_line
+// CHECK-NEXT:   dxsa.dcl_tessellator_output_primitive output_triangle_cw
+// CHECK-NEXT:   dxsa.dcl_tessellator_output_primitive output_triangle_ccw
+// CHECK-NEXT: }
+
+0x01000897, 0x01001097, 0x01001897, 0x01002097,

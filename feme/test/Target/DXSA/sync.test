@@ -1,0 +1,49 @@
+// RUN: feme-translate --split-input-file --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --split-input-file --import-dxsa-hex %s | feme-opt --split-input-file --verify-roundtrip
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <uav_global>
+// CHECK-NEXT: }
+0x010040be
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <uav_group>
+// CHECK-NEXT: }
+0x010020be
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <tgsm>
+// CHECK-NEXT: }
+0x010010be
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <threads>
+// CHECK-NEXT: }
+0x010008be
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <uav_global|threads>
+// CHECK-NEXT: }
+0x010048be
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <tgsm|threads>
+// CHECK-NEXT: }
+0x010018be
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <uav_global|tgsm|threads>
+// CHECK-NEXT: }
+0x010058be

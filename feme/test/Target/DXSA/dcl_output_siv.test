@@ -1,0 +1,12 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.dcl_output_siv o<0>, <position>
+0x04000067, 0x001020f2, 0x00000000, 0x00000001
+
+// CHECK-NEXT:   dxsa.dcl_output_siv o<1, <x>>, <clipDistance>
+0x04000067, 0x00102012, 0x00000001, 0x00000002
+
+// CHECK-NEXT: }

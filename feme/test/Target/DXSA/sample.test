@@ -1,0 +1,21 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.sample r<0>, v<0, <x, y, x, x>>, t<3, vector>, s<5>
+
+0x8b000045, 0x800000c2, 0x00155543, 0x001000f2,
+0x00000000, 0x00101046, 0x00000000, 0x00107e46,
+0x00000003, 0x00106000, 0x00000005
+
+// CHECK: dxsa.sample r<1>, v<0, <x, y, x, x>>, t<3, vector>, s<5>, <u = -5, v = 7, w = 0>
+
+0x8c000045, 0x8000f601, 0x800000c2, 0x00155543,
+0x001000f2, 0x00000001, 0x00101046, 0x00000000,
+0x00107e46, 0x00000003, 0x00106000, 0x00000005
+
+// CHECK: dxsa.sample_cl_s r<1>, v<0, <x, y, x, x>>, t<3, vector>, s<5>, <l(0x3F000000), null>, <u = -4, v = 1, w = 0>
+
+0x8f0000e6, 0x80003801, 0x800000c2, 0x00155543,
+0x001000f2, 0x00000001, 0x0000d000, 0x00101046,
+0x00000000, 0x00107e46, 0x00000003, 0x00106000,
+0x00000005, 0x00004001, 0x3f000000

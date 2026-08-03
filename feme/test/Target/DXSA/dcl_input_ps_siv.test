@@ -1,0 +1,24 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_input_ps_siv linear v0.x, position
+// CHECK:      dxsa.dcl_input_ps_siv linear v<0, <x>>, <position>
+0x04001064, 0x00101012, 0x00000000, 0x00000001
+
+// dcl_input_ps_siv linear v1.x, clipDistance
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<1, <x>>, <clipDistance>
+0x04001064, 0x00101012, 0x00000001, 0x00000002
+
+// dcl_input_ps_siv linear v2.x, cullDistance
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<2, <x>>, <cullDistance>
+0x04001064, 0x00101012, 0x00000002, 0x00000003
+
+// dcl_input_ps_siv linear v3.x, renderTargetArrayIndex
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<3, <x>>, <renderTargetArrayIndex>
+0x04001064, 0x00101012, 0x00000003, 0x00000004
+
+// dcl_input_ps_siv linear v4.x, viewportArrayIndex
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<4, <x>>, <viewportArrayIndex>
+0x04001064, 0x00101012, 0x00000004, 0x00000005

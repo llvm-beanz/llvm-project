@@ -1,0 +1,8 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_hs_max_tessfactor 4.200000e+01
+// CHECK-NEXT: }
+
+0x02000098, 0x42280000,

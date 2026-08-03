@@ -1,0 +1,8 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_hs_fork_phase_instance_count 42
+// CHECK-NEXT: }
+
+0x02000099, 0x0000002A,

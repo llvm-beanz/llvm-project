@@ -1,0 +1,63 @@
+// RUN: feme-translate --split-input-file --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --split-input-file --import-dxsa-hex %s | feme-opt --split-input-file --verify-roundtrip
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.cut
+// CHECK-NEXT: }
+0x01000009
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.emit
+// CHECK-NEXT: }
+0x01000013
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.emit_then_cut
+// CHECK-NEXT: }
+0x01000014
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.emit_stream 0
+// CHECK-NEXT: }
+0x03000075, 0x00110000, 0x00000000
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.emit_stream 3
+// CHECK-NEXT: }
+0x03000075, 0x00110000, 0x00000003
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.cut_stream 0
+// CHECK-NEXT: }
+0x03000076, 0x00110000, 0x00000000
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.cut_stream 3
+// CHECK-NEXT: }
+0x03000076, 0x00110000, 0x00000003
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.emit_then_cut_stream 0
+// CHECK-NEXT: }
+0x03000077, 0x00110000, 0x00000000
+
+// -----
+
+// CHECK-LABEL: dxsa.module {
+// CHECK-NEXT:   dxsa.emit_then_cut_stream 3
+// CHECK-NEXT: }
+0x03000077, 0x00110000, 0x00000003

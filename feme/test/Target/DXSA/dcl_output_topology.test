@@ -1,0 +1,10 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_output_topology pointlist
+// CHECK-NEXT:   dxsa.dcl_output_topology linestrip
+// CHECK-NEXT:   dxsa.dcl_output_topology trianglestrip
+// CHECK-NEXT: }
+
+0x0100085C, 0x0100185C, 0x0100285C,

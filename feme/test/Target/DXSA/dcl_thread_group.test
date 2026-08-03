@@ -1,0 +1,13 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1, y = 1, z = 1>
+0x0400009b, 0x00000001, 0x00000001, 0x00000001
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1024, y = 1, z = 1>
+0x0400009b, 0x00000400, 0x00000001, 0x00000001
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1, y = 1024, z = 1>
+0x0400009b, 0x00000001, 0x00000400, 0x00000001
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1, y = 1, z = 64>
+0x0400009b, 0x00000001, 0x00000001, 0x00000040
+// CHECK-NEXT: }

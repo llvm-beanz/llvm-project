@@ -1,0 +1,12 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_output o0.xyzw
+// CHECK:      dxsa.dcl_output o<0>
+0x03000065, 0x001020f2, 0x00000000
+
+// dcl_output oDepth
+// CHECK-NEXT: dxsa.dcl_output oDepth
+0x02000065, 0x0000c001

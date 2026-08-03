@@ -1,0 +1,9 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_max_output_vertex_count 1
+// CHECK-NEXT:   dxsa.dcl_max_output_vertex_count 1024
+// CHECK-NEXT: }
+
+0x0200005E, 0x00000001, 0x0200005E, 0x00000400,

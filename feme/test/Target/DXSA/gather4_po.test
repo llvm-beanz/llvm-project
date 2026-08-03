@@ -1,0 +1,16 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.gather4_po r<1, <x>>, v<0, <x, y, x, x>>, r<0, <x, y, x, x>>, t<0, vector>, s<0, vector, <x>>
+
+0x8d00007f, 0x800000c2, 0x00155543, 0x00100012,
+0x00000001, 0x00101046, 0x00000000, 0x00100046,
+0x00000000, 0x00107e46, 0x00000000, 0x0010600a,
+0x00000000
+
+// CHECK: dxsa.gather4_po_s r<3, <x>>, v<0, <x, y, x, x>>, r<0, <x, y, x, x>>, t<0, vector>, s<0, vector, <w>>, r<4, <x>>
+
+0x8f0000dd, 0x800000c2, 0x00155543, 0x00100012,
+0x00000003, 0x00100012, 0x00000004, 0x00101046,
+0x00000000, 0x00100046, 0x00000000, 0x00107e46,
+0x00000000, 0x0010603a, 0x00000000

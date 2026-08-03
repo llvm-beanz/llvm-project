@@ -1,0 +1,90 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, r<1>
+0x05000040, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, -r<1>
+0x06000040, 0x001000f2, 0x00000000, 0x80100e46, 0x00000041, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, |r<1>|
+0x06000040, 0x001000f2, 0x00000000, 0x80100e46, 0x00000081, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, -|r<1>|
+0x06000040, 0x001000f2, 0x00000000, 0x80100e46, 0x000000c1, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ne precise <x, y> r<0>, r<1>
+0x05180040, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ne_sat r<0>, r<1>
+0x05002040, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ne_sat precise <x> r<0>, r<1>
+0x05082040, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, r<1>
+0x05000041, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, -r<1>
+0x06000041, 0x001000f2, 0x00000000, 0x80100e46, 0x00000041, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, |r<1>|
+0x06000041, 0x001000f2, 0x00000000, 0x80100e46, 0x00000081, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, -|r<1>|
+0x06000041, 0x001000f2, 0x00000000, 0x80100e46, 0x000000c1, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ni precise <x, y> r<0>, r<1>
+0x05180041, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ni_sat r<0>, r<1>
+0x05002041, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_ni_sat precise <x> r<0>, r<1>
+0x05082041, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, r<1>
+0x05000042, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, -r<1>
+0x06000042, 0x001000f2, 0x00000000, 0x80100e46, 0x00000041, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, |r<1>|
+0x06000042, 0x001000f2, 0x00000000, 0x80100e46, 0x00000081, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, -|r<1>|
+0x06000042, 0x001000f2, 0x00000000, 0x80100e46, 0x000000c1, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_pi precise <x, y> r<0>, r<1>
+0x05180042, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_pi_sat r<0>, r<1>
+0x05002042, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_pi_sat precise <x> r<0>, r<1>
+0x05082042, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_z r<0>, r<1>
+0x05000043, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_z r<0>, -r<1>
+0x06000043, 0x001000f2, 0x00000000, 0x80100e46, 0x00000041, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_z r<0>, |r<1>|
+0x06000043, 0x001000f2, 0x00000000, 0x80100e46, 0x00000081, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_z r<0>, -|r<1>|
+0x06000043, 0x001000f2, 0x00000000, 0x80100e46, 0x000000c1, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_z precise <x, y> r<0>, r<1>
+0x05180043, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_z_sat r<0>, r<1>
+0x05002043, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT:   dxsa.round_z_sat precise <x> r<0>, r<1>
+0x05082043, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001
+
+// CHECK-NEXT: }

@@ -1,0 +1,10 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.and r<0>, r<1>, r<2>
+0x07000001, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001, 0x00100e46, 0x00000002,
+// CHECK-NEXT:   dxsa.and r<0>, r<1>, l(0xFF, 0xFF, 0xFF, 0xFF)
+0x0a000001, 0x001000f2, 0x00000000, 0x00100e46, 0x00000001, 0x00004002, 0x000000ff, 0x000000ff, 0x000000ff, 0x000000ff
+// CHECK-NEXT: }

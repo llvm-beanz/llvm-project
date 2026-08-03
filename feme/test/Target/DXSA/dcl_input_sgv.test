@@ -1,0 +1,18 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<0, <x>>, <vertexID>
+0x04000060, 0x00101012, 0x00000000, 0x00000006
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<0, <y>>, <instanceID>
+0x04000060, 0x00101022, 0x00000000, 0x00000008
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<1, <z>>, <vertexID>
+0x04000060, 0x00101042, 0x00000001, 0x00000006
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<1, <w>>, <instanceID>
+0x04000060, 0x00101082, 0x00000001, 0x00000008
+
+// CHECK-NEXT: }

@@ -1,0 +1,16 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_input_ps_sgv v0.x, primitiveID
+// CHECK:      dxsa.dcl_input_ps_sgv v<0, <x>>, <primitiveID>
+0x04000063, 0x00101012, 0x00000000, 0x00000007
+
+// dcl_input_ps_sgv v1.x, isFrontFace
+// CHECK-NEXT: dxsa.dcl_input_ps_sgv v<1, <x>>, <isFrontFace>
+0x04000063, 0x00101012, 0x00000001, 0x00000009
+
+// dcl_input_ps_sgv v2.x, sampleIndex
+// CHECK-NEXT: dxsa.dcl_input_ps_sgv v<2, <x>>, <sampleIndex>
+0x04000063, 0x00101012, 0x00000002, 0x0000000a

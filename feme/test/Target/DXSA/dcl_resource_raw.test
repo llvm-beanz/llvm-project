@@ -1,0 +1,12 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_resource_raw <id = 3>
+0x030000a1, 0x00107000, 0x00000003
+
+// CHECK-NEXT:   dxsa.dcl_resource_raw <id = 0, lbound = 0, ubound = 3, space = 1>
+0x060000a1, 0x00307000, 0x00000000, 0x00000000, 0x00000003, 0x00000001
+
+// CHECK-NEXT: }

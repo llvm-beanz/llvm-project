@@ -1,0 +1,18 @@
+// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
+// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
+
+// The precise modifier is a per-output-component mask; it carries the
+// `{x, y, z, w}` subset that must stay non-refactorable, and combines with
+// the saturate variant (`add_sat`) independently.
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.add r<0>, r<1>, r<2>
+// CHECK-NEXT:   dxsa.add precise <x, y, z, w> r<0>, r<1>, r<2>
+// CHECK-NEXT:   dxsa.add precise <x, y> r<0>, r<1>, r<2>
+// CHECK-NEXT:   dxsa.add_sat precise <x> r<0>, r<1>, r<2>
+// CHECK-NEXT: }
+
+0x07000000, 0x001000F2, 0x00000000, 0x00100E46, 0x00000001, 0x00100E46, 0x00000002, 0x07780000,
+0x001000F2, 0x00000000, 0x00100E46, 0x00000001, 0x00100E46, 0x00000002, 0x07180000, 0x001000F2,
+0x00000000, 0x00100E46, 0x00000001, 0x00100E46, 0x00000002, 0x07082000, 0x001000F2, 0x00000000,
+0x00100E46, 0x00000001, 0x00100E46, 0x00000002,
