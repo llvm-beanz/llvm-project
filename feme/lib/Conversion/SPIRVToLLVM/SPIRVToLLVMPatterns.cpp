@@ -276,6 +276,103 @@ private:
   const feme::spirv::ResourceInfoMap &Resources;
 };
 
+/// Emits the `llvm.spv.resource.getpointer` call addressing \p Coordinate
+/// within the resource \p Handle. LLVM's SPIRV backend selects
+/// `OpImageRead`/`OpImageWrite` from the ordinary load or store through the
+/// resulting pointer, which is also how the DXIL -> SPIR-V direction spells
+/// a typed buffer access (feme::spirv::RaisedLoweringPass).
+mlir::Value createResourcePointer(mlir::ConversionPatternRewriter &Rewriter,
+                                  mlir::Location Loc, mlir::Value Handle,
+                                  mlir::Value Coordinate) {
+  return createIntrinsicCall(
+      Rewriter, Loc, "llvm.spv.resource.getpointer",
+      mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
+      {Handle, Coordinate});
+}
+
+/// Converts `spirv.ImageRead` into a load through the read location.
+class ImageReadPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageReadOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageReadOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageReadOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getImageOperands())
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Value Pointer = createResourcePointer(
+        Rewriter, Op.getLoc(), Adaptor.getImage(), Adaptor.getCoordinate());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(Op, ResultType, Pointer);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.ImageWrite` into a store through the written location.
+class ImageWritePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageWriteOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageWriteOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageWriteOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getImageOperands())
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    mlir::Value Pointer = createResourcePointer(
+        Rewriter, Op.getLoc(), Adaptor.getImage(), Adaptor.getCoordinate());
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::StoreOp>(Op, Adaptor.getTexel(),
+                                                     Pointer);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.ImageQuerySize` into the `llvm.spv.resource.getdimensions`
+/// intrinsic returning as many dimensions as the query asks for.
+class ImageQuerySizePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageQuerySizeOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageQuerySizeOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageQuerySizeOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    auto VectorTy = mlir::dyn_cast<mlir::VectorType>(ResultType);
+    int64_t Dimensions = VectorTy ? VectorTy.getNumElements() : 1;
+    llvm::StringRef Intrinsic;
+    switch (Dimensions) {
+    case 1:
+      Intrinsic = "llvm.spv.resource.getdimensions.x";
+      break;
+    case 2:
+      Intrinsic = "llvm.spv.resource.getdimensions.xy";
+      break;
+    case 3:
+      Intrinsic = "llvm.spv.resource.getdimensions.xyz";
+      break;
+    default:
+      return Rewriter.notifyMatchFailure(Op, "unsupported dimension count");
+    }
+
+    Rewriter.replaceOp(Op, createIntrinsicCall(Rewriter, Op.getLoc(), Intrinsic,
+                                               ResultType, Adaptor.getImage()));
+    return mlir::success();
+  }
+};
+
 /// Drops `spirv.ExecutionMode`, whose contents FeMe instead reads before
 /// conversion and re-emits as function attributes on the entry point (see
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
@@ -354,8 +451,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources) {
   Patterns.add<BuiltInAddressOfPattern, BuiltInGlobalVariablePattern,
-               ExecutionModePattern, LoadValuePattern>(
-      Patterns.getContext(), TypeConverter, FeMeBenefit);
+               ExecutionModePattern, ImageQuerySizePattern, ImageReadPattern,
+               ImageWritePattern, LoadValuePattern>(Patterns.getContext(),
+                                                    TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
 }
