@@ -2927,3 +2927,149 @@ Committed as four changes: the type conversion; the op-legalization and
 translation test coverage; the gtest for the parser-unreachable cases; then
 the `mlir/docs/SPIRVToLLVMDialectConversion.md` and `feme/docs/Design.md`
 updates; and this entry on its own.
+
+# Building `dxbc-as`: a standalone DXBC assembler
+
+## Framing the problem
+
+The design doc already spelled out *why* `dxbc-as` needs to exist (see its
+"`dxbc-as`: a standalone DXBC assembler" section): hex-DWORD listings and
+`dxsa` dialect text aren't satisfying DXBC test inputs, and reusing FeMe's
+own `BinaryWriter` to produce importer test fixtures would make those tests
+partly circular. What it didn't spell out was the actual SM4/SM5 tokenized
+bytecode format -- Microsoft never published a formal grammar or a
+public spec doc, just a C header (`d3d10TokenizedProgramFormat.hpp` /
+`d3d11TokenizedProgramFormat.hpp`) full of `ENCODE_*`/`DECODE_*` bit-twiddling
+macros. Before writing any code, I fetched that header (it's mirrored in a
+few public SDK-header repos on GitHub) to get the real opcode token layout,
+operand token layout (num-components/selection-mode/mask/swizzle/operand-
+type/index-dimension/index-representation), the extended-operand-modifier
+token, and the enum values themselves -- I wanted the binary this tool
+emits to be bit-accurate against the real format wherever it applies, not
+an approximation invented for this tool, since half the point is producing
+fixtures a *future* real DXBC importer can trust.
+
+## Scoping the instruction set
+
+The real SM4/SM5 ISA has on the order of 200 opcodes across ~10 shader
+stages (including tessellation/geometry/compute-specific ones, UAV/atomic
+ops, double-precision ops, and full control flow). Implementing all of it
+is out of scope for what the task description called out as a testing
+tool that "doesn't need to be fully production-quality" -- but I still
+wanted every *shape* of the format's operand encoding demonstrated, not
+just the shortest possible mnemonic list. I picked ~40 mnemonics spanning:
+plain ALU with 1/2/3 operands (float and integer/bitwise, so `_sat`
+eligibility has a real distinction to enforce), texture `sample`/`ld`,
+`discard`'s fixed-by-mnemonic test boolean, `ret`/`nop`, and every kind of
+declaration (`dcl_globalFlags`, `dcl_temps`, `dcl_resource_*`,
+`dcl_sampler`, `dcl_input`/`dcl_input_ps`, `dcl_output`). Control flow
+(`if`/`loop`/`switch`/labels) is the one deliberately-deferred gap, called
+out explicitly in Design.md rather than left implicit, since it's a
+genuinely different kind of complexity (block nesting/backpatching) from
+"another operand-list shape."
+
+`Opcodes.def` (an X-macro table: mnemonic, real opcode token value, and an
+`InstructionKind` grouping mnemonics by operand-encoding shape) is the one
+place mnemonic coverage lives, specifically so extending it later is
+additive -- add a row, and only touch `Parser.cpp`/`Encoder.cpp` if the new
+mnemonic doesn't already fit an existing `InstructionKind`.
+
+## Architecture: a traditional compiler pipeline, on purpose
+
+The task asked explicitly for "traditional compiler design: lexing,
+parsing, and building out a stack of instructions which then get dumped
+either to binary or text," so I kept the four stages as genuinely separate
+libraries/files rather than a single pass that both parses and encodes:
+
+- `Lexer` (`Token`/`Lexer.h/.cpp`): format-agnostic tokenizer. Never fails
+  -- an unrecognized character becomes `TokenKind::Unknown`, not a thrown
+  error, so it can be driven straight from arbitrary fuzzer bytes.
+- `Parser` (`parseAssembly`): statement-oriented recursive descent (one
+  `Instruction` per source line), producing a flat
+  `std::vector<Instruction>` -- the "instruction stack" the task asked for.
+  Every error path returns an `llvm::Error` with line/column rather than
+  asserting, matching the existing "must not crash on untrusted input"
+  principle in Design.md's Diagnostics section, which I decided applies
+  just as much to this tool's own (attacker- or fuzzer-controlled) input as
+  to a binary importer's.
+- `Encoder` (`encodeProgram`/`wrapInContainer`): the only stage that knows
+  about real DXBC bit layouts. Kept `Instruction` itself layout-agnostic
+  (register kind/index, component selection, modifiers, bare immediates/
+  keywords) so `Encoder.cpp` is the single place bit-packing logic lives,
+  and `AsmPrinter.cpp` (the text-dump path) never needs to know about it at
+  all.
+- `AsmPrinter` (`printAssembly`): the "dump to text" side, sharing nothing
+  with `Encoder` except the `Instruction` model. Print-then-reparse is a
+  round trip by construction, which is what the `--emit=asm` lit test
+  actually checks.
+
+`dxbc-as.cpp` (the CLI) just wires these together with `llvm::cl::opt`,
+matching `llvm-mc`'s spirit as the design doc calls for, and deliberately
+has zero MLIR/`feme::Context` dependency -- it lives in its own
+`feme/lib/DXBC/Assembler` library, not under `feme/lib/Import` or anywhere
+`dxsa`-dialect-adjacent.
+
+## Two honest deviations, called out in Design.md rather than hidden
+
+1. `DXContainer::Header::FileHash` (the container checksum) is left zeroed.
+   Real `fxc`-produced containers carry a bespoke, Microsoft-undocumented
+   hash; no in-tree consumer (`llvm::object::DXContainer`, and no DXBC
+   importer exists yet) validates it, so computing a fake one would add
+   complexity for zero verification benefit right now.
+2. `dcl_globalFlags`'s per-flag bit assignment is this tool's own mapping,
+   not a verified-real one -- the token format header documents the
+   opcode-specific-control bit *range* those flags live in, but not which
+   bit means which named flag, and that's genuinely not published
+   anywhere I could find.
+
+Both are called out explicitly in the "Status: implemented" block I added
+to Design.md's "dxbc-as" section, rather than being silent simplifications
+a future reader would have to discover by diffing against a real `fxc`
+dump.
+
+## Fuzzing without a real libFuzzer available
+
+This build isn't configured with `-DLLVM_USE_SANITIZE_COVERAGE`, so
+`add_llvm_fuzzer` produces the dummy, non-mutating driver (matching how
+`feme-dxil-import-fuzzer`/`feme-spirv-import-fuzzer` already document this
+tradeoff in their own CommandGuide pages). Rather than reconfigure the
+whole build for one harness, I validated `dxbc-as-fuzzer` two ways with the
+dummy driver: ~2000 uniform-random byte strings (0-200 bytes), then ~3000
+strings generated by mutating the two seed corpus files (byte flips,
+insertions, deletions) -- both runs completed with no crash, matching what
+a real libFuzzer run would need as a baseline before any coverage-guided
+mutation could even start. I recorded this as a documented, deliberate
+tradeoff in `dxbc-as-fuzzer`'s commit message rather than silently skipping
+fuzzer validation.
+
+## Validation
+
+- 41 new gtest cases (`FeMeDXBCAssemblerTests`: `InstructionTest`,
+  `LexerTest`, `ParserTest`, `EncoderTest`) covering the opcode table,
+  every token kind including malformed-character recovery, every
+  `InstructionKind`'s grammar (including the modifier/immediate/component-
+  selection edge cases and every parse-error path), and the exact bit
+  layout of every token `Encoder.cpp` emits (verified against the real
+  `d3d11TokenizedProgramFormat.hpp` bit positions/values, not just "some
+  value round-trips").
+- 5 new `lit`/`FileCheck` tests under `test/Tools/dxbc-as`: `--help`, an
+  asm round trip matching Design.md's own worked example, two malformed-
+  input diagnostics, and an `od`-decoded check of both binary output modes
+  (raw bytecode's version/length tokens, and the container's `DXBC` magic).
+- `ninja check-feme` (Release, `LLVM_ENABLE_ASSERTIONS=ON`, `ccache`
+  launcher, against the existing `build/` cache) green at every one of the
+  eight commits below -- I temporarily moved not-yet-committed files out to
+  `/tmp` and reconfigured/rebuilt/retested after each `git add`, rather
+  than only validating the final squashed state, so the commit history
+  itself is bisectable.
+- All new/touched C++ run through `clang-format` (no changes needed --
+  already conformant).
+
+## Commits
+
+Nine commits, each independently built and tested (moving not-yet-added
+files out of the tree and back with each step, per above): the opcode
+table/instruction model; the lexer; the parser; the encoder; the asm
+printer; the `dxbc-as` CLI tool; the fuzzer harness and seed corpus; the
+`lit` tests; then the `Design.md`/`CommandGuide` documentation. This
+`agent_thoughts.md` entry is its own, tenth commit.
