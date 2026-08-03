@@ -854,26 +854,14 @@ lifting/interop representation. Instead:
 
 Status: the migration itself is done — the dialect (`feme/include/feme/Dialect/DXSA`,
 `feme/lib/Dialect/DXSA`), `BinaryParser`
-(`feme/lib/Target/DXSA/BinaryParser.cpp`), and its `--import-dxsa-bin`/
-`--import-dxsa-hex` `feme-translate` registrations are in place, with the
+(`feme/lib/Target/DXSA/BinaryParser.cpp`), and its `--import-dxsa-bin`
+`feme-translate` registration are in place, with the
 dialect's C++ namespace rehomed from `mlir::dxsa` to `feme::dxsa` and its
 full `lit` test suite (`feme/test/Target/DXSA`, ~390 tests) migrated
 alongside it. Remaining follow-up work, not attempted in this migration:
 - **`BinaryWriter`** (`feme::dxsa::serialize`) is still the unimplemented
   stub inherited from the prototype; implementing it remains a hard
   prerequisite for real DXBC export, as described above.
-- **`dxbc-as` opcode coverage**: per the "Avoiding binary test fixtures"
-  deviation above, `dxbc-as`'s curated opcode subset doesn't yet cover most
-  of the migrated test suite's fixtures (stage-specific declarations such
-  as `dcl_gs_instance_count`/`dcl_hs_max_tessfactor`/
-  `dcl_tessellator_domain`, the `precise` modifier, program-header
-  presence/absence, the unknown-opcode fallback, and ~130 real
-  `fxc`-compiled-shader fixtures under `test/Target/DXSA/{asm,hlsl}`); those
-  fixtures currently use `--import-dxsa-hex` with an inlined hex DWORD
-  listing rather than `dxbc-as` assembly. Extending `dxbc-as` to cover these
-  (mostly mechanical, matching existing `DclTemps`-shaped declaration
-  encodings) would let more of the suite drop the hex listing in favor of
-  semantic assembly text.
 - **Opcode coverage** in the dialect/parser itself beyond what the migrated
   prototype already covered is still incremental, per the "cover the full
   SM5 opcode set" goal above.
@@ -1195,7 +1183,7 @@ ever testing through the full `feme` driver end to end:
   output. Directly reuses/migrates the translation registration pattern
   already present in the `wip/dxsa-mlir` prototype's
   `mlir/lib/Target/DXSA/TranslateRegistration.cpp` (`import-dxsa-bin`,
-  `import-dxsa-hex`, `export-dxsa-bin`). This is distinct from `feme`
+  `export-dxsa-bin`). This is distinct from `feme`
   itself: `feme` resolves a full `Driver`-level `--from`/`--to`/`--target`
   chain and only produces final binary/ISA output, while `feme-translate`
   stops at a single stage and can emit human-readable intermediate IR.
@@ -1224,9 +1212,9 @@ ever testing through the full `feme` driver end to end:
 
 ### `dxbc-as`: a standalone DXBC assembler
 
-Hex-DWORD listings and `dxsa` dialect textual IR are still not truly
-satisfying as DXBC test inputs: hex is just numbers (not diffable in any
-meaningful sense, doesn't capture *meaning*), and driving everything
+Hex-DWORD listings and `dxsa` dialect textual IR are not satisfying as
+DXBC test inputs: hex is just numbers (not diffable in any meaningful
+sense, doesn't capture *meaning*), and driving everything
 through the `dxsa` dialect's own writer would make the DXBC importer's
 tests partly circular (the code producing test inputs would share the
 same dialect/`BinaryWriter` machinery as the code under test). Instead,
@@ -1264,19 +1252,34 @@ FeMe provides a small **standalone** DXBC assembler tool, `dxbc-as`, that:
 `feme/tools/dxbc-as-fuzzer`; see
 [docs/CommandGuide/dxbc-as.md](CommandGuide/dxbc-as.md)). Follows a
 traditional lex ➜ parse ➜ encode pipeline (`Lexer`/`Parser` build a flat
-`std::vector<Instruction>` "instruction stack"; `Encoder`/`AsmPrinter`
-consume it to produce binary or re-printed text respectively). A few
-implementation notes/deviations from the description above:
+`Program` "instruction stack"; `Encoder`/`AsmPrinter` consume it to
+produce binary or re-printed text respectively). A few implementation
+notes/deviations from the description above:
 
-- Mnemonic coverage (`feme/include/feme/DXBC/Assembler/Opcodes.def`) is a
-  deliberately curated, representative subset of the real SM4/SM5 ISA (on
-  the order of 40 mnemonics covering every operand-encoding shape the
-  format uses: plain ALU, texture sampling/loads, declarations, no-operand,
-  conditional), not an exhaustive reimplementation of the ~200-opcode real
-  instruction set. Control flow (`if`/`else`/`loop`/`switch`/labels) is not
-  yet covered; extending coverage is purely additive (add a row to
-  `Opcodes.def`, teach `Parser.cpp`/`Encoder.cpp` about a new
-  `InstructionKind` only if the new mnemonic doesn't fit an existing one).
+- Mnemonic coverage (`feme/include/feme/DXBC/Assembler/Opcodes.def`) is
+  the whole SM4/SM5 instruction set: every `D3D10_SB_OPCODE_TYPE` value,
+  with the destination/source operand counts and opcode-specific control
+  bits each mnemonic implies. Mnemonic *families* stand in for control
+  fields the assembly would otherwise need positional mode keywords for
+  (`callc_z`/`callc_nz`, `resinfo`/`resinfo_rcp`/`resinfo_uint`,
+  `dcl_resource_texture2d`/`dcl_resource_texture3d`/...).
+- Two syntactic constructs deviate from `fxc`'s output because `fxc` has
+  no need for them but a *test* assembler does:
+  - `.shader_model <stage> <major> <minor>` makes the program header
+    opt-in. Most DXBC fixtures are bare instruction sequences (a
+    `DXContainer`'s `SHEX` part minus its header), and the `dxsa` importer
+    accepts both forms, so which one a fixture wants has to be sayable.
+  - `.dword <token>, ...` emits raw tokens. The importer's tests
+    deliberately feed it malformed bytecode (unknown opcodes, wrong
+    instruction lengths, truncated instructions, corrupted operand type
+    fields) to check its diagnostics and its unknown-instruction fallback;
+    by construction no well-formed mnemonic can express those.
+- Where a component suffix is ambiguous, `dxbc-as` resolves it the way
+  `fxc` disassembly does -- by operand position. `.x` on a destination is
+  a one-bit write mask, on a source a single-component select. An operand
+  can override that, and its component count, through a `{...}` modifier
+  list (`{mask}`, `{comp0}`, `{min16f}`, `{nonuniform}`, ...), which also
+  carries the modifiers the bare syntax has no room for.
 - Binary encoding uses the real, documented token layout and opcode values
   from Microsoft's public `d3d11TokenizedProgramFormat.hpp` for every field
   it populates (opcode/operand tokens, component masks/swizzles, operand
@@ -1289,6 +1292,10 @@ implementation notes/deviations from the description above:
   `DXContainer` consumer validates it), and `dcl_globalFlags`' per-flag
   bit assignment within the opcode-specific control range is `dxbc-as`'s
   own, stable but not Microsoft-verified, mapping.
+- Generic instructions may carry trailing DWORDs past their operands
+  (`samplepos r0.xy, t0.xyzw, r0.x, 0`). Real `fxc` output contains such
+  tokens, and refusing to assemble them would make some real shaders
+  inexpressible.
 - `dxbc-as-fuzzer` (`feme/tools/dxbc-as-fuzzer`) fuzzes
   `feme::dxbc::parseAssembly` directly on raw fuzzer bytes as text (not a
   binary format), matching the "every parser gets a fuzzer" requirement in
@@ -1359,24 +1366,15 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
   gives DXBC tests the same quality of human-readable, diffable,
   `FileCheck`-able input as `.ll`/`.yaml` text, without depending on
   feme's own `dxsa` dialect or `BinaryWriter` to produce those inputs.
-  Deviation: the plan was for `dxbc-as` to fully supersede the migrated
-  `wip/dxsa-mlir` prototype's `import-dxsa-hex` plain-text hex listing
-  (kept in the migrated `dxsa` `BinaryParser`/`TranslateRegistration` as
-  `feme::registerDXSAImportHexTranslation`, see the DXBC section below),
-  since a hex DWORD listing doesn't capture semantic meaning the way
-  mnemonic assembly text does. In practice, migrating
-  `feme/test/Target/DXSA` (the `dxsa` dialect's own test suite) found that
-  `dxbc-as`'s deliberately curated opcode subset doesn't yet cover most of
-  that suite's fixtures (stage-specific declarations like
-  `dcl_gs_instance_count`, the `precise` modifier, and ~130 real
-  `fxc`-compiled-shader fixtures under `test/Target/DXSA/{asm,hlsl}`); only
-  the fixtures fully within `dxbc-as`'s existing coverage (`dcl_temps`,
-  `dcl_globalFlags`) were converted to `dxbc-as` assembly, and the rest use
-  `import-dxsa-hex` with the hex listing inlined in the test (still
-  diffable/`FileCheck`-able, just not semantic assembly text). Extending
-  `dxbc-as`'s opcode coverage to close this gap is tracked as follow-up
-  work under the DXBC dialect section below, not a regression from the
-  original plan.
+  `dxbc-as` has fully superseded the migrated `wip/dxsa-mlir` prototype's
+  `import-dxsa-hex` plain-text hex listing, which has been deleted: a hex
+  DWORD listing doesn't capture semantic meaning the way mnemonic assembly
+  text does. Closing that gap meant growing `dxbc-as` from its original
+  curated opcode subset to the whole SM4/SM5 instruction set, which is why
+  it also carries two deliberate escape hatches (`.shader_model` and
+  `.dword`, see the `dxbc-as` section above): the `dxsa` test suite
+  includes fixtures whose whole point is bytecode the importer must
+  *reject*, and those cannot be spelled with any well-formed mnemonic.
 - **SPIR-V**: follow MLIR's existing convention for the `spirv` dialect —
   `mlir-translate --serialize-spirv`/`--deserialize-spirv` (or
   `feme-translate`'s equivalent registration) converts between `spirv`
