@@ -20,25 +20,12 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-In a previous change you didn't attempt some of the things I requested.
-Specifically you left this note:
+You left a comment in your thoughts:
 
-## Follow-up work (not attempted here, left for later changes)
+> reconstructing a plausible-looking but fake struct type to fill that gap would
+> be worse than not raising those kinds at all, since it would silently produce
+> a handle type that doesn't match what actually flowed through the real
+> frontend.
 
-- Resource-handle DXIL opcodes (`CreateHandle`, `AnnotateHandle`, buffer/
-  texture loads and stores, etc.) and the corresponding `LLVMFrontendHLSL`
-  metadata reconstruction -- the part of the original request this change
-  does *not* yet address, and the natural next opcode family to raise.
-- SPIR-V raising to LLVM `SPIRV`-target intrinsics (today's
-  `SPIRVToLLVMTranslator` only reaches the generic `llvm` dialect via
-  `ConvertSPIRVToLLVMPass`).
-- A `Driver`/end-user `--to=llvm` "output format" surfaced through `feme`
-  itself, once enough of the above exists to make it meaningful; today the
-  equivalent is composing `feme-translate --import-dxil` with `feme-opt
-  --llvm -passes=feme-dxil-raise-ops` by hand.
-- Using real `offload-test-suite`-compiled shaders as test collateral, once
-  resource-op raising exists to make them exercise more than the "left
-  untouched" path.
-
-Can you please address those issues and ensure that the op-raising pass covers
-all valid dxil ops?
+The logic here is a bit flowed. We need to translate these operations to
+something in order to support re-targeting the IR.
