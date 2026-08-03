@@ -248,18 +248,22 @@ static llvm::Error encodeInstruction(const Instruction &Inst,
   }
 
   case InstructionKind::DclGlobalFlags: {
-    // Deviation: real DCL_GLOBAL_FLAGS bit assignments for each flag name
-    // are not published by Microsoft alongside the token format header, so
-    // (since this tool has no downstream consumer yet to match) this uses
-    // its own stable, but not Microsoft-verified, bit-per-flag assignment
-    // within the opcode-specific control range ([23:11]); see
-    // feme/docs/Design.md's "dxbc-as" section.
+    // Real DCL_GLOBAL_FLAGS bit assignments, matching
+    // D3D1[01]_SB_GLOBAL_FLAG_*/D3D12_SB_GLOBAL_FLAG_ALL_RESOURCES_BOUND in
+    // Microsoft's d3d12TokenizedProgramFormat.hpp (see
+    // feme/lib/Target/DXSA/d3d12TokenizedProgramFormat.hpp, used by the
+    // `dxsa` dialect's BinaryParser) within the opcode-specific control
+    // range ([23:11]).
     static constexpr KeywordValue Flags[] = {
         {"refactoringAllowed", 1u << 11},
         {"enableDoublePrecisionFloatOps", 1u << 12},
         {"forceEarlyDepthStencil", 1u << 13},
         {"enableRawAndStructuredBuffers", 1u << 14},
         {"skipOptimization", 1u << 15},
+        {"enableMinimumPrecision", 1u << 16},
+        {"enableDoubleExtensions", 1u << 17},
+        {"enableShaderExtensions", 1u << 18},
+        {"allResourcesBound", 1u << 19},
     };
     uint32_t Controls = 0;
     for (const std::string &Flag : Inst.Keywords) {
