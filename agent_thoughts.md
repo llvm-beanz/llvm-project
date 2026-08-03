@@ -3689,3 +3689,147 @@ Four: `RaisedLoweringPass`'s `llvm.spv.*` matching with its test; separately,
 `ResourceLoweringPass`'s (different-shaped) `llvm.spv.*` matching with its
 test; the `feme-spirv-to-amdgpu.mlir` end-to-end update; and the `Design.md`
 update, plus this entry.
+
+# Agent thoughts: fixing the Mandelbrot shader's SPIR-V -> AMDGPU translation
+
+## Framing
+
+The task gave a real HLSL compute shader (a Mandelbrot renderer with a
+`const static float3 Palette[8]`) that fails translating from SPIR-V to
+AMDGPU with `feme`. Rather than guess at the shape of the failure, I
+compiled it with the real `dxc -spirv -T cs_6_0` (the same tool the previous
+entries in this log established as the project's real-input source of
+truth) and ran it through `feme --from=spirv --target=amdgcn-amd-amdhsa`
+directly, then fixed whatever the first error was, rebuilt, and reran --
+repeating until the whole pipeline produced a real object file. This
+surfaced four independent, unrelated gaps in sequence, not one bug wearing
+different disguises:
+
+1. `spirv.Constant` of `spirv.array` type (the `Palette` array itself)
+   failed to legalize.
+2. `spirv.CompositeConstruct` building a vector (the shader's `LerpSize.xxx`
+   splat and the final `float4(Color, 1.0)`) had no lowering at all.
+3. `spirv.ImageWrite`'s `image_operands` attribute, which real `dxc` output
+   always sets explicitly to `#spirv.image_operands<None>` rather than
+   omitting it, was rejected by a presence check that meant to reject only
+   *actual* modifiers.
+4. Once past MLIR entirely, AMDGPU's own `llc` isel crashed with "Cannot
+   select: FrameIndex" on the `alloca` the palette array's local (dynamically
+   indexed) storage lowered to, since it was in the generic address space
+   rather than AMDGPU's private one (5).
+
+Each is a real, independent gap in FeMe's existing SPIR-V -> AMDGPU
+translation, not something specific to this one shader; a different shader
+using any of `const static` arrays, vector constructors/swizzles, or
+`ImageRead`/`ImageWrite` at all (which `dxc` always operand-annotates this
+way) would hit the same four in some subset.
+
+## Design decisions worth recording
+
+**Flatten to one `DenseElementsAttr` rather than reproduce nesting as
+`ArrayAttr`.** For `spirv.Constant`'s array case, I first checked
+`LLVM::ConstantOp::verify` to see what shapes it actually accepts before
+writing anything: it turns out a `!llvm.array<... x vector<...>>` constant
+can be spelled as a single *flat* `DenseElementsAttr` whose element count and
+scalar element type match the array's total element count and leaf scalar
+type (`getNumElements`/`getElementType` in `LLVMDialect.cpp` both recurse
+through array/vector nesting for exactly this reason) -- it does not require
+mirroring the SPIR-V constant's own `ArrayAttr`-of-per-element structure.
+This made `ArrayConstantPattern` a flatten-then-emit rewrite regardless of
+how deep the source array/vector nesting is (array of vectors, array of
+scalars, or a nested array of either), rather than a structural
+transliteration needing one case per shape.
+
+**`CompositeConstructPattern` only covers the vector case.** The op can also
+build a struct, array, or matrix, but nothing in FeMe's pipeline produces
+those from a `spirv.CompositeConstruct` today (structs/arrays come from
+`spirv.Constant`/`spirv.Variable` instead, and matrices are out of scope
+per `Design.md`'s existing resource/sampler gaps) -- scoping to what MLIR's
+importer and this shader's own IR actually need avoided speculative code for
+untested shapes, consistent with the project's own "leave what it cannot
+model unmodified" precedent elsewhere.
+
+**`hasImageOperands` checks the bit-enum value, not just attribute
+presence.** `Op.getImageOperands()` returns an `std::optional`, which is
+populated (not `nullopt`) even for the explicit-but-empty
+`#spirv.image_operands<None>` dxc emits, so the original `if
+(Op.getImageOperands())` check rejected every real access. This only
+surfaced by running the real shader through the real pipeline -- the
+existing `ImageReadPattern`/`ImageWritePattern` lit tests all happened to
+omit the attribute entirely (MLIR's textual default), never exercising the
+`<None>` spelling a real SPIR-V binary actually round-trips to.
+
+**Local-variable address space is fixed in `RaisedLoweringPass`, not the
+`spirv` -> `llvm` dialect conversion.** My first instinct was to make FeMe's
+own type-conversion override for `spirv.ptr<T, Function>` map straight to
+`!llvm.ptr<5>`, the same way it already does for `Input`/resource storage
+classes. I checked `llvm/lib/Target/SPIRV/SPIRVUtils.h`'s
+`storageClassToAddressSpace` before committing to that, though, and found
+`Function` storage class maps to address space *0* for LLVM's own SPIRV
+backend -- so hardcoding 5 there would silently break the `--to=spirv`
+re-serialization path the same conversion pass also serves. AMDGPU's private
+address space is a fact about *that one target*, not about SPIR-V-to-LLVM
+translation in general, so it belongs in `feme::amdgpu::RaisedLoweringPass`
+(which already exists precisely to hold AMDGPU-specific conventions),
+operating on the already-converted, raw `llvm::Module`.
+
+**Rebuilding `getelementptr`s rather than `replaceAllUsesWith`.** Moving an
+`alloca` to a new address space means every `getelementptr` computed from it
+needs rebuilding too, not just repointing: a `getelementptr`'s result
+address space is fixed, as part of its type, at the point it is created, the
+same reason `ResourceLoweringPass::lowerSPIRVAccess` (from the previous
+entry's work) cannot `replaceAllUsesWith` a differently-typed pointer
+either. `retypePointerUsers` recurses through any depth of `getelementptr`
+chain for this reason, rather than assuming (as the resource case can) that
+there is only ever one level between the pointer and its terminal
+`load`/`store`.
+
+**Verified the pass actually runs before the module's own triple becomes
+`amdgcn-*`.** My first attempt at a lit test for the alloca fix set `target
+triple = "amdgcn-amd-amdhsa"` at the top, matching this file's existing
+tests -- and LLVM's IR parser rejected the *input* itself before the pass
+even ran, since AMDGPU's own IR verifier requires every `alloca` be in
+address space 5 the moment the triple says `amdgcn-*`. Reading
+`feme::Driver::run` (`feme/lib/Driver/Driver.cpp`) confirmed this is not a
+test artifact to route around: the module's own `llvm.target_triple`
+attribute is never actually rewritten to the requested AMDGPU triple until
+`TargetMachineBackend::run`, well after `RaisedLoweringPass`/
+`ResourceLoweringPass` have already run on it -- so a module with a bad
+alloca address space *and* an `amdgcn-*` triple already set is not a state
+this pass is ever really asked to fix, and testing it that way would have
+been testing an impossible input. The alloca test therefore lives in its
+own file, `amdgpu-lower-raised-alloca.ll`, without an AMDGPU triple, with a
+comment recording why.
+
+## What I did not do
+
+Wave/quad ops and multi-use `getpointer` calls remain the same known gaps
+the previous entry left them as -- nothing in this shader touches either.
+`CompositeConstructPattern` does not cover building a struct/array/matrix,
+per the scoping note above; a future shader that needs one of those would
+need its own pattern, not a generalization of this one guessed at without a
+concrete case to test against.
+
+## Verification
+
+Reproduced the failure by compiling the task's exact HLSL with a real `dxc
+-spirv -T cs_6_0`, then ran `feme --from=spirv --target=amdgcn-amd-amdhsa`
+on the result after each individual fix, confirming the *next* distinct
+error appeared (rather than the same one recurring) before moving on, until
+the full pipeline produced a valid ELF relocatable object
+(`file`-confirmed: `ELF 64-bit LSB relocatable, AMD GPU architecture version
+1`). Added lit tests for each of the four fixes in isolation
+(`spirv-to-llvm-constants.mlir`, `spirv-to-llvm-composite-construct.mlir`, a
+new case in `spirv-to-llvm-image-access.mlir`, and
+`amdgpu-lower-raised-alloca.ll`), plus extended `feme-spirv-to-amdgpu.mlir`
+to exercise all four shapes together end to end through the real `feme` CLI.
+Ran `check-feme` (412 tests, all passing) after each individual change, with
+assertions enabled and `ccache` for iteration speed, per this task's own
+instructions.
+
+## Commits
+
+Six, each independently buildable and tested: the `image_operands<None>`
+fix; `ArrayConstantPattern`; `CompositeConstructPattern`; the AMDGPU alloca
+address-space fix; the `Design.md` update; and the `feme-spirv-to-amdgpu.mlir`
+end-to-end update exercising all of the above together, plus this entry.
