@@ -1,0 +1,107 @@
+//===- Opcodes.def - DXBC assembler opcode table ---------------*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// X-macro table of the mnemonics `dxbc-as` understands. This is a
+// deliberately curated, representative subset of the real SM4/SM5 ISA (which
+// has on the order of 200 opcodes across ~10 shader stages), not an
+// exhaustive reimplementation: `dxbc-as` is a testing tool (see
+// feme/docs/Design.md's "dxbc-as" section), and this set already covers
+// every operand-encoding shape (plain ALU, texture sampling/loads,
+// declarations, no-operand, conditional) a future DXBC importer needs
+// fixtures for. Extending coverage later is purely additive: add a row
+// here, and (if it doesn't fit an existing InstructionKind) teach Parser.cpp
+// and Encoder.cpp about the new InstructionKind.
+//
+// Each entry is:
+//   DXBC_OPCODE(EnumName, Mnemonic, RealOpcodeValue, Kind)
+//
+// `RealOpcodeValue` is the literal value of the corresponding
+// D3D10_SB_OPCODE_TYPE/D3D11_SB_OPCODE_TYPE enumerator from Microsoft's
+// public `d3d11TokenizedProgramFormat.hpp`, so the binary this tool emits
+// uses the real, documented token values rather than ones invented for this
+// tool -- see "Emits raw DXBC tokenized shader bytecode" in
+// feme/docs/Design.md's "dxbc-as" section.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef DXBC_OPCODE
+#define DXBC_OPCODE(EnumName, Mnemonic, RealOpcodeValue, Kind)
+#endif
+
+// Destination + 1 source operand, floating point unless noted.
+DXBC_OPCODE(Mov, "mov", 54, ALU1)
+DXBC_OPCODE(Not, "not", 59, ALU1)   // bitwise, integer
+DXBC_OPCODE(INeg, "ineg", 40, ALU1) // integer
+DXBC_OPCODE(ItoF, "itof", 43, ALU1)
+DXBC_OPCODE(FtoI, "ftoi", 27, ALU1)
+DXBC_OPCODE(UtoF, "utof", 86, ALU1)
+DXBC_OPCODE(FtoU, "ftou", 28, ALU1)
+DXBC_OPCODE(Rsq, "rsq", 68, ALU1)
+DXBC_OPCODE(Sqrt, "sqrt", 75, ALU1)
+DXBC_OPCODE(Exp, "exp", 25, ALU1)
+DXBC_OPCODE(Log, "log", 47, ALU1)
+DXBC_OPCODE(Frc, "frc", 26, ALU1)
+DXBC_OPCODE(RoundNE, "round_ne", 64, ALU1)
+DXBC_OPCODE(RoundNI, "round_ni", 65, ALU1)
+DXBC_OPCODE(RoundPI, "round_pi", 66, ALU1)
+DXBC_OPCODE(RoundZ, "round_z", 67, ALU1)
+
+// Destination + 2 source operands.
+DXBC_OPCODE(Add, "add", 0, ALU2)
+DXBC_OPCODE(Mul, "mul", 56, ALU2)
+DXBC_OPCODE(Div, "div", 14, ALU2)
+DXBC_OPCODE(And, "and", 1, ALU2)   // bitwise, integer
+DXBC_OPCODE(Or, "or", 60, ALU2)    // bitwise, integer
+DXBC_OPCODE(Xor, "xor", 87, ALU2)  // bitwise, integer
+DXBC_OPCODE(Min, "min", 51, ALU2)
+DXBC_OPCODE(Max, "max", 52, ALU2)
+DXBC_OPCODE(Dp2, "dp2", 15, ALU2)
+DXBC_OPCODE(Dp3, "dp3", 16, ALU2)
+DXBC_OPCODE(Dp4, "dp4", 17, ALU2)
+DXBC_OPCODE(Eq, "eq", 24, ALU2)
+DXBC_OPCODE(Ne, "ne", 57, ALU2)
+DXBC_OPCODE(Ge, "ge", 29, ALU2)
+DXBC_OPCODE(Lt, "lt", 49, ALU2)
+DXBC_OPCODE(IEq, "ieq", 32, ALU2) // integer
+DXBC_OPCODE(INe, "ine", 39, ALU2) // integer
+DXBC_OPCODE(IGe, "ige", 33, ALU2) // integer
+DXBC_OPCODE(ILt, "ilt", 34, ALU2) // integer
+DXBC_OPCODE(IAdd, "iadd", 30, ALU2) // integer
+
+// Destination + 3 source operands.
+DXBC_OPCODE(Mad, "mad", 50, ALU3)
+DXBC_OPCODE(IMad, "imad", 35, ALU3) // integer
+DXBC_OPCODE(Movc, "movc", 55, ALU3) // dest, cond, src0, src1
+
+// No operands.
+DXBC_OPCODE(Ret, "ret", 62, NoOperand)
+DXBC_OPCODE(Nop, "nop", 58, NoOperand)
+
+// Conditional, 1 source operand (the test boolean is fixed by the mnemonic:
+// `discard_z` tests for zero, `discard_nz` tests for non-zero).
+DXBC_OPCODE(DiscardZ, "discard_z", 13, Discard)
+DXBC_OPCODE(DiscardNZ, "discard_nz", 13, Discard)
+
+// Texture sampling / loads: dest, address, resource, [sampler].
+DXBC_OPCODE(Sample, "sample", 69, Sample)
+DXBC_OPCODE(Ld, "ld", 45, Load)
+
+// Declarations.
+DXBC_OPCODE(DclGlobalFlags, "dcl_globalFlags", 106, DclGlobalFlags)
+DXBC_OPCODE(DclTemps, "dcl_temps", 104, DclTemps)
+DXBC_OPCODE(DclResourceTexture1D, "dcl_resource_texture1d", 88, DclResource)
+DXBC_OPCODE(DclResourceTexture2D, "dcl_resource_texture2d", 88, DclResource)
+DXBC_OPCODE(DclResourceTexture3D, "dcl_resource_texture3d", 88, DclResource)
+DXBC_OPCODE(DclResourceTextureCube, "dcl_resource_texturecube", 88,
+            DclResource)
+DXBC_OPCODE(DclSampler, "dcl_sampler", 90, DclSampler)
+DXBC_OPCODE(DclInput, "dcl_input", 95, DclInput)
+DXBC_OPCODE(DclInputPS, "dcl_input_ps", 98, DclInputPS)
+DXBC_OPCODE(DclOutput, "dcl_output", 101, DclOutput)
+
+#undef DXBC_OPCODE
