@@ -1043,12 +1043,15 @@ operations), matching `OpRaisingPass`'s own precedent:
   intrinsics (`llvm.amdgcn.mbcnt.*`, `llvm.amdgcn.ds.permute`, ...), but the
   mapping is not always 1:1 with DXIL's wave ops and needs its own pass to
   get right.
-- SPIR-V's raised builtin-variable equivalents (`gl_GlobalInvocationID` and
-  friends): these do not yet exist upstream of these passes at all -- SPIR-V's
-  `Translator`s (see "SPIR-V -> MLIR llvm dialect -> LLVM IR" above) do not
-  currently re-express SPIR-V builtin variables as any particular
-  format-agnostic convention they could recognize, so that needs to land
-  first.
+- The `llvm.spv.*` side of the intrinsic families these passes handle
+  (`llvm.spv.thread.id`, `llvm.spv.resource.handlefrombinding`,
+  `llvm.spv.resource.getpointer`, ...). SPIR-V input now *does* reach these
+  passes in that spelling (see "FeMe's SPIR-V -> `llvm` dialect conversion"
+  above), but they only recognize the `llvm.dx.*` half of each pair, so a
+  SPIR-V-originated shader retargeted to AMDGPU still gets an object with
+  those calls left unresolved. Since the two families are parallel by
+  construction, closing this is a matter of matching both names in the same
+  places rather than new lowering logic.
 
 Exercised via `feme-opt` as the `feme-amdgpu-lower-raised` and
 `feme-amdgpu-lower-resources` passes
