@@ -21,16 +21,18 @@
 //    `amdgpu-flat-work-group-size` bound their thread group dimensions
 //    describe, so a host runtime can actually dispatch them.
 //  - Thread/group index queries: the ones with a direct per-component
-//    mapping to an AMDGPU intrinsic (`llvm.dx.group.id`,
-//    `llvm.dx.thread.id.in.group`), plus the two that do not have one --
-//    `llvm.dx.thread.id` and `llvm.dx.flattened.thread.id.in.group` -- which
-//    are synthesized from the entry point's thread group dimensions.
+//    mapping to an AMDGPU intrinsic (`llvm.dx.group.id`/`llvm.spv.group.id`,
+//    `llvm.dx.thread.id.in.group`/`llvm.spv.thread.id.in.group`), plus the
+//    two that do not have one -- `llvm.dx.thread.id`/`llvm.spv.thread.id` and
+//    `llvm.dx.flattened.thread.id.in.group`/
+//    `llvm.spv.flattened.thread.id.in.group` -- which are synthesized from
+//    the entry point's thread group dimensions.
 //
-// It does not yet cover resource-handle ops (`llvm.dx.resource.*`), or
-// SPIR-V's raised builtin-variable equivalents, which do not yet exist
-// upstream of this pass. Ops not (yet) covered are left unmodified rather
-// than erroring, so this pass composes safely with modules that mix lowered
-// and not-yet-lowered operations.
+// It does not yet cover resource-handle ops (`llvm.dx.resource.*`/
+// `llvm.spv.resource.*`, see feme::amdgpu::ResourceLoweringPass instead), or
+// the wave/quad ops (`llvm.dx.wave.*`/`llvm.spv.wave.*`). Ops not (yet)
+// covered are left unmodified rather than erroring, so this pass composes
+// safely with modules that mix lowered and not-yet-lowered operations.
 //
 //===----------------------------------------------------------------------===//
 

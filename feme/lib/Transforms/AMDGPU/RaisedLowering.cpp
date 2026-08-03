@@ -18,6 +18,7 @@
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
 #include <array>
 #include <optional>
@@ -58,18 +59,27 @@ constexpr Intrinsic::ID WorkgroupIDs[] = {Intrinsic::amdgcn_workgroup_id_x,
                                           Intrinsic::amdgcn_workgroup_id_y,
                                           Intrinsic::amdgcn_workgroup_id_z};
 
-/// A raised, format-agnostic intrinsic (see feme::dxil::OpRaisingPass) that
-/// queries a thread/group index by a constant component operand (0/1/2 for
-/// x/y/z), and the three AMDGPU intrinsics -- one per component -- it maps
-/// to.
+/// A raised, format-agnostic intrinsic (see feme::dxil::OpRaisingPass and
+/// feme::SPIRVToLLVMTranslator, which produce the `llvm.dx.*`/`llvm.spv.*`
+/// spellings respectively -- see feme/docs/Design.md's "Per-Format
+/// Representation Strategy" section) that queries a thread/group index by a
+/// constant component operand (0/1/2 for x/y/z), and the three AMDGPU
+/// intrinsics -- one per component -- it maps to.
 struct ComponentQuery {
   Intrinsic::ID RaisedID;
   const Intrinsic::ID *AMDGPUComponentIDs;
 };
 
+/// The two parallel intrinsic families' spellings of each component query
+/// this pass covers. `llvm.spv.*`'s are overloaded on return width (see
+/// IntrinsicsSPIRV.td), but this pass only ever produces AMDGPU's fixed-width
+/// `i32` intrinsics, so `lowerComponentQuery` below only rewrites calls whose
+/// own type already matches that.
 static const ComponentQuery ComponentQueries[] = {
     {Intrinsic::dx_group_id, WorkgroupIDs},
     {Intrinsic::dx_thread_id_in_group, WorkitemIDs},
+    {Intrinsic::spv_group_id, WorkgroupIDs},
+    {Intrinsic::spv_thread_id_in_group, WorkitemIDs},
 };
 
 Value *createComponentCall(IRBuilder<> &Builder, const Intrinsic::ID *IDs,
@@ -81,12 +91,14 @@ Value *createComponentCall(IRBuilder<> &Builder, const Intrinsic::ID *IDs,
 
 /// Rewrites a single call to one of the intrinsics in \p ComponentQueries
 /// into the corresponding per-component AMDGPU intrinsic call, if \p CI's
-/// sole operand is a constant in range [0, 3). Returns false (leaving \p CI
+/// sole operand is a constant in range [0, 3) and \p CI itself is `i32`
+/// (always true for the fixed-width `llvm.dx.*` family; only sometimes true
+/// for the overloaded `llvm.spv.*` one). Returns false (leaving \p CI
 /// untouched) otherwise, so callers can safely skip calls whose component
 /// isn't a compile-time constant (which this direct 1:1 mapping cannot
 /// express) rather than crashing on them.
 bool lowerComponentQuery(CallInst &CI, const ComponentQuery &Query) {
-  if (CI.arg_size() != 1)
+  if (!CI.getType()->isIntegerTy(32) || CI.arg_size() != 1)
     return false;
 
   auto *Component = dyn_cast<ConstantInt>(CI.getArgOperand(0));
@@ -106,14 +118,15 @@ bool lowerComponentQuery(CallInst &CI, const ComponentQuery &Query) {
   return true;
 }
 
-/// Lowers a `llvm.dx.thread.id` call -- the *dispatch-wide* invocation index,
-/// which AMDGPU has no single intrinsic for -- into
-/// `workgroup_id * <thread group size> + workitem_id` for the requested
-/// component. The thread group size comes from the entry point's
+/// Lowers a `llvm.dx.thread.id`/`llvm.spv.thread.id` call -- the
+/// *dispatch-wide* invocation index, which AMDGPU has no single intrinsic
+/// for -- into `workgroup_id * <thread group size> + workitem_id` for the
+/// requested component. The thread group size comes from the entry point's
 /// `hlsl.numthreads` attribute, so calls in a function without one are left
-/// unmodified.
+/// unmodified, as is a `llvm.spv.thread.id` call whose overloaded return
+/// width isn't the `i32` this pass produces.
 bool lowerThreadID(CallInst &CI) {
-  if (CI.arg_size() != 1)
+  if (!CI.getType()->isIntegerTy(32) || CI.arg_size() != 1)
     return false;
   auto *Component = dyn_cast<ConstantInt>(CI.getArgOperand(0));
   if (!Component || Component->getZExtValue() >= 3)
@@ -134,7 +147,8 @@ bool lowerThreadID(CallInst &CI) {
   return true;
 }
 
-/// Lowers a `llvm.dx.flattened.thread.id.in.group` call into the linearized
+/// Lowers a `llvm.dx.flattened.thread.id.in.group`/
+/// `llvm.spv.flattened.thread.id.in.group` call into the linearized
 /// `x + y * X + z * X * Y` combination of AMDGPU's per-component workitem
 /// ids, using the entry point's `hlsl.numthreads` dimensions.
 bool lowerFlattenedThreadIDInGroup(CallInst &CI) {
@@ -209,8 +223,12 @@ PreservedAnalyses RaisedLoweringPass::run(Module &M, ModuleAnalysisManager &) {
     });
 
   Changed |= forEachIntrinsicCall(M, Intrinsic::dx_thread_id, lowerThreadID);
+  Changed |= forEachIntrinsicCall(M, Intrinsic::spv_thread_id, lowerThreadID);
   Changed |= forEachIntrinsicCall(M, Intrinsic::dx_flattened_thread_id_in_group,
                                   lowerFlattenedThreadIDInGroup);
+  Changed |=
+      forEachIntrinsicCall(M, Intrinsic::spv_flattened_thread_id_in_group,
+                           lowerFlattenedThreadIDInGroup);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
