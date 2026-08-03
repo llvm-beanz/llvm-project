@@ -8,47 +8,76 @@
 
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/Module.h"
+#include <array>
+#include <optional>
 
 using namespace llvm;
 using namespace feme::amdgpu;
 
 namespace {
 
+/// A shader entry point's thread group dimensions, recovered from the
+/// `hlsl.numthreads` function attribute feme::dxil::MetadataRaisingPass
+/// reconstructs from DXIL's entry point metadata.
+using ThreadGroupSize = std::array<uint32_t, 3>;
+
+std::optional<ThreadGroupSize> getThreadGroupSize(const Function &F) {
+  StringRef NumThreads = F.getFnAttribute("hlsl.numthreads").getValueAsString();
+  if (NumThreads.empty())
+    return std::nullopt;
+
+  SmallVector<StringRef, 3> Components;
+  NumThreads.split(Components, ',');
+  if (Components.size() != 3)
+    return std::nullopt;
+
+  ThreadGroupSize Size{};
+  for (unsigned I = 0; I != 3; ++I)
+    if (!llvm::to_integer(Components[I], Size[I], 10))
+      return std::nullopt;
+  return Size;
+}
+
+/// The AMDGPU intrinsics naming a workitem's index within its workgroup, and
+/// its workgroup's index within the dispatch, per component (x/y/z).
+constexpr Intrinsic::ID WorkitemIDs[] = {Intrinsic::amdgcn_workitem_id_x,
+                                         Intrinsic::amdgcn_workitem_id_y,
+                                         Intrinsic::amdgcn_workitem_id_z};
+constexpr Intrinsic::ID WorkgroupIDs[] = {Intrinsic::amdgcn_workgroup_id_x,
+                                          Intrinsic::amdgcn_workgroup_id_y,
+                                          Intrinsic::amdgcn_workgroup_id_z};
+
 /// A raised, format-agnostic intrinsic (see feme::dxil::OpRaisingPass) that
 /// queries a thread/group index by a constant component operand (0/1/2 for
 /// x/y/z), and the three AMDGPU intrinsics -- one per component -- it maps
-/// to. `llvm.dx.flattened.thread.id.in.group` is intentionally not in this
-/// table: it takes no component operand (it is already a single linearized
-/// index), so lowering it needs the group's dimensions to reconstruct that
-/// linearization from AMDGPU's per-component `workitem.id`, which this pass
-/// does not yet do (see this pass's header comment).
+/// to.
 struct ComponentQuery {
   Intrinsic::ID RaisedID;
-  std::array<Intrinsic::ID, 3> AMDGPUComponentIDs;
+  const Intrinsic::ID *AMDGPUComponentIDs;
 };
 
 static const ComponentQuery ComponentQueries[] = {
-    // ThreadId: the global/dispatch invocation's per-component index within
-    // the whole dispatch grid, i.e. the workitem's index within its
-    // workgroup ("thread id in group") is exactly what AMDGPU's
-    // `llvm.amdgcn.workitem.id.*` reads -- FeMe does not need ThreadId's
-    // dispatch-wide component here since that would additionally require
-    // combining it with the workgroup id and workgroup size, which belongs
-    // to `llvm.dx.thread.id`'s different, dispatch-relative semantics.
-    {Intrinsic::dx_group_id,
-     {Intrinsic::amdgcn_workgroup_id_x, Intrinsic::amdgcn_workgroup_id_y,
-      Intrinsic::amdgcn_workgroup_id_z}},
-    {Intrinsic::dx_thread_id_in_group,
-     {Intrinsic::amdgcn_workitem_id_x, Intrinsic::amdgcn_workitem_id_y,
-      Intrinsic::amdgcn_workitem_id_z}},
+    {Intrinsic::dx_group_id, WorkgroupIDs},
+    {Intrinsic::dx_thread_id_in_group, WorkitemIDs},
 };
+
+Value *createComponentCall(IRBuilder<> &Builder, const Intrinsic::ID *IDs,
+                           unsigned Component) {
+  Function *Fn = Intrinsic::getOrInsertDeclaration(
+      Builder.GetInsertBlock()->getModule(), IDs[Component]);
+  return Builder.CreateCall(Fn, {});
+}
 
 /// Rewrites a single call to one of the intrinsics in \p ComponentQueries
 /// into the corresponding per-component AMDGPU intrinsic call, if \p CI's
@@ -65,34 +94,123 @@ bool lowerComponentQuery(CallInst &CI, const ComponentQuery &Query) {
     return false;
 
   uint64_t ComponentIndex = Component->getZExtValue();
-  if (ComponentIndex >= Query.AMDGPUComponentIDs.size())
+  if (ComponentIndex >= 3)
     return false;
 
-  Function *AMDGPUFn = Intrinsic::getOrInsertDeclaration(
-      CI.getModule(), Query.AMDGPUComponentIDs[ComponentIndex]);
   IRBuilder<> Builder(&CI);
-  CallInst *NewCall = Builder.CreateCall(AMDGPUFn, {}, CI.getName());
+  Value *NewCall = createComponentCall(Builder, Query.AMDGPUComponentIDs,
+                                       static_cast<unsigned>(ComponentIndex));
+  NewCall->takeName(&CI);
   CI.replaceAllUsesWith(NewCall);
   CI.eraseFromParent();
   return true;
+}
+
+/// Lowers a `llvm.dx.thread.id` call -- the *dispatch-wide* invocation index,
+/// which AMDGPU has no single intrinsic for -- into
+/// `workgroup_id * <thread group size> + workitem_id` for the requested
+/// component. The thread group size comes from the entry point's
+/// `hlsl.numthreads` attribute, so calls in a function without one are left
+/// unmodified.
+bool lowerThreadID(CallInst &CI) {
+  if (CI.arg_size() != 1)
+    return false;
+  auto *Component = dyn_cast<ConstantInt>(CI.getArgOperand(0));
+  if (!Component || Component->getZExtValue() >= 3)
+    return false;
+  std::optional<ThreadGroupSize> Size = getThreadGroupSize(*CI.getFunction());
+  if (!Size)
+    return false;
+
+  unsigned Index = static_cast<unsigned>(Component->getZExtValue());
+  IRBuilder<> Builder(&CI);
+  Value *GroupID = createComponentCall(Builder, WorkgroupIDs, Index);
+  Value *ItemID = createComponentCall(Builder, WorkitemIDs, Index);
+  Value *Scaled = Builder.CreateMul(GroupID, Builder.getInt32((*Size)[Index]));
+  Value *ThreadID = Builder.CreateAdd(Scaled, ItemID);
+  ThreadID->takeName(&CI);
+  CI.replaceAllUsesWith(ThreadID);
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Lowers a `llvm.dx.flattened.thread.id.in.group` call into the linearized
+/// `x + y * X + z * X * Y` combination of AMDGPU's per-component workitem
+/// ids, using the entry point's `hlsl.numthreads` dimensions.
+bool lowerFlattenedThreadIDInGroup(CallInst &CI) {
+  std::optional<ThreadGroupSize> Size = getThreadGroupSize(*CI.getFunction());
+  if (!Size)
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  Value *Flat = createComponentCall(Builder, WorkitemIDs, 0);
+  uint32_t Stride = 1;
+  for (unsigned I = 1; I != 3; ++I) {
+    Stride *= (*Size)[I - 1];
+    Value *Component = createComponentCall(Builder, WorkitemIDs, I);
+    Flat = Builder.CreateAdd(
+        Flat, Builder.CreateMul(Component, Builder.getInt32(Stride)));
+  }
+  Flat->takeName(&CI);
+  CI.replaceAllUsesWith(Flat);
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Gives a shader entry point AMDGPU's kernel calling convention, plus the
+/// `amdgpu-flat-work-group-size` bound its `hlsl.numthreads` dimensions
+/// describe. Without this the entry point is emitted as an ordinary device
+/// function, which no host runtime can dispatch.
+bool lowerEntryPoint(Function &F) {
+  if (!F.hasFnAttribute("hlsl.shader") ||
+      F.getCallingConv() == CallingConv::AMDGPU_KERNEL)
+    return false;
+
+  F.setCallingConv(CallingConv::AMDGPU_KERNEL);
+  if (std::optional<ThreadGroupSize> Size = getThreadGroupSize(F)) {
+    uint64_t FlatSize =
+        static_cast<uint64_t>((*Size)[0]) * (*Size)[1] * (*Size)[2];
+    if (FlatSize > 0)
+      F.addFnAttr("amdgpu-flat-work-group-size", "1," + llvm::utostr(FlatSize));
+  }
+  return true;
+}
+
+/// Runs \p Lower over every call to the intrinsic \p ID in \p M.
+bool forEachIntrinsicCall(Module &M, Intrinsic::ID ID,
+                          function_ref<bool(CallInst &)> Lower) {
+  bool Changed = false;
+  for (Function &F : llvm::make_early_inc_range(M.functions())) {
+    if (F.getIntrinsicID() != ID)
+      continue;
+    for (User *U : llvm::make_early_inc_range(F.users())) {
+      auto *CI = dyn_cast<CallInst>(U);
+      if (!CI || CI->getCalledFunction() != &F)
+        continue;
+      Changed |= Lower(*CI);
+    }
+    if (F.use_empty())
+      F.eraseFromParent();
+  }
+  return Changed;
 }
 
 } // namespace
 
 PreservedAnalyses RaisedLoweringPass::run(Module &M, ModuleAnalysisManager &) {
   bool Changed = false;
-  for (const ComponentQuery &Query : ComponentQueries) {
-    Function *RaisedFn = M.getFunction(Intrinsic::getName(Query.RaisedID));
-    if (!RaisedFn)
-      continue;
 
-    for (User *U : llvm::make_early_inc_range(RaisedFn->users())) {
-      auto *CI = dyn_cast<CallInst>(U);
-      if (!CI || CI->getCalledFunction() != RaisedFn)
-        continue;
-      Changed |= lowerComponentQuery(*CI, Query);
-    }
-  }
+  for (Function &F : M)
+    Changed |= lowerEntryPoint(F);
+
+  for (const ComponentQuery &Query : ComponentQueries)
+    Changed |= forEachIntrinsicCall(M, Query.RaisedID, [&Query](CallInst &CI) {
+      return lowerComponentQuery(CI, Query);
+    });
+
+  Changed |= forEachIntrinsicCall(M, Intrinsic::dx_thread_id, lowerThreadID);
+  Changed |= forEachIntrinsicCall(M, Intrinsic::dx_flattened_thread_id_in_group,
+                                  lowerFlattenedThreadIDInGroup);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

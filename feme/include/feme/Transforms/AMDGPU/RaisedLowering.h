@@ -15,18 +15,22 @@
 // feme::TargetMachineBackend targeting an `amdgcn-*` triple.
 //
 // This is deliberately incremental, matching feme::dxil::OpRaisingPass's own
-// precedent (see that pass's header comment): it currently covers only the
-// thread/group index queries with a direct, context-free mapping to a single
-// AMDGPU intrinsic call (`llvm.dx.thread.id`/`llvm.dx.group.id`/
-// `llvm.dx.thread.id.in.group`, each keyed on a constant component operand,
-// to `llvm.amdgcn.workitem.id.*`/`llvm.amdgcn.workgroup.id.*`). It does not
-// yet cover resource-handle ops (`llvm.dx.resource.*`), which need to be
-// re-expressed in terms of AMDGPU's buffer-descriptor/buffer-fat-pointer
-// conventions (see the "Raised LLVM IR -> AMDGPU" section of
-// feme/docs/Design.md for what remains), or SPIR-V's raised builtin-variable
-// equivalents, which do not yet exist upstream of this pass. Ops not (yet)
-// covered are left unmodified rather than erroring, so this pass composes
-// safely with modules that mix lowered and not-yet-lowered operations.
+// precedent (see that pass's header comment). It currently covers:
+//
+//  - Shader entry points: given AMDGPU's kernel calling convention and the
+//    `amdgpu-flat-work-group-size` bound their thread group dimensions
+//    describe, so a host runtime can actually dispatch them.
+//  - Thread/group index queries: the ones with a direct per-component
+//    mapping to an AMDGPU intrinsic (`llvm.dx.group.id`,
+//    `llvm.dx.thread.id.in.group`), plus the two that do not have one --
+//    `llvm.dx.thread.id` and `llvm.dx.flattened.thread.id.in.group` -- which
+//    are synthesized from the entry point's thread group dimensions.
+//
+// It does not yet cover resource-handle ops (`llvm.dx.resource.*`), or
+// SPIR-V's raised builtin-variable equivalents, which do not yet exist
+// upstream of this pass. Ops not (yet) covered are left unmodified rather
+// than erroring, so this pass composes safely with modules that mix lowered
+// and not-yet-lowered operations.
 //
 //===----------------------------------------------------------------------===//
 
