@@ -9,7 +9,7 @@
 // This file declares the registration hooks exposing the `dxsa` dialect's
 // BinaryParser/BinaryWriter (see feme/docs/Design.md's "DXBC -> new MLIR
 // `dxsa` dialect" section) to feme-translate as the `--import-dxsa-bin`,
-// `--import-dxsa-hex`, and `--export-dxsa-bin` flags.
+// and `--export-dxsa-bin` flags.
 //
 //===----------------------------------------------------------------------===//
 
@@ -21,11 +21,6 @@ namespace feme {
 /// Registers the DXSA `BinaryParser` under the `import-dxsa-bin` name,
 /// translating tokenized DXBC binary bytecode to the `dxsa` MLIR dialect.
 void registerDXSAImportBinTranslation();
-
-/// Registers the DXSA `BinaryParser`'s hex-DWORD-listing entry point under
-/// the `import-dxsa-hex` name, for lit tests that embed DXBC bytecode tokens
-/// as a whitespace/comma-separated hex listing directly in the test source.
-void registerDXSAImportHexTranslation();
 
 /// Registers the DXSA `BinaryWriter` under the `export-dxsa-bin` name,
 /// translating the `dxsa` MLIR dialect back to tokenized DXBC binary

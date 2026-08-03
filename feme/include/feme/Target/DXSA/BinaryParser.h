@@ -21,13 +21,6 @@ namespace feme::dxsa {
 mlir::OwningOpRef<ModuleOp> deserialize(llvm::SourceMgr &source,
                                         mlir::MLIRContext *context);
 
-/// Deserializes a textual listing of little-endian hex DWORDs,
-/// separated by whitespace or comma.
-/// This method is used in tests to store hexadeciman tokens representation
-/// right inside the text body.
-mlir::OwningOpRef<ModuleOp> deserializeHex(llvm::SourceMgr &source,
-                                           mlir::MLIRContext *context);
-
 /// Serializes the given MLIR \p moduleOp and writes to \p output.
 mlir::LogicalResult serialize(mlir::ModuleOp moduleOp,
                               llvm::raw_ostream &output);

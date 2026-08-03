@@ -28,18 +28,6 @@ void feme::registerDXSAImportBinTranslation() {
       }};
 }
 
-void feme::registerDXSAImportHexTranslation() {
-  TranslateToMLIRRegistration Registration{
-      "import-dxsa-hex", "Translate a DXSA hex DWORD listing to MLIR",
-      [](llvm::SourceMgr &SourceMgr,
-         MLIRContext *Context) -> OwningOpRef<Operation *> {
-        return feme::dxsa::deserializeHex(SourceMgr, Context);
-      },
-      [](DialectRegistry &Registry) {
-        Registry.insert<feme::dxsa::DXSADialect>();
-      }};
-}
-
 void feme::registerDXSAExportBinTranslation() {
   TranslateFromMLIRRegistration Registration{
       "export-dxsa-bin", "Translate MLIR to DXSA binary",

@@ -44,7 +44,6 @@ int main(int argc, char **argv) {
   feme::registerSPIRVImportTranslation();
   feme::registerDXILImportTranslation();
   feme::registerDXSAImportBinTranslation();
-  feme::registerDXSAImportHexTranslation();
   feme::registerDXSAExportBinTranslation();
   feme::registerSPIRVToLLVMDialectTranslation();
   feme::registerSPIRVToLLVMIRTranslation();
