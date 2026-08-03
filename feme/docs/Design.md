@@ -852,6 +852,32 @@ lifting/interop representation. Instead:
   is meant to be converted away via `SPIRVToLLVM` rather than optimized
   in place long-term.
 
+Status: the migration itself is done — the dialect (`feme/include/feme/Dialect/DXSA`,
+`feme/lib/Dialect/DXSA`), `BinaryParser`
+(`feme/lib/Target/DXSA/BinaryParser.cpp`), and its `--import-dxsa-bin`/
+`--import-dxsa-hex` `feme-translate` registrations are in place, with the
+dialect's C++ namespace rehomed from `mlir::dxsa` to `feme::dxsa` and its
+full `lit` test suite (`feme/test/Target/DXSA`, ~390 tests) migrated
+alongside it. Remaining follow-up work, not attempted in this migration:
+- **`BinaryWriter`** (`feme::dxsa::serialize`) is still the unimplemented
+  stub inherited from the prototype; implementing it remains a hard
+  prerequisite for real DXBC export, as described above.
+- **`dxbc-as` opcode coverage**: per the "Avoiding binary test fixtures"
+  deviation above, `dxbc-as`'s curated opcode subset doesn't yet cover most
+  of the migrated test suite's fixtures (stage-specific declarations such
+  as `dcl_gs_instance_count`/`dcl_hs_max_tessfactor`/
+  `dcl_tessellator_domain`, the `precise` modifier, program-header
+  presence/absence, the unknown-opcode fallback, and ~130 real
+  `fxc`-compiled-shader fixtures under `test/Target/DXSA/{asm,hlsl}`); those
+  fixtures currently use `--import-dxsa-hex` with an inlined hex DWORD
+  listing rather than `dxbc-as` assembly. Extending `dxbc-as` to cover these
+  (mostly mechanical, matching existing `DclTemps`-shaped declaration
+  encodings) would let more of the suite drop the hex listing in favor of
+  semantic assembly text.
+- **Opcode coverage** in the dialect/parser itself beyond what the migrated
+  prototype already covered is still incremental, per the "cover the full
+  SM5 opcode set" goal above.
+
 ### Summary table
 
 | Format | Import target | Rationale |
@@ -1329,14 +1355,28 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
   introduced by this migration.
 - **DXBC**: use `dxbc-as` (see above) to assemble human-readable,
   Microsoft/`fxc`-style DXBC assembly text into a binary blob at test
-  time, piped into `feme-translate --import-dxbc=-`/`feme` as needed. This
+  time, piped into `feme-translate --import-dxsa-bin=-` as needed. This
   gives DXBC tests the same quality of human-readable, diffable,
   `FileCheck`-able input as `.ll`/`.yaml` text, without depending on
-  feme's own `dxsa` dialect or `BinaryWriter` to produce those inputs. The
-  existing `wip/dxsa-mlir` prototype's `import-dxsa-hex` plain-text hex
-  listing is not carried forward — it doesn't capture semantic meaning the
-  way mnemonic assembly text does, and `dxbc-as` supersedes the need for
-  it.
+  feme's own `dxsa` dialect or `BinaryWriter` to produce those inputs.
+  Deviation: the plan was for `dxbc-as` to fully supersede the migrated
+  `wip/dxsa-mlir` prototype's `import-dxsa-hex` plain-text hex listing
+  (kept in the migrated `dxsa` `BinaryParser`/`TranslateRegistration` as
+  `feme::registerDXSAImportHexTranslation`, see the DXBC section below),
+  since a hex DWORD listing doesn't capture semantic meaning the way
+  mnemonic assembly text does. In practice, migrating
+  `feme/test/Target/DXSA` (the `dxsa` dialect's own test suite) found that
+  `dxbc-as`'s deliberately curated opcode subset doesn't yet cover most of
+  that suite's fixtures (stage-specific declarations like
+  `dcl_gs_instance_count`, the `precise` modifier, and ~130 real
+  `fxc`-compiled-shader fixtures under `test/Target/DXSA/{asm,hlsl}`); only
+  the fixtures fully within `dxbc-as`'s existing coverage (`dcl_temps`,
+  `dcl_globalFlags`) were converted to `dxbc-as` assembly, and the rest use
+  `import-dxsa-hex` with the hex listing inlined in the test (still
+  diffable/`FileCheck`-able, just not semantic assembly text). Extending
+  `dxbc-as`'s opcode coverage to close this gap is tracked as follow-up
+  work under the DXBC dialect section below, not a regression from the
+  original plan.
 - **SPIR-V**: follow MLIR's existing convention for the `spirv` dialect —
   `mlir-translate --serialize-spirv`/`--deserialize-spirv` (or
   `feme-translate`'s equivalent registration) converts between `spirv`
@@ -1710,6 +1750,15 @@ This is a rough sequencing, not a schedule:
    full SM5 coverage, plus a conversion pass toward DXIL-flavored LLVM IR;
    add a fuzzing harness for the DXBC importer (extending the existing
    `BinaryParser` fuzzing, if any, from the migrated prototype).
+
+   Status: the `dxsa` dialect and `BinaryParser` migration itself is done
+   (see "Status" under the DXBC dialect section above for what moved and
+   what's still open: `BinaryWriter`, further `dxbc-as` opcode coverage,
+   and opcode coverage beyond what the migrated prototype already had). A
+   fuzzing harness for the DXBC importer (distinct from the existing
+   `dxbc-as-fuzzer`, which fuzzes the assembler direction) has not been
+   added yet. The DXIL-flavored-LLVM-IR conversion pass (step 8) has not
+   been started.
 8. **DXBC → DXIL translation** end to end.
 9. **AMDGPU/NVPTX/AArch64 retargeting** via direct `llvm::Module` →
    `TargetMachine`. MLIR `gpu`-dialect-based retargeting is deferred until a
