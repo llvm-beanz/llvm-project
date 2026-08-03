@@ -31,6 +31,7 @@
 
 #include "feme/Import/DXIL/TranslateRegistration.h"
 #include "feme/Import/SPIRV/TranslateRegistration.h"
+#include "feme/Target/DXSA/TranslateRegistration.h"
 #include "feme/Target/TranslateRegistration.h"
 #include "feme/Translate/LLVMIR/TranslateRegistration.h"
 #include "feme/Translate/SPIRV/TranslateRegistration.h"
@@ -42,6 +43,9 @@ int main(int argc, char **argv) {
   mlir::registerAllTranslations();
   feme::registerSPIRVImportTranslation();
   feme::registerDXILImportTranslation();
+  feme::registerDXSAImportBinTranslation();
+  feme::registerDXSAImportHexTranslation();
+  feme::registerDXSAExportBinTranslation();
   feme::registerSPIRVToLLVMDialectTranslation();
   feme::registerSPIRVToLLVMIRTranslation();
   feme::registerLLVMDialectToLLVMIRTranslation();

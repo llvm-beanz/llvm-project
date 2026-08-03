@@ -11,6 +11,7 @@ set(LIBS
   MLIROptLib
   MLIRRegisterAllDialects
   MLIRRegisterAllPasses
+  FeMeDXSADialect
   FeMeTransformsAMDGPU
   FeMeTransformsDXIL
   FeMeTransformsSPIRV

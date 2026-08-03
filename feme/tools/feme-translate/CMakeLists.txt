@@ -16,6 +16,7 @@ target_link_libraries(feme-translate
   FeMeImportDXIL
   FeMeImportSPIRV
   FeMeTarget
+  FeMeTargetDXSA
   FeMeTranslateLLVMIR
   FeMeTranslateSPIRV
   MLIRIR

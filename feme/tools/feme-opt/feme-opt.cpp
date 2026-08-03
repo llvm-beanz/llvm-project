@@ -24,6 +24,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
@@ -193,7 +194,7 @@ int main(int argc, char **argv) {
 
   mlir::DialectRegistry Registry;
   mlir::registerAllDialects(Registry);
-  // TODO: Add FeMe's own dialects (e.g. dxsa) to Registry once they exist.
+  Registry.insert<feme::dxsa::DXSADialect>();
 
   return mlir::asMainReturnCode(mlir::MlirOptMain(
       argc, argv, "FeMe pass-pipeline testing driver\n", Registry));
