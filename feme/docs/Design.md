@@ -371,9 +371,11 @@ the requested destination:
    to that format's own triple. Both preserve the pipeline stage a
    DXIL-originated module names (recovered by `MetadataRaisingPass`), as the
    environment component of a `dxil-unknown-shadermodelX.Y-<stage>` or
-   `spirv-unknown-vulkan-<stage>` triple; anything else is used as a triple
-   directly. This step happens *after* raising precisely so that recovered
-   stage is available.
+   `spirv-unknown-vulkan-<stage>` triple; `"spirv"` likewise keeps the triple
+   a SPIR-V-originated module already carries (recorded by FeMe's SPIR-V ->
+   `llvm` dialect conversion); anything else is used as a triple directly.
+   This step happens *after* raising precisely so that recovered stage is
+   available.
 3. For any destination other than DXIL: `feme::dxil::IntrinsicExpansionPass`.
 4. For a SPIR-V destination: `feme::spirv::RaisedLoweringPass`.
 5. For an `amdgcn-*` destination: `feme::amdgpu::ResourceLoweringPass`, then
@@ -393,21 +395,22 @@ retargeted to DXIL, to SPIR-V, and to a real ISA (`amdgcn-amd-amdhsa`), each
 for a shader that writes a `RWBuffer<float4>` indexed by its dispatch-wide
 thread id; the SPIR-V "null pipeline" (see the deviation note under
 Retargeting to Native ISA below) through the full CLI rather than composed
-one `feme-translate` stage at a time; SPIR-V retargeted to
-`amdgcn-amd-amdhsa`; and clean (non-crash) diagnostics for an unsupported
-`--from` and a missing `--to`/`--target`.
+one `feme-translate` stage at a time; a SPIR-V compute shader that reads its
+dispatch thread id and reads and writes a bound `RWBuffer` retargeted back to
+SPIR-V; SPIR-V retargeted to `amdgcn-amd-amdhsa`; and clean (non-crash)
+diagnostics for an unsupported `--from` and a missing `--to`/`--target`.
 
 Also validated manually against real `dxc`-compiled output for the HLSL
 Mandelbrot compute shader driving this work (not checked in, per "Avoiding
 binary test fixtures" below): `dxc -T cs_6_5`'s DXContainer retargets
 successfully to all three of DXIL, SPIR-V, and AMDGPU. The same shader
-compiled with `dxc -T cs_6_5 -spirv` now *imports* successfully (see the
-control-flow structurization deviation above), and the image types its
-`RWBuffer` lowers to now convert (see "Known gap: `spirv` dialect -> `llvm`
-dialect conversion coverage" above), but it does not yet get all the way past
-MLIR's `SPIRVToLLVM` conversion: the *accesses* to those images, and SPIR-V's
-builtin input variables, still have no patterns. That remains an MLIR-level
-gap, not a `Driver`/`SPIRVImporter` one.
+compiled with `dxc -T cs_6_5 -spirv` *imports* successfully (see the
+control-flow structurization deviation above), and its resource declarations,
+resource accesses and builtin input variables all now convert (see "FeMe's
+SPIR-V -> `llvm` dialect conversion" above). What that direction is still
+missing is breadth of SPIR-V coverage rather than any structural gap; see
+"Known gap: `spirv` dialect -> `llvm` dialect conversion coverage" below for
+what is not covered yet.
 
 ### `feme::Module`
 
@@ -470,8 +473,9 @@ one opaque step -- matching how DXIL's `feme::dxil::OpRaisingPass` is
 tested in isolation rather than only end to end:
 
 1. `feme::SPIRVToLLVMDialectTranslator` (`spirv` -> `llvmdialect`,
-   `feme/lib/Translate/SPIRV/SPIRVToLLVMDialectTranslator.cpp`): runs MLIR's
-   `createConvertSPIRVToLLVMPass` and stops at the resulting `llvm` dialect
+   `feme/lib/Translate/SPIRV/SPIRVToLLVMDialectTranslator.cpp`): runs
+   `feme::spirv::createConvertSPIRVToLLVMPass` (see "FeMe's SPIR-V -> `llvm`
+   dialect conversion" below) and stops at the resulting `llvm` dialect
    `mlir::ModuleOp` -- this is "read SPIR-V into MLIR, [then] translate that
    to the LLVM-IR dialect".
 2. `feme::LLVMDialectToLLVMIRTranslator` (`llvmdialect` -> `llvmir`,
@@ -490,11 +494,61 @@ directly); it contains no logic of its own beyond that composition.
 
 The resulting `llvm::Module` is then handed to `feme::TargetMachineBackend`
 targeting LLVM's in-tree `SPIRV` backend (`llvm/lib/Target/SPIRV`), which
-lowers it the rest of the way to a real SPIR-V binary using that backend's
-own `llvm.spv.*` target intrinsics -- FeMe does not need to (and does not)
-emit those intrinsics itself; that is `TargetMachineBackend`'s/the `SPIRV`
-target's job, exactly as for any other retargeting `Backend` (see
-Retargeting to Native ISA below).
+lowers it the rest of the way to a real SPIR-V binary.
+
+#### FeMe's SPIR-V -> `llvm` dialect conversion
+
+`feme::spirv::createConvertSPIRVToLLVMPass`
+(`feme/lib/Conversion/SPIRVToLLVM/`, registered with `feme-opt` as
+`--feme-convert-spirv-to-llvm`) is a superset of MLIR's own
+`convert-spirv-to-llvm`: it runs all of MLIR's patterns, plus FeMe's own at a
+higher benefit for the constructs where MLIR either has no pattern at all or
+has one aimed at a different consumer.
+
+That difference in consumer is the crux. MLIR's conversion exists to feed
+MLIR's SPIR-V *runner*, which executes a shader on the host: a resource
+becomes an LLVM global the runner binds memory to, a builtin input variable
+becomes a global the runner writes the thread index into, and an execution
+mode becomes a `__spv__<entry>_execution_mode_info_<mode>` global the runner
+reads. FeMe's consumer is LLVM's in-tree `SPIRV` backend, which models all
+three as *target intrinsics and function attributes* instead, and which
+therefore sees a module converted MLIR's way as one that loads from globals
+nothing ever defines.
+
+Naming target intrinsics is only meaningful once a module says what target it
+is for, so the pass first records the SPIR-V environment the `spirv.module`
+was written for -- a Vulkan shader triple naming the pipeline stage of its
+entry points (`spirv-unknown-vulkan-compute`), or an OpenCL flavored
+`spirv32`/`spirv64-unknown-unknown` for `Kernel` entry points -- as the
+`llvm.target_triple` and `llvm.data_layout` module attributes
+`mlir::translateModuleToLLVMIR` forwards onto the `llvm::Module`. The `llvm`
+dialect can then name the backend's intrinsics directly, as
+`llvm.call_intrinsic "llvm.spv.*"` ops, and FeMe's patterns do:
+
+| SPIR-V | FeMe emits | MLIR's conversion emits |
+| --- | --- | --- |
+| `spirv.EntryPoint`/`spirv.ExecutionMode` | `hlsl.shader`/`hlsl.numthreads` function attributes | a `__spv__*_execution_mode_info_*` global |
+| builtin input variable (`GlobalInvocationId`, ...) | `llvm.spv.thread.id` & friends, one call per vector component | a load from an `external constant` global |
+| resource variable (image/sampler, `bind(set, binding)`) | `llvm.spv.resource.handlefrombinding` | an `external constant` global whose *name* encodes the binding |
+| `spirv.ImageRead`/`spirv.ImageWrite` | `llvm.spv.resource.getpointer` + `llvm.load`/`llvm.store` | *(no pattern; fails to legalize)* |
+| `spirv.ImageQuerySize` | `llvm.spv.resource.getdimensions.{x,xy,xyz}` | *(no pattern; fails to legalize)* |
+
+Since a builtin variable and a resource handle are values the backend
+materializes on demand rather than memory, the pointers SPIR-V reads them
+through convert to the *value* type: `!spirv.ptr<T, Input>` to `T`, and
+`!spirv.ptr<image, UniformConstant>` to the `target("spirv.Image", ...)`
+handle type. `spirv.Load` through such a pointer is then the identity. A
+consequence is that non-builtin `Input` variables (stage inputs) now fail to
+legalize with a diagnostic rather than converting to a pointer nothing can
+produce; they had no working lowering either way.
+
+The right-hand column of that table is deliberately the same representation
+`feme::spirv::RaisedLoweringPass` produces in the DXIL -> SPIR-V direction,
+so both front ends converge on one spelling of a resource handle, a typed
+buffer access and a thread index before any retargeting pass runs. FeMe still
+does not emit `llvm.spv.*` for anything that has a target-independent LLVM
+equivalent -- arithmetic, control flow, memory -- only for the shader
+concepts that do not.
 
 #### Deviation: control flow structurization is not always possible on import
 
@@ -517,28 +571,22 @@ caller.
 
 #### Known gap: `spirv` dialect -> `llvm` dialect conversion coverage
 
-Import now succeeds on real shaders, but MLIR's own `SPIRVToLLVM` conversion
-is the next wall.
+Import succeeds on real shaders, and the conversion now covers the
+constructs a compute shader that binds, reads and writes a typed buffer needs
+(see the table above): image, sampled image and sampler *types* convert
+upstream in MLIR to the same LLVM target extension types LLVM's SPIR-V
+backend uses (`target("spirv.Image", ...)`, see `llvm/docs/SPIRVUsage.md`),
+and FeMe's own patterns cover the resource, builtin-variable and image-access
+*operations*.
 
-The first half of that wall is closed upstream: `SPIRVToLLVM` had no
-conversion for image, sampled image or sampler types at all, so a
-`spirv.GlobalVariable` of image type (any `Buffer`/`Texture` resource) failed
-to legalize. Those types now convert to the same LLVM target extension types
-LLVM's SPIR-V backend uses (`target("spirv.Image", ...)` and friends, see
-`llvm/docs/SPIRVUsage.md`), which is exactly the spelling
-`feme::spirv::RaisedLoweringPass` already emits in the DXIL -> SPIR-V
-direction, so both directions agree on how a resource handle is typed.
-
-What remains is the *operations*: `spirv.ImageRead`/`spirv.ImageWrite`/
-`spirv.ImageQuerySize` and the sampling ops have no LLVM-dialect equivalent,
-and SPIR-V builtin input variables (`GlobalInvocationId` and friends) have no
-format-agnostic equivalent on the other side. Closing that means either
-extending MLIR's conversion further upstream or adding FeMe-owned conversion
-patterns that emit the same raised representation the DXIL path produces
-(`llvm.dx.resource.*` handles and thread-index intrinsics), so both front ends
-converge before the retargeting passes. Until then, the SPIR-V *input* half of
-the translation matrix is limited to shaders that declare, but do not access,
-resources and that use no builtin variables.
+What is still missing is breadth rather than a structural gap: the sampling
+ops (`spirv.ImageSampleImplicitLod` and friends), `OpImageFetch`/`OpImageGather`,
+storage/uniform buffers (`StorageBuffer` blocks, which LLVM spells as
+`target("spirv.VulkanBuffer", ...)`), push constants, and the graphics
+pipeline's stage inputs and outputs, all of which are additional patterns of
+the same shape as the ones already there. Until they exist, the SPIR-V
+*input* half of the translation matrix is limited to compute shaders whose
+resources are images (`Buffer`/`Texture`) accessed without a sampler.
 
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
@@ -1162,8 +1210,9 @@ ever testing through the full `feme` driver end to end:
   parsing.
 
   Deviation: FeMe passes come in two shapes that don't share a pass
-  manager -- MLIR passes (e.g. the eventual `dxsa` lowering) run through
-  `MlirOptMain`, as originally scaffolded, but passes operating on a plain
+  manager -- MLIR passes (e.g. `--feme-convert-spirv-to-llvm`, and the
+  eventual `dxsa` lowering) run through `MlirOptMain`, as originally
+  scaffolded, but passes operating on a plain
   `llvm::Module` (e.g. `feme::dxil::OpRaisingPass`, see the DXIL section
   above) have no MLIR operation to run `MlirOptMain` over. Rather than
   splitting these into a second binary, `feme-opt` gained a small,
@@ -1415,6 +1464,10 @@ feme/
         Options.td            (llvm::opt OptTable definitions)
         Options.h
         FrontendOptions.h     (DriverOptions struct, argv -> options parsing)
+      Conversion/
+        SPIRVToLLVM/        (feme::spirv::createConvertSPIRVToLLVMPass -- an
+                             MLIR conversion, extending MLIR's own; see the
+                             SPIR-V section above)
       Import/
         Importer.h
         DXBC/
@@ -1455,6 +1508,7 @@ feme/
     Frontend/
       Options.cpp
       FrontendOptions.cpp
+    Conversion/SPIRVToLLVM/... (feme::spirv::createConvertSPIRVToLLVMPass)
     Import/DXBC/...
     Import/DXIL/...
     Import/SPIRV/...
