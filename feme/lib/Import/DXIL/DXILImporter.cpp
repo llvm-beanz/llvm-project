@@ -10,12 +10,16 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Object/DXContainer.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/MemoryBufferRef.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace feme;
 
@@ -25,6 +29,34 @@ using namespace feme;
 /// inputs that are neither, rather than an opaque bitcode-reader error.
 static bool isDXContainer(llvm::MemoryBufferRef Buffer) {
   return Buffer.getBuffer().starts_with("DXBC");
+}
+
+/// Fixes up a DXIL module's frozen, historical data layout string so it
+/// parses under modern LLVM's stricter `DataLayout` rules, which reject
+/// `i8:32` (a non-1-byte ABI alignment for `i8`) that real DXC-emitted DXIL
+/// embeds -- see the deviation noted in DXILImporter.h. Forcing `i8`'s
+/// alignment to 1 byte does not change what the layout represents: modern
+/// LLVM does not support (and DXIL's own struct layouts do not rely on) any
+/// other `i8` alignment, so this is a lossless normalization, not a
+/// best-effort guess. Returns \p Layout unchanged if it does not contain the
+/// pattern needing normalization, so this is a no-op for any (non-DXIL)
+/// input that doesn't need it.
+static std::string normalizeDXILDataLayout(llvm::StringRef Layout) {
+  llvm::SmallVector<llvm::StringRef, 16> Components;
+  Layout.split(Components, '-');
+
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  llvm::ListSeparator Sep("-");
+  for (llvm::StringRef Component : Components) {
+    OS << Sep;
+    llvm::StringRef ABIAlign = Component;
+    if (ABIAlign.consume_front("i8:") && ABIAlign != "8")
+      OS << "i8:8";
+    else
+      OS << Component;
+  }
+  return Result;
 }
 
 /// Unwraps \p Buffer (a `DXContainer`) down to the `llvm::MemoryBufferRef`
@@ -83,9 +115,18 @@ llvm::Expected<Module> DXILImporter::import(llvm::MemoryBufferRef Buffer,
   // DXIL bitcode is frozen at an old LLVM IR version, but LLVM's bitcode
   // reader auto-upgrades old bitcode on read (see "Bitcode parsing" in the
   // DXIL section of feme/docs/Design.md), so this does not need any
-  // DXIL-specific compatibility shim.
+  // DXIL-specific compatibility shim for the IR itself. Its embedded data
+  // layout string does need one (see normalizeDXILDataLayout above), which
+  // is why this parses with an explicit DataLayoutCallback rather than
+  // taking whatever layout string the bitcode reader would otherwise use
+  // unmodified.
   llvm::Expected<std::unique_ptr<llvm::Module>> LLVMModule =
-      llvm::parseBitcodeFile(BitcodeBuffer, Ctx.getLLVMContext());
+      llvm::parseBitcodeFile(
+          BitcodeBuffer, Ctx.getLLVMContext(),
+          llvm::ParserCallbacks([](llvm::StringRef, llvm::StringRef Layout)
+                                    -> std::optional<std::string> {
+            return normalizeDXILDataLayout(Layout);
+          }));
   if (!LLVMModule)
     return LLVMModule.takeError();
 

@@ -12,6 +12,12 @@
 // it is a matter of unwrapping the container (if present) and handing the
 // embedded bitcode to LLVM's own bitcode reader.
 //
+// Deviation: real DXIL emitted by DXC embeds a frozen, historical data
+// layout string (`i8:32`, i.e. a 4-byte ABI alignment for `i8`) that is no
+// longer accepted by modern LLVM's stricter `DataLayout` parser (`i8` must
+// be 1-byte aligned) -- see DXILImporter.cpp for the compatibility shim that
+// normalizes this on read.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_IMPORT_DXIL_DXILIMPORTER_H
