@@ -23,7 +23,7 @@ namespace {
 // SPIR-V binary, which is exactly the kind of binary-format round trip
 // `feme-translate` exists to exercise via `lit`/`FileCheck` instead (see
 // "Testing Strategy" in feme/docs/Design.md); see
-// `test/Feme/Import/SPIRV/spirv-import.mlir`.
+// `test/Import/SPIRV/spirv-import.mlir`.
 
 TEST(SPIRVImporterTest, GetFormatName) {
   SPIRVImporter Importer;

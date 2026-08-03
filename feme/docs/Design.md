@@ -874,8 +874,8 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
   through `yaml2obj` to produce the binary container at test time. No new
   tooling needed here, just following existing LLVM convention.
 
-  Deviation: `test/Feme/Import/DXIL/dxil-import.ll` uses plain `llvm-as`
-  (no container), and `test/Feme/Import/DXIL/dxil-import-container.ll` uses
+  Deviation: `test/Import/DXIL/dxil-import.ll` uses plain `llvm-as`
+  (no container), and `test/Import/DXIL/dxil-import-container.ll` uses
   `llc <input>.ll --filetype=obj` (targeting a `dxil-...` triple) instead of
   hand-written
   `DXContainerYAML` `.yaml` + `yaml2obj`. LLVM's `DirectX` backend
@@ -893,8 +893,8 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
   `llvm::parseAssemblyString`/`WriteBitcodeToFile` and the
   `DXContainerYAML`/`yaml2dxcontainer` API in-process to build fixtures);
   those cases were migrated to the `lit`/`FileCheck` tests above
-  (`test/Feme/Import/DXIL/dxil-import.ll`,
-  `test/Feme/Import/DXIL/dxil-import-container.ll`) and the
+  (`test/Import/DXIL/dxil-import.ll`,
+  `test/Import/DXIL/dxil-import-container.ll`) and the
   `gtest` versions removed, per the "Deviation" entries under Testing
   Strategy below. This trades away the one advantage the in-process
   `gtest` fixture had — not requiring the `DirectX` target to be configured
@@ -1071,7 +1071,7 @@ feme/
   `gtest` cases, but a `Translator` invoked on textual MLIR input/output is
   exactly the kind of stage `feme-translate` (see Testing Tools above)
   exists to exercise; those cases were migrated to `lit`/`FileCheck` tests
-  (`test/Feme/Translate/SPIRV/spirv-to-llvmir*.mlir`) driven through
+  (`test/Translate/SPIRV/spirv-to-llvmir*.mlir`) driven through
   `feme-translate`'s new
   `--spirv-to-llvmir` flag instead, and the `gtest` versions removed to
   avoid duplicate, lower-signal coverage of the same behavior.
@@ -1084,8 +1084,8 @@ feme/
   `--llvm-backend` flag (parses `.ll`/bitcode input, runs
   `feme::TargetMachineBackend`, writes the resulting binary) so the null
   pipeline can be composed and lit-tested one stage at a time
-  (`test/Feme/Target/spirv-backend-null-pipeline.mlir`,
-  `test/Feme/Target/llvm-backend-unknown-target.ll`), and the `gtest`
+  (`test/Target/spirv-backend-null-pipeline.mlir`,
+  `test/Target/llvm-backend-unknown-target.ll`), and the `gtest`
   versions were removed. `test/lit.cfg.py` gained a per-target
   `<arch>-registered-target` feature (mirroring `llvm/test/lit.cfg.py`) so
   the null-pipeline test can `REQUIRES: spirv-registered-target` instead of
@@ -1099,9 +1099,9 @@ feme/
   writer and the `DXContainerYAML`/`yaml2dxcontainer` API). An `Importer`
   invoked on a real binary is exactly the kind of stage `feme-translate`
   exists to exercise, and equivalent `lit`/`FileCheck` coverage already
-  existed (`test/Feme/Import/SPIRV/spirv-import.mlir`,
-  `test/Feme/Import/DXIL/dxil-import.ll`,
-  `test/Feme/Import/DXIL/dxil-import-container.ll`, all driven through
+  existed (`test/Import/SPIRV/spirv-import.mlir`,
+  `test/Import/DXIL/dxil-import.ll`,
+  `test/Import/DXIL/dxil-import-container.ll`, all driven through
   `feme-translate`'s `--import-spirv`/`--import-dxil` flags), so the
   duplicate `gtest` cases (and their now-unused fixture-building helpers)
   were removed to avoid lower-signal coverage of the same behavior; see the
@@ -1123,9 +1123,9 @@ feme/
   the same rationale the deviations above give for migrating existing
   `gtest` cases to `lit`, but applied from this pass's introduction instead
   of as a later migration. Coverage lives entirely in
-  `test/Feme/Transforms/DXIL/dxil-raise-ops.ll` (hand-written `dx.op.*` IR
+  `test/Transforms/DXIL/dxil-raise-ops.ll` (hand-written `dx.op.*` IR
   covering each opcode this pass raises, plus an unrecognized-opcode case)
-  and `test/Feme/Transforms/DXIL/dxil-raise-ops-roundtrip.ll` (real
+  and `test/Transforms/DXIL/dxil-raise-ops-roundtrip.ll` (real
   `-dxil-op-lower` output, validating this pass is a genuine inverse of
   LLVM's own lowering, not just of hand-written IR matching this pass's own
   assumptions).
