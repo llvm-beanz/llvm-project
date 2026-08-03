@@ -7,17 +7,25 @@
 ; `llvm.dx.resource.handlefrombinding`/`llvm.dx.resource.load.*` intrinsic
 ; calls a real DXIL-targeting frontend would emit, lowers them with the real
 ; `-dxil-op-lower` pass, then raises the handle-creation part back and checks
-; it reconstructs the original resource handle type and binding. The buffer
-; *load* calls (`dx.op.bufferLoad`/`dx.op.rawBufferLoad`) are left as-is --
-; raising those isn't implemented yet, see the DXIL section of
-; feme/docs/Design.md -- so this only checks the handle sequence, not a full
-; round-trip of the whole function.
+; it reconstructs the original resource binding, and (for `TypedBuffer`/
+; unstructured `RawBuffer`) the exact original handle type, or (for
+; `StructuredBuffer`/`CBuffer`) a same-size/alignment opaque placeholder
+; handle type -- see `raiseResourceHandleFromBinding`'s comment for why. The
+; buffer/cbuffer *load* calls (`dx.op.bufferLoad`/`dx.op.rawBufferLoad`/
+; `dx.op.cbufferLoadLegacy`) are left as-is -- raising those isn't
+; implemented yet, see the DXIL section of feme/docs/Design.md -- so this
+; only checks the handle sequence, not a full round-trip of the whole
+; function.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-pc-shadermodel6.6-compute"
 
+%struct.S = type { float, <4 x i32> }
+
 @ResName1 = private unnamed_addr constant [4 x i8] c"buf\00"
 @ResName2 = private unnamed_addr constant [4 x i8] c"raw\00"
+@ResName3 = private unnamed_addr constant [3 x i8] c"sb\00"
+@ResName4 = private unnamed_addr constant [3 x i8] c"cb\00"
 
 ; A `Buffer<float>` (SRV TypedBuffer) bound at register t1, space 0.
 ; CHECK-LABEL: define float @typed_buffer_srv(
@@ -43,7 +51,39 @@ define i32 @raw_buffer_uav(i32 %idx) {
   ret i32 %r
 }
 
+; A `StructuredBuffer<S>` (SRV) bound at register t2, where `S`'s largest
+; member is a `<4 x i32>` (align 16): its original field layout isn't
+; recoverable from binding metadata alone, so the raised handle's element
+; type is an opaque size/alignment-only placeholder (`getOpaqueSizedType`),
+; not `%struct.S` itself -- see that function's comment.
+; CHECK-LABEL: define void @structured_buffer_srv(
+define void @structured_buffer_srv(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.RawBuffer", { <4 x i32>, [16 x i8] }, 0, 0) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 2, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.RawBuffer", { <4 x i32>, [16 x i8] }, 0, 0) [[HANDLE]])
+  %h = call target("dx.RawBuffer", %struct.S, 0, 0)
+      @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_s_struct.Ss_0_0t(i32 0, i32 2, i32 1, i32 0, ptr @ResName3)
+  %v = call {%struct.S, i1} @llvm.dx.resource.load.rawbuffer.s_struct.Ss.tdx.RawBuffer_s_struct.Ss_0_0t(target("dx.RawBuffer", %struct.S, 0, 0) %h, i32 %idx, i32 0)
+  ret void
+}
+
+; A `cbuffer` bound at register b2: its `ResourceProperties` encoding never
+; carries alignment bits, so its opaque placeholder element type is always a
+; plain byte array (`getOpaqueSizedType`).
+; CHECK-LABEL: define void @cbuffer_case(
+define void @cbuffer_case(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.CBuffer", [32 x i8]) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 2, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.CBuffer", [32 x i8]) [[HANDLE]])
+  %h = call target("dx.CBuffer", %struct.S)
+      @llvm.dx.resource.handlefrombinding.tdx.CBuffer_s_struct.Ss_t(i32 0, i32 2, i32 1, i32 0, ptr @ResName4)
+  %v = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer_s_struct.Ss_t(target("dx.CBuffer", %struct.S) %h, i32 %idx)
+  ret void
+}
+
 declare target("dx.TypedBuffer", float, 0, 0, 1) @llvm.dx.resource.handlefrombinding.tdx.TypedBuffer_f32_0_0_1t(i32, i32, i32, i32, ptr)
 declare {float, i1} @llvm.dx.resource.load.typedbuffer.f32.tdx.TypedBuffer_f32_0_0_1t(target("dx.TypedBuffer", float, 0, 0, 1), i32)
 declare target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_i8_1_0t(i32, i32, i32, i32, ptr)
 declare {i32, i1} @llvm.dx.resource.load.rawbuffer.i32.tdx.RawBuffer_i8_1_0t(target("dx.RawBuffer", i8, 1, 0), i32, i32)
+declare target("dx.RawBuffer", %struct.S, 0, 0) @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_s_struct.Ss_0_0t(i32, i32, i32, i32, ptr)
+declare {%struct.S, i1} @llvm.dx.resource.load.rawbuffer.s_struct.Ss.tdx.RawBuffer_s_struct.Ss_0_0t(target("dx.RawBuffer", %struct.S, 0, 0), i32, i32)
+declare target("dx.CBuffer", %struct.S) @llvm.dx.resource.handlefrombinding.tdx.CBuffer_s_struct.Ss_t(i32, i32, i32, i32, ptr)
+declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer_s_struct.Ss_t(target("dx.CBuffer", %struct.S), i32)

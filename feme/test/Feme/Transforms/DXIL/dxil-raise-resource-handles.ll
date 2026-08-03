@@ -7,7 +7,9 @@
 ; intrinsic call returning the resource's `target("dx.")` handle type,
 ; reconstructed from the two ops' constant `%dx.types.ResBind`/
 ; `%dx.types.ResourceProperties` operands -- see that function's comment for
-; the (intentionally narrow, TypedBuffer/unstructured-RawBuffer-only) scope.
+; scope (`TypedBuffer`/`RawBuffer` element types are recovered exactly;
+; `StructuredBuffer`/`CBuffer` only recover size/alignment, so those get an
+; opaque size-only placeholder element type via `getOpaqueSizedType`).
 ; dxil-raise-resource-handles-roundtrip.ll separately validates this against
 ; real `-dxil-op-lower` output.
 
@@ -51,14 +53,57 @@ define %dx.types.Handle @unbounded_array(i32 %idx) {
   ret %dx.types.Handle %h2
 }
 
-; A resource kind this pass doesn't (yet) reconstruct (StructuredBuffer,
-; kind 12) must be left as unmodified `dx.op.*` calls rather than erroring.
-; CHECK-LABEL: define %dx.types.Handle @unhandled_structured_buffer(
-define %dx.types.Handle @unhandled_structured_buffer(i32 %idx) {
+; A resource kind this pass doesn't (yet) reconstruct (Texture2D, kind 1)
+; must be left as unmodified `dx.op.*` calls rather than erroring.
+; CHECK-LABEL: define %dx.types.Handle @unhandled_texture(
+define %dx.types.Handle @unhandled_texture(i32 %idx) {
   ; CHECK: call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217,
   ; CHECK: call %dx.types.Handle @dx.op.annotateHandle(i32 216,
   %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 0, i32 0, i32 0, i8 0 }, i32 0, i1 false)
-  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 12, i32 16 })
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 1, i32 0 })
+  ret %dx.types.Handle %h2
+}
+
+; A `StructuredBuffer<S>` (SRV) bound at register t2, where `S` is a struct
+; whose largest member is a `<4 x i32>` (align 16), so its 20-byte payload
+; rounds up to a 32-byte, align-16 stride -- the same values a real
+; `-dxil-op-lower` run on `%struct.S = type { float, <4 x i32> }` produces
+; (see dxil-raise-resource-handles-roundtrip.ll). `StructuredBuffer`'s
+; original field layout isn't recoverable from binding metadata alone, so
+; the element type is an opaque size/alignment-only placeholder
+; (`getOpaqueSizedType`), not `%struct.S` itself.
+; CHECK-LABEL: define %dx.types.Handle @structured_buffer_srv(
+define %dx.types.Handle @structured_buffer_srv(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.RawBuffer", { <4 x i32>, [16 x i8] }, 0, 0) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 2, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.RawBuffer", { <4 x i32>, [16 x i8] }, 0, 0) [[HANDLE]])
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 2, i32 2, i32 0, i8 0 }, i32 2, i1 false)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 1036, i32 32 })
+  ret %dx.types.Handle %h2
+}
+
+; A `StructuredBuffer` whose element size (12 bytes) isn't a multiple of its
+; encoded alignment (align 8, i.e. `AlignLog2` = 3): this can't happen for a
+; real struct's alloc size (alignment always evenly divides alloc size), so
+; `getOpaqueSizedType` falls back to a plain byte array rather than
+; constructing a self-contradictory type.
+; CHECK-LABEL: define %dx.types.Handle @structured_buffer_misaligned(
+define %dx.types.Handle @structured_buffer_misaligned(i32 %idx) {
+  ; CHECK: call target("dx.RawBuffer", [12 x i8], 0, 0) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 2, i32 1, i32 0, ptr null)
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 2, i32 2, i32 0, i8 0 }, i32 2, i1 false)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 780, i32 12 })
+  ret %dx.types.Handle %h2
+}
+
+; A `cbuffer` bound at register b2: its `ResourceProperties` encoding never
+; carries alignment bits (`AlignLog2` is only ever set for
+; `StructuredBuffer`), so its opaque placeholder element type is always a
+; plain byte array.
+; CHECK-LABEL: define %dx.types.Handle @cbuffer_case(
+define %dx.types.Handle @cbuffer_case(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.CBuffer", [32 x i8]) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 2, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.CBuffer", [32 x i8]) [[HANDLE]])
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 2, i32 2, i32 0, i8 2 }, i32 2, i1 false)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 13, i32 32 })
   ret %dx.types.Handle %h2
 }
 
