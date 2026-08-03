@@ -20,7 +20,14 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-The test directory has a few problems. First you put all the lit tests under a
-Feme directory, which is just an extra layer that isn't needed and isn't
-consistent with how other LLVM projects sort tests. Second, the unit tests
-aren't connected to lit so they don't run during `check-feme`.
+feme-opt fails to build with the error:
+
+```
+/Users/cbieneman/dev/llvm-project/feme/tools/feme-opt/feme-opt.cpp:40:10: fatal error: 'llvm/Passes/PassPlugin.h' file not found
+   40 | #include "llvm/Passes/PassPlugin.h"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~
+1 error generated.
+```
+
+How did this build failure not get caught in your testing? Are you running
+`check-feme`?
