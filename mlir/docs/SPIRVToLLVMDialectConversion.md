@@ -92,10 +92,42 @@ i32)>
 
 // error !spirv.struct<i8 [0], i32 [8]> ```
 
+### Image and sampler types
+
+SPIR-V image, sampled image and sampler types are mapped to the [target
+extension types][LLVMTargetExtTypes] that LLVM's SPIR-V backend defines for the
+same purpose (see [SPIRVUsage][SPIRVUsage] for the full description of their
+parameters). All parameters other than the sampled type are the numeric values
+the SPIR-V specification assigns to the corresponding `OpTypeImage` operand.
+
+SPIR-V Dialect                                        | LLVM Dialect
+:---------------------------------------------------: | :-------------------------------------------------------:
+`!spirv.image< <sampled-type>, <params...> >`          | `!llvm.target<"spirv.Image", <sampled-type>, <params...>>`
+`!spirv.image< si<bitwidth>, <params...> >`            | `!llvm.target<"spirv.SignedImage", i<bitwidth>, <params...>>`
+`!spirv.sampled_image< !spirv.image< <params...> > >`  | `!llvm.target<"spirv.SampledImage", <params...>>`
+`!spirv.sampler`                                       | `!llvm.target<"spirv.Sampler">`
+
+Images with a signed integer sampled type use a distinct type name because LLVM
+integer types carry no signedness, which would otherwise make signed and
+unsigned images indistinguishable. Note that `!spirv.sampled_image` has no such
+signed variant, matching LLVM.
+
+The optional trailing access qualifier parameter is never emitted, since
+`spirv::ImageType` does not model it.
+
+Examples of image type conversion are:
+
+```mlir
+!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>
+  => !llvm.target<"spirv.Image", f32, 5, 0, 0, 0, 2, 1>
+!spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+  => !llvm.target<"spirv.SampledImage", f32, 1, 0, 0, 0, 1, 0>
+```
+
 ### Not implemented types
 
 The rest of the types not mentioned explicitly above are not supported by the
-conversion. This includes `ImageType` and `MatrixType`.
+conversion. This includes `MatrixType`.
 
 ## Operation Conversion
 
@@ -952,5 +984,7 @@ llvm.func @main() {
 ```
 
 [LLVMFunctionAttributes]: https://llvm.org/docs/LangRef.html#function-attributes
+[LLVMTargetExtTypes]: https://llvm.org/docs/LangRef.html#target-extension-type
+[SPIRVUsage]: https://llvm.org/docs/SPIRVUsage.html#special-types
 [SPIRVFunctionAttributes]: https://www.khronos.org/registry/spir-v/specs/unified1/SPIRV.html#_a_id_function_control_a_function_control
 [VulkanLayoutUtils]: https://github.com/llvm/llvm-project/blob/main/mlir/include/mlir/Dialect/SPIRV/LayoutUtils.h

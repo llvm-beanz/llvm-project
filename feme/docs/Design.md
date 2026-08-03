@@ -402,11 +402,12 @@ Mandelbrot compute shader driving this work (not checked in, per "Avoiding
 binary test fixtures" below): `dxc -T cs_6_5`'s DXContainer retargets
 successfully to all three of DXIL, SPIR-V, and AMDGPU. The same shader
 compiled with `dxc -T cs_6_5 -spirv` now *imports* successfully (see the
-control-flow structurization deviation above) but does not yet get past
-MLIR's `SPIRVToLLVM` conversion, which has no patterns for the image types
-its `RWBuffer` lowers to -- an MLIR-level gap documented under "Known gap:
-`spirv` dialect -> `llvm` dialect conversion coverage" above, not a
-`Driver`/`SPIRVImporter` one.
+control-flow structurization deviation above), and the image types its
+`RWBuffer` lowers to now convert (see "Known gap: `spirv` dialect -> `llvm`
+dialect conversion coverage" above), but it does not yet get all the way past
+MLIR's `SPIRVToLLVM` conversion: the *accesses* to those images, and SPIR-V's
+builtin input variables, still have no patterns. That remains an MLIR-level
+gap, not a `Driver`/`SPIRVImporter` one.
 
 ### `feme::Module`
 
@@ -517,16 +518,27 @@ caller.
 #### Known gap: `spirv` dialect -> `llvm` dialect conversion coverage
 
 Import now succeeds on real shaders, but MLIR's own `SPIRVToLLVM` conversion
-is the next wall: it has no patterns for image types at all, so a
-`spirv.GlobalVariable` of image type (any `Buffer`/`Texture` resource) fails
-to legalize, and SPIR-V builtin input variables (`GlobalInvocationId` and
-friends) have no format-agnostic equivalent on the other side. Closing this
-means either extending MLIR's conversion upstream or adding FeMe-owned
-conversion patterns that emit the same raised representation the DXIL path
-produces (`llvm.dx.resource.*` handles and thread-index intrinsics), so both
-front ends converge before the retargeting passes. Until then, the SPIR-V
-*input* half of the translation matrix is limited to shaders that use
-neither resources nor builtin variables.
+is the next wall.
+
+The first half of that wall is closed upstream: `SPIRVToLLVM` had no
+conversion for image, sampled image or sampler types at all, so a
+`spirv.GlobalVariable` of image type (any `Buffer`/`Texture` resource) failed
+to legalize. Those types now convert to the same LLVM target extension types
+LLVM's SPIR-V backend uses (`target("spirv.Image", ...)` and friends, see
+`llvm/docs/SPIRVUsage.md`), which is exactly the spelling
+`feme::spirv::RaisedLoweringPass` already emits in the DXIL -> SPIR-V
+direction, so both directions agree on how a resource handle is typed.
+
+What remains is the *operations*: `spirv.ImageRead`/`spirv.ImageWrite`/
+`spirv.ImageQuerySize` and the sampling ops have no LLVM-dialect equivalent,
+and SPIR-V builtin input variables (`GlobalInvocationId` and friends) have no
+format-agnostic equivalent on the other side. Closing that means either
+extending MLIR's conversion further upstream or adding FeMe-owned conversion
+patterns that emit the same raised representation the DXIL path produces
+(`llvm.dx.resource.*` handles and thread-index intrinsics), so both front ends
+converge before the retargeting passes. Until then, the SPIR-V *input* half of
+the translation matrix is limited to shaders that declare, but do not access,
+resources and that use no builtin variables.
 
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
@@ -1637,10 +1649,10 @@ This is a rough sequencing, not a schedule:
    feeding LLVM's in-tree `SPIRV` target. The SPIR-V -> DXIL direction is
    not: it needs a pass raising SPIR-V-derived, translated LLVM IR into
    DXIL's conventions, and is additionally blocked upstream of that by
-   MLIR's `SPIRVToLLVM` conversion having no patterns for image types (see
-   "Known gap: `spirv` dialect -> `llvm` dialect conversion coverage"
-   above), so no SPIR-V shader using a resource reaches LLVM IR at all
-   today.
+   MLIR's `SPIRVToLLVM` conversion having no patterns for the image *access*
+   ops (image *types* now convert -- see "Known gap: `spirv` dialect ->
+   `llvm` dialect conversion coverage" above), so no SPIR-V shader that
+   actually reads or writes a resource reaches LLVM IR today.
 7. **DXBC import**: build `dxbc-as` (see Testing Tools above) first —
    a standalone, MLIR-independent DXBC assembler — so DXBC importer tests
    have human-readable, diffable fixtures from day one; then migrate the
