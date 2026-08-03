@@ -281,6 +281,18 @@ TEST(ParserTest, TypedResourceDeclarations) {
   EXPECT_EQ(P.Instructions[0].Controls, (3u << 11) | 0x00010000u);
 }
 
+TEST(ParserTest, TrailingDWordsOnGenericInstructions) {
+  // Some real shaders carry DWORDs past an instruction's operands that the
+  // tokenized format does not describe.
+  Program P = parseOrFail("samplepos r0.xy, t0.xyzw, r0.x, 0");
+  ASSERT_EQ(P.Instructions[0].Operands.size(), 3u);
+  EXPECT_EQ(P.Instructions[0].ExtraDWords, llvm::SmallVector<uint32_t>({0}));
+
+  P = parseOrFail("ret, 5");
+  EXPECT_TRUE(P.Instructions[0].Operands.empty());
+  EXPECT_EQ(P.Instructions[0].ExtraDWords, llvm::SmallVector<uint32_t>({5}));
+}
+
 TEST(ParserTest, RawDWordDirective) {
   Program P = parseOrFail(".dword 0x030007FF, 0xDEADBEEF, 0x12345678");
   ASSERT_EQ(P.Instructions.size(), 1u);

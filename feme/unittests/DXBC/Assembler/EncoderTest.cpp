@@ -193,6 +193,7 @@ TEST(EncoderTest, AsmPrinterRoundTrips) {
                      "resource_return_type(uint, uint, uint, uint) r0.x, "
                      "t0.xyzw\n"
                      "callc_nz r0.x, label3\n"
+                     "ret, 5\n"
                      ".dword 0x030007FF, 0xDEADBEEF\n"
                      "ret\n");
 }

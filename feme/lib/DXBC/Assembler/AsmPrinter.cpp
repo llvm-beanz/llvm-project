@@ -300,6 +300,9 @@ static void printInstruction(const Instruction &Inst, llvm::raw_ostream &OS) {
       OS << ' ';
       printOperands(Inst, OS);
     }
+    // Trailing DWORDs always follow a comma, whether or not the
+    // instruction had operands, so that they re-parse the same way.
+    printTrailingCounts(Inst.ExtraDWords, /*AlreadyPrintedSomething=*/true, OS);
     break;
   }
   case InstructionKind::FlagList: {

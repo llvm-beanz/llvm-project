@@ -74,6 +74,7 @@ constexpr KeywordValue UAVFlags[] = {
 
 // D3D10_SB_INTERPOLATION_MODE.
 constexpr KeywordValue InterpolationModes[] = {
+    {"undefined", 0},
     {"constant", 1},
     {"linear", 2},
     {"linearCentroid", 3},
@@ -266,6 +267,19 @@ private:
     return expect(Kind, What).takeError();
   }
 
+  /// True if the '(' at \c Current opens a parenthesized integer rather
+  /// than a resource return-type quadruple. Lexer is a value type, so this
+  /// looks ahead by copying and restoring the whole lexing position.
+  bool startsSampleCount() {
+    Lexer SavedLex = Lex;
+    Token SavedToken = Current;
+    advance();
+    bool IsInteger = Current.Kind == TokenKind::Integer;
+    Lex = SavedLex;
+    Current = SavedToken;
+    return IsInteger;
+  }
+
   //===--------------------------------------------------------------------===//
   // Literals
   //===--------------------------------------------------------------------===//
@@ -453,6 +467,11 @@ private:
     case InstructionKind::Generic:
       if (llvm::Error E = parseOperandList(Inst, Info.NumDst, Info.NumSrc))
         return std::move(E);
+      // Some real shaders carry DWORDs past an instruction's operands that
+      // the tokenized format does not describe; allowing them keeps such
+      // bytecode expressible as assembly.
+      if (llvm::Error E = parseTrailingCounts(Inst, /*AtLeastOne=*/false))
+        return std::move(E);
       break;
     case InstructionKind::FlagList:
       if (llvm::Error E = parseFlagList(Inst))
@@ -540,8 +559,11 @@ private:
   /// mnemonic, in any order, before its operands.
   llvm::Error parseModifiers(Instruction &Inst, const OpcodeInfo &Info) {
     // `dcl_resource_texture2dms(4)`: the multisample count is spelled as a
-    // suffix on the mnemonic rather than as a separate token.
-    if ((Info.Flags & OF_SampleCount) && Current.Kind == TokenKind::LParen) {
+    // suffix on the mnemonic rather than as a separate token. A '(' also
+    // opens the return-type quadruple, so only claim it when a number
+    // follows.
+    if ((Info.Flags & OF_SampleCount) && Current.Kind == TokenKind::LParen &&
+        startsSampleCount()) {
       advance();
       llvm::Expected<uint64_t> Count = parseInteger("a sample count");
       if (!Count)

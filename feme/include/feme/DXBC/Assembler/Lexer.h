@@ -33,6 +33,11 @@ class Lexer {
 public:
   explicit Lexer(llvm::StringRef Source);
 
+  // Copyable and assignable so that a caller can snapshot and restore its
+  // position to look ahead by more than one token.
+  Lexer(const Lexer &) = default;
+  Lexer &operator=(const Lexer &) = default;
+
   /// Returns the next token and advances past it. Returns a TokenKind::Eof
   /// token forever once the end of \p Source is reached.
   Token next();
