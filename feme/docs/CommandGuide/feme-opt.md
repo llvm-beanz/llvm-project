@@ -50,6 +50,18 @@ operations vs. plain `llvm::Module`, see the "Testing Tools" section of
   feme-opt --llvm -passes=feme-dxil-raise-ops -S input.ll
   ```
 
+  The FeMe LLVM IR passes currently registered under their `-passes=` names
+  are:
+
+  | Name | Pass |
+  |---|---|
+  | `feme-dxil-raise-ops` | `feme::dxil::OpRaisingPass` |
+  | `feme-dxil-raise-metadata` | `feme::dxil::MetadataRaisingPass` |
+  | `feme-dxil-expand-intrinsics` | `feme::dxil::IntrinsicExpansionPass` |
+  | `feme-spirv-lower-raised` | `feme::spirv::RaisedLoweringPass` |
+  | `feme-amdgpu-lower-raised` | `feme::amdgpu::RaisedLoweringPass` |
+  | `feme-amdgpu-lower-resources` | `feme::amdgpu::ResourceLoweringPass` |
+
 ## OPTIONS
 
 `feme-opt`'s MLIR mode accepts the full set of options provided by MLIR's

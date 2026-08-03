@@ -350,7 +350,7 @@ Translation Matrix below). Embedding consumers that want single-step control
 convenience built from the same public interfaces, not a required entry
 point.
 
-#### Status: `feme::Driver` (implemented for `dxil`/`spirv` import)
+#### Status: `feme::Driver` (implemented for `dxil`/`spirv` import; `dxil`/`spirv`/native-ISA output)
 
 `feme::Driver` (`feme/include/feme/Driver/Driver.h`,
 `feme/lib/Driver/Driver.cpp`) is implemented, and is what the `feme` CLI
@@ -360,36 +360,53 @@ a second identical struct) and an input buffer, it looks up the `Importer`
 named by `Opts.From` ("dxil" or "spirv" -- DXBC is not yet implemented, so
 is rejected with a diagnostic rather than a crash), translates the result to
 an `llvm::Module` (directly for DXIL, via `SPIRVToLLVMTranslator` for
-SPIR-V), resolves `Opts.Target`/`Opts.To` to a concrete target triple
-("dxil"/"spirv" each resolve to that format's own default triple; anything
-else is used as a triple directly), runs `feme::dxil::OpRaisingPass` (for
-DXIL input, unconditionally -- see the DXIL section's deviation note above)
-and `feme::amdgpu::RaisedLoweringPass` (for an `amdgcn-*` target) as needed,
-and finally runs `feme::TargetMachineBackend`. There is no
-`Ctx.getFormatRegistry()` yet (deviating from the sketch above) -- `Driver`
-currently looks up its two `Importer`s directly rather than through a
-registry on `Context`, since only two formats exist to look up; a registry
-is expected to be added if/when this stops being a short enough list to
-hard-code, without changing `Driver`'s own public interface.
+SPIR-V), and then runs the raising/lowering chain that gets from that to
+the requested destination:
 
-Validated end to end (see `test/Tools/feme/feme-*.{ll,mlir,test}`): the
-SPIR-V "null pipeline" (see the deviation note under Retargeting to Native
-ISA below) through the full CLI rather than composed one
-`feme-translate` stage at a time; SPIR-V and DXIL each retargeted to a real
-ISA (`amdgcn-amd-amdhsa`), using only opcodes/intrinsics
-`OpRaisingPass`/`RaisedLoweringPass` currently cover; and clean (non-crash)
-diagnostics for an unsupported `--from` and a missing `--to`/`--target`.
-Also validated manually (not checked in as a test fixture, per "Avoiding
-binary test fixtures" below) against `dxc`-compiled DXIL and SPIR-V for the
-HLSL Mandelbrot compute shader used to drive this validation: DXIL import
-succeeded once the data layout deviation above was fixed, but SPIR-V import
-of that same shader currently fails with `mlir::spirv::deserialize`'s own,
-pre-existing "OpPhi in loop merge block unimplemented" limitation (an
-MLIR-level SPIR-V dialect gap, not a `feme::Driver`/`SPIRVImporter` one),
-and re-emitting DXIL back to DXIL (`--to=dxil`) for a shader with resource
-stores does not yet work end to end -- both are consequences of the
-pre-existing gaps already called out above and in the DXIL section, not
-regressions introduced by `Driver` itself.
+1. For DXIL input: `feme::dxil::OpRaisingPass`, then
+   `feme::dxil::MetadataRaisingPass` (in that order -- the first consumes
+   the `!dx.resources` metadata the second drops).
+2. Resolve `Opts.Target`/`Opts.To` to a concrete target triple. `--target`
+   wins if set; otherwise `--to` is used, with `"dxil"`/`"spirv"` resolving
+   to that format's own triple. Both preserve the pipeline stage a
+   DXIL-originated module names (recovered by `MetadataRaisingPass`), as the
+   environment component of a `dxil-unknown-shadermodelX.Y-<stage>` or
+   `spirv-unknown-vulkan-<stage>` triple; anything else is used as a triple
+   directly. This step happens *after* raising precisely so that recovered
+   stage is available.
+3. For any destination other than DXIL: `feme::dxil::IntrinsicExpansionPass`.
+4. For a SPIR-V destination: `feme::spirv::RaisedLoweringPass`.
+5. For an `amdgcn-*` destination: `feme::amdgpu::ResourceLoweringPass`, then
+   `feme::amdgpu::RaisedLoweringPass` (in that order -- the first rewrites
+   entry point signatures, which the second then sees as ordinary
+   functions).
+6. `feme::TargetMachineBackend`.
+
+There is no `Ctx.getFormatRegistry()` yet (deviating from the sketch above)
+-- `Driver` currently looks up its two `Importer`s directly rather than
+through a registry on `Context`, since only two formats exist to look up; a
+registry is expected to be added if/when this stops being a short enough
+list to hard-code, without changing `Driver`'s own public interface.
+
+Validated end to end (see `test/Tools/feme/feme-*.{ll,mlir,test}`): DXIL
+retargeted to DXIL, to SPIR-V, and to a real ISA (`amdgcn-amd-amdhsa`), each
+for a shader that writes a `RWBuffer<float4>` indexed by its dispatch-wide
+thread id; the SPIR-V "null pipeline" (see the deviation note under
+Retargeting to Native ISA below) through the full CLI rather than composed
+one `feme-translate` stage at a time; SPIR-V retargeted to
+`amdgcn-amd-amdhsa`; and clean (non-crash) diagnostics for an unsupported
+`--from` and a missing `--to`/`--target`.
+
+Also validated manually against real `dxc`-compiled output for the HLSL
+Mandelbrot compute shader driving this work (not checked in, per "Avoiding
+binary test fixtures" below): `dxc -T cs_6_5`'s DXContainer retargets
+successfully to all three of DXIL, SPIR-V, and AMDGPU. The same shader
+compiled with `dxc -T cs_6_5 -spirv` now *imports* successfully (see the
+control-flow structurization deviation above) but does not yet get past
+MLIR's `SPIRVToLLVM` conversion, which has no patterns for the image types
+its `RWBuffer` lowers to -- an MLIR-level gap documented under "Known gap:
+`spirv` dialect -> `llvm` dialect conversion coverage" above, not a
+`Driver`/`SPIRVImporter` one.
 
 ### `feme::Module`
 
@@ -478,6 +495,39 @@ emit those intrinsics itself; that is `TargetMachineBackend`'s/the `SPIRV`
 target's job, exactly as for any other retargeting `Backend` (see
 Retargeting to Native ISA below).
 
+#### Deviation: control flow structurization is not always possible on import
+
+MLIR's SPIR-V deserializer defaults to structurizing control flow into
+`spirv.mlir.selection`/`spirv.mlir.loop` regions, but it cannot do so for
+every legal SPIR-V control flow graph: an `OpPhi` in a loop *merge* block --
+which any loop carrying a value out of a `break` produces, i.e. most real
+shader loops -- is rejected outright, because `spirv.mlir.loop` has no
+results to carry that value in. Confirmed against real `dxc -spirv` output,
+this makes structurized import fail on essentially every non-trivial shader.
+
+The deserializer's unstructured mode handles the same input fine, keeping the
+original CFG as block arguments and branches -- which, for FeMe's purposes,
+maps *at least* as directly onto LLVM IR as the structured form does, since
+LLVM IR is itself unstructured. `feme::SPIRVImporter` therefore retries with
+structurization disabled when the structurized attempt fails (controlled by
+`ImportOptions::SPIRVFallBackToUnstructuredControlFlow`), swallowing the
+recovered-from attempt's diagnostics so only a genuine failure reaches the
+caller.
+
+#### Known gap: `spirv` dialect -> `llvm` dialect conversion coverage
+
+Import now succeeds on real shaders, but MLIR's own `SPIRVToLLVM` conversion
+is the next wall: it has no patterns for image types at all, so a
+`spirv.GlobalVariable` of image type (any `Buffer`/`Texture` resource) fails
+to legalize, and SPIR-V builtin input variables (`GlobalInvocationId` and
+friends) have no format-agnostic equivalent on the other side. Closing this
+means either extending MLIR's conversion upstream or adding FeMe-owned
+conversion patterns that emit the same raised representation the DXIL path
+produces (`llvm.dx.resource.*` handles and thread-index intrinsics), so both
+front ends converge before the retargeting passes. Until then, the SPIR-V
+*input* half of the translation matrix is limited to shaders that use
+neither resources nor builtin variables.
+
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
 DXIL *is* LLVM IR: it's serialized as LLVM bitcode (frozen at an old LLVM IR
@@ -544,7 +594,7 @@ For that case, DXIL's `llvm::Module` is imported into the MLIR `llvm` dialect
 via existing `mlir::translateLLVMIRToModule`, bridging into MLIR only at the
 point of need rather than as the default path.
 
-#### Status: `feme::DXILImporter` (container/bitcode parsing implemented); `feme::dxil::OpRaisingPass` (op raising, partial)
+#### Status: `feme::DXILImporter` (container/bitcode parsing implemented); `feme::dxil::OpRaisingPass` / `feme::dxil::MetadataRaisingPass` / `feme::dxil::IntrinsicExpansionPass` (raising, partial)
 
 `feme::DXILImporter` (`feme/include/feme/Import/DXIL/DXILImporter.h`,
 `feme/lib/Import/DXIL/DXILImporter.cpp`) implements step 1 and 2 above:
@@ -581,7 +631,8 @@ it now covers the two largest opcode families:
   `WaveReadLaneAt`, ...), plus `IsFinite`/`IsNormal` (raised via the generic
   `llvm.is.fpclass` intrinsic, keyed off its `FPClassTest` mask operand,
   rather than a dedicated per-op intrinsic like `IsNaN`/`IsInf`).
-- Resource-handle creation: a `dx.op.annotateHandle` call over a
+- Resource-handle creation, in both of DXIL's spellings. A
+  `dx.op.annotateHandle` call over a
   `dx.op.createHandleFromBinding` call is rewritten into a single
   `llvm.dx.resource.handlefrombinding` intrinsic call, reconstructing the
   resource's `target("dx.")` handle type from the two ops' constant
@@ -608,12 +659,33 @@ it now covers the two largest opcode families:
   casthandle` -- the same "temporary" cast `DXILOpLowering` itself uses for
   this purpose -- so mixed raised/not-yet-raised IR stays valid.
 
-Still not covered, and left for later changes: buffer/texture *load and
-store* ops (`BufferLoad`/`BufferStore`, `RawBufferLoad`/`RawBufferStore`,
-`CBufferLoadLegacy`, `TextureLoad`, `Sample*`, ...) -- these need
-`dx.types.ResRet`/`extractvalue` reconstruction into the corresponding
-`llvm.dx.resource.load.*`/`.store.*` intrinsics, a comparably sized
-follow-up to resource-handle creation itself; texture/sampler resource
+  The pre-SM6.6 spelling, `dx.op.createHandle` (57), is raised too. It is
+  what `dxc` still emits by default, and unlike `CreateHandleFromBinding` it
+  carries no binding inline at all: it names its resource *indirectly*, by
+  (resource class, range ID), an index into the module's `!dx.resources`
+  named metadata. Raising it therefore needs a reader for that metadata,
+  which lives in `feme/lib/Transforms/DXIL/ResourceMetadata.{h,cpp}` --
+  private to the DXIL transforms library, since it models DXIL's frozen
+  metadata encoding rather than anything FeMe exposes.
+- Typed buffer accesses: `dx.op.bufferStore` (69) and `dx.op.bufferLoad`
+  (68) over an already-raised handle are rewritten into
+  `llvm.dx.resource.store.typedbuffer`/`llvm.dx.resource.load.typedbuffer`,
+  reassembling the four scalar component operands DXIL splits a stored value
+  into, and rewriting the `extractvalue`s of a load's `%dx.types.ResRet`
+  return struct.
+
+  This is also where the typed buffer element type's *vector width* comes
+  from. DXIL records only a typed buffer's scalar component type (`float`),
+  never its width (`<4 x float>`) -- neither in `!dx.resources` nor in
+  `ResourceProperties` -- so the width is recovered from how the resource is
+  actually accessed: a store's write mask names it directly, and a load's
+  `%dx.types.ResRet` components are only ever extracted up to it. A handle
+  with no accesses at all falls back to 4, DXIL's widest typed buffer
+  element.
+
+Still not covered, and left for later changes: the *non-typed* buffer and
+texture load/store ops (`RawBufferLoad`/`RawBufferStore`,
+`CBufferLoadLegacy`, `TextureLoad`, `Sample*`, ...); texture/sampler resource
 kinds (need dimension/multi-sample/feedback bits `ResourceProperties`
 doesn't carry, unlike `StructuredBuffer`/`CBuffer`'s recoverable size/
 alignment); ops that return an aggregate needing `extractvalue`
@@ -636,10 +708,59 @@ if it ever sees a `dx.op.*` declaration, on the assumption that
 those. This means retargeting requires *every* `dx.op.*` call raised, not
 just "most of them, with the rest passed through unchanged" as this
 pass's own incremental-coverage design (above) allows for pass-level
-(`feme-opt`) testing. Real shaders' resource load/store and input/output
-signature ops (not yet raised, see above) currently block this in
-practice; closing that gap is the same follow-up work already called out
-above, not a new, separate one.
+(`feme-opt`) testing. Raising the legacy `CreateHandle` op and the typed
+buffer accesses (above) is what closed this for the compute shaders driving
+this work; a shader using a resource kind or access op still on the "not
+covered" list above will still hit it.
+
+#### Module metadata raising: `feme::dxil::MetadataRaisingPass`
+
+Op raising alone is not enough to retarget a DXIL module, because DXIL
+records what the module *is* -- its shader model, its entry points, their
+pipeline stages and thread group dimensions -- in `dx.shaderModel`/
+`dx.entryPoints` named metadata, together with a frozen `dxil-ms-dx` target
+triple. Modern LLVM reads none of that: `DXILMetadataAnalysis` expects a
+`dxil-unknown-shadermodelX.Y-<stage>` triple plus `hlsl.shader`/
+`hlsl.numthreads`/`hlsl.wavesize` *function attributes*. Without a
+translation, a re-emitted container has no entry point at all, and every
+later stage (including AMDGPU's, which needs the thread group dimensions to
+reconstruct a dispatch-wide thread index) is missing information that was
+present in the input.
+
+`feme::dxil::MetadataRaisingPass`
+(`feme/include/feme/Transforms/DXIL/MetadataRaising.h`,
+`feme/lib/Transforms/DXIL/MetadataRaising.cpp`) is the inverse of LLVM's
+`DXILTranslateMetadata`: it rebuilds the triple and the `hlsl.*` attributes,
+then drops the `dx.*` named metadata the DirectX backend regenerates for
+itself (keeping `dx.valver`, which `DXILMetadataAnalysis` does read, so the
+original validator version survives a round trip). Library shader models,
+whose entry points each declare their own stage via the per-entry
+`ShaderKind` property, are handled too.
+
+It must run *after* `OpRaisingPass`, which consumes the `!dx.resources`
+metadata this pass drops. Exercised via `feme-opt` as
+`feme-dxil-raise-metadata`.
+
+#### Intrinsic expansion: `feme::dxil::IntrinsicExpansionPass`
+
+`OpRaisingPass` deliberately raises each `dx.op.*` call to whichever
+intrinsic `DXILOpLowering` lowered it *from*, which for a handful of
+HLSL-specific operations (`frac`, `saturate`, `rsqrt`, integer multiply-add,
+the dot products, `isinf`/`isnan`) is a `llvm.dx.*` intrinsic only LLVM's
+DirectX backend knows how to select. That is exactly right when re-emitting
+DXIL, and exactly wrong for every other target, which fails instruction
+selection on them.
+
+`feme::dxil::IntrinsicExpansionPass`
+(`feme/include/feme/Transforms/DXIL/IntrinsicExpansion.h`,
+`feme/lib/Transforms/DXIL/IntrinsicExpansion.cpp`) expands those into plain
+LLVM IR (`frac(x)` -> `x - floor(x)`, and so on). LLVM's own
+`DXILIntrinsicExpansion` does the same job in the forward direction but is
+private to the DirectX target, so it cannot be reused. `feme::Driver` runs
+this whenever the destination is *not* DXIL; doing it once,
+target-independently, keeps each target-specific lowering pass from
+re-deriving the same identities. Exercised via `feme-opt` as
+`feme-dxil-expand-intrinsics`.
 
 The DXIL opcode numbers `OpRaisingPass` matches on are hard-coded rather
 than reusing `llvm::dxil::OpCode` (`llvm/lib/Target/DirectX/DXILConstants.h`):
@@ -736,7 +857,7 @@ below).
 | From \ To | DXBC | DXIL | SPIR-V |
 |---|---|---|---|
 | DXBC | — | `dxsa` → raised LLVM IR (direct pass) | `dxsa` → raised LLVM IR → LLVM `SPIRV` target |
-| DXIL | *(not a priority; no upstream use case)* | — | raised LLVM IR → LLVM `SPIRV` target |
+| DXIL | *(not a priority; no upstream use case)* | raised LLVM IR → LLVM `DirectX` target (implemented) | raised LLVM IR → SPIR-V lowering → LLVM `SPIRV` target (implemented) |
 | SPIR-V | *(not a priority)* | `spirv` dialect → `SPIRVToLLVM` → raise to DXIL conventions → DXIL `Exporter` | — |
 
 Notably, DXIL ⇄ SPIR-V translation is expected to route through plain LLVM
@@ -788,48 +909,120 @@ pass is therefore needed between "raised" and "ready for the `AMDGPU`
 "DXIL's own calling convention" and "raised" rather than folded into
 `DXILImporter`.
 
-`feme::amdgpu::RaisedLoweringPass`
+Two passes do this, split by concern.
+
+**`feme::amdgpu::ResourceLoweringPass`**
+(`feme/include/feme/Transforms/AMDGPU/ResourceLowering.h`,
+`feme/lib/Transforms/AMDGPU/ResourceLowering.cpp`) handles the resource
+bindings, which is the one place the two execution models genuinely differ
+rather than merely spelling the same thing differently. A graphics API binds
+a shader's resources out of band, through a descriptor table the shader
+refers to by (register space, register); an AMDGPU kernel receives
+everything it operates on as *kernel arguments*. So each distinct binding an
+entry point uses becomes an additional `ptr addrspace(1)` argument, appended
+in a deterministic (space, register) order, and typed buffer accesses
+through it become ordinary loads/stores. The resulting kernel is
+dispatchable by any host runtime that can bind one global allocation per
+resource, in the order the shader declared its bindings -- the AMDGPU
+equivalent of the descriptor table it started with.
+
+The alternative -- AMDGPU's own buffer-descriptor conventions
+(`llvm.amdgcn.make.buffer.rsrc` producing a `ptr addrspace(8)`, indexed via
+`ptr addrspace(7)` buffer fat pointers) -- was not chosen: a buffer resource
+descriptor still has to *come from somewhere*, and with no descriptor table
+in the picture that somewhere is a kernel argument anyway, so it would add a
+layer without removing the fundamental one. Revisit if bounds-checked or
+format-converting typed buffer semantics turn out to matter.
+
+An entry point using a resource this pass cannot model -- a non-typed
+buffer, a dynamically indexed binding array (which would need one pointer
+per register, something a fixed argument list cannot express), or a handle
+consumed some other way -- is left untouched *entirely* rather than
+partially rewritten, so the failure surfaces as a clean "unsupported" from
+the backend instead of silently wrong code.
+
+**`feme::amdgpu::RaisedLoweringPass`**
 (`feme/include/feme/Transforms/AMDGPU/RaisedLowering.h`,
-`feme/lib/Transforms/AMDGPU/RaisedLowering.cpp`) is that pass. Like
-`OpRaisingPass`, it is deliberately incremental: it currently covers only
-the thread/group index queries with a direct, context-free mapping to a
-single AMDGPU intrinsic call, keyed on a constant component (0/1/2 for
-x/y/z) operand:
+`feme/lib/Transforms/AMDGPU/RaisedLowering.cpp`) handles the rest:
 
-- `llvm.dx.group.id` -> `llvm.amdgcn.workgroup.id.x`/`.y`/`.z`
-- `llvm.dx.thread.id.in.group` -> `llvm.amdgcn.workitem.id.x`/`.y`/`.z`
+- Entry points: given AMDGPU's kernel calling convention plus the
+  `amdgpu-flat-work-group-size` bound their `hlsl.numthreads` dimensions
+  (see `MetadataRaisingPass`) describe. Without this the entry point is
+  emitted as an ordinary device function, which no host runtime can
+  dispatch.
+- The thread/group index queries with a direct per-component mapping,
+  keyed on a constant component (0/1/2 for x/y/z) operand:
+  `llvm.dx.group.id` -> `llvm.amdgcn.workgroup.id.x`/`.y`/`.z`, and
+  `llvm.dx.thread.id.in.group` -> `llvm.amdgcn.workitem.id.x`/`.y`/`.z`.
+- The two queries with *no* single AMDGPU counterpart, synthesized from the
+  entry point's thread group dimensions: `llvm.dx.thread.id` (the
+  dispatch-wide index, i.e. `workgroup_id * <group size> + workitem_id`) and
+  `llvm.dx.flattened.thread.id.in.group` (the linearized workitem id).
+  `llvm.dx.thread.id` in particular is what essentially every real compute
+  shader uses to index its output.
 
-Not yet covered, and left as unmodified calls rather than erroring (so this
-pass composes with modules that mix lowered and not-yet-lowered
+Not yet covered, and left as unmodified calls rather than erroring (so these
+passes compose with modules that mix lowered and not-yet-lowered
 operations), matching `OpRaisingPass`'s own precedent:
 
-- `llvm.dx.thread.id` (the dispatch-wide, not per-group, index): unlike the
-  two ops above, this is not a single AMDGPU register read — it needs the
-  workgroup's id and dimensions combined with `llvm.amdgcn.workitem.id.*`
-  to reconstruct, which is a small follow-up rather than a 1:1 mapping.
-- `llvm.dx.flattened.thread.id.in.group`: similarly needs the group's
-  dimensions to linearize the per-component `workitem.id.*` values.
-- Resource-handle ops (`llvm.dx.resource.handlefrombinding`, and the
-  buffer/texture load/store ops once `OpRaisingPass` itself raises them —
-  see the DXIL section above): these need re-expressing in terms of
-  AMDGPU's buffer-descriptor conventions (`llvm.amdgcn.make.buffer.rsrc`
-  producing a `ptr addrspace(8)`, indexed via `ptr addrspace(7)` buffer fat
-  pointers), which is a comparably sized follow-up to resource-handle
-  raising itself, not yet designed in detail here.
 - Wave/quad ops (`llvm.dx.wave.*`): AMDGPU has its own cross-lane
   intrinsics (`llvm.amdgcn.mbcnt.*`, `llvm.amdgcn.ds.permute`, ...), but the
   mapping is not always 1:1 with DXIL's wave ops and needs its own pass to
   get right.
 - SPIR-V's raised builtin-variable equivalents (`gl_GlobalInvocationID` and
-  friends): these do not yet exist upstream of this pass at all — SPIR-V's
+  friends): these do not yet exist upstream of these passes at all -- SPIR-V's
   `Translator`s (see "SPIR-V -> MLIR llvm dialect -> LLVM IR" above) do not
   currently re-express SPIR-V builtin variables as any particular
-  format-agnostic convention this pass could recognize, so that needs to
-  land first.
+  format-agnostic convention they could recognize, so that needs to land
+  first.
 
-Exercised via `feme-opt` as the `feme-amdgpu-lower-raised` pass
-(`test/Transforms/AMDGPU/amdgpu-lower-raised.ll`), the same way
-`OpRaisingPass` is tested in isolation via `feme-dxil-raise-ops`.
+Exercised via `feme-opt` as the `feme-amdgpu-lower-raised` and
+`feme-amdgpu-lower-resources` passes
+(`test/Transforms/AMDGPU/amdgpu-lower-{raised,resources}.ll`), the same way
+`OpRaisingPass` is tested in isolation via `feme-dxil-raise-ops`, and end to
+end through the CLI by `test/Tools/feme/feme-dxil-to-amdgpu.ll`.
+
+## Raised LLVM IR -> SPIR-V
+
+The same problem exists for the in-tree `SPIRV` target, and has a much
+smaller answer: LLVM's DirectX and SPIRV backends expose *parallel* intrinsic
+families -- `llvm.dx.thread.id`/`llvm.spv.thread.id`,
+`llvm.dx.resource.handlefrombinding`/`llvm.spv.resource.handlefrombinding`,
+and so on -- because both are fed by the same HLSL frontend. So most of
+`feme::spirv::RaisedLoweringPass`
+(`feme/include/feme/Transforms/SPIRV/RaisedLowering.h`,
+`feme/lib/Transforms/SPIRV/RaisedLowering.cpp`) is a straight substitution of
+the callee.
+
+The one genuine translation is the resource handle type. DXIL spells a typed
+buffer as `target("dx.TypedBuffer", <N x T>, IsUAV, IsROV, IsSigned)`;
+SPIR-V spells the same resource as
+`target("spirv.Image", T, Dim, Depth, Arrayed, MS, Sampled, Format)`, whose
+element type is the *scalar* component type, with the vector width folded
+into the image format instead (`<4 x float>` -> `float` + `Rgba32f`) and
+read-only vs read-write carried by `Sampled` (1 vs 2) rather than an `IsUAV`
+flag. Signed integer images are distinguished by a different type name
+(`spirv.SignedImage`) rather than a parameter.
+
+Naming the image format precisely, rather than emitting `Unknown`, is a
+deliberate choice: it costs a small mapping table (component type x width ->
+`ImageFormat`) and keeps the result free of SPIR-V's
+`StorageImageReadWithoutFormat`/`StorageImageWriteWithoutFormat` capability
+requirements. Combinations SPIR-V has no storage image format for -- notably
+anything three-component, which SPIR-V does not define at all -- leave the
+resource unlowered rather than silently widening it.
+
+Typed buffer accesses become `llvm.spv.resource.getpointer` plus an ordinary
+load or store, which is the form LLVM's SPIRV backend selects
+`OpImageRead`/`OpImageWrite` from. The handle's *name* operand needs a real
+string global, since the backend reads it to name the `OpVariable` it emits;
+DXIL keeps resource names only in metadata and strips them entirely in
+release builds, so a binding-derived name (`resource_s0_b0`) is synthesized
+when there is nothing to carry across.
+
+Exercised via `feme-opt` as `feme-spirv-lower-raised`
+(`test/Transforms/SPIRV/spirv-lower-raised.ll`) and end to end through the
+CLI by `test/Tools/feme/feme-dxil-to-spirv.ll`.
 
 ### Deviation: validating `Backend`/`Translator` with a SPIR-V "null pipeline"
 
@@ -1146,9 +1339,15 @@ feme/
       Translate/
       Target/              (retargeting glue)
       Transforms/
-        DXIL/               (feme::dxil::OpRaisingPass, LLVM IR passes over
-                             DXIL-derived llvm::Modules; not MLIR passes,
-                             see the DXBC Dialect/ Transforms/ split below)
+        AMDGPU/             (feme::amdgpu::RaisedLoweringPass,
+                             feme::amdgpu::ResourceLoweringPass)
+        DXIL/               (feme::dxil::OpRaisingPass,
+                             feme::dxil::MetadataRaisingPass,
+                             feme::dxil::IntrinsicExpansionPass -- LLVM IR
+                             passes over DXIL-derived llvm::Modules; not MLIR
+                             passes, see the DXBC Dialect/ Transforms/ split
+                             below)
+        SPIRV/              (feme::spirv::RaisedLoweringPass)
       Driver/                (feme::Driver; implemented, see the "Driver"
                              section above -- a distinct top-level module
                              from Core/, not folded into it, since Driver
@@ -1178,7 +1377,13 @@ feme/
                            BinaryWriter implemented new, see DXBC section
                            above)
     Target/...
-    Transforms/DXIL/...    (feme::dxil::OpRaisingPass)
+    Transforms/AMDGPU/...  (feme::amdgpu::{Raised,Resource}LoweringPass)
+    Transforms/DXIL/...    (feme::dxil::OpRaisingPass,
+                            feme::dxil::MetadataRaisingPass,
+                            feme::dxil::IntrinsicExpansionPass, plus the
+                            private ResourceMetadata.h reader for DXIL's
+                            !dx.resources metadata)
+    Transforms/SPIRV/...   (feme::spirv::RaisedLoweringPass)
     Driver/...             (feme::Driver)
     DXBC/
       Assembler/           (dxbc-as's lexer/parser/encoder; LLVM-only,
@@ -1325,7 +1530,23 @@ feme/
   and `test/Transforms/DXIL/dxil-raise-ops-roundtrip.ll` (real
   `-dxil-op-lower` output, validating this pass is a genuine inverse of
   LLVM's own lowering, not just of hand-written IR matching this pass's own
-  assumptions).
+  assumptions). The same rationale applies to every LLVM-IR-level pass added
+  since, each of which gets a `feme-opt`-driven `lit` test per translation
+  phase instead of a `gtest`:
+
+  | Pass | `feme-opt` name | Test |
+  |---|---|---|
+  | `dxil::OpRaisingPass` | `feme-dxil-raise-ops` | `Transforms/DXIL/dxil-raise-{ops,resource-handles,legacy-resources}*.ll` |
+  | `dxil::MetadataRaisingPass` | `feme-dxil-raise-metadata` | `Transforms/DXIL/dxil-raise-metadata{,-library}.ll` |
+  | `dxil::IntrinsicExpansionPass` | `feme-dxil-expand-intrinsics` | `Transforms/DXIL/dxil-expand-intrinsics.ll` |
+  | `spirv::RaisedLoweringPass` | `feme-spirv-lower-raised` | `Transforms/SPIRV/spirv-lower-raised.ll` |
+  | `amdgpu::RaisedLoweringPass` | `feme-amdgpu-lower-raised` | `Transforms/AMDGPU/amdgpu-lower-raised.ll` |
+  | `amdgpu::ResourceLoweringPass` | `feme-amdgpu-lower-resources` | `Transforms/AMDGPU/amdgpu-lower-resources.ll` |
+
+  The full chains those passes compose into are covered separately, through
+  the CLI, by `test/Tools/feme/feme-dxil-to-{dxil,spirv,amdgpu}.ll`, each of
+  which builds its DXIL fixture with `llc` at test time rather than checking
+  in a binary.
 
 ## Coding Conventions
 
@@ -1376,14 +1597,19 @@ This is a rough sequencing, not a schedule:
    Status: `DXContainer`/bitcode parsing (`feme::DXILImporter`) and its
    fuzzing harness (`feme-dxil-import-fuzzer`) are implemented; the "op
    raising" pass (`feme::dxil::OpRaisingPass`) now covers all direct-mapped
-   scalar/vector math and thread/wave/quad-query opcodes, plus
-   resource-handle *creation* for every resource kind whose binding metadata
-   supplies enough to reconstruct a handle type -- `TypedBuffer`/unstructured
-   `RawBuffer` exactly, `StructuredBuffer`/`CBuffer` via a same-size/
-   alignment opaque placeholder element type -- see the "Status" note under
-   the DXIL section above. Buffer/texture load and store ops (the actual
-   consumers of a resource handle), texture/sampler resource-handle kinds
-   (need dimension/multi-sample/feedback bits not recoverable the way
+   scalar/vector math and thread/wave/quad-query opcodes, resource-handle
+   *creation* in both DXIL spellings (the modern
+   `CreateHandleFromBinding`/`AnnotateHandle` pair and the pre-SM6.6
+   `CreateHandle`, the latter reading the module's `!dx.resources` metadata)
+   for every resource kind whose binding metadata supplies enough to
+   reconstruct a handle type -- `TypedBuffer`/unstructured `RawBuffer`
+   exactly, `StructuredBuffer`/`CBuffer` via a same-size/alignment opaque
+   placeholder element type -- and typed buffer loads/stores. Module-level
+   metadata raising (shader model, entry points, thread group dimensions)
+   landed alongside it as `feme::dxil::MetadataRaisingPass`. See the
+   "Status" note under the DXIL section above. Non-typed buffer and texture
+   load/store ops, texture/sampler resource-handle kinds (need
+   dimension/multi-sample/feedback bits not recoverable the way
    `StructuredBuffer`/`CBuffer`'s size/alignment is), and a handful of
    opcode families needing more than a 1:1 intrinsic mapping
    (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`'s flag-selected
@@ -1395,25 +1621,26 @@ This is a rough sequencing, not a schedule:
 
    Status: implemented via `feme::Driver` (see "Status: `feme::Driver`"
    above), and validated end to end for DXIL retargeted to a real ISA
-   (`amdgcn-amd-amdhsa`) using the opcodes `OpRaisingPass`/
-   `RaisedLoweringPass` currently cover. Re-emitting DXIL back to DXIL
-   itself is not yet validated for a real shader: doing so surfaced that
-   LLVM's DirectX codegen pipeline requires *every* `dx.op.*` call raised,
-   not just the ones `OpRaisingPass` currently covers (see the deviation
-   note under the DXIL section above), which real shaders using resource
-   loads/stores or input/output signature ops don't satisfy yet.
+   (`amdgcn-amd-amdhsa`) and back to DXIL itself, including for real
+   `dxc`-compiled output of a compute shader that writes a
+   `RWBuffer<float4>`. A shader using a resource kind or access op
+   `OpRaisingPass` still doesn't cover will hit LLVM's DirectX codegen
+   pipeline's requirement that *every* `dx.op.*` call be raised (see the
+   deviation note under the DXIL section above).
 6. **DXIL ⇄ SPIR-V translation**: DXIL (LLVM IR) → LLVM `SPIRV` target;
    SPIR-V → `spirv` dialect → `SPIRVToLLVM` → raise to DXIL conventions →
    DXIL exporter.
 
-   Status: not yet implemented -- `feme::Driver` does not attempt this
-   combination. It needs two things this codebase does not have yet: a pass
-   raising SPIR-V-derived, translated LLVM IR into DXIL's calling
-   convention (no equivalent of `feme::amdgpu::RaisedLoweringPass` exists
-   for DXIL), and a real DXIL `Exporter` (`Driver` currently only
-   re-serializes DXIL via `feme::TargetMachineBackend` targeting a
-   `dxil-...` triple, which -- per step 5's status note -- only works for
-   modules with no remaining `dx.op.*` calls).
+   Status: the DXIL -> SPIR-V direction is implemented and validated end to
+   end (`feme --from=dxil --to=spirv`), via
+   `feme::spirv::RaisedLoweringPass` (see "Raised LLVM IR -> SPIR-V" above)
+   feeding LLVM's in-tree `SPIRV` target. The SPIR-V -> DXIL direction is
+   not: it needs a pass raising SPIR-V-derived, translated LLVM IR into
+   DXIL's conventions, and is additionally blocked upstream of that by
+   MLIR's `SPIRVToLLVM` conversion having no patterns for image types (see
+   "Known gap: `spirv` dialect -> `llvm` dialect conversion coverage"
+   above), so no SPIR-V shader using a resource reaches LLVM IR at all
+   today.
 7. **DXBC import**: build `dxbc-as` (see Testing Tools above) first —
    a standalone, MLIR-independent DXBC assembler — so DXBC importer tests
    have human-readable, diffable fixtures from day one; then migrate the

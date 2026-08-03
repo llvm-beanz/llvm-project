@@ -25,14 +25,23 @@ each independently name `dxil`, `spirv` (re-serializing back to that format
 via its own LLVM backend), or any other LLVM target triple registered with
 the `TargetRegistry` (e.g. `amdgcn-amd-amdhsa`) for real-ISA retargeting.
 
-Current limitations: retargeting a DXIL input to any target requires
-`feme::dxil::OpRaisingPass` to first undo its `dx.op.*` calling convention,
-and retargeting to `amdgcn-*` additionally requires
-`feme::amdgpu::RaisedLoweringPass`; both passes are deliberately incremental
-(see the DXIL and "Raised LLVM IR -> AMDGPU" sections of
-[../Design.md](../Design.md)) and do not yet cover resource load/store or
-input/output signature ops, so real shaders using those will fail at this
-stage rather than at any point specific to `feme`'s own Driver/CLI logic.
+Current limitations. Retargeting a DXIL input to any target first requires
+undoing its `dx.op.*` calling convention and recovering the shader model and
+entry point information from its `dx.*` metadata; retargeting to SPIR-V or
+`amdgcn-*` additionally requires re-expressing the result in that target's
+own intrinsics and resource conventions. All of these passes are
+deliberately incremental (see the DXIL, "Raised LLVM IR -> AMDGPU", and
+"Raised LLVM IR -> SPIR-V" sections of [../Design.md](../Design.md)): typed
+buffers (`Buffer`/`RWBuffer`) are covered, but textures, samplers, raw and
+structured buffer accesses, cbuffer loads, and shader input/output signature
+ops are not, so a shader using those will fail at this stage rather than at
+any point specific to `feme`'s own Driver/CLI logic.
+
+A SPIR-V input is currently limited to shaders that use neither resources
+nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
+`feme` reuses rather than reimplementing -- has no patterns for SPIR-V image
+types. See "Known gap: `spirv` dialect -> `llvm` dialect conversion
+coverage" in [../Design.md](../Design.md).
 
 ## OPTIONS
 
