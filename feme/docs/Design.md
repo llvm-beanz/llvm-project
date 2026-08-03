@@ -402,6 +402,41 @@ From there, FeMe leverages existing MLIR conversions (`SPIRVToLLVM`, and
 `spirv`-dialect canonicalization/transform passes already in MLIR) to reach
 the `llvm` dialect / `llvm::Module` for retargeting or for DXIL export.
 
+#### Status: SPIR-V -> MLIR `llvm` dialect -> LLVM IR (implemented, as two composable stages)
+
+The `spirv` dialect -> `llvm::Module` leg above is implemented as two
+separate `Translator`s, each independently registered with `feme-translate`
+(see the "Testing Tools" section) and `lit`-tested on its own, rather than
+one opaque step -- matching how DXIL's `feme::dxil::OpRaisingPass` is
+tested in isolation rather than only end to end:
+
+1. `feme::SPIRVToLLVMDialectTranslator` (`spirv` -> `llvmdialect`,
+   `feme/lib/Translate/SPIRV/SPIRVToLLVMDialectTranslator.cpp`): runs MLIR's
+   `createConvertSPIRVToLLVMPass` and stops at the resulting `llvm` dialect
+   `mlir::ModuleOp` -- this is "read SPIR-V into MLIR, [then] translate that
+   to the LLVM-IR dialect".
+2. `feme::LLVMDialectToLLVMIRTranslator` (`llvmdialect` -> `llvmir`,
+   `feme/lib/Translate/LLVMIR/LLVMDialectToLLVMIRTranslator.cpp`): runs
+   `mlir::translateModuleToLLVMIR` on an `llvm` dialect module. This stage is
+   deliberately format-agnostic (it does not depend on the `spirv` dialect
+   at all) since it is the same "last mile" any FeMe pipeline that reaches
+   the `llvm` dialect needs, matching how DXIL import re-enters MLIR only at
+   the `llvm` dialect for passes that need it (see the DXIL section below).
+
+`feme::SPIRVToLLVMTranslator` (`spirv` -> `llvmir`) composes both stages
+into a single `Translator` for callers that want the end-to-end result
+without caring about the intermediate `llvm` dialect representation (e.g.
+the SPIR-V "null pipeline" deviation below, which historically used it
+directly); it contains no logic of its own beyond that composition.
+
+The resulting `llvm::Module` is then handed to `feme::TargetMachineBackend`
+targeting LLVM's in-tree `SPIRV` backend (`llvm/lib/Target/SPIRV`), which
+lowers it the rest of the way to a real SPIR-V binary using that backend's
+own `llvm.spv.*` target intrinsics -- FeMe does not need to (and does not)
+emit those intrinsics itself; that is `TargetMachineBackend`'s/the `SPIRV`
+target's job, exactly as for any other retargeting `Backend` (see
+Retargeting to Native ISA below).
+
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
 DXIL *is* LLVM IR: it's serialized as LLVM bitcode (frozen at an old LLVM IR
@@ -807,7 +842,13 @@ ever testing through the full `feme` driver end to end:
   `feme::SPIRVToLLVMTranslator` is registered as the `--spirv-to-llvmir`
   flag (`feme/lib/Translate/SPIRV/TranslateRegistration.cpp`), so it can be
   `lit`/`FileCheck`-tested the same way as `--import-spirv` rather than via
-  `gtest` (see the deviation note under Testing Strategy below). Likewise,
+  `gtest` (see the deviation note under Testing Strategy below). Its two
+  component stages are registered the same way: `feme::SPIRVToLLVMDialectTranslator`
+  as `--spirv-to-llvmdialect` (same file) and the format-agnostic
+  `feme::LLVMDialectToLLVMIRTranslator` as `--llvmdialect-to-llvmir`
+  (`feme/lib/Translate/LLVMIR/TranslateRegistration.cpp`), so the
+  intermediate `llvm` dialect stage can also be `lit`-tested on its own (see
+  the "SPIR-V -> MLIR llvm dialect -> LLVM IR" section below). Likewise,
   `feme::TargetMachineBackend` is registered as the `--llvm-backend` flag
   (`feme/lib/Target/TranslateRegistration.cpp`; parses `.ll`/bitcode input,
   writes the `Backend`'s binary output), letting the SPIR-V "null pipeline"
@@ -1094,6 +1135,19 @@ feme/
   `<arch>-registered-target` feature (mirroring `llvm/test/lit.cfg.py`) so
   the null-pipeline test can `REQUIRES: spirv-registered-target` instead of
   unconditionally requiring LLVM's `SPIRV` target to be configured in.
+- Deviation: `feme::SPIRVToLLVMTranslator` was originally a single
+  monolithic stage (`spirv` dialect straight to `llvm::Module`). It was
+  split into `feme::SPIRVToLLVMDialectTranslator` (`spirv` -> `llvm`
+  dialect) and the format-agnostic `feme::LLVMDialectToLLVMIRTranslator`
+  (`llvm` dialect -> `llvm::Module`), composed back together by
+  `feme::SPIRVToLLVMTranslator` for callers that want the combined
+  behavior, so the intermediate `llvm` dialect representation can be
+  produced and `lit`-tested on its own
+  (`test/Translate/SPIRV/spirv-to-llvmdialect*.mlir`,
+  `test/Translate/LLVMIR/llvmdialect-to-llvmir*.mlir`) rather than only as
+  an internal implementation detail -- matching how DXIL's
+  `feme::dxil::OpRaisingPass` is tested in isolation. See the "SPIR-V ->
+  MLIR llvm dialect -> LLVM IR" section above.
 - Deviation: `feme::SPIRVImporter`'s "imports a valid SPIR-V binary" case
   and `feme::DXILImporter`'s "imports raw bitcode"/"imports bitcode wrapped
   in a `DXContainer`" cases were likewise initially covered by `gtest`
