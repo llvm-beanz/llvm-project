@@ -1,0 +1,15 @@
+@LIT_SITE_CFG_IN_HEADER@
+
+import sys
+
+config.llvm_tools_dir = lit_config.substitute(r"@LLVM_TOOLS_DIR@")
+config.llvm_shlib_ext = "@SHLIBEXT@"
+config.llvm_build_mode = lit_config.substitute("@LLVM_BUILD_MODE@")
+config.feme_obj_root = r"@FEME_BINARY_DIR@"
+
+import lit.llvm
+
+lit.llvm.initialize(lit_config, config)
+
+# Let the main config do the real work.
+lit_config.load_config(config, r"@FEME_SOURCE_DIR@/test/Unit/lit.cfg.py")
