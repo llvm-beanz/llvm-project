@@ -17,10 +17,22 @@ than requiring callers to invoke each compilation stage by hand. See the
 "Command Line Tool(s)" section of [../Design.md](../Design.md) for the full
 design.
 
-`feme` is currently under initial development (see the Roadmap / Milestones
-section of [../Design.md](../Design.md)) and does not yet implement any
-translation; invoking it with any arguments other than `--help`/`--version`
-currently reports an error.
+`feme` drives `feme::Driver` (see the "Driver" section of
+[../Design.md](../Design.md)). Currently supported `--from` values are
+`dxil` and `spirv` (DXBC import is not yet implemented -- see the Roadmap /
+Milestones section of [../Design.md](../Design.md)); `--to`/`--target` may
+each independently name `dxil`, `spirv` (re-serializing back to that format
+via its own LLVM backend), or any other LLVM target triple registered with
+the `TargetRegistry` (e.g. `amdgcn-amd-amdhsa`) for real-ISA retargeting.
+
+Current limitations: retargeting a DXIL input to any target requires
+`feme::dxil::OpRaisingPass` to first undo its `dx.op.*` calling convention,
+and retargeting to `amdgcn-*` additionally requires
+`feme::amdgpu::RaisedLoweringPass`; both passes are deliberately incremental
+(see the DXIL and "Raised LLVM IR -> AMDGPU" sections of
+[../Design.md](../Design.md)) and do not yet cover resource load/store or
+input/output signature ops, so real shaders using those will fail at this
+stage rather than at any point specific to `feme`'s own Driver/CLI logic.
 
 ## OPTIONS
 
@@ -52,14 +64,14 @@ currently reports an error.
 
 ## EXAMPLES
 
-Once translation support lands (see the roadmap in
-[../Design.md](../Design.md)), `feme` is expected to be invoked as:
-
 ```shell
 # Translate a DXIL module to SPIR-V.
 feme --from=dxil --to=spirv input.dxil -o output.spv
 
-# Translate a DXBC module to DXIL.
+# Re-emit a DXIL module (e.g. after external re-optimization).
+feme --from=dxil --to=dxil input.dxil -o output.dxil
+
+# Translate a DXBC module to DXIL (not yet implemented).
 feme --from=dxbc --to=dxil input.dxbc -o output.dxil
 
 # Import SPIR-V and retarget it to an AMDGPU target.
