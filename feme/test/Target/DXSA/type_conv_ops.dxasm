@@ -1,0 +1,76 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.dtof r<0, <x, y>>, r<1>
+dtof r0.xy, r1.xyzw
+
+// CHECK-NEXT:   dxsa.dtof precise <x, y> r<0, <x, y>>, d(0x3FF0000000000000, 0x4000000000000000)
+dtof precise(xy) r0.xy, d(0x3FF0000000000000, 0x4000000000000000)
+
+// CHECK-NEXT:   dxsa.dtoi r<0, <x, y>>, r<1>
+dtoi r0.xy, r1.xyzw
+
+// CHECK-NEXT:   dxsa.dtoi precise <x, y> r<0, <x, y>>, d(0x3FF0000000000000, 0x4000000000000000)
+dtoi precise(xy) r0.xy, d(0x3FF0000000000000, 0x4000000000000000)
+
+// CHECK-NEXT:   dxsa.dtou r<0, <x, y>>, r<1>
+dtou r0.xy, r1.xyzw
+
+// CHECK-NEXT:   dxsa.dtou precise <x, y> r<0, <x, y>>, d(0x3FF0000000000000, 0x4000000000000000)
+dtou precise(xy) r0.xy, d(0x3FF0000000000000, 0x4000000000000000)
+
+// CHECK-NEXT:   dxsa.f16tof32 r<0>, r<1>
+f16tof32 r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.f16tof32 precise <x, y> r<0>, r<1>
+f16tof32 precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.f32tof16 r<0>, r<1>
+f32tof16 r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.f32tof16 precise <x, y> r<0>, r<1>
+f32tof16 precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.ftod r<0>, r<1>
+ftod r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.ftod precise <x, y> r<0>, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+ftod precise(xy) r0.xyzw, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+
+// CHECK-NEXT:   dxsa.ftoi r<0>, r<1>
+ftoi r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.ftoi precise <x, y> r<0>, r<1>
+ftoi precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.ftou r<0>, r<1>
+ftou r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.ftou precise <x, y> r<0>, r<1>
+ftou precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.itod r<0>, r<1>
+itod r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.itod precise <x, y> r<0>, l(0x1, 0x2, 0x3, 0x4)
+itod precise(xy) r0.xyzw, l(0x00000001, 0x00000002, 0x00000003, 0x00000004)
+
+// CHECK-NEXT:   dxsa.itof r<0>, r<1>
+itof r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.itof precise <x, y> r<0>, r<1>
+itof precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.utod r<0>, r<1>
+utod r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.utod precise <x, y> r<0>, l(0xA, 0xB, 0xC, 0xD)
+utod precise(xy) r0.xyzw, l(0x0000000A, 0x0000000B, 0x0000000C, 0x0000000D)
+
+// CHECK-NEXT:   dxsa.utof r<0>, r<1>
+utof r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.utof precise <x, y> r<0>, r<1>
+utof precise(xy) r0.xyzw, r1.xyzw
+// CHECK-NEXT: }

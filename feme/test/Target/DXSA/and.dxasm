@@ -1,0 +1,10 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.and r<0>, r<1>, r<2>
+and r0.xyzw, r1.xyzw, r2.xyzw
+// CHECK-NEXT:   dxsa.and r<0>, r<1>, l(0xFF, 0xFF, 0xFF, 0xFF)
+and r0.xyzw, r1.xyzw, l(0x000000FF, 0x000000FF, 0x000000FF, 0x000000FF)
+// CHECK-NEXT: }

@@ -1,0 +1,17 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.dcl_index_range v<1, <x>>, 3
+dcl_indexrange v1.x, 3
+
+// CHECK-NEXT:   dxsa.dcl_index_range v<4>, 6
+dcl_indexrange v4.xyzw, 6
+
+// CHECK-NEXT:   dxsa.dcl_index_range o<0, <x>>, 4
+dcl_indexrange o0.x, 4
+
+// CHECK-NEXT:   dxsa.dcl_index_range vpc<7, <x, y, z>>, 3
+dcl_indexrange vpc7.xyz, 3
+// CHECK-NEXT: }

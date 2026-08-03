@@ -1,0 +1,20 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_uav_structured <id = 0, struct_byte_stride = 4>
+dcl_uav_structured u0, 4
+
+// CHECK-NEXT:   dxsa.dcl_uav_structured <id = 1, struct_byte_stride = 16>, <flags =  globallyCoherent>
+dcl_uav_structured globallyCoherent u1, 16
+
+// CHECK-NEXT:   dxsa.dcl_uav_structured <id = 2, struct_byte_stride = 32>, <flags =  hasOrderPreservingCounter>
+dcl_uav_structured hasOrderPreservingCounter u2, 32
+
+// CHECK-NEXT:   dxsa.dcl_uav_structured <id = 3, struct_byte_stride = 64>, <flags =  globallyCoherent|hasOrderPreservingCounter>
+dcl_uav_structured globallyCoherent hasOrderPreservingCounter u3, 64
+
+// CHECK-NEXT:   dxsa.dcl_uav_structured <id = 0, struct_byte_stride = 32, lbound = 0, ubound = 3, space = 1>
+dcl_uav_structured u0[0][3], 32, 1
+// CHECK-NEXT: }

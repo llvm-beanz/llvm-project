@@ -1,0 +1,26 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.sincos r<0>, r<1>, r<2>
+sincos r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.sincos_sat r<0>, r<1>, r<2>
+sincos_sat r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.sincos null, r<1>, r<2>
+sincos null, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.sincos r<0>, null, r<2>
+sincos r0.xyzw, null, r2.xyzw
+
+// CHECK-NEXT:   dxsa.sincos r<0>, r<1>, -r<2>
+sincos r0.xyzw, r1.xyzw, -r2.xyzw
+
+// CHECK-NEXT:   dxsa.sincos precise <x, y, z, w> r<0>, r<1>, r<2>
+sincos precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.sincos_sat precise <x> r<0>, r<1>, r<2>
+sincos_sat precise(x) r0.xyzw, r1.xyzw, r2.xyzw
+// CHECK-NEXT: }

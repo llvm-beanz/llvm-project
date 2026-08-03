@@ -1,0 +1,10 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.ushr r<0, <y>>, v<0, <y>>, l(0x8)
+ushr r0.y, v0.y, l(0x00000008)
+// CHECK-NEXT:   dxsa.ushr r<0, <y>>, v<0, <y>>, v<0, <z>>
+ushr r0.y, v0.y, v0.z
+// CHECK-NEXT: }

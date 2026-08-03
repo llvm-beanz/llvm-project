@@ -1,0 +1,32 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 0, dim =  buffer>, <x =  unorm, y =  snorm, z =  sint, w =  uint>
+dcl_uav_typed_buffer (unorm, snorm, sint, uint) u0
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 1, dim =  texture1d>, <x =  float, y =  float, z =  float, w =  float>
+dcl_uav_typed_texture1d (float, float, float, float) u1
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 2, dim =  texture1darray>, <x =  float, y =  float, z =  float, w =  float>
+dcl_uav_typed_texture1darray (float, float, float, float) u2
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 3, dim =  texture2d>, <x =  float, y =  float, z =  float, w =  float>
+dcl_uav_typed_texture2d (float, float, float, float) u3
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 4, dim =  texture2darray>, <x =  float, y =  float, z =  float, w =  float>
+dcl_uav_typed_texture2darray (float, float, float, float) u4
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 5, dim =  texture3d>, <x =  float, y =  float, z =  float, w =  float>
+dcl_uav_typed_texture3d (float, float, float, float) u5
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 6, dim =  texture2d>, <x =  float, y =  float, z =  float, w =  float>, <flags =  globallyCoherent>
+dcl_uav_typed_texture2d globallyCoherent (float, float, float, float) u6
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 7, dim =  texture2d>, <x =  float, y =  float, z =  float, w =  float>, <flags =  rasterizerOrdered>
+dcl_uav_typed_texture2d rasterizerOrdered (float, float, float, float) u7
+
+// CHECK-NEXT:   dxsa.dcl_uav_typed <id = 0, dim =  texture3d, lbound = 0, ubound = 3, space = 1>, <x =  float, y =  float, z =  float, w =  float>
+dcl_uav_typed_texture3d (float, float, float, float) u0[0][3], 1
+// CHECK-NEXT: }

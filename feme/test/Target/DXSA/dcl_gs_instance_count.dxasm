@@ -1,0 +1,10 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_gs_instance_count 1
+// CHECK-NEXT:   dxsa.dcl_gs_instance_count 32
+
+dcl_gsinstances 1
+dcl_gsinstances 32
+// CHECK-NEXT: }

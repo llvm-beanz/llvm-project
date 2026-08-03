@@ -1,0 +1,22 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// Every operand form appears twice in a row, once as div and once as
+// div_sat, so the test asserts both share identical operand decoding and
+// differ only by the saturate modifier.
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.div r<0>, r<1>, r<2>
+div r0.xyzw, r1.xyzw, r2.xyzw
+// CHECK-NEXT:   dxsa.div_sat r<0>, r<1>, r<2>
+div_sat r0.xyzw, r1.xyzw, r2.xyzw
+// CHECK-NEXT:   dxsa.div r<0>, r<1>, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+div r0.xyzw, r1.xyzw, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+// CHECK-NEXT:   dxsa.div_sat r<0>, r<1>, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+div_sat r0.xyzw, r1.xyzw, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+// CHECK-NEXT:   dxsa.div r<0>, -r<1>, |r<2>|
+div r0.xyzw, -r1.xyzw, |r2.xyzw|
+// CHECK-NEXT:   dxsa.div_sat r<0>, -r<1>, |r<2>|
+div_sat r0.xyzw, -r1.xyzw, |r2.xyzw|
+// CHECK-NEXT: }

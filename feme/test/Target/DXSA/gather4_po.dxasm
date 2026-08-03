@@ -1,0 +1,9 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.gather4_po r<1, <x>>, v<0, <x, y, x, x>>, r<0, <x, y, x, x>>, t<0, vector>, s<0, vector, <x>>
+
+gather4_po resource_dim(texture2d) resource_return_type(float, float, float, float) r1.x, v0.xyxx, r0.xyxx, t0.xyzw, s0.x
+// CHECK: dxsa.gather4_po_s r<3, <x>>, v<0, <x, y, x, x>>, r<0, <x, y, x, x>>, t<0, vector>, s<0, vector, <w>>, r<4, <x>>
+
+gather4_po_s resource_dim(texture2d) resource_return_type(float, float, float, float) r3.x, r4.x, v0.xyxx, r0.xyxx, t0.xyzw, s0.w

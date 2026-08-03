@@ -1,0 +1,17 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_input_siv v<0>, <position>
+dcl_input_siv v0.xyzw, position
+
+// CHECK-NEXT:   dxsa.dcl_input_siv v<1, <x, y, z>>, <clipDistance>
+dcl_input_siv v1.xyz, clipDistance
+
+// CHECK-NEXT:   dxsa.dcl_input_siv v<2, <x, y>>, <cullDistance>
+dcl_input_siv v2.xy, cullDistance
+
+// CHECK-NEXT:   dxsa.dcl_input_siv v<3, <x>>, <finalQuadUInsideTessFactor>
+dcl_input_siv v3.x, finalQuadUInsideTessFactor
+// CHECK-NEXT: }

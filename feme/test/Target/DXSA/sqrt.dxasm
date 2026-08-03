@@ -1,0 +1,26 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.sqrt r<0>, r<1>
+sqrt r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.sqrt r<0>, -r<1>
+sqrt r0.xyzw, -r1.xyzw
+
+// CHECK-NEXT:   dxsa.sqrt r<0>, |r<1>|
+sqrt r0.xyzw, |r1.xyzw|
+
+// CHECK-NEXT:   dxsa.sqrt r<0>, -|r<1>|
+sqrt r0.xyzw, -|r1.xyzw|
+
+// CHECK-NEXT:   dxsa.sqrt r<0, <x>>, r<1, <y, z, w, y>>
+sqrt r0.x, r1.yzwy
+
+// CHECK-NEXT:   dxsa.sqrt precise <x, y> r<0>, r<1>
+sqrt precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.sqrt_sat r<0>, r<1>
+sqrt_sat r0.xyzw, r1.xyzw
+// CHECK-NEXT: }

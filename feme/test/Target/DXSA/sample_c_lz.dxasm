@@ -1,0 +1,9 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.sample_c_lz r<0, <y>>, v<0, <x, y, x, x>>, t<3, vector, <x, x, x, x>>, s<5>, r<0, <x>>
+
+sample_c_lz resource_dim(texture2d) resource_return_type(float, float, float, float) r0.y, v0.xyxx, t3.xxxx, s5, r0.x
+// CHECK: dxsa.sample_c_lz_s r<1, <x>>, v<0, <x, y, x, x>>, t<3, vector, <x, x, x, x>>, s<5>, r<0, <x>>, <l(0x3F000000), null>, <u = -4, v = 1, w = 0>
+
+sample_c_lz_s aoffimmi(-4, 1, 0) resource_dim(texture2d) resource_return_type(float, float, float, float) r1.x, null, v0.xyxx, t3.xxxx, s5, r0.x, l(0x3F000000)

@@ -1,0 +1,24 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_input_ps_siv linear v0.x, position
+// CHECK:      dxsa.dcl_input_ps_siv linear v<0, <x>>, <position>
+dcl_input_ps_siv linear v0.x, position
+
+// dcl_input_ps_siv linear v1.x, clipDistance
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<1, <x>>, <clipDistance>
+dcl_input_ps_siv linear v1.x, clipDistance
+
+// dcl_input_ps_siv linear v2.x, cullDistance
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<2, <x>>, <cullDistance>
+dcl_input_ps_siv linear v2.x, cullDistance
+
+// dcl_input_ps_siv linear v3.x, renderTargetArrayIndex
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<3, <x>>, <renderTargetArrayIndex>
+dcl_input_ps_siv linear v3.x, renderTargetArrayIndex
+
+// dcl_input_ps_siv linear v4.x, viewportArrayIndex
+// CHECK-NEXT: dxsa.dcl_input_ps_siv linear v<4, <x>>, <viewportArrayIndex>
+dcl_input_ps_siv linear v4.x, viewportArrayIndex

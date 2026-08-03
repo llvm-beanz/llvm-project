@@ -1,0 +1,29 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.dp3 r<0>, r<1>, r<2>
+dp3 r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dp3_sat r<0>, r<1>, r<2>
+dp3_sat r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dp3 r<0>, r<1>, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+dp3 r0.xyzw, r1.xyzw, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+
+// CHECK-NEXT:   dxsa.dp3_sat r<0>, r<1>, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+dp3_sat r0.xyzw, r1.xyzw, l(0x3F800000, 0x40000000, 0x40400000, 0x40800000)
+
+// CHECK-NEXT:   dxsa.dp3 r<0>, -r<1>, |r<2>|
+dp3 r0.xyzw, -r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.dp3_sat r<0>, -r<1>, |r<2>|
+dp3_sat r0.xyzw, -r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.dp3 r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+dp3 r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.dp3_sat r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+dp3_sat r0.x, r1.yzwy, r2.xxxx
+// CHECK-NEXT: }

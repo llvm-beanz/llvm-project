@@ -1,0 +1,14 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_input_control_point_count 1
+// CHECK-NEXT:   dxsa.dcl_input_control_point_count 3
+// CHECK-NEXT:   dxsa.dcl_input_control_point_count 16
+// CHECK-NEXT:   dxsa.dcl_input_control_point_count 32
+
+dcl_input_control_point_count 1
+dcl_input_control_point_count 3
+dcl_input_control_point_count 16
+dcl_input_control_point_count 32
+// CHECK-NEXT: }

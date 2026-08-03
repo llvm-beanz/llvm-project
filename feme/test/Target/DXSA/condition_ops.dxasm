@@ -1,0 +1,88 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.eq r<0, <x>>, -r<1, <y, z, w, y>>, -|r<2, <x, x, x, x>>|
+eq r0.x, -r1.yzwy, -|r2.xxxx|
+
+// CHECK-NEXT:   dxsa.eq precise <x, y, z, w> r<0>, r<1>, |r<2>|
+eq precise(xyzw) r0.xyzw, r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.ge r<0, <x>>, -r<1, <y, z, w, y>>, -|r<2, <x, x, x, x>>|
+ge r0.x, -r1.yzwy, -|r2.xxxx|
+
+// CHECK-NEXT:   dxsa.ge precise <x, y, z, w> r<0>, r<1>, |r<2>|
+ge precise(xyzw) r0.xyzw, r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.lt r<0, <x>>, -r<1, <y, z, w, y>>, -|r<2, <x, x, x, x>>|
+lt r0.x, -r1.yzwy, -|r2.xxxx|
+
+// CHECK-NEXT:   dxsa.lt precise <x, y, z, w> r<0>, r<1>, |r<2>|
+lt precise(xyzw) r0.xyzw, r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.ne r<0, <x>>, -r<1, <y, z, w, y>>, -|r<2, <x, x, x, x>>|
+ne r0.x, -r1.yzwy, -|r2.xxxx|
+
+// CHECK-NEXT:   dxsa.ne precise <x, y, z, w> r<0>, r<1>, |r<2>|
+ne precise(xyzw) r0.xyzw, r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.ieq r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+ieq r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.ieq precise <x, y, z, w> r<0>, r<1>, r<2>
+ieq precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.ige r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+ige r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.ige precise <x, y, z, w> r<0>, r<1>, r<2>
+ige precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.ilt r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+ilt r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.ilt precise <x, y, z, w> r<0>, r<1>, r<2>
+ilt precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.ine r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+ine r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.ine precise <x, y, z, w> r<0>, r<1>, r<2>
+ine precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.uge r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+uge r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.uge precise <x, y, z, w> r<0>, r<1>, r<2>
+uge precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.ult r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+ult r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.ult precise <x, y, z, w> r<0>, r<1>, r<2>
+ult precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.deq r<0, <x, y>>, -r<1, <z, w, x, y>>, -|r<2, <x, y, x, y>>|
+deq r0.xy, -r1.zwxy, -|r2.xyxy|
+
+// CHECK-NEXT:   dxsa.deq precise <x, y> r<0, <x, y>>, r<1>, |r<2>|
+deq precise(xy) r0.xy, r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.dge r<0, <x, y>>, -r<1, <z, w, x, y>>, -|r<2, <x, y, x, y>>|
+dge r0.xy, -r1.zwxy, -|r2.xyxy|
+
+// CHECK-NEXT:   dxsa.dge precise <x, y> r<0, <x, y>>, r<1>, |r<2>|
+dge precise(xy) r0.xy, r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.dlt r<0, <x, y>>, -r<1, <z, w, x, y>>, -|r<2, <x, y, x, y>>|
+dlt r0.xy, -r1.zwxy, -|r2.xyxy|
+
+// CHECK-NEXT:   dxsa.dlt precise <x, y> r<0, <x, y>>, r<1>, |r<2>|
+dlt precise(xy) r0.xy, r1.xyzw, |r2.xyzw|
+
+// CHECK-NEXT:   dxsa.dne r<0, <x, y>>, -r<1, <z, w, x, y>>, -|r<2, <x, y, x, y>>|
+dne r0.xy, -r1.zwxy, -|r2.xyxy|
+
+// CHECK-NEXT:   dxsa.dne precise <x, y> r<0, <x, y>>, r<1>, |r<2>|
+dne precise(xy) r0.xy, r1.xyzw, |r2.xyzw|
+// CHECK-NEXT: }

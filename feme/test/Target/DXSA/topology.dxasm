@@ -1,0 +1,31 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.cut
+cut
+
+// CHECK-NEXT:   dxsa.emit
+emit
+
+// CHECK-NEXT:   dxsa.emit_then_cut
+emit_then_cut
+
+// CHECK-NEXT:   dxsa.emit_stream 0
+emit_stream m0
+
+// CHECK-NEXT:   dxsa.emit_stream 3
+emit_stream m3
+
+// CHECK-NEXT:   dxsa.cut_stream 0
+cut_stream m0
+
+// CHECK-NEXT:   dxsa.cut_stream 3
+cut_stream m3
+
+// CHECK-NEXT:   dxsa.emit_then_cut_stream 0
+emit_then_cut_stream m0
+
+// CHECK-NEXT:   dxsa.emit_then_cut_stream 3
+emit_then_cut_stream m3
+// CHECK-NEXT: }

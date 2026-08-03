@@ -1,0 +1,51 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - 2>&1 | FileCheck %s --check-prefix=DIAG
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.dcl_temps 1
+dcl_temps 1
+
+// Unknown opcode 0x7FF with a valid length of 3.
+// CHECK-NEXT:   dxsa.unknown <tokens = [0x030007FF, 0xDEADBEEF, 0x12345678]>
+// DIAG: warning: treating next 3 token(s) as unknown: unknown opcode: 2047
+.dword 0x030007FF, 0xDEADBEEF, 0x12345678
+
+// CHECK-NEXT:   dxsa.dcl_temps 2
+dcl_temps 2
+
+// CUSTOMDATA: the total token count lives in the second token.
+// CHECK-NEXT:   dxsa.unknown <tokens = [0x00000035, 0x00000004, 0x11111111, 0x22222222]>
+// DIAG: warning: treating next 4 token(s) as unknown: customdata is not supported yet
+.dword 0x00000035, 0x00000004, 0x11111111, 0x22222222
+
+// CHECK-NEXT:   dxsa.dcl_temps 3
+dcl_temps 3
+
+// Valid D3D10_SB_OPCODE_DCL_TEMPS opcode, but the length is 3 instead of 2.
+// This is allowed, the last one will be skipped.
+// CHECK-NEXT:   dxsa.dcl_temps 4
+dcl_temps 4, 0xCAFEBABE
+
+// CHECK-NEXT:   dxsa.dcl_temps 5
+dcl_temps 5
+
+// Valid D3D10_SB_OPCODE_DCL_TEMPS opcode, but the length is 1 instead of 2.
+// CHECK-NEXT:   dxsa.unknown <tokens = [0x01000068]>
+// CHECK-NEXT:   dxsa.unknown <tokens = [0x00000006]>
+.dword 0x01000068
+.dword 0x00000006
+
+// CHECK-NEXT:   dxsa.dcl_temps 7
+dcl_temps 7
+
+// add r0.xyzw, <src0>, r2.xyzw with the src0 operand type field corrupted to
+// an unknown value (0xFF).
+// CHECK-NEXT:   dxsa.unknown <tokens = [0x07000000, 0x001000F2, 0x00000000, 0x001FFE46, 0x00000001, 0x00100E46, 0x00000002]>
+// DIAG: warning: treating next 7 token(s) as unknown: unknown operand type: 255
+.dword 0x07000000, 0x001000F2, 0x00000000, 0x001FFE46, 0x00000001, 0x00100E46, 0x00000002
+
+// CHECK-NEXT:   dxsa.dcl_temps 8
+dcl_temps 8
+// CHECK-NEXT: }

@@ -1,0 +1,25 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.sync <uav_global>
+sync uav_global
+
+// CHECK-NEXT:   dxsa.sync <uav_group>
+sync uav_group
+
+// CHECK-NEXT:   dxsa.sync <tgsm>
+sync tgsm
+
+// CHECK-NEXT:   dxsa.sync <threads>
+sync threads
+
+// CHECK-NEXT:   dxsa.sync <uav_global|threads>
+sync threads | uav_global
+
+// CHECK-NEXT:   dxsa.sync <tgsm|threads>
+sync threads | tgsm
+
+// CHECK-NEXT:   dxsa.sync <uav_global|tgsm|threads>
+sync threads | tgsm | uav_global
+// CHECK-NEXT: }

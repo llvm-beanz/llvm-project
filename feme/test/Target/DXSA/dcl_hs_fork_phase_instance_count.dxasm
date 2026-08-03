@@ -1,0 +1,8 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_hs_fork_phase_instance_count 42
+
+dcl_hs_fork_phase_instance_count 42
+// CHECK-NEXT: }

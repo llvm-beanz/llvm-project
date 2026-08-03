@@ -1,0 +1,16 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_input_ps_sgv v0.x, primitiveID
+// CHECK:      dxsa.dcl_input_ps_sgv v<0, <x>>, <primitiveID>
+dcl_input_ps_sgv undefined v0.x, primitiveID
+
+// dcl_input_ps_sgv v1.x, isFrontFace
+// CHECK-NEXT: dxsa.dcl_input_ps_sgv v<1, <x>>, <isFrontFace>
+dcl_input_ps_sgv undefined v1.x, isFrontFace
+
+// dcl_input_ps_sgv v2.x, sampleIndex
+// CHECK-NEXT: dxsa.dcl_input_ps_sgv v<2, <x>>, <sampleIndex>
+dcl_input_ps_sgv undefined v2.x, sampleIndex

@@ -1,0 +1,15 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.sample_l r<0>, v<0, <x, y, x, x>>, t<3, vector>, s<5>, v<0, <y>>
+
+sample_l resource_dim(texture2d) resource_return_type(float, float, float, float) r0.xyzw, v0.xyxx, t3.xyzw, s5, v0.y
+// CHECK: dxsa.sample_l r<1>, v<0, <x, y, x, x>>, t<3, vector>, s<5>, v<0, <y>>, <u = -5, v = 7, w = 0>
+
+sample_l aoffimmi(-5, 7, 0) resource_dim(texture2d) resource_return_type(float, float, float, float) r1.xyzw, v0.xyxx, t3.xyzw, s5, v0.y
+// CHECK: dxsa.sample_l_cl_s r<1>, v<0>, t<5, vector>, s<5>, v<0, <y>>, r<2, <x>>
+
+sample_l_s resource_dim(texturecubearray) resource_return_type(float, float, float, float) r1.xyzw, r2.x, v0.xyzw, t5.xyzw, s5, v0.y
+// CHECK: dxsa.sample_l_cl_s r<1>, v<0, <x, y, x, x>>, t<3, vector>, s<5>, v<0, <y>>, r<2, <x>>, <u = -3, v = 2, w = 0>
+
+sample_l_s aoffimmi(-3, 2, 0) resource_dim(texture2d) resource_return_type(float, float, float, float) r1.xyzw, r2.x, v0.xyxx, t3.xyzw, s5, v0.y

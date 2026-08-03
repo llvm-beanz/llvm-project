@@ -1,0 +1,17 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<0, <x>>, <vertexID>
+dcl_input_sgv v0.x, vertexID
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<0, <y>>, <instanceID>
+dcl_input_sgv v0.y, instanceID
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<1, <z>>, <vertexID>
+dcl_input_sgv v1.z, vertexID
+
+// CHECK-NEXT:   dxsa.dcl_input_sgv v<1, <w>>, <instanceID>
+dcl_input_sgv v1.w, instanceID
+// CHECK-NEXT: }

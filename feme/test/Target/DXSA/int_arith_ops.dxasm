@@ -1,0 +1,176 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.iadd r<0>, r<1>, r<2>
+iadd r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.iadd r<0>, -r<1>, -r<2>
+iadd r0.xyzw, -r1.xyzw, -r2.xyzw
+
+// CHECK-NEXT:   dxsa.iadd r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+iadd r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.iadd precise <x, y, z, w> r<0>, r<1>, r<2>
+iadd precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.imax r<0>, r<1>, r<2>
+imax r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.imax r<0>, -r<1>, -r<2>
+imax r0.xyzw, -r1.xyzw, -r2.xyzw
+
+// CHECK-NEXT:   dxsa.imax r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+imax r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.imax precise <x, y, z, w> r<0>, r<1>, r<2>
+imax precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.imin r<0>, r<1>, r<2>
+imin r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.imin r<0>, -r<1>, -r<2>
+imin r0.xyzw, -r1.xyzw, -r2.xyzw
+
+// CHECK-NEXT:   dxsa.imin r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+imin r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.imin precise <x, y, z, w> r<0>, r<1>, r<2>
+imin precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.ineg r<0>, r<1>
+ineg r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.ineg r<0, <x>>, r<1, <y, z, w, y>>
+ineg r0.x, r1.yzwy
+
+// CHECK-NEXT:   dxsa.ineg precise <x, y, z, w> r<0>, r<1>
+ineg precise(xyzw) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.umax r<0>, r<1>, r<2>
+umax r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.umax r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+umax r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:   dxsa.umax precise <x, y, z, w> r<0>, r<1>, r<2>
+umax precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.umin r<0>, r<1>, r<2>
+umin r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.umin r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>
+umin r0.x, r1.yzwy, r2.xxxx
+
+// CHECK-NEXT:    dxsa.imad precise <x, y, z, w> r<0>, r<0>, r<1>, r<2>
+imad precise(xyzw) r0.xyzw, r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:    dxsa.imad r<1>, r<1>, r<2>, r<3>
+imad r1.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:    dxsa.imad r<1>, -r<1>, r<2>, r<3>
+imad r1.xyzw, -r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:    dxsa.imad r<1>, -r<1>, r<2>, -r<3>
+imad r1.xyzw, -r1.xyzw, r2.xyzw, -r3.xyzw
+
+// CHECK-NEXT:    dxsa.imad r<1>, r<1, <y, x, z, w>>, r<2>, r<3, <z, x, y, w>>
+imad r1.xyzw, r1.yxzw, r2.xyzw, r3.zxyw
+
+// CHECK-NEXT:    dxsa.imad r<1, <x>>, r<1, <x>>, r<1, <y>>, r<1, <z>>
+imad r1.x, r1.x, r1.y, r1.z
+
+// CHECK-NEXT:    dxsa.imul precise <x, y, z> r<7, <x, y, z>>, r<3, <x, y, z>>, r<3, <x, y, z, x>>, r<4, <x, y, z, x>>
+imul precise(xyz) r7.xyz, r3.xyz, r3.xyzx, r4.xyzx
+
+// CHECK-NEXT:    dxsa.imul r<6, <x, z, w>>, r<2, <x, z, w>>, r<2, <y, y, z, x>>, r<3, <y, y, z, x>>
+imul r6.xzw, r2.xzw, r2.yyzx, r3.yyzx
+
+// CHECK-NEXT:    dxsa.imul r<5, <x>>, r<1, <x>>, r<1, <y>>, r<1, <x>>
+imul r5.x, r1.x, r1.y, r1.x
+
+// CHECK-NEXT:    dxsa.imul r<5, <w>>, r<0, <w>>, -r<1, <y>>, r<1, <x>>
+imul r5.w, r0.w, -r1.y, r1.x
+
+// Typically, FXC produces imul with null for destHI operand.
+// CHECK-NEXT:    dxsa.imul null, r<0, <z>>, r<0, <y>>, -r<0, <x>>
+imul null, r0.z, r0.y, -r0.x
+
+// CHECK-NEXT:    dxsa.msad r<0>, r<0>, r<1>, r<2>
+msad r0.xyzw, r0.xyzw{mask}, r1.xyzw{mask}, r2.xyzw{mask}
+
+// CHECK-NEXT:    dxsa.msad r<1, <x, y>>, r<1, <x, x, x, x>>, r<2, <y, z, y, y>>, r<1, <y, z, y, y>>
+msad r1.xy, r1.xxxx, r2.yzyy, r1.yzyy
+
+// CHECK-NEXT:    dxsa.msad precise <x, y, z, w> r<2>, r<2, <x, x, x, x>>, r<4>, r<3, <z, w, x, y>>
+msad precise(xyzw) r2.xyzw, r2.xxxx, r4.xyzw, r3.zwxy
+
+// CHECK-NEXT:    dxsa.msad r<1, <x>>, r<1, <x>>, r<1, <y>>, r<1, <z>>
+msad r1.x, r1.x, r1.y, r1.z
+
+// CHECK-NEXT:   dxsa.umin precise <x, y, z, w> r<0>, r<1>, r<2>
+umin precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.udiv r<0>, r<1>, r<2>, r<3>
+udiv r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.udiv null, r<1>, r<2>, r<3>
+udiv null, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.udiv r<0>, null, r<2>, r<3>
+udiv r0.xyzw, null, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.udiv r<0, <x>>, r<1, <x>>, r<2, <y, z, w, y>>, r<3, <x, x, x, x>>
+udiv r0.x, r1.x, r2.yzwy, r3.xxxx
+
+// CHECK-NEXT:   dxsa.udiv precise <x, y, z, w> r<0>, r<1>, r<2>, r<3>
+udiv precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.umul r<0>, r<1>, r<2>, r<3>
+umul r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.umul null, r<1>, r<2>, r<3>
+umul null, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.umul r<0>, null, r<2>, r<3>
+umul r0.xyzw, null, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.umul r<0, <x>>, r<1, <x>>, r<2, <y, z, w, y>>, r<3, <x, x, x, x>>
+umul r0.x, r1.x, r2.yzwy, r3.xxxx
+
+// CHECK-NEXT:   dxsa.umul precise <x, y, z, w> r<0>, r<1>, r<2>, r<3>
+umul precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.umad r<0>, r<1>, r<2>, r<3>
+umad r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.umad r<0, <x>>, r<1, <y, z, w, y>>, r<2, <x, x, x, x>>, r<3>
+umad r0.x, r1.yzwy, r2.xxxx, r3.xyzw
+
+// CHECK-NEXT:   dxsa.umad precise <x, y, z, w> r<0>, r<1>, r<2>, r<3>
+umad precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.uaddc r<0>, r<1>, r<2>, r<3>
+uaddc r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.uaddc r<0>, null, r<2>, r<3>
+uaddc r0.xyzw, null, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.uaddc r<0, <x>>, r<1, <x>>, r<2, <y, z, w, y>>, r<3, <x, x, x, x>>
+uaddc r0.x, r1.x, r2.yzwy, r3.xxxx
+
+// CHECK-NEXT:   dxsa.uaddc precise <x, y, z, w> r<0>, r<1>, r<2>, r<3>
+uaddc precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.usubb r<0>, r<1>, r<2>, r<3>
+usubb r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.usubb r<0>, null, r<2>, r<3>
+usubb r0.xyzw, null, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.usubb r<0, <x>>, r<1, <x>>, r<2, <y, z, w, y>>, r<3, <x, x, x, x>>
+usubb r0.x, r1.x, r2.yzwy, r3.xxxx
+
+// CHECK-NEXT:   dxsa.usubb precise <x, y, z, w> r<0>, r<1>, r<2>, r<3>
+usubb precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+// CHECK-NEXT: }

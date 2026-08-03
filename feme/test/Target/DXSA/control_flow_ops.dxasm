@@ -1,0 +1,52 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.abort
+abort
+
+// CHECK-NEXT:   dxsa.break
+break
+
+// CHECK-NEXT:   dxsa.call label<3>
+call label3
+
+// CHECK-NEXT:   dxsa.callc_z r<0, <x>>, label<3>
+callc_z r0.x, label3
+
+// CHECK-NEXT:   dxsa.callc_nz r<0, <x>>, label<3>
+callc_nz r0.x, label3
+
+// CHECK-NEXT:   dxsa.case l(0x2A)
+case l(0x0000002A)
+
+// CHECK-NEXT:   dxsa.continue
+continue
+
+// CHECK-NEXT:   dxsa.debug_break
+debug_break
+
+// CHECK-NEXT:   dxsa.default
+default
+
+// CHECK-NEXT:   dxsa.else
+else
+
+// CHECK-NEXT:   dxsa.endif
+endif
+
+// CHECK-NEXT:   dxsa.endloop
+endloop
+
+// CHECK-NEXT:   dxsa.endswitch
+endswitch
+
+// CHECK-NEXT:   dxsa.label label<3>
+label label3
+
+// CHECK-NEXT:   dxsa.loop
+loop
+
+// CHECK-NEXT:   dxsa.ret
+ret
+// CHECK-NEXT: }

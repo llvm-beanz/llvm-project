@@ -1,0 +1,89 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, r<1>
+round_ne r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, -r<1>
+round_ne r0.xyzw, -r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, |r<1>|
+round_ne r0.xyzw, |r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_ne r<0>, -|r<1>|
+round_ne r0.xyzw, -|r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_ne precise <x, y> r<0>, r<1>
+round_ne precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ne_sat r<0>, r<1>
+round_ne_sat r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ne_sat precise <x> r<0>, r<1>
+round_ne_sat precise(x) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, r<1>
+round_ni r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, -r<1>
+round_ni r0.xyzw, -r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, |r<1>|
+round_ni r0.xyzw, |r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_ni r<0>, -|r<1>|
+round_ni r0.xyzw, -|r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_ni precise <x, y> r<0>, r<1>
+round_ni precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ni_sat r<0>, r<1>
+round_ni_sat r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_ni_sat precise <x> r<0>, r<1>
+round_ni_sat precise(x) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, r<1>
+round_pi r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, -r<1>
+round_pi r0.xyzw, -r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, |r<1>|
+round_pi r0.xyzw, |r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_pi r<0>, -|r<1>|
+round_pi r0.xyzw, -|r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_pi precise <x, y> r<0>, r<1>
+round_pi precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_pi_sat r<0>, r<1>
+round_pi_sat r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_pi_sat precise <x> r<0>, r<1>
+round_pi_sat precise(x) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_z r<0>, r<1>
+round_z r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_z r<0>, -r<1>
+round_z r0.xyzw, -r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_z r<0>, |r<1>|
+round_z r0.xyzw, |r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_z r<0>, -|r<1>|
+round_z r0.xyzw, -|r1.xyzw|
+
+// CHECK-NEXT:   dxsa.round_z precise <x, y> r<0>, r<1>
+round_z precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_z_sat r<0>, r<1>
+round_z_sat r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.round_z_sat precise <x> r<0>, r<1>
+round_z_sat precise(x) r0.xyzw, r1.xyzw
+// CHECK-NEXT: }

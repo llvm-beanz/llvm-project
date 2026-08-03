@@ -1,0 +1,38 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 0>, <dim = buffer>, <x = unorm, y = snorm, z = sint, w = uint>
+dcl_resource_buffer (unorm, snorm, sint, uint) t0
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 1>, <dim = texture1d>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture1d (float, float, float, float) t1
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 2>, <dim = texture1darray>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture1darray (float, float, float, float) t2
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 3>, <dim = texture2d>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture2d (float, float, float, float) t3
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 4>, <dim = texture2darray>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture2darray (float, float, float, float) t4
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 5>, <dim = texture2dms, sample_count = 4>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture2dms(4) (float, float, float, float) t5
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 6>, <dim = texture2dmsarray, sample_count = 8>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture2dmsarray(8) (float, float, float, float) t6
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 7>, <dim = texture3d>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture3d (float, float, float, float) t7
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 8>, <dim = texturecube>, <x = float, y = float, z = float, w = float>
+dcl_resource_texturecube (float, float, float, float) t8
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 9>, <dim = texturecubearray>, <x = float, y = float, z = float, w = float>
+dcl_resource_texturecubearray (float, float, float, float) t9
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 0, lbound = 0, ubound = 3, space = 1>, <dim = texture3d>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture3d (float, float, float, float) t0[0][3], 1
+// CHECK-NEXT: }

@@ -1,0 +1,13 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1, y = 1, z = 1>
+dcl_thread_group 1, 1, 1
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1024, y = 1, z = 1>
+dcl_thread_group 1024, 1, 1
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1, y = 1024, z = 1>
+dcl_thread_group 1, 1024, 1
+// CHECK-NEXT:   dxsa.dcl_thread_group <x = 1, y = 1, z = 64>
+dcl_thread_group 1, 1, 64
+// CHECK-NEXT: }

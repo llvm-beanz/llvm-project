@@ -1,0 +1,94 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.bufinfo r<0, <x>>, t<0, vector>
+bufinfo resource_dim(structured_buffer, 52) resource_return_type(mixed, mixed, mixed, mixed) r0.x, t0.xyzw
+
+// CHECK-NEXT:   dxsa.bufinfo r<0, <y>>, u<1, vector, <y, x, z, w>>
+bufinfo resource_dim(structured_buffer, 52) resource_return_type(mixed, mixed, mixed, mixed) r0.y, u1.yxzw
+
+// CHECK-NEXT:   dxsa.bufinfo r<0, <y>>, t<1, vector, <y, x, z, w>>
+bufinfo resource_dim(raw_buffer) resource_return_type(mixed, mixed, mixed, mixed) r0.y, t1.yxzw
+
+// CHECK-NEXT:   dxsa.bufinfo r<0, <y>>, u<2, vector, <y, x, z, w>>
+bufinfo resource_dim(raw_buffer) resource_return_type(mixed, mixed, mixed, mixed) r0.y, u2.yxzw
+
+// CHECK-NEXT:   dxsa.bufinfo r<0, <y>>, t<2, vector, <y, x, z, w>>
+bufinfo resource_dim(buffer) resource_return_type(unorm, unorm, unorm, unorm) r0.y, t2.yxzw
+
+// CHECK-NEXT:   dxsa.bufinfo r<0, <y>>, u<3, vector, <y, x, z, w>>
+bufinfo resource_dim(buffer) resource_return_type(sint, sint, sint, sint) r0.y, u3.yxzw
+
+// CHECK-NEXT:   dxsa.resinfo r<0>, r<1, <x>>, r<2>
+resinfo r0.xyzw, r1.x, r2.xyzw
+
+// CHECK-NEXT:   dxsa.resinfo r<0, <x>>, r<1, <x>>, r<2, <x, x, x, x>>
+resinfo r0.x, r1.x, r2.xxxx
+
+// CHECK-NEXT:   dxsa.resinfo_rcpFloat r<0>, r<1, <x>>, r<2>
+resinfo_rcp r0.xyzw, r1.x, r2.xyzw
+
+// CHECK-NEXT:   dxsa.resinfo_rcpFloat r<0, <x>>, r<1, <x>>, r<2, <x, x, x, x>>
+resinfo_rcp r0.x, r1.x, r2.xxxx
+
+// CHECK-NEXT:   dxsa.resinfo_uint r<0, <y, z, w>>, r<0, <x>>, t<0, vector, <z, x, y, w>>
+resinfo_uint resource_dim(texture2d) resource_return_type(float, float, float, float) r0.yzw, r0.x, t0.zxyw
+
+// CHECK-NEXT:   dxsa.resinfo_uint r<1, <x, y>>, l(0x0), t<0, vector>
+resinfo_uint resource_dim(texture2d) resource_return_type(float, float, float, float) r1.xy, l(0x00000000), t0.xyzw
+
+// CHECK-NEXT:   dxsa.resinfo_uint r<1>, r<0, <x>>, t<1, vector>
+resinfo_uint resource_dim(texture2darray) resource_return_type(float, float, float, float) r1.xyzw, r0.x, t1.xyzw
+
+// CHECK-NEXT:   dxsa.resinfo_uint r<1>, r<0, <x>>, t<2, vector>
+resinfo_uint resource_dim(texturecubearray) resource_return_type(float, float, float, float) r1.xyzw, r0.x, t2.xyzw
+
+// CHECK-NEXT:   dxsa.resinfo_uint r<1, <x, y, z>>, l(0x0), t<3, vector>
+resinfo_uint resource_dim(texture2dmsarray) resource_return_type(float, float, float, float) r1.xyz, l(0x00000000), t3.xyzw
+
+// CHECK-NEXT:   dxsa.resinfo_uint r<1, <x, y>>, l(0x0), u<1, vector>
+resinfo_uint resource_dim(texture2d) resource_return_type(float, float, float, float) r1.xy, l(0x00000000), u1.xyzw
+
+// CHECK-NEXT:   dxsa.sampleinfo o<0, <x, y>>, rasterizer<vector, <x>>
+sampleinfo o0.xy, rasterizer.x
+
+// CHECK-NEXT:   dxsa.sampleinfo r<0>, r<1>
+sampleinfo r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.sampleinfo_uint o<0, <x, y>>, rasterizer<vector, <x>>
+sampleinfo_uint o0.xy, rasterizer.x
+
+// CHECK-NEXT:   dxsa.sampleinfo_uint r<0>, r<1>
+sampleinfo_uint r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.samplepos r<0, <x, w>>, t<0, vector, <x, x, x, y>>, r<0, <x>>
+samplepos r0.xw, t0.xxxy, r0.x, 0
+
+// CHECK-NEXT:   dxsa.samplepos r<1, <x, y>>, t<1, vector, <x, y, x, x>>, r<0, <y>>
+samplepos r1.xy, t1.xyxx, r0.y, 0
+
+// CHECK-NEXT:   dxsa.samplepos r<0, <y, z>>, rasterizer<vector, <x, x, y, x>>, r<0, <z>>
+samplepos r0.yz, rasterizer.xxyx, r0.z
+
+// CHECK-NEXT:   dxsa.samplepos r<1, <x, y>>, rasterizer<vector, <x, y, x, x>>, l(0x3)
+samplepos r1.xy, rasterizer.xyxx, l(0x00000003)
+
+// CHECK-NEXT:   dxsa.eval_centroid r<0>, r<1>
+eval_centroid r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.eval_centroid precise <x, y> r<0, <x>>, r<1, <y, z, w, y>>
+eval_centroid precise(xy) r0.x, r1.yzwy
+
+// CHECK-NEXT:   dxsa.eval_sample_index r<0>, r<1>, l(0x2)
+eval_sample_index r0.xyzw, r1.xyzw, l(0x00000002)
+
+// CHECK-NEXT:   dxsa.eval_sample_index precise <x, y> r<0, <x>>, r<1, <y, z, w, y>>, l(0x3)
+eval_sample_index precise(xy) r0.x, r1.yzwy, l(0x00000003)
+
+// CHECK-NEXT:   dxsa.eval_snapped r<0>, r<1>, l(0x2, 0xFFFFFFFE, 0x0, 0x0)
+eval_snapped r0.xyzw, r1.xyzw, l(0x00000002, 0xFFFFFFFE, 0x00000000, 0x00000000)
+
+// CHECK-NEXT:   dxsa.eval_snapped precise <x, y> r<0, <x>>, r<1, <y, z, w, y>>, l(0x1, 0x1, 0x0, 0x0)
+eval_snapped precise(xy) r0.x, r1.yzwy, l(0x00000001, 0x00000001, 0x00000000, 0x00000000)
+// CHECK-NEXT: }

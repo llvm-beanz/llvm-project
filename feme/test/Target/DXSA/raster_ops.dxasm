@@ -1,0 +1,190 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.deriv_rtx r<0>, v<1>
+deriv_rtx r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx r<0>, -v<1>
+deriv_rtx r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx r<0>, |v<1>|
+deriv_rtx r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rtx r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_sat r<0>, v<1>
+deriv_rtx_sat r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_sat r<0>, -v<1>
+deriv_rtx_sat r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_sat r<0>, |v<1>|
+deriv_rtx_sat r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rtx_sat r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_sat r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_sat precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_sat precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty r<0>, v<1>
+deriv_rty r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty r<0>, -v<1>
+deriv_rty r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty r<0>, |v<1>|
+deriv_rty r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rty r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_sat r<0>, v<1>
+deriv_rty_sat r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_sat r<0>, -v<1>
+deriv_rty_sat r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_sat r<0>, |v<1>|
+deriv_rty_sat r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rty_sat r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_sat r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_sat precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_sat precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse r<0>, v<1>
+deriv_rtx_coarse r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse r<0>, -v<1>
+deriv_rtx_coarse r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse r<0>, |v<1>|
+deriv_rtx_coarse r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_coarse r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_coarse precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse_sat r<0>, v<1>
+deriv_rtx_coarse_sat r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse_sat r<0>, -v<1>
+deriv_rtx_coarse_sat r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse_sat r<0>, |v<1>|
+deriv_rtx_coarse_sat r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse_sat r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_coarse_sat r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_coarse_sat precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_coarse_sat precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse r<0>, v<1>
+deriv_rty_coarse r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse r<0>, -v<1>
+deriv_rty_coarse r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse r<0>, |v<1>|
+deriv_rty_coarse r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_coarse r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_coarse precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse_sat r<0>, v<1>
+deriv_rty_coarse_sat r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse_sat r<0>, -v<1>
+deriv_rty_coarse_sat r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse_sat r<0>, |v<1>|
+deriv_rty_coarse_sat r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse_sat r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_coarse_sat r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_coarse_sat precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_coarse_sat precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine r<0>, v<1>
+deriv_rtx_fine r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine r<0>, -v<1>
+deriv_rtx_fine r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine r<0>, |v<1>|
+deriv_rtx_fine r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_fine r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_fine precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine_sat r<0>, v<1>
+deriv_rtx_fine_sat r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine_sat r<0>, -v<1>
+deriv_rtx_fine_sat r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine_sat r<0>, |v<1>|
+deriv_rtx_fine_sat r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine_sat r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_fine_sat r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rtx_fine_sat precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rtx_fine_sat precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine r<0>, v<1>
+deriv_rty_fine r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine r<0>, -v<1>
+deriv_rty_fine r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine r<0>, |v<1>|
+deriv_rty_fine r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_fine r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_fine precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine_sat r<0>, v<1>
+deriv_rty_fine_sat r0.xyzw, v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine_sat r<0>, -v<1>
+deriv_rty_fine_sat r0.xyzw, -v1.xyzw
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine_sat r<0>, |v<1>|
+deriv_rty_fine_sat r0.xyzw, |v1.xyzw|
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine_sat r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_fine_sat r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.deriv_rty_fine_sat precise <x> r<0, <x>>, v<1, <y, z, w, y>>
+deriv_rty_fine_sat precise(x) r0.x, v1.yzwy
+
+// CHECK-NEXT:   dxsa.lod r<0>, v<1>, t<0>, s<0>
+lod r0.xyzw, v1.xyzw, t0, s0
+
+// CHECK-NEXT:   dxsa.lod r<0, <x>>, v<0, <x, y, x, x>>, t<0, vector, <x>>, s<0>
+lod r0.x, v0.xyxx, t0.x, s0
+// CHECK-NEXT: }

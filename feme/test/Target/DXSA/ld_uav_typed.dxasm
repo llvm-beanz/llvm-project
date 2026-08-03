@@ -1,0 +1,15 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.ld_uav_typed r<0, min16i, <x, y, z>>, v<0, <y, y, y, y>>, u<3, vector>
+
+ld_uav_typed resource_dim(buffer) resource_return_type(sint, sint, sint, sint) r0.xyz{min16i}, v0.yyyy, u3.xyzw
+// CHECK: dxsa.ld_uav_typed r<1, min16i, <x, y, z>>, v<0, <x, x, x, x>>, u<3, vector>
+
+ld_uav_typed resource_dim(buffer) resource_return_type(sint, sint, sint, sint) r1.xyz{min16i}, v0.xxxx, u3.xyzw
+// CHECK: dxsa.ld_uav_typed_s null, v<0, <y, y, y, y>>, u<3, vector, <w, y, z, x>>, r<3, <x>>
+
+ld_uav_typed_s resource_dim(buffer) resource_return_type(sint, sint, sint, sint) null, r3.x, v0.yyyy, u3.wyzx
+// CHECK: dxsa.ld_uav_typed_s r<0, min16i, <x, y, z>>, v<0, <x, x, x, x>>, u<3, vector, <w, y, z, x>>, r<4, <x>>
+
+ld_uav_typed_s resource_dim(buffer) resource_return_type(sint, sint, sint, sint) r0.xyz{min16i}, r4.x, v0.xxxx, u3.wyzx

@@ -1,0 +1,15 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.ld_structured r<0, <w>>, r<0, <z>>, l(0x8), g<0, vector, <x, x, x, x>>
+
+ld_structured r0.w, r0.z, l(0x00000008), g0.xxxx
+// CHECK: dxsa.ld_structured r<2, min16i, <x>>, r<0, <z>>, l(0xC), g<0, vector, <x, x, x, x>>
+
+ld_structured r2.x{min16i}, r0.z, l(0x0000000C), g0.xxxx
+// CHECK: dxsa.ld_structured r<1, min16f, <x>>, r<0, <z>>, l(0x4), g<0, vector, <x, x, x, x>>
+
+ld_structured r1.x{min16f}, r0.z, l(0x00000004), g0.xxxx
+// CHECK: dxsa.ld_structured_s r<5, <x, y>>, r<0, <y>>, l(0x0), u<1, vector>, r<0, <x>>
+
+ld_structured_s resource_dim(structured_buffer, 52) resource_return_type(mixed, mixed, mixed, mixed) r5.xy, r0.x, r0.y, l(0x00000000), u1.xyzw

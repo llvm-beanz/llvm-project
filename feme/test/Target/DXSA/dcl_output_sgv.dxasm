@@ -1,0 +1,8 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.dcl_output_sgv o<0, <x>>, <primitiveID>
+dcl_output_sgv o0.x, primitiveID
+// CHECK-NEXT: }

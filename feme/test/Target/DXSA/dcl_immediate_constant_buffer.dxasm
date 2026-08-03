@@ -1,0 +1,17 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// Check customdata dcl_immediate_constant_buffer parsing.
+
+// customdata may be confused with program header, so begin our module with program header.
+// CHECK:      dxsa.module pixel_shader 5 0 {
+.shader_model pixel 5 0
+// CHECK-NEXT:   dxsa.dcl_immediate_constant_buffer
+// CHECK-SAME:     [
+// CHECK-SAME:       1.000000e+00, 0.000000e+00, 0.000000e+00, 0.000000e+00,
+// CHECK-SAME:       0.000000e+00, 1.000000e+00, 0.000000e+00, 0.000000e+00,
+// CHECK-SAME:       0.000000e+00, 0.000000e+00, 1.000000e+00, 0.000000e+00,
+// CHECK-SAME:       0.000000e+00, 0.000000e+00, 0.000000e+00, 1.000000e+00
+// CHECK-SAME:     ]
+dcl_immediateConstantBuffer {0x3F800000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3F800000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3F800000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x3F800000}
+// CHECK-NEXT: }

@@ -1,0 +1,49 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.mov r<0, <x>>, -|r<1, <y, z, w, y>>|
+mov r0.x, -|r1.yzwy|
+
+// CHECK-NEXT:   dxsa.mov precise <x, y> r<0>, r<1>
+mov precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.mov_sat r<0, <x>>, -|r<1, <y, z, w, y>>|
+mov_sat r0.x, -|r1.yzwy|
+
+// CHECK-NEXT:   dxsa.mov_sat precise <x, y> r<0>, r<1>
+mov_sat precise(xy) r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.dmov r<0, <x, y>>, -|r<1, <z, w, x, y>>|
+dmov r0.xy, -|r1.zwxy|
+
+// CHECK-NEXT:   dxsa.dmov precise <x, y> r<0, <x, y>>, r<1>
+dmov precise(xy) r0.xy, r1.xyzw
+
+// CHECK-NEXT:   dxsa.dmov_sat r<0, <x, y>>, -|r<1, <z, w, x, y>>|
+dmov_sat r0.xy, -|r1.zwxy|
+
+// CHECK-NEXT:   dxsa.dmov_sat precise <x, y> r<0, <x, y>>, r<1>
+dmov_sat precise(xy) r0.xy, r1.xyzw
+
+// CHECK-NEXT:   dxsa.dmovc r<0>, r<1>, r<2>, r<3>
+dmovc r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dmovc_sat r<0, <x, y>>, r<1>, -|r<2, <z, w, x, y>>|, r<3>
+dmovc_sat r0.xy, r1.xyzw, -|r2.zwxy|, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dmovc precise <x, y, z, w> r<0>, r<1>, r<2>, r<3>
+dmovc precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dmovc_sat precise <x, y> r<0>, r<1>, r<2>, r<3>
+dmovc_sat precise(xy) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.swapc r<0>, r<1>, r<2>, r<3>, r<4>
+swapc r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw, r4.xyzw
+
+// CHECK-NEXT:   dxsa.swapc r<0, <x, y>>, r<1, <z, w>>, r<2>, -r<3>, |r<4>|
+swapc r0.xy, r1.zw, r2.xyzw, -r3.xyzw, |r4.xyzw|
+
+// CHECK-NEXT:   dxsa.swapc precise <x, y, z, w> r<0>, r<1>, r<2>, r<3>, r<4>
+swapc precise(xyzw) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw, r4.xyzw
+// CHECK-NEXT: }

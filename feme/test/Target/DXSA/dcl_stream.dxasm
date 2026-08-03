@@ -1,0 +1,11 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_stream 0
+dcl_stream m0
+
+// CHECK-NEXT:   dxsa.dcl_stream 3
+dcl_stream m3
+// CHECK-NEXT: }

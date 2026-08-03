@@ -1,0 +1,91 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.atomic_and u<0>, r<0>, r<1, <x>>
+atomic_and u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_and g<0>, r<2>, r<3, <x>>
+atomic_and g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_and r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_and r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_or u<0>, r<0>, r<1, <x>>
+atomic_or u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_or g<0>, r<2>, r<3, <x>>
+atomic_or g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_or r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_or r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_xor u<0>, r<0>, r<1, <x>>
+atomic_xor u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_xor g<0>, r<2>, r<3, <x>>
+atomic_xor g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_xor r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_xor r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_iadd u<0>, r<0>, r<1, <x>>
+atomic_iadd u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_iadd g<0>, r<2>, r<3, <x>>
+atomic_iadd g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_iadd r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_iadd r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_imax u<0>, r<0>, r<1, <x>>
+atomic_imax u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_imax g<0>, r<2>, r<3, <x>>
+atomic_imax g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_imax r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_imax r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_imin u<0>, r<0>, r<1, <x>>
+atomic_imin u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_imin g<0>, r<2>, r<3, <x>>
+atomic_imin g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_imin r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_imin r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_umax u<0>, r<0>, r<1, <x>>
+atomic_umax u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_umax g<0>, r<2>, r<3, <x>>
+atomic_umax g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_umax r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_umax r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_umin u<0>, r<0>, r<1, <x>>
+atomic_umin u0, r0.xyzw, r1.x
+
+// CHECK-NEXT:   dxsa.atomic_umin g<0>, r<2>, r<3, <x>>
+atomic_umin g0, r2.xyzw, r3.x
+
+// CHECK-NEXT:   dxsa.imm_atomic_umin r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_umin r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.atomic_cmp_store u<0>, r<1>, r<2>, r<3>
+atomic_cmp_store u0, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.imm_atomic_cmp_exch r<0, <x>>, u<0>, r<1>, r<2>, r<3>
+imm_atomic_cmp_exch r0.x, u0, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.imm_atomic_exch r<0, <x>>, u<0>, r<1>, r<2>
+imm_atomic_exch r0.x, u0, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.imm_atomic_alloc r<0, <x>>, u<0>
+imm_atomic_alloc r0.x, u0
+
+// CHECK-NEXT:   dxsa.imm_atomic_consume r<0, <x>>, u<0>
+imm_atomic_consume r0.x, u0
+// CHECK-NEXT: }

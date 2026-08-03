@@ -1,0 +1,8 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.ubfe r<0, min16u, <x>>, l(0x1B), l(0x5), cb<[0, 0], vector, min16u, <x>>
+ubfe r0.x{min16u}, l(0x0000001B), l(0x00000005), cb0[0].x{min16u}
+// CHECK-NEXT: }

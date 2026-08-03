@@ -1,0 +1,11 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      module {
+
+// CHECK-NEXT:   dxsa.dcl_resource_structured <id = 3, struct_byte_stride = 16>
+dcl_resource_structured t3, 16
+
+// CHECK-NEXT:   dxsa.dcl_resource_structured <id = 0, struct_byte_stride = 32, lbound = 0, ubound = 3, space = 1>
+dcl_resource_structured t0[0][3], 32, 1
+// CHECK-NEXT: }

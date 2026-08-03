@@ -1,0 +1,32 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_input_ps constant v0.x
+// CHECK:      dxsa.dcl_input_ps constant v<0, <x>>
+dcl_input_ps constant v0.x
+
+// dcl_input_ps linear v1.x
+// CHECK-NEXT: dxsa.dcl_input_ps linear v<1, <x>>
+dcl_input_ps linear v1.x
+
+// dcl_input_ps linearCentroid v2.x
+// CHECK-NEXT: dxsa.dcl_input_ps linearCentroid v<2, <x>>
+dcl_input_ps linearCentroid v2.x
+
+// dcl_input_ps linearNoPerspective v3.x
+// CHECK-NEXT: dxsa.dcl_input_ps linearNoPerspective v<3, <x>>
+dcl_input_ps linearNoPerspective v3.x
+
+// dcl_input_ps linearNoPerspectiveCentroid v4.x
+// CHECK-NEXT: dxsa.dcl_input_ps linearNoPerspectiveCentroid v<4, <x>>
+dcl_input_ps linearNoPerspectiveCentroid v4.x
+
+// dcl_input_ps linearSample v5.x
+// CHECK-NEXT: dxsa.dcl_input_ps linearSample v<5, <x>>
+dcl_input_ps linearSample v5.x
+
+// dcl_input_ps linearNoPerspectiveSample v6.x
+// CHECK-NEXT: dxsa.dcl_input_ps linearNoPerspectiveSample v<6, <x>>
+dcl_input_ps linearNoPerspectiveSample v6.x

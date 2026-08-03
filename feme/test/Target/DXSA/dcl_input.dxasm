@@ -1,0 +1,12 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_input v0.x
+// CHECK:      dxsa.dcl_input v<0, <x>>
+dcl_input v0.x
+
+// dcl_input vOutputControlPointID
+// CHECK-NEXT: dxsa.dcl_input vOutputControlPointID
+dcl_input vOutputControlPointID{comp1}

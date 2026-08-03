@@ -1,9 +1,0 @@
-// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
-// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
-
-// CHECK:      dxsa.module {
-// CHECK-NEXT:   dxsa.dcl_gs_instance_count 1
-// CHECK-NEXT:   dxsa.dcl_gs_instance_count 32
-// CHECK-NEXT: }
-
-0x020000CE, 0x00000001, 0x020000CE, 0x00000020,

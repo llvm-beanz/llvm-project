@@ -1,0 +1,12 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK-LABEL: module
+
+// dcl_output o0.xyzw
+// CHECK:      dxsa.dcl_output o<0>
+dcl_output o0.xyzw
+
+// dcl_output oDepth
+// CHECK-NEXT: dxsa.dcl_output oDepth
+dcl_output oDepth

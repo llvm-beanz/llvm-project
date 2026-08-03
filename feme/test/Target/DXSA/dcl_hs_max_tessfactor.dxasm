@@ -1,0 +1,8 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_hs_max_tessfactor 4.200000e+01
+
+dcl_hs_max_tessfactor 42.0
+// CHECK-NEXT: }

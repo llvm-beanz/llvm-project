@@ -1,0 +1,11 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+
+// CHECK-NEXT:   dxsa.dcl_output_siv o<0>, <position>
+dcl_output_siv o0.xyzw, position
+
+// CHECK-NEXT:   dxsa.dcl_output_siv o<1, <x>>, <clipDistance>
+dcl_output_siv o1.x, clipDistance
+// CHECK-NEXT: }

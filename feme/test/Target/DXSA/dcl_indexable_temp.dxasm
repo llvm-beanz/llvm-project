@@ -1,0 +1,13 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<0>[1], 1
+dcl_indexableTemp x0[1], 1
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<1>[23], 2
+dcl_indexableTemp x1[23], 2
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<2>[16]
+dcl_indexableTemp x2[16], 4
+// CHECK-NEXT:   dxsa.dcl_indexable_temp x<7>[4096]
+dcl_indexableTemp x7[4096], 4
+// CHECK-NEXT: }

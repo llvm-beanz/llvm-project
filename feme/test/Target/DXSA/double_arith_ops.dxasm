@@ -1,0 +1,76 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.dadd r<0>, r<1>, r<2>
+dadd r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dadd_sat r<0>, r<1>, r<2>
+dadd_sat r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dmax r<0>, r<1>, r<2>
+dmax r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dmax_sat r<0>, r<1>, r<2>
+dmax_sat r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dmin r<0>, r<1>, r<2>
+dmin r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dmin_sat r<0>, r<1>, r<2>
+dmin_sat r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dmul r<0>, r<1>, r<2>
+dmul r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dmul_sat r<0>, r<1>, r<2>
+dmul_sat r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.ddiv r<0>, r<1>, r<2>
+ddiv r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.ddiv_sat r<0>, r<1>, r<2>
+ddiv_sat r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.drcp r<0>, r<1>
+drcp r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.drcp_sat r<0>, r<1>
+drcp_sat r0.xyzw, r1.xyzw
+
+// CHECK-NEXT:   dxsa.dfma precise <x, y, z, w> r<0>, r<0>, r<1>, r<2>
+dfma precise(xyzw) r0.xyzw, r0.xyzw, r1.xyzw, r2.xyzw
+
+// CHECK-NEXT:   dxsa.dfma_sat precise <x, y, z, w> r<1>, r<1>, r<2>, r<3>
+dfma_sat precise(xyzw) r1.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma r<1>, r<1>, r<2>, r<3>
+dfma r1.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma_sat r<1>, r<1>, r<2>, r<3>
+dfma_sat r1.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma r<1>, -r<1>, r<2>, r<3>
+dfma r1.xyzw, -r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma_sat r<1>, -r<1>, r<2>, r<3>
+dfma_sat r1.xyzw, -r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma r<1>, -r<1>, r<2>, -r<3>
+dfma r1.xyzw, -r1.xyzw, r2.xyzw, -r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma_sat r<1>, -r<1>, r<2>, -r<3>
+dfma_sat r1.xyzw, -r1.xyzw, r2.xyzw, -r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma r<1>, r<1, <z, w, x, y>>, r<2>, r<3>
+dfma r1.xyzw, r1.zwxy, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma_sat r<1>, r<1, <z, w, x, y>>, r<2>, r<3>
+dfma_sat r1.xyzw, r1.zwxy, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.dfma r<1, <x, y>>, r<1, <x, y, x, y>>, r<1, <z, w, z, w>>, r<2, <x, y, x, y>>
+dfma r1.xy, r1.xyxy, r1.zwzw, r2.xyxy
+
+// CHECK-NEXT:   dxsa.dfma_sat r<1, <x, y>>, r<1, <x, y, x, y>>, r<1, <z, w, z, w>>, r<2, <x, y, x, y>>
+dfma_sat r1.xy, r1.xyxy, r1.zwzw, r2.xyxy
+// CHECK-NEXT: }

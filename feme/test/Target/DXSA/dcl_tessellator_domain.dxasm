@@ -1,0 +1,12 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_tessellator_domain domain_isoline
+// CHECK-NEXT:   dxsa.dcl_tessellator_domain domain_tri
+// CHECK-NEXT:   dxsa.dcl_tessellator_domain domain_quad
+
+dcl_tessellator_domain domain_isoline
+dcl_tessellator_domain domain_tri
+dcl_tessellator_domain domain_quad
+// CHECK-NEXT: }

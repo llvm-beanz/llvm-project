@@ -1,8 +1,0 @@
-// RUN: feme-translate --import-dxsa-hex %s | FileCheck %s
-// RUN: feme-translate --import-dxsa-hex %s | feme-opt --verify-roundtrip
-
-// CHECK:      dxsa.module {
-
-// CHECK-NEXT:   dxsa.ibfe r<0, min16i, <x>>, l(0x1B), l(0x5), cb<[0, 0], vector, min16i, <x>>
-0x0C00008B, 0x80100012, 0x00012001, 0x00000000, 0x00004001, 0x0000001B, 0x00004001, 0x00000005, 0x8020800A, 0x00012001, 0x00000000, 0x00000000
-// CHECK-NEXT: }

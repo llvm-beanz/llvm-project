@@ -1,0 +1,12 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.ld_raw r<0, <x, z>>, r<0, <x>>, g<0, vector, <z, x, w, y>>
+
+ld_raw r0.xz, r0.x, g0.zxwy
+// CHECK: dxsa.ld_raw r<0, <y>>, r<0, <x>>, u<0, vector, <x, x, x, x>>
+
+ld_raw resource_dim(raw_buffer) resource_return_type(mixed, mixed, mixed, mixed) r0.y, r0.x, u0.xxxx
+// CHECK: dxsa.ld_raw_s r<5, <x>>, r<0, <x>>, u<1, vector, <x, x, x, x>>, r<6, <x>>
+
+ld_raw_s resource_dim(raw_buffer) resource_return_type(mixed, mixed, mixed, mixed) r5.x, r6.x, r0.x, u1.xxxx

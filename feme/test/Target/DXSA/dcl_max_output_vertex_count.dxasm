@@ -1,0 +1,10 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_max_output_vertex_count 1
+// CHECK-NEXT:   dxsa.dcl_max_output_vertex_count 1024
+
+dcl_maxout 1
+dcl_maxout 1024
+// CHECK-NEXT: }

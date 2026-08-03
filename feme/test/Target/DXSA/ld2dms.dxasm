@@ -1,0 +1,21 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.ld2dms r<0, <x, y, z>>, r<0>, t<3, vector>, l(0x0)
+
+ld2dms resource_dim(texture2dms) resource_return_type(float, float, float, float) r0.xyz, r0.xyzw, t3.xyzw, l(0x00000000)
+// CHECK: dxsa.ld2dms r<2, <x, y, z>>, r<1, <x, y, w, w>>, t<3, vector>, v<0, <z>>
+
+ld2dms resource_dim(texture2dms) resource_return_type(float, float, float, float) r2.xyz, r1.xyww, t3.xyzw, v0.z
+// CHECK: dxsa.ld2dms r<2, <x, y, z>>, r<1, <x, y, w, w>>, t<3, vector>, v<0, <z>>, <u = -5, v = 7, w = 0>
+
+ld2dms aoffimmi(-5, 7, 0) resource_dim(texture2dms) resource_return_type(float, float, float, float) r2.xyz, r1.xyww, t3.xyzw, v0.z
+// CHECK: dxsa.ld2dms_s r<2, <x, y, z>>, r<1, <x, y, w, w>>, t<3, vector>, v<0, <z>>, r<3, <x>>, <u = -5, v = 7, w = 0>
+
+ld2dms_s aoffimmi(-5, 7, 0) resource_dim(texture2dms) resource_return_type(float, float, float, float) r2.xyz, r3.x, r1.xyww, t3.xyzw, v0.z
+// CHECK: dxsa.ld2dms_s r<2, <x, y, z>>, r<1, <x, y, w, w>>, t<3, vector>, v<0, <z>>, r<3, <x>>
+
+ld2dms_s resource_dim(texture2dms) resource_return_type(float, float, float, float) r2.xyz, r3.x, r1.xyww, t3.xyzw, v0.z
+// CHECK: dxsa.ld2dms r<1, <x, y, z>>, r<1>, t<3, vector>, l(0xD)
+
+ld2dms resource_dim(texture2dms) resource_return_type(float, float, float, float) r1.xyz, r1.xyzw, t3.xyzw, l(0x0000000D)
