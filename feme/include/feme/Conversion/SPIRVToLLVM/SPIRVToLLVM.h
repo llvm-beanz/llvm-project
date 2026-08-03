@@ -30,6 +30,7 @@
 #define FEME_CONVERSION_SPIRVTOLLVM_SPIRVTOLLVM_H
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <memory>
@@ -51,6 +52,26 @@ namespace spirv {
 /// points, whose bitness comes from the module's addressing model.
 std::string getTargetTriple(mlir::spirv::ModuleOp Module);
 
+/// What `llvm.spv.resource.handlefrombinding` needs to know about a SPIR-V
+/// resource variable, recovered from its declaration before the conversion
+/// drops it.
+struct ResourceInfo {
+  uint32_t DescriptorSet;
+  uint32_t Binding;
+  /// Symbol of the string global naming the resource. LLVM's SPIRV backend
+  /// reads its contents to name the `OpVariable` it emits, so the name has to
+  /// exist in the module as real data rather than as an attribute.
+  std::string NameSymbol;
+};
+
+/// Resource variables, keyed by the symbol declaring them.
+using ResourceInfoMap = llvm::StringMap<ResourceInfo>;
+
+/// Recovers \p Module's resource variables, and materializes the name strings
+/// their handles have to point at. Must run before the conversion, which
+/// drops the declarations this reads.
+ResourceInfoMap prepareResourceVariables(mlir::spirv::ModuleOp Module);
+
 /// Adds the type conversions the patterns below rely on to \p TypeConverter,
 /// which must already have been populated with
 /// `mlir::populateSPIRVToLLVMTypeConversion`: they take precedence over the
@@ -64,9 +85,11 @@ void populateSPIRVToLLVMTargetTypeConversions(
 /// SPIRV backend. They are given a higher benefit than MLIR's, so they win
 /// wherever both apply, and are meant to be used alongside (not instead of)
 /// `mlir::populateSPIRVToLLVMConversionPatterns`.
+/// \p Resources must have been collected by prepareResourceVariables, and
+/// must outlive \p Patterns.
 void populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
-    mlir::RewritePatternSet &Patterns);
+    mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources);
 
 /// Creates the pass converting every `spirv.module` nested in a builtin
 /// module into the `llvm` dialect, targeting LLVM's in-tree `SPIRV` backend.

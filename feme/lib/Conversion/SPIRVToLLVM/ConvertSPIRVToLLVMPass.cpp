@@ -200,11 +200,19 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   // information recovered from it has to be attached to once it no longer
   // exists.
   llvm::SmallVector<SPIRVModuleInfo> Modules;
+  feme::spirv::ResourceInfoMap Resources;
   unsigned Index = 0;
-  for (mlir::Operation &Op : Module.getBody()->getOperations()) {
-    if (auto SPIRVModule = mlir::dyn_cast<mlir::spirv::ModuleOp>(Op))
+  for (mlir::Operation &Op :
+       llvm::make_early_inc_range(Module.getBody()->getOperations())) {
+    if (auto SPIRVModule = mlir::dyn_cast<mlir::spirv::ModuleOp>(Op)) {
       Modules.push_back({Index, feme::spirv::getTargetTriple(SPIRVModule),
                          collectEntryPoints(SPIRVModule)});
+      // Materializes the resource name strings the handle intrinsics refer
+      // to, so it has to run before the conversion drops the declarations
+      // those names come from.
+      for (auto &Resource : feme::spirv::prepareResourceVariables(SPIRVModule))
+        Resources[Resource.getKey()] = Resource.getValue();
+    }
     ++Index;
   }
 
@@ -217,7 +225,8 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::populateSPIRVToLLVMModuleConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMFunctionConversionPatterns(TypeConverter, Patterns);
-  feme::spirv::populateSPIRVToLLVMTargetPatterns(TypeConverter, Patterns);
+  feme::spirv::populateSPIRVToLLVMTargetPatterns(TypeConverter, Patterns,
+                                                 Resources);
 
   mlir::ConversionTarget Target(*Ctx);
   Target.addIllegalDialect<mlir::spirv::SPIRVDialect>();

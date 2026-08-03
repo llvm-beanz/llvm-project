@@ -11,6 +11,7 @@
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/SmallVector.h"
@@ -71,6 +72,16 @@ const BuiltInMapping *getBuiltInMapping(mlir::spirv::GlobalVariableOp Global) {
 mlir::spirv::GlobalVariableOp getReferencedGlobal(mlir::spirv::AddressOfOp Op) {
   return mlir::SymbolTable::lookupNearestSymbolFrom<
       mlir::spirv::GlobalVariableOp>(Op->getParentOp(), Op.getVariableAttr());
+}
+
+/// Returns true if \p Type is a pointer to a SPIR-V resource -- an image,
+/// a sampled image or a sampler -- which LLVM models as an opaque handle
+/// value obtained from its binding rather than as memory.
+bool isResourcePointer(mlir::spirv::PointerType Type) {
+  if (Type.getStorageClass() != mlir::spirv::StorageClass::UniformConstant)
+    return false;
+  return mlir::isa<mlir::spirv::ImageType, mlir::spirv::SampledImageType,
+                   mlir::spirv::SamplerType>(Type.getPointeeType());
 }
 
 /// Emits a call to \p Intrinsic returning \p ResultType, with \p Args.
@@ -184,6 +195,87 @@ public:
   }
 };
 
+/// Replaces `spirv.mlir.addressof` of a resource variable with the
+/// `llvm.spv.resource.handlefrombinding` call producing its handle. As for
+/// builtin variables, there is no LLVM global to address: LLVM's SPIRV
+/// backend emits the `OpVariable` and its `DescriptorSet`/`Binding`
+/// decorations from the intrinsic, so `!spirv.ptr<image, UniformConstant>`
+/// converts to the handle type itself.
+class ResourceAddressOfPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AddressOfOp> {
+public:
+  ResourceAddressOfPattern(mlir::MLIRContext *Context,
+                           const mlir::LLVMTypeConverter &TypeConverter,
+                           mlir::PatternBenefit Benefit,
+                           const feme::spirv::ResourceInfoMap &Resources)
+      : mlir::SPIRVToLLVMConversion<mlir::spirv::AddressOfOp>(
+            Context, TypeConverter, Benefit),
+        Resources(Resources) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AddressOfOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto It = Resources.find(Op.getVariable());
+    if (It == Resources.end())
+      return Rewriter.notifyMatchFailure(Op, "not a resource variable");
+
+    mlir::Type HandleType = getTypeConverter()->convertType(Op.getType());
+    if (!HandleType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type I32 = Rewriter.getI32Type();
+    llvm::SmallVector<mlir::Value, 5> Args;
+    Args.push_back(mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, I32, static_cast<int32_t>(It->second.DescriptorSet)));
+    Args.push_back(mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, I32, static_cast<int32_t>(It->second.Binding)));
+    // A `spirv.GlobalVariable` of image type declares exactly one resource,
+    // not an array of them, so the binding holds a single descriptor and the
+    // index into it is always zero.
+    Args.push_back(mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, 1));
+    Args.push_back(mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, 0));
+    Args.push_back(mlir::LLVM::AddressOfOp::create(
+        Rewriter, Loc, mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
+        It->second.NameSymbol));
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc,
+                                "llvm.spv.resource.handlefrombinding",
+                                HandleType, Args));
+    return mlir::success();
+  }
+
+private:
+  const feme::spirv::ResourceInfoMap &Resources;
+};
+
+/// Drops a resource variable's declaration; the handle intrinsic
+/// ResourceAddressOfPattern emits carries the whole declaration with it.
+class ResourceGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  ResourceGlobalVariablePattern(mlir::MLIRContext *Context,
+                                const mlir::LLVMTypeConverter &TypeConverter,
+                                mlir::PatternBenefit Benefit,
+                                const feme::spirv::ResourceInfoMap &Resources)
+      : mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp>(
+            Context, TypeConverter, Benefit),
+        Resources(Resources) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (!Resources.count(Op.getSymName()))
+      return Rewriter.notifyMatchFailure(Op, "not a resource variable");
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+
+private:
+  const feme::spirv::ResourceInfoMap &Resources;
+};
+
 /// Drops `spirv.ExecutionMode`, whose contents FeMe instead reads before
 /// conversion and re-emits as function attributes on the entry point (see
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
@@ -208,23 +300,62 @@ public:
 void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
     mlir::LLVMTypeConverter &TypeConverter) {
   // Registered after MLIR's conversions so it is tried before them: a builtin
-  // input variable is a value LLVM's SPIRV backend materializes on demand,
-  // not memory, so the pointer SPIR-V reads it through has nothing to convert
-  // to but the value itself. Non-builtin `Input` variables (stage inputs)
-  // have no LLVM equivalent either way, and now fail to legalize with a
-  // diagnostic rather than converting to a pointer nothing can produce.
+  // input variable, like a resource handle, is a value LLVM's SPIRV backend
+  // materializes on demand rather than memory, so the pointer SPIR-V reads it
+  // through has nothing to convert to but the value itself. Non-builtin
+  // `Input` variables (stage inputs) have no LLVM equivalent either way, and
+  // now fail to legalize with a diagnostic rather than converting to a
+  // pointer nothing can produce.
   TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
                                   -> std::optional<mlir::Type> {
-    if (Type.getStorageClass() != mlir::spirv::StorageClass::Input)
+    if (Type.getStorageClass() != mlir::spirv::StorageClass::Input &&
+        !isResourcePointer(Type))
       return std::nullopt;
     return TypeConverter.convertType(Type.getPointeeType());
   });
 }
 
+feme::spirv::ResourceInfoMap
+feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
+  ResourceInfoMap Resources;
+  mlir::SymbolTable Table(Module);
+  mlir::OpBuilder Builder(Module.getContext());
+  Builder.setInsertionPointToStart(Module.getBody());
+
+  for (auto Global : Module.getOps<mlir::spirv::GlobalVariableOp>()) {
+    auto PointerType =
+        mlir::dyn_cast<mlir::spirv::PointerType>(Global.getType());
+    if (!PointerType || !isResourcePointer(PointerType))
+      continue;
+    std::optional<uint32_t> Set = Global.getDescriptorSet();
+    std::optional<uint32_t> Binding = Global.getBinding();
+    if (!Set || !Binding)
+      continue;
+
+    llvm::StringRef SymName = Global.getSymName();
+    std::string NameSymbol = (SymName + ".str").str();
+    for (unsigned Suffix = 0; Table.lookup(NameSymbol); ++Suffix)
+      NameSymbol = (SymName + ".str." + llvm::Twine(Suffix)).str();
+
+    // The backend reads the name through the pointer it is handed, so it has
+    // to be NUL terminated the way C strings are.
+    std::string Contents = (SymName + llvm::Twine('\0')).str();
+    mlir::LLVM::GlobalOp::create(
+        Builder, Global.getLoc(),
+        mlir::LLVM::LLVMArrayType::get(Builder.getI8Type(), Contents.size()),
+        /*isConstant=*/true, mlir::LLVM::Linkage::Private, NameSymbol,
+        Builder.getStringAttr(Contents));
+    Resources[SymName] = {*Set, *Binding, NameSymbol};
+  }
+  return Resources;
+}
+
 void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
-    mlir::RewritePatternSet &Patterns) {
+    mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources) {
   Patterns.add<BuiltInAddressOfPattern, BuiltInGlobalVariablePattern,
                ExecutionModePattern, LoadValuePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
 }
