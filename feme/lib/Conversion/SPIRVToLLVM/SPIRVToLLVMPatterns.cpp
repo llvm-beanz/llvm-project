@@ -465,6 +465,82 @@ public:
   }
 };
 
+/// Converts `spirv.CompositeConstruct` building a 1-D vector out of scalar
+/// and/or shorter-vector constituents (e.g. HLSL's `float3(x, x, x)`, which
+/// SPIR-V spells as a `CompositeConstruct` of three scalar constituents, or
+/// a `.xxx` splat's `CompositeConstruct` of the same scalar three times).
+/// MLIR has no pattern for this op at all, for any of the composite kinds
+/// (vector, array, struct, matrix) it can build; only the vector case is
+/// implemented here; it lowers to an `llvm.mlir.poison` seed with one
+/// `llvm.insertelement` per resulting lane -- each lane's value either the
+/// scalar constituent supplying it directly, or one `llvm.extractelement`
+/// out of the vector constituent supplying a contiguous run of lanes, per
+/// this op's "contiguous subset of scalars" semantics.
+class CompositeConstructPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeConstructOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CompositeConstructOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CompositeConstructOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto ResultType = mlir::dyn_cast<mlir::VectorType>(Op.getType());
+    if (!ResultType || ResultType.getRank() != 1)
+      return Rewriter.notifyMatchFailure(
+          Op, "not a 1-D vector composite construct");
+
+    mlir::Type DstType = getTypeConverter()->convertType(ResultType);
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    // Validate before emitting anything: every constituent is either a
+    // scalar (one lane) or a 1-D vector (a contiguous run of lanes), and
+    // together they add up to exactly the result's lane count.
+    int64_t TotalLanes = 0;
+    for (mlir::Value Constituent : Adaptor.getConstituents()) {
+      if (auto VecTy =
+              mlir::dyn_cast<mlir::VectorType>(Constituent.getType())) {
+        if (VecTy.getRank() != 1)
+          return Rewriter.notifyMatchFailure(Op, "not a 1-D vector operand");
+        TotalLanes += VecTy.getNumElements();
+        continue;
+      }
+      ++TotalLanes;
+    }
+    if (TotalLanes != ResultType.getNumElements())
+      return Rewriter.notifyMatchFailure(
+          Op, "constituent lane count does not match result vector size");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type I32 = Rewriter.getI32Type();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, DstType);
+    int64_t Lane = 0;
+    for (mlir::Value Constituent : Adaptor.getConstituents()) {
+      auto VecTy = mlir::dyn_cast<mlir::VectorType>(Constituent.getType());
+      if (!VecTy) {
+        mlir::Value DstIndex =
+            mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, Lane++);
+        Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                     Constituent, DstIndex);
+        continue;
+      }
+      for (int64_t I = 0, E = VecTy.getNumElements(); I != E; ++I, ++Lane) {
+        mlir::Value SrcIndex =
+            mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, I);
+        mlir::Value DstIndex =
+            mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, Lane);
+        mlir::Value Component = mlir::LLVM::ExtractElementOp::create(
+            Rewriter, Loc, Constituent, SrcIndex);
+        Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                     Component, DstIndex);
+      }
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Drops `spirv.ExecutionMode`, whose contents FeMe instead reads before
 /// conversion and re-emits as function attributes on the entry point (see
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
@@ -543,10 +619,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources) {
   Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
-               BuiltInGlobalVariablePattern, ExecutionModePattern,
-               ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
-               LoadValuePattern>(Patterns.getContext(), TypeConverter,
-                                 FeMeBenefit);
+               BuiltInGlobalVariablePattern, CompositeConstructPattern,
+               ExecutionModePattern, ImageQuerySizePattern, ImageReadPattern,
+               ImageWritePattern, LoadValuePattern>(Patterns.getContext(),
+                                                    TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
 }
