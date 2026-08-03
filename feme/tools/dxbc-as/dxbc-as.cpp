@@ -59,13 +59,6 @@ static cl::opt<EmitKind> Emit(
                           "Re-print parsed input as normalized assembly text")),
     cl::init(EmitKind::Binary), cl::cat(DxbcAsCategory));
 
-static cl::opt<ShaderKind> Stage(
-    "shader-kind", cl::desc("Shader stage to declare in the program header"),
-    cl::values(clEnumValN(ShaderKind::Pixel, "pixel", "Pixel shader"),
-               clEnumValN(ShaderKind::Vertex, "vertex", "Vertex shader"),
-               clEnumValN(ShaderKind::Compute, "compute", "Compute shader")),
-    cl::init(ShaderKind::Pixel), cl::cat(DxbcAsCategory));
-
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
   cl::HideUnrelatedOptions(DxbcAsCategory);
@@ -80,11 +73,10 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  Expected<std::vector<Instruction>> Program =
-      parseAssembly((*BufferOrErr)->getBuffer());
-  if (!Program) {
+  Expected<Program> Parsed = parseAssembly((*BufferOrErr)->getBuffer());
+  if (!Parsed) {
     WithColor::error(errs(), "dxbc-as")
-        << InputFilename << ": " << toString(Program.takeError()) << '\n';
+        << InputFilename << ": " << toString(Parsed.takeError()) << '\n';
     return 1;
   }
 
@@ -99,12 +91,12 @@ int main(int argc, char **argv) {
   }
 
   if (Emit == EmitKind::Asm) {
-    printAssembly(*Program, Out.os());
+    printAssembly(*Parsed, Out.os());
     Out.keep();
     return 0;
   }
 
-  Expected<SmallVector<uint32_t, 64>> Bytecode = encodeProgram(*Program, Stage);
+  Expected<SmallVector<uint32_t, 64>> Bytecode = encodeProgram(*Parsed);
   if (!Bytecode) {
     WithColor::error(errs(), "dxbc-as")
         << InputFilename << ": " << toString(Bytecode.takeError()) << '\n';
@@ -113,7 +105,7 @@ int main(int argc, char **argv) {
 
   if (Emit == EmitKind::Container) {
     SmallVector<char, 256> ContainerBytes;
-    wrapInContainer(*Bytecode, Stage, ContainerBytes);
+    wrapInContainer(*Bytecode, ContainerBytes);
     Out.os().write(ContainerBytes.data(), ContainerBytes.size());
   } else {
     support::endian::Writer W(Out.os(), endianness::little);

@@ -29,9 +29,9 @@ using namespace feme::dxbc;
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
   llvm::StringRef Source(reinterpret_cast<const char *>(Data), Size);
 
-  llvm::Expected<std::vector<Instruction>> Program = parseAssembly(Source);
-  if (!Program) {
-    llvm::consumeError(Program.takeError());
+  llvm::Expected<Program> Parsed = parseAssembly(Source);
+  if (!Parsed) {
+    llvm::consumeError(Parsed.takeError());
     return 0;
   }
 
@@ -42,18 +42,15 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
   // best at finding.
   std::string Discard;
   llvm::raw_string_ostream OS(Discard);
-  printAssembly(*Program, OS);
+  printAssembly(*Parsed, OS);
 
-  for (ShaderKind Kind :
-       {ShaderKind::Pixel, ShaderKind::Vertex, ShaderKind::Compute}) {
-    llvm::Expected<llvm::SmallVector<uint32_t, 64>> Bytecode =
-        encodeProgram(*Program, Kind);
-    if (!Bytecode) {
-      llvm::consumeError(Bytecode.takeError());
-      continue;
-    }
-    llvm::SmallVector<char, 256> Container;
-    wrapInContainer(*Bytecode, Kind, Container);
+  llvm::Expected<llvm::SmallVector<uint32_t, 64>> Bytecode =
+      encodeProgram(*Parsed);
+  if (!Bytecode) {
+    llvm::consumeError(Bytecode.takeError());
+    return 0;
   }
+  llvm::SmallVector<char, 256> Container;
+  wrapInContainer(*Bytecode, Container);
   return 0;
 }

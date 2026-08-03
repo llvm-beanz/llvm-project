@@ -6,10 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Declares Parser, which turns a token stream from Lexer into the
-// instruction stack (a `std::vector<Instruction>`) Encoder/AsmPrinter
-// consume. This is the second stage of dxbc-as's lex -> parse -> encode
-// pipeline (see feme/docs/Design.md's "dxbc-as" section).
+// Declares parseAssembly, the second stage of dxbc-as's lex -> parse ->
+// encode pipeline (see feme/docs/Design.md's "dxbc-as" section): it turns
+// DXBC assembly text into the Program the Encoder and AsmPrinter consume.
 //
 //===----------------------------------------------------------------------===//
 
@@ -17,8 +16,7 @@
 #define FEME_DXBC_ASSEMBLER_PARSER_H
 
 #include "feme/DXBC/Assembler/Instruction.h"
-#include "feme/DXBC/Assembler/Lexer.h"
-#include "feme/DXBC/Assembler/Token.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
 #include <vector>
@@ -26,15 +24,24 @@
 namespace feme {
 namespace dxbc {
 
-/// Parses \p Source (Microsoft/`fxc`-style DXBC assembly text) into a flat
-/// list of Instructions, one per non-empty source line.
-///
-/// Never crashes on malformed input: any syntax error (unknown mnemonic,
-/// wrong operand count, malformed register/immediate syntax, etc.) is
-/// reported as an llvm::Error describing the problem and its line/column,
-/// not a crash or assertion -- `dxbc-as` must tolerate arbitrary,
-/// potentially fuzzer-generated text (see feme-dxbc-as-fuzzer).
-llvm::Expected<std::vector<Instruction>> parseAssembly(llvm::StringRef Source);
+/// One parsed DXBC assembly translation unit: an optional program header
+/// (requested by a `.shader_model` directive) plus the instruction stack.
+struct Program {
+  /// True if the source asked for a version/length token pair to precede
+  /// the instructions. Shader bodies extracted from a DXContainer's SHEX
+  /// part always have one; hand-written instruction-sequence fixtures
+  /// usually do not, so it is opt-in.
+  bool HasHeader = false;
+  /// D3D10_SB_TOKENIZED_PROGRAM_TYPE of the header, when \c HasHeader.
+  uint16_t ProgramType = 0;
+  uint8_t MajorVersion = 5;
+  uint8_t MinorVersion = 0;
+
+  std::vector<Instruction> Instructions;
+};
+
+/// Parses \p Source as DXBC assembly text.
+llvm::Expected<Program> parseAssembly(llvm::StringRef Source);
 
 } // namespace dxbc
 } // namespace feme

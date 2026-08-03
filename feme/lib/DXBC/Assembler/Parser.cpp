@@ -5,14 +5,24 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+//
+// Implements the DXBC assembly grammar. Everything a mnemonic's grammar
+// says about the *meaning* of a keyword (which control bit a global flag
+// sets, which DWORD value a system-value name has, ...) is resolved here,
+// so Encoder.cpp only has to lay out tokens; the original keyword spellings
+// are kept in Instruction::Keywords so AsmPrinter.cpp can reproduce the
+// source text without inverting any of these tables.
+//
+//===----------------------------------------------------------------------===//
 
 #include "feme/DXBC/Assembler/Parser.h"
 
+#include "feme/DXBC/Assembler/Lexer.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/FormatVariadic.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <cstring>
 
@@ -20,10 +30,168 @@ using namespace feme::dxbc;
 
 namespace {
 
+/// A named value in one of the enumerated fields the grammar spells as a
+/// keyword (global flags, system-value names, interpolation modes, ...).
+struct KeywordValue {
+  llvm::StringRef Name;
+  uint32_t Value;
+};
+
+// Opcode-specific control bits are all in the [23:11] range, so every table
+// below stores values pre-shifted into place where it is a control field,
+// and stores the plain DWORD value where it is a trailing token field.
+constexpr unsigned ControlShift = 11;
+
+// D3D10_SB_GLOBAL_FLAG_* / D3D11[_1]_SB_GLOBAL_FLAG_* /
+// D3D12_SB_GLOBAL_FLAG_ALL_RESOURCES_BOUND.
+constexpr KeywordValue GlobalFlags[] = {
+    {"refactoringAllowed", 1u << 11},
+    {"enableDoublePrecisionFloatOps", 1u << 12},
+    {"forceEarlyDepthStencil", 1u << 13},
+    {"enableRawAndStructuredBuffers", 1u << 14},
+    {"skipOptimization", 1u << 15},
+    {"enableMinimumPrecision", 1u << 16},
+    {"enableDoubleExtensions", 1u << 17},
+    {"enableShaderExtensions", 1u << 18},
+    {"allResourcesBound", 1u << 19},
+};
+
+// D3D11_SB_SYNC_*.
+constexpr KeywordValue SyncFlags[] = {
+    {"threads", 1u << 11},
+    {"tgsm", 1u << 12},
+    {"uav_group", 1u << 13},
+    {"uav_global", 1u << 14},
+};
+
+// D3D11_SB_GLOBALLY_COHERENT_ACCESS / D3D11_SB_RASTERIZER_ORDERED_ACCESS /
+// D3D11_SB_UAV_HAS_ORDER_PRESERVING_COUNTER.
+constexpr KeywordValue UAVFlags[] = {
+    {"globallyCoherent", 0x00010000},
+    {"rasterizerOrdered", 0x00020000},
+    {"hasOrderPreservingCounter", 0x00800000},
+};
+
+// D3D10_SB_INTERPOLATION_MODE.
+constexpr KeywordValue InterpolationModes[] = {
+    {"constant", 1},
+    {"linear", 2},
+    {"linearCentroid", 3},
+    {"linearNoPerspective", 4},
+    {"linearNoPerspectiveCentroid", 5},
+    {"linearSample", 6},
+    {"linearNoPerspectiveSample", 7},
+};
+
+// D3D10_SB_NAME.
+constexpr KeywordValue SystemValueNames[] = {
+    {"position", 1},
+    {"clipDistance", 2},
+    {"cullDistance", 3},
+    {"renderTargetArrayIndex", 4},
+    {"viewportArrayIndex", 5},
+    {"vertexID", 6},
+    {"primitiveID", 7},
+    {"instanceID", 8},
+    {"isFrontFace", 9},
+    {"sampleIndex", 10},
+    {"finalQuadUeq0EdgeTessFactor", 11},
+    {"finalQuadVeq0EdgeTessFactor", 12},
+    {"finalQuadUeq1EdgeTessFactor", 13},
+    {"finalQuadVeq1EdgeTessFactor", 14},
+    {"finalQuadUInsideTessFactor", 15},
+    {"finalQuadVInsideTessFactor", 16},
+    {"finalTriUeq0EdgeTessFactor", 17},
+    {"finalTriVeq0EdgeTessFactor", 18},
+    {"finalTriWeq0EdgeTessFactor", 19},
+    {"finalTriInsideTessFactor", 20},
+    {"finalLineDetailTessFactor", 21},
+    {"finalLineDensityTessFactor", 22},
+    {"barycentrics", 23},
+    {"shadingRate", 24},
+    {"cullPrimitive", 25},
+};
+
+// D3D10_SB_PRIMITIVE. The `patchN` entries (N control points) are contiguous
+// from D3D11_SB_PRIMITIVE_1_CONTROL_POINT_PATCH and are handled separately
+// in parseControlEnum rather than spelled out 32 times here.
+constexpr KeywordValue InputPrimitives[] = {
+    {"point", 1},    {"line", 2},         {"triangle", 3},
+    {"line_adj", 6}, {"triangle_adj", 7},
+};
+
+// D3D10_SB_PRIMITIVE_TOPOLOGY.
+constexpr KeywordValue OutputTopologies[] = {
+    {"pointlist", 1},      {"linelist", 2},          {"linestrip", 3},
+    {"trianglelist", 4},   {"trianglestrip", 5},     {"linelist_adj", 10},
+    {"linestrip_adj", 11}, {"trianglelist_adj", 12}, {"trianglestrip_adj", 13},
+};
+
+// D3D11_SB_TESSELLATOR_DOMAIN.
+constexpr KeywordValue TessellatorDomains[] = {
+    {"domain_isoline", 1},
+    {"domain_tri", 2},
+    {"domain_quad", 3},
+};
+
+// D3D11_SB_TESSELLATOR_PARTITIONING.
+constexpr KeywordValue TessellatorPartitionings[] = {
+    {"partitioning_integer", 1},
+    {"partitioning_pow2", 2},
+    {"partitioning_fractional_odd", 3},
+    {"partitioning_fractional_even", 4},
+};
+
+// D3D11_SB_TESSELLATOR_OUTPUT_PRIMITIVE.
+constexpr KeywordValue TessellatorOutputPrimitives[] = {
+    {"output_point", 1},
+    {"output_line", 2},
+    {"output_triangle_cw", 3},
+    {"output_triangle_ccw", 4},
+};
+
+// D3D10_SB_RESOURCE_RETURN_TYPE.
+constexpr KeywordValue ResourceReturnTypes[] = {
+    {"unorm", 1}, {"snorm", 2},  {"sint", 3},      {"uint", 4},   {"float", 5},
+    {"mixed", 6}, {"double", 7}, {"continued", 8}, {"unused", 9},
+};
+
+// D3D10_SB_RESOURCE_DIMENSION, for the `resource_dim(...)` extended opcode
+// token. The declaration mnemonics spell the same values as suffixes.
+constexpr KeywordValue ResourceDimensions[] = {
+    {"unknown", 0},
+    {"buffer", 1},
+    {"texture1d", 2},
+    {"texture2d", 3},
+    {"texture2dms", 4},
+    {"texture3d", 5},
+    {"texturecube", 6},
+    {"texture1darray", 7},
+    {"texture2darray", 8},
+    {"texture2dmsarray", 9},
+    {"texturecubearray", 10},
+    {"raw_buffer", 11},
+    {"structured_buffer", 12},
+};
+
+// D3D10_SB_TOKENIZED_PROGRAM_TYPE, for the `.shader_model` directive.
+constexpr KeywordValue ProgramTypes[] = {
+    {"pixel", 0}, {"vertex", 1}, {"geometry", 2},
+    {"hull", 3},  {"domain", 4}, {"compute", 5},
+};
+
+const KeywordValue *findKeyword(llvm::ArrayRef<KeywordValue> Table,
+                                llvm::StringRef Name) {
+  for (const KeywordValue &Entry : Table)
+    if (Entry.Name == Name)
+      return &Entry;
+  return nullptr;
+}
+
 /// Recursive-descent parser for one DXBC assembly translation unit.
-/// Statement-oriented: each source line is exactly one Instruction, so
-/// error recovery is not attempted mid-statement -- the first error found
-/// anywhere aborts the whole parse (see parseAssembly), which is
+/// Statement-oriented: each source line is exactly one instruction or
+/// directive, so error recovery is not attempted mid-statement -- the first
+/// error found anywhere aborts the whole parse (see parseAssembly), which is
 /// appropriate for a tool whose job is validating/encoding a single,
 /// deliberately-authored test fixture rather than an IDE-style parser that
 /// must keep going after an error.
@@ -33,8 +201,8 @@ public:
     Current = Lex.next();
   }
 
-  llvm::Expected<std::vector<Instruction>> parseProgram() {
-    std::vector<Instruction> Program;
+  llvm::Expected<Program> parseProgram() {
+    Program Result;
     while (true) {
       if (Current.Kind == TokenKind::EndOfStatement) {
         advance();
@@ -43,18 +211,23 @@ public:
       if (Current.Kind == TokenKind::Eof)
         break;
 
-      llvm::Expected<Instruction> Inst = parseInstruction();
-      if (!Inst)
-        return Inst.takeError();
-      Program.push_back(std::move(*Inst));
+      if (Current.Kind == TokenKind::Dot) {
+        if (llvm::Error E = parseDirective(Result))
+          return std::move(E);
+      } else {
+        llvm::Expected<Instruction> Inst = parseInstruction();
+        if (!Inst)
+          return Inst.takeError();
+        Result.Instructions.push_back(std::move(*Inst));
+      }
 
       if (Current.Kind != TokenKind::EndOfStatement &&
           Current.Kind != TokenKind::Eof)
-        return error("expected end of line after instruction");
+        return error("expected end of line after statement");
       if (Current.Kind == TokenKind::EndOfStatement)
         advance();
     }
-    return Program;
+    return Result;
   }
 
 private:
@@ -62,6 +235,17 @@ private:
   Token Current;
 
   void advance() { Current = Lex.next(); }
+
+  bool isIdentifier(llvm::StringRef Text) const {
+    return Current.Kind == TokenKind::Identifier && Current.Spelling == Text;
+  }
+
+  bool consumeIdentifier(llvm::StringRef Text) {
+    if (!isIdentifier(Text))
+      return false;
+    advance();
+    return true;
+  }
 
   llvm::Error error(const llvm::Twine &Message) {
     return llvm::createStringError(
@@ -78,8 +262,166 @@ private:
     return Tok;
   }
 
+  llvm::Error expectToken(TokenKind Kind, const llvm::Twine &What) {
+    return expect(Kind, What).takeError();
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Literals
+  //===--------------------------------------------------------------------===//
+
+  /// Parses an unsigned integer literal (decimal or 0x-prefixed hex).
+  llvm::Expected<uint64_t> parseInteger(const llvm::Twine &What) {
+    if (Current.Kind != TokenKind::Integer)
+      return error("expected " + What);
+    llvm::StringRef Text = Current.Spelling;
+    unsigned Radix = 10;
+    if (Text.consume_front("0x") || Text.consume_front("0X"))
+      Radix = 16;
+    uint64_t Value;
+    if (Text.getAsInteger(Radix, Value))
+      return error("malformed integer literal '" + Current.Spelling + "'");
+    advance();
+    return Value;
+  }
+
+  /// Parses a signed integer literal.
+  llvm::Expected<int64_t> parseSignedInteger(const llvm::Twine &What) {
+    bool Negate = false;
+    if (Current.Kind == TokenKind::Minus) {
+      Negate = true;
+      advance();
+    }
+    llvm::Expected<uint64_t> Value = parseInteger(What);
+    if (!Value)
+      return Value.takeError();
+    int64_t Signed = static_cast<int64_t>(*Value);
+    return Negate ? -Signed : Signed;
+  }
+
+  /// Parses a numeric literal, yielding its 32-bit encoding: a hexadecimal
+  /// or decimal integer keeps its integer value, while a literal spelled
+  /// with a '.' or an exponent is converted to its float32 bit pattern.
+  /// That split is what lets a fixture say either `l(1.0)` or the exact
+  /// `l(0x3F800000)` bit pattern it encodes to.
+  llvm::Expected<uint32_t> parseValue32() {
+    bool Negate = false;
+    if (Current.Kind == TokenKind::Minus) {
+      Negate = true;
+      advance();
+    }
+    if (Current.Kind == TokenKind::Integer) {
+      llvm::Expected<uint64_t> Value = parseInteger("a numeric literal");
+      if (!Value)
+        return Value.takeError();
+      uint32_t Bits = static_cast<uint32_t>(*Value);
+      return Negate ? static_cast<uint32_t>(-static_cast<int32_t>(Bits)) : Bits;
+    }
+    if (Current.Kind != TokenKind::Float)
+      return error("expected a numeric literal");
+    llvm::StringRef Text = Current.Spelling;
+    Text.consume_back("f");
+    Text.consume_back("F");
+    double Value;
+    if (Text.getAsDouble(Value))
+      return error("malformed numeric literal '" + Current.Spelling + "'");
+    advance();
+    float F = static_cast<float>(Negate ? -Value : Value);
+    return llvm::bit_cast<uint32_t>(F);
+  }
+
+  /// Parses a 64-bit numeric literal, yielding its encoding as a pair of
+  /// DWORDs (high word first, matching the tokenized format).
+  llvm::Error parseValue64(llvm::SmallVectorImpl<uint32_t> &Out) {
+    bool Negate = false;
+    if (Current.Kind == TokenKind::Minus) {
+      Negate = true;
+      advance();
+    }
+    uint64_t Bits;
+    if (Current.Kind == TokenKind::Integer) {
+      llvm::Expected<uint64_t> Value = parseInteger("a numeric literal");
+      if (!Value)
+        return Value.takeError();
+      Bits = Negate ? static_cast<uint64_t>(-static_cast<int64_t>(*Value))
+                    : *Value;
+    } else if (Current.Kind == TokenKind::Float) {
+      llvm::StringRef Text = Current.Spelling;
+      Text.consume_back("f");
+      Text.consume_back("F");
+      double Value;
+      if (Text.getAsDouble(Value))
+        return error("malformed numeric literal '" + Current.Spelling + "'");
+      advance();
+      Bits = llvm::bit_cast<uint64_t>(Negate ? -Value : Value);
+    } else {
+      return error("expected a numeric literal");
+    }
+    Out.push_back(static_cast<uint32_t>(Bits >> 32));
+    Out.push_back(static_cast<uint32_t>(Bits));
+    return llvm::Error::success();
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Directives
+  //===--------------------------------------------------------------------===//
+
+  /// directive := '.shader_model' <type> <major> <minor>
+  ///            | '.dword' <value> (',' <value>)*
+  llvm::Error parseDirective(Program &Result) {
+    advance(); // '.'
+    if (Current.Kind != TokenKind::Identifier)
+      return error("expected a directive name after '.'");
+    llvm::StringRef Name = Current.Spelling;
+
+    if (Name == "shader_model") {
+      advance();
+      if (Current.Kind != TokenKind::Identifier)
+        return error("expected a shader stage name");
+      const KeywordValue *Type = findKeyword(ProgramTypes, Current.Spelling);
+      if (!Type)
+        return error("unknown shader stage '" + Current.Spelling + "'");
+      advance();
+      llvm::Expected<uint64_t> Major = parseInteger("a major version");
+      if (!Major)
+        return Major.takeError();
+      llvm::Expected<uint64_t> Minor = parseInteger("a minor version");
+      if (!Minor)
+        return Minor.takeError();
+      Result.HasHeader = true;
+      Result.ProgramType = static_cast<uint16_t>(Type->Value);
+      Result.MajorVersion = static_cast<uint8_t>(*Major);
+      Result.MinorVersion = static_cast<uint8_t>(*Minor);
+      return llvm::Error::success();
+    }
+
+    if (Name == "dword") {
+      advance();
+      Instruction Inst;
+      Inst.Op = Opcode::RawDWords;
+      while (true) {
+        llvm::Expected<uint32_t> Value = parseValue32();
+        if (!Value)
+          return Value.takeError();
+        Inst.ExtraDWords.push_back(*Value);
+        if (Current.Kind != TokenKind::Comma)
+          break;
+        advance();
+      }
+      Result.Instructions.push_back(std::move(Inst));
+      return llvm::Error::success();
+    }
+
+    return error("unknown directive '." + Name + "'");
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Instructions
+  //===--------------------------------------------------------------------===//
+
   /// Parses one full statement: a mnemonic (with optional `_sat` suffix)
-  /// followed by whatever operand grammar its InstructionKind requires.
+  /// followed by whatever modifiers and operands its InstructionKind
+  /// grammar allows.
   llvm::Expected<Instruction> parseInstruction() {
     if (Current.Kind != TokenKind::Identifier)
       return error("expected instruction mnemonic");
@@ -99,108 +441,419 @@ private:
     Inst.Op = *Op;
     Inst.Saturate = Saturate;
     const OpcodeInfo &Info = getOpcodeInfo(Inst.Op);
+    Inst.Controls = Info.Controls;
 
-    if (Saturate && !supportsSaturate(Inst.Op))
-      return error("'_sat' is only valid on floating-point ALU instructions");
+    if (Saturate && !(Info.Flags & OF_Saturable))
+      return error("'_sat' is not valid on '" + Info.Mnemonic + "'");
+
+    if (llvm::Error E = parseModifiers(Inst, Info))
+      return std::move(E);
 
     switch (Info.Kind) {
-    case InstructionKind::ALU1:
-      if (llvm::Error E = parseOperandList(Inst, 2))
+    case InstructionKind::Generic:
+      if (llvm::Error E = parseOperandList(Inst, Info.NumDst, Info.NumSrc))
         return std::move(E);
       break;
-    case InstructionKind::ALU2:
-      if (llvm::Error E = parseOperandList(Inst, 3))
+    case InstructionKind::FlagList:
+      if (llvm::Error E = parseFlagList(Inst))
         return std::move(E);
       break;
-    case InstructionKind::ALU3:
-      if (llvm::Error E = parseOperandList(Inst, 4))
+    case InstructionKind::ControlEnum:
+      if (llvm::Error E = parseControlEnum(Inst))
         return std::move(E);
       break;
-    case InstructionKind::NoOperand:
-      break;
-    case InstructionKind::Discard:
-      if (llvm::Error E = parseOperandList(Inst, 1))
-        return std::move(E);
-      break;
-    case InstructionKind::Sample:
-      if (llvm::Error E = parseOperandList(Inst, 4))
-        return std::move(E);
-      break;
-    case InstructionKind::Load:
-      if (llvm::Error E = parseOperandList(Inst, 3))
-        return std::move(E);
-      break;
-    case InstructionKind::DclGlobalFlags:
-      if (llvm::Error E = parseGlobalFlags(Inst))
-        return std::move(E);
-      break;
-    case InstructionKind::DclTemps: {
-      llvm::Expected<Token> Count = expect(TokenKind::Integer, "temp count");
+    case InstructionKind::ControlCount: {
+      llvm::Expected<uint64_t> Count = parseInteger("a count");
       if (!Count)
         return Count.takeError();
-      Inst.Immediates.push_back(
-          llvm::APInt(64, Count->Spelling, 10).getZExtValue());
+      Inst.Controls |= static_cast<uint32_t>(*Count) << ControlShift;
       break;
     }
-    case InstructionKind::DclResource:
-      if (llvm::Error E = parseDclResource(Inst))
+    case InstructionKind::Counts:
+      if (llvm::Error E = parseTrailingCounts(Inst, /*AtLeastOne=*/true))
         return std::move(E);
       break;
-    case InstructionKind::DclSampler:
-      if (llvm::Error E = parseDclSampler(Inst))
+    case InstructionKind::Float: {
+      llvm::Expected<uint32_t> Value = parseValue32();
+      if (!Value)
+        return Value.takeError();
+      Inst.ExtraDWords.push_back(*Value);
+      break;
+    }
+    case InstructionKind::DclIndexableTemp:
+      if (llvm::Error E = parseDclIndexableTemp(Inst))
         return std::move(E);
       break;
-    case InstructionKind::DclInput:
-      if (llvm::Error E = parseOperandList(Inst, 1))
+    case InstructionKind::Operand:
+      if (llvm::Error E = parseOperandList(Inst, Info.NumDst, Info.NumSrc))
+        return std::move(E);
+      if (llvm::Error E = parseTrailingCounts(Inst, /*AtLeastOne=*/false))
+        return std::move(E);
+      break;
+    case InstructionKind::OperandSystemValue:
+      if (llvm::Error E = parseOperandList(Inst, Info.NumDst, Info.NumSrc))
+        return std::move(E);
+      if (llvm::Error E = expectToken(TokenKind::Comma, "','"))
+        return std::move(E);
+      if (llvm::Error E = parseSystemValueName(Inst))
         return std::move(E);
       break;
     case InstructionKind::DclInputPS:
-      if (llvm::Error E = parseDclInputPS(Inst))
+    case InstructionKind::DclInputPSSystemValue: {
+      if (llvm::Error E = parseInterpolationMode(Inst))
+        return std::move(E);
+      if (llvm::Error E = parseOperandList(Inst, Info.NumDst, Info.NumSrc))
+        return std::move(E);
+      if (Info.Kind == InstructionKind::DclInputPSSystemValue) {
+        if (llvm::Error E = expectToken(TokenKind::Comma, "','"))
+          return std::move(E);
+        if (llvm::Error E = parseSystemValueName(Inst))
+          return std::move(E);
+      }
+      break;
+    }
+    case InstructionKind::DclTypedResource: {
+      if (llvm::Error E = parseResourceReturnTypes(Inst))
+        return std::move(E);
+      if (llvm::Error E = parseOperandList(Inst, Info.NumDst, Info.NumSrc))
+        return std::move(E);
+      // The four return types share one trailing DWORD, four bits each.
+      uint32_t Packed = 0;
+      for (unsigned I = 0; I < 4; ++I)
+        Packed |= (Inst.ResourceReturnTypes[I] & 0xF) << (4 * I);
+      Inst.ExtraDWords.push_back(Packed);
+      if (llvm::Error E = parseTrailingCounts(Inst, /*AtLeastOne=*/false))
         return std::move(E);
       break;
-    case InstructionKind::DclOutput:
-      if (llvm::Error E = parseOperandList(Inst, 1))
+    }
+    case InstructionKind::DclImmediateConstantBuffer:
+      if (llvm::Error E = parseImmediateConstantBuffer(Inst))
         return std::move(E);
       break;
+    case InstructionKind::RawTokens:
+      return error("'.dword' is a directive, not a mnemonic");
     }
     return Inst;
   }
 
-  static bool supportsSaturate(Opcode Op) {
-    // Only floating-point-result ALU mnemonics accept `_sat`; the
-    // integer/bitwise ones in Opcodes.def do not saturate in real DXBC
-    // assembly, since clamping to [0,1] is only meaningful for floating
-    // point results.
-    switch (Op) {
-    case Opcode::Not:
-    case Opcode::INeg:
-    case Opcode::ItoF:
-    case Opcode::FtoI:
-    case Opcode::UtoF:
-    case Opcode::FtoU:
-    case Opcode::And:
-    case Opcode::Or:
-    case Opcode::Xor:
-    case Opcode::IEq:
-    case Opcode::INe:
-    case Opcode::IGe:
-    case Opcode::ILt:
-    case Opcode::IAdd:
-    case Opcode::IMad:
-      return false;
-    default:
-      return true;
+  /// Parses the keyword and parenthesized modifiers that may follow a
+  /// mnemonic, in any order, before its operands.
+  llvm::Error parseModifiers(Instruction &Inst, const OpcodeInfo &Info) {
+    // `dcl_resource_texture2dms(4)`: the multisample count is spelled as a
+    // suffix on the mnemonic rather than as a separate token.
+    if ((Info.Flags & OF_SampleCount) && Current.Kind == TokenKind::LParen) {
+      advance();
+      llvm::Expected<uint64_t> Count = parseInteger("a sample count");
+      if (!Count)
+        return Count.takeError();
+      // [22:16] D3D10_SB_RESOURCE_SAMPLE_COUNT.
+      Inst.Controls |= (static_cast<uint32_t>(*Count) & 0x7F) << 16;
+      Inst.Keywords.push_back(llvm::utostr(*Count));
+      if (llvm::Error E = expectToken(TokenKind::RParen, "')'"))
+        return E;
+    }
+
+    while (Current.Kind == TokenKind::Identifier) {
+      llvm::StringRef Name = Current.Spelling;
+      if ((Info.Flags & OF_UAVFlags) != 0) {
+        if (const KeywordValue *Flag = findKeyword(UAVFlags, Name)) {
+          Inst.Controls |= Flag->Value;
+          Inst.Keywords.push_back(Name.str());
+          advance();
+          continue;
+        }
+      }
+      if (Name == "precise") {
+        advance();
+        if (llvm::Error E = parsePreciseMask(Inst))
+          return E;
+        continue;
+      }
+      if (Name == "aoffimmi") {
+        advance();
+        if (llvm::Error E = parseSampleOffsets(Inst))
+          return E;
+        continue;
+      }
+      if (Name == "resource_dim") {
+        advance();
+        if (llvm::Error E = parseResourceDim(Inst))
+          return E;
+        continue;
+      }
+      if (Name == "resource_return_type") {
+        advance();
+        if (llvm::Error E = parseResourceReturnTypes(Inst))
+          return E;
+        Inst.HasResourceReturnType = true;
+        continue;
+      }
+      break;
+    }
+    return llvm::Error::success();
+  }
+
+  /// precise := 'precise' '(' [xyzw]{1,4} ')'
+  llvm::Error parsePreciseMask(Instruction &Inst) {
+    if (getOpcodeInfo(Inst.Op).Kind != InstructionKind::Generic)
+      return error("'precise' is not valid on '" +
+                   getOpcodeInfo(Inst.Op).Mnemonic + "'");
+    if (llvm::Error E = expectToken(TokenKind::LParen, "'('"))
+      return E;
+    llvm::Expected<Token> Comps =
+        expect(TokenKind::Identifier, "a component list (e.g. 'xy')");
+    if (!Comps)
+      return Comps.takeError();
+    uint8_t Mask = 0;
+    for (char C : Comps->Spelling) {
+      const char *Where = strchr("xyzw", C);
+      if (!Where || C == '\0')
+        return error("invalid component '" + llvm::Twine(C) + "'");
+      Mask |= 1 << (Where - "xyzw");
+    }
+    Inst.PreciseMask = Mask;
+    return expectToken(TokenKind::RParen, "')'");
+  }
+
+  /// aoffimmi := 'aoffimmi' '(' <int> ',' <int> ',' <int> ')'
+  llvm::Error parseSampleOffsets(Instruction &Inst) {
+    if (llvm::Error E = expectToken(TokenKind::LParen, "'('"))
+      return E;
+    for (unsigned I = 0; I < 3; ++I) {
+      if (I != 0) {
+        if (llvm::Error E = expectToken(TokenKind::Comma, "','"))
+          return E;
+      }
+      llvm::Expected<int64_t> Value = parseSignedInteger("an address offset");
+      if (!Value)
+        return Value.takeError();
+      if (*Value < -8 || *Value > 7)
+        return error("address offset must be in [-8, 7]");
+      Inst.SampleOffsets[I] = static_cast<int8_t>(*Value);
+    }
+    Inst.HasSampleOffsets = true;
+    return expectToken(TokenKind::RParen, "')'");
+  }
+
+  /// resource_dim := 'resource_dim' '(' <dim> [',' <stride>] ')'
+  llvm::Error parseResourceDim(Instruction &Inst) {
+    if (llvm::Error E = expectToken(TokenKind::LParen, "'('"))
+      return E;
+    if (Current.Kind != TokenKind::Identifier)
+      return error("expected a resource dimension");
+    const KeywordValue *Dim = findKeyword(ResourceDimensions, Current.Spelling);
+    if (!Dim)
+      return error("unknown resource dimension '" + Current.Spelling + "'");
+    Inst.Keywords.push_back(Current.Spelling.str());
+    advance();
+    Inst.ResourceDim = static_cast<uint8_t>(Dim->Value);
+    Inst.ResourceStride = 0;
+    if (Current.Kind == TokenKind::Comma) {
+      advance();
+      llvm::Expected<uint64_t> Stride = parseInteger("a structure stride");
+      if (!Stride)
+        return Stride.takeError();
+      Inst.ResourceStride = static_cast<uint16_t>(*Stride);
+    }
+    Inst.HasResourceDim = true;
+    return expectToken(TokenKind::RParen, "')'");
+  }
+
+  /// return-types := '(' <type> ',' <type> ',' <type> ',' <type> ')'
+  llvm::Error parseResourceReturnTypes(Instruction &Inst) {
+    if (llvm::Error E = expectToken(TokenKind::LParen, "'('"))
+      return E;
+    for (unsigned I = 0; I < 4; ++I) {
+      if (I != 0) {
+        if (llvm::Error E = expectToken(TokenKind::Comma, "','"))
+          return E;
+      }
+      if (Current.Kind != TokenKind::Identifier)
+        return error("expected a resource return type");
+      const KeywordValue *Type =
+          findKeyword(ResourceReturnTypes, Current.Spelling);
+      if (!Type)
+        return error("unknown resource return type '" + Current.Spelling + "'");
+      Inst.ResourceReturnTypes[I] = static_cast<uint8_t>(Type->Value);
+      Inst.Keywords.push_back(Current.Spelling.str());
+      advance();
+    }
+    return expectToken(TokenKind::RParen, "')'");
+  }
+
+  /// flags := <flag> ('|' <flag>)*
+  llvm::Error parseFlagList(Instruction &Inst) {
+    llvm::ArrayRef<KeywordValue> Table =
+        Inst.Op == Opcode::Sync ? llvm::ArrayRef<KeywordValue>(SyncFlags)
+                                : llvm::ArrayRef<KeywordValue>(GlobalFlags);
+    while (true) {
+      if (Current.Kind != TokenKind::Identifier)
+        return error("expected a flag name");
+      const KeywordValue *Flag = findKeyword(Table, Current.Spelling);
+      if (!Flag)
+        return error("unknown flag '" + Current.Spelling + "'");
+      Inst.Controls |= Flag->Value;
+      Inst.Keywords.push_back(Current.Spelling.str());
+      advance();
+      if (Current.Kind != TokenKind::Pipe)
+        return llvm::Error::success();
+      advance();
     }
   }
 
-  /// Parses exactly \p Count comma-separated register operands.
-  llvm::Error parseOperandList(Instruction &Inst, unsigned Count) {
-    for (unsigned I = 0; I < Count; ++I) {
+  /// Parses the single keyword naming an enumerated control field.
+  llvm::Error parseControlEnum(Instruction &Inst) {
+    llvm::ArrayRef<KeywordValue> Table;
+    switch (Inst.Op) {
+    case Opcode::DclInputprimitive:
+      Table = InputPrimitives;
+      break;
+    case Opcode::DclOutputtopology:
+      Table = OutputTopologies;
+      break;
+    case Opcode::DclTessellatorDomain:
+      Table = TessellatorDomains;
+      break;
+    case Opcode::DclTessellatorPartitioning:
+      Table = TessellatorPartitionings;
+      break;
+    case Opcode::DclTessellatorOutputPrimitive:
+      Table = TessellatorOutputPrimitives;
+      break;
+    default:
+      llvm_unreachable("opcode has no enumerated control field");
+    }
+
+    if (Current.Kind != TokenKind::Identifier)
+      return error("expected a keyword");
+    llvm::StringRef Name = Current.Spelling;
+    uint32_t Value;
+    if (const KeywordValue *Entry = findKeyword(Table, Name)) {
+      Value = Entry->Value;
+    } else if (Inst.Op == Opcode::DclInputprimitive &&
+               Name.starts_with("patch")) {
+      // D3D11_SB_PRIMITIVE_<N>_CONTROL_POINT_PATCH values are contiguous
+      // from N == 1, so spell them as `patch<N>` rather than as 32 rows.
+      unsigned Points;
+      if (Name.drop_front(5).getAsInteger(10, Points) || Points < 1 ||
+          Points > 32)
+        return error("expected 'patch<N>' with N in [1, 32]");
+      Value = 7 + Points;
+    } else {
+      return error("unknown keyword '" + Name + "'");
+    }
+    Inst.Controls |= Value << ControlShift;
+    Inst.Keywords.push_back(Name.str());
+    advance();
+    return llvm::Error::success();
+  }
+
+  llvm::Error parseInterpolationMode(Instruction &Inst) {
+    if (Current.Kind != TokenKind::Identifier)
+      return error("expected an interpolation mode");
+    const KeywordValue *Mode =
+        findKeyword(InterpolationModes, Current.Spelling);
+    if (!Mode)
+      return error("unknown interpolation mode '" + Current.Spelling + "'");
+    Inst.Controls |= Mode->Value << ControlShift;
+    Inst.Keywords.push_back(Current.Spelling.str());
+    advance();
+    return llvm::Error::success();
+  }
+
+  llvm::Error parseSystemValueName(Instruction &Inst) {
+    if (Current.Kind != TokenKind::Identifier)
+      return error("expected a system-value name");
+    const KeywordValue *Name = findKeyword(SystemValueNames, Current.Spelling);
+    if (!Name)
+      return error("unknown system-value name '" + Current.Spelling + "'");
+    Inst.ExtraDWords.push_back(Name->Value);
+    Inst.Keywords.push_back(Current.Spelling.str());
+    advance();
+    return llvm::Error::success();
+  }
+
+  /// counts := <int> (',' <int>)*
+  llvm::Error parseTrailingCounts(Instruction &Inst, bool AtLeastOne) {
+    if (!AtLeastOne) {
+      if (Current.Kind != TokenKind::Comma)
+        return llvm::Error::success();
+      advance();
+    }
+    while (true) {
+      llvm::Expected<uint64_t> Value = parseInteger("an integer");
+      if (!Value)
+        return Value.takeError();
+      Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Value));
+      if (Current.Kind != TokenKind::Comma)
+        return llvm::Error::success();
+      advance();
+    }
+  }
+
+  /// dcl_indexableTemp := 'x' <id> '[' <size> ']' ',' <components>
+  llvm::Error parseDclIndexableTemp(Instruction &Inst) {
+    if (Current.Kind != TokenKind::Identifier ||
+        !Current.Spelling.starts_with("x"))
+      return error("expected an indexable temp register (e.g. 'x0[4]')");
+    unsigned Id;
+    if (Current.Spelling.drop_front(1).getAsInteger(10, Id))
+      return error("expected a numeric indexable temp id");
+    advance();
+    if (llvm::Error E = expectToken(TokenKind::LBracket, "'['"))
+      return E;
+    llvm::Expected<uint64_t> Size = parseInteger("an array size");
+    if (!Size)
+      return Size.takeError();
+    if (llvm::Error E = expectToken(TokenKind::RBracket, "']'"))
+      return E;
+    if (llvm::Error E = expectToken(TokenKind::Comma, "','"))
+      return E;
+    llvm::Expected<uint64_t> Components = parseInteger("a component count");
+    if (!Components)
+      return Components.takeError();
+    Inst.ExtraDWords.push_back(Id);
+    Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Size));
+    Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Components));
+    return llvm::Error::success();
+  }
+
+  /// icb := '{' <value> (',' <value>)* '}'
+  llvm::Error parseImmediateConstantBuffer(Instruction &Inst) {
+    if (llvm::Error E = expectToken(TokenKind::LBrace, "'{'"))
+      return E;
+    while (Current.Kind == TokenKind::EndOfStatement)
+      advance();
+    while (true) {
+      llvm::Expected<uint32_t> Value = parseValue32();
+      if (!Value)
+        return Value.takeError();
+      Inst.ExtraDWords.push_back(*Value);
+      while (Current.Kind == TokenKind::EndOfStatement)
+        advance();
+      if (Current.Kind != TokenKind::Comma)
+        break;
+      advance();
+      while (Current.Kind == TokenKind::EndOfStatement)
+        advance();
+    }
+    return expectToken(TokenKind::RBrace, "'}'");
+  }
+
+  //===--------------------------------------------------------------------===//
+  // Operands
+  //===--------------------------------------------------------------------===//
+
+  /// Parses \p NumDst destination operands followed by \p NumSrc source
+  /// operands, comma-separated.
+  llvm::Error parseOperandList(Instruction &Inst, unsigned NumDst,
+                               unsigned NumSrc) {
+    for (unsigned I = 0, E = NumDst + NumSrc; I != E; ++I) {
       if (I != 0) {
-        if (llvm::Error E = expect(TokenKind::Comma, "','").takeError())
-          return E;
+        if (llvm::Error Err = expectToken(TokenKind::Comma, "','"))
+          return Err;
       }
-      llvm::Expected<Operand> Op = parseOperand();
+      llvm::Expected<Operand> Op = parseOperand(/*IsDestination=*/I < NumDst);
       if (!Op)
         return Op.takeError();
       Inst.Operands.push_back(std::move(*Op));
@@ -209,7 +862,7 @@ private:
   }
 
   /// operand := ['-'] ('|' register '|' | register)
-  llvm::Expected<Operand> parseOperand() {
+  llvm::Expected<Operand> parseOperand(bool IsDestination) {
     bool Negate = false;
     bool Abs = false;
     if (Current.Kind == TokenKind::Minus) {
@@ -221,240 +874,258 @@ private:
       advance();
     }
 
-    llvm::Expected<Operand> Op = parseRegister();
+    llvm::Expected<Operand> Op = parseRegister(IsDestination);
     if (!Op)
       return Op.takeError();
     Op->Negate = Negate;
     Op->Abs = Abs;
 
     if (Abs) {
-      if (llvm::Error E = expect(TokenKind::Pipe, "closing '|'").takeError())
+      if (llvm::Error E = expectToken(TokenKind::Pipe, "closing '|'"))
         return std::move(E);
     }
     return Op;
   }
 
-  /// register := identifier ['.' identifier] | 'l' '(' float [',' float]*3
-  /// ')'
-  llvm::Expected<Operand> parseRegister() {
+  /// register := 'l' '(' value (',' value){0,3} ')'
+  ///           | 'd' '(' value (',' value)? ')'
+  ///           | <kind> [<index>] ('[' index ']')* ['.' components]
+  ///             ['{' modifiers '}']
+  llvm::Expected<Operand> parseRegister(bool IsDestination) {
     if (Current.Kind != TokenKind::Identifier)
       return error("expected a register or immediate operand");
 
-    if (Current.Spelling == "l")
+    if (Current.Spelling == "l" || Current.Spelling == "d")
       return parseImmediate();
 
     llvm::StringRef Name = Current.Spelling;
-    OperandKind Kind;
-    switch (Name.front()) {
-    case 'r':
-      Kind = OperandKind::Temp;
-      break;
-    case 'v':
-      Kind = OperandKind::Input;
-      break;
-    case 'o':
-      Kind = OperandKind::Output;
-      break;
-    case 't':
-      Kind = OperandKind::Resource;
-      break;
-    case 's':
-      Kind = OperandKind::Sampler;
-      break;
-    default:
-      return error("expected register name (r/v/o/t/s followed by a digit)");
+    Operand Op;
+    const OperandKind *Kind = lookupOperandKind(Name);
+    unsigned FirstIndex = 0;
+    bool HasFirstIndex = false;
+    if (!Kind) {
+      // `r0`, `cb2`, `label7`: a storage-class spelling immediately
+      // followed by that operand's first (immediate) index.
+      size_t DigitsAt = Name.find_first_of("0123456789");
+      if (DigitsAt == llvm::StringRef::npos || DigitsAt == 0)
+        return error("unknown operand storage class '" + Name + "'");
+      Kind = lookupOperandKind(Name.take_front(DigitsAt));
+      if (!Kind || Name.drop_front(DigitsAt).getAsInteger(10, FirstIndex))
+        return error("unknown operand storage class '" + Name + "'");
+      HasFirstIndex = true;
     }
-    llvm::StringRef IndexText = Name.drop_front();
-    unsigned Index;
-    if (IndexText.empty() || IndexText.getAsInteger(10, Index))
-      return error("expected a numeric register index after '" +
-                   llvm::Twine(Name.front()) + "'");
     advance();
 
-    Operand Op;
-    Op.Kind = Kind;
-    Op.RegisterIndex = Index;
+    Op.Kind = *Kind;
+    Op.Components = getDefaultComponentCount(*Kind);
+    if (HasFirstIndex) {
+      OperandIndex Index;
+      Index.Value = FirstIndex;
+      Op.Indices.push_back(std::move(Index));
+    }
 
+    while (Current.Kind == TokenKind::LBracket) {
+      advance();
+      llvm::Expected<OperandIndex> Index = parseIndex();
+      if (!Index)
+        return Index.takeError();
+      Op.Indices.push_back(std::move(*Index));
+      if (llvm::Error E = expectToken(TokenKind::RBracket, "']'"))
+        return std::move(E);
+    }
+    if (Op.Indices.size() > 3)
+      return error("an operand can have at most three indices");
+
+    bool HasComponents = false;
     if (Current.Kind == TokenKind::Dot) {
       advance();
-      llvm::Expected<Token> Comp =
-          expect(TokenKind::Identifier, "swizzle/mask (e.g. 'xyzw')");
-      if (!Comp)
-        return Comp.takeError();
-      if (llvm::Error E = applyComponents(Op, Comp->Spelling))
+      llvm::Expected<Token> Comps =
+          expect(TokenKind::Identifier, "a swizzle/mask (e.g. 'xyzw')");
+      if (!Comps)
+        return Comps.takeError();
+      if (llvm::Error E = applyComponents(Op, Comps->Spelling, IsDestination))
+        return std::move(E);
+      HasComponents = true;
+    } else if (Op.Components == ComponentCount::Four) {
+      // No suffix on a four-component operand means "all of it": a full
+      // write mask for a destination, an identity swizzle for a source.
+      Op.SelectMode = IsDestination ? ComponentSelectMode::Mask
+                                    : ComponentSelectMode::Swizzle;
+    }
+
+    if (Current.Kind == TokenKind::LBrace) {
+      advance();
+      if (llvm::Error E = parseOperandModifiers(Op, HasComponents))
         return std::move(E);
     }
     return Op;
   }
 
-  /// Interprets a component suffix (e.g. "xyzw", "xyxx", "x") as either a
-  /// destination write mask (every letter distinct, in x/y/z/w order,
-  /// matching D3D10_SB_OPERAND_4_COMPONENT_MASK_MODE) or a source swizzle
-  /// (any order/repeats, matching …SWIZZLE_MODE); Encoder.cpp picks whichever
-  /// is valid based on whether the operand is used as a destination.
-  llvm::Error applyComponents(Operand &Op, llvm::StringRef Components) {
+  /// index := <int> | <operand> | <int> '+' <operand> | <operand> '+' <int>
+  llvm::Expected<OperandIndex> parseIndex() {
+    OperandIndex Index;
+    if (Current.Kind == TokenKind::Integer) {
+      llvm::Expected<uint64_t> Value = parseInteger("an index");
+      if (!Value)
+        return Value.takeError();
+      Index.Value = *Value;
+      if (Current.Kind != TokenKind::Plus) {
+        Index.Rep = *Value > std::numeric_limits<uint32_t>::max()
+                        ? OperandIndex::Representation::Immediate64
+                        : OperandIndex::Representation::Immediate32;
+        return Index;
+      }
+      advance();
+      llvm::Expected<Operand> Rel = parseOperand(/*IsDestination=*/false);
+      if (!Rel)
+        return Rel.takeError();
+      Index.Rep = OperandIndex::Representation::Immediate32PlusRelative;
+      Index.Relative = std::make_shared<Operand>(std::move(*Rel));
+      return Index;
+    }
+
+    llvm::Expected<Operand> Rel = parseOperand(/*IsDestination=*/false);
+    if (!Rel)
+      return Rel.takeError();
+    Index.Relative = std::make_shared<Operand>(std::move(*Rel));
+    if (Current.Kind != TokenKind::Plus) {
+      Index.Rep = OperandIndex::Representation::Relative;
+      return Index;
+    }
+    advance();
+    llvm::Expected<uint64_t> Value = parseInteger("an index");
+    if (!Value)
+      return Value.takeError();
+    Index.Rep = OperandIndex::Representation::Immediate32PlusRelative;
+    Index.Value = *Value;
+    return Index;
+  }
+
+  /// Interprets a component suffix. On a destination it is always a write
+  /// mask (D3D10_SB_OPERAND_4_COMPONENT_MASK_MODE); on a source a single
+  /// letter selects one component (...SELECT_1_MODE) and four letters give
+  /// a swizzle (...SWIZZLE_MODE), matching how `fxc` disassembly spells
+  /// them. `{mask}`/`{swizzle}`/`{select1}` override this if a fixture
+  /// needs a mode this rule would not pick.
+  llvm::Error applyComponents(Operand &Op, llvm::StringRef Components,
+                              bool IsDestination) {
     if (Components.empty() || Components.size() > 4)
       return error("swizzle/mask must have between 1 and 4 components");
 
-    static const char *Names = "xyzw";
+    uint8_t Indices[4] = {0, 0, 0, 0};
     uint8_t Mask = 0;
-    uint8_t Swizzle[4] = {0, 1, 2, 3};
-    bool Monotonic = true; // true if this could be interpreted as a mask
-    int PrevComp = -1;
     for (unsigned I = 0; I < Components.size(); ++I) {
-      const char *Where = strchr(Names, Components[I]);
+      const char *Where = strchr("xyzw", Components[I]);
       if (!Where || Components[I] == '\0')
         return error("invalid swizzle/mask component '" +
                      llvm::Twine(Components[I]) + "' (expected x/y/z/w)");
-      int Comp = static_cast<int>(Where - Names);
-      Mask |= (1 << Comp);
-      Swizzle[I] = static_cast<uint8_t>(Comp);
-      if (Comp <= PrevComp)
-        Monotonic = false;
-      PrevComp = Comp;
-    }
-    // A single-component suffix (e.g. ".x") reads as every slot replicating
-    // that one component when used as a source, matching how `fxc`-style
-    // assembly represents scalar sources; Encoder.cpp/AsmPrinter.cpp
-    // consult NumExplicitComponents to tell this apart from a
-    // single-component *mask*.
-    if (Components.size() == 1) {
-      for (uint8_t &S : Swizzle)
-        S = Swizzle[0];
+      Indices[I] = static_cast<uint8_t>(Where - "xyzw");
+      Mask |= 1 << Indices[I];
     }
 
-    Op.WriteMask = Components.size() == 1 ? (1 << Swizzle[0]) : Mask;
+    Op.Components = ComponentCount::Four;
+    Op.WriteMask = Mask;
+    Op.SelectedComponent = Indices[0];
     for (unsigned I = 0; I < 4; ++I)
-      Op.Swizzle[I] = Swizzle[I];
-    // A valid destination write mask is always a strictly-increasing,
-    // repeat-free subset of x/y/z/w (matching D3D10_SB_OPERAND_4_COMPONENT_
-    // MASK_MODE), so Monotonic alone is enough to tell a mask ('.xz') from
-    // a swizzle ('.xx', '.yx') without needing to know whether this operand
-    // will be used as a destination or a source.
-    Op.SelectMode =
-        Monotonic ? ComponentSelectMode::Mask : ComponentSelectMode::Swizzle;
+      Op.Swizzle[I] =
+          Indices[I < Components.size() ? I : Components.size() - 1];
+
+    if (IsDestination) {
+      Op.SelectMode = ComponentSelectMode::Mask;
+      return llvm::Error::success();
+    }
+    if (Components.size() == 1) {
+      Op.SelectMode = ComponentSelectMode::Select1;
+      return llvm::Error::success();
+    }
+    if (Components.size() != 4)
+      return error("a source swizzle must name exactly one or four "
+                   "components");
+    Op.SelectMode = ComponentSelectMode::Swizzle;
     return llvm::Error::success();
   }
 
-  /// immediate := 'l' '(' float (',' float){0,3} ')'
+  /// modifiers := <modifier> (',' <modifier>)* '}'
+  llvm::Error parseOperandModifiers(Operand &Op, bool HasComponents) {
+    while (true) {
+      if (Current.Kind != TokenKind::Identifier)
+        return error("expected an operand modifier");
+      llvm::StringRef Name = Current.Spelling;
+      if (Name == "comp0") {
+        Op.Components = ComponentCount::Zero;
+      } else if (Name == "comp1") {
+        Op.Components = ComponentCount::One;
+      } else if (Name == "comp4") {
+        Op.Components = ComponentCount::Four;
+        if (!HasComponents)
+          Op.SelectMode = ComponentSelectMode::Swizzle;
+      } else if (Name == "mask") {
+        Op.SelectMode = ComponentSelectMode::Mask;
+      } else if (Name == "swizzle") {
+        Op.SelectMode = ComponentSelectMode::Swizzle;
+      } else if (Name == "select1") {
+        Op.SelectMode = ComponentSelectMode::Select1;
+      } else if (Name == "nonuniform") {
+        Op.NonUniform = true;
+      } else if (Name == "min16f") {
+        Op.Precision = MinPrecision::Float16;
+      } else if (Name == "min2_8f") {
+        Op.Precision = MinPrecision::Float2_8;
+      } else if (Name == "min16i") {
+        Op.Precision = MinPrecision::SInt16;
+      } else if (Name == "min16u") {
+        Op.Precision = MinPrecision::UInt16;
+      } else {
+        return error("unknown operand modifier '" + Name + "'");
+      }
+      advance();
+      if (Current.Kind != TokenKind::Comma)
+        break;
+      advance();
+    }
+    return expectToken(TokenKind::RBrace, "'}'");
+  }
+
+  /// immediate := 'l' '(' value (',' value){0,3} ')'
+  ///            | 'd' '(' value (',' value)? ')'
   llvm::Expected<Operand> parseImmediate() {
-    advance(); // 'l'
-    if (llvm::Error E = expect(TokenKind::LParen, "'('").takeError())
+    bool Is64Bit = Current.Spelling == "d";
+    advance();
+    if (llvm::Error E = expectToken(TokenKind::LParen, "'('"))
       return std::move(E);
 
     Operand Op;
-    Op.Kind = OperandKind::Immediate32;
-    Op.SelectMode = ComponentSelectMode::None;
+    Op.Kind = Is64Bit ? OperandKind::Immediate64 : OperandKind::Immediate32;
+    unsigned Count = 0;
     while (true) {
-      bool Negate = false;
-      if (Current.Kind == TokenKind::Minus) {
-        Negate = true;
-        advance();
+      if (Is64Bit) {
+        if (llvm::Error E = parseValue64(Op.ImmediateValues))
+          return std::move(E);
+      } else {
+        llvm::Expected<uint32_t> Value = parseValue32();
+        if (!Value)
+          return Value.takeError();
+        Op.ImmediateValues.push_back(*Value);
       }
-      if (Current.Kind != TokenKind::Float &&
-          Current.Kind != TokenKind::Integer)
-        return error("expected a numeric literal inside 'l(...)'");
-      double Value;
-      llvm::StringRef Text = Current.Spelling;
-      Text.consume_back("f");
-      Text.consume_back("F");
-      if (Text.getAsDouble(Value))
-        return error("malformed numeric literal '" + Current.Spelling + "'");
-      if (Negate)
-        Value = -Value;
-      float F = static_cast<float>(Value);
-      uint32_t Bits;
-      static_assert(sizeof(Bits) == sizeof(F));
-      memcpy(&Bits, &F, sizeof(Bits));
-      Op.ImmediateValues.push_back(Bits);
+      ++Count;
+      if (Current.Kind != TokenKind::Comma)
+        break;
       advance();
-
-      if (Current.Kind == TokenKind::Comma) {
-        advance();
-        continue;
-      }
-      break;
     }
-    if (Op.ImmediateValues.size() != 1 && Op.ImmediateValues.size() != 4)
-      return error("'l(...)' must have exactly 1 or 4 components");
-    if (llvm::Error E = expect(TokenKind::RParen, "')'").takeError())
+    unsigned Max = Is64Bit ? 2u : 4u;
+    if (Count != 1 && Count != Max)
+      return error(llvm::Twine("an immediate must have exactly 1 or ") +
+                   llvm::Twine(Max) + " components");
+    Op.Components = Count == 1 ? ComponentCount::One : ComponentCount::Four;
+    if (llvm::Error E = expectToken(TokenKind::RParen, "')'"))
       return std::move(E);
     return Op;
-  }
-
-  /// dcl_globalFlags := identifier ('|' identifier)*
-  llvm::Error parseGlobalFlags(Instruction &Inst) {
-    while (true) {
-      llvm::Expected<Token> Flag =
-          expect(TokenKind::Identifier, "a global flag name");
-      if (!Flag)
-        return Flag.takeError();
-      Inst.Keywords.push_back(Flag->Spelling.str());
-      if (Current.Kind == TokenKind::Pipe) {
-        advance();
-        continue;
-      }
-      break;
-    }
-    return llvm::Error::success();
-  }
-
-  /// dcl_resource_* := '(' identifier (',' identifier){3} ')' register
-  llvm::Error parseDclResource(Instruction &Inst) {
-    if (llvm::Error E = expect(TokenKind::LParen, "'('").takeError())
-      return E;
-    for (unsigned I = 0; I < 4; ++I) {
-      if (I != 0) {
-        if (llvm::Error E = expect(TokenKind::Comma, "','").takeError())
-          return E;
-      }
-      llvm::Expected<Token> Ty =
-          expect(TokenKind::Identifier, "a resource return type");
-      if (!Ty)
-        return Ty.takeError();
-      Inst.Keywords.push_back(Ty->Spelling.str());
-    }
-    if (llvm::Error E = expect(TokenKind::RParen, "')'").takeError())
-      return E;
-    return parseOperandList(Inst, 1);
-  }
-
-  /// dcl_sampler := register ['comparison']
-  llvm::Error parseDclSampler(Instruction &Inst) {
-    if (llvm::Error E = parseOperandList(Inst, 1))
-      return E;
-    if (Current.Kind == TokenKind::Identifier &&
-        Current.Spelling == "comparison") {
-      Inst.Keywords.push_back("comparison");
-      advance();
-    }
-    return llvm::Error::success();
-  }
-
-  /// dcl_input_ps := [interpolation-mode] register
-  llvm::Error parseDclInputPS(Instruction &Inst) {
-    static const llvm::StringRef Modes[] = {
-        "constant",
-        "linear",
-        "linear_centroid",
-        "linear_noperspective",
-        "linear_noperspective_centroid",
-        "linear_sample",
-        "linear_noperspective_sample",
-    };
-    if (Current.Kind == TokenKind::Identifier &&
-        llvm::is_contained(Modes, Current.Spelling)) {
-      Inst.Keywords.push_back(Current.Spelling.str());
-      advance();
-    }
-    return parseOperandList(Inst, 1);
   }
 };
 
 } // namespace
 
-llvm::Expected<std::vector<Instruction>>
-feme::dxbc::parseAssembly(llvm::StringRef Source) {
+llvm::Expected<Program> feme::dxbc::parseAssembly(llvm::StringRef Source) {
   ParserImpl Parser(Source);
   return Parser.parseProgram();
 }

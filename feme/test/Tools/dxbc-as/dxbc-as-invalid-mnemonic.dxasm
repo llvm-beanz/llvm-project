@@ -4,6 +4,6 @@
 ; crash, matching the "must not crash on untrusted input" principle in
 ; feme/docs/Design.md's Diagnostics section.
 
-frobnicate r0, r1
+frobnicate r0.xyzw, r1.xyzw
 
 ; CHECK: error: {{.*}}unknown mnemonic 'frobnicate'

@@ -4,6 +4,6 @@
 ; bitwise/integer operations, so dxbc-as must reject this rather than
 ; silently encoding a meaningless saturate flag.
 
-and_sat r0, r1, r2
+and_sat r0.xyzw, r1.xyzw, r2.xyzw
 
-; CHECK: error: {{.*}}'_sat' is only valid on floating-point ALU instructions
+; CHECK: error: {{.*}}'_sat' is not valid on 'and'

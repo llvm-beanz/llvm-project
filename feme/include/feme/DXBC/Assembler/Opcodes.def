@@ -6,102 +6,305 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// X-macro table of the mnemonics `dxbc-as` understands. This is a
-// deliberately curated, representative subset of the real SM4/SM5 ISA (which
-// has on the order of 200 opcodes across ~10 shader stages), not an
-// exhaustive reimplementation: `dxbc-as` is a testing tool (see
-// feme/docs/Design.md's "dxbc-as" section), and this set already covers
-// every operand-encoding shape (plain ALU, texture sampling/loads,
-// declarations, no-operand, conditional) a future DXBC importer needs
-// fixtures for. Extending coverage later is purely additive: add a row
-// here, and (if it doesn't fit an existing InstructionKind) teach Parser.cpp
-// and Encoder.cpp about the new InstructionKind.
+// X-macro table of the mnemonics `dxbc-as` understands: the whole SM4/SM5
+// instruction set, so that any DXBC shader body a test needs can be written
+// as assembly text rather than as a hex DWORD listing (see the "dxbc-as"
+// section of feme/docs/Design.md).
 //
 // Each entry is:
-//   DXBC_OPCODE(EnumName, Mnemonic, RealOpcodeValue, Kind)
+//   DXBC_OPCODE(EnumName, Mnemonic, Value, NumDst, NumSrc, Controls, Kind,
+//               Flags)
 //
-// `RealOpcodeValue` is the literal value of the corresponding
+// `Value` is the literal value of the corresponding
 // D3D10_SB_OPCODE_TYPE/D3D11_SB_OPCODE_TYPE enumerator from Microsoft's
 // public `d3d11TokenizedProgramFormat.hpp`, so the binary this tool emits
 // uses the real, documented token values rather than ones invented for this
-// tool -- see "Emits raw DXBC tokenized shader bytecode" in
-// feme/docs/Design.md's "dxbc-as" section.
+// tool.
+//
+// `Controls` holds the opcode-specific control bits ([23:11], plus the
+// test-boolean bit 18) that the mnemonic spelling itself implies: several
+// real opcodes are spelled as a family of mnemonics that differ only in
+// those bits (`callc_z`/`callc_nz`, `resinfo`/`resinfo_rcp`/`resinfo_uint`,
+// `dcl_resource_texture2d`/`dcl_resource_texture3d`/...), which keeps the
+// grammar free of positional "mode" keywords.
+//
+// `NumDst`/`NumSrc` are how many destination and source operands the
+// mnemonic takes; the split matters because a one-letter component suffix
+// means a write mask on a destination but a single-component select on a
+// source.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef DXBC_OPCODE
-#define DXBC_OPCODE(EnumName, Mnemonic, RealOpcodeValue, Kind)
+#define DXBC_OPCODE(EnumName, Mnemonic, Value, NumDst, NumSrc, Controls,      \
+                    Kind, Flags)
 #endif
 
-// Destination + 1 source operand, floating point unless noted.
-DXBC_OPCODE(Mov, "mov", 54, ALU1)
-DXBC_OPCODE(Not, "not", 59, ALU1)   // bitwise, integer
-DXBC_OPCODE(INeg, "ineg", 40, ALU1) // integer
-DXBC_OPCODE(ItoF, "itof", 43, ALU1)
-DXBC_OPCODE(FtoI, "ftoi", 27, ALU1)
-DXBC_OPCODE(UtoF, "utof", 86, ALU1)
-DXBC_OPCODE(FtoU, "ftou", 28, ALU1)
-DXBC_OPCODE(Rsq, "rsq", 68, ALU1)
-DXBC_OPCODE(Sqrt, "sqrt", 75, ALU1)
-DXBC_OPCODE(Exp, "exp", 25, ALU1)
-DXBC_OPCODE(Log, "log", 47, ALU1)
-DXBC_OPCODE(Frc, "frc", 26, ALU1)
-DXBC_OPCODE(RoundNE, "round_ne", 64, ALU1)
-DXBC_OPCODE(RoundNI, "round_ni", 65, ALU1)
-DXBC_OPCODE(RoundPI, "round_pi", 66, ALU1)
-DXBC_OPCODE(RoundZ, "round_z", 67, ALU1)
-
-// Destination + 2 source operands.
-DXBC_OPCODE(Add, "add", 0, ALU2)
-DXBC_OPCODE(Mul, "mul", 56, ALU2)
-DXBC_OPCODE(Div, "div", 14, ALU2)
-DXBC_OPCODE(And, "and", 1, ALU2)   // bitwise, integer
-DXBC_OPCODE(Or, "or", 60, ALU2)    // bitwise, integer
-DXBC_OPCODE(Xor, "xor", 87, ALU2)  // bitwise, integer
-DXBC_OPCODE(Min, "min", 51, ALU2)
-DXBC_OPCODE(Max, "max", 52, ALU2)
-DXBC_OPCODE(Dp2, "dp2", 15, ALU2)
-DXBC_OPCODE(Dp3, "dp3", 16, ALU2)
-DXBC_OPCODE(Dp4, "dp4", 17, ALU2)
-DXBC_OPCODE(Eq, "eq", 24, ALU2)
-DXBC_OPCODE(Ne, "ne", 57, ALU2)
-DXBC_OPCODE(Ge, "ge", 29, ALU2)
-DXBC_OPCODE(Lt, "lt", 49, ALU2)
-DXBC_OPCODE(IEq, "ieq", 32, ALU2) // integer
-DXBC_OPCODE(INe, "ine", 39, ALU2) // integer
-DXBC_OPCODE(IGe, "ige", 33, ALU2) // integer
-DXBC_OPCODE(ILt, "ilt", 34, ALU2) // integer
-DXBC_OPCODE(IAdd, "iadd", 30, ALU2) // integer
-
-// Destination + 3 source operands.
-DXBC_OPCODE(Mad, "mad", 50, ALU3)
-DXBC_OPCODE(IMad, "imad", 35, ALU3) // integer
-DXBC_OPCODE(Movc, "movc", 55, ALU3) // dest, cond, src0, src1
-
-// No operands.
-DXBC_OPCODE(Ret, "ret", 62, NoOperand)
-DXBC_OPCODE(Nop, "nop", 58, NoOperand)
-
-// Conditional, 1 source operand (the test boolean is fixed by the mnemonic:
-// `discard_z` tests for zero, `discard_nz` tests for non-zero).
-DXBC_OPCODE(DiscardZ, "discard_z", 13, Discard)
-DXBC_OPCODE(DiscardNZ, "discard_nz", 13, Discard)
-
-// Texture sampling / loads: dest, address, resource, [sampler].
-DXBC_OPCODE(Sample, "sample", 69, Sample)
-DXBC_OPCODE(Ld, "ld", 45, Load)
-
-// Declarations.
-DXBC_OPCODE(DclGlobalFlags, "dcl_globalFlags", 106, DclGlobalFlags)
-DXBC_OPCODE(DclTemps, "dcl_temps", 104, DclTemps)
-DXBC_OPCODE(DclResourceTexture1D, "dcl_resource_texture1d", 88, DclResource)
-DXBC_OPCODE(DclResourceTexture2D, "dcl_resource_texture2d", 88, DclResource)
-DXBC_OPCODE(DclResourceTexture3D, "dcl_resource_texture3d", 88, DclResource)
-DXBC_OPCODE(DclResourceTextureCube, "dcl_resource_texturecube", 88,
-            DclResource)
-DXBC_OPCODE(DclSampler, "dcl_sampler", 90, DclSampler)
-DXBC_OPCODE(DclInput, "dcl_input", 95, DclInput)
-DXBC_OPCODE(DclInputPS, "dcl_input_ps", 98, DclInputPS)
-DXBC_OPCODE(DclOutput, "dcl_output", 101, DclOutput)
+DXBC_OPCODE(Add, "add", 0, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(And, "and", 1, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Break, "break", 2, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Call, "call", 4, 0, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Case, "case", 6, 0, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Continue, "continue", 7, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Cut, "cut", 9, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Default, "default", 10, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(DerivRtx, "deriv_rtx", 11, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(DerivRty, "deriv_rty", 12, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Div, "div", 14, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dp2, "dp2", 15, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dp3, "dp3", 16, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dp4, "dp4", 17, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Else, "else", 18, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Emit, "emit", 19, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(EmitThenCut, "emit_then_cut", 20, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Endif, "endif", 21, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Endloop, "endloop", 22, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Endswitch, "endswitch", 23, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Eq, "eq", 24, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Exp, "exp", 25, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Frc, "frc", 26, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Ftoi, "ftoi", 27, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Ftou, "ftou", 28, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Ge, "ge", 29, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Iadd, "iadd", 30, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ieq, "ieq", 32, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ige, "ige", 33, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ilt, "ilt", 34, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Imad, "imad", 35, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Imax, "imax", 36, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Imin, "imin", 37, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Imul, "imul", 38, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ine, "ine", 39, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ineg, "ineg", 40, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Ishl, "ishl", 41, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ishr, "ishr", 42, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Itof, "itof", 43, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Label, "label", 44, 1, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Log, "log", 47, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Loop, "loop", 48, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Lt, "lt", 49, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Mad, "mad", 50, 1, 3, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Min, "min", 51, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Max, "max", 52, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Mov, "mov", 54, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Mul, "mul", 56, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Ne, "ne", 57, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Nop, "nop", 58, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Not, "not", 59, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Or, "or", 60, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ret, "ret", 62, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(RoundNe, "round_ne", 64, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(RoundNi, "round_ni", 65, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(RoundPi, "round_pi", 66, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(RoundZ, "round_z", 67, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Rsq, "rsq", 68, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Sqrt, "sqrt", 75, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Sincos, "sincos", 77, 2, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Udiv, "udiv", 78, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ult, "ult", 79, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Uge, "uge", 80, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Umul, "umul", 81, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Umad, "umad", 82, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Umax, "umax", 83, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Umin, "umin", 84, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ushr, "ushr", 85, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Utof, "utof", 86, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Xor, "xor", 87, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Lod, "lod", 108, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Samplepos, "samplepos", 110, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(HsDecls, "hs_decls", 113, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(HsControlPointPhase, "hs_control_point_phase", 114, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(HsForkPhase, "hs_fork_phase", 115, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(HsJoinPhase, "hs_join_phase", 116, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(EmitStream, "emit_stream", 117, 1, 0, 0, Generic, OF_None)
+DXBC_OPCODE(CutStream, "cut_stream", 118, 1, 0, 0, Generic, OF_None)
+DXBC_OPCODE(EmitThenCutStream, "emit_then_cut_stream", 119, 1, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Bufinfo, "bufinfo", 121, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(DerivRtxCoarse, "deriv_rtx_coarse", 122, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(DerivRtxFine, "deriv_rtx_fine", 123, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(DerivRtyCoarse, "deriv_rty_coarse", 124, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(DerivRtyFine, "deriv_rty_fine", 125, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Rcp, "rcp", 129, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(F32tof16, "f32tof16", 130, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(F16tof32, "f16tof32", 131, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Uaddc, "uaddc", 132, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Usubb, "usubb", 133, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Countbits, "countbits", 134, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(FirstbitHi, "firstbit_hi", 135, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(FirstbitLo, "firstbit_lo", 136, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(FirstbitShi, "firstbit_shi", 137, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Ubfe, "ubfe", 138, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Ibfe, "ibfe", 139, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Bfrev, "bfrev", 141, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Swapc, "swapc", 142, 2, 3, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicAnd, "atomic_and", 169, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicOr, "atomic_or", 170, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicXor, "atomic_xor", 171, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicCmpStore, "atomic_cmp_store", 172, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicIadd, "atomic_iadd", 173, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicImax, "atomic_imax", 174, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicImin, "atomic_imin", 175, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicUmax, "atomic_umax", 176, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(AtomicUmin, "atomic_umin", 177, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicAlloc, "imm_atomic_alloc", 178, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicConsume, "imm_atomic_consume", 179, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicIadd, "imm_atomic_iadd", 180, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicAnd, "imm_atomic_and", 181, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicOr, "imm_atomic_or", 182, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicXor, "imm_atomic_xor", 183, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicExch, "imm_atomic_exch", 184, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicCmpExch, "imm_atomic_cmp_exch", 185, 2, 3, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicImax, "imm_atomic_imax", 186, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicImin, "imm_atomic_imin", 187, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicUmax, "imm_atomic_umax", 188, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ImmAtomicUmin, "imm_atomic_umin", 189, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Dadd, "dadd", 191, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dmax, "dmax", 192, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dmin, "dmin", 193, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dmul, "dmul", 194, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Deq, "deq", 195, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Dge, "dge", 196, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Dlt, "dlt", 197, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Dne, "dne", 198, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Dmov, "dmov", 199, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dmovc, "dmovc", 200, 1, 3, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dtof, "dtof", 201, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Ftod, "ftod", 202, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(EvalSnapped, "eval_snapped", 203, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(EvalSampleIndex, "eval_sample_index", 204, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(EvalCentroid, "eval_centroid", 205, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Abort, "abort", 207, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(DebugBreak, "debug_break", 208, 0, 0, 0, Generic, OF_None)
+DXBC_OPCODE(Ddiv, "ddiv", 210, 1, 2, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Dfma, "dfma", 211, 1, 3, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Drcp, "drcp", 212, 1, 1, 0, Generic, OF_Saturable)
+DXBC_OPCODE(Msad, "msad", 213, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Dtoi, "dtoi", 214, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Dtou, "dtou", 215, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Itod, "itod", 216, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Utod, "utod", 217, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(BreakcZ, "breakc_z", 3, 0, 1, 0x00000000, Generic, OF_None)
+DXBC_OPCODE(BreakcNZ, "breakc_nz", 3, 0, 1, 0x00040000, Generic, OF_None)
+DXBC_OPCODE(CallcZ, "callc_z", 5, 0, 2, 0x00000000, Generic, OF_None)
+DXBC_OPCODE(CallcNZ, "callc_nz", 5, 0, 2, 0x00040000, Generic, OF_None)
+DXBC_OPCODE(ContinuecZ, "continuec_z", 8, 0, 1, 0x00000000, Generic, OF_None)
+DXBC_OPCODE(ContinuecNZ, "continuec_nz", 8, 0, 1, 0x00040000, Generic, OF_None)
+DXBC_OPCODE(RetcZ, "retc_z", 63, 0, 1, 0x00000000, Generic, OF_None)
+DXBC_OPCODE(RetcNZ, "retc_nz", 63, 0, 1, 0x00040000, Generic, OF_None)
+DXBC_OPCODE(IfZ, "if_z", 31, 0, 1, 0x00000000, Generic, OF_None)
+DXBC_OPCODE(IfNZ, "if_nz", 31, 0, 1, 0x00040000, Generic, OF_None)
+DXBC_OPCODE(DiscardZ, "discard_z", 13, 0, 1, 0x00000000, Generic, OF_None)
+DXBC_OPCODE(DiscardNZ, "discard_nz", 13, 0, 1, 0x00040000, Generic, OF_None)
+DXBC_OPCODE(Switch, "switch", 76, 0, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Fcall, "fcall", 120, 0, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Resinfo, "resinfo", 61, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(ResinfoRcp, "resinfo_rcp", 61, 1, 2, 0x00000800, Generic, OF_None)
+DXBC_OPCODE(ResinfoUint, "resinfo_uint", 61, 1, 2, 0x00001000, Generic, OF_None)
+DXBC_OPCODE(Sampleinfo, "sampleinfo", 111, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(SampleinfoUint, "sampleinfo_uint", 111, 1, 1, 0x00000800, Generic, OF_None)
+DXBC_OPCODE(Ld, "ld", 45, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ld2dms, "ld2dms", 46, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Movc, "movc", 55, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Sample, "sample", 69, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(SampleB, "sample_b", 74, 1, 4, 0, Generic, OF_None)
+DXBC_OPCODE(SampleL, "sample_l", 72, 1, 4, 0, Generic, OF_None)
+DXBC_OPCODE(SampleD, "sample_d", 73, 1, 5, 0, Generic, OF_None)
+DXBC_OPCODE(SampleC, "sample_c", 70, 1, 4, 0, Generic, OF_None)
+DXBC_OPCODE(SampleCLz, "sample_c_lz", 71, 1, 4, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4, "gather4", 109, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4C, "gather4_c", 126, 1, 4, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4Po, "gather4_po", 127, 1, 4, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4PoC, "gather4_po_c", 128, 1, 5, 0, Generic, OF_None)
+DXBC_OPCODE(Bfi, "bfi", 140, 1, 4, 0, Generic, OF_None)
+DXBC_OPCODE(LdUavTyped, "ld_uav_typed", 163, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(StoreUavTyped, "store_uav_typed", 164, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(LdRaw, "ld_raw", 165, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(StoreRaw, "store_raw", 166, 1, 2, 0, Generic, OF_None)
+DXBC_OPCODE(LdStructured, "ld_structured", 167, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(StoreStructured, "store_structured", 168, 1, 3, 0, Generic, OF_None)
+DXBC_OPCODE(CheckAccessFullyMapped, "check_access_fully_mapped", 234, 1, 1, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4S, "gather4_s", 219, 2, 3, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4CS, "gather4_c_s", 220, 2, 4, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4PoS, "gather4_po_s", 221, 2, 4, 0, Generic, OF_None)
+DXBC_OPCODE(Gather4PoCS, "gather4_po_c_s", 222, 2, 5, 0, Generic, OF_None)
+DXBC_OPCODE(LdS, "ld_s", 223, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(Ld2dmsS, "ld2dms_s", 224, 2, 3, 0, Generic, OF_None)
+DXBC_OPCODE(LdUavTypedS, "ld_uav_typed_s", 225, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(LdRawS, "ld_raw_s", 226, 2, 2, 0, Generic, OF_None)
+DXBC_OPCODE(LdStructuredS, "ld_structured_s", 227, 2, 3, 0, Generic, OF_None)
+DXBC_OPCODE(SampleLS, "sample_l_s", 228, 2, 4, 0, Generic, OF_None)
+DXBC_OPCODE(SampleCLzS, "sample_c_lz_s", 229, 2, 4, 0, Generic, OF_None)
+DXBC_OPCODE(SampleClS, "sample_cl_s", 230, 2, 4, 0, Generic, OF_None)
+DXBC_OPCODE(SampleBClS, "sample_b_cl_s", 231, 2, 5, 0, Generic, OF_None)
+DXBC_OPCODE(SampleDClS, "sample_d_cl_s", 232, 2, 6, 0, Generic, OF_None)
+DXBC_OPCODE(SampleCClS, "sample_c_cl_s", 233, 2, 5, 0, Generic, OF_None)
+DXBC_OPCODE(Sync, "sync", 190, 0, 0, 0, FlagList, OF_None)
+DXBC_OPCODE(DclGlobalFlags, "dcl_globalFlags", 106, 0, 0, 0, FlagList, OF_None)
+DXBC_OPCODE(DclTemps, "dcl_temps", 104, 0, 0, 0, Counts, OF_None)
+DXBC_OPCODE(DclThreadGroup, "dcl_thread_group", 155, 0, 0, 0, Counts, OF_None)
+DXBC_OPCODE(DclGsinstances, "dcl_gsinstances", 206, 0, 0, 0, Counts, OF_None)
+DXBC_OPCODE(DclMaxout, "dcl_maxout", 94, 0, 0, 0, Counts, OF_None)
+DXBC_OPCODE(DclHsForkPhaseInstanceCount, "dcl_hs_fork_phase_instance_count", 153, 0, 0, 0, Counts, OF_None)
+DXBC_OPCODE(DclHsJoinPhaseInstanceCount, "dcl_hs_join_phase_instance_count", 154, 0, 0, 0, Counts, OF_None)
+DXBC_OPCODE(DclHsMaxTessfactor, "dcl_hs_max_tessfactor", 152, 0, 0, 0, Float, OF_None)
+DXBC_OPCODE(DclIndexableTemp, "dcl_indexableTemp", 105, 0, 0, 0, DclIndexableTemp, OF_None)
+DXBC_OPCODE(DclInputprimitive, "dcl_inputprimitive", 93, 0, 0, 0, ControlEnum, OF_None)
+DXBC_OPCODE(DclOutputtopology, "dcl_outputtopology", 92, 0, 0, 0, ControlEnum, OF_None)
+DXBC_OPCODE(DclTessellatorDomain, "dcl_tessellator_domain", 149, 0, 0, 0, ControlEnum, OF_None)
+DXBC_OPCODE(DclTessellatorPartitioning, "dcl_tessellator_partitioning", 150, 0, 0, 0, ControlEnum, OF_None)
+DXBC_OPCODE(DclTessellatorOutputPrimitive, "dcl_tessellator_output_primitive", 151, 0, 0, 0, ControlEnum, OF_None)
+DXBC_OPCODE(DclInputControlPointCount, "dcl_input_control_point_count", 147, 0, 0, 0, ControlCount, OF_None)
+DXBC_OPCODE(DclOutputControlPointCount, "dcl_output_control_point_count", 148, 0, 0, 0, ControlCount, OF_None)
+DXBC_OPCODE(DclInput, "dcl_input", 95, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclOutput, "dcl_output", 101, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclStream, "dcl_stream", 143, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclIndexrange, "dcl_indexrange", 91, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclResourceRaw, "dcl_resource_raw", 161, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclResourceStructured, "dcl_resource_structured", 162, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclTgsmRaw, "dcl_tgsm_raw", 159, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclTgsmStructured, "dcl_tgsm_structured", 160, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclFunctionBody, "dcl_function_body", 144, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclFunctionTable, "dcl_function_table", 145, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclInterface, "dcl_interface", 146, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclConstantbuffer, "dcl_constantbuffer", 89, 0, 1, 0, Operand, OF_None)
+DXBC_OPCODE(DclConstantbufferDynamicIndexed, "dcl_constantbuffer_dynamicIndexed", 89, 0, 1, 0x00000800, Operand, OF_None)
+DXBC_OPCODE(DclSampler, "dcl_sampler", 90, 1, 0, 0, Operand, OF_None)
+DXBC_OPCODE(DclSamplerComparison, "dcl_sampler_comparison", 90, 1, 0, 0x00000800, Operand, OF_None)
+DXBC_OPCODE(DclSamplerMono, "dcl_sampler_mono", 90, 1, 0, 0x00001000, Operand, OF_None)
+DXBC_OPCODE(DclUavRaw, "dcl_uav_raw", 157, 1, 0, 0, Operand, OF_UAVFlags)
+DXBC_OPCODE(DclUavStructured, "dcl_uav_structured", 158, 1, 0, 0, Operand, OF_UAVFlags)
+DXBC_OPCODE(DclInputSgv, "dcl_input_sgv", 96, 1, 0, 0, OperandSystemValue, OF_None)
+DXBC_OPCODE(DclInputSiv, "dcl_input_siv", 97, 1, 0, 0, OperandSystemValue, OF_None)
+DXBC_OPCODE(DclOutputSgv, "dcl_output_sgv", 102, 1, 0, 0, OperandSystemValue, OF_None)
+DXBC_OPCODE(DclOutputSiv, "dcl_output_siv", 103, 1, 0, 0, OperandSystemValue, OF_None)
+DXBC_OPCODE(DclInputPsSgv, "dcl_input_ps_sgv", 99, 1, 0, 0, OperandSystemValue, OF_None)
+DXBC_OPCODE(DclInputPs, "dcl_input_ps", 98, 1, 0, 0, DclInputPS, OF_None)
+DXBC_OPCODE(DclInputPsSiv, "dcl_input_ps_siv", 100, 1, 0, 0, DclInputPSSystemValue, OF_None)
+DXBC_OPCODE(DclImmediateConstantBuffer, "dcl_immediateConstantBuffer", 53, 0, 0, 0x00001800, DclImmediateConstantBuffer, OF_None)
+DXBC_OPCODE(DclResourceBuffer, "dcl_resource_buffer", 88, 1, 0, 0x00000800, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedBuffer, "dcl_uav_typed_buffer", 156, 1, 0, 0x00000800, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceTexture1d, "dcl_resource_texture1d", 88, 1, 0, 0x00001000, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedTexture1d, "dcl_uav_typed_texture1d", 156, 1, 0, 0x00001000, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceTexture2d, "dcl_resource_texture2d", 88, 1, 0, 0x00001800, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedTexture2d, "dcl_uav_typed_texture2d", 156, 1, 0, 0x00001800, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceTexture2dms, "dcl_resource_texture2dms", 88, 1, 0, 0x00002000, DclTypedResource, OF_SampleCount)
+DXBC_OPCODE(DclUavTypedTexture2dms, "dcl_uav_typed_texture2dms", 156, 1, 0, 0x00002000, DclTypedResource, OF_UAVFlags | OF_SampleCount)
+DXBC_OPCODE(DclResourceTexture3d, "dcl_resource_texture3d", 88, 1, 0, 0x00002800, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedTexture3d, "dcl_uav_typed_texture3d", 156, 1, 0, 0x00002800, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceTexturecube, "dcl_resource_texturecube", 88, 1, 0, 0x00003000, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedTexturecube, "dcl_uav_typed_texturecube", 156, 1, 0, 0x00003000, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceTexture1darray, "dcl_resource_texture1darray", 88, 1, 0, 0x00003800, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedTexture1darray, "dcl_uav_typed_texture1darray", 156, 1, 0, 0x00003800, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceTexture2darray, "dcl_resource_texture2darray", 88, 1, 0, 0x00004000, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedTexture2darray, "dcl_uav_typed_texture2darray", 156, 1, 0, 0x00004000, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceTexture2dmsarray, "dcl_resource_texture2dmsarray", 88, 1, 0, 0x00004800, DclTypedResource, OF_SampleCount)
+DXBC_OPCODE(DclUavTypedTexture2dmsarray, "dcl_uav_typed_texture2dmsarray", 156, 1, 0, 0x00004800, DclTypedResource, OF_UAVFlags | OF_SampleCount)
+DXBC_OPCODE(DclResourceTexturecubearray, "dcl_resource_texturecubearray", 88, 1, 0, 0x00005000, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedTexturecubearray, "dcl_uav_typed_texturecubearray", 156, 1, 0, 0x00005000, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceRawBuffer, "dcl_resource_raw_buffer", 88, 1, 0, 0x00005800, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedRawBuffer, "dcl_uav_typed_raw_buffer", 156, 1, 0, 0x00005800, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(DclResourceStructuredBuffer, "dcl_resource_structured_buffer", 88, 1, 0, 0x00006000, DclTypedResource, OF_None)
+DXBC_OPCODE(DclUavTypedStructuredBuffer, "dcl_uav_typed_structured_buffer", 156, 1, 0, 0x00006000, DclTypedResource, OF_UAVFlags)
+DXBC_OPCODE(RawDWords, ".dword", 0, 0, 0, 0, RawTokens, OF_None)
 
 #undef DXBC_OPCODE

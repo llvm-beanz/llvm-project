@@ -4,6 +4,7 @@
 ; Built via dxbc-as (see feme/docs/Design.md's "Avoiding binary test
 ; fixtures" section) instead of a checked-in binary fixture.
 
+.shader_model pixel 5 0
 dcl_temps 1
 dcl_temps 16
 dcl_temps 4096

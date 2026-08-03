@@ -10,9 +10,10 @@
 ; (--emit=container) starts with the "DXBC" magic and contains a "SHEX"
 ; part (see feme/docs/Design.md's "dxbc-as" section).
 
+.shader_model pixel 5 0
 ret
 
-; Version token: program type 0 (pixel, the default), major 5, minor 0,
+; Version token: program type 0 (pixel), major 5, minor 0,
 ; i.e. 0x00000050 as a little-endian DWORD.
 ; VERSION: 50 00 00 00
 ; Length token: 3 DWORDs total (version + length + the `ret` opcode token).

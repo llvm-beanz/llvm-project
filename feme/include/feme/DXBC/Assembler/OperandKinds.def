@@ -1,0 +1,72 @@
+//===- OperandKinds.def - DXBC assembler operand type table ----*- C++ -*-===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// X-macro table of the operand storage classes `dxbc-as` understands, i.e.
+// the complete D3D10_SB_OPERAND_TYPE enumeration from Microsoft's public
+// `d3d11TokenizedProgramFormat.hpp`.
+//
+// Each entry is:
+//   DXBC_OPERAND_KIND(EnumName, Spelling, Value)
+//
+// `Spelling` is how the operand's storage class is written in assembly, and
+// deliberately matches the `dxsa` dialect's operand-type keywords (see
+// feme/include/feme/Dialect/DXSA/IR/DXSAOperand.td) so a `dxbc-as` fixture
+// and the `dxsa` text it imports to read the same way.
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef DXBC_OPERAND_KIND
+#define DXBC_OPERAND_KIND(EnumName, Spelling, Value)
+#endif
+
+DXBC_OPERAND_KIND(Temp, "r", 0)
+DXBC_OPERAND_KIND(Input, "v", 1)
+DXBC_OPERAND_KIND(Output, "o", 2)
+DXBC_OPERAND_KIND(IndexableTemp, "x", 3)
+DXBC_OPERAND_KIND(Immediate32, "l", 4)
+DXBC_OPERAND_KIND(Immediate64, "d", 5)
+DXBC_OPERAND_KIND(Sampler, "s", 6)
+DXBC_OPERAND_KIND(Resource, "t", 7)
+DXBC_OPERAND_KIND(ConstantBuffer, "cb", 8)
+DXBC_OPERAND_KIND(ImmediateConstantBuffer, "icb", 9)
+DXBC_OPERAND_KIND(Label, "label", 10)
+DXBC_OPERAND_KIND(InputPrimitiveID, "vPrim", 11)
+DXBC_OPERAND_KIND(OutputDepth, "oDepth", 12)
+DXBC_OPERAND_KIND(Null, "null", 13)
+DXBC_OPERAND_KIND(Rasterizer, "rasterizer", 14)
+DXBC_OPERAND_KIND(OutputCoverageMask, "oMask", 15)
+DXBC_OPERAND_KIND(Stream, "m", 16)
+DXBC_OPERAND_KIND(FunctionBody, "fb", 17)
+DXBC_OPERAND_KIND(FunctionTable, "ft", 18)
+DXBC_OPERAND_KIND(Interface, "fp", 19)
+DXBC_OPERAND_KIND(FunctionInput, "funcInput", 20)
+DXBC_OPERAND_KIND(FunctionOutput, "funcOutput", 21)
+DXBC_OPERAND_KIND(OutputControlPointID, "vOutputControlPointID", 22)
+DXBC_OPERAND_KIND(InputForkInstanceID, "vForkInstanceID", 23)
+DXBC_OPERAND_KIND(InputJoinInstanceID, "vJoinInstanceID", 24)
+DXBC_OPERAND_KIND(InputControlPoint, "vicp", 25)
+DXBC_OPERAND_KIND(OutputControlPoint, "vocp", 26)
+DXBC_OPERAND_KIND(InputPatchConstant, "vpc", 27)
+DXBC_OPERAND_KIND(InputDomainPoint, "vDomain", 28)
+DXBC_OPERAND_KIND(ThisPointer, "thisPtr", 29)
+DXBC_OPERAND_KIND(UnorderedAccessView, "u", 30)
+DXBC_OPERAND_KIND(ThreadGroupSharedMemory, "g", 31)
+DXBC_OPERAND_KIND(InputThreadID, "vThreadID", 32)
+DXBC_OPERAND_KIND(InputThreadGroupID, "vThreadGroupID", 33)
+DXBC_OPERAND_KIND(InputThreadIDInGroup, "vThreadIDInGroup", 34)
+DXBC_OPERAND_KIND(InputCoverageMask, "vCoverage", 35)
+DXBC_OPERAND_KIND(InputThreadIDInGroupFlattened, "vThreadIDInGroupFlattened",
+                  36)
+DXBC_OPERAND_KIND(InputGSInstanceID, "vGSInstanceID", 37)
+DXBC_OPERAND_KIND(OutputDepthGreaterEqual, "oDepthGE", 38)
+DXBC_OPERAND_KIND(OutputDepthLessEqual, "oDepthLE", 39)
+DXBC_OPERAND_KIND(CycleCounter, "cycleCounter", 40)
+DXBC_OPERAND_KIND(OutputStencilRef, "oStencilRef", 41)
+DXBC_OPERAND_KIND(InnerCoverage, "vInnerCoverage", 42)
+
+#undef DXBC_OPERAND_KIND

@@ -8,11 +8,12 @@
 //
 // Implements Encoder, translating the parsed instruction stack to raw DXBC
 // tokenized shader bytecode. Bit layouts below are transcribed from
-// Microsoft's public `d3d11TokenizedProgramFormat.hpp` (see the comment on
-// each ENCODE_* helper for the specific field it implements) for every
-// field this tool populates; fields it never populates (e.g. relative
-// addressing, double-precision immediates) are simply never emitted, not
-// approximated.
+// Microsoft's public `d3d11TokenizedProgramFormat.hpp`.
+//
+// Parser has already resolved every keyword to the bits it stands for, so
+// this file only has to lay tokens out: an opcode token carrying the
+// opcode-specific control bits, any extended opcode tokens, the operand
+// tokens, then the instruction's trailing raw DWORDs.
 //
 //===----------------------------------------------------------------------===//
 
@@ -32,300 +33,213 @@ using namespace feme::dxbc;
 //===----------------------------------------------------------------------===//
 
 static constexpr uint32_t OpcodeTypeMask = 0x000007ff;
-static constexpr uint32_t SaturateMask = 0x00002000;    // bit 13
-static constexpr uint32_t TestBooleanMask = 0x00040000; // bit 18
-static constexpr uint32_t InstructionLengthShift = 24;
-static constexpr uint32_t InstructionLengthMask = 0x7f000000;
-
-static uint32_t encodeOpcodeToken0(const Instruction &Inst,
-                                   uint32_t OpcodeSpecificControls,
-                                   uint32_t LengthInDWords) {
-  const OpcodeInfo &Info = getOpcodeInfo(Inst.Op);
-  uint32_t Token = Info.RealOpcodeValue & OpcodeTypeMask;
-  Token |= OpcodeSpecificControls;
-  if (Inst.Saturate)
-    Token |= SaturateMask;
-  Token |= (LengthInDWords << InstructionLengthShift) & InstructionLengthMask;
-  return Token;
-}
+static constexpr uint32_t SaturateMask = 0x00002000;   // bit 13
+static constexpr uint32_t PreciseValuesShift = 19;     // bits [22:19]
+static constexpr uint32_t InstructionLengthShift = 24; // bits [30:24]
+static constexpr uint32_t MaxInstructionLength = 127;
+static constexpr uint32_t ExtendedMask = 0x80000000u; // bit 31
 
 //===----------------------------------------------------------------------===//
-// Operand token (OperandToken0/1) field encoders.
+// Extended opcode tokens (OpcodeToken1).
 //===----------------------------------------------------------------------===//
 
-enum class RealOperandType : uint32_t {
-  Temp = 0,
-  Input = 1,
-  Output = 2,
-  Immediate32 = 4,
-  Sampler = 6,
-  Resource = 7,
+namespace {
+enum class ExtendedOpcodeType : uint32_t {
+  SampleControls = 1,
+  ResourceDim = 2,
+  ResourceReturnType = 3,
 };
+} // namespace
 
-static RealOperandType toRealOperandType(OperandKind Kind) {
-  switch (Kind) {
-  case OperandKind::Temp:
-    return RealOperandType::Temp;
-  case OperandKind::Input:
-    return RealOperandType::Input;
-  case OperandKind::Output:
-    return RealOperandType::Output;
-  case OperandKind::Resource:
-    return RealOperandType::Resource;
-  case OperandKind::Sampler:
-    return RealOperandType::Sampler;
-  case OperandKind::Immediate32:
-    return RealOperandType::Immediate32;
+/// Appends the extended opcode tokens \p Inst needs, marking each token that
+/// is followed by another. Returns true if any were emitted (in which case
+/// the opcode token itself must set bit 31).
+static bool encodeExtendedOpcodeTokens(const Instruction &Inst,
+                                       llvm::SmallVectorImpl<uint32_t> &Out) {
+  llvm::SmallVector<uint32_t, 3> Tokens;
+
+  if (Inst.HasSampleOffsets) {
+    // [5:0] type, then three 4-bit signed texel offsets at bits 9, 13, 17.
+    uint32_t Token = static_cast<uint32_t>(ExtendedOpcodeType::SampleControls);
+    for (unsigned I = 0; I < 3; ++I) {
+      uint32_t Offset = static_cast<uint32_t>(Inst.SampleOffsets[I]) & 0xF;
+      Token |= Offset << (9 + 4 * I);
+    }
+    Tokens.push_back(Token);
   }
-  llvm_unreachable("unhandled OperandKind");
+  if (Inst.HasResourceDim) {
+    // [5:0] type, [10:6] dimension, [21:11] structure stride.
+    uint32_t Token = static_cast<uint32_t>(ExtendedOpcodeType::ResourceDim);
+    Token |= (static_cast<uint32_t>(Inst.ResourceDim) & 0x1F) << 6;
+    Token |= (static_cast<uint32_t>(Inst.ResourceStride) & 0x7FF) << 11;
+    Tokens.push_back(Token);
+  }
+  if (Inst.HasResourceReturnType) {
+    // [5:0] type, then four 4-bit return types at bits 6, 10, 14, 18.
+    uint32_t Token =
+        static_cast<uint32_t>(ExtendedOpcodeType::ResourceReturnType);
+    for (unsigned I = 0; I < 4; ++I)
+      Token |= (static_cast<uint32_t>(Inst.ResourceReturnTypes[I]) & 0xF)
+               << (6 + 4 * I);
+    Tokens.push_back(Token);
+  }
+
+  for (size_t I = 0, E = Tokens.size(); I != E; ++I)
+    Out.push_back(I + 1 == E ? Tokens[I] : Tokens[I] | ExtendedMask);
+  return !Tokens.empty();
 }
+
+//===----------------------------------------------------------------------===//
+// Operand tokens (OperandToken0/OperandToken1).
+//===----------------------------------------------------------------------===//
 
 /// Appends the token(s) for a single Operand to \p Out, following
 /// "Instruction Operand Format (OperandToken0)" /
 /// "Extended Instruction Operand Format (OperandToken1)" in
-/// d3d11TokenizedProgramFormat.hpp.
+/// `d3d11TokenizedProgramFormat.hpp`.
 static void encodeOperand(const Operand &Op,
                           llvm::SmallVectorImpl<uint32_t> &Out) {
-  RealOperandType Type = toRealOperandType(Op.Kind);
+  bool IsImmediate = Op.Kind == OperandKind::Immediate32 ||
+                     Op.Kind == OperandKind::Immediate64;
 
-  // [01:00] NUM_COMPONENTS: sampler operands carry no per-component data
-  // (0), immediates are 1 or 4 components depending on how many literal
-  // values were given, every other register we support is always
-  // (4-component).
-  uint32_t NumComponents = 2; // D3D10_SB_OPERAND_4_COMPONENT
-  if (Op.Kind == OperandKind::Sampler)
-    NumComponents = 0; // D3D10_SB_OPERAND_0_COMPONENT
-  else if (Op.Kind == OperandKind::Immediate32)
-    NumComponents = Op.ImmediateValues.size() == 1 ? 1 : 2;
+  // [01:00] NUM_COMPONENTS.
+  uint32_t Token0 = 0;
+  switch (Op.Components) {
+  case ComponentCount::Zero:
+    Token0 = 0;
+    break;
+  case ComponentCount::One:
+    Token0 = 1;
+    break;
+  case ComponentCount::Four:
+    Token0 = 2;
+    break;
+  }
 
-  uint32_t Token0 = NumComponents;
-  if (NumComponents == 2) {
-    if (Op.SelectMode == ComponentSelectMode::Mask) {
+  if (Op.Components == ComponentCount::Four && !IsImmediate) {
+    switch (Op.SelectMode) {
+    case ComponentSelectMode::Mask:
       // [03:02] = MASK_MODE (0), [07:04] = mask.
-      Token0 |= (0u << 2);
-      Token0 |= (static_cast<uint32_t>(Op.WriteMask) & 0xF) << 4;
-    } else {
-      // [03:02] = SWIZZLE_MODE (1), [11:04] = 2 bits/component swizzle.
-      Token0 |= (1u << 2);
+      Token0 |= static_cast<uint32_t>(Op.WriteMask & 0xF) << 4;
+      break;
+    case ComponentSelectMode::Swizzle: {
+      // [03:02] = SWIZZLE_MODE (1), [11:04] = 2 bits/component.
+      Token0 |= 1u << 2;
       uint32_t Swizzle = 0;
       for (unsigned I = 0; I < 4; ++I)
         Swizzle |= (static_cast<uint32_t>(Op.Swizzle[I]) & 0x3) << (2 * I);
       Token0 |= Swizzle << 4;
+      break;
+    }
+    case ComponentSelectMode::Select1:
+      // [03:02] = SELECT_1_MODE (2), [05:04] = component.
+      Token0 |= 2u << 2;
+      Token0 |= (static_cast<uint32_t>(Op.SelectedComponent) & 0x3) << 4;
+      break;
     }
   }
 
   // [19:12] OPERAND_TYPE.
-  Token0 |= (static_cast<uint32_t>(Type) & 0xff) << 12;
+  Token0 |= (static_cast<uint32_t>(Op.Kind) & 0xff) << 12;
 
-  // [21:20] INDEX_DIMENSION, [24:22] index[0] representation: every
-  // register operand `dxbc-as` emits uses a single, immediate (not
-  // relative) index; immediates carry no register index at all.
-  bool HasIndex = Op.Kind != OperandKind::Immediate32;
-  if (HasIndex) {
-    Token0 |= (1u << 20); // D3D10_SB_OPERAND_INDEX_1D
-    Token0 |= (0u << 22); // D3D10_SB_OPERAND_INDEX_IMMEDIATE32
+  // [21:20] INDEX_DIMENSION, then one 3-bit index representation per
+  // dimension at bits 22, 25 and 28.
+  if (!IsImmediate) {
+    Token0 |= (static_cast<uint32_t>(Op.Indices.size()) & 0x3) << 20;
+    for (unsigned I = 0, E = Op.Indices.size(); I != E; ++I)
+      Token0 |= (static_cast<uint32_t>(Op.Indices[I].Rep) & 0x7)
+                << (22 + 3 * I);
   }
 
-  bool HasModifier = Op.Negate || Op.Abs;
+  bool HasModifier = Op.Negate || Op.Abs || Op.NonUniform ||
+                     Op.Precision != MinPrecision::Default;
   if (HasModifier)
-    Token0 |= 0x80000000u; // bit 31: extended operand token follows.
+    Token0 |= ExtendedMask;
 
   Out.push_back(Token0);
 
   if (HasModifier) {
-    // Extended Instruction Operand Format (OperandToken1):
     // [05:00] = D3D10_SB_EXTENDED_OPERAND_MODIFIER (1)
     // [13:06] = D3D10_SB_OPERAND_MODIFIER (NEG=1, ABS=2, ABSNEG=3)
+    // [16:14] = D3D11_SB_OPERAND_MIN_PRECISION
+    // [17:17] = D3D12_SB_OPERAND_NON_UNIFORM
     uint32_t Modifier = (Op.Negate ? 1u : 0u) | (Op.Abs ? 2u : 0u);
     uint32_t Token1 = 1u | (Modifier << 6);
+    Token1 |= (static_cast<uint32_t>(Op.Precision) & 0x7) << 14;
+    if (Op.NonUniform)
+      Token1 |= 1u << 17;
     Out.push_back(Token1);
   }
 
-  if (HasIndex)
-    Out.push_back(Op.RegisterIndex);
-
-  if (Op.Kind == OperandKind::Immediate32)
-    llvm::append_range(Out, Op.ImmediateValues);
-}
-
-//===----------------------------------------------------------------------===//
-// Declaration-specific keyword tables.
-//===----------------------------------------------------------------------===//
-
-namespace {
-struct KeywordValue {
-  llvm::StringRef Name;
-  uint32_t Value;
-};
-} // namespace
-
-static llvm::Expected<uint32_t>
-lookupKeyword(llvm::ArrayRef<KeywordValue> Table, llvm::StringRef Name,
-              llvm::StringRef WhatFor) {
-  for (const KeywordValue &Entry : Table)
-    if (Entry.Name == Name)
-      return Entry.Value;
-  return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                 "unknown %s '%s'", WhatFor.str().c_str(),
-                                 Name.str().c_str());
-}
-
-// D3D10_SB_RESOURCE_RETURN_TYPE.
-static constexpr KeywordValue ResourceReturnTypes[] = {
-    {"unorm", 1}, {"snorm", 2}, {"sint", 3},
-    {"uint", 4},  {"float", 5}, {"mixed", 6},
-};
-
-// D3D10_SB_RESOURCE_DIMENSION.
-static uint32_t resourceDimension(Opcode Op) {
-  switch (Op) {
-  case Opcode::DclResourceTexture1D:
-    return 2;
-  case Opcode::DclResourceTexture2D:
-    return 3;
-  case Opcode::DclResourceTexture3D:
-    return 5;
-  case Opcode::DclResourceTextureCube:
-    return 6;
-  default:
-    llvm_unreachable("not a dcl_resource_* opcode");
+  for (const OperandIndex &Index : Op.Indices) {
+    switch (Index.Rep) {
+    case OperandIndex::Representation::Immediate32:
+      Out.push_back(static_cast<uint32_t>(Index.Value));
+      break;
+    case OperandIndex::Representation::Immediate64:
+      Out.push_back(static_cast<uint32_t>(Index.Value >> 32));
+      Out.push_back(static_cast<uint32_t>(Index.Value));
+      break;
+    case OperandIndex::Representation::Relative:
+      encodeOperand(*Index.Relative, Out);
+      break;
+    case OperandIndex::Representation::Immediate32PlusRelative:
+      Out.push_back(static_cast<uint32_t>(Index.Value));
+      encodeOperand(*Index.Relative, Out);
+      break;
+    }
   }
+
+  llvm::append_range(Out, Op.ImmediateValues);
 }
 
-// D3D10_SB_INTERPOLATION_MODE.
-static constexpr KeywordValue InterpolationModes[] = {
-    {"constant", 1},
-    {"linear", 2},
-    {"linear_centroid", 3},
-    {"linear_noperspective", 4},
-    {"linear_noperspective_centroid", 5},
-    {"linear_sample", 6},
-    {"linear_noperspective_sample", 7},
-};
-
 //===----------------------------------------------------------------------===//
-// Per-InstructionKind encoders.
+// Instruction encoding.
 //===----------------------------------------------------------------------===//
-
-/// Encodes a plain instruction: opcode token, followed by each Operand's
-/// tokens in order. Used for every InstructionKind whose only per-opcode
-/// state is its operand list (ALU*, Discard, Sample, Load, DclInput,
-/// DclOutput).
-static void encodeSimple(const Instruction &Inst, uint32_t Controls,
-                         llvm::SmallVectorImpl<uint32_t> &Out) {
-  size_t OpcodeTokenIndex = Out.size();
-  Out.push_back(0); // placeholder, patched below
-  for (const Operand &Op : Inst.Operands)
-    encodeOperand(Op, Out);
-  uint32_t Length = Out.size() - OpcodeTokenIndex;
-  Out[OpcodeTokenIndex] = encodeOpcodeToken0(Inst, Controls, Length);
-}
 
 static llvm::Error encodeInstruction(const Instruction &Inst,
                                      llvm::SmallVectorImpl<uint32_t> &Out) {
   const OpcodeInfo &Info = getOpcodeInfo(Inst.Op);
-  switch (Info.Kind) {
-  case InstructionKind::ALU1:
-  case InstructionKind::ALU2:
-  case InstructionKind::ALU3:
-  case InstructionKind::Sample:
-  case InstructionKind::Load:
-  case InstructionKind::DclInput:
-  case InstructionKind::DclOutput:
-    encodeSimple(Inst, 0, Out);
-    return llvm::Error::success();
 
-  case InstructionKind::NoOperand:
-    Out.push_back(encodeOpcodeToken0(Inst, 0, 1));
-    return llvm::Error::success();
-
-  case InstructionKind::Discard: {
-    // [18] test boolean: discard_z tests for zero (0), discard_nz for
-    // non-zero (1).
-    uint32_t TestNonZero = Inst.Op == Opcode::DiscardNZ ? 1u : 0u;
-    encodeSimple(Inst, TestNonZero ? TestBooleanMask : 0, Out);
+  if (Info.Kind == InstructionKind::RawTokens) {
+    llvm::append_range(Out, Inst.ExtraDWords);
     return llvm::Error::success();
   }
 
-  case InstructionKind::DclGlobalFlags: {
-    // Real DCL_GLOBAL_FLAGS bit assignments, matching
-    // D3D1[01]_SB_GLOBAL_FLAG_*/D3D12_SB_GLOBAL_FLAG_ALL_RESOURCES_BOUND in
-    // Microsoft's d3d12TokenizedProgramFormat.hpp (see
-    // feme/lib/Target/DXSA/d3d12TokenizedProgramFormat.hpp, used by the
-    // `dxsa` dialect's BinaryParser) within the opcode-specific control
-    // range ([23:11]).
-    static constexpr KeywordValue Flags[] = {
-        {"refactoringAllowed", 1u << 11},
-        {"enableDoublePrecisionFloatOps", 1u << 12},
-        {"forceEarlyDepthStencil", 1u << 13},
-        {"enableRawAndStructuredBuffers", 1u << 14},
-        {"skipOptimization", 1u << 15},
-        {"enableMinimumPrecision", 1u << 16},
-        {"enableDoubleExtensions", 1u << 17},
-        {"enableShaderExtensions", 1u << 18},
-        {"allResourcesBound", 1u << 19},
-    };
-    uint32_t Controls = 0;
-    for (const std::string &Flag : Inst.Keywords) {
-      llvm::Expected<uint32_t> Bit =
-          lookupKeyword(Flags, Flag, "dcl_globalFlags flag");
-      if (!Bit)
-        return Bit.takeError();
-      Controls |= *Bit;
-    }
-    Out.push_back(encodeOpcodeToken0(Inst, Controls, 1));
+  if (Info.Kind == InstructionKind::DclImmediateConstantBuffer) {
+    // CUSTOMDATA instructions carry their total token count in the token
+    // after the opcode token instead of in the opcode token's length field.
+    Out.push_back(Info.Value | Inst.Controls);
+    Out.push_back(static_cast<uint32_t>(Inst.ExtraDWords.size()) + 2);
+    llvm::append_range(Out, Inst.ExtraDWords);
     return llvm::Error::success();
   }
 
-  case InstructionKind::DclTemps:
-    // DCL_TEMPS carries its count as a raw DWORD, not an operand.
-    Out.push_back(encodeOpcodeToken0(Inst, 0, 2));
-    Out.push_back(static_cast<uint32_t>(Inst.Immediates[0]));
-    return llvm::Error::success();
+  size_t OpcodeTokenIndex = Out.size();
+  Out.push_back(0); // placeholder, patched below
+  bool Extended = encodeExtendedOpcodeTokens(Inst, Out);
+  for (const Operand &Op : Inst.Operands)
+    encodeOperand(Op, Out);
+  llvm::append_range(Out, Inst.ExtraDWords);
 
-  case InstructionKind::DclResource: {
-    // [15:11] D3D10_SB_RESOURCE_DIMENSION.
-    uint32_t Controls = resourceDimension(Inst.Op) << 11;
-    size_t OpcodeTokenIndex = Out.size();
-    Out.push_back(0);
-    encodeOperand(Inst.Operands[0], Out);
-    uint32_t ReturnTypes = 0;
-    for (unsigned I = 0; I < 4; ++I) {
-      llvm::Expected<uint32_t> Ty = lookupKeyword(
-          ResourceReturnTypes, Inst.Keywords[I], "resource return type");
-      if (!Ty)
-        return Ty.takeError();
-      ReturnTypes |= (*Ty & 0xF) << (4 * I);
-    }
-    Out.push_back(ReturnTypes);
-    uint32_t Length = Out.size() - OpcodeTokenIndex;
-    Out[OpcodeTokenIndex] = encodeOpcodeToken0(Inst, Controls, Length);
-    return llvm::Error::success();
-  }
+  size_t Length = Out.size() - OpcodeTokenIndex;
+  if (Length > MaxInstructionLength)
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "'%s' encodes to %zu DWORDs, exceeding the %u-DWORD instruction "
+        "length limit",
+        Info.Mnemonic.str().c_str(), Length, MaxInstructionLength);
 
-  case InstructionKind::DclSampler: {
-    // [14:11] D3D10_SB_SAMPLER_MODE (DEFAULT=0, COMPARISON=1).
-    bool Comparison = llvm::is_contained(Inst.Keywords, "comparison");
-    uint32_t Controls = (Comparison ? 1u : 0u) << 11;
-    encodeSimple(Inst, Controls, Out);
-    return llvm::Error::success();
-  }
-
-  case InstructionKind::DclInputPS: {
-    // [16:11] D3D10_SB_INTERPOLATION_MODE.
-    uint32_t Controls = 0;
-    if (!Inst.Keywords.empty()) {
-      llvm::Expected<uint32_t> Mode = lookupKeyword(
-          InterpolationModes, Inst.Keywords[0], "interpolation mode");
-      if (!Mode)
-        return Mode.takeError();
-      Controls = *Mode << 11;
-    }
-    encodeSimple(Inst, Controls, Out);
-    return llvm::Error::success();
-  }
-  }
-  llvm_unreachable("unhandled InstructionKind");
+  uint32_t Token = (Info.Value & OpcodeTypeMask) | Inst.Controls;
+  if (Inst.Saturate)
+    Token |= SaturateMask;
+  Token |= (static_cast<uint32_t>(Inst.PreciseMask) & 0xF)
+           << PreciseValuesShift;
+  Token |= static_cast<uint32_t>(Length) << InstructionLengthShift;
+  if (Extended)
+    Token |= ExtendedMask;
+  Out[OpcodeTokenIndex] = Token;
+  return llvm::Error::success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -333,21 +247,25 @@ static llvm::Error encodeInstruction(const Instruction &Inst,
 //===----------------------------------------------------------------------===//
 
 llvm::Expected<llvm::SmallVector<uint32_t, 64>>
-feme::dxbc::encodeProgram(llvm::ArrayRef<Instruction> Program,
-                          ShaderKind Kind) {
+feme::dxbc::encodeProgram(const Program &Program) {
   llvm::SmallVector<uint32_t, 64> Out;
 
-  // Version Token (VerTok): [31:16] program type, [15:08] major, [07:00]
-  // minor. dxbc-as always targets shader model 5.0.
-  uint32_t VersionToken = (static_cast<uint32_t>(Kind) << 16) | (5u << 4) | 0u;
-  Out.push_back(VersionToken);
-  Out.push_back(0); // Length Token placeholder, patched below.
+  if (Program.HasHeader) {
+    // Version Token (VerTok): [31:16] program type, [07:04] major version,
+    // [03:00] minor version, followed by the length of the whole program in
+    // DWORDs (patched in below).
+    Out.push_back((static_cast<uint32_t>(Program.ProgramType) << 16) |
+                  (static_cast<uint32_t>(Program.MajorVersion) << 4) |
+                  static_cast<uint32_t>(Program.MinorVersion));
+    Out.push_back(0);
+  }
 
-  for (const Instruction &Inst : Program)
+  for (const Instruction &Inst : Program.Instructions)
     if (llvm::Error E = encodeInstruction(Inst, Out))
       return std::move(E);
 
-  Out[1] = static_cast<uint32_t>(Out.size());
+  if (Program.HasHeader)
+    Out[1] = static_cast<uint32_t>(Out.size());
   return Out;
 }
 
@@ -356,7 +274,6 @@ feme::dxbc::encodeProgram(llvm::ArrayRef<Instruction> Program,
 //===----------------------------------------------------------------------===//
 
 void feme::dxbc::wrapInContainer(llvm::ArrayRef<uint32_t> Bytecode,
-                                 ShaderKind Kind,
                                  llvm::SmallVectorImpl<char> &Out) {
   using namespace llvm::dxbc;
 

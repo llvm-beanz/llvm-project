@@ -6,19 +6,17 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Declares printAssembly, which renders a parsed instruction stack back to
-// the textual DXBC assembly syntax Parser accepts. Used by `dxbc-as`'s
-// `--emit=asm` mode, primarily to let tests/users sanity-check how the
-// parser understood an input (e.g. default swizzles/write masks made
-// explicit) without needing to decode the binary encoding.
+// Declares printAssembly, which re-emits a parsed Program as normalized
+// DXBC assembly text. It is the inverse of Parser: re-parsing printAssembly's
+// output must produce an identical Program, which is what dxbc-as's
+// `--emit asm` mode exists to let tests check.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_DXBC_ASSEMBLER_ASMPRINTER_H
 #define FEME_DXBC_ASSEMBLER_ASMPRINTER_H
 
-#include "feme/DXBC/Assembler/Instruction.h"
-#include "llvm/ADT/ArrayRef.h"
+#include "feme/DXBC/Assembler/Parser.h"
 
 namespace llvm {
 class raw_ostream;
@@ -27,10 +25,8 @@ class raw_ostream;
 namespace feme {
 namespace dxbc {
 
-/// Prints \p Program to \p OS as DXBC assembly text, one instruction per
-/// line, in the same syntax parseAssembly accepts (i.e. printing then
-/// re-parsing is a round trip).
-void printAssembly(llvm::ArrayRef<Instruction> Program, llvm::raw_ostream &OS);
+/// Writes \p Program to \p OS as DXBC assembly text.
+void printAssembly(const Program &Program, llvm::raw_ostream &OS);
 
 } // namespace dxbc
 } // namespace feme

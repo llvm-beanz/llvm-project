@@ -7,6 +7,7 @@
 ; 9 individual flags (one per instruction), then multi-flag combo, then all
 ; flags.
 
+.shader_model pixel 5 0
 dcl_globalFlags refactoringAllowed
 dcl_globalFlags enableDoublePrecisionFloatOps
 dcl_globalFlags forceEarlyDepthStencil
