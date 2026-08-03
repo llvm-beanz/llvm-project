@@ -290,6 +290,16 @@ mlir::Value createResourcePointer(mlir::ConversionPatternRewriter &Rewriter,
       {Handle, Coordinate});
 }
 
+/// Returns true if \p ImageOperands names any actual modifier (e.g. `Lod`,
+/// `Bias`) rather than being absent or the empty `None` bit-enum value --
+/// real `dxc`-compiled SPIR-V spells "no modifiers" as an explicit
+/// `#spirv.image_operands<None>` attribute rather than omitting the
+/// (optional) attribute entirely, so a presence check alone rejects every
+/// image access real SPIR-V input produces.
+bool hasImageOperands(std::optional<mlir::spirv::ImageOperands> ImageOperands) {
+  return ImageOperands && *ImageOperands != mlir::spirv::ImageOperands::None;
+}
+
 /// Converts `spirv.ImageRead` into a load through the read location.
 class ImageReadPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageReadOp> {
@@ -300,7 +310,7 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageReadOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (Op.getImageOperands())
+    if (hasImageOperands(Op.getImageOperands()))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
     mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
@@ -324,7 +334,7 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageWriteOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (Op.getImageOperands())
+    if (hasImageOperands(Op.getImageOperands()))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
     mlir::Value Pointer = createResourcePointer(
