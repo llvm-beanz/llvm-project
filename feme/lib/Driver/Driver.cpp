@@ -15,6 +15,7 @@
 #include "feme/Target/Backend.h"
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
+#include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 #include "feme/Translate/Translator.h"
@@ -124,12 +125,6 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
 
   llvm::Module &M = AsLLVMIR->getLLVMModule();
 
-  llvm::Expected<std::string> TargetTriple = resolveTargetTriple(Opts, M);
-  if (!TargetTriple)
-    return TargetTriple.takeError();
-
-  llvm::Triple TheTriple(llvm::Triple::normalize(*TargetTriple));
-
   // A DXIL-imported module is still in its already-lowered `dx.op.*` calling
   // convention (see feme::DXILImporter's header comment): LLVM's DirectX
   // target's own IR pipeline (in particular `DXILShaderFlagsAnalysis`)
@@ -137,14 +132,23 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
   // ever sees a `dx.op.*` declaration, on the assumption that
   // `DXILOpLowering` (part of that same pipeline) is what produces those --
   // so retargeting to any target, DXIL included, needs `OpRaisingPass` to
-  // undo that first. See the DXIL section of feme/docs/Design.md; note
-  // `OpRaisingPass` does not yet cover every DXIL opcode (e.g. resource
-  // load/store, input/output signature ops), so modules using those will
-  // still fail here until that pass's coverage grows.
+  // undo that first. `MetadataRaisingPass` then recovers the module's shader
+  // model, entry points, and thread group dimensions from the `dx.*` named
+  // metadata they live in into the triple and `hlsl.*` function attributes
+  // every later stage reads them from; it runs second because
+  // `OpRaisingPass` consumes the `!dx.resources` metadata it drops. See the
+  // DXIL section of feme/docs/Design.md.
   if (Opts.From == "dxil") {
     llvm::ModuleAnalysisManager MAM;
     feme::dxil::OpRaisingPass().run(M, MAM);
+    feme::dxil::MetadataRaisingPass().run(M, MAM);
   }
+
+  llvm::Expected<std::string> TargetTriple = resolveTargetTriple(Opts, M);
+  if (!TargetTriple)
+    return TargetTriple.takeError();
+
+  llvm::Triple TheTriple(llvm::Triple::normalize(*TargetTriple));
 
   // A raised module still uses format-agnostic `llvm.dx.*`/`llvm.spv.*`
   // intrinsics that only the AMDGPU-specific lowering pass currently
