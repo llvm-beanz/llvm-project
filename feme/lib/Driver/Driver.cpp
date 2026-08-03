@@ -15,6 +15,7 @@
 #include "feme/Target/Backend.h"
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
+#include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
@@ -149,6 +150,15 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     return TargetTriple.takeError();
 
   llvm::Triple TheTriple(llvm::Triple::normalize(*TargetTriple));
+
+  // Raised IR still uses `llvm.dx.*` intrinsics for the HLSL-specific
+  // operations DXIL has dedicated ops for. LLVM's DirectX backend selects
+  // those directly, so leave them alone when re-emitting DXIL; every other
+  // target needs them expanded into standard LLVM IR first.
+  if (!TheTriple.isDXIL()) {
+    llvm::ModuleAnalysisManager MAM;
+    feme::dxil::IntrinsicExpansionPass().run(M, MAM);
+  }
 
   // A raised module still uses format-agnostic `llvm.dx.*`/`llvm.spv.*`
   // intrinsics that only the AMDGPU-specific lowering pass currently
