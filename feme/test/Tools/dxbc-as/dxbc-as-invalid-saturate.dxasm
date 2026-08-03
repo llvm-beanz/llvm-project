@@ -1,0 +1,9 @@
+; RUN: not dxbc-as %s 2>&1 | FileCheck %s
+
+; `_sat` only saturates floating-point results; and/or/xor/etc. are
+; bitwise/integer operations, so dxbc-as must reject this rather than
+; silently encoding a meaningless saturate flag.
+
+and_sat r0, r1, r2
+
+; CHECK: error: {{.*}}'_sat' is only valid on floating-point ALU instructions

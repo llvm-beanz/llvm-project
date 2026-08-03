@@ -1,0 +1,3 @@
+// RUN: dxbc-as --help | FileCheck %s
+
+// CHECK: standalone DXBC assembler

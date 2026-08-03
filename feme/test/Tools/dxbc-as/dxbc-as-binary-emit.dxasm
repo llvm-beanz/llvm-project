@@ -1,0 +1,18 @@
+; RUN: dxbc-as --emit=binary %s | od -An -tx1 -w4 | FileCheck %s --check-prefix=BINARY
+; RUN: dxbc-as --emit=container %s | od -An -tx1 -w4 | FileCheck %s --check-prefix=CONTAINER
+
+; Checks dxbc-as's two binary output modes: raw tokenized bytecode
+; (--emit=binary) starts with the version/length tokens described in
+; d3d11TokenizedProgramFormat.hpp, and the DXContainer-wrapped form
+; (--emit=container) starts with the "DXBC" magic and contains a "SHEX"
+; part (see feme/docs/Design.md's "dxbc-as" section).
+
+ret
+
+; Version token: program type 0 (pixel, the default), major 5, minor 0,
+; i.e. 0x00000050 as a little-endian DWORD.
+; BINARY: 50 00 00 00
+; Length token: 3 DWORDs total (version + length + the `ret` opcode token).
+; BINARY-NEXT: 03 00 00 00
+
+; CONTAINER: 44 58 42 43

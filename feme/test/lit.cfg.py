@@ -11,7 +11,7 @@ config.name = "FEME"
 config.test_format = lit.formats.ShTest()
 
 # suffixes: A list of file extensions to treat as test files.
-config.suffixes = [".test", ".mlir", ".ll"]
+config.suffixes = [".test", ".mlir", ".ll", ".dxasm"]
 
 # test_source_root: The root path where tests are located.
 config.test_source_root = os.path.dirname(__file__)
@@ -36,6 +36,11 @@ tools = [
     "feme",
     "feme-opt",
     "feme-translate",
+    # See the "dxbc-as" section of feme/docs/Design.md: a standalone DXBC
+    # assembler with no MLIR/feme::Context dependency, used to build
+    # human-readable DXBC test fixtures at test time (see "Avoiding binary
+    # test fixtures" below).
+    "dxbc-as",
     # DXIL (see feme/docs/Design.md's DXIL section) is plain LLVM bitcode,
     # optionally wrapped in a DXContainer; tests build fixtures at test time
     # with these existing, upstream LLVM tools instead of checking in

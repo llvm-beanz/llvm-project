@@ -1,0 +1,27 @@
+; RUN: dxbc-as --emit=asm %s | FileCheck %s
+
+; A hand-written DXBC assembly pixel shader matching the example in
+; feme/docs/Design.md's "dxbc-as" section, round-tripped through the
+; parser and back to text: this checks that dxbc-as understood every
+; construct in the input (default swizzles/write masks are made explicit
+; in the output) without needing to inspect the binary encoding.
+
+dcl_globalFlags refactoringAllowed
+dcl_resource_texture2d (float,float,float,float) t0
+dcl_sampler s0
+dcl_input_ps linear v1.xyzw
+dcl_output o0.xyzw
+dcl_temps 1
+sample r0.xyzw, v1.xyxx, t0.xyzw, s0
+mov o0.xyzw, r0.xyzw
+ret
+
+; CHECK: dcl_globalFlags refactoringAllowed
+; CHECK-NEXT: dcl_resource_texture2d (float,float,float,float) t0
+; CHECK-NEXT: dcl_sampler s0
+; CHECK-NEXT: dcl_input_ps linear v1.xyzw
+; CHECK-NEXT: dcl_output o0.xyzw
+; CHECK-NEXT: dcl_temps 1
+; CHECK-NEXT: sample r0.xyzw, v1.xyxx, t0.xyzw, s0
+; CHECK-NEXT: mov o0.xyzw, r0.xyzw
+; CHECK-NEXT: ret

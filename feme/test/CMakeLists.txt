@@ -16,6 +16,7 @@ configure_lit_site_cfg(
 
 set(FEME_TEST_DEPENDS
   FileCheck count not
+  dxbc-as
   feme
   feme-opt
   feme-translate
