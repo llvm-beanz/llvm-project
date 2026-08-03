@@ -20,14 +20,6 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-feme-opt fails to build with the error:
-
-```
-/Users/cbieneman/dev/llvm-project/feme/tools/feme-opt/feme-opt.cpp:40:10: fatal error: 'llvm/Passes/PassPlugin.h' file not found
-   40 | #include "llvm/Passes/PassPlugin.h"
-      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~
-1 error generated.
-```
-
-How did this build failure not get caught in your testing? Are you running
-`check-feme`?
+I need the same set of translation flows for SPIRV that we now have for DXIL. I
+need to be able to read SPIRV into MLIR, translate that to the LLVM-IR dialect,
+then to LLVM IR that uses SPIRV target intrinsics.
