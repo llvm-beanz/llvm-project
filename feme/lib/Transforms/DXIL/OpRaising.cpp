@@ -10,6 +10,7 @@
 
 #include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
@@ -242,6 +243,68 @@ std::optional<uint64_t> getConstInt(const Value *V) {
   return std::nullopt;
 }
 
+/// Builds a type of exactly \p SizeInBytes bytes' ABI alloc size to stand in
+/// for the original `StructuredBuffer`/`CBuffer` element/layout struct type,
+/// which DXIL's binding metadata doesn't carry (only that struct's size and,
+/// for `StructuredBuffer` only, its alignment -- see
+/// `ResourceTypeInfo::getStruct`/`getCBufferSize` in
+/// `llvm/lib/Analysis/DXILResource.cpp`). Reconstructing a plausible-looking
+/// but fake field layout would silently produce a handle type that doesn't
+/// match what actually flowed through the real frontend, so this
+/// deliberately does the opposite: an opaque byte-sized placeholder that
+/// makes no claim about field structure, honest about being a
+/// reconstruction. This is enough for the handle to round-trip back through
+/// `-dxil-op-lower` with the original binding size (and, when \p
+/// AlignLog2 is nonzero, alignment) intact, which is what matters for
+/// re-targeting the IR -- nothing downstream of a not-yet-raised handle
+/// (see `raiseResourceHandleFromBinding`'s cast-back below) inspects the
+/// element type's field structure.
+///
+/// \p AlignLog2 is only meaningful for `StructuredBuffer` (`CBuffer`'s
+/// `ResourceProperties` encoding carries no alignment bits at all, so
+/// callers pass 0 for it, which this treats as "no alignment to recover").
+/// Only the alignments HLSL structs actually produce in practice (a power
+/// of two from 1 to 16, driven by their largest scalar/vector member) are
+/// reconstructed precisely, via a leading field of that natural alignment
+/// (an integer for 1/2/4/8 bytes, a `<4 x i32>` for 16, matching what
+/// produces align-16 struct layout in DXIL's own data layout); anything
+/// else -- or an \p SizeInBytes not a multiple of the alignment, which
+/// shouldn't happen for a real struct's alloc size -- falls back to a plain
+/// byte array (ABI alignment 1), which is always a conservative
+/// under-approximation of the true alignment, never an unsafe
+/// over-approximation.
+Type *getOpaqueSizedType(LLVMContext &Ctx, uint32_t SizeInBytes,
+                         uint32_t AlignLog2) {
+  Type *Int8Ty = Type::getInt8Ty(Ctx);
+  Type *AlignFieldTy = nullptr;
+  switch (AlignLog2) {
+  case 0:
+    break; // No (or no recoverable) alignment: plain byte array below.
+  case 1:
+    AlignFieldTy = Type::getInt16Ty(Ctx);
+    break;
+  case 2:
+    AlignFieldTy = Type::getInt32Ty(Ctx);
+    break;
+  case 3:
+    AlignFieldTy = Type::getInt64Ty(Ctx);
+    break;
+  case 4:
+    AlignFieldTy = FixedVectorType::get(Type::getInt32Ty(Ctx), 4);
+    break;
+  default:
+    break; // Unrecognized alignment: fall back to the byte array too.
+  }
+
+  uint32_t AlignBytes = 1u << AlignLog2;
+  if (!AlignFieldTy || SizeInBytes % AlignBytes != 0)
+    return ArrayType::get(Int8Ty, SizeInBytes);
+  if (SizeInBytes == AlignBytes)
+    return AlignFieldTy;
+  return StructType::get(
+      Ctx, {AlignFieldTy, ArrayType::get(Int8Ty, SizeInBytes - AlignBytes)});
+}
+
 /// Raises a `dx.op.annotateHandle` (opcode 216) call whose handle operand is
 /// a `dx.op.createHandleFromBinding` (opcode 217) call back into a single
 /// `llvm.dx.resource.handlefrombinding` intrinsic call, reconstructing the
@@ -250,18 +313,22 @@ std::optional<uint64_t> getConstInt(const Value *V) {
 /// `llvm::hlsl`-style resource metadata reconstruction called out as future
 /// work in an earlier version of this pass (see feme/docs/Design.md).
 ///
-/// This is intentionally narrow: it only reconstructs the two resource kinds
-/// whose target extension type is fully recoverable from that metadata alone
-/// (`TypedBuffer`, and unstructured `RawBuffer` i.e. `ByteAddressBuffer`).
-/// `StructuredBuffer`/`CBuffer` need their *original* element/layout struct
-/// type, which DXIL's binding metadata doesn't carry (only its size and
-/// alignment); textures and samplers need dimension/multi-sample/feedback
-/// information this pass doesn't yet decode. Those, and raising the
-/// buffer/texture load and store ops that would actually consume this
-/// handle, are left for later changes (see feme/docs/Design.md); since nothing
-/// in this pass raises those consumers yet, the reconstructed handle is
-/// bridged back to the legacy `%dx.types.Handle` type via
-/// `llvm.dx.resource.casthandle` -- the same "temporary" cast
+/// `TypedBuffer` and unstructured `RawBuffer` (`ByteAddressBuffer`) element
+/// types are recovered exactly, since their full shape (a scalar, or
+/// nothing) is present in `ResourceProperties`. `StructuredBuffer`/`CBuffer`
+/// only have their element/layout struct's size (and, for
+/// `StructuredBuffer`, alignment) recoverable, not its original field
+/// layout -- raising those still matters for re-targeting the IR that
+/// consumes the handle (its binding, and the byte size buffer indexing
+/// depends on, are exactly reconstructed), so this raises them too, via an
+/// opaque size-only placeholder element type (`getOpaqueSizedType` above)
+/// rather than leaving them as unrecognized `dx.op.*` calls. Textures and
+/// samplers still need dimension/multi-sample/feedback information this
+/// pass doesn't yet decode, so those remain unraised for now (see
+/// feme/docs/Design.md). Since the buffer/texture load and store ops that
+/// would actually consume this handle aren't raised yet either, the
+/// reconstructed handle is bridged back to the legacy `%dx.types.Handle`
+/// type via `llvm.dx.resource.casthandle` -- the same "temporary" cast
 /// `DXILOpLowering` itself uses for this exact purpose (see
 /// `DXILOpLowering::createTmpHandleCast`) -- so the result stays valid IR.
 bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
@@ -313,6 +380,22 @@ bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
     HandleTy = TargetExtType::get(
         Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
         {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
+  } else if (Kind == dxil::ResourceKind::StructuredBuffer) {
+    // Word0's AlignLog2 field (bits 8-11) is only populated for structured
+    // buffers (see `ResourceInfo::getAnnotateProps`), and Word1 is the
+    // element stride in bytes for this kind.
+    uint32_t AlignLog2 = (*Word0 >> 8) & 0xF;
+    Type *ElemTy =
+        getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), AlignLog2);
+    HandleTy = TargetExtType::get(
+        Ctx, "dx.RawBuffer", {ElemTy},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
+  } else if (Kind == dxil::ResourceKind::CBuffer) {
+    // CBuffer's ResourceProperties encoding carries no alignment bits at
+    // all (`AlignLog2` is only ever set for `StructuredBuffer`), so there's
+    // nothing to recover beyond size here.
+    Type *ElemTy = getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), 0);
+    HandleTy = TargetExtType::get(Ctx, "dx.CBuffer", {ElemTy});
   } else {
     return false; // Unsupported resource kind: leave both ops unmodified.
   }
