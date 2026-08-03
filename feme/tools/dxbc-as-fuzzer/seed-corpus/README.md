@@ -16,7 +16,11 @@ blobs.
   feme/docs/Design.md's "dxbc-as" section.
 - `alu-ops.dxasm`: a temp-register-only program covering saturate (`_sat`),
   negate (`-`), absolute value (`| |`), and `movc`, to seed the mutator
-  with every operand-modifier shape `dxbc-as` supports.
+  with the basic operand-modifier shapes.
+- `relative-addressing.dxasm`: seeds the mutator with the constructs the
+  bare register grammar does not reach -- multi-dimensional and relative
+  indices, indexable temps, 64-bit immediates, instruction-level
+  modifiers, and both directives (`.shader_model`, `.dword`).
 
 Run the fuzzer against this corpus with:
 

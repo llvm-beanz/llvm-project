@@ -1,0 +1,10 @@
+.shader_model vertex 5 1
+dcl_constantbuffer cb0[16]
+dcl_indexableTemp x0[4], 4
+dcl_temps 2
+mov r0.x, cb0[3 + r1.y].w
+mov r0.yzw, x0[r1.x].xyzw
+dmov r0.xy, d(0x3FF0000000000000)
+sample aoffimmi(-5, 7, 0) precise(xy) r0.xyzw, v0.xyxx, t3.xyzw, s5.x
+.dword 0x030007FF, 0xDEADBEEF, 0x12345678
+ret

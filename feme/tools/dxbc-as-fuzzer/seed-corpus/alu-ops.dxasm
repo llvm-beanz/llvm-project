@@ -1,6 +1,6 @@
 dcl_temps 2
 mov r0.xyzw, l(1.0, 2.0, 3.0, 4.0)
-add r1.xy, r0.xy, -r0.zw
+add r1.xy, r0.xyzw, -r0.zwzw
 mul_sat r0.xyzw, r0.xyzw, r0.xyzw
 mad r0.x, r0.y, r0.z, |r0.w|
 itof r1.x, r0.x
