@@ -20,12 +20,7 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-You left a comment in your thoughts:
-
-> reconstructing a plausible-looking but fake struct type to fill that gap would
-> be worse than not raising those kinds at all, since it would silently produce
-> a handle type that doesn't match what actually flowed through the real
-> frontend.
-
-The logic here is a bit flowed. We need to translate these operations to
-something in order to support re-targeting the IR.
+The test directory has a few problems. First you put all the lit tests under a
+Feme directory, which is just an extra layer that isn't needed and isn't
+consistent with how other LLVM projects sort tests. Second, the unit tests
+aren't connected to lit so they don't run during `check-feme`.
