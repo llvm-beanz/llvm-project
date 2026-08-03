@@ -1,4 +1,5 @@
 add_llvm_library(FeMeDXBCAssembler
+  Lexer.cpp
   Instruction.cpp
 
   LINK_COMPONENTS
