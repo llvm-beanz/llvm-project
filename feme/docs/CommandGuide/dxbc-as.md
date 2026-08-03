@@ -64,7 +64,7 @@ dxbc-as --emit=asm input.dxasm
 # Typical `lit` usage: build a binary fixture at test time instead of
 # checking one in (see "Avoiding binary test fixtures" in
 # ../Design.md), then feed it to a future DXBC importer.
-dxbc-as %s | feme-translate --import-dxbc=-
+dxbc-as %s | feme-translate --import-dxsa-bin -
 ```
 
 ## EXIT STATUS
