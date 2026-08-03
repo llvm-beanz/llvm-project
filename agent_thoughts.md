@@ -2636,3 +2636,168 @@ found while validating (1) but not caused by it); (3) wiring the `feme`
 CLI up to `Driver` plus `feme.md` doc updates; (4) the end-to-end lit
 tests; (5) the `Design.md` updates. This `agent_thoughts.md` entry is
 committed on its own after these, per the standing instruction.
+
+# Making the end-to-end use case actually work: DXIL -> {DXIL, SPIR-V, AMDGPU}
+
+This entry records a second pass at the same request as the previous entry --
+"take an input DXContainer or SPIR-V file and retarget it to DXIL, SPIR-V or
+AMDGPU", validated against the provided HLSL Mandelbrot compute shader. The
+previous pass built `feme::Driver` and the CLI plumbing but ended with the
+real shader failing at three different points. This pass closed those.
+
+## Measuring the starting point before writing anything
+
+I compiled the shader with the real `dxc` (both `-T cs_6_5` and
+`-T cs_6_5 -spirv`) and ran all three retarget directions through the
+existing `feme` binary first, so the work was driven by observed failures
+rather than by re-reading the design doc's own TODO list:
+
+- `--from=dxil --to=dxil`: assertion in `DXILShaderFlags` (unraised
+  `dx.op.createHandle`/`dx.op.bufferStore`).
+- `--from=dxil --target=amdgcn-amd-amdhsa`: `Cannot select: intrinsic
+  %llvm.dx.thread.id`.
+- `--from=spirv --to=*`: `OpPhi in loop merge block unimplemented` out of
+  MLIR's SPIR-V deserializer.
+
+I then hand-wrote the "raised" form of the imported DXIL and ran `llc` on it
+directly, to confirm the DXIL and AMDGPU targets would accept it *before*
+building any of the passes that produce it. That took ten minutes and
+de-risked the whole plan; without it I'd have discovered the entry-point
+metadata problem (below) only after writing three passes.
+
+## What the real shader forced that a synthetic fixture would not have
+
+**Legacy `CreateHandle`.** `dxc` still emits the pre-SM6.6 `dx.op.createHandle`
+(57) by default, not `CreateHandleFromBinding` (217) which the existing
+raising code handled. The legacy op carries *no* binding inline: it names its
+resource by (resource class, range ID), an index into `!dx.resources` named
+metadata. So raising it needs a metadata reader, which I put in a private
+`ResourceMetadata.h`/`.cpp` inside `lib/Transforms/DXIL` -- it models DXIL's
+frozen metadata encoding, so it has no business in `include/feme`.
+
+**Typed buffer vector width is not recorded anywhere.** DXIL stores a typed
+buffer's *component* type (`F32`) but never its width, in neither
+`!dx.resources` nor `ResourceProperties`. LLVM's `target("dx.TypedBuffer",
+...)` needs `<4 x float>`. I recover the width from how the resource is
+actually used -- a store's write mask, or the highest component a load's
+`%dx.types.ResRet` has extracted -- defaulting to 4 only when there is
+nothing to learn from. I only realized this was necessary when the first
+version produced a scalar-element handle and the store's operand type didn't
+match it.
+
+**Entry points vanish without metadata raising.** This is the one I would
+have missed entirely by reasoning from the design doc: DXIL keeps its shader
+model, entry points, stages and thread group dimensions in
+`dx.shaderModel`/`dx.entryPoints` metadata plus a frozen `dxil-ms-dx` triple,
+while every modern LLVM consumer reads a `shadermodel` triple plus `hlsl.*`
+*function attributes*. Without a translation the re-emitted container has no
+entry point at all -- and `llc` reports no error, it just silently emits a
+container with nothing dispatchable in it. That's what `MetadataRaisingPass`
+does. It also turned out to be load-bearing for AMDGPU, since
+`llvm.dx.thread.id` cannot be lowered at all without the thread group size.
+
+Ordering matters and is easy to get backwards: `OpRaisingPass` must run
+*before* `MetadataRaisingPass`, because the first consumes the
+`!dx.resources` metadata the second drops. I also had to move the Driver's
+target-triple resolution to *after* raising, so `--to=dxil`/`--to=spirv`
+could pick up the recovered pipeline stage instead of a made-up default.
+
+## Design decisions worth recording
+
+**`IntrinsicExpansionPass` is its own, target-independent pass.** Raising
+maps each `dx.op.*` call back to whatever `DXILOpLowering` lowered it from,
+which for `frac`/`saturate`/`rsqrt`/`imad`/dot products is a `llvm.dx.*`
+intrinsic only the DirectX backend can select. My first instinct was to
+handle those inside the AMDGPU lowering pass; I stopped because the SPIR-V
+path needs exactly the same expansions, and a third target would need them
+again. LLVM has `DXILIntrinsicExpansion` for the forward direction but it is
+private to the DirectX target, so it can't be reused. The Driver runs the
+expansion whenever the destination is *not* DXIL -- when it is, leaving the
+`llvm.dx.*` calls alone produces better DXIL.
+
+**AMDGPU resources become kernel arguments, not buffer descriptors.** This is
+the biggest judgement call in the change. The design doc had sketched
+lowering resources to AMDGPU's `ptr addrspace(8)` buffer resource descriptors
+via `llvm.amdgcn.make.buffer.rsrc`. I chose kernel pointer arguments instead:
+a descriptor still has to *come from* somewhere, and with no descriptor table
+in the picture that somewhere is a kernel argument anyway, so the descriptor
+form adds a layer without removing the fundamental one. One
+`ptr addrspace(1)` argument per binding, appended in deterministic (space,
+register) order, is directly dispatchable by any host runtime that can bind
+one allocation per resource. I updated Design.md to record both the choice
+and the alternative, per the standing instruction about deviations.
+
+I also made this pass all-or-nothing per entry point: if it meets a binding
+it can't model (non-typed buffer, runtime-indexed binding array, handle used
+some other way) it leaves the function *completely* untouched rather than
+partially rewritten. A half-rewritten kernel would be silently wrong; an
+untouched one fails loudly in the backend.
+
+**SPIR-V lowering is mostly renaming, with one real translation.** LLVM's
+DirectX and SPIRV backends expose parallel intrinsic families because both
+are fed by the same HLSL frontend, so thread queries are a callee
+substitution. The handle type is not: `target("dx.TypedBuffer", <4 x float>,
+IsUAV, ...)` becomes `target("spirv.Image", float, 5, 2, 0, 0, 2, Rgba32f)`
+-- scalar element type, width folded into the image format, read/write
+carried by `Sampled` rather than a flag. I chose to compute the precise image
+format rather than emit `Unknown` (which clang does): it costs a small table
+and avoids requiring SPIR-V's `StorageImage{Read,Write}WithoutFormat`
+capabilities. Three-component resources are left unlowered, since SPIR-V
+defines no three-component storage format.
+
+Two things here were only findable by running the backend: the
+`getpointer` intrinsic needs *three* overload types, not two (its index
+operand is `llvm_any_ty` as well); and the SPIRV backend reads the handle's
+name operand's pointee *string* to name the `OpVariable`, so `ptr null` --
+which is what DXIL raising produces, since `dxc` strips resource names --
+asserts in `getStringValueFromReg`. I synthesize a binding-derived name
+(`resource_s0_b0`).
+
+## The SPIR-V input path: one real fix, one honest limit
+
+MLIR's SPIR-V deserializer rejects an `OpPhi` in a loop *merge* block, which
+is what any loop carrying a value out of a `break` produces -- i.e. most real
+shader loops, including the Mandelbrot one. `spirv.mlir.loop` has no results
+to carry that value in, so this isn't a small bug; it's a representational
+limit of the structured form. Its unstructured mode handles the same input
+fine, and unstructured CFG maps *at least* as directly onto LLVM IR (which is
+itself unstructured) as the structured form does. So `SPIRVImporter` now
+retries with structurization disabled, swallowing the recovered-from
+attempt's diagnostics. I verified this on a real SPIR-V binary built with
+`llc` from a loop-with-break, which is also how the new lit test builds its
+fixture -- no checked-in binary.
+
+That moves the failure one stage later, to MLIR's `SPIRVToLLVM` conversion,
+which has no patterns for image types at all, so any SPIR-V shader with a
+`Buffer`/`RWBuffer` fails to legalize its `spirv.GlobalVariable`. I chose to
+stop there rather than start writing FeMe-owned MLIR conversion patterns:
+that is a substantial project of its own (images, image ops, builtin input
+variables, and whatever else is behind them), and doing it badly would be
+worse than documenting it precisely. Design.md now has a "Known gap" section
+saying exactly what is missing and what the two options for closing it are.
+I deliberately did not overstate the SPIR-V input status anywhere.
+
+## Validation
+
+Every phase has its own `feme-opt`-driven lit test (one per pass, listed in a
+table in Design.md's testing section), and the full chains have CLI-level
+tests -- `feme-dxil-to-{dxil,spirv,amdgpu}.ll` -- each building its DXIL
+fixture with `llc` at test time rather than checking in a binary. For the
+DXIL-to-DXIL test I deliberately targeted shader model 6.0 so that LLVM's own
+`DXILOpLowering` emits the *legacy* `createHandle`, exercising the metadata
+-driven raising path end to end against real lowering output rather than
+against hand-written IR that happens to match my assumptions.
+
+Beyond the checked-in tests, the real `dxc`-compiled Mandelbrot shader now
+retargets successfully to all three outputs, and the emitted SPIR-V passes
+`spirv-val`. The re-emitted DXContainer also re-imports through `feme` again.
+`check-feme` (62 lit) and `check-feme-unit` (25 gtest) are green; the build
+used the existing `build/` cache (Release, `LLVM_ENABLE_ASSERTIONS=ON`,
+`ccache` launcher) and every new/modified C++ file was run through
+`clang-format`.
+
+Committed as eight changes: metadata raising; legacy handle + typed buffer
+access raising; Driver wiring for those; AMDGPU entry point and thread id
+lowering; target-independent intrinsic expansion; AMDGPU resource lowering;
+SPIR-V raised lowering; SPIR-V unstructured import fallback; then the
+Design.md/CommandGuide updates, and this entry on its own.
