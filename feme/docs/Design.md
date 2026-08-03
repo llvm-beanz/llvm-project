@@ -350,6 +350,47 @@ Translation Matrix below). Embedding consumers that want single-step control
 convenience built from the same public interfaces, not a required entry
 point.
 
+#### Status: `feme::Driver` (implemented for `dxil`/`spirv` import)
+
+`feme::Driver` (`feme/include/feme/Driver/Driver.h`,
+`feme/lib/Driver/Driver.cpp`) is implemented, and is what the `feme` CLI
+(`feme/tools/feme/feme.cpp`) drives: given `DriverOptions` (reusing
+`feme::frontend::DriverOptions`, per "Library API Shape" below, rather than
+a second identical struct) and an input buffer, it looks up the `Importer`
+named by `Opts.From` ("dxil" or "spirv" -- DXBC is not yet implemented, so
+is rejected with a diagnostic rather than a crash), translates the result to
+an `llvm::Module` (directly for DXIL, via `SPIRVToLLVMTranslator` for
+SPIR-V), resolves `Opts.Target`/`Opts.To` to a concrete target triple
+("dxil"/"spirv" each resolve to that format's own default triple; anything
+else is used as a triple directly), runs `feme::dxil::OpRaisingPass` (for
+DXIL input, unconditionally -- see the DXIL section's deviation note above)
+and `feme::amdgpu::RaisedLoweringPass` (for an `amdgcn-*` target) as needed,
+and finally runs `feme::TargetMachineBackend`. There is no
+`Ctx.getFormatRegistry()` yet (deviating from the sketch above) -- `Driver`
+currently looks up its two `Importer`s directly rather than through a
+registry on `Context`, since only two formats exist to look up; a registry
+is expected to be added if/when this stops being a short enough list to
+hard-code, without changing `Driver`'s own public interface.
+
+Validated end to end (see `test/Tools/feme/feme-*.{ll,mlir,test}`): the
+SPIR-V "null pipeline" (see the deviation note under Retargeting to Native
+ISA below) through the full CLI rather than composed one
+`feme-translate` stage at a time; SPIR-V and DXIL each retargeted to a real
+ISA (`amdgcn-amd-amdhsa`), using only opcodes/intrinsics
+`OpRaisingPass`/`RaisedLoweringPass` currently cover; and clean (non-crash)
+diagnostics for an unsupported `--from` and a missing `--to`/`--target`.
+Also validated manually (not checked in as a test fixture, per "Avoiding
+binary test fixtures" below) against `dxc`-compiled DXIL and SPIR-V for the
+HLSL Mandelbrot compute shader used to drive this validation: DXIL import
+succeeded once the data layout deviation above was fixed, but SPIR-V import
+of that same shader currently fails with `mlir::spirv::deserialize`'s own,
+pre-existing "OpPhi in loop merge block unimplemented" limitation (an
+MLIR-level SPIR-V dialect gap, not a `feme::Driver`/`SPIRVImporter` one),
+and re-emitting DXIL back to DXIL (`--to=dxil`) for a shader with resource
+stores does not yet work end to end -- both are consequences of the
+pre-existing gaps already called out above and in the DXIL section, not
+regressions introduced by `Driver` itself.
+
 ### `feme::Module`
 
 Because different formats are best represented differently (see the
@@ -468,6 +509,19 @@ benefit. Instead:
    remaining risk is narrow (e.g. confirming behavior for the oldest
    supported shader model versions) and can be resolved empirically during
    implementation rather than needing a design decision up front.
+
+   Deviation: this narrow risk turned out not to be quite as narrow as
+   expected -- confirmed against real `dxc`-compiled DXIL (not just
+   `llc`/`llvm-as`-assembled fixtures), the module's embedded data layout
+   string (`i8:32`, DXIL's real historical convention) is rejected outright
+   by modern LLVM's stricter `DataLayout` parser (`i8` must be 1-byte
+   aligned), independent of bitcode auto-upgrade. `feme::DXILImporter` does
+   need one small compatibility shim after all: a `DataLayoutCallback`
+   (passed to `llvm::parseBitcodeFile`) that normalizes `i8`'s alignment to
+   8 bits, the only value modern LLVM accepts, before the layout string is
+   parsed. This is a lossless normalization (modern LLVM cannot represent,
+   and DXIL's own struct layouts do not rely on, any other `i8` alignment),
+   not a best-effort guess.
 3. **Op raising**: run a FeMe pass that is the semantic inverse of
    `DXILOpLowering` — rewrite `dx.op.*` calls back into standard LLVM IR
    constructs/intrinsics (loads/stores against resource handles, standard
@@ -572,6 +626,20 @@ doesn't (yet) recognize -- resource or otherwise -- are left as unmodified
 that mix raised and not-yet-raised operations, and so opcode coverage can
 keep growing incrementally the same way `dxsa`'s opcode coverage does (see
 the DXBC section below).
+
+Deviation: retargeting a raised module back through the DirectX
+`TargetMachine` (`feme::Driver`, see "Driver" and "Status: `feme::Driver`"
+below) surfaced a gap beyond opcode coverage: LLVM's `DXILShaderFlags`
+analysis (part of the DirectX target's standard codegen pipeline) asserts
+if it ever sees a `dx.op.*` declaration, on the assumption that
+`DXILOpLowering` -- earlier in that same pipeline -- is what produces
+those. This means retargeting requires *every* `dx.op.*` call raised, not
+just "most of them, with the rest passed through unchanged" as this
+pass's own incremental-coverage design (above) allows for pass-level
+(`feme-opt`) testing. Real shaders' resource load/store and input/output
+signature ops (not yet raised, see above) currently block this in
+practice; closing that gap is the same follow-up work already called out
+above, not a new, separate one.
 
 The DXIL opcode numbers `OpRaisingPass` matches on are hard-coded rather
 than reusing `llvm::dxil::OpCode` (`llvm/lib/Target/DirectX/DXILConstants.h`):
@@ -1081,6 +1149,13 @@ feme/
         DXIL/               (feme::dxil::OpRaisingPass, LLVM IR passes over
                              DXIL-derived llvm::Modules; not MLIR passes,
                              see the DXBC Dialect/ Transforms/ split below)
+      Driver/                (feme::Driver; implemented, see the "Driver"
+                             section above -- a distinct top-level module
+                             from Core/, not folded into it, since Driver
+                             depends on Import/Translate/Target/Transforms
+                             and folding it into Core/ would make Core/
+                             depend back on them, an actual circular
+                             dependency)
       Dialect/
         DXSA/
           IR/               (ODS .td + generated dialect; migrated from
@@ -1104,6 +1179,7 @@ feme/
                            above)
     Target/...
     Transforms/DXIL/...    (feme::dxil::OpRaisingPass)
+    Driver/...             (feme::Driver)
     DXBC/
       Assembler/           (dxbc-as's lexer/parser/encoder; LLVM-only,
                            no MLIR or feme::Context dependency)
@@ -1316,9 +1392,28 @@ This is a rough sequencing, not a schedule:
    changes.
 5. **DXIL retargeting**: reuse step 3's backend glue for DXIL-derived
    `llvm::Module`s.
+
+   Status: implemented via `feme::Driver` (see "Status: `feme::Driver`"
+   above), and validated end to end for DXIL retargeted to a real ISA
+   (`amdgcn-amd-amdhsa`) using the opcodes `OpRaisingPass`/
+   `RaisedLoweringPass` currently cover. Re-emitting DXIL back to DXIL
+   itself is not yet validated for a real shader: doing so surfaced that
+   LLVM's DirectX codegen pipeline requires *every* `dx.op.*` call raised,
+   not just the ones `OpRaisingPass` currently covers (see the deviation
+   note under the DXIL section above), which real shaders using resource
+   loads/stores or input/output signature ops don't satisfy yet.
 6. **DXIL ⇄ SPIR-V translation**: DXIL (LLVM IR) → LLVM `SPIRV` target;
    SPIR-V → `spirv` dialect → `SPIRVToLLVM` → raise to DXIL conventions →
    DXIL exporter.
+
+   Status: not yet implemented -- `feme::Driver` does not attempt this
+   combination. It needs two things this codebase does not have yet: a pass
+   raising SPIR-V-derived, translated LLVM IR into DXIL's calling
+   convention (no equivalent of `feme::amdgpu::RaisedLoweringPass` exists
+   for DXIL), and a real DXIL `Exporter` (`Driver` currently only
+   re-serializes DXIL via `feme::TargetMachineBackend` targeting a
+   `dxil-...` triple, which -- per step 5's status note -- only works for
+   modules with no remaining `dx.op.*` calls).
 7. **DXBC import**: build `dxbc-as` (see Testing Tools above) first —
    a standalone, MLIR-independent DXBC assembler — so DXBC importer tests
    have human-readable, diffable fixtures from day one; then migrate the
@@ -1337,6 +1432,17 @@ This is a rough sequencing, not a schedule:
 9. **AMDGPU/NVPTX/AArch64 retargeting** via direct `llvm::Module` →
    `TargetMachine`. MLIR `gpu`-dialect-based retargeting is deferred until a
    concrete client needs it (see Non-Goals above).
+
+   Status: AMDGPU retargeting is implemented and validated end to end via
+   `feme::Driver` (`--target=amdgcn-...`) for both DXIL- and SPIR-V-derived
+   modules, for the opcodes/intrinsics `feme::amdgpu::RaisedLoweringPass`
+   currently covers (see "Raised LLVM IR -> AMDGPU" above); NVPTX/AArch64
+   retargeting is not yet attempted (no client need yet, matching this
+   step's own original scoping). `Driver`'s target-triple resolution is
+   generic (any triple `TargetRegistry` recognizes works for
+   `feme::TargetMachineBackend` itself), so adding those is not expected to
+   need `Driver` changes -- only, if needed, an NVPTX/AArch64 counterpart to
+   `RaisedLoweringPass` for raised-IR-specific intrinsics.
 10. **C API**: once `feme` and its underlying library primitives are
     functional and tested end to end (steps 1–9), layer a stable C API
     (analogous to `MLIR-C`/`LLVM-C`) over the by-then-proven C++ API
