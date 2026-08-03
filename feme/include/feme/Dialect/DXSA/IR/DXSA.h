@@ -9,8 +9,8 @@
 #ifndef FEME_DIALECT_DXSA_IR_DXSA_H
 #define FEME_DIALECT_DXSA_IR_DXSA_H
 
-#include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "feme/Dialect/DXSA/IR/DXSATypes.h"
+#include "mlir/Bytecode/BytecodeOpInterface.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/OpImplementation.h"
 
