@@ -55,6 +55,25 @@ TEST(LexerTest, PunctuationAndSwizzle) {
   EXPECT_EQ(Kinds, Expected);
 }
 
+TEST(LexerTest, HexIntegerLiterals) {
+  std::vector<Token> Tokens = lexAll("0x3F800000 0XdeadBEEF 0x0");
+  ASSERT_EQ(Tokens.size(), 4u);
+  EXPECT_EQ(Tokens[0].Kind, TokenKind::Integer);
+  EXPECT_EQ(Tokens[0].Spelling, "0x3F800000");
+  EXPECT_EQ(Tokens[1].Kind, TokenKind::Integer);
+  EXPECT_EQ(Tokens[1].Spelling, "0XdeadBEEF");
+  EXPECT_EQ(Tokens[2].Kind, TokenKind::Integer);
+  EXPECT_EQ(Tokens[2].Spelling, "0x0");
+}
+
+TEST(LexerTest, PlusAndBraces) {
+  std::vector<Token> Tokens = lexAll("+{}");
+  ASSERT_EQ(Tokens.size(), 4u);
+  EXPECT_EQ(Tokens[0].Kind, TokenKind::Plus);
+  EXPECT_EQ(Tokens[1].Kind, TokenKind::LBrace);
+  EXPECT_EQ(Tokens[2].Kind, TokenKind::RBrace);
+}
+
 TEST(LexerTest, FloatAndIntegerLiterals) {
   std::vector<Token> Tokens = lexAll("1 1.5 .5 1e3 1.0e-2 1.0f");
   ASSERT_EQ(Tokens.size(), 7u);

@@ -70,6 +70,18 @@ Token Lexer::lexNumber() {
   const char *Start = Source.data() + Pos;
   bool IsFloat = false;
 
+  // Hexadecimal literals are always integers; `fxc`-style disassembly uses
+  // them for raw bit patterns (e.g. `l(0x3F800000)`), where a decimal
+  // spelling would lose the distinction between a float and its encoding.
+  if (peek() == '0' && (peek(1) == 'x' || peek(1) == 'X') &&
+      isxdigit(static_cast<unsigned char>(peek(2)))) {
+    advance(); // '0'
+    advance(); // 'x'
+    while (isxdigit(static_cast<unsigned char>(peek())))
+      advance();
+    return makeToken(TokenKind::Integer, Start);
+  }
+
   while (isdigit(static_cast<unsigned char>(peek())))
     advance();
   if (peek() == '.' && isdigit(static_cast<unsigned char>(peek(1)))) {
@@ -153,6 +165,15 @@ Token Lexer::next() {
   case '-':
     advance();
     return makeToken(TokenKind::Minus, Start);
+  case '+':
+    advance();
+    return makeToken(TokenKind::Plus, Start);
+  case '{':
+    advance();
+    return makeToken(TokenKind::LBrace, Start);
+  case '}':
+    advance();
+    return makeToken(TokenKind::RBrace, Start);
   case '|':
     advance();
     return makeToken(TokenKind::Pipe, Start);

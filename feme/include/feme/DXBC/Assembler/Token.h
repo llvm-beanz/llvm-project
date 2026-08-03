@@ -31,7 +31,10 @@ enum class TokenKind {
   LBracket,       // [
   RBracket,       // ]
   Minus,          // -
+  Plus,           // +
   Pipe,           // |
+  LBrace,         // {
+  RBrace,         // }
   EndOfStatement, // newline (statements are one per line)
   Eof,
   Unknown,
