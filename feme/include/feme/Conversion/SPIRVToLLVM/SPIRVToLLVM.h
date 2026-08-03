@@ -51,6 +51,16 @@ namespace spirv {
 /// points, whose bitness comes from the module's addressing model.
 std::string getTargetTriple(mlir::spirv::ModuleOp Module);
 
+/// Populates \p Patterns with FeMe's own `spirv` -> `llvm` dialect
+/// conversion patterns: the ones MLIR has none for at all, plus the ones
+/// where MLIR's conversion targets the SPIR-V runner rather than LLVM's
+/// SPIRV backend. They are given a higher benefit than MLIR's, so they win
+/// wherever both apply, and are meant to be used alongside (not instead of)
+/// `mlir::populateSPIRVToLLVMConversionPatterns`.
+void populateSPIRVToLLVMTargetPatterns(
+    const mlir::LLVMTypeConverter &TypeConverter,
+    mlir::RewritePatternSet &Patterns);
+
 /// Creates the pass converting every `spirv.module` nested in a builtin
 /// module into the `llvm` dialect, targeting LLVM's in-tree `SPIRV` backend.
 /// This is a superset of MLIR's own `convert-spirv-to-llvm` -- see this

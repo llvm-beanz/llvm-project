@@ -16,8 +16,11 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/IR/DataLayout.h"
+#include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
 
 namespace {
@@ -76,6 +79,93 @@ void setTargetAttributes(mlir::ModuleOp Module, llvm::StringRef TargetTriple) {
           Ctx, llvm::Triple(TargetTriple.str()).computeDataLayout()));
 }
 
+/// What a `spirv.module` says about one of its entry points, in the spelling
+/// LLVM's SPIRV backend expects to find it in: the backend reads the pipeline
+/// stage from an `hlsl.shader` function attribute and the compute workgroup
+/// dimensions from an `hlsl.numthreads` one (see
+/// `llvm/lib/Target/SPIRV/SPIRVCallLowering.cpp` and `SPIRVAsmPrinter.cpp`),
+/// rather than from module-level operations the way SPIR-V itself does.
+struct EntryPointInfo {
+  std::string Stage;
+  std::string LocalSize;
+};
+
+/// Everything about a `spirv.module` that the conversion consumes but does
+/// not preserve, collected before it runs so it can be re-attached to the
+/// `llvm` dialect module the conversion leaves in its place.
+struct SPIRVModuleInfo {
+  /// Position of the `spirv.module` among the outer module's children; the
+  /// converted module takes the same position.
+  unsigned Index;
+  std::string TargetTriple;
+  llvm::StringMap<EntryPointInfo> EntryPoints;
+};
+
+/// Returns \p Values, an execution mode's operands, as the comma separated
+/// list `hlsl.numthreads` spells workgroup dimensions with.
+std::string formatLocalSize(mlir::ArrayAttr Values) {
+  std::string Result;
+  llvm::raw_string_ostream OS(Result);
+  llvm::interleave(
+      Values, OS,
+      [&](mlir::Attribute Value) {
+        OS << mlir::cast<mlir::IntegerAttr>(Value).getInt();
+      },
+      ",");
+  return Result;
+}
+
+/// Collects \p Module's entry points, keyed by the function each names.
+llvm::StringMap<EntryPointInfo>
+collectEntryPoints(mlir::spirv::ModuleOp Module) {
+  llvm::StringMap<EntryPointInfo> EntryPoints;
+  for (auto EntryPoint : Module.getOps<mlir::spirv::EntryPointOp>()) {
+    llvm::Triple::EnvironmentType Stage =
+        getStageForExecutionModel(EntryPoint.getExecutionModel());
+    if (Stage == llvm::Triple::UnknownEnvironment)
+      continue;
+    EntryPoints[EntryPoint.getFn()].Stage =
+        llvm::Triple::getEnvironmentTypeName(Stage).str();
+  }
+
+  for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeOp>()) {
+    if (Mode.getExecutionMode() != mlir::spirv::ExecutionMode::LocalSize)
+      continue;
+    auto It = EntryPoints.find(Mode.getFn());
+    if (It != EntryPoints.end())
+      It->second.LocalSize = formatLocalSize(Mode.getValues());
+  }
+  return EntryPoints;
+}
+
+/// Adds the `key = value` function attribute \p Key/\p Value to \p Func's
+/// passthrough list, which `mlir::translateModuleToLLVMIR` turns into a
+/// string attribute on the `llvm::Function`.
+void addPassthroughAttribute(mlir::LLVM::LLVMFuncOp Func, llvm::StringRef Key,
+                             llvm::StringRef Value) {
+  mlir::MLIRContext *Ctx = Func.getContext();
+  llvm::SmallVector<mlir::Attribute> Passthrough;
+  if (mlir::ArrayAttr Existing = Func.getPassthroughAttr())
+    llvm::append_range(Passthrough, Existing);
+  Passthrough.push_back(
+      mlir::ArrayAttr::get(Ctx, {mlir::StringAttr::get(Ctx, Key),
+                                 mlir::StringAttr::get(Ctx, Value)}));
+  Func.setPassthroughAttr(mlir::ArrayAttr::get(Ctx, Passthrough));
+}
+
+/// Re-attaches \p EntryPoints to the converted functions they describe.
+void applyEntryPointAttributes(
+    mlir::ModuleOp Module, const llvm::StringMap<EntryPointInfo> &EntryPoints) {
+  Module.walk([&](mlir::LLVM::LLVMFuncOp Func) {
+    auto It = EntryPoints.find(Func.getSymName());
+    if (It == EntryPoints.end())
+      return;
+    addPassthroughAttribute(Func, "hlsl.shader", It->second.Stage);
+    if (!It->second.LocalSize.empty())
+      addPassthroughAttribute(Func, "hlsl.numthreads", It->second.LocalSize);
+  });
+}
+
 /// FeMe's `spirv` dialect -> `llvm` dialect conversion; see
 /// feme/include/feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h.
 class ConvertSPIRVToLLVMPass
@@ -106,13 +196,15 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
 
   // The conversion replaces each `spirv.module` in place with the
   // `builtin.module` holding its converted body, so remember which of the
-  // outer module's children each one is: that is what the target triple
-  // recovered from it has to be attached to once it no longer exists.
-  llvm::SmallVector<std::pair<unsigned, std::string>> Triples;
+  // outer module's children each one is: that is what the module-level
+  // information recovered from it has to be attached to once it no longer
+  // exists.
+  llvm::SmallVector<SPIRVModuleInfo> Modules;
   unsigned Index = 0;
   for (mlir::Operation &Op : Module.getBody()->getOperations()) {
     if (auto SPIRVModule = mlir::dyn_cast<mlir::spirv::ModuleOp>(Op))
-      Triples.emplace_back(Index, feme::spirv::getTargetTriple(SPIRVModule));
+      Modules.push_back({Index, feme::spirv::getTargetTriple(SPIRVModule),
+                         collectEntryPoints(SPIRVModule)});
     ++Index;
   }
 
@@ -124,6 +216,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::populateSPIRVToLLVMModuleConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMFunctionConversionPatterns(TypeConverter, Patterns);
+  feme::spirv::populateSPIRVToLLVMTargetPatterns(TypeConverter, Patterns);
 
   mlir::ConversionTarget Target(*Ctx);
   Target.addIllegalDialect<mlir::spirv::SPIRVDialect>();
@@ -135,12 +228,15 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
     return signalPassFailure();
 
   mlir::Block::OpListType &Converted = Module.getBody()->getOperations();
-  for (const std::pair<unsigned, std::string> &Entry : Triples) {
-    auto It = std::next(Converted.begin(), Entry.first);
+  for (const SPIRVModuleInfo &Info : Modules) {
+    auto It = std::next(Converted.begin(), Info.Index);
     if (It == Converted.end())
       continue;
-    if (auto Inner = mlir::dyn_cast<mlir::ModuleOp>(*It))
-      setTargetAttributes(Inner, Entry.second);
+    auto Inner = mlir::dyn_cast<mlir::ModuleOp>(*It);
+    if (!Inner)
+      continue;
+    setTargetAttributes(Inner, Info.TargetTriple);
+    applyEntryPointAttributes(Inner, Info.EntryPoints);
   }
 }
 
