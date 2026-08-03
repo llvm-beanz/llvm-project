@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -20,9 +20,13 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-Can you update MLIR's SPIRVToLLVM conversion capabilities to handle SPIR-V image
-types?
+I'd like you to build out the `dxbc-as` tool described in the design document.
+While this is a testing tool so it doesn't need to be fully production-quality I
+would like it to be well engineered.
 
-Please add sufficient tests for each bit of functionality you've added, and
-ensure that everything passes when the `check-mlir` target is built. Also please
-ensure that any relevant documentation is kept up to date.
+Specifically I'd like to see the structure follow traditional compiler design,
+lexing, parsing, and building out a stack of instructions which then get dumped
+either to binary or text.
+
+I'd also like you to build a fuzzing frontend for it so that we can ensure that
+it can handle a wide array of inputs gracefully.
