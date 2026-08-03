@@ -3,7 +3,8 @@
 ; feme::amdgpu::RaisedLoweringPass (feme/lib/Transforms/AMDGPU/RaisedLowering.cpp)
 ; rewrites the raised, format-agnostic thread/group index queries
 ; feme::dxil::OpRaisingPass produces (see test/Transforms/DXIL/dxil-raise-ops.ll)
-; into the AMDGPU target intrinsics they correspond to, per the "Raised LLVM IR ->
+; into the AMDGPU target intrinsics they correspond to, and moves local
+; variables into AMDGPU's private address space, per the "Raised LLVM IR ->
 ; AMDGPU" section of feme/docs/Design.md.
 
 target triple = "amdgcn-amd-amdhsa"

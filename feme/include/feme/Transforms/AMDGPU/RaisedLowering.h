@@ -27,6 +27,12 @@
 //    `llvm.dx.flattened.thread.id.in.group`/
 //    `llvm.spv.flattened.thread.id.in.group` -- which are synthesized from
 //    the entry point's thread group dimensions.
+//  - Local variables: a raised module's `alloca`s (e.g. from a `const
+//    static` HLSL array a SPIR-V input keeps as a per-invocation local
+//    rather than folding into a single constant) are in the generic address
+//    space, since neither format-agnostic conversion has a reason to know
+//    AMDGPU's address space layout. AMDGPU's `alloca`/frame-index selection
+//    only covers address space 5 (`private`), so this pass moves them there.
 //
 // It does not yet cover resource-handle ops (`llvm.dx.resource.*`/
 // `llvm.spv.resource.*`, see feme::amdgpu::ResourceLoweringPass instead), or

@@ -14,6 +14,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
@@ -209,6 +210,81 @@ bool forEachIntrinsicCall(Module &M, Intrinsic::ID ID,
   return Changed;
 }
 
+/// AMDGPU's private address space, the only one its `alloca`/frame-index
+/// selection covers -- a raised module's `alloca`s otherwise sit in the
+/// generic default address space (0), which neither format-agnostic
+/// conversion has a reason to know is wrong for this one target.
+constexpr unsigned PrivateAddressSpace = 5;
+
+/// Returns false if any of \p Ptr's users -- recursively through any
+/// `getelementptr`, the only pointer-producing op FeMe's `spirv`/DXIL ->
+/// `llvm` dialect conversions chain off a local variable's address -- is
+/// something other than a `getelementptr`, or an ordinary `load`/`store`
+/// through it. `lowerAllocaAddressSpace` only knows how to retarget those
+/// shapes, matching `ResourceLoweringPass::hasOnlySupportedUses`'s own
+/// precedent of leaving anything it cannot model untouched rather than
+/// partially rewriting it.
+bool hasOnlySupportedPointerUses(const Value &Ptr) {
+  for (const User *U : Ptr.users()) {
+    if (isa<GetElementPtrInst>(U)) {
+      if (!hasOnlySupportedPointerUses(*U))
+        return false;
+      continue;
+    }
+    if (auto *SI = dyn_cast<StoreInst>(U)) {
+      if (SI->getPointerOperand() != &Ptr)
+        return false;
+      continue;
+    }
+    if (!isa<LoadInst>(U))
+      return false;
+  }
+  return true;
+}
+
+/// Rebuilds \p OldPtr's `getelementptr` users (recursively, since a chain of
+/// more than one is possible) so each one's declared result type carries
+/// \p NewPtr's address space, and repoints every terminal `load`/`store` at
+/// the rebuilt chain instead. A `getelementptr`'s result address space is
+/// fixed, as part of its type, at creation time -- the same reason
+/// `ResourceLoweringPass::lowerSPIRVAccess` cannot just
+/// `replaceAllUsesWith` a differently-typed pointer either (see its
+/// comment) -- so each level of the chain needs rebuilding in turn, rather
+/// than just the pointer operand `replaceAllUsesWith` would touch.
+void retypePointerUsers(Value &OldPtr, Value &NewPtr) {
+  for (Use &U : llvm::make_early_inc_range(OldPtr.uses())) {
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(U.getUser())) {
+      IRBuilder<> Builder(GEP);
+      SmallVector<Value *, 4> Indices(GEP->indices());
+      Value *NewGEP = Builder.CreateGEP(GEP->getSourceElementType(), &NewPtr,
+                                        Indices, "", GEP->isInBounds());
+      NewGEP->takeName(GEP);
+      retypePointerUsers(*GEP, *NewGEP);
+      GEP->eraseFromParent();
+      continue;
+    }
+    U.set(&NewPtr);
+  }
+}
+
+/// Moves \p Alloca into AMDGPU's private address space if it is not there
+/// already, rebuilding its users (see `retypePointerUsers`) to match.
+bool lowerAllocaAddressSpace(AllocaInst &Alloca) {
+  if (Alloca.getAddressSpace() == PrivateAddressSpace)
+    return false;
+  if (!hasOnlySupportedPointerUses(Alloca))
+    return false;
+
+  IRBuilder<> Builder(&Alloca);
+  AllocaInst *NewAlloca = Builder.CreateAlloca(
+      Alloca.getAllocatedType(), PrivateAddressSpace, Alloca.getArraySize());
+  NewAlloca->setAlignment(Alloca.getAlign());
+  NewAlloca->takeName(&Alloca);
+  retypePointerUsers(Alloca, *NewAlloca);
+  Alloca.eraseFromParent();
+  return true;
+}
+
 } // namespace
 
 PreservedAnalyses RaisedLoweringPass::run(Module &M, ModuleAnalysisManager &) {
@@ -229,6 +305,11 @@ PreservedAnalyses RaisedLoweringPass::run(Module &M, ModuleAnalysisManager &) {
   Changed |=
       forEachIntrinsicCall(M, Intrinsic::spv_flattened_thread_id_in_group,
                            lowerFlattenedThreadIDInGroup);
+
+  for (Function &F : M)
+    for (Instruction &I : llvm::make_early_inc_range(instructions(F)))
+      if (auto *Alloca = dyn_cast<AllocaInst>(&I))
+        Changed |= lowerAllocaAddressSpace(*Alloca);
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
