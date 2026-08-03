@@ -1,4 +1,5 @@
 add_subdirectory(Core)
+add_subdirectory(Dialect)
 add_subdirectory(DXBC)
 add_subdirectory(Driver)
 add_subdirectory(Frontend)
