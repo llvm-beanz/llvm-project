@@ -20,6 +20,5 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-I need the same set of translation flows for SPIRV that we now have for DXIL. I
-need to be able to read SPIRV into MLIR, translate that to the LLVM-IR dialect,
-then to LLVM IR that uses SPIRV target intrinsics.
+I'd now like a pass that translates the raised modern LLVM IR representation of
+a DXIL or SPIRV shader into LLVM IR for the AMD GPU backend.
