@@ -263,6 +263,76 @@ static std::optional<Type> convertArrayType(spirv::ArrayType type,
   return LLVM::LLVMArrayType::get(llvmElementType, numElements);
 }
 
+/// Returns the LLVM dialect type used as the sampled type parameter of an
+/// image target extension type. SPIR-V spells a sampled type of `OpTypeVoid`,
+/// which the `spirv` dialect models as `NoneType`, and which LLVM's SPIR-V
+/// backend expects as `void`.
+static Type convertImageSampledType(Type sampledType,
+                                    const TypeConverter &converter) {
+  if (isa<NoneType>(sampledType))
+    return LLVM::LLVMVoidType::get(sampledType.getContext());
+  return converter.convertType(sampledType);
+}
+
+/// Appends the seven integer parameters shared by the `spirv.Image`,
+/// `spirv.SignedImage` and `spirv.SampledImage` target extension types, in the
+/// operand order of `OpTypeImage`. The `spirv` dialect enumerations use the
+/// numeric values assigned by the SPIR-V specification, so they can be
+/// forwarded unchanged.
+static void getImageIntParams(spirv::ImageType type,
+                              SmallVectorImpl<unsigned> &intParams) {
+  intParams.append({static_cast<unsigned>(type.getDim()),
+                    static_cast<unsigned>(type.getDepthInfo()),
+                    static_cast<unsigned>(type.getArrayedInfo()),
+                    static_cast<unsigned>(type.getSamplingInfo()),
+                    static_cast<unsigned>(type.getSamplerUseInfo()),
+                    static_cast<unsigned>(type.getImageFormat())});
+}
+
+/// Converts SPIR-V image type to the LLVM target extension type LLVM's SPIR-V
+/// backend uses to represent `OpTypeImage`, either directly (`extTypeName` is
+/// `spirv.Image`) or as the payload of a sampled image (`spirv.SampledImage`).
+/// Images with a signed integer sampled type use a dedicated type name because
+/// LLVM integer types carry no signedness. The trailing access qualifier
+/// parameter is left off since `spirv::ImageType` does not model it.
+static Type convertImageTypeAs(spirv::ImageType type, StringRef extTypeName,
+                               const TypeConverter &converter) {
+  Type sampledType = convertImageSampledType(type.getElementType(), converter);
+  if (!sampledType)
+    return nullptr;
+
+  SmallVector<unsigned, 6> intParams;
+  getImageIntParams(type, intParams);
+  return LLVM::LLVMTargetExtType::get(type.getContext(), extTypeName,
+                                      {sampledType}, intParams);
+}
+
+/// Converts SPIR-V image type to an LLVM target extension type.
+static Type convertImageType(spirv::ImageType type,
+                             const TypeConverter &converter) {
+  StringRef extTypeName = type.getElementType().isSignedInteger()
+                              ? "spirv.SignedImage"
+                              : "spirv.Image";
+  return convertImageTypeAs(type, extTypeName, converter);
+}
+
+/// Converts SPIR-V sampled image type to an LLVM target extension type. The
+/// sampled image type carries the parameters of the image it wraps.
+static Type convertSampledImageType(spirv::SampledImageType type,
+                                    const TypeConverter &converter) {
+  auto imageType = dyn_cast<spirv::ImageType>(type.getImageType());
+  if (!imageType)
+    return nullptr;
+  return convertImageTypeAs(imageType, "spirv.SampledImage", converter);
+}
+
+/// Converts SPIR-V sampler type to the parameterless `spirv.Sampler` LLVM
+/// target extension type.
+static Type convertSamplerType(spirv::SamplerType type) {
+  return LLVM::LLVMTargetExtType::get(type.getContext(), "spirv.Sampler",
+                                      /*typeParams=*/{}, /*intParams=*/{});
+}
+
 /// Converts SPIR-V pointer type to LLVM pointer. Pointer's storage class is not
 /// modelled at the moment.
 static Type convertPointerType(spirv::PointerType type,
@@ -2110,6 +2180,14 @@ void mlir::populateSPIRVToLLVMTypeConversion(LLVMTypeConverter &typeConverter,
   typeConverter.addConversion([&](spirv::ArrayType type) {
     return convertArrayType(type, typeConverter);
   });
+  typeConverter.addConversion([&](spirv::ImageType type) {
+    return convertImageType(type, typeConverter);
+  });
+  typeConverter.addConversion([&](spirv::SampledImageType type) {
+    return convertSampledImageType(type, typeConverter);
+  });
+  typeConverter.addConversion(
+      [&](spirv::SamplerType type) { return convertSamplerType(type); });
   typeConverter.addConversion([&, clientAPI](spirv::PointerType type) {
     return convertPointerType(type, typeConverter, clientAPI);
   });
