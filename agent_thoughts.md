@@ -1940,3 +1940,89 @@ an ad hoc manual reproduction once one exists.
 Four commits (widening the direct-mapping table, its lit tests, resource-
 handle raising, its lit tests) plus a `Design.md` update, followed by this
 `agent_thoughts.md` entry as its own commit.
+
+# Follow-up: reconsidering the StructuredBuffer/CBuffer scope cut
+
+A prior entry in this file left `StructuredBuffer`/`CBuffer` resource
+handles unraised, with the reasoning: "reconstructing a plausible-looking
+but fake struct type to fill that gap would be worse than not raising
+those kinds at all, since it would silently produce a handle type that
+doesn't match what actually flowed through the real frontend." Prompted to
+reconsider, on reflection that conclusion didn't actually follow from the
+premise, and I'd conflated two different things under "raise this op":
+*recovering the original source* vs. *producing IR a retargeting pipeline
+can act on*. The former genuinely isn't possible from binding metadata
+alone (DXIL's `%dx.types.ResourceProperties` only carries a struct's size,
+and for `StructuredBuffer` its alignment, never its field layout) -- but
+the latter doesn't need it. This pass exists to retarget DXIL IR, not to
+decompile it back to HLSL source; a consumer of the raised handle (once
+buffer load/store raising lands) only needs a `target("dx.")` type whose
+byte size and alignment are right, since that's what buffer indexing and
+codegen actually depend on. Leaving the op entirely unraised was a strictly
+worse outcome than producing something honestly-labeled-as-approximate:
+mixed raised/unraised IR is exactly what this pass is designed to tolerate
+(unrecognized `dx.op.*` calls are left alone rather than erroring), but an
+unraised `StructuredBuffer`/`CBuffer` handle blocks *all* downstream
+progress on that resource, forever, in a way a same-size opaque handle
+would not.
+
+The fix is `getOpaqueSizedType`: instead of the original struct's fields,
+build a type that's honest about being a reconstruction -- a byte array
+sized to match, or (when `StructuredBuffer`'s `ResourceProperties` supplies
+an alignment) a natural-alignment leading field followed by byte-array
+padding, using only the align-1/2/4/8/16 shapes real HLSL structs actually
+produce (an integer for 1/2/4/8 bytes, `<4 x i32>` for 16 -- verified
+against a real `-dxil-op-lower` run, see below) so the alignment is
+recovered precisely rather than guessed. This is the same category of
+"faithful except where genuinely unrecoverable" reconstruction the
+`TypedBuffer`/`RawBuffer` cases already were -- I'd applied that standard
+inconsistently by treating "some information is unrecoverable" as license
+to recover *nothing*, rather than recovering exactly what's recoverable
+and being explicit about the rest.
+
+I validated this the same way as every other opcode/type in this pass:
+wrote `.ll` with a real frontend-shaped `llvm.dx.resource.handlefrombinding`
+call against `target("dx.RawBuffer", %struct.S, ...)`/`target("dx.CBuffer",
+%struct.S)` (where `%struct.S = { float, <4 x i32> }`, chosen so its
+20-byte payload rounds up to a 32-byte, align-16 stride -- exercising both
+the size *and* the alignment-recovery path, not just a trivially-aligned
+case), ran it through this tree's own real `opt -dxil-op-lower`, fed the
+result through `feme-opt`'s raising pass, and confirmed the reconstructed
+`target("dx.RawBuffer", { <4 x i32>, [16 x i8] }, ...)`/`target("dx.CBuffer",
+[32 x i8])` types, when run back through `-dxil-op-lower` a second time,
+produce the *exact same* `%dx.types.ResourceProperties` word values
+(`{ i32 1036, i32 32 }` for the `StructuredBuffer` SRV case, `{ i32 13, i32
+32 }` for the `CBuffer` case) as the original -- a genuine bit-for-bit
+round trip through the real forward pass, not just a plausible-looking
+match. I also added a regression case for a `StructuredBuffer` whose
+encoded size isn't a multiple of its encoded alignment -- impossible for a
+real struct's alloc size, but a case `getOpaqueSizedType` must still
+degrade safely on (falling back to a byte array) rather than constructing
+a self-contradictory type or asserting.
+
+## Validation
+
+- Empirical round-trip through this tree's own `opt -dxil-op-lower`, run
+  twice (frontend-shaped IR -> lowered -> raised -> lowered again),
+  confirming bit-identical `ResourceProperties` words for both the
+  `StructuredBuffer` and `CBuffer` cases.
+- `ninja check-feme`: 17/17 lit tests pass (extended
+  `dxil-raise-resource-handles.ll`/`-roundtrip.ll` in place, no new files
+  needed since these are additional cases in the existing suites).
+- Reran `FeMeCoreTests` (8/8), `FeMeFrontendTests` (8/8),
+  `FeMeImportDXILTests` (3/3), `FeMeImportSPIRVTests` (3/3): no
+  regressions.
+- `clang-format --style=file` over the edited `.cpp`: no diff.
+
+## Still deferred
+
+Unchanged from before, other than narrowing the resource-kind gap:
+texture/sampler resource-handle kinds (need dimension/multi-sample/
+feedback bits, not just size/alignment); buffer/texture load and store op
+raising; the flag-selected and aggregate-returning opcode families; SPIR-V
+raising and a `Driver`; real `offload-test-suite` shader collateral.
+
+## Commits
+
+Three commits (widened resource-handle raising, its lit tests, a
+`Design.md` update) plus this `agent_thoughts.md` entry as its own commit.
