@@ -211,6 +211,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::LowerToLLVMOptions Options(Ctx);
   mlir::LLVMTypeConverter TypeConverter(Ctx, Options);
   mlir::populateSPIRVToLLVMTypeConversion(TypeConverter);
+  feme::spirv::populateSPIRVToLLVMTargetTypeConversions(TypeConverter);
 
   mlir::RewritePatternSet Patterns(Ctx);
   mlir::populateSPIRVToLLVMModuleConversionPatterns(TypeConverter, Patterns);
