@@ -532,6 +532,15 @@ dialect can then name the backend's intrinsics directly, as
 | resource variable (image/sampler, `bind(set, binding)`) | `llvm.spv.resource.handlefrombinding` | an `external constant` global whose *name* encodes the binding |
 | `spirv.ImageRead`/`spirv.ImageWrite` | `llvm.spv.resource.getpointer` + `llvm.load`/`llvm.store` | *(no pattern; fails to legalize)* |
 | `spirv.ImageQuerySize` | `llvm.spv.resource.getdimensions.{x,xy,xyz}` | *(no pattern; fails to legalize)* |
+| `spirv.Constant` of `spirv.array` type (e.g. a `const static` HLSL array) | one flat `llvm.mlir.constant`, whatever the array's nesting | *(scalar/vector only; fails to legalize for an array)* |
+| `spirv.CompositeConstruct` building a vector (e.g. `floatN(...)`, a `.xxx` swizzle) | an `llvm.mlir.poison` seed plus one `llvm.insertelement` per lane | *(no pattern; fails to legalize)* |
+
+Real `dxc`-compiled SPIR-V also spells "no image operand modifiers" as an
+explicit `#spirv.image_operands<None>` attribute on `spirv.ImageRead`/
+`spirv.ImageWrite`, rather than omitting the (optional) attribute entirely;
+`feme::spirv::hasImageOperands` checks the attribute's *value*, not just its
+presence, so a real access is not rejected as if it used a modifier (`Lod`,
+`Bias`, ...) neither pattern supports.
 
 Since a builtin variable and a resource handle are values the backend
 materializes on demand rather than memory, the pointers SPIR-V reads them
@@ -1040,6 +1049,25 @@ the backend instead of silently wrong code.
   `llvm.spv.flattened.thread.id.in.group` (the linearized workitem id).
   `llvm.dx.thread.id`/`llvm.spv.thread.id` in particular is what essentially
   every real compute shader uses to index its output.
+- Local variables: an `alloca` -- e.g. from a `const static` HLSL array a
+  SPIR-V or DXIL input keeps as a per-invocation local rather than folding
+  into a single constant -- is in the generic default address space (0),
+  since neither format-agnostic conversion has any reason to know AMDGPU's
+  address space layout. AMDGPU's `alloca`/frame-index selection only
+  covers address space 5 (`private`), and its IR verifier rejects any other
+  address space outright *once the module's own target triple says
+  `amdgcn-*`* -- which is not yet true when this pass runs (`feme::Driver`
+  only retargets the module's triple right before handing it to
+  `TargetMachineBackend`, after this pass has already run) -- so this pass
+  moves every `alloca` there, rebuilding any `getelementptr` dynamically
+  indexing into it to match (a `getelementptr`'s result address space is
+  fixed, as part of its type, at creation time, so its direct users need
+  rebuilding too, the same reason `ResourceLoweringPass::lowerSPIRVAccess`
+  cannot just `replaceAllUsesWith` a differently-typed pointer either -- see
+  its comment) and repointing the terminal `load`/`store` at the rebuilt
+  chain. An `alloca` whose address escapes some other way is left
+  unmodified rather than partially rewritten, matching
+  `ResourceLoweringPass`'s own "leave what it cannot model alone" precedent.
 
 `llvm.spv.group.id`/`llvm.spv.thread.id.in.group`/`llvm.spv.thread.id` are
 overloaded on return width (unlike their fixed-`i32` `llvm.dx.*`
