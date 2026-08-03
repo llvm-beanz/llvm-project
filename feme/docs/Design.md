@@ -1234,6 +1234,43 @@ FeMe provides a small **standalone** DXBC assembler tool, `dxbc-as`, that:
   (`BinaryParser`/`dxsa` dialect construction) without depending on any
   code that importer's own tests are trying to validate.
 
+**Status: implemented** (`feme/lib/DXBC/Assembler`, `feme/tools/dxbc-as`,
+`feme/tools/dxbc-as-fuzzer`; see
+[docs/CommandGuide/dxbc-as.md](CommandGuide/dxbc-as.md)). Follows a
+traditional lex ➜ parse ➜ encode pipeline (`Lexer`/`Parser` build a flat
+`std::vector<Instruction>` "instruction stack"; `Encoder`/`AsmPrinter`
+consume it to produce binary or re-printed text respectively). A few
+implementation notes/deviations from the description above:
+
+- Mnemonic coverage (`feme/include/feme/DXBC/Assembler/Opcodes.def`) is a
+  deliberately curated, representative subset of the real SM4/SM5 ISA (on
+  the order of 40 mnemonics covering every operand-encoding shape the
+  format uses: plain ALU, texture sampling/loads, declarations, no-operand,
+  conditional), not an exhaustive reimplementation of the ~200-opcode real
+  instruction set. Control flow (`if`/`else`/`loop`/`switch`/labels) is not
+  yet covered; extending coverage is purely additive (add a row to
+  `Opcodes.def`, teach `Parser.cpp`/`Encoder.cpp` about a new
+  `InstructionKind` only if the new mnemonic doesn't fit an existing one).
+- Binary encoding uses the real, documented token layout and opcode values
+  from Microsoft's public `d3d11TokenizedProgramFormat.hpp` for every field
+  it populates (opcode/operand tokens, component masks/swizzles, operand
+  modifiers, resource dimensions/return types, interpolation modes), so
+  output is directly comparable to real `fxc`-produced bytecode where
+  fields overlap. Two exceptions, both because this tool has no downstream
+  consumer yet to match and Microsoft does not publish these particular
+  bit assignments alongside the token format header: the `DXContainer`
+  wrapper's checksum (`Header::FileHash`) is left zeroed (no in-tree
+  `DXContainer` consumer validates it), and `dcl_globalFlags`' per-flag
+  bit assignment within the opcode-specific control range is `dxbc-as`'s
+  own, stable but not Microsoft-verified, mapping.
+- `dxbc-as-fuzzer` (`feme/tools/dxbc-as-fuzzer`) fuzzes
+  `feme::dxbc::parseAssembly` directly on raw fuzzer bytes as text (not a
+  binary format), matching the "every parser gets a fuzzer" requirement in
+  Testing Strategy below even though `dxbc-as`'s *input* is text rather
+  than a binary format like SPIR-V/DXIL: `dxbc-as` exists specifically to
+  make it easy to hand-author DXBC test inputs, so its own parser must be
+  equally robust against adversarial input.
+
 ### Avoiding binary test fixtures
 
 Checking in raw binary blobs as `lit` test inputs is discouraged (not
@@ -1412,6 +1449,8 @@ feme/
                               Importer, matching feme-spirv-import-fuzzer)
     dxbc-as/               (standalone DXBC assembler, testing tool; see
                            Testing Tools above)
+    dxbc-as-fuzzer/        (llvm-fuzzer-style harness for dxbc-as's own
+                           assembly parser, see "dxbc-as" above)
   test/                    (lit + FileCheck)
   unittests/               (gtest)
   cmake/
@@ -1528,7 +1567,11 @@ feme/
   requirement, not a fast-follow**: an `llvm-fuzzer`-style harness lands
   alongside each importer as it's implemented (SPIR-V, DXIL, DXBC), matching
   how other LLVM binary-format parsers are fuzzed, and is run in CI
-  alongside the `lit`/`gtest` suites.
+  alongside the `lit`/`gtest` suites. `dxbc-as-fuzzer` (see the "dxbc-as"
+  section above) is this requirement's DXBC-adjacent counterpart landing
+  ahead of the DXBC `Importer` itself: since `dxbc-as` exists to make DXBC
+  test inputs easy to hand-author (and therefore fuzz), its own text parser
+  needs the same crash-freedom guarantee a binary importer would.
 - Deviation: `feme::dxil::OpRaisingPass` (see the DXIL section above) has no
   `gtest` coverage at all, by design rather than omission: unlike an
   `Importer`/`Translator`/`Backend`, its input and output are both plain
