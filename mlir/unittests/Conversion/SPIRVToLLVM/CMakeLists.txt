@@ -1,0 +1,9 @@
+add_mlir_unittest(MLIRSPIRVToLLVMTests
+  TypeConversionTest.cpp
+)
+mlir_target_link_libraries(MLIRSPIRVToLLVMTests
+  PRIVATE
+  MLIRLLVMDialect
+  MLIRSPIRVDialect
+  MLIRSPIRVToLLVM
+)
