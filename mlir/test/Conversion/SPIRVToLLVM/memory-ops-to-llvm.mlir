@@ -87,6 +87,32 @@ spirv.module Logical GLSL450 {
   }
 }
 
+spirv.module Logical GLSL450 {
+  //       CHECK: llvm.mlir.global external constant @image_descriptor_set0_binding0() {addr_space = 0 : i32} : !llvm.target<"spirv.Image", f32, 5, 0, 0, 0, 2, 1>
+  // CHECK-LABEL: @image_resource
+  //       CHECK:   %[[IMG:.*]] = llvm.mlir.addressof @image_descriptor_set0_binding0 : !llvm.ptr
+  //       CHECK:   llvm.load %[[IMG]] : !llvm.ptr -> !llvm.target<"spirv.Image", f32, 5, 0, 0, 0, 2, 1>
+  spirv.GlobalVariable @image bind(0, 0) : !spirv.ptr<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>, UniformConstant>
+  spirv.func @image_resource() "None" {
+    %0 = spirv.mlir.addressof @image : !spirv.ptr<!spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32f>
+    spirv.Return
+  }
+}
+
+spirv.module Logical GLSL450 {
+  //       CHECK: llvm.mlir.global external constant @sampler_descriptor_set0_binding1() {addr_space = 0 : i32} : !llvm.target<"spirv.Sampler">
+  // CHECK-LABEL: @sampler_resource
+  //       CHECK:   %[[SMP:.*]] = llvm.mlir.addressof @sampler_descriptor_set0_binding1 : !llvm.ptr
+  //       CHECK:   llvm.load %[[SMP]] : !llvm.ptr -> !llvm.target<"spirv.Sampler">
+  spirv.GlobalVariable @sampler bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.func @sampler_resource() "None" {
+    %0 = spirv.mlir.addressof @sampler : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.sampler
+    spirv.Return
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // spirv.Load
 //===----------------------------------------------------------------------===//
