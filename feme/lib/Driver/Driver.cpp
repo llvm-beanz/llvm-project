@@ -105,6 +105,13 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
       return ("spirv-unknown-vulkan-" +
               llvm::Triple::getEnvironmentTypeName(Existing.getEnvironment()))
           .str();
+    // A SPIR-V *input* already knows exactly which SPIR-V environment it was
+    // written for: feme::spirv::createConvertSPIRVToLLVMPass recovers that
+    // from the `spirv.module`'s addressing and execution models and records
+    // it on the module. Re-emitting SPIR-V should keep it rather than
+    // flattening every shader into a kernel-flavored module.
+    if (Existing.isSPIRV())
+      return Existing.str();
     // Otherwise match the SPIR-V "null pipeline" validation path (see the
     // "Deviation: validating Backend/Translator with a SPIR-V 'null
     // pipeline'" section of feme/docs/Design.md): LLVM's own in-tree SPIRV
