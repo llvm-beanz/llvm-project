@@ -41,6 +41,8 @@ struct KeywordValue {
 // below stores values pre-shifted into place where it is a control field,
 // and stores the plain DWORD value where it is a trailing token field.
 constexpr unsigned ControlShift = 11;
+/// Widest value the opcode-specific control range ([23:11]) can hold.
+constexpr uint64_t MaxControlValue = 0x1FFF;
 
 // D3D10_SB_GLOBAL_FLAG_* / D3D11[_1]_SB_GLOBAL_FLAG_* /
 // D3D12_SB_GLOBAL_FLAG_ALL_RESOURCES_BOUND.
@@ -485,6 +487,10 @@ private:
       llvm::Expected<uint64_t> Count = parseInteger("a count");
       if (!Count)
         return Count.takeError();
+      // The opcode-specific control range is [23:11]; a wider value would
+      // silently corrupt the instruction length field above it.
+      if (*Count > MaxControlValue)
+        return error("count must fit in the 13-bit control field");
       Inst.Controls |= static_cast<uint32_t>(*Count) << ControlShift;
       break;
     }
@@ -569,7 +575,9 @@ private:
       if (!Count)
         return Count.takeError();
       // [22:16] D3D10_SB_RESOURCE_SAMPLE_COUNT.
-      Inst.Controls |= (static_cast<uint32_t>(*Count) & 0x7F) << 16;
+      if (*Count > 0x7F)
+        return error("sample count must fit in 7 bits");
+      Inst.Controls |= static_cast<uint32_t>(*Count) << 16;
       Inst.Keywords.push_back(llvm::utostr(*Count));
       if (llvm::Error E = expectToken(TokenKind::RParen, "')'"))
         return E;
@@ -675,6 +683,9 @@ private:
       llvm::Expected<uint64_t> Stride = parseInteger("a structure stride");
       if (!Stride)
         return Stride.takeError();
+      // [21:11] D3D11_SB_EXTENDED_RESOURCE_DIMENSION_STRUCTURE_STRIDE.
+      if (*Stride > 0x7FF)
+        return error("structure stride must fit in 11 bits");
       Inst.ResourceStride = static_cast<uint16_t>(*Stride);
     }
     Inst.HasResourceDim = true;

@@ -202,6 +202,11 @@ TEST(ParserTest, ExtendedResourceOpcodeTokens) {
   EXPECT_EQ(Inst.ResourceStride, 52);
   EXPECT_TRUE(Inst.HasResourceReturnType);
   EXPECT_EQ(Inst.ResourceReturnTypes[0], 4); // D3D10_SB_RETURN_TYPE_UINT
+
+  EXPECT_NE(parseErrorMessage("bufinfo resource_dim(structured_buffer, 4096) "
+                              "r0.x, t0.xyzw")
+                .find("structure stride must fit"),
+            std::string::npos);
 }
 
 TEST(ParserTest, FlagLists) {
@@ -228,6 +233,11 @@ TEST(ParserTest, EnumeratedControlFields) {
 
   P = parseOrFail("dcl_input_control_point_count 4");
   EXPECT_EQ(P.Instructions[0].Controls, 4u << 11);
+  // A wider count would shift out of the control range and corrupt the
+  // instruction length field above it.
+  EXPECT_NE(parseErrorMessage("dcl_input_control_point_count 10000")
+                .find("13-bit control field"),
+            std::string::npos);
 }
 
 TEST(ParserTest, DeclarationsWithTrailingValues) {
@@ -274,6 +284,11 @@ TEST(ParserTest, TypedResourceDeclarations) {
   P = parseOrFail(
       "dcl_resource_texture2dms(4) (float, float, float, float) t5");
   EXPECT_EQ(P.Instructions[0].Controls, (4u << 11) | (4u << 16));
+
+  EXPECT_NE(parseErrorMessage("dcl_resource_texture2dms(200) (float, float, "
+                              "float, float) t5")
+                .find("sample count must fit"),
+            std::string::npos);
 
   // UAV declarations additionally accept access-flag keywords.
   P = parseOrFail("dcl_uav_typed_texture2d globallyCoherent "
