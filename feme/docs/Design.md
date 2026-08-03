@@ -687,7 +687,12 @@ LLVM infrastructure:
 - `llvm::TargetMachine` + codegen pipeline for X86, AArch64.
 - The in-tree `AMDGPU` and `NVPTX` backends for GPU ISA, targeted directly
   from `llvm::Module` via `TargetMachine` — this is sufficient for v1's
-  driver-facing use cases.
+  driver-facing use cases. For `AMDGPU`, the raised `llvm::Module` needs an
+  extra translation step first — see "Raised LLVM IR -> AMDGPU" immediately
+  below — since, unlike SPIR-V's "null pipeline" (Deviation below), the
+  in-tree `AMDGPU` target has no notion of the `llvm.dx.*`/`llvm.spv.*`
+  intrinsics `feme::dxil::OpRaisingPass`/a SPIR-V `Translator` leave in a
+  raised `llvm::Module`.
 - MLIR's structured GPU compilation pipeline (kernel outlining,
   `gpu.launch`, `gpu-to-rocdl`/`gpu-to-nvvm`) is **out of scope for v1**:
   there is no concrete client requiring it yet, and direct
@@ -699,6 +704,64 @@ LLVM infrastructure:
 FeMe's own contribution here is a thin `Backend` interface plus the glue to
 select/configure the right `TargetMachine`/pass pipeline — it does not
 reimplement target-specific codegen.
+
+## Raised LLVM IR -> AMDGPU
+
+A raised `llvm::Module` (`feme::dxil::OpRaisingPass`'s output for DXIL, or a
+SPIR-V `Translator`'s for SPIR-V — see "Per-Format Representation Strategy"
+above) is not yet valid input to the in-tree `AMDGPU` `TargetMachine`: it is
+deliberately still expressed using format-agnostic `llvm.dx.*`/`llvm.spv.*`
+intrinsics and (eventually) `target("dx.")` resource handle types, none of
+which `AMDGPU`'s ISel/codegen understands — that target only knows its own
+`llvm.amdgcn.*` intrinsics and buffer-descriptor/buffer-fat-pointer
+conventions (`ptr addrspace(8)`/`addrspace(7)`). A dedicated translation
+pass is therefore needed between "raised" and "ready for the `AMDGPU`
+`Backend`", mirroring how `OpRaisingPass` itself is a dedicated pass between
+"DXIL's own calling convention" and "raised" rather than folded into
+`DXILImporter`.
+
+`feme::amdgpu::RaisedLoweringPass`
+(`feme/include/feme/Transforms/AMDGPU/RaisedLowering.h`,
+`feme/lib/Transforms/AMDGPU/RaisedLowering.cpp`) is that pass. Like
+`OpRaisingPass`, it is deliberately incremental: it currently covers only
+the thread/group index queries with a direct, context-free mapping to a
+single AMDGPU intrinsic call, keyed on a constant component (0/1/2 for
+x/y/z) operand:
+
+- `llvm.dx.group.id` -> `llvm.amdgcn.workgroup.id.x`/`.y`/`.z`
+- `llvm.dx.thread.id.in.group` -> `llvm.amdgcn.workitem.id.x`/`.y`/`.z`
+
+Not yet covered, and left as unmodified calls rather than erroring (so this
+pass composes with modules that mix lowered and not-yet-lowered
+operations), matching `OpRaisingPass`'s own precedent:
+
+- `llvm.dx.thread.id` (the dispatch-wide, not per-group, index): unlike the
+  two ops above, this is not a single AMDGPU register read — it needs the
+  workgroup's id and dimensions combined with `llvm.amdgcn.workitem.id.*`
+  to reconstruct, which is a small follow-up rather than a 1:1 mapping.
+- `llvm.dx.flattened.thread.id.in.group`: similarly needs the group's
+  dimensions to linearize the per-component `workitem.id.*` values.
+- Resource-handle ops (`llvm.dx.resource.handlefrombinding`, and the
+  buffer/texture load/store ops once `OpRaisingPass` itself raises them —
+  see the DXIL section above): these need re-expressing in terms of
+  AMDGPU's buffer-descriptor conventions (`llvm.amdgcn.make.buffer.rsrc`
+  producing a `ptr addrspace(8)`, indexed via `ptr addrspace(7)` buffer fat
+  pointers), which is a comparably sized follow-up to resource-handle
+  raising itself, not yet designed in detail here.
+- Wave/quad ops (`llvm.dx.wave.*`): AMDGPU has its own cross-lane
+  intrinsics (`llvm.amdgcn.mbcnt.*`, `llvm.amdgcn.ds.permute`, ...), but the
+  mapping is not always 1:1 with DXIL's wave ops and needs its own pass to
+  get right.
+- SPIR-V's raised builtin-variable equivalents (`gl_GlobalInvocationID` and
+  friends): these do not yet exist upstream of this pass at all — SPIR-V's
+  `Translator`s (see "SPIR-V -> MLIR llvm dialect -> LLVM IR" above) do not
+  currently re-express SPIR-V builtin variables as any particular
+  format-agnostic convention this pass could recognize, so that needs to
+  land first.
+
+Exercised via `feme-opt` as the `feme-amdgpu-lower-raised` pass
+(`test/Transforms/AMDGPU/amdgpu-lower-raised.ll`), the same way
+`OpRaisingPass` is tested in isolation via `feme-dxil-raise-ops`.
 
 ### Deviation: validating `Backend`/`Translator` with a SPIR-V "null pipeline"
 
