@@ -83,5 +83,3 @@ const static int Dimension = 4096;
 ```
 
 And use DXC or Clang to compile that HLSL source to SPIRV and DXIL.
-
-Your last set of updates didn't accomplish this goal.
