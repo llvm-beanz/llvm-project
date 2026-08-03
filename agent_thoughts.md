@@ -3458,3 +3458,108 @@ shaders; three test-migration commits (fxc-derived shaders, larger asm
 shaders, per-instruction tests); the deletion of the hex import path; the
 documentation update; the fuzzer seed-corpus update; the control-field range
 checks; and this `agent_thoughts.md` entry.
+
+# Agent thoughts: finishing SPIR-V -> LLVM IR with target intrinsics
+
+The previous SPIR-V work stopped at a wall: MLIR's `convert-spirv-to-llvm`
+has no pattern for image accesses or builtin input variables, so any real
+shader failed to legalize, and `Design.md` recorded that as an MLIR-level gap
+to close either upstream or with FeMe-owned patterns. The prompt supplied the
+missing piece of the design: MLIR modules can carry a target triple and data
+layout, which lets the `llvm` dialect name target intrinsics directly.
+
+## Framing
+
+The important realization was *why* MLIR's conversion is shaped the way it
+is, rather than treating it as merely incomplete. It exists to feed MLIR's
+SPIR-V **runner**, which executes a shader on the host: a resource becomes an
+LLVM global the runner binds memory to, a builtin variable becomes a global
+the runner writes the thread index into, and an execution mode becomes a
+`__spv__*_execution_mode_info_*` global the runner reads. Every one of those
+is a correct lowering for that consumer and a wrong one for ours. So the gap
+is not only the missing image patterns; it is three constructs where MLIR
+*has* a pattern that actively produces something LLVM's SPIRV backend cannot
+use -- a module that loads from globals nothing ever defines.
+
+That reframing decided the shape: not a post-pass fixing up MLIR's output,
+and not a fork of MLIR's conversion, but FeMe's own pass that runs all of
+MLIR's patterns plus FeMe's at a higher benefit. FeMe overrides exactly the
+three where the consumers disagree and adds the ones nobody had.
+
+I checked the target representation empirically before writing any patterns:
+I hand-wrote the `llvm` dialect module I wanted to produce, ran it through
+`--llvmdialect-to-llvmir`, and fed the result to `llc -mtriple=spirv-...`.
+That confirmed in about a minute that `llvm.call_intrinsic` resolves
+overloaded `llvm.spv.*` names from the MLIR function type (so FeMe never has
+to spell `.tspirv.Image_f32_5_0_0_0_2_1t` itself), and it caught two
+requirements I would otherwise have discovered much later: without an
+`hlsl.shader` attribute the backend emits an exported plain function instead
+of `OpEntryPoint`, and the resource-name operand of
+`llvm.spv.resource.handlefrombinding` must point at a real string global --
+passing `poison` asserts inside the backend rather than degrading.
+
+## The one design decision worth recording
+
+A builtin variable and a resource handle are *values* the backend
+materializes on demand, not memory. SPIR-V reads both through a pointer, so
+the question was where to absorb that mismatch. Rewriting the
+`addressof`+`Load` pair as a unit inside one pattern does not work: dialect
+conversion legalizes each op independently, and whichever op the pattern does
+not replace still needs a legalization of its own.
+
+Making it a *type* conversion instead makes the whole thing fall out:
+`!spirv.ptr<T, Input>` converts to `T`, `!spirv.ptr<image, UniformConstant>`
+converts to the `target("spirv.Image", ...)` handle type, `addressof` becomes
+the intrinsic call producing that value, and `spirv.Load` through such a
+"pointer" is the identity. Each op is then independently legal and the
+patterns stay small. It also states the semantic fact directly rather than
+encoding it in pattern ordering.
+
+The cost is that the type conversion keys on the storage class alone, so
+non-builtin `Input` variables (graphics stage inputs) now fail to legalize
+with a diagnostic instead of converting to a pointer nothing can produce. I
+took that deliberately: it converts a silently-wrong lowering into a loud
+one, and stage inputs need their own lowering regardless.
+
+Two things had to be read out of the `spirv.module` *before* the conversion
+consumes them, since both survive only as something the conversion has no
+representation for: the entry points (which become function attributes on ops
+that do not exist yet) and the resource name strings (which have to exist as
+data in the module the conversion produces). Both are collected in the pass
+up front; the resource names are materialized as private string globals in
+the `spirv.module` body, which the conversion then carries into the
+`builtin.module` it leaves in its place.
+
+## Verification
+
+Each phase is tested at the level it can fail at: `feme-opt
+--feme-convert-spirv-to-llvm` lit tests per construct (triple/data layout,
+entry points, builtin variables, resources, image accesses), a unit test for
+the execution-model-to-triple mapping (which is pure logic worth pinning
+exhaustively), `--spirv-to-llvmir` tests for the composed translation, and
+two end-to-end round trips -- one composed a `feme-translate` stage at a time
+and one through the `feme` CLI -- taking a compute shader that reads its
+dispatch thread id and reads and writes a bound `RWBuffer` from SPIR-V, out
+through LLVM's own SPIRV backend, and back to a `spirv.module` with its
+`OpEntryPoint`, workgroup size, binding and image accesses intact. That last
+test is the one that would actually have caught any of the mistakes above.
+
+## What I did not do
+
+Sampling ops, storage/uniform buffers, push constants, and graphics stage
+inputs/outputs are still unconverted; they are more patterns of the same
+shape, and `Design.md` now says so instead of describing a structural gap.
+
+The AMDGPU lowering passes still match only the `llvm.dx.*` half of each
+parallel intrinsic family, so a SPIR-V-originated shader retargeted to AMDGPU
+now *reaches* them in a recognizable form but comes out with those calls
+unresolved. That is a one-sided-matching fix in a different component; I
+updated the gap note rather than widening this change into it.
+
+## Commits
+
+Seven: the conversion pass with the triple/data layout it needs before target
+intrinsics mean anything; entry points as `hlsl.*` attributes; builtin
+variables; resource handles; image accesses (with the end-to-end round trip);
+the `Driver` change to keep a SPIR-V input's own environment; and the design
+doc updates, plus this entry.
