@@ -1,3 +1,5 @@
+add_subdirectory(DXSA)
+
 add_mlir_library(FeMeTarget
   TargetMachineBackend.cpp
   TranslateRegistration.cpp
