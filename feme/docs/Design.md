@@ -498,27 +498,36 @@ it now covers the two largest opcode families:
   resource's `target("dx.")` handle type from the two ops' constant
   `%dx.types.ResBind`/`%dx.types.ResourceProperties` operands -- this is the
   `llvm::hlsl`-style resource metadata reconstruction this section
-  previously called out as unimplemented. It's narrowly scoped to the two
-  resource kinds whose handle type is fully recoverable from that metadata
-  alone (`TypedBuffer`, and unstructured `RawBuffer`/`ByteAddressBuffer`);
-  `StructuredBuffer`/`CBuffer` need their original element/layout struct
-  type (the binding metadata only carries size/alignment), and
-  textures/samplers need dimension/multi-sample/feedback bits not yet
-  decoded. Since the buffer/texture *load and store* ops that actually
-  consume a resource handle aren't raised yet either (see below), the
-  reconstructed handle is bridged back to the legacy `%dx.types.Handle` type
-  via `llvm.dx.resource.casthandle` -- the same "temporary" cast
-  `DXILOpLowering` itself uses for this purpose -- so mixed raised/
-  not-yet-raised IR stays valid.
+  previously called out as unimplemented. `TypedBuffer` and unstructured
+  `RawBuffer`/`ByteAddressBuffer` element types are recovered exactly, since
+  their full shape is present in `ResourceProperties`. `StructuredBuffer`/
+  `CBuffer` only have their original element/layout struct's size (and, for
+  `StructuredBuffer`, alignment) recoverable from that metadata, not its
+  field layout -- reconstructing a plausible-looking but fake struct would
+  silently produce a handle type that doesn't match what actually flowed
+  through the real frontend, so instead these get an opaque, honestly
+  size/alignment-only placeholder element type (an integer/vector-then-byte-
+  array pair sized and aligned to match, or a plain byte array when no
+  alignment is recoverable or representable). That's enough to round-trip
+  the binding and the exact byte size buffer indexing depends on, which is
+  what matters for re-targeting the IR -- see `getOpaqueSizedType` in
+  `OpRaising.cpp`. Textures/samplers still need dimension/multi-sample/
+  feedback bits not yet decoded, so those remain unraised. Since the buffer/
+  texture *load and store* ops that actually consume a resource handle
+  aren't raised yet either (see below), the reconstructed handle is bridged
+  back to the legacy `%dx.types.Handle` type via `llvm.dx.resource.
+  casthandle` -- the same "temporary" cast `DXILOpLowering` itself uses for
+  this purpose -- so mixed raised/not-yet-raised IR stays valid.
 
 Still not covered, and left for later changes: buffer/texture *load and
 store* ops (`BufferLoad`/`BufferStore`, `RawBufferLoad`/`RawBufferStore`,
 `CBufferLoadLegacy`, `TextureLoad`, `Sample*`, ...) -- these need
 `dx.types.ResRet`/`extractvalue` reconstruction into the corresponding
 `llvm.dx.resource.load.*`/`.store.*` intrinsics, a comparably sized
-follow-up to resource-handle creation itself; `StructuredBuffer`/`CBuffer`/
-texture/sampler resource kinds (need more than `ResourceProperties` alone
-supplies, as above); ops that return an aggregate needing `extractvalue`
+follow-up to resource-handle creation itself; texture/sampler resource
+kinds (need dimension/multi-sample/feedback bits `ResourceProperties`
+doesn't carry, unlike `StructuredBuffer`/`CBuffer`'s recoverable size/
+alignment); ops that return an aggregate needing `extractvalue`
 reconstruction outside of resources (`IMul`/`UMul`, `UAddc`, `SplitDouble`,
 `WaveActiveBallot`); and ops that pick their source intrinsic from an extra
 "kind"/flag operand rather than the opcode alone (`WaveActiveOp`,
@@ -1171,11 +1180,15 @@ This is a rough sequencing, not a schedule:
    fuzzing harness (`feme-dxil-import-fuzzer`) are implemented; the "op
    raising" pass (`feme::dxil::OpRaisingPass`) now covers all direct-mapped
    scalar/vector math and thread/wave/quad-query opcodes, plus
-   resource-handle *creation* for `TypedBuffer`/unstructured `RawBuffer` --
-   see the "Status" note under the DXIL section above. Buffer/texture load
-   and store ops (the actual consumers of a resource handle), the
-   `StructuredBuffer`/`CBuffer`/texture/sampler resource kinds, and a
-   handful of opcode families needing more than a 1:1 intrinsic mapping
+   resource-handle *creation* for every resource kind whose binding metadata
+   supplies enough to reconstruct a handle type -- `TypedBuffer`/unstructured
+   `RawBuffer` exactly, `StructuredBuffer`/`CBuffer` via a same-size/
+   alignment opaque placeholder element type -- see the "Status" note under
+   the DXIL section above. Buffer/texture load and store ops (the actual
+   consumers of a resource handle), texture/sampler resource-handle kinds
+   (need dimension/multi-sample/feedback bits not recoverable the way
+   `StructuredBuffer`/`CBuffer`'s size/alignment is), and a handful of
+   opcode families needing more than a 1:1 intrinsic mapping
    (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`'s flag-selected
    variants, `Barrier`, and the aggregate-returning `IMul`/`UMul`/
    `UAddc`/`SplitDouble`/`WaveActiveBallot`) remain open for follow-up
