@@ -7,8 +7,9 @@
 //===----------------------------------------------------------------------===//
 //
 // This file declares feme::amdgpu::ResourceLoweringPass, which re-expresses a
-// raised shader's resource bindings (`llvm.dx.resource.*`, see
-// feme::dxil::OpRaisingPass) in terms AMDGPU understands.
+// raised shader's resource bindings -- `llvm.dx.resource.*` (see
+// feme::dxil::OpRaisingPass) or `llvm.spv.resource.*` (see
+// feme::SPIRVToLLVMTranslator) -- in terms AMDGPU understands.
 //
 // A graphics API binds a shader's resources out of band, through a descriptor
 // table the shader refers to by (register space, register). AMDGPU kernels
@@ -36,12 +37,16 @@ namespace amdgpu {
 
 /// Converts each resource binding a shader entry point uses into a kernel
 /// pointer argument, and its typed buffer accesses into plain loads/stores.
+/// Handles both raised intrinsic families (`llvm.dx.resource.*` and
+/// `llvm.spv.resource.*`); a single binding is always reached through one
+/// family, never a mix of both.
 ///
 /// Entry points using a resource this pass cannot model yet -- a non-typed
 /// buffer, a dynamically indexed binding array, or a handle consumed by
-/// anything other than a typed buffer load/store -- are left untouched
-/// entirely, rather than partially rewritten, so the failure is a clean
-/// "unsupported" from the backend rather than silently wrong code.
+/// anything other than a single typed buffer load/store per access -- are
+/// left untouched entirely, rather than partially rewritten, so the failure
+/// is a clean "unsupported" from the backend rather than silently wrong
+/// code.
 class ResourceLoweringPass : public llvm::PassInfoMixin<ResourceLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);

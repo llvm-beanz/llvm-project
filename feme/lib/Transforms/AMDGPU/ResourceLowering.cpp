@@ -18,6 +18,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsDirectX.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 #include <optional>
@@ -31,11 +32,44 @@ namespace {
 /// point.
 constexpr unsigned GlobalAddressSpace = 1;
 
+/// Which of the two parallel raised resource-op families (see
+/// feme::dxil::OpRaisingPass and feme::SPIRVToLLVMTranslator, "Per-Format
+/// Representation Strategy" in feme/docs/Design.md) a binding is expressed
+/// with. The families are parallel in what they let a shader do -- create a
+/// handle, then read/write a typed buffer element through it -- but not in
+/// how they spell the access itself: DX has a dedicated
+/// load/store-typedbuffer intrinsic pair, where the load additionally
+/// returns a `{value, checkbit}` pair; SPIR-V instead has a `getpointer`
+/// intrinsic addressing an element, which ordinary `load`/`store`
+/// instructions then go through (see feme::SPIRVToLLVMTranslator's
+/// `ImageReadPattern`/`ImageWritePattern`, which spell a DXIL-raised typed
+/// buffer access from the *other* direction the same way -- see
+/// feme::spirv::RaisedLoweringPass). This pass therefore handles the two
+/// shapes with separate code paths, selected by \p Family, rather than
+/// forcing one shape's rewrite logic onto the other's ops.
+enum class ResourceFamily { DX, SPIRV };
+
+struct ResourceOps {
+  ResourceFamily Family;
+  Intrinsic::ID HandleFromBinding;
+  StringRef HandleTypeName;
+};
+
+constexpr ResourceOps DXResourceOps = {ResourceFamily::DX,
+                                       Intrinsic::dx_resource_handlefrombinding,
+                                       "dx.TypedBuffer"};
+constexpr ResourceOps SPIRVResourceOps = {
+    ResourceFamily::SPIRV, Intrinsic::spv_resource_handlefrombinding,
+    "spirv.Image"};
+constexpr const ResourceOps *AllResourceOps[] = {&DXResourceOps,
+                                                 &SPIRVResourceOps};
+
 /// One resource binding an entry point uses, together with every
-/// `llvm.dx.resource.handlefrombinding` call that materializes a handle for
-/// it. Multiple calls are common: a shader that touches the same resource
-/// from several places gets one handle each time.
+/// `...resource.handlefrombinding` call that materializes a handle for it.
+/// Multiple calls are common: a shader that touches the same resource from
+/// several places gets one handle each time.
 struct Binding {
+  const ResourceOps *Ops = nullptr;
   uint32_t Space = 0;
   uint32_t Register = 0;
   Type *ElementType = nullptr;
@@ -53,31 +87,84 @@ Intrinsic::ID getIntrinsicID(const Value *V) {
   return Callee ? Callee->getIntrinsicID() : Intrinsic::not_intrinsic;
 }
 
+/// Returns the resource op family whose `...handlefrombinding` intrinsic is
+/// \p ID, or nullptr if \p ID isn't one of those.
+const ResourceOps *getResourceOps(Intrinsic::ID ID) {
+  for (const ResourceOps *Ops : AllResourceOps)
+    if (Ops->HandleFromBinding == ID)
+      return Ops;
+  return nullptr;
+}
+
 /// Checks that every use of the handle \p HandleCI produces is a typed buffer
-/// access this pass can rewrite. A load's result must additionally only be
-/// consumed by `extractvalue`, since the raised intrinsic returns a
-/// {value, checkbit} pair that has no lowered counterpart of its own.
-bool hasOnlySupportedUses(const CallInst &HandleCI) {
+/// access this pass can rewrite.
+///
+/// A DX load's result must additionally only be consumed by `extractvalue`,
+/// since the raised intrinsic returns a `{value, checkbit}` pair that has no
+/// lowered counterpart of its own. A SPIR-V `getpointer` call's result must
+/// be consumed by exactly one ordinary `load`, or by exactly one `store` it
+/// is the pointer operand of -- anything else (multiple uses, a store that
+/// uses it as the *stored* value, ...) is more than a single element access,
+/// which this pass does not attempt to reason about.
+bool hasOnlySupportedUses(const CallInst &HandleCI, const ResourceOps &Ops) {
   for (const User *U : HandleCI.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI)
       return false;
-    switch (getIntrinsicID(CI)) {
-    case Intrinsic::dx_resource_store_typedbuffer:
-      // The handle must be the resource operand, not the stored value.
-      if (CI->getArgOperand(0) != &HandleCI)
-        return false;
-      break;
-    case Intrinsic::dx_resource_load_typedbuffer:
-      for (const User *LoadUser : CI->users())
-        if (!isa<ExtractValueInst>(LoadUser))
+
+    if (Ops.Family == ResourceFamily::DX) {
+      switch (getIntrinsicID(CI)) {
+      case Intrinsic::dx_resource_store_typedbuffer:
+        // The handle must be the resource operand, not the stored value.
+        if (CI->getArgOperand(0) != &HandleCI)
           return false;
-      break;
-    default:
+        break;
+      case Intrinsic::dx_resource_load_typedbuffer:
+        for (const User *LoadUser : CI->users())
+          if (!isa<ExtractValueInst>(LoadUser))
+            return false;
+        break;
+      default:
+        return false;
+      }
+      continue;
+    }
+
+    if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer ||
+        !CI->hasOneUse())
+      return false;
+    const User *AccessUser = *CI->user_begin();
+    if (const auto *SI = dyn_cast<StoreInst>(AccessUser)) {
+      if (SI->getPointerOperand() != CI)
+        return false;
+    } else if (!isa<LoadInst>(AccessUser)) {
       return false;
     }
   }
   return true;
+}
+
+/// Returns the element type \p HandleCI's typed buffer accesses operate on.
+/// DX's `target("dx.TypedBuffer", ElemTy, ...)` handle type spells this
+/// directly as a type parameter. SPIR-V's `target("spirv.Image", ...)`
+/// handle type does not -- its parameters describe the underlying image's
+/// dimensionality/sampled type, not the (possibly vector) type a particular
+/// access loads or stores -- so it is instead read off the load/store
+/// through the first `getpointer` call found. Returns nullptr if \p HandleCI
+/// has no accesses to read it from.
+Type *getElementType(const CallInst &HandleCI, const ResourceOps &Ops) {
+  if (Ops.Family == ResourceFamily::DX)
+    return cast<TargetExtType>(HandleCI.getType())->getTypeParameter(0);
+
+  for (const User *U : HandleCI.users()) {
+    const auto *GetPointer = cast<CallInst>(U);
+    const User *AccessUser = *GetPointer->user_begin();
+    if (const auto *LI = dyn_cast<LoadInst>(AccessUser))
+      return LI->getType();
+    if (const auto *SI = dyn_cast<StoreInst>(AccessUser))
+      return SI->getValueOperand()->getType();
+  }
+  return nullptr;
 }
 
 /// Collects the resource bindings \p F uses, or `std::nullopt` if any of them
@@ -88,11 +175,14 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
   SmallVector<Binding, 4> Bindings;
   for (Instruction &I : instructions(F)) {
     auto *CI = dyn_cast<CallInst>(&I);
-    if (!CI || getIntrinsicID(CI) != Intrinsic::dx_resource_handlefrombinding)
+    if (!CI)
+      continue;
+    const ResourceOps *Ops = getResourceOps(getIntrinsicID(CI));
+    if (!Ops)
       continue;
 
     auto *HandleTy = dyn_cast<TargetExtType>(CI->getType());
-    if (!HandleTy || HandleTy->getName() != "dx.TypedBuffer")
+    if (!HandleTy || HandleTy->getName() != Ops->HandleTypeName)
       return std::nullopt;
 
     auto *Space = dyn_cast<ConstantInt>(CI->getArgOperand(0));
@@ -100,7 +190,11 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
     auto *Index = dyn_cast<ConstantInt>(CI->getArgOperand(3));
     if (!Space || !LowerBound || !Index)
       return std::nullopt;
-    if (!hasOnlySupportedUses(*CI))
+    if (!hasOnlySupportedUses(*CI, *Ops))
+      return std::nullopt;
+
+    Type *ElementType = getElementType(*CI, *Ops);
+    if (!ElementType)
       return std::nullopt;
 
     uint32_t Register = static_cast<uint32_t>(LowerBound->getZExtValue() +
@@ -111,16 +205,17 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
     if (Existing != Bindings.end()) {
       // The same binding reached through two different element types would
       // need two differently-typed pointers for one resource.
-      if (Existing->ElementType != HandleTy->getTypeParameter(0))
+      if (Existing->ElementType != ElementType || Existing->Ops != Ops)
         return std::nullopt;
       Existing->Handles.push_back(CI);
       continue;
     }
 
     Binding NewBinding;
+    NewBinding.Ops = Ops;
     NewBinding.Space = static_cast<uint32_t>(Space->getZExtValue());
     NewBinding.Register = Register;
-    NewBinding.ElementType = HandleTy->getTypeParameter(0);
+    NewBinding.ElementType = ElementType;
     NewBinding.Handles.push_back(CI);
     Bindings.push_back(std::move(NewBinding));
   }
@@ -166,38 +261,71 @@ Function *addBindingArguments(Function &F, ArrayRef<Binding> Bindings) {
   return NewF;
 }
 
-/// Rewrites the typed buffer accesses through \p Handle into ordinary
-/// loads/stores of \p Ptr, indexed by the access's element index.
-void lowerHandleAccesses(CallInst &Handle, Value *Ptr, Type *ElementType) {
+/// Rewrites a DX `load`/`store`-typedbuffer call \p Access -- the resource
+/// operand of both is always argument 0, the element index argument 1, and
+/// the stored value (for a store) argument 2 -- into an ordinary, aligned
+/// load/store of \p Ptr.
+void lowerDXAccess(CallInst &Access, Value *Ptr, Type *ElementType,
+                   Align Alignment) {
+  IRBuilder<> Builder(&Access);
+  Value *Elem = Builder.CreateGEP(ElementType, Ptr, Access.getArgOperand(1));
+
+  if (getIntrinsicID(&Access) == Intrinsic::dx_resource_store_typedbuffer) {
+    Builder.CreateAlignedStore(Access.getArgOperand(2), Elem, Alignment);
+    Access.eraseFromParent();
+    return;
+  }
+
+  Value *Loaded = Builder.CreateAlignedLoad(ElementType, Elem, Alignment);
+  // Field 0 is the loaded value; field 1 is the "checkbit" reporting whether
+  // the access was in bounds, which plain memory always is.
+  for (User *LoadUser : llvm::make_early_inc_range(Access.users())) {
+    auto *EV = cast<ExtractValueInst>(LoadUser);
+    Value *Replacement =
+        EV->getIndices()[0] == 0
+            ? Loaded
+            : cast<Value>(ConstantInt::getTrue(EV->getContext()));
+    EV->replaceAllUsesWith(Replacement);
+    EV->eraseFromParent();
+  }
+  Access.eraseFromParent();
+}
+
+/// Rewrites a SPIR-V `llvm.spv.resource.getpointer` call \p Access into the
+/// GEP'd element pointer it addresses within \p Ptr, and points the single
+/// `load`/`store` already reading or writing through it (see
+/// `hasOnlySupportedUses`) at that pointer directly -- it needs no other
+/// changes, since it only cares about the pointer value, not which address
+/// space computed it. (A plain `replaceAllUsesWith` cannot do this instead:
+/// \p Ptr's address space differs from \p Access's generic one, and LLVM's
+/// opaque pointer types encode address space, so the two are different
+/// types.)
+void lowerSPIRVAccess(CallInst &Access, Value *Ptr, Type *ElementType) {
+  IRBuilder<> Builder(&Access);
+  Value *Elem = Builder.CreateGEP(ElementType, Ptr, Access.getArgOperand(1));
+
+  User *AccessUser = *Access.user_begin();
+  if (auto *LI = dyn_cast<LoadInst>(AccessUser))
+    LI->setOperand(LoadInst::getPointerOperandIndex(), Elem);
+  else
+    cast<StoreInst>(AccessUser)
+        ->setOperand(StoreInst::getPointerOperandIndex(), Elem);
+  Access.eraseFromParent();
+}
+
+/// Rewrites every typed buffer access through \p Handle into ordinary
+/// loads/stores of \p Ptr.
+void lowerHandleAccesses(CallInst &Handle, const ResourceOps &Ops, Value *Ptr,
+                         Type *ElementType) {
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   Align Alignment = DL.getABITypeAlign(ElementType);
 
   for (User *U : llvm::make_early_inc_range(Handle.users())) {
     auto *Access = cast<CallInst>(U);
-    IRBuilder<> Builder(Access);
-
-    if (getIntrinsicID(Access) == Intrinsic::dx_resource_store_typedbuffer) {
-      Value *Elem =
-          Builder.CreateGEP(ElementType, Ptr, Access->getArgOperand(1));
-      Builder.CreateAlignedStore(Access->getArgOperand(2), Elem, Alignment);
-      Access->eraseFromParent();
-      continue;
-    }
-
-    Value *Elem = Builder.CreateGEP(ElementType, Ptr, Access->getArgOperand(1));
-    Value *Loaded = Builder.CreateAlignedLoad(ElementType, Elem, Alignment);
-    for (User *LoadUser : llvm::make_early_inc_range(Access->users())) {
-      auto *EV = cast<ExtractValueInst>(LoadUser);
-      // Field 0 is the loaded value; field 1 is the "checkbit" reporting
-      // whether the access was in bounds, which plain memory always is.
-      Value *Replacement =
-          EV->getIndices()[0] == 0
-              ? Loaded
-              : cast<Value>(ConstantInt::getTrue(EV->getContext()));
-      EV->replaceAllUsesWith(Replacement);
-      EV->eraseFromParent();
-    }
-    Access->eraseFromParent();
+    if (Ops.Family == ResourceFamily::DX)
+      lowerDXAccess(*Access, Ptr, ElementType, Alignment);
+    else
+      lowerSPIRVAccess(*Access, Ptr, ElementType);
   }
   Handle.eraseFromParent();
 }
@@ -219,7 +347,7 @@ Function *lowerFunctionResources(Function &F) {
   for (const Binding &B : *Bindings) {
     Value *Ptr = NewF->arg_begin() + ArgIndex++;
     for (CallInst *Handle : B.Handles)
-      lowerHandleAccesses(*Handle, Ptr, B.ElementType);
+      lowerHandleAccesses(*Handle, *B.Ops, Ptr, B.ElementType);
   }
   return NewF;
 }
@@ -237,7 +365,8 @@ PreservedAnalyses ResourceLoweringPass::run(Module &M,
   // declaration surviving here would be a silent landmine.
   for (Function &F : llvm::make_early_inc_range(M.functions()))
     if (F.isDeclaration() && F.use_empty() &&
-        F.getName().starts_with("llvm.dx.resource."))
+        (F.getName().starts_with("llvm.dx.resource.") ||
+         F.getName().starts_with("llvm.spv.resource.")))
       F.eraseFromParent();
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
