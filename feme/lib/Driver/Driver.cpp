@@ -19,6 +19,7 @@
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Transforms/SPIRV/RaisedLowering.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 #include "feme/Translate/Translator.h"
 
@@ -93,14 +94,25 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
     return std::string("dxil-unknown-shadermodel6.5-library");
   }
 
-  if (Requested == "spirv")
-    // Matches the SPIR-V "null pipeline" validation path (see the
+  if (Requested == "spirv") {
+    // A module raised from DXIL knows which pipeline stage it implements (see
+    // feme::dxil::MetadataRaisingPass), and SPIR-V spells that as the
+    // environment component of a Vulkan triple -- so preserve it rather than
+    // emitting a stage-less kernel-flavored module.
+    llvm::Triple Existing = M.getTargetTriple();
+    if (Existing.getArch() == llvm::Triple::dxil &&
+        Existing.getOS() == llvm::Triple::ShaderModel)
+      return ("spirv-unknown-vulkan-" +
+              llvm::Triple::getEnvironmentTypeName(Existing.getEnvironment()))
+          .str();
+    // Otherwise match the SPIR-V "null pipeline" validation path (see the
     // "Deviation: validating Backend/Translator with a SPIR-V 'null
     // pipeline'" section of feme/docs/Design.md): LLVM's own in-tree SPIRV
     // target derives the emitted module's execution environment from the
     // llvm::Module it is handed, not from any original SPIR-V header FeMe
     // would otherwise need to reconstruct.
     return std::string("spirv64-unknown-unknown");
+  }
 
   return Requested.str();
 }
@@ -159,6 +171,11 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
   if (!TheTriple.isDXIL()) {
     llvm::ModuleAnalysisManager MAM;
     feme::dxil::IntrinsicExpansionPass().run(M, MAM);
+  }
+
+  if (TheTriple.isSPIRV()) {
+    llvm::ModuleAnalysisManager MAM;
+    feme::spirv::RaisedLoweringPass().run(M, MAM);
   }
 
   // A raised module still uses format-agnostic `llvm.dx.*`/`llvm.spv.*`

@@ -13,6 +13,7 @@ set(LIBS
   MLIRRegisterAllPasses
   FeMeTransformsAMDGPU
   FeMeTransformsDXIL
+  FeMeTransformsSPIRV
   )
 
 add_llvm_executable(feme-opt feme-opt.cpp)
