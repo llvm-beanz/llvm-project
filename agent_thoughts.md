@@ -2239,3 +2239,145 @@ Two commits: (1) the one-line fix removing the stale, unused
 `llvm/Passes/PassPlugin.h` include from `feme-opt.cpp`, (2) this
 `agent_thoughts.md` entry, committed separately per the standing convention
 in this file.
+
+# Agent thoughts: SPIR-V "read into MLIR -> llvm dialect -> LLVM IR" translation flow
+
+## Task
+
+The user asked for "the same set of translation flows for SPIRV that we now
+have for DXIL": read SPIR-V into MLIR, translate that to the LLVM-IR
+dialect, then to LLVM IR that uses SPIR-V target intrinsics.
+
+## Investigation
+
+Before writing any code I read `feme/.instructions.md` and the parts of
+`feme/docs/Design.md` covering the SPIR-V/DXIL per-format representation
+strategy, the Translation Matrix, Retargeting to Native ISA, and the "SPIR-V
+null pipeline" deviation, then inventoried what already existed under
+`feme/{include,lib,test}/**/{DXIL,SPIRV}`.
+
+Conclusion: almost the entire requested flow *already existed* and was
+already end-to-end tested:
+
+- `feme::SPIRVImporter` (`feme/lib/Import/SPIRV`) already wraps
+  `mlir::spirv::deserialize` to read a SPIR-V binary into an
+  `mlir::spirv::ModuleOp` -- "read SPIR-V into MLIR".
+- `feme::SPIRVToLLVMTranslator` (`feme/lib/Translate/SPIRV`) already ran
+  MLIR's `createConvertSPIRVToLLVMPass` (spirv dialect -> llvm dialect)
+  immediately followed by `mlir::translateModuleToLLVMIR` (llvm dialect ->
+  `llvm::Module`), all in one function -- "translate to the LLVM-IR dialect,
+  then to LLVM IR", just not exposed as two separate, individually
+  observable/testable steps.
+- `feme::TargetMachineBackend` targeting LLVM's in-tree `SPIRV` backend
+  (`llvm/lib/Target/SPIRV`) already retargets that `llvm::Module` to a real
+  SPIR-V binary, which is where the backend's own `llvm.spv.*` target
+  intrinsics actually get used during instruction selection -- this is
+  exercised end to end by the existing
+  `test/Target/spirv-backend-null-pipeline.mlir` "null pipeline" test
+  (SPIR-V -> spirv dialect -> llvm::Module -> SPIRV `TargetMachine` ->
+  SPIR-V binary -> re-imported and checked structurally).
+
+So FeMe does not need to (and should not) hand-emit `llvm.spv.*` intrinsics
+itself: that is squarely `TargetMachineBackend`'s/the in-tree `SPIRV`
+target's job, exactly as for DXIL's `SPIRV` retargeting path described in
+the Translation Matrix (`raised LLVM IR -> LLVM SPIRV target`). Reimplementing
+that inside FeMe would duplicate a mature, actively-maintained backend for
+no benefit, and would contradict the Design doc's explicit "reuse, do not
+reinvent" stance on both the `spirv` dialect and the `SPIRV` backend.
+
+## What was actually missing
+
+The one genuine gap, read literally against the user's three-step
+description, was that "translate to the LLVM-IR dialect" was not its own
+observable/testable stage -- `feme::SPIRVToLLVMTranslator` went straight
+from `spirv` dialect to `llvm::Module` in one function, with no way to stop
+at the `llvm` dialect in between (no Translator, no `feme-translate` flag,
+no lit test). This is exactly the kind of thing DXIL's
+`feme::dxil::OpRaisingPass` gets right by being its own separately
+lit-tested stage rather than being fused into DXIL import or export.
+
+## Approach
+
+Split the single `SPIRVToLLVMTranslator::translate` into two composable
+`Translator`s:
+
+1. `feme::SPIRVToLLVMDialectTranslator` (`spirv` -> `llvmdialect`): runs
+   `createConvertSPIRVToLLVMPass` and stops, returning a `Module` still
+   holding an MLIR `llvm` dialect `mlir::ModuleOp`.
+2. `feme::LLVMDialectToLLVMIRTranslator` (`llvmdialect` -> `llvmir`): runs
+   `mlir::translateModuleToLLVMIR`. Deliberately made format-agnostic (no
+   dependency on the `spirv` dialect at all, lives in a new
+   `feme/{include,lib}/Translate/LLVMIR` rather than under `.../SPIRV`)
+   since "MLIR `llvm` dialect -> `llvm::Module`" is the same last-mile step
+   any future FeMe pipeline reaching the `llvm` dialect will need (the
+   Design doc's DXIL section already anticipates DXIL re-entering MLIR at
+   the `llvm` dialect for passes that need it, via the same
+   `translateModuleToLLVMIR` call this Translator now wraps).
+
+`feme::SPIRVToLLVMTranslator` itself now just composes the two in sequence,
+so it keeps its existing behavior/tests unchanged (`--spirv-to-llvmir`,
+`test/Translate/SPIRV/spirv-to-llvmir*.mlir`,
+`test/Target/spirv-backend-null-pipeline.mlir` all still pass unmodified).
+Both new stages are registered with `feme-translate` following the exact
+pattern already used for every other Translator/Importer/Backend in this
+tree (`--spirv-to-llvmdialect`, `--llvmdialect-to-llvmir`).
+
+## Testing
+
+Per the established convention already recorded in `feme/docs/Design.md`'s
+Testing Strategy deviation notes (Translators/Backends invoked on textual
+MLIR/LLVM-IR input are covered by `lit`/`FileCheck` through `feme-translate`
+rather than `gtest`), I added:
+
+- `test/Translate/SPIRV/spirv-to-llvmdialect.mlir` /
+  `spirv-to-llvmdialect-invalid.mlir` (success + invalid-input cases for the
+  new `SPIRVToLLVMDialectTranslator` stage, mirroring the existing
+  `spirv-to-llvmir*.mlir` layout).
+- `test/Translate/LLVMIR/llvmdialect-to-llvmir.mlir` /
+  `llvmdialect-to-llvmir-invalid.mlir` (same, for the new
+  format-agnostic `LLVMDialectToLLVMIRTranslator` stage, exercised directly
+  on a hand-written `llvm` dialect module rather than only via SPIR-V).
+- `test/Target/spirv-backend-null-pipeline-split.mlir`: the same "null
+  pipeline" round-trip as the existing
+  `spirv-backend-null-pipeline.mlir`, but chained through
+  `--spirv-to-llvmdialect` + `--llvmdialect-to-llvmir` instead of the
+  combined `--spirv-to-llvmir`, checking it produces an identical
+  round-tripped result -- this is the literal three-stage pipeline the user
+  described.
+
+I deliberately did not add new `unittests/` (gtest) coverage: the same
+deviation rationale recorded for the original `SPIRVToLLVMTranslator`/
+`TargetMachineBackend` gtest-to-lit migrations applies directly here (a
+`Translator` invoked on textual MLIR input/output is exactly what
+`feme-translate` exists to exercise), and adding gtest cases alongside would
+just be duplicate, lower-signal coverage of the same behavior.
+
+## Validation
+
+- Ran `ninja check-feme` in the pre-existing `build/` directory (already
+  configured with `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_TARGETS_TO_BUILD=X86;
+  SPIRV`, and ccache) before making any changes: 39/39 tests passing
+  (baseline).
+- After the split + new tests: 44/44 tests passing (the 5 new lit tests,
+  everything pre-existing still green, including the untouched
+  `spirv-backend-null-pipeline.mlir` and `spirv-to-llvmir*.mlir`).
+- Manually ran the new `--spirv-to-llvmdialect` and `--llvmdialect-to-llvmir`
+  flags chained together on a hand-written `spirv.module` and confirmed the
+  output byte-for-byte matches the combined `--spirv-to-llvmir` flag's
+  output before writing the lit tests.
+- Ran `clang-format` over every new/modified C++ file per
+  `feme/.instructions.md`, then rebuilt/retested to confirm formatting
+  didn't change behavior.
+
+## Commits
+
+Broken into four commits: (1) the core split -- both new `Translator`s, the
+`SPIRVToLLVMTranslator` refactor to compose them, and their
+`feme-translate` registrations (kept together because LLVM's per-directory
+CMake source-listing rule -- exactly one target per directory, listing every
+file in it -- means a `Translator` and its `TranslateRegistration.cpp` in
+the same new directory can't be split into independently-buildable commits
+without staging around files still physically present in the working tree);
+(2) the new lit tests; (3) the `Design.md` documentation updates (a new
+per-format "Status" subsection, an updated Testing Tools bullet, and a new
+Testing Strategy deviation note); (4) this `agent_thoughts.md` entry.
