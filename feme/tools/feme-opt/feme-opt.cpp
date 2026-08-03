@@ -24,6 +24,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/InitAllDialects.h"
@@ -55,6 +56,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::dxil::OpRaisingPass::name())
           return false;
         MPM.addPass(feme::dxil::OpRaisingPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::amdgpu::RaisedLoweringPass::name())
+          return false;
+        MPM.addPass(feme::amdgpu::RaisedLoweringPass());
         return true;
       });
 }
