@@ -1021,43 +1021,68 @@ the backend instead of silently wrong code.
 
 - Entry points: given AMDGPU's kernel calling convention plus the
   `amdgpu-flat-work-group-size` bound their `hlsl.numthreads` dimensions
-  (see `MetadataRaisingPass`) describe. Without this the entry point is
-  emitted as an ordinary device function, which no host runtime can
-  dispatch.
+  (see `MetadataRaisingPass` for DXIL, "FeMe's SPIR-V -> `llvm` dialect
+  conversion" below for SPIR-V) describe. This keys on the format-agnostic
+  `hlsl.shader`/`hlsl.numthreads` attributes alone, so it already covers
+  both formats' entry points without needing to distinguish them. Without
+  this the entry point is emitted as an ordinary device function, which no
+  host runtime can dispatch.
 - The thread/group index queries with a direct per-component mapping,
   keyed on a constant component (0/1/2 for x/y/z) operand:
-  `llvm.dx.group.id` -> `llvm.amdgcn.workgroup.id.x`/`.y`/`.z`, and
-  `llvm.dx.thread.id.in.group` -> `llvm.amdgcn.workitem.id.x`/`.y`/`.z`.
+  `llvm.dx.group.id`/`llvm.spv.group.id` -> `llvm.amdgcn.workgroup.id.x`/
+  `.y`/`.z`, and `llvm.dx.thread.id.in.group`/`llvm.spv.thread.id.in.group`
+  -> `llvm.amdgcn.workitem.id.x`/`.y`/`.z`.
 - The two queries with *no* single AMDGPU counterpart, synthesized from the
-  entry point's thread group dimensions: `llvm.dx.thread.id` (the
-  dispatch-wide index, i.e. `workgroup_id * <group size> + workitem_id`) and
-  `llvm.dx.flattened.thread.id.in.group` (the linearized workitem id).
-  `llvm.dx.thread.id` in particular is what essentially every real compute
-  shader uses to index its output.
+  entry point's thread group dimensions: `llvm.dx.thread.id`/
+  `llvm.spv.thread.id` (the dispatch-wide index, i.e.
+  `workgroup_id * <group size> + workitem_id`) and
+  `llvm.dx.flattened.thread.id.in.group`/
+  `llvm.spv.flattened.thread.id.in.group` (the linearized workitem id).
+  `llvm.dx.thread.id`/`llvm.spv.thread.id` in particular is what essentially
+  every real compute shader uses to index its output.
+
+`llvm.spv.group.id`/`llvm.spv.thread.id.in.group`/`llvm.spv.thread.id` are
+overloaded on return width (unlike their fixed-`i32` `llvm.dx.*`
+counterparts, see IntrinsicsSPIRV.td); a call instantiated at a width other
+than `i32` -- which this pass never itself produces -- cannot be expressed
+as a 1:1 AMDGPU intrinsic call, so it is left unmodified like any other
+not-yet-covered op.
+
+**`feme::amdgpu::ResourceLoweringPass`** handles both intrinsic families'
+resource ops too, despite them not being spelled the same shape: DXIL raises
+a typed buffer access to a dedicated load/store-typedbuffer intrinsic pair
+(the load additionally returning a `{value, checkbit}` pair), where SPIR-V
+raises it to a `llvm.spv.resource.getpointer` intrinsic addressing an
+element, which an ordinary `load`/`store` then goes through (see
+`ImageReadPattern`/`ImageWritePattern` in "FeMe's SPIR-V -> `llvm` dialect
+conversion" below, which spell a DXIL-raised access the same way from the
+*other* direction -- see "Raised LLVM IR -> SPIR-V" below). The pass
+dispatches on which shape a binding's handle uses rather than forcing one
+onto the other; the element type feeding the pointer arithmetic and load/
+store alignment comes from DX's `target("dx.TypedBuffer", ElemTy, ...)`
+handle type's own type parameter, or, since SPIR-V's `target("spirv.Image",
+...)` handle type does not spell it, from the type of the first load/store
+found through the handle's accesses instead.
 
 Not yet covered, and left as unmodified calls rather than erroring (so these
 passes compose with modules that mix lowered and not-yet-lowered
 operations), matching `OpRaisingPass`'s own precedent:
 
-- Wave/quad ops (`llvm.dx.wave.*`): AMDGPU has its own cross-lane
-  intrinsics (`llvm.amdgcn.mbcnt.*`, `llvm.amdgcn.ds.permute`, ...), but the
-  mapping is not always 1:1 with DXIL's wave ops and needs its own pass to
-  get right.
-- The `llvm.spv.*` side of the intrinsic families these passes handle
-  (`llvm.spv.thread.id`, `llvm.spv.resource.handlefrombinding`,
-  `llvm.spv.resource.getpointer`, ...). SPIR-V input now *does* reach these
-  passes in that spelling (see "FeMe's SPIR-V -> `llvm` dialect conversion"
-  above), but they only recognize the `llvm.dx.*` half of each pair, so a
-  SPIR-V-originated shader retargeted to AMDGPU still gets an object with
-  those calls left unresolved. Since the two families are parallel by
-  construction, closing this is a matter of matching both names in the same
-  places rather than new lowering logic.
+- Wave/quad ops (`llvm.dx.wave.*`/`llvm.spv.wave.*`): AMDGPU has its own
+  cross-lane intrinsics (`llvm.amdgcn.mbcnt.*`, `llvm.amdgcn.ds.permute`,
+  ...), but the mapping is not always 1:1 with either format's wave ops and
+  needs its own pass to get right.
 
 Exercised via `feme-opt` as the `feme-amdgpu-lower-raised` and
 `feme-amdgpu-lower-resources` passes
-(`test/Transforms/AMDGPU/amdgpu-lower-{raised,resources}.ll`), the same way
-`OpRaisingPass` is tested in isolation via `feme-dxil-raise-ops`, and end to
-end through the CLI by `test/Tools/feme/feme-dxil-to-amdgpu.ll`.
+(`test/Transforms/AMDGPU/amdgpu-lower-{raised,resources}.ll` for the
+`llvm.dx.*` half, `test/Transforms/AMDGPU/amdgpu-lower-{raised,resources}-spirv.ll`
+for the `llvm.spv.*` one), the same way `OpRaisingPass` is tested in
+isolation via `feme-dxil-raise-ops`, and end to end through the CLI by
+`test/Tools/feme/feme-dxil-to-amdgpu.ll` (DXIL input) and
+`test/Tools/feme/feme-spirv-to-amdgpu.mlir` (SPIR-V input, the same shape of
+shader: it reads a builtin dispatch index and reads/writes a bound resource
+through it).
 
 ## Raised LLVM IR -> SPIR-V
 
