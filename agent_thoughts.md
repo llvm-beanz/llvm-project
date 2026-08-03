@@ -2801,3 +2801,129 @@ access raising; Driver wiring for those; AMDGPU entry point and thread id
 lowering; target-independent intrinsic expansion; AMDGPU resource lowering;
 SPIR-V raised lowering; SPIR-V unstructured import fallback; then the
 Design.md/CommandGuide updates, and this entry on its own.
+
+# Agent thoughts: MLIR `SPIRVToLLVM` image type support
+
+This records the reasoning behind teaching MLIR's `SPIRVToLLVM` conversion
+about SPIR-V image types -- the first half of the "Known gap: `spirv` dialect
+-> `llvm` dialect conversion coverage" item the previous entry left behind in
+`feme/docs/Design.md`.
+
+## Framing the problem
+
+The gap as previously documented was concrete: `SPIRVToLLVM` had *no*
+conversion registered for `spirv::ImageType`, `spirv::SampledImageType` or
+`spirv::SamplerType`, so a `spirv.GlobalVariable` of image type -- which is
+what every HLSL `Buffer`/`RWBuffer`/`Texture*` resource deserializes into --
+failed to legalize, taking the whole module with it. `mlir/docs/
+SPIRVToLLVMDialectConversion.md` said as much explicitly ("This includes
+`ImageType` and `MatrixType`").
+
+So the question was not *whether* to convert these types but *what to convert
+them to*. I deliberately did not invent a representation. LLVM already has one:
+the SPIR-V backend defines target extension types
+`target("spirv.Image", SampledTy, Dim, Depth, Arrayed, MS, Sampled, Format
+[, Access])`, `target("spirv.SignedImage", ...)`,
+`target("spirv.SampledImage", ...)` and `target("spirv.Sampler")`, documented
+in `llvm/docs/SPIRVUsage.md`. Three things make that the right target:
+
+1. It round-trips. LLVM's SPIR-V backend turns exactly these types back into
+   `OpTypeImage`/`OpTypeSampledImage`/`OpTypeSampler`, so the conversion loses
+   nothing.
+2. FeMe already emits this spelling in the *other* direction --
+   `feme::spirv::RaisedLoweringPass` translates
+   `target("dx.TypedBuffer", ...)` into `target("spirv.Image", ...)`. Picking
+   the same spelling means the DXIL -> SPIR-V and SPIR-V -> DXIL halves agree
+   on how a resource handle is typed, instead of each inventing its own.
+3. MLIR's LLVM dialect already models it (`LLVM::LLVMTargetExtType`), already
+   grants `spirv.`-prefixed types the `CanBeGlobal`/`HasZeroInit` properties
+   and `supportsMemOps()`, and already translates them to LLVM IR. So no new
+   type, verifier or translation support was needed -- the whole change is a
+   type conversion.
+
+## Details that needed care
+
+**Enum values.** The dialect's `Dim`, `ImageDepthInfo`, `ImageArrayedInfo`,
+`ImageSamplingInfo`, `ImageSamplerUseInfo` and `ImageFormat` enumerations all
+carry the numeric values assigned by the SPIR-V specification (I checked
+`SPIRVBase.td` -- the depth/arrayed/sampling/sampler-use ones are hand-added
+rather than generated, so this was worth verifying rather than assuming).
+That means they can be forwarded to the target extension type unchanged, with
+a `static_cast`, and no mapping table is needed.
+
+**Signedness.** LLVM integer types are signless, so `spirv.Image` and
+`spirv.SignedImage` exist to distinguish images whose sampled type is a signed
+integer -- the type name is the only carrier once `si32` has been converted to
+`i32`. I therefore select the name off `isSignedInteger()` on the *SPIR-V*
+sampled type, before conversion. Note the asymmetry: LLVM has no
+`spirv.SignedSampledImage`, so `!spirv.sampled_image` always maps to
+`spirv.SampledImage`; I matched LLVM rather than inventing a name.
+
+**Void sampled types.** OpenCL images have an `OpTypeVoid` sampled type, which
+MLIR's SPIR-V deserializer maps to `NoneType`. `LLVMTypeConverter` has no
+conversion for `NoneType`, so passing it through would silently produce a null
+type parameter; the sampled type is special-cased to `!llvm.void`, matching
+`target("spirv.Image", void, ...)` in LLVM IR.
+
+**Access qualifier.** SPIR-V's `OpTypeImage` has an optional trailing access
+qualifier operand and LLVM's target extension type has a matching optional
+parameter, but `spirv::ImageType` does not model it at all (there is a `TODO`
+to that effect in `SPIRVTypes.h`). Emitting a default value would be a lie, so
+the parameter is simply omitted -- which is also what LLVM does for images
+without one.
+
+## Scope: types, not accesses
+
+I stopped at types on purpose. `spirv.ImageRead`, `spirv.ImageWrite`,
+`spirv.ImageQuerySize` and the sampling ops have no LLVM *dialect* equivalent;
+lowering them means picking a target intrinsic family (LLVM's `llvm.spv.*`
+resource intrinsics are the obvious candidate, but they are HLSL-shaped --
+`llvm.spv.resource.load.typedbuffer` only covers `Buffer`-dimensioned images,
+and the sampling ones take a separate sampler handle rather than a
+`SampledImage`). Baking a target-specific intrinsic choice into a
+target-independent MLIR conversion is a design decision that deserves its own
+discussion, and getting it wrong is worse than the current honest failure to
+legalize. Design.md's known-gap section is updated to say precisely this:
+types now convert, accesses do not, and the two options for closing the rest
+are unchanged.
+
+That does move the needle for FeMe: a SPIR-V module can now *declare* its
+resources and get through type conversion, which is the prerequisite for
+anything else.
+
+## Testing
+
+One test per phase of the translation, which is also how the change is split
+into commits:
+
+- **Type conversion** (`test/Conversion/SPIRVToLLVM/spirv-types-to-llvm.mlir`):
+  each image parameter is varied independently so a transposed or dropped
+  parameter fails loudly -- `Dim1D`/`Dim2D`/`Cube`/`Rect`/`Buffer`/
+  `SubpassData`, all three depth values, arrayed, multisampled, all three
+  sampler-use values, and both `Rgba32f` and integer formats. Signless,
+  unsigned and signed integer sampled types are tested side by side, since
+  only the last selects `spirv.SignedImage` and that is the easiest thing to
+  get backwards.
+- **Op legalization** (`memory-ops-to-llvm.mlir`): a `spirv.GlobalVariable` of
+  image and of sampler type plus the `spirv.mlir.addressof`/`spirv.Load` pair
+  that reads the handle -- i.e. the exact pattern that used to fail, proving
+  the existing patterns need no changes now that the types convert.
+- **LLVM IR translation** (`test/Target/LLVMIR/target-ext-type.mlir`): the
+  converted types actually reach `target("spirv.Image", float, 5, ...)` in
+  LLVM IR, as globals, as function arguments and as a load result type.
+- **gtest** (`unittests/Conversion/SPIRVToLLVM/TypeConversionTest.cpp`, a new
+  unit test directory): the void sampled type cannot be written in the textual
+  format -- the dialect parser rejects `none` with "cannot use 'none' to
+  compose SPIR-V types", even though the deserializer produces it -- so that
+  path, and the failure path for a sampled type with no LLVM equivalent, are
+  only reachable by building the type programmatically.
+
+`check-mlir` is green (3790 lit tests passed, plus the MLIR-Unit suite
+including the three new gtest cases), built against the existing `build/`
+cache (Release, `LLVM_ENABLE_ASSERTIONS=ON`, `ccache` launcher), and the
+modified C++ was run through `clang-format`.
+
+Committed as four changes: the type conversion; the op-legalization and
+translation test coverage; the gtest for the parser-unreachable cases; then
+the `mlir/docs/SPIRVToLLVMDialectConversion.md` and `feme/docs/Design.md`
+updates; and this entry on its own.
