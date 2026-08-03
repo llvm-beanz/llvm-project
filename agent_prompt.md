@@ -20,5 +20,11 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-Please extend dxbc-as as necessary to fully migrate of the dxsa-hex tests
-that the dxsa dialect was using and delete all the hex-related tooling.
+A previous prompt left the SPIRV to LLVM functionality incomplete because of the
+need to generate target-specific intrinsics.
+
+MLIR supports setting the target triple and data layout as module attributes
+which can then be passed down through the LLVM IR dialect. This will allow the
+LLVM IR dialect to reference direct target intrinsics (prefixing them with
+`llvm.`). Can you use this to enable the SPIRV to LLVM path to generate
+full-featured LLVM IR that can lower into the SPIRV backend?
