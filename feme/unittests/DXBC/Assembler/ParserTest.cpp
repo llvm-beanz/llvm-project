@@ -60,8 +60,11 @@ TEST(ParserTest, FxcProfileLineIsAProgramHeader) {
   EXPECT_EQ(P.MinorVersion, 1u);
   EXPECT_EQ(P.Instructions.size(), 1u);
 
-  for (auto [Text, Type] : {std::pair{"vs_4_0", 1u}, {"gs_4_1", 2u},
-                            {"hs_5_0", 3u}, {"ds_5_0", 4u}, {"cs_5_0", 5u}})
+  for (auto [Text, Type] : {std::pair{"vs_4_0", 1u},
+                            {"gs_4_1", 2u},
+                            {"hs_5_0", 3u},
+                            {"ds_5_0", 4u},
+                            {"cs_5_0", 5u}})
     EXPECT_EQ(parseOrFail(Text).ProgramType, Type);
 
   // Mnemonics that merely start with a profile prefix are not headers.
@@ -111,8 +114,8 @@ TEST(ParserTest, FxcRegisterSpaceTrailer) {
   EXPECT_EQ(P.Instructions[0].ExtraDWords,
             (llvm::SmallVector<uint32_t, 4>{3u}));
 
-  EXPECT_NE(parseErrorMessage("dcl_uav_raw u1, bogus").find(
-                "unknown keyword 'bogus'"),
+  EXPECT_NE(parseErrorMessage("dcl_uav_raw u1, bogus")
+                .find("unknown keyword 'bogus'"),
             std::string::npos);
 }
 
@@ -142,12 +145,11 @@ TEST(ParserTest, FxcMnemonicSuffixes) {
   EXPECT_TRUE(Inst.HasResourceReturnType);
   EXPECT_EQ(Inst.ResourceReturnTypes[0], 5u); // ...RETURN_TYPE_FLOAT
 
-  EXPECT_EQ(
-      parseOrFail("ld_structured_indexable(structured_buffer, stride=52)"
-                  "(mixed,mixed,mixed,mixed) r0.x, r1.x, r1.y, t0.xxxx")
-          .Instructions[0]
-          .ResourceStride,
-      52u);
+  EXPECT_EQ(parseOrFail("ld_structured_indexable(structured_buffer, stride=52)"
+                        "(mixed,mixed,mixed,mixed) r0.x, r1.x, r1.y, t0.xxxx")
+                .Instructions[0]
+                .ResourceStride,
+            52u);
 
   // `resinfo`'s return-format suffix trails the extended opcode arguments.
   EXPECT_EQ(parseOrFail("resinfo_indexable(texture2d)"
@@ -205,8 +207,7 @@ TEST(ParserTest, FxcMinimumPrecisionConversions) {
   // the instruction reads the operand at is encoded, which is the first.
   Program P = parseOrFail("mov o0.x, v0.x {min16f as def32}");
   ASSERT_EQ(P.Instructions.size(), 1u);
-  EXPECT_EQ(P.Instructions[0].Operands.back().Precision,
-            MinPrecision::Float16);
+  EXPECT_EQ(P.Instructions[0].Operands.back().Precision, MinPrecision::Float16);
 
   EXPECT_EQ(parseOrFail("mov o0.x, l(2.0) {def32 as min16f}")
                 .Instructions[0]
@@ -217,12 +218,15 @@ TEST(ParserTest, FxcMinimumPrecisionConversions) {
 
 TEST(ParserTest, FxcStatementForms) {
   // A `dcl_indexrange` count has no separator before it.
-  EXPECT_EQ(parseOrFail("dcl_indexrange v2.xyzw 6").Instructions[0].ExtraDWords,
-            parseOrFail("dcl_indexrange v2.xyzw, 6").Instructions[0].ExtraDWords);
+  EXPECT_EQ(
+      parseOrFail("dcl_indexrange v2.xyzw 6").Instructions[0].ExtraDWords,
+      parseOrFail("dcl_indexrange v2.xyzw, 6").Instructions[0].ExtraDWords);
 
   // `dcl_hs_max_tessfactor` is wrapped in the immediate-operand syntax.
   EXPECT_EQ(
-      parseOrFail("dcl_hs_max_tessfactor l(3.000000)").Instructions[0].ExtraDWords,
+      parseOrFail("dcl_hs_max_tessfactor l(3.000000)")
+          .Instructions[0]
+          .ExtraDWords,
       parseOrFail("dcl_hs_max_tessfactor 3.0").Instructions[0].ExtraDWords);
 
   // An immediate constant buffer is grouped into rows and spread over
@@ -237,9 +241,10 @@ TEST(ParserTest, FxcStatementForms) {
   // `fxc` names the operands of the interface declarations symbolically.
   EXPECT_EQ(parseOrFail("dcl_function_body fb1").Instructions[0].ExtraDWords,
             (llvm::SmallVector<uint32_t, 4>{1u}));
-  EXPECT_EQ(
-      parseOrFail("dcl_function_table ft1 = {fb0, fb2}").Instructions[0].ExtraDWords,
-      (llvm::SmallVector<uint32_t, 4>{1u, 2u, 0u, 2u}));
+  EXPECT_EQ(parseOrFail("dcl_function_table ft1 = {fb0, fb2}")
+                .Instructions[0]
+                .ExtraDWords,
+            (llvm::SmallVector<uint32_t, 4>{1u, 2u, 0u, 2u}));
   EXPECT_EQ(parseOrFail("dcl_interface_dynamicindexed fp0[253][1] = {ft0, ft1}")
                 .Instructions[0]
                 .ExtraDWords,

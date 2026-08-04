@@ -18,14 +18,14 @@
 
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
-#include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/Parser/Parser.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Support/raw_ostream.h"
 
 #include "gtest/gtest.h"
 
@@ -114,9 +114,9 @@ TEST(DXSAToLLVMIRTranslatorTest, ShaderModelNamesTheStage) {
     Fixture F;
     std::optional<std::string> IR = F.translate(Source);
     ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
-    EXPECT_NE(IR->find((llvm::Twine("!{!\"") + Stage + "\", i32 6, i32 0}")
-                           .str()),
-              std::string::npos)
+    EXPECT_NE(
+        IR->find((llvm::Twine("!{!\"") + Stage + "\", i32 6, i32 0}").str()),
+        std::string::npos)
         << Source;
   }
 }
@@ -191,7 +191,8 @@ TEST(DXSAToLLVMIRTranslatorTest, RejectsMinimumPrecisionOperands) {
   // Minimum precision changes the width every computation reading the
   // operand is done at, so silently ignoring it would be wrong.
   Fixture Source;
-  EXPECT_FALSE(Source.translate(R"mlir(
+  EXPECT_FALSE(Source
+                   .translate(R"mlir(
 dxsa.module pixel_shader 5 0 {
   dxsa.dcl_input_ps linear v<0, min16f, <x>>
   dxsa.dcl_output o<0, <x>>
@@ -212,7 +213,7 @@ dxsa.module pixel_shader 5 0 {
   dxsa.ret
 }
 )mlir")
-                  .has_value());
+                   .has_value());
   EXPECT_NE(Dest.diagnostics().find("minimum-precision destination operand"),
             llvm::StringRef::npos);
 }

@@ -133,10 +133,14 @@ constexpr KeywordValue SystemValueNames[] = {
 // from D3D11_SB_PRIMITIVE_1_CONTROL_POINT_PATCH and are handled separately
 // in parseControlEnum rather than spelled out 32 times here.
 constexpr KeywordValue InputPrimitives[] = {
-    {"point", 1},        {"line", 2},         {"triangle", 3},
-    {"line_adj", 6},     {"triangle_adj", 7},
+    {"point", 1},
+    {"line", 2},
+    {"triangle", 3},
+    {"line_adj", 6},
+    {"triangle_adj", 7},
     // `fxc` spells the adjacency primitives without a separator.
-    {"lineadj", 6},      {"triangleadj", 7},
+    {"lineadj", 6},
+    {"triangleadj", 7},
 };
 
 // D3D10_SB_PRIMITIVE_TOPOLOGY.
@@ -208,9 +212,8 @@ constexpr KeywordValue ProfilePrefixes[] = {
 // The `sync` flag suffixes `fxc` folds into the mnemonic, in the order it
 // spells them; the values match SyncFlags above.
 constexpr KeywordValue SyncSuffixes[] = {
-    {"_sat_ugroup", 1u << 13}, {"_ugroup", 1u << 13},
-    {"_uglobal", 1u << 14},    {"_g", 1u << 12},
-    {"_t", 1u << 11},
+    {"_sat_ugroup", 1u << 13}, {"_ugroup", 1u << 13}, {"_uglobal", 1u << 14},
+    {"_g", 1u << 12},          {"_t", 1u << 11},
 };
 
 /// A control-field keyword `fxc` writes after a declaration's operand,
@@ -238,8 +241,12 @@ constexpr KeywordMnemonic ConstantBufferAccessPatterns[] = {
 /// (`CB0[0:0]`, `T0[3:7]`, `U0[0]`, `S0[2:4]`).
 const llvm::StringRef *lookupOperandKindAlias(llvm::StringRef Spelling) {
   static const llvm::StringMap<llvm::StringRef> Aliases = {
-      {"CB", "cb"},   {"T", "t"},           {"U", "u"},
-      {"S", "s"},     {"G", "g"},           {"this", "thisPtr"},
+      {"CB", "cb"},
+      {"T", "t"},
+      {"U", "u"},
+      {"S", "s"},
+      {"G", "g"},
+      {"this", "thisPtr"},
       {"vCycleCounter", "cycleCounter"},
   };
   auto It = Aliases.find(Spelling);
@@ -547,7 +554,8 @@ private:
     const KeywordValue *Type = findKeyword(ProfilePrefixes, Stage);
     unsigned MajorValue, MinorValue;
     if (!Type || Major.empty() || Minor.empty() ||
-        Major.getAsInteger(10, MajorValue) || Minor.getAsInteger(10, MinorValue))
+        Major.getAsInteger(10, MajorValue) ||
+        Minor.getAsInteger(10, MinorValue))
       return false;
 
     Result.HasHeader = true;
@@ -1523,8 +1531,9 @@ private:
       return Value.takeError();
     // `fxc` always prints an immediate alongside a relative index, writing
     // `+ 0` for the purely relative representation.
-    Index.Rep = *Value == 0 ? OperandIndex::Representation::Relative
-                            : OperandIndex::Representation::Immediate32PlusRelative;
+    Index.Rep = *Value == 0
+                    ? OperandIndex::Representation::Relative
+                    : OperandIndex::Representation::Immediate32PlusRelative;
     Index.Value = *Value;
     return Index;
   }
@@ -1661,8 +1670,7 @@ private:
     // register does (`l(2.000000) {def32 as min16f}`).
     if (Current.Kind == TokenKind::LBrace) {
       advance();
-      if (llvm::Error E =
-              parseOperandModifiers(Op, /*HasComponents=*/true))
+      if (llvm::Error E = parseOperandModifiers(Op, /*HasComponents=*/true))
         return std::move(E);
     }
     return Op;

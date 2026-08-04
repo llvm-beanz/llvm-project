@@ -11,17 +11,18 @@
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Translate/DXSA/DXSAToLLVMIRTranslator.h"
 
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/Tools/mlir-translate/Translation.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/Module.h"
 
 using namespace mlir;
 
 void feme::registerDXSAToLLVMIRTranslation() {
   TranslateFromMLIRRegistration Registration{
-      "dxsa-to-llvmir", "Translate a decoded DXBC program to DXIL-shaped LLVM IR",
+      "dxsa-to-llvmir",
+      "Translate a decoded DXBC program to DXIL-shaped LLVM IR",
       [](ModuleOp Source, raw_ostream &Output) -> LogicalResult {
         llvm::LLVMContext Context;
         std::unique_ptr<llvm::Module> Translated =

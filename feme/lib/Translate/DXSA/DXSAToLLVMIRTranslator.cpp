@@ -28,10 +28,10 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
-#include "llvm/IR/Attributes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
@@ -248,8 +248,7 @@ struct SignatureElement {
 class Signature {
 public:
   void add(SignatureElement Element) {
-    for (unsigned Col = Element.StartCol,
-                  End = Element.StartCol + Element.Cols;
+    for (unsigned Col = Element.StartCol, End = Element.StartCol + Element.Cols;
          Col != End; ++Col)
       Lookup[key(Element.Row, Col)] = Elements.size();
     Elements.push_back(std::move(Element));
@@ -349,8 +348,8 @@ private:
                         llvm::ArrayRef<llvm::Value *> Components,
                         mlir::Operation *Op);
   /// The destination components an instruction computes, in order.
-  static llvm::SmallVector<unsigned, 4> destinationComponents(
-      DstOperandAttr Dst);
+  static llvm::SmallVector<unsigned, 4>
+  destinationComponents(DstOperandAttr Dst);
 
   //===--------------------------------------------------------------------===//
   // Instructions
@@ -362,12 +361,10 @@ private:
                       SrcOperandAttr Src, bool Saturate);
   bool translateBinary(mlir::Operation *Op, DstOperandAttr Dst,
                        SrcOperandAttr Lhs, SrcOperandAttr Rhs, bool Saturate);
-  bool translateMad(mlir::Operation *Op, DstOperandAttr Dst,
-                    SrcOperandAttr Lhs, SrcOperandAttr Rhs, SrcOperandAttr Acc,
-                    bool Saturate);
-  bool translateDot(mlir::Operation *Op, DstOperandAttr Dst,
-                    SrcOperandAttr Lhs, SrcOperandAttr Rhs, unsigned Lanes,
-                    bool Saturate);
+  bool translateMad(mlir::Operation *Op, DstOperandAttr Dst, SrcOperandAttr Lhs,
+                    SrcOperandAttr Rhs, SrcOperandAttr Acc, bool Saturate);
+  bool translateDot(mlir::Operation *Op, DstOperandAttr Dst, SrcOperandAttr Lhs,
+                    SrcOperandAttr Rhs, unsigned Lanes, bool Saturate);
   llvm::Value *saturate(llvm::Value *Value, bool Enabled);
 
   /// Folds `ftoi`/`ftou` of a literal. DXBC clamps an out-of-range or NaN
@@ -503,8 +500,8 @@ unsigned Translator::sourceComponent(SrcOperandAttr Src, unsigned DstComp) {
 llvm::SmallVector<unsigned, 4>
 Translator::destinationComponents(DstOperandAttr Dst) {
   llvm::SmallVector<unsigned, 4> Result;
-  unsigned Mask = Dst.getMask() ? static_cast<unsigned>(Dst.getMask().getValue())
-                                : 0x1;
+  unsigned Mask =
+      Dst.getMask() ? static_cast<unsigned>(Dst.getMask().getValue()) : 0x1;
   for (unsigned I = 0; I < 4; ++I)
     if (Mask & (1u << I))
       Result.push_back(I);
@@ -577,11 +574,11 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
       return nullptr;
     }
     unsigned Col = Comp - Inputs.elements()[*Element].StartCol;
-    Result = emitDXOp(
-        "loadInput", DXILOp::LoadInput, Ty,
-        {llvm::ConstantInt::get(i32Ty(), *Element),
-         llvm::ConstantInt::get(i32Ty(), 0),
-         llvm::ConstantInt::get(i8Ty(), Col), llvm::UndefValue::get(i32Ty())});
+    Result = emitDXOp("loadInput", DXILOp::LoadInput, Ty,
+                      {llvm::ConstantInt::get(i32Ty(), *Element),
+                       llvm::ConstantInt::get(i32Ty(), 0),
+                       llvm::ConstantInt::get(i8Ty(), Col),
+                       llvm::UndefValue::get(i32Ty())});
     break;
   }
   default:
@@ -608,10 +605,10 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     Result = emitDXOp("unary", DXILOp::FAbs, Ty, {Result});
   }
   if (Neg)
-    Result = Ty->isFloatTy()
-                 ? Builder.CreateFSub(
-                       llvm::ConstantFP::getNegativeZero(Ty), Result)
-                 : Builder.CreateSub(llvm::ConstantInt::get(i32Ty(), 0), Result);
+    Result =
+        Ty->isFloatTy()
+            ? Builder.CreateFSub(llvm::ConstantFP::getNegativeZero(Ty), Result)
+            : Builder.CreateSub(llvm::ConstantInt::get(i32Ty(), 0), Result);
   SourceCache[Key] = Result;
   return Result;
 }
@@ -672,11 +669,10 @@ bool Translator::writeDestination(DstOperandAttr Dst,
 llvm::Function *Translator::dxOp(llvm::StringRef Name, llvm::Type *ReturnTy,
                                  llvm::ArrayRef<llvm::Type *> Args,
                                  llvm::Type *OverloadTy) {
-  llvm::StringRef Suffix = OverloadTy->isFloatTy()    ? "f32"
-                           : OverloadTy->isDoubleTy() ? "f64"
-                           : OverloadTy->isIntegerTy(1)
-                               ? "i1"
-                               : "i32";
+  llvm::StringRef Suffix = OverloadTy->isFloatTy()      ? "f32"
+                           : OverloadTy->isDoubleTy()   ? "f64"
+                           : OverloadTy->isIntegerTy(1) ? "i1"
+                                                        : "i32";
   std::string FullName = ("dx.op." + Name + "." + Suffix).str();
   llvm::SmallVector<llvm::Type *, 8> Params;
   Params.push_back(i32Ty()); // the DXIL opcode
@@ -759,8 +755,8 @@ llvm::Constant *Translator::foldFloatToInt(llvm::Instruction::CastOps Cast,
   if (std::isnan(Value))
     Value = 0.0;
   Value = std::min(std::max(Value, Low), High);
-  return llvm::ConstantInt::get(
-      i32Ty(), Signed ? uint32_t(int32_t(Value)) : uint32_t(Value));
+  return llvm::ConstantInt::get(i32Ty(), Signed ? uint32_t(int32_t(Value))
+                                                : uint32_t(Value));
 }
 
 llvm::Value *Translator::saturate(llvm::Value *Value, bool Enabled) {
@@ -905,8 +901,7 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
   if (Name == "mov") {
     llvm::SmallVector<llvm::Value *, 4> Values;
     for (unsigned Comp : Comps) {
-      llvm::Value *Value =
-          readSource(Src, Comp, movElementType(Src, Comp), Op);
+      llvm::Value *Value = readSource(Src, Comp, movElementType(Src, Comp), Op);
       if (!Value)
         return false;
       Values.push_back(saturate(Value, Saturate));
@@ -1022,7 +1017,7 @@ bool Translator::translateMad(mlir::Operation *Op, DstOperandAttr Dst,
                               SrcOperandAttr Acc, bool Saturate) {
   llvm::StringRef Name = mnemonicOf(Op);
   bool Float = Name == "mad";
-  DXILOp DXOp = Float      ? DXILOp::FMad
+  DXILOp DXOp = Float            ? DXILOp::FMad
                 : Name == "imad" ? DXILOp::IMad
                                  : DXILOp::UMad;
   llvm::Type *Ty = Float ? floatTy() : i32Ty();
@@ -1039,9 +1034,8 @@ bool Translator::translateMad(mlir::Operation *Op, DstOperandAttr Dst,
 
   llvm::SmallVector<llvm::Value *, 4> Values;
   for (unsigned I = 0, E = Comps.size(); I != E; ++I) {
-    llvm::Value *Value =
-        emitDXOp("tertiary", DXOp, Ty,
-                 {Sources[I], Sources[E + I], Sources[2 * E + I]});
+    llvm::Value *Value = emitDXOp(
+        "tertiary", DXOp, Ty, {Sources[I], Sources[E + I], Sources[2 * E + I]});
     Values.push_back(saturate(Value, Saturate));
   }
   return writeDestination(Dst, Values, Op);
@@ -1066,8 +1060,8 @@ bool Translator::translateDot(mlir::Operation *Op, DstOperandAttr Dst,
       Args.push_back(Value);
     }
 
-  llvm::Value *Value = saturate(
-      emitDXOp(Name, DXOp, floatTy(), Args), Saturate);
+  llvm::Value *Value =
+      saturate(emitDXOp(Name, DXOp, floatTy(), Args), Saturate);
   llvm::SmallVector<llvm::Value *, 4> Values(destinationComponents(Dst).size(),
                                              Value);
   return writeDestination(Dst, Values, Op);
@@ -1141,8 +1135,8 @@ llvm::MDNode *Translator::emitSignature(const Signature &Sig) {
   llvm::SmallVector<llvm::Metadata *, 8> Elements;
   for (auto [Index, Element] : llvm::enumerate(Sig.elements())) {
     auto *SemanticIndices = llvm::MDNode::get(
-        Context, {llvm::ConstantAsMetadata::get(
-                     llvm::ConstantInt::get(i32Ty(), 0))});
+        Context,
+        {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0))});
     llvm::Metadata *Fields[] = {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), Index)),
         llvm::MDString::get(Context, Element.Name),
@@ -1179,16 +1173,15 @@ void Translator::emitMetadata(llvm::Function *Entry) {
           Context,
           {llvm::MDString::get(Context, Stage),
            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 6)),
-           llvm::ConstantAsMetadata::get(
-               llvm::ConstantInt::get(i32Ty(), 0))}));
+           llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0))}));
 
   llvm::Metadata *Signatures[] = {emitSignature(Inputs), emitSignature(Outputs),
                                   nullptr};
   auto *Properties = llvm::MDNode::get(
       Context,
       {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0)),
-       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
-           llvm::Type::getInt64Ty(Context), 0))});
+       llvm::ConstantAsMetadata::get(
+           llvm::ConstantInt::get(llvm::Type::getInt64Ty(Context), 0))});
   llvm::Metadata *EntryFields[] = {
       llvm::ConstantAsMetadata::get(Entry),
       llvm::MDString::get(Context, "main"),
@@ -1214,8 +1207,8 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
   if (!collectDeclarations(Shader))
     return nullptr;
 
-  auto *EntryTy =
-      llvm::FunctionType::get(llvm::Type::getVoidTy(Context), /*isVarArg=*/false);
+  auto *EntryTy = llvm::FunctionType::get(llvm::Type::getVoidTy(Context),
+                                          /*isVarArg=*/false);
   auto *Entry = llvm::Function::Create(
       EntryTy, llvm::GlobalValue::ExternalLinkage, "main", Module.get());
   Builder.SetInsertPoint(llvm::BasicBlock::Create(Context, "entry", Entry));
