@@ -987,23 +987,26 @@ memory, and the non-pixel-shader stage-specific declarations.
 #### Building complete legacy DXBC containers for testing
 
 Signature element names and component types are synthesized from a
-`.dxasm` fixture's declarations rather than read, because a bare `SHEX`
-part (what `dxbc-as`'s assembly represents) has no `ISGN`/`OSGN` of its
-own to read them from -- `dxilconv`, by contrast, gets them from the real
+`.dxasm` fixture's declarations by default, because a bare `SHEX` part
+(what `dxbc-as`'s assembly represents) has no `ISGN`/`OSGN` of its own to
+read them from -- `dxilconv`, by contrast, gets them from the real
 container. This is a property of the *fixture format*, not of the
-translation (see `agent_thoughts.md`), but it does mean a `.dxasm`-only
-test cannot exercise real signature-element data.
+translation (see `agent_thoughts.md`); a `.dxasm`-only test still cannot
+exercise real signature-element data, but a test built from a full
+container now can (see below).
 
 To let a test carry real `ISGN`/`OSGN` (or `RDEF`/`PCSG`/`STAT`) bytes
 alongside a `dxbc-as`-assembled `SHEX` part, three pieces of upstream LLVM
 tooling compose into one pipeline:
 
 - `yaml2obj`, given a `DXContainerYAML::Object`, writes the parts LLVM
-  models structurally (e.g. `ISG1`/`OSG1`/`PSV0`/`RTS0`) and, for parts it
-  does not model (the legacy `ISGN`/`OSGN`/`PCSG`/`RDEF`/`SHEX`/`STAT`
-  names used by shader model 5.x containers), writes a `PrivateData` byte
-  sequence given in the YAML verbatim, the same escape hatch the `PRIV`
-  part already used.
+  models structurally -- e.g. `ISG1`/`OSG1`/`PSV0`/`RTS0`, and, as of this
+  session, the legacy `ISGN`/`OSGN`/`PCSG` shader model 5.x signature parts
+  too, via a `LegacySignature` YAML field
+  (`llvm/test/ObjectYAML/DXContainer/LegacySignatureParts.yaml`) -- and,
+  for the parts it still does not model (`RDEF`/`SHEX`/`STAT`), writes a
+  `PrivateData` byte sequence given in the YAML verbatim, the same escape
+  hatch the `PRIV` part already used.
 - `dxbc-as --emit=binary` assembles a `.dxasm` fixture into the raw
   bytecode that belongs in `SHEX`.
 - `llvm-objcopy --add-section=SHEX=<file>` merges that bytecode into the
@@ -1012,11 +1015,26 @@ tooling compose into one pipeline:
 `llvm-split-file` groups the container-skeleton YAML and the `.dxasm` it
 pairs with into one self-contained test file; see
 `feme/test/Tools/dxbc-as/full-container.test` for a worked example that
-builds a container this way and inspects it with `obj2yaml`. Nothing in
-`feme` parses the merged container's `ISGN`/`OSGN` yet -- that is
-future work once the DXBC importer grows a real signature reader -- but
-the pipeline above already lets a test assert on the exact bytes a
-future importer would need to consume.
+builds a container this way and inspects it with `obj2yaml`.
+
+`feme-translate --dxsa-to-llvmir --dxbc-container=<path>` reads a full
+container's real legacy `ISGN`/`OSGN` (via `object::DXContainer`'s
+`getLegacyInputSignature()`/`getLegacyOutputSignature()`) and uses its
+element names, semantic indices, register/mask placement, system values,
+and component types directly, instead of synthesizing them from the
+`dxsa.module`'s declarations -- see
+`feme/test/Translate/DXBC/indexableoutput1.test` for a fixture this
+unblocked (its real `OSGN` has signature-element indices a `.dxasm`'s
+declarations alone cannot reconstruct). This does not, on its own, unblock
+most of `feme/test/Translate/DXBC`'s remaining `.ref` fixtures: of the 117
+fixtures still using a `.ref` file, only this one and `output4` (further
+blocked by not-yet-implemented `min16f` support) were held back purely by
+signature synthesis: `agent_thoughts.md`'s "Known differences from
+`dxilconv`" already established that the other ~115 are gated on
+unimplemented opcode families -- control flow, constant buffers,
+resources/samplers, indexable temps, minimum-precision operands, and
+stage-specific declarations -- which real signature data does not
+address.
 
 Notably, DXIL ⇄ SPIR-V translation is expected to route through plain LLVM
 IR and the **existing** LLVM `SPIRV` backend/MLIR `spirv` dialect rather than
