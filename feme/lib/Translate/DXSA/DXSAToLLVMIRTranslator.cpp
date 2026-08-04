@@ -121,6 +121,7 @@ enum class DXILOp : unsigned {
   DerivFineY = 86,
   SampleIndex = 90,
   Coverage = 91,
+  InnerCoverage = 92,
   ThreadId = 93,
   GroupId = 94,
   ThreadIdInGroup = 95,
@@ -686,6 +687,10 @@ private:
 
   Signature Inputs;
   Signature Outputs;
+  /// The first register of each declared index range, by its length. A
+  /// signature register read at a run-time row names its element by the
+  /// range's first register, and the row relative to it.
+  llvm::SmallVector<std::pair<unsigned, unsigned>, 4> InputRanges;
   /// A resource the shader declares, in the terms `dx.op.createHandle` and
   /// `!dx.resources` describe it.
   struct Resource {
@@ -1264,6 +1269,22 @@ void Translator::refineFromDeclarations(dxsa::ModuleOp Shader) {
   // than in the legacy signature part: minimum precision, which the
   // pre-DXIL layout predates and records as a 32-bit type, and a pixel
   // shader input's interpolation mode, which it has no field for at all.
+  // A system value DXIL reads through a dedicated operation is named by
+  // its declaration, not by the signature part.
+  auto systemValue = [&](DstOperandAttr Operand, SystemValueName Name) {
+    auto Read = systemValueRead(toSemanticKind(Name));
+    std::optional<unsigned> Row = registerNumber(Operand.getIndex());
+    if (!Read || !Row)
+      return;
+    unsigned Mask = Operand.getMask()
+                        ? static_cast<unsigned>(Operand.getMask().getValue())
+                        : 0xF;
+    for (unsigned Comp = 0; Comp < 4; ++Comp)
+      if (Mask & (1u << Comp))
+        if (std::optional<unsigned> Element = Inputs.find(*Row, Comp))
+          SystemValueReads[*Element] = *Read;
+  };
+
   auto refine = [&](Signature &Sig,
                     llvm::ArrayRef<ContainerSignatureElement> Real,
                     DstOperandAttr Operand,
@@ -1309,13 +1330,20 @@ void Translator::refineFromDeclarations(dxsa::ModuleOp Shader) {
              static_cast<unsigned>(Dcl.getMode()));
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclInput>(&Op))
       refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op))
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op)) {
       refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
+      systemValue(Dcl.getOperandAttr(), Dcl.getName());
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
       refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op))
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op)) {
       refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
+      systemValue(Dcl.getOperandAttr(), Dcl.getName());
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclIndexRange>(&Op)) {
+      if (std::optional<unsigned> Start =
+              registerNumber(Dcl.getOperandAttr().getIndex()))
+        if (Dcl.getOperandAttr().getType() == OperandType::v)
+          InputRanges.emplace_back(*Start, Dcl.getCount());
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
       refine(Outputs, RealOutputSignature, Dcl.getOperandAttr(), std::nullopt);
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSiv>(&Op))
       refine(Outputs, RealOutputSignature, Dcl.getOperandAttr(), std::nullopt);
@@ -1782,7 +1810,23 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     break;
   }
   case OperandType::v: {
-    std::optional<unsigned> Reg = registerNumber(Src.getIndex());
+    OperandIndexAttr Indices = Src.getIndex();
+    std::optional<unsigned> Reg = registerNumber(Indices);
+    // A register indexed at run time names its element by the first
+    // register of the declared range it falls in, and the row relative to
+    // that register.
+    llvm::Value *Row = nullptr;
+    if (!Reg && Indices && !Indices.empty() && Indices[0].getRelative()) {
+      unsigned Base = Indices[0].getImm() ? Indices[0].getImm().getInt() : 0;
+      for (auto [Start, Count] : InputRanges)
+        if (Base >= Start && Base < Start + Count)
+          Base = Start;
+      llvm::Value *Value = readIndex(Indices[0], Slot, Op);
+      if (!Value)
+        return nullptr;
+      Reg = Base;
+      Row = Builder.CreateSub(Value, llvm::ConstantInt::get(i32Ty(), Base));
+    }
     if (!Reg) {
       unsupported(Op) << ": indexed input register";
       return nullptr;
@@ -1803,7 +1847,7 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     unsigned Col = Comp - Inputs.elements()[*Element].StartCol;
     Result = emitDXOp("loadInput", DXILOp::LoadInput, ElementTy,
                       {llvm::ConstantInt::get(i32Ty(), *Element),
-                       llvm::ConstantInt::get(i32Ty(), 0),
+                       Row ? Row : llvm::ConstantInt::get(i32Ty(), 0),
                        llvm::ConstantInt::get(i8Ty(), Col),
                        llvm::UndefValue::get(i32Ty())});
     break;
@@ -1829,6 +1873,9 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     break;
   case OperandType::vCoverage:
     Result = emitDXOp("coverage", DXILOp::Coverage, i32Ty(), {});
+    break;
+  case OperandType::vInnerCoverage:
+    Result = emitDXOp("innerCoverage", DXILOp::InnerCoverage, i32Ty(), {});
     break;
   case OperandType::cycleCounter: {
     // The counter is a 64-bit value returned as a pair of 32-bit halves,

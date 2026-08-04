@@ -327,6 +327,30 @@ dxsa.module pixel_shader 5 0 {
   EXPECT_NE(IR->find("trunc i32"), std::string::npos) << *IR;
 }
 
+TEST(DXSAToLLVMIRTranslatorTest, IndexedInputsNameTheirRangesFirstRegister) {
+  // A signature register read at a run-time row loads the element the
+  // declared index range starts at, with the row taken relative to it.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps linear v<3, <x>>
+  dxsa.dcl_input_ps linear v<4, <x>>
+  dxsa.dcl_input_ps constant v<9, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.dcl_index_range v<3, <x>>, 2
+  dxsa.dcl_temps 1
+  dxsa.mov r<0, <x>>, v<9, <x>>
+  dxsa.mov o<0, <x>>, v<3 + r<0, <x>>, <x>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_NE(IR->find("sub i32"), std::string::npos) << *IR;
+  EXPECT_NE(IR->find("@dx.op.loadInput.f32(i32 4, i32 0, i32 %"),
+            std::string::npos)
+      << *IR;
+}
+
 TEST(DXSAToLLVMIRTranslatorTest, TexelOffsetsAreSigned) {
   // A texel offset is a four-bit two's complement number with the range
   // [-8, 7], so it has to be sign-extended into the 32-bit argument DXIL
