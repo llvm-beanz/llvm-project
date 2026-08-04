@@ -55,6 +55,22 @@ TEST(LexerTest, PunctuationAndSwizzle) {
   EXPECT_EQ(Kinds, Expected);
 }
 
+TEST(LexerTest, ColonAndEquals) {
+  // `fxc` spells SM5.1 register ranges as `[lo:hi]` and named trailing
+  // fields as `space=<n>`.
+  std::vector<Token> Tokens = lexAll("T0[3:7], space=0");
+  std::vector<TokenKind> Kinds;
+  for (const Token &T : Tokens)
+    Kinds.push_back(T.Kind);
+  std::vector<TokenKind> Expected = {
+      TokenKind::Identifier, TokenKind::LBracket,   TokenKind::Integer,
+      TokenKind::Colon,      TokenKind::Integer,    TokenKind::RBracket,
+      TokenKind::Comma,      TokenKind::Identifier, TokenKind::Equals,
+      TokenKind::Integer,    TokenKind::Eof,
+  };
+  EXPECT_EQ(Kinds, Expected);
+}
+
 TEST(LexerTest, HexIntegerLiterals) {
   std::vector<Token> Tokens = lexAll("0x3F800000 0XdeadBEEF 0x0");
   ASSERT_EQ(Tokens.size(), 4u);

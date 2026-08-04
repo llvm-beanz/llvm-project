@@ -33,6 +33,8 @@ enum class TokenKind {
   Minus,          // -
   Plus,           // +
   Pipe,           // |
+  Colon,          // :
+  Equals,         // =
   LBrace,         // {
   RBrace,         // }
   EndOfStatement, // newline (statements are one per line)

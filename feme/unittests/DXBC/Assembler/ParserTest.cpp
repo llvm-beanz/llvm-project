@@ -70,6 +70,52 @@ TEST(ParserTest, FxcProfileLineIsAProgramHeader) {
             std::string::npos);
 }
 
+/// Returns the opcode-specific control bits the single instruction in
+/// \p Source parses to.
+uint32_t parseControls(llvm::StringRef Source) {
+  Program P = parseOrFail(Source);
+  if (P.Instructions.size() != 1) {
+    ADD_FAILURE() << "expected exactly one instruction in: " << Source;
+    return 0;
+  }
+  return P.Instructions[0].Controls;
+}
+
+TEST(ParserTest, FxcKeywordSpellings) {
+  // `fxc` spells enumerated control fields as trailing keywords where
+  // dxbc-as folds them into the mnemonic, and names the extension global
+  // flags and system values differently.
+  EXPECT_EQ(parseControls("dcl_sampler s0, mode_comparison"),
+            parseControls("dcl_sampler_comparison s0"));
+  EXPECT_EQ(parseControls("dcl_sampler s0, mode_default"),
+            parseControls("dcl_sampler s0"));
+  EXPECT_EQ(parseControls("dcl_constantbuffer cb0[1], dynamicIndexed"),
+            parseControls("dcl_constantbuffer_dynamicIndexed cb0[1]"));
+  EXPECT_EQ(parseControls("dcl_globalFlags enable11_1DoubleExtensions"),
+            parseControls("dcl_globalFlags enableDoubleExtensions"));
+  EXPECT_EQ(parseControls("dcl_inputprimitive triangleadj"),
+            parseControls("dcl_inputprimitive triangle_adj"));
+  EXPECT_EQ(parseOrFail("dcl_output_siv o0.x, rendertarget_array_index")
+                .Instructions[0]
+                .ExtraDWords,
+            parseOrFail("dcl_output_siv o0.x, renderTargetArrayIndex")
+                .Instructions[0]
+                .ExtraDWords);
+}
+
+TEST(ParserTest, FxcRegisterSpaceTrailer) {
+  // SM5.1 declarations carry a register space, which `fxc` spells
+  // `space=<n>` where dxbc-as spells it as a bare trailing DWORD.
+  Program P = parseOrFail("dcl_uav_raw u1[1][1].xyzw{swizzle}, space=3");
+  ASSERT_EQ(P.Instructions.size(), 1u);
+  EXPECT_EQ(P.Instructions[0].ExtraDWords,
+            (llvm::SmallVector<uint32_t, 4>{3u}));
+
+  EXPECT_NE(parseErrorMessage("dcl_uav_raw u1, bogus").find(
+                "unknown keyword 'bogus'"),
+            std::string::npos);
+}
+
 TEST(ParserTest, SaturateSuffix) {
   Program P = parseOrFail("mul_sat r0.xyzw, r1.xyzw, r2.xyzw");
   ASSERT_EQ(P.Instructions.size(), 1u);

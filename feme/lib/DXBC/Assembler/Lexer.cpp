@@ -177,6 +177,12 @@ Token Lexer::next() {
   case '|':
     advance();
     return makeToken(TokenKind::Pipe, Start);
+  case ':':
+    advance();
+    return makeToken(TokenKind::Colon, Start);
+  case '=':
+    advance();
+    return makeToken(TokenKind::Equals, Start);
   default:
     // Unrecognized character: report it as a single-character Unknown
     // token rather than failing outright, so callers (Parser) can produce

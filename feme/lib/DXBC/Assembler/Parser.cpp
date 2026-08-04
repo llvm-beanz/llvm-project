@@ -56,6 +56,9 @@ constexpr KeywordValue GlobalFlags[] = {
     {"enableDoubleExtensions", 1u << 17},
     {"enableShaderExtensions", 1u << 18},
     {"allResourcesBound", 1u << 19},
+    // `fxc` spells the two SM5.1 extension flags with an "11_1" infix.
+    {"enable11_1DoubleExtensions", 1u << 17},
+    {"enable11_1ShaderExtensions", 1u << 18},
 };
 
 // D3D11_SB_SYNC_*.
@@ -113,14 +116,26 @@ constexpr KeywordValue SystemValueNames[] = {
     {"barycentrics", 23},
     {"shadingRate", 24},
     {"cullPrimitive", 25},
+    // `fxc` disassembly spells the same D3D10_SB_NAME values in snake_case.
+    {"clip_distance", 2},
+    {"cull_distance", 3},
+    {"rendertarget_array_index", 4},
+    {"viewport_array_index", 5},
+    {"vertex_id", 6},
+    {"primitive_id", 7},
+    {"instance_id", 8},
+    {"is_front_face", 9},
+    {"sample_index", 10},
 };
 
 // D3D10_SB_PRIMITIVE. The `patchN` entries (N control points) are contiguous
 // from D3D11_SB_PRIMITIVE_1_CONTROL_POINT_PATCH and are handled separately
 // in parseControlEnum rather than spelled out 32 times here.
 constexpr KeywordValue InputPrimitives[] = {
-    {"point", 1},    {"line", 2},         {"triangle", 3},
-    {"line_adj", 6}, {"triangle_adj", 7},
+    {"point", 1},        {"line", 2},         {"triangle", 3},
+    {"line_adj", 6},     {"triangle_adj", 7},
+    // `fxc` spells the adjacency primitives without a separator.
+    {"lineadj", 6},      {"triangleadj", 7},
 };
 
 // D3D10_SB_PRIMITIVE_TOPOLOGY.
@@ -187,6 +202,23 @@ constexpr KeywordValue ProgramTypes[] = {
 // disassembly names a profile (`ps_5_0`, `cs_5_1`, ...).
 constexpr KeywordValue ProfilePrefixes[] = {
     {"ps", 0}, {"vs", 1}, {"gs", 2}, {"hs", 3}, {"ds", 4}, {"cs", 5},
+};
+
+// D3D10_SB_SAMPLER_MODE, spelled as a trailing keyword by `fxc` where
+// dxbc-as's own grammar folds it into the mnemonic
+// (`dcl_sampler_comparison`).
+constexpr KeywordValue SamplerModes[] = {
+    {"mode_default", 0},
+    {"mode_comparison", 1u << 11},
+    {"mode_mono", 2u << 11},
+};
+
+// D3D10_SB_CONSTANT_BUFFER_ACCESS_PATTERN, likewise spelled as a trailing
+// keyword by `fxc` (dxbc-as folds it into
+// `dcl_constantbuffer_dynamicIndexed`).
+constexpr KeywordValue ConstantBufferAccessPatterns[] = {
+    {"immediateIndexed", 0},
+    {"dynamicIndexed", 1u << 11},
 };
 
 const KeywordValue *findKeyword(llvm::ArrayRef<KeywordValue> Table,
@@ -840,22 +872,69 @@ private:
     return llvm::Error::success();
   }
 
-  /// counts := <int> (',' <int>)*
+  /// The opcode-specific control keywords `fxc` spells after a
+  /// declaration's operand, where dxbc-as's own grammar folds them into the
+  /// mnemonic. Empty for mnemonics that have no such keyword.
+  static llvm::ArrayRef<KeywordValue> getTrailerKeywords(Opcode Op) {
+    switch (Op) {
+    case Opcode::DclSampler:
+      return SamplerModes;
+    case Opcode::DclConstantbuffer:
+      return ConstantBufferAccessPatterns;
+    default:
+      return {};
+    }
+  }
+
+  /// counts := <item> (',' <item>)*
+  /// item   := <int> | <control-keyword> | ('space' | 'stride') '=' <int>
+  ///
+  /// The plain-integer form is dxbc-as's own spelling of a declaration's
+  /// trailing DWORDs; the other two are `fxc`'s, which names the register
+  /// space it emits and spells enumerated control fields as keywords.
   llvm::Error parseTrailingCounts(Instruction &Inst, bool AtLeastOne) {
     if (!AtLeastOne) {
       if (Current.Kind != TokenKind::Comma)
         return llvm::Error::success();
       advance();
     }
+    llvm::ArrayRef<KeywordValue> Keywords = getTrailerKeywords(Inst.Op);
     while (true) {
-      llvm::Expected<uint64_t> Value = parseInteger("an integer");
-      if (!Value)
-        return Value.takeError();
-      Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Value));
+      if (Current.Kind == TokenKind::Identifier) {
+        if (llvm::Error E = parseTrailingKeyword(Inst, Keywords))
+          return E;
+      } else {
+        llvm::Expected<uint64_t> Value = parseInteger("an integer");
+        if (!Value)
+          return Value.takeError();
+        Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Value));
+      }
       if (Current.Kind != TokenKind::Comma)
         return llvm::Error::success();
       advance();
     }
+  }
+
+  llvm::Error parseTrailingKeyword(Instruction &Inst,
+                                   llvm::ArrayRef<KeywordValue> Keywords) {
+    llvm::StringRef Name = Current.Spelling;
+    if (Name == "space" || Name == "stride") {
+      advance();
+      if (llvm::Error E = expectToken(TokenKind::Equals, "'='"))
+        return E;
+      llvm::Expected<uint64_t> Value = parseInteger("an integer");
+      if (!Value)
+        return Value.takeError();
+      Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Value));
+      return llvm::Error::success();
+    }
+    const KeywordValue *Entry = findKeyword(Keywords, Name);
+    if (!Entry)
+      return error("unknown keyword '" + Name + "'");
+    Inst.Controls |= Entry->Value;
+    Inst.Keywords.push_back(Name.str());
+    advance();
+    return llvm::Error::success();
   }
 
   /// dcl_indexableTemp := 'x' <id> '[' <size> ']' ',' <components>
