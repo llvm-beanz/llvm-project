@@ -263,4 +263,59 @@ dxsa.module pixel_shader 5 0 {
   EXPECT_NE(IR->find("@dx.op.unary.f32(i32 7,"), std::string::npos) << *IR;
 }
 
+TEST(DXSAToLLVMIRTranslatorTest, IndexableTempsAreFlatStackArrays) {
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps constant v<0, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.dcl_indexable_temp x<0>[4], 2
+  dxsa.mov x<[0, 1], <y>>, v<0, <x>>
+  dxsa.mov o<0, <x>>, x<[0, 1], <y>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  // Four elements of two components each, and the (1, y) slot is at
+  // 1 * 2 + 1.
+  EXPECT_NE(IR->find("alloca [8 x i32]"), std::string::npos) << *IR;
+  EXPECT_EQ(occurrences(*IR, "i32 0, i32 3"), 2u) << *IR;
+  // The array is not promoted, unlike a plain temp register.
+  EXPECT_NE(IR->find("load i32"), std::string::npos) << *IR;
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, DynamicIndexableTempIndicesScale) {
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps constant v<0, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.dcl_indexable_temp x<0>[4], 4
+  dxsa.mov r<0, <x>>, v<0, <x>>
+  dxsa.mov o<0, <x>>, x<[0, 2 + r<0, <x>>], <x>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  // The element index is the operand's own (register + offset), scaled by
+  // the declared component count, plus the component.
+  EXPECT_NE(IR->find("add i32 %1, 2"), std::string::npos) << *IR;
+  EXPECT_NE(IR->find("mul i32 %2, 4"), std::string::npos) << *IR;
+  EXPECT_NE(IR->find("add i32 %3, 0"), std::string::npos) << *IR;
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, UndeclaredIndexableTempsAreRejected) {
+  Fixture F;
+  EXPECT_FALSE(F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_output o<0, <x>>
+  dxsa.mov o<0, <x>>, x<[0, 0], <x>>
+  dxsa.ret
+}
+)mlir")
+                   .has_value());
+  EXPECT_NE(F.diagnostics().find("undeclared indexable temp"),
+            llvm::StringRef::npos);
+}
+
 } // namespace

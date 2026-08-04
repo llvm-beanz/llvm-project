@@ -25,6 +25,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
@@ -504,6 +505,17 @@ private:
   /// flow introduces, which is exactly what an `alloca` plus mem2reg
   /// models; the promoted phi nodes inherit the slot's name.
   llvm::DenseMap<uint64_t, llvm::AllocaInst *> Temps;
+  /// The stack array backing each declared indexable temp register. DXBC
+  /// gives `x#` no type either, so one array per element type is created
+  /// and the ones nothing selected are dropped again; that also reproduces
+  /// the names dxilconv's arrays end up with, which LLVM's own value-name
+  /// uniquing assigns.
+  struct IndexableTemp {
+    llvm::DenseMap<llvm::Type *, llvm::AllocaInst *> Arrays;
+    unsigned Components = 0;
+    unsigned Elements = 0;
+  };
+  llvm::DenseMap<unsigned, IndexableTemp> IndexableTemps;
   /// The type inferred for each temp register component; see
   /// `inferTempTypes`.
   llvm::DenseMap<uint64_t, llvm::Type *> TempTypes;
@@ -628,6 +640,14 @@ private:
   /// Returns (creating on first use) the stack slot backing temp register
   /// component \p Comp of register \p Reg.
   llvm::AllocaInst *tempSlot(unsigned Reg, unsigned Comp);
+
+  /// Allocates the stack array backing every declared indexable temp.
+  void createIndexableTemps(dxsa::ModuleOp Shader);
+  /// Returns the address of component \p Comp of the element \p Index
+  /// selects from indexable temp register \p Reg, at element type \p Ty.
+  llvm::Value *indexableTempAddress(OperandIndexAttr Index, unsigned Comp,
+                                    llvm::Type *Ty, mlir::Operation *Op,
+                                    unsigned Slot);
 
   llvm::Value *readSource(SrcOperandAttr Src, unsigned DstComp, llvm::Type *Ty,
                           mlir::Operation *Op, unsigned Slot = 0);
@@ -1057,6 +1077,69 @@ llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp) {
   return Slot;
 }
 
+void Translator::createIndexableTemps(dxsa::ModuleOp Shader) {
+  for (mlir::Operation &Op : *Shader.getBodyBlock()) {
+    auto Dcl = llvm::dyn_cast<dxsa::DclIndexableTemp>(&Op);
+    if (!Dcl)
+      continue;
+    IndexableTemp &Array = IndexableTemps[Dcl.getId()];
+    // A register declared twice -- once per hull shader phase, say -- is
+    // one array, sized to hold either declaration.
+    Array.Components = std::max(Array.Components, Dcl.getNumComponents());
+    Array.Elements = std::max(Array.Elements, Dcl.getSize());
+  }
+  llvm::SmallVector<unsigned, 4> Registers;
+  for (const auto &[Reg, Array] : IndexableTemps)
+    Registers.push_back(Reg);
+  llvm::sort(Registers);
+  for (unsigned Reg : Registers) {
+    IndexableTemp &Array = IndexableTemps[Reg];
+    unsigned Size = Array.Elements * Array.Components;
+    for (llvm::Type *Element : {floatTy(), i32Ty()}) {
+      auto *Alloca =
+          AllocaBuilder.CreateAlloca(llvm::ArrayType::get(Element, Size),
+                                     nullptr, "dx.v32.x" + llvm::Twine(Reg));
+      Alloca->setAlignment(llvm::Align(4));
+      Array.Arrays[Element] = Alloca;
+    }
+  }
+}
+
+llvm::Value *Translator::indexableTempAddress(OperandIndexAttr Index,
+                                              unsigned Comp, llvm::Type *Ty,
+                                              mlir::Operation *Op,
+                                              unsigned Slot) {
+  std::optional<unsigned> Reg = registerNumber(Index);
+  auto Declared = Reg ? IndexableTemps.find(*Reg) : IndexableTemps.end();
+  if (!Reg || Index.size() < 2 || Declared == IndexableTemps.end()) {
+    unsupported(Op) << ": access to an undeclared indexable temp";
+    return nullptr;
+  }
+  const IndexableTemp &Array = Declared->second;
+  llvm::AllocaInst *Storage = Array.Arrays.lookup(Ty);
+  if (!Storage) {
+    unsupported(Op) << ": indexable temp element type";
+    return nullptr;
+  }
+
+  // The array is flat, so the element index scales by the declared
+  // component count and the component index is added on.
+  llvm::Value *Element = readIndex(Index[1], Slot, Op);
+  llvm::Value *Offset = nullptr;
+  if (auto *Constant = llvm::dyn_cast_or_null<llvm::ConstantInt>(Element)) {
+    Offset = llvm::ConstantInt::get(
+        i32Ty(), Constant->getZExtValue() * Array.Components + Comp);
+  } else if (Element) {
+    Offset = Builder.CreateMul(
+        Element, llvm::ConstantInt::get(i32Ty(), Array.Components));
+    Offset = Builder.CreateAdd(Offset, llvm::ConstantInt::get(i32Ty(), Comp));
+  } else {
+    Offset = llvm::ConstantInt::get(i32Ty(), Comp);
+  }
+  return Builder.CreateGEP(Storage->getAllocatedType(), Storage,
+                           {llvm::ConstantInt::get(i32Ty(), 0), Offset});
+}
+
 llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
                                     llvm::Type *Ty, mlir::Operation *Op,
                                     unsigned Slot) {
@@ -1168,6 +1251,16 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     if (!Result)
       return nullptr;
     break;
+  case OperandType::x: {
+    llvm::Value *Address =
+        indexableTempAddress(Src.getIndex(), Comp, Ty, Op, Slot);
+    if (!Address)
+      return nullptr;
+    auto *Load = Builder.CreateLoad(Ty, Address);
+    Load->setAlignment(llvm::Align(4));
+    Result = Load;
+    break;
+  }
   default:
     unsupported(Op) << ": source operand kind";
     return nullptr;
@@ -1235,6 +1328,16 @@ bool Translator::writeDestination(DstOperandAttr Dst,
       llvm::AllocaInst *Slot = tempSlot(*Reg, Comp);
       Builder.CreateStore(coerce(Components[I], Slot->getAllocatedType()),
                           Slot);
+    }
+    return true;
+  }
+  case OperandType::x: {
+    for (auto [I, Comp] : llvm::enumerate(Comps)) {
+      llvm::Value *Address = indexableTempAddress(
+          Dst.getIndex(), Comp, Components[I]->getType(), Op, /*Slot=*/0);
+      if (!Address)
+        return false;
+      Builder.CreateStore(Components[I], Address)->setAlignment(llvm::Align(4));
     }
     return true;
   }
@@ -1363,6 +1466,11 @@ llvm::Type *Translator::movElementType(DstOperandAttr Dst, SrcOperandAttr Src,
   // bits whatever the registers involved are otherwise used for.
   if (Src.getModifier())
     return floatTy();
+  // An indexable temp is a flat array of raw 32-bit slots, so a copy to or
+  // from one carries bits rather than a value of some type.
+  if (Src.getType() == OperandType::x ||
+      (Dst && Dst.getType() == OperandType::x))
+    return i32Ty();
   if (Src.getType() == OperandType::r)
     if (std::optional<unsigned> Reg = registerNumber(Src.getIndex()))
       return tempSlot(*Reg, sourceComponent(Src, DstComp))->getAllocatedType();
@@ -2364,7 +2472,9 @@ static llvm::Value *bitcastSource(llvm::Instruction *I) {
 }
 
 void Translator::foldConditionMasks(llvm::Function &Entry) {
-  llvm::SmallVector<llvm::Instruction *, 8> Dead;
+  // A set, because one widened comparison can feed several tests, and each
+  // of them nominates it for removal.
+  llvm::SmallSetVector<llvm::Instruction *, 8> Dead;
 
   // A value stored into a temp register of the other type and read back
   // comes out unchanged; the pair only existed because the slot's type had
@@ -2382,7 +2492,7 @@ void Translator::foldConditionMasks(llvm::Function &Entry) {
         continue;
       I.replaceAllUsesWith(Original);
       I.eraseFromParent();
-      Dead.push_back(Inner);
+      Dead.insert(Inner);
     }
   }
   for (llvm::Instruction *I : Dead)
@@ -2392,10 +2502,18 @@ void Translator::foldConditionMasks(llvm::Function &Entry) {
 
   // A resource is bound at the entry point for every declaration, but one
   // only ever accessed through a run-time binding never uses that handle.
+  // An indexable temp is allocated at every element type it might be
+  // accessed at, and only the ones something did access are kept.
   for (llvm::Instruction &I :
        llvm::make_early_inc_range(Entry.getEntryBlock())) {
+    if (!I.use_empty())
+      continue;
+    if (llvm::isa<llvm::AllocaInst>(&I)) {
+      I.eraseFromParent();
+      continue;
+    }
     auto *Call = llvm::dyn_cast<llvm::CallInst>(&I);
-    if (Call && Call->use_empty() && Call->getCalledFunction() &&
+    if (Call && Call->getCalledFunction() &&
         Call->getCalledFunction()->getName() == "dx.op.createHandle")
       Call->eraseFromParent();
   }
@@ -2417,7 +2535,7 @@ void Translator::foldConditionMasks(llvm::Function &Entry) {
       }
       Compare->replaceAllUsesWith(Bit);
       Compare->eraseFromParent();
-      Dead.push_back(Mask);
+      Dead.insert(Mask);
     }
   }
   // The sign extension only existed to widen the comparison to a DXBC
@@ -2516,7 +2634,9 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
   auto *EntryBB = llvm::BasicBlock::Create(Context, "entry", Entry);
   Builder.SetInsertPoint(EntryBB);
   EntryFn = Entry;
+  AllocaBuilder.SetInsertPoint(EntryBB);
   inferTempTypes(Shader);
+  createIndexableTemps(Shader);
   createResourceHandles(Shader);
   // DXBC has no strict floating-point semantics; every arithmetic
   // instruction is free to be reassociated and contracted.
