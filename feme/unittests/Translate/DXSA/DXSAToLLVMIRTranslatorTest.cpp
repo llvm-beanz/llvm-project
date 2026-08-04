@@ -152,16 +152,56 @@ TEST(DXSAToLLVMIRTranslatorTest, SignatureElementsComeFromDeclarations) {
 
 TEST(DXSAToLLVMIRTranslatorTest, ReportsUnsupportedInstructions) {
   Fixture F;
-  // `dxsa.sample` needs resource handles, which are not translated yet.
+  // `dxsa.dfma` is a double-precision operation, which is not translated
+  // yet.
   EXPECT_FALSE(F.translate(R"mlir(
 dxsa.module pixel_shader 5 0 {
-  dxsa.dcl_output o<0, <x>>
-  dxsa.sample o<0, <x>>, v<0>, t<0>, s<0>
+  dxsa.dcl_output o<0, <x, y>>
+  dxsa.dfma o<0, <x, y>>, r<0>, r<1>, r<2>
   dxsa.ret
 }
 )mlir")
                    .has_value());
   EXPECT_NE(F.diagnostics().find("does not support"), llvm::StringRef::npos);
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, ResourcesAreBoundInResourceClassOrder) {
+  // DXIL binds the classes in order -- SRVs, UAVs, constant buffers,
+  // samplers -- whatever order the declarations appear in, and a handle
+  // names its resource by the index of the declaration within its class
+  // rather than by the register it binds to.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_sampler <id = 5, mode = default>
+  dxsa.dcl_resource <id = 3>, <dim = texture2d>,
+      <x = float, y = float, z = float, w = float>
+  dxsa.dcl_input_ps linear v<0, <x, y>>
+  dxsa.dcl_output o<0>
+  dxsa.sample o<0>, v<0, <x, y, x, x>>, t<3, vector>, s<5>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_NE(IR->find("%0 = call %dx.types.Handle @dx.op.createHandle(i32 57, "
+                     "i8 0, i32 0, i32 3, i1 false)"),
+            std::string::npos)
+      << *IR;
+  EXPECT_NE(IR->find("%1 = call %dx.types.Handle @dx.op.createHandle(i32 57, "
+                     "i8 3, i32 0, i32 5, i1 false)"),
+            std::string::npos)
+      << *IR;
+  // A two-dimensional texture leaves the last two coordinates and the
+  // third texel offset undefined.
+  EXPECT_NE(IR->find("@dx.op.sample.f32(i32 60,"), std::string::npos) << *IR;
+  EXPECT_NE(IR->find("float undef, float undef, i32 0, i32 0, i32 undef, "
+                     "float 0.000000e+00)"),
+            std::string::npos)
+      << *IR;
+  // DXIL::ResourceKind::Texture2D is 2, ComponentType::F32 is 9.
+  EXPECT_NE(IR->find(R"(!"T0", i32 0, i32 3, i32 1, i32 2, i32 0,)"),
+            std::string::npos)
+      << *IR;
 }
 
 TEST(DXSAToLLVMIRTranslatorTest, ReportsUndeclaredSignatureRegisters) {

@@ -104,6 +104,16 @@ enum class DXILOp : unsigned {
   Dot4 = 56,
   CreateHandle = 57,
   CBufferLoadLegacy = 59,
+  Sample = 60,
+  SampleBias = 61,
+  SampleLevel = 62,
+  SampleGrad = 63,
+  SampleCmp = 64,
+  SampleCmpLevelZero = 65,
+  TextureLoad = 66,
+  TextureGather = 73,
+  TextureGatherCmp = 74,
+  CalculateLOD = 81,
   Discard = 82,
   DerivCoarseX = 83,
   DerivCoarseY = 84,
@@ -125,6 +135,114 @@ enum class DXILOp : unsigned {
 /// `DXIL::ResourceClass`, as named by `dx.op.createHandle`'s first argument.
 enum class ResourceClass : unsigned { SRV = 0, UAV = 1, CBV = 2, Sampler = 3 };
 
+/// `DXIL::ResourceKind`, as recorded in a resource's `!dx.resources` entry.
+enum class ResourceKind : unsigned {
+  Texture1D = 1,
+  Texture2D = 2,
+  Texture2DMS = 3,
+  Texture3D = 4,
+  TextureCube = 5,
+  Texture1DArray = 6,
+  Texture2DArray = 7,
+  Texture2DMSArray = 8,
+  TextureCubeArray = 9,
+  TypedBuffer = 10,
+  RawBuffer = 11,
+  StructuredBuffer = 12,
+  Sampler = 14,
+};
+
+/// The `DXIL::ResourceKind` a DXBC resource dimension names.
+ResourceKind toResourceKind(ResourceDimension Dim) {
+  switch (Dim) {
+  case ResourceDimension::buffer:
+    return ResourceKind::TypedBuffer;
+  case ResourceDimension::texture1d:
+    return ResourceKind::Texture1D;
+  case ResourceDimension::texture2d:
+    return ResourceKind::Texture2D;
+  case ResourceDimension::texture2dms:
+    return ResourceKind::Texture2DMS;
+  case ResourceDimension::texture3d:
+    return ResourceKind::Texture3D;
+  case ResourceDimension::texturecube:
+    return ResourceKind::TextureCube;
+  case ResourceDimension::texture1darray:
+    return ResourceKind::Texture1DArray;
+  case ResourceDimension::texture2darray:
+    return ResourceKind::Texture2DArray;
+  case ResourceDimension::texture2dmsarray:
+    return ResourceKind::Texture2DMSArray;
+  case ResourceDimension::texturecubearray:
+    return ResourceKind::TextureCubeArray;
+  }
+  return ResourceKind::Texture2D;
+}
+
+/// The number of coordinates an address in a resource of \p Kind has, not
+/// counting the mip level or sample index a load also takes.
+unsigned coordinateCount(ResourceKind Kind) {
+  switch (Kind) {
+  case ResourceKind::TypedBuffer:
+  case ResourceKind::RawBuffer:
+  case ResourceKind::StructuredBuffer:
+  case ResourceKind::Texture1D:
+    return 1;
+  case ResourceKind::Texture1DArray:
+  case ResourceKind::Texture2D:
+  case ResourceKind::Texture2DMS:
+    return 2;
+  case ResourceKind::Texture2DArray:
+  case ResourceKind::Texture2DMSArray:
+  case ResourceKind::Texture3D:
+  case ResourceKind::TextureCube:
+    return 3;
+  case ResourceKind::TextureCubeArray:
+    return 4;
+  case ResourceKind::Sampler:
+    break;
+  }
+  return 2;
+}
+
+/// The number of *spatial* coordinates an address in a resource of \p Kind
+/// has: its dimensions without the array slice, which is what a level-of-
+/// detail calculation is interested in.
+unsigned spatialCount(ResourceKind Kind) {
+  switch (Kind) {
+  case ResourceKind::Texture1D:
+  case ResourceKind::Texture1DArray:
+    return 1;
+  case ResourceKind::Texture3D:
+  case ResourceKind::TextureCube:
+  case ResourceKind::TextureCubeArray:
+    return 3;
+  default:
+    break;
+  }
+  return 2;
+}
+
+/// The number of texel offsets an address in a resource of \p Kind takes;
+/// an array slice does not get one, and a cube map has none at all.
+unsigned offsetCount(ResourceKind Kind) {
+  switch (Kind) {
+  case ResourceKind::Texture1D:
+  case ResourceKind::Texture1DArray:
+    return 1;
+  case ResourceKind::Texture2D:
+  case ResourceKind::Texture2DArray:
+  case ResourceKind::Texture2DMS:
+  case ResourceKind::Texture2DMSArray:
+    return 2;
+  case ResourceKind::Texture3D:
+    return 3;
+  default:
+    break;
+  }
+  return 0;
+}
+
 /// `DXIL::ComponentType`, as stored in a signature element's metadata.
 enum class DXILComponentType : unsigned {
   I16 = 2,
@@ -132,7 +250,10 @@ enum class DXILComponentType : unsigned {
   I32 = 4,
   U32 = 5,
   F16 = 8,
-  F32 = 9
+  F32 = 9,
+  F64 = 10,
+  SNormF32 = 11,
+  UNormF32 = 12
 };
 
 /// `DXIL::SemanticKind`, as stored in a signature element's metadata.
@@ -412,6 +533,9 @@ llvm::Type *componentLLVMType(DXILComponentType Type,
   case DXILComponentType::U32:
     return llvm::Type::getInt32Ty(Context);
   case DXILComponentType::F32:
+  case DXILComponentType::F64:
+  case DXILComponentType::SNormF32:
+  case DXILComponentType::UNormF32:
     break;
   }
   return llvm::Type::getFloatTy(Context);
@@ -562,12 +686,27 @@ private:
 
   Signature Inputs;
   Signature Outputs;
-  /// The `dx.op.createHandle` call for each declared constant buffer, keyed
-  /// by the `cb#` number the operands name it with.
-  llvm::DenseMap<unsigned, llvm::Value *> ConstantBuffers;
-  /// The index of each constant buffer's declaration within its resource
-  /// class, which is what a handle is bound by.
-  llvm::DenseMap<unsigned, unsigned> ConstantBufferRanges;
+  /// A resource the shader declares, in the terms `dx.op.createHandle` and
+  /// `!dx.resources` describe it.
+  struct Resource {
+    ResourceClass Class = ResourceClass::SRV;
+    /// The index of the declaration within its resource class, which is
+    /// what a handle is bound by -- not the register it binds to.
+    unsigned Range = 0;
+    unsigned Bind = 0;
+    unsigned Space = 0;
+    unsigned Size = 1;
+    ResourceKind Kind = ResourceKind::Texture2D;
+    /// The component type a typed resource returns, as a DXIL component
+    /// type; a structured buffer's element stride otherwise.
+    DXILComponentType Component = DXILComponentType::F32;
+    unsigned Stride = 0;
+    unsigned SampleCount = 0;
+    llvm::Value *Handle = nullptr;
+    std::string Name;
+  };
+  /// Every declared resource, keyed by (class, register number).
+  llvm::DenseMap<uint64_t, Resource> Resources;
   /// The output signature element each registerless output -- the depth
   /// and stencil ones -- resolves to. They name no register, so they
   /// cannot be found by (row, component) the way the others are.
@@ -722,10 +861,32 @@ private:
   /// number, or nullopt if it is not a plain immediate.
   static std::optional<unsigned> registerNumber(OperandIndexAttr Index);
 
+  /// Records every resource the shader declares.
+  void collectResources(dxsa::ModuleOp Shader);
   /// Emits the `dx.op.createHandle` call for every declared resource. DXIL
   /// binds a resource once, at the top of the entry point, and refers to
   /// the resulting handle from every access.
   void createResourceHandles(dxsa::ModuleOp Shader);
+  /// The key \c Resources gives a resource of \p Class bound at \p Id.
+  static uint64_t resourceKey(ResourceClass Class, unsigned Id) {
+    return (uint64_t(Class) << 32) | Id;
+  }
+  /// Returns the resource an operand names, or null (having emitted a
+  /// diagnostic) when the shader never declared it.
+  const Resource *findResource(ResourceClass Class, OperandIndexAttr Index,
+                               mlir::Operation *Op);
+  /// The handle an operand resolves to: the one bound at the entry point,
+  /// or -- when shader model 5.1's declared range is indexed at run time --
+  /// one bound at the access.
+  /// \p Trailing is how many index slots follow the register selector --
+  /// one for a constant buffer, which also indexes the row, none for the
+  /// resources an operand names bare.
+  llvm::Value *resourceHandle(ResourceClass Class, OperandIndexAttr Index,
+                              mlir::Operation *Op, unsigned Slot,
+                              unsigned Trailing = 0, bool NonUniform = false);
+  /// The `!dx.resources` entry for every resource of \p Class, or null when
+  /// the shader declares none.
+  llvm::MDNode *emitResourceBindings(ResourceClass Class);
   /// Evaluates one index slot of an operand: an immediate, a register read
   /// at run time, or their sum.
   llvm::Value *readIndex(IndexAttr Index, unsigned Slot, mlir::Operation *Op);
@@ -804,6 +965,44 @@ private:
   bool translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
                      SrcOperandAttr Cond, SrcOperandAttr True,
                      SrcOperandAttr False, bool Saturate);
+  /// How a member of the sampling family is shaped: which DXIL operation
+  /// it is, and what it appends to the shared
+  /// (resource, sampler, coordinates, offsets) prefix.
+  struct SampleForm {
+    DXILOp Op = DXILOp::Sample;
+    llvm::StringRef Name;
+    /// Source operands appended after the offsets, in order.
+    llvm::SmallVector<SrcOperandAttr, 4> Extra;
+    /// A trailing LOD clamp, which defaults to zero when the instruction
+    /// has no `_cl` form.
+    bool Clamp = false;
+    /// `gather4`'s channel, which its sampler operand's swizzle names.
+    bool Channel = false;
+    /// At most two offsets, which is all a gather takes.
+    bool NarrowOffsets = false;
+    /// `sample_d`'s gradients, which are appended as three components of
+    /// each of two operands.
+    bool Gradients = false;
+  };
+
+  /// Returns (creating on first use) the named struct type a resource load
+  /// returns: four components of \p Element plus a mapping status.
+  llvm::StructType *resRetTy(llvm::Type *Element);
+  /// Translates one member of the sampling family.
+  bool translateSample(mlir::Operation *Op, DstOperandAttr Dst,
+                       SrcOperandAttr Address, SrcOperandAttr SRV,
+                       SrcOperandAttr Sampler, SampleOffsetAttr Offset,
+                       const SampleForm &Form);
+  /// Reads the \p Count coordinates \p Address holds, padded to four with
+  /// `undef` -- which is the shape every sampling operation takes.
+  bool readCoordinates(SrcOperandAttr Address, unsigned Count, unsigned Total,
+                       llvm::SmallVectorImpl<llvm::Value *> &Args,
+                       mlir::Operation *Op);
+  /// Writes the components \p Dst enables from the resource-load result
+  /// \p Value, picking each through \p SRV's swizzle.
+  bool writeResourceResult(DstOperandAttr Dst, SrcOperandAttr SRV,
+                           llvm::Value *Value, mlir::Operation *Op);
+
   /// Translates `sincos`, whose two destinations are written from one
   /// source and either of which may be `null`.
   bool translateSincos(mlir::Operation *Op, DstOperandAttr Sin,
@@ -1264,27 +1463,126 @@ llvm::StructType *Translator::twoI32Ty() {
   return llvm::StructType::create(Context, Fields, "dx.types.twoi32");
 }
 
-void Translator::createResourceHandles(dxsa::ModuleOp Shader) {
-  // `createHandle`'s third argument is the index of the declaration within
-  // its resource class, not the register the declaration binds to.
-  unsigned Range = 0;
-  for (mlir::Operation &Op : *Shader.getBodyBlock()) {
-    auto Dcl = llvm::dyn_cast<dxsa::DclConstantBuffer>(&Op);
-    if (!Dcl)
-      continue;
+/// The DXIL component type a DXBC resource return type names.
+static DXILComponentType toComponentType(ResourceReturnType Type) {
+  switch (Type) {
+  case ResourceReturnType::Unorm:
+    return DXILComponentType::UNormF32;
+  case ResourceReturnType::Snorm:
+    return DXILComponentType::SNormF32;
+  case ResourceReturnType::Sint:
+    return DXILComponentType::I32;
+  case ResourceReturnType::Uint:
+    return DXILComponentType::U32;
+  case ResourceReturnType::Float:
+    return DXILComponentType::F32;
+  }
+  return DXILComponentType::F32;
+}
+
+void Translator::collectResources(dxsa::ModuleOp Shader) {
+  // A handle names its resource by the index of the declaration within its
+  // class, so the declarations are numbered per class in program order.
+  llvm::DenseMap<unsigned, unsigned> Ranges;
+  auto record = [&](ResourceClass Class, unsigned Id,
+                    std::optional<uint32_t> Lbound,
+                    std::optional<uint32_t> Ubound,
+                    std::optional<uint32_t> Space) -> Resource & {
+    unsigned &Range = Ranges[unsigned(Class)];
+    Resource &R = Resources[resourceKey(Class, Id)];
+    R.Class = Class;
+    R.Range = Range;
     // Shader model 5.1 binds a range of registers and names the range by
     // an identifier of its own; before that the identifier is the register.
-    unsigned Id = Dcl.getId();
-    unsigned Bind = Dcl.getLbound().value_or(Id);
-    ConstantBufferRanges[Id] = Range;
-    ConstantBuffers[Id] =
-        emitDXOp("createHandle", DXILOp::CreateHandle, handleTy(),
-                 {llvm::ConstantInt::get(i8Ty(), unsigned(ResourceClass::CBV)),
-                  llvm::ConstantInt::get(i32Ty(), Range++),
-                  llvm::ConstantInt::get(i32Ty(), Bind),
-                  llvm::ConstantInt::get(i1Ty(), 0)},
-                 noOverload());
+    R.Bind = Lbound.value_or(Id);
+    R.Space = Space.value_or(0);
+    R.Size = Ubound ? *Ubound - R.Bind + 1 : 1;
+    R.Name = (llvm::StringRef(Class == ResourceClass::SRV   ? "T"
+                              : Class == ResourceClass::UAV ? "U"
+                              : Class == ResourceClass::CBV ? "CB"
+                                                            : "S") +
+              llvm::Twine(Range))
+                 .str();
+    ++Range;
+    return R;
+  };
+
+  for (mlir::Operation &Op : *Shader.getBodyBlock()) {
+    if (auto Dcl = llvm::dyn_cast<dxsa::DclConstantBuffer>(&Op)) {
+      Resource &R = record(ResourceClass::CBV, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      // A constant buffer's "stride" is its size in bytes: one 16-byte row
+      // per declared vector.
+      R.Stride = Dcl.getSize() * 16;
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclSampler>(&Op)) {
+      Resource &R = record(ResourceClass::Sampler, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      R.Kind = ResourceKind::Sampler;
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclResource>(&Op)) {
+      Resource &R = record(ResourceClass::SRV, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      R.Kind = toResourceKind(Dcl.getDim());
+      R.Component = toComponentType(Dcl.getX());
+      R.SampleCount = Dcl.getSampleCount().value_or(0);
+    }
   }
+}
+
+void Translator::createResourceHandles(dxsa::ModuleOp Shader) {
+  // DXIL binds the resource classes in order -- SRVs, UAVs, constant
+  // buffers, samplers -- and each class in the order its declarations were
+  // numbered, which is not the order they appear in.
+  llvm::SmallVector<Resource *, 8> Declared;
+  for (auto &[Key, R] : Resources)
+    Declared.push_back(&R);
+  llvm::sort(Declared, [](const Resource *L, const Resource *R) {
+    return std::tie(L->Class, L->Range) < std::tie(R->Class, R->Range);
+  });
+  for (Resource *R : Declared)
+    R->Handle = emitDXOp("createHandle", DXILOp::CreateHandle, handleTy(),
+                         {llvm::ConstantInt::get(i8Ty(), unsigned(R->Class)),
+                          llvm::ConstantInt::get(i32Ty(), R->Range),
+                          llvm::ConstantInt::get(i32Ty(), R->Bind),
+                          llvm::ConstantInt::get(i1Ty(), 0)},
+                         noOverload());
+}
+
+const Translator::Resource *Translator::findResource(ResourceClass Class,
+                                                     OperandIndexAttr Index,
+                                                     mlir::Operation *Op) {
+  std::optional<unsigned> Id = registerNumber(Index);
+  auto Found = Id ? Resources.find(resourceKey(Class, *Id)) : Resources.end();
+  if (Found == Resources.end()) {
+    unsupported(Op) << ": access to an undeclared resource";
+    return nullptr;
+  }
+  return &Found->second;
+}
+
+llvm::Value *Translator::resourceHandle(ResourceClass Class,
+                                        OperandIndexAttr Index,
+                                        mlir::Operation *Op, unsigned Slot,
+                                        unsigned Trailing, bool NonUniform) {
+  const Resource *R = findResource(Class, Index, Op);
+  if (!R)
+    return nullptr;
+  // Shader model 5.1 binds a range of registers, so the operand also picks
+  // the register within that range -- and may do so at run time, in which
+  // case the handle is bound at the access rather than at the entry point.
+  if (Index.size() < 2 + Trailing || !Index[1].getRelative())
+    return R->Handle;
+  llvm::Value *&Cached = HandleCache[Index.getAsOpaquePointer()];
+  if (Cached)
+    return Cached;
+  llvm::Value *Bind = readIndex(Index[1], Slot, Op);
+  if (!Bind)
+    return nullptr;
+  Cached = emitDXOp("createHandle", DXILOp::CreateHandle, handleTy(),
+                    {llvm::ConstantInt::get(i8Ty(), unsigned(Class)),
+                     llvm::ConstantInt::get(i32Ty(), R->Range), Bind,
+                     llvm::ConstantInt::get(i1Ty(), NonUniform)},
+                    noOverload());
+  return Cached;
 }
 
 llvm::Value *Translator::readIndex(IndexAttr Index, unsigned Slot,
@@ -1310,36 +1608,13 @@ llvm::Value *Translator::readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
     unsupported(Op) << ": constant buffer operand indexing";
     return nullptr;
   }
-  std::optional<unsigned> Id = registerNumber(Index);
-  auto Declared = Id ? ConstantBuffers.find(*Id) : ConstantBuffers.end();
-  if (Declared == ConstantBuffers.end()) {
-    unsupported(Op) << ": read of an undeclared constant buffer";
+  llvm::Value *Handle =
+      resourceHandle(ResourceClass::CBV, Index, Op, Slot, /*Trailing=*/1);
+  if (!Handle)
     return nullptr;
-  }
-
   llvm::Value *Row = readIndex(Index[Index.size() - 1], Slot, Op);
   if (!Row)
     return nullptr;
-
-  // Shader model 5.1 binds a range of registers, so the operand also picks
-  // the register within that range -- and may do so at run time, in which
-  // case the handle is bound at the access rather than at the entry point.
-  llvm::Value *Handle = Declared->second;
-  if (Index.size() >= 3 && Index[1].getRelative()) {
-    llvm::Value *&Cached = HandleCache[Src.getAsOpaquePointer()];
-    if (!Cached) {
-      llvm::Value *Bind = readIndex(Index[1], Slot, Op);
-      if (!Bind)
-        return nullptr;
-      Cached = emitDXOp(
-          "createHandle", DXILOp::CreateHandle, handleTy(),
-          {llvm::ConstantInt::get(i8Ty(), unsigned(ResourceClass::CBV)),
-           llvm::ConstantInt::get(i32Ty(), ConstantBufferRanges.lookup(*Id)),
-           Bind, llvm::ConstantInt::get(i1Ty(), 0)},
-          noOverload());
-    }
-    Handle = Cached;
-  }
 
   llvm::Type *Element = Ty->isFloatTy() ? floatTy() : i32Ty();
   auto Key = std::make_tuple(Src.getAsOpaquePointer(), Row, Element);
@@ -2084,7 +2359,6 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
       OperandType Kind;
       OperandIndexAttr Index;
       OperandMinPrecisionAttr MinPrecision;
-      SwizzleAttr Swizzle;
       llvm::SmallVector<unsigned, 4> Comps;
       if (auto Src = llvm::dyn_cast<SrcOperandAttr>(Attr.getValue())) {
         Kind = Src.getType();
@@ -2499,6 +2773,115 @@ bool Translator::translateSincos(mlir::Operation *Op, DstOperandAttr Sin,
   return true;
 }
 
+llvm::StructType *Translator::resRetTy(llvm::Type *Element) {
+  llvm::StringRef Suffix = Element->isFloatTy() ? "f32" : "i32";
+  std::string Name = ("dx.types.ResRet." + Suffix).str();
+  if (auto *Existing = llvm::StructType::getTypeByName(Context, Name))
+    return Existing;
+  llvm::Type *Fields[] = {Element, Element, Element, Element, i32Ty()};
+  return llvm::StructType::create(Context, Fields, Name);
+}
+
+bool Translator::readCoordinates(SrcOperandAttr Address, unsigned Count,
+                                 unsigned Total,
+                                 llvm::SmallVectorImpl<llvm::Value *> &Args,
+                                 mlir::Operation *Op) {
+  for (unsigned I = 0; I < Total; ++I) {
+    if (I >= Count) {
+      Args.push_back(llvm::UndefValue::get(floatTy()));
+      continue;
+    }
+    llvm::Value *Value = readSource(Address, I, floatTy(), Op, /*Slot=*/0);
+    if (!Value)
+      return false;
+    Args.push_back(Value);
+  }
+  return true;
+}
+
+bool Translator::writeResourceResult(DstOperandAttr Dst, SrcOperandAttr SRV,
+                                     llvm::Value *Value, mlir::Operation *Op) {
+  llvm::SmallVector<llvm::Value *, 4> Components;
+  for (unsigned Comp : destinationComponents(Dst))
+    Components.push_back(
+        Builder.CreateExtractValue(Value, sourceComponent(SRV, Comp)));
+  return writeDestination(Dst, Components, Op);
+}
+
+bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
+                                 SrcOperandAttr Address, SrcOperandAttr SRV,
+                                 SrcOperandAttr Sampler,
+                                 SampleOffsetAttr Offset,
+                                 const SampleForm &Form) {
+  const Resource *Texture =
+      findResource(ResourceClass::SRV, SRV.getIndex(), Op);
+  if (!Texture)
+    return false;
+  llvm::Value *TextureHandle =
+      resourceHandle(ResourceClass::SRV, SRV.getIndex(), Op, /*Slot=*/1,
+                     /*Trailing=*/0, bool(SRV.getNonUniform()));
+  llvm::Value *SamplerHandle =
+      resourceHandle(ResourceClass::Sampler, Sampler.getIndex(), Op, /*Slot=*/2,
+                     /*Trailing=*/0, bool(Sampler.getNonUniform()));
+  if (!TextureHandle || !SamplerHandle)
+    return false;
+
+  llvm::SmallVector<llvm::Value *, 16> Args = {TextureHandle, SamplerHandle};
+  bool IsLOD = Form.Op == DXILOp::CalculateLOD;
+  if (!readCoordinates(Address,
+                       IsLOD ? spatialCount(Texture->Kind)
+                             : coordinateCount(Texture->Kind),
+                       IsLOD ? 3 : 4, Args, Op))
+    return false;
+
+  // A resource with no texel-offset support takes `undef` where the
+  // offsets would go, and one that does takes zero when the instruction
+  // named none.
+  unsigned Offsets = offsetCount(Texture->Kind);
+  if (Form.NarrowOffsets)
+    Offsets = std::min(Offsets, 2u);
+  unsigned Slots = Form.NarrowOffsets ? 2 : 3;
+  if (!IsLOD) {
+    int32_t Values[3] = {Offset ? Offset.getU() : 0, Offset ? Offset.getV() : 0,
+                         Offset ? Offset.getW() : 0};
+    for (unsigned I = 0; I < Slots; ++I)
+      Args.push_back(I < Offsets ? llvm::ConstantInt::get(i32Ty(), Values[I])
+                                 : llvm::UndefValue::get(i32Ty()));
+  }
+
+  for (SrcOperandAttr Src : Form.Extra) {
+    llvm::Value *Value = readSource(Src, 0, floatTy(), Op, /*Slot=*/3);
+    if (!Value)
+      return false;
+    Args.push_back(Value);
+  }
+  if (Form.Gradients)
+    return false;
+  if (Form.Channel)
+    Args.push_back(
+        llvm::ConstantInt::get(i32Ty(), sourceComponent(Sampler, 0)));
+  if (Form.Clamp)
+    Args.push_back(llvm::ConstantFP::get(floatTy(), 0.0));
+  if (IsLOD)
+    Args.push_back(llvm::ConstantInt::get(i1Ty(), 1));
+
+  llvm::Type *Element =
+      componentLLVMType(Texture->Component == DXILComponentType::I32 ||
+                                Texture->Component == DXILComponentType::U32
+                            ? Texture->Component
+                            : DXILComponentType::F32,
+                        Context);
+  if (IsLOD) {
+    llvm::Value *Value = emitDXOp(Form.Name, Form.Op, floatTy(), Args);
+    llvm::SmallVector<llvm::Value *, 4> Components(
+        destinationComponents(Dst).size(), Value);
+    return writeDestination(Dst, Components, Op);
+  }
+  llvm::Value *Value =
+      emitDXOp(Form.Name, Form.Op, resRetTy(Element), Args, Element);
+  return writeResourceResult(Dst, SRV, Value, Op);
+}
+
 //===----------------------------------------------------------------------===//
 // Control flow
 //===----------------------------------------------------------------------===//
@@ -2877,6 +3260,58 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
   if (auto Mad = llvm::dyn_cast<dxsa::UMad>(Op))
     return translateMad(Op, Mad.getDst(), Mad.getLhs(), Mad.getRhs(),
                         Mad.getAcc(), Saturate);
+  if (auto S = llvm::dyn_cast<dxsa::Sample>(Op)) {
+    SampleForm Form{DXILOp::Sample, "sample", {}, /*Clamp=*/true};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleL>(Op)) {
+    SampleForm Form{DXILOp::SampleLevel, "sampleLevel", {S.getSrcLod()}};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleB>(Op)) {
+    SampleForm Form{DXILOp::SampleBias,
+                    "sampleBias",
+                    {S.getSrcLodBias()},
+                    /*Clamp=*/true};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleC>(Op)) {
+    SampleForm Form{DXILOp::SampleCmp,
+                    "sampleCmp",
+                    {S.getSrcReferenceValue()},
+                    /*Clamp=*/true};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleCLZ>(Op)) {
+    SampleForm Form{DXILOp::SampleCmpLevelZero,
+                    "sampleCmpLevelZero",
+                    {S.getSrcReferenceValue()}};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::Gather4>(Op)) {
+    SampleForm Form{DXILOp::TextureGather, "textureGather",  {},
+                    /*Clamp=*/false,       /*Channel=*/true,
+                    /*NarrowOffsets=*/true};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::LOD>(Op)) {
+    SampleForm Form{DXILOp::CalculateLOD, "calculateLOD", {}};
+    return translateSample(Op, S.getDst(), S.getSrc0(), S.getSrc1(),
+                           S.getSrc2(), SampleOffsetAttr(), Form);
+  }
+
   if (auto Bits = llvm::dyn_cast<dxsa::UBFE>(Op)) {
     SrcOperandAttr Sources[] = {Bits.getSrc0(), Bits.getSrc1(), Bits.getSrc2()};
     return translateVariadic(Op, Bits.getDst(), Sources, Saturate);
@@ -3029,6 +3464,58 @@ void Translator::foldConditionMasks(llvm::Function &Entry) {
 // Metadata
 //===----------------------------------------------------------------------===//
 
+llvm::MDNode *Translator::emitResourceBindings(ResourceClass Class) {
+  llvm::SmallVector<Resource *, 8> Bound;
+  for (auto &[Key, R] : Resources)
+    if (R.Class == Class)
+      Bound.push_back(&R);
+  if (Bound.empty())
+    return nullptr;
+  llvm::sort(Bound, [](const Resource *L, const Resource *R) {
+    return L->Range < R->Range;
+  });
+
+  llvm::SmallVector<llvm::Metadata *, 8> Entries;
+  for (const Resource *R : Bound) {
+    auto *Symbol = llvm::UndefValue::get(
+        llvm::PointerType::get(Context, Class == ResourceClass::CBV ? 2 : 1));
+    llvm::SmallVector<llvm::Metadata *, 9> Fields = {
+        llvm::ConstantAsMetadata::get(
+            llvm::ConstantInt::get(i32Ty(), R->Range)),
+        llvm::ConstantAsMetadata::get(Symbol),
+        llvm::MDString::get(Context, R->Name),
+        llvm::ConstantAsMetadata::get(
+            llvm::ConstantInt::get(i32Ty(), R->Space)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), R->Bind)),
+        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), R->Size)),
+    };
+    if (Class == ResourceClass::CBV) {
+      // A constant buffer's last field is its size in bytes.
+      Fields.push_back(llvm::ConstantAsMetadata::get(
+          llvm::ConstantInt::get(i32Ty(), R->Stride)));
+      Fields.push_back(nullptr);
+    } else if (Class == ResourceClass::Sampler) {
+      // A sampler's is its kind: 0 for the default, 1 for comparison.
+      Fields.push_back(
+          llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0)));
+      Fields.push_back(nullptr);
+    } else {
+      Fields.push_back(llvm::ConstantAsMetadata::get(
+          llvm::ConstantInt::get(i32Ty(), unsigned(R->Kind))));
+      Fields.push_back(llvm::ConstantAsMetadata::get(
+          llvm::ConstantInt::get(i32Ty(), R->SampleCount)));
+      // Tag 0 names the element type a typed resource returns.
+      Fields.push_back(llvm::MDNode::get(
+          Context,
+          {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0)),
+           llvm::ConstantAsMetadata::get(
+               llvm::ConstantInt::get(i32Ty(), unsigned(R->Component)))}));
+    }
+    Entries.push_back(llvm::MDNode::get(Context, Fields));
+  }
+  return llvm::MDNode::get(Context, Entries);
+}
+
 llvm::MDNode *Translator::emitSignature(const Signature &Sig) {
   if (Sig.empty())
     return nullptr;
@@ -3075,6 +3562,16 @@ void Translator::emitMetadata(llvm::Function *Entry) {
            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 6)),
            llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0))}));
 
+  llvm::Metadata *Bindings[] = {emitResourceBindings(ResourceClass::SRV),
+                                emitResourceBindings(ResourceClass::UAV),
+                                emitResourceBindings(ResourceClass::CBV),
+                                emitResourceBindings(ResourceClass::Sampler)};
+  llvm::MDNode *Resources = nullptr;
+  if (llvm::any_of(Bindings, [](llvm::Metadata *M) { return M != nullptr; })) {
+    Resources = llvm::MDNode::get(Context, Bindings);
+    Module->getOrInsertNamedMetadata("dx.resources")->addOperand(Resources);
+  }
+
   llvm::Metadata *Signatures[] = {emitSignature(Inputs), emitSignature(Outputs),
                                   nullptr};
   auto *Properties = llvm::MDNode::get(
@@ -3086,7 +3583,7 @@ void Translator::emitMetadata(llvm::Function *Entry) {
       llvm::ConstantAsMetadata::get(Entry),
       llvm::MDString::get(Context, "main"),
       llvm::MDNode::get(Context, Signatures),
-      nullptr,
+      Resources,
       Properties,
   };
   Module->getOrInsertNamedMetadata("dx.entryPoints")
@@ -3117,6 +3614,7 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
   AllocaBuilder.SetInsertPoint(EntryBB);
   inferTempTypes(Shader);
   createIndexableTemps(Shader);
+  collectResources(Shader);
   createResourceHandles(Shader);
   // DXBC has no strict floating-point semantics; every arithmetic
   // instruction is free to be reassociated and contracted.
