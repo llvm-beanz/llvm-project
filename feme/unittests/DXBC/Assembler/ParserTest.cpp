@@ -116,6 +116,54 @@ TEST(ParserTest, FxcRegisterSpaceTrailer) {
             std::string::npos);
 }
 
+TEST(ParserTest, FxcMnemonicSuffixes) {
+  // `sync`'s memory-scope flags are spelled as mnemonic suffixes.
+  EXPECT_EQ(parseControls("sync_uglobal_g_t"),
+            parseControls("sync uav_global | tgsm | threads"));
+  EXPECT_EQ(parseControls("sync_sat_ugroup"), parseControls("sync uav_group"));
+
+  // Declaration control bits likewise.
+  EXPECT_EQ(parseControls("dcl_uav_structured_opc u0, 16"),
+            parseControls("dcl_uav_structured hasOrderPreservingCounter u0, "
+                          "16"));
+
+  // `_aoffimmi`/`_indexable` stand in for the extended opcode tokens, whose
+  // arguments follow the mnemonic in the same order.
+  Program P = parseOrFail(
+      "ld_aoffimmi_indexable(-5,7,0)(texture2d)(float,float,float,float) "
+      "r0.xyzw, r1.xyzw, t0.xyzw");
+  ASSERT_EQ(P.Instructions.size(), 1u);
+  const Instruction &Inst = P.Instructions[0];
+  EXPECT_TRUE(Inst.HasSampleOffsets);
+  EXPECT_EQ(Inst.SampleOffsets[0], -5);
+  EXPECT_EQ(Inst.SampleOffsets[1], 7);
+  EXPECT_TRUE(Inst.HasResourceDim);
+  EXPECT_EQ(Inst.ResourceDim, 3u); // D3D10_SB_RESOURCE_DIMENSION_TEXTURE2D
+  EXPECT_TRUE(Inst.HasResourceReturnType);
+  EXPECT_EQ(Inst.ResourceReturnTypes[0], 5u); // ...RETURN_TYPE_FLOAT
+
+  EXPECT_EQ(
+      parseOrFail("ld_structured_indexable(structured_buffer, stride=52)"
+                  "(mixed,mixed,mixed,mixed) r0.x, r1.x, r1.y, t0.xxxx")
+          .Instructions[0]
+          .ResourceStride,
+      52u);
+
+  // `resinfo`'s return-format suffix trails the extended opcode arguments.
+  EXPECT_EQ(parseOrFail("resinfo_indexable(texture2d)"
+                        "(float,float,float,float)_uint r0.yzw, r0.x, t0.zxyw")
+                .Instructions[0]
+                .Op,
+            *lookupOpcode("resinfo_uint"));
+
+  // `fxc` spells D3D10_SB_OPCODE_LD_MS as `ldms`.
+  EXPECT_EQ(parseOrFail("ldms_indexable(texture2dms)(float,float,float,float) "
+                        "r0.xyz, r0.xyzw, t3.xyzw, l(0)")
+                .Instructions[0]
+                .Op,
+            *lookupOpcode("ld2dms"));
+}
+
 TEST(ParserTest, SaturateSuffix) {
   Program P = parseOrFail("mul_sat r0.xyzw, r1.xyzw, r2.xyzw");
   ASSERT_EQ(P.Instructions.size(), 1u);

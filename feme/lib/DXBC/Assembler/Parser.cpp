@@ -204,6 +204,14 @@ constexpr KeywordValue ProfilePrefixes[] = {
     {"ps", 0}, {"vs", 1}, {"gs", 2}, {"hs", 3}, {"ds", 4}, {"cs", 5},
 };
 
+// The `sync` flag suffixes `fxc` folds into the mnemonic, in the order it
+// spells them; the values match SyncFlags above.
+constexpr KeywordValue SyncSuffixes[] = {
+    {"_sat_ugroup", 1u << 13}, {"_ugroup", 1u << 13},
+    {"_uglobal", 1u << 14},    {"_g", 1u << 12},
+    {"_t", 1u << 11},
+};
+
 // D3D10_SB_SAMPLER_MODE, spelled as a trailing keyword by `fxc` where
 // dxbc-as's own grammar folds it into the mnemonic
 // (`dcl_sampler_comparison`).
@@ -501,6 +509,54 @@ private:
   // Instructions
   //===--------------------------------------------------------------------===//
 
+  /// Resolves an `fxc`-spelled mnemonic whose suffixes stand in for control
+  /// bits or extended opcode tokens that dxbc-as spells separately:
+  ///
+  ///   - `sync_uglobal_g_t`      -> `sync` with the flags OR-ed into
+  ///                                \p SuffixControls,
+  ///   - `dcl_uav_structured_opc`/`dcl_interface_dynamicindexed` -> a
+  ///                                declaration with one control bit set,
+  ///   - `<op>[_aoffimmi][_indexable]` -> \p HasAoffimmi / \p HasIndexable,
+  ///                                telling the caller that the extended
+  ///                                opcode tokens' parenthesized arguments
+  ///                                follow the mnemonic.
+  ///
+  /// Returns nullptr if \p Mnemonic is not such a spelling.
+  static const Opcode *lookupFxcMnemonic(llvm::StringRef Mnemonic,
+                                         uint32_t &SuffixControls,
+                                         bool &HasAoffimmi,
+                                         bool &HasIndexable) {
+    if (Mnemonic.consume_front("sync")) {
+      for (const KeywordValue &Suffix : SyncSuffixes)
+        if (Mnemonic.consume_front(Suffix.Name))
+          SuffixControls |= Suffix.Value;
+      if (!Mnemonic.empty() || SuffixControls == 0)
+        return nullptr;
+      return lookupOpcode("sync");
+    }
+    if (Mnemonic == "dcl_uav_structured_opc") {
+      // D3D11_SB_UAV_HAS_ORDER_PRESERVING_COUNTER.
+      SuffixControls |= 0x00800000;
+      return lookupOpcode("dcl_uav_structured");
+    }
+    if (Mnemonic == "dcl_interface_dynamicindexed") {
+      // D3D11_SB_INTERFACE_INDEXED_BIT.
+      SuffixControls |= 1u << 11;
+      return lookupOpcode("dcl_interface");
+    }
+
+    HasIndexable = Mnemonic.consume_back("_indexable");
+    HasAoffimmi = Mnemonic.consume_back("_aoffimmi");
+    // `fxc` spells D3D10_SB_OPCODE_LD_MS as `ldms`, not `ld2dms`.
+    if (Mnemonic == "ldms")
+      return lookupOpcode("ld2dms");
+    if (Mnemonic == "ldms_s")
+      return lookupOpcode("ld2dms_s");
+    if (!HasIndexable && !HasAoffimmi)
+      return nullptr;
+    return lookupOpcode(Mnemonic);
+  }
+
   /// Parses one full statement: a mnemonic (with optional `_sat` suffix)
   /// followed by whatever modifiers and operands its InstructionKind
   /// grammar allows.
@@ -510,7 +566,13 @@ private:
 
     llvm::StringRef Mnemonic = Current.Spelling;
     bool Saturate = false;
+    uint32_t SuffixControls = 0;
+    bool HasAoffimmi = false;
+    bool HasIndexable = false;
     const Opcode *Op = lookupOpcode(Mnemonic);
+    if (!Op)
+      Op = lookupFxcMnemonic(Mnemonic, SuffixControls, HasAoffimmi,
+                             HasIndexable);
     if (!Op && Mnemonic.consume_back("_sat")) {
       Op = lookupOpcode(Mnemonic);
       Saturate = Op != nullptr;
@@ -523,10 +585,33 @@ private:
     Inst.Op = *Op;
     Inst.Saturate = Saturate;
     const OpcodeInfo &Info = getOpcodeInfo(Inst.Op);
-    Inst.Controls = Info.Controls;
+    Inst.Controls = Info.Controls | SuffixControls;
 
     if (Saturate && !(Info.Flags & OF_Saturable))
       return error("'_sat' is not valid on '" + Info.Mnemonic + "'");
+
+    if (HasAoffimmi) {
+      if (llvm::Error E = parseSampleOffsets(Inst))
+        return std::move(E);
+    }
+    if (HasIndexable) {
+      if (llvm::Error E = parseResourceDim(Inst))
+        return std::move(E);
+      if (llvm::Error E = parseResourceReturnTypes(Inst))
+        return std::move(E);
+      Inst.HasResourceReturnType = true;
+      // `resinfo_indexable(...)(...)_uint`: the return-format suffix trails
+      // the extended opcode tokens' arguments rather than the base mnemonic.
+      if (Current.Kind == TokenKind::Identifier &&
+          Current.Spelling.starts_with("_")) {
+        std::string Full = (Info.Mnemonic + Current.Spelling).str();
+        if (const Opcode *Suffixed = lookupOpcode(Full)) {
+          Inst.Op = *Suffixed;
+          Inst.Controls = getOpcodeInfo(*Suffixed).Controls | SuffixControls;
+          advance();
+        }
+      }
+    }
 
     if (llvm::Error E = parseModifiers(Inst, Info))
       return std::move(E);
@@ -542,8 +627,10 @@ private:
         return std::move(E);
       break;
     case InstructionKind::FlagList:
-      if (llvm::Error E = parseFlagList(Inst))
-        return std::move(E);
+      // `sync_uglobal_g_t` already carries its flags in the mnemonic.
+      if (SuffixControls == 0)
+        if (llvm::Error E = parseFlagList(Inst))
+          return std::move(E);
       break;
     case InstructionKind::ControlEnum:
       if (llvm::Error E = parseControlEnum(Inst))
@@ -746,6 +833,11 @@ private:
     Inst.ResourceStride = 0;
     if (Current.Kind == TokenKind::Comma) {
       advance();
+      // `fxc` names the field (`stride=52`); dxbc-as spells it positionally.
+      if (consumeIdentifier("stride")) {
+        if (llvm::Error E = expectToken(TokenKind::Equals, "'='"))
+          return E;
+      }
       llvm::Expected<uint64_t> Stride = parseInteger("a structure stride");
       if (!Stride)
         return Stride.takeError();
