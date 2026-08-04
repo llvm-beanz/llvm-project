@@ -4186,3 +4186,119 @@ temps, group-shared memory, and the stage-specific declarations. That is
 117 of the 138 fixtures. Each is an increment on the same skeleton rather
 than a redesign, which is why I stopped at a working slice with real tests
 rather than a broader but unverified one.
+
+## Part 3: Tooling to construct fuller DXContainer test fixtures
+
+### The request
+
+Following on from "Signature element names and component types are
+synthesized, not read" above: build the tooling to construct the DXContainer
+parts a bare `.dxasm` fixture cannot carry (`ISGN`/`OSGN`, and by extension
+`RDEF`/`PCSG`/`STAT`), using `ObjectYAML`/`yaml2obj`, and merge them with
+`dxbc-as`'s assembled bytecode using `llvm-objcopy`, with `split-file` to keep
+the YAML and `.dxasm` in one test file.
+
+### First finding: two different "DXContainer"s
+
+LLVM's `DXContainerYAML`/`yaml2dxcontainer` and the DXContainer support in
+`llvm-objcopy`/`obj2yaml` target the *newer* container format `dxc` emits for
+DXIL (`DXIL`, `ISG1`/`OSG1`/`PSG1`, `PSV0`, `RTS0`, `HASH`, `SFI0`, ...:
+`llvm/include/llvm/BinaryFormat/DXContainerConstants.def`). The dxilconv
+fixtures this session is about are the *older* container format `fxc` emits
+for shader model 5.x (`RDEF`, `ISGN`, `OSGN`, `PCSG`, `SHEX`, `STAT`, ...),
+which is a different set of part names inside the *same* outer container
+shape (magic `DXBC`, hash, version, part count, FourCC-named parts). LLVM's
+`dxbc::PartType` enum only knows the newer names; every legacy part name
+parses as `PartType::Unknown`.
+
+That distinction turned out to matter a lot:
+
+- `dxbc-as --emit=container` (`feme/lib/DXBC/Assembler/Encoder.cpp`,
+  `wrapInContainer`) already wraps its assembled bytecode in exactly this
+  legacy shape, with a single `SHEX` part -- confirming this is the right
+  container flavor to target, and that `dxbc-as` is the natural source of the
+  bytecode part.
+- `DXContainerYAML`'s writer (`DXContainerEmitter.cpp`) and reader
+  (`DXContainerYAML.cpp`, used by `obj2yaml`) both switch on `PartType` and,
+  for `Unknown`, silently emit/see nothing -- the *size* a YAML `Part`
+  declares is honored (padded with zeros on write), but any content is
+  discarded. So a test author could declare a part named `ISGN` in YAML, but
+  not put real bytes in it.
+- `llvm-objcopy`'s DXContainer support (`llvm/lib/ObjCopy/DXContainer/`) is
+  format-agnostic at the part level -- `DXContainerReader`/`Writer` just deal
+  in `{Name, ArrayRef<uint8_t> Data}`, no `PartType` switch at all -- so it
+  already round-trips legacy parts' bytes correctly. But `ConfigManager`
+  explicitly rejected `--add-section` for DXContainer
+  (`"option is not supported for DXContainer"`), and `DXContainerObjcopy.cpp`
+  never read `Config.UpdateSection` at all, so neither half of "merge a
+  separately-built part into a container" existed yet.
+
+### What I built
+
+1. **`DXContainerEmitter.cpp`**: for `PartType::Unknown`, write `PrivateData`
+   verbatim if the YAML supplies it (the same field `PRIV` already uses),
+   instead of unconditionally discarding it. This is a minimal, targeted
+   change -- reusing an existing field/YAML key rather than inventing a new
+   one -- that makes `ISGN`/`OSGN`/etc. authorable.
+2. **I did *not*** make the symmetric change on `obj2yaml`'s read side
+   (`DXContainerYAML.cpp`'s `fromDXContainer`), even though it looked
+   like the obvious pairing. Several existing tests
+   (`ExplicitSizeAndOffsets.yaml`, `OmitSizeAndOffsets.yaml`,
+   `only-section-headers.yaml`) round-trip synthetic unknown-named parts
+   (`FKE0`..`FKE6`) through `yaml2obj | obj2yaml` and assert *no* `PrivateData`
+   appears for them -- that is, "unknown part, no visible content" is already
+   a documented, tested convention on the read side, and dumping raw bytes
+   there would silently change what every unmodeled part looks like once
+   round-tripped, not just the new legacy DXBC ones. I found this the hard
+   way: my first attempt added symmetric read support and broke those three
+   tests. Keeping the change write-only avoids relitigating that convention
+   and keeps this change minimal; tests that need to see the merged bytes do
+   so with `od`/`FileCheck` on the raw file instead of via `obj2yaml`.
+3. **`llvm-objcopy`**: added `--add-section`/`--update-section` handling to
+   `DXContainerObjcopy.cpp::handleArgs`, and removed `--add-section` from
+   `ConfigManager`'s DXContainer rejection list. `--add-section` validates the
+   part name is exactly 4 characters (DXContainer part names are fixed-size
+   FourCCs; nothing upstream previously enforced or needed this for
+   DXContainer), and `--update-section` requires the target part to already
+   exist. Both are format-agnostic at the storage level, so this was a small
+   addition once the reader/writer already handled generic parts.
+
+### Verifying the merge actually works
+
+Rather than trust the round-trip in the abstract, I ran the real pipeline by
+hand before writing any lit test: `yaml2obj` a skeleton with an `ISGN` part
+(`PrivateData` bytes), `dxbc-as --emit=binary` one of the existing
+`feme/test/Translate/DXBC/*.dxasm` fixtures, `llvm-objcopy --add-section
+=SHEX=...`, then `obj2yaml` the result and confirmed both parts and their
+correct sizes/offsets appear. Also exercised `--update-section` the same way.
+Both plain `--add-section` misuse (wrong-length part name) and the happy path
+have regression tests now
+(`llvm/test/tools/llvm-objcopy/DXContainer/{add,update}-section*.yaml`).
+
+### The `split-file` + `dxbc-as` + `yaml2obj` + `llvm-objcopy` test
+
+`feme/test/Tools/dxbc-as/full-container.test` is the demonstration: one
+`split-file`-delimited file holding a container-skeleton YAML (`ISGN`/`OSGN`
+with placeholder bytes) and a minimal `.dxasm` shader, four `RUN:` lines
+(`split-file` -> `yaml2obj` -> `dxbc-as --emit=binary` -> `llvm-objcopy
+--add-section`), and an `obj2yaml`/`FileCheck` assertion that the merged
+container has all three parts at the expected sizes. I picked the smallest
+possible shader (`.shader_model pixel 5 0` / `ret`, borrowed from
+`dxbc-as-binary-emit.dxasm`) since the point of this test is the container
+plumbing, not shader content.
+
+### What this does *not* yet do
+
+Nothing in `feme` parses `ISGN`/`OSGN` out of a real container -- the DXBC
+importer only ever sees a bare `SHEX`-shaped bytecode stream via `dxbc-as`,
+whether or not that stream is wrapped further. Building a signature-aware
+container reader into the importer (so a test could feed it a full
+container and see real signature names/types instead of synthesized ones)
+is future work; this session only builds the tooling to *construct* such
+containers for when that reader exists, per the request. I considered
+wiring one dxilconv fixture end-to-end (a full container in, translated
+output with real signature names out) to make the win concrete, but that
+would require writing that importer-side container/signature reader first,
+which is a translation-correctness change, not a test-tooling change, and
+is a large enough increment to deserve its own session rather than being
+folded into this one.
