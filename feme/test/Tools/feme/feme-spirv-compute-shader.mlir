@@ -1,6 +1,6 @@
 // REQUIRES: spirv-registered-target
 // RUN: feme-translate --no-implicit-module --serialize-spirv %s -o %t.spv
-// RUN: feme --from=spirv --target=spirv %t.spv -o %t.roundtrip.spv
+// RUN: feme --target=spirv %t.spv -o %t.roundtrip.spv
 // RUN: feme-translate --import-spirv %t.roundtrip.spv | FileCheck %s
 
 // The `feme` CLI counterpart to test/Target/spirv-backend-compute-shader.mlir:

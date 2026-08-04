@@ -1,6 +1,6 @@
 // REQUIRES: spirv-registered-target, amdgpu-registered-target
 // RUN: feme-translate --no-implicit-module --serialize-spirv %s -o %t.spv
-// RUN: feme --from=spirv --target=amdgcn-amd-amdhsa %t.spv -o %t.o
+// RUN: feme --target=amdgcn-amd-amdhsa %t.spv -o %t.o
 // RUN: od -An -tx1 -N4 %t.o | FileCheck %s
 
 // Retargets a SPIR-V module all the way to a real ISA (AMDGPU) through the

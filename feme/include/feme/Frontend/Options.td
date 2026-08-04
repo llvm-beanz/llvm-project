@@ -25,10 +25,6 @@ def h : Flag<["-"], "h">, Alias<help>,
 def version : Flag<["-", "--"], "version">,
     HelpText<"Display the version of feme">;
 
-def from_EQ : Joined<["--"], "from=">,
-    HelpText<"Input format to translate from (e.g. dxil, dxbc, spirv)">,
-    MetaVarName<"<format>">;
-
 def target_EQ : Joined<["--"], "target=">,
     HelpText<"Output format/target to translate to "
              "(e.g. dxil, spirv, or a target triple)">,

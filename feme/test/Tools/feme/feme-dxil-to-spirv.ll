@@ -1,6 +1,6 @@
 ; REQUIRES: directx-registered-target, spirv-registered-target
 ; RUN: llc %s --filetype=obj -o %t.dxcontainer
-; RUN: feme --from=dxil --target=spirv %t.dxcontainer -o %t.spv
+; RUN: feme --target=spirv %t.dxcontainer -o %t.spv
 ; RUN: od -An -tx1 -N4 %t.spv | FileCheck %s
 
 ; Cross-translates a DXContainer into a SPIR-V module through the full `feme`

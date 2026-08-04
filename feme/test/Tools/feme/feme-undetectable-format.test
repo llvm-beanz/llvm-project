@@ -1,0 +1,12 @@
+// RUN: echo 'not real dxbc' > %t.dxbc
+// RUN: not feme --target=dxil %t.dxbc -o %t.dxil 2>&1 | FileCheck %s
+
+// `feme` auto-detects its input's format from its contents (see
+// feme::detectFormat in feme/lib/Driver/Driver.cpp); it should reject
+// input it cannot recognize as any supported format cleanly (a diagnostic
+// and non-zero exit), not crash. This also covers legacy DXBC bytecode,
+// which is not yet implemented (see the Roadmap / Milestones section of
+// feme/docs/Design.md) and so cannot be distinguished from arbitrary
+// unrecognized input.
+
+// CHECK: feme: could not detect input file format

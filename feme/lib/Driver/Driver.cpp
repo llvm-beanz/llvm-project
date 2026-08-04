@@ -23,10 +23,13 @@
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 #include "feme/Translate/Translator.h"
 
+#include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/TargetParser/Triple.h"
+
+#include <cstring>
 
 using namespace feme;
 
@@ -34,16 +37,45 @@ Driver::Driver(Context &Ctx) : Ctx(Ctx) {}
 
 namespace {
 
-/// Looks up the Importer named by \p From. Returns nullptr for any name
-/// other than "dxil"/"spirv" -- DXBC import is not yet implemented (see the
-/// Roadmap / Milestones section of feme/docs/Design.md).
-const Importer *lookupImporter(llvm::StringRef From) {
+/// Sniffs \p Buffer's binary format to select which Importer parses it, so
+/// `feme` does not need an explicit `--from` flag naming it: DXIL
+/// bitcode/DXContainer and SPIR-V binaries each begin with a distinct,
+/// well-known magic number (see the "Command Line Tool(s)" section of
+/// feme/docs/Design.md). Returns nullptr if \p Buffer's format cannot be
+/// determined this way -- this covers both genuinely unrecognized input and
+/// formats FeMe does not yet import (e.g. legacy DXBC bytecode, not yet
+/// implemented -- see the Roadmap / Milestones section of
+/// feme/docs/Design.md), since neither can be told apart from unrecognized
+/// input without actually importing it.
+const Importer *detectFormat(llvm::MemoryBufferRef Buffer) {
   static const DXILImporter DXIL;
   static const SPIRVImporter SPIRV;
-  if (From == DXIL.getFormatName())
+
+  llvm::StringRef Data = Buffer.getBuffer();
+
+  // A `DXContainer` (magic "DXBC", the format predates the DXIL name --
+  // see llvm::object::DXContainer::parseHeader) wraps a DXIL bitcode part
+  // in FeMe's supported case; raw DXIL is plain LLVM bitcode, optionally
+  // with the standard bitcode wrapper header. Either encoding is
+  // `DXILImporter`'s to parse -- including giving a clean diagnostic for a
+  // `DXContainer` that turns out not to actually hold a DXIL part.
+  if (Data.starts_with("DXBC") ||
+      llvm::isBitcode(
+          reinterpret_cast<const unsigned char *>(Data.data()),
+          reinterpret_cast<const unsigned char *>(Data.data() + Data.size())))
     return &DXIL;
-  if (From == SPIRV.getFormatName())
-    return &SPIRV;
+
+  // SPIR-V binaries are a stream of 32-bit words beginning with a fixed
+  // magic number (see the SPIR-V specification's "Physical Layout of a
+  // SPIR-V Module and Instruction"), in either byte order depending on the
+  // endianness its producer chose.
+  if (Data.size() >= sizeof(uint32_t)) {
+    uint32_t Magic;
+    memcpy(&Magic, Data.data(), sizeof(Magic));
+    if (Magic == 0x07230203u || Magic == 0x03022307u)
+      return &SPIRV;
+  }
+
   return nullptr;
 }
 
@@ -124,11 +156,12 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
 
 llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
                                          const DriverOptions &Opts) const {
-  const Importer *Imp = lookupImporter(Opts.From);
+  const Importer *Imp = detectFormat(Input);
   if (!Imp)
-    return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                   "unsupported --from format '" + Opts.From +
-                                       "' (expected 'dxil' or 'spirv')");
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "could not detect input file format (expected a DXIL bitcode file "
+        "or DXContainer, or a SPIR-V binary module)");
 
   ImportOptions ImportOpts;
   llvm::Expected<Module> Imported = Imp->import(Input, ImportOpts, Ctx);
@@ -155,7 +188,7 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
   // every later stage reads them from; it runs second because
   // `OpRaisingPass` consumes the `!dx.resources` metadata it drops. See the
   // DXIL section of feme/docs/Design.md.
-  if (Opts.From == "dxil") {
+  if (Imp->getFormatName() == "dxil") {
     llvm::ModuleAnalysisManager MAM;
     feme::dxil::OpRaisingPass().run(M, MAM);
     feme::dxil::MetadataRaisingPass().run(M, MAM);

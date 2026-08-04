@@ -42,8 +42,6 @@ std::optional<DriverOptions> parseArgs(llvm::ArrayRef<const char *> Args,
   Opts_.ShowHelp = ParsedArgs.hasArg(OPT_help);
   Opts_.ShowVersion = ParsedArgs.hasArg(OPT_version);
 
-  if (const Arg *A = ParsedArgs.getLastArg(OPT_from_EQ))
-    Opts_.From = A->getValue();
   if (const Arg *A = ParsedArgs.getLastArg(OPT_target_EQ))
     Opts_.Target = A->getValue();
   if (const Arg *A = ParsedArgs.getLastArg(OPT_o))

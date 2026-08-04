@@ -43,9 +43,6 @@ struct DriverOptions {
   /// specified"; callers should apply their own default.
   std::string OutputFilename;
 
-  /// Input format to translate from (e.g. "dxil", "dxbc", "spirv").
-  std::string From;
-
   /// Output format, or target triple, to retarget the translated module to
   /// (e.g. "dxil", "spirv", or a target triple such as "amdgcn-amd-amdhsa").
   std::string Target;

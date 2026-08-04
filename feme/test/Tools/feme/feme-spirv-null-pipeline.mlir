@@ -1,13 +1,13 @@
 // REQUIRES: spirv-registered-target
 // RUN: feme-translate --no-implicit-module --serialize-spirv %s -o %t.spv
-// RUN: feme --from=spirv --target=spirv %t.spv -o %t.roundtrip.spv
+// RUN: feme --target=spirv %t.spv -o %t.roundtrip.spv
 // RUN: feme-translate --import-spirv %t.roundtrip.spv | FileCheck %s
 
 // Exercises the SPIR-V "null pipeline" (see the deviation note in
 // feme/docs/Design.md's Retargeting to Native ISA section) through the full
 // `feme` CLI/`feme::Driver`, rather than composing it one
 // `feme-translate` stage at a time as test/Target/spirv-backend-null-pipeline.mlir
-// does: `feme --from=spirv --target=spirv` should import this module,
+// does: `feme --target=spirv` should import this module,
 // translate it to `llvm::Module` (feme::SPIRVToLLVMTranslator), and retarget
 // it back to a SPIR-V binary (feme::TargetMachineBackend targeting
 // "spirv64-unknown-unknown", feme::Driver's default for `--target=spirv`) in

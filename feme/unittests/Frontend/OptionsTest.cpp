@@ -26,15 +26,15 @@ TEST(OptionsTest, RecognizesHelpFlag) {
   EXPECT_TRUE(Parsed.hasArg(OPT_help));
 }
 
-TEST(OptionsTest, RecognizesJoinedFromEquals) {
+TEST(OptionsTest, RecognizesJoinedTargetEquals) {
   const OptTable &Opts = getOptTable();
   unsigned MissingIndex, MissingCount;
-  const char *Args[] = {"--from=dxil"};
+  const char *Args[] = {"--target=spirv"};
   InputArgList Parsed = Opts.ParseArgs(Args, MissingIndex, MissingCount);
   ASSERT_EQ(MissingCount, 0u);
-  const Arg *A = Parsed.getLastArg(OPT_from_EQ);
+  const Arg *A = Parsed.getLastArg(OPT_target_EQ);
   ASSERT_NE(A, nullptr);
-  EXPECT_STREQ(A->getValue(), "dxil");
+  EXPECT_STREQ(A->getValue(), "spirv");
 }
 
 TEST(OptionsTest, FlagsUnknownOptions) {

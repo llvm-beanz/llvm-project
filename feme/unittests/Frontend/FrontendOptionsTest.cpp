@@ -18,13 +18,11 @@ namespace {
 TEST(FrontendOptionsTest, ParsesFullTranslationInvocation) {
   std::string Diags;
   llvm::raw_string_ostream DiagsOS(Diags);
-  const char *Args[] = {"--from=dxil", "--target=spirv", "-o", "out.spv",
-                        "input.dxil"};
+  const char *Args[] = {"--target=spirv", "-o", "out.spv", "input.dxil"};
   std::optional<DriverOptions> Opts = parseArgs(Args, DiagsOS);
   ASSERT_TRUE(Opts.has_value()) << Diags;
   EXPECT_FALSE(Opts->ShowHelp);
   EXPECT_FALSE(Opts->ShowVersion);
-  EXPECT_EQ(Opts->From, "dxil");
   EXPECT_EQ(Opts->Target, "spirv");
   EXPECT_EQ(Opts->OutputFilename, "out.spv");
   EXPECT_EQ(Opts->InputFilename, "input.dxil");

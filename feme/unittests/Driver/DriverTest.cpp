@@ -29,14 +29,16 @@ namespace {
 // the `feme` CLI (built into a full LLVM build with those targets
 // registered) instead.
 
-TEST(DriverTest, RejectsUnsupportedFromFormat) {
+TEST(DriverTest, RejectsUndetectableFormat) {
   Context Ctx;
   Driver D(Ctx);
 
   frontend::DriverOptions Opts;
-  Opts.From = "dxbc"; // Not yet implemented -- see feme/docs/Design.md.
   Opts.Target = "spirv";
 
+  // Empty input matches none of Driver's format-detection magic numbers
+  // (see feme::detectFormat), so this exercises that rather than any
+  // particular Importer's own parsing.
   llvm::Expected<DriverResult> Result =
       D.run(llvm::MemoryBufferRef("", "driver-test"), Opts);
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
@@ -57,7 +59,6 @@ TEST(DriverTest, RejectsMissingTarget) {
   Driver D(Ctx);
 
   frontend::DriverOptions Opts;
-  Opts.From = "dxil";
   // Opts.Target is not set.
 
   llvm::Expected<DriverResult> Result =
@@ -67,21 +68,37 @@ TEST(DriverTest, RejectsMissingTarget) {
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
 }
 
-TEST(DriverTest, RejectsMalformedInputForRequestedFromFormat) {
+TEST(DriverTest, RejectsMalformedInputForDetectedSPIRVFormat) {
   Context Ctx;
   Driver D(Ctx);
 
   frontend::DriverOptions Opts;
-  Opts.From = "spirv";
   Opts.Target = "spirv";
 
-  // 4 bytes of garbage: word-aligned, but not a valid SPIR-V module, so
-  // Importer::import itself must fail before Driver gets anywhere near
-  // translation/retargeting.
+  // Starts with the SPIR-V magic number (see feme::detectFormat) but is
+  // shorter than the mandatory 5-word header, so Importer::import itself
+  // must fail before Driver gets anywhere near translation/retargeting.
   llvm::Expected<DriverResult> Result =
-      D.run(llvm::MemoryBufferRef(llvm::StringRef("\xde\xad\xbe\xef", 4),
-                                  "driver-test"),
+      D.run(llvm::MemoryBufferRef(
+                llvm::StringRef("\x03\x02\x23\x07\x00\x00\x00\x00", 8),
+                "driver-test"),
             Opts);
+  EXPECT_THAT_EXPECTED(Result, llvm::Failed());
+}
+
+TEST(DriverTest, RejectsMalformedInputForDetectedDXContainerFormat) {
+  Context Ctx;
+  Driver D(Ctx);
+
+  frontend::DriverOptions Opts;
+  Opts.Target = "dxil";
+
+  // Starts with the "DXBC" container magic (see feme::detectFormat), a
+  // distinct detection path from the raw-bitcode one RejectsMissingTarget
+  // exercises, but is not a well-formed DXContainer, so DXILImporter itself
+  // must fail before Driver gets anywhere near translation/retargeting.
+  llvm::Expected<DriverResult> Result =
+      D.run(llvm::MemoryBufferRef("DXBC", "driver-test"), Opts);
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
 }
 

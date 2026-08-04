@@ -1,6 +1,6 @@
 ; REQUIRES: directx-registered-target, amdgpu-registered-target
 ; RUN: llc %s --filetype=obj -o %t.dxcontainer
-; RUN: feme --from=dxil --target=amdgcn-amd-amdhsa %t.dxcontainer -o %t.o
+; RUN: feme --target=amdgcn-amd-amdhsa %t.dxcontainer -o %t.o
 ; RUN: od -An -tx1 -N4 %t.o | FileCheck %s
 
 ; Retargets a DXIL module all the way to a real ISA (AMDGPU) through the full
