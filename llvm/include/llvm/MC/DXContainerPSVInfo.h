@@ -115,6 +115,35 @@ public:
   LLVM_ABI void write(raw_ostream &OS);
 };
 
+// Writer for the legacy shader model 5.x `ISGN`/`OSGN`/`PCSG` parts (see
+// dxbc::LegacySignatureElement): the same conceptual data as `Signature`
+// above, minus the `Stream`/`MinPrecision` fields the pre-DXIL on-disk
+// layout does not carry.
+class LegacySignature {
+  struct Parameter {
+    StringRef Name;
+    uint32_t Index;
+    dxbc::D3DSystemValue SystemValue;
+    dxbc::SigComponentType CompType;
+    uint32_t Register;
+    uint8_t Mask;
+    uint8_t ExclusiveMask;
+  };
+
+  SmallVector<Parameter> Params;
+
+public:
+  void addParam(StringRef Name, uint32_t Index,
+                dxbc::D3DSystemValue SystemValue,
+                dxbc::SigComponentType CompType, uint32_t Register,
+                uint8_t Mask, uint8_t ExclusiveMask) {
+    Params.push_back(Parameter{Name, Index, SystemValue, CompType, Register,
+                               Mask, ExclusiveMask});
+  }
+
+  LLVM_ABI void write(raw_ostream &OS);
+};
+
 } // namespace mcdxbc
 } // namespace llvm
 
