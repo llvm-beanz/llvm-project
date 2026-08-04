@@ -13,10 +13,11 @@ format's `Importer`/`Exporter`, as well as MLIR/LLVM-IR-to-MLIR/LLVM-IR
 `feme::Translator`s, as individual translation flags, for testing a single
 import/export/translation stage in isolation with textual (not
 final-binary-ISA) output. This is distinct from `feme` itself: `feme`
-resolves a full `Driver`-level `--from`/`--to`/`--target` chain and only
-produces final binary/ISA output, while `feme-translate` stops at a single
-stage and can emit human-readable intermediate IR. See the "Testing Tools"
-section of [../Design.md](../Design.md) for the full rationale.
+detects its input format automatically and resolves a full `Driver`-level
+`--target` chain, only producing final binary/ISA output, while
+`feme-translate` stops at a single stage and can emit human-readable
+intermediate IR. See the "Testing Tools" section of
+[../Design.md](../Design.md) for the full rationale.
 
 `feme-translate` is a **testing-only** entry point: unlike `feme` itself, it
 may use `llvm::cl::opt` (matching `mlir-translate` convention), per the

@@ -9,21 +9,23 @@ feme [options] <input file>
 ## DESCRIPTION
 
 `feme` is FeMe's primary, user-facing command line tool: given an input
-shader/IR file, a source format, and a destination format or target ISA,
-`feme` imports the input, translates it into FeMe's internal representation,
-and retargets/exports it to the requested output — the same way Clang's
-driver builds compile+assemble+link jobs from `-x`/`-o`/`--target` rather
-than requiring callers to invoke each compilation stage by hand. See the
-"Command Line Tool(s)" section of [../Design.md](../Design.md) for the full
-design.
+shader/IR file and a destination format or target ISA, `feme` detects the
+input's format, imports it, translates it into FeMe's internal
+representation, and retargets/exports it to the requested output — the same
+way Clang's driver builds compile+assemble+link jobs from `-o`/`--target`
+rather than requiring callers to invoke each compilation stage by hand. See
+the "Command Line Tool(s)" section of [../Design.md](../Design.md) for the
+full design.
 
 `feme` drives `feme::Driver` (see the "Driver" section of
-[../Design.md](../Design.md)). Currently supported `--from` values are
-`dxil` and `spirv` (DXBC import is not yet implemented -- see the Roadmap /
-Milestones section of [../Design.md](../Design.md)); `--to`/`--target` may
-each independently name `dxil`, `spirv` (re-serializing back to that format
-via its own LLVM backend), or any other LLVM target triple registered with
-the `TargetRegistry` (e.g. `amdgcn-amd-amdhsa`) for real-ISA retargeting.
+[../Design.md](../Design.md)). `feme` detects its input format from the
+input file's contents; currently detected formats are `dxil` and `spirv`
+(DXBC import is not yet implemented -- see the Roadmap / Milestones section
+of [../Design.md](../Design.md) -- so DXBC input, like any input whose
+format cannot be detected, is rejected with a diagnostic). `--target` may
+name `dxil`, `spirv` (re-serializing back to that format via its own LLVM
+backend), or any other LLVM target triple registered with the
+`TargetRegistry` (e.g. `amdgcn-amd-amdhsa`) for real-ISA retargeting.
 
 Current limitations. Retargeting a DXIL input to any target first requires
 undoing its `dx.op.*` calling convention and recovering the shader model and
@@ -45,18 +47,10 @@ coverage" in [../Design.md](../Design.md).
 
 ## OPTIONS
 
-* `--from=<format>`
-
-  Input format to translate from (e.g. `dxil`, `dxbc`, `spirv`).
-
-* `--to=<format>`
+* `--target=<format>`
 
   Output format/target to translate to (e.g. `dxil`, `spirv`, or a target
   triple).
-
-* `--target=<triple>`
-
-  Target triple to retarget the translated module to.
 
 * `-o <file>`
 
@@ -75,16 +69,16 @@ coverage" in [../Design.md](../Design.md).
 
 ```shell
 # Translate a DXIL module to SPIR-V.
-feme --from=dxil --to=spirv input.dxil -o output.spv
+feme --target=spirv input.dxil -o output.spv
 
 # Re-emit a DXIL module (e.g. after external re-optimization).
-feme --from=dxil --to=dxil input.dxil -o output.dxil
+feme --target=dxil input.dxil -o output.dxil
 
 # Translate a DXBC module to DXIL (not yet implemented).
-feme --from=dxbc --to=dxil input.dxbc -o output.dxil
+feme --target=dxil input.dxbc -o output.dxil
 
 # Import SPIR-V and retarget it to an AMDGPU target.
-feme --from=spirv --target=amdgcn-amd-amdhsa input.spv -o output.o
+feme --target=amdgcn-amd-amdhsa input.spv -o output.o
 ```
 
 ## EXIT STATUS

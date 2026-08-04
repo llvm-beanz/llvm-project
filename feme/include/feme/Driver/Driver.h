@@ -49,15 +49,17 @@ struct DriverResult {
 };
 
 /// Computes and runs the full `Importer` -> raising pass(es) -> `Translator`
-/// -> `Backend` chain needed to go from `Opts.From` to `Opts.Target`. See
-/// the "Driver" section of feme/docs/Design.md.
+/// -> `Backend` chain needed to go from the input's detected format to
+/// `Opts.Target`. See the "Driver" section of feme/docs/Design.md.
 ///
-/// Currently supported `Opts.From` values are "dxil" and "spirv" (DXBC
-/// import is not yet implemented -- see the Roadmap / Milestones section of
-/// feme/docs/Design.md). `Opts.Target` may independently name "dxil",
-/// "spirv" (re-serializing back to that format via its own LLVM backend),
-/// or any other LLVM target triple registered with the `TargetRegistry`
-/// (e.g. "amdgcn-amd-amdhsa") for real-ISA retargeting.
+/// Currently detected input formats are "dxil" and "spirv" (DXBC import is
+/// not yet implemented -- see the Roadmap / Milestones section of
+/// feme/docs/Design.md, so DXBC input, like any input whose format cannot
+/// be detected, is rejected with a diagnostic). `Opts.Target` may
+/// independently name "dxil", "spirv" (re-serializing back to that format
+/// via its own LLVM backend), or any other LLVM target triple registered
+/// with the `TargetRegistry` (e.g. "amdgcn-amd-amdhsa") for real-ISA
+/// retargeting.
 class Driver {
 public:
   explicit Driver(Context &Ctx);

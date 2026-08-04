@@ -318,9 +318,10 @@ came from.
 `Importer`/`Translator`/`Exporter`/`Backend` are deliberately low-level,
 single-step primitives. Most callers (the `feme` CLI, and eventually the C
 API) don't want to manually wire up "which importer, then which translator,
-then which backend" for a given `--from`/`--to`/`--target` request — they
-want to hand FeMe a source format, a destination format/ISA, and a buffer,
-and get a result. `feme::Driver` is that orchestration layer:
+then which backend" for a given input file and `--target` request — they
+want to hand FeMe a destination format/ISA and a buffer, and get a result,
+with the source format detected automatically from the buffer's contents.
+`feme::Driver` is that orchestration layer:
 
 ```c++
 class Driver {
@@ -328,8 +329,8 @@ public:
   explicit Driver(Context &Ctx);
 
   // Computes and runs the full chain of Importer -> Translator(s) ->
-  // Exporter/Backend steps needed to go from Opts.From to Opts.To (or
-  // Opts.Target), consulting Ctx.getFormatRegistry() to find each step.
+  // Exporter/Backend steps needed to go from the input's detected format to
+  // Opts.Target, consulting Ctx.getFormatRegistry() to find each step.
   llvm::Expected<DriverResult> run(llvm::MemoryBufferRef Input,
                                     const DriverOptions &Opts) const;
 };
@@ -340,15 +341,15 @@ assemble, then link) from a requested input/output pair, rather than
 requiring the caller to invoke the compiler, assembler, and linker
 separately. `Driver` is intentionally a thin layer *on top of* the four
 pipeline primitives — it contains no format-specific logic of its own, only
-the logic to select and sequence the right `Importer`/`Translator`(s)/
-`Exporter`/`Backend` for a requested `From`/`To`/`Target` combination (e.g.
-`--from=dxbc --to=spirv` resolves to the DXBC `Importer` → the `dxsa` →
-raised-LLVM-IR `Translator` → the LLVM `SPIRV` `Backend`, per the
-Translation Matrix below). Embedding consumers that want single-step control
-(e.g. "just import, hand me the `Module`, I'll do the rest") can still use
-`Importer`/`Translator`/`Exporter`/`Backend` directly — `Driver` is a
-convenience built from the same public interfaces, not a required entry
-point.
+the logic to detect the input format and sequence the right
+`Importer`/`Translator`(s)/`Exporter`/`Backend` for a requested `Target`
+(e.g. a DXBC input with `--target=spirv` resolves to the DXBC `Importer` →
+the `dxsa` → raised-LLVM-IR `Translator` → the LLVM `SPIRV` `Backend`, per
+the Translation Matrix below). Embedding consumers that want single-step
+control (e.g. "just import, hand me the `Module`, I'll do the rest") can
+still use `Importer`/`Translator`/`Exporter`/`Backend` directly — `Driver`
+is a convenience built from the same public interfaces, not a required
+entry point.
 
 #### Status: `feme::Driver` (implemented for `dxil`/`spirv` import; `dxil`/`spirv`/native-ISA output)
 
@@ -356,9 +357,10 @@ point.
 `feme/lib/Driver/Driver.cpp`) is implemented, and is what the `feme` CLI
 (`feme/tools/feme/feme.cpp`) drives: given `DriverOptions` (reusing
 `feme::frontend::DriverOptions`, per "Library API Shape" below, rather than
-a second identical struct) and an input buffer, it looks up the `Importer`
-named by `Opts.From` ("dxil" or "spirv" -- DXBC is not yet implemented, so
-is rejected with a diagnostic rather than a crash), translates the result to
+a second identical struct) and an input buffer, it detects which `Importer`
+to use from the buffer's contents ("dxil" or "spirv" -- DXBC is not yet
+implemented, so it (like any input whose format cannot be detected) is
+rejected with a diagnostic rather than a crash), translates the result to
 an `llvm::Module` (directly for DXIL, via `SPIRVToLLVMTranslator` for
 SPIR-V), and then runs the raising/lowering chain that gets from that to
 the requested destination:
@@ -366,9 +368,8 @@ the requested destination:
 1. For DXIL input: `feme::dxil::OpRaisingPass`, then
    `feme::dxil::MetadataRaisingPass` (in that order -- the first consumes
    the `!dx.resources` metadata the second drops).
-2. Resolve `Opts.Target`/`Opts.To` to a concrete target triple. `--target`
-   wins if set; otherwise `--to` is used, with `"dxil"`/`"spirv"` resolving
-   to that format's own triple. Both preserve the pipeline stage a
+2. Resolve `Opts.Target` to a concrete target triple: `"dxil"`/`"spirv"`
+   resolve to that format's own triple, preserving the pipeline stage a
    DXIL-originated module names (recovered by `MetadataRaisingPass`), as the
    environment component of a `dxil-unknown-shadermodelX.Y-<stage>` or
    `spirv-unknown-vulkan-<stage>` triple; `"spirv"` likewise keeps the triple
@@ -385,10 +386,12 @@ the requested destination:
 6. `feme::TargetMachineBackend`.
 
 There is no `Ctx.getFormatRegistry()` yet (deviating from the sketch above)
--- `Driver` currently looks up its two `Importer`s directly rather than
-through a registry on `Context`, since only two formats exist to look up; a
-registry is expected to be added if/when this stops being a short enough
-list to hard-code, without changing `Driver`'s own public interface.
+-- `Driver` currently detects between its two supported formats directly
+(see `feme::detectFormat` in `feme/lib/Driver/Driver.cpp`) rather than
+through a registry on `Context`, since only two formats exist to detect
+between; a registry is expected to be added if/when this stops being a
+short enough list to hard-code, without changing `Driver`'s own public
+interface.
 
 Validated end to end (see `test/Tools/feme/feme-*.{ll,mlir,test}`): DXIL
 retargeted to DXIL, to SPIR-V, and to a real ISA (`amdgcn-amd-amdhsa`), each
@@ -398,7 +401,8 @@ Retargeting to Native ISA below) through the full CLI rather than composed
 one `feme-translate` stage at a time; a SPIR-V compute shader that reads its
 dispatch thread id and reads and writes a bound `RWBuffer` retargeted back to
 SPIR-V; SPIR-V retargeted to `amdgcn-amd-amdhsa`; and clean (non-crash)
-diagnostics for an unsupported `--from` and a missing `--to`/`--target`.
+diagnostics for an input file whose format cannot be detected and a missing
+`--target`.
 
 Also validated manually against real `dxc`-compiled output for the HLSL
 Mandelbrot compute shader driving this work (not checked in, per "Avoiding
@@ -1231,9 +1235,9 @@ the following section.
   `mlir-translate`/`llvm-dis`-style tools:
 
   ```shell
-  feme --from=dxil --to=spirv input.dxil -o output.spv
-  feme --from=dxbc --to=dxil  input.dxbc -o output.dxil
-  feme --from=spirv --target=amdgcn-amd-amdhsa input.spv -o output.o
+  feme --target=spirv input.dxil -o output.spv
+  feme --target=dxil  input.dxbc -o output.dxil
+  feme --target=amdgcn-amd-amdhsa input.spv -o output.o
   ```
 
 - The tool is a thin wrapper, structured like Clang's driver: `main()` hands
@@ -1289,9 +1293,10 @@ ever testing through the full `feme` driver end to end:
   already present in the `wip/dxsa-mlir` prototype's
   `mlir/lib/Target/DXSA/TranslateRegistration.cpp` (`import-dxsa-bin`,
   `export-dxsa-bin`). This is distinct from `feme`
-  itself: `feme` resolves a full `Driver`-level `--from`/`--to`/`--target`
-  chain and only produces final binary/ISA output, while `feme-translate`
-  stops at a single stage and can emit human-readable intermediate IR.
+  itself: `feme` resolves a full `Driver`-level input-format-detection/
+  `--target` chain and only produces final binary/ISA output, while
+  `feme-translate` stops at a single stage and can emit human-readable
+  intermediate IR.
   The same pattern also applies to `feme::Translator`s that consume and
   produce MLIR/LLVM IR rather than a binary format: e.g.
   `feme::SPIRVToLLVMTranslator` is registered as the `--spirv-to-llvmir`
@@ -1835,7 +1840,7 @@ This is a rough sequencing, not a schedule:
    DXIL exporter.
 
    Status: the DXIL -> SPIR-V direction is implemented and validated end to
-   end (`feme --from=dxil --to=spirv`), via
+   end (`feme --target=spirv` on a DXIL input), via
    `feme::spirv::RaisedLoweringPass` (see "Raised LLVM IR -> SPIR-V" above)
    feeding LLVM's in-tree `SPIRV` target. The SPIR-V -> DXIL direction is
    not: it needs a pass raising SPIR-V-derived, translated LLVM IR into
