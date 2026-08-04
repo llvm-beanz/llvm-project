@@ -38,6 +38,8 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/IR/Dominators.h"
+#include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 #include <cmath>
 #include <limits>
@@ -377,7 +379,8 @@ public:
             llvm::ArrayRef<ContainerSignatureElement> RealOutputSignature)
       : Context(Context), Source(Source),
         Module(std::make_unique<llvm::Module>("dxbc", Context)),
-        Builder(Context), RealInputSignature(RealInputSignature),
+        Builder(Context), AllocaBuilder(Context),
+        RealInputSignature(RealInputSignature),
         RealOutputSignature(RealOutputSignature) {}
 
   std::unique_ptr<llvm::Module> run(dxsa::ModuleOp Shader);
@@ -395,11 +398,18 @@ private:
 
   Signature Inputs;
   Signature Outputs;
-  /// Value currently held by each temp register component, keyed by
-  /// `register * 4 + component`. DXBC temps are untyped 32-bit slots, so a
-  /// component's value is whatever type the instruction that wrote it
-  /// produced, and readers bitcast on demand.
-  llvm::DenseMap<uint64_t, llvm::Value *> Temps;
+  /// The stack slot backing each temp register component, keyed by
+  /// `register * 4 + component`, created on first use and promoted to SSA
+  /// once the whole program has been translated. DXBC temps are mutable
+  /// 32-bit locations whose live ranges cross the blocks structured control
+  /// flow introduces, which is exactly what an `alloca` plus mem2reg
+  /// models; the promoted phi nodes inherit the slot's name.
+  llvm::DenseMap<uint64_t, llvm::AllocaInst *> Temps;
+  /// The type inferred for each temp register component; see
+  /// `inferTempTypes`.
+  llvm::DenseMap<uint64_t, llvm::Type *> TempTypes;
+  /// Insertion point for `Temps`' allocas, pinned to the entry block.
+  llvm::IRBuilder<> AllocaBuilder;
   /// Values already read for the instruction being translated, keyed by the
   /// source operand, the component it reads and the type it is read at. A
   /// DXBC instruction may name the same source component several times
@@ -425,6 +435,15 @@ private:
   //===--------------------------------------------------------------------===//
 
   bool collectDeclarations(dxsa::ModuleOp Shader);
+  /// Chooses a concrete LLVM type for every temp register component, which
+  /// fixes the type of its stack slot and so of the phi nodes mem2reg
+  /// creates for it. DXBC temps are typeless 32-bit slots, so the type is
+  /// inferred from the instructions around them: one with definite
+  /// floating-point or integer semantics votes for its own type, a `mov`
+  /// to or from a signature register votes for that element's type, and a
+  /// component with no vote either way stays `i32`, the width DXBC itself
+  /// defines.
+  void inferTempTypes(dxsa::ModuleOp Shader);
   void addSignatureElement(Signature &Sig, DstOperandAttr Operand,
                            llvm::StringRef NamePrefix, DXILSemanticKind Kind,
                            unsigned InterpolationMode);
@@ -444,6 +463,10 @@ private:
   /// Returns the first immediate index of \p Operand, i.e. the register
   /// number, or nullopt if it is not a plain immediate.
   static std::optional<unsigned> registerNumber(OperandIndexAttr Index);
+
+  /// Returns (creating on first use) the stack slot backing temp register
+  /// component \p Comp of register \p Reg.
+  llvm::AllocaInst *tempSlot(unsigned Reg, unsigned Comp);
 
   llvm::Value *readSource(SrcOperandAttr Src, unsigned DstComp, llvm::Type *Ty,
                           mlir::Operation *Op);
@@ -507,6 +530,11 @@ private:
   //===--------------------------------------------------------------------===//
   // Metadata
   //===--------------------------------------------------------------------===//
+
+  /// Rewrites the temp register stack slots into SSA values. The promoted
+  /// values keep the slot's name, so a temp live across a branch surfaces
+  /// as a `dx.v32.r<n>.<m>` phi node.
+  void promoteTemps(llvm::Function &Entry);
 
   void emitMetadata(llvm::Function *Entry);
   llvm::MDNode *emitSignature(const Signature &Sig);
@@ -649,6 +677,21 @@ llvm::Value *Translator::coerce(llvm::Value *Value, llvm::Type *Ty) {
   return Builder.CreateBitCast(Value, Ty);
 }
 
+llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp) {
+  uint64_t Key = uint64_t(Reg) * 4 + Comp;
+  llvm::AllocaInst *&Slot = Temps[Key];
+  if (Slot)
+    return Slot;
+  auto It = TempTypes.find(Key);
+  llvm::Type *Ty = It == TempTypes.end() ? i32Ty() : It->second;
+  // DXBC numbers a temp by register and component; DXIL's own temp-register
+  // intrinsics flatten that to a single index, which is the name dxilconv
+  // gives the promoted value.
+  Slot = AllocaBuilder.CreateAlloca(Ty, nullptr,
+                                    "dx.v32.r" + llvm::Twine(Key));
+  return Slot;
+}
+
 llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
                                     llvm::Type *Ty, mlir::Operation *Op) {
   // A minimum-precision operand changes the width every computation
@@ -687,14 +730,11 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
       unsupported(Op) << ": indexed temp register";
       return nullptr;
     }
-    auto It = Temps.find(uint64_t(*Reg) * 4 + Comp);
-    if (It == Temps.end()) {
-      // Reading a temp component the shader never wrote is legal DXBC; its
-      // value is undefined.
-      Result = llvm::UndefValue::get(Ty);
-      break;
-    }
-    Result = It->second;
+    // Reading a temp component the shader never wrote is legal DXBC and
+    // yields an undefined value, which is what promoting an uninitialized
+    // slot produces.
+    llvm::AllocaInst *Slot = tempSlot(*Reg, Comp);
+    Result = Builder.CreateLoad(Slot->getAllocatedType(), Slot);
     break;
   }
   case OperandType::v: {
@@ -766,8 +806,11 @@ bool Translator::writeDestination(DstOperandAttr Dst,
       unsupported(Op) << ": indexed temp destination";
       return false;
     }
-    for (auto [I, Comp] : llvm::enumerate(Comps))
-      Temps[uint64_t(*Reg) * 4 + Comp] = Components[I];
+    for (auto [I, Comp] : llvm::enumerate(Comps)) {
+      llvm::AllocaInst *Slot = tempSlot(*Reg, Comp);
+      Builder.CreateStore(coerce(Components[I], Slot->getAllocatedType()),
+                          Slot);
+    }
     return true;
   }
   case OperandType::o: {
@@ -873,8 +916,7 @@ llvm::Type *Translator::movElementType(SrcOperandAttr Src, unsigned DstComp) {
   std::optional<unsigned> Reg = registerNumber(Src.getIndex());
   if (!Reg)
     return floatTy();
-  auto It = Temps.find(uint64_t(*Reg) * 4 + sourceComponent(Src, DstComp));
-  return It == Temps.end() ? floatTy() : It->second->getType();
+  return tempSlot(*Reg, sourceComponent(Src, DstComp))->getAllocatedType();
 }
 
 llvm::Constant *Translator::foldFloatToInt(llvm::Instruction::CastOps Cast,
@@ -1024,6 +1066,101 @@ static std::optional<OpLowering> lookupLowering(llvm::StringRef Name) {
   if (It == Table.end())
     return std::nullopt;
   return It->second;
+}
+
+/// Returns whether \p Op's operands and result are floating point, or
+/// nullopt when the instruction imposes no type on them (`mov` and the
+/// conditional moves copy bits) or is not modelled at all.
+static std::optional<bool> hasFloatOperands(llvm::StringRef Name) {
+  Name.consume_back("_sat");
+  if (Name == "mov" || Name == "movc")
+    return std::nullopt;
+  if (Name == "mad" || Name.starts_with("dp"))
+    return true;
+  if (Name == "imad" || Name == "umad")
+    return false;
+  if (std::optional<OpLowering> Lowering = lookupLowering(Name))
+    return Lowering->FloatOperands;
+  return std::nullopt;
+}
+
+void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
+  // Votes cast for each temp component, as (floating point, integer).
+  llvm::DenseMap<uint64_t, std::pair<unsigned, unsigned>> Votes;
+  auto vote = [&](std::optional<unsigned> Reg, unsigned Comp, bool Float) {
+    if (!Reg)
+      return;
+    std::pair<unsigned, unsigned> &V = Votes[uint64_t(*Reg) * 4 + Comp];
+    ++(Float ? V.first : V.second);
+  };
+  // A signature register's component type is recorded in the signature, so
+  // a `mov` that copies one to or from a temp fixes that temp's type too.
+  auto signatureIsFloat = [](const Signature &Sig, unsigned Reg,
+                             unsigned Comp) -> std::optional<bool> {
+    std::optional<unsigned> Element = Sig.find(Reg, Comp);
+    if (!Element)
+      return std::nullopt;
+    return Sig.elements()[*Element].Type == DXILComponentType::F32;
+  };
+
+  for (mlir::Operation &Op : *Shader.getBodyBlock()) {
+    llvm::StringRef Name = mnemonicOf(&Op);
+    if (Name.starts_with("dcl_"))
+      continue;
+
+    auto Dst = Op.getAttrOfType<DstOperandAttr>("dst");
+    llvm::SmallVector<unsigned, 4> Comps =
+        Dst ? destinationComponents(Dst) : llvm::SmallVector<unsigned, 4>{0};
+    llvm::SmallVector<SrcOperandAttr, 4> Srcs;
+    for (mlir::NamedAttribute Attr : Op.getAttrs())
+      if (auto Src = llvm::dyn_cast<SrcOperandAttr>(Attr.getValue()))
+        Srcs.push_back(Src);
+
+    // A conditional control-flow instruction tests its condition as an
+    // integer bit pattern.
+    if (Name.ends_with("_z") || Name.ends_with("_nz") || Name == "switch")
+      for (SrcOperandAttr Src : Srcs)
+        if (Src.getType() == OperandType::r)
+          vote(registerNumber(Src.getIndex()), sourceComponent(Src, 0), false);
+
+    if (std::optional<bool> Float = hasFloatOperands(Name)) {
+      if (Dst && Dst.getType() == OperandType::r)
+        for (unsigned Comp : Comps)
+          vote(registerNumber(Dst.getIndex()), Comp, *Float);
+      for (SrcOperandAttr Src : Srcs)
+        if (Src.getType() == OperandType::r)
+          for (unsigned Comp : Comps)
+            vote(registerNumber(Src.getIndex()), sourceComponent(Src, Comp),
+                 *Float);
+      continue;
+    }
+
+    if (Name != "mov" && Name != "mov_sat")
+      continue;
+    auto Src = Op.getAttrOfType<SrcOperandAttr>("src");
+    if (!Dst || !Src)
+      continue;
+    if (Dst.getType() == OperandType::r && Src.getType() == OperandType::v) {
+      std::optional<unsigned> SrcReg = registerNumber(Src.getIndex());
+      for (unsigned Comp : Comps)
+        if (SrcReg)
+          if (std::optional<bool> Float = signatureIsFloat(
+                  Inputs, *SrcReg, sourceComponent(Src, Comp)))
+            vote(registerNumber(Dst.getIndex()), Comp, *Float);
+    } else if (Dst.getType() == OperandType::o &&
+               Src.getType() == OperandType::r) {
+      std::optional<unsigned> DstReg = registerNumber(Dst.getIndex());
+      for (unsigned Comp : Comps)
+        if (DstReg)
+          if (std::optional<bool> Float = signatureIsFloat(*&Outputs, *DstReg,
+                                                           Comp))
+            vote(registerNumber(Src.getIndex()), sourceComponent(Src, Comp),
+                 *Float);
+    }
+  }
+
+  for (auto [Key, V] : Votes)
+    TempTypes[Key] = V.first > 0 && V.first >= V.second ? floatTy() : i32Ty();
 }
 
 bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
@@ -1261,6 +1398,26 @@ bool Translator::translateBody(dxsa::ModuleOp Shader) {
 }
 
 //===----------------------------------------------------------------------===//
+// Cleanup
+//===----------------------------------------------------------------------===//
+
+void Translator::promoteTemps(llvm::Function &Entry) {
+  llvm::SmallVector<llvm::AllocaInst *, 16> Slots;
+  for (auto [Key, Slot] : Temps)
+    Slots.push_back(Slot);
+  if (Slots.empty())
+    return;
+  // Promote in slot order so that the phi nodes of a block, which mem2reg
+  // creates one alloca at a time, come out in a stable order.
+  llvm::sort(Slots, [](const llvm::AllocaInst *L, const llvm::AllocaInst *R) {
+    return L->getName() < R->getName();
+  });
+  llvm::DominatorTree DT(Entry);
+  llvm::PromoteMemToReg(Slots, DT);
+  Temps.clear();
+}
+
+//===----------------------------------------------------------------------===//
 // Metadata
 //===----------------------------------------------------------------------===//
 
@@ -1346,7 +1503,10 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
                                           /*isVarArg=*/false);
   auto *Entry = llvm::Function::Create(
       EntryTy, llvm::GlobalValue::ExternalLinkage, "main", Module.get());
-  Builder.SetInsertPoint(llvm::BasicBlock::Create(Context, "entry", Entry));
+  auto *EntryBB = llvm::BasicBlock::Create(Context, "entry", Entry);
+  Builder.SetInsertPoint(EntryBB);
+  AllocaBuilder.SetInsertPoint(EntryBB);
+  inferTempTypes(Shader);
   // DXBC has no strict floating-point semantics; every arithmetic
   // instruction is free to be reassociated and contracted.
   llvm::FastMathFlags FMF;
@@ -1356,6 +1516,7 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
   if (!translateBody(Shader))
     return nullptr;
 
+  promoteTemps(*Entry);
   emitMetadata(Entry);
   return std::move(Module);
 }

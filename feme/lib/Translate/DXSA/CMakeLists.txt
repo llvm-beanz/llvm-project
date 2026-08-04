@@ -3,10 +3,12 @@ add_mlir_library(FeMeTranslateDXSA
   TranslateRegistration.cpp
 
   LINK_COMPONENTS
+  Analysis
   BinaryFormat
   Core
   Object
   Support
+  TransformUtils
 
   LINK_LIBS PUBLIC
   FeMeDXSADialect
