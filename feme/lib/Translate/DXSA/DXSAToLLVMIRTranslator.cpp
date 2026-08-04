@@ -99,6 +99,12 @@ enum class DXILOp : unsigned {
   CreateHandle = 57,
   CBufferLoadLegacy = 59,
   Discard = 82,
+  SampleIndex = 90,
+  Coverage = 91,
+  ThreadId = 93,
+  GroupId = 94,
+  ThreadIdInGroup = 95,
+  FlattenedThreadIdInGroup = 96,
   BitcastI32toF32 = 126,
   BitcastF32toI32 = 127,
 };
@@ -128,8 +134,11 @@ enum class DXILSemanticKind : unsigned {
   Coverage = 14,
   InnerCoverage = 15,
   Target = 16,
+  Depth = 17,
   TessFactor = 18,
   InsideTessFactor = 19,
+  DepthLessEqual = 20,
+  DepthGreaterEqual = 21,
   Barycentrics = 23,
   ShadingRate = 24,
   CullPrimitive = 25,
@@ -171,6 +180,12 @@ llvm::StringRef semanticName(DXILSemanticKind Kind) {
     return "SV_InnerCoverage";
   case DXILSemanticKind::Target:
     return "SV_Target";
+  case DXILSemanticKind::Depth:
+    return "SV_Depth";
+  case DXILSemanticKind::DepthLessEqual:
+    return "SV_DepthLessEqual";
+  case DXILSemanticKind::DepthGreaterEqual:
+    return "SV_DepthGreaterEqual";
   case DXILSemanticKind::TessFactor:
     return "SV_TessFactor";
   case DXILSemanticKind::InsideTessFactor:
@@ -293,6 +308,37 @@ DXILSemanticKind toSemanticKind(llvm::dxbc::D3DSystemValue Value) {
   return DXILSemanticKind::Arbitrary;
 }
 
+/// Returns the DXIL operation that reads \p Kind directly, for the system
+/// values DXIL gives an operation of their own rather than reading through
+/// `loadInput`.
+static std::optional<std::pair<llvm::StringRef, DXILOp>>
+systemValueRead(DXILSemanticKind Kind) {
+  switch (Kind) {
+  case DXILSemanticKind::SampleIndex:
+    return std::make_pair("sampleIndex", DXILOp::SampleIndex);
+  case DXILSemanticKind::Coverage:
+    return std::make_pair("coverage", DXILOp::Coverage);
+  default:
+    return std::nullopt;
+  }
+}
+
+/// Returns the DXIL semantic naming \p Type when it is one of the three
+/// pixel shader depth outputs, which are registerless operands of their own
+/// rather than an `o#` register.
+std::optional<DXILSemanticKind> depthKind(OperandType Type) {
+  switch (Type) {
+  case OperandType::oDepth:
+    return DXILSemanticKind::Depth;
+  case OperandType::oDepthGE:
+    return DXILSemanticKind::DepthGreaterEqual;
+  case OperandType::oDepthLE:
+    return DXILSemanticKind::DepthLessEqual;
+  default:
+    return std::nullopt;
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Signature model
 //===----------------------------------------------------------------------===//
@@ -358,6 +404,12 @@ public:
     Elements.push_back(std::move(Element));
   }
 
+  /// Appends an element that occupies no register, so that it does not
+  /// shadow the (row, component) an `o#` register really lives at.
+  void addUnindexed(SignatureElement Element) {
+    Elements.push_back(std::move(Element));
+  }
+
   /// Returns the index of the element covering \p Row's \p Col component,
   /// or nullopt if no declaration covers it.
   std::optional<unsigned> find(unsigned Row, unsigned Col) const {
@@ -401,6 +453,11 @@ private:
   mlir::ModuleOp Source;
   std::unique_ptr<llvm::Module> Module;
   llvm::IRBuilder<> Builder;
+  /// Insertion point for `Temps`' allocas, pinned to the top of the entry
+  /// block so that they precede every use no matter where the instruction
+  /// that first needed the slot lives.
+  llvm::IRBuilder<> AllocaBuilder;
+  llvm::Function *EntryFn = nullptr;
   /// Real signature elements read from a full `DXContainer`, overriding
   /// `collectDeclarations`'s synthesis when non-empty (see
   /// `ContainerSignatureElement`).
@@ -415,6 +472,15 @@ private:
   /// The index of each constant buffer's declaration within its resource
   /// class, which is what a handle is bound by.
   llvm::DenseMap<unsigned, unsigned> ConstantBufferRanges;
+  /// The output signature element each depth output resolves to. A depth
+  /// output names no register, so it cannot be found by (row, component)
+  /// the way the others are.
+  llvm::DenseMap<unsigned, unsigned> DepthOutputs;
+  /// The dedicated DXIL operation reading each input signature element that
+  /// has one, keyed by element index. DXIL names a few system values with
+  /// an operation of their own rather than through `loadInput`.
+  llvm::DenseMap<unsigned, std::pair<llvm::StringRef, DXILOp>>
+      SystemValueReads;
   /// The `cbufferLoadLegacy` result for each (constant buffer, row, type)
   /// the instruction being translated reads. One legacy load returns a
   /// whole 16-byte row, so an instruction naming several components of one
@@ -435,11 +501,6 @@ private:
   /// The type inferred for each temp register component; see
   /// `inferTempTypes`.
   llvm::DenseMap<uint64_t, llvm::Type *> TempTypes;
-  /// Insertion point for `Temps`' allocas, pinned to the top of the entry
-  /// block so that they precede every use no matter where the instruction
-  /// that first needed the slot lives.
-  llvm::IRBuilder<> AllocaBuilder;
-  llvm::Function *EntryFn = nullptr;
   /// Values already read for the instruction being translated, keyed by the
   /// source operand, the component it reads and the type it is read at. A
   /// DXBC instruction may name the same source component several times
@@ -726,9 +787,12 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
         addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
                             toSemanticKind(Dcl.getName()),
                             static_cast<unsigned>(Dcl.getMode()));
-      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op))
-        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
-                            toSemanticKind(Dcl.getName()), 0);
+      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op)) {
+        DXILSemanticKind Kind = toSemanticKind(Dcl.getName());
+        if (auto Read = systemValueRead(Kind))
+          SystemValueReads[Inputs.elements().size()] = *Read;
+        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN", Kind, 0);
+      }
       else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
         addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
                             toSemanticKind(Dcl.getName()), 0);
@@ -746,11 +810,24 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
   bool IsPixelShader = !Shader.getProgramType() ||
                        Shader.getProgramType() == ProgramType::pixel_shader;
   for (mlir::Operation &Op : *Shader.getBodyBlock()) {
-    if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
-      addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
+    if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op)) {
+      DstOperandAttr Operand = Dcl.getOperandAttr();
+      // A depth output names no register, so it is recorded by operand kind
+      // rather than by the (row, component) the others are found through.
+      if (std::optional<DXILSemanticKind> Kind = depthKind(Operand.getType())) {
+        DepthOutputs[unsigned(Operand.getType())] = Outputs.elements().size();
+        SignatureElement Element;
+        Element.Cols = 1;
+        Element.Kind = *Kind;
+        Element.Name = semanticName(*Kind);
+        Outputs.addUnindexed(std::move(Element));
+        continue;
+      }
+      addSignatureElement(Outputs, Operand, "OUT",
                           IsPixelShader ? DXILSemanticKind::Target
                                         : DXILSemanticKind::Arbitrary,
                           0);
+    }
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSiv>(&Op))
       addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
                           toSemanticKind(Dcl.getName()), 0);
@@ -797,6 +874,9 @@ unsigned Translator::sourceComponent(SrcOperandAttr Src, unsigned DstComp) {
 llvm::SmallVector<unsigned, 4>
 Translator::destinationComponents(DstOperandAttr Dst) {
   llvm::SmallVector<unsigned, 4> Result;
+  // A registerless output is a single scalar with no write mask.
+  if (depthKind(Dst.getType()))
+    return {0};
   unsigned Mask =
       Dst.getMask() ? static_cast<unsigned>(Dst.getMask().getValue()) : 0x1;
   for (unsigned I = 0; I < 4; ++I)
@@ -1007,6 +1087,11 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
       unsupported(Op) << ": read of undeclared input register";
       return nullptr;
     }
+    if (auto Read = SystemValueReads.find(*Element);
+        Read != SystemValueReads.end()) {
+      Result = emitDXOp(Read->second.first, Read->second.second, i32Ty(), {});
+      break;
+    }
     unsigned Col = Comp - Inputs.elements()[*Element].StartCol;
     Result = emitDXOp("loadInput", DXILOp::LoadInput, Ty,
                       {llvm::ConstantInt::get(i32Ty(), *Element),
@@ -1015,6 +1100,28 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
                        llvm::UndefValue::get(i32Ty())});
     break;
   }
+  case OperandType::vThreadID:
+  case OperandType::vThreadGroupID:
+  case OperandType::vThreadIDInGroup: {
+    // These name a three-component value directly rather than a signature
+    // register, so the swizzle picks the dimension the operation returns.
+    auto [Name, DXOp] =
+        Src.getType() == OperandType::vThreadID
+            ? std::make_pair("threadId", DXILOp::ThreadId)
+        : Src.getType() == OperandType::vThreadGroupID
+            ? std::make_pair("groupId", DXILOp::GroupId)
+            : std::make_pair("threadIdInGroup", DXILOp::ThreadIdInGroup);
+    Result = emitDXOp(Name, DXOp, i32Ty(),
+                      {llvm::ConstantInt::get(i32Ty(), Comp)});
+    break;
+  }
+  case OperandType::vThreadIDInGroupFlattened:
+    Result = emitDXOp("flattenedThreadIdInGroup",
+                      DXILOp::FlattenedThreadIdInGroup, i32Ty(), {});
+    break;
+  case OperandType::vCoverage:
+    Result = emitDXOp("coverage", DXILOp::Coverage, i32Ty(), {});
+    break;
   case OperandType::cb:
     Result = readConstantBuffer(Src, Comp, Ty, Op);
     if (!Result)
@@ -1061,6 +1168,19 @@ bool Translator::writeDestination(DstOperandAttr Dst,
   }
 
   llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
+  if (depthKind(Dst.getType())) {
+    auto Element = DepthOutputs.find(unsigned(Dst.getType()));
+    if (Element == DepthOutputs.end()) {
+      unsupported(Op) << ": write to an undeclared depth output";
+      return false;
+    }
+    emitDXOp("storeOutput", DXILOp::StoreOutput, llvm::Type::getVoidTy(Context),
+             {llvm::ConstantInt::get(i32Ty(), Element->second),
+              llvm::ConstantInt::get(i32Ty(), 0),
+              llvm::ConstantInt::get(i8Ty(), 0),
+              coerce(Components[0], floatTy())});
+    return true;
+  }
   switch (Dst.getType()) {
   case OperandType::null:
     return true;
