@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -20,9 +20,16 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-The `--from` flag for `feme` should be inferrable from the input file's type.
-Can you please remove the flag and update the driver to detect the type of the
-input file?
+I've added a bunch of test collateral under feme/test/Translate/DXBC. There are
+two types of files I've added, dxasm files and ".ref" files that are LLVM IR.
+These files come from the test data for DXC's dxilconv tool.
 
-Also the `--to` flag is redundant with the `--target` flag, please remove it and
-update any impacted tests.
+I'd like you to first ensure that the dxbc assembler can handle all the dxasm
+files.
+
+Then I'd like you to use these files as test data to implement the DXBC->DXIL
+translation. As you work through these issues translate the ".ref" files into
+FileCheck check lines in the dxasm files. The translation doesn't need to
+identically match DXC's dxilconv's translation, but they should semantically
+match, and if there are known differences I'd like you to note them in your
+thoughts.
