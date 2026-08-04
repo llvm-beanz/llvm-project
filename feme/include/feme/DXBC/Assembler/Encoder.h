@@ -17,6 +17,7 @@
 #define FEME_DXBC_ASSEMBLER_ENCODER_H
 
 #include "feme/DXBC/Assembler/Parser.h"
+#include "feme/DXBC/Assembler/SignatureComments.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Error.h"
@@ -39,8 +40,12 @@ llvm::Expected<llvm::SmallVector<uint32_t, 64>>
 encodeProgram(const Program &Program);
 
 /// Wraps \p Bytecode (as produced by encodeProgram) in a minimal DXContainer
-/// (see llvm/include/llvm/BinaryFormat/DXContainer.h) holding a single
-/// "SHEX" part, and appends the resulting bytes to \p Out.
+/// (see llvm/include/llvm/BinaryFormat/DXContainer.h) holding a "SHEX"
+/// part, preceded by the legacy "ISGN"/"OSGN"/"PCSG" signature parts
+/// \p Sig describes, and appends the resulting bytes to \p Out. A
+/// signature `fxc` did not print at all contributes no part; one it
+/// printed as empty contributes an empty part, which is what `fxc` itself
+/// emits.
 ///
 /// Deviation: real DXContainers carry a checksum (\c Header::FileHash)
 /// computed with a bespoke, undocumented-by-Microsoft hash over the file
@@ -48,7 +53,7 @@ encodeProgram(const Program &Program);
 /// DXContainer (llvm::object::DXContainer, the `dxsa` importer) validates
 /// that hash, so this is a safe simplification for a testing tool -- see
 /// feme/docs/Design.md's "dxbc-as" section.
-void wrapInContainer(llvm::ArrayRef<uint32_t> Bytecode,
+void wrapInContainer(llvm::ArrayRef<uint32_t> Bytecode, const Signatures &Sig,
                      llvm::SmallVectorImpl<char> &Out);
 
 } // namespace dxbc

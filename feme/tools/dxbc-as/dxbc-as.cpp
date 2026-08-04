@@ -19,6 +19,7 @@
 #include "feme/DXBC/Assembler/AsmPrinter.h"
 #include "feme/DXBC/Assembler/Encoder.h"
 #include "feme/DXBC/Assembler/Parser.h"
+#include "feme/DXBC/Assembler/SignatureComments.h"
 
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/EndianStream.h"
@@ -105,7 +106,9 @@ int main(int argc, char **argv) {
 
   if (Emit == EmitKind::Container) {
     SmallVector<char, 256> ContainerBytes;
-    wrapInContainer(*Bytecode, ContainerBytes);
+    wrapInContainer(*Bytecode,
+                    parseSignatureComments((*BufferOrErr)->getBuffer()),
+                    ContainerBytes);
     Out.os().write(ContainerBytes.data(), ContainerBytes.size());
   } else {
     support::endian::Writer W(Out.os(), endianness::little);

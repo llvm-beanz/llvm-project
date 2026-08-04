@@ -14,8 +14,10 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/DXBC/Assembler/Encoder.h"
+
 #include "feme/DXBC/Assembler/AsmPrinter.h"
 #include "feme/DXBC/Assembler/Parser.h"
+#include "feme/DXBC/Assembler/SignatureComments.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include "gtest/gtest.h"
@@ -148,11 +150,33 @@ TEST(EncoderTest, OverlongInstructionIsRejected) {
 TEST(EncoderTest, ContainerWrapping) {
   llvm::SmallVector<uint32_t, 4> Bytecode = {0x01000058};
   llvm::SmallVector<char, 64> Container;
-  wrapInContainer(Bytecode, Container);
+  wrapInContainer(Bytecode, Signatures(), Container);
   ASSERT_GT(Container.size(), 4u);
-  EXPECT_EQ(llvm::StringRef(Container.data(), 4), "DXBC");
-  EXPECT_NE(llvm::StringRef(Container.data(), Container.size()).find("SHEX"),
-            llvm::StringRef::npos);
+  llvm::StringRef Bytes(Container.data(), Container.size());
+  EXPECT_EQ(Bytes.take_front(4), "DXBC");
+  EXPECT_NE(Bytes.find("SHEX"), llvm::StringRef::npos);
+  // A shader whose disassembly printed no signature tables gets no
+  // signature parts.
+  EXPECT_EQ(Bytes.find("ISGN"), llvm::StringRef::npos);
+  EXPECT_EQ(Bytes.find("OSGN"), llvm::StringRef::npos);
+}
+
+TEST(EncoderTest, ContainerCarriesTheSignatureParts) {
+  llvm::SmallVector<uint32_t, 4> Bytecode = {0x01000058};
+  Signatures Sig;
+  Sig.SeenInput = true;
+  Sig.SeenOutput = true;
+  Sig.Output.push_back({/*Name=*/"SV_Target", /*Index=*/0,
+                        llvm::dxbc::D3DSystemValue::Target,
+                        llvm::dxbc::SigComponentType::Float32, /*Register=*/0,
+                        /*Mask=*/0xF, /*ExclusiveMask=*/0});
+  llvm::SmallVector<char, 64> Container;
+  wrapInContainer(Bytecode, Sig, Container);
+  llvm::StringRef Bytes(Container.data(), Container.size());
+  // An empty table still produces a part, which is what `fxc` emits.
+  EXPECT_NE(Bytes.find("ISGN"), llvm::StringRef::npos);
+  EXPECT_NE(Bytes.find("OSGN"), llvm::StringRef::npos);
+  EXPECT_NE(Bytes.find("SV_Target"), llvm::StringRef::npos);
 }
 
 /// Re-printing a parsed program and re-assembling the result must produce

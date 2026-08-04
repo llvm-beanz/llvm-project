@@ -8,6 +8,7 @@ add_feme_unittest(FeMeDXBCAssemblerTests
   LexerTest.cpp
   ParserTest.cpp
   EncoderTest.cpp
+  SignatureCommentsTest.cpp
   )
 target_link_libraries(FeMeDXBCAssemblerTests
   PRIVATE

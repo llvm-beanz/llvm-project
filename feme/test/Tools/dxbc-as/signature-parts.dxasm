@@ -1,0 +1,60 @@
+;; dxbc-as reconstructs the legacy ISGN/OSGN/PCSG parts from the signature
+;; tables `fxc` prints above its disassembly, so a bare .dxasm fixture is
+;; enough to build a container carrying a real signature -- see
+;; feme/docs/Design.md's "dxbc-as" section.
+
+; RUN: dxbc-as --emit=container %s -o %t.dxbc
+; RUN: obj2yaml %t.dxbc | FileCheck %s
+
+; CHECK: - Name:            ISGN
+; CHECK:      Parameters:
+; CHECK-NEXT:   - Name:            A
+; CHECK-NEXT:     Index:           0
+; CHECK-NEXT:     SystemValue:     Undefined
+; CHECK-NEXT:     CompType:        Float32
+; CHECK-NEXT:     Register:        0
+;; The declared allocation is xyzw, but only yz are read.
+; CHECK-NEXT:     Mask:            15
+; CHECK-NEXT:     ExclusiveMask:   6
+; CHECK-NEXT:   - Name:            SV_IsFrontFace
+; CHECK-NEXT:     Index:           0
+; CHECK-NEXT:     SystemValue:     IsFrontFace
+; CHECK-NEXT:     CompType:        UInt32
+; CHECK-NEXT:     Register:        1
+; CHECK-NEXT:     Mask:            2
+; CHECK-NEXT:     ExclusiveMask:   2
+
+; CHECK: - Name:            OSGN
+; CHECK:      Parameters:
+; CHECK-NEXT:   - Name:            SV_Target
+; CHECK-NEXT:     Index:           0
+; CHECK-NEXT:     SystemValue:     Target
+; CHECK-NEXT:     CompType:        Float32
+; CHECK-NEXT:     Register:        0
+; CHECK-NEXT:     Mask:            7
+;; xz of xyz are written, so y is the component never written.
+; CHECK-NEXT:     ExclusiveMask:   2
+
+; CHECK: - Name:            SHEX
+
+//
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// A                        0   xyzw        0     NONE   float    yz 
+// SV_IsFrontFace           0    y          1    FFACE    uint    y  
+//
+//
+// Output signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// SV_Target                0   xyz         0   TARGET   float   x z 
+//
+ps_5_0
+dcl_globalFlags refactoringAllowed
+dcl_input_ps linear v0.yz
+dcl_output o0.xyz
+mov o0.xyz, v0.yyzy
+ret 

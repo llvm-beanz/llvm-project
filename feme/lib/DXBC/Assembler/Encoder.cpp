@@ -21,6 +21,7 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/BinaryFormat/DXContainer.h"
+#include "llvm/MC/DXContainerPSVInfo.h"
 #include "llvm/Support/EndianStream.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -273,32 +274,58 @@ feme::dxbc::encodeProgram(const Program &Program) {
 // DXContainer wrapping.
 //===----------------------------------------------------------------------===//
 
+/// Serializes \p Elements as a legacy `ISGN`/`OSGN`/`PCSG` part body.
+static std::string
+encodeSignature(llvm::ArrayRef<feme::dxbc::SignatureElement> Elements) {
+  llvm::mcdxbc::LegacySignature Sig;
+  for (const feme::dxbc::SignatureElement &Element : Elements)
+    Sig.addParam(Element.Name, Element.Index, Element.SystemValue,
+                 Element.CompType, Element.Register, Element.Mask,
+                 Element.ExclusiveMask);
+  std::string Data;
+  llvm::raw_string_ostream OS(Data);
+  Sig.write(OS);
+  return Data;
+}
+
 void feme::dxbc::wrapInContainer(llvm::ArrayRef<uint32_t> Bytecode,
+                                 const Signatures &Sig,
                                  llvm::SmallVectorImpl<char> &Out) {
   using namespace llvm::dxbc;
 
-  std::string PartData;
+  // Part order follows `fxc`: the signatures, then the shader body.
+  llvm::SmallVector<std::pair<llvm::StringRef, std::string>, 4> Parts;
+  if (Sig.SeenInput)
+    Parts.emplace_back("ISGN", encodeSignature(Sig.Input));
+  if (Sig.SeenOutput)
+    Parts.emplace_back("OSGN", encodeSignature(Sig.Output));
+  if (Sig.SeenPatchConstant)
+    Parts.emplace_back("PCSG", encodeSignature(Sig.PatchConstant));
+
+  std::string ShaderData;
   {
-    llvm::raw_string_ostream PartOS(PartData);
+    llvm::raw_string_ostream PartOS(ShaderData);
     llvm::support::endian::Writer W(PartOS, llvm::endianness::little);
     for (uint32_t Word : Bytecode)
       W.write(Word);
   }
-
-  PartHeader Part;
-  memcpy(Part.Name, "SHEX", 4);
-  Part.Size = PartData.size();
+  Parts.emplace_back("SHEX", std::move(ShaderData));
 
   Header FileHeader;
   memcpy(FileHeader.Magic, "DXBC", 4);
   memset(FileHeader.FileHash.Digest, 0, sizeof(FileHeader.FileHash.Digest));
   FileHeader.Version.Major = 1;
   FileHeader.Version.Minor = 0;
-  FileHeader.PartCount = 1;
+  FileHeader.PartCount = Parts.size();
 
-  uint32_t PartOffset = sizeof(Header) + sizeof(uint32_t) /* PartOffset[0] */;
-  FileHeader.FileSize =
-      PartOffset + sizeof(PartHeader) + static_cast<uint32_t>(PartData.size());
+  llvm::SmallVector<uint32_t, 4> Offsets;
+  uint32_t Offset =
+      sizeof(Header) + static_cast<uint32_t>(Parts.size()) * sizeof(uint32_t);
+  for (const auto &[Name, Data] : Parts) {
+    Offsets.push_back(Offset);
+    Offset += sizeof(PartHeader) + static_cast<uint32_t>(Data.size());
+  }
+  FileHeader.FileSize = Offset;
 
   llvm::raw_svector_ostream OS(Out);
   llvm::support::endian::Writer W(OS, llvm::endianness::little);
@@ -308,8 +335,14 @@ void feme::dxbc::wrapInContainer(llvm::ArrayRef<uint32_t> Bytecode,
   W.write(FileHeader.Version.Minor);
   W.write(FileHeader.FileSize);
   W.write(FileHeader.PartCount);
-  W.write(PartOffset);
-  W.write(llvm::ArrayRef<uint8_t>(Part.Name, 4));
-  W.write(Part.Size);
-  OS << PartData;
+  for (uint32_t PartOffset : Offsets)
+    W.write(PartOffset);
+  for (const auto &[Name, Data] : Parts) {
+    PartHeader Part;
+    memcpy(Part.Name, Name.data(), 4);
+    Part.Size = Data.size();
+    W.write(llvm::ArrayRef<uint8_t>(Part.Name, 4));
+    W.write(Part.Size);
+    OS << Data;
+  }
 }

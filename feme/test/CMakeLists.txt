@@ -24,6 +24,8 @@ set(FEME_TEST_DEPENDS
   llc
   llvm-as
   opt
+  llvm-objcopy
+  obj2yaml
   split-file
   yaml2obj
   )

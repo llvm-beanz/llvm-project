@@ -1013,23 +1013,68 @@ translation:
 
 #### Building complete legacy DXBC containers for testing
 
-Signature element names and component types are synthesized from a
-`.dxasm` fixture's declarations by default, because a bare `SHEX` part
-(what `dxbc-as`'s assembly represents) has no `ISGN`/`OSGN` of its own to
-read them from -- `dxilconv`, by contrast, gets them from the real
-container. This is a property of the *fixture format*, not of the
-translation (see `agent_thoughts.md`); a `.dxasm`-only test still cannot
-exercise real signature-element data, but a test built from a full
-container now can (see below).
+`fxc` prints a shader's input, output and patch-constant signatures as
+fixed-width tables in the comment banner above its disassembly:
 
-To let a test carry real `ISGN`/`OSGN` (or `RDEF`/`PCSG`/`STAT`) bytes
-alongside a `dxbc-as`-assembled `SHEX` part, three pieces of upstream LLVM
-tooling compose into one pipeline:
+```
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// A                        0   xyzw        0     NONE   float    yz
+```
+
+Those tables carry the whole of the legacy `ISGN`/`OSGN`/`PCSG` parts --
+element name, semantic index, register, declared write mask, system value
+and component type -- none of which the instruction stream itself records:
+`dcl_input_ps linear v0.yz` says nothing about the element's name, its
+component type, or the `xw` components some earlier stage wrote that this
+one does not read. `dxbc-as --emit=container` therefore reads the tables
+back (`feme/lib/DXBC/Assembler/SignatureComments.cpp`) and emits the
+corresponding `ISGN`/`OSGN`/`PCSG` parts alongside `SHEX`, so that a bare
+`.dxasm` fixture is enough to build a container with a real signature in
+it. A signature `fxc` did not print at all contributes no part; one it
+printed as empty ("no Input") contributes an empty part, which is what
+`fxc` itself emits.
+
+The rows are anchored on the `SysValue`/`Format` pair rather than on
+column positions, because a long element name overflows its column and
+shifts the rest of the row, and because a discontiguous mask is printed
+with its components in fixed positions ("x z") and so arrives as several
+whitespace-separated pieces. Minimum precision is *not* recoverable from
+these parts -- the legacy layout predates it, and `fxc` records a `min16f`
+element's component type as `float` there -- so it is read from the
+operand tokens instead, which carry it directly.
+
+`feme-translate --dxsa-to-llvmir --dxbc-container=<path>` reads a full
+container's real legacy `ISGN`/`OSGN` (via `object::DXContainer`'s
+`getLegacyInputSignature()`/`getLegacyOutputSignature()`) and uses its
+element names, semantic indices, register/mask placement, system values,
+and component types directly, instead of synthesizing them from the
+`dxsa.module`'s declarations. A fixture that wants that pairs the two:
+
+```
+; RUN: dxbc-as --emit=container %s -o %t.dxbc
+; RUN: dxbc-as %s | feme-translate --import-dxsa-bin - \
+; RUN:   | feme-translate --dxsa-to-llvmir --dxbc-container=%t.dxbc - \
+; RUN:   | FileCheck %s
+```
+
+Synthesis from declarations remains the default, and remains visible in
+the output of fixtures that use it: a synthesized element is named `IN<n>`
+/`OUT<n>`, its component type is always `F32`, and its mask covers only
+the components this shader mentions. That is why a fixture translated
+without a container reads a signature register as `float` and
+reinterprets it where `dxilconv`'s real `ISGN` says `uint`.
+
+For a container that needs parts `fxc`'s disassembly does not describe
+(`RDEF`, `PSV0`, `STAT`), three pieces of upstream LLVM tooling still
+compose into one pipeline:
 
 - `yaml2obj`, given a `DXContainerYAML::Object`, writes the parts LLVM
-  models structurally -- e.g. `ISG1`/`OSG1`/`PSV0`/`RTS0`, and, as of this
-  session, the legacy `ISGN`/`OSGN`/`PCSG` shader model 5.x signature parts
-  too, via a `LegacySignature` YAML field
+  models structurally -- e.g. `ISG1`/`OSG1`/`PSV0`/`RTS0`, and the legacy
+  `ISGN`/`OSGN`/`PCSG` shader model 5.x signature parts too, via a
+  `LegacySignature` YAML field
   (`llvm/test/ObjectYAML/DXContainer/LegacySignatureParts.yaml`) -- and,
   for the parts it still does not model (`RDEF`/`SHEX`/`STAT`), writes a
   `PrivateData` byte sequence given in the YAML verbatim, the same escape
@@ -1043,27 +1088,6 @@ tooling compose into one pipeline:
 pairs with into one self-contained test file; see
 `feme/test/Tools/dxbc-as/full-container.test` for a worked example that
 builds a container this way and inspects it with `obj2yaml`.
-
-`feme-translate --dxsa-to-llvmir --dxbc-container=<path>` reads a full
-container's real legacy `ISGN`/`OSGN` (via `object::DXContainer`'s
-`getLegacyInputSignature()`/`getLegacyOutputSignature()`) and uses its
-element names, semantic indices, register/mask placement, system values,
-and component types directly, instead of synthesizing them from the
-`dxsa.module`'s declarations -- see
-`feme/test/Translate/DXBC/indexableoutput1.test` for a fixture this
-unblocked (its real `OSGN` has signature-element indices a `.dxasm`'s
-declarations alone cannot reconstruct). This does not, on its own, unblock
-the remaining `.ref` fixtures in `feme/test/Translate/DXBC`, which are
-gated on unimplemented opcode families -- resources and samplers,
-indexable temps, minimum-precision operands, subroutines, and
-stage-specific declarations -- rather than on signature data.
-
-Synthesis does, however, remain visible in the *output* of fixtures that
-do translate: a synthesized element's component type is always `F32`,
-where `dxilconv` reads the real one. That is why a handful of migrated
-fixtures read a signature register as `float` and reinterpret it, where
-`dxilconv`'s real `ISGN` says `uint` and it reads an `i32` directly. The
-difference disappears for a test built from a full container.
 
 Notably, DXIL ⇄ SPIR-V translation is expected to route through plain LLVM
 IR and the **existing** LLVM `SPIRV` backend/MLIR `spirv` dialect rather than
