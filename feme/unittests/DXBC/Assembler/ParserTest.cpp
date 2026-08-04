@@ -378,9 +378,10 @@ TEST(ParserTest, DoubleImmediates) {
   Program P = parseOrFail("dmov r0.xyzw, d(0x3FF0000000000000)");
   const Operand &Imm = P.Instructions[0].Operands[1];
   EXPECT_EQ(Imm.Kind, OperandKind::Immediate64);
+  // Stored as two DWORDs, low half first.
   ASSERT_EQ(Imm.ImmediateValues.size(), 2u);
-  EXPECT_EQ(Imm.ImmediateValues[0], 0x3FF00000u);
-  EXPECT_EQ(Imm.ImmediateValues[1], 0u);
+  EXPECT_EQ(Imm.ImmediateValues[0], 0u);
+  EXPECT_EQ(Imm.ImmediateValues[1], 0x3FF00000u);
 }
 
 TEST(ParserTest, InstructionModifiers) {

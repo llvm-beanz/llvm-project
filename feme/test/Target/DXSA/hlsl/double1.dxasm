@@ -8,8 +8,8 @@
 // CHECK:         dxsa.dcl_temps 1
 // CHECK:         dxsa.mov r<0>, v<0>
 // CHECK:         dxsa.ddiv r<0, <x, y>>, r<0, <z, w, z, w>>, r<0, <x, y, x, y>>
-// CHECK:         dxsa.dadd r<0, <z, w>>, r<0, <z, w, z, w>>, d(0x0, 0x60000000C0116666)
-// CHECK:         dxsa.dmin r<0, <x, y>>, r<0, <x, y, x, y>>, d(0x800000003FFC51EB, 0x0)
+// CHECK:         dxsa.dadd r<0, <z, w>>, r<0, <z, w, z, w>>, d(0x0, 0xC011666660000000)
+// CHECK:         dxsa.dmin r<0, <x, y>>, r<0, <x, y, x, y>>, d(0x3FFC51EB80000000, 0x0)
 // CHECK:         dxsa.dmax r<0, <x, y>>, r<0, <z, w, z, w>>, r<0, <x, y, x, y>>
 // CHECK:         dxsa.dmov r<0, <x, y>>, |r<0, <x, y, x, y>>|
 // CHECK:         dxsa.mov o<0, <x, y>>, r<0, <x, y, x, x>>
@@ -23,8 +23,8 @@ dcl_output o0.xy
 dcl_temps 1
 mov r0.xyzw, v0.xyzw
 ddiv r0.xy, r0.zwzw, r0.xyxy
-dadd r0.zw, r0.zwzw, d(0x0000000000000000, 0x60000000C0116666)
-dmin r0.xy, r0.xyxy, d(0x800000003FFC51EB, 0x0000000000000000)
+dadd r0.zw, r0.zwzw, d(0x0000000000000000, 0xC011666660000000)
+dmin r0.xy, r0.xyxy, d(0x3FFC51EB80000000, 0x0000000000000000)
 dmax r0.xy, r0.zwzw, r0.xyxy
 dmov r0.xy, |r0.xyxy|
 mov o0.xy, r0.xyxx

@@ -10,16 +10,16 @@
 // CHECK:         dxsa.dcl_temps 2
 // CHECK:         dxsa.dcl_indexable_temp x<0>[6]
 // CHECK:         dxsa.dcl_indexable_temp x<1>[4]
-// CHECK:         dxsa.dmov x<[0, 0], <x, y>>, d(0x40200000, 0x0)
-// CHECK:         dxsa.dmov x<[0, 1], <x, y>>, d(0x3FF00000, 0x0)
-// CHECK:         dxsa.dmov x<[0, 2], <x, y>>, d(0x40000000, 0x0)
-// CHECK:         dxsa.dmov x<[0, 3], <x, y>>, d(0x40000000400C7AE1, 0x0)
-// CHECK:         dxsa.dmov x<[0, 4], <x, y>>, d(0x401C0000, 0x0)
-// CHECK:         dxsa.dmov x<[0, 5], <x, y>>, d(0x40408000, 0x0)
-// CHECK:         dxsa.dmov x<[1, 0], <x, y>>, d(0x3FF00000, 0x0)
-// CHECK:         dxsa.dmov x<[1, 1], <x, y>>, d(0x40000000, 0x0)
-// CHECK:         dxsa.dmov x<[1, 2], <x, y>>, d(0x40000000400C7AE1, 0x0)
-// CHECK:         dxsa.dmov x<[1, 3], <x, y>>, d(0x401C0000, 0x0)
+// CHECK:         dxsa.dmov x<[0, 0], <x, y>>, d(0x4020000000000000, 0x0)
+// CHECK:         dxsa.dmov x<[0, 1], <x, y>>, d(0x3FF0000000000000, 0x0)
+// CHECK:         dxsa.dmov x<[0, 2], <x, y>>, d(0x4000000000000000, 0x0)
+// CHECK:         dxsa.dmov x<[0, 3], <x, y>>, d(0x400C7AE140000000, 0x0)
+// CHECK:         dxsa.dmov x<[0, 4], <x, y>>, d(0x401C000000000000, 0x0)
+// CHECK:         dxsa.dmov x<[0, 5], <x, y>>, d(0x4040800000000000, 0x0)
+// CHECK:         dxsa.dmov x<[1, 0], <x, y>>, d(0x3FF0000000000000, 0x0)
+// CHECK:         dxsa.dmov x<[1, 1], <x, y>>, d(0x4000000000000000, 0x0)
+// CHECK:         dxsa.dmov x<[1, 2], <x, y>>, d(0x400C7AE140000000, 0x0)
+// CHECK:         dxsa.dmov x<[1, 3], <x, y>>, d(0x401C000000000000, 0x0)
 // CHECK:         dxsa.mov r<0, <x, y>>, cb<[0, 0], vector, <x, y, x, x>>
 // CHECK:         dxsa.dmov r<0, <z, w>>, x<[1, r<0, <x>>], <x, y, x, y>>
 // CHECK:         dxsa.dadd r<0, <z, w>>, r<0, <z, w, z, w>>, cb<[0, 1 + r<0, <x>>], vector, <x, y, x, y>>
@@ -47,16 +47,16 @@ dcl_output o0.xyzw
 dcl_temps 2
 dcl_indexableTemp x0[6], 4
 dcl_indexableTemp x1[4], 4
-dmov x0[0].xy, d(0x0000000040200000, 0x0000000000000000)
-dmov x0[1].xy, d(0x000000003FF00000, 0x0000000000000000)
-dmov x0[2].xy, d(0x0000000040000000, 0x0000000000000000)
-dmov x0[3].xy, d(0x40000000400C7AE1, 0x0000000000000000)
-dmov x0[4].xy, d(0x00000000401C0000, 0x0000000000000000)
-dmov x0[5].xy, d(0x0000000040408000, 0x0000000000000000)
-dmov x1[0].xy, d(0x000000003FF00000, 0x0000000000000000)
-dmov x1[1].xy, d(0x0000000040000000, 0x0000000000000000)
-dmov x1[2].xy, d(0x40000000400C7AE1, 0x0000000000000000)
-dmov x1[3].xy, d(0x00000000401C0000, 0x0000000000000000)
+dmov x0[0].xy, d(0x4020000000000000, 0x0000000000000000)
+dmov x0[1].xy, d(0x3FF0000000000000, 0x0000000000000000)
+dmov x0[2].xy, d(0x4000000000000000, 0x0000000000000000)
+dmov x0[3].xy, d(0x400C7AE140000000, 0x0000000000000000)
+dmov x0[4].xy, d(0x401C000000000000, 0x0000000000000000)
+dmov x0[5].xy, d(0x4040800000000000, 0x0000000000000000)
+dmov x1[0].xy, d(0x3FF0000000000000, 0x0000000000000000)
+dmov x1[1].xy, d(0x4000000000000000, 0x0000000000000000)
+dmov x1[2].xy, d(0x400C7AE140000000, 0x0000000000000000)
+dmov x1[3].xy, d(0x401C000000000000, 0x0000000000000000)
 mov r0.xy, cb0[0].xyxx
 dmov r0.zw, x1[r0.x].xyxy
 dadd r0.zw, r0.zwzw, cb0[1 + r0.x].xyxy

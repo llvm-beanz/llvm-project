@@ -177,8 +177,8 @@ static void printOperand(const Operand &Op, OperandRole Role,
     OS << "d(";
     llvm::ListSeparator Sep(", ");
     for (size_t I = 0; I + 1 < Op.ImmediateValues.size(); I += 2) {
-      uint64_t Bits = (static_cast<uint64_t>(Op.ImmediateValues[I]) << 32) |
-                      Op.ImmediateValues[I + 1];
+      uint64_t Bits = (static_cast<uint64_t>(Op.ImmediateValues[I + 1]) << 32) |
+                      Op.ImmediateValues[I];
       OS << Sep << llvm::format("0x%016llX", Bits);
     }
     OS << ')';

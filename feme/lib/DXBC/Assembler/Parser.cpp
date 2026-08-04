@@ -448,7 +448,7 @@ private:
   }
 
   /// Parses a 64-bit numeric literal, yielding its encoding as a pair of
-  /// DWORDs (high word first, matching the tokenized format).
+  /// DWORDs (low word first, matching the tokenized format).
   llvm::Error parseValue64(llvm::SmallVectorImpl<uint32_t> &Out) {
     bool Negate = false;
     if (Current.Kind == TokenKind::Minus) {
@@ -472,8 +472,10 @@ private:
     } else {
       return error("expected a numeric literal");
     }
-    Out.push_back(static_cast<uint32_t>(Bits >> 32));
+    // The tokenized format stores a 64-bit immediate as two DWORDs, low
+    // half first.
     Out.push_back(static_cast<uint32_t>(Bits));
+    Out.push_back(static_cast<uint32_t>(Bits >> 32));
     return llvm::Error::success();
   }
 

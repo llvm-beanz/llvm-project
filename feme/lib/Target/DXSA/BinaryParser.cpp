@@ -1602,17 +1602,18 @@ public:
         }
         SmallVector<int64_t, 2> values;
         for (unsigned i = 0; i < 2; ++i) {
-          Token high = parseToken();
-          if (failed(high)) {
-            emitError(getLocation(),
-                      "expected an immediate operand (imm64 high)");
-            return failure();
-          }
-
+          // A 64-bit immediate is stored as two DWORDs, low half first.
           Token low = parseToken();
           if (failed(low)) {
             emitError(getLocation(),
                       "expected an immediate operand (imm64 low)");
+            return failure();
+          }
+
+          Token high = parseToken();
+          if (failed(high)) {
+            emitError(getLocation(),
+                      "expected an immediate operand (imm64 high)");
             return failure();
           }
 
@@ -1969,10 +1970,11 @@ public:
     if (isImmOperand(*token)) {
       if (rawOperandType == D3D10_SB_OPERAND_TYPE_IMMEDIATE64) {
         for (unsigned i = 0; i < 2; ++i) {
-          auto high = parseToken();
-          FAILURE_IF_FAILED(high);
+          // A 64-bit immediate is stored as two DWORDs, low half first.
           auto low = parseToken();
           FAILURE_IF_FAILED(low);
+          auto high = parseToken();
+          FAILURE_IF_FAILED(high);
           decoded.values64.push_back((((int64_t)*high) << 32) | *low);
         }
         return decoded;
