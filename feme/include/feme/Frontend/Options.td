@@ -29,14 +29,10 @@ def from_EQ : Joined<["--"], "from=">,
     HelpText<"Input format to translate from (e.g. dxil, dxbc, spirv)">,
     MetaVarName<"<format>">;
 
-def to_EQ : Joined<["--"], "to=">,
+def target_EQ : Joined<["--"], "target=">,
     HelpText<"Output format/target to translate to "
              "(e.g. dxil, spirv, or a target triple)">,
     MetaVarName<"<format>">;
-
-def target_EQ : Joined<["--"], "target=">,
-    HelpText<"Target triple to retarget the translated module to">,
-    MetaVarName<"<triple>">;
 
 def o : JoinedOrSeparate<["-"], "o">,
     HelpText<"Write output to <file>">,

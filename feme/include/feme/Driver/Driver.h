@@ -43,21 +43,21 @@ using DriverOptions = feme::frontend::DriverOptions;
 
 /// The result of a successful `Driver::run`: the final output bytes (an
 /// object file, or a re-serialized binary format, depending on
-/// `DriverOptions::To`/`DriverOptions::Target`).
+/// `DriverOptions::Target`).
 struct DriverResult {
   llvm::SmallVector<char, 0> Output;
 };
 
 /// Computes and runs the full `Importer` -> raising pass(es) -> `Translator`
-/// -> `Backend` chain needed to go from `Opts.From` to `Opts.To`/
-/// `Opts.Target`. See the "Driver" section of feme/docs/Design.md.
+/// -> `Backend` chain needed to go from `Opts.From` to `Opts.Target`. See
+/// the "Driver" section of feme/docs/Design.md.
 ///
 /// Currently supported `Opts.From` values are "dxil" and "spirv" (DXBC
 /// import is not yet implemented -- see the Roadmap / Milestones section of
-/// feme/docs/Design.md). `Opts.To`/`Opts.Target` may each independently name
-/// "dxil", "spirv" (re-serializing back to that format via its own LLVM
-/// backend), or any other LLVM target triple registered with the
-/// `TargetRegistry` (e.g. "amdgcn-amd-amdhsa") for real-ISA retargeting.
+/// feme/docs/Design.md). `Opts.Target` may independently name "dxil",
+/// "spirv" (re-serializing back to that format via its own LLVM backend),
+/// or any other LLVM target triple registered with the `TargetRegistry`
+/// (e.g. "amdgcn-amd-amdhsa") for real-ISA retargeting.
 class Driver {
 public:
   explicit Driver(Context &Ctx);

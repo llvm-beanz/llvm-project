@@ -35,17 +35,17 @@ TEST(DriverTest, RejectsUnsupportedFromFormat) {
 
   frontend::DriverOptions Opts;
   Opts.From = "dxbc"; // Not yet implemented -- see feme/docs/Design.md.
-  Opts.To = "spirv";
+  Opts.Target = "spirv";
 
   llvm::Expected<DriverResult> Result =
       D.run(llvm::MemoryBufferRef("", "driver-test"), Opts);
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
 }
 
-TEST(DriverTest, RejectsMissingToAndTarget) {
+TEST(DriverTest, RejectsMissingTarget) {
   // A minimal, but real and valid, LLVM bitcode module: DXILImporter accepts
   // raw bitcode on its own (no DXContainer needed), so this reaches Driver's
-  // --to/--target resolution rather than failing at the import step, unlike
+  // --target resolution rather than failing at the import step, unlike
   // an empty/malformed buffer would.
   llvm::LLVMContext LLVMCtx;
   llvm::Module M("driver-test", LLVMCtx);
@@ -58,7 +58,7 @@ TEST(DriverTest, RejectsMissingToAndTarget) {
 
   frontend::DriverOptions Opts;
   Opts.From = "dxil";
-  // Neither Opts.To nor Opts.Target is set.
+  // Opts.Target is not set.
 
   llvm::Expected<DriverResult> Result =
       D.run(llvm::MemoryBufferRef(
@@ -73,7 +73,7 @@ TEST(DriverTest, RejectsMalformedInputForRequestedFromFormat) {
 
   frontend::DriverOptions Opts;
   Opts.From = "spirv";
-  Opts.To = "spirv";
+  Opts.Target = "spirv";
 
   // 4 bytes of garbage: word-aligned, but not a valid SPIR-V module, so
   // Importer::import itself must fail before Driver gets anywhere near

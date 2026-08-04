@@ -6,8 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Defines `DriverOptions`, the explicit-state struct that feme's `--from`/
-// `--to`/`--target` command line is parsed into (see the "Driver" and
+// Defines `DriverOptions`, the explicit-state struct that feme's
+// `--target` command line is parsed into (see the "Driver" and
 // "Command Line Tool(s)" sections of feme/docs/Design.md), and `parseArgs`,
 // which builds one from `argc`/`argv` using the `OptTable` in Options.h.
 // This is deliberately a plain struct populated by explicit parsing, not a
@@ -46,10 +46,8 @@ struct DriverOptions {
   /// Input format to translate from (e.g. "dxil", "dxbc", "spirv").
   std::string From;
 
-  /// Output format, or target triple, to translate to.
-  std::string To;
-
-  /// Target triple to retarget the translated module to, if any.
+  /// Output format, or target triple, to retarget the translated module to
+  /// (e.g. "dxil", "spirv", or a target triple such as "amdgcn-amd-amdhsa").
   std::string Target;
 
   /// Whether `--help` was requested; callers should print help and exit

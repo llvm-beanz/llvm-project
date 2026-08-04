@@ -60,23 +60,19 @@ llvm::Expected<Module> translateToLLVMIR(Module &&Imported, Context &Ctx) {
   return ToLLVMIR.translate(std::move(Imported), Ctx);
 }
 
-/// Resolves `Opts.Target`/`Opts.To` (see DriverOptions' field comments) to
-/// the concrete target triple `TargetMachineBackend` should retarget to:
-/// `Opts.Target` wins if set (an explicit ISA retarget, e.g.
-/// "amdgcn-amd-amdhsa"); otherwise `Opts.To` is consulted, which may itself
-/// either name one of FeMe's own input formats ("dxil"/"spirv", each
-/// resolving to that format's own LLVM backend so the module round-trips
-/// back out through it) or be a target triple directly.
+/// Resolves `Opts.Target` (see DriverOptions' field comments) to the
+/// concrete target triple `TargetMachineBackend` should retarget to:
+/// `Opts.Target` may itself either name one of FeMe's own input formats
+/// ("dxil"/"spirv", each resolving to that format's own LLVM backend so the
+/// module round-trips back out through it) or be a target triple directly
+/// (e.g. "amdgcn-amd-amdhsa", for real-ISA retargeting).
 llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
                                                 const llvm::Module &M) {
-  llvm::StringRef Requested = !Opts.Target.empty()
-                                  ? llvm::StringRef(Opts.Target)
-                                  : llvm::StringRef(Opts.To);
+  llvm::StringRef Requested = Opts.Target;
   if (Requested.empty())
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
-        "one of --to or --target must name an output format or target "
-        "triple");
+        "--target must name an output format or target triple");
 
   if (Requested == "dxil") {
     // A DXIL input compiled by a modern toolchain (targeting a

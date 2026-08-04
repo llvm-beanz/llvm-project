@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
   // feme::TargetMachineBackend does not itself initialize any LLVM targets
   // (see its header comment), to avoid forcing every FeMe consumer to link
   // every target's codegen library; `feme` itself, like `llc`, wants every
-  // target configured into this build available for `--to`/`--target`.
+  // target configured into this build available for `--target`.
   llvm::InitializeAllTargetInfos();
   llvm::InitializeAllTargets();
   llvm::InitializeAllTargetMCs();

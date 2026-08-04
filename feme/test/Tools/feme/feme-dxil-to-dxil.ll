@@ -1,6 +1,6 @@
 ; REQUIRES: directx-registered-target
 ; RUN: llc %s --filetype=obj -o %t.dxcontainer
-; RUN: feme --from=dxil --to=dxil %t.dxcontainer -o %t.out.dxcontainer
+; RUN: feme --from=dxil --target=dxil %t.dxcontainer -o %t.out.dxcontainer
 ; RUN: od -An -c -N4 %t.out.dxcontainer | FileCheck %s
 
 ; Round-trips a DXContainer all the way back out to a DXContainer through the

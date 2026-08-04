@@ -1,6 +1,6 @@
 // REQUIRES: spirv-registered-target
 // RUN: feme-translate --no-implicit-module --serialize-spirv %s -o %t.spv
-// RUN: feme --from=spirv --to=spirv %t.spv -o %t.roundtrip.spv
+// RUN: feme --from=spirv --target=spirv %t.spv -o %t.roundtrip.spv
 // RUN: feme-translate --import-spirv %t.roundtrip.spv | FileCheck %s
 
 // The `feme` CLI counterpart to test/Target/spirv-backend-compute-shader.mlir:
@@ -11,7 +11,7 @@
 // the SPIR-V -> LLVM IR translation emits `llvm.spv.*` target intrinsics for
 // them; and the re-emitted module keeps the Vulkan compute environment the
 // input named, rather than falling back to feme::Driver's kernel-flavored
-// default for `--to=spirv`.
+// default for `--target=spirv`.
 
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, ImageBuffer], []> {
   spirv.GlobalVariable @gid built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
