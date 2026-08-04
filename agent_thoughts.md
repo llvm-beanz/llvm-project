@@ -4302,3 +4302,137 @@ would require writing that importer-side container/signature reader first,
 which is a translation-correctness change, not a test-tooling change, and
 is a large enough increment to deserve its own session rather than being
 folded into this one.
+
+# Agent thoughts: real ISGN/OSGN signature support for the DXBC .ref fixtures
+
+## The request, and what turned out to be true
+
+The task's framing was: the remaining `.ref` files in
+`feme/test/Translate/DXBC` are there because a bare `.dxasm` fixture cannot
+carry the container metadata (`ISGN`/`OSGN`) needed for a correct
+translation, and the fix is to teach `feme`'s `dxsa-to-llvmir`/objectyaml
+tooling to consume real container signature bytes, then rewrite those
+tests in `full-container.test`'s style.
+
+That is exactly right for **two** of the 117 `.ref` fixtures --
+`indexableoutput1` and `output4` -- and I confirmed it by force-running
+every `.ref` fixture through `--dxsa-to-llvmir` (bypassing the "not covered
+yet" `--import-dxsa-bin`-only `RUN` line) and diffing against its `.ref`.
+For the other ~115, every single one fails outright with a `dxsa ->
+DXIL translation does not support '...' yet` diagnostic naming a real
+untranslated construct: control flow (`if`/`loop`/`switch`), constant
+buffers, resources/samplers, indexable temps, minimum-precision operands,
+or a non-pixel-shader stage-specific declaration. That matches "What is
+left" in the DXBC -> DXIL translation's own agent-thoughts entry above --
+these are unimplemented *opcode families*, not a container-metadata gap,
+and no amount of real `ISGN`/`OSGN` data changes that. `output4` itself
+turned out to be one of these: its real `min16f` cull-distance output
+means it still fails on an unsupported `dxsa.mov` regardless of signature
+source, so it stays a `.ref` fixture; only `indexableoutput1` was
+purely blocked by signature synthesis and got rewritten.
+
+I want to be explicit that I did not find this out by assuming the
+premise and building around it -- I verified it by running the sweep
+above before deciding how big a scope this task actually was. Rewriting
+115 fixtures would have meant implementing DXBC's control-flow, resource,
+and constant-buffer translation in this session, which is exactly the
+kind of large, multi-session increment `feme/docs/Design.md`'s "What is
+left" already flags as future work; doing it properly (with the tests
+this coding standard requires for every phase) is not something to
+shortcut into "and also rewrite 115 golden files" here.
+
+## What I built: real `ISGN`/`OSGN` end to end
+
+Four layers, each with its own tests, from the bottom up:
+
+1. **`llvm::dxbc::LegacySignatureElement`**
+   (`llvm/include/llvm/BinaryFormat/DXContainer.h`): the 24-byte on-disk
+   layout the legacy `ISGN`/`OSGN`/`PCSG` parts use -- the same fields as
+   the newer `ISG1`/`OSG1`/`PSG1`'s `ProgramSignatureElement`, minus
+   `Stream` and `MinPrecision`, which the pre-DXIL format doesn't have.
+   `DirectX::Signature` in `llvm/include/llvm/Object/DXContainer.h` became
+   a class template (`SignatureBase<ElementTy>`) so its parsing logic
+   (string-table offset math, bounds checks) is shared between the two
+   element layouts rather than duplicated.
+2. **`mcdxbc::LegacySignature`** (`llvm/include/llvm/MC/DXContainerPSVInfo.h`):
+   the write-side sibling of `mcdxbc::Signature`, for the same reason.
+3. **ObjectYAML**: `ISGN`/`OSGN`/`PCSG` move from `PartType::Unknown` to a
+   real, structurally-modeled `PartType`, with a `LegacySignature` YAML
+   field mirroring `ISG1`/`OSG1`/`PSG1`'s `Signature`. This is the one
+   place the change had a real, deliberate cost: a handful of existing
+   tests used `ISGN` specifically *because* it was `Unknown`, as a stand-in
+   for "some part with arbitrary placeholder bytes"
+   (`llvm/test/tools/yaml2obj/DXContainer/legacy-part-content.yaml`, the
+   `llvm-objcopy` add/update-section tests). Since a real `PartType` now
+   has to actually parse as a legacy signature, those tests switched to
+   `RDEF`, which remains genuinely unmodeled -- I checked this is not just
+   a cosmetic swap by confirming the whole DXContainer/objectyaml/objcopy
+   test suites (1231 tests) plus `check-feme` (570 tests) still pass after
+   the rename.
+4. **`feme-translate --dxsa-to-llvmir --dxbc-container=<path>`**: a new
+   cl::opt (the same "narrowly-scoped, testing-only entrypoint" exception
+   to the "No Global State" principle that `--target-triple` already
+   uses in `feme/lib/Target/TranslateRegistration.cpp`), which reads a
+   full container's real `getLegacyInputSignature()`/
+   `getLegacyOutputSignature()` and passes their elements to
+   `translateToLLVMIR` as `ContainerSignatureElement`s, overriding
+   declaration-based synthesis in `collectDeclarations`. I kept the
+   `dxsa` MLIR dialect itself completely untouched -- the real signature
+   is threaded through as a separate out-of-band input to the *translator*
+   only, read directly from the container file by the CLI hook, rather
+   than by teaching the importer/dialect to carry container metadata as
+   attributes. That avoided a much larger, riskier change to a dialect with
+   ~390 existing tests, for a leaf-level, testing-only feature.
+
+## A design decision worth calling out: component type wasn't free
+
+Component type ("always F32") was originally listed as another synthesis
+limitation alongside signature-element names. Fixing it required
+`SignatureElement` to carry a real `DXILComponentType` (mapped from
+`dxbc::SigComponentType`) and `emitSignature` to stop hardcoding
+`DXILComponentType::F32`. I did this because it was directly needed to
+match `indexableoutput1.ref` (its `B` input is `uint`, not `float`) and it
+was a small, contained addition once the signature-element plumbing
+existed -- not because the request asked for it explicitly.
+
+## Verification
+
+- `llvm/test/ObjectYAML/DXContainer/LegacySignatureParts.yaml`: new
+  yaml2obj|obj2yaml round-trip for `ISGN`/`OSGN` with real elements,
+  mirroring `SignatureParts.yaml`.
+- `feme/test/Tools/dxbc-as/full-container.test`: rebuilt with real
+  `LegacySignature` YAML instead of placeholder bytes.
+- `feme/test/Translate/DXBC/indexableoutput1.test`: replaces the old
+  `.dxasm`/`.ref` pair; built a full container by hand first (`yaml2obj`
+  + `dxbc-as --emit=binary` + `llvm-objcopy --add-section`) and diffed
+  the translator's output against the original `.ref` before writing the
+  committed test, matching it exactly modulo the already-documented
+  `dxilconv` differences (typed-pointer IR syntax, `readnone` vs
+  `memory(none)`, the shader-flags word, the `!llvm.ident` string).
+- Full `llvm/test/{ObjectYAML,tools/{yaml2obj,obj2yaml,llvm-objcopy,
+  llvm-objdump}}/DXContainer` suites (1231 tests) and `check-feme`
+  (570 tests) pass with assertions-enabled, ccache-backed builds.
+
+## What I did not do
+
+- Did not touch the ~115 `.ref` fixtures gated on unimplemented opcode
+  families -- see "The request, and what turned out to be true" above.
+  Implementing DXBC control flow, constant buffers, resources/samplers,
+  indexable temps, and minimum-precision operands remains future work, as
+  `feme/docs/Design.md`'s "What is left" already said before this session.
+- Did not add real `ISGN`/`OSGN` reading to the `dxsa` importer/dialect
+  itself (as opposed to the `--dxsa-to-llvmir` translator, which now does
+  read it out-of-band via `--dxbc-container`). The importer only ever sees
+  a bare `SHEX` bytecode stream; teaching *it* to accept and model a full
+  container's signature as dialect attributes would be a bigger, riskier
+  change to a heavily-tested dialect for no additional test coverage this
+  session needed.
+
+## Commits
+
+- `[BinaryFormat][Object] Add legacy DXBC ISGN/OSGN/PCSG signature element format`
+- `[MC] Add mcdxbc::LegacySignature writer for legacy ISGN/OSGN/PCSG parts`
+- `[ObjectYAML] Structurally model legacy ISGN/OSGN/PCSG signature parts`
+- `[feme][dxsa] Let --dxsa-to-llvmir read a real signature from a full DXContainer`
+- `[feme][test] Build full-container.test's ISGN/OSGN from real LegacySignature YAML`
+- `[feme][test] Rewrite indexableoutput1 to use a full DXContainer, not a .ref`
