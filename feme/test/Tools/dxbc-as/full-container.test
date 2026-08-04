@@ -1,0 +1,44 @@
+;; Demonstrates assembling a complete legacy DXBC container (with real
+;; ISGN/OSGN bytes, not the synthesized names the DXBC->DXIL translation
+;; falls back to for a bare .dxasm fixture -- see feme/docs/Design.md's
+;; "Building complete legacy DXBC containers for testing") from three
+;; pieces of upstream LLVM tooling: yaml2obj builds the container skeleton,
+;; dxbc-as assembles the bytecode part, and llvm-objcopy merges them.
+;; split-file keeps the container YAML and the .dxasm it pairs with in one
+;; self-contained file.
+
+; RUN: split-file %s %t
+; RUN: yaml2obj %t/container.yaml -o %t/skeleton.dxbc
+; RUN: dxbc-as --emit=binary %t/shader.dxasm -o %t/shex.bin
+; RUN: llvm-objcopy --add-section=SHEX=%t/shex.bin %t/skeleton.dxbc %t/full.dxbc
+; RUN: obj2yaml %t/full.dxbc | FileCheck %s
+
+; CHECK:      Parts:
+; CHECK-NEXT:   - Name:            ISGN
+; CHECK-NEXT:     Size:            4
+; CHECK-NEXT:   - Name:            OSGN
+; CHECK-NEXT:     Size:            4
+; CHECK-NEXT:   - Name:            SHEX
+; CHECK-NEXT:     Size:            12
+
+;--- container.yaml
+--- !dxcontainer
+Header:
+  Hash:            [ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+                     0x0, 0x0, 0x0, 0x0, 0x0, 0x0 ]
+  Version:
+    Major:           1
+    Minor:           0
+  PartCount:       2
+Parts:
+  - Name:            ISGN
+    Size:            4
+    PrivateData:     [ 0xDE, 0xAD, 0xBE, 0xEF ]
+  - Name:            OSGN
+    Size:            4
+    PrivateData:     [ 0xFE, 0xED, 0xFA, 0xCE ]
+...
+
+;--- shader.dxasm
+.shader_model pixel 5 0
+ret

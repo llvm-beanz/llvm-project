@@ -53,6 +53,16 @@ tools = [
     # pass against real DXIL-lowering output rather than only hand-written
     # `dx.op.*` calls.
     "opt",
+    # Used to assemble complete legacy DXBC containers at test time: yaml2obj
+    # builds the parts LLVM's ObjectYAML models structurally or that a test
+    # authors verbatim (e.g. ISGN/OSGN), llvm-objcopy merges in the raw
+    # bytecode part dxbc-as produces, obj2yaml inspects the result, and
+    # split-file keeps the YAML and the .dxasm it is paired with in one
+    # self-contained test file (see feme/docs/Design.md's "dxbc-as" section).
+    "split-file",
+    "yaml2obj",
+    "obj2yaml",
+    "llvm-objcopy",
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)

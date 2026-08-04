@@ -984,6 +984,40 @@ minimum-precision (`min16f`/`min16i`/`min16u`) operands, control flow,
 constant buffers, resources and samplers, indexable temps, group-shared
 memory, and the non-pixel-shader stage-specific declarations.
 
+#### Building complete legacy DXBC containers for testing
+
+Signature element names and component types are synthesized from a
+`.dxasm` fixture's declarations rather than read, because a bare `SHEX`
+part (what `dxbc-as`'s assembly represents) has no `ISGN`/`OSGN` of its
+own to read them from -- `dxilconv`, by contrast, gets them from the real
+container. This is a property of the *fixture format*, not of the
+translation (see `agent_thoughts.md`), but it does mean a `.dxasm`-only
+test cannot exercise real signature-element data.
+
+To let a test carry real `ISGN`/`OSGN` (or `RDEF`/`PCSG`/`STAT`) bytes
+alongside a `dxbc-as`-assembled `SHEX` part, three pieces of upstream LLVM
+tooling compose into one pipeline:
+
+- `yaml2obj`, given a `DXContainerYAML::Object`, writes the parts LLVM
+  models structurally (e.g. `ISG1`/`OSG1`/`PSV0`/`RTS0`) and, for parts it
+  does not model (the legacy `ISGN`/`OSGN`/`PCSG`/`RDEF`/`SHEX`/`STAT`
+  names used by shader model 5.x containers), writes a `PrivateData` byte
+  sequence given in the YAML verbatim, the same escape hatch the `PRIV`
+  part already used.
+- `dxbc-as --emit=binary` assembles a `.dxasm` fixture into the raw
+  bytecode that belongs in `SHEX`.
+- `llvm-objcopy --add-section=SHEX=<file>` merges that bytecode into the
+  container `yaml2obj` built, producing one complete `DXContainer`.
+
+`llvm-split-file` groups the container-skeleton YAML and the `.dxasm` it
+pairs with into one self-contained test file; see
+`feme/test/Tools/dxbc-as/full-container.test` for a worked example that
+builds a container this way and inspects it with `obj2yaml`. Nothing in
+`feme` parses the merged container's `ISGN`/`OSGN` yet -- that is
+future work once the DXBC importer grows a real signature reader -- but
+the pipeline above already lets a test assert on the exact bytes a
+future importer would need to consume.
+
 Notably, DXIL ⇄ SPIR-V translation is expected to route through plain LLVM
 IR and the **existing** LLVM `SPIRV` backend/MLIR `spirv` dialect rather than
 needing a new bespoke conversion, which is a big part of why keeping DXIL as
