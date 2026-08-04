@@ -169,4 +169,52 @@ dxsa.module pixel_shader 5 0 {
             llvm::StringRef::npos);
 }
 
+TEST(DXSAToLLVMIRTranslatorTest, SystemValuesGetTheirDXILSemanticKind) {
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module vertex_shader 5 0 {
+  dxsa.dcl_input_sgv v<0, <x>>, <vertexID>
+  dxsa.dcl_output_siv o<0, <x, y, z, w>>, <position>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  // DXBC and DXIL number their system values differently: vertexID is 6 in
+  // D3D10_SB_NAME and 1 in DXIL::SemanticKind, position 1 and 3.
+  EXPECT_NE(IR->find(R"(!{i32 0, !"SV_VertexID", i8 9, i8 1,)"),
+            std::string::npos);
+  EXPECT_NE(IR->find(R"(!{i32 0, !"SV_Position", i8 9, i8 3,)"),
+            std::string::npos);
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, RejectsMinimumPrecisionOperands) {
+  // Minimum precision changes the width every computation reading the
+  // operand is done at, so silently ignoring it would be wrong.
+  Fixture Source;
+  EXPECT_FALSE(Source.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps linear v<0, min16f, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.mov o<0, <x>>, v<0, min16f, <x>>
+  dxsa.ret
+}
+)mlir")
+                   .has_value());
+  EXPECT_NE(Source.diagnostics().find("minimum-precision source operand"),
+            llvm::StringRef::npos);
+
+  Fixture Dest;
+  EXPECT_FALSE(Dest.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps linear v<0, <x>>
+  dxsa.dcl_output o<0, min16f, <x>>
+  dxsa.mov o<0, min16f, <x>>, v<0, <x>>
+  dxsa.ret
+}
+)mlir")
+                  .has_value());
+  EXPECT_NE(Dest.diagnostics().find("minimum-precision destination operand"),
+            llvm::StringRef::npos);
+}
+
 } // namespace

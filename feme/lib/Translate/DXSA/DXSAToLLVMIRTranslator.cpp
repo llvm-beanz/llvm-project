@@ -95,9 +95,133 @@ enum class DXILOp : unsigned {
 /// `DXIL::ComponentType`, as stored in a signature element's metadata.
 enum class DXILComponentType : unsigned { I32 = 4, U32 = 5, F32 = 9 };
 
-/// `DXIL::SemanticKind`, as stored in a signature element's metadata. Only
-/// the two kinds a synthesized signature can produce are listed.
-enum class DXILSemanticKind : unsigned { Arbitrary = 0, Target = 16 };
+/// `DXIL::SemanticKind`, as stored in a signature element's metadata.
+enum class DXILSemanticKind : unsigned {
+  Arbitrary = 0,
+  VertexID = 1,
+  InstanceID = 2,
+  Position = 3,
+  RenderTargetArrayIndex = 4,
+  ViewPortArrayIndex = 5,
+  ClipDistance = 6,
+  CullDistance = 7,
+  OutputControlPointID = 8,
+  DomainLocation = 9,
+  PrimitiveID = 10,
+  GSInstanceID = 11,
+  SampleIndex = 12,
+  IsFrontFace = 13,
+  Coverage = 14,
+  InnerCoverage = 15,
+  Target = 16,
+  TessFactor = 18,
+  InsideTessFactor = 19,
+  Barycentrics = 23,
+  ShadingRate = 24,
+  CullPrimitive = 25,
+};
+
+/// The `SV_`-prefixed name DXIL gives a system value in its signature
+/// metadata.
+llvm::StringRef semanticName(DXILSemanticKind Kind) {
+  switch (Kind) {
+  case DXILSemanticKind::VertexID:
+    return "SV_VertexID";
+  case DXILSemanticKind::InstanceID:
+    return "SV_InstanceID";
+  case DXILSemanticKind::Position:
+    return "SV_Position";
+  case DXILSemanticKind::RenderTargetArrayIndex:
+    return "SV_RenderTargetArrayIndex";
+  case DXILSemanticKind::ViewPortArrayIndex:
+    return "SV_ViewportArrayIndex";
+  case DXILSemanticKind::ClipDistance:
+    return "SV_ClipDistance";
+  case DXILSemanticKind::CullDistance:
+    return "SV_CullDistance";
+  case DXILSemanticKind::OutputControlPointID:
+    return "SV_OutputControlPointID";
+  case DXILSemanticKind::DomainLocation:
+    return "SV_DomainLocation";
+  case DXILSemanticKind::PrimitiveID:
+    return "SV_PrimitiveID";
+  case DXILSemanticKind::GSInstanceID:
+    return "SV_GSInstanceID";
+  case DXILSemanticKind::SampleIndex:
+    return "SV_SampleIndex";
+  case DXILSemanticKind::IsFrontFace:
+    return "SV_IsFrontFace";
+  case DXILSemanticKind::Coverage:
+    return "SV_Coverage";
+  case DXILSemanticKind::InnerCoverage:
+    return "SV_InnerCoverage";
+  case DXILSemanticKind::Target:
+    return "SV_Target";
+  case DXILSemanticKind::TessFactor:
+    return "SV_TessFactor";
+  case DXILSemanticKind::InsideTessFactor:
+    return "SV_InsideTessFactor";
+  case DXILSemanticKind::Barycentrics:
+    return "SV_Barycentrics";
+  case DXILSemanticKind::ShadingRate:
+    return "SV_ShadingRate";
+  case DXILSemanticKind::CullPrimitive:
+    return "SV_CullPrimitive";
+  case DXILSemanticKind::Arbitrary:
+    break;
+  }
+  return "";
+}
+
+/// Maps a DXBC system-value name onto the DXIL semantic kind that names the
+/// same value. The two enumerations describe the same set of system values
+/// but number them differently, and DXIL folds the eight per-edge and
+/// per-inside tessellation factors into two kinds.
+DXILSemanticKind toSemanticKind(SystemValueName Name) {
+  switch (Name) {
+  case SystemValueName::position:
+    return DXILSemanticKind::Position;
+  case SystemValueName::clipDistance:
+    return DXILSemanticKind::ClipDistance;
+  case SystemValueName::cullDistance:
+    return DXILSemanticKind::CullDistance;
+  case SystemValueName::renderTargetArrayIndex:
+    return DXILSemanticKind::RenderTargetArrayIndex;
+  case SystemValueName::viewportArrayIndex:
+    return DXILSemanticKind::ViewPortArrayIndex;
+  case SystemValueName::vertexID:
+    return DXILSemanticKind::VertexID;
+  case SystemValueName::primitiveID:
+    return DXILSemanticKind::PrimitiveID;
+  case SystemValueName::instanceID:
+    return DXILSemanticKind::InstanceID;
+  case SystemValueName::isFrontFace:
+    return DXILSemanticKind::IsFrontFace;
+  case SystemValueName::sampleIndex:
+    return DXILSemanticKind::SampleIndex;
+  case SystemValueName::finalQuadUeq0EdgeTessFactor:
+  case SystemValueName::finalQuadVeq0EdgeTessFactor:
+  case SystemValueName::finalQuadUeq1EdgeTessFactor:
+  case SystemValueName::finalQuadVeq1EdgeTessFactor:
+  case SystemValueName::finalTriUeq0EdgeTessFactor:
+  case SystemValueName::finalTriVeq0EdgeTessFactor:
+  case SystemValueName::finalTriWeq0EdgeTessFactor:
+  case SystemValueName::finalLineDetailTessFactor:
+  case SystemValueName::finalLineDensityTessFactor:
+    return DXILSemanticKind::TessFactor;
+  case SystemValueName::finalQuadUInsideTessFactor:
+  case SystemValueName::finalQuadVInsideTessFactor:
+  case SystemValueName::finalTriInsideTessFactor:
+    return DXILSemanticKind::InsideTessFactor;
+  case SystemValueName::barycentrics:
+    return DXILSemanticKind::Barycentrics;
+  case SystemValueName::shadingRate:
+    return DXILSemanticKind::ShadingRate;
+  case SystemValueName::cullPrimitive:
+    return DXILSemanticKind::CullPrimitive;
+  }
+  return DXILSemanticKind::Arbitrary;
+}
 
 //===----------------------------------------------------------------------===//
 // Signature model
@@ -317,9 +441,9 @@ void Translator::addSignatureElement(Signature &Sig, DstOperandAttr Operand,
   Element.Cols = llvm::popcount(Mask);
   Element.Kind = Kind;
   Element.InterpolationMode = InterpolationMode;
-  Element.Name = Kind == DXILSemanticKind::Target
-                     ? "SV_Target"
-                     : (NamePrefix + llvm::Twine(Sig.elements().size())).str();
+  Element.Name = Kind == DXILSemanticKind::Arbitrary
+                     ? (NamePrefix + llvm::Twine(Sig.elements().size())).str()
+                     : semanticName(Kind);
   Sig.add(std::move(Element));
 }
 
@@ -334,11 +458,30 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclInput>(&Op))
       addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
                           DXILSemanticKind::Arbitrary, 0);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSiv>(&Op))
+      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                          toSemanticKind(Dcl.getName()),
+                          static_cast<unsigned>(Dcl.getMode()));
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op))
+      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                          toSemanticKind(Dcl.getName()), 0);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
+      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                          toSemanticKind(Dcl.getName()), 0);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op))
+      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                          toSemanticKind(Dcl.getName()), 0);
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
       addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
                           IsPixelShader ? DXILSemanticKind::Target
                                         : DXILSemanticKind::Arbitrary,
                           0);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSiv>(&Op))
+      addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
+                          toSemanticKind(Dcl.getName()), 0);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSgv>(&Op))
+      addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
+                          toSemanticKind(Dcl.getName()), 0);
   }
   return true;
 }
@@ -376,6 +519,13 @@ llvm::Value *Translator::coerce(llvm::Value *Value, llvm::Type *Ty) {
 
 llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
                                     llvm::Type *Ty, mlir::Operation *Op) {
+  // A minimum-precision operand changes the width every computation
+  // reading it is done at, which this translation does not model yet.
+  if (Src.getMinPrecision()) {
+    unsupported(Op) << ": minimum-precision source operand";
+    return nullptr;
+  }
+
   unsigned Comp = sourceComponent(Src, DstComp);
   auto Key = std::make_tuple(Src.getAsOpaquePointer(), Comp, Ty);
   if (llvm::Value *Cached = SourceCache.lookup(Key))
@@ -469,6 +619,11 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
 bool Translator::writeDestination(DstOperandAttr Dst,
                                   llvm::ArrayRef<llvm::Value *> Components,
                                   mlir::Operation *Op) {
+  if (Dst.getMinPrecision()) {
+    unsupported(Op) << ": minimum-precision destination operand";
+    return false;
+  }
+
   llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
   switch (Dst.getType()) {
   case OperandType::null:
@@ -632,10 +787,10 @@ struct OpLowering {
     Compare,
   };
 
-  Form Kind;
+  Form Kind = Form::Native;
   /// Operand and result element type: true if float, false if i32.
-  bool FloatOperands;
-  bool FloatResult;
+  bool FloatOperands = false;
+  bool FloatResult = false;
   llvm::Instruction::BinaryOps Binop = llvm::Instruction::BinaryOpsEnd;
   llvm::Instruction::CastOps Cast = llvm::Instruction::CastOpsEnd;
   llvm::CmpInst::Predicate Predicate = llvm::CmpInst::BAD_ICMP_PREDICATE;
@@ -644,11 +799,17 @@ struct OpLowering {
 };
 
 static OpLowering nativeOp(llvm::Instruction::BinaryOps Binop, bool Float) {
-  return {OpLowering::Form::Native, Float, Float, Binop};
+  OpLowering L;
+  L.Kind = OpLowering::Form::Native;
+  L.FloatOperands = L.FloatResult = Float;
+  L.Binop = Binop;
+  return L;
 }
 
 static OpLowering callOp(DXILOp Op, llvm::StringRef Name, bool Float) {
-  OpLowering L{OpLowering::Form::Call, Float, Float};
+  OpLowering L;
+  L.Kind = OpLowering::Form::Call;
+  L.FloatOperands = L.FloatResult = Float;
   L.Op = Op;
   L.Name = Name;
   return L;
@@ -656,13 +817,18 @@ static OpLowering callOp(DXILOp Op, llvm::StringRef Name, bool Float) {
 
 static OpLowering castOp(llvm::Instruction::CastOps Cast, bool FloatIn,
                          bool FloatOut) {
-  OpLowering L{OpLowering::Form::Cast, FloatIn, FloatOut};
+  OpLowering L;
+  L.Kind = OpLowering::Form::Cast;
+  L.FloatOperands = FloatIn;
+  L.FloatResult = FloatOut;
   L.Cast = Cast;
   return L;
 }
 
 static OpLowering compareOp(llvm::CmpInst::Predicate Predicate, bool Float) {
-  OpLowering L{OpLowering::Form::Compare, Float, /*FloatResult=*/false};
+  OpLowering L;
+  L.Kind = OpLowering::Form::Compare;
+  L.FloatOperands = Float;
   L.Predicate = Predicate;
   return L;
 }
