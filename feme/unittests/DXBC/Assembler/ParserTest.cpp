@@ -164,6 +164,102 @@ TEST(ParserTest, FxcMnemonicSuffixes) {
             *lookupOpcode("ld2dms"));
 }
 
+TEST(ParserTest, FxcOperandSpellings) {
+  // SM5.1 disassembly upper-cases the bindable storage classes and writes a
+  // binding range as `[lower:upper]`, which encodes as two immediate
+  // indices on a four-component operand.
+  Program P = parseOrFail("dcl_uav_raw U2[2:29], space=0");
+  ASSERT_EQ(P.Instructions.size(), 1u);
+  const Operand &Uav = P.Instructions[0].Operands.front();
+  EXPECT_EQ(Uav.Kind, OperandKind::UnorderedAccessView);
+  ASSERT_EQ(Uav.Indices.size(), 3u);
+  EXPECT_EQ(Uav.Indices[0].Value, 2u); // the declaration's id
+  EXPECT_EQ(Uav.Indices[1].Value, 2u);
+  EXPECT_EQ(Uav.Indices[2].Value, 29u);
+  EXPECT_EQ(Uav.Components, ComponentCount::Four);
+  EXPECT_EQ(Uav.SelectMode, ComponentSelectMode::Swizzle);
+
+  // A constant buffer's size follows the range as its own bracketed group,
+  // and belongs to the declaration rather than to the operand.
+  Program CB = parseOrFail("dcl_constantbuffer CB0[5:5][1], immediateIndexed, "
+                           "space=3");
+  ASSERT_EQ(CB.Instructions.size(), 1u);
+  EXPECT_EQ(CB.Instructions[0].Operands.front().Indices.size(), 3u);
+  EXPECT_EQ(CB.Instructions[0].ExtraDWords,
+            (llvm::SmallVector<uint32_t, 4>{1u, 3u}));
+
+  // `fxc` always prints an immediate next to a relative index, spelling the
+  // purely relative representation `+ 0`.
+  Program Rel = parseOrFail("mov o0.x, cb0[r0.x + 0][r0.y + 2].x");
+  ASSERT_EQ(Rel.Instructions.size(), 1u);
+  const Operand &Src = Rel.Instructions[0].Operands.back();
+  ASSERT_EQ(Src.Indices.size(), 3u);
+  EXPECT_EQ(Src.Indices[1].Rep, OperandIndex::Representation::Relative);
+  EXPECT_EQ(Src.Indices[2].Rep,
+            OperandIndex::Representation::Immediate32PlusRelative);
+  EXPECT_EQ(Src.Indices[2].Value, 2u);
+}
+
+TEST(ParserTest, FxcMinimumPrecisionConversions) {
+  // `{<from> as <to>}` records a precision conversion; only the precision
+  // the instruction reads the operand at is encoded, which is the first.
+  Program P = parseOrFail("mov o0.x, v0.x {min16f as def32}");
+  ASSERT_EQ(P.Instructions.size(), 1u);
+  EXPECT_EQ(P.Instructions[0].Operands.back().Precision,
+            MinPrecision::Float16);
+
+  EXPECT_EQ(parseOrFail("mov o0.x, l(2.0) {def32 as min16f}")
+                .Instructions[0]
+                .Operands.back()
+                .Precision,
+            MinPrecision::Default);
+}
+
+TEST(ParserTest, FxcStatementForms) {
+  // A `dcl_indexrange` count has no separator before it.
+  EXPECT_EQ(parseOrFail("dcl_indexrange v2.xyzw 6").Instructions[0].ExtraDWords,
+            parseOrFail("dcl_indexrange v2.xyzw, 6").Instructions[0].ExtraDWords);
+
+  // `dcl_hs_max_tessfactor` is wrapped in the immediate-operand syntax.
+  EXPECT_EQ(
+      parseOrFail("dcl_hs_max_tessfactor l(3.000000)").Instructions[0].ExtraDWords,
+      parseOrFail("dcl_hs_max_tessfactor 3.0").Instructions[0].ExtraDWords);
+
+  // An immediate constant buffer is grouped into rows and spread over
+  // lines; both are separators around one flat DWORD sequence.
+  EXPECT_EQ(parseOrFail("dcl_immediateConstantBuffer { { 1.0, 0, 0, 0},\n"
+                        "                              { 0, 1.0, 0, 0} }")
+                .Instructions[0]
+                .ExtraDWords,
+            (llvm::SmallVector<uint32_t, 4>{0x3F800000u, 0u, 0u, 0u, 0u,
+                                            0x3F800000u, 0u, 0u}));
+
+  // `fxc` names the operands of the interface declarations symbolically.
+  EXPECT_EQ(parseOrFail("dcl_function_body fb1").Instructions[0].ExtraDWords,
+            (llvm::SmallVector<uint32_t, 4>{1u}));
+  EXPECT_EQ(
+      parseOrFail("dcl_function_table ft1 = {fb0, fb2}").Instructions[0].ExtraDWords,
+      (llvm::SmallVector<uint32_t, 4>{1u, 2u, 0u, 2u}));
+  EXPECT_EQ(parseOrFail("dcl_interface_dynamicindexed fp0[253][1] = {ft0, ft1}")
+                .Instructions[0]
+                .ExtraDWords,
+            (llvm::SmallVector<uint32_t, 4>{0u, 1u, 0x00FD0002u, 0u, 1u}));
+
+  // `fxc` spells the precise mask as a bracketed group.
+  EXPECT_EQ(parseOrFail("mul [precise] r0.xyzw, r0.xyzw, r1.xyzw")
+                .Instructions[0]
+                .PreciseMask,
+            0xFu);
+
+  // Multi-word interpolation modes.
+  EXPECT_EQ(parseControls("dcl_input_ps linear noperspective sample v0.xyzw"),
+            parseControls("dcl_input_ps linearNoPerspectiveSample v0.xyzw"));
+  EXPECT_EQ(parseControls("dcl_input_ps linear centroid v0.xyzw"),
+            parseControls("dcl_input_ps linearCentroid v0.xyzw"));
+  EXPECT_EQ(parseControls("dcl_input_ps linear v0.xyzw"),
+            parseControls("dcl_input_ps linear v0.xyzw"));
+}
+
 TEST(ParserTest, SaturateSuffix) {
   Program P = parseOrFail("mul_sat r0.xyzw, r1.xyzw, r2.xyzw");
   ASSERT_EQ(P.Instructions.size(), 1u);

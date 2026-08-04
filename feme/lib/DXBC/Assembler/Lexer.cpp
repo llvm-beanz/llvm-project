@@ -106,8 +106,15 @@ Token Lexer::lexNumber() {
     }
   }
   // A trailing 'f' suffix (e.g. "1.0f") is common in hand-written DXBC
-  // assembly; consume it without affecting the parsed value.
-  if (IsFloat && (peek() == 'f' || peek() == 'F'))
+  // assembly, and `fxc` marks the components of a 64-bit immediate with a
+  // trailing 'l' (e.g. "d(0.000000l, -4.350000l)"). Consume either without
+  // affecting the parsed value, but only when it is the whole suffix, so
+  // that an identifier is never swallowed.
+  char Suffix = peek();
+  bool IsSuffix = (IsFloat && (Suffix == 'f' || Suffix == 'F')) ||
+                  Suffix == 'l' || Suffix == 'L';
+  if (IsSuffix && !isalnum(static_cast<unsigned char>(peek(1))) &&
+      peek(1) != '_')
     advance();
 
   return makeToken(IsFloat ? TokenKind::Float : TokenKind::Integer, Start);

@@ -21,6 +21,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/MathExtras.h"
 
@@ -212,22 +213,65 @@ constexpr KeywordValue SyncSuffixes[] = {
     {"_t", 1u << 11},
 };
 
-// D3D10_SB_SAMPLER_MODE, spelled as a trailing keyword by `fxc` where
-// dxbc-as's own grammar folds it into the mnemonic
-// (`dcl_sampler_comparison`).
-constexpr KeywordValue SamplerModes[] = {
-    {"mode_default", 0},
-    {"mode_comparison", 1u << 11},
-    {"mode_mono", 2u << 11},
+/// A control-field keyword `fxc` writes after a declaration's operand,
+/// paired with the dxbc-as mnemonic that spells the same control bits.
+struct KeywordMnemonic {
+  llvm::StringRef Name;
+  llvm::StringRef Mnemonic;
 };
 
-// D3D10_SB_CONSTANT_BUFFER_ACCESS_PATTERN, likewise spelled as a trailing
-// keyword by `fxc` (dxbc-as folds it into
-// `dcl_constantbuffer_dynamicIndexed`).
-constexpr KeywordValue ConstantBufferAccessPatterns[] = {
-    {"immediateIndexed", 0},
-    {"dynamicIndexed", 1u << 11},
+// D3D10_SB_SAMPLER_MODE.
+constexpr KeywordMnemonic SamplerModes[] = {
+    {"mode_default", "dcl_sampler"},
+    {"mode_comparison", "dcl_sampler_comparison"},
+    {"mode_mono", "dcl_sampler_mono"},
 };
+
+// D3D10_SB_CONSTANT_BUFFER_ACCESS_PATTERN.
+constexpr KeywordMnemonic ConstantBufferAccessPatterns[] = {
+    {"immediateIndexed", "dcl_constantbuffer"},
+    {"dynamicIndexed", "dcl_constantbuffer_dynamicIndexed"},
+};
+
+/// Operand storage classes `fxc` spells differently to dxbc-as. `fxc`
+/// also upper-cases the four bindable classes in SM5.1 disassembly
+/// (`CB0[0:0]`, `T0[3:7]`, `U0[0]`, `S0[2:4]`).
+const llvm::StringRef *lookupOperandKindAlias(llvm::StringRef Spelling) {
+  static const llvm::StringMap<llvm::StringRef> Aliases = {
+      {"CB", "cb"},   {"T", "t"},           {"U", "u"},
+      {"S", "s"},     {"G", "g"},           {"this", "thisPtr"},
+      {"vCycleCounter", "cycleCounter"},
+  };
+  auto It = Aliases.find(Spelling);
+  if (It == Aliases.end())
+    return nullptr;
+  return &It->second;
+}
+
+/// Looks up an operand storage class by either its dxbc-as spelling or one
+/// of the `fxc` aliases above.
+const OperandKind *lookupOperandKindOrAlias(llvm::StringRef Spelling) {
+  if (const OperandKind *Kind = lookupOperandKind(Spelling))
+    return Kind;
+  if (const llvm::StringRef *Alias = lookupOperandKindAlias(Spelling))
+    return lookupOperandKind(*Alias);
+  return nullptr;
+}
+
+/// True for the system-generated registers that name a whole object in a
+/// declaration but read as a single scalar value elsewhere. The remaining
+/// zero-component kinds (`vForkInstanceID`, `vJoinInstanceID`,
+/// `vThreadIDInGroupFlattened`, ...) keep their component count in both
+/// positions, and `fxc` writes an explicit `.x` on them when read.
+bool isScalarSystemValue(OperandKind Kind) {
+  switch (Kind) {
+  case OperandKind::InputPrimitiveID:
+  case OperandKind::OutputControlPointID:
+    return true;
+  default:
+    return false;
+  }
+}
 
 const KeywordValue *findKeyword(llvm::ArrayRef<KeywordValue> Table,
                                 llvm::StringRef Name) {
@@ -334,11 +378,22 @@ private:
   // Literals
   //===--------------------------------------------------------------------===//
 
+  /// Drops the type suffix Lexer allows on a numeric literal ("1.0f",
+  /// "-4.35l"); the suffix only records how the source spelled the value.
+  static llvm::StringRef dropNumericSuffix(llvm::StringRef Text) {
+    // A hexadecimal literal's trailing 'f' is a digit, not a suffix.
+    if (Text.starts_with("0x") || Text.starts_with("0X"))
+      return Text;
+    if (!Text.empty() && strchr("fFlL", Text.back()))
+      Text = Text.drop_back();
+    return Text;
+  }
+
   /// Parses an unsigned integer literal (decimal or 0x-prefixed hex).
   llvm::Expected<uint64_t> parseInteger(const llvm::Twine &What) {
     if (Current.Kind != TokenKind::Integer)
       return error("expected " + What);
-    llvm::StringRef Text = Current.Spelling;
+    llvm::StringRef Text = dropNumericSuffix(Current.Spelling);
     unsigned Radix = 10;
     if (Text.consume_front("0x") || Text.consume_front("0X"))
       Radix = 16;
@@ -383,9 +438,7 @@ private:
     }
     if (Current.Kind != TokenKind::Float)
       return error("expected a numeric literal");
-    llvm::StringRef Text = Current.Spelling;
-    Text.consume_back("f");
-    Text.consume_back("F");
+    llvm::StringRef Text = dropNumericSuffix(Current.Spelling);
     double Value;
     if (Text.getAsDouble(Value))
       return error("malformed numeric literal '" + Current.Spelling + "'");
@@ -410,9 +463,7 @@ private:
       Bits = Negate ? static_cast<uint64_t>(-static_cast<int64_t>(*Value))
                     : *Value;
     } else if (Current.Kind == TokenKind::Float) {
-      llvm::StringRef Text = Current.Spelling;
-      Text.consume_back("f");
-      Text.consume_back("F");
+      llvm::StringRef Text = dropNumericSuffix(Current.Spelling);
       double Value;
       if (Text.getAsDouble(Value))
         return error("malformed numeric literal '" + Current.Spelling + "'");
@@ -590,6 +641,22 @@ private:
     if (Saturate && !(Info.Flags & OF_Saturable))
       return error("'_sat' is not valid on '" + Info.Mnemonic + "'");
 
+    // `fxc` writes the precise-component mask as a bracketed group right
+    // after the mnemonic; dxbc-as spells it `precise(<components>)`.
+    if (Current.Kind == TokenKind::LBracket) {
+      advance();
+      if (!consumeIdentifier("precise"))
+        return error("expected 'precise'");
+      if (Current.Kind == TokenKind::LParen) {
+        if (llvm::Error E = parsePreciseMask(Inst))
+          return std::move(E);
+      } else {
+        Inst.PreciseMask = 0xF;
+      }
+      if (llvm::Error E = expectToken(TokenKind::RBracket, "']'"))
+        return std::move(E);
+    }
+
     if (HasAoffimmi) {
       if (llvm::Error E = parseSampleOffsets(Inst))
         return std::move(E);
@@ -648,14 +715,33 @@ private:
       break;
     }
     case InstructionKind::Counts:
+      // The interface declarations name their operands symbolically in
+      // `fxc` output (`dcl_function_table ft0 = {fb0}`) where dxbc-as
+      // spells the same tokens as bare DWORDs.
+      if (Current.Kind == TokenKind::Identifier) {
+        if (llvm::Error E = parseInterfaceDeclaration(Inst))
+          return std::move(E);
+        break;
+      }
       if (llvm::Error E = parseTrailingCounts(Inst, /*AtLeastOne=*/true))
         return std::move(E);
       break;
     case InstructionKind::Float: {
+      // `fxc` wraps the value in the immediate-operand syntax even though
+      // the tokenized format stores a bare DWORD.
+      bool Wrapped = isIdentifier("l");
+      if (Wrapped) {
+        advance();
+        if (llvm::Error E = expectToken(TokenKind::LParen, "'('"))
+          return std::move(E);
+      }
       llvm::Expected<uint32_t> Value = parseValue32();
       if (!Value)
         return Value.takeError();
       Inst.ExtraDWords.push_back(*Value);
+      if (Wrapped)
+        if (llvm::Error E = expectToken(TokenKind::RParen, "')'"))
+          return std::move(E);
       break;
     }
     case InstructionKind::DclIndexableTemp:
@@ -939,16 +1025,48 @@ private:
     return llvm::Error::success();
   }
 
+  /// interpolation-mode := <mode>
+  ///                      | 'linear' ['noperspective'] ['centroid'|'sample']
+  ///
+  /// dxbc-as spells D3D10_SB_INTERPOLATION_MODE as a single camel-cased
+  /// keyword; `fxc` spells the same values as up to three words.
   llvm::Error parseInterpolationMode(Instruction &Inst) {
     if (Current.Kind != TokenKind::Identifier)
       return error("expected an interpolation mode");
-    const KeywordValue *Mode =
-        findKeyword(InterpolationModes, Current.Spelling);
-    if (!Mode)
+    // `linear` alone is a valid mode but is also the prefix of `fxc`'s
+    // multi-word spellings, so it has to fall through to those.
+    if (const KeywordValue *Mode =
+            Current.Spelling == "linear"
+                ? nullptr
+                : findKeyword(InterpolationModes, Current.Spelling)) {
+      Inst.Controls |= Mode->Value << ControlShift;
+      Inst.Keywords.push_back(Current.Spelling.str());
+      advance();
+      return llvm::Error::success();
+    }
+    if (!consumeIdentifier("linear"))
       return error("unknown interpolation mode '" + Current.Spelling + "'");
-    Inst.Controls |= Mode->Value << ControlShift;
-    Inst.Keywords.push_back(Current.Spelling.str());
-    advance();
+
+    std::string Spelling = "linear";
+    bool NoPerspective = consumeIdentifier("noperspective");
+    if (NoPerspective)
+      Spelling += " noperspective";
+    bool Centroid = consumeIdentifier("centroid");
+    bool Sample = !Centroid && consumeIdentifier("sample");
+    if (Centroid)
+      Spelling += " centroid";
+    else if (Sample)
+      Spelling += " sample";
+
+    // The `linear` half of D3D10_SB_INTERPOLATION_MODE is not laid out as
+    // independent bits, so map the qualifier combination directly.
+    uint32_t Mode;
+    if (Sample)
+      Mode = NoPerspective ? 7 : 6;
+    else
+      Mode = (NoPerspective ? 4 : 2) + (Centroid ? 1 : 0);
+    Inst.Controls |= Mode << ControlShift;
+    Inst.Keywords.push_back(std::move(Spelling));
     return llvm::Error::success();
   }
 
@@ -967,7 +1085,7 @@ private:
   /// The opcode-specific control keywords `fxc` spells after a
   /// declaration's operand, where dxbc-as's own grammar folds them into the
   /// mnemonic. Empty for mnemonics that have no such keyword.
-  static llvm::ArrayRef<KeywordValue> getTrailerKeywords(Opcode Op) {
+  static llvm::ArrayRef<KeywordMnemonic> getTrailerKeywords(Opcode Op) {
     switch (Op) {
     case Opcode::DclSampler:
       return SamplerModes;
@@ -986,11 +1104,24 @@ private:
   /// space it emits and spells enumerated control fields as keywords.
   llvm::Error parseTrailingCounts(Instruction &Inst, bool AtLeastOne) {
     if (!AtLeastOne) {
-      if (Current.Kind != TokenKind::Comma)
+      // `fxc` writes a constant buffer's size as a bracketed group directly
+      // after the operand (`CB0[5:5][1]`) and `dcl_indexrange`'s count with
+      // no separator at all; dxbc-as's own spelling is comma-separated.
+      while (Current.Kind == TokenKind::LBracket) {
+        advance();
+        llvm::Expected<uint64_t> Value = parseInteger("an integer");
+        if (!Value)
+          return Value.takeError();
+        Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Value));
+        if (llvm::Error E = expectToken(TokenKind::RBracket, "']'"))
+          return E;
+      }
+      if (Current.Kind == TokenKind::Comma)
+        advance();
+      else if (Current.Kind != TokenKind::Integer)
         return llvm::Error::success();
-      advance();
     }
-    llvm::ArrayRef<KeywordValue> Keywords = getTrailerKeywords(Inst.Op);
+    llvm::ArrayRef<KeywordMnemonic> Keywords = getTrailerKeywords(Inst.Op);
     while (true) {
       if (Current.Kind == TokenKind::Identifier) {
         if (llvm::Error E = parseTrailingKeyword(Inst, Keywords))
@@ -1008,7 +1139,7 @@ private:
   }
 
   llvm::Error parseTrailingKeyword(Instruction &Inst,
-                                   llvm::ArrayRef<KeywordValue> Keywords) {
+                                   llvm::ArrayRef<KeywordMnemonic> Keywords) {
     llvm::StringRef Name = Current.Spelling;
     if (Name == "space" || Name == "stride") {
       advance();
@@ -1020,13 +1151,118 @@ private:
       Inst.ExtraDWords.push_back(static_cast<uint32_t>(*Value));
       return llvm::Error::success();
     }
-    const KeywordValue *Entry = findKeyword(Keywords, Name);
-    if (!Entry)
-      return error("unknown keyword '" + Name + "'");
-    Inst.Controls |= Entry->Value;
-    Inst.Keywords.push_back(Name.str());
+    // Resolving the keyword to the equivalent mnemonic rather than OR-ing
+    // its bits in keeps a single canonical spelling for each control value,
+    // which is what AsmPrinter re-emits.
+    for (const KeywordMnemonic &Entry : Keywords) {
+      if (Entry.Name != Name)
+        continue;
+      const Opcode *Canonical = lookupOpcode(Entry.Mnemonic);
+      assert(Canonical && "keyword names an unknown mnemonic");
+      Inst.Op = *Canonical;
+      Inst.Controls |= getOpcodeInfo(*Canonical).Controls;
+      advance();
+      return llvm::Error::success();
+    }
+    return error("unknown keyword '" + Name + "'");
+  }
+
+  /// Parses an identifier of the form `<prefix><id>` (e.g. `ft3`),
+  /// returning the numeric id.
+  llvm::Expected<uint32_t> parseSymbolicId(llvm::StringRef Prefix) {
+    if (Current.Kind != TokenKind::Identifier ||
+        !Current.Spelling.starts_with(Prefix))
+      return error("expected a '" + Prefix + "<n>' identifier");
+    uint32_t Id;
+    if (Current.Spelling.drop_front(Prefix.size()).getAsInteger(10, Id))
+      return error("expected a numeric id after '" + Prefix + "'");
     advance();
+    return Id;
+  }
+
+  /// list := '=' '{' <prefix><id> (',' <prefix><id>)* '}'
+  llvm::Error parseSymbolicIdList(llvm::StringRef Prefix,
+                                  llvm::SmallVectorImpl<uint32_t> &Out) {
+    if (llvm::Error E = expectToken(TokenKind::Equals, "'='"))
+      return E;
+    if (llvm::Error E = expectToken(TokenKind::LBrace, "'{'"))
+      return E;
+    while (true) {
+      llvm::Expected<uint32_t> Id = parseSymbolicId(Prefix);
+      if (!Id)
+        return Id.takeError();
+      Out.push_back(*Id);
+      if (Current.Kind != TokenKind::Comma)
+        break;
+      advance();
+    }
+    return expectToken(TokenKind::RBrace, "'}'");
+  }
+
+  /// dcl_function_body  := 'dcl_function_body' 'fb'<id>
+  /// dcl_function_table := 'dcl_function_table' 'ft'<id> '=' '{' 'fb'<id>,* '}'
+  /// dcl_interface      := 'dcl_interface' 'fp'<id> '[' <len> ']'
+  ///                       '[' <table-len> ']' '=' '{' 'ft'<id>,* '}'
+  ///
+  /// All three encode to the flat DWORD sequences dxbc-as's own grammar
+  /// spells directly; the symbolic form is what `fxc` emits.
+  llvm::Error parseInterfaceDeclaration(Instruction &Inst) {
+    if (Inst.Op == Opcode::DclFunctionBody) {
+      llvm::Expected<uint32_t> Id = parseSymbolicId("fb");
+      if (!Id)
+        return Id.takeError();
+      Inst.ExtraDWords.push_back(*Id);
+      return llvm::Error::success();
+    }
+
+    if (Inst.Op == Opcode::DclFunctionTable) {
+      llvm::Expected<uint32_t> Id = parseSymbolicId("ft");
+      if (!Id)
+        return Id.takeError();
+      llvm::SmallVector<uint32_t, 4> Bodies;
+      if (llvm::Error E = parseSymbolicIdList("fb", Bodies))
+        return E;
+      Inst.ExtraDWords.push_back(*Id);
+      Inst.ExtraDWords.push_back(Bodies.size());
+      llvm::append_range(Inst.ExtraDWords, Bodies);
+      return llvm::Error::success();
+    }
+
+    if (Inst.Op != Opcode::DclInterface)
+      return error("unexpected identifier");
+
+    llvm::Expected<uint32_t> Id = parseSymbolicId("fp");
+    if (!Id)
+      return Id.takeError();
+    llvm::Expected<uint64_t> ArrayLength = parseBracketedInteger();
+    if (!ArrayLength)
+      return ArrayLength.takeError();
+    llvm::Expected<uint64_t> TableLength = parseBracketedInteger();
+    if (!TableLength)
+      return TableLength.takeError();
+    llvm::SmallVector<uint32_t, 4> Tables;
+    if (llvm::Error E = parseSymbolicIdList("ft", Tables))
+      return E;
+    if (*ArrayLength > 0xFFFF || Tables.size() > 0xFFFF)
+      return error("interface array/table count must fit in 16 bits");
+
+    Inst.ExtraDWords.push_back(*Id);
+    Inst.ExtraDWords.push_back(static_cast<uint32_t>(*TableLength));
+    Inst.ExtraDWords.push_back(static_cast<uint32_t>(*ArrayLength) << 16 |
+                               static_cast<uint32_t>(Tables.size()));
+    llvm::append_range(Inst.ExtraDWords, Tables);
     return llvm::Error::success();
+  }
+
+  llvm::Expected<uint64_t> parseBracketedInteger() {
+    if (llvm::Error E = expectToken(TokenKind::LBracket, "'['"))
+      return std::move(E);
+    llvm::Expected<uint64_t> Value = parseInteger("an integer");
+    if (!Value)
+      return Value;
+    if (llvm::Error E = expectToken(TokenKind::RBracket, "']'"))
+      return std::move(E);
+    return *Value;
   }
 
   /// dcl_indexableTemp := 'x' <id> '[' <size> ']' ',' <components>
@@ -1056,24 +1292,40 @@ private:
     return llvm::Error::success();
   }
 
-  /// icb := '{' <value> (',' <value>)* '}'
+  /// icb := '{' <element> (',' <element>)* '}'
+  ///
+  /// `fxc` groups the elements into one brace-delimited row per float4 and
+  /// spreads them over several lines; the tokenized format stores one flat
+  /// DWORD sequence, so both the row braces and the line breaks are just
+  /// separators here.
   llvm::Error parseImmediateConstantBuffer(Instruction &Inst) {
     if (llvm::Error E = expectToken(TokenKind::LBrace, "'{'"))
       return E;
-    while (Current.Kind == TokenKind::EndOfStatement)
-      advance();
-    while (true) {
+    unsigned Depth = 0;
+    auto SkipSeparators = [&] {
+      while (true) {
+        if (Current.Kind == TokenKind::EndOfStatement ||
+            Current.Kind == TokenKind::Comma) {
+          advance();
+        } else if (Current.Kind == TokenKind::LBrace) {
+          ++Depth;
+          advance();
+        } else if (Current.Kind == TokenKind::RBrace && Depth != 0) {
+          --Depth;
+          advance();
+        } else {
+          return;
+        }
+      }
+    };
+
+    SkipSeparators();
+    while (Current.Kind != TokenKind::RBrace) {
       llvm::Expected<uint32_t> Value = parseValue32();
       if (!Value)
         return Value.takeError();
       Inst.ExtraDWords.push_back(*Value);
-      while (Current.Kind == TokenKind::EndOfStatement)
-        advance();
-      if (Current.Kind != TokenKind::Comma)
-        break;
-      advance();
-      while (Current.Kind == TokenKind::EndOfStatement)
-        advance();
+      SkipSeparators();
     }
     return expectToken(TokenKind::RBrace, "'}'");
   }
@@ -1086,12 +1338,14 @@ private:
   /// operands, comma-separated.
   llvm::Error parseOperandList(Instruction &Inst, unsigned NumDst,
                                unsigned NumSrc) {
+    bool IsDeclaration = getOpcodeInfo(Inst.Op).Mnemonic.starts_with("dcl_");
     for (unsigned I = 0, E = NumDst + NumSrc; I != E; ++I) {
       if (I != 0) {
         if (llvm::Error Err = expectToken(TokenKind::Comma, "','"))
           return Err;
       }
-      llvm::Expected<Operand> Op = parseOperand(/*IsDestination=*/I < NumDst);
+      llvm::Expected<Operand> Op =
+          parseOperand(/*IsDestination=*/I < NumDst, IsDeclaration);
       if (!Op)
         return Op.takeError();
       Inst.Operands.push_back(std::move(*Op));
@@ -1100,7 +1354,8 @@ private:
   }
 
   /// operand := ['-'] ('|' register '|' | register)
-  llvm::Expected<Operand> parseOperand(bool IsDestination) {
+  llvm::Expected<Operand> parseOperand(bool IsDestination,
+                                       bool IsDeclaration = false) {
     bool Negate = false;
     bool Abs = false;
     if (Current.Kind == TokenKind::Minus) {
@@ -1112,7 +1367,7 @@ private:
       advance();
     }
 
-    llvm::Expected<Operand> Op = parseRegister(IsDestination);
+    llvm::Expected<Operand> Op = parseRegister(IsDestination, IsDeclaration);
     if (!Op)
       return Op.takeError();
     Op->Negate = Negate;
@@ -1129,7 +1384,8 @@ private:
   ///           | 'd' '(' value (',' value)? ')'
   ///           | <kind> [<index>] ('[' index ']')* ['.' components]
   ///             ['{' modifiers '}']
-  llvm::Expected<Operand> parseRegister(bool IsDestination) {
+  llvm::Expected<Operand> parseRegister(bool IsDestination,
+                                        bool IsDeclaration) {
     if (Current.Kind != TokenKind::Identifier)
       return error("expected a register or immediate operand");
 
@@ -1138,7 +1394,7 @@ private:
 
     llvm::StringRef Name = Current.Spelling;
     Operand Op;
-    const OperandKind *Kind = lookupOperandKind(Name);
+    const OperandKind *Kind = lookupOperandKindOrAlias(Name);
     unsigned FirstIndex = 0;
     bool HasFirstIndex = false;
     if (!Kind) {
@@ -1147,7 +1403,7 @@ private:
       size_t DigitsAt = Name.find_first_of("0123456789");
       if (DigitsAt == llvm::StringRef::npos || DigitsAt == 0)
         return error("unknown operand storage class '" + Name + "'");
-      Kind = lookupOperandKind(Name.take_front(DigitsAt));
+      Kind = lookupOperandKindOrAlias(Name.take_front(DigitsAt));
       if (!Kind || Name.drop_front(DigitsAt).getAsInteger(10, FirstIndex))
         return error("unknown operand storage class '" + Name + "'");
       HasFirstIndex = true;
@@ -1156,23 +1412,52 @@ private:
 
     Op.Kind = *Kind;
     Op.Components = getDefaultComponentCount(*Kind);
+    // The scalar system-generated registers name a whole object in a
+    // declaration but carry one component when read as a value, and `fxc`
+    // writes no component suffix in either position.
+    if (!IsDeclaration && Op.Components == ComponentCount::Zero &&
+        isScalarSystemValue(*Kind))
+      Op.Components = ComponentCount::One;
     if (HasFirstIndex) {
       OperandIndex Index;
       Index.Value = FirstIndex;
       Op.Indices.push_back(std::move(Index));
     }
 
+    bool SawRange = false;
     while (Current.Kind == TokenKind::LBracket) {
       advance();
       llvm::Expected<OperandIndex> Index = parseIndex();
       if (!Index)
         return Index.takeError();
       Op.Indices.push_back(std::move(*Index));
+      // `fxc` writes an SM5.1 binding range as `[lower:upper]`, which the
+      // tokenized format encodes as two consecutive immediate indices. It
+      // is always the last bracketed group on the operand: anything after
+      // it (a constant buffer's size) belongs to the declaration, not to
+      // the operand.
+      if (Current.Kind == TokenKind::Colon) {
+        advance();
+        llvm::Expected<OperandIndex> Upper = parseIndex();
+        if (!Upper)
+          return Upper.takeError();
+        Op.Indices.push_back(std::move(*Upper));
+        SawRange = true;
+      }
       if (llvm::Error E = expectToken(TokenKind::RBracket, "']'"))
         return std::move(E);
+      if (SawRange)
+        break;
     }
     if (Op.Indices.size() > 3)
       return error("an operand can have at most three indices");
+
+    // An SM5.1 binding-range declaration operand always describes all four
+    // components, which `fxc` leaves implicit.
+    if (SawRange) {
+      Op.Components = ComponentCount::Four;
+      Op.SelectMode = ComponentSelectMode::Swizzle;
+    }
 
     bool HasComponents = false;
     if (Current.Kind == TokenKind::Dot) {
@@ -1184,7 +1469,7 @@ private:
       if (llvm::Error E = applyComponents(Op, Comps->Spelling, IsDestination))
         return std::move(E);
       HasComponents = true;
-    } else if (Op.Components == ComponentCount::Four) {
+    } else if (!SawRange && Op.Components == ComponentCount::Four) {
       // No suffix on a four-component operand means "all of it": a full
       // write mask for a destination, an identity swizzle for a source.
       Op.SelectMode = IsDestination ? ComponentSelectMode::Mask
@@ -1234,7 +1519,10 @@ private:
     llvm::Expected<uint64_t> Value = parseInteger("an index");
     if (!Value)
       return Value.takeError();
-    Index.Rep = OperandIndex::Representation::Immediate32PlusRelative;
+    // `fxc` always prints an immediate alongside a relative index, writing
+    // `+ 0` for the purely relative representation.
+    Index.Rep = *Value == 0 ? OperandIndex::Representation::Relative
+                            : OperandIndex::Representation::Immediate32PlusRelative;
     Index.Value = *Value;
     return Index;
   }
@@ -1305,6 +1593,8 @@ private:
         Op.SelectMode = ComponentSelectMode::Select1;
       } else if (Name == "nonuniform") {
         Op.NonUniform = true;
+      } else if (Name == "def32") {
+        Op.Precision = MinPrecision::Default;
       } else if (Name == "min16f") {
         Op.Precision = MinPrecision::Float16;
       } else if (Name == "min2_8f") {
@@ -1317,6 +1607,14 @@ private:
         return error("unknown operand modifier '" + Name + "'");
       }
       advance();
+      // `fxc` spells a precision conversion `{<from> as <to>}`. The operand
+      // token only records the precision the instruction reads/writes it
+      // at, which is the first of the two.
+      if (consumeIdentifier("as")) {
+        if (Current.Kind != TokenKind::Identifier)
+          return error("expected a minimum-precision name after 'as'");
+        advance();
+      }
       if (Current.Kind != TokenKind::Comma)
         break;
       advance();
@@ -1357,6 +1655,14 @@ private:
     Op.Components = Count == 1 ? ComponentCount::One : ComponentCount::Four;
     if (llvm::Error E = expectToken(TokenKind::RParen, "')'"))
       return std::move(E);
+    // An immediate carries minimum-precision modifiers just like a
+    // register does (`l(2.000000) {def32 as min16f}`).
+    if (Current.Kind == TokenKind::LBrace) {
+      advance();
+      if (llvm::Error E =
+              parseOperandModifiers(Op, /*HasComponents=*/true))
+        return std::move(E);
+    }
     return Op;
   }
 };
