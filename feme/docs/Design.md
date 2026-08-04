@@ -943,9 +943,46 @@ below).
 
 | From \ To | DXBC | DXIL | SPIR-V |
 |---|---|---|---|
-| DXBC | — | `dxsa` → raised LLVM IR (direct pass) | `dxsa` → raised LLVM IR → LLVM `SPIRV` target |
+| DXBC | — | `dxsa` → raised LLVM IR (direct pass, partially implemented) | `dxsa` → raised LLVM IR → LLVM `SPIRV` target |
 | DXIL | *(not a priority; no upstream use case)* | raised LLVM IR → LLVM `DirectX` target (implemented) | raised LLVM IR → SPIR-V lowering → LLVM `SPIRV` target (implemented) |
 | SPIR-V | *(not a priority)* | `spirv` dialect → `SPIRVToLLVM` → raise to DXIL conventions → DXIL `Exporter` | — |
+
+#### Status: `feme::dxsa::translateToLLVMIR` (DXBC -> DXIL, partial)
+
+The DXBC -> DXIL edge is implemented as a direct `dxsa` dialect ->
+`llvm::Module` translation
+(`feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp`), registered with
+`feme-translate` as `--dxsa-to-llvmir`, and it replaces DXC's `dxilconv`
+tool. It is the one place in FeMe where a *translator* rather than a
+conversion pass does the work: DXBC and DXIL are both flat instruction
+streams over a fixed register file, so the natural shape is a direct
+walk rather than a dialect conversion.
+
+The essential structural difference between the two formats is width.
+DXBC is a 4-component-vector ISA; DXIL is scalar. Every `dxsa`
+instruction therefore expands to one LLVM computation per component its
+destination write mask enables, reading each source through that
+component's swizzle. Signature registers are not materialized as
+variables at all: an input read becomes a `dx.op.loadInput` call and an
+output write a `dx.op.storeOutput` call, which is what makes the result
+DXIL rather than generic LLVM IR. Everything DXIL spells with a native
+LLVM instruction (`fadd`, `shl`, `sitofp`, `icmp`, ...) is emitted as
+one, and only the operations DXIL models as `dx.op.*` calls become calls.
+
+The translation deliberately does **not** aim to reproduce `dxilconv`'s
+output instruction-for-instruction, only to be semantically equivalent;
+`feme/test/Translate/DXBC` carries `dxilconv`'s own test shaders with
+`FileCheck` lines derived from its reference output, and
+`agent_thoughts.md` records where the two differ and why.
+
+Implemented so far: the program header and entry-point metadata, input
+and output signatures synthesized from the register declarations,
+temporary registers, literals, the source modifiers (`-`, `| |`), and
+the straight-line arithmetic/logic/conversion/comparison/dot-product
+opcode families. Not yet implemented, in rough dependency order:
+minimum-precision (`min16f`/`min16i`/`min16u`) operands, control flow,
+constant buffers, resources and samplers, indexable temps, group-shared
+memory, and the non-pixel-shader stage-specific declarations.
 
 Notably, DXIL ⇄ SPIR-V translation is expected to route through plain LLVM
 IR and the **existing** LLVM `SPIRV` backend/MLIR `spirv` dialect rather than
