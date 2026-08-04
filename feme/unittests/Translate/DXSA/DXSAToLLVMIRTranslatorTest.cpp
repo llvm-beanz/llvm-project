@@ -70,6 +70,15 @@ private:
   std::string Diagnostics;
 };
 
+/// The number of (non-overlapping) times \p Needle appears in \p Haystack.
+unsigned occurrences(llvm::StringRef Haystack, llvm::StringRef Needle) {
+  unsigned Count = 0;
+  for (size_t Pos = Haystack.find(Needle); Pos != llvm::StringRef::npos;
+       Pos = Haystack.find(Needle, Pos + Needle.size()))
+    ++Count;
+  return Count;
+}
+
 constexpr llvm::StringRef PassthroughShader = R"mlir(
 dxsa.module pixel_shader 5 0 {
   dxsa.dcl_input_ps linear v<0, <x, y>>
@@ -216,6 +225,42 @@ dxsa.module pixel_shader 5 0 {
                    .has_value());
   EXPECT_NE(Dest.diagnostics().find("minimum-precision destination operand"),
             llvm::StringRef::npos);
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, EachSourceOperandIsReadSeparately) {
+  // MLIR uniques attributes, so an instruction naming the same register
+  // through the same swizzle twice carries one attribute for both
+  // operands. DXBC still reads each operand in its own right, and dxilconv
+  // emits one `loadInput` per operand.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps linear v<0, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.add o<0, <x>>, v<0, <x>>, v<0, <x>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_EQ(occurrences(*IR, "call float @dx.op.loadInput.f32"), 2u) << *IR;
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, SaturationAppliesToTheLoweredMnemonic) {
+  // The `_sat` suffix names the same operation as the unsuffixed mnemonic,
+  // so it must not be looked up as an opcode of its own.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps linear v<0, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.add_sat o<0, <x>>, v<0, <x>>, v<0, <x>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_NE(IR->find("fadd fast float"), std::string::npos) << *IR;
+  // DXIL::OpCode::Saturate is 7.
+  EXPECT_NE(IR->find("@dx.op.unary.f32(i32 7,"), std::string::npos) << *IR;
 }
 
 } // namespace

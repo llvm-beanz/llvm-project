@@ -504,9 +504,13 @@ private:
   /// source operand, the component it reads and the type it is read at. A
   /// DXBC instruction may name the same source component several times
   /// through its swizzle, and each such mention is one value, not several.
-  llvm::DenseMap<std::tuple<const void *, unsigned, llvm::Type *>,
+  llvm::DenseMap<std::tuple<const void *, unsigned, unsigned, llvm::Type *>,
                  llvm::Value *>
       SourceCache;
+  /// The clamped form of each value the instruction being translated
+  /// saturates, so that a component named twice by a swizzle is clamped
+  /// once.
+  llvm::DenseMap<llvm::Value *, llvm::Value *> SaturateCache;
   /// Shader stage name for `!dx.shaderModel` ("ps", "vs", ...).
   llvm::StringRef Stage = "ps";
 
@@ -603,17 +607,18 @@ private:
   void createResourceHandles(dxsa::ModuleOp Shader);
   /// Evaluates one index slot of an operand: an immediate, a register read
   /// at run time, or their sum.
-  llvm::Value *readIndex(IndexAttr Index, mlir::Operation *Op);
+  llvm::Value *readIndex(IndexAttr Index, unsigned Slot, mlir::Operation *Op);
   /// Reads component \p Comp of the constant buffer row \p Src names.
   llvm::Value *readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
-                                  llvm::Type *Ty, mlir::Operation *Op);
+                                  llvm::Type *Ty, mlir::Operation *Op,
+                                  unsigned Slot);
 
   /// Returns (creating on first use) the stack slot backing temp register
   /// component \p Comp of register \p Reg.
   llvm::AllocaInst *tempSlot(unsigned Reg, unsigned Comp);
 
   llvm::Value *readSource(SrcOperandAttr Src, unsigned DstComp, llvm::Type *Ty,
-                          mlir::Operation *Op);
+                          mlir::Operation *Op, unsigned Slot = 0);
   llvm::Value *coerce(llvm::Value *Value, llvm::Type *Ty);
   bool writeDestination(DstOperandAttr Dst,
                         llvm::ArrayRef<llvm::Value *> Components,
@@ -950,12 +955,13 @@ void Translator::createResourceHandles(dxsa::ModuleOp Shader) {
   }
 }
 
-llvm::Value *Translator::readIndex(IndexAttr Index, mlir::Operation *Op) {
+llvm::Value *Translator::readIndex(IndexAttr Index, unsigned Slot,
+                                   mlir::Operation *Op) {
   mlir::IntegerAttr Offset = Index.getImm();
   SrcOperandAttr Relative = Index.getRelative();
   if (!Relative)
     return Offset ? llvm::ConstantInt::get(i32Ty(), Offset.getInt()) : nullptr;
-  llvm::Value *Value = readSource(Relative, 0, i32Ty(), Op);
+  llvm::Value *Value = readSource(Relative, 0, i32Ty(), Op, Slot);
   if (!Value || !Offset || Offset.getInt() == 0)
     return Value;
   return Builder.CreateAdd(Value,
@@ -963,8 +969,8 @@ llvm::Value *Translator::readIndex(IndexAttr Index, mlir::Operation *Op) {
 }
 
 llvm::Value *Translator::readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
-                                            llvm::Type *Ty,
-                                            mlir::Operation *Op) {
+                                            llvm::Type *Ty, mlir::Operation *Op,
+                                            unsigned Slot) {
   OperandIndexAttr Index = Src.getIndex();
   // A `cb#` operand indexes the buffer and then the row; shader model 5.1
   // inserts the register within the declared range in between.
@@ -979,7 +985,7 @@ llvm::Value *Translator::readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
     return nullptr;
   }
 
-  llvm::Value *Row = readIndex(Index[Index.size() - 1], Op);
+  llvm::Value *Row = readIndex(Index[Index.size() - 1], Slot, Op);
   if (!Row)
     return nullptr;
 
@@ -990,7 +996,7 @@ llvm::Value *Translator::readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
   if (Index.size() >= 3 && Index[1].getRelative()) {
     llvm::Value *&Cached = HandleCache[Src.getAsOpaquePointer()];
     if (!Cached) {
-      llvm::Value *Bind = readIndex(Index[1], Op);
+      llvm::Value *Bind = readIndex(Index[1], Slot, Op);
       if (!Bind)
         return nullptr;
       Cached = emitDXOp(
@@ -1028,7 +1034,8 @@ llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp) {
 }
 
 llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
-                                    llvm::Type *Ty, mlir::Operation *Op) {
+                                    llvm::Type *Ty, mlir::Operation *Op,
+                                    unsigned Slot) {
   // A minimum-precision operand changes the width every computation
   // reading it is done at, which this translation does not model yet.
   if (Src.getMinPrecision()) {
@@ -1037,7 +1044,10 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
   }
 
   unsigned Comp = sourceComponent(Src, DstComp);
-  auto Key = std::make_tuple(Src.getAsOpaquePointer(), Comp, Ty);
+  // Attributes are uniqued, so two operands that read the same register
+  // through the same swizzle are one attribute; the slot keeps them apart,
+  // because DXBC reads each operand of an instruction separately.
+  auto Key = std::make_tuple(Src.getAsOpaquePointer(), Slot, Comp, Ty);
   if (llvm::Value *Cached = SourceCache.lookup(Key))
     return Cached;
 
@@ -1119,7 +1129,7 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     Result = emitDXOp("coverage", DXILOp::Coverage, i32Ty(), {});
     break;
   case OperandType::cb:
-    Result = readConstantBuffer(Src, Comp, Ty, Op);
+    Result = readConstantBuffer(Src, Comp, Ty, Op, Slot);
     if (!Result)
       return nullptr;
     break;
@@ -1356,7 +1366,12 @@ llvm::Constant *Translator::foldFloatToInt(llvm::Instruction::CastOps Cast,
 llvm::Value *Translator::saturate(llvm::Value *Value, bool Enabled) {
   if (!Enabled || !Value)
     return Value;
-  return emitDXOp("unary", DXILOp::Saturate, Value->getType(), {Value});
+  // A source component named twice by a swizzle is read once, so clamping
+  // it is one operation too.
+  llvm::Value *&Cached = SaturateCache[Value];
+  if (!Cached)
+    Cached = emitDXOp("unary", DXILOp::Saturate, Value->getType(), {Value});
+  return Cached;
 }
 
 //===----------------------------------------------------------------------===//
@@ -1604,6 +1619,7 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
 bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
                                 SrcOperandAttr Src, bool Saturate) {
   llvm::StringRef Name = mnemonicOf(Op);
+  Name.consume_back("_sat");
   llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
 
   // `mov` is a pure copy: its operand modifiers already did the work, and
@@ -1664,7 +1680,9 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
 bool Translator::translateBinary(mlir::Operation *Op, DstOperandAttr Dst,
                                  SrcOperandAttr Lhs, SrcOperandAttr Rhs,
                                  bool Saturate) {
-  std::optional<OpLowering> Lowering = lookupLowering(mnemonicOf(Op));
+  llvm::StringRef Name = mnemonicOf(Op);
+  Name.consume_back("_sat");
+  std::optional<OpLowering> Lowering = lookupLowering(Name);
   if (!Lowering) {
     unsupported(Op);
     return false;
@@ -1678,13 +1696,13 @@ bool Translator::translateBinary(mlir::Operation *Op, DstOperandAttr Dst,
   // how the operands are laid out in the instruction.
   llvm::SmallVector<llvm::Value *, 4> L, R;
   for (unsigned Comp : Comps) {
-    llvm::Value *Value = readSource(Lhs, Comp, SrcTy, Op);
+    llvm::Value *Value = readSource(Lhs, Comp, SrcTy, Op, /*Slot=*/0);
     if (!Value)
       return false;
     L.push_back(Value);
   }
   for (unsigned Comp : Comps) {
-    llvm::Value *Value = readSource(Rhs, Comp, SrcTy, Op);
+    llvm::Value *Value = readSource(Rhs, Comp, SrcTy, Op, /*Slot=*/1);
     if (!Value)
       return false;
     R.push_back(Value);
@@ -1735,9 +1753,10 @@ bool Translator::translateMad(mlir::Operation *Op, DstOperandAttr Dst,
   llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
 
   llvm::SmallVector<llvm::Value *, 12> Sources;
-  for (SrcOperandAttr Src : {Lhs, Rhs, Acc})
+  SrcOperandAttr Operands[] = {Lhs, Rhs, Acc};
+  for (auto [Slot, Src] : llvm::enumerate(Operands))
     for (unsigned Comp : Comps) {
-      llvm::Value *Value = readSource(Src, Comp, Ty, Op);
+      llvm::Value *Value = readSource(Src, Comp, Ty, Op, Slot);
       if (!Value)
         return false;
       Sources.push_back(Value);
@@ -1763,9 +1782,10 @@ bool Translator::translateDot(mlir::Operation *Op, DstOperandAttr Dst,
   // A dot product reduces all `Lanes` components of both sources to one
   // scalar, which is then broadcast to every enabled destination component.
   llvm::SmallVector<llvm::Value *, 8> Args;
-  for (SrcOperandAttr Src : {Lhs, Rhs})
+  SrcOperandAttr Operands[] = {Lhs, Rhs};
+  for (auto [Slot, Src] : llvm::enumerate(Operands))
     for (unsigned Comp = 0; Comp < Lanes; ++Comp) {
-      llvm::Value *Value = readSource(Src, Comp, floatTy(), Op);
+      llvm::Value *Value = readSource(Src, Comp, floatTy(), Op, Slot);
       if (!Value)
         return false;
       Args.push_back(Value);
@@ -2097,8 +2117,8 @@ bool Translator::translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
       Ty = movElementType(Dst, False, Comp);
     llvm::Value *Selected =
         Builder.CreateICmpNE(Test, llvm::ConstantInt::get(i32Ty(), 0));
-    llvm::Value *Left = readSource(True, Comp, Ty, Op);
-    llvm::Value *Right = readSource(False, Comp, Ty, Op);
+    llvm::Value *Left = readSource(True, Comp, Ty, Op, /*Slot=*/1);
+    llvm::Value *Right = readSource(False, Comp, Ty, Op, /*Slot=*/2);
     if (!Left || !Right)
       return false;
     // Choosing between two values has no floating-point semantics to relax.
@@ -2114,6 +2134,7 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
   SourceCache.clear();
   RowCache.clear();
   HandleCache.clear();
+  SaturateCache.clear();
   llvm::StringRef Name = mnemonicOf(Op);
   bool Saturate = Name.consume_back("_sat");
 
