@@ -57,6 +57,221 @@ def DXSA_Break : DXSA_NoOperandOp<"break"> {
 }
 
 //===----------------------------------------------------------------------===//
+// Conditional control flow
+//===----------------------------------------------------------------------===//
+
+// Shared base for the control-flow instructions whose only operand is the
+// condition their `_z`/`_nz` test is applied to.
+class DXSA_ConditionalFlowOp<string mnemonic> : DXSA_Op<mnemonic> {
+  let arguments = (ins DXSA_SrcOperandAttr:$cond);
+  let results = (outs);
+  let assemblyFormat = "$cond attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.breakc_z / dxsa.breakc_nz
+//===----------------------------------------------------------------------===//
+
+def DXSA_BreakcZ : DXSA_ConditionalFlowOp<"breakc_z"> {
+  let summary = "exits the enclosing loop or switch when all condition bits are zero";
+  let description = [{
+    The `dxsa.breakc_z` operation transfers execution to the instruction
+    that follows the innermost enclosing loop or switch construct when
+    every bit of the selected component of `$cond` is zero. Otherwise
+    execution falls through to the next instruction.
+
+    Example:
+
+    ```mlir
+    dxsa.breakc_z r<0, <x>>
+    ```
+  }];
+}
+
+def DXSA_BreakcNz : DXSA_ConditionalFlowOp<"breakc_nz"> {
+  let summary = "exits the enclosing loop or switch when any condition bit is nonzero";
+  let description = [{
+    The `dxsa.breakc_nz` operation transfers execution to the instruction
+    that follows the innermost enclosing loop or switch construct when any
+    bit of the selected component of `$cond` is nonzero. Otherwise
+    execution falls through to the next instruction.
+
+    Example:
+
+    ```mlir
+    dxsa.breakc_nz r<0, <x>>
+    ```
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.continuec_z / dxsa.continuec_nz
+//===----------------------------------------------------------------------===//
+
+def DXSA_ContinuecZ : DXSA_ConditionalFlowOp<"continuec_z"> {
+  let summary = "restarts the enclosing loop when all condition bits are zero";
+  let description = [{
+    The `dxsa.continuec_z` operation transfers execution back to the start
+    of the innermost enclosing loop when every bit of the selected
+    component of `$cond` is zero. Otherwise execution falls through to the
+    next instruction.
+
+    Example:
+
+    ```mlir
+    dxsa.continuec_z r<0, <x>>
+    ```
+  }];
+}
+
+def DXSA_ContinuecNz : DXSA_ConditionalFlowOp<"continuec_nz"> {
+  let summary = "restarts the enclosing loop when any condition bit is nonzero";
+  let description = [{
+    The `dxsa.continuec_nz` operation transfers execution back to the start
+    of the innermost enclosing loop when any bit of the selected component
+    of `$cond` is nonzero. Otherwise execution falls through to the next
+    instruction.
+
+    Example:
+
+    ```mlir
+    dxsa.continuec_nz r<0, <x>>
+    ```
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.discard_z / dxsa.discard_nz
+//===----------------------------------------------------------------------===//
+
+def DXSA_DiscardZ : DXSA_ConditionalFlowOp<"discard_z"> {
+  let summary = "discards the pixel when all condition bits are zero";
+  let description = [{
+    The `dxsa.discard_z` operation marks the current pixel as discarded
+    when every bit of the selected component of `$cond` is zero, so that
+    none of its output is written. Execution of the remaining instructions
+    is unaffected.
+
+    Example:
+
+    ```mlir
+    dxsa.discard_z r<0, <x>>
+    ```
+  }];
+}
+
+def DXSA_DiscardNz : DXSA_ConditionalFlowOp<"discard_nz"> {
+  let summary = "discards the pixel when any condition bit is nonzero";
+  let description = [{
+    The `dxsa.discard_nz` operation marks the current pixel as discarded
+    when any bit of the selected component of `$cond` is nonzero, so that
+    none of its output is written. Execution of the remaining instructions
+    is unaffected.
+
+    Example:
+
+    ```mlir
+    dxsa.discard_nz r<0, <x>>
+    ```
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.if_z / dxsa.if_nz
+//===----------------------------------------------------------------------===//
+
+def DXSA_IfZ : DXSA_ConditionalFlowOp<"if_z"> {
+  let summary = "begins an if construct taken when all condition bits are zero";
+  let description = [{
+    The `dxsa.if_z` operation begins a conditional construct whose block
+    runs when every bit of the selected component of `$cond` is zero. It is
+    closed by a matching `dxsa.endif`, optionally with a `dxsa.else` block
+    that runs otherwise.
+
+    Example:
+
+    ```mlir
+    dxsa.if_z r<0, <x>>
+    ```
+  }];
+}
+
+def DXSA_IfNz : DXSA_ConditionalFlowOp<"if_nz"> {
+  let summary = "begins an if construct taken when any condition bit is nonzero";
+  let description = [{
+    The `dxsa.if_nz` operation begins a conditional construct whose block
+    runs when any bit of the selected component of `$cond` is nonzero. It
+    is closed by a matching `dxsa.endif`, optionally with a `dxsa.else`
+    block that runs otherwise.
+
+    Example:
+
+    ```mlir
+    dxsa.if_nz r<0, <x>>
+    ```
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.retc_z / dxsa.retc_nz
+//===----------------------------------------------------------------------===//
+
+def DXSA_RetcZ : DXSA_ConditionalFlowOp<"retc_z"> {
+  let summary = "returns when all condition bits are zero";
+  let description = [{
+    The `dxsa.retc_z` operation returns from the enclosing subroutine, or
+    terminates the program, when every bit of the selected component of
+    `$cond` is zero. Otherwise execution falls through to the next
+    instruction.
+
+    Example:
+
+    ```mlir
+    dxsa.retc_z r<0, <x>>
+    ```
+  }];
+}
+
+def DXSA_RetcNz : DXSA_ConditionalFlowOp<"retc_nz"> {
+  let summary = "returns when any condition bit is nonzero";
+  let description = [{
+    The `dxsa.retc_nz` operation returns from the enclosing subroutine, or
+    terminates the program, when any bit of the selected component of
+    `$cond` is nonzero. Otherwise execution falls through to the next
+    instruction.
+
+    Example:
+
+    ```mlir
+    dxsa.retc_nz r<0, <x>>
+    ```
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.switch
+//===----------------------------------------------------------------------===//
+
+def DXSA_Switch : DXSA_Op<"switch"> {
+  let summary = "begins a switch construct";
+  let description = [{
+    The `dxsa.switch` operation begins a switch construct that selects the
+    `dxsa.case` block whose 32-bit immediate equals the selected component
+    of `$selector`, or the `dxsa.default` block when none matches. It is
+    closed by a matching `dxsa.endswitch`.
+
+    Example:
+
+    ```mlir
+    dxsa.switch r<0, <x>>
+    ```
+  }];
+  let arguments = (ins DXSA_SrcOperandAttr:$selector);
+  let results = (outs);
+  let assemblyFormat = "$selector attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
 // dxsa.call
 //===----------------------------------------------------------------------===//
 

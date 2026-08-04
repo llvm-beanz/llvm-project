@@ -56,6 +56,68 @@ def DXSA_MovSat : DXSA_UnaryOp<"mov_sat"> {
 }
 
 //===----------------------------------------------------------------------===//
+// dxsa.movc
+//===----------------------------------------------------------------------===//
+
+// Shared base for the conditional-move family: `$dst = $condition ? $src1
+// : $src2`, component-wise.
+class DXSA_MovConditionalOp<string mnemonic> : DXSA_Op<mnemonic> {
+  let arguments = (ins
+      DXSA_DstOperandAttr:$dst,
+      DXSA_SrcOperandAttr:$condition,
+      DXSA_SrcOperandAttr:$src1,
+      DXSA_SrcOperandAttr:$src2,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
+  let results = (outs);
+  let assemblyFormat =
+      "(`precise` $precise^)? $dst `,` $condition `,` $src1 `,` $src2 attr-dict";
+}
+
+def DXSA_MovC : DXSA_MovConditionalOp<"movc"> {
+  let summary = "component-wise conditional move";
+  let description = [{
+    The `dxsa.movc` operation performs a component-wise conditional move:
+
+    ```
+    $dst = ($condition != 0) ? $src1 : $src2
+    ```
+
+    Each component of `$condition` selects independently, and any nonzero
+    bit pattern counts as true. The bits of the selected source are copied
+    unaltered unless a source modifier requests otherwise.
+
+    Example:
+
+    ```mlir
+    dxsa.movc r<0>, r<1>, r<2>, r<3>
+    dxsa.movc r<0, <x, y>>, r<1>, r<2, <y, x>>, l(0x0)
+    ```
+  }];
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.movc_sat
+//===----------------------------------------------------------------------===//
+
+def DXSA_MovCSat : DXSA_MovConditionalOp<"movc_sat"> {
+  let summary = "component-wise conditional move, saturated to [0, 1]";
+  let description = [{
+    The `dxsa.movc_sat` operation performs a component-wise conditional
+    move, clamps the result to `[0.0, 1.0]`, and writes it to `$dst`:
+
+    ```
+    $dst = clamp(($condition != 0) ? $src1 : $src2, 0.0, 1.0)
+    ```
+
+    Example:
+
+    ```mlir
+    dxsa.movc_sat r<0>, r<1>, r<2>, r<3>
+    ```
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // dxsa.dmov
 //===----------------------------------------------------------------------===//
 
@@ -102,19 +164,7 @@ def DXSA_DMovSat : DXSA_UnaryOp<"dmov_sat"> {
 // dxsa.dmovc
 //===----------------------------------------------------------------------===//
 
-class DXSA_DMovConditionalOp<string mnemonic> : DXSA_Op<mnemonic> {
-  let arguments = (ins
-      DXSA_DstOperandAttr:$dst,
-      DXSA_SrcOperandAttr:$condition,
-      DXSA_SrcOperandAttr:$src1,
-      DXSA_SrcOperandAttr:$src2,
-      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
-  let results = (outs);
-  let assemblyFormat =
-      "(`precise` $precise^)? $dst `,` $condition `,` $src1 `,` $src2 attr-dict";
-}
-
-def DXSA_DMovC : DXSA_DMovConditionalOp<"dmovc"> {
+def DXSA_DMovC : DXSA_MovConditionalOp<"dmovc"> {
   let summary = "component-wise double-precision conditional move";
   let description = [{
     The `dxsa.dmovc` operation performs a component-wise double-precision
@@ -144,7 +194,7 @@ def DXSA_DMovC : DXSA_DMovConditionalOp<"dmovc"> {
 // dxsa.dmovc_sat
 //===----------------------------------------------------------------------===//
 
-def DXSA_DMovCSat : DXSA_DMovConditionalOp<"dmovc_sat"> {
+def DXSA_DMovCSat : DXSA_MovConditionalOp<"dmovc_sat"> {
   let summary =
       "component-wise double-precision conditional move, saturated to [0, 1]";
   let description = [{

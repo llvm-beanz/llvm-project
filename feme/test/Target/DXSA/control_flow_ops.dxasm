@@ -49,4 +49,37 @@ loop
 
 // CHECK-NEXT:   dxsa.ret
 ret
+
+// CHECK-NEXT:   dxsa.breakc_z r<0, <x>>
+breakc_z r0.x
+
+// CHECK-NEXT:   dxsa.breakc_nz r<0, <x>>
+breakc_nz r0.x
+
+// CHECK-NEXT:   dxsa.continuec_z r<0, <x>>
+continuec_z r0.x
+
+// CHECK-NEXT:   dxsa.continuec_nz r<0, <x>>
+continuec_nz r0.x
+
+// CHECK-NEXT:   dxsa.discard_z r<0, <x>>
+discard_z r0.x
+
+// CHECK-NEXT:   dxsa.discard_nz r<0, <x>>
+discard_nz r0.x
+
+// CHECK-NEXT:   dxsa.if_z r<0, <x>>
+if_z r0.x
+
+// CHECK-NEXT:   dxsa.if_nz -r<0, <y>>
+if_nz -r0.y
+
+// CHECK-NEXT:   dxsa.retc_z r<0, <x>>
+retc_z r0.x
+
+// CHECK-NEXT:   dxsa.retc_nz r<0, <x>>
+retc_nz r0.x
+
+// CHECK-NEXT:   dxsa.switch r<0, <x>>
+switch r0.x
 // CHECK-NEXT: }

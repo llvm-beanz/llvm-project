@@ -45,9 +45,7 @@
 // CHECK:         dxsa.mov r<1, <x>>, l(0x0)
 // CHECK:         dxsa.loop
 // CHECK:         dxsa.ige r<1, <y>>, r<1, <x>>, l(0x20)
-// CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_0:.*]] = dxsa.operand %[[INDEX_0]] {num_components = 4 : i32, one = 1 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "breakc" %[[OPERAND_0]]
+// CHECK:         dxsa.breakc_nz r<1, <y>>
 // CHECK:         dxsa.mov r<1, <y>>, vPrim
 // CHECK:         dxsa.mad r<1, <y>>, vicp<[r<1, <x>>, 0], <x>>, vicp<[r<1, <x>>, 0], <y>>, vicp<[r<1, <y>>, 0], <y>>
 // CHECK:         dxsa.add r<2>, r<1, <y, y, y, y>>, r<0>

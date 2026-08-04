@@ -14,6 +14,18 @@ mov_sat r0.x, -|r1.yzwy|
 // CHECK-NEXT:   dxsa.mov_sat precise <x, y> r<0>, r<1>
 mov_sat precise(xy) r0.xyzw, r1.xyzw
 
+// CHECK-NEXT:   dxsa.movc r<0>, r<1>, r<2>, r<3>
+movc r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.movc r<0, <x, y>>, r<1>, -|r<2, <z, w, x, y>>|, r<3>
+movc r0.xy, r1.xyzw, -|r2.zwxy|, r3.xyzw
+
+// CHECK-NEXT:   dxsa.movc_sat r<0>, r<1>, r<2>, r<3>
+movc_sat r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
+// CHECK-NEXT:   dxsa.movc precise <x, y> r<0>, r<1>, r<2>, r<3>
+movc precise(xy) r0.xyzw, r1.xyzw, r2.xyzw, r3.xyzw
+
 // CHECK-NEXT:   dxsa.dmov r<0, <x, y>>, -|r<1, <z, w, x, y>>|
 dmov r0.xy, -|r1.zwxy|
 

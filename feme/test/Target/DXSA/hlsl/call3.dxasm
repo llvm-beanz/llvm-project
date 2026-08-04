@@ -6,15 +6,11 @@
 // CHECK:         dxsa.dcl_input_ps  constant v<1, <x, y>>
 // CHECK:         dxsa.dcl_output o<0, <x>>
 // CHECK:         dxsa.dcl_temps 1
-// CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_0:.*]] = dxsa.operand %[[INDEX_0]] {num_components = 4 : i32, one = 1 : i32, type = 1 : i32}
-// CHECK:         dxsa.instruction "if" %[[OPERAND_0]]
+// CHECK:         dxsa.if_nz v<1, <y>>
 // CHECK:         dxsa.mov o<0, <x>>, v<0, <y>>
 // CHECK:         dxsa.ret
 // CHECK:         dxsa.endif
-// CHECK:         %[[INDEX_1:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_1:.*]] = dxsa.operand %[[INDEX_1]] {num_components = 4 : i32, one = 0 : i32, type = 1 : i32}
-// CHECK:         dxsa.instruction "switch" %[[OPERAND_1]]
+// CHECK:         dxsa.switch v<1, <x>>
 // CHECK:         dxsa.case l(0x1)
 // CHECK:         dxsa.call label<0>
 // CHECK:         dxsa.break
@@ -26,15 +22,11 @@
 // CHECK:         dxsa.break
 // CHECK:         dxsa.endswitch
 // CHECK:         dxsa.mov o<0, <x>>, r<0, <x>>
-// CHECK:         %[[INDEX_2:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_2:.*]] = dxsa.operand %[[INDEX_2]] {num_components = 4 : i32, one = 2 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "retc" %[[OPERAND_2]]
+// CHECK:         dxsa.retc_nz r<0, <z>>
 // CHECK:         dxsa.mov o<0, <x>>, r<0, <y>>
 // CHECK:         dxsa.ret
 // CHECK:         dxsa.label label<0>
-// CHECK:         %[[INDEX_3:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_3:.*]] = dxsa.operand %[[INDEX_3]] {num_components = 4 : i32, one = 1 : i32, type = 1 : i32}
-// CHECK:         dxsa.instruction "if" %[[OPERAND_3]]
+// CHECK:         dxsa.if_nz v<1, <y>>
 // CHECK:         dxsa.mov r<0, <x>>, v<0, <y>>
 // CHECK:         dxsa.mov r<0, <z>>, l(0xFFFFFFFF)
 // CHECK:         dxsa.ret

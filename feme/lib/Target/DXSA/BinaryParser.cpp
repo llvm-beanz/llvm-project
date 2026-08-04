@@ -3173,6 +3173,15 @@ public:
 #define STREAM_INDEX_OP(OP)                                                    \
   decodeStreamIndexOp<dxsa::OP>(beginOffset, instructionLengthInTokens,        \
                                 getLocation())
+// The `_z`/`_nz` control-flow pairs differ only in the test-boolean bit of
+// their opcode token; both spellings decode to the same operand shape.
+#define TEST_BOOLEAN_OP(MNEMONIC, NUM_DST_OPERANDS, NUM_SRC_OPERANDS)          \
+  (DECODE_D3D10_SB_INSTRUCTION_TEST_BOOLEAN(*opcodeToken0) ==                  \
+           D3D10_SB_INSTRUCTION_TEST_NONZERO                                   \
+       ? PLAIN_OP(MNEMONIC##Nz, NUM_DST_OPERANDS, NUM_SRC_OPERANDS,            \
+                  HasPreciseAttr::No)                                          \
+       : PLAIN_OP(MNEMONIC##Z, NUM_DST_OPERANDS, NUM_SRC_OPERANDS,             \
+                  HasPreciseAttr::No))
 
     switch (opcode) {
     // Floating-point arithmetic instructions
@@ -3221,6 +3230,8 @@ public:
       return SATURABLE_OP(Mov, 1, 1, HasPreciseAttr::Yes);
     case D3D11_SB_OPCODE_DMOV:
       return SATURABLE_OP(DMov, 1, 1, HasPreciseAttr::Yes);
+    case D3D10_SB_OPCODE_MOVC:
+      return SATURABLE_OP(MovC, 1, 3, HasPreciseAttr::Yes);
     case D3D11_SB_OPCODE_DMOVC:
       return SATURABLE_OP(DMovC, 1, 3, HasPreciseAttr::Yes);
     case D3D11_SB_OPCODE_SWAPC:
@@ -3470,8 +3481,20 @@ public:
           D3D10_SB_INSTRUCTION_TEST_NONZERO)
         return PLAIN_OP(CallcNz, 0, 2, HasPreciseAttr::No);
       return PLAIN_OP(CallcZ, 0, 2, HasPreciseAttr::No);
+    case D3D10_SB_OPCODE_BREAKC:
+      return TEST_BOOLEAN_OP(Breakc, 0, 1);
     case D3D10_SB_OPCODE_CASE:
       return PLAIN_OP(Case, 0, 1, HasPreciseAttr::No);
+    case D3D10_SB_OPCODE_CONTINUEC:
+      return TEST_BOOLEAN_OP(Continuec, 0, 1);
+    case D3D10_SB_OPCODE_DISCARD:
+      return TEST_BOOLEAN_OP(Discard, 0, 1);
+    case D3D10_SB_OPCODE_IF:
+      return TEST_BOOLEAN_OP(If, 0, 1);
+    case D3D10_SB_OPCODE_RETC:
+      return TEST_BOOLEAN_OP(Retc, 0, 1);
+    case D3D10_SB_OPCODE_SWITCH:
+      return PLAIN_OP(Switch, 0, 1, HasPreciseAttr::No);
     case D3D10_SB_OPCODE_CONTINUE:
       return PLAIN_OP(Continue, 0, 0, HasPreciseAttr::No);
     case D3D11_SB_OPCODE_DEBUG_BREAK:
@@ -3547,6 +3570,7 @@ public:
 #undef SATURABLE_OP
 #undef PLAIN_OP
 #undef STREAM_INDEX_OP
+#undef TEST_BOOLEAN_OP
 
     SmallVector<Operand, 8> operands;
     for (unsigned i = 0; i < numOperands; ++i) {
