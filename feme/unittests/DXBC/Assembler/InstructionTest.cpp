@@ -34,6 +34,31 @@ TEST(InstructionTest, LookupOpcodeRejectsUnknownMnemonics) {
   EXPECT_EQ(lookupOpcode("mov_sat"), nullptr);
 }
 
+TEST(InstructionTest, FeedbackVariantsAddAStatusDestination) {
+  // Every SM5.1 `_s` opcode takes the same sources as the opcode it
+  // shadows plus a second destination for the residency status.
+  for (auto [Base, Feedback] :
+       {std::pair{"sample_l", "sample_l_s"},
+        {"sample_c_lz", "sample_c_lz_s"},
+        {"gather4", "gather4_s"},
+        {"gather4_c", "gather4_c_s"},
+        {"gather4_po", "gather4_po_s"},
+        {"gather4_po_c", "gather4_po_c_s"},
+        {"ld", "ld_s"},
+        {"ld2dms", "ld2dms_s"},
+        {"ld_uav_typed", "ld_uav_typed_s"},
+        {"ld_raw", "ld_raw_s"},
+        {"ld_structured", "ld_structured_s"}}) {
+    const Opcode *B = lookupOpcode(Base);
+    const Opcode *F = lookupOpcode(Feedback);
+    ASSERT_NE(B, nullptr) << Base;
+    ASSERT_NE(F, nullptr) << Feedback;
+    EXPECT_EQ(getOpcodeInfo(*F).NumDst, getOpcodeInfo(*B).NumDst + 1)
+        << Feedback;
+    EXPECT_EQ(getOpcodeInfo(*F).NumSrc, getOpcodeInfo(*B).NumSrc) << Feedback;
+  }
+}
+
 TEST(InstructionTest, MnemonicVariantsShareAnOpcodeValueButDifferInControls) {
   const Opcode *Z = lookupOpcode("callc_z");
   const Opcode *NZ = lookupOpcode("callc_nz");
