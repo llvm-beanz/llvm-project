@@ -327,6 +327,26 @@ dxsa.module pixel_shader 5 0 {
   EXPECT_NE(IR->find("trunc i32"), std::string::npos) << *IR;
 }
 
+TEST(DXSAToLLVMIRTranslatorTest, TexelOffsetsAreSigned) {
+  // A texel offset is a four-bit two's complement number with the range
+  // [-8, 7], so it has to be sign-extended into the 32-bit argument DXIL
+  // passes it in.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_sampler <id = 0, mode = default>
+  dxsa.dcl_resource <id = 0>, <dim = texture2d>,
+      <x = float, y = float, z = float, w = float>
+  dxsa.dcl_input_ps linear v<0, <x, y>>
+  dxsa.dcl_output o<0>
+  dxsa.sample o<0>, v<0, <x, y, x, x>>, t<0, vector>, s<0>, <u = -5, v = 7, w = 0>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_NE(IR->find("i32 -5, i32 7, i32 undef"), std::string::npos) << *IR;
+}
+
 TEST(DXSAToLLVMIRTranslatorTest, EachSourceOperandIsReadSeparately) {
   // MLIR uniques attributes, so an instruction naming the same register
   // through the same swizzle twice carries one attribute for both

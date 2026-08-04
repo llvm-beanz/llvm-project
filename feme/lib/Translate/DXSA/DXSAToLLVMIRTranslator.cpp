@@ -2845,8 +2845,9 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
     int32_t Values[3] = {Offset ? Offset.getU() : 0, Offset ? Offset.getV() : 0,
                          Offset ? Offset.getW() : 0};
     for (unsigned I = 0; I < Slots; ++I)
-      Args.push_back(I < Offsets ? llvm::ConstantInt::get(i32Ty(), Values[I])
-                                 : llvm::UndefValue::get(i32Ty()));
+      Args.push_back(I < Offsets
+                         ? llvm::ConstantInt::getSigned(i32Ty(), Values[I])
+                         : llvm::UndefValue::get(i32Ty()));
   }
 
   for (SrcOperandAttr Src : Form.Extra) {
