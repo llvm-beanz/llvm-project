@@ -4733,8 +4733,8 @@ references.
 108 `.ref` files were left under `feme/test/Translate/DXBC`. Twenty-one of
 them (`dxilcleanup*`, `phibug`) have no `.dxasm` next to them at all --
 they are DXIL IR *inputs* to dxilconv's cleanup pass, not DXBC
-translations -- so 87 were in scope. This session migrated 38 of them and
-left 49.
+translations -- so 87 were in scope. This session migrated 40 of them and
+left 47.
 
 ## The thing that mattered most was not an opcode
 
@@ -4906,9 +4906,19 @@ Forty-nine fixtures, in five groups:
 4. **Subroutines** (~5): `label`/`call`/`fcall`. dxilconv inlines them,
    which is why its block names carry a `label0.callc0.` prefix --
    visible in `loop5` even though that shader has no subroutine.
-5. **Stage-specific declarations** (~6): the hull shader phases, the
-   geometry shader's `emit`/`cut`, and indexed signature registers
-   (`v[r0.x + 4]`, which loads a signature element with a run-time row).
+5. **Stage-specific declarations** (~6): the hull shader phases and the
+   geometry shader's `emit`/`cut`.
+
+There is also one thing I found and did not do. `indexableinput1` and
+`indexableinput2` read a signature register at a run-time row, which now
+works, but their *element numbering* still differs: dxilconv collapses
+the registers a `dcl_indexrange` spans into a single signature element
+with `Rows` set to the range's length, where this translation keeps one
+element per register. Getting those two fixtures exact means merging the
+elements a range covers and computing the row of every read within a
+merged element, not just the indexed ones -- which changes the numbering
+of every element after it, so it is a change worth measuring against all
+the signature-carrying fixtures at once rather than bolting on.
 
 ## Differences that remain in the migrated fixtures
 
@@ -4921,6 +4931,6 @@ Three, all cosmetic, and none of them a translation choice:
 - **Phi incoming-value order**, which follows this LLVM's mem2reg rather
   than the 3.7 one dxilconv was built against.
 
-Twenty-eight of the thirty-eight fixtures migrated this session reproduce
-dxilconv's output instruction for instruction; the other ten differ only
-in the above.
+Thirty of the forty fixtures migrated this session reproduce dxilconv's
+output instruction for instruction; the other ten differ only in the
+above.
