@@ -83,3 +83,6 @@ Total Discovered Tests: 570
 ```
 
 Please fix them.
+
+Did you maybe not add all the testing tools to the dependencies of the
+`check-feme` target?
