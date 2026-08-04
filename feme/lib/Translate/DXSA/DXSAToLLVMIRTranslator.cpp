@@ -44,6 +44,7 @@
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 #include "mlir/IR/BuiltinOps.h"
@@ -95,10 +96,15 @@ enum class DXILOp : unsigned {
   Dot2 = 54,
   Dot3 = 55,
   Dot4 = 56,
+  CreateHandle = 57,
+  CBufferLoadLegacy = 59,
   Discard = 82,
   BitcastI32toF32 = 126,
   BitcastF32toI32 = 127,
 };
+
+/// `DXIL::ResourceClass`, as named by `dx.op.createHandle`'s first argument.
+enum class ResourceClass : unsigned { SRV = 0, UAV = 1, CBV = 2, Sampler = 3 };
 
 /// `DXIL::ComponentType`, as stored in a signature element's metadata.
 enum class DXILComponentType : unsigned { I32 = 4, U32 = 5, F32 = 9 };
@@ -403,6 +409,22 @@ private:
 
   Signature Inputs;
   Signature Outputs;
+  /// The `dx.op.createHandle` call for each declared constant buffer, keyed
+  /// by the `cb#` number the operands name it with.
+  llvm::DenseMap<unsigned, llvm::Value *> ConstantBuffers;
+  /// The index of each constant buffer's declaration within its resource
+  /// class, which is what a handle is bound by.
+  llvm::DenseMap<unsigned, unsigned> ConstantBufferRanges;
+  /// The `cbufferLoadLegacy` result for each (constant buffer, row, type)
+  /// the instruction being translated reads. One legacy load returns a
+  /// whole 16-byte row, so an instruction naming several components of one
+  /// row loads it once.
+  llvm::DenseMap<std::tuple<const void *, llvm::Value *, llvm::Type *>,
+                 llvm::Value *>
+      RowCache;
+  /// The handle each dynamically bound resource operand of the instruction
+  /// being translated resolved to.
+  llvm::DenseMap<const void *, llvm::Value *> HandleCache;
   /// The stack slot backing each temp register component, keyed by
   /// `register * 4 + component`, created on first use and promoted to SSA
   /// once the whole program has been translated. DXBC temps are mutable
@@ -463,6 +485,14 @@ private:
   /// the order dxilconv emits.
   llvm::SmallVector<llvm::BasicBlock *, 8> Pending;
 
+  /// Returns (creating on first use) the named struct type DXIL gives an
+  /// opaque resource handle.
+  llvm::StructType *handleTy();
+  /// Returns (creating on first use) the named struct type a legacy
+  /// constant buffer load returns: one 16-byte row, as four components of
+  /// \p Element.
+  llvm::StructType *cbufferRetTy(llvm::Type *Element);
+
   llvm::Type *floatTy() { return llvm::Type::getFloatTy(Context); }
   llvm::Type *i32Ty() { return llvm::Type::getInt32Ty(Context); }
   llvm::Type *i8Ty() { return llvm::Type::getInt8Ty(Context); }
@@ -506,6 +536,17 @@ private:
   /// Returns the first immediate index of \p Operand, i.e. the register
   /// number, or nullopt if it is not a plain immediate.
   static std::optional<unsigned> registerNumber(OperandIndexAttr Index);
+
+  /// Emits the `dx.op.createHandle` call for every declared resource. DXIL
+  /// binds a resource once, at the top of the entry point, and refers to
+  /// the resulting handle from every access.
+  void createResourceHandles(dxsa::ModuleOp Shader);
+  /// Evaluates one index slot of an operand: an immediate, a register read
+  /// at run time, or their sum.
+  llvm::Value *readIndex(IndexAttr Index, mlir::Operation *Op);
+  /// Reads component \p Comp of the constant buffer row \p Src names.
+  llvm::Value *readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
+                                  llvm::Type *Ty, mlir::Operation *Op);
 
   /// Returns (creating on first use) the stack slot backing temp register
   /// component \p Comp of register \p Reg.
@@ -584,9 +625,11 @@ private:
   }
 
   /// The element type a `mov` copies at. DXBC registers are typeless, so
-  /// this is whatever the source component already holds; a signature read
-  /// or a literal has no type of its own and defaults to float.
-  llvm::Type *movElementType(SrcOperandAttr Src, unsigned DstComp);
+  /// this is whatever the source component already holds, or -- for a
+  /// literal, a signature read or a constant buffer read, none of which
+  /// have a type of their own -- whatever the destination holds.
+  llvm::Type *movElementType(DstOperandAttr Dst, SrcOperandAttr Src,
+                             unsigned DstComp);
 
   /// The `!dx.shaderModel` stage name for \p Type.
   static llvm::StringRef stageName(ProgramType Type);
@@ -601,8 +644,16 @@ private:
   llvm::Function *dxOp(llvm::StringRef Name, llvm::Type *ReturnTy,
                        llvm::ArrayRef<llvm::Type *> Args,
                        llvm::Type *OverloadTy);
+  /// Emits a `dx.op.<Name>` call. \p OverloadTy names the operation's
+  /// overload when it cannot be read off the call itself -- an operation
+  /// returning a struct is overloaded on the struct's element type -- and
+  /// `NoOverload` marks the operations that are not overloaded at all.
   llvm::Value *emitDXOp(llvm::StringRef Name, DXILOp Op, llvm::Type *ReturnTy,
-                        llvm::ArrayRef<llvm::Value *> Args);
+                        llvm::ArrayRef<llvm::Value *> Args,
+                        llvm::Type *OverloadTy = nullptr);
+  static llvm::Type *noOverload() {
+    return reinterpret_cast<llvm::Type *>(std::uintptr_t(-1));
+  }
 
   //===--------------------------------------------------------------------===//
   // Metadata
@@ -778,6 +829,112 @@ llvm::Value *Translator::coerce(llvm::Value *Value, llvm::Type *Ty) {
   return Builder.CreateBitCast(Value, Ty);
 }
 
+//===----------------------------------------------------------------------===//
+// Resources
+//===----------------------------------------------------------------------===//
+
+llvm::StructType *Translator::handleTy() {
+  if (auto *Existing = llvm::StructType::getTypeByName(Context,
+                                                       "dx.types.Handle"))
+    return Existing;
+  return llvm::StructType::create(Context, {Builder.getPtrTy()},
+                                  "dx.types.Handle");
+}
+
+llvm::StructType *Translator::cbufferRetTy(llvm::Type *Element) {
+  llvm::StringRef Suffix = Element->isFloatTy() ? "f32" : "i32";
+  std::string Name = ("dx.types.CBufRet." + Suffix).str();
+  if (auto *Existing = llvm::StructType::getTypeByName(Context, Name))
+    return Existing;
+  llvm::Type *Fields[] = {Element, Element, Element, Element};
+  return llvm::StructType::create(Context, Fields, Name);
+}
+
+void Translator::createResourceHandles(dxsa::ModuleOp Shader) {
+  // `createHandle`'s third argument is the index of the declaration within
+  // its resource class, not the register the declaration binds to.
+  unsigned Range = 0;
+  for (mlir::Operation &Op : *Shader.getBodyBlock()) {
+    auto Dcl = llvm::dyn_cast<dxsa::DclConstantBuffer>(&Op);
+    if (!Dcl)
+      continue;
+    // Shader model 5.1 binds a range of registers and names the range by
+    // an identifier of its own; before that the identifier is the register.
+    unsigned Id = Dcl.getId();
+    unsigned Bind = Dcl.getLbound().value_or(Id);
+    ConstantBufferRanges[Id] = Range;
+    ConstantBuffers[Id] = emitDXOp(
+        "createHandle", DXILOp::CreateHandle, handleTy(),
+        {llvm::ConstantInt::get(i8Ty(), unsigned(ResourceClass::CBV)),
+         llvm::ConstantInt::get(i32Ty(), Range++),
+         llvm::ConstantInt::get(i32Ty(), Bind),
+         llvm::ConstantInt::get(i1Ty(), 0)},
+        noOverload());
+  }
+}
+
+llvm::Value *Translator::readIndex(IndexAttr Index, mlir::Operation *Op) {
+  mlir::IntegerAttr Offset = Index.getImm();
+  SrcOperandAttr Relative = Index.getRelative();
+  if (!Relative)
+    return Offset ? llvm::ConstantInt::get(i32Ty(), Offset.getInt()) : nullptr;
+  llvm::Value *Value = readSource(Relative, 0, i32Ty(), Op);
+  if (!Value || !Offset || Offset.getInt() == 0)
+    return Value;
+  return Builder.CreateAdd(Value,
+                           llvm::ConstantInt::get(i32Ty(), Offset.getInt()));
+}
+
+llvm::Value *Translator::readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
+                                            llvm::Type *Ty,
+                                            mlir::Operation *Op) {
+  OperandIndexAttr Index = Src.getIndex();
+  // A `cb#` operand indexes the buffer and then the row; shader model 5.1
+  // inserts the register within the declared range in between.
+  if (!Index || Index.size() < 2) {
+    unsupported(Op) << ": constant buffer operand indexing";
+    return nullptr;
+  }
+  std::optional<unsigned> Id = registerNumber(Index);
+  auto Declared = Id ? ConstantBuffers.find(*Id) : ConstantBuffers.end();
+  if (Declared == ConstantBuffers.end()) {
+    unsupported(Op) << ": read of an undeclared constant buffer";
+    return nullptr;
+  }
+
+  llvm::Value *Row = readIndex(Index[Index.size() - 1], Op);
+  if (!Row)
+    return nullptr;
+
+  // Shader model 5.1 binds a range of registers, so the operand also picks
+  // the register within that range -- and may do so at run time, in which
+  // case the handle is bound at the access rather than at the entry point.
+  llvm::Value *Handle = Declared->second;
+  if (Index.size() >= 3 && Index[1].getRelative()) {
+    llvm::Value *&Cached = HandleCache[Src.getAsOpaquePointer()];
+    if (!Cached) {
+      llvm::Value *Bind = readIndex(Index[1], Op);
+      if (!Bind)
+        return nullptr;
+      Cached = emitDXOp(
+          "createHandle", DXILOp::CreateHandle, handleTy(),
+          {llvm::ConstantInt::get(i8Ty(), unsigned(ResourceClass::CBV)),
+           llvm::ConstantInt::get(i32Ty(), ConstantBufferRanges.lookup(*Id)),
+           Bind, llvm::ConstantInt::get(i1Ty(), 0)},
+          noOverload());
+    }
+    Handle = Cached;
+  }
+
+  llvm::Type *Element = Ty->isFloatTy() ? floatTy() : i32Ty();
+  auto Key = std::make_tuple(Src.getAsOpaquePointer(), Row, Element);
+  llvm::Value *&Loaded = RowCache[Key];
+  if (!Loaded)
+    Loaded = emitDXOp("cbufferLoadLegacy", DXILOp::CBufferLoadLegacy,
+                      cbufferRetTy(Element), {Handle, Row}, Element);
+  return Builder.CreateExtractValue(Loaded, Comp);
+}
+
 llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp) {
   uint64_t Key = uint64_t(Reg) * 4 + Comp;
   llvm::AllocaInst *&Slot = Temps[Key];
@@ -858,6 +1015,11 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
                        llvm::UndefValue::get(i32Ty())});
     break;
   }
+  case OperandType::cb:
+    Result = readConstantBuffer(Src, Comp, Ty, Op);
+    if (!Result)
+      return nullptr;
+    break;
   default:
     unsupported(Op) << ": source operand kind";
     return nullptr;
@@ -987,7 +1149,8 @@ llvm::Function *Translator::dxOp(llvm::StringRef Name, llvm::Type *ReturnTy,
 
 llvm::Value *Translator::emitDXOp(llvm::StringRef Name, DXILOp Op,
                                   llvm::Type *ReturnTy,
-                                  llvm::ArrayRef<llvm::Value *> Args) {
+                                  llvm::ArrayRef<llvm::Value *> Args,
+                                  llvm::Type *Overload) {
   llvm::SmallVector<llvm::Type *, 8> ArgTys;
   llvm::SmallVector<llvm::Value *, 8> CallArgs;
   CallArgs.push_back(llvm::ConstantInt::get(i32Ty(), unsigned(Op)));
@@ -998,10 +1161,12 @@ llvm::Value *Translator::emitDXOp(llvm::StringRef Name, DXILOp Op,
   // A void operation is overloaded on its value argument, which is last;
   // `discard`'s `i1` argument is not an overload, it is the operation's
   // fixed signature.
-  llvm::Type *OverloadTy = Name.starts_with("bitcast") ? nullptr
-                           : !ReturnTy->isVoidTy()      ? ReturnTy
-                           : Name == "discard"          ? nullptr
-                                                        : ArgTys.back();
+  llvm::Type *OverloadTy = Overload == noOverload() ? nullptr
+                           : Overload               ? Overload
+                           : Name.starts_with("bitcast") ? nullptr
+                           : !ReturnTy->isVoidTy()       ? ReturnTy
+                           : Name == "discard"           ? nullptr
+                                                         : ArgTys.back();
   // A dx.op call names a specific operation with fixed semantics; the
   // relaxed floating-point rules apply to the native LLVM arithmetic the
   // translation emits around it, not to the call itself.
@@ -1032,15 +1197,28 @@ llvm::StringRef Translator::stageName(ProgramType Type) {
   return "ps";
 }
 
-llvm::Type *Translator::movElementType(SrcOperandAttr Src, unsigned DstComp) {
+llvm::Type *Translator::movElementType(DstOperandAttr Dst, SrcOperandAttr Src,
+                                       unsigned DstComp) {
+  // A modifier is arithmetic, so it forces a floating-point reading of the
+  // bits whatever the registers involved are otherwise used for.
   if (Src.getModifier())
     return floatTy();
-  if (Src.getType() != OperandType::r)
-    return floatTy();
-  std::optional<unsigned> Reg = registerNumber(Src.getIndex());
-  if (!Reg)
-    return floatTy();
-  return tempSlot(*Reg, sourceComponent(Src, DstComp))->getAllocatedType();
+  if (Src.getType() == OperandType::r)
+    if (std::optional<unsigned> Reg = registerNumber(Src.getIndex()))
+      return tempSlot(*Reg, sourceComponent(Src, DstComp))->getAllocatedType();
+  // A signature register does have a type of its own: the one its
+  // signature element declares.
+  if (Src.getType() == OperandType::v)
+    if (std::optional<unsigned> Reg = registerNumber(Src.getIndex()))
+      if (std::optional<unsigned> Element =
+              Inputs.find(*Reg, sourceComponent(Src, DstComp)))
+        return Inputs.elements()[*Element].Type == DXILComponentType::F32
+                   ? floatTy()
+                   : i32Ty();
+  if (Dst && Dst.getType() == OperandType::r)
+    if (std::optional<unsigned> Reg = registerNumber(Dst.getIndex()))
+      return tempSlot(*Reg, DstComp)->getAllocatedType();
+  return floatTy();
 }
 
 llvm::Constant *Translator::foldFloatToInt(llvm::Instruction::CastOps Cast,
@@ -1239,6 +1417,22 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
       if (auto Src = llvm::dyn_cast<SrcOperandAttr>(Attr.getValue()))
         Srcs.push_back(Src);
 
+    // A register used to index another operand holds an integer, whatever
+    // else the shader does with it.
+    auto voteIndices = [&](OperandIndexAttr Indices) {
+      if (!Indices)
+        return;
+      for (IndexAttr Slot : Indices)
+        if (SrcOperandAttr Relative = Slot.getRelative())
+          if (Relative.getType() == OperandType::r)
+            vote(registerNumber(Relative.getIndex()),
+                 sourceComponent(Relative, 0), /*Float=*/false);
+    };
+    if (Dst)
+      voteIndices(Dst.getIndex());
+    for (SrcOperandAttr Src : Srcs)
+      voteIndices(Src.getIndex());
+
     // A conditional control-flow instruction tests its condition as an
     // integer bit pattern.
     if (Name.ends_with("_z") || Name.ends_with("_nz") || Name == "switch")
@@ -1302,7 +1496,8 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
   if (Name == "mov") {
     llvm::SmallVector<llvm::Value *, 4> Values;
     for (unsigned Comp : Comps) {
-      llvm::Value *Value = readSource(Src, Comp, movElementType(Src, Comp), Op);
+      llvm::Value *Value =
+          readSource(Src, Comp, movElementType(Dst, Src, Comp), Op);
       if (!Value)
         return false;
       Values.push_back(saturate(Value, Saturate));
@@ -1783,9 +1978,9 @@ bool Translator::translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
       return false;
     // A conditional move copies bits, so it takes its type from whichever
     // source has one, exactly like `mov`.
-    llvm::Type *Ty = movElementType(True, Comp);
+    llvm::Type *Ty = movElementType(Dst, True, Comp);
     if (Ty == floatTy())
-      Ty = movElementType(False, Comp);
+      Ty = movElementType(Dst, False, Comp);
     llvm::Value *Selected = Builder.CreateICmpNE(
         Test, llvm::ConstantInt::get(i32Ty(), 0));
     llvm::Value *Left = readSource(True, Comp, Ty, Op);
@@ -1803,6 +1998,8 @@ bool Translator::translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
 
 bool Translator::translateInstruction(mlir::Operation *Op) {
   SourceCache.clear();
+  RowCache.clear();
+  HandleCache.clear();
   llvm::StringRef Name = mnemonicOf(Op);
   bool Saturate = Name.consume_back("_sat");
 
@@ -1931,6 +2128,16 @@ void Translator::foldConditionMasks(llvm::Function &Entry) {
       I->eraseFromParent();
   Dead.clear();
 
+  // A resource is bound at the entry point for every declaration, but one
+  // only ever accessed through a run-time binding never uses that handle.
+  for (llvm::Instruction &I :
+       llvm::make_early_inc_range(Entry.getEntryBlock())) {
+    auto *Call = llvm::dyn_cast<llvm::CallInst>(&I);
+    if (Call && Call->use_empty() && Call->getCalledFunction() &&
+        Call->getCalledFunction()->getName() == "dx.op.createHandle")
+      Call->eraseFromParent();
+  }
+
   for (llvm::BasicBlock &BB : Entry) {
     for (llvm::Instruction &I : llvm::make_early_inc_range(BB)) {
       auto *Compare = llvm::dyn_cast<llvm::ICmpInst>(&I);
@@ -2048,6 +2255,7 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
   Builder.SetInsertPoint(EntryBB);
   EntryFn = Entry;
   inferTempTypes(Shader);
+  createResourceHandles(Shader);
   // DXBC has no strict floating-point semantics; every arithmetic
   // instruction is free to be reassociated and contracted.
   llvm::FastMathFlags FMF;
