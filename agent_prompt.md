@@ -27,3 +27,8 @@ prevents them from fully working.
 
 Can you please work through the remaining .ref files and address all outstanding
 issues and migrate the tests?
+
+Note: a previous session noted the minimum precision types as a challenge. DXIL
+does support minimum precision types by converting them to `half` in LLVM IR and
+setting the shader flag for "Low-precision data types present". Which is
+distinct from the shader flag required for "Enable native low-precision data types".
