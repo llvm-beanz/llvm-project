@@ -24,6 +24,8 @@ set(FEME_TEST_DEPENDS
   llc
   llvm-as
   opt
+  split-file
+  yaml2obj
   )
 
 add_lit_testsuite(check-feme "Running the feme regression tests"
