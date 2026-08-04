@@ -3833,3 +3833,119 @@ Six, each independently buildable and tested: the `image_operands<None>`
 fix; `ArrayConstantPattern`; `CompositeConstructPattern`; the AMDGPU alloca
 address-space fix; the `Design.md` update; and the `feme-spirv-to-amdgpu.mlir`
 end-to-end update exercising all of the above together, plus this entry.
+
+# Agent thoughts: removing --from, auto-detecting input format, and dropping --to
+
+## Framing
+
+Two related CLI cleanups: `--from` is redundant once `feme` can tell DXIL
+from SPIR-V input by content, the same way `llvm-dis`/`llvm-as`-style tools
+never need to be told their own input's format; and `--to` was already
+redundant with `--target` -- `feme::Driver::resolveTargetTriple` picked
+`Opts.Target` over `Opts.To` whenever both were set, so the two options
+were never actually independent, just two spellings of the same thing with
+`--target` already the one that won ties.
+
+I did `--to` first since it was the smaller, purely-subtractive change (one
+field, one `OptTable` entry, no new logic), then `--from`, which needed an
+actual replacement (content sniffing) rather than just deletion, so I
+wanted the simpler change in and tested on its own first.
+
+## Design decisions worth recording
+
+**Detection lives in `feme::Driver`, not a new `Importer` method.** I
+considered adding a static `bool matches(MemoryBufferRef)` to the
+`Importer` interface itself, so each format's own detection logic would
+live next to its parser. I didn't: `Importer::import` is a virtual instance
+method (deliberately, per the design doc's "no RTTI" + polymorphic-Importer
+shape), but detection has to run *before* any `Importer` is selected, so
+it can't be a virtual dispatch -- it would have to be a second, parallel,
+non-virtual entry point per format, which is more moving parts than one
+free function in `Driver.cpp` that the two-format `case` list (already
+living there, in `Driver`'s pre-existing `lookupImporter`) naturally
+became once by-name lookup turned into by-content lookup.
+
+**Reused `llvm::isBitcode` and the "DXBC" prefix check `DXILImporter.cpp`
+already has, rather than fully parsing the `DXContainer` in `Driver` to
+confirm it holds a DXIL part.** A `DXContainer` (magic "DXBC") predates the
+DXIL name and can, in principle, wrap a different, non-DXIL payload (the
+`--from=dxbc` case the old flag distinguished, and which FeMe still doesn't
+import). But telling those apart requires actually parsing the container's
+part table -- exactly what `DXILImporter::import` already does, complete
+with a clean diagnostic if the DXIL part turns out to be missing. Doing
+that parse twice (once to detect, once to import) would be pure
+duplication for no behavioral difference: either way, a `DXContainer`
+without a DXIL part fails with a diagnostic, it just now happens one call
+frame deeper, inside `DXILImporter` instead of `Driver::detectFormat`.
+I confirmed this doesn't regress the diagnostic itself by keeping a test
+(now `feme-undetectable-format.test`, checking for a clean rejection).
+
+**SPIR-V detection checks both the little- and big-endian magic number
+spellings.** `mlir::spirv::kMagicNumber` is `0x07230203`, but the SPIR-V
+spec permits a module to be big-endian internally (the *reader* detects
+endianness from the first word and byte-swaps everything else). MLIR's own
+`mlir::spirv::deserialize` does not appear to auto-detect the reverse-byte-
+order case at the point `Driver::detectFormat` runs (before any
+`Importer` is invoked at all), so matching only `0x07230203` would silently
+misclassify a legitimately big-endian SPIR-V module as "undetectable"
+rather than routing it to `SPIRVImporter` and getting whatever error *that*
+produces. Checking the reversed word (`0x03022307`) costs one extra
+comparison and means detection is at least as permissive as the two
+concrete encodings the spec allows, leaving any deeper endianness handling
+to `SPIRVImporter`/MLIR's own deserializer rather than `Driver`.
+
+**Kept `Opts.Target`'s existing dual role (format shorthand or literal
+triple) unchanged when dropping `Opts.To`.** `resolveTargetTriple` already
+treated `"dxil"`/`"spirv"` specially before falling back to using the
+string as a target triple directly; removing `Opts.To` meant deleting the
+"prefer Target, else To" fallback line and nothing else in that function,
+since `Opts.Target` already had to handle every case `Opts.To` did (a real
+triple like `amdgcn-amd-amdhsa`) plus the two format names. No new
+resolution logic was needed.
+
+## What I did not do
+
+I didn't add a `Ctx.getFormatRegistry()`-style abstraction for format
+detection, matching the existing deviation note for `Importer` lookup: two
+formats is still a short enough list to hard-code as a sequence of
+`if`s in one free function, and doing otherwise here would be scope creep
+unrelated to this task.
+
+I didn't change how `DXILImporter`/`SPIRVImporter` themselves validate
+their input (e.g. `DXILImporter`'s own "neither a DXContainer nor LLVM
+bitcode" check, or `SPIRVImporter`'s word-count check) -- `Driver`'s
+detection is deliberately a coarser, format-*selection* filter, not a
+replacement for each `Importer`'s own, more precise validation of input
+it's already committed to parsing.
+
+## Verification
+
+Ran `check-feme` after each of the three commits (`--to` removal, `--from`
+removal + detection, docs), with assertions enabled and `ccache` (an
+existing build directory already configured with
+`LLVM_ENABLE_PROJECTS=feme`, `LLVM_ENABLE_ASSERTIONS=ON`, and
+`CMAKE_C_COMPILER_LAUNCHER=ccache`): 412 tests passing before any change,
+413 after (one net-new lit test replacing the old
+`feme-unsupported-from.test`), all green throughout. Verified every
+touched C++ file already matched `clang-format` before committing.
+
+Added unit test coverage for the new detection logic specifically
+(`DriverTest.cpp`): an empty buffer (matches no magic number at all), a
+`"DXBC"`-prefixed buffer that isn't a well-formed container (exercises the
+DXContainer-magic detection path distinctly from the raw-bitcode path
+`RejectsMissingTarget` already covered), and a buffer starting with the
+SPIR-V magic number but shorter than the mandatory 5-word header
+(exercises the SPIR-V magic-number detection path). Between these and the
+existing `test/Tools/feme/feme-*.{ll,mlir}` lit tests (updated to drop
+`--from`/`--to` but otherwise unchanged, since they already exercised real
+DXIL/SPIR-V input end to end), every phase -- format detection, import,
+translation, raising/lowering, and backend codegen -- has coverage that
+still passes with the flags removed.
+
+## Commits
+
+Three: `--to` removal (consolidating into `--target`); `--from` removal
+plus `feme::detectFormat` content-based format detection; and a docs-only
+update to `Design.md`/`CommandGuide/feme.md`/`CommandGuide/feme-translate.md`
+reflecting both flag removals (plus a `Driver.h` doc comment the second
+commit missed). This entry is a fourth, separate commit.
