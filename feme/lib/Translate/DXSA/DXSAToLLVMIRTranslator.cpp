@@ -99,14 +99,21 @@ enum class DXILOp : unsigned {
   CreateHandle = 57,
   CBufferLoadLegacy = 59,
   Discard = 82,
+  DerivCoarseX = 83,
+  DerivCoarseY = 84,
+  DerivFineX = 85,
+  DerivFineY = 86,
   SampleIndex = 90,
   Coverage = 91,
   ThreadId = 93,
   GroupId = 94,
   ThreadIdInGroup = 95,
   FlattenedThreadIdInGroup = 96,
+  CycleCounterLegacy = 109,
   BitcastI32toF32 = 126,
   BitcastF32toI32 = 127,
+  LegacyF32ToF16 = 130,
+  LegacyF16ToF32 = 131,
 };
 
 /// `DXIL::ResourceClass`, as named by `dx.op.createHandle`'s first argument.
@@ -513,6 +520,8 @@ private:
   llvm::DenseMap<llvm::Value *, llvm::Value *> SaturateCache;
   /// Shader stage name for `!dx.shaderModel` ("ps", "vs", ...).
   llvm::StringRef Stage = "ps";
+  /// The shader's one `cycleCounterLegacy` call, if it reads the counter.
+  llvm::Value *CycleCounter = nullptr;
 
   /// One entry per open `if`, `loop` or `switch` construct. DXBC control
   /// flow is structured and properly nested, so a stack is all the state
@@ -556,6 +565,9 @@ private:
   /// constant buffer load returns: one 16-byte row, as four components of
   /// \p Element.
   llvm::StructType *cbufferRetTy(llvm::Type *Element);
+  /// Returns (creating on first use) the named struct type holding the two
+  /// 32-bit halves of a 64-bit cycle counter.
+  llvm::StructType *twoI32Ty();
 
   llvm::Type *floatTy() { return llvm::Type::getFloatTy(Context); }
   llvm::Type *i32Ty() { return llvm::Type::getInt32Ty(Context); }
@@ -640,6 +652,10 @@ private:
   bool translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
                      SrcOperandAttr Cond, SrcOperandAttr True,
                      SrcOperandAttr False, bool Saturate);
+  /// Translates `sincos`, whose two destinations are written from one
+  /// source and either of which may be `null`.
+  bool translateSincos(mlir::Operation *Op, DstOperandAttr Sin,
+                       DstOperandAttr Cos, SrcOperandAttr Src, bool Saturate);
 
   //===--------------------------------------------------------------------===//
   // Blocks
@@ -932,6 +948,14 @@ llvm::StructType *Translator::cbufferRetTy(llvm::Type *Element) {
   return llvm::StructType::create(Context, Fields, Name);
 }
 
+llvm::StructType *Translator::twoI32Ty() {
+  if (auto *Existing =
+          llvm::StructType::getTypeByName(Context, "dx.types.twoi32"))
+    return Existing;
+  llvm::Type *Fields[] = {i32Ty(), i32Ty()};
+  return llvm::StructType::create(Context, Fields, "dx.types.twoi32");
+}
+
 void Translator::createResourceHandles(dxsa::ModuleOp Shader) {
   // `createHandle`'s third argument is the index of the declaration within
   // its resource class, not the register the declaration binds to.
@@ -1128,6 +1152,17 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
   case OperandType::vCoverage:
     Result = emitDXOp("coverage", DXILOp::Coverage, i32Ty(), {});
     break;
+  case OperandType::cycleCounter: {
+    // The counter is a 64-bit value returned as a pair of 32-bit halves,
+    // which the swizzle picks between.
+    llvm::StructType *Pair = twoI32Ty();
+    llvm::Value *&Counter = CycleCounter;
+    if (!Counter)
+      Counter = emitDXOp("cycleCounterLegacy", DXILOp::CycleCounterLegacy, Pair,
+                         {}, noOverload());
+    Result = Builder.CreateExtractValue(Counter, Comp & 1);
+    break;
+  }
   case OperandType::cb:
     Result = readConstantBuffer(Src, Comp, Ty, Op, Slot);
     if (!Result)
@@ -1390,6 +1425,10 @@ struct OpLowering {
     Cast,
     /// A comparison followed by a sign extension to the DXBC boolean.
     Compare,
+    /// `1.0 / x`, which DXIL leaves to a plain division.
+    Reciprocal,
+    /// `0 - x`.
+    Negate,
   };
 
   Form Kind = Form::Native;
@@ -1401,6 +1440,8 @@ struct OpLowering {
   llvm::CmpInst::Predicate Predicate = llvm::CmpInst::BAD_ICMP_PREDICATE;
   DXILOp Op = DXILOp::LoadInput;
   llvm::StringRef Name;
+  /// True for the `dx.op` calls that carry no `.<overload>` suffix.
+  bool NoOverload = false;
 };
 
 static OpLowering nativeOp(llvm::Instruction::BinaryOps Binop, bool Float) {
@@ -1417,6 +1458,24 @@ static OpLowering callOp(DXILOp Op, llvm::StringRef Name, bool Float) {
   L.FloatOperands = L.FloatResult = Float;
   L.Op = Op;
   L.Name = Name;
+  return L;
+}
+
+/// A `dx.op` call whose result type differs from its operand type.
+static OpLowering convertOp(DXILOp Op, llvm::StringRef Name, bool FloatIn,
+                            bool FloatOut) {
+  OpLowering L = callOp(Op, Name, FloatIn);
+  L.FloatResult = FloatOut;
+  // These conversions fix both of their types, so DXIL does not overload
+  // them on either.
+  L.NoOverload = true;
+  return L;
+}
+
+static OpLowering simpleOp(OpLowering::Form Kind, bool Float) {
+  OpLowering L;
+  L.Kind = Kind;
+  L.FloatOperands = L.FloatResult = Float;
   return L;
 }
 
@@ -1460,8 +1519,17 @@ static std::optional<OpLowering> lookupLowering(llvm::StringRef Name) {
       {"round_ni", callOp(DXILOp::RoundNi, "unary", true)},
       {"round_pi", callOp(DXILOp::RoundPi, "unary", true)},
       {"round_z", callOp(DXILOp::RoundZ, "unary", true)},
+      {"rcp", simpleOp(OpLowering::Form::Reciprocal, true)},
+      // Derivatives. DXBC's unqualified forms are the coarse ones.
+      {"deriv_rtx", callOp(DXILOp::DerivCoarseX, "unary", true)},
+      {"deriv_rty", callOp(DXILOp::DerivCoarseY, "unary", true)},
+      {"deriv_rtx_coarse", callOp(DXILOp::DerivCoarseX, "unary", true)},
+      {"deriv_rty_coarse", callOp(DXILOp::DerivCoarseY, "unary", true)},
+      {"deriv_rtx_fine", callOp(DXILOp::DerivFineX, "unary", true)},
+      {"deriv_rty_fine", callOp(DXILOp::DerivFineY, "unary", true)},
       // Integer arithmetic.
       {"iadd", nativeOp(BO::Add, false)},
+      {"ineg", simpleOp(OpLowering::Form::Negate, false)},
       {"and", nativeOp(BO::And, false)},
       {"or", nativeOp(BO::Or, false)},
       {"xor", nativeOp(BO::Xor, false)},
@@ -1482,6 +1550,12 @@ static std::optional<OpLowering> lookupLowering(llvm::StringRef Name) {
       {"utof", castOp(BO::UIToFP, false, true)},
       {"ftoi", castOp(BO::FPToSI, true, false)},
       {"ftou", castOp(BO::FPToUI, true, false)},
+      // Half-precision packing, which DXIL keeps as a 32-bit-typed
+      // operation carrying a 16-bit value.
+      {"f32tof16", convertOp(DXILOp::LegacyF32ToF16, "legacyF32ToF16", true,
+                             /*FloatOut=*/false)},
+      {"f16tof32", convertOp(DXILOp::LegacyF16ToF32, "legacyF16ToF32",
+                             /*FloatIn=*/false, true)},
       // Comparisons. DXBC's boolean is an all-ones/all-zeroes 32-bit mask.
       {"eq", compareOp(CI::FCMP_OEQ, true)},
       {"ne", compareOp(CI::FCMP_UNE, true)},
@@ -1625,14 +1699,18 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
   // `mov` is a pure copy: its operand modifiers already did the work, and
   // DXBC gives it no type of its own, so keep whatever the source holds.
   if (Name == "mov") {
+    // Every component is read before any is clamped, which is the order
+    // the operand tokens are laid out in.
     llvm::SmallVector<llvm::Value *, 4> Values;
     for (unsigned Comp : Comps) {
       llvm::Value *Value =
           readSource(Src, Comp, movElementType(Dst, Src, Comp), Op);
       if (!Value)
         return false;
-      Values.push_back(saturate(Value, Saturate));
+      Values.push_back(Value);
     }
+    for (llvm::Value *&Value : Values)
+      Value = saturate(Value, Saturate);
     return writeDestination(Dst, Values, Op);
   }
 
@@ -1657,7 +1735,8 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
     llvm::Value *Value;
     switch (Lowering->Kind) {
     case OpLowering::Form::Call:
-      Value = emitDXOp(Lowering->Name, Lowering->Op, DstTy, {Source});
+      Value = emitDXOp(Lowering->Name, Lowering->Op, DstTy, {Source},
+                       Lowering->NoOverload ? noOverload() : nullptr);
       break;
     case OpLowering::Form::Cast: {
       // A cast has no floating-point semantics of its own to relax.
@@ -1668,6 +1747,12 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
         Value = Builder.CreateCast(Lowering->Cast, Source, DstTy);
       break;
     }
+    case OpLowering::Form::Reciprocal:
+      Value = Builder.CreateFDiv(llvm::ConstantFP::get(DstTy, 1.0), Source);
+      break;
+    case OpLowering::Form::Negate:
+      Value = Builder.CreateSub(llvm::ConstantInt::get(DstTy, 0), Source);
+      break;
     default:
       unsupported(Op);
       return false;
@@ -1798,10 +1883,45 @@ bool Translator::translateDot(mlir::Operation *Op, DstOperandAttr Dst,
   return writeDestination(Dst, Values, Op);
 }
 
+bool Translator::translateSincos(mlir::Operation *Op, DstOperandAttr Sin,
+                                 DstOperandAttr Cos, SrcOperandAttr Src,
+                                 bool Saturate) {
+  // Both results are computed from the same source components, so the
+  // union of the two write masks is read once up front.
+  llvm::SmallVector<unsigned, 4> Wanted;
+  for (DstOperandAttr Dst : {Sin, Cos}) {
+    if (Dst.getType() == OperandType::null)
+      continue;
+    for (unsigned Comp : destinationComponents(Dst))
+      if (!llvm::is_contained(Wanted, Comp))
+        Wanted.push_back(Comp);
+  }
+  llvm::sort(Wanted);
+  for (unsigned Comp : Wanted)
+    if (!readSource(Src, Comp, floatTy(), Op))
+      return false;
+
+  for (auto [Dst, DXOp] :
+       {std::make_pair(Sin, DXILOp::Sin), std::make_pair(Cos, DXILOp::Cos)}) {
+    if (Dst.getType() == OperandType::null)
+      continue;
+    llvm::SmallVector<llvm::Value *, 4> Values;
+    for (unsigned Comp : destinationComponents(Dst)) {
+      llvm::Value *Source = readSource(Src, Comp, floatTy(), Op);
+      if (!Source)
+        return false;
+      Values.push_back(
+          saturate(emitDXOp("unary", DXOp, floatTy(), {Source}), Saturate));
+    }
+    if (!writeDestination(Dst, Values, Op))
+      return false;
+  }
+  return true;
+}
+
 //===----------------------------------------------------------------------===//
 // Control flow
 //===----------------------------------------------------------------------===//
-
 llvm::BasicBlock *Translator::deferredBlock(const llvm::Twine &Name) {
   auto *BB = llvm::BasicBlock::Create(Context, Name);
   Pending.push_back(BB);
@@ -2160,6 +2280,13 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
   if (auto Sel = llvm::dyn_cast<dxsa::MovCSat>(Op))
     return translateMovC(Op, Sel.getDst(), Sel.getCondition(), Sel.getSrc1(),
                          Sel.getSrc2(), Saturate);
+
+  if (auto SC = llvm::dyn_cast<dxsa::Sincos>(Op))
+    return translateSincos(Op, SC.getSin(), SC.getCos(), SC.getOperandAttr(),
+                           Saturate);
+  if (auto SC = llvm::dyn_cast<dxsa::SincosSat>(Op))
+    return translateSincos(Op, SC.getSin(), SC.getCos(), SC.getOperandAttr(),
+                           Saturate);
 
   if (auto Mad = llvm::dyn_cast<dxsa::Mad>(Op))
     return translateMad(Op, Mad.getDst(), Mad.getLhs(), Mad.getRhs(),
