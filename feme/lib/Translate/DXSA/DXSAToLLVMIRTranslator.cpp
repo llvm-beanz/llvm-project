@@ -28,6 +28,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/BinaryFormat/DXContainer.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -223,9 +224,89 @@ DXILSemanticKind toSemanticKind(SystemValueName Name) {
   return DXILSemanticKind::Arbitrary;
 }
 
+/// Maps a container-level `llvm::dxbc::D3DSystemValue` (as read from a real
+/// `ISGN`/`OSGN`/`ISG1`/`OSG1` signature) onto the DXIL semantic kind that
+/// names the same value. Like `toSemanticKind` above, these are two
+/// enumerations for the same set of system values with different numbering.
+DXILSemanticKind toSemanticKind(llvm::dxbc::D3DSystemValue Value) {
+  switch (Value) {
+  case llvm::dxbc::D3DSystemValue::Position:
+    return DXILSemanticKind::Position;
+  case llvm::dxbc::D3DSystemValue::ClipDistance:
+    return DXILSemanticKind::ClipDistance;
+  case llvm::dxbc::D3DSystemValue::CullDistance:
+    return DXILSemanticKind::CullDistance;
+  case llvm::dxbc::D3DSystemValue::RenderTargetArrayIndex:
+    return DXILSemanticKind::RenderTargetArrayIndex;
+  case llvm::dxbc::D3DSystemValue::ViewPortArrayIndex:
+    return DXILSemanticKind::ViewPortArrayIndex;
+  case llvm::dxbc::D3DSystemValue::VertexID:
+    return DXILSemanticKind::VertexID;
+  case llvm::dxbc::D3DSystemValue::PrimitiveID:
+    return DXILSemanticKind::PrimitiveID;
+  case llvm::dxbc::D3DSystemValue::InstanceID:
+    return DXILSemanticKind::InstanceID;
+  case llvm::dxbc::D3DSystemValue::IsFrontFace:
+    return DXILSemanticKind::IsFrontFace;
+  case llvm::dxbc::D3DSystemValue::SampleIndex:
+    return DXILSemanticKind::SampleIndex;
+  case llvm::dxbc::D3DSystemValue::FinalQuadEdgeTessfactor:
+  case llvm::dxbc::D3DSystemValue::FinalTriEdgeTessfactor:
+  case llvm::dxbc::D3DSystemValue::FinalLineDetailTessfactor:
+  case llvm::dxbc::D3DSystemValue::FinalLineDensityTessfactor:
+    return DXILSemanticKind::TessFactor;
+  case llvm::dxbc::D3DSystemValue::FinalQuadInsideTessfactor:
+  case llvm::dxbc::D3DSystemValue::FinalTriInsideTessfactor:
+    return DXILSemanticKind::InsideTessFactor;
+  case llvm::dxbc::D3DSystemValue::Barycentrics:
+    return DXILSemanticKind::Barycentrics;
+  case llvm::dxbc::D3DSystemValue::ShadingRate:
+    return DXILSemanticKind::ShadingRate;
+  case llvm::dxbc::D3DSystemValue::CullPrimitive:
+    return DXILSemanticKind::CullPrimitive;
+  case llvm::dxbc::D3DSystemValue::Target:
+    return DXILSemanticKind::Target;
+  case llvm::dxbc::D3DSystemValue::Coverage:
+    return DXILSemanticKind::Coverage;
+  case llvm::dxbc::D3DSystemValue::InnerCoverage:
+    return DXILSemanticKind::InnerCoverage;
+  case llvm::dxbc::D3DSystemValue::Undefined:
+  case llvm::dxbc::D3DSystemValue::Depth:
+  case llvm::dxbc::D3DSystemValue::DepthGE:
+  case llvm::dxbc::D3DSystemValue::DepthLE:
+  case llvm::dxbc::D3DSystemValue::StencilRef:
+    break;
+  }
+  return DXILSemanticKind::Arbitrary;
+}
+
 //===----------------------------------------------------------------------===//
 // Signature model
 //===----------------------------------------------------------------------===//
+
+/// Maps a container-level `dxbc::SigComponentType` onto `DXILComponentType`.
+/// DXIL only ever stores signature elements as 32-bit `dx.op.loadInput`/
+/// `storeOutput` calls (min-precision packing is a separate, not-yet-modeled
+/// concern -- see "What is left" in `agent_thoughts.md`), so every integer
+/// width narrower or wider than 32 bits still maps to `I32`/`U32`.
+DXILComponentType toComponentType(llvm::dxbc::SigComponentType Type) {
+  switch (Type) {
+  case llvm::dxbc::SigComponentType::UInt32:
+  case llvm::dxbc::SigComponentType::UInt16:
+  case llvm::dxbc::SigComponentType::UInt64:
+    return DXILComponentType::U32;
+  case llvm::dxbc::SigComponentType::SInt32:
+  case llvm::dxbc::SigComponentType::SInt16:
+  case llvm::dxbc::SigComponentType::SInt64:
+    return DXILComponentType::I32;
+  case llvm::dxbc::SigComponentType::Unknown:
+  case llvm::dxbc::SigComponentType::Float16:
+  case llvm::dxbc::SigComponentType::Float32:
+  case llvm::dxbc::SigComponentType::Float64:
+    break;
+  }
+  return DXILComponentType::F32;
+}
 
 /// One entry of the input or output signature. DXBC declares a signature
 /// register piecewise -- one declaration per contiguous component group of
@@ -241,6 +322,16 @@ struct SignatureElement {
   DXILSemanticKind Kind = DXILSemanticKind::Arbitrary;
   /// `DXIL::InterpolationMode`, which matches D3D10_SB_INTERPOLATION_MODE.
   unsigned InterpolationMode = 0;
+  /// The semantic index (e.g. the `3` in `SV_TessFactor3`, or in multiple
+  /// arbitrary elements sharing one HLSL-source name across registers).
+  /// Declaration-synthesized elements do not track this and leave it 0;
+  /// real container elements (`ContainerSignatureElement::Index`) do.
+  unsigned Index = 0;
+  /// `DXIL::ComponentType`. DXBC registers are typeless, so
+  /// declaration-synthesized elements always default to `F32` (see
+  /// "Building complete legacy DXBC containers for testing" in
+  /// feme/docs/Design.md); real container elements carry their actual type.
+  DXILComponentType Type = DXILComponentType::F32;
 };
 
 /// The input or output signature of a shader, plus the reverse mapping from
@@ -281,10 +372,13 @@ private:
 
 class Translator {
 public:
-  Translator(llvm::LLVMContext &Context, mlir::ModuleOp Source)
+  Translator(llvm::LLVMContext &Context, mlir::ModuleOp Source,
+            llvm::ArrayRef<ContainerSignatureElement> RealInputSignature,
+            llvm::ArrayRef<ContainerSignatureElement> RealOutputSignature)
       : Context(Context), Source(Source),
         Module(std::make_unique<llvm::Module>("dxbc", Context)),
-        Builder(Context) {}
+        Builder(Context), RealInputSignature(RealInputSignature),
+        RealOutputSignature(RealOutputSignature) {}
 
   std::unique_ptr<llvm::Module> run(dxsa::ModuleOp Shader);
 
@@ -293,6 +387,11 @@ private:
   mlir::ModuleOp Source;
   std::unique_ptr<llvm::Module> Module;
   llvm::IRBuilder<> Builder;
+  /// Real signature elements read from a full `DXContainer`, overriding
+  /// `collectDeclarations`'s synthesis when non-empty (see
+  /// `ContainerSignatureElement`).
+  llvm::ArrayRef<ContainerSignatureElement> RealInputSignature;
+  llvm::ArrayRef<ContainerSignatureElement> RealOutputSignature;
 
   Signature Inputs;
   Signature Outputs;
@@ -329,6 +428,11 @@ private:
   void addSignatureElement(Signature &Sig, DstOperandAttr Operand,
                            llvm::StringRef NamePrefix, DXILSemanticKind Kind,
                            unsigned InterpolationMode);
+  /// Populates \p Sig directly from real container signature elements,
+  /// bypassing declaration-based synthesis (see `ContainerSignatureElement`).
+  static void
+  addRealSignatureElements(Signature &Sig,
+                           llvm::ArrayRef<ContainerSignatureElement> Elements);
 
   //===--------------------------------------------------------------------===//
   // Operands
@@ -445,30 +549,42 @@ void Translator::addSignatureElement(Signature &Sig, DstOperandAttr Operand,
 }
 
 bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
+  if (!RealInputSignature.empty()) {
+    addRealSignatureElements(Inputs, RealInputSignature);
+  } else {
+    for (mlir::Operation &Op : *Shader.getBodyBlock()) {
+      if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPs>(&Op))
+        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                            DXILSemanticKind::Arbitrary,
+                            static_cast<unsigned>(Dcl.getMode()));
+      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInput>(&Op))
+        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                            DXILSemanticKind::Arbitrary, 0);
+      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSiv>(&Op))
+        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                            toSemanticKind(Dcl.getName()),
+                            static_cast<unsigned>(Dcl.getMode()));
+      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op))
+        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                            toSemanticKind(Dcl.getName()), 0);
+      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
+        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                            toSemanticKind(Dcl.getName()), 0);
+      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op))
+        addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
+                            toSemanticKind(Dcl.getName()), 0);
+    }
+  }
+
+  if (!RealOutputSignature.empty()) {
+    addRealSignatureElements(Outputs, RealOutputSignature);
+    return true;
+  }
+
   bool IsPixelShader = !Shader.getProgramType() ||
                        Shader.getProgramType() == ProgramType::pixel_shader;
   for (mlir::Operation &Op : *Shader.getBodyBlock()) {
-    if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPs>(&Op))
-      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
-                          DXILSemanticKind::Arbitrary,
-                          static_cast<unsigned>(Dcl.getMode()));
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInput>(&Op))
-      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
-                          DXILSemanticKind::Arbitrary, 0);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSiv>(&Op))
-      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
-                          toSemanticKind(Dcl.getName()),
-                          static_cast<unsigned>(Dcl.getMode()));
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op))
-      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
-                          toSemanticKind(Dcl.getName()), 0);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
-      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
-                          toSemanticKind(Dcl.getName()), 0);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op))
-      addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
-                          toSemanticKind(Dcl.getName()), 0);
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
+    if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
       addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
                           IsPixelShader ? DXILSemanticKind::Target
                                         : DXILSemanticKind::Arbitrary,
@@ -481,6 +597,25 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
                           toSemanticKind(Dcl.getName()), 0);
   }
   return true;
+}
+
+void Translator::addRealSignatureElements(
+    Signature &Sig, llvm::ArrayRef<ContainerSignatureElement> Elements) {
+  for (const ContainerSignatureElement &El : Elements) {
+    SignatureElement Element;
+    Element.Row = El.Register;
+    Element.StartCol = llvm::countr_zero(El.Mask);
+    Element.Cols = llvm::popcount(El.Mask);
+    Element.Kind = toSemanticKind(static_cast<llvm::dxbc::D3DSystemValue>(
+        El.SystemValue));
+    Element.Name = Element.Kind == DXILSemanticKind::Arbitrary
+                       ? El.Name
+                       : semanticName(Element.Kind);
+    Element.Index = El.Index;
+    Element.Type =
+        toComponentType(static_cast<llvm::dxbc::SigComponentType>(El.CompType));
+    Sig.add(std::move(Element));
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -1135,13 +1270,13 @@ llvm::MDNode *Translator::emitSignature(const Signature &Sig) {
   llvm::SmallVector<llvm::Metadata *, 8> Elements;
   for (auto [Index, Element] : llvm::enumerate(Sig.elements())) {
     auto *SemanticIndices = llvm::MDNode::get(
-        Context,
-        {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0))});
+        Context, {llvm::ConstantAsMetadata::get(
+                     llvm::ConstantInt::get(i32Ty(), Element.Index))});
     llvm::Metadata *Fields[] = {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), Index)),
         llvm::MDString::get(Context, Element.Name),
         llvm::ConstantAsMetadata::get(
-            llvm::ConstantInt::get(i8Ty(), unsigned(DXILComponentType::F32))),
+            llvm::ConstantInt::get(i8Ty(), unsigned(Element.Type))),
         llvm::ConstantAsMetadata::get(
             llvm::ConstantInt::get(i8Ty(), unsigned(Element.Kind))),
         SemanticIndices,
@@ -1231,9 +1366,10 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
 // Entry point
 //===----------------------------------------------------------------------===//
 
-std::unique_ptr<llvm::Module>
-feme::dxsa::translateToLLVMIR(mlir::ModuleOp Source,
-                              llvm::LLVMContext &Context) {
+std::unique_ptr<llvm::Module> feme::dxsa::translateToLLVMIR(
+    mlir::ModuleOp Source, llvm::LLVMContext &Context,
+    llvm::ArrayRef<ContainerSignatureElement> RealInputSignature,
+    llvm::ArrayRef<ContainerSignatureElement> RealOutputSignature) {
   dxsa::ModuleOp Shader;
   for (mlir::Operation &Op : Source.getBodyRegion().front()) {
     if (auto Candidate = llvm::dyn_cast<dxsa::ModuleOp>(&Op)) {
@@ -1249,6 +1385,6 @@ feme::dxsa::translateToLLVMIR(mlir::ModuleOp Source,
     return nullptr;
   }
 
-  Translator T(Context, Source);
+  Translator T(Context, Source, RealInputSignature, RealOutputSignature);
   return T.run(Shader);
 }
