@@ -14,7 +14,7 @@
 // CHECK:         dxsa.sample_c_lz r<0, <z>>, v<0, <x, y, x, x>>, t<3, vector, <x, x, x, x>>, s<5>, r<0, <x>>, <u = -5, v = 7, w = 0>
 // CHECK:         dxsa.add r<0, <y>>, r<0, <z>>, r<0, <y>>
 // CHECK:         dxsa.sample_c_lz r<0, <z>>, v<0, <x, y, x, x>>, t<3, vector, <x, x, x, x>>, s<5>, r<0, <x>>, <u = -4, v = 1, w = 0>
-// CHECK:         dxsa.unknown <tokens = [0x900000E5, 0x80005A01, 0x800000C2, 0x00155543, 0x00100012, 0x00000000, 0x00100012, 0x00000001, 0x00101046, 0x00000000, 0x00107006, 0x00000003, 0x00106000, 0x00000005, 0x0010000A, 0x00000000]>
+// CHECK:         dxsa.sample_c_lz_s r<0, <x>>, v<0, <x, y, x, x>>, t<3, vector, <x, x, x, x>>, s<5>, r<0, <x>>, r<1, <x>>, <u = -3, v = 2, w = 0>
 // CHECK:         dxsa.add r<0, <y>>, r<0, <z>>, r<0, <y>>
 // CHECK:         dxsa.add r<0, <y>>, r<0, <x>>, r<0, <y>>
 // CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 0 : i32}
@@ -42,7 +42,7 @@ sample_c_lz resource_dim(texture2d) resource_return_type(float, float, float, fl
 sample_c_lz aoffimmi(-5, 7, 0) resource_dim(texture2d) resource_return_type(float, float, float, float) r0.z, v0.xyxx, t3.xxxx, s5, r0.x
 add r0.y, r0.z, r0.y
 sample_c_lz aoffimmi(-4, 1, 0) resource_dim(texture2d) resource_return_type(float, float, float, float) r0.z, v0.xyxx, t3.xxxx, s5, r0.x
-.dword 0x900000E5, 0x80005A01, 0x800000C2, 0x00155543, 0x00100012, 0x00000000, 0x00100012, 0x00000001, 0x00101046, 0x00000000, 0x00107006, 0x00000003, 0x00106000, 0x00000005, 0x0010000A, 0x00000000
+sample_c_lz_s aoffimmi(-3, 2, 0) resource_dim(texture2d) resource_return_type(float, float, float, float) r0.x, r1.x, v0.xyxx, t3.xxxx, s5, r0.x
 add r0.y, r0.z, r0.y
 add r0.y, r0.x, r0.y
 check_access_fully_mapped r0.z, r1.x

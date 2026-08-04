@@ -677,9 +677,9 @@ def DXSA_SampleCLZFeedback : DXSA_Op<"sample_c_lz_s"> {
     `src_reference_value`, `offset` operands are the same as in
     `dxsa.sample` instruction.
 
-    The `clamp_feedback` operand appends an additional 32 bit scalar
-    LOD clamp operand and an additional 32 bit scalar Tiled Resources
-    shader feedback status output value.
+    The `feedback` operand is an additional 32 bit scalar Tiled Resources
+    shader feedback status output value. Unlike the `_cl_s` opcodes,
+    `sample_c_lz_s` takes no LOD clamp: its LOD is always zero.
   }];
 
   let arguments = (ins
@@ -688,7 +688,7 @@ def DXSA_SampleCLZFeedback : DXSA_Op<"sample_c_lz_s"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
-      DXSA_SampleClampFeedbackAttr:$feedback,
+      DXSA_DstOperandAttr:$feedback,
       OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
   let results = (outs);
 

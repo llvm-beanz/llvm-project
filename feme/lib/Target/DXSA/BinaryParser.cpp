@@ -1161,12 +1161,11 @@ public:
   Instruction buildSampleCLZFeedback(
       dxsa::DstOperandAttr dst, dxsa::SrcOperandAttr srcAddress,
       dxsa::SrcOperandAttr srcResource, dxsa::SrcOperandAttr srcSampler,
-      dxsa::SrcOperandAttr srcReferenceValue,
-      dxsa::SampleClampFeedbackAttr clampFeedback,
+      dxsa::SrcOperandAttr srcReferenceValue, dxsa::DstOperandAttr feedback,
       dxsa::SampleOffsetAttr offset, Location loc) {
     return dxsa::SampleCLZFeedback::create(
         builder, loc, dst, srcAddress, srcResource, srcSampler,
-        srcReferenceValue, clampFeedback, offset);
+        srcReferenceValue, feedback, offset);
   }
 
   Instruction buildGather4(dxsa::DstOperandAttr dst,
@@ -2258,14 +2257,11 @@ public:
       FAILURE_IF_FAILED(srcReferenceValue);
 
       if (feedback) {
-        auto clamp = parseSrcOperand();
-        FAILURE_IF_FAILED(clamp);
-        auto clampFeedback =
-            builder.buildSampleClampFeedbackAttr(*clamp, feedback);
-
+        // `sample_c_lz_s` samples at LOD zero, so unlike the `_cl_s`
+        // opcodes it carries no LOD clamp operand.
         instr = builder.buildSampleCLZFeedback(*dst, *srcAddress, *srcResource,
                                                *srcSampler, *srcReferenceValue,
-                                               clampFeedback, offset, loc);
+                                               feedback, offset, loc);
       } else {
         instr =
             builder.buildSampleCLZ(*dst, *srcAddress, *srcResource, *srcSampler,
