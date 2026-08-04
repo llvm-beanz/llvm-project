@@ -183,6 +183,12 @@ constexpr KeywordValue ProgramTypes[] = {
     {"hull", 3},  {"domain", 4}, {"compute", 5},
 };
 
+// The same D3D10_SB_TOKENIZED_PROGRAM_TYPE values, spelled the way `fxc`
+// disassembly names a profile (`ps_5_0`, `cs_5_1`, ...).
+constexpr KeywordValue ProfilePrefixes[] = {
+    {"ps", 0}, {"vs", 1}, {"gs", 2}, {"hs", 3}, {"ds", 4}, {"cs", 5},
+};
+
 const KeywordValue *findKeyword(llvm::ArrayRef<KeywordValue> Table,
                                 llvm::StringRef Name) {
   for (const KeywordValue &Entry : Table)
@@ -217,6 +223,8 @@ public:
       if (Current.Kind == TokenKind::Dot) {
         if (llvm::Error E = parseDirective(Result))
           return std::move(E);
+      } else if (parseShaderProfile(Result)) {
+        // Consumed an `fxc`-style profile line; nothing more on this line.
       } else {
         llvm::Expected<Instruction> Inst = parseInstruction();
         if (!Inst)
@@ -429,6 +437,32 @@ private:
     }
 
     return error("unknown directive '." + Name + "'");
+  }
+
+  /// profile := ('ps'|'vs'|'gs'|'hs'|'ds'|'cs') '_' <major> '_' <minor>
+  ///
+  /// `fxc` disassembly opens with a bare profile name rather than the
+  /// `.shader_model` directive `dxbc-as` defines, so accept both spellings
+  /// of the program header. Returns false (consuming nothing) if the token
+  /// at \c Current is not a profile name, in which case it is a mnemonic.
+  bool parseShaderProfile(Program &Result) {
+    if (Current.Kind != TokenKind::Identifier)
+      return false;
+    llvm::StringRef Text = Current.Spelling;
+    auto [Stage, Version] = Text.split('_');
+    auto [Major, Minor] = Version.split('_');
+    const KeywordValue *Type = findKeyword(ProfilePrefixes, Stage);
+    unsigned MajorValue, MinorValue;
+    if (!Type || Major.empty() || Minor.empty() ||
+        Major.getAsInteger(10, MajorValue) || Minor.getAsInteger(10, MinorValue))
+      return false;
+
+    Result.HasHeader = true;
+    Result.ProgramType = static_cast<uint16_t>(Type->Value);
+    Result.MajorVersion = static_cast<uint8_t>(MajorValue);
+    Result.MinorVersion = static_cast<uint8_t>(MinorValue);
+    advance();
+    return true;
   }
 
   //===--------------------------------------------------------------------===//

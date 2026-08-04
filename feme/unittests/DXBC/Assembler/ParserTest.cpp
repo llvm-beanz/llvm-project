@@ -50,6 +50,26 @@ TEST(ParserTest, ProgramHeaderIsOptOut) {
   EXPECT_EQ(P.MinorVersion, 1u);
 }
 
+TEST(ParserTest, FxcProfileLineIsAProgramHeader) {
+  // `fxc` disassembly opens with a bare profile name instead of the
+  // `.shader_model` directive.
+  Program P = parseOrFail("ps_5_1\nnop");
+  EXPECT_TRUE(P.HasHeader);
+  EXPECT_EQ(P.ProgramType, 0u); // D3D10_SB_PIXEL_SHADER
+  EXPECT_EQ(P.MajorVersion, 5u);
+  EXPECT_EQ(P.MinorVersion, 1u);
+  EXPECT_EQ(P.Instructions.size(), 1u);
+
+  for (auto [Text, Type] : {std::pair{"vs_4_0", 1u}, {"gs_4_1", 2u},
+                            {"hs_5_0", 3u}, {"ds_5_0", 4u}, {"cs_5_0", 5u}})
+    EXPECT_EQ(parseOrFail(Text).ProgramType, Type);
+
+  // Mnemonics that merely start with a profile prefix are not headers.
+  EXPECT_FALSE(parseOrFail("hs_decls").HasHeader);
+  EXPECT_NE(parseErrorMessage("ps_5").find("unknown mnemonic"),
+            std::string::npos);
+}
+
 TEST(ParserTest, SaturateSuffix) {
   Program P = parseOrFail("mul_sat r0.xyzw, r1.xyzw, r2.xyzw");
   ASSERT_EQ(P.Instructions.size(), 1u);
