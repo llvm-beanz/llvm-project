@@ -1041,10 +1041,11 @@ The rows are anchored on the `SysValue`/`Format` pair rather than on
 column positions, because a long element name overflows its column and
 shifts the rest of the row, and because a discontiguous mask is printed
 with its components in fixed positions ("x z") and so arrives as several
-whitespace-separated pieces. Minimum precision is *not* recoverable from
-these parts -- the legacy layout predates it, and `fxc` records a `min16f`
-element's component type as `float` there -- so it is read from the
-operand tokens instead, which carry it directly.
+whitespace-separated pieces. A real `fxc` container records minimum precision in the newer `ISG1`/
+`OSG1` parts and writes 32-bit component types into the legacy ones; since
+the legacy part is the only one this container carries, a `min16f` element
+is written with the 16-bit component type instead, which is the only
+lossless way to preserve what the disassembly says.
 
 `feme-translate --dxsa-to-llvmir --dxbc-container=<path>` reads a full
 container's real legacy `ISGN`/`OSGN` (via `object::DXContainer`'s
@@ -1059,6 +1060,12 @@ and component types directly, instead of synthesizing them from the
 ; RUN:   | feme-translate --dxsa-to-llvmir --dxbc-container=%t.dxbc - \
 ; RUN:   | FileCheck %s
 ```
+
+Two things a signature element carries are not in the signature part at
+all and are read back from the shader's declarations: a pixel shader
+input's interpolation mode, which the legacy layout has no field for, and
+-- when there is no container -- minimum precision, which the operand
+tokens carry directly.
 
 Synthesis from declarations remains the default, and remains visible in
 the output of fixtures that use it: a synthesized element is named `IN<n>`

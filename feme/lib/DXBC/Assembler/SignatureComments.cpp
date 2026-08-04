@@ -71,15 +71,19 @@ std::optional<dxbc::D3DSystemValue> parseSystemValue(StringRef Text) {
       .Default(std::nullopt);
 }
 
-/// The `Format` column. The legacy signature parts predate minimum
-/// precision, which `fxc` records in the newer `ISG1`/`OSG1` parts and in
-/// the operand tokens themselves, so a `min16*` element is a 32-bit one
-/// here.
+/// The `Format` column. A real `fxc` container records minimum precision
+/// in the newer `ISG1`/`OSG1` parts and writes 32-bit component types into
+/// the legacy ones, but the legacy part is the only one this container
+/// carries -- so the 16-bit component types are used, which is the only
+/// lossless way to preserve what the disassembly says.
 std::optional<dxbc::SigComponentType> parseComponentType(StringRef Text) {
   return StringSwitch<std::optional<dxbc::SigComponentType>>(Text)
-      .Cases({"float", "min16f", "min10f"}, dxbc::SigComponentType::Float32)
-      .Cases({"uint", "min16u"}, dxbc::SigComponentType::UInt32)
-      .Cases({"int", "min16i", "min12i"}, dxbc::SigComponentType::SInt32)
+      .Case("float", dxbc::SigComponentType::Float32)
+      .Case("uint", dxbc::SigComponentType::UInt32)
+      .Case("int", dxbc::SigComponentType::SInt32)
+      .Cases({"min16f", "min10f"}, dxbc::SigComponentType::Float16)
+      .Case("min16u", dxbc::SigComponentType::UInt16)
+      .Cases({"min16i", "min12i"}, dxbc::SigComponentType::SInt16)
       .Case("double", dxbc::SigComponentType::Float64)
       .Default(std::nullopt);
 }

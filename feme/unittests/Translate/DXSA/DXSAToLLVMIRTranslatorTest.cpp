@@ -196,35 +196,95 @@ dxsa.module vertex_shader 5 0 {
             std::string::npos);
 }
 
-TEST(DXSAToLLVMIRTranslatorTest, RejectsMinimumPrecisionOperands) {
-  // Minimum precision changes the width every computation reading the
-  // operand is done at, so silently ignoring it would be wrong.
-  Fixture Source;
-  EXPECT_FALSE(Source
-                   .translate(R"mlir(
+TEST(DXSAToLLVMIRTranslatorTest, MinimumPrecisionNarrowsToHalf) {
+  // DXIL holds a `min16f` value in a `half` and records that the shader
+  // uses low-precision data types in its shader flags -- which is a
+  // different flag from the one asking for *native* 16-bit types.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
 dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_global_flags <refactoringAllowed|enableMinimumPrecision>
   dxsa.dcl_input_ps linear v<0, min16f, <x>>
   dxsa.dcl_output o<0, <x>>
-  dxsa.mov o<0, <x>>, v<0, min16f, <x>>
+  dxsa.dcl_temps 1
+  dxsa.add r<0, min16f, <x>>, v<0, min16f, <x>>, l(0x40000000)
+  dxsa.mov o<0, <x>>, r<0, min16f, <x>>
   dxsa.ret
 }
-)mlir")
-                   .has_value());
-  EXPECT_NE(Source.diagnostics().find("minimum-precision source operand"),
-            llvm::StringRef::npos);
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_NE(IR->find("call half @dx.op.loadInput.f16"), std::string::npos)
+      << *IR;
+  EXPECT_NE(IR->find("fadd fast half"), std::string::npos) << *IR;
+  // `mov` is a 32-bit copy, so the result is widened for the output.
+  EXPECT_NE(IR->find("fpext half"), std::string::npos) << *IR;
+  // 0x100 is AllResourcesBound, 0x20 LowPrecisionPresent.
+  EXPECT_NE(IR->find("!{i32 0, i64 288}"), std::string::npos) << *IR;
+  // DXIL::ComponentType::F16 is 8.
+  EXPECT_NE(IR->find(R"(!"IN0", i8 8,)"), std::string::npos) << *IR;
+}
 
-  Fixture Dest;
-  EXPECT_FALSE(Dest.translate(R"mlir(
+TEST(DXSAToLLVMIRTranslatorTest, MinimumPrecisionIntegersKeepTheirSign) {
+  Fixture Signed;
+  std::optional<std::string> IR = Signed.translate(R"mlir(
 dxsa.module pixel_shader 5 0 {
-  dxsa.dcl_input_ps linear v<0, <x>>
-  dxsa.dcl_output o<0, min16f, <x>>
-  dxsa.mov o<0, min16f, <x>>, v<0, <x>>
+  dxsa.dcl_input_ps constant v<0, min16i, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.mov o<0, <x>>, v<0, min16i, <x>>
   dxsa.ret
 }
-)mlir")
-                   .has_value());
-  EXPECT_NE(Dest.diagnostics().find("minimum-precision destination operand"),
-            llvm::StringRef::npos);
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << Signed.diagnostics().str();
+  EXPECT_NE(IR->find("sext i16"), std::string::npos) << *IR;
+
+  Fixture Unsigned;
+  IR = Unsigned.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps constant v<0, min16u, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.mov o<0, <x>>, v<0, min16u, <x>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << Unsigned.diagnostics().str();
+  EXPECT_NE(IR->find("zext i16"), std::string::npos) << *IR;
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, MinimumPrecisionTempsAreTheirOwnBank) {
+  // `r0.x` read at `min16f` is not the `r0.x` a 32-bit instruction wrote,
+  // so the narrow read of a register only ever written wide is undefined.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps constant v<0, <x>>
+  dxsa.dcl_output o<0, min16f, <x>>
+  dxsa.dcl_temps 1
+  dxsa.mov r<0, <x>>, v<0, <x>>
+  dxsa.add o<0, min16f, <x>>, r<0, min16f, <x>>, r<0, min16f, <x>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_NE(IR->find("fadd fast half undef, undef"), std::string::npos) << *IR;
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, ThirtyTwoBitOnlyOperationsNarrowTheirResult) {
+  // DXIL defines `Ubfe` only at 32 bits, so a minimum-precision
+  // destination truncates what it computed rather than narrowing the
+  // operation.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps constant v<0, min16u, <x>>
+  dxsa.dcl_output o<0, min16u, <x>>
+  dxsa.ubfe o<0, min16u, <x>>, l(0x1B), l(0x5), v<0, min16u, <x>>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  EXPECT_NE(IR->find("call i32 @dx.op.tertiary.i32(i32 52,"), std::string::npos)
+      << *IR;
+  EXPECT_NE(IR->find("trunc i32"), std::string::npos) << *IR;
 }
 
 TEST(DXSAToLLVMIRTranslatorTest, EachSourceOperandIsReadSeparately) {

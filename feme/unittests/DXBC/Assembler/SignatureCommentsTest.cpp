@@ -132,9 +132,11 @@ TEST(SignatureCommentsTest, AnEmptyTableIsStillATable) {
   EXPECT_FALSE(Sig.SeenOutput);
 }
 
-TEST(SignatureCommentsTest, MinimumPrecisionFormatsAreThirtyTwoBitHere) {
-  // The legacy signature parts predate minimum precision; it lives in the
-  // operand tokens and in the newer ISG1/OSG1 parts.
+TEST(SignatureCommentsTest, MinimumPrecisionFormatsKeepTheirWidth) {
+  // A real fxc container records minimum precision in ISG1/OSG1 and writes
+  // 32-bit component types into the legacy parts; since the legacy part is
+  // the only one this container carries, the 16-bit component types are
+  // used, which is the only lossless way to preserve the disassembly.
   Signatures Sig = parseSignatureComments(R"(// Input signature:
 //
 // Name                 Index   Mask Register SysValue  Format   Used
@@ -145,9 +147,9 @@ TEST(SignatureCommentsTest, MinimumPrecisionFormatsAreThirtyTwoBitHere) {
 //
 )");
   ASSERT_EQ(Sig.Input.size(), 3u);
-  EXPECT_EQ(Sig.Input[0].CompType, dxbc::SigComponentType::Float32);
-  EXPECT_EQ(Sig.Input[1].CompType, dxbc::SigComponentType::UInt32);
-  EXPECT_EQ(Sig.Input[2].CompType, dxbc::SigComponentType::SInt32);
+  EXPECT_EQ(Sig.Input[0].CompType, dxbc::SigComponentType::Float16);
+  EXPECT_EQ(Sig.Input[1].CompType, dxbc::SigComponentType::UInt16);
+  EXPECT_EQ(Sig.Input[2].CompType, dxbc::SigComponentType::SInt16);
 }
 
 TEST(SignatureCommentsTest, IgnoresSourceWithoutSignatureTables) {

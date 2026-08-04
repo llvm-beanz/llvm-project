@@ -23,6 +23,7 @@
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SetVector.h"
@@ -39,6 +40,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/ValueHandle.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -94,6 +96,9 @@ enum class DXILOp : unsigned {
   FMad = 46,
   IMad = 48,
   UMad = 49,
+  Ibfe = 51,
+  Ubfe = 52,
+  Bfi = 53,
   Dot2 = 54,
   Dot3 = 55,
   Dot4 = 56,
@@ -121,7 +126,14 @@ enum class DXILOp : unsigned {
 enum class ResourceClass : unsigned { SRV = 0, UAV = 1, CBV = 2, Sampler = 3 };
 
 /// `DXIL::ComponentType`, as stored in a signature element's metadata.
-enum class DXILComponentType : unsigned { I32 = 4, U32 = 5, F32 = 9 };
+enum class DXILComponentType : unsigned {
+  I16 = 2,
+  U16 = 3,
+  I32 = 4,
+  U32 = 5,
+  F16 = 8,
+  F32 = 9
+};
 
 /// `DXIL::SemanticKind`, as stored in a signature element's metadata.
 enum class DXILSemanticKind : unsigned {
@@ -143,13 +155,14 @@ enum class DXILSemanticKind : unsigned {
   InnerCoverage = 15,
   Target = 16,
   Depth = 17,
-  TessFactor = 18,
-  InsideTessFactor = 19,
-  DepthLessEqual = 20,
-  DepthGreaterEqual = 21,
-  Barycentrics = 23,
-  ShadingRate = 24,
-  CullPrimitive = 25,
+  DepthLessEqual = 18,
+  DepthGreaterEqual = 19,
+  StencilRef = 20,
+  TessFactor = 25,
+  InsideTessFactor = 26,
+  Barycentrics = 28,
+  ShadingRate = 29,
+  CullPrimitive = 30,
 };
 
 /// The `SV_`-prefixed name DXIL gives a system value in its signature
@@ -194,6 +207,8 @@ llvm::StringRef semanticName(DXILSemanticKind Kind) {
     return "SV_DepthLessEqual";
   case DXILSemanticKind::DepthGreaterEqual:
     return "SV_DepthGreaterEqual";
+  case DXILSemanticKind::StencilRef:
+    return "SV_StencilRef";
   case DXILSemanticKind::TessFactor:
     return "SV_TessFactor";
   case DXILSemanticKind::InsideTessFactor:
@@ -306,11 +321,15 @@ DXILSemanticKind toSemanticKind(llvm::dxbc::D3DSystemValue Value) {
     return DXILSemanticKind::Coverage;
   case llvm::dxbc::D3DSystemValue::InnerCoverage:
     return DXILSemanticKind::InnerCoverage;
-  case llvm::dxbc::D3DSystemValue::Undefined:
   case llvm::dxbc::D3DSystemValue::Depth:
+    return DXILSemanticKind::Depth;
   case llvm::dxbc::D3DSystemValue::DepthGE:
+    return DXILSemanticKind::DepthGreaterEqual;
   case llvm::dxbc::D3DSystemValue::DepthLE:
+    return DXILSemanticKind::DepthLessEqual;
   case llvm::dxbc::D3DSystemValue::StencilRef:
+    return DXILSemanticKind::StencilRef;
+  case llvm::dxbc::D3DSystemValue::Undefined:
     break;
   }
   return DXILSemanticKind::Arbitrary;
@@ -334,7 +353,7 @@ systemValueRead(DXILSemanticKind Kind) {
 /// Returns the DXIL semantic naming \p Type when it is one of the three
 /// pixel shader depth outputs, which are registerless operands of their own
 /// rather than an `o#` register.
-std::optional<DXILSemanticKind> depthKind(OperandType Type) {
+std::optional<DXILSemanticKind> registerlessKind(OperandType Type) {
   switch (Type) {
   case OperandType::oDepth:
     return DXILSemanticKind::Depth;
@@ -342,6 +361,8 @@ std::optional<DXILSemanticKind> depthKind(OperandType Type) {
     return DXILSemanticKind::DepthGreaterEqual;
   case OperandType::oDepthLE:
     return DXILSemanticKind::DepthLessEqual;
+  case OperandType::oStencilRef:
+    return DXILSemanticKind::StencilRef;
   default:
     return std::nullopt;
   }
@@ -359,15 +380,18 @@ std::optional<DXILSemanticKind> depthKind(OperandType Type) {
 DXILComponentType toComponentType(llvm::dxbc::SigComponentType Type) {
   switch (Type) {
   case llvm::dxbc::SigComponentType::UInt32:
-  case llvm::dxbc::SigComponentType::UInt16:
   case llvm::dxbc::SigComponentType::UInt64:
     return DXILComponentType::U32;
   case llvm::dxbc::SigComponentType::SInt32:
-  case llvm::dxbc::SigComponentType::SInt16:
   case llvm::dxbc::SigComponentType::SInt64:
     return DXILComponentType::I32;
-  case llvm::dxbc::SigComponentType::Unknown:
+  case llvm::dxbc::SigComponentType::UInt16:
+    return DXILComponentType::U16;
+  case llvm::dxbc::SigComponentType::SInt16:
+    return DXILComponentType::I16;
   case llvm::dxbc::SigComponentType::Float16:
+    return DXILComponentType::F16;
+  case llvm::dxbc::SigComponentType::Unknown:
   case llvm::dxbc::SigComponentType::Float32:
   case llvm::dxbc::SigComponentType::Float64:
     break;
@@ -375,9 +399,68 @@ DXILComponentType toComponentType(llvm::dxbc::SigComponentType Type) {
   return DXILComponentType::F32;
 }
 
+/// The LLVM type a signature element of \p Type is stored and loaded at.
+llvm::Type *componentLLVMType(DXILComponentType Type,
+                              llvm::LLVMContext &Context) {
+  switch (Type) {
+  case DXILComponentType::F16:
+    return llvm::Type::getHalfTy(Context);
+  case DXILComponentType::I16:
+  case DXILComponentType::U16:
+    return llvm::Type::getInt16Ty(Context);
+  case DXILComponentType::I32:
+  case DXILComponentType::U32:
+    return llvm::Type::getInt32Ty(Context);
+  case DXILComponentType::F32:
+    break;
+  }
+  return llvm::Type::getFloatTy(Context);
+}
+
 /// One entry of the input or output signature. DXBC declares a signature
 /// register piecewise -- one declaration per contiguous component group of
 /// one register -- and each such group is one DXIL signature element.
+/// The LLVM type a minimum-precision operand is held at. DXIL narrows
+/// `min16f` to `half` and both 16-bit integer forms to `i16`, and records
+/// that the shader uses them in the "low-precision data types present"
+/// shader flag -- which is distinct from the flag asking for *native*
+/// 16-bit types, a shader model 6.2 feature DXBC has no way to request.
+llvm::Type *minPrecisionType(OperandMinPrecisionAttr MinPrecision,
+                             llvm::LLVMContext &Context) {
+  if (!MinPrecision)
+    return nullptr;
+  switch (MinPrecision.getValue()) {
+  case OperandMinPrecision::min16f:
+  case OperandMinPrecision::min2_8f:
+    return llvm::Type::getHalfTy(Context);
+  case OperandMinPrecision::min16i:
+  case OperandMinPrecision::min16u:
+    return llvm::Type::getInt16Ty(Context);
+  }
+  return nullptr;
+}
+
+/// True when \p MinPrecision names an unsigned integer, which is what
+/// decides whether widening it back to 32 bits zero- or sign-extends.
+bool isUnsignedPrecision(OperandMinPrecisionAttr MinPrecision) {
+  return MinPrecision && MinPrecision.getValue() == OperandMinPrecision::min16u;
+}
+
+/// The DXIL signature component type a minimum-precision declaration gives
+/// its element.
+DXILComponentType toComponentType(OperandMinPrecisionAttr MinPrecision) {
+  switch (MinPrecision.getValue()) {
+  case OperandMinPrecision::min16f:
+  case OperandMinPrecision::min2_8f:
+    return DXILComponentType::F16;
+  case OperandMinPrecision::min16i:
+    return DXILComponentType::I16;
+  case OperandMinPrecision::min16u:
+    return DXILComponentType::U16;
+  }
+  return DXILComponentType::F16;
+}
+
 struct SignatureElement {
   std::string Name;
   /// The register (signature row) the element lives in.
@@ -428,6 +511,7 @@ public:
   }
 
   llvm::ArrayRef<SignatureElement> elements() const { return Elements; }
+  llvm::MutableArrayRef<SignatureElement> mutableElements() { return Elements; }
   bool empty() const { return Elements.empty(); }
 
 private:
@@ -442,6 +526,10 @@ private:
 //===----------------------------------------------------------------------===//
 // Translator
 //===----------------------------------------------------------------------===//
+
+/// How an instruction reads and writes its operands; defined below, with
+/// the lowering table it indexes.
+struct OpLowering;
 
 class Translator {
 public:
@@ -480,10 +568,10 @@ private:
   /// The index of each constant buffer's declaration within its resource
   /// class, which is what a handle is bound by.
   llvm::DenseMap<unsigned, unsigned> ConstantBufferRanges;
-  /// The output signature element each depth output resolves to. A depth
-  /// output names no register, so it cannot be found by (row, component)
-  /// the way the others are.
-  llvm::DenseMap<unsigned, unsigned> DepthOutputs;
+  /// The output signature element each registerless output -- the depth
+  /// and stencil ones -- resolves to. They name no register, so they
+  /// cannot be found by (row, component) the way the others are.
+  llvm::DenseMap<unsigned, unsigned> RegisterlessOutputs;
   /// The dedicated DXIL operation reading each input signature element that
   /// has one, keyed by element index. DXIL names a few system values with
   /// an operation of their own rather than through `loadInput`.
@@ -532,6 +620,10 @@ private:
   llvm::DenseMap<llvm::Value *, llvm::Value *> SaturateCache;
   /// Shader stage name for `!dx.shaderModel` ("ps", "vs", ...).
   llvm::StringRef Stage = "ps";
+  /// `!dx.entryPoints`' shader flags mask. `AllResourcesBound` is set for
+  /// every shader: shader model 5.x binds its resources for the whole
+  /// draw, which is exactly what the flag asserts.
+  uint64_t ShaderFlags = 0x100;
   /// The shader's one `cycleCounterLegacy` call, if it reads the counter.
   llvm::Value *CycleCounter = nullptr;
 
@@ -582,6 +674,8 @@ private:
   llvm::StructType *twoI32Ty();
 
   llvm::Type *floatTy() { return llvm::Type::getFloatTy(Context); }
+  llvm::Type *halfTy() { return llvm::Type::getHalfTy(Context); }
+  llvm::Type *i16Ty() { return llvm::Type::getInt16Ty(Context); }
   llvm::Type *i32Ty() { return llvm::Type::getInt32Ty(Context); }
   llvm::Type *i8Ty() { return llvm::Type::getInt8Ty(Context); }
   llvm::Type *i1Ty() { return llvm::Type::getInt1Ty(Context); }
@@ -596,6 +690,9 @@ private:
   //===--------------------------------------------------------------------===//
 
   bool collectDeclarations(dxsa::ModuleOp Shader);
+  /// Fills in the parts of a signature element that live in the shader's
+  /// declarations rather than in a legacy signature part.
+  void refineFromDeclarations(dxsa::ModuleOp Shader);
   /// Chooses a concrete LLVM type for every temp register component, which
   /// fixes the type of its stack slot and so of the phi nodes mem2reg
   /// creates for it. DXBC temps are typeless 32-bit slots, so the type is
@@ -610,9 +707,9 @@ private:
                            unsigned InterpolationMode);
   /// Populates \p Sig directly from real container signature elements,
   /// bypassing declaration-based synthesis (see `ContainerSignatureElement`).
-  static void
-  addRealSignatureElements(Signature &Sig,
-                           llvm::ArrayRef<ContainerSignatureElement> Elements);
+  static void addRealSignatureElements(
+      Signature &Sig, llvm::ArrayRef<ContainerSignatureElement> Elements,
+      llvm::DenseMap<unsigned, unsigned> *Registerless = nullptr);
 
   //===--------------------------------------------------------------------===//
   // Operands
@@ -638,8 +735,15 @@ private:
                                   unsigned Slot);
 
   /// Returns (creating on first use) the stack slot backing temp register
-  /// component \p Comp of register \p Reg.
-  llvm::AllocaInst *tempSlot(unsigned Reg, unsigned Comp);
+  /// component \p Comp of register \p Reg, in the 32-bit bank or the
+  /// 16-bit one. DXBC's minimum-precision registers are a bank of their
+  /// own: `r0.y` read at `min16f` is not the `r0.y` a 32-bit instruction
+  /// wrote, which is why dxilconv names them `dx.v16.r*` and `dx.v32.r*`.
+  llvm::AllocaInst *tempSlot(unsigned Reg, unsigned Comp, bool Narrow = false);
+  /// The key \c Temps and \c TempTypes give a temp register component.
+  static uint64_t tempKey(unsigned Reg, unsigned Comp, bool Narrow) {
+    return (uint64_t(Narrow) << 32) | (uint64_t(Reg) * 4 + Comp);
+  }
 
   /// Allocates the stack array backing every declared indexable temp.
   void createIndexableTemps(dxsa::ModuleOp Shader);
@@ -652,9 +756,37 @@ private:
   llvm::Value *readSource(SrcOperandAttr Src, unsigned DstComp, llvm::Type *Ty,
                           mlir::Operation *Op, unsigned Slot = 0);
   llvm::Value *coerce(llvm::Value *Value, llvm::Type *Ty);
+  /// Converts \p Value between a minimum-precision type and its 32-bit
+  /// counterpart. \p Unsigned picks between zero- and sign-extension when
+  /// widening an integer; narrowing needs no such choice.
+  llvm::Value *convertPrecision(llvm::Value *Value, llvm::Type *Ty,
+                                bool Unsigned);
+  /// The alignment an element of a stack array is accessed at.
+  static llvm::Align elementAlign(llvm::Type *Ty) {
+    return llvm::Align(Ty->getPrimitiveSizeInBits() == 16 ? 2 : 4);
+  }
+  /// The 32-bit counterpart of \p Ty, which is \p Ty itself unless it is
+  /// one of the minimum-precision types.
+  llvm::Type *widen(llvm::Type *Ty) {
+    if (Ty->isHalfTy())
+      return floatTy();
+    return Ty->isIntegerTy(16) ? i32Ty() : Ty;
+  }
+  /// The type an operand's storage holds, which is its minimum-precision
+  /// type when it has one and \p Default otherwise.
+  llvm::Type *storageType(OperandMinPrecisionAttr MinPrecision,
+                          llvm::Type *Default) {
+    llvm::Type *Narrow = minPrecisionType(MinPrecision, Context);
+    return Narrow ? Narrow : Default;
+  }
+  /// Writes \p Components to \p Dst, converting each to the destination's
+  /// own precision. \p ValuePrecision names the minimum precision the
+  /// values are already at, when they are at one, so that widening an
+  /// integer knows whether to zero- or sign-extend.
   bool writeDestination(DstOperandAttr Dst,
                         llvm::ArrayRef<llvm::Value *> Components,
-                        mlir::Operation *Op);
+                        mlir::Operation *Op,
+                        OperandMinPrecisionAttr ValuePrecision = {});
   /// The destination components an instruction computes, in order.
   static llvm::SmallVector<unsigned, 4>
   destinationComponents(DstOperandAttr Dst);
@@ -709,9 +841,22 @@ private:
                        SrcOperandAttr Lhs, SrcOperandAttr Rhs, bool Saturate);
   bool translateMad(mlir::Operation *Op, DstOperandAttr Dst, SrcOperandAttr Lhs,
                     SrcOperandAttr Rhs, SrcOperandAttr Acc, bool Saturate);
+  /// Translates an instruction that lowers to one `dx.op` call per
+  /// destination component, taking one argument from each source.
+  bool translateVariadic(mlir::Operation *Op, DstOperandAttr Dst,
+                         llvm::ArrayRef<SrcOperandAttr> Sources, bool Saturate);
   bool translateDot(mlir::Operation *Op, DstOperandAttr Dst, SrcOperandAttr Lhs,
                     SrcOperandAttr Rhs, unsigned Lanes, bool Saturate);
   llvm::Value *saturate(llvm::Value *Value, bool Enabled);
+  /// The types an instruction reads its operands and computes its result
+  /// at, given how it lowers. A minimum-precision destination narrows both
+  /// -- unless DXIL only defines the operation at 32 bits, in which case
+  /// the result is narrowed on its way to the destination instead. A
+  /// comparison writes a 32-bit mask whatever it compares, so it takes its
+  /// width from its operands agreeing on one.
+  std::pair<llvm::Type *, llvm::Type *>
+  operationTypes(const OpLowering &Lowering, DstOperandAttr Dst,
+                 llvm::ArrayRef<SrcOperandAttr> Sources);
 
   /// Folds `ftoi`/`ftou` of a literal. DXBC clamps an out-of-range or NaN
   /// conversion where LLVM's `fptosi`/`fptoui` leave it poison, so a
@@ -811,7 +956,38 @@ void Translator::addSignatureElement(Signature &Sig, DstOperandAttr Operand,
   Sig.add(std::move(Element));
 }
 
+/// The `!dx.entryPoints` shader flag each DXBC global flag implies. DXBC's
+/// `enableMinimumPrecision` asks for minimum precision, which DXIL records
+/// as "low-precision data types present" -- a different flag from the one
+/// asking for *native* 16-bit types, which is a shader model 6.2 feature
+/// DXBC cannot request.
+uint64_t toShaderFlags(GlobalFlags Flags) {
+  uint64_t Result = 0;
+  auto has = [&](GlobalFlags Flag) {
+    return (static_cast<unsigned>(Flags) & static_cast<unsigned>(Flag)) != 0;
+  };
+  if (has(GlobalFlags::skipOptimization))
+    Result |= 0x1; // DisableOptimizations
+  if (has(GlobalFlags::enableDoublePrecisionFloatOps))
+    Result |= 0x4; // UseDoubles
+  if (has(GlobalFlags::forceEarlyDepthStencil))
+    Result |= 0x8; // ForceEarlyDepthStencil
+  if (has(GlobalFlags::enableRawAndStructuredBuffers))
+    Result |= 0x10; // UseRawAndStructuredBuffers
+  if (has(GlobalFlags::enableMinimumPrecision))
+    Result |= 0x20; // LowPrecisionPresent
+  if (has(GlobalFlags::enableDoubleExtensions))
+    Result |= 0x40; // UseDoubleExtensions
+  if (has(GlobalFlags::enableShaderExtensions))
+    Result |= 0x80; // UseMSAD
+  return Result;
+}
+
 bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
+  for (mlir::Operation &Op : *Shader.getBodyBlock())
+    if (auto Dcl = llvm::dyn_cast<dxsa::DclGlobalFlags>(&Op))
+      ShaderFlags |= toShaderFlags(Dcl.getFlags());
+
   if (!RealInputSignature.empty()) {
     addRealSignatureElements(Inputs, RealInputSignature);
   } else {
@@ -842,7 +1018,9 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
   }
 
   if (!RealOutputSignature.empty()) {
-    addRealSignatureElements(Outputs, RealOutputSignature);
+    addRealSignatureElements(Outputs, RealOutputSignature,
+                             &RegisterlessOutputs);
+    refineFromDeclarations(Shader);
     return true;
   }
 
@@ -853,12 +1031,17 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
       DstOperandAttr Operand = Dcl.getOperandAttr();
       // A depth output names no register, so it is recorded by operand kind
       // rather than by the (row, component) the others are found through.
-      if (std::optional<DXILSemanticKind> Kind = depthKind(Operand.getType())) {
-        DepthOutputs[unsigned(Operand.getType())] = Outputs.elements().size();
+      if (std::optional<DXILSemanticKind> Kind =
+              registerlessKind(Operand.getType())) {
+        RegisterlessOutputs[unsigned(*Kind)] = Outputs.elements().size();
         SignatureElement Element;
+        Element.Row = ~0u;
+        Element.StartCol = ~0u;
         Element.Cols = 1;
         Element.Kind = *Kind;
         Element.Name = semanticName(*Kind);
+        if (Operand.getMinPrecision())
+          Element.Type = toComponentType(Operand.getMinPrecision());
         Outputs.addUnindexed(std::move(Element));
         continue;
       }
@@ -873,11 +1056,78 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
       addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
                           toSemanticKind(Dcl.getName()), 0);
   }
+  refineFromDeclarations(Shader);
   return true;
 }
 
+void Translator::refineFromDeclarations(dxsa::ModuleOp Shader) {
+  // Two things a signature element carries live in the declaration rather
+  // than in the legacy signature part: minimum precision, which the
+  // pre-DXIL layout predates and records as a 32-bit type, and a pixel
+  // shader input's interpolation mode, which it has no field for at all.
+  auto refine = [&](Signature &Sig,
+                    llvm::ArrayRef<ContainerSignatureElement> Real,
+                    DstOperandAttr Operand,
+                    std::optional<unsigned> Interpolation) {
+    if (!Operand || (!Operand.getMinPrecision() && !Interpolation))
+      return;
+    // A registerless output is found by its semantic rather than by the
+    // register it does not have.
+    if (std::optional<DXILSemanticKind> Kind =
+            registerlessKind(Operand.getType())) {
+      auto Found = RegisterlessOutputs.find(unsigned(*Kind));
+      if (Found != RegisterlessOutputs.end() && Operand.getMinPrecision() &&
+          Real.empty())
+        Sig.mutableElements()[Found->second].Type =
+            toComponentType(Operand.getMinPrecision());
+      return;
+    }
+    std::optional<unsigned> Row = registerNumber(Operand.getIndex());
+    if (!Row)
+      return;
+    unsigned Mask = Operand.getMask()
+                        ? static_cast<unsigned>(Operand.getMask().getValue())
+                        : 0xF;
+    for (unsigned Comp = 0; Comp < 4; ++Comp) {
+      if (!(Mask & (1u << Comp)))
+        continue;
+      std::optional<unsigned> Index = Sig.find(*Row, Comp);
+      if (!Index)
+        continue;
+      SignatureElement &Element = Sig.mutableElements()[*Index];
+      if (Operand.getMinPrecision() && Real.empty())
+        Element.Type = toComponentType(Operand.getMinPrecision());
+      if (Interpolation)
+        Element.InterpolationMode = *Interpolation;
+    }
+  };
+  for (mlir::Operation &Op : *Shader.getBodyBlock()) {
+    if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPs>(&Op))
+      refine(Inputs, RealInputSignature, Dcl.getOperandAttr(),
+             static_cast<unsigned>(Dcl.getMode()));
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSiv>(&Op))
+      refine(Inputs, RealInputSignature, Dcl.getOperandAttr(),
+             static_cast<unsigned>(Dcl.getMode()));
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInput>(&Op))
+      refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op))
+      refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
+      refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op))
+      refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
+      refine(Outputs, RealOutputSignature, Dcl.getOperandAttr(), std::nullopt);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSiv>(&Op))
+      refine(Outputs, RealOutputSignature, Dcl.getOperandAttr(), std::nullopt);
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSgv>(&Op))
+      refine(Outputs, RealOutputSignature, Dcl.getOperandAttr(), std::nullopt);
+  }
+}
+
 void Translator::addRealSignatureElements(
-    Signature &Sig, llvm::ArrayRef<ContainerSignatureElement> Elements) {
+    Signature &Sig, llvm::ArrayRef<ContainerSignatureElement> Elements,
+    llvm::DenseMap<unsigned, unsigned> *Registerless) {
   for (const ContainerSignatureElement &El : Elements) {
     SignatureElement Element;
     Element.Row = El.Register;
@@ -891,6 +1141,17 @@ void Translator::addRealSignatureElements(
     Element.Index = El.Index;
     Element.Type =
         toComponentType(static_cast<llvm::dxbc::SigComponentType>(El.CompType));
+    // `fxc` gives an element that names no register the all-ones register
+    // number, and DXIL keeps that as the -1 its metadata carries.
+    if (El.Register == ~0u) {
+      if (Registerless)
+        (*Registerless)[unsigned(Element.Kind)] = Sig.elements().size();
+      Element.Row = ~0u;
+      Element.StartCol = ~0u;
+      Element.Cols = 1;
+      Sig.addUnindexed(std::move(Element));
+      continue;
+    }
     Sig.add(std::move(Element));
   }
 }
@@ -913,7 +1174,7 @@ llvm::SmallVector<unsigned, 4>
 Translator::destinationComponents(DstOperandAttr Dst) {
   llvm::SmallVector<unsigned, 4> Result;
   // A registerless output is a single scalar with no write mask.
-  if (depthKind(Dst.getType()))
+  if (registerlessKind(Dst.getType()))
     return {0};
   unsigned Mask =
       Dst.getMask() ? static_cast<unsigned>(Dst.getMask().getValue()) : 0x1;
@@ -945,6 +1206,33 @@ llvm::Value *Translator::coerce(llvm::Value *Value, llvm::Type *Ty) {
   if (Value->getType()->isIntegerTy(32) && Ty->isFloatTy())
     return emitDXOp("bitcastI32toF32", DXILOp::BitcastI32toF32, Ty, {Value});
   return Builder.CreateBitCast(Value, Ty);
+}
+
+llvm::Value *Translator::convertPrecision(llvm::Value *Value, llvm::Type *Ty,
+                                          bool Unsigned) {
+  if (!Value || Value->getType() == Ty)
+    return Value;
+  // Changing a value's width is not arithmetic, so it has no
+  // floating-point semantics of its own to relax.
+  llvm::IRBuilderBase::FastMathFlagGuard Guard(Builder);
+  Builder.clearFastMathFlags();
+  llvm::Type *From = Value->getType();
+  if (From->isHalfTy() && Ty->isFloatTy())
+    return Builder.CreateFPExt(Value, Ty);
+  if (From->isFloatTy() && Ty->isHalfTy())
+    return Builder.CreateFPTrunc(Value, Ty);
+  if (From->isIntegerTy(16) && Ty->isIntegerTy(32))
+    return Unsigned ? Builder.CreateZExt(Value, Ty)
+                    : Builder.CreateSExt(Value, Ty);
+  if (From->isIntegerTy(32) && Ty->isIntegerTy(16))
+    return Builder.CreateTrunc(Value, Ty);
+  if (From->getPrimitiveSizeInBits() == Ty->getPrimitiveSizeInBits())
+    return coerce(Value, Ty);
+  // The integer and floating-point families do not meet at 16 bits, so a
+  // reinterpretation between them has to happen at 32.
+  if (From->getPrimitiveSizeInBits() == 16)
+    return coerce(convertPrecision(Value, widen(From), Unsigned), Ty);
+  return convertPrecision(coerce(Value, widen(Ty)), Ty, Unsigned);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1062,18 +1350,23 @@ llvm::Value *Translator::readConstantBuffer(SrcOperandAttr Src, unsigned Comp,
   return Builder.CreateExtractValue(Loaded, Comp);
 }
 
-llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp) {
-  uint64_t Key = uint64_t(Reg) * 4 + Comp;
+llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp,
+                                       bool Narrow) {
+  uint64_t Key = tempKey(Reg, Comp, Narrow);
   llvm::AllocaInst *&Slot = Temps[Key];
   if (Slot)
     return Slot;
   auto It = TempTypes.find(Key);
-  llvm::Type *Ty = It == TempTypes.end() ? i32Ty() : It->second;
+  llvm::Type *Ty =
+      It == TempTypes.end() ? (Narrow ? i16Ty() : i32Ty()) : It->second;
   // DXBC numbers a temp by register and component; DXIL's own temp-register
   // intrinsics flatten that to a single index, which is the name dxilconv
   // gives the promoted value.
   AllocaBuilder.SetInsertPointPastAllocas(EntryFn);
-  Slot = AllocaBuilder.CreateAlloca(Ty, nullptr, "dx.v32.r" + llvm::Twine(Key));
+  Slot =
+      AllocaBuilder.CreateAlloca(Ty, nullptr,
+                                 llvm::Twine(Narrow ? "dx.v16.r" : "dx.v32.r") +
+                                     llvm::Twine(uint64_t(Reg) * 4 + Comp));
   return Slot;
 }
 
@@ -1088,6 +1381,22 @@ void Translator::createIndexableTemps(dxsa::ModuleOp Shader) {
     Array.Components = std::max(Array.Components, Dcl.getNumComponents());
     Array.Elements = std::max(Array.Elements, Dcl.getSize());
   }
+  // An array accessed at minimum precision needs the narrow element types
+  // too; one that never is does not, and dxilconv does not allocate them.
+  llvm::DenseSet<unsigned> Narrow;
+  for (mlir::Operation &Op : *Shader.getBodyBlock())
+    for (mlir::NamedAttribute Attr : Op.getAttrs()) {
+      if (auto Src = llvm::dyn_cast<SrcOperandAttr>(Attr.getValue())) {
+        if (Src.getType() == OperandType::x && Src.getMinPrecision())
+          if (std::optional<unsigned> Reg = registerNumber(Src.getIndex()))
+            Narrow.insert(*Reg);
+      } else if (auto Dst = llvm::dyn_cast<DstOperandAttr>(Attr.getValue())) {
+        if (Dst.getType() == OperandType::x && Dst.getMinPrecision())
+          if (std::optional<unsigned> Reg = registerNumber(Dst.getIndex()))
+            Narrow.insert(*Reg);
+      }
+    }
+
   llvm::SmallVector<unsigned, 4> Registers;
   for (const auto &[Reg, Array] : IndexableTemps)
     Registers.push_back(Reg);
@@ -1095,10 +1404,16 @@ void Translator::createIndexableTemps(dxsa::ModuleOp Shader) {
   for (unsigned Reg : Registers) {
     IndexableTemp &Array = IndexableTemps[Reg];
     unsigned Size = Array.Elements * Array.Components;
-    for (llvm::Type *Element : {floatTy(), i32Ty()}) {
-      auto *Alloca =
-          AllocaBuilder.CreateAlloca(llvm::ArrayType::get(Element, Size),
-                                     nullptr, "dx.v32.x" + llvm::Twine(Reg));
+    llvm::SmallVector<llvm::Type *, 4> Elements = {floatTy(), i32Ty()};
+    if (Narrow.contains(Reg)) {
+      Elements.push_back(halfTy());
+      Elements.push_back(i16Ty());
+    }
+    for (llvm::Type *Element : Elements) {
+      bool Is16 = Element->getPrimitiveSizeInBits() == 16;
+      auto *Alloca = AllocaBuilder.CreateAlloca(
+          llvm::ArrayType::get(Element, Size), nullptr,
+          llvm::Twine(Is16 ? "dx.v16.x" : "dx.v32.x") + llvm::Twine(Reg));
       Alloca->setAlignment(llvm::Align(4));
       Array.Arrays[Element] = Alloca;
     }
@@ -1143,12 +1458,11 @@ llvm::Value *Translator::indexableTempAddress(OperandIndexAttr Index,
 llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
                                     llvm::Type *Ty, mlir::Operation *Op,
                                     unsigned Slot) {
-  // A minimum-precision operand changes the width every computation
-  // reading it is done at, which this translation does not model yet.
-  if (Src.getMinPrecision()) {
-    unsupported(Op) << ": minimum-precision source operand";
-    return nullptr;
-  }
+  // A minimum-precision operand is stored narrow and widened when the
+  // instruction reading it is a 32-bit one.
+  OperandMinPrecisionAttr MinPrecision = Src.getMinPrecision();
+  llvm::Type *Requested = Ty;
+  Ty = storageType(MinPrecision, Ty);
 
   unsigned Comp = sourceComponent(Src, DstComp);
   // Attributes are uniqued, so two operands that read the same register
@@ -1169,11 +1483,14 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     // A single-component immediate broadcasts; a four-component one is
     // indexed by the swizzle like any other source.
     int32_t Bits = Values.size() == 1 ? Values[0] : Values[Comp];
-    Result = Ty->isFloatTy()
+    // A DXBC literal is always 32 bits wide; an instruction running at
+    // minimum precision converts it rather than reinterpreting it.
+    Result = Ty->isFloatingPointTy()
                  ? llvm::ConstantFP::get(
-                       Ty, llvm::APFloat(llvm::bit_cast<float>(Bits)))
+                       floatTy(), llvm::APFloat(llvm::bit_cast<float>(Bits)))
                  : static_cast<llvm::Value *>(
                        llvm::ConstantInt::get(i32Ty(), uint32_t(Bits)));
+    Result = convertPrecision(Result, Ty, isUnsignedPrecision(MinPrecision));
     break;
   }
   case OperandType::r: {
@@ -1185,7 +1502,7 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     // Reading a temp component the shader never wrote is legal DXBC and
     // yields an undefined value, which is what promoting an uninitialized
     // slot produces.
-    llvm::AllocaInst *Slot = tempSlot(*Reg, Comp);
+    llvm::AllocaInst *Slot = tempSlot(*Reg, Comp, bool(MinPrecision));
     Result = Builder.CreateLoad(Slot->getAllocatedType(), Slot);
     break;
   }
@@ -1205,8 +1522,11 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
       Result = emitDXOp(Read->second.first, Read->second.second, i32Ty(), {});
       break;
     }
+    // The element has a width of its own; an instruction running at a
+    // narrower one converts what it read.
+    llvm::Type *ElementTy = MinPrecision ? Ty : widen(Ty);
     unsigned Col = Comp - Inputs.elements()[*Element].StartCol;
-    Result = emitDXOp("loadInput", DXILOp::LoadInput, Ty,
+    Result = emitDXOp("loadInput", DXILOp::LoadInput, ElementTy,
                       {llvm::ConstantInt::get(i32Ty(), *Element),
                        llvm::ConstantInt::get(i32Ty(), 0),
                        llvm::ConstantInt::get(i8Ty(), Col),
@@ -1246,18 +1566,22 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     Result = Builder.CreateExtractValue(Counter, Comp & 1);
     break;
   }
-  case OperandType::cb:
-    Result = readConstantBuffer(Src, Comp, Ty, Op, Slot);
+  case OperandType::cb: {
+    // A constant buffer row is 16 bytes of 32-bit slots whatever the
+    // instruction reading it runs at, so it is never narrowed on the way
+    // out only to be widened again.
+    Result = readConstantBuffer(Src, Comp, widen(Requested), Op, Slot);
     if (!Result)
       return nullptr;
     break;
+  }
   case OperandType::x: {
     llvm::Value *Address =
         indexableTempAddress(Src.getIndex(), Comp, Ty, Op, Slot);
     if (!Address)
       return nullptr;
     auto *Load = Builder.CreateLoad(Ty, Address);
-    Load->setAlignment(llvm::Align(4));
+    Load->setAlignment(elementAlign(Ty));
     Result = Load;
     break;
   }
@@ -1266,7 +1590,10 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     return nullptr;
   }
 
-  Result = coerce(Result, Ty);
+  // Each operand kind produced its value at the width its own storage
+  // holds; this is where it meets the width the instruction runs at.
+  Result =
+      convertPrecision(Result, Requested, isUnsignedPrecision(MinPrecision));
 
   OperandModifierAttr Modifier = Src.getModifier();
   if (!Modifier) {
@@ -1295,24 +1622,43 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
 
 bool Translator::writeDestination(DstOperandAttr Dst,
                                   llvm::ArrayRef<llvm::Value *> Components,
-                                  mlir::Operation *Op) {
-  if (Dst.getMinPrecision()) {
-    unsupported(Op) << ": minimum-precision destination operand";
-    return false;
-  }
-
+                                  mlir::Operation *Op,
+                                  OperandMinPrecisionAttr ValuePrecision) {
   llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
-  if (depthKind(Dst.getType())) {
-    auto Element = DepthOutputs.find(unsigned(Dst.getType()));
-    if (Element == DepthOutputs.end()) {
-      unsupported(Op) << ": write to an undeclared depth output";
+  // A value computed at a width the destination does not hold is converted
+  // as it is written, which is where DXBC's `min16f as def32` conversions
+  // and the 32-bit-only operations' narrow destinations meet. The
+  // conversion belongs with its own store rather than ahead of all of
+  // them, which is the order dxilconv emits.
+  llvm::Type *Narrow = minPrecisionType(Dst.getMinPrecision(), Context);
+  llvm::Type *Wide = nullptr;
+  if (!Narrow && ValuePrecision)
+    Wide = minPrecisionType(ValuePrecision, Context)->isHalfTy() ? floatTy()
+                                                                 : i32Ty();
+  auto adjust = [&](llvm::Value *Value) {
+    if (llvm::Type *Target = Narrow ? Narrow : Wide)
+      return convertPrecision(Value, Target,
+                              isUnsignedPrecision(ValuePrecision));
+    return Value;
+  };
+  if (std::optional<DXILSemanticKind> Kind = registerlessKind(Dst.getType())) {
+    auto Element = RegisterlessOutputs.find(unsigned(*Kind));
+    if (Element == RegisterlessOutputs.end()) {
+      unsupported(Op) << ": write to an undeclared registerless output";
       return false;
     }
+    llvm::Value *Value =
+        RealOutputSignature.empty()
+            ? coerce(adjust(Components[0]), floatTy())
+            : convertPrecision(
+                  Components[0],
+                  componentLLVMType(Outputs.elements()[Element->second].Type,
+                                    Context),
+                  isUnsignedPrecision(ValuePrecision));
     emitDXOp("storeOutput", DXILOp::StoreOutput, llvm::Type::getVoidTy(Context),
              {llvm::ConstantInt::get(i32Ty(), Element->second),
               llvm::ConstantInt::get(i32Ty(), 0),
-              llvm::ConstantInt::get(i8Ty(), 0),
-              coerce(Components[0], floatTy())});
+              llvm::ConstantInt::get(i8Ty(), 0), Value});
     return true;
   }
   switch (Dst.getType()) {
@@ -1325,19 +1671,23 @@ bool Translator::writeDestination(DstOperandAttr Dst,
       return false;
     }
     for (auto [I, Comp] : llvm::enumerate(Comps)) {
-      llvm::AllocaInst *Slot = tempSlot(*Reg, Comp);
-      Builder.CreateStore(coerce(Components[I], Slot->getAllocatedType()),
-                          Slot);
+      llvm::AllocaInst *Slot = tempSlot(*Reg, Comp, bool(Narrow));
+      Builder.CreateStore(
+          coerce(adjust(Components[I]), Slot->getAllocatedType()), Slot);
     }
     return true;
   }
   case OperandType::x: {
     for (auto [I, Comp] : llvm::enumerate(Comps)) {
-      llvm::Value *Address = indexableTempAddress(
-          Dst.getIndex(), Comp, Components[I]->getType(), Op, /*Slot=*/0);
+      // The address is computed before the value is converted, which is
+      // the order dxilconv emits.
+      llvm::Type *Element = Narrow ? Narrow : Components[I]->getType();
+      llvm::Value *Address =
+          indexableTempAddress(Dst.getIndex(), Comp, Element, Op, /*Slot=*/0);
       if (!Address)
         return false;
-      Builder.CreateStore(Components[I], Address)->setAlignment(llvm::Align(4));
+      Builder.CreateStore(adjust(Components[I]), Address)
+          ->setAlignment(elementAlign(Element));
     }
     return true;
   }
@@ -1360,12 +1710,17 @@ bool Translator::writeDestination(DstOperandAttr Dst,
       // synthesized from declarations alone would just be `F32` for every
       // element (see feme/docs/Design.md), so the value's own type is the
       // better guess.
+      // A signature element's component type says what the store is
+      // overloaded on -- but only a real container carries it. A type
+      // synthesized from declarations alone would just be `F32` for every
+      // element (see feme/docs/Design.md), so the value's own type is the
+      // better guess.
       llvm::Value *Value =
           RealOutputSignature.empty()
-              ? Components[I]
-              : coerce(Components[I], Info.Type == DXILComponentType::F32
-                                          ? floatTy()
-                                          : i32Ty());
+              ? adjust(Components[I])
+              : convertPrecision(Components[I],
+                                 componentLLVMType(Info.Type, Context),
+                                 isUnsignedPrecision(ValuePrecision));
       emitDXOp("storeOutput", DXILOp::StoreOutput,
                llvm::Type::getVoidTy(Context),
                {llvm::ConstantInt::get(i32Ty(), *Element),
@@ -1390,10 +1745,12 @@ llvm::Function *Translator::dxOp(llvm::StringRef Name, llvm::Type *ReturnTy,
   // An operation that is not overloaded -- one whose operand types are
   // fixed by the DXIL specification -- is named without a suffix.
   std::string FullName = OverloadTy ? ("dx.op." + Name + "." +
-                                       (OverloadTy->isFloatTy()      ? "f32"
-                                        : OverloadTy->isDoubleTy()   ? "f64"
-                                        : OverloadTy->isIntegerTy(1) ? "i1"
-                                                                     : "i32"))
+                                       (OverloadTy->isHalfTy()        ? "f16"
+                                        : OverloadTy->isFloatTy()     ? "f32"
+                                        : OverloadTy->isDoubleTy()    ? "f64"
+                                        : OverloadTy->isIntegerTy(1)  ? "i1"
+                                        : OverloadTy->isIntegerTy(16) ? "i16"
+                                                                      : "i32"))
                                           .str()
                                     : ("dx.op." + Name).str();
   llvm::SmallVector<llvm::Type *, 8> Params;
@@ -1464,6 +1821,12 @@ llvm::Type *Translator::movElementType(DstOperandAttr Dst, SrcOperandAttr Src,
                                        unsigned DstComp) {
   // A modifier is arithmetic, so it forces a floating-point reading of the
   // bits whatever the registers involved are otherwise used for.
+  // `mov` is a 32-bit copy even between minimum-precision operands: the
+  // source is widened as it is read and the destination narrows it again,
+  // which is what DXBC's `min16f as def32` / `def32 as min16f` operand
+  // annotations describe.
+  if (llvm::Type *Narrow = minPrecisionType(Src.getMinPrecision(), Context))
+    return widen(Narrow);
   if (Src.getModifier())
     return floatTy();
   // An indexable temp is a flat array of raw 32-bit slots, so a copy to or
@@ -1474,6 +1837,7 @@ llvm::Type *Translator::movElementType(DstOperandAttr Dst, SrcOperandAttr Src,
   if (Src.getType() == OperandType::r)
     if (std::optional<unsigned> Reg = registerNumber(Src.getIndex()))
       return tempSlot(*Reg, sourceComponent(Src, DstComp))->getAllocatedType();
+
   // A signature register does have a type of its own: the one its
   // signature element declares.
   if (Src.getType() == OperandType::v)
@@ -1550,6 +1914,9 @@ struct OpLowering {
   llvm::StringRef Name;
   /// True for the `dx.op` calls that carry no `.<overload>` suffix.
   bool NoOverload = false;
+  /// False for the operations DXIL only defines at 32 bits, which a
+  /// minimum-precision destination has to convert the result of.
+  bool NarrowCapable = true;
 };
 
 static OpLowering nativeOp(llvm::Instruction::BinaryOps Binop, bool Float) {
@@ -1577,6 +1944,7 @@ static OpLowering convertOp(DXILOp Op, llvm::StringRef Name, bool FloatIn,
   // These conversions fix both of their types, so DXIL does not overload
   // them on either.
   L.NoOverload = true;
+  L.NarrowCapable = false;
   return L;
 }
 
@@ -1594,6 +1962,14 @@ static OpLowering castOp(llvm::Instruction::CastOps Cast, bool FloatIn,
   L.FloatOperands = FloatIn;
   L.FloatResult = FloatOut;
   L.Cast = Cast;
+  L.NarrowCapable = false;
+  return L;
+}
+
+/// A `dx.op` call DXIL only defines at 32 bits.
+static OpLowering wideOp(DXILOp Op, llvm::StringRef Name, bool Float) {
+  OpLowering L = callOp(Op, Name, Float);
+  L.NarrowCapable = false;
   return L;
 }
 
@@ -1648,11 +2024,11 @@ static std::optional<OpLowering> lookupLowering(llvm::StringRef Name) {
       {"imax", callOp(DXILOp::IMax, "binary", false)},
       {"umin", callOp(DXILOp::UMin, "binary", false)},
       {"umax", callOp(DXILOp::UMax, "binary", false)},
-      {"bfrev", callOp(DXILOp::Bfrev, "unaryBits", false)},
-      {"countbits", callOp(DXILOp::Countbits, "unaryBits", false)},
-      {"firstbit_lo", callOp(DXILOp::FirstbitLo, "unaryBits", false)},
-      {"firstbit_hi", callOp(DXILOp::FirstbitHi, "unaryBits", false)},
-      {"firstbit_shi", callOp(DXILOp::FirstbitSHi, "unaryBits", false)},
+      {"bfrev", wideOp(DXILOp::Bfrev, "unaryBits", false)},
+      {"countbits", wideOp(DXILOp::Countbits, "unaryBits", false)},
+      {"firstbit_lo", wideOp(DXILOp::FirstbitLo, "unaryBits", false)},
+      {"firstbit_hi", wideOp(DXILOp::FirstbitHi, "unaryBits", false)},
+      {"firstbit_shi", wideOp(DXILOp::FirstbitSHi, "unaryBits", false)},
       // Conversions.
       {"itof", castOp(BO::SIToFP, false, true)},
       {"utof", castOp(BO::UIToFP, false, true)},
@@ -1660,6 +2036,9 @@ static std::optional<OpLowering> lookupLowering(llvm::StringRef Name) {
       {"ftou", castOp(BO::FPToUI, true, false)},
       // Half-precision packing, which DXIL keeps as a 32-bit-typed
       // operation carrying a 16-bit value.
+      {"ubfe", wideOp(DXILOp::Ubfe, "tertiary", false)},
+      {"ibfe", wideOp(DXILOp::Ibfe, "tertiary", false)},
+      {"bfi", wideOp(DXILOp::Bfi, "quaternary", false)},
       {"f32tof16", convertOp(DXILOp::LegacyF32ToF16, "legacyF32ToF16", true,
                              /*FloatOut=*/false)},
       {"f16tof32", convertOp(DXILOp::LegacyF16ToF32, "legacyF16ToF32",
@@ -1698,6 +2077,37 @@ static std::optional<OpLowering> typedLowering(llvm::StringRef Name) {
 }
 
 void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
+  // A minimum-precision annotation is not a vote but a statement: the
+  // register is that width, and every access to it agrees.
+  for (mlir::Operation &Op : *Shader.getBodyBlock())
+    for (mlir::NamedAttribute Attr : Op.getAttrs()) {
+      OperandType Kind;
+      OperandIndexAttr Index;
+      OperandMinPrecisionAttr MinPrecision;
+      SwizzleAttr Swizzle;
+      llvm::SmallVector<unsigned, 4> Comps;
+      if (auto Src = llvm::dyn_cast<SrcOperandAttr>(Attr.getValue())) {
+        Kind = Src.getType();
+        Index = Src.getIndex();
+        MinPrecision = Src.getMinPrecision();
+        for (unsigned Comp = 0; Comp < 4; ++Comp)
+          Comps.push_back(sourceComponent(Src, Comp));
+      } else if (auto Dst = llvm::dyn_cast<DstOperandAttr>(Attr.getValue())) {
+        Kind = Dst.getType();
+        Index = Dst.getIndex();
+        MinPrecision = Dst.getMinPrecision();
+        Comps = destinationComponents(Dst);
+      } else {
+        continue;
+      }
+      llvm::Type *Narrow = minPrecisionType(MinPrecision, Context);
+      if (Kind != OperandType::r || !Narrow)
+        continue;
+      if (std::optional<unsigned> Reg = registerNumber(Index))
+        for (unsigned Comp : Comps)
+          TempTypes[tempKey(*Reg, Comp, /*Narrow=*/true)] = Narrow;
+    }
+
   // Votes cast for each temp component, as (floating point, integer).
   llvm::DenseMap<uint64_t, std::pair<unsigned, unsigned>> Votes;
   auto vote = [&](std::optional<unsigned> Reg, unsigned Comp, bool Float) {
@@ -1749,15 +2159,17 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
     // integer bit pattern.
     if (Name.ends_with("_z") || Name.ends_with("_nz") || Name == "switch")
       for (SrcOperandAttr Src : Srcs)
-        if (Src.getType() == OperandType::r)
+        if (Src.getType() == OperandType::r && !Src.getMinPrecision())
           vote(registerNumber(Src.getIndex()), sourceComponent(Src, 0), false);
 
     if (std::optional<OpLowering> Lowering = typedLowering(Name)) {
-      if (Dst && Dst.getType() == OperandType::r)
+      // A minimum-precision operand names the narrow bank, whose type the
+      // annotation already fixed; it says nothing about the 32-bit one.
+      if (Dst && Dst.getType() == OperandType::r && !Dst.getMinPrecision())
         for (unsigned Comp : Comps)
           vote(registerNumber(Dst.getIndex()), Comp, Lowering->FloatResult);
       for (SrcOperandAttr Src : Srcs)
-        if (Src.getType() == OperandType::r)
+        if (Src.getType() == OperandType::r && !Src.getMinPrecision())
           for (unsigned Comp : Comps)
             vote(registerNumber(Src.getIndex()), sourceComponent(Src, Comp),
                  Lowering->FloatOperands);
@@ -1795,7 +2207,31 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
   }
 
   for (auto [Key, V] : Votes)
-    TempTypes[Key] = V.first > 0 && V.first >= V.second ? floatTy() : i32Ty();
+    if (!TempTypes.count(Key))
+      TempTypes[Key] = V.first > 0 && V.first >= V.second ? floatTy() : i32Ty();
+}
+
+std::pair<llvm::Type *, llvm::Type *>
+Translator::operationTypes(const OpLowering &Lowering, DstOperandAttr Dst,
+                           llvm::ArrayRef<SrcOperandAttr> Sources) {
+  llvm::Type *SrcTy = Lowering.FloatOperands ? floatTy() : i32Ty();
+  llvm::Type *DstTy = Lowering.FloatResult ? floatTy() : i32Ty();
+  if (!Lowering.NarrowCapable)
+    return {SrcTy, DstTy};
+
+  if (Lowering.Kind == OpLowering::Form::Compare) {
+    OperandMinPrecisionAttr Common = Sources.empty()
+                                         ? OperandMinPrecisionAttr()
+                                         : Sources[0].getMinPrecision();
+    for (SrcOperandAttr Src : Sources)
+      if (Src.getMinPrecision() != Common)
+        return {SrcTy, DstTy};
+    return {storageType(Common, SrcTy), DstTy};
+  }
+
+  OperandMinPrecisionAttr Precision =
+      Dst ? Dst.getMinPrecision() : OperandMinPrecisionAttr();
+  return {storageType(Precision, SrcTy), storageType(Precision, DstTy)};
 }
 
 bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
@@ -1819,7 +2255,7 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
     }
     for (llvm::Value *&Value : Values)
       Value = saturate(Value, Saturate);
-    return writeDestination(Dst, Values, Op);
+    return writeDestination(Dst, Values, Op, Src.getMinPrecision());
   }
 
   std::optional<OpLowering> Lowering = lookupLowering(Name);
@@ -1828,8 +2264,7 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
     return false;
   }
 
-  llvm::Type *SrcTy = Lowering->FloatOperands ? floatTy() : i32Ty();
-  llvm::Type *DstTy = Lowering->FloatResult ? floatTy() : i32Ty();
+  auto [SrcTy, DstTy] = operationTypes(*Lowering, Dst, {Src});
   llvm::SmallVector<llvm::Value *, 4> Sources;
   for (unsigned Comp : Comps) {
     llvm::Value *Value = readSource(Src, Comp, SrcTy, Op);
@@ -1881,8 +2316,8 @@ bool Translator::translateBinary(mlir::Operation *Op, DstOperandAttr Dst,
     return false;
   }
 
-  llvm::Type *SrcTy = Lowering->FloatOperands ? floatTy() : i32Ty();
-  llvm::Type *DstTy = Lowering->FloatResult ? floatTy() : i32Ty();
+  SrcOperandAttr Operands[] = {Lhs, Rhs};
+  auto [SrcTy, DstTy] = operationTypes(*Lowering, Dst, Operands);
   llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
 
   // Every source component is read before any result is computed, matching
@@ -1960,6 +2395,43 @@ bool Translator::translateMad(mlir::Operation *Op, DstOperandAttr Dst,
     llvm::Value *Value = emitDXOp(
         "tertiary", DXOp, Ty, {Sources[I], Sources[E + I], Sources[2 * E + I]});
     Values.push_back(saturate(Value, Saturate));
+  }
+  return writeDestination(Dst, Values, Op);
+}
+
+bool Translator::translateVariadic(mlir::Operation *Op, DstOperandAttr Dst,
+                                   llvm::ArrayRef<SrcOperandAttr> Sources,
+                                   bool Saturate) {
+  llvm::StringRef Name = mnemonicOf(Op);
+  Name.consume_back("_sat");
+  std::optional<OpLowering> Lowering = lookupLowering(Name);
+  if (!Lowering || Lowering->Kind != OpLowering::Form::Call) {
+    unsupported(Op);
+    return false;
+  }
+  auto [SrcTy, DstTy] = operationTypes(*Lowering, Dst, Sources);
+  llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
+
+  // Every source component is read before any result is computed, matching
+  // how the operands are laid out in the instruction.
+  llvm::SmallVector<llvm::SmallVector<llvm::Value *, 4>, 4> Read;
+  for (auto [Slot, Src] : llvm::enumerate(Sources)) {
+    Read.emplace_back();
+    for (unsigned Comp : Comps) {
+      llvm::Value *Value = readSource(Src, Comp, SrcTy, Op, Slot);
+      if (!Value)
+        return false;
+      Read.back().push_back(Value);
+    }
+  }
+
+  llvm::SmallVector<llvm::Value *, 4> Values;
+  for (unsigned I = 0, E = Comps.size(); I != E; ++I) {
+    llvm::SmallVector<llvm::Value *, 4> Args;
+    for (const auto &Source : Read)
+      Args.push_back(Source[I]);
+    Values.push_back(saturate(
+        emitDXOp(Lowering->Name, Lowering->Op, DstTy, Args), Saturate));
   }
   return writeDestination(Dst, Values, Op);
 }
@@ -2405,6 +2877,14 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
   if (auto Mad = llvm::dyn_cast<dxsa::UMad>(Op))
     return translateMad(Op, Mad.getDst(), Mad.getLhs(), Mad.getRhs(),
                         Mad.getAcc(), Saturate);
+  if (auto Bits = llvm::dyn_cast<dxsa::UBFE>(Op)) {
+    SrcOperandAttr Sources[] = {Bits.getSrc0(), Bits.getSrc1(), Bits.getSrc2()};
+    return translateVariadic(Op, Bits.getDst(), Sources, Saturate);
+  }
+  if (auto Bits = llvm::dyn_cast<dxsa::IBFE>(Op)) {
+    SrcOperandAttr Sources[] = {Bits.getSrc0(), Bits.getSrc1(), Bits.getSrc2()};
+    return translateVariadic(Op, Bits.getDst(), Sources, Saturate);
+  }
   if (auto Dot = llvm::dyn_cast<dxsa::Dp2>(Op))
     return translateDot(Op, Dot.getDst(), Dot.getLhs(), Dot.getRhs(), 2,
                         Saturate);
@@ -2573,7 +3053,7 @@ llvm::MDNode *Translator::emitSignature(const Signature &Sig) {
         llvm::ConstantAsMetadata::get(
             llvm::ConstantInt::get(i32Ty(), Element.Row)),
         llvm::ConstantAsMetadata::get(
-            llvm::ConstantInt::get(i8Ty(), Element.StartCol)),
+            llvm::ConstantInt::get(i8Ty(), Element.StartCol & 0xFF)),
         nullptr,
     };
     Elements.push_back(llvm::MDNode::get(Context, Fields));
@@ -2600,8 +3080,8 @@ void Translator::emitMetadata(llvm::Function *Entry) {
   auto *Properties = llvm::MDNode::get(
       Context,
       {llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 0)),
-       llvm::ConstantAsMetadata::get(
-           llvm::ConstantInt::get(llvm::Type::getInt64Ty(Context), 0))});
+       llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(
+           llvm::Type::getInt64Ty(Context), ShaderFlags))});
   llvm::Metadata *EntryFields[] = {
       llvm::ConstantAsMetadata::get(Entry),
       llvm::MDString::get(Context, "main"),
@@ -2666,6 +3146,15 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
     }
   llvm::EliminateUnreachableBlocks(*Entry);
   promoteTemps(*Entry);
+  // Promotion leaves the reads that only fed a promoted slot behind, and
+  // a DXBC shader can compute values it never uses; neither survives in
+  // dxilconv's output.
+  llvm::SmallVector<llvm::WeakTrackingVH, 8> Dead;
+  for (llvm::BasicBlock &BB : *Entry)
+    for (llvm::Instruction &I : BB)
+      if (llvm::isInstructionTriviallyDead(&I))
+        Dead.emplace_back(&I);
+  llvm::RecursivelyDeleteTriviallyDeadInstructions(Dead);
   foldConditionMasks(*Entry);
   emitMetadata(Entry);
   return std::move(Module);
