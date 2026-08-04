@@ -977,12 +977,39 @@ output instruction-for-instruction, only to be semantically equivalent;
 
 Implemented so far: the program header and entry-point metadata, input
 and output signatures synthesized from the register declarations,
-temporary registers, literals, the source modifiers (`-`, `| |`), and
-the straight-line arithmetic/logic/conversion/comparison/dot-product
-opcode families. Not yet implemented, in rough dependency order:
-minimum-precision (`min16f`/`min16i`/`min16u`) operands, control flow,
-constant buffers, resources and samplers, indexable temps, group-shared
-memory, and the non-pixel-shader stage-specific declarations.
+temporary registers, literals, the source modifiers (`-`, `| |`), the
+straight-line arithmetic/logic/conversion/comparison/dot-product opcode
+families, structured control flow, `movc`, `discard`, constant buffers,
+and the registerless signature operands (`oDepth`/`oDepthGE`/`oDepthLE`
+and the compute-shader thread identifiers). Not yet implemented, in
+rough dependency order: minimum-precision (`min16f`/`min16i`/`min16u`)
+operands, indexable temps, subroutines (`label`/`call`), resources and
+samplers, group-shared memory, doubles, and the non-pixel-shader
+stage-specific declarations.
+
+Two design points are worth recording because they shape the whole
+translation:
+
+- **Temp registers are stack slots, not values.** Each `(register,
+  component)` pair gets an `alloca` in the entry block, and the whole set
+  is promoted with `PromoteMemToReg` once the program has been
+  translated. That is what supplies the phi nodes a temp whose live range
+  crosses a branch needs, without the translator reconstructing SSA
+  itself. The slots are named `dx.v32.r<n>`, flattening the register and
+  component the way DXIL's own temp-register intrinsics do, so the
+  promoted values match `dxilconv`'s naming.
+- **A slot needs a type and DXBC registers do not have one.**
+  `inferTempTypes` picks one per component before translation begins: an
+  instruction with definite floating-point or integer semantics votes for
+  its own type (separately for its result and its operands, since a
+  comparison reads floats and writes an integer mask), a register used to
+  index another operand votes integer, a `mov` of a literal votes
+  integer, a `mov` to or from a signature register votes that element's
+  declared type, and a component with no vote stays `i32`. Where a value
+  has to cross between `float` and `i32`, DXIL's own
+  `bitcastF32toI32`/`bitcastI32toF32` operations are emitted rather than
+  an LLVM `bitcast`, which is what DXIL -- a frozen LLVM 3.7 dialect --
+  spells.
 
 #### Building complete legacy DXBC containers for testing
 
@@ -1026,15 +1053,17 @@ and component types directly, instead of synthesizing them from the
 `feme/test/Translate/DXBC/indexableoutput1.test` for a fixture this
 unblocked (its real `OSGN` has signature-element indices a `.dxasm`'s
 declarations alone cannot reconstruct). This does not, on its own, unblock
-most of `feme/test/Translate/DXBC`'s remaining `.ref` fixtures: of the 117
-fixtures still using a `.ref` file, only this one and `output4` (further
-blocked by not-yet-implemented `min16f` support) were held back purely by
-signature synthesis: `agent_thoughts.md`'s "Known differences from
-`dxilconv`" already established that the other ~115 are gated on
-unimplemented opcode families -- control flow, constant buffers,
-resources/samplers, indexable temps, minimum-precision operands, and
-stage-specific declarations -- which real signature data does not
-address.
+the remaining `.ref` fixtures in `feme/test/Translate/DXBC`, which are
+gated on unimplemented opcode families -- resources and samplers,
+indexable temps, minimum-precision operands, subroutines, and
+stage-specific declarations -- rather than on signature data.
+
+Synthesis does, however, remain visible in the *output* of fixtures that
+do translate: a synthesized element's component type is always `F32`,
+where `dxilconv` reads the real one. That is why a handful of migrated
+fixtures read a signature register as `float` and reinterpret it, where
+`dxilconv`'s real `ISGN` says `uint` and it reads an `i32` directly. The
+difference disappears for a test built from a full container.
 
 Notably, DXIL ⇄ SPIR-V translation is expected to route through plain LLVM
 IR and the **existing** LLVM `SPIRV` backend/MLIR `spirv` dialect rather than
