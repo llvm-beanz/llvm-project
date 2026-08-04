@@ -13,6 +13,14 @@ CONTAINER_PART(ISG1)
 CONTAINER_PART(OSG1)
 CONTAINER_PART(PSG1)
 CONTAINER_PART(VERS)
+// Legacy shader model 5.x signature parts. These carry the same conceptual
+// data as ISG1/OSG1/PSG1 (a program's input/output/patch-constant signature)
+// but in the older, pre-DXIL on-disk layout (no Stream/MinPrecision fields;
+// see dxbc::LegacySignatureElement) emitted by `fxc` and `dxbc-as`'s
+// container-wrapping mode.
+CONTAINER_PART(ISGN)
+CONTAINER_PART(OSGN)
+CONTAINER_PART(PCSG)
 
 #undef CONTAINER_PART
 #endif // CONTAINER_PART

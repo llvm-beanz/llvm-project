@@ -654,6 +654,42 @@ struct ProgramSignatureElement {
 static_assert(sizeof(ProgramSignatureElement) == 32,
               "ProgramSignatureElement is misaligned");
 
+// The legacy shader model 5.x signature element layout used by the `ISGN`,
+// `OSGN`, and `PCSG` parts `fxc` emits. It carries the same fields as
+// `ProgramSignatureElement` above, minus `Stream` (added when GS-with-streams
+// support required it) and `MinPrecision` (added for the newer container's
+// `ISG1`/`OSG1`/`PSG1`) -- neither of those exist in the pre-DXIL on-disk
+// format.
+struct LegacySignatureElement {
+  uint32_t NameOffset; // Offset from the start of the ProgramSignatureHeader
+                       // to the start of the null terminated string for the
+                       // name.
+  uint32_t Index;      // Semantic Index
+  D3DSystemValue SystemValue; // Semantic type. Similar to PSV::SemanticKind.
+  SigComponentType CompType;  // Type of bits.
+  uint32_t Register;          // Register Index (row index)
+  uint8_t Mask;               // Mask (column allocation)
+
+  // The ExclusiveMask has a different meaning for input and output
+  // signatures. For an output signature, masked components of the output
+  // register are never written to. For an input signature, masked
+  // components of the input register are always read.
+  uint8_t ExclusiveMask;
+
+  uint16_t Unused;
+
+  void swapBytes() {
+    sys::swapByteOrder(NameOffset);
+    sys::swapByteOrder(Index);
+    sys::swapByteOrder(SystemValue);
+    sys::swapByteOrder(CompType);
+    sys::swapByteOrder(Register);
+  }
+};
+
+static_assert(sizeof(LegacySignatureElement) == 24,
+              "LegacySignatureElement is misaligned");
+
 namespace RTS0 {
 namespace v1 {
 struct StaticSampler {

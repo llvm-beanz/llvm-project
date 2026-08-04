@@ -426,17 +426,24 @@ public:
   }
 };
 
-class Signature {
-  ViewArray<dxbc::ProgramSignatureElement> Parameters;
+/// A program's input, output, or patch-constant signature: an array of
+/// per-register elements (\p ElementTy) plus the string table their names are
+/// stored in. Shared between the newer DXIL container's `ISG1`/`OSG1`/`PSG1`
+/// parts (`dxbc::ProgramSignatureElement`) and the legacy shader model 5.x
+/// container's `ISGN`/`OSGN`/`PCSG` parts (`dxbc::LegacySignatureElement`) --
+/// both share the same header shape and string-table convention, differing
+/// only in the per-element fields.
+template <typename ElementTy> class SignatureBase {
+  ViewArray<ElementTy> Parameters;
   uint32_t StringTableOffset;
   StringRef StringTable;
 
 public:
-  ViewArray<dxbc::ProgramSignatureElement>::iterator begin() const {
+  typename ViewArray<ElementTy>::iterator begin() const {
     return Parameters.begin();
   }
 
-  ViewArray<dxbc::ProgramSignatureElement>::iterator end() const {
+  typename ViewArray<ElementTy>::iterator end() const {
     return Parameters.end();
   }
 
@@ -455,6 +462,12 @@ public:
 
   LLVM_ABI Error initialize(StringRef Part);
 };
+
+extern template class LLVM_TEMPLATE_ABI SignatureBase<dxbc::ProgramSignatureElement>;
+extern template class LLVM_TEMPLATE_ABI SignatureBase<dxbc::LegacySignatureElement>;
+
+using Signature = SignatureBase<dxbc::ProgramSignatureElement>;
+using LegacySignature = SignatureBase<dxbc::LegacySignatureElement>;
 
 } // namespace DirectX
 
@@ -477,6 +490,9 @@ private:
   DirectX::Signature InputSignature;
   DirectX::Signature OutputSignature;
   DirectX::Signature PatchConstantSignature;
+  DirectX::LegacySignature LegacyInputSignature;
+  DirectX::LegacySignature LegacyOutputSignature;
+  DirectX::LegacySignature LegacyPatchConstantSignature;
   std::optional<mcdxbc::DebugName> DebugName;
   std::optional<mcdxbc::CompilerVersion> VersionInfo;
   std::optional<mcdxbc::SourceInfo> SourceInfo;
@@ -490,7 +506,6 @@ private:
   Error parseHash(StringRef Part);
   Error parseRootSignature(StringRef Part);
   Error parsePSVInfo(StringRef Part);
-  Error parseSignature(StringRef Part, DirectX::Signature &Array);
   Error parseCompilerVersionInfo(StringRef Part);
   Error parseSourceInfo(StringRef Part);
   Error parsePrivateData(StringRef Part);
@@ -606,6 +621,16 @@ public:
   }
   const DirectX::Signature &getPatchConstantSignature() const {
     return PatchConstantSignature;
+  }
+
+  const DirectX::LegacySignature &getLegacyInputSignature() const {
+    return LegacyInputSignature;
+  }
+  const DirectX::LegacySignature &getLegacyOutputSignature() const {
+    return LegacyOutputSignature;
+  }
+  const DirectX::LegacySignature &getLegacyPatchConstantSignature() const {
+    return LegacyPatchConstantSignature;
   }
 
   const std::optional<mcdxbc::CompilerVersion> &getCompilerVersionInfo() const {

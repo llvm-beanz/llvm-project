@@ -172,11 +172,12 @@ Error DXContainer::parsePSVInfo(StringRef Part) {
   return Error::success();
 }
 
-Error DirectX::Signature::initialize(StringRef Part) {
+template <typename ElementTy>
+Error DirectX::SignatureBase<ElementTy>::initialize(StringRef Part) {
   dxbc::ProgramSignatureHeader SigHeader;
   if (Error Err = readStruct(Part, Part.begin(), SigHeader))
     return Err;
-  size_t Size = sizeof(dxbc::ProgramSignatureElement) * SigHeader.ParamCount;
+  size_t Size = sizeof(ElementTy) * SigHeader.ParamCount;
 
   if (Part.size() < Size + SigHeader.FirstParamOffset)
     return parseFailed("Signature parameters extend beyond the part boundary");
@@ -196,6 +197,9 @@ Error DirectX::Signature::initialize(StringRef Part) {
   }
   return Error::success();
 }
+
+template class DirectX::SignatureBase<dxbc::ProgramSignatureElement>;
+template class DirectX::SignatureBase<dxbc::LegacySignatureElement>;
 
 Error DXContainer::parseCompilerVersionInfo(StringRef Part) {
   if (VersionInfo)
@@ -610,6 +614,18 @@ Error DXContainer::parsePartOffsets() {
       break;
     case dxbc::PartType::PSG1:
       if (Error Err = PatchConstantSignature.initialize(PartData))
+        return Err;
+      break;
+    case dxbc::PartType::ISGN:
+      if (Error Err = LegacyInputSignature.initialize(PartData))
+        return Err;
+      break;
+    case dxbc::PartType::OSGN:
+      if (Error Err = LegacyOutputSignature.initialize(PartData))
+        return Err;
+      break;
+    case dxbc::PartType::PCSG:
+      if (Error Err = LegacyPatchConstantSignature.initialize(PartData))
         return Err;
       break;
     case dxbc::PartType::Unknown:
