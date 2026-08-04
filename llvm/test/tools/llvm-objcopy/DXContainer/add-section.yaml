@@ -1,6 +1,6 @@
 ## Check that --add-section merges a new DXBC part into a container. This is
 ## the mechanism used to combine a legacy DXBC container's structural parts
-## (e.g. ISGN/OSGN, authored via yaml2obj) with a raw bytecode part (e.g. SHEX,
+## (e.g. RDEF, authored via yaml2obj) with a raw bytecode part (e.g. SHEX,
 ## produced separately by an assembler such as dxbc-as) into one file.
 ##
 ## obj2yaml intentionally does not surface the raw bytes of parts it has no
@@ -22,17 +22,17 @@ Header:
     Minor:           0
   PartCount:       1
 Parts:
-  - Name:            ISGN
+  - Name:            RDEF
     Size:            4
     PrivateData:     [ 0xAA, 0xBB, 0xCC, 0xDD ]
 ...
 
 # CHECK:      Parts:
-# CHECK-NEXT:   - Name:            ISGN
+# CHECK-NEXT:   - Name:            RDEF
 # CHECK-NEXT:     Size:            4
 # CHECK-NEXT:   - Name:            SHEX
 # CHECK-NEXT:     Size:            4
 
-## `ISGN`, size 4, its original bytes, then `SHEX`, size 4, the merged bytes.
-# BYTES: 49 53 47 4e 04 00 00 00 aa bb cc dd 53 48 45 58 04 00 00 00 11 22 33 44
+## `RDEF`, size 4, its original bytes, then `SHEX`, size 4, the merged bytes.
+# BYTES: 52 44 45 46 04 00 00 00 aa bb cc dd 53 48 45 58 04 00 00 00 11 22 33 44
 

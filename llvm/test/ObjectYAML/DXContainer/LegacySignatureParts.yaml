@@ -1,0 +1,76 @@
+# RUN: yaml2obj %s | obj2yaml | FileCheck %s
+
+## Round-trips the legacy shader model 5.x ISGN/OSGN signature parts (see
+## dxbc::LegacySignatureElement): the same per-element fields as the newer
+## ISG1/OSG1/PSG1 parts (SignatureParts.yaml) minus Stream/MinPrecision,
+## which the pre-DXIL on-disk layout does not carry.
+
+--- !dxcontainer
+Header:
+  Hash:            [ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+                     0x0, 0x0, 0x0, 0x0, 0x0, 0x0 ]
+  Version:
+    Major:           1
+    Minor:           0
+  PartCount:       2
+Parts:
+  - Name:            ISGN
+    Size:            60
+    LegacySignature:
+      Parameters:
+        - Name:            A
+          Index:           0
+          SystemValue:     Undefined
+          CompType:        Float32
+          Register:        0
+          Mask:            15
+          ExclusiveMask:   0
+        - Name:            B
+          Index:           0
+          SystemValue:     Undefined
+          CompType:        UInt32
+          Register:        1
+          Mask:            3
+          ExclusiveMask:   0
+  - Name:            OSGN
+    Size:            42
+    LegacySignature:
+      Parameters:
+        - Name:            SV_Target
+          Index:           0
+          SystemValue:     Target
+          CompType:        Float32
+          Register:        0
+          Mask:            15
+          ExclusiveMask:   0
+...
+
+# CHECK:      - Name:            ISGN
+# CHECK-NEXT:   Size:            60
+# CHECK-NEXT:   LegacySignature:
+# CHECK-NEXT:     Parameters:
+# CHECK-NEXT:       - Name:            A
+# CHECK-NEXT:         Index:           0
+# CHECK-NEXT:         SystemValue:     Undefined
+# CHECK-NEXT:         CompType:        Float32
+# CHECK-NEXT:         Register:        0
+# CHECK-NEXT:         Mask:            15
+# CHECK-NEXT:         ExclusiveMask:   0
+# CHECK-NEXT:       - Name:            B
+# CHECK-NEXT:         Index:           0
+# CHECK-NEXT:         SystemValue:     Undefined
+# CHECK-NEXT:         CompType:        UInt32
+# CHECK-NEXT:         Register:        1
+# CHECK-NEXT:         Mask:            3
+# CHECK-NEXT:         ExclusiveMask:   0
+# CHECK-NEXT: - Name:            OSGN
+# CHECK-NEXT:   Size:            42
+# CHECK-NEXT:   LegacySignature:
+# CHECK-NEXT:     Parameters:
+# CHECK-NEXT:       - Name:            SV_Target
+# CHECK-NEXT:         Index:           0
+# CHECK-NEXT:         SystemValue:     Target
+# CHECK-NEXT:         CompType:        Float32
+# CHECK-NEXT:         Register:        0
+# CHECK-NEXT:         Mask:            15
+# CHECK-NEXT:         ExclusiveMask:   0

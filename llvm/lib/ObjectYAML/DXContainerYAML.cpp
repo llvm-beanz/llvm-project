@@ -422,6 +422,22 @@ void MappingTraits<DXContainerYAML::Signature>::mapping(
   IO.mapRequired("Parameters", S.Parameters);
 }
 
+void MappingTraits<DXContainerYAML::LegacySignatureParameter>::mapping(
+    IO &IO, DXContainerYAML::LegacySignatureParameter &S) {
+  IO.mapRequired("Name", S.Name);
+  IO.mapRequired("Index", S.Index);
+  IO.mapRequired("SystemValue", S.SystemValue);
+  IO.mapRequired("CompType", S.CompType);
+  IO.mapRequired("Register", S.Register);
+  IO.mapRequired("Mask", S.Mask);
+  IO.mapRequired("ExclusiveMask", S.ExclusiveMask);
+}
+
+void MappingTraits<DXContainerYAML::LegacySignature>::mapping(
+    IO &IO, DXContainerYAML::LegacySignature &S) {
+  IO.mapRequired("Parameters", S.Parameters);
+}
+
 void MappingTraits<DXContainerYAML::RootSignatureYamlDesc>::mapping(
     IO &IO, DXContainerYAML::RootSignatureYamlDesc &S) {
   IO.mapRequired("Version", S.Version);
@@ -563,6 +579,7 @@ void MappingTraits<DXContainerYAML::Part>::mapping(IO &IO,
   IO.mapOptional("Hash", P.Hash);
   IO.mapOptional("PSVInfo", P.Info);
   IO.mapOptional("Signature", P.Signature);
+  IO.mapOptional("LegacySignature", P.LegacySignature);
   IO.mapOptional("RootSignature", P.RootSignature);
   IO.mapOptional("DebugName", P.DebugName);
   IO.mapOptional("CompilerVersion", P.CompilerVersion);
@@ -928,6 +945,16 @@ dumpSignature(const object::DirectX::Signature &Sig) {
   return YAML;
 }
 
+static DXContainerYAML::LegacySignature
+dumpLegacySignature(const object::DirectX::LegacySignature &Sig) {
+  DXContainerYAML::LegacySignature YAML;
+  for (auto Param : Sig)
+    YAML.Parameters.push_back(DXContainerYAML::LegacySignatureParameter{
+        Sig.getName(Param.NameOffset).str(), Param.Index, Param.SystemValue,
+        Param.CompType, Param.Register, Param.Mask, Param.ExclusiveMask});
+  return YAML;
+}
+
 static void assign(DXContainerYAML::SourceInfo::SectionHeader &Dst,
                    const dxbc::SourceInfo::SectionHeader &Src) {
   Dst.AlignedSizeInBytes = Src.AlignedSizeInBytes;
@@ -1085,6 +1112,18 @@ DXContainerYAML::fromDXContainer(object::DXContainer &Container) {
       break;
     case dxbc::PartType::PSG1:
       NewPart.Signature = dumpSignature(Container.getPatchConstantSignature());
+      break;
+    case dxbc::PartType::ISGN:
+      NewPart.LegacySignature =
+          dumpLegacySignature(Container.getLegacyInputSignature());
+      break;
+    case dxbc::PartType::OSGN:
+      NewPart.LegacySignature =
+          dumpLegacySignature(Container.getLegacyOutputSignature());
+      break;
+    case dxbc::PartType::PCSG:
+      NewPart.LegacySignature =
+          dumpLegacySignature(Container.getLegacyPatchConstantSignature());
       break;
     case dxbc::PartType::Unknown:
       break;

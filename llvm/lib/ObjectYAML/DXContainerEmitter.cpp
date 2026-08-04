@@ -301,10 +301,24 @@ Error DXContainerWriter::writeParts(raw_ostream &OS) {
       Sig.write(OS);
       break;
     }
+    case dxbc::PartType::ISGN:
+    case dxbc::PartType::OSGN:
+    case dxbc::PartType::PCSG: {
+      mcdxbc::LegacySignature Sig;
+      if (P.LegacySignature.has_value()) {
+        for (const auto &Param : P.LegacySignature->Parameters) {
+          Sig.addParam(Param.Name, Param.Index, Param.SystemValue,
+                       Param.CompType, Param.Register, Param.Mask,
+                       Param.ExclusiveMask);
+        }
+      }
+      Sig.write(OS);
+      break;
+    }
     case dxbc::PartType::Unknown:
       // Parts LLVM does not model structurally (e.g. the legacy DXBC parts
-      // ISGN/OSGN/PCSG/RDEF/SHEX/STAT used by shader model 5.x containers)
-      // can still be authored verbatim via PrivateData.
+      // RDEF/SHEX/STAT used by shader model 5.x containers) can still be
+      // authored verbatim via PrivateData.
       if (P.PrivateData)
         OS.write(reinterpret_cast<char *>(P.PrivateData->data()),
                  P.PrivateData->size());

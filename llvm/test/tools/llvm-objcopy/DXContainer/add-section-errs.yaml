@@ -16,7 +16,7 @@ Header:
     Minor:           0
   PartCount:       1
 Parts:
-  - Name:            ISGN
+  - Name:            RDEF
     Size:            4
     PrivateData:     [ 0xAA, 0xBB, 0xCC, 0xDD ]
 ...

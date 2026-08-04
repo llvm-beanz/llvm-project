@@ -1,9 +1,10 @@
 ## Check that yaml2obj writes PrivateData verbatim into parts LLVM does not
 ## model structurally -- the legacy DXBC parts used by shader model 5.x
-## containers (ISGN/OSGN/PCSG/RDEF/SHEX/STAT). This lets those parts be
-## authored in YAML and merged with a separately-assembled bytecode part
-## (e.g. via llvm-objcopy --add-section) to build a complete legacy DXBC
-## container for testing.
+## containers that remain unmodeled (RDEF/SHEX/STAT; ISGN/OSGN/PCSG have a
+## structural `LegacySignature` model instead, see LegacySignatureParts.yaml
+## in ObjectYAML/DXContainer). This lets those parts be authored in YAML and
+## merged with a separately-assembled bytecode part (e.g. via llvm-objcopy
+## --add-section) to build a complete legacy DXBC container for testing.
 ##
 ## obj2yaml intentionally does not surface the raw bytes of parts it has no
 ## structural model for, so this is checked by inspecting the emitted bytes
@@ -21,7 +22,7 @@ Header:
     Minor:           0
   PartCount:       2
 Parts:
-  - Name:            ISGN
+  - Name:            RDEF
     Size:            5
     PrivateData:     [ 0xDE, 0xAD, 0xBE, 0xEF, 0x42 ]
   - Name:            SHEX
@@ -29,6 +30,6 @@ Parts:
     PrivateData:     [ 0x1, 0x2, 0x3, 0x4 ]
 ...
 
-## `ISGN`, size 5, PrivateData bytes, then `SHEX`, size 4, PrivateData bytes.
-# CHECK: 49 53 47 4e 05 00 00 00 de ad be ef 42
+## `RDEF`, size 5, PrivateData bytes, then `SHEX`, size 4, PrivateData bytes.
+# CHECK: 52 44 45 46 05 00 00 00 de ad be ef 42
 # CHECK: 53 48 45 58 04 00 00 00 01 02 03 04

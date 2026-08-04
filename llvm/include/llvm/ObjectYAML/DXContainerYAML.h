@@ -296,6 +296,24 @@ struct Signature {
   llvm::SmallVector<SignatureParameter> Parameters;
 };
 
+// The legacy shader model 5.x layout of `ISGN`/`OSGN`/`PCSG` -- the same
+// fields as `SignatureParameter` above minus `Stream` and `MinPrecision`,
+// which the pre-DXIL on-disk format does not carry (see
+// dxbc::LegacySignatureElement).
+struct LegacySignatureParameter {
+  std::string Name;
+  uint32_t Index;
+  dxbc::D3DSystemValue SystemValue;
+  dxbc::SigComponentType CompType;
+  uint32_t Register;
+  uint8_t Mask;
+  uint8_t ExclusiveMask;
+};
+
+struct LegacySignature {
+  llvm::SmallVector<LegacySignatureParameter> Parameters;
+};
+
 struct DebugName {
   std::optional<uint16_t> Flags;
   std::optional<uint16_t> NameLength;
@@ -397,6 +415,7 @@ struct Part {
   std::optional<ShaderHash> Hash;
   std::optional<PSVInfo> Info;
   std::optional<DXContainerYAML::Signature> Signature;
+  std::optional<DXContainerYAML::LegacySignature> LegacySignature;
   std::optional<DXContainerYAML::RootSignatureYamlDesc> RootSignature;
   std::optional<DXContainerYAML::DebugName> DebugName;
   std::optional<DXContainerYAML::CompilerVersion> CompilerVersion;
@@ -420,6 +439,7 @@ LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::ResourceBindInfo)
 LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::SignatureElement)
 LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::PSVInfo::MaskVector)
 LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::SignatureParameter)
+LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::LegacySignatureParameter)
 LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::RootParameterLocationYaml)
 LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::DescriptorRangeYaml)
 LLVM_YAML_IS_SEQUENCE_VECTOR(llvm::DXContainerYAML::StaticSamplerYamlDesc)
@@ -519,6 +539,16 @@ template <> struct MappingTraits<DXContainerYAML::SignatureParameter> {
 
 template <> struct MappingTraits<DXContainerYAML::Signature> {
   LLVM_ABI static void mapping(IO &IO, llvm::DXContainerYAML::Signature &El);
+};
+
+template <> struct MappingTraits<DXContainerYAML::LegacySignatureParameter> {
+  LLVM_ABI static void
+  mapping(IO &IO, llvm::DXContainerYAML::LegacySignatureParameter &El);
+};
+
+template <> struct MappingTraits<DXContainerYAML::LegacySignature> {
+  LLVM_ABI static void mapping(IO &IO,
+                               llvm::DXContainerYAML::LegacySignature &El);
 };
 
 template <> struct MappingTraits<DXContainerYAML::RootSignatureYamlDesc> {
