@@ -4727,3 +4727,200 @@ one, which is the same call the previous session made and for the same
 reason: every one of the above is an increment on this skeleton rather than
 a redesign, and each is worth its own measurement pass against the
 references.
+
+# Agent thoughts: working through the remaining dxilconv `.ref` fixtures
+
+108 `.ref` files were left under `feme/test/Translate/DXBC`. Twenty-one of
+them (`dxilcleanup*`, `phibug`) have no `.dxasm` next to them at all --
+they are DXIL IR *inputs* to dxilconv's cleanup pass, not DXBC
+translations -- so 87 were in scope. This session migrated 38 of them and
+left 49.
+
+## The thing that mattered most was not an opcode
+
+Every earlier session recorded the same three known differences from
+dxilconv's output, and two of them had the same cause: a `.dxasm` fixture
+has no `ISGN`/`OSGN`, so signature element names, component types and
+declared write masks were synthesized from `dcl_*` declarations. That is
+why migrated fixtures read a register as `float` and reinterpreted it
+where dxilconv read an `i32` directly, and why an element's column index
+came out relative to the components this shader happens to mention.
+
+But the signature *is* in the fixture. `fxc` prints it, in full, as a
+fixed-width table in the comment banner above its disassembly:
+
+```
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// A                        0   xyzw        0     NONE   float    yz
+```
+
+Element name, semantic index, register, *declared* allocation mask, system
+value, component type. None of that is in the instruction stream:
+`dcl_input_ps linear v0.yz` says nothing about the element's name or type,
+nor about the `xw` some earlier stage wrote that this one does not read.
+So `dxbc-as --emit=container` now reads the tables back and emits the
+corresponding legacy `ISGN`/`OSGN`/`PCSG` parts, and a fixture pairs that
+container with the translation:
+
+```
+; RUN: dxbc-as --emit=container %s -o %t.dxbc
+; RUN: dxbc-as %s | feme-translate --import-dxsa-bin - \
+; RUN:   | feme-translate --dxsa-to-llvmir --dxbc-container=%t.dxbc - \
+; RUN:   | FileCheck %s
+```
+
+The previous session had built exactly one such container by hand, as
+YAML, for `indexableoutput1`. Generating it removed a whole class of
+differences at a stroke: `rcp1` was three lines from matching, `swizzle1`
+needed no translator change at all, `cyclecounter`'s outputs were `uint`
+rather than `float`, and `saturate1` had a *discontiguous* input mask
+(`xz`) that declaration-based synthesis could not express and that
+therefore made the read of `v0.z` look undeclared.
+
+Two details of the reader are worth recording. The rows are anchored on
+the `SysValue`/`Format` pair rather than on column positions, because a
+long element name (`SV_FinalQuadEdgeTessFactor`) overflows its column and
+shifts the rest of the row; and the mask columns print each component in a
+fixed position, so `x z` arrives as two whitespace-separated pieces rather
+than one. Minimum precision is the one thing the legacy layout cannot
+express -- a real `fxc` container puts it in `ISG1`/`OSG1` and writes
+32-bit component types into the legacy parts -- so the 16-bit component
+types are written instead, which is the only lossless choice when the
+legacy part is the only one the container carries.
+
+## Two bugs the fixtures found
+
+Both were in code that had been passing its tests.
+
+MLIR uniques attributes, so `add r0.x, v0.z, v0.z` carries *one*
+`SrcOperandAttr` for both operands. The per-instruction source cache was
+keyed by that attribute, so the two reads collapsed into one -- and
+`binary1`'s CHECK lines had been written to match, which is how it went
+unnoticed. dxilconv reads each operand in its own right. The cache is now
+keyed by the operand's position in the instruction as well, and
+`binary1`'s expectations are back to what its reference actually says.
+
+Separately, `translateUnary` and `translateBinary` looked their mnemonic
+up with the `_sat` suffix still attached, so *every* saturating unary and
+binary instruction was rejected as unsupported. `saturate1` is the fixture
+that exposed it.
+
+A third, latent one: `foldConditionMasks` collected the sign extensions it
+wanted to delete in a vector, and one widened comparison can feed several
+tests, so `loop4` erased the same instruction twice.
+
+## Minimum precision
+
+The previous session called this out as the interesting one, and it is,
+but not for the reason I expected. Mapping `min16f` to `half` and the two
+16-bit integer forms to `i16` is mechanical; the shader flag is one bit
+(`0x20`, "low-precision data types present" -- distinct from the shader
+model 6.2 flag asking for *native* 16-bit types, which DXBC has no way to
+request). What took the measuring was working out *which* width each
+instruction runs at, because the `dxsa` dialect -- like the DXBC tokens it
+decodes -- records minimum precision per operand, and `fxc`'s
+`{def32 as min16f}` annotations are a derived description of something the
+bits do not directly say.
+
+Three rules came out of the references:
+
+- **`mov` is always a 32-bit copy**, even between two minimum-precision
+  operands. `mov o0.x {min16f}, x0[..] {min16f}` loads a `half`, widens it
+  to `float`, and narrows it again for the destination -- which looks
+  redundant until you notice it is exactly what `{min16f as def32}`
+  followed by `{def32 as min16f}` describes.
+- **The destination decides for everything else**, except a comparison,
+  which writes a 32-bit mask whatever it compared and so takes its width
+  from its operands agreeing on one. `minprec3` and `minprec6` are the
+  same `ieq` with the same minimum-precision left operand; the one whose
+  right operand is a plain literal compares at 32 bits and the one whose
+  right operand is also `min16i` compares at 16.
+- **An operation DXIL only defines at 32 bits computes wide** and narrows
+  on the way to its destination. `ubfe` into a `min16u` register is a
+  32-bit `Ubfe` and a `trunc`.
+
+And a fourth thing that is not a rule but a data layout: a
+minimum-precision temp register is a *bank of its own*. `r0.y` read at
+`min16f` is not the `r0.y` a 32-bit instruction wrote -- `indexabletemp6`
+writes the 32-bit one and reads the 16-bit one, and dxilconv's answer is
+`undef`. That is also why dxilconv's temps are named `dx.v32.r*` and
+`dx.v16.r*`.
+
+## Names that come from LLVM rather than from dxilconv
+
+An indexable temp's array is named `dx.v32.x0` in one reference and
+`dx.v32.x01` in another, and `dx.v32.x12` in a third. The suffixes are not
+dxilconv's: they are LLVM's value-name uniquing, which appends a
+per-symbol-table counter. dxilconv allocates one array per element type
+for each declared register and deletes the ones nothing used, so the
+survivor's name depends on how many *other* allocations were made first.
+Reproducing the names therefore meant reproducing the allocations --
+`float` and `i32` for every register, plus `half` and `i16` for the ones
+something accesses at minimum precision -- and deleting the unused ones
+afterwards, which is what the translator now does. It is a strange thing
+to have to imitate, but it is cheap, and the alternative is a permanent
+diff in every indexable-temp fixture.
+
+## Resources
+
+The constant-buffer support the previous session added turned out to be
+the whole of the shared part. Generalizing its one-off maps into a record
+per declared resource -- class, range index, bind point, space, kind,
+component type -- was most of the work, and two things fell out of it that
+the constant-buffer-only version had no reason to get right: DXIL binds
+the resource *classes* in order (SRVs, UAVs, constant buffers, samplers)
+whatever order the declarations appear in, and a dynamically indexed
+handle carries the operand's non-uniform marker.
+
+The sampling family then shares one shape: two handles, four coordinates
+padded with `undef`, three texel offsets that are `undef` where the
+resource kind has none and zero where the instruction named none, and then
+whatever the particular operation appends. `calculateLOD` is the one
+member that counts an array slice *out* of its coordinates -- a
+`Texture2DArray` has three, and it passes two.
+
+The texel offsets are four-bit two's complement, which is worth a mention
+only because passing `-5` through an unsigned 32-bit `ConstantInt` asserts
+rather than wrapping.
+
+## What is left, and what I would do next
+
+Forty-nine fixtures, in five groups:
+
+1. **The `_s` feedback variants and `check_access_fully_mapped`** (~8
+   fixtures: `sample3`, `sample_b1`, `sample_l1`, `sample_grad1`,
+   `sample_cmp1`, `sample_cmp2`, `gather*`). The sampling operations
+   themselves are done; what these need is the extra destination that
+   takes the `ResRet`'s fifth field, and the `check_access_fully_mapped`
+   that consumes it -- which the importer currently leaves as a generic
+   `dxsa.instruction` with `dxsa.operand` values rather than a typed op,
+   so it needs modelling first. This is the cheapest remaining group and
+   the one I would do next.
+2. **Buffers and UAVs** (~15): `ld_raw`, `ld_structured`, `store_*`, the
+   typed UAV loads and stores, the atomics, `bufinfo`, `resinfo`, and
+   group-shared memory as an `addrspace(3)` global. The handle machinery
+   is in place; what is left is the per-operation argument shapes.
+3. **Doubles** (~6). `ddiv`/`dfma`/`dtof`/`dmov` and the pairing of two
+   32-bit components into one `double`.
+4. **Subroutines** (~5): `label`/`call`/`fcall`. dxilconv inlines them,
+   which is why its block names carry a `label0.callc0.` prefix --
+   visible in `loop5` even though that shader has no subroutine.
+5. **Stage-specific declarations** (~6): the hull shader phases, the
+   geometry shader's `emit`/`cut`, and indexed signature registers
+   (`v[r0.x + 4]`, which loads a signature element with a run-time row).
+
+## Differences that remain in the migrated fixtures
+
+Three, all cosmetic, and none of them a translation choice:
+
+- **Pointer typing.** This LLVM has opaque pointers; the references, being
+  LLVM 3.7, spell `[24 x i32]* %x` where we spell `ptr %x`.
+- **Half literals.** This LLVM prints `half 2.000000e+00` where the
+  references print `half 0xH4000`. Same value.
+- **Phi incoming-value order**, which follows this LLVM's mem2reg rather
+  than the 3.7 one dxilconv was built against.
+
+Twenty-eight of the thirty-eight fixtures migrated this session reproduce
+dxilconv's output instruction for instruction; the other ten differ only
+in the above.
