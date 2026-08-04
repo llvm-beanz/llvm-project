@@ -32,13 +32,13 @@
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
@@ -438,8 +438,8 @@ private:
 class Translator {
 public:
   Translator(llvm::LLVMContext &Context, mlir::ModuleOp Source,
-            llvm::ArrayRef<ContainerSignatureElement> RealInputSignature,
-            llvm::ArrayRef<ContainerSignatureElement> RealOutputSignature)
+             llvm::ArrayRef<ContainerSignatureElement> RealInputSignature,
+             llvm::ArrayRef<ContainerSignatureElement> RealOutputSignature)
       : Context(Context), Source(Source),
         Module(std::make_unique<llvm::Module>("dxbc", Context)),
         Builder(Context), AllocaBuilder(Context),
@@ -479,8 +479,7 @@ private:
   /// The dedicated DXIL operation reading each input signature element that
   /// has one, keyed by element index. DXIL names a few system values with
   /// an operation of their own rather than through `loadInput`.
-  llvm::DenseMap<unsigned, std::pair<llvm::StringRef, DXILOp>>
-      SystemValueReads;
+  llvm::DenseMap<unsigned, std::pair<llvm::StringRef, DXILOp>> SystemValueReads;
   /// The `cbufferLoadLegacy` result for each (constant buffer, row, type)
   /// the instruction being translated reads. One legacy load returns a
   /// whole 16-byte row, so an instruction naming several components of one
@@ -792,8 +791,7 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
         if (auto Read = systemValueRead(Kind))
           SystemValueReads[Inputs.elements().size()] = *Read;
         addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN", Kind, 0);
-      }
-      else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
+      } else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
         addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
                             toSemanticKind(Dcl.getName()), 0);
       else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op))
@@ -827,8 +825,7 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
                           IsPixelShader ? DXILSemanticKind::Target
                                         : DXILSemanticKind::Arbitrary,
                           0);
-    }
-    else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSiv>(&Op))
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSiv>(&Op))
       addSignatureElement(Outputs, Dcl.getOperandAttr(), "OUT",
                           toSemanticKind(Dcl.getName()), 0);
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSgv>(&Op))
@@ -845,8 +842,8 @@ void Translator::addRealSignatureElements(
     Element.Row = El.Register;
     Element.StartCol = llvm::countr_zero(El.Mask);
     Element.Cols = llvm::popcount(El.Mask);
-    Element.Kind = toSemanticKind(static_cast<llvm::dxbc::D3DSystemValue>(
-        El.SystemValue));
+    Element.Kind =
+        toSemanticKind(static_cast<llvm::dxbc::D3DSystemValue>(El.SystemValue));
     Element.Name = Element.Kind == DXILSemanticKind::Arbitrary
                        ? El.Name
                        : semanticName(Element.Kind);
@@ -914,8 +911,8 @@ llvm::Value *Translator::coerce(llvm::Value *Value, llvm::Type *Ty) {
 //===----------------------------------------------------------------------===//
 
 llvm::StructType *Translator::handleTy() {
-  if (auto *Existing = llvm::StructType::getTypeByName(Context,
-                                                       "dx.types.Handle"))
+  if (auto *Existing =
+          llvm::StructType::getTypeByName(Context, "dx.types.Handle"))
     return Existing;
   return llvm::StructType::create(Context, {Builder.getPtrTy()},
                                   "dx.types.Handle");
@@ -943,13 +940,13 @@ void Translator::createResourceHandles(dxsa::ModuleOp Shader) {
     unsigned Id = Dcl.getId();
     unsigned Bind = Dcl.getLbound().value_or(Id);
     ConstantBufferRanges[Id] = Range;
-    ConstantBuffers[Id] = emitDXOp(
-        "createHandle", DXILOp::CreateHandle, handleTy(),
-        {llvm::ConstantInt::get(i8Ty(), unsigned(ResourceClass::CBV)),
-         llvm::ConstantInt::get(i32Ty(), Range++),
-         llvm::ConstantInt::get(i32Ty(), Bind),
-         llvm::ConstantInt::get(i1Ty(), 0)},
-        noOverload());
+    ConstantBuffers[Id] =
+        emitDXOp("createHandle", DXILOp::CreateHandle, handleTy(),
+                 {llvm::ConstantInt::get(i8Ty(), unsigned(ResourceClass::CBV)),
+                  llvm::ConstantInt::get(i32Ty(), Range++),
+                  llvm::ConstantInt::get(i32Ty(), Bind),
+                  llvm::ConstantInt::get(i1Ty(), 0)},
+                 noOverload());
   }
 }
 
@@ -1026,8 +1023,7 @@ llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp) {
   // intrinsics flatten that to a single index, which is the name dxilconv
   // gives the promoted value.
   AllocaBuilder.SetInsertPointPastAllocas(EntryFn);
-  Slot = AllocaBuilder.CreateAlloca(Ty, nullptr,
-                                    "dx.v32.r" + llvm::Twine(Key));
+  Slot = AllocaBuilder.CreateAlloca(Ty, nullptr, "dx.v32.r" + llvm::Twine(Key));
   return Slot;
 }
 
@@ -1111,8 +1107,8 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
         : Src.getType() == OperandType::vThreadGroupID
             ? std::make_pair("groupId", DXILOp::GroupId)
             : std::make_pair("threadIdInGroup", DXILOp::ThreadIdInGroup);
-    Result = emitDXOp(Name, DXOp, i32Ty(),
-                      {llvm::ConstantInt::get(i32Ty(), Comp)});
+    Result =
+        emitDXOp(Name, DXOp, i32Ty(), {llvm::ConstantInt::get(i32Ty(), Comp)});
     break;
   }
   case OperandType::vThreadIDInGroupFlattened:
@@ -1245,14 +1241,13 @@ llvm::Function *Translator::dxOp(llvm::StringRef Name, llvm::Type *ReturnTy,
                                  llvm::Type *OverloadTy) {
   // An operation that is not overloaded -- one whose operand types are
   // fixed by the DXIL specification -- is named without a suffix.
-  std::string FullName =
-      OverloadTy ? ("dx.op." + Name + "." +
-                    (OverloadTy->isFloatTy()      ? "f32"
-                     : OverloadTy->isDoubleTy()   ? "f64"
-                     : OverloadTy->isIntegerTy(1) ? "i1"
-                                                  : "i32"))
-                       .str()
-                 : ("dx.op." + Name).str();
+  std::string FullName = OverloadTy ? ("dx.op." + Name + "." +
+                                       (OverloadTy->isFloatTy()      ? "f32"
+                                        : OverloadTy->isDoubleTy()   ? "f64"
+                                        : OverloadTy->isIntegerTy(1) ? "i1"
+                                                                     : "i32"))
+                                          .str()
+                                    : ("dx.op." + Name).str();
   llvm::SmallVector<llvm::Type *, 8> Params;
   Params.push_back(i32Ty()); // the DXIL opcode
   llvm::append_range(Params, Args);
@@ -1281,8 +1276,8 @@ llvm::Value *Translator::emitDXOp(llvm::StringRef Name, DXILOp Op,
   // A void operation is overloaded on its value argument, which is last;
   // `discard`'s `i1` argument is not an overload, it is the operation's
   // fixed signature.
-  llvm::Type *OverloadTy = Overload == noOverload() ? nullptr
-                           : Overload               ? Overload
+  llvm::Type *OverloadTy = Overload == noOverload()      ? nullptr
+                           : Overload                    ? Overload
                            : Name.starts_with("bitcast") ? nullptr
                            : !ReturnTy->isVoidTy()       ? ReturnTy
                            : Name == "discard"           ? nullptr
@@ -1587,16 +1582,16 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
       std::optional<unsigned> SrcReg = registerNumber(Src.getIndex());
       for (unsigned Comp : Comps)
         if (SrcReg)
-          if (std::optional<bool> Float = signatureIsFloat(
-                  Inputs, *SrcReg, sourceComponent(Src, Comp)))
+          if (std::optional<bool> Float =
+                  signatureIsFloat(Inputs, *SrcReg, sourceComponent(Src, Comp)))
             vote(registerNumber(Dst.getIndex()), Comp, *Float);
     } else if (Dst.getType() == OperandType::o &&
                Src.getType() == OperandType::r) {
       std::optional<unsigned> DstReg = registerNumber(Dst.getIndex());
       for (unsigned Comp : Comps)
         if (DstReg)
-          if (std::optional<bool> Float = signatureIsFloat(*&Outputs, *DstReg,
-                                                           Comp))
+          if (std::optional<bool> Float =
+                  signatureIsFloat(*&Outputs, *DstReg, Comp))
             vote(registerNumber(Src.getIndex()), sourceComponent(Src, Comp),
                  *Float);
     }
@@ -1844,8 +1839,9 @@ void Translator::openPendingCaseGroup() {
   Scope &S = Scopes.back();
   if (S.PendingCases.empty())
     return;
-  llvm::BasicBlock *Group = deferredBlock(
-      "switch" + llvm::Twine(S.Id) + ".casegroup" + llvm::Twine(S.CaseGroups++));
+  llvm::BasicBlock *Group =
+      deferredBlock("switch" + llvm::Twine(S.Id) + ".casegroup" +
+                    llvm::Twine(S.CaseGroups++));
   startBlock(Group);
   for (llvm::ConstantInt *Value : S.PendingCases)
     S.Dispatch->addCase(Value, Group);
@@ -1867,8 +1863,7 @@ bool Translator::translateControlFlow(mlir::Operation *Op, bool &Handled) {
     Scope S;
     S.K = Scope::Kind::If;
     S.Id = IfCount++;
-    llvm::BasicBlock *Then =
-        deferredBlock("if" + llvm::Twine(S.Id) + ".then");
+    llvm::BasicBlock *Then = deferredBlock("if" + llvm::Twine(S.Id) + ".then");
     // The false arm is the `else` block when one follows and the
     // construct's exit otherwise, which is only known at the `endif`.
     S.FalseBB = deferredBlock("if" + llvm::Twine(S.Id) + ".else");
@@ -1953,11 +1948,10 @@ bool Translator::translateControlFlow(mlir::Operation *Op, bool &Handled) {
     llvm::Value *Cond = conditional(llvm::isa<dxsa::BreakcNz>(Op));
     if (!Cond)
       return false;
-    llvm::Twine Name = S->K == Scope::Kind::Loop
-                           ? "loop" + llvm::Twine(S->Id) + ".breakc" +
-                                 llvm::Twine(S->Breaks)
-                           : "switch" + llvm::Twine(S->Id) + ".break" +
-                                 llvm::Twine(S->Breaks);
+    llvm::Twine Name =
+        S->K == Scope::Kind::Loop
+            ? "loop" + llvm::Twine(S->Id) + ".breakc" + llvm::Twine(S->Breaks)
+            : "switch" + llvm::Twine(S->Id) + ".break" + llvm::Twine(S->Breaks);
     ++S->Breaks;
     llvm::BasicBlock *Fallthrough = deferredBlock(Name);
     Builder.CreateCondBr(Cond, S->EndBB, Fallthrough);
@@ -2012,16 +2006,16 @@ bool Translator::translateControlFlow(mlir::Operation *Op, bool &Handled) {
       Op->emitError("'dxsa.case' outside of a switch construct");
       return false;
     }
-    llvm::ArrayRef<int32_t> Values = Case.getOperand().getValues32().asArrayRef();
+    llvm::ArrayRef<int32_t> Values =
+        Case.getOperand().getValues32().asArrayRef();
     if (Values.empty()) {
       Op->emitError("'dxsa.case' without a label");
       return false;
     }
     // Consecutive `case`s share one block, so the group is not opened until
     // an instruction other than a `case` follows.
-    Scopes.back().PendingCases.push_back(
-        llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(i32Ty()),
-                               uint32_t(Values[0])));
+    Scopes.back().PendingCases.push_back(llvm::ConstantInt::get(
+        llvm::cast<llvm::IntegerType>(i32Ty()), uint32_t(Values[0])));
     return true;
   }
 
@@ -2101,8 +2095,8 @@ bool Translator::translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
     llvm::Type *Ty = movElementType(Dst, True, Comp);
     if (Ty == floatTy())
       Ty = movElementType(Dst, False, Comp);
-    llvm::Value *Selected = Builder.CreateICmpNE(
-        Test, llvm::ConstantInt::get(i32Ty(), 0));
+    llvm::Value *Selected =
+        Builder.CreateICmpNE(Test, llvm::ConstantInt::get(i32Ty(), 0));
     llvm::Value *Left = readSource(True, Comp, Ty, Op);
     llvm::Value *Right = readSource(False, Comp, Ty, Op);
     if (!Left || !Right)
