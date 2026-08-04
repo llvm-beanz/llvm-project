@@ -4436,3 +4436,52 @@ existed -- not because the request asked for it explicitly.
 - `[feme][dxsa] Let --dxsa-to-llvmir read a real signature from a full DXContainer`
 - `[feme][test] Build full-container.test's ISGN/OSGN from real LegacySignature YAML`
 - `[feme][test] Rewrite indexableoutput1 to use a full DXContainer, not a .ref`
+
+## Session: Fix stale yaml2obj causing check-feme failures
+
+### Symptom
+
+Two FEME lit tests failed with `yaml2obj: error: failed to parse YAML
+input: Invalid argument` / `unknown key 'LegacySignature'`:
+
+- `FEME :: Tools/dxbc-as/full-container.test`
+- `FEME :: Translate/DXBC/indexableoutput1.test`
+
+### Investigation
+
+`LegacySignature` is fully implemented in `DXContainerYAML.h/.cpp` and
+`DXContainerEmitter.cpp` (added in the prior session, see commits above),
+so the YAML key itself is valid. The only way `yaml2obj` could reject it
+is if the binary being invoked was built before that support landed.
+
+Checked `feme/test/CMakeLists.txt`'s `FEME_TEST_DEPENDS` list, which
+`check-feme` depends on before running lit. Both `split-file` and
+`yaml2obj` are used directly by FEME tests (grepped for their usage
+across `feme/test/`), but neither was present in `FEME_TEST_DEPENDS`.
+This matches the user's own hypothesis exactly: `check-feme` wasn't
+declaring all of its testing tool dependencies, so `ninja check-feme`
+could run lit against a stale `yaml2obj` that didn't know about
+`LegacySignature`.
+
+### Fix
+
+Added `split-file` and `yaml2obj` to `FEME_TEST_DEPENDS` in
+`feme/test/CMakeLists.txt`.
+
+### Verification
+
+Reconfigured the existing `build/` (ccache + `LLVM_ENABLE_ASSERTIONS=ON`
+already on) with `cmake .`, then ran `ninja check-feme`. Ninja relinked
+`yaml2obj` as part of the dependency graph, and the full suite passed:
+
+```
+Total Discovered Tests: 570
+  Passed: 570 (100.00%)
+```
+
+No design document changes were needed; this was purely a missing CMake
+dependency declaration, not a deviation from `feme/docs/Design.md`.
+
+### Commit
+
+- `[feme] Add split-file and yaml2obj to check-feme test dependencies`
