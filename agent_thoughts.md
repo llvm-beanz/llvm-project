@@ -3949,3 +3949,240 @@ plus `feme::detectFormat` content-based format detection; and a docs-only
 update to `Design.md`/`CommandGuide/feme.md`/`CommandGuide/feme-translate.md`
 reflecting both flag removals (plus a `Driver.h` doc comment the second
 commit missed). This entry is a fourth, separate commit.
+
+---
+
+# Agent thoughts: DXBC assembly coverage and the DXBC -> DXIL translation
+
+This entry covers the work that took `feme/test/Translate/DXBC` (DXC's
+`dxilconv` test corpus, checked in as `.dxasm` fxc disassembly plus `.ref`
+reference DXIL) from "nothing assembles" to "everything assembles, and a
+first slice translates all the way to DXIL".
+
+## Part 1: making `dxbc-as` accept real `fxc` output
+
+### Approach
+
+I started by measuring rather than guessing: a loop over all 138 `.dxasm`
+files, bucketing `dxbc-as`'s first error per file. That gave a ranked list
+of missing constructs instead of a pile of anecdotes, and I re-ran it after
+every change so I always knew both what was left and whether I had
+regressed anything. The counts went 0/138 passing -> 54 -> 79 -> 107 ->
+133 -> 138.
+
+The second measurement mattered more. 127 of the 138 shaders already
+existed in the tree as hand-migrated fixtures under
+`feme/test/Target/DXSA/hlsl`, written in `dxbc-as`'s own syntax. So for
+each pair I assembled both spellings and compared the resulting bytecode
+byte-for-byte. That is a far stronger check than "it parses": it says the
+new syntax means the *same thing* as the syntax the existing test suite
+already validates. 122 of 127 came out byte-identical, and every one of the
+five that did not turned out to be a real bug (see below) rather than a
+tolerable difference. Without that comparison I would have shipped several
+silently-wrong encodings that still round-tripped through their own tests.
+
+### What `fxc` spells differently
+
+`dxbc-as` already covered the whole SM4/SM5 instruction set, but in a
+normalized syntax of its own. Real `fxc` disassembly differs in five
+layers, which is how I split the commits:
+
+1. **The program header.** `fxc` opens with a bare profile name (`ps_5_0`)
+   where `dxbc-as` has a `.shader_model pixel 5 0` directive.
+2. **Keyword spellings.** `fxc` writes several enumerated control fields as
+   trailing keywords (`dcl_sampler s0, mode_comparison`) where `dxbc-as`
+   folds them into the mnemonic (`dcl_sampler_comparison`); names the SM5.1
+   extension global flags with an `11_1` infix; spells system values in
+   snake_case (`rendertarget_array_index`); and writes a declaration's
+   register space as `space=<n>`.
+3. **Mnemonic suffixes.** `sync`'s memory-scope flags, a UAV's
+   order-preserving counter, an interface's dynamic-indexed bit, and the
+   extended opcode tokens (`_aoffimmi`/`_indexable`, whose parenthesized
+   arguments follow the mnemonic) are all part of the mnemonic in `fxc`
+   output.
+4. **Operand syntax.** SM5.1 upper-cases the bindable storage classes and
+   writes a binding range as `[lower:upper]`; `{<from> as <to>}` records a
+   minimum-precision conversion; `[X + 0]` is how a purely relative index
+   prints.
+5. **Statement forms.** `dcl_indexrange`'s separator-less count,
+   `dcl_hs_max_tessfactor`'s `l(...)` wrapper, an immediate constant
+   buffer's per-row braces, the bracketed `[precise]` mask, multi-word
+   interpolation modes, and the symbolically-named interface declarations
+   (`dcl_function_table ft0 = {fb0}`).
+
+Design decisions worth recording:
+
+- **Both spellings are accepted, neither is privileged.** The existing
+  `dxbc-as` syntax stays valid because ~390 migrated `dxsa` tests use it,
+  and because its escape hatches (`.dword`, `.shader_model`) exist for
+  fixtures `fxc` cannot express. This is additive, not a replacement.
+- **Control keywords resolve to the canonical mnemonic, not to raw bits.**
+  My first cut had `mode_comparison` OR its control bit into
+  `Instruction::Controls` and push the keyword onto `Instruction::Keywords`
+  so `AsmPrinter` could echo it. That broke the assembler's round-trip
+  property: `AsmPrinter` prints keywords *before* the operands, producing
+  `dcl_sampler mode_comparison s0`, which does not re-parse. Resolving the
+  keyword to `Opcode::DclSamplerComparison` instead means there is exactly
+  one canonical spelling per control value and the printer needs no changes
+  at all.
+- **`[X + 0]` is the purely relative index representation.** `fxc` always
+  prints an immediate next to a relative index, so `v[r0.x + 0]` and
+  `v[r0.x + 2]` look like the same shape but are not: the first is
+  `D3D10_SB_OPERAND_INDEX_RELATIVE` and the second
+  `..._IMMEDIATE32_PLUS_RELATIVE`. The hand-migrated fixtures, which were
+  derived from real bytecode, pin this down. This is genuinely ambiguous in
+  `fxc`'s output -- a real `IMMEDIATE32_PLUS_RELATIVE` with a zero
+  immediate is indistinguishable -- but that encoding does not occur in
+  practice and the zero-immediate form is strictly smaller.
+- **A binding range implies a four-component swizzled operand.** SM5.1
+  declaration operands carry a full `.xyzw` swizzle that `fxc` leaves
+  implicit. Rather than special-case each `dcl_*` mnemonic, the rule keys
+  off the `[lo:hi]` syntax itself, which only appears in exactly those
+  declarations.
+
+### Bugs the byte-comparison found
+
+Three, all pre-existing and all committed separately:
+
+1. **`sample_c_lz_s`'s operand count.** `dxbc-as` gave
+   `D3D11_SB_OPCODE_SAMPLE_C_LZ_S` five sources. It has four: it samples at
+   LOD zero, so unlike the `_cl_s` opcodes it has no LOD clamp -- which is
+   also why its mnemonic has no `cl`. Real `fxc` output confirms it (six
+   operands, not seven). I added a test asserting the invariant across the
+   whole SM5.1 `_s` feedback family: each takes the sources of the opcode
+   it shadows plus one destination.
+2. **The same bug in the `dxsa` dialect and importer.** `dxsa.sample_c_lz_s`
+   modelled the extra operand as a clamp+feedback pair. Fixing it let the
+   importer decode a real `sample_c_lz_s` that
+   `test/Target/DXSA/hlsl/sample_cmp2.dxasm` had previously been forced to
+   spell as raw `.dword` tokens -- a nice confirmation, since those tokens
+   came from real bytecode and now decode to exactly the instruction `fxc`
+   prints.
+3. **64-bit immediates were byte-swapped.** The tokenized format stores an
+   `IMMEDIATE64` component as two DWORDs, low half first; both `dxbc-as`'s
+   encoder and the `dxsa` `BinaryParser` had them the other way round. The
+   halves being consistently swapped on *both* sides hid the bug in every
+   round-trip test -- the fixtures had simply been written with the halves
+   pre-swapped to compensate. `dxilconv`'s reference output is what settled
+   it: `double6.ref` says the constant `double6.dxasm` spelled
+   `d(0x0000000040200000)` is `8.0` (`0x4020000000000000`). This is the
+   clearest argument for having a second, independent source of truth in
+   the test corpus at all.
+
+### Known limitations of the `fxc` text form
+
+- **`fxc` prints doubles with six decimal places.** `double1.dxasm` says
+  `d(1.770000l)` for a constant that is really `0x3FFC51EB80000000`
+  (1.7699999809265137, a float-precision value widened to double). Round
+  tripping through the text loses those bits. Nothing to fix in `dxbc-as`;
+  it is a property of the input, and worth knowing when these fixtures are
+  used to check numeric results.
+- **`fcall`'s interface operand.** The hand-migrated `interface1` fixture
+  spelled `fcall` with a dummy operand plus raw trailing DWORDs, because
+  the old parser could not express an interface operand. `fxc` writes
+  `fcall fp0[r0.x + 0][0]`, which reads naturally as three indices, while
+  the old fixture's operand token encodes two. I took the natural reading;
+  the two disagree and I could not resolve which matches real bytecode
+  without a real `DXContainer` to decode.
+- **`samplepos`.** The migrated fixture carries a trailing DWORD past the
+  operands that `fxc`'s output does not. Both assemble; they are different
+  instructions. Not investigated further.
+
+## Part 2: DXBC -> DXIL
+
+### Why a translator and not a conversion pass
+
+Everywhere else FeMe converts between representations it uses MLIR's
+dialect conversion machinery. Here I wrote a direct walk
+(`feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp`, registered as
+`feme-translate --dxsa-to-llvmir`) instead, because the target is
+`llvm::Module`, not another dialect, and because DXBC and DXIL are both
+flat instruction streams over a fixed register file. There is no pattern
+matching to do: the mapping is one dxsa op to one or four LLVM
+computations, in order.
+
+The essential structural difference between the formats is **width**. DXBC
+is a 4-component-vector ISA; DXIL is scalar. So every instruction expands
+to one computation per component its destination write mask enables,
+reading each source through that component's swizzle. Signature registers
+are never materialized as variables: an input read becomes a
+`dx.op.loadInput` call and an output write a `dx.op.storeOutput` call. That
+is precisely what makes the output DXIL rather than generic LLVM IR --
+everything DXIL spells with a native LLVM instruction (`fadd`, `shl`,
+`sitofp`, `icmp`) is emitted as one, and only what DXIL models as a
+`dx.op.*` call becomes a call.
+
+### Using the `.ref` files
+
+The task framing -- "translate the `.ref` files into FileCheck check lines"
+-- is what made this tractable to get *right* rather than merely
+plausible. `dxilconv`'s output is ground truth for the semantics, so my
+workflow was: translate a fixture, `diff` the function body against the
+`.ref`, and treat every difference as a question to answer rather than
+noise to tolerate. That found four real behaviours I would otherwise have
+got wrong:
+
+- **Per-instruction source CSE.** `mov o0.xyzw, |v0.yxxx|` names `v0.x`
+  three times. `dxilconv` emits two `loadInput` calls, not four: reads are
+  deduplicated per (operand, component) *within* an instruction, but not
+  across instructions. My first version emitted four.
+- **Where the fast-math flags go.** `dxilconv` puts `fast` on the native
+  arithmetic and on nothing else -- not on `dx.op` calls, not on casts. A
+  `dx.op` call names a specific operation with fixed semantics, so relaxing
+  it would be meaningless; a cast has no floating-point semantics to relax.
+- **Shift-amount masking.** DXBC shifts use only the low five bits of the
+  count, where LLVM leaves an out-of-range shift poison. `shift1.ref`'s
+  `ishl r0.x, v0.x, l(77)` becomes `shl i32 %0, 13`.
+- **`ftoi`/`ftou` of a literal.** DXBC clamps an out-of-range or NaN
+  conversion; LLVM's constant folder produces poison. `bad_ftoi.ref` wants
+  `ftou` of `FLT_MAX` to be `-1` (`UINT_MAX`), so literals have to be
+  folded in the translator rather than left to LLVM.
+
+I also chose to make the translator *fail loudly* on anything it does not
+model, rather than degrade. That is why `min16f`/`min16i`/`min16u`
+operands are rejected: at one point the `minprec*` fixtures "translated"
+successfully and produced entirely reasonable-looking IR that silently did
+32-bit arithmetic where `dxilconv` does 16-bit. Emitting confidently wrong
+IR is worse than emitting none.
+
+### Known differences from `dxilconv`
+
+Twenty-one fixtures now carry `FileCheck` lines derived from `dxilconv`'s
+reference output and their `.ref` files are gone. Where my output differs
+from `dxilconv`'s:
+
+- **Signature element names and component types are synthesized, not
+  read.** `dxilconv` gets them from the `DXContainer`'s `ISGN`/`OSGN`
+  parts. A `.dxasm` file has no `ISGN` -- the names only appear in the
+  human-readable comment header -- so I synthesize `IN0`, `IN1`, `OUT0`
+  from the declaration order and use `SV_`-prefixed names for system
+  values. Component type is always `F32` for the same reason. This is a
+  property of the *test fixture format*, not of the translation: a real
+  `DXContainer` input would carry the signature and the difference would
+  disappear. It is also why two fixtures
+  (`indexableoutput1`, `output4`) that otherwise translate cleanly are not
+  yet checked in as tests -- their signature element *indices* differ from
+  `dxilconv`'s because its `OSGN` has elements my synthesis does not
+  invent.
+- **Shader model.** `dxilconv` emits SM6.0 regardless of the DXBC version,
+  and so do I, but I emit shader-flag `0` where `dxilconv` emits `256`;
+  the flag word is derived from container-level information a bare `SHEX`
+  does not carry.
+- **`fneg` vs `fsub -0.0, x`.** I match `dxilconv` and emit the `fsub`
+  form, because DXIL is a frozen LLVM 3.7 dialect that predates the `fneg`
+  instruction.
+- **Float literal printing.** `constoperand1` shows `float 1.234500e-01`
+  where `dxilconv` prints `float 0x3FBF9A6B60000000`. Same value, different
+  shortest-round-trip choice by LLVM's printer.
+
+### What is left
+
+In rough dependency order: minimum-precision operands, control flow
+(`if`/`loop`/`switch`, and the `dx.op.tempRegLoad`/`tempRegStore` spilling
+`dxilconv` uses when a temp is live across a branch), `movc` (which the
+`dxsa` dialect does not model yet -- the importer falls back to
+`dxsa.instruction`), constant buffers, resources and samplers, indexable
+temps, group-shared memory, and the stage-specific declarations. That is
+117 of the 138 fixtures. Each is an increment on the same skeleton rather
+than a redesign, which is why I stopped at a working slice with real tests
+rather than a broader but unverified one.
