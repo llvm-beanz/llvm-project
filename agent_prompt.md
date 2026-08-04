@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -20,16 +20,14 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-I've added a bunch of test collateral under feme/test/Translate/DXBC. There are
-two types of files I've added, dxasm files and ".ref" files that are LLVM IR.
-These files come from the test data for DXC's dxilconv tool.
+You noted that some of the dxilconv tests (and surely other DXBC test cases)
+depend on data from other parts of the DXContainer file format.
 
-I'd like you to first ensure that the dxbc assembler can handle all the dxasm
-files.
+Can you use the ObjectYAML and yaml2obj tooling from LLVM to construct those
+DXContainer components and merge the generated DXBC into a whole container using
+llvm-objcopy?
 
-Then I'd like you to use these files as test data to implement the DXBC->DXIL
-translation. As you work through these issues translate the ".ref" files into
-FileCheck check lines in the dxasm files. The translation doesn't need to
-identically match DXC's dxilconv's translation, but they should semantically
-match, and if there are known differences I'd like you to note them in your
-thoughts.
+This would allow our tests to more comprehensively cover the use cases.
+
+You could also use LLVM's split-file tool to group the YAML and dxasm into a
+single file to make tests self-contained.
