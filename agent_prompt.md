@@ -20,14 +20,11 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-You noted that some of the dxilconv tests (and surely other DXBC test cases)
-depend on data from other parts of the DXContainer file format.
+Some of the tests in feme/test/Translate/DXBC still have ".ref" files. My
+understanding is that those were left behind because the dxasm didn't fully
+capture the container metadata required to generate correct transformations to
+DXIL.
 
-Can you use the ObjectYAML and yaml2obj tooling from LLVM to construct those
-DXContainer components and merge the generated DXBC into a whole container using
-llvm-objcopy?
-
-This would allow our tests to more comprehensively cover the use cases.
-
-You could also use LLVM's split-file tool to group the YAML and dxasm into a
-single file to make tests self-contained.
+Please work through those test cases, updating LLVM's objectyaml tooling as
+necessary so that these tests can be rewritten in the style of
+feme/test/Tools/dxbc-as/full-container.test.
