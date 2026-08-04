@@ -1,0 +1,39 @@
+## Check that --update-section replaces the contents of an existing DXBC part
+## in place, without changing the container's part count or ordering.
+##
+## obj2yaml intentionally does not surface the raw bytes of parts it has no
+## structural model for, so this is checked by inspecting the emitted bytes
+## and the part names/sizes obj2yaml does report.
+
+# RUN: yaml2obj %s -o %t.dxbc
+# RUN: echo -n -e '\x11\x22\x33\x44' > %t.isgn
+# RUN: llvm-objcopy --update-section=ISGN=%t.isgn %t.dxbc %t2.dxbc
+# RUN: obj2yaml %t2.dxbc | FileCheck %s
+# RUN: od -A n -t x1 %t2.dxbc | tr -d '\n' | FileCheck %s --check-prefix=BYTES
+
+--- !dxcontainer
+Header:
+  Hash:            [ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+                     0x0, 0x0, 0x0, 0x0, 0x0, 0x0 ]
+  Version:
+    Major:           1
+    Minor:           0
+  PartCount:       2
+Parts:
+  - Name:            ISGN
+    Size:            4
+    PrivateData:     [ 0xAA, 0xBB, 0xCC, 0xDD ]
+  - Name:            SHEX
+    Size:            2
+    PrivateData:     [ 0x01, 0x02 ]
+...
+
+# CHECK:      Parts:
+# CHECK-NEXT:   - Name:            ISGN
+# CHECK-NEXT:     Size:            4
+# CHECK-NEXT:   - Name:            SHEX
+# CHECK-NEXT:     Size:            2
+
+## `ISGN`, size 4, its replaced bytes, then unchanged `SHEX`, size 2.
+# BYTES: 49 53 47 4e 04 00 00 00 11 22 33 44 53 48 45 58 02 00 00 00 01 02
+

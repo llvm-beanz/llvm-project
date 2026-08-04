@@ -9,6 +9,7 @@
 #include "llvm/ObjCopy/DXContainer/DXContainerObjcopy.h"
 #include "DXContainerReader.h"
 #include "DXContainerWriter.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/BinaryFormat/DXContainer.h"
 #include "llvm/ObjCopy/CommonConfig.h"
 #include "llvm/ObjCopy/DXContainer/DXContainerConfig.h"
@@ -114,6 +115,35 @@ static Error handleArgs(const CommonConfig &Config, Object &Obj) {
 
   if (auto E = Obj.removeParts(RemovePred))
     return E;
+
+  // Update the contents of an existing part in place.
+  for (const NewSectionInfo &NewSection : Config.UpdateSection) {
+    auto *PartIter = llvm::find_if(Obj.Parts, [&NewSection](const Part &P) {
+      return P.Name == NewSection.SectionName;
+    });
+    if (PartIter == Obj.Parts.end())
+      return createFileError(Config.InputFilename,
+                             std::make_error_code(std::errc::invalid_argument),
+                             "part '%s' not found",
+                             NewSection.SectionName.str().c_str());
+    PartIter->Data =
+        arrayRefFromStringRef(NewSection.SectionData->getBuffer());
+  }
+
+  // Add a new part, e.g. to merge in the raw bytecode part produced by
+  // dxbc-as with the other parts (signatures, resource bindings, ...) of a
+  // legacy DXBC container authored via yaml2obj.
+  for (const NewSectionInfo &NewSection : Config.AddSection) {
+    if (NewSection.SectionName.size() != 4)
+      return createFileError(
+          Config.InputFilename,
+          std::make_error_code(std::errc::invalid_argument),
+          "DXContainer part name '%s' must be exactly 4 characters",
+          NewSection.SectionName.str().c_str());
+    Obj.Parts.push_back(
+        {NewSection.SectionName,
+         arrayRefFromStringRef(NewSection.SectionData->getBuffer())});
+  }
 
   Obj.recomputeHeader();
   return Error::success();

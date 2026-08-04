@@ -128,13 +128,12 @@ ConfigManager::getDXContainerConfig() const {
   // object files and will be silently ignored.
   if (!Common.AddGnuDebugLink.empty() || !Common.SplitDWO.empty() ||
       !Common.AllocSectionsPrefix.empty() ||
-      Common.DiscardMode != DiscardType::None || !Common.AddSection.empty() ||
-      !Common.KeepSection.empty() || !Common.SectionsToRename.empty() ||
-      !Common.SetSectionAlignment.empty() || !Common.SetSectionFlags.empty() ||
-      !Common.SetSectionType.empty() || Common.ExtractDWO ||
-      Common.OnlyKeepDebug || Common.StripAllGNU || Common.StripDWO ||
-      Common.StripDebug || Common.StripNonAlloc || Common.StripSections ||
-      Common.StripUnneeded ||
+      Common.DiscardMode != DiscardType::None || !Common.KeepSection.empty() ||
+      !Common.SectionsToRename.empty() || !Common.SetSectionAlignment.empty() ||
+      !Common.SetSectionFlags.empty() || !Common.SetSectionType.empty() ||
+      Common.ExtractDWO || Common.OnlyKeepDebug || Common.StripAllGNU ||
+      Common.StripDWO || Common.StripDebug || Common.StripNonAlloc ||
+      Common.StripSections || Common.StripUnneeded ||
       Common.CompressionType != DebugCompressionType::None ||
       !Common.compressSections.empty() || Common.DecompressDebugSections ||
       Common.GapFill != 0 || Common.PadTo != 0 ||

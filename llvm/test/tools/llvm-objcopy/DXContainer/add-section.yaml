@@ -1,0 +1,38 @@
+## Check that --add-section merges a new DXBC part into a container. This is
+## the mechanism used to combine a legacy DXBC container's structural parts
+## (e.g. ISGN/OSGN, authored via yaml2obj) with a raw bytecode part (e.g. SHEX,
+## produced separately by an assembler such as dxbc-as) into one file.
+##
+## obj2yaml intentionally does not surface the raw bytes of parts it has no
+## structural model for, so this is checked by inspecting the emitted bytes
+## and the part names/sizes obj2yaml does report.
+
+# RUN: yaml2obj %s -o %t.dxbc
+# RUN: echo -n -e '\x11\x22\x33\x44' > %t.shex
+# RUN: llvm-objcopy --add-section=SHEX=%t.shex %t.dxbc %t2.dxbc
+# RUN: obj2yaml %t2.dxbc | FileCheck %s
+# RUN: od -A n -t x1 %t2.dxbc | tr -d '\n' | FileCheck %s --check-prefix=BYTES
+
+--- !dxcontainer
+Header:
+  Hash:            [ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+                     0x0, 0x0, 0x0, 0x0, 0x0, 0x0 ]
+  Version:
+    Major:           1
+    Minor:           0
+  PartCount:       1
+Parts:
+  - Name:            ISGN
+    Size:            4
+    PrivateData:     [ 0xAA, 0xBB, 0xCC, 0xDD ]
+...
+
+# CHECK:      Parts:
+# CHECK-NEXT:   - Name:            ISGN
+# CHECK-NEXT:     Size:            4
+# CHECK-NEXT:   - Name:            SHEX
+# CHECK-NEXT:     Size:            4
+
+## `ISGN`, size 4, its original bytes, then `SHEX`, size 4, the merged bytes.
+# BYTES: 49 53 47 4e 04 00 00 00 aa bb cc dd 53 48 45 58 04 00 00 00 11 22 33 44
+

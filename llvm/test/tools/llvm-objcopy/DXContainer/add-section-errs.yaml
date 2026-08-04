@@ -1,0 +1,22 @@
+## Check that --add-section rejects part names that are not exactly 4
+## characters, since DXContainer part names (FourCCs) are a fixed size.
+
+# RUN: yaml2obj %s -o %t.dxbc
+# RUN: echo -n -e '\x11\x22\x33\x44' > %t.bin
+# RUN: not llvm-objcopy --add-section=TOOLONGNAME=%t.bin %t.dxbc %t2.dxbc 2>&1 | FileCheck %s
+
+# CHECK: error: '{{.*}}dxbc': DXContainer part name 'TOOLONGNAME' must be exactly 4 characters
+
+--- !dxcontainer
+Header:
+  Hash:            [ 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+                     0x0, 0x0, 0x0, 0x0, 0x0, 0x0 ]
+  Version:
+    Major:           1
+    Minor:           0
+  PartCount:       1
+Parts:
+  - Name:            ISGN
+    Size:            4
+    PrivateData:     [ 0xAA, 0xBB, 0xCC, 0xDD ]
+...
