@@ -39,6 +39,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 
 #include <cmath>
@@ -93,6 +95,9 @@ enum class DXILOp : unsigned {
   Dot2 = 54,
   Dot3 = 55,
   Dot4 = 56,
+  Discard = 82,
+  BitcastI32toF32 = 126,
+  BitcastF32toI32 = 127,
 };
 
 /// `DXIL::ComponentType`, as stored in a signature element's metadata.
@@ -408,8 +413,11 @@ private:
   /// The type inferred for each temp register component; see
   /// `inferTempTypes`.
   llvm::DenseMap<uint64_t, llvm::Type *> TempTypes;
-  /// Insertion point for `Temps`' allocas, pinned to the entry block.
+  /// Insertion point for `Temps`' allocas, pinned to the top of the entry
+  /// block so that they precede every use no matter where the instruction
+  /// that first needed the slot lives.
   llvm::IRBuilder<> AllocaBuilder;
+  llvm::Function *EntryFn = nullptr;
   /// Values already read for the instruction being translated, keyed by the
   /// source operand, the component it reads and the type it is read at. A
   /// DXBC instruction may name the same source component several times
@@ -419,6 +427,41 @@ private:
       SourceCache;
   /// Shader stage name for `!dx.shaderModel` ("ps", "vs", ...).
   llvm::StringRef Stage = "ps";
+
+  /// One entry per open `if`, `loop` or `switch` construct. DXBC control
+  /// flow is structured and properly nested, so a stack is all the state
+  /// the branch targets need.
+  struct Scope {
+    enum class Kind { If, Loop, Switch };
+    Kind K;
+    unsigned Id = 0;
+    /// The construct's exit, and the target of `break` in a loop or switch.
+    llvm::BasicBlock *EndBB = nullptr;
+    /// `if`: the false arm, which becomes `EndBB` when there is no `else`.
+    llvm::BasicBlock *FalseBB = nullptr;
+    bool SawElse = false;
+    /// `loop`: the block a new iteration starts at, and `continue`'s target.
+    llvm::BasicBlock *HeaderBB = nullptr;
+    /// `switch`: the dispatch, and its as-yet-unattached default arm.
+    llvm::SwitchInst *Dispatch = nullptr;
+    llvm::BasicBlock *DefaultBB = nullptr;
+    /// `switch`: the case values naming the group about to be opened.
+    llvm::SmallVector<llvm::ConstantInt *, 4> PendingCases;
+    unsigned CaseGroups = 0;
+    /// `loop`/`switch`: how many `break`s have been seen, which is what
+    /// numbers the fall-through block a conditional `break` needs.
+    unsigned Breaks = 0;
+    unsigned Continues = 0;
+  };
+  llvm::SmallVector<Scope, 4> Scopes;
+  unsigned IfCount = 0;
+  unsigned LoopCount = 0;
+  unsigned SwitchCount = 0;
+  unsigned RetcCount = 0;
+  /// Blocks created but not yet inserted into the function; a block is
+  /// inserted only when translation reaches it, which is what puts them in
+  /// the order dxilconv emits.
+  llvm::SmallVector<llvm::BasicBlock *, 8> Pending;
 
   llvm::Type *floatTy() { return llvm::Type::getFloatTy(Context); }
   llvm::Type *i32Ty() { return llvm::Type::getInt32Ty(Context); }
@@ -484,6 +527,40 @@ private:
 
   bool translateBody(dxsa::ModuleOp Shader);
   bool translateInstruction(mlir::Operation *Op);
+  /// Translates the control-flow instructions, which are the ones that
+  /// need the block structure rather than a value computation. Sets
+  /// \p Handled when \p Op was one of them.
+  bool translateControlFlow(mlir::Operation *Op, bool &Handled);
+  bool translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
+                     SrcOperandAttr Cond, SrcOperandAttr True,
+                     SrcOperandAttr False, bool Saturate);
+
+  //===--------------------------------------------------------------------===//
+  // Blocks
+  //===--------------------------------------------------------------------===//
+
+  /// Creates a block that is inserted into the function only once
+  /// translation reaches it (see `Pending`).
+  llvm::BasicBlock *deferredBlock(const llvm::Twine &Name);
+  /// Appends \p BB to the function and continues emitting into it.
+  void startBlock(llvm::BasicBlock *BB);
+  /// Terminates the current block with a branch to \p BB, unless it is
+  /// already terminated -- which it is when a `break`, `continue` or `ret`
+  /// left the rest of the construct unreachable.
+  void branchTo(llvm::BasicBlock *BB);
+  /// Reads \p Cond as the i1 an LLVM branch, `select` or `dx.op.discard`
+  /// wants. \p TestNonZero picks between the `_nz` and `_z` spellings.
+  llvm::Value *readCondition(SrcOperandAttr Cond, bool TestNonZero,
+                             mlir::Operation *Op);
+  /// Returns the innermost scope a `break` applies to, or null (having
+  /// emitted a diagnostic) if there is none.
+  Scope *breakScope(mlir::Operation *Op);
+  /// Returns the innermost enclosing loop, or null (having emitted a
+  /// diagnostic) if there is none.
+  Scope *loopScope(mlir::Operation *Op);
+  /// Opens the `switch` case group named by the case values accumulated so
+  /// far, if any are pending.
+  void openPendingCaseGroup();
   bool translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
                       SrcOperandAttr Src, bool Saturate);
   bool translateBinary(mlir::Operation *Op, DstOperandAttr Dst,
@@ -535,6 +612,12 @@ private:
   /// values keep the slot's name, so a temp live across a branch surfaces
   /// as a `dx.v32.r<n>.<m>` phi node.
   void promoteTemps(llvm::Function &Entry);
+  /// Recovers the `i1` a comparison produced from the 32-bit boolean mask
+  /// DXBC stores it as. A DXBC condition is a full-width all-ones/all-zeroes
+  /// mask, so a test of one against zero is exactly the comparison that
+  /// produced it -- but only once the temp register carrying it has been
+  /// promoted, which is why this runs after `promoteTemps`.
+  void foldConditionMasks(llvm::Function &Entry);
 
   void emitMetadata(llvm::Function *Entry);
   llvm::MDNode *emitSignature(const Signature &Sig);
@@ -674,6 +757,24 @@ Translator::destinationComponents(DstOperandAttr Dst) {
 llvm::Value *Translator::coerce(llvm::Value *Value, llvm::Type *Ty) {
   if (!Value || Value->getType() == Ty)
     return Value;
+  // Re-interpreting a value back at the type it was produced at is not a
+  // conversion at all; DXBC's typeless registers make those round trips
+  // common enough to be worth not emitting.
+  if (auto *Call = llvm::dyn_cast<llvm::CallInst>(Value))
+    if (Call->arg_size() == 2 && Call->getArgOperand(1)->getType() == Ty &&
+        Call->getCalledFunction() &&
+        Call->getCalledFunction()->getName().starts_with("dx.op.bitcast"))
+      return Call->getArgOperand(1);
+  // A literal has no runtime representation to reinterpret; its bits are
+  // just written the other way round.
+  if (auto *Constant = llvm::dyn_cast<llvm::Constant>(Value))
+    return llvm::ConstantExpr::getBitCast(Constant, Ty);
+  // DXIL predates LLVM's own `bitcast` between these types being legal in
+  // a shader, and names the reinterpretation as an operation instead.
+  if (Value->getType()->isFloatTy() && Ty->isIntegerTy(32))
+    return emitDXOp("bitcastF32toI32", DXILOp::BitcastF32toI32, Ty, {Value});
+  if (Value->getType()->isIntegerTy(32) && Ty->isFloatTy())
+    return emitDXOp("bitcastI32toF32", DXILOp::BitcastI32toF32, Ty, {Value});
   return Builder.CreateBitCast(Value, Ty);
 }
 
@@ -687,6 +788,7 @@ llvm::AllocaInst *Translator::tempSlot(unsigned Reg, unsigned Comp) {
   // DXBC numbers a temp by register and component; DXIL's own temp-register
   // intrinsics flatten that to a single index, which is the name dxilconv
   // gives the promoted value.
+  AllocaBuilder.SetInsertPointPastAllocas(EntryFn);
   Slot = AllocaBuilder.CreateAlloca(Ty, nullptr,
                                     "dx.v32.r" + llvm::Twine(Key));
   return Slot;
@@ -825,12 +927,24 @@ bool Translator::writeDestination(DstOperandAttr Dst,
         unsupported(Op) << ": write to an undeclared output register";
         return false;
       }
-      unsigned Col = Comp - Outputs.elements()[*Element].StartCol;
+      const SignatureElement &Info = Outputs.elements()[*Element];
+      unsigned Col = Comp - Info.StartCol;
+      // A signature element's component type says what the store is
+      // overloaded on -- but only a real container carries it. A type
+      // synthesized from declarations alone would just be `F32` for every
+      // element (see feme/docs/Design.md), so the value's own type is the
+      // better guess.
+      llvm::Value *Value =
+          RealOutputSignature.empty()
+              ? Components[I]
+              : coerce(Components[I], Info.Type == DXILComponentType::F32
+                                          ? floatTy()
+                                          : i32Ty());
       emitDXOp("storeOutput", DXILOp::StoreOutput,
                llvm::Type::getVoidTy(Context),
                {llvm::ConstantInt::get(i32Ty(), *Element),
                 llvm::ConstantInt::get(i32Ty(), 0),
-                llvm::ConstantInt::get(i8Ty(), Col), Components[I]});
+                llvm::ConstantInt::get(i8Ty(), Col), Value});
     }
     return true;
   }
@@ -847,11 +961,16 @@ bool Translator::writeDestination(DstOperandAttr Dst,
 llvm::Function *Translator::dxOp(llvm::StringRef Name, llvm::Type *ReturnTy,
                                  llvm::ArrayRef<llvm::Type *> Args,
                                  llvm::Type *OverloadTy) {
-  llvm::StringRef Suffix = OverloadTy->isFloatTy()      ? "f32"
-                           : OverloadTy->isDoubleTy()   ? "f64"
-                           : OverloadTy->isIntegerTy(1) ? "i1"
-                                                        : "i32";
-  std::string FullName = ("dx.op." + Name + "." + Suffix).str();
+  // An operation that is not overloaded -- one whose operand types are
+  // fixed by the DXIL specification -- is named without a suffix.
+  std::string FullName =
+      OverloadTy ? ("dx.op." + Name + "." +
+                    (OverloadTy->isFloatTy()      ? "f32"
+                     : OverloadTy->isDoubleTy()   ? "f64"
+                     : OverloadTy->isIntegerTy(1) ? "i1"
+                                                  : "i32"))
+                       .str()
+                 : ("dx.op." + Name).str();
   llvm::SmallVector<llvm::Type *, 8> Params;
   Params.push_back(i32Ty()); // the DXIL opcode
   llvm::append_range(Params, Args);
@@ -876,8 +995,13 @@ llvm::Value *Translator::emitDXOp(llvm::StringRef Name, DXILOp Op,
     ArgTys.push_back(Arg->getType());
     CallArgs.push_back(Arg);
   }
-  // A void operation is overloaded on its value argument, which is last.
-  llvm::Type *OverloadTy = ReturnTy->isVoidTy() ? ArgTys.back() : ReturnTy;
+  // A void operation is overloaded on its value argument, which is last;
+  // `discard`'s `i1` argument is not an overload, it is the operation's
+  // fixed signature.
+  llvm::Type *OverloadTy = Name.starts_with("bitcast") ? nullptr
+                           : !ReturnTy->isVoidTy()      ? ReturnTy
+                           : Name == "discard"          ? nullptr
+                                                        : ArgTys.back();
   // A dx.op call names a specific operation with fixed semantics; the
   // relaxed floating-point rules apply to the native LLVM arithmetic the
   // translation emits around it, not to the call itself.
@@ -1068,20 +1192,19 @@ static std::optional<OpLowering> lookupLowering(llvm::StringRef Name) {
   return It->second;
 }
 
-/// Returns whether \p Op's operands and result are floating point, or
-/// nullopt when the instruction imposes no type on them (`mov` and the
-/// conditional moves copy bits) or is not modelled at all.
-static std::optional<bool> hasFloatOperands(llvm::StringRef Name) {
+/// Returns how \p Op types its operands and its result, or nullopt when the
+/// instruction imposes no type on either (`mov` and the conditional moves
+/// copy bits) or is not modelled at all. A comparison reads floating point
+/// and writes an integer mask, so the two are tracked separately.
+static std::optional<OpLowering> typedLowering(llvm::StringRef Name) {
   Name.consume_back("_sat");
   if (Name == "mov" || Name == "movc")
     return std::nullopt;
   if (Name == "mad" || Name.starts_with("dp"))
-    return true;
+    return nativeOp(llvm::Instruction::FAdd, /*Float=*/true);
   if (Name == "imad" || Name == "umad")
-    return false;
-  if (std::optional<OpLowering> Lowering = lookupLowering(Name))
-    return Lowering->FloatOperands;
-  return std::nullopt;
+    return nativeOp(llvm::Instruction::Add, /*Float=*/false);
+  return lookupLowering(Name);
 }
 
 void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
@@ -1123,15 +1246,15 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
         if (Src.getType() == OperandType::r)
           vote(registerNumber(Src.getIndex()), sourceComponent(Src, 0), false);
 
-    if (std::optional<bool> Float = hasFloatOperands(Name)) {
+    if (std::optional<OpLowering> Lowering = typedLowering(Name)) {
       if (Dst && Dst.getType() == OperandType::r)
         for (unsigned Comp : Comps)
-          vote(registerNumber(Dst.getIndex()), Comp, *Float);
+          vote(registerNumber(Dst.getIndex()), Comp, Lowering->FloatResult);
       for (SrcOperandAttr Src : Srcs)
         if (Src.getType() == OperandType::r)
           for (unsigned Comp : Comps)
             vote(registerNumber(Src.getIndex()), sourceComponent(Src, Comp),
-                 *Float);
+                 Lowering->FloatOperands);
       continue;
     }
 
@@ -1140,7 +1263,13 @@ void Translator::inferTempTypes(dxsa::ModuleOp Shader) {
     auto Src = Op.getAttrOfType<SrcOperandAttr>("src");
     if (!Dst || !Src)
       continue;
-    if (Dst.getType() == OperandType::r && Src.getType() == OperandType::v) {
+    if (Dst.getType() == OperandType::r && Src.getType() == OperandType::l) {
+      // DXBC spells an immediate as a 32-bit bit pattern, so moving one into
+      // a temp is evidence the temp holds raw bits rather than a float.
+      for (unsigned Comp : Comps)
+        vote(registerNumber(Dst.getIndex()), Comp, /*Float=*/false);
+    } else if (Dst.getType() == OperandType::r &&
+               Src.getType() == OperandType::v) {
       std::optional<unsigned> SrcReg = registerNumber(Src.getIndex());
       for (unsigned Comp : Comps)
         if (SrcReg)
@@ -1339,18 +1468,366 @@ bool Translator::translateDot(mlir::Operation *Op, DstOperandAttr Dst,
   return writeDestination(Dst, Values, Op);
 }
 
+//===----------------------------------------------------------------------===//
+// Control flow
+//===----------------------------------------------------------------------===//
+
+llvm::BasicBlock *Translator::deferredBlock(const llvm::Twine &Name) {
+  auto *BB = llvm::BasicBlock::Create(Context, Name);
+  Pending.push_back(BB);
+  return BB;
+}
+
+void Translator::startBlock(llvm::BasicBlock *BB) {
+  if (!BB->getParent()) {
+    llvm::Function *Fn = Builder.GetInsertBlock()->getParent();
+    Fn->insert(Fn->end(), BB);
+    llvm::erase(Pending, BB);
+  }
+  Builder.SetInsertPoint(BB);
+}
+
+/// Returns whether \p BB already ends in a terminator, which it does when a
+/// `break`, `continue` or `ret` cut the rest of the construct short.
+static bool isTerminated(llvm::BasicBlock *BB) {
+  return !BB->empty() && BB->back().isTerminator();
+}
+
+void Translator::branchTo(llvm::BasicBlock *BB) {
+  if (!isTerminated(Builder.GetInsertBlock()))
+    Builder.CreateBr(BB);
+}
+
+llvm::Value *Translator::readCondition(SrcOperandAttr Cond, bool TestNonZero,
+                                       mlir::Operation *Op) {
+  llvm::Value *Value = readSource(Cond, 0, i32Ty(), Op);
+  if (!Value)
+    return nullptr;
+  return Builder.CreateICmp(TestNonZero ? llvm::CmpInst::ICMP_NE
+                                        : llvm::CmpInst::ICMP_EQ,
+                            Value, llvm::ConstantInt::get(i32Ty(), 0));
+}
+
+Translator::Scope *Translator::breakScope(mlir::Operation *Op) {
+  for (Scope &S : llvm::reverse(Scopes))
+    if (S.K == Scope::Kind::Loop || S.K == Scope::Kind::Switch)
+      return &S;
+  Op->emitError("'") << Op->getName().getStringRef()
+                     << "' outside of a loop or switch";
+  return nullptr;
+}
+
+Translator::Scope *Translator::loopScope(mlir::Operation *Op) {
+  for (Scope &S : llvm::reverse(Scopes))
+    if (S.K == Scope::Kind::Loop)
+      return &S;
+  Op->emitError("'") << Op->getName().getStringRef() << "' outside of a loop";
+  return nullptr;
+}
+
+void Translator::openPendingCaseGroup() {
+  Scope &S = Scopes.back();
+  if (S.PendingCases.empty())
+    return;
+  llvm::BasicBlock *Group = deferredBlock(
+      "switch" + llvm::Twine(S.Id) + ".casegroup" + llvm::Twine(S.CaseGroups++));
+  startBlock(Group);
+  for (llvm::ConstantInt *Value : S.PendingCases)
+    S.Dispatch->addCase(Value, Group);
+  S.PendingCases.clear();
+}
+
+bool Translator::translateControlFlow(mlir::Operation *Op, bool &Handled) {
+  Handled = true;
+
+  auto conditional = [&](bool TestNonZero) -> llvm::Value * {
+    return readCondition(Op->getAttrOfType<SrcOperandAttr>("cond"), TestNonZero,
+                         Op);
+  };
+
+  if (llvm::isa<dxsa::IfZ, dxsa::IfNz>(Op)) {
+    llvm::Value *Cond = conditional(llvm::isa<dxsa::IfNz>(Op));
+    if (!Cond)
+      return false;
+    Scope S;
+    S.K = Scope::Kind::If;
+    S.Id = IfCount++;
+    llvm::BasicBlock *Then =
+        deferredBlock("if" + llvm::Twine(S.Id) + ".then");
+    // The false arm is the `else` block when one follows and the
+    // construct's exit otherwise, which is only known at the `endif`.
+    S.FalseBB = deferredBlock("if" + llvm::Twine(S.Id) + ".else");
+    Builder.CreateCondBr(Cond, Then, S.FalseBB);
+    Scopes.push_back(std::move(S));
+    startBlock(Then);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Else>(Op)) {
+    if (Scopes.empty() || Scopes.back().K != Scope::Kind::If) {
+      Op->emitError("'dxsa.else' outside of an if construct");
+      return false;
+    }
+    Scope &S = Scopes.back();
+    S.SawElse = true;
+    S.EndBB = deferredBlock("if" + llvm::Twine(S.Id) + ".end");
+    branchTo(S.EndBB);
+    startBlock(S.FalseBB);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Endif>(Op)) {
+    if (Scopes.empty() || Scopes.back().K != Scope::Kind::If) {
+      Op->emitError("'dxsa.endif' outside of an if construct");
+      return false;
+    }
+    Scope S = Scopes.pop_back_val();
+    if (!S.SawElse) {
+      S.EndBB = S.FalseBB;
+      S.EndBB->setName("if" + llvm::Twine(S.Id) + ".end");
+    }
+    branchTo(S.EndBB);
+    startBlock(S.EndBB);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Loop>(Op)) {
+    Scope S;
+    S.K = Scope::Kind::Loop;
+    S.Id = LoopCount++;
+    S.HeaderBB = deferredBlock("loop" + llvm::Twine(S.Id));
+    S.EndBB = deferredBlock("loop" + llvm::Twine(S.Id) + ".end");
+    branchTo(S.HeaderBB);
+    Scopes.push_back(std::move(S));
+    startBlock(Scopes.back().HeaderBB);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Endloop>(Op)) {
+    if (Scopes.empty() || Scopes.back().K != Scope::Kind::Loop) {
+      Op->emitError("'dxsa.endloop' outside of a loop");
+      return false;
+    }
+    Scope S = Scopes.pop_back_val();
+    branchTo(S.HeaderBB);
+    startBlock(S.EndBB);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Break>(Op)) {
+    Scope *S = breakScope(Op);
+    if (!S)
+      return false;
+    // A `break` that just closes a switch case falls out of the construct
+    // anyway, and does not name a block of its own; only one that cuts a
+    // case short does, which is what the counter numbers.
+    mlir::Operation *Next = Op->getNextNode();
+    if (!Next || !llvm::isa<dxsa::Case, dxsa::Default, dxsa::Endswitch>(Next))
+      ++S->Breaks;
+    branchTo(S->EndBB);
+    // Anything up to the end of the construct is unreachable, but still has
+    // to be translated somewhere.
+    startBlock(deferredBlock("afterbreak"));
+    return true;
+  }
+
+  if (llvm::isa<dxsa::BreakcZ, dxsa::BreakcNz>(Op)) {
+    Scope *S = breakScope(Op);
+    if (!S)
+      return false;
+    llvm::Value *Cond = conditional(llvm::isa<dxsa::BreakcNz>(Op));
+    if (!Cond)
+      return false;
+    llvm::Twine Name = S->K == Scope::Kind::Loop
+                           ? "loop" + llvm::Twine(S->Id) + ".breakc" +
+                                 llvm::Twine(S->Breaks)
+                           : "switch" + llvm::Twine(S->Id) + ".break" +
+                                 llvm::Twine(S->Breaks);
+    ++S->Breaks;
+    llvm::BasicBlock *Fallthrough = deferredBlock(Name);
+    Builder.CreateCondBr(Cond, S->EndBB, Fallthrough);
+    startBlock(Fallthrough);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Continue>(Op)) {
+    Scope *S = loopScope(Op);
+    if (!S)
+      return false;
+    ++S->Continues;
+    branchTo(S->HeaderBB);
+    startBlock(deferredBlock("aftercontinue"));
+    return true;
+  }
+
+  if (llvm::isa<dxsa::ContinuecZ, dxsa::ContinuecNz>(Op)) {
+    Scope *S = loopScope(Op);
+    if (!S)
+      return false;
+    llvm::Value *Cond = conditional(llvm::isa<dxsa::ContinuecNz>(Op));
+    if (!Cond)
+      return false;
+    llvm::BasicBlock *Fallthrough = deferredBlock(
+        "loop" + llvm::Twine(S->Id) + ".continuec" + llvm::Twine(S->Continues));
+    ++S->Continues;
+    Builder.CreateCondBr(Cond, S->HeaderBB, Fallthrough);
+    startBlock(Fallthrough);
+    return true;
+  }
+
+  if (auto Switch = llvm::dyn_cast<dxsa::Switch>(Op)) {
+    llvm::Value *Selector = readSource(Switch.getSelector(), 0, i32Ty(), Op);
+    if (!Selector)
+      return false;
+    Scope S;
+    S.K = Scope::Kind::Switch;
+    S.Id = SwitchCount++;
+    S.EndBB = deferredBlock("switch" + llvm::Twine(S.Id) + ".end");
+    S.DefaultBB = deferredBlock("switch" + llvm::Twine(S.Id) + ".default");
+    S.Dispatch = Builder.CreateSwitch(Selector, S.DefaultBB);
+    Scopes.push_back(std::move(S));
+    // No block is open until the first `case` or `default`; the dispatch
+    // itself terminated the one the switch was reached in.
+    startBlock(deferredBlock("beforecase"));
+    return true;
+  }
+
+  if (auto Case = llvm::dyn_cast<dxsa::Case>(Op)) {
+    if (Scopes.empty() || Scopes.back().K != Scope::Kind::Switch) {
+      Op->emitError("'dxsa.case' outside of a switch construct");
+      return false;
+    }
+    llvm::ArrayRef<int32_t> Values = Case.getOperand().getValues32().asArrayRef();
+    if (Values.empty()) {
+      Op->emitError("'dxsa.case' without a label");
+      return false;
+    }
+    // Consecutive `case`s share one block, so the group is not opened until
+    // an instruction other than a `case` follows.
+    Scopes.back().PendingCases.push_back(
+        llvm::ConstantInt::get(llvm::cast<llvm::IntegerType>(i32Ty()),
+                               uint32_t(Values[0])));
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Default>(Op)) {
+    if (Scopes.empty() || Scopes.back().K != Scope::Kind::Switch) {
+      Op->emitError("'dxsa.default' outside of a switch construct");
+      return false;
+    }
+    Scope &S = Scopes.back();
+    startBlock(S.DefaultBB);
+    S.DefaultBB = nullptr;
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Endswitch>(Op)) {
+    if (Scopes.empty() || Scopes.back().K != Scope::Kind::Switch) {
+      Op->emitError("'dxsa.endswitch' outside of a switch construct");
+      return false;
+    }
+    Scope S = Scopes.pop_back_val();
+    // A switch with no `default` falls out of the construct instead.
+    if (S.DefaultBB) {
+      S.Dispatch->setDefaultDest(S.EndBB);
+      llvm::erase(Pending, S.DefaultBB);
+      delete S.DefaultBB;
+    }
+    branchTo(S.EndBB);
+    startBlock(S.EndBB);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::RetcZ, dxsa::RetcNz>(Op)) {
+    llvm::Value *Cond = conditional(llvm::isa<dxsa::RetcNz>(Op));
+    if (!Cond)
+      return false;
+    unsigned Id = RetcCount++;
+    llvm::BasicBlock *Return = deferredBlock("retc" + llvm::Twine(Id));
+    llvm::BasicBlock *Fallthrough =
+        deferredBlock("afterretc" + llvm::Twine(Id));
+    Builder.CreateCondBr(Cond, Return, Fallthrough);
+    startBlock(Return);
+    Builder.CreateRetVoid();
+    startBlock(Fallthrough);
+    return true;
+  }
+
+  if (llvm::isa<dxsa::DiscardZ, dxsa::DiscardNz>(Op)) {
+    llvm::Value *Cond = conditional(llvm::isa<dxsa::DiscardNz>(Op));
+    if (!Cond)
+      return false;
+    emitDXOp("discard", DXILOp::Discard, llvm::Type::getVoidTy(Context),
+             {Cond});
+    return true;
+  }
+
+  if (llvm::isa<dxsa::Ret>(Op)) {
+    Builder.CreateRetVoid();
+    startBlock(deferredBlock("afterret"));
+    return true;
+  }
+
+  Handled = false;
+  return true;
+}
+
+bool Translator::translateMovC(mlir::Operation *Op, DstOperandAttr Dst,
+                               SrcOperandAttr Cond, SrcOperandAttr True,
+                               SrcOperandAttr False, bool Saturate) {
+  llvm::SmallVector<unsigned, 4> Comps = destinationComponents(Dst);
+  llvm::SmallVector<llvm::Value *, 4> Values;
+  for (unsigned Comp : Comps) {
+    llvm::Value *Test = readSource(Cond, Comp, i32Ty(), Op);
+    if (!Test)
+      return false;
+    // A conditional move copies bits, so it takes its type from whichever
+    // source has one, exactly like `mov`.
+    llvm::Type *Ty = movElementType(True, Comp);
+    if (Ty == floatTy())
+      Ty = movElementType(False, Comp);
+    llvm::Value *Selected = Builder.CreateICmpNE(
+        Test, llvm::ConstantInt::get(i32Ty(), 0));
+    llvm::Value *Left = readSource(True, Comp, Ty, Op);
+    llvm::Value *Right = readSource(False, Comp, Ty, Op);
+    if (!Left || !Right)
+      return false;
+    // Choosing between two values has no floating-point semantics to relax.
+    llvm::IRBuilderBase::FastMathFlagGuard Guard(Builder);
+    Builder.clearFastMathFlags();
+    Values.push_back(
+        saturate(Builder.CreateSelect(Selected, Left, Right), Saturate));
+  }
+  return writeDestination(Dst, Values, Op);
+}
+
 bool Translator::translateInstruction(mlir::Operation *Op) {
   SourceCache.clear();
   llvm::StringRef Name = mnemonicOf(Op);
   bool Saturate = Name.consume_back("_sat");
 
-  if (llvm::isa<dxsa::Ret>(Op)) {
-    Builder.CreateRetVoid();
-    return true;
-  }
   // Declarations carry no code.
   if (Name.starts_with("dcl_"))
     return true;
+
+  // Consecutive `case`s share one block, so the group they name is opened
+  // by the first instruction that is not itself a `case`.
+  if (!Scopes.empty() && Scopes.back().K == Scope::Kind::Switch &&
+      !llvm::isa<dxsa::Case>(Op))
+    openPendingCaseGroup();
+
+  bool Handled = false;
+  if (!translateControlFlow(Op, Handled))
+    return false;
+  if (Handled)
+    return true;
+
+  if (auto Sel = llvm::dyn_cast<dxsa::MovC>(Op))
+    return translateMovC(Op, Sel.getDst(), Sel.getCondition(), Sel.getSrc1(),
+                         Sel.getSrc2(), Saturate);
+  if (auto Sel = llvm::dyn_cast<dxsa::MovCSat>(Op))
+    return translateMovC(Op, Sel.getDst(), Sel.getCondition(), Sel.getSrc1(),
+                         Sel.getSrc2(), Saturate);
 
   if (auto Mad = llvm::dyn_cast<dxsa::Mad>(Op))
     return translateMad(Op, Mad.getDst(), Mad.getLhs(), Mad.getRhs(),
@@ -1392,7 +1869,7 @@ bool Translator::translateBody(dxsa::ModuleOp Shader) {
     if (!translateInstruction(&Op))
       return false;
   // A DXBC program need not end in `ret`.
-  if (!Builder.GetInsertBlock()->getTerminator())
+  if (!isTerminated(Builder.GetInsertBlock()))
     Builder.CreateRetVoid();
   return true;
 }
@@ -1402,19 +1879,83 @@ bool Translator::translateBody(dxsa::ModuleOp Shader) {
 //===----------------------------------------------------------------------===//
 
 void Translator::promoteTemps(llvm::Function &Entry) {
-  llvm::SmallVector<llvm::AllocaInst *, 16> Slots;
-  for (auto [Key, Slot] : Temps)
-    Slots.push_back(Slot);
-  if (Slots.empty())
+  llvm::SmallVector<std::pair<uint64_t, llvm::AllocaInst *>, 16> Ordered(
+      Temps.begin(), Temps.end());
+  if (Ordered.empty())
     return;
   // Promote in slot order so that the phi nodes of a block, which mem2reg
   // creates one alloca at a time, come out in a stable order.
-  llvm::sort(Slots, [](const llvm::AllocaInst *L, const llvm::AllocaInst *R) {
-    return L->getName() < R->getName();
-  });
+  llvm::sort(Ordered, llvm::less_first());
+  llvm::SmallVector<llvm::AllocaInst *, 16> Slots;
+  for (auto [Key, Slot] : Ordered)
+    Slots.push_back(Slot);
   llvm::DominatorTree DT(Entry);
   llvm::PromoteMemToReg(Slots, DT);
   Temps.clear();
+}
+
+/// Returns the value \p I reinterprets, when it is one of DXIL's bitcast
+/// operations, or null when it is not.
+static llvm::Value *bitcastSource(llvm::Instruction *I) {
+  auto *Call = llvm::dyn_cast<llvm::CallInst>(I);
+  if (!Call || Call->arg_size() != 2 || !Call->getCalledFunction() ||
+      !Call->getCalledFunction()->getName().starts_with("dx.op.bitcast"))
+    return nullptr;
+  return Call->getArgOperand(1);
+}
+
+void Translator::foldConditionMasks(llvm::Function &Entry) {
+  llvm::SmallVector<llvm::Instruction *, 8> Dead;
+
+  // A value stored into a temp register of the other type and read back
+  // comes out unchanged; the pair only existed because the slot's type had
+  // to be picked once for the whole shader.
+  for (llvm::BasicBlock &BB : Entry) {
+    for (llvm::Instruction &I : llvm::make_early_inc_range(BB)) {
+      llvm::Value *Source = bitcastSource(&I);
+      if (!Source)
+        continue;
+      auto *Inner = llvm::dyn_cast<llvm::Instruction>(Source);
+      if (!Inner)
+        continue;
+      llvm::Value *Original = bitcastSource(Inner);
+      if (!Original || Original->getType() != I.getType())
+        continue;
+      I.replaceAllUsesWith(Original);
+      I.eraseFromParent();
+      Dead.push_back(Inner);
+    }
+  }
+  for (llvm::Instruction *I : Dead)
+    if (I->use_empty())
+      I->eraseFromParent();
+  Dead.clear();
+
+  for (llvm::BasicBlock &BB : Entry) {
+    for (llvm::Instruction &I : llvm::make_early_inc_range(BB)) {
+      auto *Compare = llvm::dyn_cast<llvm::ICmpInst>(&I);
+      if (!Compare || !Compare->isEquality())
+        continue;
+      auto *Zero = llvm::dyn_cast<llvm::ConstantInt>(Compare->getOperand(1));
+      auto *Mask = llvm::dyn_cast<llvm::SExtInst>(Compare->getOperand(0));
+      if (!Zero || !Zero->isZero() || !Mask ||
+          !Mask->getSrcTy()->isIntegerTy(1))
+        continue;
+      llvm::Value *Bit = Mask->getOperand(0);
+      if (Compare->getPredicate() == llvm::CmpInst::ICMP_EQ) {
+        Builder.SetInsertPoint(Compare);
+        Bit = Builder.CreateNot(Bit);
+      }
+      Compare->replaceAllUsesWith(Bit);
+      Compare->eraseFromParent();
+      Dead.push_back(Mask);
+    }
+  }
+  // The sign extension only existed to widen the comparison to a DXBC
+  // boolean; dropping it is safe when nothing else reads the mask.
+  for (llvm::Instruction *I : Dead)
+    if (I->use_empty())
+      I->eraseFromParent();
 }
 
 //===----------------------------------------------------------------------===//
@@ -1505,7 +2046,7 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
       EntryTy, llvm::GlobalValue::ExternalLinkage, "main", Module.get());
   auto *EntryBB = llvm::BasicBlock::Create(Context, "entry", Entry);
   Builder.SetInsertPoint(EntryBB);
-  AllocaBuilder.SetInsertPoint(EntryBB);
+  EntryFn = Entry;
   inferTempTypes(Shader);
   // DXBC has no strict floating-point semantics; every arithmetic
   // instruction is free to be reassociated and contracted.
@@ -1515,8 +2056,27 @@ std::unique_ptr<llvm::Module> Translator::run(dxsa::ModuleOp Shader) {
 
   if (!translateBody(Shader))
     return nullptr;
+  if (!Scopes.empty()) {
+    Shader.emitError("unterminated control flow construct");
+    return nullptr;
+  }
+  // Blocks a construct turned out not to need were never inserted.
+  for (llvm::BasicBlock *BB : Pending)
+    delete BB;
+  Pending.clear();
 
+  // A `break`, `continue` or `ret` in the middle of a construct leaves the
+  // rest of it unreachable; dropping those blocks is what makes the result
+  // look like the source rather than like its block structure. They are
+  // only well-formed enough to delete once terminated.
+  for (llvm::BasicBlock &BB : *Entry)
+    if (!isTerminated(&BB)) {
+      Builder.SetInsertPoint(&BB);
+      Builder.CreateUnreachable();
+    }
+  llvm::EliminateUnreachableBlocks(*Entry);
   promoteTemps(*Entry);
+  foldConditionMasks(*Entry);
   emitMetadata(Entry);
   return std::move(Module);
 }
