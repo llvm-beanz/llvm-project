@@ -20,11 +20,66 @@ the root of the repository and commit it in its own commit when you're done.
 
 # Request
 
-Some of the tests in feme/test/Translate/DXBC still have ".ref" files. My
-understanding is that those were left behind because the dxasm didn't fully
-capture the container metadata required to generate correct transformations to
-DXIL.
+I'm seeing two test failures:
 
-Please work through those test cases, updating LLVM's objectyaml tooling as
-necessary so that these tests can be rewritten in the style of
-feme/test/Tools/dxbc-as/full-container.test.
+```
+FAIL: FEME :: Tools/dxbc-as/full-container.test (1 of 541)
+******************** TEST 'FEME :: Tools/dxbc-as/full-container.test' FAILED ********************
+Exit Code: 1
+
+Command Output (stdout):
+--
+# RUN: at line 12
+/Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/dxbc-as/full-container.test /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/dxbc-as/Output/full-container.test.tmp
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/dxbc-as/full-container.test /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/dxbc-as/Output/full-container.test.tmp
+# RUN: at line 13
+/Users/cbieneman/dev/llvm-project/build-rel/bin/yaml2obj /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/dxbc-as/Output/full-container.test.tmp/container.yaml -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/dxbc-as/Output/full-container.test.tmp/skeleton.dxbc
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/yaml2obj /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/dxbc-as/Output/full-container.test.tmp/container.yaml -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/dxbc-as/Output/full-container.test.tmp/skeleton.dxbc
+# .---command stderr------------
+# | YAML:12:5: error: unknown key 'LegacySignature'
+# |     LegacySignature:
+# |     ^~~~~~~~~~~~~~~
+# | yaml2obj: error: failed to parse YAML input: Invalid argument
+# `-----------------------------
+# error: command failed with exit status: 1
+
+--
+
+********************
+FAIL: FEME :: Translate/DXBC/indexableoutput1.test (529 of 541)
+******************** TEST 'FEME :: Translate/DXBC/indexableoutput1.test' FAILED ********************
+Exit Code: 1
+
+Command Output (stdout):
+--
+# RUN: at line 15
+/Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Translate/DXBC/indexableoutput1.test /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Translate/DXBC/Output/indexableoutput1.test.tmp
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Translate/DXBC/indexableoutput1.test /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Translate/DXBC/Output/indexableoutput1.test.tmp
+# RUN: at line 16
+/Users/cbieneman/dev/llvm-project/build-rel/bin/yaml2obj /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Translate/DXBC/Output/indexableoutput1.test.tmp/container.yaml -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Translate/DXBC/Output/indexableoutput1.test.tmp/skeleton.dxbc
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/yaml2obj /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Translate/DXBC/Output/indexableoutput1.test.tmp/container.yaml -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Translate/DXBC/Output/indexableoutput1.test.tmp/skeleton.dxbc
+# .---command stderr------------
+# | YAML:12:5: error: unknown key 'LegacySignature'
+# |     LegacySignature:
+# |     ^~~~~~~~~~~~~~~
+# | yaml2obj: error: failed to parse YAML input: Invalid argument
+# `-----------------------------
+# error: command failed with exit status: 1
+
+--
+
+********************
+********************
+Failed Tests (2):
+  FEME :: Tools/dxbc-as/full-container.test
+  FEME :: Translate/DXBC/indexableoutput1.test
+
+
+Testing Time: 7.02s
+
+Total Discovered Tests: 570
+  Passed: 568 (99.65%)
+  Failed:   2 (0.35%)
+```
+
+Please fix them.
