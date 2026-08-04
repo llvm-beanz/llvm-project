@@ -4485,3 +4485,245 @@ dependency declaration, not a deviation from `feme/docs/Design.md`.
 ### Commit
 
 - `[feme] Add split-file and yaml2obj to check-feme test dependencies`
+
+---
+
+# Agent thoughts: working through the remaining DXBC `.ref` fixtures
+
+The task was to work through the remaining `.ref` files under
+`feme/test/Translate/DXBC` -- dxilconv reference DXIL for shaders the
+DXBC -> DXIL translation could not yet handle -- fix what blocks them, and
+migrate them into real tests. There were 131 when I started and 108 when I
+stopped; this records what I did, what I decided, and what is left.
+
+## Measuring first
+
+The previous session's entry ends with a list of what is left "in rough
+dependency order", which is a plausible ordering but not a measurement. So
+the first thing I did was run every `.ref`-backed `.dxasm` through
+`dxbc-as | --import-dxsa-bin | --dxsa-to-llvmir` and bucket the *first*
+diagnostic per fixture. That produced a ranked census rather than a guess:
+
+| blocker | fixtures |
+| --- | --- |
+| control flow | ~24 |
+| resources: samplers/textures/buffers/atomics/TGSM | ~30 |
+| constant buffers | ~18 |
+| minimum precision | ~12 |
+| indexable temps | ~7 |
+| doubles | ~6 |
+| stage phases (`hs_decls`, GS/DS) | ~5 |
+| misc scalar opcodes | ~10 |
+
+Two things fell out of that immediately.
+
+**Twenty of the 131 `.ref` files have no `.dxasm` at all** --
+`dxilcleanup1`-`dxilcleanup35` and `phibug`. Those are dxilconv's
+*DxilCleanup* pass fixtures: their inputs were `.ll` files exercising the
+pass that turns `dx.op.tempRegLoad`/`tempRegStore` back into SSA, not DXBC
+shaders. There is nothing to assemble and no pipeline to run them through,
+so they cannot be migrated as translation tests at all; they are reference
+output for a pass FeMe does not have as a separate pass (the equivalent
+work happens inline, see "Temps are stack slots" below). I left them alone
+rather than inventing inputs for them.
+
+**Control flow was both the largest single bucket and a prerequisite** for
+several others, because a loop or an `if` shows up inside many of the
+resource fixtures too. So that is where I started.
+
+## Control flow, in four steps
+
+### 1. The dialect did not model it
+
+`if`, `breakc`, `continuec`, `retc`, `discard`, `switch` and `movc` had no
+`dxsa` operation. The importer fell back to the generic
+`dxsa.instruction "if" %operand` form, which round-trips the bytes but
+carries no semantics -- there is nothing for a translator to match on. I
+added them, following the existing `dxsa.callc_z`/`dxsa.callc_nz` spelling
+for the `_z`/`_nz` test-boolean opcode bit, and reused the conditional-move
+operand shape `dxsa.dmovc` already had for `dxsa.movc`.
+
+Adding real operations meant 27 checked-in fixtures that pinned down the
+old generic spelling had to be regenerated. Rather than hand-edit them I
+wrote a regenerator that re-derives the whole `CHECK` block from the
+importer's actual output and *keeps the original line* whenever the two
+differ only in whitespace, which kept the diff to the lines that actually
+changed instead of reflowing all 27 files.
+
+I also found that `Opcodes.def` marked `movc` `OF_None` while `dmovc` was
+`OF_Saturable`. `MOVC` is a saturable D3D opcode; that was a real (if
+minor) gap in the assembler, and fixing it is what let `movc_sat` be
+spelled in a fixture at all.
+
+### 2. Temps had to stop being values
+
+The translator tracked each temp register component as "whatever value the
+last instruction wrote". That is fine while the program is one basic block
+and useless the moment it is not.
+
+I could have reconstructed SSA by hand -- structured control flow means the
+merge points are known -- but that is re-implementing mem2reg. Instead
+every `(register, component)` pair gets an `alloca` in the entry block and
+the whole set is promoted with `PromoteMemToReg` at the end. This was
+deliberately committed on its own, with no control-flow support, precisely
+because it should be a *no-op* for the shaders that already translated:
+promoting a slot that lives in one block just hands each load the stored
+value straight back. All 570 tests passing across that commit is the
+evidence that the refactor was behaviour-preserving.
+
+Naming the slots `dx.v32.r<n>` -- flattening register and component the way
+DXIL's own temp-register intrinsics do -- was not cosmetic. mem2reg names a
+phi after the alloca it promotes, so this is what makes the output's phi
+nodes come out as `%dx.v32.r1.0`, exactly dxilconv's names. I worked out
+the flattening by reading `loop2.ref`: its shader uses only `r0`, yet the
+reference has `%dx.v32.r0.0` *and* `%dx.v32.r1.0`, so the number is
+`register * 4 + component`, not the register.
+
+### 3. A stack slot needs a type; DXBC registers do not have one
+
+This was the subtlest part. A DXBC temp is 32 typeless bits; an LLVM
+`alloca` is `float` or `i32`, and the choice decides where the
+reinterpretations land and what type the phi nodes come out as.
+
+I built `inferTempTypes` as a pre-pass that collects votes, and I tuned it
+against the reference output rather than from first principles, because
+every rule I guessed was wrong in an instructive way:
+
+- My first version voted with a single "is this a float instruction" bit.
+  That types `lt`'s *destination* as float, when a comparison reads floats
+  and writes an integer mask. Separating operand and result types is what
+  made the `if`-on-a-comparison folding below fire at all.
+- `switch3.ref` types a temp only ever written from literals and a float
+  input as `i32`, while `switch1.ref` types a structurally similar one as
+  `float`. The tiebreaker turned out to be that dxilconv treats a literal
+  as an `i32` bit pattern -- so a `mov` of a literal is evidence *against*
+  the slot being float. Adding that vote fixed `switch3` without breaking
+  `switch1`.
+- `cbuffer3.50` types its index temp as `i32`. A register used to index
+  another operand holds an integer whatever else the shader does with it,
+  which is both obviously true and something I only thought to encode
+  after the reference disagreed with me.
+
+I do not match dxilconv on every fixture here and I stopped chasing it: the
+remaining disagreements are between two defensible heuristics for something
+the input genuinely does not say, and they only move where a
+reinterpretation sits.
+
+### 4. Matching the block structure
+
+Three details are what make the output look like dxilconv's rather than
+merely being correct, and all three came from reading the references
+rather than from designing:
+
+- **Blocks are created when a construct opens but inserted into the
+  function only when translation reaches them.** `if5.ref`'s block order is
+  `if0.then, if1.then, if1.else, if1.end, if0.else, if2.then, if2.end,
+  if0.end` -- control-flow order, not nesting order. Eagerly appending
+  blocks gets this wrong; deferring insertion gets it exactly right with no
+  special cases.
+- **An `if`'s false arm is named `.else` until the `endif` proves there was
+  no `else`.** Without an `else`, the false arm *is* the exit block, and
+  `if5.ref` confirms it (`br i1 %9, label %if2.then, label %if2.end`). So I
+  create it named `.else` and rename it at the `endif` -- which is also how
+  I avoid needing to look ahead.
+- **A DXBC condition is a 32-bit all-ones/all-zeroes mask**, so `ieq`
+  followed by `if_nz` would naively read as `icmp ne (sext (icmp eq ...)),
+  0`. dxilconv's output has just the original `icmp`. `foldConditionMasks`
+  recovers it. Critically this has to run *after* promotion: at emission
+  time the mask has been through a store and a load and the `sext` is not
+  visible. The same pass drops the reinterpretation pairs a temp whose slot
+  type differs from the produced value creates -- which is what
+  `liveness1.ref` needed.
+
+One naming detail I could not fully explain: `switch2.ref` numbers its
+conditional break `switch0.break1` despite two plain `break`s preceding it,
+while `switch3.ref` numbers an equivalent one `switch1.break1` with one
+preceding break. The rule consistent with both is that a `break` which sits
+immediately before a `case`/`default`/`endswitch` -- i.e. one that merely
+closes a case and falls out of the construct anyway -- does not consume a
+counter value. I implemented that, noted that it is inferred from two data
+points, and moved on; it is a block name, not semantics.
+
+## Constant buffers
+
+`cb#` operands were the next largest bucket and are also the first
+resource, so they bring in machinery the samplers and UAVs will reuse:
+`%dx.types.Handle`, `dx.op.createHandle`, and the resource-class encoding.
+
+The one genuinely interesting piece is that DXIL's *legacy* constant buffer
+load returns a whole 16-byte row as a `%dx.types.CBufRet.*` struct, so a
+swizzle like `.wyyy` must produce one load and two `extractvalue`s, not
+four loads. That is a second cache alongside the existing per-instruction
+source cache, keyed by (operand, row, element type).
+
+Shader model 5.1 turned out to matter more than I expected. It binds a
+*range* of registers and lets the operand pick the register within the
+range at run time (`CB0[r0.x + 17][...]`). When it does, dxilconv binds the
+handle at the access rather than at the entry point -- and correspondingly
+does *not* emit an entry-point handle for that declaration at all. I create
+handles for every declaration and then drop the ones nothing used, which
+gets both shapes right without a pre-scan.
+
+Four of the six cbuffer fixtures now reproduce dxilconv's output exactly.
+
+## Registerless signature operands
+
+A small, self-contained increment: `oDepth`/`oDepthGE`/`oDepthLE` are
+outputs that name no register, and the compute-shader thread identifiers
+(`vThreadID` and friends) are inputs DXIL reads through dedicated
+operations. The bug worth recording is that my first version added the
+depth element to the signature's `(row, component)` lookup with `Row = 0`,
+where it silently shadowed `o0` -- `output1.ref` caught it, because its
+`mov o0.xyzw` then resolved to the depth element. Registerless elements now
+go in through `addUnindexed`.
+
+## Results
+
+Twenty-three fixtures migrated from `.ref` to real `FileCheck` tests, of
+which sixteen reproduce dxilconv's output instruction-for-instruction. 108
+`.ref` files remain, twenty of which (`dxilcleanup*`, `phibug`) are not
+migratable at all for the reason above.
+
+Where a migrated fixture differs from its reference, it is one of three
+already-documented causes and not a new one:
+
+- A literal that only ever reaches a temp register is folded to a constant
+  here, where dxilconv leaves the `dx.op.bitcastI32toF32` its temp-register
+  intrinsics imply.
+- Signature element component types are synthesized as `F32`, because a
+  bare `.dxasm` has no `ISGN`/`OSGN`; that changes which registers are read
+  as `i32` and which temps are inferred to hold floats.
+- Phi incoming-value order follows this LLVM's mem2reg rather than the LLVM
+  3.7 one dxilconv was built against.
+
+I did change one thing to be *more* faithful: reinterpreting between
+`float` and `i32` now emits DXIL's own `bitcastF32toI32`/`bitcastI32toF32`
+operations instead of an LLVM `bitcast`. DXIL is a frozen LLVM 3.7 dialect
+that spells this as an operation, dxilconv does the same, and no existing
+test depended on the `bitcast` form.
+
+## What is left, in the order I would do it next
+
+1. **Indexable temps** (`x#`, ~7 fixtures). These are array `alloca`s with
+   GEPs that must *not* be promoted, so they need to be kept out of
+   `promoteTemps`' worklist. Mechanically the smallest remaining item.
+2. **Minimum precision** (~12 fixtures). Currently rejected outright rather
+   than silently done at 32 bits, which is the right default -- emitting
+   confidently wrong IR is worse than emitting none -- but it means these
+   fixtures fail early.
+3. **Resources and samplers** (~30 fixtures). The largest bucket, but the
+   handle machinery constant buffers introduced is most of the shared part;
+   what is left is the per-operation shapes (`%dx.types.ResRet.*`,
+   `sample`/`gather`/`ld` argument orders, the `_s` feedback variants) and
+   group-shared memory as an `addrspace(3)` global.
+4. **Subroutines** (`label`/`call`/`fcall`, ~4 fixtures). dxilconv inlines
+   them into the entry point, which is why its block names carry a
+   `label0.callc0.` prefix -- visible in `loop5.ref` even though that
+   shader has no subroutine.
+5. **Doubles and the stage phases.**
+
+I stopped at a working, fully tested slice rather than a broader unverified
+one, which is the same call the previous session made and for the same
+reason: every one of the above is an increment on this skeleton rather than
+a redesign, and each is worth its own measurement pass against the
+references.
