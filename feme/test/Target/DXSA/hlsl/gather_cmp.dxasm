@@ -14,29 +14,17 @@
 // CHECK:         dxsa.add r<0>, r<0>, r<1>
 // CHECK:         dxsa.gather4_c_s r<1>, v<0, <x, y, x, x>>, t<0, vector>, s<0, vector, <w>>, v<0, <y>>, r<2, <x>>, <u = -3, v = 2, w = 0>
 // CHECK:         dxsa.add r<0>, r<0>, r<1>
-// CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_0:.*]] = dxsa.operand %[[INDEX_0]] {mask = 16 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_1:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_1:.*]] = dxsa.operand %[[INDEX_1]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_0]], %[[OPERAND_1]]
+// CHECK:         dxsa.check_access_fully_mapped r<1, <x>>, r<2, <x>>
 // CHECK:         dxsa.utof r<1, <x>>, r<1, <x>>
 // CHECK:         dxsa.add r<0>, r<0>, r<1, <x, x, x, x>>
 // CHECK:         dxsa.gather4_c_s r<1>, v<0, <x, y, z, x>>, t<1, vector>, s<0, vector, <z>>, v<0, <y>>, r<2, <x>>, <u = -3, v = 2, w = 0>
 // CHECK:         dxsa.add r<0>, r<0>, r<1>
-// CHECK:         %[[INDEX_2:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_2:.*]] = dxsa.operand %[[INDEX_2]] {mask = 16 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_3:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_3:.*]] = dxsa.operand %[[INDEX_3]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_2]], %[[OPERAND_3]]
+// CHECK:         dxsa.check_access_fully_mapped r<1, <x>>, r<2, <x>>
 // CHECK:         dxsa.utof r<1, <x>>, r<1, <x>>
 // CHECK:         dxsa.add r<0>, r<0>, r<1, <x, x, x, x>>
 // CHECK:         dxsa.gather4_c_s r<1>, v<0>, t<2, vector>, s<0, vector, <z>>, v<0, <y>>, r<2, <x>>
 // CHECK:         dxsa.add r<0>, r<0>, r<1>
-// CHECK:         %[[INDEX_4:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_4:.*]] = dxsa.operand %[[INDEX_4]] {mask = 16 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_5:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_5:.*]] = dxsa.operand %[[INDEX_5]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_4]], %[[OPERAND_5]]
+// CHECK:         dxsa.check_access_fully_mapped r<1, <x>>, r<2, <x>>
 // CHECK:         dxsa.utof r<1, <x>>, r<1, <x>>
 // CHECK:         dxsa.add o<0>, r<0>, r<1, <x, x, x, x>>
 // CHECK:         dxsa.ret

@@ -1,0 +1,13 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+
+// CHECK: dxsa.module {
+// CHECK-NEXT:   dxsa.check_access_fully_mapped r<1, <x>>, r<2, <x>>
+check_access_fully_mapped r1.x, r2.x
+
+// CHECK-NEXT:   dxsa.check_access_fully_mapped r<0, <y, w>>, r<3, <z, z, z, z>>
+check_access_fully_mapped r0.yw, r3.zzzz
+
+// CHECK-NEXT:   dxsa.check_access_fully_mapped precise <x> o<0, <x>>, r<2, <x>>
+check_access_fully_mapped precise(x) o0.x, r2.x
+// CHECK-NEXT: }

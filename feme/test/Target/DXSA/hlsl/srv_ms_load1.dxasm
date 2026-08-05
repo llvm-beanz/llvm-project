@@ -19,21 +19,13 @@
 // CHECK:         dxsa.add r<0, <x, y, z>>, r<0, <x, y, z, x>>, r<2, <x, y, z, x>>
 // CHECK:         dxsa.ld2dms_s r<2, <x, y, z>>, r<1, <x, y, w, w>>, t<3, vector>, v<0, <z>>, r<3, <x>>, <u = -5, v = 7, w = 0>
 // CHECK:         dxsa.add r<0, <x, y, z>>, r<0, <x, y, z, x>>, r<2, <x, y, z, x>>
-// CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_0:.*]] = dxsa.operand %[[INDEX_0]] {mask = 128 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_1:.*]] = dxsa.index.imm {imm = 3 : i32}
-// CHECK:         %[[OPERAND_1:.*]] = dxsa.operand %[[INDEX_1]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_0]], %[[OPERAND_1]]
+// CHECK:         dxsa.check_access_fully_mapped r<0, <w>>, r<3, <x>>
 // CHECK:         dxsa.utof r<0, <w>>, r<0, <w>>
 // CHECK:         dxsa.add r<0, <x, y, z>>, r<0, <w, w, w, w>>, r<0, <x, y, z, x>>
 // CHECK:         dxsa.ld2dms_s r<2, <x, y, z>>, r<1, <x, y, w, w>>, t<3, vector>, v<0, <z>>, r<3, <x>>
 // CHECK:         dxsa.ld2dms r<1, <x, y, z>>, r<1>, t<3, vector>, l(0xD)
 // CHECK:         dxsa.add r<0, <x, y, z>>, r<0, <x, y, z, x>>, r<2, <x, y, z, x>>
-// CHECK:         %[[INDEX_2:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_2:.*]] = dxsa.operand %[[INDEX_2]] {mask = 128 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_3:.*]] = dxsa.index.imm {imm = 3 : i32}
-// CHECK:         %[[OPERAND_3:.*]] = dxsa.operand %[[INDEX_3]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_2]], %[[OPERAND_3]]
+// CHECK:         dxsa.check_access_fully_mapped r<0, <w>>, r<3, <x>>
 // CHECK:         dxsa.utof r<0, <w>>, r<0, <w>>
 // CHECK:         dxsa.add r<0, <x, y, z>>, r<0, <w, w, w, w>>, r<0, <x, y, z, x>>
 // CHECK:         dxsa.add o<0, <x, y, z>>, r<1, <x, y, z, x>>, r<0, <x, y, z, x>>

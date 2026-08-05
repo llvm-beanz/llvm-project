@@ -3420,6 +3420,8 @@ public:
     case D3D11_SB_OPCODE_EMITTHENCUT_STREAM:
       return STREAM_INDEX_OP(EmitThenCutStream);
     // Resource instructions
+    case D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED:
+      return PLAIN_OP(CheckAccessFullyMapped, 1, 1, HasPreciseAttr::Yes);
     case D3D11_SB_OPCODE_BUFINFO:
       return PLAIN_OP(BufInfo, 1, 1, HasPreciseAttr::Yes);
     case D3D10_SB_OPCODE_RESINFO: {

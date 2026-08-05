@@ -12,17 +12,9 @@
 // CHECK:         dxsa.iadd r<2, <x, y, z>>, r<0, min16i, <x, y, z, x>>, r<1, min16i, <x, y, z, x>>
 // CHECK:         dxsa.ld_uav_typed_s null, v<0, <y, y, y, y>>, u<3, vector, <w, y, z, x>>, r<3, <x>>
 // CHECK:         dxsa.ld_uav_typed_s r<0, min16i, <x, y, z>>, v<0, <x, x, x, x>>, u<3, vector, <w, y, z, x>>, r<4, <x>>
-// CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_0:.*]] = dxsa.operand %[[INDEX_0]] {mask = 128 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_1:.*]] = dxsa.index.imm {imm = 3 : i32}
-// CHECK:         %[[OPERAND_1:.*]] = dxsa.operand %[[INDEX_1]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_0]], %[[OPERAND_1]]
+// CHECK:         dxsa.check_access_fully_mapped r<2, <w>>, r<3, <x>>
 // CHECK:         dxsa.iadd r<2, <x, y, z>>, r<2, <w, w, w, w>>, r<2, <x, y, z, x>>
-// CHECK:         %[[INDEX_2:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_2:.*]] = dxsa.operand %[[INDEX_2]] {mask = 128 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_3:.*]] = dxsa.index.imm {imm = 4 : i32}
-// CHECK:         %[[OPERAND_3:.*]] = dxsa.operand %[[INDEX_3]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_2]], %[[OPERAND_3]]
+// CHECK:         dxsa.check_access_fully_mapped r<2, <w>>, r<4, <x>>
 // CHECK:         dxsa.iadd r<2, <x, y, z>>, r<0, min16i, <x, y, z, x>>, r<2, <x, y, z, x>>
 // CHECK:         dxsa.iadd r<2, <x, y, z>>, r<2, <w, w, w, w>>, r<2, <x, y, z, x>>
 // CHECK:         %[[INDEX_4:.*]] = dxsa.index.imm {imm = 3 : i32}

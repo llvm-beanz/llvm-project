@@ -9,11 +9,7 @@
 // CHECK:         dxsa.ld r<0>, v<0, <x, x, x, x>>, t<3, vector>
 // CHECK:         dxsa.ld_s r<1>, v<0, <x, x, x, x>>, t<3, vector>, r<2, <x>>
 // CHECK:         dxsa.mad r<0>, r<0>, l(0x40000000, 0x40000000, 0x40000000, 0x40000000), r<1>
-// CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_0:.*]] = dxsa.operand %[[INDEX_0]] {mask = 16 : i32, num_components = 4 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_1:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_1:.*]] = dxsa.operand %[[INDEX_1]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "check_access_fully_mapped" %[[OPERAND_0]], %[[OPERAND_1]]
+// CHECK:         dxsa.check_access_fully_mapped r<1, <x>>, r<2, <x>>
 // CHECK:         dxsa.utof r<1, <x>>, r<1, <x>>
 // CHECK:         dxsa.add o<0>, r<0>, r<1, <x, x, x, x>>
 // CHECK:         dxsa.ret

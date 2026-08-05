@@ -1384,4 +1384,26 @@ def DXSA_LdUavTypedFeedback : DXSA_Op<"ld_uav_typed_s"> {
   }];
 }
 
+//===----------------------------------------------------------------------===//
+// dxsa.check_access_fully_mapped
+//===----------------------------------------------------------------------===//
+
+def DXSA_CheckAccessFullyMapped : DXSA_UnaryOp<"check_access_fully_mapped"> {
+  let summary = "determine whether a tiled resource access was fully mapped";
+  let description = [{
+    The `dxsa.check_access_fully_mapped` operation interprets the shader
+    feedback status value a `_s` resource access wrote into `$src` and sets
+    every component `$dst` enables to all ones when every tile the access
+    touched was mapped, and to zero otherwise.
+
+    The status value is opaque: `$src` may only be read by this instruction.
+
+    Example:
+
+    ```mlir
+    dxsa.check_access_fully_mapped r<1, <x>>, r<2, <x>>
+    ```
+  }];
+}
+
 #endif // FEME_DIALECT_DXSA_IR_DXSARESOURCEOPS
