@@ -2917,7 +2917,10 @@ bool Translator::translateSincos(mlir::Operation *Op, DstOperandAttr Sin,
 }
 
 llvm::StructType *Translator::resRetTy(llvm::Type *Element) {
-  llvm::StringRef Suffix = Element->isFloatTy() ? "f32" : "i32";
+  llvm::StringRef Suffix = Element->isHalfTy()        ? "f16"
+                           : Element->isFloatTy()     ? "f32"
+                           : Element->isIntegerTy(16) ? "i16"
+                                                      : "i32";
   std::string Name = ("dx.types.ResRet." + Suffix).str();
   if (auto *Existing = llvm::StructType::getTypeByName(Context, Name))
     return Existing;
@@ -2952,7 +2955,7 @@ bool Translator::writeResourceResult(DstOperandAttr Dst, SrcOperandAttr SRV,
   for (unsigned Comp : destinationComponents(Dst))
     Components.push_back(
         Builder.CreateExtractValue(Value, sourceComponent(SRV, Comp)));
-  return writeDestination(Dst, Components, Op);
+  return writeDestination(Dst, Components, Op, Dst.getMinPrecision());
 }
 
 bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
@@ -3123,7 +3126,10 @@ bool Translator::translateResourceLoad(
                          : llvm::UndefValue::get(i32Ty()));
   }
 
-  llvm::Type *Element = resourceElementType(*Texture);
+  // A destination register at minimum precision asks the load to return
+  // its components already narrowed.
+  llvm::Type *Element =
+      storageType(Dst.getMinPrecision(), resourceElementType(*Texture));
   llvm::Value *Value = emitDXOp(Name, DXOp, resRetTy(Element), Args, Element);
   if (!writeResourceResult(Dst, View, Value, Op))
     return false;
@@ -3158,7 +3164,8 @@ bool Translator::translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
 
   // All four components are passed whatever the write mask says; the mask
   // travels with them and selects the ones that reach memory.
-  llvm::Type *Element = resourceElementType(*View);
+  llvm::Type *Element =
+      storageType(Value.getMinPrecision(), resourceElementType(*View));
   for (unsigned I = 0; I < 4; ++I) {
     llvm::Value *Component = readSource(Value, I, Element, Op, /*Slot=*/2);
     if (!Component)
