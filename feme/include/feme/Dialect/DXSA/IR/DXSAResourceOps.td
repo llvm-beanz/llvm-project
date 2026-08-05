@@ -341,11 +341,12 @@ def DXSA_Sample : DXSA_Op<"sample"> {
       DXSA_SrcOperandAttr:$src_address,
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler
     (`,` $offset^)?
     attr-dict
   }];
@@ -368,11 +369,12 @@ def DXSA_SampleClampFeedback : DXSA_Op<"sample_cl_s"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SampleClampFeedbackAttr:$clamp_feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $clamp_feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $clamp_feedback
     (`,` $offset^)?
     attr-dict
   }];
@@ -405,11 +407,12 @@ def DXSA_SampleB : DXSA_Op<"sample_b"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_lod_bias,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod_bias
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod_bias
     (`,` $offset^)?
     attr-dict
   }];
@@ -433,11 +436,12 @@ def DXSA_SampleBClampFeedback : DXSA_Op<"sample_b_cl_s"> {
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_lod_bias,
       DXSA_SampleClampFeedbackAttr:$clamp_feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod_bias `,` $clamp_feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod_bias `,` $clamp_feedback
     (`,` $offset^)?
     attr-dict
   }];
@@ -470,11 +474,12 @@ def DXSA_SampleD : DXSA_Op<"sample_d"> {
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_x_derivatives,
       DXSA_SrcOperandAttr:$src_y_derivatives,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler
     `,` $src_x_derivatives `,` $src_y_derivatives
     (`,` $offset^)?
     attr-dict
@@ -501,11 +506,12 @@ def DXSA_SampleDClampFeedback : DXSA_Op<"sample_d_cl_s"> {
       DXSA_SrcOperandAttr:$src_x_derivatives,
       DXSA_SrcOperandAttr:$src_y_derivatives,
       DXSA_SampleClampFeedbackAttr:$clamp_feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler
     `,` $src_x_derivatives `,` $src_y_derivatives `,` $clamp_feedback
     (`,` $offset^)?
     attr-dict
@@ -538,11 +544,12 @@ def DXSA_SampleL : DXSA_Op<"sample_l"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_lod,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod
     (`,` $offset^)?
     attr-dict
   }];
@@ -566,11 +573,12 @@ def DXSA_SampleLFeedback : DXSA_Op<"sample_l_cl_s"> {
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_lod,
       DXSA_DstOperandAttr:$feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod `,` $feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_lod `,` $feedback
     (`,` $offset^)?
     attr-dict
   }];
@@ -597,11 +605,12 @@ def DXSA_SampleC : DXSA_Op<"sample_c"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value
     (`,` $offset^)?
     attr-dict
   }];
@@ -626,11 +635,12 @@ def DXSA_SampleCClampFeedback : DXSA_Op<"sample_c_cl_s"> {
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
       DXSA_SampleClampFeedbackAttr:$clamp_feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $clamp_feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $clamp_feedback
     (`,` $offset^)?
     attr-dict
   }];
@@ -660,11 +670,12 @@ def DXSA_SampleCLZ : DXSA_Op<"sample_c_lz"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value
     (`,` $offset^)?
     attr-dict
   }];
@@ -689,11 +700,12 @@ def DXSA_SampleCLZFeedback : DXSA_Op<"sample_c_lz_s"> {
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
       DXSA_DstOperandAttr:$feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $feedback
     (`,` $offset^)?
     attr-dict
   }];
@@ -749,11 +761,12 @@ def DXSA_Gather4 : DXSA_Op<"gather4"> {
       DXSA_SrcOperandAttr:$src_address,
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler
     (`,` $offset^)?
     attr-dict
   }];
@@ -783,11 +796,12 @@ def DXSA_Gather4Feedback : DXSA_Op<"gather4_s"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_DstOperandAttr:$feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $feedback
     (`,` $offset^)?
     attr-dict
   }];
@@ -823,11 +837,12 @@ def DXSA_Gather4C : DXSA_Op<"gather4_c"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value
     (`,` $offset^)?
     attr-dict
   }];
@@ -859,11 +874,12 @@ def DXSA_Gather4CFeedback : DXSA_Op<"gather4_c_s"> {
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
       DXSA_DstOperandAttr:$feedback,
-      OptionalAttr<DXSA_SampleOffsetAttr>:$offset);
+      OptionalAttr<DXSA_SampleOffsetAttr>:$offset,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $feedback
     (`,` $offset^)?
     attr-dict
   }];
@@ -901,11 +917,12 @@ def DXSA_Gather4PO : DXSA_Op<"gather4_po"> {
       DXSA_SrcOperandAttr:$src_address,
       DXSA_SrcOperandAttr:$src_offset,
       DXSA_SrcOperandAttr:$src_resource,
-      DXSA_SrcOperandAttr:$src_sampler);
+      DXSA_SrcOperandAttr:$src_sampler,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler
     attr-dict
   }];
 }
@@ -934,11 +951,12 @@ def DXSA_Gather4POFeedback : DXSA_Op<"gather4_po_s"> {
       DXSA_SrcOperandAttr:$src_offset,
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
-      DXSA_DstOperandAttr:$feedback);
+      DXSA_DstOperandAttr:$feedback,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler `,` $feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler `,` $feedback
     attr-dict
   }];
 }
@@ -972,11 +990,12 @@ def DXSA_Gather4POC : DXSA_Op<"gather4_po_c"> {
       DXSA_SrcOperandAttr:$src_offset,
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
-      DXSA_SrcOperandAttr:$src_reference_value);
+      DXSA_SrcOperandAttr:$src_reference_value,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler `,` $src_reference_value
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler `,` $src_reference_value
     attr-dict
   }];
 }
@@ -1007,11 +1026,12 @@ def DXSA_Gather4POCFeedback : DXSA_Op<"gather4_po_c_s"> {
       DXSA_SrcOperandAttr:$src_resource,
       DXSA_SrcOperandAttr:$src_sampler,
       DXSA_SrcOperandAttr:$src_reference_value,
-      DXSA_DstOperandAttr:$feedback);
+      DXSA_DstOperandAttr:$feedback,
+      OptionalAttr<DXSA_ComponentMaskAttr>:$precise);
   let results = (outs);
 
   let assemblyFormat = [{
-    $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $feedback
+    (`precise` $precise^)? $dst `,` $src_address `,` $src_offset `,` $src_resource `,` $src_sampler `,` $src_reference_value `,` $feedback
     attr-dict
   }];
 }

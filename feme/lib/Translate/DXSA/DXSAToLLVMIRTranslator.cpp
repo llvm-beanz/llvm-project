@@ -41,6 +41,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/ValueHandle.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -1133,6 +1134,12 @@ private:
   /// overload when it cannot be read off the call itself -- an operation
   /// returning a struct is overloaded on the struct's element type -- and
   /// `NoOverload` marks the operations that are not overloaded at all.
+  /// Whether the instruction being translated carries DXBC's `precise`
+  /// modifier, which forbids reassociating its arithmetic. It is cleared
+  /// while an operand is read, because a source read is a computation of
+  /// its own that the modifier does not reach.
+  bool Precise = false;
+
   llvm::Value *emitDXOp(llvm::StringRef Name, DXILOp Op, llvm::Type *ReturnTy,
                         llvm::ArrayRef<llvm::Value *> Args,
                         llvm::Type *OverloadTy = nullptr);
@@ -1802,6 +1809,7 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
   llvm::Type *Requested = Ty;
   Ty = storageType(MinPrecision, Ty);
 
+  llvm::SaveAndRestore<bool> NotPrecise(Precise, false);
   unsigned Comp = sourceComponent(Src, DstComp);
   // Attributes are uniqued, so two operands that read the same register
   // through the same swizzle are one attribute; the slot keeps them apart,
@@ -2149,7 +2157,14 @@ llvm::Value *Translator::emitDXOp(llvm::StringRef Name, DXILOp Op,
   // translation emits around it, not to the call itself.
   llvm::IRBuilderBase::FastMathFlagGuard Guard(Builder);
   Builder.clearFastMathFlags();
-  return Builder.CreateCall(dxOp(Name, ReturnTy, ArgTys, OverloadTy), CallArgs);
+  llvm::CallInst *Call =
+      Builder.CreateCall(dxOp(Name, ReturnTy, ArgTys, OverloadTy), CallArgs);
+  if (Precise)
+    Call->setMetadata(
+        "dx.precise",
+        llvm::MDNode::get(Context, llvm::ConstantAsMetadata::get(
+                                       llvm::ConstantInt::get(i32Ty(), 1))));
+  return Call;
 }
 
 llvm::StringRef Translator::stageName(ProgramType Type) {
@@ -3446,6 +3461,15 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
   SaturateCache.clear();
   llvm::StringRef Name = mnemonicOf(Op);
   bool Saturate = Name.consume_back("_sat");
+
+  // `precise` names the destination components whose arithmetic may not be
+  // reassociated; dxilconv applies it to the whole instruction.
+  auto Mask = Op->getAttrOfType<ComponentMaskAttr>("precise");
+  llvm::SaveAndRestore<bool> IsPrecise(
+      Precise, Mask && static_cast<unsigned>(Mask.getValue()) != 0);
+  llvm::IRBuilderBase::FastMathFlagGuard Relaxed(Builder);
+  if (Precise)
+    Builder.clearFastMathFlags();
 
   // Declarations carry no code.
   if (Name.starts_with("dcl_"))

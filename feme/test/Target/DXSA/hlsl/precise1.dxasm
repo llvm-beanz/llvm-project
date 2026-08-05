@@ -8,7 +8,7 @@
 // CHECK:         dxsa.dcl_input_ps  linear v<0, <x, y>>
 // CHECK:         dxsa.dcl_output o<0>
 // CHECK:         dxsa.dcl_temps 1
-// CHECK:         dxsa.sample r<0>, v<0, <x, y, x, x>>, t<0, vector>, s<0>
+// CHECK:         dxsa.sample precise <x, y, z, w> r<0>, v<0, <x, y, x, x>>, t<0, vector>, s<0>
 // CHECK:         dxsa.mul precise <x, y, z, w> r<0>, r<0>, cb<[0, 0], vector>
 // CHECK:         dxsa.mad precise <x, y, z, w> r<0>, r<0>, cb<[0, 1], vector>, cb<[0, 2], vector>
 // CHECK:         dxsa.mov precise <x, y, z, w> o<0>, -r<0>
