@@ -602,6 +602,8 @@ struct SignatureElement {
   std::string Name;
   /// The register (signature row) the element lives in.
   unsigned Row = 0;
+  /// How many consecutive registers the element occupies.
+  unsigned Rows = 1;
   /// The first component of the register the element covers.
   unsigned StartCol = 0;
   /// How many components the element covers.
@@ -609,11 +611,8 @@ struct SignatureElement {
   DXILSemanticKind Kind = DXILSemanticKind::Arbitrary;
   /// `DXIL::InterpolationMode`, which matches D3D10_SB_INTERPOLATION_MODE.
   unsigned InterpolationMode = 0;
-  /// The semantic index (e.g. the `3` in `SV_TessFactor3`, or in multiple
-  /// arbitrary elements sharing one HLSL-source name across registers).
-  /// Declaration-synthesized elements do not track this and leave it 0;
-  /// real container elements (`ContainerSignatureElement::Index`) do.
-  unsigned Index = 0;
+  /// One semantic index for each row the element occupies.
+  llvm::SmallVector<unsigned, 4> SemanticIndices;
   /// `DXIL::ComponentType`. DXBC registers are typeless, so
   /// declaration-synthesized elements always default to `F32` (see
   /// "Building complete legacy DXBC containers for testing" in
@@ -626,9 +625,7 @@ struct SignatureElement {
 class Signature {
 public:
   void add(SignatureElement Element) {
-    for (unsigned Col = Element.StartCol, End = Element.StartCol + Element.Cols;
-         Col != End; ++Col)
-      Lookup[key(Element.Row, Col)] = Elements.size();
+    addToLookup(Element, Elements.size());
     Elements.push_back(std::move(Element));
   }
 
@@ -636,6 +633,54 @@ public:
   /// shadow the (row, component) an `o#` register really lives at.
   void addUnindexed(SignatureElement Element) {
     Elements.push_back(std::move(Element));
+  }
+
+  /// Combines the elements occupying \p Count rows of the same index range.
+  void collapseRange(unsigned Start, unsigned Count, unsigned StartCol,
+                     unsigned Cols) {
+    if (Count < 2)
+      return;
+
+    llvm::SmallVector<unsigned, 4> Indices;
+    std::optional<std::pair<unsigned, unsigned>> Shape;
+    for (unsigned Row = Start; Row != Start + Count; ++Row) {
+      std::optional<unsigned> Index = find(Row, StartCol);
+      if (!Index)
+        return;
+      const SignatureElement &Element = Elements[*Index];
+      if (Element.Row != Row || Element.Rows != 1 ||
+          Element.StartCol > StartCol ||
+          Element.StartCol + Element.Cols < StartCol + Cols)
+        return;
+      if (!Indices.empty()) {
+        const SignatureElement &First = Elements[Indices.front()];
+        if (Element.Kind != First.Kind || Element.Type != First.Type ||
+            Element.InterpolationMode != First.InterpolationMode)
+          return;
+      }
+      std::pair<unsigned, unsigned> ElementShape{Element.StartCol,
+                                                 Element.Cols};
+      if (Shape && *Shape != ElementShape)
+        return;
+      Shape = ElementShape;
+      Indices.push_back(*Index);
+    }
+
+    SignatureElement &First = Elements[Indices.front()];
+    llvm::SmallVector<unsigned, 4> SemanticIndices;
+    for (unsigned Index : Indices)
+      SemanticIndices.append(Elements[Index].SemanticIndices);
+    First.Rows = Count;
+    First.SemanticIndices = std::move(SemanticIndices);
+
+    llvm::SmallDenseSet<unsigned, 4> Removed(Indices.begin() + 1,
+                                             Indices.end());
+    llvm::SmallVector<SignatureElement, 8> Collapsed;
+    for (auto [Index, Element] : llvm::enumerate(Elements))
+      if (!Removed.contains(Index))
+        Collapsed.push_back(std::move(Element));
+    Elements = std::move(Collapsed);
+    rebuildLookup();
   }
 
   /// Returns the index of the element covering \p Row's \p Col component,
@@ -652,6 +697,21 @@ public:
   bool empty() const { return Elements.empty(); }
 
 private:
+  void addToLookup(const SignatureElement &Element, unsigned Index) {
+    for (unsigned Row = Element.Row, RowEnd = Element.Row + Element.Rows;
+         Row != RowEnd; ++Row)
+      for (unsigned Col = Element.StartCol,
+                    ColEnd = Element.StartCol + Element.Cols;
+           Col != ColEnd; ++Col)
+        Lookup[key(Row, Col)] = Index;
+  }
+
+  void rebuildLookup() {
+    Lookup.clear();
+    for (auto [Index, Element] : llvm::enumerate(Elements))
+      addToLookup(Element, Index);
+  }
+
   static uint64_t key(unsigned Row, unsigned Col) {
     return (static_cast<uint64_t>(Row) << 2) | Col;
   }
@@ -702,7 +762,13 @@ private:
   /// The first register of each declared index range, by its length. A
   /// signature register read at a run-time row names its element by the
   /// range's first register, and the row relative to it.
-  llvm::SmallVector<std::pair<unsigned, unsigned>, 4> InputRanges;
+  struct InputRange {
+    unsigned Start;
+    unsigned Count;
+    unsigned StartCol;
+    unsigned Cols;
+  };
+  llvm::SmallVector<InputRange, 4> InputRanges;
   /// A resource the shader declares, in the terms `dx.op.createHandle` and
   /// `!dx.resources` describe it.
   struct Resource {
@@ -1220,6 +1286,7 @@ void Translator::addSignatureElement(Signature &Sig, DstOperandAttr Operand,
   Element.Cols = llvm::popcount(Mask);
   Element.Kind = Kind;
   Element.InterpolationMode = InterpolationMode;
+  Element.SemanticIndices.push_back(0);
   Element.Name = Kind == DXILSemanticKind::Arbitrary
                      ? (NamePrefix + llvm::Twine(Sig.elements().size())).str()
                      : semanticName(Kind);
@@ -1254,9 +1321,22 @@ uint64_t toShaderFlags(GlobalFlags Flags) {
 }
 
 bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
-  for (mlir::Operation &Op : *Shader.getBodyBlock())
+  for (mlir::Operation &Op : *Shader.getBodyBlock()) {
     if (auto Dcl = llvm::dyn_cast<dxsa::DclGlobalFlags>(&Op))
       ShaderFlags |= toShaderFlags(Dcl.getFlags());
+    else if (auto Dcl = llvm::dyn_cast<dxsa::DclIndexRange>(&Op)) {
+      DstOperandAttr Operand = Dcl.getOperandAttr();
+      std::optional<unsigned> Start = registerNumber(Operand.getIndex());
+      if (!Start || Operand.getType() != OperandType::v)
+        continue;
+      unsigned Mask = Operand.getMask()
+                          ? static_cast<unsigned>(Operand.getMask().getValue())
+                          : 0xF;
+      InputRanges.push_back({*Start, Dcl.getCount(),
+                             static_cast<unsigned>(llvm::countr_zero(Mask)),
+                             static_cast<unsigned>(llvm::popcount(Mask))});
+    }
+  }
 
   if (!RealInputSignature.empty()) {
     addRealSignatureElements(Inputs, RealInputSignature);
@@ -1275,8 +1355,6 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
                             static_cast<unsigned>(Dcl.getMode()));
       else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputPsSgv>(&Op)) {
         DXILSemanticKind Kind = toSemanticKind(Dcl.getName());
-        if (auto Read = systemValueRead(Kind))
-          SystemValueReads[Inputs.elements().size()] = *Read;
         addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN", Kind, 0);
       } else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSiv>(&Op))
         addSignatureElement(Inputs, Dcl.getOperandAttr(), "IN",
@@ -1286,6 +1364,8 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
                             toSemanticKind(Dcl.getName()), 0);
     }
   }
+  for (const InputRange &Range : InputRanges)
+    Inputs.collapseRange(Range.Start, Range.Count, Range.StartCol, Range.Cols);
 
   if (!RealOutputSignature.empty()) {
     addRealSignatureElements(Outputs, RealOutputSignature,
@@ -1310,6 +1390,7 @@ bool Translator::collectDeclarations(dxsa::ModuleOp Shader) {
         Element.Cols = 1;
         Element.Kind = *Kind;
         Element.Name = semanticName(*Kind);
+        Element.SemanticIndices.push_back(0);
         if (Operand.getMinPrecision())
           Element.Type = toComponentType(Operand.getMinPrecision());
         Outputs.addUnindexed(std::move(Element));
@@ -1404,11 +1485,6 @@ void Translator::refineFromDeclarations(dxsa::ModuleOp Shader) {
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclInputSgv>(&Op)) {
       refine(Inputs, RealInputSignature, Dcl.getOperandAttr(), std::nullopt);
       systemValue(Dcl.getOperandAttr(), Dcl.getName());
-    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclIndexRange>(&Op)) {
-      if (std::optional<unsigned> Start =
-              registerNumber(Dcl.getOperandAttr().getIndex()))
-        if (Dcl.getOperandAttr().getType() == OperandType::v)
-          InputRanges.emplace_back(*Start, Dcl.getCount());
     } else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutput>(&Op))
       refine(Outputs, RealOutputSignature, Dcl.getOperandAttr(), std::nullopt);
     else if (auto Dcl = llvm::dyn_cast<dxsa::DclOutputSiv>(&Op))
@@ -1431,7 +1507,7 @@ void Translator::addRealSignatureElements(
     Element.Name = Element.Kind == DXILSemanticKind::Arbitrary
                        ? El.Name
                        : semanticName(Element.Kind);
-    Element.Index = El.Index;
+    Element.SemanticIndices.push_back(El.Index);
     Element.Type =
         toComponentType(static_cast<llvm::dxbc::SigComponentType>(El.CompType));
     // `fxc` gives an element that names no register the all-ones register
@@ -1912,9 +1988,9 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     llvm::Value *Row = nullptr;
     if (!Reg && Indices && !Indices.empty() && Indices[0].getRelative()) {
       unsigned Base = Indices[0].getImm() ? Indices[0].getImm().getInt() : 0;
-      for (auto [Start, Count] : InputRanges)
-        if (Base >= Start && Base < Start + Count)
-          Base = Start;
+      for (const InputRange &Range : InputRanges)
+        if (Base >= Range.Start && Base < Range.Start + Range.Count)
+          Base = Range.Start;
       llvm::Value *Value = readIndex(Indices[0], Slot, Op);
       if (!Value)
         return nullptr;
@@ -1930,6 +2006,9 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
       unsupported(Op) << ": read of undeclared input register";
       return nullptr;
     }
+    if (!Row)
+      Row = llvm::ConstantInt::get(i32Ty(),
+                                   *Reg - Inputs.elements()[*Element].Row);
     if (auto Read = SystemValueReads.find(*Element);
         Read != SystemValueReads.end()) {
       Result = emitDXOp(Read->second.first, Read->second.second, i32Ty(), {});
@@ -1940,8 +2019,7 @@ llvm::Value *Translator::readSource(SrcOperandAttr Src, unsigned DstComp,
     llvm::Type *ElementTy = MinPrecision ? Ty : widen(Ty);
     unsigned Col = Comp - Inputs.elements()[*Element].StartCol;
     Result = emitDXOp("loadInput", DXILOp::LoadInput, ElementTy,
-                      {llvm::ConstantInt::get(i32Ty(), *Element),
-                       Row ? Row : llvm::ConstantInt::get(i32Ty(), 0),
+                      {llvm::ConstantInt::get(i32Ty(), *Element), Row,
                        llvm::ConstantInt::get(i8Ty(), Col),
                        llvm::UndefValue::get(i32Ty())});
     break;
@@ -4097,9 +4175,11 @@ llvm::MDNode *Translator::emitSignature(const Signature &Sig) {
     return nullptr;
   llvm::SmallVector<llvm::Metadata *, 8> Elements;
   for (auto [Index, Element] : llvm::enumerate(Sig.elements())) {
-    auto *SemanticIndices = llvm::MDNode::get(
-        Context, {llvm::ConstantAsMetadata::get(
-                     llvm::ConstantInt::get(i32Ty(), Element.Index))});
+    llvm::SmallVector<llvm::Metadata *, 4> Indices;
+    for (unsigned SemanticIndex : Element.SemanticIndices)
+      Indices.push_back(llvm::ConstantAsMetadata::get(
+          llvm::ConstantInt::get(i32Ty(), SemanticIndex)));
+    auto *SemanticIndices = llvm::MDNode::get(Context, Indices);
     llvm::Metadata *Fields[] = {
         llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), Index)),
         llvm::MDString::get(Context, Element.Name),
@@ -4110,7 +4190,8 @@ llvm::MDNode *Translator::emitSignature(const Signature &Sig) {
         SemanticIndices,
         llvm::ConstantAsMetadata::get(
             llvm::ConstantInt::get(i8Ty(), Element.InterpolationMode)),
-        llvm::ConstantAsMetadata::get(llvm::ConstantInt::get(i32Ty(), 1)),
+        llvm::ConstantAsMetadata::get(
+            llvm::ConstantInt::get(i32Ty(), Element.Rows)),
         llvm::ConstantAsMetadata::get(
             llvm::ConstantInt::get(i8Ty(), Element.Cols)),
         llvm::ConstantAsMetadata::get(

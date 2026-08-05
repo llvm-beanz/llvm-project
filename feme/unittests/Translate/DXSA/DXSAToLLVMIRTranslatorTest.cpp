@@ -47,12 +47,14 @@ public:
 
   /// Parses \p Source and translates it, returning the printed LLVM IR.
   /// Returns nullopt if either step failed.
-  std::optional<std::string> translate(llvm::StringRef Source) {
+  std::optional<std::string>
+  translate(llvm::StringRef Source,
+            llvm::ArrayRef<dxsa::ContainerSignatureElement> Inputs = {}) {
     Parsed = mlir::parseSourceString<mlir::ModuleOp>(Source, &MLIR);
     if (!Parsed)
       return std::nullopt;
     std::unique_ptr<llvm::Module> Result =
-        dxsa::translateToLLVMIR(*Parsed, LLVM);
+        dxsa::translateToLLVMIR(*Parsed, LLVM, Inputs);
     if (!Result)
       return std::nullopt;
     std::string Text;
@@ -346,6 +348,45 @@ dxsa.module pixel_shader 5 0 {
 )mlir");
   ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
   EXPECT_NE(IR->find("sub i32"), std::string::npos) << *IR;
+  EXPECT_NE(IR->find("@dx.op.loadInput.f32(i32 4, i32 0, i32 %"),
+            std::string::npos)
+      << *IR;
+}
+
+TEST(DXSAToLLVMIRTranslatorTest, IndexRangesCollapseSignatureElements) {
+  Fixture F;
+  const dxsa::ContainerSignatureElement Inputs[] = {
+      {"A", 0, 0, 0x3, 0, 3}, {"B", 0, 0, 0xC, 0, 3}, {"A", 1, 1, 0x3, 0, 3},
+      {"A", 2, 2, 0x3, 0, 3}, {"D", 0, 3, 0x1, 0, 2},
+  };
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module pixel_shader 5 0 {
+  dxsa.dcl_input_ps linear v<0, <x, y>>
+  dxsa.dcl_input_ps linear v<0, <z, w>>
+  dxsa.dcl_input_ps linear v<1, <x, y>>
+  dxsa.dcl_input_ps linear v<2, <x, y>>
+  dxsa.dcl_input_ps constant v<3, <x>>
+  dxsa.dcl_output o<0, <x>>
+  dxsa.dcl_index_range v<0, <x, y>>, 3
+  dxsa.dcl_temps 1
+  dxsa.mov r<0, <x>>, v<3, <x>>
+  dxsa.mov o<0, <x>>, v<r<0>, <x>>
+  dxsa.ret
+}
+)mlir",
+                                              Inputs);
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+
+  EXPECT_NE(IR->find(R"(!{i32 0, !"A", i8 9, i8 0,)"), std::string::npos)
+      << *IR;
+  EXPECT_NE(IR->find("!{i32 0, i32 1, i32 2}"), std::string::npos) << *IR;
+  EXPECT_NE(IR->find("i8 2, i32 3, i8 2, i32 0, i8 0, null}"),
+            std::string::npos)
+      << *IR;
+  EXPECT_NE(IR->find(R"(!{i32 1, !"B", i8 9, i8 0,)"), std::string::npos)
+      << *IR;
+  EXPECT_NE(IR->find(R"(!{i32 2, !"D", i8 4, i8 0,)"), std::string::npos)
+      << *IR;
   EXPECT_NE(IR->find("@dx.op.loadInput.f32(i32 4, i32 0, i32 %"),
             std::string::npos)
       << *IR;
