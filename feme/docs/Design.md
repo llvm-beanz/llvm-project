@@ -977,15 +977,24 @@ output instruction-for-instruction, only to be semantically equivalent;
 
 Implemented so far: the program header and entry-point metadata, input
 and output signatures synthesized from the register declarations,
-temporary registers, literals, the source modifiers (`-`, `| |`), the
-straight-line arithmetic/logic/conversion/comparison/dot-product opcode
-families, structured control flow, `movc`, `discard`, constant buffers,
-and the registerless signature operands (`oDepth`/`oDepthGE`/`oDepthLE`
-and the compute-shader thread identifiers). Not yet implemented, in
-rough dependency order: minimum-precision (`min16f`/`min16i`/`min16u`)
-operands, indexable temps, subroutines (`label`/`call`), resources and
-samplers, group-shared memory, doubles, and the non-pixel-shader
-stage-specific declarations.
+temporary registers, indexable temps, literals, the source modifiers
+(`-`, `| |`), minimum-precision (`min16f`/`min16i`/`min16u`) operands,
+the `precise` modifier, the straight-line
+arithmetic/logic/conversion/comparison/dot-product opcode families,
+structured control flow, `movc`, `discard`, constant buffers, and the
+registerless signature operands (`oDepth`/`oDepthGE`/`oDepthLE` and the
+compute-shader thread identifiers).
+
+The resource families are covered as far as reading and writing goes:
+resource, sampler and unordered-access-view declarations; the whole
+sampling family including `sample_d`'s gradients, the `_cl` LOD clamps
+and the `_s` Tiled Resources feedback status with
+`check_access_fully_mapped`; the four `gather4` forms; and `ld`, `ldms`,
+`ld_uav_typed`, `ld_raw` and `ld_structured` with their matching stores.
+Not yet implemented, in rough dependency order: the resource *queries*
+(`bufinfo`, `resinfo`, `sampleinfo`, `samplepos`), the atomics and UAV
+counters, group-shared memory, doubles, subroutines (`label`/`call`),
+and the non-pixel-shader stage-specific declarations.
 
 Two design points are worth recording because they shape the whole
 translation:
@@ -998,6 +1007,13 @@ translation:
   itself. The slots are named `dx.v32.r<n>`, flattening the register and
   component the way DXIL's own temp-register intrinsics do, so the
   promoted values match `dxilconv`'s naming.
+- **Dead computations are swept.** A DXBC instruction computes every
+  component its write mask names, and nothing has to read them all: a
+  swizzle can leave a component of the register an instruction wrote
+  unreachable. `dxilconv` drops what such a component computed, so the
+  translation deletes trivially dead instructions before it finishes --
+  which is also why a pure `dx.op` declaration is marked `willreturn`,
+  since otherwise "nothing reads this call" is not enough to delete it.
 - **A slot needs a type and DXBC registers do not have one.**
   `inferTempTypes` picks one per component before translation begins: an
   instruction with definite floating-point or integer semantics votes for
