@@ -111,6 +111,7 @@ enum class DXILOp : unsigned {
   SampleCmp = 64,
   SampleCmpLevelZero = 65,
   TextureLoad = 66,
+  BufferLoad = 68,
   CheckAccessFullyMapped = 71,
   TextureGather = 73,
   TextureGatherCmp = 74,
@@ -1023,6 +1024,24 @@ private:
   /// discards the status leaves `null`.
   bool writeFeedbackStatus(DstOperandAttr Feedback, llvm::Value *Result,
                            mlir::Operation *Op);
+  /// The LLVM type a resource load's result components have, which is the
+  /// declared component type narrowed to the three DXIL overloads a
+  /// resource return comes in.
+  llvm::Type *resourceElementType(const Resource &R) {
+    return componentLLVMType(R.Component == DXILComponentType::I32 ||
+                                     R.Component == DXILComponentType::U32
+                                 ? R.Component
+                                 : DXILComponentType::F32,
+                             Context);
+  }
+  /// Translates `ld` and `ldms`, which read a shader resource view at an
+  /// integer address and take no sampler. \p SampleIndex is `ldms`'s
+  /// sample index, which occupies the slot a mip level takes otherwise.
+  bool translateResourceLoad(mlir::Operation *Op, DstOperandAttr Dst,
+                             SrcOperandAttr Address, SrcOperandAttr SRV,
+                             SampleOffsetAttr Offset,
+                             SrcOperandAttr SampleIndex,
+                             DstOperandAttr Feedback);
 
   /// Translates `sincos`, whose two destinations are written from one
   /// source and either of which may be `null`.
@@ -2571,6 +2590,29 @@ Translator::operationTypes(const OpLowering &Lowering, DstOperandAttr Dst,
   return {storageType(Precision, SrcTy), storageType(Precision, DstTy)};
 }
 
+/// Remembers the source values a conversion has already been computed for.
+/// DXBC lets two components of an instruction read the same source --
+/// `ftoi r0.xyzw, v0.xyzz` does -- and dxilconv converts such a pair once.
+class ComponentMemo {
+public:
+  /// Returns the result already computed from \p Args, or null when there
+  /// is none.
+  llvm::Value *lookup(llvm::ArrayRef<llvm::Value *> Args) const {
+    for (const auto &[Key, Value] : Entries)
+      if (llvm::ArrayRef<llvm::Value *>(Key) == Args)
+        return Value;
+    return nullptr;
+  }
+  void record(llvm::ArrayRef<llvm::Value *> Args, llvm::Value *Value) {
+    Entries.emplace_back(llvm::SmallVector<llvm::Value *, 4>(Args), Value);
+  }
+
+private:
+  llvm::SmallVector<
+      std::pair<llvm::SmallVector<llvm::Value *, 4>, llvm::Value *>, 4>
+      Entries;
+};
+
 bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
                                 SrcOperandAttr Src, bool Saturate) {
   llvm::StringRef Name = mnemonicOf(Op);
@@ -2610,8 +2652,17 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
     Sources.push_back(Value);
   }
 
+  // A conversion is computed once per distinct source value, where an
+  // arithmetic instruction computes every destination component in its own
+  // right even when two of them read the same source.
+  bool Shared = Lowering->Kind == OpLowering::Form::Cast;
+  ComponentMemo Memo;
   llvm::SmallVector<llvm::Value *, 4> Values;
   for (llvm::Value *Source : Sources) {
+    if (llvm::Value *Computed = Shared ? Memo.lookup(Source) : nullptr) {
+      Values.push_back(Computed);
+      continue;
+    }
     llvm::Value *Value;
     switch (Lowering->Kind) {
     case OpLowering::Form::Call:
@@ -2638,6 +2689,8 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
       return false;
     }
     Values.push_back(saturate(Value, Saturate));
+    if (Shared)
+      Memo.record(Source, Values.back());
   }
   return writeDestination(Dst, Values, Op);
 }
@@ -2963,12 +3016,7 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
   if (IsLOD)
     Args.push_back(llvm::ConstantInt::get(i1Ty(), 1));
 
-  llvm::Type *Element =
-      componentLLVMType(Texture->Component == DXILComponentType::I32 ||
-                                Texture->Component == DXILComponentType::U32
-                            ? Texture->Component
-                            : DXILComponentType::F32,
-                        Context);
+  llvm::Type *Element = resourceElementType(*Texture);
   if (IsLOD) {
     llvm::Value *Value = emitDXOp(Form.Name, Form.Op, floatTy(), Args);
     llvm::SmallVector<llvm::Value *, 4> Components(
@@ -2980,6 +3028,74 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
   if (!writeResourceResult(Dst, SRV, Value, Op))
     return false;
   return writeFeedbackStatus(Form.Feedback, Value, Op);
+}
+
+bool Translator::translateResourceLoad(mlir::Operation *Op, DstOperandAttr Dst,
+                                       SrcOperandAttr Address,
+                                       SrcOperandAttr SRV,
+                                       SampleOffsetAttr Offset,
+                                       SrcOperandAttr SampleIndex,
+                                       DstOperandAttr Feedback) {
+  const Resource *Texture =
+      findResource(ResourceClass::SRV, SRV.getIndex(), Op);
+  if (!Texture)
+    return false;
+  llvm::Value *Handle =
+      resourceHandle(ResourceClass::SRV, SRV.getIndex(), Op, /*Slot=*/1,
+                     /*Trailing=*/0, bool(SRV.getNonUniform()));
+  if (!Handle)
+    return false;
+
+  llvm::StringRef Name = "textureLoad";
+  DXILOp DXOp = DXILOp::TextureLoad;
+  llvm::SmallVector<llvm::Value *, 12> Args = {Handle};
+  if (Texture->Kind == ResourceKind::TypedBuffer) {
+    // A typed buffer is addressed by one index and has no mip level; the
+    // offset within an element that follows is a structured buffer's.
+    llvm::Value *Index = readSource(Address, 0, i32Ty(), Op);
+    if (!Index)
+      return false;
+    Args.push_back(Index);
+    Args.push_back(llvm::UndefValue::get(i32Ty()));
+    Name = "bufferLoad";
+    DXOp = DXILOp::BufferLoad;
+  } else {
+    unsigned Coordinates = coordinateCount(Texture->Kind);
+    llvm::SmallVector<llvm::Value *, 3> Coords;
+    for (unsigned I = 0; I < 3; ++I) {
+      if (I >= Coordinates) {
+        Coords.push_back(llvm::UndefValue::get(i32Ty()));
+        continue;
+      }
+      llvm::Value *Value = readSource(Address, I, i32Ty(), Op);
+      if (!Value)
+        return false;
+      Coords.push_back(Value);
+    }
+    // `ldms` names its sample index in the slot from which `ld` reads a
+    // mip level, which is the address component after the coordinates.
+    llvm::Value *Level =
+        SampleIndex ? readSource(SampleIndex, 0, i32Ty(), Op, /*Slot=*/2)
+                    : readSource(Address, Coordinates, i32Ty(), Op);
+    if (!Level)
+      return false;
+    Args.push_back(Level);
+    llvm::append_range(Args, Coords);
+
+    unsigned Offsets = offsetCount(Texture->Kind);
+    int32_t Values[3] = {Offset ? Offset.getU() : 0, Offset ? Offset.getV() : 0,
+                         Offset ? Offset.getW() : 0};
+    for (unsigned I = 0; I < 3; ++I)
+      Args.push_back(I < Offsets
+                         ? llvm::ConstantInt::getSigned(i32Ty(), Values[I])
+                         : llvm::UndefValue::get(i32Ty()));
+  }
+
+  llvm::Type *Element = resourceElementType(*Texture);
+  llvm::Value *Value = emitDXOp(Name, DXOp, resRetTy(Element), Args, Element);
+  if (!writeResourceResult(Dst, SRV, Value, Op))
+    return false;
+  return writeFeedbackStatus(Feedback, Value, Op);
 }
 
 bool Translator::writeFeedbackStatus(DstOperandAttr Feedback,
@@ -3559,6 +3675,26 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
     return translateSample(Op, S.getDst(), S.getSrc0(), S.getSrc1(),
                            S.getSrc2(), SampleOffsetAttr(), Form);
   }
+  if (auto L = llvm::dyn_cast<dxsa::Ld>(Op))
+    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
+                                 L.getSrcResource(),
+                                 L.getOffset().value_or(SampleOffsetAttr()),
+                                 SrcOperandAttr(), DstOperandAttr());
+  if (auto L = llvm::dyn_cast<dxsa::LdFeedback>(Op))
+    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
+                                 L.getSrcResource(),
+                                 L.getOffset().value_or(SampleOffsetAttr()),
+                                 SrcOperandAttr(), L.getFeedback());
+  if (auto L = llvm::dyn_cast<dxsa::Ld2dms>(Op))
+    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
+                                 L.getSrcResource(),
+                                 L.getOffset().value_or(SampleOffsetAttr()),
+                                 L.getSampleIndex(), DstOperandAttr());
+  if (auto L = llvm::dyn_cast<dxsa::Ld2dmsFeedback>(Op))
+    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
+                                 L.getSrcResource(),
+                                 L.getOffset().value_or(SampleOffsetAttr()),
+                                 L.getSampleIndex(), L.getFeedback());
   if (auto Check = llvm::dyn_cast<dxsa::CheckAccessFullyMapped>(Op)) {
     llvm::Value *Status = readSource(Check.getSrc(), 0, i32Ty(), Op);
     if (!Status)
@@ -3660,6 +3796,15 @@ void Translator::foldConditionMasks(llvm::Function &Entry) {
       llvm::Value *Source = bitcastSource(&I);
       if (!Source)
         continue;
+      // Promoting the temp registers can turn the load a reinterpretation
+      // was emitted for into a literal, which has no runtime
+      // representation to reinterpret.
+      if (auto *Literal = llvm::dyn_cast<llvm::Constant>(Source)) {
+        I.replaceAllUsesWith(
+            llvm::ConstantExpr::getBitCast(Literal, I.getType()));
+        I.eraseFromParent();
+        continue;
+      }
       auto *Inner = llvm::dyn_cast<llvm::Instruction>(Source);
       if (!Inner)
         continue;
