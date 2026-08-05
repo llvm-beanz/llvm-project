@@ -111,6 +111,7 @@ enum class DXILOp : unsigned {
   SampleCmp = 64,
   SampleCmpLevelZero = 65,
   TextureLoad = 66,
+  CheckAccessFullyMapped = 71,
   TextureGather = 73,
   TextureGatherCmp = 74,
   CalculateLOD = 81,
@@ -988,6 +989,13 @@ private:
     /// `sample_d`'s gradients, which are appended as three components of
     /// each of two operands.
     bool Gradients = false;
+    /// The instruction's own LOD clamp, which a `_cl` form carries as an
+    /// operand and every other form leaves null.
+    SrcOperandAttr ClampValue;
+    /// Where a `_s` form writes the Tiled Resources feedback status the
+    /// resource return's fifth field carries. Null on the plain forms,
+    /// and `null` on a `_s` form whose shader discards the status.
+    DstOperandAttr Feedback;
   };
 
   /// Returns (creating on first use) the named struct type a resource load
@@ -1007,6 +1015,11 @@ private:
   /// \p Value, picking each through \p SRV's swizzle.
   bool writeResourceResult(DstOperandAttr Dst, SrcOperandAttr SRV,
                            llvm::Value *Value, mlir::Operation *Op);
+  /// Writes the Tiled Resources feedback status \p Result's fifth field
+  /// carries to \p Feedback, which a `_s` instruction whose shader
+  /// discards the status leaves `null`.
+  bool writeFeedbackStatus(DstOperandAttr Feedback, llvm::Value *Result,
+                           mlir::Operation *Op);
 
   /// Translates `sincos`, whose two destinations are written from one
   /// source and either of which may be `null`.
@@ -2908,8 +2921,15 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
   if (Form.Channel)
     Args.push_back(
         llvm::ConstantInt::get(i32Ty(), sourceComponent(Sampler, 0)));
-  if (Form.Clamp)
+  if (Form.ClampValue) {
+    llvm::Value *Value =
+        readSource(Form.ClampValue, 0, floatTy(), Op, /*Slot=*/4);
+    if (!Value)
+      return false;
+    Args.push_back(Value);
+  } else if (Form.Clamp) {
     Args.push_back(llvm::ConstantFP::get(floatTy(), 0.0));
+  }
   if (IsLOD)
     Args.push_back(llvm::ConstantInt::get(i1Ty(), 1));
 
@@ -2927,7 +2947,19 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
   }
   llvm::Value *Value =
       emitDXOp(Form.Name, Form.Op, resRetTy(Element), Args, Element);
-  return writeResourceResult(Dst, SRV, Value, Op);
+  if (!writeResourceResult(Dst, SRV, Value, Op))
+    return false;
+  return writeFeedbackStatus(Form.Feedback, Value, Op);
+}
+
+bool Translator::writeFeedbackStatus(DstOperandAttr Feedback,
+                                     llvm::Value *Result, mlir::Operation *Op) {
+  if (!Feedback || Feedback.getType() == OperandType::null)
+    return true;
+  llvm::Value *Status = Builder.CreateExtractValue(Result, 4);
+  llvm::SmallVector<llvm::Value *, 4> Components(
+      destinationComponents(Feedback).size(), Status);
+  return writeDestination(Feedback, Components, Op);
 }
 
 //===----------------------------------------------------------------------===//
@@ -3314,8 +3346,23 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
+  if (auto S = llvm::dyn_cast<dxsa::SampleClampFeedback>(Op)) {
+    SampleForm Form{DXILOp::Sample, "sample", {}, /*Clamp=*/true};
+    Form.ClampValue = S.getClampFeedback().getLodClamp();
+    Form.Feedback = S.getClampFeedback().getFeedback();
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
   if (auto S = llvm::dyn_cast<dxsa::SampleL>(Op)) {
     SampleForm Form{DXILOp::SampleLevel, "sampleLevel", {S.getSrcLod()}};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleLFeedback>(Op)) {
+    SampleForm Form{DXILOp::SampleLevel, "sampleLevel", {S.getSrcLod()}};
+    Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
@@ -3329,6 +3376,17 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
+  if (auto S = llvm::dyn_cast<dxsa::SampleBClampFeedback>(Op)) {
+    SampleForm Form{DXILOp::SampleBias,
+                    "sampleBias",
+                    {S.getSrcLodBias()},
+                    /*Clamp=*/true};
+    Form.ClampValue = S.getClampFeedback().getLodClamp();
+    Form.Feedback = S.getClampFeedback().getFeedback();
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
   if (auto S = llvm::dyn_cast<dxsa::SampleC>(Op)) {
     SampleForm Form{DXILOp::SampleCmp,
                     "sampleCmp",
@@ -3338,10 +3396,30 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
+  if (auto S = llvm::dyn_cast<dxsa::SampleCClampFeedback>(Op)) {
+    SampleForm Form{DXILOp::SampleCmp,
+                    "sampleCmp",
+                    {S.getSrcReferenceValue()},
+                    /*Clamp=*/true};
+    Form.ClampValue = S.getClampFeedback().getLodClamp();
+    Form.Feedback = S.getClampFeedback().getFeedback();
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
   if (auto S = llvm::dyn_cast<dxsa::SampleCLZ>(Op)) {
     SampleForm Form{DXILOp::SampleCmpLevelZero,
                     "sampleCmpLevelZero",
                     {S.getSrcReferenceValue()}};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleCLZFeedback>(Op)) {
+    SampleForm Form{DXILOp::SampleCmpLevelZero,
+                    "sampleCmpLevelZero",
+                    {S.getSrcReferenceValue()}};
+    Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
@@ -3358,6 +3436,19 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
     SampleForm Form{DXILOp::CalculateLOD, "calculateLOD", {}};
     return translateSample(Op, S.getDst(), S.getSrc0(), S.getSrc1(),
                            S.getSrc2(), SampleOffsetAttr(), Form);
+  }
+  if (auto Check = llvm::dyn_cast<dxsa::CheckAccessFullyMapped>(Op)) {
+    llvm::Value *Status = readSource(Check.getSrc(), 0, i32Ty(), Op);
+    if (!Status)
+      return false;
+    llvm::Value *Mapped =
+        emitDXOp("checkAccessFullyMapped", DXILOp::CheckAccessFullyMapped,
+                 i1Ty(), {Status}, i32Ty());
+    // The result is a condition, and DXBC spells a condition as a mask.
+    llvm::Value *Mask = Builder.CreateSExt(Mapped, i32Ty());
+    llvm::SmallVector<llvm::Value *, 4> Components(
+        destinationComponents(Check.getDst()).size(), Mask);
+    return writeDestination(Check.getDst(), Components, Op);
   }
 
   if (auto Bits = llvm::dyn_cast<dxsa::UBFE>(Op)) {
