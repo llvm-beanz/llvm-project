@@ -4934,3 +4934,157 @@ Three, all cosmetic, and none of them a translation choice:
 Thirty of the forty fixtures migrated this session reproduce dxilconv's
 output instruction for instruction; the other ten differ only in the
 above.
+
+# Agent thoughts: the resource families of the dxilconv `.ref` fixtures
+
+73 `.ref` files were left under `feme/test/Translate/DXBC`, twenty of
+which (`dxilcleanup*`, `phibug`) have no `.dxasm` next to them -- they
+are DXIL IR *inputs* to dxilconv's cleanup pass, not DXBC translations --
+so 53 were in scope. This session migrated 18 of them and left 35.
+
+The plan I inherited put the `_s` feedback variants first as the cheapest
+group and buffers second. That order held, and each group turned out to
+be mostly argument shapes on top of machinery that already existed. What
+took the measuring, again, was not the opcodes.
+
+## What the sampling family actually needed
+
+Three things, all small:
+
+- **A second destination.** A `_s` instruction names a register for the
+  Tiled Resources mapping status, which is the fifth field of the
+  resource return the operation already produced. `null` there means the
+  shader discarded it, and then dxilconv does not even extract it.
+- **A real LOD clamp.** A `_cl` form carries its clamp as an operand
+  where the plain form passes zero, which is a one-line difference in
+  the argument builder.
+- **`check_access_fully_mapped`**, which the importer left as a generic
+  `dxsa.instruction`. Modelling it was the whole of the work; the
+  translation is a `dx.op` call and a `sext i1 to i32`, because the
+  result is a condition and DXBC spells a condition as an all-ones mask.
+
+The gathers then needed one reordering and one new operand source.
+`gather4_c` appends its reference value *after* the channel, where a
+comparing sample names its reference value *before* its LOD clamp, so the
+channel moved ahead of everything else the operation appends.
+`gather4_po` reads its two texel offsets from a register instead of the
+instruction's immediate suffix. `sample_d`'s gradients are three spatial
+components of each of two operands, with the array slice's slot `undef`.
+
+## Two rules the references disagreed about
+
+**Cube maps and texel offsets.** `gather4` on a `TextureCubeArray` passes
+`undef, undef` for its two offset slots; `sample_l` on the same resource
+passes `0, 0, 0` for its three. The value is moot -- fxc never gives a
+cube map a non-zero `aoffimmi` -- but the `undef` is not, and the two
+families genuinely differ. The sampling operations fill up to the
+resource's spatial coordinate count, which for a cube is three; `gather4`
+treats a cube as having no offsets at all. I did not find a single rule
+that fits both, and I do not think there is one: they are separate paths
+in dxilconv.
+
+**Where `ld` reads its mip level.** I first read it as the address
+component after the coordinates, which for a `Texture2D` is index 2, and
+`srv_typed_load1` matched -- but only because I had also, wrongly,
+decided dxilconv computes a conversion once per distinct source value.
+`raw_buf1` disproved that: `ftou r0.xzw, r1.wwwz` emits `fptoui` on the
+same value twice, once for `r0.x` and once for `r0.z`. Backing the
+sharing out and reading the mip from the address's *last* component
+instead explains `srv_typed_load1` exactly: `r1.z` is then never read,
+and the conversion that produced it is dead.
+
+Which is the more interesting finding, because it means **dxilconv
+deletes dead computations** -- a DXBC instruction computes every
+component its write mask names, and a swizzle can leave one of them
+unreachable. The translation now sweeps trivially dead instructions
+before it finishes. That required marking a pure `dx.op` declaration
+`willreturn`: without it "nothing reads this call" is not enough for LLVM
+to delete it, and a reinterpretation feeding nothing would survive and
+keep its operand alive.
+
+`abs2` and `dot1` are the fixtures that say arithmetic is *not* shared:
+three identical `dx.op.binary.i32(37, %3, %5)` calls in a row, one per
+destination component.
+
+## `precise`
+
+Two effects, and the second is the one worth recording. The relaxed
+floating-point flags come off the instruction's native arithmetic, and
+the `dx.op` calls it emits carry `!dx.precise`. But not *all* of them:
+the constant-buffer loads a precise `mul` needs to read its operands are
+unmarked, where the `sample` itself and the signature stores are marked.
+So the modifier reaches the operation and its destination, and a source
+read is a computation of its own that it does not reach. The translator
+models that by clearing the flag for the duration of `readSource`.
+
+The importer had been dropping `precise` on the sampling and gather
+operations, which is why `precise1` needed twenty operations to gain the
+attribute every mnemonic-shaped operation already had.
+
+## Buffers
+
+Less interesting than expected, because `bufferLoad` and `textureLoad`
+differ only in how they are addressed. The shapes:
+
+- A typed unordered access view is a texture with no mip level and no
+  texel offsets: `undef` in all four slots.
+- A raw or structured access reaches *both* shader resource views and
+  unordered access views, so only the register the operand names says
+  which class to look the resource up in.
+- A structured buffer names the element and the byte offset within it
+  separately; everything else passes `undef` for the second index.
+- A store passes four component slots and a write mask, and the slots
+  the mask leaves out are `undef` -- not the register's other
+  components, which is what I assumed first and `raw_buf1` corrected.
+- A destination register at minimum precision asks the load to return
+  its components already narrowed, so the resource return comes in `i16`
+  and `f16` overloads too.
+
+One assembler fix fell out of this: `dcl_resource_texture2dms(0)` is how
+fxc spells a multisampled resource whose sample count the shader never
+named, and the importer rejected a zero count as invalid.
+
+## What is left
+
+Thirty-five fixtures with inputs, in six groups, plus the twenty
+input-less ones.
+
+1. **Resource queries** (~6): `bufinfo`, `resinfo`, `sampleinfo`,
+   `samplepos`, `eval_*`. All single calls with a handle and a small
+   argument list; this is the cheapest group and the one I would do next.
+2. **Atomics and UAV counters** (~4): the `atomic_*`/`imm_atomic_*`
+   family, `imm_atomic_alloc`/`imm_atomic_consume`.
+3. **Group-shared memory** (~5, the `cs*` fixtures): an
+   `addrspace(3)` global per `dcl_tgsm_*`, and the raw/structured
+   accesses already implemented pointed at it instead of a handle.
+4. **Doubles** (~6): `ddiv`/`dfma`/`dtof`/`dmov` and the pairing of two
+   32-bit components into one `double`.
+5. **Subroutines** (~5): `label`/`call`/`fcall`, which dxilconv inlines.
+6. **Stage-specific declarations** (~6): the hull shader phases, the
+   geometry shader's `emit`/`cut`, and `icb1`'s immediate constant
+   buffer.
+
+Two things I found and did not do:
+
+- **`struct_buf1` is one instruction away.** Its only difference is a
+  `bitcastI32toF32` we emit and dxilconv does not, because a temp
+  register component this translation typed `float` dxilconv typed
+  `i32`. That is a `inferTempTypes` voting question, not a resource one.
+- **`indexableinput1`/`indexableinput2`** still differ in signature
+  *element numbering*: dxilconv collapses the registers a
+  `dcl_indexrange` spans into one element with `Rows` set to the range's
+  length. That renumbers every element after it, so it is worth
+  measuring against all the signature-carrying fixtures at once.
+
+The twenty input-less `.ref` files remain a separate question. They are
+dxilconv's cleanup-pass outputs for `.ll` inputs this tree does not have,
+so they cannot be migrated the way the others were; they either need
+their inputs reconstructed or need deleting, and that is a call about
+what the cleanup pass is for rather than about DXBC translation.
+
+## Differences that remain in the migrated fixtures
+
+The same three as before, all cosmetic and none a translation choice:
+opaque pointers where the LLVM 3.7 references spell typed ones, `half
+2.000000e+00` where they print `half 0xH4000`, and phi incoming-value
+order that follows this LLVM's mem2reg.
