@@ -96,4 +96,12 @@ store_uav_typed resource_dim(texture2d) u3.xyzw, v0.zwww, r0.xyzw
 
 // CHECK-NEXT:   dxsa.store_uav_typed u<1, vector, <y, w>>, r<2, <x, y, x, x>>, r<3, <z, z, z, z>>
 store_uav_typed resource_dim(texture2d) u1.yw, r2.xyxx, r3.zzzz
+// CHECK-NEXT:   dxsa.store_raw u<1, vector, <x>>, r<0, <y>>, r<0, <x, x, x, x>>
+store_raw u1.x, r0.y, r0.xxxx
+
+// CHECK-NEXT:   dxsa.store_raw g<2, vector, <x, y>>, r<2, <x>>, r<0, <z, w, z, z>>
+store_raw g2.xy, r2.x, r0.zwzz
+
+// CHECK-NEXT:   dxsa.store_structured u<1, vector, <x, y, z>>, r<2, <y>>, l(0x4), r<0, <x, y, z, x>>
+store_structured u1.xyz, r2.y, l(0x00000004), r0.xyzx
 // CHECK-NEXT: }

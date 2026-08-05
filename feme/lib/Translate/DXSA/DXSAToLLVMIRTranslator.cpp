@@ -185,6 +185,13 @@ ResourceKind toResourceKind(ResourceDimension Dim) {
   return ResourceKind::Texture2D;
 }
 
+/// Whether a resource of \p Kind is a buffer, which is addressed by an
+/// index rather than by coordinates and has no mip level.
+bool isBuffer(ResourceKind Kind) {
+  return Kind == ResourceKind::TypedBuffer || Kind == ResourceKind::RawBuffer ||
+         Kind == ResourceKind::StructuredBuffer;
+}
+
 /// The number of coordinates an address in a resource of \p Kind has, not
 /// counting the mip level or sample index a load also takes.
 unsigned coordinateCount(ResourceKind Kind) {
@@ -1027,6 +1034,13 @@ private:
   /// discards the status leaves `null`.
   bool writeFeedbackStatus(DstOperandAttr Feedback, llvm::Value *Result,
                            mlir::Operation *Op);
+  /// The class the resource operand \p View names: a raw or structured
+  /// access reaches both shader resource views and unordered access views,
+  /// and only the register the operand names says which.
+  static ResourceClass viewClass(SrcOperandAttr View) {
+    return View.getType() == OperandType::u ? ResourceClass::UAV
+                                            : ResourceClass::SRV;
+  }
   /// The LLVM type a resource load's result components have, which is the
   /// declared component type narrowed to the three DXIL overloads a
   /// resource return comes in.
@@ -1047,9 +1061,12 @@ private:
                              SrcOperandAttr View, SampleOffsetAttr Offset,
                              SrcOperandAttr SampleIndex,
                              DstOperandAttr Feedback);
-  /// Translates `store_uav_typed`.
+  /// Translates the `store_uav_typed`, `store_raw` and `store_structured`
+  /// family. \p ByteOffset is the offset within a structured buffer's
+  /// element, which the other two leave null.
   bool translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
-                              SrcOperandAttr Address, SrcOperandAttr Value);
+                              SrcOperandAttr Address, SrcOperandAttr ByteOffset,
+                              SrcOperandAttr Value);
 
   /// Translates `sincos`, whose two destinations are written from one
   /// source and either of which may be `null`.
@@ -1606,6 +1623,28 @@ void Translator::collectResources(dxsa::ModuleOp Shader) {
                            Dcl.getUbound(), Dcl.getSpace());
       R.Kind = toResourceKind(Dcl.getDim());
       R.Component = toComponentType(Dcl.getX());
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclResourceRaw>(&Op)) {
+      Resource &R = record(ResourceClass::SRV, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      R.Kind = ResourceKind::RawBuffer;
+      R.Component = DXILComponentType::U32;
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclUavRaw>(&Op)) {
+      Resource &R = record(ResourceClass::UAV, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      R.Kind = ResourceKind::RawBuffer;
+      R.Component = DXILComponentType::U32;
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclResourceStructured>(&Op)) {
+      Resource &R = record(ResourceClass::SRV, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      R.Kind = ResourceKind::StructuredBuffer;
+      R.Component = DXILComponentType::U32;
+      R.Stride = Dcl.getStructByteStride();
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclUavStructured>(&Op)) {
+      Resource &R = record(ResourceClass::UAV, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      R.Kind = ResourceKind::StructuredBuffer;
+      R.Component = DXILComponentType::U32;
+      R.Stride = Dcl.getStructByteStride();
     }
   }
 }
@@ -2139,8 +2178,11 @@ llvm::Function *Translator::dxOp(llvm::StringRef Name, llvm::Type *ReturnTy,
   // Every dx.op this translation emits is a pure computation except for the
   // signature stores, which are the shader's observable output.
   Fn->addFnAttr(llvm::Attribute::NoUnwind);
-  if (!ReturnTy->isVoidTy())
+  if (!ReturnTy->isVoidTy()) {
     Fn->setMemoryEffects(llvm::MemoryEffects::none());
+    // Saying so is what lets a call nothing reads be deleted.
+    Fn->addFnAttr(llvm::Attribute::WillReturn);
+  }
   return Fn;
 }
 
@@ -2617,29 +2659,6 @@ Translator::operationTypes(const OpLowering &Lowering, DstOperandAttr Dst,
   return {storageType(Precision, SrcTy), storageType(Precision, DstTy)};
 }
 
-/// Remembers the source values a conversion has already been computed for.
-/// DXBC lets two components of an instruction read the same source --
-/// `ftoi r0.xyzw, v0.xyzz` does -- and dxilconv converts such a pair once.
-class ComponentMemo {
-public:
-  /// Returns the result already computed from \p Args, or null when there
-  /// is none.
-  llvm::Value *lookup(llvm::ArrayRef<llvm::Value *> Args) const {
-    for (const auto &[Key, Value] : Entries)
-      if (llvm::ArrayRef<llvm::Value *>(Key) == Args)
-        return Value;
-    return nullptr;
-  }
-  void record(llvm::ArrayRef<llvm::Value *> Args, llvm::Value *Value) {
-    Entries.emplace_back(llvm::SmallVector<llvm::Value *, 4>(Args), Value);
-  }
-
-private:
-  llvm::SmallVector<
-      std::pair<llvm::SmallVector<llvm::Value *, 4>, llvm::Value *>, 4>
-      Entries;
-};
-
 bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
                                 SrcOperandAttr Src, bool Saturate) {
   llvm::StringRef Name = mnemonicOf(Op);
@@ -2679,17 +2698,8 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
     Sources.push_back(Value);
   }
 
-  // A conversion is computed once per distinct source value, where an
-  // arithmetic instruction computes every destination component in its own
-  // right even when two of them read the same source.
-  bool Shared = Lowering->Kind == OpLowering::Form::Cast;
-  ComponentMemo Memo;
   llvm::SmallVector<llvm::Value *, 4> Values;
   for (llvm::Value *Source : Sources) {
-    if (llvm::Value *Computed = Shared ? Memo.lookup(Source) : nullptr) {
-      Values.push_back(Computed);
-      continue;
-    }
     llvm::Value *Value;
     switch (Lowering->Kind) {
     case OpLowering::Form::Call:
@@ -2716,8 +2726,6 @@ bool Translator::translateUnary(mlir::Operation *Op, DstOperandAttr Dst,
       return false;
     }
     Values.push_back(saturate(Value, Saturate));
-    if (Shared)
-      Memo.record(Source, Values.back());
   }
   return writeDestination(Dst, Values, Op);
 }
@@ -3082,14 +3090,21 @@ bool Translator::translateResourceLoad(
   llvm::StringRef Name = "textureLoad";
   DXILOp DXOp = DXILOp::TextureLoad;
   llvm::SmallVector<llvm::Value *, 12> Args = {Handle};
-  if (Texture->Kind == ResourceKind::TypedBuffer) {
-    // A typed buffer is addressed by one index and has no mip level; the
-    // offset within an element that follows is a structured buffer's.
+  if (isBuffer(Texture->Kind)) {
+    // A buffer has no mip level. It is addressed by one index, except for
+    // a structured buffer, which names the element and the byte offset
+    // within it separately.
     llvm::Value *Index = readSource(Address, 0, i32Ty(), Op);
     if (!Index)
       return false;
     Args.push_back(Index);
-    Args.push_back(llvm::UndefValue::get(i32Ty()));
+    llvm::Value *Offset = llvm::UndefValue::get(i32Ty());
+    if (SampleIndex) {
+      Offset = readSource(SampleIndex, 0, i32Ty(), Op, /*Slot=*/2);
+      if (!Offset)
+        return false;
+    }
+    Args.push_back(Offset);
     Name = "bufferLoad";
     DXOp = DXILOp::BufferLoad;
   } else {
@@ -3106,11 +3121,12 @@ bool Translator::translateResourceLoad(
       Coords.push_back(Value);
     }
     // `ldms` names its sample index in the slot from which `ld` reads a
-    // mip level, which is the address component after the coordinates.
+    // mip level, which is the address's last component whatever the
+    // resource's dimensionality.
     llvm::Value *Level = llvm::UndefValue::get(i32Ty());
     if (Levelled) {
       Level = SampleIndex ? readSource(SampleIndex, 0, i32Ty(), Op, /*Slot=*/2)
-                          : readSource(Address, Coordinates, i32Ty(), Op);
+                          : readSource(Address, 3, i32Ty(), Op);
       if (!Level)
         return false;
     }
@@ -3138,6 +3154,7 @@ bool Translator::translateResourceLoad(
 
 bool Translator::translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
                                         SrcOperandAttr Address,
+                                        SrcOperandAttr ByteOffset,
                                         SrcOperandAttr Value) {
   const Resource *View = findResource(ResourceClass::UAV, UAV.getIndex(), Op);
   if (!View)
@@ -3149,32 +3166,50 @@ bool Translator::translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
     return false;
 
   llvm::SmallVector<llvm::Value *, 12> Args = {Handle};
-  bool IsBuffer = View->Kind == ResourceKind::TypedBuffer;
-  unsigned Coordinates = IsBuffer ? 1 : coordinateCount(View->Kind);
-  for (unsigned I = 0, E = IsBuffer ? 2 : 3; I < E; ++I) {
-    if (I >= Coordinates) {
-      Args.push_back(llvm::UndefValue::get(i32Ty()));
-      continue;
-    }
-    llvm::Value *Coord = readSource(Address, I, i32Ty(), Op, /*Slot=*/1);
-    if (!Coord)
+  bool IsBuffer = isBuffer(View->Kind);
+  if (IsBuffer) {
+    llvm::Value *Index = readSource(Address, 0, i32Ty(), Op, /*Slot=*/1);
+    if (!Index)
       return false;
-    Args.push_back(Coord);
+    Args.push_back(Index);
+    llvm::Value *Offset = llvm::UndefValue::get(i32Ty());
+    if (ByteOffset) {
+      Offset = readSource(ByteOffset, 0, i32Ty(), Op, /*Slot=*/2);
+      if (!Offset)
+        return false;
+    }
+    Args.push_back(Offset);
+  } else {
+    unsigned Coordinates = coordinateCount(View->Kind);
+    for (unsigned I = 0; I < 3; ++I) {
+      if (I >= Coordinates) {
+        Args.push_back(llvm::UndefValue::get(i32Ty()));
+        continue;
+      }
+      llvm::Value *Coord = readSource(Address, I, i32Ty(), Op, /*Slot=*/1);
+      if (!Coord)
+        return false;
+      Args.push_back(Coord);
+    }
   }
 
-  // All four components are passed whatever the write mask says; the mask
-  // travels with them and selects the ones that reach memory.
+  // Four component slots travel with the write mask that selects the ones
+  // reaching memory; the slots the mask leaves out are `undef`.
+  unsigned Mask = 0;
+  for (unsigned Comp : destinationComponents(UAV))
+    Mask |= 1u << Comp;
   llvm::Type *Element =
       storageType(Value.getMinPrecision(), resourceElementType(*View));
   for (unsigned I = 0; I < 4; ++I) {
-    llvm::Value *Component = readSource(Value, I, Element, Op, /*Slot=*/2);
+    if (!(Mask & (1u << I))) {
+      Args.push_back(llvm::UndefValue::get(Element));
+      continue;
+    }
+    llvm::Value *Component = readSource(Value, I, Element, Op, /*Slot=*/3);
     if (!Component)
       return false;
     Args.push_back(Component);
   }
-  unsigned Mask = 0;
-  for (unsigned Comp : destinationComponents(UAV))
-    Mask |= 1u << Comp;
   Args.push_back(llvm::ConstantInt::get(i8Ty(), Mask));
 
   emitDXOp(IsBuffer ? "bufferStore" : "textureStore",
@@ -3799,7 +3834,29 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
         SampleOffsetAttr(), SrcOperandAttr(), L.getFeedback());
   if (auto S = llvm::dyn_cast<dxsa::StoreUavTyped>(Op))
     return translateResourceStore(Op, S.getDstUav(), S.getSrcAddress(),
-                                  S.getSrcValue());
+                                  SrcOperandAttr(), S.getSrcValue());
+  if (auto S = llvm::dyn_cast<dxsa::StoreRaw>(Op))
+    return translateResourceStore(Op, S.getDst(), S.getSrcByteOffset(),
+                                  SrcOperandAttr(), S.getSrcValue());
+  if (auto S = llvm::dyn_cast<dxsa::StoreStructured>(Op))
+    return translateResourceStore(Op, S.getDst(), S.getSrcAddress(),
+                                  S.getSrcByteOffset(), S.getSrcValue());
+  if (auto L = llvm::dyn_cast<dxsa::LdRaw>(Op))
+    return translateResourceLoad(
+        Op, viewClass(L.getSrc()), L.getDst(), L.getSrcByteOffset(), L.getSrc(),
+        SampleOffsetAttr(), SrcOperandAttr(), DstOperandAttr());
+  if (auto L = llvm::dyn_cast<dxsa::LdRawFeedback>(Op))
+    return translateResourceLoad(
+        Op, viewClass(L.getSrc()), L.getDst(), L.getSrcByteOffset(), L.getSrc(),
+        SampleOffsetAttr(), SrcOperandAttr(), L.getFeedback());
+  if (auto L = llvm::dyn_cast<dxsa::LdStructured>(Op))
+    return translateResourceLoad(
+        Op, viewClass(L.getSrc()), L.getDst(), L.getSrcAddress(), L.getSrc(),
+        SampleOffsetAttr(), L.getSrcByteOffset(), DstOperandAttr());
+  if (auto L = llvm::dyn_cast<dxsa::LdStructuredFeedback>(Op))
+    return translateResourceLoad(
+        Op, viewClass(L.getSrc()), L.getDst(), L.getSrcAddress(), L.getSrc(),
+        SampleOffsetAttr(), L.getSrcByteOffset(), L.getFeedback());
   if (auto Check = llvm::dyn_cast<dxsa::CheckAccessFullyMapped>(Op)) {
     llvm::Value *Status = readSource(Check.getSrc(), 0, i32Ty(), Op);
     if (!Status)
@@ -3943,6 +4000,14 @@ void Translator::foldConditionMasks(llvm::Function &Entry) {
         Call->getCalledFunction()->getName() == "dx.op.createHandle")
       Call->eraseFromParent();
   }
+
+  // A DXBC instruction computes every component its write mask names, and
+  // nothing has to read them all -- a swizzle can leave a component of the
+  // register it wrote unreachable. dxilconv drops what such a component
+  // computed, so a shader's value numbering only counts what it uses.
+  for (llvm::BasicBlock &BB : Entry)
+    for (llvm::Instruction &I : llvm::make_early_inc_range(BB))
+      llvm::RecursivelyDeleteTriviallyDeadInstructions(&I);
 
   for (llvm::BasicBlock &BB : Entry) {
     for (llvm::Instruction &I : llvm::make_early_inc_range(BB)) {

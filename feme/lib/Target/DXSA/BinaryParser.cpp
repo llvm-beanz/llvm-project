@@ -3441,6 +3441,10 @@ public:
     // Resource instructions
     case D3D11_SB_OPCODE_STORE_UAV_TYPED:
       return PLAIN_OP(StoreUavTyped, 1, 2, HasPreciseAttr::No);
+    case D3D11_SB_OPCODE_STORE_RAW:
+      return PLAIN_OP(StoreRaw, 1, 2, HasPreciseAttr::No);
+    case D3D11_SB_OPCODE_STORE_STRUCTURED:
+      return PLAIN_OP(StoreStructured, 1, 3, HasPreciseAttr::No);
     case D3DWDDM1_3_SB_OPCODE_CHECK_ACCESS_FULLY_MAPPED:
       return PLAIN_OP(CheckAccessFullyMapped, 1, 1, HasPreciseAttr::Yes);
     case D3D11_SB_OPCODE_BUFINFO:

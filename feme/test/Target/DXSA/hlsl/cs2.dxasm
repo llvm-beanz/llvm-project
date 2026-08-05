@@ -18,28 +18,10 @@
 // CHECK:         dxsa.iadd r<0, <x>>, r<0, <x>>, vThreadIDInGroupFlattened<vector, <x>>
 // CHECK:         dxsa.ld_raw r<0, <y>>, r<0, <x>>, u<0, vector, <x, x, x, x>>
 // CHECK:         dxsa.add r<1, min16f, <x>>, r<0, <y>>, l(0x40000000)
-// CHECK:         %[[INDEX_0:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_0:.*]] = dxsa.operand %[[INDEX_0]] {mask = 16 : i32, num_components = 4 : i32, type = 31 : i32}
-// CHECK:         %[[OPERAND_1:.*]] = dxsa.operand  {num_components = 4 : i32, one = 0 : i32, type = 36 : i32}
-// CHECK:         %[[OPERAND_2:.*]] = dxsa.operand.imm {imm = dense<4> : vector<1xi32>}
-// CHECK:         %[[INDEX_1:.*]] = dxsa.index.imm {imm = 1 : i32}
-// CHECK:         %[[OPERAND_3:.*]] = dxsa.operand %[[INDEX_1]] {min_precision = 1 : i32, num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "store_structured" %[[OPERAND_0]], %[[OPERAND_1]], %[[OPERAND_2]], %[[OPERAND_3]]
-// CHECK:         %[[INDEX_2:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_4:.*]] = dxsa.operand %[[INDEX_2]] {mask = 16 : i32, num_components = 4 : i32, type = 31 : i32}
-// CHECK:         %[[OPERAND_5:.*]] = dxsa.operand  {num_components = 4 : i32, one = 0 : i32, type = 36 : i32}
-// CHECK:         %[[OPERAND_6:.*]] = dxsa.operand.imm {imm = dense<8> : vector<1xi32>}
-// CHECK:         %[[INDEX_3:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_7:.*]] = dxsa.operand %[[INDEX_3]] {num_components = 4 : i32, one = 1 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "store_structured" %[[OPERAND_4]], %[[OPERAND_5]], %[[OPERAND_6]], %[[OPERAND_7]]
+// CHECK:         dxsa.store_structured g<0, vector, <x>>, vThreadIDInGroupFlattened<vector, <x>>, l(0x4), r<1, min16f, <x>>
+// CHECK:         dxsa.store_structured g<0, vector, <x>>, vThreadIDInGroupFlattened<vector, <x>>, l(0x8), r<0, <y>>
 // CHECK:         dxsa.ftoi r<2, min16i, <x>>, r<0, <y>>
-// CHECK:         %[[INDEX_4:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_8:.*]] = dxsa.operand %[[INDEX_4]] {mask = 16 : i32, num_components = 4 : i32, type = 31 : i32}
-// CHECK:         %[[OPERAND_9:.*]] = dxsa.operand  {num_components = 4 : i32, one = 0 : i32, type = 36 : i32}
-// CHECK:         %[[OPERAND_10:.*]] = dxsa.operand.imm {imm = dense<12> : vector<1xi32>}
-// CHECK:         %[[INDEX_5:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_11:.*]] = dxsa.operand %[[INDEX_5]] {min_precision = 4 : i32, num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "store_structured" %[[OPERAND_8]], %[[OPERAND_9]], %[[OPERAND_10]], %[[OPERAND_11]]
+// CHECK:         dxsa.store_structured g<0, vector, <x>>, vThreadIDInGroupFlattened<vector, <x>>, l(0xC), r<2, min16i, <x>>
 // CHECK:         dxsa.sync <uav_global|tgsm|threads>
 // CHECK:         dxsa.iadd r<0, <z>>, vThreadIDInGroupFlattened<vector, <x>>, cb<[0, 0], vector, <x>>
 // CHECK:         dxsa.ld_structured r<0, <w>>, r<0, <z>>, l(0x8), g<0, vector, <x, x, x, x>>
@@ -51,13 +33,7 @@
 // CHECK:         dxsa.sync <uav_global>
 // CHECK:         dxsa.ld_structured r<1, min16f, <x>>, r<0, <z>>, l(0x4), g<0, vector, <x, x, x, x>>
 // CHECK:         dxsa.add r<0, <y>>, r<0, <y>>, r<1, min16f, <x>>
-// CHECK:         %[[INDEX_6:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_12:.*]] = dxsa.operand %[[INDEX_6]] {mask = 16 : i32, num_components = 4 : i32, type = 30 : i32}
-// CHECK:         %[[INDEX_7:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_13:.*]] = dxsa.operand %[[INDEX_7]] {num_components = 4 : i32, one = 0 : i32, type = 0 : i32}
-// CHECK:         %[[INDEX_8:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_14:.*]] = dxsa.operand %[[INDEX_8]] {num_components = 4 : i32, one = 1 : i32, type = 0 : i32}
-// CHECK:         dxsa.instruction "store_raw" %[[OPERAND_12]], %[[OPERAND_13]], %[[OPERAND_14]]
+// CHECK:         dxsa.store_raw u<0, vector, <x>>, r<0, <x>>, r<0, <y>>
 // CHECK:         dxsa.ret
 
 .shader_model compute 5 0

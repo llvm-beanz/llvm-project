@@ -1436,6 +1436,69 @@ def DXSA_StoreUavTyped : DXSA_Op<"store_uav_typed"> {
 }
 
 //===----------------------------------------------------------------------===//
+// dxsa.store_raw
+//===----------------------------------------------------------------------===//
+
+def DXSA_StoreRaw : DXSA_Op<"store_raw"> {
+  let summary = "write a value to a raw unordered access view";
+  let description = [{
+    The `dxsa.store_raw` operation writes `$src_value` to the byte offset
+    `$src_byte_offset` names in the raw unordered access view or thread
+    group shared memory `$dst`, whose write mask names the components the
+    store covers.
+
+    `$src_byte_offset` is read as an unsigned integer and must be a
+    multiple of four.
+
+    Example:
+
+    ```mlir
+    dxsa.store_raw u<1, vector, <x, y>>, r<0, <x>>, r<2>
+    ```
+  }];
+
+  let arguments = (ins
+      DXSA_DstOperandAttr:$dst,
+      DXSA_SrcOperandAttr:$src_byte_offset,
+      DXSA_SrcOperandAttr:$src_value);
+  let results = (outs);
+
+  let assemblyFormat = "$dst `,` $src_byte_offset `,` $src_value attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
+// dxsa.store_structured
+//===----------------------------------------------------------------------===//
+
+def DXSA_StoreStructured : DXSA_Op<"store_structured"> {
+  let summary = "write a value to a structured unordered access view";
+  let description = [{
+    The `dxsa.store_structured` operation writes `$src_value` to the
+    structured unordered access view or thread group shared memory `$dst`,
+    at the byte offset `$src_byte_offset` within the element
+    `$src_address` selects. The destination's write mask names the
+    components the store covers.
+
+    Example:
+
+    ```mlir
+    dxsa.store_structured u<1, vector, <x, y>>, r<0, <x>>, l(0x4), r<2>
+    ```
+  }];
+
+  let arguments = (ins
+      DXSA_DstOperandAttr:$dst,
+      DXSA_SrcOperandAttr:$src_address,
+      DXSA_SrcOperandAttr:$src_byte_offset,
+      DXSA_SrcOperandAttr:$src_value);
+  let results = (outs);
+
+  let assemblyFormat = [{
+    $dst `,` $src_address `,` $src_byte_offset `,` $src_value attr-dict
+  }];
+}
+
+//===----------------------------------------------------------------------===//
 // dxsa.check_access_fully_mapped
 //===----------------------------------------------------------------------===//
 
