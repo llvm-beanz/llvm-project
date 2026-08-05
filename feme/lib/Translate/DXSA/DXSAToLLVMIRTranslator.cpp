@@ -2894,12 +2894,15 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
                        IsLOD ? 3 : 4, Args, Op))
     return false;
 
-  // A resource with no texel-offset support takes `undef` where the
-  // offsets would go, and one that does takes zero when the instruction
-  // named none.
-  unsigned Offsets = offsetCount(Texture->Kind);
-  if (Form.NarrowOffsets)
-    Offsets = std::min(Offsets, 2u);
+  // A texel offset slot the resource's dimensionality does not reach takes
+  // `undef`, and one it does takes zero when the instruction named no
+  // offsets. The two families disagree on where a cube map's dimensionality
+  // stops: `gather4` treats a cube as having no offsets at all, where the
+  // sampling operations count its three spatial coordinates -- which is
+  // moot for the value passed, since no cube map accepts a non-zero offset.
+  unsigned Offsets = Form.NarrowOffsets
+                         ? std::min(offsetCount(Texture->Kind), 2u)
+                         : spatialCount(Texture->Kind);
   unsigned Slots = Form.NarrowOffsets ? 2 : 3;
   if (!IsLOD) {
     int32_t Values[3] = {Offset ? Offset.getU() : 0, Offset ? Offset.getV() : 0,
