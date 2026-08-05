@@ -91,4 +91,9 @@ eval_snapped r0.xyzw, r1.xyzw, l(0x00000002, 0xFFFFFFFE, 0x00000000, 0x00000000)
 
 // CHECK-NEXT:   dxsa.eval_snapped precise <x, y> r<0, <x>>, r<1, <y, z, w, y>>, l(0x1, 0x1, 0x0, 0x0)
 eval_snapped precise(xy) r0.x, r1.yzwy, l(0x00000001, 0x00000001, 0x00000000, 0x00000000)
+// CHECK-NEXT:   dxsa.store_uav_typed u<3, vector>, v<0, <z, w, w, w>>, r<0>
+store_uav_typed resource_dim(texture2d) u3.xyzw, v0.zwww, r0.xyzw
+
+// CHECK-NEXT:   dxsa.store_uav_typed u<1, vector, <y, w>>, r<2, <x, y, x, x>>, r<3, <z, z, z, z>>
+store_uav_typed resource_dim(texture2d) u1.yw, r2.xyxx, r3.zzzz
 // CHECK-NEXT: }

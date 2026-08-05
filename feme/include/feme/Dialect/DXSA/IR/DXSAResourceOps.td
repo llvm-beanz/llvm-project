@@ -1405,6 +1405,37 @@ def DXSA_LdUavTypedFeedback : DXSA_Op<"ld_uav_typed_s"> {
 }
 
 //===----------------------------------------------------------------------===//
+// dxsa.store_uav_typed
+//===----------------------------------------------------------------------===//
+
+def DXSA_StoreUavTyped : DXSA_Op<"store_uav_typed"> {
+  let summary = "write a value to a typed unordered access view";
+  let description = [{
+    The `dxsa.store_uav_typed` operation writes `$src_value` to the
+    location `$src_address` selects in the typed unordered access view
+    `$dst_uav`, whose write mask names the components the store covers.
+
+    `$src_address` is read as unsigned integers, one component per
+    dimension of the view. A typed unordered access view has neither a mip
+    level nor a texel offset, so the address carries only coordinates.
+
+    Example:
+
+    ```mlir
+    dxsa.store_uav_typed u<3, vector>, v<0, <z, w, w, w>>, r<0>
+    ```
+  }];
+
+  let arguments = (ins
+      DXSA_DstOperandAttr:$dst_uav,
+      DXSA_SrcOperandAttr:$src_address,
+      DXSA_SrcOperandAttr:$src_value);
+  let results = (outs);
+
+  let assemblyFormat = "$dst_uav `,` $src_address `,` $src_value attr-dict";
+}
+
+//===----------------------------------------------------------------------===//
 // dxsa.check_access_fully_mapped
 //===----------------------------------------------------------------------===//
 

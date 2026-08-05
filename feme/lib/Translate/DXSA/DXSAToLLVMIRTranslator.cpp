@@ -112,7 +112,9 @@ enum class DXILOp : unsigned {
   SampleCmp = 64,
   SampleCmpLevelZero = 65,
   TextureLoad = 66,
+  TextureStore = 67,
   BufferLoad = 68,
+  BufferStore = 69,
   CheckAccessFullyMapped = 71,
   TextureGather = 73,
   TextureGatherCmp = 74,
@@ -1035,14 +1037,19 @@ private:
                                  : DXILComponentType::F32,
                              Context);
   }
-  /// Translates `ld` and `ldms`, which read a shader resource view at an
-  /// integer address and take no sampler. \p SampleIndex is `ldms`'s
-  /// sample index, which occupies the slot a mip level takes otherwise.
-  bool translateResourceLoad(mlir::Operation *Op, DstOperandAttr Dst,
-                             SrcOperandAttr Address, SrcOperandAttr SRV,
-                             SampleOffsetAttr Offset,
+  /// Translates `ld`, `ldms` and `ld_uav_typed`, which read a resource at
+  /// an integer address and take no sampler. \p SampleIndex is `ldms`'s
+  /// sample index, which occupies the slot a mip level takes otherwise; an
+  /// unordered access view has neither, and passes `undef` for both that
+  /// slot and the texel offsets.
+  bool translateResourceLoad(mlir::Operation *Op, ResourceClass Class,
+                             DstOperandAttr Dst, SrcOperandAttr Address,
+                             SrcOperandAttr View, SampleOffsetAttr Offset,
                              SrcOperandAttr SampleIndex,
                              DstOperandAttr Feedback);
+  /// Translates `store_uav_typed`.
+  bool translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
+                              SrcOperandAttr Address, SrcOperandAttr Value);
 
   /// Translates `sincos`, whose two destinations are written from one
   /// source and either of which may be `null`.
@@ -1594,6 +1601,11 @@ void Translator::collectResources(dxsa::ModuleOp Shader) {
       R.Kind = toResourceKind(Dcl.getDim());
       R.Component = toComponentType(Dcl.getX());
       R.SampleCount = Dcl.getSampleCount().value_or(0);
+    } else if (auto Dcl = llvm::dyn_cast<dxsa::DclUavTyped>(&Op)) {
+      Resource &R = record(ResourceClass::UAV, Dcl.getId(), Dcl.getLbound(),
+                           Dcl.getUbound(), Dcl.getSpace());
+      R.Kind = toResourceKind(Dcl.getDim());
+      R.Component = toComponentType(Dcl.getX());
     }
   }
 }
@@ -2932,6 +2944,10 @@ bool Translator::readCoordinates(SrcOperandAttr Address, unsigned Count,
 
 bool Translator::writeResourceResult(DstOperandAttr Dst, SrcOperandAttr SRV,
                                      llvm::Value *Value, mlir::Operation *Op) {
+  // A `_s` load whose shader wants only the mapping status names no
+  // destination for the data.
+  if (Dst.getType() == OperandType::null)
+    return true;
   llvm::SmallVector<llvm::Value *, 4> Components;
   for (unsigned Comp : destinationComponents(Dst))
     Components.push_back(
@@ -3045,21 +3061,20 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
   return writeFeedbackStatus(Form.Feedback, Value, Op);
 }
 
-bool Translator::translateResourceLoad(mlir::Operation *Op, DstOperandAttr Dst,
-                                       SrcOperandAttr Address,
-                                       SrcOperandAttr SRV,
-                                       SampleOffsetAttr Offset,
-                                       SrcOperandAttr SampleIndex,
-                                       DstOperandAttr Feedback) {
-  const Resource *Texture =
-      findResource(ResourceClass::SRV, SRV.getIndex(), Op);
+bool Translator::translateResourceLoad(
+    mlir::Operation *Op, ResourceClass Class, DstOperandAttr Dst,
+    SrcOperandAttr Address, SrcOperandAttr View, SampleOffsetAttr Offset,
+    SrcOperandAttr SampleIndex, DstOperandAttr Feedback) {
+  const Resource *Texture = findResource(Class, View.getIndex(), Op);
   if (!Texture)
     return false;
   llvm::Value *Handle =
-      resourceHandle(ResourceClass::SRV, SRV.getIndex(), Op, /*Slot=*/1,
-                     /*Trailing=*/0, bool(SRV.getNonUniform()));
+      resourceHandle(Class, View.getIndex(), Op, /*Slot=*/1,
+                     /*Trailing=*/0, bool(View.getNonUniform()));
   if (!Handle)
     return false;
+  // An unordered access view is a single level with no texel offsets.
+  bool Levelled = Class != ResourceClass::UAV;
 
   llvm::StringRef Name = "textureLoad";
   DXILOp DXOp = DXILOp::TextureLoad;
@@ -3089,15 +3104,17 @@ bool Translator::translateResourceLoad(mlir::Operation *Op, DstOperandAttr Dst,
     }
     // `ldms` names its sample index in the slot from which `ld` reads a
     // mip level, which is the address component after the coordinates.
-    llvm::Value *Level =
-        SampleIndex ? readSource(SampleIndex, 0, i32Ty(), Op, /*Slot=*/2)
-                    : readSource(Address, Coordinates, i32Ty(), Op);
-    if (!Level)
-      return false;
+    llvm::Value *Level = llvm::UndefValue::get(i32Ty());
+    if (Levelled) {
+      Level = SampleIndex ? readSource(SampleIndex, 0, i32Ty(), Op, /*Slot=*/2)
+                          : readSource(Address, Coordinates, i32Ty(), Op);
+      if (!Level)
+        return false;
+    }
     Args.push_back(Level);
     llvm::append_range(Args, Coords);
 
-    unsigned Offsets = offsetCount(Texture->Kind);
+    unsigned Offsets = Levelled ? offsetCount(Texture->Kind) : 0;
     int32_t Values[3] = {Offset ? Offset.getU() : 0, Offset ? Offset.getV() : 0,
                          Offset ? Offset.getW() : 0};
     for (unsigned I = 0; I < 3; ++I)
@@ -3108,9 +3125,55 @@ bool Translator::translateResourceLoad(mlir::Operation *Op, DstOperandAttr Dst,
 
   llvm::Type *Element = resourceElementType(*Texture);
   llvm::Value *Value = emitDXOp(Name, DXOp, resRetTy(Element), Args, Element);
-  if (!writeResourceResult(Dst, SRV, Value, Op))
+  if (!writeResourceResult(Dst, View, Value, Op))
     return false;
   return writeFeedbackStatus(Feedback, Value, Op);
+}
+
+bool Translator::translateResourceStore(mlir::Operation *Op, DstOperandAttr UAV,
+                                        SrcOperandAttr Address,
+                                        SrcOperandAttr Value) {
+  const Resource *View = findResource(ResourceClass::UAV, UAV.getIndex(), Op);
+  if (!View)
+    return false;
+  llvm::Value *Handle =
+      resourceHandle(ResourceClass::UAV, UAV.getIndex(), Op, /*Slot=*/0,
+                     /*Trailing=*/0, /*NonUniform=*/false);
+  if (!Handle)
+    return false;
+
+  llvm::SmallVector<llvm::Value *, 12> Args = {Handle};
+  bool IsBuffer = View->Kind == ResourceKind::TypedBuffer;
+  unsigned Coordinates = IsBuffer ? 1 : coordinateCount(View->Kind);
+  for (unsigned I = 0, E = IsBuffer ? 2 : 3; I < E; ++I) {
+    if (I >= Coordinates) {
+      Args.push_back(llvm::UndefValue::get(i32Ty()));
+      continue;
+    }
+    llvm::Value *Coord = readSource(Address, I, i32Ty(), Op, /*Slot=*/1);
+    if (!Coord)
+      return false;
+    Args.push_back(Coord);
+  }
+
+  // All four components are passed whatever the write mask says; the mask
+  // travels with them and selects the ones that reach memory.
+  llvm::Type *Element = resourceElementType(*View);
+  for (unsigned I = 0; I < 4; ++I) {
+    llvm::Value *Component = readSource(Value, I, Element, Op, /*Slot=*/2);
+    if (!Component)
+      return false;
+    Args.push_back(Component);
+  }
+  unsigned Mask = 0;
+  for (unsigned Comp : destinationComponents(UAV))
+    Mask |= 1u << Comp;
+  Args.push_back(llvm::ConstantInt::get(i8Ty(), Mask));
+
+  emitDXOp(IsBuffer ? "bufferStore" : "textureStore",
+           IsBuffer ? DXILOp::BufferStore : DXILOp::TextureStore,
+           llvm::Type::getVoidTy(Context), Args, Element);
+  return true;
 }
 
 bool Translator::writeFeedbackStatus(DstOperandAttr Feedback,
@@ -3700,25 +3763,36 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getSrc2(), SampleOffsetAttr(), Form);
   }
   if (auto L = llvm::dyn_cast<dxsa::Ld>(Op))
-    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
-                                 L.getSrcResource(),
+    return translateResourceLoad(Op, ResourceClass::SRV, L.getDst(),
+                                 L.getSrcAddress(), L.getSrcResource(),
                                  L.getOffset().value_or(SampleOffsetAttr()),
                                  SrcOperandAttr(), DstOperandAttr());
   if (auto L = llvm::dyn_cast<dxsa::LdFeedback>(Op))
-    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
-                                 L.getSrcResource(),
+    return translateResourceLoad(Op, ResourceClass::SRV, L.getDst(),
+                                 L.getSrcAddress(), L.getSrcResource(),
                                  L.getOffset().value_or(SampleOffsetAttr()),
                                  SrcOperandAttr(), L.getFeedback());
   if (auto L = llvm::dyn_cast<dxsa::Ld2dms>(Op))
-    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
-                                 L.getSrcResource(),
+    return translateResourceLoad(Op, ResourceClass::SRV, L.getDst(),
+                                 L.getSrcAddress(), L.getSrcResource(),
                                  L.getOffset().value_or(SampleOffsetAttr()),
                                  L.getSampleIndex(), DstOperandAttr());
   if (auto L = llvm::dyn_cast<dxsa::Ld2dmsFeedback>(Op))
-    return translateResourceLoad(Op, L.getDst(), L.getSrcAddress(),
-                                 L.getSrcResource(),
+    return translateResourceLoad(Op, ResourceClass::SRV, L.getDst(),
+                                 L.getSrcAddress(), L.getSrcResource(),
                                  L.getOffset().value_or(SampleOffsetAttr()),
                                  L.getSampleIndex(), L.getFeedback());
+  if (auto L = llvm::dyn_cast<dxsa::LdUavTyped>(Op))
+    return translateResourceLoad(
+        Op, ResourceClass::UAV, L.getDst(), L.getSrcAddress(), L.getSrcUav(),
+        SampleOffsetAttr(), SrcOperandAttr(), DstOperandAttr());
+  if (auto L = llvm::dyn_cast<dxsa::LdUavTypedFeedback>(Op))
+    return translateResourceLoad(
+        Op, ResourceClass::UAV, L.getDst(), L.getSrcAddress(), L.getSrcUav(),
+        SampleOffsetAttr(), SrcOperandAttr(), L.getFeedback());
+  if (auto S = llvm::dyn_cast<dxsa::StoreUavTyped>(Op))
+    return translateResourceStore(Op, S.getDstUav(), S.getSrcAddress(),
+                                  S.getSrcValue());
   if (auto Check = llvm::dyn_cast<dxsa::CheckAccessFullyMapped>(Op)) {
     llvm::Value *Status = readSource(Check.getSrc(), 0, i32Ty(), Op);
     if (!Status)

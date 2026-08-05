@@ -17,13 +17,7 @@
 // CHECK:         dxsa.check_access_fully_mapped r<2, <w>>, r<4, <x>>
 // CHECK:         dxsa.iadd r<2, <x, y, z>>, r<0, min16i, <x, y, z, x>>, r<2, <x, y, z, x>>
 // CHECK:         dxsa.iadd r<2, <x, y, z>>, r<2, <w, w, w, w>>, r<2, <x, y, z, x>>
-// CHECK:         %[[INDEX_4:.*]] = dxsa.index.imm {imm = 3 : i32}
-// CHECK:         %[[OPERAND_4:.*]] = dxsa.operand %[[INDEX_4]] {mask = 240 : i32, num_components = 4 : i32, type = 30 : i32}
-// CHECK:         %[[INDEX_5:.*]] = dxsa.index.imm {imm = 0 : i32}
-// CHECK:         %[[OPERAND_5:.*]] = dxsa.operand %[[INDEX_5]] {num_components = 4 : i32, swizzle = dense<1> : vector<4xi32>, type = 1 : i32}
-// CHECK:         %[[INDEX_6:.*]] = dxsa.index.imm {imm = 2 : i32}
-// CHECK:         %[[OPERAND_6:.*]] = dxsa.operand %[[INDEX_6]] {num_components = 4 : i32, swizzle = dense<[0, 1, 2, 0]> : vector<4xi32>, type = 0 : i32}
-// CHECK:         dxsa.instruction "store_uav_typed" %[[OPERAND_4]], %[[OPERAND_5]], %[[OPERAND_6]]
+// CHECK:         dxsa.store_uav_typed u<3, vector>, v<0, <y, y, y, y>>, r<2, <x, y, z, x>>
 // CHECK:         dxsa.mov o<0, <x, y, z>>, r<2, <x, y, z, x>>
 // CHECK:         dxsa.ret
 
