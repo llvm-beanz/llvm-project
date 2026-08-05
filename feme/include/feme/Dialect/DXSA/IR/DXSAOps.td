@@ -1276,8 +1276,10 @@ def DXSA_DclResource : DXSA_Op<"dcl_resource"> {
       DXSA_ResourceReturnTypeAttr:$y,
       DXSA_ResourceReturnTypeAttr:$z,
       DXSA_ResourceReturnTypeAttr:$w,
+      // A count of zero is how fxc spells a multisampled resource whose
+      // sample count the shader never named.
       OptionalAttr<ConfinedAttr<I32Attr,
-          [IntPositive, IntMaxValue<127>]>>:$sample_count,
+          [IntNonNegative, IntMaxValue<127>]>>:$sample_count,
       OptionalAttr<I32Attr>:$lbound,
       OptionalAttr<I32Attr>:$ubound,
       OptionalAttr<I32Attr>:$space);

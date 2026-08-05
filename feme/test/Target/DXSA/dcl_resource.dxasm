@@ -24,6 +24,14 @@ dcl_resource_texture2dms(4) (float, float, float, float) t5
 // CHECK-NEXT:   dxsa.dcl_resource <id = 6>, <dim = texture2dmsarray, sample_count = 8>, <x = float, y = float, z = float, w = float>
 dcl_resource_texture2dmsarray(8) (float, float, float, float) t6
 
+// A multisampled resource whose sample count the shader never named is
+// spelled with a count of zero.
+// CHECK-NEXT:   dxsa.dcl_resource <id = 20>, <dim = texture2dms, sample_count = 0>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture2dms(0) (float, float, float, float) t20
+
+// CHECK-NEXT:   dxsa.dcl_resource <id = 21>, <dim = texture2dmsarray, sample_count = 0>, <x = float, y = float, z = float, w = float>
+dcl_resource_texture2dmsarray(0) (float, float, float, float) t21
+
 // CHECK-NEXT:   dxsa.dcl_resource <id = 7>, <dim = texture3d>, <x = float, y = float, z = float, w = float>
 dcl_resource_texture3d (float, float, float, float) t7
 

@@ -50,12 +50,12 @@ dxsa.dcl_resource <id = 0>, <dim = texturecubearray, sample_count = 4>, <x = flo
 
 // -----
 
-// expected-error@+1 {{attribute 'sample_count' failed to satisfy constraint: 32-bit signless integer attribute whose value is positive whose maximum value is 127}}
-dxsa.dcl_resource <id = 0>, <dim = texture2dms, sample_count = 0>, <x = float, y = float, z = float, w = float>
+// expected-error@+1 {{attribute 'sample_count' failed to satisfy constraint: 32-bit signless integer attribute whose value is non-negative whose maximum value is 127}}
+dxsa.dcl_resource <id = 0>, <dim = texture2dms, sample_count = -1>, <x = float, y = float, z = float, w = float>
 
 // -----
 
-// expected-error@+1 {{attribute 'sample_count' failed to satisfy constraint: 32-bit signless integer attribute whose value is positive whose maximum value is 127}}
+// expected-error@+1 {{attribute 'sample_count' failed to satisfy constraint: 32-bit signless integer attribute whose value is non-negative whose maximum value is 127}}
 dxsa.dcl_resource <id = 0>, <dim = texture2dms, sample_count = 128>, <x = float, y = float, z = float, w = float>
 
 // -----

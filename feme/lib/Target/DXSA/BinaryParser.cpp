@@ -2731,12 +2731,9 @@ public:
     std::optional<uint32_t> sampleCount;
     if (*dim == dxsa::ResourceDimension::texture2dms ||
         *dim == dxsa::ResourceDimension::texture2dmsarray) {
-      auto rawSampleCount = DECODE_D3D10_SB_RESOURCE_SAMPLE_COUNT(opcodeToken);
-      if (rawSampleCount == 0)
-        return emitError(loc, "sample count must be non-zero for multisampled "
-                              "dimension ")
-               << dxsa::stringifyResourceDimension(*dim);
-      sampleCount = rawSampleCount;
+      // A zero sample count is how fxc spells a multisampled resource whose
+      // count the shader never named, which is legal.
+      sampleCount = DECODE_D3D10_SB_RESOURCE_SAMPLE_COUNT(opcodeToken);
     }
 
     auto operand = parseDstOperand();
