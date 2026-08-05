@@ -986,9 +986,9 @@ private:
     bool Channel = false;
     /// At most two offsets, which is all a gather takes.
     bool NarrowOffsets = false;
-    /// `sample_d`'s gradients, which are appended as three components of
-    /// each of two operands.
-    bool Gradients = false;
+    /// `sample_d`'s gradients: the x and y derivative operands, each
+    /// appended as three spatial components.
+    llvm::SmallVector<SrcOperandAttr, 2> Gradients;
     /// `gather4_po`'s offsets, which come from a source operand rather
     /// than from the instruction's immediate suffix.
     SrcOperandAttr OffsetSource;
@@ -2927,8 +2927,19 @@ bool Translator::translateSample(mlir::Operation *Op, DstOperandAttr Dst,
     }
   }
 
-  if (Form.Gradients)
-    return false;
+  // The derivatives are spatial, so a resource's array slice gets none.
+  unsigned Derivatives = spatialCount(Texture->Kind);
+  for (auto [Index, Src] : llvm::enumerate(Form.Gradients))
+    for (unsigned I = 0; I < 3; ++I) {
+      if (I >= Derivatives) {
+        Args.push_back(llvm::UndefValue::get(floatTy()));
+        continue;
+      }
+      llvm::Value *Value = readSource(Src, I, floatTy(), Op, Index + 5);
+      if (!Value)
+        return false;
+      Args.push_back(Value);
+    }
   // A gather names its channel before whatever else it appends, where a
   // comparing sample names its reference value first.
   if (Form.Channel)
@@ -3400,6 +3411,22 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                     "sampleBias",
                     {S.getSrcLodBias()},
                     /*Clamp=*/true};
+    Form.ClampValue = S.getClampFeedback().getLodClamp();
+    Form.Feedback = S.getClampFeedback().getFeedback();
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleD>(Op)) {
+    SampleForm Form{DXILOp::SampleGrad, "sampleGrad", {}, /*Clamp=*/true};
+    Form.Gradients = {S.getSrcXDerivatives(), S.getSrcYDerivatives()};
+    return translateSample(Op, S.getDst(), S.getSrcAddress(),
+                           S.getSrcResource(), S.getSrcSampler(),
+                           S.getOffset().value_or(SampleOffsetAttr()), Form);
+  }
+  if (auto S = llvm::dyn_cast<dxsa::SampleDClampFeedback>(Op)) {
+    SampleForm Form{DXILOp::SampleGrad, "sampleGrad", {}, /*Clamp=*/true};
+    Form.Gradients = {S.getSrcXDerivatives(), S.getSrcYDerivatives()};
     Form.ClampValue = S.getClampFeedback().getLodClamp();
     Form.Feedback = S.getClampFeedback().getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
