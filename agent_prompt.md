@@ -1,5 +1,5 @@
 ---
-model: gpt-5.6-sol
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -21,10 +21,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-There are still a number of *.ref files in the feme/test/Translate/DXBC test
-folder. Those files correspond to un-migrated tests from DXC's dxilconv, and
-have a *.dxasm file next to them that is the test input.
+I'd like to start a new design document, I've created an empty document
+FeMeCPUDesign.md as our starting point.
 
-Please migrate the remaining *.ref files into FileCheck `CHECK` lines in the
-source tests, and update the translation and testing infrastructure as necessary
-to enable these tests.
+I'd like to design a way to target SPIRV and DXIL programs to CPUs through LLVM
+IR. This will require transforming the program IR to SIMD-ized IR, and should
+support a user-provided wave size.
+
+We'll also need some sort of resource binding model, and JIT flow for this
+design. Please think through this a bit and come up with a basic proposal and
+ask any questions that you need to help elaborate on this more.
