@@ -5118,3 +5118,161 @@ order that follows this LLVM's mem2reg.
 - Built with the existing assertion-enabled, ccache-backed `build` directory.
 - Ran the DXSA translator unit tests, all DXBC translation lit tests, and the
   complete `check-feme` suite.
+
+# Agent thoughts: drafting the CPU target design
+
+## The Request
+
+Start `FeMeCPUDesign.md` (an empty file at `feme/docs/`) with a proposal for
+targeting SPIR-V and DXIL programs at CPUs through LLVM IR: SIMD-izing the
+program IR with a user-provided wave size, a resource binding model, and a
+JIT flow — then ask whatever questions the design still needs answered.
+This is a documentation change; there is no code to test yet, so the usual
+"unit tests per phase of translation" instruction shows up in the document
+itself (as the testing strategy the eventual implementation must follow)
+rather than as tests in this change.
+
+## Reading the Existing Design First
+
+The important context is that FeMe already has most of the front half of
+this. `feme::Driver` imports DXIL and SPIR-V, raises both into a common
+"raised" LLVM IR spelled with `llvm.dx.*`/`llvm.spv.*` intrinsics and
+`target("dx.*")`/`target("spirv.*")` handle types, and then hands that to a
+per-destination lowering pass before `feme::TargetMachineBackend`. So the
+CPU target is structurally a *sibling of* `Raised LLVM IR -> AMDGPU`, not a
+new pipeline, and the document should say so rather than re-deriving FeMe's
+architecture. I wrote it as an explicit companion document that assumes
+Design.md has been read.
+
+Two existing pieces shaped the proposal more than anything else:
+
+- `feme::amdgpu::ResourceLoweringPass` appends one `ptr addrspace(1)`
+  argument per binding, and gives up entirely on dynamically indexed binding
+  arrays because a fixed argument list cannot express them. That's the right
+  answer for an HSA kernel launch and the wrong one for a CPU host that
+  wants to rebind between dispatches and reuse a compiled kernel — which is
+  why the CPU design proposes a flat descriptor table instead, with the
+  dynamic index falling out naturally as an index into it.
+- The "leave what it cannot model alone" precedent (both AMDGPU lowering
+  passes leave unsupported constructs as unmodified calls rather than
+  half-rewriting them) is worth keeping, so the resource lowering phase
+  inherits it explicitly.
+
+## What Is Actually New Here, and What Isn't
+
+The temptation with an SPMD-to-SIMD design is to describe a lot of novel
+analysis. Almost none of it needs to be novel. I checked the in-tree
+machinery before writing, and:
+
+- `llvm::UniformityInfo` (`GenericUniformityInfo<SSAContext>`) already
+  implements divergence *including* sync dependence, which is the genuinely
+  hard part. It is parameterized entirely through `TargetTransformInfo`:
+  `UniformityInfoAnalysis::run` bails out to an empty result when
+  `TTI.hasBranchDivergence()` is false, and the impl asks
+  `TTI->getValueUniformity()` for divergence sources
+  (`llvm/lib/Analysis/UniformityAnalysis.cpp`).
+- Neither `llvm/lib/Target/DirectX` nor `llvm/lib/Target/SPIRV` implements
+  those hooks (grepping for `hasBranchDivergence`/`getValueUniformity` in
+  both finds nothing), and a host target answers "no divergence" — so the
+  analysis would return "everything is uniform" no matter when it ran.
+- But `TargetTransformInfo` has a public constructor taking a
+  `std::unique_ptr<const TargetTransformInfoImplBase>`
+  (`llvm/include/llvm/Analysis/TargetTransformInfo.h:313`), so FeMe can
+  supply its *own* TTI describing the SPMD model — branches divergent, the
+  lane-varying raised builtins as divergence sources — and reuse all of
+  LLVM's generic machinery unchanged.
+
+That single finding is what let the design claim "the hard analysis is not
+new code", and it is called out in the document with the alternative
+(teaching the upstream DirectX/SPIRV TTIs these hooks) noted as
+non-exclusive and deletable-later.
+
+Similarly: `StructurizeCFG`, `FixIrreducible`, `UnifyLoopExits` and
+`LowerSwitch` are all target-independent and give the linearizer the
+structured, two-way-branch CFG it wants; the masked load/store/gather/
+scatter intrinsics give the widener its memory forms; ORC gives the JIT.
+
+## Design Decisions I Had to Actually Make
+
+**Phase split.** I chose the phase boundaries by asking "is this pass's
+output printable, checkable IR that a `lit` test can `CHECK` without
+reasoning about the other phases?" That produced: resources lowered first
+(the one phase whose correctness has nothing to do with the wave size),
+then linearization on *scalar* IR with `i1` masks (checkable without
+vectors), then widening (checkable without the group wrapper), then wave
+lowering, then the wrapper. This is the same instinct as FeMe's existing
+`feme-dxil-raise-ops` / `feme-amdgpu-lower-{raised,resources}` split, and it
+is the direct consequence of the standing instruction that each phase of
+translation gets its own tests.
+
+**Lane linearization order.** Lane `i` of wave `w` is in-group flattened
+index `w * W + i`, which is exactly `SV_GroupIndex`/`LocalInvocationIndex`
+ordering. That makes `llvm.dx.flattened.thread.id.in.group` lower to
+`splat(w*W) + iota` and every other builtin derive from it. Any other
+choice buys nothing and costs a shuffle.
+
+**Barriers.** This is the one place where there is a real fork. Barrier
+splitting (cut the kernel into regions at each barrier, wrap each region in
+its own wave loop, spill cross-barrier liveness to a per-wave context array)
+is what POCL and Intel's CPU OpenCL do; fibers/coroutines (SwiftShader) are
+the alternative. Splitting is more compiler code and less runtime cost, and
+both source models make barriers in divergent control flow undefined, which
+keeps the splitting tractable. I documented the alternative with the reason
+for rejecting it rather than silently picking one, and noted LLVM coroutines
+as the fallback implementation if splitting turns out to be insufficient.
+
+**Robustness.** Out-of-bounds returns zero / drops writes, checked, by
+default. For the reference-execution use case, a fault-on-OOB CPU target
+turns a merely nonconformant shader into a host crash, which defeats the
+purpose of having one.
+
+**W = 1 comes early in the roadmap.** Sequencing the trivial (scalar) wave
+size end to end — including the JIT and `feme-run` — *before* the hard
+divergence work means every subsequent phase is verifiable by execution
+rather than only by IR inspection. It also enables differential testing
+between wave sizes, which isolates a widening bug from a translation bug and
+is the cheapest high-value test the whole design enables. I called that out
+as a first-class part of the test strategy rather than an afterthought.
+
+**A tool that runs shaders.** Every FeMe test today checks IR *shape*; none
+check that the translated program computes the right answer, because there
+was no way to run one in `lit`. `feme-run` (JIT + a textual YAML resource
+description in, buffer contents out, `FileCheck`ed) is the piece that
+changes that, and it is why the JIT is a v1 deliverable in this proposal
+rather than a follow-up. It also keeps to Design.md's "avoiding binary test
+fixtures" principle.
+
+## Scoping
+
+Deliberately out of scope, each with a stated reason rather than just a
+list: graphics pipeline stages (the pipeline around a pixel shader is a
+bigger project than the shader transform), texture sampling (no
+representation in raised IR yet — the AMDGPU pass punts on texture handles
+too), derivatives/quad ops (need a lane-to-quad mapping that only means
+something once pixel shaders exist), indirect calls and recursion (neither
+appears in what FeMe imports), and performance parity with ISPC.
+
+## Open Questions
+
+I ended with nine, the ones that would actually change the design rather
+than the ones that are merely unimplemented: the wave size default/range and
+what to do when a shader declares a required wave size; whether the flat
+descriptor table is the right host-facing model or whether a specific API's
+binding model is already in mind; whether robustness needs an off switch;
+whether the JIT should own dispatch (better for testing) or hand back a
+function pointer (better for a real driver); whether compute-only is
+acceptable indefinitely; how the per-instruction mask is carried between the
+linearizer and the widener (my preference: a FeMe-internal masked-intrinsic
+form, so the intermediate IR stays printable and each phase stays testable
+in isolation); how much unstructured DXIL control flow must work in v1; and
+whether there is interest in doing the SIMD-ization in MLIR instead of on
+`llvm::Module` (the latter is what every existing FeMe lowering pass does).
+
+## Testing and Build
+
+No code changed, so there was nothing to build or run; the change is three
+Markdown files (the new document plus cross-references from Design.md's
+retargeting section and the README). The testing strategy the implementation
+must follow — per-phase `gtest` unit tests, per-pass `feme-opt` `lit` tests,
+and end-to-end execution tests at several wave sizes — is written into the
+document as a table, one row per phase.
