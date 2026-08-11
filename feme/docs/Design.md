@@ -1146,6 +1146,13 @@ FeMe's own contribution here is a thin `Backend` interface plus the glue to
 select/configure the right `TargetMachine`/pass pipeline — it does not
 reimplement target-specific codegen.
 
+Retargeting to a *CPU* (X86, AArch64) is a larger problem than picking a
+different `TargetMachine`, because a CPU supplies none of the SPMD execution
+model a shader assumes: the program has to be SIMD-ized to a chosen wave
+size, its resource bindings given a concrete ABI, and its dispatch driven by
+a host loop or JIT. That is a design of its own; see
+[FeMeCPUDesign.md](FeMeCPUDesign.md) (proposal, not yet implemented).
+
 ## Raised LLVM IR -> AMDGPU
 
 A raised `llvm::Module` (`feme::dxil::OpRaisingPass`'s output for DXIL, or a
