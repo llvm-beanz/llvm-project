@@ -5848,3 +5848,104 @@ miss, "Lane linearization", is a bolded paragraph lead-in rather than a
 heading, which is how the document already refers to it elsewhere) and that no
 "open question" / "resolved decision" / "draft" references survive. Seven
 commits, one per issue plus the deletion.
+
+# Agent thoughts: second final review of the CPU design
+
+The ask was the same as last time — a final consistency pass over
+`feme/docs/FeMeCPUDesign.md`, then delete its open and resolved decisions —
+but the document had changed a great deal in between: one review commit
+rewrote the resource model from "emit a format `switch` at every access" to
+"emit canonical `feme.cpu.resource.*` calls and link scalar helper bitcode",
+reworked barriers and wave lowering, and renumbered the roadmap.
+
+## The decisions were already gone
+
+The "Open Questions" and "Resolved Decisions" sections were deleted in
+a1c0fdcf9d89, and the review commit did not bring them back, so this half of
+the ask was mostly confirmation: nothing in the document still says
+"question", "draft" or "decision" except the graphics section's "Decisions
+made now to keep it cheap later", which is design content rather than a log.
+Two pieces of residue did survive and are now gone: the intrinsic naming rule
+was still justified against "what an earlier draft of this document said",
+and Design.md still deferred `feme::Context`'s name to an "open questions"
+section that document has not had for a long time, for a class that has been
+implemented under that name since the scaffolding step.
+
+## What the review turned up
+
+The rewrite moved a mechanism — bounds checking, format selection, descriptor
+reads — out of the SIMDizer and into linked helper bitcode, and most of the
+findings are places the surrounding text still describes the old location or
+was never updated to describe the new one.
+
+1. "Any `feme.cpu.*` call surviving into Phase 5 is an assertion failure" is
+   now false by design: the resource calls are *meant* to survive, all the way
+   to the bitcode link. Only the mask intrinsics have to be gone.
+2. The widening table still left a uniform-address load or store "unchanged,
+   or masked when predicated", two sections after the masked-lowering table
+   started saying guarded-scalar-load-and-broadcast, or a scalarized
+   ascending-lane loop.
+3. Every resource call takes `ptr %heap, i32 %heap_count`, and nothing said
+   where those come from. The raised shader has no such parameter, and the
+   design forbids reading a global, so appending the parameters has to be part
+   of resource lowering — which then also explains what Phase 3's entry mask
+   is joining and what Phase 6's wrapper is supplying.
+4. Bounds checking still read as if the checks were emitted at the access
+   site and widened like any other operation, and priced the
+   `FEME_DESCRIPTOR_TRUSTED` bit as a hoisted uniform load. In the new model
+   the checks are the helper's, the mask decides whether a lane calls it at
+   all, and hoisting is explicitly deferred to `ResourceCallOptimizationPass`.
+5. Phase 5 does two separable jobs, and two other parts of the document need
+   only one of them. `feme-run --reference` claimed to skip Phases 3-5, which
+   leaves the unwidened function with no thread id to run on; milestone 4
+   claimed to run a shader four milestones before wave lowering. The id
+   builtins are lane arithmetic over the wave-body parameters, not cross-lane
+   operations, so saying once that the phase has two halves fixes both.
+6. Three API names were wrong in ways that would waste an implementer's
+   afternoon: TTI has no no-argument `isUniform()` divergence hook (its
+   `isUniform` is the vectorizer's SCEV query), there is no `llvm::ThreadPool`
+   class (`ThreadPoolInterface`, with `DefaultThreadPool` aliasing an
+   implementation), and `llvm.dx.resource.handlefromheap` — the intrinsic the
+   entire resource model rests on — does not exist in-tree at all. The last
+   one is genuinely a prerequisite, so it now says so where it is introduced.
+7. `MetadataRaisingPass` widens the SM 6.6 single-value `[WaveSize(n)]` to
+   `"n,0,0"`, not `"n,n,n"`. The resolution rule reads the preferred size
+   first, which is 0 there, so the encoding needed writing down.
+
+A second pass — done by an agent reading the whole document cold, which is
+worth more than re-reading my own edits — found four more:
+
+8. The pipeline diagram numbered its nodes `P1`..`P6` across the six passes,
+   so its `P2` is resource lowering while the body's Phase 2 is the uniformity
+   analysis, and everything after was one out. The previous iteration
+   considered renumbering the phases and rejected it as churn; renaming the
+   diagram's node ids costs nothing and removes the collision from the other
+   direction, which is the better trade.
+9. The wave-body interface listed the resource heap and "root constants",
+   losing the sampler heap and the root-constant size — the latter being
+   exactly what the documented "reads past `RootConstantSize` return zero"
+   rule is checked against.
+10. Phase 3 predicates resource calls and both Phase 4 tables lower a "masked
+    `feme.cpu.resource.*` call", but no masked spelling was ever defined. It
+    is now a trailing `i1`, as on the mask intrinsics, emitted as `true` by
+    resource lowering — which incidentally answers how milestone 4 runs a
+    resource-using shader before a linearizer exists.
+11. "Divergent value of type `T` becomes `<W x T>`" has no meaning for the
+    type most shader values actually have. There is no `<W x <4 x float>>` in
+    LLVM, and the document's own example resource call returns `<4 x float>`.
+    Widening per component into `N` values of `<W x T>` is what every SPMD
+    vectorizer does and what a GPU register file looks like anyway.
+
+## What I did not change
+
+The `feme_cpu_info_<entry>` symbol grew a counted tail of heap indices rather
+than the metadata losing them, because the argument for the symbol's existence
+is that an AOT host should not be told less than a JIT host. And I left the
+unnumbered position of resource lowering alone for the same reason the last
+iteration did — the numbers are load-bearing in half a dozen cross-references
+— but the diagram now says which scheme a "Phase N" reference means, so the
+ambiguity that made it confusing is gone rather than merely tolerated.
+
+Doc-only change, so nothing to build or test; verification was re-reading each
+cross-reference against a real heading and checking every claim about existing
+FeMe and LLVM code against the source. Seventeen commits, one per issue.
