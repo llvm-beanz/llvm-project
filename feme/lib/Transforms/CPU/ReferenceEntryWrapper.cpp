@@ -52,7 +52,8 @@ Function *buildWrapper(Function &Body) {
   Args->setName("args");
 
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
-  BasicBlock *HeaderBB = BasicBlock::Create(Ctx, "invocation.loop.header", Wrapper);
+  BasicBlock *HeaderBB =
+      BasicBlock::Create(Ctx, "invocation.loop.header", Wrapper);
   BasicBlock *BodyBB = BasicBlock::Create(Ctx, "invocation.loop.body", Wrapper);
   BasicBlock *ExitBB = BasicBlock::Create(Ctx, "invocation.loop.exit", Wrapper);
 
@@ -78,15 +79,15 @@ Function *buildWrapper(Function &Body) {
       M.getGlobalVariable(ReferenceGroupIDGlobalName, /*AllowInternal=*/true);
   if (GroupIDGlobal)
     Entry.CreateStore(GroupIDVec, GroupIDGlobal);
-  GlobalVariable *FlatGlobal =
-      M.getGlobalVariable(ReferenceThreadIndexInGroupGlobalName, /*AllowInternal=*/true);
+  GlobalVariable *FlatGlobal = M.getGlobalVariable(
+      ReferenceThreadIndexInGroupGlobalName, /*AllowInternal=*/true);
   Entry.CreateBr(HeaderBB);
 
   IRBuilder<> Header(HeaderBB);
   PHINode *Flat = Header.CreatePHI(I32Ty, 2, "flat");
   Flat->addIncoming(Header.getInt32(0), EntryBB);
-  Value *Cond =
-      Header.CreateICmpULT(Flat, Header.getInt32(GroupSizeTotal), "invocation.cond");
+  Value *Cond = Header.CreateICmpULT(Flat, Header.getInt32(GroupSizeTotal),
+                                     "invocation.cond");
   Header.CreateCondBr(Cond, BodyBB, ExitBB);
 
   IRBuilder<> BodyIR(BodyBB);

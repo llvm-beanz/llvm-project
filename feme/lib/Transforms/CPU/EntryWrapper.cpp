@@ -64,7 +64,6 @@ std::string getEntrySymbolName(StringRef EntryName) {
 
 namespace {
 
-
 /// Builds the entry-mask lane comparison for wave \p W (see the file
 /// comment above): lane `L` of wave `w` is active iff
 /// `w * WaveSize + L < GroupSizeTotal`.

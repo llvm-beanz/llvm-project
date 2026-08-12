@@ -55,7 +55,7 @@ TEST(ReferenceLoweringTest, LowersThreadIdAndMarksTheFunction) {
   for (const Instruction &I : instructions(F))
     if (const auto *CI = dyn_cast<CallInst>(&I))
       EXPECT_FALSE(CI->getCalledFunction() &&
-                  CI->getCalledFunction()->getName().starts_with("llvm.dx."));
+                   CI->getCalledFunction()->getName().starts_with("llvm.dx."));
 
   EXPECT_TRUE(M->getGlobalVariable(ReferenceThreadIndexInGroupGlobalName,
                                    /*AllowInternal=*/true));

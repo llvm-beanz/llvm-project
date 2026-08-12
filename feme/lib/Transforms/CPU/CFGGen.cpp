@@ -79,8 +79,8 @@ class CFGGenerator {
     bool Divergent = Opts.AllowDivergent && chance(0.5);
     std::string Masked = newTmp(), Cmp = newTmp();
     unsigned K = randInt(0, 3);
-    B.Body += "  " + Masked + " = and i32 " +
-             (Divergent ? "%tid" : "%gid") + ", 3\n";
+    B.Body +=
+        "  " + Masked + " = and i32 " + (Divergent ? "%tid" : "%gid") + ", 3\n";
     B.Body +=
         "  " + Cmp + " = icmp eq i32 " + Masked + ", " + Twine(K).str() + "\n";
     return Cmp;
@@ -98,8 +98,8 @@ class CFGGenerator {
     std::string Cond = appendCondition(B);
     OpenBlock T = newOpen("if.then");
     OpenBlock F = newOpen("if.else");
-    closeBlock(B, "br i1 " + Cond + ", label %" + T.Name + ", label %" +
-                      F.Name);
+    closeBlock(B,
+               "br i1 " + Cond + ", label %" + T.Name + ", label %" + F.Name);
     OpenBlock TEnd = genOneConstruct(std::move(T), Depth - 1, Budget);
     OpenBlock FEnd = genOneConstruct(std::move(F), Depth - 1, Budget);
     OpenBlock End = newOpen("if.end");
@@ -127,12 +127,12 @@ class CFGGenerator {
     OpenBlock Exit = newOpen("loop.exit");
 
     std::string Cond = newTmp();
-    Header.Body += "  " + CounterPhi + " = phi i32 [ 0, %" + B.Name +
-                  " ], [ " + Inc + ", %" + Latch.Name + " ]\n";
+    Header.Body += "  " + CounterPhi + " = phi i32 [ 0, %" + B.Name + " ], [ " +
+                   Inc + ", %" + Latch.Name + " ]\n";
     Header.Body += "  " + Cond + " = icmp slt i32 " + CounterPhi + ", " +
-                  Twine(TripCount).str() + "\n";
-    closeBlock(Header, "br i1 " + Cond + ", label %" + Body.Name +
-                           ", label %" + Exit.Name);
+                   Twine(TripCount).str() + "\n";
+    closeBlock(Header, "br i1 " + Cond + ", label %" + Body.Name + ", label %" +
+                           Exit.Name);
 
     appendFold(Body);
     if (Opts.AllowLoops && chance(0.4)) {
@@ -172,17 +172,17 @@ class CFGGenerator {
     OpenBlock Bb = newOpen("irred.b");
     OpenBlock Exit = newOpen("irred.exit");
     closeBlock(B, "br i1 " + EntryCond + ", label %" + A.Name + ", label %" +
-                     Bb.Name);
+                      Bb.Name);
 
     appendFold(A);
     std::string ACond = appendCondition(A);
     closeBlock(A, "br i1 " + ACond + ", label %" + Exit.Name + ", label %" +
-                     Bb.Name);
+                      Bb.Name);
 
     appendFold(Bb);
     std::string BCond = appendCondition(Bb);
     closeBlock(Bb, "br i1 " + BCond + ", label %" + Exit.Name + ", label %" +
-                      A.Name);
+                       A.Name);
 
     return Exit;
   }
@@ -223,7 +223,7 @@ public:
     Entry.Body += "  %tid = call i32 @llvm.dx.thread.id(i32 0)\n";
     Entry.Body += "  %gid = call i32 @llvm.dx.group.id(i32 0)\n";
     Entry.Body += "  %h = call target(\"dx.RawBuffer\", i8, 1, 0) "
-                 "@llvm.dx.resource.handlefromheap(i32 0, i1 false)\n";
+                  "@llvm.dx.resource.handlefromheap(i32 0, i1 false)\n";
 
     unsigned Budget = Opts.MaxConstructs;
     OpenBlock Cur = std::move(Entry);
@@ -234,8 +234,8 @@ public:
     Cur.Body += "  " + AccVal + " = load i32, ptr %acc\n";
     Cur.Body += "  " + Offset + " = mul i32 %tid, 4\n";
     Cur.Body += "  call void @llvm.dx.resource.store.rawbuffer.i32(target("
-               "\"dx.RawBuffer\", i8, 1, 0) %h, i32 " +
-               Offset + ", i32 poison, i32 " + AccVal + ")\n";
+                "\"dx.RawBuffer\", i8, 1, 0) %h, i32 " +
+                Offset + ", i32 poison, i32 " + AccVal + ")\n";
     closeBlock(Cur, "ret void");
 
     std::string Result;

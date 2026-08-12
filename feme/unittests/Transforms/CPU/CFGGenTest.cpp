@@ -65,13 +65,12 @@ void expectGeneratesStructuredIR(const CFGGenOptions &Opts) {
   LLVMContext Ctx;
   SMDiagnostic Err;
   std::unique_ptr<Module> M = parseAssemblyString(IR, Err, Ctx);
-  ASSERT_TRUE(M) << "seed " << Opts.Seed << " failed to parse: "
-                 << [&] {
-                      std::string S;
-                      raw_string_ostream OS(S);
-                      Err.print("CFGGenTest", OS);
-                      return S;
-                    }();
+  ASSERT_TRUE(M) << "seed " << Opts.Seed << " failed to parse: " << [&] {
+    std::string S;
+    raw_string_ostream OS(S);
+    Err.print("CFGGenTest", OS);
+    return S;
+  }();
   ASSERT_FALSE(verifyModule(*M, &errs()))
       << "seed " << Opts.Seed << " produced an invalid module";
 

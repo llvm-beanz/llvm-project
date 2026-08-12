@@ -31,7 +31,7 @@ namespace {
 void report(raw_ostream *ErrOS, const Function &F, const Twine &Message) {
   if (ErrOS)
     *ErrOS << "feme-cpu-verify-structured: function '" << F.getName()
-          << "': " << Message << "\n";
+           << "': " << Message << "\n";
 }
 
 /// No `switch`: the linearizer only understands two-way branches (see
@@ -72,8 +72,7 @@ bool checkNoCriticalEdges(Function &F, raw_ostream *ErrOS) {
 /// loop handling assumes them.
 bool checkCycles(Function &F, CycleInfo &CI, raw_ostream *ErrOS) {
   bool Ok = true;
-  SmallVector<CycleRef, 8> Worklist(CI.toplevel_begin(),
-                                               CI.toplevel_end());
+  SmallVector<CycleRef, 8> Worklist(CI.toplevel_begin(), CI.toplevel_end());
   while (!Worklist.empty()) {
     CycleRef C = Worklist.pop_back_val();
     if (!CI.isReducible(C)) {
@@ -103,8 +102,7 @@ bool checkCycles(Function &F, CycleInfo &CI, raw_ostream *ErrOS) {
 /// one (e.g. one arm never returns) is exactly the shape the linearizer
 /// cannot handle.
 bool checkDivergentBranchesReconverge(Function &F, DominatorTree &DT,
-                                      CycleInfo &CI,
-                                      PostDominatorTree &PDT,
+                                      CycleInfo &CI, PostDominatorTree &PDT,
                                       raw_ostream *ErrOS) {
   UniformityInfo UI = computeWaveUniformity(F, DT, CI);
   bool Ok = true;

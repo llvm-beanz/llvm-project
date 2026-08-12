@@ -38,8 +38,13 @@ namespace {
 
 /// Which raised builtin \p ID is, for this pass's purposes; `std::nullopt`
 /// for anything this pass leaves untouched (ordinary instructions).
-enum class RaisedBuiltin { ThreadId, ThreadIdInGroup, FlattenedThreadIdInGroup,
-                           GroupId, Unsupported };
+enum class RaisedBuiltin {
+  ThreadId,
+  ThreadIdInGroup,
+  FlattenedThreadIdInGroup,
+  GroupId,
+  Unsupported
+};
 
 std::optional<RaisedBuiltin> classify(Intrinsic::ID ID) {
   switch (ID) {
@@ -81,9 +86,8 @@ GlobalVariable *getOrCreateRefGlobal(Module &M, StringRef Name, Type *Ty) {
 /// group dimension \p Component's (0/1/2 for x/y/z) thread-in-group id,
 /// scalar counterpart of `feme::cpu::WaveLoweringPass`'s
 /// `decomposeComponent`.
-Value *decomposeComponent(IRBuilder<> &Builder, Value *Flat,
-                          unsigned Component, uint32_t NumThreadsX,
-                          uint32_t NumThreadsY) {
+Value *decomposeComponent(IRBuilder<> &Builder, Value *Flat, unsigned Component,
+                          uint32_t NumThreadsX, uint32_t NumThreadsY) {
   switch (Component) {
   case 0:
     return Builder.CreateURem(Flat, Builder.getInt32(NumThreadsX));
@@ -94,7 +98,8 @@ Value *decomposeComponent(IRBuilder<> &Builder, Value *Flat,
   case 2: {
     uint64_t XY = static_cast<uint64_t>(NumThreadsX) * NumThreadsY;
     return Builder.CreateUDiv(
-        Flat, ConstantInt::get(Builder.getInt32Ty(), static_cast<uint32_t>(XY)));
+        Flat,
+        ConstantInt::get(Builder.getInt32Ty(), static_cast<uint32_t>(XY)));
   }
   default:
     llvm_unreachable("component out of range");
@@ -105,7 +110,7 @@ Value *decomposeComponent(IRBuilder<> &Builder, Value *Flat,
 /// FlatPtr/\p GroupIDPtr (the two per-invocation/group globals) and \p
 /// NumThreads (from `hlsl.numthreads`).
 void lowerCall(CallInst &CI, RaisedBuiltin Kind, Value *FlatPtr,
-              Value *GroupIDPtr, const std::array<uint32_t, 3> &NumThreads) {
+               Value *GroupIDPtr, const std::array<uint32_t, 3> &NumThreads) {
   IRBuilder<> Builder(&CI);
   Type *I32Ty = Builder.getInt32Ty();
   Value *Flat = Builder.CreateLoad(I32Ty, FlatPtr, "ref.flat");
@@ -116,30 +121,26 @@ void lowerCall(CallInst &CI, RaisedBuiltin Kind, Value *FlatPtr,
     Result = Flat;
     break;
   case RaisedBuiltin::ThreadIdInGroup: {
-    unsigned Component =
-        cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+    unsigned Component = cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
     Result = decomposeComponent(Builder, Flat, Component, NumThreads[0],
                                 NumThreads[1]);
     break;
   }
   case RaisedBuiltin::ThreadId: {
-    unsigned Component =
-        cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
-    Value *InGroup = decomposeComponent(Builder, Flat, Component,
-                                        NumThreads[0], NumThreads[1]);
-    Value *GroupIDPtrComponent =
-        Builder.CreateConstGEP2_32(ArrayType::get(I32Ty, 3), GroupIDPtr, 0,
-                                   Component);
+    unsigned Component = cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+    Value *InGroup = decomposeComponent(Builder, Flat, Component, NumThreads[0],
+                                        NumThreads[1]);
+    Value *GroupIDPtrComponent = Builder.CreateConstGEP2_32(
+        ArrayType::get(I32Ty, 3), GroupIDPtr, 0, Component);
     Value *GroupIDComponent =
         Builder.CreateLoad(I32Ty, GroupIDPtrComponent, "ref.group_id");
-    Value *Scaled =
-        Builder.CreateMul(GroupIDComponent, Builder.getInt32(NumThreads[Component]));
+    Value *Scaled = Builder.CreateMul(GroupIDComponent,
+                                      Builder.getInt32(NumThreads[Component]));
     Result = Builder.CreateAdd(Scaled, InGroup);
     break;
   }
   case RaisedBuiltin::GroupId: {
-    unsigned Component =
-        cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
+    unsigned Component = cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue();
     Value *Ptr = Builder.CreateConstGEP2_32(ArrayType::get(I32Ty, 3),
                                             GroupIDPtr, 0, Component);
     Result = Builder.CreateLoad(I32Ty, Ptr, "ref.group_id");
@@ -183,11 +184,12 @@ bool lowerFunction(Function &F) {
   }
 
   Module &M = *F.getParent();
-  Value *FlatPtr = getOrCreateRefGlobal(
-      M, ReferenceThreadIndexInGroupGlobalName, Type::getInt32Ty(M.getContext()));
-  Value *GroupIDPtr = getOrCreateRefGlobal(
-      M, ReferenceGroupIDGlobalName,
-      ArrayType::get(Type::getInt32Ty(M.getContext()), 3));
+  Value *FlatPtr =
+      getOrCreateRefGlobal(M, ReferenceThreadIndexInGroupGlobalName,
+                           Type::getInt32Ty(M.getContext()));
+  Value *GroupIDPtr =
+      getOrCreateRefGlobal(M, ReferenceGroupIDGlobalName,
+                           ArrayType::get(Type::getInt32Ty(M.getContext()), 3));
   std::array<uint32_t, 3> NumThreads = getThreadGroupSize(F);
 
   for (auto [CI, Kind] : Calls)
@@ -199,7 +201,8 @@ bool lowerFunction(Function &F) {
 
 } // namespace
 
-PreservedAnalyses ReferenceLoweringPass::run(Module &M, ModuleAnalysisManager &) {
+PreservedAnalyses ReferenceLoweringPass::run(Module &M,
+                                             ModuleAnalysisManager &) {
   bool Changed = false;
   SmallVector<Function *, 4> Candidates;
   for (Function &F : M)
