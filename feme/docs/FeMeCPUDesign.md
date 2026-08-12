@@ -396,7 +396,7 @@ LLVM's `llvm::UniformityInfo` (`GenericUniformityInfo<SSAContext>`) already
 implements exactly this analysis, including the hard part (sync dependence:
 which values become divergent because of *where* control flow reconverged).
 It is driven entirely through `TargetTransformInfo`:
-`hasBranchDivergence()`, `getValueUniformity()`, `isUniform()`. Neither the
+`hasBranchDivergence()` and `getValueUniformity()`. Neither the
 `DirectX` nor the `SPIRV` target implements those hooks, and the host target
 (x86, AArch64) answers "no divergence" — so FeMe supplies its own:
 
@@ -1112,7 +1112,7 @@ Notes and constraints:
   an embedded driver must not have shader code reaching arbitrary host
   symbols.
 - **Dispatch parallelism**: `dispatch()` runs groups across an
-  `llvm::ThreadPool` owned by the engine (or the calling thread when
+  `llvm::DefaultThreadPool` owned by the engine (or the calling thread when
   `NumThreads == 1`). Groups are independent by definition, so this needs no
   synchronization beyond the join. The pool belongs to the engine rather
   than to `Context` so that two shaders compiled from one context do not
