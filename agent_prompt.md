@@ -21,8 +21,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-The tests in WaveUniformityTest.cpp would be far easier to debug and maintain if
-the WaveUniformity analysis had a printer pass and the tests were instead
-written with FileCheck against the printer's output.
-
-Can you make that change?
+Writing FeMeRuntimeCPU.ll as LLVM IR is a maintainability nightmare. It would be
+better to add a dependency on Clang than to maintain that. Please rewrite it in
+C and make feme's runtime, JIT, and any required bits depend on using Clang as
+the host compiler.
