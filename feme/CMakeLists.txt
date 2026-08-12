@@ -46,6 +46,7 @@ set(FEME_INCLUDE_TESTS ${LLVM_INCLUDE_TESTS} CACHE BOOL
 
 add_subdirectory(include)
 add_subdirectory(lib)
+add_subdirectory(runtime)
 add_subdirectory(tools)
 
 if(FEME_INCLUDE_TESTS)
