@@ -74,7 +74,7 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   import) to the host CPU, as a `feme::Backend` selected the same way every
   other target is (`--target=<host triple>`), reusing
   `feme::TargetMachineBackend` for the final codegen step.
-- Support a **user-provided wave size** `W` ∈ {1, 2, 4, 8, 16, 32, 64, 128},
+- Support a **user-provided wave size** `W` ∈ {4, 8, 16, 32, 64, 128},
   independent of the host's native vector width, with `W = 1` a supported
   (scalar, one-lane-per-program) configuration that shares the entire
   pipeline.
