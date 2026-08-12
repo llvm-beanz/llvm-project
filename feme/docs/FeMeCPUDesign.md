@@ -1172,8 +1172,8 @@ because it is a separate project that happens to reuse this one.
 
   and the output heap entries are printed for `FileCheck` to match.
   `--reference` runs the shader one invocation at a time through the
-  unwidened module instead, which is the ground truth the CFG
-  restructurization suite below diffs against.
+  unwidened module instead (see "CFG restructurization test suite"), which
+  is the ground truth that suite diffs against.
   Deliberately textual, per Design.md's "Avoiding binary test fixtures"
   section. Note that the file describes *heap slots*, not bindings — it is
   the same thing the shader indexes, so a test's expectations do not depend
@@ -1249,13 +1249,17 @@ each invocation took*, which is what makes a mismatch diagnosable rather
 than merely detectable.
 
 The ground truth for the comparison is `feme-run --reference`: a mode that
-skips Phases 3–6 entirely and calls the *unwidened* function once per
-invocation, so the reference executes the original control flow rather than
-a restructured, masked version of it. Generated shaders therefore avoid
-wave intrinsics, which have no meaning one invocation at a time; that is
-the right scope anyway, since this suite is testing control flow. The
-harness runs each seed through the reference and through the real pipeline
-at a couple of wave sizes and diffs the buffers.
+skips Phases 3–5 and calls the *unwidened* function once per invocation, so
+the reference executes the original control flow rather than a
+restructured, masked version of it. Phase 6 still runs, in a scalar variant
+whose "wave loop" is a loop over single invocations, so builtins,
+groupshared memory, barriers and the kernel ABI are the ones described
+above and only the SPMD transform is out of the picture. This is not a
+`W = 1` wave size — there is none — and wave intrinsics have no meaning one
+invocation at a time, so the mode rejects them; generated shaders avoid
+them, which is the right scope anyway, since this suite is testing control
+flow. The harness runs each seed through the reference and through the real
+pipeline at a couple of wave sizes and diffs the buffers.
 
 **4. Fuzzing.** FeMe already builds libFuzzer targets
 (`feme-dxil-import-fuzzer`, `feme-spirv-import-fuzzer`, `dxbc-as-fuzzer`),
