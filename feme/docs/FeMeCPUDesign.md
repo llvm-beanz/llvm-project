@@ -180,19 +180,20 @@ where `X`, `Y` are the group's `hlsl.numthreads` dimensions. Lanes
 `(x, y)`, `(x+1, y)`, `(x, y+1)`, `(x+1, y+1)` — the arrangement SM 6.6
 compute-shader derivatives and pixel shaders both assume.
 
-For a 1D group (`Y == 1`) this degenerates exactly to `x`, i.e. to HLSL's
-`SV_GroupIndex` / SPIR-V's `LocalInvocationIndex` ordering, so
-`llvm.dx.flattened.thread.id.in.group` is `splat(w * W) + iota` — the
-cheapest possible thing. For a 2D or 3D group it is that same vector run
-through a fixed, compile-time-known permutation, which is a handful of
-vector integer ops on constants (`X` and `Y` are constants, and `w` is the
-wave loop's index), and constant-folds outright when the wave loop is
-unrolled. Every other builtin is derived from the flattened index as
-before.
+The tiling only means anything when both `X` and `Y` are even, so when
+either is odd the mapping falls back to plain `SV_GroupIndex` order and
+quad operations are undefined — matching SM 6.6, which requires even group
+dimensions for compute derivatives.
 
-When `X` or `Y` is odd the tiling has no meaning, so the mapping falls back
-to plain `SV_GroupIndex` order and quad operations are undefined — matching
-SM 6.6, which requires even group dimensions for compute derivatives.
+A 1D group (`Y == 1`) is that fallback case, so its mapping is exactly `x`,
+i.e. HLSL's `SV_GroupIndex` / SPIR-V's `LocalInvocationIndex` ordering, and
+`llvm.dx.flattened.thread.id.in.group` is `splat(w * W) + iota` — the
+cheapest possible thing. For an even-dimensioned 2D or 3D group it is that
+same vector run through a fixed, compile-time-known permutation, which is a
+handful of vector integer ops on constants (`X` and `Y` are constants, and
+`w` is the wave loop's index), and constant-folds outright when the wave
+loop is unrolled. Every other builtin is derived from the flattened index
+as before.
 
 Neither source model specifies which invocation lands in which lane, so
 this is FeMe's choice to make; making it a quad-consistent one costs
