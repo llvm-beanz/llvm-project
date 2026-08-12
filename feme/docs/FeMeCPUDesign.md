@@ -271,13 +271,14 @@ flowchart TD
     DXIL[DXIL] -- Importer + OpRaising + MetadataRaising --> R[raised llvm::Module<br/>llvm.dx.* / llvm.spv.*]
     SPV[SPIR-V] -- Importer + SPIRVToLLVM --> R
     R --> P1[feme-cpu-prepare<br/>canonicalize + structurize CFG]
-    P1 --> P2[feme-cpu-lower-resources<br/>descriptor heap ABI]
+    P1 --> P2[feme-cpu-lower-resources<br/>canonical resource calls]
     P2 --> P3[feme-cpu-linearize<br/>divergence -> masks]
     P3 --> P4[feme-cpu-simdize<br/>widen to &lt;W x T&gt;]
     P4 --> P5[feme-cpu-lower-wave<br/>wave/builtin intrinsics]
     P5 --> P6[feme-cpu-wrap-entry<br/>group/wave loops, barriers]
-    P6 --> TM[TargetMachineBackend<br/>host triple]
-    P6 --> JIT[feme::cpu::JITEngine<br/>ORC]
+    P6 --> RL[link libFeMeRuntimeCPU bitcode<br/>then optimize]
+    RL --> TM[TargetMachineBackend<br/>host triple]
+    RL --> JIT[feme::cpu::JITEngine<br/>ORC]
 ```
 
 Each box is a separate pass with its own `feme-opt` name and its own `lit`
@@ -285,19 +286,40 @@ tests, following the precedent set by `feme-dxil-raise-ops` /
 `feme-amdgpu-lower-{raised,resources}`. The split points are chosen so that
 each pass's input and output are both *printable, checkable* LLVM IR:
 
-- After `feme-cpu-lower-resources`, resources are bounds-checked pointers and
-  the module has no `handlefromheap` left — checkable without reasoning
-  about masks.
+- After `feme-cpu-lower-resources`, source-format handles and accesses are
+  canonical `feme.cpu.resource.*` calls carrying explicit heap indices; no
+  descriptor has been loaded and no format-specific control flow has been
+  introduced — checkable without reasoning about masks or vectors.
 - After `feme-cpu-linearize`, control flow is (almost) straight-line and
   masks are explicit `i1` values on `feme.cpu.masked.*` calls — checkable
   without reasoning about vectors.
 - After `feme-cpu-simdize`, everything is `<W x T>` — checkable without
   reasoning about the group wrapper.
 
-The resource lowering runs *before* linearization/widening deliberately: it
-is the one phase whose correctness has nothing to do with `W`, so it should
-be testable at `W`-agnostic scale, and lowering handles to plain pointers
-early lets the widener treat them as ordinary uniform values.
+Resource canonicalization runs *before* linearization/widening deliberately:
+it records what each access means without choosing how a wave executes it.
+Phase 3 can therefore predicate resource calls like any other side effect,
+and Phase 4 can scalarize a varying call over active lanes without ever
+forming a vector of descriptor aggregates. The scalar helper definitions are
+linked only after SIMDization, so their internal format dispatch is ordinary
+host control flow that never passes through the shader linearizer.
+
+### Raised IR prerequisites
+
+The CPU pipeline begins only after the source front end has raised every
+shader operation it needs into the shared `llvm.{dx,spv}.*` vocabulary. In
+particular, both input paths must represent descriptor-heap handle creation,
+typed/structured/raw/constant-buffer accesses, barrier scope and memory
+semantics, and every supported wave operation. DXIL op raising and SPIR-V
+conversion do not cover all of those operations today; closing those gaps is
+an explicit prerequisite, not work hidden inside a CPU pass.
+
+The CPU target depends on the descriptor-heap extensions named in the
+Resource Model even when the corresponding support has not yet landed in
+LLVM's SPIR-V reader or backend. FeMe adds the importer/conversion support it
+needs. Any operation that remains source-specific or whose semantics the CPU
+pipeline does not support is diagnosed before preparation, rather than
+surviving until host instruction selection.
 
 ## Format-Agnostic Operation
 
@@ -355,8 +377,10 @@ Gets the raised module into the shape the later phases assume:
   in memory becomes a per-lane array in Phase 4 (see below), which is
   correct but much worse code, so it is worth running SROA first.
 - **Canonicalize entry points**: exactly one `hlsl.shader="compute"`
-  function is selected (by name, from options), and any other entry point is
-  either dropped or left alone; the wrapper in Phase 6 needs a single root.
+  function is selected (by name, from options). Retain its reachable internal
+  call graph, remove other entry points and unreachable definitions, and
+  diagnose a call graph that cannot be isolated. Every retained definition
+  goes through the CPU pipeline; the wrapper in Phase 6 needs a single root.
 
 Nothing here is FeMe-specific except the pass ordering and the entry point
 selection, so this pass is mostly a pipeline builder.
@@ -392,8 +416,18 @@ Divergence sources are the lane-varying builtins FeMe already raises:
 `llvm.{dx,spv}.thread.id`, `.thread.id.in.group`,
 `.flattened.thread.id.in.group`, `llvm.dx.wave.getlaneindex`, and every wave
 op whose result is per-lane (`WavePrefix*`, `WaveReadLaneFirst` is *uniform*,
-etc.). Everything else — group ids, resource handles, constants, loads of
-uniform addresses — is uniform by inference.
+etc.). Group ids and constants are uniform. A load through a uniform address
+is uniform only when the memory value is proven invariant across the wave;
+otherwise it remains lane-observable and is scalarized in Phase 4.
+
+This result guides Phase 3 but is not retained across that pass: CFG
+linearization replaces phis, creates masks and rewrites calls, invalidating
+an ordinary `UniformityInfo`. Phase 4 recomputes uniformity over the
+linearized function, treating the explicit mask operations and canonical
+resource calls as divergence sources where appropriate. For internal calls,
+the CPU pipeline computes a fixed-point summary of which formal parameters
+are varying across all call sites; a function is cloned when different call
+sites require incompatible uniform/varying specializations.
 
 This is an analysis, not a transform, and gets `gtest` coverage directly
 (construct IR, assert the expected values are divergent) plus a
@@ -442,6 +476,10 @@ before any widening happens. Working on scalar IR here (masks are `i1`, not
   mask as an explicit `i1` operand. Loads from addresses that could be
   lane-varying get the same treatment: an unmasked gather can fault on a
   lane that was never supposed to execute.
+- **Canonical resource calls** are similarly rewritten to masked forms. A
+  resource helper is never invoked for an inactive lane, so its descriptor
+  and resource bounds checks cannot touch memory on behalf of control flow
+  the source program did not execute.
 
 ### Mask representation between phases
 
@@ -489,11 +527,14 @@ lowering them to the real thing:
 
 | Phase 3 form | Phase 4 lowering |
 |---|---|
-| `feme.cpu.masked.load` at a uniform address | plain `load`, or `llvm.masked.load` when the mask is not provably all-ones |
+| Proven-uniform, invariant load | one guarded scalar `load`, broadcast to active lanes |
+| Uniform address with lane-observable memory | scalarized active-lane loop |
 | `feme.cpu.masked.load` at a contiguous divergent address | `llvm.masked.load` |
 | `feme.cpu.masked.load` at an arbitrary divergent address | `llvm.masked.gather` |
-| `feme.cpu.masked.store` | `llvm.masked.store` / `llvm.masked.scatter`, by the same rules |
+| Store to one uniform address | scalarized active-lane loop, in ascending lane order |
+| Store to contiguous/arbitrary divergent addresses | `llvm.masked.store` / `llvm.masked.scatter` |
 | `feme.cpu.masked.atomicrmw` / `.cmpxchg` | scalarized lane loop guarded by the widened mask |
+| masked `feme.cpu.resource.*` call | scalar helper call in an active-lane loop |
 | `feme.cpu.mask.any` | `llvm.vector.reduce.or` |
 
 **Alternatives considered.** Operand bundles on the instruction survive
@@ -527,6 +568,7 @@ as an explicit option (`feme-opt -passes=feme-cpu-simdize -feme-wave-size=8`).
 | Call to a math libcall (`llvm.sin.f32`, ...) | vector-typed intrinsic call, letting the host's vector library / scalarizer handle it |
 | Atomic RMW / cmpxchg | scalarized lane loop (see below) |
 | `feme.cpu.masked.*` call from Phase 3 | the corresponding `llvm.masked.*` intrinsic (see "Mask representation between phases") |
+| masked `feme.cpu.resource.*` call | scalar helper call for each active lane; results are reassembled into the widened value |
 
 **Scalarization fallback.** Any operation with no vector form is emitted as
 a `W`-iteration loop (or unrolled sequence) over the lanes, guarded by the
@@ -536,9 +578,16 @@ Having this fallback is what lets the pass be *total* — it never has to bail
 out on an unsupported opcode, which matters a lot for a target whose job is
 "run any shader".
 
-**Uniform-value hoisting.** Because Phase 2 already classified values, this
-pass does not need to re-derive uniformity; it just never widens a value the
-analysis called uniform.
+**Uniform-value hoisting.** This pass recomputes uniformity on Phase 3's
+linearized IR and never widens a value that result calls uniform. It may
+reuse Phase 2's call-graph summaries, but not its invalidated per-value
+analysis result.
+
+**Wave-body interface.** Phase 4 gives the SIMDized body an explicit internal
+signature containing the group id, wave index, entry mask, resource heap
+pointers and counts, root constants, and groupshared pointer. Phase 5 lowers
+builtins from these parameters; Phase 6 constructs the loops that supply
+them. This internal interface is not the exported kernel ABI.
 
 ## Phase 5: Wave and Builtin Lowering (`feme::cpu::WaveLoweringPass`)
 
@@ -551,20 +600,28 @@ reduction over a vector register:
 |---|---|
 | `wave.getlaneindex` | `iota` (constant `<W x i32>`) |
 | `WaveGetLaneCount` | constant `W` |
-| `wave.is.first.lane` | lane == `cttz(bitcast M to iW)` |
+| `wave.is.first.lane` | `M != 0 && lane == cttz(bitcast M to iW, false)` |
 | `wave.any` / `wave.all` | `reduce.or(M & X)` / `reduce.and(M ? X : true)` |
-| `wave.all.equal` | broadcast of first active lane, compared under `M` |
-| `wave.readlane(X, i)` | `extractelement X, i` (broadcast back) |
-| `WaveReadLaneFirst` | `extractelement X, cttz(M)` |
-| `WaveActiveBallot` | `bitcast (M & X) to iW`, zext to `i64`/`<4 x i32>` |
+| `wave.all.equal` | guarded broadcast of the first active lane, compared under `M` |
+| `wave.readlane(X, i)` | uniform `i`: guarded extract and broadcast; varying `i`: one guarded extract per result lane |
+| `WaveReadLaneFirst` | guarded extract at `cttz(M, false)`, broadcast back |
+| `WaveActiveBallot` | `bitcast (M & X) to iW`, split and zero-pad into the source ABI's 32-bit result words |
 | `wave.active.countbits` | `ctpop(bitcast (M & X))` |
 | `WaveActiveSum/Product/Min/Max/BitAnd/...` | `llvm.vector.reduce.*` over `select(M, X, identity)` |
 | `WavePrefix*` | inclusive/exclusive scan; log2(W)-step shuffle scan, or a lane loop for large `W` |
-| Thread/group ids | derived from the wrapper's loop indices (below) |
+| Thread/group ids | derived from Phase 4's group-id and wave-index parameters |
 
 Every row here is a small, independently testable rewrite, which is how this
 phase's `lit` tests are organized (one `CHECK` function per intrinsic, at a
 couple of wave sizes).
+
+No lowering may create poison merely because `M` is all-zero: Phase 3 does
+not initially skip all-off regions, so such operations can be evaluated even
+though no source lane observes their result. Where a source specification
+leaves a read from an inactive or out-of-range lane undefined, FeMe chooses
+zero for deterministic reference execution. Ballots always use the source
+ABI's full result shape (`i64` or `<4 x i32>`), zeroing words and high bits
+beyond `W`.
 
 ## Phase 6: Group Execution and Barriers (`feme::cpu::EntryWrapperPass`)
 
@@ -593,8 +650,28 @@ Values live across a barrier must be spilled to a per-wave array indexed by
 `w` (a "context" allocation), since they no longer live in registers across
 the split. Barriers inside divergent control flow are undefined behaviour in
 both source models, so only barriers in *uniform* control flow need
-handling; a barrier inside a uniform loop splits the loop itself (loop
-fission over the wave loop).
+handling. A barrier inside a uniform loop keeps the loop iteration outside
+the region and wave loops:
+
+```c
+for (iteration = ...) {
+  for (w = ...) region_before_barrier(iteration, w);
+  for (w = ...) region_after_barrier(iteration, w);
+}
+```
+
+Fissioning the whole loop into one all-iterations "before" loop and one
+all-iterations "after" loop is not equivalent.
+
+Barrier raising preserves execution scope, memory scope, affected memory
+classes and ordering rather than collapsing every source operation into one
+generic barrier. V1 supports workgroup execution barriers, workgroup and
+device memory scopes, and the acquire/release/acquire-release semantics
+needed by DXIL barriers and SPIR-V `OpControlBarrier`. Region splitting
+implements workgroup execution convergence; the wrapper emits the
+corresponding LLVM fences for memory ordering. Device memory scope does not
+turn a workgroup barrier into synchronization between groups. Unsupported
+execution scopes or memory semantics are diagnosed before wrapper creation.
 
 **Alternative considered:** fibers/coroutines — give each wave a stack and
 switch at barriers (SwiftShader does a variant of this). It handles
@@ -681,19 +758,32 @@ than into undefined behaviour.
 ### Lowering (`feme::cpu::ResourceLoweringPass`, `feme-cpu-lower-resources`)
 
 - `llvm.dx.resource.handlefromheap(index, nonuniform)` (and its SPIR-V
-  equivalent) becomes a bounds-checked load of `ResourceHeap[index]`. The
-  `nonuniform` flag is a codegen hint on a GPU and is ignored here; a
-  lane-varying `index` simply makes the descriptor a divergent value, which
-  Phase 4 widens like any other.
-- A typed buffer access at element `i` becomes `Data + i * Stride` plus a
-  format conversion selected from the descriptor's `Format`, since in a
-  bindless shader the storage format is a runtime value rather than
-  something the handle type fixes. "Descriptor formats" below works through
-  how that selection is made and what it costs.
-- Constant buffers are read-only descriptors with `Kind = CBuffer`; the
-  4-component-vector-indexed access DXIL uses (`CBufferLoadLegacy`) becomes
-  ordinary loads.
-- Counter UAVs use `Counter` with host atomics.
+  equivalent) remains an explicit heap index rather than becoming a loaded
+  `FemeDescriptor`. The `nonuniform` flag is a GPU codegen hint and is
+  ignored; normal uniformity analysis determines whether the index varies by
+  lane.
+- Each operation through that handle becomes a scalar, type-mangled
+  `feme.cpu.resource.*` call carrying the heap pointer and count, descriptor
+  index, element or byte offset, and source-level view type. For example:
+
+  ```llvm
+  declare <4 x float> @feme.cpu.resource.load.typed.v4f32(
+      ptr %heap, i32 %heap_count, i32 %descriptor_index,
+      i64 %element_index)
+  declare void @feme.cpu.resource.store.typed.v4f32(
+      ptr %heap, i32 %heap_count, i32 %descriptor_index,
+      i64 %element_index, <4 x float> %value)
+  ```
+
+  Structured and raw-buffer calls carry byte offsets and alignment instead;
+  constant-buffer calls are read-only. Counter UAV calls name the atomic
+  operation explicitly.
+- These are ordinary declarations with attributes describing their memory
+  effects, created and recognized through one helper rather than ad hoc name
+  matching. Phase 3 adds the governing mask. Phase 4 emits a scalar helper
+  call for each active lane and reconstructs the widened result; a
+  lane-varying descriptor is therefore just a lane-varying integer index,
+  never an invalid vector of descriptor structures.
 - A **descriptor kind mismatch** — a shader reading a `Kind = CBuffer`
   descriptor through a structured buffer handle, say — is undefined in both
   source models. FeMe treats it as an out-of-bounds access (zeros/ignored)
@@ -717,69 +807,44 @@ runtime value and the conversion has to be selected at run time. (Raw and
 structured buffers are unaffected — they have no format — so this concerns
 typed buffers now and textures whenever sampling arrives.)
 
-The options, roughly in order of how much they cost the compiler:
+The implementation of each canonical call lives in an LLVM bitcode form of
+`libFeMeRuntimeCPU`. After SIMDization and wrapper construction, FeMe links
+only the referenced helper definitions into the shader module, internalizes
+them, and runs the ordinary host optimization pipeline. Resolving calls to a
+separately compiled native library through ORC would leave them opaque and is
+not sufficient: the helper IR must be present before optimization for
+inlining, constant propagation and loop optimization to apply. The AOT path
+uses the same link-before-codegen flow, so its generated object contains the
+needed helpers and does not depend on link-time optimization by the final
+host application.
 
-| # | Design | Cost per access | Extensible? | Notes |
-|---|---|---|---|---|
-| A | One runtime call per access; the helper switches on `Format` | call + switch, effectively scalar per lane | trivially | Always correct, always slow. The floor. |
-| B | Inlined `switch` on `Format` at the access site, common formats as vectorized cases, generic helper as `default` | one uniform branch, hoistable | new formats join the `default` case first | Fast path is straight-line vector code. |
-| C | Format dispatch hoisted to the *region* using the handle: one `switch` outside the loop, the loop body cloned per format | amortized to zero inside the loop | as B | B plus unswitching; mostly falls out of LICM/`SimpleLoopUnswitch` given B. |
-| D | Whole-kernel specialization: read the heap at JIT time, constant-fold every `Format`, compile per unique heap shape | zero | as B | Best code; costs a recompile per distinct heap shape and only works on the JIT path. |
-| E | The descriptor carries a converter function pointer | indirect call, no inlining | trivially, by the host | Rejected: indirect calls are a non-goal, they defeat vectorization, and letting an untrusted heap supply code pointers is exactly what the bounds-checking rules exist to avoid. |
-| F | Require the descriptor's format to match the shader's view, validated at dispatch | zero | n/a | Not a model of either API; useful only as an opt-in assertion. |
+The helper reads the descriptor, checks its kind and bounds, and switches on
+`Format`. It contains direct scalar implementations for the 32-bit formats,
+`R8G8B8A8_UNORM`/`_SNORM`/`_SRGB`, `R16G16B16A16_FLOAT`,
+`R11G11B10_FLOAT`, `R10G10B10A2_UNORM`, and the 8/16-bit integer formats;
+the identity case is the load or store itself. Additional formats extend one
+helper implementation rather than every access site.
 
-**The plan: B by default, A as B's `default` case, C for free, D and F as
-options.** Concretely:
+V1 deliberately invokes this scalar implementation once per active lane.
+That is correct for both uniform and divergent descriptors, bounds code size,
+and gives LLVM an opportunity to inline and optimize without making vector
+resource dispatch part of the correctness-critical SIMDizer. A later
+`ResourceCallOptimizationPass` may recognize a uniform descriptor index,
+hoist its descriptor and format checks, and replace the lane calls with a
+vector fast path. A divergent-descriptor waterfall is one possible late
+optimization, not a required representation between phases.
 
-- `ResourceLoweringPass` emits, at each typed access, a `switch` on the
-  descriptor's `Format` with inlined vector code for the formats worth
-  inlining (the 32-bit ones, `R8G8B8A8_UNORM`/`_SNORM`/`_SRGB`,
-  `R16G16B16A16_FLOAT`, `R11G11B10_FLOAT`, `R10G10B10A2_UNORM`, and the
-  8/16-bit integer ones) and a call to `feme_rt_{load,store}_typed_*` for
-  everything else. Adding a format later means adding a case, and until
-  someone does, the format still *works* through the helper. That
-  "correct first, fast later" property is why A stays in the design rather
-  than being replaced by B.
-- **The identity case is not a case.** When the descriptor's format is bit-
-  identical to the shader's view (the common `Buffer<float4>` over
-  `R32G32B32A32_FLOAT` situation), the "conversion" is the load itself, and
-  the emitted code is the check plus a plain vector load.
-- **The format load is uniform** whenever the descriptor is, which is almost
-  always, so the `switch` hoists out of loops and C requires nothing beyond
-  running the existing loop passes after resource lowering.
-- **Divergent descriptors need a waterfall.** If lanes of one wave index
-  *different* heap slots, their formats can differ and there is no single
-  vector conversion to emit. The lowering handles this the way GPU backends
-  handle divergent descriptors: a **waterfall loop** that picks the first
-  active lane's format, builds the sub-mask of lanes sharing it, runs the
-  vectorized fast path under that sub-mask, and repeats until every lane is
-  serviced. Worst case that is `W` iterations (equivalent to A); the common
-  case is one. This is the only part of the scheme that is genuinely new
-  code rather than "emit a switch", so it is worth stating explicitly that
-  it is the fallback and not the norm.
-- **D is a JIT-only optimization, added later.** `JITOptions` grows a
-  `SpecializeFormats` flag and `JITEngine::create` an optional heap
-  *description* (formats and kinds only, no pointers) that lets the
-  compiler constant-fold the `switch`. It is off by default because it
-  trades the design's best property — one compiled kernel runs against any
-  heap — for code quality, and because the specialization cache key becomes
-  the heap shape. The AOT path cannot have it at all, which is another
-  reason B has to be good enough on its own. Whether it is worth building
-  at all is a measurement rather than a design argument — how much does the
-  hoisted, unswitched `switch` actually cost on real shaders? — so the
-  question gets answered once B runs and not before.
-- **F is an opt-in check, not a mode.** `--cpu-require-matching-formats`
-  (and the equivalent `JITOptions` flag) makes a format/view mismatch a
-  dispatch-time error instead of a conversion. It is for hosts that believe
-  they are handing over exactly-typed data and want to find out when they
-  are wrong, and for narrowing bug reports; it never changes what a
-  conforming shader computes.
+JIT-only heap-shape specialization remains optional. A future
+`SpecializeFormats` option may provide descriptor kinds and formats (never
+pointers) at compile time, include that shape in the cache key, and
+constant-fold the linked helper. `--cpu-require-matching-formats` similarly
+remains an opt-in dispatch-time assertion for hosts that expect the runtime
+format to exactly match the shader view; neither option changes the default
+semantics.
 
-The testing consequence is that format handling is exercised at three
-levels: `lit` tests over the emitted `switch` shape (B), `feme-run` tests
-over each format's round-trip values including the odd-width ones (A and B
-agreeing), and a differential test that runs the same shader with and
-without `SpecializeFormats` (D agreeing with B).
+Tests therefore cover the canonical call shape, scalar helper behavior for
+every format (including odd-width formats), uniform and divergent descriptor
+indices, and agreement between specialized and unspecialized execution.
 
 ### Bounds checking
 
@@ -863,8 +928,12 @@ layout the source model already fixed (HLSL `cbuffer` packing rules for
 DXIL, the `Offset` decorations the SPIR-V importer preserves), so FeMe
 neither imposes nor validates a layout: a host that fills the block with a
 struct whose layout disagrees with the shader's gets wrong answers, exactly
-as it would on a GPU. `ResourceInfo` reports the size the shader reads so a
-host can at least check that much.
+as it would on a GPU. `ResourceInfo` reports the full byte span the shader
+can read. `JITEngine::dispatch()` and the runtime dispatch API reject a null
+or undersized block before scheduling any group. The direct entry-symbol
+escape hatch retains robust behavior: root-constant accesses outside
+`RootConstantSize` read zero, using the same linked helper machinery as
+descriptor-backed constant buffers.
 
 #### Limitations, and how this compares to GPU APIs
 
@@ -907,9 +976,15 @@ There is no per-shader binding table to publish, but the host still benefits
 from knowing what the shader needs: FeMe emits a named metadata node
 (`!feme.cpu.resources`) recording the root constant block's size, whether
 the sampler heap is used, and the statically known heap indices when the
-shader uses constants. `feme::cpu::ResourceInfo::fromModule` reads it back,
-so the artifact remains self-describing on the object-file path where there
-is no in-process compiler to ask.
+shader uses constants. `feme::cpu::ResourceInfo::fromModule` reads it back
+while the module is in memory.
+
+LLVM metadata is not an object-file ABI. Before AOT codegen, FeMe also emits
+a versioned, read-only data symbol named `feme_cpu_info_<entry>`, containing
+the ABI version, resolved wave size, thread-group dimensions, groupshared
+size and alignment, required root-constant span, and heap-use flags. An AOT
+host reads this symbol through `ResourceInfo`; the JIT builds the same
+information directly from the module.
 
 ## Kernel ABI
 
@@ -963,7 +1038,7 @@ struct JITOptions {
 };
 
 /// The resources a dispatch runs against. Descriptor heaps are owned by the
-/// caller and must outlive the dispatch.
+/// caller and must remain alive until this dispatch call returns.
 struct DispatchResources {
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<FemeDescriptor> SamplerHeap;
@@ -1001,10 +1076,12 @@ Notes and constraints:
   `Context` construction rather than requiring callers to do it, keeping the
   "no global mutable state *of FeMe's own*" property honest about the one
   piece of LLVM that genuinely is global.
-- **Runtime symbols**: the runtime support library's helpers are resolved
-  from an explicitly populated symbol map, not from the host process's
-  dynamic symbol table — an embedded driver must not have shader code
-  reaching arbitrary host symbols.
+- **Runtime helpers**: referenced resource helpers are linked from the
+  `libFeMeRuntimeCPU` bitcode module, internalized and optimized with the
+  shader. Any residual C ABI symbols are resolved from an explicitly
+  populated symbol map, not from the host process's dynamic symbol table —
+  an embedded driver must not have shader code reaching arbitrary host
+  symbols.
 - **Dispatch parallelism**: `dispatch()` runs groups across an
   `llvm::ThreadPool` owned by the engine (or the calling thread when
   `NumThreads == 1`). Groups are independent by definition, so this needs no
@@ -1016,15 +1093,19 @@ Notes and constraints:
   state on the engine, so a host may run several dispatches concurrently
   against different descriptor heaps. Whether *those* dispatches conflict on
   the resources they were handed is the host's problem, exactly as on a GPU.
+  Each invocation uses its own `llvm::ThreadPoolTaskGroup` and waits only for
+  that group; it never waits for unrelated work already queued on the
+  engine's shared pool.
 - **Caching**: an `ObjectCache` can be attached so a host can persist
   compiled shaders; the cache key must include the wave size, opt level and
   robustness setting, not just the input hash.
-- **Object-file path**: the same pipeline minus the JIT, through
+- **Object-file path**: the same helper-bitcode link and optimization
+  pipeline minus the JIT, through
   `feme::TargetMachineBackend` with the host triple, producing a relocatable
-  object with the same ABI. A host taking that path schedules groups itself;
-  the runtime support library ships the same group loop so it does not have
-  to. This is what makes `--target=<host-triple>` work as an ordinary FeMe
-  target and gives an AOT story for free.
+  object containing its referenced helpers and the versioned artifact-info
+  symbol. A host taking that path schedules groups itself; the runtime
+  support library ships the same group loop so it does not have to. This is
+  what makes `--target=<host-triple>` work as an ordinary FeMe target.
 - **Escape hatch**: a host that genuinely wants to schedule groups itself
   can ask the engine for the entry symbol and the resolved ABI description.
   This is deliberately the secondary interface — it exists so that owning
@@ -1033,13 +1114,13 @@ Notes and constraints:
 
 ## Runtime Support Library
 
-A small static library (`libFeMeRuntimeCPU`) with a C ABI, containing only
-what cannot reasonably be emitted as IR:
+A small support library (`libFeMeRuntimeCPU`) with linkable LLVM bitcode for
+shader helpers and a C ABI for host-side dispatch, containing only what
+cannot reasonably be emitted directly by the transforms:
 
-- Typed-buffer format pack/unpack for every format, as the `default` case
-  of the format `switch` the resource lowering emits (see "Descriptor
-  formats"). The formats worth inlining are inlined there; this is what
-  makes the ones that are not still work.
+- Descriptor lookup, robustness checks, and typed-buffer format pack/unpack
+  for every supported format. Only referenced helper definitions are linked
+  into a compiled shader module.
 - Atomic helpers for formats needing read-modify-write conversion.
 - The host-side dispatch loop, so the object-file path has a usable
   `main`-adjacent entry point without every embedder rewriting it.
@@ -1187,12 +1268,13 @@ Following the instruction that each phase of translation gets unit tests:
 |---|---|---|
 | Uniformity | divergence classification on hand-built IR, including sync dependence | `print<feme-cpu-uniformity>` output |
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG; the named-shape corpus under `-verify-structured` (see "CFG restructurization test suite") |
-| Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, per-descriptor `trusted` opt-out, format `switch` shape, divergent-descriptor waterfall, rejection of register-bound resources |
-| Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, `feme.cpu.masked.*` emission |
-| SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8}, `feme.cpu.masked.*` → `llvm.masked.*` lowering from hand-written IR |
-| Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
-| Entry wrapper | barrier region splitting, quad-tiled lane mapping (including the 1D degenerate case and odd dimensions) | wave loop shape, barrier split, groupshared, builtin derivation for 1D/2D/3D groups |
-| JIT | `JITEngine::create`/`dispatch` on a tiny module, resource info round-trip, multi-threaded group scheduling | — |
+| Resource lowering | canonical call creation and resource info extraction | one test per resource kind, dynamic heap indexing, type mangling, rejection of register-bound resources |
+| Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, masked memory and resource-call emission |
+| SIMDize | widening rules, contiguity detection, resource-call scalarization | per-construct `CHECK`s at `W` ∈ {4, 8}, masked calls → LLVM masked operations or active-lane loops |
+| Runtime helpers | descriptor and root-constant robustness, format conversions, atomics | OOB reads/writes, per-descriptor `trusted`, every format, uniform and divergent descriptor indices |
+| Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes, all-off masks, varying lane reads, and ballot result packing |
+| Entry wrapper | barrier region splitting, scope/order mapping, quad-tiled lane mapping | wave loop shape, barriers inside/outside uniform loops, rejected scopes, groupshared, builtin derivation for 1D/2D/3D groups |
+| JIT | `JITEngine::create`/`dispatch` on a tiny module, resource/artifact info round-trip, multi-threaded group scheduling | — |
 | End to end | — | `feme-run` executing real shaders and `FileCheck`ing results, at several wave sizes, from both DXIL and SPIR-V inputs of the same shader |
 
 Wave size resolution gets its own tests: each row of the resolution table
@@ -1201,12 +1283,14 @@ diagnostics) is a `lit` test over a shader with and without a declared wave
 size.
 
 Differential testing across wave sizes is the cheapest high-value test this
-design enables and should be first-class rather than an afterthought: the
-same shader run at `W = 4` and at `W = 128` must produce identical output
-buffers unless it observes `WaveGetLaneCount()`, so a mismatch isolates a
-widening bug from a translation bug. `W = 4` is the cheapest configuration
-to read in `CHECK` lines and doubles as the "smallest legal wave"
-regression, replacing the role a scalar mode would have played.
+design enables and should be first-class rather than an afterthought. A
+wave-size-independent shader — one that does not use lane index, lane reads,
+ballots, reductions, prefixes, wave size, or any other wave-sensitive
+operation — must produce identical output at `W = 4` and `W = 128`, so a
+mismatch isolates a widening bug from a translation bug. Wave-sensitive
+shaders instead have per-wave-size expected results. `W = 4` is the cheapest
+configuration to read in `CHECK` lines and doubles as the "smallest legal
+wave" regression, replacing the role a scalar mode would have played.
 
 ### CFG restructurization test suite
 
@@ -1284,6 +1368,7 @@ feme/
     Transforms/
       CPU/Prepare.h
       CPU/ResourceLowering.h
+      CPU/ResourceCallOptimization.h
       CPU/Linearize.h
       CPU/SIMDize.h
       CPU/WaveLowering.h
@@ -1297,7 +1382,7 @@ feme/
     Transforms/CPU/...
     Target/CPU/...
   runtime/
-    CPU/                          (libFeMeRuntimeCPU, C ABI)
+    CPU/                          (libFeMeRuntimeCPU, helper bitcode + C ABI)
   tools/
     feme-run/
     feme-cfg-gen/                 (seeded CFG generator; see the test suite)
@@ -1313,13 +1398,19 @@ existing layout moves.
 
 Sequenced so each step is independently testable and useful:
 
-1. **Scaffolding + ABI header**: `Target/CPU/RuntimeABI.h`, wave size
-   resolution (`--wave-size` in `DriverOptions`, shader declaration, host
-   default) with its diagnostics, empty passes registered in `feme-opt`.
+1. **Scaffolding + raised-IR contract + ABI header**:
+  `Target/CPU/RuntimeABI.h`, wave size resolution (`--wave-size` in
+  `DriverOptions`, shader declaration, host default) with its diagnostics,
+  empty passes registered in `feme-opt`, and front-end raising for the
+  descriptor-heap, barrier and wave operations required by the first
+  executable milestones. Unsupported raised operations get an early CPU
+  target diagnostic.
 2. **Uniformity analysis** (`WaveTTIImpl` + printer + unit tests). No
    transform yet.
-3. **Resource lowering** to the descriptor heap, with the heap-usage
-   metadata and reader. Testable at `W`-agnostic scale.
+3. **Resource canonicalization + scalar helper IR**: canonical
+  `feme.cpu.resource.*` calls, the `libFeMeRuntimeCPU` bitcode helpers,
+  heap-usage metadata, versioned AOT artifact information and the
+  `ResourceInfo` reader. Testable at `W`-agnostic scale.
 4. **Uniform-control-flow end-to-end at `W = 4`**: prepare + widening of
    straight-line, uniform-control-flow shaders + entry wrapper, plus
    `feme-run` and the JIT. This is the first point at which a shader *runs*,
@@ -1337,9 +1428,10 @@ Sequenced so each step is independently testable and useful:
    and the scalarization fallback.
 8. **Wave intrinsic lowering**.
 9. **Barriers and groupshared memory** (region splitting).
-10. **Format conversion runtime**: the inlined format `switch` and the
-    runtime helpers behind it, including the waterfall loop for divergent
-    descriptors.
-11. **Performance work**: contiguity detection, all-lanes-off branch
-    skipping, uniform-load hoisting. Only after correctness is established
-    and measurable.
+10. **Resource performance**: recognize uniform descriptor calls, hoist
+  descriptor/format checks, emit vector fast paths, and measure whether a
+  divergent-descriptor waterfall or JIT heap-shape specialization pays for
+  its complexity.
+11. **General performance work**: contiguity detection, all-lanes-off branch
+  skipping, uniform-load hoisting. Only after correctness is established
+  and measurable.
