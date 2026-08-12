@@ -2,8 +2,9 @@
 
 ## Status
 
-Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header) and
-milestone 2 (uniformity analysis) are implemented. This document is a
+Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header),
+milestone 2 (uniformity analysis) and milestone 3 (resource
+canonicalization + scalar helper IR) are implemented. This document is a
 companion to [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
@@ -51,6 +52,66 @@ Deviation: milestone 2's implementation narrowed one thing described in
   design's `WaveReadLaneFirst` example is: it broadcasts a single lane's
   value to the whole wave. The list grows as new raised wave intrinsics are
   added; nothing about the classification itself is expected to change.
+
+Deviation: milestone 3's implementation narrowed several things described
+in "Resource Model" below; each is called out inline where it's discussed,
+and summarized here:
+
+- `feme::cpu::ResourceLoweringPass` only canonicalizes the two resource
+  kinds `feme::dxil::OpRaisingPass` currently reconstructs a
+  `handlefromheap` for: `TypedBuffer` and `RawBuffer` (which covers both
+  `ByteAddressBuffer` and `StructuredBuffer`; see "Descriptor heaps" for
+  how the pass tells them apart). A constant buffer read through the heap
+  is left entirely unmodified rather than canonicalized -- it needs the
+  same multi-return-value `extractvalue` reconstruction mechanism the
+  milestone 1 deviation above defers for `WaveActiveBallot` et al., since
+  `dx.op.cbufferLoadLegacy`'s raised form returns a whole row of dwords per
+  call rather than one canonical scalar/vector view. Sampling remains a
+  non-goal, so a sampler heap access is untouched for the same reason
+  `feme::dxil::OpRaisingPass` never raises a `handlefromheap` for one.
+- SPIR-V's bindless descriptor-heap counterpart (`SPV_EXT_descriptor_heap`)
+  has no raised-IR representation yet -- only DXIL defines
+  `llvm.dx.resource.handlefromheap` (see "Raised IR prerequisites") -- so
+  `ResourceLoweringPass` has nothing to rewrite in a SPIR-V-sourced module
+  until that lands upstream.
+- The new heap/root-constant parameters `ResourceLoweringPass` appends to a
+  rewritten function are threaded through the calls *within* that function
+  only. Full inter-procedural threading -- a resource access reached
+  through a helper function the entry point calls -- is deferred; a
+  function is rewritten only if every resource access it performs is local
+  to it. Raised shaders are typically already fully inlined by this point,
+  so this has not been a practical limitation yet.
+- Root constants are not implemented (this was already true as of
+  milestone 1's deviation note above, and remains so): every
+  register-bound handle is still rejected unconditionally, `!feme.cpu.
+  resources`' `RootConstantSize` field is always 0, and the "Kernel ABI"'s
+  `RootConstants`/`RootConstantSize` parameters `ResourceLoweringPass`
+  appends are always null/0 at this stage (a later pass will populate
+  them once "Root constants" lands).
+- The `libFeMeRuntimeCPU` scalar helper IR (`feme/runtime/CPU/
+  FeMeRuntimeCPU.ll`) implements the typed-buffer `<4 x float>` view
+  (switching between the `R32G32B32A32_FLOAT` identity format and the
+  packed `R8G8B8A8_UNORM` format, to establish the format-switch pattern
+  concretely and correctly) and the raw/structured `i32`/`float` views.
+  Every other view/format "Descriptor formats" lists is a mechanical
+  repeat of the same pattern -- "extend one helper implementation rather
+  than every access site" -- added on demand as a shader actually needs
+  it, rather than spelled out exhaustively up front. Nothing links this
+  bitcode into a compiled shader module yet; that lands with the
+  widening/entry-wrapper milestones (4, 7) "Descriptor formats" describes
+  the linking flow for.
+- `feme::cpu::ArtifactInfo`'s versioned byte layout includes the
+  execution-shape fields ("Kernel ABI": wave size, thread-group
+  dimensions, groupshared size/alignment) from the start, so a later
+  milestone that wires wave-size resolution (milestone 4) and groupshared
+  allocation (milestone 9) into `ResourceLoweringPass` or a sibling pass
+  does not need a new artifact version -- but this milestone always
+  populates them with 0. Nothing yet writes this artifact into an actual
+  object file either: `emitArtifactGlobal`/`readArtifactGlobal` round-trip
+  the format in-module (see feme/include/feme/Target/CPU/ResourceInfo.h),
+  which is what "testable at `W`-agnostic scale" means for this piece;
+  reading the symbol back out of a real object file is exercised once the
+  AOT/JIT milestones produce one.
 
 ## Summary
 
@@ -1533,10 +1594,16 @@ Sequenced so each step is independently testable and useful:
    No transform yet -- see the Status section's Deviation note for the one
    thing that narrowed (the intrinsic list `getValueUniformity` switches on
    is explicit/enumerated rather than a general rule).
-3. **Resource canonicalization + scalar helper IR**: canonical
+3. **Resource canonicalization + scalar helper IR** (done): canonical
   `feme.cpu.resource.*` calls, the `libFeMeRuntimeCPU` bitcode helpers,
   heap-usage metadata, versioned AOT artifact information and the
-  `ResourceInfo` reader. Testable at `W`-agnostic scale.
+  `ResourceInfo` reader. Testable at `W`-agnostic scale. See the Status
+  section's Deviation note for what narrowed (only the `TypedBuffer`/
+  `RawBuffer` resource kinds, no SPIR-V bindless heap raising upstream yet,
+  no inter-procedural parameter threading, root constants still not
+  implemented, only a representative subset of formats/views has a scalar
+  helper, and nothing yet links that helper IR into a compiled shader or
+  writes the artifact into a real object file).
 4. **Uniform-control-flow end-to-end at `W = 4`**: prepare + widening of
    straight-line, uniform-control-flow shaders + Phase 5's builtin half +
    entry wrapper, plus
