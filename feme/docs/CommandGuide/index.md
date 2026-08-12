@@ -19,6 +19,11 @@ tool has its own page:
   harness for `feme::DXILImporter`.
 - [`dxbc-as-fuzzer`](dxbc-as-fuzzer.md) — libFuzzer harness for `dxbc-as`'s
   own assembly parser.
+- [`feme-cfg-gen`](feme-cfg-gen.md) — seeded generator for CFG-shaped
+  shaders, for the FeMe CPU target's restructurization test suite.
+- [`feme-cpu-restructure-fuzzer`](feme-cpu-restructure-fuzzer.md) —
+  libFuzzer harness for CFG restructurization (`FixIrreducible` +
+  `StructurizeCFG`), over `feme-cfg-gen` seeds.
 
 `feme-opt`, `feme-run`, `feme-translate`, and `dxbc-as` are testing-only
 entry points
