@@ -33,14 +33,14 @@ operations over that mask.
 
 Three pieces are needed beyond the transform itself:
 
-1. A **resource binding model** — a shader refers to its resources
-   indirectly, by (register space, register); a CPU program has to get real
-   pointers from somewhere. This design proposes a flat, explicit
-   **descriptor table ABI** passed to the kernel, rather than the
-   one-pointer-argument-per-binding scheme
-   `feme::amdgpu::ResourceLoweringPass` uses, because a CPU host is expected
-   to bind arrays, change bindings between dispatches, and reuse one
-   compiled kernel across binding sets.
+1. A **resource model** — a shader refers to its resources indirectly; a CPU
+   program has to get real pointers from somewhere. This design accepts
+   **bindless shaders only** (DXIL SM 6.6+ `ResourceDescriptorHeap`,
+   SPIR-V's `SPV_EXT_descriptor_heap`) and passes the kernel a
+   **descriptor heap** with a fixed, shader-independent layout, rather than
+   the one-pointer-argument-per-binding scheme
+   `feme::amdgpu::ResourceLoweringPass` uses. Every access through a
+   descriptor is bounds-checked.
 2. A small **runtime support library** for the operations that do not lower
    to plain IR (typed-buffer format conversion, atomics on formats, and the
    host-side dispatch loop).
@@ -74,18 +74,23 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
 - Retarget an already-raised `llvm::Module` (from either DXIL or SPIR-V
   import) to the host CPU, as a `feme::Backend` selected the same way every
   other target is (`--target=<host triple>`), reusing
-  `feme::TargetMachineBackend` for the final codegen step.
+  `feme::TargetMachineBackend` for the final codegen step. **Everything in
+  this design operates on `llvm::Module`** — no phase is DXIL- or
+  SPIR-V-specific, so the two inputs share the entire pipeline (see
+  "Format-Agnostic Operation").
 - Support a **wave size** `W` ∈ {4, 8, 16, 32, 64, 128} — every power of two
   in `[4, 128]` — independent of the host's native vector width, selected
   from the user's request, the shader's own declaration, or a host-derived
   default, in that order of authority (see "Wave Size Selection").
 - Preserve the semantics of the wave/quad intrinsics FeMe already raises,
   relative to that wave size.
-- Define a resource binding ABI that a host can populate without knowing how
-  the shader was compiled, and that survives the shader being recompiled at
-  a different wave size.
-- Provide an in-process JIT (`feme::cpu::JITEngine`) and a dispatch entry
-  point, both `feme::Context`-scoped and free of process-wide mutable state.
+- Define a bindless resource ABI (a descriptor heap) that a host can
+  populate without knowing how the shader was compiled, that survives the
+  shader being recompiled at a different wave size, and every access through
+  which is bounds-checked.
+- Provide an in-process JIT (`feme::cpu::JITEngine`) that owns dispatch
+  management — compilation, the group loop, and the thread pool it runs on —
+  `feme::Context`-scoped and free of process-wide mutable state.
 - Be testable phase by phase: each transform is an individually
   `feme-opt`-runnable pass with its own `lit` tests, and the whole thing is
   additionally testable by *running* shaders and checking their output
@@ -102,7 +107,13 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   pipeline around them (rasterization, interpolation, blending) that is a
   much larger project than the shader transform itself, and none of FeMe's
   driving use cases need it yet. The transform is stage-agnostic; the
-  *wrapper* and resource model are not.
+  *wrapper* and resource model are not. "Accounting for Graphics Later"
+  below records what this design would have to grow, and which of its
+  present choices would have to change, so that the compute-only v1 does not
+  paint the graphics case into a corner.
+- **Register-bound resources.** Bindless only: DXIL SM 6.6+
+  `ResourceDescriptorHeap` and SPIR-V `SPV_EXT_descriptor_heap`. See
+  "Resource Binding Model".
 - **Texture sampling.** Filtering, addressing modes, mip selection and
   format decode are a large body of work with no representation in FeMe's
   raised IR yet (`ResourceLoweringPass` explicitly doesn't handle texture
@@ -232,7 +243,7 @@ flowchart TD
     DXIL[DXIL] -- Importer + OpRaising + MetadataRaising --> R[raised llvm::Module<br/>llvm.dx.* / llvm.spv.*]
     SPV[SPIR-V] -- Importer + SPIRVToLLVM --> R
     R --> P1[feme-cpu-prepare<br/>canonicalize + structurize CFG]
-    P1 --> P2[feme-cpu-lower-resources<br/>descriptor table ABI]
+    P1 --> P2[feme-cpu-lower-resources<br/>descriptor heap ABI]
     P2 --> P3[feme-cpu-linearize<br/>divergence -> masks]
     P3 --> P4[feme-cpu-simdize<br/>widen to &lt;W x T&gt;]
     P4 --> P5[feme-cpu-lower-wave<br/>wave/builtin intrinsics]
@@ -246,8 +257,9 @@ tests, following the precedent set by `feme-dxil-raise-ops` /
 `feme-amdgpu-lower-{raised,resources}`. The split points are chosen so that
 each pass's input and output are both *printable, checkable* LLVM IR:
 
-- After `feme-cpu-lower-resources`, resources are pointers and the module has
-  no `handlefrombinding` left — checkable without reasoning about masks.
+- After `feme-cpu-lower-resources`, resources are bounds-checked pointers and
+  the module has no `handlefromheap` left — checkable without reasoning
+  about masks.
 - After `feme-cpu-linearize`, control flow is (almost) straight-line and
   masks are explicit `i1` values — checkable without reasoning about
   vectors.
@@ -469,75 +481,132 @@ level where a thread pool wants to hand out work.
 
 ## Resource Binding Model
 
-A shader names its resources by `(register space, register)` — plus, for
-descriptor arrays, a dynamic index. `feme::amdgpu::ResourceLoweringPass`
-answers this by appending one pointer argument per binding, which works
-because an HSA kernel launch supplies arguments anyway. That is a poor fit
-here:
+**The CPU target accepts bindless shaders only.** A shader must address its
+resources through a descriptor heap:
 
-- A host that wants to change one binding between dispatches would have to
-  rebuild an argument buffer whose layout depends on the shader's binding
-  set.
-- Dynamically indexed binding arrays (`Texture2D t[] : register(t0)`) cannot
-  be expressed at all — the pass explicitly gives up on them.
-- The argument list changes when the shader changes, so the host cannot have
-  one generic dispatch path.
+- **DXIL**: Shader Model 6.6+ dynamic resource indexing —
+  `ResourceDescriptorHeap[i]` / `SamplerDescriptorHeap[i]`, which is
+  `dx.op.createHandleFromHeap` in DXIL and `llvm.dx.resource.handlefromheap`
+  after raising.
+- **SPIR-V**: the `SPV_EXT_descriptor_heap` extension (the SPIR-V half of
+  `VK_EXT_descriptor_heap`), which expresses the same thing: an
+  application-managed heap of descriptors indexed by the shader.
 
-Instead, the CPU target defines a **descriptor table**: a flat array of
-descriptors that the kernel indexes, with the *shader-independent* layout
-below.
+Register-bound resources — `llvm.{dx,spv}.resource.handlefrombinding`,
+`handlefromimplicitbinding`, and SPIR-V descriptor set/binding decorations —
+are **rejected with a diagnostic**, with the single exception of the root
+constant buffer described below. This is a deliberate narrowing of scope,
+not an implementation gap:
+
+- The kernel ABI becomes completely shader-independent. There is no slot
+  assignment to compute, no binding table to publish, and no per-shader
+  argument layout for a host to reconstruct; one dispatch path works for
+  every shader, and rebinding between dispatches means writing a different
+  descriptor into the heap.
+- Dynamically indexed resources — the case
+  `feme::amdgpu::ResourceLoweringPass` explicitly gives up on — are the
+  *only* case here, so nothing special is needed to support them.
+- Both source models converge on the same shape, so the pass is one rewrite
+  rather than one per binding model.
+- Bindless is where both APIs are going; a reference implementation that
+  only runs modern shaders is more useful than one that also runs the legacy
+  binding model badly.
+
+Supporting register binding later is a strictly additive change: a pass that
+assigns register-bound resources heap slots and rewrites
+`handlefrombinding` into `handlefromheap` would sit in front of everything
+described here.
+
+### Descriptor heaps
 
 ```c
-/// One bound resource. Layout is part of the CPU target ABI; see
+/// One descriptor. Layout is part of the CPU target ABI; see
 /// feme/include/feme/Target/CPU/RuntimeABI.h.
 typedef struct {
   void    *Data;        // base pointer to the resource's storage
-  uint64_t SizeInBytes; // for bounds checking; 0 means unbounded
+  uint64_t SizeInBytes; // for bounds checking
   uint32_t Stride;      // element stride (structured/typed buffers)
   uint32_t Format;      // feme::cpu::ResourceFormat, for typed buffers
-  uint32_t Kind;        // typed / structured / raw / cbuffer
+  uint32_t Kind;        // typed / structured / raw / cbuffer / none
   uint32_t Flags;       // UAV vs SRV, ROV, counter present, ...
   void    *Counter;     // append/consume/counter UAV, else null
 } FemeDescriptor;
 ```
 
-Lowering (`feme::cpu::ResourceLoweringPass`, Phase 2 above):
+The host supplies two heaps — the resource heap and the sampler heap — as
+flat arrays of `FemeDescriptor` with explicit counts. The sampler heap is
+part of the ABI from the start even though sampling is a non-goal, so that
+adding it later does not change the ABI. A descriptor the host has not
+written is zero-filled (`Kind = None`, `SizeInBytes = 0`), which the
+bounds-checking rules below turn into "reads zero, writes ignored" rather
+than into undefined behaviour.
 
-- `llvm.{dx,spv}.resource.handlefrombinding(space, reg, range, index, ...)`
-  becomes a load of `Descriptors[SlotOf(space, reg) + index]`, where the
-  slot mapping is computed by the pass from the module's own bindings, in
-  ascending `(space, register)` order, and **emitted into the module as
-  metadata plus a queryable table** so the host knows which slot to fill.
-  The dynamic `index` operand is what makes binding arrays work here and not
-  in the AMDGPU scheme.
-- A typed buffer access at element `i` becomes
-  `Data + i * Stride` plus, when `Format` is not the shader's element type,
-  a call to a runtime format conversion helper
-  (`feme_rt_load_typed_f32x4` and friends). When the format is statically
-  known — the common case, since the handle type spells the element type —
-  the conversion is inlined and the helper never appears.
-- **Bounds behaviour**: out-of-bounds reads return zero and writes are
-  dropped, matching D3D/Vulkan robustness rather than trapping. The check is
-  a masked compare against `SizeInBytes` and is *not* optional: a
-  fault-on-OOB CPU target would turn a merely-nonconformant shader into a
-  host crash, which is unacceptable for the reference-execution use case.
-  An option to disable the checks (`-feme-cpu-no-robustness`) for
-  performance is reasonable but should not be the default.
+### Lowering (`feme::cpu::ResourceLoweringPass`, Phase 2 above)
+
+- `llvm.dx.resource.handlefromheap(index, nonuniform)` (and its SPIR-V
+  equivalent) becomes a bounds-checked load of `ResourceHeap[index]`. The
+  `nonuniform` flag is a codegen hint on a GPU and is ignored here; a
+  lane-varying `index` simply makes the descriptor a divergent value, which
+  Phase 4 widens like any other.
+- A typed buffer access at element `i` becomes `Data + i * Stride` plus,
+  when `Format` is not the shader's element type, a call to a runtime format
+  conversion helper (`feme_rt_load_typed_f32x4` and friends). When the
+  format is statically known the conversion is inlined and the helper never
+  appears. Unlike the register-bound model, the format is *not* generally
+  static in a bindless shader — the handle type gives the shader's view of
+  the element type, and the descriptor gives the storage format — so the
+  runtime helpers carry more weight here, with a fast path when the two
+  agree.
 - Constant buffers are read-only descriptors with `Kind = CBuffer`; the
   4-component-vector-indexed access DXIL uses (`CBufferLoadLegacy`) becomes
   ordinary loads.
 - Counter UAVs use `Counter` with host atomics.
+- A **descriptor kind mismatch** — a shader reading a `Kind = CBuffer`
+  descriptor through a structured buffer handle, say — is undefined in both
+  source models. FeMe treats it as an out-of-bounds access (zeros/ignored)
+  rather than reinterpreting the pointer, so a mistyped heap cannot be
+  turned into an arbitrary host memory access.
 
-`feme::cpu::ResourceLoweringPass` keeps the precedent set by its AMDGPU
-sibling: a binding shape it cannot model leaves the entry point untouched
-rather than half-rewritten, so it fails as a clean diagnostic.
+### Bounds checking
 
-**Descriptor table discovery.** The host needs to know the slot layout.
-This design emits it as a FeMe-owned named metadata node (`!feme.cpu.bindings`)
-and provides a reader (`feme::cpu::BindingTable::fromModule`) so the JIT can
-hand the host a `{space, register, kind, slot}` list. That keeps the
-compiled artifact self-describing, which matters for the object-file path
-where there is no in-process compiler to ask.
+Every access through a descriptor is bounds-checked, at two levels:
+
+1. **The heap index**: `index < HeapCount`. A failing index yields the
+   all-zero descriptor rather than reading past the heap.
+2. **The offset within the resource**: `Offset + AccessSize <= SizeInBytes`.
+
+Out-of-bounds reads return zero and out-of-bounds writes are dropped,
+matching D3D/Vulkan robustness rather than trapping. For a vector access the
+check is per-component under the execution mask, so a partially in-bounds
+access behaves like the GPU's. This is **not optional**: a fault-on-OOB CPU
+target would turn a merely-nonconformant shader into a host crash, which is
+unacceptable both for the reference-execution use case and for a host that
+JITs untrusted shader code. An option to disable the checks
+(`-feme-cpu-no-robustness`) for performance measurement is reasonable but
+must not be the default.
+
+Because both checks are `select`s rather than branches, they widen and
+predicate like any other operation, and constant heap indices with a known
+heap size fold the first check away entirely.
+
+### Root constants
+
+A bindless shader still has to learn its heap indices from somewhere, and
+in practice that is root constants. The CPU ABI therefore carries a small
+opaque byte block in the dispatch arguments, and exactly one register-bound
+constant buffer — by default `(b0, space0)`, overridable with
+`--cpu-root-constants=bN,spaceM` — is lowered to loads from it instead of
+being rejected. Everything else must come from the heap.
+
+### Heap usage discovery
+
+There is no per-shader binding table to publish, but the host still benefits
+from knowing what the shader needs: FeMe emits a named metadata node
+(`!feme.cpu.resources`) recording the root constant block's size, whether
+the sampler heap is used, and the statically known heap indices when the
+shader uses constants. `feme::cpu::ResourceInfo::fromModule` reads it back,
+so the artifact remains self-describing on the object-file path where there
+is no in-process compiler to ask.
 
 ## Kernel ABI
 
@@ -546,11 +615,16 @@ and a single argument:
 
 ```c
 typedef struct {
-  const FemeDescriptor *Descriptors;  // the descriptor table
-  uint32_t GroupID[3];                // this dispatch item
-  uint32_t GroupCount[3];             // full dispatch size
-  void    *GroupShared;               // group-shared storage, or null
-  void    *Reserved[4];               // ABI headroom
+  const FemeDescriptor *ResourceHeap;  // the resource descriptor heap
+  uint32_t ResourceHeapCount;
+  const FemeDescriptor *SamplerHeap;   // the sampler descriptor heap
+  uint32_t SamplerHeapCount;
+  const void *RootConstants;           // root constant block, or null
+  uint32_t RootConstantSize;
+  uint32_t GroupID[3];                 // this dispatch item
+  uint32_t GroupCount[3];              // full dispatch size
+  void    *GroupShared;                // group-shared storage, or null
+  void    *Reserved[4];                // ABI headroom
 } FemeDispatchArgs;
 
 void feme_cpu_entry_<name>(const FemeDispatchArgs *Args);
@@ -558,11 +632,21 @@ void feme_cpu_entry_<name>(const FemeDispatchArgs *Args);
 
 Everything the shader can ask about its position derives from `GroupID`,
 `GroupCount`, and the wave loop index, so the ABI does not change with `W`,
-with the shader's binding set, or between the JIT and object-file paths.
+with the shader's resource usage, or between the JIT and object-file paths.
 `W` and the thread group dimensions are baked into the compiled code and
-reported alongside the binding table.
+reported alongside the resource info.
 
 ## JIT Flow
+
+The `JITEngine` **owns dispatch management**. It is not a "compile and hand
+back a function pointer" API: it owns the compiled code, the thread pool the
+groups run on, the group loop, and the marshalling of the dispatch arguments
+described above. A host asks it to run a dispatch; how that dispatch is cut
+into groups, which thread runs which group, and how the ABI struct is filled
+in are all FeMe's business. That keeps the ABI an implementation detail
+rather than a contract every embedder has to re-implement correctly, and it
+makes `feme-run` (and therefore the end-to-end tests) a thin shell over the
+same code path a real host uses.
 
 ```c++
 namespace feme::cpu {
@@ -572,22 +656,33 @@ struct JITOptions {
   std::string EntryPoint;            // empty = the module's only entry point
   llvm::CodeGenOptLevel OptLevel = llvm::CodeGenOptLevel::Default;
   bool EnableRobustness = true;
+  unsigned NumThreads = 0;           // 0 = hardware concurrency
 };
 
-/// Owns an ORC LLJIT instance and the compiled shader in it. One per
-/// compiled shader; safe to use from multiple threads to dispatch, per
-/// FeMe's no-global-state rule (see Design.md).
+/// The resources a dispatch runs against. Descriptor heaps are owned by the
+/// caller and must outlive the dispatch.
+struct DispatchResources {
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+};
+
+/// Owns an ORC LLJIT instance, the compiled shader in it, and the execution
+/// of dispatches against it. One per compiled shader; safe to use from
+/// multiple threads to dispatch, per FeMe's no-global-state rule (see
+/// Design.md).
 class JITEngine {
 public:
   static llvm::Expected<std::unique_ptr<JITEngine>>
   create(Context &Ctx, feme::Module M, const JITOptions &Opts);
 
-  /// The binding table the host must fill, in slot order.
-  llvm::ArrayRef<BindingInfo> getBindings() const;
+  /// What the shader needs from the host: root constant size, sampler heap
+  /// use, and the resolved wave size and thread group dimensions.
+  const ResourceInfo &getResourceInfo() const;
 
-  /// Runs the whole dispatch. `Descriptors` must have getBindings().size()
-  /// entries.
-  llvm::Error dispatch(llvm::ArrayRef<FemeDescriptor> Descriptors,
+  /// Runs the whole dispatch to completion: schedules every group across the
+  /// engine's thread pool, fills in FemeDispatchArgs per group, and joins.
+  llvm::Error dispatch(const DispatchResources &Resources,
                        std::array<uint32_t, 3> GroupCount) const;
 };
 
@@ -608,16 +703,30 @@ Notes and constraints:
   dynamic symbol table — an embedded driver must not have shader code
   reaching arbitrary host symbols.
 - **Dispatch parallelism**: `dispatch()` runs groups across an
-  `llvm::ThreadPool` owned by the `Context` (or the calling thread when the
-  pool has one thread). Groups are independent by definition, so this needs
-  no synchronization beyond the join.
+  `llvm::ThreadPool` owned by the engine (or the calling thread when
+  `NumThreads == 1`). Groups are independent by definition, so this needs no
+  synchronization beyond the join. The pool belongs to the engine rather
+  than to `Context` so that two shaders compiled from one context do not
+  contend for one pool, and so that engine destruction is the only join
+  point that matters.
+- **Concurrent dispatches**: `dispatch()` is `const` and holds no per-run
+  state on the engine, so a host may run several dispatches concurrently
+  against different descriptor heaps. Whether *those* dispatches conflict on
+  the resources they were handed is the host's problem, exactly as on a GPU.
 - **Caching**: an `ObjectCache` can be attached so a host can persist
   compiled shaders; the cache key must include the wave size, opt level and
   robustness setting, not just the input hash.
 - **Object-file path**: the same pipeline minus the JIT, through
   `feme::TargetMachineBackend` with the host triple, producing a relocatable
-  object with the same ABI. This is what makes `--target=<host-triple>` work
-  as an ordinary FeMe target and gives an AOT story for free.
+  object with the same ABI. A host taking that path schedules groups itself;
+  the runtime support library ships the same group loop so it does not have
+  to. This is what makes `--target=<host-triple>` work as an ordinary FeMe
+  target and gives an AOT story for free.
+- **Escape hatch**: a host that genuinely wants to schedule groups itself
+  can ask the engine for the entry symbol and the resolved ABI description.
+  This is deliberately the secondary interface — it exists so that owning
+  dispatch does not *preclude* a driver-style embedder, not because the
+  common path needs it.
 
 ## Runtime Support Library
 
@@ -652,17 +761,24 @@ lower through the host's normal vector-math handling.
   correctly?" into "does this compute the right answer?" in `lit`:
 
   ```yaml
-  # feme-run --wave-size=8 --groups=4,1,1 shader.dxil --bind=bind.yaml
-  resources:
-    - space: 0
-      register: 0
+  # feme-run --wave-size=8 --groups=4,1,1 shader.dxil --heap=heap.yaml
+  root-constants: [0, 1]
+  resource-heap:
+    - index: 0
       kind: typed-buffer
       format: r32g32b32a32_float
       data: [0.0, 1.0, 2.0, 3.0, ...]
+    - index: 1
+      kind: structured-buffer
+      stride: 16
+      data: [...]
   ```
 
-  and the output buffer is printed for `FileCheck` to match. Deliberately
-  textual, per Design.md's "Avoiding binary test fixtures" section.
+  and the output heap entries are printed for `FileCheck` to match.
+  Deliberately textual, per Design.md's "Avoiding binary test fixtures"
+  section. Note that the file describes *heap slots*, not bindings — it is
+  the same thing the shader indexes, so a test's expectations do not depend
+  on a slot assignment the compiler chose.
 
 ### Test strategy per phase
 
@@ -672,12 +788,12 @@ Following the instruction that each phase of translation gets unit tests:
 |---|---|---|
 | Uniformity | divergence classification on hand-built IR, including sync dependence | `print<feme-cpu-uniformity>` output |
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG |
-| Resource lowering | slot assignment order, binding table extraction | one test per resource kind, plus binding-array indexing |
+| Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, rejection of register-bound resources |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation |
 | SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8} |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
 | Entry wrapper | barrier region splitting | wave loop shape, barrier split, groupshared |
-| JIT | `JITEngine::create`/`dispatch` on a tiny module, binding table round-trip | — |
+| JIT | `JITEngine::create`/`dispatch` on a tiny module, resource info round-trip, multi-threaded group scheduling | — |
 | End to end | — | `feme-run` executing real shaders and `FileCheck`ing results, at several wave sizes |
 
 Wave size resolution gets its own tests: each row of the resolution table
@@ -711,7 +827,7 @@ feme/
       CPU/EntryWrapper.h
     Target/
       CPU/RuntimeABI.h            (FemeDescriptor, FemeDispatchArgs; C ABI)
-      CPU/BindingTable.h
+      CPU/ResourceInfo.h
       CPU/JITEngine.h
   lib/
     Analysis/CPU/...
@@ -773,27 +889,47 @@ it:
    request silently would produce wrong answers in the tool whose job is to
    produce right ones.
 
+3. **Resource model.** Bindless only — a descriptor heap indexed by the
+   shader (DXIL SM 6.6+ `ResourceDescriptorHeap`, SPIR-V
+   `SPV_EXT_descriptor_heap`), plus one root constant block. Register-bound
+   resources are rejected. This makes the kernel ABI shader-independent and
+   makes dynamic indexing the only case rather than a special one; adding
+   register binding later is a purely additive front-end pass.
+4. **Robustness by default.** Every access through a descriptor is
+   bounds-checked, at the heap index and at the offset within the resource.
+   OOB reads return zero, OOB writes are dropped. This is not optional
+   behaviour that a host can trade away by default: the target's job is to
+   run possibly-wrong shaders without crashing (or worse) the host.
+5. **JIT scope.** `feme::cpu::JITEngine` owns dispatch management — the
+   compiled code, the group loop, the thread pool, and the marshalling of
+   the ABI struct. Handing back a raw function pointer remains available as
+   a secondary interface for a driver-style embedder, but it is not the
+   supported path, so the ABI stays an implementation detail.
+6. **DXIL input.** DXIL is a first-class input, not a best-effort one: every
+   DXIL compute shader that satisfies the bindless requirement must work,
+   including arbitrarily unstructured control flow. `FixIrreducible` +
+   `StructurizeCFG` in Phase 1 are the mechanism, and CFG shapes those
+   passes handle badly are bugs to fix rather than inputs to reject.
+7. **Level of abstraction.** The whole pipeline operates on `llvm::Module`,
+   not on MLIR, so DXIL and SPIR-V inputs converge before any of it runs and
+   share every phase. See "Format-Agnostic Operation".
+
 ## Open Questions
 
 These need answers (or at least preferences) to firm this design up:
 
-1. **Descriptor table vs. kernel arguments.** Is the flat descriptor table
-   the right host-facing model, or should the CPU target match a specific
-   API's binding model (D3D12 root signatures, Vulkan descriptor sets) more
-   closely? The proposal here is deliberately the lowest common denominator
-   — is there a host already in mind whose model this should match?
-2. **Robustness by default.** Bounds-checked, zero-returning OOB access is
-   proposed as the default. Is a "trust the shader" mode needed at all, and
-   if so should it be per-resource rather than global?
-3. **JIT scope.** Is `feme::cpu::JITEngine` owning its own dispatch (thread
-   pool, group loop) the right shape, or should FeMe only hand back a
-   function pointer plus the ABI description and let the host schedule?
-   The former is much better for testing; the latter is what a real driver
-   would want. (Both are possible; the question is which is v1.)
-4. **Graphics stages.** Is compute-only acceptable indefinitely, or is
-   there a pixel/vertex shader use case that should shape the design now
-   (in particular the lane-to-quad mapping and the wrapper's shape)?
-5. **Mask representation between phases.** Phase 3 needs to hand Phase 4 a
+1. **Root constant convention.** A bindless shader gets its heap indices
+   from root constants, which are still spelled as a register-bound constant
+   buffer in both source models. This design carves out exactly one such
+   buffer, `(b0, space0)` by default. Is that the right convention, or
+   should the root constant block be discovered some other way (an
+   annotation, a dedicated heap slot, the root signature when one is
+   present)?
+2. **Per-resource robustness.** Bounds checking is mandatory and global. If
+   a "trust this descriptor" escape hatch is ever wanted for performance,
+   should it be per-descriptor (a `Flags` bit the host sets) rather than a
+   compile-time switch?
+3. **Mask representation between phases.** Phase 3 needs to hand Phase 4 a
    per-instruction mask. Operand bundles on the instruction, a FeMe-internal
    intrinsic taking a mask token, or an out-of-IR side table computed on
    demand? Bundles survive printing (good for testing) but are unusual on
@@ -802,13 +938,18 @@ These need answers (or at least preferences) to firm this design up:
    testing goals. Current preference: a FeMe-internal
    `llvm.feme.cpu.masked.*` intrinsic form for the operations that need it,
    so the intermediate IR is printable and checkable.
-6. **Where does SPIR-V's structurization leave us?** DXIL input can be
-   arbitrarily unstructured; `StructurizeCFG` handles reducible CFGs and
-   `FixIrreducible` the rest, but the combination is not commonly exercised
-   on shader-shaped code. Is it acceptable for v1 to reject the cases those
-   passes handle badly, or must every DXIL input work?
-7. **Relationship to MLIR.** This design operates entirely on `llvm::Module`
-   (consistent with the existing AMDGPU/SPIR-V lowering passes). Is there
-   interest in doing the SIMD-ization at the MLIR level instead (e.g. via
-   the `vector` dialect), which would be more expressive but would mean
-   SPIR-V and DXIL inputs converge much later?
+4. **Descriptor format generality.** In a bindless shader the storage format
+   behind a descriptor is a runtime value, so typed buffer access needs
+   either a runtime format switch or specialization. Is a small set of
+   inlined fast paths plus a generic helper enough, or is per-format
+   specialization of the whole kernel eventually needed?
+5. **Graphics.** "Accounting for Graphics Later" sketches what changes.
+   Which of those changes, if any, are worth paying for now — in particular
+   the lane-to-quad mapping, which is cheap to fix early and expensive to
+   change once shaders depend on it?
+6. **Unstructured control flow coverage.** Every DXIL input must work, so
+   the question is not whether to reject hard CFGs but how to be confident
+   `FixIrreducible` + `StructurizeCFG` handle them: is there a corpus of
+   shader-shaped unstructured CFGs to test against, or does FeMe need to
+   grow one (hand-written `.ll`, plus a randomized CFG generator compared
+   against a scalar reference)?
