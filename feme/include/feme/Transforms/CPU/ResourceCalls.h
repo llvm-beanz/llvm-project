@@ -21,6 +21,7 @@
 #define FEME_TRANSFORMS_CPU_RESOURCECALLS_H
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/ADT/Twine.h"
 #include "llvm/IR/Value.h"
 
 #include <optional>
