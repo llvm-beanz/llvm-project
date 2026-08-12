@@ -28,6 +28,12 @@
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
+#include "feme/Transforms/CPU/EntryWrapper.h"
+#include "feme/Transforms/CPU/Linearize.h"
+#include "feme/Transforms/CPU/Prepare.h"
+#include "feme/Transforms/CPU/ResourceLowering.h"
+#include "feme/Transforms/CPU/SIMDize.h"
+#include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
@@ -104,6 +110,56 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::spirv::RaisedLoweringPass::name())
           return false;
         MPM.addPass(feme::spirv::RaisedLoweringPass());
+        return true;
+      });
+  // FeMe CPU target passes (see feme/docs/FeMeCPUDesign.md's Pipeline
+  // Overview); currently scaffolding, see each pass's own header comment.
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::PreparePass::name())
+          return false;
+        MPM.addPass(feme::cpu::PreparePass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::ResourceLoweringPass::name())
+          return false;
+        MPM.addPass(feme::cpu::ResourceLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::LinearizePass::name())
+          return false;
+        MPM.addPass(feme::cpu::LinearizePass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::SIMDizePass::name())
+          return false;
+        MPM.addPass(feme::cpu::SIMDizePass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::WaveLoweringPass::name())
+          return false;
+        MPM.addPass(feme::cpu::WaveLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::EntryWrapperPass::name())
+          return false;
+        MPM.addPass(feme::cpu::EntryWrapperPass());
         return true;
       });
 }

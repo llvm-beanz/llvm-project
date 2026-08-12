@@ -14,6 +14,7 @@ set(LIBS
   FeMeConversionSPIRVToLLVM
   FeMeDXSADialect
   FeMeTransformsAMDGPU
+  FeMeTransformsCPU
   FeMeTransformsDXIL
   FeMeTransformsSPIRV
   )
