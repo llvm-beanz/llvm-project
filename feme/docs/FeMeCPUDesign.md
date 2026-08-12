@@ -431,8 +431,11 @@ before any widening happens. Working on scalar IR here (masks are `i1`, not
 - **Uniform branches stay branches.** This is the entire payoff of Phase 2,
   and also the mechanism for the "skip a block when all lanes are off"
   optimization: a *divergent* branch whose taken block is expensive can be
-  guarded by a uniform `if (mask != 0)` test. Whether to do that by default,
-  always, or by heuristic is an open question below.
+  guarded by a uniform `if (mask != 0)` test (`feme.cpu.mask.any` below).
+  That guard is not emitted in v1 — it trades a branch misprediction for
+  skipped work, so which blocks deserve it is a heuristic that wants
+  measurements rather than a rule, and it is part of the performance work
+  the roadmap defers until correctness is established.
 - **Early `ret`** under divergence becomes a mask update plus a jump to a
   unified exit; the shader's "still running" mask is conjoined into every
   subsequent block's mask.
