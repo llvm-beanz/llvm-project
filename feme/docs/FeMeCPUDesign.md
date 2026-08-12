@@ -570,7 +570,7 @@ typedef struct {
   uint32_t Stride;      // element stride (structured/typed buffers)
   uint32_t Format;      // feme::cpu::ResourceFormat, for typed buffers
   uint32_t Kind;        // typed / structured / raw / cbuffer / none
-  uint32_t Flags;       // UAV vs SRV, ROV, counter present, ...
+  uint32_t Flags;       // UAV vs SRV, ROV, counter present, trusted, ...
   void    *Counter;     // append/consume/counter UAV, else null
 } FemeDescriptor;
 ```
@@ -630,6 +630,52 @@ must not be the default.
 Because both checks are `select`s rather than branches, they widen and
 predicate like any other operation, and constant heap indices with a known
 heap size fold the first check away entirely.
+
+#### Per-descriptor control
+
+Robustness is also controllable **per descriptor**, through a
+`FEME_DESCRIPTOR_TRUSTED` bit in the descriptor's `Flags`. The three levels
+compose as follows:
+
+| Level | Set by | Effect |
+|---|---|---|
+| Heap index check | always on | An index `>= HeapCount` yields the all-zero descriptor. Never skippable — it is what makes the `Flags` word itself safe to read. |
+| Offset check, default | the compiler | `Offset + AccessSize <= SizeInBytes`, OOB reads zero / writes dropped. |
+| Offset check, per descriptor | the host, via `FEME_DESCRIPTOR_TRUSTED` | The offset check is skipped for accesses through *that* descriptor. |
+| Offset check, whole module | `-feme-cpu-no-robustness` | The offset check is skipped everywhere and the `Flags` bit is not consulted. Measurement only. |
+
+Per-descriptor is the right granularity because it matches where the
+knowledge lives. Whether an access can go out of bounds is a property of
+the resource and the host's confidence in the shader indexing it, not of
+the shader as a whole: a host that generated a buffer itself and sized it
+from the same data the shader indexes with knows more about that one
+descriptor than it does about the other thirty in the heap. A compile-time
+switch forces that judgement to be all-or-nothing, and — worse for the JIT
+path — makes it part of the compilation key, so flipping it for one buffer
+recompiles the shader. The `Flags` bit costs nothing at compile time and
+lets the same compiled kernel run against a trusted and an untrusted heap.
+
+The cost is that the check becomes data-dependent rather than statically
+absent: the emitted code is `select(Trusted | InBounds, ...)` where it was
+`select(InBounds, ...)`. `Trusted` is a uniform load from the descriptor,
+so the extra work is one load and one `or` per descriptor per kernel, not
+per access — and for the overwhelmingly common untrusted case the code is
+what it was. Hosts wanting the checks genuinely gone still have
+`-feme-cpu-no-robustness`.
+
+Two rules keep the escape hatch from becoming a footgun:
+
+- **`FEME_DESCRIPTOR_TRUSTED` is a host assertion, not a request.** Setting
+  it on a descriptor whose resource the shader then over-reads is undefined
+  behaviour — a host memory access, possibly a wild one. It is documented
+  as such in `RuntimeABI.h`, and nothing in FeMe sets it.
+- **It is ignored under `Kind = None`.** A zero-filled descriptor is
+  bounds-checked regardless of what the flags word happens to contain, so
+  the "host forgot to write this slot" case cannot be turned into an
+  arbitrary access by a stale flag.
+
+`feme-run` exposes it as `trusted: true` on a heap entry, so the behaviour
+of both settings is testable.
 
 ### Root constants
 
@@ -958,7 +1004,7 @@ Following the instruction that each phase of translation gets unit tests:
 |---|---|---|
 | Uniformity | divergence classification on hand-built IR, including sync dependence | `print<feme-cpu-uniformity>` output |
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG |
-| Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, rejection of register-bound resources |
+| Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, per-descriptor `trusted` opt-out, rejection of register-bound resources |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation |
 | SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8} |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
@@ -1069,7 +1115,11 @@ it:
    bounds-checked, at the heap index and at the offset within the resource.
    OOB reads return zero, OOB writes are dropped. This is not optional
    behaviour that a host can trade away by default: the target's job is to
-   run possibly-wrong shaders without crashing (or worse) the host.
+   run possibly-wrong shaders without crashing (or worse) the host. The
+   offset check is opt-out **per descriptor** (a `FEME_DESCRIPTOR_TRUSTED`
+   flag the host sets) so that the choice lives where the knowledge does and
+   does not become part of the compilation key; the heap index check is
+   never skippable.
 5. **JIT scope.** `feme::cpu::JITEngine` owns dispatch management — the
    compiled code, the group loop, the thread pool, and the marshalling of
    the ABI struct. Handing back a raw function pointer remains available as
@@ -1095,11 +1145,7 @@ it:
 
 These need answers (or at least preferences) to firm this design up:
 
-1. **Per-resource robustness.** Bounds checking is mandatory and global. If
-   a "trust this descriptor" escape hatch is ever wanted for performance,
-   should it be per-descriptor (a `Flags` bit the host sets) rather than a
-   compile-time switch?
-3. **Mask representation between phases.** Phase 3 needs to hand Phase 4 a
+1. **Mask representation between phases.** Phase 3 needs to hand Phase 4 a
    per-instruction mask. Operand bundles on the instruction, a FeMe-internal
    intrinsic taking a mask token, or an out-of-IR side table computed on
    demand? Bundles survive printing (good for testing) but are unusual on
