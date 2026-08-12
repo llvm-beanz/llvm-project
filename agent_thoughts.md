@@ -5401,3 +5401,155 @@ Configured with the existing `feme/cmake/caches/feme.cmake` (which already
 turns on `LLVM_ENABLE_ASSERTIONS`), adding
 `-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache`
 for object file caching, and built with Ninja.
+
+# Agent thoughts: FeMe CPU design iteration (wave size, bindless, graphics)
+
+This round is documentation-only: it iterates on `feme/docs/FeMeCPUDesign.md`
+in response to seven design decisions handed down on the first draft. No
+source changed, so there was nothing to build or test beyond re-reading the
+document for internal consistency; the existing `check-feme` suite has no
+coverage of design prose, and adding some would be inventing a linting tool
+the project doesn't have.
+
+## Wave size
+
+The rule is now: power of two in `[4, 128]`, resolved from the user's
+request, else the shader's declaration, else `max(4, host vector width / 32)`,
+with a user/shader conflict being a hard error. Two consequences were worth
+chasing through the whole document rather than editing one paragraph:
+
+- **`W = 1` had to go.** The first draft leaned on a scalar configuration in
+  three places: as a supported goal, as roadmap step 4 ("`W = 1` end to end",
+  the first point at which a shader runs), and as the differential-testing
+  baseline. Removing it without replacing those roles would have left the
+  roadmap with no cheap first milestone. The replacement is "uniform control
+  flow only, at `W = 4`": same property (a shader runs before the hard
+  transform lands) without a wave size the hardware models don't have. `W = 4`
+  also inherits the differential-testing role, since `W = 4` vs `W = 128` is a
+  stronger comparison than `W = 1` vs `W = 8` anyway.
+- **The minimum of 4 is load-bearing.** It is the quad granularity, which is
+  what makes the lane ordering quad-compatible for free, which is in turn the
+  cheapest of the graphics-forward-compatibility decisions. That connection is
+  now stated in both places rather than left implicit.
+
+I chose to record the resolution rules as a table because the interesting part
+is the four-way combination of "user said / shader said", and prose describing
+a truth table is worse than the truth table. I also noted that a shader-
+declared value outside the legal set is an error rather than something FeMe
+rounds — silently honouring a malformed `[WaveSize(3)]` would be the same
+class of mistake as silently overriding a valid one.
+
+`feme::dxil::MetadataRaisingPass` already normalizes both the SM 6.6
+single-value and SM 6.8 (min, max, preferred) spellings into an
+`"hlsl.wavesize"="min,max,preferred"` function attribute, so the shader half
+of the resolution has a concrete source and the design cites it.
+
+## Bindless-only, and what that removes
+
+Restricting to DXIL SM 6.6+ `ResourceDescriptorHeap` and SPIR-V's
+`SPV_EXT_descriptor_heap` deletes more of the design than it adds: the slot
+assignment algorithm, the `!feme.cpu.bindings` metadata, the `BindingTable`
+reader, and the "what if the host wants to rebind" argument that justified the
+descriptor table in the first place all disappear, because the heap *is* the
+host-facing model and the shader indexes it directly. Dynamic indexing stops
+being a feature and becomes the only case.
+
+The one thing bindless does not solve is bootstrapping: a bindless shader
+learns its heap indices from root constants, and root constants are still
+spelled as a register-bound constant buffer in both source models. Rejecting
+every register-bound resource without exception would make the target unable
+to run any real bindless shader, which would be a silly place to land. So the
+design carves out exactly one constant buffer, `(b0, space0)` by default, and
+maps it to an opaque byte block in the dispatch arguments. I flagged the
+convention as an open question rather than pretending it's obviously right —
+discovering the root constant block from a root signature, when one is
+present, is a plausible alternative.
+
+Two smaller things fell out that I don't think were obvious:
+
+- **Formats stop being static.** With register binding, the handle type spells
+  the element type and format conversion inlines away. With a heap, the
+  storage format is a runtime property of the descriptor, so the runtime
+  helpers carry real weight and only the "shader's view matches the
+  descriptor" fast path inlines. The design says so, and asks whether
+  per-format kernel specialization is eventually needed.
+- **Kind mismatch needs a defined answer.** Reading a cbuffer descriptor
+  through a structured buffer handle is undefined in both source models, but
+  "undefined" on a CPU target that may be JITting untrusted shaders has to
+  mean something safe. Folding it into the out-of-bounds behaviour (zeros in,
+  writes dropped) reuses machinery that already has to exist and avoids
+  turning a mistyped heap into an arbitrary host memory access.
+
+## Bounds checking
+
+Confirmed as mandatory, and made two-level: the heap index against the heap
+count, and the offset against the descriptor's size. The first level is new —
+the previous draft only had the second, which is not enough once the shader
+supplies the descriptor index. Both are `select`s rather than branches so they
+widen and predicate like anything else, and constant indices fold.
+
+## JIT owning dispatch
+
+The engine now owns the compiled code, the group loop, the thread pool, and
+the ABI marshalling. The substantive detail is that the thread pool moved from
+`Context` to the engine: two shaders compiled from one context shouldn't
+contend for one pool, and engine destruction becomes the only join point that
+matters. I kept a documented escape hatch (ask for the entry symbol and the
+resolved ABI) because the original open question was right that a driver-style
+embedder wants to schedule its own work — making it secondary rather than
+absent costs nothing and keeps the ABI an implementation detail for everyone
+else.
+
+## DXIL as a first-class input, on `llvm::Module`
+
+These two requirements are really one: the CPU pipeline runs entirely after
+the point where DXIL and SPIR-V converge at raised IR, so DXIL gets the same
+implementation rather than a second one. The new "Format-Agnostic Operation"
+section says that, and says the one place the input format stays visible: the
+parallel `llvm.dx.*` / `llvm.spv.*` intrinsic spellings, matched through a
+shared classification helper the way `feme::amdgpu::RaisedLoweringPass`
+already does.
+
+The consequence I had to go back and fix elsewhere: Phase 1 previously said
+"reject or handle unstructured control flow". With DXIL first-class, rejecting
+isn't available, so a CFG that `FixIrreducible` + `StructurizeCFG` handle
+badly is a bug to fix rather than an input to refuse. That turned the old open
+question about rejection into a different one — how to build confidence in
+that combination, since shader-shaped unstructured CFGs aren't a corpus FeMe
+has.
+
+## Graphics
+
+Asked what would change, I found it more useful to answer in three parts than
+one: what doesn't change (phases 2–5, the heap, wave size rules, JIT-owned
+execution — genuinely most of it), what does (stage-specific wrappers, the
+fixed-function rasterization work that is the actual bulk, stage I/O
+signatures, helper lanes, derivatives, a pipeline object), and — the part that
+actually affects today's decisions — the handful of choices being made now
+because they're free now and expensive later:
+
+- quad-compatible lane ordering (already implied by `W >= 4` and
+  `SV_GroupIndex` linearization);
+- keeping the wrapper a separate phase, since it's the stage-specific one;
+- ABI headroom with resource-facing and execution-facing fields separated;
+- masks produced by a named phase, so the pixel-shader "live vs active" pair
+  is a change to one pass's contract rather than an archaeology exercise.
+
+The helper-lane point is the one I'd call out as genuinely design-shaping: a
+pixel shader needs two masks where compute needs one, and that lands squarely
+on the mask representation the design still has as an open question. It seemed
+worth connecting those two explicitly rather than leaving a reader to notice.
+
+## Bookkeeping
+
+Answered open questions moved into a new "Resolved Decisions" section rather
+than being deleted, so the rationale for each stays with the document instead
+of only in commit messages, and the remaining open questions were renumbered
+and replaced with the ones the new decisions raise. I also fixed a pre-existing
+inconsistency found while editing: the resource lowering section called itself
+"Phase 2", but the numbered Phase 2 is the uniformity analysis, so it now
+refers to the pass by its `feme-opt` name.
+
+The work was split into five commits — wave size, bindless plus JIT ownership,
+format-agnostic operation, graphics, and the phase-reference fix — so each
+decision is reviewable against its own rationale.
