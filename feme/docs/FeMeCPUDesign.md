@@ -118,12 +118,12 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   format decode are a large body of work with no representation in FeMe's
   raised IR yet (`ResourceLoweringPass` explicitly doesn't handle texture
   handles either). Typed/structured/raw buffers and constant buffers only.
-- **Derivatives / quad ops** (`ddx`, `ddy`, `QuadReadAcross*`): these need a
-  defined 2x2 lane arrangement, which only fully makes sense once pixel
-  shaders do. The lane ordering here is already quad-compatible (`W` is a
-  multiple of 4 and lanes are linearized in `SV_GroupIndex` order, so lanes
-  `4k..4k+3` form a quad), so supporting them on compute shaders later is a
-  matter of declaring that mapping rather than changing it.
+- **Derivatives / quad ops** (`ddx`, `ddy`, `QuadReadAcross*`): not
+  implemented in v1, but the lane arrangement they need *is* fixed now.
+  `W` is a multiple of 4 and lanes are quad-tiled (see "Lane
+  linearization"), so lanes `4k..4k+3` are a 2x2 quad in a defined order,
+  and adding these operations later is a matter of emitting the shuffles
+  rather than renumbering lanes.
 - **Indirect calls and recursion.** Neither appears in DXIL or in the
   SPIR-V subset FeMe imports today.
 - **Debug info fidelity.** Preserving line tables through the SIMD-izer is
@@ -164,13 +164,41 @@ wave      = W lanes, one SIMD program          (the transformed function)
 lane      = one original shader invocation     (one element of every <W x T>)
 ```
 
-**Lane linearization.** Lane `i` of wave `w` is the invocation with
-flattened in-group index `w * W + i`, where the flattened index is
-`x + y * NumThreadsX + z * NumThreadsX * NumThreadsY`. This is exactly
-HLSL's `SV_GroupIndex` / SPIR-V's `LocalInvocationIndex` ordering, which
-means `llvm.dx.flattened.thread.id.in.group` lowers to
-`splat(w * W) + iota` — the cheapest possible thing — and every other
-builtin is derived from it.
+**Lane linearization.** Lane `i` of wave `w` is the invocation at
+**quad-tiled index** `w * W + i`. The quad-tiled index tiles the group's
+`(x, y)` plane into 2x2 blocks and numbers each block's four invocations
+consecutively:
+
+```
+QuadTiled(x, y, z) = z * X * Y
+                   + ((y / 2) * (X / 2) + (x / 2)) * 4
+                   + (y % 2) * 2 + (x % 2)
+```
+
+where `X`, `Y` are the group's `hlsl.numthreads` dimensions. Lanes
+`4k..4k+3` are therefore a 2x2 quad, in the order
+`(x, y)`, `(x+1, y)`, `(x, y+1)`, `(x+1, y+1)` — the arrangement SM 6.6
+compute-shader derivatives and pixel shaders both assume.
+
+For a 1D group (`Y == 1`) this degenerates exactly to `x`, i.e. to HLSL's
+`SV_GroupIndex` / SPIR-V's `LocalInvocationIndex` ordering, so
+`llvm.dx.flattened.thread.id.in.group` is `splat(w * W) + iota` — the
+cheapest possible thing. For a 2D or 3D group it is that same vector run
+through a fixed, compile-time-known permutation, which is a handful of
+vector integer ops on constants (`X` and `Y` are constants, and `w` is the
+wave loop's index), and constant-folds outright when the wave loop is
+unrolled. Every other builtin is derived from the flattened index as
+before.
+
+When `X` or `Y` is odd the tiling has no meaning, so the mapping falls back
+to plain `SV_GroupIndex` order and quad operations are undefined — matching
+SM 6.6, which requires even group dimensions for compute derivatives.
+
+Neither source model specifies which invocation lands in which lane, so
+this is FeMe's choice to make; making it a quad-consistent one costs
+almost nothing (see "Decisions made now to keep it cheap later") and is
+what lets quad ops and derivatives be added later without renumbering
+lanes underneath shaders that already observe `WaveGetLaneIndex()`.
 
 **Partial waves.** `GroupSize` need not be a multiple of `W`. The final wave
 of a group runs with an entry mask that has the out-of-range lanes off,
@@ -1082,10 +1110,16 @@ The core of this design is stage-agnostic and stays as-is:
 
 ### Decisions made now to keep it cheap later
 
-- **Lane ordering is quad-compatible.** `W` is a multiple of 4 and lanes are
-  linearized in `SV_GroupIndex` order, so lanes `4k..4k+3` can be declared a
-  quad without renumbering anything. This is part of why the minimum wave
-  size is 4 rather than 1 or 2.
+- **The lane-to-quad mapping is fixed now, not later.** `W` is a multiple
+  of 4 and lanes are quad-tiled, so lanes `4k..4k+3` *are* a 2x2 quad in a
+  defined order — see "Lane linearization". This is the one item in this
+  section that is worth paying for immediately rather than merely designing
+  around: lane assignment is observable through `WaveGetLaneIndex()`,
+  `WaveReadLaneAt` and ballots, so changing it later would silently change
+  what existing shaders (and existing test expectations) compute. The price
+  is a compile-time-known permutation of the flattened index for 2D and 3D
+  groups, and literally nothing for 1D groups. It is also part of why the
+  minimum wave size is 4 rather than 1 or 2.
 - **The wrapper is a separate phase** with everything stage-specific on one
   side of it.
 - **`FemeDispatchArgs` has explicit ABI headroom** and separates the
@@ -1150,7 +1184,7 @@ Following the instruction that each phase of translation gets unit tests:
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, `feme.cpu.masked.*` emission |
 | SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8}, `feme.cpu.masked.*` → `llvm.masked.*` lowering from hand-written IR |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
-| Entry wrapper | barrier region splitting | wave loop shape, barrier split, groupshared |
+| Entry wrapper | barrier region splitting, quad-tiled lane mapping (including the 1D degenerate case and odd dimensions) | wave loop shape, barrier split, groupshared, builtin derivation for 1D/2D/3D groups |
 | JIT | `JITEngine::create`/`dispatch` on a tiny module, resource info round-trip, multi-threaded group scheduling | — |
 | End to end | — | `feme-run` executing real shaders and `FileCheck`ing results, at several wave sizes, from both DXIL and SPIR-V inputs of the same shader |
 
@@ -1291,6 +1325,15 @@ it:
    function. Phase 3's output is therefore printable, `FileCheck`-able IR,
    and Phase 4 is runnable on hand-written IR — which an out-of-IR side
    table would have prevented. See "Mask representation between phases".
+10. **Graphics readiness.** Of the things "Accounting for Graphics Later"
+    identifies, exactly one is paid for now: the lane-to-quad mapping,
+    because lane assignment is observable and therefore expensive to change
+    afterwards. Lanes are quad-tiled from the start. The rest — the
+    stage-specific wrapper, the fixed-function stages, stage I/O in the ABI,
+    helper lanes as a second mask, and a pipeline object in place of the
+    single kernel — stay deferred, kept cheap by the wrapper being a
+    separate phase, the ABI having explicit headroom, and masks being
+    produced by a named phase.
 
 ## Open Questions
 
@@ -1303,10 +1346,6 @@ These need answers (or at least preferences) to firm this design up:
    worth building at all, which is a measurement rather than a design
    argument: how much does the hoisted, unswitched `switch` actually cost on
    real shaders?
-5. **Graphics.** "Accounting for Graphics Later" sketches what changes.
-   Which of those changes, if any, are worth paying for now — in particular
-   the lane-to-quad mapping, which is cheap to fix early and expensive to
-   change once shaders depend on it?
 6. **Unstructured control flow coverage.** Every DXIL input must work, so
    the question is not whether to reject hard CFGs but how to be confident
    `FixIrreducible` + `StructurizeCFG` handle them: is there a corpus of
