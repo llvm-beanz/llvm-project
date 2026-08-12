@@ -4,8 +4,9 @@
 
 Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header),
 milestone 2 (uniformity analysis), milestone 3 (resource canonicalization +
-scalar helper IR) and milestone 4 (uniform-control-flow end-to-end at
-`W = 4`) are implemented. This document is a companion to
+scalar helper IR), milestone 4 (uniform-control-flow end-to-end at
+`W = 4`) and milestone 5 (the CFG restructurization test suite) are
+implemented. This document is a companion to
 [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
@@ -179,7 +180,48 @@ inline where it's discussed, and summarized here:
   design's YAML sketch shows -- matching what `libFeMeRuntimeCPU` and
   resource-call scalarization exercise as of this milestone. `--reference`
   execution (the ground truth the CFG restructurization suite, milestone
-  5, diffs against) is not yet implemented.
+  5, diffs against) is implemented as of that milestone -- see its own
+  Deviation note below.
+
+Deviation: milestone 5's implementation narrowed a few things described in
+"CFG restructurization test suite" below; each is called out inline where
+it's discussed, and summarized here:
+
+- Building the named-shape corpus surfaced a real gap rather than only
+  validating one: `StructurizeCFG`'s own "Flow" blocks (built to merge a
+  divergent branch's two arms back together) can leave a critical edge
+  behind, which `feme::cpu::verifyStructured`'s "no critical edges" check
+  caught on an existing test (`prepare-structurize.ll`). Fixed by adding
+  `BreakCriticalEdgesPass` as Phase 1's last step, rather than left as a
+  narrowing -- this is the kind of regression the suite exists to catch,
+  and it was caught the first time it was exercised.
+- The layer 3 generator (`feme-cfg-gen`/`feme::cpu::generateCFGIR`) builds
+  its random nesting out of a fixed menu of constructs (`if`/`else`, a
+  counted loop with optional break/continue, and the "irreducible-two-entry"
+  shape as its one unstructured-edge kind) rather than an unconstrained
+  random control-flow graph; every construct still nests to an
+  `Opts.MaxDepth`-bounded, arbitrary depth and the corpus this can generate
+  is already far larger than anyone would hand-write, but it is not every
+  irreducible shape `FixIrreducible` might ever see.
+- The differential harness (layer 3's other half, `--reference` diffed
+  against the normal pipeline) is scoped to the same acyclic,
+  uniform-control-flow shapes `feme::cpu::SIMDizePass` widens today
+  (`feme-cfg-gen --divergent=false --loops=false --unstructured=false`):
+  divergent branches and loops are exactly what the linearizer (roadmap
+  milestone 6) and the remaining widening work (milestone 7) will make
+  widenable, at which point this harness's scope should grow with them.
+  `--reference` itself (`feme::cpu::ReferenceLoweringPass` +
+  `feme::cpu::ReferenceEntryWrapperPass`) has no such restriction -- it
+  runs any shader `feme::cpu::PreparePass` + resource lowering accept,
+  rejecting only an actual wave intrinsic use (which has no meaning one
+  invocation at a time) -- the restriction is only on what the *normal*
+  pipeline can currently produce to diff against.
+- `feme-cpu-restructure-fuzzer` asserts `feme::cpu::verifyStructured`'s
+  postconditions (layers 1/2) over generator seeds (layer 3's generator),
+  not execution correctness (layer 3's differential harness); it always
+  enables `AllowUnstructured`, so it is a structural (not semantic) check
+  over the harness's full breadth rather than just its currently-widenable
+  subset.
 
 ## Summary
 
@@ -558,6 +600,12 @@ Gets the raised module into the shape the later phases assume:
   arbitrarily unstructured. `UnifyLoopExits` runs alongside, as
   `StructurizeCFG` requires it. Because DXIL is a first-class input, a CFG
   these passes handle badly is a bug to fix here, not an input to reject.
+  `BreakCriticalEdges` runs immediately after: `StructurizeCFG`'s own "Flow"
+  blocks (built to merge a divergent branch's two arms back together) can
+  leave a critical edge behind, which the linearizer's mask-merging cannot
+  be built on top of (see `feme::cpu::verifyStructured`'s "no critical
+  edges" postcondition, roadmap milestone 5's "CFG restructurization test
+  suite").
 - **`LowerSwitch`**: the linearizer handles two-way branches only.
 - **Promote what can be promoted** (`mem2reg`/SROA): an `alloca` that stays
   in memory becomes a per-lane array in Phase 4 (see below), which is
@@ -1603,9 +1651,10 @@ seed and asserts the verifier's postconditions costs little and runs where
 those already run. Failing seeds reduce to layer-1 files, by hand or with
 `llvm-reduce`.
 
-Layers 1 and 2 come with the prepare pass in milestone 4; layers 3 and 4
-depend on `feme-run`, so they arrive in milestone 5 and are the thing that
-makes milestone 6 (linearization) safe to build on.
+All four layers arrive together in milestone 5, once `feme-run` exists (see
+the Status section's Deviation note for one thing that narrowed): the
+result is the thing that makes milestone 6 (linearization) safe to build
+on.
 
 ## Directory / Library Layout Additions
 
@@ -1686,11 +1735,14 @@ Sequenced so each step is independently testable and useful:
    widening table, the builtin-half/wave-op split, the barrier-free entry
    wrapper, sequential rather than thread-pooled dispatch, and `feme-run`
    accepting only already-raised LLVM IR).
-5. **CFG restructurization suite**: the named-shape corpus, the
+5. **CFG restructurization suite** (done): the named-shape corpus, the
    `-verify-structured` postcondition checker, and — now that `feme-run`
    exists — the generator, its differential harness, and the fuzzer over
    it. This lands before the linearizer because the linearizer is what
-   starts depending on Phase 1 having actually succeeded.
+   starts depending on Phase 1 having actually succeeded. See the Status
+   section's Deviation note for what narrowed (the generator's fixed
+   construct menu, the differential harness's acyclic-uniform-only scope,
+   and the fuzzer checking structure rather than execution).
 6. **Linearization** for divergent control flow (straight-line diamonds,
    then loops).
 7. **Widening** for the remaining wave sizes, including masked memory ops
