@@ -4,6 +4,8 @@ add_mlir_library(FeMeTransformsCPU
   EntryWrapper.cpp
   Linearize.cpp
   Prepare.cpp
+  ReferenceEntryWrapper.cpp
+  ReferenceLowering.cpp
   ResourceCalls.cpp
   ResourceLowering.cpp
   SIMDize.cpp
