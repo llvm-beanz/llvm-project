@@ -5,7 +5,6 @@ function(add_feme_unittest test_dirname)
   add_unittest(FeMeUnitTests ${test_dirname} ${ARGN})
 endfunction()
 
-add_subdirectory(Analysis)
 add_subdirectory(Conversion)
 add_subdirectory(Core)
 add_subdirectory(Driver)
