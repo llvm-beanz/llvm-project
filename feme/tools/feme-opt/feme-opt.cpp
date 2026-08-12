@@ -34,6 +34,7 @@
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
+#include "feme/Transforms/CPU/VerifyStructured.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
@@ -220,6 +221,12 @@ int runLLVMIRMode(int Argc, char **Argv) {
                          "'feme-dxil-raise-ops'"));
   cl::opt<bool> OutputAssembly(
       "S", cl::desc("Write output as LLVM assembly, not bitcode"));
+  cl::opt<bool> VerifyStructuredOpt(
+      "verify-structured",
+      cl::desc("Check feme::cpu::PreparePass's postconditions on every "
+               "function after the pipeline runs (see the 'CFG "
+               "restructurization test suite' section of "
+               "feme/docs/FeMeCPUDesign.md)"));
 
   cl::ParseCommandLineOptions(Argc, Argv,
                               "FeMe LLVM IR pass-pipeline testing driver\n");
@@ -277,6 +284,14 @@ int runLLVMIRMode(int Argc, char **Argv) {
   if (verifyModule(*M, &errs())) {
     errs() << Argv[0] << ": output module is invalid\n";
     return 1;
+  }
+
+  if (VerifyStructuredOpt) {
+    bool AllStructured = true;
+    for (Function &F : *M)
+      AllStructured = feme::cpu::verifyStructured(F, &errs()) && AllStructured;
+    if (!AllStructured)
+      return 1;
   }
 
   std::error_code EC;
