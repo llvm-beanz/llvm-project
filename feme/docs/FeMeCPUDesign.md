@@ -97,8 +97,9 @@ and summarized here:
   `RootConstants`/`RootConstantSize` parameters `ResourceLoweringPass`
   appends are always null/0 at this stage (a later pass will populate
   them once "Root constants" lands).
-- The `libFeMeRuntimeCPU` scalar helper IR (`feme/runtime/CPU/
-  FeMeRuntimeCPU.ll`) implements the typed-buffer `<4 x float>` view
+- The `libFeMeRuntimeCPU` scalar helper source (`feme/runtime/CPU/
+  FeMeRuntimeCPU.c`, compiled to bitcode by clang) implements the
+  typed-buffer `<4 x float>` view
   (switching between the `R32G32B32A32_FLOAT` identity format and the
   packed `R8G8B8A8_UNORM` format, to establish the format-switch pattern
   concretely and correctly) and the raw/structured `i32`/`float` views.

@@ -1807,6 +1807,15 @@ feme/
 - Depends on `LLVM` and `MLIR` libraries (`find_package`/`add_subdirectory`
   depending on in-tree vs. installed, matching the dual-mode pattern used by
   other MLIR-dependent subprojects such as `flang`).
+- Also depends on `clang` as a host compiler, for the sole purpose of
+  compiling `libFeMeRuntimeCPU`'s C source
+  (`feme/runtime/CPU/FeMeRuntimeCPU.c`, see "Runtime Support Library" in
+  feme/docs/FeMeCPUDesign.md) to bitcode at build time; `llvm/CMakeLists.txt`
+  enables `clang` implicitly whenever `feme` is enabled, the same way it
+  does for `flang` and `lldb`. FeMe's own libraries do not otherwise depend
+  on clang's C++ libraries (`libclangAST`, etc.) -- only the `clang` driver
+  binary is used, as an external tool invoked from CMake, not linked
+  against.
 - Standalone (out-of-tree, against an installed LLVM+MLIR) build support is
   intentionally out of scope for now (see Goals above); it can be added
   later without restructuring the in-tree build.
