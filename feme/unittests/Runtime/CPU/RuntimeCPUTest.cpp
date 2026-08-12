@@ -40,6 +40,19 @@ using namespace llvm;
 
 namespace {
 
+/// Looks up \p Name in \p M, the way the target platform's mangler actually
+/// spells it. `libFeMeRuntimeCPU`'s helpers are all given their canonical
+/// dotted name via a GNU `asm` label (see FeMeRuntimeCPU.c), and on Mach-O
+/// targets Clang marks such explicit-asm-label names with a leading
+/// `GlobalValue::dropLLVMManglingEscape` byte so the backend emits them
+/// verbatim, unprefixed -- so the plain dotted name is not always the
+/// `GlobalValue`'s actual name. Try both spellings rather than assume one.
+Function *getRuntimeFunction(Module &M, StringRef Name) {
+  if (Function *F = M.getFunction(Name))
+    return F;
+  return M.getFunction(("\1" + Name).str());
+}
+
 class RuntimeCPUTest : public testing::Test {
 protected:
   static void SetUpTestSuite() {
@@ -66,7 +79,8 @@ protected:
   /// offset, i1 mask, ptr out)` calling the load `feme.cpu.resource.load.*`
   /// function named \p Callee and storing its result through `out`.
   Function *addLoadWrapper(StringRef Name, StringRef Callee) {
-    Function *Target = M->getFunction(Callee);
+    Function *Target = getRuntimeFunction(*M, Callee);
+    assert(Target && "runtime function not found in libFeMeRuntimeCPU bitcode");
     Type *ElemTy = Target->getReturnType();
     LLVMContext &C = M->getContext();
     Type *PtrTy = PointerType::get(C, 0);
@@ -99,7 +113,8 @@ protected:
   /// loading the value to store from `value_ptr` (again sidestepping the
   /// vector-argument ABI question).
   Function *addStoreWrapper(StringRef Name, StringRef Callee, Type *ValueTy) {
-    Function *Target = M->getFunction(Callee);
+    Function *Target = getRuntimeFunction(*M, Callee);
+    assert(Target && "runtime function not found in libFeMeRuntimeCPU bitcode");
     LLVMContext &C = M->getContext();
     Type *PtrTy = PointerType::get(C, 0);
     FunctionType *WrapperTy =
