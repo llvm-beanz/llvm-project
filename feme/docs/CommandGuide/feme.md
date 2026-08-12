@@ -57,6 +57,19 @@ coverage" in [../Design.md](../Design.md).
   Write output to `<file>`. If omitted, output is written to standard
   output.
 
+* `-O0`, `-O1`, `-O2`, `-O3`
+
+  Optimization level for FeMe's IR optimization pipeline (see
+  `feme::OptimizerPipeline`), run after import/raising and before
+  retargeting/codegen. Mirrors `clang`/`opt`'s levels of the same name;
+  defaults to `-O0` ("disable as many optimizations as possible") when no
+  `-O` flag is given.
+
+* `-Od`
+
+  Alias for `-O0`, matching `clang-cl`/DXC's spelling for "disable
+  optimizations".
+
 * `-help`, `-h`
 
   Display available options and exit.

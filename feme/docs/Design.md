@@ -383,7 +383,13 @@ the requested destination:
    `feme::amdgpu::RaisedLoweringPass` (in that order -- the first rewrites
    entry point signatures, which the second then sees as ordinary
    functions).
-6. `feme::TargetMachineBackend`.
+6. `feme::OptimizerPipeline`, at `Opts.OptLevel` (`-O0` by default, `-O1`/
+   `-O2`/`-O3`, or the `-Od` alias for `-O0` -- see "Command Line Tool(s)"
+   below). Runs after every format-specific raising pass so the optimizer
+   always sees idiomatic LLVM IR, and before codegen, matching where
+   `clang`/`opt -O<N> | llc` run the optimizer relative to instruction
+   selection.
+7. `feme::TargetMachineBackend`.
 
 There is no `Ctx.getFormatRegistry()` yet (deviating from the sketch above)
 -- `Driver` currently detects between its two supported formats directly
@@ -1410,15 +1416,18 @@ the following section.
   feme --target=spirv input.dxil -o output.spv
   feme --target=dxil  input.dxbc -o output.dxil
   feme --target=amdgcn-amd-amdhsa input.spv -o output.o
+  feme --target=amdgcn-amd-amdhsa -O2 input.spv -o output.o
   ```
 
 - The tool is a thin wrapper, structured like Clang's driver: `main()` hands
   `argc`/`argv` to FeMe's `llvm::opt`-based options component (see Core
   Architectural Principle: No Global State above), which parses them into
   `DriverOptions` (composed of `ImportOptions`/`ExportOptions`/
-  `BackendOptions`) → construct one `feme::Context` → hand the options and
-  input buffer to `feme::Driver::run` (see `Driver` above), which computes
-  and executes the full import → translate → retarget/export chain. All
+  `BackendOptions`, plus an `OptLevel` selected via `-O0`/`-O1`/`-O2`/`-O3`
+  or the `-Od` alias for `-O0`, see `feme::OptimizerPipeline` under Driver
+  above) → construct one `feme::Context` → hand the options and input buffer
+  to `feme::Driver::run` (see `Driver` above), which computes and executes
+  the full import → translate → optimize → retarget/export chain. All
   actual logic lives in the library so that anything the CLI can do, an
   embedding driver can do too, including reusing the same `Driver` and
   options component for CLI-compatible, full-toolchain invocations.
@@ -1711,6 +1720,9 @@ feme/
         DXIL/
       Translate/
       Target/              (retargeting glue)
+      Optimizer/           (feme::OptimizerPipeline: runs LLVM's standard
+                           per-module optimization pipeline at a requested
+                           `-O0`/`-O1`/`-O2`/`-O3` level, see Driver above)
       Transforms/
         AMDGPU/             (feme::amdgpu::RaisedLoweringPass,
                              feme::amdgpu::ResourceLoweringPass)
@@ -1751,6 +1763,7 @@ feme/
                            BinaryWriter implemented new, see DXBC section
                            above)
     Target/...
+    Optimizer/...          (feme::OptimizerPipeline)
     Transforms/AMDGPU/...  (feme::amdgpu::{Raised,Resource}LoweringPass)
     Transforms/DXIL/...    (feme::dxil::OpRaisingPass,
                             feme::dxil::MetadataRaisingPass,
