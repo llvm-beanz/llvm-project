@@ -802,15 +802,23 @@ than into undefined behaviour.
   ```llvm
   declare <4 x float> @feme.cpu.resource.load.typed.v4f32(
       ptr %heap, i32 %heap_count, i32 %descriptor_index,
-      i64 %element_index)
+      i64 %element_index, i1 %mask)
   declare void @feme.cpu.resource.store.typed.v4f32(
       ptr %heap, i32 %heap_count, i32 %descriptor_index,
-      i64 %element_index, <4 x float> %value)
+      i64 %element_index, <4 x float> %value, i1 %mask)
   ```
 
   Structured and raw-buffer calls carry byte offsets and alignment instead;
   constant-buffer calls are read-only. Counter UAV calls name the atomic
   operation explicitly.
+- **The mask is a trailing `i1` operand**, as it is on the
+  `feme.cpu.masked.*` intrinsics, rather than a second family of names. This
+  pass emits `true` for it; Phase 3 replaces that with the governing mask
+  where the access was predicated, so "masked `feme.cpu.resource.*` call"
+  below means the same call with a mask that is no longer a constant. Phase
+  4's lowering is one rule either way — call the helper for each active lane
+  — which is what lets a shader with no divergent control flow run before
+  the linearizer exists (roadmap milestone 4).
 - **The heap operands come from new function parameters.** A raised shader
   function has no way to name the heap, so this pass appends the resource
   heap pointer and count, the sampler heap pointer and count, and the root
@@ -823,7 +831,7 @@ than into undefined behaviour.
   concurrently.
 - These are ordinary declarations with attributes describing their memory
   effects, created and recognized through one helper rather than ad hoc name
-  matching. Phase 3 adds the governing mask. Phase 4 emits a scalar helper
+  matching. Phase 4 emits a scalar helper
   call for each active lane and reconstructs the widened result; a
   lane-varying descriptor is therefore just a lane-varying integer index,
   never an invalid vector of descriptor structures.
