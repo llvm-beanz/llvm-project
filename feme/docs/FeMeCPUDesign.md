@@ -364,7 +364,7 @@ Gets the raised module into the shape the later phases assume:
 Nothing here is FeMe-specific except the pass ordering and the entry point
 selection, so this pass is mostly a pipeline builder.
 
-## Phase 2: Uniformity Analysis (`feme::cpu::WaveUniformityInfo`)
+## Phase 2: Uniformity Analysis (`feme::cpu::computeWaveUniformity`)
 
 Widening every value to `<W x T>` would be correct and slow. The interesting
 question is which values are *lane-varying* (divergent) and which are
@@ -913,7 +913,7 @@ is no in-process compiler to ask.
 
 ## Kernel ABI
 
-One exported symbol per entry point, with a `feme.cpu.entry.` name prefix
+One exported symbol per entry point, with a `feme_cpu_entry_` name prefix
 and a single argument:
 
 ```c
