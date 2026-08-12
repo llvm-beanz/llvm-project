@@ -6078,3 +6078,51 @@ resolution, the unsupported-ops check), a focused gtest suite. Also verified
 Ten feature commits plus one clang-format cleanup commit; this note is an
 eleventh, appended under its own heading per this repository's convention
 rather than folded into any of the feature commits.
+
+# Fixing feme-cpu-wave-size.ll on non-Linux hosts
+
+## The bug
+
+`feme/test/Tools/feme/feme-cpu-wave-size.ll` produces an object file for
+`--target=%feme_host_triple` (the FeMe CPU target, resolved to whatever
+triple the build's host actually is — see `feme/docs/FeMeCPUDesign.md`'s
+"Kernel ABI" section) and then checked the first four bytes against the
+fixed ELF magic (`7f 45 4c 46`). That's only true when the host is Linux (or
+another ELF-emitting platform). On macOS the host object format is Mach-O,
+whose magic starts `cf fa ed fe`, so the test failed there (and would fail
+similarly on Windows, where the host format is COFF) even though `feme` and
+`llc`'s underlying object emission were both working correctly — this was a
+test-portability bug, not a codegen bug.
+
+## The fix
+
+The test's actual intent, per its own comment, is just "produces a real
+object file for the host target" — it doesn't need to assert which object
+format that is, since that's entirely a property of the host triage, not
+something `feme` chooses. Hard-coding per-platform magic bytes (via
+`%if system-darwin %{ ... %}` / `%if system-linux %{ ... %}` etc., the
+pattern used elsewhere in-tree, e.g.
+`llvm/test/tools/llvm-objcopy/ELF/compress-debug-sections-zstd.test`) would
+work but is more machinery than the assertion warrants, and COFF object
+files don't even have a fixed magic — their leading bytes are a
+machine-type field that varies by target architecture, so a hard-coded COFF
+check would just trade one hard-coded assumption for another.
+
+Instead I replaced the `od -An -tx1 -N4 %t.o | FileCheck ... --check-prefix=
+ELF-MAGIC` line with `RUN: llvm-readobj --file-headers %t.o` and no
+`FileCheck` at all: `llvm-readobj` fails (and so does the `RUN:` line, and so
+does the test) if it doesn't recognize the file as a well-formed object for
+*some* backend, which is exactly the property the test wants to check,
+without asserting anything about which one. `llvm-readobj` was already
+implicitly available via the standard LLVM tool `PATH` sub, so no
+`lit.cfg.py` change was needed.
+
+## Verification
+
+Rebuilt with the existing `LLVM_ENABLE_ASSERTIONS=ON` + ccache configuration
+and re-ran `ninja check-feme`: 623/623 passing (same total as before this
+fix — this was a one-test regression fix, not new coverage), including this
+test individually via `llvm-lit`. I don't have a non-Linux machine to
+reproduce the original macOS failure on, but the fix removes the
+platform-specific assumption entirely rather than special-casing it, so it
+should be robust on any host `llvm-readobj` supports.
