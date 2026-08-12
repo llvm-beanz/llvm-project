@@ -23,7 +23,8 @@ A GPU shader is an SPMD program: the source describes the behaviour of a
 single invocation ("lane"), and the machine supplies the parallelism. A CPU
 has no such machine. Something has to *choose* how many invocations execute
 per hardware thread and rewrite the program accordingly. That choice is this
-design's central knob: a **user-provided wave size** `W`. The program is
+design's central knob: a **wave size** `W`, chosen by the user, by the
+shader, or (failing both) from the host's vector width. The program is
 transformed from "one lane per program" into "`W` lanes per program", with
 every lane-varying value widened to a `<W x T>` vector, every divergent
 branch replaced by an execution mask, and the shader's own wave intrinsics
@@ -74,10 +75,10 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   import) to the host CPU, as a `feme::Backend` selected the same way every
   other target is (`--target=<host triple>`), reusing
   `feme::TargetMachineBackend` for the final codegen step.
-- Support a **user-provided wave size** `W` ∈ {4, 8, 16, 32, 64, 128},
-  independent of the host's native vector width, with `W = 1` a supported
-  (scalar, one-lane-per-program) configuration that shares the entire
-  pipeline.
+- Support a **wave size** `W` ∈ {4, 8, 16, 32, 64, 128} — every power of two
+  in `[4, 128]` — independent of the host's native vector width, selected
+  from the user's request, the shader's own declaration, or a host-derived
+  default, in that order of authority (see "Wave Size Selection").
 - Preserve the semantics of the wave/quad intrinsics FeMe already raises,
   relative to that wave size.
 - Define a resource binding ABI that a host can populate without knowing how
@@ -161,26 +162,68 @@ builtin is derived from it.
 **Partial waves.** `GroupSize` need not be a multiple of `W`. The final wave
 of a group runs with an entry mask that has the out-of-range lanes off,
 rather than the kernel being specialized per group. When
-`GroupSize % W == 0` (the common case, and always true for `W = 1`) the
-entry mask is all-ones and every mask expression folds away.
+`GroupSize % W == 0` (the common case) the entry mask is all-ones and every
+mask expression folds away.
 
 **Wave size semantics.** `W` is what the shader observes:
 `WaveGetLaneCount()` returns `W`, `WaveGetLaneIndex()` returns the lane's
 index in `[0, W)`, and every `WaveActive*` reduction reduces over exactly
 those `W` lanes, honouring the current execution mask (inactive lanes do not
-contribute, matching both DXIL's and SPIR-V's definitions). A shader that
-declares a required wave size (`[WaveSize(n)]` / SM 6.6+
-`!dx.entryPoints`'s wave-size tag, SPIR-V's
-`SubgroupSize` execution mode) and is compiled at a different `W` is a
-diagnosable error, not silently miscompiled.
+contribute, matching both DXIL's and SPIR-V's definitions).
+
+### Wave Size Selection
+
+`W` must be a power of two in `[4, 128]`: `{4, 8, 16, 32, 64, 128}`. The
+lower bound is the quad (`2x2`) granularity every source model assumes
+exists; the upper bound is where the legalized vector code stops being
+plausible on any host FeMe targets. There is no scalar (`W = 1`)
+configuration: a one-lane wave cannot express quad ops, makes
+`WaveGetLaneCount() == 1` visible to shaders that were not written for it,
+and is not a wave size any real target reports.
+
+Two independent parties can express an opinion about `W`:
+
+- **The user**, via `--wave-size=N` (`feme`), `-feme-wave-size=N`
+  (`feme-opt`), or `JITOptions::WaveSize`.
+- **The shader**, via a required wave size: HLSL `[WaveSize(n)]`, which SM
+  6.6 encodes as a single value and SM 6.8 as a `(min, max, preferred)`
+  range in `!dx.entryPoints` — both of which
+  `feme::dxil::MetadataRaisingPass` already normalizes into the
+  `"hlsl.wavesize"="min,max,preferred"` function attribute — or SPIR-V's
+  `SubgroupSize`/`RequiredSubgroupSizeKHR` execution mode.
+
+The resolution rules are:
+
+| User | Shader | Result |
+|---|---|---|
+| unset | unset | `max(4, HostVectorBits / 32)`, rounded down to a power of two and clamped to 128 |
+| unset | set | the shader's value (its preferred size, else the low end of its range) |
+| set | unset | the user's value |
+| set | set, equal (or user's value inside the shader's range) | that value |
+| set | set, different | **error** |
+
+The host-derived default divides by 32 because 32-bit is the width of the
+overwhelming majority of lane-varying values in shader code; `max(4, ...)`
+keeps a host with no vector unit at all from producing an illegal `W`. A
+value outside `[4, 128]` or not a power of two is an error wherever it comes
+from, including from the shader — a shader declaring `[WaveSize(3)]` is
+malformed, not a request FeMe rounds up.
+
+The conflict case is a hard error rather than a warning-plus-override
+because a shader that declares a required wave size is asserting that its
+algorithm depends on that size, and silently running it at another one
+produces wrong answers with no diagnostic — the exact failure mode a
+reference implementation exists to catch. The resolved `W` is recorded on
+the compiled artifact so a host never has to re-derive it.
 
 **Independence from host vector width.** `W` is a *semantic* choice, not a
 codegen one: `<32 x float>` on a host with 128-bit vectors is legal, and
-LLVM's type legalizer splits it into 8 operations. Choosing `W` to match the
-host (`W = VectorBits / 32`) is the performance-sensible default, but
-correctness never depends on it, and the ability to compile at the wave size
-a shader was *written* for (e.g. 32, for a shader whose algorithm assumes
-`WaveGetLaneCount() == 32`) matters more than the codegen quality.
+LLVM's type legalizer splits it into 8 operations. The host-derived default
+exists because it is the performance-sensible choice when nothing else has
+an opinion, but correctness never depends on it, and the ability to compile
+at the wave size a shader was *written* for (e.g. 32, for a shader whose
+algorithm assumes `WaveGetLaneCount() == 32`) matters more than the codegen
+quality.
 
 ## Pipeline Overview
 
@@ -525,7 +568,7 @@ reported alongside the binding table.
 namespace feme::cpu {
 
 struct JITOptions {
-  unsigned WaveSize = 0;             // 0 = pick from the host's vector width
+  unsigned WaveSize = 0;             // 0 = resolve from the shader, else host
   std::string EntryPoint;            // empty = the module's only entry point
   llvm::CodeGenOptLevel OptLevel = llvm::CodeGenOptLevel::Default;
   bool EnableRobustness = true;
@@ -595,9 +638,10 @@ lower through the host's normal vector-math handling.
 ### Command line
 
 - `feme --target=<host-triple> --wave-size=N` produces an object file.
-  `--wave-size` is a new `DriverOptions` field, defaulting to the host's
-  natural width, and is ignored (with a diagnostic if explicitly set) for
-  non-CPU targets.
+  `--wave-size` is a new `DriverOptions` field; when unset it is resolved
+  per "Wave Size Selection" (shader declaration, else host-derived default),
+  and it is ignored (with a diagnostic if explicitly set) for non-CPU
+  targets.
 - `feme-opt` gains one pass name per phase, matching the existing
   convention: `feme-cpu-prepare`, `feme-cpu-lower-resources`,
   `feme-cpu-linearize`, `feme-cpu-simdize`, `feme-cpu-lower-wave`,
@@ -630,18 +674,24 @@ Following the instruction that each phase of translation gets unit tests:
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG |
 | Resource lowering | slot assignment order, binding table extraction | one test per resource kind, plus binding-array indexing |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation |
-| SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {1, 4, 8} |
+| SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8} |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
 | Entry wrapper | barrier region splitting | wave loop shape, barrier split, groupshared |
 | JIT | `JITEngine::create`/`dispatch` on a tiny module, binding table round-trip | — |
 | End to end | — | `feme-run` executing real shaders and `FileCheck`ing results, at several wave sizes |
 
-The `W = 1` configuration is worth calling out as a testing tool in its own
-right: it exercises the entire pipeline while producing scalar code, so a
-mismatch between `W = 1` and `W = 8` results for the same shader isolates a
-widening bug from a translation bug. Differential testing between wave sizes
-is the cheapest high-value test this design enables, and should be a
-first-class part of the test suite rather than an afterthought.
+Wave size resolution gets its own tests: each row of the resolution table
+above (including the conflict error and the out-of-range/non-power-of-two
+diagnostics) is a `lit` test over a shader with and without a declared wave
+size.
+
+Differential testing across wave sizes is the cheapest high-value test this
+design enables and should be first-class rather than an afterthought: the
+same shader run at `W = 4` and at `W = 128` must produce identical output
+buffers unless it observes `WaveGetLaneCount()`, so a mismatch isolates a
+widening bug from a translation bug. `W = 4` is the cheapest configuration
+to read in `CHECK` lines and doubles as the "smallest legal wave"
+regression, replacing the role a scalar mode would have played.
 
 ## Directory / Library Layout Additions
 
@@ -682,21 +732,23 @@ existing layout moves.
 
 Sequenced so each step is independently testable and useful:
 
-1. **Scaffolding + ABI header**: `Target/CPU/RuntimeABI.h`, `--wave-size`
-   plumbed through `DriverOptions`, empty passes registered in `feme-opt`.
+1. **Scaffolding + ABI header**: `Target/CPU/RuntimeABI.h`, wave size
+   resolution (`--wave-size` in `DriverOptions`, shader declaration, host
+   default) with its diagnostics, empty passes registered in `feme-opt`.
 2. **Uniformity analysis** (`WaveTTIImpl` + printer + unit tests). No
    transform yet.
-3. **Resource lowering** to the descriptor table, with the binding table
+3. **Resource lowering** to the descriptor heap, with the heap-usage
    metadata and reader. Testable at `W`-agnostic scale.
-4. **`W = 1` end-to-end**: prepare + trivial linearize + trivial widen +
-   entry wrapper, no divergence handling, plus `feme-run` and the JIT. This
-   is the first point at which a shader *runs*, and it deliberately comes
-   before the hard transform — it makes every subsequent step verifiable by
-   execution rather than by IR inspection alone.
+4. **Uniform-control-flow end-to-end at `W = 4`**: prepare + widening of
+   straight-line, uniform-control-flow shaders + entry wrapper, plus
+   `feme-run` and the JIT. This is the first point at which a shader *runs*,
+   and it deliberately comes before the divergence transform — it makes
+   every subsequent step verifiable by execution rather than by IR
+   inspection alone.
 5. **Linearization** for divergent control flow (straight-line diamonds,
    then loops).
-6. **Widening** for `W > 1`, including masked memory ops and the
-   scalarization fallback.
+6. **Widening** for the remaining wave sizes, including masked memory ops
+   and the scalarization fallback.
 7. **Wave intrinsic lowering**.
 8. **Barriers and groupshared memory** (region splitting).
 9. **Format conversion runtime** for non-trivial typed buffer formats.
@@ -704,35 +756,44 @@ Sequenced so each step is independently testable and useful:
     skipping, uniform-load hoisting. Only after correctness is established
     and measurable.
 
+## Resolved Decisions
+
+Questions this design previously left open, and the answers now baked into
+it:
+
+1. **Wave size default and range.** `W` is any power of two in `[4, 128]`.
+   With no other input it defaults to `max(4, HostVectorBits / 32)`; a
+   shader-declared size wins over the default, and a user-specified size
+   wins over nothing else (a conflict with the shader is an error). Large
+   `W` on a narrow host is allowed — legalization quality is a performance
+   concern, and the ability to run a shader at the wave size it was written
+   for is a correctness one. See "Wave Size Selection".
+2. **Required wave size conflicts.** Hard error. A declared wave size is a
+   correctness assertion by the shader; honouring the user's conflicting
+   request silently would produce wrong answers in the tool whose job is to
+   produce right ones.
+
 ## Open Questions
 
 These need answers (or at least preferences) to firm this design up:
 
-1. **Wave size default and range.** Is a host-derived default (`W` =
-   host vector width / 32 bits) right, or should `W` always be explicit? And
-   is 64/128 worth supporting on a 128-bit-vector host, or should the
-   supported set be bounded by what the host can do without pathological
-   legalization?
-2. **Required wave size conflicts.** When a shader declares
-   `[WaveSize(32)]` and the user asks for `W = 8`: hard error, or warn and
-   honour the shader? (This design assumes hard error.)
-3. **Descriptor table vs. kernel arguments.** Is the flat descriptor table
+1. **Descriptor table vs. kernel arguments.** Is the flat descriptor table
    the right host-facing model, or should the CPU target match a specific
    API's binding model (D3D12 root signatures, Vulkan descriptor sets) more
    closely? The proposal here is deliberately the lowest common denominator
    — is there a host already in mind whose model this should match?
-4. **Robustness by default.** Bounds-checked, zero-returning OOB access is
+2. **Robustness by default.** Bounds-checked, zero-returning OOB access is
    proposed as the default. Is a "trust the shader" mode needed at all, and
    if so should it be per-resource rather than global?
-5. **JIT scope.** Is `feme::cpu::JITEngine` owning its own dispatch (thread
+3. **JIT scope.** Is `feme::cpu::JITEngine` owning its own dispatch (thread
    pool, group loop) the right shape, or should FeMe only hand back a
    function pointer plus the ABI description and let the host schedule?
    The former is much better for testing; the latter is what a real driver
    would want. (Both are possible; the question is which is v1.)
-6. **Graphics stages.** Is compute-only acceptable indefinitely, or is
+4. **Graphics stages.** Is compute-only acceptable indefinitely, or is
    there a pixel/vertex shader use case that should shape the design now
    (in particular the lane-to-quad mapping and the wrapper's shape)?
-7. **Mask representation between phases.** Phase 3 needs to hand Phase 4 a
+5. **Mask representation between phases.** Phase 3 needs to hand Phase 4 a
    per-instruction mask. Operand bundles on the instruction, a FeMe-internal
    intrinsic taking a mask token, or an out-of-IR side table computed on
    demand? Bundles survive printing (good for testing) but are unusual on
@@ -741,12 +802,12 @@ These need answers (or at least preferences) to firm this design up:
    testing goals. Current preference: a FeMe-internal
    `llvm.feme.cpu.masked.*` intrinsic form for the operations that need it,
    so the intermediate IR is printable and checkable.
-8. **Where does SPIR-V's structurization leave us?** DXIL input can be
+6. **Where does SPIR-V's structurization leave us?** DXIL input can be
    arbitrarily unstructured; `StructurizeCFG` handles reducible CFGs and
    `FixIrreducible` the rest, but the combination is not commonly exercised
    on shader-shaped code. Is it acceptable for v1 to reject the cases those
    passes handle badly, or must every DXIL input work?
-9. **Relationship to MLIR.** This design operates entirely on `llvm::Module`
+7. **Relationship to MLIR.** This design operates entirely on `llvm::Module`
    (consistent with the existing AMDGPU/SPIR-V lowering passes). Is there
    interest in doing the SIMD-ization at the MLIR level instead (e.g. via
    the `vector` dialect), which would be more expressive but would mean
