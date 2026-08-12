@@ -1,0 +1,47 @@
+; This is the differential harness roadmap milestone 5 describes (see the
+; "CFG restructurization test suite" section of
+; feme/docs/FeMeCPUDesign.md): it runs `feme-cfg-gen`-generated shaders
+; through both the normal (widened) pipeline and `--reference` (the ground
+; truth, an unwidened, one-invocation-at-a-time run) and diffs the
+; resulting heap contents. A mismatch would mean Phase 4 (widening) computed
+; something different from what the shader's own control flow says it
+; should have -- exactly the kind of bug this suite exists to catch before
+; it reaches the linearizer (roadmap milestone 6).
+;
+; Scope for this milestone (see the Status section's own deviation note):
+; `feme::cpu::SIMDizePass` widens acyclic, uniform-control-flow shaders only
+; (roadmap milestone 4), so the shapes this harness diffs are restricted to
+; that subset (`--divergent=false --loops=false --unstructured=false`) --
+; the full breadth `feme-cfg-gen` can produce (divergent branches, loops,
+; irreducible edges) is exactly what the linearizer and the remaining
+; widening work (milestones 6/7) will make it possible to widen, at which
+; point this harness's scope should grow with them.
+
+; RUN: echo 'resource-heap:' > %t.heap.yaml
+; RUN: echo '  - index: 0' >> %t.heap.yaml
+; RUN: echo '    size: 32' >> %t.heap.yaml
+
+; RUN: feme-cfg-gen --seed=1 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.1.ll
+; RUN: feme-run --wave-size=4 --groups=1,1,1 --heap=%t.heap.yaml %t.1.ll > %t.1.normal.txt
+; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.1.ll > %t.1.reference.txt
+; RUN: diff %t.1.normal.txt %t.1.reference.txt
+
+; RUN: feme-cfg-gen --seed=2 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.2.ll
+; RUN: feme-run --wave-size=4 --groups=1,1,1 --heap=%t.heap.yaml %t.2.ll > %t.2.normal.txt
+; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.2.ll > %t.2.reference.txt
+; RUN: diff %t.2.normal.txt %t.2.reference.txt
+
+; RUN: feme-cfg-gen --seed=3 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.3.ll
+; RUN: feme-run --wave-size=8 --groups=1,1,1 --heap=%t.heap.yaml %t.3.ll > %t.3.normal.txt
+; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.3.ll > %t.3.reference.txt
+; RUN: diff %t.3.normal.txt %t.3.reference.txt
+
+; RUN: feme-cfg-gen --seed=4 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.4.ll
+; RUN: feme-run --wave-size=4 --groups=2,1,1 --heap=%t.heap.yaml %t.4.ll > %t.4.normal.txt
+; RUN: feme-run --reference --groups=2,1,1 --heap=%t.heap.yaml %t.4.ll > %t.4.reference.txt
+; RUN: diff %t.4.normal.txt %t.4.reference.txt
+
+; RUN: feme-cfg-gen --seed=5 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.5.ll
+; RUN: feme-run --wave-size=4 --groups=1,1,1 --heap=%t.heap.yaml %t.5.ll > %t.5.normal.txt
+; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.5.ll > %t.5.reference.txt
+; RUN: diff %t.5.normal.txt %t.5.reference.txt
