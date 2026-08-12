@@ -6999,3 +6999,350 @@ Eight commits, each independently buildable and tested: (1) `PreparePass`
 `EntryWrapperPass`, (6) `JITEngine`, (7) `feme-run` + `FeMeCPUDesign.md`
 Status/Roadmap updates, (8) a `clang-format` pass over every file touched
 by this milestone. This note is a ninth, doc-only commit.
+
+# Milestone 5: CFG restructurization suite
+
+Implementing roadmap milestone 5 from `feme/docs/FeMeCPUDesign.md`'s
+"Roadmap / Milestones" section:
+
+> **CFG restructurization suite**: the named-shape corpus, the
+> `-verify-structured` postcondition checker, and — now that `feme-run`
+> exists — the generator, its differential harness, and the fuzzer over
+> it. This lands before the linearizer because the linearizer is what
+> starts depending on Phase 1 having actually succeeded.
+
+## Approach
+
+Read the whole design doc again, focusing on "CFG restructurization test
+suite" (which spells out all four layers, in order, plus their rationale)
+and the Status section's milestone 4 deviation note (which flagged
+`--reference` as this milestone's own deliverable). Also re-read
+`feme/.instructions.md`. Then read every pass this milestone builds on
+(`Prepare.cpp`, `EntryWrapper.cpp`, `WaveLowering.cpp`, `BuiltinCalls.h`,
+`ResourceLowering.cpp`) and `feme-run.cpp` before writing anything, since
+milestone 5 is entirely about validating and extending existing
+infrastructure rather than adding a new pipeline phase.
+
+One thing worth calling out up front: the design doc's own "CFG
+restructurization test suite" section claimed "layers 1 and 2 come with
+the prepare pass in milestone 4". That was aspirational, not actual --
+neither the corpus nor the verifier existed in the tree before this
+session. I built both as part of this milestone (see "Layer 1/2" below)
+and corrected that sentence in `FeMeCPUDesign.md` rather than leaving a
+doc that described work that hadn't happened.
+
+## What I built
+
+### Layer 2 first: `feme::cpu::verifyStructured` (`VerifyStructured.h`/`.cpp`)
+
+Built the postcondition checker before the corpus, since the corpus's
+whole point (per the design) is "restructure this and assert it is
+structured" -- a corpus file is nearly untestable without it. Implemented
+the five postconditions literally as written: no `switch`
+(`isa<SwitchInst>`), no critical edges (`llvm::isCriticalEdge`), every
+`llvm::CycleInfo` cycle (walked recursively via `toplevel_cycles()` +
+`children()`, not just the top level) reducible with a unique exit block
+(`getExitBlocks` deduplicated through a `SmallPtrSet`), and every divergent
+branch (`UniformityInfo::isUniformTerminator`, reusing
+`feme::cpu::computeWaveUniformity` from Phase 2) having a reconvergence
+point (a `PostDominatorTree` immediate post-dominator). Each check runs and
+reports independently rather than short-circuiting, so one invocation
+surfaces every violation a shape has, not just the first.
+
+Wired it into `feme::cpu::PreparePass::run` as an `assert()` at the very
+end (assertions-only, per the design: "The same verifier runs as an
+assertions-only postcondition inside PreparePass itself") and into
+`feme-opt` as a new `-verify-structured` flag on top of the existing
+`--llvm` pipeline driver, checked after the pipeline runs and the module
+verifies.
+
+**This immediately found a real bug, not just a hypothetical one to guard
+against.** The very first existing test I ran it against
+(`prepare-structurize.ll`, a `switch`-lowered diamond) tripped the new
+`assert` in `PreparePass`. Turning the assert into a diagnostic-printing
+one-off (temporarily) showed why: `StructurizeCFG`'s own "Flow" blocks --
+built to merge a divergent branch's two arms back together via a `phi` of
+booleans -- leave a critical edge behind on both sides of the merge
+(`LeafBlock -> Flow` and `Flow -> end` in that example, since `LeafBlock`
+and `Flow` each have two successors into a block with two predecessors).
+I checked `llvm::BreakCriticalEdgesPass` was available and fixed for real:
+added it as Phase 1's last step, after `StructurizeCFG`, rather than
+weakening the postcondition to allow this. Re-verified: the existing test
+suite (704 tests going in) still passed at 100% afterward, plus the new
+corpus and generator (see below) all check out clean. This is exactly the
+kind of thing the suite exists to catch, and it caught something the first
+time it was exercised against pre-existing, previously-"working" test
+input -- which is a good sign the approach is doing its job, not just
+passing on its own generated inputs.
+
+Covered by 8 `gtest` cases in `VerifyStructuredTest.cpp`: one per check on
+both the accepting and rejecting side (a uniform diamond and a divergent
+diamond that reconverges both pass; a `switch`, a critical edge, an
+irreducible two-block cycle, a two-exit-block loop, and a divergent branch
+into an infinite loop all fail).
+
+### Layer 1: the named-shape corpus (`feme/test/Transforms/CPU/CFG/`)
+
+Wrote all 13 named shapes the design lists by name (`diamond`,
+`nested-diamonds`, `short-circuit-and`/`-or`, `loop-break`,
+`loop-continue`, `loop-multi-exit`, `loop-early-return`,
+`switch-multiway`, `irreducible-two-entry`, `irreducible-nested`,
+`loop-jump-into-body`, `infinite-loop-divergent-exit`) by hand, each with
+one `RUN:` line (`feme-opt --llvm -passes=feme-cpu-prepare
+-verify-structured -S %s -o /dev/null`) and no `FileCheck` -- exactly the
+"one line each" the design promises `-verify-structured` buys. Getting
+`irreducible-two-entry`/`-nested` right meant hand-writing the classic
+two-block mutual-cycle shape (`entry` branches to `a`/`b`; `a` can branch
+to `b` or exit; `b` can branch to `a` or exit -- neither dominates the
+other), and `loop-jump-into-body` meant a branch straight from outside a
+loop into its body block, skipping the header entirely, so the header no
+longer dominates every block in the "loop". `infinite-loop-divergent-exit`
+needed the `phi`'s incoming values kept in argument order (LLVM's verifier
+enforces "PHI nodes not grouped at top of basic block" strictly, which
+caught a copy-paste ordering slip immediately). All 13 pass
+`-verify-structured` cleanly (confirmed one at a time via `feme-opt`
+directly before wiring into `lit`, then via `ninja check-feme`).
+
+### Layer 3's generator: `feme::cpu::generateCFGIR` (`CFGGen.h`/`.cpp`) + `feme-cfg-gen`
+
+Read the design's generator description closely: "random nesting of
+uniform and divergent `if`s, loops with random break/continue placement,
+and -- behind a flag -- unstructured edges", with "each generated block
+folds its own block id into a per-invocation accumulator written to a
+UAV" as the key design point that makes a mismatch *diagnosable* (a full
+execution trace, not a single pass/fail bit).
+
+Two implementation decisions worth recording:
+
+1. **Textual generation, not `IRBuilder`.** I generate LLVM IR as a string
+   directly (a small `TextCFGGenerator` class building up "open" blocks --
+   a fixed name plus an accumulating instruction-text buffer -- and
+   closing each with a terminator once its successor(s) are known) rather
+   than building an `llvm::Module` via `IRBuilder`. This sidesteps two
+   things `IRBuilder` would make painful: forward-referencing a block by
+   name before it's been created (trivial in text, since LLVM doesn't
+   care about textual order beyond "entry block first"), and forward
+   -referencing an SSA value not yet defined (also trivial in text, since
+   dominance -- not textual position -- is what the verifier actually
+   checks). It also means the generator's output is inspectable the same
+   way every other test fixture in this codebase is (a `.ll` file), which
+   matters for "Avoiding binary test fixtures" in `Design.md`.
+2. **`alloca`-backed accumulator, not hand-placed `phi`s.** Threading an
+   SSA accumulator value through arbitrary (especially irreducible)
+   control flow would mean the generator computing its own dominance-based
+   `phi` placement -- essentially reimplementing `mem2reg` in reverse.
+   Instead every "fold this block's id in" step is a
+   `load`/`mul`/`add`/`store` through a single `%acc = alloca i32` in the
+   entry block. `feme::cpu::PreparePass`'s own first step is `mem2reg`
+   (`PromotePass`), so this gets promoted back to SSA for free, and the
+   generator never has to reason about merge points at all -- it can
+   emit `br`s in whatever shape it likes (including two-entry mutual
+   cycles) and correctness of the SSA form is entirely `mem2reg`'s
+   problem, which is exactly the division of labor the rest of Phase 1
+   already assumes.
+
+Construct kinds: `if`/`else` (condition either thread-id-derived
+--divergent, classified that way by `feme::cpu::WaveTTIImpl` -- or
+group-id-derived -- uniform, since a wave never spans more than one
+group), a counted loop (trip count 2-4, a compile-time constant so
+generation always terminates) with independently-probable divergent
+`break`/`continue`, and (behind `AllowUnstructured`) the
+`irreducible-two-entry` shape parameterized the same way the corpus file
+of that name is. Recursion is bounded by both `MaxDepth` and a
+`MaxConstructs` budget, so output size is bounded regardless of how the
+random walk falls.
+
+**Bug found during generator testing, not a hypothetical one:** my first
+version had `appendCondition`'s "uniform" branch read a
+`%uniform_seed` *function parameter* I'd added to the generated `main`.
+This parsed and verified fine, and passed `-verify-structured` fine (a
+function parameter is about as uniform as a value gets), but crashed
+`feme-run` with `llvm_unreachable` in `EntryWrapperPass::buildWrapper`:
+root constants aren't implemented yet (per milestone 3's own deviation
+note), so there's no ABI slot for an arbitrary extra scalar shader
+parameter, and `EntryWrapperPass` only knows how to route the fixed set
+of resource/root-constant/wave-body parameter names. Fixed by using
+`llvm.dx.group.id` instead (a real, already-supported raised builtin
+that's uniform for the same reason -- one wave never spans two groups --
+without inventing a new kind of shader input this milestone's ABI can't
+express). This is exactly the kind of gap between "the CFG passes the
+verifier" and "the shader actually runs" that layer 3 (the differential
+harness, not just the generator alone) exists to catch, and I found it
+even before wiring the harness up, just from trying to `feme-run` a
+generated shader by hand for a sanity check.
+
+Fuzz-tested the generator directly (not just through the fuzzer target,
+which came later): 200 seeds with default settings, then another 300 with
+`--unstructured=true --max-depth=4 --max-constructs=20` (deeper nesting,
+every construct kind enabled) all round-tripped through `feme-opt
+-passes=feme-cpu-prepare -verify-structured` cleanly. `gtest` coverage
+(`CFGGenTest.cpp`) does the same over 64 seeds each way (with and without
+`AllowUnstructured`), plus determinism (`generateCFGIR` is a pure function
+of `Opts`) and seed-sensitivity checks.
+
+### Layer 3's other half: `--reference` (`ReferenceLowering.h`/`.cpp`, `ReferenceEntryWrapper.h`/`.cpp`)
+
+This is the piece the Status section's milestone 4 deviation note
+explicitly deferred to this milestone: "the ground truth the CFG
+restructurization suite diffs against". The design's own description is
+specific about what it means: skip Phases 3/4 (linearization, widening)
+entirely and call the *unwidened* function once per invocation, with
+Phase 5 running only its "builtin half" and Phase 6 running "a scalar
+variant whose 'wave loop' is a loop over single invocations".
+
+I modeled this as two new passes mirroring the two that already do the
+widened version, so the CPU pipeline gains a second, parallel branch
+rather than special-casing the existing one:
+
+- **`feme::cpu::ReferenceLoweringPass`** is `feme::cpu::WaveLoweringPass`'s
+  builtin half, but scalar. The widened version reads its wave-body
+  parameters (`GroupIDX/Y/Z`, `WaveIndex`) directly off the function
+  signature `feme::cpu::SIMDizePass` appended; the reference version has
+  no such signature (it never widens, so there's no `WaveBodyEnv` to add
+  one to) and instead reads a pair of module-level globals
+  (`feme.cpu.ref.thread_index_in_group`, `feme.cpu.ref.group_id`) that
+  `feme::cpu::ReferenceEntryWrapperPass` sets once per invocation/group.
+  Using globals instead of extending every function's signature keeps
+  this pass from needing to rebuild the function (the same
+  "`Function::Create` + splice + RAUW" dance `ResourceLoweringPass` and
+  `SIMDizePass` both already do) just to add a couple of scalars nothing
+  else needs to see; it costs thread-safety, which is fine since
+  `JITEngine::dispatch` already runs every group sequentially on the
+  calling thread (this milestone's own already-documented deviation).
+  Wave intrinsics (currently just `WaveGetLaneIndex`; none of
+  `WaveActive*` are raised yet) are diagnosed and leave the function
+  unmarked, matching "the mode rejects them" in the design.
+- **`feme::cpu::ReferenceEntryWrapperPass`** mirrors
+  `feme::cpu::EntryWrapperPass` almost line for line, but its loop is a
+  flat `0..GroupSizeTotal` counter (no wave splitting, no entry mask --
+  every invocation in the group runs, unconditionally) and it calls the
+  unwidened body once per iteration instead of the widened one once per
+  wave. I factored the `FemeDispatchArgs` struct-layout code (field
+  indices, the LLVM struct type, the field-loading helper, the
+  thread-group-size reader) out of `EntryWrapper.cpp` into a new private
+  header, `DispatchArgsLayout.h`, once it became clear both wrappers
+  needed the exact same layout code verbatim -- duplicating it would have
+  meant two copies to keep in sync with `RuntimeABI.h` by hand.
+
+Both produce the *same* exported ABI symbol name
+(`feme_cpu_entry_<name>`), which is what let `feme::cpu::JITEngine::create`
+add `JITOptions::Reference` as a simple pipeline fork (Prepare + resource
+lowering, then either the widened four passes or these two) with *no*
+changes to `JITEngine::dispatch` at all -- the caller-facing contract
+doesn't change, only how the compiled code was produced.
+
+**Second real bug found, again not hypothetical:** my first working build
+of this produced all-zero output from `feme-run --reference` on the
+thread-id-store shader, instead of `0 1 2 3`. Traced it to
+`llvm::Module::getGlobalVariable(Name)`'s default argument --
+`AllowInternal = false` -- silently returning `nullptr` for an
+internal-linkage global (which is exactly what
+`getOrCreateRefGlobal`/`ReferenceLoweringPass` creates). Both stores in
+`ReferenceEntryWrapperPass::buildWrapper` (`GroupID`, and the per
+-iteration flat index) were guarded with `if (Global) ...` -- which I'd
+written defensively, expecting them to always be present, but that
+defensiveness is exactly what let the bug hide instead of crashing
+immediately. Fixed by passing `AllowInternal=true` explicitly at both
+call sites. Re-verified against the same shader at two group counts
+(`1,1,1` and `2,1,1`) and against five `feme-cfg-gen`-generated uniform
+-only shaders, comparing `feme-run` (widened) output byte-for-byte
+against `feme-run --reference` output for each -- all matched exactly
+afterward. In hindsight, the `if (Global)` guards should have been
+`assert`s or an outright `report_fatal_error`, since a missing global at
+this point is always a pipeline-ordering bug, never a legitimate "nothing
+to do" case; left as-is since the behavior is correct now and the guard
+still doesn't hide anything a test wouldn't already catch, but noting it
+here as a "would tighten if I were touching this file again" observation
+rather than a live bug.
+
+Covered by `gtest` (`ReferenceLoweringTest`, `ReferenceEntryWrapperTest`,
+plus a new `JITEngineTest.ReferenceModeRunsTheSameShaderUnwidened` case
+asserting the exact byte-for-byte match against the existing widened
+-mode test's expectation) and `lit` tests (the scalar arithmetic shape,
+the wave-intrinsic rejection diagnostic, the per-invocation loop shape,
+and `feme-run --reference` against the existing `thread-id-store.ll`
+shader).
+
+### The differential harness itself (`feme/test/Tools/feme-run/differential-harness.test`)
+
+A `lit` test chaining `feme-cfg-gen` -> `feme-run` (widened) and
+`feme-cfg-gen`'s same output -> `feme-run --reference`, `diff`-ing the two
+heap dumps, across five seeds at a couple of wave sizes and group counts.
+Scoped the generator flags to `--divergent=false --loops=false
+--unstructured=false`: `feme::cpu::SIMDizePass` only widens acyclic,
+uniform-control-flow shaders as of milestone 4, so anything else the
+generator can produce would fail in the *widened* path today for reasons
+that have nothing to do with this suite (a pre-existing, already-diagnosed
+scope limit, not a restructurization bug) -- diffing against `--reference`
+on those shapes has to wait for the linearizer (milestone 6) and the rest
+of widening (milestone 7). Documented this explicitly as a Deviation in
+`FeMeCPUDesign.md` rather than silently narrowing the harness's own file
+comment, since it's exactly the kind of thing a future reader would
+otherwise assume was oversight rather than a deliberate, load-bearing
+scope cut.
+
+### Layer 4: `feme-cpu-restructure-fuzzer`
+
+A `libFuzzer` harness interpreting its input bytes as a
+`feme::cpu::generateCFGIR` seed plus a few small option knobs (depth,
+construct budget, and three on/off bits for divergent/loops/unstructured),
+mirroring how `feme-dxil-import-fuzzer`/`feme-spirv-import-fuzzer` are
+built (a `DUMMY_MAIN` standalone entry point for offline runs, following
+`dxbc-as-fuzzer`'s `DummyFuzzer.cpp` naming convention exactly). Runs the
+generated shader through `feme::cpu::PreparePass` and
+`feme::cpu::verifyStructured`, `report_fatal_error`-ing on either an
+unparseable/invalid generated module (a generator bug, not a
+restructurization one) or a `verifyStructured` failure (the actual thing
+this layer exists to catch) -- deliberately in addition to, not instead
+of, `PreparePass`'s own internal `assert`, since an assertions-disabled
+build of this fuzzer would otherwise silently lose the check the fuzzer
+exists to run. `AllowUnstructured` is always on, unlike the differential
+harness, since this layer checks structure (which today's pipeline can
+check regardless of whether SIMDize could later widen the shape), not
+execution.
+
+Manually verified (no crashes) against a small hand-built seed corpus (6
+files exercising specific seed/option-byte combinations) and 500 random
+byte strings of random length via the `DummyMain` build, before writing
+the seed corpus into the tree.
+
+### Doc updates
+
+Added `feme-cfg-gen.md` and `feme-cpu-restructure-fuzzer.md` to
+`docs/CommandGuide/` (and linked them from `index.md`), matching every
+other tool's existing doc page. Updated `feme-run.md` for `--reference`.
+Updated `FeMeCPUDesign.md`: marked milestone 5 done in the Status section
+and Roadmap, added its own Deviation note (the `BreakCriticalEdges` fix,
+the generator's fixed construct menu, the differential harness's
+acyclic-uniform-only scope, the fuzzer checking structure not execution),
+corrected the "CFG restructurization test suite" section's inaccurate
+claim about which layers shipped with milestone 4, and added a note to
+"Phase 1: Preparation" about `BreakCriticalEdges` joining the pass list.
+
+## Validation
+
+Every commit was built and tested individually
+(`ninja <lib-or-tool-target>` then `ninja check-feme`, using the existing
+`ccache`+`LLVM_ENABLE_ASSERTIONS=ON` Release config already configured in
+`build/`) before moving to the next. Started at 704 passing tests (the
+milestone 4 baseline) and ended at 742, with zero regressions at any point
+-- including through the `BreakCriticalEdgesPass` fix, which is the one
+change in this milestone that touches already-shipped, already-tested
+pipeline behavior rather than adding something new. Manually fuzz-tested
+`feme-cfg-gen` (500 seeds across two configurations) and
+`feme-cpu-restructure-fuzzer` (500 random byte strings) beyond what's
+checked into the tree as `lit`/`gtest` cases, specifically because a
+generator/fuzzer's real value is in inputs nobody thought to write down.
+
+## Commit breakdown
+
+Eleven commits, each independently buildable and tested: (1)
+`feme::cpu::verifyStructured`, (2) the `BreakCriticalEdges` fix +
+`PreparePass` assertion, (3) `feme-opt -verify-structured`, (4) the
+named-shape corpus, (5) `feme::cpu::generateCFGIR`, (6) `feme-cfg-gen`,
+(7) `feme-cpu-restructure-fuzzer`, (8) `DispatchArgsLayout.h` extraction,
+(9) `feme::cpu::ReferenceLoweringPass`, (10)
+`feme::cpu::ReferenceEntryWrapperPass`, (11) `--reference` wired into
+`JITEngine`/`feme-run`, (12) the differential harness `lit` test, (13)
+`FeMeCPUDesign.md` updates, (14) a `clang-format` pass over every file
+touched by this milestone. This note is a fifteenth, doc-only commit.
