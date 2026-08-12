@@ -277,16 +277,23 @@ quality.
 flowchart TD
     DXIL[DXIL] -- Importer + OpRaising + MetadataRaising --> R[raised llvm::Module<br/>llvm.dx.* / llvm.spv.*]
     SPV[SPIR-V] -- Importer + SPIRVToLLVM --> R
-    R --> P1[feme-cpu-prepare<br/>canonicalize + structurize CFG]
-    P1 --> P2[feme-cpu-lower-resources<br/>canonical resource calls]
-    P2 --> P3[feme-cpu-linearize<br/>divergence -> masks]
-    P3 --> P4[feme-cpu-simdize<br/>widen to &lt;W x T&gt;]
-    P4 --> P5[feme-cpu-lower-wave<br/>wave/builtin intrinsics]
-    P5 --> P6[feme-cpu-wrap-entry<br/>group/wave loops, barriers]
-    P6 --> RL[link libFeMeRuntimeCPU bitcode<br/>then optimize]
+    R --> PREP[feme-cpu-prepare<br/>canonicalize + structurize CFG]
+    PREP --> RES[feme-cpu-lower-resources<br/>canonical resource calls]
+    RES --> LIN[feme-cpu-linearize<br/>divergence -> masks]
+    LIN --> SIMD[feme-cpu-simdize<br/>widen to &lt;W x T&gt;]
+    SIMD --> WAVE[feme-cpu-lower-wave<br/>wave/builtin intrinsics]
+    WAVE --> WRAP[feme-cpu-wrap-entry<br/>group/wave loops, barriers]
+    WRAP --> RL[link libFeMeRuntimeCPU bitcode<br/>then optimize]
     RL --> TM[TargetMachineBackend<br/>host triple]
     RL --> JIT[feme::cpu::JITEngine<br/>ORC]
 ```
+
+The numbered phases below are the *transforms* the SPMD model needs: Phase 2
+is the uniformity analysis, which is not a box here because it produces no
+IR, and resource lowering has no number of its own — it runs where the
+diagram shows it, after Phase 1 and before Phase 3. Every reference to a
+numbered phase in this document means the numbered heading, never a box in
+this diagram.
 
 Each box is a separate pass with its own `feme-opt` name and its own `lit`
 tests, following the precedent set by `feme-dxil-raise-ops` /
