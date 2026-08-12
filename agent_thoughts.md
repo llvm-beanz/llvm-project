@@ -6778,3 +6778,224 @@ etc.) as well as the plain form.
 Two commits: (1) the `RuntimeCPUTest.cpp` lookup-helper fix, (2) the
 `runtime-cpu-bitcode.test` `CHECK-DAG` pattern fix. This note is a third,
 doc-only commit.
+
+# Milestone 4: Uniform-control-flow end-to-end at W = 4
+
+## Task
+
+Implement roadmap milestone 4 of the FeMe CPU target design: prepare +
+widening of straight-line, uniform-control-flow shaders, Phase 5's builtin
+half, the entry wrapper, `feme-run`, and the JIT -- the first point at
+which a shader actually *runs*.
+
+## Scoping decisions (made up front, given the size of the milestone)
+
+This is, by a wide margin, the largest milestone attempted in one session
+so far: it spans five previously-scaffolded passes plus two entirely new
+components (the JIT engine and a CLI tool), each of which is independently
+a substantial piece of compiler engineering. Rather than either refusing
+the scope or producing a shallow implementation across all of it, I made
+explicit, documented scoping cuts and drove each cut piece to a genuinely
+working, tested state:
+
+- **Widening (Phase 4) covers acyclic, uniform-control-flow CFGs only.**
+  The design's "uniform-control-flow shaders" already excludes divergent
+  branches (that's the linearizer's job, milestone 6); I additionally
+  excluded loops for this milestone, since a uniform loop's widening needs
+  to reconcile with Phase 6's own per-iteration wave-loop nesting (see the
+  design's "A barrier inside a uniform loop..." passage) in a way that
+  interacts with milestone 9 (barriers) more than I could responsibly
+  scope into this pass alone. `SIMDizePass` checks both properties itself
+  (via `feme::cpu::computeWaveUniformity` and `llvm::CycleInfo`) and
+  diagnoses rather than mis-widens a function that violates either.
+- **Widening covers a subset of the "Widening" table.** Elementwise
+  scalar/vector ops, casts, comparisons, `select`, `phi`, and
+  `feme.cpu.resource.*` calls (scalarized when divergent) are implemented;
+  masked memory ops, aggregate/vector-of-`<W x T>` component decomposition,
+  and the general scalarization fallback (mainly for atomics) are left for
+  milestone 7, which the design already scopes that way for "the remaining
+  wave sizes and masked memory ops" -- I just moved a bit more into that
+  bucket than the design's exact wording implied, to keep this milestone's
+  widener a hand-writable, testable size.
+- **A new abstraction, `feme::cpu::BuiltinCalls`, that the design doesn't
+  name.** The design's Phase 4/5 split says Phase 4 widens types and Phase
+  5 lowers builtins from the parameters Phase 4 introduces -- but a
+  per-lane-varying builtin (thread id, ...) has no existing vector-typed
+  intrinsic to widen *to*; Phase 4 has to produce *something* `<W x T>`-
+  typed to keep its own postcondition true, and that something can't be
+  the real arithmetic (that's Phase 5's whole reason to exist as a
+  separate, independently testable pass). I resolved this by introducing
+  canonical, wave-size-mangled `feme.cpu.builtin.*` calls, mirroring
+  exactly how `feme::cpu::ResourceCalls`/`ResourceLoweringPass` already
+  separate "canonicalize the access" from "lower it against a
+  concrete ABI". This is a real design decision, not just an
+  implementation detail, so I recorded it in the Status section's
+  Deviation note rather than only in code comments.
+- **`llvm.dx.group.id` is not one of the canonical builtin calls.** It's
+  uniform (every lane in a group sees the same group id), so there is
+  nothing for Phase 4 to widen at all -- I replace it directly with the
+  wave-body's `GroupID` parameter component in `SIMDizePass` itself. I
+  called this out explicitly since it could look like an inconsistency
+  (why does *this* builtin not go through the same canonicalize-then-lower
+  path as the others) without the reasoning being visible.
+- **The entry wrapper implements only the barrier-free case.** No
+  groupshared allocation, no barrier region splitting -- both are
+  explicitly milestone 9 in the design already; I just confirmed nothing
+  about this milestone's pieces needs to anticipate them beyond passing
+  `FemeDispatchArgs::GroupShared` straight through unconditionally.
+- **The JIT's `dispatch()` runs groups sequentially, on the calling
+  thread.** The full design's thread-pool/`ThreadPoolTaskGroup` machinery
+  is a meaningful chunk of orthogonal engineering (thread pool lifetime,
+  per-invocation task groups, concurrent-dispatch safety) that doesn't
+  change what "does a shader run and produce the right answer" means for
+  this milestone's purpose (making every later step verifiable by
+  execution). I built the sequential version correctly and completely
+  (per-group `FemeDispatchArgs` construction, real group-id iteration) and
+  left `JITOptions::NumThreads` accepted-but-unused, documented as a
+  Deviation. Concurrency is a performance property to add later, not a
+  correctness property this milestone needs.
+- **`feme-run` accepts only already-raised LLVM IR (`.ll`/`.bc`), not
+  DXIL/SPIR-V binaries.** `feme::Driver` already implements that whole
+  import/translate/raise chain; duplicating it inside a second tool would
+  have been a large, purely mechanical addition with no new design
+  content, and the roadmap's own milestone 5 description ("now that
+  `feme-run` exists") only requires the tool to *exist* and JIT something
+  at this point, not to subsume `feme`'s own import path. I scoped
+  `feme-run`'s heap YAML format the same way: untyped raw/structured byte
+  buffers only, matching what `libFeMeRuntimeCPU` and resource-call
+  scalarization actually exercise so far, not the full typed-buffer
+  format sketch in the design.
+
+Each of these is recorded in a new "Deviation: milestone 4's
+implementation narrowed..." block in `feme/docs/FeMeCPUDesign.md`'s Status
+section, following the exact pattern the milestone 1-3 deviation notes
+already established, plus a one-line update to the milestone 4 roadmap
+entry marking it done.
+
+## Implementation order and why
+
+I built the six pieces in dependency order, committing each once it had
+its own passing `lit` + `gtest` coverage, rather than writing everything
+and testing at the end:
+
+1. **`PreparePass`** (Phase 1) first, since every later pass's `lit` tests
+   want an already-structurized, already-mem2reg'd module to exercise
+   against, and it's the most self-contained of the six pieces (existing
+   in-tree LLVM passes -- `FixIrreducible`, `UnifyLoopExits`,
+   `StructurizeCFG`, `LowerSwitch`, `PromotePass` -- plus new entry-point
+   selection/reachability logic). Along the way I discovered
+   `feme-opt`'s LLVM IR driver had no way to report a hard failure other
+   than a crash (a `ModulePassManager::run` has no `Error`-returning path
+   for a pass to propagate a real failure through), so I added a
+   diagnostic-handler-based failure path to `feme-opt` itself
+   (`SawErrorDiagnostic`) rather than reaching for `report_fatal_error`,
+   which aborts the whole process instead of failing the tool cleanly --
+   `not feme-opt ...` needed a real, non-crashing nonzero exit code to be
+   testable the same way every other feme-opt diagnostic test already is.
+2. **`feme::cpu::BuiltinCalls`** next, in its own commit, since it's a
+   shared contract between `SIMDizePass` and `WaveLoweringPass` and is
+   easiest to get right (and unit-test in isolation, mirroring
+   `ResourceCallsTest.cpp`) before either of its two consumers exist.
+3. **`SIMDizePass`** (Phase 4), the largest single piece: a
+   `FunctionWidener` class doing a single reverse-post-order walk,
+   building a divergent-value -> widened-value map plus a memoized
+   uniform-value -> broadcast map, with resource-call scalarization
+   unrolling `W` lane-local scalar calls directly (no runtime lane loop,
+   since `W` is a compile-time constant for this pass). I verified the
+   widening/scalarization logic manually against hand-written `feme-opt`
+   invocations before writing the `lit`/`gtest` coverage, which caught a
+   real bug early: the first version of `SIMDizePass::run` used
+   `llvm::make_early_inc_range(M.functions())` while replacing functions
+   in place, and since a freshly-created widened function gets appended
+   to the end of the module's function list, the same early-inc-range
+   iterator walked into the *new* function and re-widened it (and then
+   the result of that, and so on) -- the fix was to snapshot the list of
+   functions to widen before mutating the module at all.
+4. **`WaveLoweringPass`**'s builtin half (Phase 5), which turned out to be
+   pleasant to write once `BuiltinCalls` existed: it's a direct transcription
+   of the flattened-index decomposition `feme::amdgpu::RaisedLoweringPass`
+   already does the other direction (multiply/add vs. divide/remainder),
+   just in `<W x i32>` instead of scalar `i32`.
+5. **`EntryWrapperPass`** (Phase 6), which needed one non-obvious decision:
+   how the wrapper finds the `FemeDispatchArgs` struct's fields. I built an
+   LLVM `StructType` with exactly `RuntimeABI.h`'s field types in
+   declaration order and relied on ordinary (non-packed) LLVM struct
+   layout to reproduce that header's C layout -- documented explicitly in
+   the file comment as an assumption, since if it ever stopped holding
+   (e.g. a target with unusual alignment rules) the wrapper would silently
+   read the wrong bytes with no crash to point at the cause.
+6. **`JITEngine`**, the other large piece. The most important discovery
+   here: `feme::Context` owns a plain `llvm::LLVMContext`, but ORC's
+   `ThreadSafeModule` needs a module owned by an `orc::ThreadSafeContext`
+   (a distinct, ref-counted, mutex-guarded wrapper type) -- there is no
+   direct conversion between the two. I solved this with a bitcode
+   round-trip (`WriteBitcodeToFile` then `parseBitcodeFile` into a fresh
+   `ThreadSafeContext`), done *before* running the CPU pipeline so every
+   later step operates directly on the module ORC will eventually own,
+   rather than round-tripping again afterward. I hit and fixed two real
+   bugs while writing the first gtest that actually dispatches a compiled
+   shader against a host buffer:
+   - A dangling-pointer bug: I captured the entry point's `Function*`
+     before running the pipeline, then used it *after* the pipeline had
+     replaced that function object entirely (both `SIMDizePass` and
+     `EntryWrapperPass`/`ResourceLoweringPass` build a new `Function` and
+     erase the old one). Reading `hlsl.numthreads` off that stale pointer
+     read whatever garbage happened to occupy the freed memory. Fixed by
+     looking the (same-named, per `Function::takeName`) function back up
+     from the module after the pipeline runs, rather than trusting the
+     pre-pipeline pointer.
+   - A test-authoring bug, not a compiler bug: my first JIT test shader
+     declared a raw-buffer handle with an `i32` element type parameter,
+     which `feme::cpu::ResourceLoweringPass` reads as a *structured*
+     buffer (nonzero stride) rather than an unstructured byte-address
+     buffer -- so my hand-computed byte offset got multiplied by the
+     stride a second time, and only every other lane's write landed in
+     bounds. This was a good, if accidental, exercise of the resource
+     canonicalization's raw/structured disambiguation rule from milestone
+     3; the fix was in the test's IR (use the `i8` element-type spelling
+     for an unstructured buffer), not in any pass.
+   - A build-system-only issue, not a code bug: linking a gtest binary
+     that calls `InitializeNativeTarget()`/`InitializeNativeTargetAsmPrinter()`
+     failed with undefined references to `LLVMInitializeAArch64Target`/
+     `AsmPrinter`, even though the archive defining them was on the link
+     line -- because it was positioned *before* the object file that
+     references it, and static archives resolve left-to-right, once. The
+     fix was moving the `native` LLVM component onto `FeMeTargetCPU`'s own
+     `LINK_COMPONENTS` (so CMake's dependency graph places it correctly
+     relative to that library) rather than onto the unittest target
+     directly.
+7. **`feme-run`**, last, once the JIT existed to drive. Used
+   `llvm::yaml::Input` for the heap file (a small, hand-written
+   `MappingTraits`/`SequenceTraits` pair -- `LLVM_YAML_IS_SEQUENCE_VECTOR`
+   explicitly rejects fundamental element types like `uint32_t`, so that
+   one sequence trait had to be spelled out directly rather than using the
+   macro).
+
+## Validation
+
+Every commit was built and tested individually before moving to the next
+(`cmake --build . --target <lib-or-test>` with the existing
+`ccache`+`LLVM_ENABLE_ASSERTIONS=ON` Release config already configured in
+`build/`, then `ninja check-feme`). The full suite passed at 100% (704
+tests) after every commit in this milestone, with no regressions to any
+pre-existing test. New coverage per phase: `lit` tests for every new pass
+under `feme/test/Transforms/CPU/` (structurization, entry-point selection,
+widening of thread ids/uniform diamonds/resource calls, the two
+unsupported-CFG diagnostics, builtin lowering, and the entry wrapper's
+single- and multi-wave cases) plus `feme/test/Tools/feme-run/`, and `gtest`
+coverage for every new pass/class under `feme/unittests/` (`PrepareTest`,
+`BuiltinCallsTest`, `SIMDizeTest`, `WaveLoweringTest`, `EntryWrapperTest`,
+`JITEngineTest`). `JITEngineTest.RunsThreadIdShaderAgainstARawBuffer` and
+the two `feme-run` `lit` tests are the ones that matter most for this
+milestone's actual goal: they run a compiled shader against a real
+host-allocated buffer and assert on the buffer's contents afterward, not
+merely on IR shape.
+
+## Commit breakdown
+
+Eight commits, each independently buildable and tested: (1) `PreparePass`
++ `feme-opt` diagnostic-handler fix, (2) `feme::cpu::BuiltinCalls`, (3)
+`SIMDizePass`, (4) `WaveLoweringPass`'s builtin half, (5)
+`EntryWrapperPass`, (6) `JITEngine`, (7) `feme-run` + `FeMeCPUDesign.md`
+Status/Roadmap updates, (8) a `clang-format` pass over every file touched
+by this milestone. This note is a ninth, doc-only commit.
