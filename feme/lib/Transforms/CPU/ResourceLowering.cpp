@@ -8,11 +8,342 @@
 
 #include "feme/Transforms/CPU/ResourceLowering.h"
 
+#include "feme/Transforms/CPU/ResourceCalls.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
+
+#include <optional>
+
 using namespace llvm;
 using namespace feme::cpu;
 
-PreservedAnalyses ResourceLoweringPass::run(Module &, ModuleAnalysisManager &) {
-  // Scaffolding only -- see the header comment. Canonical resource call
-  // creation lands in roadmap milestone 3.
-  return PreservedAnalyses::all();
+namespace {
+
+/// The two resource kinds this pass canonicalizes, distinguished by the
+/// `target("dx.")` handle type's name (see the header comment for the
+/// kinds this milestone doesn't yet cover).
+enum class Family { Typed, Raw };
+
+/// One `llvm.dx.resource.handlefromheap` call this pass will rewrite,
+/// together with everything needed to rewrite its accesses.
+struct HandleInfo {
+  CallInst *Handle;
+  Family Kind;
+  /// The stride (in bytes) of a `Raw`-family structured buffer's element, or
+  /// 0 for an unstructured `ByteAddressBuffer` (see "Descriptor heaps" in
+  /// feme/docs/FeMeCPUDesign.md for the distinction). Unused for `Typed`.
+  uint64_t Stride = 0;
+};
+
+/// Returns the intrinsic ID of the call \p V is, or `not_intrinsic`.
+Intrinsic::ID getIntrinsicID(const Value *V) {
+  const auto *CI = dyn_cast<CallInst>(V);
+  const Function *Callee = CI ? CI->getCalledFunction() : nullptr;
+  return Callee ? Callee->getIntrinsicID() : Intrinsic::not_intrinsic;
+}
+
+/// Checks that every use of \p Handle is a typed- or raw-buffer access this
+/// pass knows how to rewrite (see `hasOnlySupportedUses` in
+/// feme::amdgpu::ResourceLoweringPass for the analogous check on the
+/// register-bound side): a load's result must only be consumed by
+/// `extractvalue`, since the raised intrinsic returns a `{value, checkbit}`
+/// pair with no canonical-call counterpart of its own (the canonical load
+/// always succeeds, reporting an out-of-bounds access as a zero result
+/// instead -- see "Bounds checking"); a store's resource operand must be
+/// \p Handle itself, not its stored value.
+bool hasOnlySupportedUses(const CallInst &Handle, Family Kind) {
+  Intrinsic::ID LoadID = Kind == Family::Typed
+                             ? Intrinsic::dx_resource_load_typedbuffer
+                             : Intrinsic::dx_resource_load_rawbuffer;
+  Intrinsic::ID StoreID = Kind == Family::Typed
+                              ? Intrinsic::dx_resource_store_typedbuffer
+                              : Intrinsic::dx_resource_store_rawbuffer;
+
+  for (const User *U : Handle.users()) {
+    const auto *CI = dyn_cast<CallInst>(U);
+    if (!CI)
+      return false;
+    Intrinsic::ID ID = getIntrinsicID(CI);
+    if (ID == StoreID) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      continue;
+    }
+    if (ID != LoadID)
+      return false;
+    for (const User *LoadUser : CI->users())
+      if (!isa<ExtractValueInst>(LoadUser))
+        return false;
+  }
+  return true;
+}
+
+/// Classifies \p Handle's resource kind from its `target("dx.")` handle
+/// type, returning `std::nullopt` for a kind this pass doesn't canonicalize
+/// (see the header comment): constant buffers, and anything
+/// `feme::dxil::OpRaisingPass` doesn't reconstruct a `handlefromheap` for in
+/// the first place (textures, samplers).
+std::optional<HandleInfo> classifyHandle(CallInst &Handle,
+                                         const DataLayout &DL) {
+  auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
+  if (!HandleTy)
+    return std::nullopt;
+
+  if (HandleTy->getName() == "dx.TypedBuffer") {
+    if (!hasOnlySupportedUses(Handle, Family::Typed))
+      return std::nullopt;
+    return HandleInfo{&Handle, Family::Typed, /*Stride=*/0};
+  }
+
+  if (HandleTy->getName() == "dx.RawBuffer") {
+    if (!hasOnlySupportedUses(Handle, Family::Raw))
+      return std::nullopt;
+    // An unstructured `ByteAddressBuffer` always carries a literal `i8`
+    // element type parameter (see `raiseResourceHandleFromHeap` in
+    // OpRaising.cpp); a `StructuredBuffer`'s is instead an opaque
+    // size/alignment placeholder whose store size is never 1 byte as a
+    // scalar `i8` (it is at minimum a single-element `[1 x i8]` array, a
+    // distinct type) -- so the two are unambiguous to tell apart.
+    Type *ElemTy = HandleTy->getTypeParameter(0);
+    uint64_t Stride = ElemTy->isIntegerTy(8) ? 0 : DL.getTypeStoreSize(ElemTy);
+    return HandleInfo{&Handle, Family::Raw, Stride};
+  }
+
+  return std::nullopt; // Constant buffer, texture, sampler: not yet covered.
+}
+
+/// Collects every `handlefromheap` call \p F contains that this pass can
+/// rewrite, or `std::nullopt` if any of them uses a resource kind or access
+/// pattern it cannot model -- in which case \p F is left entirely
+/// unmodified rather than partially rewritten (see the header comment).
+std::optional<SmallVector<HandleInfo, 4>> collectHandles(Function &F) {
+  const DataLayout &DL = F.getDataLayout();
+  SmallVector<HandleInfo, 4> Handles;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || getIntrinsicID(CI) != Intrinsic::dx_resource_handlefromheap)
+      continue;
+    std::optional<HandleInfo> Info = classifyHandle(*CI, DL);
+    if (!Info)
+      return std::nullopt;
+    Handles.push_back(*Info);
+  }
+  return Handles;
+}
+
+/// Builds \p F's replacement: the same function with the six trailing
+/// resource/root-constant ABI parameters "Lowering" describes appended, in
+/// the order the design gives them. The body is moved across (not cloned),
+/// so every instruction -- including the handles `collectHandles` already
+/// found -- stays valid and belongs to the new function afterwards, exactly
+/// as feme::amdgpu::ResourceLoweringPass's `addBindingArguments` does for
+/// its own (differently-shaped) parameter list.
+Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
+  LLVMContext &Ctx = F.getContext();
+  Type *PtrTy = PointerType::get(Ctx, 0);
+  Type *I32Ty = Type::getInt32Ty(Ctx);
+
+  SmallVector<Type *, 6> ParamTypes(F.getFunctionType()->params());
+  ParamTypes.append({PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty});
+
+  FunctionType *NewTy = FunctionType::get(F.getReturnType(), ParamTypes,
+                                          F.getFunctionType()->isVarArg());
+  Function *NewF = Function::Create(NewTy, F.getLinkage(), F.getAddressSpace(),
+                                    "", F.getParent());
+  NewF->copyAttributesFrom(&F);
+  NewF->setComdat(F.getComdat());
+  NewF->splice(NewF->begin(), &F);
+
+  for (auto [OldArg, NewArg] : llvm::zip(F.args(), NewF->args())) {
+    NewArg.takeName(&OldArg);
+    OldArg.replaceAllUsesWith(&NewArg);
+  }
+
+  auto ArgIt = NewF->arg_begin() + F.arg_size();
+  Env.ResourceHeap = &*ArgIt++;
+  Env.ResourceHeap->setName("resource_heap");
+  Env.ResourceHeapCount = &*ArgIt++;
+  Env.ResourceHeapCount->setName("resource_heap_count");
+  Env.SamplerHeap = &*ArgIt++;
+  Env.SamplerHeap->setName("sampler_heap");
+  Env.SamplerHeapCount = &*ArgIt++;
+  Env.SamplerHeapCount->setName("sampler_heap_count");
+  Env.RootConstants = &*ArgIt++;
+  Env.RootConstants->setName("root_constants");
+  Env.RootConstantSize = &*ArgIt++;
+  Env.RootConstantSize->setName("root_constant_size");
+
+  NewF->takeName(&F);
+  F.replaceAllUsesWith(NewF);
+  F.eraseFromParent();
+  return NewF;
+}
+
+/// Replaces every `extractvalue` reading the raised load's `{value,
+/// checkbit}` result with \p Loaded (field 0) or `true` (field 1): the
+/// canonical call has no checkbit of its own because it never fails to
+/// produce a result -- an out-of-bounds access reads as zero instead (see
+/// "Bounds checking" in feme/docs/FeMeCPUDesign.md).
+void replaceLoadResultUses(CallInst &Access, Value *Loaded) {
+  for (User *U : llvm::make_early_inc_range(Access.users())) {
+    auto *EV = cast<ExtractValueInst>(U);
+    Value *Replacement =
+        EV->getIndices()[0] == 0
+            ? Loaded
+            : cast<Value>(ConstantInt::getTrue(EV->getContext()));
+    EV->replaceAllUsesWith(Replacement);
+    EV->eraseFromParent();
+  }
+}
+
+/// Rewrites every access through \p Info.Handle into the corresponding
+/// canonical `feme.cpu.resource.*` call, using \p Env and \p DescriptorIndex
+/// (the heap index the handle was created from).
+void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
+                   Value *DescriptorIndex) {
+  LLVMContext &Ctx = Info.Handle->getContext();
+  Type *I64Ty = Type::getInt64Ty(Ctx);
+  Value *Mask = ConstantInt::getTrue(Ctx);
+
+  for (User *U : llvm::make_early_inc_range(Info.Handle->users())) {
+    auto *Access = cast<CallInst>(U);
+    IRBuilder<> Builder(Access);
+    Intrinsic::ID ID = getIntrinsicID(Access);
+    bool IsStore = ID == Intrinsic::dx_resource_store_typedbuffer ||
+                   ID == Intrinsic::dx_resource_store_rawbuffer;
+
+    Value *Offset;
+    if (Info.Kind == Family::Typed) {
+      // The element index is the canonical typed call's own operand; no
+      // byte-offset arithmetic is needed (see the literal example in
+      // "Lowering").
+      Offset = Builder.CreateZExt(Access->getArgOperand(1), I64Ty);
+    } else if (Info.Stride == 0) {
+      // An unstructured `ByteAddressBuffer`'s index operand is already a
+      // byte address.
+      Offset = Builder.CreateZExt(Access->getArgOperand(1), I64Ty);
+    } else {
+      // A `StructuredBuffer` access's two index operands are an element
+      // index and a byte offset within that element (see
+      // `lowerRawBufferLoad` in DXILOpLowering.cpp, which reads the same
+      // pair the other way for codegen).
+      Value *ElemIdx = Builder.CreateZExt(Access->getArgOperand(1), I64Ty);
+      Value *SubOffset = Builder.CreateZExt(Access->getArgOperand(2), I64Ty);
+      Value *StrideConst = ConstantInt::get(I64Ty, Info.Stride);
+      Offset =
+          Builder.CreateAdd(Builder.CreateMul(ElemIdx, StrideConst), SubOffset);
+    }
+
+    if (IsStore) {
+      Value *StoredValue = Access->getArgOperand(Access->arg_size() - 1);
+      if (Info.Kind == Family::Typed)
+        createTypedStore(Builder, Env, DescriptorIndex, Offset, StoredValue,
+                         Mask);
+      else
+        createRawStore(Builder, Env, DescriptorIndex, Offset, StoredValue,
+                       Mask);
+      Access->eraseFromParent();
+      continue;
+    }
+
+    Type *ElemTy = cast<StructType>(Access->getType())->getElementType(0);
+    CallInst *Loaded =
+        Info.Kind == Family::Typed
+            ? createTypedLoad(Builder, Env, DescriptorIndex, Offset, Mask,
+                              ElemTy, Access->getName())
+            : createRawLoad(Builder, Env, DescriptorIndex, Offset, Mask, ElemTy,
+                            Access->getName());
+    replaceLoadResultUses(*Access, Loaded);
+    Access->eraseFromParent();
+  }
+  Info.Handle->eraseFromParent();
+}
+
+/// Lowers every canonicalizable resource access \p F performs, returning the
+/// rewritten function (a new one, since its signature grows), or nullptr if
+/// \p F has no `handlefromheap` calls or uses one this pass cannot model
+/// (see the header comment). Statically-known heap indices found along the
+/// way are appended to \p StaticHeapIndices.
+Function *lowerFunctionResources(Function &F,
+                                 SmallVectorImpl<uint32_t> &StaticHeapIndices) {
+  if (F.isDeclaration())
+    return nullptr;
+
+  std::optional<SmallVector<HandleInfo, 4>> Handles = collectHandles(F);
+  if (!Handles || Handles->empty())
+    return nullptr;
+
+  ResourceCallEnv Env;
+  Function *NewF = addResourceEnvParams(F, Env);
+
+  for (const HandleInfo &Info : *Handles) {
+    Value *DescriptorIndex = Info.Handle->getArgOperand(0);
+    if (auto *ConstIdx = dyn_cast<ConstantInt>(DescriptorIndex))
+      StaticHeapIndices.push_back(
+          static_cast<uint32_t>(ConstIdx->getZExtValue()));
+    lowerAccesses(Info, Env, DescriptorIndex);
+  }
+  return NewF;
+}
+
+/// Attaches the `!feme.cpu.resources` heap-usage metadata node "Heap usage
+/// discovery" describes for \p F: its name, the root constant block size
+/// (always 0 for now -- root constants are not yet implemented, see the
+/// Status section's Deviation note), whether the sampler heap is used
+/// (always false -- `feme::dxil::OpRaisingPass` does not yet reconstruct a
+/// sampler handle from the heap, see `raiseResourceHandleFromHeap`'s
+/// comment), and the sorted, deduplicated statically-known heap indices the
+/// shader reads through a constant descriptor index.
+void attachResourceMetadata(Function &F,
+                            SmallVectorImpl<uint32_t> &StaticHeapIndices) {
+  llvm::sort(StaticHeapIndices);
+  StaticHeapIndices.erase(llvm::unique(StaticHeapIndices),
+                          StaticHeapIndices.end());
+
+  LLVMContext &Ctx = F.getContext();
+  Type *I32Ty = Type::getInt32Ty(Ctx);
+  SmallVector<Metadata *, 8> Ops;
+  Ops.push_back(MDString::get(Ctx, F.getName()));
+  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)));
+  Ops.push_back(ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)));
+  for (uint32_t Idx : StaticHeapIndices)
+    Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, Idx)));
+
+  F.getParent()
+      ->getOrInsertNamedMetadata("feme.cpu.resources")
+      ->addOperand(MDNode::get(Ctx, Ops));
+}
+
+} // namespace
+
+PreservedAnalyses ResourceLoweringPass::run(Module &M,
+                                            ModuleAnalysisManager &) {
+  bool Changed = false;
+  for (Function &F : llvm::make_early_inc_range(M.functions())) {
+    SmallVector<uint32_t, 4> StaticHeapIndices;
+    Function *NewF = lowerFunctionResources(F, StaticHeapIndices);
+    if (!NewF)
+      continue;
+    Changed = true;
+    attachResourceMetadata(*NewF, StaticHeapIndices);
+  }
+
+  // An unused `handlefromheap` declaration is left behind once its last
+  // caller is rewritten away; nothing downstream can select a call to it.
+  for (Function &F : llvm::make_early_inc_range(M.functions()))
+    if (F.isDeclaration() && F.use_empty() &&
+        F.getIntrinsicID() == Intrinsic::dx_resource_handlefromheap)
+      F.eraseFromParent();
+
+  return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

@@ -7,17 +7,35 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file declares feme::cpu::ResourceLoweringPass, which will re-express a
+// This file declares feme::cpu::ResourceLoweringPass, which re-expresses a
 // raised shader's bindless descriptor-heap resource access
-// (`llvm.{dx,spv}.resource.handlefromheap` and its accompanying loads/
-// stores) as canonical, type-mangled `feme.cpu.resource.*` calls -- see the
-// "Resource Model" -> "Lowering" section of feme/docs/FeMeCPUDesign.md.
+// (`llvm.dx.resource.handlefromheap` and its accompanying typed/raw-buffer
+// loads and stores) as canonical, type-mangled `feme.cpu.resource.*` calls
+// -- see the "Resource Model" -> "Lowering" section of
+// feme/docs/FeMeCPUDesign.md and `feme::cpu::ResourceCalls` (the call
+// creation/matching helpers this pass uses).
 //
-// This is currently scaffolding (roadmap milestone 1): the pass is
-// registered under its final name (`feme-cpu-lower-resources`) so the CPU
-// pipeline's command-line surface exists end to end, but it does not yet
-// canonicalize anything -- see the Roadmap / Milestones section of
-// feme/docs/FeMeCPUDesign.md for when this lands (milestone 3).
+// Scope (roadmap milestone 3):
+//
+//  - Only the two resource kinds `feme::dxil::OpRaisingPass` currently
+//    reconstructs handles for -- `TypedBuffer` and `RawBuffer` (which covers
+//    both `ByteAddressBuffer` and `StructuredBuffer`; see the "Descriptor
+//    heaps" section for how they differ) -- are rewritten. A function using
+//    any other resource kind through the heap (a constant buffer, texture or
+//    sampler) is left entirely unmodified rather than partially rewritten:
+//    constant-buffer canonicalization needs the same multi-return-value
+//    `extractvalue` reconstruction mechanism the Status section's Deviation
+//    note defers for `WaveActiveBallot` et al., and sampling is a non-goal
+//    (see "Goals"/"Non-Goals" in feme/docs/FeMeCPUDesign.md).
+//  - Only DXIL produces `llvm.dx.resource.handlefromheap` today --
+//    SPIR-V's bindless counterpart (`SPV_EXT_descriptor_heap`, see "Resource
+//    Model") has no raised-IR representation yet, so this pass has nothing
+//    to rewrite in a SPIR-V-sourced module until that lands upstream.
+//  - The new heap/root-constant parameters this pass appends to a rewritten
+//    function are threaded through the calls *within* that function only.
+//    Full inter-procedural threading -- a resource access reached through a
+//    helper function the entry point calls -- is deferred; a function is
+//    rewritten only if every resource access it performs is local to it.
 //
 //===----------------------------------------------------------------------===//
 
