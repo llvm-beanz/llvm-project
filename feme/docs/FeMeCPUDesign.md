@@ -119,9 +119,11 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   raised IR yet (`ResourceLoweringPass` explicitly doesn't handle texture
   handles either). Typed/structured/raw buffers and constant buffers only.
 - **Derivatives / quad ops** (`ddx`, `ddy`, `QuadReadAcross*`): these need a
-  defined 2x2 lane arrangement, which only makes sense once pixel shaders
-  do. `WaveGetLaneIndex`-style quad ops on a compute shader could be
-  supported later by fixing a lane-to-quad mapping.
+  defined 2x2 lane arrangement, which only fully makes sense once pixel
+  shaders do. The lane ordering here is already quad-compatible (`W` is a
+  multiple of 4 and lanes are linearized in `SV_GroupIndex` order, so lanes
+  `4k..4k+3` form a quad), so supporting them on compute shaders later is a
+  matter of declaring that mapping rather than changing it.
 - **Indirect calls and recursion.** Neither appears in DXIL or in the
   SPIR-V subset FeMe imports today.
 - **Debug info fidelity.** Preserving line tables through the SIMD-izer is
@@ -781,6 +783,91 @@ what cannot reasonably be emitted as IR:
 
 It deliberately does **not** contain a math library: `llvm.sin` and friends
 lower through the host's normal vector-math handling.
+
+## Accounting for Graphics Later
+
+Compute-only is the v1 scope, but graphics stages are plausible enough
+longer term to be worth designing *around* rather than into a corner. This
+section records what would change, what would not, and the few decisions
+being made now specifically to keep the door open.
+
+### What does not change
+
+The core of this design is stage-agnostic and stays as-is:
+
+- Phases 2–5 (uniformity, linearization, widening, wave lowering). An SPMD
+  program is an SPMD program; a pixel shader's divergence is a vertex
+  shader's is a compute shader's.
+- The bindless descriptor heap, the bounds-checking rules, and the root
+  constant block. Graphics APIs bind resources to graphics stages exactly
+  the way they bind them to compute, so the heap model transfers unchanged;
+  each stage gets its own root constants.
+- Wave size selection, including the shader-declared/user-specified conflict
+  rules.
+- The JIT's ownership of execution — the object it owns grows from "a
+  compiled kernel" to "a compiled pipeline", but the ownership story is the
+  same one, and is the reason graphics is expressible at all without
+  exposing an ABI to embedders.
+
+### What changes
+
+1. **The wrapper (Phase 6) becomes stage-specific.** "Loop over the waves of
+   a thread group" is a compute concept. A vertex shader's wrapper loops
+   over waves of vertices drawn from an index buffer; a pixel shader's
+   consumes fragment quads produced by rasterization. `EntryWrapperPass`
+   would become a family of wrappers over a common interface — supply a
+   wave, supply its builtins, run the body — with the compute wrapper as one
+   member. This is the main reason the wrapper is already a separate pass
+   from everything before it.
+2. **Fixed-function stages have to exist.** Rasterization, attribute
+   interpolation, depth/stencil, blending and output merge are not shader
+   translation at all; they are a software rasterizer, and they are where
+   the bulk of the work is (this is the llvmpipe/SwiftShader-scale part of
+   the problem). They would live in the runtime support library, JIT-
+   specialized per pipeline state where it pays.
+3. **Stage I/O becomes part of the ABI.** Compute shaders communicate only
+   through resources; graphics stages have input/output *signatures*
+   (vertex attributes, varyings, render targets, system values like
+   `SV_Position`). The kernel ABI would grow per-stage input and output
+   pointers plus a signature description, and the importers would have to
+   preserve signature information that FeMe does not need today — DXIL's
+   `!dx.entryPoints` signature elements and SPIR-V's `Input`/`Output`
+   storage class variables.
+4. **Helper lanes appear.** A pixel shader runs inactive "helper"
+   invocations so that derivatives at quad edges are well defined: lanes
+   that compute values but must not have side effects. That is a *second*
+   mask — "live" for computation, "active" for stores — where this design
+   currently has one. Phase 3's mask representation would have to carry a
+   pair.
+5. **Derivatives and quad ops become required.** `ddx`/`ddy` and
+   `QuadReadAcross*` are shuffles within a quad once a lane-to-quad mapping
+   is fixed, but they are only meaningful when one is.
+6. **The pipeline object replaces the single kernel.** `JITEngine` would
+   grow into something owning several compiled stages plus the fixed-
+   function state between them, with `dispatch()` joined by `draw()`.
+   Mesh/amplification shaders reintroduce thread groups (and therefore
+   barriers) into a graphics pipeline, which is a point in favour of keeping
+   the compute wrapper factored out rather than special-cased.
+
+### Decisions made now to keep it cheap later
+
+- **Lane ordering is quad-compatible.** `W` is a multiple of 4 and lanes are
+  linearized in `SV_GroupIndex` order, so lanes `4k..4k+3` can be declared a
+  quad without renumbering anything. This is part of why the minimum wave
+  size is 4 rather than 1 or 2.
+- **The wrapper is a separate phase** with everything stage-specific on one
+  side of it.
+- **`FemeDispatchArgs` has explicit ABI headroom** and separates the
+  resource-facing fields (heaps, root constants) from the
+  execution-facing ones (group id/count), so a stage-specific block can be
+  added without disturbing the former.
+- **Masks are produced by a named phase**, not inferred implicitly, so
+  extending "the mask" into "the pair of masks" is a change to one pass's
+  contract rather than an archaeology exercise.
+
+None of these cost anything for compute. Everything else — rasterization,
+interpolation, signatures, pipeline objects — is deliberately deferred,
+because it is a separate project that happens to reuse this one.
 
 ## Tooling and Testing
 
