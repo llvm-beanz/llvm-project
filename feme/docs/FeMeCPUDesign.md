@@ -521,18 +521,21 @@ declare i1    @feme.cpu.mask.any(i1 %mask)
   off" guard is expressible before widening; Phase 4 turns it into
   `llvm.vector.reduce.or` over the widened mask.
 
-Phase 4 consumes every one of these — a `feme.cpu.*` call surviving into
-Phase 5 is an assertion failure, not a call the backend will attempt —
-lowering them to the real thing:
+Phase 4 consumes every one of these — a `feme.cpu.masked.*` or
+`feme.cpu.mask.*` call surviving into Phase 5 is an assertion failure, not a
+call the backend will attempt — lowering them to the real thing. The
+`feme.cpu.resource.*` calls are the exception: Phase 4 rewrites them into
+per-lane calls to the same declarations, which stay unresolved until the
+runtime bitcode link supplies their definitions.
 
 | Phase 3 form | Phase 4 lowering |
 |---|---|
-| Proven-uniform, invariant load | one guarded scalar `load`, broadcast to active lanes |
-| Uniform address with lane-observable memory | scalarized active-lane loop |
+| `feme.cpu.masked.load` at a uniform address, memory proven wave-invariant | one guarded scalar `load`, broadcast to active lanes |
+| `feme.cpu.masked.load` at a uniform address, memory lane-observable | scalarized active-lane loop |
 | `feme.cpu.masked.load` at a contiguous divergent address | `llvm.masked.load` |
 | `feme.cpu.masked.load` at an arbitrary divergent address | `llvm.masked.gather` |
-| Store to one uniform address | scalarized active-lane loop, in ascending lane order |
-| Store to contiguous/arbitrary divergent addresses | `llvm.masked.store` / `llvm.masked.scatter` |
+| `feme.cpu.masked.store` to a uniform address | scalarized active-lane loop, in ascending lane order |
+| `feme.cpu.masked.store` to a contiguous/arbitrary divergent address | `llvm.masked.store` / `llvm.masked.scatter` |
 | `feme.cpu.masked.atomicrmw` / `.cmpxchg` | scalarized lane loop guarded by the widened mask |
 | masked `feme.cpu.resource.*` call | scalar helper call in an active-lane loop |
 | `feme.cpu.mask.any` | `llvm.vector.reduce.or` |
