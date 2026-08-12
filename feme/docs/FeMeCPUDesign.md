@@ -869,17 +869,22 @@ Every access through a descriptor is bounds-checked, at two levels:
 
 Out-of-bounds reads return zero and out-of-bounds writes are dropped,
 matching D3D/Vulkan robustness rather than trapping. For a vector access the
-check is per-component under the execution mask, so a partially in-bounds
-access behaves like the GPU's. This is **not optional**: a fault-on-OOB CPU
+check is per-component, so a partially in-bounds access behaves like the
+GPU's; whether a lane runs the access at all is the execution mask's job.
+This is **not optional**: a fault-on-OOB CPU
 target would turn a merely-nonconformant shader into a host crash, which is
 unacceptable both for the reference-execution use case and for a host that
 JITs untrusted shader code. An option to disable the checks
 (`-feme-cpu-no-robustness`) for performance measurement is reasonable but
-must not be the default.
+must not be the default. It is implemented by linking the unchecked variant
+of the helpers, so it changes which definitions arrive rather than adding a
+run-time branch.
 
-Because both checks are `select`s rather than branches, they widen and
-predicate like any other operation, and constant heap indices with a known
-heap size fold the first check away entirely.
+Both checks live in the linked helper rather than at the access site, because
+that is where the descriptor is read. They are `select`s rather than
+branches, so once the helper is inlined into the active-lane loop they cost a
+compare and a mask each, and a constant heap index against a known heap count
+folds the first check away outright.
 
 #### Per-descriptor control
 
@@ -890,7 +895,7 @@ compose as follows:
 | Level | Set by | Effect |
 |---|---|---|
 | Heap index check | always on | An index `>= HeapCount` yields the all-zero descriptor. Never skippable — it is what makes the `Flags` word itself safe to read. |
-| Offset check, default | the compiler | `Offset + AccessSize <= SizeInBytes`, OOB reads zero / writes dropped. |
+| Offset check, default | the helper | `Offset + AccessSize <= SizeInBytes`, OOB reads zero / writes dropped. |
 | Offset check, per descriptor | the host, via `FEME_DESCRIPTOR_TRUSTED` | The offset check is skipped for accesses through *that* descriptor. |
 | Offset check, whole module | `-feme-cpu-no-robustness` | The offset check is skipped everywhere and the `Flags` bit is not consulted. Measurement only. |
 
@@ -907,11 +912,14 @@ lets the same compiled kernel run against a trusted and an untrusted heap.
 
 The cost is that the check becomes data-dependent rather than statically
 absent: the emitted code is `select(Trusted | InBounds, ...)` where it was
-`select(InBounds, ...)`. `Trusted` is a uniform load from the descriptor,
-so the extra work is one load and one `or` per descriptor per kernel, not
-per access — and for the overwhelmingly common untrusted case the code is
-what it was. Hosts wanting the checks genuinely gone still have
-`-feme-cpu-no-robustness`.
+`select(InBounds, ...)`. `Trusted` comes from the same descriptor the helper
+already loaded to get `Data` and `SizeInBytes`, so it adds one `or` to a
+load that was happening anyway, and for the overwhelmingly common untrusted
+case the code is what it was. Hoisting that descriptor load out of the
+active-lane loop for a uniform descriptor index is the
+`ResourceCallOptimizationPass`'s job (see "Descriptor formats"), not
+something the flag makes harder. Hosts wanting the checks genuinely gone
+still have `-feme-cpu-no-robustness`.
 
 Two rules keep the escape hatch from becoming a footgun:
 
