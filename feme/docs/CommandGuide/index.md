@@ -7,6 +7,8 @@ tool has its own page:
 - [`feme`](feme.md) — the primary, user-facing FeMe driver.
 - [`feme-opt`](feme-opt.md) — testing tool for FeMe's MLIR passes/conversions
   in isolation.
+- [`feme-run`](feme-run.md) — testing tool that JITs and dispatches a raised
+  shader against a textual resource heap, for the FeMe CPU target.
 - [`feme-translate`](feme-translate.md) — testing tool for FeMe's per-format
   import/export stages in isolation.
 - [`dxbc-as`](dxbc-as.md) — standalone DXBC assembler, used to build
@@ -18,7 +20,8 @@ tool has its own page:
 - [`dxbc-as-fuzzer`](dxbc-as-fuzzer.md) — libFuzzer harness for `dxbc-as`'s
   own assembly parser.
 
-`feme-opt`, `feme-translate`, and `dxbc-as` are testing-only entry points
+`feme-opt`, `feme-run`, `feme-translate`, and `dxbc-as` are testing-only
+entry points
 (see the "Core Architectural Principle: No Global State" and "Testing
 Tools" sections of [Design.md](../Design.md)): they exist to exercise
 individual pipeline stages in isolation under `lit`/`FileCheck`, not as

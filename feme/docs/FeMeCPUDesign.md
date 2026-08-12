@@ -3,9 +3,10 @@
 ## Status
 
 Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header),
-milestone 2 (uniformity analysis) and milestone 3 (resource
-canonicalization + scalar helper IR) are implemented. This document is a
-companion to [Design.md](Design.md) — it
+milestone 2 (uniformity analysis), milestone 3 (resource canonicalization +
+scalar helper IR) and milestone 4 (uniform-control-flow end-to-end at
+`W = 4`) are implemented. This document is a companion to
+[Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
 "Raised LLVM IR -> AMDGPU" sections of that document first; this design is
@@ -122,6 +123,63 @@ and summarized here:
   which is what "testable at `W`-agnostic scale" means for this piece;
   reading the symbol back out of a real object file is exercised once the
   AOT/JIT milestones produce one.
+
+Deviation: milestone 4's implementation narrowed several things described
+in "Phase 4: Widening", "Phase 5: Wave and Builtin Lowering", "Phase 6:
+Group Execution and Barriers" and "JIT Flow" below; each is called out
+inline where it's discussed, and summarized here:
+
+- `feme::cpu::SIMDizePass` widens acyclic, uniform-control-flow shaders
+  only (a CFG with no loop and no divergent branch): the divergence
+  transform (Phase 3, milestone 6) does not exist yet, so this pass
+  verifies both properties itself and diagnoses (rather than mis-widens) a
+  function that has either. Only a subset of "Widening"'s table is
+  implemented: elementwise scalar/vector-typed instructions (binary/unary
+  ops, casts, `icmp`/`fcmp`, `select`, `phi`), the per-lane-varying
+  builtins (thread id family, lane index), and `feme.cpu.resource.*` calls
+  (scalarized when any operand is divergent, left scalar when every
+  operand is uniform). Masked memory ops, the scalarization fallback for
+  arbitrary instructions, atomics, and vector/aggregate leaf decomposition
+  are milestone 7.
+- The per-lane-varying builtins `SIMDizePass` cannot widen with an
+  ordinary elementwise rule (thread id, thread id in group, flattened
+  thread id in group, lane index) become canonical, wave-size-mangled
+  `feme.cpu.builtin.*` calls (see `feme::cpu::BuiltinCalls`), mirroring how
+  `feme::cpu::ResourceCalls` separates canonicalization from lowering;
+  `feme::cpu::WaveLoweringPass`'s builtin half lowers them into the real
+  group-id/wave-index/lane arithmetic. `llvm.{dx,spv}.group.id` is uniform
+  and is simply replaced by the corresponding wave-body `GroupID`
+  parameter directly in `SIMDizePass`, with no canonical call of its own.
+  This is not what the design's Phase 4/5 split originally implied
+  (`SIMDizePass` widens a scalar type in place; it does not introduce new
+  call kinds), but keeps Phase 4's "everything is `<W x T>`" postcondition
+  true without Phase 4 having to know the group/wave-index arithmetic
+  Phase 5 owns.
+- `feme::cpu::WaveLoweringPass` implements only the builtin half (thread
+  and group id arithmetic); the remaining wave intrinsics (`WaveActiveSum`,
+  `WaveReadLaneAt`, ...) are milestone 8, matching the design's own "two
+  halves, separately usable" note.
+- `feme::cpu::EntryWrapperPass` implements only the barrier-free case: the
+  wave loop and the exported `feme_cpu_entry_<name>` ABI function. Barrier
+  region splitting and groupshared allocation are milestone 9;
+  `FemeDispatchArgs::GroupShared` is threaded straight through to the wave
+  body unconditionally.
+- `feme::cpu::JITEngine::dispatch` runs every group of a dispatch
+  sequentially, on the calling thread, rather than across a thread pool:
+  `JITOptions::NumThreads` is accepted but not yet consulted. The
+  `ObjectCache`-based compiled-shader caching, the escape hatch for a
+  driver-style embedder, and the object-file path
+  (`feme::TargetMachineBackend` retargeting to the host triple) described
+  in "JIT Flow" are not yet wired into this pass; only the JIT path is
+  implemented so far.
+- `feme-run`'s input must already be idiomatic, raised LLVM IR
+  (`.ll`/`.bc`); it does not yet import DXIL or SPIR-V itself the way
+  `feme::Driver` does. Its heap YAML format only describes untyped raw/
+  structured byte buffers, not the typed-buffer view/format the full
+  design's YAML sketch shows -- matching what `libFeMeRuntimeCPU` and
+  resource-call scalarization exercise as of this milestone. `--reference`
+  execution (the ground truth the CFG restructurization suite, milestone
+  5, diffs against) is not yet implemented.
 
 ## Summary
 
@@ -1617,13 +1675,17 @@ Sequenced so each step is independently testable and useful:
   implemented, only a representative subset of formats/views has a scalar
   helper, and nothing yet links that helper IR into a compiled shader or
   writes the artifact into a real object file).
-4. **Uniform-control-flow end-to-end at `W = 4`**: prepare + widening of
-   straight-line, uniform-control-flow shaders + Phase 5's builtin half +
-   entry wrapper, plus
+4. **Uniform-control-flow end-to-end at `W = 4`** (done): prepare +
+   widening of straight-line, uniform-control-flow shaders + Phase 5's
+   builtin half + entry wrapper, plus
    `feme-run` and the JIT. This is the first point at which a shader *runs*,
    and it deliberately comes before the divergence transform — it makes
    every subsequent step verifiable by execution rather than by IR
-   inspection alone.
+   inspection alone. See the Status section's Deviation note for what
+   narrowed (acyclic/uniform-CFG-only widening covering a subset of the
+   widening table, the builtin-half/wave-op split, the barrier-free entry
+   wrapper, sequential rather than thread-pooled dispatch, and `feme-run`
+   accepting only already-raised LLVM IR).
 5. **CFG restructurization suite**: the named-shape corpus, the
    `-verify-structured` postcondition checker, and — now that `feme-run`
    exists — the generator, its differential harness, and the fuzzer over
