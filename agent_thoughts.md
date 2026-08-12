@@ -6458,3 +6458,82 @@ commit (the hand-written `.ll` and the `embed_bitcode.py` script have no
 Six commits: the canonical call helpers, the lowering pass itself,
 the resource-info reader plus versioned artifact format, the runtime bitcode
 library, the design doc status/deviation update, and this note.
+
+# Agent thoughts: WaveUniformityTest.cpp -> FileCheck against the printer
+
+## Request
+
+Convert `WaveUniformityTest.cpp`'s `gtest` coverage of
+`feme::cpu::computeWaveUniformity` to `FileCheck` tests against a printer
+pass's output, on the premise that asserting on printed `DIVERGENT:` lines
+is easier to read and debug than a table of `isDivergentAtDef` assertions.
+
+## Investigation
+
+Before writing anything I checked whether a printer pass already existed:
+it did. `WaveUniformityPrinterPass` (`feme/include/feme/Analysis/CPU/
+WaveUniformity.h`, `feme/lib/Analysis/CPU/WaveUniformity.cpp`) was already
+wired into `feme-opt` under `print<feme-cpu-uniformity>`
+(`feme/tools/feme-opt/feme-opt.cpp`), and there was already one small `lit`
+test using it (`feme/test/Analysis/CPU/uniformity.ll`), covering a subset
+of what `WaveUniformityTest.cpp`'s ten `gtest` cases covered. So the actual
+task was narrower than the prompt implied: expand the `lit` coverage to
+subsume every `gtest` case, then delete the now-redundant `gtest` file (and
+the CMake wiring for its now-empty `unittests/Analysis` directory), rather
+than adding a printer pass from scratch.
+
+## Approach
+
+I ran `feme-opt --llvm -passes='print<feme-cpu-uniformity>'` against a
+scratch `.ll` file exercising every scenario from the ten `gtest` cases
+first, to see the printer's exact output shape (`BLOCK <name>` /
+`DEFINITIONS` / `TERMINATORS` / `END BLOCK`, plus a trailing `ALL VALUES
+UNIFORM` line when nothing in a function diverges) before writing
+`CHECK` lines against it, rather than guessing at the format from the
+printer's source and getting brittle regexes wrong on the first try.
+
+I organized the expanded `uniformity.ll` as one function per scenario
+(mirroring the one-`TEST`-per-scenario shape of the `gtest` file it
+replaces) rather than cramming everything into the original single `@main`
+function, since `print<feme-cpu-uniformity>` prints one
+`WaveUniformityInfo for function '...':` block per function and
+`CHECK-LABEL` naturally anchors each scenario the same way a `TEST(...)`
+name did. This keeps the diff for any future scenario small and the
+failure output for a broken scenario unambiguous (which `CHECK-LABEL`
+failed to match), rather than one giant function where a `CHECK-NOT`
+regression could be misattributed to the wrong nearby instruction.
+
+Covered scenarios (matching the ten original `gtest` `TEST`s 1:1):
+`llvm.dx.thread.id`, `llvm.dx.flattened.thread.id.in.group`,
+`llvm.dx.wave.getlaneindex`, and `WavePrefixUSum` are divergence sources;
+`WaveActiveUSum` and `WaveReadLaneAt` are uniform even over a divergent
+operand; a bare constant expression is uniform; a value computed from a
+divergent thread id is divergent; a phi merging constants along a
+divergent branch's arms is divergent; a phi merging constants along a
+uniform branch's arms stays uniform.
+
+## Validation
+
+Ran the new `uniformity.ll` directly through `feme-opt | FileCheck` and
+then through `llvm-lit` before committing, to confirm both the printer's
+literal output and the `lit`-harness path agree. After deleting
+`WaveUniformityTest.cpp` and its `CMakeLists.txt`/`unittests/Analysis`
+subdirectory wiring, reconfigured with `cmake .` (new subdirectory removed)
+and ran `ninja check-feme`: 673/673 (100%) passing -- same total as before
+this change's predecessor commit, since one `gtest` binary's worth of
+cases became `lit` cases instead of a net change in coverage.
+
+## Design doc update
+
+Milestone 2 ("Uniformity analysis") in `feme/docs/FeMeCPUDesign.md`
+originally specified *both* `gtest` coverage directly against
+`UniformityInfo` and a `print<feme-cpu-uniformity>` printer for `lit`.
+Since this change removes the `gtest` half entirely, I added a milestone-2
+deviation bullet to the Status section, updated "Phase 2: Uniformity
+Analysis"'s own description of its test strategy, and updated the "Test
+strategy per phase" table's Uniformity row and the roadmap milestone 2
+entry, so the design doc doesn't describe test coverage that no longer
+exists.
+
+Three commits: the expanded `lit` test, the `gtest` file/CMake removal,
+and the design doc update. This note is a fourth.
