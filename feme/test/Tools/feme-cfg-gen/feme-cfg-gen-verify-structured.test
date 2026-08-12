@@ -1,0 +1,19 @@
+// RUN: feme-cfg-gen --seed=1 --unstructured --max-depth=4 --max-constructs=20 \
+// RUN:   | feme-opt --llvm -passes=feme-cpu-prepare -verify-structured -S -o /dev/null
+// RUN: feme-cfg-gen --seed=2 --unstructured --max-depth=4 --max-constructs=20 \
+// RUN:   | feme-opt --llvm -passes=feme-cpu-prepare -verify-structured -S -o /dev/null
+// RUN: feme-cfg-gen --seed=3 --unstructured --max-depth=4 --max-constructs=20 \
+// RUN:   | feme-opt --llvm -passes=feme-cpu-prepare -verify-structured -S -o /dev/null
+// RUN: feme-cfg-gen --seed=4 --unstructured --max-depth=4 --max-constructs=20 \
+// RUN:   | feme-opt --llvm -passes=feme-cpu-prepare -verify-structured -S -o /dev/null
+// RUN: feme-cfg-gen --seed=5 --unstructured --max-depth=4 --max-constructs=20 \
+// RUN:   | feme-opt --llvm -passes=feme-cpu-prepare -verify-structured -S -o /dev/null
+
+// `feme-cfg-gen` (roadmap milestone 5's layer 3 generator, see the "CFG
+// restructurization test suite" section of feme/docs/FeMeCPUDesign.md)
+// must always emit a shader `feme-cpu-prepare` can restructure into
+// something `-verify-structured` accepts, across a handful of seeds and
+// with every construct kind enabled (`--unstructured` included, since that
+// is the shape most likely to break `FixIrreducible`). Each RUN line
+// succeeding is the whole test, matching how the design describes the
+// named-shape corpus's own tests.

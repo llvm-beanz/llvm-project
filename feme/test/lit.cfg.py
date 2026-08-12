@@ -41,6 +41,7 @@ tools = [
     "feme",
     "feme-opt",
     "feme-run",
+    "feme-cfg-gen",
     "feme-translate",
     # See the "dxbc-as" section of feme/docs/Design.md: a standalone DXBC
     # assembler with no MLIR/feme::Context dependency, used to build

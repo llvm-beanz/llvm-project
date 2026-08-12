@@ -1,0 +1,3 @@
+// RUN: feme-cfg-gen --help | FileCheck %s
+
+// CHECK: FeMe seeded CFG-shaped shader generator
