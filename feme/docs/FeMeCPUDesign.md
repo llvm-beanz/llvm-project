@@ -1264,9 +1264,9 @@ seed and asserts the verifier's postconditions costs little and runs where
 those already run. Failing seeds reduce to layer-1 files, by hand or with
 `llvm-reduce`.
 
-Layers 1 and 2 come with the Phase 1 milestone; layers 3 and 4 depend on
-`feme-run`, so they arrive with milestone 4 and are the thing that makes
-milestone 5 (linearization) safe to build on.
+Layers 1 and 2 come with the prepare pass in milestone 4; layers 3 and 4
+depend on `feme-run`, so they arrive in milestone 5 and are the thing that
+makes milestone 6 (linearization) safe to build on.
 
 ## Directory / Library Layout Additions
 
@@ -1297,6 +1297,7 @@ feme/
   tools/
     feme-run/
     feme-cfg-gen/                 (seeded CFG generator; see the test suite)
+    feme-cpu-restructure-fuzzer/  (libFuzzer over feme-cfg-gen seeds)
 ```
 
 `Analysis/` is a new top-level module; the alternative (putting
@@ -1323,9 +1324,9 @@ Sequenced so each step is independently testable and useful:
    inspection alone.
 5. **CFG restructurization suite**: the named-shape corpus, the
    `-verify-structured` postcondition checker, and — now that `feme-run`
-   exists — the generator and its differential harness. This lands before
-   the linearizer because the linearizer is what starts depending on
-   Phase 1 having actually succeeded.
+   exists — the generator, its differential harness, and the fuzzer over
+   it. This lands before the linearizer because the linearizer is what
+   starts depending on Phase 1 having actually succeeded.
 6. **Linearization** for divergent control flow (straight-line diamonds,
    then loops).
 7. **Widening** for the remaining wave sizes, including masked memory ops
