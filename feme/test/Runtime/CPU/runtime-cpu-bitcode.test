@@ -1,18 +1,19 @@
-; RUN: llvm-as %S/../../../runtime/CPU/FeMeRuntimeCPU.ll -o %t.bc
+; RUN: clang -c -emit-llvm -O2 -ffreestanding -fno-builtin \
+; RUN:     %S/../../../runtime/CPU/FeMeRuntimeCPU.c -o %t.bc
 ; RUN: opt -passes=verify -disable-output %t.bc
 ; RUN: opt -S %t.bc -o - | FileCheck %s
 
-; libFeMeRuntimeCPU's shader-side helper IR (see "Runtime Support Library"
-; in feme/docs/FeMeCPUDesign.md) assembles cleanly and defines the
+; libFeMeRuntimeCPU's shader-side helper C source (see "Runtime Support
+; Library" in feme/docs/FeMeCPUDesign.md) compiles cleanly and defines the
 ; canonical calls `feme::cpu::ResourceCalls` creates -- see
 ; feme/unittests/Runtime/CPU/RuntimeCPUTest.cpp for the gtests that
 ; JIT-execute these and check their actual bounds-checking/format-
 ; conversion behavior; this lit test only covers that the bitcode itself
 ; builds and exposes the expected external symbols.
 
-; CHECK-DAG: define <4 x float> @feme.cpu.resource.load.typed.v4f32(
-; CHECK-DAG: define void @feme.cpu.resource.store.typed.v4f32(
-; CHECK-DAG: define i32 @feme.cpu.resource.load.raw.i32(
-; CHECK-DAG: define void @feme.cpu.resource.store.raw.i32(
-; CHECK-DAG: define float @feme.cpu.resource.load.raw.f32(
-; CHECK-DAG: define void @feme.cpu.resource.store.raw.f32(
+; CHECK-DAG: <4 x float> @feme.cpu.resource.load.typed.v4f32(
+; CHECK-DAG: void @feme.cpu.resource.store.typed.v4f32(
+; CHECK-DAG: i32 @feme.cpu.resource.load.raw.i32(
+; CHECK-DAG: void @feme.cpu.resource.store.raw.i32(
+; CHECK-DAG: float @feme.cpu.resource.load.raw.f32(
+; CHECK-DAG: void @feme.cpu.resource.store.raw.f32(

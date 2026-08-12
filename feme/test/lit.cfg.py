@@ -69,6 +69,11 @@ tools = [
     "obj2yaml",
     "llvm-objcopy",
     "llvm-readobj",
+    # Compiles libFeMeRuntimeCPU's C source (see
+    # feme/runtime/CPU/FeMeRuntimeCPU.c and "Runtime Support Library" in
+    # feme/docs/FeMeCPUDesign.md) to bitcode at test time, the same way the
+    # build itself does (feme/runtime/CPU/CMakeLists.txt).
+    "clang",
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
