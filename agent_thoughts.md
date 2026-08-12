@@ -7409,3 +7409,144 @@ headers).
 No design-document deviation resulted from this fix; it's a pure build/IWYU
 correction with no behavioral or architectural change, so
 `feme/docs/FeMeCPUDesign.md` was not touched.
+
+# Agent thoughts: why the agent's own build was "passing" a build that doesn't build
+
+## The question
+
+The user reported a build failure in `WaveLoweringTest.cpp` (`member access
+into incomplete type 'llvm::ConstantInt'`) and asked something more pointed
+than "fix this": why had prior sessions' validation -- which explicitly
+claims to build and run `check-feme` before every commit (see the
+"Validation" section a few commits back, and the CFGGen.cpp postmortem
+right above this one) -- not caught it? That's a question about the agent's
+*process*, not just this one file.
+
+## Reproducing, and finding it doesn't reproduce
+
+First surprise: building the exact failing translation unit
+(`WaveLoweringTest.cpp.o`) in this session's own `build/` directory
+succeeded, first try, no errors. So either the bug had already been fixed
+upstream of this checkout (it hadn't -- `git log` shows the file untouched
+since milestone 4), or this session's build environment differs from the
+one that produced the user's error log in some way that matters.
+
+Comparing the two compile command lines side by side (the user's, pasted
+verbatim in their report; this session's, pulled from
+`build/compile_commands.json`) found the difference immediately: this
+session's command has
+`-Xclang -include-pch -Xclang .../LLVMCore.dir/cmake_pch.hxx.pch` tacked
+onto it. The user's does not -- their command has no PCH flags at all.
+This build has precompiled headers on; theirs doesn't.
+
+## Why: two different default-PCH decisions, driven by two different compiler-cache tools
+
+`llvm/cmake/modules/HandleLLVMOptions.cmake` decides
+`CMAKE_DISABLE_PRECOMPILE_HEADERS`'s default via a handful of
+compiler/launcher-specific rules when the project doesn't set it
+explicitly (which `feme/cmake/caches/feme.cmake` didn't, until this
+change). Two of those rules matter here:
+
+- `CMAKE_CXX_COMPILER_LAUNCHER MATCHES "sccache"` -> PCH forced off (sccache
+  doesn't support PCH; see the comment's linked sccache issues).
+- Clang >= 18 with no launcher-specific override -> PCH left **on**.
+
+The user's compile command invokes `sccache` (`/usr/local/bin/sccache
+/usr/bin/c++ ...`); this session's `build/` was configured with
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache` (a plain `ccache`, not `sccache`) per
+the "object file caching" instruction every session has been following
+since milestone 1's scaffolding. `ccache` isn't one of the rules that
+disables PCH, so on Clang 18 (this host) PCH stays on by default. Two
+reasonable-sounding "use a compiler cache" choices -- `ccache` here,
+`sccache` for the user -- silently produced two different
+default `CMAKE_DISABLE_PRECOMPILE_HEADERS` values, and only one of them
+matches the coding standard `feme/.instructions.md` already states
+("Headers must compile standalone (include all dependencies)").
+
+## Why the PCH masked this specific bug
+
+`WaveLoweringTest.cpp` uses `cast<ConstantInt>(...)->getZExtValue()` but
+only transitively includes `llvm/IR/Instructions.h`, which merely forward
+-declares `ConstantInt` (the full definition is in `llvm/IR/Constants.h`,
+never directly included). With PCH on, every translation unit in this
+build implicitly force-includes `LLVMCore.dir/cmake_pch.hxx`, which (being
+built to cover all of LLVMCore's own headers) already includes
+`Constants.h` -- so `ConstantInt` is a complete type by the time this file's
+own `#include`s are processed, regardless of what *this file itself*
+remembered to include. Confirmed directly: recompiling with
+`-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON` (no other change) reproduces the
+user's exact error, byte for byte (same three diagnostics, same
+`Casting.h` instantiation backtrace); recompiling with it back off, and the
+error disappears again, no source change either way. This is the same
+class of bug the CFGGen.cpp fix (immediately above this entry) diagnosed
+and partially addressed -- and that fix even explicitly noted several other
+files (`BuiltinCalls.cpp`, `SIMDize.cpp`, `VerifyStructured.cpp`) relying on
+the same kind of transitive-include fragility, correctly guessing they
+were "not currently broken" but not identifying *why* they weren't broken
+(the same masking PCH) or that the mask was a property of the *validation
+build*, not of the source.
+
+## The actual process gap
+
+The prior CFGGen.cpp investigation checked whether feme's own
+`CMakeLists.txt` opted into PCH (it doesn't -- no target passes
+`PRECOMPILE_HEADERS`) and concluded "this isn't a PCH problem." That
+check was incomplete: it's not feme's CMake that turns PCH on, it's
+LLVM's own top-level `HandleLLVMOptions.cmake` defaulting it on for
+*every* target in the build (including feme's) whenever the host compiler
+and launcher combination doesn't match one of its own carve-outs -- and
+`ccache` (this project's chosen launcher) isn't one of them, while
+`sccache` (evidently what real downstream users/CI are building with) is.
+So every session's "built and tested `check-feme` successfully" claim has
+been true only in the narrow sense that *this specific build
+configuration* built and tested successfully -- not that the code is
+free of missing-`#include` bugs, which is the thing `check-feme` passing
+is supposed to stand in for. This is exactly the same gap as the very
+first prompt in `agent_prompt.md` ("Please ensure that the code builds
+without pch"), which the first CFGGen.cpp fix addressed for one file
+without addressing the build configuration that let the underlying
+class of bug reappear afterward.
+
+## Fix
+
+1. `feme/unittests/Transforms/CPU/WaveLoweringTest.cpp`: added the missing
+   `#include "llvm/IR/Constants.h"`, in include-order, fixing the reported
+   error directly (a pure IWYU fix, no behavior change).
+2. `feme/cmake/caches/feme.cmake`: added
+   `set(CMAKE_DISABLE_PRECOMPILE_HEADERS ON CACHE BOOL "")`, with a comment
+   explaining why (see above). This is the process fix: it makes PCH-off
+   the one true default for *every* build configured from this cache file,
+   regardless of which compiler-cache launcher (`ccache`, `sccache`, none)
+   gets passed on the command line, so this class of bug can't hide behind
+   a launcher choice again. Verified by reconfiguring this session's
+   existing `build/` directory with `-C feme/cmake/caches/feme.cmake`
+   (an incremental `cmake .` re-run, not a from-scratch configure) and
+   confirming `CMakeCache.txt` now reads
+   `CMAKE_DISABLE_PRECOMPILE_HEADERS:BOOL=ON` and that the generated
+   compile commands no longer carry `-include-pch`.
+
+## Validation
+
+- Reconfigured this session's `build/` directory in place with
+  `-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON` (before touching the cache
+  script) and rebuilt `WaveLoweringTest.cpp.o` directly: reproduced the
+  user's exact failure, unmodified source. This isolated the cause to the
+  build configuration before writing any fix.
+- Applied the `#include` fix; rebuilt the same object file (still PCH-off):
+  succeeds.
+- Ran the full `ninja check-feme` (PCH still off, `ccache` +
+  `LLVM_ENABLE_ASSERTIONS=ON` both still in effect) end to end: all 5420
+  build steps succeed, 742/742 tests pass -- confirming the PCH-off
+  configuration doesn't regress anything else in the tree (i.e. this
+  really was the only file relying on the mask, at least among what
+  `check-feme` covers today).
+- Added the `CMAKE_DISABLE_PRECOMPILE_HEADERS` cache setting, reconfigured
+  `build/` again via `cmake -C feme/cmake/caches/feme.cmake .` (simulating
+  a fresh checkout picking up the updated cache file) to confirm the
+  setting takes effect the way a real from-scratch configure would, then
+  re-ran `ninja check-feme` once more: 742/742 tests pass again.
+
+## Design doc
+
+No `feme/docs/*Design.md` changes: this is a build-configuration and
+process fix, not a design decision about FeMe's own architecture or ABI.
