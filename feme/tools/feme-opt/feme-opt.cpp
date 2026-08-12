@@ -24,6 +24,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "feme/Analysis/CPU/WaveUniformity.h"
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
@@ -162,6 +163,20 @@ void registerFeMePasses(PassBuilder &PB) {
         MPM.addPass(feme::cpu::EntryWrapperPass());
         return true;
       });
+  // Phase 2's analysis printer (see feme/docs/FeMeCPUDesign.md's "Phase 2:
+  // Uniformity Analysis" section) is a function pass, not a module pass, so
+  // it is registered against the FunctionPassManager parsing callback;
+  // `PassBuilder::parsePassPipeline`'s module-level overload auto-wraps a
+  // recognized leading function-pass name in `function(...)`, matching how
+  // `opt -passes='print<uniformity>'` works upstream.
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, FunctionPassManager &FPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::WaveUniformityPrinterPass::name())
+          return false;
+        FPM.addPass(feme::cpu::WaveUniformityPrinterPass(outs()));
+        return true;
+      });
 }
 
 /// A minimal `opt`-style new-pass-manager driver for FeMe's LLVM IR passes
@@ -204,6 +219,9 @@ int runLLVMIRMode(int Argc, char **Argv) {
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
   registerFeMePasses(PB);
+  // Not part of PassBuilder's own registry (see the "Phase 2" comment
+  // above), so the FunctionAnalysisManager needs it registered directly.
+  FAM.registerPass([] { return feme::cpu::WaveUniformityAnalysis(); });
 
   ModulePassManager MPM;
   if (Error E = PB.parsePassPipeline(MPM, PassPipeline)) {
