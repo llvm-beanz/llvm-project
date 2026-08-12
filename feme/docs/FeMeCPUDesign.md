@@ -618,6 +618,14 @@ Every row here is a small, independently testable rewrite, which is how this
 phase's `lit` tests are organized (one `CHECK` function per intrinsic, at a
 couple of wave sizes).
 
+**Two halves, separately usable.** The last row is not a wave operation: the
+thread and group id builtins are lane arithmetic on the wave-body parameters
+and have a meaning for any execution, wave-shaped or not. The pass therefore
+lowers builtins and wave ops as two independently runnable halves. Milestone
+4 needs only the builtin half to run its first shader, and `feme-run
+--reference` runs the builtin half over single invocations while rejecting
+wave ops outright (see "CFG restructurization test suite").
+
 No lowering may create poison merely because `M` is all-zero: Phase 3 does
 not initially skip all-off regions, so such operations can be evaluated even
 though no source lane observes their result. Where a source specification
@@ -1354,10 +1362,11 @@ each invocation took*, which is what makes a mismatch diagnosable rather
 than merely detectable.
 
 The ground truth for the comparison is `feme-run --reference`: a mode that
-skips Phases 3–5 and calls the *unwidened* function once per invocation, so
-the reference executes the original control flow rather than a
-restructured, masked version of it. Phase 6 still runs, in a scalar variant
-whose "wave loop" is a loop over single invocations, so builtins,
+skips Phases 3 and 4 and calls the *unwidened* function once per invocation,
+so the reference executes the original control flow rather than a
+restructured, masked version of it. Phase 5 runs its builtin half only, and
+Phase 6 runs in a scalar variant whose "wave loop" is a loop over single
+invocations, so builtins,
 groupshared memory, barriers and the kernel ABI are the ones described
 above and only the SPMD transform is out of the picture. This is not a
 `W = 1` wave size — there is none — and wave intrinsics have no meaning one
@@ -1433,7 +1442,8 @@ Sequenced so each step is independently testable and useful:
   heap-usage metadata, versioned AOT artifact information and the
   `ResourceInfo` reader. Testable at `W`-agnostic scale.
 4. **Uniform-control-flow end-to-end at `W = 4`**: prepare + widening of
-   straight-line, uniform-control-flow shaders + entry wrapper, plus
+   straight-line, uniform-control-flow shaders + Phase 5's builtin half +
+   entry wrapper, plus
    `feme-run` and the JIT. This is the first point at which a shader *runs*,
    and it deliberately comes before the divergence transform — it makes
    every subsequent step verifiable by execution rather than by IR
@@ -1447,7 +1457,8 @@ Sequenced so each step is independently testable and useful:
    then loops).
 7. **Widening** for the remaining wave sizes, including masked memory ops
    and the scalarization fallback.
-8. **Wave intrinsic lowering**.
+8. **Wave intrinsic lowering**: Phase 5's remaining half, over the mask
+   milestone 6 introduced.
 9. **Barriers and groupshared memory** (region splitting).
 10. **Resource performance**: recognize uniform descriptor calls, hoist
   descriptor/format checks, emit vector fast paths, and measure whether a
