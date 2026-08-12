@@ -4,6 +4,7 @@ add_mlir_library(FeMeTransformsCPU
   Prepare.cpp
   ResourceLowering.cpp
   SIMDize.cpp
+  UnsupportedOps.cpp
   WaveLowering.cpp
 
   LINK_COMPONENTS

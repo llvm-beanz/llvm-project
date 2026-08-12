@@ -17,6 +17,7 @@ add_mlir_library(FeMeDriver
   FeMeTarget
   FeMeTargetCPU
   FeMeTransformsAMDGPU
+  FeMeTransformsCPU
   FeMeTransformsDXIL
   FeMeTransformsSPIRV
   FeMeTranslateSPIRV
