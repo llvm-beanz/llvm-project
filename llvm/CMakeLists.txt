@@ -208,6 +208,11 @@ if ("feme" IN_LIST LLVM_ENABLE_PROJECTS)
     message(STATUS "Enabling MLIR as a dependency to feme")
     list(APPEND LLVM_ENABLE_PROJECTS "mlir")
   endif()
+
+  if (NOT "clang" IN_LIST LLVM_ENABLE_PROJECTS)
+    message(STATUS "Enabling clang as a dependency to feme")
+    list(APPEND LLVM_ENABLE_PROJECTS "clang")
+  endif()
 endif()
 
 if ("lldb" IN_LIST LLVM_ENABLE_PROJECTS)
