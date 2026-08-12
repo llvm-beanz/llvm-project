@@ -21,11 +21,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please implement milestone 4 of the FeMe CPU design:
+Please implement milestone 5 of the FeMe CPU design:
 
-> 4. **Uniform-control-flow end-to-end at `W = 4`**: prepare + widening of
->    straight-line, uniform-control-flow shaders + Phase 5's builtin half +
->    entry wrapper, plus `feme-run` and the JIT. This is the first point at
->    which a shader *runs*, and it deliberately comes before the divergence
->    transform — it makes every subsequent step verifiable by execution rather
->    than by IR inspection alone.
+> 5. **CFG restructurization suite**: the named-shape corpus, the
+>    `-verify-structured` postcondition checker, and — now that `feme-run`
+>    exists — the generator, its differential harness, and the fuzzer over
+>    it. This lands before the linearizer because the linearizer is what
+>    starts depending on Phase 1 having actually succeeded.
