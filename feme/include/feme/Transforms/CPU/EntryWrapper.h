@@ -14,21 +14,26 @@
 // `feme_cpu_entry_<name>(const FemeDispatchArgs *)` symbol described in the
 // "Kernel ABI" section (see feme/include/feme/Target/CPU/RuntimeABI.h).
 //
-// This is currently scaffolding (roadmap milestone 1): the pass is
-// registered under its final name (`feme-cpu-wrap-entry`) so the CPU
-// pipeline's command-line surface exists end to end, but it does not yet
-// wrap anything -- see the Roadmap / Milestones section of
-// feme/docs/FeMeCPUDesign.md for when this lands (milestone 4, for the
-// barrier-free case; milestone 9 for barriers and groupshared memory).
+// Roadmap milestone 4 implements the barrier-free case: the wave loop over
+// a `feme::cpu::WaveBodyEnv`-shaped wave body (see EntryWrapper.cpp's file
+// comment), producing the exported `feme_cpu_entry_<name>` ABI function.
+// Barrier region splitting and groupshared allocation are milestone 9.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_ENTRYWRAPPER_H
 #define FEME_TRANSFORMS_CPU_ENTRYWRAPPER_H
 
+#include "llvm/ADT/StringRef.h"
 #include "llvm/IR/PassManager.h"
 
+#include <string>
+
 namespace feme::cpu {
+
+/// The exported ABI symbol name for the entry point named \p EntryName (see
+/// "Kernel ABI" in feme/docs/FeMeCPUDesign.md): `feme_cpu_entry_<name>`.
+std::string getEntrySymbolName(llvm::StringRef EntryName);
 
 /// Phase 6: wraps a shader body in the group/wave loop and produces the
 /// `feme_cpu_entry_<name>` ABI entry point. See the file comment above for
