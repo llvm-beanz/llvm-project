@@ -5949,3 +5949,132 @@ ambiguity that made it confusing is gone rather than merely tolerated.
 Doc-only change, so nothing to build or test; verification was re-reading each
 cross-reference against a real heading and checking every claim about existing
 FeMe and LLVM code against the source. Seventeen commits, one per issue.
+
+# Agent thoughts: implementing CPU target roadmap milestone 1 (scaffolding)
+
+This records the reasoning behind implementing milestone 1 of
+`feme/docs/FeMeCPUDesign.md`'s roadmap:
+
+> **Scaffolding + raised-IR contract + ABI header**: `Target/CPU/RuntimeABI.h`,
+> wave size resolution (`--wave-size` in `DriverOptions`, shader declaration,
+> host default) with its diagnostics, empty passes registered in `feme-opt`,
+> and front-end raising for the descriptor-heap, barrier and wave operations
+> required by the first executable milestones. Unsupported raised operations
+> get an early CPU target diagnostic.
+
+## Scoping the work
+
+This milestone bundles five genuinely separate deliverables, each committed
+separately (ten commits total, one more for this note and one for the
+clang-format pass):
+
+1. `RuntimeABI.h` — a pure transcription of the "Resource Model"/"Kernel ABI"
+   sections into a C-compatible header. No design decisions of its own to
+   make; the interesting question was just getting every field, bit and
+   enumerator to match the design doc exactly.
+2. Wave size resolution (`feme::cpu::resolveWaveSize`) — the resolution table
+   from "Wave Size Selection" translated directly into code and gtest cases,
+   one test per table row plus the diagnostic cases. Deliberately free of any
+   CLI/attribute parsing of its own (`parseShaderWaveSizeAttr` is a separate,
+   trivially testable function) so the same logic serves `feme`'s
+   `DriverOptions`, a future `feme-opt -feme-wave-size`, and
+   `JITOptions::WaveSize` without duplicating the table.
+3. `--wave-size` wired into `DriverOptions`/`Driver::run`. The interesting
+   decision here was where to run it: right after `--target` resolves to a
+   concrete triple (so `isCPUTarget` can tell the difference between the CPU
+   target and DXIL/SPIR-V/AMDGPU), before any lowering pass runs. The
+   resolved size is stashed as a `feme.cpu.wavesize` function attribute for
+   now, since no CPU pass exists yet to consume it — an explicit placeholder,
+   not a real design decision.
+4. Six empty passes (`feme::cpu::PreparePass` through `EntryWrapperPass`),
+   registered in `feme-opt` under their final names. Genuinely trivial —
+   `PreservedAnalyses::all()` and a header comment saying which later
+   milestone fills each one in — but getting the library layering
+   (`FeMeTransformsCPU`) and command-line surface right now means every later
+   milestone is "flesh out this pass" rather than "add a pass and its
+   plumbing".
+5. Front-end raising for descriptor-heap, barrier and wave operations, plus
+   the "unsupported raised operation" diagnostic. This is where the real
+   judgment calls were.
+
+## The raising work, and where I drew the line
+
+The design doc is explicit that `llvm.dx.resource.handlefromheap` "does not
+exist in LLVM yet" and that defining it is FeMe's own prerequisite work, not
+something hidden inside a CPU pass. Taking that at face value, I:
+
+- Added `int_dx_resource_handlefromheap` to `IntrinsicsDirectX.td` (mirroring
+  `handlefrombinding`'s shape, per the design doc's own sketch of its
+  signature).
+- Wired `CreateHandleFromHeap` as DXIL opcode 218 in `DXIL.td` — the real
+  DXIL wire encoding (`(Index, SamplerHeap, NonUniformIndex) -> Handle`),
+  which I know from general familiarity with the DXIL op reference rather
+  than from anything checked into this tree; the existing `createHandleFromHeap`
+  `DXILOpClass` placeholder and `llvm/docs/DirectX/DXILResources.rst`'s mention
+  of the op name were the only in-tree corroboration. I deliberately gave it
+  no `intrinsics = [...]` forward-lowering list, because FeMe's op raising only
+  needs to parse an already-lowered `dx.op.createHandleFromHeap` call (as a
+  real DXIL toolchain's output would already contain), not produce one from
+  `int_dx_resource_handlefromheap` — that forward direction is HLSL-to-DXIL
+  codegen, a different problem FeMe doesn't own.
+- Found the same "class exists, opcode never wired" situation for
+  `WaveGetLaneCount` — this one significant because `WaveGetLaneCount()`
+  returning the resolved wave size `W` is core to the CPU target's execution
+  model, not incidental. Wired it as opcode 112 (immediately after
+  `WaveGetLaneIndex`'s 111, matching the DXIL op reference), this time *with*
+  a forward-lowering entry, since it was a one-line, low-risk addition and
+  meant I could validate the round trip against real `-dxil-op-lower` output
+  the same way the existing `WaveGetLaneIndex` case in
+  `dxil-raise-ops-roundtrip.ll` does, rather than only against hand-written
+  `dx.op.*` IR.
+- Before touching `llvm/lib/Target/DirectX/DXIL.td` at all, I ran
+  `llvm/test/CodeGen/DirectX` both before and after each change and diffed
+  the failure lists — they're identical (12 pre-existing, unrelated
+  ContainerData/PDB and `embed-ildb` failures) in both cases — since this
+  file is shared, non-`feme/` LLVM code and regressing it would be a much
+  worse mistake than anything in `feme/` itself.
+- `WaveActiveBallot` I left alone. The header comment already groups it with
+  `IMul`/`UMul`/`UAddc`/`SplitDouble` as "returns an aggregate needing
+  `extractvalue` reconstruction" — a genuinely different, reusable piece of
+  machinery from the mode-operand-dispatch pattern `Barrier` needed, and not
+  worth building a one-off version of just for wave ops. Documented as a
+  deviation in the design doc rather than silently dropped.
+- `Barrier` raising was the cleanest win: six existing LLVM intrinsics, a
+  constant mode operand to switch on, no upstream `DXIL.td` gaps to fill.
+
+## The "unsupported raised operation" diagnostic
+
+The design doc's phrasing — "Unsupported raised operations get an early CPU
+target diagnostic" — reads as one requirement, but it's really covering two
+different failure modes that both need catching before the (not-yet-built)
+CPU passes would otherwise trip over them confusingly:
+
+1. A leftover source-specific op (an unraised `dx.op.*` call) — the raised-IR
+   contract itself wasn't met.
+2. A register-bound resource handle — a deliberate scope rejection ("Resource
+   Model" says the CPU target is bindless-only), not a gap.
+
+I made `checkSupportedRaisedOps` reject every register-bound handle
+unconditionally rather than trying to build the "Root constants" section's
+one-exception carve-out now — that section describes matching one
+`(bN, spaceM)` binding and rewriting it into constant-buffer loads, which is
+a real pass with its own tests, not something to sneak into a diagnostic
+function. The over-approximation is called out explicitly, both in the
+function's own doc comment and in the design doc's Status section, so nobody
+mistakes today's behavior for the final semantics.
+
+## Verification
+
+Built with `LLVM_ENABLE_ASSERTIONS=ON` and ccache (the existing
+`feme/cmake/caches/feme.cmake` configuration, already set up this way) after
+every meaningful change, not just at the end. `ninja check-feme` is 623/623
+passing at the end of this branch (up from the 599 baseline); every new
+behavior has both a lit test (through the real `feme`/`feme-opt` CLIs) and,
+where the logic was non-trivial enough to be worth isolating (wave size
+resolution, the unsupported-ops check), a focused gtest suite. Also verified
+`llvm/test/CodeGen/DirectX` is unaffected by the two `DXIL.td`/
+`IntrinsicsDirectX.td` changes, as described above.
+
+Ten feature commits plus one clang-format cleanup commit; this note is an
+eleventh, appended under its own heading per this repository's convention
+rather than folded into any of the feature commits.
