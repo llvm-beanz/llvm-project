@@ -7346,3 +7346,66 @@ named-shape corpus, (5) `feme::cpu::generateCFGIR`, (6) `feme-cfg-gen`,
 `JITEngine`/`feme-run`, (12) the differential harness `lit` test, (13)
 `FeMeCPUDesign.md` updates, (14) a `clang-format` pass over every file
 touched by this milestone. This note is a fifteenth, doc-only commit.
+
+# Agent thoughts: Fix CFGGen.cpp build failure (missing includes)
+
+## The bug
+
+`feme/lib/Transforms/CPU/CFGGen.cpp` failed to build with errors like
+`unknown type name 'Twine'` and `use of undeclared identifier
+'llvm_unreachable'`. The user asked whether this was a precompiled-header
+(PCH) issue.
+
+## Investigation
+
+I checked `feme/CMakeLists.txt` and the relevant `add_mlir_library` calls in
+`feme/lib/Transforms/CPU/CMakeLists.txt`: none of them pass
+`PRECOMPILE_HEADERS`, and the top-level LLVM build only enables PCH when
+`CMAKE_DISABLE_PRECOMPILE_HEADERS` is off and a Clang host compiler is in
+use with ccache sloppiness set accordingly -- not something feme's own
+CMake opts into. So this isn't a PCH problem as such; it's a plain
+include-what-you-use (IWYU) violation: `CFGGen.cpp` uses `llvm::Twine` and
+`llvm_unreachable` but only included `feme/Transforms/CPU/CFGGen.h` (which
+doesn't declare either) and `llvm/Support/raw_ostream.h` (which pulls in
+`StringRef`/`SmallVector` transitively, but not `Twine` or
+`ErrorHandling.h`). In whatever configuration the file last built
+successfully, some other translation unit or header ordering must have
+made these symbols visible transitively; that's fragile and exactly what
+IWYU-style explicit includes exist to prevent.
+
+## Fix
+
+Added the two missing includes directly to `CFGGen.cpp`:
+`llvm/ADT/Twine.h` and `llvm/Support/ErrorHandling.h`, keeping the existing
+include-order convention (module header, then LLVM headers, then system
+headers).
+
+## Verification
+
+- Rebuilt the previously-failing object file
+  (`obj.FeMeTransformsCPU.dir/CFGGen.cpp.o`) directly: succeeds.
+- Rebuilt `feme-cfg-gen`, `feme-opt`, and `FeMeTransformsCPU` (the
+  library CFGGen.cpp belongs to): all succeed, using the existing
+  ccache-backed, assertions-enabled build in `build/`
+  (`LLVM_ENABLE_ASSERTIONS=ON`, `CMAKE_CXX_COMPILER_LAUNCHER=ccache`).
+- Built `FeMeUnitTests` (all FeMe unit test binaries) and ran
+  `FeMeTransformsCPUTests`, which includes the existing `CFGGenTest` suite
+  covering `generateCFGIR`: all 51 tests in that binary pass. No new tests
+  were needed since this was a compile-only fix with no behavior change,
+  and existing coverage of `generateCFGIR` already exercises the affected
+  code paths.
+- Swept the rest of `feme/lib` and `feme/include` for other files using
+  `Twine`/`llvm_unreachable` without a direct include, to see if the same
+  fragility existed elsewhere. Several do (e.g. `BuiltinCalls.cpp`,
+  `SIMDize.cpp`, `VerifyStructured.cpp`), but since the full project and
+  unit test suite already build cleanly today, I left those alone per the
+  instructions not to fix unrelated pre-existing issues -- they aren't
+  currently broken, just relying on transitive includes that happen to be
+  stable in the current build graph.
+- Ran `git-clang-format` on the changed file: no reformatting needed.
+
+## Design doc
+
+No design-document deviation resulted from this fix; it's a pure build/IWYU
+correction with no behavioral or architectural change, so
+`feme/docs/FeMeCPUDesign.md` was not touched.
