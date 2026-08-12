@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -21,6 +21,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-I'm happy with how all the design decisions are worked out. Can you please do a
-final review to double check if there are any outstanding issues and, remove the
-open and resolved decisions from the document.
+Now that we have a finalized design for the FeMe CPU target.
+
+Please implement the first step on the roadmap:
+
+> 1. **Scaffolding + raised-IR contract + ABI header**:
+>   `Target/CPU/RuntimeABI.h`, wave size resolution (`--wave-size` in
+>   `DriverOptions`, shader declaration, host default) with its diagnostics,
+>   empty passes registered in `feme-opt`, and front-end raising for the
+>   descriptor-heap, barrier and wave operations required by the first
+>   executable milestones. Unsupported raised operations get an early CPU
+>   target diagnostic.
