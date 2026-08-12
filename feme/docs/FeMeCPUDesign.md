@@ -717,7 +717,12 @@ resources through a descriptor heap:
 - **DXIL**: Shader Model 6.6+ dynamic resource indexing —
   `ResourceDescriptorHeap[i]` / `SamplerDescriptorHeap[i]`, which is
   `dx.op.createHandleFromHeap` in DXIL and `llvm.dx.resource.handlefromheap`
-  after raising.
+  after raising. That intrinsic does not exist in LLVM yet — in-tree DirectX
+  has the `createHandleFromHeap` op class but only
+  `llvm.dx.resource.handlefrombinding` and `handlefromimplicitbinding` on
+  the raised side — so defining it, and its `llvm.spv.*` counterpart, is
+  part of the raised-IR prerequisite above rather than something the CPU
+  passes can assume.
 - **SPIR-V**: the `SPV_EXT_descriptor_heap` extension (the SPIR-V half of
   `VK_EXT_descriptor_heap`), which expresses the same thing: an
   application-managed heap of descriptors indexed by the shader.
