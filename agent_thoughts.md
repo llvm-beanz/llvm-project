@@ -6269,3 +6269,192 @@ new/changed file before the corresponding commit landed.
 
 Four commits: the analysis library + its unit tests, the `feme-opt` printer
 wiring + lit test, the design doc status/deviation update, and this note.
+
+# Agent thoughts: FeMe CPU Target roadmap milestone 3 (Resource canonicalization + scalar helper IR)
+
+This records the reasoning behind the changes in this branch, which implement
+roadmap milestone 3 from `feme/docs/FeMeCPUDesign.md`:
+
+> 3. **Resource canonicalization + scalar helper IR**: canonical
+>  `feme.cpu.resource.*` calls, the `libFeMeRuntimeCPU` bitcode helpers,
+>  heap-usage metadata, versioned AOT artifact information and the
+>  `ResourceInfo` reader. Testable at `W`-agnostic scale.
+
+## Approach
+
+I read the "Resource Model" section of `FeMeCPUDesign.md` in full (Descriptor
+heaps, Lowering, Descriptor formats, Bounds checking, Per-descriptor control,
+Root constants, Heap usage discovery), plus "Kernel ABI", "Runtime Support
+Library" and the milestone's row in "Test strategy per phase", before writing
+anything. The milestone bundles four genuinely separate pieces, so I broke it
+into four sequential commits, each independently buildable and tested, per
+`feme/.instructions.md`'s "as small granularity as possible" rule:
+
+1. `feme::cpu::ResourceCalls` — the canonical call creation/matching helpers.
+2. `feme::cpu::ResourceLoweringPass` — the actual canonicalizing rewrite.
+3. `feme::cpu::ResourceInfo`/`ArtifactInfo` — the metadata reader and the
+   versioned AOT artifact format.
+4. `libFeMeRuntimeCPU` — the scalar helper bitcode.
+
+Each of these had an existing analog to model conventions on:
+`feme::amdgpu::ResourceLoweringPass` (already in-tree) for the
+"collect-handles, check every use is supported, rebuild the function with a
+grown signature, rewrite each access" shape `feme::cpu::ResourceLoweringPass`
+needed, and the milestone 1/2 Status-section deviation notes for how to
+document a deliberately narrowed scope inline rather than pretend the
+milestone is more complete than it is.
+
+## What I built, and the scope decisions behind it
+
+**`ResourceCalls.h`/`.cpp`** (`feme/{include,lib}/Transforms/CPU/`). The
+mangled name scheme (`feme.cpu.resource.load.typed.v4f32`) is the literal
+example the design doc gives, so I matched it exactly rather than inventing
+my own and hoping it was equivalent. Load/store share one family per
+view kind (`Typed`, keyed by element index; `Raw`, keyed by byte offset,
+covering both `ByteAddressBuffer` and `StructuredBuffer` per "Descriptor
+heaps") since the design explicitly says raw and structured "carry byte
+offsets and alignment instead" of a format — one call shape, not four.
+Matching is done by name-prefix plus operand-count, not by walking back
+through the mangled suffix to reconstruct a type: the element type is always
+directly recoverable from the call itself (the return type for a load, the
+stored-value operand's type for a store), so there was no reason to build a
+name-demangler nobody else needs.
+
+**`ResourceLoweringPass`**. This is the piece with the most deliberate
+narrowing, all documented in the header's comment and the design doc's new
+Status deviation:
+
+- Only `TypedBuffer` and `RawBuffer` (which the design's raising code already
+  produces a `handlefromheap` for) are canonicalized. I checked what
+  `feme::dxil::OpRaisingPass::raiseResourceHandleFromHeap` actually
+  reconstructs before deciding scope, rather than assuming the full kind list
+  RuntimeABI.h enumerates was all reachable today — it isn't; constant
+  buffers and samplers aren't raised from the heap at all yet, so there was
+  nothing to canonicalize for them regardless of how much lowering logic I
+  wrote.
+- A function using an unsupported kind, or a handle used in a shape this pass
+  doesn't recognize, is left **entirely** unmodified rather than partially
+  rewritten — copying `feme::amdgpu::ResourceLoweringPass`'s
+  `hasOnlySupportedUses`-then-bail pattern exactly, since a half-rewritten
+  function is a worse failure mode than a clean "not touched", and the two
+  passes already agree on this contract for their own (different) kind of
+  resource access.
+- Distinguishing a `StructuredBuffer` from a `ByteAddressBuffer`, both of
+  which raise to `target("dx.RawBuffer", ElemTy, ...)`, needed reading
+  `raiseResourceHandleFromHeap`/`getOpaqueSizedType` in OpRaising.cpp closely:
+  an unstructured buffer's `ElemTy` is always the literal scalar `i8`, while a
+  structured buffer's is always a synthesized opaque size/alignment
+  placeholder that is never that same type (minimum `[1 x i8]`, a distinct
+  array type) — so the two are unambiguous to tell apart by type identity
+  alone, no extra metadata needed.
+- Parameter threading is intra-procedural only. The design's prose ("threads
+  them through the calls between them") reads as inter-procedural in the
+  general case, but building real call-graph rewriting for this milestone
+  would have meant a much bigger, harder-to-review change for a case that,
+  as far as I can tell from every raised-IR example in the existing test
+  suite, doesn't currently arise (raised shaders are already fully inlined).
+  I scoped it down and said so explicitly rather than silently under-deliver
+  against the prose.
+- Root constants are still not implemented, consistent with the milestone 1
+  Status note already saying so — `RootConstantSize` in the heap-usage
+  metadata is always 0, and I did not attempt to build the "one register
+  binding becomes root-constant loads" mechanism as part of this milestone;
+  it's its own design subsection with its own test-strategy row, not a
+  resource-canonicalization detail.
+
+**`ResourceInfo`/`ArtifactInfo`**. The design describes two representations
+of the same information for two different consumers ("Heap usage
+discovery"): metadata while the module is still IR (the JIT path), and a
+versioned byte-layout data symbol once it's an object file (the AOT path). I
+built both, but scoped what I could test without either milestone 4's JIT or
+real object-file codegen existing yet: `ResourceInfo::fromModule` reads real
+`!feme.cpu.resources` metadata `ResourceLoweringPass` actually attaches, and
+`ArtifactInfo`'s serialize/parse round-trip plus `emitArtifactGlobal`/
+`readArtifactGlobal` prove the versioned byte format is correct and
+self-describing (rejecting a wrong ABI version or an inconsistent heap-index
+count) without needing an actual linked object file to read the symbol back
+out of — that's "testable at `W`-agnostic scale" for this piece; reading a
+real `feme_cpu_info_<entry>` symbol out of a compiled `.o` is deferred to
+whichever later milestone first produces one. I included the execution-shape
+fields (wave size, group dimensions, groupshared) in the versioned layout
+from day one even though they're always zero right now, specifically so a
+later milestone wiring those in doesn't need a second artifact version — the
+design's own "Decisions made now to keep it cheap later" philosophy applied
+one level down.
+
+**`libFeMeRuntimeCPU`**. I wrote `FeMeRuntimeCPU.ll` as hand-authored LLVM IR
+text rather than C compiled through clang, because feme has no clang
+dependency today and the design itself frames this as "linkable LLVM
+bitcode" whose only consumer is other LLVM IR — introducing a clang build
+dependency for one file would have been a much bigger, harder-to-justify
+change than writing the IR directly, especially since `llvm-as` was already
+a build/test dependency. I scoped the actual format coverage down to a
+representative, *fully and correctly working* subset (the `<4 x float>`
+typed view switching between the `R32G32B32A32_FLOAT` identity format and
+the packed `R8G8B8A8_UNORM` format, plus the raw/structured `i32`/`float`
+views) rather than attempting all ~20 formats RuntimeABI.h enumerates
+up front with less confidence in each — the design's own words, "additional
+formats extend one helper implementation rather than every access site,"
+read as license to do exactly this and extend on demand.
+
+Before trusting the hand-written IR at all, I manually assembled it with
+`llvm-as`, linked it against small throwaway harness modules, and ran them
+with `lli` to check actual numeric behavior (identity load, packed-format
+decode, out-of-bounds index against a null heap, mask=false, SRV store
+drop) *before* writing the permanent gtest suite — this caught nothing
+wrong in this case, but is the same "verify before trusting" discipline the
+milestone 1 entry used for the CMake wiring, and is a much cheaper way to
+debug hand-written IR than iterating through a full gtest rebuild each
+time. The permanent test suite
+(`feme/unittests/Runtime/CPU/RuntimeCPUTest.cpp`) then does the same thing
+properly: it JIT-compiles the *actual* embedded bitcode with MCJIT (not a
+copy or a re-derivation of it) and calls the canonical functions directly
+against a real, host-allocated heap laid out exactly as
+`feme::cpu::FemeDescriptor` describes, sidestepping the question of how the
+host's C ABI would return an LLVM-vector-typed value by adding a thin
+`void`-returning, out-parameter wrapper function to the JIT'd module per
+test and calling that instead.
+
+## Bugs caught by testing
+
+Building the embedding pipeline and the MCJIT-based gtest surfaced two real
+issues I would not have found by inspection:
+
+- My first `runtime-cpu-bitcode.test` lit test piped `llvm-as`'s output
+  through a bare `llvm-dis` in the `RUN:` line. That resolved against the
+  *system* `llvm-dis` (an older, incompatible LLVM 18 install found earlier
+  on `$PATH`) rather than the just-built one, because `llvm-dis` wasn't in
+  FeMe's `lit.cfg.py` tool-substitution list the way `llvm-as`/`opt` are —
+  it failed with an "Unknown attribute kind" version-skew error. Fixed by
+  using `opt -S` instead (already substituted to the build's own binary)
+  rather than adding `llvm-dis` to the substitution list for one test.
+- My first version of the `RuntimeCPUTest` fixture resolved each wrapper
+  function's JIT'd address (`getFunctionAddress`) immediately after adding
+  it, which worked for tests needing one wrapper but returned a null address
+  for the *second* wrapper in `RawLoadStoreRoundTrip` (added after the
+  first's address had already forced MCJIT to compile the module as it
+  stood). Fixed by separating "add the wrapper's IR" from "resolve its
+  address", and resolving every wrapper a test needs only after all of them
+  have been added — documented on the fixture's `resolve` helper so the next
+  test added to this file doesn't repeat the mistake.
+
+## Validation
+
+Built with the existing `LLVM_ENABLE_ASSERTIONS=ON` + `ccache`-backed
+configuration (`build/CMakeCache.txt`, `LLVM_ENABLE_ASSERTIONS:BOOL=ON`,
+`CMAKE_*_COMPILER_LAUNCHER=ccache`), reconfiguring with `cmake .` after each
+new CMake target/subdirectory rather than assuming Ninja's build-file
+regeneration would pick up new source globs unprompted. Ran `ninja
+check-feme` after every commit's worth of change, ending at 673/673 (100%)
+lit + gtest tests passing, up from 644 at the end of the milestone 2 entry
+(29 new: 3 new lit tests for the two resource-lowering shapes and the
+unsupported-kind pass-through, 1 for the runtime bitcode's own
+assemble/verify, plus 7+6+11+11 new gtest cases across
+`ResourceCallsTest`/`ResourceLoweringTest`/`ResourceInfoTest`/
+`RuntimeCPUTest`). `clang-format`'d every new/changed C++ file before its
+commit (the hand-written `.ll` and the `embed_bitcode.py` script have no
+`clang-format` equivalent to run).
+
+Six commits: the canonical call helpers, the lowering pass itself,
+the resource-info reader plus versioned artifact format, the runtime bitcode
+library, the design doc status/deviation update, and this note.
