@@ -12,6 +12,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   ResourceLoweringTest.cpp
   SIMDizeTest.cpp
   UnsupportedOpsTest.cpp
+  WaveLoweringTest.cpp
   )
 target_link_libraries(FeMeTransformsCPUTests
   PRIVATE
