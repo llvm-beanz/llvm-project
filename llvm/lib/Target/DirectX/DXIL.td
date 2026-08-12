@@ -1498,3 +1498,21 @@ def CreateHandleFromBinding : DXILOp<217, createHandleFromBinding> {
   let stages = [Stages<DXIL1_6, [all_stages]>];
   let attributes = [Attributes<DXIL1_0, [ReadNone]>];
 }
+
+def CreateHandleFromHeap : DXILOp<218, createHandleFromHeap> {
+  let Doc = "create resource handle from heap index, for SM 6.6+ dynamic "
+            "resource indexing (`ResourceDescriptorHeap`/"
+            "`SamplerDescriptorHeap`)";
+  // No `intrinsics` list: unlike `CreateHandleFromBinding`,
+  // `llvm.dx.resource.handlefromheap` (see IntrinsicsDirectX.td) is not yet
+  // wired to a forward-lowering path (`DXILOpLowering.cpp`) -- FeMe's op
+  // raising (feme::dxil::OpRaisingPass) is the only consumer of this op
+  // definition today, and only needs the DXIL op's own signature to parse
+  // real `dx.op.createHandleFromHeap` calls, not a lowering direction. See
+  // the "Resource Model" section of feme/docs/FeMeCPUDesign.md.
+  let arguments = [Int32Ty, Int1Ty, Int1Ty];
+  let result = HandleTy;
+  let stages = [Stages<DXIL1_6, [all_stages]>];
+  let attributes = [Attributes<DXIL1_0, [ReadNone]>];
+}
+

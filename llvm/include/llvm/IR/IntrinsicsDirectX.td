@@ -36,6 +36,17 @@ def int_dx_resource_handlefromimplicitbinding
           [llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_i32_ty, llvm_ptr_ty],
           [IntrNoMem]>;
 
+// Create resource handle from a bindless descriptor-heap index (SM 6.6+
+// dynamic resource indexing, i.e. `ResourceDescriptorHeap[i]`/
+// `SamplerDescriptorHeap[i]`). Returns a `target("dx.")` type appropriate
+// for the kind of resource, given the heap index and an indicator whether
+// that index may be non-uniform.
+def int_dx_resource_handlefromheap
+    : DefaultAttrsIntrinsic<
+          [llvm_any_ty],
+          [llvm_i32_ty, llvm_i1_ty],
+          [IntrNoMem]>;
+
 def int_dx_resource_getpointer
     : DefaultAttrsIntrinsic<[llvm_anyptr_ty], [llvm_any_ty, llvm_any_ty],
                             [IntrConvergent, IntrNoMem]>;

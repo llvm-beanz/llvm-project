@@ -491,6 +491,112 @@ bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
   return true;
 }
 
+/// Raises a `dx.op.annotateHandle` (opcode 216) call whose handle operand is
+/// a `dx.op.createHandleFromHeap` (opcode 218) call into a single
+/// `llvm.dx.resource.handlefromheap` intrinsic call -- the bindless
+/// descriptor-heap counterpart of `raiseResourceHandleFromBinding` above
+/// (SM 6.6+ dynamic resource indexing, `ResourceDescriptorHeap[i]`/
+/// `SamplerDescriptorHeap[i]`; see the "Resource Model" section of
+/// feme/docs/FeMeCPUDesign.md). This is required raised IR for the CPU
+/// target, which accepts bindless shaders only.
+///
+/// Unlike `CreateHandleFromBinding`, there is no `%dx.types.ResBind` operand
+/// to reconstruct a register binding from -- a heap index is not a
+/// register -- so this only needs `AnnotateHandle`'s
+/// `%dx.types.ResourceProperties` operand to recover the resource's
+/// `target("dx.")` handle type, exactly as `raiseResourceHandleFromBinding`
+/// does; see that function's comment for the same scope notes (which
+/// resource kinds are reconstructed, and why unhandled ones are left
+/// unmodified rather than erroring). The heap index and non-uniform-index
+/// operands carry over unchanged. The raw op's `SamplerHeap` operand
+/// (`CreateHandleFromHeap`'s second argument) does not need to survive
+/// separately: which heap a handle indexes is already implied by whether
+/// its reconstructed resource kind is a sampler, which this pass does not
+/// yet reconstruct (sampling is a non-goal for the CPU target's v1, see
+/// feme/docs/FeMeCPUDesign.md), so a sampler heap access is left unmodified
+/// like any other not-yet-covered resource kind.
+bool raiseResourceHandleFromHeap(CallInst &AnnotateCI) {
+  if (AnnotateCI.arg_size() != 3)
+    return false;
+  auto *HandleCI = dyn_cast<CallInst>(AnnotateCI.getArgOperand(1));
+  Function *HandleFn = HandleCI ? HandleCI->getCalledFunction() : nullptr;
+  if (!HandleFn ||
+      !HandleFn->getName().starts_with("dx.op.createHandleFromHeap") ||
+      HandleCI->arg_size() != 4)
+    return false;
+  std::optional<uint64_t> HandleOpcode =
+      getConstInt(HandleCI->getArgOperand(0));
+  if (HandleOpcode != 218)
+    return false;
+
+  auto *ResProps = dyn_cast<ConstantStruct>(AnnotateCI.getArgOperand(2));
+  if (!ResProps || ResProps->getNumOperands() != 2)
+    return false;
+
+  std::optional<uint64_t> Word0 = getConstInt(ResProps->getOperand(0));
+  std::optional<uint64_t> Word1 = getConstInt(ResProps->getOperand(1));
+  if (!Word0 || !Word1)
+    return false;
+
+  // See ResourceInfo::getAnnotateProps (llvm/lib/Analysis/DXILResource.cpp)
+  // for this bit layout -- the same encoding raiseResourceHandleFromBinding
+  // inverts.
+  auto Kind = static_cast<dxil::ResourceKind>(*Word0 & 0xFF);
+  bool IsUAV = (*Word0 >> 12) & 1;
+  bool IsROV = (*Word0 >> 13) & 1;
+
+  LLVMContext &Ctx = AnnotateCI.getContext();
+  TargetExtType *HandleTy = nullptr;
+  if (Kind == dxil::ResourceKind::TypedBuffer) {
+    auto ElemKind = static_cast<dxil::ElementType>(*Word1 & 0xFF);
+    Type *ElemTy = getElementLLVMType(ElemKind, Ctx);
+    if (!ElemTy)
+      return false;
+    HandleTy = TargetExtType::get(
+        Ctx, "dx.TypedBuffer", {ElemTy},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV),
+         static_cast<unsigned>(isSignedElementType(ElemKind))});
+  } else if (Kind == dxil::ResourceKind::RawBuffer && *Word1 == 0) {
+    HandleTy = TargetExtType::get(
+        Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
+  } else if (Kind == dxil::ResourceKind::StructuredBuffer) {
+    uint32_t AlignLog2 = (*Word0 >> 8) & 0xF;
+    Type *ElemTy =
+        getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), AlignLog2);
+    HandleTy = TargetExtType::get(
+        Ctx, "dx.RawBuffer", {ElemTy},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
+  } else if (Kind == dxil::ResourceKind::CBuffer) {
+    Type *ElemTy = getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), 0);
+    HandleTy = TargetExtType::get(Ctx, "dx.CBuffer", {ElemTy});
+  } else {
+    return false; // Samplers and other unreconstructed kinds: leave alone.
+  }
+
+  IRBuilder<> Builder(&AnnotateCI);
+  Value *Index = HandleCI->getArgOperand(1);
+  Value *NonUniform = HandleCI->getArgOperand(3);
+
+  Function *HandleFromHeapFn = Intrinsic::getOrInsertDeclaration(
+      AnnotateCI.getModule(), Intrinsic::dx_resource_handlefromheap,
+      {HandleTy});
+  Value *NewHandle =
+      Builder.CreateCall(HandleFromHeapFn, {Index, NonUniform});
+
+  Function *CastFn = Intrinsic::getOrInsertDeclaration(
+      AnnotateCI.getModule(), Intrinsic::dx_resource_casthandle,
+      {AnnotateCI.getType(), HandleTy});
+  Value *CastBack =
+      Builder.CreateCall(CastFn, {NewHandle}, AnnotateCI.getName());
+
+  AnnotateCI.replaceAllUsesWith(CastBack);
+  AnnotateCI.eraseFromParent();
+  if (HandleCI->use_empty())
+    HandleCI->eraseFromParent();
+  return true;
+}
+
 /// Rewrites a single `dx.op.*` call to the LLVM intrinsic call it was
 /// lowered from, per \p RaiseAs. Returns false (leaving \p CI untouched) if
 /// the call's shape doesn't match what's expected for \p RaiseAs (e.g. a
@@ -795,7 +901,13 @@ bool raiseResourceOps(Module &M) {
   };
 
   Changed |= forEachDXOpCall(216, [](CallInst &CI) { // AnnotateHandle
-    return raiseResourceHandleFromBinding(CI);
+    // A handle bridged from either CreateHandleFromBinding (register-bound)
+    // or CreateHandleFromHeap (bindless); each raiser recognizes its own
+    // handle operand's callee name and declines otherwise (see each
+    // function's comment).
+    if (raiseResourceHandleFromBinding(CI))
+      return true;
+    return raiseResourceHandleFromHeap(CI);
   });
   Changed |= forEachDXOpCall(57, [&MD](CallInst &CI) { // CreateHandle
     return raiseLegacyCreateHandle(CI, MD);
