@@ -6701,3 +6701,80 @@ change, (2) the new `FeMeRuntimeCPU.c` source alongside deletion of
 `FeMeRuntimeCPU.ll`, (3) the `runtime/CPU/CMakeLists.txt` build-rule swap,
 (4) the test/lit-config updates, (5) the design-doc and comment updates.
 This note is a sixth, doc-only commit.
+
+# Fixing Mach-O `asm`-label mangling breaking `RuntimeCPUTest`/bitcode lit test
+
+## Symptom
+
+User reported (on `arm64-apple-macosx26.0.0`) that 11 of 11 `RuntimeCPUTest`
+gtests segfault (`SIGSEGV`, exit -11) and the `runtime-cpu-bitcode.test` lit
+test fails its `CHECK-DAG` matches. All crashes are in `addLoadWrapper`/
+`addStoreWrapper`, either dereferencing `Target->getReturnType()` (load) or
+passing `Target` (null) into `IRBuilderBase::CreateCall` (store) -- i.e.
+`Module::getFunction(Callee)` was returning `nullptr` for every canonical
+`feme.cpu.resource.*` name.
+
+## Root cause
+
+`FeMeRuntimeCPU.c`'s helpers are all given their dotted canonical name via
+a GNU `asm("name")` label (since dots aren't valid C identifiers). Clang's
+Mach-O mangler treats an explicit `asm` label specially there: it marks the
+resulting `GlobalValue`'s name with a leading
+`GlobalValue::dropLLVMManglingEscape` byte (the raw 0x01 byte, printed as
+literal `\01` in textual IR and requiring the name to be quoted) so the
+backend emits the label completely unprefixed instead of applying Mach-O's
+usual leading-underscore convention. Verified by cross-compiling
+`FeMeRuntimeCPU.c` with `-target arm64-apple-macosx14.0`: the IR shows
+`@"\01feme.cpu.resource.load.typed.v4f32"` there, vs. plain
+`@feme.cpu.resource.load.typed.v4f32` on the ELF/Linux build this repo's
+own CI runs. So `RuntimeCPUTest.cpp` looking up the plain dotted name via
+`M->getFunction(Callee)` only ever worked by accident of running on a
+non-Mach-O host; the `runtime-cpu-bitcode.test` `CHECK-DAG` lines had the
+exact same portability gap. Neither bug is reachable on this Linux
+sandbox, so the fix was validated here by cross-compiling the runtime C
+file for `arm64-apple-macosx14.0` and confirming the actual mangled names,
+then checking the new `CHECK-DAG` patterns and lookup helper against both
+manglings.
+
+## Fix
+
+- `RuntimeCPUTest.cpp`: added a `getRuntimeFunction(Module&, StringRef)`
+  helper that tries the plain name first, then the same name with a
+  leading `"\1"` (the raw escape byte, matching
+  `GlobalValue::dropLLVMManglingEscape`'s own escape character) -- this is
+  what actually appears in the parsed bitcode's `GlobalValue` name on
+  Mach-O, not the 3-character `\01` text seen in the disassembly (that's
+  only how the IR printer spells an unprintable byte). `addLoadWrapper`/
+  `addStoreWrapper` now call this instead of `M->getFunction(Callee)`
+  directly, with an `assert` on the result so a future genuine lookup
+  miss fails with a clear message instead of segfaulting.
+- `runtime-cpu-bitcode.test`: each `CHECK-DAG` pattern now optionally
+  matches a leading quote and `\01` escape (`{{"?}}{{(\\01)?}}...{{"?}}`)
+  around the callee name, verified against both the plain ELF-style
+  dump and the actual Mach-O cross-compile dump collected above.
+
+No change to `FeMeRuntimeCPU.c`, `RuntimeABI.h`, or any production
+lowering code was needed: the `asm` labels themselves are correct and
+portable (they compile and link fine everywhere); only the two pieces of
+test infrastructure that assumed one specific mangling of those labels
+needed fixing. Nothing in `feme/docs/FeMeCPUDesign.md` describes this
+lookup mechanism, so no design-doc update was required.
+
+## Validation
+
+Built with the existing `ccache`+`LLVM_ENABLE_ASSERTIONS=ON` Release
+config already configured in `build/`. `FeMeRuntimeCPUTests` (all 11
+gtests) and `check-feme-unit`/`check-feme` (188 and 673 tests
+respectively) all pass at 100% on this ELF/Linux host, confirming no
+regression. Additionally cross-compiled `FeMeRuntimeCPU.c` with
+`-target arm64-apple-macosx14.0` and ran `opt -S | FileCheck` against the
+updated `runtime-cpu-bitcode.test` directly against that Mach-O-mangled
+IR, confirming the new `CHECK-DAG` patterns actually match the reported
+failure's exact mangling (`@"\01feme.cpu.resource.load.typed.v4f32"`,
+etc.) as well as the plain form.
+
+## Commit breakdown
+
+Two commits: (1) the `RuntimeCPUTest.cpp` lookup-helper fix, (2) the
+`runtime-cpu-bitcode.test` `CHECK-DAG` pattern fix. This note is a third,
+doc-only commit.
