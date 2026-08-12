@@ -1,4 +1,5 @@
 add_mlir_library(FeMeTransformsCPU
+  BuiltinCalls.cpp
   EntryWrapper.cpp
   Linearize.cpp
   Prepare.cpp
