@@ -1,3 +1,4 @@
+add_subdirectory(CPU)
 add_subdirectory(DXSA)
 
 add_mlir_library(FeMeTarget
