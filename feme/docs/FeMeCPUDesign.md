@@ -271,17 +271,57 @@ is the one phase whose correctness has nothing to do with `W`, so it should
 be testable at `W`-agnostic scale, and lowering handles to plain pointers
 early lets the widener treat them as ordinary uniform values.
 
+## Format-Agnostic Operation
+
+Everything from `feme-cpu-prepare` onwards operates on `llvm::Module`, and
+no phase knows whether the module came from DXIL or from SPIR-V. This is a
+requirement, not an accident of the implementation:
+
+- **DXIL is a first-class input.** The reference-execution and
+  FeMe-self-testing use cases that motivate this design are mostly about
+  DXIL today, so "SPIR-V works and DXIL mostly works" is not an acceptable
+  outcome. Every DXIL compute shader meeting the bindless requirement must
+  run.
+- **One pipeline, two front ends.** DXIL and SPIR-V converge at raised IR
+  (see Design.md); putting the CPU pipeline entirely after that point means
+  the divergence analysis, linearizer, widener, wave lowering and wrapper
+  are written and tested once. The alternative — SIMD-izing in MLIR on the
+  `spirv` or `vector` dialect — would be more expressive but would keep the
+  two inputs apart until much later and leave DXIL with a second
+  implementation of the same transform.
+
+Raised IR still carries the two parallel intrinsic spellings —
+`llvm.dx.thread.id` and `llvm.spv.thread.id`, and so on — because raising
+preserves the source's own vocabulary rather than inventing a third. The CPU
+passes therefore match on the *pair*, exactly as
+`feme::amdgpu::RaisedLoweringPass` already does, through one shared
+classification helper rather than a `dx`/`spv` switch per pass. That helper
+is the only place in the CPU pipeline where the input format is visible, and
+its tests are the only tests that need writing twice.
+
+Two consequences for the phase descriptions below:
+
+- Phase 1 is where the format-specific cleanup lives:
+  `feme::dxil::IntrinsicExpansionPass` for the DXIL-only intrinsics, and CFG
+  structurization, which DXIL input needs and SPIR-V input has already had.
+  After Phase 1 the module is uniform in shape regardless of origin.
+- Every `lit` test for a later phase is written against raised IR directly,
+  so it does not care which importer produced it; the end-to-end tests are
+  run from both a DXIL and a SPIR-V input of the same shader, which is what
+  actually proves the claim.
+
 ## Phase 1: Preparation (`feme::cpu::PreparePass`)
 
 Gets the raised module into the shape the later phases assume:
 
 - **`feme::dxil::IntrinsicExpansionPass`** (already exists) for the DXIL-only
   intrinsics with no direct CPU equivalent.
-- **Reject or handle unstructured control flow**: `FixIrreducible` then
-  `StructurizeCFG` (both in-tree, both target-independent). SPIR-V input
-  already went through MLIR's structurizer during import; DXIL input has not
-  and can be arbitrarily unstructured. `UnifyLoopExits` runs alongside, as
-  `StructurizeCFG` requires it.
+- **Structurize control flow**: `FixIrreducible` then `StructurizeCFG` (both
+  in-tree, both target-independent). SPIR-V input already went through
+  MLIR's structurizer during import; DXIL input has not and can be
+  arbitrarily unstructured. `UnifyLoopExits` runs alongside, as
+  `StructurizeCFG` requires it. Because DXIL is a first-class input, a CFG
+  these passes handle badly is a bug to fix here, not an input to reject.
 - **`LowerSwitch`**: the linearizer handles two-way branches only.
 - **Promote what can be promoted** (`mem2reg`/SROA): an `alloca` that stays
   in memory becomes a per-lane array in Phase 4 (see below), which is
@@ -794,7 +834,7 @@ Following the instruction that each phase of translation gets unit tests:
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
 | Entry wrapper | barrier region splitting | wave loop shape, barrier split, groupshared |
 | JIT | `JITEngine::create`/`dispatch` on a tiny module, resource info round-trip, multi-threaded group scheduling | — |
-| End to end | — | `feme-run` executing real shaders and `FileCheck`ing results, at several wave sizes |
+| End to end | — | `feme-run` executing real shaders and `FileCheck`ing results, at several wave sizes, from both DXIL and SPIR-V inputs of the same shader |
 
 Wave size resolution gets its own tests: each row of the resolution table
 above (including the conflict error and the out-of-range/non-power-of-two
