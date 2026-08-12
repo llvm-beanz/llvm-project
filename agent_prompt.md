@@ -21,16 +21,6 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Let's iterate on the FemeCPUDesign.md design.
-
-1. One root constant buffer is fine (at least initially), but we should document
-   the limitation and how it compares to GPU APIs.
-2. Yes, it probably makes sense to have bounds checking be controllable
-   per-descriptor.
-3. Use masked intrinsics to represent the masks between phases so they are
-   testable.
-4. Let's talk more about the possible designs for representing descriptor
-   formats.
-5. I agree with the assessments about graphics support in the "Decisions made
-   now to keep it cheap later" section.
-6. FeMe will need to grow a test suite for CFC restructuring.
+I'm happy with how all the design decisions are worked out. Can you please do a
+final review to double check if there are any outstanding issues and, remove the
+open and resolved decisions from the document.
