@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/CPU/CFGGen.h"
 
+#include "llvm/ADT/Twine.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <random>
