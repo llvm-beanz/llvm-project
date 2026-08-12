@@ -2,8 +2,9 @@
 
 ## Status
 
-Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header) is
-implemented. This document is a companion to [Design.md](Design.md) — it
+Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header) and
+milestone 2 (uniformity analysis) are implemented. This document is a
+companion to [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
 "Raised LLVM IR -> AMDGPU" sections of that document first; this design is
@@ -34,6 +35,22 @@ below; each is called out inline where it's discussed, and summarized here:
   Neither gained a forward-lowering (`DXILOpLowering.cpp`) path, since
   FeMe's raising only needs to parse already-lowered `dx.op.*` calls, not
   produce them.
+
+Deviation: milestone 2's implementation narrowed one thing described in
+"Phase 2: Uniformity Analysis" below:
+
+- `WaveTTIImpl::getValueUniformity` classifies divergence sources and
+  wave-wide reductions by an explicit, enumerated list of the
+  `llvm.{dx,spv}.*` intrinsic IDs FeMe's DXIL/SPIR-V raising already
+  produces (see `feme::dxil::OpRaisingPass` and
+  `feme::spirv::RaisedLoweringPass`), rather than a more general
+  name/attribute-based rule. There is no separate `WaveReadLaneFirst`
+  intrinsic wired yet -- FeMe raises only `WaveReadLaneAt`
+  (`llvm.{dx,spv}.wave.readlane`), which subsumes it (reading a uniform
+  lane index) and is classified `AlwaysUniform` for the same reason the
+  design's `WaveReadLaneFirst` example is: it broadcasts a single lane's
+  value to the whole wave. The list grows as new raised wave intrinsics are
+  added; nothing about the classification itself is expected to change.
 
 ## Summary
 
@@ -1512,8 +1529,10 @@ Sequenced so each step is independently testable and useful:
   target diagnostic. See the Status section's Deviation note for what
   narrowed (`WaveActiveBallot` raising deferred; the register-bound-handle
   check does not yet honor the future root-constant exception).
-2. **Uniformity analysis** (`WaveTTIImpl` + printer + unit tests). No
-   transform yet.
+2. **Uniformity analysis** (`WaveTTIImpl` + printer + unit tests) (done):
+   No transform yet -- see the Status section's Deviation note for the one
+   thing that narrowed (the intrinsic list `getValueUniformity` switches on
+   is explicit/enumerated rather than a general rule).
 3. **Resource canonicalization + scalar helper IR**: canonical
   `feme.cpu.resource.*` calls, the `libFeMeRuntimeCPU` bitcode helpers,
   heap-usage metadata, versioned AOT artifact information and the
