@@ -119,9 +119,10 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
 - **Derivatives / quad ops** (`ddx`, `ddy`, `QuadReadAcross*`): not
   implemented in v1, but the lane arrangement they need *is* fixed now.
   `W` is a multiple of 4 and lanes are quad-tiled (see "Lane
-  linearization"), so lanes `4k..4k+3` are a 2x2 quad in a defined order,
-  and adding these operations later is a matter of emitting the shuffles
-  rather than renumbering lanes.
+  linearization"), so in any group whose `X` and `Y` dimensions are even —
+  the groups in which quads are defined at all — lanes `4k..4k+3` are a 2x2
+  quad in a defined order, and adding these operations later is a matter of
+  emitting the shuffles rather than renumbering lanes.
 - **Indirect calls and recursion.** Neither appears in DXIL or in the
   SPIR-V subset FeMe imports today.
 - **Debug info fidelity.** Preserving line tables through the SIMD-izer is
@@ -1236,8 +1237,9 @@ The core of this design is stage-agnostic and stays as-is:
 ### Decisions made now to keep it cheap later
 
 - **The lane-to-quad mapping is fixed now, not later.** `W` is a multiple
-  of 4 and lanes are quad-tiled, so lanes `4k..4k+3` *are* a 2x2 quad in a
-  defined order — see "Lane linearization". This is the one item in this
+  of 4 and lanes are quad-tiled, so wherever quads are defined — even `X`
+  and `Y` — lanes `4k..4k+3` *are* a 2x2 quad in a defined order; see "Lane
+  linearization". This is the one item in this
   section that is worth paying for immediately rather than merely designing
   around: lane assignment is observable through `WaveGetLaneIndex()`,
   `WaveReadLaneAt` and ballots, so changing it later would silently change
