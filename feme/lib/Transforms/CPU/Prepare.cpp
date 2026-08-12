@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/CPU/Prepare.h"
 
+#include "feme/Transforms/CPU/VerifyStructured.h"
+
 #include "llvm/ADT/SetVector.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
@@ -22,6 +24,7 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar/StructurizeCFG.h"
+#include "llvm/Transforms/Utils/BreakCriticalEdges.h"
 #include "llvm/Transforms/Utils/FixIrreducible.h"
 #include "llvm/Transforms/Utils/LowerSwitch.h"
 #include "llvm/Transforms/Utils/Mem2Reg.h"
@@ -37,7 +40,14 @@ namespace {
 /// `LowerSwitch` (the linearizer only understands two-way branches), then
 /// `FixIrreducible` + `UnifyLoopExits` + `StructurizeCFG` -- in that order,
 /// matching `StructurizeCFG`'s own documented precondition that irreducible
-/// control flow and multi-exit loops are already gone.
+/// control flow and multi-exit loops are already gone -- and finally
+/// `BreakCriticalEdges`: `StructurizeCFG`'s own "Flow" blocks (built to
+/// merge a divergent branch's two arms back together, see its
+/// documentation) can themselves leave a critical edge behind (a branch
+/// with more than one successor into a block with more than one
+/// predecessor), which the linearizer's mask-merging at a branch's targets
+/// cannot be built on top of -- see `feme::cpu::verifyStructured`'s "no
+/// critical edges" postcondition.
 void prepareFunction(Function &F, FunctionAnalysisManager &FAM) {
   FunctionPassManager FPM;
   FPM.addPass(PromotePass());
@@ -45,6 +55,7 @@ void prepareFunction(Function &F, FunctionAnalysisManager &FAM) {
   FPM.addPass(FixIrreduciblePass());
   FPM.addPass(UnifyLoopExitsPass());
   FPM.addPass(StructurizeCFGPass());
+  FPM.addPass(BreakCriticalEdgesPass());
   FPM.run(F, FAM);
 }
 
@@ -147,6 +158,16 @@ PreservedAnalyses PreparePass::run(Module &M, ModuleAnalysisManager &) {
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
   prepareFunction(**Entry, FAM);
+
+  // Phase 1's postconditions (see "CFG restructurization test suite" in
+  // feme/docs/FeMeCPUDesign.md) hold by construction if `StructurizeCFG` and
+  // friends did their job; checking them here, once, on every run rather
+  // than only in the dedicated test suite catches a regression as close to
+  // its cause as possible. Assertions-only: a release build trusts the
+  // upstream passes rather than paying for the check on every compile.
+  assert(verifyStructured(**Entry) &&
+         "feme-cpu-prepare: output function is not structured; see "
+         "-verify-structured for details");
 
   return PreservedAnalyses::none();
 }

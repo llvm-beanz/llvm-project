@@ -22,6 +22,10 @@
 // given, else the module's only one -- discarding every other entry point
 // and any definition left unreachable from it.
 //
+// Roadmap milestone 5 adds an assertions-only postcondition check
+// (`feme::cpu::verifyStructured`) at the end of `run`, matching the "CFG
+// restructurization test suite" section of feme/docs/FeMeCPUDesign.md.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TRANSFORMS_CPU_PREPARE_H
