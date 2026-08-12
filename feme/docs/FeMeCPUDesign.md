@@ -228,7 +228,8 @@ Two independent parties can express an opinion about `W`:
   6.6 encodes as a single value and SM 6.8 as a `(min, max, preferred)`
   range in `!dx.entryPoints` — both of which
   `feme::dxil::MetadataRaisingPass` already normalizes into the
-  `"hlsl.wavesize"="min,max,preferred"` function attribute — or SPIR-V's
+  `"hlsl.wavesize"="min,max,preferred"` function attribute, widening the
+  single-value form to `"n,0,0"` — or SPIR-V's
   `SubgroupSize`/`RequiredSubgroupSizeKHR` execution mode.
 
 The resolution rules are:
@@ -240,6 +241,10 @@ The resolution rules are:
 | set | unset | the user's value |
 | set | set, equal (or user's value inside the shader's range) | that value |
 | set | set, different | **error** |
+
+A zero component of `hlsl.wavesize` means "unspecified", so the SM 6.6
+spelling `"n,0,0"` reads as a required `n`, not as a range whose preferred
+size is zero.
 
 The host-derived default divides by 32 because 32-bit is the width of the
 overwhelming majority of lane-varying values in shader code; `max(4, ...)`
