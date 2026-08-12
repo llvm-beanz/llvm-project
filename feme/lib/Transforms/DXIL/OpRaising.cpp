@@ -141,6 +141,7 @@ static const RaisableOp DirectOps[] = {
     {101, Intrinsic::dx_asdouble, true},                      // MakeDouble (overloaded on the i32 operand type)
     {110, Intrinsic::dx_wave_is_first_lane, false},           // WaveIsFirstLane
     {111, Intrinsic::dx_wave_getlaneindex, false},            // WaveGetLaneIndex
+    {112, Intrinsic::dx_wave_get_lane_count, false},          // WaveGetLaneCount
     {113, Intrinsic::dx_wave_any, false},                     // WaveActiveAnyTrue
     {114, Intrinsic::dx_wave_all, false},                     // WaveActiveAllTrue
     {115, Intrinsic::dx_wave_all_equal, true},                // WaveActiveAllEqual (overloaded on the operand, not the i1 result)

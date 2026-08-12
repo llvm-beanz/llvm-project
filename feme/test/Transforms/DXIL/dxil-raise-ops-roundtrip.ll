@@ -40,6 +40,13 @@ define i32 @wave_get_lane_index() {
   ret i32 %1
 }
 
+; CHECK-LABEL: define i32 @wave_get_lane_count(
+define i32 @wave_get_lane_count() {
+  ; CHECK: call i32 @llvm.dx.wave.get.lane.count()
+  %1 = call i32 @llvm.dx.wave.get.lane.count()
+  ret i32 %1
+}
+
 ; CHECK-LABEL: define i32 @countbits_i32(
 define i32 @countbits_i32(i32 %a) {
   ; CHECK: call i32 @llvm.ctpop.i32(i32 %a)
