@@ -63,4 +63,46 @@ TEST(FrontendOptionsTest, FailsOnMultipleInputFiles) {
   EXPECT_FALSE(Diags.empty());
 }
 
+TEST(FrontendOptionsTest, DefaultsToOptLevelO0) {
+  std::string Diags;
+  llvm::raw_string_ostream DiagsOS(Diags);
+  const char *Args[] = {"input.dxil"};
+  std::optional<DriverOptions> Opts = parseArgs(Args, DiagsOS);
+  ASSERT_TRUE(Opts.has_value()) << Diags;
+  EXPECT_EQ(Opts->OptLevel, llvm::OptimizationLevel::O0);
+}
+
+TEST(FrontendOptionsTest, ParsesEachOptimizationLevel) {
+  struct Case {
+    const char *Flag;
+    llvm::OptimizationLevel Expected;
+  };
+  const Case Cases[] = {
+      {"-O0", llvm::OptimizationLevel::O0},
+      {"-O1", llvm::OptimizationLevel::O1},
+      {"-O2", llvm::OptimizationLevel::O2},
+      {"-O3", llvm::OptimizationLevel::O3},
+      // `-Od` is DXC/clang-cl's spelling for "disable optimizations",
+      // aliased to `-O0` (see Options.td).
+      {"-Od", llvm::OptimizationLevel::O0},
+  };
+  for (const Case &C : Cases) {
+    std::string Diags;
+    llvm::raw_string_ostream DiagsOS(Diags);
+    const char *Args[] = {C.Flag, "input.dxil"};
+    std::optional<DriverOptions> Opts = parseArgs(Args, DiagsOS);
+    ASSERT_TRUE(Opts.has_value()) << C.Flag << ": " << Diags;
+    EXPECT_EQ(Opts->OptLevel, C.Expected) << C.Flag;
+  }
+}
+
+TEST(FrontendOptionsTest, LastOptimizationLevelFlagWins) {
+  std::string Diags;
+  llvm::raw_string_ostream DiagsOS(Diags);
+  const char *Args[] = {"-O2", "-O0", "input.dxil"};
+  std::optional<DriverOptions> Opts = parseArgs(Args, DiagsOS);
+  ASSERT_TRUE(Opts.has_value()) << Diags;
+  EXPECT_EQ(Opts->OptLevel, llvm::OptimizationLevel::O0);
+}
+
 } // namespace

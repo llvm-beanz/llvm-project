@@ -25,6 +25,7 @@
 #define FEME_FRONTEND_FRONTENDOPTIONS_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Passes/OptimizationLevel.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <optional>
@@ -46,6 +47,13 @@ struct DriverOptions {
   /// Output format, or target triple, to retarget the translated module to
   /// (e.g. "dxil", "spirv", or a target triple such as "amdgcn-amd-amdhsa").
   std::string Target;
+
+  /// The optimization level to run FeMe's IR optimization pipeline at (see
+  /// feme::OptimizerPipeline), selected via `-O0`/`-O1`/`-O2`/`-O3` (or
+  /// `-Od`, an alias for `-O0` matching clang-cl/DXC's spelling for
+  /// "disable optimizations"). Defaults to `O0`, matching `opt`/`clang`'s
+  /// behavior when no `-O` flag is given.
+  llvm::OptimizationLevel OptLevel = llvm::OptimizationLevel::O0;
 
   /// Whether `--help` was requested; callers should print help and exit
   /// successfully without inspecting the other fields.

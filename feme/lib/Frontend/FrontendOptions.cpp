@@ -47,6 +47,30 @@ std::optional<DriverOptions> parseArgs(llvm::ArrayRef<const char *> Args,
   if (const Arg *A = ParsedArgs.getLastArg(OPT_o))
     Opts_.OutputFilename = A->getValue();
 
+  // `-Od` is a plain alias for `-O0` (see Options.td), so the OptTable has
+  // already resolved it to an `OPT_O0` Arg by the time we get here; only the
+  // four canonical IDs need considering. `getLastArg` picks whichever of
+  // these was specified last, matching how repeating `-O2 ... -O0` on a
+  // single command line takes the last one, as with `clang`/`opt`.
+  if (const Arg *A = ParsedArgs.getLastArg(OPT_O0, OPT_O1, OPT_O2, OPT_O3)) {
+    switch (A->getOption().getID()) {
+    case OPT_O0:
+      Opts_.OptLevel = llvm::OptimizationLevel::O0;
+      break;
+    case OPT_O1:
+      Opts_.OptLevel = llvm::OptimizationLevel::O1;
+      break;
+    case OPT_O2:
+      Opts_.OptLevel = llvm::OptimizationLevel::O2;
+      break;
+    case OPT_O3:
+      Opts_.OptLevel = llvm::OptimizationLevel::O3;
+      break;
+    default:
+      llvm_unreachable("getLastArg only matches the IDs passed to it");
+    }
+  }
+
   llvm::SmallVector<std::string> Inputs;
   for (const Arg *A : ParsedArgs.filtered(OPT_INPUT))
     Inputs.push_back(A->getValue());
