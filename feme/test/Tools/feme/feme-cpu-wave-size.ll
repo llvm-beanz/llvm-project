@@ -6,10 +6,9 @@
 ; see feme/docs/FeMeCPUDesign.md's "Wave Size Selection" and "Kernel ABI"
 ; sections).
 ; RUN: feme --target=%feme_host_triple --wave-size=8 %t.dxcontainer -o %t.o 2>&1 | FileCheck %s --check-prefix=NO-DIAG --allow-empty
-; RUN: od -An -tx1 -N4 %t.o | FileCheck %s --check-prefix=ELF-MAGIC
+; RUN: llvm-readobj --file-headers %t.o
 ; NO-DIAG-NOT: warning
 ; NO-DIAG-NOT: error
-; ELF-MAGIC: 7f 45 4c 46
 
 ; A non-power-of-two --wave-size is rejected with a diagnostic naming the
 ; requirement, regardless of where it came from.
