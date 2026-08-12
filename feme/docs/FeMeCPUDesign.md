@@ -506,8 +506,8 @@ declare { i32, i1 } @feme.cpu.masked.cmpxchg.i32(ptr %p, i32 %cmp, i32 %new,
 declare i1    @feme.cpu.mask.any(i1 %mask)
 ```
 
-- **The name prefix is `feme.cpu.`, not `llvm.feme.cpu.`** (as an earlier
-  draft of this document said). `llvm.`-prefixed names are reserved for
+- **The name prefix is `feme.cpu.`, not `llvm.feme.cpu.`.** `llvm.`-prefixed
+  names are reserved for
   in-tree intrinsics: LLVM would treat such a declaration as an intrinsic
   with no known ID, which loses attribute handling and is not something
   out-of-tree code should rely on. `feme.cpu.*` functions are ordinary

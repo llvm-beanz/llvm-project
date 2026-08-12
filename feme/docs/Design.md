@@ -181,8 +181,8 @@ older parts of LLVM.
 
 ## `feme::Context`
 
-All FeMe entry points take an explicit `feme::Context&` (name TBD, see open
-questions) analogous in spirit to `MLIRContext`/`LLVMContext`, but scoped to
+All FeMe entry points take an explicit `feme::Context&` analogous in spirit
+to `MLIRContext`/`LLVMContext`, but scoped to
 a single FeMe "session":
 
 ```c++
