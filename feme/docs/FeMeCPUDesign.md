@@ -263,8 +263,8 @@ each pass's input and output are both *printable, checkable* LLVM IR:
   the module has no `handlefromheap` left — checkable without reasoning
   about masks.
 - After `feme-cpu-linearize`, control flow is (almost) straight-line and
-  masks are explicit `i1` values — checkable without reasoning about
-  vectors.
+  masks are explicit `i1` values on `feme.cpu.masked.*` calls — checkable
+  without reasoning about vectors.
 - After `feme-cpu-simdize`, everything is `<W x T>` — checkable without
   reasoning about the group wrapper.
 
@@ -408,11 +408,76 @@ before any widening happens. Working on scalar IR here (masks are `i1`, not
   unified exit; the shader's "still running" mask is conjoined into every
   subsequent block's mask.
 - **Side-effecting operations** (stores, atomics, resource writes) are *not*
-  rewritten here — they are annotated with their governing mask (via an
-  operand bundle or a FeMe-internal `llvm.feme.cpu.mask` token, TBD, see
-  Open Questions) and Phase 4 turns them into masked forms. Loads from
-  addresses that could be lane-varying are likewise annotated: an unmasked
-  gather can fault on a lane that was never supposed to execute.
+  predicated by control flow any more, so they are rewritten into the
+  **masked intrinsic forms** described below, which carry their governing
+  mask as an explicit `i1` operand. Loads from addresses that could be
+  lane-varying get the same treatment: an unmasked gather can fault on a
+  lane that was never supposed to execute.
+
+### Mask representation between phases
+
+Masks are carried in the IR, in a family of FeMe-internal intrinsics that
+mirror LLVM's `llvm.masked.*` intrinsics but with a scalar `i1` mask, so
+that everything Phase 3 produces is printable IR a `lit` test can match and
+`feme-opt` can round-trip:
+
+```llvm
+declare float @feme.cpu.masked.load.f32(ptr %p, i32 immarg %align,
+                                        i1 %mask, float %passthru)
+declare void  @feme.cpu.masked.store.f32(float %val, ptr %p,
+                                         i32 immarg %align, i1 %mask)
+declare i32   @feme.cpu.masked.atomicrmw.add.i32(ptr %p, i32 %val, i1 %mask,
+                                                 i32 immarg %ordering)
+declare { i32, i1 } @feme.cpu.masked.cmpxchg.i32(ptr %p, i32 %cmp, i32 %new,
+                                                 i1 %mask, i32 immarg %ordering)
+declare i1    @feme.cpu.mask.any(i1 %mask)
+```
+
+- **The name prefix is `feme.cpu.`, not `llvm.feme.cpu.`** (as an earlier
+  draft of this document said). `llvm.`-prefixed names are reserved for
+  in-tree intrinsics: LLVM would treat such a declaration as an intrinsic
+  with no known ID, which loses attribute handling and is not something
+  out-of-tree code should rely on. `feme.cpu.*` functions are ordinary
+  declarations with the right attributes applied explicitly
+  (`nounwind willreturn`, plus `memory(argmem: read)` /
+  `memory(argmem: readwrite)` as appropriate), so the optimizer treats them
+  no worse than it treats an opaque call, and no better than it should.
+- **Names are type-mangled** in the `.f32` / `.v4i32` style, and are
+  created and recognized through one helper header
+  (`Transforms/CPU/MaskIntrinsics.h`) rather than by string matching at
+  each use.
+- **The wave's entry mask is a trailing `i1` parameter** on the function
+  Phase 3 rewrites, not a magic call. Phase 4 widens it to `<W x i1>` like
+  any other value, and Phase 6's wrapper supplies it — all-ones except for
+  a group's final partial wave.
+- **`feme.cpu.mask.any`** exists so the "skip this region when every lane is
+  off" guard is expressible before widening; it becomes
+  `llvm.vector.reduce.or` in Phase 5.
+
+Phase 4 consumes every one of these — a `feme.cpu.*` call surviving into
+Phase 5 is an assertion failure, not a call the backend will attempt —
+lowering them to the real thing:
+
+| Phase 3 form | Phase 4 lowering |
+|---|---|
+| `feme.cpu.masked.load` at a uniform address | plain `load`, or `llvm.masked.load` when the mask is not provably all-ones |
+| `feme.cpu.masked.load` at a contiguous divergent address | `llvm.masked.load` |
+| `feme.cpu.masked.load` at an arbitrary divergent address | `llvm.masked.gather` |
+| `feme.cpu.masked.store` | `llvm.masked.store` / `llvm.masked.scatter`, by the same rules |
+| `feme.cpu.masked.atomicrmw` / `.cmpxchg` | scalarized lane loop guarded by the widened mask |
+| `feme.cpu.mask.any` | `llvm.vector.reduce.or` |
+
+**Alternatives considered.** Operand bundles on the instruction survive
+printing too, but bundles on non-call instructions are not a thing LLVM
+supports, so every masked `load`/`store` would have had to become a call
+anyway — at which point it may as well be a call with a name that says what
+it means. An out-of-IR side table (a `DenseMap` from instruction to mask,
+computed by Phase 3 and consumed by Phase 4) keeps the intermediate IR
+clean, but makes the two phases inseparable: Phase 4 could not be run on
+hand-written IR in a `lit` test, and Phase 3's output could not be checked
+without a printer that reinvents this representation anyway. That conflicts
+directly with this design's per-phase testing goal, which is the deciding
+factor.
 
 ## Phase 4: Widening (`feme::cpu::SIMDizePass`)
 
@@ -432,6 +497,7 @@ as an explicit option (`feme-opt -passes=feme-cpu-simdize -feme-wave-size=8`).
 | Call to a non-entry internal function | widen the callee too (whole-function vectorization of the call graph, bottom-up), passing the mask as an extra argument |
 | Call to a math libcall (`llvm.sin.f32`, ...) | vector-typed intrinsic call, letting the host's vector library / scalarizer handle it |
 | Atomic RMW / cmpxchg | scalarized lane loop (see below) |
+| `feme.cpu.masked.*` call from Phase 3 | the corresponding `llvm.masked.*` intrinsic (see "Mask representation between phases") |
 
 **Scalarization fallback.** Any operation with no vector form is emitted as
 a `W`-iteration loop (or unrolled sequence) over the lanes, guarded by the
@@ -1005,8 +1071,8 @@ Following the instruction that each phase of translation gets unit tests:
 | Uniformity | divergence classification on hand-built IR, including sync dependence | `print<feme-cpu-uniformity>` output |
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG |
 | Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, per-descriptor `trusted` opt-out, rejection of register-bound resources |
-| Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation |
-| SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8} |
+| Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, `feme.cpu.masked.*` emission |
+| SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8}, `feme.cpu.masked.*` → `llvm.masked.*` lowering from hand-written IR |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
 | Entry wrapper | barrier region splitting | wave loop shape, barrier split, groupshared |
 | JIT | `JITEngine::create`/`dispatch` on a tiny module, resource info round-trip, multi-threaded group scheduling | — |
@@ -1140,21 +1206,19 @@ it:
    The block has no size limit — FeMe warns past 256 bytes so the
    divergence from both GPU APIs stays visible — and growing to several
    blocks later is an additive ABI change. See "Root constants".
+9. **Mask representation between phases.** Masks live in the IR, as an
+   explicit `i1` operand on a family of `feme.cpu.masked.*` intrinsic-shaped
+   declarations that Phase 4 lowers to LLVM's real `llvm.masked.*`
+   intrinsics, plus a trailing `i1` entry-mask parameter on the rewritten
+   function. Phase 3's output is therefore printable, `FileCheck`-able IR,
+   and Phase 4 is runnable on hand-written IR — which an out-of-IR side
+   table would have prevented. See "Mask representation between phases".
 
 ## Open Questions
 
 These need answers (or at least preferences) to firm this design up:
 
-1. **Mask representation between phases.** Phase 3 needs to hand Phase 4 a
-   per-instruction mask. Operand bundles on the instruction, a FeMe-internal
-   intrinsic taking a mask token, or an out-of-IR side table computed on
-   demand? Bundles survive printing (good for testing) but are unusual on
-   non-call instructions; a side table keeps the IR clean but makes the
-   phases untestable in isolation, which conflicts with this design's
-   testing goals. Current preference: a FeMe-internal
-   `llvm.feme.cpu.masked.*` intrinsic form for the operations that need it,
-   so the intermediate IR is printable and checkable.
-4. **Descriptor format generality.** In a bindless shader the storage format
+1. **Descriptor format generality.** In a bindless shader the storage format
    behind a descriptor is a runtime value, so typed buffer access needs
    either a runtime format switch or specialization. Is a small set of
    inlined fast paths plus a generic helper enough, or is per-format
