@@ -52,6 +52,15 @@ Deviation: milestone 2's implementation narrowed one thing described in
   design's `WaveReadLaneFirst` example is: it broadcasts a single lane's
   value to the whole wave. The list grows as new raised wave intrinsics are
   added; nothing about the classification itself is expected to change.
+- The `gtest` coverage this analysis originally got (construct IR, assert
+  `isDivergentAtDef` directly against `UniformityInfo`) was replaced with
+  `FileCheck` tests against the `print<feme-cpu-uniformity>` printer's
+  output instead: asserting on printed `DIVERGENT:` lines is easier to
+  read and debug than a table of `EXPECT_TRUE`/`EXPECT_FALSE` calls, and
+  it exercises the printer itself as a side effect. See
+  `feme/test/Analysis/CPU/uniformity.ll`; there is no longer a
+  `WaveUniformityTest.cpp`. The "Test strategy per phase" table below is
+  updated accordingly.
 
 Deviation: milestone 3's implementation narrowed several things described
 in "Resource Model" below; each is called out inline where it's discussed,
@@ -547,10 +556,12 @@ the CPU pipeline computes a fixed-point summary of which formal parameters
 are varying across all call sites; a function is cloned when different call
 sites require incompatible uniform/varying specializations.
 
-This is an analysis, not a transform, and gets `gtest` coverage directly
-(construct IR, assert the expected values are divergent) plus a
-`feme-opt -passes='print<feme-cpu-uniformity>'` printer so `lit` tests can
-check it the way `print<uniformity>` does upstream.
+This is an analysis, not a transform, and gets coverage entirely through a
+`feme-opt -passes='print<feme-cpu-uniformity>'` printer, so `lit` tests can
+check it the way `print<uniformity>` does upstream: `FileCheck`-ing the
+printer's `DIVERGENT:` output is easier to read and debug than asserting
+`isDivergentAtDef` calls directly against `UniformityInfo` in a `gtest`
+(see the Status section's milestone 2 deviation note).
 
 **Alternative considered:** teaching the in-tree `DirectX`/`SPIRV` TTIs
 these hooks upstream, so `UniformityInfoAnalysis` works out of the box.
@@ -1446,7 +1457,7 @@ Following the instruction that each phase of translation gets unit tests:
 
 | Phase | Unit tests (`gtest`) | `lit` tests |
 |---|---|---|
-| Uniformity | divergence classification on hand-built IR, including sync dependence | `print<feme-cpu-uniformity>` output |
+| Uniformity | — (see the Status section's milestone 2 deviation note) | divergence classification on hand-built IR, including sync dependence, via `print<feme-cpu-uniformity>` output |
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG; the named-shape corpus under `-verify-structured` (see "CFG restructurization test suite") |
 | Resource lowering | canonical call creation and resource info extraction | one test per resource kind, dynamic heap indexing, type mangling, rejection of register-bound resources |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, masked memory and resource-call emission |
@@ -1590,10 +1601,11 @@ Sequenced so each step is independently testable and useful:
   target diagnostic. See the Status section's Deviation note for what
   narrowed (`WaveActiveBallot` raising deferred; the register-bound-handle
   check does not yet honor the future root-constant exception).
-2. **Uniformity analysis** (`WaveTTIImpl` + printer + unit tests) (done):
-   No transform yet -- see the Status section's Deviation note for the one
-   thing that narrowed (the intrinsic list `getValueUniformity` switches on
-   is explicit/enumerated rather than a general rule).
+2. **Uniformity analysis** (`WaveTTIImpl` + printer + `lit` tests) (done):
+   No transform yet -- see the Status section's Deviation note for the
+   things that narrowed (the intrinsic list `getValueUniformity` switches
+   on is explicit/enumerated rather than a general rule; its test coverage
+   moved from `gtest` to `FileCheck`-ing the printer).
 3. **Resource canonicalization + scalar helper IR** (done): canonical
   `feme.cpu.resource.*` calls, the `libFeMeRuntimeCPU` bitcode helpers,
   heap-usage metadata, versioned AOT artifact information and the
