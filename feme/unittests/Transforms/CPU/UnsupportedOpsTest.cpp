@@ -51,8 +51,8 @@ TEST(UnsupportedOpsTest, RejectsUnraisedDXOpCall) {
   ASSERT_TRUE(M);
   Error E = checkSupportedRaisedOps(*M);
   EXPECT_THAT_ERROR(std::move(E), Failed<StringError>(testing::Property(
-                                       &StringError::getMessage,
-                                       testing::HasSubstr("dx.op.something"))));
+                                      &StringError::getMessage,
+                                      testing::HasSubstr("dx.op.something"))));
 }
 
 TEST(UnsupportedOpsTest, RejectsRegisterBoundDXHandle) {
@@ -68,11 +68,10 @@ TEST(UnsupportedOpsTest, RejectsRegisterBoundDXHandle) {
   )");
   ASSERT_TRUE(M);
   Error E = checkSupportedRaisedOps(*M);
-  EXPECT_THAT_ERROR(
-      std::move(E),
-      Failed<StringError>(testing::Property(
-          &StringError::getMessage,
-          testing::HasSubstr("register-bound resource handle"))));
+  EXPECT_THAT_ERROR(std::move(E),
+                    Failed<StringError>(testing::Property(
+                        &StringError::getMessage,
+                        testing::HasSubstr("register-bound resource handle"))));
 }
 
 TEST(UnsupportedOpsTest, RejectsRegisterBoundSPIRVHandle) {
@@ -86,11 +85,10 @@ TEST(UnsupportedOpsTest, RejectsRegisterBoundSPIRVHandle) {
   )");
   ASSERT_TRUE(M);
   Error E = checkSupportedRaisedOps(*M);
-  EXPECT_THAT_ERROR(
-      std::move(E),
-      Failed<StringError>(testing::Property(
-          &StringError::getMessage,
-          testing::HasSubstr("register-bound resource handle"))));
+  EXPECT_THAT_ERROR(std::move(E),
+                    Failed<StringError>(testing::Property(
+                        &StringError::getMessage,
+                        testing::HasSubstr("register-bound resource handle"))));
 }
 
 TEST(UnsupportedOpsTest, AcceptsBindlessDXHandle) {

@@ -581,8 +581,7 @@ bool raiseResourceHandleFromHeap(CallInst &AnnotateCI) {
   Function *HandleFromHeapFn = Intrinsic::getOrInsertDeclaration(
       AnnotateCI.getModule(), Intrinsic::dx_resource_handlefromheap,
       {HandleTy});
-  Value *NewHandle =
-      Builder.CreateCall(HandleFromHeapFn, {Index, NonUniform});
+  Value *NewHandle = Builder.CreateCall(HandleFromHeapFn, {Index, NonUniform});
 
   Function *CastFn = Intrinsic::getOrInsertDeclaration(
       AnnotateCI.getModule(), Intrinsic::dx_resource_casthandle,

@@ -53,7 +53,9 @@ struct ShaderWaveSizeRequirement {
   unsigned preferredSize() const { return Preferred ? Preferred : Min; }
 
   /// Whether \p W is one of the sizes this requirement accepts.
-  bool accepts(unsigned W) const { return Max ? (W >= Min && W <= Max) : W == Min; }
+  bool accepts(unsigned W) const {
+    return Max ? (W >= Min && W <= Max) : W == Min;
+  }
 };
 
 /// Parses a raised `"hlsl.wavesize"` function attribute value (see

@@ -1,4 +1,5 @@
-//===- Linearize.h - CPU target Phase 3: linearization -----------*- C++ -*-===//
+//===- Linearize.h - CPU target Phase 3: linearization -----------*- C++
+//-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.

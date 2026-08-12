@@ -43,7 +43,6 @@ Driver::Driver(Context &Ctx) : Ctx(Ctx) {}
 
 namespace {
 
-
 /// Sniffs \p Buffer's binary format to select which Importer parses it, so
 /// `feme` does not need an explicit `--from` flag naming it: DXIL
 /// bitcode/DXContainer and SPIR-V binaries each begin with a distinct,
@@ -165,8 +164,7 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
 /// Selection" in feme/docs/FeMeCPUDesign.md means by "non-CPU targets":
 /// `--wave-size` only has meaning for an actual host retarget.
 bool isCPUTarget(const llvm::Triple &TheTriple) {
-  return !TheTriple.isDXIL() && !TheTriple.isSPIRV() &&
-         !TheTriple.isAMDGCN();
+  return !TheTriple.isDXIL() && !TheTriple.isSPIRV() && !TheTriple.isAMDGCN();
 }
 
 /// The shader's declared wave size requirement, if any: the `"hlsl.wavesize"`

@@ -1,4 +1,5 @@
-//===- EntryWrapper.h - CPU target Phase 6: group execution -------*- C++ -*-===//
+//===- EntryWrapper.h - CPU target Phase 6: group execution -------*- C++
+//-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.

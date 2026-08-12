@@ -1,4 +1,5 @@
-//===- ResourceLowering.h - CPU target resource canonicalization -*- C++ -*-===//
+//===- ResourceLowering.h - CPU target resource canonicalization -*- C++
+//-*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -30,8 +31,7 @@ namespace feme::cpu {
 /// Canonicalizes a raised shader's descriptor-heap resource access into
 /// `feme.cpu.resource.*` calls. See the file comment above for current
 /// scope.
-class ResourceLoweringPass
-    : public llvm::PassInfoMixin<ResourceLoweringPass> {
+class ResourceLoweringPass : public llvm::PassInfoMixin<ResourceLoweringPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

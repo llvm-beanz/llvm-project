@@ -32,10 +32,10 @@ unsigned resolveOrFail(std::optional<unsigned> User,
 }
 
 /// Resolves and asserts failure, returning the diagnostic text.
-std::string resolveOrFailExpectingError(
-    std::optional<unsigned> User,
-    std::optional<ShaderWaveSizeRequirement> Shader,
-    unsigned HostVectorBits = 128) {
+std::string
+resolveOrFailExpectingError(std::optional<unsigned> User,
+                            std::optional<ShaderWaveSizeRequirement> Shader,
+                            unsigned HostVectorBits = 128) {
   llvm::Expected<unsigned> Result =
       resolveWaveSize(User, Shader, HostVectorBits);
   EXPECT_FALSE(!!Result);
@@ -45,33 +45,33 @@ std::string resolveOrFailExpectingError(
 TEST(WaveSizeTest, NeitherSetUsesHostDerivedDefault) {
   // max(4, HostVectorBits / 32), rounded down to a power of two.
   EXPECT_EQ(resolveOrFail(std::nullopt, std::nullopt, /*HostVectorBits=*/128),
-           4u);
+            4u);
   EXPECT_EQ(resolveOrFail(std::nullopt, std::nullopt, /*HostVectorBits=*/256),
-           8u);
+            8u);
   EXPECT_EQ(resolveOrFail(std::nullopt, std::nullopt, /*HostVectorBits=*/512),
-           16u);
+            16u);
   // A vector-less host still gets a legal minimum, not zero.
   EXPECT_EQ(resolveOrFail(std::nullopt, std::nullopt, /*HostVectorBits=*/0),
-           4u);
+            4u);
   // Clamped to MaxWaveSize even for an implausibly wide host vector.
   EXPECT_EQ(
       resolveOrFail(std::nullopt, std::nullopt, /*HostVectorBits=*/100000),
       128u);
   // Not a power of two: rounds down.
   EXPECT_EQ(resolveOrFail(std::nullopt, std::nullopt, /*HostVectorBits=*/200),
-           4u);
+            4u);
 }
 
 TEST(WaveSizeTest, ShaderSetUsesItsPreferredSize) {
   // Single required value (SM 6.6 form, widened to "n,0,0").
   EXPECT_EQ(resolveOrFail(std::nullopt, ShaderWaveSizeRequirement{16, 0, 0}),
-           16u);
+            16u);
   // Range with an explicit preferred size.
-  EXPECT_EQ(
-      resolveOrFail(std::nullopt, ShaderWaveSizeRequirement{8, 32, 16}), 16u);
+  EXPECT_EQ(resolveOrFail(std::nullopt, ShaderWaveSizeRequirement{8, 32, 16}),
+            16u);
   // Range with no preferred size: the low end of the range.
   EXPECT_EQ(resolveOrFail(std::nullopt, ShaderWaveSizeRequirement{8, 32, 0}),
-           8u);
+            8u);
 }
 
 TEST(WaveSizeTest, UserSetUsesUserValue) {
@@ -97,12 +97,12 @@ TEST(WaveSizeTest, UserAndShaderConflictIsAnError) {
 
 TEST(WaveSizeTest, UserValueOutOfRangeIsAnError) {
   EXPECT_NE(resolveOrFailExpectingError(2u, std::nullopt).find("power of two"),
-           std::string::npos);
+            std::string::npos);
   EXPECT_NE(
       resolveOrFailExpectingError(256u, std::nullopt).find("power of two"),
       std::string::npos);
   EXPECT_NE(resolveOrFailExpectingError(6u, std::nullopt).find("power of two"),
-           std::string::npos);
+            std::string::npos);
 }
 
 TEST(WaveSizeTest, ShaderValueOutOfRangeIsAnError) {
@@ -111,7 +111,7 @@ TEST(WaveSizeTest, ShaderValueOutOfRangeIsAnError) {
   EXPECT_NE(resolveOrFailExpectingError(std::nullopt,
                                         ShaderWaveSizeRequirement{3, 0, 0})
                 .find("power of two"),
-           std::string::npos);
+            std::string::npos);
 }
 
 TEST(WaveSizeTest, ParsesNormalizedAttribute) {
