@@ -108,8 +108,7 @@ Expected<HeapFile> readHeapFile(StringRef Filename) {
       MemoryBuffer::getFile(Filename);
   if (std::error_code EC = BufOrErr.getError())
     return createStringError(EC, "could not open '%s': %s",
-                             Filename.str().c_str(),
-                             EC.message().c_str());
+                             Filename.str().c_str(), EC.message().c_str());
 
   HeapFile File;
   yaml::Input Yin((*BufOrErr)->getBuffer());
@@ -146,8 +145,9 @@ HeapStorage buildHeapStorage(const HeapFile &File) {
         std::max<uint32_t>(Entry.Size, Entry.Data.size() * sizeof(uint32_t));
     std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
     Buffer.assign(ByteSize, 0);
-    memcpy(Buffer.data(), Entry.Data.data(),
-          std::min<size_t>(Buffer.size(), Entry.Data.size() * sizeof(uint32_t)));
+    memcpy(
+        Buffer.data(), Entry.Data.data(),
+        std::min<size_t>(Buffer.size(), Entry.Data.size() * sizeof(uint32_t)));
 
     FemeDescriptor &Desc = Storage.Descriptors[Entry.Index];
     Desc = FemeDescriptor{};
@@ -163,12 +163,12 @@ HeapStorage buildHeapStorage(const HeapFile &File) {
 /// per entry: `heap[<index>]: <word0> <word1> ...`, for `FileCheck` to
 /// match against (see the file comment above).
 void printHeapContents(raw_ostream &OS, const HeapFile &File,
-                      const HeapStorage &Storage) {
+                       const HeapStorage &Storage) {
   for (const HeapEntry &Entry : File.ResourceHeap) {
     const std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
     OS << "heap[" << Entry.Index << "]:";
     for (size_t I = 0; I + sizeof(uint32_t) <= Buffer.size();
-        I += sizeof(uint32_t)) {
+         I += sizeof(uint32_t)) {
       uint32_t Word;
       memcpy(&Word, Buffer.data() + I, sizeof(Word));
       OS << ' ' << Word;
@@ -207,7 +207,8 @@ int main(int argc, char **argv) {
 
   SMDiagnostic Err;
   LLVMContext LLVMCtx;
-  std::unique_ptr<llvm::Module> LLVMMod = parseIRFile(InputFilename, Err, LLVMCtx);
+  std::unique_ptr<llvm::Module> LLVMMod =
+      parseIRFile(InputFilename, Err, LLVMCtx);
   if (!LLVMMod) {
     Err.print(argv[0], errs());
     return 1;
@@ -229,7 +230,7 @@ int main(int argc, char **argv) {
   for (unsigned I = 0; I != std::min<size_t>(3, GroupCountParts.size()); ++I)
     if (GroupCountParts[I].getAsInteger(10, GroupCount[I])) {
       errs() << "feme-run: '--groups' must be three comma-separated "
-               "integers\n";
+                "integers\n";
       return 1;
     }
 
@@ -249,7 +250,7 @@ int main(int argc, char **argv) {
   std::vector<uint8_t> RootConstantBytes(Heap.RootConstants.size() *
                                          sizeof(uint32_t));
   memcpy(RootConstantBytes.data(), Heap.RootConstants.data(),
-        RootConstantBytes.size());
+         RootConstantBytes.size());
 
   DispatchResources Resources;
   Resources.ResourceHeap = Storage.Descriptors;

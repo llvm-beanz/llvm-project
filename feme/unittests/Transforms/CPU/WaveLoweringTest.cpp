@@ -86,11 +86,9 @@ TEST(WaveLoweringTest, LowersLaneIndexToConstantIota) {
         if (!CV->getType()->isVectorTy())
           continue;
         EXPECT_EQ(
-            cast<ConstantInt>(CV->getAggregateElement(0u))->getZExtValue(),
-            0u);
+            cast<ConstantInt>(CV->getAggregateElement(0u))->getZExtValue(), 0u);
         EXPECT_EQ(
-            cast<ConstantInt>(CV->getAggregateElement(1u))->getZExtValue(),
-            1u);
+            cast<ConstantInt>(CV->getAggregateElement(1u))->getZExtValue(), 1u);
         FoundConstantIota = true;
       }
     }

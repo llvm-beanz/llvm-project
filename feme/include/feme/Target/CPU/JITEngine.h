@@ -116,8 +116,8 @@ public:
 
 private:
   JITEngine(std::unique_ptr<llvm::orc::LLJIT> JIT, void *EntryFn,
-           ResourceInfo Info, unsigned WaveSize,
-           std::array<uint32_t, 3> GroupSize);
+            ResourceInfo Info, unsigned WaveSize,
+            std::array<uint32_t, 3> GroupSize);
 
   std::unique_ptr<llvm::orc::LLJIT> JIT;
   /// `void (*)(const FemeDispatchArgs *)`: the compiled

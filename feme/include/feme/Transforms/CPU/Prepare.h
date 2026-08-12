@@ -40,7 +40,8 @@ class PreparePass : public llvm::PassInfoMixin<PreparePass> {
   std::string EntryPoint;
 
 public:
-  explicit PreparePass(llvm::StringRef EntryPoint = "") : EntryPoint(EntryPoint) {}
+  explicit PreparePass(llvm::StringRef EntryPoint = "")
+      : EntryPoint(EntryPoint) {}
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

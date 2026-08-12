@@ -59,7 +59,7 @@ TEST(SIMDizeTest, AppendsWaveBodyInterfaceParams) {
   EXPECT_TRUE(Env->EntryMask);
   EXPECT_TRUE(Env->GroupShared);
   EXPECT_EQ(cast<FixedVectorType>(Env->EntryMask->getType())->getNumElements(),
-           4u);
+            4u);
 }
 
 TEST(SIMDizeTest, WidensDivergentThreadId) {
@@ -89,8 +89,7 @@ TEST(SIMDizeTest, WidensDivergentThreadId) {
       }
     }
     if (auto *BO = dyn_cast<BinaryOperator>(&I))
-      if (BO->getOpcode() == Instruction::Mul &&
-          BO->getType()->isVectorTy())
+      if (BO->getOpcode() == Instruction::Mul && BO->getType()->isVectorTy())
         FoundWideMul = true;
   }
   EXPECT_TRUE(FoundBuiltinCall);

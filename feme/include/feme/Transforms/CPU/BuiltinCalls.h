@@ -97,10 +97,9 @@ struct MatchedBuiltinCall {
 /// `ThreadId`/`ThreadIdInGroup`. Returns a `<WaveSize x i32>`-typed call.
 llvm::CallInst *createBuiltinCall(llvm::IRBuilderBase &Builder,
                                   BuiltinCallKind Kind,
-                                  const BuiltinCallEnv &Env,
-                                  unsigned WaveSize, uint32_t NumThreadsX,
-                                  uint32_t NumThreadsY, uint32_t NumThreadsZ,
-                                  unsigned Component = 0,
+                                  const BuiltinCallEnv &Env, unsigned WaveSize,
+                                  uint32_t NumThreadsX, uint32_t NumThreadsY,
+                                  uint32_t NumThreadsZ, unsigned Component = 0,
                                   const llvm::Twine &Name = "");
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.builtin.*` calls,

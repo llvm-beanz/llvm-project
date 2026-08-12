@@ -110,7 +110,7 @@ std::array<uint32_t, 3> getThreadGroupSize(const Function &F) {
 /// Loads field \p Field of `*Args` (a `getDispatchArgsType()`-typed
 /// pointer), with \p FieldTy the field's type.
 Value *loadArgsField(IRBuilder<> &Builder, StructType *ArgsTy, Value *Args,
-                    unsigned Field, Type *FieldTy) {
+                     unsigned Field, Type *FieldTy) {
   Value *Ptr = Builder.CreateStructGEP(ArgsTy, Args, Field);
   return Builder.CreateLoad(FieldTy, Ptr);
 }
@@ -119,7 +119,7 @@ Value *loadArgsField(IRBuilder<> &Builder, StructType *ArgsTy, Value *Args,
 /// comment above): lane `L` of wave `w` is active iff
 /// `w * WaveSize + L < GroupSizeTotal`.
 Value *buildEntryMask(IRBuilder<> &Builder, Value *W, unsigned WaveSize,
-                     uint32_t GroupSizeTotal) {
+                      uint32_t GroupSizeTotal) {
   Type *I32Ty = Builder.getInt32Ty();
   Value *Base = Builder.CreateMul(W, ConstantInt::get(I32Ty, WaveSize));
   Value *WideBase = Builder.CreateVectorSplat(WaveSize, Base);
@@ -158,8 +158,8 @@ Function *buildWrapper(Function &WaveBody) {
   std::string WrapperName = getEntrySymbolName(WaveBody.getName());
   FunctionType *WrapperTy =
       FunctionType::get(Type::getVoidTy(Ctx), {PtrTy}, false);
-  Function *Wrapper = Function::Create(WrapperTy, GlobalValue::ExternalLinkage,
-                                       WrapperName, M);
+  Function *Wrapper =
+      Function::Create(WrapperTy, GlobalValue::ExternalLinkage, WrapperName, M);
   Argument *Args = Wrapper->getArg(0);
   Args->setName("args");
 
@@ -169,8 +169,8 @@ Function *buildWrapper(Function &WaveBody) {
   BasicBlock *ExitBB = BasicBlock::Create(Ctx, "wave.loop.exit", Wrapper);
 
   IRBuilder<> Entry(EntryBB);
-  Value *ResourceHeapVal =
-      loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::ResourceHeap, PtrTy);
+  Value *ResourceHeapVal = loadArgsField(
+      Entry, ArgsTy, Args, DispatchArgsField::ResourceHeap, PtrTy);
   Value *ResourceHeapCountVal = loadArgsField(
       Entry, ArgsTy, Args, DispatchArgsField::ResourceHeapCount, I32Ty);
   Value *SamplerHeapVal =
@@ -186,8 +186,8 @@ Function *buildWrapper(Function &WaveBody) {
   Value *GroupIDX = Entry.CreateExtractValue(GroupIDVec, 0);
   Value *GroupIDY = Entry.CreateExtractValue(GroupIDVec, 1);
   Value *GroupIDZ = Entry.CreateExtractValue(GroupIDVec, 2);
-  Value *GroupSharedVal = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::GroupShared, PtrTy);
+  Value *GroupSharedVal =
+      loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::GroupShared, PtrTy);
   Entry.CreateBr(HeaderBB);
 
   IRBuilder<> Header(HeaderBB);

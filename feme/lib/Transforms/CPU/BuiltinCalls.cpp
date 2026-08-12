@@ -60,11 +60,11 @@ bool needsGroupID(BuiltinCallKind Kind) {
 }
 bool needsNumThreads(BuiltinCallKind Kind) {
   return Kind == BuiltinCallKind::ThreadId ||
-        Kind == BuiltinCallKind::ThreadIdInGroup;
+         Kind == BuiltinCallKind::ThreadIdInGroup;
 }
 bool needsComponent(BuiltinCallKind Kind) {
   return Kind == BuiltinCallKind::ThreadId ||
-        Kind == BuiltinCallKind::ThreadIdInGroup;
+         Kind == BuiltinCallKind::ThreadIdInGroup;
 }
 bool needsWaveIndex(BuiltinCallKind Kind) {
   return Kind != BuiltinCallKind::LaneIndex;
@@ -97,7 +97,7 @@ CallInst *createBuiltinCall(IRBuilderBase &Builder, BuiltinCallKind Kind,
   if (needsNumThreads(Kind)) {
     ParamTypes.append({I32Ty, I32Ty, I32Ty});
     Args.append({Builder.getInt32(NumThreadsX), Builder.getInt32(NumThreadsY),
-                Builder.getInt32(NumThreadsZ)});
+                 Builder.getInt32(NumThreadsZ)});
   }
   if (needsComponent(Kind)) {
     ParamTypes.push_back(I32Ty);
@@ -111,8 +111,8 @@ CallInst *createBuiltinCall(IRBuilderBase &Builder, BuiltinCallKind Kind,
   Function *Callee = M->getFunction(MangledName);
   if (!Callee) {
     FunctionType *FTy = FunctionType::get(ResultTy, ParamTypes, false);
-    Callee = Function::Create(FTy, GlobalValue::ExternalLinkage, MangledName,
-                              M);
+    Callee =
+        Function::Create(FTy, GlobalValue::ExternalLinkage, MangledName, M);
     Callee->setDoesNotAccessMemory();
     Callee->setWillReturn();
   }

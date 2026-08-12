@@ -72,8 +72,9 @@ std::optional<feme::cpu::ShaderWaveSizeRequirement>
 getShaderWaveSizeRequirement(const llvm::Module &M) {
   for (const Function &F : M)
     if (F.hasFnAttribute("hlsl.wavesize"))
-      if (std::optional<ShaderWaveSizeRequirement> Req = parseShaderWaveSizeAttr(
-              F.getFnAttribute("hlsl.wavesize").getValueAsString()))
+      if (std::optional<ShaderWaveSizeRequirement> Req =
+              parseShaderWaveSizeAttr(
+                  F.getFnAttribute("hlsl.wavesize").getValueAsString()))
         return Req;
   return std::nullopt;
 }
@@ -232,7 +233,8 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
                              "shader declares an empty thread group");
 
   std::optional<ResourceInfo> Info = ResourceInfo::fromModule(Mod, EntryName);
-  ResourceInfo ResolvedInfo = Info.value_or(ResourceInfo{EntryName, 0, false, {}});
+  ResourceInfo ResolvedInfo =
+      Info.value_or(ResourceInfo{EntryName, 0, false, {}});
 
   std::string WrapperName = getEntrySymbolName(EntryName);
   if (!Mod.getFunction(WrapperName))
@@ -254,7 +256,8 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     return createStringError(inconvertibleErrorCode(),
                              "failed to link libFeMeRuntimeCPU");
 
-  OptimizerPipeline().run(Mod, OptimizerOptions{toOptimizationLevel(Opts.OptLevel)});
+  OptimizerPipeline().run(Mod,
+                          OptimizerOptions{toOptimizationLevel(Opts.OptLevel)});
 
   if (verifyModule(Mod, &errs()))
     return createStringError(inconvertibleErrorCode(),
@@ -269,13 +272,13 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   if (!EntryAddr)
     return EntryAddr.takeError();
 
-  return std::unique_ptr<JITEngine>(new JITEngine(
-      std::move(JIT), EntryAddr->toPtr<void *>(), std::move(ResolvedInfo),
-      *WaveSize, GroupSize));
+  return std::unique_ptr<JITEngine>(
+      new JITEngine(std::move(JIT), EntryAddr->toPtr<void *>(),
+                    std::move(ResolvedInfo), *WaveSize, GroupSize));
 }
 
 Error JITEngine::dispatch(const DispatchResources &Resources,
-                         std::array<uint32_t, 3> GroupCount) const {
+                          std::array<uint32_t, 3> GroupCount) const {
   using EntryFnTy = void (*)(const FemeDispatchArgs *);
   auto *Entry = reinterpret_cast<EntryFnTy>(EntryFn);
 

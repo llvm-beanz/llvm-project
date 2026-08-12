@@ -126,7 +126,8 @@ std::array<uint32_t, 3> getThreadGroupSize(const Function &F) {
 /// The wave size `SIMDizePass` should widen \p F to: the pass's own
 /// constructor option if given, else \p F's `feme.cpu.wavesize` attribute
 /// (see feme::Driver, "Wave Size Selection"), else `feme::cpu::MinWaveSize`.
-unsigned resolveWaveSizeForFunction(const Function &F, unsigned OptionWaveSize) {
+unsigned resolveWaveSizeForFunction(const Function &F,
+                                    unsigned OptionWaveSize) {
   if (OptionWaveSize)
     return OptionWaveSize;
   if (F.hasFnAttribute("feme.cpu.wavesize")) {
@@ -239,7 +240,7 @@ Function *FunctionWidener::buildWidenedFunction() {
   ParamTypes.append({I32Ty, I32Ty, I32Ty, I32Ty, MaskTy, PtrTy});
 
   FunctionType *NewTy = FunctionType::get(OldF.getReturnType(), ParamTypes,
-                                         OldF.getFunctionType()->isVarArg());
+                                          OldF.getFunctionType()->isVarArg());
   Function *F = Function::Create(NewTy, OldF.getLinkage(),
                                  OldF.getAddressSpace(), "", OldF.getParent());
   F->copyAttributesFrom(&OldF);
@@ -315,7 +316,7 @@ void FunctionWidener::widenPHI(PHINode &PN) {
 }
 
 void FunctionWidener::widenBuiltin(CallInst &CI, BuiltinCallKind Kind,
-                                  IRBuilder<> &Builder) {
+                                   IRBuilder<> &Builder) {
   BuiltinCallEnv BEnv;
   BEnv.GroupIDX = Env.GroupIDX;
   BEnv.GroupIDY = Env.GroupIDY;
@@ -338,8 +339,9 @@ void FunctionWidener::widenBuiltin(CallInst &CI, BuiltinCallKind Kind,
 void FunctionWidener::replaceGroupIdCall(CallInst &CI) {
   unsigned Component = static_cast<unsigned>(
       cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue());
-  Value *Replacement =
-      Component == 0 ? Env.GroupIDX : Component == 1 ? Env.GroupIDY : Env.GroupIDZ;
+  Value *Replacement = Component == 0   ? Env.GroupIDX
+                       : Component == 1 ? Env.GroupIDY
+                                        : Env.GroupIDZ;
   CI.replaceAllUsesWith(Replacement);
   ToErase.push_back(&CI);
 }
@@ -405,17 +407,17 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   Value *NewI = nullptr;
   if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
     NewI = Builder.CreateBinOp(BO->getOpcode(), WideOps[0], WideOps[1],
-                              I.getName() + ".wide");
+                               I.getName() + ".wide");
   } else if (auto *Cmp = dyn_cast<CmpInst>(&I)) {
     NewI = Builder.CreateCmp(Cmp->getPredicate(), WideOps[0], WideOps[1],
-                            I.getName() + ".wide");
+                             I.getName() + ".wide");
   } else if (auto *Cast = dyn_cast<CastInst>(&I)) {
     Type *WideTy = FixedVectorType::get(I.getType(), WaveSize);
     NewI = Builder.CreateCast(Cast->getOpcode(), WideOps[0], WideTy,
-                             I.getName() + ".wide");
+                              I.getName() + ".wide");
   } else if (isa<SelectInst>(&I)) {
     NewI = Builder.CreateSelect(WideOps[0], WideOps[1], WideOps[2],
-                               I.getName() + ".wide");
+                                I.getName() + ".wide");
   } else if (auto *UO = dyn_cast<UnaryOperator>(&I)) {
     NewI =
         Builder.CreateUnOp(UO->getOpcode(), WideOps[0], I.getName() + ".wide");
@@ -436,8 +438,8 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       return true;
     }
     Intrinsic::ID ID = CI->getCalledFunction()
-                          ? CI->getCalledFunction()->getIntrinsicID()
-                          : Intrinsic::not_intrinsic;
+                           ? CI->getCalledFunction()->getIntrinsicID()
+                           : Intrinsic::not_intrinsic;
     if (isGroupIdCall(ID)) {
       replaceGroupIdCall(*CI);
       return true;

@@ -66,40 +66,38 @@ Constant *getLaneIota(LLVMContext &Ctx, unsigned WaveSize) {
 /// above): the flattened thread id within the group, for every lane of the
 /// wave at once.
 Value *buildFlattenedThreadIdInGroup(IRBuilder<> &Builder, Value *WaveIndex,
-                                    unsigned WaveSize) {
+                                     unsigned WaveSize) {
   Value *Base = Builder.CreateMul(WaveIndex, Builder.getInt32(WaveSize));
   Value *WideBase = Builder.CreateVectorSplat(WaveSize, Base);
-  return Builder.CreateAdd(WideBase, getLaneIota(Builder.getContext(), WaveSize));
+  return Builder.CreateAdd(WideBase,
+                           getLaneIota(Builder.getContext(), WaveSize));
 }
 
 /// Decomposes \p Flat (see `buildFlattenedThreadIdInGroup`) into thread group
 /// dimension \p Component's (0/1/2 for x/y/z) thread-in-group id, per the
 /// file comment above.
-Value *decomposeComponent(IRBuilder<> &Builder, Value *Flat,
-                          unsigned Component, uint32_t NumThreadsX,
-                          uint32_t NumThreadsY) {
+Value *decomposeComponent(IRBuilder<> &Builder, Value *Flat, unsigned Component,
+                          uint32_t NumThreadsX, uint32_t NumThreadsY) {
   switch (Component) {
   case 0:
-    return Builder.CreateURem(Flat, Builder.CreateVectorSplat(
-                                        cast<FixedVectorType>(Flat->getType())
-                                            ->getNumElements(),
-                                        Builder.getInt32(NumThreadsX)));
+    return Builder.CreateURem(
+        Flat, Builder.CreateVectorSplat(
+                  cast<FixedVectorType>(Flat->getType())->getNumElements(),
+                  Builder.getInt32(NumThreadsX)));
   case 1: {
-    unsigned W =
-        cast<FixedVectorType>(Flat->getType())->getNumElements();
+    unsigned W = cast<FixedVectorType>(Flat->getType())->getNumElements();
     Value *DivX = Builder.CreateUDiv(
         Flat, Builder.CreateVectorSplat(W, Builder.getInt32(NumThreadsX)));
     return Builder.CreateURem(
         DivX, Builder.CreateVectorSplat(W, Builder.getInt32(NumThreadsY)));
   }
   case 2: {
-    unsigned W =
-        cast<FixedVectorType>(Flat->getType())->getNumElements();
+    unsigned W = cast<FixedVectorType>(Flat->getType())->getNumElements();
     uint64_t XY = static_cast<uint64_t>(NumThreadsX) * NumThreadsY;
     return Builder.CreateUDiv(
         Flat, Builder.CreateVectorSplat(
                   W, ConstantInt::get(Builder.getInt32Ty(),
-                                     static_cast<uint32_t>(XY))));
+                                      static_cast<uint32_t>(XY))));
   }
   default:
     llvm_unreachable("component out of range");
@@ -119,29 +117,30 @@ void lowerBuiltinCall(const MatchedBuiltinCall &Matched) {
     Result = getLaneIota(Builder.getContext(), W);
     break;
   case BuiltinCallKind::FlattenedThreadIdInGroup:
-    Result =
-        buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
+    Result = buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
     break;
   case BuiltinCallKind::ThreadIdInGroup: {
-    Value *Flat = buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
+    Value *Flat =
+        buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
     Result = decomposeComponent(Builder, Flat, Matched.Component,
                                 Matched.NumThreadsX, Matched.NumThreadsY);
     break;
   }
   case BuiltinCallKind::ThreadId: {
-    Value *Flat = buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
-    Value *InGroup = decomposeComponent(Builder, Flat, Matched.Component,
-                                        Matched.NumThreadsX,
-                                        Matched.NumThreadsY);
+    Value *Flat =
+        buildFlattenedThreadIdInGroup(Builder, Matched.Env.WaveIndex, W);
+    Value *InGroup =
+        decomposeComponent(Builder, Flat, Matched.Component,
+                           Matched.NumThreadsX, Matched.NumThreadsY);
     Value *GroupIDComponent = Matched.Component == 0   ? Matched.Env.GroupIDX
                               : Matched.Component == 1 ? Matched.Env.GroupIDY
-                                                        : Matched.Env.GroupIDZ;
+                                                       : Matched.Env.GroupIDZ;
     uint32_t NumThreadsComponent = Matched.Component == 0 ? Matched.NumThreadsX
                                    : Matched.Component == 1
                                        ? Matched.NumThreadsY
                                        : Matched.NumThreadsZ;
-    Value *Scaled = Builder.CreateMul(
-        GroupIDComponent, Builder.getInt32(NumThreadsComponent));
+    Value *Scaled = Builder.CreateMul(GroupIDComponent,
+                                      Builder.getInt32(NumThreadsComponent));
     Value *WideScaled = Builder.CreateVectorSplat(W, Scaled);
     Result = Builder.CreateAdd(WideScaled, InGroup);
     break;

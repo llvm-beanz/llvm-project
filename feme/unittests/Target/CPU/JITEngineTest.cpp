@@ -56,8 +56,7 @@ constexpr char ShaderIR[] = R"(
 TEST(JITEngineTest, RunsThreadIdShaderAgainstARawBuffer) {
   Context Ctx;
   SMDiagnostic Err;
-  auto LLVMMod =
-      parseAssemblyString(ShaderIR, Err, Ctx.getLLVMContext());
+  auto LLVMMod = parseAssemblyString(ShaderIR, Err, Ctx.getLLVMContext());
   ASSERT_TRUE(LLVMMod) << "parse error: " << Err.getMessage().str();
 
   feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
