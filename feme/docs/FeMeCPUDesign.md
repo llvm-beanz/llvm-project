@@ -601,8 +601,10 @@ reuse Phase 2's call-graph summaries, but not its invalidated per-value
 analysis result.
 
 **Wave-body interface.** Phase 4 gives the SIMDized body an explicit internal
-signature containing the group id, wave index, entry mask, resource heap
-pointers and counts, root constants, and groupshared pointer. Phase 5 lowers
+signature containing the group id, wave index, entry mask, both descriptor
+heap pointers and counts, the root constant pointer and size, and the
+groupshared pointer — the parameters resource lowering and Phase 3 accreted,
+now widened where widening applies. Phase 5 lowers
 builtins from these parameters; Phase 6 constructs the loops that supply
 them. This internal interface is not the exported kernel ABI.
 
@@ -656,7 +658,8 @@ produces a **wrapper function** with the fixed ABI below, containing:
 
 ```c
 for (w = 0; w < WavesPerGroup; ++w)      // the "wave loop"
-  wave_body(group_id, w, entry_mask(w), heaps, root_constants, groupshared);
+  wave_body(group_id, w, entry_mask(w), heaps, root_constants,
+            root_constant_size, groupshared);
 ```
 
 **Barriers.** `GroupMemoryBarrierWithGroupSync` (DXIL `Barrier`, SPIR-V
