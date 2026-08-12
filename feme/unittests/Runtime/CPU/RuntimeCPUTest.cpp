@@ -7,7 +7,7 @@
 //===----------------------------------------------------------------------===//
 //
 // These tests JIT-compile the actual `libFeMeRuntimeCPU` bitcode (see
-// feme/runtime/CPU/FeMeRuntimeCPU.ll and "Runtime Support Library" in
+// feme/runtime/CPU/FeMeRuntimeCPU.c and "Runtime Support Library" in
 // feme/docs/FeMeCPUDesign.md) with MCJIT and call its canonical
 // `feme.cpu.resource.*` helpers directly against a real, host-allocated
 // heap laid out exactly as `feme::cpu::FemeDescriptor`

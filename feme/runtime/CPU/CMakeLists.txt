@@ -1,28 +1,44 @@
 # libFeMeRuntimeCPU: the CPU target's shader-side scalar helper bitcode (see
 # "Runtime Support Library" in feme/docs/FeMeCPUDesign.md).
 #
-# FeMeRuntimeCPU.ll is hand-written LLVM IR (not C++): the descriptor
-# lookup, bounds/kind checks and per-format conversions it implements are
-# meant to be linked *into* a compiled shader module and inlined there (see
-# "Descriptor formats"), not called through an ABI boundary of their own --
-# writing it directly as IR avoids a clang dependency (feme currently has
-# none) for a file whose only consumer is LLVM IR anyway.
+# FeMeRuntimeCPU.c is plain freestanding C (see feme/docs/Design.md's
+# "Dependencies" note): the descriptor lookup, bounds/kind checks and
+# per-format conversions it implements are meant to be linked *into* a
+# compiled shader module and inlined there (see "Descriptor formats"), not
+# called through an ABI boundary of their own, but hand-writing that logic
+# directly as LLVM IR proved a maintainability burden not worth the clang
+# dependency it was avoiding -- feme depends on clang as its host C compiler
+# for this file (llvm/CMakeLists.txt enables clang implicitly alongside
+# feme, the same way it does for flang and lldb).
 #
-# The build assembles it to bitcode with llvm-as, then embeds the resulting
+# The build compiles it to bitcode with clang, then embeds the resulting
 # bytes into this library as an ordinary C++ byte array (`embed_bitcode.py`)
 # so `feme::cpu::getRuntimeCPUBitcode()` never needs to locate a `.bc` file
 # on disk at run time.
 
-set(feme_runtime_cpu_ll ${CMAKE_CURRENT_SOURCE_DIR}/FeMeRuntimeCPU.ll)
+set(feme_runtime_cpu_c ${CMAKE_CURRENT_SOURCE_DIR}/FeMeRuntimeCPU.c)
 set(feme_runtime_cpu_bc ${CMAKE_CURRENT_BINARY_DIR}/FeMeRuntimeCPU.bc)
 set(feme_runtime_cpu_embed_cpp
   ${CMAKE_CURRENT_BINARY_DIR}/FeMeRuntimeCPUBitcode.cpp)
 
+get_host_tool_path(clang CLANG clang_exe clang_target)
+
+# FeMeRuntimeCPU.c is compiled by the custom command above, not by
+# add_llvm_library's normal per-target compiler invocation (it needs
+# freestanding/optimization flags of its own, and produces bitcode rather
+# than an object file for this library); tell LLVM's source-file-list check
+# to allow it to sit in this directory without being one of
+# add_llvm_library's sources below.
+set(LLVM_OPTIONAL_SOURCES FeMeRuntimeCPU.c)
+
 add_custom_command(
   OUTPUT ${feme_runtime_cpu_bc}
-  COMMAND llvm-as ${feme_runtime_cpu_ll} -o ${feme_runtime_cpu_bc}
-  DEPENDS ${feme_runtime_cpu_ll} llvm-as
-  COMMENT "Assembling libFeMeRuntimeCPU bitcode"
+  COMMAND ${clang_exe}
+          -c -emit-llvm -O2 -ffreestanding -fno-builtin
+          -Wall -Wextra -Werror
+          ${feme_runtime_cpu_c} -o ${feme_runtime_cpu_bc}
+  DEPENDS ${feme_runtime_cpu_c} ${clang_target}
+  COMMENT "Compiling libFeMeRuntimeCPU bitcode"
   VERBATIM
   )
 

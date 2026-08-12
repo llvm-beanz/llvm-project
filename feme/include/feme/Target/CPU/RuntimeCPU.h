@@ -10,8 +10,8 @@
 // This file declares `feme::cpu::getRuntimeCPUBitcode`, which returns
 // `libFeMeRuntimeCPU`'s shader-side scalar helper IR (see "Runtime Support
 // Library" in feme/docs/FeMeCPUDesign.md and
-// feme/runtime/CPU/FeMeRuntimeCPU.ll) as an in-memory bitcode buffer. The
-// bitcode is assembled at build time (`llvm-as`) and embedded directly into
+// feme/runtime/CPU/FeMeRuntimeCPU.c) as an in-memory bitcode buffer. The
+// bitcode is compiled at build time (`clang`) and embedded directly into
 // this library as a byte array, so a consumer -- the linking step a later
 // milestone adds to the CPU pipeline (see "Descriptor formats"'s "After
 // SIMDization and wrapper construction, FeMe links only the referenced
