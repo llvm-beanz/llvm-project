@@ -7,9 +7,11 @@ add_mlir_library(FeMeTransformsCPU
   ResourceLowering.cpp
   SIMDize.cpp
   UnsupportedOps.cpp
+  VerifyStructured.cpp
   WaveLowering.cpp
 
   LINK_COMPONENTS
+  Analysis
   Core
   Passes
   Scalar
