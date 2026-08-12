@@ -31,6 +31,11 @@ for arch in config.targets_to_build.split():
 
 llvm_config.use_default_substitutions()
 
+# The host's own default target triple, for tests exercising `feme
+# --target=<host-triple>` (the FeMe CPU target, see
+# feme/docs/FeMeCPUDesign.md) without hard-coding an architecture.
+config.substitutions.append(("%feme_host_triple", config.target_triple))
+
 tool_dirs = [config.feme_tools_dir, config.llvm_tools_dir]
 tools = [
     "feme",

@@ -7,6 +7,8 @@ config.llvm_shlib_ext = "@SHLIBEXT@"
 config.feme_obj_root = r"@FEME_BINARY_DIR@"
 config.feme_tools_dir = r"@LLVM_RUNTIME_OUTPUT_INTDIR@"
 config.targets_to_build = "@TARGETS_TO_BUILD@"
+config.host_triple = "@LLVM_HOST_TRIPLE@"
+config.target_triple = "@LLVM_TARGET_TRIPLE@"
 
 import lit.llvm
 

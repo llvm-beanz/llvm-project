@@ -47,6 +47,16 @@ std::optional<DriverOptions> parseArgs(llvm::ArrayRef<const char *> Args,
   if (const Arg *A = ParsedArgs.getLastArg(OPT_o))
     Opts_.OutputFilename = A->getValue();
 
+  if (const Arg *A = ParsedArgs.getLastArg(OPT_wave_size_EQ)) {
+    unsigned WaveSize;
+    if (llvm::StringRef(A->getValue()).getAsInteger(10, WaveSize)) {
+      Diags << "error: '" << A->getValue() << "' is not a valid --wave-size "
+            << "value\n";
+      return std::nullopt;
+    }
+    Opts_.WaveSize = WaveSize;
+  }
+
   // `-Od` is a plain alias for `-O0` (see Options.td), so the OptTable has
   // already resolved it to an `OPT_O0` Arg by the time we get here; only the
   // four canonical IDs need considering. `getLastArg` picks whichever of

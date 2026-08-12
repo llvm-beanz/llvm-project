@@ -14,6 +14,7 @@
 #include "feme/Import/SPIRV/SPIRVImporter.h"
 #include "feme/Optimizer/OptimizerPipeline.h"
 #include "feme/Target/Backend.h"
+#include "feme/Target/CPU/WaveSize.h"
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
@@ -24,10 +25,13 @@
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 #include "feme/Translate/Translator.h"
 
+#include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
 
 #include <cstring>
@@ -37,6 +41,7 @@ using namespace feme;
 Driver::Driver(Context &Ctx) : Ctx(Ctx) {}
 
 namespace {
+
 
 /// Sniffs \p Buffer's binary format to select which Importer parses it, so
 /// `feme` does not need an explicit `--from` flag naming it: DXIL
@@ -153,6 +158,61 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
   return Requested.str();
 }
 
+/// Whether \p TheTriple is the FeMe CPU target, i.e. any target triple that
+/// is not one of FeMe's other, GPU-shaped retargeting destinations
+/// (re-serialized DXIL/SPIR-V, or AMDGPU). This is what "Wave Size
+/// Selection" in feme/docs/FeMeCPUDesign.md means by "non-CPU targets":
+/// `--wave-size` only has meaning for an actual host retarget.
+bool isCPUTarget(const llvm::Triple &TheTriple) {
+  return !TheTriple.isDXIL() && !TheTriple.isSPIRV() &&
+         !TheTriple.isAMDGCN();
+}
+
+/// The shader's declared wave size requirement, if any: the `"hlsl.wavesize"`
+/// attribute (see feme::dxil::MetadataRaisingPass) of the first function
+/// that carries one. A module with multiple entry points disagreeing about
+/// their required wave size is future work (today's front ends only ever
+/// raise a single compute entry point per module, see
+/// feme/docs/FeMeCPUDesign.md's Roadmap); this simply takes the first
+/// declared requirement it finds.
+std::optional<feme::cpu::ShaderWaveSizeRequirement>
+getShaderWaveSizeRequirement(const llvm::Module &M) {
+  for (const llvm::Function &F : M)
+    if (F.hasFnAttribute("hlsl.wavesize"))
+      if (std::optional<feme::cpu::ShaderWaveSizeRequirement> Req =
+              feme::cpu::parseShaderWaveSizeAttr(
+                  F.getFnAttribute("hlsl.wavesize").getValueAsString()))
+        return Req;
+  return std::nullopt;
+}
+
+/// The host's vector register width in bits, used only for "Wave Size
+/// Selection"'s host-derived default (see feme::cpu::resolveWaveSize). Best
+/// effort: a target that isn't registered in this build, or that
+/// `TargetTransformInfo` can't usefully answer for (e.g. an empty module),
+/// falls back to a conservative 128 bits (SSE/NEON-width) rather than
+/// failing outright -- correctness never depends on this value (see "Wave
+/// Size Selection"), only which default `W` a shader with no opinion of its
+/// own gets built at.
+unsigned getHostVectorBits(const llvm::Triple &TheTriple, llvm::Module &M) {
+  constexpr unsigned Fallback = 128;
+  std::string LookupError;
+  const llvm::Target *TheTarget =
+      llvm::TargetRegistry::lookupTarget(TheTriple, LookupError);
+  if (!TheTarget)
+    return Fallback;
+  std::unique_ptr<llvm::TargetMachine> TM(TheTarget->createTargetMachine(
+      TheTriple, /*CPU=*/"", /*Features=*/"", llvm::TargetOptions(),
+      /*RM=*/std::nullopt));
+  if (!TM || M.empty())
+    return Fallback;
+  llvm::TargetTransformInfo TTI = TM->getTargetTransformInfo(*M.begin());
+  llvm::TypeSize Bits =
+      TTI.getRegisterBitWidth(llvm::TargetTransformInfo::RGK_FixedWidthVector);
+  return Bits.isNonZero() ? static_cast<unsigned>(Bits.getFixedValue())
+                          : Fallback;
+}
+
 } // namespace
 
 llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
@@ -200,6 +260,27 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     return TargetTriple.takeError();
 
   llvm::Triple TheTriple(llvm::Triple::normalize(*TargetTriple));
+
+  // "Wave Size Selection" (feme/docs/FeMeCPUDesign.md) only has meaning for
+  // the CPU target: resolve and record it there, and diagnose (without
+  // failing the build) a `--wave-size` given for any other target, where it
+  // is simply ignored.
+  if (isCPUTarget(TheTriple)) {
+    llvm::Expected<unsigned> WaveSize = feme::cpu::resolveWaveSize(
+        Opts.WaveSize, getShaderWaveSizeRequirement(M),
+        getHostVectorBits(TheTriple, M));
+    if (!WaveSize)
+      return WaveSize.takeError();
+    // Recorded as a function attribute on every entry point rather than
+    // consumed here: the CPU pipeline's own passes (not yet implemented,
+    // see the Roadmap) are what read this to select `<W x T>` widening.
+    for (llvm::Function &F : M)
+      if (F.hasFnAttribute("hlsl.shader"))
+        F.addFnAttr("feme.cpu.wavesize", std::to_string(*WaveSize));
+  } else if (Opts.WaveSize) {
+    llvm::errs() << "feme: warning: --wave-size is ignored for target '"
+                 << *TargetTriple << "' (not the FeMe CPU target)\n";
+  }
 
   // Raised IR still uses `llvm.dx.*` intrinsics for the HLSL-specific
   // operations DXIL has dedicated ops for. LLVM's DirectX backend selects

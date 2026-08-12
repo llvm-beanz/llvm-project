@@ -105,4 +105,32 @@ TEST(FrontendOptionsTest, LastOptimizationLevelFlagWins) {
   EXPECT_EQ(Opts->OptLevel, llvm::OptimizationLevel::O0);
 }
 
+TEST(FrontendOptionsTest, WaveSizeDefaultsToUnset) {
+  std::string Diags;
+  llvm::raw_string_ostream DiagsOS(Diags);
+  const char *Args[] = {"input.dxil"};
+  std::optional<DriverOptions> Opts = parseArgs(Args, DiagsOS);
+  ASSERT_TRUE(Opts.has_value()) << Diags;
+  EXPECT_FALSE(Opts->WaveSize.has_value());
+}
+
+TEST(FrontendOptionsTest, ParsesWaveSize) {
+  std::string Diags;
+  llvm::raw_string_ostream DiagsOS(Diags);
+  const char *Args[] = {"--wave-size=16", "input.dxil"};
+  std::optional<DriverOptions> Opts = parseArgs(Args, DiagsOS);
+  ASSERT_TRUE(Opts.has_value()) << Diags;
+  ASSERT_TRUE(Opts->WaveSize.has_value());
+  EXPECT_EQ(*Opts->WaveSize, 16u);
+}
+
+TEST(FrontendOptionsTest, FailsOnNonNumericWaveSize) {
+  std::string Diags;
+  llvm::raw_string_ostream DiagsOS(Diags);
+  const char *Args[] = {"--wave-size=abc", "input.dxil"};
+  std::optional<DriverOptions> Opts = parseArgs(Args, DiagsOS);
+  EXPECT_FALSE(Opts.has_value());
+  EXPECT_FALSE(Diags.empty());
+}
+
 } // namespace

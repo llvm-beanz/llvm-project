@@ -48,6 +48,15 @@ struct DriverOptions {
   /// (e.g. "dxil", "spirv", or a target triple such as "amdgcn-amd-amdhsa").
   std::string Target;
 
+  /// User-requested wave size (`W`) for the FeMe CPU target, from
+  /// `--wave-size=N` (see the "Wave Size Selection" section of
+  /// feme/docs/FeMeCPUDesign.md and feme::cpu::resolveWaveSize).
+  /// `std::nullopt` means unset: `W` resolves from the shader's declared
+  /// wave size, else a host-derived default. Ignored, with a diagnostic if
+  /// explicitly set, when `Target` does not name the CPU target (i.e. any
+  /// target triple other than "dxil"/"spirv"/an AMDGPU triple).
+  std::optional<unsigned> WaveSize;
+
   /// The optimization level to run FeMe's IR optimization pipeline at (see
   /// feme::OptimizerPipeline), selected via `-O0`/`-O1`/`-O2`/`-O3` (or
   /// `-Od`, an alias for `-O0` matching clang-cl/DXC's spelling for

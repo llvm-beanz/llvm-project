@@ -30,6 +30,13 @@ def target_EQ : Joined<["--"], "target=">,
              "(e.g. dxil, spirv, or a target triple)">,
     MetaVarName<"<format>">;
 
+def wave_size_EQ : Joined<["--"], "wave-size=">,
+    HelpText<"Wave size (W) for the FeMe CPU target: a power of two in "
+             "[4, 128]. Unset resolves from the shader's declared wave "
+             "size, else a host-derived default; ignored (with a "
+             "diagnostic) for non-CPU targets">,
+    MetaVarName<"<N>">;
+
 def o : JoinedOrSeparate<["-"], "o">,
     HelpText<"Write output to <file>">,
     MetaVarName<"<file>">;
