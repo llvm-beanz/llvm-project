@@ -2,15 +2,12 @@
 
 ## Status
 
-Proposal / first draft. Nothing described here is implemented yet. This
+Proposal. Nothing described here is implemented yet. This
 document is a companion to [Design.md](Design.md) — it does not restate
 FeMe's architecture, only the parts that are new for CPU targets. Read the
 "Pipeline Abstraction", "Retargeting to Native ISA", and "Raised LLVM IR ->
 AMDGPU" sections of that document first; this design is a sibling of the
 latter.
-
-Open questions that need answers before this leaves draft state are
-collected in "Open Questions" at the end.
 
 ## Summary
 
@@ -767,7 +764,10 @@ options.** Concretely:
   trades the design's best property — one compiled kernel runs against any
   heap — for code quality, and because the specialization cache key becomes
   the heap shape. The AOT path cannot have it at all, which is another
-  reason B has to be good enough on its own.
+  reason B has to be good enough on its own. Whether it is worth building
+  at all is a measurement rather than a design argument — how much does the
+  hoisted, unswitched `switch` actually cost on real shaders? — so the
+  question gets answered once B runs and not before.
 - **F is an opt-in check, not a mode.** `--cpu-require-matching-formats`
   (and the equivalent `JITOptions` flag) makes a format/view mismatch a
   dispatch-time error instead of a conversion. It is for hosts that believe
@@ -1343,91 +1343,3 @@ Sequenced so each step is independently testable and useful:
 11. **Performance work**: contiguity detection, all-lanes-off branch
     skipping, uniform-load hoisting. Only after correctness is established
     and measurable.
-
-## Resolved Decisions
-
-Questions this design previously left open, and the answers now baked into
-it:
-
-1. **Wave size default and range.** `W` is any power of two in `[4, 128]`.
-   With no other input it defaults to `max(4, HostVectorBits / 32)`; a
-   shader-declared size wins over the default, and a user-specified size
-   wins over nothing else (a conflict with the shader is an error). Large
-   `W` on a narrow host is allowed — legalization quality is a performance
-   concern, and the ability to run a shader at the wave size it was written
-   for is a correctness one. See "Wave Size Selection".
-2. **Required wave size conflicts.** Hard error. A declared wave size is a
-   correctness assertion by the shader; honouring the user's conflicting
-   request silently would produce wrong answers in the tool whose job is to
-   produce right ones.
-
-3. **Resource model.** Bindless only — a descriptor heap indexed by the
-   shader (DXIL SM 6.6+ `ResourceDescriptorHeap`, SPIR-V
-   `SPV_EXT_descriptor_heap`), plus one root constant block. Register-bound
-   resources are rejected. This makes the kernel ABI shader-independent and
-   makes dynamic indexing the only case rather than a special one; adding
-   register binding later is a purely additive front-end pass.
-4. **Robustness by default.** Every access through a descriptor is
-   bounds-checked, at the heap index and at the offset within the resource.
-   OOB reads return zero, OOB writes are dropped. This is not optional
-   behaviour that a host can trade away by default: the target's job is to
-   run possibly-wrong shaders without crashing (or worse) the host. The
-   offset check is opt-out **per descriptor** (a `FEME_DESCRIPTOR_TRUSTED`
-   flag the host sets) so that the choice lives where the knowledge does and
-   does not become part of the compilation key; the heap index check is
-   never skippable.
-5. **JIT scope.** `feme::cpu::JITEngine` owns dispatch management — the
-   compiled code, the group loop, the thread pool, and the marshalling of
-   the ABI struct. Handing back a raw function pointer remains available as
-   a secondary interface for a driver-style embedder, but it is not the
-   supported path, so the ABI stays an implementation detail.
-6. **DXIL input.** DXIL is a first-class input, not a best-effort one: every
-   DXIL compute shader that satisfies the bindless requirement must work,
-   including arbitrarily unstructured control flow. `FixIrreducible` +
-   `StructurizeCFG` in Phase 1 are the mechanism, and CFG shapes those
-   passes handle badly are bugs to fix rather than inputs to reject.
-7. **Level of abstraction.** The whole pipeline operates on `llvm::Module`,
-   not on MLIR, so DXIL and SPIR-V inputs converge before any of it runs and
-   share every phase. See "Format-Agnostic Operation".
-8. **Root constants.** Exactly one register-bound constant buffer,
-   `(b0, space0)` by default, is carried as an opaque byte block in the
-   dispatch arguments; a second one is a diagnostic. This is narrower than
-   D3D12's root constants and matches Vulkan's single push constant block.
-   The block has no size limit — FeMe warns past 256 bytes so the
-   divergence from both GPU APIs stays visible — and growing to several
-   blocks later is an additive ABI change. See "Root constants".
-9. **Mask representation between phases.** Masks live in the IR, as an
-   explicit `i1` operand on a family of `feme.cpu.masked.*` intrinsic-shaped
-   declarations that Phase 4 lowers to LLVM's real `llvm.masked.*`
-   intrinsics, plus a trailing `i1` entry-mask parameter on the rewritten
-   function. Phase 3's output is therefore printable, `FileCheck`-able IR,
-   and Phase 4 is runnable on hand-written IR — which an out-of-IR side
-   table would have prevented. See "Mask representation between phases".
-10. **Graphics readiness.** Of the things "Accounting for Graphics Later"
-    identifies, exactly one is paid for now: the lane-to-quad mapping,
-    because lane assignment is observable and therefore expensive to change
-    afterwards. Lanes are quad-tiled from the start. The rest — the
-    stage-specific wrapper, the fixed-function stages, stage I/O in the ABI,
-    helper lanes as a second mask, and a pipeline object in place of the
-    single kernel — stay deferred, kept cheap by the wrapper being a
-    separate phase, the ABI having explicit headroom, and masks being
-    produced by a named phase.
-11. **Unstructured control flow coverage.** FeMe grows its own CFG
-    restructurization test suite rather than assuming `FixIrreducible` +
-    `StructurizeCFG` are adequately covered upstream: a named-shape `.ll`
-    corpus, a structural verifier that turns each corpus file into a
-    one-line test, a seeded CFG generator whose shaders trace the path each
-    invocation took, and a fuzzer over the generator. See "CFG
-    restructurization test suite".
-
-## Open Questions
-
-These need answers (or at least preferences) to firm this design up:
-
-1. **Descriptor format specialization.** "Descriptor formats" settles the
-   default (an inlined format `switch` with a runtime helper behind it) and
-   defers whole-kernel specialization from a host-supplied heap description
-   to a JIT-only option. The question left open is whether that option is
-   worth building at all, which is a measurement rather than a design
-   argument: how much does the hoisted, unswitched `switch` actually cost on
-   real shaders?
