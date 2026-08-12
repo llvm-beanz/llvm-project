@@ -6126,3 +6126,146 @@ test individually via `llvm-lit`. I don't have a non-Linux machine to
 reproduce the original macOS failure on, but the fix removes the
 platform-specific assumption entirely rather than special-casing it, so it
 should be robust on any host `llvm-readobj` supports.
+
+# Implementing CPU target roadmap milestone 2 (uniformity analysis)
+
+## Scope
+
+Roadmap milestone 2 is "Uniformity analysis (`WaveTTIImpl` + printer + unit
+tests). No transform yet." The "Phase 2: Uniformity Analysis" section of
+`feme/docs/FeMeCPUDesign.md` already specifies the shape precisely: LLVM's
+`llvm::UniformityInfo` (`GenericUniformityInfo<SSAContext>`) implements the
+whole analysis, including sync dependence; it just needs a
+`TargetTransformInfo` that answers `hasBranchDivergence()` and
+`getValueUniformity()` for the SPMD model a raised shader runs under, since
+neither `DirectX` nor `SPIRV`'s in-tree TTI implements those hooks and the
+host CPU target answers "no divergence" (correctly, for host code, but not
+for a raised shader being compiled *as* a CPU target). So the actual task
+was almost entirely "write the classification, wire it up, test it" rather
+than any new algorithmic work — exactly the point the design doc's "Prior
+Art" section makes about this whole design leaning on in-tree machinery.
+
+## Design decisions
+
+**Where `getValueUniformity`'s classification data comes from.** The design
+doc's own text lists examples (`llvm.{dx,spv}.thread.id`, `.thread.id.in.
+group`, `.flattened.thread.id.in.group`, `llvm.dx.wave.getlaneindex`,
+`WavePrefix*`, "`WaveReadLaneFirst` is uniform") but isn't a literal
+manifest of every intrinsic ID. I cross-referenced it against three sources
+to build the actual `switch`: `llvm/include/llvm/IR/IntrinsicsDirectX.td`
+and `IntrinsicsSPIRV.td` (the full `llvm.{dx,spv}.*` vocabulary), and
+`feme/lib/Transforms/DXIL/OpRaising.cpp` / `feme/lib/Transforms/SPIRV/
+RaisedLowering.cpp` (which of those intrinsics FeMe's raising passes
+actually produce today — milestone 1's deviation note already established
+`WaveActiveBallot` isn't raised yet, for instance, so it has no case in the
+switch). This produced two groups:
+
+- `NeverUniform`: `{dx,spv}.thread.id`, `.thread.id.in.group`,
+  `.flattened.thread.id.in.group`, `dx.wave.getlaneindex`,
+  `{dx,spv}.wave.is.first.lane` (true on exactly one lane — divergent by
+  construction, not to be confused with the *broadcast* `WaveReadLaneFirst`
+  the design text separately calls uniform), and every `WavePrefix*`
+  variant (`bit_count`, `sum`, `usum`, `product`, `uproduct`) — each lane's
+  prefix necessarily differs from its neighbors'.
+- `AlwaysUniform`: every `WaveActive*`-style reduction
+  (`wave.active.countbits`, `wave.all`, `wave.any`, `wave.all.equal`,
+  `wave.reduce.{or,xor,and,max,umax,min,umin,sum,usum}`, `wave.product`,
+  `wave.uproduct`, `wave.get.lane.count`) and `WaveReadLaneAt`
+  (`wave.readlane`). The design doc doesn't spell out `WaveReadLaneAt`
+  explicitly, but its own reasoning does the work: "every `WaveActive*`
+  reduction reduces over exactly those `W` lanes" (the "Wave size
+  semantics" section), and `WaveReadLaneAt` broadcasts one lane's value to
+  the whole wave the same way `WaveReadLaneFirst` does — same shape,
+  same answer. I recorded this as a deviation note in the design doc rather
+  than silently diverging from the letter of the text, since "an explicit,
+  enumerated switch over specific intrinsic IDs" versus "a name/attribute
+  pattern" is a real implementation choice future readers might reasonably
+  ask about.
+- Everything else keeps `ValueUniformity::Default` (uniform iff every
+  operand is), which is exactly right for both "group ids and constants are
+  uniform" (the design text's own phrasing) and ordinary arithmetic.
+
+**`hasBranchDivergence` always returns `true`.** A raised shader is an SPMD
+program under this model regardless of whether it has any branches at all —
+even straight-line code has per-lane-varying *values* (`WaveGetLaneIndex()`
+being the simplest example) that `UniformityInfo::compute()` needs to seed
+divergence from, so there's no "trivially uniform, skip the analysis" case
+the way there is for ordinary host code.
+
+**Directory placement.** `feme/docs/FeMeCPUDesign.md`'s own "Directory /
+Library Layout Additions" section already places this under
+`Analysis/CPU/WaveUniformity.h`, as a new top-level `Analysis/` module
+rather than under `Transforms/CPU/` — its stated rationale (an analysis
+usable by non-CPU consumers shouldn't live in a target-specific directory)
+applies just as much to FeMe's own internal layering as to hypothetical
+external consumers, so I followed it exactly: new `include/feme/Analysis/
+CPU/`, `lib/Analysis/CPU/`, and `unittests/Analysis/CPU/` trees, each with
+its own `CMakeLists.txt` following the existing per-directory pattern (an
+`add_llvm_library`/`add_feme_unittest` call plus a `LINK_COMPONENTS` list
+matching what the code actually calls into — `Analysis` for
+`TargetTransformInfoImpl`/`UniformityAnalysis`/`CycleAnalysis`, plus
+`AsmParser` for the unit tests' `parseAssemblyString` fixtures).
+
+**The printer pass.** The design doc asks for a
+`feme-opt -passes='print<feme-cpu-uniformity>'` printer "so `lit` tests can
+check it the way `print<uniformity>` does upstream" — I looked at
+`llvm/lib/Analysis/UniformityAnalysis.cpp`'s `UniformityInfoPrinterPass`
+and `llvm/lib/Passes/PassRegistry.def`'s `FUNCTION_PASS("print<uniformity>",
+UniformityInfoPrinterPass(errs()))` entry as the template, but couldn't
+reuse the upstream pass directly: it hard-codes
+`AM.getResult<UniformityInfoAnalysis>(F)`, which is *the* standard
+TTI-driven analysis, not FeMe's own. So `WaveUniformityPrinterPass` is a
+small FeMe-owned `PassInfoMixin` wrapping a FeMe-owned
+`WaveUniformityAnalysis` (a `FunctionAnalysisManager` pass whose `Result` is
+just `llvm::UniformityInfo`, produced via `computeWaveUniformity`), printing
+in the same `"WaveUniformityInfo for function '%s':\n"` + `UI.print(OS)`
+shape the upstream pass uses, just with a distinguishing name so it's
+obvious in output which target's uniformity model produced it.
+
+Wiring it into `feme-opt --llvm` mode needed two things `feme-opt.cpp`
+didn't have yet, since every existing FeMe LLVM-IR pass is a module pass:
+a `PassBuilder::registerPipelineParsingCallback` overload taking a
+`FunctionPassManager&` (not `ModulePassManager&`), and registering the
+analysis itself with the driver's `FunctionAnalysisManager` directly (`FAM.
+registerPass([] { return feme::cpu::WaveUniformityAnalysis(); });`) since
+it isn't part of `PassBuilder`'s own registry the way `registerFunctionAnalyses`
+covers. I confirmed `PassBuilder::parsePassPipeline`'s module-level overload
+auto-detects a recognized function-pass name and wraps it in `function(...)`
+(`isFunctionPassName` in `PassBuilder.cpp`), so
+`-passes='print<feme-cpu-uniformity>'` works directly at the top level
+without the caller needing to spell out `function(...)`, matching how `opt`
+itself behaves for `print<uniformity>`.
+
+## Bugs caught by testing
+
+The first unit test run crashed inside `DominatorTree`'s construction with
+an `ilist` sentinel assertion. The cause: `Function *F = &*M->begin()`
+grabbed the *first* function in the parsed module, which for a module
+containing both a `declare` (the intrinsic) and a `define @main` is the
+*declaration* (declarations are functions with no basic blocks, and module
+function order is declaration order in the textual IR, which put the
+`declare` first) — not `@main`. Fixed by looking the function up by name
+(`M->getFunction("main")`) instead of taking the first one, which is the
+obviously-correct way to find "the function under test" regardless of
+however many declarations happen to precede it.
+
+## Verification
+
+Built with the existing `LLVM_ENABLE_ASSERTIONS=ON` + ccache configuration
+(`build/CMakeCache.txt` already has both). `FeMeAnalysisCPUTests` (10 new
+gtest cases: each divergence-source intrinsic individually, a
+`WaveActive*`-reduction-over-a-divergent-operand-is-uniform case, a
+`WaveReadLaneAt`-is-uniform case, a plain-constant-is-uniform case, a
+value-computed-from-a-divergent-value-is-divergent case, and both branches
+of the divergent-vs-uniform-branch phi case) all pass. Manually ran
+`feme-opt --llvm -passes='print<feme-cpu-uniformity>'` against a hand-built
+module before writing the lit test, to see the actual print format and
+confirm the `DIVERGENT:`/blank-for-uniform distinction landed where
+expected, then wrote `feme/test/Analysis/CPU/uniformity.ll` around that and
+confirmed it with `llvm-lit` directly as well as through `ninja check-feme`
+(634/634 passing, up from 623 at the end of the previous entry's fix,
+matching one new lit test plus a new gtest binary). `clang-format`'d every
+new/changed file before the corresponding commit landed.
+
+Four commits: the analysis library + its unit tests, the `feme-opt` printer
+wiring + lit test, the design doc status/deviation update, and this note.
