@@ -5553,3 +5553,206 @@ refers to the pass by its `feme-opt` name.
 The work was split into five commits — wave size, bindless plus JIT ownership,
 format-agnostic operation, graphics, and the phase-reference fix — so each
 decision is reviewable against its own rationale.
+
+# Agent thoughts: FeMe CPU design iteration (root constants, masks, formats, CFG tests)
+
+Another documentation-only round on `feme/docs/FeMeCPUDesign.md`, answering the
+six points raised against the previous draft. No source changed, so there was
+nothing to build; the review pass was re-reading the document end to end for
+internal consistency, since a claim made in "Execution Model" and repeated in
+"Accounting for Graphics Later" is exactly the kind of thing that rots when
+only one of the two is edited. (That worry turned out to be justified — see
+the quad mapping below.)
+
+Five commits, one per topic, plus this one.
+
+## Root constants: document the limit rather than lift it
+
+The instruction was "one is fine, document the limitation and how it compares
+to GPU APIs", which is a request for calibration rather than for a decision.
+The useful framing turned out to be that FeMe is *narrower than D3D12* and
+*about equal to Vulkan*: D3D12 root signatures carry any number of root
+constant entries (plus root descriptors, tables and static samplers) inside a
+64-DWORD budget, while Vulkan has exactly one push constant block. So "one
+block" is not an arbitrary simplification; it is the Vulkan model, and the
+shaders that suffer are the D3D12-shaped ones that split constants across
+several `bN` registers.
+
+The direction I did not expect to have to write down is where FeMe is *more*
+permissive: there is no register file behind the block, so it has no size
+limit and can be dynamically indexed. That is a portability trap — a shader
+developed against the CPU target could quietly exceed what any GPU API would
+accept — so the design now warns past 256 bytes (D3D12's budget). A warning
+rather than an error, because exceeding it is not wrong for the CPU target;
+it is only unportable, and the CPU target's job is running shaders, not
+policing them.
+
+I also spelled out that the block is untyped bytes and FeMe validates no
+layout. That is not a limitation so much as an honest statement of where the
+correctness boundary sits: layout is the source model's business (HLSL cbuffer
+packing, SPIR-V `Offset` decorations) and matching it is the host's.
+
+## Per-descriptor bounds checking
+
+The interesting question was not "should this be possible" but "at what
+granularity, and what does it cost". Three observations drove the shape:
+
+1. **The knowledge is per-resource.** A host knows it sized *this* buffer from
+   the same data the shader indexes it with; it rarely knows that about every
+   descriptor in a heap. A compile-time switch forces an all-or-nothing
+   judgement that nobody is actually in a position to make.
+2. **A compile-time switch poisons the JIT's cache key.** The design already
+   says the object cache key must include the robustness setting. Making the
+   opt-out a runtime flag bit means one compiled kernel serves a trusted and
+   an untrusted heap — which is the same property that makes bindless
+   attractive in the first place, so it would be odd to give it up here.
+3. **The cost is per descriptor, not per access.** `Trusted` is a uniform load
+   from a descriptor that has already been loaded, so the extra work is one
+   `or` per descriptor per kernel. That is cheap enough that I did not feel
+   the need to keep a compile-time switch as the "real" fast path — though
+   `-feme-cpu-no-robustness` stays for measurement.
+
+Two guard rails felt necessary once the flag exists. The heap *index* check
+stays unconditional, because it is what makes reading the flags word itself
+safe — an out-of-range index must not be able to fetch its own permission to
+be out of range. And a zero-filled (`Kind = None`) descriptor ignores the
+flag, so "the host forgot to fill this slot" cannot combine with stale flag
+bits into a wild access. Both of those are the sort of thing that is obvious
+when writing the ABI header and invisible six months later, so they are in
+the document.
+
+## Masks as intrinsics
+
+The draft's preference (a FeMe-internal masked intrinsic form) was confirmed,
+so the work was making it concrete enough to implement against. Three things
+came out of doing that:
+
+- **The spelling in the draft was wrong.** `llvm.feme.cpu.masked.*` puts
+  FeMe's own operations in LLVM's reserved namespace, where they would be
+  functions whose `isIntrinsic()` is true but whose intrinsic ID is
+  `not_intrinsic` — no attribute handling, no verifier coverage, and a
+  dependence on LLVM continuing to tolerate unknown `llvm.` names. The prefix
+  is now `feme.cpu.`, with attributes (`nounwind willreturn`, `memory(argmem:
+  ...)`) applied explicitly. Cheap to fix on paper, annoying to fix after the
+  first pass is written.
+- **The entry mask should not be an intrinsic.** It is a value the wrapper
+  supplies, so it is a trailing `i1` parameter on the rewritten function. That
+  keeps it subject to ordinary widening in Phase 4 and means Phase 3's output
+  is a self-contained function a test can call.
+- **Phase 4 must consume all of them.** Making a surviving `feme.cpu.*` call
+  an assertion failure turns "Phase 3 masked an operation Phase 4 doesn't know
+  how to widen" into a loud, immediate failure instead of a call to an
+  undefined symbol discovered at link or JIT time.
+
+The alternatives section is worth keeping in the document because the operand
+bundle idea is the one a reader will independently have: bundles are only a
+thing on calls, so masked `load`/`store` would have to become calls regardless
+— at which point naming them for what they do is strictly better.
+
+## Descriptor formats
+
+This was the "let's talk more" item, so it gets a real comparison rather than
+a decision. Laying the six options out as a table made the answer fall out:
+the axis that matters is *when the format becomes a constant*, and the options
+are only ever "never" (A), "at the access site" (B), "outside the loop" (C),
+"at compile time" (D), or "not at all, by fiat" (E/F).
+
+The parts I think are load-bearing:
+
+- **A stays in the design even though B supersedes it.** A is the `default`
+  case of B's switch. That is what makes format coverage incremental — a
+  format nobody has inlined still *works* — and it is why the runtime library
+  description changed from "the awkward formats" to "every format".
+- **C is nearly free.** The format load is uniform whenever the descriptor is,
+  so LICM and `SimpleLoopUnswitch` do C without FeMe writing anything. Worth
+  saying explicitly so nobody builds a bespoke unswitcher.
+- **Divergent descriptors need a waterfall loop**, and this is the only part
+  of the scheme that is real new code. I nearly left it implicit under "the
+  format is a runtime value"; it deserves its own bullet because it is where
+  the performance cliff is and because a reader who has done GPU backend work
+  will recognise the pattern immediately.
+- **D is JIT-only and off by default.** It trades away "one kernel, any heap",
+  which is the property the whole bindless model is built on, and it cannot
+  exist on the AOT path at all. So B has to be good enough standalone, which
+  is a design constraint rather than an aspiration.
+- **E (converter function pointers in the descriptor) is rejected on
+  security grounds** as much as performance ones. The bounds-checking rules
+  exist because heaps may be untrusted; a heap that supplies code pointers
+  would undo that in one field.
+
+The remaining open question is narrowed from "what should we do" to "is D
+worth building", which is a measurement, not an argument.
+
+## Graphics, and the quad mapping I had to fix
+
+The agreement was with the "decisions made now to keep it cheap later"
+assessments — but checking the first of them against the "Execution Model"
+section showed it was **not actually true as written**. The draft claimed
+lanes were quad-compatible because they are linearized in `SV_GroupIndex`
+order; for a 2D thread group, `SV_GroupIndex` order makes lanes `4k..4k+3` a
+1x4 row, not a 2x2 quad. The claim held only for 1D groups.
+
+That is the worst kind of error to leave in: it is a decision the document
+says has already been paid for, so nobody would revisit it until derivatives
+were implemented and found to need a lane renumbering — after shaders and
+test expectations already observe lane indices through `WaveGetLaneIndex()`
+and ballots. So the mapping is now defined properly, as an explicit quad-tiled
+formula that degenerates to `SV_GroupIndex` order exactly when `Y == 1`.
+
+The cost is small and worth stating: for 1D groups nothing changes
+(`splat(w*W) + iota`); for 2D/3D it is a compile-time-known permutation of
+that vector, computed with a few integer vector ops on constants, folding away
+when the wave loop unrolls. Odd group dimensions fall back to plain
+`SV_GroupIndex` order with quad ops undefined, which matches SM 6.6's own
+requirement that compute derivatives need even dimensions — so FeMe is not
+inventing a restriction, it is inheriting one.
+
+Everything else in the graphics section stays deferred, and the resolved
+decision now says so explicitly: exactly one graphics-forward decision is paid
+for now, and it is paid for because lane assignment is *observable*.
+
+## A test suite for CFG restructurization
+
+The instruction ("FeMe will need to grow a test suite for CFG restructuring")
+is a requirement, so the open question is resolved rather than refined. The
+argument for why it matters is worth having in writing: the failure mode of a
+restructurization bug is not a crash or a rejected input — Phase 1 will report
+success — but a shader that runs and computes the wrong answer, discovered by
+whoever is least equipped to debug it.
+
+Four layers, and the ordering between them is the design:
+
+1. A named-shape `.ll` corpus, named for CFG shapes rather than for source
+   shaders, so failures found later have an obvious home.
+2. A **structural verifier** (`-verify-structured`), which is what makes layer
+   1 affordable: a corpus file's RUN line becomes "restructure and assert
+   structured" instead of a hand-maintained `CHECK` pattern over block names
+   that changes whenever upstream `StructurizeCFG` changes its naming. Also
+   runs as an assertions-only postcondition in the pass itself.
+3. A seeded generator plus a differential harness. Two details make this more
+   than a fuzzer: generated shaders fold each visited block's id into a
+   per-invocation accumulator, so the output buffer is a *path trace* and a
+   mismatch says which branch went wrong; and the ground truth is a new
+   `feme-run --reference` mode that skips Phases 3–6 and calls the unwidened
+   function once per invocation. Without that mode there is nothing to diff
+   against — comparing two wave sizes only catches widening bugs, not
+   restructurization bugs, because both would share the same broken CFG.
+4. A libFuzzer target over the generator's seed, which is nearly free given
+   FeMe already builds three fuzzers.
+
+Layers 3 and 4 need `feme-run`, so the suite gets its own roadmap milestone
+sitting between "a shader runs" and "linearization" — deliberately before the
+linearizer, since the linearizer is the first consumer that *depends* on
+Phase 1 having succeeded rather than merely following it.
+
+## Consistency work
+
+Beyond the six topics, edits that fell out of them: the phase-split rationale
+now mentions the masked intrinsics as what makes Phase 3's output checkable;
+the Phase 4 widening table gained the `feme.cpu.masked.*` row; the per-phase
+test table gained the `trusted` opt-out, the format switch and waterfall, the
+quad mapping, and the corpus; the runtime library section changed scope from
+"awkward formats" to "all formats"; the roadmap gained a milestone and was
+renumbered; and the layout section gained `feme-cfg-gen`. Two of the seven
+resolved decisions were amended rather than appended to, because "robustness
+by default" and "root constants" are now different decisions than they were.
