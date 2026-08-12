@@ -16,19 +16,21 @@
 // pass's introduction updates): it covers every DXIL opcode with a direct,
 // context-free 1:1 mapping back to a single LLVM intrinsic call -- scalar/
 // vector math, bit-manipulation, screen-space derivatives, thread/wave/quad
-// queries, and so on -- plus `IsFinite`/`IsNormal` (raised via the generic
-// `llvm.is.fpclass` intrinsic, the one pair of opcodes that needs to
-// reconstruct an extra constant operand rather than a bare 1:1 call). It
-// does not yet cover: ops that return an aggregate needing `extractvalue`
-// reconstruction (`IMul`/`UMul`, `UAddc`, `SplitDouble`, `WaveActiveBallot`),
-// ops that pick their source intrinsic from an extra "kind"/flag operand
-// rather than the opcode alone (`WaveActiveOp`, `WaveActiveBit`,
-// `WavePrefixOp`, `QuadOp`, `Barrier`), or resource-handle ops
-// (`CreateHandle`, `AnnotateHandle`, buffer/texture loads and stores, ...),
-// which need `llvm::hlsl`-style resource metadata reconstruction. Opcodes
-// not (yet) covered are left as unmodified `dx.op.*` calls rather than
-// erroring, so this pass can be used incrementally on modules that mix
-// raised and not-yet-raised operations.
+// queries, and so on -- `IsFinite`/`IsNormal` (raised via the generic
+// `llvm.is.fpclass` intrinsic, reconstructing an extra constant operand
+// rather than a bare 1:1 call), and `Barrier` (raised via its constant mode
+// operand, selecting one of the six barrier-scope intrinsics -- required
+// raised IR for the CPU target, see feme/docs/FeMeCPUDesign.md's "Raised IR
+// prerequisites"). It does not yet cover: ops that return an aggregate
+// needing `extractvalue` reconstruction (`IMul`/`UMul`, `UAddc`,
+// `SplitDouble`, `WaveActiveBallot`), ops that pick their source intrinsic
+// from an extra "kind"/flag operand rather than the opcode alone
+// (`WaveActiveOp`, `WaveActiveBit`, `WavePrefixOp`, `QuadOp`), or
+// resource-handle ops (`CreateHandle`, `AnnotateHandle`, buffer/texture
+// loads and stores, ...), which need `llvm::hlsl`-style resource metadata
+// reconstruction. Opcodes not (yet) covered are left as unmodified
+// `dx.op.*` calls rather than erroring, so this pass can be used
+// incrementally on modules that mix raised and not-yet-raised operations.
 //
 //===----------------------------------------------------------------------===//
 

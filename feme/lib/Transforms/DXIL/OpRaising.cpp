@@ -65,7 +65,10 @@ struct RaisableOp {
 //    `WaveActiveBallot`),
 //  - pick their source intrinsic based on an extra "kind"/flag operand
 //    rather than the opcode alone (`WaveActiveOp`, `WaveActiveBit`,
-//    `WavePrefixOp`, `QuadOp`, `Barrier`'s mode flags), or
+//    `WavePrefixOp`, `QuadOp`) -- `Barrier`'s mode flags are the same shape
+//    of problem, but it is now covered by `raiseBarrierCall`/
+//    `RaisableBarriers` below instead, since the CPU target requires it
+//    (see feme/docs/FeMeCPUDesign.md's "Raised IR prerequisites"), or
 //  - are resource-handle ops, which need `llvm::hlsl`-style resource
 //    metadata reconstruction (`CreateHandle`, `AnnotateHandle`,
 //    `CreateHandleFromBinding`, buffer/texture loads and stores, ...) --
@@ -244,6 +247,53 @@ std::optional<uint64_t> getConstInt(const Value *V) {
   if (const auto *CI = dyn_cast<ConstantInt>(V))
     return CI->getZExtValue();
   return std::nullopt;
+}
+
+/// The `Barrier` DXIL op's (opcode 80) constant mode operand -> the LLVM
+/// intrinsic it was lowered from (see `Barrier`'s `intrinsics` list in
+/// `llvm/lib/Target/DirectX/DXIL.td`, which enumerates exactly these six
+/// mode values -- this table is that list's inverse). `Barrier` is a
+/// required raised operation for the CPU target (see the "Raised IR
+/// prerequisites" section of feme/docs/FeMeCPUDesign.md): every one of
+/// these six intrinsics is what feme::cpu::EntryWrapperPass's barrier
+/// region splitting (Phase 6) will eventually consume.
+struct RaisableBarrier {
+  uint64_t Mode;
+  Intrinsic::ID ID;
+};
+// clang-format off
+static const RaisableBarrier RaisableBarriers[] = {
+    {2, Intrinsic::dx_device_memory_barrier},
+    {3, Intrinsic::dx_device_memory_barrier_with_group_sync},
+    {8, Intrinsic::dx_group_memory_barrier},
+    {9, Intrinsic::dx_group_memory_barrier_with_group_sync},
+    {10, Intrinsic::dx_all_memory_barrier},
+    {11, Intrinsic::dx_all_memory_barrier_with_group_sync},
+};
+// clang-format on
+
+/// Raises a `dx.op.barrier` (opcode 80) call, selecting the LLVM intrinsic
+/// via its constant mode operand rather than the opcode alone (see
+/// `RaisableBarriers` above), so it doesn't fit the table-driven `raiseCall`
+/// path.
+bool raiseBarrierCall(CallInst &CI) {
+  if (CI.arg_size() != 2)
+    return false;
+  std::optional<uint64_t> Mode = getConstInt(CI.getArgOperand(1));
+  if (!Mode)
+    return false;
+
+  for (const RaisableBarrier &B : RaisableBarriers) {
+    if (B.Mode != *Mode)
+      continue;
+    IRBuilder<> Builder(&CI);
+    Function *BarrierFn =
+        Intrinsic::getOrInsertDeclaration(CI.getModule(), B.ID);
+    Builder.CreateCall(BarrierFn);
+    CI.eraseFromParent();
+    return true;
+  }
+  return false; // An unrecognized mode: leave the call unmodified.
 }
 
 /// Builds a type of exactly \p SizeInBytes bytes' ABI alloc size to stand in
@@ -795,6 +845,11 @@ PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
 
       if (Opcode == 10 || Opcode == 11) { // IsFinite, IsNormal
         Changed |= raiseIsFPClassCall(*CI, Opcode);
+        continue;
+      }
+
+      if (Opcode == 80) { // Barrier
+        Changed |= raiseBarrierCall(*CI);
         continue;
       }
 
