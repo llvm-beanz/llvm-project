@@ -113,8 +113,9 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   "Resource Model".
 - **Texture sampling.** Filtering, addressing modes, mip selection and
   format decode are a large body of work with no representation in FeMe's
-  raised IR yet (`ResourceLoweringPass` explicitly doesn't handle texture
-  handles either). Typed/structured/raw buffers and constant buffers only.
+  raised IR yet (`feme::amdgpu::ResourceLoweringPass` explicitly doesn't
+  handle texture handles either). Typed/structured/raw buffers and constant
+  buffers only.
 - **Derivatives / quad ops** (`ddx`, `ddy`, `QuadReadAcross*`): not
   implemented in v1, but the lane arrangement they need *is* fixed now.
   `W` is a multiple of 4 and lanes are quad-tiled (see "Lane
@@ -1408,7 +1409,9 @@ feme/
     Transforms/
       CPU/Prepare.h
       CPU/ResourceLowering.h
+      CPU/ResourceCalls.h           (feme.cpu.resource.* creation/matching)
       CPU/ResourceCallOptimization.h
+      CPU/MaskIntrinsics.h          (feme.cpu.masked.* creation/matching)
       CPU/Linearize.h
       CPU/SIMDize.h
       CPU/WaveLowering.h
