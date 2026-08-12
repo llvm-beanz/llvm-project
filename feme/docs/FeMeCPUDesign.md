@@ -656,15 +656,11 @@ than into undefined behaviour.
   `nonuniform` flag is a codegen hint on a GPU and is ignored here; a
   lane-varying `index` simply makes the descriptor a divergent value, which
   Phase 4 widens like any other.
-- A typed buffer access at element `i` becomes `Data + i * Stride` plus,
-  when `Format` is not the shader's element type, a call to a runtime format
-  conversion helper (`feme_rt_load_typed_f32x4` and friends). When the
-  format is statically known the conversion is inlined and the helper never
-  appears. Unlike the register-bound model, the format is *not* generally
-  static in a bindless shader — the handle type gives the shader's view of
-  the element type, and the descriptor gives the storage format — so the
-  runtime helpers carry more weight here, with a fast path when the two
-  agree.
+- A typed buffer access at element `i` becomes `Data + i * Stride` plus a
+  format conversion selected from the descriptor's `Format`, since in a
+  bindless shader the storage format is a runtime value rather than
+  something the handle type fixes. "Descriptor formats" below works through
+  how that selection is made and what it costs.
 - Constant buffers are read-only descriptors with `Kind = CBuffer`; the
   4-component-vector-indexed access DXIL uses (`CBufferLoadLegacy`) becomes
   ordinary loads.
@@ -674,6 +670,84 @@ than into undefined behaviour.
   source models. FeMe treats it as an out-of-bounds access (zeros/ignored)
   rather than reinterpreting the pointer, so a mistyped heap cannot be
   turned into an arbitrary host memory access.
+
+### Descriptor formats
+
+This is the one place where bindless makes the CPU target's job harder
+rather than easier, so it is worth taking apart.
+
+On a GPU, a typed buffer load goes through a texture unit that reads the
+descriptor, decodes the storage format (`R8G8B8A8_UNORM`, `R11G11B10_FLOAT`,
+...) and hands the shader the `float4` it asked for. The shader's element
+type is a *view*; the storage format is in the descriptor. In a
+register-bound shader the compiler can often recover the format from the
+binding, which is what lets a GPU backend specialize. In a **bindless**
+shader it genuinely cannot: `ResourceDescriptorHeap[i]` is a runtime index
+into a heap the host filled in after compilation, so the format is a
+runtime value and the conversion has to be selected at run time. (Raw and
+structured buffers are unaffected — they have no format — so this concerns
+typed buffers now and textures whenever sampling arrives.)
+
+The options, roughly in order of how much they cost the compiler:
+
+| # | Design | Cost per access | Extensible? | Notes |
+|---|---|---|---|---|
+| A | One runtime call per access; the helper switches on `Format` | call + switch, effectively scalar per lane | trivially | Always correct, always slow. The floor. |
+| B | Inlined `switch` on `Format` at the access site, common formats as vectorized cases, generic helper as `default` | one uniform branch, hoistable | new formats join the `default` case first | Fast path is straight-line vector code. |
+| C | Format dispatch hoisted to the *region* using the handle: one `switch` outside the loop, the loop body cloned per format | amortized to zero inside the loop | as B | B plus unswitching; mostly falls out of LICM/`SimpleLoopUnswitch` given B. |
+| D | Whole-kernel specialization: read the heap at JIT time, constant-fold every `Format`, compile per unique heap shape | zero | as B | Best code; costs a recompile per distinct heap shape and only works on the JIT path. |
+| E | The descriptor carries a converter function pointer | indirect call, no inlining | trivially, by the host | Rejected: indirect calls are a non-goal, they defeat vectorization, and letting an untrusted heap supply code pointers is exactly what the bounds-checking rules exist to avoid. |
+| F | Require the descriptor's format to match the shader's view, validated at dispatch | zero | n/a | Not a model of either API; useful only as an opt-in assertion. |
+
+**The plan: B by default, A as B's `default` case, C for free, D and F as
+options.** Concretely:
+
+- `ResourceLoweringPass` emits, at each typed access, a `switch` on the
+  descriptor's `Format` with inlined vector code for the formats worth
+  inlining (the 32-bit ones, `R8G8B8A8_UNORM`/`_SNORM`/`_SRGB`,
+  `R16G16B16A16_FLOAT`, `R11G11B10_FLOAT`, `R10G10B10A2_UNORM`, and the
+  8/16-bit integer ones) and a call to `feme_rt_{load,store}_typed_*` for
+  everything else. Adding a format later means adding a case, and until
+  someone does, the format still *works* through the helper. That
+  "correct first, fast later" property is why A stays in the design rather
+  than being replaced by B.
+- **The identity case is not a case.** When the descriptor's format is bit-
+  identical to the shader's view (the common `Buffer<float4>` over
+  `R32G32B32A32_FLOAT` situation), the "conversion" is the load itself, and
+  the emitted code is the check plus a plain vector load.
+- **The format load is uniform** whenever the descriptor is, which is almost
+  always, so the `switch` hoists out of loops and C requires nothing beyond
+  running the existing loop passes after resource lowering.
+- **Divergent descriptors need a waterfall.** If lanes of one wave index
+  *different* heap slots, their formats can differ and there is no single
+  vector conversion to emit. The lowering handles this the way GPU backends
+  handle divergent descriptors: a **waterfall loop** that picks the first
+  active lane's format, builds the sub-mask of lanes sharing it, runs the
+  vectorized fast path under that sub-mask, and repeats until every lane is
+  serviced. Worst case that is `W` iterations (equivalent to A); the common
+  case is one. This is the only part of the scheme that is genuinely new
+  code rather than "emit a switch", so it is worth stating explicitly that
+  it is the fallback and not the norm.
+- **D is a JIT-only optimization, added later.** `JITOptions` grows a
+  `SpecializeFormats` flag and `JITEngine::create` an optional heap
+  *description* (formats and kinds only, no pointers) that lets the
+  compiler constant-fold the `switch`. It is off by default because it
+  trades the design's best property — one compiled kernel runs against any
+  heap — for code quality, and because the specialization cache key becomes
+  the heap shape. The AOT path cannot have it at all, which is another
+  reason B has to be good enough on its own.
+- **F is an opt-in check, not a mode.** `--cpu-require-matching-formats`
+  (and the equivalent `JITOptions` flag) makes a format/view mismatch a
+  dispatch-time error instead of a conversion. It is for hosts that believe
+  they are handing over exactly-typed data and want to find out when they
+  are wrong, and for narrowing bug reports; it never changes what a
+  conforming shader computes.
+
+The testing consequence is that format handling is exercised at three
+levels: `lit` tests over the emitted `switch` shape (B), `feme-run` tests
+over each format's round-trip values including the odd-width ones (A and B
+agreeing), and a differential test that runs the same shader with and
+without `SpecializeFormats` (D agreeing with B).
 
 ### Bounds checking
 
@@ -930,8 +1004,10 @@ Notes and constraints:
 A small static library (`libFeMeRuntimeCPU`) with a C ABI, containing only
 what cannot reasonably be emitted as IR:
 
-- Typed-buffer format pack/unpack for the formats that are not a direct
-  bitcast (UNORM/SNORM, packed 10:10:10:2, 16-bit float, sRGB).
+- Typed-buffer format pack/unpack for every format, as the `default` case
+  of the format `switch` the resource lowering emits (see "Descriptor
+  formats"). The formats worth inlining are inlined there; this is what
+  makes the ones that are not still work.
 - Atomic helpers for formats needing read-modify-write conversion.
 - The host-side dispatch loop, so the object-file path has a usable
   `main`-adjacent entry point without every embedder rewriting it.
@@ -1070,7 +1146,7 @@ Following the instruction that each phase of translation gets unit tests:
 |---|---|---|
 | Uniformity | divergence classification on hand-built IR, including sync dependence | `print<feme-cpu-uniformity>` output |
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG |
-| Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, per-descriptor `trusted` opt-out, rejection of register-bound resources |
+| Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, per-descriptor `trusted` opt-out, format `switch` shape, divergent-descriptor waterfall, rejection of register-bound resources |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, `feme.cpu.masked.*` emission |
 | SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8}, `feme.cpu.masked.*` → `llvm.masked.*` lowering from hand-written IR |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes |
@@ -1149,7 +1225,9 @@ Sequenced so each step is independently testable and useful:
    and the scalarization fallback.
 7. **Wave intrinsic lowering**.
 8. **Barriers and groupshared memory** (region splitting).
-9. **Format conversion runtime** for non-trivial typed buffer formats.
+9. **Format conversion runtime**: the inlined format `switch` and the
+    runtime helpers behind it, including the waterfall loop for divergent
+    descriptors.
 10. **Performance work**: contiguity detection, all-lanes-off branch
     skipping, uniform-load hoisting. Only after correctness is established
     and measurable.
@@ -1218,11 +1296,13 @@ it:
 
 These need answers (or at least preferences) to firm this design up:
 
-1. **Descriptor format generality.** In a bindless shader the storage format
-   behind a descriptor is a runtime value, so typed buffer access needs
-   either a runtime format switch or specialization. Is a small set of
-   inlined fast paths plus a generic helper enough, or is per-format
-   specialization of the whole kernel eventually needed?
+1. **Descriptor format specialization.** "Descriptor formats" settles the
+   default (an inlined format `switch` with a runtime helper behind it) and
+   defers whole-kernel specialization from a host-supplied heap description
+   to a JIT-only option. The question left open is whether that option is
+   worth building at all, which is a measurement rather than a design
+   argument: how much does the hoisted, unswitched `switch` actually cost on
+   real shaders?
 5. **Graphics.** "Accounting for Graphics Later" sketches what changes.
    Which of those changes, if any, are worth paying for now — in particular
    the lane-to-quad mapping, which is cheap to fix early and expensive to
