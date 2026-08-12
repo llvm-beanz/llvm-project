@@ -6537,3 +6537,167 @@ exists.
 
 Three commits: the expanded `lit` test, the `gtest` file/CMake removal,
 and the design doc update. This note is a fourth.
+
+# Agent thoughts: rewriting `FeMeRuntimeCPU.ll` in C, and depending on Clang
+
+## The ask
+
+`feme/runtime/CPU/FeMeRuntimeCPU.ll` was hand-written LLVM IR, and its own
+file header said why: writing it as C would have meant giving feme a clang
+dependency it didn't otherwise have, so milestone 3 wrote the descriptor
+lookup, bounds checks and format conversions directly as IR instead. The
+request was to reverse that call: rewrite the file in C and take the clang
+dependency, since hand-maintaining non-trivial control flow (branches,
+phis, GEP-based struct field access) in raw textual IR is a real
+maintainability cost that keeps paying out on every future format/helper
+this file grows.
+
+## Wiring the clang dependency at the CMake level
+
+`llvm/CMakeLists.txt` already had the pattern I needed for exactly this
+kind of thing: `lldb` and `flang` both implicitly append `clang` to
+`LLVM_ENABLE_PROJECTS` if it isn't already there, right where `feme`
+implicitly enables `mlir`. I added the same three lines for `feme`. This
+means `-DLLVM_ENABLE_PROJECTS=feme` alone (this repo's existing build
+configuration) now silently also builds `clang`, mirroring how it already
+silently also builds `mlir` -- no new flag for anyone to remember.
+
+I deliberately did *not* reach for `find_package(Clang)`/linking against
+`libclangAST` etc. (the way `flang` partially does for its driver): feme
+only ever needs to *invoke* the `clang` binary as an external tool to turn
+one C file into bitcode at build time, not call into clang's C++ APIs. That
+keeps the dependency to "a sibling in-tree project must be built first,"
+the same shape as feme's existing (implicit, unstated until now) dependency
+on `llvm-as`/`opt` as tools, not a new kind of library dependency.
+
+## Finding the right way to invoke an in-tree tool from CMake
+
+`libclc`'s `CMakeLists.txt` is the existing in-tree example of "a
+subproject that must invoke `opt`/`llvm-link` as build-time tools, whether
+those tools are being built in the same configure or found pre-built."
+Its `get_host_tool_path` calls pointed me at `AddLLVM.cmake`'s
+`get_host_tool_path` function directly, which is the actual right primitive
+here (I'd initially reached for a bespoke `find_program(CLANG_EXECUTABLE
+clang)`, which would have silently picked up a system clang instead of the
+one this exact build produces -- wrong for a monorepo build where the
+whole point is building against the in-tree clang). `get_host_tool_path`
+gives me both a `$<TARGET_FILE:clang>` generator-expression path and a
+`clang` target name to add as a `DEPENDS`, exactly like the existing
+`add_llvm_library`-internal uses of the same function for `llvm-nm`/
+`llvm-readobj` already do.
+
+## Designing the C source itself
+
+Three things had to be preserved exactly, since they're depended on
+elsewhere (the CPU resource-lowering pass and this file's own `gtest`s):
+
+1. **The six external symbol names** (`feme.cpu.resource.load.typed.v4f32`
+   etc.) are not valid C identifiers -- they contain dots.
+   `feme::cpu::ResourceCalls::getResourceCallName` builds exactly these
+   strings and looks up/creates declarations with them, and
+   `RuntimeCPUTest.cpp` resolves them by literal name via
+   `M->getFunction(...)`/`Engine->getFunctionAddress(...)`. GNU/Clang's
+   `asm("literal")` label extension on a function declaration was the
+   answer -- it lets the C-level function have a normal, referenceable
+   name (`femeCpuResourceLoadTypedV4F32`) while the emitted LLVM symbol is
+   whatever literal string I give it. I verified with a standalone
+   `clang -S -emit-llvm` compile that the emitted `@feme.cpu.resource.*`
+   symbols really do come out dotted, not name-mangled or renamed.
+
+2. **The exact LLVM function *types*** the JIT-based `gtest`s build calls
+   against with `IRBuilder`: `(ptr, i32, i32, i64, i1) -> <4 x float>` for
+   the typed load, etc. `_Bool` parameters compile to `i1` (verified in the
+   generated IR), and GCC/Clang's vector extension
+   (`typedef float FemeRTv4f32 __attribute__((vector_size(16)));`) compiles
+   to exactly `<4 x float>`, matching `FixedVectorType::get(FloatTy, 4)` in
+   the test file bit for bit. Since the test calls these functions only as
+   raw LLVM `CallInst`s built directly against the real `FunctionType` read
+   back off the parsed module (never through a real C-ABI call from
+   generated machine code), I didn't have to worry at all about what the
+   platform C calling convention would do with a `<4 x float>` argument --
+   only the *IR-level* type needed to match.
+
+3. **The descriptor struct layout**, field for field, matching
+   `feme::cpu::FemeDescriptor` (`RuntimeABI.h`). I could not `#include`
+   that header directly -- it's C++ (`enum class`, `namespace feme::cpu`)
+   and this translation unit is deliberately freestanding plain C, per the
+   original file's own reasoning for staying dependency-free of feme's own
+   C++ code. So `FemeRTDescriptor` in the new file is a hand-written
+   twin struct with a comment pointing at `RuntimeABI.h`, exactly as the
+   original `.ll`'s `%feme.cpu.rt.Descriptor` type was a hand-written twin
+   of the same layout; only the *hardcoding of GEP field indices in the
+   IR* is gone, which was the actual maintainability sink.
+
+For the `align 4` load/store of the `<4 x float>` view (the format IR
+deliberately did not assume a typed buffer's storage is aligned to the
+full vector width, only to its element size), I added a second vector
+typedef, `FemeRTv4f32Unaligned`, with `aligned(4)` overriding the natural
+16-byte vector alignment, and pointer-cast through that type for the
+identity-format load/store rather than reaching for `memcpy` everywhere
+(which would have been simpler but strictly weaker -- align 1 -- and
+generates worse code than needed for the common case).
+
+`llvm.maxnum.f32`/`llvm.minnum.f32`/`llvm.round.f32`, called directly by
+name in the original IR for the `R8G8B8A8_UNORM` pack path's clamp/round,
+have exact `__builtin_fmaxf`/`__builtin_fminf`/`__builtin_roundf`
+equivalents in C that lower to the same intrinsics without pulling in a
+libm dependency -- confirmed by inspecting the compiled IR's `declare`
+lines.
+
+## CMake plumbing for the compile step, and a build-system surprise
+
+Swapping `llvm-as FeMeRuntimeCPU.ll` for `clang -c -emit-llvm
+FeMeRuntimeCPU.c` in the existing `add_custom_command` was direct. The one
+surprise: LLVM's `llvm_check_source_file_list` enforces that every file in
+a directory with a "compilable" extension (`.c` counts, `.ll` didn't) is
+either listed as a source of the directory's one target or explicitly
+exempted. `FeMeRuntimeCPU.c` isn't a normal source of the `FeMeRuntimeCPU`
+add_llvm_library target -- it's consumed by the custom command, compiled
+with its own freestanding/optimization flags, not the ambient C++ library's
+flags -- so I added it to `LLVM_OPTIONAL_SOURCES` (the documented escape
+hatch for exactly this "file legitimately lives here but isn't one of this
+target's sources" situation) rather than the discouraged
+`PARTIAL_SOURCES_INTENDED` on the library itself.
+
+## Test and doc updates
+
+- `feme/test/Runtime/CPU/runtime-cpu-bitcode.test`: swapped the `llvm-as`
+  `RUN:` line for a `clang -c -emit-llvm` one against the `.c` file, and
+  added `clang` to `feme/test/lit.cfg.py`'s tool substitution list (it
+  wasn't a tool `feme`'s lit suite needed before this). Had to loosen the
+  `CHECK-DAG` lines from `define <4 x float> @...` to `<4 x float> @...`:
+  clang emits a `dso_local` qualifier between `define` and the return type
+  that `llvm-as`-assembled hand-written IR never had.
+- Comments in `RuntimeCPU.h`/`RuntimeCPU.cpp`/`RuntimeCPUTest.cpp` and the
+  `FeMeCPUDesign.md` milestone-3 status bullet that named
+  `FeMeRuntimeCPU.ll` were updated to name `FeMeRuntimeCPU.c` and describe
+  compiling (not assembling) it.
+- `Design.md`'s "Build System Integration" section gets a new bullet
+  recording the clang dependency and clarifying its scope (host tool only,
+  not a library dependency) alongside the existing MLIR dependency bullet,
+  since a future reader of that section would otherwise have no idea feme
+  now needs clang built at all.
+- The `runtime/CPU/CMakeLists.txt` header comment's rationale is rewritten
+  to say the opposite of what it used to say: the maintainability cost of
+  hand-written IR was judged not worth the clang dependency it dodged.
+
+## Validation
+
+Reconfigured (`cmake .`) to pick up the new implicit `LLVM_ENABLE_PROJECTS`
+entry, built `clang` itself (needed anyway, and confirms the dependency
+wiring actually pulls it in), then `FeMeRuntimeCPU`, `FeMeRuntimeCPUTests`,
+and `check-feme`. All 11 `RuntimeCPUTest` gtests pass unchanged (same
+bounds/kind/format/mask behavior as the hand-written IR), the `lit` bitcode
+test passes after the `CHECK-DAG` fix above, and the full `check-feme`
+suite (673 tests) and full `FeMeUnitTests` binary suite both pass at
+100%, matching the pre-change baseline. Ran `clang-format --style=file -n`
+against the new `.c` file and fixed the (several) violations before the
+final build/test pass, per the repo's clang-format-before-committing rule.
+
+## Commit breakdown
+
+Five commits: (1) the `llvm/CMakeLists.txt` implicit-clang-dependency
+change, (2) the new `FeMeRuntimeCPU.c` source alongside deletion of
+`FeMeRuntimeCPU.ll`, (3) the `runtime/CPU/CMakeLists.txt` build-rule swap,
+(4) the test/lit-config updates, (5) the design-doc and comment updates.
+This note is a sixth, doc-only commit.
