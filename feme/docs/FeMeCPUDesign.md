@@ -640,6 +640,49 @@ constant buffer — by default `(b0, space0)`, overridable with
 `--cpu-root-constants=bN,spaceM` — is lowered to loads from it instead of
 being rejected. Everything else must come from the heap.
 
+The block is untyped bytes on the ABI side. Accesses into it keep the
+layout the source model already fixed (HLSL `cbuffer` packing rules for
+DXIL, the `Offset` decorations the SPIR-V importer preserves), so FeMe
+neither imposes nor validates a layout: a host that fills the block with a
+struct whose layout disagrees with the shader's gets wrong answers, exactly
+as it would on a GPU. `ResourceInfo` reports the size the shader reads so a
+host can at least check that much.
+
+#### Limitations, and how this compares to GPU APIs
+
+One block is a real restriction, and a deliberate one for v1. Against the
+two APIs FeMe imports from:
+
+| Capability | D3D12 | Vulkan | FeMe CPU v1 |
+|---|---|---|---|
+| Inline constants | Root constants, any number of `bN` entries, sharing a 64-DWORD root signature budget | One push constant block per pipeline, ≥128 bytes guaranteed | One block, `(b0, space0)` by default |
+| Per-stage constants | Per-stage visibility flags on each entry | Per-stage ranges within the one block | Compute only, so one block |
+| Root descriptors (a CBV/SRV/UAV bound as a raw address) | Yes | Buffer device address, inline uniform blocks | None — everything else is a heap descriptor |
+| Descriptor tables / sets | Yes | Yes | None — bindless heap only |
+| Static / immutable samplers | Yes | Yes | None |
+| Size limit | 64 DWORDs of root signature, shared with everything else in it | Device `maxPushConstantsSize` | None imposed |
+
+Two directions of divergence matter:
+
+- **FeMe is more restrictive** in that a shader binding a second constant
+  buffer (`b1`, or `b0` in another space) is rejected with a diagnostic
+  naming this limitation, rather than silently getting one of them. Shaders
+  that keep all their heap indices in one struct — the common bindless
+  style, and the one both APIs' documentation recommends — are unaffected.
+- **FeMe is more permissive** about size, because there is no register file
+  to spend: the block is ordinary memory, and dynamically indexing it is
+  fine. A shader that relies on that will not port back to either GPU API,
+  so FeMe warns when the block a shader reads exceeds 256 bytes (D3D12's
+  64-DWORD budget, and comfortably above Vulkan's guaranteed minimum). The
+  warning is about portability, not correctness, and is suppressible.
+
+Lifting the restriction later does not change anything described here: the
+ABI's single `RootConstants`/`RootConstantSize` pair becomes an array
+indexed by the order `ResourceInfo` reports, and the pass that today
+matches one register binding matches several. It is deferred because no
+motivating shader needs it, and because every additional block is another
+thing a host must get right for a dispatch to mean anything.
+
 ### Heap usage discovery
 
 There is no per-shader binding table to publish, but the host still benefits
@@ -1040,19 +1083,19 @@ it:
 7. **Level of abstraction.** The whole pipeline operates on `llvm::Module`,
    not on MLIR, so DXIL and SPIR-V inputs converge before any of it runs and
    share every phase. See "Format-Agnostic Operation".
+8. **Root constants.** Exactly one register-bound constant buffer,
+   `(b0, space0)` by default, is carried as an opaque byte block in the
+   dispatch arguments; a second one is a diagnostic. This is narrower than
+   D3D12's root constants and matches Vulkan's single push constant block.
+   The block has no size limit — FeMe warns past 256 bytes so the
+   divergence from both GPU APIs stays visible — and growing to several
+   blocks later is an additive ABI change. See "Root constants".
 
 ## Open Questions
 
 These need answers (or at least preferences) to firm this design up:
 
-1. **Root constant convention.** A bindless shader gets its heap indices
-   from root constants, which are still spelled as a register-bound constant
-   buffer in both source models. This design carves out exactly one such
-   buffer, `(b0, space0)` by default. Is that the right convention, or
-   should the root constant block be discovered some other way (an
-   annotation, a dedicated heap slot, the root signature when one is
-   present)?
-2. **Per-resource robustness.** Bounds checking is mandatory and global. If
+1. **Per-resource robustness.** Bounds checking is mandatory and global. If
    a "trust this descriptor" escape hatch is ever wanted for performance,
    should it be per-descriptor (a `Flags` bit the host sets) rather than a
    compile-time switch?
