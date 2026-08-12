@@ -5276,3 +5276,128 @@ retargeting section and the README). The testing strategy the implementation
 must follow — per-phase `gtest` unit tests, per-pass `feme-opt` `lit` tests,
 and end-to-end execution tests at several wave sizes — is written into the
 document as a table, one row per phase.
+
+# Agent thoughts: an optimization pass pipeline for `feme`
+
+## The ask
+
+Add infrastructure to `feme` to initialize an optimization pass pipeline
+driven by commonly supported optimization flags (`-Od`, `-O0`, `-O1`, ...).
+Unlike the CPU target design (the previous entry in this file), this one
+came with an explicit expectation of working, tested code, not just a
+document -- so I read `feme/.instructions.md` and `feme/docs/Design.md`
+first to figure out where this fits before writing anything.
+
+## Where this fits
+
+`feme::Driver::run` already has a clear shape: detect format -> import ->
+translate to `llvm::Module` -> run format-specific raising passes ->
+resolve the target triple -> `feme::TargetMachineBackend`. Nothing in that
+chain reoptimizes the module; it's raised, format-specific IR handed almost
+directly to codegen. The Non-Goals section is explicit that FeMe "does not
+initially ship its own standalone, user-facing optimizer binary" -- but
+that's about not building an `opt`-alike *product*, not about never running
+LLVM's own optimizer. `feme-opt` already exists precisely so FeMe's own
+passes can be lit-tested via `-passes=`; running the *standard* pipeline as
+part of `feme`'s own translate/retarget flow is a different, complementary
+thing, and is exactly what "reuse LLVM's existing optimizer and target
+infrastructure" (Prior Art section) is describing.
+
+So: a new pipeline stage, `feme::OptimizerPipeline`, that runs between the
+raising passes and the backend. It doesn't reimplement anything -- it's a
+few lines around `llvm::PassBuilder::buildPerModuleDefaultPipeline`, the
+same call `opt`'s new-pass-manager driver makes. That function already
+special-cases `OptimizationLevel::O0` internally (dispatches to
+`buildO0DefaultPipeline`), so `OptimizerPipeline::run` doesn't need to
+branch on level itself.
+
+## Options surface: `-O0`..`-O3`, `-Od`
+
+The task explicitly calls out `-Od` alongside `-O0`/`-O1`. `-Od` isn't an
+LLVM/clang spelling -- it's DXC's (and clang-cl's) "disable optimizations"
+flag, which I confirmed against the DirectXShaderCompiler checkout
+(`tools/clang/include/clang/Driver/CLCompatOptions.td`:
+`def _SLASH_Od : CLFlag<"Od">, ..., Alias<O0>;`). Given FeMe's whole reason
+for existing is DXIL/SPIR-V shader tooling, accepting DXC's own
+optimization-disabling spelling as an alias for `-O0` seemed like the right
+call, rather than inventing a FeMe-specific meaning for it. `llvm::opt`
+already has first-class `Alias<>` support for this, and `Option::accept`
+resolves an alias to its target's option ID before the `Arg` is even
+constructed -- so `Od` never needs its own `OPT_Od` handling anywhere;
+`getLastArg(OPT_O0, OPT_O1, OPT_O2, OPT_O3)` picking it up as `OPT_O0` for
+free is why I checked that behavior in a unit test rather than just
+assuming it.
+
+I didn't add `-Os`/`-Oz`: `llvm::OptimizationLevel` itself only has
+`O0`..`O3` (no size-optimization levels), and the task's examples were all
+speed levels, so I kept the option surface matching what the pipeline
+builder can actually express rather than accepting flags that would need
+to silently downgrade to a speed level.
+
+## Design of `feme::OptimizerPipeline`
+
+Modeled directly on `feme::Backend`/`feme::TargetMachineBackend`'s
+established pattern in this codebase: a plain options struct
+(`OptimizerOptions`, just `OptimizationLevel Level = O0` for now, matching
+`BackendOptions`' "no RTTI, so no polymorphic options hierarchy" rationale
+from `feme/.instructions.md`) plus a class with a `run` method. I gave `run`
+an optional `llvm::TargetMachine *TM = nullptr` parameter now, even though
+`Driver::run` currently passes nullptr: `PassBuilder`'s constructor takes an
+optional `TargetMachine*` to register target-specific analyses
+(`TargetIRAnalysis`) that make vectorization/cost-model-driven passes
+target-aware, matching how `opt`'s own driver configures its `PassBuilder`.
+Wiring an actual shared `TargetMachine` through from `TargetMachineBackend`
+(which currently constructs its own, internally, after the optimizer would
+run) is future work I called out explicitly in the commit message and in
+Design.md, rather than something to fake now -- `Backend`'s `TargetMachine`
+construction and `OptimizerPipeline`'s would need to be reordered/shared,
+which is a bigger change than "add the optimizer pipeline."
+
+`OptimizerPipeline` got its own top-level library
+(`feme/include/feme/Optimizer`, `feme/lib/Optimizer`) rather than living
+under `Target/` or `Transforms/`: it's format-agnostic like `Target/`, but
+it isn't retargeting, and it isn't one of FeMe's own raising/lowering passes
+like `Transforms/`. It's closer in spirit to `Target/Backend.h` -- "thin
+glue over standard LLVM infrastructure" -- so I described it that way in
+Design.md's Directory/Library Layout section and cross-referenced it from
+`Backend`'s own doc comment.
+
+## Testing, per phase
+
+Following `feme/.instructions.md`'s "each change ... individually testable
+and tested" and the existing `feme` test layout:
+
+- `OptionsTest.cpp`: the raw `OptTable` parses `-O0`..`-O3`/`-Od`, and
+  `-Od` really does resolve to an `OPT_O0` `Arg` (see the alias note above).
+- `FrontendOptionsTest.cpp`: `parseArgs` defaults to `O0`, maps each flag to
+  its `OptimizationLevel`, and takes the last of repeated `-O` flags
+  (`-O2 -O0` ends up at `O0`) -- the same "later wins" rule `clang`/`opt`
+  use, exercised via `ArgList::getLastArg`'s variadic-ID overload rather
+  than hand-rolled index comparison.
+- `OptimizerPipelineTest.cpp` (new unittest dir): parses a trivial
+  `add i32 1, 2` function via `parseAssemblyString` and asserts `-O0` leaves
+  the `add` untouched (`buildO0DefaultPipeline` runs no mid-level
+  optimizations) while `-O2` constant-folds it away -- a minimal but real
+  behavioral check that the requested level actually changes what runs,
+  not just that the level parses.
+- `DriverTest.cpp` needed no changes: its existing tests only exercise
+  early-failure paths (undetectable format, missing target, malformed
+  input) that never reach the optimizer stage, so they still pass
+  unmodified and still cover what they did before.
+- Manually smoke-tested the full CLI end-to-end (`llc` producing a
+  DXContainer, then `feme --target=amdgcn-amd-amdhsa -O2 ...` and the same
+  with `-Od`) to confirm the flag actually reaches `Driver::run` and the
+  optimizer runs without crashing on a real raised-and-retargeted module,
+  beyond what the unit tests exercise directly.
+
+Ran the full `check-feme` suite (599 tests) after wiring the new library
+into `feme/lib/CMakeLists.txt`/`feme/unittests/CMakeLists.txt` --
+all passing, confirming the new stage doesn't regress any existing
+DXIL/SPIR-V/AMDGPU retargeting test.
+
+## Build
+
+Configured with the existing `feme/cmake/caches/feme.cmake` (which already
+turns on `LLVM_ENABLE_ASSERTIONS`), adding
+`-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache`
+for object file caching, and built with Ninja.
