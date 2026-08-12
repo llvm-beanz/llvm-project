@@ -21,61 +21,194 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-The FeMe code fails to build. Why is the agent claiming this builds successfully
-when it doesn't? What needs to change in the agent's build and test process?
+I'm now seeing some test failures, can you diagnose and fix them?
 
-The errors I'm seeing are:
+FAIL: FEME :: Tools/feme-cfg-gen/feme-cfg-gen-help.test (570 of 666)
+******************** TEST 'FEME :: Tools/feme-cfg-gen/feme-cfg-gen-help.test' FAILED ********************
+Exit Code: 127
 
-[36/62] Building CXX object tools/feme/unittests/Transforms/CPU/CMakeFiles/FeMeTransformsCPUTests.dir/WaveLoweringTest.cpp.o
-FAILED: tools/feme/unittests/Transforms/CPU/CMakeFiles/FeMeTransformsCPUTests.dir/WaveLoweringTest.cpp.o
-/usr/local/bin/sccache /usr/bin/c++ -DLLVM_BUILD_STATIC -D_DEBUG -D_GLIBCXX_ASSERTIONS -D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -I/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/unittests/Transforms/CPU -I/Users/cbieneman/dev/llvm-project/feme/unittests/Transforms/CPU -I/Users/cbieneman/dev/llvm-project/build-rel/include -I/Users/cbieneman/dev/llvm-project/llvm/include -I/Users/cbieneman/dev/llvm-project/feme/include -I/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/include -I/Users/cbieneman/dev/llvm-project/third-party/unittest/googletest/include -I/Users/cbieneman/dev/llvm-project/third-party/unittest/googlemock/include -isystem /Users/cbieneman/dev/llvm-project/feme/../mlir/include -isystem /Users/cbieneman/dev/llvm-project/build-rel/tools/mlir/include -fPIC -fvisibility-inlines-hidden -Werror=date-time -Werror=unguarded-availability-new -Wall -Wextra -Wno-unused-parameter -Wwrite-strings -Wcast-qual -Wmissing-field-initializers -pedantic -Wno-long-long -Wc++98-compat-extra-semi -Wimplicit-fallthrough -Wcovered-switch-default -Wno-noexcept-type -Wnon-virtual-dtor -Wdelete-non-virtual-dtor -Wsuggest-override -Wstring-conversion -Wno-pass-failed -Wmisleading-indentation -Wctad-maybe-unsupported -fdiagnostics-color -O2 -g -DNDEBUG -std=c++17 -arch arm64 -UNDEBUG -Wno-variadic-macros -Wno-gnu-zero-variadic-macro-arguments -fno-exceptions -funwind-tables -fno-rtti -Wno-suggest-override -MD -MT tools/feme/unittests/Transforms/CPU/CMakeFiles/FeMeTransformsCPUTests.dir/WaveLoweringTest.cpp.o -MF tools/feme/unittests/Transforms/CPU/CMakeFiles/FeMeTransformsCPUTests.dir/WaveLoweringTest.cpp.o.d -o tools/feme/unittests/Transforms/CPU/CMakeFiles/FeMeTransformsCPUTests.dir/WaveLoweringTest.cpp.o -c /Users/cbieneman/dev/llvm-project/feme/unittests/Transforms/CPU/WaveLoweringTest.cpp
-/Users/cbieneman/dev/llvm-project/feme/unittests/Transforms/CPU/WaveLoweringTest.cpp:89:59: error: member access into incomplete type 'llvm::ConstantInt'
-   89 |             cast<ConstantInt>(CV->getAggregateElement(0u))->getZExtValue(), 0u);
-      |                                                           ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/IR/Instructions.h:52:7: note: forward declaration of 'llvm::ConstantInt'
-   52 | class ConstantInt;
-      |       ^
-/Users/cbieneman/dev/llvm-project/feme/unittests/Transforms/CPU/WaveLoweringTest.cpp:91:59: error: member access into incomplete type 'llvm::ConstantInt'
-   91 |             cast<ConstantInt>(CV->getAggregateElement(1u))->getZExtValue(), 1u);
-      |                                                           ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/IR/Instructions.h:52:7: note: forward declaration of 'llvm::ConstantInt'
-   52 | class ConstantInt;
-      |       ^
-In file included from /Users/cbieneman/dev/llvm-project/feme/unittests/Transforms/CPU/WaveLoweringTest.cpp:9:
-In file included from /Users/cbieneman/dev/llvm-project/feme/include/feme/Transforms/CPU/WaveLowering.h:29:
-In file included from /Users/cbieneman/dev/llvm-project/llvm/include/llvm/IR/PassManager.h:44:
-In file included from /Users/cbieneman/dev/llvm-project/llvm/include/llvm/ADT/TinyPtrVector.h:13:
-In file included from /Users/cbieneman/dev/llvm-project/llvm/include/llvm/ADT/PointerUnion.h:21:
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:64:53: error: incomplete type 'llvm::ConstantInt' named in nested name specifier
-   64 |   static inline bool doit(const From &Val) { return To::classof(&Val); }
-      |                                                     ^~~~
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:110:32: note: in instantiation of member function 'llvm::isa_impl<llvm::ConstantInt, llvm::Constant>::doit' requested here
-  110 |     return isa_impl<To, From>::doit(*Val);
-      |                                ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:137:37: note: in instantiation of member function 'llvm::isa_impl_cl<llvm::ConstantInt, const llvm::Constant *>::doit' requested here
-  137 |     return isa_impl_cl<To, FromTy>::doit(Val);
-      |                                     ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:129:9: note: in instantiation of member function 'llvm::isa_impl_wrap<llvm::ConstantInt, const llvm::Constant *, const llvm::Constant *>::doit' requested here
-  129 |         doit(simplify_type<const From>::getSimplifiedValue(Val));
-      |         ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:257:58: note: in instantiation of member function 'llvm::isa_impl_wrap<llvm::ConstantInt, const llvm::Constant *const, const llvm::Constant *>::doit' requested here
-  257 |         typename simplify_type<const From>::SimpleType>::doit(f);
-      |                                                          ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:509:28: note: in instantiation of member function 'llvm::CastIsPossible<llvm::ConstantInt, const llvm::Constant *>::isPossible' requested here
-  509 |     return SimplifiedSelf::isPossible(
-      |                            ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:548:37: note: in instantiation of member function 'llvm::CastInfo<llvm::ConstantInt, llvm::Constant *const>::isPossible' requested here
-  548 |   return (CastInfo<To, const From>::isPossible(Val) || ...);
-      |                                     ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/Support/Casting.h:572:10: note: in instantiation of function template specialization 'llvm::isa<llvm::ConstantInt, llvm::Constant *>' requested here
-  572 |   assert(isa<To>(Val) && "cast<Ty>() argument of incompatible type!");
-      |          ^
-/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/assert.h:72:25: note: expanded from macro 'assert'
-   72 |     (__builtin_expect(!(e), 0) ? __assert_rtn(__func__, __ASSERT_FILE_NAME, __LINE__, #e) : (void)0)
-      |                         ^
-/Users/cbieneman/dev/llvm-project/llvm/include/llvm/IR/Instructions.h:52:7: note: forward declaration of 'llvm::ConstantInt'
-   52 | class ConstantInt;
-      |       ^
-3 errors generated.
-[39/62] Building CXX object tools/feme/tools/feme-opt/CMakeFiles/feme-opt.dir/feme-opt.cpp.o
-ninja: build stopped: subcommand failed.
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen --help | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-cfg-gen/feme-cfg-gen-help.test
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen --help
+# .---command stderr------------
+# | '/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen': command not found
+# `-----------------------------
+# error: command failed with exit status: 127
+
+--
+
+********************
+FAIL: FEME :: Tools/feme-cfg-gen/feme-cfg-gen-verify-structured.test (574 of 666)
+******************** TEST 'FEME :: Tools/feme-cfg-gen/feme-cfg-gen-verify-structured.test' FAILED ********************
+Exit Code: 127
+
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen --seed=1 --unstructured --max-depth=4 --max-constructs=20    | /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-prepare -verify-structured -S -o /dev/null
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen --seed=1 --unstructured --max-depth=4 --max-constructs=20
+# .---command stderr------------
+# | '/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen': command not found
+# `-----------------------------
+# error: command failed with exit status: 127
+
+--
+
+********************
+FAIL: FEME :: Tools/feme-run/differential-harness.test (578 of 666)
+******************** TEST 'FEME :: Tools/feme-run/differential-harness.test' FAILED ********************
+Exit Code: 127
+
+Command Output (stdout):
+--
+# RUN: at line 20
+echo 'resource-heap:' > /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml
+# executed command: echo resource-heap:
+# RUN: at line 21
+echo '  - index: 0' >> /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml
+# executed command: echo '  - index: 0'
+# RUN: at line 22
+echo '    size: 32' >> /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.heap.yaml
+# executed command: echo '    size: 32'
+# RUN: at line 24
+/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen --seed=1 --divergent=false --loops=false --unstructured=false --max-constructs=8 > /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/differential-harness.test.tmp.1.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen --seed=1 --divergent=false --loops=false --unstructured=false --max-constructs=8
+# .---command stderr------------
+# | '/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-cfg-gen': command not found
+# `-----------------------------
+# error: command failed with exit status: 127
+
+--
+
+********************
+FAIL: FEME :: Tools/feme-run/reference-mode.ll (579 of 666)
+******************** TEST 'FEME :: Tools/feme-run/reference-mode.ll' FAILED ********************
+Exit Code: 127
+
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/reference-mode.ll /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/reference-mode.ll.tmp
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/reference-mode.ll /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/reference-mode.ll.tmp
+# RUN: at line 2
+/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run --reference --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/reference-mode.ll.tmp/heap.yaml /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/reference-mode.ll.tmp/shader.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/reference-mode.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run --reference --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/reference-mode.ll.tmp/heap.yaml /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/reference-mode.ll.tmp/shader.ll
+# .---command stderr------------
+# | '/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run': command not found
+# `-----------------------------
+# error: command failed with exit status: 127
+
+--
+
+********************
+FAIL: FEME :: Tools/feme-run/thread-id-store.ll (580 of 666)
+******************** TEST 'FEME :: Tools/feme-run/thread-id-store.ll' FAILED ********************
+Exit Code: 127
+
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/thread-id-store.ll /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/thread-id-store.ll.tmp
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/thread-id-store.ll /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/thread-id-store.ll.tmp
+# RUN: at line 2
+/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run --wave-size=4 --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/thread-id-store.ll.tmp/heap.yaml /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/thread-id-store.ll.tmp/shader.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/thread-id-store.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run --wave-size=4 --groups=1,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/thread-id-store.ll.tmp/heap.yaml /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/thread-id-store.ll.tmp/shader.ll
+# .---command stderr------------
+# | '/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run': command not found
+# `-----------------------------
+# error: command failed with exit status: 127
+
+--
+
+********************
+FAIL: FEME :: Tools/feme-run/multi-group-dispatch.ll (581 of 666)
+******************** TEST 'FEME :: Tools/feme-run/multi-group-dispatch.ll' FAILED ********************
+Exit Code: 127
+
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/multi-group-dispatch.ll /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/multi-group-dispatch.ll.tmp
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/split-file /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/multi-group-dispatch.ll /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/multi-group-dispatch.ll.tmp
+# RUN: at line 2
+/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run --wave-size=4 --groups=2,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/multi-group-dispatch.ll.tmp/heap.yaml /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/multi-group-dispatch.ll.tmp/shader.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme-run/multi-group-dispatch.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run --wave-size=4 --groups=2,1,1 --heap=/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/multi-group-dispatch.ll.tmp/heap.yaml /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme-run/Output/multi-group-dispatch.ll.tmp/shader.ll
+# .---command stderr------------
+# | '/Users/cbieneman/dev/llvm-project/build-rel/./bin/feme-run': command not found
+# `-----------------------------
+# error: command failed with exit status: 127
+
+--
+
+********************
+FAIL: FeMe-Unit :: Target/CPU/./FeMeTargetCPUTests/0/23 (619 of 666)
+******************** TEST 'FeMe-Unit :: Target/CPU/./FeMeTargetCPUTests/0/23' FAILED ********************
+Script(shard):
+--
+GTEST_OUTPUT=json:/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/unittests/Target/CPU/./FeMeTargetCPUTests-FeMe-Unit-32748-0-23.json GTEST_SHUFFLE=0 GTEST_TOTAL_SHARDS=23 GTEST_SHARD_INDEX=0 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/unittests/Target/CPU/./FeMeTargetCPUTests
+--
+
+Script:
+--
+/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/unittests/Target/CPU/./FeMeTargetCPUTests --gtest_filter=JITEngineTest.RunsThreadIdShaderAgainstARawBuffer
+--
+JIT session error: Symbols not found: [ _feme.cpu.resource.store.raw.i32 ]
+/Users/cbieneman/dev/llvm-project/feme/unittests/Target/CPU/JITEngineTest.cpp:68: Failure
+Value of: llvm::detail::TakeExpected(Engine)
+Expected: succeeded
+  Actual: failed  (Failed to materialize symbols: { (main, { _feme_cpu_entry_main }) })
+
+
+/Users/cbieneman/dev/llvm-project/feme/unittests/Target/CPU/JITEngineTest.cpp:68
+Value of: llvm::detail::TakeExpected(Engine)
+Expected: succeeded
+  Actual: failed  (Failed to materialize symbols: { (main, { _feme_cpu_entry_main }) })
+
+
+
+********************
+FAIL: FeMe-Unit :: Target/CPU/./FeMeTargetCPUTests/1/23 (620 of 666)
+******************** TEST 'FeMe-Unit :: Target/CPU/./FeMeTargetCPUTests/1/23' FAILED ********************
+Script(shard):
+--
+GTEST_OUTPUT=json:/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/unittests/Target/CPU/./FeMeTargetCPUTests-FeMe-Unit-32748-1-23.json GTEST_SHUFFLE=0 GTEST_TOTAL_SHARDS=23 GTEST_SHARD_INDEX=1 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/unittests/Target/CPU/./FeMeTargetCPUTests
+--
+
+Script:
+--
+/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/unittests/Target/CPU/./FeMeTargetCPUTests --gtest_filter=JITEngineTest.ReferenceModeRunsTheSameShaderUnwidened
+--
+JIT session error: Symbols not found: [ _feme.cpu.resource.store.raw.i32 ]
+/Users/cbieneman/dev/llvm-project/feme/unittests/Target/CPU/JITEngineTest.cpp:103: Failure
+Value of: llvm::detail::TakeExpected(Engine)
+Expected: succeeded
+  Actual: failed  (Failed to materialize symbols: { (main, { _feme_cpu_entry_main }) })
+
+
+/Users/cbieneman/dev/llvm-project/feme/unittests/Target/CPU/JITEngineTest.cpp:103
+Value of: llvm::detail::TakeExpected(Engine)
+Expected: succeeded
+  Actual: failed  (Failed to materialize symbols: { (main, { _feme_cpu_entry_main }) })
+
+
+
+********************
+********************
+Failed Tests (8):
+  FEME :: Tools/feme-cfg-gen/feme-cfg-gen-help.test
+  FEME :: Tools/feme-cfg-gen/feme-cfg-gen-verify-structured.test
+  FEME :: Tools/feme-run/differential-harness.test
+  FEME :: Tools/feme-run/multi-group-dispatch.ll
+  FEME :: Tools/feme-run/reference-mode.ll
+  FEME :: Tools/feme-run/thread-id-store.ll
+  FeMe-Unit :: Target/CPU/./FeMeTargetCPUTests/JITEngineTest/ReferenceModeRunsTheSameShaderUnwidened
+  FeMe-Unit :: Target/CPU/./FeMeTargetCPUTests/JITEngineTest/RunsThreadIdShaderAgainstARawBuffer
+
+
+Testing Time: 7.56s
+
+Total Discovered Tests: 742
+  Passed: 734 (98.92%)
+  Failed:   8 (1.08%)
