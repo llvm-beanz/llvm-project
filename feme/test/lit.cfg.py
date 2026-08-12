@@ -68,6 +68,7 @@ tools = [
     "yaml2obj",
     "obj2yaml",
     "llvm-objcopy",
+    "llvm-readobj",
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
