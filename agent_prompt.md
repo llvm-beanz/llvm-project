@@ -21,9 +21,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please implement milestone 3 of the FeMe CPU Target roadmap:
+The tests in WaveUniformityTest.cpp would be far easier to debug and maintain if
+the WaveUniformity analysis had a printer pass and the tests were instead
+written with FileCheck against the printer's output.
 
-> 3. **Resource canonicalization + scalar helper IR**: canonical
->  `feme.cpu.resource.*` calls, the `libFeMeRuntimeCPU` bitcode helpers,
->  heap-usage metadata, versioned AOT artifact information and the
->  `ResourceInfo` reader. Testable at `W`-agnostic scale.
+Can you make that change?
