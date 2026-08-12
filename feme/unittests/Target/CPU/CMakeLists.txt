@@ -6,10 +6,12 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_feme_unittest(FeMeTargetCPUTests
+  JITEngineTest.cpp
   ResourceInfoTest.cpp
   WaveSizeTest.cpp
   )
 target_link_libraries(FeMeTargetCPUTests
   PRIVATE
+  FeMeCore
   FeMeTargetCPU
   )

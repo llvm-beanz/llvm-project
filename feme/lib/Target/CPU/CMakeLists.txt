@@ -1,8 +1,23 @@
-add_llvm_library(FeMeTargetCPU
+add_mlir_library(FeMeTargetCPU
+  JITEngine.cpp
   ResourceInfo.cpp
   WaveSize.cpp
 
   LINK_COMPONENTS
+  BitReader
+  BitWriter
   Core
+  ExecutionEngine
+  Linker
+  OrcJIT
+  Passes
   Support
+  native
+
+  LINK_LIBS PUBLIC
+  FeMeAnalysisCPU
+  FeMeCore
+  FeMeOptimizer
+  FeMeRuntimeCPU
+  FeMeTransformsCPU
   )
