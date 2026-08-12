@@ -12,6 +12,7 @@
 #include "feme/Import/DXIL/DXILImporter.h"
 #include "feme/Import/Importer.h"
 #include "feme/Import/SPIRV/SPIRVImporter.h"
+#include "feme/Optimizer/OptimizerPipeline.h"
 #include "feme/Target/Backend.h"
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
@@ -228,6 +229,13 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
 
   BackendOptions BackendOpts;
   BackendOpts.TargetTriple = *TargetTriple;
+
+  // Runs after every format-specific raising pass above so the optimizer
+  // always sees idiomatic LLVM IR, regardless of which frontend produced
+  // it (see feme::OptimizerPipeline's header comment) -- and before
+  // codegen, matching where `clang`/`opt -O<N> | llc` run the optimizer
+  // relative to instruction selection.
+  OptimizerPipeline().run(M, OptimizerOptions{Opts.OptLevel});
 
   DriverResult Result;
   llvm::raw_svector_ostream OS(Result.Output);
