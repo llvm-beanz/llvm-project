@@ -563,7 +563,7 @@ as an explicit option (`feme-opt -passes=feme-cpu-simdize -feme-wave-size=8`).
 | Uniform value | unchanged (broadcast at use sites that mix) |
 | Elementwise op | same op on `<W x T>` |
 | `select`/mask | `<W x i1>` |
-| Uniform-address `load`/`store` | unchanged, or masked when predicated |
+| Uniform-address `load`/`store` | load stays scalar and broadcasts when the memory is wave-invariant; otherwise a scalarized active-lane loop, stores in ascending lane order (see "Mask representation between phases") |
 | Divergent-address `load`/`store` | `llvm.masked.gather` / `llvm.masked.scatter` |
 | Contiguous divergent address (address = base + lane*stride, stride == size) | `llvm.masked.load` / `llvm.masked.store` — worth detecting, it's the common case for `buf[tid]` |
 | `alloca T` | `alloca [W x T]`, indexed by lane; SROA-able back into vectors when uniformly accessed |
