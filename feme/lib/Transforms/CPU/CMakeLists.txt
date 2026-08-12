@@ -10,5 +10,8 @@ add_mlir_library(FeMeTransformsCPU
 
   LINK_COMPONENTS
   Core
+  Passes
+  Scalar
   Support
+  TransformUtils
   )

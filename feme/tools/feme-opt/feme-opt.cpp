@@ -47,6 +47,8 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -61,6 +63,28 @@
 using namespace llvm;
 
 namespace {
+
+/// `-feme-cpu-entry-point=<name>`: the compute entry point
+/// `feme::cpu::PreparePass` selects, matching "Canonicalize entry points" in
+/// feme/docs/FeMeCPUDesign.md ("by name, from options"). Empty (the
+/// default) requires the module to have exactly one.
+cl::opt<std::string> EntryPointOpt(
+    "feme-cpu-entry-point",
+    cl::desc("The compute entry point feme-cpu-prepare selects, if the "
+             "module has more than one"),
+    cl::init(""));
+
+/// `-feme-cpu-wave-size=<N>`: the wave size `feme::cpu::SIMDizePass` widens
+/// to, matching the literal example in "Phase 4: Widening"
+/// (`feme-opt -passes=feme-cpu-simdize -feme-wave-size=8`). 0 (the default)
+/// resolves from the module's `feme.cpu.wavesize` function attribute (see
+/// feme::cpu::resolveWaveSize), falling back to feme::cpu::MinWaveSize.
+cl::opt<unsigned> WaveSizeOpt(
+    "feme-cpu-wave-size",
+    cl::desc("The wave size feme-cpu-simdize widens to; 0 resolves from the "
+             "module"),
+    cl::init(0));
+
 /// Registers FeMe's own LLVM-IR-level passes so `-passes=<name>` can find
 /// them by the name each pass's `name()` reports, matching how `opt` looks
 /// up in-tree passes; grows one line per FeMe LLVM IR pass as they're added.
@@ -120,7 +144,7 @@ void registerFeMePasses(PassBuilder &PB) {
          ArrayRef<PassBuilder::PipelineElement>) {
         if (Name != feme::cpu::PreparePass::name())
           return false;
-        MPM.addPass(feme::cpu::PreparePass());
+        MPM.addPass(feme::cpu::PreparePass(EntryPointOpt));
         return true;
       });
   PB.registerPipelineParsingCallback(
@@ -202,6 +226,23 @@ int runLLVMIRMode(int Argc, char **Argv) {
 
   SMDiagnostic Err;
   LLVMContext Context;
+  // `feme::cpu::PreparePass` (and future passes) report unrecoverable input
+  // problems (e.g. an ambiguous entry point) through `LLVMContext::diagnose`
+  // rather than a crash, since a `ModulePassManager` has no `Error`-returning
+  // `run` to propagate one through; this handler is what turns that into
+  // this driver's ordinary "print and fail" exit path.
+  bool SawErrorDiagnostic = false;
+  Context.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Ctx) = true;
+        errs() << LLVMContext::getDiagnosticMessagePrefix(DI->getSeverity())
+               << ": ";
+        DiagnosticPrinterRawOStream Printer(errs());
+        DI->print(Printer);
+        errs() << "\n";
+      },
+      &SawErrorDiagnostic);
   std::unique_ptr<Module> M = parseIRFile(InputFilename, Err, Context);
   if (!M) {
     Err.print(Argv[0], errs());
@@ -230,6 +271,8 @@ int runLLVMIRMode(int Argc, char **Argv) {
   }
 
   MPM.run(*M, MAM);
+  if (SawErrorDiagnostic)
+    return 1;
 
   if (verifyModule(*M, &errs())) {
     errs() << Argv[0] << ": output module is invalid\n";
