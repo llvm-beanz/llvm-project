@@ -1054,9 +1054,12 @@ while the module is in memory.
 LLVM metadata is not an object-file ABI. Before AOT codegen, FeMe also emits
 a versioned, read-only data symbol named `feme_cpu_info_<entry>`, containing
 the ABI version, resolved wave size, thread-group dimensions, groupshared
-size and alignment, required root-constant span, and heap-use flags. An AOT
+size and alignment, required root-constant span, and heap-use flags,
+followed by the statically known heap indices as a counted tail. An AOT
 host reads this symbol through `ResourceInfo`; the JIT builds the same
-information directly from the module.
+information directly from the module. `ResourceInfo` reports the same fields
+either way, so a host is never told less because it chose the object-file
+path — which is the only reason the symbol exists.
 
 ## Kernel ABI
 
