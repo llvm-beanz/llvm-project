@@ -37,6 +37,7 @@
 
 #include "feme/Transforms/CPU/EntryWrapper.h"
 
+#include "DispatchArgsLayout.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -63,57 +64,6 @@ std::string getEntrySymbolName(StringRef EntryName) {
 
 namespace {
 
-/// Field indices into the `FemeDispatchArgs`-shaped LLVM struct
-/// `getDispatchArgsType` builds, matching
-/// feme/include/feme/Target/CPU/RuntimeABI.h field-for-field.
-enum DispatchArgsField : unsigned {
-  ResourceHeap = 0,
-  ResourceHeapCount = 1,
-  SamplerHeap = 2,
-  SamplerHeapCount = 3,
-  RootConstants = 4,
-  RootConstantSize = 5,
-  GroupID = 6,
-  GroupCount = 7,
-  GroupShared = 8,
-  Reserved = 9,
-};
-
-/// Builds the LLVM struct type mirroring `FemeDispatchArgs` (see the file
-/// comment above): field types/order match that struct exactly, relying on
-/// ordinary LLVM struct layout to reproduce its C layout.
-StructType *getDispatchArgsType(LLVMContext &Ctx) {
-  Type *PtrTy = PointerType::get(Ctx, 0);
-  Type *I32Ty = Type::getInt32Ty(Ctx);
-  Type *I32x3 = ArrayType::get(I32Ty, 3);
-  Type *PtrX4 = ArrayType::get(PtrTy, 4);
-  return StructType::get(Ctx, {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty, I32x3,
-                               I32x3, PtrTy, PtrX4});
-}
-
-std::array<uint32_t, 3> getThreadGroupSize(const Function &F) {
-  std::array<uint32_t, 3> Size{1, 1, 1};
-  if (!F.hasFnAttribute("hlsl.numthreads"))
-    return Size;
-  StringRef NumThreads = F.getFnAttribute("hlsl.numthreads").getValueAsString();
-  SmallVector<StringRef, 3> Components;
-  NumThreads.split(Components, ',');
-  if (Components.size() != 3)
-    return Size;
-  std::array<uint32_t, 3> Result;
-  for (unsigned I = 0; I != 3; ++I)
-    if (!llvm::to_integer(Components[I], Result[I], 10))
-      return Size;
-  return Result;
-}
-
-/// Loads field \p Field of `*Args` (a `getDispatchArgsType()`-typed
-/// pointer), with \p FieldTy the field's type.
-Value *loadArgsField(IRBuilder<> &Builder, StructType *ArgsTy, Value *Args,
-                     unsigned Field, Type *FieldTy) {
-  Value *Ptr = Builder.CreateStructGEP(ArgsTy, Args, Field);
-  return Builder.CreateLoad(FieldTy, Ptr);
-}
 
 /// Builds the entry-mask lane comparison for wave \p W (see the file
 /// comment above): lane `L` of wave `w` is active iff
