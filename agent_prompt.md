@@ -21,7 +21,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please implement milestone 2 of the FeMe CPU Target roadmap:
+Please implement milestone 3 of the FeMe CPU Target roadmap:
 
-> 2. **Uniformity analysis** (`WaveTTIImpl` + printer + unit tests). No
->    transform yet.
+> 3. **Resource canonicalization + scalar helper IR**: canonical
+>  `feme.cpu.resource.*` calls, the `libFeMeRuntimeCPU` bitcode helpers,
+>  heap-usage metadata, versioned AOT artifact information and the
+>  `ResourceInfo` reader. Testable at `W`-agnostic scale.
