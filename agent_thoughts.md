@@ -5756,3 +5756,95 @@ quad mapping, and the corpus; the runtime library section changed scope from
 renumbered; and the layout section gained `feme-cfg-gen`. Two of the seven
 resolved decisions were amended rather than appended to, because "robustness
 by default" and "root constants" are now different decisions than they were.
+
+# Agent thoughts: final review of the CPU design, and retiring its decision log
+
+The ask was a last consistency pass over `feme/docs/FeMeCPUDesign.md`
+followed by deleting its "Open Questions" and "Resolved Decisions" sections.
+Deleting them is only safe if nothing lived *only* there, so I did the review
+as two passes: first check that every resolved decision is fully stated in the
+body, then read the document front to back looking for statements that
+contradict each other.
+
+## Is the decision log load-bearing?
+
+All eleven resolved decisions restate something the body already says at
+greater length — wave size range and conflicts in "Wave Size Selection",
+bindless-only in "Resource Model", robustness in "Bounds checking" and its
+per-descriptor subsection, one root constant block in "Root constants", the
+mask intrinsics in "Mask representation between phases", the quad mapping in
+"Lane linearization" and "Decisions made now to keep it cheap later", the CFG
+suite in its own section. So the log was a second copy of the design, with the
+maintenance hazard that implies: it had already drifted once (the earlier
+lane-ordering claim), and the previous iteration's notes record amending
+entries rather than appending, which is exactly the cost of keeping one.
+
+The single open question was different: it asked whether whole-kernel format
+specialization (option D) is worth building at all, and the honest answer is
+"that is a measurement, not an argument". That is a real piece of design
+content, so rather than dropping it I moved it into the D bullet of "Descriptor
+formats", where it sits next to the option it qualifies and will be read by
+whoever implements it.
+
+## What the review actually turned up
+
+Seven inconsistencies, all of the "two statements that cannot both be true"
+kind rather than matters of taste:
+
+1. `feme.cpu.mask.any` was said to become `llvm.vector.reduce.or` "in Phase 5",
+   two lines above the rule that any `feme.cpu.*` call surviving into Phase 5
+   is an assertion failure, and next to a table headed "Phase 4 lowering".
+2. Lane linearization claimed the quad-tiled formula "degenerates exactly to
+   `x`" for a 1D group. It does not: with `Y == 1`, `QuadTiled(2, 0, 0)` is 4,
+   not 2. What makes a 1D group `SV_GroupIndex`-ordered is the odd-dimension
+   fallback, since `Y == 1` is odd. The conclusion was right and the derivation
+   was wrong, which is the worst combination to leave in a spec someone will
+   implement from, so I stated the fallback first and derived the 1D case from
+   it. This is also the second bug found in this formula's exposition, which is
+   an argument for the test table's "including the 1D degenerate case and odd
+   dimensions" row being there.
+3. Phase 3 deferred the all-lanes-off guard to "an open question below" that no
+   longer existed. The roadmap already answers it (milestone 11, performance
+   work), so I resolved it in place: v1 does not emit the guard, because
+   trading a possible misprediction for skipped work is a heuristic that wants
+   measurements.
+4. The CFG suite's layer-to-milestone mapping was off by one throughout —
+   it named milestones 4 and 5 for work the roadmap puts in 5 and 6, and a
+   "Phase 1 milestone" that is milestone 4. The fuzzer was also missing from
+   both the directory layout and the milestone that delivers it, even though
+   the suite describes it as layer 4.
+5. Phase 2's heading named a `WaveUniformityInfo` type that appears nowhere
+   else; the interface the section and the layout describe is
+   `computeWaveUniformity` returning an `llvm::UniformityInfo`.
+6. The kernel ABI gave the entry symbol prefix as `feme.cpu.entry.` one line
+   above declaring `feme_cpu_entry_<name>`. It is a C symbol a host looks up,
+   and the runtime helpers are already `feme_rt_*`, so the underscored
+   spelling wins.
+7. `feme-run --reference` was described as skipping Phases 3–6. Phase 6 is the
+   entry wrapper, so skipping it leaves the reference with no builtins, no
+   groupshared memory, no barrier handling and no ABI to call — it would have
+   nothing to execute. Only the SPMD transform (3–5) can be skipped; Phase 6
+   runs in a scalar variant whose wave loop iterates single invocations.
+
+The last one is the interesting one, because it also brushes against the
+"there is no `W = 1` configuration" rule. Reference mode is not a wave size:
+it is an unwidened execution path with no wave semantics at all, which is why
+wave intrinsics are rejected there rather than being given a one-lane meaning.
+Saying so explicitly keeps someone from later "generalizing" it into the
+scalar wave size the design deliberately excludes.
+
+## What I deliberately did not change
+
+The document numbers its phases 1–6 but resource lowering, which sits between
+Phases 1 and 3 in the pipeline diagram, has no number. That reads oddly, but
+every reference to a numbered phase in the document is self-consistent under
+the existing scheme, and renumbering would touch three dozen cross-references
+to fix a cosmetic complaint. The phase numbers are also load-bearing in the
+`--reference` description and the graphics section. Not worth the churn.
+
+Doc-only change, so there is nothing to build or test; I verified instead that
+every `see "..."` cross-reference still names a real heading (the one apparent
+miss, "Lane linearization", is a bolded paragraph lead-in rather than a
+heading, which is how the document already refers to it elsewhere) and that no
+"open question" / "resolved decision" / "draft" references survive. Seven
+commits, one per issue plus the deletion.
