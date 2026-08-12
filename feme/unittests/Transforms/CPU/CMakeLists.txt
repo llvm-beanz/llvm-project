@@ -1,12 +1,16 @@
 set(LLVM_LINK_COMPONENTS
   AsmParser
   Core
+  Passes
+  Scalar
   Support
   TestingSupport
+  TransformUtils
   )
 
 add_feme_unittest(FeMeTransformsCPUTests
   BuiltinCallsTest.cpp
+  CFGGenTest.cpp
   EntryWrapperTest.cpp
   PrepareTest.cpp
   ResourceCallsTest.cpp
