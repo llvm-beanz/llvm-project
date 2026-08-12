@@ -33,3 +33,16 @@ def target_EQ : Joined<["--"], "target=">,
 def o : JoinedOrSeparate<["-"], "o">,
     HelpText<"Write output to <file>">,
     MetaVarName<"<file>">;
+
+def O0 : Flag<["-"], "O0">,
+    HelpText<"Disable optimizations (default)">;
+def O1 : Flag<["-"], "O1">,
+    HelpText<"Optimize quickly, without destroying debuggability">;
+def O2 : Flag<["-"], "O2">,
+    HelpText<"Optimize for fast execution without significant code size "
+             "growth">;
+def O3 : Flag<["-"], "O3">,
+    HelpText<"Optimize for fast execution as aggressively as possible">;
+def Od : Flag<["-"], "Od">, Alias<O0>,
+    HelpText<"Alias for -O0 (disable optimizations, matching clang-cl/DXC's "
+             "spelling)">;
