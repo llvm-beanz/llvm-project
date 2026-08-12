@@ -479,8 +479,8 @@ declare i1    @feme.cpu.mask.any(i1 %mask)
   any other value, and Phase 6's wrapper supplies it — all-ones except for
   a group's final partial wave.
 - **`feme.cpu.mask.any`** exists so the "skip this region when every lane is
-  off" guard is expressible before widening; it becomes
-  `llvm.vector.reduce.or` in Phase 5.
+  off" guard is expressible before widening; Phase 4 turns it into
+  `llvm.vector.reduce.or` over the widened mask.
 
 Phase 4 consumes every one of these — a `feme.cpu.*` call surviving into
 Phase 5 is an assertion failure, not a call the backend will attempt —
