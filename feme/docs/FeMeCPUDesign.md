@@ -2,12 +2,38 @@
 
 ## Status
 
-Proposal. Nothing described here is implemented yet. This
-document is a companion to [Design.md](Design.md) — it does not restate
-FeMe's architecture, only the parts that are new for CPU targets. Read the
-"Pipeline Abstraction", "Retargeting to Native ISA", and "Raised LLVM IR ->
-AMDGPU" sections of that document first; this design is a sibling of the
-latter.
+Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header) is
+implemented. This document is a companion to [Design.md](Design.md) — it
+does not restate FeMe's architecture, only the parts that are new for CPU
+targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
+"Raised LLVM IR -> AMDGPU" sections of that document first; this design is
+a sibling of the latter.
+
+Deviation: milestone 1's implementation narrowed a few things described
+below; each is called out inline where it's discussed, and summarized here:
+
+- `WaveActiveBallot` raising is deferred. It is grouped, in
+  `feme::dxil::OpRaisingPass`'s own scope notes, with `IMul`/`UMul`/
+  `UAddc`/`SplitDouble` as ops needing a general multi-return-value
+  `extractvalue`-reconstruction mechanism this milestone does not build;
+  it is not specific to wave ops and is better done once for all four than
+  once for `WaveActiveBallot` alone.
+- `checkSupportedRaisedOps` (see "Raised IR prerequisites" below) rejects
+  every register-bound resource handle unconditionally, including the one
+  the "Root constants" section carves out an exception for. That section's
+  mechanism (matching one `(bN, spaceM)` binding and lowering it to root
+  constant loads instead of rejecting it) is not yet implemented, so the
+  exception has nothing to key off yet; the check will start honoring it
+  once "Root constants" lands.
+- `CreateHandleFromHeap` (DXIL opcode 218) and `WaveGetLaneCount` (opcode
+  112) needed wiring in `llvm/lib/Target/DirectX/DXIL.td` and
+  `IntrinsicsDirectX.td` before `feme::dxil::OpRaisingPass` could raise
+  them at all -- both were previously unwired `DXILOpClass`
+  placeholders/intrinsics with no opcode connecting them, exactly as the
+  "Raised IR prerequisites" section anticipated for `CreateHandleFromHeap`.
+  Neither gained a forward-lowering (`DXILOpLowering.cpp`) path, since
+  FeMe's raising only needs to parse already-lowered `dx.op.*` calls, not
+  produce them.
 
 ## Summary
 
@@ -1477,13 +1503,15 @@ existing layout moves.
 
 Sequenced so each step is independently testable and useful:
 
-1. **Scaffolding + raised-IR contract + ABI header**:
+1. **Scaffolding + raised-IR contract + ABI header** (done):
   `Target/CPU/RuntimeABI.h`, wave size resolution (`--wave-size` in
   `DriverOptions`, shader declaration, host default) with its diagnostics,
   empty passes registered in `feme-opt`, and front-end raising for the
   descriptor-heap, barrier and wave operations required by the first
   executable milestones. Unsupported raised operations get an early CPU
-  target diagnostic.
+  target diagnostic. See the Status section's Deviation note for what
+  narrowed (`WaveActiveBallot` raising deferred; the register-bound-handle
+  check does not yet honor the future root-constant exception).
 2. **Uniformity analysis** (`WaveTTIImpl` + printer + unit tests). No
    transform yet.
 3. **Resource canonicalization + scalar helper IR**: canonical
