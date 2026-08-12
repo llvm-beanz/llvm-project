@@ -573,7 +573,9 @@ as an explicit option (`feme-opt -passes=feme-cpu-simdize -feme-wave-size=8`).
 
 | Construct | Widened form |
 |---|---|
-| Divergent value of type `T` | `<W x T>` |
+| Divergent value of scalar type `T` | `<W x T>` |
+| Divergent value of vector type `<N x T>` | `N` separate `<W x T>` values, one per component |
+| Divergent value of aggregate type | one widened value per scalar leaf, by the same two rules |
 | Uniform value | unchanged (broadcast at use sites that mix) |
 | Elementwise op | same op on `<W x T>` |
 | `select`/mask | `<W x i1>` |
@@ -594,6 +596,17 @@ wave is preserved because the lanes are genuinely sequential on a CPU.
 Having this fallback is what lets the pass be *total* — it never has to bail
 out on an unsupported opcode, which matters a lot for a target whose job is
 "run any shader".
+
+**Vectors become components, not nested vectors.** LLVM has no `<W x <4 x
+float>>`, and shader code is full of `float4`s, so a divergent value of
+vector type is split into one widened value per component — the
+structure-of-arrays form a GPU register file has anyway. A
+`<4 x float>` typed-buffer load through a resource call therefore produces
+four `<W x float>` values, `extractelement`/`insertelement` at a constant
+index become value selection at no cost, and a shuffle or a dynamic index
+becomes selects across the components. Aggregates decompose the same way,
+which is also what makes the `alloca` row above work for a `struct` that
+SROA did not promote.
 
 **Uniform-value hoisting.** This pass recomputes uniformity on Phase 3's
 linearized IR and never widens a value that result calls uniform. It may
@@ -1330,7 +1343,7 @@ Following the instruction that each phase of translation gets unit tests:
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG; the named-shape corpus under `-verify-structured` (see "CFG restructurization test suite") |
 | Resource lowering | canonical call creation and resource info extraction | one test per resource kind, dynamic heap indexing, type mangling, rejection of register-bound resources |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, masked memory and resource-call emission |
-| SIMDize | widening rules, contiguity detection, resource-call scalarization | per-construct `CHECK`s at `W` ∈ {4, 8}, masked calls → LLVM masked operations or active-lane loops |
+| SIMDize | widening rules, vector/aggregate component splitting, contiguity detection, resource-call scalarization | per-construct `CHECK`s at `W` ∈ {4, 8}, masked calls → LLVM masked operations or active-lane loops |
 | Runtime helpers | descriptor and root-constant robustness, format conversions, atomics | OOB reads/writes, per-descriptor `trusted`, every format, uniform and divergent descriptor indices |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes, all-off masks, varying lane reads, and ballot result packing |
 | Entry wrapper | barrier region splitting, scope/order mapping, quad-tiled lane mapping | wave loop shape, barriers inside/outside uniform loops, rejected scopes, groupshared, builtin derivation for 1D/2D/3D groups |
