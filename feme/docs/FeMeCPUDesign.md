@@ -113,7 +113,7 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   paint the graphics case into a corner.
 - **Register-bound resources.** Bindless only: DXIL SM 6.6+
   `ResourceDescriptorHeap` and SPIR-V `SPV_EXT_descriptor_heap`. See
-  "Resource Binding Model".
+  "Resource Model".
 - **Texture sampling.** Filtering, addressing modes, mip selection and
   format decode are a large body of work with no representation in FeMe's
   raised IR yet (`ResourceLoweringPass` explicitly doesn't handle texture
@@ -521,7 +521,7 @@ is an ABI decision: this design puts *one group* per wrapper call and lets
 the host parallelize across groups (see JIT flow below), because that's the
 level where a thread pool wants to hand out work.
 
-## Resource Binding Model
+## Resource Model
 
 **The CPU target accepts bindless shaders only.** A shader must address its
 resources through a descriptor heap:
@@ -583,7 +583,7 @@ written is zero-filled (`Kind = None`, `SizeInBytes = 0`), which the
 bounds-checking rules below turn into "reads zero, writes ignored" rather
 than into undefined behaviour.
 
-### Lowering (`feme::cpu::ResourceLoweringPass`, Phase 2 above)
+### Lowering (`feme::cpu::ResourceLoweringPass`, `feme-cpu-lower-resources`)
 
 - `llvm.dx.resource.handlefromheap(index, nonuniform)` (and its SPIR-V
   equivalent) becomes a bounds-checked load of `ResourceHeap[index]`. The
