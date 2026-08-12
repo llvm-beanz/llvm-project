@@ -1167,6 +1167,9 @@ because it is a separate project that happens to reuse this one.
   ```
 
   and the output heap entries are printed for `FileCheck` to match.
+  `--reference` runs the shader one invocation at a time through the
+  unwidened module instead, which is the ground truth the CFG
+  restructurization suite below diffs against.
   Deliberately textual, per Design.md's "Avoiding binary test fixtures"
   section. Note that the file describes *heap slots*, not bindings — it is
   the same thing the shader indexes, so a test's expectations do not depend
@@ -1179,7 +1182,7 @@ Following the instruction that each phase of translation gets unit tests:
 | Phase | Unit tests (`gtest`) | `lit` tests |
 |---|---|---|
 | Uniformity | divergence classification on hand-built IR, including sync dependence | `print<feme-cpu-uniformity>` output |
-| Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG |
+| Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG; the named-shape corpus under `-verify-structured` (see "CFG restructurization test suite") |
 | Resource lowering | heap access lowering, bounds check emission, resource info extraction | one test per resource kind, dynamic heap indexing, OOB read/write behaviour, per-descriptor `trusted` opt-out, format `switch` shape, divergent-descriptor waterfall, rejection of register-bound resources |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, `feme.cpu.masked.*` emission |
 | SIMDize | widening rules, contiguity detection | per-construct `CHECK`s at `W` ∈ {4, 8}, `feme.cpu.masked.*` → `llvm.masked.*` lowering from hand-written IR |
@@ -1200,6 +1203,66 @@ buffers unless it observes `WaveGetLaneCount()`, so a mismatch isolates a
 widening bug from a translation bug. `W = 4` is the cheapest configuration
 to read in `CHECK` lines and doubles as the "smallest legal wave"
 regression, replacing the role a scalar mode would have played.
+
+### CFG restructurization test suite
+
+Phase 1 leans on `FixIrreducible` + `StructurizeCFG` to make arbitrary DXIL
+control flow structured, and Phase 3 assumes they succeeded. That is the
+riskiest load-bearing assumption in this design, and its failure mode is
+the bad one: not a crash or a rejected input, but a shader that runs and
+computes the wrong thing. Neither upstream pass is tested against
+shader-shaped input at the scale FeMe needs, so **FeMe grows its own test
+suite for CFG restructurization**, in four layers.
+
+**1. A named-shape corpus.** Hand-written `.ll` under
+`feme/test/Transforms/CPU/CFG/`, one file per control flow shape, each
+named for what it is rather than for the shader it came from: `diamond`,
+`nested-diamonds`, `short-circuit-and`/`-or`, `loop-break`,
+`loop-continue`, `loop-multi-exit`, `loop-early-return`,
+`switch-multiway`, `irreducible-two-entry`, `irreducible-nested`,
+`loop-jump-into-body`, `infinite-loop-divergent-exit`. These are the
+regression suite: every restructurization bug found anywhere else gets
+reduced into a new file here.
+
+**2. A structural verifier, so those tests are one line each.**
+`feme-opt -passes=feme-cpu-prepare -verify-structured` checks Phase 1's
+postconditions rather than a `CHECK` pattern per file: no irreducible
+cycles (`CycleInfo`), every cycle single-entry with a unique exit block, no
+`switch`, no critical edges, and every divergent branch's reconvergence
+point dominated as the linearizer requires. A shape file's `RUN` line is
+then "restructure this and assert it is structured", which is both cheaper
+to write and stronger than matching block names. The same verifier runs as
+an assertions-only postcondition inside `PreparePass` itself.
+
+**3. A generator plus a differential harness.** Named shapes will not cover
+what real optimized DXIL does to a CFG, so a small generator
+(`feme-cfg-gen`, seeded) emits shader-shaped functions: random nesting of
+uniform and divergent `if`s, loops with random break/continue placement,
+and — behind a flag — unstructured edges that make the result irreducible.
+Each generated block folds its own block id into a per-invocation
+accumulator written to a UAV, so the *output buffer is a trace of the path
+each invocation took*, which is what makes a mismatch diagnosable rather
+than merely detectable.
+
+The ground truth for the comparison is `feme-run --reference`: a mode that
+skips Phases 3–6 entirely and calls the *unwidened* function once per
+invocation, so the reference executes the original control flow rather than
+a restructured, masked version of it. Generated shaders therefore avoid
+wave intrinsics, which have no meaning one invocation at a time; that is
+the right scope anyway, since this suite is testing control flow. The
+harness runs each seed through the reference and through the real pipeline
+at a couple of wave sizes and diffs the buffers.
+
+**4. Fuzzing.** FeMe already builds libFuzzer targets
+(`feme-dxil-import-fuzzer`, `feme-spirv-import-fuzzer`, `dxbc-as-fuzzer`),
+so a `feme-cpu-restructure-fuzzer` that interprets its input as a generator
+seed and asserts the verifier's postconditions costs little and runs where
+those already run. Failing seeds reduce to layer-1 files, by hand or with
+`llvm-reduce`.
+
+Layers 1 and 2 come with the Phase 1 milestone; layers 3 and 4 depend on
+`feme-run`, so they arrive with milestone 4 and are the thing that makes
+milestone 5 (linearization) safe to build on.
 
 ## Directory / Library Layout Additions
 
@@ -1229,6 +1292,7 @@ feme/
     CPU/                          (libFeMeRuntimeCPU, C ABI)
   tools/
     feme-run/
+    feme-cfg-gen/                 (seeded CFG generator; see the test suite)
 ```
 
 `Analysis/` is a new top-level module; the alternative (putting
@@ -1253,16 +1317,21 @@ Sequenced so each step is independently testable and useful:
    and it deliberately comes before the divergence transform — it makes
    every subsequent step verifiable by execution rather than by IR
    inspection alone.
-5. **Linearization** for divergent control flow (straight-line diamonds,
+5. **CFG restructurization suite**: the named-shape corpus, the
+   `-verify-structured` postcondition checker, and — now that `feme-run`
+   exists — the generator and its differential harness. This lands before
+   the linearizer because the linearizer is what starts depending on
+   Phase 1 having actually succeeded.
+6. **Linearization** for divergent control flow (straight-line diamonds,
    then loops).
-6. **Widening** for the remaining wave sizes, including masked memory ops
+7. **Widening** for the remaining wave sizes, including masked memory ops
    and the scalarization fallback.
-7. **Wave intrinsic lowering**.
-8. **Barriers and groupshared memory** (region splitting).
-9. **Format conversion runtime**: the inlined format `switch` and the
+8. **Wave intrinsic lowering**.
+9. **Barriers and groupshared memory** (region splitting).
+10. **Format conversion runtime**: the inlined format `switch` and the
     runtime helpers behind it, including the waterfall loop for divergent
     descriptors.
-10. **Performance work**: contiguity detection, all-lanes-off branch
+11. **Performance work**: contiguity detection, all-lanes-off branch
     skipping, uniform-load hoisting. Only after correctness is established
     and measurable.
 
@@ -1334,6 +1403,13 @@ it:
     single kernel — stay deferred, kept cheap by the wrapper being a
     separate phase, the ABI having explicit headroom, and masks being
     produced by a named phase.
+11. **Unstructured control flow coverage.** FeMe grows its own CFG
+    restructurization test suite rather than assuming `FixIrreducible` +
+    `StructurizeCFG` are adequately covered upstream: a named-shape `.ll`
+    corpus, a structural verifier that turns each corpus file into a
+    one-line test, a seeded CFG generator whose shaders trace the path each
+    invocation took, and a fuzzer over the generator. See "CFG
+    restructurization test suite".
 
 ## Open Questions
 
@@ -1346,9 +1422,3 @@ These need answers (or at least preferences) to firm this design up:
    worth building at all, which is a measurement rather than a design
    argument: how much does the hoisted, unswitched `switch` actually cost on
    real shaders?
-6. **Unstructured control flow coverage.** Every DXIL input must work, so
-   the question is not whether to reject hard CFGs but how to be confident
-   `FixIrreducible` + `StructurizeCFG` handle them: is there a corpus of
-   shader-shaped unstructured CFGs to test against, or does FeMe need to
-   grow one (hand-written `.ll`, plus a randomized CFG generator compared
-   against a scalar reference)?
