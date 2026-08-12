@@ -16,6 +16,8 @@
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
+#include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
+#include "feme/Transforms/CPU/ReferenceLowering.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
@@ -183,12 +185,20 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     return Entry.takeError();
   std::string EntryName = (*Entry)->getName().str();
 
-  Expected<unsigned> WaveSize = resolveWaveSize(
-      Opts.WaveSize ? std::optional<unsigned>(Opts.WaveSize) : std::nullopt,
-      getShaderWaveSizeRequirement(Mod), DefaultHostVectorBits);
-  if (!WaveSize)
-    return WaveSize.takeError();
-  (*Entry)->addFnAttr("feme.cpu.wavesize", std::to_string(*WaveSize));
+  // `--reference` resolves no wave size at all: it never widens anything
+  // (see the "CFG restructurization test suite" section of
+  // feme/docs/FeMeCPUDesign.md), so there is no `<W x T>` for one to
+  // describe.
+  unsigned WaveSize = 1;
+  if (!Opts.Reference) {
+    Expected<unsigned> ResolvedWaveSize = resolveWaveSize(
+        Opts.WaveSize ? std::optional<unsigned>(Opts.WaveSize) : std::nullopt,
+        getShaderWaveSizeRequirement(Mod), DefaultHostVectorBits);
+    if (!ResolvedWaveSize)
+      return ResolvedWaveSize.takeError();
+    WaveSize = *ResolvedWaveSize;
+    (*Entry)->addFnAttr("feme.cpu.wavesize", std::to_string(WaveSize));
+  }
 
   if (Error E = checkSupportedRaisedOps(Mod))
     return std::move(E);
@@ -208,10 +218,15 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     ModulePassManager MPM;
     MPM.addPass(PreparePass(Opts.EntryPoint));
     MPM.addPass(ResourceLoweringPass());
-    MPM.addPass(LinearizePass());
-    MPM.addPass(SIMDizePass(*WaveSize));
-    MPM.addPass(WaveLoweringPass());
-    MPM.addPass(EntryWrapperPass());
+    if (Opts.Reference) {
+      MPM.addPass(ReferenceLoweringPass());
+      MPM.addPass(ReferenceEntryWrapperPass());
+    } else {
+      MPM.addPass(LinearizePass());
+      MPM.addPass(SIMDizePass(WaveSize));
+      MPM.addPass(WaveLoweringPass());
+      MPM.addPass(EntryWrapperPass());
+    }
     MPM.run(Mod, MAM);
   }
 
@@ -237,13 +252,21 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
       Info.value_or(ResourceInfo{EntryName, 0, false, {}});
 
   std::string WrapperName = getEntrySymbolName(EntryName);
-  if (!Mod.getFunction(WrapperName))
+  if (!Mod.getFunction(WrapperName)) {
+    if (Opts.Reference)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "feme-cpu-wrap-reference-entry did not produce '%s'; the shader "
+          "likely uses a wave intrinsic, which has no meaning one "
+          "invocation at a time (--reference)",
+          WrapperName.c_str());
     return createStringError(
         inconvertibleErrorCode(),
         "feme-cpu-wrap-entry did not produce '%s'; the shader is likely not "
         "acyclic, uniform control flow (see feme::cpu::SIMDizePass, "
         "roadmap milestone 4)",
         WrapperName.c_str());
+  }
 
   // Link in only the referenced `libFeMeRuntimeCPU` helper definitions (see
   // "Runtime Support Library" in feme/docs/FeMeCPUDesign.md).
@@ -274,7 +297,7 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
 
   return std::unique_ptr<JITEngine>(
       new JITEngine(std::move(JIT), EntryAddr->toPtr<void *>(),
-                    std::move(ResolvedInfo), *WaveSize, GroupSize));
+                    std::move(ResolvedInfo), WaveSize, GroupSize));
 }
 
 Error JITEngine::dispatch(const DispatchResources &Resources,

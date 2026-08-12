@@ -72,6 +72,14 @@ struct JITOptions {
   /// note): `dispatch` always runs groups sequentially on the calling
   /// thread for now, regardless of this value.
   unsigned NumThreads = 0;
+  /// Runs the shader one invocation at a time through the unwidened module
+  /// instead of Phases 3/4 (`feme::cpu::LinearizePass`/
+  /// `feme::cpu::SIMDizePass`) and Phase 5's wave-op half -- the ground
+  /// truth the CFG restructurization test suite (roadmap milestone 5, see
+  /// feme/docs/FeMeCPUDesign.md) diffs against. `WaveSize` is ignored when
+  /// this is set. A shader using a wave intrinsic (which has no meaning
+  /// one invocation at a time) is rejected.
+  bool Reference = false;
 };
 
 /// The resources a dispatch runs against. Descriptor heaps are owned by the

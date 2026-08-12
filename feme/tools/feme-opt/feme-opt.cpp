@@ -32,6 +32,8 @@
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
+#include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
+#include "feme/Transforms/CPU/ReferenceLowering.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/VerifyStructured.h"
@@ -186,6 +188,26 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::cpu::EntryWrapperPass::name())
           return false;
         MPM.addPass(feme::cpu::EntryWrapperPass());
+        return true;
+      });
+  // `--reference`'s two passes (see the "CFG restructurization test suite"
+  // section of feme/docs/FeMeCPUDesign.md): registered here too so `lit`
+  // tests can exercise them the same isolated way as every other CPU
+  // pipeline phase.
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::ReferenceLoweringPass::name())
+          return false;
+        MPM.addPass(feme::cpu::ReferenceLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::ReferenceEntryWrapperPass::name())
+          return false;
+        MPM.addPass(feme::cpu::ReferenceEntryWrapperPass());
         return true;
       });
   // Phase 2's analysis printer (see feme/docs/FeMeCPUDesign.md's "Phase 2:

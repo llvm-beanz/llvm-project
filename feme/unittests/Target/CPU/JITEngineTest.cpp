@@ -88,4 +88,43 @@ TEST(JITEngineTest, RunsThreadIdShaderAgainstARawBuffer) {
   EXPECT_EQ(Buffer, (std::vector<int32_t>{0, 1, 2, 3}));
 }
 
+TEST(JITEngineTest, ReferenceModeRunsTheSameShaderUnwidened) {
+  Context Ctx;
+  SMDiagnostic Err;
+  auto LLVMMod = parseAssemblyString(ShaderIR, Err, Ctx.getLLVMContext());
+  ASSERT_TRUE(LLVMMod) << "parse error: " << Err.getMessage().str();
+
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+
+  JITOptions Opts;
+  Opts.Reference = true;
+  Expected<std::unique_ptr<JITEngine>> Engine =
+      JITEngine::create(Ctx, std::move(Mod), Opts);
+  ASSERT_THAT_EXPECTED(Engine, Succeeded());
+
+  EXPECT_EQ((*Engine)->getGroupSize(), (std::array<uint32_t, 3>{4, 1, 1}));
+
+  std::vector<int32_t> Buffer(4, -1);
+  FemeDescriptor Desc{};
+  Desc.Data = Buffer.data();
+  Desc.SizeInBytes = Buffer.size() * sizeof(int32_t);
+  Desc.Stride = 0;
+  Desc.Format = 0;
+  Desc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+  Desc.Counter = nullptr;
+
+  DispatchResources Resources;
+  Resources.ResourceHeap = ArrayRef<FemeDescriptor>(&Desc, 1);
+
+  // The reference path never widens anything (see the "CFG
+  // restructurization test suite" section of feme/docs/FeMeCPUDesign.md),
+  // so it must produce the same result the widened path
+  // (RunsThreadIdShaderAgainstARawBuffer, above) does on this
+  // wave-size-independent shader.
+  ASSERT_THAT_ERROR((*Engine)->dispatch(Resources, {1, 1, 1}), Succeeded());
+
+  EXPECT_EQ(Buffer, (std::vector<int32_t>{0, 1, 2, 3}));
+}
+
 } // namespace

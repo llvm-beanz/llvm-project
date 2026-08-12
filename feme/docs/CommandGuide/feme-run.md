@@ -35,6 +35,12 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
 - `--groups=<X,Y,Z>`: the dispatch's group count (default `1,1,1`).
 - `--entry-point=<name>`: the compute entry point to run, if the module has
   more than one.
+- `--reference`: runs the shader one invocation at a time through the
+  unwidened module, instead of Phases 3/4 (linearization and widening) --
+  the ground truth the CFG restructurization test suite (roadmap milestone
+  5, see [../FeMeCPUDesign.md](../FeMeCPUDesign.md)) diffs against.
+  `--wave-size` is ignored. A shader using a wave intrinsic (which has no
+  meaning one invocation at a time) is rejected.
 - `--heap=<file>`: a YAML file describing the resource heap a dispatch runs
   against:
 

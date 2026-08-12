@@ -23,6 +23,10 @@
 // `libFeMeRuntimeCPU` and the CPU pipeline's resource-call scalarization
 // exercise today.
 //
+// Roadmap milestone 5 adds `--reference` (see
+// `feme::cpu::JITOptions::Reference`): the ground truth the CFG
+// restructurization test suite diffs against.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Core/Context.h"
@@ -198,6 +202,13 @@ int main(int argc, char **argv) {
       "entry-point",
       cl::desc("The compute entry point to run, if the module has more "
                "than one"));
+  cl::opt<bool> Reference(
+      "reference",
+      cl::desc("Run the shader one invocation at a time through the "
+               "unwidened module instead of Phases 3/4 -- the ground truth "
+               "the CFG restructurization test suite diffs against (see "
+               "the 'CFG restructurization test suite' section of "
+               "feme/docs/FeMeCPUDesign.md). --wave-size is ignored."));
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe CPU target JIT/dispatch runner\n");
@@ -238,6 +249,7 @@ int main(int argc, char **argv) {
   JITOptions Opts;
   Opts.WaveSize = WaveSize;
   Opts.EntryPoint = EntryPoint;
+  Opts.Reference = Reference;
 
   Expected<std::unique_ptr<JITEngine>> Engine = JITEngine::create(
       Ctx, feme::Module::fromLLVMIR(std::move(LLVMMod)), Opts);
