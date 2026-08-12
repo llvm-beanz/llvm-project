@@ -648,7 +648,7 @@ produces a **wrapper function** with the fixed ABI below, containing:
 
 ```c
 for (w = 0; w < WavesPerGroup; ++w)      // the "wave loop"
-  wave_body(group_id, w, entry_mask(w), descriptors, groupshared);
+  wave_body(group_id, w, entry_mask(w), heaps, root_constants, groupshared);
 ```
 
 **Barriers.** `GroupMemoryBarrierWithGroupSync` (DXIL `Barrier`, SPIR-V
