@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -21,13 +21,5 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-I'd like to start a new design document, I've created an empty document
-FeMeCPUDesign.md as our starting point.
-
-I'd like to design a way to target SPIRV and DXIL programs to CPUs through LLVM
-IR. This will require transforming the program IR to SIMD-ized IR, and should
-support a user-provided wave size.
-
-We'll also need some sort of resource binding model, and JIT flow for this
-design. Please think through this a bit and come up with a basic proposal and
-ask any questions that you need to help elaborate on this more.
+Please add infrastructure to the `feme` tool to initialize an optimization pass
+pipeline with commonly supported optimization flags (`-Od`, `-O0`, `-O1`, etc).
