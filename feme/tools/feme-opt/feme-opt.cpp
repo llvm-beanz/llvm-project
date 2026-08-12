@@ -168,7 +168,7 @@ void registerFeMePasses(PassBuilder &PB) {
          ArrayRef<PassBuilder::PipelineElement>) {
         if (Name != feme::cpu::SIMDizePass::name())
           return false;
-        MPM.addPass(feme::cpu::SIMDizePass());
+        MPM.addPass(feme::cpu::SIMDizePass(WaveSizeOpt));
         return true;
       });
   PB.registerPipelineParsingCallback(

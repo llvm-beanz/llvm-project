@@ -15,4 +15,7 @@ add_mlir_library(FeMeTransformsCPU
   Scalar
   Support
   TransformUtils
+
+  LINK_LIBS PUBLIC
+  FeMeAnalysisCPU
   )

@@ -10,6 +10,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   PrepareTest.cpp
   ResourceCallsTest.cpp
   ResourceLoweringTest.cpp
+  SIMDizeTest.cpp
   UnsupportedOpsTest.cpp
   )
 target_link_libraries(FeMeTransformsCPUTests
