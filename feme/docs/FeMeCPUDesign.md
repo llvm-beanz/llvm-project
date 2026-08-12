@@ -781,6 +781,16 @@ than into undefined behaviour.
   Structured and raw-buffer calls carry byte offsets and alignment instead;
   constant-buffer calls are read-only. Counter UAV calls name the atomic
   operation explicitly.
+- **The heap operands come from new function parameters.** A raised shader
+  function has no way to name the heap, so this pass appends the resource
+  heap pointer and count, the sampler heap pointer and count, and the root
+  constant pointer and size to every function it rewrites, and threads them
+  through the calls between them. Phase 3's entry mask joins that parameter
+  list, Phase 4 carries it into the wave-body signature, and Phase 6's
+  wrapper supplies all of it from `FemeDispatchArgs`. Passing them rather
+  than reading a global keeps the transformed module free of mutable global
+  state, per Design.md, and lets two dispatches run against different heaps
+  concurrently.
 - These are ordinary declarations with attributes describing their memory
   effects, created and recognized through one helper rather than ad hoc name
   matching. Phase 3 adds the governing mask. Phase 4 emits a scalar helper
