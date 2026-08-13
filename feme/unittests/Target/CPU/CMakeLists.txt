@@ -7,6 +7,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeTargetCPUTests
   JITEngineTest.cpp
+  ResourceHeapTest.cpp
   ResourceInfoTest.cpp
   WaveSizeTest.cpp
   )

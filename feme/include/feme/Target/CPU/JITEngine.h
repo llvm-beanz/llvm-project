@@ -30,6 +30,7 @@
 #ifndef FEME_TARGET_CPU_JITENGINE_H
 #define FEME_TARGET_CPU_JITENGINE_H
 
+#include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 
@@ -114,7 +115,20 @@ struct JITOptions {
 /// caller and must remain alive until the `dispatch` call using them
 /// returns.
 struct DispatchResources {
+  /// The caller's *logical* dynamic resource heap: unprefixed, exactly as a
+  /// shader using no traditional binding would see it directly. `dispatch`
+  /// materializes the physical heap the compiled shader actually expects --
+  /// this array's contents placed right after the reserved bound-range
+  /// prefix `BoundResources` fills (see "Descriptor heaps" in
+  /// feme/docs/FeMeCPUDesign.md and `feme::cpu::materializeResourceHeap`).
+  /// For a shader using no traditional binding, this is passed straight
+  /// through.
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  /// Descriptors for the shader's traditionally-bound resources, matched by
+  /// (Space, BaseRegister) to `getResourceInfo().BoundRanges` -- see
+  /// `feme::cpu::BoundResourceBinding`. Empty for a shader using no
+  /// traditional binding.
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
   llvm::ArrayRef<FemeDescriptor> SamplerHeap;
   llvm::ArrayRef<uint8_t> RootConstants;
 };

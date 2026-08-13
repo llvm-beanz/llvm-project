@@ -1,6 +1,7 @@
 add_mlir_library(FeMeTargetCPU
   JITEngine.cpp
   Pipeline.cpp
+  ResourceHeap.cpp
   ResourceInfo.cpp
   WaveSize.cpp
 

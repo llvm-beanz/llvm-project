@@ -360,9 +360,18 @@ Error JITEngine::dispatch(const DispatchResources &Resources,
   using EntryFnTy = void (*)(const FemeDispatchArgs *);
   auto *Entry = reinterpret_cast<EntryFnTy>(EntryFn);
 
+  // Materialize the physical resource heap this shader's compiled entry
+  // point expects: its reserved bound-range prefix (if any) followed by the
+  // caller's logical dynamic heap (see "Descriptor heaps" in
+  // feme/docs/FeMeCPUDesign.md). For a shader using no traditional binding,
+  // `Info.ReservedResourceHeapSize == 0` and this is exactly
+  // `Resources.ResourceHeap`.
+  std::vector<FemeDescriptor> PhysicalResourceHeap = materializeResourceHeap(
+      Info, Resources.BoundResources, Resources.ResourceHeap);
+
   FemeDispatchArgs Args{};
-  Args.ResourceHeap = Resources.ResourceHeap.data();
-  Args.ResourceHeapCount = static_cast<uint32_t>(Resources.ResourceHeap.size());
+  Args.ResourceHeap = PhysicalResourceHeap.data();
+  Args.ResourceHeapCount = static_cast<uint32_t>(PhysicalResourceHeap.size());
   Args.SamplerHeap = Resources.SamplerHeap.data();
   Args.SamplerHeapCount = static_cast<uint32_t>(Resources.SamplerHeap.size());
   Args.RootConstants = Resources.RootConstants.data();
