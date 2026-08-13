@@ -5,9 +5,10 @@
 Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header),
 milestone 2 (uniformity analysis), milestone 3 (resource canonicalization +
 scalar helper IR), milestone 4 (uniform-control-flow end-to-end at
-`W = 4`), milestone 5 (the CFG restructurization test suite) and milestone 6
-(linearization for divergent diamonds and loops with a divergent exit) are
-implemented. This document is a companion to
+`W = 4`), milestone 5 (the CFG restructurization test suite), milestone 6
+(linearization for divergent diamonds and loops with a divergent exit) and
+milestone 7 (widening for loops, masked memory ops, and the scalarization
+fallback) are implemented. This document is a companion to
 [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
@@ -141,8 +142,9 @@ inline where it's discussed, and summarized here:
   builtins (thread id family, lane index), and `feme.cpu.resource.*` calls
   (scalarized when any operand is divergent, left scalar when every
   operand is uniform). Masked memory ops, the scalarization fallback for
-  arbitrary instructions, atomics, and vector/aggregate leaf decomposition
-  are milestone 7.
+  arbitrary instructions, atomics, and widening a loop are all milestone 7
+  (see its own deviation note for what narrowed there in turn); vector/
+  aggregate leaf decomposition remains unimplemented even after milestone 7.
 - The per-lane-varying builtins `SIMDizePass` cannot widen with an
   ordinary elementwise rule (thread id, thread id in group, flattened
   thread id in group, lane index) become canonical, wave-size-mangled
@@ -206,11 +208,14 @@ it's discussed, and summarized here:
   irreducible shape `FixIrreducible` might ever see.
 - The differential harness (layer 3's other half, `--reference` diffed
   against the normal pipeline) is scoped to the same acyclic,
-  uniform-control-flow shapes `feme::cpu::SIMDizePass` widens today
-  (`feme-cfg-gen --divergent=false --loops=false --unstructured=false`):
-  divergent branches and loops are exactly what the linearizer (roadmap
-  milestone 6) and the remaining widening work (milestone 7) will make
-  widenable, at which point this harness's scope should grow with them.
+  uniform-control-flow shapes `feme::cpu::SIMDizePass` widened as of this
+  milestone (`feme-cfg-gen --divergent=false --loops=false
+  --unstructured=false`): divergent branches and loops are exactly what the
+  linearizer (roadmap milestone 6) and the remaining widening work
+  (milestone 7) made widenable, at which point this harness's scope should
+  grow with them -- both have since landed (see their own deviation notes),
+  but growing this harness's default scope to match is not itself part of
+  either milestone and remains future work.
   `--reference` itself (`feme::cpu::ReferenceLoweringPass` +
   `feme::cpu::ReferenceEntryWrapperPass`) has no such restriction -- it
   runs any shader `feme::cpu::PreparePass` + resource lowering accept,
@@ -263,18 +268,20 @@ where it's discussed, and summarized here:
   the header/latch rewrite directly against already-structured IR instead;
   generalizing the loop linearizer to see through a `StructurizeCFG`-style
   internal `Flow` merge is the natural next step, not yet done.
-- **Masking is implemented only for the canonical `feme.cpu.resource.*`
-  calls** (which already carry a mask operand -- see
+- **As of this milestone, masking was implemented only for the canonical
+  `feme.cpu.resource.*` calls** (which already carry a mask operand -- see
   `feme::cpu::ResourceCalls`), by rewriting that operand from the constant
   `true` `feme::cpu::ResourceLoweringPass` leaves it as to the block's
-  actual mask. Ordinary `load`/`store` under a divergent condition are not
+  actual mask. Ordinary `load`/`store` under a divergent condition were not
   yet rewritten into the `feme.cpu.masked.load`/`.store` intrinsic forms
-  "Mask representation between phases" describes -- resource calls are the
-  only memory access the pipeline canonicalizes and executes end to end
-  today, so those intrinsics (and the scalarized-active-lane-loop lowering
-  Phase 4 gives them) are added once Phase 4 actually needs them
-  (roadmap milestone 7). `feme.cpu.mask.any` (needed by the loop
-  linearizer itself, unlike the memory intrinsics) is implemented in
+  "Mask representation between phases" describes -- resource calls were the
+  only memory access the pipeline canonicalized and executed end to end at
+  this point, so those intrinsics (and the scalarized-active-lane-loop
+  lowering Phase 4 gives them) were added once Phase 4 actually needed them
+  (roadmap milestone 7, see its own deviation note -- `llvm.masked.gather`/
+  `.scatter` rather than the scalarized-active-lane-loop this note
+  anticipated). `feme.cpu.mask.any` (needed by the loop linearizer itself,
+  unlike the memory intrinsics) is implemented in
   `feme/include/feme/Transforms/CPU/MaskIntrinsics.h`.
 - Nested loops (a cycle containing another cycle) are not linearized: only
   a leaf cycle (one with no child cycle) is considered a candidate.
@@ -282,6 +289,54 @@ where it's discussed, and summarized here:
   in v1" in "Divergent two-way branches become unconditional fallthrough"
   is, as that section says, still not emitted -- this milestone does not
   change that.
+
+Deviation: milestone 7's implementation narrowed several things described in
+"Phase 4: Widening" and "Mask representation between phases" below; each is
+called out inline where it's discussed, and summarized here:
+
+- **`feme::cpu::SIMDizePass` now widens a loop**, provided
+  `feme::cpu::LinearizePass` has already removed every divergent branch from
+  it (a loop with one still unlinearized is diagnosed, the same as any other
+  unsupported divergent branch): the loop-carried "active" mask becomes a
+  widened `phi`, and the mask-gated backedge's `feme.cpu.mask.any` lowers to
+  `llvm.vector.reduce.or`. `feme::cpu::LinearizePass`'s `LoopLinearizer` also
+  now masks a `feme.cpu.resource.*` call inside a loop body with the
+  iteration's active mask (previously only a divergent diamond's arm did).
+- **Masked memory ops are implemented, but only via `llvm.masked.gather`/
+  `.scatter`.** `feme::cpu::LinearizePass` now rewrites a plain, non-atomic,
+  non-volatile `load`/`store` inside a masked region into a
+  `feme.cpu.masked.load`/`.store` call (closing the milestone 6 deviation
+  that only `feme.cpu.resource.*` calls got this treatment), and
+  `feme::cpu::SIMDizePass` widens either into `llvm.masked.gather`/
+  `.scatter` over a `<W x ptr>` address vector -- correct whether the
+  address is genuinely divergent or turns out to be the same pointer
+  broadcast into every lane. The finer per-case lowerings "Mask
+  representation between phases"'s table describes (a broadcast scalar load
+  for a wave-invariant uniform address, a scalarized active-lane store loop
+  for a uniform address, a real `llvm.masked.load`/`.store` for a
+  *contiguous* divergent address) are deferred, pure performance work --
+  see the roadmap's "General performance work" item -- `llvm.masked.gather`/
+  `.scatter` is correct, if not optimal, for every case that table
+  distinguishes.
+- **The scalarization fallback is implemented for any divergent instruction
+  with no vector form** (atomics, chiefly, but the fallback is fully
+  generic): `FunctionWidener::widenScalarizedFallback` clones the
+  instruction once per lane with each operand's extracted scalar value,
+  reassembling a result vector when it produces one. It does not yet gate a
+  scalarized instruction's per-lane execution by an active-lane mask --
+  matching the still-open masked-atomics gap the paragraph above's `load`/
+  `store` masking does not close -- and it excludes a generic divergent
+  `CallInst` (e.g. an unrecognized math libcall), whose callee operand the
+  fallback's per-operand extraction does not know to leave alone; such a
+  call remains a diagnosed error.
+- **Vector/aggregate leaf decomposition is not implemented.** "Vectors
+  become components, not nested vectors" describes splitting a divergent
+  `<N x T>` (or aggregate) value into `N` separate `<W x T>` components,
+  since LLVM has no `<W x <N x T>>`; `feme::cpu::SIMDizePass` instead
+  diagnoses a divergent value of vector or aggregate type up front
+  (`FunctionWidener::checkNoDivergentAggregates`) rather than attempt to
+  build that illegal type. This is a substantial follow-up of its own, not
+  yet scheduled against a specific future milestone.
 
 ## Summary
 
@@ -1826,7 +1881,22 @@ Sequenced so each step is independently testable and useful:
    and masking scoped to `feme.cpu.resource.*` calls rather than ordinary
    `load`/`store`).
 7. **Widening** for the remaining wave sizes, including masked memory ops
-   and the scalarization fallback.
+   and the scalarization fallback (done): `feme::cpu::SIMDizePass` now
+   widens a loop `feme::cpu::LinearizePass` has linearized (a widened
+   loop-carried mask `phi`, `feme.cpu.mask.any` lowered to
+   `llvm.vector.reduce.or`), and `feme::cpu::LinearizePass` now masks a
+   `feme.cpu.resource.*` call inside a loop body the same way it already did
+   for a divergent diamond's arm. `feme::cpu::LinearizePass` also masks a
+   plain `load`/`store` into `feme.cpu.masked.load`/`.store` calls, which
+   `feme::cpu::SIMDizePass` widens into `llvm.masked.gather`/`.scatter`. Any
+   divergent instruction with no vector form (atomics, chiefly) scalarizes
+   into a generic per-lane clone-and-reassemble loop rather than erroring.
+   See the Status section's Deviation note for what narrowed (the masked
+   memory ops always lower to `llvm.masked.gather`/`.scatter` rather than
+   the finer uniform-address/contiguous-address cases the design's lowering
+   table distinguishes, the scalarization fallback does not yet mask a
+   scalarized instruction's per-lane execution, and vector/aggregate leaf
+   decomposition remains unimplemented -- diagnosed rather than attempted).
 8. **Wave intrinsic lowering**: Phase 5's remaining half, over the mask
    milestone 6 introduced.
 9. **Barriers and groupshared memory** (region splitting).
