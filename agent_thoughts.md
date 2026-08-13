@@ -8223,3 +8223,139 @@ existing text there described milestone 8 as unstarted future work.
    above.
 6. `FeMeCPUDesign.md`: mark milestone 8 done, add its deviation note.
 7. This file.
+
+# Milestone 9: Barriers and groupshared memory (region splitting)
+
+## Reading the design before touching anything
+
+Explored the existing state first (via a background research agent plus
+manual `grep`/`view`) rather than guessing: `feme::cpu::EntryWrapperPass`
+(Phase 6) already had the barrier-free wave loop from milestone 4, with its
+own header/file comments explicitly deferring "barrier region splitting and
+groupshared allocation" to this milestone. `feme::cpu::WaveBodyEnv` already
+carried a `GroupShared` pointer parameter (unused beyond forwarding
+`Args->GroupShared`, always null from `feme::cpu::JITEngine`), and
+`feme::cpu::ArtifactInfo` already reserved `GroupSharedSize`/`GroupSharedAlign`
+fields, both clearly scaffolded in anticipation of this milestone. DXIL op
+raising already produced the six `llvm.dx.*_memory_barrier[_with_group_sync]`
+intrinsics; nothing downstream consumed them yet. No pass anywhere handled an
+`addrspace(3)` (groupshared) global at all -- referencing one in a shader
+would have silently left a broken, unallocated global in the final module.
+
+## Scoping the two halves
+
+The design's "Groupshared memory" and "Barriers" prose describes a lot:
+per-value context spilling across a barrier, a barrier inside a uniform
+loop keeping the loop iteration outside the region/wave loops, and full
+scope/ordering fidelity (workgroup vs. device memory, acquire/release
+semantics). Given how every prior milestone in this codebase explicitly
+narrows scope and documents the narrowing (see the Status section's
+Deviation notes), I made the same kind of decisive cuts rather than trying
+to build the fully general version:
+
+- **Groupshared canonicalization + allocation**: split cleanly along the
+  same "canonicalize at Phase 4, lower at Phase 6" line
+  `ResourceCalls`/`WaveCalls` already established.
+  `feme::cpu::rewriteGroupSharedGlobals` (new, in `GroupShared.h/.cpp`)
+  rewrites a *uniform* groupshared access into a `getelementptr` off the
+  wave body's `wave_groupshared` parameter; a divergent (per-lane-varying)
+  index is diagnosed rather than rewired into a masked
+  gather/scatter -- a real, deliberate scope cut, since that needs a
+  vector-of-pointers rewrite this milestone doesn't attempt.
+  `feme::cpu::EntryWrapperPass` computes the identical layout a second
+  time (deterministic given the same still-present globals) and allocates
+  the backing buffer, on the wrapper's own stack if it's small enough,
+  else from the host-supplied `FemeDispatchArgs::GroupShared`.
+- **Barrier region splitting**: scoped to a *straight-line* wave body (no
+  surviving branch, no loop) with *no SSA value* live across a
+  `..._with_group_sync` barrier -- only groupshared/resource memory may
+  carry state across one. Every divergent branch is already gone by this
+  point (`feme::cpu::LinearizePass`), so this only bites a barrier
+  surviving inside genuinely uniform control flow, or one whose
+  surrounding code computes a register value it reuses after the barrier.
+  Both are diagnosed with a clear message rather than silently
+  mis-compiled. `Device`/`All` memory scope collapse to one fence
+  (`SyncScope::System`); only `Group`-only gets the cheaper
+  `SyncScope::SingleThread`, since a group's waves already run on one host
+  thread in program order.
+
+## Two bugs found by testing against real IR, not just by reading code
+
+1. **Inserting new instructions mid-widening confuses `UniformityInfo`.**
+   My first attempt ran `rewriteGroupSharedGlobals` right after
+   `buildWidenedFunction()`, before `FunctionWidener::widen()`'s own
+   instruction walk. That walk's `UniformityInfo` was computed once, up
+   front, on the *original* (pre-groupshared-rewrite) function; a brand
+   new `getelementptr` my rewrite inserted was never in that analysis, and
+   `GenericUniformityImpl.h` documents exactly this: "values not in
+   UniformValues (e.g. newly created) are conservatively treated as
+   divergent." The walk then tried to widen/erase my own replacement
+   instructions, corrupting the IR (`llvm::Value::~Value()`'s "Uses remain
+   when a value is destroyed" assertion, easy to spot but not obviously
+   caused by my code from the assertion text alone -- I had to bisect with
+   a debug print to confirm it). Fix: move the rewrite to run *after* the
+   whole widening walk (including its own erase pass) finishes, operating
+   on settled IR only. This also simplified the groupshared rewrite itself
+   a lot: by then, a genuinely divergent access has already scalarized
+   into per-lane `getelementptr` clones (each an ordinary scalar GEP
+   feeding an `insertelement`, not a `load`/`store`), which my "must feed
+   only a load/store" check catches and diagnoses for free, rather than
+   needing to separately detect a vector-of-pointers GEP type.
+2. **`replaceAllUsesWith` across an address-space change.** Casting a
+   groupshared pointer's address space away (the design's own phrase) via
+   `GEP->replaceAllUsesWith(NewGEP)` asserts, since `ptr addrspace(3)` and
+   `ptr` are different types and RAUW requires an exact match. Fixed by
+   retargeting each of the old GEP's uses individually
+   (`Use::set`) instead of a blanket RAUW -- `load`/`store` read their
+   pointer operand's address space dynamically rather than caching it, so
+   this is safe for the load/store-only shapes this milestone supports.
+3. **A pre-existing, unrelated `SIMDize.cpp` bug I worked around rather
+   than fixed**: a `store` of a divergent *value* at a uniform *address*
+   (no divergent control flow involved, so `feme::cpu::LinearizePass`
+   never masks it) falls through to `widenScalarizedFallback`, which
+   calls `Builder.Insert(Clone, I.getName() + ".lane")` on a cloned
+   (void-typed) `store` -- `setName` on a void value asserts. This is
+   orthogonal to barriers/groupshared (it reproduces with an ordinary
+   divergent store, no `addrspace(3)`/barrier involved) and out of this
+   milestone's stated scope, so per the "don't fix pre-existing issues
+   unrelated to your task" guidance I avoided it in every test I wrote
+   (storing a uniform, group-id-derived value instead) rather than fixing
+   `widenScalarizedFallback` itself.
+
+## Why `CodeExtractor` wasn't used for region splitting
+
+I considered `llvm::CodeExtractor` for turning each region into its own
+function, since it already computes inputs/outputs and builds the
+call/reload glue automatically. Two things ruled it out for this
+milestone's scope: it extracts a region *in place*, leaving a "driver"
+function behind that calls each extracted region in sequence -- exactly
+backwards from what's needed here, where the *wrapper* (not the wave body)
+must call each region in its own separate wave loop, not back-to-back in
+one call. And its automatic outputs/reloads solve exactly the per-value
+context-spilling problem this milestone's scope deliberately defers.
+Given the "no live value across a barrier" restriction, a much simpler,
+hand-rolled block-range `Function::splice` (the same technique
+`FunctionWidener::buildWidenedFunction` already uses) plus a per-region
+operand remap sufficed, with no cross-region liveness machinery needed at
+all.
+
+## Commit breakdown
+
+1. `GroupShared.h/.cpp`, `SIMDize.cpp`, `CMakeLists.txt`, and two new
+   `lit` tests: canonicalize a uniform groupshared access into a
+   `getelementptr` off `wave_groupshared`; diagnose a divergent one.
+2. `BarrierCalls.h/.cpp`, `CMakeLists.txt`: standalone classification of
+   the six raised barrier intrinsics (memory scope, group-sync or not).
+3. `EntryWrapper.{h,cpp}`, `EntryWrapperTest.cpp`, and six new `lit` tests:
+   the actual groupshared allocation and barrier region splitting/fence
+   logic, plus tests for the stack/host-buffer allocation split, a
+   group-sync barrier's two-region split, a memory-only barrier's in-place
+   fence, and the two new diagnostics (non-linear control flow, a value
+   live across a barrier).
+4. `JITEngine.cpp`, `ResourceInfo.h`: comment-only updates reflecting that
+   the common (small) groupshared case is now handled, and that
+   `ArtifactInfo`'s `GroupSharedSize`/`WaveSize` fields are still not wired
+   into an AOT-facing builder.
+5. `FeMeCPUDesign.md`: mark roadmap milestone 9 done, add its deviation
+   note.
+6. This file.
