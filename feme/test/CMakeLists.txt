@@ -20,6 +20,8 @@ set(FEME_TEST_DEPENDS
   feme
   feme-opt
   feme-translate
+  feme-run
+  feme-cfg-gen
   FeMeUnitTests
   llc
   llvm-as
