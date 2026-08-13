@@ -8884,3 +8884,158 @@ support.
 7. `feme/docs/{Design.md,FeMeCPUDesign.md}`: documentation updates
    reflecting the above.
 8. This file.
+
+# Making the real Mandelbrot compute shader compile end to end on the CPU target
+
+Picking up exactly where the previous session's "Compiling a real
+Mandelbrot compute shader through the FeMe CPU target CLI" heading left
+off: `bin/feme --target=aarch64-apple-darwin mandelbrot.dxbc -o -` (the
+same `dxc -T cs_6_6`-compiled Mandelbrot shader as before) no longer
+crashed anywhere in FeMe's own code, but `feme::cpu::SIMDizePass` still
+diagnosed (cleanly) a divergent `<4 x float>` value -- the shader's
+per-pixel `Color` -- as an unimplemented "vector or aggregate" widening
+case. The task was to keep iterating on that same repro until it fully
+compiles.
+
+## Finding #1: the "divergent vector" is entirely a resource-store artifact
+
+The raised DXIL IR (`feme-translate --import-dxil`) has *no* vector types
+at all -- DXIL's `dx.op.bufferStore` takes four separate scalar float
+arguments, not a `float4`. The vector only appears once
+`feme::dxil::OpRaisingPass::raiseTypedBufferStore` (OpRaising.cpp)
+reassembles those four scalars back into a `<4 x float>` via a `poison`
+base plus four constant-index `insertelement`s, to match
+`llvm.dx.resource.store.typedbuffer`'s vector-typed signature. Since
+`Color`'s components are computed inside the shader's divergent
+`Diverged` branch, that reassembled vector is divergent too -- and
+`FunctionWidener::checkNoDivergentAggregates` (SIMDize.cpp) rejected any
+divergent vector or aggregate value unconditionally, matching the design
+doc's own "vector/aggregate leaf decomposition is not implemented"
+deviation note from milestone 7.
+
+Rather than implement the design's full generality (arbitrary
+`extractelement`/`shufflevector`/a divergent vector `phi`/`select`, plus
+aggregates of any kind -- a genuinely open-ended follow-up the previous
+session's own deviation note already flagged as unscheduled), I
+implemented exactly the one shape `raiseTypedBufferStore` actually
+produces and that a masked resource-store call actually needs to
+consume: a constant-index `insertelement` chain, decomposed into `N`
+separate `<W x elemT>` components (never an illegal `<W x <N x T>>`)
+tracked in a new `WidenedVectorComponents` map, consumed only by another
+link of the same chain or by a matched `feme.cpu.resource.*` store
+call's stored-value operand (`FunctionWidener::widenInsertElement`,
+`widenResourceCall`'s new per-lane `<N x elemT>` reassembly, and a
+renamed `checkVectorDecompositionSupported` that verifies every
+divergent vector value matches this exact shape up front). Everything
+else that produces or consumes a divergent vector, and every divergent
+aggregate, is still diagnosed exactly as before -- a narrower, but total
+and separately tested, slice of the design.
+
+## Finding #2: a divergent call to a DXIL-specific math intrinsic was still unsupported
+
+Fixing #1 uncovered the next diagnostic: `unsupported divergent call to
+'llvm.log2.f32'` (also `llvm.sqrt.f32`, `llvm.dx.frac.f32`) --
+`FunctionWidener::widenElementwise`'s existing code always rejected any
+divergent `CallInst` it didn't otherwise recognize (the callee is one of
+`I.operands()`, which the generic scalarization fallback doesn't know to
+leave alone), exactly matching milestone 7's "Call to a math libcall"
+deviation note. Since these are genuinely elementwise, single-overloaded-
+type math intrinsics, I widened them directly to their vector-typed
+overload instead of rejecting or scalarizing: `llvm::isTriviallyVectorizable`
+covers the target-independent ones (`sqrt`, `log2`, ...), but not
+DXIL/SPIR-V-specific ones like `llvm.dx.frac`/`.rsqrt`/`.saturate` (raised
+by `feme::dxil::OpRaisingPass`'s `DirectOps` table) that utility simply
+doesn't know about -- added a small `isElementwiseVectorizableIntrinsic`
+whitelist for those, gated on the same "every operand's type equals the
+result type" homogeneity check either way, so a call with a non-
+overloaded operand (e.g. `llvm.powi`'s integer exponent) still falls
+through to the pre-existing diagnostic rather than being mis-widened.
+
+## Finding #3: a real, independent erasure-order bug in `FunctionWidener::widen`
+
+With both of those fixed, the pipeline stopped diagnosing anything and
+instead crashed: `Use still stuck around after Def is destroyed` deleting
+a value named `%Guard..inv` still used by a `select` in a different
+block. This was not a new bug my own changes introduced -- it was always
+latent in `FunctionWidener::widen`'s final erasure pass, just never
+reached before, because every earlier attempt to compile this shader
+had failed earlier in the pipeline first (either in `LinearizePass`,
+fixed in the previous session, or in `SIMDizePass`'s own diagnostics,
+fixed by findings #1/#2 above).
+
+The bug: that erasure pass assumed the widened function's block *list*
+order was itself a "uses before defs" order ("a block always precedes
+what it dominates"). LLVM guarantees no such thing -- only that a def's
+*block* dominates its use's *block*, regardless of either's position in
+the function's block list, and nothing rebuilds that list into RPO/
+dominance order anywhere in this pipeline. A `feme::cpu::LinearizePass`-
+inserted "Flow" merge block (reconverging the palette lookup after the
+escape-time loop) sorted earlier in the block list than the loop's own
+cycle-exit "guard" block whose value it still used -- exactly the
+"loop, then a diamond after it" shape the previous session's own
+Linearize work newly enabled. I reduced this to a minimal, loop/diamond-
+free repro (two straight-line blocks feeding a `select` in a block
+listed *before* one of its operands' defining block) and confirmed it
+crashes against the old logic independent of any specific CFG shape,
+confirming this is a general bug in the erasure pass itself, not
+something specific to Mandelbrot's control flow.
+
+Fix: sever every to-be-erased instruction's uses (`replaceAllUsesWith`
+`poison`) up front, across the *whole* to-be-erased set, before erasing
+any of them -- this subsumes (and is strictly more general than) the
+pre-existing "poison out a loop header phi's own operands first" special
+case, since it handles a soon-to-be-dead `select`/binop/etc.'s uses of
+another soon-to-be-dead value exactly the same way a phi's incoming-value
+cycle was already handled, rather than needing a second, opcode-specific
+mechanism for it.
+
+## Where it stands
+
+`bin/feme --target=aarch64-apple-darwin mandelbrot.dxbc -o -` (the exact
+repro from the task, re-run against a fresh `dxc -T cs_6_6` compile of
+the same HLSL) now exits 0 and produces a valid Mach-O 64-bit arm64
+object file end to end, with no crash and no diagnostic error -- only
+two pre-existing, tested-around warnings from linking `libFeMeRuntimeCPU`
+(a host-triple-only prebuilt bitcode blob) into a module targeting a
+*different* triple than the build host's own
+(`feme-cpu-wave-size.ll`'s own `NO-DIAG-NOT: warning` check already only
+asserts this for `%feme_host_triple`, i.e. this is a known, documented
+cross-compilation limitation of the current CPU-target runtime-library
+design, not something introduced or fixed by this session).
+
+## Verification
+
+- `ninja check-feme` (assertions-enabled, ccache build): 823/823 passing
+  (815 pre-existing at the start of this session + 8 new: 5 lit tests
+  covering the vector decomposition/math-libcall/erasure-order fixes, 1
+  new SIMDizeTest unit test, plus 2 rewritten/split lit tests whose
+  premises this session's fixes changed).
+- Manually confirmed each of findings #1-#3 in isolation, both before and
+  after its respective fix, using `feme-opt -passes=feme-cpu-simdize`
+  (and, for #3, a hand-reduced repro independent of Mandelbrot's own
+  shape) against hand-built IR matching each failure exactly.
+- Re-ran the actual `mandelbrot.dxbc` (freshly recompiled with the
+  `/home/dev/dev/DirectXShaderCompiler/build-rel` `dxc`) through
+  `bin/feme --target=aarch64-apple-darwin` after every fix to confirm
+  forward progress, and a final time after all three fixes landed to
+  confirm it now compiles all the way to a valid object file (`file`
+  reports "Mach-O 64-bit arm64 object"), exit code 0.
+
+## Commit breakdown
+
+1. `feme/lib/Transforms/CPU/SIMDize.cpp`,
+   `feme/test/Transforms/CPU/simdize-erasure-order.ll`: fix #3 (the
+   erasure-order bug), with a minimal, CFG-shape-independent regression
+   test.
+2. `feme/lib/Transforms/CPU/SIMDize.cpp`,
+   `feme/test/Transforms/CPU/{simdize-vector-resource-store,
+   simdize-vector-unsupported, simdize-aggregate-unsupported}.ll`,
+   `feme/unittests/Transforms/CPU/SIMDizeTest.cpp`: fix #1 (insertelement-
+   chain vector decomposition into a resource store).
+3. `feme/lib/Transforms/CPU/SIMDize.cpp`,
+   `feme/test/Transforms/CPU/simdize-math-libcall.ll`: fix #2 (widening a
+   divergent math-libcall to its vector overload).
+4. `feme/docs/FeMeCPUDesign.md`: documentation updates for all three,
+   folded into commits 1-3 above (each deviation note lives next to the
+   capability it describes).
+5. This file.
