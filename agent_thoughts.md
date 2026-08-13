@@ -8588,3 +8588,120 @@ milestone 9 narrowing rather than a bug:
    needed to run them.
 5. `feme-run.md`, `FeMeCPUDesign.md`: documentation.
 6. This file.
+
+# Fix: `dx.op.bufferStore.f32` unsupported-raised-operation on the CPU target
+
+## The bug report
+
+Running a real DXContainer file through `feme` targeting the CPU produced:
+
+```
+feme: unsupported raised operation: 'dx.op.bufferStore.f32' was not raised
+to idiomatic LLVM IR before reaching the FeMe CPU target
+```
+
+`UnsupportedOps.cpp`'s diagnostic (`checkSupportedRaisedOps`) fires whenever
+a leftover `dx.op.*` declaration still has uses at the point the CPU target
+inspects the module -- i.e. `OpRaisingPass` (`OpRaising.cpp`) failed to
+raise some DXIL op into the `llvm.dx.*`/`llvm.{dx,spv}.resource.*`
+vocabulary the rest of the pipeline expects. So the diagnostic itself is
+doing its job correctly; the actual bug is a *raising* gap, not a target
+check.
+
+## Finding the root cause
+
+`raiseTypedBufferStore` (and `raiseTypedBufferLoad`) only raise a
+`dx.op.bufferStore`/`dx.op.bufferLoad` call if its write mask's width
+(bit-popcount of a contiguous low-order mask) exactly matches the
+`target("dx.TypedBuffer", ...)` handle's element type's vector width. A
+`RWBuffer<float4>` store with a full `0xF` mask needs a `<4 x float>`
+handle to match; if the handle it's actually consuming is `float` (scalar),
+the raise silently declines (returns `false`) and the op is left as bare
+`dx.op.bufferStore.f32` -- exactly the symptom reported.
+
+Tracing where that handle type comes from: `raiseResourceHandleFromBinding`
+(the modern SM6.6+ `CreateHandleFromBinding`+`AnnotateHandle` path -- the
+one a real compiled DXContainer takes, as opposed to the legacy
+`CreateHandle` path `raiseLegacyCreateHandle` covers) decodes a
+TypedBuffer's element type from `AnnotateHandle`'s `ResourceProperties`
+Word1 like this:
+
+```cpp
+auto ElemKind = static_cast<dxil::ElementType>(*Word1 & 0xFF);
+Type *ElemTy = getElementLLVMType(ElemKind, Ctx);
+```
+
+This only reads bits 0-7 (`CompType`). But
+`ResourceInfo::getAnnotateProps` (`llvm/lib/Analysis/DXILResource.cpp`)
+also packs the element's **component count** into bits 8-15:
+
+```cpp
+Word1 |= (CompType & 0xFF) << 0;
+Word1 |= (CompCount & 0xFF) << 8;
+```
+
+`raiseResourceHandleFromBinding` (and its bindless twin,
+`raiseResourceHandleFromHeap`, which has the identical bug -- and is
+actually the *only* path the CPU target's v1 accepts, since it "accepts
+bindless shaders only" per the Resource Model section below) never reads
+that field, so every TypedBuffer handle this pass reconstructs comes out
+scalar regardless of its real element width. `raiseLegacyCreateHandle`
+doesn't have this bug -- it has no `ResourceProperties` to read at all (the
+legacy `CreateHandle` op doesn't carry one), so it already has to infer the
+width from how the handle is actually used (`inferTypedBufferWidth`,
+looking at store masks / load extracts) -- a heavier mechanism than needed
+here, since the modern path's `ResourceProperties` already has the answer
+sitting right there in a field the code just wasn't reading.
+
+## The fix
+
+Added `widenToTypedBufferElement(Type *ScalarTy, uint64_t Word1)`, a small
+shared helper next to `getElementLLVMType`, that decodes `CompCount` from
+Word1's bits 8-15 and widens the scalar element type into the matching
+`FixedVectorType` when `CompCount > 1` (returning nullptr for a `CompCount`
+of 0, which never occurs for a real typed resource, consistent with how
+this file already declines to raise rather than crashing on malformed
+input elsewhere). Wired it into both `raiseResourceHandleFromBinding` and
+`raiseResourceHandleFromHeap`'s TypedBuffer branch -- deliberately shared
+rather than fixed in only one place, since both had the exact same bug and
+a future reader touching one without the other would silently reintroduce
+it in the untouched copy.
+
+This is a straightforward correctness bug fix, not a design change --
+`TypedBuffer` with a vector element was already an intended, already-tested
+shape (see `dxil-raise-legacy-resources.ll`'s `store_float4` and
+`buildHandleType`'s own vector-width handling in the legacy path); the
+modern-path reconstruction just wasn't reading the field that told it the
+width. No design doc update needed.
+
+## Verification
+
+Reproduced the exact bug by hand with a real `-dxil-op-lower` run: an
+`llvm.dx.resource.handlefrombinding`/`llvm.dx.resource.store.typedbuffer`
+pair over `<4 x float>`, lowered through the real DXIL backend, produces
+`ResourceProperties { i32 4106, i32 1033 }` (Word1 = 1033 = `0x409`:
+`CompType` 9 = F32, `CompCount` 4) and a `dx.op.bufferStore.f32` call --
+confirmed this reproduced the "unsupported raised operation" failure
+before the fix, and raised cleanly to
+`llvm.dx.resource.store.typedbuffer` after it.
+
+Added test coverage at both levels this bug spans:
+- `dxil-raise-resource-handles.ll`/`dxil-raise-resource-heap-handles.ll`:
+  a direct, hand-constructed `ResourceProperties` case for each of the two
+  buggy functions, checking the reconstructed handle type is
+  `target("dx.TypedBuffer", <4 x float>, ...)`, not scalar `float`.
+- `dxil-raise-resource-handles-roundtrip.ll`: an end-to-end case through
+  the real `-dxil-op-lower` pass (this file's existing pattern for
+  validating against genuine DXIL backend output, not just hand-written
+  IR), confirming the store now round-trips completely with no leftover
+  `dx.op.*`/`casthandle`.
+
+`ninja check-feme` (assertions-enabled, ccache build): 815/815 passing.
+
+## Commit breakdown
+
+1. `OpRaising.cpp`: the `widenToTypedBufferElement` fix, wired into both
+   `raiseResourceHandleFromBinding` and `raiseResourceHandleFromHeap`.
+2. `dxil-raise-resource-handles.ll`, `dxil-raise-resource-heap-handles.ll`,
+   `dxil-raise-resource-handles-roundtrip.ll`: regression test coverage.
+3. This file.
