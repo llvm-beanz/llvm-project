@@ -9257,3 +9257,90 @@ functions to the same reported address.
 1. `feme/test/Tools/feme/feme-cpu-loop.ll`: fix #1 (accept either Mach-O
    or ELF symbol mangling for `feme_cpu_entry_main`).
 2. This file.
+
+# Third investigation of the `FunctionWidener::widen()` segfault report
+
+## Task
+
+The exact same `check-feme` failure report as the previous two sessions
+(byte-for-byte identical stdout/stderr, including the two identical
+`FunctionWidener::widen()` backtrace frames) was filed again against
+`Transforms/CPU/simdize-math-libcall.ll`, asking to "fix the issues."
+`agent_thoughts.md` already contains two prior investigations of this exact
+report (see "### #3: crash in `FunctionWidener::widen()`" and its
+follow-up "#2: `FunctionWidener::widen()` segfault, re-investigated"
+above), both concluding no bug reproduces in-tree and the most likely
+explanation is a stale/incremental build artifact specific to the
+reporter's macOS machine. Since the report recurred verbatim, I repeated
+the investigation from scratch on this (Linux/x86_64) checkout rather than
+trusting the prior conclusion on faith.
+
+## What I did
+
+- Confirmed `git status` is clean and `HEAD` (`12586625677b`) has no
+  uncommitted or pending changes to `feme/lib/Transforms/CPU/SIMDize.cpp`
+  since `056c5dd6741b` (the commit that added the math-libcall widening
+  path and its test) landed.
+- Deleted and fully relinked `bin/feme-opt` from scratch (`ninja feme-opt`
+  with ccache still populated, assertions-enabled Release build per
+  `CMakeCache.txt`'s `LLVM_ENABLE_ASSERTIONS:BOOL=ON`) to rule out any
+  stale-link theory on *this* machine.
+- Ran `feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S`
+  on `simdize-math-libcall.ll` 20 times in a row: every run exits 0 and
+  produces byte-identical, `CHECK`-satisfying output; piping straight into
+  `FileCheck` also passes every time.
+- Reran the same command at wave sizes 1, 2, 4, 8, 16, 32, and 64: all
+  succeed, ruling out anything specific to `-feme-cpu-wave-size=4`.
+- Reran under `ulimit -s 512` (matching the previous session's stack-
+  exhaustion check): output is byte-identical to the unconstrained run,
+  still no crash, reinforcing that this is not a stack-overflow that only
+  a smaller stack would trip.
+- Re-read `FunctionWidener::widen()` and its full call graph
+  (`checkSupportedControlFlow`, `checkVectorDecompositionSupported`,
+  `buildWidenedFunction`, `widenInstruction`/`widenElementwise`/
+  `getWidened`, `fillWidenedPHIIncoming`, group-shared rewriting) once
+  more, independently of the previous two passes: confirmed again that
+  `widen()` has exactly one call site (`SIMDizePass::run`'s `Entries`
+  loop, over a pre-snapshotted list of functions, so a freshly-built
+  widened function is never revisited) and nothing in this call graph
+  calls back into `widen()` itself, directly or indirectly.
+- Ran the full `ninja check-feme` (assertions-enabled, ccache build)
+  twice: 815/824 discovered tests passing both times, 9 unsupported
+  (the `directx-registered-target`-gated tests, expected on this host),
+  0 failures, including `Transforms/CPU/simdize-math-libcall.ll`.
+
+## Conclusion
+
+Three independent investigations, across at least two different
+sessions/machines and now a third from-scratch rebuild, all agree: nothing
+in the current tree reproduces this crash, and no plausible in-source
+recursion into `widen()` exists to fix. Making a speculative code change to
+`SIMDize.cpp` at this point — with three separate verification passes
+unable to find anything wrong — would risk masking a real, different bug
+rather than fixing this one, which is explicitly against this repository's
+"make precise, surgical changes" convention. No source change was made.
+If this report recurs a fourth time, the next actionable step (unchanged
+from the prior session's recommendation, still not yet possible from this
+environment) is to get a core dump or `lldb`/`gdb` backtrace from the
+*exact* crashing `feme-opt` binary on the reporting machine, since a
+stripped/optimized backtrace can legitimately fold two different
+`static`/anonymous-namespace functions in the same translation unit to one
+misleading, byte-identical reported address -- which would explain why the
+backtrace shows `widen()` "calling" `widen()` even though no such call
+exists in source.
+
+## Verification
+
+- `ninja feme-opt` (clean relink) then `ninja check-feme` twice
+  (assertions-enabled, ccache build): 815/824 passing, 9 unsupported, 0
+  failures both times.
+- 20 repeated direct invocations of `feme-opt --llvm
+  -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S
+  simdize-math-libcall.ll`, all successful with identical output.
+- The same invocation at wave sizes 1/2/4/8/16/32/64: all successful.
+- The same invocation under `ulimit -s 512`: successful, output identical
+  to the unconstrained run.
+
+## Commit breakdown
+
+1. This file (no source changes; nothing reproduced to fix).
