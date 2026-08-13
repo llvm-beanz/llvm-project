@@ -16,7 +16,7 @@
 ; RUN: feme --target=%feme_host_triple %t.dxcontainer -o %t.o
 ; RUN: llvm-nm %t.o | FileCheck %s
 
-; CHECK: T feme_cpu_entry_main
+; CHECK: T {{_?}}feme_cpu_entry_main
 
 target triple = "dxil-unknown-shadermodel6.6-compute"
 
