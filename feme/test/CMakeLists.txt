@@ -33,6 +33,8 @@ set(FEME_TEST_DEPENDS
   yaml2obj
   )
 
+add_custom_target(feme-test-depends DEPENDS ${FEME_TEST_DEPENDS})
+
 add_lit_testsuite(check-feme "Running the feme regression tests"
   ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS ${FEME_TEST_DEPENDS}
