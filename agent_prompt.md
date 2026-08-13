@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -23,18 +23,6 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-I've updated the design documentation for the FeMe CPU target to add emulation
-for traditional resources. Can you implement that phase?
-
-> 11. **Traditional bound-resource emulation**: add
->   `feme::cpu::BoundResourceNormalizationPass`, preserve finite DXIL and
->   SPIR-V binding-range metadata through raising/import, publish the reserved
->   heap prefixes and source-binding map through `ResourceInfo` and the next
->   artifact-info version, and teach `JITEngine`/`libFeMeRuntimeCPU`/
->   `feme-run` to materialize physical heaps from bound ranges plus logical
->   dynamic heaps. Remove `feme-run`'s testing-only
->   `--dxil-bind-register-resources` bridge once its HLSL tests use this common
->   path. The completion test is the same shader executed with a traditional
->   binding, a native dynamic slot, and both in one module, with identical
->   results through JIT and AOT runtime dispatch. No change is permitted below
->   `ResourceLoweringPass`: a bound handle reaching it is a pipeline error.
+Can you look over the current implementation and design documentation for feme
+and produce a roadmap for fleshing out the remaining parts of the design and
+extending the end-to-end testing to cover more interesting cases?
