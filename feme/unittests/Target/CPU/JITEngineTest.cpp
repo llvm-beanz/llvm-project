@@ -127,4 +127,33 @@ TEST(JITEngineTest, ReferenceModeRunsTheSameShaderUnwidened) {
   EXPECT_EQ(Buffer, (std::vector<int32_t>{0, 1, 2, 3}));
 }
 
+// Regression test for the Mach-O-specific `asm`-label mangling escape (see
+// `feme::cpu::detail::stripAsmLabelManglingEscape`'s comment in
+// JITEngine.cpp): a `'\1'`-prefixed global name, exactly like Clang emits
+// for an `asm`-labeled symbol on a Mach-O target, must come out with that
+// leading byte stripped so it matches the plain canonical name a shader
+// module's declaration uses. This is exercised directly (rather than only
+// through the end-to-end JIT tests above) because those tests can only
+// observe the bug on a Mach-O host; this host may not be one.
+TEST(JITEngineTest, StripAsmLabelManglingEscapeDropsLeadingSOHByte) {
+  LLVMContext Ctx;
+  SMDiagnostic Err;
+  auto M = parseAssemblyString(R"(
+    define void @"\01mangled.name"() {
+      ret void
+    }
+    @"\01mangled.global" = global i32 0
+    @plain.global = global i32 0
+  )",
+                               Err, Ctx);
+  ASSERT_TRUE(M) << "parse error: " << Err.getMessage().str();
+
+  feme::cpu::detail::stripAsmLabelManglingEscape(*M);
+
+  EXPECT_NE(M->getFunction("mangled.name"), nullptr);
+  EXPECT_EQ(M->getFunction("\01mangled.name"), nullptr);
+  EXPECT_NE(M->getGlobalVariable("mangled.global"), nullptr);
+  EXPECT_NE(M->getGlobalVariable("plain.global"), nullptr);
+}
+
 } // namespace
