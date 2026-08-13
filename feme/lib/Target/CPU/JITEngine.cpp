@@ -11,17 +11,15 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
 #include "feme/Optimizer/OptimizerPipeline.h"
+#include "feme/Target/CPU/Pipeline.h"
 #include "feme/Target/CPU/RuntimeCPU.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
-#include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
 #include "feme/Transforms/CPU/ReferenceLowering.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
-#include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
-#include "feme/Transforms/CPU/WaveLowering.h"
 
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -232,7 +230,13 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   if (Error E = checkSupportedRaisedOps(Mod))
     return std::move(E);
 
-  {
+  std::string WrapperName;
+  if (Opts.Reference) {
+    // `--reference` runs its own, simpler pipeline shape (Prepare +
+    // ResourceLowering, then the reference lowering/wrapper passes instead
+    // of Linearize/SIMDize/WaveLowering/EntryWrapper) -- see
+    // `feme::cpu::runPipeline`'s file comment for why that pipeline is
+    // factored out on its own rather than covering this shape too.
     PassBuilder PB;
     LoopAnalysisManager LAM;
     FunctionAnalysisManager FAM;
@@ -247,16 +251,36 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     ModulePassManager MPM;
     MPM.addPass(PreparePass(Opts.EntryPoint));
     MPM.addPass(ResourceLoweringPass());
-    if (Opts.Reference) {
-      MPM.addPass(ReferenceLoweringPass());
-      MPM.addPass(ReferenceEntryWrapperPass());
-    } else {
-      MPM.addPass(LinearizePass());
-      MPM.addPass(SIMDizePass(WaveSize));
-      MPM.addPass(WaveLoweringPass());
-      MPM.addPass(EntryWrapperPass());
-    }
+    MPM.addPass(ReferenceLoweringPass());
+    MPM.addPass(ReferenceEntryWrapperPass());
     MPM.run(Mod, MAM);
+
+    WrapperName = getEntrySymbolName(EntryName);
+    if (!Mod.getFunction(WrapperName))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "feme-cpu-wrap-reference-entry did not produce '%s'; the shader "
+          "likely uses a wave intrinsic, which has no meaning one "
+          "invocation at a time (--reference)",
+          WrapperName.c_str());
+
+    // Link in only the referenced `libFeMeRuntimeCPU` helper definitions
+    // (see "Runtime Support Library" in feme/docs/FeMeCPUDesign.md).
+    Expected<std::unique_ptr<llvm::Module>> RuntimeMod =
+        parseBitcodeFile(getRuntimeCPUBitcode(), Mod.getContext());
+    if (!RuntimeMod)
+      return RuntimeMod.takeError();
+    detail::stripAsmLabelManglingEscape(**RuntimeMod);
+    Linker L(Mod);
+    if (L.linkInModule(std::move(*RuntimeMod), Linker::Flags::LinkOnlyNeeded))
+      return createStringError(inconvertibleErrorCode(),
+                               "failed to link libFeMeRuntimeCPU");
+  } else {
+    Expected<PipelineResult> Result =
+        runPipeline(Mod, Opts.EntryPoint, WaveSize);
+    if (!Result)
+      return Result.takeError();
+    WrapperName = std::move(Result->WrapperName);
   }
 
   // `*Entry` was captured before the pipeline above ran; `SIMDizePass`
@@ -279,35 +303,6 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   std::optional<ResourceInfo> Info = ResourceInfo::fromModule(Mod, EntryName);
   ResourceInfo ResolvedInfo =
       Info.value_or(ResourceInfo{EntryName, 0, false, {}});
-
-  std::string WrapperName = getEntrySymbolName(EntryName);
-  if (!Mod.getFunction(WrapperName)) {
-    if (Opts.Reference)
-      return createStringError(
-          inconvertibleErrorCode(),
-          "feme-cpu-wrap-reference-entry did not produce '%s'; the shader "
-          "likely uses a wave intrinsic, which has no meaning one "
-          "invocation at a time (--reference)",
-          WrapperName.c_str());
-    return createStringError(
-        inconvertibleErrorCode(),
-        "feme-cpu-wrap-entry did not produce '%s'; the shader is likely not "
-        "acyclic, uniform control flow (see feme::cpu::SIMDizePass, "
-        "roadmap milestone 4)",
-        WrapperName.c_str());
-  }
-
-  // Link in only the referenced `libFeMeRuntimeCPU` helper definitions (see
-  // "Runtime Support Library" in feme/docs/FeMeCPUDesign.md).
-  Expected<std::unique_ptr<llvm::Module>> RuntimeMod =
-      parseBitcodeFile(getRuntimeCPUBitcode(), Mod.getContext());
-  if (!RuntimeMod)
-    return RuntimeMod.takeError();
-  detail::stripAsmLabelManglingEscape(**RuntimeMod);
-  Linker L(Mod);
-  if (L.linkInModule(std::move(*RuntimeMod), Linker::Flags::LinkOnlyNeeded))
-    return createStringError(inconvertibleErrorCode(),
-                             "failed to link libFeMeRuntimeCPU");
 
   OptimizerPipeline().run(Mod,
                           OptimizerOptions{toOptimizationLevel(Opts.OptLevel)});
