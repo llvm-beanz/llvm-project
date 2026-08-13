@@ -87,4 +87,5 @@ Using the command line `dxc -T cs_6_6 mandelbrot.hlsl -Fo mandelbrot.dxbc`
 The generated DXIL file `mandelbrot.dxbc` fails to compile with feme using the
 command `bin/feme --target=aarch64-apple-darwin mandelbrot.dxbc -o -`
 
-Please identify and address the issues.
+Please identify and address the issues. Please continue iterating and resolving
+issues until this test case works.
