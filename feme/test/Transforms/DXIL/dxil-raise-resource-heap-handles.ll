@@ -29,6 +29,23 @@ define %dx.types.Handle @typed_buffer_heap(i32 %idx) {
   ret %dx.types.Handle %h2
 }
 
+; A `RWBuffer<float4>` (UAV TypedBuffer) accessed through
+; `ResourceDescriptorHeap[%idx]`: this is the bindless counterpart of
+; dxil-raise-resource-handles.ll's `typed_buffer_uav_vec4` case -- the CPU
+; target's actual supported shape, since it accepts bindless shaders only
+; (see feme/docs/FeMeCPUDesign.md's "Resource Model") -- confirming
+; `raiseResourceHandleFromHeap` also reconstructs `ResourceProperties`'
+; Word1 component-count field (bits 8-15) into a `<4 x float>` element
+; type rather than a bare scalar `float`.
+; CHECK-LABEL: define %dx.types.Handle @typed_buffer_heap_vec4(
+define %dx.types.Handle @typed_buffer_heap_vec4(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.TypedBuffer", <4 x float>, 1, 0, 1) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 true)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.TypedBuffer", <4 x float>, 1, 0, 1) [[HANDLE]])
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 true)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 4106, i32 1033 })
+  ret %dx.types.Handle %h2
+}
+
 ; A `RWByteAddressBuffer` (UAV, unstructured RawBuffer), uniformly indexed.
 ; CHECK-LABEL: define %dx.types.Handle @raw_buffer_heap(
 define %dx.types.Handle @raw_buffer_heap(i32 %idx) {

@@ -33,6 +33,21 @@ define %dx.types.Handle @typed_buffer_srv(i32 %idx) {
   ret %dx.types.Handle %h2
 }
 
+; A `RWBuffer<float4>` (UAV TypedBuffer) bound at register u1, space 0:
+; `ResourceProperties`' Word1 carries not just the scalar component type
+; (`F32`, bits 0-7) but also the element's component count (`4`, bits
+; 8-15 -- see `ResourceInfo::getAnnotateProps`), so the reconstructed
+; handle's element type must be `<4 x float>`, not the bare `float` that
+; only decoding the component type would produce.
+; CHECK-LABEL: define %dx.types.Handle @typed_buffer_uav_vec4(
+define %dx.types.Handle @typed_buffer_uav_vec4(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.TypedBuffer", <4 x float>, 1, 0, 1) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 1, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.TypedBuffer", <4 x float>, 1, 0, 1) [[HANDLE]])
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 1, i32 1, i32 0, i8 1 }, i32 1, i1 false)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 4106, i32 1033 })
+  ret %dx.types.Handle %h2
+}
+
 ; A `RWByteAddressBuffer` (UAV, unstructured RawBuffer) bound at register u0.
 ; CHECK-LABEL: define %dx.types.Handle @raw_buffer_uav(
 define %dx.types.Handle @raw_buffer_uav(i32 %idx) {

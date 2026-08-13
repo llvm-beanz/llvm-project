@@ -19,7 +19,10 @@
 ; `dx.op.cbufferLoadLegacy`) are left as-is -- raising an aggregate-typed
 ; load isn't implemented yet, see the DXIL section of feme/docs/Design.md --
 ; so for those this only checks the handle sequence, not a full round-trip of
-; the whole function.
+; the whole function. A `<4 x float>` typed buffer store also round-trips
+; completely, confirming the element type's vector width -- reconstructed
+; from ResourceProperties' Word1 component-count field, not just its
+; component type -- matches what the write mask expects.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-pc-shadermodel6.6-compute"
@@ -30,6 +33,7 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 @ResName2 = private unnamed_addr constant [4 x i8] c"raw\00"
 @ResName3 = private unnamed_addr constant [3 x i8] c"sb\00"
 @ResName4 = private unnamed_addr constant [3 x i8] c"cb\00"
+@ResName5 = private unnamed_addr constant [4 x i8] c"buf\00"
 
 ; A `Buffer<float>` (SRV TypedBuffer) bound at register t1, space 0.
 ; CHECK-LABEL: define float @typed_buffer_srv(
@@ -89,6 +93,27 @@ define void @cbuffer_case(i32 %idx) {
   ret void
 }
 
+; A `RWBuffer<float4>` (UAV TypedBuffer) bound at register u1: a full
+; write-mask (0xF) typed buffer store round-trips completely, proving
+; `raiseResourceHandleFromBinding` reconstructs the `<4 x float>` element
+; type ResourceProperties' Word1 component-count field calls for (bits
+; 8-15; see `ResourceInfo::getAnnotateProps`) rather than the bare scalar
+; `float` `getElementLLVMType` alone would produce. Before
+; `widenToTypedBufferElement` existed, this mismatch between the raised
+; handle's scalar element type and the store's 4-wide write mask made
+; `raiseTypedBufferStore` decline to raise, leaving a bare
+; `dx.op.bufferStore.f32` call that the FeMe CPU target then rejected as an
+; unsupported raised operation.
+; CHECK-LABEL: define void @typed_buffer_uav_vec4(
+define void @typed_buffer_uav_vec4(i32 %idx, <4 x float> %v) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.TypedBuffer", <4 x float>, 1, 0, 1) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 1, i32 1, i32 0, ptr null)
+  ; CHECK: call void @llvm.dx.resource.store.typedbuffer{{.*}}(target("dx.TypedBuffer", <4 x float>, 1, 0, 1) [[HANDLE]], i32 %idx, <4 x float>{{.*}})
+  %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 1)
+      @llvm.dx.resource.handlefrombinding.tdx.TypedBuffer_v4f32_1_0_1t(i32 0, i32 1, i32 1, i32 0, ptr @ResName5)
+  call void @llvm.dx.resource.store.typedbuffer.tdx.TypedBuffer_v4f32_1_0_1t.v4f32(target("dx.TypedBuffer", <4 x float>, 1, 0, 1) %h, i32 %idx, <4 x float> %v)
+  ret void
+}
+
 declare target("dx.TypedBuffer", float, 0, 0, 1) @llvm.dx.resource.handlefrombinding.tdx.TypedBuffer_f32_0_0_1t(i32, i32, i32, i32, ptr)
 declare {float, i1} @llvm.dx.resource.load.typedbuffer.f32.tdx.TypedBuffer_f32_0_0_1t(target("dx.TypedBuffer", float, 0, 0, 1), i32)
 declare target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_i8_1_0t(i32, i32, i32, i32, ptr)
@@ -97,3 +122,5 @@ declare target("dx.RawBuffer", %struct.S, 0, 0) @llvm.dx.resource.handlefrombind
 declare {%struct.S, i1} @llvm.dx.resource.load.rawbuffer.s_struct.Ss.tdx.RawBuffer_s_struct.Ss_0_0t(target("dx.RawBuffer", %struct.S, 0, 0), i32, i32)
 declare target("dx.CBuffer", %struct.S) @llvm.dx.resource.handlefrombinding.tdx.CBuffer_s_struct.Ss_t(i32, i32, i32, i32, ptr)
 declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer_s_struct.Ss_t(target("dx.CBuffer", %struct.S), i32)
+declare target("dx.TypedBuffer", <4 x float>, 1, 0, 1) @llvm.dx.resource.handlefrombinding.tdx.TypedBuffer_v4f32_1_0_1t(i32, i32, i32, i32, ptr)
+declare void @llvm.dx.resource.store.typedbuffer.tdx.TypedBuffer_v4f32_1_0_1t.v4f32(target("dx.TypedBuffer", <4 x float>, 1, 0, 1), i32, <4 x float>)
