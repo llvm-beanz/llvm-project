@@ -223,6 +223,22 @@ Type *getElementLLVMType(dxil::ElementType ET, LLVMContext &Ctx) {
   }
 }
 
+/// Widens \p ScalarTy into the vector type a TypedBuffer's `Word1`
+/// component-count field (bits 8-15; see `ResourceInfo::getAnnotateProps`)
+/// calls for: e.g. a `RWBuffer<float4>` reports a `CompCount` of 4, not the
+/// bare scalar `getElementLLVMType` returns on its own, so that width has to
+/// be recovered here to reconstruct the element type raiseTypedBufferStore/
+/// raiseTypedBufferLoad expect to see. Returns nullptr if \p ScalarTy itself
+/// is null (an unreconstructed component type) or `CompCount` is 0, which
+/// never occurs for a real typed resource.
+Type *widenToTypedBufferElement(Type *ScalarTy, uint64_t Word1) {
+  uint32_t CompCount = (Word1 >> 8) & 0xFF;
+  if (!ScalarTy || CompCount == 0)
+    return nullptr;
+  return CompCount > 1 ? cast<Type>(FixedVectorType::get(ScalarTy, CompCount))
+                       : ScalarTy;
+}
+
 /// `TypedBufferExtType::isSigned()` distinguishes signed/unsigned *integer*
 /// formats (`I32` vs `U32`), which `dxil::ElementType` already encodes
 /// directly -- so this only needs to special-case the `U*` element kinds.
@@ -423,7 +439,8 @@ bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
   TargetExtType *HandleTy = nullptr;
   if (Kind == dxil::ResourceKind::TypedBuffer) {
     auto ElemKind = static_cast<dxil::ElementType>(*Word1 & 0xFF);
-    Type *ElemTy = getElementLLVMType(ElemKind, Ctx);
+    Type *ElemTy =
+        widenToTypedBufferElement(getElementLLVMType(ElemKind, Ctx), *Word1);
     if (!ElemTy)
       return false;
     HandleTy = TargetExtType::get(
@@ -549,7 +566,8 @@ bool raiseResourceHandleFromHeap(CallInst &AnnotateCI) {
   TargetExtType *HandleTy = nullptr;
   if (Kind == dxil::ResourceKind::TypedBuffer) {
     auto ElemKind = static_cast<dxil::ElementType>(*Word1 & 0xFF);
-    Type *ElemTy = getElementLLVMType(ElemKind, Ctx);
+    Type *ElemTy =
+        widenToTypedBufferElement(getElementLLVMType(ElemKind, Ctx), *Word1);
     if (!ElemTy)
       return false;
     HandleTy = TargetExtType::get(
