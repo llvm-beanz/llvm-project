@@ -48,6 +48,12 @@
 //      - `llvm.{dx,spv}.group.id` is uniform (a group's id is the same for
 //        every lane) and is simply replaced by the corresponding wave-body
 //        `GroupID` parameter component.
+//      - A raised wave intrinsic (other than `wave.getlaneindex`, handled as
+//        a per-lane-varying builtin above) becomes a canonical
+//        `feme.cpu.wave.*` call (see feme::cpu::WaveCalls) over the
+//        widened operand(s) and the wave's entry mask -- `WaveLoweringPass`
+//        lowers the actual cross-lane reduction/scan/broadcast arithmetic,
+//        not this pass, mirroring the resource-call/builtin split above.
 //
 // Any divergent instruction the elementwise rule and these special cases
 // don't otherwise cover -- atomics, chiefly -- falls back to a generic,
@@ -69,6 +75,7 @@
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
+#include "feme/Transforms/CPU/WaveCalls.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PostOrderIterator.h"
@@ -184,6 +191,42 @@ std::optional<BuiltinCallKind> classifyBuiltin(Intrinsic::ID ID) {
   }
 }
 
+/// Which raised wave intrinsic \p ID canonicalizes to a `feme.cpu.wave.*`
+/// call (see feme::cpu::WaveCalls); `std::nullopt` for anything else,
+/// including `wave.getlaneindex` (a `BuiltinCallKind` instead -- see
+/// `classifyBuiltin` above) and the wave intrinsics no current front end
+/// raises yet (`WaveActiveSum`/`Product`/..., `WaveActiveBallot`,
+/// `WavePrefixSum`/`Product`/...; see WaveLowering.cpp's file comment).
+std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
+  switch (ID) {
+  case Intrinsic::dx_wave_get_lane_count:
+  case Intrinsic::spv_wave_get_lane_count:
+    return WaveCallKind::GetLaneCount;
+  case Intrinsic::dx_wave_is_first_lane:
+  case Intrinsic::spv_wave_is_first_lane:
+    return WaveCallKind::IsFirstLane;
+  case Intrinsic::dx_wave_any:
+  case Intrinsic::spv_wave_any:
+    return WaveCallKind::Any;
+  case Intrinsic::dx_wave_all:
+  case Intrinsic::spv_wave_all:
+    return WaveCallKind::All;
+  case Intrinsic::dx_wave_all_equal:
+  case Intrinsic::spv_wave_all_equal:
+    return WaveCallKind::AllEqual;
+  case Intrinsic::dx_wave_readlane:
+  case Intrinsic::spv_wave_readlane:
+    return WaveCallKind::ReadLane;
+  case Intrinsic::dx_wave_active_countbits:
+  case Intrinsic::spv_wave_active_countbits:
+    return WaveCallKind::ActiveCountBits;
+  case Intrinsic::dx_wave_prefix_bit_count:
+    return WaveCallKind::PrefixBitCount;
+  default:
+    return std::nullopt;
+  }
+}
+
 bool isGroupIdCall(Intrinsic::ID ID) {
   return ID == Intrinsic::dx_group_id || ID == Intrinsic::spv_group_id;
 }
@@ -226,6 +269,7 @@ private:
   PHINode *createWidenedPHIStub(PHINode &PN);
   void fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN);
   void widenBuiltin(CallInst &CI, BuiltinCallKind Kind, IRBuilder<> &Builder);
+  void widenWaveCall(CallInst &CI, WaveCallKind Kind, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
                          IRBuilder<> &Builder);
@@ -407,6 +451,37 @@ void FunctionWidener::widenBuiltin(CallInst &CI, BuiltinCallKind Kind,
       createBuiltinCall(Builder, Kind, BEnv, WaveSize, NumThreads[0],
                         NumThreads[1], NumThreads[2], Component, CI.getName());
   Widened[&CI] = NewCall;
+  ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
+                                    IRBuilder<> &Builder) {
+  // Every wave op but `GetLaneCount` reduces over exactly the wave's
+  // currently-active lanes (see "Phase 5: Wave and Builtin Lowering"), so
+  // the wave's entry mask is the first canonical operand for every other
+  // kind.
+  Value *WideMask =
+      Kind == WaveCallKind::GetLaneCount ? nullptr : Env.EntryMask;
+
+  Value *WideOperand = nullptr;
+  if (Kind != WaveCallKind::GetLaneCount && Kind != WaveCallKind::IsFirstLane)
+    WideOperand = getWidened(CI.getArgOperand(0), Builder);
+
+  Value *WideLaneIndex = nullptr;
+  if (Kind == WaveCallKind::ReadLane)
+    WideLaneIndex = getWidened(CI.getArgOperand(1), Builder);
+
+  CallInst *NewCall = createWaveCall(Builder, Kind, WaveSize, WideMask,
+                                     WideOperand, WideLaneIndex, CI.getName());
+
+  // A divergent result (`IsFirstLane`/`PrefixBitCount`, see
+  // `isDivergentWaveCallResult`) is itself widened, exactly like a builtin
+  // or resource-call result; a uniform one stands in directly for the old
+  // scalar call the same way `widenMaskAny` RAUWs its reduction.
+  if (isDivergentWaveCallResult(Kind))
+    Widened[&CI] = NewCall;
+  else
+    CI.replaceAllUsesWith(NewCall);
   ToErase.push_back(&CI);
 }
 
@@ -663,6 +738,10 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
     if (std::optional<BuiltinCallKind> Kind = classifyBuiltin(ID)) {
       widenBuiltin(*CI, *Kind, Builder);
+      return true;
+    }
+    if (std::optional<WaveCallKind> Kind = classifyWaveCall(ID)) {
+      widenWaveCall(*CI, *Kind, Builder);
       return true;
     }
   }
