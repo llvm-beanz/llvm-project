@@ -9039,3 +9039,118 @@ design, not something introduced or fixed by this session).
    folded into commits 1-3 above (each deviation note lives next to the
    capability it describes).
 5. This file.
+
+# Fixing the three failing FEME regression tests (test-dependency and runtime-triple bugs)
+
+## Task
+
+Three `check-feme` tests were reported failing on a macOS build
+(`arm64-apple-darwin25.5.0`):
+
+1. `Tools/feme/feme-cpu-wave-size.ll` -- `NO-DIAG-NOT: warning` failed
+   because `feme` printed `warning: Linking two modules of different
+   target triples: 'libFeMeRuntimeCPU' is 'arm64-apple-macosx26.0.0'
+   whereas ... is 'arm64-apple-darwin25.5.0'`.
+2. `Tools/feme/feme-cpu-loop.ll` -- `llvm-nm: command not found`.
+3. `Transforms/CPU/simdize-math-libcall.ll` -- `feme-opt` segfaulted
+   inside `(anonymous namespace)::FunctionWidener::widen()`.
+
+## Investigation
+
+Configured and built a fresh in-tree build
+(`-DLLVM_ENABLE_PROJECTS="feme;clang" -DLLVM_ENABLE_ASSERTIONS=ON
+-DCMAKE_{C,CXX}_COMPILER_LAUNCHER=ccache`, `ninja check-feme`) on
+Linux/AArch64 to reproduce. All 823 tests, including these three, passed
+outright in that build -- this is expected for #2 and #3 (below), and
+consistent with #1 not manifesting because this build's Clang default
+triple and `%feme_host_triple` happen to already agree exactly
+(`aarch64-unknown-linux-gnu` both ways), unlike the reporter's Mach-O
+host. Since the underlying bugs are still real and (for #1 and #2)
+plainly host-triple/dependency-list bugs rather than anything Linux vs.
+macOS specific, all three were fixed at the source level rather than
+dismissed as unreproducible here.
+
+### #1: spurious "different target triples" warning
+
+`feme/runtime/CPU/CMakeLists.txt` compiles `FeMeRuntimeCPU.c` to bitcode
+with a bare `clang -c -emit-llvm`, no `-target`: that bitcode's module
+triple is whatever Clang's *build-host* default is (e.g. Mach-O Clang
+spells its OS component `macosxNN.N`). Both `feme::cpu::runPipeline`
+(`Pipeline.cpp`) and `feme::cpu::JITEngine::create`'s `--reference` path
+(`JITEngine.cpp`) then `Linker::linkInModule` that bitcode straight into
+the shader module, whose triple is whatever `--target`/`%feme_host_triple`
+resolved to (e.g. an explicit `...-darwin25.5.0` triple) -- textually
+different from the runtime bitcode's triple even though both name the
+very same target, which is exactly what trips `Linker`'s "different
+target triples" warning. `FeMeRuntimeCPU.c` is plain freestanding C with
+no target-specific codegen of its own (see its own file comment), so it
+is always safe to retarget its parsed module to the shader module's exact
+triple before linking. Added `feme::cpu::detail::alignRuntimeModuleTriple`
+(next to the existing `stripAsmLabelManglingEscape`, which addresses a
+sibling Mach-O-specific runtime-linking wrinkle) and called it at both of
+`getRuntimeCPUBitcode()`'s two call sites, with a
+`JITEngineTest.AlignRuntimeModuleTripleMatchesShaderModuleTriple`
+regression test that reproduces the exact macOS triple pair (Mach-O
+default `arm64-apple-macosx14.0.0` vs. explicit `arm64-apple-darwin23.4.0`)
+without requiring a Mach-O host to observe it, mirroring how
+`StripAsmLabelManglingEscapeDropsLeadingSOHByte` already covers its
+sibling.
+
+### #2: `llvm-nm: command not found`
+
+`feme/test/Tools/feme/feme-cpu-loop.ll` (`RUN: llvm-nm %t.o | FileCheck
+%s`) and `feme-cpu-wave-size.ll` (`RUN: llvm-readobj --file-headers %t.o`)
+both `RUN:` upstream LLVM tools that `feme/test/CMakeLists.txt`'s
+`FEME_TEST_DEPENDS` (and hence `check-feme`'s and `feme-test-depends`'s
+build-before-test dependency list) never listed, so neither tool was
+guaranteed to exist yet -- or even be up to date -- by the time `lit`
+ran. Grepped every `feme/test/**/*.{ll,hlsl,mlir}` for `RUN:`-invoked
+`llvm-*` tool names to confirm `llvm-nm` and `llvm-readobj` were the only
+two missing from the list (`llvm-as` was already present), and added
+both.
+
+### #3: crash in `FunctionWidener::widen()`
+
+Could not reproduce on this Linux/AArch64 build: `feme-opt --llvm
+-passes=feme-cpu-simdize -feme-cpu-wave-size={1,2,4,64} -S
+simdize-math-libcall.ll` ran clean and produced the exact `CHECK`-expected
+output every time, and a manual code read of `widenElementwise`'s math-
+libcall path (added by the immediately-preceding commit,
+`056c5dd6741b`) found nothing that could recurse the way the reported
+backtrace's two identical `widen()` frames suggest -- `widen()` itself has
+no recursive call, `Intrinsic::getOrInsertDeclaration(..., {WideTy})`
+matches `int_dx_frac`/`int_dx_rsqrt`/`int_dx_saturate`'s single
+`LLVMMatchType<0>`-shaped overloaded type exactly, and neither `getWidened`
+nor `widenElementwise` re-enter `widen()`. Given both #1 and #2 above are
+independently, verifiably real bugs (a genuine triple-string mismatch and
+a genuine missing test dependency respectively) rather than flaky
+symptoms, and this one did not reproduce under repeated runs, varied wave
+sizes, or code review, it looks most likely to be an environment-specific
+artifact of the reporter's original (unspecified) build -- e.g. a stale
+object file from an interrupted/incremental build predating
+`056c5dd6741b`, given nothing in the current tree reproduces it. No source
+change was made for #3 beyond what #1's build hygiene already improves;
+if it recurs on a clean, fully-rebuilt tree, the next step would be to
+capture a core dump (`ulimit -c unlimited`) to identify the actual
+recursing frame, since the reported backtrace's duplicate `widen()` frames
+are consistent with a symbolizer folding an unrelated, byte-identical
+static function to the same address rather than `widen()` truly calling
+itself.
+
+## Verification
+
+- `ninja check-feme` (assertions-enabled, ccache build,
+  `-DLLVM_ENABLE_PROJECTS="feme;clang"`): 824/824 discovered tests passing
+  (9 unsupported), including all three originally-failing tests and the
+  one new `JITEngineTest` case, 0 failures.
+- `clang-format -i` on every changed `feme/**` file (no changes needed).
+
+## Commit breakdown
+
+1. `feme/test/CMakeLists.txt`: fix #2 (add `llvm-nm`/`llvm-readobj` to
+   `FEME_TEST_DEPENDS`).
+2. `feme/lib/Target/CPU/{JITEngine,Pipeline}.cpp`,
+   `feme/include/feme/Target/CPU/JITEngine.h`,
+   `feme/unittests/Target/CPU/JITEngineTest.cpp`: fix #1 (align the
+   runtime bitcode's triple to the shader module's before linking).
+3. This file.
