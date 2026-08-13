@@ -23,7 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please implement milestone 7 of the FeMe CPU target design:
+Please implement milestone 8 of the FeMe CPU target design:
 
-> 7. **Widening** for the remaining wave sizes, including masked memory ops
->    and the scalarization fallback.
+> 8. **Wave intrinsic lowering**: Phase 5's remaining half, over the mask
+>   milestone 6 introduced.
