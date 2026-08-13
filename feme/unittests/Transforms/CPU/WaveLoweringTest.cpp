@@ -10,11 +10,14 @@
 
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/SIMDize.h"
+#include "feme/Transforms/CPU/WaveCalls.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
@@ -96,6 +99,185 @@ TEST(WaveLoweringTest, LowersLaneIndexToConstantIota) {
   }
   EXPECT_TRUE(FoundConstantIota);
   EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+/// Runs `SIMDizePass`+`WaveLoweringPass` over \p Assembly at \p WaveSize,
+/// asserting the module still verifies and every `feme.cpu.wave.*`/
+/// `feme.cpu.builtin.*` call is gone (fully lowered), and returns the
+/// resulting module for a test to inspect further.
+std::unique_ptr<Module> lowerWaveOps(LLVMContext &Ctx, StringRef Assembly,
+                                     unsigned WaveSize = 4) {
+  std::unique_ptr<Module> M = parseIR(Ctx, Assembly);
+  if (!M)
+    return nullptr;
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(WaveSize).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+
+  for (Function &F : *M)
+    for (const Instruction &I : instructions(F))
+      if (const auto *CI = dyn_cast<CallInst>(&I))
+        EXPECT_FALSE(matchWaveCall(*CI))
+            << "left an unlowered feme.cpu.wave.* call behind";
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+  return M;
+}
+
+TEST(WaveLoweringTest, LowersGetLaneCountToConstant) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %n = call i32 @llvm.dx.wave.get.lane.count()
+      ret void
+    }
+    declare i32 @llvm.dx.wave.get.lane.count()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(getWaveBodyEnv(*F));
+}
+
+TEST(WaveLoweringTest, LowersIsFirstLaneToDivergentMaskArithmetic) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %first = call i1 @llvm.dx.wave.is.first.lane()
+      %sel = select i1 %first, i32 1, i32 0
+      ret void
+    }
+    declare i1 @llvm.dx.wave.is.first.lane()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundCttz = false;
+  for (const Instruction &I : instructions(F))
+    if (const auto *II = dyn_cast<IntrinsicInst>(&I))
+      FoundCttz |= II->getIntrinsicID() == Intrinsic::cttz;
+  EXPECT_TRUE(FoundCttz);
+}
+
+TEST(WaveLoweringTest, LowersAnyAllToVectorReductions) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %pred = icmp eq i32 %tid, 0
+      %any = call i1 @llvm.dx.wave.any(i1 %pred)
+      %all = call i1 @llvm.dx.wave.all(i1 %pred)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i1 @llvm.dx.wave.any(i1)
+    declare i1 @llvm.dx.wave.all(i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundOrReduce = false, FoundAndReduce = false;
+  for (const Instruction &I : instructions(F))
+    if (const auto *II = dyn_cast<IntrinsicInst>(&I)) {
+      FoundOrReduce |= II->getIntrinsicID() == Intrinsic::vector_reduce_or;
+      FoundAndReduce |= II->getIntrinsicID() == Intrinsic::vector_reduce_and;
+    }
+  EXPECT_TRUE(FoundOrReduce);
+  EXPECT_TRUE(FoundAndReduce);
+}
+
+TEST(WaveLoweringTest, LowersAllEqualAtSeveralWaveSizes) {
+  for (unsigned W : {4u, 8u, 16u}) {
+    LLVMContext Ctx;
+    std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+      define void @main() #0 {
+        %tid = call i32 @llvm.dx.thread.id(i32 0)
+        %eq = call i1 @llvm.dx.wave.all.equal.i32(i32 %tid)
+        ret void
+      }
+      declare i32 @llvm.dx.thread.id(i32)
+      declare i1 @llvm.dx.wave.all.equal.i32(i32)
+      attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+    )",
+                                             W);
+    ASSERT_TRUE(M) << "wave size " << W;
+  }
+}
+
+TEST(WaveLoweringTest, LowersReadLaneToGuardedExtract) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %val = call i32 @llvm.dx.wave.readlane.i32(i32 %tid, i32 0)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @llvm.dx.wave.readlane.i32(i32, i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundSelect = false;
+  for (const Instruction &I : instructions(F))
+    FoundSelect |= isa<SelectInst>(&I);
+  EXPECT_TRUE(FoundSelect);
+}
+
+TEST(WaveLoweringTest, LowersActiveCountBitsToCtpop) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %pred = icmp eq i32 %tid, 0
+      %cnt = call i32 @llvm.dx.wave.active.countbits(i1 %pred)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @llvm.dx.wave.active.countbits(i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundCtpop = false;
+  for (const Instruction &I : instructions(F))
+    if (const auto *II = dyn_cast<IntrinsicInst>(&I))
+      FoundCtpop |= II->getIntrinsicID() == Intrinsic::ctpop;
+  EXPECT_TRUE(FoundCtpop);
+}
+
+TEST(WaveLoweringTest, LowersPrefixBitCountToDivergentLaneLoop) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %pred = icmp eq i32 %tid, 0
+      %cnt = call i32 @llvm.dx.wave.prefix.bit.count(i1 %pred)
+      %doubled = mul i32 %cnt, 2
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @llvm.dx.wave.prefix.bit.count(i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  // The result is divergent (see `isDivergentWaveCallResult`), so it
+  // widens `%doubled` into a real `<4 x i32>` multiply rather than leaving
+  // it scalar.
+  bool FoundWideMul = false;
+  for (const Instruction &I : instructions(F))
+    if (const auto *BO = dyn_cast<BinaryOperator>(&I))
+      FoundWideMul |=
+          BO->getOpcode() == Instruction::Mul && BO->getType()->isVectorTy();
+  EXPECT_TRUE(FoundWideMul);
 }
 
 } // namespace

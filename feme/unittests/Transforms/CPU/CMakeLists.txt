@@ -22,6 +22,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   SIMDizeTest.cpp
   UnsupportedOpsTest.cpp
   VerifyStructuredTest.cpp
+  WaveCallsTest.cpp
   WaveLoweringTest.cpp
   )
 target_link_libraries(FeMeTransformsCPUTests
