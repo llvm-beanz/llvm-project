@@ -8,8 +8,9 @@ scalar helper IR), milestone 4 (uniform-control-flow end-to-end at
 `W = 4`), milestone 5 (the CFG restructurization test suite), milestone 6
 (linearization for divergent diamonds and loops with a divergent exit),
 milestone 7 (widening for loops, masked memory ops, and the scalarization
-fallback), milestone 8 (wave intrinsic lowering) and milestone 9 (barriers
-and groupshared memory) are implemented. This document is a companion to
+fallback), milestone 8 (wave intrinsic lowering), milestone 9 (barriers
+and groupshared memory), and milestone 10 (end-to-end HLSL test coverage)
+are implemented. This document is a companion to
 [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
@@ -186,6 +187,44 @@ inline where it's discussed, and summarized here:
   execution (the ground truth the CFG restructurization suite, milestone
   5, diffs against) is implemented as of that milestone -- see its own
   Deviation note below.
+
+  Update (end-to-end HLSL test coverage, see feme/test/Tools/feme-run/HLSL):
+  `feme-run` now also accepts a DXIL bitcode file or `DXContainer` directly,
+  running the same import + `feme::dxil::OpRaisingPass`/
+  `MetadataRaisingPass` sequence `feme::Driver` runs before any
+  target-specific lowering -- closing this note's DXIL half. SPIR-V import
+  remains unwired: real Clang-compiled SPIR-V could not even round-trip
+  through `feme::SPIRVImporter` for a shader using a resource (an
+  `OpCopyObject` this milestone's testing surfaced but does not fix -- see
+  "Known gap" in Design.md's SPIR-V section), so there is no bindless-heap
+  raised form to feed this tool for that format yet either.
+
+  A second, genuinely new gap this testing surfaced (not previously called
+  out anywhere in this document): Clang's own HLSL front end cannot emit
+  `ResourceDescriptorHeap`/`SamplerDescriptorHeap` (SM6.6 bindless) access
+  at all -- only a register-bound handle -- so a real HLSL shader Clang
+  compiles today can never reach the bindless form this CPU target
+  otherwise requires (see "Root constants" above), regardless of anything
+  in `feme-run` or `feme::Driver`. `feme-run --dxil-bind-register-resources`
+  is a narrow, testing-only bridge around exactly that gap: it rewrites a
+  raised `llvm.dx.resource.handlefrombinding` call into
+  `llvm.dx.resource.handlefromheap`, mapping the register slot directly
+  onto the same heap index space `--heap`'s YAML file addresses. This is
+  *not* a relaxation of the CPU target's own "no register-bound resource"
+  rejection (`feme::cpu::checkSupportedRaisedOps`, unchanged) -- the bridge
+  runs, opt-in only, inside `feme-run` itself, before the module ever
+  reaches that check. Fixing the underlying gap (Clang HLSL bindless
+  resource support) is upstream Clang work well outside this target's own
+  scope.
+
+  Relatedly, `feme::dxil::OpRaisingPass` gained `raiseRawBufferStore`/
+  `raiseRawBufferLoad` (a single-component `dx.op.rawBufferStore`/
+  `rawBufferLoad`, opcodes 140/139): every HLSL end-to-end test that
+  reports its result through a `RWStructuredBuffer`/`RWByteAddressBuffer`
+  (the idiomatic way to do so; a `RWBuffer<T>` typed buffer, the only kind
+  already raised, cannot express an untyped per-thread scalar write)
+  depends on this raising existing at all -- it was simply never exercised
+  before real HLSL compiled through it.
 
 Deviation: milestone 5's implementation narrowed a few things described in
 "CFG restructurization test suite" below; each is called out inline where
@@ -2022,10 +2061,28 @@ Sequenced so each step is independently testable and useful:
    memory may carry state across one; only a uniform groupshared access is
    canonicalized, a divergent one is diagnosed; `Device` and `All` memory
    scope are not distinguished).
-10. **Resource performance**: recognize uniform descriptor calls, hoist
+10. **End-to-end HLSL test coverage** (done): real HLSL source, compiled to
+   a DXIL `DXContainer` by Clang's own HLSL front end and DirectX backend,
+   imported, raised, and JIT-dispatched by `feme-run` -- covering a loop, a
+   divergent branch, wave ops, a barrier plus groupshared memory, and one
+   shader combining all of them (see feme/test/Tools/feme-run/HLSL). This
+   required two small, additive changes rather than only new tests:
+   `feme-run` itself gained DXIL import (closing part of milestone 4's own
+   Deviation note above) and a testing-only register-bound-resource-to-heap
+   bridge (`--dxil-bind-register-resources`), and
+   `feme::dxil::OpRaisingPass` gained raw/structured buffer store/load
+   raising (`raiseRawBufferStore`/`raiseRawBufferLoad`) -- see this
+   milestone's own update to milestone 4's Deviation note above for why
+   each was needed and what each does and does not cover. SPIR-V is
+   compiled from the same HLSL by Clang and validated as a well-formed
+   SPIR-V module, but not executed through `feme-run`: real SPIR-V
+   resource access does not yet round-trip through `feme::SPIRVImporter`
+   at all (see "Known gap" in Design.md's SPIR-V section), independent of
+   anything in this milestone.
+11. **Resource performance**: recognize uniform descriptor calls, hoist
   descriptor/format checks, emit vector fast paths, and measure whether a
   divergent-descriptor waterfall or JIT heap-shape specialization pays for
   its complexity.
-11. **General performance work**: contiguity detection, all-lanes-off branch
+12. **General performance work**: contiguity detection, all-lanes-off branch
   skipping, uniform-load hoisting. Only after correctness is established
   and measurable.
