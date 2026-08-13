@@ -6,9 +6,10 @@ Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header),
 milestone 2 (uniformity analysis), milestone 3 (resource canonicalization +
 scalar helper IR), milestone 4 (uniform-control-flow end-to-end at
 `W = 4`), milestone 5 (the CFG restructurization test suite), milestone 6
-(linearization for divergent diamonds and loops with a divergent exit) and
+(linearization for divergent diamonds and loops with a divergent exit),
 milestone 7 (widening for loops, masked memory ops, and the scalarization
-fallback) are implemented. This document is a companion to
+fallback), milestone 8 (wave intrinsic lowering) and milestone 9 (barriers
+and groupshared memory) are implemented. This document is a companion to
 [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
@@ -384,6 +385,47 @@ it's discussed, and summarized here:
   (`FunctionWidener::widenResourceCall`/`widenScalarizedFallback`). A
   shuffle-based scan is pure performance work that can replace it later
   without changing `feme.cpu.wave.*`'s canonical shape.
+
+Deviation: milestone 9's implementation narrowed several things described in
+"Phase 6: Group Execution and Barriers" below; each is called out inline
+where it's discussed, and summarized here:
+
+- **Region splitting only supports a straight-line wave body.** A
+  `..._with_group_sync` barrier inside any surviving branch or loop is
+  diagnosed (`feme::cpu::isLinearChain`) rather than split; the design's
+  own worked example of a barrier inside a *uniform loop* (keeping the
+  iteration outside the region/wave loops) is not yet implemented. Every
+  branch a divergent-control-flow barrier could have introduced is already
+  gone by this point (`feme::cpu::LinearizePass`), so this narrowing only
+  bites a barrier that survives inside genuinely uniform (e.g.
+  group-id-derived) control flow.
+- **No SSA value may be live across a `..._with_group_sync` barrier.** The
+  design calls for spilling such a value to a per-wave "context"
+  allocation indexed by the wave loop's `w`; this milestone diagnoses the
+  shape instead (`splitAtGroupSyncBarriers`'s liveness check) rather than
+  building that allocation. Groupshared memory is unaffected -- it already
+  carries state across a barrier correctly, since it lives in the one
+  buffer every wave of the group shares regardless of which region touches
+  it.
+- **Only a uniform groupshared access is canonicalized.** A divergent
+  (per-lane-varying) index into a `groupshared` array -- the common
+  `groupshared[threadIdInGroup]` pattern -- scalarizes into one
+  `getelementptr` clone per lane before `feme::cpu::rewriteGroupSharedGlobals`
+  ever sees it; this milestone diagnoses that shape rather than rewiring a
+  vector-of-pointers access into `llvm.masked.gather`/`.scatter` over the
+  flat buffer.
+- **`Device` and `All` memory scope are not distinguished.** Both get a
+  `fence` visible across host threads (`SyncScope::System`); the design
+  only requires the CPU target's memory model, not DXIL's/SPIR-V's finer
+  distinction between them, to be sound. A `Group`-only barrier gets
+  `SyncScope::SingleThread` instead, since every wave of one group already
+  runs on the same host thread in program order.
+- **No SPIR-V raising produces any of the six barrier intrinsics yet**
+  (`feme::cpu::matchBarrierCall` recognizes both spellings, matching every
+  other raised-op classification in this target, but nothing raises the
+  `spv.*` ones today) -- the same "Raised IR prerequisites" gap milestone
+  3's deviation note already flagged for SPIR-V's descriptor-heap
+  extension.
 
 ## Summary
 
@@ -1960,7 +2002,26 @@ Sequenced so each step is independently testable and useful:
    lowered; `WaveReadLaneAt`'s lane operand is assumed uniform, per the HLSL
    source rule, rather than also handling a varying one; `WavePrefixBitCount`
    scans with an unrolled lane loop rather than a shuffle scan).
-9. **Barriers and groupshared memory** (region splitting).
+9. **Barriers and groupshared memory** (region splitting) (done):
+   `feme::cpu::SIMDizePass` canonicalizes a `groupshared` (`addrspace(3)`)
+   global's uniform accesses into a `getelementptr` off the wave body's
+   `wave_groupshared` parameter (`feme::cpu::rewriteGroupSharedGlobals`,
+   GroupShared.h), and `feme::cpu::EntryWrapperPass` allocates the backing
+   buffer -- on the wrapper's own stack if it fits under
+   `GroupSharedStackLimit`, else from the host-supplied
+   `FemeDispatchArgs::GroupShared` -- per "Groupshared memory" in "Phase 6:
+   Group Execution and Barriers". `feme::cpu::EntryWrapperPass` also
+   implements barrier region splitting: a `..._with_group_sync` barrier
+   (`feme::cpu::matchBarrierCall`, BarrierCalls.h) cuts the wave body into
+   one region per barrier, each wrapped in its own wave loop with a memory
+   fence in between; a barrier with no group-sync requirement becomes an
+   in-place `fence` instead. See the Status section's Deviation note for
+   what narrowed (only a straight-line wave body is split -- a barrier
+   inside a surviving branch or a loop is diagnosed; no SSA value may be
+   live across a `..._with_group_sync` barrier, only groupshared/resource
+   memory may carry state across one; only a uniform groupshared access is
+   canonicalized, a divergent one is diagnosed; `Device` and `All` memory
+   scope are not distinguished).
 10. **Resource performance**: recognize uniform descriptor calls, hoist
   descriptor/format checks, emit vector fast paths, and measure whether a
   divergent-descriptor waterfall or JIT heap-shape specialization pays for
