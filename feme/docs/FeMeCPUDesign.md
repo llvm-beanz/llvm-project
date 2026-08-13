@@ -338,6 +338,53 @@ called out inline where it's discussed, and summarized here:
   build that illegal type. This is a substantial follow-up of its own, not
   yet scheduled against a specific future milestone.
 
+Deviation: milestone 8's implementation narrowed several things described in
+"Phase 5: Wave and Builtin Lowering" below; each is called out inline where
+it's discussed, and summarized here:
+
+- **Only the wave intrinsics DXIL raising already produces are lowered**:
+  `WaveGetLaneCount`, `WaveIsFirstLane`, `WaveActiveAnyTrue`/`AllTrue`,
+  `WaveActiveAllEqual`, `WaveReadLaneAt`, `WaveAllBitCount`
+  (`wave.active.countbits`) and `WavePrefixBitCount`.
+  `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/`Xor`,
+  `WaveActiveBallot` and `WavePrefixSum`/`Product`/`USum`/`UProduct` are not
+  lowered: `feme::dxil::OpRaisingPass` does not raise them yet either (they
+  pick their source intrinsic from an extra opcode-carried operand raising
+  does not yet reconstruct, or -- `WaveActiveBallot` -- return an aggregate,
+  matching milestone 1's "WaveActiveBallot raising deferred" deviation), and
+  SPIR-V import raises no wave op at all yet, so no front end can put one of
+  these into a module `feme::cpu::WaveLoweringPass` ever sees; lowering them
+  now would be untested dead code. `WaveReadLaneFirst` has no dedicated
+  raised intrinsic to lower in the first place (DXIL/SPIR-V both express it
+  through the same `WaveReadLaneAt`-family op raising already covers).
+- **`feme::cpu::WaveCalls` introduces the `feme.cpu.wave.*` canonical calls**
+  this milestone needs, mirroring how `feme::cpu::ResourceCalls`/
+  `BuiltinCalls` split canonicalization (`feme::cpu::SIMDizePass`, which
+  widens each wave intrinsic's operand(s) and attaches the wave's entry
+  mask) from lowering (`feme::cpu::WaveLoweringPass`, which builds the real
+  reduction/scan/broadcast arithmetic) -- not a deviation from the design's
+  intent, but an implementation detail the design's own text did not
+  anticipate needing a name for.
+- **`WaveReadLaneAt`'s lane operand is assumed uniform.** The design's
+  lowering table describes both a uniform-index fast path (guarded extract
+  and broadcast) and a varying-index case (one guarded extract per result
+  lane); this milestone implements only the former, matching the HLSL
+  source language's own requirement that the lane argument be uniform
+  across the wave (`feme::cpu::WaveUniformity`'s `WaveTTIImpl` already
+  classifies every `wave.readlane` call `AlwaysUniform` unconditionally, on
+  the same assumption). A genuinely varying lane index -- which only
+  SPIR-V's broader `OpGroupNonUniformShuffle` semantics would permit, and
+  which nothing raises yet -- is not handled.
+- **`WavePrefixBitCount` scans with an unrolled lane loop**, not the
+  log2(`W`)-step shuffle scan the design's table offers as an alternative:
+  `WaveSize` is a compile-time constant bounded by `feme::cpu::MaxWaveSize`,
+  so the unrolled loop (extract, add, insert, once per lane) is a small,
+  fixed-size, easy-to-verify-correct instruction sequence, matching the
+  scalarization-style unrolled loops elsewhere in this target
+  (`FunctionWidener::widenResourceCall`/`widenScalarizedFallback`). A
+  shuffle-based scan is pure performance work that can replace it later
+  without changing `feme.cpu.wave.*`'s canonical shape.
+
 ## Summary
 
 FeMe can already import DXIL and SPIR-V, raise both into a common,
@@ -990,7 +1037,12 @@ and have a meaning for any execution, wave-shaped or not. The pass therefore
 lowers builtins and wave ops as two independently runnable halves. Milestone
 4 needs only the builtin half to run its first shader, and `feme-run
 --reference` runs the builtin half over single invocations while rejecting
-wave ops outright (see "CFG restructurization test suite").
+wave ops outright (see "CFG restructurization test suite"). Milestone 8 adds
+the wave op half; see the Status section's milestone 8 deviation note for
+which rows of the table above it implements and which it leaves for later
+(`WaveReadLaneFirst`, `WaveActiveBallot`, `WaveActiveSum`/`Product`/... and
+`WavePrefixSum`/`Product`/... are not lowered yet, since no front end raises
+them into a module this pass ever sees).
 
 No lowering may create poison merely because `M` is all-zero: Phase 3 does
 not initially skip all-off regions, so such operations can be evaluated even
@@ -1897,8 +1949,17 @@ Sequenced so each step is independently testable and useful:
    table distinguishes, the scalarization fallback does not yet mask a
    scalarized instruction's per-lane execution, and vector/aggregate leaf
    decomposition remains unimplemented -- diagnosed rather than attempted).
-8. **Wave intrinsic lowering**: Phase 5's remaining half, over the mask
-   milestone 6 introduced.
+8. **Wave intrinsic lowering** (done): Phase 5's remaining half, over the mask
+   milestone 6 introduced. `feme::cpu::SIMDizePass` canonicalizes a raised
+   wave intrinsic (other than `wave.getlaneindex`, already a builtin) into a
+   `feme.cpu.wave.*` call over its widened operand(s) and the wave's entry
+   mask (`feme::cpu::WaveCalls`, mirroring `ResourceCalls`/`BuiltinCalls`'s
+   canonicalization/lowering split), and `feme::cpu::WaveLoweringPass` lowers
+   it per "Phase 5"'s table. See the Status section's Deviation note for what
+   narrowed (only the wave intrinsics DXIL raising already produces are
+   lowered; `WaveReadLaneAt`'s lane operand is assumed uniform, per the HLSL
+   source rule, rather than also handling a varying one; `WavePrefixBitCount`
+   scans with an unrolled lane loop rather than a shuffle scan).
 9. **Barriers and groupshared memory** (region splitting).
 10. **Resource performance**: recognize uniform descriptor calls, hoist
   descriptor/format checks, emit vector fast paths, and measure whether a
