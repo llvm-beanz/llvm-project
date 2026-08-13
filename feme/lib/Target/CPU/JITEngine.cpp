@@ -345,7 +345,13 @@ Error JITEngine::dispatch(const DispatchResources &Resources,
   Args.GroupCount[0] = GroupCount[0];
   Args.GroupCount[1] = GroupCount[1];
   Args.GroupCount[2] = GroupCount[2];
-  // Groupshared allocation is milestone 9; every group runs with none.
+  // Groupshared allocation: `feme::cpu::EntryWrapperPass` (milestone 9)
+  // allocates a small `groupshared` declaration on its own stack, so most
+  // groups need nothing from here. A shader declaring more than that
+  // pass's `GroupSharedStackLimit` needs a real host-supplied buffer this
+  // JIT path does not yet provide -- a group that large fails at runtime
+  // (a null-pointer dereference), not compile time; the JIT flow doesn't
+  // consult `feme::cpu::ArtifactInfo::GroupSharedSize` to allocate one yet.
   Args.GroupShared = nullptr;
 
   // Deviation (see the header comment): groups run sequentially on the

@@ -102,10 +102,14 @@ enum ArtifactFlagBits : uint32_t {
 /// `WaveSize`, `GroupSize`, `GroupSharedSize` and `GroupSharedAlign` are
 /// part of the versioned layout from the start (so a later milestone that
 /// wires wave-size resolution and groupshared allocation into this pass
-/// does not need a new artifact version), but this milestone always
-/// populates them with 0 -- see the Roadmap in feme/docs/FeMeCPUDesign.md
-/// for when Phase 6 (groupshared, milestone 9) and wave-size threading
-/// (milestone 4) land.
+/// does not need a new artifact version), but nothing populates them with
+/// anything but 0 yet: milestone 4 (wave size) and milestone 9
+/// (groupshared, `feme::cpu::computeGroupSharedLayout`) both compute the
+/// values these fields need, but neither is wired into an AOT-facing
+/// `ArtifactInfo` builder yet -- only `feme::cpu::EntryWrapperPass`'s own
+/// JIT-adjacent allocation (see "Groupshared memory" in "Phase 6: Group
+/// Execution and Barriers" in feme/docs/FeMeCPUDesign.md) consumes them
+/// today.
 struct ArtifactInfo {
   uint32_t WaveSize = 0;
   uint32_t GroupSize[3] = {0, 0, 0};
