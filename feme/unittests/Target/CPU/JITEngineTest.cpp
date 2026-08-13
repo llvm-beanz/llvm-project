@@ -156,4 +156,31 @@ TEST(JITEngineTest, StripAsmLabelManglingEscapeDropsLeadingSOHByte) {
   EXPECT_NE(M->getGlobalVariable("plain.global"), nullptr);
 }
 
+// Regression test for the "Linking two modules of different target
+// triples" spurious warning (see
+// `feme::cpu::detail::alignRuntimeModuleTriple`'s comment in JITEngine.cpp):
+// `libFeMeRuntimeCPU`'s bitcode is compiled with no explicit `-target`, so it
+// may carry a triple that is textually different from -- but names the very
+// same target as -- the shader module's own (already resolved) triple, e.g.
+// Clang's Mach-O default spelling an OS component "macosx<ver>" where an
+// explicit "-darwin<ver>" triple spells it "darwin<ver>".
+// `alignRuntimeModuleTriple` must retarget the runtime module to the shader
+// module's exact triple so `Linker::linkInModule` sees them as identical.
+TEST(JITEngineTest, AlignRuntimeModuleTripleMatchesShaderModuleTriple) {
+  LLVMContext Ctx;
+  SMDiagnostic Err;
+  auto RuntimeMod = parseAssemblyString("", Err, Ctx);
+  ASSERT_TRUE(RuntimeMod) << "parse error: " << Err.getMessage().str();
+  RuntimeMod->setTargetTriple(Triple("arm64-apple-macosx14.0.0"));
+
+  auto ShaderMod = parseAssemblyString("", Err, Ctx);
+  ASSERT_TRUE(ShaderMod) << "parse error: " << Err.getMessage().str();
+  ShaderMod->setTargetTriple(Triple("arm64-apple-darwin23.4.0"));
+
+  feme::cpu::detail::alignRuntimeModuleTriple(*RuntimeMod, *ShaderMod);
+
+  EXPECT_EQ(RuntimeMod->getTargetTriple().str(),
+            ShaderMod->getTargetTriple().str());
+}
+
 } // namespace

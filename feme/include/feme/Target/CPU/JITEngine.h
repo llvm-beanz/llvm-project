@@ -68,6 +68,17 @@ namespace detail {
 /// (only) for `JITEngineTest`'s regression coverage of this Mach-O-specific
 /// behavior on hosts that are not themselves Mach-O.
 void stripAsmLabelManglingEscape(llvm::Module &M);
+
+/// Retargets \p RuntimeMod (the freshly-parsed `libFeMeRuntimeCPU` bitcode)
+/// to \p M's own target triple before it is linked into \p M. `RuntimeMod`
+/// is plain freestanding C compiled with no explicit `-target`, so its
+/// triple is only whatever Clang defaults to for the build host and need
+/// not be textually identical to \p M's (already resolved) triple even when
+/// both name the same target; leaving them mismatched makes
+/// `Linker::linkInModule` emit a spurious "Linking two modules of different
+/// target triples" warning. Exposed (only) for `JITEngineTest`'s regression
+/// coverage of this behavior.
+void alignRuntimeModuleTriple(llvm::Module &RuntimeMod, const llvm::Module &M);
 } // namespace detail
 
 /// Options controlling how `JITEngine::create` compiles and runs a shader.

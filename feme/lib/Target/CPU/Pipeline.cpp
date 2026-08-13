@@ -85,6 +85,24 @@ void stripAsmLabelManglingEscape(Module &M) {
   }
 }
 
+/// `FeMeRuntimeCPU.c` is compiled to bitcode by an unadorned `clang -c
+/// -emit-llvm` invocation (see feme/runtime/CPU/CMakeLists.txt), with no
+/// explicit `-target`, so its module carries whichever triple Clang treats
+/// as its default for the build host -- which need not be textually
+/// identical to the (already normalized) triple `feme::Driver::run`
+/// resolved from `--target`/`%feme_host_triple` for \p M, even when both
+/// name the very same target (e.g. Clang's Mach-O default spells its OS
+/// component "macosx<ver>" where an explicit "--target=...-darwin<ver>"
+/// triple spells it "darwin<ver>"). `RuntimeMod` is plain freestanding C
+/// with no target-specific codegen of its own, so it is always safe to
+/// retarget to \p M's triple -- doing so before linking avoids
+/// `Linker::linkInModule` emitting a spurious "Linking two modules of
+/// different target triples" warning for what is, in truth, the same
+/// target.
+void alignRuntimeModuleTriple(Module &RuntimeMod, const Module &M) {
+  RuntimeMod.setTargetTriple(M.getTargetTriple());
+}
+
 } // namespace
 
 namespace feme::cpu {
@@ -134,6 +152,7 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
   if (!RuntimeMod)
     return RuntimeMod.takeError();
   stripAsmLabelManglingEscape(**RuntimeMod);
+  alignRuntimeModuleTriple(**RuntimeMod, M);
   Linker L(M);
   if (L.linkInModule(std::move(*RuntimeMod), Linker::Flags::LinkOnlyNeeded))
     return createStringError(inconvertibleErrorCode(),
