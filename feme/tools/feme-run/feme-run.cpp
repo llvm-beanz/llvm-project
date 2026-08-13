@@ -14,10 +14,18 @@
 // this is the tool that makes that distinction possible for the first
 // time.
 //
-// Scope for this milestone (see feme/docs/FeMeCPUDesign.md's Status
-// section for the corresponding Deviation note): the input must already be
-// idiomatic, raised LLVM IR (`.ll`/`.bc`) -- DXIL/SPIR-V import, which
-// `feme::Driver` already implements, is not yet wired into this tool.
+// The input may either already be idiomatic, raised LLVM IR (`.ll`/`.bc`),
+// or a DXIL bitcode file/DXContainer: `loadModule` below sniffs which, and
+// for DXIL, runs the same import + op/metadata raising `feme::Driver` runs
+// before any target-specific lowering (see the "DXIL" section of
+// feme/docs/Design.md) -- closing the "DXIL/SPIR-V import ... is not yet
+// wired into this tool" gap this file's own comment used to note for that
+// format, and letting a test compile real HLSL through `clang`/DXIL's own
+// backend and run the result straight through this tool (see
+// feme/test/Tools/feme-run/HLSL). SPIR-V import remains unwired: see the
+// "SPIR-V" deviation note this milestone's update to
+// feme/docs/FeMeCPUDesign.md's Status section adds.
+//
 // Every resource-heap descriptor is an untyped byte buffer (raw/structured
 // buffers only; no typed-buffer format conversion), matching what
 // `libFeMeRuntimeCPU` and the CPU pipeline's resource-call scalarization
@@ -27,14 +35,31 @@
 // `feme::cpu::JITOptions::Reference`): the ground truth the CFG
 // restructurization test suite diffs against.
 //
+// `--dxil-bind-register-resources` (see its own `cl::desc`) is a further,
+// testing-only bridge: Clang's HLSL front end cannot yet emit the bindless
+// ResourceDescriptorHeap/SamplerDescriptorHeap access the FeMe CPU target
+// requires (see "Root constants" in feme/docs/FeMeCPUDesign.md), so without
+// it, no real HLSL shader Clang compiles today could reach this tool at
+// all. It is off by default -- the FeMe CPU target's own rejection of a
+// register-bound resource stays intact unless a caller opts in.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Import/DXIL/DXILImporter.h"
 #include "feme/Target/CPU/JITEngine.h"
+#include "feme/Transforms/DXIL/MetadataRaising.h"
+#include "feme/Transforms/DXIL/OpRaising.h"
 
+#include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/DataLayout.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Intrinsics.h"
+#include "llvm/IR/IntrinsicsDirectX.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
@@ -43,6 +68,7 @@
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/YAMLTraits.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <cstdint>
 #include <vector>
@@ -181,13 +207,127 @@ void printHeapContents(raw_ostream &OS, const HeapFile &File,
   }
 }
 
+/// Whether \p Buffer looks like a DXIL bitcode file or DXContainer, the same
+/// sniff `feme::Driver`'s own format detection uses (see the "DXIL" section
+/// of feme/docs/Design.md): a `DXContainer` starts with the magic "DXBC"
+/// (the format predates the DXIL name), while raw DXIL is plain LLVM
+/// bitcode, optionally with the standard bitcode wrapper header.
+bool looksLikeDXIL(MemoryBufferRef Buffer) {
+  StringRef Data = Buffer.getBuffer();
+  return Data.starts_with("DXBC") ||
+         isBitcode(reinterpret_cast<const unsigned char *>(Data.data()),
+                   reinterpret_cast<const unsigned char *>(Data.data() +
+                                                           Data.size()));
+}
+
+/// Rewrites every `llvm.dx.resource.handlefrombinding` call in \p M into the
+/// equivalent `llvm.dx.resource.handlefromheap` call, mapping the binding's
+/// (space-relative) register slot straight onto the same heap index space
+/// `--heap`'s YAML file addresses (`LowerBound` operand + the binding's own
+/// `Index` operand). This only exists for `--dxil-bind-register-resources`
+/// below: see that flag's own `cl::desc` for why.
+void bridgeRegisterBoundResourcesToHeap(llvm::Module &M) {
+  for (Function &F : llvm::make_early_inc_range(M.functions())) {
+    if (F.getIntrinsicID() != Intrinsic::dx_resource_handlefrombinding)
+      continue;
+    for (User *U : llvm::make_early_inc_range(F.users())) {
+      auto *CI = dyn_cast<CallInst>(U);
+      if (!CI || CI->getCalledFunction() != &F)
+        continue;
+      IRBuilder<> Builder(CI);
+      Value *HeapIndex =
+          Builder.CreateAdd(CI->getArgOperand(1), CI->getArgOperand(3));
+      Function *HeapFn = Intrinsic::getOrInsertDeclaration(
+          &M, Intrinsic::dx_resource_handlefromheap, {CI->getType()});
+      Value *NewCall = Builder.CreateCall(
+          HeapFn, {HeapIndex, Builder.getInt1(false)}, CI->getName());
+      CI->replaceAllUsesWith(NewCall);
+      CI->eraseFromParent();
+    }
+    if (F.use_empty())
+      F.eraseFromParent();
+  }
+}
+
+/// Loads \p Filename as the raised LLVM IR the JIT engine expects. Already-
+/// raised, idiomatic LLVM IR (`.ll`/`.bc`) is parsed directly, matching
+/// `feme-run`'s original, milestone-4 scope; a DXIL bitcode file or
+/// DXContainer is imported and raised the same way `feme::Driver` raises
+/// one before any target-specific lowering (`feme::dxil::OpRaisingPass`
+/// undoes the `dx.op.*` calling convention, then
+/// `feme::dxil::MetadataRaisingPass` recovers the shader model, entry
+/// points, and thread-group dimensions from `dx.*` metadata into the
+/// `hlsl.*` function attributes this tool's own pipeline reads them from --
+/// see the DXIL section of feme/docs/Design.md) -- letting a test compile
+/// real HLSL through `clang`/DXIL's own backend and run the result straight
+/// through this tool. See the file comment above for what remains unwired
+/// (SPIR-V import).
+Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx,
+                                  bool BridgeRegisterBoundResources) {
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr =
+      MemoryBuffer::getFileOrSTDIN(Filename, /*IsText=*/false);
+  if (std::error_code EC = BufOrErr.getError())
+    return createStringError(EC, "could not open '%s': %s",
+                             Filename.str().c_str(), EC.message().c_str());
+
+  if (looksLikeDXIL((*BufOrErr)->getMemBufferRef())) {
+    feme::DXILImporter Importer;
+    feme::ImportOptions ImportOpts;
+    Expected<feme::Module> Imported =
+        Importer.import((*BufOrErr)->getMemBufferRef(), ImportOpts, Ctx);
+    if (!Imported)
+      return Imported.takeError();
+
+    llvm::Module &M = Imported->getLLVMModule();
+    ModuleAnalysisManager MAM;
+    feme::dxil::OpRaisingPass().run(M, MAM);
+    feme::dxil::MetadataRaisingPass().run(M, MAM);
+    if (BridgeRegisterBoundResources)
+      bridgeRegisterBoundResourcesToHeap(M);
+
+    // DXIL's own module triple/data layout has no meaning to the FeMe CPU
+    // target's JIT (see `feme::Driver::run`: retargeting to any other
+    // target, CPU included, replaces both once codegen begins). Clearing
+    // them leaves the module target-agnostic, matching every raised `.ll`
+    // fixture (see e.g. feme/test/Tools/feme-run/thread-id-store.ll, which
+    // carries no `target triple`/`target datalayout` at all) so
+    // `feme::cpu::JITEngine` -- which never itself sets either -- treats it
+    // exactly the same way regardless of which importer produced it.
+    M.setTargetTriple(llvm::Triple());
+    M.setDataLayout(llvm::DataLayout());
+    // Clang's HLSL front end also stamps ordinary host-compiler module
+    // flags (e.g. "frame-pointer") that mean nothing to the FeMe CPU
+    // target's JIT and, when linked against `libFeMeRuntimeCPU`'s own
+    // (different) values for them, would only ever produce a harmless but
+    // noisy "conflicting values" warning; drop them for the same reason the
+    // triple/data layout above are cleared.
+    if (llvm::NamedMDNode *ModuleFlags =
+            M.getNamedMetadata("llvm.module.flags"))
+      M.eraseNamedMetadata(ModuleFlags);
+
+    return Imported;
+  }
+
+  SMDiagnostic Err;
+  std::unique_ptr<llvm::Module> LLVMMod =
+      parseIR((*BufOrErr)->getMemBufferRef(), Err, Ctx.getLLVMContext());
+  if (!LLVMMod) {
+    std::string Message;
+    raw_string_ostream OS(Message);
+    Err.print("feme-run", OS);
+    return createStringError(inconvertibleErrorCode(), "%s", Message.c_str());
+  }
+  return feme::Module::fromLLVMIR(std::move(LLVMMod));
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
   InitLLVM X(argc, argv);
 
-  cl::opt<std::string> InputFilename(cl::Positional, cl::Required,
-                                     cl::desc("<input .ll/.bc file>"));
+  cl::opt<std::string> InputFilename(
+      cl::Positional, cl::Required,
+      cl::desc("<input .ll/.bc file, or DXIL bitcode/DXContainer>"));
   cl::opt<std::string> HeapFilename(
       "heap", cl::desc("The resource-heap YAML file (see feme-run's own "
                        "file comment)"));
@@ -209,6 +349,20 @@ int main(int argc, char **argv) {
                "the CFG restructurization test suite diffs against (see "
                "the 'CFG restructurization test suite' section of "
                "feme/docs/FeMeCPUDesign.md). --wave-size is ignored."));
+  cl::opt<bool> BindRegisterResources(
+      "dxil-bind-register-resources",
+      cl::desc(
+          "For a DXIL input only: rewrite every register-bound resource "
+          "(llvm.dx.resource.handlefrombinding) into a bindless heap access "
+          "(llvm.dx.resource.handlefromheap) at the same index its register "
+          "binding names, before handing the module to the FeMe CPU target. "
+          "A testing-only bridge, *not* what the FeMe CPU target itself "
+          "accepts (see 'Root constants' in feme/docs/FeMeCPUDesign.md: "
+          "every other register-bound handle is rejected) -- it exists "
+          "because Clang's HLSL front end cannot yet emit "
+          "ResourceDescriptorHeap/SamplerDescriptorHeap (bindless) access, "
+          "so a real HLSL shader compiled by Clang today has no way to "
+          "produce the bindless form the CPU target requires."));
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe CPU target JIT/dispatch runner\n");
@@ -216,12 +370,11 @@ int main(int argc, char **argv) {
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
 
-  SMDiagnostic Err;
-  LLVMContext LLVMCtx;
-  std::unique_ptr<llvm::Module> LLVMMod =
-      parseIRFile(InputFilename, Err, LLVMCtx);
-  if (!LLVMMod) {
-    Err.print(argv[0], errs());
+  feme::Context Ctx;
+  Expected<feme::Module> Mod =
+      loadModule(InputFilename, Ctx, BindRegisterResources);
+  if (!Mod) {
+    errs() << "feme-run: " << toString(Mod.takeError()) << "\n";
     return 1;
   }
 
@@ -245,14 +398,13 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-  feme::Context Ctx;
   JITOptions Opts;
   Opts.WaveSize = WaveSize;
   Opts.EntryPoint = EntryPoint;
   Opts.Reference = Reference;
 
-  Expected<std::unique_ptr<JITEngine>> Engine = JITEngine::create(
-      Ctx, feme::Module::fromLLVMIR(std::move(LLVMMod)), Opts);
+  Expected<std::unique_ptr<JITEngine>> Engine =
+      JITEngine::create(Ctx, std::move(*Mod), Opts);
   if (!Engine) {
     errs() << "feme-run: " << toString(Engine.takeError()) << "\n";
     return 1;
