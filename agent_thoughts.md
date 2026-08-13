@@ -7700,3 +7700,145 @@ doesn't otherwise alter the design.
    linking in `libFeMeRuntimeCPU`, plus the design doc note.
 3. `JITEngineTest.cpp`: regression test for the escape-stripping fix.
 4. This file.
+
+# Milestone 6: Linearization for divergent control flow
+
+## Approach
+
+Implemented `feme::cpu::LinearizePass` ("Phase 3: Linearization and
+Predication") for two shapes, matching the roadmap wording exactly
+("straight-line diamonds, then loops"):
+
+1. **Divergent diamonds.** A two-way branch whose condition
+   `feme::cpu::computeWaveUniformity` classifies as divergent is flattened
+   into unconditional fallthrough: the true arm always executes, its own
+   former jump to the reconvergence block (found via `PostDominatorTree`)
+   is redirected into the false arm instead, and the false arm still
+   reconverges normally. Any `phi` at the reconvergence block becomes a
+   `select` on the branch condition.
+
+   The key design realization: this doesn't need a separate "validate,
+   then collect an ordering, then mutate" three-phase scheme. A single
+   recursive function (`flatten(Cur, End, Mask, RedirectTo)`) walking the
+   region between a branch and its reconvergence point handles arbitrary
+   nesting for free -- a nested divergent branch just recurses into the
+   same function with a conjoined mask, and a nested *uniform* branch
+   recurses with the *same* mask (left as real control flow) -- because
+   the recursion depth naturally matches dominance depth, so inner
+   branches are always resolved before the outer one needs their result.
+   I initially over-engineered this: my first plan involved computing a
+   separate "cumulative mask" map over the original CFG via a forward RPO
+   pass, worrying that nested branches wouldn't correctly compose the
+   mask for side-effect gating. It turns out threading the mask as a
+   parameter through the same recursive walk that does the CFG rewrite
+   gets this right automatically, with much less code and no separate
+   validation/mutation ordering to get right.
+
+   I verified this against **real** `StructurizeCFG` output, not just
+   hand-written IR: running `feme-cpu-prepare` on a single flat if/else
+   (`diamond.ll`'s shape) produces a *two-level* nested diamond of its own
+   (a synthetic "Flow" block plus a critical-edge-split block), because
+   `StructurizeCFG` always uses its own Flow-block scheme even for the
+   simplest case. My recursive flattener handled this correctly on the
+   first attempt with no special-casing, and I hand-verified the resulting
+   `select` chain's arithmetic for a couple of concrete `%tid` values to
+   be sure (see the diamond.ll test derivation in the session transcript).
+   This gave me much higher confidence in the algorithm than a suite of
+   hand-written test IR alone would have.
+
+2. **Loops with a divergent exit.** Scoped to the shape
+   `feme::cpu::verifyStructured` already guarantees (single latch, single
+   shared exit block): a loop-carried `i1` "active" phi at the header,
+   updated by ANDing in the negation of any divergent exit condition found
+   directly in the header and/or the latch, and the backedge condition
+   gated by a new `feme.cpu.mask.any` call (a new, minimal
+   `feme/include/feme/Transforms/CPU/MaskIntrinsics.h`) -- this is a
+   genuinely new intrinsic the design calls for, since "is any lane still
+   active" is a wave-wide reduction that only makes sense once Phase 4
+   widens the scalar `i1` this pass works with to `<W x i1>`; at the
+   scalar level it's just plumbing that composes correctly through
+   widening later.
+
+## What narrowed, and why
+
+Both `SIMDize.cpp` and `Prepare.cpp` already establish the pattern this
+follows: validate first, diagnose and leave the function untouched on an
+unsupported shape, rather than ever emitting a partially-transformed
+function. I hit one shape that is *more* restrictive in practice than I
+expected going in: I originally assumed the loop linearizer would need to
+special-case "header and latch are the same block" (an infinite loop whose
+only exit is a divergent break) as distinct from "separate header and
+latch, one with a divergent check". Testing against
+`feme-cpu-prepare,feme-cpu-linearize` end to end on the `loop-break.ll`
+named shape (separate header/latch) revealed that `StructurizeCFG`
+restructures even that shape into an *internal diamond inside the loop
+body* (its own Flow-block merge, this time between the latch and a
+critical-edge-split block) -- a shape my loop linearizer correctly
+diagnoses as unsupported rather than silently doing nothing or, worse,
+mistransforming. I recorded this precisely in both the design doc's
+milestone 6 deviation note and in `Linearize/loop-break.ll`'s test comment:
+that lit test exercises the header/latch rewrite directly against
+already-structured IR (bypassing `feme-cpu-prepare`) specifically because
+the *prepared* form of that exact shape isn't linearizable yet. Generalizing
+the loop linearizer to see through a `StructurizeCFG`-style internal `Flow`
+merge is the natural next increment, not yet done.
+
+I also expected "a uniform branch nested inside a divergent arm" to be an
+unsupported combination worth its own diagnostic (I even started writing a
+test for it) -- but the recursive `flatten` function actually handles it
+correctly with no special-casing, since a uniform branch just recurses with
+an unchanged mask regardless of what encloses it. I kept that as a positive
+test (`uniform-nested-in-divergent.ll`) instead of a diagnostic one once I
+noticed my assumption was wrong; better to record verified capability than
+an assumption that didn't hold up against the actual implementation.
+
+Deliberately narrowed, and recorded as such in the design doc's Status
+section:
+
+- An empty diamond arm (the branch's own edge, not a distinct block's
+  tail, would need redirecting -- a case the general rewrite doesn't cover
+  yet).
+- Early return under a divergent branch (in practice folds into "no
+  reconvergence point" before a dedicated check is ever reached, since
+  `PostDominatorTree` has nothing to report as an immediate post-dominator
+  once one arm never returns).
+- A loop's divergent exit check reached through an internal diamond, which
+  --  as described above -- covers more real shapes post-`StructurizeCFG`
+  than I originally scoped for.
+- Masking is implemented only for the canonical `feme.cpu.resource.*`
+  calls (rewriting their existing mask operand away from the constant
+  `true` `ResourceLoweringPass` leaves it as); ordinary `load`/`store`
+  aren't rewritten into `feme.cpu.masked.load`/`.store` yet, since resource
+  calls are the only memory access the pipeline canonicalizes and executes
+  end to end today, and Phase 4 (roadmap milestone 7) is what will actually
+  need to lower those forms.
+- Nested loops (a cycle containing another cycle) aren't linearized; only
+  leaf cycles are considered.
+
+## Validation
+
+`ninja check-feme` (Release, assertions on, ccache): 759/759 (100%),
+including 11 new `lit` tests under `feme/test/Transforms/CPU/Linearize/`
+and 5 new `gtest` cases in `LinearizeTest.cpp`. `clang-format` reported
+changes on every new/touched file, applied and re-verified against the
+full suite afterward (I clobbered the new `.ll` test files with a glob
+that matched them into a C++-style `clang-format -i` pass by mistake once
+-- `clang-format` doesn't parse LLVM IR and rewrote them into garbage;
+caught by immediately re-running the new tests, and I now keep `.ll`
+globs completely separate from `clang-format` invocations).
+
+## Design doc
+
+Updated the Status section (milestone 6 marked done, with a Deviation note
+covering everything narrowed above) and the Roadmap section's milestone 6
+entry in `feme/docs/FeMeCPUDesign.md`.
+
+## Commit breakdown
+
+1. `MaskIntrinsics.{h,cpp}`: standalone `feme.cpu.mask.any` helper (needed
+   by the loop half, added first since it's independently buildable/small).
+2. `Linearize.{h,cpp}`, `LinearizeTest.cpp`, and the diamond-shape `lit`
+   tests: divergent diamond flattening.
+3. `Linearize.{h,cpp}`, `LinearizeTest.cpp`, the loop-shape `lit` tests, and
+   the design doc updates: loop linearization, completing the milestone.
+4. This file.
