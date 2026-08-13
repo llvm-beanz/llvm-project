@@ -54,6 +54,28 @@ void diagnose(Function &F, const Twine &Message) {
                            "': " + Message);
 }
 
+/// Rewrites the mask operand of every `feme.cpu.resource.*` call in \p BB to
+/// \p Mask, so a resource access under a divergent condition never touches
+/// memory on behalf of an invocation that did not take that path (see
+/// "Canonical resource calls are similarly rewritten to masked forms" in
+/// "Phase 3"). Shared between `DiamondFlattener` (a divergent arm's mask)
+/// and `LoopLinearizer` (a loop iteration's "active" mask) below. A no-op
+/// when \p Mask is the all-active constant: nothing outside a divergent
+/// region needs masking.
+void maskResourceCalls(BasicBlock &BB, Value *Mask) {
+  if (isa<Constant>(Mask))
+    return;
+  for (Instruction &I : make_early_inc_range(BB)) {
+    auto *Call = dyn_cast<CallInst>(&I);
+    if (!Call)
+      continue;
+    std::optional<MatchedResourceCall> Matched = matchResourceCall(*Call);
+    if (!Matched)
+      continue;
+    Call->setArgOperand(Call->arg_size() - 1, Mask);
+  }
+}
+
 //===----------------------------------------------------------------------===//
 // Divergent diamonds.
 //===----------------------------------------------------------------------===//
@@ -114,14 +136,6 @@ private:
   /// no redirect is needed, e.g. for an outermost or false-side call).
   void flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
                BasicBlock *RedirectTo);
-
-  /// Rewrites the mask operand of every `feme.cpu.resource.*` call in
-  /// \p BB to \p Mask, so a resource access under a divergent condition
-  /// never touches memory on behalf of an invocation that did not take that
-  /// path (see "Canonical resource calls are similarly rewritten to masked
-  /// forms" in "Phase 3"). A no-op when \p Mask is the all-active constant:
-  /// nothing outside a divergent region needs masking.
-  void maskResourceCalls(BasicBlock &BB, Value *Mask);
 };
 
 bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
@@ -180,20 +194,6 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
     Cur = R;
   }
   return true;
-}
-
-void DiamondFlattener::maskResourceCalls(BasicBlock &BB, Value *Mask) {
-  if (isa<Constant>(Mask))
-    return; // All-active: nothing to mask.
-  for (Instruction &I : make_early_inc_range(BB)) {
-    auto *Call = dyn_cast<CallInst>(&I);
-    if (!Call)
-      continue;
-    std::optional<MatchedResourceCall> Matched = matchResourceCall(*Call);
-    if (!Matched)
-      continue;
-    Call->setArgOperand(Call->arg_size() - 1, Mask);
-  }
 }
 
 void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
@@ -430,6 +430,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                                    // loop alone; undo the speculative phi.
       return false;
     }
+    maskResourceCalls(*Header, ActivePN);
     IRBuilder<> B(HeaderExit->Br);
     Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(HeaderExit->Cond)
                                             : HeaderExit->Cond;
@@ -452,6 +453,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   }
 
   Value *ActiveAtLatch = ActivePN;
+  maskResourceCalls(*Header, ActivePN);
   if (HeaderDivergent) {
     IRBuilder<> B(HeaderExit->Br);
     Value *Cond = HeaderExit->Cond;
@@ -464,6 +466,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     HeaderExit->Br->eraseFromParent();
   }
 
+  maskResourceCalls(*Latch, ActiveAtLatch);
   Value *ActiveAfterLatchCheck = ActiveAtLatch;
   Value *Continue;
   if (LatchDivergent) {

@@ -387,9 +387,16 @@ void FunctionWidener::replaceGroupIdCall(CallInst &CI) {
 void FunctionWidener::widenResourceCall(CallInst &CI,
                                         const MatchedResourceCall &Matched,
                                         IRBuilder<> &Builder) {
+  // A divergent governing mask (see "masked feme.cpu.resource.* call") needs
+  // scalarization exactly as much as a divergent address/value operand does:
+  // even if every lane that's still active would compute the same address
+  // and value (as in a resource write inside a masked loop whose address
+  // does not itself depend on the lane), a deactivated lane must still be
+  // prevented from touching memory at all.
   bool AnyDivergent =
       Widened.count(Matched.DescriptorIndex) || Widened.count(Matched.Offset) ||
-      (Matched.StoredValue && Widened.count(Matched.StoredValue));
+      (Matched.StoredValue && Widened.count(Matched.StoredValue)) ||
+      Widened.count(Matched.Mask);
   if (!AnyDivergent)
     return; // Every operand is uniform: leave the scalar call as-is.
 
