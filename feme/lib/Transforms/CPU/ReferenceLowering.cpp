@@ -60,13 +60,21 @@ std::optional<RaisedBuiltin> classify(Intrinsic::ID ID) {
   case Intrinsic::dx_group_id:
   case Intrinsic::spv_group_id:
     return RaisedBuiltin::GroupId;
-  case Intrinsic::dx_wave_getlaneindex:
-    // Wave intrinsics have no meaning one invocation at a time (see the
-    // header comment): reported as `Unsupported` rather than left alone,
-    // so the caller can diagnose it instead of silently leaving a raised
-    // builtin nothing downstream will ever lower.
-    return RaisedBuiltin::Unsupported;
   default:
+    // Every other raised `llvm.{dx,spv}.wave.*` intrinsic (not just
+    // `wave.getlaneindex`) has no meaning one invocation at a time -- see
+    // the header comment -- so any of them is reported as `Unsupported`
+    // rather than left alone, matching the intrinsic-family check `feme::
+    // cpu::WaveTTIImpl` and `feme::cpu::SIMDizePass`'s `classifyWaveCall`
+    // use elsewhere for the same family. Checking the intrinsic's name
+    // rather than enumerating every `Intrinsic::ID` here keeps this in
+    // sync automatically as more wave intrinsics are raised in the future.
+    if (ID != Intrinsic::not_intrinsic) {
+      StringRef Name = Intrinsic::getBaseName(ID);
+      if (Name.starts_with("llvm.dx.wave.") ||
+          Name.starts_with("llvm.spv.wave."))
+        return RaisedBuiltin::Unsupported;
+    }
     return std::nullopt;
   }
 }
