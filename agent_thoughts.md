@@ -9550,3 +9550,151 @@ planned up front:
 6. `[feme][cpu] Add roadmap milestone 11's completion test (AOT dispatch)`
 7. `[feme][docs] Update FeMeCPUDesign.md for milestone 11 completion`
 8. This file.
+
+# Roadmap: what is left across both designs, and how to grow end-to-end testing
+
+The ask was analysis, not implementation: look over feme's implementation and
+design documentation and produce a roadmap for finishing the design and for
+extending end-to-end testing to more interesting cases. The deliverable is
+`feme/docs/Roadmap.md`, plus links to it from the README and both design
+documents.
+
+## Why a third document rather than editing the two existing ones
+
+Both `Design.md` and `FeMeCPUDesign.md` already have a "Roadmap / Milestones"
+section, and both are meticulous about recording status and deviations inline
+against the design text they narrow. That is the right structure for those
+documents -- a milestone's status belongs next to the design it implements --
+but it has two consequences:
+
+1. "What is left" is scattered across ~4,400 lines of two documents, as
+   Status notes, Deviation bullets, "Known gap" subsections, and
+   parenthetical "not yet attempted" clauses inside milestone entries. There
+   is no single place that answers it.
+2. Neither document's milestone list is cross-referenced with the other's.
+   Design.md milestone 6 (SPIR-V -> DXIL) and FeMeCPUDesign.md milestone 11's
+   SPIR-V deviation are blocked on the *same* upstream gap (SPIRVToLLVM
+   conversion breadth), and nothing says so.
+
+Editing status into the existing milestone lists would not fix either -- it
+would add a third layer of inline notes to documents that already have two.
+So `Roadmap.md` is deliberately a *derived* document: it holds no design
+decisions of its own, cites the owning section for every item, and is
+explicitly non-authoritative on how anything should work. That also makes it
+cheap to throw away once the backlog it describes is worked off, which a
+design document is not.
+
+## How I built the gap inventory
+
+I read both design documents' Status/Deviation/Known-gap sections in full,
+then cross-checked each claim against the tree rather than trusting the prose,
+because the prose is written at implementation time and the tree moves. That
+turned up several things the documents do not say, each of which became an
+inventory item:
+
+- `feme::Context` has no `setDiagnosticHandler`/`diagnose` at all. Design.md
+  sketches both, and its "No Global State" principle leans on the diagnostic
+  callback as the reason library code never prints to `errs()`; the shipped
+  header exposes only the two context accessors, and fallible code returns
+  `llvm::Error` that each tool prints itself. That is a defensible interim
+  state, but it is not what the design says, and nothing records the gap.
+- There is no `Exporter` type anywhere in the tree. `Importer`, `Translator`
+  and `Backend` all exist as declared. `Exporter` is referenced only in
+  comments. DXIL and SPIR-V "export" happens to be spelled as a `Backend`
+  today, which works precisely because both destinations have an in-tree LLVM
+  target; DXBC will not have that option, which is when the missing interface
+  starts costing something.
+- None of the four fuzzers is in `FEME_TEST_DEPENDS`, so `check-feme` does
+  not even *build* them. Design.md states they are run in CI alongside the
+  lit/gtest suites. This is the cheapest gap on the list to close and the one
+  with the worst failure mode (silent bit-rot of the harnesses guarding the
+  untrusted-input surface), so it is P0 in the inventory.
+- `feme-run` links `FeMeImportDXIL` and nothing SPIR-V, which is the concrete
+  reason the entire execution-based test suite is DXIL-only. I had assumed
+  from the design text that this was a format-detection gap; it is a linkage
+  and pipeline-composition gap, and the roadmap says so rather than
+  underestimating it.
+- `lib/Target/DXSA/BinaryParser.cpp` is ~3,800 lines of hand-written token
+  decoding over untrusted input with no fuzzer, while `dxbc-as`'s *text*
+  parser has one. That inversion (the harder, more adversarially-exposed
+  parser is the unfuzzed one) is worth calling out explicitly.
+
+## How I chose the end-to-end test cases
+
+Two sources, weighted differently.
+
+The first is the tree's own admissions. `differential-harness.test` carries a
+comment saying its `--divergent=false --loops=false --unstructured=false`
+restriction exists because milestone 4's widener was acyclic/uniform-only,
+"at which point this harness's scope should grow with them". Milestones 6
+(linearization) and 7 (widening for loops, masked memory, scalarization)
+landed; the harness never grew. So the highest-value test change available is
+not a new test at all -- it is deleting three flags from an existing one. I
+put that first in the sequencing for the same reason FeMeCPUDesign.md put its
+restructurization suite before its linearizer: it converts subsequent
+failures from "a wrong number in a CHECK line nobody wrote yet" into a diff.
+
+Similarly, FeMeCPUDesign.md calls cross-wave-size differential testing "the
+cheapest high-value test this design enables and should be first-class rather
+than an afterthought". 49 of the tree's 54 `--wave-size=` occurrences are
+`--wave-size=4`, and all five executing HLSL tests run at `W = 4` only. The
+design's own stated first-class test is, in practice, an afterthought.
+
+The second source is asking what shape of real compute shader the pipeline
+would fall over on, and picking cases that sit exactly on a recorded
+narrowing rather than cases that merely look impressive:
+
+- `reduction.hlsl` (groupshared tree reduction) sits on milestone 9's "a
+  barrier inside a surviving branch or a loop is diagnosed" narrowing. It is
+  also the single most common real compute-shader shape not covered.
+- `histogram.hlsl` (divergent atomics) is the only realistic workload for
+  milestone 7's scalarization fallback, which does not yet mask per-lane
+  execution -- the one narrowing whose failure mode is a silently wrong
+  answer rather than a diagnostic, which is why I made it P0.
+- `prefix-sum.hlsl` and `ballot.hlsl` sit on the two DXIL raising gaps
+  (flag-selected opcode families; the aggregate-returning mechanism shared by
+  IMul/UMul/UAddc/SplitDouble/WaveActiveBallot).
+
+I deliberately did not propose a large corpus of shaders that exercise
+already-covered paths. The existing five HLSL tests already prove the
+pipeline works end to end; more of the same buys little, whereas each case
+above either fails today or would fail the moment its blocking gap is
+implemented carelessly.
+
+The axis analysis (§2.2) is the other half: wave size, front-end equivalence
+(one HLSL source through both DXIL and SPIR-V, blocked on the SPIRVToLLVM
+breadth gap), JIT vs AOT (AOT is what an embedding client ships and is
+covered only by one gtest), optimization level (every end-to-end test runs at
+-O0; -O2 reorders and vectorizes the raised IR before the CPU pipeline sees
+it), executed round trips (feme-dxil-to-dxil.ll checks a container comes out,
+not that it runs), and resource shapes (every executing test uses a raw
+buffer because that is all the heap YAML can describe).
+
+## Sequencing rationale
+
+The R1-R15 table's only hard constraint is the dependency column; the order
+within that is chosen so that test infrastructure precedes the features it
+would catch bugs in. R1 (grow the differential harness, add the wave-size
+sweep) depends on nothing and makes R2 onward verifiable. R6/R7 (DXBC fuzzer,
+DXBC through the Driver) are early despite being unblocked because DXBC is
+the one format with substantial implemented machinery and zero end-to-end
+reach -- Design.md milestone 8 is mostly wiring at this point, not new
+translation, so it is unusually cheap for how much of the design it closes.
+R11 (FormatRegistry, Exporter, diagnostics routing) is deliberately *after*
+R7: a registry over two hard-coded formats is not worth its own abstraction,
+and a third format is what makes it pay.
+
+## Scope
+
+Documentation only -- no code, so nothing to build or test beyond confirming
+every factual claim against the tree, which I did file by file. I did not
+implement any roadmap item, including the tempting one-line ones (adding the
+fuzzers to `FEME_TEST_DEPENDS`, deleting the harness's three flags), because
+the request was for a roadmap and each of those needs its own build-and-test
+cycle to land honestly.
+
+## Commit breakdown
+
+1. `[feme][docs] Add a consolidated roadmap for the remaining design and test work`
+2. `[feme][docs] Link the consolidated roadmap from README and both design docs`
+3. This file.
