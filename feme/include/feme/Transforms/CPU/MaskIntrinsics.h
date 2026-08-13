@@ -73,8 +73,7 @@ bool isMaskAnyCall(const llvm::CallInst &CI);
 /// between phases". An ordinary declaration (not an intrinsic, for the same
 /// reason `feme.cpu.mask.any` is), with `nounwind willreturn` and
 /// `memory(argmem: read)`.
-llvm::Function *getOrInsertMaskedLoad(llvm::Module &M,
-                                      llvm::Type *ElementType);
+llvm::Function *getOrInsertMaskedLoad(llvm::Module &M, llvm::Type *ElementType);
 
 /// Gets (inserting if absent) the type-mangled `feme.cpu.masked.store.*`
 /// declaration for \p ElementType in \p M: `declare void
@@ -112,13 +111,11 @@ struct MatchedMaskedMemOp {
 
 /// Recognizes \p CI as a canonical `feme.cpu.masked.load.*` call, returning
 /// its decoded operands, or `std::nullopt` if \p CI's callee isn't one.
-std::optional<MatchedMaskedMemOp>
-matchMaskedLoad(const llvm::CallInst &CI);
+std::optional<MatchedMaskedMemOp> matchMaskedLoad(const llvm::CallInst &CI);
 
 /// Recognizes \p CI as a canonical `feme.cpu.masked.store.*` call, returning
 /// its decoded operands, or `std::nullopt` if \p CI's callee isn't one.
-std::optional<MatchedMaskedMemOp>
-matchMaskedStore(const llvm::CallInst &CI);
+std::optional<MatchedMaskedMemOp> matchMaskedStore(const llvm::CallInst &CI);
 
 } // namespace feme::cpu
 

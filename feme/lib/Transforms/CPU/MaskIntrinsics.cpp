@@ -89,7 +89,8 @@ Function *feme::cpu::getOrInsertMaskedLoad(Module &M, Type *ElementType) {
   Type *I1Ty = Type::getInt1Ty(Ctx);
   FunctionType *FTy = FunctionType::get(
       ElementType, {PtrTy, I32Ty, I1Ty, ElementType}, /*isVarArg=*/false);
-  std::string Name = mangleMaskedMemOpName("feme.cpu.masked.load.", ElementType);
+  std::string Name =
+      mangleMaskedMemOpName("feme.cpu.masked.load.", ElementType);
   Function *F = cast<Function>(M.getOrInsertFunction(Name, FTy).getCallee());
   if (!F->hasFnAttribute(Attribute::Memory)) {
     F->setMemoryEffects(MemoryEffects::argMemOnly(ModRefInfo::Ref));
@@ -123,8 +124,8 @@ CallInst *feme::cpu::createMaskedLoad(IRBuilderBase &Builder, Value *Ptr,
                                       Value *Passthru, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertMaskedLoad(*M, Passthru->getType());
-  return Builder.CreateCall(
-      F, {Ptr, Builder.getInt32(Align), Mask, Passthru}, Name);
+  return Builder.CreateCall(F, {Ptr, Builder.getInt32(Align), Mask, Passthru},
+                            Name);
 }
 
 CallInst *feme::cpu::createMaskedStore(IRBuilderBase &Builder, Value *Val,
@@ -144,9 +145,8 @@ feme::cpu::matchMaskedLoad(const CallInst &CI) {
   MatchedMaskedMemOp Result;
   Result.Call = const_cast<CallInst *>(&CI);
   Result.Ptr = CI.getArgOperand(0);
-  Result.Align =
-      static_cast<unsigned>(cast<ConstantInt>(CI.getArgOperand(1))
-                                ->getZExtValue());
+  Result.Align = static_cast<unsigned>(
+      cast<ConstantInt>(CI.getArgOperand(1))->getZExtValue());
   Result.Mask = CI.getArgOperand(2);
   Result.ValueOperand = CI.getArgOperand(3);
   return Result;
@@ -162,9 +162,8 @@ feme::cpu::matchMaskedStore(const CallInst &CI) {
   Result.Call = const_cast<CallInst *>(&CI);
   Result.ValueOperand = CI.getArgOperand(0);
   Result.Ptr = CI.getArgOperand(1);
-  Result.Align =
-      static_cast<unsigned>(cast<ConstantInt>(CI.getArgOperand(2))
-                                ->getZExtValue());
+  Result.Align = static_cast<unsigned>(
+      cast<ConstantInt>(CI.getArgOperand(2))->getZExtValue());
   Result.Mask = CI.getArgOperand(3);
   return Result;
 }

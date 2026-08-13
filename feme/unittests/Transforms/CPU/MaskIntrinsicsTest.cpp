@@ -42,7 +42,8 @@ TEST_F(MaskIntrinsicsTest, MaskAnyRoundTrips) {
   EXPECT_TRUE(isMaskAnyCall(*CI));
 
   CallInst *Unrelated = Builder.CreateCall(
-      M->getOrInsertFunction("feme.cpu.mask.any.not.actually", CI->getFunctionType()),
+      M->getOrInsertFunction("feme.cpu.mask.any.not.actually",
+                             CI->getFunctionType()),
       {Mask});
   EXPECT_FALSE(isMaskAnyCall(*Unrelated));
 }
@@ -52,8 +53,8 @@ TEST_F(MaskIntrinsicsTest, MaskedLoadMangleAndRoundTrip) {
   Value *Ptr = ConstantPointerNull::get(PointerType::get(Ctx, 0));
   Value *Mask = Builder.getInt1(true);
   Value *Passthru = Builder.getInt32(0);
-  CallInst *CI = createMaskedLoad(Builder, Ptr, /*Align=*/4, Mask, Passthru,
-                                  "load");
+  CallInst *CI =
+      createMaskedLoad(Builder, Ptr, /*Align=*/4, Mask, Passthru, "load");
   EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.cpu.masked.load.i32");
 
   std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI);

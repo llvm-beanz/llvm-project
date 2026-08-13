@@ -579,9 +579,9 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Instruction *Clone = I.clone();
     for (unsigned OpIdx = 0, E = WideOps.size(); OpIdx != E; ++OpIdx)
-      Clone->setOperand(OpIdx, Builder.CreateExtractElement(
-                                   WideOps[OpIdx], Builder.getInt32(Lane),
-                                   "lane.op"));
+      Clone->setOperand(OpIdx,
+                        Builder.CreateExtractElement(
+                            WideOps[OpIdx], Builder.getInt32(Lane), "lane.op"));
     Builder.Insert(Clone, I.getName() + ".lane");
     if (Result)
       Result =
@@ -732,7 +732,8 @@ Function *FunctionWidener::widen() {
   // into a normal acyclic one.
   for (PHINode *PN : DivergentPHIs)
     for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I)
-      PN->setIncomingValue(I, PoisonValue::get(PN->getIncomingValue(I)->getType()));
+      PN->setIncomingValue(
+          I, PoisonValue::get(PN->getIncomingValue(I)->getType()));
 
   // The remaining erasure order only needs "uses before defs" among what's
   // left, which `NewF`'s actual layout gives directly: a block always
