@@ -7550,3 +7550,153 @@ class of bug reappear afterward.
 
 No `feme/docs/*Design.md` changes: this is a build-configuration and
 process fix, not a design decision about FeMe's own architecture or ABI.
+
+# Agent thoughts: three unrelated causes behind eight test failures
+
+## The report
+
+Eight failing tests, reported from a `build-rel` build on macOS:
+
+- 6 lit tests failing with `command not found` for `feme-cfg-gen` and
+  `feme-run` (exit code 127).
+- 2 `FeMeTargetCPUTests` (`JITEngineTest.RunsThreadIdShaderAgainstARawBuffer`,
+  `JITEngineTest.ReferenceModeRunsTheSameShaderUnwidened`) failing with a JIT
+  session error: `Symbols not found: [ _feme.cpu.resource.store.raw.i32 ]`.
+
+These looked like they might share one root cause (a bad rebase, a broken
+CMake target, etc.), but turned out to be two independent bugs.
+
+## Bug 1: `feme-cfg-gen` doesn't build (which explains 6 of the 8 failures)
+
+`command not found` for a tool that's supposed to exist is a build failure,
+not a test failure -- lit just reports the `sh`-level symptom. Rebuilding
+locally (`ninja feme-cfg-gen feme-run`, Release, assertions on, ccache)
+reproduced it directly as a hard compile error, not a flaky or
+environment-specific problem:
+
+```
+feme-cfg-gen.cpp:62:51: error: no member named 'OF_TextWithCRLF' in namespace 'llvm::sys::fs'
+```
+
+`sys::fs::OF_TextWithCRLF` is a real, unconditionally-declared enumerator in
+`llvm/Support/FileSystem.h` -- so the natural next question is why the
+compiler can't see it. `feme-cfg-gen.cpp` never includes
+`llvm/Support/FileSystem.h` directly; it only includes
+`llvm/Support/ToolOutputFile.h` and `llvm/Support/raw_ostream.h`. Checking
+`raw_ostream.h` shows why that isn't enough:
+
+```cpp
+namespace fs {
+enum OpenFlags : unsigned;   // forward declaration only
+} // end namespace fs
+```
+
+`raw_ostream.h` only forward-declares `OpenFlags` (it needs the type to
+name constructor parameters, not the enumerators), so it doesn't pull in
+`FileSystem.h`'s actual definition, and neither does `ToolOutputFile.h`.
+`sys::fs::OF_TextWithCRLF` is simply never visible from
+`feme-cfg-gen.cpp`'s own includes -- it happened to build before purely
+because some other now-changed header in the include graph was pulling in
+`FileSystem.h` transitively. This is exactly the class of bug LLVM's coding
+standard's "headers must compile standalone" rule exists to prevent: sibling
+tools `feme-opt`, `dxbc-as`, and `feme` all already include
+`llvm/Support/FileSystem.h` explicitly for the same `ToolOutputFile`
+pattern; `feme-cfg-gen.cpp` was just missing it.
+
+Fix: add the missing `#include "llvm/Support/FileSystem.h"`. Rebuilt both
+tools clean afterward; that alone accounts for 6 of the 8 reported
+failures (`feme-cfg-gen` not existing broke its own two tests plus four
+`feme-run` tests that shell out to `feme-cfg-gen` to synthesize test
+input).
+
+## Bug 2: a Mach-O-specific symbol name mismatch (the other 2 failures)
+
+This one doesn't reproduce on Linux at all -- both `JITEngineTest`s pass
+locally without any change. The error text is the clue:
+`Symbols not found: [ _feme.cpu.resource.store.raw.i32 ]` -- note the
+leading underscore, which is Mach-O's (macOS's object format) calling
+convention for C symbol names, not ELF's (Linux's).
+
+`feme.cpu.resource.store.raw.i32` is one of `libFeMeRuntimeCPU`'s helpers
+(`FeMeRuntimeCPU.c`, recently rewritten from hand-written `.ll` to plain C
+in `d302d5b4`). Since a dotted name isn't a valid C identifier, each helper
+gets its canonical name via a GNU `asm` label:
+
+```c
+void femeCpuResourceStoreRawI32(...) asm("feme.cpu.resource.store.raw.i32");
+```
+
+`JITEngine::create` links this runtime module into the compiled shader
+module with `Linker::linkInModule(..., LinkOnlyNeeded)`, which only pulls
+in a definition if its name exactly matches an existing unresolved
+declaration in the destination module -- an LLVM-IR-level, pre-codegen,
+string comparison on `GlobalValue::getName()`.
+
+Compiling `FeMeRuntimeCPU.c` for the two object formats and inspecting the
+resulting IR shows the divergence directly:
+
+```
+# -target x86_64-unknown-linux-gnu (ELF)
+define dso_local void @feme.cpu.resource.store.raw.i32(...)
+
+# -target x86_64-apple-darwin (Mach-O)
+define void @"\01feme.cpu.resource.store.raw.i32"(...)
+```
+
+On Mach-O, Clang prepends a literal `'\1'` (SOH) byte to an `asm`-labeled
+symbol's actual LLVM IR name. That byte is a convention the AsmPrinter's
+`Mangler` recognizes later, at final codegen, meaning "emit this name
+verbatim, skip the platform's usual global-symbol mangling" (i.e. skip
+Mach-O's own leading-underscore convention) -- which is exactly what makes
+`asm("literal.name")` produce that literal symbol in the `.o` on Darwin
+instead of `_literal.name`. But it does so by embedding the byte in the
+*name itself*, which runs a full phase earlier than the codegen step it's
+meant to influence: it's still there during IR linking, so
+`feme.cpu.resource.store.raw.i32` (the plain declaration `ResourceCalls`
+creates in the shader module) and `\01feme.cpu.resource.store.raw.i32`
+(the runtime module's actual definition) are two different names as far as
+`Linker::linkInModule` is concerned. The helper never gets linked in; the
+declaration survives to final codegen, where Mach-O's ordinary mangling
+*does* apply to it (it has no `'\1'` escape of its own), producing a
+reference to `_feme.cpu.resource.store.raw.i32` that nothing in the module
+defines -- hence ORC falling through to process-symbol resolution, and
+failing.
+
+This is is invisible on ELF hosts (no `'\1'` escape is ever added there),
+which is exactly why it didn't show up until it was run on macOS, and why
+it can't be exercised end-to-end from this Linux sandbox.
+
+Fix: strip a leading `'\1'` from every global's name in the freshly-parsed
+runtime module before linking it in (`JITEngine.cpp`,
+`feme::cpu::detail::stripAsmLabelManglingEscape`), so its names always
+match the plain canonical names `ResourceCalls` declares, regardless of
+host object format. Moved the helper out of the anonymous namespace into
+`feme::cpu::detail` (declared in `JITEngine.h`) specifically so a unit test
+can drive it directly with a hand-built `'\1'`-prefixed module and assert
+the byte is stripped -- since the end-to-end `JITEngineTest`s can only ever
+observe *this* bug on a Mach-O host, that direct test is the only coverage
+of this fix that means anything running here.
+
+## Validation
+
+`ninja check-feme` (Release, assertions on, ccache): 743/743 (100%),
+including the new `JITEngineTest.StripAsmLabelManglingEscapeDropsLeadingSOHByte`
+regression test. `clang-format` reported no changes needed on any touched
+file.
+
+## Design doc
+
+Added a short paragraph to "Runtime Support Library" in
+`feme/docs/FeMeCPUDesign.md` documenting the `asm`-label/Mach-O escape-byte
+interaction and that `JITEngine` normalizes it -- a subtle, easy-to-reintroduce
+portability point worth recording next to the section that already
+describes how the runtime library gets linked in, even though this change
+doesn't otherwise alter the design.
+
+## Commit breakdown
+
+1. `feme-cfg-gen.cpp`: add missing `FileSystem.h` include.
+2. `JITEngine.{h,cpp}`: strip the Mach-O `asm`-label mangling escape before
+   linking in `libFeMeRuntimeCPU`, plus the design doc note.
+3. `JITEngineTest.cpp`: regression test for the escape-stripping fix.
+4. This file.
