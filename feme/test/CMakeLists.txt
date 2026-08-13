@@ -26,6 +26,8 @@ set(FEME_TEST_DEPENDS
   FeMeUnitTests
   llc
   llvm-as
+  llvm-nm
+  llvm-readobj
   opt
   llvm-objcopy
   obj2yaml
