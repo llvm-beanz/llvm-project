@@ -873,6 +873,90 @@ bool raiseTypedBufferLoad(CallInst &CI) {
   return true;
 }
 
+/// Raises a `dx.op.rawBufferStore` (opcode 140) call on an already-raised
+/// raw/structured buffer handle into `llvm.dx.resource.store.rawbuffer`.
+/// `RawBufferStore`'s `Coord0`/`Coord1` operands carry whichever of "byte
+/// offset" (a `ByteAddressBuffer`) or "element index, byte offset within
+/// element" (a `StructuredBuffer`) the handle's resource kind means -- both
+/// forward straight through to the raised intrinsic's own `Coord0`/`Coord1`
+/// operands unexamined, so this needs no resource-kind-specific handling of
+/// its own (see `int_dx_resource_store_rawbuffer`'s own operand comment).
+/// Only a single-component (mask 0b0001) store is raised, matching what
+/// `libFeMeRuntimeCPU`'s raw/structured buffer view implements today (see
+/// the "Descriptor formats" section of feme/docs/FeMeCPUDesign.md); a
+/// multi-component store is left unraised for now.
+bool raiseRawBufferStore(CallInst &CI) {
+  if (CI.arg_size() != 10)
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || HandleTy->getName() != "dx.RawBuffer")
+    return false;
+
+  std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(8));
+  if (!Mask || *Mask != 1)
+    return false;
+
+  Value *Coord0 = CI.getArgOperand(2);
+  Value *Coord1 = CI.getArgOperand(3);
+  Value *Stored = CI.getArgOperand(4);
+
+  IRBuilder<> Builder(&CI);
+  Function *StoreFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_store_rawbuffer,
+      {HandleTy, Stored->getType()});
+  Builder.CreateCall(StoreFn, {Handle, Coord0, Coord1, Stored});
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises a `dx.op.rawBufferLoad` (opcode 139) call on an already-raised
+/// raw/structured buffer handle into `llvm.dx.resource.load.rawbuffer`,
+/// mirroring `raiseTypedBufferLoad`: the loaded scalar's type is recovered
+/// from the `extractvalue`s reading the DXIL `%dx.types.ResRet` return
+/// struct's component 0 (the only component a single-component load ever
+/// reads), and a load consumed any other way (multiple components, or
+/// `ResRet`'s trailing status field) is left unraised.
+bool raiseRawBufferLoad(CallInst &CI) {
+  if (CI.arg_size() != 6)
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || HandleTy->getName() != "dx.RawBuffer")
+    return false;
+
+  std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(4));
+  if (!Mask || *Mask != 1)
+    return false;
+
+  SmallVector<ExtractValueInst *, 2> Extracts;
+  for (User *U : CI.users()) {
+    auto *EV = dyn_cast<ExtractValueInst>(U);
+    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] != 0)
+      return false;
+    Extracts.push_back(EV);
+  }
+  if (Extracts.empty())
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  Function *LoadFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_load_rawbuffer,
+      {Extracts[0]->getType(), HandleTy});
+  Value *Loaded = Builder.CreateCall(
+      LoadFn, {Handle, CI.getArgOperand(2), CI.getArgOperand(3)});
+  Value *Value0 = Builder.CreateExtractValue(Loaded, 0);
+
+  for (ExtractValueInst *EV : Extracts) {
+    EV->replaceAllUsesWith(Value0);
+    EV->eraseFromParent();
+  }
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Runs the resource-op raising phases in dependency order over \p M: handle
 /// creation first (so that the accesses below have a `target("dx.")` handle
 /// to consume), then the buffer accesses that consume those handles, then
@@ -916,6 +1000,12 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(68, [](CallInst &CI) { // BufferLoad
     return raiseTypedBufferLoad(CI);
+  });
+  Changed |= forEachDXOpCall(140, [](CallInst &CI) { // RawBufferStore
+    return raiseRawBufferStore(CI);
+  });
+  Changed |= forEachDXOpCall(139, [](CallInst &CI) { // RawBufferLoad
+    return raiseRawBufferLoad(CI);
   });
 
   for (Function &F : llvm::make_early_inc_range(M.functions())) {

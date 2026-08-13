@@ -26,9 +26,10 @@
 // `SplitDouble`, `WaveActiveBallot`), ops that pick their source intrinsic
 // from an extra "kind"/flag operand rather than the opcode alone
 // (`WaveActiveOp`, `WaveActiveBit`, `WavePrefixOp`, `QuadOp`), or
-// resource-handle ops (`CreateHandle`, `AnnotateHandle`, buffer/texture
+// resource-handle ops (`CreateHandle`, `AnnotateHandle`, typed/raw buffer
 // loads and stores, ...), which need `llvm::hlsl`-style resource metadata
-// reconstruction. Opcodes not (yet) covered are left as unmodified
+// reconstruction -- see OpRaising.cpp for the scope of what's covered there
+// specifically. Opcodes not (yet) covered are left as unmodified
 // `dx.op.*` calls rather than erroring, so this pass can be used
 // incrementally on modules that mix raised and not-yet-raised operations.
 //

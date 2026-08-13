@@ -10,13 +10,16 @@
 ; it reconstructs the original resource binding, and (for `TypedBuffer`/
 ; unstructured `RawBuffer`) the exact original handle type, or (for
 ; `StructuredBuffer`/`CBuffer`) a same-size/alignment opaque placeholder
-; handle type -- see `raiseResourceHandleFromBinding`'s comment for why. The
-; A typed buffer load (`dx.op.bufferLoad`) round-trips completely, leaving no
-; `llvm.dx.resource.casthandle` bridge behind. The raw buffer/cbuffer *load*
-; calls (`dx.op.rawBufferLoad`/`dx.op.cbufferLoadLegacy`) are left as-is --
-; raising those isn't implemented yet, see the DXIL section of
-; feme/docs/Design.md -- so for those this only checks the handle sequence,
-; not a full round-trip of the whole function.
+; handle type -- see `raiseResourceHandleFromBinding`'s comment for why. A
+; typed buffer load (`dx.op.bufferLoad`) and a single-component raw buffer
+; load (`dx.op.rawBufferLoad`) both round-trip completely, leaving no
+; `llvm.dx.resource.casthandle` bridge behind (see `raiseRawBufferLoad`'s own
+; comment in OpRaising.cpp for what's covered). The structured buffer/cbuffer
+; *load* calls (`dx.op.rawBufferLoad` on a struct-typed element,
+; `dx.op.cbufferLoadLegacy`) are left as-is -- raising an aggregate-typed
+; load isn't implemented yet, see the DXIL section of feme/docs/Design.md --
+; so for those this only checks the handle sequence, not a full round-trip of
+; the whole function.
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-pc-shadermodel6.6-compute"
@@ -42,11 +45,15 @@ define float @typed_buffer_srv(i32 %idx) {
   ret float %r
 }
 
-; A `RWByteAddressBuffer` (UAV, unstructured RawBuffer) bound at register u0.
+; A `RWByteAddressBuffer` (UAV, unstructured RawBuffer) bound at register u0:
+; a single-component raw buffer load round-trips completely too (see
+; `raiseRawBufferLoad`), the same as the typed buffer case above.
 ; CHECK-LABEL: define i32 @raw_buffer_uav(
 define i32 @raw_buffer_uav(i32 %idx) {
   ; CHECK: [[HANDLE:%.*]] = call target("dx.RawBuffer", i8, 1, 0) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 0, i32 1, i32 0, ptr null)
-  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.RawBuffer", i8, 1, 0) [[HANDLE]])
+  ; CHECK-NEXT: [[LOAD:%.*]] = call { i32, i1 } @llvm.dx.resource.load.rawbuffer{{.*}}(target("dx.RawBuffer", i8, 1, 0) [[HANDLE]], i32 %idx, i32 undef)
+  ; CHECK-NEXT: extractvalue { i32, i1 } [[LOAD]], 0
+  ; CHECK-NOT: casthandle
   %h = call target("dx.RawBuffer", i8, 1, 0)
       @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_i8_1_0t(i32 0, i32 0, i32 1, i32 0, ptr @ResName2)
   %v = call {i32, i1} @llvm.dx.resource.load.rawbuffer.i32.tdx.RawBuffer_i8_1_0t(target("dx.RawBuffer", i8, 1, 0) %h, i32 %idx, i32 poison)
