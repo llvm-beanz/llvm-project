@@ -70,6 +70,7 @@
 
 #include "feme/Transforms/CPU/SIMDize.h"
 
+#include "GroupShared.h"
 #include "feme/Analysis/CPU/WaveUniformity.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
@@ -826,6 +827,17 @@ Function *FunctionWidener::widen() {
         OrderedErase.push_back(&I);
   for (Instruction *I : llvm::reverse(OrderedErase))
     I->eraseFromParent();
+
+  // Canonicalize every groupshared (`addrspace(3)`) global's uses into a
+  // `getelementptr` off `wave_groupshared`, now that widening has settled
+  // -- see GroupShared.h's file comment for why this must run after the
+  // walk above rather than before it, and roadmap milestone 9 for why it
+  // lives here at all (Phase 6, `feme::cpu::EntryWrapperPass`, does the
+  // actual allocation once every access has been canonicalized this way).
+  GroupSharedLayout GSLayout = computeGroupSharedLayout(*NewF->getParent());
+  if (!GSLayout.Offsets.empty() &&
+      !rewriteGroupSharedGlobals(*NewF, Env.GroupShared, GSLayout))
+    return nullptr;
 
   return NewF;
 }

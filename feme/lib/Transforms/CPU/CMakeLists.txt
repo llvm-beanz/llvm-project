@@ -2,6 +2,7 @@ add_mlir_library(FeMeTransformsCPU
   BuiltinCalls.cpp
   CFGGen.cpp
   EntryWrapper.cpp
+  GroupShared.cpp
   Linearize.cpp
   MaskIntrinsics.cpp
   Prepare.cpp
