@@ -122,9 +122,10 @@ public:
       : F(F), DT(DT), PDT(PDT), CI(CI), UI(UI) {}
 
   /// Validates and then flattens every divergent diamond reachable from
-  /// \p F's entry block without crossing into a cycle. Returns whether \p F
-  /// was changed; a validation failure is diagnosed and leaves \p F
-  /// untouched (returns false).
+  /// \p F's entry block, or from the exit block of any cycle reached along
+  /// the way (see `validate`'s comment), without crossing into a cycle
+  /// itself. Returns whether \p F was changed; a validation failure is
+  /// diagnosed and leaves \p F untouched (returns false).
   bool run();
 
 private:
@@ -137,6 +138,28 @@ private:
   /// Whether \p BB is a cycle header/member -- the boundary this pass never
   /// crosses (see the class comment).
   bool isInCycle(BasicBlock *BB) { return CI.getCycle(BB).isValid(); }
+
+  /// Whether \p Target is one of \p Cur's own cycle's two loop-control
+  /// edges -- a back edge to the cycle's header, or its one edge to the
+  /// cycle's exit block -- as opposed to a branch target that stays
+  /// entirely within the loop body. \p Cur must be a cycle member (see
+  /// `isInCycle`). A two-way branch whose targets are *both* ordinary loop-
+  /// body blocks is a plain nested `if`/`else` this pass flattens like any
+  /// other diamond, wherever it happens to sit; one whose target is either
+  /// of these two edges instead decides the loop's own iteration, which is
+  /// `LoopLinearizer`'s job, not this pass's (see the class comment's "code
+  /// after that cycle" case, and `feme::cpu::LoopLinearizer::
+  /// linearizeCycle`'s own comment for why an internal diamond feeding that
+  /// decision -- as opposed to being the decision itself -- is fine for
+  /// this pass to flatten first).
+  bool isLoopControlEdge(BasicBlock *Cur, BasicBlock *Target) {
+    CycleRef C = CI.getCycle(Cur);
+    if (Target == CI.getHeader(C))
+      return true;
+    SmallVector<BasicBlock *, 2> Exits;
+    CI.getExitBlocks(C, Exits);
+    return llvm::is_contained(Exits, Target);
+  }
 
   /// The immediate post-dominator of \p BB, or `nullptr` if none (should not
   /// happen for a divergent branch once `feme::cpu::verifyStructured` has
@@ -154,8 +177,15 @@ private:
   /// this pass can flatten: every block in it is either a straight-line
   /// unconditional chain, a `ret`, or a two-way branch (uniform or
   /// divergent) with a reconvergence point and exactly two non-trivial
-  /// (non-empty) arms, recursively. Stops (without failing) the moment a
-  /// cycle is reached.
+  /// (non-empty) arms, recursively -- even one entirely inside a cycle, as
+  /// long as neither of its targets is that cycle's own loop-control edge
+  /// (see `isLoopControlEdge`). Stops (without failing) the moment such an
+  /// edge is reached, recording it in `CycleBoundaryBlocks` (see `run`) so
+  /// code after that cycle -- e.g. a divergent diamond branching on a value
+  /// the loop computed, as in a Mandelbrot-style escape-time loop followed
+  /// by a palette lookup -- still gets its own chance at validation instead
+  /// of being silently left unvisited just because it happens to follow a
+  /// loop.
   bool validate(BasicBlock *Start, BasicBlock *End);
 
   /// Mutates the region \p validate already approved, threading \p Mask
@@ -165,14 +195,18 @@ private:
   /// no redirect is needed, e.g. for an outermost or false-side call).
   void flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
                BasicBlock *RedirectTo);
+
+  /// The blocks `validate` stopped at (see its comment) because they were
+  /// cycle members, collected across every root `run` has processed so
+  /// far -- each contributes its cycle's exit block(s) as further roots,
+  /// since a cycle's own body is `LoopLinearizer`'s problem, but the code
+  /// after it is squarely this pass's.
+  SmallPtrSet<BasicBlock *, 8> CycleBoundaryBlocks;
 };
 
 bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
   BasicBlock *Cur = Start;
   while (Cur != End) {
-    if (isInCycle(Cur))
-      return true; // Stop here; LoopLinearizer's problem, not an error.
-
     Instruction *Term = Cur->getTerminator();
     if (isa<ReturnInst>(Term)) {
       if (End != nullptr) {
@@ -197,6 +231,13 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
 
     BasicBlock *T = Br->getSuccessor(0);
     BasicBlock *Fsucc = Br->getSuccessor(1);
+
+    if (isInCycle(Cur) &&
+        (isLoopControlEdge(Cur, T) || isLoopControlEdge(Cur, Fsucc))) {
+      CycleBoundaryBlocks.insert(Cur);
+      return true; // Stop here; LoopLinearizer's problem, not an error.
+    }
+
     BasicBlock *R = immediatePostDom(Cur);
     if (!R) {
       diagnose(F, "divergent branch in '" + Cur->getName() +
@@ -228,8 +269,6 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
 void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
                                BasicBlock *RedirectTo) {
   for (;;) {
-    maskMemoryOps(*Cur, Mask);
-
     if (Cur == End) {
       // A trivial (already-empty) walk: nothing to redirect, `Cur` itself
       // is the join point. Only reachable when this call's own arm has no
@@ -240,6 +279,25 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
     }
 
     Instruction *Term = Cur->getTerminator();
+
+    // Mirrors `validate`'s own cycle-control-edge boundary (see its
+    // comment): this walk must stop here too, matching whatever `validate`
+    // already approved -- leaving the loop's own iteration decision, and
+    // this block's own memory ops (`LoopLinearizer` masks those with the
+    // loop's own "active" mask instead), to `LoopLinearizer`/a later run
+    // instead of misreading it as an ordinary diamond (whose immediate
+    // post-dominator is not simply "the reconvergence point of a two-arm
+    // branch"). A plain nested `if`/`else` entirely inside a loop body is
+    // not this boundary, and falls through to the ordinary flattening
+    // below like any other diamond.
+    if (auto *Br = dyn_cast<CondBrInst>(Term);
+        Br && isInCycle(Cur) &&
+        (isLoopControlEdge(Cur, Br->getSuccessor(0)) ||
+         isLoopControlEdge(Cur, Br->getSuccessor(1))))
+      return;
+
+    maskMemoryOps(*Cur, Mask);
+
     if (isa<ReturnInst>(Term))
       return; // Only reachable at the outermost call (End == nullptr).
 
@@ -257,6 +315,7 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
     auto *Br = cast<CondBrInst>(Term);
     BasicBlock *T = Br->getSuccessor(0);
     BasicBlock *Fsucc = Br->getSuccessor(1);
+
     BasicBlock *R = immediatePostDom(Cur);
 
     if (!UI.isDivergentTerminator(Br)) {
@@ -310,8 +369,30 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
 }
 
 bool DiamondFlattener::run() {
-  if (!validate(&F.getEntryBlock(), nullptr))
-    return false;
+  // Two-phase, whole-function discipline (see the class comment): every
+  // root this pass will flatten -- the entry block, plus the exit block of
+  // any cycle `validate` stopped at along the way (see its comment) -- is
+  // validated before any of them are mutated, so a validation failure
+  // anywhere leaves the whole function untouched rather than partially
+  // flattened. Cycle exit blocks are roots in their own right because a
+  // divergent diamond can follow a loop entirely (e.g. an escape-time loop
+  // followed by a palette lookup branching on whether it converged) --
+  // that diamond is just as much this pass's job as one before any loop,
+  // even though the loop itself is `LoopLinearizer`'s.
+  SmallVector<BasicBlock *, 4> Roots{&F.getEntryBlock()};
+  SmallPtrSet<BasicBlock *, 8> Considered{&F.getEntryBlock()};
+  for (unsigned I = 0; I != Roots.size(); ++I) {
+    CycleBoundaryBlocks.clear();
+    if (!validate(Roots[I], nullptr))
+      return false;
+    for (BasicBlock *CycleBlock : CycleBoundaryBlocks) {
+      SmallVector<BasicBlock *, 2> Exits;
+      CI.getExitBlocks(CI.getCycle(CycleBlock), Exits);
+      for (BasicBlock *Exit : Exits)
+        if (Considered.insert(Exit).second)
+          Roots.push_back(Exit);
+    }
+  }
 
   // A validation pass that found nothing to do is common (most functions
   // have no divergent branch at all); avoid manufacturing an all-active
@@ -319,16 +400,20 @@ bool DiamondFlattener::run() {
   bool HasDivergentBranch = false;
   for (BasicBlock &BB : F) {
     auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
-    if (Br && !isInCycle(&BB) && UI.isDivergentTerminator(Br)) {
-      HasDivergentBranch = true;
-      break;
-    }
+    if (!Br || !UI.isDivergentTerminator(Br))
+      continue;
+    if (isInCycle(&BB) && (isLoopControlEdge(&BB, Br->getSuccessor(0)) ||
+                           isLoopControlEdge(&BB, Br->getSuccessor(1))))
+      continue; // The loop's own iteration decision, not a diamond.
+    HasDivergentBranch = true;
+    break;
   }
   if (!HasDivergentBranch)
     return false;
 
   Value *AllActive = ConstantInt::getTrue(F.getContext());
-  flatten(&F.getEntryBlock(), nullptr, AllActive, nullptr);
+  for (BasicBlock *Root : Roots)
+    flatten(Root, nullptr, AllActive, nullptr);
   return true;
 }
 
@@ -370,8 +455,48 @@ private:
   std::optional<ExitCheck> matchExitCheck(BasicBlock &BB,
                                           BasicBlock *ExitBlock);
 
+  /// Finalizes \p Latch's backedge once its loop-carried "active" mask is
+  /// fully known (\p ActiveAtLatch), returning the resulting backedge
+  /// condition: \p Latch's own natural condition (if it has one -- real,
+  /// uniform control flow the exit check upstream left alone), conjoined
+  /// with `feme.cpu.mask.any` of \p ActiveAtLatch, so a uniform-false
+  /// natural exit still wins and a uniform-true natural continue does not
+  /// resurrect a lane an earlier divergent check already deactivated. \p
+  /// Latch's existing terminator is erased; the caller installs the real
+  /// backedge branch using the returned condition.
+  Value *closeLatch(BasicBlock *Latch, BasicBlock *Header,
+                    Value *ActiveAtLatch);
+
   bool linearizeCycle(CycleRef C);
 };
+
+/// Walks the straight, unconditional chain from \p From (inclusive) to
+/// \p To (exclusive) -- every block in between (but not \p From itself,
+/// which may legitimately have more than one predecessor, e.g. the loop
+/// header's backedge) must be entered only via this chain's previous
+/// block -- returning the blocks visited in order, or `std::nullopt` if
+/// the chain does not reach \p To this way. This is the "straight-line"
+/// requirement `LoopLinearizer::linearizeCycle` places on whatever lies
+/// between the header/latch and a loop's exit check when that check sits
+/// in neither of them directly (see its comment): in particular, the
+/// extra blocks `StructurizeCFG`'s general "Flow" merge-block scheme (or
+/// `feme::cpu::DiamondFlattener`, flattening a divergent diamond that
+/// used to feed the check) can leave behind.
+std::optional<SmallVector<BasicBlock *, 4>> straightChain(BasicBlock *From,
+                                                          BasicBlock *To) {
+  SmallVector<BasicBlock *, 4> Chain;
+  BasicBlock *Cur = From;
+  while (Cur != To) {
+    if (Cur != From && Cur->getUniquePredecessor() == nullptr)
+      return std::nullopt;
+    Chain.push_back(Cur);
+    auto *UBr = dyn_cast<UncondBrInst>(Cur->getTerminator());
+    if (!UBr)
+      return std::nullopt;
+    Cur = UBr->getSuccessor(0);
+  }
+  return Chain;
+}
 
 std::optional<LoopLinearizer::ExitCheck>
 LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
@@ -390,14 +515,40 @@ LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
   return Result;
 }
 
+Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
+                                  Value *ActiveAtLatch) {
+  auto *NaturalBr = dyn_cast<CondBrInst>(Latch->getTerminator());
+  IRBuilder<> B(Latch->getTerminator());
+  Value *AnyActive = createMaskAny(B, ActiveAtLatch, "loop.any.active");
+  Value *Continue;
+  if (NaturalBr) {
+    Value *NaturalCond = NaturalBr->getCondition();
+    bool ContinueOnTrue = NaturalBr->getSuccessor(0) == Header;
+    Value *NaturalContinue =
+        ContinueOnTrue ? NaturalCond : B.CreateNot(NaturalCond);
+    Continue = B.CreateAnd(NaturalContinue, AnyActive, "loop.continue");
+    NaturalBr->eraseFromParent();
+  } else {
+    Continue = AnyActive;
+    Latch->getTerminator()->eraseFromParent();
+  }
+  return Continue;
+}
+
 bool LoopLinearizer::linearizeCycle(CycleRef C) {
-  // This milestone only linearizes the single-exit, single-latch shape
+  // This milestone linearizes the single-exit, single-latch shape
   // `feme::cpu::verifyStructured` guarantees every cycle already has (see
   // its "unique exit block" postcondition): a header and a latch, each
-  // optionally ending in a divergent exit check, with no other blocks in
-  // between (a divergent exit check nested inside a further internal
-  // diamond, as in `loop-continue.ll`'s shape, is deferred -- see the
-  // Status section's milestone 6 deviation note).
+  // optionally ending in a divergent exit check -- or, when neither of them
+  // does, a divergent exit check in exactly one other block reached from
+  // the header, and reaching the latch, each via a plain unconditional
+  // chain (the shape `StructurizeCFG`'s general "Flow" merge-block scheme,
+  // or `feme::cpu::DiamondFlattener` flattening a divergent diamond that
+  // used to feed the check, leaves behind -- see "Loops with a divergent
+  // exit" below and the Status section's milestone 6 deviation note in
+  // feme/docs/FeMeCPUDesign.md). Anything else -- more than one such block,
+  // or one not connected by a straight chain -- is left alone and
+  // diagnosed.
   BasicBlock *Header = CI.getHeader(C);
   SmallVector<BasicBlock *, 2> ExitBlocks;
   CI.getExitBlocks(C, ExitBlocks);
@@ -423,42 +574,43 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     return false;
   }
 
-  // Anything besides "header, optionally the latch too, each with at most
-  // one exit check straight to the shared exit block" is the compound
-  // diamond-inside-loop shape this milestone defers.
-  for (BasicBlock &BB : F) {
-    if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch)
-      continue;
-    if (isa<CondBrInst>(BB.getTerminator())) {
-      diagnose(F, "loop at '" + Header->getName() +
-                      "' has an internal branch in '" + BB.getName() +
-                      "'; only a divergent exit check in the header and/or "
-                      "latch is supported yet (roadmap milestone 6 "
-                      "deviation)");
-      return false;
-    }
-  }
-
-  std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
-  bool HeaderDivergent = HeaderExit && UI.isDivergentTerminator(HeaderExit->Br);
-
   LLVMContext &Ctx = F.getContext();
   Type *I1Ty = Type::getInt1Ty(Ctx);
-  PHINode *ActivePN = PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active");
-  ActivePN->insertBefore(Header->getFirstNonPHIIt());
-  for (BasicBlock *Pred : predecessors(Header))
-    if (!CI.contains(C, Pred))
-      ActivePN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+  auto makeActivePN = [&] {
+    PHINode *PN = PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active");
+    PN->insertBefore(Header->getFirstNonPHIIt());
+    for (BasicBlock *Pred : predecessors(Header))
+      if (!CI.contains(C, Pred))
+        PN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+    return PN;
+  };
 
   if (Header == Latch) {
     // A single-block loop body (see `infinite-loop-divergent-exit.ll`'s
     // shape): the one exit check is simultaneously the header's and the
-    // latch's, so it is linearized in one step rather than two.
-    if (!HeaderDivergent) {
-      ActivePN->eraseFromParent(); // No divergence: leave this real uniform
-                                   // loop alone; undo the speculative phi.
-      return false;
+    // latch's, so it is linearized in one step rather than two. Anything
+    // else in the cycle is the compound diamond-inside-loop shape this
+    // single-block case does not generalize to (see the file comment
+    // above; unlike the header/latch case below, a single-block loop's
+    // exit check has nowhere else to be).
+    for (BasicBlock &BB : F) {
+      if (!CI.contains(C, &BB) || &BB == Header)
+        continue;
+      if (isa<CondBrInst>(BB.getTerminator())) {
+        diagnose(F, "loop at '" + Header->getName() +
+                        "' has an internal branch in '" + BB.getName() +
+                        "'; only a divergent exit check in the header is "
+                        "supported yet for a single-block loop (roadmap "
+                        "milestone 6 deviation)");
+        return false;
+      }
     }
+
+    std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
+    if (!HeaderExit || !UI.isDivergentTerminator(HeaderExit->Br))
+      return false; // No divergence: leave this real uniform loop alone.
+
+    PHINode *ActivePN = makeActivePN();
     maskMemoryOps(*Header, ActivePN);
     IRBuilder<> B(HeaderExit->Br);
     Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(HeaderExit->Cond)
@@ -472,15 +624,82 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     return true;
   }
 
+  std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
   std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
+  bool HeaderDivergent = HeaderExit && UI.isDivergentTerminator(HeaderExit->Br);
   bool LatchDivergent = LatchExit && UI.isDivergentTerminator(LatchExit->Br);
-  if (!HeaderDivergent && !LatchDivergent) {
-    ActivePN->eraseFromParent(); // No divergence: a real uniform loop, left
-                                 // alone; undo the phi this function already
-                                 // inserted speculatively.
-    return false;
+
+  // Every other cycle block, if any, must instead be the single "Flow
+  // merge" exit-check block described above (see the file comment).
+  SmallVector<BasicBlock *, 2> OtherCondBrBlocks;
+  for (BasicBlock &BB : F)
+    if (CI.contains(C, &BB) && &BB != Header && &BB != Latch &&
+        isa<CondBrInst>(BB.getTerminator()))
+      OtherCondBrBlocks.push_back(&BB);
+
+  if (!OtherCondBrBlocks.empty()) {
+    if (OtherCondBrBlocks.size() != 1 || HeaderExit || LatchExit) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" +
+                      OtherCondBrBlocks.front()->getName() +
+                      "'; unsupported (roadmap milestone 6 deviation)");
+      return false;
+    }
+    BasicBlock *CheckBlock = OtherCondBrBlocks.front();
+    std::optional<ExitCheck> CheckExit = matchExitCheck(*CheckBlock, ExitBlock);
+    if (!CheckExit) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" + CheckBlock->getName() +
+                      "' that does not reach the loop's exit block; "
+                      "unsupported (roadmap milestone 6 deviation)");
+      return false;
+    }
+    std::optional<SmallVector<BasicBlock *, 4>> PreChain =
+        straightChain(Header, CheckBlock);
+    std::optional<SmallVector<BasicBlock *, 4>> PostChain =
+        straightChain(CheckExit->StayInLoop, Latch);
+    if (!PreChain || !PostChain) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" + CheckBlock->getName() +
+                      "'; only a straight-line chain to/from the exit "
+                      "check is supported yet (roadmap milestone 6 "
+                      "deviation)");
+      return false;
+    }
+    if (!UI.isDivergentTerminator(CheckExit->Br))
+      return false; // No divergence: leave this real uniform loop alone.
+
+    PHINode *ActivePN = makeActivePN();
+    for (BasicBlock *BB : *PreChain)
+      maskMemoryOps(*BB, ActivePN);
+    maskMemoryOps(*CheckBlock, ActivePN);
+
+    IRBuilder<> CheckBuilder(CheckExit->Br);
+    Value *Staying = CheckExit->ExitOnTrue
+                         ? CheckBuilder.CreateNot(CheckExit->Cond)
+                         : CheckExit->Cond;
+    Value *ActiveAfterCheck =
+        CheckBuilder.CreateAnd(ActivePN, Staying, "active.check");
+    // Never really exit here: always continue toward the latch, letting an
+    // inactive lane's iterations become no-ops instead (see "Loops with a
+    // divergent exit" below).
+    UncondBrInst::Create(CheckExit->StayInLoop, CheckExit->Br->getIterator());
+    CheckExit->Br->eraseFromParent();
+
+    for (BasicBlock *BB : *PostChain)
+      maskMemoryOps(*BB, ActiveAfterCheck);
+    maskMemoryOps(*Latch, ActiveAfterCheck);
+
+    Value *Continue = closeLatch(Latch, Header, ActiveAfterCheck);
+    CondBrInst::Create(Continue, Header, ExitBlock, Latch);
+    ActivePN->addIncoming(ActiveAfterCheck, Latch);
+    return true;
   }
 
+  if (!HeaderDivergent && !LatchDivergent)
+    return false; // No divergence: a real uniform loop, left alone.
+
+  PHINode *ActivePN = makeActivePN();
   Value *ActiveAtLatch = ActivePN;
   maskMemoryOps(*Header, ActivePN);
   if (HeaderDivergent) {
@@ -513,20 +732,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // active" so a uniform-false natural exit still wins, and so a
     // uniform-true natural continue does not resurrect a lane the header's
     // divergent check already deactivated.
-    auto *NaturalBr = dyn_cast<CondBrInst>(Latch->getTerminator());
-    IRBuilder<> B(Latch->getTerminator());
-    Value *AnyActive = createMaskAny(B, ActiveAtLatch, "loop.any.active");
-    if (NaturalBr) {
-      Value *NaturalCond = NaturalBr->getCondition();
-      bool ContinueOnTrue = NaturalBr->getSuccessor(0) == Header;
-      Value *NaturalContinue =
-          ContinueOnTrue ? NaturalCond : B.CreateNot(NaturalCond);
-      Continue = B.CreateAnd(NaturalContinue, AnyActive, "loop.continue");
-      NaturalBr->eraseFromParent();
-    } else {
-      Continue = AnyActive;
-      Latch->getTerminator()->eraseFromParent();
-    }
+    Continue = closeLatch(Latch, Header, ActiveAtLatch);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
   }
 
