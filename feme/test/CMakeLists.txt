@@ -30,6 +30,7 @@ set(FEME_TEST_DEPENDS
   llvm-readobj
   opt
   llvm-objcopy
+  llvm-nm
   obj2yaml
   split-file
   yaml2obj
