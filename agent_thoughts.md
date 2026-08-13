@@ -9414,3 +9414,139 @@ looking at `widenElementwise` in isolation.
 1. `[feme][cpu] Fix null Module dereference in widenElementwise` -- the
    one-line source fix plus explanatory comment.
 2. This file.
+
+# Milestone 11: Traditional bound-resource emulation
+
+## Task
+
+The design doc (feme/docs/FeMeCPUDesign.md, roadmap item 11) called for
+adding `feme::cpu::BoundResourceNormalizationPass`: normalize traditional,
+register-bound resource handles into the CPU target's bindless heap before
+`feme::cpu::ResourceLoweringPass` ever sees them, publish the resulting
+reserved-heap-prefix/source-binding map for a host to consume, teach
+`JITEngine`/`feme-run` to materialize a physical heap from that map plus a
+caller's logical dynamic heap, and retire `feme-run`'s testing-only
+`--dxil-bind-register-resources` bridge once real HLSL tests use the common
+path instead.
+
+## Investigation
+
+Used three parallel `explore` sub-agents to map the existing code before
+writing anything:
+
+1. How DXIL raises `llvm.dx.resource.handlefrombinding` (`OpRaising.cpp`),
+   exactly what `feme::cpu::ResourceLoweringPass` matches today
+   (`handlefromheap` only, `TypedBuffer`/`RawBuffer` kinds only), and how
+   `feme-run`'s existing bridge computed a heap index from a binding.
+2. `RuntimeABI.h`/`FeMeRuntimeCPU.c`/`JITEngine`/`feme-run`'s current
+   dispatch-argument plumbing and the exact pass list `runPipeline` chains.
+3. Test conventions (lit idioms for `feme-opt --llvm -passes=...`, gtest
+   idioms for a `ModulePass`, CMakeLists wiring).
+
+Two design decisions fell out of that investigation rather than being
+planned up front:
+
+- **`handlefrombinding`'s index operand is already zero-based within its
+  range** (`DXILOpLowering::lowerToBindAndAnnotateHandle` biases it by
+  `LowerBound` on the way in; `raiseResourceHandleFromBinding` undoes that
+  bias on the way out). That's exactly the `j` in "array element `j` of a
+  range assigned base `B` maps to `B + j`" -- no extra arithmetic needed to
+  recover it.
+- **Range size 0 is DXIL's own unbounded-array sentinel** (from
+  `DXILOpLowering`'s own `Binding.Size == 0 ? UINT32_MAX : ...` check for
+  the upper bound it encodes), not `UINT32_MAX` at the raised-IR level. That
+  made the unbounded-range rejection a one-line check.
+- **`checkSupportedRaisedOps` runs *before* the CPU pipeline today**, in two
+  places (`Driver.cpp`, `JITEngine.cpp`), both ahead of where
+  `BoundResourceNormalizationPass` needed to run. This forced reordering:
+  the check now runs from *inside* each pipeline shape (`runPipeline`,
+  JITEngine's `--reference` branch), immediately after normalization,
+  rather than being called by the two outer sites at all.
+
+## Implementation, in the order committed
+
+1. **`BoundResourceNormalizationPass`** (feme/lib/Transforms/CPU/
+   BoundResourceNormalization.cpp): collects every `handlefrombinding` call
+   whose handle is `TypedBuffer`/`RawBuffer` (matching
+   `ResourceLoweringPass`'s own narrowing), groups by `(space, register)`
+   identity, rejects an unbounded or conflicting identity by leaving it
+   un-rewritten, assigns the rest contiguous slots sorted by identity, and
+   rewrites each into a range-checked `handlefromheap` call. A subtlety
+   caught by testing rather than review: the pass must offset *native*
+   `handlefromheap` calls (the ones already in the module) by the total
+   prefix size *before* creating its own new `handlefromheap` calls for the
+   bound ranges -- doing it after double-offset the newly-created ones,
+   since they're also `handlefromheap` calls by the time the offsetting
+   loop runs. Caught immediately by manually inspecting `feme-opt` output on
+   a hand-written mixed-resource test case before writing the lit test
+   around it.
+2. **`ResourceInfo`/`ArtifactInfo` v2**: added `ReservedResourceHeapSize`/
+   `BoundRanges`, read from a new `!feme.cpu.bound_resources` metadata node
+   (mirroring `!feme.cpu.resources`'s shape), bumped `ArtifactAbiVersion` to
+   2 with a second counted tail in the serialized layout.
+3. **Pipeline reordering**: moved `checkSupportedRaisedOps` to run after
+   `BoundResourceNormalizationPass` in both pipeline shapes; removed its two
+   prior call sites. Updated its diagnostic message (still contains the
+   substring `"register-bound resource handle"` an existing unit test
+   asserts on) to describe the narrower set of cases that still reach it.
+   Renamed/repurposed `feme-cpu-reject-register-bound.ll` to
+   `feme-cpu-reject-unbounded-register-bound.ll` (a finite range no longer
+   rejects) and added `feme-cpu-accept-bound-resource.ll` for the new
+   accepted case.
+4. **`feme::cpu::materializeResourceHeap`** (new ResourceHeap.h/cpp, part of
+   `FeMeTargetCPU`, *not* `FeMeRuntimeCPU.c`): that file is plain
+   freestanding C, compiled for the shader's own IR with no dynamic
+   allocation and no dependency on FeMe's C++ code, so it has no way to host
+   a `std::vector`-returning, host-side helper -- a deliberate, documented
+   deviation from the milestone text's literal "teach ... libFeMeRuntimeCPU
+   ... to materialize". `JITEngine::DispatchResources` gained a
+   `BoundResources` field; `dispatch()` now always materializes (a no-op
+   passthrough when `ReservedResourceHeapSize == 0`, so no existing JIT
+   behavior changed).
+5. **`feme-run`**: added a `bindings` YAML list (`{space, register,
+   entries: [{index, size, data}]}`), removed
+   `--dxil-bind-register-resources` and its rewrite function entirely, and
+   converted every HLSL test's `register(u0)` heap entry from a
+   `resource-heap` slot to a `bindings` entry, dropping the flag from each
+   RUN line. Output gained a `binding[<space>:<register>][<index>]: ...`
+   line alongside the pre-existing `heap[<index>]: ...`.
+6. **Completion test**: `JITEngineTest.RunsShaderMixingTraditionalAndDynamicResources`
+   (JIT path) plus a new `AOTDispatchTest.cpp` compiling the identical
+   shader through `runPipeline` + `feme::TargetMachineBackend` (the same two
+   steps `Driver::run` chains for the CPU target) to a real object file,
+   loaded with `orc::LLJIT::addObjectFile` (exercising real codegen/object
+   loading, not JITEngine's IR-level JIT compile) and dispatched by calling
+   `feme_cpu_entry_main` directly. Both produce identical results
+   (`{0,1,2,3}` in both the bound and the dynamic buffer), satisfying the
+   design doc's literal completion-test wording.
+7. **Design doc**: marked milestone 11 done in Status/Roadmap, and added
+   Deviation notes for every place the implementation narrowed or diverged
+   from the text (DXIL-only normalization, the pipeline reordering, where
+   `materializeResourceHeap` actually lives, the `bindings` YAML shape vs.
+   the richer `bound-resources` sketch, and `BoundResourceBinding`'s actual
+   shape vs. `SourceBinding`/`BoundDescriptorRange`).
+
+## Verification
+
+- Every commit above was built and its own new/changed tests run in
+  isolation before moving to the next (feme-opt for the pass's lit tests;
+  `FeMeTransformsCPUTests`/`FeMeTargetCPUTests` for unit tests) with
+  assertions-enabled, ccache-accelerated builds
+  (`LLVM_CCACHE_BUILD`/`CMAKE_CXX_COMPILER_LAUNCHER=ccache`,
+  `LLVM_ENABLE_ASSERTIONS=ON` already configured in this build tree).
+- `ninja check-feme` run twice at natural checkpoints (after the pipeline
+  reordering, and again after every remaining commit): 840/849 tests
+  passing both times, 9 unsupported (DirectX target not registered on this
+  host, expected), 0 failures.
+- `clang-format` run on every changed/new file before each commit.
+
+## Commit breakdown
+
+1. `[feme][cpu] Add BoundResourceNormalizationPass`
+2. `[feme][cpu] ResourceInfo/ArtifactInfo v2: publish bound-resource ranges`
+3. `[feme][cpu] Wire BoundResourceNormalizationPass into the CPU pipeline`
+4. `[feme][cpu] Materialize physical resource heaps from bound ranges`
+5. `[feme] feme-run: materialize bound resources; drop testing-only bridge`
+6. `[feme][cpu] Add roadmap milestone 11's completion test (AOT dispatch)`
+7. `[feme][docs] Update FeMeCPUDesign.md for milestone 11 completion`
+8. This file.
