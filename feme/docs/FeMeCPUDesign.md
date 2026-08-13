@@ -5,7 +5,8 @@
 Roadmap milestone 1 (scaffolding + raised-IR contract + ABI header),
 milestone 2 (uniformity analysis), milestone 3 (resource canonicalization +
 scalar helper IR), milestone 4 (uniform-control-flow end-to-end at
-`W = 4`) and milestone 5 (the CFG restructurization test suite) are
+`W = 4`), milestone 5 (the CFG restructurization test suite) and milestone 6
+(linearization for divergent diamonds and loops with a divergent exit) are
 implemented. This document is a companion to
 [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
@@ -222,6 +223,65 @@ it's discussed, and summarized here:
   enables `AllowUnstructured`, so it is a structural (not semantic) check
   over the harness's full breadth rather than just its currently-widenable
   subset.
+
+Deviation: milestone 6's implementation narrowed several things described in
+"Phase 3: Linearization and Predication" below; each is called out inline
+where it's discussed, and summarized here:
+
+- `feme::cpu::LinearizePass` handles exactly two shapes: a **divergent
+  diamond** (a two-way branch whose condition is divergent, with a
+  reconvergence point) and a **loop whose divergent exit check sits directly
+  in its header and/or its latch**. Both are validated (and, on a shape this
+  milestone does not recognize, diagnosed and left completely untouched)
+  before anything is mutated, matching how `feme::cpu::SIMDizePass` already
+  bails rather than mis-widens an unsupported CFG.
+- An **empty diamond arm** (a branch whose true or false successor *is* the
+  reconvergence block itself, i.e. an `if` with no corresponding body on
+  that side) is not supported yet: the general rewrite needs to redirect the
+  edge the branch instruction itself owns rather than a distinct arm
+  block's tail, which adds a case this milestone defers. A nested divergent
+  branch, and a uniform branch nested inside a divergent arm (or vice
+  versa), both work today -- only the empty-arm case is narrowed.
+- **Early `ret` under a divergent branch** (one arm returns directly instead
+  of reconverging) is not supported: in practice this already fails
+  `PostDominatorTree`'s "does every path from this branch reach a common
+  block" property before this pass's own check even runs, since the
+  branch then has no real immediate post-dominator to reconverge at, so it
+  is reported as "no reconvergence point" rather than a dedicated
+  diagnostic. The mask-update-plus-jump-to-a-unified-exit rewrite "Phase 3"
+  describes for this case is still future work.
+- The loop linearizer only recognizes a divergent exit check **directly in
+  the header and/or the latch**, targeting the loop's one shared exit block
+  (guaranteed by `feme::cpu::verifyStructured`'s "unique exit block"
+  postcondition). A divergent check reached through an internal diamond
+  inside the loop body that reconverges back at the latch (the
+  `loop-continue.ll` named shape) is diagnosed and left alone -- and, in
+  practice, so is the more common `loop-break.ll` shape once run through the
+  full `feme-cpu-prepare` pipeline: `StructurizeCFG`'s general "Flow"
+  merge-block scheme restructures even a single header/latch loop into this
+  same internal-diamond form. The `Linearize/loop-break.ll` test exercises
+  the header/latch rewrite directly against already-structured IR instead;
+  generalizing the loop linearizer to see through a `StructurizeCFG`-style
+  internal `Flow` merge is the natural next step, not yet done.
+- **Masking is implemented only for the canonical `feme.cpu.resource.*`
+  calls** (which already carry a mask operand -- see
+  `feme::cpu::ResourceCalls`), by rewriting that operand from the constant
+  `true` `feme::cpu::ResourceLoweringPass` leaves it as to the block's
+  actual mask. Ordinary `load`/`store` under a divergent condition are not
+  yet rewritten into the `feme.cpu.masked.load`/`.store` intrinsic forms
+  "Mask representation between phases" describes -- resource calls are the
+  only memory access the pipeline canonicalizes and executes end to end
+  today, so those intrinsics (and the scalarized-active-lane-loop lowering
+  Phase 4 gives them) are added once Phase 4 actually needs them
+  (roadmap milestone 7). `feme.cpu.mask.any` (needed by the loop
+  linearizer itself, unlike the memory intrinsics) is implemented in
+  `feme/include/feme/Transforms/CPU/MaskIntrinsics.h`.
+- Nested loops (a cycle containing another cycle) are not linearized: only
+  a leaf cycle (one with no child cycle) is considered a candidate.
+- The "skip a block when all lanes are off" guard described as "not emitted
+  in v1" in "Divergent two-way branches become unconditional fallthrough"
+  is, as that section says, still not emitted -- this milestone does not
+  change that.
 
 ## Summary
 
@@ -1754,7 +1814,17 @@ Sequenced so each step is independently testable and useful:
    construct menu, the differential harness's acyclic-uniform-only scope,
    and the fuzzer checking structure rather than execution).
 6. **Linearization** for divergent control flow (straight-line diamonds,
-   then loops).
+   then loops) (done): `feme::cpu::LinearizePass` flattens a divergent
+   two-way branch into masked, unconditional fallthrough with `phi`s
+   replaced by `select`s (nesting either way with a uniform branch), and
+   linearizes a loop whose divergent exit check sits in its header and/or
+   latch into a loop-carried "active" mask gated by `feme.cpu.mask.any`.
+   See the Status section's Deviation note for what narrowed (an empty
+   diamond arm, early return under divergence, a loop's divergent check
+   reached through an internal diamond -- which in practice includes the
+   common `loop-break.ll` shape once `StructurizeCFG` has restructured it --
+   and masking scoped to `feme.cpu.resource.*` calls rather than ordinary
+   `load`/`store`).
 7. **Widening** for the remaining wave sizes, including masked memory ops
    and the scalarization fallback.
 8. **Wave intrinsic lowering**: Phase 5's remaining half, over the mask
