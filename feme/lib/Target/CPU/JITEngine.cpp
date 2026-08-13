@@ -143,6 +143,35 @@ llvm::OptimizationLevel toOptimizationLevel(CodeGenOptLevel Level) {
 
 } // namespace
 
+namespace feme::cpu::detail {
+
+/// `FeMeRuntimeCPU.c`'s externally-visible helpers are given their
+/// canonical dotted `feme.cpu.resource.*`/`feme.cpu.rt.*` names via a GNU
+/// `asm` label (see that file's top comment), since a dotted name is not a
+/// valid C identifier. On Mach-O targets, Clang spells an `asm`-labeled
+/// symbol's LLVM IR name with a leading `'\1'` (SOH) byte, a convention the
+/// AsmPrinter recognizes as "emit this name verbatim, without the
+/// platform's usual global-symbol mangling" (i.e. without Mach-O's leading
+/// underscore) -- see `Mangler::getNameWithPrefix`. That byte is part of
+/// the `GlobalValue`'s actual name, though, so it also defeats the
+/// exact-name matching `Linker::linkInModule(..., LinkOnlyNeeded)` uses
+/// below: the plain (unescaped) declaration `feme::cpu::ResourceCalls`
+/// creates in the shader module never matches the runtime module's
+/// `'\1'`-prefixed definition, so the helper never gets linked in, leaving
+/// the declaration to fail JIT symbol resolution instead. Strip that
+/// leading byte from every global in the freshly-parsed runtime module so
+/// its names line up with the plain canonical names regardless of host
+/// object format.
+void stripAsmLabelManglingEscape(llvm::Module &M) {
+  for (GlobalValue &GV : M.global_values()) {
+    StringRef Name = GV.getName();
+    if (Name.starts_with('\1'))
+      GV.setName(Name.drop_front());
+  }
+}
+
+} // namespace feme::cpu::detail
+
 JITEngine::JITEngine(std::unique_ptr<orc::LLJIT> JIT, void *EntryFn,
                      ResourceInfo Info, unsigned WaveSize,
                      std::array<uint32_t, 3> GroupSize)
@@ -274,6 +303,7 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
       parseBitcodeFile(getRuntimeCPUBitcode(), Mod.getContext());
   if (!RuntimeMod)
     return RuntimeMod.takeError();
+  detail::stripAsmLabelManglingEscape(**RuntimeMod);
   Linker L(Mod);
   if (L.linkInModule(std::move(*RuntimeMod), Linker::Flags::LinkOnlyNeeded))
     return createStringError(inconvertibleErrorCode(),

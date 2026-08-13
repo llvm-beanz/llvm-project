@@ -42,9 +42,12 @@
 #include <memory>
 #include <string>
 
-namespace llvm::orc {
+namespace llvm {
+class Module;
+namespace orc {
 class LLJIT;
-} // namespace llvm::orc
+} // namespace orc
+} // namespace llvm
 
 namespace feme {
 class Context;
@@ -52,6 +55,20 @@ class Module;
 } // namespace feme
 
 namespace feme::cpu {
+
+namespace detail {
+/// `FeMeRuntimeCPU.c`'s externally-visible helpers are given their canonical
+/// dotted `feme.cpu.resource.*`/`feme.cpu.rt.*` names via a GNU `asm` label
+/// (see that file's top comment). On Mach-O targets, Clang spells such a
+/// symbol's LLVM IR name with a leading `'\1'` (SOH) byte that tells the
+/// AsmPrinter to skip the platform's usual global-symbol mangling; since
+/// that byte is part of the `GlobalValue`'s actual name, it also defeats
+/// `JITEngine::create`'s exact-name matching when it links the runtime
+/// module in, so this strips it from every global in \p M first. Exposed
+/// (only) for `JITEngineTest`'s regression coverage of this Mach-O-specific
+/// behavior on hosts that are not themselves Mach-O.
+void stripAsmLabelManglingEscape(llvm::Module &M);
+} // namespace detail
 
 /// Options controlling how `JITEngine::create` compiles and runs a shader.
 /// See "JIT Flow" in feme/docs/FeMeCPUDesign.md.

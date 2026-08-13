@@ -1422,6 +1422,16 @@ cannot reasonably be emitted directly by the transforms:
 - The host-side dispatch loop, so the object-file path has a usable
   `main`-adjacent entry point without every embedder rewriting it.
 
+Each helper keeps its canonical dotted `feme.cpu.resource.*`/`feme.cpu.rt.*`
+name via a GNU `asm` label (a dotted name is not a valid C identifier). On
+Mach-O hosts, Clang spells an `asm`-labeled symbol's LLVM IR name with a
+leading `'\1'` (SOH) byte that tells the AsmPrinter to skip the platform's
+usual global-symbol mangling; since that byte is part of the `GlobalValue`'s
+actual name, `feme::cpu::JITEngine` strips it from every global in the
+parsed runtime module before linking it in, so its names always line up
+with the plain canonical names `feme::cpu::ResourceCalls` declares,
+regardless of host object format.
+
 It deliberately does **not** contain a math library: `llvm.sin` and friends
 lower through the host's normal vector-math handling.
 
