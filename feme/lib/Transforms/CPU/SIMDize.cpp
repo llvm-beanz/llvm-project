@@ -220,6 +220,7 @@ public:
 
 private:
   bool checkSupportedControlFlow();
+  bool checkNoDivergentAggregates();
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
   PHINode *createWidenedPHIStub(PHINode &PN);
@@ -255,6 +256,31 @@ bool FunctionWidener::checkSupportedControlFlow() {
           "' has a divergent branch; the divergence transform "
           "(feme::cpu::LinearizePass) did not remove it, or produced a "
           "shape this pass cannot widen");
+      return false;
+    }
+  }
+  return true;
+}
+
+bool FunctionWidener::checkNoDivergentAggregates() {
+  // "Vectors become components, not nested vectors" in "Phase 4: Widening"
+  // describes decomposing a divergent `<N x T>` (or aggregate) value into
+  // `N` separate `<W x T>` components -- LLVM has no `<W x <N x T>>`. That
+  // decomposition is not yet implemented (still narrowed relative to the
+  // design, the same as the milestone 4 deviation note already flagged);
+  // verify no divergent value has such a type up front and bail with a
+  // diagnostic, matching every other precondition this pass checks before
+  // mutating anything, rather than let `getWidened` build an invalid nested
+  // vector type and assert.
+  for (Instruction &I : instructions(OldF)) {
+    if (!UI.isDivergentAtDef(&I))
+      continue;
+    if (I.getType()->isVectorTy() || I.getType()->isAggregateType()) {
+      OldF.getContext().emitError(
+          "feme-cpu-simdize: function '" + OldF.getName() +
+          "' has a divergent value '" + I.getName() +
+          "' of vector or aggregate type; component decomposition is not "
+          "yet supported (roadmap milestone 7 deviation)");
       return false;
     }
   }
@@ -653,6 +679,8 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 
 Function *FunctionWidener::widen() {
   if (!checkSupportedControlFlow())
+    return nullptr;
+  if (!checkNoDivergentAggregates())
     return nullptr;
 
   NewF = buildWidenedFunction();
