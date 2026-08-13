@@ -14,6 +14,7 @@
 #include "feme/Import/SPIRV/SPIRVImporter.h"
 #include "feme/Optimizer/OptimizerPipeline.h"
 #include "feme/Target/Backend.h"
+#include "feme/Target/CPU/Pipeline.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
@@ -263,19 +264,24 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
   // "Wave Size Selection" (feme/docs/FeMeCPUDesign.md) only has meaning for
   // the CPU target: resolve and record it there, and diagnose (without
   // failing the build) a `--wave-size` given for any other target, where it
-  // is simply ignored.
+  // is simply ignored. `ResolvedWaveSize` is threaded through to
+  // `feme::cpu::runPipeline` below rather than re-resolved there, matching
+  // `feme::cpu::JITEngine::create`'s own resolve-once-then-thread-through
+  // shape.
+  unsigned ResolvedWaveSize = 0;
   if (isCPUTarget(TheTriple)) {
     llvm::Expected<unsigned> WaveSize = feme::cpu::resolveWaveSize(
         Opts.WaveSize, getShaderWaveSizeRequirement(M),
         getHostVectorBits(TheTriple, M));
     if (!WaveSize)
       return WaveSize.takeError();
-    // Recorded as a function attribute on every entry point rather than
-    // consumed here: the CPU pipeline's own passes (not yet implemented,
-    // see the Roadmap) are what read this to select `<W x T>` widening.
+    ResolvedWaveSize = *WaveSize;
+    // Recorded as a function attribute on every entry point too, so a
+    // module dumped between this point and `feme::cpu::runPipeline`
+    // still shows it.
     for (llvm::Function &F : M)
       if (F.hasFnAttribute("hlsl.shader"))
-        F.addFnAttr("feme.cpu.wavesize", std::to_string(*WaveSize));
+        F.addFnAttr("feme.cpu.wavesize", std::to_string(ResolvedWaveSize));
   } else if (Opts.WaveSize) {
     llvm::errs() << "feme: warning: --wave-size is ignored for target '"
                  << *TargetTriple << "' (not the FeMe CPU target)\n";
@@ -312,6 +318,45 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     // lowering then sees as an ordinary function.
     feme::amdgpu::ResourceLoweringPass().run(M, MAM);
     feme::amdgpu::RaisedLoweringPass().run(M, MAM);
+  }
+
+  // A raised module isn't valid input to a real CPU `TargetMachine` either:
+  // like AMDGPU, it still uses format-agnostic `llvm.dx.*`/`llvm.spv.*`
+  // resource/builtin intrinsics (and, unlike AMDGPU, a `target("dx.")`
+  // resource handle type LLVM's generic codegen has no notion of at all --
+  // see `llvm::MVT::getVT`) no in-tree CPU backend understands. Unlike
+  // AMDGPU's single translation pass, the CPU target needs its own full
+  // SPMD-to-scalar/vector lowering pipeline (`feme::cpu::runPipeline`, see
+  // feme/docs/FeMeCPUDesign.md); it is the same pipeline
+  // `feme::cpu::JITEngine::create` runs before JIT-dispatching a shader,
+  // reused here since retargeting to an object file needs exactly the same
+  // lowering, just handed to a `TargetMachine` afterwards instead of ORC.
+  if (isCPUTarget(TheTriple)) {
+    // `TargetMachineBackend::run` normally sets these right before codegen,
+    // but `feme::cpu::runPipeline` links in `libFeMeRuntimeCPU` (see its
+    // own comment) before that point is reached; linking two modules that
+    // each carry a *different, non-empty* target triple/data layout (the
+    // still-DXIL-flavored one this module inherited from import, vs. the
+    // runtime bitcode's host one) is otherwise merely a diagnosed warning,
+    // not an error, but not one any of this pipeline's own output should
+    // ever provoke.
+    std::string LookupError;
+    if (const llvm::Target *TheTarget =
+            llvm::TargetRegistry::lookupTarget(TheTriple, LookupError)) {
+      if (std::unique_ptr<llvm::TargetMachine> TM(
+              TheTarget->createTargetMachine(
+                  TheTriple, /*CPU=*/"", /*Features=*/"", llvm::TargetOptions(),
+                  /*RM=*/std::nullopt));
+          TM) {
+        M.setTargetTriple(TheTriple);
+        M.setDataLayout(TM->createDataLayout());
+      }
+    }
+
+    llvm::Expected<feme::cpu::PipelineResult> Result =
+        feme::cpu::runPipeline(M, /*EntryPoint=*/"", ResolvedWaveSize);
+    if (!Result)
+      return Result.takeError();
   }
 
   BackendOptions BackendOpts;
