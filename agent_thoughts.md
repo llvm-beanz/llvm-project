@@ -9154,3 +9154,106 @@ itself.
    `feme/unittests/Target/CPU/JITEngineTest.cpp`: fix #1 (align the
    runtime bitcode's triple to the shader module's before linking).
 3. This file.
+
+# Follow-up: `feme-cpu-loop.ll`'s Mach-O symbol prefix, and re-checking the `FunctionWidener::widen()` crash
+
+## Task
+
+`check-feme` was reported failing again on the same macOS
+(`arm64-apple-darwin25.5.0`) host, this time with two failures:
+
+1. `Tools/feme/feme-cpu-loop.ll` -- `llvm-nm` now runs (the previous
+   session's `FEME_TEST_DEPENDS` fix held), but its output is
+   `T _feme_cpu_entry_main` (a leading underscore) while the test's
+   `CHECK: T feme_cpu_entry_main` has none.
+2. `Transforms/CPU/simdize-math-libcall.ll` -- the same
+   `FunctionWidener::widen()` segfault as the previous session, byte-for-
+   byte the same backtrace (two identical `widen()` frames), still
+   unresolved from that session's investigation.
+
+## #1: Mach-O's leading-underscore C symbol mangling
+
+`llc --filetype=obj` compiles `feme-cpu-loop.ll`'s DXIL module straight
+to a real object file for `%feme_host_triple`; on a Mach-O host that
+triple's `DataLayout` mangles every global with a leading `_` (this is
+the platform's actual C ABI, not an `llvm-nm` quirk or a bug in `feme`'s
+own emitted IR -- the same object, inspected with `llvm-nm` on an ELF
+host, has no such prefix, which is exactly why this passed in every
+Linux/AArch64 build tried so far and only fails on Mach-O). The test's
+`CHECK: T feme_cpu_entry_main` line simply never accounted for this,
+unlike `feme-cpu-wave-size.ll`'s own Mach-O-vs-ELF handling
+("Fixing feme-cpu-wave-size.ll on non-Linux hosts" above). Fixed by
+loosening the `CHECK` to `T {{_?}}feme_cpu_entry_main`, matching either
+mangling convention -- the symbol's underlying name is exactly the same
+either way, so this is the test being precise about what actually varies
+by platform rather than a real product bug.
+
+## #2: `FunctionWidener::widen()` segfault, re-investigated
+
+Repeated the previous session's investigation from scratch, in case the
+intervening commits (`a8aa0b153e44` "Add nm", or anything else on top of
+`056c5dd6741b`) changed anything relevant -- they did not touch
+`SIMDize.cpp` at all. Confirmed again, on a clean full rebuild
+(assertions-enabled, ccache, `ninja check-feme`):
+
+- `feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S
+  simdize-math-libcall.ll` produces the exact `CHECK`-expected output,
+  every one of 50 repeated runs (ruling out heap-layout/ASLR-dependent
+  nondeterminism from the `DenseMap<Value *, ...>` members `Widened`,
+  `Broadcasts`, and `WidenedVectorComponents` -- none of them are ever
+  iterated in pointer order anywhere in `FunctionWidener`, only looked up
+  by key, so this was worth ruling out explicitly rather than assuming).
+- Reproduced with `ulimit -s 512` (well below Mach-O's default secondary-
+  thread stack size) to rule out a stack-overflow that only a smaller
+  stack would trip; still no crash.
+- Re-read `widen()` and everything it calls
+  (`checkSupportedControlFlow`, `checkVectorDecompositionSupported`,
+  `buildWidenedFunction`, `createWidenedPHIStub`, `widenInstruction` ->
+  `widenElementwise` -> `getWidened`, `fillWidenedPHIIncoming`,
+  `computeGroupSharedLayout`/`rewriteGroupSharedGlobals`) end to end:
+  confirmed again there is exactly one call site of `widen()`
+  (`SIMDizePass::run`'s `Entries` loop, which explicitly snapshots
+  `Entries` before widening to avoid ever re-widening a freshly-built
+  function -- see that function's own comment), and no function in this
+  call graph calls back into `widen()` or into itself. The reported
+  backtrace's two byte-identical `widen()` frames therefore still cannot
+  correspond to real, in-source recursion.
+- `feme/test/CMakeLists.txt`'s `FEME_TEST_DEPENDS` already lists every
+  tool this test's `RUN:` lines need (`feme-opt`, `FileCheck`), so the
+  "missing build dependency -> stale binary" theory that explained the
+  *other* two bugs in the previous session does not apply here either.
+
+This still points at an artifact specific to the reporting machine's
+build (e.g. a `feme-opt` binary left over from before `056c5dd6741b`
+landed, or a `ccache` entry keyed off a header that changed without its
+content hash changing -- both undetectable from this tree). No source
+change was made in `SIMDize.cpp`: three independent verification passes
+across two sessions, with different rebuild states each time, have not
+turned up an actual bug for this one, and inventing a "fix" for a
+transform that already produces the exact `CHECK`-expected output would
+risk masking a real bug elsewhere instead of fixing anything. If this
+recurs, the next concrete step (noted in the previous session, still the
+right one) is a core dump from the *exact* failing binary to identify
+the real crashing frame, since a symbolizer can legitimately fold two
+different, byte-identical-after-icf `static`/anonymous-namespace
+functions to the same reported address.
+
+## Verification
+
+- `ninja feme-opt` then `ninja check-feme` (assertions-enabled, ccache
+  build): 815/824 discovered tests passing, 9 unsupported (the
+  `directx-registered-target`-gated tests, expected on this host), 0
+  failures -- including both originally-reported tests.
+- Re-ran `Tools/feme/feme-cpu-loop.ll` and
+  `Transforms/CPU/simdize-math-libcall.ll` individually with
+  `llvm-lit -v` before and after the `CHECK` fix to confirm the fix (and
+  not some other side effect) is what makes the first test pass, and
+  that the second test was already passing before any change.
+- `clang-format -i` on the changed test file (no changes needed; the
+  edit is a single comment-only `CHECK` line).
+
+## Commit breakdown
+
+1. `feme/test/Tools/feme/feme-cpu-loop.ll`: fix #1 (accept either Mach-O
+   or ELF symbol mangling for `feme_cpu_entry_main`).
+2. This file.
