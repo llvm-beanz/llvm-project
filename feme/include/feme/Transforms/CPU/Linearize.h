@@ -33,9 +33,12 @@
 //
 // See the Status section's milestone 6 deviation note in
 // feme/docs/FeMeCPUDesign.md for what narrowed relative to the full design
-// (e.g. a uniform branch nested inside a divergent arm's arm, an empty
-// diamond arm, and masking ordinary `load`/`store` rather than only the
-// canonical `feme.cpu.resource.*` calls, are all deferred).
+// (e.g. a uniform branch nested inside a divergent arm's arm and an empty
+// diamond arm are deferred). Roadmap milestone 7 additionally masks a plain,
+// non-atomic, non-volatile `load`/`store` inside a masked region into the
+// `feme.cpu.masked.load`/`.store` calls "Mask representation between
+// phases" describes, rather than leaving only `feme.cpu.resource.*` calls
+// masked.
 //
 //===----------------------------------------------------------------------===//
 

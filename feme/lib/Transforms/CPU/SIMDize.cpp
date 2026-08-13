@@ -229,6 +229,10 @@ private:
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
                          IRBuilder<> &Builder);
   void widenMaskAny(CallInst &CI, IRBuilder<> &Builder);
+  void widenMaskedLoad(CallInst &CI, const MatchedMaskedMemOp &Matched,
+                       IRBuilder<> &Builder);
+  void widenMaskedStore(CallInst &CI, const MatchedMaskedMemOp &Matched,
+                        IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
   bool widenInstruction(Instruction &I, IRBuilder<> &Builder);
@@ -475,6 +479,52 @@ void FunctionWidener::widenMaskAny(CallInst &CI, IRBuilder<> &Builder) {
   ToErase.push_back(&CI);
 }
 
+void FunctionWidener::widenMaskedLoad(CallInst &CI,
+                                      const MatchedMaskedMemOp &Matched,
+                                      IRBuilder<> &Builder) {
+  // Every masked load lowers to `llvm.masked.gather` over a `<W x ptr>`
+  // vector of addresses -- correct whether that vector turns out to hold
+  // the same pointer in every lane (`feme::cpu::LinearizePass`'s uniform
+  // address case) or a genuinely different one per lane, so it is used
+  // uniformly here rather than special-casing either. The "Mask
+  // representation between phases" table's finer per-case lowerings (a
+  // broadcast scalar load for a wave-invariant uniform address, a real
+  // `llvm.masked.load` for a contiguous divergent address) are pure
+  // performance work this milestone defers -- see the roadmap's "General
+  // performance work" item -- `llvm.masked.gather` is correct, if not
+  // optimal, for all of them.
+  Value *WideMask = getWidened(Matched.Mask, Builder);
+  Value *EffectiveMask =
+      Builder.CreateAnd(Env.EntryMask, WideMask, "masked.mask");
+  Value *WidePtr = getWidened(Matched.Ptr, Builder);
+  Value *WidePassthru = getWidened(Matched.ValueOperand, Builder);
+
+  Value *Result = Builder.CreateMaskedGather(
+      FixedVectorType::get(CI.getType(), WaveSize), WidePtr,
+      Align(Matched.Align ? Matched.Align : 1), EffectiveMask, WidePassthru,
+      CI.getName());
+  Widened[&CI] = Result;
+  ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenMaskedStore(CallInst &CI,
+                                       const MatchedMaskedMemOp &Matched,
+                                       IRBuilder<> &Builder) {
+  // See `widenMaskedLoad` above: `llvm.masked.scatter` over a `<W x ptr>`
+  // vector of addresses is correct for a uniform or a divergent address
+  // alike, at the cost of the same deferred performance work.
+  Value *WideMask = getWidened(Matched.Mask, Builder);
+  Value *EffectiveMask =
+      Builder.CreateAnd(Env.EntryMask, WideMask, "masked.mask");
+  Value *WidePtr = getWidened(Matched.Ptr, Builder);
+  Value *WideVal = getWidened(Matched.ValueOperand, Builder);
+
+  Builder.CreateMaskedScatter(WideVal, WidePtr,
+                              Align(Matched.Align ? Matched.Align : 1),
+                              EffectiveMask);
+  ToErase.push_back(&CI);
+}
+
 void FunctionWidener::widenScalarizedFallback(Instruction &I,
                                               IRBuilder<> &Builder) {
   // The generic, "always applicable" fallback ("Scalarization fallback" in
@@ -568,6 +618,14 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
     if (isMaskAnyCall(*CI)) {
       widenMaskAny(*CI, Builder);
+      return true;
+    }
+    if (std::optional<MatchedMaskedMemOp> Matched = matchMaskedLoad(*CI)) {
+      widenMaskedLoad(*CI, *Matched, Builder);
+      return true;
+    }
+    if (std::optional<MatchedMaskedMemOp> Matched = matchMaskedStore(*CI)) {
+      widenMaskedStore(*CI, *Matched, Builder);
       return true;
     }
     Intrinsic::ID ID = CI->getCalledFunction()

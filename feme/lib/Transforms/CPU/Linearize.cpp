@@ -54,25 +54,54 @@ void diagnose(Function &F, const Twine &Message) {
                            "': " + Message);
 }
 
-/// Rewrites the mask operand of every `feme.cpu.resource.*` call in \p BB to
-/// \p Mask, so a resource access under a divergent condition never touches
-/// memory on behalf of an invocation that did not take that path (see
-/// "Canonical resource calls are similarly rewritten to masked forms" in
-/// "Phase 3"). Shared between `DiamondFlattener` (a divergent arm's mask)
-/// and `LoopLinearizer` (a loop iteration's "active" mask) below. A no-op
-/// when \p Mask is the all-active constant: nothing outside a divergent
-/// region needs masking.
-void maskResourceCalls(BasicBlock &BB, Value *Mask) {
+/// Rewrites every memory access in \p BB that needs a governing mask once
+/// \p Mask is not the all-active constant: a `feme.cpu.resource.*` call's
+/// existing mask operand is set to \p Mask (see "Canonical resource calls
+/// are similarly rewritten to masked forms" in "Phase 3"), and a plain,
+/// non-atomic, non-volatile `load`/`store` is replaced with the
+/// corresponding `feme.cpu.masked.load`/`.store` call carrying \p Mask (see
+/// "Side-effecting operations ... are rewritten into the masked intrinsic
+/// forms" and "Loads from addresses that could be lane-varying get the same
+/// treatment", also in "Phase 3"; Phase 4 decides, from the address's own
+/// uniformity, whether that becomes a broadcast scalar access, a
+/// scalarized active-lane loop, or a real vector `llvm.masked.*` op -- this
+/// pass always emits the masked form and lets Phase 4 pick). A masked
+/// load's passthru value is zero, matching "Phase 5"'s "FeMe chooses zero
+/// for deterministic reference execution" for any other lane read this
+/// design leaves undefined. Shared between `DiamondFlattener` (a divergent
+/// arm's mask) and `LoopLinearizer` (a loop iteration's "active" mask)
+/// below. A no-op when \p Mask is the all-active constant: nothing outside
+/// a divergent region needs masking.
+void maskMemoryOps(BasicBlock &BB, Value *Mask) {
   if (isa<Constant>(Mask))
     return;
   for (Instruction &I : make_early_inc_range(BB)) {
-    auto *Call = dyn_cast<CallInst>(&I);
-    if (!Call)
+    if (auto *Call = dyn_cast<CallInst>(&I)) {
+      if (std::optional<MatchedResourceCall> Matched = matchResourceCall(*Call))
+        Call->setArgOperand(Call->arg_size() - 1, Mask);
       continue;
-    std::optional<MatchedResourceCall> Matched = matchResourceCall(*Call);
-    if (!Matched)
+    }
+    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      if (!LI->isSimple())
+        continue; // Atomic/volatile: not this milestone's problem yet.
+      IRBuilder<> B(LI);
+      Value *Passthru = Constant::getNullValue(LI->getType());
+      CallInst *Masked =
+          createMaskedLoad(B, LI->getPointerOperand(), LI->getAlign().value(),
+                           Mask, Passthru, LI->getName());
+      LI->replaceAllUsesWith(Masked);
+      LI->eraseFromParent();
       continue;
-    Call->setArgOperand(Call->arg_size() - 1, Mask);
+    }
+    if (auto *SI = dyn_cast<StoreInst>(&I)) {
+      if (!SI->isSimple())
+        continue;
+      IRBuilder<> B(SI);
+      createMaskedStore(B, SI->getValueOperand(), SI->getPointerOperand(),
+                        SI->getAlign().value(), Mask);
+      SI->eraseFromParent();
+      continue;
+    }
   }
 }
 
@@ -199,7 +228,7 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
 void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
                                BasicBlock *RedirectTo) {
   for (;;) {
-    maskResourceCalls(*Cur, Mask);
+    maskMemoryOps(*Cur, Mask);
 
     if (Cur == End) {
       // A trivial (already-empty) walk: nothing to redirect, `Cur` itself
@@ -430,7 +459,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
                                    // loop alone; undo the speculative phi.
       return false;
     }
-    maskResourceCalls(*Header, ActivePN);
+    maskMemoryOps(*Header, ActivePN);
     IRBuilder<> B(HeaderExit->Br);
     Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(HeaderExit->Cond)
                                             : HeaderExit->Cond;
@@ -453,7 +482,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
   }
 
   Value *ActiveAtLatch = ActivePN;
-  maskResourceCalls(*Header, ActivePN);
+  maskMemoryOps(*Header, ActivePN);
   if (HeaderDivergent) {
     IRBuilder<> B(HeaderExit->Br);
     Value *Cond = HeaderExit->Cond;
@@ -466,7 +495,7 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     HeaderExit->Br->eraseFromParent();
   }
 
-  maskResourceCalls(*Latch, ActiveAtLatch);
+  maskMemoryOps(*Latch, ActiveAtLatch);
   Value *ActiveAfterLatchCheck = ActiveAtLatch;
   Value *Continue;
   if (LatchDivergent) {

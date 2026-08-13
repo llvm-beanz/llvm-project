@@ -193,4 +193,58 @@ TEST(SIMDizeTest, ScalarizesAtomicRMWFallback) {
   EXPECT_EQ(AtomicRMWCount, 4u);
 }
 
+TEST(SIMDizeTest, WidensMaskedLoadStoreToGatherScatter) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp eq i32 %tid, 0
+      br i1 %c, label %t, label %f
+    t:
+      %off = zext i32 %tid to i64
+      %addr = getelementptr i32, ptr %p, i64 %off
+      %loaded = load i32, ptr %addr
+      %added = add i32 %loaded, 1
+      store i32 %added, ptr %addr
+      br label %end
+    f:
+      br label %end
+    end:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  feme::cpu::LinearizePass().run(*M, MAM);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundGather = false;
+  bool FoundScatter = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction())
+      continue;
+    switch (CI->getCalledFunction()->getIntrinsicID()) {
+    case Intrinsic::masked_gather:
+      FoundGather = true;
+      break;
+    case Intrinsic::masked_scatter:
+      FoundScatter = true;
+      break;
+    default:
+      break;
+    }
+  }
+  EXPECT_TRUE(FoundGather);
+  EXPECT_TRUE(FoundScatter);
+}
+
 } // namespace
