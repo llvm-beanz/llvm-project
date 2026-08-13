@@ -159,4 +159,81 @@ TEST(ResourceInfoTest, FromResourceInfoCarriesFieldsOver) {
   EXPECT_EQ(Artifact.WaveSize, 0u);
 }
 
+TEST(ResourceInfoTest, FromModuleMergesBoundResourceMetadata) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    !feme.cpu.resources = !{!0}
+    !feme.cpu.bound_resources = !{!1}
+    !0 = !{!"main", i32 0, i1 false, i32 3, i32 5}
+    !1 = !{!"main", i32 8, i32 0, i32 0, i32 8, i32 0}
+  )");
+  ASSERT_TRUE(M);
+
+  std::optional<ResourceInfo> Info = ResourceInfo::fromModule(*M, "main");
+  ASSERT_TRUE(Info);
+  EXPECT_EQ(Info->ReservedResourceHeapSize, 8u);
+  ASSERT_EQ(Info->BoundRanges.size(), 1u);
+  EXPECT_EQ(Info->BoundRanges[0].Space, 0u);
+  EXPECT_EQ(Info->BoundRanges[0].BaseRegister, 0u);
+  EXPECT_EQ(Info->BoundRanges[0].RangeSize, 8u);
+  EXPECT_EQ(Info->BoundRanges[0].HeapBase, 0u);
+}
+
+TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    !feme.cpu.resources = !{!0}
+    !0 = !{!"main", i32 0, i1 false}
+  )");
+  ASSERT_TRUE(M);
+
+  std::optional<ResourceInfo> Info = ResourceInfo::fromModule(*M, "main");
+  ASSERT_TRUE(Info);
+  EXPECT_EQ(Info->ReservedResourceHeapSize, 0u);
+  EXPECT_TRUE(Info->BoundRanges.empty());
+}
+
+TEST(ResourceInfoTest, ArtifactAbiVersionIsTwo) {
+  EXPECT_EQ(ArtifactAbiVersion, 2u);
+}
+
+TEST(ResourceInfoTest, SerializeParseRoundTripsBoundRanges) {
+  ArtifactInfo Info;
+  Info.ReservedResourceHeapSize = 12;
+  Info.BoundRanges = {
+      BoundResourceRange{0, 0, 4, 0},
+      BoundResourceRange{0, 4, 8, 4},
+  };
+
+  std::vector<uint8_t> Bytes = serializeArtifact(Info);
+  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  ASSERT_THAT_EXPECTED(Parsed, Succeeded());
+  EXPECT_EQ(Parsed->ReservedResourceHeapSize, 12u);
+  ASSERT_EQ(Parsed->BoundRanges.size(), 2u);
+  EXPECT_EQ(Parsed->BoundRanges[0].RangeSize, 4u);
+  EXPECT_EQ(Parsed->BoundRanges[1].BaseRegister, 4u);
+  EXPECT_EQ(Parsed->BoundRanges[1].HeapBase, 4u);
+}
+
+TEST(ResourceInfoTest, ParseRejectsInconsistentBoundRangeCount) {
+  ArtifactInfo Info;
+  Info.BoundRanges = {BoundResourceRange{0, 0, 4, 0}};
+  std::vector<uint8_t> Bytes = serializeArtifact(Info);
+  Bytes.pop_back(); // Truncate one bound-range field short.
+  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  EXPECT_THAT_EXPECTED(std::move(Parsed), Failed());
+}
+
+TEST(ResourceInfoTest, FromResourceInfoCarriesBoundRangesOver) {
+  ResourceInfo RI;
+  RI.EntryName = "main";
+  RI.ReservedResourceHeapSize = 4;
+  RI.BoundRanges = {BoundResourceRange{0, 0, 4, 0}};
+
+  ArtifactInfo Artifact = ArtifactInfo::fromResourceInfo(RI);
+  EXPECT_EQ(Artifact.ReservedResourceHeapSize, 4u);
+  ASSERT_EQ(Artifact.BoundRanges.size(), 1u);
+  EXPECT_EQ(Artifact.BoundRanges[0].RangeSize, 4u);
+}
+
 } // namespace

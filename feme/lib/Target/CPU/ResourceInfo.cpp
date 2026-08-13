@@ -18,6 +18,46 @@
 using namespace llvm;
 using namespace feme::cpu;
 
+namespace {
+
+/// Reads \p EntryName's entry from \p M's `!feme.cpu.bound_resources`
+/// metadata (see `attachBoundResourceMetadata` in
+/// BoundResourceNormalization.cpp for the node shape: {name, prefix-size,
+/// (space, register, range-size, heap-base)...}), or `std::nullopt` if that
+/// entry (or the node itself) isn't present -- e.g. because the shader uses
+/// no traditionally-bound resource, so that pass never rewrote it.
+std::optional<std::pair<uint32_t, std::vector<BoundResourceRange>>>
+readBoundResourceMetadata(const Module &M, StringRef EntryName) {
+  const NamedMDNode *MD = M.getNamedMetadata("feme.cpu.bound_resources");
+  if (!MD)
+    return std::nullopt;
+
+  for (const MDNode *Entry : MD->operands()) {
+    if (Entry->getNumOperands() < 2)
+      continue;
+    const auto *Name = dyn_cast<MDString>(Entry->getOperand(0));
+    if (!Name || Name->getString() != EntryName)
+      continue;
+
+    uint32_t PrefixSize = static_cast<uint32_t>(
+        mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue());
+    std::vector<BoundResourceRange> Ranges;
+    for (unsigned I = 2, E = Entry->getNumOperands(); I + 4 <= E; I += 4) {
+      auto GetField = [&](unsigned Offset) {
+        return static_cast<uint32_t>(
+            mdconst::extract<ConstantInt>(Entry->getOperand(I + Offset))
+                ->getZExtValue());
+      };
+      Ranges.push_back(BoundResourceRange{GetField(0), GetField(1), GetField(2),
+                                          GetField(3)});
+    }
+    return std::make_pair(PrefixSize, std::move(Ranges));
+  }
+  return std::nullopt;
+}
+
+} // namespace
+
 std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
                                                      StringRef EntryName) {
   const NamedMDNode *MD = M.getNamedMetadata("feme.cpu.resources");
@@ -43,6 +83,11 @@ std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
     for (unsigned I = 3, E = Entry->getNumOperands(); I != E; ++I)
       Info.StaticHeapIndices.push_back(static_cast<uint32_t>(
           mdconst::extract<ConstantInt>(Entry->getOperand(I))->getZExtValue()));
+
+    if (auto BoundInfo = readBoundResourceMetadata(M, EntryName)) {
+      Info.ReservedResourceHeapSize = BoundInfo->first;
+      Info.BoundRanges = std::move(BoundInfo->second);
+    }
     return Info;
   }
   return std::nullopt;
@@ -54,6 +99,8 @@ ArtifactInfo ArtifactInfo::fromResourceInfo(const ResourceInfo &Info) {
   Artifact.Flags =
       Info.UsesSamplerHeap ? FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP : 0u;
   Artifact.StaticHeapIndices = Info.StaticHeapIndices;
+  Artifact.ReservedResourceHeapSize = Info.ReservedResourceHeapSize;
+  Artifact.BoundRanges = Info.BoundRanges;
   return Artifact;
 }
 
@@ -62,13 +109,19 @@ std::string feme::cpu::getArtifactSymbolName(StringRef EntryName) {
 }
 
 /// The number of fixed (non-tail) `uint32_t` fields the layout has, ahead of
-/// the counted `StaticHeapIndices` tail: version, wave size, 3 group-size
-/// dimensions, groupshared size/align, root constant size, flags, and the
-/// tail's own count.
-constexpr size_t NumFixedFields = 10;
+/// the two counted tails: version, wave size, 3 group-size dimensions,
+/// groupshared size/align, root constant size, flags, the
+/// `StaticHeapIndices` tail's own count, the reserved resource-heap prefix
+/// size, and the `BoundRanges` tail's own count.
+constexpr size_t NumFixedFields = 12;
+
+/// The number of `uint32_t` fields one `BoundResourceRange` serializes to
+/// (its four fields, in declaration order).
+constexpr size_t FieldsPerBoundRange = 4;
 
 std::vector<uint8_t> feme::cpu::serializeArtifact(const ArtifactInfo &Info) {
-  std::vector<uint8_t> Bytes((NumFixedFields + Info.StaticHeapIndices.size()) *
+  std::vector<uint8_t> Bytes((NumFixedFields + Info.StaticHeapIndices.size() +
+                              Info.BoundRanges.size() * FieldsPerBoundRange) *
                              sizeof(uint32_t));
   uint8_t *P = Bytes.data();
   auto WriteNext = [&](uint32_t V) {
@@ -87,6 +140,14 @@ std::vector<uint8_t> feme::cpu::serializeArtifact(const ArtifactInfo &Info) {
   WriteNext(static_cast<uint32_t>(Info.StaticHeapIndices.size()));
   for (uint32_t Idx : Info.StaticHeapIndices)
     WriteNext(Idx);
+  WriteNext(Info.ReservedResourceHeapSize);
+  WriteNext(static_cast<uint32_t>(Info.BoundRanges.size()));
+  for (const BoundResourceRange &Range : Info.BoundRanges) {
+    WriteNext(Range.Space);
+    WriteNext(Range.BaseRegister);
+    WriteNext(Range.RangeSize);
+    WriteNext(Range.HeapBase);
+  }
   return Bytes;
 }
 
@@ -122,18 +183,45 @@ Expected<ArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
   Info.Flags = ReadNext();
   uint32_t NumIndices = ReadNext();
 
-  size_t ExpectedSize =
+  // Two variable-length tails are laid out back to back (`StaticHeapIndices`
+  // then `BoundRanges`), each preceded by its own count -- validate just
+  // enough to safely read up to and including the second tail's own count
+  // field before computing the final expected size below.
+  size_t MinSizeForRangeCount =
       (NumFixedFields + static_cast<size_t>(NumIndices)) * sizeof(uint32_t);
-  if (Bytes.size() != ExpectedSize)
+  if (Bytes.size() < MinSizeForRangeCount)
     return createStringError(inconvertibleErrorCode(),
                              "FeMe CPU artifact's declared heap-index count "
                              "(%u) is inconsistent with its length: expected "
-                             "%zu bytes, got %zu",
-                             NumIndices, ExpectedSize, Bytes.size());
+                             "at least %zu bytes, got %zu",
+                             NumIndices, MinSizeForRangeCount, Bytes.size());
 
   Info.StaticHeapIndices.reserve(NumIndices);
   for (uint32_t I = 0; I != NumIndices; ++I)
     Info.StaticHeapIndices.push_back(ReadNext());
+
+  Info.ReservedResourceHeapSize = ReadNext();
+  uint32_t NumRanges = ReadNext();
+
+  size_t ExpectedSize = (NumFixedFields + static_cast<size_t>(NumIndices) +
+                         static_cast<size_t>(NumRanges) * FieldsPerBoundRange) *
+                        sizeof(uint32_t);
+  if (Bytes.size() != ExpectedSize)
+    return createStringError(inconvertibleErrorCode(),
+                             "FeMe CPU artifact's declared bound-range count "
+                             "(%u) is inconsistent with its length: expected "
+                             "%zu bytes, got %zu",
+                             NumRanges, ExpectedSize, Bytes.size());
+
+  Info.BoundRanges.reserve(NumRanges);
+  for (uint32_t I = 0; I != NumRanges; ++I) {
+    BoundResourceRange Range;
+    Range.Space = ReadNext();
+    Range.BaseRegister = ReadNext();
+    Range.RangeSize = ReadNext();
+    Range.HeapBase = ReadNext();
+    Info.BoundRanges.push_back(Range);
+  }
   return Info;
 }
 

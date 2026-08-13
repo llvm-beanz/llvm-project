@@ -320,8 +320,11 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
                              "shader declares an empty thread group");
 
   std::optional<ResourceInfo> Info = ResourceInfo::fromModule(Mod, EntryName);
-  ResourceInfo ResolvedInfo =
-      Info.value_or(ResourceInfo{EntryName, 0, false, {}});
+  ResourceInfo ResolvedInfo = Info.value_or([&] {
+    ResourceInfo Default;
+    Default.EntryName = EntryName;
+    return Default;
+  }());
 
   OptimizerPipeline().run(Mod,
                           OptimizerOptions{toOptimizationLevel(Opts.OptLevel)});

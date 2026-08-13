@@ -53,6 +53,21 @@ class Module;
 
 namespace feme::cpu {
 
+/// One traditionally-bound resource range's assignment in the reserved heap
+/// prefix `feme::cpu::BoundResourceNormalizationPass` builds (see
+/// "Bound-resource normalization" in feme/docs/FeMeCPUDesign.md): source
+/// register space and base register, the range's declared array length, and
+/// the contiguous base slot it was assigned in the resource heap. A host
+/// materializing a physical heap for a dispatch matches its own bound
+/// resources to one of these by (Space, BaseRegister), then writes array
+/// element `j`'s descriptor at heap index `HeapBase + j`.
+struct BoundResourceRange {
+  uint32_t Space = 0;
+  uint32_t BaseRegister = 0;
+  uint32_t RangeSize = 0;
+  uint32_t HeapBase = 0;
+};
+
 /// One entry point's descriptor-heap usage, as
 /// `feme::cpu::ResourceLoweringPass` discovers it and records in the
 /// `!feme.cpu.resources` named metadata node (see "Heap usage discovery" in
@@ -73,11 +88,23 @@ struct ResourceInfo {
   /// (`RootConstantSize`/`UsesSamplerHeap` cover the parts that are always
   /// knowable), just not as one of these specific indices.
   std::vector<uint32_t> StaticHeapIndices;
+  /// The total size of the reserved resource-heap prefix
+  /// `feme::cpu::BoundResourceNormalizationPass` builds for this shader's
+  /// traditionally-bound resources, or 0 if it uses none (see
+  /// "Bound-resource normalization"). A host materializing a physical
+  /// resource heap must place its logical dynamic heap starting at this
+  /// index (see "Descriptor heaps").
+  uint32_t ReservedResourceHeapSize = 0;
+  /// Each traditionally-bound range's assignment within the reserved
+  /// prefix above.
+  std::vector<BoundResourceRange> BoundRanges;
 
   /// Reads \p EntryName's entry from \p M's `!feme.cpu.resources` metadata,
   /// or `std::nullopt` if that entry (or the node itself) isn't present --
   /// e.g. because \p EntryName's function doesn't access any descriptor-heap
-  /// resource, so `ResourceLoweringPass` never rewrote it.
+  /// resource, so `ResourceLoweringPass` never rewrote it. Also merges in
+  /// \p EntryName's `!feme.cpu.bound_resources` entry, if
+  /// `feme::cpu::BoundResourceNormalizationPass` recorded one.
   static std::optional<ResourceInfo> fromModule(const llvm::Module &M,
                                                 llvm::StringRef EntryName);
 };
@@ -85,7 +112,13 @@ struct ResourceInfo {
 /// The current version of the `ArtifactInfo` byte layout. Bumped whenever
 /// that layout changes incompatibly; `parseArtifact` rejects any other
 /// value rather than guessing at a different field order.
-constexpr uint32_t ArtifactAbiVersion = 1;
+///
+/// Version 2 (roadmap milestone 11) added `ReservedResourceHeapSize` and the
+/// `BoundRanges` counted tail (see "Bound-resource normalization" in
+/// feme/docs/FeMeCPUDesign.md): an AOT host materializing a physical
+/// resource heap for a bound-resource shader needs both to place its bound
+/// descriptors and its logical dynamic heap correctly.
+constexpr uint32_t ArtifactAbiVersion = 2;
 
 /// Bits of `ArtifactInfo::Flags`, mirrored in the serialized byte layout.
 enum ArtifactFlagBits : uint32_t {
@@ -118,6 +151,9 @@ struct ArtifactInfo {
   uint32_t RootConstantSize = 0;
   uint32_t Flags = 0;
   std::vector<uint32_t> StaticHeapIndices;
+  /// See `ResourceInfo::ReservedResourceHeapSize`/`BoundRanges`.
+  uint32_t ReservedResourceHeapSize = 0;
+  std::vector<BoundResourceRange> BoundRanges;
 
   /// Builds the execution-shape-agnostic fields of an `ArtifactInfo` from
   /// \p Info, leaving `WaveSize`/`GroupSize`/`GroupSharedSize`/
