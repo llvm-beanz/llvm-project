@@ -23,6 +23,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please implement milestone 9 of the FeMe CPU target design:
+Now that we have made it through all the major milestones except performance
+tuning, I'd like to work on some wider coverage of feme-run with end-to-end
+tests.
 
-> 9. **Barriers and groupshared memory** (region splitting).
+Please generate a set of end-to-end tests that start with shaders implemented in
+HLSL, compiled to DXIL and SPIRV with Clang, and executed through feme-run to
+verify correct execution.
+
+Particular test cases I'd like you to focus on are loops, divergent control
+flow, wave operations, barriers, groupshared memory and use cases that combine
+all of the above.
