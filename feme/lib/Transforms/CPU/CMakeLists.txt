@@ -12,6 +12,7 @@ add_mlir_library(FeMeTransformsCPU
   SIMDize.cpp
   UnsupportedOps.cpp
   VerifyStructured.cpp
+  WaveCalls.cpp
   WaveLowering.cpp
 
   LINK_COMPONENTS
