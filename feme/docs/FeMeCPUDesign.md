@@ -9,28 +9,23 @@ scalar helper IR), milestone 4 (uniform-control-flow end-to-end at
 (linearization for divergent diamonds and loops with a divergent exit),
 milestone 7 (widening for loops, masked memory ops, and the scalarization
 fallback), milestone 8 (wave intrinsic lowering), milestone 9 (barriers
-and groupshared memory), and milestone 10 (end-to-end HLSL test coverage)
-are implemented. `feme::cpu::runPipeline`
+and groupshared memory), milestone 10 (end-to-end HLSL test coverage), and
+milestone 11 (traditional bound-resource emulation) are implemented.
+`feme::cpu::runPipeline`
 (feme/include/feme/Target/CPU/Pipeline.h) factors the
-Prepare/ResourceLowering/Linearize/SIMDize/WaveLowering/EntryWrapper
-sequence out of `feme::cpu::JITEngine::create` into a function
-`feme::Driver::run`'s own CPU-target retargeting path shares, so `feme
---target=<a non-DXIL/SPIR-V/AMDGPU triple>` retargets a raised shader to a
-real object file the same way `feme --target=amdgcn-amd-amdhsa` already
-did for AMDGPU, rather than handing raised IR straight to a host
-`TargetMachine` that cannot make sense of it. This document is a companion
-to
+Prepare/BoundResourceNormalization/ResourceLowering/Linearize/SIMDize/
+WaveLowering/EntryWrapper sequence out of `feme::cpu::JITEngine::create`
+into a function `feme::Driver::run`'s own CPU-target retargeting path
+shares, so `feme --target=<a non-DXIL/SPIR-V/AMDGPU triple>` retargets a
+raised shader to a real object file the same way `feme
+--target=amdgcn-amd-amdhsa` already did for AMDGPU, rather than handing
+raised IR straight to a host `TargetMachine` that cannot make sense of it.
+This document is a companion to
 [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
 "Raised LLVM IR -> AMDGPU" sections of that document first; this design is
 a sibling of the latter.
-
-The traditional bound-resource emulation described below is the proposed
-next functional milestone and is not implemented yet. The current
-`feme-run --dxil-bind-register-resources` option remains a testing-only DXIL
-bridge until that common DXIL/SPIR-V normalization and runtime materializer
-replace it.
 
 Deviation: milestone 1's implementation narrowed a few things described
 below; each is called out inline where it's discussed, and summarized here:
@@ -47,7 +42,10 @@ below; each is called out inline where it's discussed, and summarized here:
   mechanism (matching one `(bN, spaceM)` binding and lowering it to root
   constant loads instead of rejecting it) is not yet implemented, so the
   exception has nothing to key off yet; the check will start honoring it
-  once "Root constants" lands.
+  once "Root constants" lands. Milestone 11 narrows this further still --
+  see its own Deviation note below -- by normalizing every *other*
+  register-bound handle into a heap access before this check runs, rather
+  than rejecting it.
 - `CreateHandleFromHeap` (DXIL opcode 218) and `WaveGetLaneCount` (opcode
   112) needed wiring in `llvm/lib/Target/DirectX/DXIL.td` and
   `IntrinsicsDirectX.td` before `feme::dxil::OpRaisingPass` could raise
@@ -57,6 +55,43 @@ below; each is called out inline where it's discussed, and summarized here:
   Neither gained a forward-lowering (`DXILOpLowering.cpp`) path, since
   FeMe's raising only needs to parse already-lowered `dx.op.*` calls, not
   produce them.
+- Milestone 11's implementation (`feme::cpu::BoundResourceNormalizationPass`)
+  narrowed the design in several ways:
+  - Only DXIL's `llvm.dx.resource.handlefrombinding` is normalized, and
+    only for the two resource kinds `feme::cpu::ResourceLoweringPass`
+    itself canonicalizes (`TypedBuffer`/`RawBuffer`). `handlefromimplicitbinding`
+    has no in-tree raiser to produce it in the first place, and SPIR-V's
+    `spv.resource.handlefrombinding` has no raised bindless-heap
+    counterpart (`handlefromheap`) to rewrite into: `SPV_EXT_descriptor_heap`
+    remains unraised (see "Resource Model"'s SPIR-V bullet), so SPIR-V
+    binding-range preservation is deferred until that lands upstream and
+    SPIR-V resource access executes through `feme-run` at all (see
+    "Known gap" in Design.md's SPIR-V section).
+  - `feme::cpu::checkSupportedRaisedOps` moved to run *after*
+    `BoundResourceNormalizationPass` (in both `feme::cpu::runPipeline` and
+    `feme::cpu::JITEngine::create`'s `--reference` pipeline) rather than
+    before the CPU pipeline runs at all, since a finite, unambiguous
+    traditional binding is no longer categorically unsupported. An
+    unbounded range, a conflicting re-declaration of the same binding, or
+    an unsupported resource kind is left unrewritten and still rejected by
+    that check, with an updated diagnostic describing all of these cases.
+  - The reserved heap prefix and each accepted range's assignment are
+    published through a new `!feme.cpu.bound_resources` module metadata
+    node (mirroring `!feme.cpu.resources`) and a `feme::cpu::ArtifactInfo`
+    version bump (1 -> 2, adding `ReservedResourceHeapSize`/`BoundRanges`).
+  - Physical-heap materialization
+    (`feme::cpu::materializeResourceHeap`) lives in a new
+    feme/include/feme/Target/CPU/ResourceHeap.h (part of `FeMeTargetCPU`),
+    not in `libFeMeRuntimeCPU`'s `FeMeRuntimeCPU.c` as this milestone's own
+    roadmap text literally suggests: that file is plain freestanding C
+    compiled for the *shader's own* IR (see its file comment), with no
+    dynamic allocation and no dependency on FeMe's C++ code, so it cannot
+    host a `std::vector`-returning, host-side helper. `feme::cpu::JITEngine`
+    and `feme-run` both call this helper instead of duplicating the logic.
+  - Root constants remain unimplemented (see the bullet above); a bound
+    constant buffer is therefore still an unsupported resource kind, not
+    normalized by this pass, matching `feme::cpu::ResourceLoweringPass`'s
+    own scope.
 
 Deviation: milestone 2's implementation narrowed one thing described in
 "Phase 2: Uniformity Analysis" below:
@@ -223,16 +258,17 @@ inline where it's discussed, and summarized here:
   compiles today can never reach the bindless form this CPU target
   otherwise requires (see "Root constants" above), regardless of anything
   in `feme-run` or `feme::Driver`. `feme-run --dxil-bind-register-resources`
-  is a narrow, testing-only bridge around exactly that gap: it rewrites a
+  was a narrow, testing-only bridge around exactly that gap: it rewrote a
   raised `llvm.dx.resource.handlefrombinding` call into
   `llvm.dx.resource.handlefromheap`, mapping the register slot directly
-  onto the same heap index space `--heap`'s YAML file addresses. This is
+  onto the same heap index space `--heap`'s YAML file addressed. It was
   *not* a relaxation of the CPU target's own "no register-bound resource"
-  rejection (`feme::cpu::checkSupportedRaisedOps`, unchanged) -- the bridge
-  runs, opt-in only, inside `feme-run` itself, before the module ever
-  reaches that check. Fixing the underlying gap (Clang HLSL bindless
-  resource support) is upstream Clang work well outside this target's own
-  scope.
+  rejection (`feme::cpu::checkSupportedRaisedOps`) -- the bridge ran,
+  opt-in only, inside `feme-run` itself, before the module ever reached
+  that check. Milestone 11 (below) removed this bridge: a register-bound
+  handle Clang's HLSL front end emits is now normalized into the bindless
+  heap by the common `feme::cpu::BoundResourceNormalizationPass` path every
+  other consumer already uses, rather than by a `feme-run`-only rewrite.
 
   Relatedly, `feme::dxil::OpRaisingPass` gained `raiseRawBufferStore`/
   `raiseRawBufferLoad` (a single-component `dx.op.rawBufferStore`/
@@ -1812,6 +1848,20 @@ Notes and constraints:
 - **Caching**: an `ObjectCache` can be attached so a host can persist
   compiled shaders; the cache key must include the wave size, opt level and
   robustness setting, not just the input hash.
+- **Deviation (milestone 11's implementation)**: the shipped type is
+  `feme::cpu::BoundResourceBinding` (feme/include/feme/Target/CPU/
+  ResourceHeap.h) -- `{Space, BaseRegister, Descriptors}` -- rather than
+  the `SourceBinding`/`BoundDescriptorRange` pair sketched above; DXIL is
+  the only source model with bound-resource handling yet (see the Status
+  section's Deviation note), so there is no other namespace a `Space`/
+  `BaseRegister` pair could collide with today. `materializeResourceHeap`
+  matches each `ResourceInfo::BoundRanges` entry by `(Space,
+  BaseRegister)` and zero-fills an unmatched or short range, but does not
+  itself diagnose a duplicate or oversized `BoundResourceBinding`, or one
+  naming a binding `ResourceInfo` doesn't have -- it silently ignores
+  data outside a declared range's bounds rather than erroring, unlike this
+  section's original text. Making an unknown/malformed binding a host
+  error is possible future work, not required for the completion test.
 - **Object-file path**: the same helper-bitcode link and optimization
   pipeline minus the JIT, through
   `feme::TargetMachineBackend` with the host triple, producing a relocatable
@@ -1993,6 +2043,21 @@ because it is a separate project that happens to reuse this one.
   `resource-heap` describes logical native-dynamic slots. `feme-run` uses
   `ResourceInfo` to materialize both into the physical heap the entry point
   receives, so tests never encode compiler-assigned prefix slots.
+
+  Deviation (milestone 11's implementation): the shipped YAML key is
+  `bindings`, not `bound-resources` above, and each entry is `{space,
+  register, entries: [{index, size, data}]}` -- the same
+  `{index, size, data}` shape `resource-heap` already used, rather than the
+  richer `{class, kind, stride, format, data}` sketched above. Every entry
+  this milestone's heap file format describes is an unstructured,
+  host-writable raw buffer (matching `resource-heap`'s own scope note
+  elsewhere in this document); `class`/`kind`/`stride`/`format` remain
+  future work for whenever `feme-run` grows typed-buffer/format support.
+  The materialization itself matches this section as described:
+  `feme::cpu::materializeResourceHeap` (feme/include/feme/Target/CPU/
+  ResourceHeap.h) builds the physical heap from `ResourceInfo`'s
+  `BoundRanges` and the YAML's `bindings`/`resource-heap` lists, so a test
+  never encodes a compiler-assigned prefix slot.
 
 ### Test strategy per phase
 
@@ -2259,7 +2324,7 @@ Sequenced so each step is independently testable and useful:
    resource access does not yet round-trip through `feme::SPIRVImporter`
    at all (see "Known gap" in Design.md's SPIR-V section), independent of
    anything in this milestone.
-11. **Traditional bound-resource emulation**: add
+11. **Traditional bound-resource emulation** (done): add
   `feme::cpu::BoundResourceNormalizationPass`, preserve finite DXIL and
   SPIR-V binding-range metadata through raising/import, publish the reserved
   heap prefixes and source-binding map through `ResourceInfo` and the next
@@ -2271,6 +2336,12 @@ Sequenced so each step is independently testable and useful:
   binding, a native dynamic slot, and both in one module, with identical
   results through JIT and AOT runtime dispatch. No change is permitted below
   `ResourceLoweringPass`: a bound handle reaching it is a pipeline error.
+  See the Status section's Deviation note for what narrowed (DXIL
+  `handlefrombinding` only -- neither `handlefromimplicitbinding` nor
+  SPIR-V's binding form, since SPIR-V has no raised bindless-heap
+  counterpart yet; the physical-heap materializer lives in a new
+  `feme::cpu::ResourceHeap.h`, not literally in `FeMeRuntimeCPU.c`, which is
+  freestanding shader-side code and cannot host it).
 12. **Resource performance**: recognize uniform descriptor calls, hoist
   descriptor/format checks, emit vector fast paths, and measure whether a
   divergent-descriptor waterfall or JIT heap-shape specialization pays for
