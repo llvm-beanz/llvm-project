@@ -1,11 +1,16 @@
 set(LLVM_LINK_COMPONENTS
   AsmParser
   Core
+  MC
+  OrcJIT
   Support
+  Target
   TestingSupport
+  native
   )
 
 add_feme_unittest(FeMeTargetCPUTests
+  AOTDispatchTest.cpp
   JITEngineTest.cpp
   ResourceHeapTest.cpp
   ResourceInfoTest.cpp
@@ -14,5 +19,7 @@ add_feme_unittest(FeMeTargetCPUTests
 target_link_libraries(FeMeTargetCPUTests
   PRIVATE
   FeMeCore
+  FeMeOptimizer
+  FeMeTarget
   FeMeTargetCPU
   )
