@@ -26,44 +26,34 @@ if it already exists, and commit it in its own commit when you're done.
 The tests are currently failing. Please fix the issues:
 
 ```
-[40/41] Running the feme regression tests
-FAIL: FEME :: Transforms/CPU/simdize-math-libcall.ll (5 of 713)
-******************** TEST 'FEME :: Transforms/CPU/simdize-math-libcall.ll' FAILED ********************
-Exit Code: 2
-
-Command Output (stdout):
---
-# RUN: at line 1
-/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
-# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
-# .---command stderr------------
-# | PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and instructions to reproduce the bug.
-# | Stack dump:
-# | 0.  Program arguments: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
-# | 1.  Running pass "feme-cpu-simdize" on module "/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll"
-# |  #0 0x0000000100a0815c llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1003e015c)
-# |  #1 0x0000000100a05f00 llvm::sys::RunSignalHandlers() (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1003ddf00)
-# |  #2 0x0000000100a08c68 SignalHandler(int, __siginfo*, void*) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1003e0c68)
-# |  #3 0x000000018536f744 (/usr/lib/system/libsystem_platform.dylib+0x1804fb744)
-# |  #4 0x0000000100cc5bb0 (anonymous namespace)::FunctionWidener::widen() (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10069dbb0)
-# |  #5 0x0000000100cc5bb0 (anonymous namespace)::FunctionWidener::widen() (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10069dbb0)
-# |  #6 0x0000000100cc3760 feme::cpu::SIMDizePass::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10069b760)
-# |  #7 0x00000001008425c0 llvm::PassManager<llvm::Module, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10021a5c0)
-# |  #8 0x000000010062a4c4 main (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1000024c4)
-# |  #9 0x0000000184fa7e00
-# `-----------------------------
-# error: command failed with exit status: -11
-# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
-# .---command stderr------------
-# | FileCheck error: '<stdin>' is empty.
-# | FileCheck command line:  /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
-# `-----------------------------
-# error: command failed with exit status: 2
-
---
-
-********************
-********************
-Failed Tests (1):
-  FEME :: Transforms/CPU/simdize-math-libcall.ll
+cbieneman@MacBook-Pro-3 ~/d/l/build-dbg (cbieneman/feme)> bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
+/Users/cbieneman/dev/llvm-project/llvm/lib/IR/Intrinsics.cpp:806:33: runtime error: member call on null pointer of type 'llvm::Module'
+SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior /Users/cbieneman/dev/llvm-project/llvm/lib/IR/Intrinsics.cpp:806:33
+PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and instructions to reproduce the bug.
+Stack dump:
+0.      Program arguments: bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
+1.      Running pass "feme-cpu-simdize" on module "/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll"
+Stack dump without symbol names (ensure you have llvm-symbolizer in your PATH or set the environment var `LLVM_SYMBOLIZER_PATH` to point to it):
+0  feme-opt                            0x0000000104c0e9f8 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) + 108
+1  feme-opt                            0x0000000104c0fd70 PrintStackTraceSignalHandler(void*) + 112
+2  feme-opt                            0x0000000104c09378 llvm::sys::RunSignalHandlers() + 524
+3  feme-opt                            0x0000000104c13dc0 SignalHandler(int, __siginfo*, void*) + 328
+4  libsystem_platform.dylib            0x000000018536f744 _sigtramp + 56
+5  libsystem_pthread.dylib             0x00000001853658d8 pthread_kill + 296
+6  libsystem_c.dylib                   0x000000018526c644 abort + 148
+7  libclang_rt.ubsan_osx_dynamic.dylib 0x000000017029c298 __sanitizer::Atexit(void (*)()) + 0
+8  libclang_rt.ubsan_osx_dynamic.dylib 0x000000017029b890 __sanitizer::Die() + 108
+9  libclang_rt.ubsan_osx_dynamic.dylib 0x000000017027f6c0 __ubsan_handle_alignment_assumption + 0
+10 feme-opt                            0x0000000103ae2ecc llvm::Intrinsic::getOrInsertDeclaration(llvm::Module*, unsigned int, llvm::ArrayRef<llvm::Type*>) + 80
+11 feme-opt                            0x0000000105c8a358 (anonymous namespace)::FunctionWidener::widenElementwise(llvm::Instruction&, llvm::IRBuilder<llvm::ConstantFolder, llvm::IRBuilderDefaultInserter>&) + 940
+12 feme-opt                            0x0000000105c7fad0 (anonymous namespace)::FunctionWidener::widenInstruction(llvm::Instruction&, llvm::IRBuilder<llvm::ConstantFolder, llvm::IRBuilderDefaultInserter>&) + 2656
+13 feme-opt                            0x0000000105c78cac (anonymous namespace)::FunctionWidener::widen() + 2232
+14 feme-opt                            0x0000000105c78134 feme::cpu::SIMDizePass::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) + 1252
+15 feme-opt                            0x0000000102eaca44 llvm::detail::PassModel<llvm::Module, feme::cpu::SIMDizePass, llvm::AnalysisManager<llvm::Module>>::runImpl(llvm::detail::PassConcept<llvm::Module, llvm::AnalysisManager<llvm::Module>>&, llvm::Module&, llvm::AnalysisManager<llvm::Module>&) + 264
+16 feme-opt                            0x0000000103e52248 llvm::detail::PassConcept<llvm::Module, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) + 284
+17 feme-opt                            0x0000000103e5139c llvm::PassManager<llvm::Module, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) + 1032
+18 feme-opt                            0x0000000102e8b230 (anonymous namespace)::runLLVMIRMode(int, char**) + 1864
+19 feme-opt                            0x0000000102e8a7dc main + 544
+20 dyld                                0x0000000184fa7e00 start + 6992
+fish: Job 1, 'bin/feme-opt --llvm -passes=fem…' terminated by signal SIGABRT (Abort)
 ```
