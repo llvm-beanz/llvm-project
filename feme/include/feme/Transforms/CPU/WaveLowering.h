@@ -17,9 +17,14 @@
 // `feme.cpu.builtin.*` calls `feme::cpu::SIMDizePass` introduces (thread id,
 // thread id in group, flattened thread id in group, lane index) into real
 // `<W x i32>` arithmetic over the wave-body's group id/wave index
-// parameters and a compile-time-constant lane iota. The remaining wave
-// intrinsics (`WaveActiveSum`, ...) are milestone 8 -- see
-// WaveLowering.cpp's file comment for the two halves' independence.
+// parameters and a compile-time-constant lane iota. Roadmap milestone 8
+// adds the "wave op half": lowering the `feme.cpu.wave.*` calls
+// `feme::cpu::SIMDizePass` introduces for a raised wave intrinsic (other
+// than `wave.getlaneindex`, a builtin) into the vector reduction/scan/
+// broadcast arithmetic each one stands in for -- see WaveLowering.cpp's
+// file comment for exactly which wave intrinsics that covers, and why some
+// (`WaveActiveSum`, `WaveActiveBallot`, `WavePrefixSum`, ...) are still
+// left untouched.
 //
 //===----------------------------------------------------------------------===//
 
