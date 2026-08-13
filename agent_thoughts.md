@@ -8705,3 +8705,182 @@ Added test coverage at both levels this bug spans:
 2. `dxil-raise-resource-handles.ll`, `dxil-raise-resource-heap-handles.ll`,
    `dxil-raise-resource-handles-roundtrip.ll`: regression test coverage.
 3. This file.
+
+# Compiling a real Mandelbrot compute shader through the FeMe CPU target CLI
+
+## Task
+
+Compile a real, DXC-produced Mandelbrot compute shader (bindless
+`RWBuffer<float4>` via `ResourceDescriptorHeap`, an escape-time iteration
+loop with a divergent `break`, and a post-loop palette lookup driven by
+whether the loop escaped) to DXIL with DXC, then compile that DXIL to
+`aarch64-apple-darwin` with `bin/feme --target=aarch64-apple-darwin
+mandelbrot.dxbc -o -`, identifying and fixing whatever broke.
+
+## Finding #1: `feme::Driver` never actually retargeted to the CPU target
+
+The very first crash (`Unknown target ext type!` /
+`llvm::MVT::getVT` `UNREACHABLE`) traced back to a much bigger gap than a
+single bad type: `feme::Driver::run`'s CPU-target branch (`isCPUTarget`)
+only resolved the wave size and ran `checkSupportedRaisedOps` -- it never
+actually ran the CPU lowering pipeline
+(`PreparePass`/`ResourceLoweringPass`/`LinearizePass`/`SIMDizePass`/
+`WaveLoweringPass`/`EntryWrapperPass`) before handing the still-fully-raised
+module (complete with `target("dx.TypedBuffer", ...)` handle types and
+`llvm.dx.*` intrinsics) straight to a generic `TargetMachine`. That pipeline
+already existed and was fully tested -- but only wired into
+`feme::cpu::JITEngine::create` (the `feme-run` JIT path), never into the
+`feme` CLI's own `Driver`. `feme/test/Tools/feme/feme-cpu-wave-size.ll`'s
+own comment ("the CPU pipeline's resource/builtin lowering passes are
+future roadmap milestones") confirms this was a known, if under-stated,
+gap rather than a regression.
+
+Fix: factored the non-`--reference` half of `JITEngine::create`'s pipeline
+(the passes above, plus linking `libFeMeRuntimeCPU`) out into a new,
+shared `feme::cpu::runPipeline` (`feme/include/feme/Target/CPU/Pipeline.h`,
+`feme/lib/Target/CPU/Pipeline.cpp`), and call it from both `JITEngine`
+(a small, behavior-preserving refactor -- verified via the full `feme-run`
+test suite) and `feme::Driver::run`'s CPU-target branch, right after
+`IntrinsicExpansionPass` (already unconditional for non-DXIL targets, so
+CPU already got it) and before the `OptimizerPipeline`/`TargetMachineBackend`
+steps AMDGPU/SPIR-V/DXIL retargeting already share. Also had to set the
+module's target triple/data layout *before* `runPipeline` runs (rather than
+`TargetMachineBackend::run`'s usual, later spot), since `runPipeline` links
+in `libFeMeRuntimeCPU` -- linking two modules with mismatched non-empty
+triples/layouts is a diagnosed `Linker` warning, which `feme-cpu-wave-size.ll`
+already asserted never happens.
+
+## Finding #2: `DiamondFlattener` had no cycle-boundary check in its mutating half
+
+With the CPU pipeline actually running, the next crash was a `pred_iterator
+out of range` assertion inside `feme::cpu::DiamondFlattener::flatten`.
+`DiamondFlattener::validate` (the read-only pass) correctly stops at a
+cycle's boundary ("stop here; `LoopLinearizer`'s problem, not an error"),
+but `flatten` (the mutating pass that walks the exact same shape `validate`
+already approved) had **no matching check at all** -- it happily treated
+the loop header's own divergent exit-check branch as an ordinary diamond,
+computed a nonsensical "reconvergence point", and walked off the end of
+that block's (too-short) predecessor list. This is a real, independent bug:
+`validate`/`flatten` had silently drifted out of sync, and would crash on
+any raised, divergent loop, retargeted to the CPU target from any caller
+(not just `feme::Driver`'s newly-added path) once `LinearizePass` ran
+against a shader whose loop header holds a divergent exit check.
+
+## Finding #3: the crash uncovered was actually two missing *capabilities*, not just a crash
+
+Fixing #2 as a minimal "stop at the cycle boundary, matching `validate`"
+patch only turned the crash into a clean diagnostic
+(`LoopLinearizer`: "has an internal branch in 'Flow3'; only a divergent
+exit check in the header and/or latch is supported yet") -- the Mandelbrot
+shader's actual shape still didn't compile. Two follow-on gaps, both
+already anticipated by name in the design doc's milestone 6 deviation notes
+but not yet implemented, were blocking it:
+
+1. **A divergent diamond entirely *after* a loop** (the palette lookup,
+   branching on whether the escape-time loop diverged) was never even
+   *visited* by `DiamondFlattener`: its single-entry-block traversal
+   stopped for good the moment it reached the loop, so nothing after the
+   loop was ever validated or flattened, silently. Fixed by having
+   `DiamondFlattener::validate` record every cycle boundary it stops at,
+   and `DiamondFlattener::run` treat each such cycle's exit block as an
+   additional root to validate/flatten from (in the same
+   validate-everything-then-mutate-everything, whole-function-affecting
+   order the class's "leaves the function untouched on failure" contract
+   already relies on).
+2. **A loop's real exit check living in neither the header nor the latch**
+   (the `StructurizeCFG`-inserted "Flow" merge block the design doc's own
+   `loop-break.ll` test comment already named as the *common* case once a
+   shader goes through the real `feme-cpu-prepare` pipeline, not just the
+   header/latch-only shape the dedicated unit test exercises directly).
+   Fixed in two parts:
+   - `DiamondFlattener` was generalized to distinguish a genuine
+     loop-control edge (a branch target that is the cycle's own header
+     -- a back edge -- or its unique exit block) from an ordinary nested
+     `if`/`else` that happens to sit *inside* a loop body: only the former
+     stops this pass now, so the diamond `StructurizeCFG` builds for a
+     divergent `break` (reconverging at the "Flow" block that holds the
+     *real* exit decision) gets flattened first, just like any other
+     diamond.
+   - `LoopLinearizer::linearizeCycle` was generalized to locate the loop's
+     one real exit check in *any* single cycle-internal block reachable
+     from the header, and reaching the latch, each via a plain
+     unconditional chain -- not only literally the header or the latch --
+     masking the straight-line blocks in between with the right "active"
+     mask value as it goes. The existing header/latch-only code paths are
+     untouched (this is purely an additional case), and `closeLatch` was
+     factored out of the pre-existing "latch has its own natural,
+     non-divergent condition" logic so the new case could reuse it instead
+     of duplicating it a third time.
+
+Both fixes are deliberately narrow generalizations of an existing,
+documented shape, not new designs of their own -- `feme/docs/
+FeMeCPUDesign.md`'s milestone 6 deviation note was updated to describe the
+new, wider scope (and to stop pointing at the old TODO, since it's done).
+The previously-`unsupported-loop-internal-branch.ll`/`loop-continue.ll`
+shape (a divergent *continue*, whose "skip this iteration" arm jumps
+directly to the reconvergence block with **no body of its own** -- an
+"empty diamond arm") is still correctly rejected: that is
+`DiamondFlattener`'s own pre-existing, separately-documented empty-arm
+narrowing, not something either of these two fixes touches or claims to
+close.
+
+## Where it stands
+
+`bin/feme --target=aarch64-apple-darwin mandelbrot.dxbc -o -` no longer
+crashes anywhere in FeMe's own code, and gets substantially further:
+resource lowering, the escape-time loop (including its `StructurizeCFG`-
+restructured divergent `break`), and the post-loop palette-index diamond
+all linearize successfully now. It still does not fully compile:
+`feme::cpu::SIMDizePass` diagnoses (cleanly, not a crash) `float3 Color`'s
+divergent, vector-typed value ("has a divergent value ... of vector or
+aggregate type; component decomposition is not yet supported"). This is
+`feme::cpu::SIMDizePass`'s own, pre-existing, explicitly-documented gap
+("Vector/aggregate leaf decomposition is not implemented ... a substantial
+follow-up of its own, not yet scheduled against a specific future
+milestone" -- see the milestone 7 deviation note in
+`feme/docs/FeMeCPUDesign.md`), unrelated to anything this session touched:
+widening a divergent `<N x T>` value requires splitting it into `N`
+separate `<W x T>` components (LLVM has no `<W x <N x T>>`), which is a
+real, scoped design of its own -- not a bug, and out of proportion to fix
+as a side effect of this task. Recommending it as the natural next roadmap
+item for whoever picks up full HLSL-shader-with-vector-math CPU-target
+support.
+
+## Verification
+
+- `ninja check-feme` (assertions-enabled, ccache build): 818/818 passing
+  (815 pre-existing + 3 new).
+- Manually reproduced every fixed crash/gap with `feme-opt
+  -passes=feme-cpu-linearize` (and, for the "Flow merge" shape,
+  `-passes=feme-cpu-prepare,feme-cpu-linearize`) against hand-reduced IR
+  matching the Mandelbrot shader's own structure, confirming each one
+  crashed/silently-mis-lowered before its respective fix and
+  linearizes/diagnoses cleanly after.
+- Re-ran the actual `mandelbrot.dxbc` (from real `dxc -T cs_6_6`) through
+  `bin/feme --target=aarch64-apple-darwin` after every fix to confirm
+  forward progress and no new crashes, ending at the `SIMDizePass`
+  diagnostic described above.
+
+## Commit breakdown
+
+1. `feme/lib/Target/CPU/{Pipeline.h,Pipeline.cpp,CMakeLists.txt}`,
+   `JITEngine.cpp`: factor `JITEngine`'s non-`--reference` CPU pipeline out
+   into shared `feme::cpu::runPipeline`.
+2. `feme/lib/Driver/Driver.cpp`: wire `feme::cpu::runPipeline` into
+   `feme::Driver::run`'s CPU-target retargeting path, and set the module's
+   target triple/data layout before it runs.
+3. `feme/lib/Transforms/CPU/Linearize.cpp`: fix `DiamondFlattener::flatten`'s
+   missing cycle-boundary check (the crash fix).
+4. `feme/lib/Transforms/CPU/Linearize.cpp`: generalize `DiamondFlattener` to
+   validate/flatten from every cycle's exit block, not just the function
+   entry (diamonds after a loop).
+5. `feme/lib/Transforms/CPU/Linearize.cpp`: generalize `DiamondFlattener`
+   to flatten a plain diamond fully inside a loop body, and
+   `LoopLinearizer::linearizeCycle` to find the loop's exit check in a
+   third, `StructurizeCFG`-style "Flow" block.
+6. `feme/test/Tools/feme/feme-cpu-loop.ll`,
+   `feme/test/Transforms/CPU/Linearize/{diamond-after-loop,
+   loop-break-structurized}.ll`: regression test coverage.
+7. `feme/docs/{Design.md,FeMeCPUDesign.md}`: documentation updates
+   reflecting the above.
+8. This file.
