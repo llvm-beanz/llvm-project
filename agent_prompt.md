@@ -23,69 +23,116 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-There is a build of DXC at the path
-/home/dev/dev/DirectXShaderCompiler/build-rel.
-
-Please use that DXC to compile this shader:
+The tests are currently failing. Please fix the issues:
 
 ```
-const static float3 Palette[8] = {float3(0.0, 0.0, 0.0), float3(0.5, 0.5, 0.5),
-                                  float3(1.0, 0.5, 0.5), float3(0.5, 1.0, 0.5),
-                                  float3(0.5, 0.5, 1.0), float3(0.5, 1.0, 1.0),
-                                  float3(1.0, 0.5, 1.0), float3(1.0, 1.0, 0.5)};
+[1/3] Running the feme regression tests
+FAIL: FEME :: Tools/feme/feme-cpu-wave-size.ll (21 of 712)
+******************** TEST 'FEME :: Tools/feme/feme-cpu-wave-size.ll' FAILED ********************
+Exit Code: 1
 
-const static int Dimension = 4096;
+Command Output (stdout):
+--
+# RUN: at line 2
+/Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-wave-size.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.dxcontainer
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-wave-size.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.dxcontainer
+# RUN: at line 8
+/Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 --wave-size=8 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.o 2>&1 | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-wave-size.ll --check-prefix=NO-DIAG --allow-empty
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 --wave-size=8 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.o
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-wave-size.ll --check-prefix=NO-DIAG --allow-empty
+# .---command stderr------------
+# | /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-wave-size.ll:10:16: error: NO-DIAG-NOT: excluded string found in input
+# | ; NO-DIAG-NOT: warning
+# |                ^
+# | <stdin>:1:1: note: found here
+# | warning: Linking two modules of different target triples: 'libFeMeRuntimeCPU' is 'arm64-apple-macosx26.0.0' whereas '/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.dxcontainer' is 'arm64-apple-darwin25.5.0'
+# | ^~~~~~~
+# |
+# | Input file: <stdin>
+# | Check file: /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-wave-size.ll
+# |
+# | -dump-input=help explains the following input dump.
+# |
+# | Input was:
+# | <<<<<<
+# |           1: warning: Linking two modules of different target triples: 'libFeMeRuntimeCPU' is 'arm64-apple-macosx26.0.0' whereas '/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-wave-size.ll.tmp.dxcontainer' is 'arm64-apple-darwin25.5.0'
+# | not:10'0    {                                                                       search range start (exclusive)
+# | not:10'1     !~~~~~~                                                                       error: no match expected
+# |           2:
+# | not:10'2      } search range end (exclusive)
+# | >>>>>>
+# `-----------------------------
+# error: command failed with exit status: 1
 
-[numthreads(1024, 1, 1)] void main(uint3 DID
-                                   : SV_DispatchThreadID) {
-  RWBuffer<float4> Tex = ResourceDescriptorHeap[0];
-  float scale = 1.5 / pow(2.0, 16.0 * abs(sin(0.25 / 16.0)));
-  float2 offset = float2(-1.0, 0.0);
-  uint2 Index =
-      uint2(DID.x % Dimension, DID.x / Dimension + (Dimension * DID.y));
-  uint2 DispatchSize = Dimension.xx;
-  float X0 =
-      scale * (2.0 * (float)Index.x / (float)DispatchSize.x - 1.5) + offset.x;
-  float Y0 =
-      scale * (2.0 * (float)Index.y / (float)DispatchSize.y - 1.0) + offset.y;
+--
 
-  // Implement Mandelbrot set
-  float X = X0;
-  float Y = Y0;
-  uint Iteration = 0;
-  uint MaxIteration = 2000;
-  float XTmp = 0.0;
-  bool Diverged = false;
-  for (; Iteration < MaxIteration; ++Iteration) {
-    if (X * X + Y * Y > 2000 * 2000) {
-      Diverged = true;
-      break;
-    }
-    XTmp = X * X - Y * Y + X0;
-    Y = 2 * X * Y + Y0;
-    X = XTmp;
-  }
+********************
+FAIL: FEME :: Tools/feme/feme-cpu-loop.ll (22 of 712)
+******************** TEST 'FEME :: Tools/feme/feme-cpu-loop.ll' FAILED ********************
+Exit Code: 127
 
-  float3 Color = float3(0, 0, 0);
-  if (Diverged) {
-    float Gradient = 1.0;
-    float Smooth = log2(log2(X * X + Y * Y) / 2.0);
-    float ColorIdx = sqrt((float)Iteration + 10.0 - Smooth) * Gradient;
-    float LerpSize = frac(ColorIdx);
-    LerpSize = LerpSize * LerpSize * (3.0 - 2.0 * LerpSize);
-    int ColorIdx1 = (int)ColorIdx % 8;
-    int ColorIdx2 = (ColorIdx1 + 1) % 8;
-    Color = lerp(Palette[ColorIdx1], Palette[ColorIdx2], LerpSize.xxx);
-  }
+Command Output (stdout):
+--
+# RUN: at line 2
+/Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-loop.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.dxcontainer
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/llc /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-loop.ll --filetype=obj -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.dxcontainer
+# RUN: at line 16
+/Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.o
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme --target=arm64-apple-darwin25.5.0 /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.dxcontainer -o /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.o
+# .---command stderr------------
+# | warning: Linking two modules of different target triples: 'libFeMeRuntimeCPU' is 'arm64-apple-macosx26.0.0' whereas '/Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.dxcontainer' is 'arm64-apple-darwin25.5.0'
+# |
+# `-----------------------------
+# RUN: at line 17
+llvm-nm /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.o | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Tools/feme/feme-cpu-loop.ll
+# executed command: llvm-nm /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/test/Tools/feme/Output/feme-cpu-loop.ll.tmp.o
+# .---command stderr------------
+# | 'llvm-nm': command not found
+# `-----------------------------
+# error: command failed with exit status: 127
 
-  Tex[DID.x] = float4(Color, 1.0);
-}
+--
+
+********************
+FAIL: FEME :: Transforms/CPU/simdize-math-libcall.ll (34 of 712)
+******************** TEST 'FEME :: Transforms/CPU/simdize-math-libcall.ll' FAILED ********************
+Exit Code: 2
+
+Command Output (stdout):
+--
+# RUN: at line 1
+/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll | /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
+# .---command stderr------------
+# | PLEASE submit a bug report to https://github.com/llvm/llvm-project/issues/ and include the crash backtrace and instructions to reproduce the bug.
+# | Stack dump:
+# | 0.  Program arguments: /Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
+# | 1.  Running pass "feme-cpu-simdize" on module "/Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll"
+# |  #0 0x000000010268415c llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1003e015c)
+# |  #1 0x0000000102681f00 llvm::sys::RunSignalHandlers() (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1003ddf00)
+# |  #2 0x0000000102684c68 SignalHandler(int, __siginfo*, void*) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1003e0c68)
+# |  #3 0x000000018536f744 (/usr/lib/system/libsystem_platform.dylib+0x1804fb744)
+# |  #4 0x0000000102941bb0 (anonymous namespace)::FunctionWidener::widen() (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10069dbb0)
+# |  #5 0x0000000102941bb0 (anonymous namespace)::FunctionWidener::widen() (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10069dbb0)
+# |  #6 0x000000010293f760 feme::cpu::SIMDizePass::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10069b760)
+# |  #7 0x00000001024be5c0 llvm::PassManager<llvm::Module, llvm::AnalysisManager<llvm::Module>>::run(llvm::Module&, llvm::AnalysisManager<llvm::Module>&) (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x10021a5c0)
+# |  #8 0x00000001022a64c4 main (/Users/cbieneman/dev/llvm-project/build-rel/bin/feme-opt+0x1000024c4)
+# |  #9 0x0000000184fa7e00
+# `-----------------------------
+# error: command failed with exit status: -11
+# executed command: /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
+# .---command stderr------------
+# | FileCheck error: '<stdin>' is empty.
+# | FileCheck command line:  /Users/cbieneman/dev/llvm-project/build-rel/bin/FileCheck /Users/cbieneman/dev/llvm-project/feme/test/Transforms/CPU/simdize-math-libcall.ll
+# `-----------------------------
+# error: command failed with exit status: 2
+
+--
+
+********************
+********************
+Failed Tests (3):
+  FEME :: Tools/feme/feme-cpu-loop.ll
+  FEME :: Tools/feme/feme-cpu-wave-size.ll
+  FEME :: Transforms/CPU/simdize-math-libcall.ll
 ```
-
-Using the command line `dxc -T cs_6_6 mandelbrot.hlsl -Fo mandelbrot.dxbc`
-
-The generated DXIL file `mandelbrot.dxbc` fails to compile with feme using the
-command `bin/feme --target=aarch64-apple-darwin mandelbrot.dxbc -o -`
-
-Please identify and address the issues. Please continue iterating and resolving
-issues until this test case works.
