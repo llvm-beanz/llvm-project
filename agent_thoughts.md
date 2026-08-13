@@ -7842,3 +7842,207 @@ entry in `feme/docs/FeMeCPUDesign.md`.
 3. `Linearize.{h,cpp}`, `LinearizeTest.cpp`, the loop-shape `lit` tests, and
    the design doc updates: loop linearization, completing the milestone.
 4. This file.
+
+# Milestone 7: Widening for loops, masked memory ops, and the scalarization fallback
+
+## Approach
+
+Re-read the roadmap entry ("Widening for the remaining wave sizes, including
+masked memory ops and the scalarization fallback") against the actual
+deviation notes milestones 4-6 left behind, since the literal wording is
+ambiguous on its own. The cross-references were unambiguous, though: the
+milestone 5 deviation note says explicitly "divergent branches and loops are
+exactly what the linearizer (milestone 6) and the remaining widening work
+(milestone 7) will make widenable," and milestone 4's own deviation note
+lists exactly what it deferred: "Masked memory ops, the scalarization
+fallback for arbitrary instructions, atomics, and vector/aggregate leaf
+decomposition are milestone 7." So "the remaining wave sizes" in the roadmap
+title is best read as "the remaining widening work" -- i.e. generalizing
+`feme::cpu::SIMDizePass` beyond milestone 4's acyclic-only restriction, now
+that `feme::cpu::LinearizePass` (milestone 6) exists to feed it linearized
+loops -- not literally about testing more values of `W` (the pass was
+already fully parametric in `W`; only `W = 4` had test coverage, which I
+didn't treat as this milestone's job to fix broadly).
+
+I broke this into six independently-testable, separately-committed pieces,
+each verified against `ninja check-feme` before moving to the next:
+
+1. **Classify `feme.cpu.mask.any` as always-uniform** in `WaveTTIImpl`. This
+   had to come first: without it, a linearized loop's mask-gated backedge
+   branch is classified *divergent* by the generic call-uniformity rule
+   (its operand -- the loop-carried mask -- is genuinely divergent), which
+   would make `SIMDizePass`'s existing "no divergent branch" precondition
+   reject every linearized loop outright. I nearly missed this dependency
+   and started on loop widening directly; the uniformity printer test
+   caught the wrong classification before I'd wasted time debugging the
+   widener itself. One subtlety: `feme.cpu.mask.any` is an ordinary
+   `CallInst`, not an `IntrinsicInst`, so it needs its own name-based check
+   in `getValueUniformity` ahead of the intrinsic-ID switch, not a case
+   added to that switch.
+
+2. **Widen a loop in `SIMDizePass`.** This was the crux of the milestone and
+   took three real bugs to get right, none of which I predicted up front:
+
+   - **PHI incoming-value ordering.** The milestone 4 code built a widened
+     `phi`'s incoming values inline, immediately after creating its stub,
+     while walking blocks in reverse post-order. That's fine acyclically
+     (every predecessor is visited first), but a loop header's backedge
+     value comes from the latch, which RPO visits *after* the header. The
+     old code would silently broadcast the *old*, soon-to-be-replaced
+     scalar backedge value instead of referencing its real widened form.
+     Fix: split into three passes -- create every divergent `phi`'s
+     (empty) wide stub first, across the *whole* function; then widen
+     every non-`phi` instruction; then fill in every `phi`'s incoming
+     values, by which point every value referenced anywhere has its final
+     widened form in the `Widened` map.
+
+   - **Erasure order became a genuine cycle.** Once a loop header's old
+     `phi` and its own backedge-computing instruction can each hold a
+     `Value` use of the other (the `phi`'s incoming-from-latch operand
+     uses the backedge value; nothing stops the reverse being true too in
+     general), no linear erasure order works -- LLVM's `eraseFromParent`
+     asserts if any use remains. I hit this as a real crash
+     (`llvm_unreachable` in `Value::~Value`), not something I anticipated
+     from reading the code. Fix: poison out every old widened `phi`'s
+     incoming operands *after* pass 3 has read them, breaking the cycle,
+     then erase everything else in reverse of the function's actual
+     top-to-bottom layout order (which does have the right "uses before
+     defs" property once the cycle is gone).
+
+   - **Broadcast insertion point for a `phi` operand.** `getWidened`'s
+     "broadcast a uniform value at first use" logic inserted the splat
+     right after the instruction being broadcast. For a uniform `phi`
+     specifically, "right after" can land in the middle of a block's other
+     `phi`s, violating "every `phi` must be grouped at the top of its
+     block" and failing the verifier (a different bug from the two above,
+     caught the same way -- by actually running `feme-opt`'s own verifier
+     against real linearized+widened IR, not just hand-checking my own
+     reasoning). Fixed by special-casing `PHINode` operands to broadcast
+     at the block's first non-`phi` insertion point instead.
+
+   I found all three by writing a tiny standalone debug harness (parse IR,
+   run `LinearizePass` then `SIMDizePass`, print without going through
+   `feme-opt`'s `verifyModule` call) once `feme-opt`'s own abort made it
+   hard to see the *intermediate*, invalid IR that caused it. That harness
+   was more useful for root-causing these than staring at the pass source
+   alone would have been -- seeing the actual malformed output (e.g. the
+   broadcast inserted between two `phi`s) made each bug obvious in a way
+   the code reading did not.
+
+   Also fixed a **pre-existing latent bug** exposed by loop widening, not
+   something loops introduced: `widenResourceCall` ignored a
+   `feme.cpu.resource.*` call's own (possibly divergent) mask operand
+   entirely, always ANDing only the wave's entry mask into each lane. This
+   was harmless at milestone 4 (nothing had masked a resource call with
+   anything but the constant `true` yet), but once `LinearizePass` started
+   masking resource calls inside a loop body with a *real* divergent mask
+   (next item), a resource call whose only divergent operand was its own
+   mask stopped being scalarized at all (the `AnyDivergent` check never
+   looked at `Matched.Mask`), leaving a stale reference to an
+   about-to-be-erased value. Fixed both: AND the call's own mask in, and
+   include it in the `AnyDivergent` check.
+
+3. **Mask resource calls inside a linearized loop's body.**
+   `DiamondFlattener` already rewrote a `feme.cpu.resource.*` call's mask
+   operand for a divergent diamond's arm; `LoopLinearizer` never did the
+   equivalent for a loop's header/latch. Extracted the shared helper out of
+   `DiamondFlattener` and called it from `LoopLinearizer` too, with the
+   iteration's "active" mask (header) or the mask after the header's own
+   exit check (latch).
+
+4. **Add `feme.cpu.masked.load`/`.store` intrinsic helpers.** Mechanical,
+   mirroring `feme.cpu.resource.*`'s existing mangling/builder/matcher
+   pattern in `ResourceCalls.{h,cpp}`, matching the design doc's literal
+   declaration example.
+
+5. **Mask ordinary `load`/`store` in `LinearizePass`, widen them to
+   `llvm.masked.gather`/`.scatter` in `SIMDizePass`.** Generalized the same
+   shared helper from item 3 into `maskMemoryOps`, converting a plain
+   (non-atomic, non-volatile) `load`/`store` into the new masked call. For
+   widening, I deliberately did *not* implement the design's full
+   three-way lowering split (broadcast scalar load / scalarized store loop
+   for a uniform address, `llvm.masked.load`/`.store` for a *contiguous*
+   divergent address, gather/scatter for an arbitrary one): detecting
+   contiguity robustly needs pattern-matching the pre-widening address
+   expression for a lane-affine stride, which is real, separate work the
+   roadmap already earmarks as later "General performance work" (item 11)
+   rather than a correctness requirement of this milestone.
+   `llvm.masked.gather`/`.scatter` over a `<W x ptr>` vector (broadcasting
+   a uniform pointer into an identical-every-lane vector when needed) is
+   correct for every case the design's table distinguishes, just not
+   optimal for the common ones -- a documented, explicit trade I noted in
+   both the code comments and the design doc's new deviation note rather
+   than silently narrowing.
+
+6. **Generic scalarization fallback.** Replaced the milestone 4 hard error
+   for an unsupported divergent instruction with a real per-lane
+   clone-and-reassemble loop, generic enough to cover atomics without special
+   casing them. I did special-case one thing: a generic divergent `CallInst`
+   is excluded and still errors, because the callee is one of the
+   instruction's own `operands()`, and the generic fallback's
+   extract-per-lane loop would otherwise try to "broadcast" a function
+   pointer through `ConstantVector::getSplat` -- caught by reasoning about
+   the code rather than by a crash, since I added the guard before testing
+   it, having just been burned by the analogous PHI/erasure bugs above.
+
+## A bug found and fixed, but explicitly not "solved"
+
+While testing, I found that a divergent value of vector type (`<4 x
+float>`) crashes `getWidened` (`FixedVectorType::get` asserting on a nested
+vector element type) -- this is exactly "vector/aggregate leaf
+decomposition," which the design describes as splitting such a value into
+`N` separate `<W x T>` components, since LLVM has no `<W x <N x T>>`. Fully
+implementing that is a substantial redesign of `FunctionWidener`'s core
+`Widened` map (from `Value* -> Value*` to `Value* -> SmallVector<Value*>`)
+touching every widening helper, and I judged it out of scope for this pass
+given the time budget. What I did instead: turned the crash into a clean,
+diagnosed error (`checkNoDivergentAggregates`, checked up front alongside
+the existing control-flow precondition), so the pass fails safely rather
+than aborting, and documented the gap explicitly in the design doc rather
+than leaving milestone 4's stale "milestone 7" cross-reference in place
+uncorrected. I considered this the right call: a diagnosed limitation is
+much better than either a crash or a silent scope-narrowing I don't flag.
+
+## Validation
+
+`ninja check-feme` (Release, assertions on, ccache) after every commit:
+774/774 (100%) by the end, up from the 759/759 baseline, including 12 new
+`lit` tests and 5 new `gtest` cases (a new `MaskIntrinsicsTest.cpp` plus
+three additions to `SIMDizeTest.cpp`). Manually verified several
+intermediate pipeline outputs (`feme-opt -passes=feme-cpu-linearize,feme-cpu-simdize
+-S`) against `feme-opt`'s own module verifier before writing the
+corresponding `lit` `CHECK` lines, rather than trusting my own trace-through
+of the widening algorithm on paper -- this is what caught the three loop
+bugs in item 2 above.
+
+## Design doc
+
+Updated the Status section (milestone 7 marked done, with its own Deviation
+note covering everything narrowed above) and the roadmap's milestone 7
+entry in `feme/docs/FeMeCPUDesign.md`. Also corrected two now-stale forward
+references in the milestone 4 and milestone 6 deviation notes that pointed
+at "milestone 7" as future work, and added a note to the milestone 5
+deviation that the CFG differential harness's scope has not grown to match
+now that loops and divergent branches are both widenable (out of scope for
+this milestone specifically).
+
+## Commit breakdown
+
+1. `WaveUniformity.cpp`, `MaskIntrinsics.{h,cpp}`, `uniformity.ll`:
+   classify `feme.cpu.mask.any` as always-uniform.
+2. `SIMDize.cpp`, `simdize-loop*.ll`, `SIMDizeTest.cpp`: widen a linearized
+   loop (three-pass PHI handling, cyclic-erasure fix, broadcast-insertion
+   fix, `feme.cpu.mask.any` lowering, and the `widenResourceCall` mask fix).
+3. `Linearize.cpp`, `Linearize/loop-resource-mask.ll`,
+   `simdize-loop-resource-mask.ll`: mask resource calls inside a loop body.
+4. `MaskIntrinsics.{h,cpp}`, `MaskIntrinsicsTest.cpp`: `feme.cpu.masked.load`/
+   `.store` helpers.
+5. `Linearize.cpp`, `Linearize/load-store-masked.ll`, `SIMDize.cpp`,
+   `simdize-masked-memop-{divergent,uniform}.ll`, `SIMDizeTest.cpp`: mask
+   ordinary `load`/`store`, widen to gather/scatter.
+6. `SIMDize.cpp`, `simdize-scalarize-atomic.ll`, `SIMDizeTest.cpp`: generic
+   scalarization fallback.
+7. `SIMDize.cpp`, `simdize-vector-unsupported.ll`: diagnose (rather than
+   crash on) a divergent vector/aggregate value.
+8. `FeMeCPUDesign.md`: mark milestone 7 done, correct stale cross-references.
+9. This file.
