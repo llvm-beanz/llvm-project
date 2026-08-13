@@ -6,33 +6,37 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Roadmap milestone 6, first half: divergent diamonds (see the header
-// comment for the overall two-shape scope -- loops with a divergent exit
-// are added in a following commit) and the Status section's milestone 6
-// deviation note in feme/docs/FeMeCPUDesign.md for what narrowed.
+// Roadmap milestone 6. See the header comment for the two shapes this
+// implements (divergent diamonds, loops with a divergent exit) and the
+// Status section's milestone 6 deviation note in
+// feme/docs/FeMeCPUDesign.md for what narrowed.
 //
-// The transform is a read-only validation walk over the original CFG
-// (using `UniformityInfo`/`DominatorTree`/`PostDominatorTree`/`CycleInfo`
-// computed once, up front) that either confirms the shape this pass
-// supports, or bails with a diagnostic and leaves the function completely
-// untouched; followed by a mutation walk that only runs once validation for
-// the whole function succeeds, so a partially-rewritten function is never
-// left behind.
+// Both transforms share the same two-step structure: a read-only validation
+// walk over the original CFG (using `UniformityInfo`/`DominatorTree`/
+// `PostDominatorTree`/`CycleInfo` computed once, up front) that either
+// confirms the shape this pass supports and records what it needs, or bails
+// with a diagnostic and leaves the function completely untouched; and a
+// mutation walk that only runs once validation for the whole function
+// succeeds, so a partially-rewritten function is never left behind.
 //
 //===----------------------------------------------------------------------===//
 
 #include "feme/Transforms/CPU/Linearize.h"
 
 #include "feme/Analysis/CPU/WaveUniformity.h"
+#include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Casting.h"
@@ -299,6 +303,222 @@ bool DiamondFlattener::run() {
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// Loops with a divergent exit.
+//===----------------------------------------------------------------------===//
+
+/// Linearizes a loop whose only divergent control is an exit check in its
+/// header and/or its latch (see the file comment above): the natural
+/// backedge condition, if any, is conjoined with `feme.cpu.mask.any` of a
+/// loop-carried "active" mask that a divergent exit check updates instead of
+/// really branching away.
+class LoopLinearizer {
+public:
+  LoopLinearizer(Function &F, CycleInfo &CI, UniformityInfo &UI)
+      : F(F), CI(CI), UI(UI) {}
+
+  /// Validates and linearizes every leaf cycle in \p F matching the shape
+  /// this pass supports. Returns whether \p F was changed.
+  bool run();
+
+private:
+  Function &F;
+  CycleInfo &CI;
+  UniformityInfo &UI;
+
+  /// The exit-check shape a single loop block can have: a conditional
+  /// branch where exactly one successor is the loop's shared exit block and
+  /// the other stays inside the loop.
+  struct ExitCheck {
+    CondBrInst *Br = nullptr;
+    Value *Cond = nullptr;
+    BasicBlock *StayInLoop = nullptr;
+    bool ExitOnTrue = false;
+  };
+
+  /// Recognizes \p BB's terminator as an `ExitCheck` targeting \p ExitBlock,
+  /// or `std::nullopt` if it isn't a conditional branch to/from it at all.
+  std::optional<ExitCheck> matchExitCheck(BasicBlock &BB,
+                                          BasicBlock *ExitBlock);
+
+  bool linearizeCycle(CycleRef C);
+};
+
+std::optional<LoopLinearizer::ExitCheck>
+LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
+  auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
+  if (!Br)
+    return std::nullopt;
+  if (Br->getSuccessor(0) != ExitBlock && Br->getSuccessor(1) != ExitBlock)
+    return std::nullopt;
+
+  ExitCheck Result;
+  Result.Br = Br;
+  Result.Cond = Br->getCondition();
+  Result.ExitOnTrue = Br->getSuccessor(0) == ExitBlock;
+  Result.StayInLoop =
+      Result.ExitOnTrue ? Br->getSuccessor(1) : Br->getSuccessor(0);
+  return Result;
+}
+
+bool LoopLinearizer::linearizeCycle(CycleRef C) {
+  // This milestone only linearizes the single-exit, single-latch shape
+  // `feme::cpu::verifyStructured` guarantees every cycle already has (see
+  // its "unique exit block" postcondition): a header and a latch, each
+  // optionally ending in a divergent exit check, with no other blocks in
+  // between (a divergent exit check nested inside a further internal
+  // diamond, as in `loop-continue.ll`'s shape, is deferred -- see the
+  // Status section's milestone 6 deviation note).
+  BasicBlock *Header = CI.getHeader(C);
+  SmallVector<BasicBlock *, 2> ExitBlocks;
+  CI.getExitBlocks(C, ExitBlocks);
+  if (ExitBlocks.size() != 1)
+    return false; // Not this pass's problem to diagnose; verifyStructured
+                  // owns that postcondition and should already have failed.
+  BasicBlock *ExitBlock = ExitBlocks.front();
+
+  BasicBlock *Latch = nullptr;
+  for (BasicBlock *Pred : predecessors(Header)) {
+    if (!CI.contains(C, Pred))
+      continue;
+    if (Latch) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has more than one latch; unsupported (roadmap "
+                      "milestone 6 deviation)");
+      return false;
+    }
+    Latch = Pred;
+  }
+  if (!Latch) {
+    diagnose(F, "loop at '" + Header->getName() + "' has no latch");
+    return false;
+  }
+
+  // Anything besides "header, optionally the latch too, each with at most
+  // one exit check straight to the shared exit block" is the compound
+  // diamond-inside-loop shape this milestone defers.
+  for (BasicBlock &BB : F) {
+    if (!CI.contains(C, &BB) || &BB == Header || &BB == Latch)
+      continue;
+    if (isa<CondBrInst>(BB.getTerminator())) {
+      diagnose(F, "loop at '" + Header->getName() +
+                      "' has an internal branch in '" + BB.getName() +
+                      "'; only a divergent exit check in the header and/or "
+                      "latch is supported yet (roadmap milestone 6 "
+                      "deviation)");
+      return false;
+    }
+  }
+
+  std::optional<ExitCheck> HeaderExit = matchExitCheck(*Header, ExitBlock);
+  bool HeaderDivergent = HeaderExit && UI.isDivergentTerminator(HeaderExit->Br);
+
+  LLVMContext &Ctx = F.getContext();
+  Type *I1Ty = Type::getInt1Ty(Ctx);
+  PHINode *ActivePN = PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active");
+  ActivePN->insertBefore(Header->getFirstNonPHIIt());
+  for (BasicBlock *Pred : predecessors(Header))
+    if (!CI.contains(C, Pred))
+      ActivePN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+
+  if (Header == Latch) {
+    // A single-block loop body (see `infinite-loop-divergent-exit.ll`'s
+    // shape): the one exit check is simultaneously the header's and the
+    // latch's, so it is linearized in one step rather than two.
+    if (!HeaderDivergent) {
+      ActivePN->eraseFromParent(); // No divergence: leave this real uniform
+                                   // loop alone; undo the speculative phi.
+      return false;
+    }
+    IRBuilder<> B(HeaderExit->Br);
+    Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(HeaderExit->Cond)
+                                            : HeaderExit->Cond;
+    Value *ActiveNext = B.CreateAnd(ActivePN, Staying, "active.next");
+    Value *Continue = createMaskAny(B, ActiveNext, "loop.continue");
+    CondBrInst::Create(Continue, HeaderExit->StayInLoop, ExitBlock,
+                       HeaderExit->Br->getIterator());
+    HeaderExit->Br->eraseFromParent();
+    ActivePN->addIncoming(ActiveNext, Latch);
+    return true;
+  }
+
+  std::optional<ExitCheck> LatchExit = matchExitCheck(*Latch, ExitBlock);
+  bool LatchDivergent = LatchExit && UI.isDivergentTerminator(LatchExit->Br);
+  if (!HeaderDivergent && !LatchDivergent) {
+    ActivePN->eraseFromParent(); // No divergence: a real uniform loop, left
+                                 // alone; undo the phi this function already
+                                 // inserted speculatively.
+    return false;
+  }
+
+  Value *ActiveAtLatch = ActivePN;
+  if (HeaderDivergent) {
+    IRBuilder<> B(HeaderExit->Br);
+    Value *Cond = HeaderExit->Cond;
+    Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
+    ActiveAtLatch = B.CreateAnd(ActivePN, Staying, "active.header");
+    // Never really exit here: always continue toward the latch, letting an
+    // inactive lane's iterations become no-ops instead (see the file
+    // comment above).
+    UncondBrInst::Create(HeaderExit->StayInLoop, HeaderExit->Br->getIterator());
+    HeaderExit->Br->eraseFromParent();
+  }
+
+  Value *ActiveAfterLatchCheck = ActiveAtLatch;
+  Value *Continue;
+  if (LatchDivergent) {
+    IRBuilder<> B(LatchExit->Br);
+    Value *Cond = LatchExit->Cond;
+    Value *Staying = LatchExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
+    ActiveAfterLatchCheck = B.CreateAnd(ActiveAtLatch, Staying, "active.latch");
+    Continue = createMaskAny(B, ActiveAfterLatchCheck, "loop.continue");
+    CondBrInst::Create(Continue, Header, ExitBlock,
+                       LatchExit->Br->getIterator());
+    LatchExit->Br->eraseFromParent();
+  } else {
+    // The latch's own condition (if any) is real/uniform control flow and
+    // stays exactly as it branches today, conjoined with "any lane still
+    // active" so a uniform-false natural exit still wins, and so a
+    // uniform-true natural continue does not resurrect a lane the header's
+    // divergent check already deactivated.
+    auto *NaturalBr = dyn_cast<CondBrInst>(Latch->getTerminator());
+    IRBuilder<> B(Latch->getTerminator());
+    Value *AnyActive = createMaskAny(B, ActiveAtLatch, "loop.any.active");
+    if (NaturalBr) {
+      Value *NaturalCond = NaturalBr->getCondition();
+      bool ContinueOnTrue = NaturalBr->getSuccessor(0) == Header;
+      Value *NaturalContinue =
+          ContinueOnTrue ? NaturalCond : B.CreateNot(NaturalCond);
+      Continue = B.CreateAnd(NaturalContinue, AnyActive, "loop.continue");
+      NaturalBr->eraseFromParent();
+    } else {
+      Continue = AnyActive;
+      Latch->getTerminator()->eraseFromParent();
+    }
+    CondBrInst::Create(Continue, Header, ExitBlock, Latch);
+  }
+
+  ActivePN->addIncoming(ActiveAfterLatchCheck, Latch);
+  return true;
+}
+
+bool LoopLinearizer::run() {
+  bool Changed = false;
+  SmallVector<CycleRef, 8> Worklist(CI.toplevel_begin(), CI.toplevel_end());
+  while (!Worklist.empty()) {
+    CycleRef C = Worklist.pop_back_val();
+    // Innermost cycles first: an outer loop containing this one is not
+    // itself linearized by this milestone (nested loops are future work),
+    // but its inner cycle might still be a supported shape on its own.
+    for (CycleRef Child : CI.children(C))
+      Worklist.push_back(Child);
+    if (!CI.children(C).empty())
+      continue; // Only leaf cycles match this milestone's supported shape.
+    Changed |= linearizeCycle(C);
+  }
+  return Changed;
+}
+
 } // namespace
 
 PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
@@ -312,8 +532,21 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     CI.compute(F);
     UniformityInfo UI = computeWaveUniformity(F, DT, CI);
 
-    PostDominatorTree PDT(F);
-    Changed |= DiamondFlattener(F, DT, PDT, CI, UI).run();
+    {
+      PostDominatorTree PDT(F);
+      Changed |= DiamondFlattener(F, DT, PDT, CI, UI).run();
+    }
+
+    // The diamond flattening pass above may have changed the CFG (and thus
+    // invalidated `DT`/`CI`/`UI`; `PostDominatorTree` was already
+    // block-scoped above). Loops are structurally untouched by it, but
+    // recompute everything fresh regardless, since it is cheap next to
+    // getting this wrong.
+    DominatorTree DT2(F);
+    CycleInfo CI2;
+    CI2.compute(F);
+    UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
+    Changed |= LoopLinearizer(F, CI2, UI2).run();
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

@@ -149,4 +149,70 @@ TEST(LinearizeTest, MasksResourceCallUnderDivergentBranch) {
   EXPECT_TRUE(FoundMaskedCall);
 }
 
+TEST(LinearizeTest, LinearizesLoopWithDivergentExit) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %loop
+    loop:
+      %i = phi i32 [0, %entry], [%inc, %loop]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %inc = add i32 %i, 1
+      %break.cond = icmp eq i32 %tid, %inc
+      br i1 %break.cond, label %exit, label %loop
+    exit:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundMaskAny = false;
+  bool FoundActivePhi = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getName() == "feme.cpu.mask.any")
+        FoundMaskAny = true;
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getType()->isIntegerTy(1))
+        FoundActivePhi = true;
+  }
+  EXPECT_TRUE(FoundMaskAny);
+  EXPECT_TRUE(FoundActivePhi);
+}
+
+TEST(LinearizeTest, LeavesUniformLoopUnchanged) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n) #0 {
+    entry:
+      br label %loop
+    loop:
+      %i = phi i32 [0, %entry], [%inc, %loop]
+      %inc = add i32 %i, 1
+      %loop.cond = icmp slt i32 %inc, %n
+      br i1 %loop.cond, label %loop, label %exit
+    exit:
+      ret void
+    }
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_FALSE(run(*M));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(CI->getCalledFunction() &&
+                   CI->getCalledFunction()->getName() == "feme.cpu.mask.any");
+}
+
 } // namespace
