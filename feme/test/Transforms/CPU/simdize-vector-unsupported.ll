@@ -1,16 +1,20 @@
 ; RUN: not feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S %s 2>&1 | FileCheck %s
 
-; A divergent value of vector type is diagnosed rather than crashing:
-; "Vectors become components, not nested vectors" in "Phase 4: Widening"
-; describes decomposing a divergent `<N x T>` value into `N` separate
-; `<W x T>` components (LLVM has no `<W x <N x T>>`), which is not yet
-; implemented (roadmap milestone 7 deviation).
+; A divergent vector value is only decomposed when it is a constant-index
+; `insertelement` chain consumed solely by another link of that chain or by
+; a matched resource-store call's stored-value operand (see
+; `simdize-vector-resource-store.ll` for the supported shape, and
+; `checkVectorDecompositionSupported` in SIMDize.cpp) -- the narrow slice
+; of "Vectors become components, not nested vectors" ("Phase 4: Widening")
+; this pass implements. Any other consumer -- here, an `extractelement` --
+; is still diagnosed rather than crashing.
 
-; CHECK: error: feme-cpu-simdize: function 'main' has a divergent value 'v' of vector or aggregate type
+; CHECK: error: feme-cpu-simdize: function 'main' has a divergent vector value 'v' used outside a supported insertelement-chain/resource-store pattern
 define void @main() #0 {
   %tid = call i32 @llvm.dx.thread.id(i32 0)
   %tidf = sitofp i32 %tid to float
   %v = insertelement <4 x float> poison, float %tidf, i32 0
+  %e = extractelement <4 x float> %v, i32 0
   ret void
 }
 declare i32 @llvm.dx.thread.id(i32)

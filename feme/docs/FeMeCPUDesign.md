@@ -155,7 +155,9 @@ inline where it's discussed, and summarized here:
   operand is uniform). Masked memory ops, the scalarization fallback for
   arbitrary instructions, atomics, and widening a loop are all milestone 7
   (see its own deviation note for what narrowed there in turn); vector/
-  aggregate leaf decomposition remains unimplemented even after milestone 7.
+  aggregate leaf decomposition is likewise narrower than the design even
+  after milestone 7 (see that deviation note for the one shape it does
+  cover).
 - The per-lane-varying builtins `SIMDizePass` cannot widen with an
   ordinary elementwise rule (thread id, thread id in group, flattened
   thread id in group, lane index) become canonical, wave-size-mangled
@@ -407,14 +409,24 @@ called out inline where it's discussed, and summarized here:
   `CallInst` (e.g. an unrecognized math libcall), whose callee operand the
   fallback's per-operand extraction does not know to leave alone; such a
   call remains a diagnosed error.
-- **Vector/aggregate leaf decomposition is not implemented.** "Vectors
-  become components, not nested vectors" describes splitting a divergent
-  `<N x T>` (or aggregate) value into `N` separate `<W x T>` components,
-  since LLVM has no `<W x <N x T>>`; `feme::cpu::SIMDizePass` instead
-  diagnoses a divergent value of vector or aggregate type up front
-  (`FunctionWidener::checkNoDivergentAggregates`) rather than attempt to
-  build that illegal type. This is a substantial follow-up of its own, not
-  yet scheduled against a specific future milestone.
+- **Vector/aggregate leaf decomposition is narrower than the design.**
+  "Vectors become components, not nested vectors" describes splitting *any*
+  divergent `<N x T>` (or aggregate) value into `N` separate `<W x T>`
+  components, since LLVM has no `<W x <N x T>>`. `feme::cpu::SIMDizePass`
+  implements exactly the one shape a typed-buffer store's raising actually
+  produces (`feme::dxil::OpRaisingPass::raiseTypedBufferStore`): a
+  constant-index `insertelement` chain assembling a vector from scalar
+  components, consumed only by another link of that same chain or by a
+  matched `feme.cpu.resource.*` store call's stored-value operand (see
+  `FunctionWidener::widenInsertElement`/`checkVectorDecompositionSupported`
+  in SIMDize.cpp) -- reassembling the per-lane `<N x T>` argument a
+  scalarized resource-store call needs from the `N` widened components
+  instead of a single `extractelement`. Anything else that produces or
+  consumes a divergent vector (`extractelement`/`shufflevector`/a divergent
+  `phi`/`select` of vector type, ...), and every divergent aggregate of any
+  kind, is still diagnosed up front rather than attempting to build an
+  illegal type; generalizing further is a substantial follow-up of its own,
+  not yet scheduled against a specific future milestone.
 
 Deviation: milestone 8's implementation narrowed several things described in
 "Phase 5: Wave and Builtin Lowering" below; each is called out inline where

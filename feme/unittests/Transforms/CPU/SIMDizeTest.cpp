@@ -11,6 +11,7 @@
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -245,6 +246,51 @@ TEST(SIMDizeTest, WidensMaskedLoadStoreToGatherScatter) {
   }
   EXPECT_TRUE(FoundGather);
   EXPECT_TRUE(FoundScatter);
+}
+
+TEST(SIMDizeTest, DecomposesInsertElementChainIntoResourceStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = uitofp i32 %tid to float
+      %v0 = insertelement <4 x float> poison, float %tidf, i32 0
+      %v1 = insertelement <4 x float> %v0, float %tidf, i32 1
+      %v2 = insertelement <4 x float> %v1, float %tidf, i32 2
+      %v3 = insertelement <4 x float> %v2, float 1.000000e+00, i32 3
+      %off = zext i32 %tid to i64
+      call void @feme.cpu.resource.store.typed.v4f32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off,
+          <4 x float> %v3, i1 true)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @feme.cpu.resource.store.typed.v4f32(ptr, i32, i32, i64, <4 x float>, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // Decomposition never builds an illegal `<4 x <4 x float>>`, and the
+  // scalarized call keeps its original, whole-vector `<4 x float>` argument
+  // type, reassembled per lane from the widened components.
+  unsigned StoreCallCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (CI && CI->getCalledFunction() &&
+        CI->getCalledFunction()->getName() ==
+            "feme.cpu.resource.store.typed.v4f32") {
+      ++StoreCallCount;
+      EXPECT_TRUE(CI->getArgOperand(4)->getType()->isVectorTy());
+    }
+  }
+  EXPECT_EQ(StoreCallCount, 4u);
 }
 
 } // namespace

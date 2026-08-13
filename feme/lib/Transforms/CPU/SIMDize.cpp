@@ -249,6 +249,11 @@ class FunctionWidener {
   /// for it, memoized so a value used divergently more than once doesn't
   /// grow a broadcast per use.
   DenseMap<Value *, Value *> Broadcasts;
+  /// A divergent, vector-typed `insertelement` chain (in the *old* function)
+  /// -> its decomposed widened form: one `<W x elemT>` per vector lane (see
+  /// `widenInsertElement`, and "Vectors become components, not nested
+  /// vectors" in "Phase 4: Widening").
+  DenseMap<Value *, SmallVector<Value *, 4>> WidenedVectorComponents;
 
   SmallVector<Instruction *, 16> ToErase;
 
@@ -264,7 +269,7 @@ public:
 
 private:
   bool checkSupportedControlFlow();
-  bool checkNoDivergentAggregates();
+  bool checkVectorDecompositionSupported();
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
   PHINode *createWidenedPHIStub(PHINode &PN);
@@ -279,6 +284,7 @@ private:
                        IRBuilder<> &Builder);
   void widenMaskedStore(CallInst &CI, const MatchedMaskedMemOp &Matched,
                         IRBuilder<> &Builder);
+  void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
   bool widenInstruction(Instruction &I, IRBuilder<> &Builder);
@@ -307,25 +313,61 @@ bool FunctionWidener::checkSupportedControlFlow() {
   return true;
 }
 
-bool FunctionWidener::checkNoDivergentAggregates() {
+bool FunctionWidener::checkVectorDecompositionSupported() {
   // "Vectors become components, not nested vectors" in "Phase 4: Widening"
   // describes decomposing a divergent `<N x T>` (or aggregate) value into
-  // `N` separate `<W x T>` components -- LLVM has no `<W x <N x T>>`. That
-  // decomposition is not yet implemented (still narrowed relative to the
-  // design, the same as the milestone 4 deviation note already flagged);
-  // verify no divergent value has such a type up front and bail with a
+  // `N` separate `<W x T>` components -- LLVM has no `<W x <N x T>>`. Full
+  // decomposition (arbitrary `extractelement`/`shufflevector`/`phi`/`select`
+  // of vector type, and aggregates of any kind) is not yet implemented; what
+  // *is* supported, narrower than the design, is the one shape a
+  // typed-buffer store actually produces (see `raiseTypedBufferStore` in
+  // OpRaising.cpp): a chain of constant-index `insertelement`s assembling a
+  // vector from scalar components, consumed only by another link of that
+  // same chain or by a matched resource-store call's stored-value operand
+  // (see `widenInsertElement`/`widenResourceCall` below). Verify every
+  // divergent vector value matches that shape up front and bail with a
   // diagnostic, matching every other precondition this pass checks before
-  // mutating anything, rather than let `getWidened` build an invalid nested
+  // mutating anything, rather than let a later step build an invalid nested
   // vector type and assert.
   for (Instruction &I : instructions(OldF)) {
     if (!UI.isDivergentAtDef(&I))
       continue;
-    if (I.getType()->isVectorTy() || I.getType()->isAggregateType()) {
+
+    if (I.getType()->isAggregateType()) {
       OldF.getContext().emitError(
           "feme-cpu-simdize: function '" + OldF.getName() +
           "' has a divergent value '" + I.getName() +
-          "' of vector or aggregate type; component decomposition is not "
-          "yet supported (roadmap milestone 7 deviation)");
+          "' of aggregate type; component decomposition is not yet "
+          "supported (roadmap milestone 7 deviation)");
+      return false;
+    }
+    if (!I.getType()->isVectorTy())
+      continue;
+
+    auto *IE = dyn_cast<InsertElementInst>(&I);
+    if (!IE || !isa<ConstantInt>(IE->getOperand(2))) {
+      OldF.getContext().emitError(
+          "feme-cpu-simdize: function '" + OldF.getName() +
+          "' has a divergent value '" + I.getName() +
+          "' of vector type; only a constant-index insertelement chain is "
+          "supported (roadmap milestone 7 deviation)");
+      return false;
+    }
+    for (User *U : IE->users()) {
+      if (auto *UserIE = dyn_cast<InsertElementInst>(U))
+        if (UserIE->getOperand(0) == IE)
+          continue;
+      if (auto *UserCI = dyn_cast<CallInst>(U)) {
+        std::optional<MatchedResourceCall> Matched = matchResourceCall(*UserCI);
+        if (Matched && Matched->StoredValue == IE)
+          continue;
+      }
+      OldF.getContext().emitError(
+          "feme-cpu-simdize: function '" + OldF.getName() +
+          "' has a divergent vector value '" + IE->getName() +
+          "' used outside a supported insertelement-chain/resource-store "
+          "pattern; component decomposition is not yet supported for this "
+          "use (roadmap milestone 7 deviation)");
       return false;
     }
   }
@@ -499,16 +541,29 @@ void FunctionWidener::replaceGroupIdCall(CallInst &CI) {
 void FunctionWidener::widenResourceCall(CallInst &CI,
                                         const MatchedResourceCall &Matched,
                                         IRBuilder<> &Builder) {
+  // A vector-typed stored value ("Vectors become components, not nested
+  // vectors" in "Phase 4: Widening") is decomposed into one `<W x elemT>`
+  // per lane component rather than a single `<W x T>` (see
+  // `widenInsertElement`); it counts as divergent for this call exactly
+  // when its components were, i.e. it was recorded in
+  // `WidenedVectorComponents` (a uniform vector stays whole, and identical
+  // for every lane, like any other uniform operand).
+  bool StoredValueIsVector =
+      Matched.StoredValue && Matched.StoredValue->getType()->isVectorTy();
+  bool StoredValueDivergent =
+      Matched.StoredValue &&
+      (StoredValueIsVector ? WidenedVectorComponents.count(Matched.StoredValue)
+                           : Widened.count(Matched.StoredValue));
+
   // A divergent governing mask (see "masked feme.cpu.resource.* call") needs
   // scalarization exactly as much as a divergent address/value operand does:
   // even if every lane that's still active would compute the same address
   // and value (as in a resource write inside a masked loop whose address
   // does not itself depend on the lane), a deactivated lane must still be
   // prevented from touching memory at all.
-  bool AnyDivergent =
-      Widened.count(Matched.DescriptorIndex) || Widened.count(Matched.Offset) ||
-      (Matched.StoredValue && Widened.count(Matched.StoredValue)) ||
-      Widened.count(Matched.Mask);
+  bool AnyDivergent = Widened.count(Matched.DescriptorIndex) ||
+                      Widened.count(Matched.Offset) || StoredValueDivergent ||
+                      Widened.count(Matched.Mask);
   if (!AnyDivergent)
     return; // Every operand is uniform: leave the scalar call as-is.
 
@@ -522,8 +577,13 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   Function *Callee = CI.getCalledFunction();
   Value *WideDescriptorIndex = getWidened(Matched.DescriptorIndex, Builder);
   Value *WideOffset = getWidened(Matched.Offset, Builder);
-  Value *WideStoredValue =
-      Matched.StoredValue ? getWidened(Matched.StoredValue, Builder) : nullptr;
+
+  Value *WideStoredValue = nullptr;
+  SmallVector<Value *, 4> WideStoredComponents;
+  if (Matched.StoredValue && StoredValueIsVector && StoredValueDivergent)
+    WideStoredComponents = WidenedVectorComponents.lookup(Matched.StoredValue);
+  else if (Matched.StoredValue && !StoredValueIsVector)
+    WideStoredValue = getWidened(Matched.StoredValue, Builder);
 
   Value *LaneMaskBase = Env.EntryMask;
   if (!isa<Constant>(Matched.Mask)) {
@@ -549,9 +609,30 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
     CallArgs.push_back(CI.getArgOperand(1)); // ResourceHeapCount
     CallArgs.push_back(LaneDescriptorIndex);
     CallArgs.push_back(LaneOffset);
-    if (WideStoredValue)
-      CallArgs.push_back(Builder.CreateExtractElement(
-          WideStoredValue, Builder.getInt32(Lane), "lane.value"));
+    if (Matched.StoredValue) {
+      if (StoredValueIsVector) {
+        if (StoredValueDivergent) {
+          Value *LaneVector = PoisonValue::get(Matched.StoredValue->getType());
+          for (unsigned Component = 0,
+                        NumComponents = WideStoredComponents.size();
+               Component != NumComponents; ++Component) {
+            Value *LaneScalar = Builder.CreateExtractElement(
+                WideStoredComponents[Component], Builder.getInt32(Lane),
+                "lane.value.elt");
+            LaneVector = Builder.CreateInsertElement(
+                LaneVector, LaneScalar, Builder.getInt32(Component));
+          }
+          CallArgs.push_back(LaneVector);
+        } else {
+          // Uniform vector: identical for every lane, so it needs no
+          // per-lane extraction.
+          CallArgs.push_back(Matched.StoredValue);
+        }
+      } else {
+        CallArgs.push_back(Builder.CreateExtractElement(
+            WideStoredValue, Builder.getInt32(Lane), "lane.value"));
+      }
+    }
     CallArgs.push_back(LaneMask);
 
     Value *LaneResult = Builder.CreateCall(Callee, CallArgs);
@@ -669,6 +750,31 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
   ToErase.push_back(&I);
 }
 
+void FunctionWidener::widenInsertElement(InsertElementInst &IE,
+                                         IRBuilder<> &Builder) {
+  // Decompose a divergent `insertelement` into its widened per-component
+  // form (see `checkVectorDecompositionSupported`'s file comment): start
+  // from the base's own components (an all-null placeholder for the
+  // chain's first link, whose base is the `poison`/`undef`
+  // `raiseTypedBufferStore` always starts from), fill in the inserted
+  // element's widened value at its constant index, and record the result
+  // for the next link (or `widenResourceCall`) to consume -- this
+  // instruction itself never gets a single widened `<W x T>` replacement.
+  auto *VecTy = cast<FixedVectorType>(IE.getType());
+  SmallVector<Value *, 4> Components;
+  if (auto It = WidenedVectorComponents.find(IE.getOperand(0));
+      It != WidenedVectorComponents.end())
+    Components = It->second;
+  else
+    Components.resize(VecTy->getNumElements(), nullptr);
+
+  uint64_t Index = cast<ConstantInt>(IE.getOperand(2))->getZExtValue();
+  Components[Index] = getWidened(IE.getOperand(1), Builder);
+
+  WidenedVectorComponents[&IE] = std::move(Components);
+  ToErase.push_back(&IE);
+}
+
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   SmallVector<Value *, 4> WideOps;
   for (Value *Op : I.operands())
@@ -753,6 +859,11 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   if (isa<CondBrInst>(I) || isa<UncondBrInst>(I) || isa<ReturnInst>(I))
     return true; // Handled/verified by checkSupportedControlFlow already.
 
+  if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
+    widenInsertElement(*IE, Builder);
+    return true;
+  }
+
   widenElementwise(I, Builder);
   return true;
 }
@@ -760,7 +871,7 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 Function *FunctionWidener::widen() {
   if (!checkSupportedControlFlow())
     return nullptr;
-  if (!checkNoDivergentAggregates())
+  if (!checkVectorDecompositionSupported())
     return nullptr;
 
   NewF = buildWidenedFunction();
