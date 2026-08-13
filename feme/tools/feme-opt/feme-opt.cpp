@@ -29,6 +29,7 @@
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
+#include "feme/Transforms/CPU/BoundResourceNormalization.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
@@ -148,6 +149,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::cpu::PreparePass::name())
           return false;
         MPM.addPass(feme::cpu::PreparePass(EntryPointOpt));
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::BoundResourceNormalizationPass::name())
+          return false;
+        MPM.addPass(feme::cpu::BoundResourceNormalizationPass());
         return true;
       });
   PB.registerPipelineParsingCallback(

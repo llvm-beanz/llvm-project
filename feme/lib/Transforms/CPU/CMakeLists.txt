@@ -1,5 +1,6 @@
 add_mlir_library(FeMeTransformsCPU
   BarrierCalls.cpp
+  BoundResourceNormalization.cpp
   BuiltinCalls.cpp
   CFGGen.cpp
   EntryWrapper.cpp

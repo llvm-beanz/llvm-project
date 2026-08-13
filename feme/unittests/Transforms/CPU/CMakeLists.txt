@@ -9,6 +9,7 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_feme_unittest(FeMeTransformsCPUTests
+  BoundResourceNormalizationTest.cpp
   BuiltinCallsTest.cpp
   CFGGenTest.cpp
   EntryWrapperTest.cpp
