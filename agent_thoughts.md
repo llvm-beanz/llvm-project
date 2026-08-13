@@ -9344,3 +9344,73 @@ exists in source.
 ## Commit breakdown
 
 1. This file (no source changes; nothing reproduced to fix).
+
+# Fourth investigation: root cause found and fixed
+
+## Reproduction
+
+This time the report included a UBSan diagnostic pinpointing the exact
+fault: `llvm/lib/IR/Intrinsics.cpp:806:33: runtime error: member call on
+null pointer of type 'llvm::Module'`, i.e. `Intrinsic::getOrInsertDeclaration`
+was called with a null `Module *`, and the call chain in the backtrace
+(`FunctionWidener::widenElementwise` -> `widenInstruction` -> `widen`) matches
+source exactly this time -- unlike the prior three sessions' reports, this
+one is not an artifact of a stripped/optimized backtrace folding two
+functions together. Reproduced locally (Linux, non-UBSan build still
+crashes/aborts consistently, and inspection confirms the same null
+dereference would occur under any sanitizer or none):
+
+```
+bin/feme-opt --llvm -passes=feme-cpu-simdize -feme-cpu-wave-size=4 -S \
+    feme/test/Transforms/CPU/simdize-math-libcall.ll
+```
+
+## Root cause
+
+`FunctionWidener::widenElementwise` (feme/lib/Transforms/CPU/SIMDize.cpp)
+calls `Intrinsic::getOrInsertDeclaration(OldF.getParent(), ID, {WideTy})` to
+materialize the widened intrinsic declaration. However, `OldF` -- the
+pre-widening scalar function -- has already been spliced into the new
+widened function `NewF` and erased from its parent module by
+`buildWidenedFunction()` (called at the top of `widen()`, well before
+`widenInstruction`/`widenElementwise` run in pass 2). `eraseFromParent()`
+does not delete `OldF` (its other members, like `getContext()`/`getName()`,
+remain valid, which is why the many *other* `OldF.foo()` calls in this file
+are fine), but it does clear `OldF`'s parent-module link, so
+`OldF.getParent()` returns `nullptr` by the time `widenElementwise` runs.
+`Intrinsic::getOrInsertDeclaration` immediately dereferences that `Module *`
+to get the `LLVMContext`, hence the null-pointer member call UBSan caught.
+
+This only manifests for functions containing a divergent call to an
+"elementwise vectorizable" intrinsic (the `llvm.sqrt`/`llvm.dx.frac`-style
+path added for roadmap milestone 7's math-libcall widening) -- every other
+`widenElementwise`/`widenInstruction` code path either doesn't need the
+module at all or reaches it through `NewF` already.
+
+## Fix
+
+Changed the one call site to use `NewF->getParent()` instead of
+`OldF.getParent()`, since `NewF` is the function actually being built and
+remains attached to the module throughout widening. Added a short comment
+at the call site explaining why `OldF`'s parent can't be used here, since
+the ordering dependency (erase-before-widen) is easy to miss when only
+looking at `widenElementwise` in isolation.
+
+## Verification
+
+- `ninja check-feme` (assertions-enabled, ccache build): 815/824 tests
+  passing, 9 unsupported (expected, DirectX target not registered on this
+  host), 0 failures -- including `Transforms/CPU/simdize-math-libcall.ll`,
+  which already existed as a regression test for this exact code path and
+  now exercises it successfully end-to-end instead of crashing.
+- Manually re-ran the exact reported repro command; it now succeeds and
+  produces the expected widened IR (`llvm.sqrt.v4f32`/`llvm.dx.frac.v4f32`
+  calls on `<4 x float>`), with no crash.
+- `clang-format` run on the changed file; diff was a no-op beyond the
+  intended edit.
+
+## Commit breakdown
+
+1. `[feme][cpu] Fix null Module dereference in widenElementwise` -- the
+   one-line source fix plus explanatory comment.
+2. This file.
