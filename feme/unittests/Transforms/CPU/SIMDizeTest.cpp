@@ -166,4 +166,31 @@ TEST(SIMDizeTest, WidensMaskedLoopBackedge) {
   EXPECT_TRUE(FoundReduceOr);
 }
 
+TEST(SIMDizeTest, ScalarizesAtomicRMWFallback) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tid64 = zext i32 %tid to i64
+      %ptr = getelementptr i32, ptr %p, i64 %tid64
+      %old = atomicrmw add ptr %ptr, i32 1 monotonic
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned AtomicRMWCount = 0;
+  for (Instruction &I : instructions(F))
+    if (isa<AtomicRMWInst>(&I))
+      ++AtomicRMWCount;
+  EXPECT_EQ(AtomicRMWCount, 4u);
+}
+
 } // namespace

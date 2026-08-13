@@ -50,10 +50,15 @@
 //        `GroupID` parameter component.
 //
 // Any divergent instruction the elementwise rule and these special cases
-// don't otherwise cover is still an error in this milestone's first change
-// (the scalarization fallback is a separate, later change to
-// `widenElementwise` -- "the scalarization fallback" in roadmap milestone
-// 7).
+// don't otherwise cover -- atomics, chiefly -- falls back to a generic,
+// per-lane scalarization: `W` clones of the instruction, each fed its
+// lane's extracted scalar operands, with the per-lane results reassembled
+// into a vector (see `FunctionWidener::widenScalarizedFallback`, "the
+// scalarization fallback" in roadmap milestone 7). This is what makes
+// widening total: it never has to reject an unsupported divergent opcode.
+// A divergent call not otherwise recognized (e.g. a math libcall) is the
+// one exception -- its callee is one of its own operands, which the
+// generic fallback does not know to leave alone -- so it remains an error.
 //
 //===----------------------------------------------------------------------===//
 
@@ -225,6 +230,7 @@ private:
                          IRBuilder<> &Builder);
   void widenMaskAny(CallInst &CI, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
+  void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
   bool widenInstruction(Instruction &I, IRBuilder<> &Builder);
 };
 
@@ -469,6 +475,48 @@ void FunctionWidener::widenMaskAny(CallInst &CI, IRBuilder<> &Builder) {
   ToErase.push_back(&CI);
 }
 
+void FunctionWidener::widenScalarizedFallback(Instruction &I,
+                                              IRBuilder<> &Builder) {
+  // The generic, "always applicable" fallback ("Scalarization fallback" in
+  // "Phase 4: Widening"): extract each operand's per-lane value, clone `I`
+  // once per lane with those scalar operands substituted, and reassemble a
+  // result vector from the per-lane results (if `I` produces one). This is
+  // what makes widening total -- it never has to reject an unsupported
+  // divergent opcode. Atomics are the main user (`AtomicRMWInst`,
+  // `AtomicCmpXchgInst`); this milestone does not yet gate their per-lane
+  // execution by an active-lane mask the way "masked feme.cpu.resource.*
+  // call" already does, matching the existing, documented narrowing that
+  // ordinary `load`/`store`/atomics under a divergent condition are not yet
+  // rewritten into the masked intrinsic forms `feme::cpu::LinearizePass`
+  // would otherwise have produced (see the Status section's milestone 6
+  // deviation note in feme/docs/FeMeCPUDesign.md) -- a masked, scalarized
+  // atomic is future work once that lands.
+  SmallVector<Value *, 4> WideOps;
+  for (Value *Op : I.operands())
+    WideOps.push_back(getWidened(Op, Builder));
+
+  bool HasResult = !I.getType()->isVoidTy();
+  Value *Result =
+      HasResult ? PoisonValue::get(FixedVectorType::get(I.getType(), WaveSize))
+                : nullptr;
+
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Instruction *Clone = I.clone();
+    for (unsigned OpIdx = 0, E = WideOps.size(); OpIdx != E; ++OpIdx)
+      Clone->setOperand(OpIdx, Builder.CreateExtractElement(
+                                   WideOps[OpIdx], Builder.getInt32(Lane),
+                                   "lane.op"));
+    Builder.Insert(Clone, I.getName() + ".lane");
+    if (Result)
+      Result =
+          Builder.CreateInsertElement(Result, Clone, Builder.getInt32(Lane));
+  }
+
+  if (Result)
+    Widened[&I] = Result;
+  ToErase.push_back(&I);
+}
+
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   SmallVector<Value *, 4> WideOps;
   for (Value *Op : I.operands())
@@ -491,10 +539,21 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   } else if (auto *UO = dyn_cast<UnaryOperator>(&I)) {
     NewI =
         Builder.CreateUnOp(UO->getOpcode(), WideOps[0], I.getName() + ".wide");
-  } else {
+  } else if (isa<CallBase>(&I)) {
+    // A generic divergent call (e.g. a math libcall like `llvm.sin.f32`,
+    // "Call to a math libcall" in "Phase 4: Widening") needs its own
+    // handling -- the callee itself is one of `I.operands()`, which the
+    // scalarization fallback below would otherwise try to broadcast/extract
+    // like any other operand -- so it is not yet covered by either the
+    // elementwise rule or the generic fallback.
     OldF.getContext().emitError(
-        "feme-cpu-simdize: unsupported divergent instruction '" +
-        Twine(I.getOpcodeName()) + "' (roadmap milestone 7)");
+        "feme-cpu-simdize: unsupported divergent call to '" +
+        Twine(I.getOperand(I.getNumOperands() - 1)->getName()) +
+        "' (roadmap milestone 7 does not cover a generic vector-call "
+        "rewrite)");
+    return;
+  } else {
+    widenScalarizedFallback(I, Builder);
     return;
   }
   Widened[&I] = NewI;
