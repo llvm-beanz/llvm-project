@@ -133,3 +133,31 @@ exit:
   %merged = phi i32 [ 1, %if_true ], [ 2, %if_false ]
   ret void
 }
+
+; feme.cpu.mask.any is always uniform, even though its operand is
+; necessarily divergent (see "Mask representation between phases" in
+; feme/docs/FeMeCPUDesign.md): it stands in for a cross-lane reduction that
+; `feme::cpu::SIMDizePass` lowers to `llvm.vector.reduce.or`, which is by
+; definition the same on every lane. This is what lets
+; `feme::cpu::LinearizePass`'s mask-gated loop backedge be widened as a
+; uniform branch (roadmap milestone 7).
+; CHECK-LABEL: WaveUniformityInfo for function 'mask_any_is_uniform':
+define void @mask_any_is_uniform() {
+  %id = call i32 @llvm.dx.thread.id(i32 0)
+  ; CHECK: DIVERGENT:{{.*}}%active = icmp
+  %active = icmp eq i32 %id, 0
+  ; CHECK-NOT: DIVERGENT:{{.*}}%any = call i1 @feme.cpu.mask.any
+  %any = call i1 @feme.cpu.mask.any(i1 %active)
+  ; CHECK-NOT: DIVERGENT:{{.*}}br i1 %any
+  br i1 %any, label %if_true, label %if_false
+
+if_true:
+  br label %exit
+
+if_false:
+  br label %exit
+
+exit:
+  ret void
+}
+declare i1 @feme.cpu.mask.any(i1)

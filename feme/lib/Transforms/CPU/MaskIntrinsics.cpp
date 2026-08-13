@@ -33,3 +33,8 @@ CallInst *feme::cpu::createMaskAny(IRBuilderBase &Builder, Value *Mask,
   Module *M = Builder.GetInsertBlock()->getModule();
   return Builder.CreateCall(getOrInsertMaskAny(*M), {Mask}, Name);
 }
+
+bool feme::cpu::isMaskAnyCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee && Callee->getName() == "feme.cpu.mask.any";
+}

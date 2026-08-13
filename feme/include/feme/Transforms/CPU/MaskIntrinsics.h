@@ -40,6 +40,7 @@ class CallInst;
 class Function;
 class IRBuilderBase;
 class Module;
+class Type;
 class Value;
 } // namespace llvm
 
@@ -55,6 +56,16 @@ llvm::Function *getOrInsertMaskAny(llvm::Module &M);
 /// Builds a `feme.cpu.mask.any` call over \p Mask.
 llvm::CallInst *createMaskAny(llvm::IRBuilderBase &Builder, llvm::Value *Mask,
                               const llvm::Twine &Name = "");
+
+/// Returns whether \p CI calls the exact `feme.cpu.mask.any` declaration
+/// `getOrInsertMaskAny` produces -- matched by name and shape rather than by
+/// `Function *` identity, so it also recognizes a call parsed from separate
+/// `lit` test IR. Used by `feme::cpu::WaveTTIImpl` (the call always reduces
+/// to the same value on every lane, so it is `AlwaysUniform` regardless of
+/// its operand's divergence -- see "Mask representation between phases" in
+/// feme/docs/FeMeCPUDesign.md) and by `feme::cpu::SIMDizePass` (which must
+/// lower every surviving call to `llvm.vector.reduce.or` before Phase 5).
+bool isMaskAnyCall(const llvm::CallInst &CI);
 
 } // namespace feme::cpu
 

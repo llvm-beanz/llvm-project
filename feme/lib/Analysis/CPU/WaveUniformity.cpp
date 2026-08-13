@@ -20,6 +20,27 @@ using namespace llvm;
 namespace feme::cpu {
 
 ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
+  // `feme.cpu.mask.any` (see "Mask representation between phases" in
+  // feme/docs/FeMeCPUDesign.md, and `feme::cpu::getOrInsertMaskAny` in
+  // Transforms/CPU/MaskIntrinsics.h, which this analysis library cannot
+  // depend on without an include cycle -- Transforms/CPU already depends on
+  // Analysis/CPU) is an ordinary `CallInst`, not an `IntrinsicInst`, so it
+  // needs its own name-based check ahead of the intrinsic switch below. It
+  // is always uniform regardless of its (necessarily divergent -- it is
+  // only ever called on a per-lane "active" mask) operand: it stands in for
+  // a cross-lane reduction that is meaningless before Phase 4 widens it, and
+  // is defined to produce the same answer on every lane once it does
+  // (`feme::cpu::SIMDizePass` lowers it to `llvm.vector.reduce.or`).
+  // Classifying it here is what lets a Phase 3 loop's mask-gated backedge
+  // (`feme::cpu::LinearizePass`'s `LoopLinearizer`) be recognized as a
+  // uniform branch, which `feme::cpu::SIMDizePass`'s widening of that loop
+  // (roadmap milestone 7) depends on.
+  if (const auto *CI = dyn_cast<CallInst>(V)) {
+    const Function *Callee = CI->getCalledFunction();
+    if (Callee && Callee->getName() == "feme.cpu.mask.any")
+      return ValueUniformity::AlwaysUniform;
+  }
+
   const auto *II = dyn_cast<IntrinsicInst>(V);
   if (!II)
     return ValueUniformity::Default;
