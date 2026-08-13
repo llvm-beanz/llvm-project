@@ -821,8 +821,12 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
     if (ID != Intrinsic::not_intrinsic &&
         isElementwiseVectorizableIntrinsic(ID) && Homogeneous) {
       Type *WideTy = FixedVectorType::get(I.getType(), WaveSize);
+      // `OldF` has already been spliced into `NewF` and erased from its
+      // module by `buildWidenedFunction` by the time this runs, so its
+      // parent module is null; look the declaration up in `NewF`'s module
+      // instead.
       Function *WideCallee =
-          Intrinsic::getOrInsertDeclaration(OldF.getParent(), ID, {WideTy});
+          Intrinsic::getOrInsertDeclaration(NewF->getParent(), ID, {WideTy});
       SmallVector<Value *, 4> WideArgs;
       for (Value *Arg : CI->args())
         WideArgs.push_back(getWidened(Arg, Builder));
