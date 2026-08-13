@@ -1155,8 +1155,12 @@ reimplement target-specific codegen.
 Retargeting to a *CPU* (X86, AArch64) is a larger problem than picking a
 different `TargetMachine`, because a CPU supplies none of the SPMD execution
 model a shader assumes: the program has to be SIMD-ized to a chosen wave
-size, its resource bindings given a concrete ABI, and its dispatch driven by
-a host loop or JIT. That is a design of its own; see
+size, its resources given a concrete ABI, and its dispatch driven by a host
+loop or JIT. The CPU execution layer has one dynamic descriptor-heap model;
+traditional DXIL register bindings and SPIR-V set/binding resources are
+normalized into reserved ranges of that model before resource lowering, so
+the SIMD and execution layers do not acquire a second binding path. That is a
+design of its own; see
 [FeMeCPUDesign.md](FeMeCPUDesign.md) for that design, its implementation
 status, and how `feme::Driver::run` retargets to it (`feme::cpu::
 runPipeline`) alongside DXIL/SPIR-V/AMDGPU.

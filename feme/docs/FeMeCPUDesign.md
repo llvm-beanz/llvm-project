@@ -26,6 +26,12 @@ targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
 "Raised LLVM IR -> AMDGPU" sections of that document first; this design is
 a sibling of the latter.
 
+The traditional bound-resource emulation described below is the proposed
+next functional milestone and is not implemented yet. The current
+`feme-run --dxil-bind-register-resources` option remains a testing-only DXIL
+bridge until that common DXIL/SPIR-V normalization and runtime materializer
+replace it.
+
 Deviation: milestone 1's implementation narrowed a few things described
 below; each is called out inline where it's discussed, and summarized here:
 
@@ -549,11 +555,13 @@ operations over that mask.
 Three pieces are needed beyond the transform itself:
 
 1. A **resource model** — a shader refers to its resources indirectly; a CPU
-   program has to get real pointers from somewhere. This design accepts
-   **bindless shaders only** (DXIL SM 6.6+ `ResourceDescriptorHeap`,
-   SPIR-V's `SPV_EXT_descriptor_heap`) and passes the kernel a
-   **descriptor heap** with a fixed, shader-independent layout, rather than
-   the one-pointer-argument-per-binding scheme
+   program has to get real pointers from somewhere. The execution pipeline
+   accepts only **dynamic descriptor heaps** (DXIL SM 6.6+
+   `ResourceDescriptorHeap`, SPIR-V's `SPV_EXT_descriptor_heap`), but a
+   normalization pass maps traditional bound resources into reserved ranges
+   of those same heaps before execution. This keeps the executable ABI and
+   every access helper shader-independent rather than introducing the
+   one-pointer-argument-per-binding scheme
    `feme::amdgpu::ResourceLoweringPass` uses. Every access through a
    descriptor is bounds-checked.
 2. A small **runtime support library** for the operations that do not lower
@@ -599,10 +607,11 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   default, in that order of authority (see "Wave Size Selection").
 - Preserve the semantics of the wave/quad intrinsics FeMe already raises,
   relative to that wave size.
-- Define a bindless resource ABI (a descriptor heap) that a host can
-  populate without knowing how the shader was compiled, that survives the
-  shader being recompiled at a different wave size, and every access through
-  which is bounds-checked.
+- Define a dynamic resource ABI (a descriptor heap) that survives the shader
+  being recompiled at a different wave size and through which every access is
+  bounds-checked. Accept both native dynamic resources and finite traditional
+  binding ranges by normalizing the latter into that ABI and publishing the
+  resulting binding-to-heap map.
 - Provide an in-process JIT (`feme::cpu::JITEngine`) that owns dispatch
   management — compilation, the group loop, and the thread pool it runs on —
   `feme::Context`-scoped and free of process-wide mutable state.
@@ -626,9 +635,11 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   below records what this design would have to grow, and which of its
   present choices would have to change, so that the compute-only v1 does not
   paint the graphics case into a corner.
-- **Register-bound resources.** Bindless only: DXIL SM 6.6+
-  `ResourceDescriptorHeap` and SPIR-V `SPV_EXT_descriptor_heap`. See
-  "Resource Model".
+- **Unbounded traditional binding ranges.** A finite register/set binding or
+  binding array is emulated through a reserved descriptor-heap range. An
+  unbounded range has no finite prefix to reserve and must use the source
+  format's native dynamic-resource representation instead. See "Resource
+  Model".
 - **Texture sampling.** Filtering, addressing modes, mip selection and
   format decode are a large body of work with no representation in FeMe's
   raised IR yet (`feme::amdgpu::ResourceLoweringPass` explicitly doesn't
@@ -796,7 +807,8 @@ flowchart TD
     DXIL[DXIL] -- Importer + OpRaising + MetadataRaising --> R[raised llvm::Module<br/>llvm.dx.* / llvm.spv.*]
     SPV[SPIR-V] -- Importer + SPIRVToLLVM --> R
     R --> PREP[feme-cpu-prepare<br/>canonicalize + structurize CFG]
-    PREP --> RES[feme-cpu-lower-resources<br/>canonical resource calls]
+    PREP --> BIND[feme-cpu-normalize-bound-resources<br/>bound ranges -> dynamic heap indices]
+    BIND --> RES[feme-cpu-lower-resources<br/>canonical resource calls]
     RES --> LIN[feme-cpu-linearize<br/>divergence -> masks]
     LIN --> SIMD[feme-cpu-simdize<br/>widen to &lt;W x T&gt;]
     SIMD --> WAVE[feme-cpu-lower-wave<br/>wave/builtin intrinsics]
@@ -808,10 +820,10 @@ flowchart TD
 
 The numbered phases below are the *transforms* the SPMD model needs: Phase 2
 is the uniformity analysis, which is not a box here because it produces no
-IR, and resource lowering has no number of its own — it runs where the
-diagram shows it, after Phase 1 and before Phase 3. Every reference to a
-numbered phase in this document means the numbered heading, never a box in
-this diagram.
+IR, and bound-resource normalization and resource lowering have no numbers
+of their own — they run where the diagram shows them, after Phase 1 and
+before Phase 3. Every reference to a numbered phase in this document means
+the numbered heading, never a box in this diagram.
 
 Each box is a separate pass with its own `feme-opt` name and its own `lit`
 tests, following the precedent set by `feme-dxil-raise-ops` /
@@ -828,21 +840,24 @@ each pass's input and output are both *printable, checkable* LLVM IR:
 - After `feme-cpu-simdize`, everything is `<W x T>` — checkable without
   reasoning about the group wrapper.
 
-Resource canonicalization runs *before* linearization/widening deliberately:
-it records what each access means without choosing how a wave executes it.
-Phase 3 can therefore predicate resource calls like any other side effect,
-and Phase 4 can scalarize a varying call over active lanes without ever
-forming a vector of descriptor aggregates. The scalar helper definitions are
-linked only after SIMDization, so their internal format dispatch is ordinary
-host control flow that never passes through the shader linearizer.
+Bound-resource normalization and resource canonicalization run *before*
+linearization/widening deliberately: the first reduces both source binding
+models to dynamic heap indices, and the second records what each access means
+without choosing how a wave executes it. Phase 3 can therefore predicate
+resource calls like any other side effect, and Phase 4 can scalarize a
+varying call over active lanes without ever forming a vector of descriptor
+aggregates. The scalar helper definitions are linked only after SIMDization,
+so their internal format dispatch is ordinary host control flow that never
+passes through the shader linearizer.
 
 ### Raised IR prerequisites
 
 The CPU pipeline begins only after the source front end has raised every
 shader operation it needs into the shared `llvm.{dx,spv}.*` vocabulary. In
-particular, both input paths must represent descriptor-heap handle creation,
-typed/structured/raw/constant-buffer accesses, barrier scope and memory
-semantics, and every supported wave operation. DXIL op raising and SPIR-V
+particular, both input paths must represent dynamic and bound handle creation,
+including binding range length and dynamic array index;
+typed/structured/raw/constant-buffer accesses; barrier scope and memory
+semantics; and every supported wave operation. DXIL op raising and SPIR-V
 conversion do not cover all of those operations today; closing those gaps is
 an explicit prerequisite, not work hidden inside a CPU pass.
 
@@ -862,8 +877,8 @@ requirement, not an accident of the implementation:
 - **DXIL is a first-class input.** The reference-execution and
   FeMe-self-testing use cases that motivate this design are mostly about
   DXIL today, so "SPIR-V works and DXIL mostly works" is not an acceptable
-  outcome. Every DXIL compute shader meeting the bindless requirement must
-  run.
+  outcome. Every DXIL compute shader using supported resource operations and
+  either native dynamic resources or finite bound ranges must run.
 - **One pipeline, two front ends.** DXIL and SPIR-V converge at raised IR
   (see Design.md); putting the CPU pipeline entirely after that point means
   the divergence analysis, linearizer, widener, wave lowering and wrapper
@@ -878,15 +893,18 @@ preserves the source's own vocabulary rather than inventing a third. The CPU
 passes therefore match on the *pair*, exactly as
 `feme::amdgpu::RaisedLoweringPass` already does, through one shared
 classification helper rather than a `dx`/`spv` switch per pass. That helper
-is the only place in the CPU pipeline where the input format is visible, and
-its tests are the only tests that need writing twice.
+and `BoundResourceNormalizationPass`'s binding-identity decoder are the only
+places in the CPU pipeline where the input format is visible, and their tests
+are the only tests that need writing twice. Normalization erases that last
+resource-addressing distinction before `ResourceLoweringPass`.
 
 Two consequences for the phase descriptions below:
 
 - Phase 1 is where the format-specific cleanup lives:
   `feme::dxil::IntrinsicExpansionPass` for the DXIL-only intrinsics, and CFG
   structurization, which DXIL input needs and SPIR-V input has already had.
-  After Phase 1 the module is uniform in shape regardless of origin.
+  After Phase 1 and bound-resource normalization the module is uniform in
+  shape regardless of origin.
 - Every `lit` test for a later phase is written against raised IR directly,
   so it does not care which importer produced it; the end-to-end tests are
   run from both a DXIL and a SPIR-V input of the same shader, which is what
@@ -1267,8 +1285,10 @@ level where a thread pool wants to hand out work.
 
 ## Resource Model
 
-**The CPU target accepts bindless shaders only.** A shader must address its
-resources through a descriptor heap:
+**The CPU execution model is dynamic-resource-only, but the CPU target also
+accepts traditional bound resources by normalizing them into dynamic
+resources.** After normalization every shader addresses resources through a
+descriptor heap:
 
 - **DXIL**: Shader Model 6.6+ dynamic resource indexing —
   `ResourceDescriptorHeap[i]` / `SamplerDescriptorHeap[i]`, which is
@@ -1282,31 +1302,69 @@ resources through a descriptor heap:
 - **SPIR-V**: the `SPV_EXT_descriptor_heap` extension (the SPIR-V half of
   `VK_EXT_descriptor_heap`), which expresses the same thing: an
   application-managed heap of descriptors indexed by the shader.
+- **Traditional bindings**: DXIL
+  `llvm.dx.resource.handlefrombinding`/`handlefromimplicitbinding` and SPIR-V
+  descriptor set/binding resources are assigned fixed ranges in the same
+  resource or sampler heap, then rewritten to the corresponding
+  `handlefromheap` operation before resource lowering.
 
-Register-bound resources — `llvm.{dx,spv}.resource.handlefrombinding`,
-`handlefromimplicitbinding`, and SPIR-V descriptor set/binding decorations —
-are **rejected with a diagnostic**, with the single exception of the root
-constant buffer described below. This is a deliberate narrowing of scope,
-not an implementation gap:
+The normalization is intentionally outside the execution pipeline. Neither
+`feme::cpu::ResourceLoweringPass`, the SIMDizer, the runtime resource helpers,
+nor the kernel ABI gains a bound-resource case: each sees only a heap index.
+The designated root-constant binding is recognized first and keeps the
+special lowering described below; every other supported bound resource goes
+through heap emulation.
+
+### Bound-resource normalization
+
+`feme::cpu::BoundResourceNormalizationPass`
+(`feme-cpu-normalize-bound-resources`) runs immediately before
+`feme::cpu::ResourceLoweringPass`. It performs the following independently
+for the resource and sampler heaps:
+
+1. Collect each finite bound range used by the selected entry point and its
+   retained call graph. A range is identified by source model, register
+   space/descriptor set, base register/binding, resource class, and array
+   length. Duplicate uses of the same range share one assignment; conflicting
+   declarations of the same binding are diagnosed.
+2. Sort ranges by that identity and assign them contiguous slots in a reserved
+   heap prefix. Array element `j` of a range assigned base `B` maps to `B + j`.
+   This ordering is deterministic but is not itself an ABI: the published
+   `ResourceInfo` map is the contract a host consumes.
+3. Rewrite each bound handle into a range-checked
+   `handlefromheap(B + dynamic_array_index)`. A scalar binding has a zero
+   array index. An index outside the declared range, or an overflow while
+   forming the physical index, selects `UINT32_MAX` as an out-of-heap
+   sentinel; the ordinary heap bounds check then returns zero or drops the
+   write. This per-range check is required so an invalid index cannot alias
+   the next bound range.
+4. Add the reserved-prefix size to every *native* dynamic heap index in the
+   shader, with overflow likewise selecting the out-of-heap sentinel. This
+   makes a shader that mixes traditional and bindless resources unambiguous:
+   logical dynamic slot 0 still names the caller's slot 0 after the runtime
+   prepends the emulated bindings.
+
+Only finite ranges can be assigned this way. An unbounded traditional range
+is diagnosed with guidance to express it using the source format's native
+dynamic-resource operation. Resource kinds that `ResourceLoweringPass` does
+not yet canonicalize remain unsupported regardless of whether their source
+handle was bound or dynamic; normalization changes addressing, not the set of
+implemented resource operations.
+
+This arrangement preserves the useful properties of the dynamic-only
+execution model:
 
 - The kernel ABI becomes completely shader-independent. There is no slot
-  assignment to compute, no binding table to publish, and no per-shader
-  argument layout for a host to reconstruct; one dispatch path works for
-  every shader, and rebinding between dispatches means writing a different
-  descriptor into the heap.
+  assignment in the ABI and no pointer argument per binding; one dispatch
+  path works for every shader.
 - Dynamically indexed resources — the case
   `feme::amdgpu::ResourceLoweringPass` explicitly gives up on — are the
-  *only* case here, so nothing special is needed to support them.
+  canonical case here, so nothing downstream needs a special bound-resource
+  path.
 - Both source models converge on the same shape, so the pass is one rewrite
-  rather than one per binding model.
-- Bindless is where both APIs are going; a reference implementation that
-  only runs modern shaders is more useful than one that also runs the legacy
-  binding model badly.
-
-Supporting register binding later is a strictly additive change: a pass that
-assigns register-bound resources heap slots and rewrites
-`handlefrombinding` into `handlefromheap` would sit in front of everything
-described here.
+  rather than separate execution implementations per binding model.
+- Rebinding changes only the descriptors materialized for a dispatch; no
+  shader recompilation is required while the binding layout is unchanged.
 
 ### Descriptor heaps
 
@@ -1324,13 +1382,30 @@ typedef struct {
 } FemeDescriptor;
 ```
 
-The host supplies two heaps — the resource heap and the sampler heap — as
-flat arrays of `FemeDescriptor` with explicit counts. The sampler heap is
-part of the ABI from the start even though sampling is a non-goal, so that
-adding it later does not change the ABI. A descriptor the host has not
-written is zero-filled (`Kind = None`, `SizeInBytes = 0`), which the
-bounds-checking rules below turn into "reads zero, writes ignored" rather
+The executable receives two physical heaps — the resource heap and the
+sampler heap — as flat arrays of `FemeDescriptor` with explicit counts. The
+sampler heap is part of the ABI from the start even though sampling is a
+non-goal, so that adding it later does not change the ABI. A descriptor the
+host has not written is zero-filled (`Kind = None`, `SizeInBytes = 0`), which
+the bounds-checking rules below turn into "reads zero, writes ignored" rather
 than into undefined behaviour.
+
+For a native-dynamic-only shader, the caller's heaps are already the physical
+heaps and can be passed through without copying. When emulated bindings are
+present, the runtime adapter materializes each physical heap as:
+
+```
+[descriptors for reserved bound ranges][caller's logical dynamic heap]
+```
+
+It fills the prefix from binding records supplied for this dispatch, leaves
+an unbound slot as the zero descriptor, appends the caller's dynamic heap,
+and passes only the resulting ordinary heap to `FemeDispatchArgs`. The
+compiled entry point and every helper therefore remain unaware that any
+descriptor originated from a traditional binding. A host using the direct
+AOT entry symbol may perform the same materialization through
+`libFeMeRuntimeCPU`; passing the entry point a logical, unprefixed heap is an
+ABI error rather than a second interpretation of `FemeDispatchArgs`.
 
 ### Lowering (`feme::cpu::ResourceLoweringPass`, `feme-cpu-lower-resources`)
 
@@ -1548,17 +1623,21 @@ two APIs FeMe imports from:
 | Inline constants | Root constants, any number of `bN` entries, sharing a 64-DWORD root signature budget | One push constant block per pipeline, ≥128 bytes guaranteed | One block, `(b0, space0)` by default |
 | Per-stage constants | Per-stage visibility flags on each entry | Per-stage ranges within the one block | Compute only, so one block |
 | Root descriptors (a CBV/SRV/UAV bound as a raw address) | Yes | Buffer device address, inline uniform blocks | None — everything else is a heap descriptor |
-| Descriptor tables / sets | Yes | Yes | None — bindless heap only |
+| Descriptor tables / sets | Yes | Yes | Finite ranges, emulated in the dynamic heap |
 | Static / immutable samplers | Yes | Yes | None |
 | Size limit | 64 DWORDs of root signature, shared with everything else in it | Device `maxPushConstantsSize` | None imposed |
 
 Two directions of divergence matter:
 
-- **FeMe is more restrictive** in that a shader binding a second constant
-  buffer (`b1`, or `b0` in another space) is rejected with a diagnostic
-  naming this limitation, rather than silently getting one of them. Shaders
-  that keep all their heap indices in one struct — the common bindless
-  style, and the one both APIs' documentation recommends — are unaffected.
+- **FeMe is more restrictive** in that only the designated binding is
+  supplied through the inline root-constant block. Another constant buffer
+  (`b1`, or `b0` in another space) is an ordinary bound resource and is
+  emulated through the dynamic descriptor heap, provided constant-buffer
+  resource lowering supports its access form; the host cannot promote
+  several arbitrary bindings into separate inline blocks. Shaders that keep
+  all their heap indices in one root-constant struct — the common bindless
+  style, and the one both APIs' documentation recommends — avoid the extra
+  descriptor access.
 - **FeMe is more permissive** about size, because there is no register file
   to spend: the block is ordinary memory, and dynamically indexing it is
   fine. A shader that relies on that will not port back to either GPU API,
@@ -1573,24 +1652,29 @@ matches one register binding matches several. It is deferred because no
 motivating shader needs it, and because every additional block is another
 thing a host must get right for a dispatch to mean anything.
 
-### Heap usage discovery
+### Resource usage discovery
 
-There is no per-shader binding table to publish, but the host still benefits
-from knowing what the shader needs: FeMe emits a named metadata node
-(`!feme.cpu.resources`) recording the root constant block's size, whether
-the sampler heap is used, and the statically known heap indices when the
-shader uses constants. `feme::cpu::ResourceInfo::fromModule` reads it back
+The host needs both dynamic-heap usage and the emulated binding layout. FeMe
+emits a named metadata node (`!feme.cpu.resources`) recording the root
+constant block's size, whether the sampler heap is used, the statically known
+logical dynamic heap indices, each heap's reserved-prefix size, and one map
+entry per bound range. A map entry contains the source binding identity,
+resource/sampler heap selection, resource class, declared range length, and
+assigned prefix base. `feme::cpu::ResourceInfo::fromModule` reads it back
 while the module is in memory.
 
 LLVM metadata is not an object-file ABI. Before AOT codegen, FeMe also emits
 a versioned, read-only data symbol named `feme_cpu_info_<entry>`, containing
 the ABI version, resolved wave size, thread-group dimensions, groupshared
-size and alignment, required root-constant span, and heap-use flags,
-followed by the statically known heap indices as a counted tail. An AOT
-host reads this symbol through `ResourceInfo`; the JIT builds the same
-information directly from the module. `ResourceInfo` reports the same fields
-either way, so a host is never told less because it chose the object-file
-path — which is the only reason the symbol exists.
+size and alignment, required root-constant span, heap-use flags and reserved
+prefix sizes, followed by counted tails for the statically known logical
+heap indices and bound-range map. An AOT host reads this symbol through
+`ResourceInfo`; the JIT builds the same information directly from the
+module. `ResourceInfo` reports the same fields either way, so a host is never
+told less because it chose the object-file path — which is the only reason
+the symbol exists. Adding the map requires a new artifact-info version;
+readers continue to accept the previous dynamic-only version with zero
+prefix sizes and an empty map.
 
 ## Kernel ABI
 
@@ -1617,8 +1701,10 @@ void feme_cpu_entry_<name>(const FemeDispatchArgs *Args);
 Everything the shader can ask about its position derives from `GroupID`,
 `GroupCount`, and the wave loop index, so the ABI does not change with `W`,
 with the shader's resource usage, or between the JIT and object-file paths.
-`W` and the thread group dimensions are baked into the compiled code and
-reported alongside the resource info.
+The heaps in this low-level ABI are always physical, already-normalized
+heaps; binding identities never cross the entry-point boundary. `W`, the
+thread group dimensions and the heap-prefix maps are baked into or reported
+alongside the compiled code.
 
 ## JIT Flow
 
@@ -1643,11 +1729,21 @@ struct JITOptions {
   unsigned NumThreads = 0;           // 0 = hardware concurrency
 };
 
-/// The resources a dispatch runs against. Descriptor heaps are owned by the
-/// caller and must remain alive until this dispatch call returns.
+/// One finite traditional binding range supplied for a dispatch. Binding is
+/// matched against ResourceInfo; Descriptors contains the range's elements.
+struct BoundDescriptorRange {
+  SourceBinding Binding;
+  llvm::ArrayRef<FemeDescriptor> Descriptors;
+};
+
+/// The resources a dispatch runs against. Dynamic heaps and descriptors are
+/// owned by the caller and must remain alive until this dispatch call returns.
 struct DispatchResources {
+  // Logical native-dynamic heaps; JITEngine appends these after any reserved
+  // prefixes before calling the compiled entry point.
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<BoundDescriptorRange> BoundRanges;
   llvm::ArrayRef<uint8_t> RootConstants;
 };
 
@@ -1660,8 +1756,8 @@ public:
   static llvm::Expected<std::unique_ptr<JITEngine>>
   create(Context &Ctx, feme::Module M, const JITOptions &Opts);
 
-  /// What the shader needs from the host: root constant size, sampler heap
-  /// use, and the resolved wave size and thread group dimensions.
+  /// What the shader needs from the host: root constant size, heap use,
+  /// emulated binding map, and resolved execution shape.
   const ResourceInfo &getResourceInfo() const;
 
   /// Runs the whole dispatch to completion: schedules every group across the
@@ -1672,6 +1768,17 @@ public:
 
 } // namespace feme::cpu
 ```
+
+`SourceBinding` preserves the input model and its binding coordinates (DXIL
+register class/register/space or SPIR-V descriptor set/binding), so unrelated
+namespaces cannot collide. `dispatch()` validates that every supplied
+`BoundDescriptorRange` appears in `ResourceInfo`, rejects duplicate or
+oversized ranges, zero-fills omitted or short ranges, and materializes
+prefixed heaps only when a prefix is nonempty. Unknown bindings are errors
+because silently ignoring a host typo is harder to diagnose than an unbound
+shader slot. This materialization is per-dispatch state and does not mutate
+the engine, preserving concurrent dispatches and keeping recompilation out of
+rebinding.
 
 Notes and constraints:
 
@@ -1758,10 +1865,11 @@ The core of this design is stage-agnostic and stays as-is:
 - Phases 2–5 (uniformity, linearization, widening, wave lowering). An SPMD
   program is an SPMD program; a pixel shader's divergence is a vertex
   shader's is a compute shader's.
-- The bindless descriptor heap, the bounds-checking rules, and the root
-  constant block. Graphics APIs bind resources to graphics stages exactly
-  the way they bind them to compute, so the heap model transfers unchanged;
-  each stage gets its own root constants.
+- The dynamic descriptor heap, bound-resource normalization, the
+  bounds-checking rules, and the root constant block. Graphics APIs bind
+  resources to graphics stages exactly the way they bind them to compute, so
+  the normalization and heap model transfer unchanged; each stage gets its
+  own root constants.
 - Wave size selection, including the shader-declared/user-specified conflict
   rules.
 - The JIT's ownership of execution — the object it owns grows from "a
@@ -1846,9 +1954,10 @@ because it is a separate project that happens to reuse this one.
   and it is ignored (with a diagnostic if explicitly set) for non-CPU
   targets.
 - `feme-opt` gains one pass name per phase, matching the existing
-  convention: `feme-cpu-prepare`, `feme-cpu-lower-resources`,
-  `feme-cpu-linearize`, `feme-cpu-simdize`, `feme-cpu-lower-wave`,
-  `feme-cpu-wrap-entry`, plus the `print<feme-cpu-uniformity>` printer.
+  convention: `feme-cpu-prepare`, `feme-cpu-normalize-bound-resources`,
+  `feme-cpu-lower-resources`, `feme-cpu-linearize`, `feme-cpu-simdize`,
+  `feme-cpu-lower-wave`, `feme-cpu-wrap-entry`, plus the
+  `print<feme-cpu-uniformity>` printer.
 - **`feme-run`** (new): JITs a DXIL/SPIR-V/LLVM IR input and dispatches it,
   with resources described by a small YAML file (buffer contents in, buffer
   contents out, as text). This is the tool that turns "does this translate
@@ -1857,6 +1966,13 @@ because it is a separate project that happens to reuse this one.
   ```yaml
   # feme-run --wave-size=8 --groups=4,1,1 shader.dxil --heap=heap.yaml
   root-constants: [0, 1]
+  bound-resources:
+    - space: 0
+      register: 0
+      class: uav
+      kind: structured-buffer
+      stride: 16
+      data: [...]
   resource-heap:
     - index: 0
       kind: typed-buffer
@@ -1873,9 +1989,10 @@ because it is a separate project that happens to reuse this one.
   unwidened module instead (see "CFG restructurization test suite"), which
   is the ground truth that suite diffs against.
   Deliberately textual, per Design.md's "Avoiding binary test fixtures"
-  section. Note that the file describes *heap slots*, not bindings — it is
-  the same thing the shader indexes, so a test's expectations do not depend
-  on a slot assignment the compiler chose.
+  section. `bound-resources` describes source-visible binding identities;
+  `resource-heap` describes logical native-dynamic slots. `feme-run` uses
+  `ResourceInfo` to materialize both into the physical heap the entry point
+  receives, so tests never encode compiler-assigned prefix slots.
 
 ### Test strategy per phase
 
@@ -1885,13 +2002,14 @@ Following the instruction that each phase of translation gets unit tests:
 |---|---|---|
 | Uniformity | — (see the Status section's milestone 2 deviation note) | divergence classification on hand-built IR, including sync dependence, via `print<feme-cpu-uniformity>` output |
 | Prepare | pass ordering/entry selection | structurization of an unstructured DXIL-derived CFG; the named-shape corpus under `-verify-structured` (see "CFG restructurization test suite") |
-| Resource lowering | canonical call creation and resource info extraction | one test per resource kind, dynamic heap indexing, type mangling, rejection of register-bound resources |
+| Bound-resource normalization | deterministic range assignment and `ResourceInfo` map round-trip | DXIL register and SPIR-V set/binding rewrites, finite arrays, mixed bound/dynamic rebasing, per-range OOB, overflow, conflicts, and unbounded-range diagnostics |
+| Resource lowering | canonical call creation and resource info extraction | one test per resource kind, normalized dynamic heap indexing, and type mangling; no bound-handle form may survive into this pass |
 | Linearize | mask construction on diamond/loop CFGs | per-CFG-shape `CHECK`s, uniform-branch preservation, masked memory and resource-call emission |
 | SIMDize | widening rules, vector/aggregate component splitting, contiguity detection, resource-call scalarization | per-construct `CHECK`s at `W` ∈ {4, 8}, masked calls → LLVM masked operations or active-lane loops |
 | Runtime helpers | descriptor and root-constant robustness, format conversions, atomics | OOB reads/writes, per-descriptor `trusted`, every format, uniform and divergent descriptor indices |
 | Wave lowering | one test per intrinsic | per-intrinsic `CHECK`s at two wave sizes, all-off masks, varying lane reads, and ballot result packing |
 | Entry wrapper | barrier region splitting, scope/order mapping, quad-tiled lane mapping | wave loop shape, barriers inside/outside uniform loops, rejected scopes, groupshared, builtin derivation for 1D/2D/3D groups |
-| JIT | `JITEngine::create`/`dispatch` on a tiny module, resource/artifact info round-trip, multi-threaded group scheduling | — |
+| JIT | `JITEngine::create`/`dispatch` on a tiny module, resource/artifact info round-trip including binding maps, bound-prefix materialization, concurrent rebinding, multi-threaded group scheduling | — |
 | End to end | — | `feme-run` executing real shaders and `FileCheck`ing results, at several wave sizes, from both DXIL and SPIR-V inputs of the same shader |
 
 Wave size resolution gets its own tests: each row of the resolution table
@@ -1986,6 +2104,7 @@ feme/
       CPU/WaveUniformity.h        (WaveTTIImpl, computeWaveUniformity)
     Transforms/
       CPU/Prepare.h
+      CPU/BoundResourceNormalization.h
       CPU/ResourceLowering.h
       CPU/ResourceCalls.h           (feme.cpu.resource.* creation/matching)
       CPU/ResourceCallOptimization.h
@@ -2140,10 +2259,22 @@ Sequenced so each step is independently testable and useful:
    resource access does not yet round-trip through `feme::SPIRVImporter`
    at all (see "Known gap" in Design.md's SPIR-V section), independent of
    anything in this milestone.
-11. **Resource performance**: recognize uniform descriptor calls, hoist
+11. **Traditional bound-resource emulation**: add
+  `feme::cpu::BoundResourceNormalizationPass`, preserve finite DXIL and
+  SPIR-V binding-range metadata through raising/import, publish the reserved
+  heap prefixes and source-binding map through `ResourceInfo` and the next
+  artifact-info version, and teach `JITEngine`/`libFeMeRuntimeCPU`/
+  `feme-run` to materialize physical heaps from bound ranges plus logical
+  dynamic heaps. Remove `feme-run`'s testing-only
+  `--dxil-bind-register-resources` bridge once its HLSL tests use this common
+  path. The completion test is the same shader executed with a traditional
+  binding, a native dynamic slot, and both in one module, with identical
+  results through JIT and AOT runtime dispatch. No change is permitted below
+  `ResourceLoweringPass`: a bound handle reaching it is a pipeline error.
+12. **Resource performance**: recognize uniform descriptor calls, hoist
   descriptor/format checks, emit vector fast paths, and measure whether a
   divergent-descriptor waterfall or JIT heap-shape specialization pays for
   its complexity.
-12. **General performance work**: contiguity detection, all-lanes-off branch
+13. **General performance work**: contiguity detection, all-lanes-off branch
   skipping, uniform-load hoisting. Only after correctness is established
   and measurable.
