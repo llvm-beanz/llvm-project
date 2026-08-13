@@ -9,14 +9,18 @@
 #include "feme/Transforms/CPU/SIMDize.h"
 
 #include "feme/Transforms/CPU/BuiltinCalls.h"
+#include "feme/Transforms/CPU/Linearize.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
 #include "gtest/gtest.h"
 
 using namespace feme::cpu;
@@ -113,6 +117,53 @@ TEST(SIMDizeTest, LeavesUniformFunctionUnchanged) {
   for (Instruction &I : instructions(F))
     if (auto *BO = dyn_cast<BinaryOperator>(&I))
       EXPECT_FALSE(BO->getType()->isVectorTy());
+}
+
+TEST(SIMDizeTest, WidensMaskedLoopBackedge) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %n) #0 {
+    entry:
+      br label %loop
+    loop:
+      %i = phi i32 [0, %entry], [%inc, %latch]
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %break.cond = icmp eq i32 %tid, %i
+      br i1 %break.cond, label %exit, label %latch
+    latch:
+      %inc = add i32 %i, 1
+      %loop.cond = icmp slt i32 %inc, %n
+      br i1 %loop.cond, label %loop, label %exit
+    exit:
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  feme::cpu::LinearizePass().run(*M, MAM);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundWidePHI = false;
+  bool FoundReduceOr = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getType()->isVectorTy())
+        FoundWidePHI = true;
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getIntrinsicID() ==
+              Intrinsic::vector_reduce_or)
+        FoundReduceOr = true;
+  }
+  EXPECT_TRUE(FoundWidePHI);
+  EXPECT_TRUE(FoundReduceOr);
 }
 
 } // namespace

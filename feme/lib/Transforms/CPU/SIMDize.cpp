@@ -6,39 +6,54 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Roadmap milestone 4's widening algorithm, for a straight-line,
-// uniform-control-flow wave body (an acyclic CFG with no divergent branch --
-// loops and divergent control flow are milestones 6/7, see SIMDize.h):
+// Roadmap milestone 4's widening algorithm, generalized by milestone 7 to a
+// wave body that has already been through `feme::cpu::LinearizePass` (Phase
+// 3): a CFG with no divergent branch, but now possibly a loop whose backedge
+// is gated by `feme.cpu.mask.any` of a loop-carried mask.
 //
-//  1. Compute `feme::cpu::computeWaveUniformity` on the function as given
-//     (Phase 3, the linearizer, does not exist yet; every branch this
-//     milestone accepts is uniform by construction). Bail (leaving the
-//     function untouched, with a diagnostic) if the CFG has a cycle or a
-//     divergent branch -- this pass's whole simplification depends on both
-//     being absent.
+//  1. Compute `feme::cpu::computeWaveUniformity` on the function as given.
+//     Bail (leaving the function untouched, with a diagnostic) if a
+//     divergent branch remains -- this pass's whole simplification depends
+//     on control flow itself being uniform; a loop is fine as long as it has
+//     none (see "Loops with divergent exits" in "Phase 3").
 //  2. Build the widened function: the same signature plus the wave-body
 //     interface parameters ("Wave-body interface" in "Phase 4: Widening"),
 //     with the body spliced across unchanged (same technique
 //     `feme::cpu::ResourceLoweringPass::addResourceEnvParams` uses).
-//  3. Walk every instruction once, in reverse post-order (sufficient for an
-//     acyclic CFG: every value is defined before it is used): a divergent
-//     instruction gets a widened `<W x T>` replacement built from its
-//     operands' widened forms (broadcasting a uniform operand at the point
-//     it's first needed); a uniform instruction is left completely alone.
-//     Three cases don't fit that generic rule and are special-cased:
+//  3. Walk every instruction: a divergent instruction gets a widened
+//     `<W x T>` replacement built from its operands' widened forms
+//     (broadcasting a uniform operand at the point it's first needed); a
+//     uniform instruction is left completely alone. Every divergent `phi`
+//     across the whole function gets its (empty) widened replacement first,
+//     in its own pass, so a loop header `phi`'s backedge incoming value --
+//     not yet widened when the header is first reached in reverse post-order
+//     -- resolves to the real widened value rather than a stale broadcast of
+//     the soon-to-be-erased scalar one; the incoming values themselves are
+//     filled in a third and final pass. A handful of cases don't fit the
+//     generic elementwise rule and are special-cased:
 //      - The per-lane-varying builtins (thread id, ...) become
 //        `feme.cpu.builtin.*` calls (see feme::cpu::BuiltinCalls) -- Phase 5
 //        lowers the arithmetic, not this pass.
-//      - A `feme.cpu.resource.*` call (Phase 3 would normally mask these,
-//        but Phase 3 does not exist yet, so `feme::cpu::ResourceLoweringPass`'s
-//        own output can already appear here) with any divergent operand is
+//      - A `feme.cpu.resource.*` call with any divergent operand is
 //        scalarized: `W` unrolled scalar calls to the same callee,
 //        extracting per-lane operands and reassembling a loaded result into
 //        a vector (see "Widening" table's "masked feme.cpu.resource.* call"
-//        row).
+//        row), ANDing the call's own (possibly divergent, once
+//        `feme::cpu::LinearizePass` has masked it) governing mask into the
+//        wave's entry mask.
+//      - `feme.cpu.mask.any` is uniform (`feme::cpu::WaveTTIImpl` classifies
+//        it that way) but its operand isn't: it is lowered in place to
+//        `llvm.vector.reduce.or` over the widened operand, the real
+//        cross-lane reduction it stands in for.
 //      - `llvm.{dx,spv}.group.id` is uniform (a group's id is the same for
 //        every lane) and is simply replaced by the corresponding wave-body
 //        `GroupID` parameter component.
+//
+// Any divergent instruction the elementwise rule and these special cases
+// don't otherwise cover is still an error in this milestone's first change
+// (the scalarization fallback is a separate, later change to
+// `widenElementwise` -- "the scalarization fallback" in roadmap milestone
+// 7).
 //
 //===----------------------------------------------------------------------===//
 
@@ -47,11 +62,13 @@
 #include "feme/Analysis/CPU/WaveUniformity.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
+#include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/IR/Constants.h"
@@ -191,39 +208,43 @@ public:
       : OldF(OldF), WaveSize(WaveSize), UI(UI),
         NumThreads(getThreadGroupSize(OldF)) {}
 
-  /// Returns the widened function, or nullptr if \p OldF's CFG isn't the
-  /// acyclic, uniform-control-flow shape this milestone supports (a
-  /// diagnostic is emitted; \p OldF is left untouched).
-  Function *widen(CycleInfo &CI);
+  /// Returns the widened function, or nullptr if \p OldF has a divergent
+  /// branch left unhandled by `feme::cpu::LinearizePass` (a diagnostic is
+  /// emitted; \p OldF is left untouched).
+  Function *widen();
 
 private:
-  bool checkSupportedControlFlow(CycleInfo &CI);
+  bool checkSupportedControlFlow();
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
-  void widenPHI(PHINode &PN);
+  PHINode *createWidenedPHIStub(PHINode &PN);
+  void fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN);
   void widenBuiltin(CallInst &CI, BuiltinCallKind Kind, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
                          IRBuilder<> &Builder);
+  void widenMaskAny(CallInst &CI, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   bool widenInstruction(Instruction &I, IRBuilder<> &Builder);
 };
 
-bool FunctionWidener::checkSupportedControlFlow(CycleInfo &CI) {
-  if (!CI.toplevel_cycles().empty()) {
-    OldF.getContext().emitError(
-        "feme-cpu-simdize: function '" + OldF.getName() +
-        "' has a loop; only acyclic, uniform control flow is supported "
-        "(roadmap milestone 4)");
-    return false;
-  }
+bool FunctionWidener::checkSupportedControlFlow() {
+  // A loop is supported as of roadmap milestone 7 provided it has no
+  // divergent branch left in it: `feme::cpu::LinearizePass`'s
+  // `LoopLinearizer` turns a loop's own divergent exit check into an
+  // unconditional continuation gated by a loop-carried mask, with the
+  // backedge condition itself made uniform (`feme.cpu.mask.any`, classified
+  // `AlwaysUniform` by `feme::cpu::WaveTTIImpl`) -- so the divergent-branch
+  // check below is what actually decides whether a cycle is widenable, not
+  // the mere presence of one.
   for (BasicBlock &BB : OldF) {
     auto *BI = dyn_cast<CondBrInst>(BB.getTerminator());
     if (BI && UI.isDivergentTerminator(BI)) {
       OldF.getContext().emitError(
           "feme-cpu-simdize: function '" + OldF.getName() +
-          "' has a divergent branch; the divergence transform is not yet "
-          "implemented (roadmap milestone 6)");
+          "' has a divergent branch; the divergence transform "
+          "(feme::cpu::LinearizePass) did not remove it, or produced a "
+          "shape this pass cannot widen");
       return false;
     }
   }
@@ -281,6 +302,17 @@ Value *FunctionWidener::getWidened(Value *V, IRBuilderBase &Builder) {
   Value *Splat;
   if (auto *C = dyn_cast<Constant>(V)) {
     Splat = ConstantVector::getSplat(ElementCount::getFixed(WaveSize), C);
+  } else if (auto *PN = dyn_cast<PHINode>(V)) {
+    // A `phi`'s broadcast cannot be inserted right after it the way any
+    // other instruction's can: another `phi` may follow it in the same
+    // block (every `phi` must stay grouped at the block's top), and, for a
+    // loop header specifically, "right after" could even be read as before
+    // the block's other incoming edges are done executing. The first
+    // non-`phi` insertion point is always valid: it dominates every
+    // instruction in the block, including a divergent one this same call
+    // might be widening operands for.
+    IRBuilder<> B(&*PN->getParent()->getFirstInsertionPt());
+    Splat = B.CreateVectorSplat(WaveSize, V, V->getName() + ".splat");
   } else if (auto *I = dyn_cast<Instruction>(V)) {
     IRBuilder<> B(I->getParent(), std::next(I->getIterator()));
     Splat = B.CreateVectorSplat(WaveSize, V, V->getName() + ".splat");
@@ -294,25 +326,31 @@ Value *FunctionWidener::getWidened(Value *V, IRBuilderBase &Builder) {
   return Splat;
 }
 
-void FunctionWidener::widenPHI(PHINode &PN) {
-  if (!UI.isDivergentAtDef(&PN))
-    return;
-
+PHINode *FunctionWidener::createWidenedPHIStub(PHINode &PN) {
   Type *WideTy = FixedVectorType::get(PN.getType(), WaveSize);
   PHINode *NewPN = PHINode::Create(WideTy, PN.getNumIncomingValues(),
                                    PN.getName() + ".wide");
   NewPN->insertBefore(PN.getIterator());
-  // Deferred: the incoming values are widened lazily below, once every
-  // predecessor block has actually been processed (this pass never visits a
-  // block before all of its non-back-edge predecessors, since the CFG this
-  // milestone accepts is acyclic -- see `checkSupportedControlFlow`).
-  for (unsigned I = 0, E = PN.getNumIncomingValues(); I != E; ++I) {
-    IRBuilder<> IncomingBuilder(PN.getIncomingBlock(I)->getTerminator());
-    NewPN->addIncoming(getWidened(PN.getIncomingValue(I), IncomingBuilder),
-                       PN.getIncomingBlock(I));
-  }
   Widened[&PN] = NewPN;
   ToErase.push_back(&PN);
+  return NewPN;
+}
+
+void FunctionWidener::fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN) {
+  // Filling every widened PHI's incoming values is deferred to its own pass
+  // over the whole function (see `widen` below), run only after every
+  // instruction (including one reached solely through a loop's backedge)
+  // has its final widened form in `Widened`. A loop header's PHI has an
+  // incoming value from its latch that is not widened yet when the header
+  // is first reached in reverse post-order -- building its broadcast
+  // eagerly here, as milestone 4's acyclic-only version of this function
+  // did, would broadcast the *old*, soon-to-be-erased scalar value instead
+  // of referencing the real widened one (roadmap milestone 7).
+  for (unsigned I = 0, E = PN.getNumIncomingValues(); I != E; ++I) {
+    IRBuilder<> IncomingBuilder(PN.getIncomingBlock(I)->getTerminator());
+    NewPN.addIncoming(getWidened(PN.getIncomingValue(I), IncomingBuilder),
+                      PN.getIncomingBlock(I));
+  }
 }
 
 void FunctionWidener::widenBuiltin(CallInst &CI, BuiltinCallKind Kind,
@@ -356,15 +394,24 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
     return; // Every operand is uniform: leave the scalar call as-is.
 
   // Scalarize: call the same scalar callee once per lane, feeding it that
-  // lane's extracted operand values, ANDing the always-true scalar mask
-  // operand with this wave's entry mask so an inactive lane (e.g. a partial
-  // last wave) never touches memory (see "masked feme.cpu.resource.* call"
-  // in "Phase 4: Widening").
+  // lane's extracted operand values, ANDing the wave's entry mask with this
+  // call's own governing mask (a real, possibly-divergent value once
+  // `feme::cpu::LinearizePass` has masked a diamond arm or a loop iteration
+  // -- the constant `true` `feme::cpu::ResourceLoweringPass` otherwise
+  // leaves it as costs nothing to AND in) so an inactive lane never touches
+  // memory (see "masked feme.cpu.resource.* call" in "Phase 4: Widening").
   Function *Callee = CI.getCalledFunction();
   Value *WideDescriptorIndex = getWidened(Matched.DescriptorIndex, Builder);
   Value *WideOffset = getWidened(Matched.Offset, Builder);
   Value *WideStoredValue =
       Matched.StoredValue ? getWidened(Matched.StoredValue, Builder) : nullptr;
+
+  Value *LaneMaskBase = Env.EntryMask;
+  if (!isa<Constant>(Matched.Mask)) {
+    Value *WideCallMask = getWidened(Matched.Mask, Builder);
+    LaneMaskBase =
+        Builder.CreateAnd(Env.EntryMask, WideCallMask, "resource.mask");
+  }
 
   Value *Result = nullptr;
   if (!Matched.StoredValue)
@@ -372,7 +419,7 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
 
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *LaneMask = Builder.CreateExtractElement(
-        Env.EntryMask, Builder.getInt32(Lane), "lane.mask");
+        LaneMaskBase, Builder.getInt32(Lane), "lane.mask");
     Value *LaneDescriptorIndex = Builder.CreateExtractElement(
         WideDescriptorIndex, Builder.getInt32(Lane), "lane.desc");
     Value *LaneOffset = Builder.CreateExtractElement(
@@ -396,6 +443,22 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
 
   if (Result)
     Widened[&CI] = Result;
+  ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenMaskAny(CallInst &CI, IRBuilder<> &Builder) {
+  // `feme.cpu.mask.any` is uniform (see `feme::cpu::WaveTTIImpl`), so the
+  // generic `!UI.isDivergentAtDef` rule in `widenInstruction` would leave it
+  // alone -- wrong here, since its operand is a divergent value about to be
+  // replaced. Lower it in place to the real cross-lane reduction over the
+  // widened mask ("Mask representation between phases" in
+  // feme/docs/FeMeCPUDesign.md) and RAUW with the (uniform, scalar `i1`)
+  // result directly, rather than recording it in `Widened`, since nothing
+  // needs to broadcast a value that is already what every other use expects.
+  Value *WideMask = getWidened(CI.getArgOperand(0), Builder);
+  Value *Reduced = Builder.CreateOrReduce(WideMask);
+  Reduced->takeName(&CI);
+  CI.replaceAllUsesWith(Reduced);
   ToErase.push_back(&CI);
 }
 
@@ -437,6 +500,10 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       widenResourceCall(*CI, *Matched, Builder);
       return true;
     }
+    if (isMaskAnyCall(*CI)) {
+      widenMaskAny(*CI, Builder);
+      return true;
+    }
     Intrinsic::ID ID = CI->getCalledFunction()
                            ? CI->getCalledFunction()->getIntrinsicID()
                            : Intrinsic::not_intrinsic;
@@ -460,20 +527,34 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   return true;
 }
 
-Function *FunctionWidener::widen(CycleInfo &CI) {
-  if (!checkSupportedControlFlow(CI))
+Function *FunctionWidener::widen() {
+  if (!checkSupportedControlFlow())
     return nullptr;
 
   NewF = buildWidenedFunction();
 
   ReversePostOrderTraversal<Function *> RPOT(NewF);
+
+  // Pass 1: create every divergent PHI's widened stub, across the whole
+  // function, before any other instruction is widened -- see
+  // `fillWidenedPHIIncoming`'s comment for why a loop needs this to happen
+  // strictly before pass 2, not interleaved with it the way milestone 4's
+  // acyclic-only version of this function did.
+  SmallVector<PHINode *, 8> DivergentPHIs;
   for (BasicBlock *BB : RPOT) {
-    for (Instruction &PN : make_early_inc_range(*BB)) {
-      if (auto *Phi = dyn_cast<PHINode>(&PN))
-        widenPHI(*Phi);
-      else
-        break; // PHIs are always at the top of a block.
+    for (PHINode &PN : BB->phis()) {
+      if (UI.isDivergentAtDef(&PN))
+        DivergentPHIs.push_back(&PN);
     }
+  }
+  for (PHINode *PN : DivergentPHIs)
+    createWidenedPHIStub(*PN);
+
+  // Pass 2: widen every non-phi instruction. Reverse post-order is
+  // sufficient here even for a loop body: only a `phi` can observe a value
+  // defined later in this order (through a backedge), and every `phi` was
+  // already given its final (empty) widened form in pass 1 above.
+  for (BasicBlock *BB : RPOT) {
     for (Instruction &I : make_early_inc_range(*BB)) {
       if (isa<PHINode>(I))
         continue;
@@ -482,7 +563,36 @@ Function *FunctionWidener::widen(CycleInfo &CI) {
     }
   }
 
-  for (Instruction *I : llvm::reverse(ToErase))
+  // Pass 3: fill in every widened PHI's incoming values, now that every
+  // instruction anywhere in the function (including one reachable only
+  // through a backedge) has its final widened form.
+  for (PHINode *PN : DivergentPHIs)
+    fillWidenedPHIIncoming(*PN, *cast<PHINode>(Widened[PN]));
+
+  // A loop header's old scalar `phi` and its own backedge value can each
+  // hold a use of the other (the `phi`'s incoming-from-latch operand uses
+  // the backedge value; that value's own defining instruction may in turn
+  // use the `phi`) -- an honest cycle in the old, soon-to-be-fully-replaced
+  // IR that no erasure order can resolve on its own. Every read of a
+  // widened `phi`'s old incoming values happened above in pass 3, so it is
+  // safe to sever them now: poison out each old `phi`'s operands before
+  // erasing anything, which turns the rest of the old, dead subgraph back
+  // into a normal acyclic one.
+  for (PHINode *PN : DivergentPHIs)
+    for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I)
+      PN->setIncomingValue(I, PoisonValue::get(PN->getIncomingValue(I)->getType()));
+
+  // The remaining erasure order only needs "uses before defs" among what's
+  // left, which `NewF`'s actual layout gives directly: a block always
+  // precedes what it dominates, so walking the function once more and
+  // erasing in reverse of that walk is safe.
+  SmallPtrSet<Instruction *, 16> ToEraseSet(llvm::from_range, ToErase);
+  SmallVector<Instruction *, 16> OrderedErase;
+  for (BasicBlock &BB : *NewF)
+    for (Instruction &I : BB)
+      if (ToEraseSet.contains(&I))
+        OrderedErase.push_back(&I);
+  for (Instruction *I : llvm::reverse(OrderedErase))
     I->eraseFromParent();
 
   return NewF;
@@ -510,7 +620,7 @@ PreservedAnalyses SIMDizePass::run(Module &M, ModuleAnalysisManager &) {
     UniformityInfo UI = computeWaveUniformity(*F, DT, CI);
 
     FunctionWidener Widener(*F, W, UI);
-    if (Widener.widen(CI))
+    if (Widener.widen())
       Changed = true;
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
