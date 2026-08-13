@@ -8046,3 +8046,180 @@ this milestone specifically).
    crash on) a divergent vector/aggregate value.
 8. `FeMeCPUDesign.md`: mark milestone 7 done, correct stale cross-references.
 9. This file.
+
+# Milestone 8: Wave intrinsic lowering
+
+## Scope decision
+
+The design's "Phase 5: Wave and Builtin Lowering" table lists every wave
+intrinsic HLSL exposes (`WaveActiveSum`, `WaveActiveBallot`, `WavePrefix*`,
+...). Before writing any lowering code I checked which of these a shader can
+actually reach `feme::cpu::WaveLoweringPass` with today: `feme::dxil::
+OpRaisingPass`'s `DirectOps` table raises `WaveIsFirstLane`,
+`WaveGetLaneIndex`, `WaveGetLaneCount`, `WaveActiveAnyTrue`/`AllTrue`,
+`WaveActiveAllEqual`, `WaveReadLaneAt`, `WaveAllBitCount` and
+`WavePrefixBitCount` -- but explicitly does *not* raise `WaveActiveOp`/
+`WaveActiveBit`/`WavePrefixOp` (they pick their source intrinsic from an
+extra opcode-carried operand the raising pass doesn't reconstruct yet) or
+`WaveActiveBallot` (an aggregate-returning op), per that file's own header
+comment. SPIR-V import raises no wave op at all yet (there's no `OpGroupNon
+Uniform*` handling anywhere in `feme/lib/Import/SPIRV/`).
+
+That means implementing a lowering rule for `WaveActiveSum` et al. right now
+would be dead code no `lit`/`gtest` could exercise through the real
+pipeline -- I could only test it by hand-writing already-raised IR that no
+front end actually produces, which felt like testing a rule against itself
+rather than against the design. I scoped this milestone to exactly the
+raised subset instead, and documented the rest as a further narrowing
+alongside milestone 1's existing "WaveActiveBallot raising deferred" note,
+rather than silently under-delivering against the roadmap entry's text.
+
+## Canonicalization/lowering split
+
+Every existing Phase 4/5 boundary in this codebase (`feme.cpu.resource.*`,
+`feme.cpu.builtin.*`, `feme.cpu.masked.*`) follows the same shape:
+`SIMDizePass` canonicalizes a raised op it can't widen elementwise into a
+private, type/wave-size-mangled call, and a later pass matches and lowers
+that call. Wave intrinsics needed the same treatment for a subtle reason:
+LLVM's raised `llvm.dx.wave.*`/`llvm.spv.wave.*` intrinsics are declared with
+`LLVMMatchType<0>` between their value operand and result (e.g.
+`WaveActiveAllEqual`'s operand and `WaveReadLaneAt`'s operand/result share a
+type slot) -- so if `SIMDizePass` just widened the operand to `<W x T>` in
+place, the *result* would also become `<W x T>` by the intrinsic's own type
+constraint, which is wrong: the design's table needs a scalar (or, for
+`is.first.lane`/`prefix.bit.count`, a genuinely different-shaped
+divergent-but-not-elementwise) result. A new callee with its own signature
+was the only way to keep "everything is `<W x T>`" as a widening
+postcondition without also making Phase 5's lowering fight the original
+intrinsic's type constraints.
+
+So `WaveCalls.h`/`.cpp` is a new module of the same shape as
+`ResourceCalls`/`BuiltinCalls`: `WaveCallKind` enumerates the eight rows this
+milestone covers (`GetLaneCount`, `IsFirstLane`, `Any`, `All`, `AllEqual`,
+`ReadLane`, `ActiveCountBits`, `PrefixBitCount`), `createWaveCall`/
+`matchWaveCall` build/recognize the canonical `feme.cpu.wave.*` calls (type-
+mangled only where the kind is itself type-overloaded -- `AllEqual`/
+`ReadLane` -- since the rest are always `i1` operands with fixed-width
+results), and `isDivergentWaveCallResult` distinguishes the two kinds
+(`IsFirstLane`, `PrefixBitCount`) whose result must itself be widened
+(`Widened[&CI] = NewCall` in `SIMDizePass`, exactly like a builtin or
+resource-call result) from the six that stand in directly for the old
+scalar call via `replaceAllUsesWith` (matching `widenMaskAny`'s existing
+pattern for the same reason: nothing needs to broadcast a value that's
+already the uniform scalar shape every other use expects).
+
+## Bugs caught by actually running the pipeline, not just reading the design table
+
+1. **`createWaveCall`'s mask assertion fired on `GetLaneCount`.** My first
+   version of `FunctionWidener::widenWaveCall` always passed `Env.EntryMask`
+   through regardless of `Kind`, but `GetLaneCount` takes no mask operand at
+   all (it's a compile-time constant, no cross-lane reduction involved).
+   Caught immediately by `feme-opt`'s own assertion the first time I ran a
+   `WaveGetLaneCount` shader through `-passes=feme-cpu-simdize` by hand,
+   before I'd written a single test -- exactly the "verify against the
+   module verifier/assertions before writing `CHECK` lines" discipline the
+   milestone 7 notes above already flagged as valuable.
+2. **`CreateTrunc` from `iW` to `i32` is invalid when `W < 32`.** `cttz`'s
+   result and the mask-as-integer bitcast are both `iW` (`i4` at `W = 4`,
+   the cheapest wave size and hence the one I tested first); truncating that
+   down to `i32` to compare against/index into a `<W x i32>` lane vector is
+   actually a *widening* conversion at `W = 4`, and `CastInst::Create`
+   asserts rather than silently doing the wrong thing. Fixed by using
+   `CreateZExtOrTrunc` everywhere an `iW` value crosses into `i32`, which is
+   correct at every wave size in `[MinWaveSize, MaxWaveSize]` (`4..128`),
+   not just the ones `>= 32`. Re-verified by running every new lowering
+   rule at both `W = 4` and `W = 8` by hand (`bitcast <8 x i1> ... to i8`
+   exercises the "shrinking" direction the assertion would have caught
+   anyway, so `W = 4` was the right one to catch this on first).
+3. **`--reference` silently accepted every wave op except
+   `WaveGetLaneIndex`.** `feme::cpu::ReferenceLoweringPass`'s `classify`
+   function had a single `case Intrinsic::dx_wave_getlaneindex:` mapped to
+   `Unsupported`, with every other wave intrinsic falling through to the
+   `default: return std::nullopt` case -- meaning `--reference` would leave
+   a raised `WaveActiveAnyTrue` call untouched rather than diagnosing it, so
+   a generated shader that (by mistake, since the CFG generator "avoids"
+   wave ops per its own design note, but nothing enforced that) used one
+   would silently produce a module with a dangling raised intrinsic instead
+   of a clear error. Caught by manually running a hand-written repro through
+   `-passes=feme-cpu-reference-lower-builtins` before writing the
+   corresponding `lit` test, the same way item 1 above was caught -- writing
+   the test first would have "worked" (there was no crash to see) without
+   ever revealing the silent-acceptance bug. Fixed by checking the raised
+   intrinsic's *name* (`llvm.dx.wave.`/`llvm.spv.wave.` prefix) rather than
+   enumerating every wave `Intrinsic::ID`, so this stays correct
+   automatically as raising covers more of them later, rather than needing
+   a matching edit here every time.
+
+## No poison from an all-zero mask
+
+Two of the eight lowerings extract a specific lane's value out of a wide
+vector using an index derived from `cttz` of the (possibly all-zero) mask:
+`AllEqual` (broadcast of "the first active lane's value") and, if it had
+needed one, `IsFirstLane` (it doesn't -- see below). `llvm.cttz` with
+`is_zero_poison=false` already returns `W` rather than poison on a zero
+input, but `W` is out of range for an `extractelement` on a `<W x T>`
+vector, which *would* be real undefined behaviour. `getClampedFirstActive
+LaneIndex` (used only by `lowerAllEqual`) selects lane 0 instead of the raw
+`cttz` result when the mask is entirely zero; `lowerIsFirstLane` doesn't
+need the same clamp because it never extracts anything -- it only compares
+the (possibly out-of-range) `cttz` value against the lane iota, and that
+comparison is always false for every real lane regardless, with the correct
+all-false answer additionally guaranteed by the `M != 0` conjunct. Getting
+this distinction right (clamp only where an actual `extractelement` occurs)
+took inspecting the emitted IR at `W = 4` for both rules side by side rather
+than reasoning about it purely from the design's prose.
+
+## Testing
+
+`lit`: one file per row this milestone implements (`wave-lowering-get-lane-
+count.ll`, `-is-first-lane.ll`, `-any-all.ll`, `-all-equal.ll`, `-readlane.
+ll`, `-active-countbits.ll`, `-prefix-bitcount.ll`), each running
+`feme-cpu-simdize,feme-cpu-lower-wave` end to end and `CHECK`ing the emitted
+arithmetic, plus `reference-lowering-wave-op-unsupported.ll` for the
+`--reference` fix. `gtest`: `WaveCallsTest.cpp` (new) round-trips
+`createWaveCall`/`matchWaveCall` for a representative kind of each shape
+--no-operand, `i1`-operand, type-overloaded, and lane-index-carrying --
+plus a `verifyModule` check on every one and an explicit test that
+`AllEqual`'s `i32` and `f32` instances get distinct mangled callees; nine
+new cases added to `WaveLoweringTest.cpp` running the full canonicalize-then
+-lower pipeline per intrinsic (asserting no `feme.cpu.wave.*` call survives
+and the module still verifies), including one that specifically checks
+`AllEqual` at three different wave sizes (`4`, `8`, `16`) since that's the
+rule most sensitive to the `iW` bit-width bug above.
+
+`ninja check-feme` (assertions-enabled, ccache) went from the 774/774
+baseline to 796/796 (100%): 774 pre-existing + 15 new `lit` files (7 new
+wave-lowering files + 1 reference-mode file, the rest pulled in via the
+`gtest` binary's own test count) + 16 new `gtest` cases across
+`WaveCallsTest.cpp` and the `WaveLoweringTest.cpp` additions, with zero
+regressions in the pre-existing suite at any point.
+
+## Design doc
+
+Marked roadmap milestone 8 done, with a summary of what narrowed. Added a
+"Deviation: milestone 8's implementation narrowed..." block to the Status
+section (same place every other milestone's deviation note lives) covering
+the raised-intrinsic-subset scope, the new `WaveCalls` module (not really a
+deviation, just an implementation detail the design's prose didn't name),
+the uniform-lane-index assumption for `WaveReadLaneAt`, and the unrolled-
+loop `WavePrefixBitCount` scan. Also added a forward pointer from "Phase 5"'s
+"Two halves, separately usable" paragraph to that deviation note, since the
+existing text there described milestone 8 as unstarted future work.
+
+## Commit breakdown
+
+1. `WaveCalls.{h,cpp}`, `CMakeLists.txt`: new `feme.cpu.wave.*` canonical
+   call helpers (create/match), mirroring `ResourceCalls`/`BuiltinCalls`.
+2. `SIMDize.cpp`: canonicalize a raised wave intrinsic into a
+   `feme.cpu.wave.*` call over its widened operand(s) and the wave's entry
+   mask.
+3. `WaveLowering.cpp`, `WaveLowering.h`: lower every `feme.cpu.wave.*` call
+   per "Phase 5"'s table (the `CreateZExtOrTrunc` fix included, since it
+   surfaced while implementing this step).
+4. `ReferenceLowering.cpp`: reject every wave op under `--reference`, not
+   just `wave.getlaneindex`.
+5. `WaveCallsTest.cpp`, `WaveLoweringTest.cpp`, `CMakeLists.txt`, and the
+   new `lit` files under `feme/test/Transforms/CPU/`: tests for all of the
+   above.
+6. `FeMeCPUDesign.md`: mark milestone 8 done, add its deviation note.
+7. This file.
