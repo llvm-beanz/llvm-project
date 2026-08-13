@@ -8359,3 +8359,232 @@ all.
 5. `FeMeCPUDesign.md`: mark roadmap milestone 9 done, add its deviation
    note.
 6. This file.
+
+# Milestone 10: End-to-end HLSL test coverage
+
+## Task
+
+Now that milestones 1-9 are done (everything but performance tuning), the
+request was for wider `feme-run` coverage via end-to-end tests: real HLSL,
+compiled to DXIL *and* SPIR-V with Clang, executed through `feme-run` to
+verify correct execution -- specifically covering loops, divergent control
+flow, wave operations, barriers, groupshared memory, and a shader combining
+all of them.
+
+## What I found before writing any test
+
+I started by trying the literal pipeline the request describes -- HLSL,
+`clang -x hlsl -target dxil...`, `feme-run` -- and hit three real gaps
+before a single test could pass:
+
+1. **`feme-run` cannot import DXIL or SPIR-V at all.** Its own file
+   comment already documented this (roadmap milestone 4's Deviation note):
+   the input must already be idiomatic, raised LLVM IR. Every existing
+   `feme-run` test (`thread-id-store.ll`, the differential harness, ...)
+   is hand-written raised IR for exactly this reason. Without fixing this,
+   there is no way to feed real HLSL/DXIL/SPIR-V into `feme-run` at all --
+   this is not a test-writing problem, it's a missing feature.
+2. **Clang's HLSL front end cannot emit bindless resource access
+   (`ResourceDescriptorHeap`/`SamplerDescriptorHeap`, SM6.6) at all** --
+   I confirmed this by grepping Clang's `SemaHLSL.cpp`/`CGHLSLBuiltins.cpp`/
+   `Builtins.td` for `handlefromheap` and finding nothing: only
+   `__builtin_hlsl_resource_handlefrombinding`/
+   `handlefromimplicitbinding` exist. Every resource a real Clang-compiled
+   HLSL shader can declare is therefore register-bound
+   (`llvm.dx.resource.handlefrombinding`) -- but the FeMe CPU target's own
+   `checkSupportedRaisedOps` rejects *every* register-bound handle
+   unconditionally (this is deliberate, not a bug: see "Root constants" in
+   FeMeCPUDesign.md -- the design's bindless-only resource model just has
+   no real front end that can produce it yet).
+3. **Real SPIR-V resource access does not round-trip through
+   `feme::SPIRVImporter` at all.** I compiled the same HLSL to a real
+   SPIR-V binary (`clang -target spirv-unknown-vulkan-compute ... | llc
+   --filetype=obj`) and ran it through `feme-translate --import-spirv`:
+   `error: unhandled opcode 83` (`OpCopyObject`), i.e. it can't even
+   deserialize a shader that touches a `StorageBuffer`
+   (`spirv.VulkanBuffer`) resource. This matches Design.md's own "Known
+   gap" note (storage/uniform buffers are explicitly listed as "still
+   missing" from the `spirv` dialect -> `llvm` dialect conversion), so
+   this isn't a new gap I introduced -- it's the pre-existing one, just
+   never exercised with a real Clang-compiled binary before.
+
+Given (2) and (3), executing real SPIR-V through `feme-run` is blocked on
+gaps in Clang's HLSL front end and MLIR's own SPIR-V deserializer -- both
+well outside this target's scope, and each substantial enough to be its
+own project, not something to bundle into a test-writing task. I decided
+*not* to attempt either. Instead: SPIR-V is still exercised (Clang compiles
+the same HLSL to a real, valid SPIR-V binary, verified structurally, the
+same way `feme-dxil-to-spirv.ll` et al. already validate SPIR-V output
+elsewhere) but not executed through `feme-run`. I recorded this limitation
+explicitly in both `feme-run.cpp`'s file comment and FeMeCPUDesign.md's
+Status section rather than silently narrowing scope.
+
+(1) and the register-bound half of (2), though, were both small, clearly
+scoped, and directly blocking the one thing actually requested (DXIL
+through `feme-run`), so I fixed both:
+
+- `feme-run` now sniffs its input the same way `feme::Driver::detectFormat`
+  does, and for a DXIL bitcode file/DXContainer, imports it
+  (`feme::DXILImporter`) and runs the same `OpRaisingPass`/
+  `MetadataRaisingPass` sequence `feme::Driver::run` runs before any
+  target-specific lowering, closing the DXIL half of milestone 4's own
+  Deviation note. `.ll`/`.bc` raised IR keeps working exactly as before
+  (the new code path is purely additive, gated on `looksLikeDXIL`'s
+  bitcode/DXContainer sniff). Two follow-on fixes were needed in the same
+  function once real Clang-generated modules actually flowed through it:
+  clearing the module's DXIL-specific target triple/data layout (they mean
+  nothing to the CPU target's JIT and otherwise fail `Linker` outright with
+  "incompatible data layouts") and stripping Clang's own host-compiler
+  module flags (`frame-pointer`), which otherwise produce a harmless but
+  noisy linker warning when linked against `libFeMeRuntimeCPU`.
+- A new, explicit, opt-in `--dxil-bind-register-resources` flag rewrites a
+  raised `llvm.dx.resource.handlefrombinding` call into
+  `llvm.dx.resource.handlefromheap`, mapping the register slot directly
+  onto the heap index space `--heap`'s YAML already addresses. This is
+  deliberately **not** a change to `feme::cpu::checkSupportedRaisedOps` or
+  anything in the real `feme::Driver`/CPU-target pipeline -- the rewrite
+  happens inside `feme-run` itself, before the module ever reaches that
+  check, and is off by default. I went back and forth on whether this was
+  overreach for a "write some tests" task, but concluded it was the right
+  call: without it, *no* resource-touching HLSL shader Clang compiles
+  today can reach `feme-run` at all, bindless or not, which would make the
+  entire request unsatisfiable. Framing it as an explicit, narrowly-scoped,
+  heavily-commented testing bridge (not a silent relaxation of the CPU
+  target's real acceptance criteria) seemed the honest way to unblock the
+  actual request without misrepresenting what the CPU target itself
+  accepts.
+
+## A real, additive gap I found once DXIL import was wired up
+
+The very first shader I tried (`RWStructuredBuffer<uint> Out; Out[tid.x] =
+tid.x;`, the most idiomatic possible HLSL way to report a per-thread
+result) failed with `unsupported raised operation:
+'dx.op.rawBufferStore.i32' was not raised to idiomatic LLVM IR`.
+`feme::dxil::OpRaisingPass` only raised `dx.op.bufferStore`/`bufferLoad`
+(typed buffers, opcodes 68/69) -- `dx.op.rawBufferStore`/`rawBufferLoad`
+(opcodes 139/140, what a `RWStructuredBuffer`/`RWByteAddressBuffer`
+actually lowers to) had no raising at all. This wasn't a bug in anything I
+changed -- `thread-id-store.ll`'s existing raw-buffer test starts from
+*already-raised* IR (`llvm.dx.resource.store.rawbuffer.i32` written by
+hand), so this path was simply never exercised end-to-end from real DXIL
+before. Since every practical HLSL end-to-end test needs some way to
+report a per-thread result, and a typed buffer can't express an untyped
+scalar the way a structured/raw buffer can, I added
+`raiseRawBufferStore`/`raiseRawBufferLoad` (mirroring the existing typed
+buffer functions' structure and scope closely: single-component only, mask
+must be exactly one bit, `Coord0`/`Coord1` forwarded straight through
+unexamined since both resource kinds' raised intrinsic form takes them
+uninterpreted). This is a real, permanent capability addition to
+`OpRaisingPass`, not a test-only shim -- it's exercised by both a new,
+non-HLSL `lit` test (`dxil-raise-raw-buffer-ops.ll`, covering the
+single/multi-component and store/load cases directly) and by every one of
+the new HLSL end-to-end tests. It also let a *pre-existing* test
+(`dxil-raise-resource-handles-roundtrip.ll`) tighten its own assertion: the
+`raw_buffer_uav` case, previously documented as "left as-is, only the
+handle round-trips", now round-trips completely, the same as the typed
+buffer case right above it -- I updated that test's comment and `CHECK`
+lines to match rather than leaving a now-stale "not implemented yet" note
+next to code that just implemented it.
+
+## Two more milestone-9 limitations the barrier/groupshared test surfaced
+
+Getting `barrier-groupshared.hlsl` and `combined.hlsl` to actually pass
+took three iterations, each hitting a documented (not new) roadmap
+milestone 9 narrowing rather than a bug:
+
+1. **`InterlockedAdd` on a groupshared cell isn't supported.**
+   `rewriteGroupSharedGlobals` only recognizes a plain `load`/`store`/
+   `getelementptr` user of a groupshared global; an `atomicrmw` (what
+   `InterlockedAdd` lowers to) isn't one of those three, so it's
+   diagnosed. My first attempt used `InterlockedAdd(Shared[0], 1)` as the
+   most natural "combine every lane's contribution" idiom; I switched to a
+   plain, non-atomic groupshared write instead once I understood this was
+   an explicit scope boundary ("only a uniform getelementptr, load, or
+   store is supported"), not a bug to fix.
+2. **No SSA value may be live across a `..._with_group_sync` barrier --
+   including the per-lane thread ID.** My first `groupshared.hlsl`
+   attempt read `SV_DispatchThreadID` both before and after a barrier (to
+   decide which thread initializes `Shared[0]`, and again to index `Out`
+   at the end) and hit `splitAtGroupSyncBarriers`'s own liveness
+   diagnostic. This one crashed rather than diagnosed cleanly on my very
+   first attempt (see below) before I simplified past it; once simplified,
+   it's an accurate, deliberate milestone-9 narrowing ("carry state across
+   a barrier through groupshared memory instead"), and the fix was to read
+   `SV_GroupID` (a genuine `WaveBody` function *argument*, not a computed
+   instruction, so it survives the liveness check by construction) after
+   the barrier instead of `SV_DispatchThreadID`.
+3. **A pre-existing crash I worked around rather than fixed**: my very
+   first `groupshared.hlsl` draft (`if (gtid == 0) Shared[0] = 0;` before
+   the barrier) crashed `feme-cpu-linearize`
+   (`createMaskedStore`/`maskMemoryOps` in `Linearize.cpp`) with an
+   assertion failure (`Calling a function with a bad signature!`) while
+   masking a store into a groupshared global inside a divergent diamond.
+   This reproduces with no barrier involved at all (a divergent branch
+   guarding a groupshared store is enough) and is unrelated to anything
+   I'm adding here -- it's a bug in code from a much earlier milestone,
+   surfaced by a genuinely new combination (divergent-branch-guarded
+   groupshared store) nothing had exercised before. Per the "don't fix
+   pre-existing issues unrelated to your task" guidance, I did not
+   debug/fix `Linearize.cpp`; I rewrote the test to avoid a
+   divergent-branch-guarded groupshared store (every groupshared access in
+   the final tests is unconditional, matching what
+   `rewriteGroupSharedGlobals` already documents as its only supported
+   shape) rather than chase a `LinearizePass` bug under a "write tests"
+   task. This is worth a follow-up bug report/fix on its own, separate
+   from this milestone.
+
+## What actually shipped
+
+- `feme-run.cpp`: DXIL bitcode/DXContainer import (`loadModule`, sniffing
+  format the same way `feme::Driver::detectFormat` does), the
+  `--dxil-bind-register-resources` bridge (`bridgeRegisterBoundResourcesToHeap`),
+  and the triple/data-layout/module-flags cleanup needed once a real
+  Clang-compiled module flows through it. `CMakeLists.txt` gained the two
+  new library dependencies (`FeMeImportDXIL`, `FeMeTransformsDXIL`).
+- `OpRaising.{h,cpp}`: `raiseRawBufferStore`/`raiseRawBufferLoad`, wired
+  into `raiseResourceOps` at opcodes 140/139.
+- `dxil-raise-raw-buffer-ops.ll` (new): direct coverage of the new raising,
+  independent of HLSL/`feme-run`.
+- `dxil-raise-resource-handles-roundtrip.ll`: updated to reflect that raw
+  buffer loads now round-trip completely (previously documented as a gap
+  that code just closed).
+- `dxil-container-input.ll` (new, `feme/test/Tools/feme-run/`): the DXIL
+  import + register-bound bridge covered directly, from an `llc`-built
+  fixture (per "Avoiding binary test fixtures" in Design.md), independent
+  of Clang/HLSL.
+- `feme/test/Tools/feme-run/HLSL/` (new directory), five tests: `loop.hlsl`,
+  `divergent-control-flow.hlsl`, `wave-ops.hlsl`,
+  `barrier-groupshared.hlsl`, and `combined.hlsl` (all five use cases
+  together: a loop whose body branches on divergent per-lane data, a wave
+  op broadcasting a uniform view of the result, and a barrier plus
+  groupshared memory publishing it once per group). Each computes its
+  expected output by hand in the test's own comment, not just by trusting
+  whatever the tool prints.
+- `lit.cfg.py`: added `.hlsl` to `config.suffixes` so these are picked up
+  as test files at all; `test/CMakeLists.txt`: added `clang` to
+  `FEME_TEST_DEPENDS` (it was already a tool substitution, and already an
+  incidental dependency of `libFeMeRuntimeCPU`'s own build, but not an
+  explicit `check-feme` dependency -- I verified this really was missing
+  by deleting the built `clang-24` binary and confirming `ninja check-feme`
+  still happened to rebuild it, only because of that incidental runtime
+  dependency, not because `check-feme` itself asked for it).
+- `feme-run.md`, `FeMeCPUDesign.md`: synopsis/options/examples updated for
+  the new input format and flag; a new "Update" paragraph on milestone 4's
+  own Deviation note (rather than pretending this was always the design)
+  documenting exactly what closed and what's still open (SPIR-V); a new
+  roadmap milestone 10 entry; the Status section's milestone list updated
+  to mention it.
+
+## Commit breakdown
+
+1. `feme-run.cpp`/`CMakeLists.txt`: DXIL bitcode/DXContainer import.
+2. `OpRaising.{h,cpp}` + `dxil-raise-raw-buffer-ops.ll` (new) +
+   `dxil-raise-resource-handles-roundtrip.ll` (updated): raw/structured
+   buffer store/load raising.
+3. `feme-run.cpp`: `--dxil-bind-register-resources` bridge +
+   `dxil-container-input.ll` (new).
+4. `lit.cfg.py`, `test/CMakeLists.txt`, `feme/test/Tools/feme-run/HLSL/`
+   (new): the five HLSL end-to-end tests and the build-system changes
+   needed to run them.
+5. `feme-run.md`, `FeMeCPUDesign.md`: documentation.
+6. This file.
