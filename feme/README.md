@@ -4,8 +4,10 @@ FeMe is an LLVM sub-project for importing, translating, and retargeting GPU
 shader intermediate representations (SPIR-V, DXIL, DXBC) using LLVM/MLIR
 infrastructure. See [docs/Design.md](docs/Design.md) for the full design and
 roadmap, [docs/FeMeCPUDesign.md](docs/FeMeCPUDesign.md) for the (proposed)
-CPU target design, and [docs/CommandGuide](docs/CommandGuide/index.md) for
-usage docs for each of FeMe's command line tools.
+CPU target design, [docs/Roadmap.md](docs/Roadmap.md) for what remains
+across both designs and how end-to-end test coverage should grow with it,
+and [docs/CommandGuide](docs/CommandGuide/index.md) for usage docs for each
+of FeMe's command line tools.
 
 FeMe is currently under initial development (see the Roadmap / Milestones
 section of the design document) and is not yet part of the default `"all"`

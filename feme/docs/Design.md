@@ -1975,7 +1975,11 @@ feme/
 
 ## Roadmap / Milestones
 
-This is a rough sequencing, not a schedule:
+This is a rough sequencing, not a schedule. Each step below records its own
+implementation status inline; for a consolidated view of what remains across
+this document *and* [FeMeCPUDesign.md](FeMeCPUDesign.md), together with the
+end-to-end test coverage that should grow alongside it, see
+[Roadmap.md](Roadmap.md).
 
 1. **Scaffolding**: directory layout, `CMakeLists.txt` wiring into the
    monorepo build, empty `feme::Context`, `feme` skeleton with

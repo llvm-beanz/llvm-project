@@ -2201,7 +2201,10 @@ existing layout moves.
 
 ## Roadmap / Milestones
 
-Sequenced so each step is independently testable and useful:
+Sequenced so each step is independently testable and useful. For how the
+remaining steps here interleave with the ones still open in
+[Design.md](Design.md), and for the end-to-end test coverage each needs, see
+[Roadmap.md](Roadmap.md).
 
 1. **Scaffolding + raised-IR contract + ABI header** (done):
   `Target/CPU/RuntimeABI.h`, wave size resolution (`--wave-size` in
