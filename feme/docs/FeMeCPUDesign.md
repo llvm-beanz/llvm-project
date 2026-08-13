@@ -368,6 +368,18 @@ called out inline where it's discussed, and summarized here:
   `llvm.vector.reduce.or`. `feme::cpu::LinearizePass`'s `LoopLinearizer` also
   now masks a `feme.cpu.resource.*` call inside a loop body with the
   iteration's active mask (previously only a divergent diamond's arm did).
+  Fixing this also required a real bug fix, not just new capability:
+  `FunctionWidener::widen`'s final erasure pass used to assume its widened
+  function's block *list* order was itself a "uses before defs" order,
+  which nothing about LLVM guarantees (only that a def's block *dominates*
+  its use's block, regardless of either's position in the function's block
+  list) -- a `LinearizePass`-inserted "Flow" merge block routinely sorts
+  earlier in the list than a cycle-exit block whose value it still uses,
+  once a loop and a diamond after it both need linearizing (see
+  `simdize-erasure-order.ll`). Every to-be-erased instruction's uses are
+  now severed (RAUW'd with `poison`) up front, across the whole to-be-erased
+  set, before any of them are actually erased, making every remaining
+  erasure order safe.
 - **Masked memory ops are implemented, but only via `llvm.masked.gather`/
   `.scatter`.** `feme::cpu::LinearizePass` now rewrites a plain, non-atomic,
   non-volatile `load`/`store` inside a masked region into a

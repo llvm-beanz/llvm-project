@@ -801,31 +801,27 @@ Function *FunctionWidener::widen() {
   for (PHINode *PN : DivergentPHIs)
     fillWidenedPHIIncoming(*PN, *cast<PHINode>(Widened[PN]));
 
-  // A loop header's old scalar `phi` and its own backedge value can each
-  // hold a use of the other (the `phi`'s incoming-from-latch operand uses
-  // the backedge value; that value's own defining instruction may in turn
-  // use the `phi`) -- an honest cycle in the old, soon-to-be-fully-replaced
-  // IR that no erasure order can resolve on its own. Every read of a
-  // widened `phi`'s old incoming values happened above in pass 3, so it is
-  // safe to sever them now: poison out each old `phi`'s operands before
-  // erasing anything, which turns the rest of the old, dead subgraph back
-  // into a normal acyclic one.
-  for (PHINode *PN : DivergentPHIs)
-    for (unsigned I = 0, E = PN->getNumIncomingValues(); I != E; ++I)
-      PN->setIncomingValue(
-          I, PoisonValue::get(PN->getIncomingValue(I)->getType()));
-
-  // The remaining erasure order only needs "uses before defs" among what's
-  // left, which `NewF`'s actual layout gives directly: a block always
-  // precedes what it dominates, so walking the function once more and
-  // erasing in reverse of that walk is safe.
-  SmallPtrSet<Instruction *, 16> ToEraseSet(llvm::from_range, ToErase);
-  SmallVector<Instruction *, 16> OrderedErase;
-  for (BasicBlock &BB : *NewF)
-    for (Instruction &I : BB)
-      if (ToEraseSet.contains(&I))
-        OrderedErase.push_back(&I);
-  for (Instruction *I : llvm::reverse(OrderedErase))
+  // Every instruction being erased may still be used by another
+  // soon-to-be-erased instruction: a loop header's old scalar `phi` and its
+  // own backedge value can each hold a use of the other (the `phi`'s
+  // incoming-from-latch operand uses the backedge value; that value's own
+  // defining instruction may in turn use the `phi`) -- an honest cycle in
+  // the old, soon-to-be-fully-replaced IR that no erasure order alone can
+  // resolve. More generally, nothing about `NewF`'s block layout guarantees
+  // a "uses before defs" erasure order either: `feme::cpu::LinearizePass`'s
+  // "Flow"-style merge blocks routinely land earlier in a function's block
+  // list than a cycle-exit block whose value they still use (LLVM requires
+  // a def to dominate its uses, not to precede them in a function's block
+  // list). Sever every remaining use of a to-be-erased instruction's result
+  // up front, across the whole set, before erasing anything -- every read
+  // of an old value that widening still needed (a widened `phi`'s old
+  // incoming values, in pass 3 above; a resource call's stored-value
+  // operand; ...) has already happened by this point, so nothing is lost,
+  // and it makes every remaining erasure order equally safe.
+  for (Instruction *I : ToErase)
+    if (!I->getType()->isVoidTy())
+      I->replaceAllUsesWith(PoisonValue::get(I->getType()));
+  for (Instruction *I : llvm::reverse(ToErase))
     I->eraseFromParent();
 
   // Canonicalize every groupshared (`addrspace(3)`) global's uses into a
