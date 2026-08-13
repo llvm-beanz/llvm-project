@@ -84,6 +84,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CycleAnalysis.h"
+#include "llvm/Analysis/VectorUtils.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Dominators.h"
@@ -230,6 +231,26 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
 
 bool isGroupIdCall(Intrinsic::ID ID) {
   return ID == Intrinsic::dx_group_id || ID == Intrinsic::spv_group_id;
+}
+
+/// Whether \p ID is trivially widenable to a vector-typed overload with the
+/// same, single overloaded type shared by its return and every argument:
+/// `llvm::isTriviallyVectorizable`'s target-independent intrinsics, plus the
+/// handful of homogeneous, `LLVMMatchType`-shaped unary DXIL/SPIR-V math
+/// intrinsics `feme::dxil::OpRaisingPass`'s `DirectOps` table raises that
+/// utility does not itself know about (see `widenElementwise`).
+bool isElementwiseVectorizableIntrinsic(Intrinsic::ID ID) {
+  switch (ID) {
+  case Intrinsic::dx_frac:
+  case Intrinsic::spv_frac:
+  case Intrinsic::dx_rsqrt:
+  case Intrinsic::spv_rsqrt:
+  case Intrinsic::dx_saturate:
+  case Intrinsic::spv_saturate:
+    return true;
+  default:
+    return isTriviallyVectorizable(ID);
+  }
 }
 
 /// Widens a single acyclic, uniform-control-flow function to \p WaveSize
@@ -776,6 +797,49 @@ void FunctionWidener::widenInsertElement(InsertElementInst &IE,
 }
 
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
+  if (auto *CI = dyn_cast<CallInst>(&I)) {
+    // A divergent call to a "trivially vectorizable" LLVM intrinsic (see
+    // `isElementwiseVectorizableIntrinsic` above) whose signature is a
+    // single overloaded type shared by its return and every argument --
+    // exactly the shape of a simple elementwise math libcall like
+    // `llvm.sqrt.f32`, `llvm.log2.f32`, or `llvm.dx.frac.f32` ("Call to a
+    // math libcall" in "Phase 4: Widening") -- widens directly to that
+    // intrinsic's vector-typed overload, letting the host's own vectorized
+    // math library/scalarizer handle it, rather than the generic
+    // scalarization fallback below (whose per-lane clone would otherwise
+    // try to broadcast/extract the callee itself, one of `I.operands()`).
+    // Any other divergent call -- including a vectorizable intrinsic with a
+    // non-overloaded operand, e.g. `llvm.powi`'s integer exponent -- remains
+    // unsupported.
+    Function *Callee = CI->getCalledFunction();
+    Intrinsic::ID ID =
+        Callee ? Callee->getIntrinsicID() : Intrinsic::not_intrinsic;
+    bool Homogeneous = ID != Intrinsic::not_intrinsic &&
+                       llvm::all_of(CI->args(), [&](const Value *Arg) {
+                         return Arg->getType() == I.getType();
+                       });
+    if (ID != Intrinsic::not_intrinsic &&
+        isElementwiseVectorizableIntrinsic(ID) && Homogeneous) {
+      Type *WideTy = FixedVectorType::get(I.getType(), WaveSize);
+      Function *WideCallee =
+          Intrinsic::getOrInsertDeclaration(OldF.getParent(), ID, {WideTy});
+      SmallVector<Value *, 4> WideArgs;
+      for (Value *Arg : CI->args())
+        WideArgs.push_back(getWidened(Arg, Builder));
+      Value *NewCall =
+          Builder.CreateCall(WideCallee, WideArgs, I.getName() + ".wide");
+      Widened[&I] = NewCall;
+      ToErase.push_back(&I);
+      return;
+    }
+    OldF.getContext().emitError(
+        "feme-cpu-simdize: unsupported divergent call to '" +
+        Twine(Callee ? Callee->getName() : "<indirect>") +
+        "' (roadmap milestone 7 does not cover a generic vector-call "
+        "rewrite)");
+    return;
+  }
+
   SmallVector<Value *, 4> WideOps;
   for (Value *Op : I.operands())
     WideOps.push_back(getWidened(Op, Builder));
@@ -797,19 +861,6 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   } else if (auto *UO = dyn_cast<UnaryOperator>(&I)) {
     NewI =
         Builder.CreateUnOp(UO->getOpcode(), WideOps[0], I.getName() + ".wide");
-  } else if (isa<CallBase>(&I)) {
-    // A generic divergent call (e.g. a math libcall like `llvm.sin.f32`,
-    // "Call to a math libcall" in "Phase 4: Widening") needs its own
-    // handling -- the callee itself is one of `I.operands()`, which the
-    // scalarization fallback below would otherwise try to broadcast/extract
-    // like any other operand -- so it is not yet covered by either the
-    // elementwise rule or the generic fallback.
-    OldF.getContext().emitError(
-        "feme-cpu-simdize: unsupported divergent call to '" +
-        Twine(I.getOperand(I.getNumOperands() - 1)->getName()) +
-        "' (roadmap milestone 7 does not cover a generic vector-call "
-        "rewrite)");
-    return;
   } else {
     widenScalarizedFallback(I, Builder);
     return;
