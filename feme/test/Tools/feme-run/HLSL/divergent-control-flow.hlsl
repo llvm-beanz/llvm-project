@@ -1,7 +1,7 @@
 // REQUIRES: directx-registered-target
 // RUN: split-file %s %t
 // RUN: clang -target dxil--shadermodel6.5-compute -c %t/shader.hlsl -o %t/shader.dxcontainer
-// RUN: feme-run --dxil-bind-register-resources --wave-size=4 --groups=1,1,1 \
+// RUN: feme-run --wave-size=4 --groups=1,1,1 \
 // RUN:     --heap=%t/heap.yaml %t/shader.dxcontainer | FileCheck %s
 
 // End-to-end coverage for divergent control flow: real HLSL, compiled to a
@@ -12,7 +12,7 @@
 // linearizing the divergent diamond) and `feme::cpu::SIMDizePass`'s
 // `select`-based widening of the two arms' predicated results together.
 
-// CHECK: heap[0]: 100 201 102 203
+// CHECK: binding[0:0][0]: 100 201 102 203
 
 //--- shader.hlsl
 RWStructuredBuffer<uint> Out : register(u0);
@@ -29,6 +29,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
 }
 
 //--- heap.yaml
-resource-heap:
-  - index: 0
-    size: 16
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 16

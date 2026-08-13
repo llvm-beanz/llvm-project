@@ -35,13 +35,17 @@
 // `feme::cpu::JITOptions::Reference`): the ground truth the CFG
 // restructurization test suite diffs against.
 //
-// `--dxil-bind-register-resources` (see its own `cl::desc`) is a further,
-// testing-only bridge: Clang's HLSL front end cannot yet emit the bindless
-// ResourceDescriptorHeap/SamplerDescriptorHeap access the FeMe CPU target
-// requires (see "Root constants" in feme/docs/FeMeCPUDesign.md), so without
-// it, no real HLSL shader Clang compiles today could reach this tool at
-// all. It is off by default -- the FeMe CPU target's own rejection of a
-// register-bound resource stays intact unless a caller opts in.
+// Roadmap milestone 11 adds the heap YAML file's `bindings` list (see
+// `BindingFile`): a shader's traditionally-bound resources
+// (`feme::cpu::BoundResourceNormalizationPass` normalizes them into a
+// reserved heap prefix, see "Bound-resource normalization" in
+// feme/docs/FeMeCPUDesign.md) are supplied there, matched by (space,
+// register); `--heap`'s pre-existing `resource-heap` list now supplies only
+// the shader's *logical* dynamic heap, which `feme::cpu::JITEngine::dispatch`
+// places right after that reserved prefix. This replaces the
+// milestone-10-era `--dxil-bind-register-resources` testing bridge (removed
+// here): every HLSL test using a traditional binding now goes through this
+// common path instead.
 //
 //===----------------------------------------------------------------------===//
 
@@ -49,9 +53,11 @@
 #include "feme/Core/Module.h"
 #include "feme/Import/DXIL/DXILImporter.h"
 #include "feme/Target/CPU/JITEngine.h"
+#include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRBuilder.h"
@@ -78,25 +84,40 @@ using namespace feme::cpu;
 
 namespace {
 
-/// One `resource-heap` entry in the heap YAML file (see the file comment
-/// above): an untyped byte buffer, `Size` bytes, optionally pre-populated
-/// with `Data` (little-endian `uint32` words, zero-padding any remaining
-/// bytes).
+/// One `resource-heap`/binding-range entry in the heap YAML file (see the
+/// file comment above): an untyped byte buffer, `Size` bytes, optionally
+/// pre-populated with `Data` (little-endian `uint32` words, zero-padding
+/// any remaining bytes).
 struct HeapEntry {
   uint32_t Index = 0;
   uint32_t Size = 0;
   std::vector<uint32_t> Data;
 };
 
+/// One `bindings` entry: the host's descriptors for a shader's
+/// traditionally-bound resource, matched to a
+/// `feme::cpu::ResourceInfo::BoundRanges` entry by (`Space`, `Register`) --
+/// see "Bound-resource normalization" in feme/docs/FeMeCPUDesign.md.
+/// `Entries`' own `index` is the array element within the binding's range,
+/// not a heap index -- `feme::cpu::materializeResourceHeap` places it in
+/// the reserved prefix.
+struct BindingFile {
+  uint32_t Space = 0;
+  uint32_t Register = 0;
+  std::vector<HeapEntry> Entries;
+};
+
 /// The whole heap YAML file's contents.
 struct HeapFile {
   std::vector<uint32_t> RootConstants;
   std::vector<HeapEntry> ResourceHeap;
+  std::vector<BindingFile> Bindings;
 };
 
 } // namespace
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(HeapEntry)
+LLVM_YAML_IS_SEQUENCE_VECTOR(BindingFile)
 
 namespace llvm::yaml {
 /// A `std::vector<uint32_t>` sequence: `LLVM_YAML_IS_SEQUENCE_VECTOR`
@@ -121,10 +142,19 @@ template <> struct MappingTraits<HeapEntry> {
   }
 };
 
+template <> struct MappingTraits<BindingFile> {
+  static void mapping(IO &Io, BindingFile &Binding) {
+    Io.mapRequired("space", Binding.Space);
+    Io.mapRequired("register", Binding.Register);
+    Io.mapOptional("entries", Binding.Entries);
+  }
+};
+
 template <> struct MappingTraits<HeapFile> {
   static void mapping(IO &Io, HeapFile &File) {
     Io.mapOptional("root-constants", File.RootConstants);
     Io.mapOptional("resource-heap", File.ResourceHeap);
+    Io.mapOptional("bindings", File.Bindings);
   }
 };
 } // namespace llvm::yaml
@@ -161,16 +191,20 @@ struct HeapStorage {
   std::vector<FemeDescriptor> Descriptors;
 };
 
-HeapStorage buildHeapStorage(const HeapFile &File) {
+/// Builds \p Entries' backing storage the same way `buildHeapStorage`
+/// builds `resource-heap`'s, densely indexed by each entry's own `index`
+/// field (the array element within a `bindings` entry's range, for that
+/// caller -- see `BindingFile`'s own comment).
+HeapStorage buildEntryStorage(ArrayRef<HeapEntry> Entries) {
   HeapStorage Storage;
   uint32_t MaxIndex = 0;
-  for (const HeapEntry &Entry : File.ResourceHeap)
+  for (const HeapEntry &Entry : Entries)
     MaxIndex = std::max(MaxIndex, Entry.Index);
 
-  Storage.Buffers.resize(File.ResourceHeap.empty() ? 0 : MaxIndex + 1);
-  Storage.Descriptors.resize(File.ResourceHeap.empty() ? 0 : MaxIndex + 1);
+  Storage.Buffers.resize(Entries.empty() ? 0 : MaxIndex + 1);
+  Storage.Descriptors.resize(Entries.empty() ? 0 : MaxIndex + 1);
 
-  for (const HeapEntry &Entry : File.ResourceHeap) {
+  for (const HeapEntry &Entry : Entries) {
     uint32_t ByteSize =
         std::max<uint32_t>(Entry.Size, Entry.Data.size() * sizeof(uint32_t));
     std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
@@ -189,14 +223,50 @@ HeapStorage buildHeapStorage(const HeapFile &File) {
   return Storage;
 }
 
+HeapStorage buildHeapStorage(const HeapFile &File) {
+  return buildEntryStorage(File.ResourceHeap);
+}
+
+/// One `bindings` entry's backing storage: `Entries`' buffers/descriptors
+/// (see `buildEntryStorage`) plus the (space, register) identity a
+/// `feme::cpu::BoundResourceBinding` is matched by.
+struct BindingStorage {
+  uint32_t Space = 0;
+  uint32_t Register = 0;
+  HeapStorage Entries;
+};
+
+std::vector<BindingStorage> buildBindingStorage(const HeapFile &File) {
+  std::vector<BindingStorage> Storage;
+  Storage.reserve(File.Bindings.size());
+  for (const BindingFile &Binding : File.Bindings)
+    Storage.push_back(BindingStorage{Binding.Space, Binding.Register,
+                                     buildEntryStorage(Binding.Entries)});
+  return Storage;
+}
+
+/// Builds the `feme::cpu::BoundResourceBinding` array `JITEngine::dispatch`
+/// expects from \p Storage, referencing (not copying) each binding's own
+/// descriptor storage.
+std::vector<BoundResourceBinding>
+toBoundResourceBindings(const std::vector<BindingStorage> &Storage) {
+  std::vector<BoundResourceBinding> Bindings;
+  Bindings.reserve(Storage.size());
+  for (const BindingStorage &Binding : Storage)
+    Bindings.push_back(BoundResourceBinding{Binding.Space, Binding.Register,
+                                            Binding.Entries.Descriptors});
+  return Bindings;
+}
+
 /// Prints every heap entry's final contents as `uint32` words, one line
-/// per entry: `heap[<index>]: <word0> <word1> ...`, for `FileCheck` to
-/// match against (see the file comment above).
+/// per entry: `heap[<index>]: <word0> <word1> ...` for a `resource-heap`
+/// entry, `binding[<space>:<register>][<index>]: <word0> <word1> ...` for a
+/// `bindings` entry, for `FileCheck` to match against (see the file
+/// comment above).
 void printHeapContents(raw_ostream &OS, const HeapFile &File,
-                       const HeapStorage &Storage) {
-  for (const HeapEntry &Entry : File.ResourceHeap) {
-    const std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
-    OS << "heap[" << Entry.Index << "]:";
+                       const HeapStorage &Storage,
+                       const std::vector<BindingStorage> &BindingsStorage) {
+  auto PrintBuffer = [&](const std::vector<uint8_t> &Buffer) {
     for (size_t I = 0; I + sizeof(uint32_t) <= Buffer.size();
          I += sizeof(uint32_t)) {
       uint32_t Word;
@@ -204,6 +274,18 @@ void printHeapContents(raw_ostream &OS, const HeapFile &File,
       OS << ' ' << Word;
     }
     OS << '\n';
+  };
+
+  for (const HeapEntry &Entry : File.ResourceHeap) {
+    OS << "heap[" << Entry.Index << "]:";
+    PrintBuffer(Storage.Buffers[Entry.Index]);
+  }
+  for (auto [Binding, BindingFile] : zip(BindingsStorage, File.Bindings)) {
+    for (const HeapEntry &Entry : BindingFile.Entries) {
+      OS << "binding[" << Binding.Space << ":" << Binding.Register << "]["
+         << Entry.Index << "]:";
+      PrintBuffer(Binding.Entries.Buffers[Entry.Index]);
+    }
   }
 }
 
@@ -220,35 +302,6 @@ bool looksLikeDXIL(MemoryBufferRef Buffer) {
                                                            Data.size()));
 }
 
-/// Rewrites every `llvm.dx.resource.handlefrombinding` call in \p M into the
-/// equivalent `llvm.dx.resource.handlefromheap` call, mapping the binding's
-/// (space-relative) register slot straight onto the same heap index space
-/// `--heap`'s YAML file addresses (`LowerBound` operand + the binding's own
-/// `Index` operand). This only exists for `--dxil-bind-register-resources`
-/// below: see that flag's own `cl::desc` for why.
-void bridgeRegisterBoundResourcesToHeap(llvm::Module &M) {
-  for (Function &F : llvm::make_early_inc_range(M.functions())) {
-    if (F.getIntrinsicID() != Intrinsic::dx_resource_handlefrombinding)
-      continue;
-    for (User *U : llvm::make_early_inc_range(F.users())) {
-      auto *CI = dyn_cast<CallInst>(U);
-      if (!CI || CI->getCalledFunction() != &F)
-        continue;
-      IRBuilder<> Builder(CI);
-      Value *HeapIndex =
-          Builder.CreateAdd(CI->getArgOperand(1), CI->getArgOperand(3));
-      Function *HeapFn = Intrinsic::getOrInsertDeclaration(
-          &M, Intrinsic::dx_resource_handlefromheap, {CI->getType()});
-      Value *NewCall = Builder.CreateCall(
-          HeapFn, {HeapIndex, Builder.getInt1(false)}, CI->getName());
-      CI->replaceAllUsesWith(NewCall);
-      CI->eraseFromParent();
-    }
-    if (F.use_empty())
-      F.eraseFromParent();
-  }
-}
-
 /// Loads \p Filename as the raised LLVM IR the JIT engine expects. Already-
 /// raised, idiomatic LLVM IR (`.ll`/`.bc`) is parsed directly, matching
 /// `feme-run`'s original, milestone-4 scope; a DXIL bitcode file or
@@ -262,8 +315,7 @@ void bridgeRegisterBoundResourcesToHeap(llvm::Module &M) {
 /// real HLSL through `clang`/DXIL's own backend and run the result straight
 /// through this tool. See the file comment above for what remains unwired
 /// (SPIR-V import).
-Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx,
-                                  bool BridgeRegisterBoundResources) {
+Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr =
       MemoryBuffer::getFileOrSTDIN(Filename, /*IsText=*/false);
   if (std::error_code EC = BufOrErr.getError())
@@ -282,8 +334,6 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx,
     ModuleAnalysisManager MAM;
     feme::dxil::OpRaisingPass().run(M, MAM);
     feme::dxil::MetadataRaisingPass().run(M, MAM);
-    if (BridgeRegisterBoundResources)
-      bridgeRegisterBoundResourcesToHeap(M);
 
     // DXIL's own module triple/data layout has no meaning to the FeMe CPU
     // target's JIT (see `feme::Driver::run`: retargeting to any other
@@ -349,20 +399,6 @@ int main(int argc, char **argv) {
                "the CFG restructurization test suite diffs against (see "
                "the 'CFG restructurization test suite' section of "
                "feme/docs/FeMeCPUDesign.md). --wave-size is ignored."));
-  cl::opt<bool> BindRegisterResources(
-      "dxil-bind-register-resources",
-      cl::desc(
-          "For a DXIL input only: rewrite every register-bound resource "
-          "(llvm.dx.resource.handlefrombinding) into a bindless heap access "
-          "(llvm.dx.resource.handlefromheap) at the same index its register "
-          "binding names, before handing the module to the FeMe CPU target. "
-          "A testing-only bridge, *not* what the FeMe CPU target itself "
-          "accepts (see 'Root constants' in feme/docs/FeMeCPUDesign.md: "
-          "every other register-bound handle is rejected) -- it exists "
-          "because Clang's HLSL front end cannot yet emit "
-          "ResourceDescriptorHeap/SamplerDescriptorHeap (bindless) access, "
-          "so a real HLSL shader compiled by Clang today has no way to "
-          "produce the bindless form the CPU target requires."));
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe CPU target JIT/dispatch runner\n");
@@ -371,8 +407,7 @@ int main(int argc, char **argv) {
   InitializeNativeTargetAsmPrinter();
 
   feme::Context Ctx;
-  Expected<feme::Module> Mod =
-      loadModule(InputFilename, Ctx, BindRegisterResources);
+  Expected<feme::Module> Mod = loadModule(InputFilename, Ctx);
   if (!Mod) {
     errs() << "feme-run: " << toString(Mod.takeError()) << "\n";
     return 1;
@@ -411,6 +446,9 @@ int main(int argc, char **argv) {
   }
 
   HeapStorage Storage = buildHeapStorage(Heap);
+  std::vector<BindingStorage> BindingsStorage = buildBindingStorage(Heap);
+  std::vector<BoundResourceBinding> Bindings =
+      toBoundResourceBindings(BindingsStorage);
   std::vector<uint8_t> RootConstantBytes(Heap.RootConstants.size() *
                                          sizeof(uint32_t));
   memcpy(RootConstantBytes.data(), Heap.RootConstants.data(),
@@ -418,6 +456,7 @@ int main(int argc, char **argv) {
 
   DispatchResources Resources;
   Resources.ResourceHeap = Storage.Descriptors;
+  Resources.BoundResources = Bindings;
   Resources.RootConstants = RootConstantBytes;
 
   if (Error E = (*Engine)->dispatch(Resources, GroupCount)) {
@@ -425,6 +464,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  printHeapContents(outs(), Heap, Storage);
+  printHeapContents(outs(), Heap, Storage, BindingsStorage);
   return 0;
 }

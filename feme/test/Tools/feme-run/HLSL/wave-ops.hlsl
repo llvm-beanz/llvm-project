@@ -1,7 +1,7 @@
 // REQUIRES: directx-registered-target
 // RUN: split-file %s %t
 // RUN: clang -target dxil--shadermodel6.5-compute -c %t/shader.hlsl -o %t/shader.dxcontainer
-// RUN: feme-run --dxil-bind-register-resources --wave-size=4 --groups=1,1,1 \
+// RUN: feme-run --wave-size=4 --groups=1,1,1 \
 // RUN:     --heap=%t/heap.yaml %t/shader.dxcontainer | FileCheck %s
 
 // End-to-end coverage for wave operations: real HLSL, compiled to a DXIL
@@ -15,7 +15,7 @@
 // is uniform across the wave by construction), so a single
 // wave-size-4-wide dispatch's four lanes should all agree.
 
-// CHECK: heap[0]: 4104 4104 4104 4104
+// CHECK: binding[0:0][0]: 4104 4104 4104 4104
 
 //--- shader.hlsl
 RWStructuredBuffer<uint> Out : register(u0);
@@ -30,6 +30,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
 }
 
 //--- heap.yaml
-resource-heap:
-  - index: 0
-    size: 16
+bindings:
+  - space: 0
+    register: 0
+    entries:
+      - index: 0
+        size: 16

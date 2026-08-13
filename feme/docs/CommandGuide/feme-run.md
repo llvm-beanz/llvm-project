@@ -16,8 +16,8 @@ the "Command line" section of [../FeMeCPUDesign.md](../FeMeCPUDesign.md)):
 a test can assert on what a shader actually computed, not only on the shape
 of its IR.
 
-**Scope (roadmap milestone 4, updated by milestone 10):** the input may
-either already be idiomatic, raised LLVM IR (`.ll`/`.bc`), or a DXIL
+**Scope (roadmap milestone 4, updated by milestones 10 and 11):** the input
+may either already be idiomatic, raised LLVM IR (`.ll`/`.bc`), or a DXIL
 bitcode file/DXContainer -- `feme-run` sniffs which, and for DXIL runs the
 same import + op/metadata raising `feme::Driver` runs before any
 target-specific lowering. SPIR-V import remains unwired (see
@@ -44,32 +44,33 @@ Like `feme-opt`, `feme-run` is a testing-oriented tool and may use
   5, see [../FeMeCPUDesign.md](../FeMeCPUDesign.md)) diffs against.
   `--wave-size` is ignored. A shader using a wave intrinsic (which has no
   meaning one invocation at a time) is rejected.
-- `--dxil-bind-register-resources`: for a DXIL input only, rewrites every
-  register-bound resource (`llvm.dx.resource.handlefrombinding`) into a
-  bindless heap access (`llvm.dx.resource.handlefromheap`) at the same
-  index its register binding names, before handing the module to the FeMe
-  CPU target. A testing-only bridge, *not* what the CPU target itself
-  accepts (see "Root constants" in
-  [../FeMeCPUDesign.md](../FeMeCPUDesign.md): every other register-bound
-  handle is rejected) -- it exists because Clang's HLSL front end cannot
-  yet emit `ResourceDescriptorHeap`/`SamplerDescriptorHeap` (bindless)
-  access, so a real HLSL shader compiled by Clang today has no way to
-  produce the bindless form the CPU target requires. See
-  feme/test/Tools/feme-run/HLSL for HLSL compiled through this bridge.
 - `--heap=<file>`: a YAML file describing the resource heap a dispatch runs
   against:
 
   ```yaml
   root-constants: [1, 2, 3, 4]   # optional: uint32 words
-  resource-heap:
+  resource-heap:                 # the shader's *logical* dynamic heap
     - index: 0
       size: 64                  # bytes to allocate (zero-filled)
       data: [0, 1, 2, 3]        # optional: little-endian uint32 words
+  bindings:                      # the shader's traditionally-bound resources
+    - space: 0
+      register: 0
+      entries:
+        - index: 0              # array element within the binding's range
+          size: 64
+          data: [0, 1, 2, 3]
   ```
 
   Every entry becomes an unstructured, host-writable raw buffer
-  (`ResourceKind::Raw`, `FEME_DESCRIPTOR_UAV` set); this is the same buffer
-  a shader's `ResourceDescriptorHeap[index]` indexes.
+  (`ResourceKind::Raw`, `FEME_DESCRIPTOR_UAV` set). A `resource-heap` entry
+  is the buffer a shader's native `ResourceDescriptorHeap[index]` indexes.
+  A `bindings` entry (roadmap milestone 11) is matched by (`space`,
+  `register`) to a traditional binding (e.g. `register(u0, space0)`)
+  `feme::cpu::BoundResourceNormalizationPass` normalized into the CPU
+  target's reserved heap prefix (see "Bound-resource normalization" in
+  [../FeMeCPUDesign.md](../FeMeCPUDesign.md)); an unbound slot within a
+  declared range is left as the zero descriptor.
 
 ## OUTPUT
 
@@ -78,6 +79,7 @@ contents as `uint32` words, one line per entry, for `FileCheck` to match:
 
 ```
 heap[0]: 0 1 2 3
+binding[0:0][0]: 4 5 6 7
 ```
 
 ## EXAMPLES
@@ -88,9 +90,12 @@ heap[0]: 0 1 2 3
 feme-run --wave-size=4 --groups=1,1,1 --heap=heap.yaml shader.ll | FileCheck shader.ll
 
 # Compile real HLSL to a DXIL DXContainer with Clang, and run it the same
-# way (see feme/test/Tools/feme-run/HLSL for full examples).
+# way (see feme/test/Tools/feme-run/HLSL for full examples). A
+# `register(u0)`-bound resource is normalized into the bindless heap
+# automatically; the heap YAML supplies its descriptor as a `bindings`
+# entry.
 clang -target dxil--shadermodel6.5-compute -c shader.hlsl -o shader.dxcontainer
-feme-run --dxil-bind-register-resources --wave-size=4 --groups=1,1,1 \
+feme-run --wave-size=4 --groups=1,1,1 \
     --heap=heap.yaml shader.dxcontainer | FileCheck shader.hlsl
 ```
 
