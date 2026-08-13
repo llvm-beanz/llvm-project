@@ -19,7 +19,6 @@
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
-#include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
@@ -286,13 +285,6 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     llvm::errs() << "feme: warning: --wave-size is ignored for target '"
                  << *TargetTriple << "' (not the FeMe CPU target)\n";
   }
-
-  // Diagnosed before any CPU-specific lowering runs, rather than surviving
-  // until a later pass (or host instruction selection) trips over it -- see
-  // "Raised IR prerequisites" in feme/docs/FeMeCPUDesign.md.
-  if (isCPUTarget(TheTriple))
-    if (llvm::Error E = feme::cpu::checkSupportedRaisedOps(M))
-      return std::move(E);
 
   // Raised IR still uses `llvm.dx.*` intrinsics for the HLSL-specific
   // operations DXIL has dedicated ops for. LLVM's DirectX backend selects

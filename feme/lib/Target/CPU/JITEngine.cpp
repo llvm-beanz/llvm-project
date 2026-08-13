@@ -14,6 +14,7 @@
 #include "feme/Target/CPU/Pipeline.h"
 #include "feme/Target/CPU/RuntimeCPU.h"
 #include "feme/Target/CPU/WaveSize.h"
+#include "feme/Transforms/CPU/BoundResourceNormalization.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
@@ -245,16 +246,14 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     (*Entry)->addFnAttr("feme.cpu.wavesize", std::to_string(WaveSize));
   }
 
-  if (Error E = checkSupportedRaisedOps(Mod))
-    return std::move(E);
-
   std::string WrapperName;
   if (Opts.Reference) {
     // `--reference` runs its own, simpler pipeline shape (Prepare +
-    // ResourceLowering, then the reference lowering/wrapper passes instead
-    // of Linearize/SIMDize/WaveLowering/EntryWrapper) -- see
-    // `feme::cpu::runPipeline`'s file comment for why that pipeline is
-    // factored out on its own rather than covering this shape too.
+    // BoundResourceNormalization + ResourceLowering, then the reference
+    // lowering/wrapper passes instead of Linearize/SIMDize/WaveLowering/
+    // EntryWrapper) -- see `feme::cpu::runPipeline`'s file comment for why
+    // that pipeline is factored out on its own rather than covering this
+    // shape too.
     PassBuilder PB;
     LoopAnalysisManager LAM;
     FunctionAnalysisManager FAM;
@@ -266,8 +265,17 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     PB.registerLoopAnalyses(LAM);
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
+    ModulePassManager Normalize;
+    Normalize.addPass(PreparePass(Opts.EntryPoint));
+    Normalize.addPass(BoundResourceNormalizationPass());
+    Normalize.run(Mod, MAM);
+
+    // See `checkSupportedRaisedOps`'s call site in `feme::cpu::runPipeline`
+    // for why this runs after normalization rather than before it.
+    if (Error E = checkSupportedRaisedOps(Mod))
+      return std::move(E);
+
     ModulePassManager MPM;
-    MPM.addPass(PreparePass(Opts.EntryPoint));
     MPM.addPass(ResourceLoweringPass());
     MPM.addPass(ReferenceLoweringPass());
     MPM.addPass(ReferenceEntryWrapperPass());

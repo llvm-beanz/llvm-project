@@ -38,17 +38,24 @@ Error checkSupportedRaisedOps(const Module &M) {
     case Intrinsic::dx_resource_handlefromimplicitbinding:
     case Intrinsic::spv_resource_handlefrombinding:
     case Intrinsic::spv_resource_handlefromimplicitbinding:
-      // Register-bound resources are rejected: the CPU target accepts
-      // bindless shaders only (see "Resource Model" in
-      // feme/docs/FeMeCPUDesign.md). This over-approximates that section's
-      // eventual root-constant exception -- not yet implemented, see the
-      // Roadmap -- by rejecting every register-bound handle, that one
-      // included.
+      // A register-bound resource handle that survives to this point is
+      // one `feme::cpu::BoundResourceNormalizationPass` could not (or does
+      // not yet) normalize into a heap access -- an unbounded range, a
+      // conflicting re-declaration of the same binding, an unsupported
+      // resource kind, an implicit binding, or a SPIR-V binding (see
+      // "Bound-resource normalization" in feme/docs/FeMeCPUDesign.md for
+      // exactly which of these that pass accepts). The CPU target has no
+      // other way to address such a resource: bindless
+      // (ResourceDescriptorHeap/SamplerDescriptorHeap) access, or a finite,
+      // unambiguous traditional binding, are the only two forms it accepts.
       return createStringError(
           inconvertibleErrorCode(),
           "unsupported raised operation: '%s' is a register-bound resource "
-          "handle; the FeMe CPU target accepts bindless "
-          "(ResourceDescriptorHeap/SamplerDescriptorHeap) shaders only",
+          "handle the FeMe CPU target cannot normalize into a heap access "
+          "(an unbounded range, a conflicting re-declaration, or an "
+          "unsupported resource kind); express it as a finite, "
+          "unambiguous traditional binding or bindless "
+          "(ResourceDescriptorHeap/SamplerDescriptorHeap) access",
           F.getName().str().c_str());
     default:
       break;

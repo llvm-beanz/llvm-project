@@ -9,11 +9,13 @@
 #include "feme/Target/CPU/Pipeline.h"
 
 #include "feme/Target/CPU/RuntimeCPU.h"
+#include "feme/Transforms/CPU/BoundResourceNormalization.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
+#include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 
 #include "llvm/Analysis/CGSCCPassManager.h"
@@ -126,8 +128,23 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
     PB.registerLoopAnalyses(LAM);
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
+    // `feme::cpu::BoundResourceNormalizationPass` must run before
+    // `checkSupportedRaisedOps` -- a finite-range bound handle it can
+    // normalize is not a raised operation the CPU target rejects, unlike an
+    // unbounded or conflicting one, which it leaves for that check to
+    // reject exactly as before that pass existed (see "Bound-resource
+    // normalization" in feme/docs/FeMeCPUDesign.md). This splits the
+    // pipeline into two `ModulePassManager` runs around that check instead
+    // of running it from within a callback pass.
+    ModulePassManager Normalize;
+    Normalize.addPass(PreparePass(EntryPoint));
+    Normalize.addPass(BoundResourceNormalizationPass());
+    Normalize.run(M, MAM);
+
+    if (Error E = checkSupportedRaisedOps(M))
+      return std::move(E);
+
     ModulePassManager MPM;
-    MPM.addPass(PreparePass(EntryPoint));
     MPM.addPass(ResourceLoweringPass());
     MPM.addPass(LinearizePass());
     MPM.addPass(SIMDizePass(WaveSize));
