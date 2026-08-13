@@ -10,7 +10,16 @@ scalar helper IR), milestone 4 (uniform-control-flow end-to-end at
 milestone 7 (widening for loops, masked memory ops, and the scalarization
 fallback), milestone 8 (wave intrinsic lowering), milestone 9 (barriers
 and groupshared memory), and milestone 10 (end-to-end HLSL test coverage)
-are implemented. This document is a companion to
+are implemented. `feme::cpu::runPipeline`
+(feme/include/feme/Target/CPU/Pipeline.h) factors the
+Prepare/ResourceLowering/Linearize/SIMDize/WaveLowering/EntryWrapper
+sequence out of `feme::cpu::JITEngine::create` into a function
+`feme::Driver::run`'s own CPU-target retargeting path shares, so `feme
+--target=<a non-DXIL/SPIR-V/AMDGPU triple>` retargets a raised shader to a
+real object file the same way `feme --target=amdgcn-amd-amdhsa` already
+did for AMDGPU, rather than handing raised IR straight to a host
+`TargetMachine` that cannot make sense of it. This document is a companion
+to
 [Design.md](Design.md) — it
 does not restate FeMe's architecture, only the parts that are new for CPU
 targets. Read the "Pipeline Abstraction", "Retargeting to Native ISA", and
@@ -275,11 +284,15 @@ where it's discussed, and summarized here:
 
 - `feme::cpu::LinearizePass` handles exactly two shapes: a **divergent
   diamond** (a two-way branch whose condition is divergent, with a
-  reconvergence point) and a **loop whose divergent exit check sits directly
-  in its header and/or its latch**. Both are validated (and, on a shape this
-  milestone does not recognize, diagnosed and left completely untouched)
-  before anything is mutated, matching how `feme::cpu::SIMDizePass` already
-  bails rather than mis-widens an unsupported CFG.
+  reconvergence point) -- which may itself sit entirely inside a loop body,
+  as long as neither of its targets is that loop's own back edge or exit
+  edge -- and a **loop whose divergent exit check sits directly in its
+  header and/or its latch, or in one other block reached from the header
+  and reaching the latch each via a plain unconditional chain** (see below).
+  Both are validated (and, on a shape this milestone does not recognize,
+  diagnosed and left completely untouched) before anything is mutated,
+  matching how `feme::cpu::SIMDizePass` already bails rather than mis-widens
+  an unsupported CFG.
 - An **empty diamond arm** (a branch whose true or false successor *is* the
   reconvergence block itself, i.e. an `if` with no corresponding body on
   that side) is not supported yet: the general rewrite needs to redirect the
@@ -295,19 +308,32 @@ where it's discussed, and summarized here:
   is reported as "no reconvergence point" rather than a dedicated
   diagnostic. The mask-update-plus-jump-to-a-unified-exit rewrite "Phase 3"
   describes for this case is still future work.
-- The loop linearizer only recognizes a divergent exit check **directly in
-  the header and/or the latch**, targeting the loop's one shared exit block
-  (guaranteed by `feme::cpu::verifyStructured`'s "unique exit block"
-  postcondition). A divergent check reached through an internal diamond
-  inside the loop body that reconverges back at the latch (the
-  `loop-continue.ll` named shape) is diagnosed and left alone -- and, in
-  practice, so is the more common `loop-break.ll` shape once run through the
-  full `feme-cpu-prepare` pipeline: `StructurizeCFG`'s general "Flow"
-  merge-block scheme restructures even a single header/latch loop into this
-  same internal-diamond form. The `Linearize/loop-break.ll` test exercises
-  the header/latch rewrite directly against already-structured IR instead;
-  generalizing the loop linearizer to see through a `StructurizeCFG`-style
-  internal `Flow` merge is the natural next step, not yet done.
+- The loop linearizer recognizes a divergent exit check directly in the
+  header or the latch, **or in a third block reached from the header, and
+  reaching the latch, each via a plain unconditional chain** -- the shape
+  `StructurizeCFG`'s general "Flow" merge-block scheme restructures even a
+  single header/latch loop's exit check into once `feme-cpu-prepare` has
+  run (see the `loop-break.ll` shape below), always targeting the loop's
+  one shared exit block (guaranteed by `feme::cpu::verifyStructured`'s
+  "unique exit block" postcondition). `feme::cpu::DiamondFlattener` was
+  generalized alongside this: it now also flattens a plain, non-loop-
+  control diamond that sits *inside* a cycle (neither of its targets is
+  the cycle's own back edge or exit edge) -- e.g. the diamond
+  `StructurizeCFG` builds for a divergent `break` check, which reconverges
+  at the "Flow" block holding the real exit decision -- rather than
+  stopping at the cycle boundary unconditionally; only a genuine
+  loop-control edge is still left to `LoopLinearizer`. `feme::cpu::
+  DiamondFlattener` was also generalized to validate/flatten from every
+  cycle's exit block, not just the function entry, so a divergent diamond
+  *entirely after* a loop -- e.g. a Mandelbrot-style escape-time loop
+  followed by a palette lookup branching on whether it converged -- is
+  flattened too, instead of being silently left unvisited. A divergent
+  check reached through an internal diamond that reconverges back at the
+  latch **via an empty arm** (the `loop-continue.ll` named shape, where the
+  "continue" arm jumps directly to the reconvergence block with no body of
+  its own) is still diagnosed and left alone: that is `DiamondFlattener`'s
+  own pre-existing "empty diamond arm" narrowing (see two bullets above),
+  not a loop-linearizer-specific gap.
 - **As of this milestone, masking was implemented only for the canonical
   `feme.cpu.resource.*` calls** (which already carry a mask operand -- see
   `feme::cpu::ResourceCalls`), by rewriting that operand from the constant

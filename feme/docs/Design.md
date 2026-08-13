@@ -1157,7 +1157,9 @@ different `TargetMachine`, because a CPU supplies none of the SPMD execution
 model a shader assumes: the program has to be SIMD-ized to a chosen wave
 size, its resource bindings given a concrete ABI, and its dispatch driven by
 a host loop or JIT. That is a design of its own; see
-[FeMeCPUDesign.md](FeMeCPUDesign.md) (proposal, not yet implemented).
+[FeMeCPUDesign.md](FeMeCPUDesign.md) for that design, its implementation
+status, and how `feme::Driver::run` retargets to it (`feme::cpu::
+runPipeline`) alongside DXIL/SPIR-V/AMDGPU.
 
 ## Raised LLVM IR -> AMDGPU
 
