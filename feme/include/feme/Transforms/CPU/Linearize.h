@@ -12,11 +12,22 @@
 // into data flow over an explicit `i1` execution mask, before any widening
 // happens.
 //
-// This is currently scaffolding (roadmap milestone 1): the pass is
-// registered under its final name (`feme-cpu-linearize`) so the CPU
-// pipeline's command-line surface exists end to end, but it does not yet
-// transform anything -- see the Roadmap / Milestones section of
-// feme/docs/FeMeCPUDesign.md for when this lands (milestone 6).
+// Roadmap milestone 6, first half: a **divergent diamond** (a two-way
+// branch whose condition is divergent, with a reconvergence point -- see
+// `feme::cpu::verifyStructured`'s "every divergent branch reconverges"
+// postcondition) becomes unconditional fallthrough into its true side,
+// whose tail is redirected into its false side instead of the
+// reconvergence block, and any `phi` at the reconvergence block becomes a
+// `select` on the branch condition. Diamonds nest (a divergent branch
+// inside another's arm, or a uniform branch inside a divergent arm) by
+// recursing the same rewrite on each arm before splicing it into the outer
+// one. Loops with a divergent exit are a following commit (see the roadmap
+// entry in feme/docs/FeMeCPUDesign.md).
+//
+// See the Status section's milestone 6 deviation note in
+// feme/docs/FeMeCPUDesign.md for what narrowed relative to the full design
+// (e.g. an empty diamond arm and masking ordinary `load`/`store` rather
+// than only the canonical `feme.cpu.resource.*` calls are both deferred).
 //
 //===----------------------------------------------------------------------===//
 

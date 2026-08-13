@@ -18,8 +18,8 @@ Function *feme::cpu::getOrInsertMaskAny(Module &M) {
   LLVMContext &Ctx = M.getContext();
   Type *I1Ty = Type::getInt1Ty(Ctx);
   FunctionType *FTy = FunctionType::get(I1Ty, {I1Ty}, /*isVarArg=*/false);
-  Function *F =
-      cast<Function>(M.getOrInsertFunction("feme.cpu.mask.any", FTy).getCallee());
+  Function *F = cast<Function>(
+      M.getOrInsertFunction("feme.cpu.mask.any", FTy).getCallee());
   if (!F->hasFnAttribute(Attribute::Memory)) {
     F->setMemoryEffects(MemoryEffects::none());
     F->setWillReturn();
