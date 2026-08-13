@@ -16,6 +16,7 @@ configure_lit_site_cfg(
 
 set(FEME_TEST_DEPENDS
   FileCheck count not
+  clang
   dxbc-as
   feme
   feme-opt
