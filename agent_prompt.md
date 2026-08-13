@@ -23,14 +23,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Now that we have made it through all the major milestones except performance
-tuning, I'd like to work on some wider coverage of feme-run with end-to-end
-tests.
+When I run a DXContainer file into the `feme` tool to target CPU I get the
+error:
 
-Please generate a set of end-to-end tests that start with shaders implemented in
-HLSL, compiled to DXIL and SPIRV with Clang, and executed through feme-run to
-verify correct execution.
+```
+feme: unsupported raised operation: 'dx.op.bufferStore.f32' was not raised to idiomatic LLVM IR before reaching the FeMe CPU target
+```
 
-Particular test cases I'd like you to focus on are loops, divergent control
-flow, wave operations, barriers, groupshared memory and use cases that combine
-all of the above.
+Is there something missing in the feme pipeline? Can you fix it?
