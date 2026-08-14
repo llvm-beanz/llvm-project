@@ -15,6 +15,8 @@
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
+#include "feme/Transforms/CPU/SPIRVBuiltinFolding.h"
+#include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 
@@ -199,8 +201,23 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
     // pipeline into two `ModulePassManager` runs around that check instead
     // of running it from within a callback pass.
     ModulePassManager Normalize;
+    // A SPIR-V-sourced module's builtin (thread/group ID) access always
+    // materializes the whole 3-component vector before extracting the one
+    // lane actually used (see `feme::cpu::SPIRVBuiltinFoldingPass`'s header
+    // comment); folding that here, before any other pass, keeps the rest of
+    // the pipeline seeing the same directly-scalar shape a DXIL-sourced
+    // module's `llvm.dx.thread.id` already is. A no-op for a DXIL-sourced
+    // module, which has no such construct to fold.
+    Normalize.addPass(SPIRVBuiltinFoldingPass());
     Normalize.addPass(PreparePass(EntryPoint));
     Normalize.addPass(BoundResourceNormalizationPass());
+    // SPIR-V has no bindless-heap counterpart to normalize into (see
+    // `feme::cpu::SPIRVResourceLoweringPass`'s header comment), so it lowers
+    // a bound `spirv.VulkanBuffer` handle directly into the same canonical
+    // `feme.cpu.resource.*` calls this pipeline's later stages already
+    // expect, rather than feeding `feme::cpu::ResourceLoweringPass` a
+    // `handlefromheap` call the way the DXIL pass above does.
+    Normalize.addPass(SPIRVResourceLoweringPass());
     Normalize.run(M, MAM);
     if (DiagGuard.sawError())
       return createStringError(inconvertibleErrorCode(),
