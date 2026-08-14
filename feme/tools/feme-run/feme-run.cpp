@@ -538,7 +538,6 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
   return feme::Module::fromLLVMIR(std::move(LLVMMod));
 }
 
-
 /// Runs `--object` mode (see the file comment above): loads \p Filename as
 /// a real compiled object file, resolves \p EntryPoint's (or "main"'s)
 /// `feme_cpu_entry_<name>` symbol in it, and dispatches \p GroupCount

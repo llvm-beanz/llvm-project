@@ -27,8 +27,7 @@ PreservedAnalyses SPIRVBuiltinFoldingPass::run(Module &M,
       if (!EE || !isa<ConstantInt>(EE->getIndexOperand()))
         continue;
 
-      unsigned EltNo = cast<ConstantInt>(EE->getIndexOperand())
-                          ->getZExtValue();
+      unsigned EltNo = cast<ConstantInt>(EE->getIndexOperand())->getZExtValue();
       Value *Folded = findScalarElement(EE->getVectorOperand(), EltNo);
       if (!Folded || Folded == EE)
         continue;

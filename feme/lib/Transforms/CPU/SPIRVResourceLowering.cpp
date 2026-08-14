@@ -82,7 +82,7 @@ Intrinsic::ID getIntrinsicID(const Value *V) {
 /// `std::nullopt` for any other handle kind (an image/sampler resource, not
 /// yet covered -- see the header comment).
 std::optional<uint64_t> classifyVulkanBufferStride(const CallInst &Handle,
-                                                    const DataLayout &DL) {
+                                                   const DataLayout &DL) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
   if (!HandleTy || HandleTy->getName() != "spirv.VulkanBuffer")
     return std::nullopt;
@@ -144,7 +144,7 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
       return std::nullopt; // Non-constant binding: not produced today.
 
     RangeKey Key{static_cast<uint32_t>(SetC->getZExtValue()),
-                static_cast<uint32_t>(BindingC->getZExtValue())};
+                 static_cast<uint32_t>(BindingC->getZExtValue())};
     Handles.push_back(BoundHandle{CI, Key, *Stride});
   }
   return Handles;
@@ -229,8 +229,8 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
     auto *GetPtr = cast<CallInst>(U);
     IRBuilder<> PtrBuilder(GetPtr);
     Value *ElemIdx = PtrBuilder.CreateZExt(GetPtr->getArgOperand(1), I64Ty);
-    Value *Offset = PtrBuilder.CreateMul(
-        ElemIdx, ConstantInt::get(I64Ty, BH.Stride));
+    Value *Offset =
+        PtrBuilder.CreateMul(ElemIdx, ConstantInt::get(I64Ty, BH.Stride));
 
     for (User *PU : llvm::make_early_inc_range(GetPtr->users())) {
       if (auto *LI = dyn_cast<LoadInst>(PU)) {
