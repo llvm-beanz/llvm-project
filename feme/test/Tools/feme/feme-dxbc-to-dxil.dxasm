@@ -1,0 +1,40 @@
+// REQUIRES: directx-registered-target
+// RUN: dxbc-as --emit=container %s -o %t.dxbc
+// RUN: feme --target=dxil %t.dxbc -o %t.out.dxcontainer
+// RUN: od -An -c -N4 %t.out.dxcontainer | FileCheck %s
+
+// Round-trips a legacy DXBC DXContainer all the way out to a modern DXIL
+// DXContainer through the full `feme` CLI: import (feme::DXBCImporter) ->
+// translate to DXIL-shaped LLVM IR (feme::dxsa::DXSAToLLVMIRTranslator,
+// wrapping feme::dxsa::translateToLLVMIR) -> raise `dx.op.*` calls
+// (feme::dxil::OpRaisingPass) -> raise `dx.*` module metadata
+// (feme::dxil::MetadataRaisingPass) -> feme::TargetMachineBackend targeting
+// DXIL. See Design.md milestone 8 ("DXBC -> DXIL translation end to end")
+// and Roadmap.md's R7.
+//
+// A typed UAV (RWBuffer-shaped) read-modify-write, addressed by thread ID,
+// is used rather than a graphics-stage shader with real signature I/O:
+// LLVM's DirectX target does not yet raise `dx.op.loadInput`/`storeOutput`
+// (no idiomatic intrinsic models "read a whole signature element" the way
+// resource ops do -- see feme::dxil::OpRaisingPass's known gaps), so this
+// deliberately exercises the same "compute shader, resource I/O only" shape
+// feme-dxil-to-dxil.ll already validates for a directly-imported DXIL input.
+
+//
+// Resource Bindings:
+//
+// Name                                 Type  Format         Dim      HLSL Bind  Count
+// ------------------------------ ---------- ------- ----------- -------------- ------
+// buf0                                  UAV  float4      buffer             u0      1
+//
+cs_5_0
+dcl_globalFlags refactoringAllowed
+dcl_uav_typed_buffer (float,float,float,float) u0
+dcl_input vThreadID.x
+dcl_thread_group 8, 1, 1
+dcl_temps 1
+ld_uav_typed_indexable(buffer)(float,float,float,float) r0.xyzw, vThreadID.xxxx, u0.xyzw
+store_uav_typed u0.xyzw, vThreadID.xxxx, r0.xyzw
+ret
+
+// CHECK: D   X   B   C
