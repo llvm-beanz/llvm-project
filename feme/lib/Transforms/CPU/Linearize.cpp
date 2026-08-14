@@ -68,10 +68,23 @@ void diagnose(Function &F, const Twine &Message) {
 /// pass always emits the masked form and lets Phase 4 pick). A masked
 /// load's passthru value is zero, matching "Phase 5"'s "FeMe chooses zero
 /// for deterministic reference execution" for any other lane read this
-/// design leaves undefined. Shared between `DiamondFlattener` (a divergent
-/// arm's mask) and `LoopLinearizer` (a loop iteration's "active" mask)
-/// below. A no-op when \p Mask is the all-active constant: nothing outside
-/// a divergent region needs masking.
+/// design leaves undefined. An `atomicrmw` gets the same treatment, via
+/// `feme.cpu.masked.atomicrmw` (see `feme::cpu::SIMDizePass`'s
+/// `widenMaskedAtomicRMW`, which turns a masked-off lane's contribution
+/// into its operation's identity element rather than skipping the
+/// instruction, so it never needs real per-lane control flow) -- this
+/// closes roadmap milestone 7's "Scalarization fallback does not mask
+/// per-lane execution" deviation (feme/docs/FeMeCPUDesign.md's Status
+/// section): before this, an atomic left for `FunctionWidener`'s generic
+/// scalarization fallback ran unconditionally on every lane regardless of
+/// this block's governing mask, corrupting memory on behalf of a lane that
+/// should have stayed inactive. An `AtomicCmpXchgInst` needs no equivalent
+/// rewrite here: its `{T, i1}` result is an aggregate, already rejected by
+/// `feme::cpu::SIMDizePass::checkVectorDecompositionSupported` before
+/// masking would ever matter. Shared between `DiamondFlattener` (a
+/// divergent arm's mask) and `LoopLinearizer` (a loop iteration's "active"
+/// mask) below. A no-op when \p Mask is the all-active constant: nothing
+/// outside a divergent region needs masking.
 void maskMemoryOps(BasicBlock &BB, Value *Mask) {
   if (isa<Constant>(Mask))
     return;
@@ -100,6 +113,15 @@ void maskMemoryOps(BasicBlock &BB, Value *Mask) {
       createMaskedStore(B, SI->getValueOperand(), SI->getPointerOperand(),
                         SI->getAlign().value(), Mask);
       SI->eraseFromParent();
+      continue;
+    }
+    if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
+      IRBuilder<> B(RMW);
+      CallInst *Masked = createMaskedAtomicRMW(
+          B, RMW->getOperation(), RMW->getPointerOperand(),
+          RMW->getValOperand(), RMW->getAlign().value(), Mask, RMW->getName());
+      RMW->replaceAllUsesWith(Masked);
+      RMW->eraseFromParent();
       continue;
     }
   }

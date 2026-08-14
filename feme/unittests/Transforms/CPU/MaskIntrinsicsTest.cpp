@@ -85,4 +85,26 @@ TEST_F(MaskIntrinsicsTest, MaskedStoreMangleAndRoundTrip) {
   EXPECT_FALSE(matchMaskedLoad(*CI));
 }
 
+TEST_F(MaskIntrinsicsTest, MaskedAtomicRMWMangleAndRoundTrip) {
+  IRBuilder<> Builder(BB);
+  Value *Ptr = ConstantPointerNull::get(PointerType::get(Ctx, 0));
+  Value *Mask = Builder.getInt1(true);
+  Value *Val = Builder.getInt32(1);
+  CallInst *CI = createMaskedAtomicRMW(Builder, AtomicRMWInst::Add, Ptr, Val,
+                                       /*Align=*/4, Mask, "rmw");
+  EXPECT_EQ(CI->getCalledFunction()->getName(),
+            "feme.cpu.masked.atomicrmw.i32");
+
+  std::optional<MatchedMaskedAtomicRMW> Matched = matchMaskedAtomicRMW(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Op, AtomicRMWInst::Add);
+  EXPECT_EQ(Matched->Ptr, Ptr);
+  EXPECT_EQ(Matched->Val, Val);
+  EXPECT_EQ(Matched->Align, 4u);
+  EXPECT_EQ(Matched->Mask, Mask);
+
+  EXPECT_FALSE(matchMaskedLoad(*CI));
+  EXPECT_FALSE(matchMaskedStore(*CI));
+}
+
 } // namespace

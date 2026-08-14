@@ -31,6 +31,7 @@
 #define FEME_TRANSFORMS_CPU_MASKINTRINSICS_H
 
 #include "llvm/ADT/Twine.h"
+#include "llvm/IR/Instructions.h"
 
 #include <optional>
 
@@ -72,15 +73,26 @@ bool isMaskAnyCall(const llvm::CallInst &CI);
 /// <ElementType> %passthru)`, the literal example in "Mask representation
 /// between phases". An ordinary declaration (not an intrinsic, for the same
 /// reason `feme.cpu.mask.any` is), with `nounwind willreturn` and
-/// `memory(argmem: read)`.
-llvm::Function *getOrInsertMaskedLoad(llvm::Module &M, llvm::Type *ElementType);
+/// `memory(argmem: read)`. \p AddressSpace is folded into the mangled name
+/// (as `.as<N>`, omitted for the default address space 0) rather than the
+/// declaration's `ptr` parameter type itself -- opaque pointers carry no
+/// static type to overload on, so two different address spaces would
+/// otherwise collide on the very same declaration, then fail with a "bad
+/// signature" assertion the first time \p Ptr's actual address space (e.g.
+/// a raised shader's `addrspace(3)` groupshared global, still untouched
+/// until `feme::cpu::rewriteGroupSharedGlobals` runs at the very end of
+/// `feme::cpu::SIMDizePass`) disagreed with whichever call happened to
+/// create the shared declaration first.
+llvm::Function *getOrInsertMaskedLoad(llvm::Module &M, llvm::Type *ElementType,
+                                      unsigned AddressSpace = 0);
 
 /// Gets (inserting if absent) the type-mangled `feme.cpu.masked.store.*`
 /// declaration for \p ElementType in \p M: `declare void
 /// @feme.cpu.masked.store.<mangling>(<ElementType> %val, ptr %p, i32 immarg
 /// %align, i1 %mask)`. `nounwind willreturn` and `memory(argmem: write)`.
-llvm::Function *getOrInsertMaskedStore(llvm::Module &M,
-                                       llvm::Type *ElementType);
+/// See `getOrInsertMaskedLoad`'s comment for \p AddressSpace.
+llvm::Function *getOrInsertMaskedStore(llvm::Module &M, llvm::Type *ElementType,
+                                       unsigned AddressSpace = 0);
 
 /// Builds a `feme.cpu.masked.load.*` call reading \p ElementType at \p Ptr
 /// (aligned to \p Align bytes), returning \p Passthru wherever \p Mask is
@@ -116,6 +128,53 @@ std::optional<MatchedMaskedMemOp> matchMaskedLoad(const llvm::CallInst &CI);
 /// Recognizes \p CI as a canonical `feme.cpu.masked.store.*` call, returning
 /// its decoded operands, or `std::nullopt` if \p CI's callee isn't one.
 std::optional<MatchedMaskedMemOp> matchMaskedStore(const llvm::CallInst &CI);
+
+/// Gets (inserting if absent) the type-mangled `feme.cpu.masked.atomicrmw.*`
+/// declaration for \p ValueType in \p M: `declare <ValueType>
+/// @feme.cpu.masked.atomicrmw.<mangling>(i32 %op, ptr %p, <ValueType> %val,
+/// i32 %align, i1 %mask)`, one declaration shared by every
+/// `llvm::AtomicRMWInst::BinOp` (encoded as the leading `%op` operand rather
+/// than mangled into the name, since unlike a masked load/store's element
+/// type an atomic's operation is not part of its call's LLVM type) -- see
+/// roadmap milestone 7's "Scalarization fallback does not mask per-lane
+/// execution" deviation in feme/docs/FeMeCPUDesign.md, which this closes for
+/// `AtomicRMWInst` (an `AtomicCmpXchgInst`'s `{T, i1}` result is already
+/// rejected as an unsupported divergent aggregate type before this would
+/// ever matter -- see `feme::cpu::SIMDizePass`'s
+/// `checkVectorDecompositionSupported`). `nounwind willreturn` and
+/// `memory(argmem: readwrite)`, matching the real instruction's effects.
+/// See `getOrInsertMaskedLoad`'s comment for \p AddressSpace.
+llvm::Function *getOrInsertMaskedAtomicRMW(llvm::Module &M,
+                                           llvm::Type *ValueType,
+                                           unsigned AddressSpace = 0);
+
+/// Builds a `feme.cpu.masked.atomicrmw.*` call performing \p Op at \p Ptr
+/// (aligned to \p Align bytes) with operand \p Val, active only where
+/// \p Mask is true (see "Mask representation between phases" in
+/// feme/docs/FeMeCPUDesign.md, mirroring `createMaskedLoad`/
+/// `createMaskedStore`).
+llvm::CallInst *createMaskedAtomicRMW(llvm::IRBuilderBase &Builder,
+                                      llvm::AtomicRMWInst::BinOp Op,
+                                      llvm::Value *Ptr, llvm::Value *Val,
+                                      unsigned Align, llvm::Value *Mask,
+                                      const llvm::Twine &Name = "");
+
+/// The result of successfully matching a call against the canonical
+/// `feme.cpu.masked.atomicrmw.*` shape (see `matchMaskedAtomicRMW`).
+struct MatchedMaskedAtomicRMW {
+  llvm::CallInst *Call = nullptr;
+  llvm::AtomicRMWInst::BinOp Op = llvm::AtomicRMWInst::BAD_BINOP;
+  llvm::Value *Ptr = nullptr;
+  llvm::Value *Val = nullptr;
+  unsigned Align = 0;
+  llvm::Value *Mask = nullptr;
+};
+
+/// Recognizes \p CI as a canonical `feme.cpu.masked.atomicrmw.*` call,
+/// returning its decoded operands, or `std::nullopt` if \p CI's callee
+/// isn't one.
+std::optional<MatchedMaskedAtomicRMW>
+matchMaskedAtomicRMW(const llvm::CallInst &CI);
 
 } // namespace feme::cpu
 

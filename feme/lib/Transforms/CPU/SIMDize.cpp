@@ -253,6 +253,59 @@ bool isElementwiseVectorizableIntrinsic(Intrinsic::ID ID) {
   }
 }
 
+/// Returns the identity element `Id` for \p Op such that `Op(old, Id) ==
+/// old` for every `old` -- i.e. the value a masked-off lane's `atomicrmw`
+/// should contribute so it becomes a no-op instead of a real, unmasked
+/// modification (see `FunctionWidener::widenMaskedAtomicRMW`). Every
+/// `llvm::AtomicRMWInst::BinOp` HLSL's `Interlocked*` builtins actually
+/// lower to (`Add`/`Sub`/`And`/`Or`/`Xor`/`Max`/`Min`/`UMax`/`UMin`) has one
+/// (`FAdd`/`FSub`/`FMax`/`FMin`/`FMaximum`/`FMinimum`/`USubCond`/`USubSat`
+/// do too, for whatever future front end produces them); `std::nullopt` for
+/// `Xchg` (handled separately -- see `widenMaskedAtomicRMW`) and the three
+/// operations (`Nand`, `UIncWrap`, `UDecWrap`) whose result depends on
+/// `old` in a way no single operand value can leave unchanged for every
+/// `old`.
+std::optional<Constant *> getAtomicRMWIdentity(AtomicRMWInst::BinOp Op,
+                                               Type *Ty) {
+  switch (Op) {
+  case AtomicRMWInst::Add:
+  case AtomicRMWInst::Sub:
+  case AtomicRMWInst::Or:
+  case AtomicRMWInst::Xor:
+  case AtomicRMWInst::UMax:
+  case AtomicRMWInst::USubCond:
+  case AtomicRMWInst::USubSat:
+    return Constant::getNullValue(Ty);
+  case AtomicRMWInst::And:
+  case AtomicRMWInst::UMin:
+    return Constant::getAllOnesValue(Ty);
+  case AtomicRMWInst::Max:
+    return ConstantInt::get(Ty,
+                            APInt::getSignedMinValue(Ty->getIntegerBitWidth()));
+  case AtomicRMWInst::Min:
+    return ConstantInt::get(Ty,
+                            APInt::getSignedMaxValue(Ty->getIntegerBitWidth()));
+  case AtomicRMWInst::FAdd:
+  case AtomicRMWInst::FSub:
+    return ConstantFP::get(Ty, 0.0);
+  case AtomicRMWInst::FMax:
+  case AtomicRMWInst::FMaximum:
+  case AtomicRMWInst::FMaximumNum:
+    return ConstantFP::getInfinity(Ty, /*Negative=*/true);
+  case AtomicRMWInst::FMin:
+  case AtomicRMWInst::FMinimum:
+  case AtomicRMWInst::FMinimumNum:
+    return ConstantFP::getInfinity(Ty, /*Negative=*/false);
+  case AtomicRMWInst::Xchg:
+  case AtomicRMWInst::Nand:
+  case AtomicRMWInst::UIncWrap:
+  case AtomicRMWInst::UDecWrap:
+  case AtomicRMWInst::BAD_BINOP:
+    return std::nullopt;
+  }
+  llvm_unreachable("unhandled AtomicRMWInst::BinOp");
+}
+
 /// Widens a single acyclic, uniform-control-flow function to \p WaveSize
 /// lanes. See the file comment above for the algorithm.
 class FunctionWidener {
@@ -305,6 +358,8 @@ private:
                        IRBuilder<> &Builder);
   void widenMaskedStore(CallInst &CI, const MatchedMaskedMemOp &Matched,
                         IRBuilder<> &Builder);
+  void widenMaskedAtomicRMW(CallInst &CI, const MatchedMaskedAtomicRMW &Matched,
+                            IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
@@ -736,15 +791,15 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
   // once per lane with those scalar operands substituted, and reassemble a
   // result vector from the per-lane results (if `I` produces one). This is
   // what makes widening total -- it never has to reject an unsupported
-  // divergent opcode. Atomics are the main user (`AtomicRMWInst`,
-  // `AtomicCmpXchgInst`); this milestone does not yet gate their per-lane
-  // execution by an active-lane mask the way "masked feme.cpu.resource.*
-  // call" already does, matching the existing, documented narrowing that
-  // ordinary `load`/`store`/atomics under a divergent condition are not yet
-  // rewritten into the masked intrinsic forms `feme::cpu::LinearizePass`
-  // would otherwise have produced (see the Status section's milestone 6
-  // deviation note in feme/docs/FeMeCPUDesign.md) -- a masked, scalarized
-  // atomic is future work once that lands.
+  // divergent opcode. An `AtomicRMWInst` no longer reaches this fallback
+  // when it needs masking (`feme::cpu::LinearizePass`'s `maskMemoryOps` now
+  // rewrites one under a divergent mask into `feme.cpu.masked.atomicrmw`,
+  // widened by `widenMaskedAtomicRMW` below instead); an `AtomicRMWInst`
+  // with no divergent operand at all (so never masked, and not divergent
+  // enough to be widened in the first place) and an `AtomicCmpXchgInst`
+  // (whose `{T, i1}` result is an aggregate `feme::cpu::SIMDizePass`
+  // already rejects before this would run) are this fallback's only
+  // remaining atomic-instruction callers.
   SmallVector<Value *, 4> WideOps;
   for (Value *Op : I.operands())
     WideOps.push_back(getWidened(Op, Builder));
@@ -769,6 +824,72 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
   if (Result)
     Widened[&I] = Result;
   ToErase.push_back(&I);
+}
+
+void FunctionWidener::widenMaskedAtomicRMW(
+    CallInst &CI, const MatchedMaskedAtomicRMW &Matched, IRBuilder<> &Builder) {
+  // Masks a scalarized `atomicrmw`'s per-lane execution (roadmap milestone
+  // 7's "Scalarization fallback does not mask per-lane execution"
+  // deviation, feme/docs/FeMeCPUDesign.md's Status section): rather than
+  // real per-lane control flow -- which the widening driver in `widen()`
+  // cannot support mid-block (it walks each block's original instruction
+  // list once, so splitting a block during widening would strand whatever
+  // followed the split point outside that walk) -- a masked-off lane's
+  // `atomicrmw` still executes, but with its value operand replaced by
+  // `Op`'s identity element (`getAtomicRMWIdentity`), making the memory
+  // access a real but observably-inert no-op. `Xchg` has no such identity
+  // (any value it writes is observable), so a masked-off lane instead
+  // writes back the value already there: a plain (non-atomic) load of the
+  // same address immediately beforehand is safe only because dispatch is
+  // still sequential, one lane at a time (see the "Dispatch is sequential,
+  // not thread-pooled" P1 narrowing in feme/docs/Roadmap.md's §1.6) -- a
+  // genuinely concurrent lane could observe a torn or stale value between
+  // that load and this lane's `atomicrmw`, the same caveat thread-pooling
+  // will need to revisit this for. `Nand`/`UIncWrap`/`UDecWrap` have no
+  // identity and no such substitute either (see `getAtomicRMWIdentity`'s
+  // comment) -- HLSL's `Interlocked*` builtins never produce them, so this
+  // is diagnosed rather than silently wrong.
+  Value *WideMask = getWidened(Matched.Mask, Builder);
+  Value *EffectiveMask =
+      Builder.CreateAnd(Env.EntryMask, WideMask, "atomicrmw.mask");
+  Value *WidePtr = getWidened(Matched.Ptr, Builder);
+  Value *WideVal = getWidened(Matched.Val, Builder);
+
+  Type *ValTy = Matched.Val->getType();
+  std::optional<Constant *> Identity = getAtomicRMWIdentity(Matched.Op, ValTy);
+  if (!Identity && Matched.Op != AtomicRMWInst::Xchg) {
+    OldF.getContext().emitError(
+        "feme-cpu-simdize: function '" + NewF->getName() +
+        "' has a divergent atomicrmw '" +
+        AtomicRMWInst::getOperationName(Matched.Op) +
+        "' with no maskable identity element (roadmap milestone 7 "
+        "deviation)");
+    return;
+  }
+
+  Value *Result = PoisonValue::get(FixedVectorType::get(ValTy, WaveSize));
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *LaneMask = Builder.CreateExtractElement(
+        EffectiveMask, Builder.getInt32(Lane), "lane.mask");
+    Value *LanePtr = Builder.CreateExtractElement(
+        WidePtr, Builder.getInt32(Lane), "lane.ptr");
+    Value *LaneVal = Builder.CreateExtractElement(
+        WideVal, Builder.getInt32(Lane), "lane.val");
+    Value *IdentityVal = Identity
+                             ? static_cast<Value *>(*Identity)
+                             : Builder.CreateLoad(ValTy, LanePtr, "lane.old");
+    Value *MaskedVal =
+        Builder.CreateSelect(LaneMask, LaneVal, IdentityVal, "lane.rmw.val");
+    Value *LaneResult =
+        Builder.CreateAtomicRMW(Matched.Op, LanePtr, MaskedVal,
+                                Align(Matched.Align ? Matched.Align : 1),
+                                AtomicOrdering::SequentiallyConsistent);
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+
+  Widened[&CI] = Result;
+  ToErase.push_back(&CI);
 }
 
 void FunctionWidener::widenInsertElement(InsertElementInst &IE,
@@ -891,6 +1012,11 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       widenMaskedStore(*CI, *Matched, Builder);
       return true;
     }
+    if (std::optional<MatchedMaskedAtomicRMW> Matched =
+            matchMaskedAtomicRMW(*CI)) {
+      widenMaskedAtomicRMW(*CI, *Matched, Builder);
+      return true;
+    }
     Intrinsic::ID ID = CI->getCalledFunction()
                            ? CI->getCalledFunction()->getIntrinsicID()
                            : Intrinsic::not_intrinsic;
@@ -906,6 +1032,26 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
       widenWaveCall(*CI, *Kind, Builder);
       return true;
     }
+  }
+
+  // An `atomicrmw` always needs `widenElementwise`'s scalarization, even
+  // when its own operands classify as uniform: unlike a pure computation or
+  // an idempotent uniform `store` (every lane writing the identical value
+  // to the identical address, so one execution and `W` give the same final
+  // memory content), an atomic read-modify-write's effect accumulates --
+  // running it once instead of once per active lane silently undercounts
+  // (see the P0 "masked" fix in `widenMaskedAtomicRMW`/
+  // `getAtomicRMWIdentity` above, and `feme/test/Tools/feme-run/HLSL/
+  // histogram.hlsl`, the roadmap step R2 regression test this fixes: a
+  // groupshared counter every lane increments unconditionally is uniform
+  // by every operand's own value, but must still execute once per lane).
+  // `AtomicCmpXchgInst` is not included here: its `{T, i1}` aggregate
+  // result already has no widening support regardless of uniformity (see
+  // `checkVectorDecompositionSupported`), so forcing it through the
+  // generic vector-result fallback below would fail differently instead.
+  if (isa<AtomicRMWInst>(I)) {
+    widenElementwise(I, Builder);
+    return true;
   }
 
   if (!UI.isDivergentAtDef(&I))
