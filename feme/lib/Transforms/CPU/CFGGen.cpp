@@ -168,21 +168,53 @@ class CFGGenerator {
   /// able to branch to the other, with no single block dominating both --
   /// exactly what `FixIrreducible` exists to resolve before `StructurizeCFG`
   /// runs.
+  ///
+  /// `ACond`/`BCond` are each derived from `%tid`/`%gid` (see
+  /// `appendCondition`), which do not change across a hop between \p A and
+  /// \p Bb, so either condition alone could be `false` for every hop a
+  /// given invocation ever takes, bouncing between the two blocks forever.
+  /// A shared bounce counter (an `alloca` like `appendFold`'s accumulator)
+  /// bounds that: each block also exits once the counter reaches
+  /// `MaxBounces`, so the shape stays irreducible (\p A and \p Bb remain
+  /// mutually reachable, dominated by neither) while still guaranteeing
+  /// termination -- the same guarantee `genLoop`'s constant trip count
+  /// gives its own cycle.
   OpenBlock genIrreducible(OpenBlock B) {
+    constexpr unsigned MaxBounces = 4;
+
     std::string EntryCond = appendCondition(B);
     OpenBlock A = newOpen("irred.a");
     OpenBlock Bb = newOpen("irred.b");
     OpenBlock Exit = newOpen("irred.exit");
+    std::string CounterPtr = newTmp();
+    B.Body += "  " + CounterPtr + " = alloca i32\n";
+    B.Body += "  store i32 0, ptr " + CounterPtr + "\n";
     closeBlock(B, "br i1 " + EntryCond + ", label %" + A.Name + ", label %" +
                       Bb.Name);
 
-    appendFold(A);
-    std::string ACond = appendCondition(A);
+    // Folds \p Block's id in, bumps the shared bounce counter, and returns
+    // the (already fresh) exit condition to branch on: the block's own
+    // random condition, forced to `true` once the counter reaches the cap.
+    auto genHop = [&](OpenBlock &Block) -> std::string {
+      appendFold(Block);
+      std::string Count = newTmp(), Inc = newTmp(), AtCap = newTmp();
+      Block.Body += "  " + Count + " = load i32, ptr " + CounterPtr + "\n";
+      Block.Body += "  " + Inc + " = add i32 " + Count + ", 1\n";
+      Block.Body += "  store i32 " + Inc + ", ptr " + CounterPtr + "\n";
+      Block.Body += "  " + AtCap + " = icmp sge i32 " + Inc + ", " +
+                    Twine(MaxBounces).str() + "\n";
+      std::string RandCond = appendCondition(Block);
+      std::string ExitCond = newTmp();
+      Block.Body +=
+          "  " + ExitCond + " = or i1 " + RandCond + ", " + AtCap + "\n";
+      return ExitCond;
+    };
+
+    std::string ACond = genHop(A);
     closeBlock(A, "br i1 " + ACond + ", label %" + Exit.Name + ", label %" +
                       Bb.Name);
 
-    appendFold(Bb);
-    std::string BCond = appendCondition(Bb);
+    std::string BCond = genHop(Bb);
     closeBlock(Bb, "br i1 " + BCond + ", label %" + Exit.Name + ", label %" +
                        A.Name);
 

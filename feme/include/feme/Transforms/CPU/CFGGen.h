@@ -54,12 +54,14 @@ struct CFGGenOptions {
   /// placement).
   bool AllowLoops = true;
   /// Whether the generator may emit unstructured edges that make the
-  /// result irreducible (a two-entry mutual cycle, see CFGGen.cpp). Only
-  /// `-verify-structured` and the fuzzer (layers 2 and 4) exercise these;
-  /// the differential harness (layer 3) does not enable this, since
-  /// widening divergent/looping control flow is not yet implemented (see
-  /// the Status section's milestone 5 deviation note in
-  /// feme/docs/FeMeCPUDesign.md).
+  /// result irreducible (a two-entry mutual cycle, bounded so it always
+  /// terminates -- see CFGGen.cpp's `genIrreducible`). `-verify-structured`
+  /// and the fuzzer (layers 2 and 4) exercise these against
+  /// `feme::cpu::verifyStructured`'s structural postconditions; the
+  /// differential harness (layer 3) exercises them against `--reference`
+  /// only, not yet the normal (widened) pipeline (see the Status section's
+  /// milestone 5 deviation note in feme/docs/FeMeCPUDesign.md, and the new
+  /// P0 gap it links to in feme/docs/Roadmap.md).
   bool AllowUnstructured = false;
 };
 

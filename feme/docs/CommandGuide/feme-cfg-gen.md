@@ -29,6 +29,15 @@ written to a raw-buffer UAV at the end -- *the output buffer is a trace of
 the path each invocation took*, which is what makes a mismatch between two
 runs diagnosable rather than merely detectable.
 
+Every generated shape is guaranteed to terminate for any thread/group id, at
+every option combination: a counted loop always has a small, compile-time
+constant trip count, and `--unstructured`'s irreducible-edge construct
+bounds its own two-block bounce with a shared counter (see CFGGen.cpp's
+`genIrreducible`) rather than relying on either block's random,
+`%tid`/`%gid`-derived exit condition alone -- that condition does not
+change across a hop, so a thread for which it was never true would
+otherwise bounce forever.
+
 Like `feme-opt`/`feme-run`, `feme-cfg-gen` is a testing-oriented tool and
 may use `llvm::cl::opt` freely.
 
