@@ -351,23 +351,30 @@ still use `Importer`/`Translator`/`Exporter`/`Backend` directly — `Driver`
 is a convenience built from the same public interfaces, not a required
 entry point.
 
-#### Status: `feme::Driver` (implemented for `dxil`/`spirv` import; `dxil`/`spirv`/native-ISA output)
+#### Status: `feme::Driver` (implemented for `dxil`/`spirv`/`dxbc` import; `dxil`/`spirv`/native-ISA output)
 
 `feme::Driver` (`feme/include/feme/Driver/Driver.h`,
 `feme/lib/Driver/Driver.cpp`) is implemented, and is what the `feme` CLI
 (`feme/tools/feme/feme.cpp`) drives: given `DriverOptions` (reusing
 `feme::frontend::DriverOptions`, per "Library API Shape" below, rather than
 a second identical struct) and an input buffer, it detects which `Importer`
-to use from the buffer's contents ("dxil" or "spirv" -- DXBC is not yet
-implemented, so it (like any input whose format cannot be detected) is
-rejected with a diagnostic rather than a crash), translates the result to
-an `llvm::Module` (directly for DXIL, via `SPIRVToLLVMTranslator` for
-SPIR-V), and then runs the raising/lowering chain that gets from that to
-the requested destination:
+to use from the buffer's contents ("dxil", "spirv", or "dxbc" -- a legacy
+DXBC `DXContainer` and a DXIL one share the same "DXBC" magic, so telling
+them apart needs a peek at which part the container carries, `SHEX`/`SHDR`
+for DXBC or `DXIL`/`ILDB` for DXIL; any input whose format cannot be
+determined this way is rejected with a diagnostic rather than a crash),
+translates the result to an `llvm::Module` (directly for DXIL, via
+`SPIRVToLLVMTranslator` for SPIR-V, via `feme::dxsa::
+DXSAToLLVMIRTranslator` for DXBC), and then runs the raising/lowering chain
+that gets from that to the requested destination:
 
-1. For DXIL input: `feme::dxil::OpRaisingPass`, then
+1. For DXIL *or* DXBC input: `feme::dxil::OpRaisingPass`, then
    `feme::dxil::MetadataRaisingPass` (in that order -- the first consumes
-   the `!dx.resources` metadata the second drops).
+   the `!dx.resources` metadata the second drops). A DXBC-derived module
+   needs this too: `feme::dxsa::translateToLLVMIR` deliberately targets
+   DXIL's own `dx.op.*` calling convention directly (see the DXBC section
+   below) rather than idiomatic LLVM IR, so it is exactly as unraised as a
+   directly-imported DXIL module is.
 2. Resolve `Opts.Target` to a concrete target triple: `"dxil"`/`"spirv"`
    resolve to that format's own triple, preserving the pipeline stage a
    DXIL-originated module names (recovered by `MetadataRaisingPass`), as the
@@ -392,9 +399,9 @@ the requested destination:
 7. `feme::TargetMachineBackend`.
 
 There is no `Ctx.getFormatRegistry()` yet (deviating from the sketch above)
--- `Driver` currently detects between its two supported formats directly
+-- `Driver` currently detects between its three supported formats directly
 (see `feme::detectFormat` in `feme/lib/Driver/Driver.cpp`) rather than
-through a registry on `Context`, since only two formats exist to detect
+through a registry on `Context`, since only three formats exist to detect
 between; a registry is expected to be added if/when this stops being a
 short enough list to hard-code, without changing `Driver`'s own public
 interface.
@@ -935,6 +942,21 @@ alongside it. Remaining follow-up work, not attempted in this migration:
   prototype already covered is still incremental, per the "cover the full
   SM5 opcode set" goal above.
 
+Roadmap step R7 added `feme::DXBCImporter`
+(`feme/include/feme/Import/DXBC/DXBCImporter.h`,
+`feme/lib/Import/DXBC/DXBCImporter.cpp`), the `Importer` this section's
+"Import target" table row describes: given a full `DXContainer`, it locates
+the `SHEX` (Shader Model 4.1+) or `SHDR` (Shader Model 4.0) part carrying
+the raw tokenized shader bytecode (unlike `DXILImporter`'s `DXIL`/`ILDB`
+parts, `object::DXContainer` does not model this part structurally, so it
+is found by iterating the container's parts and matching on name) and hands
+its bytes to `feme::dxsa::deserialize`, exactly as `--import-dxsa-bin`
+already did for bare (container-less) bytecode. It is registered with
+`feme-translate` as `--import-dxbc`, and is what `feme::Driver`/`feme` use
+for a legacy DXBC input (see "Status: `feme::Driver`" above) -- closing the
+"DXBC is not reachable from `feme` or `Driver` at all" gap `feme/docs/
+Roadmap.md` tracked.
+
 ### Summary table
 
 | Format | Import target | Rationale |
@@ -1002,7 +1024,34 @@ and the `_s` Tiled Resources feedback status with
 Not yet implemented, in rough dependency order: the resource *queries*
 (`bufinfo`, `resinfo`, `sampleinfo`, `samplepos`), the atomics and UAV
 counters, group-shared memory, doubles, subroutines (`label`/`call`),
-and the non-pixel-shader stage-specific declarations.
+and the non-pixel-shader stage-specific declarations -- notably, a compute
+shader's `dcl_thread_group` dimensions are not yet carried into the
+`NumThreads` tag of `!dx.entryPoints`' shader-properties list, so
+`feme::dxil::MetadataRaisingPass` cannot recover `"hlsl.numthreads"` for a
+DXBC-derived compute shader the way it can for one imported directly from
+DXIL (see `test/Tools/feme/feme-dxbc-to-dxil.dxasm`'s header comment for
+why its own fixture sidesteps this rather than exercising it).
+
+Roadmap step R7 fixed a latent bug this translation's own test suite had
+not caught (no existing test `FileCheck`ed a UAV's `!dx.resources` entry):
+`emitResourceBindings` gave a UAV binding the same 9-operand shape as an
+SRV's, omitting the three `i1` globally-coherent/has-counter/
+rasterizer-ordered flags a UAV's entry must carry per `llvm::dxil::
+ResourceInfo::write` (`llvm/lib/Analysis/DXILResource.cpp`). A 9-operand
+UAV entry is silently unusable: `feme::dxil::ResourceMetadata` (see
+`feme/lib/Transforms/DXIL/ResourceMetadata.cpp`) requires exactly 11
+operands to parse a UAV entry at all, so `feme::dxil::OpRaisingPass`'s
+`raiseLegacyCreateHandle` could never find the binding and left every
+DXBC-derived UAV's `dx.op.createHandle` (and everything reading through it)
+unraised -- invisible until DXBC gained an actual `Driver` retargeting path
+to notice via LLVM's DirectX target rejecting the still-lowered result (see
+"Status: `feme::Driver`" above). All three flags are conservatively emitted
+`false`, since `dxsa`'s `dcl_uav_*` access-flag modifiers
+(`globallyCoherent`, `rasterizerOrdered`, `hasOrderPreservingCounter`, see
+[dxbc-as.md](CommandGuide/dxbc-as.md)'s "Operands" section) are not yet
+read off the declaration into `Resource`; every shader this translation
+currently handles leaves all three false regardless, so this is not yet a
+loss of fidelity in practice.
 
 Two design points are worth recording because they shape the whole
 translation:
@@ -2107,6 +2156,25 @@ end-to-end test coverage that should grow alongside it, see
    The DXIL-flavored-LLVM-IR conversion pass (step 8) has not been
    started.
 8. **DXBC → DXIL translation** end to end.
+
+   Status: `feme::dxsa::translateToLLVMIR` (the DXIL-flavored-LLVM-IR
+   conversion pass step 7's status note above called out as not yet
+   started) is implemented, registered with `feme-translate` as
+   `--dxsa-to-llvmir` (see "Status: `feme::dxsa::translateToLLVMIR`" under
+   the Translation Matrix below for its own coverage and known gaps).
+   Roadmap step R7 closed the remaining "end to end" gap: `feme::
+   DXBCImporter` (see "Status" under the DXBC dialect section above) makes
+   a legacy DXBC `DXContainer` importable, `feme::dxsa::
+   DXSAToLLVMIRTranslator` wraps the translation behind the `Translator`
+   interface so `feme::Driver` can dispatch to it like any other format
+   (see "Status: `feme::Driver`" above), and both are registered with
+   `feme` and `feme-translate` (`--import-dxbc`) -- so a DXBC module can now
+   go all the way to a re-emitted DXIL `DXContainer` (or any other
+   `feme::Driver` destination) through the full `feme` CLI, not just
+   through isolated `feme-translate` stages (see
+   `test/Tools/feme/feme-dxbc-to-dxil.dxasm`). Step R7 also fixed a
+   resource-metadata bug this exposed (see "Status: `feme::dxsa::
+   translateToLLVMIR`" below).
 9. **AMDGPU/NVPTX/AArch64 retargeting** via direct `llvm::Module` →
    `TargetMachine`. MLIR `gpu`-dialect-based retargeting is deferred until a
    concrete client needs it (see Non-Goals above).

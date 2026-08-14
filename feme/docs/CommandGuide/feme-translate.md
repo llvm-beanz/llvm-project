@@ -48,6 +48,37 @@ current list; only FeMe-specific translations are documented here.
   `llvm::Module::print`), not MLIR: DXIL import does not go through MLIR at
   all (see [../Design.md](../Design.md)).
 
+* `--import-dxbc`
+
+  Imports a legacy DXBC module via `feme::DXBCImporter`, producing the MLIR
+  `dxsa` dialect's textual form. Accepts a full `DXContainer` carrying an
+  `SHEX`/`SHDR` part (see the "DXBC" section of [../Design.md](../Design.md));
+  unlike `--import-dxil`, DXBC has no bare-bytecode-only encoding to also
+  accept, since a real DXBC module is never distributed outside a
+  container. Complements `--import-dxsa-bin` (below), which imports the
+  bare tokenized bytecode `dxbc-as` emits (with no container).
+
+* `--import-dxsa-bin`
+
+  Imports raw (container-less) DXBC tokenized shader bytecode via
+  `feme::dxsa::deserialize`, producing the MLIR `dxsa` dialect's textual
+  form. This is the flag `dxbc-as`'s default `--emit=binary` output pipes
+  into (see [dxbc-as.md](dxbc-as.md)), and is what most DXBC `lit` tests
+  use for a diffable, human-readable fixture instead of a full
+  `DXContainer`.
+
+* `--dxsa-to-llvmir`
+
+  Translates a `dxsa` dialect module (as produced by `--import-dxbc` or
+  `--import-dxsa-bin`) to DXIL-shaped LLVM IR via
+  `feme::dxsa::translateToLLVMIR` — the DXBC → DXIL edge of the Translation
+  Matrix in [../Design.md](../Design.md). Accepts a `--dxbc-container=<path>`
+  option naming a full `DXContainer` to read real `ISGN`/`OSGN` signature
+  element names/types from, overriding the names this translation would
+  otherwise synthesize from the input module's declarations (see "Building
+  complete legacy DXBC containers for testing" in
+  [../Design.md](../Design.md)).
+
 * `--spirv-to-llvmir`
 
   Translates a `spirv` dialect module to LLVM IR via
@@ -76,6 +107,14 @@ Import a DXIL bitcode file or `DXContainer` via `feme::DXILImporter`:
 ```shell
 feme-translate --import-dxil input.bc
 feme-translate --import-dxil input.dxcontainer
+```
+
+Import a legacy DXBC `DXContainer` via `feme::DXBCImporter`, then translate
+it to DXIL-shaped LLVM IR via `feme::dxsa::translateToLLVMIR`:
+
+```shell
+dxbc-as --emit=container input.dxasm -o input.dxbc
+feme-translate --import-dxbc input.dxbc | feme-translate --dxsa-to-llvmir -
 ```
 
 Translate a `spirv` dialect module directly to LLVM IR via

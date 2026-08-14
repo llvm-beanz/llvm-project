@@ -105,13 +105,32 @@ DXIL import is the most complete path, and its gaps are enumerable.
 
 ### 1.4 DXBC / `dxsa`
 
-- **P0 — DXBC is not reachable from `feme` or `Driver` at all.**
-  `detectFormat` knows "dxil" and "spirv"; `feme-translate` still carries a
-  `TODO` for registering DXBC. The `dxsa` dialect, `BinaryParser` and
-  `translateToLLVMIR` all exist and are heavily lit-tested in isolation
-  (`test/Target/DXSA`, `test/Translate/DXBC`), but no end-to-end DXBC
-  invocation exists — which is Design.md milestone 8 ("DXBC → DXIL end to
-  end") in its entirety, and it is mostly *wiring*, not new translation.
+- **P0 — DXBC is not reachable from `feme` or `Driver` at all (done by
+  R7).** `detectFormat` now distinguishes a legacy DXBC `DXContainer` (an
+  `SHEX`/`SHDR` part) from a DXIL one (a `DXIL`/`ILDB` part) sharing the
+  same "DXBC" magic; `feme::DXBCImporter` (`feme/lib/Import/DXBC`) parses
+  the former into the `dxsa` dialect via the existing `BinaryParser`, and
+  `feme::dxsa::DXSAToLLVMIRTranslator` wraps the existing
+  `translateToLLVMIR` behind the `Translator` interface so `feme::Driver`
+  dispatches to it exactly like `SPIRVToLLVMTranslator`. Both are
+  registered with `feme-translate` (`--import-dxbc`), closing Design.md
+  milestone 8 ("DXBC → DXIL end to end") -- see
+  `test/Tools/feme/feme-dxbc-to-dxil.dxasm` for the resulting end-to-end
+  DXBC-in, DXIL-`DXContainer`-out round trip through the full `feme` CLI.
+  This was indeed mostly wiring, but exposed one real bug in
+  `translateToLLVMIR` itself along the way: a UAV's `!dx.resources` entry
+  was missing the three `i1` flags (globally-coherent/has-counter/
+  rasterizer-ordered) a UAV entry needs beyond an SRV's, which silently
+  made every DXBC-derived UAV unraisable (`feme::dxil::OpRaisingPass`
+  could never look its binding up) -- invisible until an actual retargeting
+  path existed to notice, since no existing test `FileCheck`ed that far
+  into the metadata. Retargeting a DXBC-derived module inherits every
+  limitation retargeting a DXIL one already has (see §1.3), plus
+  `translateToLLVMIR`'s own remaining gaps below -- notably, no DXBC
+  graphics-stage shader is retargetable yet at all (`loadInput`/
+  `storeOutput` are not raised, a gap shared with real DXIL input, see
+  `feme/docs/CommandGuide/feme.md`), and a DXBC compute shader's declared
+  `NumThreads` does not yet reach DXIL's metadata.
 - **P0 — DXBC importer fuzzer (done by R6).** Design.md's Testing Strategy
   makes "a fuzzing harness lands alongside each importer" a v1 requirement,
   and DXBC was the one importer without one (`dxbc-as-fuzzer` fuzzes the
@@ -131,7 +150,8 @@ DXIL import is the most complete path, and its gaps are enumerable.
 - **P1 — `translateToLLVMIR` coverage**, in the dependency order its own
   status note gives: resource queries (`bufinfo`/`resinfo`/`sampleinfo`/
   `samplepos`), atomics and UAV counters, groupshared memory, doubles,
-  subroutines (`label`/`call`), non-pixel-shader stage declarations.
+  subroutines (`label`/`call`), non-pixel-shader stage declarations (which
+  includes the `NumThreads` gap R7 found, above).
 - **P2 — SM5 opcode coverage** in the dialect/parser itself, incrementally.
 
 ### 1.5 Retargeting
@@ -276,7 +296,10 @@ being untested.
 7. **Resource shapes.** Every executing test uses an unstructured raw buffer,
    because that is all `feme-run`'s heap YAML can describe (§1.6). Typed
    buffers, formats, strides and constant buffers are untested by execution.
-8. **DXBC.** Zero end-to-end coverage, per §1.4.
+8. **DXBC.** CLI-level (`feme`/`feme-translate`) end-to-end coverage now
+   exists, per §1.4's R7 entry (`test/Tools/feme/feme-dxbc-to-dxil.dxasm`).
+   Execution (a DXBC-derived module reaching `feme-run`/the CPU target) is
+   still uncovered -- `feme-run` only accepts `.ll`/`.bc`/DXIL, per §1.2.
 
 ### 2.3 The interesting cases to add
 
@@ -391,7 +414,7 @@ dependency column is the only ordering constraint.
 | R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` (done: `feme::dxil::OpRaisingPass` raises all four remaining families; `feme::cpu::WaveLoweringPass` lowers every one of them except `QuadOp`, which stays raised-only pending the quad/derivative lane mapping FeMeCPUDesign.md's "Non-Goals" defers) | §1.3 P0 | — |
 | R5 | Barriers inside a uniform loop; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` (done: `feme::cpu::matchLoopShape`/`buildWrapperForLoop` split a barrier inside a header-tested uniform loop by cloning its header/latch into the wrapper as an ordinary scalar loop; `feme::cpu::spillValuesLiveAcrossBarriers` spills any value live across a barrier into a per-wave context array; a barrier inside a *branch* remains diagnosed, and a divergent groupshared access -- including a masked store at a uniform address, found writing `reduction.hlsl` -- remains a separate, still-open narrowing, see §1.6) | §1.6, §2.3 | R4 (`Barrier` raising) |
 | R6 | DXBC importer fuzzer; `check-feme-fuzz` (done: `feme-dxbc-import-fuzzer` fuzzes `feme::dxsa::deserialize` directly and found/fixed a real `SrcOperandAttr` builder assertion on a malformed immediate operand; `check-feme-fuzz` runs all five fuzz targets, seed-corpus-only, and found/fixed a bit-rotted `dxbc-as-fuzzer` call site broken by an unrelated `wrapInContainer` signature change) | §1.4 P0, §1.7 P0 | — |
-| R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end | §1.4 P0, §2.2.8 | — |
+| R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end (done: `feme::DXBCImporter` + `feme::dxsa::DXSAToLLVMIRTranslator` wired into `feme::Driver`/`feme`/`feme-translate --import-dxbc`; found/fixed a latent `!dx.resources` UAV-metadata bug the new end-to-end path exposed, see §1.4) | §1.4 P0, §2.2.8 | — |
 | R8 | Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe | §2.4.3, §2.4.5, §2.2.4 | — |
 | R9 | `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants) | §1.2 P0 | — |
 | R10 | `feme-run` SPIR-V input; one HLSL source executed through both front ends | §1.2 P0, §2.2.3 | R9 |

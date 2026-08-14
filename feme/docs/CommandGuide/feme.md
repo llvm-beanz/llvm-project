@@ -19,25 +19,36 @@ full design.
 
 `feme` drives `feme::Driver` (see the "Driver" section of
 [../Design.md](../Design.md)). `feme` detects its input format from the
-input file's contents; currently detected formats are `dxil` and `spirv`
-(DXBC import is not yet implemented -- see the Roadmap / Milestones section
-of [../Design.md](../Design.md) -- so DXBC input, like any input whose
-format cannot be detected, is rejected with a diagnostic). `--target` may
-name `dxil`, `spirv` (re-serializing back to that format via its own LLVM
+input file's contents; currently detected formats are `dxil`, `spirv`, and
+`dxbc` (a legacy DXBC `DXContainer`; any input whose format cannot be
+detected this way is rejected with a diagnostic). `--target` may name
+`dxil`, `spirv` (re-serializing back to that format via its own LLVM
 backend), or any other LLVM target triple registered with the
 `TargetRegistry` (e.g. `amdgcn-amd-amdhsa`) for real-ISA retargeting.
 
-Current limitations. Retargeting a DXIL input to any target first requires
-undoing its `dx.op.*` calling convention and recovering the shader model and
-entry point information from its `dx.*` metadata; retargeting to SPIR-V or
-`amdgcn-*` additionally requires re-expressing the result in that target's
-own intrinsics and resource conventions. All of these passes are
-deliberately incremental (see the DXIL, "Raised LLVM IR -> AMDGPU", and
-"Raised LLVM IR -> SPIR-V" sections of [../Design.md](../Design.md)): typed
-buffers (`Buffer`/`RWBuffer`) are covered, but textures, samplers, raw and
-structured buffer accesses, cbuffer loads, and shader input/output signature
-ops are not, so a shader using those will fail at this stage rather than at
-any point specific to `feme`'s own Driver/CLI logic.
+Current limitations. Retargeting a DXIL *or* DXBC input to any target first
+requires undoing its `dx.op.*` calling convention and recovering the shader
+model and entry point information from its `dx.*` metadata (a DXBC input
+reaches this same `dx.op.*`-calling-convention shape via `feme::dxsa::
+translateToLLVMIR`, the DXBC → DXIL edge of FeMe's Translation Matrix, so
+it needs the identical raising); retargeting to SPIR-V or `amdgcn-*`
+additionally requires re-expressing the result in that target's own
+intrinsics and resource conventions. All of these passes are deliberately
+incremental (see the DXIL, "Raised LLVM IR -> AMDGPU", and "Raised LLVM IR
+-> SPIR-V" sections of [../Design.md](../Design.md)): typed buffers
+(`Buffer`/`RWBuffer`) are covered, but textures, samplers, raw and
+structured buffer accesses, cbuffer loads, and shader input/output
+signature ops are not, so a shader using those will fail at this stage
+rather than at any point specific to `feme`'s own Driver/CLI logic -- a
+DXBC-derived module is limited to the same set, on top of `feme::dxsa::
+translateToLLVMIR`'s own known gaps (see the DXBC section of
+[../Design.md](../Design.md)): notably, a DXBC compute shader's
+`dcl_thread_group` dimensions do not yet reach DXIL's `NumThreads`
+metadata, and no DXBC graphics-stage (vertex/pixel/...) shader's signature
+I/O is retargetable to DXIL/AMDGPU yet either, DXBC- or DXIL-derived, since
+neither `feme::dxil::OpRaisingPass` nor LLVM's DirectX target itself raises
+`dx.op.loadInput`/`storeOutput` (no idiomatic intrinsic models "read a
+whole signature element" the way resource ops do).
 
 A SPIR-V input is currently limited to shaders that use neither resources
 nor builtin variables, since MLIR's `SPIRVToLLVM` conversion -- which
@@ -87,7 +98,7 @@ feme --target=spirv input.dxil -o output.spv
 # Re-emit a DXIL module (e.g. after external re-optimization).
 feme --target=dxil input.dxil -o output.dxil
 
-# Translate a DXBC module to DXIL (not yet implemented).
+# Translate a DXBC module to DXIL.
 feme --target=dxil input.dxbc -o output.dxil
 
 # Import SPIR-V and retarget it to an AMDGPU target.
