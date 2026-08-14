@@ -239,4 +239,126 @@ TEST(EntryWrapperTest, NonLinearControlFlowWithBarrierIsDiagnosed) {
   EXPECT_FALSE(M->getFunction("feme_cpu_entry_main"));
 }
 
+// Roadmap step R5 (feme/docs/Roadmap.md): a divergent (per-lane) value
+// computed before a `..._with_group_sync` barrier and used after it is
+// spilled to a per-wave context array rather than being diagnosed -- see
+// "Values live across a barrier" in EntryWrapper.cpp's file comment.
+TEST(EntryWrapperTest, SpillsValueLiveAcrossGroupSyncBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %doubled = mul i32 %tid, 2
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+
+  Function *Region0 = M->getFunction("main.region0");
+  Function *Region1 = M->getFunction("main");
+  ASSERT_TRUE(Region0);
+  ASSERT_TRUE(Region1);
+  EXPECT_TRUE(Region0->getArg(Region0->arg_size() - 1)->getName() ==
+              "barrier_spill");
+  EXPECT_TRUE(Region1->getArg(Region1->arg_size() - 1)->getName() ==
+              "barrier_spill");
+
+  bool FoundStore = false, FoundLoad = false;
+  for (Instruction &I : instructions(Region0))
+    FoundStore |= isa<StoreInst>(&I);
+  for (Instruction &I : instructions(Region1))
+    FoundLoad |= isa<LoadInst>(&I);
+  EXPECT_TRUE(FoundStore);
+  EXPECT_TRUE(FoundLoad);
+
+  bool FoundSpillAlloca = false;
+  for (Instruction &I : instructions(Wrapper))
+    if (auto *AI = dyn_cast<AllocaInst>(&I))
+      if (AI->getName() == "barrier.spill")
+        FoundSpillAlloca = true;
+  EXPECT_TRUE(FoundSpillAlloca);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap step R5: a `..._with_group_sync` barrier inside a uniform loop
+// (a stride-halving reduction loop's shape) is split, not diagnosed -- see
+// "Barriers inside a uniform loop" in EntryWrapper.cpp's file comment. The
+// loop's own induction variable (`stride`) is hoisted into the wrapper as
+// an ordinary scalar loop; the barrier-split body regions run once per
+// wave, once per iteration.
+TEST(EntryWrapperTest, SplitsBarrierInsideUniformLoop) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      br label %loop.header
+    loop.header:
+      %stride = phi i32 [ 2, %entry ], [ %stride.next, %loop.latch ]
+      %cond = icmp ugt i32 %stride, 0
+      br i1 %cond, label %loop.body, label %loop.exit
+    loop.body:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %sum = add i32 %gid, %stride
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %doubled = mul i32 %sum, 2
+      br label %loop.latch
+    loop.latch:
+      %stride.next = lshr i32 %stride, 1
+      br label %loop.header
+    loop.exit:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_FALSE(M->getFunction("main"));
+  EXPECT_TRUE(M->getFunction("main.body0"));
+
+  bool FoundWrapperLoop = false, FoundWrapperPhi = false, FoundFence = false;
+  unsigned NumWaveLoopHeaders = 0;
+  for (BasicBlock &BB : *Wrapper) {
+    if (BB.getName() == "loop.header")
+      FoundWrapperLoop = true;
+    if (BB.getName().starts_with("wave.loop.header"))
+      ++NumWaveLoopHeaders;
+    for (Instruction &I : BB) {
+      if (auto *PN = dyn_cast<PHINode>(&I))
+        if (PN->getName().starts_with("loopvar"))
+          FoundWrapperPhi = true;
+      if (isa<FenceInst>(&I))
+        FoundFence = true;
+    }
+  }
+  EXPECT_TRUE(FoundWrapperLoop);
+  EXPECT_TRUE(FoundWrapperPhi);
+  // A single barrier splits the loop body into 2 regions (before/after);
+  // the (trivial) prefix and suffix chains each get their own wave loop
+  // too, for 4 total.
+  EXPECT_EQ(NumWaveLoopHeaders, 4u);
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace

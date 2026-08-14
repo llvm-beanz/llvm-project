@@ -17,10 +17,12 @@
 // Roadmap milestone 4 implements the barrier-free case: the wave loop over
 // a `feme::cpu::WaveBodyEnv`-shaped wave body (see EntryWrapper.cpp's file
 // comment), producing the exported `feme_cpu_entry_<name>` ABI function.
-// Milestone 9 adds barrier region splitting and groupshared allocation --
-// see EntryWrapper.cpp's file comment for the current scope and its
-// narrowing (only a straight-line wave body, no value live across a
-// group-sync barrier).
+// Milestone 9 adds barrier region splitting and groupshared allocation;
+// roadmap step R5 (feme/docs/Roadmap.md) closes that milestone's two
+// narrowings -- a value live across a barrier is spilled rather than
+// diagnosed, and a barrier inside a uniform loop (not just a straight-line
+// wave body) is split -- see EntryWrapper.cpp's file comment for the
+// current scope and what remains diagnosed (a barrier inside a branch).
 //
 //===----------------------------------------------------------------------===//
 
