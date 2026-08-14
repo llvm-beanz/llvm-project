@@ -39,7 +39,10 @@ namespace feme::cpu {
 /// Options controlling `generateCFGIR`'s output. See the file comment above.
 struct CFGGenOptions {
   /// Seeds the generator's PRNG; the same seed always produces the same
-  /// output.
+  /// output, byte-for-byte, regardless of the standard library
+  /// `generateCFGIR` is built against (see CFGGen.cpp's `chance`/`randInt`
+  /// for why that second part needs its own hand-rolled distributions
+  /// rather than `<random>`'s).
   uint64_t Seed = 0;
   /// How deeply constructs (`if`/loop/irreducible-edge) may nest.
   unsigned MaxDepth = 3;

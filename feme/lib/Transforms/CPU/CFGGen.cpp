@@ -12,6 +12,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <limits>
 #include <random>
 #include <utility>
 
@@ -52,11 +53,37 @@ class CFGGenerator {
   }
   std::string newTmp() { return ("%t" + Twine(NextTmp++)).str(); }
 
-  bool chance(double P) {
-    return std::uniform_real_distribution<double>(0.0, 1.0)(Rng) < P;
-  }
+  /// Draws a uniform `double` in [0, 1) from `Rng` alone (the top 53 bits
+  /// of one 64-bit draw, scaled by 2^-53 -- enough bits for a `double`'s
+  /// mantissa) and compares it against \p P. This hand-rolls what
+  /// `std::uniform_real_distribution<double>(0.0, 1.0)(Rng)` would do
+  /// rather than calling it directly, because the standard leaves a
+  /// distribution's own algorithm unspecified (only the engine, `Rng`
+  /// itself, is required to be portable): libc++ and libstdc++ give
+  /// different sequences of `double`s for the same seeded
+  /// `std::mt19937_64`, which would make `--seed` on the same
+  /// `feme-cfg-gen` build produce a different shader on macOS/libc++ than
+  /// on Linux/libstdc++, breaking the "same seed always produces the same
+  /// output" promise CFGGen.h documents (found by
+  /// feme-run/differential-harness.test's curated divergent/loop seeds
+  /// failing only on a libc++ build).
+  bool chance(double P) { return (Rng() >> 11) * 0x1.0p-53 < P; }
+
+  /// Draws a uniform `unsigned` in [\p Lo, \p Hi] from `Rng` alone via
+  /// rejection sampling: `Range` values from the top of `Rng`'s 64-bit
+  /// output space are rejected and redrawn so every one of the remaining,
+  /// evenly-divisible values is equally likely, then reduced mod `Range`.
+  /// See `chance` above for why this avoids
+  /// `std::uniform_int_distribution` instead of calling it directly --
+  /// the same portability hazard applies to it.
   unsigned randInt(unsigned Lo, unsigned Hi) {
-    return std::uniform_int_distribution<unsigned>(Lo, Hi)(Rng);
+    uint64_t Range = uint64_t(Hi) - Lo + 1;
+    uint64_t Limit = (std::numeric_limits<uint64_t>::max() / Range) * Range;
+    uint64_t X;
+    do {
+      X = Rng();
+    } while (X >= Limit);
+    return Lo + unsigned(X % Range);
   }
 
   OpenBlock newOpen(StringRef Base) { return OpenBlock{newName(Base), ""}; }
