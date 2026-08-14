@@ -468,13 +468,25 @@ called out inline where it's discussed, and summarized here:
   with no vector form** (atomics, chiefly, but the fallback is fully
   generic): `FunctionWidener::widenScalarizedFallback` clones the
   instruction once per lane with each operand's extracted scalar value,
-  reassembling a result vector when it produces one. It does not yet gate a
-  scalarized instruction's per-lane execution by an active-lane mask --
-  matching the still-open masked-atomics gap the paragraph above's `load`/
-  `store` masking does not close -- and it excludes a generic divergent
-  `CallInst` (e.g. an unrecognized math libcall), whose callee operand the
-  fallback's per-operand extraction does not know to leave alone; such a
-  call remains a diagnosed error.
+  reassembling a result vector when it produces one. As of roadmap step R2
+  (feme/docs/Roadmap.md), an `AtomicRMWInst` under a divergent condition no
+  longer reaches this generic fallback unmasked: `feme::cpu::LinearizePass`
+  now rewrites one the same way it already did a plain `load`/`store`, into
+  a `feme.cpu.masked.atomicrmw` call (`feme::cpu::MaskIntrinsics`), and
+  `FunctionWidener::widenMaskedAtomicRMW` widens it by substituting the
+  masked-off lane's operand with `Op`'s identity element (`Xchg`, which has
+  none, instead substitutes the value already at the address, safe only
+  because dispatch is still sequential -- see §1.6's "Dispatch is
+  sequential, not thread-pooled" row in feme/docs/Roadmap.md) rather than
+  skipping the instruction, so no real per-lane control flow is needed. An
+  `AtomicRMWInst` with no divergent operand at all is still always routed
+  through this same widening (not left alone as a uniform value would be):
+  its side effect accumulates once per lane, so leaving it unwidened would
+  silently run it once for the whole wave instead of once per active lane.
+  `FunctionWidener::widenScalarizedFallback` itself excludes a generic
+  divergent `CallInst` (e.g. an unrecognized math libcall), whose callee
+  operand the fallback's per-operand extraction does not know to leave
+  alone; such a call remains a diagnosed error.
 - **Vector/aggregate leaf decomposition is narrower than the design.**
   "Vectors become components, not nested vectors" describes splitting *any*
   divergent `<N x T>` (or aggregate) value into `N` separate `<W x T>`
@@ -2299,9 +2311,11 @@ remaining steps here interleave with the ones still open in
    See the Status section's Deviation note for what narrowed (the masked
    memory ops always lower to `llvm.masked.gather`/`.scatter` rather than
    the finer uniform-address/contiguous-address cases the design's lowering
-   table distinguishes, the scalarization fallback does not yet mask a
-   scalarized instruction's per-lane execution, and vector/aggregate leaf
-   decomposition remains unimplemented -- diagnosed rather than attempted).
+   table distinguishes, and vector/aggregate leaf decomposition remains
+   unimplemented -- diagnosed rather than attempted). Roadmap step R2 closed
+   the scalarization fallback's remaining "does not mask per-lane execution"
+   gap: an `atomicrmw` under a divergent condition is now masked the same
+   way a `load`/`store` already was.
 8. **Wave intrinsic lowering** (done): Phase 5's remaining half, over the mask
    milestone 6 introduced. `feme::cpu::SIMDizePass` canonicalizes a raised
    wave intrinsic (other than `wave.getlaneindex`, already a builtin) into a

@@ -143,23 +143,30 @@ which is a diagnostic today and a wrong answer tomorrow if forgotten:
 | Root constants unimplemented; a bound constant buffer is an unsupported resource kind | 3/11 | P1 |
 | Barrier inside a surviving branch or loop is diagnosed, not split | 9 | P1 |
 | No SSA value may be live across a group-sync barrier | 9 | P1 |
-| Divergent groupshared access is diagnosed | 9 | P1 |
-| Scalarization fallback does not mask per-lane execution | 7 | P0 |
+| Divergent groupshared access is diagnosed (including a groupshared `atomicrmw`/`load`/`store` reached through a `getelementptr`, even one every index of which is constant -- only a *direct* global reference, with no intervening `getelementptr` at all, is canonicalized as of R2; see `feme/test/Transforms/CPU/simdize-groupshared-atomic-scalar.ll`'s comment) | 9 | P1 |
 | Vector/aggregate leaf decomposition unimplemented | 7 | P1 |
 | Masked memory always lowers to `gather`/`scatter` (no uniform/contiguous cases) | 7 | P2 (perf) |
 | `WaveReadLaneAt`'s lane operand assumed uniform | 8 | P1 |
 | `Device` vs `All` memory scope not distinguished | 9 | P2 |
 | Dispatch is sequential, not thread-pooled | 4 | P1 |
 | `feme-run`'s heap YAML has no `class`/`kind`/`stride`/`format` | 11 | P0 (see §2.4) |
-| A divergent branch inside a loop that `feme-cpu-linearize` diagnoses and leaves untouched can still reach the JIT unwidened instead of failing (roadmap milestone 6's `feme-cpu-simdize` divergent-branch check does not catch every such case), running forever rather than erroring; found by growing the differential harness to `--unstructured` shapes (R1, §2.3's differential harness note) | 6/7 | P0 |
 
-The scalarization item is P0 for the same reason the design calls
-restructurization the riskiest assumption: an unmasked lane in a scalarized
-atomic is not a crash, it is a silently wrong answer, and the differential
-harness cannot currently reach it (§2.3). The new divergent-branch-in-a-loop
-item is P0 for the same class of reason: a diagnostic that fails to fire is
-worse than one that fires too eagerly, because the caller has no signal that
-anything went wrong at all short of the dispatch never returning.
+R2 closed both of this table's former P0 rows: the scalarization fallback
+now masks a divergent `atomicrmw`'s per-lane execution (an unmasked lane in
+a scalarized atomic was not a crash, it was a silently wrong answer, which
+is why it was P0 -- see `feme::cpu::FunctionWidener::widenMaskedAtomicRMW`,
+`feme/test/Tools/feme-run/HLSL/histogram.hlsl`), and `feme::cpu::runPipeline`
+now fails outright, with the underlying diagnostic surfaced, the moment any
+CPU-pipeline pass (`feme::cpu::LinearizePass`/`SIMDizePass` in particular)
+reports one instead of silently continuing to a later pass or the JIT (see
+`feme::cpu::ErrorDiagnosticGuard` in Pipeline.cpp) -- investigating the
+"`feme-cpu-simdize` divergent-branch check does not catch every such case"
+symptom found that check itself (`FunctionWidener::checkSupportedControlFlow`)
+already correctly flags every shape `feme-cfg-gen --unstructured` produces
+that `feme::cpu::LinearizePass` leaves untouched (verified directly via
+`feme-opt -passes=feme-cpu-linearize,feme-cpu-simdize`); the actual gap was
+that neither pass's diagnostic ever stopped `runPipeline` from linking and
+JIT-dispatching the untouched, still-divergent function anyway.
 
 ### 1.7 Robustness
 
@@ -251,7 +258,14 @@ unless noted:
   divergent mask; exercises §1.3's flag-selected `WavePrefixOp` family.
 - **`histogram.hlsl`** — divergent atomics into a shared buffer. This is the
   scalarization fallback's only realistic workload, and the one that catches
-  §1.6's unmasked-lane P0.
+  §1.6's unmasked-lane P0 (done: a single groupshared counter a divergent
+  condition gates `InterlockedAdd` into, reading the atomic's own return
+  value rather than a separate reload -- a genuine multi-bucket histogram,
+  indexing a groupshared array by a divergent bucket, remains blocked on
+  §1.6's separate "Divergent groupshared access is diagnosed" row: Clang
+  itself folds an `if`/`else` each doing the same op on a different constant
+  address into a single `select`-of-pointer `atomicrmw`, the address-
+  divergent shape that narrowing already covers).
 - **`ballot.hlsl`** — `WaveActiveBallot` + `countbits`; gated on §1.3's
   aggregate-returning mechanism.
 - **`nested-divergence.hlsl`** — divergent loop containing a divergent
@@ -329,7 +343,7 @@ dependency column is the only ordering constraint.
 | # | Step | Covers | Depends on |
 |---|---|---|---|
 | R1 | Grow the differential harness to divergent/loop shapes; add the wave-size sweep (done: `--unstructured` stays `--reference`-only, see §1.6's new gap) | §2.2.1, §2.2.2, §2.4.1, §2.4.4 | — |
-| R2 | Mask the scalarization fallback's per-lane execution; add `histogram.hlsl`; make `feme-cpu-simdize` reject every shape `feme-cpu-linearize` left an unwidened divergent branch in, including one inside a loop (§1.6's new gap, found by R1) | §1.6 P0, §2.3 | R1 (harness catches regressions) |
+| R2 | Mask the scalarization fallback's per-lane execution; add `histogram.hlsl`; make `feme-cpu-simdize` reject every shape `feme-cpu-linearize` left an unwidened divergent branch in, including one inside a loop (§1.6's new gap, found by R1) (done: the divergent-branch gap turned out to be `feme::cpu::runPipeline` not propagating a pass diagnostic, not `feme-cpu-simdize`'s own check -- see §1.6's table) | §1.6 P0, §2.3 | R1 (harness catches regressions) |
 | R3 | Multi-return-value raising mechanism (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` | §1.3 P0 | — |
 | R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` | §1.3 P0 | — |
 | R5 | Barriers inside branches/loops; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` | §1.6, §2.3 | R4 (`Barrier` raising) |
