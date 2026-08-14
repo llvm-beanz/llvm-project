@@ -23,7 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R11?
+Can you implement roadmap step R12?
 
-> Thread-safety test; route library diagnostics through `Context`;
-> `FormatRegistry`; `Exporter` interface (see: §1.1)
+> Root constants; `WaveReadLaneAt` with a varying lane; vector/aggregate
+> decomposition (see: §1.6 P1)
