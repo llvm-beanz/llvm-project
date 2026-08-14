@@ -23,7 +23,6 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R5?
+Can you implement roadmap step R6?
 
-> Barriers inside branches/loops; values live across barriers; `reduction.hlsl`,
-> `multi-group-barrier.hlsl` (see: §1.6, §2.3)
+> DXBC importer fuzzer; `check-feme-fuzz` (see: §1.4 P0, §1.7 P0)
