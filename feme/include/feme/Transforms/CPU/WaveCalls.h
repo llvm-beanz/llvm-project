@@ -66,9 +66,14 @@ enum class WaveCallKind : uint8_t {
   All,
   /// `WaveActiveAllEqual`: `T` operand, uniform `i1` result.
   AllEqual,
-  /// `WaveReadLaneAt`: `T` operand plus an `i32` lane index (required
-  /// uniform across the wave, matching the HLSL source language rule),
-  /// uniform `T` result.
+  /// `WaveReadLaneAt`: `T` operand plus an `i32` lane index. HLSL requires
+  /// the index to be dynamically uniform, but nothing enforces that at
+  /// this level (SPIR-V's `OpGroupNonUniformShuffle`, which this also
+  /// lowers, explicitly permits a varying one) -- so the result is a
+  /// genuine per-lane `<W x T>` gather (see WaveLowering.cpp's
+  /// `lowerReadLane`), not a uniform broadcast. A uniform index is simply
+  /// the case where every lane's gather happens to read the same source
+  /// lane.
   ReadLane,
   /// `WaveActiveCountBits`/`WaveAllBitCount`: `i1` operand, uniform `i32`
   /// result.
@@ -116,12 +121,22 @@ enum class WaveCallKind : uint8_t {
   PrefixProduct,
 };
 
-/// Returns whether \p Kind's result is divergent (a genuine `<W x T>` value
-/// with a different answer per lane) rather than uniform (the same scalar
-/// answer broadcast to every lane) -- see each `WaveCallKind` enumerator's
-/// comment above. Only `IsFirstLane`, `PrefixBitCount`, `PrefixSum` and
-/// `PrefixProduct` are divergent, the same rows `feme::cpu::WaveTTIImpl`
+/// Returns whether \p Kind's result is unconditionally divergent (a genuine
+/// `<W x T>` value with a different answer per lane on *every* call of that
+/// kind) rather than uniform (the same scalar answer broadcast to every
+/// lane) -- see each `WaveCallKind` enumerator's comment above. Only
+/// `IsFirstLane`, `PrefixBitCount`, `PrefixSum` and `PrefixProduct` are
+/// unconditionally divergent, the same rows `feme::cpu::WaveTTIImpl`
 /// classifies `NeverUniform`.
+///
+/// `ReadLane` is deliberately not included even though its result type is
+/// always the wide `<W x T>` shape (see its own enumerator comment): unlike
+/// the rows above, whether a *specific* `ReadLane` call's result is
+/// genuinely divergent depends on that call's own operands (its lane index
+/// need not be uniform), matching `feme::cpu::WaveTTIImpl::
+/// getValueUniformity`'s `Default` classification for it -- so
+/// `feme::cpu::FunctionWidener::widenWaveCall` decides that case with the
+/// actual `UniformityInfo` result instead of this static per-`Kind` table.
 bool isDivergentWaveCallResult(WaveCallKind Kind);
 
 /// The result of successfully matching a call against the canonical

@@ -43,9 +43,14 @@ struct Harness {
 };
 
 TEST(WaveCallsTest, IsDivergentWaveCallResultMatchesDesignTable) {
-  // Only `IsFirstLane` and `PrefixBitCount` produce a genuinely per-lane
-  // result (see "Phase 5" in feme/docs/FeMeCPUDesign.md); every other kind
-  // reduces/broadcasts to the same scalar answer on every lane.
+  // Only `IsFirstLane` and `PrefixBitCount` are *unconditionally* per-lane
+  // (see "Phase 5" in feme/docs/FeMeCPUDesign.md); every other kind in this
+  // table reduces/broadcasts to the same scalar answer on every lane.
+  // `ReadLane` is excluded even though its own type is always the wide
+  // shape (see `ReadLaneRoundTrips` below): its actual per-call divergence
+  // is operand-dependent, decided by `FunctionWidener::widenWaveCall`'s own
+  // `UniformityInfo` query, not this static table (see
+  // `isDivergentWaveCallResult`'s comment).
   EXPECT_TRUE(isDivergentWaveCallResult(WaveCallKind::IsFirstLane));
   EXPECT_TRUE(isDivergentWaveCallResult(WaveCallKind::PrefixBitCount));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::GetLaneCount));
@@ -134,7 +139,12 @@ TEST(WaveCallsTest, ReadLaneCarriesLaneIndexOperand) {
       ElementCount::getFixed(4), ConstantInt::get(Type::getInt32Ty(H.Ctx), 0));
   CallInst *CI = createWaveCall(H.Builder, WaveCallKind::ReadLane, 4, H.Mask,
                                 Operand, LaneIndex);
-  EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+  // Always a genuine `<W x T>` result, even for this uniform-lane-index
+  // instance -- see `WaveCallKind::ReadLane`'s comment: a varying lane
+  // index (not exercised by this constant-splat instance) needs the same
+  // shape, and `FunctionWidener::widenWaveCall` is what narrows a uniform
+  // call's result back to a scalar for its callers.
+  EXPECT_EQ(CI->getType(), FixedVectorType::get(Type::getInt32Ty(H.Ctx), 4));
 
   std::optional<MatchedWaveCall> Matched = matchWaveCall(*CI);
   ASSERT_TRUE(Matched);

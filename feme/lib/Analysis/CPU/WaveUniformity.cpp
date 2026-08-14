@@ -69,11 +69,25 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   case Intrinsic::spv_wave_prefix_product:
     return ValueUniformity::NeverUniform;
 
-  // `WaveActive*` reductions and `WaveReadLaneAt` (which broadcasts a single
-  // lane's value to the whole wave) are defined to reduce over exactly the
-  // `W` lanes of the wave, honouring the active mask -- see "Wave size
-  // semantics" in feme/docs/FeMeCPUDesign.md -- so their result is by
-  // definition the same on every lane.
+  // `WaveActive*` reductions and DXIL's `WaveReadLaneAt` are defined to
+  // reduce/broadcast over exactly the `W` lanes of the wave, honouring the
+  // active mask -- see "Wave size semantics" in feme/docs/FeMeCPUDesign.md
+  // -- so their result is by definition the same on every lane. HLSL's
+  // language rule requires `WaveReadLaneAt`'s lane-index operand to be
+  // dynamically uniform, so `dx_wave_readlane` keeps this classification
+  // regardless of its *value* operand's own divergence (the common case:
+  // reading one, uniformly-selected lane's otherwise-divergent data and
+  // broadcasting it is itself a uniform result, e.g. `combined.hlsl`'s
+  // `WaveReadLaneAt(sum, 0)` where `sum` is a divergent per-lane
+  // accumulation). `spv_wave_readlane` is deliberately excluded: SPIR-V's
+  // broader `OpGroupNonUniformShuffle` semantics permit a genuinely varying
+  // index, in which case the result differs per lane (see
+  // `WaveCallKind::ReadLane`'s comment in WaveCalls.h) -- it is left at
+  // `Default`, so the generic operand-divergence rule applies instead
+  // (conservative: divergent whenever either operand is, including a
+  // divergent value read through a uniform index, which is stricter than
+  // necessary but never unsound).
+  case Intrinsic::dx_wave_readlane:
   case Intrinsic::dx_wave_get_lane_count:
   case Intrinsic::spv_wave_get_lane_count:
   case Intrinsic::dx_wave_any:
@@ -84,8 +98,6 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   case Intrinsic::spv_wave_all_equal:
   case Intrinsic::dx_wave_active_countbits:
   case Intrinsic::spv_wave_active_countbits:
-  case Intrinsic::dx_wave_readlane:
-  case Intrinsic::spv_wave_readlane:
   case Intrinsic::dx_wave_reduce_or:
   case Intrinsic::spv_wave_reduce_or:
   case Intrinsic::dx_wave_reduce_xor:

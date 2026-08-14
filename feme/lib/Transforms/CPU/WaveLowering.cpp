@@ -36,9 +36,10 @@
 //   Any / All        -> `reduce.or(M & X)` / `reduce.and(select(M, X, true))`
 //   AllEqual         -> broadcast of the first active lane, `icmp eq` against
 //                       `X` under `M` (vacuously true where `M` is all-zero)
-//   ReadLane(X, i)   -> guarded extract of lane `i` (required uniform, per
-//                       the HLSL source rule -- see WaveCalls.h), zero if
-//                       that lane is inactive
+//   ReadLane(X, I)   -> per-lane guarded extract: lane `L`'s result is
+//                       `X[I[L]]` if lane `I[L]` is active, else zero --
+//                       a genuine gather, since `I` is not required uniform
+//                       (see WaveCalls.h)
 //   ActiveCountBits  -> `ctpop(bitcast (M & X) to iW)`
 //   PrefixBitCount   -> exclusive running `ctpop`-style count of `M & X`,
 //                       lane by lane (the "lane loop for large W" option --
@@ -276,22 +277,33 @@ Value *lowerAllEqual(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
   return Builder.CreateAndReduce(Selected);
 }
 
-/// `wave.readlane(X, i)`: a guarded extract of lane `i`'s value, zero if
-/// that lane is inactive (see "No lowering may create poison merely because
-/// `M` is all-zero" and the "read from an inactive ... lane" rule in "Phase
-/// 5"). `i` is required uniform across the wave by the HLSL source
-/// language, so lane 0 of the (already-widened, hence necessarily
-/// broadcast) index operand is as good a representative as any other lane
-/// -- see WaveCalls.h's `ReadLane` documentation for the narrowing this
-/// implies (a genuinely varying `i`, which only SPIR-V's broader
-/// `OpGroupNonUniformShuffle` semantics would permit, is not handled).
+/// `wave.readlane(X, I)`: a genuine per-lane gather, not a uniform extract
+/// -- `I` is not required uniform across the wave (see WaveCalls.h's
+/// `ReadLane` documentation), so output lane `L` independently reads
+/// source lane `I[L]`'s value, guarded the same way a uniform read would
+/// be: zero if that source lane is inactive (see "No lowering may create
+/// poison merely because `M` is all-zero" and the "read from an inactive
+/// ... lane" rule in "Phase 5"). Built as an explicit lane loop -- the same
+/// "lane loop for large W" option `lowerPrefixBitCount`/`lowerPrefixReduce`
+/// use -- since each output lane's dynamic (not necessarily equal) source
+/// index rules out a single vectorized `shufflevector`. A uniform `I` (the
+/// common HLSL case) still produces the correct answer: every iteration
+/// simply reads the same source lane.
 Value *lowerReadLane(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
-                     Value *WideLaneIndex) {
-  Value *LaneIdx = Builder.CreateExtractElement(WideLaneIndex, uint64_t{0});
-  Value *LaneActive = Builder.CreateExtractElement(WideMask, LaneIdx);
-  Value *RawVal = Builder.CreateExtractElement(WideOperand, LaneIdx);
-  Value *Zero = Constant::getNullValue(RawVal->getType());
-  return Builder.CreateSelect(LaneActive, RawVal, Zero);
+                     Value *WideLaneIndex, unsigned WaveSize) {
+  Type *ElemTy = cast<VectorType>(WideOperand->getType())->getElementType();
+  Value *Zero = Constant::getNullValue(ElemTy);
+  Value *Result = PoisonValue::get(FixedVectorType::get(ElemTy, WaveSize));
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *SrcIdx =
+        Builder.CreateExtractElement(WideLaneIndex, Builder.getInt32(Lane));
+    Value *LaneActive = Builder.CreateExtractElement(WideMask, SrcIdx);
+    Value *RawVal = Builder.CreateExtractElement(WideOperand, SrcIdx);
+    Value *Selected = Builder.CreateSelect(LaneActive, RawVal, Zero);
+    Result =
+        Builder.CreateInsertElement(Result, Selected, Builder.getInt32(Lane));
+  }
+  return Result;
 }
 
 /// `wave.active.countbits`: `ctpop(bitcast (M & X) to iW)`.
@@ -514,7 +526,7 @@ void lowerWaveCall(const MatchedWaveCall &Matched) {
     break;
   case WaveCallKind::ReadLane:
     Result = lowerReadLane(Builder, Matched.WideMask, Matched.WideOperand,
-                           Matched.WideLaneIndex);
+                           Matched.WideLaneIndex, W);
     break;
   case WaveCallKind::ActiveCountBits:
     Result =

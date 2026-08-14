@@ -655,14 +655,35 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   CallInst *NewCall = createWaveCall(Builder, Kind, WaveSize, WideMask,
                                      WideOperand, WideLaneIndex, CI.getName());
 
-  // A divergent result (`IsFirstLane`/`PrefixBitCount`, see
-  // `isDivergentWaveCallResult`) is itself widened, exactly like a builtin
-  // or resource-call result; a uniform one stands in directly for the old
-  // scalar call the same way `widenMaskAny` RAUWs its reduction.
-  if (isDivergentWaveCallResult(Kind))
+  // A divergent result (`IsFirstLane`/`PrefixBitCount`/`PrefixSum`/
+  // `PrefixProduct`, see `isDivergentWaveCallResult`) is itself widened,
+  // exactly like a builtin or resource-call result; a uniform one stands
+  // in directly for the old scalar call the same way `widenMaskAny` RAUWs
+  // its reduction.
+  //
+  // `ReadLane` is neither unconditionally: unlike the other rows in that
+  // table, its actual divergence depends on its specific operands (its
+  // lane index need not be uniform, see `WaveCallKind::ReadLane`'s
+  // comment), so `feme::cpu::WaveTTIImpl` leaves it at the generic
+  // operand-divergence rule rather than a fixed classification -- this
+  // call's own `UI.isDivergentAtDef` result is what actually decides,
+  // not a static per-`Kind` table entry. `createWaveCall` always builds a
+  // genuinely wide `<W x T>` result for `ReadLane` (the lowering needs
+  // that shape regardless), so the uniform case still needs one lane
+  // extracted back to the scalar type `CI`'s existing (uniform) users
+  // expect.
+  bool ResultDivergent = Kind == WaveCallKind::ReadLane
+                             ? UI.isDivergentAtDef(&CI)
+                             : isDivergentWaveCallResult(Kind);
+  if (ResultDivergent) {
     Widened[&CI] = NewCall;
-  else
+  } else if (Kind == WaveCallKind::ReadLane) {
+    Value *Scalar = Builder.CreateExtractElement(NewCall, uint64_t{0});
+    Scalar->takeName(&CI);
+    CI.replaceAllUsesWith(Scalar);
+  } else {
     CI.replaceAllUsesWith(NewCall);
+  }
   ToErase.push_back(&CI);
 }
 

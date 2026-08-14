@@ -233,7 +233,11 @@ CallInst *createWaveCall(IRBuilderBase &Builder, WaveCallKind Kind,
     RetTy = I1Ty;
     break;
   case WaveCallKind::ReadLane:
-    RetTy = ElementType;
+    // A genuine per-lane `<W x T>` gather, not a uniform broadcast: the
+    // lane index is not required to be uniform across the wave (see
+    // `WaveCallKind::ReadLane`'s comment), so each output lane may read a
+    // different source lane.
+    RetTy = FixedVectorType::get(ElementType, WaveSize);
     break;
   case WaveCallKind::PrefixBitCount:
     RetTy = FixedVectorType::get(I32Ty, WaveSize);
