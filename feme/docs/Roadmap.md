@@ -112,12 +112,19 @@ DXIL import is the most complete path, and its gaps are enumerable.
   (`test/Target/DXSA`, `test/Translate/DXBC`), but no end-to-end DXBC
   invocation exists — which is Design.md milestone 8 ("DXBC → DXIL end to
   end") in its entirety, and it is mostly *wiring*, not new translation.
-- **P0 — DXBC importer fuzzer.** Design.md's Testing Strategy makes "a
-  fuzzing harness lands alongside each importer" a v1 requirement, and DXBC
-  is the one importer without one (`dxbc-as-fuzzer` fuzzes the assembler's
-  text parser, not `BinaryParser`'s binary one). `BinaryParser.cpp` is ~3800
-  lines of hand-written token decoding over untrusted input; it is the
-  highest-risk unfuzzed surface in the tree.
+- **P0 — DXBC importer fuzzer (done by R6).** Design.md's Testing Strategy
+  makes "a fuzzing harness lands alongside each importer" a v1 requirement,
+  and DXBC was the one importer without one (`dxbc-as-fuzzer` fuzzes the
+  assembler's text parser, not `BinaryParser`'s binary one).
+  `feme-dxbc-import-fuzzer` (`feme/tools/feme-dxbc-import-fuzzer`) now
+  fuzzes `feme::dxsa::deserialize` directly, and immediately found a real
+  crash: a malformed `l`/`d` immediate source operand whose decoded
+  component count didn't match its payload hit an unchecked
+  `SrcOperandAttr::get` builder call and asserted instead of surfacing a
+  diagnostic; `BinaryParser.cpp` now builds it with `getChecked`, falling
+  back to the existing `dxsa.unknown` diagnostic path like every other
+  malformed-operand case (see
+  `test/Target/DXSA/src_operand_immediate_zero_components_invalid.dxasm`).
 - **P1 — `BinaryWriter` (`feme::dxsa::serialize`)** is still the
   unimplemented stub inherited from the prototype, and is the hard
   prerequisite for real DXBC *export*.
@@ -192,15 +199,19 @@ JIT-dispatching the untouched, still-divergent function anyway.
 
 ### 1.7 Robustness
 
-- **P0 — the fuzzers do not run anywhere.** Three libFuzzer targets exist
-  (`feme-dxil-import-fuzzer`, `feme-spirv-import-fuzzer`, `dxbc-as-fuzzer`)
-  plus `feme-cpu-restructure-fuzzer`; Design.md says they are "run in CI
-  alongside the `lit`/`gtest` suites". Nothing runs them — none of the four
-  is even in `FEME_TEST_DEPENDS` (`test/CMakeLists.txt`), so `check-feme`
-  does not build them and a fuzzer that stops compiling would go unnoticed.
-  A bounded (`-runs=N`, seed-corpus-only) `check-feme-fuzz` target that each
-  fuzzer registers with would make that claim true for a few seconds of test
-  time; adding them to `FEME_TEST_DEPENDS` closes the build half on its own.
+- **P0 — the fuzzers do not run anywhere (done by R6).** Five libFuzzer
+  targets now exist (`feme-dxil-import-fuzzer`, `feme-dxbc-import-fuzzer`,
+  `feme-spirv-import-fuzzer`, `dxbc-as-fuzzer`,
+  `feme-cpu-restructure-fuzzer`); all five are in `FEME_TEST_DEPENDS`
+  (`test/CMakeLists.txt`), so `ninja check-feme` builds every one, and a
+  new `check-feme-fuzz` CMake target (driven by
+  `feme/utils/check-feme-fuzz.py`) runs each fuzzer for a bounded number of
+  iterations (`-runs=N`/`-max_total_time=N`) over its own checked-in seed
+  corpus. Wiring the build half up alone was enough to catch a real,
+  already-landed regression: `dxbc-as-fuzzer.cpp` had bit-rotted against a
+  `wrapInContainer` signature change (a `Signatures` parameter added by a
+  later commit) and no longer compiled, unnoticed because nothing built it
+  — exactly the failure mode this item warned about.
 - **P1 — sanitizer coverage.** The one previously-recorded crash class in
   this tree (see `agent_thoughts.md`) was a UB/null-deref bug found by hand;
   an ASan/UBSan `check-feme` configuration is the systematic version.
@@ -348,8 +359,11 @@ is small enough to land on its own:
 5. **An AOT lit recipe.** `feme --target=<host-triple>` + a tiny loader
    (either a `feme-run --object` mode or a test-only C driver) so AOT is
    covered by `lit`, not only by `gtest`.
-6. **`check-feme-fuzz`.** Per §1.7: bounded runs over the checked-in seed
-   corpora, wired as a dependency of nothing by default but runnable in CI.
+6. **`check-feme-fuzz` (done by R6).** Per §1.7: bounded (`-runs=N`,
+   seed-corpus-only) runs of every fuzz target, wired as a dependency of
+   nothing by default (`ninja check-feme-fuzz` runs it explicitly) but with
+   every fuzz target added to `FEME_TEST_DEPENDS` so `ninja check-feme`
+   still builds all of them.
 
 ### 2.5 Corpus discipline
 
@@ -376,7 +390,7 @@ dependency column is the only ordering constraint.
 | R3 | Multi-return-value raising mechanism (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` (done: `feme::dxil::OpRaisingPass::raiseAggregateCall` raises all five; `feme::cpu::WaveCallKind::Ballot`/`lowerBallot` lower `WaveActiveBallot` on the CPU target) | §1.3 P0 | — |
 | R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` (done: `feme::dxil::OpRaisingPass` raises all four remaining families; `feme::cpu::WaveLoweringPass` lowers every one of them except `QuadOp`, which stays raised-only pending the quad/derivative lane mapping FeMeCPUDesign.md's "Non-Goals" defers) | §1.3 P0 | — |
 | R5 | Barriers inside a uniform loop; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` (done: `feme::cpu::matchLoopShape`/`buildWrapperForLoop` split a barrier inside a header-tested uniform loop by cloning its header/latch into the wrapper as an ordinary scalar loop; `feme::cpu::spillValuesLiveAcrossBarriers` spills any value live across a barrier into a per-wave context array; a barrier inside a *branch* remains diagnosed, and a divergent groupshared access -- including a masked store at a uniform address, found writing `reduction.hlsl` -- remains a separate, still-open narrowing, see §1.6) | §1.6, §2.3 | R4 (`Barrier` raising) |
-| R6 | DXBC importer fuzzer; `check-feme-fuzz` | §1.4 P0, §1.7 P0 | — |
+| R6 | DXBC importer fuzzer; `check-feme-fuzz` (done: `feme-dxbc-import-fuzzer` fuzzes `feme::dxsa::deserialize` directly and found/fixed a real `SrcOperandAttr` builder assertion on a malformed immediate operand; `check-feme-fuzz` runs all five fuzz targets, seed-corpus-only, and found/fixed a bit-rotted `dxbc-as-fuzzer` call site broken by an unrelated `wrapInContainer` signature change) | §1.4 P0, §1.7 P0 | — |
 | R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end | §1.4 P0, §2.2.8 | — |
 | R8 | Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe | §2.4.3, §2.4.5, §2.2.4 | — |
 | R9 | `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants) | §1.2 P0 | — |

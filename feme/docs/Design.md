@@ -1921,12 +1921,27 @@ feme/
   untrusted sources at driver runtime, fuzzing the `Importer`s is a **v1
   requirement, not a fast-follow**: an `llvm-fuzzer`-style harness lands
   alongside each importer as it's implemented (SPIR-V, DXIL, DXBC), matching
-  how other LLVM binary-format parsers are fuzzed, and is run in CI
-  alongside the `lit`/`gtest` suites. `dxbc-as-fuzzer` (see the "dxbc-as"
-  section above) is this requirement's DXBC-adjacent counterpart landing
-  ahead of the DXBC `Importer` itself: since `dxbc-as` exists to make DXBC
-  test inputs easy to hand-author (and therefore fuzz), its own text parser
-  needs the same crash-freedom guarantee a binary importer would.
+  how other LLVM binary-format parsers are fuzzed. `dxbc-as-fuzzer` (see the
+  "dxbc-as" section above) is this requirement's DXBC-adjacent counterpart
+  landing ahead of the DXBC `Importer` itself: since `dxbc-as` exists to
+  make DXBC test inputs easy to hand-author (and therefore fuzz), its own
+  text parser needs the same crash-freedom guarantee a binary importer
+  would.
+- Every fuzz target -- `feme-dxil-import-fuzzer`, `feme-spirv-import-fuzzer`,
+  `feme-dxbc-import-fuzzer`, `dxbc-as-fuzzer`, and
+  `feme-cpu-restructure-fuzzer` -- is exercised by `ninja check-feme-fuzz`
+  (Roadmap step R6), a bounded (`-runs=N`/`-max_total_time=N`), seed-corpus-
+  only run added as its own CMake target (`feme/test/CMakeLists.txt`) once
+  the fourth fuzzer (DXBC's) existed, so the "run in CI alongside the
+  `lit`/`gtest` suites" claim above is actually checked: every fuzz target
+  is also added to `FEME_TEST_DEPENDS`, so `ninja check-feme` builds all of
+  them even without running `check-feme-fuzz` itself, catching a fuzzer
+  that stops compiling. Wiring this up immediately caught two real,
+  previously-undetected bugs -- a bit-rotted `dxbc-as-fuzzer` call site (a
+  `wrapInContainer` signature change had gone unnoticed because nothing
+  built it) and a `feme-dxbc-import-fuzzer` crash on its first run (see
+  DXBC import's Status note above) -- exactly the class of regression this
+  target exists to catch.
 - Deviation: `feme::dxil::OpRaisingPass` (see the DXIL section above) has no
   `gtest` coverage at all, by design rather than omission: unlike an
   `Importer`/`Translator`/`Backend`, its input and output are both plain
@@ -2076,11 +2091,21 @@ end-to-end test coverage that should grow alongside it, see
    Status: the `dxsa` dialect and `BinaryParser` migration itself is done
    (see "Status" under the DXBC dialect section above for what moved and
    what's still open: `BinaryWriter`, further `dxbc-as` opcode coverage,
-   and opcode coverage beyond what the migrated prototype already had). A
-   fuzzing harness for the DXBC importer (distinct from the existing
-   `dxbc-as-fuzzer`, which fuzzes the assembler direction) has not been
-   added yet. The DXIL-flavored-LLVM-IR conversion pass (step 8) has not
-   been started.
+   and opcode coverage beyond what the migrated prototype already had).
+   Roadmap step R6 added the fuzzing harness for the DXBC importer
+   (`feme-dxbc-import-fuzzer`, distinct from the existing `dxbc-as-fuzzer`,
+   which fuzzes the assembler direction; see
+   [docs/CommandGuide/feme-dxbc-import-fuzzer.md](CommandGuide/feme-dxbc-import-fuzzer.md)),
+   which immediately found and fixed a real crash: a malformed but
+   otherwise well-formed-looking `l`/`d` immediate source operand token
+   (a recognized operand type whose decoded component count doesn't match
+   its payload) hit an unchecked `SrcOperandAttr::get` builder call and
+   asserted instead of surfacing a diagnostic; `BinaryParser.cpp` now
+   builds it with `getChecked` and falls back to the `dxsa.unknown`
+   diagnostic path like every other malformed-operand case (see
+   `test/Target/DXSA/src_operand_immediate_zero_components_invalid.dxasm`).
+   The DXIL-flavored-LLVM-IR conversion pass (step 8) has not been
+   started.
 8. **DXBC → DXIL translation** end to end.
 9. **AMDGPU/NVPTX/AArch64 retargeting** via direct `llvm::Module` →
    `TargetMachine`. MLIR `gpu`-dialect-based retargeting is deferred until a
