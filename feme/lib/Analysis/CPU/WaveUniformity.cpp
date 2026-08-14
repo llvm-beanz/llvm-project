@@ -109,6 +109,31 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   case Intrinsic::dx_wave_ballot:
     return ValueUniformity::AlwaysUniform;
 
+  // A group-sync/memory barrier (`feme::cpu::matchBarrierCall`,
+  // Transforms/CPU/BarrierCalls.h) is, by the source languages' own rule,
+  // only ever reached by every invocation in the group or by none --
+  // reaching one from divergent control flow is undefined behaviour in
+  // both DXIL and SPIR-V. Its own call site is therefore always uniform
+  // regardless of which (reconverged) block it sits in, which is what
+  // roadmap step R5's "barrier inside a uniform loop" case needs: a
+  // barrier immediately following a divergent `if`'s join point (a common
+  // reduction-loop shape) must not be scalarized as though it were itself
+  // divergent (`feme::cpu::FunctionWidener::widenScalarizedFallback` would
+  // otherwise try to name-and-widen a `void`-typed call and assert).
+  case Intrinsic::dx_group_memory_barrier:
+  case Intrinsic::spv_group_memory_barrier:
+  case Intrinsic::dx_group_memory_barrier_with_group_sync:
+  case Intrinsic::spv_group_memory_barrier_with_group_sync:
+  case Intrinsic::dx_device_memory_barrier:
+  case Intrinsic::spv_device_memory_barrier:
+  case Intrinsic::dx_device_memory_barrier_with_group_sync:
+  case Intrinsic::spv_device_memory_barrier_with_group_sync:
+  case Intrinsic::dx_all_memory_barrier:
+  case Intrinsic::spv_all_memory_barrier:
+  case Intrinsic::dx_all_memory_barrier_with_group_sync:
+  case Intrinsic::spv_all_memory_barrier_with_group_sync:
+    return ValueUniformity::AlwaysUniform;
+
   default:
     return ValueUniformity::Default;
   }
