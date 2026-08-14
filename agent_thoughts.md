@@ -11429,3 +11429,230 @@ corpora. Commit breakdown for this entry:
 4. `[feme] test: add check-feme-fuzz target`.
 5. `[feme] docs: record roadmap step R6 completion`.
 6. This file.
+
+# Agent thoughts: FeMe roadmap step R7 (DXBC through Driver/feme/feme-translate)
+
+## Task
+
+Implement roadmap step R7: "DXBC through `Driver`/`feme`/`feme-translate` —
+Design.md milestone 8 end to end (see: §1.4 P0, §2.2.8)". Roadmap.md's own
+framing: `detectFormat` only knows "dxil"/"spirv"; the `dxsa` dialect,
+`BinaryParser`, and `translateToLLVMIR` all already exist and are
+heavily lit-tested in isolation, but no end-to-end DXBC invocation exists
+through the full CLI tools. Called "mostly wiring, not new translation".
+
+## Investigation
+
+Read Design.md's Pipeline Abstraction (`Importer`/`Translator`/`Exporter`/
+`Backend`/`Driver`), the DXBC section, and the Translation Matrix's DXBC row
+to understand what already exists:
+
+- `feme::dxsa::deserialize` (`lib/Target/DXSA/BinaryParser.cpp`) parses raw
+  tokenized DXBC bytecode into the `dxsa` dialect. Already reachable via
+  `feme-translate --import-dxsa-bin`.
+- `feme::dxsa::translateToLLVMIR` (`lib/Translate/DXSA/
+  DXSAToLLVMIRTranslator.cpp`) translates a `dxsa.module` (nested inside a
+  builtin `mlir::ModuleOp`, matching mlir-translate's calling convention)
+  into DXIL-shaped LLVM IR (`dx.op.*` calls, `!dx.*` metadata). Already
+  reachable via `feme-translate --dxsa-to-llvmir`.
+- What was genuinely missing: an `Importer` for a *full DXContainer*
+  wrapping DXBC's `SHEX`/`SHDR` part (unlike DXIL's `DXContainer`, this had
+  no importer at all -- only the bare-bytecode `--import-dxsa-bin` path
+  existed), and any way for `feme::Driver` to reach either the importer or
+  the translator, since `detectFormat`/the local `translateToLLVMIR` helper
+  in `Driver.cpp` were both hard-coded to "dxil"/"spirv".
+
+Key design realization: a legacy DXBC `DXContainer` and a modern DXIL one
+share the exact same "DXBC" magic (the container format predates the DXIL
+name) -- `detectFormat` cannot tell them apart from the first four bytes
+alone the way it tells DXIL/SPIR-V apart. Telling them apart needs an
+actual peek at which part the container carries: `SHEX`/`SHDR` (DXBC,
+`object::DXContainer` doesn't model these structurally, they're
+`PartType::Unknown`, found only by iterating and matching part names) vs.
+`DXIL`/`ILDB` (DXIL, which `object::DXContainer::create` already parses
+into an optional field).
+
+## Design
+
+1. `feme::DXBCImporter` (new, `lib/Import/DXBC`): parses a `DXContainer`,
+   locates its `SHEX`/`SHDR` part, feeds the raw bytes to
+   `feme::dxsa::deserialize`, and wraps the resulting (bare, not nested in
+   a builtin module) `dxsa::ModuleOp` as a `feme::Module`. Registered with
+   `feme-translate` as `--import-dxbc`, mirroring `SPIRVImporter`'s
+   registration pattern (`TranslateToMLIRRegistration`, dialect inserted
+   into the passed-in registry).
+2. `feme::dxsa::DXSAToLLVMIRTranslator` (new): a thin `feme::Translator`
+   subclass wrapping the existing `translateToLLVMIR` free function, so
+   `feme::Driver` can dispatch to it exactly like `SPIRVToLLVMTranslator`.
+   Has to bridge one representation mismatch: `translateToLLVMIR` expects
+   its `dxsa.module` nested inside a builtin `mlir::ModuleOp` (matching
+   mlir-translate's textual round trip), but `DXBCImporter` hands back the
+   bare `dxsa::ModuleOp` with no such wrapper -- so the wrapper builds a
+   throwaway outer module and pushes the (detached) op into it first,
+   mirroring `SPIRVToLLVMDialectTranslator`'s own "Outer" module trick.
+3. `Driver.cpp`: `detectFormat` peeks inside a "DXBC"-magic buffer's parts
+   to choose `DXILImporter` vs `DXBCImporter`; the local `translateToLLVMIR`
+   helper takes the detected format name and dispatches to
+   `DXSAToLLVMIRTranslator` for "dxbc"; the `OpRaisingPass`/
+   `MetadataRaisingPass` gate (previously `dxil`-only) now also covers
+   `dxbc`, since `translateToLLVMIR` deliberately targets DXIL's own
+   lowered `dx.op.*` calling convention directly (not idiomatic LLVM IR),
+   so a DXBC-derived module needs exactly the same raising a real DXIL one
+   does before any target (DXIL included) can consume it.
+4. `feme-translate.cpp`: register `--import-dxbc`, replacing the stale
+   `TODO` comment.
+
+## A naming collision worth recording
+
+First attempt: add the `Translator`-interface wrapper class directly into
+the existing `DXSAToLLVMIRTranslator.h`/`.cpp` (which already declares the
+free function of (almost) the same name). This failed to compile:
+`DXSAToLLVMIRTranslator.cpp` has its own **file-local** `class Translator`
+(the actual per-shader translation state machine, in an anonymous namespace
+at file scope) that predates this change. Once the new code
+`#include`d `feme/Translate/Translator.h` and used `feme::Translator`, the
+file's existing `using namespace feme;` (needed for other unqualified uses
+throughout that file) made `feme::Translator` visible unqualified *closer*
+in the lookup chain (namespace `feme` itself) than the file-local
+`(anonymous namespace)::Translator` (only visible via the outer global
+namespace) -- so `Translator T(Context, Source, ...)` at the free
+function's end silently started resolving to the wrong (abstract, pure
+virtual) class instead of the file's own concrete one, and failed to
+compile as "abstract class". Explicitly qualifying with `::Translator`
+didn't help either: the `using namespace feme;` using-directive injects
+`feme::Translator` into the *global* namespace's lookup too, so `::Translator`
+was reported ambiguous between both candidates.
+
+Fix: moved the new `Translator`-interface wrapper class into its own
+translation unit (`DXSATranslator.h`/`.cpp`), which never sees the
+file-local `Translator` class from `DXSAToLLVMIRTranslator.cpp` at all,
+sidestepping the whole issue rather than trying to rename either class.
+
+## The empty-container crash: a real `llvm::object::DXContainer` bug
+
+Writing the "rejects a DXContainer with no shader bytecode part" test (both
+for `DXBCImporterTest` and `DriverTest`, mirroring `DXILImporterTest`'s
+existing "no DXIL part" case) hit a real crash, not a clean `Expected`
+failure: `llvm::object::DXContainer::PartIterator`'s constructor
+unconditionally reads `PartOffsets.back()` whenever `begin() == end()`
+(its documented "point past the last part" sentinel state), which is
+exactly the state a *zero-part* container's `begin()` starts in --
+`PartOffsets` is empty, so `.back()` asserts. `DXILImporterTest`'s existing
+equivalent test never hit this because `DXILImporter` only ever consults
+`DXContainer::getDXIL()` (populated during `create()`, no iteration), while
+`DXBCImporter` is the first FeMe code to actually range-for over
+`DXContainer`'s parts. This is a genuine upstream `llvm/lib/Object`
+bug/gap, out of scope to fix here (would need its own investigation +
+tests under `llvm/unittests/Object`); worked around defensively in both
+`DXBCImporter::getShaderBytecode` and `Driver.cpp`'s `detectFormat` by
+checking `Container.getHeader().PartCount != 0` before iterating.
+
+## The real bug this end-to-end path exposed: UAV `!dx.resources` shape
+
+Manually validating the new pipeline end to end (`dxbc-as --emit=container`
+→ `feme --target=dxil`) with a real compute shader hit
+`DXILShaderFlags.cpp`'s `"DXIL Shader Flag analysis should not be run
+post-lowering"` assertion -- meaning `feme::dxil::OpRaisingPass` had failed
+to raise something. Two false leads before finding the real bug:
+
+1. First test shader used `ld_raw`/`store_raw` (unstructured raw buffer):
+   translates to `dx.op.bufferLoad`/`bufferStore` (68/69) on a `RawBuffer`
+   handle, which `OpRaisingPass`'s legacy-`createHandle` raising genuinely
+   does not cover yet (only `dx.op.rawBufferLoad`/`rawBufferStore`,
+   139/140, handle `RawBuffer`; 68/69 only raises for `TypedBuffer`). This
+   is Roadmap.md §1.3's already-tracked "remaining resource access ops"
+   gap, not something in this step's scope -- switched the test fixture to
+   a typed UAV (`dcl_uav_typed_buffer`/`ld_uav_typed`/`store_uav_typed`)
+   instead, which *is* covered by `raiseTypedBufferLoad`/`Store`.
+2. Still failed with the typed UAV. Isolated with `feme-opt -passes=
+   feme-dxil-raise-ops` (the same tool `test/Transforms/DXIL` uses) to find
+   that `dx.op.createHandle` itself was never raised -- meaning
+   `feme::dxil::ResourceMetadata::lookup` never found the binding.
+   Comparing `feme::dxil::ResourceMetadata::readEntry`'s hard-coded
+   `UAVOperands = 11` against what `DXSAToLLVMIRTranslator::
+   emitResourceBindings` actually emitted (9 operands, identical to the SRV
+   case) found the real bug: DXIL's real `!dx.resources` UAV entry format
+   (per `llvm::dxil::ResourceInfo::write` in
+   `llvm/lib/Analysis/DXILResource.cpp`) has three extra `i1` fields after
+   the resource kind (globally-coherent, has-counter, rasterizer-ordered)
+   that an SRV's entry doesn't -- `emitResourceBindings` never emitted
+   them for UAVs. A 9-operand UAV entry parses as nothing at all
+   (`readEntry` rejects on operand-count mismatch), so *any* DXBC shader
+   using a UAV -- i.e. virtually every interesting compute shader -- could
+   never have its handle raised, a bug invisible until now because no
+   existing `test/Translate/DXBC/*.dxasm` test's `CHECK` lines reach as far
+   as the trailing metadata (they all stop at the instruction stream).
+   Fixed by emitting the three flags (conservatively `false`, since
+   `dxsa`'s `dcl_uav_*` access-flag modifiers aren't read into `Resource`
+   yet -- a separate, narrower, still-open gap noted in Design.md and
+   Roadmap.md rather than fixed here, since every currently-translatable
+   shader would get `false` for all three anyway). Added a direct gtest
+   (`DXSAToLLVMIRTranslatorTest.UAVResourceMetadataHasTheUAVOnlyFields`)
+   pinning down the fixed shape, on top of the new end-to-end lit coverage
+   that found it.
+
+Treated this as in-scope to fix (not just document) per the "bugs directly
+caused by or tightly coupled to the code you're changing" guidance: R7's
+whole point is an actually-working end-to-end round trip, and this bug
+made that impossible for any realistic (UAV-using) shader.
+
+## Test fixture choice: why a compute shader with only a typed UAV
+
+The full `feme --target=dxil` round trip (`test/Tools/feme/
+feme-dxbc-to-dxil.dxasm`) deliberately avoids any signature I/O
+(vertex/pixel `v#`/`o#` registers): those translate to `dx.op.loadInput`/
+`storeOutput`, which *nothing* raises back to an idiomatic intrinsic yet --
+not `feme::dxil::OpRaisingPass` (no case for either op at all), and not
+LLVM's DirectX target itself (no `DXILOpLowering` entry produces them from
+any modern intrinsic; modern DXC/Clang HLSL codegen for graphics stages
+doesn't reach this op pair at all in-tree today). This is the identical
+shape restriction `feme-dxil-to-dxil.ll` (the existing DXIL→DXIL round trip
+test) already lives under, for the same underlying reason -- documented in
+the new test's own header comment and in `feme.md`'s "Current limitations"
+so it isn't rediscovered as a surprise.
+
+## Documentation updates
+
+- Design.md: `Status: feme::Driver` section now describes three detected
+  formats and the DXBC raising step; DXBC dialect section gained a status
+  paragraph for `DXBCImporter`; `translateToLLVMIR` status section gained
+  the `NumThreads` gap note and the UAV-metadata-bug writeup; milestone 8
+  gained its own `Status:` paragraph (was previously the one milestone in
+  the Roadmap with none at all).
+- Roadmap.md: §1.4's DXBC gap table marked R7 done with the bug-fix
+  writeup; §2.2 axis 8 (DXBC) updated from "zero coverage" to "CLI-level
+  coverage exists, execution still doesn't"; the R7 summary-table row
+  filled in.
+- CommandGuide/feme.md, CommandGuide/feme-translate.md: replaced "DXBC
+  import is not yet implemented" with accurate descriptions of
+  `--import-dxbc`/`dxbc` detection and this step's retargeting
+  limitations (inherits DXIL's, plus DXBC-specific ones).
+
+## Verification
+
+Built with the existing `build/` (ccache launcher, `LLVM_ENABLE_ASSERTIONS=
+ON`, `LLVM_ENABLE_PROJECTS=feme;clang`, DirectX/X86/AArch64 targets
+registered -- SPIR-V/AMDGPU targets are not in this particular build
+configuration, so those two `--target=` destinations for a DXBC input are
+exercised by code-path inspection/reasoning rather than an actual run
+here, same as they would be for a DXIL input in this build). Manually
+verified the fixed pipeline end to end: `dxbc-as --emit=container` → `feme
+--target=dxil` → `obj2yaml`/`llvm-dis` on the embedded DXIL bitcode, a
+real, valid, idiomatic-`dx.op.*`-free DXIL module with a `RWBuffer<float4>`
+resource and a thread-ID-addressed load/store. `ninja check-feme`: 891
+discovered, 882 passed, 9 unsupported, 0 failed -- up from the pre-existing
+874/9/0 baseline by 8 new tests (3 `DXBCImporterTest`, 2 `DriverTest`, 1
+`DXSAToLLVMIRTranslatorTest`, 2 lit tests: `Import/DXBC/dxbc-import.dxasm`
++ `Import/DXBC/dxbc-import-invalid.test`, plus
+`Tools/feme/feme-dxbc-to-dxil.dxasm`).
+
+## Commit breakdown
+
+1. `[feme] Add feme::DXBCImporter`.
+2. `[feme] Add feme::dxsa::DXSAToLLVMIRTranslator (Translator interface)`.
+3. `[feme] Driver: detect and translate legacy DXBC input`.
+4. `[feme] feme-translate: register --import-dxbc`.
+5. `[feme][DXSA] Fix UAV !dx.resources metadata missing UAV-only fields`.
+6. `[feme] test: add end-to-end DXBC coverage`.
+7. `[feme] docs: record roadmap step R7 completion`.
+8. This file.
