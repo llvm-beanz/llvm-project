@@ -9996,3 +9996,309 @@ also confirms end to end through `lit`.
 2. `[feme][test] Add a golden-output regression test for feme-cfg-gen's PRNG use`
 3. `[feme][test] Re-curate differential-harness.test's divergent/loop seeds`
 4. This file.
+
+# Agent thoughts: FeMe roadmap step R2 (mask the scalarization fallback; histogram.hlsl; reject unwidened divergent branches)
+
+## Scope
+
+Roadmap step R2 (feme/docs/Roadmap.md's "Suggested sequencing" table) asked
+for three things:
+
+1. Mask the scalarization fallback's per-lane execution (the §1.6 P0 item:
+   an unmasked lane in a scalarized atomic is a silently wrong answer, not
+   a crash).
+2. Add `histogram.hlsl` (§2.3): divergent atomics into a shared buffer, the
+   scalarization fallback's only realistic workload.
+3. Make `feme-cpu-simdize` reject every shape `feme-cpu-linearize` left an
+   unwidened divergent branch in, including one inside a loop -- the gap
+   R1 found by growing the differential harness to `--unstructured` shapes.
+
+## Part 1: root-causing the "divergent branch inside a loop" gap
+
+I started here because R1's differential-harness comment already narrowed
+it down: a `--unstructured` seed's divergent branch, left untouched by
+`feme::cpu::LinearizePass`'s diagnostic, "can reach the JIT unwidened
+instead of failing... running forever rather than erroring."
+
+I reproduced it directly: generating the 15 `--unstructured` seeds the
+harness's second block already uses and running each through `feme-run`'s
+*normal* (non-`--reference`) pipeline with a `timeout`. Seeds 4 and 6 hung.
+Both printed a `feme-cpu-linearize` diagnostic to stderr before hanging --
+so the diagnostic *did* fire, but the process kept going.
+
+The roadmap's wording ("`feme-cpu-simdize`'s divergent-branch check does
+not catch every such case") suggested the bug was in
+`FunctionWidener::checkSupportedControlFlow`'s `UniformityInfo`-based
+check. I tested that hypothesis directly: running the exact same seed 4/6
+IR through `feme-opt -passes=feme-cpu-linearize,feme-cpu-simdize` (bypassing
+`feme-run`'s full driver) reproduced the linearize diagnostic *and* a
+second diagnostic from `feme-cpu-simdize` itself ("has a divergent branch"),
+with a nonzero exit code -- `feme-opt`'s `runLLVMIRMode` already tracks
+`DS_Error`-severity diagnostics via a `setDiagnosticHandlerCallBack` and
+turns one into an exit-code-1 failure. So `checkSupportedControlFlow`'s
+`UniformityInfo` classification was *not* the bug; it correctly flagged
+every one of these shapes when I asked it to, directly.
+
+That left `feme::cpu::runPipeline` (Pipeline.cpp) as the actual gap:
+`ModulePassManager::run` returns `void`, and nothing after either
+`LinearizePass` or `SIMDizePass` checked whether either had reported a
+diagnostic through `LLVMContext::emitError` before continuing on to
+`WaveLoweringPass`, `EntryWrapperPass`, linking, and eventually the JIT.
+`feme-opt` already had the fix pattern; `runPipeline` (used by both
+`feme-run` and `feme --target=<cpu>`) never adopted it.
+
+### The first fix attempt wasn't enough
+
+My first fix wrapped the *whole* `ResourceLowering/Linearize/SIMDize/
+WaveLowering/EntryWrapper` `ModulePassManager` run in one
+`ErrorDiagnosticGuard` (a `DiagnosticHandler` callback tracking whether any
+`DS_Error` fired), checking once at the end. That fixed the hang for
+`feme-run`'s JIT path, but a `feme --target=<cpu>` retargeting test
+(compiling the exact `unsupported-loop-internal-branch.ll` shape through a
+real DXIL round trip) crashed instead: `EntryWrapperPass` hit
+`llvm_unreachable("unexpected wave-body parameter for EntryWrapperPass")`.
+The problem: even though `LinearizePass`/`SIMDizePass` both diagnosed and
+left the function untouched, the *same* `ModulePassManager::run` call kept
+going and ran `WaveLoweringPass`/`EntryWrapperPass` on that same
+un-widened function before my post-run check ever got a chance to look at
+the diagnostic flag -- a diagnostic mid-run doesn't abort the run.
+
+The real fix: split the five-pass `ModulePassManager` into five separate
+one-pass `ModulePassManager`s, checking `DiagGuard.sawError()` after each
+one and bailing before the next runs. This is what actually prevents a
+downstream pass from ever seeing a function an earlier pass only diagnosed
+rather than transformed.
+
+### Verification
+
+- All 15 `--unstructured` seeds (including the two that used to hang) now
+  fail with `rc=1` and a printed diagnostic, in well under a second each,
+  through `feme-run`'s normal pipeline.
+- New test:
+  `test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll`,
+  reusing the exact "internal branch in a loop body" shape from
+  `test/Transforms/CPU/Linearize/unsupported-loop-internal-branch.ll`, run
+  through the real DXIL round trip (`llc` + `feme --target=...`), checking
+  both the underlying `feme-cpu-linearize` diagnostic and the new
+  `ErrorDiagnosticGuard`-driven pipeline failure message.
+- Full `check-feme` stayed green throughout (849/858, 9 platform-gated
+  `Unsupported`).
+
+## Part 2: masking the scalarization fallback
+
+`FunctionWidener::widenScalarizedFallback` (SIMDize.cpp) is the generic
+"clone the instruction once per lane" path an `atomicrmw` falls into; it
+had no notion of a governing mask at all, unlike a masked
+`feme.cpu.resource.*` call or (since milestone 7) a masked `load`/`store`.
+`feme::cpu::LinearizePass::maskMemoryOps` already rewrote a plain `load`/
+`store` under a divergent region into a `feme.cpu.masked.load`/`.store`
+call; it simply didn't do the same for `AtomicRMWInst`.
+
+### Design
+
+I added a new `feme.cpu.masked.atomicrmw.*` call family
+(`MaskIntrinsics.h`/`.cpp`), mirroring `masked.load`/`.store`: one
+type-mangled declaration per value type, with the `AtomicRMWInst::BinOp`
+passed as a plain `i32` leading operand (rather than mangled into the name,
+since the operation isn't part of the call's LLVM type the way the element
+type is). `LinearizePass::maskMemoryOps` now rewrites an `atomicrmw` inside
+a masked region into this call, exactly like it already did for a plain
+`load`/`store`.
+
+`FunctionWidener::widenMaskedAtomicRMW` (SIMDize.cpp) widens the masked
+call: for each lane, it selects between the real operand and the
+operation's *identity element* (`getAtomicRMWIdentity`: `0` for `Add`/
+`Sub`/`Or`/`Xor`/`UMax`/`USubCond`/`USubSat`, all-ones for `And`/`UMin`,
+`INT_MIN`/`INT_MAX` for `Max`/`Min`, `±inf` for the float min/max family)
+based on that lane's mask bit, then always executes the real, per-lane
+`atomicrmw` with that selected operand. A masked-off lane's real atomic
+still runs, but with the identity element, so it's an observably-inert
+no-op rather than a skipped instruction -- this needed no new control flow
+at all, which matters: I checked, and `FunctionWidener::widen()`'s driver
+loop walks each block's original instruction list once, so splitting a
+block mid-widening (to conditionally skip an atomic) would strand whatever
+instructions followed the split point outside that walk.
+
+`Xchg` has no identity element (any value it writes is observable); I
+special-cased it to substitute the value already at the address (read via
+a plain load immediately before the atomic), which is safe only because
+dispatch is still sequential, one lane at a time (§1.6's own "Dispatch is
+sequential, not thread-pooled" P1 row already documents this same
+assumption elsewhere). `Nand`/`UIncWrap`/`UDecWrap` have neither an
+identity element nor a substitutable value (their result depends on the
+old value in a way no single operand choice leaves unchanged for every
+`old` -- I worked through the algebra for each to confirm this rather than
+assume it), so a divergent one of those is diagnosed rather than silently
+computing the wrong answer; none of them arise from HLSL's `Interlocked*`
+builtins in this front end, so this doesn't narrow anything real.
+
+### A second, related bug: uniform atomics aren't idempotent
+
+While building `histogram.hlsl` I found a second, closely-related bug in
+the same code path: `widenInstruction`'s existing `if
+(!UI.isDivergentAtDef(&I)) return true;` shortcut ("uniform: leave it
+exactly as it is") is correct for a pure computation or even a uniform
+`store` (every lane writing the identical value to the identical address,
+so one execution and `W` give the same final memory content), but wrong
+for an `atomicrmw`: its effect *accumulates*, so a "uniform" atomic (same
+address, same value, on every lane) still needs to run once per active
+lane, not once for the whole wave. I confirmed this by hand: an
+unconditional `InterlockedAdd(Counter, 1)` with no divergent branch at all,
+executed by 4 lanes, must leave `Counter == 4`; before this fix, it left
+`Counter == 1` (only one 4x). I added a special case in `widenInstruction`
+that always routes an `AtomicRMWInst` through the generic widening path
+(`widenElementwise`/`widenScalarizedFallback`), regardless of its own
+uniformity classification -- `AtomicCmpXchgInst` is deliberately excluded,
+since its `{T, i1}` aggregate result has no widening support at all yet
+(pre-existing, and orthogonal to this fix).
+
+## Part 3: `histogram.hlsl`, and the real-world walls I hit building it
+
+This took by far the most iteration. The roadmap's description --
+"divergent atomics into a shared buffer" -- undersold how many *separate,
+already-documented, genuinely out-of-scope* gaps a naive "bucketed
+histogram" HLSL shader collides with:
+
+1. **A `RWStructuredBuffer` (UAV) atomic is a dead end.** Clang lowers
+   `InterlockedAdd` on a structured buffer element to `llvm.dx.resource.
+   getpointer` + a plain `atomicrmw`, but the DXIL backend's instruction
+   selection converts that into `dx.op.atomicBinOp` during codegen, and
+   nothing in `feme::dxil::OpRaisingPass` raises that op back to an
+   idiomatic `atomicrmw` -- `feme-run` fails with "unsupported raised
+   operation" before ever reaching my new code. This is real, separate
+   raising work, not scoped to R2.
+2. **A groupshared *array* element's divergent atomic hits `feme::cpu::
+   rewriteGroupSharedGlobals`'s pre-existing "divergent groupshared access
+   is diagnosed" narrowing (§1.6, milestone 9 P1) -- and, I found, so does
+   a *uniform-address* array atomic once my "always scalarize an atomicrmw"
+   fix above lands.** I dug into why: `FunctionWidener::getWidened`
+   broadcasts a `Constant` (e.g. a bare `GlobalVariable` used directly)
+   into a `ConstantVector` splat, which trivially constant-folds back to
+   the original value at any `extractelement` -- but it broadcasts an
+   `Instruction` (even a `getelementptr` with every index constant) via a
+   *real* `insertelement`/`shufflevector` splat, which does not fold away.
+   `rewriteGroupSharedGlobals` only recognizes a first-level `getelementptr`
+   feeding a `load`/`store`/`atomicrmw` directly; it does not see through
+   that broadcast, so any array-indexed (or divergent-address) groupshared
+   op it reaches this way is rejected. I confirmed a *scalar* (no
+   `getelementptr` at all) groupshared global's atomic works fine end to
+   end, since the broadcast of a bare global folds away. Extending this to
+   see through the broadcast is a real, separate, larger fix (it would need
+   to change the broadcast vector's own element type when the address
+   space is cast away) that I deliberately left out of R2's scope; I did
+   extend `rewriteGroupSharedGlobals` to accept `AtomicRMWInst` as a valid
+   direct/first-level-GEP user alongside `load`/`store` (a small, correct,
+   and now load-bearing extension -- without it, *no* groupshared atomic,
+   uniform or not, scalar or not, would canonicalize at all, since my "atomics
+   always scalarize" fix means every atomic now goes through the same
+   widening path a masked load/store already did).
+3. **Clang aggressively fuses "if/else, each incrementing a different but
+   compile-time-known address" into a single `select`-of-pointer
+   `atomicrmw`, at every optimization level except `-O0`** (which itself
+   crashes Clang's DXIL "Resource Binding Analysis" pass -- a separate,
+   pre-existing frontend limitation, not something to route around by
+   pinning `-O0`). I tried several structurally different two-bucket HLSL
+   shapes (a `Histogram[2]` array with a divergent index, two named
+   `Histogram0`/`Histogram1` globals with an `if`/`else`, two independent
+   non-complementary `if`s) -- the array and `if`/`else` shapes both
+   collapsed to the same address-divergent `select` pattern this narrowing
+   already covers; only two *independent* (non-mutually-exclusive)
+   conditions, each with its own unconditional-looking atomic, avoided it,
+   confirmed by inspecting Clang's own `-S -emit-llvm` output at each step
+   rather than guessing from the DXIL-round-tripped result.
+4. **Groupshared memory is genuinely not zero-initialized by the HLSL
+   spec** (verified this before assuming otherwise), and this
+   implementation's own `EntryWrapperPass::buildWrapperEnv` stack `alloca`
+   for it isn't either -- I found this the hard way: my first working
+   masked-atomic shape produced numerically wrong-looking results (a
+   constant, non-zero offset on top of the expected count) until I checked
+   whether the *masking* was actually correct by computing the delta
+   between "every lane increments" and "half the lanes increment" runs --
+   the deltas matched the expected participant counts exactly, proving the
+   masking fix was already right and the discrepancy was purely the
+   uninitialized counter. The textbook HLSL fix (explicit zero-init,
+   `GroupMemoryBarrierWithGroupSync()`, then the conditional atomic) hits
+   two more separate, pre-existing, already-documented walls: an explicit
+   zero-init followed by a *merge-block* reload gets speculatively hoisted
+   by Clang into the divergent arm (the "%.pre" pattern), landing back on
+   gap 2 above; and `SV_DispatchThreadID` (needed for the final `Out[tid.x]`
+   write) does not survive `EntryWrapperPass`'s barrier-region splitting
+   (documented in `barrier-groupshared.hlsl`'s own comment: only a
+   group-uniform builtin like `SV_GroupID` does).
+
+Given all four walls are separate, pre-existing, already-tracked gaps (three
+of them under §1.6's own table, one a Clang frontend limitation), I scoped
+`histogram.hlsl` to the shape that stays clear of all of them while still
+being a real, meaningful regression test for the actual P0 this milestone
+fixes: a single groupshared counter, zero-initialized unconditionally (no
+merge-block reload -- the shader reads the *atomic's own return value*
+directly, the classic atomic-append/stream-compaction "get my slot" idiom,
+not a separate load), incremented only by lanes with an even `tid.x`. I
+verified this against the actual bug: before this milestone's fix,
+`Counter` would have been incremented by every lane regardless of the
+`if`, corrupting every subsequent lane's "slot". I ran it, added via
+`%feme-wave-size-sweep`, at `W` in {4, 8, 16, 32} per §2.2.1's convention,
+and it is wave-size-independent by construction (dispatch is still
+sequential, so `tid.x` order is preserved regardless of `W`).
+
+## Documentation updates
+
+- `feme/docs/Roadmap.md`: removed both closed P0 rows from §1.6's table,
+  added a paragraph explaining what R2 actually fixed (including the
+  correction that `feme-cpu-simdize`'s own divergent-branch check was never
+  broken -- the gap was `runPipeline` not propagating a diagnostic);
+  extended the "Divergent groupshared access is diagnosed" row to mention
+  the broadcast-folding subtlety found while building `histogram.hlsl`;
+  updated §2.3's `histogram.hlsl` bullet and R2's "Suggested sequencing"
+  row to record what shipped and why a multi-bucket histogram remains
+  blocked.
+- `feme/docs/FeMeCPUDesign.md`: updated the milestone 7 deviation note and
+  the Milestones-and-status-summary's item 7 to describe the mask now
+  implemented instead of the gap that used to be there.
+- `differential-harness.test`: updated the `--unstructured` block's
+  comment to reflect that a hang is no longer possible (still not diffed
+  against `--reference`, since the normal pipeline is *expected* to fail on
+  these shapes, not compute a matching answer).
+
+## Testing
+
+- `feme/test/Transforms/CPU/Linearize/atomicrmw-masked.ll`: `feme-cpu-
+  linearize` rewrites a divergent-arm `atomicrmw` into `feme.cpu.masked.
+  atomicrmw`.
+- `feme/test/Transforms/CPU/simdize-scalarize-atomic-masked.ll`: the full
+  `linearize`+`simdize` pipeline masks an `add` atomic's per-lane
+  execution via the identity element.
+- `feme/test/Transforms/CPU/simdize-scalarize-atomic-xchg-masked.ll`: same,
+  for `xchg` (the read-old-value substitution, since it has no identity).
+- `feme/test/Transforms/CPU/simdize-scalarize-atomic-nand-unsupported.ll`:
+  `nand` (no identity, no substitute) is diagnosed, not silently wrong.
+- `feme/test/Transforms/CPU/simdize-groupshared-atomic-scalar.ll`: a
+  groupshared scalar's `atomicrmw` canonicalizes like a `load`/`store`
+  already did.
+- `feme/unittests/Transforms/CPU/MaskIntrinsicsTest.cpp`: round-trips
+  `createMaskedAtomicRMW`/`matchMaskedAtomicRMW`.
+- `feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll`:
+  the driver-level regression test for Part 1's fix.
+- `feme/test/Tools/feme-run/HLSL/histogram.hlsl`: the roadmap's requested
+  end-to-end test.
+- Existing `feme/test/Transforms/CPU/simdize-scalarize-atomic.ll` (an
+  unconditional, address-only-divergent atomic, never masked) continues to
+  pass unchanged -- confirming the new masking path only engages when
+  `feme::cpu::LinearizePass` actually attached a governing mask.
+- Full `check-feme` (`ninja check-feme`, assertions-enabled, ccache):
+  849 passed, 9 unsupported (platform-gated), 0 failed, both before and
+  after `clang-format`.
+
+## Commit breakdown
+
+1. `[feme][cpu] Make feme-cpu pipeline errors actually fail the pipeline`
+   (Pipeline.cpp's `ErrorDiagnosticGuard`, closing Part 1).
+2. `[feme][test] Add a regression test for the unwidened-loop-branch fix`.
+3. `[feme][cpu] Mask a divergent atomicrmw's per-lane execution`
+   (`feme.cpu.masked.atomicrmw`, `MaskIntrinsics`, `LinearizePass`,
+   `widenMaskedAtomicRMW`, `getAtomicRMWIdentity`).
+4. `[feme][cpu] Always scalarize an atomicrmw, even a uniform one`.
+5. `[feme][cpu] Accept an atomicrmw as a groupshared canonicalization user`.
+6. `[feme][test] Add histogram.hlsl`.
+7. `[feme][docs] Update Roadmap.md and FeMeCPUDesign.md for roadmap step R2`.
+8. This file.
