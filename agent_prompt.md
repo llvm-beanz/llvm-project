@@ -23,7 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R8?
+Can you implement roadmap step R9?
 
-> Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe (see:
-> §2.4.3, §2.4.5, §2.2.4)
+> `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants)
+> (see: §1.2 P0)
