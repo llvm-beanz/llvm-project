@@ -10302,3 +10302,62 @@ sequential, so `tid.x` order is preserved regardless of `W`).
 6. `[feme][test] Add histogram.hlsl`.
 7. `[feme][docs] Update Roadmap.md and FeMeCPUDesign.md for roadmap step R2`.
 8. This file.
+
+# Re-investigation: reported crash in simdize-scalarize-atomic-nand-unsupported.ll
+
+## The report
+
+A new task handed me the same request text as above (verbatim, down to the
+`/Users/cbieneman/dev/llvm-project/build-rel/...` paths), reporting that
+`FEME :: Transforms/CPU/simdize-scalarize-atomic-nand-unsupported.ll` was
+crashing (`PLEASE submit a bug report...`, a `SignalHandler` frame, and two
+back-to-back `FunctionWidener::widen() + 7544` frames suggesting a stack
+overflow) instead of printing the expected diagnostic and failing cleanly.
+
+## What I found
+
+`git log --oneline` on `feme/` showed the crashing commit range already had
+a fix on top of it: `a99e27236863 [feme][cpu] Mask a divergent atomicrmw's
+per-lane execution` -- the exact commit from this file's "Commit breakdown"
+above -- which added `getAtomicRMWIdentity`'s `Nand`/`UIncWrap`/`UDecWrap`
+handling and `widenMaskedAtomicRMW`'s early, clean `emitError` + `return`
+for them (`feme/lib/Transforms/CPU/SIMDize.cpp`, no dubious recursion
+anywhere on that path). `git merge-base --is-ancestor a99e27236863 HEAD`
+confirmed it: the fix is already an ancestor of `HEAD`
+(`822c6239c362`), the working tree is clean (`git status --short`), and
+this is the only repository checked out here -- there is no
+`build-rel/` directory or macOS toolchain in this environment to have
+produced that stack trace.
+
+I reproduced the exact `RUN:` line from the test by hand
+(`not feme-opt --llvm -passes=feme-cpu-linearize,feme-cpu-simdize
+-feme-cpu-wave-size=4 -S ... | FileCheck ...`) against a from-scratch
+rebuild (touched `Linearize.cpp`/`SIMDize.cpp`, `ninja check-feme` with
+`LLVM_ENABLE_ASSERTIONS=ON` and `CMAKE_CXX_COMPILER_LAUNCHER=ccache`, so
+this ruled out a stale object file masking the bug) and it printed exactly
+the expected diagnostic with no crash:
+
+```
+error: feme-cpu-simdize: function 'main' has a divergent atomicrmw 'nand' with no maskable identity element (roadmap milestone 7 deviation)
+```
+
+`llvm-lit` on the single test file passes (ran it three times back to back
+to rule out flakiness), and a full `ninja check-feme` from a clean rebuild
+of every `feme/lib/Transforms/CPU/*.cpp` translation unit passes
+completely: 849 passed, 9 unsupported (platform-gated), **0 failed** --
+the same numbers this file's "Testing" section above already recorded
+after the original fix landed.
+
+## Conclusion
+
+There is nothing left to fix in this checkout: the crash the task
+described was the *pre-fix* behavior of `widenScalarizedFallback` silently
+scalarizing an unmaskable `atomicrmw` (the same commit's own description
+above already explains why that shape was unsafe), and commit
+`a99e27236863` -- already on this branch, already covered by this file's
+history -- replaced it with the clean diagnostic the test now checks for.
+The `/Users/cbieneman/dev/llvm-project/build-rel/` paths and stack trace in
+the task's reproduction are consistent with a stale, unrebuilt binary on a
+different (macOS) machine/build directory that predates that fix, not a
+regression in the source tree. No source changes were made; no new commit
+beyond this note was needed.
