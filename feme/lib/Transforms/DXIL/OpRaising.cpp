@@ -58,14 +58,17 @@ struct RaisableOp {
 // e.g. `Dot2`..`Dot4`) or DXIL's "class" grouping (`unary`, `binary`,
 // `tertiary`, `dot2`, ... are grouping-only; this pass doesn't need to
 // distinguish them, since `raiseCall` below handles any argument count
-// uniformly). Opcodes intentionally NOT covered here (documented in
-// feme/docs/Design.md) either:
+// uniformly). Opcodes intentionally NOT covered by *this* table (documented
+// in feme/docs/Design.md) either:
 //  - pick their source intrinsic based on an extra "kind"/flag operand
-//    rather than the opcode alone (`WaveActiveOp`, `WaveActiveBit`,
-//    `WavePrefixOp`, `QuadOp`) -- `Barrier`'s mode flags are the same shape
-//    of problem, but it is now covered by `raiseBarrierCall`/
-//    `RaisableBarriers` below instead, since the CPU target requires it
-//    (see feme/docs/FeMeCPUDesign.md's "Raised IR prerequisites"), or
+//    rather than the opcode alone -- `Barrier`'s mode flags are covered by
+//    `raiseBarrierCall`/`RaisableBarriers` below (required for the CPU
+//    target, see feme/docs/FeMeCPUDesign.md's "Raised IR prerequisites");
+//    `WaveActiveOp`/`WavePrefixOp`'s reduce-kind/signedness flag pair is
+//    covered by `raiseReduceOpCall`/`RaisableReduceOp`; `WaveActiveBit`'s
+//    bitwise-op flag is covered by `raiseWaveActiveBitCall`/`RaisableBitOp`;
+//    and `QuadOp`'s direction flag is covered by `raiseQuadOpCall`/
+//    `RaisableQuadOp` (roadmap step R4) -- or
 //  - are resource-handle ops, which need `llvm::hlsl`-style resource
 //    metadata reconstruction (`CreateHandle`, `AnnotateHandle`,
 //    `CreateHandleFromBinding`, buffer/texture loads and stores, ...) --
@@ -315,6 +318,179 @@ bool raiseBarrierCall(CallInst &CI) {
   return false; // An unrecognized mode: leave the call unmodified.
 }
 
+/// The `WaveOpKind_*`/`SignedOpKind_*`/`WaveBitOpKind_*`/`QuadOpKind_*`
+/// `defvar`s `WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp` select
+/// their source intrinsic with (see the `defvar`s of the same name in
+/// `llvm/lib/Target/DirectX/DXIL.td`, alongside each op's definition).
+/// Mirrored here as plain constants (rather than an `enum class`) so they
+/// compare directly against the `uint64_t` `getConstInt` reads off the
+/// call's flag operand(s).
+constexpr uint64_t WaveOpKind_Sum = 0;
+constexpr uint64_t WaveOpKind_Product = 1;
+constexpr uint64_t WaveOpKind_Min = 2;
+constexpr uint64_t WaveOpKind_Max = 3;
+
+constexpr uint64_t WaveBitOpKind_And = 0;
+constexpr uint64_t WaveBitOpKind_Or = 1;
+constexpr uint64_t WaveBitOpKind_Xor = 2;
+
+constexpr uint64_t SignedOpKind_Signed = 0;
+constexpr uint64_t SignedOpKind_Unsigned = 1;
+
+constexpr uint64_t QuadOpKind_ReadAcrossX = 0;
+constexpr uint64_t QuadOpKind_ReadAcrossY = 1;
+constexpr uint64_t QuadOpKind_ReadAcrossDiagonal = 2;
+
+/// `WaveActiveOp` (opcode 119) and `WavePrefixOp` (opcode 121) both select
+/// their source intrinsic from the same pair of Int8Ty flag operands -- a
+/// `WaveOpKind_*` reduce/scan kind, then a `SignedOpKind_*` signedness --
+/// rather than the opcode alone (see each op's `intrinsics` list in
+/// `llvm/lib/Target/DirectX/DXIL.td`). `WavePrefixOp` only ever selects
+/// `Sum`/`Product` (DXIL has no prefix min/max), so this table's four
+/// `WavePrefixOp` rows are exactly that DXIL.td subset, not an omission
+/// here.
+struct RaisableReduceOp {
+  unsigned Opcode;
+  uint64_t OpKind;
+  uint64_t SignKind;
+  Intrinsic::ID ID;
+};
+
+// clang-format off
+static const RaisableReduceOp ReduceOps[] = {
+    // WaveActiveOp (119): reduces its operand across the whole wave.
+    {119, WaveOpKind_Sum, SignedOpKind_Signed, Intrinsic::dx_wave_reduce_sum},
+    {119, WaveOpKind_Sum, SignedOpKind_Unsigned, Intrinsic::dx_wave_reduce_usum},
+    {119, WaveOpKind_Product, SignedOpKind_Signed, Intrinsic::dx_wave_product},
+    {119, WaveOpKind_Product, SignedOpKind_Unsigned, Intrinsic::dx_wave_uproduct},
+    {119, WaveOpKind_Max, SignedOpKind_Signed, Intrinsic::dx_wave_reduce_max},
+    {119, WaveOpKind_Max, SignedOpKind_Unsigned, Intrinsic::dx_wave_reduce_umax},
+    {119, WaveOpKind_Min, SignedOpKind_Signed, Intrinsic::dx_wave_reduce_min},
+    {119, WaveOpKind_Min, SignedOpKind_Unsigned, Intrinsic::dx_wave_reduce_umin},
+    // WavePrefixOp (121): an exclusive scan of the same reduction, one wave
+    // lane at a time.
+    {121, WaveOpKind_Sum, SignedOpKind_Signed, Intrinsic::dx_wave_prefix_sum},
+    {121, WaveOpKind_Sum, SignedOpKind_Unsigned, Intrinsic::dx_wave_prefix_usum},
+    {121, WaveOpKind_Product, SignedOpKind_Signed, Intrinsic::dx_wave_prefix_product},
+    {121, WaveOpKind_Product, SignedOpKind_Unsigned, Intrinsic::dx_wave_prefix_uproduct},
+};
+// clang-format on
+
+const RaisableReduceOp *lookupRaisableReduceOp(unsigned Opcode, uint64_t OpKind,
+                                               uint64_t SignKind) {
+  for (const RaisableReduceOp &Op : ReduceOps)
+    if (Op.Opcode == Opcode && Op.OpKind == OpKind && Op.SignKind == SignKind)
+      return &Op;
+  return nullptr;
+}
+
+/// Raises a `dx.op.waveActiveOp`/`dx.op.wavePrefixOp` (opcodes 119/121)
+/// call, selecting the LLVM intrinsic via its two constant flag operands
+/// (see `RaisableReduceOp` above) rather than the opcode alone, so it
+/// doesn't fit the table-driven `raiseCall` path. Both intrinsics are
+/// overloaded on the value operand's type, matching `OverloadTy` in
+/// `WaveActiveOp`/`WavePrefixOp`'s DXIL.td definition.
+bool raiseReduceOpCall(CallInst &CI, unsigned Opcode) {
+  if (CI.arg_size() != 4)
+    return false;
+  std::optional<uint64_t> OpKind = getConstInt(CI.getArgOperand(2));
+  std::optional<uint64_t> SignKind = getConstInt(CI.getArgOperand(3));
+  if (!OpKind || !SignKind)
+    return false;
+  const RaisableReduceOp *RaiseAs =
+      lookupRaisableReduceOp(Opcode, *OpKind, *SignKind);
+  if (!RaiseAs)
+    return false; // An unrecognized flag combination: leave the call as-is.
+
+  Value *Operand = CI.getArgOperand(1);
+  Function *IntrinFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), RaiseAs->ID, {Operand->getType()});
+  IRBuilder<> Builder(&CI);
+  CallInst *NewCall = Builder.CreateCall(IntrinFn, {Operand}, CI.getName());
+  CI.replaceAllUsesWith(NewCall);
+  CI.eraseFromParent();
+  return true;
+}
+
+/// `WaveActiveBit` (opcode 120) selects its source intrinsic from a single
+/// `WaveBitOpKind_*` flag operand (see its `intrinsics` list in DXIL.td).
+struct RaisableBitOp {
+  uint64_t BitOpKind;
+  Intrinsic::ID ID;
+};
+
+static const RaisableBitOp BitOps[] = {
+    {WaveBitOpKind_And, Intrinsic::dx_wave_reduce_and},
+    {WaveBitOpKind_Or, Intrinsic::dx_wave_reduce_or},
+    {WaveBitOpKind_Xor, Intrinsic::dx_wave_reduce_xor},
+};
+
+/// Raises a `dx.op.waveActiveBit` (opcode 120) call, selecting the LLVM
+/// intrinsic via its constant `WaveBitOpKind_*` flag operand (see
+/// `RaisableBitOp` above) rather than the opcode alone.
+bool raiseWaveActiveBitCall(CallInst &CI) {
+  if (CI.arg_size() != 3)
+    return false;
+  std::optional<uint64_t> BitOpKind = getConstInt(CI.getArgOperand(2));
+  if (!BitOpKind)
+    return false;
+
+  for (const RaisableBitOp &Op : BitOps) {
+    if (Op.BitOpKind != *BitOpKind)
+      continue;
+    Value *Operand = CI.getArgOperand(1);
+    Function *IntrinFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(), Op.ID, {Operand->getType()});
+    IRBuilder<> Builder(&CI);
+    CallInst *NewCall = Builder.CreateCall(IntrinFn, {Operand}, CI.getName());
+    CI.replaceAllUsesWith(NewCall);
+    CI.eraseFromParent();
+    return true;
+  }
+  return false; // An unrecognized flag value: leave the call as-is.
+}
+
+/// `QuadOp` (opcode 123) selects its source intrinsic from a single
+/// `QuadOpKind_*` flag operand (see its `intrinsics` list in DXIL.td).
+struct RaisableQuadOp {
+  uint64_t QuadKind;
+  Intrinsic::ID ID;
+};
+
+static const RaisableQuadOp QuadOps[] = {
+    {QuadOpKind_ReadAcrossX, Intrinsic::dx_quad_read_across_x},
+    {QuadOpKind_ReadAcrossY, Intrinsic::dx_quad_read_across_y},
+    {QuadOpKind_ReadAcrossDiagonal, Intrinsic::dx_quad_read_across_diagonal},
+};
+
+/// Raises a `dx.op.quadOp` (opcode 123) call, selecting the LLVM intrinsic
+/// via its constant `QuadOpKind_*` flag operand (see `RaisableQuadOp`
+/// above) rather than the opcode alone. Note this only raises the op; the
+/// FeMe CPU target does not yet lower the resulting `llvm.dx.quad.read.*`
+/// calls (quad/derivative support is an explicit v1 non-goal -- see
+/// feme/docs/FeMeCPUDesign.md's "Non-Goals" section).
+bool raiseQuadOpCall(CallInst &CI) {
+  if (CI.arg_size() != 3)
+    return false;
+  std::optional<uint64_t> QuadKind = getConstInt(CI.getArgOperand(2));
+  if (!QuadKind)
+    return false;
+
+  for (const RaisableQuadOp &Op : QuadOps) {
+    if (Op.QuadKind != *QuadKind)
+      continue;
+    Value *Operand = CI.getArgOperand(1);
+    Function *IntrinFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(), Op.ID, {Operand->getType()});
+    IRBuilder<> Builder(&CI);
+    CallInst *NewCall = Builder.CreateCall(IntrinFn, {Operand}, CI.getName());
+    CI.replaceAllUsesWith(NewCall);
+    CI.eraseFromParent();
+    return true;
+  }
+  return false; // An unrecognized flag value: leave the call as-is.
+}
+
 /// A DXIL opcode that returns an aggregate (a fixed-shape struct of two or
 /// more scalars) needing `extractvalue` reconstruction, and the single LLVM
 /// intrinsic call it was lowered from -- the general mechanism `IMul`/
@@ -392,8 +568,8 @@ bool raiseAggregateCall(CallInst &CI, const RaisableAggregateOp &RaiseAs) {
 
   Module &M = *CI.getModule();
   Type *OverloadTy = RaiseAs.OverloadOnOperand
-                          ? Args[0]->getType()
-                          : Type::getInt32Ty(M.getContext());
+                         ? Args[0]->getType()
+                         : Type::getInt32Ty(M.getContext());
   Function *IntrinFn =
       Intrinsic::getOrInsertDeclaration(&M, RaiseAs.ID, {OverloadTy});
 
@@ -1167,6 +1343,21 @@ PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
 
       if (Opcode == 80) { // Barrier
         Changed |= raiseBarrierCall(*CI);
+        continue;
+      }
+
+      if (Opcode == 119 || Opcode == 121) { // WaveActiveOp, WavePrefixOp
+        Changed |= raiseReduceOpCall(*CI, Opcode);
+        continue;
+      }
+
+      if (Opcode == 120) { // WaveActiveBit
+        Changed |= raiseWaveActiveBitCall(*CI);
+        continue;
+      }
+
+      if (Opcode == 123) { // QuadOp
+        Changed |= raiseQuadOpCall(*CI);
         continue;
       }
 

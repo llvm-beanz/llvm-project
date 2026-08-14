@@ -18,19 +18,23 @@
 // vector math, bit-manipulation, screen-space derivatives, thread/wave/quad
 // queries, and so on -- `IsFinite`/`IsNormal` (raised via the generic
 // `llvm.is.fpclass` intrinsic, reconstructing an extra constant operand
-// rather than a bare 1:1 call), `Barrier` (raised via its constant mode
-// operand, selecting one of the six barrier-scope intrinsics -- required
-// raised IR for the CPU target, see feme/docs/FeMeCPUDesign.md's "Raised IR
-// prerequisites"), and the aggregate-returning ops (`IMul`/`UMul`, `UAddc`,
-// `SplitDouble`, `WaveActiveBallot`; raised via a general multi-return-value
-// `extractvalue`-reconstruction mechanism). It does not yet cover: ops that
-// pick their source intrinsic from an extra "kind"/flag operand rather than
-// the opcode alone (`WaveActiveOp`, `WaveActiveBit`, `WavePrefixOp`,
-// `QuadOp`), or resource-handle ops (`CreateHandle`, `AnnotateHandle`,
-// typed/raw buffer loads and stores, ...), which need `llvm::hlsl`-style
-// resource metadata reconstruction -- see OpRaising.cpp for the scope of
-// what's covered there specifically. Opcodes not (yet) covered are left as
-// unmodified `dx.op.*` calls rather than erroring, so this pass can be used
+// rather than a bare 1:1 call), the aggregate-returning ops (`IMul`/`UMul`,
+// `UAddc`, `SplitDouble`, `WaveActiveBallot`; raised via a general
+// multi-return-value `extractvalue`-reconstruction mechanism), and every
+// opcode that picks its source intrinsic from an extra "kind"/flag operand
+// rather than the opcode alone: `Barrier` (its constant mode operand,
+// selecting one of the six barrier-scope intrinsics -- required raised IR
+// for the CPU target, see feme/docs/FeMeCPUDesign.md's "Raised IR
+// prerequisites"), `WaveActiveOp`/`WavePrefixOp` (a reduce-kind/signedness
+// flag pair), `WaveActiveBit` (a bitwise-op flag), and `QuadOp` (a
+// direction flag; raised as an op, though the CPU target does not lower
+// the result yet -- quad/derivative support is an explicit v1 non-goal,
+// see feme/docs/FeMeCPUDesign.md's "Non-Goals"). It does not yet cover
+// resource-handle ops (`CreateHandle`, `AnnotateHandle`, typed/raw buffer
+// loads and stores, ...), which need `llvm::hlsl`-style resource metadata
+// reconstruction -- see OpRaising.cpp for the scope of what's covered
+// there specifically. Opcodes not (yet) covered are left as unmodified
+// `dx.op.*` calls rather than erroring, so this pass can be used
 // incrementally on modules that mix raised and not-yet-raised operations.
 //
 //===----------------------------------------------------------------------===//
