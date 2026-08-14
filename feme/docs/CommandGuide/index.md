@@ -17,6 +17,8 @@ tool has its own page:
   harness for `feme::SPIRVImporter`.
 - [`feme-dxil-import-fuzzer`](feme-dxil-import-fuzzer.md) — libFuzzer
   harness for `feme::DXILImporter`.
+- [`feme-dxbc-import-fuzzer`](feme-dxbc-import-fuzzer.md) — libFuzzer
+  harness for `feme::dxsa::deserialize` (the DXBC importer's `BinaryParser`).
 - [`dxbc-as-fuzzer`](dxbc-as-fuzzer.md) — libFuzzer harness for `dxbc-as`'s
   own assembly parser.
 - [`feme-cfg-gen`](feme-cfg-gen.md) — seeded generator for CFG-shaped

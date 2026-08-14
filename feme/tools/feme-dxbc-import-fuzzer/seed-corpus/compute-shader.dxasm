@@ -1,0 +1,22 @@
+// Source for compute-shader.dxbc: a compute shader with a program header,
+// UAV/thread-group declarations, and structured control flow (if/loop) --
+// exercising the header + control-flow-token decoding paths BinaryParser
+// handles beyond a bare instruction stream.
+// Regenerate the binary fixture with:
+//   dxbc-as compute-shader.dxasm -o compute-shader.dxbc
+.shader_model compute 5 0
+
+dcl_globalFlags refactoringAllowed
+dcl_uav_typed_texture2d (uint,uint,uint,uint) u0
+dcl_thread_group 8, 8, 1
+dcl_temps 2
+dcl_input vThreadID.xy
+if_nz vThreadID.x
+  loop
+    iadd r0.x, r0.x, l(1)
+    ige r1.x, r0.x, l(16)
+    breakc_nz r1.x
+  endloop
+  store_uav_typed u0.xyzw, vThreadID.xyxx, r0.xxxx
+endif
+ret

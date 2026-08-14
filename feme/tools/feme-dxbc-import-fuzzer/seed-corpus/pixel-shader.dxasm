@@ -1,0 +1,14 @@
+// Source for pixel-shader.dxbc: a small, representative pixel shader
+// covering resource/sampler declarations, a texture sample, and a plain
+// mov -- matching feme/tools/dxbc-as-fuzzer/seed-corpus/sample-pixel-shader.dxasm.
+// Regenerate the binary fixture with:
+//   dxbc-as pixel-shader.dxasm -o pixel-shader.dxbc
+dcl_globalFlags refactoringAllowed
+dcl_resource_texture2d (float,float,float,float) t0
+dcl_sampler s0
+dcl_input_ps linear v1.xyzw
+dcl_output o0.xyzw
+dcl_temps 1
+sample r0.xyzw, v1.xyxx, t0.xyzw, s0
+mov o0.xyzw, r0.xyzw
+ret
