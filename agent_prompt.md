@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -23,6 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you look over the current implementation and design documentation for feme
-and produce a roadmap for fleshing out the remaining parts of the design and
-extending the end-to-end testing to cover more interesting cases?
+Can you implement roadmap step R1?
+
+> Grow the differential harness to divergent/loop/unstructured shapes; add the
+> wave-size sweep (see: §2.2.1, §2.2.2, §2.4.1, §2.4.4)
