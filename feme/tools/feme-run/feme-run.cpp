@@ -209,9 +209,14 @@ HeapStorage buildEntryStorage(ArrayRef<HeapEntry> Entries) {
         std::max<uint32_t>(Entry.Size, Entry.Data.size() * sizeof(uint32_t));
     std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
     Buffer.assign(ByteSize, 0);
-    memcpy(
-        Buffer.data(), Entry.Data.data(),
-        std::min<size_t>(Buffer.size(), Entry.Data.size() * sizeof(uint32_t)));
+    size_t CopySize =
+        std::min<size_t>(Buffer.size(), Entry.Data.size() * sizeof(uint32_t));
+    // `Entry.Data.data()` is null when `Entry.Data` is empty (no initial
+    // data in the heap file); memcpy's source parameter is declared
+    // never-null, so guard the call rather than pass a null pointer even
+    // though `CopySize` would be 0.
+    if (CopySize > 0)
+      memcpy(Buffer.data(), Entry.Data.data(), CopySize);
 
     FemeDescriptor &Desc = Storage.Descriptors[Entry.Index];
     Desc = FemeDescriptor{};
@@ -451,8 +456,11 @@ int main(int argc, char **argv) {
       toBoundResourceBindings(BindingsStorage);
   std::vector<uint8_t> RootConstantBytes(Heap.RootConstants.size() *
                                          sizeof(uint32_t));
-  memcpy(RootConstantBytes.data(), Heap.RootConstants.data(),
-         RootConstantBytes.size());
+  // Guard against a null `data()` on both sides when `RootConstants` is
+  // empty (see `buildEntryStorage`'s equivalent memcpy guard above).
+  if (!RootConstantBytes.empty())
+    memcpy(RootConstantBytes.data(), Heap.RootConstants.data(),
+           RootConstantBytes.size());
 
   DispatchResources Resources;
   Resources.ResourceHeap = Storage.Descriptors;
