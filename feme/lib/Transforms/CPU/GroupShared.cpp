@@ -54,10 +54,16 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
   // support (see `rewriteGroupSharedGlobals`'s doc comment): this
   // milestone only canonicalizes a *uniform* access, left by
   // `feme::cpu::SIMDizePass`'s widening walk as a plain scalar
-  // `getelementptr`/`load`/`store` -- a divergent access instead becomes a
-  // vector-of-pointers `getelementptr` feeding `llvm.masked.gather`/
-  // `.scatter` (see "Widening" in feme/docs/FeMeCPUDesign.md), which this
-  // milestone does not yet rewrite.
+  // `getelementptr`/`load`/`store`/`atomicrmw` -- a divergent access
+  // instead becomes a vector-of-pointers `getelementptr` feeding
+  // `llvm.masked.gather`/`.scatter` (see "Widening" in
+  // feme/docs/FeMeCPUDesign.md), which this milestone does not yet
+  // rewrite. An `atomicrmw` is accepted alongside `load`/`store` (roadmap
+  // step R2, feme/docs/Roadmap.md's §2.3 `histogram.hlsl`): its address is
+  // masked exactly the same way a `load`/`store`'s is (see
+  // `feme::cpu::LinearizePass::maskMemoryOps`), so it needs no different
+  // treatment here -- only the pointer operand's address space changes,
+  // just as it does for `load`/`store`.
   for (auto &[GVConst, Offset] : Layout.Offsets) {
     auto *GV = const_cast<GlobalVariable *>(GVConst);
     if (GV->use_empty())
@@ -74,12 +80,13 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
       if (UserInst && UserInst->getFunction() != &F)
         continue; // A different entry point's use of the same global.
       if (!UserInst || (!isa<LoadInst>(UserInst) && !isa<StoreInst>(UserInst) &&
+                        !isa<AtomicRMWInst>(UserInst) &&
                         !isa<GetElementPtrInst>(UserInst))) {
         Ctx.emitError(
             "feme-cpu-simdize: groupshared global '" + GV->getName() +
             "' is used in a way this milestone does not yet canonicalize; "
-            "only a uniform getelementptr, load, or store is supported "
-            "(roadmap milestone 9 deviation)");
+            "only a uniform getelementptr, load, store, or atomicrmw is "
+            "supported (roadmap milestone 9 deviation)");
         return false;
       }
       if (auto *GEP = dyn_cast<GetElementPtrInst>(UserInst)) {
@@ -92,12 +99,14 @@ bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,
           return false;
         }
         for (const User *GEPUser : GEP->users())
-          if (!isa<LoadInst>(GEPUser) && !isa<StoreInst>(GEPUser)) {
+          if (!isa<LoadInst>(GEPUser) && !isa<StoreInst>(GEPUser) &&
+              !isa<AtomicRMWInst>(GEPUser)) {
             Ctx.emitError(
                 "feme-cpu-simdize: groupshared global '" + GV->getName() +
                 "' feeds a nested getelementptr or another unsupported "
                 "user; only a first-level getelementptr feeding a direct "
-                "load/store is supported (roadmap milestone 9 deviation)");
+                "load, store, or atomicrmw is supported (roadmap milestone "
+                "9 deviation)");
             return false;
           }
       }
