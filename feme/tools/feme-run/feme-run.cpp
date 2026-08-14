@@ -14,17 +14,24 @@
 // this is the tool that makes that distinction possible for the first
 // time.
 //
-// The input may either already be idiomatic, raised LLVM IR (`.ll`/`.bc`),
-// or a DXIL bitcode file/DXContainer: `loadModule` below sniffs which, and
-// for DXIL, runs the same import + op/metadata raising `feme::Driver` runs
-// before any target-specific lowering (see the "DXIL" section of
-// feme/docs/Design.md) -- closing the "DXIL/SPIR-V import ... is not yet
-// wired into this tool" gap this file's own comment used to note for that
-// format, and letting a test compile real HLSL through `clang`/DXIL's own
-// backend and run the result straight through this tool (see
-// feme/test/Tools/feme-run/HLSL). SPIR-V import remains unwired: see the
-// "SPIR-V" deviation note this milestone's update to
-// feme/docs/FeMeCPUDesign.md's Status section adds.
+// The input may already be idiomatic, raised LLVM IR (`.ll`/`.bc`), a DXIL
+// bitcode file/DXContainer, or (roadmap step R10, see
+// feme/docs/Roadmap.md's §2.4.2) a SPIR-V binary module: `loadModule` below
+// sniffs which, and for DXIL/SPIR-V, runs the same import
+// (`feme::DXILImporter`/`feme::SPIRVImporter`) + translation/raising
+// `feme::Driver` runs before any target-specific lowering (see the "DXIL"
+// and "SPIR-V" sections of feme/docs/Design.md) -- letting a test compile
+// real HLSL through `clang`/DXIL's own backend and run the result straight
+// through this tool (see feme/test/Tools/feme-run/HLSL), or assemble a
+// `spirv` dialect MLIR module into SPIR-V with `feme-translate
+// --serialize-spirv` and do the same. A SPIR-V-sourced module's bound
+// `spirv.VulkanBuffer` storage-buffer resources are normalized directly by
+// `feme::cpu::SPIRVResourceLoweringPass`, the SPIR-V counterpart to the
+// DXIL side's `BoundResourceNormalizationPass`/`ResourceLoweringPass` pair
+// (see that pass's own header comment for current scope); every other
+// builtin/intrinsic the CPU pipeline lowers already accepts both formats'
+// raised vocabulary uniformly (see e.g. `feme::cpu::SIMDizePass`'s
+// `dx_thread_id`/`spv_thread_id` cases).
 //
 // Every resource-heap/binding entry defaults to an untyped raw buffer, the
 // only kind milestone 11's heap file format described; roadmap step R8
@@ -71,10 +78,12 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
 #include "feme/Import/DXIL/DXILImporter.h"
+#include "feme/Import/SPIRV/SPIRVImporter.h"
 #include "feme/Target/CPU/JITEngine.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -417,6 +426,41 @@ bool looksLikeDXIL(MemoryBufferRef Buffer) {
                                                            Data.size()));
 }
 
+/// Whether \p Buffer looks like a SPIR-V binary module, the same sniff
+/// `feme::Driver`'s own format detection uses (see the "SPIR-V" section of
+/// feme/docs/Design.md): a stream of 32-bit words beginning with a fixed
+/// magic number, in either byte order depending on the endianness its
+/// producer chose (see the SPIR-V specification's "Physical Layout of a
+/// SPIR-V Module and Instruction").
+bool looksLikeSPIRV(MemoryBufferRef Buffer) {
+  StringRef Data = Buffer.getBuffer();
+  if (Data.size() < sizeof(uint32_t))
+    return false;
+  uint32_t Magic;
+  memcpy(&Magic, Data.data(), sizeof(Magic));
+  return Magic == 0x07230203u || Magic == 0x03022307u;
+}
+
+/// Clears \p M's target triple/data layout and drops its
+/// `llvm.module.flags`: neither format's own module flavor has any meaning
+/// to the FeMe CPU target's JIT (see `feme::Driver::run`: retargeting to
+/// any other target, CPU included, replaces both once codegen begins), and
+/// Clang's HLSL front end stamps ordinary host-compiler module flags (e.g.
+/// "frame-pointer") that would otherwise only ever produce a harmless but
+/// noisy "conflicting values" warning once linked against
+/// `libFeMeRuntimeCPU`'s own (different) values for them. Leaving both
+/// target-agnostic matches every raised `.ll` fixture (see e.g.
+/// feme/test/Tools/feme-run/thread-id-store.ll, which carries no `target
+/// triple`/`target datalayout` at all) so `feme::cpu::JITEngine` -- which
+/// never itself sets either -- treats every importer's output exactly the
+/// same way.
+void clearHostAgnosticMetadata(llvm::Module &M) {
+  M.setTargetTriple(llvm::Triple());
+  M.setDataLayout(llvm::DataLayout());
+  if (llvm::NamedMDNode *ModuleFlags = M.getNamedMetadata("llvm.module.flags"))
+    M.eraseNamedMetadata(ModuleFlags);
+}
+
 /// Loads \p Filename as the raised LLVM IR the JIT engine expects. Already-
 /// raised, idiomatic LLVM IR (`.ll`/`.bc`) is parsed directly, matching
 /// `feme-run`'s original, milestone-4 scope; a DXIL bitcode file or
@@ -428,8 +472,18 @@ bool looksLikeDXIL(MemoryBufferRef Buffer) {
 /// `hlsl.*` function attributes this tool's own pipeline reads them from --
 /// see the DXIL section of feme/docs/Design.md) -- letting a test compile
 /// real HLSL through `clang`/DXIL's own backend and run the result straight
-/// through this tool. See the file comment above for what remains unwired
-/// (SPIR-V import).
+/// through this tool. A SPIR-V binary module is imported
+/// (`feme::SPIRVImporter`, reusing MLIR's own `spirv` dialect deserializer)
+/// and translated straight to LLVM IR (`feme::SPIRVToLLVMTranslator`);
+/// unlike DXIL, no further raising pass runs here -- the translator's own
+/// `feme::spirv::createConvertSPIRVToLLVMPass` (see the "SPIR-V -> MLIR llvm
+/// dialect -> LLVM IR" section of feme/docs/Design.md) already recovers the
+/// entry point/thread-group-size `hlsl.*` function attributes DXIL's
+/// `MetadataRaisingPass` recovers separately, and leaves resource access in
+/// the raised, format-agnostic `llvm.spv.*` vocabulary
+/// `feme::cpu::SPIRVResourceLoweringPass` (part of the CPU pipeline itself,
+/// see its own header comment) normalizes, mirroring how DXIL's raised
+/// `llvm.dx.*` vocabulary is normalized there too.
 Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
   ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr =
       MemoryBuffer::getFileOrSTDIN(Filename, /*IsText=*/false);
@@ -450,27 +504,26 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
     feme::dxil::OpRaisingPass().run(M, MAM);
     feme::dxil::MetadataRaisingPass().run(M, MAM);
 
-    // DXIL's own module triple/data layout has no meaning to the FeMe CPU
-    // target's JIT (see `feme::Driver::run`: retargeting to any other
-    // target, CPU included, replaces both once codegen begins). Clearing
-    // them leaves the module target-agnostic, matching every raised `.ll`
-    // fixture (see e.g. feme/test/Tools/feme-run/thread-id-store.ll, which
-    // carries no `target triple`/`target datalayout` at all) so
-    // `feme::cpu::JITEngine` -- which never itself sets either -- treats it
-    // exactly the same way regardless of which importer produced it.
-    M.setTargetTriple(llvm::Triple());
-    M.setDataLayout(llvm::DataLayout());
-    // Clang's HLSL front end also stamps ordinary host-compiler module
-    // flags (e.g. "frame-pointer") that mean nothing to the FeMe CPU
-    // target's JIT and, when linked against `libFeMeRuntimeCPU`'s own
-    // (different) values for them, would only ever produce a harmless but
-    // noisy "conflicting values" warning; drop them for the same reason the
-    // triple/data layout above are cleared.
-    if (llvm::NamedMDNode *ModuleFlags =
-            M.getNamedMetadata("llvm.module.flags"))
-      M.eraseNamedMetadata(ModuleFlags);
-
+    clearHostAgnosticMetadata(M);
     return Imported;
+  }
+
+  if (looksLikeSPIRV((*BufOrErr)->getMemBufferRef())) {
+    feme::SPIRVImporter Importer;
+    feme::ImportOptions ImportOpts;
+    Expected<feme::Module> Imported =
+        Importer.import((*BufOrErr)->getMemBufferRef(), ImportOpts, Ctx);
+    if (!Imported)
+      return Imported.takeError();
+
+    feme::SPIRVToLLVMTranslator ToLLVMIR;
+    Expected<feme::Module> AsLLVMIR =
+        ToLLVMIR.translate(std::move(*Imported), Ctx);
+    if (!AsLLVMIR)
+      return AsLLVMIR.takeError();
+
+    clearHostAgnosticMetadata(AsLLVMIR->getLLVMModule());
+    return AsLLVMIR;
   }
 
   SMDiagnostic Err;
@@ -484,6 +537,7 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
   }
   return feme::Module::fromLLVMIR(std::move(LLVMMod));
 }
+
 
 /// Runs `--object` mode (see the file comment above): loads \p Filename as
 /// a real compiled object file, resolves \p EntryPoint's (or "main"'s)
@@ -538,7 +592,8 @@ int main(int argc, char **argv) {
 
   cl::opt<std::string> InputFilename(
       cl::Positional, cl::Required,
-      cl::desc("<input .ll/.bc file, or DXIL bitcode/DXContainer>"));
+      cl::desc("<input .ll/.bc file, DXIL bitcode/DXContainer, or SPIR-V "
+               "binary module>"));
   cl::opt<std::string> HeapFilename(
       "heap", cl::desc("The resource-heap YAML file (see feme-run's own "
                        "file comment)"));
