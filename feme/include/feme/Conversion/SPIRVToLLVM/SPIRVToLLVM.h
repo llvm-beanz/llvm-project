@@ -53,8 +53,8 @@ namespace spirv {
 std::string getTargetTriple(mlir::spirv::ModuleOp Module);
 
 /// What `llvm.spv.resource.handlefrombinding` needs to know about a SPIR-V
-/// resource variable, recovered from its declaration before the conversion
-/// drops it.
+/// resource variable -- an image, a sampler, or a `StorageBuffer` block --
+/// recovered from its declaration before the conversion drops it.
 struct ResourceInfo {
   uint32_t DescriptorSet;
   uint32_t Binding;
