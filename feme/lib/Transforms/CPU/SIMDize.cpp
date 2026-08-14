@@ -331,6 +331,17 @@ class FunctionWidener {
 
   SmallVector<Instruction *, 16> ToErase;
 
+  /// Set by any `widen*` helper that diagnoses an unsupported construct via
+  /// `emitError` partway through Pass 2 of `widen()` below (unlike
+  /// `checkSupportedControlFlow`/`checkVectorDecompositionSupported`, which
+  /// run to completion *before* any widening starts and can simply return
+  /// `false`). `LLVMContext::emitError` only reports a diagnostic -- it
+  /// does not itself stop execution -- so `widen()` must check this flag
+  /// after every instruction it widens and bail out immediately once it is
+  /// set, before continuing to build widened uses of (or replace uses of)
+  /// a value that was left without its usual `Widened`/`ToErase` entry.
+  bool HadError = false;
+
 public:
   FunctionWidener(Function &OldF, unsigned WaveSize, UniformityInfo &UI)
       : OldF(OldF), WaveSize(WaveSize), UI(UI),
@@ -864,6 +875,7 @@ void FunctionWidener::widenMaskedAtomicRMW(
         AtomicRMWInst::getOperationName(Matched.Op) +
         "' with no maskable identity element (roadmap milestone 7 "
         "deviation)");
+    HadError = true;
     return;
   }
 
@@ -962,6 +974,7 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
         Twine(Callee ? Callee->getName() : "<indirect>") +
         "' (roadmap milestone 7 does not cover a generic vector-call "
         "rewrite)");
+    HadError = true;
     return;
   }
 
@@ -1104,6 +1117,13 @@ Function *FunctionWidener::widen() {
         continue;
       IRBuilder<> Builder(&I);
       widenInstruction(I, Builder);
+      // A `widen*` helper above may have diagnosed an unsupported
+      // construct (see `HadError`'s comment) and returned without giving
+      // `I` its usual `Widened`/`ToErase` entry. Bail out immediately
+      // instead of letting pass 3 or the erasure loop below dereference
+      // that missing entry.
+      if (HadError)
+        return nullptr;
     }
   }
 

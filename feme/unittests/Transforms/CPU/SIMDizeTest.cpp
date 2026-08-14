@@ -12,6 +12,7 @@
 #include "feme/Transforms/CPU/Linearize.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -192,6 +193,51 @@ TEST(SIMDizeTest, ScalarizesAtomicRMWFallback) {
     if (isa<AtomicRMWInst>(&I))
       ++AtomicRMWCount;
   EXPECT_EQ(AtomicRMWCount, 4u);
+}
+
+// A divergent `atomicrmw nand` (unlike `add`/`and`/... -- see
+// `ScalarizesAtomicRMWFallback` above and `getAtomicRMWIdentity`'s comment
+// in SIMDize.cpp) has no identity element a masked-off lane's operand can
+// be replaced with, so `widenMaskedAtomicRMW` diagnoses it via `emitError`
+// instead of masking it. This regression-tests that `widen()` bails out
+// cleanly right there instead of continuing to widen the rest of the
+// function with a value that was never given its usual `Widened` entry
+// (previously a null-pointer dereference/crash later in the same pass).
+TEST(SIMDizeTest, DiagnosesUnmaskableAtomicRMWWithoutCrashing) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %c = icmp eq i32 %tid, 0
+      br i1 %c, label %t, label %f
+    t:
+      %old = atomicrmw nand ptr @g, i32 1 monotonic
+      br label %end
+    f:
+      br label %end
+    end:
+      ret void
+    }
+    @g = global i32 0
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        if (DI->getSeverity() == DS_Error)
+          *reinterpret_cast<bool *>(Ctx) = true;
+      },
+      &SawError);
+
+  ModuleAnalysisManager MAM;
+  feme::cpu::LinearizePass().run(*M, MAM);
+  runPass(*M);
+
+  EXPECT_TRUE(SawError);
 }
 
 TEST(SIMDizeTest, WidensMaskedLoadStoreToGatherScatter) {
