@@ -42,10 +42,15 @@
 ;   only (no `--wave-sizes`): `feme::cpu::LinearizePass` does not yet
 ;   linearize every shape `StructurizeCFG`/`FixIrreducible` can turn an
 ;   irreducible input into (in particular, a divergent branch surviving
-;   inside a loop that a generated irreducible edge produced can reach the
-;   JIT unwidened -- see the P0 entry this milestone's update adds to
-;   feme/docs/Roadmap.md's gap inventory), so diffing the normal pipeline
-;   against `--reference` for these shapes is not yet safe to check in.
+;   inside a loop that a generated irreducible edge produced), so diffing
+;   the normal pipeline against `--reference` for these shapes still is not
+;   meaningful -- the normal pipeline is *expected* to fail on them, not
+;   compute a matching answer. Roadmap step R2 (feme/docs/Roadmap.md's
+;   §1.6) closed the P0 half of that gap: such a shape used to reach the
+;   JIT unwidened and hang instead of failing (`feme::cpu::runPipeline`
+;   silently continued past a pass's diagnostic); it now fails fast, with
+;   the diagnostic surfaced, matching every other unsupported shape (see
+;   `feme/test/Tools/feme/feme-cpu-reject-unwidened-loop-divergent-branch.ll`).
 ;   `--reference` itself has no such restriction (see feme-run.md): this
 ;   block is what closes out this milestone's other prerequisite, a real
 ;   termination bug in `feme-cfg-gen`'s own irreducible-edge construct (an

@@ -21,16 +21,70 @@
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Linker/Linker.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
 
 namespace {
+
+/// RAII installation of a diagnostic handler that records whether any
+/// `DS_Error`-severity diagnostic fired while it is alive, restoring \p M's
+/// previous handler callback on destruction. Several CPU-pipeline passes
+/// (`feme::cpu::PreparePass`, `feme::cpu::LinearizePass`,
+/// `feme::cpu::SIMDizePass`, ...) report an unsupported shape by calling
+/// `LLVMContext::emitError` rather than through an `Error`-returning `run`
+/// (a `ModulePassManager` has none to propagate one through -- see
+/// `feme::cpu::checkSupportedRaisedOps`'s own comment for the same
+/// constraint); left unchecked, `ModulePassManager::run`'s `void` result
+/// means such a diagnostic prints to stderr but otherwise lets the pipeline
+/// carry on to link and JIT-dispatch whatever the diagnosing pass left
+/// behind (see the "divergent branch inside a loop" P0 item in
+/// feme/docs/Roadmap.md's §1.6: `feme::cpu::LinearizePass` diagnoses and
+/// leaves such a shape completely untouched, and without this guard the
+/// unwidened, still-divergent function it left behind would reach the JIT
+/// and run forever rather than fail). Mirrors the same pattern
+/// `tools/feme-opt/feme-opt.cpp`'s `runLLVMIRMode` already uses to turn a
+/// diagnostic into its own "print and fail" exit path.
+class ErrorDiagnosticGuard {
+public:
+  explicit ErrorDiagnosticGuard(LLVMContext &Ctx)
+      : Ctx(Ctx), PrevCallback(Ctx.getDiagnosticHandlerCallBack()),
+        PrevContext(Ctx.getDiagnosticContext()) {
+    Ctx.setDiagnosticHandlerCallBack(&handle, this);
+  }
+
+  ~ErrorDiagnosticGuard() {
+    Ctx.setDiagnosticHandlerCallBack(PrevCallback, PrevContext);
+  }
+
+  bool sawError() const { return SawError; }
+
+private:
+  static void handle(const DiagnosticInfo *DI, void *Context) {
+    auto *Self = static_cast<ErrorDiagnosticGuard *>(Context);
+    if (DI->getSeverity() == DS_Error)
+      Self->SawError = true;
+    errs() << LLVMContext::getDiagnosticMessagePrefix(DI->getSeverity())
+           << ": ";
+    DiagnosticPrinterRawOStream Printer(errs());
+    DI->print(Printer);
+    errs() << "\n";
+  }
+
+  LLVMContext &Ctx;
+  DiagnosticHandler::DiagnosticHandlerTy PrevCallback;
+  void *PrevContext;
+  bool SawError = false;
+};
 
 /// Finds the sole (or named) `hlsl.shader` function in \p M -- see
 /// `feme::cpu::PreparePass`'s own (equivalent, but `Error`-reporting-via-
@@ -128,6 +182,14 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
     PB.registerLoopAnalyses(LAM);
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
+    // See `ErrorDiagnosticGuard`'s comment: every pass below reports an
+    // unsupported shape through `LLVMContext::emitError` rather than an
+    // `Error` a `ModulePassManager::run` could propagate, so this guard is
+    // what turns "printed a diagnostic" into "this function fails" instead
+    // of silently continuing to link and JIT-dispatch whatever the
+    // diagnosing pass left behind.
+    ErrorDiagnosticGuard DiagGuard(M.getContext());
+
     // `feme::cpu::BoundResourceNormalizationPass` must run before
     // `checkSupportedRaisedOps` -- a finite-range bound handle it can
     // normalize is not a raised operation the CPU target rejects, unlike an
@@ -140,17 +202,49 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
     Normalize.addPass(PreparePass(EntryPoint));
     Normalize.addPass(BoundResourceNormalizationPass());
     Normalize.run(M, MAM);
+    if (DiagGuard.sawError())
+      return createStringError(inconvertibleErrorCode(),
+                               "feme-cpu pipeline: a diagnostic was reported "
+                               "while preparing '%s' (see stderr)",
+                               EntryName.c_str());
 
     if (Error E = checkSupportedRaisedOps(M))
       return std::move(E);
 
-    ModulePassManager MPM;
-    MPM.addPass(ResourceLoweringPass());
-    MPM.addPass(LinearizePass());
-    MPM.addPass(SIMDizePass(WaveSize));
-    MPM.addPass(WaveLoweringPass());
-    MPM.addPass(EntryWrapperPass());
-    MPM.run(M, MAM);
+    // Each pass runs in its own `ModulePassManager`, checked immediately
+    // after: `feme::cpu::LinearizePass` (and, per §1.6's new gap this
+    // milestone closes, `feme::cpu::SIMDizePass`) can diagnose a shape and
+    // deliberately leave it completely untouched rather than fail outright
+    // (a `ModulePassManager::run` has no `Error` to propagate one through),
+    // and a later pass in this same pipeline (`feme::cpu::EntryWrapperPass`
+    // in particular) assumes every earlier one actually produced its
+    // documented postcondition -- running it anyway on a function a prior
+    // pass only diagnosed, rather than transformed, hits an
+    // `llvm_unreachable` instead of a clean failure. Bailing between each
+    // pass, not just once after the whole pipeline, is what makes this
+    // guard actually prevent that rather than merely detect it too late.
+    auto runAndCheck = [&](StringRef Stage, auto &&Pass) -> Error {
+      ModulePassManager StageMPM;
+      StageMPM.addPass(std::forward<decltype(Pass)>(Pass));
+      StageMPM.run(M, MAM);
+      if (DiagGuard.sawError())
+        return createStringError(
+            inconvertibleErrorCode(),
+            "feme-cpu pipeline: a diagnostic was reported while %s '%s' "
+            "(see stderr)",
+            Stage.str().c_str(), EntryName.c_str());
+      return Error::success();
+    };
+    if (Error E = runAndCheck("lowering resources for", ResourceLoweringPass()))
+      return std::move(E);
+    if (Error E = runAndCheck("linearizing", LinearizePass()))
+      return std::move(E);
+    if (Error E = runAndCheck("widening", SIMDizePass(WaveSize)))
+      return std::move(E);
+    if (Error E = runAndCheck("lowering waves for", WaveLoweringPass()))
+      return std::move(E);
+    if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
+      return std::move(E);
   }
 
   std::string WrapperName = getEntrySymbolName(EntryName);
