@@ -37,6 +37,7 @@
 #include "feme/Transforms/CPU/ReferenceLowering.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
+#include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/VerifyStructured.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
@@ -165,6 +166,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::cpu::ResourceLoweringPass::name())
           return false;
         MPM.addPass(feme::cpu::ResourceLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::SPIRVResourceLoweringPass::name())
+          return false;
+        MPM.addPass(feme::cpu::SPIRVResourceLoweringPass());
         return true;
       });
   PB.registerPipelineParsingCallback(

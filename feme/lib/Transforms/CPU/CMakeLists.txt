@@ -13,6 +13,7 @@ add_mlir_library(FeMeTransformsCPU
   ResourceCalls.cpp
   ResourceLowering.cpp
   SIMDize.cpp
+  SPIRVResourceLowering.cpp
   UnsupportedOps.cpp
   VerifyStructured.cpp
   WaveCalls.cpp
