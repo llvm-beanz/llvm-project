@@ -1,8 +1,9 @@
 // REQUIRES: directx-registered-target
 // RUN: split-file %s %t
 // RUN: clang -target dxil--shadermodel6.5-compute -c %t/shader.hlsl -o %t/shader.dxcontainer
-// RUN: feme-run --wave-size=4 --groups=1,1,1 \
-// RUN:     --heap=%t/heap.yaml %t/shader.dxcontainer | FileCheck %s
+// RUN: %feme-wave-size-sweep --feme-run=feme-run --filecheck=FileCheck \
+// RUN:     --check-file=%s --wave-sizes=4,8,16,32 -- --groups=1,1,1 \
+// RUN:     --heap=%t/heap.yaml %t/shader.dxcontainer
 
 // End-to-end coverage for divergent control flow: real HLSL, compiled to a
 // DXIL DXContainer by Clang, imported/raised/JIT-dispatched by `feme-run`
@@ -11,6 +12,9 @@
 // wave, so this exercises `feme::cpu::LinearizePass` (roadmap milestone 6:
 // linearizing the divergent diamond) and `feme::cpu::SIMDizePass`'s
 // `select`-based widening of the two arms' predicated results together.
+// Wave-size-independent (see loop.hlsl's own comment for why this runs at
+// `W` in {4, 8, 16, 32} -- roadmap step R1, feme/docs/Roadmap.md's
+// §2.2.1).
 
 // CHECK: binding[0:0][0]: 100 201 102 203
 
