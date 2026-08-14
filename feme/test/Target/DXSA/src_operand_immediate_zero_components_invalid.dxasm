@@ -1,0 +1,25 @@
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | FileCheck %s
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - | feme-opt --verify-roundtrip
+// RUN: dxbc-as %s | feme-translate --import-dxsa-bin - 2>&1 | FileCheck %s --check-prefix=DIAG
+
+// CHECK:      dxsa.module {
+// CHECK-NEXT:   dxsa.dcl_temps 1
+dcl_temps 1
+
+// add r0.xyzw, <src0>, r2.xyzw with the src0 operand recognized as an `l`
+// (32-bit immediate) type but its component-count field corrupted to
+// 0-component, so no immediate payload DWORDs follow it. Unlike
+// unknown.dxasm's corrupted-*type*-field case, this operand type is a
+// perfectly valid enumerator, so it reaches SrcOperandAttr construction
+// with an empty values32 payload -- which used to hit a builder assertion
+// (`SrcOperandAttr::get`'s "operand type `l` requires a values32 literal"
+// invariant) instead of surfacing this diagnostic and falling back to
+// `dxsa.unknown`, a crash `feme-dxbc-import-fuzzer` found on this exact
+// shape.
+// CHECK-NEXT:   dxsa.unknown <tokens = [0x06000000, 0x001000F2, 0x00000000, 0x00004000, 0x00100E46, 0x00000002]>
+// DIAG: warning: treating next 6 token(s) as unknown: operand type `l` requires a values32 literal
+.dword 0x06000000, 0x001000F2, 0x00000000, 0x00004000, 0x00100E46, 0x00000002
+
+// CHECK-NEXT:   dxsa.dcl_temps 2
+dcl_temps 2
+// CHECK-NEXT: }

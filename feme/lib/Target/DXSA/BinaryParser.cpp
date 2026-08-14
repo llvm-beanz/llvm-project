@@ -724,12 +724,20 @@ public:
                                      componentsAttr, minPrecisionAttr);
   }
 
-  dxsa::SrcOperandAttr
+  // Returns failure (after emitting a diagnostic at \p loc) instead of
+  // asserting when the decoded fields violate SrcOperandAttr's invariants
+  // (e.g. an `l`/`d` immediate operand token whose decoded component count
+  // does not match its payload) -- unlike the other operand-attribute
+  // builders in this class, an SrcOperandAttr's verifier can be violated by
+  // a malformed but otherwise well-formed-looking token stream, which a
+  // fuzzer over untrusted binary input is expected to find.
+  FailureOr<dxsa::SrcOperandAttr>
   buildSrcOperandAttr(dxsa::OperandType operandType,
                       const OperandComponents &components,
                       ArrayRef<dxsa::IndexAttr> indexEntries,
                       std::optional<OperandModifier> opModifier,
-                      ArrayRef<int32_t> values, ArrayRef<int64_t> values64) {
+                      ArrayRef<int32_t> values, ArrayRef<int64_t> values64,
+                      Location loc) {
     auto componentsValue = components.num == 0 ? dxsa::OperandComponents::none
                            : components.num == 1
                                ? dxsa::OperandComponents::scalar
@@ -775,9 +783,13 @@ public:
                             ? DenseI64ArrayAttr()
                             : DenseI64ArrayAttr::get(context, values64);
 
-    return dxsa::SrcOperandAttr::get(
-        context, operandType, indexAttr, componentsAttr, minPrecisionAttr,
-        nonUniformAttr, swizzleAttr, modifierAttr, valuesAttr, values64Attr);
+    auto result = dxsa::SrcOperandAttr::getChecked(
+        [&] { return emitError(loc); }, context, operandType, indexAttr,
+        componentsAttr, minPrecisionAttr, nonUniformAttr, swizzleAttr,
+        modifierAttr, valuesAttr, values64Attr);
+    if (!result)
+      return failure();
+    return result;
   }
 
   dxsa::IndexAttr buildOperandIndexImm32(int32_t imm) {
@@ -2032,11 +2044,12 @@ public:
   }
 
   FailureOr<dxsa::SrcOperandAttr> parseSrcOperand() {
+    auto loc = getLocation();
     auto fields = parseOperandFields();
     FAILURE_IF_FAILED(fields);
     return builder.buildSrcOperandAttr(fields->type, fields->components,
                                        fields->indexEntries, fields->modifier,
-                                       fields->values, fields->values64);
+                                       fields->values, fields->values64, loc);
   }
 
   // Get plain immediates with no relative indices.
