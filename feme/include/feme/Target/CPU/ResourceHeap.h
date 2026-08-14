@@ -34,6 +34,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -64,6 +65,47 @@ std::vector<FemeDescriptor>
 materializeResourceHeap(const ResourceInfo &Info,
                         llvm::ArrayRef<BoundResourceBinding> Bindings,
                         llvm::ArrayRef<FemeDescriptor> DynamicHeap);
+
+/// The resources one dispatch runs against. Descriptor heaps are owned by
+/// the caller and must remain alive until the `runDispatch` call using them
+/// returns. Shared by `feme::cpu::JITEngine::dispatch` (the compiled entry
+/// point resolved through the JIT) and `feme-run`'s `--object` AOT path
+/// (the same entry point resolved out of a real object file) -- see
+/// `runDispatch` below.
+struct DispatchResources {
+  /// The caller's *logical* dynamic resource heap: unprefixed, exactly as a
+  /// shader using no traditional binding would see it directly. `dispatch`
+  /// materializes the physical heap the compiled shader actually expects --
+  /// this array's contents placed right after the reserved bound-range
+  /// prefix `BoundResources` fills (see "Descriptor heaps" in
+  /// feme/docs/FeMeCPUDesign.md and `materializeResourceHeap`). For a
+  /// shader using no traditional binding, this is passed straight through.
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  /// Descriptors for the shader's traditionally-bound resources, matched by
+  /// (Space, BaseRegister) to `Info.BoundRanges` -- see
+  /// `BoundResourceBinding`. Empty for a shader using no traditional
+  /// binding.
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
+  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+};
+
+/// A compiled `feme_cpu_entry_<name>` symbol's signature (see "Kernel ABI"
+/// in feme/docs/FeMeCPUDesign.md).
+using EntryPointFn = void (*)(const FemeDispatchArgs *);
+
+/// Runs a whole dispatch to completion: materializes \p Resources into the
+/// physical resource heap \p Info's bound-range layout expects (see
+/// `materializeResourceHeap`), then calls \p EntryFn once per group in
+/// \p GroupCount, filling in a fresh `FemeDispatchArgs` each time. Shared by
+/// `feme::cpu::JITEngine::dispatch` and `feme-run`'s `--object` AOT path so
+/// the group-iteration/heap-materialization logic has one implementation
+/// (see `DispatchResources`'s own comment). Groups run sequentially on the
+/// calling thread, matching `JITEngine::dispatch`'s own current deviation
+/// from the full design's thread pool.
+void runDispatch(EntryPointFn EntryFn, const ResourceInfo &Info,
+                 const DispatchResources &Resources,
+                 std::array<uint32_t, 3> GroupCount);
 
 } // namespace feme::cpu
 

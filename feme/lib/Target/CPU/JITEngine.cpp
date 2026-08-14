@@ -358,47 +358,7 @@ JITEngine::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
 Error JITEngine::dispatch(const DispatchResources &Resources,
                           std::array<uint32_t, 3> GroupCount) const {
   using EntryFnTy = void (*)(const FemeDispatchArgs *);
-  auto *Entry = reinterpret_cast<EntryFnTy>(EntryFn);
-
-  // Materialize the physical resource heap this shader's compiled entry
-  // point expects: its reserved bound-range prefix (if any) followed by the
-  // caller's logical dynamic heap (see "Descriptor heaps" in
-  // feme/docs/FeMeCPUDesign.md). For a shader using no traditional binding,
-  // `Info.ReservedResourceHeapSize == 0` and this is exactly
-  // `Resources.ResourceHeap`.
-  std::vector<FemeDescriptor> PhysicalResourceHeap = materializeResourceHeap(
-      Info, Resources.BoundResources, Resources.ResourceHeap);
-
-  FemeDispatchArgs Args{};
-  Args.ResourceHeap = PhysicalResourceHeap.data();
-  Args.ResourceHeapCount = static_cast<uint32_t>(PhysicalResourceHeap.size());
-  Args.SamplerHeap = Resources.SamplerHeap.data();
-  Args.SamplerHeapCount = static_cast<uint32_t>(Resources.SamplerHeap.size());
-  Args.RootConstants = Resources.RootConstants.data();
-  Args.RootConstantSize = static_cast<uint32_t>(Resources.RootConstants.size());
-  Args.GroupCount[0] = GroupCount[0];
-  Args.GroupCount[1] = GroupCount[1];
-  Args.GroupCount[2] = GroupCount[2];
-  // Groupshared allocation: `feme::cpu::EntryWrapperPass` (milestone 9)
-  // allocates a small `groupshared` declaration on its own stack, so most
-  // groups need nothing from here. A shader declaring more than that
-  // pass's `GroupSharedStackLimit` needs a real host-supplied buffer this
-  // JIT path does not yet provide -- a group that large fails at runtime
-  // (a null-pointer dereference), not compile time; the JIT flow doesn't
-  // consult `feme::cpu::ArtifactInfo::GroupSharedSize` to allocate one yet.
-  Args.GroupShared = nullptr;
-
-  // Deviation (see the header comment): groups run sequentially on the
-  // calling thread rather than across a thread pool.
-  for (uint32_t Z = 0; Z != GroupCount[2]; ++Z) {
-    for (uint32_t Y = 0; Y != GroupCount[1]; ++Y) {
-      for (uint32_t X = 0; X != GroupCount[0]; ++X) {
-        Args.GroupID[0] = X;
-        Args.GroupID[1] = Y;
-        Args.GroupID[2] = Z;
-        Entry(&Args);
-      }
-    }
-  }
+  runDispatch(reinterpret_cast<EntryFnTy>(EntryFn), Info, Resources,
+             GroupCount);
   return Error::success();
 }

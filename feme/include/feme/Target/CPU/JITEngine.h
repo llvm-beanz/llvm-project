@@ -111,28 +111,6 @@ struct JITOptions {
   bool Reference = false;
 };
 
-/// The resources a dispatch runs against. Descriptor heaps are owned by the
-/// caller and must remain alive until the `dispatch` call using them
-/// returns.
-struct DispatchResources {
-  /// The caller's *logical* dynamic resource heap: unprefixed, exactly as a
-  /// shader using no traditional binding would see it directly. `dispatch`
-  /// materializes the physical heap the compiled shader actually expects --
-  /// this array's contents placed right after the reserved bound-range
-  /// prefix `BoundResources` fills (see "Descriptor heaps" in
-  /// feme/docs/FeMeCPUDesign.md and `feme::cpu::materializeResourceHeap`).
-  /// For a shader using no traditional binding, this is passed straight
-  /// through.
-  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
-  /// Descriptors for the shader's traditionally-bound resources, matched by
-  /// (Space, BaseRegister) to `getResourceInfo().BoundRanges` -- see
-  /// `feme::cpu::BoundResourceBinding`. Empty for a shader using no
-  /// traditional binding.
-  llvm::ArrayRef<BoundResourceBinding> BoundResources;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
-  llvm::ArrayRef<uint8_t> RootConstants;
-};
-
 /// Owns an ORC `LLJIT` instance, the compiled shader in it, and the
 /// execution of dispatches against it. See the file comment above for
 /// current scope.
