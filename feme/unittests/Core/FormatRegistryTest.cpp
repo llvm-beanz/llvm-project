@@ -10,6 +10,7 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Export/Exporter.h"
 #include "feme/Import/Importer.h"
 #include "gtest/gtest.h"
 
@@ -38,10 +39,28 @@ private:
   llvm::StringRef Name;
 };
 
+/// A minimal Exporter, mirroring FakeImporter above.
+class FakeExporter : public Exporter {
+public:
+  explicit FakeExporter(llvm::StringRef Name) : Name(Name) {}
+
+  llvm::Error exportModule(Module &, const ExportOptions &, Context &,
+                           llvm::raw_pwrite_stream &) const override {
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "FakeExporter never actually exports");
+  }
+
+  llvm::StringRef getFormatName() const override { return Name; }
+
+private:
+  llvm::StringRef Name;
+};
+
 TEST(FormatRegistryTest, StartsEmpty) {
   FormatRegistry Registry;
   EXPECT_TRUE(Registry.empty());
   EXPECT_EQ(Registry.lookupImporter("anything"), nullptr);
+  EXPECT_EQ(Registry.lookupExporter("anything"), nullptr);
   EXPECT_TRUE(Registry.importers().empty());
 }
 
@@ -55,6 +74,19 @@ TEST(FormatRegistryTest, RegisterImporterMakesItLookupable) {
   EXPECT_EQ(Registry.lookupImporter("not-registered"), nullptr);
   ASSERT_EQ(Registry.importers().size(), 1u);
   EXPECT_EQ(Registry.importers()[0], &Fake);
+}
+
+TEST(FormatRegistryTest, RegisterExporterMakesItLookupable) {
+  FormatRegistry Registry;
+  FakeExporter Fake("fake");
+  Registry.registerExporter(Fake);
+
+  EXPECT_FALSE(Registry.empty());
+  EXPECT_EQ(Registry.lookupExporter("fake"), &Fake);
+  EXPECT_EQ(Registry.lookupExporter("not-registered"), nullptr);
+  // Registering an Exporter does not also register an Importer: the two
+  // are independent (DXBC, for example, has an Importer but no Exporter).
+  EXPECT_EQ(Registry.lookupImporter("fake"), nullptr);
 }
 
 TEST(FormatRegistryTest, RegistersMultipleFormatsIndependently) {

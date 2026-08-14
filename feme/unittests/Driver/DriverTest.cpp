@@ -135,10 +135,10 @@ TEST(DriverTest, RejectsDXBCContainerWithNoShaderBytecodePart) {
 
 TEST(DriverTest, PopulatesFormatRegistry) {
   // Constructing a Driver populates its Context's FormatRegistry with
-  // FeMe's statically-linked Importers (see the "Deviation: FormatRegistry
-  // population" note in feme/docs/Design.md), so an embedding consumer
-  // that wants to know "what formats does Driver know how to detect"
-  // doesn't need to hard-code the answer.
+  // FeMe's statically-linked Importers/Exporters (see the "Deviation:
+  // FormatRegistry population" note in feme/docs/Design.md), so an
+  // embedding consumer that wants to know "what formats does Driver know
+  // how to detect/round-trip" doesn't need to hard-code the answer.
   Context Ctx;
   EXPECT_TRUE(Ctx.getFormatRegistry().empty());
 
@@ -147,6 +147,12 @@ TEST(DriverTest, PopulatesFormatRegistry) {
   EXPECT_NE(Ctx.getFormatRegistry().lookupImporter("dxil"), nullptr);
   EXPECT_NE(Ctx.getFormatRegistry().lookupImporter("dxbc"), nullptr);
   EXPECT_NE(Ctx.getFormatRegistry().lookupImporter("spirv"), nullptr);
+
+  // DXBC has no Exporter (see the "Exporter" section of
+  // feme/docs/Design.md): it is not a current export use case.
+  EXPECT_NE(Ctx.getFormatRegistry().lookupExporter("dxil"), nullptr);
+  EXPECT_NE(Ctx.getFormatRegistry().lookupExporter("spirv"), nullptr);
+  EXPECT_EQ(Ctx.getFormatRegistry().lookupExporter("dxbc"), nullptr);
 }
 
 } // namespace

@@ -11,6 +11,8 @@ add_mlir_library(FeMeDriver
 
   LINK_LIBS PUBLIC
   FeMeCore
+  FeMeExportDXIL
+  FeMeExportSPIRV
   FeMeFrontend
   FeMeImportDXBC
   FeMeImportDXIL

@@ -8,6 +8,7 @@
 
 #include "feme/Core/FormatRegistry.h"
 
+#include "feme/Export/Exporter.h"
 #include "feme/Import/Importer.h"
 
 using namespace feme;
@@ -17,8 +18,18 @@ void FormatRegistry::registerImporter(const Importer &Imp) {
   Importers.push_back(&Imp);
 }
 
+void FormatRegistry::registerExporter(const Exporter &Exp) {
+  ExportersByName[Exp.getFormatName()] = &Exp;
+}
+
 const Importer *
 FormatRegistry::lookupImporter(llvm::StringRef FormatName) const {
   auto It = ImportersByName.find(FormatName);
   return It == ImportersByName.end() ? nullptr : It->second;
+}
+
+const Exporter *
+FormatRegistry::lookupExporter(llvm::StringRef FormatName) const {
+  auto It = ExportersByName.find(FormatName);
+  return It == ExportersByName.end() ? nullptr : It->second;
 }

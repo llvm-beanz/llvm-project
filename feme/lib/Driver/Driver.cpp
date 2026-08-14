@@ -11,6 +11,9 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/FormatRegistry.h"
 #include "feme/Core/Module.h"
+#include "feme/Export/DXIL/DXILExporter.h"
+#include "feme/Export/Exporter.h"
+#include "feme/Export/SPIRV/SPIRVExporter.h"
 #include "feme/Import/DXBC/DXBCImporter.h"
 #include "feme/Import/DXIL/DXILImporter.h"
 #include "feme/Import/Importer.h"
@@ -62,6 +65,13 @@ void populateFormatRegistry(FormatRegistry &Registry) {
   Registry.registerImporter(DXIL);
   Registry.registerImporter(DXBC);
   Registry.registerImporter(SPIRV);
+
+  // DXBC has no Exporter: it is not a current export use case (see the
+  // "Exporter" section of feme/docs/Design.md).
+  static const DXILExporter DXILExp;
+  static const SPIRVExporter SPIRVExp;
+  Registry.registerExporter(DXILExp);
+  Registry.registerExporter(SPIRVExp);
 }
 
 } // namespace
@@ -432,6 +442,20 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
 
   DriverResult Result;
   llvm::raw_svector_ostream OS(Result.Output);
+
+  // "dxil"/"spirv" round-trip back out through their own format's Exporter
+  // (see the "Exporter" section of feme/docs/Design.md) rather than the
+  // generic TargetMachineBackend directly; any other --target (real-ISA
+  // retargeting) has no format to round-trip to, so it keeps using
+  // TargetMachineBackend on the triple resolveTargetTriple computed above.
+  if (const Exporter *Exp =
+          Ctx.getFormatRegistry().lookupExporter(Opts.Target)) {
+    ExportOptions ExportOpts;
+    if (llvm::Error Err = Exp->exportModule(*AsLLVMIR, ExportOpts, Ctx, OS))
+      return std::move(Err);
+    return Result;
+  }
+
   TargetMachineBackend Backend;
   if (llvm::Error Err = Backend.run(M, BackendOpts, OS))
     return std::move(Err);
