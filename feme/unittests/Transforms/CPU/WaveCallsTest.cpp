@@ -151,7 +151,8 @@ TEST(WaveCallsTest, BallotRoundTrips) {
   CallInst *CI =
       createWaveCall(H.Builder, WaveCallKind::Ballot, 4, H.Mask, Operand);
   Type *I32Ty = Type::getInt32Ty(H.Ctx);
-  EXPECT_EQ(CI->getType(), StructType::get(H.Ctx, {I32Ty, I32Ty, I32Ty, I32Ty}));
+  EXPECT_EQ(CI->getType(),
+            StructType::get(H.Ctx, {I32Ty, I32Ty, I32Ty, I32Ty}));
   EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::Ballot));
 
   std::optional<MatchedWaveCall> Matched = matchWaveCall(*CI);
@@ -169,6 +170,58 @@ TEST(WaveCallsTest, MatchWaveCallRejectsUnrelatedCall) {
       GlobalValue::ExternalLinkage, "not.a.wave.call", H.M.get());
   CallInst *CI = H.Builder.CreateCall(Unrelated, {});
   EXPECT_FALSE(matchWaveCall(*CI));
+}
+
+TEST(WaveCallsTest, ActiveSumRoundTrips) {
+  Harness H(4);
+  Value *Operand = ConstantVector::getSplat(
+      ElementCount::getFixed(4), ConstantInt::get(Type::getInt32Ty(H.Ctx), 1));
+  CallInst *CI =
+      createWaveCall(H.Builder, WaveCallKind::ActiveSum, 4, H.Mask, Operand);
+  EXPECT_TRUE(CI->getType()->isIntegerTy(32));
+  EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::ActiveSum));
+
+  std::optional<MatchedWaveCall> Matched = matchWaveCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, WaveCallKind::ActiveSum);
+  EXPECT_EQ(Matched->WideMask, H.Mask);
+  EXPECT_EQ(Matched->WideOperand, Operand);
+  EXPECT_FALSE(verifyModule(*H.M, &errs()));
+}
+
+TEST(WaveCallsTest, PrefixSumRoundTripsAndIsDivergent) {
+  Harness H(4);
+  Value *Operand = ConstantVector::getSplat(
+      ElementCount::getFixed(4), ConstantInt::get(Type::getInt32Ty(H.Ctx), 1));
+  CallInst *CI =
+      createWaveCall(H.Builder, WaveCallKind::PrefixSum, 4, H.Mask, Operand);
+  EXPECT_EQ(CI->getType(), FixedVectorType::get(Type::getInt32Ty(H.Ctx), 4));
+  EXPECT_TRUE(isDivergentWaveCallResult(WaveCallKind::PrefixSum));
+
+  std::optional<MatchedWaveCall> Matched = matchWaveCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, WaveCallKind::PrefixSum);
+  EXPECT_FALSE(verifyModule(*H.M, &errs()));
+}
+
+TEST(WaveCallsTest, ActiveMaxIsTypeOverloaded) {
+  // Like `AllEqual`/`ReadLane`, the roadmap step R4 reduce/scan kinds are
+  // overloaded on the operand's scalar type, so an `i32` and an `f32`
+  // instance must not collide on the same callee.
+  Harness H(4);
+  Value *IntOperand = ConstantVector::getSplat(
+      ElementCount::getFixed(4), ConstantInt::get(Type::getInt32Ty(H.Ctx), 0));
+  Value *FloatOperand = ConstantVector::getSplat(
+      ElementCount::getFixed(4), ConstantFP::get(Type::getFloatTy(H.Ctx), 0.0));
+
+  CallInst *IntCall =
+      createWaveCall(H.Builder, WaveCallKind::ActiveMax, 4, H.Mask, IntOperand);
+  CallInst *FloatCall = createWaveCall(H.Builder, WaveCallKind::ActiveMax, 4,
+                                       H.Mask, FloatOperand);
+  EXPECT_NE(IntCall->getCalledFunction(), FloatCall->getCalledFunction());
+  EXPECT_TRUE(IntCall->getType()->isIntegerTy(32));
+  EXPECT_TRUE(FloatCall->getType()->isFloatTy());
+  EXPECT_FALSE(verifyModule(*H.M, &errs()));
 }
 
 } // namespace

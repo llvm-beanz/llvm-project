@@ -47,22 +47,23 @@
 //   Ballot           -> `bitcast (M & X) to iW`, split and zero-pad into
 //                       the source ABI's 32-bit result words (roadmap step
 //                       R3; see `lowerBallot`)
+//   ActiveSum/Product/Max/UMax/Min/UMin/BitAnd/BitOr/BitXor
+//                    -> `llvm.vector.reduce.*` over `select(M, X, identity)`
+//                       (roadmap step R4; see `lowerActiveReduce`)
+//   PrefixSum/PrefixProduct
+//                    -> exclusive running sum/product of `select(M, X,
+//                       identity)`, lane by lane, the same "lane loop for
+//                       large W" `PrefixBitCount` uses (roadmap step R4;
+//                       see `lowerPrefixReduce`)
 //
 // `getFirstActiveLane` is the one piece of arithmetic `IsFirstLane` and
 // `AllEqual` share (see its own comment for why it never reads out of
 // bounds, even when `M` is all-zero).
 //
-// `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/`Xor` and
-// `WavePrefixSum`/`Product`/`USum`/`UProduct` are not lowered here: no
-// current front end raises them into a module this pass ever sees --
-// `feme::dxil::OpRaisingPass` explicitly defers `WaveActiveOp`/
-// `WaveActiveBit`/`WavePrefixOp` (they pick their source intrinsic from an
-// extra opcode-carried operand DXIL raising doesn't yet reconstruct), and
-// SPIR-V import raises no wave ops at all yet -- so lowering them now would
-// be untested dead code. This is a further narrowing of this milestone's
-// scope. `WaveActiveBallot` is lowered (see `Ballot` above): roadmap step R3
-// added the multi-return-value raising mechanism milestone 1's deviation
-// note deferred it for (see feme/docs/FeMeCPUDesign.md's Status section).
+// `QuadOp`'s `llvm.dx.quad.read.*` family is raised (roadmap step R4) but
+// not lowered here: quad ops need a fixed lane-to-quad mapping this target
+// does not yet implement (an explicit v1 non-goal, see
+// feme/docs/FeMeCPUDesign.md's "Non-Goals").
 //
 //===----------------------------------------------------------------------===//
 
@@ -352,12 +353,137 @@ Value *lowerBallot(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
     if (I * WordBits >= WaveSize) {
       Word = ConstantInt::get(WordTy, 0);
     } else {
-      Value *Shifted = I == 0 ? AsInt
-                               : Builder.CreateLShr(
-                                     AsInt, ConstantInt::get(IWTy, I * WordBits));
+      Value *Shifted =
+          I == 0
+              ? AsInt
+              : Builder.CreateLShr(AsInt, ConstantInt::get(IWTy, I * WordBits));
       Word = Builder.CreateZExtOrTrunc(Shifted, WordTy);
     }
     Result = Builder.CreateInsertValue(Result, Word, I);
+  }
+  return Result;
+}
+
+/// A masked reduction's identity element -- the value substituted for an
+/// inactive lane (per \p WideMask) so it cannot affect the reduction's
+/// result, matching "Phase 5"'s `llvm.vector.reduce.* over select(M, X,
+/// identity)` row. \p Kind picks the identity appropriate to the
+/// reduction/element-type pair; not every `WaveCallKind` this is called for
+/// supports every element type (e.g. `ActiveUMax`/`ActiveBitAnd` are
+/// integer-only per DXIL.td's `Overloads`), so only the combinations that
+/// occur are handled.
+Constant *getReduceIdentity(WaveCallKind Kind, Type *EltTy) {
+  bool IsFP = EltTy->isFloatingPointTy();
+  switch (Kind) {
+  case WaveCallKind::ActiveSum:
+  case WaveCallKind::PrefixSum:
+    return Constant::getNullValue(EltTy); // additive identity: 0
+  case WaveCallKind::ActiveProduct:
+  case WaveCallKind::PrefixProduct:
+    return IsFP ? ConstantFP::get(EltTy, 1.0)
+                : ConstantInt::get(EltTy, 1); // multiplicative identity: 1
+  case WaveCallKind::ActiveMax:
+    return IsFP ? ConstantFP::getInfinity(EltTy, /*Negative=*/true)
+                : ConstantInt::get(EltTy, APInt::getSignedMinValue(
+                                              EltTy->getIntegerBitWidth()));
+  case WaveCallKind::ActiveUMax:
+    return Constant::getNullValue(EltTy); // unsigned min: 0
+  case WaveCallKind::ActiveMin:
+    return IsFP ? ConstantFP::getInfinity(EltTy, /*Negative=*/false)
+                : ConstantInt::get(EltTy, APInt::getSignedMaxValue(
+                                              EltTy->getIntegerBitWidth()));
+  case WaveCallKind::ActiveUMin:
+    return ConstantInt::getAllOnesValue(EltTy); // unsigned max: ~0
+  case WaveCallKind::ActiveBitAnd:
+    return ConstantInt::getAllOnesValue(EltTy);
+  case WaveCallKind::ActiveBitOr:
+  case WaveCallKind::ActiveBitXor:
+    return Constant::getNullValue(EltTy);
+  default:
+    llvm_unreachable("not a reduction WaveCallKind");
+  }
+}
+
+/// `WaveActiveSum/Product/Max/UMax/Min/UMin/BitAnd/BitOr/BitXor`:
+/// `llvm.vector.reduce.*` over `select(M, X, identity)` (see "Phase 5"'s
+/// table and `getReduceIdentity` above). Floating-point sum/product
+/// reductions are marked `fast`: HLSL's wave reductions do not specify a
+/// lane order to accumulate in, so the reassociation `fast` permits is
+/// exactly what a cross-lane hardware reduction already does.
+Value *lowerActiveReduce(IRBuilder<> &Builder, WaveCallKind Kind,
+                         Value *WideMask, Value *WideOperand) {
+  Type *EltTy = cast<VectorType>(WideOperand->getType())->getElementType();
+  Value *Identity = ConstantVector::getSplat(
+      cast<VectorType>(WideOperand->getType())->getElementCount(),
+      getReduceIdentity(Kind, EltTy));
+  Value *Selected = Builder.CreateSelect(WideMask, WideOperand, Identity);
+  bool IsFP = EltTy->isFloatingPointTy();
+
+  switch (Kind) {
+  case WaveCallKind::ActiveSum: {
+    if (!IsFP)
+      return Builder.CreateAddReduce(Selected);
+    auto *Reduced = cast<Instruction>(
+        Builder.CreateFAddReduce(ConstantFP::get(EltTy, 0.0), Selected));
+    Reduced->setFast(true);
+    return Reduced;
+  }
+  case WaveCallKind::ActiveProduct: {
+    if (!IsFP)
+      return Builder.CreateMulReduce(Selected);
+    auto *Reduced = cast<Instruction>(
+        Builder.CreateFMulReduce(ConstantFP::get(EltTy, 1.0), Selected));
+    Reduced->setFast(true);
+    return Reduced;
+  }
+  case WaveCallKind::ActiveMax:
+    return IsFP ? Builder.CreateFPMaxReduce(Selected)
+                : Builder.CreateIntMaxReduce(Selected, /*IsSigned=*/true);
+  case WaveCallKind::ActiveUMax:
+    return Builder.CreateIntMaxReduce(Selected, /*IsSigned=*/false);
+  case WaveCallKind::ActiveMin:
+    return IsFP ? Builder.CreateFPMinReduce(Selected)
+                : Builder.CreateIntMinReduce(Selected, /*IsSigned=*/true);
+  case WaveCallKind::ActiveUMin:
+    return Builder.CreateIntMinReduce(Selected, /*IsSigned=*/false);
+  case WaveCallKind::ActiveBitAnd:
+    return Builder.CreateAndReduce(Selected);
+  case WaveCallKind::ActiveBitOr:
+    return Builder.CreateOrReduce(Selected);
+  case WaveCallKind::ActiveBitXor:
+    return Builder.CreateXorReduce(Selected);
+  default:
+    llvm_unreachable("not an active-reduce WaveCallKind");
+  }
+}
+
+/// `WavePrefixSum/PrefixProduct`: the exclusive running sum/product of
+/// `select(M, X, identity)` before each lane. Built as an explicit lane
+/// loop, the same "lane loop for large `W`" choice `lowerPrefixBitCount`
+/// makes and for the same reason (a bounded, fixed number of instructions
+/// at every supported wave size, rather than a log2(W)-step shuffle scan).
+Value *lowerPrefixReduce(IRBuilder<> &Builder, WaveCallKind Kind,
+                         Value *WideMask, Value *WideOperand,
+                         unsigned WaveSize) {
+  Type *EltTy = cast<VectorType>(WideOperand->getType())->getElementType();
+  bool IsFP = EltTy->isFloatingPointTy();
+  Constant *Identity = getReduceIdentity(Kind, EltTy);
+  Value *WideIdentity =
+      ConstantVector::getSplat(ElementCount::getFixed(WaveSize), Identity);
+  Value *Masked = Builder.CreateSelect(WideMask, WideOperand, WideIdentity);
+
+  Value *Result = PoisonValue::get(FixedVectorType::get(EltTy, WaveSize));
+  Value *Accum = Identity;
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Result = Builder.CreateInsertElement(Result, Accum, Builder.getInt32(Lane));
+    Value *LaneVal =
+        Builder.CreateExtractElement(Masked, Builder.getInt32(Lane));
+    if (Kind == WaveCallKind::PrefixSum)
+      Accum = IsFP ? Builder.CreateFAdd(Accum, LaneVal)
+                   : Builder.CreateAdd(Accum, LaneVal);
+    else
+      Accum = IsFP ? Builder.CreateFMul(Accum, LaneVal)
+                   : Builder.CreateMul(Accum, LaneVal);
   }
   return Result;
 }
@@ -401,6 +527,23 @@ void lowerWaveCall(const MatchedWaveCall &Matched) {
   case WaveCallKind::Ballot:
     Result = lowerBallot(Builder, Matched.WideMask, Matched.WideOperand, W,
                          CI.getType());
+    break;
+  case WaveCallKind::ActiveSum:
+  case WaveCallKind::ActiveProduct:
+  case WaveCallKind::ActiveMax:
+  case WaveCallKind::ActiveUMax:
+  case WaveCallKind::ActiveMin:
+  case WaveCallKind::ActiveUMin:
+  case WaveCallKind::ActiveBitAnd:
+  case WaveCallKind::ActiveBitOr:
+  case WaveCallKind::ActiveBitXor:
+    Result = lowerActiveReduce(Builder, Matched.Kind, Matched.WideMask,
+                               Matched.WideOperand);
+    break;
+  case WaveCallKind::PrefixSum:
+  case WaveCallKind::PrefixProduct:
+    Result = lowerPrefixReduce(Builder, Matched.Kind, Matched.WideMask,
+                               Matched.WideOperand, W);
     break;
   }
 

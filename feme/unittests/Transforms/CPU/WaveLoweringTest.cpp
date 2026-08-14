@@ -310,4 +310,79 @@ TEST(WaveLoweringTest, LowersBallotToInsertValueChain) {
   EXPECT_EQ(InsertValueCount, 4u);
 }
 
+TEST(WaveLoweringTest, LowersActiveSumToMaskedVectorReduceAdd) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %sum = call i32 @llvm.dx.wave.reduce.sum.i32(i32 %tid)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @llvm.dx.wave.reduce.sum.i32(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundSelect = false, FoundAddReduce = false;
+  for (const Instruction &I : instructions(F)) {
+    FoundSelect |= isa<SelectInst>(&I);
+    if (const auto *II = dyn_cast<IntrinsicInst>(&I))
+      FoundAddReduce |= II->getIntrinsicID() == Intrinsic::vector_reduce_add;
+  }
+  EXPECT_TRUE(FoundSelect);
+  EXPECT_TRUE(FoundAddReduce);
+}
+
+TEST(WaveLoweringTest, LowersActiveMaxToMaskedFPMaxReduce) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = uitofp i32 %tid to float
+      %m = call float @llvm.dx.wave.reduce.max.f32(float %tidf)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare float @llvm.dx.wave.reduce.max.f32(float)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundFMaxReduce = false;
+  for (const Instruction &I : instructions(F))
+    if (const auto *II = dyn_cast<IntrinsicInst>(&I))
+      FoundFMaxReduce |= II->getIntrinsicID() == Intrinsic::vector_reduce_fmax;
+  EXPECT_TRUE(FoundFMaxReduce);
+}
+
+TEST(WaveLoweringTest, LowersPrefixSumToDivergentLaneLoop) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %sum = call i32 @llvm.dx.wave.prefix.sum.i32(i32 %tid)
+      %doubled = mul i32 %sum, 2
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare i32 @llvm.dx.wave.prefix.sum.i32(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  // `PrefixSum` is divergent (see `isDivergentWaveCallResult`), so it
+  // widens `%doubled` into a real `<4 x i32>` multiply, the same way
+  // `PrefixBitCount` does above.
+  bool FoundWideMul = false;
+  for (const Instruction &I : instructions(F))
+    if (const auto *BO = dyn_cast<BinaryOperator>(&I))
+      FoundWideMul |=
+          BO->getOpcode() == Instruction::Mul && BO->getType()->isVectorTy();
+  EXPECT_TRUE(FoundWideMul);
+}
+
 } // namespace

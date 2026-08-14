@@ -51,10 +51,9 @@ namespace feme::cpu {
 
 /// Which wave operation a `feme.cpu.wave.*` call performs, one per non-
 /// trivial row of "Phase 5"'s lowering table that this milestone (plus
-/// roadmap step R3's `Ballot` addition) implements (see WaveLowering.cpp's
-/// file comment for which rows those are, and why the rest --
-/// `WaveActiveSum`/`Product`/..., `WavePrefixSum`/`Product`/... -- are not
-/// yet covered).
+/// roadmap step R3's `Ballot` and step R4's `Active*`/`Prefix{Sum,Product}`
+/// additions) implements (see WaveLowering.cpp's file comment for which
+/// rows those are).
 enum class WaveCallKind : uint8_t {
   /// `WaveGetLaneCount`: no operand, result is the constant wave size.
   GetLaneCount,
@@ -81,13 +80,48 @@ enum class WaveCallKind : uint8_t {
   /// result (DXIL's fixed 128-bit ballot mask ABI -- see WaveLowering.cpp's
   /// `lowerBallot`).
   Ballot,
+  /// `WaveActiveSum`/`WaveActiveUSum` (roadmap step R4): `T` operand,
+  /// uniform `T` result. Signed/unsigned integer addition is bit-identical
+  /// in two's complement, so both DXIL ops share this one kind (see
+  /// WaveLowering.cpp's `lowerActiveSum`).
+  ActiveSum,
+  /// `WaveActiveProduct`/`WaveActiveUProduct`: `T` operand, uniform `T`
+  /// result. Like `ActiveSum`, signed/unsigned multiplication is
+  /// bit-identical, so both DXIL ops share this one kind.
+  ActiveProduct,
+  /// `WaveActiveMax` (signed integer or float): `T` operand, uniform `T`
+  /// result.
+  ActiveMax,
+  /// `WaveActiveUMax` (unsigned integer only): `T` operand, uniform `T`
+  /// result.
+  ActiveUMax,
+  /// `WaveActiveMin` (signed integer or float): `T` operand, uniform `T`
+  /// result.
+  ActiveMin,
+  /// `WaveActiveUMin` (unsigned integer only): `T` operand, uniform `T`
+  /// result.
+  ActiveUMin,
+  /// `WaveActiveBitAnd`: `T` (integer) operand, uniform `T` result.
+  ActiveBitAnd,
+  /// `WaveActiveBitOr`: `T` (integer) operand, uniform `T` result.
+  ActiveBitOr,
+  /// `WaveActiveBitXor`: `T` (integer) operand, uniform `T` result.
+  ActiveBitXor,
+  /// `WavePrefixSum`/`WavePrefixUSum`: `T` operand, a per-lane `<W x T>`
+  /// exclusive prefix sum (see `ActiveSum`'s signedness note, and
+  /// WaveLowering.cpp's `lowerPrefixReduce`).
+  PrefixSum,
+  /// `WavePrefixProduct`/`WavePrefixUProduct`: `T` operand, a per-lane
+  /// `<W x T>` exclusive prefix product.
+  PrefixProduct,
 };
 
 /// Returns whether \p Kind's result is divergent (a genuine `<W x T>` value
 /// with a different answer per lane) rather than uniform (the same scalar
 /// answer broadcast to every lane) -- see each `WaveCallKind` enumerator's
-/// comment above. Only `IsFirstLane` and `PrefixBitCount` are divergent, the
-/// same two rows `feme::cpu::WaveTTIImpl` classifies `NeverUniform`.
+/// comment above. Only `IsFirstLane`, `PrefixBitCount`, `PrefixSum` and
+/// `PrefixProduct` are divergent, the same rows `feme::cpu::WaveTTIImpl`
+/// classifies `NeverUniform`.
 bool isDivergentWaveCallResult(WaveCallKind Kind);
 
 /// The result of successfully matching a call against the canonical

@@ -44,6 +44,28 @@ StringRef kindName(WaveCallKind Kind) {
     return "feme.cpu.wave.prefix_bitcount";
   case WaveCallKind::Ballot:
     return "feme.cpu.wave.ballot";
+  case WaveCallKind::ActiveSum:
+    return "feme.cpu.wave.active_sum";
+  case WaveCallKind::ActiveProduct:
+    return "feme.cpu.wave.active_product";
+  case WaveCallKind::ActiveMax:
+    return "feme.cpu.wave.active_max";
+  case WaveCallKind::ActiveUMax:
+    return "feme.cpu.wave.active_umax";
+  case WaveCallKind::ActiveMin:
+    return "feme.cpu.wave.active_min";
+  case WaveCallKind::ActiveUMin:
+    return "feme.cpu.wave.active_umin";
+  case WaveCallKind::ActiveBitAnd:
+    return "feme.cpu.wave.active_bitand";
+  case WaveCallKind::ActiveBitOr:
+    return "feme.cpu.wave.active_bitor";
+  case WaveCallKind::ActiveBitXor:
+    return "feme.cpu.wave.active_bitxor";
+  case WaveCallKind::PrefixSum:
+    return "feme.cpu.wave.prefix_sum";
+  case WaveCallKind::PrefixProduct:
+    return "feme.cpu.wave.prefix_product";
   }
   llvm_unreachable("unknown WaveCallKind");
 }
@@ -67,16 +89,48 @@ std::optional<WaveCallKind> parseKindName(StringRef Name) {
     return WaveCallKind::PrefixBitCount;
   if (Name == "feme.cpu.wave.ballot")
     return WaveCallKind::Ballot;
+  if (Name == "feme.cpu.wave.active_sum")
+    return WaveCallKind::ActiveSum;
+  if (Name == "feme.cpu.wave.active_product")
+    return WaveCallKind::ActiveProduct;
+  if (Name == "feme.cpu.wave.active_max")
+    return WaveCallKind::ActiveMax;
+  if (Name == "feme.cpu.wave.active_umax")
+    return WaveCallKind::ActiveUMax;
+  if (Name == "feme.cpu.wave.active_min")
+    return WaveCallKind::ActiveMin;
+  if (Name == "feme.cpu.wave.active_umin")
+    return WaveCallKind::ActiveUMin;
+  if (Name == "feme.cpu.wave.active_bitand")
+    return WaveCallKind::ActiveBitAnd;
+  if (Name == "feme.cpu.wave.active_bitor")
+    return WaveCallKind::ActiveBitOr;
+  if (Name == "feme.cpu.wave.active_bitxor")
+    return WaveCallKind::ActiveBitXor;
+  if (Name == "feme.cpu.wave.prefix_sum")
+    return WaveCallKind::PrefixSum;
+  if (Name == "feme.cpu.wave.prefix_product")
+    return WaveCallKind::PrefixProduct;
   return std::nullopt;
 }
 
 /// Whether \p Kind's value operand is type-overloaded (`AllEqual`/
 /// `ReadLane`, which operate on whatever scalar type `T` the source
-/// intrinsic was called with) rather than always `i1` (`Any`/`All`/
-/// `ActiveCountBits`/`PrefixBitCount`) or absent (`GetLaneCount`/
-/// `IsFirstLane`).
+/// intrinsic was called with, plus the roadmap step R4 reduce/scan kinds
+/// -- `Active{Sum,Product,Max,UMax,Min,UMin,BitAnd,BitOr,BitXor}` and
+/// `Prefix{Sum,Product}`, all of which likewise share DXIL's `OverloadTy`)
+/// rather than always `i1` (`Any`/`All`/`ActiveCountBits`/`PrefixBitCount`)
+/// or absent (`GetLaneCount`/`IsFirstLane`).
 bool hasTypeOverloadedOperand(WaveCallKind Kind) {
-  return Kind == WaveCallKind::AllEqual || Kind == WaveCallKind::ReadLane;
+  return Kind == WaveCallKind::AllEqual || Kind == WaveCallKind::ReadLane ||
+         Kind == WaveCallKind::ActiveSum ||
+         Kind == WaveCallKind::ActiveProduct ||
+         Kind == WaveCallKind::ActiveMax || Kind == WaveCallKind::ActiveUMax ||
+         Kind == WaveCallKind::ActiveMin || Kind == WaveCallKind::ActiveUMin ||
+         Kind == WaveCallKind::ActiveBitAnd ||
+         Kind == WaveCallKind::ActiveBitOr ||
+         Kind == WaveCallKind::ActiveBitXor ||
+         Kind == WaveCallKind::PrefixSum || Kind == WaveCallKind::PrefixProduct;
 }
 
 bool hasMask(WaveCallKind Kind) { return Kind != WaveCallKind::GetLaneCount; }
@@ -125,7 +179,8 @@ namespace feme::cpu {
 
 bool isDivergentWaveCallResult(WaveCallKind Kind) {
   return Kind == WaveCallKind::IsFirstLane ||
-         Kind == WaveCallKind::PrefixBitCount;
+         Kind == WaveCallKind::PrefixBitCount ||
+         Kind == WaveCallKind::PrefixSum || Kind == WaveCallKind::PrefixProduct;
 }
 
 CallInst *createWaveCall(IRBuilderBase &Builder, WaveCallKind Kind,
@@ -190,6 +245,26 @@ CallInst *createWaveCall(IRBuilderBase &Builder, WaveCallKind Kind,
     // (see `feme::dxil::OpRaisingPass::raiseAggregateCall`'s comment for why
     // a *named* struct wouldn't type-check the same way here).
     RetTy = StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty});
+    break;
+  case WaveCallKind::ActiveSum:
+  case WaveCallKind::ActiveProduct:
+  case WaveCallKind::ActiveMax:
+  case WaveCallKind::ActiveUMax:
+  case WaveCallKind::ActiveMin:
+  case WaveCallKind::ActiveUMin:
+  case WaveCallKind::ActiveBitAnd:
+  case WaveCallKind::ActiveBitOr:
+  case WaveCallKind::ActiveBitXor:
+    // A reduction over the operand's own type, uniform across the wave
+    // (roadmap step R4).
+    RetTy = ElementType;
+    break;
+  case WaveCallKind::PrefixSum:
+  case WaveCallKind::PrefixProduct:
+    // An exclusive scan: a genuine per-lane `<W x T>` value, like
+    // `PrefixBitCount` but overloaded on the operand's type instead of a
+    // fixed `i32`.
+    RetTy = FixedVectorType::get(ElementType, WaveSize);
     break;
   }
 

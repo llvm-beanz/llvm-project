@@ -196,9 +196,10 @@ std::optional<BuiltinCallKind> classifyBuiltin(Intrinsic::ID ID) {
 /// Which raised wave intrinsic \p ID canonicalizes to a `feme.cpu.wave.*`
 /// call (see feme::cpu::WaveCalls); `std::nullopt` for anything else,
 /// including `wave.getlaneindex` (a `BuiltinCallKind` instead -- see
-/// `classifyBuiltin` above) and the wave intrinsics no current front end
-/// raises yet (`WaveActiveSum`/`Product`/..., `WavePrefixSum`/`Product`/...;
-/// see WaveLowering.cpp's file comment).
+/// `classifyBuiltin` above) and `QuadOp`'s `llvm.dx.quad.read.*` family
+/// (raised, per roadmap step R4, but not yet lowered -- quad/derivative
+/// support is an explicit v1 non-goal, see feme/docs/FeMeCPUDesign.md's
+/// "Non-Goals").
 std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
   switch (ID) {
   case Intrinsic::dx_wave_get_lane_count:
@@ -226,6 +227,46 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
     return WaveCallKind::PrefixBitCount;
   case Intrinsic::dx_wave_ballot:
     return WaveCallKind::Ballot;
+  // Signed/unsigned addition and multiplication are bit-identical in two's
+  // complement, so each signed/unsigned pair shares one `WaveCallKind` (see
+  // `WaveCallKind::ActiveSum`'s comment).
+  case Intrinsic::dx_wave_reduce_sum:
+  case Intrinsic::dx_wave_reduce_usum:
+  case Intrinsic::spv_wave_reduce_sum:
+    return WaveCallKind::ActiveSum;
+  case Intrinsic::dx_wave_product:
+  case Intrinsic::dx_wave_uproduct:
+  case Intrinsic::spv_wave_product:
+    return WaveCallKind::ActiveProduct;
+  case Intrinsic::dx_wave_reduce_max:
+  case Intrinsic::spv_wave_reduce_max:
+    return WaveCallKind::ActiveMax;
+  case Intrinsic::dx_wave_reduce_umax:
+  case Intrinsic::spv_wave_reduce_umax:
+    return WaveCallKind::ActiveUMax;
+  case Intrinsic::dx_wave_reduce_min:
+  case Intrinsic::spv_wave_reduce_min:
+    return WaveCallKind::ActiveMin;
+  case Intrinsic::dx_wave_reduce_umin:
+  case Intrinsic::spv_wave_reduce_umin:
+    return WaveCallKind::ActiveUMin;
+  case Intrinsic::dx_wave_reduce_and:
+  case Intrinsic::spv_wave_reduce_and:
+    return WaveCallKind::ActiveBitAnd;
+  case Intrinsic::dx_wave_reduce_or:
+  case Intrinsic::spv_wave_reduce_or:
+    return WaveCallKind::ActiveBitOr;
+  case Intrinsic::dx_wave_reduce_xor:
+  case Intrinsic::spv_wave_reduce_xor:
+    return WaveCallKind::ActiveBitXor;
+  case Intrinsic::dx_wave_prefix_sum:
+  case Intrinsic::dx_wave_prefix_usum:
+  case Intrinsic::spv_wave_prefix_sum:
+    return WaveCallKind::PrefixSum;
+  case Intrinsic::dx_wave_prefix_product:
+  case Intrinsic::dx_wave_prefix_uproduct:
+  case Intrinsic::spv_wave_prefix_product:
+    return WaveCallKind::PrefixProduct;
   default:
     return std::nullopt;
   }
