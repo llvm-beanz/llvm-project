@@ -26,10 +26,14 @@
 // "SPIR-V" deviation note this milestone's update to
 // feme/docs/FeMeCPUDesign.md's Status section adds.
 //
-// Every resource-heap descriptor is an untyped byte buffer (raw/structured
-// buffers only; no typed-buffer format conversion), matching what
-// `libFeMeRuntimeCPU` and the CPU pipeline's resource-call scalarization
-// exercise today.
+// Every resource-heap/binding entry defaults to an untyped raw buffer, the
+// only kind milestone 11's heap file format described; roadmap step R8
+// (feme/docs/Roadmap.md, "Heap YAML kind/format/stride") adds the optional
+// `kind`/`format`/`stride` keys "Descriptor formats"/"Bound-resource
+// normalization" in feme/docs/FeMeCPUDesign.md's richer schema sketches, so
+// a test can describe a real `structured-buffer` or `typed-buffer` (with
+// its storage format) instead of hand-encoding one as an untyped raw
+// buffer.
 //
 // Roadmap milestone 5 adds `--reference` (see
 // `feme::cpu::JITOptions::Reference`): the ground truth the CFG
@@ -58,6 +62,7 @@
 #include "feme/Transforms/DXIL/OpRaising.h"
 
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRBuilder.h"
@@ -87,11 +92,19 @@ namespace {
 /// One `resource-heap`/binding-range entry in the heap YAML file (see the
 /// file comment above): an untyped byte buffer, `Size` bytes, optionally
 /// pre-populated with `Data` (little-endian `uint32` words, zero-padding
-/// any remaining bytes).
+/// any remaining bytes), plus the storage-kind/format/stride fields roadmap
+/// step R8 adds (§2.4.3 in feme/docs/Roadmap.md): `Kind` (default
+/// `raw-buffer`), `Format` (meaningful only for `typed-buffer`) and
+/// `Stride` (meaningful only for `structured-buffer`) -- see
+/// `parseResourceKind`/`parseResourceFormat` below for the accepted
+/// spellings.
 struct HeapEntry {
   uint32_t Index = 0;
   uint32_t Size = 0;
   std::vector<uint32_t> Data;
+  std::string Kind;
+  std::string Format;
+  uint32_t Stride = 0;
 };
 
 /// One `bindings` entry: the host's descriptors for a shader's
@@ -139,6 +152,9 @@ template <> struct MappingTraits<HeapEntry> {
     Io.mapRequired("index", Entry.Index);
     Io.mapOptional("size", Entry.Size, 0u);
     Io.mapOptional("data", Entry.Data);
+    Io.mapOptional("kind", Entry.Kind);
+    Io.mapOptional("format", Entry.Format);
+    Io.mapOptional("stride", Entry.Stride, 0u);
   }
 };
 
@@ -180,10 +196,10 @@ Expected<HeapFile> readHeapFile(StringRef Filename) {
 }
 
 /// Builds each `HeapEntry`'s backing storage (owned for the dispatch's
-/// duration) and the `FemeDescriptor`s pointing at it: every entry is an
-/// unstructured, host-writable raw buffer (`ResourceKind::Raw`,
-/// `FEME_DESCRIPTOR_UAV`), the only kind this milestone's heap file format
-/// describes (see the file comment above).
+/// duration) and the `FemeDescriptor`s pointing at it: `Kind`/`Format`/
+/// `Stride` (roadmap step R8, §2.4.3) let an entry describe a real
+/// `structured-buffer`/`typed-buffer` instead of always being an
+/// unstructured raw buffer (see the file comment above).
 struct HeapStorage {
   // One buffer per entry, indexed the same way `Descriptors` is; kept
   // alive here since `FemeDescriptor::Data` merely points into it.
@@ -191,11 +207,75 @@ struct HeapStorage {
   std::vector<FemeDescriptor> Descriptors;
 };
 
+/// Parses a heap YAML entry's `kind` string into `feme::cpu::ResourceKind`,
+/// defaulting an empty string to `Raw` (the only kind milestone 11's heap
+/// file format described, kept as the default for backward compatibility --
+/// see the file comment above). Returns an `Error` for any other,
+/// unrecognized spelling.
+Expected<ResourceKind> parseResourceKind(StringRef Kind) {
+  if (Kind.empty() || Kind == "raw-buffer")
+    return ResourceKind::Raw;
+  if (Kind == "structured-buffer")
+    return ResourceKind::Structured;
+  if (Kind == "typed-buffer")
+    return ResourceKind::Typed;
+  if (Kind == "cbuffer")
+    return ResourceKind::CBuffer;
+  return createStringError(inconvertibleErrorCode(),
+                           "unknown heap entry 'kind': '%s'",
+                           Kind.str().c_str());
+}
+
+/// Parses a heap YAML entry's `format` string (meaningful only for a
+/// `typed-buffer` entry) into `feme::cpu::ResourceFormat`: the lowercase,
+/// underscore-separated spelling of the enumerator's own name, e.g.
+/// `r32g32b32a32_float` for `ResourceFormat::R32G32B32A32_FLOAT` --
+/// matching the literal spelling "Command line" in
+/// feme/docs/FeMeCPUDesign.md sketches. An empty string parses as
+/// `Unknown`. Returns an `Error` for any other, unrecognized spelling.
+Expected<ResourceFormat> parseResourceFormat(StringRef Format) {
+  ResourceFormat Result =
+      StringSwitch<ResourceFormat>(Format)
+          .Cases({"", "unknown"}, ResourceFormat::Unknown)
+          .Case("r32_float", ResourceFormat::R32_FLOAT)
+          .Case("r32g32_float", ResourceFormat::R32G32_FLOAT)
+          .Case("r32g32b32_float", ResourceFormat::R32G32B32_FLOAT)
+          .Case("r32g32b32a32_float", ResourceFormat::R32G32B32A32_FLOAT)
+          .Case("r32_uint", ResourceFormat::R32_UINT)
+          .Case("r32g32_uint", ResourceFormat::R32G32_UINT)
+          .Case("r32g32b32_uint", ResourceFormat::R32G32B32_UINT)
+          .Case("r32g32b32a32_uint", ResourceFormat::R32G32B32A32_UINT)
+          .Case("r32_sint", ResourceFormat::R32_SINT)
+          .Case("r32g32_sint", ResourceFormat::R32G32_SINT)
+          .Case("r32g32b32_sint", ResourceFormat::R32G32B32_SINT)
+          .Case("r32g32b32a32_sint", ResourceFormat::R32G32B32A32_SINT)
+          .Case("r8g8b8a8_unorm", ResourceFormat::R8G8B8A8_UNORM)
+          .Case("r8g8b8a8_snorm", ResourceFormat::R8G8B8A8_SNORM)
+          .Case("r8g8b8a8_uint", ResourceFormat::R8G8B8A8_UINT)
+          .Case("r8g8b8a8_sint", ResourceFormat::R8G8B8A8_SINT)
+          .Case("r8g8b8a8_unorm_srgb", ResourceFormat::R8G8B8A8_UNORM_SRGB)
+          .Case("r16g16b16a16_float", ResourceFormat::R16G16B16A16_FLOAT)
+          .Case("r16g16b16a16_unorm", ResourceFormat::R16G16B16A16_UNORM)
+          .Case("r16g16b16a16_snorm", ResourceFormat::R16G16B16A16_SNORM)
+          .Case("r16g16b16a16_uint", ResourceFormat::R16G16B16A16_UINT)
+          .Case("r16g16b16a16_sint", ResourceFormat::R16G16B16A16_SINT)
+          .Case("r11g11b10_float", ResourceFormat::R11G11B10_FLOAT)
+          .Case("r10g10b10a2_unorm", ResourceFormat::R10G10B10A2_UNORM)
+          .Case("r10g10b10a2_uint", ResourceFormat::R10G10B10A2_UINT)
+          .Default(ResourceFormat::Unknown);
+  if (Result == ResourceFormat::Unknown && !Format.empty() &&
+      Format != "unknown")
+    return createStringError(inconvertibleErrorCode(),
+                             "unknown heap entry 'format': '%s'",
+                             Format.str().c_str());
+  return Result;
+}
+
 /// Builds \p Entries' backing storage the same way `buildHeapStorage`
 /// builds `resource-heap`'s, densely indexed by each entry's own `index`
 /// field (the array element within a `bindings` entry's range, for that
 /// caller -- see `BindingFile`'s own comment).
-HeapStorage buildEntryStorage(ArrayRef<HeapEntry> Entries) {
+Expected<HeapStorage> buildEntryStorage(ArrayRef<HeapEntry> Entries) {
   HeapStorage Storage;
   uint32_t MaxIndex = 0;
   for (const HeapEntry &Entry : Entries)
@@ -205,6 +285,13 @@ HeapStorage buildEntryStorage(ArrayRef<HeapEntry> Entries) {
   Storage.Descriptors.resize(Entries.empty() ? 0 : MaxIndex + 1);
 
   for (const HeapEntry &Entry : Entries) {
+    Expected<ResourceKind> Kind = parseResourceKind(Entry.Kind);
+    if (!Kind)
+      return Kind.takeError();
+    Expected<ResourceFormat> Format = parseResourceFormat(Entry.Format);
+    if (!Format)
+      return Format.takeError();
+
     uint32_t ByteSize =
         std::max<uint32_t>(Entry.Size, Entry.Data.size() * sizeof(uint32_t));
     std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
@@ -222,13 +309,15 @@ HeapStorage buildEntryStorage(ArrayRef<HeapEntry> Entries) {
     Desc = FemeDescriptor{};
     Desc.Data = Buffer.data();
     Desc.SizeInBytes = Buffer.size();
-    Desc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+    Desc.Stride = Entry.Stride;
+    Desc.Format = static_cast<uint32_t>(*Format);
+    Desc.Kind = static_cast<uint32_t>(*Kind);
     Desc.Flags = FEME_DESCRIPTOR_UAV;
   }
   return Storage;
 }
 
-HeapStorage buildHeapStorage(const HeapFile &File) {
+Expected<HeapStorage> buildHeapStorage(const HeapFile &File) {
   return buildEntryStorage(File.ResourceHeap);
 }
 
@@ -241,12 +330,17 @@ struct BindingStorage {
   HeapStorage Entries;
 };
 
-std::vector<BindingStorage> buildBindingStorage(const HeapFile &File) {
+Expected<std::vector<BindingStorage>>
+buildBindingStorage(const HeapFile &File) {
   std::vector<BindingStorage> Storage;
   Storage.reserve(File.Bindings.size());
-  for (const BindingFile &Binding : File.Bindings)
-    Storage.push_back(BindingStorage{Binding.Space, Binding.Register,
-                                     buildEntryStorage(Binding.Entries)});
+  for (const BindingFile &Binding : File.Bindings) {
+    Expected<HeapStorage> Entries = buildEntryStorage(Binding.Entries);
+    if (!Entries)
+      return Entries.takeError();
+    Storage.push_back(
+        BindingStorage{Binding.Space, Binding.Register, std::move(*Entries)});
+  }
   return Storage;
 }
 
@@ -450,10 +544,19 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  HeapStorage Storage = buildHeapStorage(Heap);
-  std::vector<BindingStorage> BindingsStorage = buildBindingStorage(Heap);
+  Expected<HeapStorage> Storage = buildHeapStorage(Heap);
+  if (!Storage) {
+    errs() << "feme-run: " << toString(Storage.takeError()) << "\n";
+    return 1;
+  }
+  Expected<std::vector<BindingStorage>> BindingsStorage =
+      buildBindingStorage(Heap);
+  if (!BindingsStorage) {
+    errs() << "feme-run: " << toString(BindingsStorage.takeError()) << "\n";
+    return 1;
+  }
   std::vector<BoundResourceBinding> Bindings =
-      toBoundResourceBindings(BindingsStorage);
+      toBoundResourceBindings(*BindingsStorage);
   std::vector<uint8_t> RootConstantBytes(Heap.RootConstants.size() *
                                          sizeof(uint32_t));
   // Guard against a null `data()` on both sides when `RootConstants` is
@@ -463,7 +566,7 @@ int main(int argc, char **argv) {
            RootConstantBytes.size());
 
   DispatchResources Resources;
-  Resources.ResourceHeap = Storage.Descriptors;
+  Resources.ResourceHeap = Storage->Descriptors;
   Resources.BoundResources = Bindings;
   Resources.RootConstants = RootConstantBytes;
 
@@ -472,6 +575,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  printHeapContents(outs(), Heap, Storage, BindingsStorage);
+  printHeapContents(outs(), Heap, *Storage, *BindingsStorage);
   return 0;
 }
