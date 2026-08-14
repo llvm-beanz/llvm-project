@@ -356,9 +356,9 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
-    mlir::Value ElementPtr = createIntrinsicCall(
-        Rewriter, Loc, "llvm.spv.resource.getpointer", ResultType,
-        {Adaptor.getBasePtr(), Indices[1]});
+    mlir::Value ElementPtr =
+        createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.getpointer",
+                            ResultType, {Adaptor.getBasePtr(), Indices[1]});
     if (Indices.size() == 2) {
       Rewriter.replaceOp(Op, ElementPtr);
       return mlir::success();
@@ -368,8 +368,8 @@ public:
     // 0 dereferences through the pointer `llvm.spv.resource.getpointer`
     // returned, exactly as an ordinary GEP into a pointer operand would.
     auto ElementType = mlir::cast<mlir::LLVM::LLVMArrayType>(
-                            HandleType.getTypeParams().front())
-                            .getElementType();
+                           HandleType.getTypeParams().front())
+                           .getElementType();
     llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
     GEPIndices.push_back(0);
     llvm::append_range(GEPIndices, Indices.drop_front(2));
@@ -559,11 +559,13 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
-    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, StructType);
+    mlir::Value Result =
+        mlir::LLVM::PoisonOp::create(Rewriter, Loc, StructType);
     Result = mlir::LLVM::InsertValueOp::create(
         Rewriter, Loc, Result, Adaptor.getImage(), llvm::ArrayRef<int64_t>{0});
-    Result = mlir::LLVM::InsertValueOp::create(
-        Rewriter, Loc, Result, Adaptor.getSampler(), llvm::ArrayRef<int64_t>{1});
+    Result = mlir::LLVM::InsertValueOp::create(Rewriter, Loc, Result,
+                                               Adaptor.getSampler(),
+                                               llvm::ArrayRef<int64_t>{1});
     Rewriter.replaceOp(Op, Result);
     return mlir::success();
   }
@@ -577,7 +579,8 @@ public:
 /// pattern does not supply) are not yet covered -- see the "Known gap" note
 /// in the SPIR-V section of feme/docs/Design.md.
 class ImageSampleImplicitLodPattern
-    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageSampleImplicitLodOp> {
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::ImageSampleImplicitLodOp> {
 public:
   using mlir::SPIRVToLLVMConversion<
       mlir::spirv::ImageSampleImplicitLodOp>::SPIRVToLLVMConversion;
@@ -609,8 +612,9 @@ public:
         Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
 
     Rewriter.replaceOp(
-        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.sample",
-                                ResultType, {Image, Sampler, Coordinate, Offset}));
+        Op,
+        createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.sample",
+                            ResultType, {Image, Sampler, Coordinate, Offset}));
     return mlir::success();
   }
 };
@@ -793,8 +797,9 @@ public:
 /// (forwarded unchanged, like an image type's parameters -- see
 /// getBufferBlockElementArray) and whether the buffer is writable
 /// (`RWStructuredBuffer<T>`) or not (`StructuredBuffer<T>`).
-mlir::Type convertBufferBlockType(mlir::spirv::PointerType Type,
-                                  const mlir::LLVMTypeConverter &TypeConverter) {
+mlir::Type
+convertBufferBlockType(mlir::spirv::PointerType Type,
+                       const mlir::LLVMTypeConverter &TypeConverter) {
   mlir::spirv::RuntimeArrayType Array = getBufferBlockElementArray(Type);
   if (!Array)
     return nullptr;
@@ -836,32 +841,30 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // buffer access to be (address space 11, see `storageClassToAddressSpace`
   // in `llvm/lib/Target/SPIRV/SPIRVUtils.h`) rather than MLIR's own
   // Vulkan-client default of address space 0.
-  TypeConverter.addConversion(
-      [&TypeConverter](
-          mlir::spirv::PointerType Type) -> std::optional<mlir::Type> {
-        if (Type.getStorageClass() != mlir::spirv::StorageClass::StorageBuffer)
-          return std::nullopt;
-        if (mlir::Type Handle = convertBufferBlockType(Type, TypeConverter))
-          return Handle;
-        return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
-                                                /*addressSpace=*/11);
-      });
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
+                                  -> std::optional<mlir::Type> {
+    if (Type.getStorageClass() != mlir::spirv::StorageClass::StorageBuffer)
+      return std::nullopt;
+    if (mlir::Type Handle = convertBufferBlockType(Type, TypeConverter))
+      return Handle;
+    return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                            /*addressSpace=*/11);
+  });
 
   // A push constant pointer is ordinary memory too, in the address space
   // (13) `feme::spirv::PushConstantGlobalVariablePattern`'s global lives in
   // -- LLVM's own `SPIRVPushConstantAccess` pass finds it there and rewrites
   // it (and every use) into the `spirv.PushConstant` handle representation
   // itself, so nothing further is needed on FeMe's side.
-  TypeConverter.addConversion(
-      [&TypeConverter](
-          mlir::spirv::PointerType Type) -> std::optional<mlir::Type> {
-        if (Type.getStorageClass() != mlir::spirv::StorageClass::PushConstant)
-          return std::nullopt;
-        if (!TypeConverter.convertType(Type.getPointeeType()))
-          return std::nullopt;
-        return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
-                                                /*addressSpace=*/13);
-      });
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
+                                  -> std::optional<mlir::Type> {
+    if (Type.getStorageClass() != mlir::spirv::StorageClass::PushConstant)
+      return std::nullopt;
+    if (!TypeConverter.convertType(Type.getPointeeType()))
+      return std::nullopt;
+    return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                            /*addressSpace=*/13);
+  });
 
   // MLIR's own runtime array conversion refuses one with an `ArrayStride`
   // decoration (see `convertRuntimeArrayType` in MLIR's `SPIRVToLLVM.cpp`),
@@ -886,8 +889,8 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // vehicle to travel together through the dialect conversion until then;
   // a two-element struct is the simplest one.
   TypeConverter.addConversion(
-      [&TypeConverter](mlir::spirv::SampledImageType Type)
-          -> std::optional<mlir::Type> {
+      [&TypeConverter](
+          mlir::spirv::SampledImageType Type) -> std::optional<mlir::Type> {
         mlir::Type ImageHandle = TypeConverter.convertType(Type.getImageType());
         if (!ImageHandle)
           return std::nullopt;
