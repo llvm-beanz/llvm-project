@@ -23,7 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R10?
+Can you implement roadmap step R11?
 
-> `feme-run` SPIR-V input; one HLSL source executed through both front ends
-> (see: §1.2 P0, §2.2.3)
+> Thread-safety test; route library diagnostics through `Context`;
+> `FormatRegistry`; `Exporter` interface (see: §1.1)
