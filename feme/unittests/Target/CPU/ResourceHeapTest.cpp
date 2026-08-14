@@ -104,4 +104,52 @@ TEST(ResourceHeapTest, MultipleRangesFillTheirOwnHeapBase) {
   EXPECT_EQ(Heap[2].Kind, static_cast<uint32_t>(ResourceKind::None));
 }
 
+namespace {
+// Records every `FemeDispatchArgs::GroupID` `runDispatch` calls it with,
+// and (for the second test below) whether the resource heap it saw inside
+// the call matches expectations -- captured eagerly inside the callback,
+// since `Args->ResourceHeap` points into `runDispatch`'s own local,
+// materialized heap and is not valid once the call returns.
+std::vector<std::array<uint32_t, 3>> *RecordedGroupIDs = nullptr;
+const void *ExpectedFirstDescriptorData = nullptr;
+bool SawExpectedResourceHeap = false;
+
+void recordingEntryFn(const FemeDispatchArgs *Args) {
+  RecordedGroupIDs->push_back(
+      {Args->GroupID[0], Args->GroupID[1], Args->GroupID[2]});
+  SawExpectedResourceHeap =
+      Args->ResourceHeapCount == 1 &&
+      Args->ResourceHeap[0].Data == ExpectedFirstDescriptorData;
+}
+} // namespace
+
+TEST(RunDispatchTest, CallsEntryOncePerGroupInXYZOrder) {
+  std::vector<std::array<uint32_t, 3>> GroupIDs;
+  RecordedGroupIDs = &GroupIDs;
+
+  ResourceInfo Info;
+  DispatchResources Resources;
+  runDispatch(recordingEntryFn, Info, Resources, {2, 2, 1});
+
+  EXPECT_EQ(GroupIDs, (std::vector<std::array<uint32_t, 3>>{
+                          {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}}));
+}
+
+TEST(RunDispatchTest, PassesTheMaterializedHeapToTheEntryPoint) {
+  std::vector<std::array<uint32_t, 3>> GroupIDs;
+  RecordedGroupIDs = &GroupIDs;
+
+  int Dummy = 0;
+  std::vector<FemeDescriptor> Dynamic = {makeDescriptor(&Dummy)};
+  ExpectedFirstDescriptorData = &Dummy;
+  SawExpectedResourceHeap = false;
+
+  ResourceInfo Info;
+  DispatchResources Resources;
+  Resources.ResourceHeap = Dynamic;
+  runDispatch(recordingEntryFn, Info, Resources, {1, 1, 1});
+
+  EXPECT_TRUE(SawExpectedResourceHeap);
+}
+
 } // namespace
