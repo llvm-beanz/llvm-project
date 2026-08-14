@@ -23,8 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R3?
+Can you implement roadmap step R4?
 
-> Multi-return-value raising mechanism
-> (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` (see:
-> §1.3 P0)
+> Flag-selected opcode families
+> (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) +
+> `prefix-sum.hlsl` (see: §1.3 P0)
