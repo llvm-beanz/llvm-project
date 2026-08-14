@@ -10361,3 +10361,145 @@ the task's reproduction are consistent with a stale, unrebuilt binary on a
 different (macOS) machine/build directory that predates that fix, not a
 regression in the source tree. No source changes were made; no new commit
 beyond this note was needed.
+
+# UBSan check-feme failures: FEME :: Target/DXSA/unknown.dxasm and the nand-unsupported test, again
+
+## The report
+
+A new task handed me the same two `FAIL:` blocks: `FEME ::
+Target/DXSA/unknown.dxasm` aborting mid-run with `UndefinedBehaviorSanitizer:
+undefined-behavior BinaryParser.cpp:1962:44: load of value 255, which is not
+a valid value for type 'D3D10_SB_OPERAND_TYPE'`, and
+`FEME :: Transforms/CPU/simdize-scalarize-atomic-nand-unsupported.ll`
+aborting with a `SEGV Type.h:138 in llvm::Type::getTypeID() const` instead of
+printing the expected diagnostic. Both traces were from a macOS
+`build-dbg`/`build-rel` tree I don't have access to, same as the earlier
+"Re-investigation" entry above.
+
+## Building an actual UBSan configuration
+
+Unlike that earlier entry, this environment has no pre-existing
+sanitizer-enabled build directory, and `LLVM_USE_SANITIZER=Undefined` isn't
+free to turn on: this host (aarch64 Ubuntu) has no `libclang_rt.ubsan_*`
+static archives installed for Clang 18 (`libclang-rt-18-dev` wasn't
+installed, and CMake's default `LLVM_UBSAN_FLAGS` also passes
+`-fsanitize-blacklist=.../ubsan_ignorelist.txt`, an option GCC's `-fsanitize=
+undefined` doesn't accept, so falling back to GCC's own `libubsan.a` wasn't a
+straightforward substitute either). `sudo apt-get update` picked up
+`libclang-rt-18-dev` from `noble-updates/universe` (not visible before the
+update), and installing it gave Clang the missing runtime archives. Built a
+fresh `build-ubsan/` with `-DLLVM_ENABLE_PROJECTS="clang;feme;mlir"
+-DLLVM_ENABLE_ASSERTIONS=ON -DLLVM_USE_SANITIZER=Undefined
+-DCMAKE_{C,CXX}_COMPILER=clang{,++} -DCMAKE_{C,CXX}_COMPILER_LAUNCHER=ccache
+-DLLVM_TARGETS_TO_BUILD="X86;AArch64"` (AArch64 has to be in the target list
+too, not just X86 -- `feme`'s runtime bitcode build step compiles
+`FeMeRuntimeCPU.c` for the *host* triple, which is AArch64 here, and silently
+omitting it produces an `unknown target triple 'unknown'` failure that has
+nothing to do with sanitizers and briefly looked like a build config bug of
+its own).
+
+## `unknown.dxasm`: reproduces exactly, root-caused, fixed
+
+With that build, `dxbc-as .../unknown.dxasm | feme-translate
+--import-dxsa-bin -` reproduces the exact reported diagnostic byte-for-byte,
+including the line/column (`BinaryParser.cpp:1962:44`) and message. Root
+cause: `DECODE_D3D10_SB_OPERAND_TYPE` (from the vendor
+`d3d12TokenizedProgramFormat.hpp`) C-style-casts an 8-bit field extracted
+directly from the (here, deliberately malformed) input token to the
+`D3D10_SB_OPERAND_TYPE` enum, whose enumerators only go up to 42; per
+[dcl.enum]p8 that enum's representable range is only `[0, 63]`
+(`2^ceil(log2(43))-1`), so a genuinely-unknown opcode's operand-type field
+being, e.g., `255` is outside that range, and reading it back out of the
+resulting enum-typed variable (to hand to `dxsa::symbolizeOperandType`) is
+undefined behavior -- independent of anything about parsing or validation
+logic; the macro's own cast is where the UB already happened. Fixed by
+adding `Parser::decodeRawOperandType`, doing the identical mask/shift but
+keeping the result as a plain `uint32_t`, and swapping it in at every one of
+the macro's four call sites in `BinaryParser.cpp` (not just the one the
+report's stack pointed at) since they're all fed by the same
+untrusted-input token and share the exact same latent bug, just not
+currently covered by a failing test. Reverting just this fix and re-running
+the exact `dxbc-as | feme-translate` pipeline against the rebuilt UBSan
+binaries reproduces the identical diagnostic and a non-zero exit, confirming
+both that the bug is real in this checkout and that the fix resolves it.
+
+## `simdize-scalarize-atomic-nand-unsupported.ll`: does *not* reproduce here, but a related bug does exist
+
+Running the exact reported `feme-opt --llvm -passes=feme-cpu-linearize,
+feme-cpu-simdize ...` command against the from-scratch UBSan build -- both
+with my other changes applied and with `SIMDize.cpp` reverted back to
+`HEAD` via `git stash` to test the unpatched code -- printed the expected
+`error: feme-cpu-simdize: function 'main' has a divergent atomicrmw 'nand'
+with no maskable identity element ...` diagnostic and exited cleanly both
+times; no crash, on this platform, in either case. This matches the earlier
+"Re-investigation" entry's finding, and extends it: even under a real
+`-fsanitize=undefined` build (which that entry didn't have), the bug as
+originally reported does not reproduce here. In this particular test, the
+`CallInst` `widenMaskedAtomicRMW` errors out on has no other user for
+`widen()`'s later passes to dereference through, which is presumably why it
+doesn't crash on this platform/allocator, even though the code path is
+genuinely unsound.
+
+That unsoundness is real, though, and worth fixing regardless of whether
+this exact test reproduces it here: `widenMaskedAtomicRMW`'s (and, by the
+same pattern, `widenElementwise`'s "unsupported divergent call") `emitError`
+call is not itself control flow -- `LLVMContext::emitError` only reports a
+diagnostic and returns normally -- so `widen()`'s Pass 2 loop kept widening
+every instruction after the one that errored, and the errored instruction
+was left without the `Widened`/`ToErase` map entry every other widened
+instruction gets. `checkSupportedControlFlow`/
+`checkVectorDecompositionSupported`'s own `emitError`-then-`return false`
+calls are safe *only* because they run to completion before
+`buildWidenedFunction` ever splices the old function's body into the new
+one; this diagnostic fires from deep inside Pass 2, after that's already
+happened, so simply falling through leaves a value some later pass (filling
+in a widened `phi`'s incoming value, replacing every to-be-erased
+instruction's remaining uses, `rewriteGroupSharedGlobals`) could easily go
+on to read out of `Widened`, defaulting to a null `Value*` -- consistent
+with the reported `SEGV ... in llvm::Type::getTypeID() const`, a
+plausible next line of code after dereferencing one. Added a `HadError`
+flag both diagnostics now set and that `widen()`'s Pass 2 loop checks right
+after processing each instruction, bailing out with `nullptr` (the same
+sentinel the two pre-widening checks already return for their own
+diagnostics) before any later pass can observe the incomplete state, plus a
+`SIMDizeTest` regression test exercising the same divergent-nand shape as
+the lit test, asserting only that the diagnostic fires (not anything about
+the abandoned module's contents, since `widen()` bailing out mid-Pass-2
+deliberately leaves `NewF` half-built once `OldF` itself has already been
+erased -- see `buildWidenedFunction`'s comment -- there is no "back to a
+clean state" to assert on here, only "didn't crash, did diagnose").
+
+## Fixing a bug UBSan surfaced in a different test entirely
+
+`ninja check-feme` on the from-scratch UBSan build turned up a third,
+unrelated UBSan failure neither reported test mentioned:
+`FEME :: Tools/feme-run/{multi-group-dispatch,reference-mode,
+thread-id-store}.ll` and the `differential-harness.test` driver script all
+failed with `feme-run.cpp:213:24: runtime error: null pointer passed as
+argument 2, which is declared to never be null`. `buildEntryStorage`'s
+`memcpy(Buffer.data(), Entry.Data.data(), ...)` passes `Entry.Data.data()`
+even when `Entry.Data` (a heap-file resource entry's initial data) is empty,
+and an empty `std::vector`'s `data()` is null; `memcpy`'s source parameter
+is declared `nonnull`, so this is UB regardless of the copy length being 0.
+Guarded the call (and `main`'s equivalent, not-yet-test-covered
+`RootConstantBytes`/`Heap.RootConstants` copy, same null-when-empty shape)
+with a length check. Since the task's instructions are to fix "the issues"
+causing check-feme to fail under UBSan, not just the two tests explicitly
+quoted, this one is in scope too, and the reported command
+(`ninja check-feme`) would have failed on it either way.
+
+## Final state
+
+Full `ninja check-feme` on the from-scratch UBSan + assertions build (with
+every fix above applied): 849 discovered, 823 passed, 26 unsupported
+(platform-gated), **0 failed** -- both originally-reported tests, the
+newly-discovered `feme-run` UBSan failures, and every pre-existing test all
+pass. Commit breakdown for this entry:
+
+1. `[feme][DXSA] Avoid UB casting untrusted operand-type bits to an enum`.
+2. `[feme][cpu] Bail out of SIMDizePass::widen() after a mid-widening error`
+   (SIMDize.cpp + a SIMDizeTest regression test in the same commit, since
+   the test only makes sense paired with the fix it's regression-testing).
+3. `[feme][tools] Avoid passing a null memcpy source for an empty heap
+   entry`.
+4. This file.
