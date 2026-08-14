@@ -503,4 +503,34 @@ dxsa.module pixel_shader 5 0 {
             llvm::StringRef::npos);
 }
 
+TEST(DXSAToLLVMIRTranslatorTest, UAVResourceMetadataHasTheUAVOnlyFields) {
+  // Unlike an SRV's `!dx.resources` entry (9 operands), a UAV's carries
+  // three extra `i1` flags after its resource kind -- globally-coherent,
+  // has-counter, rasterizer-ordered -- before the trailing extended
+  // properties list (see `llvm::dxil::ResourceInfo::write` in
+  // llvm/lib/Analysis/DXILResource.cpp). `feme::dxil::ResourceMetadata`
+  // (and any real DXIL consumer) rejects a UAV entry that's the wrong
+  // (SRV-like) shape outright, so this pins down the fix for that bug.
+  Fixture F;
+  std::optional<std::string> IR = F.translate(R"mlir(
+dxsa.module compute_shader 5 0 {
+  dxsa.dcl_uav_typed <id = 0, dim = buffer>,
+      <x = float, y = float, z = float, w = float>
+  dxsa.dcl_input vThreadID<<x>>
+  dxsa.ld_uav_typed r<0>, vThreadID<<x, x, x, x>>, u<0, vector>
+  dxsa.store_uav_typed u<0, vector>, vThreadID<<x, x, x, x>>, r<0>
+  dxsa.ret
+}
+)mlir");
+  ASSERT_TRUE(IR.has_value()) << F.diagnostics().str();
+  // DXIL::ResourceKind::TypedBuffer is 10; the three `i1 false` that follow
+  // are the UAV-only globally-coherent/has-counter/rasterizer-ordered
+  // flags this translation does not yet track off the declaration (see
+  // agent_thoughts.md), so they are conservatively always false.
+  EXPECT_NE(IR->find(R"(!"U0", i32 0, i32 0, i32 1, i32 10, i1 false, )"
+                     R"(i1 false, i1 false, )"),
+            std::string::npos)
+      << *IR;
+}
+
 } // namespace

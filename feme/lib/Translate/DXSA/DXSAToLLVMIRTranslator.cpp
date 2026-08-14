@@ -4156,8 +4156,32 @@ llvm::MDNode *Translator::emitResourceBindings(ResourceClass Class) {
     } else {
       Fields.push_back(llvm::ConstantAsMetadata::get(
           llvm::ConstantInt::get(i32Ty(), unsigned(R->Kind))));
-      Fields.push_back(llvm::ConstantAsMetadata::get(
-          llvm::ConstantInt::get(i32Ty(), R->SampleCount)));
+      if (Class == ResourceClass::UAV) {
+        // A UAV's shape metadata carries three extra `i1` flags after its
+        // kind that an SRV's does not (see `ResourceInfo::write` in
+        // llvm/lib/Analysis/DXILResource.cpp): globally-coherent, whether it
+        // has an associated counter, and rasterizer-ordered. `dxsa`'s
+        // `dcl_uav_*` opcodes do parse the equivalent access-flag modifiers
+        // (`globallyCoherent`, `hasOrderPreservingCounter`,
+        // `rasterizerOrdered`, see dxbc-as.md's "Operands" section), but
+        // this translation does not yet read them off the declaration (see
+        // agent_thoughts.md); emitting `false` for all three matches every
+        // shader this translation currently handles, none of which uses
+        // those flags, and -- critically -- keeps this metadata node's
+        // shape the 11 operands `feme::dxil::ResourceMetadata` (and DXIL
+        // consumers generally) require for a UAV, unlike the shorter
+        // (SRV-shaped) 9-operand node this emitted before, which no
+        // `dx.op.createHandle` referencing an SRV-shaped UAV binding could
+        // ever be raised back out of.
+        llvm::Metadata *False =
+            llvm::ConstantAsMetadata::get(llvm::ConstantInt::getFalse(Context));
+        Fields.push_back(False);
+        Fields.push_back(False);
+        Fields.push_back(False);
+      } else {
+        Fields.push_back(llvm::ConstantAsMetadata::get(
+            llvm::ConstantInt::get(i32Ty(), R->SampleCount)));
+      }
       // Tag 0 names the element type a typed resource returns.
       Fields.push_back(llvm::MDNode::get(
           Context,
