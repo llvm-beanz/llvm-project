@@ -29,7 +29,15 @@
 ;   internal-branch placements -- see its own deviation note), and a run
 ;   that reached the JIT anyway despite one of those diagnostics would only
 ;   be correct by coincidence for the specific thread/group ids a given
-;   seed happens to exercise.
+;   seed happens to exercise. (The five seeds below were re-curated after
+;   `feme-cfg-gen`'s `chance`/`randInt` stopped calling
+;   `std::uniform_real_distribution`/`std::uniform_int_distribution`
+;   directly -- see CFGGen.cpp -- since a distribution's own algorithm is
+;   unspecified by the standard and libc++/libstdc++ disagree on it, so a
+;   seed curated against one library's shapes is not guaranteed to be one
+;   against the other's; the fix makes `--seed` itself library-independent,
+;   but the specific seeds already curated under the old, non-portable
+;   algorithm needed re-picking against the new one.)
 ; - The second block enables `--unstructured` as well, against `--reference`
 ;   only (no `--wave-sizes`): `feme::cpu::LinearizePass` does not yet
 ;   linearize every shape `StructurizeCFG`/`FixIrreducible` can turn an
@@ -52,15 +60,15 @@
 
 ; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
 ; RUN:     --work-dir=%t.divergent-loop.dir --heap=%t.heap.yaml \
-; RUN:     --seeds=9,322,365,429,673 --wave-sizes=4,8,16,32 \
+; RUN:     --seeds=325,653,1559,2377,2454 --wave-sizes=4,8,16,32 \
 ; RUN:     --groups=1,1,1 --max-depth=2 --max-constructs=8
 ; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
 ; RUN:     --work-dir=%t.divergent-loop.dir --heap=%t.heap.yaml \
-; RUN:     --seeds=9,322,365,429,673 --wave-sizes=4,8,16,32 \
+; RUN:     --seeds=325,653,1559,2377,2454 --wave-sizes=4,8,16,32 \
 ; RUN:     --groups=2,1,1 --max-depth=2 --max-constructs=8
 ; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
 ; RUN:     --work-dir=%t.divergent-loop.dir --heap=%t.heap.yaml \
-; RUN:     --seeds=9,322,365,429,673 --wave-sizes=4,8,16,32 \
+; RUN:     --seeds=325,653,1559,2377,2454 --wave-sizes=4,8,16,32 \
 ; RUN:     --groups=1,2,2 --max-depth=2 --max-constructs=8
 
 ; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
