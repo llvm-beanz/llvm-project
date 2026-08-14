@@ -9698,3 +9698,183 @@ cycle to land honestly.
 1. `[feme][docs] Add a consolidated roadmap for the remaining design and test work`
 2. `[feme][docs] Link the consolidated roadmap from README and both design docs`
 3. This file.
+
+# Agent thoughts: FeMe roadmap step R1 (grow the differential harness; wave-size sweep)
+
+This records the reasoning behind implementing roadmap step R1 from
+`feme/docs/Roadmap.md`:
+
+> Grow the differential harness to divergent/loop/unstructured shapes; add
+> the wave-size sweep (see: §2.2.1, §2.2.2, §2.4.1, §2.4.4)
+
+## Approach
+
+I re-read `feme/docs/Roadmap.md` in full (I wrote it in the previous
+session), `feme/.instructions.md`, `differential-harness.test`'s own header
+comment, `feme-cfg-gen`'s source and CommandGuide page, and the relevant
+`feme-run`/CPU pipeline deviation notes in `FeMeCPUDesign.md` before writing
+anything. Then, rather than assuming `--divergent=true --loops=true
+--unstructured=true` would just work because milestones 6/7 "landed", I
+built the existing tools locally (assertions on, ccache already configured
+in the shared build directory) and actually ran `feme-cfg-gen`/`feme-run`
+across hundreds of seeds by hand before writing a single test file. That
+turned up two real problems the roadmap text didn't anticipate, which is the
+reason this took several iterations instead of being a pure test-infra
+change.
+
+## What the manual sweep found
+
+**Most `--divergent=true --loops=true` seeds still fail today.** Roadmap
+milestone 6's `feme::cpu::LinearizePass` only linearizes specific shapes
+(a single divergent diamond, or a loop with the exit check in one of a few
+recognized positions); a *nested* loop, or a loop body with both a `break`
+and a `continue` check, is diagnosed and left untouched, and
+`feme::cpu::SIMDizePass` then correctly refuses to widen the surviving
+divergent branch. That's working as designed, not a bug -- but it means "turn
+the flags on" does not, by itself, give you a shape the current pipeline
+actually reaches end to end. I had to search across ~1000 seeds (varying
+`--max-depth`/`--max-constructs` to reduce nesting) to find seeds whose
+*entire* run -- generation, `--reference`, and every wave size/group count
+I intended to check -- produces **zero** diagnostics, not just a zero exit
+code. That last distinction mattered: several seeds exit 0 and still match
+`--reference` despite `feme-cpu-linearize` printing "unsupported" for an
+inner loop, which on inspection is only true by luck for the specific
+thread/group ids those particular seeds exercise (a structurally divergent
+branch that happens to evaluate to the same result for every lane at
+`groups=1,1,1`/`W=4`). Trusting a run like that would bake a landmine into
+the differential harness -- a "passing" test whose pass is not actually
+proof of anything. So `feme-run-differential.py` treats any stderr output
+from `feme-run` as a hard failure regardless of exit code, and I only kept
+seeds (9, 322, 365, 429, 673 at `--max-depth=2 --max-constructs=8`) that
+produce genuinely clean runs, re-verified across `W` in {4, 8, 16, 32} and
+three different group counts.
+
+**`--unstructured=true` hung, and for two separate reasons.** First,
+`feme-cfg-gen`'s own `genIrreducible` construct had no termination
+guarantee: its two mutually-reachable blocks (`irred.a`/`irred.b`) each only
+exit the cycle on a condition derived from `%tid`/`%gid`, and neither
+operand changes across a hop between the two blocks, so a thread for which
+both conditions are `false` bounces between them forever. This is a real bug
+in test infrastructure that predates this milestone, not something R1
+introduced, but it blocks R1's stated goal outright: you cannot safely
+diff-test a shape that never returns. I fixed it in `CFGGen.cpp` by giving
+`genIrreducible` a shared bounce counter (an `alloca`, incremented on every
+hop) and OR-ing "the counter reached a small cap" into each block's exit
+condition -- the shape stays irreducible (neither block still dominates the
+other) but now always terminates within 4 hops regardless of what
+`%tid`/`%gid` evaluate to. I verified this against 200 seeds through
+`--reference` with a wall-clock `timeout` wrapper (not part of the checked-in
+test, which doesn't need it once the bound is real) before and after the
+fix; all 200 hung before, none did after.
+
+Second, even after that fix, some `--unstructured` seeds *still* hang, but
+now in the *normal* (widened) pipeline specifically, not `--reference`. This
+is a different, more concerning bug: `feme-cpu-linearize` prints its
+"unsupported (roadmap milestone 6 deviation)" diagnostic for a loop it can't
+handle (as designed), but the pipeline proceeds past that diagnostic anyway
+-- `SIMDizePass`'s divergent-branch check, which correctly caught this same
+situation for `--divergent`/`--loops`-only seeds (fast `exit 1` with a clear
+"has a divergent branch" message), does not catch it for at least some
+shapes StructurizeCFG produces from an irreducible input, and the JIT ends
+up executing a shader with an actual unwidened divergent branch inside a
+widened loop, which does not terminate. I judged fixing *this* to be out of
+scope for R1 -- it's a pipeline correctness bug (arguably a P0 masking bug in
+the same family the roadmap already tracks under milestone 7's
+scalarization narrowing), not a test-infrastructure gap, and diagnosing it
+properly means auditing `SIMDizePass`'s divergence check against every shape
+`StructurizeCFG`/`FixIrreducible` can produce, which is real pipeline work
+with its own test story. Silently working around it (e.g. by curating
+`--unstructured` seeds the same way I did for `--divergent`/`--loops`) would
+have hidden a real bug behind a "passing" test, which is worse than not
+testing the shape at all. So I recorded it as a new P0 gap in
+`Roadmap.md`'s §1.6 table and in `FeMeCPUDesign.md`'s milestone 5 deviation
+note, and scoped R1's `--unstructured` coverage to `--reference` alone (which
+has no such restriction and is real coverage in its own right -- it is what
+caught and proved the `feme-cfg-gen` termination fix). I updated R2's row in
+the sequencing table to note this gap as part of its scope, since R2 is
+already "mask the scalarization fallback correctly" -- the same family of
+bug.
+
+## What I built
+
+- **`feme/lib/Transforms/CPU/CFGGen.cpp`**: bounded `genIrreducible`'s
+  two-block bounce with a shared counter (see above). `feme/include/feme/
+  Transforms/CPU/CFGGen.h`'s `AllowUnstructured` comment and
+  `feme-cfg-gen.md` updated to describe the termination guarantee.
+- **`feme/utils/feme-run-differential.py`**: the §2.4.4 harness helper.
+  Takes a seed list, a `feme-cfg-gen` flag set, and a wave-size list;
+  generates each seed once, runs `--reference` once, and diffs it against
+  every requested wave size, failing loudly (with the actual mismatching
+  output, not just "differs") on any exit-code failure, stderr output, or
+  content mismatch. An empty `--wave-sizes=` runs only the
+  generate-plus-`--reference` step, which is what the `--unstructured`
+  block in `differential-harness.test` uses (see above).
+- **`feme/utils/feme-wave-size-sweep.py`**: the §2.4.1 helper. Runs
+  `feme-run` once per wave size and `FileCheck`s each run's output against
+  the same input file, so an existing `feme-run | FileCheck` pipeline
+  becomes one substitution instead of four.
+- **`feme/test/lit.cfg.py`** / **`lit.site.cfg.py.in`**: registered
+  `%feme-run-differential` and `%feme-wave-size-sweep` as substitutions
+  (mirroring how `llvm/test/lit.cfg.py` wires its own Python utility
+  scripts), which needed `config.python_executable` added to the site
+  config (feme's didn't set it before; llvm's does).
+- **`differential-harness.test`**: rewritten around the two helpers --
+  `--divergent`/`--loops` shapes diffed against `--reference` at four wave
+  sizes and three group counts, plus the `--unstructured`-against-
+  `--reference`-only block.
+- **`loop.hlsl`, `divergent-control-flow.hlsl`, `barrier-groupshared.hlsl`**:
+  switched to `%feme-wave-size-sweep` (§2.2.1) after confirming by hand that
+  each one's expected output does not depend on wave size (their computation
+  is per-lane and does not use a wave intrinsic). `wave-ops.hlsl` and
+  `combined.hlsl` were deliberately left alone: they use `WaveActiveSum`
+  directly, so their expected output *is* wave-size-dependent by design (I
+  verified this by hand too), and sweeping them would need a different
+  expected value per wave size rather than one shared `CHECK` line -- a
+  reasonable follow-up, not a same-day change.
+- **`Roadmap.md`/`FeMeCPUDesign.md`**: updated per the "deviate from the
+  design, update the design" instruction -- R1's row marked done (with the
+  `--unstructured` caveat), the new P0 gap added to §1.6's table, §2.2/§2.4
+  updated to describe what actually landed instead of what was proposed,
+  and `FeMeCPUDesign.md`'s milestone 5 deviation note rewritten to describe
+  the harness's new scope and both bugs this milestone found.
+
+## Why no new CFGGen-level gtest for the termination fix
+
+I tried first: a `ScalarEvolution::getSmallConstantMaxTripCount` check over
+every `LoopInfo` loop in the structurized output, on the theory that a
+correctly-bounded bounce should give SCEV a small constant trip count the
+same way `genLoop`'s own counted loop does. It doesn't -- SCEV can't see
+through the counter's `or`-with-a-random-condition exit test even after
+`instcombine`/`simplifycfg`, so the assertion failed on shapes that
+terminate fine, which would have been a flaky/wrong regression test, not a
+real one. Actually executing the generated IR at this layer would need
+stubbing out `llvm.dx.thread.id`/`llvm.dx.resource.*` well enough to run
+under an interpreter, which duplicates real chunks of
+`feme::cpu::ResourceLoweringPass` for no real gain. The differential
+harness's new `--unstructured` block already *is* the correct-layer
+regression test -- it runs the real generator through the real `--reference`
+pipeline, which is exactly what would hang if this fix regressed -- so I
+left `CFGGenTest.cpp` as it was rather than force a weaker or more invasive
+test at the wrong layer.
+
+## Verification
+
+Full local build (assertions on, ccache) of `feme-test-depends`, then
+`ninja check-feme`: 840/849 discovered tests pass (9 unsupported, matching
+the pre-existing baseline for build configurations without particular
+targets). Ran `FeMeTransformsCPUTests`'s `CFGGenTest.*` directly (unchanged,
+4/4 pass). Manually re-verified, before committing, that: the five curated
+`--divergent`/`--loops` seeds are clean (no diagnostics) at all four wave
+sizes and three group counts I check in; 200 `--unstructured` seeds
+terminate cleanly through `--reference`; and the two updated
+wave-size-swept HLSL tests still produce their expected `CHECK`ed value at
+every wave size.
+
+## Commit breakdown
+
+1. `[feme][cpu] Fix feme-cfg-gen's irreducible-edge construct to always terminate`
+2. `[feme][test] Add the feme-run-differential and feme-wave-size-sweep helpers`
+3. `[feme][test] Grow the differential harness to divergent/loop shapes and unstructured (--reference-only)`
+4. `[feme][test] Run wave-size-independent HLSL execution tests across W=4,8,16,32`
+5. `[feme][docs] Update Roadmap.md and FeMeCPUDesign.md for roadmap step R1`
+6. This file.
