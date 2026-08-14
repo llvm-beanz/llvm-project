@@ -17,6 +17,7 @@
 #define FEME_CORE_CONTEXT_H
 
 #include "feme/Core/Diagnostic.h"
+#include "feme/Core/FormatRegistry.h"
 
 #include <memory>
 
@@ -91,6 +92,15 @@ public:
   /// never through this path.
   void diagnose(Diagnostic D) const;
 
+  /// Returns the registry of Importers/Exporters available through this
+  /// Context. Empty until something populates it: FeMeCore itself
+  /// registers none (see the "Deviation: FormatRegistry population" note
+  /// in the "Status: feme::Driver" section of feme/docs/Design.md), so a
+  /// bare Context's registry stays empty until, e.g., a feme::Driver
+  /// constructed with it populates it on first use.
+  FormatRegistry &getFormatRegistry();
+  const FormatRegistry &getFormatRegistry() const;
+
 private:
   std::unique_ptr<llvm::LLVMContext> LLVMCtx;
   // Null when wrapping an externally-owned MLIRContext (see the wrapping
@@ -99,6 +109,7 @@ private:
   std::unique_ptr<mlir::MLIRContext> OwnedMLIRCtx;
   mlir::MLIRContext *MLIRCtx;
   DiagnosticHandlerTy DiagHandler;
+  FormatRegistry Registry;
 };
 
 } // namespace feme

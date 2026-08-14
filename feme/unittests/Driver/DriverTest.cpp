@@ -133,4 +133,20 @@ TEST(DriverTest, RejectsDXBCContainerWithNoShaderBytecodePart) {
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
 }
 
+TEST(DriverTest, PopulatesFormatRegistry) {
+  // Constructing a Driver populates its Context's FormatRegistry with
+  // FeMe's statically-linked Importers (see the "Deviation: FormatRegistry
+  // population" note in feme/docs/Design.md), so an embedding consumer
+  // that wants to know "what formats does Driver know how to detect"
+  // doesn't need to hard-code the answer.
+  Context Ctx;
+  EXPECT_TRUE(Ctx.getFormatRegistry().empty());
+
+  Driver D(Ctx);
+  EXPECT_FALSE(Ctx.getFormatRegistry().empty());
+  EXPECT_NE(Ctx.getFormatRegistry().lookupImporter("dxil"), nullptr);
+  EXPECT_NE(Ctx.getFormatRegistry().lookupImporter("dxbc"), nullptr);
+  EXPECT_NE(Ctx.getFormatRegistry().lookupImporter("spirv"), nullptr);
+}
+
 } // namespace

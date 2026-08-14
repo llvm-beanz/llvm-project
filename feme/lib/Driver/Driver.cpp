@@ -9,6 +9,7 @@
 #include "feme/Driver/Driver.h"
 
 #include "feme/Core/Context.h"
+#include "feme/Core/FormatRegistry.h"
 #include "feme/Core/Module.h"
 #include "feme/Import/DXBC/DXBCImporter.h"
 #include "feme/Import/DXIL/DXILImporter.h"
@@ -44,7 +45,34 @@
 
 using namespace feme;
 
-Driver::Driver(Context &Ctx) : Ctx(Ctx) {}
+namespace {
+
+/// Registers FeMe's statically-linked Importers into \p Registry. This is
+/// FeMeDriver's job, not FeMeCore's: FeMeCore (where Context and
+/// FormatRegistry live) cannot depend on FeMeImportDXIL/FeMeImportDXBC/
+/// FeMeImportSPIRV without an upward, cyclic library dependency (those
+/// libraries already depend on FeMeCore for Context/Module), whereas
+/// FeMeDriver already links all three -- see the "Deviation:
+/// FormatRegistry population" note in the "Status: feme::Driver" section
+/// of feme/docs/Design.md.
+void populateFormatRegistry(FormatRegistry &Registry) {
+  static const DXILImporter DXIL;
+  static const DXBCImporter DXBC;
+  static const SPIRVImporter SPIRV;
+  Registry.registerImporter(DXIL);
+  Registry.registerImporter(DXBC);
+  Registry.registerImporter(SPIRV);
+}
+
+} // namespace
+
+Driver::Driver(Context &Ctx) : Ctx(Ctx) {
+  // Populated lazily, at most once per Context: a Context reused across
+  // several Drivers (or handed to Driver after already being populated by
+  // some other caller) must not re-register the same Importers.
+  if (Ctx.getFormatRegistry().empty())
+    populateFormatRegistry(Ctx.getFormatRegistry());
+}
 
 namespace {
 
@@ -56,10 +84,11 @@ namespace {
 /// format cannot be determined this way -- this covers input FeMe does not
 /// yet import as well as genuinely unrecognized input, since neither can be
 /// told apart from the other without actually importing it.
-const Importer *detectFormat(llvm::MemoryBufferRef Buffer) {
-  static const DXILImporter DXIL;
-  static const DXBCImporter DXBC;
-  static const SPIRVImporter SPIRV;
+const Importer *detectFormat(llvm::MemoryBufferRef Buffer,
+                             const FormatRegistry &Registry) {
+  const Importer *DXIL = Registry.lookupImporter("dxil");
+  const Importer *DXBC = Registry.lookupImporter("dxbc");
+  const Importer *SPIRV = Registry.lookupImporter("spirv");
 
   llvm::StringRef Data = Buffer.getBuffer();
 
@@ -83,7 +112,7 @@ const Importer *detectFormat(llvm::MemoryBufferRef Buffer) {
         for (const auto &Part : *Container) {
           llvm::StringRef Name = Part.Part.getName();
           if (Name == "SHEX" || Name == "SHDR")
-            return &DXBC;
+            return DXBC;
         }
     } else {
       // Consume the error: an unparseable container is still DXILImporter's
@@ -91,13 +120,13 @@ const Importer *detectFormat(llvm::MemoryBufferRef Buffer) {
       // "detect, don't validate" contract.
       llvm::consumeError(Container.takeError());
     }
-    return &DXIL;
+    return DXIL;
   }
 
   if (llvm::isBitcode(
           reinterpret_cast<const unsigned char *>(Data.data()),
           reinterpret_cast<const unsigned char *>(Data.data() + Data.size())))
-    return &DXIL;
+    return DXIL;
 
   // SPIR-V binaries are a stream of 32-bit words beginning with a fixed
   // magic number (see the SPIR-V specification's "Physical Layout of a
@@ -107,7 +136,7 @@ const Importer *detectFormat(llvm::MemoryBufferRef Buffer) {
     uint32_t Magic;
     memcpy(&Magic, Data.data(), sizeof(Magic));
     if (Magic == 0x07230203u || Magic == 0x03022307u)
-      return &SPIRV;
+      return SPIRV;
   }
 
   return nullptr;
@@ -251,7 +280,7 @@ unsigned getHostVectorBits(const llvm::Triple &TheTriple, llvm::Module &M) {
 
 llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
                                          const DriverOptions &Opts) const {
-  const Importer *Imp = detectFormat(Input);
+  const Importer *Imp = detectFormat(Input, Ctx.getFormatRegistry());
   if (!Imp)
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),

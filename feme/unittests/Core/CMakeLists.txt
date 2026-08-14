@@ -4,6 +4,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeCoreTests
   ContextTest.cpp
+  FormatRegistryTest.cpp
   ModuleTest.cpp
   )
 target_link_libraries(FeMeCoreTests

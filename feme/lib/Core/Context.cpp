@@ -46,3 +46,7 @@ void Context::diagnose(Diagnostic D) const {
   if (DiagHandler)
     DiagHandler(D);
 }
+
+FormatRegistry &Context::getFormatRegistry() { return Registry; }
+
+const FormatRegistry &Context::getFormatRegistry() const { return Registry; }

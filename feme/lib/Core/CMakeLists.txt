@@ -1,5 +1,6 @@
 add_mlir_library(FeMeCore
   Context.cpp
+  FormatRegistry.cpp
   Module.cpp
 
   LINK_COMPONENTS
