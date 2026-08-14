@@ -11955,3 +11955,185 @@ flagged.
 4. `[feme][SPIRVToLLVM] Clarify ResourceInfo doc now covers buffer resources`.
 5. `[feme][SPIRVToLLVM] Apply clang-format to R9 changes`.
 6. This file.
+
+# Agent thoughts: FeMe roadmap step R10 (feme-run SPIR-V input; one HLSL source executed through both front ends)
+
+## Reading the roadmap item
+
+R10's row in feme/docs/Roadmap.md says: "`feme-run` SPIR-V input; one HLSL
+source executed through both front ends", covering §1.2 P0 and §2.2.3,
+depending only on R9. §1.2's own "SPIR-V shaders cannot execute" bullet and
+§2.4.2's "`feme-run` SPIR-V input" item frame this as "link the SPIR-V
+importer/translator into `feme-run`, reusing `Driver`'s format detection".
+That undersold the actual scope once I started building it, for two
+independent reasons discovered along the way (see below) -- both are now
+recorded as their own Deviation note in FeMeCPUDesign.md's Status section,
+per the roadmap's own convention.
+
+## Investigation
+
+- Read `feme/tools/feme-run/feme-run.cpp`'s `loadModule`: DXIL import runs
+  `feme::dxil::OpRaisingPass`/`MetadataRaisingPass` after
+  `feme::DXILImporter`; SPIR-V's counterpart is `feme::SPIRVImporter` +
+  `feme::SPIRVToLLVMTranslator`, whose own
+  `feme::spirv::createConvertSPIRVToLLVMPass` already recovers the
+  `hlsl.shader`/`hlsl.numthreads` attributes DXIL's `MetadataRaisingPass`
+  recovers separately -- so no extra raising pass is needed on the SPIR-V
+  side, only the import + translate call.
+- Checked whether the CPU pipeline (`feme::cpu::runPipeline`,
+  Pipeline.cpp) already treats DXIL's and SPIR-V's raised vocabulary
+  uniformly: builtin (thread/group ID) intrinsics already do
+  (`feme::cpu::SIMDizePass`/`ReferenceLowering.cpp` both switch on
+  `dx_thread_id`/`spv_thread_id` etc. side by side), but resource access
+  does not -- `feme::cpu::BoundResourceNormalizationPass`/
+  `ResourceLoweringPass` (and `checkSupportedRaisedOps`) only recognize
+  `target("dx.*")` handle types and `llvm.dx.resource.*` calls; any
+  `llvm.spv.resource.handlefrombinding`/`handlefromimplicitbinding` is
+  rejected unconditionally (see `UnsupportedOps.cpp`'s existing comment,
+  which already anticipated this: "an unbounded range... or a SPIR-V
+  binding"). This is a real, structural gap, not just "link the importer" --
+  confirmed by tracing R9's own storage-buffer conversion output
+  (`feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-storage-buffer.mlir`):
+  a `RWStructuredBuffer<T>` converts to `llvm.spv.resource.handlefrombinding`
+  producing a `target("spirv.VulkanBuffer", ...)` handle, accessed through
+  `llvm.spv.resource.getpointer` + an ordinary load/store -- a different
+  *shape* from DXIL's dedicated `load_rawbuffer`/`store_rawbuffer`
+  intrinsics, so nothing downstream could simply treat the two uniformly
+  without new code.
+- Checked whether real HLSL can be compiled to SPIR-V by Clang in this
+  build at all (the literal reading of "one HLSL source executed through
+  both front ends"): `llc --version`/`llvm-config --targets-built` and the
+  feme lit site config's `config.targets_to_build` (`X86 AArch64 DirectX`)
+  confirm the SPIRV target is not registered in this build, and
+  `clang -target spirv-unknown-vulkan-compute -c ...` fails with an
+  internal "Unknown command line argument '-spirv-ext=all'" error (the
+  driver forwards a `-mllvm` flag only the SPIRV backend itself defines).
+  Every existing SPIR-V test in this tree already works around this by
+  hand-writing `spirv` dialect MLIR and assembling it with `feme-translate
+  --serialize-spirv` (an MLIR-level serializer, independent of LLVM's own
+  SPIRV *codegen* target) rather than compiling real SPIR-V through
+  `clang`/`llc` -- confirmed `--serialize-spirv`/`--import-spirv` round-trip
+  fine with no `spirv-registered-target` requirement. So literally
+  compiling one `.hlsl` file to both formats is not possible in this
+  environment; the completion test instead hand-writes the SPIR-V half
+  directly, matching every other SPIR-V test's own established pattern
+  (documented explicitly in the new test's own comment and in the roadmap/
+  design-doc updates, rather than silently narrowing scope).
+- Manually built and ran a hand-written `RWStructuredBuffer<float>` compute
+  shader (writing `(float)tid.x`) through the not-yet-complete pipeline to
+  find the *actual* remaining gap once resource lowering worked: it failed
+  in `feme::cpu::SIMDizePass` with "component decomposition is not yet
+  supported for this use" on the store's value operand. Dumping the raised
+  IR for both the DXIL and SPIR-V paths side by side
+  (`feme-translate --spirv-to-llvmir` / `--import-dxil` +
+  `feme-opt -passes=feme-dxil-raise-ops,feme-dxil-raise-metadata`) showed
+  the actual difference: DXIL's raised `llvm.dx.thread.id` is already a
+  scalar call, while SPIR-V's builtin-variable materialization
+  (`feme::spirv::createConvertSPIRVToLLVMPass`'s lowering of
+  `GlobalInvocationId`) always builds the *whole* 3-component vector via an
+  `insertelement` chain over three `llvm.spv.thread.id` calls, then
+  `extractelement`s the one lane actually used -- `SIMDizePass`'s pattern
+  matching over a resource store's value operand does not see through that
+  extra construct. Confirmed with `opt -passes=instcombine,dce,early-cse`
+  that this is exactly the shape InstCombine already folds away; wrote a
+  small, targeted pass (`SPIRVBuiltinFoldingPass`, using
+  `llvm::findScalarElement` -- the same helper InstCombine itself uses for
+  this exact fold) rather than pulling a general InstCombine run into the
+  CPU pipeline, matching the project's existing preference for narrow,
+  single-purpose passes over broad, general-purpose ones at this stage
+  (the real optimizer only runs *after* the CPU pipeline, per
+  `feme::cpu::JITEngine`/`Driver::run`'s own structure).
+
+## Design decisions
+
+- **One SPIR-V resource pass, not two.** DXIL's split
+  (`BoundResourceNormalizationPass` normalizes a bound handle into a
+  `handlefromheap` call; `ResourceLoweringPass` then canonicalizes *every*
+  `handlefromheap`-based access, bound or bindless, into
+  `feme.cpu.resource.*` calls) exists because DXIL has a genuine bindless
+  heap (`ResourceDescriptorHeap`) the two need to share a canonical form
+  with. SPIR-V has no such bindless-heap concept at all (see
+  `BoundResourceNormalizationPass`'s own header comment, which already
+  says so) -- every SPIR-V resource is traditionally bound -- so there is
+  no intermediate form to split around `checkSupportedRaisedOps` the way
+  the DXIL side does. `feme::cpu::SPIRVResourceLoweringPass` normalizes
+  and lowers a bound `spirv.VulkanBuffer` handle in one pass, reusing the
+  *same* canonical `feme.cpu.resource.*` call helpers (`ResourceCalls.h`)
+  and the *same* `!feme.cpu.resources`/`!feme.cpu.bound_resources`
+  metadata shape the DXIL pair produces, so `feme::cpu::ResourceInfo`/
+  `ResourceHeap.h`/`JITEngine`/`feme-run` need zero SPIR-V-specific code of
+  their own -- confirmed by testing end to end with no changes to any of
+  those files.
+- **(descriptor set, binding) plays DXIL's (register space, register)
+  role**, exactly the correspondence `feme::spirv::RaisedLoweringPass`
+  already uses in the opposite (DXIL -> SPIR-V) direction
+  (`lowerResourceHandle`'s own comment: "DXIL's (register space, register)
+  binding is SPIR-V's (descriptor set, binding) pair, in the same operand
+  order"). This is why the existing heap YAML `bindings: {space, register,
+  ...}` schema needs no changes at all for a SPIR-V shader.
+- **Scope narrowed to a flat storage-buffer element**, matching
+  `ResourceLoweringPass`'s own "typed and raw buffers only" narrowing:
+  only a `getpointer` immediately followed by an ordinary load/store (no
+  intervening `getelementptr` into the element's own fields) is
+  recognized, verified against
+  `feme::spirv::StorageBufferAccessChainPattern`'s own two cases (a flat
+  element returns the `getpointer` result directly; a struct field access
+  adds a `getelementptr`) in SPIRVToLLVMPatterns.cpp. Image/sampler
+  resources and per-field structured-buffer access are left for a
+  function to be entirely untouched by this pass (verified with two
+  dedicated negative tests), the same all-or-nothing contract
+  `ResourceLoweringPass::collectHandles` documents for its own scope.
+- **`SPIRVBuiltinFoldingPass` runs first, unconditionally**, before
+  `PreparePass`/`BoundResourceNormalizationPass` even see the module: it
+  is a no-op for a DXIL-sourced module (nothing to fold), and folding
+  early means every later pass -- not just `SIMDizePass` -- sees the same
+  directly-scalar shape a DXIL-sourced module already has, rather than
+  special-casing just the one pass that happened to trip over it first.
+
+## What was deliberately left out
+
+- **Image/sampler resources on the CPU target** (`Buffer<T>`/
+  `RWBuffer<T>`/`Texture*`/`Sampler*`) -- `SPIRVResourceLoweringPass` only
+  normalizes `spirv.VulkanBuffer` (storage buffers); `spirv.Image`/
+  `spirv.Sampler` handles are left untouched, same as DXIL's own
+  `TypedBuffer`-only-via-a-different-mechanism narrowing. Real sampling
+  execution on the CPU target is a much larger, separate piece of work
+  (not attempted by any milestone so far).
+- **Structured-buffer field access** (reading one field of a multi-field
+  element individually, via the extra `getelementptr` the access-chain
+  pattern emits for that shape) -- left unmodeled; a whole-element
+  load/store is the only access shape this pass recognizes.
+- **A real SPIR-V codegen path for the completion test.** The test hand-
+  writes the SPIR-V half as `spirv` dialect MLIR rather than compiling it
+  from the same `.hlsl` file the DXIL half uses, since this build
+  configures no LLVM SPIRV backend for Clang's HLSL front end to target.
+  Documented explicitly, not silently narrowed.
+
+## Verification
+
+Built with the existing `build/` directory (ccache launcher via
+`CMAKE_CXX_COMPILER_LAUNCHER=ccache`, `LLVM_ENABLE_ASSERTIONS=ON`,
+targets `X86;AArch64` + experimental `DirectX`). Manually traced IR at
+every stage with `feme-translate`/`feme-opt -passes=...` before writing
+each lit test, to confirm each new pass's output matches what the next
+stage actually expects (not just "looks plausible") -- this is how the
+`SPIRVBuiltinFoldingPass` gap was found in the first place, by running the
+full pipeline commit-by-commit end to end on a hand-written shader rather
+than only unit-testing each pass in isolation.
+`ninja check-feme` after every commit: 894 passed, 9 unsupported
+(`spirv-registered-target`-gated, pre-existing), 0 failed throughout --
+up from the pre-existing 892/9 baseline by the 5 new lit tests this step
+adds (3 for `SPIRVResourceLoweringPass`, 1 for `SPIRVBuiltinFoldingPass`,
+1 end-to-end `front-end-equivalence.hlsl`). Ran `clang-format` over every
+touched C++ file and fixed the formatting it flagged.
+
+## Commit breakdown
+
+1. `[feme][Transforms][CPU] Add SPIRVResourceLoweringPass`.
+2. `[feme][Transforms][CPU] Add SPIRVBuiltinFoldingPass`.
+3. `[feme][Target][CPU] Wire SPIR-V resource/builtin passes into the CPU pipeline`.
+4. `[feme][Tools] feme-run: accept SPIR-V input`.
+5. `[feme][test] Add SPIR-V/DXIL front-end equivalence execution test`.
+6. `[feme][docs] Record roadmap step R10 completion`.
+7. `[feme] Apply clang-format to R10 changes`.
+8. This file.
