@@ -12137,3 +12137,189 @@ touched C++ file and fixed the formatting it flagged.
 6. `[feme][docs] Record roadmap step R10 completion`.
 7. `[feme] Apply clang-format to R10 changes`.
 8. This file.
+
+# Agent thoughts: FeMe roadmap step R11 (thread-safety test; route library diagnostics through Context; FormatRegistry; Exporter interface)
+
+## Reading the request
+
+R11's four sub-items (feme/docs/Roadmap.md §1.1's "Core library plumbing"
+table) are the design-document plumbing that every prior milestone routed
+around: nothing about DXIL/SPIR-V/DXBC import, raising, or CPU-target
+execution needed a diagnostics channel, a format registry, or a real
+`Exporter`, so those parts of Design.md stayed unimplemented sketches
+while the actual translation-matrix work moved forward. R11 is the first
+step whose job is entirely "make the library plumbing match what
+Design.md already describes" rather than adding a new translation
+capability.
+
+I treated the four sub-items as four small, independently landable
+commits, in the order the Roadmap table lists them, since each is
+testable on its own and none strictly depends on the others (the
+"Depends on" column only names R7, for the registry's "third format"
+precondition — DXBC).
+
+## Thread-safety test (commit 1)
+
+The Roadmap text already sketches the shape of this test almost exactly
+("a gtest that imports/raises/retargets the same input on N threads with
+N Contexts"). I implemented "imports/raises" fully
+(`unittests/Driver/ThreadSafetyTest.cpp`: `DXILImporter::import` +
+`OpRaisingPass` + `MetadataRaisingPass`, run on 8 threads x 25 iterations
+each), but deliberately left out "retargets": that needs a real
+`TargetMachine` registered in the process, and the existing
+`DriverTest.cpp` already documents (in its own header comment) why this
+unittest binary doesn't do that — it would mean linking/initializing
+DirectX/SPIRV/AMDGPU codegen into every unit test binary just for one
+test. I followed that same precedent rather than fighting it.
+
+The subtler design point was making the "Contexts never share state"
+assertion actually meaningful. My first draft created and destroyed
+`Context`s sequentially per-thread and compared pointers afterwards — but
+that's not a valid test: a freed `Context`'s heap address can coincidentally
+get reused by the next one, which would make the "must be distinct"
+assertion pass or fail based on allocator behavior, not on any real
+sharing bug. I fixed this by constructing all N `Context`s up front (into
+a `std::vector<std::unique_ptr<Context>>`) and keeping every one alive
+until after all threads join, so the pointer-distinctness check at the
+end is comparing genuinely-simultaneously-live objects. I also record
+success per-thread into a plain `std::vector<unsigned char>` rather than
+calling gtest `EXPECT_*` macros from inside worker threads, since I did
+not want to depend on gtest's assertion thread-safety guarantees to make
+this test itself trustworthy under TSan.
+
+## Diagnostics through Context (commit 2)
+
+This one had a concrete violation to fix, not just a missing feature:
+`feme::Driver::run`'s "`--wave-size` is ignored for target ..." warning
+was library code (`lib/Driver/Driver.cpp`) writing directly to
+`llvm::errs()`, exactly what "never printed directly to errs() by
+library code" (Design.md's "No Global State" section) says not to do. I
+added `feme::Diagnostic`/`DiagnosticSeverity`/`DiagnosticHandlerTy`
+(`feme/Core/Diagnostic.h`) and `Context::setDiagnosticHandler`/`diagnose`,
+then moved that one warning to `Ctx.diagnose(...)`.
+
+Deliberate choice: `Context` installs no default handler at all (not even
+a stderr one), matching "which defaults to a simple stderr-printing
+handler in the CLI tool" read literally — the default lives in the CLI
+tool, not in `Context`. This means a bare `Context` silently drops
+diagnostics unless something installs a handler; I considered that
+worse ("a warning vanished!") until I reread "never assumed by library
+code" and realized the whole point is that library code must not depend
+on diagnostics being visible for correctness, so a silent no-op default
+is exactly the safe choice, not a gap. I updated `feme.cpp` and
+`feme-run.cpp` to each install their own stderr-printing handler,
+preserving the exact former message text (checked against
+`test/Tools/feme/feme-cpu-wave-size.ll`'s `FileCheck` pattern, which still
+passes unmodified).
+
+## FormatRegistry (commit 3)
+
+The interesting problem here was layering, not the data structure itself.
+Design.md's `Context` sketch has `Context` own a `FormatRegistry` and
+populate it "eagerly at construction... from statically-linked
+components." But `Context`/`FormatRegistry` live in `FeMeCore`, which
+cannot depend on `FeMeImportDXIL`/`FeMeImportDXBC`/`FeMeImportSPIRV`
+without creating an upward, cyclic library dependency — those libraries
+already depend on `FeMeCore` for `Context`/`Module`. `feme::Driver`,
+which already links all three (and, after commit 4, both Exporters too),
+does not have this problem.
+
+I resolved this by keeping `FormatRegistry` itself format-agnostic (just
+`StringMap`s from format name to `Importer*`/`Exporter*`, no knowledge of
+DXIL/SPIR-V/DXBC) in `FeMeCore`, and having `Driver`'s constructor
+populate `Ctx.getFormatRegistry()` lazily (guarded by `.empty()`, so a
+`Context` reused across multiple `Driver`s, or already populated by some
+other caller, doesn't double-register) instead of `Context`'s own
+constructor. This is a real deviation from the design sketch, so I
+recorded it explicitly in Design.md (a "Status" subsection under
+"`feme::Context`", and an update to the existing "Status: `feme::Driver`"
+paragraph that already flagged "no `Ctx.getFormatRegistry()` yet" as a
+known gap) rather than silently diverging.
+
+`Driver::detectFormat` used to hold three `static const` Importer
+instances as function-local statics; those moved into a
+`populateFormatRegistry` helper that registers them into whatever
+`FormatRegistry` it's handed, and `detectFormat` now takes a `const
+FormatRegistry&` and looks each Importer up by name instead of closing
+over the statics directly. `Driver`'s own public interface (`Driver::run`'s
+signature) is unchanged, exactly matching what the pre-existing Design.md
+note anticipated.
+
+## Exporter interface (commit 4)
+
+Design.md's "Exporter" section already existed as a one-paragraph
+description with no code — it was pure aspiration, unlike `Importer`
+which had a full interface sketch. I mirrored `Importer`'s shape
+(`ExportOptions` as a single plain struct, same RTTI-avoidance rationale)
+for `Exporter`, with one deliberate naming difference: I called the pure
+virtual method `exportModule`, not `export`, because `export` is a
+reserved C++ keyword (left over from the never-widely-implemented
+templates-export feature, still reserved through C++20) and can't be used
+as an identifier.
+
+For the two concrete `Exporter`s, I didn't reinvent DXIL/SPIR-V codegen:
+`DXILExporter`/`SPIRVExporter` are thin wrappers that resolve the same
+target triple `Driver::resolveTargetTriple` already computes (preserving
+a DXIL-originated module's recovered shader model, or a SPIR-V-originated
+module's own environment — I duplicated this small piece of logic rather
+than trying to share it with `Driver.cpp`'s anonymous-namespace-local
+function, since extracting it into a shared header for two ~15-line call
+sites felt like more layering than the duplication cost justified) and
+then delegate to the existing, already-tested `TargetMachineBackend`. This
+keeps "Exporter interface exists" and "DXIL/SPIR-V codegen has a second,
+divergent implementation" as two separate concerns — only the former is
+what R11 asks for.
+
+I wired `Driver::run`'s final step to look up `Opts.Target` ("dxil" or
+"spirv" specifically) in the `FormatRegistry`'s Exporters and use
+`Exporter::exportModule` when one exists, falling back to
+`TargetMachineBackend` directly for every other `--target` (real-ISA
+retargeting has no format to round-trip to, so there's nothing to look
+up). DXBC gets no `Exporter` at all, matching the "DXBC export is not a
+current use case" line in Design.md's original "Exporter" section.
+
+## Testing gaps and how I closed them
+
+`DriverTest.cpp`'s existing "avoid real-target retargeting" precedent
+extends to the new `Exporter`s: `DXILExporterTest`/`SPIRVExporterTest`
+each test `getFormatName()` and that `exportModule` fails with a clean
+`Error` (not a crash) when its target isn't registered in the unittest
+binary — the same shape of coverage `DriverTest.cpp`'s
+`RejectsMalformedInputForDetectedSPIRVFormat` etc. already established for
+Importers. Real DXIL/SPIR-V round-trip coverage (through the CLI, with
+targets actually registered) already exists in
+`test/Tools/feme/feme-*.test` and needed no changes, since `Driver`'s
+externally observable behavior for those two targets is unchanged, only
+internally re-routed through the new `Exporter`s.
+
+`FormatRegistryTest.cpp` uses `FakeImporter`/`FakeExporter` test doubles
+rather than the real DXIL/SPIR-V/DXBC ones, since `FormatRegistry` itself
+needs to be tested as format-agnostic; `DriverTest.cpp`'s
+`PopulatesFormatRegistry` test is the one place that checks the *real*
+Importers/Exporters actually get registered when a `Driver` is
+constructed.
+
+## Verification
+
+Built and tested with the existing `build/` directory (ccache launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`, `X86;AArch64` + experimental `DirectX`
+targets) after every commit via `ninja check-feme`, which builds every
+`check-feme-*` target's dependencies (including `check-feme-unit`) before
+running them: baseline was 894/903 passed (9 unsupported,
+`directx-registered-target`-gated, pre-existing), ending at 907/916
+passed (9 unsupported, unchanged) — 0 failures throughout, +13 new unit
+tests across the four commits. Also rebuilt and ran the touched/added
+unit test binaries (`FeMeCoreTests`, `FeMeDriverTests`,
+`FeMeExportDXILTests`, `FeMeExportSPIRVTests`) under the existing
+`build-ubsan/` (`LLVM_USE_SANITIZER=Undefined`) tree with no sanitizer
+reports. Ran `clang-format` over every touched/added C++ file and fixed
+what it flagged.
+
+## Commit breakdown
+
+1. `[feme] R11: add thread-safety test for Context/Importer/raising passes`.
+2. `[feme] R11: route library diagnostics through Context`.
+3. `[feme] R11: add FormatRegistry, used by Driver for format detection`.
+4. `[feme] R11: add Exporter interface, DXILExporter and SPIRVExporter`.
+5. `[feme] R11: update Design.md/Roadmap.md for diagnostics/FormatRegistry/Exporter`.
+6. This file.
