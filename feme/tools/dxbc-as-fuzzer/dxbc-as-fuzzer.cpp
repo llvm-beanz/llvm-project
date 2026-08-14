@@ -21,6 +21,7 @@
 #include "feme/DXBC/Assembler/AsmPrinter.h"
 #include "feme/DXBC/Assembler/Encoder.h"
 #include "feme/DXBC/Assembler/Parser.h"
+#include "feme/DXBC/Assembler/SignatureComments.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -50,7 +51,11 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
     llvm::consumeError(Bytecode.takeError());
     return 0;
   }
+  // Same fuzzer bytes as parseAssembly's input, fuzzing
+  // parseSignatureComments (which never fails -- malformed/unrecognized
+  // rows are skipped, see SignatureComments.h) alongside the encoder, since
+  // real `dxbc-as --emit=container` usage feeds it the same source text.
   llvm::SmallVector<char, 256> Container;
-  wrapInContainer(*Bytecode, Container);
+  wrapInContainer(*Bytecode, parseSignatureComments(Source), Container);
   return 0;
 }
