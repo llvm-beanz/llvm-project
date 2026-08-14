@@ -13,6 +13,7 @@
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -238,6 +239,46 @@ TEST(SIMDizeTest, DiagnosesUnmaskableAtomicRMWWithoutCrashing) {
   runPass(*M);
 
   EXPECT_TRUE(SawError);
+}
+
+// A divergent call to an ordinary function has no widened form yet, so
+// `widenElementwise` diagnoses it via `emitError`. Like every other
+// mid-widening diagnostic, it is emitted after `buildWidenedFunction` has
+// erased the pre-widening function, which is why the widener must not
+// reach through that function for the context (previously a use-after-free
+// that crashed on macOS arm64).
+TEST(SIMDizeTest, DiagnosesUnsupportedDivergentCall) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %r = call i32 @foo(i32 %tid)
+      ret void
+    }
+    declare i32 @foo(i32)
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  std::string ErrorMessage;
+  M->getContext().setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        if (DI->getSeverity() != DS_Error)
+          return;
+        std::string &Out = *reinterpret_cast<std::string *>(Ctx);
+        raw_string_ostream OS(Out);
+        DiagnosticPrinterRawOStream Printer(OS);
+        DI->print(Printer);
+      },
+      &ErrorMessage);
+
+  runPass(*M);
+
+  EXPECT_NE(ErrorMessage.find("unsupported divergent call to 'foo'"),
+            std::string::npos)
+      << "actual diagnostic: " << ErrorMessage;
 }
 
 TEST(SIMDizeTest, WidensMaskedLoadStoreToGatherScatter) {
