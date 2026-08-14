@@ -23,7 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R7?
+Can you implement roadmap step R8?
 
-> DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to
-> end (see: §1.4 P0, §2.2.8)
+> Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe (see:
+> §2.4.3, §2.4.5, §2.2.4)
