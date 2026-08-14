@@ -235,7 +235,34 @@ Key properties:
   (e.g. target SPIR-V version, DXIL validator version) are passed to the
   relevant Importer/Exporter, not stored globally on `Context`.
 
-## Pipeline Abstraction: Importers, Translators, Exporters, Backends
+#### Status: `setDiagnosticHandler`/`diagnose`, `FormatRegistry` (implemented)
+
+`Context::setDiagnosticHandler`/`diagnose` (`feme::Diagnostic`/
+`DiagnosticSeverity`/`DiagnosticHandlerTy`, `feme/include/feme/Core/
+Diagnostic.h`) are implemented: warnings/notes that don't abort an
+operation (see "Diagnostics and Error Handling" below) now go through
+`Ctx.diagnose(...)` instead of library code writing to `errs()` directly
+-- `feme::Driver::run`'s "`--wave-size` is ignored for this target"
+warning is the first, and so far only, caller. No handler is installed by
+default; a `Context` with none set silently drops diagnostics, and only a
+CLI tool (`feme`/`feme-run`) that wants them printed installs one of its
+own.
+
+`Context::getFormatRegistry()` (`feme::FormatRegistry`,
+`feme/include/feme/Core/FormatRegistry.h`) is also implemented, mapping
+format names to the `Importer`/`Exporter` instance that handles them.
+Deviation: FeMeCore (where `Context`/`FormatRegistry` live) cannot depend
+on the format libraries (`FeMeImportDXIL`, `FeMeExportDXIL`, ...) without
+an upward, cyclic library dependency -- those libraries already depend on
+FeMeCore for `Context`/`Module` -- so a bare `Context`'s registry starts
+empty rather than being populated by `Context`'s own constructor as the
+class sketch above suggests. `feme::Driver`, which already links every
+format library, populates its `Context`'s registry lazily (at most once
+per `Context`) in its own constructor instead; see the "Status:
+`feme::Driver`" section below for how this replaces `detectFormat`'s
+former file-local `static const` Importer instances.
+
+
 
 FeMe models its work as four composable, single-step operations, plus a
 `Driver` that chains them into full toolchain invocations (see `Driver`
@@ -295,6 +322,27 @@ subclass.
 The inverse of an `Importer`: serializes a `Module` back to a format's binary
 encoding. Not every format needs to support export in v1 (DXBC export is not
 a current use case), but the interface is symmetric.
+
+#### Status: `feme::Exporter`; `feme::DXILExporter`/`feme::SPIRVExporter` (implemented)
+
+`feme::Exporter` (`feme/include/feme/Export/Exporter.h`) is implemented,
+mirroring `Importer`'s shape (an `ExportOptions` struct, currently empty,
+for the same "single plain struct, no RTTI downcast" reason `ImportOptions`
+is one). `feme::DXILExporter`/`feme::SPIRVExporter`
+(`feme/lib/Export/DXIL`/`feme/lib/Export/SPIRV`) are thin wrappers: each
+resolves the same DXIL/SPIR-V target triple `feme::Driver`'s
+`resolveTargetTriple` already computes (preserving a DXIL-originated
+module's recovered shader model, or a SPIR-V-originated module's own
+environment) and delegates the actual codegen to the existing
+`feme::TargetMachineBackend` -- this closes "DXIL/SPIR-V export is spelled
+as a `Backend` today" without introducing a second, parallel lowering
+path. `feme::FormatRegistry` (see the "`feme::Context`" section above) maps
+format names to Exporters the same way it does Importers; `feme::Driver`
+registers both and, for a `--target` of `"dxil"`/`"spirv"` specifically,
+now goes through the registered Exporter instead of calling
+`TargetMachineBackend` directly (any other `--target`, i.e. real-ISA
+retargeting, is unaffected). DXBC has no Exporter, matching this section's
+"not a current use case" note above.
 
 ### `Translator`
 
@@ -398,13 +446,14 @@ that gets from that to the requested destination:
    selection.
 7. `feme::TargetMachineBackend`.
 
-There is no `Ctx.getFormatRegistry()` yet (deviating from the sketch above)
--- `Driver` currently detects between its three supported formats directly
-(see `feme::detectFormat` in `feme/lib/Driver/Driver.cpp`) rather than
-through a registry on `Context`, since only three formats exist to detect
-between; a registry is expected to be added if/when this stops being a
-short enough list to hard-code, without changing `Driver`'s own public
-interface.
+`Ctx.getFormatRegistry()` (see the "`feme::Context`" section's Status note
+above) now backs format detection: `Driver`'s constructor populates it
+(lazily, at most once per `Context`) with the same three Importers/two
+Exporters `detectFormat`/the final export step used to hold as file-local
+`static const` instances, and `feme::detectFormat`
+(`feme/lib/Driver/Driver.cpp`) now looks each up by name in the registry
+instead. `Driver`'s own public interface is unchanged, matching what this
+section previously anticipated.
 
 Validated end to end (see `test/Tools/feme/feme-*.{ll,mlir,test}`): DXIL
 retargeted to DXIL, to SPIR-V, and to a real ISA (`amdgcn-amd-amdhsa`), each
