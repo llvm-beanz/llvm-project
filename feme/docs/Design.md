@@ -2018,16 +2018,18 @@ end-to-end test coverage that should grow alongside it, see
    exactly, `StructuredBuffer`/`CBuffer` via a same-size/alignment opaque
    placeholder element type -- and typed buffer loads/stores. Module-level
    metadata raising (shader model, entry points, thread group dimensions)
-   landed alongside it as `feme::dxil::MetadataRaisingPass`. See the
+   landed alongside it as `feme::dxil::MetadataRaisingPass`. `Barrier` (its
+   constant mode operand selecting one of six barrier-scope intrinsics) and
+   the aggregate-returning `IMul`/`UMul`/`UAddc`/`SplitDouble`/
+   `WaveActiveBallot` (a general multi-return-value `extractvalue`-
+   reconstruction mechanism, roadmap step R3) are raised too. See the
    "Status" note under the DXIL section above. Non-typed buffer and texture
    load/store ops, texture/sampler resource-handle kinds (need
    dimension/multi-sample/feedback bits not recoverable the way
    `StructuredBuffer`/`CBuffer`'s size/alignment is), and a handful of
    opcode families needing more than a 1:1 intrinsic mapping
    (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`'s flag-selected
-   variants, `Barrier`, and the aggregate-returning `IMul`/`UMul`/
-   `UAddc`/`SplitDouble`/`WaveActiveBallot`) remain open for follow-up
-   changes.
+   variants) remain open for follow-up changes.
 5. **DXIL retargeting**: reuse step 3's backend glue for DXIL-derived
    `llvm::Module`s.
 

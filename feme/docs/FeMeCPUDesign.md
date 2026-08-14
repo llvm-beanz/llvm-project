@@ -30,12 +30,16 @@ a sibling of the latter.
 Deviation: milestone 1's implementation narrowed a few things described
 below; each is called out inline where it's discussed, and summarized here:
 
-- `WaveActiveBallot` raising is deferred. It is grouped, in
+- `WaveActiveBallot` raising was deferred. It was grouped, in
   `feme::dxil::OpRaisingPass`'s own scope notes, with `IMul`/`UMul`/
   `UAddc`/`SplitDouble` as ops needing a general multi-return-value
-  `extractvalue`-reconstruction mechanism this milestone does not build;
-  it is not specific to wave ops and is better done once for all four than
-  once for `WaveActiveBallot` alone.
+  `extractvalue`-reconstruction mechanism this milestone did not build; it
+  is not specific to wave ops and was better done once for all five than
+  once for `WaveActiveBallot` alone. Roadmap step R3 added that mechanism
+  (`feme::dxil::OpRaisingPass::raiseAggregateCall`) and the CPU-target
+  lowering it unblocks (`feme::cpu::WaveCallKind::Ballot`/`lowerBallot` in
+  WaveLowering.cpp) -- see the milestone 8 deviation note below and
+  `feme/test/Tools/feme-run/HLSL/ballot.hlsl`.
 - `checkSupportedRaisedOps` (see "Raised IR prerequisites" below) rejects
   every register-bound resource handle unconditionally, including the one
   the "Root constants" section carves out an exception for. That section's
@@ -127,12 +131,16 @@ and summarized here:
   `handlefromheap` for: `TypedBuffer` and `RawBuffer` (which covers both
   `ByteAddressBuffer` and `StructuredBuffer`; see "Descriptor heaps" for
   how the pass tells them apart). A constant buffer read through the heap
-  is left entirely unmodified rather than canonicalized -- it needs the
-  same multi-return-value `extractvalue` reconstruction mechanism the
-  milestone 1 deviation above defers for `WaveActiveBallot` et al., since
-  `dx.op.cbufferLoadLegacy`'s raised form returns a whole row of dwords per
-  call rather than one canonical scalar/vector view. Sampling remains a
-  non-goal, so a sampler heap access is untouched for the same reason
+  is left entirely unmodified rather than canonicalized -- roadmap step R3
+  added the general multi-return-value `extractvalue` reconstruction
+  mechanism the milestone 1 deviation above once deferred `WaveActiveBallot`
+  et al. for (`feme::dxil::OpRaisingPass::raiseAggregateCall`), but
+  `dx.op.cbufferLoadLegacy` itself is not yet one of that mechanism's
+  `RaisableAggregateOp` entries: it returns a whole row of dwords per call
+  (a wider, differently-shaped aggregate than `IMul`/`UMul`/`UAddc`/
+  `SplitDouble`/`WaveActiveBallot`'s fixed two-or-four-field structs), so
+  wiring it up is left for a future change. Sampling remains a non-goal, so
+  a sampler heap access is untouched for the same reason
   `feme::dxil::OpRaisingPass` never raises a `handlefromheap` for one.
 - SPIR-V's bindless descriptor-heap counterpart (`SPV_EXT_descriptor_heap`)
   has no raised-IR representation yet -- only DXIL defines
@@ -524,18 +532,17 @@ it's discussed, and summarized here:
 - **Only the wave intrinsics DXIL raising already produces are lowered**:
   `WaveGetLaneCount`, `WaveIsFirstLane`, `WaveActiveAnyTrue`/`AllTrue`,
   `WaveActiveAllEqual`, `WaveReadLaneAt`, `WaveAllBitCount`
-  (`wave.active.countbits`) and `WavePrefixBitCount`.
-  `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/`Xor`,
-  `WaveActiveBallot` and `WavePrefixSum`/`Product`/`USum`/`UProduct` are not
-  lowered: `feme::dxil::OpRaisingPass` does not raise them yet either (they
-  pick their source intrinsic from an extra opcode-carried operand raising
-  does not yet reconstruct, or -- `WaveActiveBallot` -- return an aggregate,
-  matching milestone 1's "WaveActiveBallot raising deferred" deviation), and
-  SPIR-V import raises no wave op at all yet, so no front end can put one of
-  these into a module `feme::cpu::WaveLoweringPass` ever sees; lowering them
-  now would be untested dead code. `WaveReadLaneFirst` has no dedicated
-  raised intrinsic to lower in the first place (DXIL/SPIR-V both express it
-  through the same `WaveReadLaneAt`-family op raising already covers).
+  (`wave.active.countbits`), `WavePrefixBitCount`, and (roadmap step R3)
+  `WaveActiveBallot`. `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/
+  `Xor` and `WavePrefixSum`/`Product`/`USum`/`UProduct` are not lowered:
+  `feme::dxil::OpRaisingPass` does not raise them yet either (they pick
+  their source intrinsic from an extra opcode-carried operand raising does
+  not yet reconstruct), and SPIR-V import raises no wave op at all yet, so
+  no front end can put one of these into a module
+  `feme::cpu::WaveLoweringPass` ever sees; lowering them now would be
+  untested dead code. `WaveReadLaneFirst` has no dedicated raised intrinsic
+  to lower in the first place (DXIL/SPIR-V both express it through the same
+  `WaveReadLaneAt`-family op raising already covers).
 - **`feme::cpu::WaveCalls` introduces the `feme.cpu.wave.*` canonical calls**
   this milestone needs, mirroring how `feme::cpu::ResourceCalls`/
   `BuiltinCalls` split canonicalization (`feme::cpu::SIMDizePass`, which

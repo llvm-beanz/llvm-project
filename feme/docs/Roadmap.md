@@ -77,12 +77,15 @@ The SPIR-V *input* half is the narrowest edge of the translation matrix.
 
 DXIL import is the most complete path, and its gaps are enumerable.
 
-- **P0 — aggregate-returning ops.** `IMul`/`UMul`/`UAddc`/`SplitDouble`/
-  `WaveActiveBallot` all need the same general multi-return-value
-  `extractvalue`-reconstruction mechanism, which is why they were deferred
-  together (Design.md milestone 4 status; FeMeCPUDesign.md milestone 1
-  deviation). One mechanism unblocks all five, and `WaveActiveBallot` is the
-  only wave intrinsic HLSL programs reach for that FeMe cannot lower.
+- **P0 — aggregate-returning ops (done by R3).** `IMul`/`UMul`/`UAddc`/
+  `SplitDouble`/`WaveActiveBallot` all needed the same general
+  multi-return-value `extractvalue`-reconstruction mechanism, which is why
+  they were deferred together (Design.md milestone 4 status; FeMeCPUDesign.md
+  milestone 1 deviation). `feme::dxil::OpRaisingPass::raiseAggregateCall` is
+  that one mechanism, unblocking all five; `WaveActiveBallot` -- the only
+  wave intrinsic HLSL programs reach for that FeMe could not lower -- is now
+  lowered on the CPU target too (`feme::cpu::WaveCallKind::Ballot` in
+  WaveLowering.cpp), exercised end to end by `ballot.hlsl`.
 - **P0 — flag-selected opcode families.** `WaveActiveOp`/`WaveActiveBit`/
   `WavePrefixOp`/`QuadOp` select their operation from a flag operand rather
   than mapping 1:1 onto an intrinsic; `Barrier` likewise. Every one of these
@@ -266,8 +269,8 @@ unless noted:
   itself folds an `if`/`else` each doing the same op on a different constant
   address into a single `select`-of-pointer `atomicrmw`, the address-
   divergent shape that narrowing already covers).
-- **`ballot.hlsl`** — `WaveActiveBallot` + `countbits`; gated on §1.3's
-  aggregate-returning mechanism.
+- **`ballot.hlsl`** (done by R3) — `WaveActiveBallot` + `countbits`; was
+  gated on §1.3's aggregate-returning mechanism.
 - **`nested-divergence.hlsl`** — divergent loop containing a divergent
   diamond containing an early return. The linearizer's hardest supported
   shape, currently only reached through generated CFGs.
@@ -344,7 +347,7 @@ dependency column is the only ordering constraint.
 |---|---|---|---|
 | R1 | Grow the differential harness to divergent/loop shapes; add the wave-size sweep (done: `--unstructured` stays `--reference`-only, see §1.6's new gap) | §2.2.1, §2.2.2, §2.4.1, §2.4.4 | — |
 | R2 | Mask the scalarization fallback's per-lane execution; add `histogram.hlsl`; make `feme-cpu-simdize` reject every shape `feme-cpu-linearize` left an unwidened divergent branch in, including one inside a loop (§1.6's new gap, found by R1) (done: the divergent-branch gap turned out to be `feme::cpu::runPipeline` not propagating a pass diagnostic, not `feme-cpu-simdize`'s own check -- see §1.6's table) | §1.6 P0, §2.3 | R1 (harness catches regressions) |
-| R3 | Multi-return-value raising mechanism (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` | §1.3 P0 | — |
+| R3 | Multi-return-value raising mechanism (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` (done: `feme::dxil::OpRaisingPass::raiseAggregateCall` raises all five; `feme::cpu::WaveCallKind::Ballot`/`lowerBallot` lower `WaveActiveBallot` on the CPU target) | §1.3 P0 | — |
 | R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` | §1.3 P0 | — |
 | R5 | Barriers inside branches/loops; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` | §1.6, §2.3 | R4 (`Barrier` raising) |
 | R6 | DXBC importer fuzzer; `check-feme-fuzz` | §1.4 P0, §1.7 P0 | — |
