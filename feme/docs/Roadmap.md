@@ -282,10 +282,11 @@ being untested.
    DXIL and SPIR-V and asserts the two produce the same answer. This is the
    test that would give the SPIR-V input path the same confidence the DXIL
    one has, and it is blocked only on §1.2's two P0 items.
-4. **JIT vs AOT.** `AOTDispatchTest.cpp` establishes the pattern in `gtest`
-   for one shader; no `lit` test compiles a shader with `feme --target=<host>`
-   and executes the resulting object file. AOT is what an embedding client
-   actually ships.
+4. **JIT vs AOT** (done by R8). `AOTDispatchTest.cpp` establishes the pattern
+   in `gtest` for one shader; `feme-run --object` now loads a shader
+   compiled with `feme --target=<host>` -- a real object file -- with
+   `orc::LLJIT::addObjectFile` and dispatches it directly, so `lit` covers
+   the same AOT path (see test/Tools/feme-run/feme-run-object-aot.ll).
 5. **Optimization level.** Every end-to-end test runs at the default `-O0`.
    `-O2` reorders and vectorizes the raised IR before the CPU pipeline sees
    it; nothing checks that a shader still computes the same answer.
@@ -293,9 +294,13 @@ being untested.
    produces a container, but no test re-imports the produced artifact and
    executes it (DXIL→DXIL→run), nor re-imports produced SPIR-V. A round trip
    that *executes* is a much stronger statement than one that parses.
-7. **Resource shapes.** Every executing test uses an unstructured raw buffer,
-   because that is all `feme-run`'s heap YAML can describe (§1.6). Typed
-   buffers, formats, strides and constant buffers are untested by execution.
+7. **Resource shapes** (typed buffers done by R8). Every executing test
+   used to use an unstructured raw buffer, because that was all
+   `feme-run`'s heap YAML could describe (§1.6); it now also accepts
+   `kind`/`format`/`stride`, and `typed-buffer.hlsl` exercises a real
+   `RWBuffer<float4>`. Structured-buffer strides and constant buffers
+   remain untested by execution (the heap YAML can describe them, but no
+   test yet does).
 8. **DXBC.** CLI-level (`feme`/`feme-translate`) end-to-end coverage now
    exists, per §1.4's R7 entry (`test/Tools/feme/feme-dxbc-to-dxil.dxasm`).
    Execution (a DXBC-derived module reaching `feme-run`/the CPU target) is
@@ -339,8 +344,8 @@ unless noted:
 - **`matrix-multiply.hlsl`** — tiled, groupshared-staged, loop-heavy; the
   closest thing to a real workload, and a natural first performance
   regression fixture for milestone 12/13.
-- **`typed-buffer.hlsl`** — `RWBuffer<float4>` with a real format, gated on
-  §2.4's heap YAML work.
+- **`typed-buffer.hlsl`** (done by R8) — `RWBuffer<float4>` with a real
+  format (`r32g32b32a32_float`), using §2.4's heap YAML work.
 - **A DXBC pair** under `test/Tools/feme/`: a `dxbc-as`-assembled `.dxasm`
   fixture retargeted with `feme --target=dxil`, and the same fixture executed
   through `feme-run` once DXBC import reaches `Driver` (§1.4).
@@ -364,10 +369,11 @@ is small enough to land on its own:
    work is linking the SPIR-V importer and its `Translator` chain and
    reusing `Driver`'s existing format detection rather than re-deriving it,
    and it is what unlocks §2.2's front-end-equivalence axis.
-3. **Heap YAML `kind`/`format`/`stride`.** FeMeCPUDesign.md already specifies
-   the richer schema; milestone 11 shipped the raw-buffer subset. Filling it
-   in unlocks §2.3's typed-buffer cases and stops tests from hand-encoding
-   float bit patterns as integers.
+3. **Heap YAML `kind`/`format`/`stride`** (done by R8). FeMeCPUDesign.md
+   already specified the richer schema; milestone 11 shipped the raw-buffer
+   subset. `feme-run`'s `resource-heap`/`bindings` entries now accept all
+   three, unlocking §2.3's typed-buffer cases and stopping tests from
+   hand-encoding float bit patterns as integers.
 4. **A `%feme-run-differential` harness helper** (done by R1:
    feme/utils/feme-run-differential.py). Takes a seed list, a `feme-cfg-gen`
    flag set, and a wave-size list, generating each seed once and diffing its
@@ -379,9 +385,11 @@ is small enough to land on its own:
    was zero (see §1.6's new divergent-branch-in-a-loop gap, found by this
    helper), so a shape is only accepted once the pipeline ran it with no
    caveats.
-5. **An AOT lit recipe.** `feme --target=<host-triple>` + a tiny loader
-   (either a `feme-run --object` mode or a test-only C driver) so AOT is
-   covered by `lit`, not only by `gtest`.
+5. **An AOT lit recipe** (done by R8). `feme-run --object` loads a shader
+   compiled with `feme --target=<host-triple>` -- a real object file -- with
+   `orc::LLJIT::addObjectFile` and dispatches it directly through
+   `feme::cpu::runDispatch`, so AOT is covered by `lit`, not only by
+   `gtest` (test/Tools/feme-run/feme-run-object-aot.ll).
 6. **`check-feme-fuzz` (done by R6).** Per §1.7: bounded (`-runs=N`,
    seed-corpus-only) runs of every fuzz target, wired as a dependency of
    nothing by default (`ninja check-feme-fuzz` runs it explicitly) but with
@@ -415,7 +423,7 @@ dependency column is the only ordering constraint.
 | R5 | Barriers inside a uniform loop; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` (done: `feme::cpu::matchLoopShape`/`buildWrapperForLoop` split a barrier inside a header-tested uniform loop by cloning its header/latch into the wrapper as an ordinary scalar loop; `feme::cpu::spillValuesLiveAcrossBarriers` spills any value live across a barrier into a per-wave context array; a barrier inside a *branch* remains diagnosed, and a divergent groupshared access -- including a masked store at a uniform address, found writing `reduction.hlsl` -- remains a separate, still-open narrowing, see §1.6) | §1.6, §2.3 | R4 (`Barrier` raising) |
 | R6 | DXBC importer fuzzer; `check-feme-fuzz` (done: `feme-dxbc-import-fuzzer` fuzzes `feme::dxsa::deserialize` directly and found/fixed a real `SrcOperandAttr` builder assertion on a malformed immediate operand; `check-feme-fuzz` runs all five fuzz targets, seed-corpus-only, and found/fixed a bit-rotted `dxbc-as-fuzzer` call site broken by an unrelated `wrapInContainer` signature change) | §1.4 P0, §1.7 P0 | — |
 | R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end (done: `feme::DXBCImporter` + `feme::dxsa::DXSAToLLVMIRTranslator` wired into `feme::Driver`/`feme`/`feme-translate --import-dxbc`; found/fixed a latent `!dx.resources` UAV-metadata bug the new end-to-end path exposed, see §1.4) | §1.4 P0, §2.2.8 | — |
-| R8 | Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe | §2.4.3, §2.4.5, §2.2.4 | — |
+| R8 | Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe (done: `feme-run`'s heap YAML `resource-heap`/`bindings` entries accept `kind`/`format`/`stride`, closing the "raw buffers only" narrowing §2.2's "Resource shapes" row and milestone 11's own deviation note flagged; `typed-buffer.hlsl` gives `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` real execution coverage; `feme-run --object` loads a real `feme --target=<host>`-compiled object file with `orc::LLJIT::addObjectFile` and dispatches it through the `feme::cpu::runDispatch` loop factored out of `JITEngine::dispatch` for this reuse, closing §2.2's "JIT vs AOT" row for `lit` -- it has no `ResourceInfo` to place a `bindings` entry's reserved prefix, so only `resource-heap` is supported in that mode) | §2.4.3, §2.4.5, §2.2.4 | — |
 | R9 | `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants) | §1.2 P0 | — |
 | R10 | `feme-run` SPIR-V input; one HLSL source executed through both front ends | §1.2 P0, §2.2.3 | R9 |
 | R11 | Thread-safety test; route library diagnostics through `Context`; `FormatRegistry`; `Exporter` interface | §1.1 | R7 (a third format makes the registry pay) |

@@ -2117,6 +2117,34 @@ because it is a separate project that happens to reuse this one.
   `BoundRanges` and the YAML's `bindings`/`resource-heap` lists, so a test
   never encodes a compiler-assigned prefix slot.
 
+  Roadmap step R8 fills in `kind`/`format`/`stride` on both `resource-heap`
+  and `bindings`' `entries` (still not `class`: every entry remains a UAV,
+  as milestone 11 shipped it -- SRV/read-only descriptors stay future
+  work). `kind` is one of `raw-buffer` (the default, matching this
+  section's original scope note), `structured-buffer`, `typed-buffer` or
+  `cbuffer`; `format` (meaningful only for `typed-buffer`) is the
+  lowercase, underscore-separated spelling of a `feme::cpu::ResourceFormat`
+  enumerator, e.g. `r32g32b32a32_float`. This is what
+  test/Tools/feme-run/HLSL/typed-buffer.hlsl's `RWBuffer<float4>` uses, the
+  first executing test giving `femeCpuResourceLoadTypedV4F32`/
+  `femeCpuResourceStoreTypedV4F32` (feme/runtime/CPU/FeMeRuntimeCPU.c)
+  real, DXIL-derived execution coverage.
+
+  Roadmap step R8 also adds `--object` (see the "Testing" milestone's own
+  status further down): loads a real, already-compiled object file --
+  `feme --target=<host-triple>`'s output -- with `orc::LLJIT::
+  addObjectFile` and dispatches its `feme_cpu_entry_<name>` symbol
+  directly through `feme::cpu::runDispatch` (the group-iteration/heap-
+  materialization loop factored out of `JITEngine::dispatch` for exactly
+  this reuse), rather than JIT-compiling IR the way every other mode does.
+  With no `ResourceInfo`/IR metadata surviving object-file compilation,
+  this mode has no way to place a `bindings` entry's descriptors into a
+  bound resource's reserved heap prefix, so it rejects `bindings`
+  entirely; `resource-heap` still works, and lands at the same physical
+  heap slot a single-binding-at-heap-base-0 shader's own compiled-in
+  prefix already expects (see
+  test/Tools/feme-run/feme-run-object-aot.ll's own comment).
+
 ### Test strategy per phase
 
 Following the instruction that each phase of translation gets unit tests:
