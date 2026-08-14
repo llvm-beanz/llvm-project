@@ -86,11 +86,16 @@ DXIL import is the most complete path, and its gaps are enumerable.
   wave intrinsic HLSL programs reach for that FeMe could not lower -- is now
   lowered on the CPU target too (`feme::cpu::WaveCallKind::Ballot` in
   WaveLowering.cpp), exercised end to end by `ballot.hlsl`.
-- **P0 — flag-selected opcode families.** `WaveActiveOp`/`WaveActiveBit`/
-  `WavePrefixOp`/`QuadOp` select their operation from a flag operand rather
-  than mapping 1:1 onto an intrinsic; `Barrier` likewise. Every one of these
-  is reachable from ordinary HLSL, and an unraised `dx.op.*` call is a hard
-  pipeline error downstream, not a slow path.
+- **P0 — flag-selected opcode families (done by R4).** `WaveActiveOp`/
+  `WaveActiveBit`/`WavePrefixOp`/`QuadOp` select their operation from a flag
+  operand rather than mapping 1:1 onto an intrinsic; `Barrier` (done
+  earlier) likewise. `feme::dxil::OpRaisingPass::raiseReduceOpCall`/
+  `raiseWaveActiveBitCall`/`raiseQuadOpCall` raise all four; the CPU target
+  lowers every one of them except `QuadOp` (`feme::cpu::WaveLoweringPass::
+  lowerActiveReduce`/`lowerPrefixReduce`) -- quad ops need a fixed
+  lane-to-quad mapping that remains an explicit v1 non-goal (see
+  FeMeCPUDesign.md's "Non-Goals"), so raising `QuadOp` closes the "hard
+  pipeline error downstream" risk without yet making it executable.
 - **P1 — texture/sampler handle kinds.** Blocked on recovering the
   dimension/multi-sample/feedback bits that binding metadata does not carry
   the way `StructuredBuffer`/`CBuffer`'s size/alignment is; needs a decision
@@ -257,8 +262,9 @@ unless noted:
   loop. Directly exercises §1.6's "barrier inside a loop is diagnosed"
   narrowing, and is the single most common real compute-shader shape not yet
   covered.
-- **`prefix-sum.hlsl`** — `WavePrefixSum`/`WavePrefixCountBits` over a
-  divergent mask; exercises §1.3's flag-selected `WavePrefixOp` family.
+- **`prefix-sum.hlsl`** (done by R4) — `WavePrefixSum`/`WavePrefixCountBits`
+  over a divergent mask; exercises §1.3's flag-selected `WavePrefixOp`
+  family.
 - **`histogram.hlsl`** — divergent atomics into a shared buffer. This is the
   scalarization fallback's only realistic workload, and the one that catches
   §1.6's unmasked-lane P0 (done: a single groupshared counter a divergent
@@ -348,7 +354,7 @@ dependency column is the only ordering constraint.
 | R1 | Grow the differential harness to divergent/loop shapes; add the wave-size sweep (done: `--unstructured` stays `--reference`-only, see §1.6's new gap) | §2.2.1, §2.2.2, §2.4.1, §2.4.4 | — |
 | R2 | Mask the scalarization fallback's per-lane execution; add `histogram.hlsl`; make `feme-cpu-simdize` reject every shape `feme-cpu-linearize` left an unwidened divergent branch in, including one inside a loop (§1.6's new gap, found by R1) (done: the divergent-branch gap turned out to be `feme::cpu::runPipeline` not propagating a pass diagnostic, not `feme-cpu-simdize`'s own check -- see §1.6's table) | §1.6 P0, §2.3 | R1 (harness catches regressions) |
 | R3 | Multi-return-value raising mechanism (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` (done: `feme::dxil::OpRaisingPass::raiseAggregateCall` raises all five; `feme::cpu::WaveCallKind::Ballot`/`lowerBallot` lower `WaveActiveBallot` on the CPU target) | §1.3 P0 | — |
-| R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` | §1.3 P0 | — |
+| R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` (done: `feme::dxil::OpRaisingPass` raises all four remaining families; `feme::cpu::WaveLoweringPass` lowers every one of them except `QuadOp`, which stays raised-only pending the quad/derivative lane mapping FeMeCPUDesign.md's "Non-Goals" defers) | §1.3 P0 | — |
 | R5 | Barriers inside branches/loops; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` | §1.6, §2.3 | R4 (`Barrier` raising) |
 | R6 | DXBC importer fuzzer; `check-feme-fuzz` | §1.4 P0, §1.7 P0 | — |
 | R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end | §1.4 P0, §2.2.8 | — |

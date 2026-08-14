@@ -764,19 +764,21 @@ it now covers the two largest opcode families:
 
 Still not covered, and left for later changes: the *non-typed* buffer and
 texture load/store ops (`RawBufferLoad`/`RawBufferStore`,
-`CBufferLoadLegacy`, `TextureLoad`, `Sample*`, ...); texture/sampler resource
-kinds (need dimension/multi-sample/feedback bits `ResourceProperties`
-doesn't carry, unlike `StructuredBuffer`/`CBuffer`'s recoverable size/
-alignment); ops that return an aggregate needing `extractvalue`
-reconstruction outside of resources (`IMul`/`UMul`, `UAddc`, `SplitDouble`,
-`WaveActiveBallot`); and ops that pick their source intrinsic from an extra
-"kind"/flag operand rather than the opcode alone (`WaveActiveOp`,
-`WaveActiveBit`, `WavePrefixOp`, `QuadOp`, `Barrier`). Opcodes this pass
-doesn't (yet) recognize -- resource or otherwise -- are left as unmodified
-`dx.op.*` calls rather than erroring, so it composes safely with modules
-that mix raised and not-yet-raised operations, and so opcode coverage can
-keep growing incrementally the same way `dxsa`'s opcode coverage does (see
-the DXBC section below).
+`CBufferLoadLegacy`, `TextureLoad`, `Sample*`, ...), and texture/sampler
+resource kinds (need dimension/multi-sample/feedback bits
+`ResourceProperties` doesn't carry, unlike `StructuredBuffer`/`CBuffer`'s
+recoverable size/alignment). Ops that return an aggregate needing
+`extractvalue` reconstruction outside of resources (`IMul`/`UMul`, `UAddc`,
+`SplitDouble`, `WaveActiveBallot`, roadmap step R3) and ops that pick their
+source intrinsic from an extra "kind"/flag operand rather than the opcode
+alone (`Barrier`; `WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`,
+roadmap step R4) are raised too -- see the "Status" note below for what
+each of those covers exactly. Opcodes this pass doesn't (yet) recognize --
+resource or otherwise -- are left as unmodified `dx.op.*` calls rather than
+erroring, so it composes safely with modules that mix raised and
+not-yet-raised operations, and so opcode coverage can keep growing
+incrementally the same way `dxsa`'s opcode coverage does (see the DXBC
+section below).
 
 Deviation: retargeting a raised module back through the DirectX
 `TargetMachine` (`feme::Driver`, see "Driver" and "Status: `feme::Driver`"
@@ -2018,18 +2020,19 @@ end-to-end test coverage that should grow alongside it, see
    exactly, `StructuredBuffer`/`CBuffer` via a same-size/alignment opaque
    placeholder element type -- and typed buffer loads/stores. Module-level
    metadata raising (shader model, entry points, thread group dimensions)
-   landed alongside it as `feme::dxil::MetadataRaisingPass`. `Barrier` (its
-   constant mode operand selecting one of six barrier-scope intrinsics) and
-   the aggregate-returning `IMul`/`UMul`/`UAddc`/`SplitDouble`/
-   `WaveActiveBallot` (a general multi-return-value `extractvalue`-
-   reconstruction mechanism, roadmap step R3) are raised too. See the
-   "Status" note under the DXIL section above. Non-typed buffer and texture
-   load/store ops, texture/sampler resource-handle kinds (need
-   dimension/multi-sample/feedback bits not recoverable the way
-   `StructuredBuffer`/`CBuffer`'s size/alignment is), and a handful of
-   opcode families needing more than a 1:1 intrinsic mapping
-   (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`'s flag-selected
-   variants) remain open for follow-up changes.
+   landed alongside it as `feme::dxil::MetadataRaisingPass`. Every opcode
+   family that picks its source intrinsic from an extra "kind"/flag operand
+   rather than the opcode alone is raised too: `Barrier` (its constant mode
+   operand selecting one of six barrier-scope intrinsics) and the
+   aggregate-returning `IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`
+   (a general multi-return-value `extractvalue`-reconstruction mechanism,
+   roadmap step R3), plus `WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`
+   (a reduce-kind/signedness or bitwise-op flag) and `QuadOp` (a direction
+   flag, roadmap step R4). See the "Status" note under the DXIL section
+   above. Non-typed buffer and texture load/store ops and texture/sampler
+   resource-handle kinds (need dimension/multi-sample/feedback bits not
+   recoverable the way `StructuredBuffer`/`CBuffer`'s size/alignment is)
+   remain open for follow-up changes.
 5. **DXIL retargeting**: reuse step 3's backend glue for DXIL-derived
    `llvm::Module`s.
 

@@ -532,16 +532,14 @@ it's discussed, and summarized here:
 - **Only the wave intrinsics DXIL raising already produces are lowered**:
   `WaveGetLaneCount`, `WaveIsFirstLane`, `WaveActiveAnyTrue`/`AllTrue`,
   `WaveActiveAllEqual`, `WaveReadLaneAt`, `WaveAllBitCount`
-  (`wave.active.countbits`), `WavePrefixBitCount`, and (roadmap step R3)
-  `WaveActiveBallot`. `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/
-  `Xor` and `WavePrefixSum`/`Product`/`USum`/`UProduct` are not lowered:
-  `feme::dxil::OpRaisingPass` does not raise them yet either (they pick
-  their source intrinsic from an extra opcode-carried operand raising does
-  not yet reconstruct), and SPIR-V import raises no wave op at all yet, so
-  no front end can put one of these into a module
-  `feme::cpu::WaveLoweringPass` ever sees; lowering them now would be
-  untested dead code. `WaveReadLaneFirst` has no dedicated raised intrinsic
-  to lower in the first place (DXIL/SPIR-V both express it through the same
+  (`wave.active.countbits`), `WavePrefixBitCount`, (roadmap step R3)
+  `WaveActiveBallot`, and (roadmap step R4) `WaveActiveSum`/`Product`/
+  `Min`/`Max`/`BitAnd`/`Or`/`Xor` and `WavePrefixSum`/`Product`. `QuadOp`'s
+  `llvm.dx.quad.read.*` family is raised (roadmap step R4) but still not
+  lowered here: quad ops need a fixed lane-to-quad mapping this target
+  does not yet implement, an explicit v1 non-goal (see "Non-Goals" above).
+  `WaveReadLaneFirst` has no dedicated raised intrinsic to lower in the
+  first place (DXIL/SPIR-V both express it through the same
   `WaveReadLaneAt`-family op raising already covers).
 - **`feme::cpu::WaveCalls` introduces the `feme.cpu.wave.*` canonical calls**
   this milestone needs, mirroring how `feme::cpu::ResourceCalls`/
@@ -1279,9 +1277,9 @@ lowers builtins and wave ops as two independently runnable halves. Milestone
 wave ops outright (see "CFG restructurization test suite"). Milestone 8 adds
 the wave op half; see the Status section's milestone 8 deviation note for
 which rows of the table above it implements and which it leaves for later
-(`WaveReadLaneFirst`, `WaveActiveBallot`, `WaveActiveSum`/`Product`/... and
-`WavePrefixSum`/`Product`/... are not lowered yet, since no front end raises
-them into a module this pass ever sees).
+(`WaveReadLaneFirst` has no dedicated raised intrinsic to lower at all, and
+`QuadOp`'s row is raised but not lowered -- quad/derivative support is an
+explicit v1 non-goal).
 
 No lowering may create poison merely because `M` is all-zero: Phase 3 does
 not initially skip all-off regions, so such operations can be evaluated even
