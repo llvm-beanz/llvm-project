@@ -8,40 +8,62 @@
 ; should have -- exactly the kind of bug this suite exists to catch before
 ; it reaches the linearizer (roadmap milestone 6).
 ;
-; Scope for this milestone (see the Status section's own deviation note):
-; `feme::cpu::SIMDizePass` widens acyclic, uniform-control-flow shaders only
-; (roadmap milestone 4), so the shapes this harness diffs are restricted to
-; that subset (`--divergent=false --loops=false --unstructured=false`) --
-; the full breadth `feme-cfg-gen` can produce (divergent branches, loops,
-; irreducible edges) is exactly what the linearizer and the remaining
-; widening work (milestones 6/7) will make it possible to widen, at which
-; point this harness's scope should grow with them.
+; Roadmap step R1 (see feme/docs/Roadmap.md's "Suggested sequencing" table)
+; grows this harness's scope, using the `%feme-run-differential` helper
+; (feme/utils/feme-run-differential.py, §2.4.4) that lets a single test
+; command spell out a seed list and a wave-size list (§2.4.1's wave-size
+; sweep) instead of one five-line block per (seed, wave size) pair:
+;
+; - The first block below enables `--divergent`/`--loops`: milestones 6/7
+;   (linearization and widening for divergent diamonds and loops) landed
+;   after this harness's scope was first written, and their own deviation
+;   notes in feme/docs/FeMeCPUDesign.md's Status section say this harness's
+;   scope should grow to match, which this does. Each seed is checked at
+;   `wave-size` 4, 8, 16 and 32 (previously only one of five seeds ran above
+;   `W = 4`) and at more than one group count, so a wave-size- or
+;   group-count-dependent bug is caught the same way a translation bug is.
+;   `%feme-run-differential` itself also trusts a shape only when neither
+;   `feme-run` invocation printed a diagnostic (not just when it exited
+;   zero): `feme::cpu::LinearizePass` diagnoses, and leaves completely
+;   untouched, several shapes it does not yet linearize (nested loops, some
+;   internal-branch placements -- see its own deviation note), and a run
+;   that reached the JIT anyway despite one of those diagnostics would only
+;   be correct by coincidence for the specific thread/group ids a given
+;   seed happens to exercise.
+; - The second block enables `--unstructured` as well, against `--reference`
+;   only (no `--wave-sizes`): `feme::cpu::LinearizePass` does not yet
+;   linearize every shape `StructurizeCFG`/`FixIrreducible` can turn an
+;   irreducible input into (in particular, a divergent branch surviving
+;   inside a loop that a generated irreducible edge produced can reach the
+;   JIT unwidened -- see the P0 entry this milestone's update adds to
+;   feme/docs/Roadmap.md's gap inventory), so diffing the normal pipeline
+;   against `--reference` for these shapes is not yet safe to check in.
+;   `--reference` itself has no such restriction (see feme-run.md): this
+;   block is what closes out this milestone's other prerequisite, a real
+;   termination bug in `feme-cfg-gen`'s own irreducible-edge construct (an
+;   unbounded two-block bounce with no guarantee either exit condition is
+;   ever true for a given thread -- see CFGGen.cpp's `genIrreducible`) that
+;   made every seed below hang before that fix landed.
 
 ; RUN: echo 'resource-heap:' > %t.heap.yaml
 ; RUN: echo '  - index: 0' >> %t.heap.yaml
 ; RUN: echo '    size: 32' >> %t.heap.yaml
+; RUN: mkdir -p %t.divergent-loop.dir %t.unstructured.dir
 
-; RUN: feme-cfg-gen --seed=1 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.1.ll
-; RUN: feme-run --wave-size=4 --groups=1,1,1 --heap=%t.heap.yaml %t.1.ll > %t.1.normal.txt
-; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.1.ll > %t.1.reference.txt
-; RUN: diff %t.1.normal.txt %t.1.reference.txt
+; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
+; RUN:     --work-dir=%t.divergent-loop.dir --heap=%t.heap.yaml \
+; RUN:     --seeds=9,322,365,429,673 --wave-sizes=4,8,16,32 \
+; RUN:     --groups=1,1,1 --max-depth=2 --max-constructs=8
+; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
+; RUN:     --work-dir=%t.divergent-loop.dir --heap=%t.heap.yaml \
+; RUN:     --seeds=9,322,365,429,673 --wave-sizes=4,8,16,32 \
+; RUN:     --groups=2,1,1 --max-depth=2 --max-constructs=8
+; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
+; RUN:     --work-dir=%t.divergent-loop.dir --heap=%t.heap.yaml \
+; RUN:     --seeds=9,322,365,429,673 --wave-sizes=4,8,16,32 \
+; RUN:     --groups=1,2,2 --max-depth=2 --max-constructs=8
 
-; RUN: feme-cfg-gen --seed=2 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.2.ll
-; RUN: feme-run --wave-size=4 --groups=1,1,1 --heap=%t.heap.yaml %t.2.ll > %t.2.normal.txt
-; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.2.ll > %t.2.reference.txt
-; RUN: diff %t.2.normal.txt %t.2.reference.txt
-
-; RUN: feme-cfg-gen --seed=3 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.3.ll
-; RUN: feme-run --wave-size=8 --groups=1,1,1 --heap=%t.heap.yaml %t.3.ll > %t.3.normal.txt
-; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.3.ll > %t.3.reference.txt
-; RUN: diff %t.3.normal.txt %t.3.reference.txt
-
-; RUN: feme-cfg-gen --seed=4 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.4.ll
-; RUN: feme-run --wave-size=4 --groups=2,1,1 --heap=%t.heap.yaml %t.4.ll > %t.4.normal.txt
-; RUN: feme-run --reference --groups=2,1,1 --heap=%t.heap.yaml %t.4.ll > %t.4.reference.txt
-; RUN: diff %t.4.normal.txt %t.4.reference.txt
-
-; RUN: feme-cfg-gen --seed=5 --divergent=false --loops=false --unstructured=false --max-constructs=8 > %t.5.ll
-; RUN: feme-run --wave-size=4 --groups=1,1,1 --heap=%t.heap.yaml %t.5.ll > %t.5.normal.txt
-; RUN: feme-run --reference --groups=1,1,1 --heap=%t.heap.yaml %t.5.ll > %t.5.reference.txt
-; RUN: diff %t.5.normal.txt %t.5.reference.txt
+; RUN: %feme-run-differential --feme-cfg-gen=feme-cfg-gen --feme-run=feme-run \
+; RUN:     --work-dir=%t.unstructured.dir --heap=%t.heap.yaml \
+; RUN:     --seeds=1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 --wave-sizes= \
+; RUN:     --unstructured --groups=1,1,1
