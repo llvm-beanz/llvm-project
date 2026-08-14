@@ -11806,3 +11806,152 @@ compiled object file) before writing the lit tests around them, and ran
 7. `[feme] test: add RunDispatchTest for feme::cpu::runDispatch`.
 8. `[feme] docs: record roadmap step R8 completion`.
 9. This file.
+
+# Roadmap step R9
+
+## Task
+
+> `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants)
+> (see: §1.2 P0)
+
+## Investigation
+
+Started from Roadmap.md's §1.2 P0 note and Design.md's "Known gap: `spirv`
+dialect -> `llvm` dialect conversion coverage", which named four missing
+pieces: sampling ops, `OpImageFetch`/`OpImageGather`, `StorageBuffer` blocks
+(`target("spirv.VulkanBuffer", ...)`), and push constants. Rather than
+guess at the shape LLVM's SPIRV backend expects for each, I read the
+backend's own test suite (`llvm/test/CodeGen/SPIRV/hlsl-resources/*.ll`,
+`llvm/test/CodeGen/SPIRV/pointers/structured-buffer-access.ll`) and its
+`IntrinsicsSPIRV.td` definitions first, the same way the existing
+image/builtin-variable patterns' doc comments cite `SPIRVInstructionSelector.cpp`.
+That paid off three times:
+
+1. **Push constants turned out to need almost no new code.** LLVM's own
+   `SPIRVPushConstantAccess.cpp` backend pass already finds every global in
+   address space 13 and rewrites it (and every use) into the
+   `spirv.PushConstant` handle type and `llvm.spv.pushconstant.getpointer`
+   intrinsic itself. So FeMe only needs to route a `PushConstant` variable
+   to an ordinary `llvm.mlir.global` in that address space; MLIR's own
+   generic `AddressOfPattern`/`AccessChainPattern`/`LoadStorePattern`
+   already handle everything past that, once the pointer *type* conversion
+   is corrected to that address space (MLIR's Vulkan-client default is
+   address space 0 for everything, since `storageClassToAddressSpace`'s
+   non-OpenCL branch is a stub).
+2. **`OpImageFetch` needed no new intrinsic at all.** The instruction
+   selector picks `OpImageFetch` vs `OpImageRead` from the handle's
+   underlying image type's `Sampled` bit (`generateImageReadOrFetch`), not
+   from which intrinsic produced the load. So `spirv.ImageFetch` reuses
+   `spirv.ImageRead`'s exact lowering; I turned `ImageReadPattern` into a
+   template (`ImageLoadPattern<OpTy>`) instantiated for both ops rather than
+   duplicating it.
+3. **Sampling needed one extra type**, not directly asked for: SPIR-V's
+   `spirv.SampledImage` op combines a separate image and sampler handle into
+   one `!spirv.sampled_image` value, but LLVM's `llvm.spv.resource.sample*`
+   intrinsics take the two handles as *separate* arguments -- there is no
+   combined handle at the LLVM IR level. I gave `spirv::SampledImageType` its
+   own FeMe conversion to a two-element `!llvm.struct<(Image, Sampler)>`
+   (overriding MLIR's own, which folds both into one runner-facing type)
+   purely as a vehicle to carry both handles through the dialect conversion,
+   unpacked again in `ImageSampleImplicitLodPattern`.
+
+Storage buffers needed the most new machinery, and also surfaced a real
+blocking bug in MLIR's own conversion along the way: `convertRuntimeArrayType`
+in MLIR's `SPIRVToLLVM.cpp` refuses to convert a runtime array with a nonzero
+`ArrayStride` decoration -- and every runtime array nested in a real
+(Vulkan-valid) storage buffer block *must* carry one (Vulkan's memory layout
+rules require it). Without overriding that conversion too, no real
+`RWStructuredBuffer<T>`/`StructuredBuffer<T>` could ever reach the
+`target("spirv.VulkanBuffer", ...)` handle type at all. I judged this
+tightly coupled enough to the feature being added (storage buffers
+literally cannot exist without it) to fix inline rather than carve out as a
+separate follow-up.
+
+## Design
+
+`StorageBuffer` block variables are always a single `Block`-decorated
+struct with exactly one member (the runtime array `RWStructuredBuffer<T>`/
+`StructuredBuffer<T>` compiles down to -- see [wg-hlsl proposal
+0018](https://github.com/llvm/wg-hlsl/blob/main/proposals/0018-spirv-resource-representation.md)).
+That let the whole feature reduce to:
+
+- A **type conversion** recognizing that one-member-struct-of-runtime-array
+  shape and converting the *block* pointer directly to the
+  `target("spirv.VulkanBuffer", ElementType, StorageClass, IsWriteable)`
+  handle -- `IsWriteable` read off the sole member's `NonWritable`
+  decoration (present for `StructuredBuffer<T>`, absent for
+  `RWStructuredBuffer<T>`), matching the two `structured-buffer-access.ll`
+  buffers directly.
+- A **second type conversion** for any *other* `StorageBuffer` pointer (an
+  access-chain result reaching into the buffer's contents) to an ordinary
+  `!llvm.ptr` in address space 11 -- the address space LLVM's SPIRV backend
+  expects a storage buffer access to use, again not MLIR's default of 0.
+- One new pattern, `StorageBufferAccessChainPattern`, since MLIR's own
+  `AccessChainPattern` assumes its base pointer converts to `!llvm.ptr` and
+  cannot handle a base that converted to the `VulkanBuffer` *handle*
+  instead. It drops the access chain's first index (the member selector
+  into the wrapping struct, structurally always 0), turns the second into
+  `llvm.spv.resource.getpointer`'s buffer-element index, and -- if the
+  buffer element itself is a struct with further indices into its fields --
+  emits an ordinary `llvm.getelementptr` off the pointer that intrinsic
+  returns, exactly mirroring `structured-buffer-access.ll`'s
+  `%3 = ...getpointer...; %f.i = getelementptr ... %3, i64 16` shape (as a
+  typed multi-index GEP rather than that test's already-optimized flat byte
+  offset, since FeMe's conversion runs long before any LLVM optimization
+  pass would fold one into the other).
+- No new pattern needed for `spirv.GlobalVariable`/`spirv.mlir.addressof`
+  itself: both reuse the *existing* `ResourceAddressOfPattern`/
+  `ResourceGlobalVariablePattern` (previously only for image/sampler
+  resources), since `prepareResourceVariables`'s recognition predicate just
+  needed extending to also collect buffer-block globals -- the handle-
+  materialization logic (descriptor set/binding constants + name string) is
+  identical for both kinds of resource.
+
+## What was deliberately left out
+
+- **Uniform-storage-class buffer blocks (`cbuffer`/`ConstantBuffer<T>`).**
+  These share `spirv.VulkanBuffer`'s representation in principle, but real
+  `clang`-compiled cbuffer access (see `llvm/test/CodeGen/SPIRV/hlsl-resources/cbuffer*.ll`)
+  does not go through an access chain into the handle at all -- clang
+  flattens each cbuffer member into its own external global in a *separate*
+  address space (12), tied back to the cbuffer's handle only through
+  `!hlsl.cbs` module metadata. That is a fundamentally different shape from
+  what SPIR-V *import* naturally produces (an ordinary `spirv.AccessChain`
+  into the `Uniform` block variable), and reproducing clang's convention
+  from imported SPIR-V would need its own design decision, not a
+  straightforward reuse of the storage-buffer access-chain pattern. Recorded
+  as a narrowed, explicit gap in Design.md rather than attempted.
+- **Sampling variants needing extra operands** (bias, gradient, explicit
+  LOD, depth comparison, gather) -- each needs a pattern supplying the
+  additional operand(s) its own `llvm.spv.resource.*` intrinsic expects;
+  only the plain (no-modifier) `spirv.ImageSampleImplicitLod` case is
+  covered, which is the common case a straightforward HLSL `.Sample()` call
+  compiles to.
+- **Graphics pipeline stage inputs and outputs** -- untouched; still a
+  compute-shader-only story.
+
+## Verification
+
+Built with the existing `build/` (ccache launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_ENABLE_PROJECTS=feme;clang`).
+`ninja check-feme` after every commit, ending at 898 discovered tests
+(739 lit + 159 gtest), 889 passed, 9 unsupported, 0 failed -- up from the
+886/895 pre-existing baseline by 3 new lit tests
+(spirv-to-llvm-storage-buffer.mlir, spirv-to-llvm-push-constant.mlir,
+spirv-to-llvm-sampling.mlir). Manually ran each new conversion through
+`feme-opt --feme-convert-spirv-to-llvm` on hand-written `spirv` dialect
+input mirroring the exact shapes LLVM's own SPIRV backend tests use
+(`structured-buffer-access.ll`, `Sample.ll`) before writing the lit tests
+around them, to confirm the emitted `llvm` dialect actually matches what
+that backend's test suite expects rather than just "looking plausible."
+Ran `clang-format` over the touched C++ file and fixed the formatting it
+flagged.
+
+## Commit breakdown
+
+1. `[feme][SPIRVToLLVM] Convert StorageBuffer blocks and PushConstant variables`.
+2. `[feme][SPIRVToLLVM] Convert image sampling and OpImageFetch`.
+3. `[feme][docs] Update SPIR-V conversion coverage notes for R9`.
+4. `[feme][SPIRVToLLVM] Clarify ResourceInfo doc now covers buffer resources`.
+5. `[feme][SPIRVToLLVM] Apply clang-format to R9 changes`.
+6. This file.
