@@ -11045,3 +11045,231 @@ add to lit's own count). Commit breakdown for this entry:
    prefix-sum.hlsl`.
 3. `[feme] docs: record roadmap step R4 completion`.
 4. This file.
+
+# Agent thoughts: FeMe roadmap step R5 (barriers inside branches/loops; values live across barriers)
+
+## Scope
+
+The request was step R5 from `feme/docs/Roadmap.md`'s sequencing table:
+
+> Barriers inside branches/loops; values live across barriers;
+> `reduction.hlsl`, `multi-group-barrier.hlsl` (see: §1.6, §2.3)
+
+Both named rows live entirely in `feme::cpu::EntryWrapperPass`'s "Phase 6:
+Group Execution and Barriers" (`EntryWrapper.cpp`), which milestone 9 had
+already narrowed to "a strictly linear (no branch, no loop) wave body...
+and no SSA value may be live across a `..._with_group_sync` barrier."
+
+## Part 1: what "inside branches" actually means here
+
+Before writing anything I re-read `matchLoopShape`'s eventual precondition
+carefully against `feme::cpu::LinearizePass`: every *divergent* branch a
+barrier could sit inside is already gone by the time `EntryWrapperPass`
+runs -- `LinearizePass` either masks it into straight-line predicated code
+or (for a loop) turns a divergent exit into a loop-carried mask. So "a
+barrier inside a branch" that survives to this pass is necessarily a
+*uniform* branch (e.g. one keyed off `SV_GroupID`), and "inside a loop" is
+necessarily a uniform-trip-count loop. I decided up front that supporting
+a uniform loop (the design's own worked example, and what `reduction.hlsl`
+needs) was worth the engineering; supporting a barrier inside a genuine
+*branch* (as opposed to a loop) still isn't, and stays diagnosed -- I
+didn't see a realistic shader shape that needs it that a loop doesn't
+already cover, and the design's own example is specifically the loop case.
+
+## Part 2: values live across a barrier
+
+This part is self-contained and I built it first, independently of the
+loop work, verifying it end to end before touching anything else.
+
+The existing code already computed exactly the right liveness set (any
+operand, after a barrier, resolving to an instruction defined before it)
+but only to diagnose it. I replaced that with real spilling:
+`spillValuesLiveAcrossBarriers` builds one struct type from every such
+live instruction's type, and, if any exist, appends a new trailing
+`barrier_spill` parameter to the wave body (`appendTrailingParam`, a small
+generalization of the `Function::Create` + `splice` + arg-RAUW technique
+`FunctionWidener::buildWidenedFunction` already uses in `SIMDize.cpp` --
+I factored it out as its own helper rather than duplicating it inline).
+Critically, I do this rewrite *before* `SplitBlock` cuts the function into
+separate region functions: while it's still one function, inserting a
+store right after the defining instruction and a load right before each
+cross-barrier use is ordinary same-function IR surgery, no cross-function
+reference ever exists to go stale. The existing per-region splitting loop
+then carries the new parameter along for free, since it already copies
+`WaveBody`'s (now-larger) argument list into every region.
+
+One real bug along the way: I first wrote the GEP-index/struct-GEP helper
+as a lambda capturing a C++17 structured binding (`auto [NewWaveBody,
+SpillArg] = appendTrailingParam(...)`), which Clang correctly flagged as a
+C++20 extension (`feme/.instructions.md` requires C++17) -- fixed by
+naming the pair's two members explicitly instead of destructuring them
+before capture.
+
+I wrote `entry-wrapper-barrier-live-value-spill.ll` to replace
+`entry-wrapper-barrier-live-value-unsupported.ll` (deleted -- the shape it
+tested is not unsupported anymore) and a new `EntryWrapperTest` gtest case,
+both checking the actual `store`/`load`/struct-GEP shape, not just "it
+didn't error."
+
+## Part 3: barriers inside a uniform loop
+
+This needed a genuinely new transformation, not a generalization of the
+existing straight-line splitter, because the design's own fix -- "keep the
+loop iteration outside the region and wave loops" -- means the loop's
+*control* (its header's phi/comparison, its latch's increment) has to run
+once per iteration in the wrapper itself, while only the loop *body*'s
+barrier-split pieces run once per wave, once per iteration.
+
+`LoopShape`/`matchLoopShape` recognize the canonical header-tested shape
+(header: phis + one comparison + conditional branch; body: a straight
+chain containing the barrier(s), ending at a latch that branches back to
+the header; latch: a pure, side-effect-free recurrence over the header's
+own phis) by walking the CFG directly rather than pulling in
+`llvm::LoopInfo` -- the existing `isLinearChain` in the same file already
+established the "walk single-successor unconditional branches" idiom, and
+a loop is just three instances of that walk (prefix, body, suffix) plus
+one non-generic step (the body walk has to stop at the block whose branch
+targets the header, not at the header itself, which is where my first
+attempt at reusing a generic `walkLinearChain` helper for the body chain
+too went wrong -- it kept walking straight through the header since a
+generic "stop at the first non-unconditional-branch block" rule has no way
+to know it should stop one block earlier).
+
+The key insight that made the transformation itself tractable:
+since the header/latch are proven pure and side-effect-free, they can
+simply be *cloned* (`Instruction::clone` + `RemapInstruction`) directly
+into the wrapper as ordinary scalar IR, rather than outlined into a
+callable region the way barrier-split body pieces are -- this sidesteps
+needing any new ABI convention for "a loop-driving function." The body's
+own induction-variable uses get their own trailing `loopvarN` parameter
+(added the same `appendTrailingParam` way as `barrier_spill`, before the
+body is split into per-barrier region functions), threaded from the
+wrapper's cloned phi. I deliberately kept the scope narrow here too: only
+a *compile-time-constant* initial value and a *pure* (no loads, no calls)
+recurrence are accepted -- a divergent (per-lane) value that needs to
+survive the loop's own backedge, not just a barrier within one iteration,
+is explicitly out of scope and falls back to the existing diagnostic.
+
+Bugs along the way, in the order I hit them:
+
+1. `isPureClosedChain` initially rejected the header's own phi (it
+   iterated every non-terminator instruction, including phis, and then
+   flagged the phi's own *incoming-edge* operands -- which legitimately
+   reference blocks outside the chain -- as impure). Fixed by skipping
+   `PHINode`s in the per-instruction operand check; they're licensed by
+   simply being in `AllowedPhis` in the first place.
+2. The crash described above (walking straight through the header).
+3. A poison-vs-placeholder question I designed around but almost got
+   wrong in practice: the prefix region's own wave loop runs *before* the
+   wrapper's scalar loop phi exists, so its (unused) `loopvarN` call
+   argument needs a value at that point regardless -- I use
+   `PoisonValue::get` for it, which is correct precisely because the
+   prefix function never actually reads that parameter.
+4. This tree also uses `UncondBrInst`/`CondBrInst` as two distinct
+   classes rather than upstream LLVM's single `BranchInst` with
+   `isConditional()` -- I'd written the loop-shape code against upstream's
+   API from memory and had to fix every `BranchInst`/`isConditional()`
+   use once the build told me so.
+5. A `ValueToValueMapTy` (`WeakTrackingVH`-valued) indexing into a
+   ternary alongside a plain `Value*` doesn't resolve unambiguously in
+   this LLVM's overload set (`Value*` and `WeakTrackingVH` both convert to
+   each other) -- fixed with explicit `static_cast<Value *>`.
+
+I added both a gtest (`SplitsBarrierInsideUniformLoop`, checking the
+wrapper gets its own scalar `loop.header`/`loopvarN` phi and the expected
+wave-loop count) and a pass-level lit test
+(`entry-wrapper-barrier-in-loop.ll`) mirroring the existing
+`entry-wrapper-barrier-region-split.ll`'s style.
+
+## Part 4: `reduction.hlsl` -- a real bug and a real gap, not just a test
+
+Writing the actual end-to-end HLSL test surfaced two things a synthetic
+`.ll` test never would have.
+
+First, a genuine crash unrelated to anything in `EntryWrapperPass`: a
+`GroupMemoryBarrierWithGroupSync()` call sitting right after a divergent
+`if`'s reconvergence point got classified as *divergent* by
+`feme::cpu::WaveUniformity`'s generic block-reachability rule (barrier
+calls were never given their own uniformity classification, unlike
+`feme.cpu.mask.any` or the various `Wave*` intrinsics), which sent it into
+`FunctionWidener::widenScalarizedFallback` -- the always-applicable
+"clone once per lane" fallback -- which then asserts trying to
+`setName` a clone of a `void`-typed call (`IRBuilder::Insert` calls
+`setName` unconditionally). A barrier is, by both source languages' own
+rule, only ever reached by every invocation in the group or by none, so
+it is always uniform regardless of which block it sits in -- I added it
+to `WaveTTIImpl::getValueUniformity`'s intrinsic switch, right alongside
+the existing `dx_`/`spv_` entries it already pattern-matches. I checked
+this is a pre-existing bug, not something my `EntryWrapperPass` changes
+introduced, by noting the entire crash stack trace is inside
+`feme-cpu-simdize`, a pass I never touched.
+
+Second, and this one I could not route around with a bug fix: a genuine
+*tree* reduction needs `groupshared[SV_GroupThreadID.x]`-style per-lane
+indexing, which hits a **different, still-open** roadmap gap ("Divergent
+groupshared access is diagnosed", §1.6, not part of this step) --
+confirmed this is real and not something I broke by testing several
+narrower shapes and watching `feme::cpu::rewriteGroupSharedGlobals`
+diagnose each: first a divergent *index* (the documented gap), then --
+after avoiding that -- a `if (tid.x == 0) Shared[0] = ...` *masked*
+(conditionally-executed) store, even at a uniform address, which
+`feme::cpu::LinearizePass` lowers into a `feme.cpu.masked.store` call that
+`rewriteGroupSharedGlobals` doesn't recognize as a direct load/store user
+of the global's `getelementptr` -- a narrower version of the same gap
+nobody had written down yet. I recorded this precisely (not just "still
+broken") in both Roadmap.md and the test's own comment, rather than
+silently working around it without saying why, since a future reader
+trying the "obvious" tree-reduction shape will hit the same wall.
+
+`reduction.hlsl` as shipped: a loop whose only per-iteration state is a
+`stride`-halving induction variable (a pure, uniform recurrence -- so
+`matchLoopShape` accepts it), a barrier splitting the loop body, a
+genuinely divergent per-lane `contribution` computed fresh each iteration
+that lives across that barrier (exercising the spilling from Part 2), and
+`WaveActiveSum` folding it back to one group-uniform value that every lane
+*unconditionally* republishes to (and reads back from) a `groupshared`
+slot around a second barrier -- sidestepping the masked-store gap above
+while still exercising two barriers (three regions) inside one loop.
+
+## Part 5: `multi-group-barrier.hlsl`
+
+Simpler once the above worked: three dispatched groups
+(`--groups=3,1,1`), each publishing through *two* barrier-separated
+groupshared slots derived from its own `SV_GroupID`, so a wrong answer in
+any group's output slot means either the barrier ordering or per-group
+groupshared allocation let one group observe another's memory, not just
+per-lane arithmetic. The heap buffer intentionally holds one more slot
+than groups dispatched (4 vs. 3) so the untouched 4th slot's `0` is itself
+evidence nothing wrote outside its own group's output index.
+
+## A build-tree oddity, noted but not chased
+
+`ninja` reported `tools/feme/unittests/Analysis/CPU/FeMeAnalysisCPUTests`
+building and running a `WaveUniformityTest` suite (10 passing tests) that
+I could not find any corresponding source file or `CMakeLists.txt` for
+anywhere under `feme/unittests/` -- it appears to be a stale artifact from
+an earlier state of this build directory. I ran it anyway as an extra
+sanity check on the `WaveUniformity.cpp` change (it still passes), but did
+not add a new case there since there's no live source location to add one
+to; `reduction.hlsl` is the regression test that actually depends on this
+fix (reverting it reproduces the crash).
+
+## Final state
+
+Build: existing `build` (ccache launcher, `LLVM_ENABLE_ASSERTIONS=ON`,
+`LLVM_ENABLE_PROJECTS=feme;clang`); `ninja check-feme`, which builds every
+test dependency before running the suite. 882 discovered, 873 passed, 9
+unsupported (platform-gated), 0 failed -- up from the pre-existing 880/9/0
+baseline (after R4's 4 new tests) by this step's 4 new lit tests
+(`entry-wrapper-barrier-live-value-spill.ll` replacing the now-inaccurate
+`entry-wrapper-barrier-live-value-unsupported.ll`,
+`entry-wrapper-barrier-in-loop.ll`, `reduction.hlsl`,
+`multi-group-barrier.hlsl`) plus two new gtest cases inside the
+pre-existing `EntryWrapperTest` binary. Commit breakdown for this entry:
+
+1. `[feme] CPU: split barriers inside a uniform loop; spill values live
+   across a barrier`.
+2. `[feme] CPU: classify barriers as uniform; add reduction.hlsl and
+   multi-group-barrier.hlsl`.
+3. `[feme] docs: record roadmap step R5 completion`.
+4. This file.
