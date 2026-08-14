@@ -40,14 +40,15 @@ below; each is called out inline where it's discussed, and summarized here:
   lowering it unblocks (`feme::cpu::WaveCallKind::Ballot`/`lowerBallot` in
   WaveLowering.cpp) -- see the milestone 8 deviation note below and
   `feme/test/Tools/feme-run/HLSL/ballot.hlsl`.
-- `checkSupportedRaisedOps` (see "Raised IR prerequisites" below) rejects
+- `checkSupportedRaisedOps` (see "Raised IR prerequisites" below) rejected
   every register-bound resource handle unconditionally, including the one
-  the "Root constants" section carves out an exception for. That section's
-  mechanism (matching one `(bN, spaceM)` binding and lowering it to root
-  constant loads instead of rejecting it) is not yet implemented, so the
-  exception has nothing to key off yet; the check will start honoring it
-  once "Root constants" lands. Milestone 11 narrows this further still --
-  see its own Deviation note below -- by normalizing every *other*
+  the "Root constants" section carves out an exception for, until roadmap
+  step R12 implemented that exception (`feme::cpu::RootConstantLoweringPass`,
+  matching one `(b0, space0)` binding by default and lowering it to
+  bounds-checked root-constant loads instead of rejecting it -- see that
+  section's own Deviation note for the narrowing R12 itself introduced).
+  Milestone 11 narrows this further still -- see its own Deviation note
+  below -- by normalizing every *other*
   register-bound handle into a heap access before this check runs, rather
   than rejecting it.
 - `CreateHandleFromHeap` (DXIL opcode 218) and `WaveGetLaneCount` (opcode
@@ -187,13 +188,20 @@ and summarized here:
   function is rewritten only if every resource access it performs is local
   to it. Raised shaders are typically already fully inlined by this point,
   so this has not been a practical limitation yet.
-- Root constants are not implemented (this was already true as of
-  milestone 1's deviation note above, and remains so): every
-  register-bound handle is still rejected unconditionally, `!feme.cpu.
-  resources`' `RootConstantSize` field is always 0, and the "Kernel ABI"'s
+- Root constants were not implemented as of this milestone (this was
+  already true as of milestone 1's deviation note above): every
+  register-bound handle was rejected unconditionally, `!feme.cpu.
+  resources`' `RootConstantSize` field was always 0, and the "Kernel ABI"'s
   `RootConstants`/`RootConstantSize` parameters `ResourceLoweringPass`
-  appends are always null/0 at this stage (a later pass will populate
-  them once "Root constants" lands).
+  appends were always null/0 at this stage. Roadmap step R12 implemented
+  them (`feme::cpu::RootConstantLoweringPass`, see the "Root constants"
+  section's own Deviation note for the narrowing it introduced); a shader
+  with no other resource access gets `RootConstants`/`RootConstantSize`
+  populated by that pass directly, and one that also performs bindless
+  resource access gets them populated by `ResourceLoweringPass` instead
+  (the two passes' env-parameter names would otherwise collide), but both
+  now report a real, non-zero `RootConstantSize` when the shader actually
+  reads one.
 - The `libFeMeRuntimeCPU` scalar helper source (`feme/runtime/CPU/
   FeMeRuntimeCPU.c`, compiled to bitcode by clang) implements the
   typed-buffer `<4 x float>` view
@@ -528,20 +536,26 @@ called out inline where it's discussed, and summarized here:
   divergent `CallInst` (e.g. an unrecognized math libcall), whose callee
   operand the fallback's per-operand extraction does not know to leave
   alone; such a call remains a diagnosed error.
-- **Vector/aggregate leaf decomposition is narrower than the design.**
-  "Vectors become components, not nested vectors" describes splitting *any*
-  divergent `<N x T>` (or aggregate) value into `N` separate `<W x T>`
-  components, since LLVM has no `<W x <N x T>>`. `feme::cpu::SIMDizePass`
-  implements exactly the one shape a typed-buffer store's raising actually
-  produces (`feme::dxil::OpRaisingPass::raiseTypedBufferStore`): a
+- **Vector/aggregate leaf decomposition is narrower than the design
+  (widened by roadmap step R12).** "Vectors become components, not nested
+  vectors" describes splitting *any* divergent `<N x T>` (or aggregate)
+  value into `N` separate `<W x T>` components, since LLVM has no `<W x
+  <N x T>>`. `feme::cpu::SIMDizePass` implements two producer shapes: a
   constant-index `insertelement` chain assembling a vector from scalar
-  components, consumed only by another link of that same chain or by a
-  matched `feme.cpu.resource.*` store call's stored-value operand (see
-  `FunctionWidener::widenInsertElement`/`checkVectorDecompositionSupported`
-  in SIMDize.cpp) -- reassembling the per-lane `<N x T>` argument a
-  scalarized resource-store call needs from the `N` widened components
-  instead of a single `extractelement`. Anything else that produces or
-  consumes a divergent vector (`extractelement`/`shufflevector`/a divergent
+  components, the one shape a typed-buffer *store*'s raising actually
+  produces (`feme::dxil::OpRaisingPass::raiseTypedBufferStore`), and (R12)
+  a vector-typed `feme.cpu.resource.*` *load* call (e.g. a typed-buffer
+  element read back), decomposed into its `N` components directly as it is
+  scalarized rather than a single nested-vector `Widened` entry. Either
+  producer's components may be consumed by another link of the same
+  insertelement chain, a matched resource-store call's stored-value
+  operand, or (R12) a constant-index `extractelement` (see
+  `FunctionWidener::widenInsertElement`/`widenExtractElement`/
+  `checkVectorDecompositionSupported` in SIMDize.cpp) -- the last of these
+  reads one already-decomposed component straight back out, rather than
+  extracting a per-lane scalar out of a single wide vector that was never
+  built. Anything else that produces or consumes a divergent vector (a
+  non-constant-index `extractelement`, `shufflevector`, a divergent
   `phi`/`select` of vector type, ...), and every divergent aggregate of any
   kind, is still diagnosed up front rather than attempting to build an
   illegal type; generalizing further is a substantial follow-up of its own,
@@ -582,16 +596,30 @@ it's discussed, and summarized here:
   reduction/scan/broadcast arithmetic) -- not a deviation from the design's
   intent, but an implementation detail the design's own text did not
   anticipate needing a name for.
-- **`WaveReadLaneAt`'s lane operand is assumed uniform.** The design's
-  lowering table describes both a uniform-index fast path (guarded extract
-  and broadcast) and a varying-index case (one guarded extract per result
-  lane); this milestone implements only the former, matching the HLSL
-  source language's own requirement that the lane argument be uniform
-  across the wave (`feme::cpu::WaveUniformity`'s `WaveTTIImpl` already
-  classifies every `wave.readlane` call `AlwaysUniform` unconditionally, on
-  the same assumption). A genuinely varying lane index -- which only
-  SPIR-V's broader `OpGroupNonUniformShuffle` semantics would permit, and
-  which nothing raises yet -- is not handled.
+- **`WaveReadLaneAt`'s lane operand assumed uniform (closed by roadmap step
+  R12).** The design's lowering table describes both a uniform-index fast
+  path (guarded extract and broadcast) and a varying-index case (one
+  guarded extract per result lane); milestone 8 implemented only the
+  former, matching the HLSL source language's own requirement that the
+  lane argument be uniform across the wave. R12 implemented the
+  varying-index case too: `feme::cpu::WaveLowering.cpp`'s `lowerReadLane`
+  now builds a genuine per-lane gather (an unrolled lane loop, like
+  `WavePrefixBitCount` below) rather than extracting only lane 0 of the
+  index and broadcasting it -- a uniform index still produces the correct
+  answer, since every lane's gather then happens to read the same source
+  lane. `feme::cpu::WaveTTIImpl::getValueUniformity` keeps DXIL's
+  `wave.readlane` classified `AlwaysUniform` unconditionally (HLSL's
+  language rule guarantees it, and this lets a uniformly-indexed read of
+  an otherwise-divergent value stay uniform, e.g. reading a divergent
+  per-lane accumulation at a fixed lane), but SPIR-V's broader
+  `OpGroupNonUniformShuffle` semantics (which this also lowers, and which
+  permit a genuinely varying index) are left at the generic
+  operand-divergence rule instead -- conservative (a uniform-index read of
+  a divergent value is classified divergent too, since nothing
+  distinguishes which operand's divergence matters for an ordinary call),
+  but sound, and `feme::cpu::FunctionWidener::widenWaveCall` narrows a
+  call the analysis did classify uniform back to a scalar for its callers
+  regardless of which format raised it.
 - **`WavePrefixBitCount` scans with an unrolled lane loop**, not the
   log2(`W`)-step shuffle scan the design's table offers as an alternative:
   `WaveSize` is a compile-time constant bounded by `feme::cpu::MaxWaveSize`,
@@ -1727,6 +1755,36 @@ opaque byte block in the dispatch arguments, and exactly one register-bound
 constant buffer — by default `(b0, space0)`, overridable with
 `--cpu-root-constants=bN,spaceM` — is lowered to loads from it instead of
 being rejected. Everything else must come from the heap.
+
+Deviation (roadmap step R12): `feme::cpu::RootConstantLoweringPass`
+implements exactly the default `(b0, space0)` binding above, and only for
+a DXIL-sourced module (SPIR-V's `PushConstant`-storage-class equivalent is
+not yet recognized -- see "Non-Goals"/the SPIR-V conversion coverage notes
+for the analogous, still-open gap on that side); the
+`--cpu-root-constants=bN,spaceM` CLI override is not yet wired up (there is
+only one binding to key off, so nothing exercises it yet). Only a
+non-array binding whose every access is a DXIL `cbufferrow.4` load (32-bit
+components, the shape a plain `float`/`uint`/`int`-typed `cbuffer` member
+produces) with a *constant* row index is accepted; `cbufferrow.2`/`.8`
+(64-/16-bit components) and a dynamically-indexed row are left for
+`feme::cpu::checkSupportedRaisedOps` to reject, same as before this pass
+existed. Getting there needed a real, previously-missing raiser
+(`feme::dxil::OpRaisingPass::raiseCBufferLoadLegacy`): `dx.op.
+cbufferLoadLegacy` was not raised into any canonical intrinsic at all
+before R12 (see `feme::dxil::OpRaisingPass`'s file comment). A shader that
+also performs bindless resource access has its root-constant load lowered
+by `feme::cpu::ResourceLoweringPass` instead of this pass, reusing the
+`RootConstants`/`RootConstantSize` parameters that pass already appends to
+every function it touches (`feme::cpu::RootConstantLoweringPass` adding
+its own pair would collide by name with `feme::cpu::EntryWrapperPass`'s
+by-name argument wiring); see RootConstantLowering.h's file comment for
+the exact split. Out-of-range reads (including a null, empty root-constant
+block) are guarded by a real, uniform branch around the load itself, not a
+`select` after an unconditional one — the bounds check depends only on the
+dispatch-wide `RootConstantSize`, never on per-lane data, so introducing
+this narrow, always-uniform control flow this early in the pipeline
+(before `feme::cpu::LinearizePass`/`SIMDizePass` run) needs no divergence
+handling of its own.
 
 The block is untyped bytes on the ABI side. Accesses into it keep the
 layout the source model already fixed (HLSL `cbuffer` packing rules for

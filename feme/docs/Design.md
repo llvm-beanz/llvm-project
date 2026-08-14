@@ -852,8 +852,12 @@ it now covers the two largest opcode families:
   element.
 
 Still not covered, and left for later changes: the *non-typed* buffer and
-texture load/store ops (`RawBufferLoad`/`RawBufferStore`,
-`CBufferLoadLegacy`, `TextureLoad`, `Sample*`, ...), and texture/sampler
+texture load/store ops (`RawBufferLoad`/`RawBufferStore` on a struct-typed
+element, `TextureLoad`, `Sample*`, ...) -- `CBufferLoadLegacy`'s standard
+32-bit-per-component row shape is covered as of roadmap step R12
+(`feme::dxil::OpRaisingPass::raiseCBufferLoadLegacy`, used by the CPU
+target's root-constant support; its `.f16`/`.f64`/`.i16` overloads, 8- or
+2-field rows of a different component width, are not) -- and texture/sampler
 resource kinds (need dimension/multi-sample/feedback bits
 `ResourceProperties` doesn't carry, unlike `StructuredBuffer`/`CBuffer`'s
 recoverable size/alignment). Ops that return an aggregate needing
