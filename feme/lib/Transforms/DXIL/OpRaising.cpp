@@ -60,9 +60,6 @@ struct RaisableOp {
 // distinguish them, since `raiseCall` below handles any argument count
 // uniformly). Opcodes intentionally NOT covered here (documented in
 // feme/docs/Design.md) either:
-//  - return an aggregate/multiple values that would need `extractvalue`
-//    reconstruction (`IMul`/`UMul`, `UAddc`, `SplitDouble`,
-//    `WaveActiveBallot`),
 //  - pick their source intrinsic based on an extra "kind"/flag operand
 //    rather than the opcode alone (`WaveActiveOp`, `WaveActiveBit`,
 //    `WavePrefixOp`, `QuadOp`) -- `Barrier`'s mode flags are the same shape
@@ -73,6 +70,11 @@ struct RaisableOp {
 //    metadata reconstruction (`CreateHandle`, `AnnotateHandle`,
 //    `CreateHandleFromBinding`, buffer/texture loads and stores, ...) --
 //    those are covered by the separate `ResourceOps` table below instead.
+// Ops that return an aggregate needing `extractvalue` reconstruction
+// (`IMul`/`UMul`, `UAddc`, `SplitDouble`, `WaveActiveBallot`) are covered by
+// the separate `AggregateOps` table/`raiseAggregateCall` below instead of
+// this one, since they need per-`extractvalue` rewriting rather than a
+// whole-value `replaceAllUsesWith` (see `RaisableAggregateOp`'s comment).
 // clang-format off
 static const RaisableOp DirectOps[] = {
     // Scalar unary math raised to a standard LLVM intrinsic.
@@ -311,6 +313,101 @@ bool raiseBarrierCall(CallInst &CI) {
     return true;
   }
   return false; // An unrecognized mode: leave the call unmodified.
+}
+
+/// A DXIL opcode that returns an aggregate (a fixed-shape struct of two or
+/// more scalars) needing `extractvalue` reconstruction, and the single LLVM
+/// intrinsic call it was lowered from -- the general mechanism `IMul`/
+/// `UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot` were all deferred for
+/// together (see this pass's header comment). Unlike `RaisableOp` above,
+/// the result here is a genuine multi-value struct on both sides
+/// (`dx.types.twoi32`/`dx.types.i32c`/`dx.types.splitdouble`/
+/// `dx.types.fouri32` on the DXIL side, an equivalent-shaped anonymous LLVM
+/// struct on the intrinsic side), so raising cannot simply RAUW the whole
+/// call the way `raiseCall` does: the two struct types are never
+/// `llvm::Type`-identical (one is named, the other a literal struct
+/// uniqued by shape), only "layout identical" the way
+/// `DXILOpLowering::replaceNamedStructUses` checks for the forward
+/// direction. Raising therefore rewrites each `extractvalue` of the old
+/// call individually to read the new one instead (mirroring
+/// `raiseTypedBufferLoad`/`raiseRawBufferLoad`'s per-`extractvalue`
+/// rewriting), rather than replacing the aggregate value itself.
+struct RaisableAggregateOp {
+  unsigned Opcode;
+  Intrinsic::ID ID;
+  /// The call's total argument count, opcode operand included (e.g. 3 for
+  /// `IMul`'s `(opcode, a, b)`).
+  unsigned ArgCount;
+  /// The result struct's field count (2 for `IMul`/`UMul`/`UAddc`/
+  /// `SplitDouble`'s `{iN, iN}`, 4 for `WaveActiveBallot`'s `{i32 x 4}`).
+  unsigned NumResults;
+  /// Whether the intrinsic's overload type is the first operand's type
+  /// (`IMul`/`UMul`/`UAddc`, all `LLVMMatchType`-shaped between their
+  /// operands and result) rather than a fixed `i32` (`SplitDouble`'s
+  /// result halves and `WaveActiveBallot`'s result words are always `i32`,
+  /// regardless of the `double`/`i1` operand's own type).
+  bool OverloadOnOperand;
+};
+
+// clang-format off
+static const RaisableAggregateOp AggregateOps[] = {
+    {41, Intrinsic::dx_imul, 3, 2, true},          // IMul
+    {42, Intrinsic::dx_umul, 3, 2, true},          // UMul
+    {44, Intrinsic::uadd_with_overflow, 3, 2, true}, // UAddc
+    {102, Intrinsic::dx_splitdouble, 2, 2, false}, // SplitDouble
+    {116, Intrinsic::dx_wave_ballot, 2, 4, false},  // WaveActiveBallot
+};
+// clang-format on
+
+const RaisableAggregateOp *lookupRaisableAggregateOp(unsigned Opcode) {
+  for (const RaisableAggregateOp &Op : AggregateOps)
+    if (Op.Opcode == Opcode)
+      return &Op;
+  return nullptr;
+}
+
+/// Raises a `dx.op.*` call returning an aggregate, per \p RaiseAs (see
+/// `RaisableAggregateOp` above). Declines (leaving \p CI untouched) if the
+/// call's argument count doesn't match, or if any of its uses isn't a
+/// single-index `extractvalue` naming one of the result's fields -- the
+/// only shape `DXILOpLowering`'s forward direction ever produces (see
+/// `replaceNamedStructUses`), so anything else is unexpected input this
+/// pass doesn't try to reason about further.
+bool raiseAggregateCall(CallInst &CI, const RaisableAggregateOp &RaiseAs) {
+  if (CI.arg_size() != RaiseAs.ArgCount)
+    return false;
+
+  SmallVector<ExtractValueInst *, 4> Extracts;
+  for (User *U : CI.users()) {
+    auto *EV = dyn_cast<ExtractValueInst>(U);
+    if (!EV || EV->getNumIndices() != 1 ||
+        EV->getIndices()[0] >= RaiseAs.NumResults)
+      return false;
+    Extracts.push_back(EV);
+  }
+
+  // Operand 0 is always the opcode; the remaining operands are the op's
+  // actual arguments, in order (see `raiseCall`'s identical comment).
+  SmallVector<Value *, 2> Args(llvm::drop_begin(CI.args()));
+
+  Module &M = *CI.getModule();
+  Type *OverloadTy = RaiseAs.OverloadOnOperand
+                          ? Args[0]->getType()
+                          : Type::getInt32Ty(M.getContext());
+  Function *IntrinFn =
+      Intrinsic::getOrInsertDeclaration(&M, RaiseAs.ID, {OverloadTy});
+
+  IRBuilder<> Builder(&CI);
+  CallInst *NewCall = Builder.CreateCall(IntrinFn, Args, CI.getName());
+
+  for (ExtractValueInst *EV : Extracts) {
+    Builder.SetInsertPoint(EV);
+    Value *Field = Builder.CreateExtractValue(NewCall, EV->getIndices()[0]);
+    EV->replaceAllUsesWith(Field);
+    EV->eraseFromParent();
+  }
+  CI.eraseFromParent();
+  return true;
 }
 
 /// Builds a type of exactly \p SizeInBytes bytes' ABI alloc size to stand in
@@ -1070,6 +1167,12 @@ PreservedAnalyses OpRaisingPass::run(Module &M, ModuleAnalysisManager &AM) {
 
       if (Opcode == 80) { // Barrier
         Changed |= raiseBarrierCall(*CI);
+        continue;
+      }
+
+      if (const RaisableAggregateOp *RaiseAsAggregate =
+              lookupRaisableAggregateOp(Opcode)) {
+        Changed |= raiseAggregateCall(*CI, *RaiseAsAggregate);
         continue;
       }
 

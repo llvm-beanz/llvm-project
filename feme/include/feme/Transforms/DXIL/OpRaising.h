@@ -18,19 +18,19 @@
 // vector math, bit-manipulation, screen-space derivatives, thread/wave/quad
 // queries, and so on -- `IsFinite`/`IsNormal` (raised via the generic
 // `llvm.is.fpclass` intrinsic, reconstructing an extra constant operand
-// rather than a bare 1:1 call), and `Barrier` (raised via its constant mode
+// rather than a bare 1:1 call), `Barrier` (raised via its constant mode
 // operand, selecting one of the six barrier-scope intrinsics -- required
 // raised IR for the CPU target, see feme/docs/FeMeCPUDesign.md's "Raised IR
-// prerequisites"). It does not yet cover: ops that return an aggregate
-// needing `extractvalue` reconstruction (`IMul`/`UMul`, `UAddc`,
-// `SplitDouble`, `WaveActiveBallot`), ops that pick their source intrinsic
-// from an extra "kind"/flag operand rather than the opcode alone
-// (`WaveActiveOp`, `WaveActiveBit`, `WavePrefixOp`, `QuadOp`), or
-// resource-handle ops (`CreateHandle`, `AnnotateHandle`, typed/raw buffer
-// loads and stores, ...), which need `llvm::hlsl`-style resource metadata
-// reconstruction -- see OpRaising.cpp for the scope of what's covered there
-// specifically. Opcodes not (yet) covered are left as unmodified
-// `dx.op.*` calls rather than erroring, so this pass can be used
+// prerequisites"), and the aggregate-returning ops (`IMul`/`UMul`, `UAddc`,
+// `SplitDouble`, `WaveActiveBallot`; raised via a general multi-return-value
+// `extractvalue`-reconstruction mechanism). It does not yet cover: ops that
+// pick their source intrinsic from an extra "kind"/flag operand rather than
+// the opcode alone (`WaveActiveOp`, `WaveActiveBit`, `WavePrefixOp`,
+// `QuadOp`), or resource-handle ops (`CreateHandle`, `AnnotateHandle`,
+// typed/raw buffer loads and stores, ...), which need `llvm::hlsl`-style
+// resource metadata reconstruction -- see OpRaising.cpp for the scope of
+// what's covered there specifically. Opcodes not (yet) covered are left as
+// unmodified `dx.op.*` calls rather than erroring, so this pass can be used
 // incrementally on modules that mix raised and not-yet-raised operations.
 //
 //===----------------------------------------------------------------------===//
