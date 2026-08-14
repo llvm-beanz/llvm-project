@@ -309,7 +309,15 @@ std::optional<Constant *> getAtomicRMWIdentity(AtomicRMWInst::BinOp Op,
 /// Widens a single acyclic, uniform-control-flow function to \p WaveSize
 /// lanes. See the file comment above for the algorithm.
 class FunctionWidener {
-  Function &OldF;
+  /// The function being widened, up until `buildWidenedFunction` splices its
+  /// body into `NewF` and erases it; null from that point on, so that a use
+  /// of the old, freed function after widening has started asserts instead
+  /// of silently reading freed memory.
+  Function *OldF;
+  /// The module's context, cached because it outlives `OldF` and so stays
+  /// usable for the diagnostics `widen*` helpers emit after
+  /// `buildWidenedFunction` has erased it.
+  LLVMContext &Ctx;
   unsigned WaveSize;
   UniformityInfo &UI;
   Function *NewF = nullptr;
@@ -344,7 +352,7 @@ class FunctionWidener {
 
 public:
   FunctionWidener(Function &OldF, unsigned WaveSize, UniformityInfo &UI)
-      : OldF(OldF), WaveSize(WaveSize), UI(UI),
+      : OldF(&OldF), Ctx(OldF.getContext()), WaveSize(WaveSize), UI(UI),
         NumThreads(getThreadGroupSize(OldF)) {}
 
   /// Returns the widened function, or nullptr if \p OldF has a divergent
@@ -386,11 +394,11 @@ bool FunctionWidener::checkSupportedControlFlow() {
   // `AlwaysUniform` by `feme::cpu::WaveTTIImpl`) -- so the divergent-branch
   // check below is what actually decides whether a cycle is widenable, not
   // the mere presence of one.
-  for (BasicBlock &BB : OldF) {
+  for (BasicBlock &BB : *OldF) {
     auto *BI = dyn_cast<CondBrInst>(BB.getTerminator());
     if (BI && UI.isDivergentTerminator(BI)) {
-      OldF.getContext().emitError(
-          "feme-cpu-simdize: function '" + OldF.getName() +
+      Ctx.emitError(
+          "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent branch; the divergence transform "
           "(feme::cpu::LinearizePass) did not remove it, or produced a "
           "shape this pass cannot widen");
@@ -416,16 +424,15 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // diagnostic, matching every other precondition this pass checks before
   // mutating anything, rather than let a later step build an invalid nested
   // vector type and assert.
-  for (Instruction &I : instructions(OldF)) {
+  for (Instruction &I : instructions(*OldF)) {
     if (!UI.isDivergentAtDef(&I))
       continue;
 
     if (I.getType()->isAggregateType()) {
-      OldF.getContext().emitError(
-          "feme-cpu-simdize: function '" + OldF.getName() +
-          "' has a divergent value '" + I.getName() +
-          "' of aggregate type; component decomposition is not yet "
-          "supported (roadmap milestone 7 deviation)");
+      Ctx.emitError("feme-cpu-simdize: function '" + OldF->getName() +
+                    "' has a divergent value '" + I.getName() +
+                    "' of aggregate type; component decomposition is not yet "
+                    "supported (roadmap milestone 7 deviation)");
       return false;
     }
     if (!I.getType()->isVectorTy())
@@ -433,8 +440,8 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
 
     auto *IE = dyn_cast<InsertElementInst>(&I);
     if (!IE || !isa<ConstantInt>(IE->getOperand(2))) {
-      OldF.getContext().emitError(
-          "feme-cpu-simdize: function '" + OldF.getName() +
+      Ctx.emitError(
+          "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent value '" + I.getName() +
           "' of vector type; only a constant-index insertelement chain is "
           "supported (roadmap milestone 7 deviation)");
@@ -449,8 +456,8 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         if (Matched && Matched->StoredValue == IE)
           continue;
       }
-      OldF.getContext().emitError(
-          "feme-cpu-simdize: function '" + OldF.getName() +
+      Ctx.emitError(
+          "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent vector value '" + IE->getName() +
           "' used outside a supported insertelement-chain/resource-store "
           "pattern; component decomposition is not yet supported for this "
@@ -462,28 +469,28 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
 }
 
 Function *FunctionWidener::buildWidenedFunction() {
-  LLVMContext &Ctx = OldF.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *MaskTy = FixedVectorType::get(Type::getInt1Ty(Ctx), WaveSize);
 
-  SmallVector<Type *, 8> ParamTypes(OldF.getFunctionType()->params());
+  SmallVector<Type *, 8> ParamTypes(OldF->getFunctionType()->params());
   ParamTypes.append({I32Ty, I32Ty, I32Ty, I32Ty, MaskTy, PtrTy});
 
-  FunctionType *NewTy = FunctionType::get(OldF.getReturnType(), ParamTypes,
-                                          OldF.getFunctionType()->isVarArg());
-  Function *F = Function::Create(NewTy, OldF.getLinkage(),
-                                 OldF.getAddressSpace(), "", OldF.getParent());
-  F->copyAttributesFrom(&OldF);
-  F->setComdat(OldF.getComdat());
-  F->splice(F->begin(), &OldF);
+  FunctionType *NewTy = FunctionType::get(OldF->getReturnType(), ParamTypes,
+                                          OldF->getFunctionType()->isVarArg());
+  Function *F =
+      Function::Create(NewTy, OldF->getLinkage(), OldF->getAddressSpace(), "",
+                       OldF->getParent());
+  F->copyAttributesFrom(OldF);
+  F->setComdat(OldF->getComdat());
+  F->splice(F->begin(), OldF);
 
-  for (auto [OldArg, NewArg] : llvm::zip(OldF.args(), F->args())) {
+  for (auto [OldArg, NewArg] : llvm::zip(OldF->args(), F->args())) {
     NewArg.takeName(&OldArg);
     OldArg.replaceAllUsesWith(&NewArg);
   }
 
-  auto ArgIt = F->arg_begin() + OldF.arg_size();
+  auto ArgIt = F->arg_begin() + OldF->arg_size();
   Env.GroupIDX = &*ArgIt++;
   Env.GroupIDX->setName("wave_group_id_x");
   Env.GroupIDY = &*ArgIt++;
@@ -497,9 +504,10 @@ Function *FunctionWidener::buildWidenedFunction() {
   Env.GroupShared = &*ArgIt++;
   Env.GroupShared->setName("wave_groupshared");
 
-  F->takeName(&OldF);
-  OldF.replaceAllUsesWith(F);
-  OldF.eraseFromParent();
+  F->takeName(OldF);
+  OldF->replaceAllUsesWith(F);
+  OldF->eraseFromParent();
+  OldF = nullptr;
   return F;
 }
 
@@ -869,12 +877,11 @@ void FunctionWidener::widenMaskedAtomicRMW(
   Type *ValTy = Matched.Val->getType();
   std::optional<Constant *> Identity = getAtomicRMWIdentity(Matched.Op, ValTy);
   if (!Identity && Matched.Op != AtomicRMWInst::Xchg) {
-    OldF.getContext().emitError(
-        "feme-cpu-simdize: function '" + NewF->getName() +
-        "' has a divergent atomicrmw '" +
-        AtomicRMWInst::getOperationName(Matched.Op) +
-        "' with no maskable identity element (roadmap milestone 7 "
-        "deviation)");
+    Ctx.emitError("feme-cpu-simdize: function '" + NewF->getName() +
+                  "' has a divergent atomicrmw '" +
+                  AtomicRMWInst::getOperationName(Matched.Op) +
+                  "' with no maskable identity element (roadmap milestone 7 "
+                  "deviation)");
     HadError = true;
     return;
   }
@@ -969,11 +976,10 @@ void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
       ToErase.push_back(&I);
       return;
     }
-    OldF.getContext().emitError(
-        "feme-cpu-simdize: unsupported divergent call to '" +
-        Twine(Callee ? Callee->getName() : "<indirect>") +
-        "' (roadmap milestone 7 does not cover a generic vector-call "
-        "rewrite)");
+    Ctx.emitError("feme-cpu-simdize: unsupported divergent call to '" +
+                  Twine(Callee ? Callee->getName() : "<indirect>") +
+                  "' (roadmap milestone 7 does not cover a generic vector-call "
+                  "rewrite)");
     HadError = true;
     return;
   }
