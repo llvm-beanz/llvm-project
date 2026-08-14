@@ -151,11 +151,15 @@ which is a diagnostic today and a wrong answer tomorrow if forgotten:
 | `Device` vs `All` memory scope not distinguished | 9 | P2 |
 | Dispatch is sequential, not thread-pooled | 4 | P1 |
 | `feme-run`'s heap YAML has no `class`/`kind`/`stride`/`format` | 11 | P0 (see §2.4) |
+| A divergent branch inside a loop that `feme-cpu-linearize` diagnoses and leaves untouched can still reach the JIT unwidened instead of failing (roadmap milestone 6's `feme-cpu-simdize` divergent-branch check does not catch every such case), running forever rather than erroring; found by growing the differential harness to `--unstructured` shapes (R1, §2.3's differential harness note) | 6/7 | P0 |
 
 The scalarization item is P0 for the same reason the design calls
 restructurization the riskiest assumption: an unmasked lane in a scalarized
 atomic is not a crash, it is a silently wrong answer, and the differential
-harness cannot currently reach it (§2.3).
+harness cannot currently reach it (§2.3). The new divergent-branch-in-a-loop
+item is P0 for the same class of reason: a diagnostic that fails to fire is
+worse than one that fires too eagerly, because the caller has no signal that
+anything went wrong at all short of the dispatch never returning.
 
 ### 1.7 Robustness
 
@@ -192,22 +196,28 @@ being untested.
 
 ### 2.2 The axes not yet covered
 
-1. **Wave size.** 49 of the 54 `--wave-size=` occurrences in the tree are
-   `--wave-size=4`, and all five executing HLSL tests run at `W = 4` only.
-   FeMeCPUDesign.md calls cross-wave-size differential
-   testing "the cheapest high-value test this design enables", and it is
-   currently exercised by one seed at `W = 8`. Every wave-size-independent
-   HLSL shader should run at `W ∈ {4, 8, 16, 32}` and produce identical
-   output; a mismatch isolates a widening bug from a translation bug for
-   free.
-2. **The differential harness's own scope.** Its header comment says its
-   `--divergent=false --loops=false --unstructured=false` restriction exists
-   because milestone 4's widener was acyclic/uniform-only, "at which point
-   this harness's scope should grow with them". Milestones 6 and 7 landed;
-   the harness did not grow. Turning those three flags on is the
-   single highest-value test change available in the tree, because it is
-   precisely the configuration that exercises the linearizer and the
-   scalarization fallback against ground truth.
+1. **Wave size** (done by R1). Three of the five executing HLSL end-to-end
+   tests whose own computation does not depend on wave width (`loop.hlsl`,
+   `divergent-control-flow.hlsl`, `barrier-groupshared.hlsl`) now run at `W`
+   in {4, 8, 16, 32} via the `%feme-wave-size-sweep` lit substitution
+   (§2.4.1); `wave-ops.hlsl`/`combined.hlsl` genuinely compute a
+   wave-size-dependent answer (they use a wave intrinsic directly) and stay
+   at `W = 4` until a per-wave-size expected value is worth adding.
+2. **The differential harness's own scope** (done for `--divergent`/
+   `--loops` by R1; `--unstructured` remains `--reference`-only). Its header
+   comment used to say its `--divergent=false --loops=false
+   --unstructured=false` restriction existed because milestone 4's widener
+   was acyclic/uniform-only, "at which point this harness's scope should
+   grow with them". Milestones 6 and 7 landed; the harness did not grow
+   until R1, which turns `--divergent`/`--loops` on (the configuration that
+   exercises the linearizer and the widened-loop path against ground
+   truth) and found the new P0 gap in §1.6's table when `--unstructured`
+   was also tried against the normal pipeline (a divergent branch inside a
+   loop that should have been diagnosed instead reaching the JIT
+   unwidened). `--unstructured` stays `--reference`-only (still real
+   coverage: it also caught, and this milestone fixed, a genuine
+   `feme-cfg-gen` termination bug in its own irreducible-edge construct)
+   until that gap closes.
 3. **Front-end equivalence.** No test compiles one HLSL source to *both*
    DXIL and SPIR-V and asserts the two produce the same answer. This is the
    test that would give the SPIR-V input path the same confidence the DXIL
@@ -268,10 +278,11 @@ prerequisites in §2.4 exist.
 These are the changes that make §2.3 cheap rather than repetitive, and each
 is small enough to land on its own:
 
-1. **A wave-size sweep substitution.** A lit substitution (or a `feme-run`
-   `--wave-sizes=4,8,16,32` mode) that runs one input at several wave sizes
-   and asserts identical output, so a shader opts into the differential by
-   one word instead of four `RUN:` lines.
+1. **A wave-size sweep substitution** (done by R1: `%feme-wave-size-sweep`,
+   feme/utils/feme-wave-size-sweep.py). A lit substitution that runs one
+   input at several wave sizes and `FileCheck`s each run's output, so a
+   shader opts into the sweep by one substitution instead of four `RUN:`
+   lines.
 2. **`feme-run` SPIR-V input.** `feme-run` links `FeMeImportDXIL` only; the
    work is linking the SPIR-V importer and its `Translator` chain and
    reusing `Driver`'s existing format detection rather than re-deriving it,
@@ -280,10 +291,17 @@ is small enough to land on its own:
    the richer schema; milestone 11 shipped the raw-buffer subset. Filling it
    in unlocks §2.3's typed-buffer cases and stops tests from hand-encoding
    float bit patterns as integers.
-4. **A `%feme-run-differential` harness helper.** The differential harness is
-   five copy-pasted five-line blocks; a small script (or `feme-run` flag)
-   taking a seed range and a flag set would let §2.2's item 2 grow the shape
-   space without growing the file.
+4. **A `%feme-run-differential` harness helper** (done by R1:
+   feme/utils/feme-run-differential.py). Takes a seed list, a `feme-cfg-gen`
+   flag set, and a wave-size list, generating each seed once and diffing its
+   `--reference` output against every requested wave size -- replacing the
+   differential harness's previous five copy-pasted five-line blocks with
+   one substitution per shape/wave-size combination, so §2.2's item 2 can
+   grow the shape space without growing the file. It also refuses to trust
+   a `feme-run` invocation that printed a diagnostic even if its exit code
+   was zero (see §1.6's new divergent-branch-in-a-loop gap, found by this
+   helper), so a shape is only accepted once the pipeline ran it with no
+   caveats.
 5. **An AOT lit recipe.** `feme --target=<host-triple>` + a tiny loader
    (either a `feme-run --object` mode or a test-only C driver) so AOT is
    covered by `lit`, not only by `gtest`.
@@ -310,8 +328,8 @@ dependency column is the only ordering constraint.
 
 | # | Step | Covers | Depends on |
 |---|---|---|---|
-| R1 | Grow the differential harness to divergent/loop/unstructured shapes; add the wave-size sweep | §2.2.1, §2.2.2, §2.4.1, §2.4.4 | — |
-| R2 | Mask the scalarization fallback's per-lane execution; add `histogram.hlsl` | §1.6 P0, §2.3 | R1 (harness catches regressions) |
+| R1 | Grow the differential harness to divergent/loop shapes; add the wave-size sweep (done: `--unstructured` stays `--reference`-only, see §1.6's new gap) | §2.2.1, §2.2.2, §2.4.1, §2.4.4 | — |
+| R2 | Mask the scalarization fallback's per-lane execution; add `histogram.hlsl`; make `feme-cpu-simdize` reject every shape `feme-cpu-linearize` left an unwidened divergent branch in, including one inside a loop (§1.6's new gap, found by R1) | §1.6 P0, §2.3 | R1 (harness catches regressions) |
 | R3 | Multi-return-value raising mechanism (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` | §1.3 P0 | — |
 | R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` | §1.3 P0 | — |
 | R5 | Barriers inside branches/loops; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` | §1.6, §2.3 | R4 (`Barrier` raising) |

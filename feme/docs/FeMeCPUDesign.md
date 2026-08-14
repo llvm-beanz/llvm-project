@@ -300,21 +300,45 @@ it's discussed, and summarized here:
   is already far larger than anyone would hand-write, but it is not every
   irreducible shape `FixIrreducible` might ever see.
 - The differential harness (layer 3's other half, `--reference` diffed
-  against the normal pipeline) is scoped to the same acyclic,
-  uniform-control-flow shapes `feme::cpu::SIMDizePass` widened as of this
-  milestone (`feme-cfg-gen --divergent=false --loops=false
-  --unstructured=false`): divergent branches and loops are exactly what the
-  linearizer (roadmap milestone 6) and the remaining widening work
-  (milestone 7) made widenable, at which point this harness's scope should
-  grow with them -- both have since landed (see their own deviation notes),
-  but growing this harness's default scope to match is not itself part of
-  either milestone and remains future work.
+  against the normal pipeline) was scoped, as of this milestone, to the same
+  acyclic, uniform-control-flow shapes `feme::cpu::SIMDizePass` widened
+  (`feme-cfg-gen --divergent=false --loops=false --unstructured=false`):
+  divergent branches and loops are exactly what the linearizer (roadmap
+  milestone 6) and the remaining widening work (milestone 7) made
+  widenable. Roadmap step R1 (see feme/docs/Roadmap.md) grows the harness's
+  default scope to match: `feme/test/Tools/feme-run/differential-harness.test`
+  now diffs `--divergent`/`--loops` shapes (several curated seeds, across
+  wave sizes 4/8/16/32 and more than one group count) against `--reference`,
+  using the `feme-run-differential`/`feme-wave-size-sweep` helpers
+  (feme/utils) roadmap step R1 also adds. `--unstructured` shapes are
+  exercised against `--reference` alone, not yet the normal pipeline (see
+  the next bullet and feme/docs/Roadmap.md's gap inventory for why).
   `--reference` itself (`feme::cpu::ReferenceLoweringPass` +
-  `feme::cpu::ReferenceEntryWrapperPass`) has no such restriction -- it
+  `feme::cpu::ReferenceEntryWrapperPass`) has no shape restriction -- it
   runs any shader `feme::cpu::PreparePass` + resource lowering accept,
   rejecting only an actual wave intrinsic use (which has no meaning one
-  invocation at a time) -- the restriction is only on what the *normal*
-  pipeline can currently produce to diff against.
+  invocation at a time).
+- Enabling `--unstructured` surfaced two real bugs, not just a scope
+  narrowing:
+  - `feme-cfg-gen`'s own `genIrreducible` construct had no termination
+    guarantee: its two mutually-reachable blocks each only left the cycle on
+    a `%tid`/`%gid`-derived condition, and neither operand changes across a
+    hop between them, so a thread for which both conditions were `false`
+    bounced between the two forever. Fixed by bounding every hop with a
+    shared counter that forces an exit once a small cap is reached (see
+    CFGGen.cpp's `genIrreducible`); the shape stays irreducible (neither
+    block dominates the other) but now always terminates.
+  - Separately, some `--unstructured`-derived shapes reach the JIT despite
+    `feme::cpu::LinearizePass` diagnosing an unlinearized divergent branch
+    inside a loop (which the design says should be "diagnosed and left
+    completely untouched" -- see this milestone's own note above), producing
+    a program that runs forever instead of failing cleanly the way the same
+    diagnostic does for a non-`--unstructured` shape (roadmap milestone 6's
+    `feme-cpu-simdize` divergent-branch check does not catch every case
+    `feme-cpu-linearize` itself already declined to fix). This is a new P0
+    gap (see feme/docs/Roadmap.md's gap inventory); it is why this
+    milestone's harness growth stops at `--reference`-only coverage for
+    `--unstructured` rather than diffing it against the normal pipeline.
 - `feme-cpu-restructure-fuzzer` asserts `feme::cpu::verifyStructured`'s
   postconditions (layers 1/2) over generator seeds (layer 3's generator),
   not execution correctness (layer 3's differential harness); it always
