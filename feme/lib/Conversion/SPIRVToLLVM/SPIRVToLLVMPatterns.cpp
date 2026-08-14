@@ -85,6 +85,47 @@ bool isResourcePointer(mlir::spirv::PointerType Type) {
                    mlir::spirv::SamplerType>(Type.getPointeeType());
 }
 
+/// A SPIR-V storage/uniform buffer block is always spelled as a single
+/// SPIR-V `Block`-decorated struct with exactly one member (the HLSL ->
+/// SPIR-V compilation FeMe targets never emits more than one, and neither
+/// does the `spirv.VulkanBuffer` representation this converts to -- see
+/// https://github.com/llvm/wg-hlsl/blob/main/proposals/0018-spirv-resource-representation.md).
+/// Returns that sole member, the runtime array `RWStructuredBuffer<T>`/
+/// `StructuredBuffer<T>` compile down to, or a null type for any other shape
+/// (which does not convert -- see the "Known gap" note in the SPIR-V section
+/// of feme/docs/Design.md for what that leaves out, notably `cbuffer`/
+/// `ConstantBuffer<T>`, whose `Uniform` storage class this does not match).
+mlir::spirv::RuntimeArrayType
+getBufferBlockElementArray(mlir::spirv::PointerType Type) {
+  if (Type.getStorageClass() != mlir::spirv::StorageClass::StorageBuffer)
+    return nullptr;
+  auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(Type.getPointeeType());
+  if (!Struct || Struct.getNumElements() != 1)
+    return nullptr;
+  return mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(
+      Struct.getElementType(0));
+}
+
+/// Returns true if \p Type is a pointer to a storage buffer block -- see
+/// getBufferBlockElementArray.
+bool isBufferBlockPointer(mlir::spirv::PointerType Type) {
+  return static_cast<bool>(getBufferBlockElementArray(Type));
+}
+
+/// Returns false if \p Struct's sole member -- the runtime array a storage
+/// buffer block wraps -- carries a `NonWritable` decoration, i.e. the buffer
+/// is a `StructuredBuffer<T>` (SRV) rather than a `RWStructuredBuffer<T>`
+/// (UAV); true otherwise.
+bool isBufferBlockWritable(mlir::spirv::StructType Struct) {
+  llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 1>
+      Decorations;
+  Struct.getMemberDecorations(0, Decorations);
+  for (const auto &Decoration : Decorations)
+    if (Decoration.decoration == mlir::spirv::Decoration::NonWritable)
+      return false;
+  return true;
+}
+
 /// Emits a call to \p Intrinsic returning \p ResultType, with \p Args.
 mlir::Value createIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
                                 mlir::Location Loc, llvm::StringRef Intrinsic,
@@ -275,6 +316,107 @@ public:
 
 private:
   const feme::spirv::ResourceInfoMap &Resources;
+};
+
+/// Converts `spirv.AccessChain` into a storage buffer whose base pointer
+/// converted to a `spirv.VulkanBuffer` handle rather than an ordinary LLVM
+/// pointer (see feme::spirv::getBufferBlockElementArray), which MLIR's own
+/// `AccessChainPattern` cannot handle since it assumes its base pointer
+/// converts to `!llvm.ptr`. SPIR-V spells a storage buffer access as an
+/// access chain into the wrapping `Block` struct's sole member (its runtime
+/// array) and then into that array's element, so the leading index -- the
+/// member selector, always 0 -- is dropped, and the second -- the array
+/// element -- becomes `llvm.spv.resource.getpointer`'s index; any further
+/// indices navigate the element type's own fields with an ordinary
+/// `llvm.getelementptr`, matching how real `dxc`-compiled SPIR-V is
+/// expected to lower on LLVM's SPIRV backend (see
+/// `llvm/test/CodeGen/SPIRV/pointers/structured-buffer-access.ll`).
+class StorageBufferAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
+        Adaptor.getBasePtr().getType());
+    if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer")
+      return Rewriter.notifyMatchFailure(Op, "not a storage buffer access");
+
+    mlir::ValueRange Indices = Adaptor.getIndices();
+    if (Indices.size() < 2)
+      return Rewriter.notifyMatchFailure(
+          Op, "expected a member selector and an array index");
+
+    mlir::Type ResultType =
+        getTypeConverter()->convertType(Op.getComponentPtr().getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value ElementPtr = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.resource.getpointer", ResultType,
+        {Adaptor.getBasePtr(), Indices[1]});
+    if (Indices.size() == 2) {
+      Rewriter.replaceOp(Op, ElementPtr);
+      return mlir::success();
+    }
+
+    // Further indices navigate the array element's own fields; the leading
+    // 0 dereferences through the pointer `llvm.spv.resource.getpointer`
+    // returned, exactly as an ordinary GEP into a pointer operand would.
+    auto ElementType = mlir::cast<mlir::LLVM::LLVMArrayType>(
+                            HandleType.getTypeParams().front())
+                            .getElementType();
+    llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
+    GEPIndices.push_back(0);
+    llvm::append_range(GEPIndices, Indices.drop_front(2));
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
+        Op, ResultType, ElementType, ElementPtr, GEPIndices,
+        mlir::LLVM::GEPNoWrapFlags::inbounds);
+    return mlir::success();
+  }
+};
+
+/// Converts a push constant `spirv.GlobalVariable` to an ordinary
+/// `llvm.mlir.global` in the address space LLVM's SPIRV backend recognizes
+/// as a push constant block (13, see `storageClassToAddressSpace` in
+/// `llvm/lib/Target/SPIRV/SPIRVUtils.h`): its own `SPIRVPushConstantAccess`
+/// pass finds every global there and rewrites it -- and every use of it --
+/// into the `spirv.PushConstant` target extension type and the
+/// `llvm.spv.pushconstant.getpointer` intrinsic itself, so FeMe does not
+/// have to spell either one; unlike a resource or builtin variable, a push
+/// constant's declaration survives the conversion as a real global; only its
+/// storage class needs translating into that address space (see
+/// feme::spirv::populateSPIRVToLLVMTargetTypeConversions), matching how
+/// MLIR's own `GlobalVariablePattern` handles the storage classes it
+/// supports -- `PushConstant` is just not one of them.
+class PushConstantGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GlobalVariableOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    if (SrcType.getStorageClass() != mlir::spirv::StorageClass::PushConstant)
+      return Rewriter.notifyMatchFailure(Op, "not a push constant variable");
+
+    mlir::Type DstType =
+        getTypeConverter()->convertType(SrcType.getPointeeType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+        Op, DstType, /*isConstant=*/true, mlir::LLVM::Linkage::External,
+        Op.getSymName(), mlir::Attribute(), /*alignment=*/0,
+        /*addrSpace=*/13);
+    return mlir::success();
+  }
 };
 
 /// Emits the `llvm.spv.resource.getpointer` call addressing \p Coordinate
@@ -560,6 +702,31 @@ public:
   }
 };
 
+/// Converts a storage buffer block pointer to the `spirv.VulkanBuffer`
+/// handle type LLVM's SPIRV backend materializes it from, mirroring
+/// convertImageTypeAs's role for image/sampler resources: the element type
+/// parameter is the buffer's runtime array, converted to a 0-sized
+/// `!llvm.array`, and the two integer parameters are the storage class
+/// (forwarded unchanged, like an image type's parameters -- see
+/// getBufferBlockElementArray) and whether the buffer is writable
+/// (`RWStructuredBuffer<T>`) or not (`StructuredBuffer<T>`).
+mlir::Type convertBufferBlockType(mlir::spirv::PointerType Type,
+                                  const mlir::LLVMTypeConverter &TypeConverter) {
+  mlir::spirv::RuntimeArrayType Array = getBufferBlockElementArray(Type);
+  if (!Array)
+    return nullptr;
+  mlir::Type ElementType = TypeConverter.convertType(Array.getElementType());
+  if (!ElementType)
+    return nullptr;
+
+  bool Writable = isBufferBlockWritable(
+      mlir::cast<mlir::spirv::StructType>(Type.getPointeeType()));
+  return mlir::LLVM::LLVMTargetExtType::get(
+      Type.getContext(), "spirv.VulkanBuffer",
+      {mlir::LLVM::LLVMArrayType::get(ElementType, 0)},
+      {static_cast<unsigned>(Type.getStorageClass()), Writable ? 1u : 0u});
+}
+
 } // namespace
 
 void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
@@ -578,6 +745,55 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
       return std::nullopt;
     return TypeConverter.convertType(Type.getPointeeType());
   });
+
+  // A storage buffer block's own pointer converts to the handle LLVM's
+  // SPIRV backend materializes it from; any other `StorageBuffer` pointer --
+  // an access chain result reaching into the buffer's contents -- is
+  // ordinary memory, addressed the way that backend expects a storage
+  // buffer access to be (address space 11, see `storageClassToAddressSpace`
+  // in `llvm/lib/Target/SPIRV/SPIRVUtils.h`) rather than MLIR's own
+  // Vulkan-client default of address space 0.
+  TypeConverter.addConversion(
+      [&TypeConverter](
+          mlir::spirv::PointerType Type) -> std::optional<mlir::Type> {
+        if (Type.getStorageClass() != mlir::spirv::StorageClass::StorageBuffer)
+          return std::nullopt;
+        if (mlir::Type Handle = convertBufferBlockType(Type, TypeConverter))
+          return Handle;
+        return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                                /*addressSpace=*/11);
+      });
+
+  // A push constant pointer is ordinary memory too, in the address space
+  // (13) `feme::spirv::PushConstantGlobalVariablePattern`'s global lives in
+  // -- LLVM's own `SPIRVPushConstantAccess` pass finds it there and rewrites
+  // it (and every use) into the `spirv.PushConstant` handle representation
+  // itself, so nothing further is needed on FeMe's side.
+  TypeConverter.addConversion(
+      [&TypeConverter](
+          mlir::spirv::PointerType Type) -> std::optional<mlir::Type> {
+        if (Type.getStorageClass() != mlir::spirv::StorageClass::PushConstant)
+          return std::nullopt;
+        if (!TypeConverter.convertType(Type.getPointeeType()))
+          return std::nullopt;
+        return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                                /*addressSpace=*/13);
+      });
+
+  // MLIR's own runtime array conversion refuses one with an `ArrayStride`
+  // decoration (see `convertRuntimeArrayType` in MLIR's `SPIRVToLLVM.cpp`),
+  // which every runtime array nested in a real (Vulkan-valid) storage
+  // buffer block carries -- the stride is otherwise unused here, since the
+  // resulting `!llvm.array<0 x T>`'s layout comes from `T` itself.
+  TypeConverter.addConversion(
+      [&TypeConverter](
+          mlir::spirv::RuntimeArrayType Type) -> std::optional<mlir::Type> {
+        mlir::Type ElementType =
+            TypeConverter.convertType(Type.getElementType());
+        if (!ElementType)
+          return std::nullopt;
+        return mlir::LLVM::LLVMArrayType::get(ElementType, 0);
+      });
 }
 
 feme::spirv::ResourceInfoMap
@@ -590,7 +806,8 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
   for (auto Global : Module.getOps<mlir::spirv::GlobalVariableOp>()) {
     auto PointerType =
         mlir::dyn_cast<mlir::spirv::PointerType>(Global.getType());
-    if (!PointerType || !isResourcePointer(PointerType))
+    if (!PointerType ||
+        (!isResourcePointer(PointerType) && !isBufferBlockPointer(PointerType)))
       continue;
     std::optional<uint32_t> Set = Global.getDescriptorSet();
     std::optional<uint32_t> Binding = Global.getBinding();
@@ -621,8 +838,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
                BuiltInGlobalVariablePattern, CompositeConstructPattern,
                ExecutionModePattern, ImageQuerySizePattern, ImageReadPattern,
-               ImageWritePattern, LoadValuePattern>(Patterns.getContext(),
-                                                    TypeConverter, FeMeBenefit);
+               ImageWritePattern, LoadValuePattern,
+               PushConstantGlobalVariablePattern,
+               StorageBufferAccessChainPattern>(Patterns.getContext(),
+                                                TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
 }
