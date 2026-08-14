@@ -10503,3 +10503,108 @@ pass. Commit breakdown for this entry:
 3. `[feme][tools] Avoid passing a null memcpy source for an empty heap
    entry`.
 4. This file.
+
+# Use-after-free of the pre-widening function in `feme::cpu::SIMDizePass`
+
+## The report
+
+`FEME :: Transforms/CPU/simdize-scalarize-atomic-nand-unsupported.ll` and
+`SIMDizeTest.DiagnosesUnmaskableAtomicRMWWithoutCrashing` crashed on macOS
+arm64 (debug + UBSan) with `Assertion failed: (Val && "isa<> used on a null
+pointer")` inside `llvm::GlobalValue::getType()`, reached from
+`llvm::Function::getContext()` called by
+`FunctionWidener::widenMaskedAtomicRMW`. Both tests exercise the *expected*
+path -- the pass is supposed to emit a diagnostic for a divergent
+`atomicrmw nand` -- so the crash was in emitting the diagnostic itself, not
+in deciding to emit one.
+
+## Reading the stack, not the symptom
+
+`getContext()` asserting on a null type means the `Function` it was called
+on was not a live `Function` at all: the object's own fields were garbage.
+`widenMaskedAtomicRMW` calls `OldF.getContext()`, and `OldF` is a
+`Function &` captured at `FunctionWidener` construction --- but
+`buildWidenedFunction`, which runs *before* any instruction is widened,
+ends with `OldF.replaceAllUsesWith(F); OldF.eraseFromParent();`. From that
+point on `OldF` is a dangling reference, and every mid-widening diagnostic
+that reached through it was a use-after-free. macOS's allocator hands back
+scribbled memory, which is why it crashed there and not on Linux.
+
+Two call sites did this: `widenMaskedAtomicRMW`'s unmaskable-`atomicrmw`
+diagnostic (the reported one) and `widenElementwise`'s unsupported
+divergent-call diagnostic. Notably, both had already been *partly* fixed
+for this exact hazard before: `widenMaskedAtomicRMW` prints
+`NewF->getName()` rather than `OldF.getName()`, and `widenElementwise`
+carries a comment explaining that `OldF` has already been erased and so
+looks its intrinsic declaration up in `NewF`'s module --- the `getContext()`
+call sitting right next to each of those was just missed.
+
+## Reproducing it on Linux
+
+The reported configuration was not available here, and neither the plain
+UBSan build nor `MALLOC_PERTURB_` reproduced it (glibc happens to leave the
+freed block intact, so the read returns the old, still-valid pointer).
+`valgrind` does not depend on that luck, and reported it immediately and
+precisely:
+
+```
+Invalid read of size 8
+   at llvm::GlobalValue::getType() const
+   by llvm::Function::getContext() const
+   by FunctionWidener::widenMaskedAtomicRMW (SIMDize.cpp:872)
+ Address ... is 16 bytes inside a block of size 152 free'd
+   at llvm::Function::eraseFromParent()
+   by FunctionWidener::buildWidenedFunction (SIMDize.cpp:502)
+```
+
+This is worth recording as the general technique for this class of report:
+a `isa<> used on a null pointer` assertion on an IR object that *should*
+exist is a lifetime bug far more often than a genuine null, and valgrind
+reproduces it on any host regardless of allocator behaviour.
+
+## The fix
+
+Two changes, both in `FunctionWidener`:
+
+1. Cache `LLVMContext &Ctx` at construction and route every `emitError`
+   through it. The context outlives the module, let alone the function, so
+   it is valid before and after `buildWidenedFunction`.
+2. Hold the pre-widening function as `Function *OldF`, set to `nullptr`
+   immediately after `eraseFromParent()`. Any future use after widening has
+   started is then a null dereference (an assertion in a build with them
+   enabled) instead of a silent read of freed memory that only misbehaves
+   on some allocators. This is what stops the same bug being reintroduced
+   the next time a `widen*` helper wants something from the old function.
+
+No design deviation, so `feme/docs/FeMeCPUDesign.md` needed no update: the
+diagnostics and their wording are unchanged, only the memory they read
+while producing them.
+
+## Testing
+
+`widenMaskedAtomicRMW`'s path already had both a lit test and a unit test
+(the two that were failing). `widenElementwise`'s divergent-call
+diagnostic --- the second dangling read --- had neither, so this adds:
+
+- `feme/test/Transforms/CPU/simdize-divergent-call-unsupported.ll`, and
+- `SIMDizeTest.DiagnosesUnsupportedDivergentCall`, which checks the
+  diagnostic's text rather than just that some error was emitted.
+
+Both were verified to fault under valgrind against the pre-fix
+`SIMDize.cpp` (rebuilt at `HEAD~1` for exactly that check) and to be clean
+with the fix, which is what makes them real regression tests for the
+lifetime bug rather than only for the diagnostic wording.
+
+## Final state
+
+Build: existing `build-ubsan` (`LLVM_USE_SANITIZER=Undefined`,
+`LLVM_ENABLE_ASSERTIONS=ON`, `ccache` as the C/C++ compiler launcher);
+`ninja check-feme`, which builds every test dependency before running the
+suite. 851 discovered, 825 passed, 26 unsupported (platform-gated), 0
+failed. `SIMDizeTest.*` and the two lit tests were additionally re-run
+under valgrind with no errors. Commit breakdown for this entry:
+
+1. `[feme][cpu] Fix use-after-free of the pre-widening function in
+   SIMDizePass`.
+2. `[feme][cpu] Test SIMDizePass's unsupported-divergent-call diagnostic`.
+3. This file.
