@@ -9878,3 +9878,121 @@ every wave size.
 4. `[feme][test] Run wave-size-independent HLSL execution tests across W=4,8,16,32`
 5. `[feme][docs] Update Roadmap.md and FeMeCPUDesign.md for roadmap step R1`
 6. This file.
+
+# Fixing check-feme: differential-harness.test failing on libc++ builds
+
+## Symptom
+
+The user reported `check-feme` failing with `FEME :: Tools/feme-run/
+differential-harness.test` on a macOS build (`build-rel`, an
+`/Applications/Xcode.app/.../python3.9` interpreter in the log -- clearly a
+libc++ toolchain, not the libstdc++ one this sandbox's Linux build uses).
+The failure was 20 `feme-run-differential` failures, all either
+`feme-cpu-linearize` diagnosing "loop ... has an internal branch" (a shape
+outside `feme::cpu::LinearizePass`'s documented milestone 6 scope -- see its
+own deviation note) or a mismatch, for the five seeds
+(9, 322, 365, 429, 673) the previous commit (`2a0de39559bc`, "Grow the
+differential harness to divergent/loop shapes") says it curated specifically
+to avoid that outcome.
+
+Reproducing locally (Linux, libstdc++, same commit) with the exact
+`feme-run-differential.py` invocation from the log: all three group-count
+blocks pass, exit 0. `ninja check-feme` on this checkout: 840/849 pass,
+including this test. So the test is not failing here -- only, per the log,
+on the reporter's libc++ build. That is the whole bug: something about the
+generated shader for a given `--seed` differs between the two builds.
+
+## Root cause: `std::uniform_real_distribution`/`std::uniform_int_distribution`
+are not portable across standard libraries
+
+`CFGGen.cpp`'s `chance`/`randInt` fed a `std::mt19937_64` (itself a
+standard-mandated, portable algorithm -- same seed, same engine output on
+every conforming implementation) directly into
+`std::uniform_real_distribution<double>`/`std::uniform_int_distribution
+<unsigned>`. The standard deliberately leaves a distribution's *own*
+algorithm unspecified (only requires it to use the engine "correctly" in a
+statistical sense) -- libc++ and libstdc++ are well known to disagree here
+(different rejection-sampling/scaling schemes), so the same seeded engine
+produces different `double`s/`unsigned`s, and therefore a different
+generated shader, on the two libraries. `CFGGen.h` already documented
+"the same seed always produces the same output" as a hard contract (the
+whole point of `--seed` for a differential/fuzzing harness); this broke it
+across platforms without ever breaking it on a single one, which is exactly
+why it passed every existing single-platform CI/local run while still being
+a real, live bug -- and why the five "curated" seeds from `2a0de39559bc`
+were only ever curated against whichever standard library that agent
+happened to build with, not against the algorithm itself.
+
+## Fix
+
+Replaced both `chance` and `randInt` with hand-rolled, engine-only
+implementations that only ever call `Rng()` (the `mt19937_64` itself,
+which *is* portable) and do the rest with plain, portable integer/double
+arithmetic:
+- `chance`: top 53 bits of one 64-bit draw, scaled by `2^-53`, compared
+  against `P` -- the same "enough mantissa bits, scaled into `[0, 1)`"
+  technique real-world distributions use internally, just pinned rather
+  than left to each library's own choice.
+- `randInt`: ordinary rejection sampling (draw, reject the values that
+  would make the reduction mod `Range` biased, retry) -- no bias, no
+  library-specific behavior, and no need for a 128-bit type since these
+  ranges are all tiny.
+
+This makes `generateCFGIR`'s "same seed, same output" promise from
+CFGGen.h actually hold across standard libraries, not just within one.
+
+## Re-curating the seeds
+
+Changing the algorithm (necessarily) changes what every existing seed
+generates, so the five `--divergent`/`--loops` seeds from `2a0de39559bc`
+needed replacing regardless of platform. Brute-forced seeds 1..20000
+against the exact three `--groups` values and `--max-depth=2
+--max-constructs=8` the test uses, keeping only ones where `feme-run`
+prints no diagnostic at any of `--wave-size=4,8,16,32` for all three group
+counts. That is deliberately the same bar `2a0de39559bc`'s own commit
+message set for the original five ("curated to run with zero pipeline
+diagnostics, not just a zero exit code"): a seed that only "passes" by
+having the diagnosed, incorrect codepath coincidentally not affect the
+specific thread/group IDs a given run touches is not actually a clean
+shape, and re-picking to avoid that class of shape (rather than special-
+casing the two `Flow`-block-internal-branch diagnostics away) keeps this
+test testing the same thing `2a0de39559bc` intended: widening, not
+linearization's still-open gaps. Replacement seeds: 325, 653, 1559, 2377,
+2454 -- verified clean (no diagnostics, no mismatch) at every wave size and
+group count this test exercises. The `--unstructured` block's seeds
+(1-15, `--reference` only) still terminate cleanly under the new algorithm,
+since that block was never testing anything sensitive to the exact bit
+pattern of a given `chance`/`randInt` draw (only that `--reference` doesn't
+hang or error), so it did not need re-curating.
+
+## Regression test
+
+Added `CFGGenTest.MatchesGoldenOutputForAFixedSeed`: a golden-output
+comparison for one small, fixed `Opts` (`Seed=1234`, one `if` construct,
+loops/unstructured disabled) that pins the exact IR text `chance`/`randInt`
+must produce. This is the layer where a future accidental reintroduction of
+`std::uniform_real_distribution`/`std::uniform_int_distribution` (or any
+other change to the draw order/algorithm) should be caught -- as a same-
+platform gtest failure -- rather than only surfacing as a
+platform-dependent `differential-harness.test` failure on whichever
+standard library a given CI happens to use, the same class of gap that let
+this bug through in the first place.
+
+## Verification
+
+Rebuilt `feme-cfg-gen`, `feme-run`, and `FeMeTransformsCPUTests` (assertions
+on, `ccache` already configured for this tree). `CFGGenTest.*`: 5/5 pass
+(the new golden test included). Full `FeMeTransformsCPUTests`: 89/89 pass.
+`ninja check-feme`: 841/850 pass (9 unsupported, same pre-existing
+baseline as before this change). Manually re-ran
+`feme-run-differential.py` with the new seeds across all three `--groups`
+values at `--wave-sizes=4,8,16,32`, and the `--unstructured` block's 15
+seeds against `--reference`: all exit 0, matching what `ninja check-feme`
+also confirms end to end through `lit`.
+
+## Commit breakdown
+
+1. `[feme][cpu] Make feme-cfg-gen's chance/randInt portable across standard libraries`
+2. `[feme][test] Add a golden-output regression test for feme-cfg-gen's PRNG use`
+3. `[feme][test] Re-curate differential-harness.test's divergent/loop seeds`
+4. This file.
