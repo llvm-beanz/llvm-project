@@ -149,15 +149,29 @@ which is a diagnostic today and a wrong answer tomorrow if forgotten:
 | Narrowing | Milestone | Priority |
 |---|---|---|
 | Root constants unimplemented; a bound constant buffer is an unsupported resource kind | 3/11 | P1 |
-| Barrier inside a surviving branch or loop is diagnosed, not split | 9 | P1 |
-| No SSA value may be live across a group-sync barrier | 9 | P1 |
-| Divergent groupshared access is diagnosed (including a groupshared `atomicrmw`/`load`/`store` reached through a `getelementptr`, even one every index of which is constant -- only a *direct* global reference, with no intervening `getelementptr` at all, is canonicalized as of R2; see `feme/test/Transforms/CPU/simdize-groupshared-atomic-scalar.ll`'s comment) | 9 | P1 |
+| Barrier inside a surviving *branch* (not a loop; R5 closed the loop case) is diagnosed, not split | 9 | P1 |
+| Divergent groupshared access is diagnosed (including a groupshared `atomicrmw`/`load`/`store` reached through a `getelementptr`, even one every index of which is constant, and a *masked* store even at a uniform address -- found by R5's `reduction.hlsl` -- only a *direct*, unconditionally-executed global reference, with no intervening `getelementptr` at all, is canonicalized as of R2; see `feme/test/Transforms/CPU/simdize-groupshared-atomic-scalar.ll`'s comment) | 9 | P1 |
 | Vector/aggregate leaf decomposition unimplemented | 7 | P1 |
 | Masked memory always lowers to `gather`/`scatter` (no uniform/contiguous cases) | 7 | P2 (perf) |
 | `WaveReadLaneAt`'s lane operand assumed uniform | 8 | P1 |
 | `Device` vs `All` memory scope not distinguished | 9 | P2 |
 | Dispatch is sequential, not thread-pooled | 4 | P1 |
 | `feme-run`'s heap YAML has no `class`/`kind`/`stride`/`format` | 11 | P0 (see §2.4) |
+
+R5 closed this table's "no SSA value may be live across a group-sync
+barrier" row outright (`feme::cpu::spillValuesLiveAcrossBarriers`) and
+narrowed the "barrier inside a surviving branch or loop" row to just
+branches: `feme::cpu::matchLoopShape`/`buildWrapperForLoop` split a barrier
+inside a uniform, header-tested loop (the stride-halving reduction shape
+`reduction.hlsl` compiles to) by cloning the loop's header/latch directly
+into the wrapper as an ordinary scalar loop and running the barrier-split
+body regions through the usual per-wave wave loop once per iteration. It
+also found (while writing `reduction.hlsl`) that the groupshared-access
+narrowing was one case broader than recorded: not just a divergent
+*index*, but also a *masked* (conditionally-executed) store at a uniform
+address, since `feme::cpu::LinearizePass` lowers that into a call
+`feme::cpu::rewriteGroupSharedGlobals` does not recognize -- both remain
+open.
 
 R2 closed both of this table's former P0 rows: the scalarization fallback
 now masks a divergent `atomicrmw`'s per-lane execution (an unmasked lane in
@@ -258,10 +272,15 @@ being untested.
 Concretely, in rough value order, all under `test/Tools/feme-run/HLSL/`
 unless noted:
 
-- **`reduction.hlsl`** — a groupshared tree reduction with barriers inside a
-  loop. Directly exercises §1.6's "barrier inside a loop is diagnosed"
-  narrowing, and is the single most common real compute-shader shape not yet
-  covered.
+- **`reduction.hlsl`** (done by R5) — a barrier inside a loop, folding
+  per-lane contributions with `WaveActiveSum` and publishing the result
+  through groupshared. Directly exercises §1.6's "barrier inside a loop is
+  diagnosed" narrowing (now closed for this uniform-loop shape); an honest
+  groupshared *tree* reduction (indexing `groupshared` by
+  `SV_GroupThreadID`) remains blocked on §1.6's separate "Divergent
+  groupshared access is diagnosed" row, which R5 found is one case broader
+  than recorded (a *masked* store at a uniform address, not just a
+  divergent index).
 - **`prefix-sum.hlsl`** (done by R4) — `WavePrefixSum`/`WavePrefixCountBits`
   over a divergent mask; exercises §1.3's flag-selected `WavePrefixOp`
   family.
@@ -280,8 +299,9 @@ unless noted:
 - **`nested-divergence.hlsl`** — divergent loop containing a divergent
   diamond containing an early return. The linearizer's hardest supported
   shape, currently only reached through generated CFGs.
-- **`multi-group-barrier.hlsl`** — several groups, each with barriers and
-  groupshared state, asserting groups do not observe each other's memory.
+- **`multi-group-barrier.hlsl`** (done by R5) — several groups, each
+  publishing through two barrier-separated groupshared slots, asserting
+  groups do not observe each other's memory.
 - **`matrix-multiply.hlsl`** — tiled, groupshared-staged, loop-heavy; the
   closest thing to a real workload, and a natural first performance
   regression fixture for milestone 12/13.
@@ -355,7 +375,7 @@ dependency column is the only ordering constraint.
 | R2 | Mask the scalarization fallback's per-lane execution; add `histogram.hlsl`; make `feme-cpu-simdize` reject every shape `feme-cpu-linearize` left an unwidened divergent branch in, including one inside a loop (§1.6's new gap, found by R1) (done: the divergent-branch gap turned out to be `feme::cpu::runPipeline` not propagating a pass diagnostic, not `feme-cpu-simdize`'s own check -- see §1.6's table) | §1.6 P0, §2.3 | R1 (harness catches regressions) |
 | R3 | Multi-return-value raising mechanism (`IMul`/`UMul`/`UAddc`/`SplitDouble`/`WaveActiveBallot`) + `ballot.hlsl` (done: `feme::dxil::OpRaisingPass::raiseAggregateCall` raises all five; `feme::cpu::WaveCallKind::Ballot`/`lowerBallot` lower `WaveActiveBallot` on the CPU target) | §1.3 P0 | — |
 | R4 | Flag-selected opcode families (`WaveActiveOp`/`WaveActiveBit`/`WavePrefixOp`/`QuadOp`/`Barrier`) + `prefix-sum.hlsl` (done: `feme::dxil::OpRaisingPass` raises all four remaining families; `feme::cpu::WaveLoweringPass` lowers every one of them except `QuadOp`, which stays raised-only pending the quad/derivative lane mapping FeMeCPUDesign.md's "Non-Goals" defers) | §1.3 P0 | — |
-| R5 | Barriers inside branches/loops; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` | §1.6, §2.3 | R4 (`Barrier` raising) |
+| R5 | Barriers inside a uniform loop; values live across barriers; `reduction.hlsl`, `multi-group-barrier.hlsl` (done: `feme::cpu::matchLoopShape`/`buildWrapperForLoop` split a barrier inside a header-tested uniform loop by cloning its header/latch into the wrapper as an ordinary scalar loop; `feme::cpu::spillValuesLiveAcrossBarriers` spills any value live across a barrier into a per-wave context array; a barrier inside a *branch* remains diagnosed, and a divergent groupshared access -- including a masked store at a uniform address, found writing `reduction.hlsl` -- remains a separate, still-open narrowing, see §1.6) | §1.6, §2.3 | R4 (`Barrier` raising) |
 | R6 | DXBC importer fuzzer; `check-feme-fuzz` | §1.4 P0, §1.7 P0 | — |
 | R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end | §1.4 P0, §2.2.8 | — |
 | R8 | Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe | §2.4.3, §2.4.5, §2.2.4 | — |

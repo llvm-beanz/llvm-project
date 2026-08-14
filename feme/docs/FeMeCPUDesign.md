@@ -571,32 +571,49 @@ it's discussed, and summarized here:
 
 Deviation: milestone 9's implementation narrowed several things described in
 "Phase 6: Group Execution and Barriers" below; each is called out inline
-where it's discussed, and summarized here:
+where it's discussed, and summarized here (roadmap step R5,
+feme/docs/Roadmap.md, closed the first two):
 
-- **Region splitting only supports a straight-line wave body.** A
-  `..._with_group_sync` barrier inside any surviving branch or loop is
-  diagnosed (`feme::cpu::isLinearChain`) rather than split; the design's
-  own worked example of a barrier inside a *uniform loop* (keeping the
-  iteration outside the region/wave loops) is not yet implemented. Every
-  branch a divergent-control-flow barrier could have introduced is already
-  gone by this point (`feme::cpu::LinearizePass`), so this narrowing only
-  bites a barrier that survives inside genuinely uniform (e.g.
-  group-id-derived) control flow.
-- **No SSA value may be live across a `..._with_group_sync` barrier.** The
-  design calls for spilling such a value to a per-wave "context"
-  allocation indexed by the wave loop's `w`; this milestone diagnoses the
-  shape instead (`splitAtGroupSyncBarriers`'s liveness check) rather than
-  building that allocation. Groupshared memory is unaffected -- it already
-  carries state across a barrier correctly, since it lives in the one
-  buffer every wave of the group shares regardless of which region touches
-  it.
-- **Only a uniform groupshared access is canonicalized.** A divergent
-  (per-lane-varying) index into a `groupshared` array -- the common
-  `groupshared[threadIdInGroup]` pattern -- scalarizes into one
-  `getelementptr` clone per lane before `feme::cpu::rewriteGroupSharedGlobals`
-  ever sees it; this milestone diagnoses that shape rather than rewiring a
-  vector-of-pointers access into `llvm.masked.gather`/`.scatter` over the
-  flat buffer.
+- **Region splitting supports a straight-line wave body or a single
+  uniform loop.** A `..._with_group_sync` barrier inside the design's own
+  worked example -- a uniform loop, keeping the iteration outside the
+  region/wave loops -- is recognized by `feme::cpu::matchLoopShape` and
+  split by `feme::cpu::buildWrapperForLoop`: the loop's header/latch (a
+  pure, side-effect-free scalar recurrence -- e.g. a stride-halving
+  reduction's own induction variable) are cloned directly into the wrapper
+  as an ordinary scalar loop, run once per iteration rather than once per
+  wave. A barrier inside a *branch* (as opposed to a loop) is still
+  diagnosed (`feme::cpu::isLinearChain`/`matchLoopShape` both decline it)
+  rather than split -- every branch a divergent-control-flow barrier could
+  have introduced is already gone by this point
+  (`feme::cpu::LinearizePass`), so this narrowing only bites a barrier
+  that survives inside genuinely uniform (e.g. group-id-derived) branchy
+  control flow, not a loop.
+- **Values live across a `..._with_group_sync` barrier are spilled.** Any
+  SSA value defined in one barrier-split region and used by a later one is
+  spilled into a per-wave context array
+  (`feme::cpu::spillValuesLiveAcrossBarriers`) -- `[WavesPerGroup x
+  SpillTy]`, allocated by the wrapper alongside groupshared memory and
+  indexed by the wave loop's `w` -- exactly the design's own "context"
+  allocation. A loop-carried value other than the loop's own (uniform)
+  induction variable -- one that would need spilling *across the loop's
+  own backedge*, not just across a barrier within one iteration -- remains
+  unsupported (`feme::cpu::LoopShape` requires every header phi's
+  recurrence to be a pure, uniform computation).
+- **Only a uniform, unconditionally-executed groupshared access is
+  canonicalized.** Two shapes still scalarize into one `getelementptr`
+  clone per lane before `feme::cpu::rewriteGroupSharedGlobals` ever sees
+  them, and are diagnosed rather than rewired: a divergent
+  (per-lane-varying) index -- the common `groupshared[threadIdInGroup]`
+  pattern -- into a vector-of-pointers access this milestone does not
+  rewrite into `llvm.masked.gather`/`.scatter` over the flat buffer; and a
+  *masked* store -- one only some lanes execute, e.g. `if (tid.x == 0)
+  Shared[0] = ...` -- even at a uniform address, since
+  `feme::cpu::LinearizePass` lowers that into a `feme.cpu.masked.store`
+  call `rewriteGroupSharedGlobals` does not recognize as a direct
+  load/store/atomicrmw user of the global's `getelementptr` (found writing
+  `reduction.hlsl`, which works around it by publishing every lane's
+  identical, already-group-uniform value unconditionally instead).
 - **`Device` and `All` memory scope are not distinguished.** Both get a
   `fence` visible across host threads (`SyncScope::System`); the design
   only requires the CPU target's memory model, not DXIL's/SPIR-V's finer
