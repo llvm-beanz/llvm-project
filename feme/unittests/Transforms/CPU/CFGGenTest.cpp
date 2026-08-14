@@ -115,4 +115,69 @@ TEST(CFGGenTest, DifferentSeedsProduceDifferentOutput) {
   EXPECT_NE(generateCFGIR(OptsA), generateCFGIR(OptsB));
 }
 
+// Pins a fixed seed's exact output (rather than merely its shape) so that a
+// future change accidentally reintroducing `std::uniform_real_distribution`/
+// `std::uniform_int_distribution` (see CFGGen.cpp's `chance`/`randInt` for
+// why those are hand-rolled instead: their own algorithm is unspecified by
+// the standard, so libc++ and libstdc++ draw different values from the same
+// seeded `std::mt19937_64`) is caught here rather than only by a
+// platform-dependent `feme-run-differential.py` failure.
+TEST(CFGGenTest, MatchesGoldenOutputForAFixedSeed) {
+  CFGGenOptions Opts;
+  Opts.Seed = 1234;
+  Opts.MaxDepth = 1;
+  Opts.MaxConstructs = 1;
+  Opts.AllowDivergent = true;
+  Opts.AllowLoops = false;
+  Opts.AllowUnstructured = false;
+
+  EXPECT_EQ(generateCFGIR(Opts),
+            "define void @main() #0 {\n"
+            "entry.0:\n"
+            "  %acc = alloca i32\n"
+            "  store i32 0, ptr %acc\n"
+            "  %tid = call i32 @llvm.dx.thread.id(i32 0)\n"
+            "  %gid = call i32 @llvm.dx.group.id(i32 0)\n"
+            "  %h = call target(\"dx.RawBuffer\", i8, 1, 0) "
+            "@llvm.dx.resource.handlefromheap(i32 0, i1 false)\n"
+            "  %t0 = load i32, ptr %acc\n"
+            "  %t1 = mul i32 %t0, 2654435761\n"
+            "  %t2 = add i32 %t1, 0\n"
+            "  store i32 %t2, ptr %acc\n"
+            "  %t3 = load i32, ptr %acc\n"
+            "  %t4 = mul i32 %t3, 2654435761\n"
+            "  %t5 = add i32 %t4, 1\n"
+            "  store i32 %t5, ptr %acc\n"
+            "  %t6 = and i32 %gid, 3\n"
+            "  %t7 = icmp eq i32 %t6, 3\n"
+            "  br i1 %t7, label %if.then.1, label %if.else.2\n"
+            "if.then.1:\n"
+            "  %t8 = load i32, ptr %acc\n"
+            "  %t9 = mul i32 %t8, 2654435761\n"
+            "  %t10 = add i32 %t9, 2\n"
+            "  store i32 %t10, ptr %acc\n"
+            "  br label %if.end.3\n"
+            "if.else.2:\n"
+            "  %t11 = load i32, ptr %acc\n"
+            "  %t12 = mul i32 %t11, 2654435761\n"
+            "  %t13 = add i32 %t12, 3\n"
+            "  store i32 %t13, ptr %acc\n"
+            "  br label %if.end.3\n"
+            "if.end.3:\n"
+            "  %t14 = load i32, ptr %acc\n"
+            "  %t15 = mul i32 %tid, 4\n"
+            "  call void @llvm.dx.resource.store.rawbuffer.i32(target(\"dx."
+            "RawBuffer\", i8, 1, 0) %h, i32 %t15, i32 poison, i32 %t14)\n"
+            "  ret void\n"
+            "}\n"
+            "declare i32 @llvm.dx.thread.id(i32)\n"
+            "declare i32 @llvm.dx.group.id(i32)\n"
+            "declare target(\"dx.RawBuffer\", i8, 1, 0) "
+            "@llvm.dx.resource.handlefromheap(i32, i1)\n"
+            "declare void @llvm.dx.resource.store.rawbuffer.i32(\n"
+            "    target(\"dx.RawBuffer\", i8, 1, 0), i32, i32, i32)\n"
+            "attributes #0 = { \"hlsl.shader\"=\"compute\" "
+            "\"hlsl.numthreads\"=\"4,1,1\" }\n");
+}
+
 } // namespace
