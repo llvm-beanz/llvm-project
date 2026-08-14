@@ -423,6 +423,7 @@ private:
   void widenMaskedAtomicRMW(CallInst &CI, const MatchedMaskedAtomicRMW &Matched,
                             IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
+  void widenExtractElement(ExtractElementInst &EE, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
   bool widenInstruction(Instruction &I, IRBuilder<> &Builder);
@@ -455,18 +456,26 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
   // "Vectors become components, not nested vectors" in "Phase 4: Widening"
   // describes decomposing a divergent `<N x T>` (or aggregate) value into
   // `N` separate `<W x T>` components -- LLVM has no `<W x <N x T>>`. Full
-  // decomposition (arbitrary `extractelement`/`shufflevector`/`phi`/`select`
-  // of vector type, and aggregates of any kind) is not yet implemented; what
-  // *is* supported, narrower than the design, is the one shape a
-  // typed-buffer store actually produces (see `raiseTypedBufferStore` in
-  // OpRaising.cpp): a chain of constant-index `insertelement`s assembling a
-  // vector from scalar components, consumed only by another link of that
-  // same chain or by a matched resource-store call's stored-value operand
-  // (see `widenInsertElement`/`widenResourceCall` below). Verify every
-  // divergent vector value matches that shape up front and bail with a
+  // decomposition (a divergent `shufflevector`/`phi`/`select` of vector
+  // type, and aggregates of any kind) is not yet implemented; what *is*
+  // supported, narrower than the design, is:
+  //
+  //  - a chain of constant-index `insertelement`s assembling a vector from
+  //    scalar components, the shape `raiseTypedBufferStore` in
+  //    OpRaising.cpp produces (see `widenInsertElement`), and
+  //  - a vector-typed `feme.cpu.resource.*` load call (e.g. a typed-buffer
+  //    load's `<N x T>` element), decomposed into `N` widened components
+  //    directly as it is scalarized (see `widenResourceCall`'s per-lane
+  //    loop), rather than one nested-vector `Widened` entry,
+  //
+  // each consumed only by another link of an insertelement chain, a
+  // matched resource-store call's stored-value operand, or a constant-index
+  // `extractelement` (see `widenExtractElement`). Verify every divergent
+  // vector value matches one of those two producer shapes, and every use of
+  // one matches one of the three consumer shapes, up front and bail with a
   // diagnostic, matching every other precondition this pass checks before
-  // mutating anything, rather than let a later step build an invalid nested
-  // vector type and assert.
+  // mutating anything, rather than let a later step build an invalid
+  // nested vector type and assert.
   for (Instruction &I : instructions(*OldF)) {
     if (!UI.isDivergentAtDef(&I))
       continue;
@@ -478,33 +487,67 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
                     "supported (roadmap milestone 7 deviation)");
       return false;
     }
+
+    // A constant-index `extractelement` is a supported *consumer* of a
+    // decomposed vector (validated from the producer's side below, since
+    // every divergent vector-typed value in this function is visited by
+    // this same loop); its own result is scalar, so it does not fall
+    // through to the vector-producer checks below. A non-constant index
+    // would need a genuinely per-lane-varying gather this milestone does
+    // not support.
+    if (auto *EE = dyn_cast<ExtractElementInst>(&I)) {
+      if (!isa<ConstantInt>(EE->getIndexOperand())) {
+        Ctx.emitError(
+            "feme-cpu-simdize: function '" + OldF->getName() +
+            "' has a divergent value '" + I.getName() +
+            "' from a non-constant-index extractelement; component "
+            "decomposition is not yet supported for this use (roadmap "
+            "milestone 7 deviation)");
+        return false;
+      }
+      continue;
+    }
+
     if (!I.getType()->isVectorTy())
       continue;
 
     auto *IE = dyn_cast<InsertElementInst>(&I);
-    if (!IE || !isa<ConstantInt>(IE->getOperand(2))) {
+    bool IsInsertChain = IE && isa<ConstantInt>(IE->getOperand(2));
+
+    bool IsVectorLoad = false;
+    if (auto *CI = dyn_cast<CallInst>(&I)) {
+      std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
+      IsVectorLoad = Matched && !Matched->StoredValue;
+    }
+
+    if (!IsInsertChain && !IsVectorLoad) {
       Ctx.emitError(
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent value '" + I.getName() +
-          "' of vector type; only a constant-index insertelement chain is "
-          "supported (roadmap milestone 7 deviation)");
+          "' of vector type; only a constant-index insertelement chain or "
+          "a resource load is supported (roadmap milestone 7 deviation)");
       return false;
     }
-    for (User *U : IE->users()) {
+
+    for (User *U : I.users()) {
       if (auto *UserIE = dyn_cast<InsertElementInst>(U))
-        if (UserIE->getOperand(0) == IE)
+        if (UserIE->getOperand(0) == &I)
           continue;
       if (auto *UserCI = dyn_cast<CallInst>(U)) {
         std::optional<MatchedResourceCall> Matched = matchResourceCall(*UserCI);
-        if (Matched && Matched->StoredValue == IE)
+        if (Matched && Matched->StoredValue == &I)
           continue;
       }
+      if (auto *UserEE = dyn_cast<ExtractElementInst>(U))
+        if (UserEE->getVectorOperand() == &I &&
+            isa<ConstantInt>(UserEE->getIndexOperand()))
+          continue;
       Ctx.emitError(
           "feme-cpu-simdize: function '" + OldF->getName() +
-          "' has a divergent vector value '" + IE->getName() +
-          "' used outside a supported insertelement-chain/resource-store "
-          "pattern; component decomposition is not yet supported for this "
-          "use (roadmap milestone 7 deviation)");
+          "' has a divergent vector value '" + I.getName() +
+          "' used outside a supported insertelement-chain/resource-store/"
+          "extractelement pattern; component decomposition is not yet "
+          "supported for this use (roadmap milestone 7 deviation)");
       return false;
     }
   }
@@ -752,8 +795,23 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   }
 
   Value *Result = nullptr;
-  if (!Matched.StoredValue)
-    Result = PoisonValue::get(FixedVectorType::get(CI.getType(), WaveSize));
+  SmallVector<Value *, 4> LoadComponents;
+  bool ResultIsVector = !Matched.StoredValue && CI.getType()->isVectorTy();
+  if (!Matched.StoredValue) {
+    if (ResultIsVector) {
+      // "Vectors become components, not nested vectors": a vector-typed
+      // load (e.g. a typed-buffer element) is decomposed into one `<W x
+      // elemT>` per component as it is scalarized below, rather than one
+      // illegal `<W x <N x elemT>>` (see `checkVectorDecompositionSupported`'s
+      // file comment and `widenExtractElement`, which reads these back).
+      auto *VecTy = cast<FixedVectorType>(CI.getType());
+      LoadComponents.assign(VecTy->getNumElements(),
+                            PoisonValue::get(FixedVectorType::get(
+                                VecTy->getElementType(), WaveSize)));
+    } else {
+      Result = PoisonValue::get(FixedVectorType::get(CI.getType(), WaveSize));
+    }
+  }
 
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *LaneMask = Builder.CreateExtractElement(
@@ -795,12 +853,23 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
     CallArgs.push_back(LaneMask);
 
     Value *LaneResult = Builder.CreateCall(Callee, CallArgs);
-    if (Result)
+    if (ResultIsVector) {
+      for (unsigned Component = 0, NumComponents = LoadComponents.size();
+           Component != NumComponents; ++Component) {
+        Value *LaneScalar = Builder.CreateExtractElement(
+            LaneResult, Builder.getInt32(Component), "lane.result.elt");
+        LoadComponents[Component] = Builder.CreateInsertElement(
+            LoadComponents[Component], LaneScalar, Builder.getInt32(Lane));
+      }
+    } else if (Result) {
       Result = Builder.CreateInsertElement(Result, LaneResult,
                                            Builder.getInt32(Lane));
+    }
   }
 
-  if (Result)
+  if (ResultIsVector)
+    WidenedVectorComponents[&CI] = std::move(LoadComponents);
+  else if (Result)
     Widened[&CI] = Result;
   ToErase.push_back(&CI);
 }
@@ -1000,6 +1069,24 @@ void FunctionWidener::widenInsertElement(InsertElementInst &IE,
   ToErase.push_back(&IE);
 }
 
+void FunctionWidener::widenExtractElement(ExtractElementInst &EE,
+                                          IRBuilder<> &Builder) {
+  // The dual of `widenInsertElement`: reads one already-decomposed `<W x
+  // elemT>` component straight out of `WidenedVectorComponents` rather than
+  // extracting a per-lane scalar out of a single widened vector (there is
+  // none -- see `checkVectorDecompositionSupported`'s file comment for why
+  // a divergent vector is never given one). `checkVectorDecompositionSupported`
+  // already verified the vector operand is one of the two decomposed
+  // producer shapes and the index is constant, so the lookup below cannot
+  // fail.
+  auto It = WidenedVectorComponents.find(EE.getVectorOperand());
+  assert(It != WidenedVectorComponents.end() &&
+         "extractelement's vector operand should already be decomposed");
+  uint64_t Index = cast<ConstantInt>(EE.getIndexOperand())->getZExtValue();
+  Widened[&EE] = It->second[Index];
+  ToErase.push_back(&EE);
+}
+
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
   if (auto *CI = dyn_cast<CallInst>(&I)) {
     // A divergent call to a "trivially vectorizable" LLVM intrinsic (see
@@ -1145,6 +1232,11 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 
   if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
     widenInsertElement(*IE, Builder);
+    return true;
+  }
+
+  if (auto *EE = dyn_cast<ExtractElementInst>(&I)) {
+    widenExtractElement(*EE, Builder);
     return true;
   }
 

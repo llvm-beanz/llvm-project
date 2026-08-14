@@ -380,4 +380,70 @@ TEST(SIMDizeTest, DecomposesInsertElementChainIntoResourceStore) {
   EXPECT_EQ(StoreCallCount, 4u);
 }
 
+TEST(SIMDizeTest, DecomposesResourceLoadIntoExtractElement) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %resource_heap, i32 %resource_heap_count) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %off = zext i32 %tid to i64
+      %v = call <4 x float> @feme.cpu.resource.load.typed.v4f32(
+          ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %off, i1 true)
+      %e0 = extractelement <4 x float> %v, i32 0
+      %e2 = extractelement <4 x float> %v, i32 2
+      %sum = fadd float %e0, %e2
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare <4 x float> @feme.cpu.resource.load.typed.v4f32(ptr, i32, i32, i64, i1)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  // A vector-typed load never builds an illegal `<4 x <4 x float>>` either
+  // (the dual of `DecomposesInsertElementChainIntoResourceStore` above),
+  // and the original `fadd` widens directly over the two decomposed,
+  // per-lane `<4 x float>` components `extractelement` reads back.
+  bool FoundWideAdd = false;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *BO = dyn_cast<BinaryOperator>(&I))
+      if (BO->getOpcode() == Instruction::FAdd &&
+          BO->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        FoundWideAdd = true;
+  }
+  EXPECT_TRUE(FoundWideAdd);
+}
+
+TEST(SIMDizeTest, DiagnosesNonConstantIndexExtractElement) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %v = insertelement <4 x float> poison, float %tidf, i32 0
+      %e = extractelement <4 x float> %v, i32 %tid
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  LLVMContext &MCtx = M->getContext();
+  MCtx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        *static_cast<bool *>(Ctx) = DI->getSeverity() == DS_Error;
+      },
+      &SawError);
+  runPass(*M);
+  EXPECT_TRUE(SawError);
+}
+
 } // namespace
