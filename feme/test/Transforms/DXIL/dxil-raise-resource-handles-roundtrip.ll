@@ -11,15 +11,16 @@
 ; unstructured `RawBuffer`) the exact original handle type, or (for
 ; `StructuredBuffer`/`CBuffer`) a same-size/alignment opaque placeholder
 ; handle type -- see `raiseResourceHandleFromBinding`'s comment for why. A
-; typed buffer load (`dx.op.bufferLoad`) and a single-component raw buffer
-; load (`dx.op.rawBufferLoad`) both round-trip completely, leaving no
-; `llvm.dx.resource.casthandle` bridge behind (see `raiseRawBufferLoad`'s own
-; comment in OpRaising.cpp for what's covered). The structured buffer/cbuffer
-; *load* calls (`dx.op.rawBufferLoad` on a struct-typed element,
-; `dx.op.cbufferLoadLegacy`) are left as-is -- raising an aggregate-typed
-; load isn't implemented yet, see the DXIL section of feme/docs/Design.md --
-; so for those this only checks the handle sequence, not a full round-trip of
-; the whole function. A `<4 x float>` typed buffer store also round-trips
+; typed buffer load (`dx.op.bufferLoad`), a single-component raw buffer
+; load (`dx.op.rawBufferLoad`), and a `cbufferLoadLegacy` load (roadmap
+; step R12; see `raiseCBufferLoadLegacy`) all round-trip completely,
+; leaving no `llvm.dx.resource.casthandle` bridge behind (see
+; `raiseRawBufferLoad`'s own comment in OpRaising.cpp for what's covered).
+; A structured-buffer *load* on a struct-typed element (`dx.op.rawBufferLoad`)
+; is left as-is -- raising an aggregate-typed load of an arbitrary struct
+; isn't implemented yet, see the DXIL section of feme/docs/Design.md -- so
+; for that one this only checks the handle sequence, not a full round-trip
+; of the whole function. A `<4 x float>` typed buffer store also round-trips
 ; completely, confirming the element type's vector width -- reconstructed
 ; from ResourceProperties' Word1 component-count field, not just its
 ; component type -- matches what the write mask expects.
@@ -82,11 +83,13 @@ define void @structured_buffer_srv(i32 %idx) {
 
 ; A `cbuffer` bound at register b2: its `ResourceProperties` encoding never
 ; carries alignment bits, so its opaque placeholder element type is always a
-; plain byte array (`getOpaqueSizedType`).
+; plain byte array (`getOpaqueSizedType`). Its `cbufferLoadLegacy` load
+; round-trips completely (roadmap step R12), leaving no
+; `llvm.dx.resource.casthandle` bridge behind.
 ; CHECK-LABEL: define void @cbuffer_case(
 define void @cbuffer_case(i32 %idx) {
   ; CHECK: [[HANDLE:%.*]] = call target("dx.CBuffer", [32 x i8]) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 2, i32 1, i32 0, ptr null)
-  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.CBuffer", [32 x i8]) [[HANDLE]])
+  ; CHECK: call { i32, i32, i32, i32 } @llvm.dx.resource.load.cbufferrow.4{{.*}}(target("dx.CBuffer", [32 x i8]) [[HANDLE]], i32 %idx)
   %h = call target("dx.CBuffer", %struct.S)
       @llvm.dx.resource.handlefrombinding.tdx.CBuffer_s_struct.Ss_t(i32 0, i32 2, i32 1, i32 0, ptr @ResName4)
   %v = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32.tdx.CBuffer_s_struct.Ss_t(target("dx.CBuffer", %struct.S) %h, i32 %idx)

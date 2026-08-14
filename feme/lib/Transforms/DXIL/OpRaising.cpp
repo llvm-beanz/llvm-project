@@ -1164,6 +1164,64 @@ bool raiseTypedBufferLoad(CallInst &CI) {
   return true;
 }
 
+/// Raises a `dx.op.cbufferLoadLegacy` (opcode 59) call on an already-raised
+/// constant-buffer handle into `llvm.dx.resource.load.cbufferrow.4`, the
+/// standard 32-bit-per-component row shape (`%dx.types.CBufRet.i32`/`.f32`,
+/// a fixed 4-field aggregate covering DXIL's 128-bit cbuffer row -- see
+/// `CBufferLoadLegacy`'s `overloads` list in DXIL.td). The other three
+/// overloads this op has (`.f16`/`.f64`/`.i16`, an 8- or 2-field aggregate
+/// of a different component width) are not yet raised: nothing downstream
+/// (`feme::cpu::RootConstantLoweringPass`) consumes them yet either, so
+/// there is nothing to raise them *into*.
+bool raiseCBufferLoadLegacy(CallInst &CI) {
+  if (CI.arg_size() != 3)
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<TargetExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy || HandleTy->getName() != "dx.CBuffer")
+    return false;
+
+  auto *RetTy = dyn_cast<StructType>(CI.getType());
+  if (!RetTy || RetTy->getNumElements() != 4)
+    return false;
+  Type *ElemTy = RetTy->getElementType(0);
+  if (!ElemTy->isIntegerTy(32) && !ElemTy->isFloatTy())
+    return false;
+  for (Type *Field : RetTy->elements())
+    if (Field != ElemTy)
+      return false; // Every field must share the same 32-bit type.
+
+  // `CI`'s result type (DXIL's named `%dx.types.CBufRet.*`) and the
+  // intrinsic's (a literal struct) are layout- but never `llvm::Type`-
+  // identical (see `raiseAggregateCall`'s comment for the same point about
+  // `WaveActiveBallot` et al.), so each `extractvalue` of `CI` is rewritten
+  // individually to read the new call instead of RAUWing the aggregate
+  // value itself.
+  SmallVector<ExtractValueInst *, 4> Extracts;
+  for (User *U : CI.users()) {
+    auto *EV = dyn_cast<ExtractValueInst>(U);
+    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] >= 4)
+      return false;
+    Extracts.push_back(EV);
+  }
+
+  IRBuilder<> Builder(&CI);
+  Function *LoadFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_load_cbufferrow_4,
+      {ElemTy, ElemTy, ElemTy, ElemTy, HandleTy});
+  Value *Loaded = Builder.CreateCall(LoadFn, {Handle, CI.getArgOperand(2)});
+
+  for (ExtractValueInst *EV : Extracts) {
+    Builder.SetInsertPoint(EV);
+    Value *Field = Builder.CreateExtractValue(Loaded, EV->getIndices()[0]);
+    EV->replaceAllUsesWith(Field);
+    EV->eraseFromParent();
+  }
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Raises a `dx.op.rawBufferStore` (opcode 140) call on an already-raised
 /// raw/structured buffer handle into `llvm.dx.resource.store.rawbuffer`.
 /// `RawBufferStore`'s `Coord0`/`Coord1` operands carry whichever of "byte
@@ -1297,6 +1355,9 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(139, [](CallInst &CI) { // RawBufferLoad
     return raiseRawBufferLoad(CI);
+  });
+  Changed |= forEachDXOpCall(59, [](CallInst &CI) { // CBufferLoadLegacy
+    return raiseCBufferLoadLegacy(CI);
   });
 
   for (Function &F : llvm::make_early_inc_range(M.functions())) {
