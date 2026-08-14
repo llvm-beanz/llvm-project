@@ -8,6 +8,7 @@
 
 #include "feme/Driver/Driver.h"
 
+#include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
 #include "feme/Import/DXBC/DXBCImporter.h"
 #include "feme/Import/DXIL/DXILImporter.h"
@@ -320,8 +321,9 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
       if (F.hasFnAttribute("hlsl.shader"))
         F.addFnAttr("feme.cpu.wavesize", std::to_string(ResolvedWaveSize));
   } else if (Opts.WaveSize) {
-    llvm::errs() << "feme: warning: --wave-size is ignored for target '"
-                 << *TargetTriple << "' (not the FeMe CPU target)\n";
+    Ctx.diagnose(Diagnostic{DiagnosticSeverity::Warning,
+                            "--wave-size is ignored for target '" +
+                                *TargetTriple + "' (not the FeMe CPU target)"});
   }
 
   // Raised IR still uses `llvm.dx.*` intrinsics for the HLSL-specific

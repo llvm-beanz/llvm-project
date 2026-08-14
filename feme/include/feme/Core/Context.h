@@ -16,6 +16,8 @@
 #ifndef FEME_CORE_CONTEXT_H
 #define FEME_CORE_CONTEXT_H
 
+#include "feme/Core/Diagnostic.h"
+
 #include <memory>
 
 namespace llvm {
@@ -75,6 +77,20 @@ public:
   /// produced while using this Context are owned by this MLIRContext.
   mlir::MLIRContext &getMLIRContext();
 
+  /// Installs the callback that diagnose() below delivers Diagnostics to.
+  /// No handler is installed by default (see DiagnosticHandlerTy's
+  /// comment); a caller that wants diagnostics printed (e.g. the `feme`
+  /// CLI tool) must install one itself.
+  void setDiagnosticHandler(DiagnosticHandlerTy Handler);
+
+  /// Delivers \p D to the handler installed by setDiagnosticHandler(), if
+  /// any; otherwise silently drops it. Library code uses this for
+  /// warnings/notes that don't abort the operation producing them (see
+  /// "Diagnostics and Error Handling" in feme/docs/Design.md) -- a
+  /// fallible operation still reports failure via llvm::Expected/Error,
+  /// never through this path.
+  void diagnose(Diagnostic D) const;
+
 private:
   std::unique_ptr<llvm::LLVMContext> LLVMCtx;
   // Null when wrapping an externally-owned MLIRContext (see the wrapping
@@ -82,6 +98,7 @@ private:
   // either way.
   std::unique_ptr<mlir::MLIRContext> OwnedMLIRCtx;
   mlir::MLIRContext *MLIRCtx;
+  DiagnosticHandlerTy DiagHandler;
 };
 
 } // namespace feme

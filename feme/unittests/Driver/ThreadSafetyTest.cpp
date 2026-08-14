@@ -68,8 +68,8 @@ llvm::SmallVector<char, 0> buildTestBitcode() {
 
 TEST(ThreadSafetyTest, ConcurrentContextsImportAndRaiseIndependently) {
   llvm::SmallVector<char, 0> Bitcode = buildTestBitcode();
-  llvm::MemoryBufferRef Input(
-      llvm::StringRef(Bitcode.data(), Bitcode.size()), "thread-safety-test");
+  llvm::MemoryBufferRef Input(llvm::StringRef(Bitcode.data(), Bitcode.size()),
+                              "thread-safety-test");
 
   // One statically-shaped Importer instance, shared (read-only) across
   // every thread: per "Core Architectural Principle: No Global State",

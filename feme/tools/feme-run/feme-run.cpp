@@ -666,6 +666,15 @@ int main(int argc, char **argv) {
   }
 
   feme::Context Ctx;
+  // See feme.cpp's identical installation: Context itself installs no
+  // default handler, so any CLI tool that wants diagnostics printed must
+  // install one of its own.
+  Ctx.setDiagnosticHandler([](const feme::Diagnostic &D) {
+    errs() << "feme-run: "
+           << (D.Severity == feme::DiagnosticSeverity::Warning ? "warning"
+                                                               : "note")
+           << ": " << D.Message << "\n";
+  });
   Expected<feme::Module> Mod = loadModule(InputFilename, Ctx);
   if (!Mod) {
     errs() << "feme-run: " << toString(Mod.takeError()) << "\n";

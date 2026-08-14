@@ -37,3 +37,12 @@ Context &Context::operator=(Context &&) noexcept = default;
 llvm::LLVMContext &Context::getLLVMContext() { return *LLVMCtx; }
 
 mlir::MLIRContext &Context::getMLIRContext() { return *MLIRCtx; }
+
+void Context::setDiagnosticHandler(DiagnosticHandlerTy Handler) {
+  DiagHandler = std::move(Handler);
+}
+
+void Context::diagnose(Diagnostic D) const {
+  if (DiagHandler)
+    DiagHandler(D);
+}

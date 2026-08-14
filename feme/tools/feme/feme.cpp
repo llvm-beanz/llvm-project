@@ -18,6 +18,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "feme/Core/Context.h"
+#include "feme/Core/Diagnostic.h"
 #include "feme/Driver/Driver.h"
 #include "feme/Frontend/FrontendOptions.h"
 #include "feme/Frontend/Options.h"
@@ -88,6 +89,15 @@ int main(int argc, char **argv) {
   }
 
   feme::Context Ctx;
+  // No default handler is installed by Context itself (see
+  // DiagnosticHandlerTy's comment in feme/Core/Diagnostic.h); `feme`, as
+  // the CLI entry point, is where "print diagnostics to stderr" belongs.
+  Ctx.setDiagnosticHandler([](const feme::Diagnostic &D) {
+    llvm::errs() << "feme: "
+                 << (D.Severity == feme::DiagnosticSeverity::Warning ? "warning"
+                                                                     : "note")
+                 << ": " << D.Message << "\n";
+  });
   feme::Driver TheDriver(Ctx);
   llvm::Expected<feme::DriverResult> Result =
       TheDriver.run((*InputOrErr)->getMemBufferRef(), *Options);
