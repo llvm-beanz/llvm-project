@@ -51,6 +51,21 @@
 // here): every HLSL test using a traditional binding now goes through this
 // common path instead.
 //
+// Roadmap step R8 adds `--object` (see feme/docs/Roadmap.md's §2.4.5 "An
+// AOT lit recipe"): treats the input as a real, already-compiled object
+// file -- the output of `feme --target=<host-triple>` -- rather than IR to
+// JIT-compile, loading it with `orc::LLJIT::addObjectFile` and calling its
+// `feme_cpu_entry_<name>` symbol directly through `feme::cpu::runDispatch`,
+// the same dispatch loop `feme::cpu::JITEngine::dispatch` uses. This is
+// what lets AOT codegen (already covered by `feme --target=<host>` CLI
+// tests like feme-cpu-loop.ll, which only check the compiled object
+// exports the right symbol, and by `AOTDispatchTest.cpp` in `gtest`) be
+// covered by `lit` too: a real object file, executed, `FileCheck`ed the
+// same way the JIT path is. Unlike the JIT path, no `ResourceInfo`/IR
+// metadata survives compilation for this mode to read back, so a shader
+// using a traditional binding (heap YAML `bindings`) is rejected -- only
+// the logical dynamic heap (`resource-heap`) is supported.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Core/Context.h"
@@ -64,6 +79,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/Bitcode/BitcodeReader.h"
+#include "llvm/ExecutionEngine/Orc/LLJIT.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Intrinsics.h"
@@ -469,6 +485,52 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
   return feme::Module::fromLLVMIR(std::move(LLVMMod));
 }
 
+/// Runs `--object` mode (see the file comment above): loads \p Filename as
+/// a real compiled object file, resolves \p EntryPoint's (or "main"'s)
+/// `feme_cpu_entry_<name>` symbol in it, and dispatches \p GroupCount
+/// groups against it through `feme::cpu::runDispatch`, printing the
+/// resulting heap contents the same way the JIT path's `main` does.
+/// \p Heap's `bindings` must be empty: with no IR/metadata surviving
+/// compilation, this mode has no `ResourceInfo` to place a traditionally-
+/// bound resource's reserved prefix, so only `Heap.ResourceHeap`'s logical
+/// dynamic heap is usable (an empty `ResourceInfo` below means no prefix
+/// is reserved at all).
+Error runObjectMode(StringRef Filename, StringRef EntryPoint,
+                    const HeapFile &Heap, std::array<uint32_t, 3> GroupCount,
+                    const HeapStorage &Storage) {
+  if (!Heap.Bindings.empty())
+    return createStringError(
+        inconvertibleErrorCode(),
+        "'--object' does not support traditional bindings (heap YAML "
+        "'bindings'): no compiled-object metadata records their reserved "
+        "heap prefix; describe every resource under 'resource-heap' "
+        "instead");
+
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr =
+      MemoryBuffer::getFileOrSTDIN(Filename, /*IsText=*/false);
+  if (std::error_code EC = BufOrErr.getError())
+    return createStringError(EC, "could not open '%s': %s",
+                             Filename.str().c_str(), EC.message().c_str());
+
+  Expected<std::unique_ptr<orc::LLJIT>> JIT = orc::LLJITBuilder().create();
+  if (!JIT)
+    return JIT.takeError();
+  if (Error E = (*JIT)->addObjectFile(std::move(*BufOrErr)))
+    return E;
+
+  std::string SymbolName =
+      "feme_cpu_entry_" + (EntryPoint.empty() ? "main" : EntryPoint).str();
+  Expected<orc::ExecutorAddr> EntryAddr = (*JIT)->lookup(SymbolName);
+  if (!EntryAddr)
+    return EntryAddr.takeError();
+
+  DispatchResources Resources;
+  Resources.ResourceHeap = Storage.Descriptors;
+  runDispatch(EntryAddr->toPtr<EntryPointFn>(), ResourceInfo{}, Resources,
+              GroupCount);
+  return Error::success();
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -498,19 +560,20 @@ int main(int argc, char **argv) {
                "the CFG restructurization test suite diffs against (see "
                "the 'CFG restructurization test suite' section of "
                "feme/docs/FeMeCPUDesign.md). --wave-size is ignored."));
+  cl::opt<bool> ObjectMode(
+      "object",
+      cl::desc("Treat <input> as a real compiled object file (the output "
+               "of 'feme --target=<host-triple>') instead of IR/DXIL to "
+               "JIT-compile, and dispatch its already-compiled "
+               "feme_cpu_entry_<name> symbol directly (see feme-run's own "
+               "file comment). --wave-size/--reference are ignored; heap "
+               "YAML 'bindings' are rejected."));
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe CPU target JIT/dispatch runner\n");
 
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
-
-  feme::Context Ctx;
-  Expected<feme::Module> Mod = loadModule(InputFilename, Ctx);
-  if (!Mod) {
-    errs() << "feme-run: " << toString(Mod.takeError()) << "\n";
-    return 1;
-  }
 
   HeapFile Heap;
   if (!HeapFilename.empty()) {
@@ -532,6 +595,29 @@ int main(int argc, char **argv) {
       return 1;
     }
 
+  Expected<HeapStorage> Storage = buildHeapStorage(Heap);
+  if (!Storage) {
+    errs() << "feme-run: " << toString(Storage.takeError()) << "\n";
+    return 1;
+  }
+
+  if (ObjectMode) {
+    if (Error E = runObjectMode(InputFilename, EntryPoint, Heap, GroupCount,
+                                *Storage)) {
+      errs() << "feme-run: " << toString(std::move(E)) << "\n";
+      return 1;
+    }
+    printHeapContents(outs(), Heap, *Storage, /*BindingsStorage=*/{});
+    return 0;
+  }
+
+  feme::Context Ctx;
+  Expected<feme::Module> Mod = loadModule(InputFilename, Ctx);
+  if (!Mod) {
+    errs() << "feme-run: " << toString(Mod.takeError()) << "\n";
+    return 1;
+  }
+
   JITOptions Opts;
   Opts.WaveSize = WaveSize;
   Opts.EntryPoint = EntryPoint;
@@ -544,11 +630,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  Expected<HeapStorage> Storage = buildHeapStorage(Heap);
-  if (!Storage) {
-    errs() << "feme-run: " << toString(Storage.takeError()) << "\n";
-    return 1;
-  }
   Expected<std::vector<BindingStorage>> BindingsStorage =
       buildBindingStorage(Heap);
   if (!BindingsStorage) {
