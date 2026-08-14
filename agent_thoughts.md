@@ -12323,3 +12323,169 @@ what it flagged.
 4. `[feme] R11: add Exporter interface, DXILExporter and SPIRVExporter`.
 5. `[feme] R11: update Design.md/Roadmap.md for diagnostics/FormatRegistry/Exporter`.
 6. This file.
+
+# Roadmap step R12: root constants; `WaveReadLaneAt` with a varying lane; vector/aggregate decomposition
+
+R12 closed three of §1.6's narrowing-table rows in `feme/docs/Roadmap.md`.
+I tackled them in order of tractability: `WaveReadLaneAt`'s varying lane
+first (self-contained), then vector/aggregate decomposition (also
+self-contained), then root constants last, since it turned out to need a
+DXIL-raising prerequisite (`raiseCBufferLoadLegacy`) neither existing code
+nor the design doc's own text flagged as missing until I went looking for
+where a `cbuffer` load's canonical intrinsic form would even come from.
+
+## `WaveReadLaneAt` with a varying lane (commit 1)
+
+The existing `lowerReadLane` in WaveLowering.cpp extracted only lane 0 of
+the (already-widened, hence necessarily broadcast) lane-index operand and
+used it as every output lane's source index -- correct only because HLSL
+requires the index to be dynamically uniform, a requirement nothing
+downstream enforced. I rewrote it as a real per-lane gather (an unrolled
+lane loop, the same style `lowerPrefixBitCount`/`lowerPrefixReduce`
+already use): output lane `L` reads source lane `I[L]`'s value, guarded by
+that source lane's activity.
+
+The subtler part was `feme::cpu::WaveTTIImpl::getValueUniformity`'s
+classification. My first attempt removed `dx_wave_readlane` from the
+`AlwaysUniform` list entirely, falling back to the generic
+operand-divergence rule. That's *sound* (never wrong, only sometimes
+conservative) but it broke `combined.hlsl`: `WaveReadLaneAt(sum, 0)` reads
+a divergent per-lane accumulation (`sum`) at a uniform lane (`0`), and its
+result really is uniform (every lane reads the same source lane's data),
+but the generic rule doesn't know that -- it just sees one divergent
+operand and calls the whole thing divergent. That's not unsound, but it
+exposed a real, pre-existing, unrelated bug in
+`FunctionWidener::widenScalarizedFallback` (confirmed by reproducing it
+with a plain groupshared write and *no* cbuffer at all) that I did not
+fix, since it's out of this task's scope -- I just needed to not trip it.
+
+The fix: keep DXIL's `dx_wave_readlane` classified `AlwaysUniform`
+(HLSL's language rule genuinely guarantees this), but leave SPIR-V's
+`spv_wave_readlane` (which backs `OpGroupNonUniformShuffle`, permitting a
+genuinely varying index) at the generic rule. `FunctionWidener::
+widenWaveCall`'s `ReadLane` case decides per-call whether to keep the
+result wide (`Widened` map) or narrow it back to a scalar (extract lane 0)
+based on that call's actual `UniformityInfo` result, not a static
+per-`Kind` table entry -- `createWaveCall` always builds the wide `<W x
+T>` shape the lowering needs regardless, so narrowing back is just one
+`extractelement`.
+
+## Vector/aggregate decomposition (commit 2)
+
+`checkVectorDecompositionSupported`/`FunctionWidener` already had exactly
+one producer shape (a constant-index `insertelement` chain) and two
+consumer shapes (chain continuation, resource-store operand) implemented.
+I added the natural next pair: a vector-typed resource *load* as a second
+producer (decomposed into `N` widened components as `widenResourceCall`
+scalarizes it, instead of attempting an illegal `<W x <N x T>>`), and a
+constant-index `extractelement` as a third consumer (`widenExtractElement`,
+the dual of `widenInsertElement`: it reads an already-decomposed component
+back out of `WidenedVectorComponents` instead of extracting from a vector
+that was never built).
+
+One existing test (`simdize-vector-unsupported.ll`) turned out to already
+exercise exactly the shape I was adding support for (a constant-index
+`extractelement`) as its "still rejected" example -- once my change
+landed, it silently started *passing* instead of testing the rejection it
+claimed to. I moved that test's positive case to a new
+`simdize-vector-extractelement.ll` and gave `simdize-vector-unsupported.ll`
+a genuinely-still-rejected scenario (a non-constant-index `extractelement`)
+instead of leaving a rejection test that no longer rejected anything.
+
+## Root constants (commits 3-4)
+
+This was the most involved of the three. The design doc's "Root
+constants" section was already fully written, `ResourceInfo`/`JITEngine`/
+`feme-run`'s heap YAML already fully plumb a `RootConstantSize` field and
+raw root-constant bytes end to end -- so I expected this to be mostly
+wiring. It wasn't, for two reasons I found by trying to actually run a
+shader through it rather than stopping at "the pass builds valid IR":
+
+1. **`dx.op.cbufferLoadLegacy` was never raised at all.** Design.md's DXIL
+   section already said so ("raising an aggregate-typed load isn't
+   implemented yet"), but I didn't appreciate what that meant for this
+   task until a real HLSL `cbuffer` shader hit `checkSupportedRaisedOps`'s
+   "was not raised to idiomatic LLVM IR" error, not the register-bound
+   -handle rejection I was expecting to fix. `raiseCBufferLoadLegacy`
+   mirrors `raiseAggregateCall`'s existing per-`extractvalue` rewriting
+   (the DXIL and intrinsic result struct types are layout- but never
+   `llvm::Type`-identical, so a straight `replaceAllUsesWith` on the
+   aggregate is wrong -- I made exactly this mistake once and the comment
+   on `raiseAggregateCall` is what caught it for me on review).
+
+2. **A function using both a root constant and a bindless resource nearly
+   shipped broken.** My first design had `RootConstantLoweringPass` always
+   add its own `root_constants`/`root_constant_size` parameters. For a
+   shader using *only* a root constant this is fine; for one that also
+   uses `ResourceDescriptorHeap` (which `ResourceLoweringPass` handles,
+   and which unconditionally appends a same-named parameter pair whether
+   or not the shader actually reads a root constant), it produced a
+   function with **two** parameters legitimately named `root_constants`.
+   LLVM's textual IR silently disambiguates this (`%root_constants` /
+   `%root_constants1`), which is exactly the problem:
+   `EntryWrapperPass`'s existing by-name argument-wiring loop matches on
+   the literal string `"root_constants"` and hit its own
+   `llvm_unreachable("unexpected wave-body parameter")` on the renamed
+   duplicate. I found this by actually compiling and running an HLSL
+   shader combining both (`Out[tid.x] = Value.x + tid.x` with `Out` a
+   `RWStructuredBuffer`), not by reasoning about the IR shape in the
+   abstract -- the crash only shows up once you get past IR verification,
+   in a downstream generic optimizer pass that happened to visit a `phi`
+   fed by the wrong parameter.
+
+   The fix: `matchRootConstantAccess`/`lowerRootConstantAccess` (in
+   RootConstantLowering.h) are the actual matching/rewriting logic,
+   exposed so *both* `RootConstantLoweringPass` (a function with no other
+   resource access, which adds its own parameter pair) and
+   `ResourceLoweringPass` (a function that also uses the heap, which
+   reuses the parameter pair it already adds for every function it
+   touches) can call them, and so `checkSupportedRaisedOps` can ask "is
+   this still-present `handlefrombinding` call one either pass is going to
+   finish?" before rejecting it. Only one pass ever adds a
+   `root_constants` parameter to a given function.
+
+3. **A `select` after an unconditional out-of-bounds load is not safe.**
+   My first bounds-check attempt always executed the real pointer load,
+   then `select`ed between it and zero. This crashed the moment I tested
+   an empty root-constant block (`root-constants: []` in the heap YAML,
+   giving a null `RootConstants` pointer with size 0) -- `select` doesn't
+   short-circuit, so the load ran regardless of whether it was in bounds.
+   I replaced it with a real (uniform, since the bounds check depends only
+   on the dispatch-wide `RootConstantSize`, never per-lane data)
+   conditional branch via `SplitBlockAndInsertIfThenElse`, merging the
+   loaded/zero values with `phi`s. My first version of *that* also failed
+   IR verification ("PHI nodes not grouped at top of basic block") because
+   I interleaved `phi` creation with the `insertvalue` chain assembling the
+   result in one loop -- fixed by building every `phi` first, in its own
+   pass, before any `insertvalue`.
+
+All three of these were caught by actually compiling and running real
+HLSL shaders through `feme-run`, not just by running the unit/lit test
+suite against hand-written IR -- the lit tests exercise the pass in
+isolation and wouldn't have caught the interaction between two passes, or
+the difference between "verifies" and "doesn't crash three passes later".
+
+## Verification
+
+Built and tested with the existing `build/` directory (ccache launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`) after every commit via `ninja check-feme`:
+started at 907/916 passed (9 unsupported, `directx-registered-target`
+-gated, pre-existing, unchanged throughout), ending at 916/925 passed (9
+unsupported, unchanged) -- 0 failures at any point once each commit's own
+fixes landed, +9 new lit tests and +12 new unit tests across the four
+commits. Also rebuilt and ran the touched unit test binaries
+(`FeMeTransformsCPUTests`) under `build-ubsan/`
+(`LLVM_USE_SANITIZER=Undefined`) with no sanitizer reports. Ran
+`clang-format` over every touched/added C++ file (not the `.ll`/`.hlsl`
+test files -- `clang-format` mangled one `.ll` file's `RUN:` line badly
+enough on a first attempt that I reverted and left `.ll`/`.hlsl` files
+untouched by it) and fixed what it flagged.
+
+## Commit breakdown
+
+1. `[feme] R12: support a genuinely varying WaveReadLaneAt lane index`.
+2. `[feme] R12: widen extractelement and vector-typed resource loads`.
+3. `[feme] R12: raise dx.op.cbufferLoadLegacy to llvm.dx.resource.load.cbufferrow.4`.
+4. `[feme] R12: add RootConstantLoweringPass, closing the root-constants gap`.
+5. `[feme] R12: update Design.md/FeMeCPUDesign.md/Roadmap.md`.
+6. This file.
