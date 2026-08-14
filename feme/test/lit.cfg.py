@@ -36,6 +36,38 @@ llvm_config.use_default_substitutions()
 # feme/docs/FeMeCPUDesign.md) without hard-coding an architecture.
 config.substitutions.append(("%feme_host_triple", config.target_triple))
 
+# The CFG restructurization differential harness helper (see
+# feme/utils/feme-run-differential.py and roadmap step R1 in
+# feme/docs/Roadmap.md): lets a test diff a `feme-cfg-gen` seed's normal
+# (widened) `feme-run` output against `--reference` across a seed list and
+# a wave-size list with one `RUN:` line instead of one per (seed, wave
+# size) pair.
+feme_run_differential = os.path.join(
+    config.test_source_root, "..", "utils", "feme-run-differential.py"
+)
+config.substitutions.append(
+    (
+        "%feme-run-differential",
+        "'%s' %s" % (config.python_executable, feme_run_differential),
+    )
+)
+
+# The wave-size sweep helper (see feme/utils/feme-wave-size-sweep.py and
+# roadmap step R1's §2.4.1 prerequisite in feme/docs/Roadmap.md): runs
+# `feme-run` once per `--wave-sizes` entry, `FileCheck`ing each run against
+# the same input, so a wave-size-independent end-to-end HLSL test opts into
+# running at every wave size in one substitution instead of one `feme-run |
+# FileCheck` pipeline per wave size.
+feme_wave_size_sweep = os.path.join(
+    config.test_source_root, "..", "utils", "feme-wave-size-sweep.py"
+)
+config.substitutions.append(
+    (
+        "%feme-wave-size-sweep",
+        "'%s' %s" % (config.python_executable, feme_wave_size_sweep),
+    )
+)
+
 tool_dirs = [config.feme_tools_dir, config.llvm_tools_dir]
 tools = [
     "feme",
