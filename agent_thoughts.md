@@ -11656,3 +11656,153 @@ discovered, 882 passed, 9 unsupported, 0 failed -- up from the pre-existing
 6. `[feme] test: add end-to-end DXBC coverage`.
 7. `[feme] docs: record roadmap step R7 completion`.
 8. This file.
+
+# Roadmap step R8
+
+## Task
+
+Implement roadmap step R8 (feme/docs/Roadmap.md's sequencing table):
+"Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe"
+(§2.4.3, §2.4.5, §2.2.4).
+
+## Investigation
+
+Read feme/.instructions.md, docs/Roadmap.md (§2.2 "axes not yet covered",
+§2.3 "interesting cases to add", §2.4 "test infrastructure prerequisites",
+Part 3's sequencing table) and docs/FeMeCPUDesign.md's "Command line"
+section (the heap YAML sketch and milestone 11's deviation note, which
+explicitly said `class`/`kind`/`stride`/`format` were future work). Traced
+the existing pieces already in place that R8 could build on rather than
+invent from scratch:
+
+- `feme::cpu::FemeDescriptor`/`ResourceKind`/`ResourceFormat`
+  (RuntimeABI.h) already had `Kind`/`Format`/`Stride` fields and a full
+  enumerator list -- nothing in the ABI needed to change.
+- `feme::cpu::ResourceLoweringPass`/`ResourceCalls` already build
+  format-aware `feme.cpu.resource.load/store.typed.*` calls for a
+  `dx.TypedBuffer` handle, and `feme/runtime/CPU/FeMeRuntimeCPU.c` already
+  implements `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` (the
+  `<4 x float>` view, covering `R32G32B32A32_FLOAT`'s identity format and
+  `R8G8B8A8_UNORM`'s packed one). So the whole compiler pipeline for a
+  typed buffer already worked end to end -- what R8's three items were
+  actually gated on was `feme-run`'s heap YAML only being able to describe
+  an untyped raw buffer (milestone 11's own deviation note said as much),
+  and AOT codegen (`feme --target=<host>`, already exercised by
+  `AOTDispatchTest.cpp` in `gtest` and by `feme-cpu-loop.ll`'s symbol-only
+  `lit` check) never being *dispatched* by `lit`.
+- `feme::cpu::JITEngine::dispatch`'s group-iteration/heap-materialization
+  loop was the obvious thing for a new `feme-run --object` AOT mode to
+  reuse rather than duplicate, so the first commit extracts it into a free
+  function, `feme::cpu::runDispatch`, callable without a `JITEngine`
+  instance at all.
+
+Manually built a `RWBuffer<float4>` HLSL shader through `clang -target
+dxil--shadermodel6.5-compute` to check what DXIL op shape it actually
+lowers to (`llvm.dx.resource.handlefrombinding` +
+`llvm.dx.resource.getpointer`/`store`, not a raised
+`load/store.typedbuffer` call directly -- that shape only appears after
+`feme::dxil::OpRaisingPass` undoes the real `dx.op.*` DXIL calling
+convention `llc`'s DXIL backend emits), then ran it through `feme-run`
+directly with a hand-built heap YAML using the new `kind`/`format` keys to
+confirm the whole pipeline actually produces the right `<4 x float>` bit
+patterns before writing the `typed-buffer.hlsl` lit test around it.
+
+For the AOT recipe, tried a hand-written raised `.ll` using
+`llvm.dx.resource.handlefromheap` (the placeholder for SM6.6 bindless
+access) through `llc --filetype=obj`, expecting to reuse
+`thread-id-store.ll`'s dynamic-heap shape -- this crashed `llc`'s DXIL
+bitcode writer (`Unsupported intrinsic ... for DXIL lowering`): that
+intrinsic is FeMe's own raised form, not something the real DXIL backend
+understands, unlike `llvm.dx.resource.handlefrombinding` (a legitimate,
+lowerable DXIL op real HLSL compiles to). Switched to a bound-resource
+shape instead (mirroring `AOTDispatchTest.cpp`'s own hand-written IR), and
+found empirically that `feme-run --object`'s `resource-heap` (with no
+`ResourceInfo`/`BoundRanges` at all, since none survives object-file
+compilation) still lands at the correct physical heap slot for a
+single-binding-at-heap-base-0 shape: `BoundResourceNormalizationPass`
+always assigns the first range base 0, and an empty `ResourceInfo` also
+starts the (unprefixed) logical heap at physical index 0, so the two
+coincide for exactly this common shape. Documented that narrowing rather
+than trying to reconstruct `ResourceInfo` from the object file (which
+would need reading an `ArtifactInfo` global's variable-length tail out of
+raw loaded-object memory with no length to hand) -- out of scope for R8;
+a real host embedding client is expected to keep its own `ResourceInfo`
+from the compile step for its own resources, matching `AOTDispatchTest`'s
+own shape (a hand-built `FemeDispatchArgs`, not a heap YAML).
+
+## Changes
+
+1. `[feme] Extract feme::cpu::runDispatch shared dispatch loop`. Pure
+   refactor: moves `DispatchResources` and the group-iteration/heap-
+   materialization loop out of `JITEngine::dispatch` into a free function
+   in ResourceHeap.h/.cpp so `feme-run --object` can call it directly
+   without a `JITEngine`. No behavior change (verified against the
+   existing `JITEngineTest`/`AOTDispatchTest`/`check-feme` suite before
+   adding anything new).
+2. `[feme] nit: clang-format JITEngine.cpp` -- a one-line indentation fix
+   `clang-format` caught in the previous commit; small enough to fold in
+   rather than amend history.
+3. `[feme] feme-run: heap YAML kind/format/stride`. Adds `kind` (raw-
+   buffer/structured-buffer/typed-buffer/cbuffer, default raw-buffer for
+   backward compatibility), `format` (typed-buffer only, the lowercase
+   underscore-separated `ResourceFormat` spelling) and `stride`
+   (structured-buffer only) to both `resource-heap` and `bindings`'
+   `entries`. `buildHeapStorage`/`buildBindingStorage` now return
+   `Expected` so an unrecognized `kind`/`format` string is a clean
+   diagnostic. Deliberately did not add `class` (SRV vs. UAV): out of R8's
+   stated scope (only `kind`/`format`/`stride`), and every existing test
+   already assumes UAV.
+4. `[feme] test: add typed-buffer.hlsl end-to-end execution coverage`. A
+   real `RWBuffer<float4>` shader through Clang's HLSL front end/DXIL
+   backend, `feme-run`-dispatched with the new heap YAML keys, `CHECK`ing
+   the exact `<4 x float>` bit patterns four lanes each write. First
+   execution coverage for `femeCpuResourceLoadTypedV4F32`/
+   `StoreTypedV4F32` through a real DXIL-derived path rather than only
+   `FeMeRuntimeCPUTests`' own hand-built calls.
+5. `[feme] feme-run: add --object AOT dispatch mode`. `--object` loads
+   `<input>` as a real compiled object file via
+   `orc::LLJIT::addObjectFile`, resolves `feme_cpu_entry_<name>` directly,
+   and dispatches through `feme::cpu::runDispatch`. Rejects heap YAML
+   `bindings` with a clear diagnostic (no `ResourceInfo` survives
+   object-file compilation to place them); `resource-heap` still works.
+6. `[feme] test: add feme-run --object AOT lit recipe`. A hand-written,
+   bound-resource raised `.ll` (the same shape `thread-id-store.ll`/
+   `AOTDispatchTest.cpp` use) compiled with real `llc`/`feme
+   --target=%feme_host_triple` codegen and dispatched with `feme-run
+   --object`, closing §2.2's "JIT vs AOT" gap for `lit`.
+7. `[feme] test: add RunDispatchTest for feme::cpu::runDispatch`. Direct
+   `gtest` coverage for the extracted dispatch loop: group-iteration order
+   and that the entry point sees the materialized (not caller's raw)
+   heap -- regression coverage now shared by both `JITEngine::dispatch`
+   and `feme-run --object`.
+8. `[feme] docs: record roadmap step R8 completion`. Updates
+   FeMeCPUDesign.md's milestone-11 heap-YAML deviation note (what R8
+   filled in, what's still deferred) and Roadmap.md's §2.2/§2.3/§2.4 gap
+   descriptions and R8's sequencing-table row.
+9. This file.
+
+## Verification
+
+Built with the existing `build/` (ccache launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_ENABLE_PROJECTS=feme;clang`).
+`ninja check-feme` after every commit: 895 discovered (736 lit + 159
+gtest), 886 passed, 9 unsupported, 0 failed -- up from the pre-existing
+891/882/9/0 baseline by 4 new tests (1 lit: `typed-buffer.hlsl`, 1 lit:
+`feme-run-object-aot.ll`, 2 gtest: `RunDispatchTest`'s two cases).
+Manually exercised both new `feme-run` code paths outside `lit` first
+(typed-buffer heap YAML against a real `clang`-compiled DXContainer;
+`--object` against a real `feme --target=aarch64-unknown-linux-gnu`-
+compiled object file) before writing the lit tests around them, and ran
+`clang-format` over every touched C++ file.
+
+## Commit breakdown
+
+1. `[feme] Extract feme::cpu::runDispatch shared dispatch loop`.
+2. `[feme] nit: clang-format JITEngine.cpp`.
+3. `[feme] feme-run: heap YAML kind/format/stride`.
+4. `[feme] test: add typed-buffer.hlsl end-to-end execution coverage`.
+5. `[feme] feme-run: add --object AOT dispatch mode`.
+6. `[feme] test: add feme-run --object AOT lit recipe`.
+7. `[feme] test: add RunDispatchTest for feme::cpu::runDispatch`.
+8. `[feme] docs: record roadmap step R8 completion`.
+9. This file.
