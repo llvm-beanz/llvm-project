@@ -443,20 +443,26 @@ bool hasImageOperands(std::optional<mlir::spirv::ImageOperands> ImageOperands) {
   return ImageOperands && *ImageOperands != mlir::spirv::ImageOperands::None;
 }
 
-/// Converts `spirv.ImageRead` into a load through the read location.
-class ImageReadPattern
-    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageReadOp> {
+/// Converts `spirv.ImageRead` or `spirv.ImageFetch` into a load through the
+/// read location. The two ops are otherwise handled identically here: LLVM's
+/// SPIRV backend picks `OpImageRead` vs `OpImageFetch` itself, from whether
+/// the handle's underlying image type has its `Sampled` operand set to 1
+/// (`spirv.ImageFetch`'s only legal operand, per its verifier) rather than
+/// from which intrinsic produced the load -- see `generateImageReadOrFetch`
+/// in `llvm/lib/Target/SPIRV/SPIRVInstructionSelector.cpp`.
+template <typename ImageOpTy>
+class ImageLoadPattern : public mlir::SPIRVToLLVMConversion<ImageOpTy> {
 public:
-  using mlir::SPIRVToLLVMConversion<
-      mlir::spirv::ImageReadOp>::SPIRVToLLVMConversion;
+  using mlir::SPIRVToLLVMConversion<ImageOpTy>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<ImageOpTy>::OpAdaptor;
 
   mlir::LogicalResult
-  matchAndRewrite(mlir::spirv::ImageReadOp Op, OpAdaptor Adaptor,
+  matchAndRewrite(ImageOpTy Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
     if (hasImageOperands(Op.getImageOperands()))
       return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
 
-    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    mlir::Type ResultType = this->getTypeConverter()->convertType(Op.getType());
     if (!ResultType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
@@ -466,6 +472,8 @@ public:
     return mlir::success();
   }
 };
+using ImageReadPattern = ImageLoadPattern<mlir::spirv::ImageReadOp>;
+using ImageFetchPattern = ImageLoadPattern<mlir::spirv::ImageFetchOp>;
 
 /// Converts `spirv.ImageWrite` into a store through the written location.
 class ImageWritePattern
@@ -526,11 +534,86 @@ public:
   }
 };
 
-/// Appends \p Value's scalar leaves, in element order, to \p Out. A SPIR-V
-/// array constant's constituents are either a further nested array (itself
-/// an `ArrayAttr`, for a multi-dimensional array or an array of vectors), or
-/// a vector leaf (a `DenseElementsAttr`); this descends through both so the
-/// result is the same flat scalar sequence regardless of how deeply the
+/// Converts `spirv.SampledImage`, which combines an image and a sampler
+/// handle into one `!spirv.sampled_image` value, into the
+/// `!llvm.struct<(ImageHandle, SamplerHandle)>` FeMe's own
+/// `spirv.SampledImageType` conversion produces (see
+/// populateSPIRVToLLVMTargetTypeConversions): unlike MLIR's own conversion,
+/// which folds both handles into one combined target extension type for the
+/// SPIR-V *runner*, LLVM's SPIRV backend intrinsics for sampling
+/// (`llvm.spv.resource.sample*`) take the image and sampler handles as two
+/// separate arguments, so nothing needs a single combined handle value; the
+/// struct is just a vehicle for carrying both through the dialect
+/// conversion until ImageSampleImplicitLodPattern unpacks it again.
+class SampledImagePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::SampledImageOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::SampledImageOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::SampledImageOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type StructType = getTypeConverter()->convertType(Op.getType());
+    if (!StructType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, StructType);
+    Result = mlir::LLVM::InsertValueOp::create(
+        Rewriter, Loc, Result, Adaptor.getImage(), llvm::ArrayRef<int64_t>{0});
+    Result = mlir::LLVM::InsertValueOp::create(
+        Rewriter, Loc, Result, Adaptor.getSampler(), llvm::ArrayRef<int64_t>{1});
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
+/// Converts a `spirv.ImageSampleImplicitLod` with no modifiers into the
+/// `llvm.spv.resource.sample` intrinsic call LLVM's SPIRV backend selects
+/// `OpSampledImage`+`OpImageSampleImplicitLod` from -- see
+/// `llvm/test/CodeGen/SPIRV/hlsl-resources/Sample.ll`. Bias/gradient/LOD-
+/// clamped/comparison/gather variants (which need additional operands this
+/// pattern does not supply) are not yet covered -- see the "Known gap" note
+/// in the SPIR-V section of feme/docs/Design.md.
+class ImageSampleImplicitLodPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageSampleImplicitLodOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageSampleImplicitLodOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageSampleImplicitLodOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (hasImageOperands(Op.getImageOperands()))
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value SampledImage = Adaptor.getSampledImage();
+    mlir::Value Image = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
+
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    mlir::Type OffsetType =
+        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
+                         CoordVecTy.getShape(), Rewriter.getI32Type()))
+                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+    mlir::Value Offset = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.sample",
+                                ResultType, {Image, Sampler, Coordinate, Offset}));
+    return mlir::success();
+  }
+};
 /// array is nested.
 void flattenConstantElements(mlir::Attribute Value,
                              llvm::SmallVectorImpl<mlir::Attribute> &Out) {
@@ -794,6 +877,26 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
           return std::nullopt;
         return mlir::LLVM::LLVMArrayType::get(ElementType, 0);
       });
+
+  // Registered after (so tried before) MLIR's own `spirv.sampled_image`
+  // conversion, which folds the image and sampler into one combined target
+  // extension type for the SPIR-V runner. LLVM's SPIRV backend sampling
+  // intrinsics take separate image and sampler handle arguments instead
+  // (see ImageSampleImplicitLodPattern), so the two handles just need a
+  // vehicle to travel together through the dialect conversion until then;
+  // a two-element struct is the simplest one.
+  TypeConverter.addConversion(
+      [&TypeConverter](mlir::spirv::SampledImageType Type)
+          -> std::optional<mlir::Type> {
+        mlir::Type ImageHandle = TypeConverter.convertType(Type.getImageType());
+        if (!ImageHandle)
+          return std::nullopt;
+        mlir::Type SamplerHandle = mlir::LLVM::LLVMTargetExtType::get(
+            Type.getContext(), "spirv.Sampler", /*typeParams=*/{},
+            /*intParams=*/{});
+        return mlir::LLVM::LLVMStructType::getLiteral(
+            Type.getContext(), {ImageHandle, SamplerHandle});
+      });
 }
 
 feme::spirv::ResourceInfoMap
@@ -837,9 +940,10 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources) {
   Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
                BuiltInGlobalVariablePattern, CompositeConstructPattern,
-               ExecutionModePattern, ImageQuerySizePattern, ImageReadPattern,
-               ImageWritePattern, LoadValuePattern,
-               PushConstantGlobalVariablePattern,
+               ExecutionModePattern, ImageFetchPattern,
+               ImageSampleImplicitLodPattern, ImageQuerySizePattern,
+               ImageReadPattern, ImageWritePattern, LoadValuePattern,
+               PushConstantGlobalVariablePattern, SampledImagePattern,
                StorageBufferAccessChainPattern>(Patterns.getContext(),
                                                 TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
