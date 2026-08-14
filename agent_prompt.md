@@ -23,6 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R6?
+Can you implement roadmap step R7?
 
-> DXBC importer fuzzer; `check-feme-fuzz` (see: §1.4 P0, §1.7 P0)
+> DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to
+> end (see: §1.4 P0, §2.2.8)
