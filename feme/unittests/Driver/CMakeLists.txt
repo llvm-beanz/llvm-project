@@ -10,6 +10,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeDriverTests
   DriverTest.cpp
+  ThreadSafetyTest.cpp
   )
 target_link_libraries(FeMeDriverTests
   PRIVATE
