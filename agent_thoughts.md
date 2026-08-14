@@ -11273,3 +11273,159 @@ pre-existing `EntryWrapperTest` binary. Commit breakdown for this entry:
    multi-group-barrier.hlsl`.
 3. `[feme] docs: record roadmap step R5 completion`.
 4. This file.
+
+# Agent thoughts: FeMe roadmap step R6 (DXBC importer fuzzer; check-feme-fuzz)
+
+## Part 1: Reading the gap
+
+§1.4 P0 and §1.7 P0 of Roadmap.md describe two related but separate gaps:
+DXBC has no importer fuzzer (`dxbc-as-fuzzer` fuzzes the *assembler's*
+text parser, not `BinaryParser`'s binary token decoder), and none of the
+four fuzz targets that existed (`feme-dxil-import-fuzzer`,
+`feme-spirv-import-fuzzer`, `dxbc-as-fuzzer`, `feme-cpu-restructure-fuzzer`)
+were even in `FEME_TEST_DEPENDS`, so `check-feme` didn't build them and a
+fuzzer that stopped compiling would go unnoticed. R6 is both halves
+together, which turned out to be the right scope: wiring up the second
+half is what caught a live instance of exactly the failure mode it
+describes (Part 3 below).
+
+`feme::dxsa::deserialize` (`BinaryParser.h`) was the obvious fuzz target:
+it takes a `SourceMgr` wrapping a raw buffer and an `MLIRContext`, matching
+the shape `feme-dxil-import-fuzzer`/`feme-spirv-import-fuzzer` already
+fuzz (`Importer::import` over a `MemoryBufferRef`). The one wrinkle: unlike
+`feme::Context`, which bundles dialect registration, a bare `MLIRContext`
+needs the `dxsa` dialect registered into its `DialectRegistry` up front --
+`BinaryParser.cpp`'s own `parseProgram` calls `allowUnregisteredDialects()`
+and `loadAllAvailableDialects()`, but the latter only loads dialects
+already present in the context's registry, and `MLIRContext`'s
+default constructor uses an *empty* one (confirmed by reading
+`MLIRContext::MLIRContext(Threading)` in `mlir/lib/IR/MLIRContext.cpp`,
+which delegates to the registry-taking constructor with a
+default-constructed, empty `DialectRegistry`). I mirrored
+`feme::registerDXSAImportBinTranslation` (`TranslateRegistration.cpp`,
+`--import-dxsa-bin`'s non-fuzzer entry point to the same `deserialize`
+call): build a `DialectRegistry`, insert `DXSADialect`, construct the
+`MLIRContext` from it.
+
+## Part 2: Building the seed corpus, and the first crash
+
+Three `.dxasm` sources assembled with `dxbc-as` into `.dxbc` binaries: a
+pixel shader (reused from `dxbc-as-fuzzer`'s own
+`sample-pixel-shader.dxasm`), a temp-register ALU program (likewise reused
+from `dxbc-as-fuzzer`'s `alu-ops.dxasm`), and a new compute shader with a
+`.shader_model` header, a UAV declaration, thread-group size, and
+`if`/`loop`/`breakc_nz`/`endloop`/`endif` control flow -- covering the
+header and control-flow-token decoding paths the other two don't reach.
+All three round-tripped cleanly through `feme-translate --import-dxsa-bin`
+before I wired up the fuzzer harness itself.
+
+Once the harness built, I didn't stop at "the seed corpus doesn't crash it"
+-- Design.md's own framing of DXBC import as "the highest-risk unfuzzed
+surface in the tree" only means something if the fuzzer actually gets
+exercised against something beyond its own seeds before landing. I wrote a
+throwaway (not committed) Python mutator: flip/truncate/extend/insert
+random bytes into copies of the three seeds, run the (`DummyMain`, since
+this environment has no libFuzzer-instrumented build) binary over batches
+of the results. The very first batch of 50 mutants crashed on an
+assertion failure inside `SrcOperandAttr::get`'s `StorageUserBase::get`
+(`StorageUniquerSupport.h:180`, "operand type `l` requires a values32
+literal" as an *assertion*, not a diagnostic).
+
+Root cause, once I traced the stack: `DXBuilder::buildSrcOperandAttr`
+called the *unchecked* `SrcOperandAttr::get(...)` overload directly,
+instead of `getChecked`. `SrcOperandAttr::verify` legitimately rejects an
+`l`/`d` immediate operand whose payload doesn't match its declared
+component count -- but a decoded operand token's
+`D3D10_SB_OPERAND_NUM_COMPONENTS` field can be `0_COMPONENT` (a
+perfectly valid *encoding*, just not one immediate operands are supposed
+to use) on an operand whose *type* field says `IMMEDIATE32`/`l`. Unlike
+`unknown.dxasm`'s already-tested "operand type field corrupted to an
+unrecognized value" case, this operand type is a real enumerator, so
+parsing sails past every "is this a known thing" check and only fails
+once `SrcOperandAttr`'s *value* invariants are checked -- at which point
+the unchecked builder chose to assert instead of fail. `DstOperandAttr`
+and `IndexAttr`'s other raw `::get()` call sites in the same file don't
+have this problem: I checked each of their verifiers
+(`DstOperandAttr::verify` only requires a non-null `components`, which
+`buildDstOperandAttr` always constructs; `IndexAttr::verify`'s
+`!imm && !relative` case can't trigger from any of `BinaryParser.cpp`'s
+four `IndexAttr::get` call sites, since one of `imm`/`relative` is always
+supplied) before concluding this was the one real gap, rather than
+papering over the specific crash without checking whether the pattern
+recurred elsewhere.
+
+Fix: `buildSrcOperandAttr` now takes a `Location` and returns
+`FailureOr<SrcOperandAttr>` via `getChecked`, threaded through
+`parseSrcOperand` exactly like every other fallible builder in this file
+already works (`FAILURE_IF_FAILED`, ultimately surfacing as the same
+`dxsa.unknown` diagnostic fallback `unknown.dxasm` already tests other
+malformed-operand shapes with). I minimized the crashing mutant by hand
+(binary-search truncation, then zeroing bytes that didn't affect the
+crash) down to a 52-byte reproducer, decoded it as a DWORD stream to
+understand *which* field was corrupted, then hand-built a much smaller,
+readable `.dword`-based regression fixture
+(`src_operand_immediate_zero_components_invalid.dxasm`) with the exact
+same shape (an `add`'s `src0` operand token encoding `IMMEDIATE32` type
+with a 0-component field) -- following `unknown.dxasm`'s established
+convention for "corrupted token, checked via `.dword`" tests rather than
+checking in the fuzzer-derived binary itself (Design.md's "Avoiding binary
+test fixtures" applies here too: a hand-decoded `.dword` line is far more
+useful to a future reader than an opaque 52-byte blob). I verified the fix
+by reverting it (`git stash`) and confirming the exact same assertion and
+stack trace reproduces on both the original mutant and the new minimized
+`.dword` fixture, then re-applied it and confirmed both now print the
+expected diagnostic and fall back to `dxsa.unknown` instead of crashing. A
+second, larger mutation run (3000 mutants across all three seeds) after
+the fix found nothing further.
+
+## Part 3: The second bug, found by wiring up `check-feme-fuzz` itself
+
+Building `check-feme-fuzz`'s five fuzz-target dependencies from a clean
+target list immediately failed: `dxbc-as-fuzzer.cpp` no longer compiled.
+`wrapInContainer` had gained a required `Signatures` parameter in a later,
+unrelated `dxbc-as` commit ("Rebuild ISGN/OSGN/PCSG from fxc's signature
+tables"), and the fuzzer's own call site was never updated to match --
+because nothing built it. This is the *exact* failure mode §1.7 P0
+describes ("a fuzzer that stops compiling would go unnoticed"), caught by
+this step's own infrastructure before it even landed. Fixed by passing
+`parseSignatureComments(Source)` (the same fuzzer-provided text
+`parseAssembly` already consumed), matching real `dxbc-as
+--emit=container` usage and, as a side effect, fuzzing
+`parseSignatureComments` too.
+
+## Part 4: `check-feme-fuzz` itself
+
+A CMake custom target (`feme/test/CMakeLists.txt`) driven by a small
+Python script (`feme/utils/check-feme-fuzz.py`, styled after
+`feme-run-differential.py`: `argparse`, a `run`-style helper that reports
+failures rather than raising past the caller). One design choice worth
+recording: the script expands each fuzzer's seed-corpus *directory* into
+its individual files before invoking the fuzzer binary, rather than
+passing the directory straight through. A real libFuzzer binary accepts a
+directory argument directly, but the `DummyMain` fallback this environment
+actually builds (`runFuzzerOnInputs` in `FuzzerCLI.cpp`) cannot open a
+directory as an input file and fails outright -- I hit this once during
+testing (`feme-dxil-import-fuzzer <dir>` -> "Error reading file: <dir>: Is
+a directory") before switching the script to glob-expand first, which
+works identically for both build configurations. All five fuzz targets
+(`feme-dxil-import-fuzzer`, `feme-dxbc-import-fuzzer`,
+`feme-spirv-import-fuzzer`, `dxbc-as-fuzzer`, `feme-cpu-restructure-fuzzer`)
+went into `FEME_TEST_DEPENDS` too, so `ninja check-feme` alone now builds
+every one even for someone who never runs `check-feme-fuzz` itself.
+
+## Final state
+
+Build: existing `build` (ccache launcher, `LLVM_ENABLE_ASSERTIONS=ON`,
+`LLVM_ENABLE_PROJECTS=feme;clang`). `ninja check-feme`: 883 discovered, 874
+passed, 9 unsupported (platform-gated), 0 failed -- up from the
+pre-existing 882/9/0 baseline by this step's one new lit test
+(`src_operand_immediate_zero_components_invalid.dxasm`). `ninja
+check-feme-fuzz`: all 5 fuzz targets complete cleanly over their seed
+corpora. Commit breakdown for this entry:
+
+1. `[feme] dxbc-as-fuzzer: fix stale wrapInContainer call`.
+2. `[feme][DXSA] Avoid asserting on a malformed immediate source operand`.
+3. `[feme] Add feme-dxbc-import-fuzzer`.
+4. `[feme] test: add check-feme-fuzz target`.
+5. `[feme] docs: record roadmap step R6 completion`.
+6. This file.
