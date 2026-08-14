@@ -4,6 +4,7 @@ add_mlir_library(FeMeDriver
   LINK_COMPONENTS
   Core
   CodeGen
+  Object
   Support
   Target
   TargetParser
@@ -11,6 +12,7 @@ add_mlir_library(FeMeDriver
   LINK_LIBS PUBLIC
   FeMeCore
   FeMeFrontend
+  FeMeImportDXBC
   FeMeImportDXIL
   FeMeImportSPIRV
   FeMeOptimizer
@@ -20,5 +22,6 @@ add_mlir_library(FeMeDriver
   FeMeTransformsCPU
   FeMeTransformsDXIL
   FeMeTransformsSPIRV
+  FeMeTranslateDXSA
   FeMeTranslateSPIRV
   )

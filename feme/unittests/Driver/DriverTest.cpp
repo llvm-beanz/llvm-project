@@ -12,6 +12,8 @@
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/ObjectYAML/DXContainerYAML.h"
+#include "llvm/ObjectYAML/yaml2obj.h"
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
@@ -99,6 +101,35 @@ TEST(DriverTest, RejectsMalformedInputForDetectedDXContainerFormat) {
   // must fail before Driver gets anywhere near translation/retargeting.
   llvm::Expected<DriverResult> Result =
       D.run(llvm::MemoryBufferRef("DXBC", "driver-test"), Opts);
+  EXPECT_THAT_EXPECTED(Result, llvm::Failed());
+}
+
+TEST(DriverTest, RejectsDXBCContainerWithNoShaderBytecodePart) {
+  Context Ctx;
+  Driver D(Ctx);
+
+  frontend::DriverOptions Opts;
+  Opts.Target = "dxil";
+
+  // A well-formed but empty DXContainer: feme::detectFormat's inner-part
+  // scan (see the DXBC section of feme/docs/Design.md) finds neither a
+  // "SHEX"/"SHDR" part (which would select feme::DXBCImporter) nor a "DXIL"
+  // part, so this still falls back to feme::DXILImporter, which then fails
+  // on the missing DXIL part -- exercising that fallback rather than
+  // feme::DXBCImporter's own parsing.
+  llvm::DXContainerYAML::Object Obj;
+  Obj.Header.Hash.assign(16, llvm::yaml::Hex8(0));
+  Obj.Header.Version.Major = 1;
+  Obj.Header.Version.Minor = 0;
+  Obj.Header.PartCount = 0;
+
+  llvm::SmallString<0> Binary;
+  llvm::raw_svector_ostream OS(Binary);
+  ASSERT_TRUE(llvm::yaml::yaml2dxcontainer(
+      Obj, OS, [](const llvm::Twine &Msg) { FAIL() << Msg.str(); }));
+
+  llvm::Expected<DriverResult> Result =
+      D.run(llvm::MemoryBufferRef(OS.str(), "driver-test"), Opts);
   EXPECT_THAT_EXPECTED(Result, llvm::Failed());
 }
 

@@ -2,6 +2,8 @@ set(LLVM_LINK_COMPONENTS
   BitReader
   BitWriter
   Core
+  Object
+  ObjectYAML
   Support
   TestingSupport
   )

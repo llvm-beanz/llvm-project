@@ -9,6 +9,7 @@
 #include "feme/Driver/Driver.h"
 
 #include "feme/Core/Module.h"
+#include "feme/Import/DXBC/DXBCImporter.h"
 #include "feme/Import/DXIL/DXILImporter.h"
 #include "feme/Import/Importer.h"
 #include "feme/Import/SPIRV/SPIRVImporter.h"
@@ -23,6 +24,7 @@
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "feme/Transforms/SPIRV/RaisedLowering.h"
+#include "feme/Translate/DXSA/DXSATranslator.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 #include "feme/Translate/Translator.h"
 
@@ -31,6 +33,8 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/MC/TargetRegistry.h"
+#include "llvm/Object/DXContainer.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
@@ -45,28 +49,51 @@ namespace {
 
 /// Sniffs \p Buffer's binary format to select which Importer parses it, so
 /// `feme` does not need an explicit `--from` flag naming it: DXIL
-/// bitcode/DXContainer and SPIR-V binaries each begin with a distinct,
-/// well-known magic number (see the "Command Line Tool(s)" section of
-/// feme/docs/Design.md). Returns nullptr if \p Buffer's format cannot be
-/// determined this way -- this covers both genuinely unrecognized input and
-/// formats FeMe does not yet import (e.g. legacy DXBC bytecode, not yet
-/// implemented -- see the Roadmap / Milestones section of
-/// feme/docs/Design.md), since neither can be told apart from unrecognized
-/// input without actually importing it.
+/// bitcode/DXContainer, legacy DXBC DXContainer, and SPIR-V binaries each
+/// begin with a distinct, well-known magic number (see the "Command Line
+/// Tool(s)" section of feme/docs/Design.md). Returns nullptr if \p Buffer's
+/// format cannot be determined this way -- this covers input FeMe does not
+/// yet import as well as genuinely unrecognized input, since neither can be
+/// told apart from the other without actually importing it.
 const Importer *detectFormat(llvm::MemoryBufferRef Buffer) {
   static const DXILImporter DXIL;
+  static const DXBCImporter DXBC;
   static const SPIRVImporter SPIRV;
 
   llvm::StringRef Data = Buffer.getBuffer();
 
   // A `DXContainer` (magic "DXBC", the format predates the DXIL name --
-  // see llvm::object::DXContainer::parseHeader) wraps a DXIL bitcode part
-  // in FeMe's supported case; raw DXIL is plain LLVM bitcode, optionally
-  // with the standard bitcode wrapper header. Either encoding is
-  // `DXILImporter`'s to parse -- including giving a clean diagnostic for a
-  // `DXContainer` that turns out not to actually hold a DXIL part.
-  if (Data.starts_with("DXBC") ||
-      llvm::isBitcode(
+  // see llvm::object::DXContainer::parseHeader) wraps either a DXIL
+  // bitcode part (DXILImporter's to parse) or, for a legacy Shader Model
+  // 5.0-and-earlier module, a raw tokenized shader bytecode part named
+  // `SHEX`/`SHDR` (DXBCImporter's to parse) -- both formats share this
+  // same outer magic, so telling them apart needs a peek inside the
+  // container. Raw DXIL bitcode, with no container at all, is always
+  // DXILImporter's: legacy DXBC is never distributed outside a container.
+  if (Data.starts_with("DXBC")) {
+    llvm::Expected<llvm::object::DXContainer> Container =
+        llvm::object::DXContainer::create(Buffer);
+    if (Container) {
+      // Guard against llvm::object::DXContainer::PartIterator's
+      // constructor unconditionally reading PartOffsets.back() when
+      // begin() already equals end(), which only a zero-part container
+      // reaches (see feme::DXBCImporter's own getShaderBytecode).
+      if (Container->getHeader().PartCount != 0)
+        for (const auto &Part : *Container) {
+          llvm::StringRef Name = Part.Part.getName();
+          if (Name == "SHEX" || Name == "SHDR")
+            return &DXBC;
+        }
+    } else {
+      // Consume the error: an unparseable container is still DXILImporter's
+      // to reject with its own diagnostic, matching this function's
+      // "detect, don't validate" contract.
+      llvm::consumeError(Container.takeError());
+    }
+    return &DXIL;
+  }
+
+  if (llvm::isBitcode(
           reinterpret_cast<const unsigned char *>(Data.data()),
           reinterpret_cast<const unsigned char *>(Data.data() + Data.size())))
     return &DXIL;
@@ -88,11 +115,18 @@ const Importer *detectFormat(llvm::MemoryBufferRef Buffer) {
 /// Converts \p Imported (in whichever representation its format's Importer
 /// produces, see the "Per-Format Representation Strategy" section of
 /// feme/docs/Design.md) into a Module holding a plain llvm::Module: DXIL
-/// import already produces one directly, while SPIR-V import produces an
-/// `mlir::spirv::ModuleOp` that still needs `SPIRVToLLVMTranslator`.
-llvm::Expected<Module> translateToLLVMIR(Module &&Imported, Context &Ctx) {
+/// import already produces one directly, while SPIR-V and DXBC import each
+/// produce an MLIR operation (`mlir::spirv::ModuleOp`/`feme::dxsa::ModuleOp`
+/// respectively) that still needs its own Translator.
+llvm::Expected<Module>
+translateToLLVMIR(Module &&Imported, llvm::StringRef FormatName, Context &Ctx) {
   if (Imported.getKind() == Module::Kind::LLVMIR)
     return std::move(Imported);
+
+  if (FormatName == "dxbc") {
+    feme::dxsa::DXSAToLLVMIRTranslator ToLLVMIR;
+    return ToLLVMIR.translate(std::move(Imported), Ctx);
+  }
 
   SPIRVToLLVMTranslator ToLLVMIR;
   return ToLLVMIR.translate(std::move(Imported), Ctx);
@@ -221,7 +255,8 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
         "could not detect input file format (expected a DXIL bitcode file "
-        "or DXContainer, or a SPIR-V binary module)");
+        "or DXContainer, a legacy DXBC DXContainer, or a SPIR-V binary "
+        "module)");
 
   ImportOptions ImportOpts;
   llvm::Expected<Module> Imported = Imp->import(Input, ImportOpts, Ctx);
@@ -229,26 +264,29 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     return Imported.takeError();
 
   llvm::Expected<Module> AsLLVMIR =
-      translateToLLVMIR(std::move(*Imported), Ctx);
+      translateToLLVMIR(std::move(*Imported), Imp->getFormatName(), Ctx);
   if (!AsLLVMIR)
     return AsLLVMIR.takeError();
 
   llvm::Module &M = AsLLVMIR->getLLVMModule();
 
   // A DXIL-imported module is still in its already-lowered `dx.op.*` calling
-  // convention (see feme::DXILImporter's header comment): LLVM's DirectX
-  // target's own IR pipeline (in particular `DXILShaderFlagsAnalysis`)
-  // requires starting from *idiomatic*, pre-lowering IR -- it asserts if it
-  // ever sees a `dx.op.*` declaration, on the assumption that
-  // `DXILOpLowering` (part of that same pipeline) is what produces those --
-  // so retargeting to any target, DXIL included, needs `OpRaisingPass` to
-  // undo that first. `MetadataRaisingPass` then recovers the module's shader
-  // model, entry points, and thread group dimensions from the `dx.*` named
-  // metadata they live in into the triple and `hlsl.*` function attributes
-  // every later stage reads them from; it runs second because
-  // `OpRaisingPass` consumes the `!dx.resources` metadata it drops. See the
-  // DXIL section of feme/docs/Design.md.
-  if (Imp->getFormatName() == "dxil") {
+  // convention (see feme::DXILImporter's header comment); a DXBC-derived one
+  // is in that same calling convention too, since `feme::dxsa::
+  // translateToLLVMIR` deliberately targets it directly (see the DXBC
+  // section of feme/docs/Design.md) rather than idiomatic LLVM IR. LLVM's
+  // DirectX target's own IR pipeline (in particular
+  // `DXILShaderFlagsAnalysis`) requires starting from *idiomatic*,
+  // pre-lowering IR -- it asserts if it ever sees a `dx.op.*` declaration, on
+  // the assumption that `DXILOpLowering` (part of that same pipeline) is
+  // what produces those -- so retargeting to any target, DXIL included,
+  // needs `OpRaisingPass` to undo that first. `MetadataRaisingPass` then
+  // recovers the module's shader model, entry points, and thread group
+  // dimensions from the `dx.*` named metadata they live in into the triple
+  // and `hlsl.*` function attributes every later stage reads them from; it
+  // runs second because `OpRaisingPass` consumes the `!dx.resources`
+  // metadata it drops. See the DXIL section of feme/docs/Design.md.
+  if (Imp->getFormatName() == "dxil" || Imp->getFormatName() == "dxbc") {
     llvm::ModuleAnalysisManager MAM;
     feme::dxil::OpRaisingPass().run(M, MAM);
     feme::dxil::MetadataRaisingPass().run(M, MAM);
