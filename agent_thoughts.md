@@ -10608,3 +10608,176 @@ under valgrind with no errors. Commit breakdown for this entry:
    SIMDizePass`.
 2. `[feme][cpu] Test SIMDizePass's unsupported-divergent-call diagnostic`.
 3. This file.
+
+# Agent thoughts: FeMe roadmap step R3 (multi-return-value raising mechanism; ballot.hlsl)
+
+## Scope
+
+Roadmap step R3 (feme/docs/Roadmap.md's "Suggested sequencing" table) asked
+for two things, both under §1.3's DXIL P0 gap:
+
+1. A general multi-return-value raising mechanism unblocking `IMul`/`UMul`/
+   `UAddc`/`SplitDouble`/`WaveActiveBallot` -- five DXIL opcodes deferred
+   together because they all return an aggregate `DXILOpLowering` splits
+   with `extractvalue`, which `feme::dxil::OpRaisingPass` had no generic way
+   to reconstruct (only single-value calls, via `raiseCall`).
+2. `ballot.hlsl`: an end-to-end HLSL test for `WaveActiveBallot` specifically
+   (the only one of the five a wave-intrinsic-reaching HLSL program uses
+   directly), gated on (1).
+
+## Part 1: the raising mechanism itself
+
+I started by reading every existing raiser in OpRaising.cpp for the shape to
+match: `raiseCall` (the generic table-driven single-value path),
+`raiseTypedBufferLoad`/`raiseRawBufferLoad` (which already deal with a
+DXIL struct return, `%dx.types.ResRet`). The typed/raw buffer load raisers
+were the right template, and reading them closely explained *why* a generic
+whole-value `CI.replaceAllUsesWith(NewIntrinsicCall)` -- the shortcut
+`raiseCall` uses for a scalar result -- cannot work for an aggregate: the
+old DXIL op's return type is a *named* struct (`%dx.types.twoi32`, etc.,
+created via `StructType::create` in `DXILOpBuilder.cpp`), while the LLVM
+intrinsic's return type is a literal, unnamed struct (uniqued purely by
+field shape). `Value::replaceAllUsesWith` asserts the two types are
+identical, and a named struct is never `==` to a literal one even with
+identical fields -- only "layout identical", which is exactly what
+`DXILOpLowering::replaceNamedStructUses` checks for the *forward* direction
+(and is the reason its own comment exists). So raising an aggregate has to
+rewrite each `extractvalue` of the old call individually to read a new
+`extractvalue` of the new call, never touch the aggregate value itself.
+
+I verified this hypothesis (rather than trusting the "named vs literal
+struct" theory alone) with a scratch `.ll` and real `opt -dxil-op-lower`:
+compiled `{i32,i32} @llvm.dx.imul.i32(...)`-shaped IR both without any
+`extractvalue` consumer (which `-dxil-op-lower` itself rejected: "DXIL ops
+that return structs may only be used by insert- and extractvalue") and with
+one, confirming the exact `dx.op.*` function name/signature/field order for
+all five ops (`dx.op.binaryWithTwoOuts.i32`/`binaryWithCarryOrBorrow.i32`/
+`splitDouble.f64`/`waveActiveBallot`, all field-order-identical to their
+source intrinsic -- `DXILOpLowering.cpp`'s `replaceNamedStructUses` moving
+extractvalue's operand pointer directly, with no reordering, is what
+guarantees this). This scratch-testing step mattered: I could have gotten
+the opcode numbers or field order wrong from reading DXIL.td alone (the
+existing `DirectOps` table's own comment specifically warns about this for
+`FMad`/`Fma`).
+
+`raiseAggregateCall`/`RaisableAggregateOp` (mirroring `raiseCall`/
+`RaisableOp`'s shape) is the result: a small table (opcode, target
+intrinsic ID, argument count, result field count, and whether the
+intrinsic's overload type comes from the first operand or is fixed `i32`
+-- `SplitDouble`/`WaveActiveBallot`'s result halves/words are always `i32`
+regardless of the `double`/`i1` operand's own type, while `IMul`/`UMul`/
+`UAddc` are `LLVMMatchType`-shaped between operands and result). It
+declines (leaving the call untouched, matching every other raiser's
+unrecognized-shape handling) if any user isn't a single-index
+`extractvalue`, which is the only shape the forward direction ever
+produces.
+
+Verification: `dxil-raise-aggregate-ops.ll` (hand-written `dx.op.*` IR, one
+function per opcode, plus an "unsupported use" case) and
+`dxil-raise-aggregate-ops-roundtrip.ll` (real `-dxil-op-lower` output,
+`REQUIRES: directx-registered-target`), mirroring the existing
+`dxil-raise-ops.ll`/`-roundtrip.ll` pair exactly. Both needed one fix after
+the first draft: FileCheck captures rather than literal names for anything
+downstream of a raised aggregate's `extractvalue`s -- `raiseAggregateCall`
+intentionally leaves its new `extractvalue`s unnamed (matching
+`raiseTypedBufferLoad`'s convention), and since the *old* instructions
+aren't erased until after the new ones are built, a name collision (e.g.
+the old and new call both wanting `%r`) gets LLVM's usual numeric
+uniquification (`%r1`, `%cnt2`, ...) -- not a bug, but it means a test
+can't assume a specific derived name survives raising.
+
+## Part 2: `ballot.hlsl`
+
+Roadmap.md's own wording ("+ `ballot.hlsl`") implied more than a raising-
+level test: `ballot.hlsl` is listed under §2.3 (end-to-end HLSL coverage),
+which for every other roadmap step means "runs through `feme-run`". Reading
+FeMeCPUDesign.md's milestone 8 deviation note confirmed `WaveActiveBallot`
+was *also* deliberately left unlowered on the CPU target specifically
+because raising couldn't produce it yet -- so R3 had to close that too, not
+just the DXIL-side raising, or `ballot.hlsl` would fail deeper in the
+pipeline than the mechanism this step is about.
+
+I traced the whole CPU-target wave-op path before writing any code:
+`feme::cpu::WaveCallKind` (WaveCalls.h/.cpp, the canonical
+`feme.cpu.wave.*` call family) -> `SIMDizePass::classifyWaveCall` (which
+intrinsic IDs canonicalize to which kind) -> `WaveTTIImpl::getValueUniformity`
+(which wave intrinsics are classified uniform, since `WaveActiveBallot`'s
+result is the same on every lane by definition) -> `FunctionWidener::
+widenWaveCall` (which widens the operand and swaps in a new canonical call)
+-> `WaveLoweringPass::lowerWaveCall` (the actual arithmetic). Two things
+this reading surfaced that mattered before I wrote `lowerBallot`:
+
+1. `checkVectorDecompositionSupported` in SIMDize.cpp diagnoses *any*
+   divergent value of aggregate type up front ("component decomposition is
+   not yet supported"). `WaveActiveBallot`'s result -- an aggregate -- only
+   avoids this because it's *uniform*, not divergent: `WaveTTIImpl` needed
+   `Intrinsic::dx_wave_ballot` added to its `AlwaysUniform` case list
+   (alongside the other `WaveActive*` reductions) for this to hold, and I
+   confirmed the generic `UniformityInfo` propagates that uniformity
+   through the `extractvalue`s reading the ballot's result automatically
+   (no special-casing needed there) rather than assuming it.
+2. `widenWaveCall`'s uniform-result path (`CI.replaceAllUsesWith(NewCall)`)
+   only type-checks if `createWaveCall`'s `RetTy` for `Ballot` is a
+   *literal* struct (`StructType::get`, uniqued by shape) -- exactly the
+   same reasoning as Part 1's raising mechanism, since the old call (an
+   already-raised `llvm.dx.wave.ballot` call) has a literal `{i32,i32,i32,
+   i32}` return type, and only a literal `RetTy` on the new
+   `feme.cpu.wave.ballot.*` declaration would structurally unify with it.
+   Getting this wrong would have meant `replaceAllUsesWith`'s type-equality
+   assert firing the first time `widenWaveCall` ran on a real ballot call.
+
+`lowerBallot` itself follows "Phase 5"'s table entry directly: `bitcast
+(M & X) to iW`, split into the result struct's 32-bit words (zero-padding
+any word once `32*wordIndex >= WaveSize`) -- built generically off the
+matched call's actual result type rather than hard-coding "4 words", so it
+doesn't silently do the wrong thing if a future front end's ballot ABI
+differs from DXIL's fixed `uint4`.
+
+### Verification
+
+- `WaveCallsTest.BallotRoundTrips` (create/match round-trip, matching every
+  other `WaveCallKind`'s existing unit test).
+- `WaveLoweringTest.LowersBallotToInsertValueChain` (asserts the 4-field
+  `insertvalue` chain lands and nothing crashes at wave size 4).
+- `wave-lowering-ballot.ll` (isolates `SIMDizePass`+`WaveLoweringPass`'s
+  lowering of a hand-written ballot call, mirroring the existing
+  `wave-lowering-active-countbits.ll`).
+- `test/Tools/feme-run/HLSL/ballot.hlsl`: real HLSL (`WaveActiveBallot(tid.x
+  % 2 == 0)` then `countbits(ballot.x)`), compiled by Clang to a DXIL
+  DXContainer, executed by `feme-run --wave-size=4`. I first validated this
+  manually outside the test tree (`clang -target dxil--shadermodel6.5-
+  compute` + `feme-run`) to confirm the expected output (`2 2 2 2`: lanes 0
+  and 2 of 4 satisfy the even-`tid.x` condition, so the ballot's first word
+  is `0b0101`, `countbits` of which is 2, the same uniform answer every
+  lane writes) before turning it into a lit test, exactly the way
+  `wave-ops.hlsl` and `histogram.hlsl` were verified. I did not use the
+  `%feme-wave-size-sweep` substitution some other HLSL tests use, since
+  `numthreads(4,1,1)` fixes the real thread count independent of the
+  requested wave size, and I only needed one wave size to exercise the new
+  code path -- `wave-ops.hlsl` makes the same choice for the same reason.
+
+One thing I checked but didn't need to act on: Clang's pre-lowering IR
+attaches a `"convergencectrl"` operand bundle to the `llvm.dx.wave.ballot`
+call. I confirmed (by compiling the real test shader all the way to a
+`.dxcontainer` and running it) that this bundle does not survive to the
+`dx.op.waveActiveBallot` call `OpRaisingPass` actually sees -- DXIL's wire
+format has no token type to carry it -- so `raiseAggregateCall` needs no
+operand-bundle handling, matching every other raiser's calls in the same
+file.
+
+## Final state
+
+Build: existing `build` (ccache launcher, `LLVM_ENABLE_ASSERTIONS=ON`,
+`LLVM_ENABLE_PROJECTS=feme;clang`); `ninja check-feme`, which builds every
+test dependency before running the suite. 867 discovered, 858 passed, 9
+unsupported (platform-gated), 0 failed -- 858 = the pre-existing 854 plus
+the 4 new lit tests this step adds (2 raising tests, 1 wave-lowering test,
+1 `ballot.hlsl`); the 2 new gtest cases run inside the pre-existing
+`WaveCallsTest`/`WaveLoweringTest` binaries and don't add to lit's count.
+Commit breakdown for this entry:
+
+1. `[feme][dxil] Raise aggregate-returning ops (IMul/UMul/UAddc/
+   SplitDouble/WaveActiveBallot)`.
+2. `[feme][cpu] Lower WaveActiveBallot on the CPU target; add ballot.hlsl`.
+3. `[feme][docs] Update Design.md/FeMeCPUDesign.md/Roadmap.md for step R3`.
+4. This file.
