@@ -53,14 +53,24 @@ state) is cheap and closes it.
 
 The SPIR-V *input* half is the narrowest edge of the translation matrix.
 
-- **P0 — `spirv` → `llvm` dialect conversion breadth.** Per "Known gap:
-  `spirv` dialect -> `llvm` dialect conversion coverage": sampling ops
-  (`OpImageSampleImplicitLod` and friends), `OpImageFetch`/`OpImageGather`,
-  `StorageBuffer` blocks (`target("spirv.VulkanBuffer", ...)`), push
-  constants, and graphics stage inputs/outputs are all missing. Until these
-  land, "SPIR-V input" means "a compute shader whose only resources are
-  sampler-less images", which is not enough to run the same HLSL through
-  both front ends (see §2.3).
+- **P0 — `spirv` → `llvm` dialect conversion breadth (done by R9).** Per
+  "Known gap: `spirv` dialect -> `llvm` dialect conversion coverage":
+  `StorageBuffer` blocks (`RWStructuredBuffer<T>`/`StructuredBuffer<T>`,
+  converting to `target("spirv.VulkanBuffer", ...)`), push constants, basic
+  (unmodified) `spirv.ImageSampleImplicitLod` sampling and `OpImageFetch`
+  (which reuses `spirv.ImageRead`'s exact lowering -- LLVM's SPIRV backend
+  itself picks the opcode from the handle's image type) all now convert.
+  Still missing, and narrower than originally scoped here: the sampling
+  bias/gradient/explicit-LOD/comparison/gather variants (each needs its own
+  pattern supplying additional operands), `Uniform`-storage-class buffer
+  blocks (`cbuffer`/`ConstantBuffer<T>`, which real `clang`-compiled access
+  spells entirely differently -- per-member globals in a separate address
+  space tied together by `!hlsl.cbs` metadata -- and so needs its own design
+  decision rather than reusing the storage buffer access chain pattern), and
+  graphics stage inputs/outputs. "SPIR-V input" now covers a compute shader
+  binding, reading and writing storage buffers and sampling a texture, which
+  is enough to run more (but not yet all) HLSL through both front ends (see
+  §2.3).
 - **P0 — SPIR-V shaders cannot execute.** `feme-run` accepts `.ll`/`.bc`/
   DXIL only (`tools/feme-run/feme-run.cpp`), so the CPU target's entire
   execution-based test suite is DXIL-only. This is the single biggest
@@ -424,7 +434,7 @@ dependency column is the only ordering constraint.
 | R6 | DXBC importer fuzzer; `check-feme-fuzz` (done: `feme-dxbc-import-fuzzer` fuzzes `feme::dxsa::deserialize` directly and found/fixed a real `SrcOperandAttr` builder assertion on a malformed immediate operand; `check-feme-fuzz` runs all five fuzz targets, seed-corpus-only, and found/fixed a bit-rotted `dxbc-as-fuzzer` call site broken by an unrelated `wrapInContainer` signature change) | §1.4 P0, §1.7 P0 | — |
 | R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end (done: `feme::DXBCImporter` + `feme::dxsa::DXSAToLLVMIRTranslator` wired into `feme::Driver`/`feme`/`feme-translate --import-dxbc`; found/fixed a latent `!dx.resources` UAV-metadata bug the new end-to-end path exposed, see §1.4) | §1.4 P0, §2.2.8 | — |
 | R8 | Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe (done: `feme-run`'s heap YAML `resource-heap`/`bindings` entries accept `kind`/`format`/`stride`, closing the "raw buffers only" narrowing §2.2's "Resource shapes" row and milestone 11's own deviation note flagged; `typed-buffer.hlsl` gives `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` real execution coverage; `feme-run --object` loads a real `feme --target=<host>`-compiled object file with `orc::LLJIT::addObjectFile` and dispatches it through the `feme::cpu::runDispatch` loop factored out of `JITEngine::dispatch` for this reuse, closing §2.2's "JIT vs AOT" row for `lit` -- it has no `ResourceInfo` to place a `bindings` entry's reserved prefix, so only `resource-heap` is supported in that mode) | §2.4.3, §2.4.5, §2.2.4 | — |
-| R9 | `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants) | §1.2 P0 | — |
+| R9 | `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants) (done: `StorageBuffer` blocks convert to `target("spirv.VulkanBuffer", ...)` handles with `llvm.spv.resource.getpointer`/GEP access chains; `PushConstant` variables convert to an ordinary global in address space 13, which LLVM's own `SPIRVPushConstantAccess` pass rewrites the rest of the way; basic `spirv.ImageSampleImplicitLod` sampling and `OpImageFetch` (reusing `spirv.ImageRead`'s lowering) convert -- sampling variants needing extra operands, `Uniform`-storage-class `cbuffer`/`ConstantBuffer<T>` blocks (a differently-shaped problem, see §1.2's updated note) and graphics stage inputs/outputs remain open) | §1.2 P0 | — |
 | R10 | `feme-run` SPIR-V input; one HLSL source executed through both front ends | §1.2 P0, §2.2.3 | R9 |
 | R11 | Thread-safety test; route library diagnostics through `Context`; `FormatRegistry`; `Exporter` interface | §1.1 | R7 (a third format makes the registry pay) |
 | R12 | Root constants; `WaveReadLaneAt` with a varying lane; vector/aggregate decomposition | §1.6 P1 | — |

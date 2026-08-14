@@ -547,8 +547,11 @@ dialect can then name the backend's intrinsics directly, as
 | `spirv.EntryPoint`/`spirv.ExecutionMode` | `hlsl.shader`/`hlsl.numthreads` function attributes | a `__spv__*_execution_mode_info_*` global |
 | builtin input variable (`GlobalInvocationId`, ...) | `llvm.spv.thread.id` & friends, one call per vector component | a load from an `external constant` global |
 | resource variable (image/sampler, `bind(set, binding)`) | `llvm.spv.resource.handlefrombinding` | an `external constant` global whose *name* encodes the binding |
-| `spirv.ImageRead`/`spirv.ImageWrite` | `llvm.spv.resource.getpointer` + `llvm.load`/`llvm.store` | *(no pattern; fails to legalize)* |
+| `spirv.ImageRead`/`spirv.ImageWrite`/`spirv.ImageFetch` | `llvm.spv.resource.getpointer` + `llvm.load`/`llvm.store` | *(no pattern; fails to legalize)* |
 | `spirv.ImageQuerySize` | `llvm.spv.resource.getdimensions.{x,xy,xyz}` | *(no pattern; fails to legalize)* |
+| `spirv.SampledImage` + `spirv.ImageSampleImplicitLod` (no modifiers) | `llvm.spv.resource.sample`, image/sampler handles carried as a struct in between | *(folds both handles into one combined runner-facing type; no sampling op pattern at all)* |
+| `StorageBuffer` block variable (`RWStructuredBuffer<T>`/`StructuredBuffer<T>`) and `spirv.AccessChain` into it | `llvm.spv.resource.handlefrombinding` to a `target("spirv.VulkanBuffer", ...)` handle, `llvm.spv.resource.getpointer` for the buffer index plus an ordinary `llvm.getelementptr` for any further field indices | an `llvm.mlir.global` in the pointer's storage class's address space (memory nothing binds to for the SPIRV backend's consumer) |
+| `PushConstant` block variable | an `llvm.mlir.global` in address space 13, which LLVM's own `SPIRVPushConstantAccess` backend pass finds and rewrites into the `spirv.PushConstant` handle representation itself | *(storage class not among the ones MLIR's `GlobalVariablePattern` converts; fails to legalize)* |
 | `spirv.Constant` of `spirv.array` type (e.g. a `const static` HLSL array) | one flat `llvm.mlir.constant`, whatever the array's nesting | *(scalar/vector only; fails to legalize for an array)* |
 | `spirv.CompositeConstruct` building a vector (e.g. `floatN(...)`, a `.xxx` swizzle) | an `llvm.mlir.poison` seed plus one `llvm.insertelement` per lane | *(no pattern; fails to legalize)* |
 
@@ -567,6 +570,20 @@ handle type. `spirv.Load` through such a pointer is then the identity. A
 consequence is that non-builtin `Input` variables (stage inputs) now fail to
 legalize with a diagnostic rather than converting to a pointer nothing can
 produce; they had no working lowering either way.
+
+A storage buffer's pointer works the same way one level up: the *block*
+pointer (the variable's own declared type) converts to the
+`spirv.VulkanBuffer` handle, but every pointer an access chain into it
+produces converts to an ordinary `!llvm.ptr` in address space 11 (the
+address space LLVM's SPIRV backend expects a storage buffer access to use),
+since those are real memory once the handle has been materialized -- MLIR's
+own `AccessChainPattern` still applies past `feme::spirv::
+StorageBufferAccessChainPattern`'s first (member-select + array-index) hop,
+for any further struct field indices. This also needed one narrower fix:
+MLIR's own runtime array conversion refuses one with a nonzero `ArrayStride`
+decoration, which every runtime array nested in a real (Vulkan-valid)
+storage buffer block carries, so FeMe's own conversion drops the stride (the
+resulting `!llvm.array<0 x T>`'s layout comes from `T` alone).
 
 The right-hand column of that table is deliberately the same representation
 `feme::spirv::RaisedLoweringPass` produces in the DXIL -> SPIR-V direction,
@@ -598,21 +615,37 @@ caller.
 #### Known gap: `spirv` dialect -> `llvm` dialect conversion coverage
 
 Import succeeds on real shaders, and the conversion now covers the
-constructs a compute shader that binds, reads and writes a typed buffer needs
-(see the table above): image, sampled image and sampler *types* convert
-upstream in MLIR to the same LLVM target extension types LLVM's SPIR-V
-backend uses (`target("spirv.Image", ...)`, see `llvm/docs/SPIRVUsage.md`),
-and FeMe's own patterns cover the resource, builtin-variable and image-access
-*operations*.
+constructs a compute shader that binds, reads and writes a typed buffer,
+storage buffer or sampled texture needs (see the table above): image,
+sampled image and sampler *types* convert upstream in MLIR to the same LLVM
+target extension types LLVM's SPIR-V backend uses (`target("spirv.Image",
+...)`, see `llvm/docs/SPIRVUsage.md`), and FeMe's own patterns cover the
+resource, builtin-variable, storage-buffer, push-constant, image-access and
+basic-sampling *operations*.
 
-What is still missing is breadth rather than a structural gap: the sampling
-ops (`spirv.ImageSampleImplicitLod` and friends), `OpImageFetch`/`OpImageGather`,
-storage/uniform buffers (`StorageBuffer` blocks, which LLVM spells as
-`target("spirv.VulkanBuffer", ...)`), push constants, and the graphics
-pipeline's stage inputs and outputs, all of which are additional patterns of
-the same shape as the ones already there. Until they exist, the SPIR-V
-*input* half of the translation matrix is limited to compute shaders whose
-resources are images (`Buffer`/`Texture`) accessed without a sampler.
+What is still missing is breadth rather than a structural gap:
+
+- **Sampling variants.** Only `spirv.ImageSampleImplicitLod` with no
+  modifiers converts; the bias/gradient/explicit-LOD/depth-comparison
+  variants (`spirv.ImageSampleExplicitLod`, `*DrefImplicitLod`, ...) and
+  `OpImageGather`/`OpImageDrefGather` each need their own pattern supplying
+  the additional operand(s) `llvm.spv.resource.samplebias`/`samplegrad`/
+  `samplelevel`/`samplecmp*`/`gather*` expect.
+- **`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`).
+  These share `spirv.VulkanBuffer`'s representation in principle (see
+  `llvm/test/CodeGen/SPIRV/hlsl-resources/cbuffer*.ll`), but real
+  `clang`-compiled cbuffer access does not go through `spirv.AccessChain`
+  into the handle at all -- it flattens each cbuffer member into its own
+  external global in a separate address space (12) tied back to the
+  cbuffer's handle only via `!hlsl.cbs` module metadata, a shape SPIR-V
+  *import* has no reason to reproduce and that therefore needs its own
+  design decision before implementation, rather than reusing the storage
+  buffer access chain pattern.
+- **Graphics pipeline stage inputs and outputs.**
+
+Until they exist, the SPIR-V *input* half of the translation matrix does not
+yet cover every shader stage or every resource kind a real HLSL program can
+use.
 
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
