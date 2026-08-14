@@ -1402,8 +1402,18 @@ public:
     return FileLineColLoc::get(name, 0, currentTokenOffset + offset);
   }
 
+  /// Extracts the raw operand type bits from an operand token as a plain
+  /// integer. The bit pattern comes directly from (possibly untrusted or
+  /// malformed) binary input and may not correspond to any enumerator of
+  /// D3D10_SB_OPERAND_TYPE, so we deliberately avoid going through the
+  /// DECODE_D3D10_SB_OPERAND_TYPE macro's cast to that enum type, which
+  /// would be undefined behavior for out-of-range values.
+  static uint32_t decodeRawOperandType(uint32_t token) {
+    return (token & D3D10_SB_OPERAND_TYPE_MASK) >> D3D10_SB_OPERAND_TYPE_SHIFT;
+  }
+
   bool isImmOperand(uint32_t token) {
-    switch (DECODE_D3D10_SB_OPERAND_TYPE(token)) {
+    switch (decodeRawOperandType(token)) {
     case D3D10_SB_OPERAND_TYPE_IMMEDIATE32:
     case D3D10_SB_OPERAND_TYPE_IMMEDIATE64:
       return true;
@@ -1574,7 +1584,7 @@ public:
 
     FileLineColLoc loc = getLocation();
 
-    uint32_t opType = DECODE_D3D10_SB_OPERAND_TYPE(*token);
+    uint32_t opType = decodeRawOperandType(*token);
     bool isExtended = DECODE_IS_D3D10_SB_OPERAND_EXTENDED(*token);
 
     FailureOr<OperandComponents> components = parseOperandComponents(*token);
@@ -1956,15 +1966,12 @@ public:
     FAILURE_IF_FAILED(token);
 
     auto loc = getLocation();
-    auto rawOperandType = DECODE_D3D10_SB_OPERAND_TYPE(*token);
+    auto rawOperandType = decodeRawOperandType(*token);
     auto isExtended = DECODE_IS_D3D10_SB_OPERAND_EXTENDED(*token);
 
     auto type = dxsa::symbolizeOperandType(rawOperandType);
     if (!type)
-      // Streaming the raw enum would print the value as a byte, use cast to
-      // prevent it.
-      return emitError(loc, "unknown operand type: ")
-             << static_cast<unsigned>(rawOperandType);
+      return emitError(loc, "unknown operand type: ") << rawOperandType;
 
     auto components = parseOperandComponents(*token);
     FAILURE_IF_FAILED(components);
@@ -2659,7 +2666,7 @@ public:
     auto operandToken = parseToken();
     FAILURE_IF_FAILED(operandToken);
 
-    auto operandType = DECODE_D3D10_SB_OPERAND_TYPE(*operandToken);
+    auto operandType = decodeRawOperandType(*operandToken);
     if (operandType != D3D10_SB_OPERAND_TYPE_CONSTANT_BUFFER)
       return emitError(loc, "unexpected operand type: ") << operandType;
 
