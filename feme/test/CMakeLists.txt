@@ -18,11 +18,16 @@ set(FEME_TEST_DEPENDS
   FileCheck count not
   clang
   dxbc-as
+  dxbc-as-fuzzer
   feme
   feme-opt
   feme-translate
   feme-run
   feme-cfg-gen
+  feme-dxil-import-fuzzer
+  feme-dxbc-import-fuzzer
+  feme-spirv-import-fuzzer
+  feme-cpu-restructure-fuzzer
   FeMeUnitTests
   llc
   llvm-as
@@ -45,3 +50,34 @@ add_lit_testsuite(check-feme "Running the feme regression tests"
 set_target_properties(check-feme PROPERTIES FOLDER "Tests")
 
 add_lit_testsuites(FEME ${CMAKE_CURRENT_SOURCE_DIR} DEPENDS ${FEME_TEST_DEPENDS})
+
+# Roadmap step R6 (see feme/docs/Roadmap.md's §1.7 P0): a bounded,
+# seed-corpus-only run of every fuzz target, so a fuzzer that stops
+# compiling or regresses to crashing on one of its own checked-in seeds is
+# caught by `ninja check-feme-fuzz` (a few seconds of test time) rather
+# than only by an actual, unbounded fuzzing campaign that nothing today
+# runs in CI.
+set(FEME_FUZZ_TARGETS
+  feme-dxil-import-fuzzer
+  feme-dxbc-import-fuzzer
+  feme-spirv-import-fuzzer
+  dxbc-as-fuzzer
+  feme-cpu-restructure-fuzzer
+  )
+
+set(FEME_FUZZ_ARGS "")
+foreach(fuzzer ${FEME_FUZZ_TARGETS})
+  list(APPEND FEME_FUZZ_ARGS
+    "--fuzzer=$<TARGET_FILE:${fuzzer}>=${FEME_SOURCE_DIR}/tools/${fuzzer}/seed-corpus")
+endforeach()
+
+add_custom_target(check-feme-fuzz
+  COMMAND ${Python3_EXECUTABLE}
+          ${FEME_SOURCE_DIR}/utils/check-feme-fuzz.py
+          ${FEME_FUZZ_ARGS}
+  DEPENDS ${FEME_FUZZ_TARGETS}
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  COMMENT "Running bounded seed-corpus fuzz checks"
+  USES_TERMINAL
+  )
+set_target_properties(check-feme-fuzz PROPERTIES FOLDER "Tests")
