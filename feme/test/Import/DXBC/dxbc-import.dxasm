@@ -1,0 +1,25 @@
+// RUN: dxbc-as --emit=container %s -o %t.dxbc
+// RUN: feme-translate --import-dxbc %t.dxbc | FileCheck %s
+
+// Round-trips a minimal legacy DXBC module through feme::DXBCImporter:
+// dxbc-as (see feme/docs/Design.md's "dxbc-as" section) assembles this
+// file's disassembly text into a full DXContainer with an `SHEX` part, and
+// feme-translate's `--import-dxbc` (feme::DXBCImporter) locates that part
+// and decodes it back into the `dxsa` dialect via feme::dxsa::deserialize.
+// No binary fixture is checked in, per "Avoiding binary test fixtures" in
+// feme/docs/Design.md.
+
+ps_5_0
+dcl_globalFlags refactoringAllowed
+dcl_input_ps constant v0.x
+dcl_output o0.x
+mov o0.x, v0.x
+ret
+
+// CHECK: dxsa.module pixel_shader 5 0 {
+// CHECK-NEXT: dxsa.dcl_global_flags <refactoringAllowed>
+// CHECK-NEXT: dxsa.dcl_input_ps constant v<0, <x>>
+// CHECK-NEXT: dxsa.dcl_output o<0, <x>>
+// CHECK-NEXT: dxsa.mov o<0, <x>>, v<0, <x>>
+// CHECK-NEXT: dxsa.ret
+// CHECK-NEXT: }

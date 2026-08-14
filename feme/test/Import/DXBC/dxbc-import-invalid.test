@@ -1,0 +1,8 @@
+// RUN: not feme-translate --import-dxbc %s 2>&1 | FileCheck %s
+
+// Not a DXContainer at all (no "DXBC" magic) -- feme::DXBCImporter must
+// report an error, not crash, per "Diagnostics and Error Handling" in
+// feme/docs/Design.md.
+this is not a DXContainer
+
+// CHECK: error:

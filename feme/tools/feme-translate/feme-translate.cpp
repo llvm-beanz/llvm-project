@@ -12,10 +12,11 @@
 // output (see the "Testing Tools" section of feme/docs/Design.md).
 //
 // `--import-spirv` (roadmap step 2) wraps feme::SPIRVImporter; `--import-dxil`
-// (roadmap step 4) wraps feme::DXILImporter. Later roadmap steps will
-// register e.g. `--import-dxbc` here, migrating the registration pattern
-// from the `wip/dxsa-mlir` prototype's TranslateRegistration.cpp.
-// `--spirv-to-llvmir` and `--llvm-backend` (roadmap step 3) wrap
+// (roadmap step 4) wraps feme::DXILImporter; `--import-dxbc` (roadmap step
+// R7) wraps feme::DXBCImporter, the full-`DXContainer` counterpart to
+// `--import-dxsa-bin` below (which imports the bare tokenized bytecode
+// `dxbc-as` emits, with no container). `--spirv-to-llvmir` and
+// `--llvm-backend` (roadmap step 3) wrap
 // feme::SPIRVToLLVMTranslator and feme::TargetMachineBackend respectively,
 // so that each stage of the SPIR-V "null pipeline" (see
 // feme/docs/Design.md's Retargeting to Native ISA section) can be
@@ -29,6 +30,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "feme/Import/DXBC/TranslateRegistration.h"
 #include "feme/Import/DXIL/TranslateRegistration.h"
 #include "feme/Import/SPIRV/TranslateRegistration.h"
 #include "feme/Target/DXSA/TranslateRegistration.h"
@@ -44,6 +46,7 @@ int main(int argc, char **argv) {
   mlir::registerAllTranslations();
   feme::registerSPIRVImportTranslation();
   feme::registerDXILImportTranslation();
+  feme::registerDXBCImportTranslation();
   feme::registerDXSAImportBinTranslation();
   feme::registerDXSAExportBinTranslation();
   feme::registerDXSAToLLVMIRTranslation();
@@ -51,8 +54,6 @@ int main(int argc, char **argv) {
   feme::registerSPIRVToLLVMIRTranslation();
   feme::registerLLVMDialectToLLVMIRTranslation();
   feme::registerTargetMachineBackendTranslation();
-  // TODO: Register FeMe's other import/export translations (DXBC) here as
-  // they are implemented.
 
   return mlir::failed(
       mlir::mlirTranslateMain(argc, argv, "FeMe import/export testing driver"));
