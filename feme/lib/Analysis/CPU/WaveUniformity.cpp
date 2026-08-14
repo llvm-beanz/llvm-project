@@ -106,6 +106,7 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
   case Intrinsic::dx_wave_product:
   case Intrinsic::spv_wave_product:
   case Intrinsic::dx_wave_uproduct:
+  case Intrinsic::dx_wave_ballot:
     return ValueUniformity::AlwaysUniform;
 
   default:

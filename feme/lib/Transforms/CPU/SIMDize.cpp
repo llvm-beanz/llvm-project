@@ -197,8 +197,8 @@ std::optional<BuiltinCallKind> classifyBuiltin(Intrinsic::ID ID) {
 /// call (see feme::cpu::WaveCalls); `std::nullopt` for anything else,
 /// including `wave.getlaneindex` (a `BuiltinCallKind` instead -- see
 /// `classifyBuiltin` above) and the wave intrinsics no current front end
-/// raises yet (`WaveActiveSum`/`Product`/..., `WaveActiveBallot`,
-/// `WavePrefixSum`/`Product`/...; see WaveLowering.cpp's file comment).
+/// raises yet (`WaveActiveSum`/`Product`/..., `WavePrefixSum`/`Product`/...;
+/// see WaveLowering.cpp's file comment).
 std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
   switch (ID) {
   case Intrinsic::dx_wave_get_lane_count:
@@ -224,6 +224,8 @@ std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
     return WaveCallKind::ActiveCountBits;
   case Intrinsic::dx_wave_prefix_bit_count:
     return WaveCallKind::PrefixBitCount;
+  case Intrinsic::dx_wave_ballot:
+    return WaveCallKind::Ballot;
   default:
     return std::nullopt;
   }

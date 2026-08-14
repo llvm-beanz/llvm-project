@@ -144,6 +144,24 @@ TEST(WaveCallsTest, ReadLaneCarriesLaneIndexOperand) {
   EXPECT_FALSE(verifyModule(*H.M, &errs()));
 }
 
+TEST(WaveCallsTest, BallotRoundTrips) {
+  Harness H(4);
+  Value *Operand = Constant::getAllOnesValue(
+      FixedVectorType::get(Type::getInt1Ty(H.Ctx), 4));
+  CallInst *CI =
+      createWaveCall(H.Builder, WaveCallKind::Ballot, 4, H.Mask, Operand);
+  Type *I32Ty = Type::getInt32Ty(H.Ctx);
+  EXPECT_EQ(CI->getType(), StructType::get(H.Ctx, {I32Ty, I32Ty, I32Ty, I32Ty}));
+  EXPECT_FALSE(isDivergentWaveCallResult(WaveCallKind::Ballot));
+
+  std::optional<MatchedWaveCall> Matched = matchWaveCall(*CI);
+  ASSERT_TRUE(Matched);
+  EXPECT_EQ(Matched->Kind, WaveCallKind::Ballot);
+  EXPECT_EQ(Matched->WideMask, H.Mask);
+  EXPECT_EQ(Matched->WideOperand, Operand);
+  EXPECT_FALSE(verifyModule(*H.M, &errs()));
+}
+
 TEST(WaveCallsTest, MatchWaveCallRejectsUnrelatedCall) {
   Harness H(4);
   Function *Unrelated = Function::Create(

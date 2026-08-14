@@ -44,22 +44,25 @@
 //                       lane by lane (the "lane loop for large W" option --
 //                       see the header's row for why no shuffle-scan is
 //                       needed at these wave sizes)
+//   Ballot           -> `bitcast (M & X) to iW`, split and zero-pad into
+//                       the source ABI's 32-bit result words (roadmap step
+//                       R3; see `lowerBallot`)
 //
 // `getFirstActiveLane` is the one piece of arithmetic `IsFirstLane` and
 // `AllEqual` share (see its own comment for why it never reads out of
 // bounds, even when `M` is all-zero).
 //
-// `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/`Xor`,
-// `WaveActiveBallot` and `WavePrefixSum`/`Product`/`USum`/`UProduct` are not
-// lowered here: no current front end raises them into a module this pass
-// ever sees --`feme::dxil::OpRaisingPass` explicitly defers `WaveActiveOp`/
+// `WaveActiveSum`/`Product`/`Min`/`Max`/`BitAnd`/`Or`/`Xor` and
+// `WavePrefixSum`/`Product`/`USum`/`UProduct` are not lowered here: no
+// current front end raises them into a module this pass ever sees --
+// `feme::dxil::OpRaisingPass` explicitly defers `WaveActiveOp`/
 // `WaveActiveBit`/`WavePrefixOp` (they pick their source intrinsic from an
-// extra opcode-carried operand DXIL raising doesn't yet reconstruct) and
-// `WaveActiveBallot` (an aggregate-returning op), and SPIR-V import raises
-// no wave ops at all yet -- so lowering them now would be untested dead
-// code. This is a further narrowing of this milestone's scope, tracked
-// alongside milestone 1's "WaveActiveBallot raising deferred" deviation
-// note in feme/docs/FeMeCPUDesign.md.
+// extra opcode-carried operand DXIL raising doesn't yet reconstruct), and
+// SPIR-V import raises no wave ops at all yet -- so lowering them now would
+// be untested dead code. This is a further narrowing of this milestone's
+// scope. `WaveActiveBallot` is lowered (see `Ballot` above): roadmap step R3
+// added the multi-return-value raising mechanism milestone 1's deviation
+// note deferred it for (see feme/docs/FeMeCPUDesign.md's Status section).
 //
 //===----------------------------------------------------------------------===//
 
@@ -322,6 +325,43 @@ Value *lowerPrefixBitCount(IRBuilder<> &Builder, Value *WideMask,
   return Result;
 }
 
+/// `WaveActiveBallot`: `bitcast (M & X) to iW`, split and zero-pad into the
+/// source ABI's 32-bit result words (see "Phase 5"'s table). \p ResultTy is
+/// the matched call's actual result type (DXIL's fixed `{i32, i32, i32,
+/// i32}` -- see `feme::cpu::WaveCallKind::Ballot`'s comment); word \p I
+/// (`0..NumWords-1`) is bits `[32*I, 32*I+32)` of the `W`-bit mask, or zero
+/// once `32*I` reaches or exceeds `W` -- "Ballots always use the source
+/// ABI's full result shape ..., zeroing words and high bits beyond `W`" in
+/// "Phase 5". `WaveSize` is never wider than `feme::cpu::MaxWaveSize`
+/// (128 bits, exactly the width of DXIL's four-word ballot ABI), so every
+/// in-range word is a plain truncating (or, for `W` < 32, zero-extending)
+/// shift/extract, never a shift by an out-of-range amount.
+Value *lowerBallot(IRBuilder<> &Builder, Value *WideMask, Value *WideOperand,
+                   unsigned WaveSize, Type *ResultTy) {
+  Value *AndX = Builder.CreateAnd(WideMask, WideOperand);
+  Type *IWTy = IntegerType::get(Builder.getContext(), WaveSize);
+  Value *AsInt = Builder.CreateBitCast(AndX, IWTy);
+
+  auto *StructTy = cast<StructType>(ResultTy);
+  Value *Result = PoisonValue::get(StructTy);
+  for (unsigned I = 0, NumWords = StructTy->getNumElements(); I != NumWords;
+       ++I) {
+    Type *WordTy = StructTy->getElementType(I);
+    unsigned WordBits = WordTy->getIntegerBitWidth();
+    Value *Word;
+    if (I * WordBits >= WaveSize) {
+      Word = ConstantInt::get(WordTy, 0);
+    } else {
+      Value *Shifted = I == 0 ? AsInt
+                               : Builder.CreateLShr(
+                                     AsInt, ConstantInt::get(IWTy, I * WordBits));
+      Word = Builder.CreateZExtOrTrunc(Shifted, WordTy);
+    }
+    Result = Builder.CreateInsertValue(Result, Word, I);
+  }
+  return Result;
+}
+
 /// Lowers one matched `feme.cpu.wave.*` call per the file comment's table
 /// above, and replaces/erases the call.
 void lowerWaveCall(const MatchedWaveCall &Matched) {
@@ -357,6 +397,10 @@ void lowerWaveCall(const MatchedWaveCall &Matched) {
   case WaveCallKind::PrefixBitCount:
     Result =
         lowerPrefixBitCount(Builder, Matched.WideMask, Matched.WideOperand, W);
+    break;
+  case WaveCallKind::Ballot:
+    Result = lowerBallot(Builder, Matched.WideMask, Matched.WideOperand, W,
+                         CI.getType());
     break;
   }
 

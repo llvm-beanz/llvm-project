@@ -42,6 +42,8 @@ StringRef kindName(WaveCallKind Kind) {
     return "feme.cpu.wave.active_countbits";
   case WaveCallKind::PrefixBitCount:
     return "feme.cpu.wave.prefix_bitcount";
+  case WaveCallKind::Ballot:
+    return "feme.cpu.wave.ballot";
   }
   llvm_unreachable("unknown WaveCallKind");
 }
@@ -63,6 +65,8 @@ std::optional<WaveCallKind> parseKindName(StringRef Name) {
     return WaveCallKind::ActiveCountBits;
   if (Name == "feme.cpu.wave.prefix_bitcount")
     return WaveCallKind::PrefixBitCount;
+  if (Name == "feme.cpu.wave.ballot")
+    return WaveCallKind::Ballot;
   return std::nullopt;
 }
 
@@ -178,6 +182,14 @@ CallInst *createWaveCall(IRBuilderBase &Builder, WaveCallKind Kind,
     break;
   case WaveCallKind::PrefixBitCount:
     RetTy = FixedVectorType::get(I32Ty, WaveSize);
+    break;
+  case WaveCallKind::Ballot:
+    // DXIL's fixed `uint4` ballot ABI (`%dx.types.fouri32`): a literal,
+    // unnamed struct so it structurally unifies with whatever anonymous
+    // struct type `llvm.dx.wave.ballot`'s multi-value return actually uses
+    // (see `feme::dxil::OpRaisingPass::raiseAggregateCall`'s comment for why
+    // a *named* struct wouldn't type-check the same way here).
+    RetTy = StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty});
     break;
   }
 

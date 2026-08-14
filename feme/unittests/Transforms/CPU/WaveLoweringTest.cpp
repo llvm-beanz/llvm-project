@@ -280,4 +280,34 @@ TEST(WaveLoweringTest, LowersPrefixBitCountToDivergentLaneLoop) {
   EXPECT_TRUE(FoundWideMul);
 }
 
+TEST(WaveLoweringTest, LowersBallotToInsertValueChain) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = lowerWaveOps(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %pred = icmp eq i32 %tid, 0
+      %r = call {i32, i32, i32, i32} @llvm.dx.wave.ballot.i32(i1 %pred)
+      %x = extractvalue {i32, i32, i32, i32} %r, 0
+      %cnt = call i32 @llvm.ctpop.i32(i32 %x)
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare {i32, i32, i32, i32} @llvm.dx.wave.ballot.i32(i1)
+    declare i32 @llvm.ctpop.i32(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  // The lowered ballot is a 4-field `insertvalue` chain (see `lowerBallot`),
+  // built from a masked `bitcast`-to-`iW` word rather than a per-lane
+  // vector -- unlike `PrefixBitCount` above, the result is uniform (see
+  // `isDivergentWaveCallResult`), so nothing downstream needs widening.
+  unsigned InsertValueCount = 0;
+  for (const Instruction &I : instructions(F))
+    if (isa<InsertValueInst>(&I))
+      ++InsertValueCount;
+  EXPECT_EQ(InsertValueCount, 4u);
+}
+
 } // namespace

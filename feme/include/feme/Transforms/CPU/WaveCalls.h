@@ -50,10 +50,11 @@ class Value;
 namespace feme::cpu {
 
 /// Which wave operation a `feme.cpu.wave.*` call performs, one per non-
-/// trivial row of "Phase 5"'s lowering table that this milestone implements
-/// (see WaveLowering.cpp's file comment for which rows those are, and why
-/// the rest -- `WaveActiveSum`/`Product`/..., `WaveActiveBallot`,
-/// `WavePrefixSum`/`Product`/... -- are not yet covered).
+/// trivial row of "Phase 5"'s lowering table that this milestone (plus
+/// roadmap step R3's `Ballot` addition) implements (see WaveLowering.cpp's
+/// file comment for which rows those are, and why the rest --
+/// `WaveActiveSum`/`Product`/..., `WavePrefixSum`/`Product`/... -- are not
+/// yet covered).
 enum class WaveCallKind : uint8_t {
   /// `WaveGetLaneCount`: no operand, result is the constant wave size.
   GetLaneCount,
@@ -76,6 +77,10 @@ enum class WaveCallKind : uint8_t {
   /// `WavePrefixCountBits`/`WavePrefixBitCount`: `i1` operand, a per-lane
   /// `<W x i32>` exclusive prefix count.
   PrefixBitCount,
+  /// `WaveActiveBallot`: `i1` operand, uniform `{i32, i32, i32, i32}`
+  /// result (DXIL's fixed 128-bit ballot mask ABI -- see WaveLowering.cpp's
+  /// `lowerBallot`).
+  Ballot,
 };
 
 /// Returns whether \p Kind's result is divergent (a genuine `<W x T>` value

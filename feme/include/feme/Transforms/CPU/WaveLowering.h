@@ -23,8 +23,7 @@
 // than `wave.getlaneindex`, a builtin) into the vector reduction/scan/
 // broadcast arithmetic each one stands in for -- see WaveLowering.cpp's
 // file comment for exactly which wave intrinsics that covers, and why some
-// (`WaveActiveSum`, `WaveActiveBallot`, `WavePrefixSum`, ...) are still
-// left untouched.
+// (`WaveActiveSum`, `WavePrefixSum`, ...) are still left untouched.
 //
 //===----------------------------------------------------------------------===//
 
