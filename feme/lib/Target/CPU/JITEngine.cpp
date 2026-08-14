@@ -359,6 +359,6 @@ Error JITEngine::dispatch(const DispatchResources &Resources,
                           std::array<uint32_t, 3> GroupCount) const {
   using EntryFnTy = void (*)(const FemeDispatchArgs *);
   runDispatch(reinterpret_cast<EntryFnTy>(EntryFn), Info, Resources,
-             GroupCount);
+              GroupCount);
   return Error::success();
 }
