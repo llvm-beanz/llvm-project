@@ -62,12 +62,10 @@ struct ContainerSignatureElement {
 ///
 /// Returns null and emits diagnostics through \p Source's MLIRContext if the
 /// module uses a construct that is not translated yet.
-std::unique_ptr<llvm::Module>
-translateToLLVMIR(mlir::ModuleOp Source, llvm::LLVMContext &Context,
-                  llvm::ArrayRef<ContainerSignatureElement>
-                      RealInputSignature = {},
-                  llvm::ArrayRef<ContainerSignatureElement>
-                      RealOutputSignature = {});
+std::unique_ptr<llvm::Module> translateToLLVMIR(
+    mlir::ModuleOp Source, llvm::LLVMContext &Context,
+    llvm::ArrayRef<ContainerSignatureElement> RealInputSignature = {},
+    llvm::ArrayRef<ContainerSignatureElement> RealOutputSignature = {});
 
 } // namespace dxsa
 } // namespace feme

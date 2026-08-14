@@ -1,5 +1,6 @@
 add_mlir_library(FeMeTranslateDXSA
   DXSAToLLVMIRTranslator.cpp
+  DXSATranslator.cpp
   TranslateRegistration.cpp
 
   LINK_COMPONENTS
@@ -11,6 +12,7 @@ add_mlir_library(FeMeTranslateDXSA
   TransformUtils
 
   LINK_LIBS PUBLIC
+  FeMeCore
   FeMeDXSADialect
   MLIRIR
   MLIRTranslateLib
