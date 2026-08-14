@@ -97,6 +97,39 @@ below; each is called out inline where it's discussed, and summarized here:
     normalized by this pass, matching `feme::cpu::ResourceLoweringPass`'s
     own scope.
 
+Deviation: roadmap step R10 closes the "SPIR-V resource access executes
+through `feme-run` at all" gap the milestone 11 bullet above deferred, but
+not by teaching `BoundResourceNormalizationPass` itself SPIR-V's binding
+form (`SPV_EXT_descriptor_heap`, and with it a raised `spv.resource.
+handlefromheap` that pass could rewrite into, remain unraised upstream, so
+that deferral still stands as written). Instead, a new
+`feme::cpu::SPIRVResourceLoweringPass` normalizes a SPIR-V-sourced bound
+`spirv.VulkanBuffer` handle -- the storage-buffer representation
+`feme::spirv::convertBufferBlockType` (see the "SPIR-V" section of
+Design.md) produces for `RWStructuredBuffer<T>`/`StructuredBuffer<T>` --
+directly into the same canonical `feme.cpu.resource.*` calls
+`BoundResourceNormalizationPass` + `ResourceLoweringPass` jointly produce
+for DXIL, in one pass rather than two: SPIR-V has no bindless heap concept
+to normalize *into*, so there is no intermediate `handlefromheap` step to
+split around `checkSupportedRaisedOps` the way the DXIL side does. It
+covers only a flat (non-aggregate-element) storage buffer access -- a
+`getpointer` immediately followed by an ordinary load/store, with no
+`getelementptr` navigating the element's own fields -- matching
+`ResourceLoweringPass`'s own "typed and raw buffers only" narrowing;
+image/sampler resources and a structured buffer's individual fields remain
+future work. `feme-run` itself gained `feme::SPIRVImporter` +
+`feme::SPIRVToLLVMTranslator` wiring (mirroring its existing DXIL import),
+and a small `feme::cpu::SPIRVBuiltinFoldingPass` folds the
+`insertelement`-chain-then-`extractelement` idiom
+`feme::spirv::createConvertSPIRVToLLVMPass` always materializes a builtin
+(thread/group ID) input variable as, back into the single scalar lane a
+shader actually reads -- otherwise `feme::cpu::SIMDizePass`'s pattern
+matching over a resource store's value operand does not recognize it, even
+though DXIL's already-scalar `llvm.dx.thread.id` never needs this. The
+completion test is `test/Tools/feme-run/HLSL/front-end-equivalence.hlsl`:
+one shader's DXIL and SPIR-V executions checked against the same expected
+numbers.
+
 Deviation: milestone 2's implementation narrowed one thing described in
 "Phase 2: Uniformity Analysis" below:
 
@@ -2414,7 +2447,15 @@ remaining steps here interleave with the ones still open in
    SPIR-V module, but not executed through `feme-run`: real SPIR-V
    resource access does not yet round-trip through `feme::SPIRVImporter`
    at all (see "Known gap" in Design.md's SPIR-V section), independent of
-   anything in this milestone.
+   anything in this milestone. Roadmap step R10 closes the *execution*
+   half of this gap for a storage-buffer shader, once roadmap step R9's
+   `spirv` dialect -> `llvm` dialect conversion breadth covers one (see
+   the Status section's own R10 Deviation note above) -- but its own
+   completion test hand-writes the SPIR-V half directly as `spirv` dialect
+   MLIR rather than compiling it from the same `.hlsl` file this
+   milestone's tests do: Clang's HLSL front end only reaches SPIR-V
+   through LLVM's in-tree SPIRV backend, which R10's own build did not
+   configure.
 11. **Traditional bound-resource emulation** (done): add
   `feme::cpu::BoundResourceNormalizationPass`, preserve finite DXIL and
   SPIR-V binding-range metadata through raising/import, publish the reserved

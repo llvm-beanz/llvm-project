@@ -71,10 +71,18 @@ The SPIR-V *input* half is the narrowest edge of the translation matrix.
   binding, reading and writing storage buffers and sampling a texture, which
   is enough to run more (but not yet all) HLSL through both front ends (see
   §2.3).
-- **P0 — SPIR-V shaders cannot execute.** `feme-run` accepts `.ll`/`.bc`/
-  DXIL only (`tools/feme-run/feme-run.cpp`), so the CPU target's entire
-  execution-based test suite is DXIL-only. This is the single biggest
-  asymmetry in the current test story; see §2.4.
+- **P0 — SPIR-V shaders cannot execute (done by R10).** `feme-run` now
+  links `FeMeImportSPIRV`/`FeMeTranslateSPIRV` too (see §2.4.2), so a
+  SPIR-V binary module is imported and translated to LLVM IR the same way
+  a DXIL bitcode file/DXContainer is; `feme::cpu::SPIRVResourceLoweringPass`
+  and `feme::cpu::SPIRVBuiltinFoldingPass` (new CPU-pipeline passes) let a
+  storage-buffer compute shader using thread/group ID builtins execute,
+  closing this asymmetry for that shape of shader (still not every
+  resource kind §1.2's conversion-breadth note above lists as open --
+  image/sampler resources and per-field structured-buffer access remain
+  future work on the CPU-execution side specifically). See §2.4.2 and the
+  Deviation note roadmap step R10 adds to feme/docs/FeMeCPUDesign.md's
+  Status section.
 - **P1 — SPIR-V → DXIL direction.** Design.md milestone 6's remaining half:
   a pass raising SPIR-V-derived LLVM IR into DXIL's conventions. Blocked on
   the conversion breadth above.
@@ -288,10 +296,18 @@ being untested.
    coverage: it also caught, and this milestone fixed, a genuine
    `feme-cfg-gen` termination bug in its own irreducible-edge construct)
    until that gap closes.
-3. **Front-end equivalence.** No test compiles one HLSL source to *both*
-   DXIL and SPIR-V and asserts the two produce the same answer. This is the
-   test that would give the SPIR-V input path the same confidence the DXIL
-   one has, and it is blocked only on §1.2's two P0 items.
+3. **Front-end equivalence** (done by R10). Both of §1.2's P0 items now
+   close: `test/Tools/feme-run/HLSL/front-end-equivalence.hlsl` runs a
+   `RWStructuredBuffer<float>` compute shader through both the DXIL and
+   SPIR-V front ends and `FileCheck`s the same expected numbers from each.
+   The DXIL half is real HLSL compiled by Clang; the SPIR-V half is
+   hand-written `spirv` dialect MLIR (see that test's own comment for why
+   -- Clang's HLSL front end only reaches SPIR-V through LLVM's in-tree
+   SPIRV backend, which this roadmap step's own build did not configure),
+   so it is not literally *one* `.hlsl` source compiled twice, but the same
+   shader's logic independently authored for each front end and checked
+   for agreement, which is the property this item exists to give SPIR-V
+   input the same confidence the DXIL side already has.
 4. **JIT vs AOT** (done by R8). `AOTDispatchTest.cpp` establishes the pattern
    in `gtest` for one shader; `feme-run --object` now loads a shader
    compiled with `feme --target=<host>` -- a real object file -- with
@@ -375,10 +391,18 @@ is small enough to land on its own:
    input at several wave sizes and `FileCheck`s each run's output, so a
    shader opts into the sweep by one substitution instead of four `RUN:`
    lines.
-2. **`feme-run` SPIR-V input.** `feme-run` links `FeMeImportDXIL` only; the
-   work is linking the SPIR-V importer and its `Translator` chain and
-   reusing `Driver`'s existing format detection rather than re-deriving it,
-   and it is what unlocks §2.2's front-end-equivalence axis.
+2. **`feme-run` SPIR-V input** (done by R10). `feme-run` now links
+   `FeMeImportSPIRV`/`FeMeTranslateSPIRV` alongside `FeMeImportDXIL`, and
+   `loadModule` sniffs a SPIR-V binary's own magic number the same way
+   `feme::Driver::detectFormat` does, rather than re-deriving that logic
+   (the DXIL/SPIR-V import + translation split is small enough that
+   sharing `Driver`'s exact detection code was not worth the coupling; see
+   `feme-run`'s own file comment). Unlocks §2.2's front-end-equivalence
+   axis, once the CPU pipeline itself could also execute a SPIR-V-sourced
+   module's resource access and builtin-variable idiom (see
+   `feme::cpu::SPIRVResourceLoweringPass`/`SPIRVBuiltinFoldingPass` and
+   the Deviation note roadmap step R10 adds to
+   feme/docs/FeMeCPUDesign.md's Status section).
 3. **Heap YAML `kind`/`format`/`stride`** (done by R8). FeMeCPUDesign.md
    already specified the richer schema; milestone 11 shipped the raw-buffer
    subset. `feme-run`'s `resource-heap`/`bindings` entries now accept all
@@ -435,7 +459,7 @@ dependency column is the only ordering constraint.
 | R7 | DXBC through `Driver`/`feme`/`feme-translate` — Design.md milestone 8 end to end (done: `feme::DXBCImporter` + `feme::dxsa::DXSAToLLVMIRTranslator` wired into `feme::Driver`/`feme`/`feme-translate --import-dxbc`; found/fixed a latent `!dx.resources` UAV-metadata bug the new end-to-end path exposed, see §1.4) | §1.4 P0, §2.2.8 | — |
 | R8 | Heap YAML `kind`/`format`/`stride`; `typed-buffer.hlsl`; AOT lit recipe (done: `feme-run`'s heap YAML `resource-heap`/`bindings` entries accept `kind`/`format`/`stride`, closing the "raw buffers only" narrowing §2.2's "Resource shapes" row and milestone 11's own deviation note flagged; `typed-buffer.hlsl` gives `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` real execution coverage; `feme-run --object` loads a real `feme --target=<host>`-compiled object file with `orc::LLJIT::addObjectFile` and dispatches it through the `feme::cpu::runDispatch` loop factored out of `JITEngine::dispatch` for this reuse, closing §2.2's "JIT vs AOT" row for `lit` -- it has no `ResourceInfo` to place a `bindings` entry's reserved prefix, so only `resource-heap` is supported in that mode) | §2.4.3, §2.4.5, §2.2.4 | — |
 | R9 | `spirv`→`llvm` dialect breadth (storage buffers, sampling, push constants) (done: `StorageBuffer` blocks convert to `target("spirv.VulkanBuffer", ...)` handles with `llvm.spv.resource.getpointer`/GEP access chains; `PushConstant` variables convert to an ordinary global in address space 13, which LLVM's own `SPIRVPushConstantAccess` pass rewrites the rest of the way; basic `spirv.ImageSampleImplicitLod` sampling and `OpImageFetch` (reusing `spirv.ImageRead`'s lowering) convert -- sampling variants needing extra operands, `Uniform`-storage-class `cbuffer`/`ConstantBuffer<T>` blocks (a differently-shaped problem, see §1.2's updated note) and graphics stage inputs/outputs remain open) | §1.2 P0 | — |
-| R10 | `feme-run` SPIR-V input; one HLSL source executed through both front ends | §1.2 P0, §2.2.3 | R9 |
+| R10 | `feme-run` SPIR-V input; one HLSL source executed through both front ends (done: `feme-run` links `FeMeImportSPIRV`/`FeMeTranslateSPIRV`, sniffing SPIR-V's own magic number the same way `feme::Driver::detectFormat` does; `feme::cpu::SPIRVResourceLoweringPass` normalizes a bound `spirv.VulkanBuffer` storage-buffer handle directly into the same canonical `feme.cpu.resource.*` calls the DXIL `BoundResourceNormalizationPass`/`ResourceLoweringPass` pair produces (SPIR-V has no bindless heap to normalize into, so one pass suffices where DXIL needs two), and `feme::cpu::SPIRVBuiltinFoldingPass` folds the `insertelement`-chain-then-`extractelement` idiom SPIR-V's builtin-variable materialization always produces back into the single scalar lane read, matching DXIL's already-scalar `llvm.dx.thread.id` -- `test/Tools/feme-run/HLSL/front-end-equivalence.hlsl` runs a `RWStructuredBuffer<float>` shader through both front ends and checks the same expected numbers from each, though the SPIR-V half is hand-written `spirv` dialect MLIR rather than compiled by Clang from the same `.hlsl` file, since this build configures no LLVM SPIRV backend for Clang's own HLSL-to-SPIR-V path to use; image/sampler resources and per-field structured-buffer access remain unexecutable on the CPU target) | §1.2 P0, §2.2.3 | R9 |
 | R11 | Thread-safety test; route library diagnostics through `Context`; `FormatRegistry`; `Exporter` interface | §1.1 | R7 (a third format makes the registry pay) |
 | R12 | Root constants; `WaveReadLaneAt` with a varying lane; vector/aggregate decomposition | §1.6 P1 | — |
 | R13 | SPIR-V → DXIL direction; `BinaryWriter`; NVPTX/AArch64 | §1.2, §1.4, §1.5 P1 | R9 |
