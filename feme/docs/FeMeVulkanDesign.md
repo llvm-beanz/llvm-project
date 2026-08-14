@@ -1,0 +1,1080 @@
+# FeMe Vulkan Runtime Design
+
+## Status
+
+This is an initial design for a Vulkan installable client driver (ICD) backed
+by FeMe's CPU target. The first implementation target is a headless,
+compute-only Vulkan device. It is intended to sit below the standard Vulkan
+loader in the same position as Mesa's lavapipe, but it does not initially aim
+to match lavapipe's graphics, WSI, or extension coverage.
+
+The CPU shader compiler and execution machinery described in
+[FeMeCPUDesign.md](FeMeCPUDesign.md) already exists. The work designed here is
+the runtime layer which translates Vulkan objects and commands into that
+machinery, plus the FeMe changes needed to make the CPU target usable by a
+driver.
+
+The shared compiler, stage ABI, image/sampler, and software-rasterization work
+needed to extend this compute device to graphics is designed separately in
+[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md). This document retains
+ownership of Vulkan pipeline, render-pass, command, synchronization, and WSI
+semantics.
+
+Those FeMe changes are not incidental, and this design does not treat them as
+such. Four of them gate the first executing milestone:
+
+- `feme::SPIRVImporter` cannot yet ingest realistic Vulkan SPIR-V. Its
+  structurization limits, not its resource coverage, are the first blocker.
+  See "SPIR-V import prerequisites".
+- `feme::cpu::JITEngine` compiles once and dispatches many times, but has no
+  per-workgroup entry point and no worker pool. See "CPU Runtime API Changes".
+- `feme::cpu` supports only *uniform* groupshared accesses today, which
+  excludes the `gl_LocalInvocationIndex`-indexed shared arrays that dominate
+  real Vulkan compute shaders. See "Physical Device and Capabilities".
+- Root constant lowering does not exist at all, so Vulkan push constants are a
+  multi-pass CPU-target change rather than a translation detail. See
+  "Descriptor Model".
+
+## Summary
+
+FeMe should provide a shared library, tentatively `libfeme_vulkan`, which
+implements the Vulkan loader-driver interface and exposes one software
+`VkPhysicalDevice`. The device has one compute-only queue family. A compute
+pipeline imports the application's SPIR-V with `feme::SPIRVImporter`,
+translates it to raised LLVM IR, and compiles it with the FeMe CPU pipeline.
+A queue submission interprets recorded command buffers, snapshots the bound
+pipeline and descriptor state at each dispatch, translates Vulkan descriptors
+into `feme::cpu::FemeDescriptor` values, and invokes the compiled entry point.
+
+The central architectural boundary is:
+
+```mermaid
+flowchart LR
+    App[Vulkan application] --> Loader[Vulkan loader]
+    Loader --> ICD[libfeme_vulkan]
+
+    subgraph ICD[FeMe Vulkan ICD]
+      API[Generated entrypoint dispatch]
+      Objects[Vulkan objects and state]
+      Queue[Queue executor]
+      Compile[Pipeline compiler and cache]
+      Translate[Descriptor and push-constant translation]
+      API --> Objects
+      Objects --> Queue
+      Objects --> Compile
+      Queue --> Translate
+    end
+
+    Compile --> Import[SPIR-V import and translation]
+    Import --> CPU[FeMe CPU pipeline]
+    CPU --> Kernel[Compiled CPU kernel]
+    Translate --> ABI[FemeDispatchArgs]
+    Queue --> Kernel
+    ABI --> Kernel
+```
+
+The ICD owns Vulkan semantics. FeMe's CPU target continues to own shader
+semantics. In particular, the CPU target must not acquire knowledge of
+`VkDescriptorSet`, `VkBuffer`, queue submission, or Vulkan synchronization.
+
+## Goals
+
+- Load through the standard Khronos Vulkan loader using a driver manifest.
+- Present a useful, compute-only Vulkan physical device on Linux first.
+- Accept Vulkan SPIR-V compute shaders without translating through NIR,
+  Gallium, or Mesa.
+- Reuse FeMe's import, optimization, CPU lowering, runtime helper, and JIT/AOT
+  infrastructure.
+- Make all advertised limits, features, formats, and extensions truthful.
+- Support multiple devices, queues, and pipeline compilations without mutable
+  process-global FeMe state.
+- Coexist in one process with other installed Vulkan drivers, including other
+  LLVM-based software drivers, because the loader loads every discovered ICD.
+- Preserve a path to graphics support without designing a software rasterizer
+  into the compute milestone.
+- Make malformed SPIR-V and hostile Vulkan object sizes fail cleanly rather
+  than becoming host memory corruption.
+
+## Initial Non-Goals
+
+- Graphics, ray tracing, mesh shading, and video queues.
+- Window-system integration, surfaces, swapchains, and presentation.
+- Vulkan conformance. Until the relevant CTS coverage passes, the driver must
+  report a zero `VkConformanceVersion`, must not imply Khronos conformance in
+  its device name, driver name, or documentation, and must not be distributed
+  under a name that asserts a conformant Vulkan implementation.
+- Matching all lavapipe extensions or performance.
+- Reusing Mesa's NIR, Gallium, llvmpipe, or common Vulkan runtime as a link-time
+  dependency.
+- Device group execution, sparse residency, protected memory, external memory,
+  and external synchronization handles. Their *features* report false and their
+  capability queries return empty or degenerate results, but the core
+  entrypoints that carry them -- `vkEnumeratePhysicalDeviceGroups`,
+  `vkGetPhysicalDeviceSparseImageFormatProperties2`,
+  `vkGetPhysicalDeviceExternalBufferProperties`, and their peers -- are still
+  implemented. An advertised core version may report a feature as unsupported;
+  it may not omit a command.
+- Images, sampling, and samplers in the first executing milestone. These are
+  required for broader Vulkan compute compatibility, but FeMe's current CPU
+  resource runtime is buffer-oriented and deliberately does not implement
+  sampling.
+
+## Reference Model and Research Conclusions
+
+There are two distinct interfaces to reproduce from lavapipe's position in the
+stack:
+
+1. The Vulkan loader-driver interface: discovery, interface negotiation,
+   proc-address lookup, and dispatchable object layout.
+2. Vulkan device behavior: object lifetime, memory, descriptors, pipeline
+   creation, command recording, queue execution, and synchronization.
+
+The first is comparatively small but exacting. The Khronos loader requires a
+JSON driver manifest and discovers entrypoints through
+`vk_icdGetInstanceProcAddr`. Modern drivers negotiate a loader-driver interface
+version with `vk_icdNegotiateLoaderICDInterfaceVersion`. Driver-created
+dispatchable handles (`VkInstance`, `VkPhysicalDevice`, `VkDevice`, `VkQueue`,
+and `VkCommandBuffer`) are pointers to regular structures whose first field is
+reserved for loader dispatch data and is initialized with the loader magic.
+These requirements are separate from the Vulkan specification itself.
+
+Lavapipe demonstrates a useful high-level split: Vulkan objects and recorded
+commands live in a Vulkan frontend; pipeline compilation lowers SPIR-V into the
+backend's shader representation; queue execution interprets commands and drives
+the software backend. FeMe should preserve that split, but replace the
+NIR/Gallium/llvmpipe path with FeMe's SPIR-V importer and CPU target.
+
+Mesa's common Vulkan runtime is a valuable implementation reference, especially
+for generated entrypoints, object bases, allocation callbacks, command pools,
+and synchronization. Directly depending on it is not proposed: it is an
+internal Mesa library, would make FeMe's LLVM subproject depend on a second
+source tree and build system, and would not remove the FeMe-specific pipeline,
+descriptor, and execution work.
+
+Primary references:
+
+- [Vulkan loader-driver interface](https://github.com/KhronosGroup/Vulkan-Loader/blob/main/docs/LoaderDriverInterface.md)
+- [Vulkan specification](https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html)
+- [Vulkan-Headers and `vk.xml`](https://github.com/KhronosGroup/Vulkan-Headers)
+- [Mesa lavapipe source](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/gallium/frontends/lavapipe)
+- [Mesa common Vulkan runtime](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/vulkan/runtime)
+- [LLVMpipe overview](https://docs.mesa3d.org/drivers/llvmpipe.html)
+
+## Project and Library Boundaries
+
+The proposed source layout is:
+
+```text
+feme/
+  include/feme/Vulkan/       Public embedding and test interfaces, if any
+  lib/Vulkan/                ICD objects, entrypoints, and queue execution
+  tools/feme-vulkan-info/    Optional testing-only driver introspection tool
+  test/Vulkan/               Lit tests with small Vulkan clients
+  unittests/Vulkan/          Object, descriptor, and synchronization tests
+  share/vulkan/icd.d/        Configured development manifest template
+```
+
+The ICD is an optional FeMe component because Vulkan-Headers may not be present
+in every LLVM build. Configuration should accept a Vulkan-Headers source or
+install location and build `libfeme_vulkan` only when explicitly enabled. The
+driver should depend on Vulkan-Headers, FeMe, LLVM, MLIR, and platform thread/
+dynamic-library support, but not on the Vulkan loader library at runtime. Test
+clients link to the loader.
+
+Vulkan-Headers would be FeMe's first external dependency of any kind: FeMe is
+built in-tree only and currently has no optional external packages. The
+configuration surface, the CI coverage for the disabled path, and the version
+floor for `vk.xml` are therefore new project-wide obligations, not a reuse of
+an existing pattern.
+
+Vulkan entrypoint declarations and lookup tables should be generated from
+`vk.xml`. Hand-maintaining hundreds of command names, aliases, core-version
+promotions, and extension guards is error-prone even when only a subset is
+implemented. The generated table maps supported names to ICD functions and
+returns null for unsupported extension commands.
+
+### Process Coexistence and Symbol Visibility
+
+The Vulkan loader loads *every* discovered ICD into the application process, so
+on a normal Linux desktop `libfeme_vulkan.so` is loaded alongside Mesa drivers
+that link their own copy of LLVM. Two LLVM copies in one address space is a
+known failure mode: duplicate `cl::opt` registration aborts at load time,
+`ManagedStatic` and target-registry state collide, and RTTI/exception type
+identity diverges. This is a hard requirement on the ICD, not a packaging
+preference.
+
+The driver must therefore:
+
+- Link LLVM and MLIR statically, never against `libLLVM.so`/`libMLIR.so`, and
+  never be opened with `RTLD_GLOBAL`.
+- Build with `-fvisibility=hidden -fvisibility-inlines-hidden` and a link
+  version script that exports only the loader-facing `vk_icd*` symbols plus the
+  legacy `vkGetInstanceProcAddr` alias. No LLVM, MLIR, or FeMe symbol may be
+  dynamically exported.
+- Register no `llvm::cl` option from any code reachable in the ICD, and perform
+  LLVM's process-global target initialization exactly once under a
+  `std::once_flag` during `vkCreateInstance`. FeMe itself has no process-global
+  mutable state; LLVM's target registry does.
+- Be verified by a test that runs a client with both the FeMe manifest and a
+  system driver manifest visible, and by a link-time check that the exported
+  dynamic symbol set matches the version script exactly.
+
+## Loader Integration
+
+The initial Linux manifest is generated with the built shared library's path:
+
+```json
+{
+  "file_format_version": "1.0.1",
+  "ICD": {
+    "library_path": "/path/to/build/lib/libfeme_vulkan.so",
+    "api_version": "1.1.0",
+    "is_portability_driver": false
+  }
+}
+```
+
+The build-tree manifest uses an absolute path into the build directory; a bare
+soname only resolves after installation into a loader search path. Two
+manifests are configured: a development one for `VK_DRIVER_FILES` and an
+installed one for the packaging path.
+
+The exact advertised API version is selected during implementation from the
+core command and CTS coverage actually achieved; `1.1.0` above is illustrative,
+not a commitment. Vulkan has no pre-1.0 profile in which mandatory core
+functionality can simply be omitted, so the early milestones below are
+development checkpoints, not complete Vulkan implementations. Development
+runs select the build-tree manifest with `VK_DRIVER_FILES`.
+
+The library provides or makes queryable:
+
+- `vk_icdNegotiateLoaderICDInterfaceVersion`
+- `vk_icdGetInstanceProcAddr`
+- `vk_icdGetPhysicalDeviceProcAddr`
+- `vkGetDeviceProcAddr`
+- Global commands needed before an instance exists, including instance version
+  and extension enumeration
+
+Supporting loader-driver interface version 7 is preferred. Exporting the
+traditional ICD symbols as well as making them queryable retains compatibility
+with older loaders at little cost.
+
+Every dispatchable object starts with `VK_LOADER_DATA` from `vk_icd.h` and is
+initialized with `set_loader_magic_value`. Non-dispatchable handles are typed
+pointers internally on 64-bit hosts. A generated handle-cast layer keeps Vulkan
+C handles out of the C++ implementation details.
+
+## Object Model
+
+All objects use the application's `VkAllocationCallbacks` when supplied. A
+small common header stores object type, owning device or instance, allocator,
+and debug name. Destruction validates no state in release builds; Vulkan's
+externally synchronized lifetime rules remain the application's obligation.
+
+| Vulkan object | FeMe ICD responsibility |
+|---|---|
+| `VkInstance` | Enabled instance extensions, allocator, one physical device |
+| `VkPhysicalDevice` | Immutable properties, limits, memory types, queue families |
+| `VkDevice` | Enabled features/extensions, queues, compiler service, worker pool |
+| `VkQueue` | Ordered submission stream and synchronization state |
+| `VkDeviceMemory` | Host allocation, size, memory type, map state |
+| `VkBuffer` | Size/usage plus a bound memory range |
+| `VkShaderModule` | Validated owned SPIR-V bytes or words |
+| `VkDescriptorSetLayout` | Immutable binding metadata and compact slot layout |
+| `VkPipelineLayout` | Ordered set layouts and push-constant ranges |
+| `VkDescriptorPool` | Accounting and storage ownership for descriptor sets |
+| `VkDescriptorSet` | Mutable descriptor records in layout-defined slots |
+| `VkPipeline` | Immutable compiled compute kernel and binding map |
+| `VkPipelineCache` | Serialized FeMe compilation artifacts keyed by pipeline inputs |
+| `VkCommandPool` | Allocator and reset domain for command buffers |
+| `VkCommandBuffer` | Append-only typed command stream while recording |
+| `VkQueryPool` | Result storage and availability state per query |
+| Fence/semaphore/event | Host synchronization state with condition-variable backing |
+
+`VkQueryPool` is listed because `vkCreateQueryPool`, `vkCmdResetQueryPool`,
+`vkCmdBeginQuery`/`vkCmdEndQuery`, `vkCmdWriteTimestamp`,
+`vkCmdCopyQueryPoolResults`, and `vkGetQueryPoolResults` are core commands. A
+compute-only device with zero `timestampValidBits` still has to implement the
+object and the commands; timestamp queries may write zero and pipeline
+statistics may be reported unsupported, but the pool cannot be absent.
+
+`VkImage`, image views, samplers, and WSI objects are not created until their
+features are implemented and advertised. Until then, `vkCreateImage` fails
+cleanly rather than returning a half-initialized object.
+
+## Physical Device and Capabilities
+
+The ICD exposes one CPU physical device.
+
+### Device identity
+
+`vendorID`, `deviceID`, and the `VkDriverId` reported through
+`VkPhysicalDeviceDriverProperties` are ecosystem-visible identifiers, not free
+fields. Applications, engines, and driver allowlists key behavior off them, so
+inventing values collides with real vendors. The driver must either use a
+Khronos-registered `VkDriverId` and a registered vendor ID, or, until one is
+allocated, set `vendorID` to the Khronos-reserved implementation-defined form
+described by the specification and report `VK_DRIVER_ID_MAX_ENUM` rather than
+impersonating another driver. Obtaining a registered `VkDriverId` is an
+explicit prerequisite for distributing the driver.
+
+The device UUID and pipeline cache UUID must be deterministic for the FeMe ABI
+version, LLVM version, target triple, host CPU feature policy, selected wave
+size, and driver build. Cache identity must change whenever any of those can
+change generated code or serialized data.
+
+### Queue families
+
+The first queue family exposes `VK_QUEUE_COMPUTE_BIT` and
+`VK_QUEUE_TRANSFER_BIT`, but not `VK_QUEUE_GRAPHICS_BIT`. Queue count should be
+small and truthful; one queue is sufficient for the first milestone. Timestamp
+valid bits are zero until query timestamps are implemented.
+
+### Subgroup size
+
+Core Vulkan 1.1 requires a single `VkPhysicalDeviceSubgroupProperties::subgroupSize`
+for the whole device. FeMe's wave size is a compile-time constant chosen per
+compilation from `{4, 8, 16, 32, 64, 128}`. The driver must therefore pin one
+wave size device-wide, derive it from the host SIMD width once at physical
+device initialization, report it as `subgroupSize`, and fold it into the device
+and pipeline cache UUIDs. Per-pipeline wave sizes are only permissible if the
+driver later implements `VK_EXT_subgroup_size_control` and honors its required
+and full-subgroup semantics.
+
+`subgroupSupportedStages` is compute-only, and `subgroupSupportedOperations`
+starts at `VK_SUBGROUP_FEATURE_BASIC_BIT` and grows only as
+`feme::cpu::WaveLoweringPass` coverage is demonstrated by tests.
+
+### Limits and features
+
+Properties and limits are implementation contracts, not aspirational values.
+In particular:
+
+- `maxComputeWorkGroupInvocations` is bounded by FeMe's supported wave/group
+  lowering and practical stack/groupshared limits.
+- `maxComputeWorkGroupSize` and `maxComputeWorkGroupCount` must be checked both
+  at pipeline creation and dispatch.
+- `maxComputeSharedMemorySize` cannot be advertised at the core-required
+  minimum until FeMe's groupshared lowering supports *divergent* accesses.
+  Today `feme::cpu` accepts only uniform groupshared indices and diagnoses
+  anything else, which excludes the `gl_LocalInvocationIndex`-indexed shared
+  arrays that most Vulkan compute shaders use. A shader that uses shared memory
+  divergently must fail pipeline creation with a clear diagnostic until that
+  lands; the advertised limit stays at whatever the driver can actually honor
+  for the advertised core version, which means the divergent path is a
+  prerequisite for claiming that version at all.
+- `minMemoryMapAlignment`, `minStorageBufferOffsetAlignment`,
+  `minUniformBufferOffsetAlignment`, `minTexelBufferOffsetAlignment`,
+  `maxStorageBufferRange`, `maxUniformBufferRange`, and `nonCoherentAtomSize`
+  must match the host allocator's real guarantees and the descriptor
+  translation's real range checks, not the specification minima copied
+  verbatim.
+- Descriptor limits reflect the maximum safely representable heap and the
+  allocation-overflow checks in the runtime, while still meeting every minimum
+  required by the advertised core version.
+- `maxPushConstantsSize` meets the core-required minimum. The driver is not
+  considered core-complete until SPIR-V push constants and the CPU root
+  constant path implement that advertised range; root constant lowering does
+  not exist in `feme::cpu` today.
+- Robust buffer access is advertised only when the descriptor helper path
+  enforces the Vulkan-required behavior for every supported buffer operation.
+  Advertising it false does *not* relax bounds enforcement; see "Error Handling
+  and Security".
+- Features involving images, atomics, subgroup operations, 8/16/64-bit types,
+  variable pointers, or physical storage buffer addresses are independently
+  gated by importer and CPU-lowering coverage.
+
+The driver reports no device extension merely because Vulkan-Headers declares
+it. Each extension has an implementation owner and a focused test before it is
+enumerated.
+
+## Shader and Pipeline Compilation
+
+### Input and specialization
+
+`vkCreateShaderModule` copies the SPIR-V and performs cheap structural checks.
+Full validation and translation occur at compute pipeline creation, when the
+entrypoint, specialization constants, and pipeline layout are known.
+
+Specialization constants must be applied before FeMe lowers SPIR-V to LLVM IR.
+The implementation should use SPIR-V/MLIR structured APIs rather than patching
+binary words. The selected entrypoint and its execution modes determine the
+thread-group size, and both of the specification's mechanisms for a
+specializable group size must be handled before the CPU pipeline resolves group
+dimensions:
+
+- The `LocalSizeId` execution mode, whose operands are specialization constant
+  ids.
+- The deprecated `BuiltIn WorkgroupSize` decoration applied to a
+  specialization-constant composite. This is what glslang emits by default and
+  is therefore the common case in practice, not the rare one. When present it
+  overrides `LocalSize`.
+
+After specialization, the resolved group size is validated against
+`maxComputeWorkGroupSize` and `maxComputeWorkGroupInvocations` at pipeline
+creation.
+
+### Compilation flow
+
+```mermaid
+flowchart TD
+    SM[VkShaderModule SPIR-V] --> Validate[Validate module, stage, entrypoint]
+    Spec[Specialization constants] --> Specialize[Apply specialization]
+    Layout[VkPipelineLayout] --> Bindings[Build set/binding translation map]
+    Validate --> Specialize
+    Specialize --> Import[SPIRVImporter]
+    Import --> Convert[SPIR-V dialect to raised LLVM IR]
+    Bindings --> Convert
+    Convert --> Check[Check supported operations and resources]
+    Check --> Lower[FeMe CPU pipeline]
+    Lower --> JIT[ORC compile reusable kernel]
+    JIT --> Pipe[Immutable VkPipeline]
+```
+
+The pipeline owns a compiler result rather than a `JITEngine` tied to one
+dispatch. The result contains:
+
+- A callable CPU entrypoint with lifetime tied to the compiled code object.
+- Resolved workgroup size and wave size.
+- Groupshared size and alignment.
+- `ResourceInfo` plus a Vulkan `(set, binding, array element)` to physical
+  FeMe heap-slot map.
+- Push-constant byte ranges used by the shader.
+- A strong cache key and optional serializable object-code payload.
+
+Compilation may run concurrently for independent pipelines. A `feme::Context`
+is not thread-safe, so each concurrent compile needs its own; immutable cache
+entries and target configuration may be shared. Context *ownership* outlives
+the compile, however: the JIT-compiled code object and the `llvm::LLVMContext`
+behind it stay alive as long as the `VkPipeline` does. `CompiledKernel` must
+therefore own its context -- either by taking it by value or by holding an ORC
+`ThreadSafeContext` -- rather than borrowing a caller's `Context&` that the
+caller may destroy after `vkCreateComputePipelines` returns. This is a
+correctness constraint on the API proposed below, not an implementation
+detail.
+
+Vulkan's pipeline-creation feedback and early-return flags can be added once
+the base compilation API exists.
+
+### SPIR-V import prerequisites
+
+The first blocker is not resource coverage; it is that `feme::SPIRVImporter`
+cannot yet ingest realistic Vulkan SPIR-V at all. The importer is a thin
+wrapper over `mlir::spirv::deserialize`, and that deserializer must rebuild
+structured `spirv.mlir.selection`/`spirv.mlir.loop` regions from an unstructured
+binary CFG. It cannot do so for every legal module. In particular, an `OpPhi`
+in a loop merge block -- which any loop carrying a `break` that produces a
+value emits -- is rejected outright, because `spirv.mlir.loop` has no results
+to carry the incoming values. A Clang- or glslang-compiled compute shader with
+resources has also been observed to fail to round-trip on `OpCopyObject`.
+
+The practical consequence is that only shaders with trivial control flow can be
+imported today. Making the importer survive real compiler output is a
+prerequisite milestone (V0.5 below), not a detail of the resource work, and it
+is the largest single unknown in this design. Two candidate approaches, to be
+evaluated in that milestone:
+
+- Fix the structurization gaps in MLIR's SPIR-V deserializer upstream, giving
+  `spirv.mlir.loop`/`spirv.mlir.selection` the result values needed to carry
+  merge-block phis.
+- Bypass structured reconstruction for compute by translating the SPIR-V CFG
+  directly to unstructured LLVM IR, and rely on `feme::cpu::PreparePass`'s
+  existing structurizer -- which already has to handle raised DXIL's
+  unstructured CFGs -- to restore structure. This aligns the SPIR-V path with
+  how the CPU target already consumes DXIL.
+
+The second is likely cheaper and lower-risk because FeMe's CPU pipeline already
+does not require structured input, but it is a genuine architectural decision
+and should be settled with a prototype before V1 work is scheduled.
+
+### Builtin and execution-shape mapping
+
+The compute builtins the driver must map onto the CPU entry ABI, and their
+sources, are:
+
+| SPIR-V builtin | Source in `FemeDispatchArgs` / CPU entry |
+|---|---|
+| `WorkgroupId` | `GroupID` |
+| `NumWorkgroups` | `GroupCount` |
+| `WorkgroupSize` | Compile-time constant from execution mode |
+| `LocalInvocationId` | Lane index within the group's wave loop |
+| `LocalInvocationIndex` | Linearized local id |
+| `GlobalInvocationId` | `GroupID * WorkgroupSize + LocalInvocationId` |
+| `SubgroupSize` / `SubgroupLocalInvocationId` | Pinned wave size and lane index |
+
+`NumWorkgroups` must report the full dispatch dimensions even when workgroups
+are distributed across the worker pool, and must remain correct under
+`vkCmdDispatchBase`, where the reported value is the original dispatch size
+rather than the base-offset range.
+
+### Required SPIR-V resource work
+
+Once import works, FeMe still cannot execute a representative Vulkan resource
+shader. The existing SPIR-V conversion handles important builtins and some
+image handle types, but its documented gaps include:
+
+- `StorageBuffer`/`Uniform` block conversion, represented by LLVM SPIR-V
+  `target("spirv.VulkanBuffer", ...)` types.
+- Push constants.
+- General descriptor-backed resource operations.
+- Sampling, image fetch/gather, and broad image operation coverage.
+- A binding-to-heap normalization for SPIR-V. `feme::cpu::BoundResourceNormalizationPass`
+  today rewrites only DXIL's `llvm.dx.resource.handlefrombinding`, because
+  SPIR-V has no raised bindless-heap counterpart to rewrite into:
+  `SPV_EXT_descriptor_heap` is unraised and only DXIL defines
+  `llvm.dx.resource.handlefromheap`. Adding a SPIR-V path is required work, not
+  an alternative to be chosen later.
+
+Buffer descriptors are the first required extension. Sampling and image
+resources remain a later milestone.
+
+## CPU Runtime API Changes
+
+`feme::cpu::JITEngine` already separates compilation from execution:
+`JITEngine::create` compiles once and the returned engine serves many
+`dispatch` calls against different `DispatchResources`. What it does not offer
+is any unit of work smaller than a whole dispatch. `dispatch` materializes the
+physical descriptor heap and then runs every workgroup to completion,
+sequentially, on the calling thread; `JITOptions::NumThreads` is accepted and
+ignored. That granularity, not the compile/execute split, is what makes it
+unsuitable for a Vulkan queue executor.
+
+Add a lower-level API that exposes per-workgroup invocation, tentatively:
+
+```c++
+namespace feme::cpu {
+
+class CompiledKernel {
+public:
+  // Takes ownership of the context; the compiled code outlives compilation.
+  static llvm::Expected<std::unique_ptr<CompiledKernel>>
+  create(Context Ctx, feme::Module M, const CompileOptions &Opts);
+
+  const ArtifactInfo &getArtifactInfo() const;
+
+  llvm::Error invokeGroup(const PreparedDispatch &Prepared,
+                          std::array<uint32_t, 3> GroupID,
+                          llvm::MutableArrayRef<uint8_t> GroupShared) const;
+};
+
+} // namespace feme::cpu
+```
+
+`invokeGroup` owns the *wave* loop within the group. The CPU entry wrapper is
+not called once per workgroup: it is called once per wave, with an entry mask
+selecting the active lanes of a partial trailing wave, as
+
+```text
+for W in 0 .. CeilDiv(GroupSize, WaveSize) - 1:
+  feme_cpu_entry_<name>(Args, entry_mask(W))
+```
+
+Hiding that loop inside `invokeGroup` keeps the wave/mask ABI out of the ICD.
+It also means `invokeGroup` -- not the caller -- is responsible for the
+intra-group barrier semantics that sequential wave execution implies: an
+`OpControlBarrier` scoped to the workgroup must be correct when the group's
+waves execute one after another rather than concurrently. Confirming that
+`feme::cpu`'s barrier lowering holds under this schedule is a prerequisite for
+any multi-wave workgroup.
+
+`PreparedDispatch` owns the materialized physical heap, the root-constant
+bytes, and the immutable `FemeDispatchArgs` fields, so that workers vary only
+`GroupID` and groupshared storage and no `std::vector<FemeDescriptor>` is
+rebuilt per group. It is submission-local and immutable while workers run.
+
+`JITEngine` can then become a convenience wrapper around `CompiledKernel`,
+preserving its existing API for `feme-run` and tests, and gaining a real
+implementation of `JITOptions::NumThreads` for free. This change provides the
+ICD with:
+
+- Workgroup scheduling controlled by the device worker pool.
+- Correct host allocation for groupshared regions above the entry wrapper's
+  stack threshold.
+- One-time descriptor-heap materialization per Vulkan dispatch rather than per
+  group.
+- A future route to object-code caching independent of Vulkan.
+
+Two further CPU-target changes are required:
+
+- `ArtifactInfo` must be fully populated with wave size, group size, and
+  groupshared size/alignment. The fields already exist in artifact ABI version
+  2 and are reserved in its byte layout, so populating them is not an ABI
+  break; they are simply always written as zero by the current builder.
+- Groupshared lowering must accept divergent indices. Until it does, the ICD
+  cannot honor `maxComputeSharedMemorySize` for realistic shaders.
+
+## Memory and Buffers
+
+The initial physical device exposes one memory type and one heap. The type is
+`HOST_VISIBLE | HOST_COHERENT | DEVICE_LOCAL`: on a software device the host
+allocation genuinely is device memory, and applications that require a
+device-local heap to select a device will otherwise reject the driver.
+`HOST_CACHED` may be added once the driver is confident about the reporting's
+implications for `vkFlushMappedMemoryRanges`. `vkAllocateMemory` allocates host
+storage aligned to at least the advertised `minMemoryMapAlignment`;
+`vkMapMemory` returns a pointer into it. Coherent memory avoids cache-management
+work in the first implementation, so flush and invalidate validate ranges and
+otherwise do nothing.
+
+Binding a buffer records a `(VkDeviceMemory, offset)` pair after validating
+alignment, range, and usage. A descriptor referring to a buffer resolves to:
+
+```text
+Data        = memory allocation base + buffer binding offset + descriptor offset
+SizeInBytes = effective Vulkan descriptor range
+Kind        = Raw or Structured
+Flags       = read-only or UAV-equivalent access
+```
+
+Vulkan's `VK_WHOLE_SIZE`, texel-buffer formats, dynamic offsets, and robust
+out-of-bounds behavior are resolved while preparing a dispatch. Integer
+overflow is checked before every offset/range addition.
+
+Device addresses are not exposed initially. Doing so would allow shaders to
+bypass descriptor bounds and would require a separate robust-access design.
+
+## Descriptor Model
+
+A descriptor set stores source Vulkan records; it does not store
+`FemeDescriptor` directly. This is important because buffers can be rebound,
+dynamic offsets are supplied at command recording/execution, and the same set
+may be consumed by pipelines with different compact heap layouts.
+
+At pipeline creation, shader reflection plus `VkPipelineLayout` produces a
+binding map. At dispatch preparation, the runtime walks only the bindings used
+by the pipeline and builds the FeMe heap.
+
+The binding map cannot be a per-descriptor slot table. A binding may be an
+array, and a shader may index that array with a value not known at compile
+time, so no static `(set, binding, array element)` to slot mapping exists for
+the indexed case. The map must instead assign each *binding array* a
+contiguous heap range and record `(base slot, count, stride)`, so a dynamic
+index becomes `base + index` with a bounds check against `count`. Descriptor
+arrays whose length exceeds what the reserved heap can represent must fail
+pipeline creation rather than silently truncate. Non-uniform indexing across a
+wave additionally requires the access to be lowered per lane, which gates
+advertising any descriptor indexing feature.
+
+| Vulkan descriptor type | Initial FeMe representation | Status |
+|---|---|---|
+| Storage buffer | Raw/structured `FemeDescriptor`, writable | Required first |
+| Uniform buffer | `CBuffer` or read-only raw descriptor | Requires CPU cbuffer path |
+| Dynamic storage/uniform buffer | Same, with bound dynamic offset | Required after base buffers |
+| Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Requires format map |
+| Uniform texel buffer | Typed read-only `FemeDescriptor` | Requires format map |
+| Sampled/storage image | Future image descriptor ABI | Deferred |
+| Sampler/combined image sampler | Future sampler descriptor ABI | Deferred |
+| Inline uniform block | Push/root-data or cbuffer descriptor | Deferred |
+| Acceleration structure | None | Out of scope |
+
+Descriptor updates obey Vulkan's host synchronization rules. Queue submission
+must preserve the visibility and lifetime semantics of update-after-bind and
+descriptor update templates before advertising those features. The first
+version should omit those features and snapshot all used descriptors into a
+prepared dispatch before worker execution.
+
+Push constants are copied into command-buffer state by `vkCmdPushConstants`.
+Each dispatch snapshots the bytes visible through its pipeline layout and
+passes them as `RootConstants`. Vulkan push-constant members carry absolute
+offsets within the push-constant block, while FeMe's root constant parameter is
+a flat byte blob, so the translation must record the base offset of the
+pipeline layout's ranges and reject a shader whose accessed range is not fully
+covered by a range declared in the layout with the compute stage bit set.
+
+This depends on FeMe root constant lowering, which does not exist: every
+register-bound handle is currently rejected by `feme::cpu::checkSupportedRaisedOps`,
+`ResourceInfo::RootConstantSize` is hardcoded to zero, and
+`BoundResourceNormalizationPass` explicitly does not normalize constant
+buffers. Push constants are therefore a multi-pass CPU-target change, and are
+scheduled accordingly in the milestones below rather than bundled into the
+first executing milestone.
+
+## Command Buffers
+
+Command buffers record a compact typed stream in command-pool-owned storage.
+They do not execute commands at record time. Each record contains an opcode
+and an aligned payload, with owned copies of variable-sized data where Vulkan
+requires recording-time capture.
+
+The first command set is:
+
+- Bind compute pipeline.
+- Bind descriptor sets and dynamic offsets.
+- Push constants.
+- Dispatch, dispatch base, and dispatch indirect.
+- Fill, update, and copy buffers.
+- Reset query pool, begin/end query, write timestamp, and copy query results.
+- Pipeline barriers sufficient for supported host/buffer operations.
+- Set/reset events and wait events, if events are advertised.
+- Execute secondary command buffers.
+- Begin/end debug labels as no-op metadata.
+
+`vkCmdDispatchBase` is core in Vulkan 1.1 and cannot be omitted, but
+`FemeDispatchArgs` carries only `GroupID` and `GroupCount` with no base offset.
+The ICD emulates it by offsetting the `GroupID` it passes to `invokeGroup`
+while still reporting the original dispatch size as `GroupCount`, so that
+`NumWorkgroups` stays specification-correct. If a future FeMe ABI adds a base
+field, the emulation collapses into it.
+
+`vkCmdUpdateBuffer` is capped at 65536 bytes and requires 4-byte aligned offset
+and size; `vkCmdFillBuffer` has the same alignment rule. Both bounds are
+enforced at record time, and the update payload is copied into command-pool
+storage, so both feed the command stream's checked size accounting.
+
+Execution maintains explicit state containing the current compute pipeline,
+descriptor sets, dynamic offsets, and push constants. A dispatch command
+captures or prepares the state required by its pipeline, validates indirect
+arguments if applicable, and schedules its workgroups.
+
+Secondary command buffers are interpreted into the primary execution state.
+Simultaneous-use support requires immutable command streams and submission-local
+execution state; no cursor or bound state may be stored back into the command
+buffer during execution.
+
+## Queues, Scheduling, and Synchronization
+
+Each `VkQueue` is an ordered stream. The first implementation may use one
+dedicated executor thread per queue, or execute submissions synchronously in
+`vkQueueSubmit`; the dedicated executor is preferred because Vulkan fences and
+semaphores should not require the submitting application thread to perform all
+work.
+
+Within a dispatch, independent workgroups can run on the device worker pool.
+Each workgroup receives private groupshared storage. Commands before and after
+the dispatch remain ordered according to the queue and barrier model.
+
+The scheduling layers are therefore:
+
+```text
+queue order
+  -> submission order
+    -> command-buffer order
+      -> command order
+        -> parallel workgroups within one dispatch
+```
+
+For the initial coherent host-memory device, many cache operations collapse to
+compiler fences and task dependencies, but Vulkan execution dependencies still
+matter. A pipeline barrier cannot be treated as a universal no-op: it must
+ensure earlier worker tasks covered by the source scope complete before later
+commands in the destination scope start.
+
+The first implementation gives that a deliberately coarse but obviously correct
+meaning: a barrier is a join. Executing a `vkCmdPipelineBarrier` drains every
+worker task previously scheduled by the command buffer under execution, then
+issues an acquire/release fence pair, then continues. Per-resource dependency
+tracking that would let independent tasks straddle a barrier is an optimization
+to be added later with tests, not the initial semantics. The same join applies
+at submission boundaries, at `vkCmdWaitEvents`, and before any host-visible
+result is reported through a fence or semaphore.
+
+Synchronization objects use monotonically changing state under a mutex and
+condition variable:
+
+- A fence becomes signaled after all work in its submission completes.
+- A binary semaphore transitions between unsignaled and signaled and is
+  consumed by a wait.
+- A timeline semaphore stores a monotonically increasing 64-bit value.
+- An event stores device-set/reset state and participates in command execution.
+
+The queue executor waits without holding object-global locks needed by another
+queue to signal. Device loss is latched once: subsequent queue/device operations
+return `VK_ERROR_DEVICE_LOST`, and all pending host waits are awakened.
+
+## Pipeline Cache
+
+The first cache may be process-local and store compiled kernels by a strong key
+over:
+
+- SPIR-V bytes and selected entrypoint.
+- Specialization data.
+- Pipeline-layout binding map and push-constant ranges.
+- FeMe/LLVM versions, CPU target triple, CPU feature policy, wave size, and
+  optimization/robustness options.
+- CPU runtime ABI and artifact ABI versions.
+
+`vkGetPipelineCacheData` must not serialize ORC pointers or process addresses.
+Persistent cache support therefore depends on a FeMe API that emits relocatable
+object code plus complete `ArtifactInfo`, and a loader that can safely recreate
+a `CompiledKernel`. Until then, the command may return a valid empty cache blob
+with the driver header and retain only in-process entries.
+
+The blob handed to `vkCreatePipelineCache` is fully attacker-controlled input:
+it is typically loaded from a file the application wrote earlier and may have
+been tampered with. Once object code is serialized, deserializing it is a
+direct code-execution vector. The format must therefore:
+
+- Begin with the specification-mandated header, validated for length, vendor
+  ID, device ID, and pipeline cache UUID before any further byte is read.
+- Carry a cryptographic digest over the payload, checked before use.
+- Bounds-check every internal offset and count with checked arithmetic, and
+  treat any inconsistency as a cache miss.
+- Treat *any* validation failure as an empty cache, never as an error and never
+  as a partial load. Vulkan explicitly permits ignoring stale or invalid cache
+  data.
+- Be excluded from the trust boundary entirely under a build option, so that
+  security-sensitive embedders can disable persistent cache loading.
+
+## Error Handling and Security
+
+Vulkan applications supply untrusted SPIR-V, object counts, offsets, indirect
+dispatch dimensions, and pipeline cache blobs. The runtime must:
+
+- Use checked arithmetic for allocation sizes, descriptor ranges, command
+  stream growth, and dispatch workgroup products.
+- Cap allocations and compiler resource use according to advertised limits.
+- Translate `llvm::Error` into the narrowest applicable `VkResult`, while
+  preserving diagnostics for `VK_EXT_debug_utils` or an opt-in log callback.
+- Never print from reusable library code or mutate process-global diagnostic
+  state.
+- Run SPIR-V import and the new Vulkan-to-FeMe translation surfaces under
+  fuzzers.
+- Treat unsupported shader operations as pipeline-creation failures, never as
+  partially lowered executable code.
+- Keep robust and non-robust access modes distinct. The ICD must never set
+  `FEME_DESCRIPTOR_TRUSTED` for application-controlled accesses unless it has
+  proved the complete accessed range.
+
+Host memory safety is independent of the advertised `robustBufferAccess`
+feature. Vulkan leaves the *values* produced by an out-of-bounds access
+undefined when robustness is not enabled, but for a software driver an
+undefined value must never become an arbitrary host read or write: the shader
+and the application share one address space. Descriptor bounds are therefore
+always enforced, and `robustBufferAccess` controls only whether the driver
+promises the specification's defined return values and no-op writes.
+`FEME_DESCRIPTOR_TRUSTED` is off by default and is set only where the complete
+accessed range has been proved at compile time.
+
+Out-of-host-memory conditions return `VK_ERROR_OUT_OF_HOST_MEMORY`. A shader
+compile failure returns `VK_ERROR_INVALID_SHADER_NV` only when that extension's
+semantics apply; otherwise pipeline creation should use the core-permitted
+failure result and emit a useful debug diagnostic. Internal execution failures
+after submission generally become device loss.
+
+## Threading Rules
+
+- Independent `VkDevice` objects share no mutable FeMe context.
+- Each concurrent pipeline compile uses its own `feme::Context`, and the
+  resulting `CompiledKernel` owns that context for the lifetime of the
+  `VkPipeline`. No `feme::Context` is shared between threads.
+- LLVM's process-global target initialization runs exactly once per process
+  under a `std::once_flag`, guarded so that repeated `vkCreateInstance` calls
+  and concurrent instances are safe. This is the one piece of global state the
+  driver cannot avoid, and it is the reason the ICD must not export LLVM
+  symbols (see "Process Coexistence and Symbol Visibility").
+- Vulkan externally synchronized objects rely on the application's required
+  synchronization; internally synchronized entrypoints protect their state.
+- Command buffers are immutable while pending.
+- Compiled kernels and pipeline metadata are immutable and may be invoked by
+  multiple worker threads.
+- Descriptor snapshots and push constants are submission-local.
+- Allocation callbacks are called with the scope and alignment required by the
+  Vulkan specification and never while holding unrelated queue locks.
+
+## Implementation Milestones
+
+### V0: Loader-visible skeleton
+
+- Add the optional Vulkan-Headers dependency and `vk.xml` entrypoint generator.
+- Build the ICD shared library with hidden visibility and an export version
+  script, and generate the development JSON manifest.
+- Implement instance, physical-device, device, and one compute queue family.
+- Implement truthful properties, features, memory properties, and extension
+  enumeration, including device identity and the pinned subgroup size.
+- Pass a loader smoke test and run a small client through
+  `vkEnumeratePhysicalDevices` and `vkCreateDevice`.
+- Pass a coexistence test with a second, LLVM-based system driver visible to
+  the loader.
+
+No shader execution is required in this milestone.
+
+### V0.5: SPIR-V import that survives real shaders
+
+This milestone exists because the importer, not the runtime, is the first
+blocker. It is scheduled before V1 and its outcome may change V1's design.
+
+- Assemble a corpus of glslang-, DXC-, and Clang-produced compute SPIR-V,
+  including loops with value-carrying breaks, nested control flow, and
+  `OpCopyObject`.
+- Decide between fixing MLIR's SPIR-V structurized deserialization and adding
+  an unstructured SPIR-V-to-LLVM path that relies on
+  `feme::cpu::PreparePass`'s structurizer; prototype the chosen approach.
+- Import the whole corpus without failure and round-trip it through the CPU
+  pipeline's front half.
+- Extend the SPIR-V importer fuzzer to the new path.
+
+### V1: Empty compute dispatch
+
+- Add device memory, buffers, shader modules, pipeline layouts, command pools,
+  and command buffers.
+- Factor `CompiledKernel`/per-workgroup invocation out of `JITEngine`, with the
+  wave loop and entry mask owned by `invokeGroup`.
+- Resolve group size from `LocalSize`, `LocalSizeId`, and the
+  `BuiltIn WorkgroupSize` specialization-constant decoration.
+- Compile and execute a resource-free SPIR-V compute shader using builtins.
+- Implement queue submit, fences, queue/device idle, and private groupshared
+  allocation.
+- Implement direct dispatch, `vkCmdDispatchBase` emulation, and indirect
+  dispatch, with dimension validation on all three.
+- Populate `ArtifactInfo`'s wave size, group size, and groupshared fields.
+
+This is the first end-to-end Vulkan-to-FeMe execution milestone. It remains a
+development subset until all mandatory limits and operations for the manifest's
+advertised core version are implemented. Push constants are deliberately *not*
+here: they require root constant lowering that does not exist in `feme::cpu`,
+which is a multi-pass change of its own and is scheduled in V3.
+
+### V2: Storage buffers and descriptors
+
+- Add a SPIR-V binding-to-heap normalization, since
+  `BoundResourceNormalizationPass` handles DXIL only.
+- Complete SPIR-V `StorageBuffer` lowering to the CPU resource model.
+- Implement descriptor layouts, pools, sets, updates, binding, and dynamic
+  storage-buffer offsets, with contiguous heap ranges for arrayed bindings.
+- Implement buffer copy/fill/update commands and buffer barriers with the join
+  semantics described above.
+- Implement divergent groupshared access in `feme::cpu`, without which
+  `maxComputeSharedMemorySize` cannot be honored for realistic shaders.
+- Run a Vulkan compute shader that reads and writes storage buffers.
+- Differentially compare results with lavapipe for the supported subset.
+
+### V3: Uniform data, push constants, and synchronization
+
+- Implement FeMe root constant lowering and map Vulkan push constants onto it,
+  covering the full advertised `maxPushConstantsSize`.
+- Implement uniform buffers and dynamic uniform offsets.
+- Implement binary and timeline semaphores across queues, including the host
+  `vkSignalSemaphore`/`vkWaitSemaphores` paths.
+- Add secondary command buffers and the supported event subset.
+- Implement query pools with zero-valued timestamps.
+- Verify workgroup barrier correctness for multi-wave groups under sequential
+  wave execution.
+
+### V4: Typed buffers and broader compute
+
+- Map supported `VkFormat` values to `ResourceFormat`.
+- Implement uniform/storage texel buffers.
+- Expand subgroup, atomic, numeric-type, and robustness coverage.
+- Add persistent pipeline cache object-code serialization, with header, UUID,
+  and digest validation and a fuzzer over the blob parser.
+- Begin Vulkan CTS runs for the intentionally advertised subset.
+
+### V5: Images and sampling
+
+- Design an image layout and sampler ABI rather than forcing images into the
+  current buffer descriptor.
+- Implement image memory requirements, image views, layout tracking, copies,
+  storage images, sampled images, and samplers.
+- Add the corresponding SPIR-V raising and CPU runtime helpers.
+
+Graphics and WSI require a separate design building on this runtime. In
+particular, software rasterization, interpolation, derivatives, blend/depth/
+stencil, render-pass/dynamic-rendering semantics, and presentation are not a
+mechanical extension of compute dispatch.
+
+## Testing Strategy
+
+Each milestone has four layers:
+
+1. Unit tests for handles, allocation callbacks, object lifetimes, descriptor
+   translation, command streams, cache keys, and synchronization transitions.
+2. Lit tests invoking tiny Vulkan clients with `VK_DRIVER_FILES` set to the
+   build-tree manifest.
+3. End-to-end compute tests comparing buffer results against a scalar reference
+   and, where available, lavapipe.
+4. Vulkan CTS runs filtered to the API version, queue capabilities, features,
+   and extensions actually advertised.
+
+Additional required configurations include ASan/UBSan, TSan for queue and
+pipeline concurrency, 32-bit handle-layout compilation where supported,
+different host SIMD widths, forced allocation failures, runs with the Khronos
+validation layers enabled, and runs with a second installed ICD visible to the
+loader. The SPIR-V importer fuzzer remains relevant, and new fuzzers should
+target descriptor updates, pipeline cache blob parsing, and command-stream
+decoding because all three consume attacker-controlled counts and offsets.
+
+The first acceptance test should be deliberately small:
+
+```text
+create instance
+enumerate FeMe physical device
+create compute-only device and queue
+allocate/map two buffers
+create descriptor set and compute pipeline
+record bind + dispatch
+submit with a fence
+wait and verify output bytes
+destroy every object with allocation accounting balanced
+```
+
+## Alternatives Considered
+
+### Fork or embed lavapipe
+
+Replacing only lavapipe's shader backend inside Mesa would provide mature
+Vulkan object and WSI machinery sooner. It would also make FeMe a Mesa backend,
+require NIR/Gallium integration or invasive lavapipe changes, and prevent the
+runtime from being an in-tree LLVM component. This remains useful as an
+experiment or differential oracle, not the proposed architecture.
+
+### Depend on Mesa's common Vulkan runtime
+
+This removes substantial boilerplate, but that runtime is not a stable external
+API and carries Mesa build, utility, and generated-code assumptions. Revisit
+only if the standalone implementation cost proves materially larger than
+expected and Mesa is willing to support an external consumer boundary.
+
+### Implement a Vulkan layer over another driver
+
+A layer cannot replace a physical device's shader execution backend. It can
+intercept calls, but it still needs an underlying ICD and therefore does not
+satisfy the goal.
+
+### Start with graphics for application compatibility
+
+Graphics would make the driver visible to more applications, but it introduces
+a software rasterizer and broad image/WSI semantics before validating the
+FeMe-specific Vulkan-to-CPU path. A compute-only queue is a valid and sharply
+testable first device.
+
+## Open Questions
+
+1. Should `CompiledKernel` be a CPU-target API independent of JIT/AOT, or should
+   the ICD own a thinner wrapper around a generalized `JITEngine`? Either way it
+   must own its `feme::Context`.
+2. Should SPIR-V import be fixed by completing MLIR's structurized
+   deserialization, or by adding an unstructured SPIR-V-to-LLVM path that reuses
+   `feme::cpu::PreparePass`'s structurizer as the DXIL path already does? This
+   is the highest-risk open question and V0.5 exists to answer it.
+3. Should the SPIR-V binding-to-heap normalization reuse
+   `BoundResourceNormalizationPass` by first raising `SPV_EXT_descriptor_heap`,
+   or should it be a separate SPIR-V-specific pass? A general raised
+   descriptor-heap intrinsic is no longer optional, only its shape is open.
+4. Which Vulkan core version is the smallest practical target for the loader,
+   ecosystem, and CTS in use when implementation begins?
+5. Should queue submissions execute synchronously for V1 simplicity, or should
+   the dedicated queue executor be present from the first dispatch?
+6. What host CPU feature policy makes the physical-device and pipeline-cache
+   identities stable across heterogeneous cores and process migration, and which
+   single wave size should be pinned as the device `subgroupSize`?
+7. Can FeMe's existing resource metadata carry Vulkan descriptor arrays and
+   dynamic indexing as contiguous heap ranges without losing set/binding
+   identity, or does it need a Vulkan-specific reflection record before
+   `ResourceLoweringPass`?
+8. Which robust-buffer-access guarantees can the current scalar runtime helpers
+   prove for vector, atomic, and partially out-of-range accesses?
+9. How large is the divergent-groupshared change in `feme::cpu`, and does it
+   belong to the CPU target's own roadmap rather than the Vulkan milestones?
+10. Can a registered `VkDriverId` and vendor ID be obtained, and what should the
+    driver report until one exists?
+
+Question 2 is answered first, by prototype, because it gates every later
+milestone. Questions 1, 3, and 7 are answered next with a resource-free
+prototype followed by one storage-buffer shader. Those exercise the
+architectural boundary without prematurely committing to images, graphics, or
+WSI.
+
+Answered during this design and recorded here so they are not reopened:
+Vulkan-Headers would be FeMe's first optional external dependency, and that
+cost is accepted; and Mesa's common Vulkan runtime is not a link-time
+dependency.

@@ -2057,6 +2057,11 @@ longer term to be worth designing *around* rather than into a corner. This
 section records what would change, what would not, and the few decisions
 being made now specifically to keep the door open.
 
+[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md) develops this outline into the
+shared core, CPU-target, image/sampler, and software-executor design used by
+the Vulkan and Direct3D runtimes. This section remains the record of the
+compute design decisions that constrain that work.
+
 ### What does not change
 
 The core of this design is stage-agnostic and stays as-is:
