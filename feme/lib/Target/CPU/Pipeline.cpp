@@ -14,6 +14,7 @@
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
+#include "feme/Transforms/CPU/RootConstantLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/SPIRVBuiltinFolding.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
@@ -211,6 +212,13 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
     Normalize.addPass(SPIRVBuiltinFoldingPass());
     Normalize.addPass(PreparePass(EntryPoint));
     Normalize.addPass(BoundResourceNormalizationPass());
+    // Lowers the one register-bound constant buffer "Root constants" in
+    // feme/docs/FeMeCPUDesign.md carves out an exception for, before
+    // `checkSupportedRaisedOps` below would otherwise reject its
+    // `handlefrombinding` call the same as any other register-bound
+    // handle `feme::cpu::BoundResourceNormalizationPass` didn't (or
+    // couldn't) normalize into a heap access.
+    Normalize.addPass(RootConstantLoweringPass());
     // SPIR-V has no bindless-heap counterpart to normalize into (see
     // `feme::cpu::SPIRVResourceLoweringPass`'s header comment), so it lowers
     // a bound `spirv.VulkanBuffer` handle directly into the same canonical

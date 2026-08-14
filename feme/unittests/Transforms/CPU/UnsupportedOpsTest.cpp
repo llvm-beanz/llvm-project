@@ -122,4 +122,54 @@ TEST(UnsupportedOpsTest, IgnoresUnusedDeclarations) {
   EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
 }
 
+TEST(UnsupportedOpsTest, AcceptsRootConstantHandle) {
+  // The one recognized root-constant binding (`(b0, space0)`, see
+  // RootConstantLowering.h) is not an unsupported operation, even though it
+  // is still present at this point -- `feme::cpu::RootConstantLoweringPass`/
+  // `feme::cpu::ResourceLoweringPass` run after this check (see "Root
+  // constants" in feme/docs/FeMeCPUDesign.md).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %row) {
+      %h = call target("dx.CBuffer", [16 x i8])
+          @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %v = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+          target("dx.CBuffer", [16 x i8]) %h, i32 0)
+      ret void
+    }
+    declare target("dx.CBuffer", [16 x i8])
+        @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+        target("dx.CBuffer", [16 x i8]), i32)
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+}
+
+TEST(UnsupportedOpsTest, RejectsRootConstantHandleAtOtherBinding) {
+  // Only `(b0, space0)` is recognized (see RootConstantLowering.h); a
+  // `dx.CBuffer` handle at any other binding is an ordinary register-bound
+  // resource this target still has no other way to address.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %row) {
+      %h = call target("dx.CBuffer", [16 x i8])
+          @llvm.dx.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %v = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+          target("dx.CBuffer", [16 x i8]) %h, i32 0)
+      ret void
+    }
+    declare target("dx.CBuffer", [16 x i8])
+        @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+        target("dx.CBuffer", [16 x i8]), i32)
+  )");
+  ASSERT_TRUE(M);
+  Error E = checkSupportedRaisedOps(*M);
+  EXPECT_THAT_ERROR(std::move(E),
+                    Failed<StringError>(testing::Property(
+                        &StringError::getMessage,
+                        testing::HasSubstr("register-bound resource handle"))));
+}
+
 } // namespace

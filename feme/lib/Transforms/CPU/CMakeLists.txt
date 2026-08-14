@@ -12,6 +12,7 @@ add_mlir_library(FeMeTransformsCPU
   ReferenceLowering.cpp
   ResourceCalls.cpp
   ResourceLowering.cpp
+  RootConstantLowering.cpp
   SIMDize.cpp
   SPIRVBuiltinFolding.cpp
   SPIRVResourceLowering.cpp

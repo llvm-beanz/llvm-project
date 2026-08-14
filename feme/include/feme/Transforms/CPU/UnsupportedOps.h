@@ -21,10 +21,14 @@
 //    handlefrombinding`/`handlefromimplicitbinding`) is rejected outright:
 //    the CPU target accepts bindless shaders only (descriptor-heap handles,
 //    `llvm.dx.resource.handlefromheap`), a deliberate narrowing of scope,
-//    not an implementation gap. (The design's future root-constant
-//    exception for exactly one register-bound constant buffer is not yet
-//    implemented -- see the Roadmap -- so every register-bound handle is
-//    rejected for now, including that one.)
+//    not an implementation gap. The one exception -- a single register-bound
+//    constant buffer lowered to the CPU ABI's root-constant block (roadmap
+//    step R12; see `feme::cpu::RootConstantLoweringPass`) -- is normalized
+//    away before this check runs, the same way
+//    `feme::cpu::BoundResourceNormalizationPass` normalizes a finite
+//    traditional binding into a heap access; a register-bound handle this
+//    check does still see was left behind because neither pass could (or
+//    would) normalize it.
 //
 //===----------------------------------------------------------------------===//
 
