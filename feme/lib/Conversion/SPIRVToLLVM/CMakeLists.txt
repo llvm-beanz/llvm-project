@@ -8,6 +8,7 @@ add_mlir_library(FeMeConversionSPIRVToLLVM
   TargetParser
 
   LINK_LIBS PUBLIC
+  FeMeCore
   MLIRIR
   MLIRLLVMDialect
   MLIRPass

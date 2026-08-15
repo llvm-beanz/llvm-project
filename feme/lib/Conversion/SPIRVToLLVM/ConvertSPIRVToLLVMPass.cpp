@@ -8,6 +8,8 @@
 
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -84,9 +86,11 @@ void setTargetAttributes(mlir::ModuleOp Module, llvm::StringRef TargetTriple) {
 /// stage from an `hlsl.shader` function attribute and the compute workgroup
 /// dimensions from an `hlsl.numthreads` one (see
 /// `llvm/lib/Target/SPIRV/SPIRVCallLowering.cpp` and `SPIRVAsmPrinter.cpp`),
-/// rather than from module-level operations the way SPIR-V itself does.
+/// rather than from module-level operations the way SPIR-V itself does. The
+/// same stage is also recorded as FeMe's own source-independent
+/// `feme.shader.stage` enumeration (see feme/include/feme/Core/ShaderStage.h).
 struct EntryPointInfo {
-  std::string Stage;
+  feme::ShaderStage Stage;
   std::string LocalSize;
 };
 
@@ -115,17 +119,34 @@ std::string formatLocalSize(mlir::ArrayAttr Values) {
   return Result;
 }
 
-/// Collects \p Module's entry points, keyed by the function each names.
-llvm::StringMap<EntryPointInfo>
-collectEntryPoints(mlir::spirv::ModuleOp Module) {
-  llvm::StringMap<EntryPointInfo> EntryPoints;
+/// Collects \p Module's entry points into \p EntryPoints, keyed by the
+/// function each names, and validates each one's stage against \p
+/// TargetTriple -- the triple the converted module will carry, whose
+/// environment names the stage the module as a whole claims. A module with
+/// entry points of more than one stage has no single such environment, so it
+/// is reported rather than converted with a triple that describes only its
+/// first entry point ("Stage identity" in
+/// feme/docs/FeMeGraphicsDesign.md).
+mlir::LogicalResult
+collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
+                   llvm::StringMap<EntryPointInfo> &EntryPoints) {
+  llvm::Triple::EnvironmentType Env =
+      llvm::Triple(TargetTriple).getEnvironment();
   for (auto EntryPoint : Module.getOps<mlir::spirv::EntryPointOp>()) {
-    llvm::Triple::EnvironmentType Stage =
+    llvm::Triple::EnvironmentType StageEnv =
         getStageForExecutionModel(EntryPoint.getExecutionModel());
-    if (Stage == llvm::Triple::UnknownEnvironment)
+    if (StageEnv == llvm::Triple::UnknownEnvironment)
       continue;
-    EntryPoints[EntryPoint.getFn()].Stage =
-        llvm::Triple::getEnvironmentTypeName(Stage).str();
+    std::optional<feme::ShaderStage> Stage =
+        feme::getShaderStageForEnvironment(StageEnv);
+    assert(Stage && "every pipeline stage environment names a shader stage");
+    if (!feme::isShaderStageCompatibleWithEnvironment(*Stage, Env))
+      return EntryPoint.emitError()
+             << "entry point '" << EntryPoint.getFn() << "' declares stage '"
+             << feme::getShaderStageName(*Stage)
+             << "', which disagrees with the module's target triple '"
+             << TargetTriple << "'";
+    EntryPoints[EntryPoint.getFn()].Stage = *Stage;
   }
 
   for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeOp>()) {
@@ -135,7 +156,7 @@ collectEntryPoints(mlir::spirv::ModuleOp Module) {
     if (It != EntryPoints.end())
       It->second.LocalSize = formatLocalSize(Mode.getValues());
   }
-  return EntryPoints;
+  return mlir::success();
 }
 
 /// Adds the `key = value` function attribute \p Key/\p Value to \p Func's
@@ -160,7 +181,12 @@ void applyEntryPointAttributes(
     auto It = EntryPoints.find(Func.getSymName());
     if (It == EntryPoints.end())
       return;
-    addPassthroughAttribute(Func, "hlsl.shader", It->second.Stage);
+    addPassthroughAttribute(
+        Func, "hlsl.shader",
+        llvm::Triple::getEnvironmentTypeName(
+            feme::getEnvironmentForShaderStage(It->second.Stage)));
+    addPassthroughAttribute(Func, feme::getShaderStageAttrName(),
+                            feme::getShaderStageName(It->second.Stage));
     if (!It->second.LocalSize.empty())
       addPassthroughAttribute(Func, "hlsl.numthreads", It->second.LocalSize);
   });
@@ -205,8 +231,12 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   for (mlir::Operation &Op :
        llvm::make_early_inc_range(Module.getBody()->getOperations())) {
     if (auto SPIRVModule = mlir::dyn_cast<mlir::spirv::ModuleOp>(Op)) {
-      Modules.push_back({Index, feme::spirv::getTargetTriple(SPIRVModule),
-                         collectEntryPoints(SPIRVModule)});
+      SPIRVModuleInfo Info{
+          Index, feme::spirv::getTargetTriple(SPIRVModule), {}};
+      if (mlir::failed(collectEntryPoints(SPIRVModule, Info.TargetTriple,
+                                          Info.EntryPoints)))
+        return signalPassFailure();
+      Modules.push_back(std::move(Info));
       // Materializes the resource name strings the handle intrinsics refer
       // to, so it has to run before the conversion drops the declarations
       // those names come from.

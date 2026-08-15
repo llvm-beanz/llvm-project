@@ -8,6 +8,8 @@
 
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
@@ -52,6 +54,26 @@ TEST(SPIRVToLLVMTest, TargetTripleNamesTheShaderStage) {
             "spirv-unknown-vulkan-hull");
   EXPECT_EQ(getTargetTripleFor(makeShaderModule("TessellationEvaluation")),
             "spirv-unknown-vulkan-domain");
+}
+
+// The `feme.shader.stage` attribute the conversion records on each entry
+// point is a projection of the same information the triple's environment
+// carries, so every stage a `spirv.module` can name has to survive both
+// spellings and map back to one enumerator ("Stage identity" in
+// feme/docs/FeMeGraphicsDesign.md).
+TEST(SPIRVToLLVMTest, EveryStageTripleNamesAShaderStage) {
+  for (llvm::StringRef Model :
+       {"GLCompute", "Vertex", "Fragment", "Geometry", "TessellationControl",
+        "TessellationEvaluation", "TaskEXT", "MeshEXT", "RayGenerationKHR",
+        "IntersectionKHR", "AnyHitKHR", "ClosestHitKHR", "MissKHR",
+        "CallableKHR"}) {
+    llvm::Triple Triple(getTargetTripleFor(makeShaderModule(Model)));
+    std::optional<ShaderStage> Stage =
+        getShaderStageForEnvironment(Triple.getEnvironment());
+    ASSERT_TRUE(Stage.has_value()) << Model.str();
+    EXPECT_EQ(getEnvironmentForShaderStage(*Stage), Triple.getEnvironment())
+        << Model.str();
+  }
 }
 
 TEST(SPIRVToLLVMTest, TargetTripleWithoutEntryPointNamesNoStage) {
