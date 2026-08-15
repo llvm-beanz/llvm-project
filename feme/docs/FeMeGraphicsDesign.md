@@ -365,6 +365,26 @@ producer element IDs to consumer element IDs. FeMe validates type, width,
 interpolation, and system-value compatibility but does not impose one API's
 linkage rules on the other.
 
+Status: the data model, its verifier, and its serialization round trip are
+implemented (roadmap R17). `feme::SignatureElement`/`feme::EntrySignature`
+and the enumerations for each field above live in
+`feme/include/feme/Core/Signature.h`; `feme::verifySignature` checks the
+structural invariants the model relies on (unique element IDs, an in-range
+component shape, a supported bit width, a semantic index only alongside a
+semantic name, and patch direction/frequency agreeing), and
+`feme::serializeSignature`/`feme::parseSignature` round-trip it through a
+versioned byte layout, following `feme::cpu::ArtifactInfo`'s
+serialize/parse convention in `feme/include/feme/Target/CPU/ResourceInfo.h`.
+Import wiring is not yet part of this: DXIL's `!dx.entryPoints` rows (R18)
+and SPIR-V's `Input`/`Output` interface variables (R19) do not populate this
+model yet, so no canonical stage operation refers to an `ElementID` this
+model assigned. `SignatureInterpolationMode`'s enumerators are deliberately
+DXIL's paired (base mode, sampling qualifier) kinds rather than the five
+independent axes the table above lists, so that R18 can map onto it without
+re-deriving the pairing; `SignatureSystemValue` currently only names the
+vertex/fragment builtins "Builtins and system values" describes, since later
+stages' system values are out of scope until their own milestones.
+
 ### Canonical stage operations
 
 After source raising, graphics behavior should be expressed by a small family
