@@ -2,6 +2,7 @@ set(LLVM_LINK_COMPONENTS
   Core
   Support
   TargetParser
+  TestingSupport
   )
 
 add_feme_unittest(FeMeCoreTests
@@ -9,6 +10,7 @@ add_feme_unittest(FeMeCoreTests
   FormatRegistryTest.cpp
   ModuleTest.cpp
   ShaderStageTest.cpp
+  SignatureTest.cpp
   )
 target_link_libraries(FeMeCoreTests
   PRIVATE
