@@ -13266,3 +13266,130 @@ target dependencies building every unit test binary first as before.
 7. `[feme] Resolve retarget triples through feme::getShaderStage`.
 8. `[feme] Recognize entry points through feme::isShaderEntryPoint`.
 9. This file.
+
+# Agent thoughts: roadmap step R17 (signature reflection data model)
+
+R17, from `feme/docs/Roadmap.md`, §1.8.2:
+
+> The signature reflection data model (element ID, direction, location,
+> semantic, system value, component type, shape, interpolation, frequency,
+> stream), its verifier, and its serialization round trip in `gtest`.
+
+## Scope
+
+The design's "Signature reflection" section (`FeMeGraphicsDesign.md`) covers
+three things this milestone is responsible for and two it explicitly is not:
+DXIL's `!dx.entryPoints` rows surviving `MetadataRaisingPass` (R18) and
+SPIR-V's `Input`/`Output` variables converting instead of failing to
+legalize (R19) are both listed as separate roadmap rows depending on R17, not
+part of it. So this change adds the data model, its verifier, and a
+serialization round trip -- and nothing that reads a real shader into it. I
+checked this wasn't a misreading by re-reading R18/R19's own rows, which
+name exactly those two gaps and list R17 as their prerequisite.
+
+## Modeling the fields
+
+Two of the design table's fields needed a decision the table itself leaves
+implicit:
+
+- **System value.** The table says "Position, vertex ID, instance ID,
+  primitive ID, depth, coverage, and peers" -- deliberately open-ended, since
+  later milestones (tessellation, geometry, mesh, ray) each add their own.
+  I scoped `SignatureSystemValue` to exactly what "Builtins and system
+  values" names for the vertex and fragment milestones already committed to
+  (`G0`/`G1`'s scope), rather than pre-populating every system value every
+  future stage will eventually need. Guessing at, say, mesh's per-primitive
+  outputs now would mean guessing at their shape before R35 designs it, and
+  getting it wrong would make the enum a migration instead of an addition
+  later -- the same reasoning R16's write-up gave for refusing
+  `runPipeline`'s stage parameter early.
+- **Interpolation.** The table lists five words -- "Flat, perspective,
+  no-perspective, centroid, sample" -- as if they were independent axes, but
+  centroid and sample are actually *qualifiers* on perspective/no-perspective
+  sampling, not stackable with flat. DXIL's own `InterpolationMode` already
+  encodes this as seven paired kinds (undefined/constant, linear,
+  linear-centroid, linear-noperspective, linear-noperspective-centroid,
+  linear-sample, linear-noperspective-sample). I modeled
+  `SignatureInterpolationMode` on that pairing rather than the table's literal
+  wording, specifically so R18's DXIL import can map one enumerator to
+  another instead of re-deriving which qualifiers are legal with which base
+  mode. This is exactly the kind of choice the design doc asks an
+  implementation to record when it resolves an ambiguity the sketch left
+  open (see R16's three bullet points in "Stage identity"), so I wrote it
+  into `FeMeGraphicsDesign.md`'s new "Status" note rather than only into a
+  comment.
+
+Component type, shape, frequency, direction, and stream map onto the table
+directly with no similar judgment call: signed/unsigned/float/boolean plus a
+separate bit-width field; first component/component count/row count;
+per-vertex/per-primitive/per-patch/per-sample; input/output/patch
+input/patch output; a reserved stream index.
+
+## Verifier
+
+`feme::verifySignature` checks structural invariants the model itself can
+state without any stage context -- unique element IDs, a component range
+that fits in one register, a bit width FeMe's component types actually
+support, a semantic index that only means something alongside a semantic
+name, and patch direction agreeing with per-patch frequency. I deliberately
+left out anything that needs a *stage* to evaluate (e.g. "only a fragment
+input may use `PerSample`", or "a vertex shader has no `PrimitiveID` output")
+since this model has no stage field of its own yet -- it is symmetrical
+with `feme::cpu::verifyStructured`, which only checks Phase 1's own
+postconditions and leaves later-phase invariants to later verifiers. Adding
+stage-aware rules here would be guessing at what R20's canonicalization pass
+needs to check, which is a different milestone's job.
+
+Following `feme::cpu::verifyStructured`'s shape exactly (`bool` return,
+optional `raw_ostream*`, every check running and reporting independently
+rather than short-circuiting) was a deliberate choice to keep one verifier
+idiom in the tree rather than inventing a second one for a second kind of
+model.
+
+## Serialization
+
+`serializeSignature`/`parseSignature` follow `feme::cpu::ArtifactInfo`'s
+convention in `ResourceInfo.h` (a small object-file-friendly byte layout: a
+versioned header, fixed fields in declaration order, and a counted tail for
+anything variable-length) with one addition that convention didn't need yet:
+a length-prefixed string for `SemanticName`, since a signature element's
+identity genuinely needs a variable-length field where `ArtifactInfo`'s
+tails were all fixed-size records. `parseSignature` validates enum ranges on
+every field that came from an enumeration (direction, system value,
+component type, interpolation mode, frequency) rather than trusting the
+integer, and rejects trailing bytes the same way `ResourceInfo`'s bound-range
+count check does -- both are "this either matches its own declared shape
+exactly or it's rejected outright" rather than "read what parses and ignore
+the rest", which is what makes a corrupt or forward-versioned buffer fail
+loudly instead of silently misparsing.
+
+One implementation bug worth recording: my first `ReadField` helper wrapped
+a failed `Expected<uint32_t>` in a new, more specific error without first
+consuming the original one, which aborts at runtime (LLVM's `Expected<T>`
+asserts if destroyed unchecked). The fix is `consumeError(V.takeError())`
+before returning the wrapping error -- a reminder that every `Expected`
+along a chain needs to actually be checked or consumed, not just the one
+that ultimately gets returned.
+
+## Testing
+
+`unittests/Core/SignatureTest.cpp`: one test per verifier rule (both the
+accept and reject side, including that patch direction and per-patch
+frequency must agree in *both* directions, not just one), a check that a
+signature violating two rules at once is reported for both rather than only
+the first, and the serialization round trip -- a signature exercising every
+field (including an empty semantic name, a patch element, and every scalar
+component type/bit width combination touched), an empty signature, and
+rejection of a too-short buffer, a wrong ABI version, a truncated semantic
+name, trailing bytes, and an out-of-range enumerator value.
+
+`ninja -C build check-feme` (the existing ccache-backed, assertions-enabled
+build, target dependencies building every unit test binary first as usual):
+955 passed / 2 unsupported before, 977 passed / 2 unsupported after.
+
+## Commit breakdown
+
+1. `[feme] Add the signature reflection data model, its verifier, and serialization`.
+2. `[feme] Test the signature reflection model's verifier and round trip`.
+3. `[feme] Design: record what R17 landed for signature reflection`.
+4. This file.
