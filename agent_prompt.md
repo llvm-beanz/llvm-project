@@ -23,8 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R13?
+Can you implement roadmap step R14?
 
-> SPIR-V → DXIL direction; `BinaryWriter`; NVPTX/AArch64 (see: §1.2, §1.4, §1.5
-> P1)
+> `-O2` end-to-end differential; execute-after-round-trip tests (see: §2.2.5,
+> §2.2.6)
 
