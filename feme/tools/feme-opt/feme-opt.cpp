@@ -45,6 +45,7 @@
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Transforms/DXIL/SPIRVRaising.h"
 #include "feme/Transforms/SPIRV/RaisedLowering.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/InitAllDialects.h"
@@ -142,6 +143,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::spirv::RaisedLoweringPass::name())
           return false;
         MPM.addPass(feme::spirv::RaisedLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::dxil::SPIRVRaisingPass::name())
+          return false;
+        MPM.addPass(feme::dxil::SPIRVRaisingPass());
         return true;
       });
   // FeMe CPU target passes (see feme/docs/FeMeCPUDesign.md's Pipeline

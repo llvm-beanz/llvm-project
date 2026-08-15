@@ -3,6 +3,7 @@ add_mlir_library(FeMeTransformsDXIL
   MetadataRaising.cpp
   OpRaising.cpp
   ResourceMetadata.cpp
+  SPIRVRaising.cpp
 
   LINK_COMPONENTS
   Core
