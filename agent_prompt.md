@@ -23,20 +23,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you address the documentation debt from the Roadmap document:
+Can you implement R16 from the roadmap document?
 
-## 3.4 Documentation debt
-
-Three documentation items are prerequisites for the steps above rather than
-follow-ups, and each is small:
-
-> - **FeMeVulkanDesign.md has no V6–V8.** The graphics design lists what they
->   unblock but explicitly does not own their Vulkan-side content (graphics
->   queue family, `VkRenderPass`/dynamic rendering, graphics pipeline state,
->   WSI). Required before R32's work has a Vulkan consumer to aim at.
-> - **Design.md's tool list and `docs/CommandGuide/` need `feme-render`**
->   (R31), which is also where the textual scene and image fixture formats
->   should be specified.
-> - **DXIL texture/sampler handle kinds still need a decision recorded in
->   Design.md's DXIL section** before R30 implements them — §1.3 has flagged
->   this as blocking since before the graphics design existed.
+> `feme::ShaderStage` plus the `feme.shader.stage` entry-point attribute,
+> derived at import from the source stage and diagnosed against the module
+> triple's environment; `feme::cpu::PreparePass` selects by enumeration instead
+> of `isComputeEntryPoint`'s string comparison, with `hlsl.shader` still
+> accepted (see: §1.8.2)
