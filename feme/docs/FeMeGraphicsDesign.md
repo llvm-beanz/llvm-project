@@ -61,10 +61,22 @@ by anything in this document:
 
 | Compute gap | First graphics milestone that requires it |
 |---|---|
-| Root constants are an unsupported resource kind | G1, for `FemeShaderResources::RootConstants` |
-| A barrier inside a surviving branch or loop is diagnosed, not split | G5 and G6, for patch and mesh workgroups |
+| Root constants cover only one narrow shape | G1, for `FemeShaderResources::RootConstants` |
+| A barrier inside a surviving branch is diagnosed, not split | G5 and G6, for patch and mesh workgroups |
 | Divergent groupshared access is diagnosed | G5 and G6 |
-| No SSA value may be live across a group-sync barrier | G5 and G6 |
+| A `phi` live across a group-sync barrier cannot be spilled | G5 and G6 |
+
+Status: three of these four rows were narrowed by compute work that landed
+after this document's first draft, and the table above records the corrected
+state. Roadmap step R12 landed `feme::cpu::RootConstantLoweringPass`, so root
+constants are implemented — for the default `(b0, space0)` binding, a
+non-array `dx.CBuffer`, and a constant row index only — and
+`ResourceInfo::RootConstantSize` is genuinely populated; what G1 needs beyond
+that is breadth, not a first implementation. Roadmap step R5 split a barrier
+inside a *uniform, header-tested loop* and spilled ordinary values live across
+a barrier, leaving only a barrier inside a surviving *branch* and a live
+`phi`. Divergent groupshared access is unchanged. See feme/docs/Roadmap.md
+§1.8.1 for the per-row priority these carry as graphics prerequisites.
 
 G0 through G4 depend only on the compute middle end as it exists once root
 constants work. G5 and G6 reuse the compute workgroup and barrier lowering

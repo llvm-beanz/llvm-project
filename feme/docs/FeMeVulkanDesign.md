@@ -31,9 +31,13 @@ such. Four of them gate the first executing milestone:
 - `feme::cpu` supports only *uniform* groupshared accesses today, which
   excludes the `gl_LocalInvocationIndex`-indexed shared arrays that dominate
   real Vulkan compute shaders. See "Physical Device and Capabilities".
-- Root constant lowering does not exist at all, so Vulkan push constants are a
-  multi-pass CPU-target change rather than a translation detail. See
-  "Descriptor Model".
+- Root constant lowering covers only one narrow binding shape, so covering
+  Vulkan's advertised push-constant range is a multi-pass CPU-target change
+  rather than a translation detail. See "Descriptor Model".
+
+The FeMe-side prerequisites above, and this document's milestones, are
+scheduled against the rest of FeMe in [Roadmap.md](Roadmap.md) (§1.9 and
+§3.3).
 
 ## Summary
 
@@ -374,8 +378,9 @@ In particular:
   required by the advertised core version.
 - `maxPushConstantsSize` meets the core-required minimum. The driver is not
   considered core-complete until SPIR-V push constants and the CPU root
-  constant path implement that advertised range; root constant lowering does
-  not exist in `feme::cpu` today.
+  constant path implement that advertised range; `feme::cpu`'s root constant
+  lowering covers only one narrow binding shape today (see "Push constants"
+  below).
 - Robust buffer access is advertised only when the descriptor helper path
   enforces the Vulkan-required behavior for every supported buffer operation.
   Advertising it false does *not* relax bounds enforcement; see "Error Handling
@@ -681,13 +686,15 @@ a flat byte blob, so the translation must record the base offset of the
 pipeline layout's ranges and reject a shader whose accessed range is not fully
 covered by a range declared in the layout with the compute stage bit set.
 
-This depends on FeMe root constant lowering, which does not exist: every
-register-bound handle is currently rejected by `feme::cpu::checkSupportedRaisedOps`,
-`ResourceInfo::RootConstantSize` is hardcoded to zero, and
-`BoundResourceNormalizationPass` explicitly does not normalize constant
-buffers. Push constants are therefore a multi-pass CPU-target change, and are
-scheduled accordingly in the milestones below rather than bundled into the
-first executing milestone.
+This depends on FeMe root constant lowering broader than what exists: roadmap
+step R12 landed `feme::cpu::RootConstantLoweringPass`, so the default
+`(b0, space0)` binding with a non-array constant buffer and a constant row
+index does lower and `ResourceInfo::RootConstantSize` is populated, but any
+other register binding, an array, or a dynamic row index is still rejected,
+and `BoundResourceNormalizationPass` explicitly does not normalize constant
+buffers. Covering the full advertised `maxPushConstantsSize` is therefore
+still a multi-pass CPU-target change, and is scheduled accordingly in the
+milestones below rather than bundled into the first executing milestone.
 
 ## Command Buffers
 
@@ -921,8 +928,9 @@ blocker. It is scheduled before V1 and its outcome may change V1's design.
 This is the first end-to-end Vulkan-to-FeMe execution milestone. It remains a
 development subset until all mandatory limits and operations for the manifest's
 advertised core version are implemented. Push constants are deliberately *not*
-here: they require root constant lowering that does not exist in `feme::cpu`,
-which is a multi-pass change of its own and is scheduled in V3.
+here: they require root constant lowering broader than the single
+`(b0, space0)`, non-array, constant-row-index shape `feme::cpu` implements
+today, which is a multi-pass change of its own and is scheduled in V3.
 
 ### V2: Storage buffers and descriptors
 
@@ -940,8 +948,9 @@ which is a multi-pass change of its own and is scheduled in V3.
 
 ### V3: Uniform data, push constants, and synchronization
 
-- Implement FeMe root constant lowering and map Vulkan push constants onto it,
-  covering the full advertised `maxPushConstantsSize`.
+- Complete FeMe root constant lowering beyond the single `(b0, space0)`,
+  non-array, constant-row-index shape it supports today, and map Vulkan push
+  constants onto it, covering the full advertised `maxPushConstantsSize`.
 - Implement uniform buffers and dynamic uniform offsets.
 - Implement binary and timeline semaphores across queues, including the host
   `vkSignalSemaphore`/`vkWaitSemaphores` paths.

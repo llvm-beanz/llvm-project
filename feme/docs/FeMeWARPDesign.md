@@ -39,10 +39,14 @@ the Vulkan design rather than specific to Direct3D:
   runs every group sequentially on the calling thread and accepts but ignores
   `JITOptions::NumThreads`, so a command-queue executor needs the per-workgroup
   API the Vulkan design proposes.
-- Root-constant lowering does not exist, `ResourceInfo::RootConstantSize` is
-  always zero, and `feme::cpu::BoundResourceNormalizationPass` deliberately
-  does not normalize constant buffers. Root constants and CBVs are a multi-pass
-  CPU-target change, not a frontend mapping.
+- Root-constant lowering exists only in the narrow shape roadmap step R12
+  landed: `feme::cpu::RootConstantLoweringPass` handles the default
+  `(b0, space0)` binding, a non-array `dx.CBuffer`, and a constant row index,
+  and `ResourceInfo::RootConstantSize` is populated from it. Any other
+  register binding, an array, or a dynamic row index is still unsupported, and
+  `feme::cpu::BoundResourceNormalizationPass` deliberately does not normalize
+  constant buffers. Root constants and CBVs remain a multi-pass CPU-target
+  change, not a frontend mapping.
 - Groupshared lowering accepts only *uniform* indices, which excludes the
   `SV_GroupIndex`-indexed `groupshared` arrays that ordinary compute shaders
   use.
@@ -53,6 +57,10 @@ the Vulkan design rather than specific to Direct3D:
   a shader stage with per-invocation inputs and outputs, and no `FemeDescriptor`
   field describes an image or a sampler. Every graphics stage below therefore
   needs new ABI, not only new runtime code.
+
+The FeMe-side prerequisites above, and this document's milestones, are
+scheduled against the rest of FeMe in [Roadmap.md](Roadmap.md) (§1.10 and
+§3.3).
 
 ## Summary
 
@@ -399,11 +407,12 @@ changed while a queue may be executing a command that reads them remain
 application error; the snapshot point does not repair that, it only stops the
 runtime from creating the problem itself.
 
-FeMe root-constant lowering is currently absent, and constant-buffer handling
-is incomplete. These are prerequisites for general D3D12 applications, not
+FeMe root-constant lowering covers only the default `(b0, space0)`, non-array,
+constant-row-index shape, and constant-buffer handling is otherwise
+incomplete. These are prerequisites for general D3D12 applications, not
 frontend-only translation work. The first executing shader may therefore use
-only bound raw/structured buffers and builtins; root constants and CBVs are a
-separate milestone.
+only bound raw/structured buffers and builtins; general root constants and
+CBVs are a separate milestone.
 
 ## Memory, Resources, and Residency
 
