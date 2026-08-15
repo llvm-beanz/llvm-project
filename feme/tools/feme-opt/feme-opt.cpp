@@ -46,6 +46,8 @@
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "feme/Transforms/DXIL/SPIRVRaising.h"
+#include "feme/Transforms/NVPTX/RaisedLowering.h"
+#include "feme/Transforms/NVPTX/ResourceLowering.h"
 #include "feme/Transforms/SPIRV/RaisedLowering.h"
 #include "mlir/IR/DialectRegistry.h"
 #include "mlir/InitAllDialects.h"
@@ -135,6 +137,22 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::amdgpu::ResourceLoweringPass::name())
           return false;
         MPM.addPass(feme::amdgpu::ResourceLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::nvptx::RaisedLoweringPass::name())
+          return false;
+        MPM.addPass(feme::nvptx::RaisedLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::nvptx::ResourceLoweringPass::name())
+          return false;
+        MPM.addPass(feme::nvptx::ResourceLoweringPass());
         return true;
       });
   PB.registerPipelineParsingCallback(

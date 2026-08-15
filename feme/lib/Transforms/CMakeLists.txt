@@ -1,4 +1,5 @@
 add_subdirectory(AMDGPU)
 add_subdirectory(CPU)
 add_subdirectory(DXIL)
+add_subdirectory(NVPTX)
 add_subdirectory(SPIRV)
