@@ -1087,8 +1087,11 @@ Gets the raised module into the shape the later phases assume:
 - **Promote what can be promoted** (`mem2reg`/SROA): an `alloca` that stays
   in memory becomes a per-lane array in Phase 4 (see below), which is
   correct but much worse code, so it is worth running SROA first.
-- **Canonicalize entry points**: exactly one `hlsl.shader="compute"`
-  function is selected (by name, from options). Retain its reachable internal
+- **Canonicalize entry points**: exactly one entry point of the requested
+  `feme::ShaderStage` -- `Compute` unless a caller asks otherwise -- is
+  selected (by name, from options; see "Stage identity" in
+  FeMeGraphicsDesign.md, and `feme::getShaderStage` for the
+  `feme.shader.stage`/`hlsl.shader` attributes it reads). Retain its reachable internal
   call graph, remove other entry points and unreachable definitions, and
   diagnose a call graph that cannot be isolated. Every retained definition
   goes through the CPU pipeline; the wrapper in Phase 6 needs a single root.

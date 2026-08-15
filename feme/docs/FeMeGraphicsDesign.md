@@ -25,7 +25,8 @@ FeMe is not graphics-capable today, and the gaps are specific:
 
 - `feme::cpu::PreparePass` selects an entry point with an
   `isComputeEntryPoint` predicate that string-compares the `hlsl.shader`
-  function attribute against `"compute"`, and `feme::cpu::runPipeline` has a
+  function attribute against `"compute"` (closed by roadmap R16: it now
+  selects by `feme::ShaderStage`), and `feme::cpu::runPipeline` has a
   single signature, `runPipeline(llvm::Module &, llvm::StringRef EntryPoint,
   unsigned WaveSize)`, with no stage parameter.
 - `feme::cpu::EntryWrapperPass` emits only the dispatch wrapper
@@ -284,13 +285,44 @@ information, recorded on the entry point as a `feme.shader.stage` attribute so
 that stage selection is a checked enumeration rather than a string comparison.
 Import derives it from the source-format stage and diagnoses any disagreement
 with the module triple's environment. Existing `hlsl.shader` attributes remain
-accepted during transition, but CPU stage selection should stop using
-`isComputeEntryPoint`'s comparison against `"compute"` as its fundamental
-model.
+accepted, but CPU stage selection should stop using `isComputeEntryPoint`'s
+comparison against `"compute"` as its fundamental model.
 
 One module may contain several entry points. Selection is always explicit when
 more than one compatible entry exists. A stage compile rejects a requested
 entry whose declared stage does not match `StageCompileOptions::Stage`.
+
+Status: implemented (roadmap R16). `feme::ShaderStage`, the
+`feme.shader.stage` attribute, and their accessors live in
+`feme/include/feme/Core/ShaderStage.h`; `feme::dxil::MetadataRaisingPass` and
+the `spirv` -> `llvm` dialect conversion both record the attribute at import,
+and `feme::cpu::PreparePass` takes the stage it selects as a
+`feme::ShaderStage` (`feme-opt -feme-cpu-stage=<stage>`) instead of comparing
+`hlsl.shader` against `"compute"`. Three details the sketch above leaves
+open, decided by that implementation:
+
+- **What "diagnosed against the module triple's environment" means per
+  format.** A stage-specific DXIL profile (`cs`, `vs`, ...) fixes the
+  environment before any entry point is examined, so an entry whose own
+  `ShaderKind` property names a different stage is diagnosed directly. A
+  `lib` profile -- and any triple whose environment names no stage at all --
+  constrains nothing, since each entry point declares its own stage
+  (`feme::isShaderStageCompatibleWithEnvironment`). SPIR-V has no separately
+  authored triple to check against: FeMe *derives* the triple from the first
+  entry point's execution model, so the same rule turns into a cross-entry
+  consistency check, and a `spirv.module` mixing two stages is diagnosed
+  rather than converted under a triple that describes only one of them.
+- **`hlsl.shader` remains the fallback, not just an accepted duplicate.**
+  `feme::getShaderStage` prefers `feme.shader.stage` and falls back to
+  `hlsl.shader`, so hand-written IR and modules raised before R16 keep
+  selecting. `hlsl.shader` also keeps being *written* at import: LLVM's own
+  DirectX and SPIRV backends read the stage from it, so it is a backend
+  interface rather than a transitional spelling, and the two attributes
+  differ deliberately for one stage (`hlsl.shader="pixel"` alongside
+  `feme.shader.stage="fragment"`).
+- **`ShaderStage::Library` is an enumerator like any other.** It is the stage
+  a `lib` profile's entry point declares when it declares none of its own,
+  which keeps every DXIL entry point mapping to exactly one enumerator.
 
 ### Signature reflection
 
