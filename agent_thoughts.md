@@ -12973,3 +12973,173 @@ no build target consumes `feme/docs`.
 3. `[feme] Roadmap: sequence the graphics and API runtime work (R16-R37)`.
 4. `[feme] Correct the design docs' root-constant status; link the roadmap`.
 5. This file.
+
+# Agent thoughts: closing Roadmap.md §3.4's documentation debt
+
+## What was asked
+
+Roadmap.md's §3.4 lists three documentation items as *prerequisites* for the
+graphics/runtime steps rather than follow-ups: FeMeVulkanDesign.md has no
+V6-V8, Design.md's tool list and `docs/CommandGuide/` have no `feme-render`
+(and nowhere specifies the scene/image fixture formats), and the DXIL
+texture/sampler handle-kind decision was still unrecorded. All three are
+documentation-only, so the whole change touches five markdown files and no
+code.
+
+## The thing I did not expect: §1.3's premise was wrong
+
+The DXIL item was the one I assumed would be the smallest, and it was the one
+that changed shape once I looked. Design.md and Roadmap.md both said textures
+and samplers were blocked because `ResourceProperties` "doesn't carry" the
+dimension, multi-sample and feedback bits the way it carries
+`StructuredBuffer`/`CBuffer`'s size and alignment.
+
+That is not true. `ResourceInfo::getAnnotateProps`
+(`llvm/lib/Analysis/DXILResource.cpp`) packs all of them:
+
+- Word0 bits 0-7 are `ResourceKind`, and for a texture the kind *is* the
+  dimension (`Texture2DMSArray`, `TextureCubeArray`, ...). FeMe's own
+  `raiseHandleFromBinding` already decodes that byte -- it just switches on
+  the buffer kinds and returns false for everything else.
+- Word0 bit 15 is `SamplerCmpOrHasCounter`, which for a sampler is exactly
+  the `Default`-versus-`Comparison` distinction `dx.Sampler` needs.
+- Word1 bits 0-7/8-15/16-23 are component type, component count and sample
+  count, and `ResourceTypeInfo::isTyped()` returns true for every non-feedback
+  texture kind -- so that is the *same* layout `widenToTypedBufferElement` and
+  `isSignedElementType` already decode for `TypedBuffer`.
+- Word1 for a feedback texture is the `SamplerFeedbackType`.
+
+So the "decision" is mostly "decode the fields that are already there, into
+LLVM's existing `dx.Texture`/`dx.MSTexture`/`dx.FeedbackTexture`/`dx.Sampler`
+target types". I wrote the section to say the old premise was wrong rather
+than quietly replacing it, because the wrong premise is what made this look
+like a research question for as long as it did, and someone will otherwise
+rediscover the note before the code.
+
+Three things really are open, and those are what the section spends its space
+on:
+
+1. The pre-SM6.6 `CreateHandle` path reads `!dx.resources`, and
+   `ResourceInfo::getAsMetadata` writes the element-type tag and the sample
+   count but *no component count*. So a texture raised through that path has
+   to recover its texel width from access sites, the way typed buffers
+   already recover theirs from a store's write mask and a load's
+   `%dx.types.ResRet` extractions. That is a real, if small, piece of work
+   with a real fallback (4).
+2. UNORM/SNORM/packed element kinds stay unraised. `getElementLLVMType`
+   already returns null for them, and unlike a buffer, a *texture* is where
+   they are common (`Texture2D<unorm float4>`). Raising them needs the format
+   to survive into the handle, which is the graphics design's central format
+   table, not DXIL's handle type. I recorded this as a deliberate hole rather
+   than pretending the decision covers it.
+3. Raising the handle is not raising the access. The section fixes the handle
+   type so both ends agree, and leaves `TextureLoad`/`Sample*`/`Gather*`/
+   `GetDimensions`/`CalculateLOD` with G2's `feme.image.*` operations, whose
+   canonical target the graphics design owns.
+
+## Vulkan V6-V8: decisions, not a feature list
+
+FeMeGraphicsDesign.md says explicitly that it supplies the FeMe-side content
+for V6-V8 and that the Vulkan-side milestones "still need to be written
+there". Writing them as four bullet lists would have satisfied the letter of
+the debt and none of its point, so the new "Graphics, Presentation, and
+Window-System Integration" section is organized around the decisions a later
+implementer would otherwise have to make under time pressure:
+
+- **One queue family, not two.** Adding a second family advertising only
+  `VK_QUEUE_GRAPHICS_BIT` would let graphics land without touching the compute
+  family, and would describe hardware that does not exist. This document is
+  unusually insistent about truthful capability reporting (it will not even
+  claim a `VkConformanceVersion`), so an invented queue family is the same
+  category of lie as an aspirational limit. `VK_QUEUE_GRAPHICS_BIT` goes on
+  the existing universal family, which also means V6 depends on G3 *and* G4:
+  the bit commits to every core graphics command, and there is no
+  "graphics bit set, blending unimplemented" configuration.
+- **Both `VkRenderPass` and dynamic rendering, normalized into one internal
+  render-target binding.** Implementing only dynamic rendering is tempting and
+  impossible -- `VkRenderPass` is core in every version the driver can
+  advertise. Normalizing both at the edge is the same pattern the descriptor
+  model already uses, and it keeps one implementation.
+- **Subpasses are joins first.** Reusing the coarse-but-obviously-correct
+  barrier semantics the compute path already defines, with tile-local merging
+  as a later optimization, is consistent with how this document treats every
+  other scheduling question.
+- **WSI starts headless.** `VK_EXT_headless_surface` exercises the entire
+  swapchain state machine under `lit` with no display server, and only then
+  does one CI-exercisable platform surface follow. This is also why WSI is in
+  V8 rather than V6: presentation is not a graphics prerequisite, and G3's own
+  completion test compares off-screen images.
+
+I also recorded the two obligations that are Vulkan's and not the graphics
+core's: acceleration-structure build inputs and shader binding tables are
+attacker-controlled parsers reached only at V8, so they get fuzzers under the
+document's existing rule, and `VK_KHR_buffer_device_address` becomes reachable
+there for the first time.
+
+Alternatives-Considered entries were added for the three rejected options, so
+the reasoning survives the next person who wonders why there is no separate
+graphics queue family.
+
+## `feme-render`: the fixture formats are the decision
+
+The tool entry itself is short. The interesting half is that a rendered image
+is the single most tempting binary fixture in the project and the least
+reviewable one -- a `.png` diff says an edge rule changed, not how -- so both
+formats had to be pinned down before R31 rather than invented alongside it.
+
+Three properties are load-bearing and are stated as such:
+
+- **One image format for texture input, expected output and actual-output
+  dump.** A rendered attachment can be fed back in as the next test's texture,
+  and a dump can be pasted into a `CHECK` line. Two formats would have drifted.
+- **Storage encoding, not converted values.** A fixture that printed converted
+  values would silently depend on the very conversion the G2 tests exist to
+  check.
+- **Exact comparison by default.** The graphics design *requires* determinism
+  across worker counts, tile orders and wave sizes, so a tolerance would hide
+  exactly the class of bug the fixture catches. `--tolerance` exists only for
+  the lavapipe/WARP differentials, and is a per-run argument rather than a
+  file property so it can never be quietly baked into a checked-in fixture.
+
+The scene format extends `feme-run`'s existing heap YAML rather than inventing
+a parallel schema, spells every enumeration in FeMe's own vocabulary (never
+`VkFormat` or `DXGI_FORMAT`) so one scene is legitimate evidence for both
+runtimes, and makes unimplemented state a load-time error instead of a
+silently ignored key -- otherwise a scene stops being diffable, which was the
+whole reason for text.
+
+I put the formats in Design.md under "Avoiding binary test fixtures" rather
+than in the command guide page, because `unittests/Graphics/` and both API
+runtime suites consume them too; the command guide documents the tool.
+
+## What I deliberately did not do
+
+- I did not implement anything. All three items are documentation
+  prerequisites; R30 and R31 remain the implementation steps, and the roadmap
+  entries now say "only the implementation is left" rather than being marked
+  done.
+- I did not invent a Vulkan version number for the advertised graphics
+  profile. That interacts with open question 4 (which core version), so it is
+  recorded as new open questions 11-13 rather than answered prematurely.
+- I did not extend the format decision to UNORM/SNORM textures. That answer
+  belongs to G2's format table, and guessing it here would have created a
+  second place for it to be decided.
+- I did not renumber or reprioritize anything in Parts 1-3 beyond the entries
+  these three items own.
+
+## Verification
+
+Documentation-only, so there is nothing new to compile, but I ran the suite
+before and after to prove it: `ninja feme-test-depends` then `ninja check-feme`
+in the existing ccache-backed (`CMAKE_CXX_COMPILER_LAUNCHER=ccache`),
+assertions-enabled build -- 932 passed, 2 unsupported, both times, identical
+to the pre-change baseline. I also checked every relative markdown link in
+`feme/docs` resolves, and that the change adds no over-80-column lines outside
+tables (the existing convention allows long table rows only).
+
+## Commit breakdown
+
+1. `[feme] Vulkan: design and schedule V6-V8 (graphics, ray tracing, WSI)`.
+2. `[feme] Design: record the DXIL texture/sampler handle-kind decision`.
+3. `[feme] Design: specify feme-render and its scene/image fixture formats`.
+4. This file.
