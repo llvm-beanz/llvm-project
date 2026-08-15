@@ -13562,3 +13562,178 @@ gtest cases, 2 new lit tests).
 3. `[feme] docs: record R18 (DXIL signature/root-signature preservation) as done` --
    Design.md, FeMeGraphicsDesign.md, and Roadmap.md updates.
 4. This file.
+
+# Agent thoughts: roadmap step R19 (SPIR-V non-builtin `Input`/`Output` variables)
+
+## What R19 actually asks for
+
+> Convert SPIR-V non-builtin `Input`/`Output` variables and their
+> `Location`/`Component`/`Index`/interpolation/per-primitive/per-patch
+> decorations instead of failing to legalize them (see: §1.8.2, §1.2)
+
+Unlike R18 (DXIL), the roadmap row's own text for R19 does *not* say
+"populate the signature model" -- it says "convert ... instead of failing to
+legalize", which is a narrower, concrete claim about
+`feme::spirv::createConvertSPIRVToLLVMPass` (the `spirv` dialect -> `llvm`
+dialect conversion). `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`
+already had the exact bug this closes, spelled out in its own comment:
+"Non-builtin `Input` variables (stage inputs) have no LLVM equivalent
+either way, and now fail to legalize with a diagnostic rather than
+converting to a pointer nothing can produce." I scoped the change to that
+literal claim, and updated FeMeGraphicsDesign.md's "Signature reflection"
+Status note to say plainly that feeding these variables into
+`feme::EntrySignature` itself is still R20's job (R20's own roadmap row
+already says it rewrites "SPIR-V interface accesses" into `feme.stage.*`,
+which is the natural point that would assign `ElementID`s) rather than
+silently claiming more than R19's own text asked for.
+
+## Finding the real LLVM-IR shape to converge on
+
+The novel research question was: what should a non-builtin `Input`/`Output`
+variable's declaration actually look like once it reaches LLVM's SPIRV
+backend, given the codebase already has three worked examples of the same
+general problem (a SPIR-V storage class with no MLIR upstream support) --
+resource handles (`llvm.spv.resource.handlefrombinding`), storage buffers
+(`spirv.VulkanBuffer`), and push constants (address space 13, backend pass
+does the rest). None of those looked right for stage IO: there's no
+"handle" for an ordinary varying, and nothing rewrites a plain global the
+way `SPIRVPushConstantAccess` does.
+
+I found the answer in `llvm/lib/Target/SPIRV/SPIRVUtils.cpp`'s
+`buildOpSpirvDecorations`, which reads an arbitrary `!spirv.Decorations`
+metadata node off an LLVM `GlobalVariable` and emits the matching
+`OpDecorate`s -- confirmed against
+`llvm/test/CodeGen/SPIRV/linkage/hidden-interface-vars.ll`, which is
+*exactly* this scenario (`@input_var`/`@output_var` in address space 7/8
+with `Location` via `!spirv.Decorations`). That test existing in-tree told
+me LLVM's SPIRV backend already has a well-defined answer for this; FeMe
+just needed to produce it. `storageClassToAddressSpace` in
+`llvm/lib/Target/SPIRV/SPIRVUtils.h` gave the address spaces (7/8)
+directly, matching the numbering the existing storage-buffer/push-constant
+comments already cite from the same file.
+
+## The type-conversion collision that took three iterations to get right
+
+My first attempt added a blanket `PointerType` conversion rule ("`Input`/
+`Output` -> ordinary pointer in address space 7/8") alongside a new
+`StageIOGlobalVariablePattern`/`StageIOAddressOfPattern` pair. This
+compiled and even passed my first hand-written `feme-opt` smoke test for
+the *new* case, but broke the *existing* builtin-variable conversion
+(`spirv-to-llvm-builtin-variables.mlir`) at legalization time -- a stray
+`builtin.unrealized_conversion_cast` appeared between a builtin's
+`llvm.spv.*` intrinsic result and the load "reading" it.
+
+Root cause, confirmed with `--debug-only=dialect-conversion`: MLIR's dialect
+conversion driver uses the shared `TypeConverter` to decide what a *not yet
+converted* SPIR-V-typed value's legalized type will eventually be, purely
+from the *type itself* (not from which op produced it), so it can build
+adaptors for ops that get visited before their operand's producer does; if
+a pattern later produces something of a different type than the converter
+predicted, a materialization cast bridges the gap. A builtin `Input`
+variable and a non-builtin one can share the exact same SPIR-V pointer type
+(e.g. both `!spirv.ptr<i32, Input>`), so one `PointerType` conversion rule
+cannot answer "pointee type" for one and "ordinary pointer" for the other --
+there is no op-context available to the callback to disambiguate. This
+reproduces even without going through the whole pipeline: `feme-opt
+--feme-convert-spirv-to-llvm` on a two-line reduction was enough, so I
+stopped guessing and used `--debug-only=dialect-conversion` directly rather
+than re-running the whole thing hoping the entrypoint was upstream/
+downstream.
+
+The fix: keep `Input`'s type-conversion rule from before this change
+(convert to pointee type, same answer for builtin and non-builtin -- no
+new ambiguity introduced there), and make `StageIOAddressOfPattern`
+special-case `Input`: it now performs the load *eagerly*, right at the
+`spirv.mlir.addressof` site, producing the pointee-typed value directly
+(matching what the type converter already promises); the existing
+`LoadValuePattern` then collapses the real `spirv.Load` into the identity,
+the same way it already does for a builtin's intrinsic call. `Output` has
+no builtin counterpart at all in this codebase (`BuiltInMappings` are all
+compute-only, `Input`-only), so it gets its own, uncontested type-conversion
+rule (ordinary pointer, address space 8) with no collision to resolve.
+
+## A second, more subtle ordering bug: symbol lookups after conversion
+
+Even after fixing the above, `StageIOAddressOfPattern`'s first
+implementation (looking up the referenced `spirv::GlobalVariableOp` via
+`SymbolTable::lookupNearestSymbolFrom`, the same idiom
+`BuiltInAddressOfPattern`/`ResourceAddressOfPattern` already use) failed
+whenever the global variable was declared *before* the function using it in
+the source `spirv.module` -- which is the idiomatic order, and the one every
+test I wrote used. `--debug-only=dialect-conversion` showed why: dialect
+conversion legalizes top-level siblings in block order, so
+`spirv.GlobalVariable` converts (and its symbol is replaced by an
+`llvm.mlir.global` of the same name) *before* the `spirv.func` body
+containing the `addressof` is even visited; by then, looking up
+`spirv::GlobalVariableOp` by that name finds nothing (the symbol now
+resolves to a different op type). Reordering a minimal repro (function
+before the global) made it succeed, confirming the theory experimentally
+rather than by pure code reading.
+
+I could not find why `BuiltInAddressOfPattern` gets away with the same
+lookup pattern (its global also gets erased via
+`BuiltInGlobalVariablePattern` before the function body converts, per the
+same debug trace) -- possibly an `eraseOp` vs. `replaceOpWithNewOp`
+distinction in how the rewriter defers the underlying IR mutation, but I did
+not chase that further once I had a robust fix that didn't depend on
+understanding it. Instead of relying on a live symbol lookup at all, I
+followed the pattern already established by `ResourceAddressOfPattern`
+(`ResourceInfoMap`, populated by `prepareResourceVariables` *before* the
+conversion runs): added `feme::spirv::prepareStageIOVariables`/
+`StageIOInfoMap`, populated in `ConvertSPIRVToLLVMPass::runOnOperation`
+before conversion, and had `StageIOAddressOfPattern` consult that map by
+name instead of re-deriving anything from the (possibly already-converted)
+declaration. This is strictly more robust than trusting ordering
+coincidences, and matches an existing, working precedent in the same file.
+
+## Getting the actual metadata onto a real `llvm::Module`
+
+MLIR's LLVM dialect has no generic "attach arbitrary metadata to this
+global" mechanism a foreign (non-dialect) attribute can hook into --
+`LLVMTranslationDialectInterface::amendOperation` only dispatches by the
+*attribute's own dialect*, and FeMe does not define an MLIR dialect of its
+own. So `!spirv.Decorations` cannot be produced during
+`mlir::translateModuleToLLVMIR` itself. I followed the same shape DXIL's
+`SignatureImport`/`MetadataRaisingPass` already use for a structurally
+identical problem (attach information gathered during a `spirv`/`llvm`
+dialect pass onto real LLVM IR that does not exist yet at that point):
+stash it as a plain (non-dialect) MLIR attribute
+(`feme.spirv.decorations`) that survives untouched through translation
+(since `mlir::translateModuleToLLVMIR` just ignores attributes it does not
+understand), then walk the still-alive MLIR module by name after
+`mlir::translateModuleToLLVMIR` succeeds, in
+`feme::SPIRVToLLVMTranslator::translate` (which already holds both the
+pre-translation MLIR module and the post-translation `llvm::Module` in
+scope, since it composes the two sub-`Translator`s itself), building the
+real metadata via `feme::spirv::attachStageIODecorations`.
+
+## Verifying against the real backend, not just my own patterns
+
+Since roundtripping through the actual `llvm::SPIRV` backend was cheap in
+this sandbox (`llc -mtriple=spirv-unknown-vulkan1.3-pixel ... -filetype=obj`
+piped to `spirv-val --target-env vulkan1.3`), I did that for every
+decoration combination the test file exercises (a plain `Location`, `Flat`,
+and `Component`+`NoPerspective`+`Centroid` together) rather than trusting
+that FileCheck-matched MLIR/LLVM-IR output alone meant the feature worked
+end to end. All produced SPIR-V that `spirv-val` accepted, and `llc`'s own
+disassembly showed the exact `OpDecorate`s expected (`Location`, `Flat`,
+`Component`, `NoPerspective`, `Centroid`), which is stronger evidence this
+is genuinely usable by the downstream backend than any of my own
+unit/lit tests could give alone.
+
+## What is deliberately out of scope
+
+- **Arrays/structs of stage-IO variables** (e.g. `gl_in[]`-style arrayed
+  vertex inputs, or a struct-typed varying block): `StageIOAddressOfPattern`
+  only handles a direct `spirv.Load`/`spirv.Store` at the address-of site,
+  the same limitation `BuiltInAddressOfPattern` already has for builtins.
+  `spirv.AccessChain` into a stage-IO variable is not converted.
+- **`Component`/`Centroid`/`Sample`/`PerPrimitiveEXT` from a real SPIR-V
+  *binary***: MLIR's own SPIR-V deserializer
+  (`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`) does not parse
+  these decorations at all yet (its `processDecoration` switch has no case
+  for them, an upstream MLIR gap, not one this change adds) -- so my tests
+  exercise them via hand-written `spirv` dialect text, the same way the
+  pre-existing builtin-variable tests already do, rather than via
+  deserialized binaries.
+- **`feme::EntrySignature` population**: left to R20, as discussed above.
