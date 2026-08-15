@@ -8,9 +8,11 @@
 
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 
+#include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
 #include "feme/Core/Module.h"
 #include "feme/Translate/LLVMIR/LLVMDialectToLLVMIRTranslator.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMDialectTranslator.h"
+#include "llvm/IR/Module.h"
 #include "llvm/Support/Error.h"
 
 using namespace feme;
@@ -31,8 +33,26 @@ llvm::Expected<Module> SPIRVToLLVMTranslator::translate(Module &&M,
   if (!LLVMDialectModule)
     return LLVMDialectModule.takeError();
 
+  // A non-builtin `Input`/`Output` variable's decorations survive the
+  // conversion above as an ad hoc `llvm.mlir.global` attribute (see
+  // feme::spirv::getStageIODecorationsAttrName); collect them before that
+  // MLIR module is consumed below, so they can be re-attached as real LLVM
+  // metadata once translateModuleToLLVMIR (inside
+  // LLVMDialectToLLVMIRTranslator) has produced a genuine llvm::Module to
+  // attach them to.
+  feme::spirv::StageIODecorationsMap Decorations =
+      feme::spirv::collectStageIODecorations(
+          LLVMDialectModule->getMLIROperation());
+
   LLVMDialectToLLVMIRTranslator ToLLVMIR;
-  return ToLLVMIR.translate(std::move(*LLVMDialectModule), Ctx);
+  llvm::Expected<Module> LLVMIRModule =
+      ToLLVMIR.translate(std::move(*LLVMDialectModule), Ctx);
+  if (!LLVMIRModule)
+    return LLVMIRModule.takeError();
+
+  feme::spirv::attachStageIODecorations(Decorations,
+                                        LLVMIRModule->getLLVMModule());
+  return LLVMIRModule;
 }
 
 llvm::StringRef SPIRVToLLVMTranslator::getFromFormatName() const {
