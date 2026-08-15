@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -23,8 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R14?
-
-> `-O2` end-to-end differential; execute-after-round-trip tests (see: §2.2.5,
-> §2.2.6)
-
+I've added updated design documentation for the FeMe Vulkan and WARP (Direct3D)
+runtime components. Can you assess the current state of the implementation, and
+update the roadmap document with a complete plan for building out the newly
+designed components?
