@@ -12715,3 +12715,130 @@ touch `Driver.cpp`/`DXILExporter.cpp`, which do have unit coverage.
 5. `[feme] Wire NVPTX passes into Driver; add AArch64 end-to-end test`.
 6. `[feme] Update Design.md/Roadmap.md for roadmap step R13`.
 7. This file.
+
+# Agent thoughts: FeMe roadmap step R14 (`-O2` end-to-end differential; execute-after-round-trip tests)
+
+R14 is a testing-focused step (Roadmap.md §2.2.5/§2.2.6, depending on R8):
+no new lowering passes, just closing two specific "nothing checks this"
+gaps the roadmap had flagged. Read §2.2's items 5/6 closely first to make
+sure I understood exactly what each was (and wasn't) asking for before
+touching any code.
+
+## Part 1: `-O2` end-to-end differential
+
+First surprise: every end-to-end HLSL test already runs "at -O2", just not
+visibly. `feme::cpu::JITEngine::create` (JITEngine.cpp) always calls
+`OptimizerPipeline().run(Mod, OptimizerOptions{toOptimizationLevel(Opts.OptLevel)})`
+after the CPU pipeline lowers a shader, and `JITOptions::OptLevel` defaults
+to `CodeGenOptLevel::Default`, which `toOptimizationLevel` maps to
+`llvm::OptimizationLevel::O2` -- so `feme-run` has silently been optimizing
+every shader at O2 since milestone 4. The actual gap wasn't "nothing runs
+at O2", it was "nothing ever ran at a *different* level and diffed the
+answer" -- `feme-run` had no CLI flag to override `JITOptions::OptLevel` at
+all, so a test couldn't even ask for `-O0` if it wanted to.
+
+That reframing simplified the task a lot: add the missing CLI flag, then
+write the differential. For the flag's spelling I looked at how `llc`
+spells its own `-O` (`cl::opt<char> OptLevel("O", cl::Prefix, cl::init('2'))`,
+parsed with `CodeGenOpt::parseLevel`) and matched it exactly rather than
+inventing `--opt-level=N` or similar -- one less thing for a future reader
+to learn, and `CodeGenOpt::parseLevel`/`getLevel` already exist in
+`llvm/Support/CodeGen.h` for exactly this. Wired the parsed level straight
+into `JITOptions::OptLevel`, which already existed as a field for this
+purpose and needed no changes.
+
+For the test shader, I didn't want to just re-run an existing test's exact
+shape (e.g. loop.hlsl) with four extra RUN lines and call it a day -- the
+value of this test is in exercising something the optimizer can actually
+transform differently at different levels, not just re-checking IR that
+happens to survive `-O2` unchanged either way. I picked
+loop.hlsl's own shape (a small unrolled per-lane multiply-add loop) since
+its independent per-lane accumulations across four loop iterations give
+`-O3` real reassociation/vectorization opportunities `-O0` won't take.
+Confirmed manually (`feme-run -O0 ... ` vs `-O2` vs `-O3`) that all three
+produce the same answer before trusting the lit test.
+
+## Part 2: Execute-after-round-trip (DXIL)
+
+`feme-dxil-to-dxil.ll` already exists and checks a DXContainer→DXContainer
+retarget through `feme --target=dxil`, but only greps the output's first
+four magic bytes. Adding the missing "execute it" step was mostly
+mechanical: `llc` (or, better, real Clang-compiled HLSL) → `feme
+--target=dxil` → `feme-run` on the result, `FileCheck`ing the same way
+every other execution test does.
+
+First attempt used a hand-written `.ll` fixture, reusing dxil-container-
+input.ll's own raw-buffer-store shape (`llvm.dx.resource.store.rawbuffer.i32`
+with a non-`poison` element index). That fixture builds and imports fine,
+but `feme --target=dxil`'s re-export crashes: LLVM's own
+`DXILBitcodeWriter` hits `UNREACHABLE ... Element index of raw buffer must
+be poison`. This is a real, narrow finding -- `feme::dxil::OpRaisingPass`'s
+`raiseRawBufferStore` produces a shape that round-trips through *import*
+fine but that LLVM's own DXIL *writer* has never been asked to re-emit,
+because Clang's own DXIL backend never produces a raw-buffer store with a
+non-poison index in the first place (it's specific to the hand-written
+`.ll` idiom this tree's own raw-buffer tests use for import coverage).
+Rather than chase that into LLVM's DirectX backend (well outside this
+step's scope), I swapped to real HLSL -- typed-buffer.hlsl's own
+`RWBuffer<float4>` shader, compiled by Clang exactly like every other
+`test/Tools/feme-run/HLSL` test -- which round-trips cleanly since it's
+exactly the shape Clang's own backend already produces and DXILWriter
+already knows how to re-emit. Verified the whole chain by hand
+(`clang` → `feme --target=dxil` → `feme-run`) before writing the lit test,
+same as R13's "verify manually before trusting the lit test" habit.
+
+## Part 3: SPIR-V round trip -- a genuine, documented dead end
+
+The roadmap's §2.2.6 also mentions "nor re-imports produced SPIR-V" as a
+second half of the same gap, so I tried the SPIR-V mirror of the DXIL test
+before writing anything up: assemble front-end-equivalence.hlsl's own
+hand-written `spirv` dialect shader with `feme-translate --serialize-spirv`,
+retarget it with `feme --target=spirv`, and run the result through
+`feme-run`.
+
+This failed immediately and unambiguously: `error: unhandled opcode 83`
+(`OpAccessChain`) while deserializing the *retargeted* binary -- even
+though `feme-run` executes the *original*, non-retargeted binary from the
+exact same shader without any error at all. That contrast (same shader,
+same op, one binary imports fine and the other doesn't) told me this
+wasn't a matter of `feme::SPIRVImporter` lacking `OpAccessChain` support
+in general -- it clearly has it -- but a structural difference between
+*how* the op is emitted by MLIR's own `spirv` dialect serializer (what
+every existing SPIR-V fixture in this tree uses) versus how it's emitted
+by LLVM's own in-tree SPIR-V code generator (what `feme::SPIRVExporter`
+actually calls, via `feme::TargetMachineBackend` -- I confirmed this by
+reading `SPIRVExporter.cpp` directly rather than assuming it also used
+MLIR's serializer). These are two independently-maintained upstream
+SPIR-V producers with no stated cross-compatibility contract; reconciling
+them is either a change to MLIR's own deserializer (out of tree for this
+repository) or giving `feme::SPIRVExporter` its own MLIR-`spirv`-dialect
+serialization path instead of going through LLVM's SPIR-V backend (a much
+bigger change than "add a test," and one that would need its own design
+discussion about which SPIR-V producer FeMe actually wants as its
+source of truth for retargeting).
+
+Given R14's own scope is testing, not new import/export breadth, I stopped
+here rather than trying to fix either side, and documented the finding as
+a new "Known gap" in Design.md's SPIR-V section (with the exact repro) and
+in Roadmap.md's R14 entry, so it's discoverable rather than silently
+missing. This mirrors R13's NVPTX-object-file finding: a real, narrow gap
+discovered while implementing a roadmap step, recorded rather than either
+silently worked around or expanded into its own multi-day side project.
+
+## Verification
+
+Built `feme-run` after the CLI change (`ninja feme-run`) and manually
+exercised `-O0`/`-O2`/`-O3`/an invalid `-O9` before trusting any lit test.
+Ran the full suite after each test addition: `ninja feme-test-depends`
+then `ninja check-feme` -- 932/934 passed (2 unsupported, both pre-existing
+and unrelated to this change) after both new tests, +2 from the pre-change
+baseline of 930/932, 0 regressions. Also ran `ninja check-feme-unit`
+(311/311, unchanged) since `feme-run.cpp` is a CLI tool with no gtest
+coverage of its own, just to confirm nothing it links against regressed.
+
+## Commit breakdown
+
+1. `[feme] Add feme-run -O flag; -O2 end-to-end differential test (R14 part 1/2)`.
+2. `[feme] Add DXIL execute-after-round-trip test (R14 part 2/2)`.
+3. `[feme] Update Design.md/Roadmap.md for roadmap step R14`.
+4. This file.
