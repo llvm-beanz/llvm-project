@@ -765,6 +765,13 @@ resource-exhaustion path is exercised.
 Each step is independently landable and independently testable; the
 dependency column is the only ordering constraint.
 
+§3.1's table is the compute and retargeting track (R1–R15, the original
+sequencing). §3.2 adds the graphics core and CPU stage work (R16–R37), and
+§3.3 places the two API runtimes' own milestones against it. R16 onward may
+proceed in parallel with R15, which has no dependents.
+
+### 3.1 Compute and retargeting track
+
 | # | Step | Covers | Depends on |
 |---|---|---|---|
 | R1 | Grow the differential harness to divergent/loop shapes; add the wave-size sweep (done: `--unstructured` stays `--reference`-only, see §1.6's new gap) | §2.2.1, §2.2.2, §2.4.1, §2.4.4 | — |
@@ -788,6 +795,102 @@ own restructurization suite before its linearizer: it is the step that makes
 every subsequent step's failures visible as a diff instead of as a wrong
 number in a `CHECK` line nobody wrote yet.
 
+### 3.2 Graphics core and CPU stage track
+
+Every step here lands in `feme` proper — core reflection, the CPU target, and
+the two new executor libraries — and is testable through `feme-opt`,
+`feme-run`, `feme-render` and `gtest` without any API runtime existing. The
+"Milestone" column is the FeMeGraphicsDesign.md milestone the step belongs to;
+a milestone is complete when its own completion test passes, which is normally
+the last step carrying its name.
+
+| # | Step | Milestone | Covers | Depends on |
+|---|---|---|---|---|
+| R16 | `feme::ShaderStage` plus the `feme.shader.stage` entry-point attribute, derived at import from the source stage and diagnosed against the module triple's environment; `feme::cpu::PreparePass` selects by enumeration instead of `isComputeEntryPoint`'s string comparison, with `hlsl.shader` still accepted | G0 | §1.8.2 | — |
+| R17 | The signature reflection data model (element ID, direction, location, semantic, system value, component type, shape, interpolation, frequency, stream), its verifier, and its serialization round trip in `gtest` | G0 | §1.8.2 | R16 |
+| R18 | Preserve DXIL input/output/patch-constant/root-signature rows from `!dx.entryPoints` into that model before `feme::dxil::MetadataRaisingPass` erases the source metadata | G0 | §1.8.2 | R17 |
+| R19 | Convert SPIR-V non-builtin `Input`/`Output` variables and their `Location`/`Component`/`Index`/interpolation/per-primitive/per-patch decorations instead of failing to legalize them | G0 | §1.8.2, §1.2 | R17 |
+| R20 | The `feme.stage.*` operation family for vertex/fragment (input load, output store, discard, demote, is_helper, derivatives, quad read, pull-model interpolation) plus `FeMeTransformsGraphics`' canonicalization and validation pass, rewriting DXIL `loadInput`/`storeOutput` and SPIR-V interface accesses into it. **Completes G0** | G0 | §1.8.2, §1.4 | R18, R19 |
+| R21 | Factor `CompiledStage`/`PreparedDispatch`/`invokeGroup` out of `JITEngine`, with the wave loop and entry mask owned by `invokeGroup`; `JITEngine` becomes a convenience wrapper and `JITOptions::NumThreads` becomes real. Land it under the final `CompiledStage` name so V1/W1 never build against `CompiledKernel` | G1 (shared with V1, W1) | §1.6, §1.8.1, §1.8.3 | — |
+| R22 | Populate `ArtifactInfo`'s `WaveSize`/`GroupSize`/`GroupSharedSize`/`GroupSharedAlign`, then generalize it into stage-tagged `StageArtifactInfo` with signatures and side-effect summaries; bump the artifact ABI version and round-trip JIT and AOT reflection through the same structure | G1 (shared with V1, W1) | §1.8.1, §1.8.3 | R17, R21 |
+| R23 | Divergent groupshared access in `feme::cpu` — a divergent index, an access through a `getelementptr`, and a masked store at a uniform address (§1.6's three recorded shapes) | prerequisite | §1.6, §1.8.1 | — |
+| R24 | Barrier inside a surviving *branch*, and a `phi` live across a group-sync barrier | prerequisite | §1.6, §1.8.1 | R23 |
+| R25 | Root-constant breadth: any register-bound constant buffer rather than only `(b0, space0)`, array and non-constant-row-index shapes, and the full advertised push-constant range | prerequisite | §1.8.1 | — |
+| R26 | A SPIR-V descriptor-set binding-to-heap normalization matching DXIL's `BoundResourceNormalizationPass`, with arrayed bindings in contiguous heap ranges and dynamic buffer offsets | prerequisite (V2) | §1.2, §1.9 | — |
+| R27 | `StageCompileOptions` and a stage-aware `runPipeline` (compute-only overload retained), stage-aware `PreparePass` and pre-mutation graphics validation, and the split of the single active mask into live and side-effect masks through `LinearizePass`/`SIMDizePass` and the reference path | G1 | §1.8.3 | R20, R21 |
+| R28 | Vertex and fragment wrappers over in-memory synthetic stage layouts, `FemeStageLayout`/`FemeVertexArgs`/`FemeFragmentArgs`, and derivative/quad lowering at wave sizes 4 and 8. **Completes G1**, and is the design's decision point: if either stage cannot pass through the existing middle end with localized extensions, revise the shared-middle-end boundary before building any fixed function | G1 | §1.8.3 | R27, R22 |
+| R29 | The image and sampler descriptors, `FemeShaderResources` folded into `FemeDispatchArgs`, and `SamplerHeap` retyped. This is the deliberate ABI break: artifacts built before it stop loading | G2 | §1.8.4 | R22 |
+| R30 | `feme.image.*`/`feme.sampler.*` canonicalization from DXIL (including §1.3's texture/sampler handle-kind gap) and SPIR-V (including §1.2's sampling variants), the `runtime/CPU` sampling helpers (1D/2D addressing, mip layout, point/linear filtering, explicit and implicit LOD, addressing modes, comparison sampling), the initial format table with sRGB, and active-lane SIMD lowering. **Completes G2**, unblocking V5 and W3 | G2 | §1.8.4, §1.2, §1.3 | R29 |
+| R31 | `FeMeGraphics` skeleton: normalized pipeline and prepared-draw descriptions, the `feme-render` tool with its command guide page and Design.md tool-list entry, and the heap YAML image resource class | G3 | §2.6.1 | R28 |
+| R32 | Vertex/index fetch, triangle assembly, clipping, viewport transform, culling, tile binning, top-left coverage, interpolation, and both stages run through the executor: one color attachment, one viewport/scissor, no MSAA. **Completes G3** | G3 | §1.8.5 | R31, R30 |
+| R33 | Depth/stencil attachments with legal early/late scheduling, blending, write masks, logic ops, multiple render targets, multisample coverage and resolves, the format expansion the first advertised profile needs, and deterministic parallel tiled schedules | G4 | §1.8.5, §2.6.3 | R32 |
+| R34 | Geometry/hull/domain signatures and wrappers, patch storage, control-stage barriers, tessellator state and domain-coordinate generation, bounded geometry streams, stream output, adjacency, layered rendering | G5 | §1.8.5 | R33, R24 |
+| R35 | Amplification and mesh stages: import and canonicalization, bounded payload and mesh-output builders reusing the compute workgroup/barrier/wave lowering, checked dispatch queues, meshlet assembly and validation, feeding the shared clip/raster path | G6 | §1.8.5 | R33, R24 |
+| R36 | `FeMeRayTracing`: canonical acceleration structures and deterministic builders, triangle/instance traversal with bounds validation, inline ray-query import from DXIL and SPIR-V, ray/payload/attribute/callable/record/continuation reflection, scalar traversal from compute and fragment shaders | G7 | §1.8.5 | R30 |
+| R37 | Ray-tracing pipelines: all six stage kinds plus hit-group linkage, the continuation transform, entry/resume wrappers, bounded frame allocation, shader-record translation, recursion enforcement, and packetization only once scalar continuation execution is the differential reference | G8 | §1.8.5 | R36, R28 |
+
+Three ordering notes that are not visible in the dependency column:
+
+- **R21 and R22 come first for the runtimes, not for graphics.** They are the
+  only steps Vulkan V1 and Direct3D W1 need from this table, so landing them
+  early lets both runtime tracks start while R16–R20 are still in progress.
+- **R29's ABI break is cheap exactly once.** It must land before any artifact
+  format is depended upon outside this tree, which in practice means before
+  V4's persistent pipeline cache and W5's validated cache.
+- **R23/R24/R25 have no graphics dependency of their own** and close §1.6
+  narrowings that are already wrong answers waiting to happen. They can land
+  at any time and unblock the most milestones per unit of work.
+
+### 3.3 API runtime tracks
+
+These milestones live in FeMeVulkanDesign.md and FeMeWARPDesign.md; they are
+reproduced here only with their dependencies on §3.2, since neither document
+can see this tree's schedule. Both tracks may run concurrently with each other
+and with §3.2 once their prerequisites land.
+
+| # | Milestone | Depends on |
+|---|---|---|
+| V0 | Loader-visible skeleton: optional Vulkan-Headers dependency, `vk.xml` entrypoint generator, hidden-visibility ICD with a version script and development manifest, instance/physical device/device/compute queue, truthful properties and limits, loader smoke and two-ICD coexistence tests | — (new build-system work, §1.9) |
+| V0.5 | SPIR-V import that survives real shaders: a glslang/DXC/Clang corpus, the decision between fixing MLIR's structurized deserializer and translating the SPIR-V CFG to unstructured LLVM IR for `PreparePass` to restructure, a prototype of the chosen approach, and the importer fuzzer extended to it | — (may change V1's design; schedule before V1) |
+| V1 | Empty compute dispatch: memory, buffers, shader modules, pipeline layouts, command pools/buffers, group-size resolution, submit/fences/idle, direct, base and indirect dispatch | V0, V0.5, R21, R22 |
+| V2 | Storage buffers and descriptors, descriptor pools/sets/updates and dynamic offsets, buffer copies and barriers, lavapipe differential | V1, R26, R23 |
+| V3 | Push constants onto FeMe root constants, uniform buffers, binary and timeline semaphores, secondary command buffers, events, query pools | V2, R25 |
+| V4 | Typed buffers, `VkFormat` mapping, texel buffers, broader subgroup/atomic/robustness coverage, persistent pipeline cache with a blob fuzzer, first CTS runs over the advertised subset | V3, R22 |
+| V5 | Images and sampling: image memory requirements, views, layout tracking, copies, storage and sampled images, samplers | V4, R30 |
+| V6–V8 | Graphics queue and pipelines, render pass/dynamic rendering, mesh and ray-tracing exposure, and the WSI decision — **these milestones are not yet written in FeMeVulkanDesign.md** and must be before they can be scheduled | V5, R32–R37 |
+
+| # | Milestone | Depends on |
+|---|---|---|
+| W0 | Integration feasibility prototype: SDK/WDK/DDI/OS version selection, proof that a software adapter can be installed and enumerated through DXGI or selection of the application-local compatibility-runtime boundary instead, and the signing/INF/CI/debugging story. Throwaway-capable, and gates every other W step | — |
+| W1 | Headless compute device: objects, DXIL import through the existing path, a resource-free dispatch, multi-wave barrier correctness, device-removal propagation | W0, R21, R22 |
+| W2 | Root signatures of both versions, descriptor heaps and tables, root constants and CBVs, raw/structured/typed buffers with UAV writes and atomics, dispatch/copy/barrier/query, WARP differential | W1, R25, R23 |
+| W3 | Textures and sampling: image/sampler descriptor ABI, committed and placed layouts, copy footprints, views, the initial format matrix, UAV texture access | W2, R30 |
+| W4 | Basic graphics: input assembly through pixel shading with derivatives, interpolation modes, helper lanes, one render target, depth, minimal blend | W3, R32 |
+| W5 | Graphics completeness: depth/stencil, blending, MSAA, formats, MRT, queries, predication, stream output, indirect draw, tessellation and geometry, pipeline libraries and a validated cache, Windows conformance and HLK | W4, R33, R34 |
+| W6 | Interoperability: DXGI presentation or cross-adapter prototype, shared resources and fences, D3D11-on-12 evaluation, mesh-shader and ray-tracing evaluation | W5, R35–R37 |
+
+The capability rule from FeMeGraphicsDesign.md applies to both tables and is
+the one scheduling constraint that cannot be traded away: neither runtime may
+advertise a graphics-capable queue, `VK_QUEUE_GRAPHICS_BIT`, or a
+raster-implying feature level until the corresponding G milestone's completion
+test passes for *every* format and state combination it reports.
+
+### 3.4 Documentation debt
+
+Three documentation items are prerequisites for the steps above rather than
+follow-ups, and each is small:
+
+- **FeMeVulkanDesign.md has no V6–V8.** The graphics design lists what they
+  unblock but explicitly does not own their Vulkan-side content (graphics
+  queue family, `VkRenderPass`/dynamic rendering, graphics pipeline state,
+  WSI). Required before R32's work has a Vulkan consumer to aim at.
+- **Design.md's tool list and `docs/CommandGuide/` need `feme-render`**
+  (R31), which is also where the textual scene and image fixture formats
+  should be specified.
+- **DXIL texture/sampler handle kinds still need a decision recorded in
+  Design.md's DXIL section** before R30 implements them — §1.3 has flagged
+  this as blocking since before the graphics design existed.
+
 ## Part 4: Explicitly not scheduled
 
 - MLIR `gpu`-dialect retargeting (Design.md Non-Goals — no client).
@@ -795,3 +898,15 @@ number in a `CHECK` line nobody wrote yet.
 - HLSL/GLSL source front ends (Design.md Non-Goals).
 - Standalone out-of-tree builds against an installed LLVM+MLIR (Design.md
   Goals: out of scope for now, no redesign needed to add later).
+- Work graphs (FeMeGraphicsDesign.md, G8's closing note): a persistent,
+  dynamically composed node graph with its own backing-memory model is not
+  equivalent to amplification fanout or bounded ray continuation queues, and
+  needs its own design.
+- A native Direct3D 11 DDI (FeMeWARPDesign.md W6): evaluate D3D11-on-12
+  coverage first.
+- Vulkan video, sparse resources, and any extension outside the advertised
+  manifest (FeMeVulkanDesign.md Initial Non-Goals).
+- Transparent substitution for Microsoft's WARP binary or
+  `D3D_DRIVER_TYPE_WARP`/`EnumWarpAdapter` interception (FeMeWARPDesign.md
+  Status): those are Windows-owned selection paths, and a separately
+  installed, explicitly selected adapter is the first deployment target.
