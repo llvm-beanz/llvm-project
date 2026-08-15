@@ -3,6 +3,7 @@ add_mlir_library(FeMeCore
   FormatRegistry.cpp
   Module.cpp
   ShaderStage.cpp
+  Signature.cpp
 
   LINK_COMPONENTS
   Core
