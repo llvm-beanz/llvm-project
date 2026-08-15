@@ -375,15 +375,52 @@ semantic name, and patch direction/frequency agreeing), and
 `feme::serializeSignature`/`feme::parseSignature` round-trip it through a
 versioned byte layout, following `feme::cpu::ArtifactInfo`'s
 serialize/parse convention in `feme/include/feme/Target/CPU/ResourceInfo.h`.
-Import wiring is not yet part of this: DXIL's `!dx.entryPoints` rows (R18)
-and SPIR-V's `Input`/`Output` interface variables (R19) do not populate this
-model yet, so no canonical stage operation refers to an `ElementID` this
-model assigned. `SignatureInterpolationMode`'s enumerators are deliberately
-DXIL's paired (base mode, sampling qualifier) kinds rather than the five
-independent axes the table above lists, so that R18 can map onto it without
-re-deriving the pairing; `SignatureSystemValue` currently only names the
-vertex/fragment builtins "Builtins and system values" describes, since later
-stages' system values are out of scope until their own milestones.
+Import wiring is not yet fully part of this: SPIR-V's `Input`/`Output`
+interface variables (R19) do not populate this model yet (DXIL's
+`!dx.entryPoints` rows, R18, now do -- see the Status note below), so no
+canonical stage operation refers to an `ElementID` this model assigned yet.
+`SignatureInterpolationMode`'s enumerators are deliberately DXIL's paired
+(base mode, sampling qualifier) kinds rather than the five independent axes
+the table above lists, so that R18 could map onto it without re-deriving the
+pairing; `SignatureSystemValue` currently only names the vertex/fragment
+builtins "Builtins and system values" describes, since later stages' system
+values are out of scope until their own milestones.
+
+Status: DXIL's half of import wiring is implemented (roadmap R18).
+`feme::dxil::convertEntrySignature`
+(`feme/include/feme/Transforms/DXIL/SignatureImport.h`) converts a
+`!dx.entryPoints` entry's `Signatures` tuple into a `feme::EntrySignature`,
+and `feme::dxil::MetadataRaisingPass` calls it, then attaches the result as
+`!feme.signature` function metadata (via `setEntrySignature`), before
+erasing `!dx.entryPoints` itself. DXIL numbers its input, output and
+patch-constant signatures independently starting at 0, so the converter
+renumbers `ElementID` by combined position rather than reusing DXIL's own
+per-list IDs, which would otherwise collide across the three lists and
+violate `verifySignature`'s uniqueness check. `SignatureInterpolationMode`
+and DXIL's `InterpMode` map directly per the pairing above, with DXIL's
+`Undefined` (an element interpolation does not apply to) collapsing onto
+`Flat` alongside `Constant`; DXIL semantic kinds with no `SignatureSystemValue`
+counterpart yet (tessellation, geometry/mesh and shading-rate builtins, and
+`Target`, a fragment shader's ordinary render-target output) convert to
+`None` rather than being dropped, keeping the row itself but not claiming a
+system value FeMe does not model.
+
+A hull shader's patch-constant signature is its own *output*; a domain
+shader's is an *input* it consumes. `convertEntrySignature` takes the
+entry's `feme::ShaderStage` to decide which, since DXIL's metadata does not
+otherwise distinguish the two.
+
+R18 also covers an entry's root signature: DXIL's `EntryRootSigTag` (12)
+entry property, a raw serialized byte blob, is preserved verbatim as
+`!feme.dxil.rootsignature` function metadata (`setRootSignature`/
+`getRootSignature`). FeMe does not parse a root signature's contents yet --
+that is roadmap W2, tracked in feme/docs/FeMeWARPDesign.md's "Root
+Signatures and Descriptor Heaps" -- so nothing here claims to interpret it,
+only to stop it from being lost when `!dx.entryPoints` is erased.
+
+See `feme/lib/Transforms/DXIL/SignatureImport.cpp` and
+`test/Transforms/DXIL/dxil-raise-metadata-signature.ll`/
+`dxil-raise-metadata-patch-constant.ll`.
 
 ### Canonical stage operations
 

@@ -1029,6 +1029,12 @@ It must run *after* `OpRaisingPass`, which consumes the `!dx.resources`
 metadata this pass drops. Exercised via `feme-opt` as
 `feme-dxil-raise-metadata`.
 
+Before dropping `!dx.entryPoints`, the pass also preserves each entry's
+input/output/patch-constant signature rows and root-signature bytes (roadmap
+R18), which would otherwise be lost with nothing left to recover them from;
+see "Signature reflection" in feme/docs/FeMeGraphicsDesign.md and
+`feme/include/feme/Transforms/DXIL/SignatureImport.h`.
+
 #### Intrinsic expansion: `feme::dxil::IntrinsicExpansionPass`
 
 `OpRaisingPass` deliberately raises each `dx.op.*` call to whichever
