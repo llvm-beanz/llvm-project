@@ -13143,3 +13143,126 @@ tables (the existing convention allows long table rows only).
 2. `[feme] Design: record the DXIL texture/sampler handle-kind decision`.
 3. `[feme] Design: specify feme-render and its scene/image fixture formats`.
 4. This file.
+
+# Agent thoughts: roadmap step R16 (`feme::ShaderStage` and `feme.shader.stage`)
+
+## What R16 actually asks for
+
+Three things, and the third is the one with teeth: the enumeration, the
+entry-point attribute derived *and validated* at import, and
+`feme::cpu::PreparePass` selecting by that enumeration instead of
+`isComputeEntryPoint`'s `hlsl.shader == "compute"` comparison, with
+`hlsl.shader` still accepted. FeMeGraphicsDesign.md's "Stage identity"
+section is the owner; §1.8.2 lists it as the first G0 gap.
+
+## Where the enumeration lives, and why not a triple
+
+The design is explicit that `feme::ShaderStage` is *not* a replacement for
+target triples, so I put it in FeMeCore (`feme/include/feme/Core/ShaderStage.h`)
+next to `Context`/`Module` and gave it a total, both-directions mapping to
+`llvm::Triple::EnvironmentType`. That mapping is the whole point: a raised
+module already carries `dxil-unknown-shadermodelX.Y-<stage>` or
+`spirv-unknown-vulkan-<stage>`, and R16's job is to project that onto each
+entry point in a form that can be *checked*, not to invent a second source of
+truth. The unit test asserts the round trip in both directions for every
+enumerator, including that each enumerator's environment is one a triple can
+actually spell -- if a future stage is added with no triple environment, that
+test fails rather than the mismatch surfacing as a mis-parsed triple later.
+
+The one deliberate spelling divergence is Direct3D's `pixel` versus FeMe's
+`fragment`, which the design chose. `parseShaderStage` accepts both;
+`getShaderStageName` only ever emits `fragment`. That is why import writes
+*two* attributes with different values for that one stage, which looked wrong
+until I wrote it down: `hlsl.shader` is not a transitional spelling, it is the
+interface LLVM's own DirectX and SPIRV backends read the stage from, so it has
+to keep its own vocabulary.
+
+## What "diagnosed against the module triple's environment" means
+
+This is the part the design sketch left genuinely ambiguous, and the two
+importers turned out to need different readings of the same sentence:
+
+- **DXIL** authors the environment independently of the entry point: the
+  `!dx.shaderModel` profile (`cs`, `vs`, ...) fixes it, and library shader
+  models additionally give each entry its own `ShaderKind`. So there is a real
+  two-sided check, and `cs` + `ShaderKind = vertex` is now an error instead of
+  one side silently winning (it previously did win: `applyEntryProps`'
+  `EntryEnv.value_or(SM->Env)` preferred the entry's kind, with the module
+  triple left saying something else).
+- **SPIR-V** has no independently authored triple at all: FeMe *derives* it
+  from the first entry point's execution model. Checking the derived value
+  against its own source would be vacuous, so the same rule becomes a
+  cross-entry consistency check, and it catches something real -- a
+  `spirv.module` with a `GLCompute` and a `Vertex` entry point used to convert
+  silently under a compute triple that described only half of it.
+
+`isShaderStageCompatibleWithEnvironment` is where both live: a `library`
+environment (or any environment naming no stage) constrains nothing; anything
+else must match. Putting it in Core rather than in either importer is what
+made the asymmetry above obvious, since both call the same predicate and only
+differ in what they pass it.
+
+## The scope creep I accepted, and the one I refused
+
+Making `PreparePass` select by enumeration is a five-line change. Making it
+*true* is not: once `feme.shader.stage` is a legitimate way to declare a stage,
+every other "is this an entry point?" test in the tree -- `JITEngine` and
+`runPipeline`'s pre-checks, `Driver`'s wave-size stamping, and the entry-point
+lowering in the CPU, AMDGPU and NVPTX passes -- was still reading `hlsl.shader`
+directly, so a module carrying only the new attribute would pass Phase 1 and
+then be invisible to everything after it. I added `feme::isShaderEntryPoint`
+and routed all thirteen sites through it;
+`test/Tools/feme-run/shader-stage-attribute.ll` dispatches such a module end to
+end, which is the test that would have failed before.
+
+I also moved `Driver::resolveTargetTriple` and `DXILExporter` onto
+`feme::getShaderStage`, since both recovered a stage by reading `hlsl.shader`
+and both feed a triple's environment component -- exactly the mapping the new
+header owns. Renaming their local helpers to `getEntryPointStageName` was not
+cosmetic: leaving two different `getShaderStage`s, one returning a string and
+one an enumerator, is the kind of thing that reads correctly and compiles
+wrong.
+
+What I refused: giving `runPipeline`/`JITEngine` a stage *parameter*. That is
+R21/G1's `StageCompileOptions`, and adding a half-version of it here would have
+made the real one a migration instead of an addition. Their pre-checks stayed
+"is there an entry point at all", which is what they were.
+
+## Testing
+
+Each phase of translation has its own coverage at the level that phase is
+normally tested at in this tree:
+
+- Core: `unittests/Core/ShaderStageTest.cpp` -- name/enumerator and
+  enumerator/environment round trips over the whole enumeration (not a
+  hand-picked subset, so adding a stage without a spelling fails), the
+  `pixel`/`fragment` alias, attribute set/get/replace, the `hlsl.shader`
+  fallback and its precedence, and the non-entry-point and
+  unknown-value cases.
+- DXIL import: `test/Transforms/DXIL/dxil-raise-metadata{,-library}.ll` for
+  the attribute, plus a new `-stage-mismatch.ll` for the diagnostic.
+- SPIR-V import: the entry-point conversion test for the attribute (both
+  spellings), a new mismatch test for the diagnostic, and a gtest asserting
+  every execution model FeMe maps produces a triple that maps back to one
+  enumerator.
+- Prepare: four new gtests (selection by the new attribute, selecting a
+  requested non-compute stage among several, rejecting another stage's entry
+  by name, and the `hlsl.shader` fallback still working) plus a lit test
+  driving `feme-opt -feme-cpu-stage=vertex`.
+- End to end: the `feme-run` test above.
+
+`ninja check-feme` in the existing ccache-backed, assertions-enabled build:
+932 passed / 2 unsupported before, 955 passed / 2 unsupported after, with the
+target dependencies building every unit test binary first as before.
+
+## Commit breakdown
+
+1. `[feme] Add feme::ShaderStage and the feme.shader.stage attribute`.
+2. `[feme] DXIL: record feme.shader.stage and validate it against the profile`.
+3. `[feme] SPIR-V: record feme.shader.stage and validate it against the triple`.
+4. `[feme] Update the SPIR-V translation test for feme.shader.stage`.
+5. `[feme] CPU: select the prepared entry point by feme::ShaderStage`.
+6. `[feme] Design: record what R16 decided about stage identity`.
+7. `[feme] Resolve retarget triples through feme::getShaderStage`.
+8. `[feme] Recognize entry points through feme::isShaderEntryPoint`.
+9. This file.
