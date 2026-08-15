@@ -12842,3 +12842,134 @@ coverage of its own, just to confirm nothing it links against regressed.
 2. `[feme] Add DXIL execute-after-round-trip test (R14 part 2/2)`.
 3. `[feme] Update Design.md/Roadmap.md for roadmap step R14`.
 4. This file.
+
+# Agent thoughts: roadmap plan for the Vulkan/WARP/Graphics designs
+
+## The task
+
+Three new design documents landed in one commit (`Add design docs for
+graphics, vk and d3d emulation`): FeMeGraphicsDesign.md (G0-G8),
+FeMeVulkanDesign.md (V0-V5) and FeMeWARPDesign.md (W0-W6). The request was to
+assess the current state of the implementation and extend Roadmap.md with a
+complete plan for building the newly designed components. This is a
+documentation change: no code was touched, and none should have been -- the
+roadmap's whole job is to say what is missing and in what order, and writing
+any of it would have made the assessment stale before it was written.
+
+## Assessing the current state
+
+I read the three documents' Status, boundary, ABI, milestone and testing
+sections directly rather than trusting their own summaries, and separately
+audited the tree for every concrete claim they make. That separation mattered,
+because the documents and the tree disagree in one place.
+
+What the audit confirmed is true today:
+
+- No `feme::ShaderStage`, no signature reflection of any kind, no
+  `feme.stage.*`/`feme.image.*` operations, no `lib/Graphics`,
+  `lib/RayTracing`, `lib/Vulkan` or `lib/Direct3D`, no `feme-render`, no
+  image or sampler descriptor, and no external dependency machinery. The
+  graphics/runtime track is entirely greenfield.
+- `feme::cpu::PreparePass`'s `isComputeEntryPoint` really is a string compare
+  against `"compute"` (Prepare.cpp:65), and `runPipeline` really has no stage
+  parameter (Pipeline.h:64).
+- `feme::cpu::EntryWrapperPass` emits only
+  `feme_cpu_entry_<name>(const FemeDispatchArgs *)`.
+- `FemeDispatchArgs::SamplerHeap` is typed `const FemeDescriptor *`, and
+  `ResourceKind` has no image kind (RuntimeABI.h).
+- `ArtifactInfo`'s `WaveSize`/`GroupSize`/`GroupShared*` are in the version-2
+  layout and always written as zero -- ResourceInfo.h says so in its own
+  comment.
+- `feme::dxil::MetadataRaisingPass` erases `!dx.entryPoints`
+  (MetadataRaising.cpp:218) keeping only `hlsl.shader`/`numthreads`/`wavesize`,
+  and SPIRVToLLVMPatterns.cpp:822 deliberately fails to legalize non-builtin
+  `Input`/`Output`. Both are exactly as the graphics design describes.
+- There is no `CompiledStage`/`CompiledKernel`/`invokeGroup`; `JITEngine::
+  dispatch` still runs every group sequentially through `runDispatch`.
+
+What the audit contradicted: all three documents say root-constant lowering
+does not exist and that `ResourceInfo::RootConstantSize` is always zero. That
+was true when the compute roadmap's R12 entry was written and stopped being
+true when R12 landed `feme::cpu::RootConstantLoweringPass`;
+`lib/Target/CPU/ResourceInfo.cpp:78,98` populates `RootConstantSize` from real
+data. The remaining gap is breadth -- only the default `(b0, space0)` binding,
+a non-array `dx.CBuffer` and a constant row index lower today -- which is a
+materially different scheduling fact: it is a P1 "widen this" step, not a P0
+"build this" step, and it should not gate V1 or W1. The graphics prerequisite
+table was one row stale in the same way for barriers, which R5 narrowed from
+"branch or loop" to "branch" while also adding value spilling across barriers
+for everything except a `phi`. I corrected all of these in place rather than
+only noting them in the roadmap, since the design documents are the ones a
+reader consults first.
+
+## How I structured the plan
+
+The existing roadmap has a shape worth preserving: a gap inventory with
+priorities and owner sections, an end-to-end testing roadmap, a sequencing
+table whose dependency column is the only ordering constraint, and an
+explicitly-not-scheduled list. I extended each part rather than appending a
+parallel document.
+
+Four judgement calls:
+
+1. **Two tracks, one priority scale that does not mean the same thing in
+   both.** P0 in §1.1-§1.7 means "a landed claim is unverified". P0 in
+   §1.8-§1.10 means "the new track stalls here". Collapsing them would have
+   implied a P0 Vulkan symbol-visibility item outranks a P0 correctness gap in
+   the compute pipeline, which is not what anyone means. I said so explicitly
+   in the intro instead of leaving it to be inferred.
+2. **Track-scoped milestone IDs stay where they are; the roadmap gets its own
+   R numbers.** The G/V/W milestones are owned by their documents, so
+   renumbering them here would create two spellings for one thing. Instead
+   R16-R37 decompose only the G milestones (the work that lands in `feme`
+   proper and is testable here), and §3.3 lists V and W milestones verbatim
+   with a dependency column pointing back at R steps. The design documents can
+   evolve their own milestone text without invalidating this table.
+3. **R21/R22 are pulled to the front of the new track.** They are the only
+   steps both API runtimes need before their first executing milestone, and
+   the graphics design explicitly says to land `CompiledStage` under its final
+   name so V1/W1 never compile against a `CompiledKernel` that G1 would
+   rename. Scheduling them ahead of the G0 reflection work lets three tracks
+   start at once, which is the single biggest parallelism win available.
+4. **R23/R24/R25 are listed as prerequisite steps with no graphics dependency
+   at all.** They close §1.6 narrowings that are wrong answers waiting to
+   happen, and they unblock the most downstream milestones per unit of work
+   (V2, W2, G5, G6 between them). Anyone looking for something to do that
+   helps everything should start there, and the table now says that in prose
+   because a dependency column alone does not surface it.
+
+I also recorded the three pieces of documentation debt that are genuinely
+blocking rather than tidying: FeMeVulkanDesign.md has no V6-V8 (the graphics
+design says so itself and declines to write them), Design.md's tool list needs
+`feme-render` before R31 can add it, and §1.3's DXIL texture/sampler
+handle-kind decision still has to be recorded in Design.md before R30 can
+implement it.
+
+## What I deliberately did not do
+
+- I did not invent milestones the designs do not have. The Vulkan V6-V8 rows
+  exist in §3.3 as a dependency and a documentation-debt item, not as a plan I
+  wrote on that document's behalf.
+- I did not reprioritize the existing R1-R15 track or renumber it. R15 stays
+  where it is with no dependents; the new work runs beside it.
+- I did not soften the capability rule both runtime designs state. It is
+  repeated in Part 3 because it is the one constraint a schedule is likely to
+  trade away under pressure, and partial graphics support really is worse than
+  none for a reference implementation.
+
+## Verification
+
+Documentation-only change, so there is nothing to compile, but I ran the suite
+anyway to prove that: `ninja feme-test-depends` then `ninja check-feme` in the
+existing ccache-backed, assertions-enabled build -- 932/934 passed, 2
+unsupported, identical to the pre-change baseline recorded for R14. I also
+checked every added markdown table for consistent column counts and confirmed
+no build target consumes `feme/docs`.
+
+## Commit breakdown
+
+1. `[feme] Roadmap: inventory the graphics/Vulkan/Direct3D gaps` (Part 1).
+2. `[feme] Roadmap: add the graphics/runtime testing plan (section 2.6)`.
+3. `[feme] Roadmap: sequence the graphics and API runtime work (R16-R37)`.
+4. `[feme] Correct the design docs' root-constant status; link the roadmap`.
+5. This file.
