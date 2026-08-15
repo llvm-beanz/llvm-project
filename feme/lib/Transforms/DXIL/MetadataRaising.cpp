@@ -9,6 +9,7 @@
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 
 #include "feme/Core/ShaderStage.h"
+#include "feme/Transforms/DXIL/SignatureImport.h"
 
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
@@ -35,6 +36,12 @@ enum EntryPropTag : unsigned {
   NumThreadsTag = 4,
   ShaderKindTag = 8,
   WaveSizeTag = 11,
+  // `DxilMDHelper::kDxilEntryRootSigTag`: an entry's serialized root
+  // signature, stored as a byte blob (see `applyEntryProps`'s
+  // `RootSignature` handling and `feme::dxil::setRootSignature`) rather
+  // than by reference to a separate named metadata node. FeMe does not
+  // parse the blob itself yet (roadmap W2); this only preserves it.
+  EntryRootSigTag = 12,
 };
 
 /// Maps a DXIL shader model profile string (the first operand of
@@ -137,9 +144,10 @@ std::optional<ShaderModel> getShaderModel(const Module &M) {
 }
 
 /// Applies the `hlsl.*` function attributes described by an entry point's
-/// flat tag/value property list \p Props to \p F, and returns the stage the
-/// entry declares for itself, if any (only library shader models carry a
-/// per-entry `ShaderKindTag`).
+/// flat tag/value property list \p Props to \p F, records its root
+/// signature bytes (if any -- see `feme::dxil::setRootSignature`), and
+/// returns the stage the entry declares for itself, if any (only library
+/// shader models carry a per-entry `ShaderKindTag`).
 std::optional<Triple::EnvironmentType> applyEntryProps(Function &F,
                                                        const MDNode *Props) {
   std::optional<Triple::EnvironmentType> Env;
@@ -200,6 +208,27 @@ std::optional<Triple::EnvironmentType> applyEntryProps(Function &F,
       F.addFnAttr("hlsl.wavesize", WaveSize);
       continue;
     }
+
+    if (*Tag == EntryRootSigTag) {
+      // The blob is a single-operand `MDNode` around a `ConstantDataArray`
+      // of bytes (see `feme::dxil::setRootSignature`'s comment for the
+      // matching DXC encoding); preserved verbatim, since FeMe does not
+      // parse a root signature's contents yet (roadmap W2).
+      const auto *Blob = dyn_cast_or_null<MDNode>(Value);
+      const auto *CAM = Blob && Blob->getNumOperands() == 1
+                            ? dyn_cast_or_null<ConstantAsMetadata>(
+                                  Blob->getOperand(0))
+                            : nullptr;
+      const auto *CDA =
+          CAM ? dyn_cast<ConstantDataArray>(CAM->getValue()) : nullptr;
+      if (CDA && CDA->getElementType()->isIntegerTy(8)) {
+        StringRef Raw = CDA->getRawDataValues();
+        feme::dxil::setRootSignature(
+            F, ArrayRef(reinterpret_cast<const uint8_t *>(Raw.data()),
+                       Raw.size()));
+      }
+      continue;
+    }
   }
   return Env;
 }
@@ -255,6 +284,16 @@ PreservedAnalyses MetadataRaisingPass::run(Module &M, ModuleAnalysisManager &) {
         continue;
       }
       feme::setShaderStage(*F, *Stage);
+
+      // Preserve the entry's input/output/patch-constant signature rows
+      // (roadmap R18) into feme's source-independent `feme::EntrySignature`
+      // model before the `Signatures` operand below is erased along with
+      // the rest of `!dx.entryPoints`; see "Signature reflection" in
+      // feme/docs/FeMeGraphicsDesign.md.
+      const auto *Signatures =
+          dyn_cast_or_null<MDNode>(Entry->getOperand(2).get());
+      feme::dxil::setEntrySignature(
+          *F, feme::dxil::convertEntrySignature(Signatures, *Stage));
     }
   }
 

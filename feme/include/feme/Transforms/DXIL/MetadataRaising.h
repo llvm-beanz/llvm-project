@@ -13,7 +13,11 @@
 // target triple and `hlsl.*` function attributes that modern LLVM's DirectX
 // backend consumes (see `llvm/lib/Analysis/DXILMetadataAnalysis.cpp`), plus
 // the source-independent `feme.shader.stage` attribute FeMe's own stage
-// selection and reflection use (see feme/include/feme/Core/ShaderStage.h).
+// selection and reflection use (see feme/include/feme/Core/ShaderStage.h),
+// and (roadmap R18) each entry's input/output/patch-constant signature rows
+// and root-signature bytes, converted and preserved as function metadata by
+// feme/include/feme/Transforms/DXIL/SignatureImport.h before the source
+// metadata carrying them is erased.
 //
 // This is the inverse of `DXILTranslateMetadata`
 // (llvm/lib/Target/DirectX/DXILTranslateMetadata.cpp). Without it, an
