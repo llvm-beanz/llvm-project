@@ -23,7 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap step R12?
+Can you implement roadmap step R13?
 
-> Root constants; `WaveReadLaneAt` with a varying lane; vector/aggregate
-> decomposition (see: §1.6 P1)
+> SPIR-V → DXIL direction; `BinaryWriter`; NVPTX/AArch64 (see: §1.2, §1.4, §1.5
+> P1)
+
