@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -23,10 +23,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R16 from the roadmap document?
+Can you implement R17 from the roadmap document?
 
-> `feme::ShaderStage` plus the `feme.shader.stage` entry-point attribute,
-> derived at import from the source stage and diagnosed against the module
-> triple's environment; `feme::cpu::PreparePass` selects by enumeration instead
-> of `isComputeEntryPoint`'s string comparison, with `hlsl.shader` still
-> accepted (see: §1.8.2)
+> The signature reflection data model (element ID, direction, location,
+> semantic, system value, component type, shape, interpolation, frequency,
+> stream), its verifier, and its serialization round trip in `gtest` (see:
+> §1.8.2)
