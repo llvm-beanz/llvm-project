@@ -1831,7 +1831,24 @@ ever testing through the full `feme` driver end to end:
   writes the `Backend`'s binary output), letting the SPIR-V "null pipeline"
   be composed and `lit`-tested one stage at a time instead of via `gtest`
   (see the deviation note under Testing Strategy below).
-- Both tools are testing-only entrypoints in the sense of the Core
+- **`feme-render`**: the graphics counterpart of `feme-run`. It renders a
+  *textual scene description* — render targets, pipeline state, vertex and
+  index data, resources, and one or more draws — through FeMe's software
+  graphics executor and prints the resulting attachments as *textual image
+  fixtures*, so a `lit` test can assert on what a vertex/fragment pipeline
+  actually rasterized rather than only on the shape of its IR. It is
+  deliberately a separate binary rather than a draw mode bolted onto
+  `feme-run`: a dispatch is described by a group count and a heap, a draw by
+  a pipeline, attachments and vertex streams, and mixing the two argument
+  models in one tool serves neither. Both fixture formats are specified in
+  "Textual scene and image fixtures" below;
+  see [docs/CommandGuide/feme-render.md](CommandGuide/feme-render.md) for
+  the tool itself, and [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md) for the
+  executor it drives. (`feme-run`, its compute sibling, is specified in
+  [FeMeCPUDesign.md](FeMeCPUDesign.md) since it exists to exercise that
+  document's CPU target; the same split applies here.)
+- Every tool in this section is a testing-only entrypoint in the sense of the
+  Core
   Architectural Principle above: they may use `llvm::cl::opt` (matching
   `mlir-opt`/`mlir-translate` convention) precisely because that principle
   already carves out an exception for narrowly-scoped, testing-only
@@ -2007,10 +2024,107 @@ inputs on the fly in a `RUN:` line, instead of checking in `.dxil`/`.spv`/
   `feme-translate`'s equivalent registration) converts between `spirv`
   dialect textual IR and binary at test time; tests author `spirv` dialect
   text, not `.spv` binaries.
+- **Rendered images, textures and scenes**: `feme-render` (see Testing Tools
+  above) consumes and produces text for both, specified in "Textual scene and
+  image fixtures" immediately below. No `.png`, `.dds` or packed-texel blob
+  is checked in.
 - Fuzzing seed corpora (see Testing Strategy below) are the one intentional
   exception — fuzzer corpora are expected to contain real binary samples,
   and live outside `test/` (e.g. alongside each fuzz harness), not as `lit`
   test inputs.
+
+### Textual scene and image fixtures
+
+The rule above applies unchanged to graphics, where it bites hardest: a
+rendered image is the most tempting binary fixture in the whole project, and
+the least reviewable. A `.png` diff tells a reviewer that an edge rule
+changed; it does not tell them *how*. Both of `feme-render`'s fixture formats
+are therefore text, and both are specified here rather than in the tool's
+command guide page, because the graphics executor's unit tests
+(`unittests/Graphics/`) and both API runtimes' tests consume the same formats.
+
+**Images.** One format is used for *both* an input texture and an expected or
+produced attachment, so a rendered attachment can be fed straight back in as
+the next test's texture, and an actual-output dump can be pasted into a
+`CHECK` line:
+
+```text
+image color0 4x4 r8g8b8a8-unorm
+  y=0: ff0000ff ff0000ff 000000ff 000000ff
+  y=1: ff0000ff 000000ff 000000ff 000000ff
+  y=2: 000000ff 000000ff 000000ff 000000ff
+  y=3: 000000ff 000000ff 000000ff 000000ff
+```
+
+- The header names the image, its extent, and its format from the central
+  format table FeMeGraphicsDesign.md's "Texture layout and formats" defines.
+  Extent grows a third component for 3D and array images (`4x4x6`), and mip
+  and array slices are separate blocks with their own headers
+  (`image tex 2x2 r8g8b8a8-unorm mip=1 slice=3`).
+- One line per row, one token per texel, most significant component first,
+  in the format's own storage encoding: hexadecimal for integer and
+  normalized formats, and a fixed-precision decimal (`+1.0000e+00`) for
+  floating-point ones. Storage encoding, not a converted one — a fixture must
+  not silently depend on the conversion it is testing.
+- Comparison is *exact* by default. The executor is required to be
+  deterministic across worker counts, tile orders and wave sizes
+  (FeMeGraphicsDesign.md, "Determinism and Reference Execution"), so a
+  tolerance would hide precisely the class of bug this fixture exists to
+  catch. `--tolerance` exists only for the cross-implementation differentials
+  against lavapipe and WARP, where the specification itself permits
+  variation, and it is an explicit per-run argument, never a file property.
+- Everything after `#` is a comment, which is what makes an expected image
+  reviewable: a coverage fixture can annotate which texel is the top-left
+  rule's boundary case.
+
+**Scenes.** A scene is YAML, extending the resource-heap schema
+`feme-run --heap` already accepts (`root-constants`, `resource-heap`,
+`bindings`, plus the image resource class §2.6.1 of the roadmap adds) with
+the state a draw needs and nothing else:
+
+```yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [0.0, 0.0, 0.0, 1.0]
+pipeline:
+  vertex: { module: vs.ll, entry: main }
+  fragment: { module: fs.ll, entry: main }
+  cull: none                # none | front | back
+  front-face: ccw
+  depth: { test: less, write: true }
+  blend: replace
+viewport: { rect: [0, 0, 4, 4], depth: [0.0, 1.0] }
+scissor: [0, 0, 4, 4]
+vertex-buffers:
+  - binding: 0
+    stride: 12
+    attributes:
+      - { location: 0, format: r32g32b32-float, offset: 0 }
+    data: [-1.0, -1.0, 0.0,  3.0, -1.0, 0.0,  -1.0, 3.0, 0.0]
+textures:
+  - { index: 0, file: checker.image }
+draws:
+  - { vertices: 3, instances: 1 }
+```
+
+- Every enumerated value is FeMe's own spelling, never a `VkFormat` or `DXGI`
+  enum: the fixture describes the normalized pipeline description
+  FeMeGraphicsDesign.md defines, so the same scene is legitimate evidence for
+  both API runtimes.
+- Shader modules are referenced by path, not embedded, so they stay ordinary
+  `.ll`/`.hlsl`/`spirv`-dialect files built by the same `RUN:` line
+  machinery every other test uses.
+- Textures are referenced by path to an image fixture in the format above.
+- State the scene does not mention takes the executor's documented default,
+  and a scene naming state the executor does not implement is an error at
+  load time, not a silently ignored key. Both properties are what keep a
+  scene diffable: a state change shows up as one added line.
+
+This is a `lit` fixture format, not an interchange format. It is versioned
+only by the tests that use it, has no stability guarantee, and is
+deliberately not a scene *file format* anyone should build a tool around.
 
 ## Directory / Library Layout
 

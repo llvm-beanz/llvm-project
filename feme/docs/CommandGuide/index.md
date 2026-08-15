@@ -9,6 +9,9 @@ tool has its own page:
   in isolation.
 - [`feme-run`](feme-run.md) — testing tool that JITs and dispatches a raised
   shader against a textual resource heap, for the FeMe CPU target.
+- [`feme-render`](feme-render.md) — testing tool that renders a textual scene
+  description through the software graphics executor and prints textual image
+  fixtures; the graphics counterpart of `feme-run`.
 - [`feme-translate`](feme-translate.md) — testing tool for FeMe's per-format
   import/export stages in isolation.
 - [`dxbc-as`](dxbc-as.md) — standalone DXBC assembler, used to build
@@ -27,8 +30,8 @@ tool has its own page:
   libFuzzer harness for CFG restructurization (`FixIrreducible` +
   `StructurizeCFG`), over `feme-cfg-gen` seeds.
 
-`feme-opt`, `feme-run`, `feme-translate`, and `dxbc-as` are testing-only
-entry points
+`feme-opt`, `feme-run`, `feme-render`, `feme-translate`, and `dxbc-as` are
+testing-only entry points
 (see the "Core Architectural Principle: No Global State" and "Testing
 Tools" sections of [Design.md](../Design.md)): they exist to exercise
 individual pipeline stages in isolation under `lit`/`FileCheck`, not as

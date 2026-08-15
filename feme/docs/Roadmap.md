@@ -699,14 +699,18 @@ the first shader-facing milestone rather than alongside it.
    textual image fixtures G3 onward compare against.
 2. **`feme-render`.** A new tool that renders a textual scene description to a
    textual image fixture through the graphics executor, the way `feme-run`
-   dispatches a compute shader. It must be added to Design.md's tool list and
-   given a `docs/CommandGuide/` page like every other FeMe tool. Needed from
-   G3; the alternative — growing `feme-run` a draw mode — mixes two very
-   different argument models.
+   dispatches a compute shader. It is specified in Design.md's "Testing
+   Tools" and has a [CommandGuide page](CommandGuide/feme-render.md);
+   only the implementation is left. Needed from G3; the alternative — growing
+   `feme-run` a draw mode — mixes two very different argument models.
 3. **Textual scene and image fixtures.** §2.5's "no binary fixtures" rule
    applies unchanged: scenes, textures and expected images are text, generated
    or compared at test time. This is what makes edge-rule failures reviewable
-   in a diff.
+   in a diff. Both formats are specified in Design.md's "Textual scene and
+   image fixtures": one image format serves as texture input, expected output
+   and actual-output dump, compared exactly by default, and a scene is YAML
+   extending `feme-run`'s heap schema with attachments, pipeline state and
+   vertex streams spelled in FeMe's own enumerations rather than any API's.
 
 Two more become prerequisites once the runtimes start:
 
@@ -829,7 +833,7 @@ the last step carrying its name.
 | R28 | Vertex and fragment wrappers over in-memory synthetic stage layouts, `FemeStageLayout`/`FemeVertexArgs`/`FemeFragmentArgs`, and derivative/quad lowering at wave sizes 4 and 8. **Completes G1**, and is the design's decision point: if either stage cannot pass through the existing middle end with localized extensions, revise the shared-middle-end boundary before building any fixed function | G1 | §1.8.3 | R27, R22 |
 | R29 | The image and sampler descriptors, `FemeShaderResources` folded into `FemeDispatchArgs`, and `SamplerHeap` retyped. This is the deliberate ABI break: artifacts built before it stop loading | G2 | §1.8.4 | R22 |
 | R30 | `feme.image.*`/`feme.sampler.*` canonicalization from DXIL (including §1.3's texture/sampler handle-kind gap) and SPIR-V (including §1.2's sampling variants), the `runtime/CPU` sampling helpers (1D/2D addressing, mip layout, point/linear filtering, explicit and implicit LOD, addressing modes, comparison sampling), the initial format table with sRGB, and active-lane SIMD lowering. **Completes G2**, unblocking V5 and W3 | G2 | §1.8.4, §1.2, §1.3 | R29 |
-| R31 | `FeMeGraphics` skeleton: normalized pipeline and prepared-draw descriptions, the `feme-render` tool with its command guide page and Design.md tool-list entry, and the heap YAML image resource class | G3 | §2.6.1 | R28 |
+| R31 | `FeMeGraphics` skeleton: normalized pipeline and prepared-draw descriptions, the `feme-render` tool (already specified in Design.md's "Testing Tools" and `docs/CommandGuide/feme-render.md`, along with its scene and image fixture formats -- only the implementation is left), and the heap YAML image resource class | G3 | §2.6.1 | R28 |
 | R32 | Vertex/index fetch, triangle assembly, clipping, viewport transform, culling, tile binning, top-left coverage, interpolation, and both stages run through the executor: one color attachment, one viewport/scissor, no MSAA. **Completes G3** | G3 | §1.8.5 | R31, R30 |
 | R33 | Depth/stencil attachments with legal early/late scheduling, blending, write masks, logic ops, multiple render targets, multisample coverage and resolves, the format expansion the first advertised profile needs, and deterministic parallel tiled schedules | G4 | §1.8.5, §2.6.3 | R32 |
 | R34 | Geometry/hull/domain signatures and wrappers, patch storage, control-stage barriers, tessellator state and domain-coordinate generation, bounded geometry streams, stream output, adjacency, layered rendering | G5 | §1.8.5 | R33, R24 |
@@ -887,8 +891,9 @@ test passes for *every* format and state combination it reports.
 
 ### 3.4 Documentation debt
 
-Three documentation items are prerequisites for the steps above rather than
-follow-ups, and each is small:
+Three documentation items were prerequisites for the steps above rather than
+follow-ups, and each was small. All three are now written; each entry records
+what was decided, since the decisions are what the later steps build on:
 
 - **FeMeVulkanDesign.md has no V6–V8** (done). The graphics design listed
   what they unblock but explicitly did not own their Vulkan-side content
@@ -905,7 +910,11 @@ follow-ups, and each is small:
   written against it. R32's work now has a Vulkan consumer to aim at.
 - **Design.md's tool list and `docs/CommandGuide/` need `feme-render`**
   (R31), which is also where the textual scene and image fixture formats
-  should be specified.
+  should be specified (done). Design.md's "Testing Tools" now carries the
+  tool, `docs/CommandGuide/feme-render.md` documents it, and Design.md's
+  "Textual scene and image fixtures" specifies both formats — placed under
+  "Avoiding binary test fixtures" rather than in the command guide, since the
+  graphics unit tests and both API runtime suites consume the same formats.
 - **DXIL texture/sampler handle kinds needed a decision recorded in
   Design.md's DXIL section** before R30 implements them — §1.3 had flagged
   this as blocking since before the graphics design existed (done).
