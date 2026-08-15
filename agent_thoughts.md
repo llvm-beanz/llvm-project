@@ -13393,3 +13393,172 @@ build, target dependencies building every unit test binary first as usual):
 2. `[feme] Test the signature reflection model's verifier and round trip`.
 3. `[feme] Design: record what R17 landed for signature reflection`.
 4. This file.
+
+# Agent thoughts: roadmap step R18 (DXIL signature/root-signature import)
+
+## What R18 actually asks for
+
+> Preserve DXIL input/output/patch-constant/root-signature rows from
+> `!dx.entryPoints` into that model before `feme::dxil::MetadataRaisingPass`
+> erases the source metadata (see: §1.8.2)
+
+"That model" is R17's `feme::EntrySignature`/`feme::SignatureElement`
+(`feme/include/feme/Core/Signature.h`), which is a pure data model with no
+DXIL or `llvm::Function` dependency by design -- its own file comment says
+so explicitly. So this step is entirely import wiring: read
+`!dx.entryPoints`' `Signatures` operand (the third field of each entry
+tuple) before `MetadataRaisingPass` erases the whole named metadata node,
+convert it, and stash the result somewhere it survives.
+
+## Finding the real DXIL metadata format
+
+`feme::dxsa::translateToLLVMIR`
+(`feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp`) already *writes*
+`!dx.entryPoints`' Signatures tuple for the DXBC->DXIL synthetic path, so I
+had a same-repo, same-format writer to check my reader against instead of
+trusting my memory of DXIL's metadata layout. I cross-checked both against
+a real `dxbc2dxil`-produced test fixture
+(`feme/test/Translate/DXBC/hs1.ref`), which has a genuine hull shader's
+input/output/patch-constant signatures and made the "one list per direction,
+11 fields per row" shape concrete rather than assumed. I also pulled
+DirectXShaderCompiler's `DxilMetadataHelper.h`/`.cpp` from GitHub directly
+(rather than trusting a web search's summary of it, which turned out to
+describe made-up tag values when I sanity-checked it against the real
+header) to get the authoritative field-index and entry-property-tag
+constants: `kDxilSignatureElement*` for the 11-field row layout, and
+`kDxilEntryRootSigTag = 12` for root signature association.
+
+## The root-signature question I could not fully resolve
+
+DXC's classic root-signature representation is a *separate* top-level named
+metadata (`dx.rootSignature`, singular, explicitly documented in
+`DxilMetadataHelper.cpp` as "not valid in final module -- should be moved to
+DxilContainer"), and a compiled `DXContainer`'s bitcode part in fact doesn't
+carry it at all -- the root signature lives in the container's own `RTS0`
+part instead, which `feme::DXILImporter` never even looks at when it
+extracts the DXIL bitcode part. Modern LLVM's own emitter uses yet a third
+spelling, `dx.rootsignatures` (plural, lowercase), read by
+`llvm/lib/Target/DirectX/DXILRootSignature.cpp`.
+
+None of those three match the roadmap's explicit framing: "root-signature
+rows from `!dx.entryPoints`". The one thing that genuinely lives inside
+`!dx.entryPoints` is the per-entry `EntryRootSigTag` (12) property, whose
+value DXC's own root-signature emitter (`EmitSerializedRootSignature`) shows
+is a single-operand `MDNode` wrapping a `ConstantDataArray<i8>` -- i.e. the
+same "wrap raw bytes as metadata" encoding the separate named node uses,
+just embedded per-entry instead of module-wide. I went with that
+interpretation since it is the only one that is both literally "from
+`!dx.entryPoints`" and cheap to implement losslessly: preserve the bytes
+verbatim (`feme::dxil::setRootSignature`/`getRootSignature`), and do not
+attempt to parse them, since that is roadmap W2's job
+(`feme/docs/FeMeWARPDesign.md`'s "Root Signatures and Descriptor Heaps"), not
+R18's. If a real DXIL module turns out to carry its root signature the other
+two ways instead, that is an additive follow-up (read the separate named
+node too), not a rework of what is here.
+
+## Renumbering `ElementID`
+
+The first version of the converter reused DXIL's own per-list element ID
+field directly. It failed `SignatureImportTest.ConvertsInputAndOutputElements`
+immediately: `feme::verifySignature` requires every `ElementID` to be unique
+*within one entry point*, but DXIL numbers its input, output and
+patch-constant signatures independently, each starting at 0 -- so an input
+row 0 and an output row 0 collide the instant both are combined into one
+`feme::EntrySignature`. The fix threads a single running counter across all
+three `convertSignature` calls and assigns it instead of DXIL's own ID.
+`feme::EntrySignature` has no field to keep DXIL's original per-list ID
+around either (there is no `SourceRow`-shaped field in R17's model, and
+adding one felt like scope creep beyond what R18 asks for), so that
+information is intentionally not preserved -- canonical stage operations
+only need a stable ID for the lifetime of one raised module, not DXIL's own
+numbering back.
+
+## What did not translate cleanly
+
+- **Interpolation.** DXIL's `InterpMode` (`Undefined`, `Constant`, `Linear`,
+  `LinearCentroid`, `LinearNoperspective`, `LinearNoperspectiveCentroid`,
+  `LinearSample`, `LinearNoperspectiveSample`) has one more state than
+  `feme::SignatureInterpolationMode` does: `Undefined`, used for an element
+  interpolation does not apply to (a system-value input, mostly). I
+  collapsed it onto `Flat` alongside `Constant` rather than inventing an
+  eighth enumerator for a state FeMe's model was deliberately designed
+  without (see R17's comment: the enumerators are DXIL's *paired* kinds,
+  and `Undefined` is not one of the pairs).
+- **System values.** Several `DXIL::SemanticKind` values
+  (`OutputControlPointID`, `DomainLocation`, `GSInstanceID`,
+  `InnerCoverage`, `TessFactor`, `InsideTessFactor`, `Barycentrics`,
+  `ShadingRate`, `CullPrimitive`) have no `feme::SignatureSystemValue`
+  counterpart, because those stages are out of scope until their own
+  milestones (R17's comment says as much). I map all of them to `None`
+  rather than dropping the row or asserting -- the row (and its semantic
+  name) is still preserved, it just is not claimed as a system value FeMe
+  does not model yet. `Target` (a fragment shader's render-target output)
+  gets the same `None` treatment deliberately, since unlike the others it
+  is not really a builtin at all -- it is an ordinary user-varying output
+  identified by `Location`, and `DepthLessEqual`/`DepthGreaterEqual`
+  (conservative-depth variants) collapse onto plain `Depth` the same way
+  `Undefined` collapses onto `Flat`.
+- **Normalized component types.** `SNormF32`/`UNormF32` read back as plain
+  `F32`; `SignatureComponentType` has no normalized variant, and nothing
+  downstream distinguishes them yet.
+
+## Where the data lives after conversion
+
+R17's `ArtifactInfo`/`ResourceInfo` precedent
+(`feme/include/feme/Target/CPU/ResourceInfo.h`) uses a `!feme.cpu.resources`
+*named* metadata node keyed by entry name, because that information needs to
+survive past IR entirely into an object file. Signature/root-signature
+information does not need that yet -- nothing downstream reads it outside
+the same LLVM module -- so I used function metadata instead
+(`F.setMetadata("feme.signature", ...)`/`"feme.dxil.rootsignature"`), which
+is simpler to attach/read per-entry and does not need a name-keyed lookup at
+all. If a later milestone needs this to survive into an object file the way
+`ArtifactInfo` does, that is an `ArtifactInfo`-shaped extension at that
+point, not a reason to over-build this one now.
+
+## Testing
+
+`unittests/Transforms/DXIL/SignatureImportTest.cpp` (new directory --
+`feme/unittests/Transforms/DXIL` did not exist before this) covers: the
+input/output conversion (system value, location, component type, bit width,
+interpolation, frequency, one field at a time), that a null `Signatures`
+operand converts to an empty signature, that patch-constant direction
+depends on `feme::ShaderStage` (hull -> `PatchOutput`, domain ->
+`PatchInput`), and both function-metadata round trips
+(`setEntrySignature`/`getEntrySignature`, `setRootSignature`/
+`getRootSignature`), including that a function with no metadata attached
+reads back as `std::nullopt` rather than crashing.
+
+`test/Transforms/DXIL/dxil-raise-metadata-signature.ll` exercises
+`feme::dxil::MetadataRaisingPass` end to end: a vertex shader with a real
+`POSITION`/`SV_Position` input/output pair and an `EntryRootSigTag` (12)
+property, checking that both `!feme.signature` and
+`!feme.dxil.rootsignature` function metadata come out attached (the
+signature's exact bytes are deliberately not checked here -- that's the
+unit test's job -- only that something was attached and the root-signature
+bytes round-trip exactly, since those are simple to hand-verify).
+`dxil-raise-metadata-patch-constant.ll` is a companion covering a hull
+shader's patch-constant output row specifically, since the first test has
+none.
+
+Existing `dxil-raise-metadata.ll`/`dxil-raise-metadata-library.ll` still
+pass unmodified: both declare entry points with a null `Signatures` operand,
+so the change only adds an (empty, 8-byte) `!feme.signature` node to their
+output, which their `CHECK`/`CHECK-DAG` lines already tolerate without
+needing updates.
+
+`ninja -C build check-feme` (ccache-backed, assertions-enabled, target
+dependencies building every test binary first as usual): 984 passed / 2
+unsupported, up from 977 passed / 2 unsupported before this step (5 new
+gtest cases, 2 new lit tests).
+
+## Commit breakdown
+
+1. `[feme] Add DXIL !dx.entryPoints signature conversion (R18, part 1)` --
+   `feme::dxil::convertEntrySignature` plus the metadata attach/read
+   helpers, and their unit tests, with no `MetadataRaisingPass` wiring yet.
+2. `[feme] Preserve DXIL signature/root-signature rows in MetadataRaisingPass (R18)` --
+   wires the conversion into the pass and adds the two lit tests.
+3. `[feme] docs: record R18 (DXIL signature/root-signature preservation) as done` --
+   Design.md, FeMeGraphicsDesign.md, and Roadmap.md updates.
+4. This file.
