@@ -85,9 +85,13 @@ The SPIR-V *input* half is the narrowest edge of the translation matrix.
   future work on the CPU-execution side specifically). See §2.4.2 and the
   Deviation note roadmap step R10 adds to feme/docs/FeMeCPUDesign.md's
   Status section.
-- **P1 — SPIR-V → DXIL direction.** Design.md milestone 6's remaining half:
-  a pass raising SPIR-V-derived LLVM IR into DXIL's conventions. Blocked on
-  the conversion breadth above.
+- **P1 — SPIR-V → DXIL direction (done by R13).** Design.md milestone 6's
+  remaining half: `feme::dxil::SPIRVRaisingPass` raises the `llvm.spv.*`/
+  `target("spirv.")` conventions back to `llvm.dx.*`/`target("dx.")`,
+  covering the thread/group index queries and a `StorageBuffer` resource
+  accessed through a flat element access. A typed-buffer image resource
+  remains unraised, since it is still blocked on the conversion breadth
+  above (no SPIR-V shader reading/writing one reaches LLVM IR at all yet).
 - **P1 — SPIR-V bound resources.** `SPV_EXT_descriptor_heap` is unraised, so
   `feme::cpu::BoundResourceNormalizationPass` handles DXIL's
   `handlefrombinding` only (FeMeCPUDesign.md milestone 11's deviation note),
@@ -164,9 +168,15 @@ DXIL import is the most complete path, and its gaps are enumerable.
   back to the existing `dxsa.unknown` diagnostic path like every other
   malformed-operand case (see
   `test/Target/DXSA/src_operand_immediate_zero_components_invalid.dxasm`).
-- **P1 — `BinaryWriter` (`feme::dxsa::serialize`)** is still the
-  unimplemented stub inherited from the prototype, and is the hard
-  prerequisite for real DXBC *export*.
+- **P1 — `BinaryWriter` (`feme::dxsa::serialize`, done by R13)** implements
+  the DXBC export path's hard prerequisite: it reuses `dxbc-as`'s own
+  mnemonic-to-opcode table and encoder (`lookupOpcode`/`getOpcodeInfo`/
+  `encodeProgram`) and covers every operation built from DXSAOpBase.td's
+  five generic shapes (no-operand/unary/binary/ternary/multiply-add) plus
+  `DXSA_MovConditionalOp`'s `movc`/`dmovc` family -- the ISA's arithmetic/
+  logic/comparison/conversion core. Declarations, control flow, and
+  resource/texture ops still diagnose rather than serialize, so a real,
+  complete shader cannot round-trip through it end to end yet.
 - **P1 — `translateToLLVMIR` coverage**, in the dependency order its own
   status note gives: resource queries (`bufinfo`/`resinfo`/`sampleinfo`/
   `samplepos`), atomics and UAV counters, groupshared memory, doubles,
@@ -176,10 +186,18 @@ DXIL import is the most complete path, and its gaps are enumerable.
 
 ### 1.5 Retargeting
 
-- **P1 — NVPTX and AArch64** (Design.md milestone 9's remainder). `Driver`'s
-  triple resolution is already generic; what each needs is, at most, a
-  counterpart to `feme::amdgpu::RaisedLoweringPass` for the raised
-  intrinsics that have no target-independent form.
+- **P1 — NVPTX and AArch64 (done by R13)** (Design.md milestone 9's
+  remainder). `feme::nvptx::RaisedLoweringPass`/`ResourceLoweringPass` are
+  the NVPTX counterparts to AMDGPU's own pair, mapping the same raised
+  conventions onto NVVM/PTX-kernel primitives; unlike AMDGPU, NVPTX has no
+  native object-file codegen (only PTX assembly text) and
+  `feme::Backend`'s `BackendOptions::FileType` has no knob yet to request
+  that, so there is no end-to-end `feme --target=nvptx*` object-file test,
+  only the two passes' own `feme-opt` coverage. `Driver`'s triple
+  resolution turned out to already be generic enough for AArch64 with no
+  code changes at all -- `test/Tools/feme/feme-dxil-to-aarch64.ll` is a new
+  end-to-end test proving that against a genuine non-host CPU ISA, not a
+  new capability.
 - **P1 — `feme::amdgpu::RaisedLoweringPass` breadth** tracks §1.2/§1.3: every
   newly-raised intrinsic needs an AMDGPU lowering or it becomes a new
   end-to-end failure on a path that used to work.
@@ -464,7 +482,7 @@ dependency column is the only ordering constraint.
 | R10 | `feme-run` SPIR-V input; one HLSL source executed through both front ends (done: `feme-run` links `FeMeImportSPIRV`/`FeMeTranslateSPIRV`, sniffing SPIR-V's own magic number the same way `feme::Driver::detectFormat` does; `feme::cpu::SPIRVResourceLoweringPass` normalizes a bound `spirv.VulkanBuffer` storage-buffer handle directly into the same canonical `feme.cpu.resource.*` calls the DXIL `BoundResourceNormalizationPass`/`ResourceLoweringPass` pair produces (SPIR-V has no bindless heap to normalize into, so one pass suffices where DXIL needs two), and `feme::cpu::SPIRVBuiltinFoldingPass` folds the `insertelement`-chain-then-`extractelement` idiom SPIR-V's builtin-variable materialization always produces back into the single scalar lane read, matching DXIL's already-scalar `llvm.dx.thread.id` -- `test/Tools/feme-run/HLSL/front-end-equivalence.hlsl` runs a `RWStructuredBuffer<float>` shader through both front ends and checks the same expected numbers from each, though the SPIR-V half is hand-written `spirv` dialect MLIR rather than compiled by Clang from the same `.hlsl` file, since this build configures no LLVM SPIRV backend for Clang's own HLSL-to-SPIR-V path to use; image/sampler resources and per-field structured-buffer access remain unexecutable on the CPU target) | §1.2 P0, §2.2.3 | R9 |
 | R11 | Thread-safety test; route library diagnostics through `Context`; `FormatRegistry`; `Exporter` interface (done: `unittests/Driver/ThreadSafetyTest.cpp` drives one shared, stateless `DXILImporter` plus the DXIL raising passes from N threads, each with its own `Context`, and checks every `Context`'s underlying `LLVMContext`/`MLIRContext` stays distinct while all are simultaneously alive; `feme::Diagnostic`/`Context::setDiagnosticHandler`/`diagnose` replace `feme::Driver::run`'s direct `errs()` write for its `--wave-size`-ignored warning, with `feme`/`feme-run` each installing their own stderr handler; `feme::FormatRegistry` maps format names to `Importer`/`Exporter` instances, populated lazily by `feme::Driver`'s constructor rather than `Context`'s own -- see the Deviation note this adds to the "`feme::Context`" section of feme/docs/Design.md -- and now backs `feme::detectFormat`; `feme::Exporter`/`ExportOptions` plus `feme::DXILExporter`/`feme::SPIRVExporter` close the "`Exporter` was never written" gap, each a thin wrapper resolving the same target triple `resolveTargetTriple` already computes and delegating to the existing `TargetMachineBackend`, registered into the `FormatRegistry` and used by `Driver` for a `--target` of `dxil`/`spirv` specifically) | §1.1 | R7 (a third format makes the registry pay) |
 | R12 | Root constants; `WaveReadLaneAt` with a varying lane; vector/aggregate decomposition (done: `feme::cpu::RootConstantLoweringPass` lowers the one recognized register-bound constant buffer -- `(b0, space0)` by default, matching "Root constants" -- into bounds-checked loads from the CPU ABI's root-constant block, closing a real gap in `feme::dxil::OpRaisingPass` along the way (`raiseCBufferLoadLegacy` raises `dx.op.cbufferLoadLegacy` into `llvm.dx.resource.load.cbufferrow.4`, the standard 32-bit-per-component row shape, which nothing raised before); a shader that also performs bindless resource access has that root-constant access finished by `feme::cpu::ResourceLoweringPass` instead, reusing its own already-added `root_constants`/`root_constant_size` parameters rather than colliding by name with a second pair (see RootConstantLowering.h's file comment for the two-pass split, and `feme::cpu::checkSupportedRaisedOps`'s updated tolerance for either). `feme::cpu::WaveLowering.cpp`'s `lowerReadLane` now builds a genuine per-lane gather (an unrolled lane loop) instead of assuming a uniform index and extracting lane 0; `feme::cpu::WaveTTIImpl` keeps DXIL's `WaveReadLaneAt` classified uniform (HLSL's own language rule), but SPIR-V's broader shuffle-style read is left to the generic operand-divergence rule, since it has no such guarantee. `feme::cpu::SIMDizePass`'s vector/aggregate decomposition ("Vectors become components, not nested vectors") now also accepts a vector-typed resource *load* as a producer and a constant-index `extractelement` as a consumer of either producer shape, in addition to the existing constant-index-`insertelement`-chain/resource-store pair; a non-constant-index `extractelement`, `shufflevector`, `phi`/`select` of vector type, and every aggregate remain diagnosed) | §1.6 P1 | — |
-| R13 | SPIR-V → DXIL direction; `BinaryWriter`; NVPTX/AArch64 | §1.2, §1.4, §1.5 P1 | R9 |
+| R13 | SPIR-V → DXIL direction; `BinaryWriter`; NVPTX/AArch64 (done: `feme::dxil::SPIRVRaisingPass` raises the SPIR-V-derived `llvm.spv.*`/`target("spirv.")` conventions a `Translator` produces back into the `llvm.dx.*`/`target("dx.")` ones `feme::dxil::OpRaisingPass`'s own output already uses -- the mirror image of `feme::spirv::RaisedLoweringPass` -- covering the four thread/group index queries with a direct mapping and a bound `StorageBuffer` resource (`target("spirv.VulkanBuffer", ...)`, HLSL's `(RW)StructuredBuffer<T>`) accessed through a flat `getpointer` plus an ordinary load/store, raised into DXIL's `target("dx.RawBuffer", ...)` handle and `llvm.dx.resource.load.rawbuffer`/`store.rawbuffer`; a typed-buffer image resource stays unraised, since MLIR's `SPIRVToLLVM` conversion still has no patterns for image *access* ops (only types), so none reaches LLVM IR to raise. `feme::Driver` runs it whenever a SPIR-V-derived module retargets to DXIL, closing Design.md milestone 6 end to end (`test/Tools/feme/feme-spirv-to-dxil.mlir`); doing so exposed a real bug shared by `feme::Driver::resolveTargetTriple` and `feme::DXILExporter` -- both fell back to a stage-less `dxil-unknown-shadermodel6.5-library` triple for any non-DXIL-originated module, which LLVM's DirectX codegen rejects outright for a stage-specific op like `llvm.dx.thread.id` -- now fixed by recovering the real pipeline stage from the entry point's `hlsl.shader` attribute first, the same attribute a SPIR-V `Translator` already sets. `feme::dxsa::serialize` (`BinaryWriter.cpp`) is implemented too, closing the DXBC-export prerequisite: it reuses `feme::dxbc::lookupOpcode`/`getOpcodeInfo`/`encodeProgram` (the exact table/encoder `dxbc-as`'s own text assembler already builds) rather than re-deriving SM4/SM5's bit layouts, and covers every operation built from DXSAOpBase.td's five generic shapes (no-operand/unary/binary/ternary/multiply-add) plus `DXSA_MovConditionalOp`'s `movc`/`dmovc` family -- the arithmetic/logic/comparison/conversion core of the ISA; declarations, control flow, and resource/texture ops are not yet covered and diagnose cleanly instead of mis-encoding, matching this dialect's own "extend incrementally" precedent. NVPTX gets its own `feme::nvptx::RaisedLoweringPass`/`ResourceLoweringPass`, mapping the same raised conventions onto NVVM/PTX-kernel primitives instead of AMDGPU's -- narrower than AMDGPU's own coverage in one respect the design didn't anticipate: NVPTX has no native object-file (ELF) codegen, only PTX assembly text, and `feme::Backend`'s `BackendOptions::FileType` has no knob yet to request that instead of the hard-coded `ObjectFile` default, so (unlike AMDGPU) there is no end-to-end `feme --target=nvptx*` object-file test yet, only the two passes' own `feme-opt` coverage (`test/Transforms/NVPTX`). AArch64 needed no new code at all: `feme::Driver`'s triple resolution and `feme::cpu::runPipeline` were already triple-generic, so `test/Tools/feme/feme-dxil-to-aarch64.ll` simply exercises that against a genuine non-host CPU ISA instead of leaving it an untested claim) | §1.2, §1.4, §1.5 P1 | R9 |
 | R14 | `-O2` end-to-end differential; execute-after-round-trip tests | §2.2.5, §2.2.6 | R8 |
 | R15 | CPU milestones 12/13 (resource and general performance), C API | §1.5, §1.6 P2, Design.md milestone 10 | R1–R14 |
 

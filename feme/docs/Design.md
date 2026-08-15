@@ -1020,10 +1020,20 @@ Status: the migration itself is done — the dialect (`feme/include/feme/Dialect
 `feme-translate` registration are in place, with the
 dialect's C++ namespace rehomed from `mlir::dxsa` to `feme::dxsa` and its
 full `lit` test suite (`feme/test/Target/DXSA`, ~390 tests) migrated
-alongside it. Remaining follow-up work, not attempted in this migration:
-- **`BinaryWriter`** (`feme::dxsa::serialize`) is still the unimplemented
-  stub inherited from the prototype; implementing it remains a hard
-  prerequisite for real DXBC export, as described above.
+alongside it. Roadmap step R13 implemented the previously-stubbed
+`BinaryWriter` (`feme::dxsa::serialize`, `feme/lib/Target/DXSA/
+BinaryWriter.cpp`), registered as `feme-translate`'s `--export-dxsa-bin`:
+it reuses `dxbc-as`'s own mnemonic-to-opcode table and encoder
+(`feme::dxbc::lookupOpcode`/`getOpcodeInfo`/`encodeProgram`) rather than
+re-deriving SM4/SM5's bit layouts, and covers every operation built from
+DXSAOpBase.td's five generic shapes (no-operand/unary/binary/ternary/
+multiply-add) plus `DXSA_MovConditionalOp`'s `movc`/`dmovc` family — the
+ISA's arithmetic/logic/comparison/conversion core, matching the "extend
+incrementally" plan above. Remaining follow-up work:
+- **`BinaryWriter` coverage** beyond the generic-shape ops above —
+  declarations, control flow, and resource/texture ops all still diagnose
+  rather than serialize, so a real, complete shader cannot round-trip
+  through it end to end yet.
 - **Opcode coverage** in the dialect/parser itself beyond what the migrated
   prototype already covered is still incremental, per the "cover the full
   SM5 opcode set" goal above.
@@ -1437,6 +1447,22 @@ isolation via `feme-dxil-raise-ops`, and end to end through the CLI by
 shader: it reads a builtin dispatch index and reads/writes a bound resource
 through it).
 
+**NVPTX** (roadmap step R13) gets the exact same two-pass split --
+`feme::nvptx::ResourceLoweringPass`/`RaisedLoweringPass`
+(`feme/{include,lib}/Transforms/NVPTX`) -- mapped onto NVVM/PTX-kernel
+primitives instead: `llvm.nvvm.read.ptx.sreg.ctaid.*`/`tid.*` for the
+group/thread-index queries, PTX's `ptx_kernel` calling convention for entry
+points, and NVPTX's local address space (5) for local variables (the same
+numeric value as AMDGPU's private address space, purely by coincidence). A
+resource binding becomes a kernel pointer parameter exactly like AMDGPU's
+own, since a CUDA kernel receives everything as parameters too (and NVPTX's
+global address space -- 1 -- again coincides with AMDGPU's). Tested via
+`feme-opt` (`test/Transforms/NVPTX/nvptx-lower-{raised,resources}.ll`); not
+yet end to end through the CLI, since NVPTX has no native object-file (ELF)
+codegen -- only PTX assembly text -- and `feme::Backend`'s
+`BackendOptions::FileType` has no knob yet to request that instead of the
+hard-coded `ObjectFile` default.
+
 ## Raised LLVM IR -> SPIR-V
 
 The same problem exists for the in-tree `SPIRV` target, and has a much
@@ -1511,6 +1537,59 @@ don't straightforwardly have) to define "success." Real ISA retargeting
 is the same `Backend` implementation either way, selected purely by
 `BackendOptions::TargetTriple` — this is not a SPIR-V-specific `Backend`,
 just a SPIR-V-specific validation path for it.
+
+## Raised LLVM IR (SPIR-V) -> DXIL
+
+Roadmap step R13 closed milestone 6's remaining direction: raising a
+SPIR-V-derived, translated `llvm::Module` back into the `llvm.dx.*`/
+`target("dx.")` conventions `feme::dxil::OpRaisingPass`'s own output
+already uses, via `feme::dxil::SPIRVRaisingPass`
+(`feme/include/feme/Transforms/DXIL/SPIRVRaising.h`,
+`feme/lib/Transforms/DXIL/SPIRVRaising.cpp`) -- the mirror image of
+`feme::spirv::RaisedLoweringPass` above, run the opposite direction. The
+same parallel-intrinsic-family structure that direction exploits applies
+here too: the thread/group index queries are a straight callee
+substitution, `llvm.spv.thread.id`/`.group.id`/`.thread.id.in.group`/
+`.flattened.thread.id.in.group` -> their `llvm.dx.*` counterparts.
+
+The resource handle direction is narrower than SPIR-V -> AMDGPU/NVPTX's own
+resource handling, though, because of what actually reaches this pass: a
+typed-buffer image resource (`target("spirv.Image", ...)`) needs the image
+*access* ops MLIR's `SPIRVToLLVM` conversion still has no patterns for (see
+"Known gap: `spirv` dialect -> `llvm` dialect conversion coverage" under
+the SPIR-V section above), so no such shader reaches LLVM IR at all today
+-- there is nothing yet to raise. What *does* reach LLVM IR is a
+`StorageBuffer` block (HLSL's `(RW)StructuredBuffer<T>`,
+`target("spirv.VulkanBuffer", [0 x ElemTy], StorageClass, IsWriteable)`),
+accessed through `llvm.spv.resource.getpointer` plus an ordinary load or
+store. This pass raises that shape -- restricted to a flat (whole-element)
+access, matching `feme::cpu::SPIRVResourceLoweringPass`'s own narrowing,
+not yet a structured-buffer field access -- into DXIL's raw/structured
+buffer handle (`target("dx.RawBuffer", ElemTy, IsUAV, IsROV)`) and
+`llvm.dx.resource.load.rawbuffer`/`store.rawbuffer`, the same shape
+`feme::dxil::OpRaisingPass::raiseRawBufferLoad`/`raiseRawBufferStore`
+produce from real DXIL. `IsROV` is always false: SPIR-V carries no
+rasterizer-ordered-view distinction to recover it from.
+
+`feme::Driver` runs this pass whenever a module whose *original* input
+format was SPIR-V (not merely one that happens to already be in
+`llvm.dx.*` form, e.g. DXIL/DXBC) retargets to a DXIL triple. Doing so
+exposed a real, pre-existing bug: both `feme::Driver::resolveTargetTriple`
+and `feme::DXILExporter` fell back to a stage-less
+`dxil-unknown-shadermodel6.5-library` triple for any non-DXIL-originated
+module, which is fine for the SPIR-V "null pipeline" (validated only up to
+`llvm::Module`, never actually fed to DirectX codegen) but not for a real
+`--target=dxil`: LLVM's DirectX codegen rejects a stage-specific op like
+`llvm.dx.thread.id` outright for a stage-less module. Both now recover the
+real pipeline stage from the entry point's `hlsl.shader` function
+attribute first -- set identically by `MetadataRaisingPass` for a
+DXIL-derived module and by `SPIRVToLLVMTranslator` for a SPIR-V-derived
+one -- before falling back to `library`.
+
+Exercised via `feme-opt` as `feme-dxil-raise-spirv`
+(`test/Transforms/DXIL/dxil-raise-spirv.ll`) and end to end through the CLI
+by `test/Tools/feme/feme-spirv-to-dxil.mlir` (a `StorageBuffer` compute
+shader retargeted from SPIR-V all the way to a real `DXContainer`).
 
 ## Library API Shape
 
@@ -2201,13 +2280,20 @@ end-to-end test coverage that should grow alongside it, see
    Status: the DXIL -> SPIR-V direction is implemented and validated end to
    end (`feme --target=spirv` on a DXIL input), via
    `feme::spirv::RaisedLoweringPass` (see "Raised LLVM IR -> SPIR-V" above)
-   feeding LLVM's in-tree `SPIRV` target. The SPIR-V -> DXIL direction is
-   not: it needs a pass raising SPIR-V-derived, translated LLVM IR into
-   DXIL's conventions, and is additionally blocked upstream of that by
-   MLIR's `SPIRVToLLVM` conversion having no patterns for the image *access*
-   ops (image *types* now convert -- see "Known gap: `spirv` dialect ->
+   feeding LLVM's in-tree `SPIRV` target. Roadmap step R13 closed the SPIR-V
+   -> DXIL direction too: `feme::dxil::SPIRVRaisingPass` raises the
+   `llvm.spv.*`/`target("spirv.")` conventions a SPIR-V `Translator`
+   produces back to `llvm.dx.*`/`target("dx.")`, covering the thread/group
+   index queries and a `StorageBuffer` resource (`(RW)StructuredBuffer<T>`)
+   accessed through a flat element access; `feme::Driver` runs it whenever
+   a SPIR-V-derived module retargets to DXIL, validated end to end
+   (`feme --target=dxil` on a SPIR-V input, see
+   `test/Tools/feme/feme-spirv-to-dxil.mlir`). A typed-buffer image
+   resource remains unraised: still blocked upstream by MLIR's
+   `SPIRVToLLVM` conversion having no patterns for the image *access* ops
+   (image *types* now convert -- see "Known gap: `spirv` dialect ->
    `llvm` dialect conversion coverage" above), so no SPIR-V shader that
-   actually reads or writes a resource reaches LLVM IR today.
+   actually reads or writes one reaches LLVM IR today.
 7. **DXBC import**: build `dxbc-as` (see Testing Tools above) first —
    a standalone, MLIR-independent DXBC assembler — so DXBC importer tests
    have human-readable, diffable fixtures from day one; then migrate the
@@ -2268,13 +2354,20 @@ end-to-end test coverage that should grow alongside it, see
    Status: AMDGPU retargeting is implemented and validated end to end via
    `feme::Driver` (`--target=amdgcn-...`) for both DXIL- and SPIR-V-derived
    modules, for the opcodes/intrinsics `feme::amdgpu::RaisedLoweringPass`
-   currently covers (see "Raised LLVM IR -> AMDGPU" above); NVPTX/AArch64
-   retargeting is not yet attempted (no client need yet, matching this
-   step's own original scoping). `Driver`'s target-triple resolution is
-   generic (any triple `TargetRegistry` recognizes works for
-   `feme::TargetMachineBackend` itself), so adding those is not expected to
-   need `Driver` changes -- only, if needed, an NVPTX/AArch64 counterpart to
-   `RaisedLoweringPass` for raised-IR-specific intrinsics.
+   currently covers (see "Raised LLVM IR -> AMDGPU" above). Roadmap step
+   R13 added NVPTX and AArch64: `feme::nvptx::RaisedLoweringPass`/
+   `ResourceLoweringPass` mirror AMDGPU's own pair onto NVVM/PTX-kernel
+   primitives, wired into `feme::Driver` (`--target=nvptx*`) and validated
+   via their own `feme-opt` tests (`test/Transforms/NVPTX`) -- but not end
+   to end through the full `feme` CLI the way AMDGPU is, since NVPTX has no
+   native object-file (ELF) codegen (only PTX assembly text) and
+   `feme::Backend`'s `BackendOptions::FileType` has no knob yet to request
+   that instead of the hard-coded `ObjectFile` default this needs.
+   AArch64 needed no new code: `Driver`'s target-triple resolution was
+   already generic enough (any triple `TargetRegistry` recognizes works for
+   `feme::TargetMachineBackend`, and `feme::cpu::runPipeline` is
+   triple-generic too), so `test/Tools/feme/feme-dxil-to-aarch64.ll` simply
+   validates that against a genuine non-host CPU ISA end to end.
 10. **C API**: once `feme` and its underlying library primitives are
     functional and tested end to end (steps 1–9), layer a stable C API
     (analogous to `MLIR-C`/`LLVM-C`) over the by-then-proven C++ API
