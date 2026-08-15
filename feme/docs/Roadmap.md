@@ -145,10 +145,18 @@ DXIL import is the most complete path, and its gaps are enumerable.
   lane-to-quad mapping that remains an explicit v1 non-goal (see
   FeMeCPUDesign.md's "Non-Goals"), so raising `QuadOp` closes the "hard
   pipeline error downstream" risk without yet making it executable.
-- **P1 — texture/sampler handle kinds.** Blocked on recovering the
-  dimension/multi-sample/feedback bits that binding metadata does not carry
-  the way `StructuredBuffer`/`CBuffer`'s size/alignment is; needs a decision
-  recorded in Design.md's DXIL section before implementation.
+- **P1 — texture/sampler handle kinds.** The blocking decision is now
+  recorded in Design.md's DXIL section ("Decision: texture and sampler handle
+  kinds"): the dimension/multi-sample/feedback bits this entry said were
+  missing are in fact carried by `ResourceProperties` (Word0's `ResourceKind`
+  byte *is* the dimension; Word1 carries component type/count, sample count
+  and feedback kind), so the raised handle types are LLVM's own
+  `dx.Texture`/`dx.MSTexture`/`dx.FeedbackTexture`/`dx.Sampler`. What is
+  actually left is implementation, plus two narrower gaps the decision names:
+  the legacy `!dx.resources` path has no component count and must recover the
+  texel width from access sites the way typed buffers already do, and
+  UNORM/SNORM/packed element kinds stay unraised until G2's format table
+  exists. Implemented by R30.
 - **P1 — the remaining resource access ops** (non-typed buffer and texture
   load/store beyond the raw/structured forms milestone 10 added).
 
@@ -375,7 +383,7 @@ should therefore be treated as a decision point, not just another step.
 | `FemeDispatchArgs::SamplerHeap` is typed `const FemeDescriptor *` — reserved before sampling had any representation — and must become `const FemeSamplerDescriptor *` | "Relationship to the compute ABI" | P0 |
 | No `FemeShaderResources` block shared by compute and graphics; the resource fields are inlined into `FemeDispatchArgs` | "Relationship to the compute ABI" | P0 |
 | No `feme.image.*`/`feme.sampler.*` operations and no sampling, filtering, mip-selection, addressing-mode, sRGB or format-conversion helpers in `runtime/CPU` | "Canonical image operations", "Texture layout and formats" | P0 |
-| DXIL texture/sampler handle kinds are unraised (§1.3's own P1 row, blocked on recovering dimension/multi-sample/feedback bits) and SPIR-V sampling beyond basic `ImageSampleImplicitLod`/`OpImageFetch` is unconverted (§1.2's R9 entry) | §1.2, §1.3 | P0 |
+| DXIL texture/sampler handle kinds are unraised (§1.3's own P1 row; the encoding is now decided in Design.md's "Decision: texture and sampler handle kinds", so only the implementation is left) and SPIR-V sampling beyond basic `ImageSampleImplicitLod`/`OpImageFetch` is unconverted (§1.2's R9 entry) | §1.2, §1.3 | P0 |
 
 G2 is scheduled before any raster stage on purpose: compute shaders that
 sample images are required by Vulkan V5 and Direct3D W3, both of which precede
@@ -898,9 +906,16 @@ follow-ups, and each is small:
 - **Design.md's tool list and `docs/CommandGuide/` need `feme-render`**
   (R31), which is also where the textual scene and image fixture formats
   should be specified.
-- **DXIL texture/sampler handle kinds still need a decision recorded in
-  Design.md's DXIL section** before R30 implements them — §1.3 has flagged
-  this as blocking since before the graphics design existed.
+- **DXIL texture/sampler handle kinds needed a decision recorded in
+  Design.md's DXIL section** before R30 implements them — §1.3 had flagged
+  this as blocking since before the graphics design existed (done).
+  Design.md's "Decision: texture and sampler handle kinds" records it, and
+  corrects the premise: the bits §1.3 said `ResourceProperties` does not
+  carry are carried, so the decision is to decode them into LLVM's existing
+  `dx.Texture`/`dx.MSTexture`/`dx.FeedbackTexture`/`dx.Sampler` types, with
+  the legacy `!dx.resources` path recovering the texel width from access
+  sites and normalized (UNORM/SNORM/packed) element kinds deferred to G2's
+  format table.
 
 ## Part 4: Explicitly not scheduled
 

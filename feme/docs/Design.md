@@ -850,8 +850,9 @@ it now covers the two largest opcode families:
   alignment is recoverable or representable). That's enough to round-trip
   the binding and the exact byte size buffer indexing depends on, which is
   what matters for re-targeting the IR -- see `getOpaqueSizedType` in
-  `OpRaising.cpp`. Textures/samplers still need dimension/multi-sample/
-  feedback bits not yet decoded, so those remain unraised. Since the buffer/
+  `OpRaising.cpp`. Textures and samplers are not raised yet; the encoding
+  they need is decided in "Decision: texture and sampler handle kinds"
+  below. Since the buffer/
   texture *load and store* ops that actually consume a resource handle
   aren't raised yet either (see below), the reconstructed handle is bridged
   back to the legacy `%dx.types.Handle` type via `llvm.dx.resource.
@@ -889,9 +890,9 @@ element, `TextureLoad`, `Sample*`, ...) -- `CBufferLoadLegacy`'s standard
 (`feme::dxil::OpRaisingPass::raiseCBufferLoadLegacy`, used by the CPU
 target's root-constant support; its `.f16`/`.f64`/`.i16` overloads, 8- or
 2-field rows of a different component width, are not) -- and texture/sampler
-resource kinds (need dimension/multi-sample/feedback bits
-`ResourceProperties` doesn't carry, unlike `StructuredBuffer`/`CBuffer`'s
-recoverable size/alignment). Ops that return an aggregate needing
+resource kinds, whose encoding is decided in "Decision: texture and sampler
+handle kinds" below but not yet implemented. Ops that return an aggregate
+needing
 `extractvalue` reconstruction outside of resources (`IMul`/`UMul`, `UAddc`,
 `SplitDouble`, `WaveActiveBallot`, roadmap step R3) and ops that pick their
 source intrinsic from an extra "kind"/flag operand rather than the opcode
@@ -917,6 +918,88 @@ pass's own incremental-coverage design (above) allows for pass-level
 buffer accesses (above) is what closed this for the compute shaders driving
 this work; a shader using a resource kind or access op still on the "not
 covered" list above will still hit it.
+
+#### Decision: texture and sampler handle kinds
+
+This section is the decision this document previously recorded as owed
+before textures and samplers could be raised, and which Roadmap.md's §1.3
+and §1.8.4 list as blocking G2's canonical image operations.
+
+The premise the earlier note recorded was wrong, and stating that plainly
+matters more than the decision itself: it claimed the dimension,
+multi-sample and feedback bits "`ResourceProperties` doesn't carry". They
+are carried. `ResourceInfo::getAnnotateProps`
+(`llvm/lib/Analysis/DXILResource.cpp`) packs, into the two `i32` words of
+the `%dx.types.ResourceProperties` constant every `dx.op.annotateHandle`
+call already supplies:
+
+| Field | Location | Meaning for a texture/sampler |
+|---|---|---|
+| `ResourceKind` | Word0 bits 0-7 | *Is* the dimension: `Texture1D`, `Texture2D`, `Texture2DMS`, `Texture3D`, `TextureCube`, the four array forms, `FeedbackTexture2D{,Array}`, `Sampler` |
+| `IsUAV` | Word0 bit 12 | Writeable (`RWTexture*`) |
+| `IsROV` | Word0 bit 13 | Rasterizer-ordered view |
+| `SamplerCmpOrHasCounter` | Word0 bit 15 | For `Sampler`, `SamplerType::Comparison` vs `Default` |
+| Component type | Word1 bits 0-7 | `dxil::ElementType`, the same field `TypedBuffer` already uses |
+| Component count | Word1 bits 8-15 | Texel vector width (`Texture2D<float4>` reports 4) |
+| Sample count | Word1 bits 16-23 | Nonzero only for `Texture2DMS{,Array}` |
+| Feedback kind | Word1 (whole word) | `SamplerFeedbackType` for the two feedback kinds |
+
+`ResourceTypeInfo::isTyped()` returns true for every non-feedback texture
+kind, which is why the component type/count/sample-count layout is shared
+with `TypedBuffer` rather than being texture-specific. The decision is
+therefore simply to decode those fields, and the raised handle types are the
+ones LLVM's DirectX target already defines
+(`llvm/include/llvm/Analysis/DXILResource.h`):
+
+| DXIL `ResourceKind` | Raised handle type |
+|---|---|
+| `Texture1D`/`2D`/`3D`/`Cube` and their array forms | `target("dx.Texture", ElemTy, IsUAV, IsROV, IsSigned, Kind)` |
+| `Texture2DMS`, `Texture2DMSArray` | `target("dx.MSTexture", ElemTy, IsUAV, SampleCount, IsSigned, Kind)` |
+| `FeedbackTexture2D`, `FeedbackTexture2DArray` | `target("dx.FeedbackTexture", FeedbackType, Kind)` |
+| `Sampler` | `target("dx.Sampler", SamplerType)` |
+
+`ElemTy` is `widenToTypedBufferElement(getElementLLVMType(...))`, and
+`IsSigned` is `isSignedElementType`, both reused unchanged from the typed
+buffer path. `Kind` is passed through as its raw `dxil::ResourceKind`
+value, which is what `TextureExtType::getDimension` expects. Nothing new has
+to be invented, and nothing needs recovering from access sites — with one
+exception, below.
+
+Three consequences are worth recording explicitly, because they are the
+parts that are *not* mechanical:
+
+1. **The legacy `!dx.resources` path cannot recover the component count.**
+   The pre-SM6.6 `dx.op.createHandle` spelling names its resource by
+   (class, range ID) and `ResourceMetadata` reads the answer out of
+   `!dx.resources`, which stores the `ElementType` extended-property tag and
+   the sample count but no component count at all (see
+   `ResourceInfo::getAsMetadata`). Textures raised through that path must
+   therefore recover the texel width the same way typed buffers already do:
+   from how the resource is actually accessed — a `dx.op.textureStore` write
+   mask names it directly, and a `dx.op.textureLoad`/`sample`'s
+   `%dx.types.ResRet` components are only ever extracted up to it — falling
+   back to 4, DXIL's widest texel, for a handle with no accesses.
+   `ResourceBinding` gains a component-count field for this, populated by
+   the same access scan `widenToTypedBufferElement` currently short-circuits.
+2. **UNORM/SNORM/packed element kinds stay unraised, and that is a
+   deliberate hole, not an oversight.** `getElementLLVMType` already returns
+   null for them because an LLVM scalar type cannot express the format
+   conversion they imply, and a texture is where they are actually common
+   (`Texture2D<unorm float4>`). Raising them needs the format to survive into
+   the handle, which is FeMeGraphicsDesign.md's central format table
+   ("Texture layout and formats"), not DXIL's handle type. Until G2 defines
+   that table, a normalized-format texture is left as an unraised
+   `dx.op.*` call, exactly like an unsupported opcode.
+3. **Raising the handle is not raising the access.** `dx.op.textureLoad`,
+   `dx.op.textureStore`, `dx.op.sample*`, `dx.op.textureGather*`,
+   `dx.op.getDimensions` and `dx.op.calculateLOD` are separate work and are
+   the *only* consumers that make a raised texture handle useful. They are
+   scheduled with G2's canonical `feme.image.*`/`feme.sampler.*` operations
+   rather than here, because their canonical target is owned by the graphics
+   design; this section only fixes what the handle type must be, so both
+   ends agree before either is written. The `DXILShaderFlags` constraint in
+   the Deviation note above still applies: a shader using a texture is not
+   retargetable until both halves land.
 
 #### Module metadata raising: `feme::dxil::MetadataRaisingPass`
 
@@ -2290,9 +2373,9 @@ end-to-end test coverage that should grow alongside it, see
    (a reduce-kind/signedness or bitwise-op flag) and `QuadOp` (a direction
    flag, roadmap step R4). See the "Status" note under the DXIL section
    above. Non-typed buffer and texture load/store ops and texture/sampler
-   resource-handle kinds (need dimension/multi-sample/feedback bits not
-   recoverable the way `StructuredBuffer`/`CBuffer`'s size/alignment is)
-   remain open for follow-up changes.
+   resource-handle kinds remain open for follow-up changes; the handle
+   encoding the latter needs is settled in "Decision: texture and sampler
+   handle kinds" above.
 5. **DXIL retargeting**: reuse step 3's backend glue for DXIL-derived
    `llvm::Module`s.
 
