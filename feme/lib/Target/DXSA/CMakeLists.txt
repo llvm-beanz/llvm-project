@@ -7,6 +7,7 @@ add_mlir_translation_library(FeMeTargetDXSA
   ${FEME_SOURCE_DIR}/include/feme/Target/DXSA
 
   LINK_LIBS PUBLIC
+  FeMeDXBCAssembler
   FeMeDXSADialect
   MLIRIR
   MLIRSupport
