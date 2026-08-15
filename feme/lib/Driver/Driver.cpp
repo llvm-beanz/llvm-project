@@ -28,6 +28,7 @@
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
+#include "feme/Transforms/DXIL/SPIRVRaising.h"
 #include "feme/Transforms/SPIRV/RaisedLowering.h"
 #include "feme/Translate/DXSA/DXSATranslator.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
@@ -172,6 +173,23 @@ translateToLLVMIR(Module &&Imported, llvm::StringRef FormatName, Context &Ctx) {
   return ToLLVMIR.translate(std::move(Imported), Ctx);
 }
 
+/// The pipeline stage a module's entry point declares, i.e. the
+/// `"hlsl.shader"` function attribute `feme::dxil::MetadataRaisingPass`
+/// (for a DXIL-derived module) or `feme::SPIRVToLLVMTranslator` (for a
+/// SPIR-V-derived one) both spell identically -- `llvm::Triple::
+/// getEnvironmentTypeName`'s own string for the stage's `EnvironmentType`
+/// (`"compute"`, `"pixel"`, ...), which is also exactly the environment
+/// component a `dxil-unknown-shadermodelX.Y-<stage>` triple needs. A module
+/// with multiple entry points disagreeing about their stage is future work
+/// (see `getShaderWaveSizeRequirement`'s own precedent); this simply takes
+/// the first one it finds.
+std::optional<llvm::StringRef> getShaderStage(const llvm::Module &M) {
+  for (const llvm::Function &F : M)
+    if (F.hasFnAttribute("hlsl.shader"))
+      return F.getFnAttribute("hlsl.shader").getValueAsString();
+  return std::nullopt;
+}
+
 /// Resolves `Opts.Target` (see DriverOptions' field comments) to the
 /// concrete target triple `TargetMachineBackend` should retarget to:
 /// `Opts.Target` may itself either name one of FeMe's own input formats
@@ -199,6 +217,12 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
     if (Existing.getArch() == llvm::Triple::dxil &&
         Existing.getOS() == llvm::Triple::ShaderModel)
       return Existing.str();
+    // A SPIR-V-derived module's entry point still knows its own pipeline
+    // stage (see `getShaderStage`'s comment); use that rather than a
+    // stage-less default, which LLVM's DirectX codegen rejects outright for
+    // a stage-specific op like `llvm.dx.thread.id` (a compute-only query).
+    if (std::optional<llvm::StringRef> Stage = getShaderStage(M))
+      return ("dxil-unknown-shadermodel6.5-" + *Stage).str();
     return std::string("dxil-unknown-shadermodel6.5-library");
   }
 
@@ -363,6 +387,17 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     Ctx.diagnose(Diagnostic{DiagnosticSeverity::Warning,
                             "--wave-size is ignored for target '" +
                                 *TargetTriple + "' (not the FeMe CPU target)"});
+  }
+
+  // A SPIR-V-derived module reaching a DXIL target needs the reverse of
+  // `feme::spirv::RaisedLoweringPass` below: `llvm.spv.*`/`target("spirv.")`
+  // conventions raised back into the `llvm.dx.*`/`target("dx.")` ones
+  // `feme::dxil::OpRaisingPass`'s own output already uses (see "SPIR-V ->
+  // DXIL direction" in feme/docs/Design.md). A DXIL/DXBC-derived module is
+  // already in that shape, so this only runs for a genuine SPIR-V input.
+  if (TheTriple.isDXIL() && Imp->getFormatName() == "spirv") {
+    llvm::ModuleAnalysisManager MAM;
+    feme::dxil::SPIRVRaisingPass().run(M, MAM);
   }
 
   // Raised IR still uses `llvm.dx.*` intrinsics for the HLSL-specific
