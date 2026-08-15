@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/Prepare.h"
 
+#include "feme/Core/ShaderStage.h"
 #include "feme/Transforms/CPU/VerifyStructured.h"
 
 #include "llvm/ADT/SetVector.h"
@@ -59,45 +60,49 @@ void prepareFunction(Function &F, FunctionAnalysisManager &FAM) {
   FPM.run(F, FAM);
 }
 
-/// Whether \p F is a compute entry point (the only kind FeMe's front ends
-/// raise today, see "Format-Agnostic Operation" in
-/// feme/docs/FeMeCPUDesign.md).
-bool isComputeEntryPoint(const Function &F) {
-  return F.hasFnAttribute("hlsl.shader") &&
-         F.getFnAttribute("hlsl.shader").getValueAsString() == "compute";
-}
-
-/// Selects the single compute entry point Phase 1 keeps: \p EntryPoint by
-/// name if given, else the module's only one. Every other
-/// `hlsl.shader="compute"` function is a diagnosable ambiguity (`EntryPoint`
-/// empty, more than one candidate) or an outright miss (`EntryPoint` names
-/// nothing), rather than an arbitrary pick -- "Canonicalize entry points" in
+/// Selects the single \p Stage entry point Phase 1 keeps: \p EntryPoint by
+/// name if given, else the module's only one. Every other entry point of
+/// that stage is a diagnosable ambiguity (`EntryPoint` empty, more than one
+/// candidate) or an outright miss (`EntryPoint` names nothing), rather than
+/// an arbitrary pick -- "Canonicalize entry points" in
 /// feme/docs/FeMeCPUDesign.md requires selection, not guessing.
-Expected<Function *> selectEntryPoint(Module &M, StringRef EntryPoint) {
+///
+/// The stage is the checked `feme::ShaderStage` an entry point declares (see
+/// `feme::getShaderStage`), not a string comparison against one attribute's
+/// value, so that selecting a non-compute stage is an argument rather than a
+/// second rule.
+Expected<Function *> selectEntryPoint(Module &M, StringRef EntryPoint,
+                                      feme::ShaderStage Stage) {
+  StringRef StageName = feme::getShaderStageName(Stage);
+  auto declaresStage = [Stage](const Function &F) {
+    return feme::getShaderStage(F) == Stage;
+  };
+
   if (!EntryPoint.empty()) {
     Function *F = M.getFunction(EntryPoint);
-    if (!F || !isComputeEntryPoint(*F))
+    if (!F || !declaresStage(*F))
       return createStringError(
-          errc::invalid_argument,
-          "no compute entry point named '%s' in this module",
-          EntryPoint.str().c_str());
+          errc::invalid_argument, "no %s entry point named '%s' in this module",
+          StageName.str().c_str(), EntryPoint.str().c_str());
     return F;
   }
 
   Function *Found = nullptr;
   for (Function &F : M) {
-    if (!isComputeEntryPoint(F))
+    if (!declaresStage(F))
       continue;
     if (Found)
       return createStringError(
           errc::invalid_argument,
-          "module has more than one compute entry point; select one with "
-          "the entry-point option");
+          "module has more than one %s entry point; select one with "
+          "the entry-point option",
+          StageName.str().c_str());
     Found = &F;
   }
   if (!Found)
     return createStringError(errc::invalid_argument,
-                             "module has no compute entry point");
+                             "module has no %s entry point",
+                             StageName.str().c_str());
   return Found;
 }
 
@@ -130,9 +135,9 @@ void removeUnreachableDefinitions(Module &M, Function &Entry) {
 } // namespace
 
 PreservedAnalyses PreparePass::run(Module &M, ModuleAnalysisManager &) {
-  Expected<Function *> Entry = selectEntryPoint(M, EntryPoint);
+  Expected<Function *> Entry = selectEntryPoint(M, EntryPoint, Stage);
   if (!Entry) {
-    // Selecting a compute entry point is a precondition every later phase
+    // Selecting an entry point is a precondition every later phase
     // relies on (Phase 6 needs a single wrapper root); there is no
     // meaningful IR to hand onward if it fails. `ModulePassManager::run` has
     // no `Error`-returning path of its own, so this reports the failure

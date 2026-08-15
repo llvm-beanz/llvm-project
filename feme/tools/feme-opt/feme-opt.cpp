@@ -26,6 +26,7 @@
 
 #include "feme/Analysis/CPU/WaveUniformity.h"
 #include "feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Dialect/DXSA/IR/DXSA.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
@@ -78,11 +79,20 @@ namespace {
 /// `feme::cpu::PreparePass` selects, matching "Canonicalize entry points" in
 /// feme/docs/FeMeCPUDesign.md ("by name, from options"). Empty (the
 /// default) requires the module to have exactly one.
-cl::opt<std::string> EntryPointOpt(
-    "feme-cpu-entry-point",
-    cl::desc("The compute entry point feme-cpu-prepare selects, if the "
-             "module has more than one"),
-    cl::init(""));
+cl::opt<std::string>
+    EntryPointOpt("feme-cpu-entry-point",
+                  cl::desc("The entry point feme-cpu-prepare selects, if the "
+                           "module has more than one"),
+                  cl::init(""));
+
+/// `-feme-cpu-stage=<stage>`: the pipeline stage `feme::cpu::PreparePass`
+/// selects an entry point of, spelled with `feme::getShaderStageName`'s
+/// canonical name (see "Stage identity" in
+/// feme/docs/FeMeGraphicsDesign.md).
+cl::opt<std::string> StageOpt(
+    "feme-cpu-stage",
+    cl::desc("The shader stage feme-cpu-prepare selects an entry point of"),
+    cl::init("compute"));
 
 /// `-feme-cpu-wave-size=<N>`: the wave size `feme::cpu::SIMDizePass` widens
 /// to, matching the literal example in "Phase 4: Widening"
@@ -178,7 +188,13 @@ void registerFeMePasses(PassBuilder &PB) {
          ArrayRef<PassBuilder::PipelineElement>) {
         if (Name != feme::cpu::PreparePass::name())
           return false;
-        MPM.addPass(feme::cpu::PreparePass(EntryPointOpt));
+        std::optional<feme::ShaderStage> Stage =
+            feme::parseShaderStage(StageOpt);
+        if (!Stage) {
+          errs() << "feme-opt: unknown shader stage '" << StageOpt << "'\n";
+          return false;
+        }
+        MPM.addPass(feme::cpu::PreparePass(EntryPointOpt, *Stage));
         return true;
       });
   PB.registerPipelineParsingCallback(

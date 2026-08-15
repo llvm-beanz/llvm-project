@@ -27,8 +27,10 @@ add_mlir_library(FeMeTransformsCPU
   Passes
   Scalar
   Support
+  TargetParser
   TransformUtils
 
   LINK_LIBS PUBLIC
   FeMeAnalysisCPU
+  FeMeCore
   )

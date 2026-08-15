@@ -18,9 +18,17 @@
 // structurize control flow, `LowerSwitch` removes multi-way branches (the
 // linearizer handles two-way branches only), `PromotePass` (`mem2reg`)
 // promotes allocas that can be, and entry-point canonicalization selects a
-// single `hlsl.shader="compute"` function -- by name if `EntryPoint` is
-// given, else the module's only one -- discarding every other entry point
-// and any definition left unreachable from it.
+// single entry point of the requested `feme::ShaderStage` -- by name if
+// `EntryPoint` is given, else the module's only one -- discarding every
+// other entry point and any definition left unreachable from it.
+//
+// Roadmap milestone 16 replaces that selection's original `hlsl.shader ==
+// "compute"` string comparison with the checked `feme::ShaderStage`
+// enumeration ("Stage identity" in feme/docs/FeMeGraphicsDesign.md), so that
+// a non-compute stage is a `Stage` argument rather than a different
+// comparison. `hlsl.shader` is still accepted as the source of an entry
+// point's stage when `feme.shader.stage` is absent; see
+// `feme::getShaderStage`.
 //
 // Roadmap milestone 5 adds an assertions-only postcondition check
 // (`feme::cpu::verifyStructured`) at the end of `run`, matching the "CFG
@@ -31,21 +39,29 @@
 #ifndef FEME_TRANSFORMS_CPU_PREPARE_H
 #define FEME_TRANSFORMS_CPU_PREPARE_H
 
+#include "feme/Core/ShaderStage.h"
+
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/PassManager.h"
+
+#include <string>
 
 namespace feme::cpu {
 
 /// Phase 1: prepares a raised module for the rest of the CPU pipeline. See
 /// the file comment above for current scope.
 class PreparePass : public llvm::PassInfoMixin<PreparePass> {
-  /// The compute entry point to keep, or empty to require the module to
-  /// have exactly one `hlsl.shader="compute"` function.
+  /// The entry point to keep, or empty to require the module to have
+  /// exactly one entry point of `Stage`.
   std::string EntryPoint;
 
+  /// The pipeline stage the selected entry point must declare.
+  ShaderStage Stage;
+
 public:
-  explicit PreparePass(llvm::StringRef EntryPoint = "")
-      : EntryPoint(EntryPoint) {}
+  explicit PreparePass(llvm::StringRef EntryPoint = "",
+                       ShaderStage Stage = ShaderStage::Compute)
+      : EntryPoint(EntryPoint), Stage(Stage) {}
 
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);
 

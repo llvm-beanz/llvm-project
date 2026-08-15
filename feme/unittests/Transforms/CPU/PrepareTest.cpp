@@ -8,7 +8,11 @@
 
 #include "feme/Transforms/CPU/Prepare.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "llvm/AsmParser/Parser.h"
+#include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/IR/DiagnosticPrinter.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
@@ -31,9 +35,10 @@ std::unique_ptr<Module> parseIR(LLVMContext &Ctx, StringRef Assembly) {
   return M;
 }
 
-void runPass(Module &M, StringRef EntryPoint = "") {
+void runPass(Module &M, StringRef EntryPoint = "",
+             feme::ShaderStage Stage = feme::ShaderStage::Compute) {
   ModuleAnalysisManager MAM;
-  PreparePass(EntryPoint).run(M, MAM);
+  PreparePass(EntryPoint, Stage).run(M, MAM);
 }
 
 TEST(PrepareTest, PromotesAllocaAndLowersSwitch) {
@@ -117,6 +122,95 @@ TEST(PrepareTest, RemovesUnreachableDefinitions) {
 
   EXPECT_TRUE(M->getFunction("helper"));
   EXPECT_FALSE(M->getFunction("unreachable_helper"));
+}
+
+// Stage selection is the `feme.shader.stage` enumeration, so an entry point
+// carrying only that attribute -- no `hlsl.shader` -- selects.
+TEST(PrepareTest, SelectsByShaderStageAttribute) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  EXPECT_TRUE(M->getFunction("main"));
+}
+
+// Two entry points of *different* stages are not an ambiguity: only the
+// requested stage is a candidate, which is what selecting by enumeration
+// rather than by "is it a compute shader?" buys.
+TEST(PrepareTest, SelectsTheRequestedStageAmongSeveral) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @vertex_main() #0 {
+      ret void
+    }
+    define void @compute_main() #1 {
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    attributes #1 = { "feme.shader.stage"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M, "", feme::ShaderStage::Vertex);
+
+  EXPECT_TRUE(M->getFunction("vertex_main"));
+  EXPECT_FALSE(M->getFunction("compute_main"));
+}
+
+// An entry point of another stage is not selectable as this one, even by
+// name.
+TEST(PrepareTest, RejectsAnEntryPointOfAnotherStage) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )");
+  ASSERT_TRUE(M);
+
+  std::string Error;
+  Ctx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Payload) {
+        if (DI->getSeverity() != DS_Error)
+          return;
+        raw_string_ostream OS(*static_cast<std::string *>(Payload));
+        DiagnosticPrinterRawOStream Printer(OS);
+        DI->print(Printer);
+      },
+      &Error);
+  runPass(*M, "main");
+
+  EXPECT_EQ(Error, "feme-cpu-prepare: no compute entry point named 'main' in "
+                   "this module");
+  // The module is left alone rather than half-prepared.
+  EXPECT_TRUE(M->getFunction("main"));
+}
+
+// `feme.shader.stage` is the model, but a module raised before it existed --
+// or hand-written IR -- still selects through `hlsl.shader`.
+TEST(PrepareTest, HLSLShaderAttributeIsStillAccepted) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      ret void
+    }
+    define void @pixel_main() #1 {
+      ret void
+    }
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+    attributes #1 = { "hlsl.shader"="pixel" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  EXPECT_TRUE(M->getFunction("main"));
+  EXPECT_FALSE(M->getFunction("pixel_main"));
 }
 
 } // namespace
