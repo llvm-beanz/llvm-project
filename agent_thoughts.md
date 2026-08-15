@@ -12489,3 +12489,229 @@ untouched by it) and fixed what it flagged.
 4. `[feme] R12: add RootConstantLoweringPass, closing the root-constants gap`.
 5. `[feme] R12: update Design.md/FeMeCPUDesign.md/Roadmap.md`.
 6. This file.
+
+# Agent thoughts: FeMe roadmap step R13 (SPIR-V -> DXIL direction; `BinaryWriter`; NVPTX/AArch64)
+
+R13 bundles three genuinely independent pieces of work under one roadmap
+line (Roadmap.md §1.2/§1.4/§1.5 P1, depending on R9). Treated each as its
+own investigation + implementation + test + doc-update cycle, landed as
+separate commits, in this order: SPIR-V -> DXIL, `BinaryWriter`, NVPTX/
+AArch64.
+
+## Part 1: SPIR-V -> DXIL direction
+
+Design.md milestone 6 already had the DXIL -> SPIR-V half done (R9/R10):
+`feme::spirv::RaisedLoweringPass` rewrites raised `llvm.dx.*` IR into
+`llvm.spv.*`. The other direction needed the mirror-image pass, so I read
+that pass closely first and built `feme::dxil::SPIRVRaisingPass` as its
+literal inverse: same `DirectMapping` table shape (just `SPIRVID`/`RaisedID`
+swapped), same resource-handle-plus-accesses rewrite structure.
+
+The scope question was what resource shape to actually raise. The roadmap
+note said the SPIR-V -> DXIL direction was "blocked on the conversion
+breadth" of `SPIRVToLLVM` -- specifically, no image *access* op patterns
+exist yet, only image *types*. I confirmed this by grepping
+`SPIRVToLLVMPatterns.cpp` and finding no `ImageRead`/`ImageWrite` pattern,
+which means no SPIR-V shader that samples/reads/writes a texture resource
+ever reaches LLVM IR at all -- there's nothing for a raising pass to raise.
+What *does* reach LLVM IR (per R9) is a `StorageBuffer` block
+(`RWStructuredBuffer<T>`), converted to a `target("spirv.VulkanBuffer",
+...)` handle accessed via `llvm.spv.resource.getpointer` + ordinary
+load/store. I scoped the pass to exactly that shape, raising it into
+DXIL's `target("dx.RawBuffer", ...)` handle + `llvm.dx.resource.
+load.rawbuffer`/`store.rawbuffer` -- the same raw/structured-buffer
+convention `feme::dxil::OpRaisingPass::raiseRawBufferLoad`/`Store` already
+produce from real DXIL, so nothing downstream needed to learn a new shape.
+
+Wiring this into `feme::Driver` (run whenever `TheTriple.isDXIL() &&
+Imp->getFormatName() == "spirv"`) immediately hit a real bug when I tried
+an actual end-to-end test: `llc: Cannot create ThreadId operation: Invalid
+stage` from LLVM's own DirectX codegen. Traced it to
+`DXILOpBuilder::ShaderStage = TT.getEnvironment()` -- and found that both
+`feme::Driver::resolveTargetTriple`'s "dxil" branch *and*
+`feme::DXILExporter::exportModule` had their own, independent copy of
+"prefer the module's own `dxil-shadermodelX.Y-<stage>` triple if it has
+one, else fall back to a stage-less `-library` default." That fallback is
+correct for anything DXIL-originated (which always already carries the
+real triple) but wrong for a SPIR-V-derived module, which never does --
+and DirectX codegen genuinely rejects a stage-specific op like
+`llvm.dx.thread.id` for the stage-less default. Fixed both call sites to
+recover the real stage from the `hlsl.shader` function attribute first
+(which `SPIRVToLLVMTranslator` already sets, identically to how
+`MetadataRaisingPass` sets it for DXIL) before falling back to `library`.
+This is a real, narrow, well-motivated bug fix directly exposed by the
+feature I was adding, not scope creep -- without it, *no* SPIR-V-derived
+compute shader could ever retarget to DXIL, which defeats the entire point
+of this roadmap item.
+
+Verified the whole pipeline manually first (feme-translate stage by stage)
+before writing the lit test, to separate "is my pass right" from "is the
+CLI wiring right" -- worth doing given how many moving pieces a
+cross-format retarget touches.
+
+## Part 2: `BinaryWriter` (`feme::dxsa::serialize`)
+
+This looked like the biggest risk going in: a full SM4/SM5 assembler is a
+~4000-line effort (`BinaryParser.cpp`'s own size gives a sense of scale),
+and the existing stub had sat unimplemented since the dialect's migration.
+The key discovery that made this tractable: `dxbc-as` (the standalone
+DXBC text assembler) *already* has exactly the encoder this needs --
+`feme::dxbc::encodeProgram`/`Instruction`/`Operand`, plus a complete
+mnemonic-to-opcode table (`Opcodes.def`, `lookupOpcode`/`getOpcodeInfo`) --
+built for an entirely different purpose (assembling test fixtures) but
+structurally identical to what `dxsa::serialize` needs to produce. So
+instead of re-deriving DXBC's tokenized bit layouts, `BinaryWriter.cpp`
+converts each `dxsa` MLIR op into a `feme::dxbc::Instruction`/`Operand` and
+hands the whole thing to `encodeProgram` -- reusing, not reimplementing,
+the hard part.
+
+Scoping which ops to support: I noticed `DXSAOpBase.td` defines five
+generic op-shape base classes (`NoOperandOp`/`UnaryOp`/`BinaryOp`/
+`TernaryOp`/`MultiplyAddOp`) that ~150 of the dialect's arithmetic/logic/
+comparison/conversion ops are built from, all with identical, predictable
+attribute names (`dst`/`src`, `dst`/`lhs`/`rhs`, etc.). Rather than
+hand-listing every mnemonic, I classify an op's shape generically from
+`getOpcodeInfo(Opcode).NumDst`/`NumSrc` (0/0 -> no-operand, 1/1 -> unary,
+1/2 -> binary), with one small hardcoded exception: the four-operand case
+(`NumDst=1, NumSrc=3`) is ambiguous between three *different* attribute-
+name conventions (`TernaryOp`'s `src0/src1/src2`, `MultiplyAddOp`'s
+`lhs/rhs/acc`, and `MovConditionalOp`'s `condition/src1/src2` -- I
+initially missed that `movc` uses its own custom base class, not
+`TernaryOp`, and only found that by grepping for its actual `.td`
+definition rather than assuming it matched the pattern). That's the only
+per-mnemonic table the writer needs.
+
+Then a fully generic operand converter: `dst`/`src` attributes read off
+the `Operation*` by name (`getAttrOfType<DstOperandAttr>("dst")`, etc.,
+with no dependency on the concrete op's C++ type at all), converted field
+by field into `feme::dxbc::Operand` -- type, index list (recursing through
+`convertSrcOperand` for a relative index's nested register), component
+count, min-precision, mask/swizzle, modifier. Cross-checked every numeric
+encoding against `BinaryParser.cpp`'s equivalent decode logic rather than
+guessing (e.g. `ComponentMask`'s bit values, `MinPrecision`'s enum values,
+both turned out to share the exact same numeric encoding between the
+`dxsa` and `dxbc` namespaces, so most conversions are direct `static_cast`s
+rather than lookup tables).
+
+One real API-shape mistake along the way, caught by the compiler rather
+than by me reasoning it out correctly the first time: `dxsa::ModuleOp`'s
+`getMask()`/`getMinPrecision()`/`getModifier()`/`getSwizzle()`/`getIndex()`
+accessors (AttrDef `OptionalParameter`s) return the raw nullable attribute
+type, not `std::optional<Enum>` -- unlike `ModuleOp::getProgramType()`
+(an *op-level* `OptionalAttr` argument), which does return
+`std::optional<ProgramType>`. Two different ODS attribute-optionality
+mechanisms, two different generated accessor shapes; I'd assumed they were
+the same and had to fix every one of the former after the build told me
+so.
+
+Also a namespace surprise on `serialize`'s own parameter: the header
+declares it as `mlir::ModuleOp`, not `feme::dxsa::ModuleOp` -- I initially
+assumed this was a typo in the pre-existing stub and "fixed" it, but
+`TranslateRegistration.cpp`'s existing caller (`registerDXSAExportBinTranslation`)
+already expects `mlir::ModuleOp`: `TranslateFromMLIRRegistration`'s driver
+always wraps parsed text in an implicit top-level `builtin.module`, so the
+real `dxsa.module` is nested one level inside. Reverted my "fix" and
+instead had `serialize` look up the single nested `feme::dxsa::ModuleOp`
+itself (`Source.getOps<dxsa::ModuleOp>()`), matching what `deserialize`'s
+own result shape already implies.
+
+Tested with a genuine round-trip (export then re-import, checking the
+text is byte-identical) covering every supported shape, plus a negative
+test confirming an unsupported op (e.g. any `dcl_*` declaration) is
+diagnosed cleanly rather than silently mis-encoded or dropped.
+
+## Part 3: NVPTX/AArch64
+
+Read the AMDGPU passes first, since the roadmap note says explicitly
+"what each needs is, at most, a counterpart to `RaisedLoweringPass`."
+That turned out to be true for NVPTX and *not even that much* true for
+AArch64.
+
+NVPTX: wrote `feme::nvptx::RaisedLoweringPass`/`ResourceLoweringPass` as
+close mirrors of the AMDGPU pair -- `llvm.nvvm.read.ptx.sreg.tid.*`/
+`ctaid.*` in place of `llvm.amdgcn.workitem.id.*`/`workgroup.id.*`,
+`ptx_kernel` calling convention in place of `amdgpu_kernel`, NVPTX's local
+address space (5) in place of AMDGPU's private one (which happens to
+share the same numeric value -- confirmed via `NVPTXAddrSpace.h`, not
+assumed). `ResourceLoweringPass` is close enough to a literal copy that I
+generated it with `sed` from the AMDGPU original and then re-read every
+line to fix the now-stale AMDGPU-specific wording in comments -- NVPTX's
+global address space (1) *also* happens to coincide with AMDGPU's, purely
+by coincidence, which I called out explicitly in both files' comments so
+a future reader doesn't mistake it for structural code sharing.
+
+Tried to write the AMDGPU-style end-to-end object-file test
+(`feme-dxil-to-amdgpu.ll`'s NVPTX counterpart) and it failed immediately:
+`createMCCodeEmitter failed` / `target 'nvptx64-nvidia-cuda' does not
+support emitting the requested file type`. NVPTX has no native object-file
+(ELF) code generator -- only PTX assembly text -- and
+`feme::Backend`'s `BackendOptions::FileType` is hard-coded to
+`ObjectFile` with no CLI knob to ask for assembly instead. This is a real,
+separate, pre-existing gap in `feme::TargetMachineBackend`'s own options,
+not something either new pass can fix on its own, and adding a
+`--filetype` flag to the whole `feme`/`feme-translate` CLI surface is a
+larger, separate feature than "add NVPTX intrinsic lowering." Documented
+this narrowing explicitly (in the pass's own header comment, and in
+Roadmap.md/Design.md) rather than force-fitting a test that can't actually
+pass, or silently skipping the topic. The two passes are still fully
+tested via `feme-opt` in isolation, mirroring the AMDGPU passes' own
+`feme-opt`-level test coverage exactly.
+
+AArch64 needed *zero* new passes. `isCPUTarget` already treats any triple
+that isn't DXIL/SPIR-V/AMDGCN as "the FeMe CPU target," which already
+included AArch64 before this change (I only added NVPTX to that
+exclusion list, since NVPTX is GPU-shaped and needs its own passes the
+way AMDGPU does). `feme::cpu::runPipeline`'s own status note already
+claimed triple-genericness. So the actual work here was purely
+*validating* an existing claim against a genuine non-host ISA rather than
+building anything: added `test/Tools/feme/feme-dxil-to-aarch64.ll`,
+retargeting a real DXIL compute shader to `aarch64-unknown-linux-gnu`
+through the full `feme` CLI and checking `llvm-readobj`'s `Machine: EM_
+AARCH64` field, which is a genuinely new, previously-completely-untested
+code path (every other CPU-target lit test implicitly retargets to the
+*host's own* triple via `%feme_host_triple`) even though it required no
+implementation changes.
+
+## Environment note: build reconfiguration
+
+The pre-existing `build/` directory was configured with
+`LLVM_TARGETS_TO_BUILD=X86;AArch64` (no SPIRV/AMDGPU/NVPTX), which doesn't
+match `cmake/caches/feme.cmake`'s own declared `Native;SPIRV;AMDGPU`. This
+meant several *existing* SPIR-V/AMDGPU-dependent tests were silently
+`REQUIRES`-gated out in this particular build, and I couldn't validate my
+own new SPIR-V/NVPTX work without adding those targets. Reconfigured with
+`cmake -DLLVM_TARGETS_TO_BUILD="X86;AArch64;SPIRV;NVPTX" .` (incremental,
+not a full rebuild -- ccache + existing object files made this a few
+minutes, not a from-scratch LLVM build) so the new tests would actually
+*run*, not just compile. Updated `cmake/caches/feme.cmake` itself to add
+NVPTX and AArch64 to its own target list, so a fresh `check-feme` build
+from that cache continues to build and run every test this roadmap step
+adds, matching the existing convention that the cache file's own comment
+explains *why* each target is there.
+
+## Verification
+
+Every commit built cleanly (`ninja feme feme-opt`, sometimes narrower)
+and was checked against the full suite (`ninja check-feme`) before moving
+to the next piece, not just at the end: started at 927/929 (2 unsupported,
+pre-existing SPIR-V-gated tests in the original X86;AArch64-only config),
+ended at 930/932 passed (2 unsupported -- both are the two `dxsa-mlir`
+`BinaryWriter` fixtures' *unrelated*, pre-existing `directx-registered-
+target`-independent gates, unchanged) with +12 new lit tests (2 DXSA
+BinaryWriter, 2 DXIL SPIRVRaising, 1 feme-spirv-to-dxil e2e, 2 NVPTX
+transforms, 1 feme-dxil-to-aarch64 e2e, plus the DXILExporter/Driver
+stage-recovery fix's own coverage riding on the SPIR-V e2e test) and 0
+regressions at any point. Also ran `ninja check-feme-unit` (311/311
+passed, unchanged from baseline) after each commit, since none of this
+session's changes touched gtest-covered code paths directly but several
+touch `Driver.cpp`/`DXILExporter.cpp`, which do have unit coverage.
+
+## Commit breakdown
+
+1. `[feme] Implement feme::dxsa::serialize (DXBC BinaryWriter)`.
+2. `[feme] Add feme::dxil::SPIRVRaisingPass (SPIR-V -> DXIL direction, part 1/2)`.
+3. `[feme] Wire SPIRVRaisingPass into Driver (SPIR-V -> DXIL direction, part 2/2)`.
+4. `[feme] Add feme::nvptx::{RaisedLowering,ResourceLowering}Pass`.
+5. `[feme] Wire NVPTX passes into Driver; add AArch64 end-to-end test`.
+6. `[feme] Update Design.md/Roadmap.md for roadmap step R13`.
+7. This file.
