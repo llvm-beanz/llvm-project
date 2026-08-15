@@ -227,6 +227,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   // exists.
   llvm::SmallVector<SPIRVModuleInfo> Modules;
   feme::spirv::ResourceInfoMap Resources;
+  feme::spirv::StageIOInfoMap StageIOVariables;
   unsigned Index = 0;
   for (mlir::Operation &Op :
        llvm::make_early_inc_range(Module.getBody()->getOperations())) {
@@ -242,6 +243,12 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
       // those names come from.
       for (auto &Resource : feme::spirv::prepareResourceVariables(SPIRVModule))
         Resources[Resource.getKey()] = Resource.getValue();
+      // Recovers each stage-IO variable's address space before the
+      // conversion may have already dropped the declaration this reads by
+      // the time its own uses are legalized (see
+      // feme::spirv::prepareStageIOVariables).
+      for (auto &StageIOVar : feme::spirv::prepareStageIOVariables(SPIRVModule))
+        StageIOVariables[StageIOVar.getKey()] = StageIOVar.getValue();
     }
     ++Index;
   }
@@ -256,7 +263,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::populateSPIRVToLLVMConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMFunctionConversionPatterns(TypeConverter, Patterns);
   feme::spirv::populateSPIRVToLLVMTargetPatterns(TypeConverter, Patterns,
-                                                 Resources);
+                                                 Resources, StageIOVariables);
 
   mlir::ConversionTarget Target(*Ctx);
   Target.addIllegalDialect<mlir::spirv::SPIRVDialect>();

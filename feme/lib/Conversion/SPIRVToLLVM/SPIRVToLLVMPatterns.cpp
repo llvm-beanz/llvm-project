@@ -140,9 +140,11 @@ mlir::Value createIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
 /// `llvm.spv.*` intrinsic reading it. There is no LLVM global to take the
 /// address of: LLVM's SPIRV backend synthesizes the `OpVariable`, and its
 /// `BuiltIn` decoration, from the intrinsic itself, so the "address" a
-/// builtin variable has in SPIR-V is modeled as the value it holds -- which
-/// is why `!spirv.ptr<T, Input>` converts to `T`, see
-/// feme::spirv::populateSPIRVToLLVMTargetTypeConversions.
+/// builtin variable has in SPIR-V is modeled as the value it holds, and this
+/// converts its pointee type directly (rather than going through the pointer
+/// type conversion, which non-builtin `Input`/`Output` variables need to
+/// convert to an ordinary pointer instead -- see
+/// feme::spirv::populateSPIRVToLLVMTargetTypeConversions).
 class BuiltInAddressOfPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AddressOfOp> {
 public:
@@ -160,7 +162,9 @@ public:
       return Rewriter.notifyMatchFailure(
           Op, "not a builtin variable with an LLVM equivalent");
 
-    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    auto PointerTy = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    mlir::Type ResultType =
+        getTypeConverter()->convertType(PointerTy.getPointeeType());
     if (!ResultType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
@@ -213,6 +217,215 @@ public:
     Rewriter.eraseOp(Op);
     return mlir::success();
   }
+};
+
+/// A SPIR-V decoration this pattern preserves for a stage-IO variable, and
+/// the `!spirv.Decorations`-shaped (see `getStageIODecorationsAttrName`)
+/// code it maps to. Values match the SPIR-V spec's `Decoration` enumerators;
+/// see `mlir::spirv::Decoration` (`SPIRVBase.td`) for the same numbering.
+struct StageIODecoration {
+  llvm::StringLiteral AttrName;
+  uint32_t Code;
+};
+
+/// The boolean (no-argument) decorations a non-builtin `Input`/`Output`
+/// variable may carry: the fragment-stage interpolation qualifiers, and
+/// `Patch`/`PerPrimitiveEXT` for tessellation/mesh per-patch and
+/// per-primitive variables. `Component`/`Index` are separate since they
+/// carry an integer argument (handled directly in buildStageIODecorations),
+/// as does `Location` (already an ODS attribute on `GlobalVariableOp`).
+constexpr StageIODecoration StageIOFlagDecorations[] = {
+    {"no_perspective", 13}, {"flat", 14},   {"patch", 15},
+    {"centroid", 16},       {"sample", 17}, {"per_primitive_ext", 5271},
+};
+
+/// Builds the getStageIODecorationsAttrName() attribute for \p Op -- a
+/// non-builtin `Input`/`Output` variable -- from its `Location`/`Component`/
+/// `Index` and boolean interpolation/per-primitive/per-patch attributes
+/// (`StageIOFlagDecorations`), or a null attribute if it carries none of
+/// them.
+mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
+  mlir::Builder Builder(Op.getContext());
+  llvm::SmallVector<mlir::Attribute> Decorations;
+
+  auto addIntDecoration = [&](uint32_t Code, mlir::Attribute ValueAttr) {
+    auto Value = mlir::dyn_cast_or_null<mlir::IntegerAttr>(ValueAttr);
+    if (!Value)
+      return;
+    Decorations.push_back(Builder.getArrayAttr(
+        {Builder.getI32IntegerAttr(Code),
+         Builder.getI32IntegerAttr(static_cast<int32_t>(Value.getInt()))}));
+  };
+
+  // `location` is a strongly typed `GlobalVariableOp` attribute; `component`/
+  // `index` are not (MLIR's SPIR-V dialect only special-cases `location`,
+  // `binding`, `descriptor_set` and `built_in` -- see `SPIRV_GlobalVariableOp`
+  // in `SPIRVStructureOps.td`), so those are read as plain attributes by the
+  // name MLIR's deserializer would give them
+  // (`llvm::convertToSnakeFromCamelCase`).
+  addIntDecoration(30, Op.getLocationAttr());
+  addIntDecoration(31, Op->getAttr("component"));
+  addIntDecoration(32, Op->getAttr("index"));
+
+  for (const StageIODecoration &Flag : StageIOFlagDecorations)
+    if (Op->hasAttr(Flag.AttrName))
+      Decorations.push_back(
+          Builder.getArrayAttr({Builder.getI32IntegerAttr(Flag.Code)}));
+
+  if (Decorations.empty())
+    return nullptr;
+  return Builder.getArrayAttr(Decorations);
+}
+
+/// Converts a non-builtin `Input`/`Output` `spirv.GlobalVariable` -- an
+/// ordinary vertex/fragment/etc. stage-IO variable, as opposed to a `BuiltIn`
+/// one (BuiltInGlobalVariablePattern) -- to an `llvm.mlir.global` in the
+/// address space LLVM's SPIRV backend expects that storage class to use (7
+/// for `Input`, 8 for `Output`; see `storageClassToAddressSpace` in
+/// `llvm/lib/Target/SPIRV/SPIRVUtils.h`), matching how
+/// PushConstantGlobalVariablePattern handles the one other storage class
+/// MLIR's own `GlobalVariablePattern` does not support -- unlike that one,
+/// though, MLIR's `GlobalVariablePattern` *does* claim `Input`/`Output`
+/// already, just at address space 0 (its `storageClassToAddressSpace`
+/// overload is Vulkan-unaware), so this needs a higher benefit to win over
+/// it here too. `Location`/`Component`/`Index`/interpolation/per-primitive/
+/// per-patch decorations are preserved as a getStageIODecorationsAttrName()
+/// attribute (see buildStageIODecorationsAttr), which
+/// feme::spirv::attachStageIODecorations later turns into real
+/// `!spirv.Decorations` metadata once a genuine `llvm::Module` exists.
+/// Returns the address space a non-builtin stage-IO variable's storage
+/// class converts to (7 for `Input`, 8 for `Output` -- see
+/// `storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`), or
+/// `std::nullopt` if \p Op is not one (a different storage class, or a
+/// builtin variable, which converts through BuiltInAddressOfPattern/
+/// BuiltInGlobalVariablePattern instead).
+std::optional<unsigned>
+getStageIOAddressSpace(mlir::spirv::GlobalVariableOp Op) {
+  auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+  mlir::spirv::StorageClass SC = SrcType.getStorageClass();
+  if (SC != mlir::spirv::StorageClass::Input &&
+      SC != mlir::spirv::StorageClass::Output)
+    return std::nullopt;
+  if (getBuiltInMapping(Op))
+    return std::nullopt;
+  return SC == mlir::spirv::StorageClass::Input ? 7 : 8;
+}
+
+class StageIOGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GlobalVariableOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    std::optional<unsigned> AddrSpace = getStageIOAddressSpace(Op);
+    if (!AddrSpace)
+      return Rewriter.notifyMatchFailure(Op,
+                                         "not a non-builtin stage-IO variable");
+
+    auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    mlir::Type DstType =
+        getTypeConverter()->convertType(SrcType.getPointeeType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    // `Input` is read-only from the shader's point of view (nothing lowers a
+    // store into one); `Output` is written but never read back, matching how
+    // MLIR's own `GlobalVariablePattern` treats these two storage classes.
+    bool IsConstant =
+        SrcType.getStorageClass() == mlir::spirv::StorageClass::Input;
+    auto NewGlobal = Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+        Op, DstType, IsConstant, mlir::LLVM::Linkage::External, Op.getSymName(),
+        mlir::Attribute(), /*alignment=*/0, *AddrSpace);
+
+    if (mlir::ArrayAttr Decorations = buildStageIODecorationsAttr(Op))
+      NewGlobal->setAttr(feme::spirv::getStageIODecorationsAttrName(),
+                         Decorations);
+    return mlir::success();
+  }
+};
+
+/// Replaces `spirv.mlir.addressof` of a non-builtin stage-IO variable.
+///
+/// For an `Output` variable this produces `llvm.mlir.addressof` of the
+/// `llvm.mlir.global` StageIOGlobalVariablePattern converts its declaration
+/// to, in the matching address space (8) -- see
+/// feme::spirv::populateSPIRVToLLVMTargetTypeConversions.
+///
+/// For an `Input` variable, whose pointer converts to its pointee type
+/// instead (the same conversion a builtin `Input` variable's pointer uses,
+/// there being no way to tell the two apart by type alone), this instead
+/// loads the global eagerly right here, producing that pointee-typed value
+/// directly: LoadValuePattern then collapses the real `spirv.Load` reading
+/// it into the identity, exactly as it already does for a builtin's
+/// `llvm.spv.*` intrinsic result.
+/// Replaces `spirv.mlir.addressof` of a non-builtin stage-IO variable.
+///
+/// For an `Output` variable this produces `llvm.mlir.addressof` of the
+/// `llvm.mlir.global` StageIOGlobalVariablePattern converts its declaration
+/// to, in the matching address space (8) -- see
+/// feme::spirv::populateSPIRVToLLVMTargetTypeConversions.
+///
+/// For an `Input` variable, whose pointer converts to its pointee type
+/// instead (the same conversion a builtin `Input` variable's pointer uses,
+/// there being no way to tell the two apart by type alone), this instead
+/// loads the global eagerly right here, producing that pointee-typed value
+/// directly: LoadValuePattern then collapses the real `spirv.Load` reading
+/// it into the identity, exactly as it already does for a builtin's
+/// `llvm.spv.*` intrinsic result.
+///
+/// \p StageIOVariables must have been collected by
+/// feme::spirv::prepareStageIOVariables, before the conversion ran: by the
+/// time an `Input`/`Output` variable's own use is legalized, an earlier
+/// sibling `spirv.GlobalVariable` in the same block (this one included) may
+/// already have converted, so looking its address space back up through
+/// the (possibly by-then-replaced) declaration -- the way
+/// BuiltInAddressOfPattern/ResourceAddressOfPattern look up their own
+/// declarations -- is not reliable here (see prepareStageIOVariables).
+class StageIOAddressOfPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AddressOfOp> {
+public:
+  StageIOAddressOfPattern(mlir::MLIRContext *Context,
+                          const mlir::LLVMTypeConverter &TypeConverter,
+                          mlir::PatternBenefit Benefit,
+                          const feme::spirv::StageIOInfoMap &StageIOVariables)
+      : mlir::SPIRVToLLVMConversion<mlir::spirv::AddressOfOp>(
+            Context, TypeConverter, Benefit),
+        StageIOVariables(StageIOVariables) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AddressOfOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto It = StageIOVariables.find(Op.getVariable());
+    if (It == StageIOVariables.end())
+      return Rewriter.notifyMatchFailure(Op,
+                                         "not a non-builtin stage-IO variable");
+    unsigned AddrSpace = It->second;
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Type PtrType =
+        mlir::LLVM::LLVMPointerType::get(Rewriter.getContext(), AddrSpace);
+    mlir::Value Address = mlir::LLVM::AddressOfOp::create(
+        Rewriter, Loc, PtrType, Op.getVariable());
+
+    if (AddrSpace == 8) {
+      Rewriter.replaceOp(Op, Address);
+      return mlir::success();
+    }
+
+    auto PointerTy = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    mlir::Type ValueType =
+        getTypeConverter()->convertType(PointerTy.getPointeeType());
+    if (!ValueType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::LoadOp>(Op, ValueType, Address);
+    return mlir::success();
+  }
+
+private:
+  const feme::spirv::StageIOInfoMap &StageIOVariables;
 };
 
 /// Converts a load whose "pointer" operand already converted to the loaded
@@ -819,19 +1032,46 @@ convertBufferBlockType(mlir::spirv::PointerType Type,
 
 void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
     mlir::LLVMTypeConverter &TypeConverter) {
-  // Registered after MLIR's conversions so it is tried before them: a builtin
-  // input variable, like a resource handle, is a value LLVM's SPIRV backend
-  // materializes on demand rather than memory, so the pointer SPIR-V reads it
-  // through has nothing to convert to but the value itself. Non-builtin
-  // `Input` variables (stage inputs) have no LLVM equivalent either way, and
-  // now fail to legalize with a diagnostic rather than converting to a
-  // pointer nothing can produce.
+  // Registered after MLIR's conversions so it is tried before them: a
+  // resource handle, like a builtin `Input` variable
+  // (BuiltInAddressOfPattern), is a value LLVM's SPIRV backend materializes
+  // on demand rather than memory, so the pointer SPIR-V reads either through
+  // has nothing to convert to but the value itself. A non-builtin `Input`
+  // variable (an ordinary stage-IO variable FeMe has no way to distinguish
+  // from a builtin one by type alone, since e.g. both can be a plain `i32`)
+  // shares this same conversion -- StageIOAddressOfPattern accordingly reads
+  // it eagerly at the `spirv.mlir.addressof` site too (rather than
+  // converting to a real pointer the way a non-builtin `Output` variable
+  // does just below, which no builtin ever is), so that this conversion's
+  // answer for every `Input` pointer type stays exactly one thing regardless
+  // of which kind of variable it is.
   TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
                                   -> std::optional<mlir::Type> {
     if (Type.getStorageClass() != mlir::spirv::StorageClass::Input &&
         !isResourcePointer(Type))
       return std::nullopt;
     return TypeConverter.convertType(Type.getPointeeType());
+  });
+
+  // A non-builtin `Output` variable (a stage-IO variable: a vertex shader's
+  // output, a fragment shader's render target, and so on) is real memory,
+  // unlike an `Input` variable (which, builtin or not, is read through the
+  // conversion just above instead) -- StageIOGlobalVariablePattern converts
+  // its declaration to an ordinary `llvm.mlir.global`, so its pointer
+  // converts to an ordinary pointer too, in the address space (8) LLVM's
+  // SPIRV backend expects that storage class to use (see
+  // `storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`)
+  // rather than MLIR's own Vulkan-client default of address space 0. No
+  // builtin variable is ever `Output`, so this has no equivalent ambiguity
+  // to resolve.
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
+                                  -> std::optional<mlir::Type> {
+    if (Type.getStorageClass() != mlir::spirv::StorageClass::Output)
+      return std::nullopt;
+    if (!TypeConverter.convertType(Type.getPointeeType()))
+      return std::nullopt;
+    return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                            /*addressSpace=*/8);
   });
 
   // A storage buffer block's own pointer converts to the handle LLVM's
@@ -938,17 +1178,29 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
   return Resources;
 }
 
+feme::spirv::StageIOInfoMap
+feme::spirv::prepareStageIOVariables(mlir::spirv::ModuleOp Module) {
+  StageIOInfoMap StageIOVariables;
+  for (auto Global : Module.getOps<mlir::spirv::GlobalVariableOp>())
+    if (std::optional<unsigned> AddrSpace = getStageIOAddressSpace(Global))
+      StageIOVariables[Global.getSymName()] = *AddrSpace;
+  return StageIOVariables;
+}
+
 void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
-    mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources) {
+    mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
+    const StageIOInfoMap &StageIOVariables) {
   Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
                BuiltInGlobalVariablePattern, CompositeConstructPattern,
                ExecutionModePattern, ImageFetchPattern,
                ImageSampleImplicitLodPattern, ImageQuerySizePattern,
                ImageReadPattern, ImageWritePattern, LoadValuePattern,
                PushConstantGlobalVariablePattern, SampledImagePattern,
-               StorageBufferAccessChainPattern>(Patterns.getContext(),
-                                                TypeConverter, FeMeBenefit);
+               StageIOGlobalVariablePattern, StorageBufferAccessChainPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
+  Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
+                                        FeMeBenefit, StageIOVariables);
 }

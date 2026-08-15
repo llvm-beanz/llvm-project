@@ -1,6 +1,7 @@
 add_mlir_library(FeMeConversionSPIRVToLLVM
   ConvertSPIRVToLLVMPass.cpp
   SPIRVToLLVMPatterns.cpp
+  StageIODecorations.cpp
 
   LINK_COMPONENTS
   Core

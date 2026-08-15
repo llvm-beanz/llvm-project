@@ -1,4 +1,5 @@
 set(LLVM_LINK_COMPONENTS
+  Core
   Support
   TargetParser
   TestingSupport
@@ -11,6 +12,8 @@ target_link_libraries(FeMeConversionSPIRVToLLVMTests
   PRIVATE
   FeMeConversionSPIRVToLLVM
   MLIRIR
+  MLIRLLVMDialect
   MLIRParser
+  MLIRPass
   MLIRSPIRVDialect
   )

@@ -30,14 +30,20 @@
 #define FEME_CONVERSION_SPIRVTOLLVM_SPIRVTOLLVM_H
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 
 #include <memory>
 #include <string>
 
+namespace llvm {
+class Module;
+} // namespace llvm
+
 namespace mlir {
 class LLVMTypeConverter;
+class Operation;
 class Pass;
 class RewritePatternSet;
 } // namespace mlir
@@ -72,6 +78,22 @@ using ResourceInfoMap = llvm::StringMap<ResourceInfo>;
 /// drops the declarations this reads.
 ResourceInfoMap prepareResourceVariables(mlir::spirv::ModuleOp Module);
 
+/// The address space (7 for `Input`, 8 for `Output`) a non-builtin stage-IO
+/// variable's `llvm.mlir.addressof` converts to (see
+/// populateSPIRVToLLVMTargetTypeConversions), keyed by the symbol declaring
+/// it.
+using StageIOInfoMap = llvm::StringMap<unsigned>;
+
+/// Recovers the address space of every non-builtin `Input`/`Output`
+/// variable \p Module declares. Must run before the conversion: unlike a
+/// resource or builtin variable, a stage-IO variable's declaration survives
+/// as a real `llvm.mlir.global`, but by the time its `spirv.mlir.addressof`
+/// use is legalized, `spirv.GlobalVariable` siblings earlier in the same
+/// block (this one included) may already have been converted, so looking
+/// its storage class back up through the (by-then-replaced) declaration is
+/// not reliable -- see StageIOAddressOfPattern.
+StageIOInfoMap prepareStageIOVariables(mlir::spirv::ModuleOp Module);
+
 /// Adds the type conversions the patterns below rely on to \p TypeConverter,
 /// which must already have been populated with
 /// `mlir::populateSPIRVToLLVMTypeConversion`: they take precedence over the
@@ -86,10 +108,12 @@ void populateSPIRVToLLVMTargetTypeConversions(
 /// wherever both apply, and are meant to be used alongside (not instead of)
 /// `mlir::populateSPIRVToLLVMConversionPatterns`.
 /// \p Resources must have been collected by prepareResourceVariables, and
-/// must outlive \p Patterns.
+/// \p StageIOVariables by prepareStageIOVariables; both must outlive
+/// \p Patterns.
 void populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
-    mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources);
+    mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
+    const StageIOInfoMap &StageIOVariables);
 
 /// Creates the pass converting every `spirv.module` nested in a builtin
 /// module into the `llvm` dialect, targeting LLVM's in-tree `SPIRV` backend.
@@ -99,6 +123,40 @@ std::unique_ptr<mlir::Pass> createConvertSPIRVToLLVMPass();
 
 /// The `feme-opt`/`--pass-pipeline` name of the pass above.
 llvm::StringRef getConvertSPIRVToLLVMPassArgument();
+
+/// The name of the `llvm.mlir.global` attribute the stage-IO global variable
+/// pattern (see populateSPIRVToLLVMTargetPatterns) records a non-builtin
+/// `Input`/`Output` variable's `Location`/`Component`/`Index`/interpolation/
+/// per-primitive/per-patch decorations under: an `ArrayAttr` of `ArrayAttr`s,
+/// each inner one an `(i32 decoration, i32 arg...)` tuple in the same shape
+/// `!spirv.Decorations` metadata uses (see
+/// `llvm/lib/Target/SPIRV/SPIRVUtils.cpp`'s `buildOpSpirvDecorations`).
+/// `attachStageIODecorations` converts this attribute into that real LLVM
+/// metadata once a genuine `llvm::Module` exists to attach it to.
+llvm::StringRef getStageIODecorationsAttrName();
+
+/// A non-builtin stage-IO global's decorations (see
+/// getStageIODecorationsAttrName), keyed by the `llvm.mlir.global`'s symbol
+/// name.
+using StageIODecorationsMap = llvm::StringMap<mlir::ArrayAttr>;
+
+/// Collects every `llvm.mlir.global` in \p Module (the `llvm` dialect module
+/// `createConvertSPIRVToLLVMPass` produces) carrying a
+/// getStageIODecorationsAttrName() attribute, keyed by symbol name. Must run
+/// before `mlir::translateModuleToLLVMIR`, whose result
+/// attachStageIODecorations re-attaches this information to: that translation
+/// has no way to carry an attribute it does not understand from a dialect it
+/// has no `LLVMTranslationDialectInterface` for.
+StageIODecorationsMap collectStageIODecorations(mlir::Operation *Module);
+
+/// Re-attaches \p Decorations (from collectStageIODecorations, run on the
+/// `llvm` dialect module \p LLVMModule was translated from) as
+/// `!spirv.Decorations` metadata on the matching `llvm::GlobalVariable`s in
+/// \p LLVMModule, looked up by name. A no-op for any name \p LLVMModule does
+/// not declare a global under (e.g. one dead-code-eliminated during
+/// translation).
+void attachStageIODecorations(const StageIODecorationsMap &Decorations,
+                              llvm::Module &LLVMModule);
 
 } // namespace spirv
 } // namespace feme
