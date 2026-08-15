@@ -421,7 +421,7 @@ dependency machinery of any kind.
 | No SPIR-V binding-to-heap normalization: `feme::cpu::BoundResourceNormalizationPass` rewrites DXIL's `handlefrombinding` only, and R10's `SPIRVResourceLoweringPass` normalizes a *single* bound storage buffer directly, with no descriptor-set, arrayed-binding or dynamic-offset model | "Required SPIR-V resource work"; §1.2 | P0 |
 | Everything else in the object model — instance/device/queue, memory, buffers, descriptor pools/sets/updates, command pools and buffers, submission, fences, binary and timeline semaphores, events, query pools, pipeline cache | V0–V4 | P1 |
 | Images, image views, layout tracking, copies, storage/sampled images and samplers | V5 | P1 (blocked on G2) |
-| Graphics, WSI and presentation: **V6–V8 do not exist in FeMeVulkanDesign.md.** The graphics design supplies their FeMe-side content and lists what they unblock, but the Vulkan-side milestones — graphics queue family, `VkRenderPass`/dynamic rendering, graphics pipeline state, and the WSI decision — still have to be written | "Sequencing against the API runtime designs" (Graphics) | P1 (documentation) |
+| Graphics, WSI and presentation: FeMeVulkanDesign.md's V6–V8 (done: its "Graphics, Presentation, and Window-System Integration" section now specifies the graphics queue family, `VkRenderPass`/dynamic rendering normalized into one render-target binding, graphics pipeline state translation, draw commands, the headless-first WSI decision, and mesh/ray exposure, and V6–V8 are written against G3–G8) | "Graphics, Presentation, and Window-System Integration" (Vulkan) | P1 |
 
 The SPIR-V import row is the largest single unknown in the Vulkan design, and
 it is scheduled as its own milestone (V0.5) *before* V1 precisely because its
@@ -857,7 +857,9 @@ and with §3.2 once their prerequisites land.
 | V3 | Push constants onto FeMe root constants, uniform buffers, binary and timeline semaphores, secondary command buffers, events, query pools | V2, R25 |
 | V4 | Typed buffers, `VkFormat` mapping, texel buffers, broader subgroup/atomic/robustness coverage, persistent pipeline cache with a blob fuzzer, first CTS runs over the advertised subset | V3, R22 |
 | V5 | Images and sampling: image memory requirements, views, layout tracking, copies, storage and sampled images, samplers | V4, R30 |
-| V6–V8 | Graphics queue and pipelines, render pass/dynamic rendering, mesh and ray-tracing exposure, and the WSI decision — **these milestones are not yet written in FeMeVulkanDesign.md** and must be before they can be scheduled | V5, R32–R37 |
+| V6 | Graphics queue and basic rendering: graphics stage compilation, `VkRenderPass` and dynamic rendering, graphics pipeline state, draws, and `VK_QUEUE_GRAPHICS_BIT` | V5, R32, R33 |
+| V7 | Tessellation, geometry, and graphics completeness: the optional stages, queries over real draws, layered rendering, multi-viewport, and the advertised format matrix | V6, R34 |
+| V8 | Mesh shading, ray tracing, and presentation: `VK_EXT_mesh_shader`, the ray-tracing extension set with validated build inputs and shader binding tables, and WSI starting with `VK_EXT_headless_surface` | V7, R35–R37 |
 
 | # | Milestone | Depends on |
 |---|---|---|
@@ -880,10 +882,19 @@ test passes for *every* format and state combination it reports.
 Three documentation items are prerequisites for the steps above rather than
 follow-ups, and each is small:
 
-- **FeMeVulkanDesign.md has no V6–V8.** The graphics design lists what they
-  unblock but explicitly does not own their Vulkan-side content (graphics
-  queue family, `VkRenderPass`/dynamic rendering, graphics pipeline state,
-  WSI). Required before R32's work has a Vulkan consumer to aim at.
+- **FeMeVulkanDesign.md has no V6–V8** (done). The graphics design listed
+  what they unblock but explicitly did not own their Vulkan-side content
+  (graphics queue family, `VkRenderPass`/dynamic rendering, graphics pipeline
+  state, WSI). FeMeVulkanDesign.md's "Graphics, Presentation, and
+  Window-System Integration" section now specifies all four — graphics adds
+  `VK_QUEUE_GRAPHICS_BIT` to the *existing* universal queue family rather than
+  inventing a second one, `VkRenderPass` and dynamic rendering are both
+  implemented and normalized into one internal render-target binding, pipeline
+  state translates into `FeMeGraphics`' normalized pipeline description with
+  dynamic state resolved per draw, and WSI starts with
+  `VK_EXT_headless_surface` before exactly one CI-exercisable platform
+  surface — and milestones V6 (G3/G4), V7 (G5) and V8 (G6–G8 plus WSI) are
+  written against it. R32's work now has a Vulkan consumer to aim at.
 - **Design.md's tool list and `docs/CommandGuide/` need `feme-render`**
   (R31), which is also where the textual scene and image fixture formats
   should be specified.

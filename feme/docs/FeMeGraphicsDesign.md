@@ -1226,14 +1226,14 @@ Two consequences follow, and both are load-bearing for planning:
   `CompiledKernel` that Vulkan V1 and Direct3D W1 already require. Landing it
   as a stage-parameterized type from the start avoids compiling the compute
   runtime against a name that G1 would then replace.
-- **The Vulkan design currently stops at V5 (images and sampling) and states
-  that "Graphics and WSI require a separate design building on this
-  runtime."** The V6–V8 rows above do not exist in that document yet. This
-  design supplies their FeMe-side content; the Vulkan-side milestones — the
-  graphics queue family, `VkRenderPass`/dynamic rendering, graphics pipeline
-  state, and the WSI decision — still need to be written there. The Direct3D
-  design already schedules W4–W6, so it needs no new milestones, only the
-  dependency on G2–G8 recorded above.
+- **The Vulkan design's compute-only device stops at V5 (images and
+  sampling).** Its V6–V8 milestones — the graphics queue family,
+  `VkRenderPass`/dynamic rendering, graphics pipeline state, mesh and
+  ray-tracing exposure, and the WSI decision — are owned by that document and
+  are written there, in its "Graphics, Presentation, and Window-System
+  Integration" section. This design supplies only their FeMe-side content.
+  The Direct3D design already schedules W4–W6, so it needs no new milestones,
+  only the dependency on G2–G8 recorded above.
 
 Neither runtime may advertise a graphics-capable queue, a
 `VK_QUEUE_GRAPHICS_BIT` queue family, or a Direct3D feature level implying

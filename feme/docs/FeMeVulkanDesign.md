@@ -18,7 +18,9 @@ The shared compiler, stage ABI, image/sampler, and software-rasterization work
 needed to extend this compute device to graphics is designed separately in
 [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md). This document retains
 ownership of Vulkan pipeline, render-pass, command, synchronization, and WSI
-semantics.
+semantics; those are specified in "Graphics, Presentation, and Window-System
+Integration" below and scheduled as milestones V6–V8. Everything before V6 is
+a compute-only device.
 
 Those FeMe changes are not incidental, and this design does not treat them as
 such. Four of them gate the first executing milestone:
@@ -101,8 +103,14 @@ semantics. In particular, the CPU target must not acquire knowledge of
 
 ## Initial Non-Goals
 
-- Graphics, ray tracing, mesh shading, and video queues.
-- Window-system integration, surfaces, swapchains, and presentation.
+These are non-goals for the *initial*, compute-only device (V0–V5). Graphics,
+mesh shading, ray tracing, and WSI are designed in "Graphics, Presentation,
+and Window-System Integration" and scheduled as V6–V8; nothing below is
+permanently excluded except where it says so.
+
+- Graphics, ray tracing, mesh shading, and video queues. Video queues are
+  permanently out of scope; the rest are V6–V8.
+- Window-system integration, surfaces, swapchains, and presentation (V8).
 - Vulkan conformance. Until the relevant CTS coverage passes, the driver must
   report a zero `VkConformanceVersion`, must not imply Khronos conformance in
   its device name, driver name, or documentation, and must not be distributed
@@ -332,7 +340,9 @@ change generated code or serialized data.
 The first queue family exposes `VK_QUEUE_COMPUTE_BIT` and
 `VK_QUEUE_TRANSFER_BIT`, but not `VK_QUEUE_GRAPHICS_BIT`. Queue count should be
 small and truthful; one queue is sufficient for the first milestone. Timestamp
-valid bits are zero until query timestamps are implemented.
+valid bits are zero until query timestamps are implemented. Graphics does not
+add a second family; see "Graphics queue family" below for when
+`VK_QUEUE_GRAPHICS_BIT` may be added to this one.
 
 ### Subgroup size
 
@@ -822,6 +832,203 @@ direct code-execution vector. The format must therefore:
 - Be excluded from the trust boundary entirely under a build option, so that
   security-sensitive embedders can disable persistent cache loading.
 
+## Graphics, Presentation, and Window-System Integration
+
+Everything above describes a compute-only device, and milestones V0–V5 build
+exactly that. This section is the Vulkan-side content for the graphics
+milestones V6–V8 below. It exists because
+[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md) deliberately does not own it:
+that document supplies the FeMe-side stage ABI, image/sampler model, and
+software rasterizer, and states that the Vulkan-side milestones — the graphics
+queue family, `VkRenderPass`/dynamic rendering, graphics pipeline state, and
+the WSI decision — still have to be written here.
+
+### Ownership boundary
+
+The boundary drawn in "Summary" does not move for graphics. The graphics core
+owns stage identity, signature reflection, the `feme.stage.*`/`feme.image.*`
+operations, stage compilation into `CompiledStage`, and the software
+rasterizer's normalized pipeline and prepared-draw descriptions. This ICD owns
+every Vulkan concept those know nothing about:
+
+| Vulkan concept | Owner |
+|---|---|
+| Graphics queue family, `VkQueueFlags`, submission order | ICD |
+| `VkRenderPass`, subpasses, dependencies, dynamic rendering | ICD |
+| `VkPipeline` graphics state, dynamic state, pipeline layout | ICD |
+| `VkImageLayout` transitions, attachment load/store ops | ICD |
+| Draw commands, vertex/index buffer binding, indirect draw | ICD |
+| Surfaces, swapchains, present modes, image acquisition | ICD |
+| Stage compilation, interpolation, coverage, blend math, tests | Graphics core |
+| Image layout math, format conversion, sampling | Graphics core |
+
+The rule is the same one the compute path follows: the ICD translates Vulkan
+state into a normalized prepared draw and hands it over; `FeMeGraphics` must
+not acquire knowledge of `VkRenderPass`, `VkFramebuffer`, or a swapchain.
+
+### Graphics queue family
+
+"Queue families" above exposes one family with `VK_QUEUE_COMPUTE_BIT |
+VK_QUEUE_TRANSFER_BIT`. Adding graphics does **not** add a second family: a
+single software device with one worker pool has no independent graphics
+engine, and reporting two families would be an untruthful description of the
+hardware model. `VK_QUEUE_GRAPHICS_BIT` is instead added to the existing
+family, which is also what an application expects from a universal queue.
+
+That bit may only be set once G3 *and* G4's completion tests pass for every
+format and state combination the driver reports, per the capability rule both
+this document and FeMeGraphicsDesign.md state. There is no intermediate
+"graphics bit set, draws unimplemented" configuration: a queue advertising
+graphics must accept every core graphics command on it.
+
+Consequences that must land with the bit, not after it:
+
+- `timestampValidBits`, pipeline-statistics queries, and occlusion queries are
+  evaluated against the graphics pipeline, not only dispatch.
+- `VkPhysicalDeviceLimits`' viewport, attachment, sample-count, vertex-input,
+  and interpolation limits stop being unreachable and become contracts, and
+  every one of them is checked at pipeline creation and at draw time.
+- `subgroupSupportedStages` grows beyond compute only as the corresponding
+  stage's wave lowering is demonstrated by tests.
+
+### Render passes and dynamic rendering
+
+Both entry points are required. `VkRenderPass`/`VkFramebuffer` is core in every
+version this driver can advertise, and `VK_KHR_dynamic_rendering` (core in
+1.3) is what current applications and the CTS increasingly use.
+
+They are not implemented twice. The ICD normalizes both into one internal
+*render-target binding*: an ordered attachment list with format, sample count,
+load/store or resolve behavior, clear value, and read-only-ness, plus the
+render area. A `VkRenderPass` is compiled at creation time into a sequence of
+these, one per subpass, with its dependency graph resolved into the same join
+semantics "Queues, Scheduling, and Synchronization" already defines for
+`vkCmdPipelineBarrier`. `vkCmdBeginRendering` builds one directly.
+
+Subpasses get the deliberately coarse treatment first: each subpass boundary
+is a full join and, where the attachment's store/load ops require it, an
+attachment resolve or clear. Tile-local subpass merging, and therefore
+`VK_ATTACHMENT_LOAD_OP_LOAD` from an input attachment without a round trip
+through memory, is an optimization to be added with tests. Input attachments
+themselves are read as ordinary sampled images at a fixed coordinate, which is
+correct but not fast, and is not permitted to be exposed as
+`VK_SUBPASS_DESCRIPTION_*` behavior it does not implement.
+
+Attachment layout transitions are tracked, validated, and — for the internal
+tiled layouts FeMeGraphicsDesign.md's "Texture layout and formats" permits —
+may be real conversions. They may never be silently ignored: a layout the
+driver cannot honor fails at render-pass creation, not at draw time.
+
+### Graphics pipeline state
+
+`vkCreateGraphicsPipelines` compiles each stage through the same flow the
+compute path uses, with `StageCompileOptions` naming the stage, and then
+translates the fixed-function state into `FeMeGraphics`' normalized pipeline
+description. Every state block has an explicit owner:
+
+| `VkGraphicsPipelineCreateInfo` state | Translation |
+|---|---|
+| Stages | One `CompiledStage` each, linked through `StageInterfaceMap` |
+| Vertex input bindings/attributes | Normalized vertex fetch description; formats resolved through the central format table |
+| Input assembly | Primitive topology and restart, validated against the advertised topologies |
+| Tessellation | Patch control points; requires G5 (V7) |
+| Viewport/scissor | Normalized viewport transform and scissor rects |
+| Rasterization | Cull mode, front face, fill mode, depth bias, depth clamp/clip |
+| Multisample | Sample count, sample mask, alpha-to-coverage, sample shading |
+| Depth/stencil | Compare ops, write masks, stencil state, bounds test |
+| Color blend | Per-attachment blend equations, write masks, logic op |
+| Dynamic state | The subset that may vary per draw, snapshotted into the prepared draw |
+
+Cross-stage interface matching is validated at pipeline creation against the
+core reflection G0 produces, and a mismatch is a pipeline-creation failure with
+a diagnostic, never a silently mislinked varying. A pipeline whose state
+combination has no implemented path must also fail at creation; a draw is not
+permitted to be the place a state combination is discovered to be unsupported.
+
+Dynamic state is what makes the prepared draw a snapshot rather than a
+pipeline pointer: the ICD resolves pipeline state and dynamic state together at
+each draw, exactly as it snapshots descriptors and push constants at each
+dispatch today.
+
+The pipeline cache key from "Pipeline Cache" gains the normalized pipeline
+description, the render-target binding, and every stage's SPIR-V and
+specialization data. Two pipelines differing only in dynamic state that is
+genuinely dynamic must produce the same key; anything folded into generated
+code must not.
+
+### Draw commands and vertex data
+
+The command set from "Command Buffers" grows by:
+
+- Bind graphics pipeline, vertex buffers, and index buffer.
+- Begin/end render pass, next subpass; begin/end rendering.
+- Set the supported dynamic state.
+- Draw, indexed draw, indirect and indexed-indirect draw, and their count
+  variants once they are advertised.
+- Clear attachments, blit, and resolve image.
+- Image copies and image/buffer copies (V5 supplies the layouts these move).
+
+Indirect draw arguments are attacker-controlled and validated exactly like
+indirect dispatch: read once, bounds-checked against the bound buffers and the
+advertised limits, and rejected rather than clamped when they cannot be
+honored. `firstInstance`/`vertexOffset` participate in the fetch bounds check,
+not only in the index arithmetic.
+
+Secondary command buffers recorded inside a render pass inherit the render-pass
+state through `VkCommandBufferInheritanceInfo` and are interpreted into the
+primary's execution state, with the same immutability rule the compute path
+already requires for simultaneous use.
+
+### Window-system integration
+
+WSI is a decision, not a feature list, because a software ICD can be useful
+with no presentation path at all. The decision recorded here:
+
+1. **Headless first.** `VK_EXT_headless_surface` plus the swapchain machinery
+   is the first target. It exercises every swapchain state transition —
+   creation, acquire, present, out-of-date, retirement — with no display
+   dependency, no platform-specific build configuration, and no CI display
+   server. It is also what the CTS's WSI tests can run against.
+2. **One platform next, chosen by CI, not by preference.** After headless,
+   exactly one real platform surface is implemented, and it is whichever one
+   this tree's CI can actually exercise. On Linux that is expected to be
+   `VK_KHR_xcb_surface` or `VK_KHR_wayland_surface`; presenting a
+   host-memory image to either is a blit, and the copy path is the same one
+   `vkCmdCopyImage` already needs.
+3. **No `VK_KHR_display`, no direct mode, no cross-driver image sharing.**
+   Those require external memory and modifier negotiation, which "Initial
+   Non-Goals" already excludes.
+4. **Presentation is not a graphics prerequisite.** A swapchain can be
+   presented from a compute or transfer queue writing an image. WSI is
+   therefore scheduled in V8 rather than V6, and V6's completion is defined by
+   off-screen rendering, matching how FeMeGraphicsDesign.md's G3 completion
+   test compares off-screen images against lavapipe and WARP.
+
+Surfaces and swapchains are ordinary objects under "Object Model" rules: an
+unadvertised surface extension's `vkCreate*SurfaceKHR` is simply not exposed,
+and `vkCreateSwapchainKHR` fails cleanly until implemented rather than
+returning a half-initialized object.
+
+### Mesh shading and ray tracing exposure
+
+Mesh shading (`VK_EXT_mesh_shader`) and ray tracing (`VK_KHR_ray_query`,
+`VK_KHR_ray_tracing_pipeline`, `VK_KHR_acceleration_structure`) are exposed
+through the same rule as everything else: not until the corresponding graphics
+milestone's completion test passes, and never partially.
+
+Two Vulkan-specific obligations do not come from the graphics core and are
+owned here:
+
+- Acceleration-structure build inputs, `VkAccelerationStructureBuildRangeInfo`
+  counts and strides, and device-address-based instance data are
+  attacker-controlled and must be validated before any traversal structure is
+  built. `VK_KHR_buffer_device_address` becomes reachable at this point, which
+  the compute milestones deliberately avoided.
+- Shader binding tables are application-authored memory with API-defined
+  strides and alignments. Translating one into the graphics core's shader
+  records requires the same checked arithmetic the pipeline-cache blob parser
+  uses, and a malformed table must fail the trace, not index out of the buffer.
+
 ## Error Handling and Security
 
 Vulkan applications supply untrusted SPIR-V, object counts, offsets, indirect
@@ -976,10 +1183,84 @@ today, which is a multi-pass change of its own and is scheduled in V3.
   storage images, sampled images, and samplers.
 - Add the corresponding SPIR-V raising and CPU runtime helpers.
 
-Graphics and WSI require a separate design building on this runtime. In
-particular, software rasterization, interpolation, derivatives, blend/depth/
-stencil, render-pass/dynamic-rendering semantics, and presentation are not a
-mechanical extension of compute dispatch.
+### V6: Graphics queue and basic rendering
+
+The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
+first that may not be partial. It depends on FeMeGraphicsDesign.md's G3 *and*
+G4 completing, because the bit commits the driver to every core graphics
+command and to the depth/stencil, blend, and multisample state a core version
+requires.
+
+- Add the graphics stage compilation path: vertex and fragment
+  `CompiledStage`s, cross-stage interface validation against core reflection,
+  and pipeline-creation failure for any unimplemented state combination.
+- Implement `VkRenderPass`/`VkFramebuffer` and `vkCmdBeginRendering`,
+  normalized into the single internal render-target binding, with subpass
+  boundaries as joins.
+- Implement graphics pipeline state translation, including the dynamic-state
+  subset, into `FeMeGraphics`' normalized pipeline and prepared-draw
+  descriptions.
+- Implement vertex/index buffer binding, draw, indexed draw, and both indirect
+  forms with validated arguments.
+- Implement attachment clears, blits, resolves, and image copies.
+- Add `VK_QUEUE_GRAPHICS_BIT` to the existing queue family, and make every
+  viewport, attachment, sample-count, and vertex-input limit a checked
+  contract.
+- Run the graphics subset of the CTS for the advertised version, plus an
+  off-screen differential against lavapipe.
+
+Completion test: render off-screen through a `VkRenderPass` and through
+dynamic rendering, with depth, stencil, blending, MRT, and multisample
+resolves, and match lavapipe for every format and state combination the driver
+reports.
+
+### V7: Tessellation, geometry, and graphics completeness
+
+Depends on G5.
+
+- Add tessellation control/evaluation and geometry stages, their pipeline
+  state, and their signature and patch-constant reflection.
+- Implement transform feedback only if it is advertised; otherwise report it
+  unsupported truthfully.
+- Add occlusion and pipeline-statistics queries over real draws, and
+  conditional rendering if advertised.
+- Add layered rendering, viewport/layer array indexing, and multiple viewports
+  and scissors.
+- Complete the format matrix for the advertised graphics profile, including
+  render-target, blend, depth/stencil, and multisample capability bits.
+- Add secondary command buffers recorded inside a render pass.
+
+Completion test: the CTS's tessellation, geometry, multi-viewport, and query
+coverage for the advertised version, plus a lavapipe differential over the
+same scenes rendered with and without the optional stages present.
+
+### V8: Mesh shading, ray tracing, and presentation
+
+Depends on G6, G7, and G8. These are grouped because each is an independently
+advertisable capability rather than a step toward core completeness, and none
+of them blocks another.
+
+- Expose `VK_EXT_mesh_shader`: task/mesh stage compilation, bounded payload
+  and mesh-output limits reported truthfully, and mesh draws through the same
+  prepared-draw path.
+- Expose `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`, and
+  `VK_KHR_ray_tracing_pipeline`: validated build inputs, shader binding table
+  translation with checked strides, recursion limits enforced at pipeline
+  creation, and `VK_KHR_buffer_device_address` with its own bounds model.
+- Implement WSI in the order decided above: `VK_EXT_headless_surface` plus the
+  full swapchain state machine first, then exactly one CI-exercisable platform
+  surface.
+- Add fuzzers for acceleration-structure build inputs and shader binding
+  tables, per this document's own rule that every attacker-controlled parser
+  ships with one.
+
+Completion test: the CTS's mesh-shader, ray-query, ray-tracing-pipeline, and
+WSI coverage for exactly the extensions advertised, with the headless surface
+exercised in `lit` and the platform surface exercised wherever CI has a
+display.
+
+Video queues, sparse residency, external memory, and cross-driver image
+sharing remain out of scope; see "Initial Non-Goals".
 
 ## Testing Strategy
 
@@ -1001,6 +1282,19 @@ validation layers enabled, and runs with a second installed ICD visible to the
 loader. The SPIR-V importer fuzzer remains relevant, and new fuzzers should
 target descriptor updates, pipeline cache blob parsing, and command-stream
 decoding because all three consume attacker-controlled counts and offsets.
+
+From V6 onward, three more layers apply, and each belongs to the milestone
+that makes it meaningful rather than to a late sweep:
+
+5. Off-screen rendering differentials against lavapipe over the same scene,
+   for exactly the formats and state combinations advertised. Presentation is
+   never required to compare two images.
+6. Metamorphic checks the graphics design already enumerates, restated at the
+   API level: identical results across worker counts and tile traversal
+   orders, across wave sizes, and between a `VkRenderPass` and the equivalent
+   dynamic-rendering sequence.
+7. Fuzzers for the new attacker-controlled parsers: indirect draw arguments,
+   acceleration-structure build inputs, and shader binding tables.
 
 The first acceptance test should be deliberately small:
 
@@ -1046,6 +1340,35 @@ a software rasterizer and broad image/WSI semantics before validating the
 FeMe-specific Vulkan-to-CPU path. A compute-only queue is a valid and sharply
 testable first device.
 
+### Expose a separate graphics queue family
+
+A second family advertising `VK_QUEUE_GRAPHICS_BIT` alone would let graphics
+land without touching the compute family's advertised capabilities. It would
+also describe hardware that does not exist: one worker pool, one scheduler, no
+independent engine. Applications make real scheduling decisions from family
+counts and flags, so an invented family is an untruthful limit in the same
+sense as an aspirational `maxComputeSharedMemorySize`. Graphics therefore adds
+the bit to the existing universal family.
+
+### Implement dynamic rendering only, and emulate `VkRenderPass` on top
+
+Tempting, because `VkRenderPass` is the more complex object and dynamic
+rendering is the direction the ecosystem moved. Rejected as a *stated*
+architecture: `VkRenderPass` is core in every version this driver can
+advertise, so it must work regardless, and its subpass dependency graph
+carries information dynamic rendering does not express. Both are instead
+normalized into one internal render-target binding, which is the same
+"normalize at the edge, implement once" pattern the descriptor model uses.
+
+### Implement a platform surface before a headless one
+
+A real surface would demo better. It also makes the first swapchain
+implementation depend on a display server that CI may not have, and mixes
+presentation bugs with swapchain state-machine bugs. `VK_EXT_headless_surface`
+exercises the entire state machine — acquire, present, out-of-date,
+retirement — under `lit`, so the platform surface that follows only has to add
+a blit.
+
 ## Open Questions
 
 1. Should `CompiledKernel` be a CPU-target API independent of JIT/AOT, or should
@@ -1076,14 +1399,27 @@ testable first device.
    belong to the CPU target's own roadmap rather than the Vulkan milestones?
 10. Can a registered `VkDriverId` and vendor ID be obtained, and what should the
     driver report until one exists?
+11. Which core version's graphics profile does V6 target, and does the answer to
+    question 4 survive the graphics limits it makes contractual?
+12. Should subpass boundaries stay full joins, or does the tile scheduler
+    FeMeGraphicsDesign.md describes make tile-local subpass merging cheap
+    enough to be the initial semantics rather than a later optimization?
+13. Which platform surface does this tree's CI make exercisable — xcb,
+    Wayland, or neither — and does that answer change if presentation is only
+    ever tested through `VK_EXT_headless_surface`?
 
 Question 2 is answered first, by prototype, because it gates every later
 milestone. Questions 1, 3, and 7 are answered next with a resource-free
 prototype followed by one storage-buffer shader. Those exercise the
 architectural boundary without prematurely committing to images, graphics, or
-WSI.
+WSI. Questions 11–13 are not answered until V5 is close, because answering
+them earlier commits to a graphics profile before there is a rasterizer to
+measure it against.
 
 Answered during this design and recorded here so they are not reopened:
 Vulkan-Headers would be FeMe's first optional external dependency, and that
-cost is accepted; and Mesa's common Vulkan runtime is not a link-time
-dependency.
+cost is accepted; Mesa's common Vulkan runtime is not a link-time
+dependency; graphics adds `VK_QUEUE_GRAPHICS_BIT` to the existing queue family
+rather than a second family; `VkRenderPass` and dynamic rendering are both
+implemented, normalized into one internal render-target binding; and WSI
+starts headless.
