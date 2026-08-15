@@ -11,7 +11,9 @@
 // `dx.op.*` calls back to `llvm.dx.*` intrinsics, this one raises DXIL's
 // `dx.shaderModel`/`dx.entryPoints` named metadata back into the module
 // target triple and `hlsl.*` function attributes that modern LLVM's DirectX
-// backend consumes (see `llvm/lib/Analysis/DXILMetadataAnalysis.cpp`).
+// backend consumes (see `llvm/lib/Analysis/DXILMetadataAnalysis.cpp`), plus
+// the source-independent `feme.shader.stage` attribute FeMe's own stage
+// selection and reflection use (see feme/include/feme/Core/ShaderStage.h).
 //
 // This is the inverse of `DXILTranslateMetadata`
 // (llvm/lib/Target/DirectX/DXILTranslateMetadata.cpp). Without it, an
@@ -32,10 +34,15 @@ namespace feme {
 namespace dxil {
 
 /// Raises DXIL's `dx.shaderModel`/`dx.entryPoints` named metadata into a
-/// modern shader-model target triple plus `hlsl.shader`/`hlsl.numthreads`
-/// function attributes, and drops the `dx.*` named metadata the DirectX
-/// backend regenerates for itself. Modules with no `dx.shaderModel` metadata
-/// (i.e. not DXIL-originated) are left untouched.
+/// modern shader-model target triple plus
+/// `hlsl.shader`/`hlsl.numthreads`/`feme.shader.stage` function attributes,
+/// and drops the `dx.*` named metadata the DirectX backend regenerates for
+/// itself. Modules with no `dx.shaderModel` metadata (i.e. not
+/// DXIL-originated) are left untouched.
+///
+/// An entry point whose own `ShaderKind` property disagrees with the module's
+/// shader model profile is reported through the LLVM context's diagnostic
+/// handler rather than resolved by picking one of the two.
 class MetadataRaisingPass : public llvm::PassInfoMixin<MetadataRaisingPass> {
 public:
   llvm::PreservedAnalyses run(llvm::Module &M, llvm::ModuleAnalysisManager &AM);

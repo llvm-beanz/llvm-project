@@ -18,7 +18,10 @@ define void @main() {
   ret void
 }
 
-; CHECK-DAG: attributes [[ATTRS]] = {{{.*}}"hlsl.numthreads"="1024,1,1"{{.*}}"hlsl.shader"="compute"{{.*}}}
+; The stage is recorded twice: as the `hlsl.shader` attribute LLVM's DirectX
+; backend reads, and as FeMe's own source-independent `feme.shader.stage`
+; enumeration ("Stage identity" in feme/docs/FeMeGraphicsDesign.md).
+; CHECK-DAG: attributes [[ATTRS]] = {{{.*}}"feme.shader.stage"="compute"{{.*}}"hlsl.numthreads"="1024,1,1"{{.*}}"hlsl.shader"="compute"{{.*}}}
 
 ; The `dx.*` named metadata this pass consumes is dropped, since the DirectX
 ; backend regenerates all of it from scratch when re-emitting DXIL (and it is

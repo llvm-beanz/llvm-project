@@ -9,4 +9,7 @@ add_mlir_library(FeMeTransformsDXIL
   Core
   Support
   TargetParser
+
+  LINK_LIBS PUBLIC
+  FeMeCore
   )

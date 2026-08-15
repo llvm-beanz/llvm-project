@@ -3,7 +3,8 @@
 ; A `lib` shader model has no single pipeline stage of its own: each entry
 ; point declares its own stage via the `ShaderKind` (tag 8) entry property.
 ; This checks that feme::dxil::MetadataRaisingPass gives each entry its own
-; `hlsl.shader` attribute accordingly, while the module triple stays
+; `hlsl.shader`/`feme.shader.stage` attributes accordingly -- a `library`
+; environment accepts any per-entry stage -- while the module triple stays
 ; `-library`, and that a SM 6.6-style single-value `wavesize` (tag 11) is
 ; widened to the (min, max, preferred) spelling LLVM's `DXILMetadataAnalysis`
 ; expects.
@@ -22,8 +23,8 @@ define void @kernel() {
   ret void
 }
 
-; CHECK-DAG: attributes [[RAYGEN]] = {{{.*}}"hlsl.shader"="raygeneration"{{.*}}}
-; CHECK-DAG: attributes [[KERNEL]] = {{{.*}}"hlsl.numthreads"="8,4,1"{{.*}}"hlsl.shader"="compute"{{.*}}"hlsl.wavesize"="32,0,0"{{.*}}}
+; CHECK-DAG: attributes [[RAYGEN]] = {{{.*}}"feme.shader.stage"="raygeneration"{{.*}}"hlsl.shader"="raygeneration"{{.*}}}
+; CHECK-DAG: attributes [[KERNEL]] = {{{.*}}"feme.shader.stage"="compute"{{.*}}"hlsl.numthreads"="8,4,1"{{.*}}"hlsl.shader"="compute"{{.*}}"hlsl.wavesize"="32,0,0"{{.*}}}
 
 !dx.valver = !{!0}
 !dx.shaderModel = !{!1}

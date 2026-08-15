@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
@@ -227,8 +229,32 @@ PreservedAnalyses MetadataRaisingPass::run(Module &M, ModuleAnalysisManager &) {
 
       std::optional<Triple::EnvironmentType> EntryEnv = applyEntryProps(
           *F, dyn_cast_or_null<MDNode>(Entry->getOperand(4).get()));
-      F->addFnAttr("hlsl.shader",
-                   Triple::getEnvironmentTypeName(EntryEnv.value_or(SM->Env)));
+      Triple::EnvironmentType Env = EntryEnv.value_or(SM->Env);
+      F->addFnAttr("hlsl.shader", Triple::getEnvironmentTypeName(Env));
+
+      // The stage this entry point declares, recorded as the checked
+      // `feme.shader.stage` enumeration described by "Stage identity" in
+      // feme/docs/FeMeGraphicsDesign.md, and diagnosed against the module
+      // triple's own environment: a `lib` shader model lets each entry
+      // declare its own stage, but a stage-specific profile disagreeing
+      // with an entry's `ShaderKind` is malformed input, not a stage FeMe
+      // should silently pick a winner for.
+      std::optional<feme::ShaderStage> Stage =
+          feme::getShaderStageForEnvironment(Env);
+      if (!Stage) {
+        M.getContext().emitError("feme-dxil-raise-metadata: entry point '" +
+                                 F->getName() + "' declares no shader stage");
+        continue;
+      }
+      if (!feme::isShaderStageCompatibleWithEnvironment(*Stage, SM->Env)) {
+        M.getContext().emitError(
+            "feme-dxil-raise-metadata: entry point '" + F->getName() +
+            "' declares stage '" + feme::getShaderStageName(*Stage) +
+            "', which disagrees with the module's '" +
+            Triple::getEnvironmentTypeName(SM->Env) + "' shader model");
+        continue;
+      }
+      feme::setShaderStage(*F, *Stage);
     }
   }
 
