@@ -9,6 +9,7 @@
 #include "feme/Export/DXIL/DXILExporter.h"
 
 #include "feme/Core/Module.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Target/Backend.h"
 #include "feme/Target/TargetMachineBackend.h"
 
@@ -22,14 +23,16 @@ using namespace feme;
 
 namespace {
 
-/// The pipeline stage a module's entry point declares -- see
-/// feme::getShaderStage in Driver.cpp, whose own comment this mirrors
+/// The pipeline stage a module's entry point declares, in the spelling a
+/// target triple's environment component uses for it -- see
+/// `getEntryPointStageName` in Driver.cpp, whose own comment this mirrors
 /// (duplicated here rather than shared, matching this file's existing
 /// "Driver.cpp's own copy of this exact fallback" precedent below).
-std::optional<llvm::StringRef> getShaderStage(const llvm::Module &M) {
+std::optional<llvm::StringRef> getEntryPointStageName(const llvm::Module &M) {
   for (const llvm::Function &F : M)
-    if (F.hasFnAttribute("hlsl.shader"))
-      return F.getFnAttribute("hlsl.shader").getValueAsString();
+    if (std::optional<ShaderStage> Stage = getShaderStage(F))
+      return llvm::Triple::getEnvironmentTypeName(
+          getEnvironmentForShaderStage(*Stage));
   return std::nullopt;
 }
 
@@ -50,16 +53,17 @@ llvm::Error DXILExporter::exportModule(Module &M, const ExportOptions &Opts,
   // by feme::dxil::MetadataRaisingPass) over a made-up default, matching
   // feme::Driver's resolveTargetTriple -- see the "dxil" branch there for
   // the full rationale. A SPIR-V-derived module's entry point still knows
-  // its own pipeline stage (see `getShaderStage`); LLVM's DirectX codegen
-  // rejects a stage-specific op like `llvm.dx.thread.id` outright for the
-  // stage-less "library" default, so that fallback only applies once
+  // its own pipeline stage (see `getEntryPointStageName`); LLVM's DirectX
+  // codegen rejects a stage-specific op like `llvm.dx.thread.id` outright for
+  // the stage-less "library" default, so that fallback only applies once
   // nothing else is known.
   llvm::Triple Existing = LLVMModule.getTargetTriple();
   std::string TargetTriple;
   if (Existing.getArch() == llvm::Triple::dxil &&
       Existing.getOS() == llvm::Triple::ShaderModel)
     TargetTriple = Existing.str();
-  else if (std::optional<llvm::StringRef> Stage = getShaderStage(LLVMModule))
+  else if (std::optional<llvm::StringRef> Stage =
+               getEntryPointStageName(LLVMModule))
     TargetTriple = ("dxil-unknown-shadermodel6.5-" + *Stage).str();
   else
     TargetTriple = "dxil-unknown-shadermodel6.5-library";

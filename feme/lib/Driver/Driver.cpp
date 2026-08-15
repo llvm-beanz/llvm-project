@@ -11,6 +11,7 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/FormatRegistry.h"
 #include "feme/Core/Module.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Export/DXIL/DXILExporter.h"
 #include "feme/Export/Exporter.h"
 #include "feme/Export/SPIRV/SPIRVExporter.h"
@@ -175,20 +176,19 @@ translateToLLVMIR(Module &&Imported, llvm::StringRef FormatName, Context &Ctx) {
   return ToLLVMIR.translate(std::move(Imported), Ctx);
 }
 
-/// The pipeline stage a module's entry point declares, i.e. the
-/// `"hlsl.shader"` function attribute `feme::dxil::MetadataRaisingPass`
-/// (for a DXIL-derived module) or `feme::SPIRVToLLVMTranslator` (for a
-/// SPIR-V-derived one) both spell identically -- `llvm::Triple::
-/// getEnvironmentTypeName`'s own string for the stage's `EnvironmentType`
-/// (`"compute"`, `"pixel"`, ...), which is also exactly the environment
-/// component a `dxil-unknown-shadermodelX.Y-<stage>` triple needs. A module
-/// with multiple entry points disagreeing about their stage is future work
-/// (see `getShaderWaveSizeRequirement`'s own precedent); this simply takes
-/// the first one it finds.
-std::optional<llvm::StringRef> getShaderStage(const llvm::Module &M) {
+/// The pipeline stage a module's entry point declares (see
+/// `feme::getShaderStage`, which both `feme::dxil::MetadataRaisingPass` and
+/// `feme::SPIRVToLLVMTranslator` record), spelled the way a target triple's
+/// environment component spells it -- `"compute"`, `"pixel"`, ... -- which
+/// is exactly what a `dxil-unknown-shadermodelX.Y-<stage>` triple needs. A
+/// module with multiple entry points disagreeing about their stage is future
+/// work (see `getShaderWaveSizeRequirement`'s own precedent); this simply
+/// takes the first one it finds.
+std::optional<llvm::StringRef> getEntryPointStageName(const llvm::Module &M) {
   for (const llvm::Function &F : M)
-    if (F.hasFnAttribute("hlsl.shader"))
-      return F.getFnAttribute("hlsl.shader").getValueAsString();
+    if (std::optional<ShaderStage> Stage = feme::getShaderStage(F))
+      return llvm::Triple::getEnvironmentTypeName(
+          feme::getEnvironmentForShaderStage(*Stage));
   return std::nullopt;
 }
 
@@ -220,10 +220,10 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
         Existing.getOS() == llvm::Triple::ShaderModel)
       return Existing.str();
     // A SPIR-V-derived module's entry point still knows its own pipeline
-    // stage (see `getShaderStage`'s comment); use that rather than a
+    // stage (see `getEntryPointStageName`'s comment); use that rather than a
     // stage-less default, which LLVM's DirectX codegen rejects outright for
     // a stage-specific op like `llvm.dx.thread.id` (a compute-only query).
-    if (std::optional<llvm::StringRef> Stage = getShaderStage(M))
+    if (std::optional<llvm::StringRef> Stage = getEntryPointStageName(M))
       return ("dxil-unknown-shadermodel6.5-" + *Stage).str();
     return std::string("dxil-unknown-shadermodel6.5-library");
   }
