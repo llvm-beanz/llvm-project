@@ -2,22 +2,25 @@
 
 ## What this document is
 
-[Design.md](Design.md) and [FeMeCPUDesign.md](FeMeCPUDesign.md) each carry
-their own "Roadmap / Milestones" section, and each records, inline, which of
-its milestones are implemented and how each implementation narrowed the
-design (the "Status"/"Deviation" notes). Read together they describe *what
-FeMe is*, but neither answers the two questions that matter for planning the
-next stretch of work:
+[Design.md](Design.md), [FeMeCPUDesign.md](FeMeCPUDesign.md),
+[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md),
+[FeMeVulkanDesign.md](FeMeVulkanDesign.md) and
+[FeMeWARPDesign.md](FeMeWARPDesign.md) each carry their own "Roadmap /
+Milestones" section, and each records, inline, which of its milestones are
+implemented and how each implementation narrowed the design (the
+"Status"/"Deviation" notes). Read together they describe *what FeMe is*, but
+none answers the two questions that matter for planning the next stretch of
+work:
 
 1. What is left, across both documents, and in what order should it be done?
 2. FeMe now executes shaders (`feme-run`, the CPU target). What should it be
    executing that it isn't, so that the next feature to land is caught by a
    test rather than by a user?
 
-This document answers those two questions. It does not restate either design;
-every item below cites the section of Design.md / FeMeCPUDesign.md that owns
-the decision, and those documents remain authoritative for *how* a thing
-should work. This one is only about *what is missing* and *what order*.
+This document answers those two questions. It does not restate any design;
+every item below cites the section of the design document that owns the
+decision, and those documents remain authoritative for *how* a thing should
+work. This one is only about *what is missing* and *what order*.
 
 Priorities are relative, not scheduled:
 
@@ -26,6 +29,28 @@ Priorities are relative, not scheduled:
 - **P1** — needed for the design's stated v1 scope, but nothing currently
   landed depends on it.
 - **P2** — genuinely later; listed so it isn't rediscovered as a surprise.
+
+### The two tracks
+
+Everything through §1.7 and R1–R15 is the *retargeting and compute
+execution* track: FeMe as a library that imports DXIL/SPIR-V/DXBC, retargets
+it, and executes compute shaders on the CPU. That track is the one every
+landed milestone belongs to.
+
+§1.8–§1.10 and R16 onward are the *graphics and API runtime* track added by
+FeMeGraphicsDesign.md, FeMeVulkanDesign.md and FeMeWARPDesign.md. Nothing in
+it exists in tree today — there is no `feme::ShaderStage`, no signature
+reflection, no `feme.stage.*`/`feme.image.*` operation, no `CompiledStage`,
+no image or sampler descriptor, and no `lib/Graphics`, `lib/RayTracing`,
+`lib/Vulkan` or `lib/Direct3D` directory of any kind. Its priorities are
+relative *within that track*: a P0 there does not outrank a P1 in §1.1–§1.7,
+it means "the graphics/runtime work stalls until this lands".
+
+The two tracks are not independent. Four compute-track narrowings recorded in
+§1.6 are load-bearing prerequisites for graphics milestones
+(FeMeGraphicsDesign.md, "Prerequisites from the compute CPU target"), and
+§1.6's "Dispatch is sequential, not thread-pooled" row is the *first* thing
+both API runtimes need. §1.8's table records which is which.
 
 ## Part 1: Gap inventory
 
@@ -272,7 +297,161 @@ JIT-dispatching the untouched, still-divergent function anyway.
   — exactly the failure mode this item warned about.
 - **P1 — sanitizer coverage.** The one previously-recorded crash class in
   this tree (see `agent_thoughts.md`) was a UB/null-deref bug found by hand;
-  an ASan/UBSan `check-feme` configuration is the systematic version.
+  an ASan/UBSan `check-feme` configuration is the systematic version. It is
+  also a stated requirement of all three new designs, each of which adds
+  attacker-controlled parsers (SPIR-V from applications, descriptor updates,
+  command streams, pipeline-cache blobs, acceleration-structure builds), so
+  it stops being a nice-to-have the moment §1.9/§1.10 start.
+
+### 1.8 Graphics core and the CPU stage ABI
+
+Owned by [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md). None of it exists.
+This section is the shared half of §1.9 and §1.10: every row here blocks both
+API runtimes, which is why it is scheduled ahead of either.
+
+#### 1.8.1 Compute-track prerequisites the graphics design depends on
+
+These are already in §1.1–§1.7 as compute gaps. They are repeated here only
+because the graphics design's "Prerequisites from the compute CPU target"
+table makes them blocking, which changes their priority: each is P1 in §1.6
+for compute and P0 for the track below.
+
+| §1.6 narrowing | Blocks | Priority here |
+|---|---|---|
+| Dispatch is sequential, not thread-pooled (`JITEngine` has no unit of work smaller than a whole dispatch; `JITOptions::NumThreads` is accepted and ignored) | Every runtime milestone — Vulkan V1, Direct3D W1, and graphics G1 all need `CompiledStage::invokeGroup` | P0 |
+| `ArtifactInfo`'s `WaveSize`/`GroupSize`/`GroupSharedSize`/`GroupSharedAlign` are in the version-2 layout but always written as 0 (see ResourceInfo.h's own note) | V1, W1 — a runtime cannot size a workgroup or its groupshared block from reflection | P0 |
+| Divergent groupshared access is diagnosed | V2, W2 (an `SV_GroupIndex`-indexed `groupshared` array is what ordinary shaders write), G5, G6 | P0 |
+| A barrier inside a surviving *branch* is diagnosed, and a `phi` live across a group-sync barrier cannot be spilled | G5, G6 — a tessellation-control stage that cannot synchronize inside control flow cannot express its source model | P1 |
+| Root constants cover only the default `(b0, space0)`, non-array `dx.CBuffer`, constant-row-index shape R12 landed | V3's full advertised `maxPushConstantsSize`, W2's CBVs, G1's `FemeShaderResources::RootConstants` | P1 |
+
+The last row is a *correction* to all three new documents: FeMeWARPDesign.md's
+status section says "Root-constant lowering does not exist,
+`ResourceInfo::RootConstantSize` is always zero", and
+FeMeGraphicsDesign.md's prerequisite table lists root constants as an
+unsupported resource kind. Both predate R12, which landed
+`feme::cpu::RootConstantLoweringPass` and made `ResourceInfo::RootConstantSize`
+real (`lib/Target/CPU/ResourceInfo.cpp`). What is actually left is breadth,
+not existence, which is why this is P1 rather than P0.
+
+#### 1.8.2 Core reflection and canonical graphics IR (G0)
+
+| Gap | Owner section | Priority |
+|---|---|---|
+| No `feme::ShaderStage` enumeration and no `feme.shader.stage` entry-point attribute; CPU stage selection is `feme::cpu::PreparePass`'s `isComputeEntryPoint` string comparison against `"compute"` | "Stage identity" | P0 |
+| No signature reflection of any kind: no element ID, direction, location, semantic, system value, component type, shape, interpolation, frequency, or stream | "Signature reflection" | P0 |
+| `feme::dxil::MetadataRaisingPass` erases `!dx.entryPoints` — including the input, output, patch-constant and root-signature rows — after recovering only `hlsl.shader`/`hlsl.numthreads`/`hlsl.wavesize` | "Signature reflection" | P0 |
+| SPIR-V conversion deliberately fails to legalize non-builtin `Input`/`Output` variables, and converts no `Location`/`Component`/`Index`/interpolation/per-primitive/per-patch decoration | "Signature reflection"; §1.2's own "graphics stage inputs/outputs" gap | P0 |
+| No canonical stage operations (`feme.stage.input.load`/`output.store`/`discard`/`demote`/`is_helper`/derivative/quad/interpolate/emit/cut/mesh/ray families) and no `lib/Transforms/Graphics` canonicalization or validation pass | "Canonical stage operations" | P0 |
+| No `StageInterfaceMap` or cross-stage linkage validation | "Signature reflection" | P1 |
+
+DXIL's `loadInput`/`storeOutput` being unraised is *already* recorded as a
+compute-track gap (§1.4's R7 entry notes no DXBC graphics-stage shader is
+retargetable because of it, and that real DXIL input shares the gap). G0 is
+where it is finally owned by a design rather than noted as a limitation.
+
+#### 1.8.3 CPU stage compilation (G1)
+
+| Gap | Owner section | Priority |
+|---|---|---|
+| `runPipeline(llvm::Module &, llvm::StringRef, unsigned)` has no stage parameter and no `StageCompileOptions` | "CPU Lowering Pipeline" | P0 |
+| No `CompiledStage`/`PreparedDispatch`/`invokeGroup` — the type FeMeVulkanDesign.md calls `CompiledKernel` and FeMeWARPDesign.md asks to share; the graphics design's answer is that there is exactly one type, so V1/W1 should build against the final name | "Compiled stage API" | P0 |
+| `feme::cpu::EntryWrapperPass` emits only `feme_cpu_entry_<name>(const FemeDispatchArgs *)`; there is no vertex, fragment, patch, mesh or ray continuation wrapper | "Vertex wrapper" … "Ray continuation wrappers" | P0 |
+| One implicit active mask controls both execution and stores; fragment execution needs a separate live mask and side-effect mask, with `discard` clearing both and `demote` clearing only the second | "Shared middle-end phases" | P0 |
+| No derivative or quad lowering at all (`QuadOp` is raised but not lowered — §1.3's R4 entry — and FeMeCPUDesign.md's Non-Goals still defer the lane-to-quad mapping a fragment stage requires at wave sizes 4 and 8) | "Derivatives and quad operations" | P0 |
+| No `FemeStageLayout`, `FemeVertexArgs`, `FemeFragmentArgs` or any stage argument block | "Graphics Runtime ABI" | P0 |
+| `ArtifactInfo` is compute-shaped; there is no stage-tagged `StageArtifactInfo` carrying signatures, side-effect summaries, tessellation/mesh/ray layouts | "Artifact reflection" | P1 |
+
+G1 is the design's own discriminating milestone: if a vertex or fragment
+shader cannot pass through the existing uniformity, linearization, SIMDization
+and wave-lowering phases with localized extensions, the shared middle-end
+boundary is wrong and must be revised before any fixed function is built. It
+should therefore be treated as a decision point, not just another step.
+
+#### 1.8.4 Images, samplers, and formats (G2)
+
+| Gap | Owner section | Priority |
+|---|---|---|
+| `FemeDescriptor` cannot express dimensionality, mip/array ranges, sample or plane layout; `ResourceKind` is `{None, Typed, Structured, Raw, CBuffer}` with no image kind | "Separate descriptor kinds" | P0 |
+| `FemeDispatchArgs::SamplerHeap` is typed `const FemeDescriptor *` — reserved before sampling had any representation — and must become `const FemeSamplerDescriptor *` | "Relationship to the compute ABI" | P0 |
+| No `FemeShaderResources` block shared by compute and graphics; the resource fields are inlined into `FemeDispatchArgs` | "Relationship to the compute ABI" | P0 |
+| No `feme.image.*`/`feme.sampler.*` operations and no sampling, filtering, mip-selection, addressing-mode, sRGB or format-conversion helpers in `runtime/CPU` | "Canonical image operations", "Texture layout and formats" | P0 |
+| DXIL texture/sampler handle kinds are unraised (§1.3's own P1 row, blocked on recovering dimension/multi-sample/feedback bits) and SPIR-V sampling beyond basic `ImageSampleImplicitLod`/`OpImageFetch` is unconverted (§1.2's R9 entry) | §1.2, §1.3 | P0 |
+
+G2 is scheduled before any raster stage on purpose: compute shaders that
+sample images are required by Vulkan V5 and Direct3D W3, both of which precede
+graphics in their own documents. It is also the ABI break — compiled artifacts
+produced before it stop loading, which the design accepts explicitly now and
+would not later.
+
+#### 1.8.5 Software graphics and ray executors (G3–G8)
+
+Everything here is greenfield: `FeMeGraphics`, `FeMeRayTracing`, the
+normalized pipeline and prepared-draw descriptions, vertex/index fetch,
+clipping, viewport transform, culling, tile binning, coverage, interpolation,
+depth/stencil, blending, MSAA, tessellation, meshlets, acceleration-structure
+builds and traversal, and the ray continuation transform. Priorities inside
+this group are the milestone order itself (G3 → G8); nothing else depends on
+them.
+
+Two constraints from the design are worth restating because they are easy to
+lose in scheduling:
+
+- Neither runtime may advertise a graphics-capable queue,
+  `VK_QUEUE_GRAPHICS_BIT`, or a raster-implying Direct3D feature level until
+  the corresponding G milestone's completion test passes for every format and
+  state combination it reports. Partial graphics support is worse than none.
+- Wavefront packetization of ray continuations (G8) is only allowed *after*
+  scalar continuation execution exists as the differential reference.
+
+Work graphs are explicitly a later, separate design, not an extension of
+amplification fanout or the ray continuation queues.
+
+### 1.9 Vulkan runtime
+
+Owned by [FeMeVulkanDesign.md](FeMeVulkanDesign.md). Nothing exists: there is
+no `lib/Vulkan`, no manifest, no `vk.xml` generator, and no external
+dependency machinery of any kind.
+
+| Gap | Owner section | Priority |
+|---|---|---|
+| Vulkan-Headers would be FeMe's **first external dependency**. FeMe is built in-tree only, with no optional external package pattern to copy: the configuration surface, the disabled-path CI coverage, and the `vk.xml` version floor are new project-wide obligations | "Project and Library Boundaries" | P0 |
+| No generated entrypoint table; hand-maintaining command names, aliases, core-version promotions and extension guards is the failure mode the design rejects | "Loader Integration" | P0 |
+| Symbol visibility and LLVM coexistence: the loader loads *every* ICD into the process, so `libfeme_vulkan.so` shares an address space with Mesa drivers linking their own LLVM. Static LLVM/MLIR, `-fvisibility=hidden`, an exports version script, no `llvm::cl` registration on any reachable path, and one-shot target initialization under `std::once_flag` are hard requirements, verified by a two-ICD test and an exported-symbol-set link check | "Process Coexistence and Symbol Visibility" | P0 |
+| **`feme::SPIRVImporter` cannot ingest realistic Vulkan SPIR-V at all.** It wraps `mlir::spirv::deserialize`, whose structurized reconstruction rejects an `OpPhi` in a loop merge block — which any loop carrying a value-producing `break` emits — and has been observed to fail on `OpCopyObject`. Only trivial control flow imports today | "SPIR-V import prerequisites" | P0 |
+| No SPIR-V binding-to-heap normalization: `feme::cpu::BoundResourceNormalizationPass` rewrites DXIL's `handlefrombinding` only, and R10's `SPIRVResourceLoweringPass` normalizes a *single* bound storage buffer directly, with no descriptor-set, arrayed-binding or dynamic-offset model | "Required SPIR-V resource work"; §1.2 | P0 |
+| Everything else in the object model — instance/device/queue, memory, buffers, descriptor pools/sets/updates, command pools and buffers, submission, fences, binary and timeline semaphores, events, query pools, pipeline cache | V0–V4 | P1 |
+| Images, image views, layout tracking, copies, storage/sampled images and samplers | V5 | P1 (blocked on G2) |
+| Graphics, WSI and presentation: **V6–V8 do not exist in FeMeVulkanDesign.md.** The graphics design supplies their FeMe-side content and lists what they unblock, but the Vulkan-side milestones — graphics queue family, `VkRenderPass`/dynamic rendering, graphics pipeline state, and the WSI decision — still have to be written | "Sequencing against the API runtime designs" (Graphics) | P1 (documentation) |
+
+The SPIR-V import row is the largest single unknown in the Vulkan design, and
+it is scheduled as its own milestone (V0.5) *before* V1 precisely because its
+outcome — fixing MLIR's deserializer upstream versus translating the SPIR-V
+CFG directly to unstructured LLVM IR and leaning on `feme::cpu::PreparePass`'s
+existing structurizer — may change V1's design. It is also the one row here
+that is a *FeMe* gap rather than a runtime gap, so it stays owned by this
+roadmap even though the Vulkan document schedules it.
+
+### 1.10 Direct3D software adapter
+
+Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md). Nothing exists.
+
+| Gap | Owner section | Priority |
+|---|---|---|
+| The integration boundary is undecided: whether a software/render-only adapter can be installed and enumerated through DXGI at all, versus an application-local compatibility runtime. Choosing wrong invalidates most object-layer work, so W0 is explicitly a throwaway-capable prototype and gates every Windows-facing line of code | "Replacement and Deployment Model", W0 | P0 |
+| No Windows SDK/WDK/DDI version selection, signing, INF, CI or debugging story — and no Windows CI in this tree at all | W0 | P0 |
+| Same in-process LLVM coexistence requirement as §1.9 (the adapter loads into processes that may already host DXC), plus an exported symbol set checked against the selected DDI contract | "Project and Binary Boundaries" | P0 |
+| Serialized root signatures of both versions, descriptor heaps and tables | W2 | P1 |
+| Device/queue/allocator/list/fence/heap/buffer/pipeline objects, device-removal propagation, indirect dispatch, copies, barriers, queries | W1–W2 | P1 |
+| Textures, sampling, copy footprints, views, format matrix | W3 | P1 (blocked on G2) |
+| Raster, output merge, tessellation/geometry, pipeline libraries, persistent cache, HLK | W4–W5 | P2 (blocked on G3–G5) |
+| DXGI presentation, shared resources/fences, D3D11-on-12 evaluation | W6 | P2 |
+
+The Direct3D track needs no new milestones of its own — W4–W6 are already
+scheduled — only the dependency on G2–G8 that the graphics design records.
+Its portable half (command execution, resource layout, software graphics) is
+required to stay unit-testable on non-Windows hosts, which is what makes W1–W5
+partially reviewable in this tree at all; only `lib/Direct3D/Windows` is
+genuinely Windows-only.
 
 ## Part 2: End-to-end testing roadmap
 
