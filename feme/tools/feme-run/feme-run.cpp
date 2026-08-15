@@ -73,6 +73,18 @@
 // using a traditional binding (heap YAML `bindings`) is rejected -- only
 // the logical dynamic heap (`resource-heap`) is supported.
 //
+// Roadmap step R14 adds `-O` (see feme/docs/Roadmap.md's §2.2.5
+// "Optimization level"): `feme::cpu::JITEngine::create` has always run
+// `feme::OptimizerPipeline` on the CPU-lowered module before JIT-ing it
+// (see `JITEngine.cpp`'s `toOptimizationLevel`), but at a level this tool
+// never let a test pick, so nothing checked that a shader's answer stays
+// the same across optimization levels. This mirrors `llc`'s own `-O`
+// spelling (a single digit, `cl::Prefix`) rather than inventing a new one;
+// unlike `feme`'s own `-O0`/.../`-Od` (`feme::FrontendOptions`, which
+// select the *front-end* pipeline's level before any CPU-specific
+// lowering runs), this level only ever applies to `JITEngine`'s
+// post-CPU-lowering optimization pass, so the two are independent knobs.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Core/Context.h"
@@ -97,6 +109,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/MemoryBuffer.h"
@@ -622,9 +635,23 @@ int main(int argc, char **argv) {
                "feme_cpu_entry_<name> symbol directly (see feme-run's own "
                "file comment). --wave-size/--reference are ignored; heap "
                "YAML 'bindings' are rejected."));
+  cl::opt<char> OptLevel(
+      "O", cl::Prefix, cl::init('2'),
+      cl::desc("The optimization level JITEngine's post-CPU-lowering "
+               "OptimizerPipeline pass runs at. [-O0, -O1, -O2, or -O3] "
+               "(default = '-O2', matching the level this tool always ran "
+               "at before this option existed)"));
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe CPU target JIT/dispatch runner\n");
+
+  std::optional<CodeGenOptLevel> ResolvedOptLevel =
+      CodeGenOpt::parseLevel(OptLevel);
+  if (!ResolvedOptLevel) {
+    errs() << "feme-run: '-O" << OptLevel
+           << "' is not a valid optimization level (expected 0-3)\n";
+    return 1;
+  }
 
   InitializeNativeTarget();
   InitializeNativeTargetAsmPrinter();
@@ -685,6 +712,7 @@ int main(int argc, char **argv) {
   Opts.WaveSize = WaveSize;
   Opts.EntryPoint = EntryPoint;
   Opts.Reference = Reference;
+  Opts.OptLevel = *ResolvedOptLevel;
 
   Expected<std::unique_ptr<JITEngine>> Engine =
       JITEngine::create(Ctx, std::move(*Mod), Opts);
