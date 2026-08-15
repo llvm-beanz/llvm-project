@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -177,7 +179,7 @@ bool lowerFlattenedThreadIDInGroup(CallInst &CI) {
 /// describe. Without this the entry point is emitted as an ordinary device
 /// function, which no host runtime can dispatch.
 bool lowerEntryPoint(Function &F) {
-  if (!F.hasFnAttribute("hlsl.shader") ||
+  if (!feme::isShaderEntryPoint(F) ||
       F.getCallingConv() == CallingConv::AMDGPU_KERNEL)
     return false;
 

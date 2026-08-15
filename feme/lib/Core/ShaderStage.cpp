@@ -170,3 +170,7 @@ std::optional<feme::ShaderStage> feme::getShaderStage(const Function &F) {
       return parseShaderStage(F.getFnAttribute(Attr).getValueAsString());
   return std::nullopt;
 }
+
+bool feme::isShaderEntryPoint(const Function &F) {
+  return getShaderStage(F).has_value();
+}

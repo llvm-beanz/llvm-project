@@ -387,7 +387,7 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     // module dumped between this point and `feme::cpu::runPipeline`
     // still shows it.
     for (llvm::Function &F : M)
-      if (F.hasFnAttribute("hlsl.shader"))
+      if (feme::isShaderEntryPoint(F))
         F.addFnAttr("feme.cpu.wavesize", std::to_string(ResolvedWaveSize));
   } else if (Opts.WaveSize) {
     Ctx.diagnose(Diagnostic{DiagnosticSeverity::Warning,

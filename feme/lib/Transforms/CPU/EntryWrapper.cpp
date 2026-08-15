@@ -86,6 +86,7 @@
 #include "BarrierCalls.h"
 #include "DispatchArgsLayout.h"
 #include "GroupShared.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -1187,7 +1188,7 @@ PreservedAnalyses EntryWrapperPass::run(Module &M, ModuleAnalysisManager &) {
   bool Changed = false;
   SmallVector<Function *, 4> Candidates;
   for (Function &F : M)
-    if (!F.isDeclaration() && F.hasFnAttribute("hlsl.shader"))
+    if (!F.isDeclaration() && feme::isShaderEntryPoint(F))
       Candidates.push_back(&F);
 
   for (Function *F : Candidates)

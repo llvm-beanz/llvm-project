@@ -10,6 +10,7 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Optimizer/OptimizerPipeline.h"
 #include "feme/Target/CPU/Pipeline.h"
 #include "feme/Target/CPU/RuntimeCPU.h"
@@ -103,7 +104,7 @@ std::array<uint32_t, 3> getThreadGroupSize(const Function &F) {
 Expected<Function *> selectEntryPoint(llvm::Module &M, StringRef EntryPoint) {
   if (!EntryPoint.empty()) {
     Function *F = M.getFunction(EntryPoint);
-    if (!F || !F->hasFnAttribute("hlsl.shader"))
+    if (!F || !feme::isShaderEntryPoint(*F))
       return createStringError(inconvertibleErrorCode(),
                                "no compute entry point named '%s'",
                                EntryPoint.str().c_str());
@@ -111,7 +112,7 @@ Expected<Function *> selectEntryPoint(llvm::Module &M, StringRef EntryPoint) {
   }
   Function *Found = nullptr;
   for (Function &F : M) {
-    if (!F.hasFnAttribute("hlsl.shader"))
+    if (!feme::isShaderEntryPoint(F))
       continue;
     if (Found)
       return createStringError(

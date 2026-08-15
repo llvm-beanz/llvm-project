@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/NVPTX/RaisedLowering.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
@@ -167,7 +169,7 @@ bool lowerFlattenedThreadIDInGroup(CallInst &CI) {
 /// the entry point is emitted as an ordinary device function, which no host
 /// runtime can launch.
 bool lowerEntryPoint(Function &F) {
-  if (!F.hasFnAttribute("hlsl.shader") ||
+  if (!feme::isShaderEntryPoint(F) ||
       F.getCallingConv() == CallingConv::PTX_Kernel)
     return false;
 

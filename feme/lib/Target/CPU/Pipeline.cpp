@@ -8,6 +8,7 @@
 
 #include "feme/Target/CPU/Pipeline.h"
 
+#include "feme/Core/ShaderStage.h"
 #include "feme/Target/CPU/RuntimeCPU.h"
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
@@ -97,7 +98,7 @@ private:
 Expected<Function *> selectEntryPoint(Module &M, StringRef EntryPoint) {
   if (!EntryPoint.empty()) {
     Function *F = M.getFunction(EntryPoint);
-    if (!F || !F->hasFnAttribute("hlsl.shader"))
+    if (!F || !feme::isShaderEntryPoint(*F))
       return createStringError(inconvertibleErrorCode(),
                                "no compute entry point named '%s'",
                                EntryPoint.str().c_str());
@@ -105,7 +106,7 @@ Expected<Function *> selectEntryPoint(Module &M, StringRef EntryPoint) {
   }
   Function *Found = nullptr;
   for (Function &F : M) {
-    if (!F.hasFnAttribute("hlsl.shader"))
+    if (!feme::isShaderEntryPoint(F))
       continue;
     if (Found)
       return createStringError(

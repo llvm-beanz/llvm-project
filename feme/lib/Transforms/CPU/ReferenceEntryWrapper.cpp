@@ -9,6 +9,7 @@
 #include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
 
 #include "DispatchArgsLayout.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/ReferenceLowering.h"
 
@@ -137,7 +138,7 @@ PreservedAnalyses ReferenceEntryWrapperPass::run(Module &M,
   bool Changed = false;
   SmallVector<Function *, 4> Candidates;
   for (Function &F : M)
-    if (!F.isDeclaration() && F.hasFnAttribute("hlsl.shader"))
+    if (!F.isDeclaration() && feme::isShaderEntryPoint(F))
       Candidates.push_back(&F);
 
   for (Function *F : Candidates)

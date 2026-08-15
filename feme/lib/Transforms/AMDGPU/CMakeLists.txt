@@ -5,4 +5,8 @@ add_mlir_library(FeMeTransformsAMDGPU
   LINK_COMPONENTS
   Core
   Support
+  TargetParser
+
+  LINK_LIBS PUBLIC
+  FeMeCore
   )

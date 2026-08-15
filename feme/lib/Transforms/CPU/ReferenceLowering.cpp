@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/CPU/ReferenceLowering.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "DispatchArgsLayout.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -214,7 +216,7 @@ PreservedAnalyses ReferenceLoweringPass::run(Module &M,
   bool Changed = false;
   SmallVector<Function *, 4> Candidates;
   for (Function &F : M)
-    if (!F.isDeclaration() && F.hasFnAttribute("hlsl.shader"))
+    if (!F.isDeclaration() && feme::isShaderEntryPoint(F))
       Candidates.push_back(&F);
 
   for (Function *F : Candidates)

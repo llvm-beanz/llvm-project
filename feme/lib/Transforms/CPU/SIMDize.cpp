@@ -72,6 +72,7 @@
 
 #include "GroupShared.h"
 #include "feme/Analysis/CPU/WaveUniformity.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
@@ -1343,7 +1344,7 @@ PreservedAnalyses SIMDizePass::run(Module &M, ModuleAnalysisManager &) {
   // and re-widen.
   SmallVector<Function *, 4> Entries;
   for (Function &F : M)
-    if (!F.isDeclaration() && F.hasFnAttribute("hlsl.shader"))
+    if (!F.isDeclaration() && feme::isShaderEntryPoint(F))
       Entries.push_back(&F);
 
   for (Function *F : Entries) {

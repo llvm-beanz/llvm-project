@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/NVPTX/ResourceLowering.h"
 
+#include "feme/Core/ShaderStage.h"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -336,7 +338,7 @@ void lowerHandleAccesses(CallInst &Handle, const ResourceOps &Ops, Value *Ptr,
 /// (a new one, since its signature grows), or nullptr if \p F has no
 /// bindings or uses one this pass cannot model.
 Function *lowerFunctionResources(Function &F) {
-  if (F.isDeclaration() || !F.hasFnAttribute("hlsl.shader"))
+  if (F.isDeclaration() || !feme::isShaderEntryPoint(F))
     return nullptr;
 
   std::optional<SmallVector<Binding, 4>> Bindings = collectBindings(F);

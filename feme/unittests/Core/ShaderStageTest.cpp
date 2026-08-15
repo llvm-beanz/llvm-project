@@ -153,6 +153,20 @@ TEST(ShaderStageTest, ShaderStageAttributeWinsOverHLSLShader) {
   EXPECT_EQ(getShaderStage(*F), ShaderStage::Vertex);
 }
 
+TEST(ShaderStageTest, EntryPointPredicate) {
+  LLVMContext Ctx;
+  Module M("m", Ctx);
+  EXPECT_FALSE(isShaderEntryPoint(*makeFunction(M, "helper")));
+
+  Function *Raised = makeFunction(M, "raised");
+  Raised->addFnAttr("hlsl.shader", "compute");
+  EXPECT_TRUE(isShaderEntryPoint(*Raised));
+
+  Function *Vertex = makeFunction(M, "vertex_main");
+  setShaderStage(*Vertex, ShaderStage::Vertex);
+  EXPECT_TRUE(isShaderEntryPoint(*Vertex));
+}
+
 TEST(ShaderStageTest, UnknownAttributeValueIsNotAStage) {
   LLVMContext Ctx;
   Module M("m", Ctx);

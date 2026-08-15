@@ -117,6 +117,12 @@ void setShaderStage(llvm::Function &F, ShaderStage Stage);
 /// selecting correctly.
 std::optional<ShaderStage> getShaderStage(const llvm::Function &F);
 
+/// Whether \p F is a shader entry point at all, i.e. declares any stage.
+/// This is the "is this the function a runtime dispatches?" predicate, for
+/// the many places that need to find entry points without caring which stage
+/// they implement.
+bool isShaderEntryPoint(const llvm::Function &F);
+
 } // namespace feme
 
 #endif // FEME_CORE_SHADERSTAGE_H
