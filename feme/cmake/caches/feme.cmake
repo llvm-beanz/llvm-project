@@ -14,11 +14,17 @@ set(LLVM_ENABLE_PROJECTS "feme;mlir" CACHE STRING "")
 # LLVM's own in-tree SPIRV backend provides and which the SPIR-V retargeting
 # "null pipeline" tests need (feme::TargetMachineBackend retargeting SPIR-V
 # back to itself via LLVM's SPIRV target -- see the deviation note under
-# "Retargeting to Native ISA" in feme/docs/Design.md), and AMDGPU, which the
+# "Retargeting to Native ISA" in feme/docs/Design.md), AMDGPU, which the
 # raised-LLVM-IR -> AMDGPU lowering tests need (see the "Raised LLVM IR ->
-# AMDGPU" section of feme/docs/Design.md); downstream builds enabling
+# AMDGPU" section of feme/docs/Design.md), NVPTX, which the raised-LLVM-IR ->
+# NVPTX lowering tests need (feme::nvptx::RaisedLoweringPass/
+# ResourceLoweringPass, Design.md milestone 9's NVPTX remainder), and
+# AArch64, so real-ISA CPU-target retargeting (feme::cpu::runPipeline,
+# already triple-generic) is exercised against a genuine non-host CPU ISA
+# and not only whichever "Native" happens to be on the machine building this
+# (see test/Tools/feme/feme-dxil-to-aarch64.ll); downstream builds enabling
 # additional projects can override this to add more targets.
-set(LLVM_TARGETS_TO_BUILD "Native;SPIRV;AMDGPU" CACHE STRING "")
+set(LLVM_TARGETS_TO_BUILD "Native;SPIRV;AMDGPU;NVPTX;AArch64" CACHE STRING "")
 
 # Include the DirectX target for DXIL code generation.
 set(LLVM_EXPERIMENTAL_TARGETS_TO_BUILD "DirectX" CACHE STRING "")

@@ -29,6 +29,8 @@
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "feme/Transforms/DXIL/SPIRVRaising.h"
+#include "feme/Transforms/NVPTX/RaisedLowering.h"
+#include "feme/Transforms/NVPTX/ResourceLowering.h"
 #include "feme/Transforms/SPIRV/RaisedLowering.h"
 #include "feme/Translate/DXSA/DXSATranslator.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
@@ -258,11 +260,15 @@ llvm::Expected<std::string> resolveTargetTriple(const DriverOptions &Opts,
 
 /// Whether \p TheTriple is the FeMe CPU target, i.e. any target triple that
 /// is not one of FeMe's other, GPU-shaped retargeting destinations
-/// (re-serialized DXIL/SPIR-V, or AMDGPU). This is what "Wave Size
+/// (re-serialized DXIL/SPIR-V, or AMDGPU/NVPTX). This is what "Wave Size
 /// Selection" in feme/docs/FeMeCPUDesign.md means by "non-CPU targets":
-/// `--wave-size` only has meaning for an actual host retarget.
+/// `--wave-size` only has meaning for an actual host retarget -- which
+/// includes a real AArch64 target, exactly like the host's own native
+/// architecture, since `Driver`'s CPU pipeline (`feme::cpu::runPipeline`)
+/// is triple-generic already (see Design.md milestone 9's status note).
 bool isCPUTarget(const llvm::Triple &TheTriple) {
-  return !TheTriple.isDXIL() && !TheTriple.isSPIRV() && !TheTriple.isAMDGCN();
+  return !TheTriple.isDXIL() && !TheTriple.isSPIRV() &&
+        !TheTriple.isAMDGCN() && !TheTriple.isNVPTX();
 }
 
 /// The shader's declared wave size requirement, if any: the `"hlsl.wavesize"`
@@ -424,6 +430,16 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     // lowering then sees as an ordinary function.
     feme::amdgpu::ResourceLoweringPass().run(M, MAM);
     feme::amdgpu::RaisedLoweringPass().run(M, MAM);
+  }
+
+  // NVPTX's own counterpart (Design.md milestone 9's NVPTX remainder, see
+  // "Retargeting" in feme/docs/Roadmap.md): the same shape of lowering as
+  // AMDGPU above, just onto NVPTX's own kernel-parameter/intrinsic
+  // conventions instead.
+  if (TheTriple.isNVPTX()) {
+    llvm::ModuleAnalysisManager MAM;
+    feme::nvptx::ResourceLoweringPass().run(M, MAM);
+    feme::nvptx::RaisedLoweringPass().run(M, MAM);
   }
 
   // A raised module isn't valid input to a real CPU `TargetMachine` either:
