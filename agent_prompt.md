@@ -23,8 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R18 from the roadmap document?
+Can you implement R19 from the roadmap document?
 
-> Preserve DXIL input/output/patch-constant/root-signature rows from
-> `!dx.entryPoints` into that model before `feme::dxil::MetadataRaisingPass`
-> erases the source metadata (see: §1.8.2)
+> Convert SPIR-V non-builtin `Input`/`Output` variables and their
+> `Location`/`Component`/`Index`/interpolation/per-primitive/per-patch
+> decorations instead of failing to legalize them (see: §1.8.2, §1.2)
