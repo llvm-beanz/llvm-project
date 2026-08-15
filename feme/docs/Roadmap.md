@@ -676,6 +676,90 @@ keep following them:
   file** under `test/Transforms/CPU/CFG/` (FeMeCPUDesign.md, "CFG
   restructurization test suite", layer 1).
 
+### 2.6 Testing the graphics and API runtime track
+
+§2.1–§2.5 are about the compute track's breadth. The new components need
+their own layers, and three of them are infrastructure that must exist before
+the first shader-facing milestone rather than alongside it.
+
+#### 2.6.1 Infrastructure prerequisites
+
+1. **An image resource class in `feme-run`'s heap YAML.** Today's schema
+   accepts `resource-heap`/`bindings` entries with `kind`/`format`/`stride`
+   (§2.4.3). An image entry additionally needs dimensionality, extent, mip and
+   array ranges, format, and layout. Required by every G2 test and by the
+   textual image fixtures G3 onward compare against.
+2. **`feme-render`.** A new tool that renders a textual scene description to a
+   textual image fixture through the graphics executor, the way `feme-run`
+   dispatches a compute shader. It must be added to Design.md's tool list and
+   given a `docs/CommandGuide/` page like every other FeMe tool. Needed from
+   G3; the alternative — growing `feme-run` a draw mode — mixes two very
+   different argument models.
+3. **Textual scene and image fixtures.** §2.5's "no binary fixtures" rule
+   applies unchanged: scenes, textures and expected images are text, generated
+   or compared at test time. This is what makes edge-rule failures reviewable
+   in a diff.
+
+Two more become prerequisites once the runtimes start:
+
+4. **Lit clients under `test/Vulkan/`** running against the build-tree
+   manifest via `VK_DRIVER_FILES`, plus a second-ICD coexistence
+   configuration and an exported-dynamic-symbol check against the version
+   script (§1.9).
+5. **A differential reference for each API.** Vulkan compares against Mesa's
+   lavapipe, Direct3D against Microsoft's WARP, in both cases only for the
+   subset each milestone actually advertises. Both are optional, detected
+   dependencies: a missing reference must skip, never fail.
+
+#### 2.6.2 Layers
+
+The graphics design's six layers map onto this tree as:
+
+| Layer | Where | First needed |
+|---|---|---|
+| Core import convergence (same canonical signature/operations from DXIL and SPIR-V) | `test/Transforms/Graphics/` | G0 |
+| CPU pass tests at wave sizes 4, 8 and one native width, checking mask, quad, barrier, output-bound and spill invariants | `test/Transforms/CPU/Graphics/` | G1 |
+| Runtime helper tests exhausting image coordinates, formats, filtering, robustness and helper-lane side effects | `unittests/Graphics/` | G2 |
+| Fixed-function unit tests with no shader frontend (clipping, edge rules, interpolation, depth/stencil, blend, tessellator, meshlet validation, BVH build/traversal, layout math) | `unittests/Graphics/`, `unittests/RayTracing/` | G3 |
+| End-to-end executor tests rendering textual scenes | `test/Tools/feme-render/` | G3 |
+| Frontend tests creating real Vulkan/Direct3D pipelines | `test/Vulkan/`, `test/Direct3D/` | V1, W1 |
+
+#### 2.6.3 Metamorphic properties
+
+These are the checks that catch the failures image comparison alone does not,
+and each should land with the milestone that makes it meaningful rather than
+as a late sweep:
+
+- identical wave-size-independent output across wave sizes (extends §2.2.1's
+  existing sweep to stages);
+- identical deterministic output across worker counts and tile traversal
+  orders — the graphics counterpart of §2.2's differential harness, and the
+  first thing a thread-pooled dispatch (§1.6) needs;
+- identical linked varyings after irrelevant signature elements are added;
+- identical sampling through storage-compatible API format aliases;
+- no resource or attachment change from helper-only quads;
+- the same canonical behavior from equivalent DXIL and SPIR-V inputs — the
+  stage-shaped version of §2.2.3's front-end equivalence test;
+- identical primitive streams from equivalent conventional and mesh pipelines;
+- identical hits between BVH traversal and brute-force intersection;
+- identical scalar and packetized ray continuation results.
+
+#### 2.6.4 Fuzzing and sanitizers
+
+§1.7's rule — "a fuzzing harness lands alongside each importer" — generalizes
+to "alongside each attacker-controlled parser". The new ones are descriptor
+updates, pipeline-cache blobs, command-stream decoding, serialized root
+signatures, artifact/`StageArtifactInfo` blobs, and acceleration-structure
+builds. Each belongs in `check-feme-fuzz` (§2.4.6) with its own seed corpus
+the day its parser lands.
+
+Sanitizer configurations stop being §1.7's P1 nice-to-have: ASan/UBSan for
+import and raster code, TSan for prepared-draw and tile scheduling (and for
+queue/pipeline concurrency in both runtimes), forced allocation/JIT failure
+injection, and stress configurations that cap tessellation, mesh queues,
+continuation memory and ray recursion at small values so every
+resource-exhaustion path is exercised.
+
 ## Part 3: Suggested sequencing
 
 Each step is independently landable and independently testable; the
