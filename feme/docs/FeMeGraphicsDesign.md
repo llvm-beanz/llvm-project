@@ -376,9 +376,11 @@ semantic name, and patch direction/frequency agreeing), and
 versioned byte layout, following `feme::cpu::ArtifactInfo`'s
 serialize/parse convention in `feme/include/feme/Target/CPU/ResourceInfo.h`.
 Import wiring is not yet fully part of this: SPIR-V's `Input`/`Output`
-interface variables (R19) do not populate this model yet (DXIL's
-`!dx.entryPoints` rows, R18, now do -- see the Status note below), so no
-canonical stage operation refers to an `ElementID` this model assigned yet.
+interface variables (R19) do not populate this model yet -- they convert
+instead of failing to legalize (see the Status note below), but nothing yet
+feeds them into `feme::EntrySignature` (DXIL's `!dx.entryPoints` rows, R18,
+already do -- see the next Status note), so no canonical stage operation
+refers to an `ElementID` this model assigned yet.
 `SignatureInterpolationMode`'s enumerators are deliberately DXIL's paired
 (base mode, sampling qualifier) kinds rather than the five independent axes
 the table above lists, so that R18 could map onto it without re-deriving the
@@ -421,6 +423,43 @@ only to stop it from being lost when `!dx.entryPoints` is erased.
 See `feme/lib/Transforms/DXIL/SignatureImport.cpp` and
 `test/Transforms/DXIL/dxil-raise-metadata-signature.ll`/
 `dxil-raise-metadata-patch-constant.ll`.
+
+Status: SPIR-V's half of import is implemented differently (roadmap R19),
+scoped to what the roadmap entry itself asks for -- converting non-builtin
+`Input`/`Output` variables instead of failing to legalize, not (yet)
+populating `feme::EntrySignature`. `feme::spirv::populateSPIRVToLLVMTargetTypeConversions`
+and the `StageIOGlobalVariablePattern`/`StageIOAddressOfPattern` pair
+(`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`) convert a
+non-builtin `Input`/`Output` `spirv.GlobalVariable` to an ordinary
+`llvm.mlir.global` in the address space (7/8) LLVM's SPIRV backend expects
+that storage class to use, recording its `Location`/`Component`/`Index` and
+boolean interpolation/`Patch`/`PerPrimitiveEXT` decorations as a
+`feme.spirv.decorations` MLIR attribute
+(`feme::spirv::getStageIODecorationsAttrName`); once
+`mlir::translateModuleToLLVMIR` has produced a genuine `llvm::Module`,
+`feme::spirv::attachStageIODecorations` (called from
+`feme::SPIRVToLLVMTranslator::translate`, `feme/lib/Translate/SPIRV/
+SPIRVToLLVMTranslator.cpp`) turns that attribute into real
+`!spirv.Decorations` metadata on the matching `llvm::GlobalVariable` -- the
+same shape `buildOpSpirvDecorations`
+(`llvm/lib/Target/SPIRV/SPIRVUtils.cpp`) reads `OpDecorate`s back from (see
+`llvm/test/CodeGen/SPIRV/linkage/hidden-interface-vars.ll`), verified
+end to end through `llc`+`spirv-val`. `Input` collapses `spirv.mlir.addressof`
+and the `spirv.Load` reading it into a single `llvm.load` at the
+address-of site (mirroring how a builtin `Input` variable's `llvm.spv.*`
+intrinsic result already works, since the two share one pointer-type
+conversion rule and cannot be told apart by type alone); `Output` converts
+to an ordinary pointer instead, there being no builtin `Output` variable to
+collide with. Feeding these variables' element IDs into
+`feme::EntrySignature` itself is left to R20 alongside the `feme.stage.*`
+operation family below, which is what will actually consume them; MLIR's own
+SPIR-V *deserializer* also does not yet parse `Component`/`Centroid`/
+`Sample`/`PerPrimitiveEXT` from a real binary (an upstream MLIR gap this
+conversion's own textual-IR-driven tests do not depend on). See
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`,
+`feme/lib/Conversion/SPIRVToLLVM/StageIODecorations.cpp`, and
+`test/Conversion/SPIRVToLLVM/spirv-to-llvm-stage-io.mlir`/
+`test/Translate/SPIRV/spirv-to-llvmir-stage-io.mlir`.
 
 ### Canonical stage operations
 

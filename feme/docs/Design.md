@@ -669,8 +669,8 @@ storage buffer or sampled texture needs (see the table above): image,
 sampled image and sampler *types* convert upstream in MLIR to the same LLVM
 target extension types LLVM's SPIR-V backend uses (`target("spirv.Image",
 ...)`, see `llvm/docs/SPIRVUsage.md`), and FeMe's own patterns cover the
-resource, builtin-variable, storage-buffer, push-constant, image-access and
-basic-sampling *operations*.
+resource, builtin-variable, storage-buffer, push-constant, image-access,
+basic-sampling and stage-IO variable *operations*.
 
 What is still missing is breadth rather than a structural gap:
 
@@ -690,11 +690,25 @@ What is still missing is breadth rather than a structural gap:
   *import* has no reason to reproduce and that therefore needs its own
   design decision before implementation, rather than reusing the storage
   buffer access chain pattern.
-- **Graphics pipeline stage inputs and outputs.**
 
 Until they exist, the SPIR-V *input* half of the translation matrix does not
 yet cover every shader stage or every resource kind a real HLSL program can
 use.
+
+Non-builtin `Input`/`Output` variables (a vertex shader's inputs, a fragment
+shader's outputs, and so on -- roadmap R19) closed what used to be a third
+bullet here: their `Location`/`Component`/`Index`/`NoPerspective`/`Flat`/
+`Patch`/`Centroid`/`Sample`/`PerPrimitiveEXT` decorations convert to an
+ordinary `llvm.mlir.global` in the address space (7/8) LLVM's SPIRV backend
+expects that storage class to use, plus `!spirv.Decorations` metadata on it
+in the same shape `buildOpSpirvDecorations`
+(`llvm/lib/Target/SPIRV/SPIRVUtils.cpp`) reads back
+(`feme::spirv::attachStageIODecorations`), instead of failing to legalize --
+see "Signature reflection" in feme/docs/FeMeGraphicsDesign.md for what is
+still deferred (feeding these variables into the `feme::EntrySignature`
+model itself, and MLIR's own SPIR-V *deserializer* not yet parsing
+`Component`/`Centroid`/`Sample`/`PerPrimitiveEXT` from a real binary, which
+is an upstream MLIR limitation rather than one FeMe's own conversion adds).
 
 #### Known gap: `feme::SPIRVImporter` cannot deserialize LLVM SPIR-V backend output
 
