@@ -696,6 +696,37 @@ Until they exist, the SPIR-V *input* half of the translation matrix does not
 yet cover every shader stage or every resource kind a real HLSL program can
 use.
 
+#### Known gap: `feme::SPIRVImporter` cannot deserialize LLVM SPIR-V backend output
+
+Found by roadmap step R14 (feme/docs/Roadmap.md's §2.2.6 "Round trips")
+while trying to write a SPIR-V→SPIR-V→run execute-after-round-trip test to
+match the DXIL one it added: every SPIR-V binary anything in this tree
+imports is produced by `feme-translate --serialize-spirv` -- MLIR's own
+`spirv` dialect serializer, invoked directly on hand-authored `spirv`
+dialect MLIR (see e.g. `test/Tools/feme/feme-spirv-compute-shader.mlir`).
+`feme::SPIRVExporter` (the "SPIR-V" branch of `feme --target=spirv`'s
+retargeting, used whenever a module -- including one `feme::SPIRVImporter`
+itself just produced -- is retargeted back to SPIR-V) is a different
+producer entirely: it hands idiomatic LLVM IR to `feme::TargetMachineBackend`,
+i.e. LLVM's own in-tree SPIR-V code generator. That generator's binary
+output is not guaranteed to deserialize back through MLIR's `spirv::deserialize`
+(the two are independent, upstream components with no cross-compatibility
+contract between them); concretely, retargeting
+`test/Tools/feme-run/HLSL/front-end-equivalence.hlsl`'s hand-written SPIR-V
+half through `feme --target=spirv` and feeding the result back into
+`feme::SPIRVImporter` (via `feme-run` or `feme-translate --import-spirv`)
+fails with `error: unhandled opcode 83` (`OpAccessChain`) -- despite the
+*original*, non-round-tripped binary executing through `feme-run` without
+issue. Closing this gap would mean either extending MLIR's SPIR-V
+deserializer to accept whatever shape LLVM's SPIR-V backend emits for an
+access chain (upstream MLIR work, outside this repository), or giving
+`feme::SPIRVExporter` its own MLIR-`spirv`-dialect-based serialization path
+instead of going through `TargetMachineBackend` (a much larger change than
+this roadmap step's own testing-focused scope) -- both out of scope here.
+Until one of those happens, only a SPIR-V binary produced by MLIR's own
+serializer (i.e. never one that has been through `feme --target=spirv`) is
+guaranteed importable.
+
 ### DXIL → stay in LLVM IR; raise DXIL ops back to idiomatic form
 
 DXIL *is* LLVM IR: it's serialized as LLVM bitcode (frozen at an old LLVM IR
