@@ -23,9 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R17 from the roadmap document?
+Can you implement R18 from the roadmap document?
 
-> The signature reflection data model (element ID, direction, location,
-> semantic, system value, component type, shape, interpolation, frequency,
-> stream), its verifier, and its serialization round trip in `gtest` (see:
-> §1.8.2)
+> Preserve DXIL input/output/patch-constant/root-signature rows from
+> `!dx.entryPoints` into that model before `feme::dxil::MetadataRaisingPass`
+> erases the source metadata (see: §1.8.2)
