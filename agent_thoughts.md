@@ -14539,3 +14539,186 @@ confirm nothing outside `Transforms/CPU` regressed; all passed. Ran
 `clang-format -i` on both modified C++ files before the final commit and
 rebuilt/reran the full suite afterward to confirm formatting alone hadn't
 shifted any behavior.
+
+# Roadmap step R25: root-constant breadth
+
+## Task
+
+Implement roadmap step R25 (feme/docs/Roadmap.md): "Root-constant breadth:
+any register-bound constant buffer rather than only `(b0, space0)`, array
+and non-constant-row-index shapes, and the full advertised push-constant
+range" (§1.8.1). This is a correction/breadth row over R12's original
+`feme::cpu::RootConstantLoweringPass`, which implemented exactly one
+binding, one shape.
+
+## Investigation
+
+Read feme/.instructions.md, the Roadmap's §1.8.1 table and R25's own row,
+and FeMeCPUDesign.md's "Root constants" section (the target design R12
+narrowed). Read RootConstantLowering.h/.cpp in full: `matchRootConstantHandle`
+hardcoded `RootConstantSpace`/`RootConstantRegister` constants to `(0, 0)`
+and rejected any other binding, `RangeSize != 1` (array), or a non-constant
+row index outright; `lowerRootConstantAccess` computed the root-constant
+span a function needed from the maximum byte offset its own (necessarily
+constant-row) loads touched.
+
+Checked whether any other pass already lowers a `dx.CBuffer` handle bound
+through the heap (i.e. whether "another constant buffer is an ordinary
+bound resource emulated through the dynamic heap", per the design doc) --
+it does not: `feme::cpu::ResourceLoweringPass::classifyHandle` explicitly
+treats `dx.CBuffer` as an unclassified kind. So the existing "more than one
+candidate: reject both" behavior in `matchRootConstantAccess` is still the
+right answer for two distinct bindings even after broadening which single
+one is recognized -- there is no fallback path for a second one yet.
+
+Checked DXIL's `handlefrombinding` intrinsic signature
+(`llvm/include/llvm/IR/IntrinsicsDirectX.td`): `(space, lowerBound,
+rangeSize, index, name)`, all i32 except the trailing `ptr`. The existing
+code never looked at the `index` operand at all (irrelevant when
+`RangeSize` was forced to 1); making an array binding work meant reading
+it and folding it into the byte-offset arithmetic.
+
+## Design
+
+Three coupled changes, matching the roadmap row's three bullets:
+
+1. **Any binding.** Drop the `RootConstantSpace`/`RootConstantRegister`
+   constants; accept any `(space, register)` a `dx.CBuffer` handle names,
+   as long as it is a compile-time-constant, finite (not DXIL's `-1`
+   unbounded sentinel), non-conflicting single candidate in the function.
+   `RootConstantAccess` gains `Space`/`Register` (and `RangeSize`/
+   `ElementSize`, needed for point 3) so callers can report which binding
+   a given size belongs to. Threaded through `!feme.cpu.resources`
+   metadata and `StageArtifactInfo` as two new fields
+   (`RootConstantSpace`/`RootConstantRegister`), bumping `ArtifactAbiVersion`
+   to 4 -- a host otherwise has no way to know where to place root-constant
+   data once the binding isn't fixed.
+
+2. **Array and dynamic-row-index shapes.** `RootConstantRowLoad::Row`
+   generalizes from a resolved `uint64_t` to a `Value*`; `lowerRootConstantAccess`
+   builds its byte-offset arithmetic (`Index * ElementSize + Row *
+   RowSizeBytes`) with `IRBuilder` calls that constant-fold automatically
+   when both operands happen to be `ConstantInt`s (LLVM's default
+   `IRBuilder<>` uses `ConstantFolder`), so the already-constant case (every
+   existing test, and the common one in practice) produces exactly the same
+   IR as before -- verified by hand with `feme-opt` before committing to
+   this approach, rather than assuming it.
+
+3. **Full advertised range.** `RootConstantSizeNeeded` becomes
+   `Access.ElementSize * Access.RangeSize` (the binding's declared
+   `dx.CBuffer` handle-type byte length times its array length) instead of
+   the maximum byte offset actually-touched rows reached. This is not
+   optional once point 2 lands: a dynamic row or array index means there is
+   no longer a fixed set of rows to inspect statically, so the old
+   "touched span" computation cannot be computed at all in the general
+   case. It is also a strictly more accurate answer even in the
+   already-constant case (a host is expected to supply the whole
+   advertised binding, not just the bytes one particular function happens
+   to read).
+
+Considered whether an out-of-range *array* index needs its own explicit
+bounds check (separate from the byte-offset check against
+`RootConstantSize`). It does not: because `RootConstantSizeNeeded` is now
+the *full* advertised span (`ElementSize * RangeSize`), an index at or
+past `RangeSize` pushes `BaseOffset` past `RootConstantSize` by
+construction, so the existing single check catches both an out-of-range
+row and an out-of-range array index with no additional code.
+
+## Implementation
+
+`feme/include/feme/Transforms/CPU/RootConstantLowering.h`: rewrote the
+file comment for R25's scope; `RootConstantRowLoad::Row` is now `Value*`;
+`RootConstantAccess` gains `Space`/`Register`/`RangeSize`/`ElementSize`.
+
+`feme/lib/Transforms/CPU/RootConstantLowering.cpp`: `matchRootConstantHandle`
+returns a full `RootConstantAccess` (binding shape only; `Loads` filled in
+by the caller) instead of a bare `CallInst*`, rejecting only an unbounded
+range or a non-`[N x i8]`-shaped handle type; `collectRowLoads` no longer
+requires `Row` to be a `ConstantInt`; `lowerRootConstantAccess` rewritten
+around runtime `Index`/`Row` arithmetic and the full-advertised-range
+size; `attachRootConstantMetadata`/`attachResourceMetadata` (the latter in
+ResourceLowering.cpp) gain `Space`/`Register` parameters, written into two
+new trailing-before-the-heap-index-tail metadata operands.
+
+Found one real bug while testing the dynamic-row case by hand: `feme::cpu::
+lowerFunctionRootConstants` called `matchRootConstantAccess` against the
+*original* function, then rebuilt it via `addRootConstantParams` (which
+moves the body to a new `Function` and RAUW's every argument) -- any
+`Value*` the match captured from an `Argument` (now possible, since `Row`/
+`Index` can reference a function argument directly) pointed at the old,
+about-to-be-erased `Function`'s argument object, not the new one, and hit
+an LLVM assertion the first time it was used in an `IRBuilder` call
+alongside a value that *did* get updated. Fixed by re-matching against the
+rebuilt function instead of reusing the pre-rebuild match -- exactly what
+`feme::cpu::ResourceLoweringPass`'s own combined (heap + root-constant)
+path already did, for the same reason, so this was really "make the two
+call sites consistent" rather than a novel fix.
+
+`feme/include/feme/Target/CPU/ResourceInfo.h`/`.cpp`: added
+`ResourceInfo::RootConstantSpace`/`RootConstantRegister` and the matching
+`StageArtifactInfo` fields; bumped `ArtifactAbiVersion` to 4; updated
+`fromModule`, `fromResourceInfo`, `serializeArtifact`, `parseArtifact`.
+
+`feme/lib/Transforms/CPU/SPIRVResourceLowering.cpp`: its own
+`attachResourceMetadata` (root constants are always 0 there, SPIR-V push
+constants aren't recognized yet) gained the same two zero-valued fields,
+to keep the metadata node shape uniform across all three writers.
+
+## Testing
+
+Rewrote `test/Transforms/CPU/root-constant-lowering.ll` from scratch:
+`two_bindings` (two distinct bindings, both left alone), `other_binding`
+(a non-default `(space0, b1)` binding, now accepted), `array_binding`
+(`RangeSize == 4`, dynamic index), `dynamic_row` (dynamic row index), and
+the original `main` (default binding, constant row) -- re-verified its
+generated IR is byte-for-byte identical to before this change, since every
+new arithmetic operation constant-folds away in the already-constant case.
+Added a trailing metadata block checking all four lowered functions'
+`Space`/`Register` fields together.
+
+Updated `UnsupportedOpsTest.{AcceptsRootConstantHandle,
+RejectsTwoDistinctRootConstantBindings}` (replacing the now-inaccurate
+`RejectsRootConstantHandleAtOtherBinding`, since a single non-default
+binding is no longer rejected) and added
+`AcceptsRootConstantHandleAtNonDefaultBinding`. Updated
+`ResourceLoweringTest.RecordsStaticHeapIndexMetadata` and every
+`ResourceInfoTest` literal/assertion that encoded the metadata node's or
+`StageArtifactInfo`'s exact field layout (operand counts, `ArtifactAbiVersion`),
+and added `ResourceInfoTest.{FromModuleReadsRootConstantBinding,...}`
+covering the two new fields' round trip through metadata, serialization,
+and `fromResourceInfo`. Updated the two other lit tests
+(`spirv-resource-lowering.ll`, `resource-lowering-typed-buffer.ll`) whose
+`CHECK` lines matched the metadata node's exact literal shape.
+
+Split the implementation into two commits for R25's own granularity: (1)
+binding breadth alone (still `RangeSize == 1`, still a constant row,
+still the old touched-span size calculation) with its own metadata/ABI
+plumbing, and (2) array bindings, dynamic row indices, and the
+full-advertised-range size together (these three are tightly coupled --
+the size computation change is *required* by, not just related to, the
+dynamic-index support). Verified each commit independently by temporarily
+reconstructing its intermediate source state, building `feme-opt`, and
+running `ninja check-feme` before committing, rather than assuming the
+combined diff decomposed cleanly. Built with assertions on and ccache
+throughout (pre-existing `build/` config; `ccache -s` before/after showed
+cache hits on unrelated object files across rebuilds). `ninja check-feme`
+(building every `FEME_TEST_DEPENDS` target first, confirming the target
+dependency graph is intact) reported 1053/1055 passing both before this
+work and after each of the two commits (2 unsupported, platform-gated,
+unchanged baseline) -- no regressions, three net-new lit test functions in
+one already-existing file rather than net-new files. Also ran
+`FeMeTransformsCPUTests`, `FeMeTargetCPUTests`, `FeMeDriverTests`, and
+`FeMeOptimizerTests` individually to confirm nothing outside the two
+touched libraries regressed. Ran `clang-format -i` on every modified C++
+file before finalizing, then rebuilt and reran the full suite once more to
+confirm formatting alone hadn't shifted any behavior.
+
+## Documentation
+
+Updated FeMeCPUDesign.md's "Root constants" section and its D3D12/Vulkan
+comparison table for the R25 shape, and noted that the `--cpu-root-
+constants=bN,spaceM` CLI override the original design sketched is no
+longer needed for the reason it was proposed (disambiguating between
+several bindings), since any single one is now recognized automatically.
+Marked R25 done in Roadmap.md's milestone table (mirroring R21-R24's own
+"done: ..." parenthetical) and closed its §1.8.1 narrowing row.
