@@ -68,9 +68,32 @@
 //    the usual per-wave `buildWaveLoop`, once per iteration (see "A barrier
 //    inside a uniform loop" in "Phase 6: Group Execution and Barriers").
 //    The loop's own induction variable(s) become a `loopvarN` parameter
-//    threaded through every body region. A barrier inside a *branch* (as
-//    opposed to a loop), or a loop shape other than this one, remains
-//    diagnosed rather than mis-split.
+//    threaded through every body region. A loop shape other than this one
+//    remains diagnosed rather than mis-split.
+//
+// Roadmap step R24 closes milestone 9's remaining two narrowings:
+//
+//  - **Barrier inside a surviving branch**: `matchBranchShape` recognizes a
+//    uniform two-way branch -- guaranteed uniform, since a divergent branch
+//    a barrier could survive inside is already gone by this point
+//    (`feme::cpu::LinearizePass`) -- whose arms are each a linear chain
+//    (possibly empty, for a plain `if` with no `else`) reconverging at a
+//    merge block with no phi of its own. `buildWrapperForBranch` clones
+//    the branch's own uniform condition (computed once, not once per wave)
+//    directly into the wrapper as an ordinary scalar `br`, and
+//    barrier-splits each arm exactly like a straight-line wave body
+//    (`splitArmAtBarriers`), with the wrapper's own real control flow
+//    choosing which arm's wave loops run. A merge block with a phi (a
+//    value one arm computes differently from the other, needed after the
+//    branch) remains diagnosed: threading it would mean spilling across a
+//    control-flow choice made once, scalar, in the wrapper, not just across
+//    a barrier within a single region, which this milestone's spilling
+//    does not yet support.
+//  - **A `phi` live across a barrier**: spilled exactly like any other
+//    value (`spillValuesLiveAcrossBarriers` below), with its spill store
+//    placed after its own block's last phi rather than immediately after
+//    itself (a phi must stay grouped with any others at the top of a
+//    block).
 //
 // The emitted `FemeDispatchArgs` field accesses assume an LLVM struct built
 // from exactly feme/include/feme/Target/CPU/RuntimeABI.h's field types, in
@@ -414,9 +437,13 @@ struct RegionBoundary {
 /// \p WaveBody if any such value is found. \p WaveBody is reassigned to
 /// the recreated function in that case (see `appendTrailingParam`);
 /// \p Order/\p IndexOf/\p Barriers's `BasicBlock*`/`Instruction*` pointers
-/// stay valid regardless. Returns false (having emitted a diagnostic,
-/// leaving \p WaveBody unmodified) if a live value's shape is not one this
-/// milestone's spilling supports.
+/// stay valid regardless. A `phi` is spilled exactly like any other
+/// instruction (see "Barrier inside a surviving branch, and a `phi` live
+/// across a barrier" in the file comment above), except its spill store
+/// goes after its block's last phi rather than right after itself, since a
+/// phi must stay grouped with any others at the top of its block. Returns
+/// false (having emitted a diagnostic, leaving \p WaveBody unmodified) if a
+/// live value's shape is not one this milestone's spilling supports.
 bool spillValuesLiveAcrossBarriers(Function *&WaveBody,
                                    ArrayRef<BasicBlock *> Order,
                                    ArrayRef<CallInst *> Barriers,
@@ -448,15 +475,6 @@ bool spillValuesLiveAcrossBarriers(Function *&WaveBody,
   if (SpilledDefs.empty())
     return true;
 
-  if (any_of(SpilledDefs, [](Instruction *I) { return isa<PHINode>(I); })) {
-    WaveBody->getContext().emitError(
-        "feme-cpu-wrap-entry: function '" + WaveBody->getName() +
-        "' has a phi live across a group-sync barrier; only a value "
-        "computed by an ordinary instruction can be spilled for now "
-        "(roadmap milestone 9 deviation)");
-    return false;
-  }
-
   LLVMContext &Ctx = WaveBody->getContext();
   SmallVector<Type *, 4> FieldTypes;
   DenseMap<Instruction *, unsigned> FieldOf;
@@ -486,7 +504,14 @@ bool spillValuesLiveAcrossBarriers(Function *&WaveBody,
   };
 
   for (Instruction *Def : SpilledDefs) {
-    IRBuilder<> Builder(Def->getNextNode());
+    // A phi's own block may hold further phis right after it (LLVM
+    // requires every phi in a block to precede every non-phi instruction),
+    // so a spilled phi's store goes after the block's last phi rather than
+    // right after the phi itself.
+    Instruction *InsertPt = isa<PHINode>(Def)
+                               ? &*Def->getParent()->getFirstNonPHIOrDbg()
+                               : Def->getNextNode();
+    IRBuilder<> Builder(InsertPt);
     Value *Field = buildFieldPtr(Builder, Def, Def->getName() + ".spill");
     Builder.CreateStore(Def, Field);
   }

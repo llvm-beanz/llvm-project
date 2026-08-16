@@ -361,4 +361,62 @@ TEST(EntryWrapperTest, SplitsBarrierInsideUniformLoop) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+// Roadmap step R24 (feme/docs/Roadmap.md): a `phi` live across a
+// `..._with_group_sync` barrier is spilled exactly like any other value
+// (see "A `phi` live across a barrier" in EntryWrapper.cpp's file
+// comment), rather than being diagnosed. Its spill store goes after the
+// block's own last phi rather than immediately after itself.
+TEST(EntryWrapperTest, SpillsPhiLiveAcrossGroupSyncBarrier) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      br label %next
+    next:
+      %val = phi i32 [ %tid, %entry ]
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      %doubled = mul i32 %val, 2
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+
+  Function *Region0 = M->getFunction("main.region0");
+  Function *Region1 = M->getFunction("main");
+  ASSERT_TRUE(Region0);
+  ASSERT_TRUE(Region1);
+
+  bool FoundPhi = false, FoundStoreAfterPhi = false, FoundLoad = false;
+  for (BasicBlock &BB : *Region0) {
+    bool SeenPhi = false;
+    for (Instruction &I : BB) {
+      if (isa<PHINode>(&I)) {
+        FoundPhi = true;
+        SeenPhi = true;
+        continue;
+      }
+      if (isa<StoreInst>(&I) && SeenPhi)
+        FoundStoreAfterPhi = true;
+    }
+  }
+  for (Instruction &I : instructions(Region1))
+    FoundLoad |= isa<LoadInst>(&I);
+  EXPECT_TRUE(FoundPhi);
+  EXPECT_TRUE(FoundStoreAfterPhi);
+  EXPECT_TRUE(FoundLoad);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 } // namespace
