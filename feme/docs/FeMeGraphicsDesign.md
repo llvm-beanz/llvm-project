@@ -1466,6 +1466,42 @@ triple, CPU feature policy, wave size, image-helper ABI, and compiler version.
 This is the same identity the Vulkan design requires of its pipeline cache
 UUID, so a graphics cache key must never be narrower than the compute one.
 
+Status (roadmap R31, "FeMeGraphics skeleton"): `feme::graphics::
+GraphicsPipeline`/`PreparedDraw` (`feme/include/feme/Graphics/{Pipeline,
+PreparedDraw}.h`, new `FeMeGraphics` library) implement these as plain
+description types -- `GraphicsPipeline` owns the compiled vertex/fragment
+`cpu::CompiledStage`s plus primitive topology, raster/depth/blend state and
+attachment formats; `PreparedDraw` holds one draw's attachments, viewport/
+scissor, vertex buffers, resource heap and draw commands -- but neither type
+implements clip/raster/interpolation logic yet; that is roadmap R32, "Basic
+triangle pipeline". Deviations from the sketch above: no `StageInterfaceMap`,
+sample locations, restart behavior, or provoking-vertex field exists yet
+(nothing yet consumes them), and only the conventional vertex+fragment path
+is described (tessellation/geometry/mesh, G5-G6, have their own signature
+shapes and are out of scope here). `feme-render`
+(`feme/tools/feme-render/feme-render.cpp`, see docs/CommandGuide/
+feme-render.md) is the new testing tool this section's design and "Testing
+Tools" in feme/docs/Design.md specify: it parses a scene YAML
+(`feme::graphics::parseScene`), builds and clears every attachment, and
+compiles `pipeline.vertex`/`pipeline.fragment` into a real `GraphicsPipeline`
+when a scene has one -- proving the description builds end to end from a real
+scene file and real compiled stages -- but a scene with a non-empty `draws`
+list is diagnosed as not implemented rather than silently misrendering, since
+no executor exists yet to run one. The heap YAML image resource class this
+row also adds (§2.6.1 of feme/docs/Roadmap.md) lives in `feme-run` itself
+(`ImageEntry` in feme-run.cpp): a new `images` list builds
+`FemeImageDescriptor`s into the ABI's separate image heap, alongside
+`resource-heap`/`bindings`, covering a single mip level and (for a
+non-array dimension) a single array layer; multisample dimensions are
+rejected, matching G4's later multisample milestone. The textual image
+fixture (`feme::graphics::ImageFixture`) and scene
+(`feme::graphics::Scene`) formats "Textual scene and image fixtures" in
+Design.md specifies are implemented in the same `FeMeGraphics` library,
+shared by `feme-render` and `unittests/Graphics/` as that section requires;
+fixture format coverage matches what `runtime/CPU`'s image helpers already
+implement (`R8G8B8A8_*` and the `R32*_FLOAT/UINT/SINT` family) and grows
+mechanically, matching FeMeCPUDesign.md's "Descriptor formats" precedent.
+
 ### Draw flow
 
 The initial indexed and non-indexed triangle path is:

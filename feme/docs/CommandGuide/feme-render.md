@@ -18,6 +18,18 @@ correctly?" into "does this compute the right answer?" for a compute shader,
 can assert on rasterized coverage, interpolation, depth, stencil and blending
 rather than only on the shape of the IR.
 
+**Status (roadmap R31, "FeMeGraphics skeleton"):** this tool implements scene
+parsing, attachment building/clearing, and pipeline compilation (a scene's
+`pipeline.vertex`/`pipeline.fragment` compile into a real `GraphicsPipeline`
+description), but no draw executes yet -- a scene with a non-empty `draws`
+list is diagnosed as not implemented rather than silently misrendering.
+Vertex/index fetch, clipping, rasterization and interpolation are roadmap
+R32, "Basic triangle pipeline", which is also when `--workers`/
+`--tile-order`/`--reference` become meaningful (accepted today only for
+forward compatibility). Shader modules are loaded as plain, already-raised
+LLVM IR (`.ll`/`.bc`) only for now; DXIL/SPIR-V import follows `feme-run`'s
+own precedent once a test needs it.
+
 Both fixture formats — the scene it reads and the images it reads and writes —
 are specified in "Textual scene and image fixtures" in
 [../Design.md](../Design.md), because the graphics unit tests and both API
