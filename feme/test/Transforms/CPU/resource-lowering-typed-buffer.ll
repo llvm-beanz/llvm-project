@@ -41,10 +41,11 @@ define void @main(i32 %idx) {
 
 ; A statically-known heap index (3, above) is recorded in the heap-usage
 ; metadata "Heap usage discovery" describes: entry name, root constant size
-; (0 -- not yet implemented), sampler heap use (false), then the sorted
+; (0 -- this function has none), sampler heap use (false), root-constant
+; binding (both 0 -- unused, since the size above is 0), then the sorted
 ; heap indices.
 ; CHECK: !feme.cpu.resources = !{![[MD:[0-9]+]]}
-; CHECK: ![[MD]] = !{!"main", i32 0, i1 false, i32 3}
+; CHECK: ![[MD]] = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 3}
 
 declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
     @llvm.dx.resource.handlefromheap.tdx.TypedBuffer_v4f32_1_0_0t(i32, i1)

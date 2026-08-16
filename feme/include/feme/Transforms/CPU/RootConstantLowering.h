@@ -9,17 +9,21 @@
 //
 // This file declares feme::cpu::RootConstantLoweringPass, which lowers the
 // one register-bound constant buffer "Root constants" in
-// feme/docs/FeMeCPUDesign.md carves out an exception for -- by default
-// `(b0, space0)` -- into loads from the CPU ABI's inline root-constant
-// block, rather than leaving it for `feme::cpu::checkSupportedRaisedOps` to
-// reject as an unsupported register-bound resource handle.
+// feme/docs/FeMeCPUDesign.md carves out an exception for into loads from
+// the CPU ABI's inline root-constant block, rather than leaving it for
+// `feme::cpu::checkSupportedRaisedOps` to reject as an unsupported
+// register-bound resource handle.
 //
-// Scope (roadmap step R12; see the design doc's "Root constants" section
-// for the target shape this narrows):
+// Scope (roadmap step R25 broadened this from R12's original, narrower
+// shape; see the design doc's "Root constants" section for the target
+// shape this now matches):
 //
-//  - Only the single default binding `(b0, space0)` is recognized; the
-//    `--cpu-root-constants=bN,spaceM` override the design describes is not
-//    yet implemented.
+//  - Any single `(space, register)` binding is recognized, not just the
+//    default `(b0, space0)` -- whichever one `dx.CBuffer` handle a function
+//    reads is the one this pass promotes, as long as it is the only one.
+//    Two or more distinct bindings remain ambiguous and are left entirely
+//    alone, for `checkSupportedRaisedOps` to reject, exactly as a single
+//    non-default binding was before R25.
 //  - Only a non-array (`RangeSize == 1`) `dx.CBuffer` handle whose every use
 //    is a `llvm.dx.resource.load.cbufferrow.4.*` call (DXIL's 32-bit-per-
 //    component row shape; `cbufferrow.2`/`.8`, 64- and 16-bit components,
@@ -70,6 +74,13 @@ struct RootConstantRowLoad {
 struct RootConstantAccess {
   llvm::CallInst *Handle;
   llvm::SmallVector<RootConstantRowLoad, 4> Loads;
+  /// The binding's source register space and base register (roadmap R25:
+  /// any single binding is recognized, not just `(space0, b0)`) -- reported
+  /// to the caller so it can attach them to whichever `!feme.cpu.resources`
+  /// metadata entry it emits, for a host to know which binding the root
+  /// constant block corresponds to.
+  uint32_t Space = 0;
+  uint32_t Register = 0;
 };
 
 /// Returns \p F's root-constant access, if it has exactly one recognized

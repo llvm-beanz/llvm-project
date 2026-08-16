@@ -256,17 +256,21 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
 /// `feme::cpu::ResourceInfo::fromModule` reads: name, root constant size
 /// (always 0 -- root constants are not yet raised from SPIR-V push
 /// constants into this form), whether the sampler heap is used (always
-/// false -- no SPIR-V sampler handle is normalized by this pass), and an
-/// empty statically-known-heap-index tail (every heap index this pass
-/// assigns is already static by construction, but none is a *dynamic* heap
-/// access the way `feme::cpu::ResourceLoweringPass`'s own tail records --
-/// see "Heap usage discovery" in feme/docs/FeMeCPUDesign.md).
+/// false -- no SPIR-V sampler handle is normalized by this pass), a
+/// root-constant binding (always `(space0, register0)`, unused since the
+/// size above is always 0), and an empty statically-known-heap-index tail
+/// (every heap index this pass assigns is already static by construction,
+/// but none is a *dynamic* heap access the way
+/// `feme::cpu::ResourceLoweringPass`'s own tail records -- see "Heap usage
+/// discovery" in feme/docs/FeMeCPUDesign.md).
 void attachResourceMetadata(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Metadata *Ops[] = {MDString::get(Ctx, F.getName()),
                      ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
-                     ConstantAsMetadata::get(ConstantInt::getFalse(Ctx))};
+                     ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)),
+                     ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
+                     ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0))};
   F.getParent()
       ->getOrInsertNamedMetadata("feme.cpu.resources")
       ->addOperand(MDNode::get(Ctx, Ops));

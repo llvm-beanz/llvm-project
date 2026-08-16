@@ -123,9 +123,10 @@ TEST(UnsupportedOpsTest, IgnoresUnusedDeclarations) {
 }
 
 TEST(UnsupportedOpsTest, AcceptsRootConstantHandle) {
-  // The one recognized root-constant binding (`(b0, space0)`, see
-  // RootConstantLowering.h) is not an unsupported operation, even though it
-  // is still present at this point -- `feme::cpu::RootConstantLoweringPass`/
+  // Any single register-bound `dx.CBuffer` handle is not an unsupported
+  // operation (roadmap R25 lifted the earlier `(b0, space0)`-only
+  // restriction; see RootConstantLowering.h), even though it is still
+  // present at this point -- `feme::cpu::RootConstantLoweringPass`/
   // `feme::cpu::ResourceLoweringPass` run after this check (see "Root
   // constants" in feme/docs/FeMeCPUDesign.md).
   LLVMContext Ctx;
@@ -146,10 +147,9 @@ TEST(UnsupportedOpsTest, AcceptsRootConstantHandle) {
   EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
 }
 
-TEST(UnsupportedOpsTest, RejectsRootConstantHandleAtOtherBinding) {
-  // Only `(b0, space0)` is recognized (see RootConstantLowering.h); a
-  // `dx.CBuffer` handle at any other binding is an ordinary register-bound
-  // resource this target still has no other way to address.
+TEST(UnsupportedOpsTest, AcceptsRootConstantHandleAtNonDefaultBinding) {
+  // Roadmap R25: the recognized binding is no longer fixed to
+  // `(b0, space0)` -- any single one qualifies.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main(i32 %row) {
@@ -157,6 +157,33 @@ TEST(UnsupportedOpsTest, RejectsRootConstantHandleAtOtherBinding) {
           @llvm.dx.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
       %v = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
           target("dx.CBuffer", [16 x i8]) %h, i32 0)
+      ret void
+    }
+    declare target("dx.CBuffer", [16 x i8])
+        @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+        target("dx.CBuffer", [16 x i8]), i32)
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
+}
+
+TEST(UnsupportedOpsTest, RejectsTwoDistinctRootConstantBindings) {
+  // Exactly one register-bound constant buffer is still promoted to root
+  // constants; a second, distinct binding remains ambiguous (there is only
+  // one root-constant block) and is left as an ordinary register-bound
+  // resource this target still has no other way to address.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %row) {
+      %h0 = call target("dx.CBuffer", [16 x i8])
+          @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %h1 = call target("dx.CBuffer", [16 x i8])
+          @llvm.dx.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %v0 = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+          target("dx.CBuffer", [16 x i8]) %h0, i32 0)
+      %v1 = call {i32, i32, i32, i32} @llvm.dx.resource.load.cbufferrow.4.i32(
+          target("dx.CBuffer", [16 x i8]) %h1, i32 0)
       ret void
     }
     declare target("dx.CBuffer", [16 x i8])

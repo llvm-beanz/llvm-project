@@ -118,14 +118,19 @@ TEST(ResourceLoweringTest, RecordsStaticHeapIndexMetadata) {
   ASSERT_TRUE(MD);
   ASSERT_EQ(MD->getNumOperands(), 1u);
   MDNode *Entry = MD->getOperand(0);
-  // {name, root-constant-size, uses-sampler-heap, ...heap indices}.
-  ASSERT_EQ(Entry->getNumOperands(), 4u);
+  // {name, root-constant-size, uses-sampler-heap, root-constant-space,
+  // root-constant-register, ...heap indices}.
+  ASSERT_EQ(Entry->getNumOperands(), 6u);
   EXPECT_EQ(cast<MDString>(Entry->getOperand(0))->getString(), "main");
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue(),
             0u);
   EXPECT_FALSE(
       mdconst::extract<ConstantInt>(Entry->getOperand(2))->getZExtValue());
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(3))->getZExtValue(),
+            0u);
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(4))->getZExtValue(),
+            0u);
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(5))->getZExtValue(),
             5u);
 }
 

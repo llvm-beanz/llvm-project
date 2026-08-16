@@ -270,16 +270,24 @@ void lowerAccesses(const HandleInfo &Info, const ResourceCallEnv &Env,
   Info.Handle->eraseFromParent();
 }
 
+/// A co-existing root-constant access's metadata contribution (see
+/// `lowerFunctionResources`), or all zero if \p F has none.
+struct RootConstantMetadata {
+  uint32_t Size = 0;
+  uint32_t Space = 0;
+  uint32_t Register = 0;
+};
+
 /// Lowers every canonicalizable resource access \p F performs, returning the
 /// rewritten function (a new one, since its signature grows), or nullptr if
 /// \p F has no `handlefromheap` calls or uses one this pass cannot model
 /// (see the header comment). Statically-known heap indices found along the
-/// way are appended to \p StaticHeapIndices; the root-constant byte span a
-/// co-existing root-constant access (see RootConstantLowering.h) reads, if
-/// any, is written to \p RootConstantSize.
+/// way are appended to \p StaticHeapIndices; a co-existing root-constant
+/// access (see RootConstantLowering.h), if any, is written to \p
+/// RootConstant.
 Function *lowerFunctionResources(Function &F,
                                  SmallVectorImpl<uint32_t> &StaticHeapIndices,
-                                 uint32_t &RootConstantSize) {
+                                 RootConstantMetadata &RootConstant) {
   if (F.isDeclaration())
     return nullptr;
 
@@ -298,32 +306,36 @@ Function *lowerFunctionResources(Function &F,
     lowerAccesses(Info, Env, DescriptorIndex);
   }
 
-  // A shader that also reads the one recognized root-constant binding
-  // (see "Root constants" in feme/docs/FeMeCPUDesign.md) has that access
+  // A shader that also reads a recognized root-constant binding (see
+  // "Root constants" in feme/docs/FeMeCPUDesign.md) has that access
   // finished here, reusing the `RootConstants`/`RootConstantSize`
   // parameters `addResourceEnvParams` above just added, rather than by
   // `feme::cpu::RootConstantLoweringPass` adding its own -- see
   // RootConstantLowering.h's file comment for why a function with any
   // bindless resource access of its own is handled this way instead.
-  if (std::optional<RootConstantAccess> Access = matchRootConstantAccess(*NewF))
-    RootConstantSize = lowerRootConstantAccess(*Access, Env.RootConstants,
-                                               Env.RootConstantSize);
+  if (std::optional<RootConstantAccess> Access =
+          matchRootConstantAccess(*NewF)) {
+    RootConstant.Size = lowerRootConstantAccess(*Access, Env.RootConstants,
+                                                Env.RootConstantSize);
+    RootConstant.Space = Access->Space;
+    RootConstant.Register = Access->Register;
+  }
 
   return NewF;
 }
 
 /// Attaches the `!feme.cpu.resources` heap-usage metadata node "Heap usage
-/// discovery" describes for \p F: its name, \p RootConstantSize (the
-/// root-constant byte span a co-existing root-constant access reads, 0 if
-/// \p F has none -- see `lowerFunctionResources`), whether the sampler heap
-/// is used (always false -- `feme::dxil::OpRaisingPass` does not yet
-/// reconstruct a sampler handle from the heap, see
-/// `raiseResourceHandleFromHeap`'s comment), and the sorted, deduplicated
-/// statically-known heap indices the shader reads through a constant
-/// descriptor index.
+/// discovery" describes for \p F: its name, \p RootConstant's byte span
+/// (0 if \p F has no co-existing root-constant access -- see
+/// `lowerFunctionResources`), whether the sampler heap is used (always
+/// false -- `feme::dxil::OpRaisingPass` does not yet reconstruct a sampler
+/// handle from the heap, see `raiseResourceHandleFromHeap`'s comment), \p
+/// RootConstant's binding (space/register, both 0 if \p F has none), and
+/// the sorted, deduplicated statically-known heap indices the shader reads
+/// through a constant descriptor index.
 void attachResourceMetadata(Function &F,
                             SmallVectorImpl<uint32_t> &StaticHeapIndices,
-                            uint32_t RootConstantSize) {
+                            const RootConstantMetadata &RootConstant) {
   llvm::sort(StaticHeapIndices);
   StaticHeapIndices.erase(llvm::unique(StaticHeapIndices),
                           StaticHeapIndices.end());
@@ -333,8 +345,12 @@ void attachResourceMetadata(Function &F,
   SmallVector<Metadata *, 8> Ops;
   Ops.push_back(MDString::get(Ctx, F.getName()));
   Ops.push_back(
-      ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantSize)));
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstant.Size)));
   Ops.push_back(ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)));
+  Ops.push_back(
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstant.Space)));
+  Ops.push_back(
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstant.Register)));
   for (uint32_t Idx : StaticHeapIndices)
     Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, Idx)));
 
@@ -350,13 +366,12 @@ PreservedAnalyses ResourceLoweringPass::run(Module &M,
   bool Changed = false;
   for (Function &F : llvm::make_early_inc_range(M.functions())) {
     SmallVector<uint32_t, 4> StaticHeapIndices;
-    uint32_t RootConstantSize = 0;
-    Function *NewF =
-        lowerFunctionResources(F, StaticHeapIndices, RootConstantSize);
+    RootConstantMetadata RootConstant;
+    Function *NewF = lowerFunctionResources(F, StaticHeapIndices, RootConstant);
     if (!NewF)
       continue;
     Changed = true;
-    attachResourceMetadata(*NewF, StaticHeapIndices, RootConstantSize);
+    attachResourceMetadata(*NewF, StaticHeapIndices, RootConstant);
   }
 
   // An unused `handlefromheap`/`handlefrombinding` declaration is left

@@ -34,5 +34,5 @@ define void @main(i32 %idx) {
 ; CHECK-NOT: @llvm.spv.resource.handlefrombinding
 ; CHECK: !feme.cpu.resources = !{![[RMD:[0-9]+]]}
 ; CHECK: !feme.cpu.bound_resources = !{![[BMD:[0-9]+]]}
-; CHECK: ![[RMD]] = !{!"main", i32 0, i1 false}
+; CHECK: ![[RMD]] = !{!"main", i32 0, i1 false, i32 0, i32 0}
 ; CHECK: ![[BMD]] = !{!"main", i32 1, i32 0, i32 1, i32 1, i32 0}

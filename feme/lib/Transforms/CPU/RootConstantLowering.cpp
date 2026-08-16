@@ -30,11 +30,6 @@ using namespace feme::cpu;
 
 namespace {
 
-/// The one binding this milestone recognizes -- see the header comment for
-/// why `--cpu-root-constants=bN,spaceM` isn't implemented yet.
-constexpr uint32_t RootConstantSpace = 0;
-constexpr uint32_t RootConstantRegister = 0;
-
 /// A full DXIL cbuffer row is always 16 bytes, regardless of how many
 /// components of what width it is split into (see
 /// `int_dx_resource_load_cbufferrow_4`'s TableGen comment: "The total size
@@ -58,24 +53,25 @@ bool usesResourceHeap(Function &F) {
   return false;
 }
 
-/// Returns \p Handle if it is a `dx.CBuffer` handle bound at the one
-/// recognized binding (`RootConstantSpace`/`RootConstantRegister`, a
-/// non-array range), or nullptr otherwise.
-CallInst *matchRootConstantHandle(CallInst &Handle) {
+/// Returns \p Handle's binding (source register space and base register) if
+/// it is a `dx.CBuffer` handle bound at any finite, statically-known,
+/// non-array binding (roadmap R25: any single binding is recognized, not
+/// just `(b0, space0)`), or `std::nullopt` otherwise.
+std::optional<std::pair<uint32_t, uint32_t>>
+matchRootConstantHandle(CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
   if (!HandleTy || HandleTy->getName() != "dx.CBuffer")
-    return nullptr;
+    return std::nullopt;
 
   auto *SpaceC = dyn_cast<ConstantInt>(Handle.getArgOperand(0));
-  auto *LowerBoundC = dyn_cast<ConstantInt>(Handle.getArgOperand(1));
+  auto *RegisterC = dyn_cast<ConstantInt>(Handle.getArgOperand(1));
   auto *RangeSizeC = dyn_cast<ConstantInt>(Handle.getArgOperand(2));
-  if (!SpaceC || !LowerBoundC || !RangeSizeC)
-    return nullptr;
-  if (SpaceC->getZExtValue() != RootConstantSpace ||
-      LowerBoundC->getZExtValue() != RootConstantRegister ||
-      RangeSizeC->getZExtValue() != 1)
-    return nullptr;
-  return &Handle;
+  if (!SpaceC || !RegisterC || !RangeSizeC)
+    return std::nullopt;
+  if (RangeSizeC->getZExtValue() != 1)
+    return std::nullopt;
+  return std::make_pair(static_cast<uint32_t>(SpaceC->getZExtValue()),
+                        static_cast<uint32_t>(RegisterC->getZExtValue()));
 }
 
 /// Collects every `llvm.dx.resource.load.cbufferrow.4.*` call \p Handle is
@@ -145,16 +141,21 @@ Function *addRootConstantParams(Function &F, Value *&RootConstants,
 /// Attaches the same `!feme.cpu.resources` heap-usage metadata node
 /// "Resource usage discovery" describes for \p F (see `attachResourceMetadata`
 /// in ResourceLowering.cpp for the shape this mirrors): its name, the root
-/// constant block size this function reads, and `false`/no trailing indices
-/// (a root-constant-only function uses neither the sampler heap nor any
-/// statically-known dynamic heap index).
-void attachRootConstantMetadata(Function &F, uint32_t RootConstantSize) {
+/// constant block size this function reads, `false` (a root-constant-only
+/// function uses neither the sampler heap nor any statically-known dynamic
+/// heap index), the binding's source register space and base register
+/// (roadmap R25: any single binding is recognized now, so a host needs to
+/// be told which one this is), and no trailing indices.
+void attachRootConstantMetadata(Function &F, uint32_t RootConstantSize,
+                                uint32_t Space, uint32_t Register) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   MDNode *Node = MDNode::get(
       Ctx, {MDString::get(Ctx, F.getName()),
             ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantSize)),
-            ConstantAsMetadata::get(ConstantInt::getFalse(Ctx))});
+            ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)),
+            ConstantAsMetadata::get(ConstantInt::get(I32Ty, Space)),
+            ConstantAsMetadata::get(ConstantInt::get(I32Ty, Register))});
   F.getParent()
       ->getOrInsertNamedMetadata("feme.cpu.resources")
       ->addOperand(Node);
@@ -179,7 +180,8 @@ Function *lowerFunctionRootConstants(Function &F) {
 
   uint32_t RootConstantSizeNeeded =
       lowerRootConstantAccess(*Access, RootConstants, RootConstantSize);
-  attachRootConstantMetadata(*NewF, RootConstantSizeNeeded);
+  attachRootConstantMetadata(*NewF, RootConstantSizeNeeded, Access->Space,
+                            Access->Register);
   return NewF;
 }
 
@@ -192,14 +194,19 @@ std::optional<RootConstantAccess> matchRootConstantAccess(Function &F) {
     return std::nullopt;
 
   CallInst *Handle = nullptr;
+  uint32_t Space = 0;
+  uint32_t Register = 0;
   for (Instruction &I : instructions(F)) {
     auto *CI = dyn_cast<CallInst>(&I);
     if (!CI || getIntrinsicID(CI) != Intrinsic::dx_resource_handlefrombinding)
       continue;
-    if (CallInst *Matched = matchRootConstantHandle(*CI)) {
+    if (std::optional<std::pair<uint32_t, uint32_t>> Binding =
+            matchRootConstantHandle(*CI)) {
       if (Handle)
         return std::nullopt; // More than one candidate: reject both.
-      Handle = Matched;
+      Handle = CI;
+      Space = Binding->first;
+      Register = Binding->second;
     }
   }
   if (!Handle)
@@ -210,7 +217,7 @@ std::optional<RootConstantAccess> matchRootConstantAccess(Function &F) {
   if (!Loads)
     return std::nullopt;
 
-  return RootConstantAccess{Handle, std::move(*Loads)};
+  return RootConstantAccess{Handle, std::move(*Loads), Space, Register};
 }
 
 uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,

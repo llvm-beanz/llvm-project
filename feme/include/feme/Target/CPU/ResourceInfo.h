@@ -110,9 +110,13 @@ struct BoundResourceRange {
 struct ResourceInfo {
   std::string EntryName;
   /// The root constant block's required byte span, or 0 if the shader reads
-  /// none. Always 0 for now -- root constants are not yet implemented (see
-  /// the Status section's Deviation note in feme/docs/FeMeCPUDesign.md).
+  /// none.
   uint32_t RootConstantSize = 0;
+  /// The root constant binding's source register space and base register
+  /// (roadmap R25: any single binding is recognized, not just the default
+  /// `(b0, space0)`), meaningful only when `RootConstantSize != 0`.
+  uint32_t RootConstantSpace = 0;
+  uint32_t RootConstantRegister = 0;
   /// Whether the shader reads the sampler heap. Always false for now --
   /// `feme::dxil::OpRaisingPass` does not yet reconstruct a sampler handle
   /// from the heap (see `raiseResourceHandleFromHeap`'s comment).
@@ -160,7 +164,12 @@ struct ResourceInfo {
 /// for a stage/milestone that does not populate one yet), plus new
 /// `Flags` bits summarizing the entry's use of `feme.stage.discard`/
 /// `.demote`/`.is_helper`.
-constexpr uint32_t ArtifactAbiVersion = 3;
+///
+/// Version 4 (roadmap R25) added `RootConstantSpace`/`RootConstantRegister`:
+/// root-constant support now recognizes any single register binding rather
+/// than only the default `(b0, space0)`, so a host needs to be told which
+/// one a given `RootConstantSize` corresponds to.
+constexpr uint32_t ArtifactAbiVersion = 4;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.
@@ -205,6 +214,9 @@ struct StageArtifactInfo {
   uint32_t GroupSharedSize = 0;
   uint32_t GroupSharedAlign = 0;
   uint32_t RootConstantSize = 0;
+  /// See `ResourceInfo::RootConstantSpace`/`RootConstantRegister`.
+  uint32_t RootConstantSpace = 0;
+  uint32_t RootConstantRegister = 0;
   uint32_t Flags = 0;
   std::vector<uint32_t> StaticHeapIndices;
   /// See `ResourceInfo::ReservedResourceHeapSize`/`BoundRanges`.
