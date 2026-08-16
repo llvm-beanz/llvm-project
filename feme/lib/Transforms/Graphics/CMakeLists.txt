@@ -1,5 +1,6 @@
 add_mlir_library(FeMeTransformsGraphics
   CanonicalizeStage.cpp
+  ValidateStage.cpp
 
   LINK_COMPONENTS
   Core

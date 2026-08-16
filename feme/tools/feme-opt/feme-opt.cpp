@@ -48,6 +48,7 @@
 #include "feme/Transforms/DXIL/OpRaising.h"
 #include "feme/Transforms/DXIL/SPIRVRaising.h"
 #include "feme/Transforms/Graphics/CanonicalizeStage.h"
+#include "feme/Transforms/Graphics/ValidateStage.h"
 #include "feme/Transforms/NVPTX/RaisedLowering.h"
 #include "feme/Transforms/NVPTX/ResourceLowering.h"
 #include "feme/Transforms/SPIRV/RaisedLowering.h"
@@ -188,6 +189,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::graphics::CanonicalizeStagePass::name())
           return false;
         MPM.addPass(feme::graphics::CanonicalizeStagePass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::graphics::ValidateStagePass::name())
+          return false;
+        MPM.addPass(feme::graphics::ValidateStagePass());
         return true;
       });
   // FeMe CPU target passes (see feme/docs/FeMeCPUDesign.md's Pipeline
