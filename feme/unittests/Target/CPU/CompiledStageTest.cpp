@@ -141,4 +141,45 @@ TEST(CompiledStageTest,
   EXPECT_EQ(Buffer, Expected);
 }
 
+TEST(CompiledStageTest, GetArtifactInfoReflectsResolvedExecutionShape) {
+  Context Ctx;
+  Expected<std::unique_ptr<CompiledStage>> Stage = compile(Ctx, /*WaveSize=*/8);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  ArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.WaveSize, 8u);
+  EXPECT_EQ(Artifact.GroupSize[0], 1u);
+  EXPECT_EQ(Artifact.GroupSize[1], 1u);
+  EXPECT_EQ(Artifact.GroupSize[2], 1u);
+  // `ShaderIR` declares no `addrspace(3)` global.
+  EXPECT_EQ(Artifact.GroupSharedSize, 0u);
+}
+
+constexpr char GroupSharedShaderIR[] = R"(
+  @tile = addrspace(3) global [4 x i32] zeroinitializer, align 16
+
+  define void @main() #0 {
+    ret void
+  }
+  attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="1,1,1" }
+)";
+
+TEST(CompiledStageTest, GetArtifactInfoReportsGroupSharedRequirements) {
+  Context Ctx;
+  SMDiagnostic Err;
+  auto LLVMMod =
+      parseAssemblyString(GroupSharedShaderIR, Err, Ctx.getLLVMContext());
+  ASSERT_TRUE(LLVMMod) << Err.getMessage().str();
+
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+  JITOptions Opts;
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      CompiledStage::create(Ctx, std::move(Mod), Opts);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+
+  ArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.GroupSharedSize, 16u);
+  EXPECT_EQ(Artifact.GroupSharedAlign, 16u);
+}
+
 } // namespace

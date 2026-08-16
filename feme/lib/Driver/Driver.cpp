@@ -22,10 +22,12 @@
 #include "feme/Optimizer/OptimizerPipeline.h"
 #include "feme/Target/Backend.h"
 #include "feme/Target/CPU/Pipeline.h"
+#include "feme/Target/CPU/ResourceInfo.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Target/TargetMachineBackend.h"
 #include "feme/Transforms/AMDGPU/RaisedLowering.h"
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
+#include "feme/Transforms/CPU/GroupSharedInfo.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
 #include "feme/Transforms/DXIL/OpRaising.h"
@@ -48,6 +50,7 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include <array>
 #include <cstring>
 
 using namespace feme;
@@ -475,10 +478,46 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
       }
     }
 
+    // Computed against \p M's now-resolved data layout, before
+    // `runPipeline` below erases the `addrspace(3)` globals it describes
+    // (see `feme::cpu::EntryWrapperPass`'s own comment) -- the same point
+    // `feme::cpu::CompiledStage::create` computes it at for its JIT
+    // counterpart, so an AOT host and a JIT host agree on the same
+    // shader's groupshared requirements (roadmap R22).
+    feme::cpu::GroupSharedRequirements GroupSharedReqs =
+        feme::cpu::getGroupSharedRequirements(M);
+
     llvm::Expected<feme::cpu::PipelineResult> Result =
         feme::cpu::runPipeline(M, /*EntryPoint=*/"", ResolvedWaveSize);
     if (!Result)
       return Result.takeError();
+
+    // Embed the same versioned reflection artifact a JIT host reads back
+    // from `feme::cpu::CompiledStage::getArtifactInfo` (roadmap R22), so an
+    // AOT host reading only the resulting object file learns exactly as
+    // much as one that JIT-compiled the same shader (see ResourceInfo.h's
+    // file comment).
+    const llvm::Function *WaveBody = M.getFunction(Result->EntryName);
+    assert(WaveBody && "runPipeline succeeded without producing its own "
+                       "documented entry point");
+    std::optional<feme::cpu::ResourceInfo> ResInfo =
+        feme::cpu::ResourceInfo::fromModule(M, Result->EntryName);
+    if (!ResInfo) {
+      ResInfo.emplace();
+      ResInfo->EntryName = Result->EntryName;
+    }
+    feme::cpu::ArtifactInfo Artifact =
+        feme::cpu::ArtifactInfo::fromResourceInfo(*ResInfo);
+    Artifact.WaveSize = ResolvedWaveSize;
+    std::array<uint32_t, 3> GroupSize =
+        feme::cpu::getDeclaredGroupSize(*WaveBody);
+    Artifact.GroupSize[0] = GroupSize[0];
+    Artifact.GroupSize[1] = GroupSize[1];
+    Artifact.GroupSize[2] = GroupSize[2];
+    Artifact.GroupSharedSize = static_cast<uint32_t>(GroupSharedReqs.Size);
+    Artifact.GroupSharedAlign =
+        static_cast<uint32_t>(GroupSharedReqs.Alignment);
+    feme::cpu::emitArtifactGlobal(M, Result->EntryName, Artifact);
   }
 
   BackendOptions BackendOpts;

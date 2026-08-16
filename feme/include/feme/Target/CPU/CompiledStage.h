@@ -38,6 +38,7 @@
 
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
+#include "feme/Transforms/CPU/GroupSharedInfo.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Error.h"
@@ -92,6 +93,18 @@ public:
   /// The shader's declared thread group dimensions (`hlsl.numthreads`).
   std::array<uint32_t, 3> getGroupSize() const { return GroupSize; }
 
+  /// The reflection artifact a host reads to prepare a dispatch against
+  /// this compiled stage: `getResourceInfo`'s fields plus the
+  /// execution-shape ones (`WaveSize`/`GroupSize`/`GroupSharedSize`/
+  /// `GroupSharedAlign`) this milestone (roadmap R22) populates from
+  /// values `create` already resolved, tagged
+  /// `feme::ShaderStage::Compute` -- every `CompiledStage` is implicitly
+  /// that stage for now (see the file comment above). This is the same
+  /// structure `feme::Driver`'s AOT retargeting path serializes with
+  /// `feme::cpu::emitArtifactGlobal`, so a JIT and an AOT host see
+  /// identical reflection for the same shader.
+  ArtifactInfo getArtifactInfo() const;
+
   /// Invokes the compiled entry point once for \p GroupID against
   /// \p Prepared's already-materialized dispatch state (see
   /// `PreparedDispatch`), using \p GroupShared as its groupshared storage
@@ -110,7 +123,8 @@ public:
 private:
   CompiledStage(std::unique_ptr<llvm::orc::LLJIT> JIT, void *EntryFn,
                ResourceInfo Info, unsigned WaveSize,
-               std::array<uint32_t, 3> GroupSize);
+               std::array<uint32_t, 3> GroupSize,
+               GroupSharedRequirements GroupSharedReqs);
 
   std::unique_ptr<llvm::orc::LLJIT> JIT;
   /// `void (*)(const FemeDispatchArgs *)`: the compiled
@@ -120,6 +134,10 @@ private:
   ResourceInfo Info;
   unsigned WaveSize;
   std::array<uint32_t, 3> GroupSize;
+  /// This shader's aggregate groupshared allocation requirements (see
+  /// feme::cpu::getGroupSharedRequirements), computed from \p M before
+  /// `create`'s pipeline erases the `addrspace(3)` globals it describes.
+  GroupSharedRequirements GroupSharedReqs;
 };
 
 } // namespace feme::cpu

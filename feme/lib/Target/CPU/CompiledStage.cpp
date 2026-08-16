@@ -178,9 +178,10 @@ void alignRuntimeModuleTriple(llvm::Module &RuntimeMod,
 
 CompiledStage::CompiledStage(std::unique_ptr<orc::LLJIT> JIT, void *EntryFn,
                              ResourceInfo Info, unsigned WaveSize,
-                             std::array<uint32_t, 3> GroupSize)
+                             std::array<uint32_t, 3> GroupSize,
+                             GroupSharedRequirements GroupSharedReqs)
     : JIT(std::move(JIT)), EntryFn(EntryFn), Info(std::move(Info)),
-      WaveSize(WaveSize), GroupSize(GroupSize) {}
+      WaveSize(WaveSize), GroupSize(GroupSize), GroupSharedReqs(GroupSharedReqs) {}
 
 CompiledStage::~CompiledStage() = default;
 CompiledStage::CompiledStage(CompiledStage &&) noexcept = default;
@@ -218,6 +219,13 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   if (!Entry)
     return Entry.takeError();
   std::string EntryName = (*Entry)->getName().str();
+
+  // Computed before the pipeline below runs: the non-`--reference` path's
+  // `EntryWrapperPass` (Phase 6) erases every `addrspace(3)` groupshared
+  // global once it has allocated a buffer for them (see "Groupshared
+  // memory" in feme/docs/FeMeCPUDesign.md's Phase 6 section), so this is
+  // the last point at which they still exist to measure.
+  GroupSharedRequirements GroupSharedReqs = getGroupSharedRequirements(Mod);
 
   // `--reference` resolves no wave size at all: it never widens anything
   // (see the "CFG restructurization test suite" section of
@@ -340,7 +348,8 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
 
   return std::unique_ptr<CompiledStage>(
       new CompiledStage(std::move(JIT), EntryAddr->toPtr<void *>(),
-                        std::move(ResolvedInfo), WaveSize, GroupSize));
+                        std::move(ResolvedInfo), WaveSize, GroupSize,
+                        GroupSharedReqs));
 }
 
 Error CompiledStage::invokeGroup(const PreparedDispatch &Prepared,
@@ -351,4 +360,15 @@ Error CompiledStage::invokeGroup(const PreparedDispatch &Prepared,
   feme::cpu::invokeGroup(reinterpret_cast<EntryPointFn>(EntryFn), Prepared,
                          GroupID, GroupShared);
   return Error::success();
+}
+
+ArtifactInfo CompiledStage::getArtifactInfo() const {
+  ArtifactInfo Artifact = ArtifactInfo::fromResourceInfo(Info);
+  Artifact.WaveSize = WaveSize;
+  Artifact.GroupSize[0] = GroupSize[0];
+  Artifact.GroupSize[1] = GroupSize[1];
+  Artifact.GroupSize[2] = GroupSize[2];
+  Artifact.GroupSharedSize = static_cast<uint32_t>(GroupSharedReqs.Size);
+  Artifact.GroupSharedAlign = static_cast<uint32_t>(GroupSharedReqs.Alignment);
+  return Artifact;
 }

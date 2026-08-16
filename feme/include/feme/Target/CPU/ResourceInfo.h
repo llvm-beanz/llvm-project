@@ -144,17 +144,15 @@ enum ArtifactFlagBits : uint32_t {
 /// feme/include/feme/Target/CPU/RuntimeABI.h's structs are: layout and field
 /// order must stay in sync with `serializeArtifact`/`parseArtifact`.
 ///
-/// `WaveSize`, `GroupSize`, `GroupSharedSize` and `GroupSharedAlign` are
-/// part of the versioned layout from the start (so a later milestone that
-/// wires wave-size resolution and groupshared allocation into this pass
-/// does not need a new artifact version), but nothing populates them with
-/// anything but 0 yet: milestone 4 (wave size) and milestone 9
-/// (groupshared, `feme::cpu::computeGroupSharedLayout`) both compute the
-/// values these fields need, but neither is wired into an AOT-facing
-/// `ArtifactInfo` builder yet -- only `feme::cpu::EntryWrapperPass`'s own
-/// JIT-adjacent allocation (see "Groupshared memory" in "Phase 6: Group
-/// Execution and Barriers" in feme/docs/FeMeCPUDesign.md) consumes them
-/// today.
+/// `WaveSize`, `GroupSize`, `GroupSharedSize` and `GroupSharedAlign` were
+/// part of the versioned layout from the start, but left populated with 0
+/// until roadmap milestone R22: `feme::cpu::CompiledStage::getArtifactInfo`
+/// (the JIT-adjacent path) and `feme::Driver`'s CPU-target retargeting path
+/// (the AOT path, ResourceInfo.cpp -> `emitArtifactGlobal`) now both supply
+/// them from the same already-resolved wave size/thread-group size and
+/// `feme::cpu::getGroupSharedRequirements` (feme/include/feme/Transforms/
+/// CPU/GroupSharedInfo.h), so a host sees identical reflection regardless
+/// of which path produced the compiled code.
 struct ArtifactInfo {
   uint32_t WaveSize = 0;
   uint32_t GroupSize[3] = {0, 0, 0};
@@ -169,8 +167,10 @@ struct ArtifactInfo {
 
   /// Builds the execution-shape-agnostic fields of an `ArtifactInfo` from
   /// \p Info, leaving `WaveSize`/`GroupSize`/`GroupSharedSize`/
-  /// `GroupSharedAlign` at their default (0) until a later milestone
-  /// supplies them.
+  /// `GroupSharedAlign` at their default (0) -- a caller that also knows
+  /// the resolved execution shape (`feme::cpu::CompiledStage::
+  /// getArtifactInfo`, `feme::Driver`'s CPU retargeting path) sets those
+  /// itself afterward.
   static ArtifactInfo fromResourceInfo(const ResourceInfo &Info);
 };
 

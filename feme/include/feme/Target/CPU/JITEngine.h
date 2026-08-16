@@ -145,6 +145,10 @@ public:
   /// The shader's declared thread group dimensions (`hlsl.numthreads`).
   std::array<uint32_t, 3> getGroupSize() const { return Stage->getGroupSize(); }
 
+  /// The reflection artifact this engine's compiled stage exposes; see
+  /// `CompiledStage::getArtifactInfo`.
+  ArtifactInfo getArtifactInfo() const { return Stage->getArtifactInfo(); }
+
   /// Runs the whole dispatch to completion: prepares \p Resources once
   /// (see `PreparedDispatch`), then runs every group in \p GroupCount
   /// against `CompiledStage::invokeGroup`, across the engine's own worker
