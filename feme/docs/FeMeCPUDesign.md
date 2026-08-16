@@ -672,19 +672,27 @@ feme/docs/Roadmap.md, closed the first two):
   unsupported (`feme::cpu::LoopShape` requires every header phi's
   recurrence to be a pure, uniform computation).
 - **Only a uniform, unconditionally-executed groupshared access is
-  canonicalized.** Two shapes still scalarize into one `getelementptr`
-  clone per lane before `feme::cpu::rewriteGroupSharedGlobals` ever sees
-  them, and are diagnosed rather than rewired: a divergent
-  (per-lane-varying) index -- the common `groupshared[threadIdInGroup]`
-  pattern -- into a vector-of-pointers access this milestone does not
-  rewrite into `llvm.masked.gather`/`.scatter` over the flat buffer; and a
-  *masked* store -- one only some lanes execute, e.g. `if (tid.x == 0)
-  Shared[0] = ...` -- even at a uniform address, since
+  canonicalized -- closed by roadmap step R23.** Three shapes used to
+  scalarize into one `getelementptr`/broadcast clone per lane before
+  `feme::cpu::rewriteGroupSharedGlobals` ever saw them, diagnosed rather
+  than rewired: a divergent (per-lane-varying) index -- the common
+  `groupshared[threadIdInGroup]` pattern (`feme::cpu::FunctionWidener::
+  widenGroupSharedGEP` now widens it into a real vector-of-pointers
+  `getelementptr` instead, which `widenGroupSharedLoad`/`widenGroupSharedStore`
+  turn into `llvm.masked.gather`/`.scatter` over the flat buffer); an
+  access reached through a `getelementptr` at all, even a uniform one, an
+  `atomicrmw` in particular (`widenGroupSharedAtomicRMW` reuses the
+  uniform `getelementptr` directly per lane instead of broadcasting it);
+  and a *masked* store -- one only some lanes execute, e.g. `if (tid.x ==
+  0) Shared[0] = ...` -- even at a uniform address, since
   `feme::cpu::LinearizePass` lowers that into a `feme.cpu.masked.store`
-  call `rewriteGroupSharedGlobals` does not recognize as a direct
-  load/store/atomicrmw user of the global's `getelementptr` (found writing
-  `reduction.hlsl`, which works around it by publishing every lane's
-  identical, already-group-uniform value unconditionally instead).
+  call that always widens to a real `llvm.masked.scatter`
+  (`rewriteGroupSharedGlobals` now retargets the resulting same-value
+  broadcast too, whether it is `ConstantFolder`'s fold-then-
+  re-materialize of a direct global reference or `getWidened`'s ordinary
+  broadcast of a uniform `getelementptr`). A *nested* `getelementptr` (a
+  groupshared array of arrays/structs, one level deeper than a single
+  index) remains unsupported.
 - **`Device` and `All` memory scope are not distinguished.** Both get a
   `fence` visible across host threads (`SyncScope::System`); the design
   only requires the CPU target's memory model, not DXIL's/SPIR-V's finer
