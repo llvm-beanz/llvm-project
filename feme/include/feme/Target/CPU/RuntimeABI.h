@@ -7,11 +7,16 @@
 //===----------------------------------------------------------------------===//
 //
 // This file defines the C ABI the FeMe CPU target's compiled shaders and
-// their host share. Today that covers both the compute-dispatch ABI
-// (`FemeDispatchArgs`) and roadmap R28's graphics-stage batch ABI
+// their host share. Today that covers the compute-dispatch ABI
+// (`FemeDispatchArgs`), roadmap R28's graphics-stage batch ABI
 // (`FemeShaderResources`, `FemeStageLayout`, `FemeVertexArgs`, and
-// `FemeFragmentArgs`), plus the descriptor/layout/system-value enumerators that
-// give those structs' fields meaning.
+// `FemeFragmentArgs`), and roadmap R29's image/sampler descriptors
+// (`FemeImageDescriptor`, `FemeSamplerDescriptor`), plus the
+// descriptor/layout/system-value enumerators that give those structs' fields
+// meaning. R29 also folded `FemeShaderResources` into `FemeDispatchArgs` and
+// retyped `FemeShaderResources::SamplerHeap`, breaking the ABI on purpose
+// (see "Relationship to the compute ABI" in feme/docs/FeMeGraphicsDesign.md):
+// an artifact compiled before that change no longer matches this header.
 //
 // This header is plain C-compatible data only (no functions, no C++ features
 // besides `enum class`/namespacing): both feme::cpu's own compiler-side code
@@ -133,6 +138,185 @@ struct FemeDescriptor {
   /// append/consume/counter UAV (see `FEME_DESCRIPTOR_HAS_COUNTER`);
   /// null otherwise.
   void *Counter;
+};
+
+/// The dimensionality of a `FemeImageDescriptor`, mirroring the DXIL/SPIR-V
+/// resource-dimension space (see `feme::dxsa::ResourceDimension`) minus the
+/// buffer case, which stays a `FemeDescriptor`.
+enum class ImageDimension : uint32_t {
+  Texture1D = 0,
+  Texture1DArray = 1,
+  Texture2D = 2,
+  Texture2DArray = 3,
+  Texture2DMS = 4,
+  Texture2DMSArray = 5,
+  Texture3D = 6,
+  TextureCube = 7,
+  TextureCubeArray = 8,
+};
+
+/// Bits of `FemeImageDescriptor::Flags`.
+enum FemeImageDescriptorFlagBits : uint32_t {
+  /// Set if the image may be sampled (an SRV-like texture view).
+  FEME_IMAGE_SAMPLED = 1u << 0,
+  /// Set if the image may be read/written by address (a UAV-like storage
+  /// image). `FEME_IMAGE_SAMPLED` and `FEME_IMAGE_STORAGE` are not mutually
+  /// exclusive: a source API may expose the same allocation both ways.
+  FEME_IMAGE_STORAGE = 1u << 1,
+  /// Set if the image is a depth/stencil format used as a depth attachment
+  /// or depth-comparison sampling source.
+  FEME_IMAGE_DEPTH = 1u << 2,
+};
+
+/// One subresource's byte layout within a `FemeImageDescriptor::Data`
+/// allocation: the base offset of mip level 0 of one array layer, plus the
+/// strides needed to address any row, slice (3D depth or array layer), or
+/// sample within it. Entries are dense by mip level, i.e.
+/// `FemeImageDescriptor::MipLayouts[Level]` describes mip `Level` of every
+/// array layer (array layers share one `SlicePitch`-derived stride, so no
+/// separate per-layer entry is needed).
+struct FemeImageSubresourceLayout {
+  /// Byte offset of row 0, slice 0, sample 0 of this mip level within
+  /// `FemeImageDescriptor::Data`.
+  uint64_t Offset;
+  /// Byte distance between two vertically adjacent rows.
+  uint64_t RowPitch;
+  /// Byte distance between two adjacent slices (a 3D image's depth slices,
+  /// or an array image's layers) at this mip level.
+  uint64_t SlicePitch;
+  /// Byte distance between two adjacent samples of one texel, or 0 for a
+  /// single-sample image.
+  uint64_t SampleStride;
+};
+
+/// One image descriptor: the unit the image heap is an array of. Images do
+/// not fit `FemeDescriptor`'s buffer-oriented shape (see "Separate
+/// descriptor kinds" in feme/docs/FeMeGraphicsDesign.md), so they get their
+/// own descriptor type with an explicit per-mip layout table rather than a
+/// single stride. A descriptor the host has not written is zero-filled
+/// (`Data = nullptr`, every count 0), which reads as an empty image with no
+/// valid subresource.
+struct FemeImageDescriptor {
+  /// Base pointer to the image's storage, or null if unwritten.
+  void *Data;
+  /// Total size of the storage `Data` points to, in bytes.
+  uint64_t SizeInBytes;
+  /// The image's dimensionality (`ImageDimension`).
+  uint32_t Dimension;
+  /// The storage format (`ResourceFormat`).
+  uint32_t Format;
+  /// Extent in texels at mip level 0. `Height`/`Depth` are 1 for dimensions
+  /// that do not use them.
+  uint32_t Width;
+  uint32_t Height;
+  uint32_t Depth;
+  /// Number of mip levels, and therefore the number of entries in
+  /// `MipLayouts`.
+  uint32_t MipLevels;
+  /// Number of array layers, or 1 for a non-array image.
+  uint32_t ArrayLayers;
+  /// Number of plane sub-images (e.g. separate luma/chroma planes for a
+  /// planar format), or 1 for a single-plane format.
+  uint32_t PlaneCount;
+  /// Number of samples per texel, or 1 for a non-multisampled image.
+  uint32_t SampleCount;
+  /// `FemeImageDescriptorFlagBits` bitmask.
+  uint32_t Flags;
+  /// Dense by mip level: `MipLayouts[Level]` describes level `Level`.
+  const FemeImageSubresourceLayout *MipLayouts;
+  /// Number of entries in `MipLayouts`; always equal to `MipLevels` for a
+  /// valid descriptor.
+  uint32_t MipLayoutCount;
+  /// ABI headroom for later image-descriptor extensions.
+  uint32_t Reserved[3];
+};
+
+/// The minification/magnification/mip filter a `FemeSamplerDescriptor`
+/// applies, mirroring Vulkan's `VkFilter`/`VkSamplerMipmapMode` and Direct3D's
+/// filter enumerations without depending on either.
+enum class SamplerFilter : uint32_t {
+  Nearest = 0,
+  Linear = 1,
+};
+
+/// The addressing mode a `FemeSamplerDescriptor` applies to one texture
+/// coordinate axis outside `[0, 1)`.
+enum class SamplerAddressMode : uint32_t {
+  Repeat = 0,
+  MirroredRepeat = 1,
+  ClampToEdge = 2,
+  ClampToBorder = 3,
+  MirrorClampToEdge = 4,
+};
+
+/// The comparison function a depth-comparison sampler applies, mirroring
+/// `FemeDescriptor`'s sibling concept for depth-comparison sampling
+/// (`SamplerCompareEnable` in `FemeSamplerDescriptor::Flags` gates whether
+/// this field is meaningful).
+enum class SamplerCompareFunc : uint32_t {
+  Never = 0,
+  Less = 1,
+  Equal = 2,
+  LessEqual = 3,
+  Greater = 4,
+  NotEqual = 5,
+  GreaterEqual = 6,
+  Always = 7,
+};
+
+/// How a multi-sample or anisotropic footprint's texel values are combined
+/// into one filtered result.
+enum class SamplerReductionMode : uint32_t {
+  WeightedAverage = 0,
+  Min = 1,
+  Max = 2,
+};
+
+/// Bits of `FemeSamplerDescriptor::Flags`.
+enum FemeSamplerDescriptorFlagBits : uint32_t {
+  /// Set if `CompareFunc` is used to produce a comparison result rather
+  /// than a filtered value (depth-comparison sampling).
+  FEME_SAMPLER_COMPARE_ENABLE = 1u << 0,
+  /// Set if anisotropic filtering is enabled, in which case `MaxAnisotropy`
+  /// bounds the sample count; clear to use `MinFilter`/`MagFilter` only.
+  FEME_SAMPLER_ANISOTROPY_ENABLE = 1u << 1,
+};
+
+/// One sampler descriptor: the unit the sampler heap is an array of. Unlike
+/// `FemeImageDescriptor`, a sampler owns no host storage -- it is pure
+/// filtering/addressing state, always valid regardless of whether the host
+/// wrote it (the zero value is `Nearest`/`Repeat` filtering with no
+/// comparison or anisotropy, a legal if unhelpful sampler).
+struct FemeSamplerDescriptor {
+  /// Minification filter (`SamplerFilter`).
+  uint32_t MinFilter;
+  /// Magnification filter (`SamplerFilter`).
+  uint32_t MagFilter;
+  /// Mip-level filter (`SamplerFilter`).
+  uint32_t MipFilter;
+  /// Per-axis addressing modes (`SamplerAddressMode`).
+  uint32_t AddressU;
+  uint32_t AddressV;
+  uint32_t AddressW;
+  /// Bias applied to the computed level of detail before clamping.
+  float LodBias;
+  /// Clamp bounds for the computed level of detail.
+  float MinLod;
+  float MaxLod;
+  /// Comparison function (`SamplerCompareFunc`), meaningful only when
+  /// `FEME_SAMPLER_COMPARE_ENABLE` is set.
+  uint32_t CompareFunc;
+  /// Border color for `SamplerAddressMode::ClampToBorder`, RGBA order.
+  float BorderColor[4];
+  /// Maximum anisotropy, meaningful only when
+  /// `FEME_SAMPLER_ANISOTROPY_ENABLE` is set.
+  float MaxAnisotropy;
+  /// How a multi-texel footprint reduces to one value (`SamplerReductionMode`).
+  uint32_t ReductionMode;
+  /// `FemeSamplerDescriptorFlagBits` bitmask.
+  uint32_t Flags;
+  /// ABI headroom for later sampler-descriptor extensions.
+  uint32_t Reserved[3];
 };
 
 /// The version written to `FemeVertexArgs::AbiVersion` and
@@ -263,28 +447,31 @@ struct FemeStageLayout {
 };
 
 /// The resources any compiled stage may read: the descriptor heaps and root
-/// constants today shared by compute, vertex, and fragment stages. This is the
-/// graphics/runtime analogue of the resource-related prefix of
-/// `FemeDispatchArgs`, split out so vertex and fragment batches need not carry
-/// compute-specific dispatch state.
+/// constants shared by compute, vertex, and fragment stages -- and, since
+/// roadmap R29, by `FemeDispatchArgs` too (see "Relationship to the compute
+/// ABI" in feme/docs/FeMeGraphicsDesign.md), so there is exactly one
+/// resource-binding contract for every stage rather than a compute-only
+/// duplicate.
 struct FemeShaderResources {
   /// The resource descriptor heap: `ResourceDescriptorHeap[i]` indexes this
   /// array.
   const FemeDescriptor *ResourceHeap;
   /// Number of descriptors in `ResourceHeap`.
   uint32_t ResourceHeapCount;
-  /// The sampler descriptor heap. It intentionally still reuses
-  /// `FemeDescriptor` until roadmap R29 gives samplers their own descriptor
-  /// type and folds that change through every stage uniformly.
-  const FemeDescriptor *SamplerHeap;
+  /// The image descriptor heap.
+  const FemeImageDescriptor *ImageHeap;
+  /// Number of descriptors in `ImageHeap`.
+  uint32_t ImageHeapCount;
+  /// The sampler descriptor heap.
+  const FemeSamplerDescriptor *SamplerHeap;
   /// Number of descriptors in `SamplerHeap`.
   uint32_t SamplerHeapCount;
   /// The root constant block, or null if the shader declares none.
   const void *RootConstants;
   /// Size of the root constant block in bytes.
   uint32_t RootConstantSize;
-  /// ABI headroom for image/sampler/resource-model extensions.
-  void *Reserved[4];
+  /// ABI headroom for resource-model extensions.
+  void *Reserved[2];
 };
 
 /// One vertex-stage invocation record. The compiled wrapper uses these fields
@@ -418,19 +605,14 @@ struct FemeFragmentArgs {
 /// this struct's shape does not change with the resolved wave size, the
 /// shader's resource usage, or between the JIT and object-file paths.
 struct FemeDispatchArgs {
-  /// The resource descriptor heap: `ResourceDescriptorHeap[i]` indexes this
-  /// array.
-  const FemeDescriptor *ResourceHeap;
-  uint32_t ResourceHeapCount;
-  /// The sampler descriptor heap: `SamplerDescriptorHeap[i]` indexes this
-  /// array. Part of the ABI from the start even though sampling is a
-  /// non-goal for v1, so that adding it later does not change the ABI.
-  const FemeDescriptor *SamplerHeap;
-  uint32_t SamplerHeapCount;
-  /// The root constant block (see "Root constants" in
-  /// feme/docs/FeMeCPUDesign.md), or null if the shader declares none.
-  const void *RootConstants;
-  uint32_t RootConstantSize;
+  /// The resource/image/sampler descriptor heaps and root constant block,
+  /// shared with the vertex and fragment stage argument blocks below (see
+  /// `FemeShaderResources` and "Relationship to the compute ABI" in
+  /// feme/docs/FeMeGraphicsDesign.md). Roadmap R29 folded what used to be
+  /// this struct's own `ResourceHeap`/`SamplerHeap`/`RootConstants` fields
+  /// into this embedded block rather than gaining a second, compute-only
+  /// spelling of the same resource contract.
+  FemeShaderResources Resources;
   /// This dispatch item's 3D group coordinate.
   uint32_t GroupID[3];
   /// The full dispatch's 3D group count.
