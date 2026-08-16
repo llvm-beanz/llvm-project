@@ -297,6 +297,24 @@ bool isElementwiseVectorizableIntrinsic(Intrinsic::ID ID) {
   }
 }
 
+/// Whether \p Ty is a pointer into groupshared (`addrspace(3)`) memory --
+/// the address space `feme::cpu::GroupSharedAddressSpace` names (see
+/// GroupShared.h). A divergent access through one of these needs its own
+/// widening rule (see `FunctionWidener::widenGroupSharedGEP`/`Load`/
+/// `Store`/`AtomicRMW` below) rather than the generic elementwise/
+/// scalarization rules: those build a broadcast `insertelement`/
+/// `shufflevector` for any uniform *instruction* operand (a `Constant`
+/// like a direct global reference folds away instead, `ConstantFolder`
+/// having already done the equivalent job) that
+/// `feme::cpu::rewriteGroupSharedGlobals` cannot see through when
+/// canonicalizing the address space away afterwards -- the "divergent
+/// index"/"access through a getelementptr" shapes roadmap milestone 9
+/// narrowed (feme/docs/Roadmap.md's §1.6, closed by roadmap step R23).
+bool isGroupSharedPointerType(Type *Ty) {
+  auto *PtrTy = dyn_cast<PointerType>(Ty);
+  return PtrTy && PtrTy->getAddressSpace() == GroupSharedAddressSpace;
+}
+
 /// Returns the identity element `Id` for \p Op such that `Op(old, Id) ==
 /// old` for every `old` -- i.e. the value a masked-off lane's `atomicrmw`
 /// should contribute so it becomes a no-op instead of a real, unmasked
@@ -423,6 +441,10 @@ private:
                         IRBuilder<> &Builder);
   void widenMaskedAtomicRMW(CallInst &CI, const MatchedMaskedAtomicRMW &Matched,
                             IRBuilder<> &Builder);
+  void widenGroupSharedGEP(GetElementPtrInst &GEP, IRBuilder<> &Builder);
+  void widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder);
+  void widenGroupSharedStore(StoreInst &SI, IRBuilder<> &Builder);
+  void widenGroupSharedAtomicRMW(AtomicRMWInst &RMW, IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenExtractElement(ExtractElementInst &EE, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
@@ -1005,7 +1027,25 @@ void FunctionWidener::widenMaskedAtomicRMW(
   Value *WideMask = getWidened(Matched.Mask, Builder);
   Value *EffectiveMask =
       Builder.CreateAnd(Env.EntryMask, WideMask, "atomicrmw.mask");
-  Value *WidePtr = getWidened(Matched.Ptr, Builder);
+
+  // A uniform groupshared address (the common case: an array element at a
+  // compile-time-constant index) must reuse `Matched.Ptr` directly instead
+  // of `getWidened`'s usual broadcast: unlike a direct, unindexed global
+  // reference (a `Constant`, which `ConstantFolder` broadcasts-then-folds
+  // right back to itself), a `getelementptr` off one is an `Instruction`,
+  // so the broadcast survives as a real `insertelement`/`shufflevector`
+  // `feme::cpu::rewriteGroupSharedGlobals` cannot see through when
+  // canonicalizing the address space away afterwards -- the "access
+  // through a getelementptr" shape roadmap milestone 9 narrowed
+  // (feme/docs/Roadmap.md's §1.6, closed by roadmap step R23). A
+  // genuinely divergent groupshared index still needs one real address
+  // extracted per lane, from the real vector `getelementptr`
+  // `widenGroupSharedGEP` builds for it.
+  bool PtrUniform = !isa<Instruction>(Matched.Ptr) ||
+                    !UI.isDivergentAtDef(cast<Instruction>(Matched.Ptr));
+  bool ReuseScalarPtr =
+      PtrUniform && isGroupSharedPointerType(Matched.Ptr->getType());
+  Value *WidePtr = ReuseScalarPtr ? nullptr : getWidened(Matched.Ptr, Builder);
   Value *WideVal = getWidened(Matched.Val, Builder);
 
   Type *ValTy = Matched.Val->getType();
@@ -1024,8 +1064,10 @@ void FunctionWidener::widenMaskedAtomicRMW(
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *LaneMask = Builder.CreateExtractElement(
         EffectiveMask, Builder.getInt32(Lane), "lane.mask");
-    Value *LanePtr = Builder.CreateExtractElement(
-        WidePtr, Builder.getInt32(Lane), "lane.ptr");
+    Value *LanePtr = ReuseScalarPtr
+                         ? Matched.Ptr
+                         : Builder.CreateExtractElement(
+                               WidePtr, Builder.getInt32(Lane), "lane.ptr");
     Value *LaneVal = Builder.CreateExtractElement(
         WideVal, Builder.getInt32(Lane), "lane.val");
     Value *IdentityVal = Identity
@@ -1043,6 +1085,113 @@ void FunctionWidener::widenMaskedAtomicRMW(
 
   Widened[&CI] = Result;
   ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenGroupSharedGEP(GetElementPtrInst &GEP,
+                                          IRBuilder<> &Builder) {
+  // A genuinely divergent groupshared index -- the common
+  // `groupshared[threadIdInGroup]` pattern -- widens into a real
+  // vector-of-pointers `getelementptr` instead of
+  // `widenScalarizedFallback`'s per-lane clone-and-reassemble: LLVM allows
+  // a scalar base with one or more vector index operands (implicitly
+  // broadcasting the base to match), so every index that is itself
+  // divergent is widened, and every uniform one (most commonly a leading
+  // constant `0`) is left scalar. This gives
+  // `feme::cpu::rewriteGroupSharedGlobals` one real divergent access to
+  // retarget later, rather than `W` separate uniform accesses hidden
+  // behind an `insertelement` chain it cannot see through -- the
+  // "divergent index" shape roadmap milestone 9 narrowed
+  // (feme/docs/Roadmap.md's §1.6, closed by roadmap step R23).
+  SmallVector<Value *, 4> Indices;
+  for (Value *Idx : GEP.indices())
+    Indices.push_back(Widened.count(Idx) ? Widened[Idx] : Idx);
+
+  Value *NewGEP =
+      Builder.CreateGEP(GEP.getSourceElementType(), GEP.getPointerOperand(),
+                        Indices, GEP.getName() + ".wide", GEP.isInBounds());
+  Widened[&GEP] = NewGEP;
+  ToErase.push_back(&GEP);
+}
+
+void FunctionWidener::widenGroupSharedLoad(LoadInst &LI, IRBuilder<> &Builder) {
+  // A raw `load` from a divergent groupshared address -- one
+  // `feme::cpu::LinearizePass` never masked into a `feme.cpu.masked.load`
+  // call because it is not conditionally executed, only lane-varying in
+  // its address -- still needs a real gather, exactly like an already-
+  // masked one does (see `widenMaskedLoad` above); the only difference is
+  // there is no extra governing mask to fold in besides the wave's own
+  // entry mask. `LI`'s pointer operand is always already in `Widened`: a
+  // `load`'s divergence tracks its pointer operand's exactly, and that
+  // operand, being divergent, was necessarily widened earlier in reverse
+  // post-order by `widenGroupSharedGEP` above.
+  Value *WidePtr = Widened.lookup(LI.getPointerOperand());
+  Value *Passthru =
+      Constant::getNullValue(FixedVectorType::get(LI.getType(), WaveSize));
+
+  Value *Result = Builder.CreateMaskedGather(
+      FixedVectorType::get(LI.getType(), WaveSize), WidePtr, LI.getAlign(),
+      Env.EntryMask, Passthru, LI.getName());
+  Widened[&LI] = Result;
+  ToErase.push_back(&LI);
+}
+
+void FunctionWidener::widenGroupSharedStore(StoreInst &SI,
+                                            IRBuilder<> &Builder) {
+  // See `widenGroupSharedLoad` above: a real scatter is correct for a raw,
+  // divergent-address groupshared `store` for the same reason a real
+  // gather is for a `load`.
+  Value *WidePtr = Widened.lookup(SI.getPointerOperand());
+  Value *WideVal = getWidened(SI.getValueOperand(), Builder);
+
+  Builder.CreateMaskedScatter(WideVal, WidePtr, SI.getAlign(), Env.EntryMask);
+  ToErase.push_back(&SI);
+}
+
+void FunctionWidener::widenGroupSharedAtomicRMW(AtomicRMWInst &RMW,
+                                                IRBuilder<> &Builder) {
+  // An `atomicrmw` always executes once per lane regardless of its own
+  // operands' uniformity (see the "always scalarize an atomicrmw" comment
+  // in `widenInstruction` below) -- but cloning it through the generic
+  // `widenScalarizedFallback` reaches its pointer operand through
+  // `getWidened`'s usual broadcast-then-extract, which (unlike a direct,
+  // unindexed global reference, a `Constant` `ConstantFolder` broadcasts
+  // and folds straight back to itself) survives as a real
+  // `insertelement`/`shufflevector` when the pointer is a `getelementptr`
+  // instruction, even a uniform one -- exactly the "access through a
+  // getelementptr" shape roadmap milestone 9 narrowed
+  // (feme/docs/Roadmap.md's §1.6, closed by roadmap step R23; see
+  // `feme/test/Transforms/CPU/simdize-groupshared-atomic-scalar.ll`'s
+  // comment for the narrower, direct-global-only case this generalizes).
+  // Reusing the pointer operand directly, once per lane, when it is
+  // uniform sidesteps that broadcast entirely: every lane's clone then
+  // shares the identical, untouched `getelementptr`/global operand, the
+  // same way multiple ordinary `load`/`store` users of one already can. A
+  // genuinely divergent index (widened into a real vector `getelementptr`
+  // by `widenGroupSharedGEP` above) still needs one real address
+  // extracted per lane.
+  Value *Ptr = RMW.getPointerOperand();
+  bool PtrDivergent = Widened.count(Ptr) != 0;
+  Value *WidePtr = PtrDivergent ? Widened[Ptr] : nullptr;
+  Value *WideVal = getWidened(RMW.getValOperand(), Builder);
+
+  Value *Result =
+      PoisonValue::get(FixedVectorType::get(RMW.getType(), WaveSize));
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *LanePtr = PtrDivergent
+                         ? Builder.CreateExtractElement(
+                               WidePtr, Builder.getInt32(Lane), "lane.ptr")
+                         : Ptr;
+    Value *LaneVal = Builder.CreateExtractElement(
+        WideVal, Builder.getInt32(Lane), "lane.val");
+    Instruction *Clone = RMW.clone();
+    Clone->setOperand(0, LanePtr);
+    Clone->setOperand(1, LaneVal);
+    Builder.Insert(Clone, RMW.getName() + ".lane");
+    Result = Builder.CreateInsertElement(Result, Clone, Builder.getInt32(Lane));
+  }
+
+  Widened[&RMW] = Result;
+  ToErase.push_back(&RMW);
 }
 
 void FunctionWidener::widenInsertElement(InsertElementInst &IE,
@@ -1205,10 +1354,10 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
   }
 
-  // An `atomicrmw` always needs `widenElementwise`'s scalarization, even
-  // when its own operands classify as uniform: unlike a pure computation or
-  // an idempotent uniform `store` (every lane writing the identical value
-  // to the identical address, so one execution and `W` give the same final
+  // An `atomicrmw` always needs scalarization, even when its own operands
+  // classify as uniform: unlike a pure computation or an idempotent
+  // uniform `store` (every lane writing the identical value to the
+  // identical address, so one execution and `W` give the same final
   // memory content), an atomic read-modify-write's effect accumulates --
   // running it once instead of once per active lane silently undercounts
   // (see the P0 "masked" fix in `widenMaskedAtomicRMW`/
@@ -1216,12 +1365,19 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   // histogram.hlsl`, the roadmap step R2 regression test this fixes: a
   // groupshared counter every lane increments unconditionally is uniform
   // by every operand's own value, but must still execute once per lane).
+  // A groupshared address gets its own scalarization
+  // (`widenGroupSharedAtomicRMW`), which reuses a uniform address directly
+  // per lane instead of `widenElementwise`'s generic broadcast-then-
+  // extract (roadmap step R23; see that function's comment).
   // `AtomicCmpXchgInst` is not included here: its `{T, i1}` aggregate
   // result already has no widening support regardless of uniformity (see
   // `checkVectorDecompositionSupported`), so forcing it through the
   // generic vector-result fallback below would fail differently instead.
-  if (isa<AtomicRMWInst>(I)) {
-    widenElementwise(I, Builder);
+  if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
+    if (isGroupSharedPointerType(RMW->getPointerOperand()->getType()))
+      widenGroupSharedAtomicRMW(*RMW, Builder);
+    else
+      widenElementwise(I, Builder);
     return true;
   }
 
@@ -1230,6 +1386,35 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
 
   if (isa<CondBrInst>(I) || isa<UncondBrInst>(I) || isa<ReturnInst>(I))
     return true; // Handled/verified by checkSupportedControlFlow already.
+
+  // A divergent groupshared `getelementptr`/`load`/`store` gets its own
+  // widening rules (`widenGroupSharedGEP`/`Load`/`Store`) rather than the
+  // generic elementwise/scalarization ones below, so
+  // `feme::cpu::rewriteGroupSharedGlobals` sees a real vector access (or a
+  // real gather/scatter) to retarget afterwards instead of a broadcast it
+  // cannot see through (roadmap step R23).
+  if (auto *GEP = dyn_cast<GetElementPtrInst>(&I)) {
+    if (isGroupSharedPointerType(GEP->getPointerOperandType())) {
+      widenGroupSharedGEP(*GEP, Builder);
+      return true;
+    }
+  }
+
+  if (auto *LI = dyn_cast<LoadInst>(&I)) {
+    if (LI->isSimple() &&
+        isGroupSharedPointerType(LI->getPointerOperandType())) {
+      widenGroupSharedLoad(*LI, Builder);
+      return true;
+    }
+  }
+
+  if (auto *SI = dyn_cast<StoreInst>(&I)) {
+    if (SI->isSimple() &&
+        isGroupSharedPointerType(SI->getPointerOperandType())) {
+      widenGroupSharedStore(*SI, Builder);
+      return true;
+    }
+  }
 
   if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
     widenInsertElement(*IE, Builder);

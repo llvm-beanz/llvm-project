@@ -81,12 +81,18 @@ GroupSharedLayout computeGroupSharedLayout(const llvm::Module &M);
 /// analysis conservatively treats any value it never saw as divergent
 /// (see `feme::cpu::computeWaveUniformity`), which would otherwise make the
 /// walk try to widen \p rewriteGroupSharedGlobals's own replacement
-/// instructions. Returns false (emitting a diagnostic, leaving \p F
-/// unmodified) if a use this pass does not yet support is found: a
-/// divergent (vector-of-pointers) access, or a groupshared pointer feeding
-/// anything other than a first-level `getelementptr`/direct `load`/`store`
-/// (roadmap milestone 9's narrowing; see the Status section's Deviation
-/// note in feme/docs/FeMeCPUDesign.md).
+/// instructions. Supports a genuinely divergent (vector-of-pointers)
+/// access, an access reached through a first-level `getelementptr`
+/// (`load`/`store`/`atomicrmw`, or a masked `llvm.masked.gather`/
+/// `.scatter`), and one reached through the uniform-address broadcast a
+/// masked gather/scatter's pointer argument still needs even when the
+/// address never varies by lane (roadmap step R23, closing roadmap
+/// milestone 9's narrowing; see the Status section's Deviation note in
+/// feme/docs/FeMeCPUDesign.md). Returns false (emitting a diagnostic,
+/// leaving \p F unmodified) if a use this pass does not yet support is
+/// found: a *nested* `getelementptr` (one level deeper than a single
+/// index -- a groupshared array of arrays/structs), or a groupshared
+/// pointer feeding anything else entirely.
 bool rewriteGroupSharedGlobals(llvm::Function &F, llvm::Value *GroupSharedBase,
                                const GroupSharedLayout &Layout);
 
