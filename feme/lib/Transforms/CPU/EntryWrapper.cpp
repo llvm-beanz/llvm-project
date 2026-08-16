@@ -215,18 +215,18 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
   Type *I32x3 = ArrayType::get(I32Ty, 3);
 
   WrapperEnv Env;
-  Env.ResourceHeap = loadArgsField(Entry, ArgsTy, Args,
-                                   DispatchArgsField::ResourceHeap, PtrTy);
-  Env.ResourceHeapCount = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::ResourceHeapCount, I32Ty);
-  Env.SamplerHeap =
-      loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::SamplerHeap, PtrTy);
-  Env.SamplerHeapCount = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::SamplerHeapCount, I32Ty);
-  Env.RootConstants = loadArgsField(Entry, ArgsTy, Args,
-                                    DispatchArgsField::RootConstants, PtrTy);
-  Env.RootConstantSize = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::RootConstantSize, I32Ty);
+  Env.ResourceHeap = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldResourceHeap, PtrTy);
+  Env.ResourceHeapCount = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldResourceHeapCount, I32Ty);
+  Env.SamplerHeap = loadResourcesField(Entry, ArgsTy, Args,
+                                       ShaderResourcesFieldSamplerHeap, PtrTy);
+  Env.SamplerHeapCount = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldSamplerHeapCount, I32Ty);
+  Env.RootConstants = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldRootConstants, PtrTy);
+  Env.RootConstantSize = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldRootConstantSize, I32Ty);
   Value *GroupIDVec =
       loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::GroupID, I32x3);
   Env.GroupIDX = Entry.CreateExtractValue(GroupIDVec, 0);

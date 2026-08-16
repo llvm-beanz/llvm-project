@@ -59,18 +59,18 @@ Function *buildWrapper(Function &Body) {
   BasicBlock *ExitBB = BasicBlock::Create(Ctx, "invocation.loop.exit", Wrapper);
 
   IRBuilder<> Entry(EntryBB);
-  Value *ResourceHeapVal = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::ResourceHeap, PtrTy);
-  Value *ResourceHeapCountVal = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::ResourceHeapCount, I32Ty);
-  Value *SamplerHeapVal =
-      loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::SamplerHeap, PtrTy);
-  Value *SamplerHeapCountVal = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::SamplerHeapCount, I32Ty);
-  Value *RootConstantsVal = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::RootConstants, PtrTy);
-  Value *RootConstantSizeVal = loadArgsField(
-      Entry, ArgsTy, Args, DispatchArgsField::RootConstantSize, I32Ty);
+  Value *ResourceHeapVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldResourceHeap, PtrTy);
+  Value *ResourceHeapCountVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldResourceHeapCount, I32Ty);
+  Value *SamplerHeapVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldSamplerHeap, PtrTy);
+  Value *SamplerHeapCountVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldSamplerHeapCount, I32Ty);
+  Value *RootConstantsVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldRootConstants, PtrTy);
+  Value *RootConstantSizeVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldRootConstantSize, I32Ty);
   Value *GroupIDVec =
       loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::GroupID, I32x3);
 
