@@ -23,8 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R25 from the roadmap document?
+Can you implement R26 from the roadmap document?
 
-> Root-constant breadth: any register-bound constant buffer rather than only
-> `(b0, space0)`, array and non-constant-row-index shapes, and the full
-> advertised push-constant range (see: §1.8.1)
+> A SPIR-V descriptor-set binding-to-heap normalization matching DXIL's
+> `BoundResourceNormalizationPass`, with arrayed bindings in contiguous heap
+> ranges and dynamic buffer offsets (see: §1.2, §1.9)
