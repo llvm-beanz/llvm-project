@@ -14395,3 +14395,147 @@ binary alone went from 112 to 116 passing tests. Ran `clang-format -i` on
 every modified/added C++ file before the final commit and rebuilt/reran
 the full suite afterward to confirm formatting alone hadn't shifted any
 behavior.
+
+# Roadmap step R24: barrier inside a surviving branch, and a phi live across a barrier
+
+## Task
+
+Implement roadmap step R24 (feme/docs/Roadmap.md): "Barrier inside a
+surviving *branch*, and a `phi` live across a group-sync barrier" (§1.6,
+§1.8.1). Both were milestone 9's remaining two narrowings, called out in
+FeMeCPUDesign.md's Deviation note and in EntryWrapper.cpp's own file
+comment, right after roadmap step R5 closed the other two ("no SSA value
+may be live across a barrier" and "barrier inside a uniform *loop*").
+
+## Investigation
+
+Read feme/.instructions.md (coding standards specific to feme/), the
+Roadmap's §1.6/§1.8.1 rows and R23/R24/R25 table entries, and
+EntryWrapper.cpp's file comment plus `spillValuesLiveAcrossBarriers`
+(the "phi" diagnostic) and `isLinearChain`/`matchLoopShape` (the "barrier
+inside a branch" diagnostic). Found both diagnosed sites precisely:
+
+- `isLinearChain` (region splitting's straight-line path) requires every
+  block's terminator be an unconditional branch or `ret` -- any surviving
+  `CondBrInst` fails it, and `matchLoopShape` also declines any function
+  it doesn't recognize as its own specific header-tested loop shape, so a
+  branch that is neither reaches `splitAtGroupSyncBarriers`'s "non-linear
+  control flow" diagnostic.
+- `spillValuesLiveAcrossBarriers` explicitly refused (`any_of(SpilledDefs,
+  isa<PHINode>)`) to spill a `phi`, emitting its own diagnostic instead.
+
+Existing lit test `entry-wrapper-barrier-non-linear-unsupported.ll` and
+unit test `EntryWrapperTest.NonLinearControlFlowWithBarrierIsDiagnosed`
+covered the branch diagnostic; both needed rewriting once the shape
+became supported.
+
+## Design decisions
+
+**Phi spilling** turned out to be almost free: the only reason it was
+diagnosed was that the existing spill-store insertion point
+(`Def->getNextNode()`) is illegal for a `phi` whenever another phi
+follows it in the same block (LLVM requires every phi in a block to
+precede every non-phi instruction). Fixed by inserting after the block's
+`getFirstNonPHIOrDbg()` instead of right after the phi itself when
+`Def` is a `PHINode`, and removed the diagnostic. Landed as its own
+commit before touching the branch case at all, since it's independently
+testable and unrelated in mechanism.
+
+**Barrier inside a branch** is architecturally the same idea as R5's
+loop case (`matchLoopShape`/`buildWrapperForLoop`), so I mirrored that
+shape closely rather than inventing a new pattern:
+
+- `matchBranchShape` recognizes a prefix chain to a header ending in a
+  `CondBrInst`, whose condition is verified "pure" (side-effect-free,
+  referencing only constants or specific uniform parameters) by a
+  generalized `isPureClosedChain` (added an optional
+  `function_ref<bool(Argument&)>` predicate parameter, since a branch's
+  condition -- unlike a loop header's, which only ever touches its own
+  induction phis and constants -- realistically references group id or
+  root-constant parameters). Each arm is walked (`walkBranchArm`) as a
+  linear chain until a block with 2+ predecessors (the reconvergence
+  point) is found; both arms must reach the *same* merge block, which
+  must have no phi of its own.
+- `buildWrapperForBranch` clones the header condition directly into the
+  wrapper as a genuine scalar `br` (computed once for the whole group,
+  not once per wave -- exactly like the loop case clones its header/latch
+  as a scalar loop), then barrier-splits each arm independently
+  (`splitArmAtBarriers`, a close copy of `splitLoopBodyAtBarriers`) and
+  routes the wrapper's own real control flow to whichever arm's wave
+  loops actually need to run.
+- **Deliberately narrowed two things, diagnosed rather than silently
+  miscompiled:** a merge-block phi (a value the two arms compute
+  differently, needed afterward) would mean threading a value across the
+  wrapper's own scalar branch choice -- not just across a barrier within
+  one region -- which this milestone's spilling has no story for, so
+  `matchBranchShape` simply declines that shape (falls through to the
+  existing "non-linear" diagnostic). More subtly, I initially let
+  `splitArmAtBarriers` call `spillValuesLiveAcrossBarriers` unconditionally
+  for a value live across a barrier *within* one arm, but realized this
+  would silently pass a null `barrier_spill` pointer at the call site: the
+  wrapper only ever allocates *one* spill buffer, of *one* struct type,
+  but two independently-split arms would each want their own type under
+  the same parameter name -- `buildWaveLoop`'s simple argument-name
+  dispatch has no way to route "this one's for the true arm" vs. "this
+  one's for the false arm". Rather than build out per-arm spill buffer
+  plumbing (a real architecture change, not a small increment), I added
+  an explicit check: if spilling ever occurs within an arm, diagnose
+  instead of proceeding. This is the same "silently wrong is worse than
+  diagnosed" philosophy the existing code already follows (see R2's
+  masked-atomicrmw fix in the Roadmap).
+
+## Implementation
+
+`feme/lib/Transforms/CPU/EntryWrapper.cpp`:
+- `spillValuesLiveAcrossBarriers`: removed the phi diagnostic; spill
+  stores for a phi def now go after the block's last phi.
+- `isPureClosedChain`: added an optional `AllowArgument` predicate.
+- New: `isUniformWaveBodyArgument` (which of `WaveBodyEnv`'s parameters
+  are the same for the whole group, not per-wave), `BranchShape`,
+  `walkBranchArm`, `matchBranchShape`, `splitArmAtBarriers`,
+  `buildWrapperForBranch`. Wired into `buildWrapper`'s dispatch between
+  `matchLoopShape` and the straight-line fallback.
+- Updated the file's top comment (R24 section) and every doc comment
+  whose narrowing description was now stale.
+
+## Testing
+
+Added `entry-wrapper-barrier-live-phi-spill.ll` (phi spilling) as its own
+commit with `EntryWrapperTest.SpillsPhiLiveAcrossGroupSyncBarrier`.
+
+For the branch case: renamed the now-passing
+`entry-wrapper-barrier-non-linear-unsupported.ll` to
+`entry-wrapper-barrier-in-branch-merge-phi-unsupported.ll` and rewrote it
+to cover the still-diagnosed merge-phi shape instead (same IR skeleton,
+plus a merge phi). Added `entry-wrapper-barrier-in-branch.ll` (the
+newly-supported if/else-with-barrier-in-one-arm shape) and
+`entry-wrapper-barrier-in-branch-arm-spill-unsupported.ll` (the
+still-diagnosed arm-local-spill shape). Renamed
+`EntryWrapperTest.NonLinearControlFlowWithBarrierIsDiagnosed` to
+`SplitsBarrierInsideUniformBranch` (now asserting a real wrapper with a
+conditional branch, split true-arm regions, and a fence) and added
+`BranchMergePhiIsDiagnosed`.
+
+For the new lit tests, I ran `feme-opt` by hand first to see the actual
+generated IR (block naming, argument order) before writing `CHECK` lines,
+rather than guessing -- this caught a real ordering mistake: `BasicBlock`s
+created by `buildWrapperForBranch` end up in the order
+`branch.cond`/`branch.true`/`branch.false`/`branch.merge` (all four
+created before any wave loop), *then* every wave-loop block for the true
+arm, *then* the false arm's -- not interleaved per-arm the way a naive
+top-to-bottom reading of the source might suggest. Fixed the `CHECK`
+ordering to match.
+
+Built with assertions on and ccache throughout (pre-existing config, both
+`build/` and `build-ubsan/` exist; used `build/`). Ran `ninja check-feme`
+(builds every `FEME_TEST_DEPENDS` target, including the fuzzers and
+`feme-run`, first) after each of the two commits: 1048/1050 before this
+work (2 unsupported, platform-gated, unchanged baseline), 1051/1053 after
+both commits landed (three net new lit tests: the phi-spill one, the new
+in-branch one, and the new arm-spill-unsupported one; the merge-phi
+lit test is a rename, not a net-new file). Also ran every one of the 17
+`FeMe*Tests` unit test binaries individually (not just the CPU one) to
+confirm nothing outside `Transforms/CPU` regressed; all passed. Ran
+`clang-format -i` on both modified C++ files before the final commit and
+rebuilt/reran the full suite afterward to confirm formatting alone hadn't
+shifted any behavior.
