@@ -65,6 +65,13 @@ struct ResourceCallEnv {
   llvm::Value *SamplerHeapCount = nullptr;
   llvm::Value *RootConstants = nullptr;
   llvm::Value *RootConstantSize = nullptr;
+  /// The image heap/count (roadmap R30): appended alongside the other
+  /// fields whenever `feme::cpu::ResourceLoweringPass` grows a function's
+  /// signature at all (see that pass's `addResourceEnvParams`), even for a
+  /// function with no image access of its own -- the same "always appended"
+  /// convention `SamplerHeap`/`RootConstants` already follow.
+  llvm::Value *ImageHeap = nullptr;
+  llvm::Value *ImageHeapCount = nullptr;
 };
 
 /// The result of successfully matching a call against the canonical

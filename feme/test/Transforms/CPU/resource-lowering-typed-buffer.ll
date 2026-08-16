@@ -4,9 +4,11 @@
 ; typed-buffer access (see "Resource Model" -> "Lowering" in
 ; feme/docs/FeMeCPUDesign.md): `llvm.dx.resource.handlefromheap` plus its
 ; load/store-typedbuffer accesses become `feme.cpu.resource.*` calls, and
-; the rewritten function gains the six trailing resource/root-constant ABI
-; parameters every rewritten function gets ("The heap operands come from
-; new function parameters").
+; the rewritten function gains the eight trailing resource/root-constant/
+; image ABI parameters every rewritten function gets ("The heap operands
+; come from new function parameters"; the trailing `image_heap`/
+; `image_heap_count` pair is roadmap R30's addition, unused by this
+; buffer-only function but always appended -- see `addResourceEnvParams`).
 
 target datalayout = "e-m:e-p:32:32-i1:32-i8:8-i16:16-i32:32-i64:64-f16:16-f32:32-f64:64-n8:16:32:64"
 target triple = "dxil-pc-shadermodel6.6-compute"
@@ -14,7 +16,8 @@ target triple = "dxil-pc-shadermodel6.6-compute"
 ; CHECK-LABEL: define void @main(
 ; CHECK-SAME: i32 %idx, ptr %resource_heap, i32 %resource_heap_count,
 ; CHECK-SAME: ptr %sampler_heap, i32 %sampler_heap_count,
-; CHECK-SAME: ptr %root_constants, i32 %root_constant_size)
+; CHECK-SAME: ptr %root_constants, i32 %root_constant_size,
+; CHECK-SAME: ptr %image_heap, i32 %image_heap_count)
 define void @main(i32 %idx) {
   ; CHECK: [[ELEMIDX:%.*]] = zext i32 %idx to i64
   ; CHECK: [[LOADED:%.*]] = call <4 x float> @feme.cpu.resource.load.typed.v4f32(

@@ -71,6 +71,10 @@ Function *buildWrapper(Function &Body) {
       Entry, ArgsTy, Args, ShaderResourcesFieldRootConstants, PtrTy);
   Value *RootConstantSizeVal = loadResourcesField(
       Entry, ArgsTy, Args, ShaderResourcesFieldRootConstantSize, I32Ty);
+  Value *ImageHeapVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldImageHeap, PtrTy);
+  Value *ImageHeapCountVal = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldImageHeapCount, I32Ty);
   Value *GroupIDVec =
       loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::GroupID, I32x3);
 
@@ -109,12 +113,16 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(RootConstantsVal);
     else if (Arg.getName() == "root_constant_size")
       CallArgs.push_back(RootConstantSizeVal);
+    else if (Arg.getName() == "image_heap")
+      CallArgs.push_back(ImageHeapVal);
+    else if (Arg.getName() == "image_heap_count")
+      CallArgs.push_back(ImageHeapCountVal);
     else
       llvm_unreachable(
           "unexpected parameter for ReferenceEntryWrapperPass: --reference "
           "runs before widening, so a shader body only ever takes the "
-          "resource/root-constant parameters feme::cpu::ResourceLoweringPass "
-          "appends");
+          "resource/root-constant/image parameters "
+          "feme::cpu::ResourceLoweringPass appends");
   }
   BodyIR.CreateCall(&Body, CallArgs);
   Value *FlatNext = BodyIR.CreateAdd(Flat, BodyIR.getInt32(1), "flat.next");

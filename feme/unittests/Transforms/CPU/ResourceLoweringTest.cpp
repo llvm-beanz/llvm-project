@@ -74,8 +74,10 @@ TEST(ResourceLoweringTest, CanonicalizesTypedBufferLoad) {
 
   Function *F = M->getFunction("main");
   ASSERT_TRUE(F);
-  // The original parameter plus the six resource/root-constant ABI params.
-  EXPECT_EQ(F->arg_size(), 7u);
+  // The original parameter plus the eight resource/root-constant/image ABI
+  // params (roadmap R30 added the trailing image_heap/image_heap_count
+  // pair to the original six).
+  EXPECT_EQ(F->arg_size(), 9u);
 
   bool FoundCanonicalCall = false;
   for (const Instruction &I : instructions(F)) {

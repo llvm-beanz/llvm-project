@@ -6,6 +6,7 @@ add_mlir_library(FeMeTransformsCPU
   EntryWrapper.cpp
   FragmentWrapper.cpp
   GroupShared.cpp
+  ImageCalls.cpp
   Linearize.cpp
   MaskIntrinsics.cpp
   Prepare.cpp

@@ -185,6 +185,11 @@ struct WrapperEnv {
   Value *SamplerHeapCount;
   Value *RootConstants;
   Value *RootConstantSize;
+  /// The image heap/count (roadmap R30); see `ResourceCallEnv::ImageHeap`'s
+  /// comment in ResourceCalls.h for why these are always loaded here even
+  /// for a shader with no image access of its own.
+  Value *ImageHeap;
+  Value *ImageHeapCount;
   Value *GroupIDX;
   Value *GroupIDY;
   Value *GroupIDZ;
@@ -227,6 +232,10 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
       Entry, ArgsTy, Args, ShaderResourcesFieldRootConstants, PtrTy);
   Env.RootConstantSize = loadResourcesField(
       Entry, ArgsTy, Args, ShaderResourcesFieldRootConstantSize, I32Ty);
+  Env.ImageHeap = loadResourcesField(Entry, ArgsTy, Args,
+                                     ShaderResourcesFieldImageHeap, PtrTy);
+  Env.ImageHeapCount = loadResourcesField(
+      Entry, ArgsTy, Args, ShaderResourcesFieldImageHeapCount, I32Ty);
   Value *GroupIDVec =
       loadArgsField(Entry, ArgsTy, Args, DispatchArgsField::GroupID, I32x3);
   Env.GroupIDX = Entry.CreateExtractValue(GroupIDVec, 0);
@@ -304,6 +313,10 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.RootConstants);
     else if (Arg.getName() == "root_constant_size")
       CallArgs.push_back(Env.RootConstantSize);
+    else if (Arg.getName() == "image_heap")
+      CallArgs.push_back(Env.ImageHeap);
+    else if (Arg.getName() == "image_heap_count")
+      CallArgs.push_back(Env.ImageHeapCount);
     else if (Arg.getName() == "wave_group_id_x")
       CallArgs.push_back(Env.GroupIDX);
     else if (Arg.getName() == "wave_group_id_y")
@@ -846,6 +859,7 @@ bool isUniformWaveBodyArgument(Argument &Arg) {
   return Name == "resource_heap" || Name == "resource_heap_count" ||
          Name == "sampler_heap" || Name == "sampler_heap_count" ||
          Name == "root_constants" || Name == "root_constant_size" ||
+         Name == "image_heap" || Name == "image_heap_count" ||
          Name == "wave_group_id_x" || Name == "wave_group_id_y" ||
          Name == "wave_group_id_z";
 }
@@ -1419,6 +1433,10 @@ Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
       EnvVal = WEnv.RootConstants;
     else if (Name == "root_constant_size")
       EnvVal = WEnv.RootConstantSize;
+    else if (Name == "image_heap")
+      EnvVal = WEnv.ImageHeap;
+    else if (Name == "image_heap_count")
+      EnvVal = WEnv.ImageHeapCount;
     else if (Name == "wave_group_id_x")
       EnvVal = WEnv.GroupIDX;
     else if (Name == "wave_group_id_y")

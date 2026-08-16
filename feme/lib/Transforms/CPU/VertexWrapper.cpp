@@ -390,6 +390,8 @@ struct WrapperEnv {
   Value *SamplerHeapCount = nullptr;
   Value *RootConstants = nullptr;
   Value *RootConstantSize = nullptr;
+  Value *ImageHeap = nullptr;
+  Value *ImageHeapCount = nullptr;
   Value *InputLayout = nullptr;
   Value *Inputs = nullptr;
   Value *OutputLayout = nullptr;
@@ -437,6 +439,11 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
   Env.RootConstantSize =
       loadStructField(Builder, ResourcesTy, Resources,
                       ShaderResourcesFieldRootConstantSize, I32Ty);
+  Env.ImageHeap = loadStructField(Builder, ResourcesTy, Resources,
+                                  ShaderResourcesFieldImageHeap, PtrTy);
+  Env.ImageHeapCount =
+      loadStructField(Builder, ResourcesTy, Resources,
+                      ShaderResourcesFieldImageHeapCount, I32Ty);
   return Env;
 }
 
@@ -502,6 +509,10 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.RootConstants);
     else if (Arg.getName() == "root_constant_size")
       CallArgs.push_back(Env.RootConstantSize);
+    else if (Arg.getName() == "image_heap")
+      CallArgs.push_back(Env.ImageHeap);
+    else if (Arg.getName() == "image_heap_count")
+      CallArgs.push_back(Env.ImageHeapCount);
     else if (Arg.getName() == "wave_group_id_x" ||
              Arg.getName() == "wave_group_id_y" ||
              Arg.getName() == "wave_group_id_z")
