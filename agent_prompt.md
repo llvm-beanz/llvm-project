@@ -23,7 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R24 from the roadmap document?
+Can you implement R25 from the roadmap document?
 
-> Barrier inside a surviving *branch*, and a `phi` live across a group-sync
-> barrier (see: §1.6, §1.8.1)
+> Root-constant breadth: any register-bound constant buffer rather than only
+> `(b0, space0)`, array and non-constant-row-index shapes, and the full
+> advertised push-constant range (see: §1.8.1)
