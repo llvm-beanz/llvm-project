@@ -11,6 +11,7 @@ add_feme_unittest(FeMeCoreTests
   ModuleTest.cpp
   ShaderStageTest.cpp
   SignatureTest.cpp
+  StageOpsTest.cpp
   )
 target_link_libraries(FeMeCoreTests
   PRIVATE

@@ -4,6 +4,7 @@ add_mlir_library(FeMeCore
   Module.cpp
   ShaderStage.cpp
   Signature.cpp
+  StageOps.cpp
 
   LINK_COMPONENTS
   Core
