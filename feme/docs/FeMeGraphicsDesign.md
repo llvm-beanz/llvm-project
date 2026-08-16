@@ -1086,6 +1086,29 @@ serialized AOT artifact and the runtime loading it disagree loudly rather than
 silently; once FeMe ships, they become the mechanism for real compatibility
 rather than a formality.
 
+Status (roadmap R29): implemented as described above.
+`feme/include/feme/Target/CPU/RuntimeABI.h` now defines
+`FemeImageDescriptor` (base allocation/size, `ImageDimension`, extent, mip
+and array counts, plane/sample counts, format, a dense-by-mip-level
+`FemeImageSubresourceLayout` table for row/slice/sample pitches, and
+sampled/storage/depth flags) and `FemeSamplerDescriptor` (min/mag/mip
+filter, per-axis addressing modes, LOD bias/clamp, comparison function,
+border color, anisotropy, and reduction mode). `FemeShaderResources` gained
+`ImageHeap`/`ImageHeapCount` and `SamplerHeap` is now
+`const FemeSamplerDescriptor *`. `FemeDispatchArgs` no longer declares its
+own `ResourceHeap`/`SamplerHeap`/`RootConstants` fields; it embeds a
+`FemeShaderResources Resources` member instead, so
+`feme::cpu::EntryWrapperPass`/`ReferenceEntryWrapperPass` (via the new
+`loadResourcesField` helper in `lib/Transforms/CPU/DispatchArgsLayout.h`) and
+`feme::cpu::VertexWrapperPass`/`FragmentWrapperPass` all read the identical
+resource block. `feme::cpu::PreparedDispatch`/`PreparedVertexBatch`/
+`PreparedFragmentBatch` (`feme/include/feme/Target/CPU/ResourceHeap.h`) grew
+matching `ImageHeap`/retyped `SamplerHeap` fields on their `*Resources`
+input structs. Canonical `feme.image.*`/`feme.sampler.*` operations, the
+format table, and sampling/addressing math remain R30's job: this milestone
+only settles the descriptor shapes and the ABI fold-in, not how a compiled
+shader uses them.
+
 ### Stage layout
 
 `FemeStageLayout` is an immutable, bounds-checked table generated from stage
@@ -1289,6 +1312,15 @@ FemeSamplerDescriptor
   border color
   anisotropy and reduction mode
 ```
+
+Status (roadmap R29): implemented in
+`feme/include/feme/Target/CPU/RuntimeABI.h` field-for-field as sketched
+above, with one addition the sketch elided: `FemeImageDescriptor`'s "row,
+slice, mip, and sample layout" is a dense-by-mip-level
+`FemeImageSubresourceLayout` table (`Offset`/`RowPitch`/`SlicePitch`/
+`SampleStride` per level), since a single stride cannot describe every mip
+level of a mipped image. `ImageDimension` mirrors
+`feme::dxsa::ResourceDimension` minus its buffer case.
 
 API runtimes resolve views into these descriptors at command execution, just
 as they materialize buffer descriptors. A descriptor references validated host

@@ -1973,12 +1973,19 @@ and a single argument:
 
 ```c
 typedef struct {
-  const FemeDescriptor *ResourceHeap;  // the resource descriptor heap
+  const FemeDescriptor *ResourceHeap;         // the resource descriptor heap
   uint32_t ResourceHeapCount;
-  const FemeDescriptor *SamplerHeap;   // the sampler descriptor heap
+  const FemeImageDescriptor *ImageHeap;       // the image descriptor heap
+  uint32_t ImageHeapCount;
+  const FemeSamplerDescriptor *SamplerHeap;   // the sampler descriptor heap
   uint32_t SamplerHeapCount;
-  const void *RootConstants;           // root constant block, or null
+  const void *RootConstants;                 // root constant block, or null
   uint32_t RootConstantSize;
+  void    *Reserved[2];                       // ABI headroom
+} FemeShaderResources;
+
+typedef struct {
+  FemeShaderResources Resources;       // shared with graphics stage ABIs
   uint32_t GroupID[3];                 // this dispatch item
   uint32_t GroupCount[3];              // full dispatch size
   void    *GroupShared;                // group-shared storage, or null
@@ -1995,6 +2002,14 @@ The heaps in this low-level ABI are always physical, already-normalized
 heaps; binding identities never cross the entry-point boundary. `W`, the
 thread group dimensions and the heap-prefix maps are baked into or reported
 alongside the compiled code.
+
+Status (roadmap R29): `FemeShaderResources` -- previously a graphics-only
+struct -- is now the resource block embedded in `FemeDispatchArgs` itself
+(see FeMeGraphicsDesign.md's "Relationship to the compute ABI"), gaining an
+image heap and a `FemeSamplerDescriptor`-typed sampler heap in the same
+change. This is a deliberate ABI break: a `FemeDispatchArgs`-shaped argument
+block compiled before this milestone no longer matches this layout, and an
+artifact built against the old layout must be recompiled.
 
 ## JIT Flow
 
