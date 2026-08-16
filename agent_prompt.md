@@ -23,11 +23,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R30 from the roadmap document?
+Can you implement R31 from the roadmap document?
 
-> `feme.image.*`/`feme.sampler.*` canonicalization from DXIL (including §1.3's
-> texture/sampler handle-kind gap) and SPIR-V (including §1.2's sampling
-> variants), the `runtime/CPU` sampling helpers (1D/2D addressing, mip layout,
-> point/linear filtering, explicit and implicit LOD, addressing modes,
-> comparison sampling), the initial format table with sRGB, and active-lane SIMD
-> lowering. **Completes G2**, unblocking V5 and W3 (see: §1.8.4, §1.2, §1.3)
+> `FeMeGraphics` skeleton: normalized pipeline and prepared-draw descriptions,
+> the `feme-render` tool (already specified in Design.md's "Testing Tools" and
+> `docs/CommandGuide/feme-render.md`, along with its scene and image fixture
+> formats -- only the implementation is left), and the heap YAML image resource
+> class (see: §2.6.1)
