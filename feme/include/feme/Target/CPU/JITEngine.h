@@ -8,28 +8,33 @@
 //===----------------------------------------------------------------------===//
 //
 // This file declares feme::cpu::JITEngine, the "JIT Flow" section of
-// feme/docs/FeMeCPUDesign.md: an ORC-based JIT that owns compiling a raised
-// module through the whole CPU pipeline (Phases 1/resource-lowering/3-6),
-// linking `libFeMeRuntimeCPU`, and running dispatches against the result --
-// not merely a "compile and hand back a function pointer" API. See that
-// section for the full rationale (dispatch ownership, thread pool,
-// ObjectCache, ...).
+// feme/docs/FeMeCPUDesign.md: it owns running dispatches -- scheduling every
+// group of a dispatch across `JITOptions::NumThreads` worker threads, filling
+// in the dispatch arguments, and joining -- against a shader compiled
+// through the whole CPU pipeline (Phases 1/resource-lowering/3-6) and linked
+// against `libFeMeRuntimeCPU`.
 //
-// Roadmap milestone 4 implements the core of this: `create` runs the CPU
-// pipeline (barrier-free, uniform-control-flow shaders only, matching
-// SIMDizePass/EntryWrapperPass's own current scope) and links/optimizes the
-// result; `dispatch` runs every group of a dispatch. It deviates from the
-// full design in one respect the Status section's Deviation note calls
-// out: `dispatch` runs groups on the calling thread, sequentially, rather
-// than across a thread pool -- `JITOptions::NumThreads` is accepted but
-// unused. Groupshared memory is also not yet allocated (milestone 9), so a
-// shader declaring any is rejected.
+// Roadmap milestone R21 factors the compiled-code ownership this type used
+// to hold entirely on its own out into `feme::cpu::CompiledStage`
+// (CompiledStage.h): `JITEngine` is now a convenience wrapper around it,
+// adding only dispatch scheduling -- see that header's own file comment for
+// the rationale (this is the same factoring FeMeVulkanDesign.md's "CPU
+// Runtime API Changes" and FeMeGraphicsDesign.md's "Compiled stage API"
+// describe). `JITOptions::NumThreads` is real as of this milestone: see
+// `dispatch`'s own comment for its threading policy.
+//
+// Roadmap milestone 4 implements the core of the compile step now owned by
+// `CompiledStage::create` (barrier-free, uniform-control-flow shaders only,
+// matching SIMDizePass/EntryWrapperPass's own current scope). Groupshared
+// memory is also not yet allocated (milestone 9), so a shader declaring any
+// is rejected.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TARGET_CPU_JITENGINE_H
 #define FEME_TARGET_CPU_JITENGINE_H
 
+#include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
 #include "feme/Target/CPU/RuntimeABI.h"
@@ -45,9 +50,6 @@
 
 namespace llvm {
 class Module;
-namespace orc {
-class LLJIT;
-} // namespace orc
 } // namespace llvm
 
 namespace feme {
@@ -64,8 +66,9 @@ namespace detail {
 /// symbol's LLVM IR name with a leading `'\1'` (SOH) byte that tells the
 /// AsmPrinter to skip the platform's usual global-symbol mangling; since
 /// that byte is part of the `GlobalValue`'s actual name, it also defeats
-/// `JITEngine::create`'s exact-name matching when it links the runtime
-/// module in, so this strips it from every global in \p M first. Exposed
+/// `CompiledStage::create`'s exact-name matching when it links the runtime
+/// module in, so this strips it from every global in \p M first. Defined in
+/// CompiledStage.cpp (that is where compilation now happens); exposed
 /// (only) for `JITEngineTest`'s regression coverage of this Mach-O-specific
 /// behavior on hosts that are not themselves Mach-O.
 void stripAsmLabelManglingEscape(llvm::Module &M);
@@ -77,8 +80,8 @@ void stripAsmLabelManglingEscape(llvm::Module &M);
 /// not be textually identical to \p M's (already resolved) triple even when
 /// both name the same target; leaving them mismatched makes
 /// `Linker::linkInModule` emit a spurious "Linking two modules of different
-/// target triples" warning. Exposed (only) for `JITEngineTest`'s regression
-/// coverage of this behavior.
+/// target triples" warning. Defined in CompiledStage.cpp; exposed (only)
+/// for `JITEngineTest`'s regression coverage of this behavior.
 void alignRuntimeModuleTriple(llvm::Module &RuntimeMod, const llvm::Module &M);
 } // namespace detail
 
@@ -97,9 +100,13 @@ struct JITOptions {
   /// comment's Deviation note); not yet consulted by anything this
   /// milestone implements.
   bool EnableRobustness = true;
-  /// Accepted for forward compatibility (see the file comment's Deviation
-  /// note): `dispatch` always runs groups sequentially on the calling
-  /// thread for now, regardless of this value.
+  /// How many worker threads `dispatch` runs a dispatch's groups across: 0
+  /// requests hardware concurrency (`llvm::hardware_concurrency`'s own
+  /// convention), 1 runs every group sequentially on the calling thread
+  /// with no pool overhead, and any other value requests that many worker
+  /// threads. Groups are independent by definition (see "Dispatch
+  /// parallelism" in feme/docs/FeMeCPUDesign.md's "JIT Flow" section), so
+  /// this needs no synchronization beyond `dispatch`'s own join.
   unsigned NumThreads = 0;
   /// Runs the shader one invocation at a time through the unwidened module
   /// instead of Phases 3/4 (`feme::cpu::LinearizePass`/
@@ -111,9 +118,11 @@ struct JITOptions {
   bool Reference = false;
 };
 
-/// Owns an ORC `LLJIT` instance, the compiled shader in it, and the
-/// execution of dispatches against it. See the file comment above for
-/// current scope.
+/// A convenience wrapper around `CompiledStage` (CompiledStage.h) that adds
+/// dispatch-wide group scheduling: compiling a shader and running whole
+/// dispatches against it in one type, for `feme-run` and every existing
+/// caller that has no reason to iterate groups itself. See the file
+/// comment above for the roadmap context.
 class JITEngine {
 public:
   static llvm::Expected<std::unique_ptr<JITEngine>>
@@ -127,34 +136,26 @@ public:
 
   /// What the shader needs from the host: root constant size, sampler heap
   /// use, and the statically-known heap indices it accesses.
-  const ResourceInfo &getResourceInfo() const { return Info; }
+  const ResourceInfo &getResourceInfo() const { return Stage->getResourceInfo(); }
 
   /// The resolved wave size this shader was compiled at.
-  unsigned getWaveSize() const { return WaveSize; }
+  unsigned getWaveSize() const { return Stage->getWaveSize(); }
 
   /// The shader's declared thread group dimensions (`hlsl.numthreads`).
-  std::array<uint32_t, 3> getGroupSize() const { return GroupSize; }
+  std::array<uint32_t, 3> getGroupSize() const { return Stage->getGroupSize(); }
 
-  /// Runs the whole dispatch to completion: for every group in \p
-  /// GroupCount, fills in a `FemeDispatchArgs` and calls the compiled entry
-  /// point. See the file comment above for this milestone's sequencing
-  /// deviation from the full design.
+  /// Runs the whole dispatch to completion: prepares \p Resources once
+  /// (see `PreparedDispatch`), then runs every group in \p GroupCount
+  /// against `CompiledStage::invokeGroup`, across `JITOptions::NumThreads`
+  /// worker threads (see that field's own comment), and joins.
   llvm::Error dispatch(const DispatchResources &Resources,
                        std::array<uint32_t, 3> GroupCount) const;
 
 private:
-  JITEngine(std::unique_ptr<llvm::orc::LLJIT> JIT, void *EntryFn,
-            ResourceInfo Info, unsigned WaveSize,
-            std::array<uint32_t, 3> GroupSize);
+  JITEngine(std::unique_ptr<CompiledStage> Stage, unsigned NumThreads);
 
-  std::unique_ptr<llvm::orc::LLJIT> JIT;
-  /// `void (*)(const FemeDispatchArgs *)`: the compiled
-  /// `feme_cpu_entry_<name>` symbol's address, resolved once at `create`
-  /// time (the `LLJIT` instance below keeps it valid).
-  void *EntryFn;
-  ResourceInfo Info;
-  unsigned WaveSize;
-  std::array<uint32_t, 3> GroupSize;
+  std::unique_ptr<CompiledStage> Stage;
+  unsigned NumThreads;
 };
 
 } // namespace feme::cpu

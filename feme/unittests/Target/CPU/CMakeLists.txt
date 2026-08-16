@@ -11,6 +11,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeTargetCPUTests
   AOTDispatchTest.cpp
+  CompiledStageTest.cpp
   JITEngineTest.cpp
   ResourceHeapTest.cpp
   ResourceInfoTest.cpp

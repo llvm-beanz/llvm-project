@@ -100,6 +100,52 @@ TEST(JITEngineTest, RunsThreadIdShaderAgainstARawBuffer) {
   EXPECT_EQ(Buffer, (std::vector<int32_t>{0, 1, 2, 3}));
 }
 
+// Roadmap milestone R21: `JITOptions::NumThreads` is real now, not merely
+// accepted -- this dispatches many groups (16 groups of 4 lanes each, 64
+// total dispatch threads) across a real worker pool
+// (`NumThreads = 4`, deliberately more than one so this would deadlock or
+// corrupt `Buffer` if `dispatch` still ran everything on the calling thread
+// unsynchronized) and checks every thread id landed in its own, correct
+// slot -- exactly what `RunsThreadIdShaderAgainstARawBuffer`'s single-group,
+// implicitly-sequential (`NumThreads == 0`'s previous no-op meaning) case
+// already checks, but now exercised at a scale that only a real thread pool
+// gets right.
+TEST(JITEngineTest, DispatchRunsGroupsAcrossARealWorkerPool) {
+  Context Ctx;
+  SMDiagnostic Err;
+  auto LLVMMod = parseAssemblyString(ShaderIR, Err, Ctx.getLLVMContext());
+  ASSERT_TRUE(LLVMMod) << "parse error: " << Err.getMessage().str();
+
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+
+  JITOptions Opts;
+  Opts.WaveSize = 4;
+  Opts.NumThreads = 4;
+  Expected<std::unique_ptr<JITEngine>> Engine =
+      JITEngine::create(Ctx, std::move(Mod), Opts);
+  ASSERT_THAT_EXPECTED(Engine, Succeeded());
+
+  constexpr uint32_t NumGroups = 16;
+  constexpr uint32_t NumThreads = NumGroups * 4;
+  std::vector<int32_t> Buffer(NumThreads, -1);
+  FemeDescriptor Desc{};
+  Desc.Data = Buffer.data();
+  Desc.SizeInBytes = Buffer.size() * sizeof(int32_t);
+  Desc.Kind = static_cast<uint32_t>(ResourceKind::Raw);
+  Desc.Flags = FEME_DESCRIPTOR_UAV;
+
+  DispatchResources Resources;
+  Resources.ResourceHeap = ArrayRef<FemeDescriptor>(&Desc, 1);
+
+  ASSERT_THAT_ERROR((*Engine)->dispatch(Resources, {NumGroups, 1, 1}),
+                    Succeeded());
+
+  std::vector<int32_t> Expected(NumThreads);
+  for (uint32_t I = 0; I != NumThreads; ++I)
+    Expected[I] = static_cast<int32_t>(I);
+  EXPECT_EQ(Buffer, Expected);
+}
+
 TEST(JITEngineTest, ReferenceModeRunsTheSameShaderUnwidened) {
   Context Ctx;
   SMDiagnostic Err;
