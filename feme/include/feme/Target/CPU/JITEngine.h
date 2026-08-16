@@ -147,7 +147,7 @@ public:
 
   /// The reflection artifact this engine's compiled stage exposes; see
   /// `CompiledStage::getArtifactInfo`.
-  ArtifactInfo getArtifactInfo() const { return Stage->getArtifactInfo(); }
+  StageArtifactInfo getArtifactInfo() const { return Stage->getArtifactInfo(); }
 
   /// Runs the whole dispatch to completion: prepares \p Resources once
   /// (see `PreparedDispatch`), then runs every group in \p GroupCount

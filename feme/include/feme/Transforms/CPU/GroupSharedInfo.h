@@ -15,7 +15,7 @@
 // EntryWrapperPass` themselves (see that header's own file comment).
 //
 // This is what lets a host-facing reflection structure --
-// `feme::cpu::ArtifactInfo`'s `GroupSharedSize`/`GroupSharedAlign`
+// `feme::cpu::StageArtifactInfo`'s `GroupSharedSize`/`GroupSharedAlign`
 // (feme/include/feme/Target/CPU/ResourceInfo.h) -- learn how large a
 // groupshared allocation to prepare before dispatching a compiled entry
 // point, per roadmap milestone R22.

@@ -8,10 +8,10 @@
 //
 // This file declares `feme::cpu::ResourceInfo`, the reader for the heap-usage
 // information `feme::cpu::ResourceLoweringPass` records (see "Heap usage
-// discovery" in feme/docs/FeMeCPUDesign.md), and `feme::cpu::ArtifactInfo`,
-// the versioned, object-file-friendly form of the same information plus the
-// execution-shape fields ("Kernel ABI") an AOT host needs before it can
-// dispatch a compiled entry point at all.
+// discovery" in feme/docs/FeMeCPUDesign.md), and `feme::cpu::
+// StageArtifactInfo`, the versioned, object-file-friendly form of the same
+// information plus the execution-shape fields ("Kernel ABI") an AOT host
+// needs before it can dispatch a compiled entry point at all.
 //
 // Two representations exist because they serve different consumers at
 // different times, per "Heap usage discovery":
@@ -20,7 +20,7 @@
 //    metadata node directly, which only exists while the module is still
 //    LLVM IR -- this is what the JIT path uses, since it never loses the
 //    module.
-//  - `ArtifactInfo` is what survives into an object file: a versioned,
+//  - `StageArtifactInfo` is what survives into an object file: a versioned,
 //    read-only byte layout, exposed under the module as a data symbol named
 //    `feme_cpu_info_<entry>` (`getArtifactSymbolName`/`emitArtifactGlobal`).
 //    An AOT host that only has the compiled object reads this back with
@@ -30,13 +30,26 @@
 //    object-file codegen.
 //
 // Both report the same fields (`ResourceInfo`'s are a strict subset of
-// `ArtifactInfo`'s), so a host is never told less because it chose the
+// `StageArtifactInfo`'s), so a host is never told less because it chose the
 // object-file path over the JIT one.
+//
+// `StageArtifactInfo` (roadmap R22) generalizes what was, before this
+// milestone, a compute-only `ArtifactInfo`: it is now tagged with the
+// `feme::ShaderStage` that produced it and carries the entry point's
+// serialized `feme::EntrySignature` (feme/include/feme/Core/Signature.h)
+// plus a side-effect summary, so the same structure and serialization can
+// describe a vertex/fragment stage artifact once roadmap R27/R28 make
+// `CompiledStage` itself stage-aware -- neither of those populate the new
+// fields yet (every `CompiledStage` today is implicitly
+// `feme::ShaderStage::Compute`, see CompiledStage.h), but the layout exists
+// from the start so that milestone does not need another ABI break.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_TARGET_CPU_RESOURCEINFO_H
 #define FEME_TARGET_CPU_RESOURCEINFO_H
+
+#include "feme/Core/ShaderStage.h"
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
@@ -60,10 +73,20 @@ namespace feme::cpu {
 /// attribute is not exactly three comma-separated integers. Shared by
 /// `feme::cpu::CompiledStage::create` (resolving the shape it compiles
 /// against) and `feme::Driver`'s AOT retargeting path (resolving the same
-/// shape for `ArtifactInfo` reflection, see "Heap usage discovery" in
+/// shape for `StageArtifactInfo` reflection, see "Heap usage discovery" in
 /// feme/docs/FeMeCPUDesign.md), so both stay in agreement about what a
 /// missing/malformed attribute means.
 std::array<uint32_t, 3> getDeclaredGroupSize(const llvm::Function &F);
+
+/// The side-effect-summary bits of `StageArtifactInfo::Flags` that
+/// \p F's use of the `feme.stage.*` family (feme/include/feme/Core/
+/// StageOps.h) implies: whether it calls `feme.stage.discard`/`.demote`/
+/// `.is_helper` anywhere in its body. Every compute entry point today
+/// reports none of these (only R20's vertex/fragment canonicalization ever
+/// introduces such a call), but the scan itself is stage-agnostic, so this
+/// is ready for roadmap R27/R28 to reuse once `CompiledStage` compiles
+/// those stages too.
+uint32_t computeSideEffectFlags(const llvm::Function &F);
 
 /// One traditionally-bound resource range's assignment in the reserved heap
 /// prefix `feme::cpu::BoundResourceNormalizationPass` builds (see
@@ -121,20 +144,37 @@ struct ResourceInfo {
                                                 llvm::StringRef EntryName);
 };
 
-/// The current version of the `ArtifactInfo` byte layout. Bumped whenever
-/// that layout changes incompatibly; `parseArtifact` rejects any other
-/// value rather than guessing at a different field order.
+/// The current version of the `StageArtifactInfo` byte layout. Bumped
+/// whenever that layout changes incompatibly; `parseArtifact` rejects any
+/// other value rather than guessing at a different field order.
 ///
 /// Version 2 (roadmap milestone 11) added `ReservedResourceHeapSize` and the
 /// `BoundRanges` counted tail (see "Bound-resource normalization" in
 /// feme/docs/FeMeCPUDesign.md): an AOT host materializing a physical
 /// resource heap for a bound-resource shader needs both to place its bound
 /// descriptors and its logical dynamic heap correctly.
-constexpr uint32_t ArtifactAbiVersion = 2;
+///
+/// Version 3 (roadmap R22) generalized the compute-only `ArtifactInfo` into
+/// `StageArtifactInfo`, adding `Stage` and `Signature`: a stage-tagged
+/// artifact and the entry point's serialized `feme::EntrySignature` (empty
+/// for a stage/milestone that does not populate one yet), plus new
+/// `Flags` bits summarizing the entry's use of `feme.stage.discard`/
+/// `.demote`/`.is_helper`.
+constexpr uint32_t ArtifactAbiVersion = 3;
 
-/// Bits of `ArtifactInfo::Flags`, mirrored in the serialized byte layout.
+/// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
+/// layout.
 enum ArtifactFlagBits : uint32_t {
   FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP = 1u << 0,
+  /// Set if the entry point calls `feme.stage.discard` anywhere in its
+  /// body (see `computeSideEffectFlags`).
+  FEME_CPU_ARTIFACT_USES_DISCARD = 1u << 1,
+  /// Set if the entry point calls `feme.stage.demote` anywhere in its
+  /// body.
+  FEME_CPU_ARTIFACT_USES_DEMOTE = 1u << 2,
+  /// Set if the entry point calls `feme.stage.is_helper` anywhere in its
+  /// body.
+  FEME_CPU_ARTIFACT_USES_HELPER = 1u << 3,
 };
 
 /// The versioned, object-file-friendly artifact `emitArtifactGlobal` writes
@@ -153,7 +193,13 @@ enum ArtifactFlagBits : uint32_t {
 /// `feme::cpu::getGroupSharedRequirements` (feme/include/feme/Transforms/
 /// CPU/GroupSharedInfo.h), so a host sees identical reflection regardless
 /// of which path produced the compiled code.
-struct ArtifactInfo {
+///
+/// `Stage` and `Signature` generalize this compute-only structure into a
+/// stage-tagged one (roadmap R22); see the file comment above for why
+/// neither is populated with anything but `feme::ShaderStage::Compute`/
+/// empty yet.
+struct StageArtifactInfo {
+  ShaderStage Stage = ShaderStage::Compute;
   uint32_t WaveSize = 0;
   uint32_t GroupSize[3] = {0, 0, 0};
   uint32_t GroupSharedSize = 0;
@@ -164,14 +210,18 @@ struct ArtifactInfo {
   /// See `ResourceInfo::ReservedResourceHeapSize`/`BoundRanges`.
   uint32_t ReservedResourceHeapSize = 0;
   std::vector<BoundResourceRange> BoundRanges;
+  /// The entry point's serialized `feme::EntrySignature`
+  /// (`feme::serializeSignature`), or empty if none is attached -- true for
+  /// every compute entry point today (see the file comment above).
+  std::vector<uint8_t> Signature;
 
-  /// Builds the execution-shape-agnostic fields of an `ArtifactInfo` from
-  /// \p Info, leaving `WaveSize`/`GroupSize`/`GroupSharedSize`/
-  /// `GroupSharedAlign` at their default (0) -- a caller that also knows
-  /// the resolved execution shape (`feme::cpu::CompiledStage::
-  /// getArtifactInfo`, `feme::Driver`'s CPU retargeting path) sets those
-  /// itself afterward.
-  static ArtifactInfo fromResourceInfo(const ResourceInfo &Info);
+  /// Builds the execution-shape-agnostic fields of a `StageArtifactInfo`
+  /// from \p Info, leaving `Stage` at its default (`Compute`), `Signature`
+  /// empty, and `WaveSize`/`GroupSize`/`GroupSharedSize`/`GroupSharedAlign`
+  /// at their default (0) -- a caller that also knows the resolved
+  /// execution shape (`feme::cpu::CompiledStage::getArtifactInfo`,
+  /// `feme::Driver`'s CPU retargeting path) sets those itself afterward.
+  static StageArtifactInfo fromResourceInfo(const ResourceInfo &Info);
 };
 
 /// The AOT artifact symbol name for an entry point named \p EntryName (see
@@ -180,14 +230,17 @@ std::string getArtifactSymbolName(llvm::StringRef EntryName);
 
 /// Serializes \p Info to the byte layout `parseArtifact` reads back: a
 /// little-endian `ArtifactAbiVersion`, then \p Info's fields in declaration
-/// order, then \p Info.StaticHeapIndices's count followed by the indices
-/// themselves as a counted tail (see "Heap usage discovery").
-std::vector<uint8_t> serializeArtifact(const ArtifactInfo &Info);
+/// order, then \p Info.StaticHeapIndices's/`BoundRanges`'s/`Signature`'s
+/// counts followed by each tail's own contents (see "Heap usage
+/// discovery").
+std::vector<uint8_t> serializeArtifact(const StageArtifactInfo &Info);
 
-/// Parses \p Bytes as a serialized `ArtifactInfo`, or an `Error` if it is
-/// too short, has a heap-index count inconsistent with its length, or
-/// declares an ABI version other than `ArtifactAbiVersion`.
-llvm::Expected<ArtifactInfo> parseArtifact(llvm::ArrayRef<uint8_t> Bytes);
+/// Parses \p Bytes as a serialized `StageArtifactInfo`, or an `Error` if it
+/// is too short, has a heap-index/bound-range/signature-length count
+/// inconsistent with its length, declares an ABI version other than
+/// `ArtifactAbiVersion`, or names a `feme::ShaderStage` this build does not
+/// know.
+llvm::Expected<StageArtifactInfo> parseArtifact(llvm::ArrayRef<uint8_t> Bytes);
 
 /// Emits \p Info as a read-only data global named
 /// `getArtifactSymbolName(EntryName)` in \p M, containing
@@ -196,14 +249,14 @@ llvm::Expected<ArtifactInfo> parseArtifact(llvm::ArrayRef<uint8_t> Bytes);
 /// the file comment above.
 llvm::GlobalVariable *emitArtifactGlobal(llvm::Module &M,
                                          llvm::StringRef EntryName,
-                                         const ArtifactInfo &Info);
+                                         const StageArtifactInfo &Info);
 
 /// Reads back the artifact global `emitArtifactGlobal` wrote for
 /// \p EntryName in \p M, or `std::nullopt` if no such global exists. This is
 /// the JIT-adjacent, still-in-IR analogue of an AOT host reading the symbol
 /// out of an object file -- see the file comment above for why both exist.
-std::optional<ArtifactInfo> readArtifactGlobal(const llvm::Module &M,
-                                               llvm::StringRef EntryName);
+std::optional<StageArtifactInfo> readArtifactGlobal(const llvm::Module &M,
+                                                    llvm::StringRef EntryName);
 
 } // namespace feme::cpu
 

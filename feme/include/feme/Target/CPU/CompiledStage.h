@@ -103,7 +103,7 @@ public:
   /// structure `feme::Driver`'s AOT retargeting path serializes with
   /// `feme::cpu::emitArtifactGlobal`, so a JIT and an AOT host see
   /// identical reflection for the same shader.
-  ArtifactInfo getArtifactInfo() const;
+  StageArtifactInfo getArtifactInfo() const;
 
   /// Invokes the compiled entry point once for \p GroupID against
   /// \p Prepared's already-materialized dispatch state (see
@@ -122,9 +122,10 @@ public:
 
 private:
   CompiledStage(std::unique_ptr<llvm::orc::LLJIT> JIT, void *EntryFn,
-               ResourceInfo Info, unsigned WaveSize,
-               std::array<uint32_t, 3> GroupSize,
-               GroupSharedRequirements GroupSharedReqs);
+                ResourceInfo Info, unsigned WaveSize,
+                std::array<uint32_t, 3> GroupSize,
+                GroupSharedRequirements GroupSharedReqs,
+                uint32_t SideEffectFlags);
 
   std::unique_ptr<llvm::orc::LLJIT> JIT;
   /// `void (*)(const FemeDispatchArgs *)`: the compiled
@@ -138,6 +139,10 @@ private:
   /// feme::cpu::getGroupSharedRequirements), computed from \p M before
   /// `create`'s pipeline erases the `addrspace(3)` globals it describes.
   GroupSharedRequirements GroupSharedReqs;
+  /// This entry point's side-effect summary bits (see
+  /// `feme::cpu::computeSideEffectFlags`), computed from the original
+  /// entry `Function` before `create`'s pipeline runs.
+  uint32_t SideEffectFlags;
 };
 
 } // namespace feme::cpu

@@ -487,6 +487,18 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     feme::cpu::GroupSharedRequirements GroupSharedReqs =
         feme::cpu::getGroupSharedRequirements(M);
 
+    // Likewise computed against the original entry point, before
+    // `runPipeline` rewrites or replaces it (see `computeSideEffectFlags`'s
+    // own comment). `runPipeline` itself requires exactly one entry point
+    // when given no explicit name (see its own `selectEntryPoint`), so the
+    // first one found here is the one it will compile.
+    uint32_t SideEffectFlags = 0;
+    for (const llvm::Function &F : M)
+      if (feme::isShaderEntryPoint(F)) {
+        SideEffectFlags = feme::cpu::computeSideEffectFlags(F);
+        break;
+      }
+
     llvm::Expected<feme::cpu::PipelineResult> Result =
         feme::cpu::runPipeline(M, /*EntryPoint=*/"", ResolvedWaveSize);
     if (!Result)
@@ -506,8 +518,8 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
       ResInfo.emplace();
       ResInfo->EntryName = Result->EntryName;
     }
-    feme::cpu::ArtifactInfo Artifact =
-        feme::cpu::ArtifactInfo::fromResourceInfo(*ResInfo);
+    feme::cpu::StageArtifactInfo Artifact =
+        feme::cpu::StageArtifactInfo::fromResourceInfo(*ResInfo);
     Artifact.WaveSize = ResolvedWaveSize;
     std::array<uint32_t, 3> GroupSize =
         feme::cpu::getDeclaredGroupSize(*WaveBody);
@@ -517,6 +529,7 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     Artifact.GroupSharedSize = static_cast<uint32_t>(GroupSharedReqs.Size);
     Artifact.GroupSharedAlign =
         static_cast<uint32_t>(GroupSharedReqs.Alignment);
+    Artifact.Flags |= SideEffectFlags;
     feme::cpu::emitArtifactGlobal(M, Result->EntryName, Artifact);
   }
 

@@ -8,11 +8,15 @@
 
 #include "feme/Target/CPU/ResourceInfo.h"
 
+#include "feme/Core/StageOps.h"
+
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
+#include "llvm/IR/Instructions.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Endian.h"
@@ -77,6 +81,34 @@ std::array<uint32_t, 3> feme::cpu::getDeclaredGroupSize(const Function &F) {
   return Result;
 }
 
+uint32_t feme::cpu::computeSideEffectFlags(const Function &F) {
+  uint32_t Flags = 0;
+  for (const BasicBlock &BB : F) {
+    for (const Instruction &I : BB) {
+      const auto *CI = dyn_cast<CallInst>(&I);
+      if (!CI)
+        continue;
+      StageOpKind Kind;
+      if (!isStageOpCall(*CI, &Kind))
+        continue;
+      switch (Kind) {
+      case StageOpKind::Discard:
+        Flags |= FEME_CPU_ARTIFACT_USES_DISCARD;
+        break;
+      case StageOpKind::Demote:
+        Flags |= FEME_CPU_ARTIFACT_USES_DEMOTE;
+        break;
+      case StageOpKind::IsHelper:
+        Flags |= FEME_CPU_ARTIFACT_USES_HELPER;
+        break;
+      default:
+        break;
+      }
+    }
+  }
+  return Flags;
+}
+
 std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
                                                      StringRef EntryName) {
   const NamedMDNode *MD = M.getNamedMetadata("feme.cpu.resources");
@@ -112,8 +144,9 @@ std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
   return std::nullopt;
 }
 
-ArtifactInfo ArtifactInfo::fromResourceInfo(const ResourceInfo &Info) {
-  ArtifactInfo Artifact;
+StageArtifactInfo
+StageArtifactInfo::fromResourceInfo(const ResourceInfo &Info) {
+  StageArtifactInfo Artifact;
   Artifact.RootConstantSize = Info.RootConstantSize;
   Artifact.Flags =
       Info.UsesSamplerHeap ? FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP : 0u;
@@ -128,26 +161,31 @@ std::string feme::cpu::getArtifactSymbolName(StringRef EntryName) {
 }
 
 /// The number of fixed (non-tail) `uint32_t` fields the layout has, ahead of
-/// the two counted tails: version, wave size, 3 group-size dimensions,
-/// groupshared size/align, root constant size, flags, the
+/// the three counted tails: version, stage, wave size, 3 group-size
+/// dimensions, groupshared size/align, root constant size, flags, the
 /// `StaticHeapIndices` tail's own count, the reserved resource-heap prefix
-/// size, and the `BoundRanges` tail's own count.
-constexpr size_t NumFixedFields = 12;
+/// size, the `BoundRanges` tail's own count, and the `Signature` tail's own
+/// byte length.
+constexpr size_t NumFixedFields = 14;
 
 /// The number of `uint32_t` fields one `BoundResourceRange` serializes to
 /// (its four fields, in declaration order).
 constexpr size_t FieldsPerBoundRange = 4;
 
-std::vector<uint8_t> feme::cpu::serializeArtifact(const ArtifactInfo &Info) {
-  std::vector<uint8_t> Bytes((NumFixedFields + Info.StaticHeapIndices.size() +
-                              Info.BoundRanges.size() * FieldsPerBoundRange) *
-                             sizeof(uint32_t));
+std::vector<uint8_t>
+feme::cpu::serializeArtifact(const StageArtifactInfo &Info) {
+  std::vector<uint8_t> Bytes(NumFixedFields * sizeof(uint32_t) +
+                             Info.StaticHeapIndices.size() * sizeof(uint32_t) +
+                             Info.BoundRanges.size() * FieldsPerBoundRange *
+                                 sizeof(uint32_t) +
+                             Info.Signature.size());
   uint8_t *P = Bytes.data();
   auto WriteNext = [&](uint32_t V) {
     support::endian::write32le(P, V);
     P += sizeof(uint32_t);
   };
   WriteNext(ArtifactAbiVersion);
+  WriteNext(static_cast<uint32_t>(Info.Stage));
   WriteNext(Info.WaveSize);
   WriteNext(Info.GroupSize[0]);
   WriteNext(Info.GroupSize[1]);
@@ -167,10 +205,13 @@ std::vector<uint8_t> feme::cpu::serializeArtifact(const ArtifactInfo &Info) {
     WriteNext(Range.RangeSize);
     WriteNext(Range.HeapBase);
   }
+  WriteNext(static_cast<uint32_t>(Info.Signature.size()));
+  llvm::copy(Info.Signature, P);
+  P += Info.Signature.size();
   return Bytes;
 }
 
-Expected<ArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
+Expected<StageArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
   if (Bytes.size() < NumFixedFields * sizeof(uint32_t))
     return createStringError(inconvertibleErrorCode(),
                              "FeMe CPU artifact too short: expected at "
@@ -191,7 +232,15 @@ Expected<ArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
                              "%u",
                              Version, ArtifactAbiVersion);
 
-  ArtifactInfo Info;
+  uint32_t StageValue = ReadNext();
+  if (StageValue >= static_cast<uint32_t>(ShaderStage::NumStages))
+    return createStringError(inconvertibleErrorCode(),
+                             "FeMe CPU artifact names an unknown shader "
+                             "stage (%u)",
+                             StageValue);
+
+  StageArtifactInfo Info;
+  Info.Stage = static_cast<ShaderStage>(StageValue);
   Info.WaveSize = ReadNext();
   Info.GroupSize[0] = ReadNext();
   Info.GroupSize[1] = ReadNext();
@@ -202,10 +251,11 @@ Expected<ArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
   Info.Flags = ReadNext();
   uint32_t NumIndices = ReadNext();
 
-  // Two variable-length tails are laid out back to back (`StaticHeapIndices`
-  // then `BoundRanges`), each preceded by its own count -- validate just
-  // enough to safely read up to and including the second tail's own count
-  // field before computing the final expected size below.
+  // Three variable-length tails are laid out back to back
+  // (`StaticHeapIndices`, then `BoundRanges`, then `Signature`), each
+  // preceded by its own count -- validate just enough to safely read up to
+  // and including the next tail's own count field before computing the
+  // final expected size below.
   size_t MinSizeForRangeCount =
       (NumFixedFields + static_cast<size_t>(NumIndices)) * sizeof(uint32_t);
   if (Bytes.size() < MinSizeForRangeCount)
@@ -222,15 +272,17 @@ Expected<ArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
   Info.ReservedResourceHeapSize = ReadNext();
   uint32_t NumRanges = ReadNext();
 
-  size_t ExpectedSize = (NumFixedFields + static_cast<size_t>(NumIndices) +
-                         static_cast<size_t>(NumRanges) * FieldsPerBoundRange) *
-                        sizeof(uint32_t);
-  if (Bytes.size() != ExpectedSize)
+  size_t MinSizeForSignatureLength =
+      (NumFixedFields + static_cast<size_t>(NumIndices) +
+       static_cast<size_t>(NumRanges) * FieldsPerBoundRange) *
+      sizeof(uint32_t);
+  if (Bytes.size() < MinSizeForSignatureLength)
     return createStringError(inconvertibleErrorCode(),
                              "FeMe CPU artifact's declared bound-range count "
                              "(%u) is inconsistent with its length: expected "
-                             "%zu bytes, got %zu",
-                             NumRanges, ExpectedSize, Bytes.size());
+                             "at least %zu bytes, got %zu",
+                             NumRanges, MinSizeForSignatureLength,
+                             Bytes.size());
 
   Info.BoundRanges.reserve(NumRanges);
   for (uint32_t I = 0; I != NumRanges; ++I) {
@@ -241,11 +293,23 @@ Expected<ArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
     Range.HeapBase = ReadNext();
     Info.BoundRanges.push_back(Range);
   }
+
+  uint32_t SignatureLength = ReadNext();
+  size_t ExpectedSize =
+      MinSizeForSignatureLength + static_cast<size_t>(SignatureLength);
+  if (Bytes.size() != ExpectedSize)
+    return createStringError(inconvertibleErrorCode(),
+                             "FeMe CPU artifact's declared signature length "
+                             "(%u) is inconsistent with its length: expected "
+                             "%zu bytes, got %zu",
+                             SignatureLength, ExpectedSize, Bytes.size());
+
+  Info.Signature.assign(P, P + SignatureLength);
   return Info;
 }
 
 GlobalVariable *feme::cpu::emitArtifactGlobal(Module &M, StringRef EntryName,
-                                              const ArtifactInfo &Info) {
+                                              const StageArtifactInfo &Info) {
   std::vector<uint8_t> Bytes = serializeArtifact(Info);
   Constant *Init = ConstantDataArray::get(M.getContext(), Bytes);
   auto *GV = new GlobalVariable(M, Init->getType(), /*isConstant=*/true,
@@ -255,8 +319,8 @@ GlobalVariable *feme::cpu::emitArtifactGlobal(Module &M, StringRef EntryName,
   return GV;
 }
 
-std::optional<ArtifactInfo> feme::cpu::readArtifactGlobal(const Module &M,
-                                                          StringRef EntryName) {
+std::optional<StageArtifactInfo>
+feme::cpu::readArtifactGlobal(const Module &M, StringRef EntryName) {
   const GlobalVariable *GV =
       M.getGlobalVariable(getArtifactSymbolName(EntryName));
   if (!GV || !GV->hasInitializer())
@@ -267,7 +331,7 @@ std::optional<ArtifactInfo> feme::cpu::readArtifactGlobal(const Module &M,
 
   StringRef Data = Init->getRawDataValues();
   std::vector<uint8_t> Bytes(Data.begin(), Data.end());
-  Expected<ArtifactInfo> Info = parseArtifact(Bytes);
+  Expected<StageArtifactInfo> Info = parseArtifact(Bytes);
   if (!Info) {
     consumeError(Info.takeError());
     return std::nullopt;

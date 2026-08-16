@@ -146,7 +146,8 @@ TEST(CompiledStageTest, GetArtifactInfoReflectsResolvedExecutionShape) {
   Expected<std::unique_ptr<CompiledStage>> Stage = compile(Ctx, /*WaveSize=*/8);
   ASSERT_THAT_EXPECTED(Stage, Succeeded());
 
-  ArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.Stage, feme::ShaderStage::Compute);
   EXPECT_EQ(Artifact.WaveSize, 8u);
   EXPECT_EQ(Artifact.GroupSize[0], 1u);
   EXPECT_EQ(Artifact.GroupSize[1], 1u);
@@ -177,7 +178,7 @@ TEST(CompiledStageTest, GetArtifactInfoReportsGroupSharedRequirements) {
       CompiledStage::create(Ctx, std::move(Mod), Opts);
   ASSERT_THAT_EXPECTED(Stage, Succeeded());
 
-  ArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
   EXPECT_EQ(Artifact.GroupSharedSize, 16u);
   EXPECT_EQ(Artifact.GroupSharedAlign, 16u);
 }

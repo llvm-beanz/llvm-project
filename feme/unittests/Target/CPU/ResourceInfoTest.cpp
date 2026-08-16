@@ -98,7 +98,7 @@ TEST(ResourceInfoTest, GetDeclaredGroupSizeDefaultsToOnesWhenMalformed) {
 }
 
 TEST(ResourceInfoTest, SerializeParseRoundTrips) {
-  ArtifactInfo Info;
+  StageArtifactInfo Info;
   Info.WaveSize = 8;
   Info.GroupSize[0] = 64;
   Info.GroupSize[1] = 1;
@@ -108,7 +108,7 @@ TEST(ResourceInfoTest, SerializeParseRoundTrips) {
   Info.StaticHeapIndices = {2, 7, 9};
 
   std::vector<uint8_t> Bytes = serializeArtifact(Info);
-  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
   ASSERT_THAT_EXPECTED(Parsed, Succeeded());
   EXPECT_EQ(Parsed->WaveSize, 8u);
   EXPECT_EQ(Parsed->GroupSize[0], 64u);
@@ -122,16 +122,16 @@ TEST(ResourceInfoTest, SerializeParseRoundTrips) {
 
 TEST(ResourceInfoTest, ParseRejectsTooShort) {
   std::vector<uint8_t> Bytes = {1, 2, 3};
-  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
   EXPECT_THAT_EXPECTED(std::move(Parsed), Failed());
 }
 
 TEST(ResourceInfoTest, ParseRejectsWrongVersion) {
-  ArtifactInfo Info;
+  StageArtifactInfo Info;
   std::vector<uint8_t> Bytes = serializeArtifact(Info);
   // Corrupt the version field (the first little-endian uint32_t).
   Bytes[0] = 0xFF;
-  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
   EXPECT_THAT_ERROR(
       Parsed.takeError(),
       Failed<StringError>(testing::Property(
@@ -139,21 +139,21 @@ TEST(ResourceInfoTest, ParseRejectsWrongVersion) {
 }
 
 TEST(ResourceInfoTest, ParseRejectsInconsistentHeapIndexCount) {
-  ArtifactInfo Info;
+  StageArtifactInfo Info;
   Info.StaticHeapIndices = {1, 2, 3};
   std::vector<uint8_t> Bytes = serializeArtifact(Info);
   Bytes.pop_back(); // Truncate one heap index short.
   Bytes.pop_back();
   Bytes.pop_back();
   Bytes.pop_back();
-  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
   EXPECT_THAT_EXPECTED(std::move(Parsed), Failed());
 }
 
 TEST(ResourceInfoTest, EmitAndReadArtifactGlobalRoundTrips) {
   LLVMContext Ctx;
   Module M("M", Ctx);
-  ArtifactInfo Info;
+  StageArtifactInfo Info;
   Info.WaveSize = 4;
   Info.RootConstantSize = 8;
   Info.StaticHeapIndices = {0, 1};
@@ -162,7 +162,7 @@ TEST(ResourceInfoTest, EmitAndReadArtifactGlobalRoundTrips) {
   ASSERT_TRUE(GV);
   EXPECT_EQ(GV->getName(), "feme_cpu_info_main");
 
-  std::optional<ArtifactInfo> RoundTripped = readArtifactGlobal(M, "main");
+  std::optional<StageArtifactInfo> RoundTripped = readArtifactGlobal(M, "main");
   ASSERT_TRUE(RoundTripped);
   EXPECT_EQ(RoundTripped->WaveSize, 4u);
   EXPECT_EQ(RoundTripped->RootConstantSize, 8u);
@@ -182,7 +182,7 @@ TEST(ResourceInfoTest, FromResourceInfoCarriesFieldsOver) {
   RI.UsesSamplerHeap = true;
   RI.StaticHeapIndices = {4};
 
-  ArtifactInfo Artifact = ArtifactInfo::fromResourceInfo(RI);
+  StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(RI);
   EXPECT_EQ(Artifact.RootConstantSize, 32u);
   EXPECT_EQ(Artifact.Flags,
             static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP));
@@ -225,12 +225,12 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsTwo) {
-  EXPECT_EQ(ArtifactAbiVersion, 2u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsThree) {
+  EXPECT_EQ(ArtifactAbiVersion, 3u);
 }
 
 TEST(ResourceInfoTest, SerializeParseRoundTripsBoundRanges) {
-  ArtifactInfo Info;
+  StageArtifactInfo Info;
   Info.ReservedResourceHeapSize = 12;
   Info.BoundRanges = {
       BoundResourceRange{0, 0, 4, 0},
@@ -238,7 +238,7 @@ TEST(ResourceInfoTest, SerializeParseRoundTripsBoundRanges) {
   };
 
   std::vector<uint8_t> Bytes = serializeArtifact(Info);
-  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
   ASSERT_THAT_EXPECTED(Parsed, Succeeded());
   EXPECT_EQ(Parsed->ReservedResourceHeapSize, 12u);
   ASSERT_EQ(Parsed->BoundRanges.size(), 2u);
@@ -248,11 +248,11 @@ TEST(ResourceInfoTest, SerializeParseRoundTripsBoundRanges) {
 }
 
 TEST(ResourceInfoTest, ParseRejectsInconsistentBoundRangeCount) {
-  ArtifactInfo Info;
+  StageArtifactInfo Info;
   Info.BoundRanges = {BoundResourceRange{0, 0, 4, 0}};
   std::vector<uint8_t> Bytes = serializeArtifact(Info);
   Bytes.pop_back(); // Truncate one bound-range field short.
-  Expected<ArtifactInfo> Parsed = parseArtifact(Bytes);
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
   EXPECT_THAT_EXPECTED(std::move(Parsed), Failed());
 }
 
@@ -262,10 +262,85 @@ TEST(ResourceInfoTest, FromResourceInfoCarriesBoundRangesOver) {
   RI.ReservedResourceHeapSize = 4;
   RI.BoundRanges = {BoundResourceRange{0, 0, 4, 0}};
 
-  ArtifactInfo Artifact = ArtifactInfo::fromResourceInfo(RI);
+  StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(RI);
   EXPECT_EQ(Artifact.ReservedResourceHeapSize, 4u);
   ASSERT_EQ(Artifact.BoundRanges.size(), 1u);
   EXPECT_EQ(Artifact.BoundRanges[0].RangeSize, 4u);
+}
+
+TEST(ResourceInfoTest, DefaultStageArtifactInfoIsTaggedCompute) {
+  StageArtifactInfo Info;
+  EXPECT_EQ(Info.Stage, feme::ShaderStage::Compute);
+}
+
+TEST(ResourceInfoTest, SerializeParseRoundTripsStageAndSignature) {
+  StageArtifactInfo Info;
+  Info.Stage = feme::ShaderStage::Fragment;
+  Info.Signature = {1, 2, 3, 4, 5};
+
+  std::vector<uint8_t> Bytes = serializeArtifact(Info);
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
+  ASSERT_THAT_EXPECTED(Parsed, Succeeded());
+  EXPECT_EQ(Parsed->Stage, feme::ShaderStage::Fragment);
+  EXPECT_EQ(Parsed->Signature, (std::vector<uint8_t>{1, 2, 3, 4, 5}));
+}
+
+TEST(ResourceInfoTest, ParseRejectsUnknownStage) {
+  StageArtifactInfo Info;
+  std::vector<uint8_t> Bytes = serializeArtifact(Info);
+  // The `Stage` field is the second little-endian uint32_t, right after the
+  // version.
+  Bytes[4] = 0xFF;
+  Bytes[5] = 0xFF;
+  Bytes[6] = 0xFF;
+  Bytes[7] = 0xFF;
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
+  EXPECT_THAT_ERROR(
+      Parsed.takeError(),
+      Failed<StringError>(testing::Property(
+          &StringError::getMessage, testing::HasSubstr("shader stage"))));
+}
+
+TEST(ResourceInfoTest, ParseRejectsInconsistentSignatureLength) {
+  StageArtifactInfo Info;
+  Info.Signature = {1, 2, 3, 4};
+  std::vector<uint8_t> Bytes = serializeArtifact(Info);
+  Bytes.pop_back(); // Truncate the signature one byte short.
+  Expected<StageArtifactInfo> Parsed = parseArtifact(Bytes);
+  EXPECT_THAT_EXPECTED(std::move(Parsed), Failed());
+}
+
+TEST(ResourceInfoTest, ComputeSideEffectFlagsFindsDiscardDemoteHelper) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @discards(i1 %c) {
+      call void @feme.stage.discard(i1 %c)
+      ret void
+    }
+    define void @demotes(i1 %c) {
+      call void @feme.stage.demote(i1 %c)
+      ret void
+    }
+    define void @checksHelper() {
+      %h = call i1 @feme.stage.is_helper()
+      ret void
+    }
+    define void @plain() {
+      ret void
+    }
+    declare void @feme.stage.discard(i1)
+    declare void @feme.stage.demote(i1)
+    declare i1 @feme.stage.is_helper()
+  )");
+  ASSERT_TRUE(M);
+
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("discards")),
+            static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_DISCARD));
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("demotes")),
+            static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_DEMOTE));
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("checksHelper")),
+            static_cast<uint32_t>(FEME_CPU_ARTIFACT_USES_HELPER));
+  EXPECT_EQ(computeSideEffectFlags(*M->getFunction("plain")), 0u);
 }
 
 } // namespace

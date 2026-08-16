@@ -1121,6 +1121,24 @@ and round-trip in unit tests.
 Pipeline creation uses this reflection to reject an incompatible interface or
 unsupported fixed-function combination before recording a draw.
 
+#### Status: `feme::cpu::StageArtifactInfo` (partial: R22)
+
+Roadmap R22 lands this section's first slice: `ArtifactInfo` is renamed
+`StageArtifactInfo` (`ArtifactAbiVersion` bumped to 3) and gains the `Stage`
+tag, a serialized `feme::EntrySignature` `Signature` tail, and side-effect
+`Flags` bits (`FEME_CPU_ARTIFACT_USES_DISCARD`/`_DEMOTE`/`_HELPER`, via the
+new `feme::cpu::computeSideEffectFlags`), plus `WaveSize`/`GroupSize`/
+`GroupSharedSize`/`GroupSharedAlign` -- part of the version-2 layout already,
+but populated for the first time here (`feme::cpu::CompiledStage::
+getArtifactInfo` for JIT reflection, `feme::Driver`'s CPU retargeting path
+for AOT). Every field is generic enough to describe a non-compute stage, but
+`Signature`/the side-effect flags are unpopulated in practice until roadmap
+R27/R28 make `CompiledStage` itself stage-aware -- every artifact today is
+still `ShaderStage::Compute`. Resource/sampler/root-constant requirements,
+depth/coverage/derivative flags beyond the three landed here, image/sampler
+requirements, and the tessellation/mesh/ray fields this section lists all
+remain open for their own owning milestones (R25/R29/R30/R34/R35/R37).
+
 ## Images and Samplers
 
 ### Separate descriptor kinds

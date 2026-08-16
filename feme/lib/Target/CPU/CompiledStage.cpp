@@ -179,9 +179,11 @@ void alignRuntimeModuleTriple(llvm::Module &RuntimeMod,
 CompiledStage::CompiledStage(std::unique_ptr<orc::LLJIT> JIT, void *EntryFn,
                              ResourceInfo Info, unsigned WaveSize,
                              std::array<uint32_t, 3> GroupSize,
-                             GroupSharedRequirements GroupSharedReqs)
+                             GroupSharedRequirements GroupSharedReqs,
+                             uint32_t SideEffectFlags)
     : JIT(std::move(JIT)), EntryFn(EntryFn), Info(std::move(Info)),
-      WaveSize(WaveSize), GroupSize(GroupSize), GroupSharedReqs(GroupSharedReqs) {}
+      WaveSize(WaveSize), GroupSize(GroupSize),
+      GroupSharedReqs(GroupSharedReqs), SideEffectFlags(SideEffectFlags) {}
 
 CompiledStage::~CompiledStage() = default;
 CompiledStage::CompiledStage(CompiledStage &&) noexcept = default;
@@ -226,6 +228,13 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   // memory" in feme/docs/FeMeCPUDesign.md's Phase 6 section), so this is
   // the last point at which they still exist to measure.
   GroupSharedRequirements GroupSharedReqs = getGroupSharedRequirements(Mod);
+
+  // Likewise computed against the original entry point, before any
+  // pipeline pass has a chance to rewrite or replace it (see
+  // `computeSideEffectFlags`'s own comment for why this scans for a
+  // `feme.stage.*` family this milestone's compute-only pipeline never
+  // itself introduces).
+  uint32_t SideEffectFlags = computeSideEffectFlags(**Entry);
 
   // `--reference` resolves no wave size at all: it never widens anything
   // (see the "CFG restructurization test suite" section of
@@ -346,10 +355,9 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   if (!EntryAddr)
     return EntryAddr.takeError();
 
-  return std::unique_ptr<CompiledStage>(
-      new CompiledStage(std::move(JIT), EntryAddr->toPtr<void *>(),
-                        std::move(ResolvedInfo), WaveSize, GroupSize,
-                        GroupSharedReqs));
+  return std::unique_ptr<CompiledStage>(new CompiledStage(
+      std::move(JIT), EntryAddr->toPtr<void *>(), std::move(ResolvedInfo),
+      WaveSize, GroupSize, GroupSharedReqs, SideEffectFlags));
 }
 
 Error CompiledStage::invokeGroup(const PreparedDispatch &Prepared,
@@ -362,13 +370,14 @@ Error CompiledStage::invokeGroup(const PreparedDispatch &Prepared,
   return Error::success();
 }
 
-ArtifactInfo CompiledStage::getArtifactInfo() const {
-  ArtifactInfo Artifact = ArtifactInfo::fromResourceInfo(Info);
+StageArtifactInfo CompiledStage::getArtifactInfo() const {
+  StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(Info);
   Artifact.WaveSize = WaveSize;
   Artifact.GroupSize[0] = GroupSize[0];
   Artifact.GroupSize[1] = GroupSize[1];
   Artifact.GroupSize[2] = GroupSize[2];
   Artifact.GroupSharedSize = static_cast<uint32_t>(GroupSharedReqs.Size);
   Artifact.GroupSharedAlign = static_cast<uint32_t>(GroupSharedReqs.Alignment);
+  Artifact.Flags |= SideEffectFlags;
   return Artifact;
 }
