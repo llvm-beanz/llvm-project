@@ -13899,3 +13899,154 @@ assertions via a custom `DiagnosticHandler`) and `lit` coverage (real
 `dx.op.*`/SPIR-V-shaped textual IR through the actual registered
 `feme-opt` pass names), matching the "each phase... individually testable
 and tested" instruction rather than relying on one test style alone.
+
+# Agent thoughts: roadmap step R21 (`CompiledStage`/`PreparedDispatch`/`invokeGroup`)
+
+This records the reasoning behind implementing roadmap item R21:
+
+> Factor `CompiledStage`/`PreparedDispatch`/`invokeGroup` out of `JITEngine`,
+> with the wave loop and entry mask owned by `invokeGroup`; `JITEngine`
+> becomes a convenience wrapper and `JITOptions::NumThreads` becomes real.
+> Land it under the final `CompiledStage` name so V1/W1 never build against
+> `CompiledKernel` (see: §1.6, §1.8.1, §1.8.3)
+
+## Reading before writing
+
+Before touching code I read `feme/.instructions.md`, the relevant sections of
+`feme/docs/Roadmap.md` (§1.6's "Dispatch is sequential" row, §1.8.1's
+prerequisite table, §1.8.3's "Compiled stage API" gap, and the R21 row
+itself plus its neighbors R22/R27 for what is deliberately *not* this
+milestone's job), FeMeGraphicsDesign.md's "Compiled stage API" section (the
+`CompiledStage` sketch, its relationship to `StageCompileOptions`/R27, and
+the "there is one type" answer to the Vulkan/WARP designs' open question),
+and FeMeVulkanDesign.md's "CPU Runtime API Changes" (the `CompiledKernel`
+sketch, `PreparedDispatch`, and the tentative host-owned wave loop
+pseudocode). I also read the existing `JITEngine.h`/`.cpp`,
+`ResourceHeap.h`/`.cpp`, and `EntryWrapper.cpp` before deciding what to
+change, rather than implementing the sketches blind.
+
+## The one real design decision: where does the wave loop live?
+
+FeMeVulkanDesign.md's sketch is explicit that `invokeGroup` should own a
+*host-side* wave loop, calling the compiled entry point once per wave with a
+host-computed `entry_mask(W)`:
+
+```text
+for W in 0 .. CeilDiv(GroupSize, WaveSize) - 1:
+  feme_cpu_entry_<name>(Args, entry_mask(W))
+```
+
+Reading `feme::cpu::EntryWrapperPass` (`feme/lib/Transforms/CPU/
+EntryWrapper.cpp`) before writing anything showed this isn't accurate to
+what already exists: that pass already builds a wave loop with its own
+entry-mask computation (`buildEntryMask`/`buildWaveLoop`), but *inside* the
+compiled `feme_cpu_entry_<name>` wrapper itself, not at the call site. It has
+to live there, because roadmap milestone 9 ("Group Execution and Barriers")
+built real barrier support on top of it: a barrier inside the group splits
+the wrapper into a prefix wave loop, a scalar (non-widened) barrier-adjacent
+body, and a suffix wave loop, with values live across the barrier spilled
+into a per-wave context array between them. None of that has anywhere to go
+if the wave loop moves to host C++ calling a per-wave entry point instead --
+either the barrier-splitting machinery gets duplicated on the host side, or
+the compiled entry point's ABI has to change to take an explicit wave index
+and mask, and barrier correctness has to be re-derived against whatever that
+new ABI implies. Both are much larger, riskier changes than R21's actual gap
+(§1.6/§1.8.1's "Dispatch is sequential, not thread-pooled" -- `JITEngine` has
+no unit of work smaller than a whole dispatch) requires solving, and neither
+is what any of R22/R23/R24/R27's own scope notes suggest should happen at
+this milestone -- R23/R24 are about *fixing* remaining gaps in the existing
+barrier/groupshared machinery, not replacing its foundation.
+
+I treated this as one of the documented deviations the task instructions
+explicitly permit ("When you deviate from the design document please update
+the design document") rather than silently implementing a different thing
+than the sketch describes, or worse, faithfully implementing the sketch and
+regressing every barrier-splitting test roadmap milestone 9 added. `invokeGroup`
+calls the compiled entry point exactly once per group; the wave loop inside
+that entry point is untouched. I wrote this deviation into three places, the
+same discipline earlier steps in this file used for their own narrowings:
+FeMeVulkanDesign.md's "CPU Runtime API Changes" Status note (the fullest
+explanation), FeMeGraphicsDesign.md's "Compiled stage API" Status note (a
+shorter cross-reference to the first), and the R21 roadmap row itself.
+
+## Shape of the actual change
+
+Three commits, each independently buildable and testable:
+
+1. **`PreparedDispatch`/`invokeGroup` factored out of `runDispatch`**
+   (ResourceHeap.h/.cpp). This is a pure, non-functional refactoring of the
+   AOT-path dispatch loop that already existed: `runDispatch` used to
+   materialize the heap and fill in `FemeDispatchArgs` inline in one
+   function. Splitting it into `PreparedDispatch::create`/`argsFor` and a
+   free `invokeGroup` first, with `runDispatch` rewritten in terms of them,
+   meant the harder second commit (`CompiledStage`) had a tested, working
+   building block to call rather than inventing the abstraction and the JIT
+   refactor simultaneously. `RunDispatchTest`'s existing sequential-XYZ-order
+   assertion (backed by a non-thread-safe global recording callback) was the
+   signal that this layer must stay strictly sequential and un-threaded --
+   confirming that `NumThreads` is a `JITEngine`/`JITOptions` concept, not a
+   `runDispatch`/AOT-path one, since the AOT path (`feme-run --object`, and
+   `AOTDispatchTest`) has no `JITOptions` to carry a threading policy at all.
+
+2. **`CompiledStage` factored out of `JITEngine`** (CompiledStage.h/.cpp,
+   new files; JITEngine.h/.cpp rewritten). `CompiledStage::create` is
+   `JITEngine::create`'s entire old body, moved verbatim (module cloning,
+   wave-size resolution, the CPU pipeline/reference lowering, linking
+   `libFeMeRuntimeCPU`, JIT compilation, and entry-point resolution);
+   `invokeGroup` forwards to the free `invokeGroup` from step 1, cast to
+   `EntryPointFn`. One layering wrinkle worth recording: `CompiledStage.h`
+   only forward-declares `struct JITOptions;` rather than including
+   `JITEngine.h`, specifically so `JITEngine.h` can include `CompiledStage.h`
+   (it now holds a `CompiledStage` member) without a circular header
+   dependency; `CompiledStage.cpp` includes `JITEngine.h` for the full
+   `JITOptions` definition it actually needs. `JITEngine` itself shrank to a
+   thin wrapper holding a `CompiledStage` and an optional worker pool.
+
+3. **Real `NumThreads`** (folded into the `JITEngine` rewrite, then
+   corrected in a follow-up commit). My first pass created a fresh
+   `llvm::DefaultThreadPool` inside every `dispatch()` call when
+   `NumThreads != 1`. Re-reading FeMeCPUDesign.md's "JIT Flow" section's
+   "Dispatch parallelism" bullet caught that this contradicts the design
+   text ("The pool belongs to the engine... so that engine destruction is
+   the only join point that matters"), and is also simply wasteful (spinning
+   worker threads up and down on every dispatch rather than once per
+   engine). I moved the pool to a `JITEngine` member, created once in
+   `create()` and reused by every `dispatch()` call through its own
+   `llvm::ThreadPoolTaskGroup`, matching the design text exactly rather than
+   a superficially-working alternative. `NumThreads == 1` still allocates no
+   pool at all, and every dispatch's own errors are collected with a mutex
+   into a single first-error `Error` rather than trying to merge multiple
+   `llvm::Error`s across threads, since nothing in this milestone's scope
+   actually produces a per-group failure yet (`invokeGroup` always succeeds
+   today) -- the mechanism exists for forward compatibility with whatever
+   R23-onward's remaining barrier/groupshared work eventually needs to
+   report as a real per-group error.
+
+## Verification
+
+Built with `-DLLVM_ENABLE_ASSERTIONS=ON` and ccache throughout (the
+pre-existing build config already had both), running `ninja check-feme`
+after each commit-sized increment: 1022/1024 passed once the
+`PreparedDispatch`/`invokeGroup` refactor and its own new
+`PreparedDispatchTest`/`InvokeGroupTest` coverage landed (a non-functional
+refactoring of `runDispatch` plus new direct tests of the extracted API, so
+this is the first measurement I took), and 1025/1027 after
+`CompiledStage`/real `NumThreads` landed, the +3 being exactly the new tests
+that commit added: `CompiledStageTest`'s two cases and one new
+`JITEngineTest` case. Added unit coverage at each
+new layer rather than only re-running existing tests: `PreparedDispatchTest`/
+`InvokeGroupTest` exercise the extracted heap-materialization/args-building
+API directly; `CompiledStageTest` exercises `invokeGroup` directly, including
+a dedicated concurrent-invocation test (eight threads hammering
+`invokeGroup` for 64 disjoint `GroupID`s on one `CompiledStage`, verifying
+every group's own slot lands correctly with no torn writes) that specifically
+checks the "safe to call concurrently for independent GroupIDs" claim in
+`CompiledStage.h`'s own doc comment rather than just asserting it; and a new
+`JITEngineTest` case dispatches 16 groups (64 total lanes) with
+`NumThreads = 4` end to end through the real worker pool, which is the one
+scenario that would have silently stayed sequential (or deadlocked/corrupted
+the buffer) had the thread pool wiring been wrong. Ran the threaded tests
+repeatedly (5+ runs) to rule out flakiness before committing, and confirmed
+existing `JITEngineTest`/`AOTDispatchTest`/`ResourceHeapTest` coverage did
+not need to change at all, since both commits preserved every public API's
+existing observable behavior for `NumThreads` in `{0, 1}`.
