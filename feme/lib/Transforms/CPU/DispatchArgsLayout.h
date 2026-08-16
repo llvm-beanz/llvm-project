@@ -22,6 +22,8 @@
 #ifndef FEME_LIB_TRANSFORMS_CPU_DISPATCHARGSLAYOUT_H
 #define FEME_LIB_TRANSFORMS_CPU_DISPATCHARGSLAYOUT_H
 
+#include "StageArgsLayout.h"
+
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -35,18 +37,16 @@ namespace feme::cpu {
 
 /// Field indices into the `FemeDispatchArgs`-shaped LLVM struct
 /// `getDispatchArgsType` builds, matching
-/// feme/include/feme/Target/CPU/RuntimeABI.h field-for-field.
+/// feme/include/feme/Target/CPU/RuntimeABI.h field-for-field. `Resources` is
+/// the embedded `FemeShaderResources` (roadmap R29); see
+/// `ShaderResourcesField`/`getShaderResourcesType` in StageArgsLayout.h for
+/// its own fields.
 enum DispatchArgsField : unsigned {
-  ResourceHeap = 0,
-  ResourceHeapCount = 1,
-  SamplerHeap = 2,
-  SamplerHeapCount = 3,
-  RootConstants = 4,
-  RootConstantSize = 5,
-  GroupID = 6,
-  GroupCount = 7,
-  GroupShared = 8,
-  Reserved = 9,
+  Resources = 0,
+  GroupID = 1,
+  GroupCount = 2,
+  GroupShared = 3,
+  Reserved = 4,
 };
 
 /// Builds the LLVM struct type mirroring `FemeDispatchArgs`: field
@@ -57,8 +57,8 @@ inline llvm::StructType *getDispatchArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *I32x3 = llvm::ArrayType::get(I32Ty, 3);
   llvm::Type *PtrX4 = llvm::ArrayType::get(PtrTy, 4);
-  return llvm::StructType::get(Ctx, {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty,
-                                     I32x3, I32x3, PtrTy, PtrX4});
+  return llvm::StructType::get(
+      Ctx, {getShaderResourcesType(Ctx), I32x3, I32x3, PtrTy, PtrX4});
 }
 
 /// Loads field \p Field of `*Args` (a `getDispatchArgsType()`-typed
@@ -68,6 +68,22 @@ inline llvm::Value *loadArgsField(llvm::IRBuilder<> &Builder,
                                   unsigned Field, llvm::Type *FieldTy) {
   llvm::Value *Ptr = Builder.CreateStructGEP(ArgsTy, Args, Field);
   return Builder.CreateLoad(FieldTy, Ptr);
+}
+
+/// Loads shader-resources field \p Field (a `ShaderResourcesField` from
+/// StageArgsLayout.h) out of `Args->Resources`, the `FemeShaderResources`
+/// embedded in the `getDispatchArgsType()`-typed pointer \p Args (roadmap
+/// R29).
+inline llvm::Value *loadResourcesField(llvm::IRBuilder<> &Builder,
+                                       llvm::StructType *ArgsTy,
+                                       llvm::Value *Args, unsigned Field,
+                                       llvm::Type *FieldTy) {
+  llvm::StructType *ResourcesTy = getShaderResourcesType(Builder.getContext());
+  llvm::Value *ResourcesPtr =
+      Builder.CreateStructGEP(ArgsTy, Args, DispatchArgsField::Resources);
+  llvm::Value *FieldPtr =
+      Builder.CreateStructGEP(ResourcesTy, ResourcesPtr, Field);
+  return Builder.CreateLoad(FieldTy, FieldPtr);
 }
 
 /// \p F's thread group dimensions, from `hlsl.numthreads` (see

@@ -48,11 +48,13 @@ enum StageLayoutField : unsigned {
 enum ShaderResourcesField : unsigned {
   ShaderResourcesFieldResourceHeap = 0,
   ShaderResourcesFieldResourceHeapCount = 1,
-  ShaderResourcesFieldSamplerHeap = 2,
-  ShaderResourcesFieldSamplerHeapCount = 3,
-  ShaderResourcesFieldRootConstants = 4,
-  ShaderResourcesFieldRootConstantSize = 5,
-  ShaderResourcesFieldReserved = 6,
+  ShaderResourcesFieldImageHeap = 2,
+  ShaderResourcesFieldImageHeapCount = 3,
+  ShaderResourcesFieldSamplerHeap = 4,
+  ShaderResourcesFieldSamplerHeapCount = 5,
+  ShaderResourcesFieldRootConstants = 6,
+  ShaderResourcesFieldRootConstantSize = 7,
+  ShaderResourcesFieldReserved = 8,
 };
 
 enum VertexInvocationField : unsigned {
@@ -126,8 +128,9 @@ inline llvm::StructType *getStageLayoutType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getShaderResourcesType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(Ctx, {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty,
-                                     llvm::ArrayType::get(PtrTy, 4)});
+  return llvm::StructType::get(Ctx,
+                               {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty, PtrTy,
+                                I32Ty, llvm::ArrayType::get(PtrTy, 2)});
 }
 
 inline llvm::StructType *getVertexInvocationType(llvm::LLVMContext &Ctx) {
