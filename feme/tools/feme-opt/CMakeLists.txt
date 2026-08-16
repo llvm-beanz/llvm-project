@@ -18,6 +18,7 @@ set(LIBS
   FeMeTransformsNVPTX
   FeMeTransformsCPU
   FeMeTransformsDXIL
+  FeMeTransformsGraphics
   FeMeTransformsSPIRV
   )
 
