@@ -23,8 +23,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R26 from the roadmap document?
+Can you implement R27 from the roadmap document?
 
-> A SPIR-V descriptor-set binding-to-heap normalization matching DXIL's
-> `BoundResourceNormalizationPass`, with arrayed bindings in contiguous heap
-> ranges and dynamic buffer offsets (see: §1.2, §1.9)
+> `StageCompileOptions` and a stage-aware `runPipeline` (compute-only overload
+> retained), stage-aware `PreparePass` and pre-mutation graphics validation, and
+> the split of the single active mask into live and side-effect masks through
+> `LinearizePass`/`SIMDizePass` and the reference path (see: §1.8.3)
