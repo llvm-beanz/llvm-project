@@ -679,17 +679,18 @@ bool isPlainTextureKind(dxil::ResourceKind Kind) {
 /// sampler handle kinds" for the field layout and the raised handle type
 /// table this implements verbatim: `TypedBuffer` and the plain texture
 /// dimensions (`isPlainTextureKind`) share their component type/count decode
-/// and raise to `dx.TypedBuffer`/`dx.Texture` respectively; `Texture2DMS(Array)`
-/// additionally carries a sample count and raises to `dx.MSTexture`;
-/// `FeedbackTexture2D(Array)` carries only a `SamplerFeedbackType` (the whole
-/// of \p Word1) and raises to `dx.FeedbackTexture`; `Sampler` raises to
-/// `dx.Sampler`, keyed off `SamplerCmpOrHasCounter` (Word0 bit 15). An
-/// unstructured `RawBuffer` (`ByteAddressBuffer`), `StructuredBuffer` and
-/// `CBuffer` are unchanged from before this function existed. Returns
-/// nullptr for a resource kind or element format this pass doesn't (yet)
-/// reconstruct: `TBuffer`, `RTAccelerationStructure`, and any UNORM/SNORM/
-/// packed typed element format (see `getElementLLVMType`) on any of the
-/// typed/texture/multisample-texture kinds.
+/// and raise to `dx.TypedBuffer`/`dx.Texture` respectively;
+/// `Texture2DMS(Array)` additionally carries a sample count and raises to
+/// `dx.MSTexture`; `FeedbackTexture2D(Array)` carries only a
+/// `SamplerFeedbackType` (the whole of \p Word1) and raises to
+/// `dx.FeedbackTexture`; `Sampler` raises to `dx.Sampler`, keyed off
+/// `SamplerCmpOrHasCounter` (Word0 bit 15). An unstructured `RawBuffer`
+/// (`ByteAddressBuffer`), `StructuredBuffer` and `CBuffer` are unchanged from
+/// before this function existed. Returns nullptr for a resource kind or element
+/// format this pass doesn't (yet) reconstruct: `TBuffer`,
+/// `RTAccelerationStructure`, and any UNORM/SNORM/ packed typed element format
+/// (see `getElementLLVMType`) on any of the typed/texture/multisample-texture
+/// kinds.
 TargetExtType *buildAnnotatedHandleType(LLVMContext &Ctx, uint64_t Word0,
                                         uint64_t Word1) {
   auto Kind = static_cast<dxil::ResourceKind>(Word0 & 0xFF);
@@ -707,10 +708,10 @@ TargetExtType *buildAnnotatedHandleType(LLVMContext &Ctx, uint64_t Word0,
       return TargetExtType::get(Ctx, "dx.TypedBuffer", {ElemTy},
                                 {static_cast<unsigned>(IsUAV),
                                  static_cast<unsigned>(IsROV), IsSigned});
-    return TargetExtType::get(
-        Ctx, "dx.Texture", {ElemTy},
-        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV), IsSigned,
-         static_cast<unsigned>(Kind)});
+    return TargetExtType::get(Ctx, "dx.Texture", {ElemTy},
+                              {static_cast<unsigned>(IsUAV),
+                               static_cast<unsigned>(IsROV), IsSigned,
+                               static_cast<unsigned>(Kind)});
   }
 
   if (Kind == dxil::ResourceKind::Texture2DMS ||
@@ -1313,9 +1314,9 @@ bool replaceResRetExtracts(CallInst &CI, unsigned Width, Value *Loaded,
   auto *VecTy = dyn_cast<FixedVectorType>(Loaded->getType());
   for (ExtractValueInst *EV : Extracts) {
     Builder.SetInsertPoint(EV);
-    Value *Component = VecTy ? Builder.CreateExtractElement(
-                                   Loaded, EV->getIndices()[0])
-                             : Loaded;
+    Value *Component =
+        VecTy ? Builder.CreateExtractElement(Loaded, EV->getIndices()[0])
+              : Loaded;
     EV->replaceAllUsesWith(Component);
     EV->eraseFromParent();
   }
@@ -1334,11 +1335,12 @@ bool replaceResRetExtracts(CallInst &CI, unsigned Width, Value *Loaded,
 /// `int_dx_resource_sample_clamp`, a separate call this pass does not (yet)
 /// raise to.
 bool raiseSample(CallInst &CI) {
-  if (CI.arg_size() != 11) // opcode, Handle, Sampler, Coord0-3, Offset0-2, Clamp
+  if (CI.arg_size() !=
+      11) // opcode, Handle, Sampler, Coord0-3, Offset0-2, Clamp
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
-  auto *HandleTy = Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType())
-                          : nullptr;
+  auto *HandleTy =
+      Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType()) : nullptr;
   Value *Sampler = lookThroughCastHandle(CI.getArgOperand(2));
   if (!HandleTy || !Sampler || !isa<dxil::SamplerExtType>(Sampler->getType()))
     return false;
@@ -1388,8 +1390,8 @@ bool raiseSampleLevel(CallInst &CI) {
   if (CI.arg_size() != 11) // opcode, Handle, Sampler, Coord0-3, Offset0-2, LOD
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
-  auto *HandleTy = Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType())
-                          : nullptr;
+  auto *HandleTy =
+      Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType()) : nullptr;
   Value *Sampler = lookThroughCastHandle(CI.getArgOperand(2));
   if (!HandleTy || !Sampler || !isa<dxil::SamplerExtType>(Sampler->getType()))
     return false;
@@ -1421,8 +1423,8 @@ bool raiseSampleLevel(CallInst &CI) {
       CI.getModule(), Intrinsic::dx_resource_samplelevel,
       {ElemTy, HandleTy, Sampler->getType(), Coord->getType(),
        Offset->getType()});
-  Value *Loaded = Builder.CreateCall(SampleLevelFn,
-                                     {Handle, Sampler, Coord, Lod, Offset});
+  Value *Loaded =
+      Builder.CreateCall(SampleLevelFn, {Handle, Sampler, Coord, Lod, Offset});
   if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
     return false;
   CI.eraseFromParent();
@@ -1440,8 +1442,8 @@ bool raiseTextureLoad(CallInst &CI) {
   if (CI.arg_size() != 9) // opcode, Handle, MipLevel, Coord0-2, Offset0-2
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
-  auto *HandleTy = Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType())
-                          : nullptr;
+  auto *HandleTy =
+      Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType()) : nullptr;
   if (!HandleTy)
     return false;
 
@@ -1489,7 +1491,8 @@ bool raiseGetDimensionsX(CallInst &CI) {
   if (CI.arg_size() != 3) // opcode, Handle, MipLevel
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
-  if (!Handle || !isa<dxil::TextureExtType, dxil::MSTextureExtType>(Handle->getType()))
+  if (!Handle ||
+      !isa<dxil::TextureExtType, dxil::MSTextureExtType>(Handle->getType()))
     return false;
 
   SmallVector<ExtractValueInst *, 1> Extracts;

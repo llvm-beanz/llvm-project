@@ -18,8 +18,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "feme/Target/CPU/RuntimeCPU.h"
 #include "feme/Target/CPU/RuntimeABI.h"
+#include "feme/Target/CPU/RuntimeCPU.h"
 
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
@@ -166,16 +166,16 @@ TEST_F(ImageSamplingTest, PointSampleIdentityFormat) {
   float Storage[2][2][4] = {{{1, 2, 3, 4}, {5, 6, 7, 8}},
                             {{9, 10, 11, 12}, {13, 14, 15, 16}}};
   FemeImageSubresourceLayout Layout;
-  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 2, 2,
-                                       ResourceFormat::R32G32B32A32_FLOAT,
-                                       Layout);
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor Samp =
       makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
-  SampleFn Fn = resolve<SampleFn>(
-      addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   // Texel (1, 0)'s center is at normalized coordinates (0.75, 0.25).
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.75f, 0.25f, 0.0f, true, true, Out);
@@ -191,16 +191,16 @@ TEST_F(ImageSamplingTest, LinearSampleBlendsFourTexels) {
   float Storage[2][2][4] = {{{0, 0, 0, 0}, {4, 0, 0, 0}},
                             {{0, 4, 0, 0}, {4, 4, 0, 0}}};
   FemeImageSubresourceLayout Layout;
-  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 2, 2,
-                                       ResourceFormat::R32G32B32A32_FLOAT,
-                                       Layout);
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor Samp =
       makeSampler(SamplerFilter::Linear, SamplerAddressMode::ClampToEdge);
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
-  SampleFn Fn = resolve<SampleFn>(
-      addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 2.0f);
@@ -212,16 +212,16 @@ TEST_F(ImageSamplingTest, RepeatAddressingWrapsCoordinate) {
   // around to the left column.
   float Storage[1][2][4] = {{{1, 1, 1, 1}, {9, 9, 9, 9}}};
   FemeImageSubresourceLayout Layout;
-  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 2, 1,
-                                       ResourceFormat::R32G32B32A32_FLOAT,
-                                       Layout);
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor Samp =
       makeSampler(SamplerFilter::Nearest, SamplerAddressMode::Repeat);
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
-  SampleFn Fn = resolve<SampleFn>(
-      addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   // 1.25 wraps to 0.25, texel 0's center: reads the first (value-1) texel.
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 1.25f, 0.5f, 0.0f, true, true, Out);
@@ -231,20 +231,20 @@ TEST_F(ImageSamplingTest, RepeatAddressingWrapsCoordinate) {
 TEST_F(ImageSamplingTest, ClampToBorderReadsBorderColor) {
   float Storage[1][1][4] = {{{1, 1, 1, 1}}};
   FemeImageSubresourceLayout Layout;
-  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
-                                       ResourceFormat::R32G32B32A32_FLOAT,
-                                       Layout);
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
   FemeImageDescriptor ImageHeap[1] = {Img};
-  FemeSamplerDescriptor Samp = makeSampler(SamplerFilter::Nearest,
-                                           SamplerAddressMode::ClampToBorder);
+  FemeSamplerDescriptor Samp =
+      makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToBorder);
   Samp.BorderColor[0] = 0.1f;
   Samp.BorderColor[1] = 0.2f;
   Samp.BorderColor[2] = 0.3f;
   Samp.BorderColor[3] = 0.4f;
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
-  SampleFn Fn = resolve<SampleFn>(
-      addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 2.0f, 2.0f, 0.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.1f);
@@ -262,14 +262,14 @@ TEST_F(ImageSamplingTest, SRGBDecodeOnSample) {
   FemeImageSubresourceLayout Layout;
   FemeImageDescriptor Img =
       makeImage2D(Storage, sizeof(Storage), 1, 1,
-                 ResourceFormat::R8G8B8A8_UNORM_SRGB, Layout);
+                  ResourceFormat::R8G8B8A8_UNORM_SRGB, Layout);
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor Samp =
       makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
-  SampleFn Fn = resolve<SampleFn>(
-      addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true, true, Out);
   EXPECT_NEAR(Out[0], 0.5f, 0.01f);
@@ -318,8 +318,8 @@ TEST_F(ImageSamplingTest, ExplicitLodSelectsMipLevel) {
       makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
   FemeSamplerDescriptor SamplerHeap[1] = {Samp};
 
-  SampleFn Fn = resolve<SampleFn>(
-      addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4];
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 1.0f, true, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 9.0f);
@@ -332,9 +332,9 @@ TEST_F(ImageSamplingTest, ComparisonSamplingLessEqualPasses) {
   // unambiguous.
   float Storage[1][1][4] = {{{0.5f, 0, 0, 0}}};
   FemeImageSubresourceLayout Layout;
-  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
-                                       ResourceFormat::R32G32B32A32_FLOAT,
-                                       Layout, FEME_IMAGE_DEPTH);
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout, FEME_IMAGE_DEPTH);
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor Samp =
       makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge);
@@ -359,9 +359,9 @@ TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {
   float Storage[2][2][4] = {{{1, 2, 3, 4}, {5, 6, 7, 8}},
                             {{9, 10, 11, 12}, {13, 14, 15, 16}}};
   FemeImageSubresourceLayout Layout;
-  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 2, 2,
-                                       ResourceFormat::R32G32B32A32_FLOAT,
-                                       Layout);
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 2, 2,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
   FemeImageDescriptor ImageHeap[1] = {Img};
 
   LoadFn Fn =
@@ -377,15 +377,15 @@ TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {
 TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {
   float Storage[1][1][4] = {{{1, 1, 1, 1}}};
   FemeImageSubresourceLayout Layout;
-  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
-                                       ResourceFormat::R32G32B32A32_FLOAT,
-                                       Layout);
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R32G32B32A32_FLOAT, Layout);
   FemeImageDescriptor ImageHeap[1] = {Img};
   FemeSamplerDescriptor SamplerHeap[1] = {
       makeSampler(SamplerFilter::Nearest, SamplerAddressMode::ClampToEdge)};
 
-  SampleFn Fn = resolve<SampleFn>(
-      addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
+  SampleFn Fn =
+      resolve<SampleFn>(addWrapper("sample", "feme.cpu.image.sample.2d.v4f32"));
   float Out[4] = {9, 9, 9, 9};
   Fn(ImageHeap, 1, SamplerHeap, 1, 0, 0, 0.5f, 0.5f, 0.0f, true,
      /*Mask=*/false, Out);

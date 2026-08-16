@@ -178,8 +178,7 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
   Type *I32Ty = Type::getInt32Ty(Ctx);
 
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append(
-      {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty});
+  ParamTypes.append({PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty});
 
   FunctionType *NewTy = FunctionType::get(F.getReturnType(), ParamTypes,
                                           F.getFunctionType()->isVarArg());
@@ -379,9 +378,9 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
-      CallInst *NewCall = createLoad2D(Builder, Env, ImageIndex, X, Y,
-                                       CI->getArgOperand(2), Mask,
-                                       CI->getName());
+      CallInst *NewCall =
+          createLoad2D(Builder, Env, ImageIndex, X, Y, CI->getArgOperand(2),
+                       Mask, CI->getName());
       CI->replaceAllUsesWith(NewCall);
       CI->eraseFromParent();
       Changed = true;
@@ -400,7 +399,7 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
     Value *U = Builder.CreateExtractElement(Coord, uint64_t{0});
     Value *V = Builder.CreateExtractElement(Coord, uint64_t{1});
     Value *Lod = IsSampleLevel ? CI->getArgOperand(3)
-                              : ConstantFP::get(Builder.getFloatTy(), 0.0);
+                               : ConstantFP::get(Builder.getFloatTy(), 0.0);
     Value *UseExplicitLod = Builder.getInt1(IsSampleLevel);
     Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
     Value *SamplerIndex = (*Sampler)->getArgOperand(0);

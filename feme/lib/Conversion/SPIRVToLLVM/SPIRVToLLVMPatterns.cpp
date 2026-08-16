@@ -1247,11 +1247,11 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                BuiltInGlobalVariablePattern, CompositeConstructPattern,
                ExecutionModePattern, ImageFetchPattern,
                ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
-               ImageQuerySizePattern,
-               ImageReadPattern, ImageWritePattern, LoadValuePattern,
-               PushConstantGlobalVariablePattern, SampledImagePattern,
-               StageIOGlobalVariablePattern, StorageBufferAccessChainPattern>(
-      Patterns.getContext(), TypeConverter, FeMeBenefit);
+               ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
+               LoadValuePattern, PushConstantGlobalVariablePattern,
+               SampledImagePattern, StageIOGlobalVariablePattern,
+               StorageBufferAccessChainPattern>(Patterns.getContext(),
+                                                TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,

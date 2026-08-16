@@ -58,9 +58,9 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
   case ImageCallKind::Load2D:
     // (image_heap, image_heap_count, image_index, x, y, mip, mask)
     // -> <4 x float>
-    FTy = FunctionType::get(
-        V4F32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
-        /*isVarArg=*/false);
+    FTy = FunctionType::get(V4F32Ty,
+                            {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+                            /*isVarArg=*/false);
     break;
   }
 
@@ -78,17 +78,16 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
 }
 
 CallInst *feme::cpu::createSample2D(IRBuilderBase &Builder,
-                                    const ImageCallEnv &Env,
-                                    Value *ImageIndex, Value *SamplerIndex,
-                                    Value *U, Value *V, Value *Lod,
-                                    Value *UseExplicitLod, Value *Mask,
-                                    const Twine &Name) {
+                                    const ImageCallEnv &Env, Value *ImageIndex,
+                                    Value *SamplerIndex, Value *U, Value *V,
+                                    Value *Lod, Value *UseExplicitLod,
+                                    Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::Sample2D);
   return Builder.CreateCall(F,
-                            {Env.ImageHeap, Env.ImageHeapCount,
-                             Env.SamplerHeap, Env.SamplerHeapCount, ImageIndex,
-                             SamplerIndex, U, V, Lod, UseExplicitLod, Mask},
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
+                             V, Lod, UseExplicitLod, Mask},
                             Name);
 }
 
@@ -100,12 +99,11 @@ CallInst *feme::cpu::createSampleCmp2D(IRBuilderBase &Builder,
                                        Value *Mask, const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::SampleCmp2D);
-  return Builder.CreateCall(
-      F,
-      {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
-       Env.SamplerHeapCount, ImageIndex, SamplerIndex, U, V, Lod,
-       UseExplicitLod, Dref, Mask},
-      Name);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, Env.SamplerHeap,
+                             Env.SamplerHeapCount, ImageIndex, SamplerIndex, U,
+                             V, Lod, UseExplicitLod, Dref, Mask},
+                            Name);
 }
 
 CallInst *feme::cpu::createLoad2D(IRBuilderBase &Builder,
@@ -124,9 +122,9 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
   if (!Callee)
     return std::nullopt;
 
-  static constexpr ImageCallKind AllKinds[] = {
-      ImageCallKind::Sample2D, ImageCallKind::SampleCmp2D,
-      ImageCallKind::Load2D};
+  static constexpr ImageCallKind AllKinds[] = {ImageCallKind::Sample2D,
+                                               ImageCallKind::SampleCmp2D,
+                                               ImageCallKind::Load2D};
 
   ImageCallKind Kind;
   bool Found = false;

@@ -106,14 +106,12 @@ llvm::CallInst *createSample2D(llvm::IRBuilderBase &Builder,
                                const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.samplecmp.2d.f32` call.
-llvm::CallInst *createSampleCmp2D(llvm::IRBuilderBase &Builder,
-                                  const ImageCallEnv &Env,
-                                  llvm::Value *ImageIndex,
-                                  llvm::Value *SamplerIndex, llvm::Value *U,
-                                  llvm::Value *V, llvm::Value *Lod,
-                                  llvm::Value *UseExplicitLod,
-                                  llvm::Value *Dref, llvm::Value *Mask,
-                                  const llvm::Twine &Name = "");
+llvm::CallInst *
+createSampleCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
+                  llvm::Value *ImageIndex, llvm::Value *SamplerIndex,
+                  llvm::Value *U, llvm::Value *V, llvm::Value *Lod,
+                  llvm::Value *UseExplicitLod, llvm::Value *Dref,
+                  llvm::Value *Mask, const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4f32` call.
 llvm::CallInst *createLoad2D(llvm::IRBuilderBase &Builder,

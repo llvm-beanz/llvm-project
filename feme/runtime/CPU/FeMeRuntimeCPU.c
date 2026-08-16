@@ -418,8 +418,8 @@ typedef struct {
 // zero-is-empty convention (see RuntimeABI.h) rather than a separate
 // `IndexOK` flag.
 __attribute__((always_inline)) static FemeRTImageDescriptor
-femeRTLoadImageDescriptor(const FemeRTImageDescriptor *Heap,
-                          uint32_t HeapCount, uint32_t Index) {
+femeRTLoadImageDescriptor(const FemeRTImageDescriptor *Heap, uint32_t HeapCount,
+                          uint32_t Index) {
   if (Index >= HeapCount) {
     FemeRTImageDescriptor Empty;
     __builtin_memset(&Empty, 0, sizeof(Empty));
@@ -538,7 +538,7 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
     int32_t M = Coord < 0 ? -1 - Coord : Coord;
     return M >= Size ? Size - 1 : M;
   }
-  case 2:   // ClampToEdge
+  case 2: // ClampToEdge
   default:
     return Coord < 0 ? 0 : (Coord >= Size ? Size - 1 : Coord);
   }
@@ -552,9 +552,8 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
 // `SizeInBytes` bound rejects) -- the same "out-of-range reads zero" rule
 // buffers use (see "Bounds checking").
 __attribute__((always_inline)) static FemeRTv4f32
-femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
-                   int32_t X, int32_t Y, _Bool UseBorder,
-                   const float BorderColor[4]) {
+femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
+                   int32_t Y, _Bool UseBorder, const float BorderColor[4]) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
     FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
@@ -614,8 +613,8 @@ typedef struct {
 } FemeRTBilinearSupport;
 
 __attribute__((always_inline)) static FemeRTBilinearSupport
-femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U,
-                             float V, const FemeRTSamplerDescriptor *Samp,
+femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U, float V,
+                             const FemeRTSamplerDescriptor *Samp,
                              uint32_t Level) {
   uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
   uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
@@ -632,12 +631,12 @@ femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U,
   S.BorderX0 = S.BorderX1 = S.BorderY0 = S.BorderY1 = 0;
   S.X0 = femeRTApplyAddressMode(BaseX, (int32_t)LevelWidth, Samp->AddressU,
                                 &S.BorderX0);
-  S.X1 = femeRTApplyAddressMode(BaseX + 1, (int32_t)LevelWidth,
-                                Samp->AddressU, &S.BorderX1);
+  S.X1 = femeRTApplyAddressMode(BaseX + 1, (int32_t)LevelWidth, Samp->AddressU,
+                                &S.BorderX1);
   S.Y0 = femeRTApplyAddressMode(BaseY, (int32_t)LevelHeight, Samp->AddressV,
                                 &S.BorderY0);
-  S.Y1 = femeRTApplyAddressMode(BaseY + 1, (int32_t)LevelHeight,
-                                Samp->AddressV, &S.BorderY1);
+  S.Y1 = femeRTApplyAddressMode(BaseY + 1, (int32_t)LevelHeight, Samp->AddressV,
+                                &S.BorderY1);
   return S;
 }
 
@@ -651,10 +650,10 @@ femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
   int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
   int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight);
   _Bool BorderX = 0, BorderY = 0;
-  int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
-                                        Samp->AddressU, &BorderX);
-  int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
-                                        Samp->AddressV, &BorderY);
+  int32_t AddrX =
+      femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp->AddressU, &BorderX);
+  int32_t AddrY =
+      femeRTApplyAddressMode(Y, (int32_t)LevelHeight, Samp->AddressV, &BorderY);
   return femeRTFetchTexel2D(Img, Level, AddrX, AddrY, BorderX || BorderY,
                             Samp->BorderColor);
 }
@@ -667,18 +666,14 @@ femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
                      uint32_t Level) {
   FemeRTBilinearSupport S =
       femeRTComputeBilinearSupport(Img, U, V, Samp, Level);
-  FemeRTv4f32 T00 = femeRTFetchTexel2D(Img, Level, S.X0, S.Y0,
-                                       S.BorderX0 || S.BorderY0,
-                                       Samp->BorderColor);
-  FemeRTv4f32 T10 = femeRTFetchTexel2D(Img, Level, S.X1, S.Y0,
-                                       S.BorderX1 || S.BorderY0,
-                                       Samp->BorderColor);
-  FemeRTv4f32 T01 = femeRTFetchTexel2D(Img, Level, S.X0, S.Y1,
-                                       S.BorderX0 || S.BorderY1,
-                                       Samp->BorderColor);
-  FemeRTv4f32 T11 = femeRTFetchTexel2D(Img, Level, S.X1, S.Y1,
-                                       S.BorderX1 || S.BorderY1,
-                                       Samp->BorderColor);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(
+      Img, Level, S.X0, S.Y0, S.BorderX0 || S.BorderY0, Samp->BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(
+      Img, Level, S.X1, S.Y0, S.BorderX1 || S.BorderY0, Samp->BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(
+      Img, Level, S.X0, S.Y1, S.BorderX0 || S.BorderY1, Samp->BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(
+      Img, Level, S.X1, S.Y1, S.BorderX1 || S.BorderY1, Samp->BorderColor);
   FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
   FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
   return Top + (Bottom - Top) * S.Wy;
@@ -721,8 +716,7 @@ FemeRTv4f32 femeCpuImageSample2DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
     const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
     uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
-    _Bool UseExplicitLod,
-    _Bool Mask) asm("feme.cpu.image.sample.2d.v4f32");
+    _Bool UseExplicitLod, _Bool Mask) asm("feme.cpu.image.sample.2d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
@@ -738,8 +732,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
     return Zero;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod,
-                                        Samp.MipFilter);
+  uint32_t Level =
+      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
   return Samp.MagFilter == 1 // SamplerFilter::Linear.
              ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level)
              : femeRTSamplePoint2D(&Img, &Samp, U, V, Level);
@@ -771,8 +765,8 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
     return 0.0f;
   FemeRTSamplerDescriptor Samp =
       femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
-  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod,
-                                        Samp.MipFilter);
+  uint32_t Level =
+      femeRTSelectMipLevel(&Img, Lod, UseExplicitLod, Samp.MipFilter);
 
   if (Samp.MagFilter != 1) { // Point (nearest).
     uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
@@ -780,8 +774,8 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
     int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
     int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight);
     _Bool BorderX = 0, BorderY = 0;
-    int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
-                                           Samp.AddressU, &BorderX);
+    int32_t AddrX =
+        femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp.AddressU, &BorderX);
     int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                            Samp.AddressV, &BorderY);
     FemeRTv4f32 T = femeRTFetchTexel2D(&Img, Level, AddrX, AddrY,
@@ -791,18 +785,14 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
 
   FemeRTBilinearSupport S =
       femeRTComputeBilinearSupport(&Img, U, V, &Samp, Level);
-  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, Level, S.X0, S.Y0,
-                                      S.BorderX0 || S.BorderY0,
-                                      Samp.BorderColor);
-  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, Level, S.X1, S.Y0,
-                                      S.BorderX1 || S.BorderY0,
-                                      Samp.BorderColor);
-  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, Level, S.X0, S.Y1,
-                                      S.BorderX0 || S.BorderY1,
-                                      Samp.BorderColor);
-  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, Level, S.X1, S.Y1,
-                                      S.BorderX1 || S.BorderY1,
-                                      Samp.BorderColor);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(
+      &Img, Level, S.X0, S.Y0, S.BorderX0 || S.BorderY0, Samp.BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(
+      &Img, Level, S.X1, S.Y0, S.BorderX1 || S.BorderY0, Samp.BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(
+      &Img, Level, S.X0, S.Y1, S.BorderX0 || S.BorderY1, Samp.BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(
+      &Img, Level, S.X1, S.Y1, S.BorderX1 || S.BorderY1, Samp.BorderColor);
   float C00 = femeRTApplyCompare(Samp.CompareFunc, Dref, T00[0]);
   float C10 = femeRTApplyCompare(Samp.CompareFunc, Dref, T10[0]);
   float C01 = femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0]);
@@ -818,10 +808,11 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
 // `OpImageFetch`/`OpImageRead`): an out-of-range coordinate reads as zero
 // rather than applying any address mode, since there is no sampler to
 // supply one.
-FemeRTv4f32 femeCpuImageLoad2DV4F32(
-    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
-    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Mip,
-    _Bool Mask) asm("feme.cpu.image.load.2d.v4f32");
+FemeRTv4f32
+femeCpuImageLoad2DV4F32(const FemeRTImageDescriptor *ImageHeap,
+                        uint32_t ImageHeapCount, uint32_t ImageIndex, int32_t X,
+                        int32_t Y, uint32_t Mip,
+                        _Bool Mask) asm("feme.cpu.image.load.2d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
