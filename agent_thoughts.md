@@ -15188,3 +15188,224 @@ from the new vertex/fragment wrapper lit coverage, derivative/quad lit
 coverage, the new wrapper unit tests, the prepared-batch unit tests, and the
 stage-aware `CompiledStage` end-to-end tests; there were no regressions in the
 pre-existing suite.
+
+# Agent thoughts: roadmap step R29 (image/sampler descriptors, `FemeShaderResources` folded into `FemeDispatchArgs`, `SamplerHeap` retyped)
+
+## Task
+
+Implement roadmap R29 (feme/docs/Roadmap.md): "The image and sampler
+descriptors, `FemeShaderResources` folded into `FemeDispatchArgs`, and
+`SamplerHeap` retyped. This is the deliberate ABI break: artifacts built
+before it stop loading (see: §1.8.4)."
+
+## Reading the design first
+
+FeMeGraphicsDesign.md's "Relationship to the compute ABI" section (under
+"Graphics Runtime ABI") and its "Images and Samplers" / "Separate descriptor
+kinds" section together specify what this milestone is and, just as
+importantly, is not:
+
+- `FemeShaderResources` (today: `ResourceHeap`, `SamplerHeap`,
+  `RootConstants` plus counts) is meant to be *the* resource block for every
+  stage, compute included. Two things about the current shape are flagged as
+  outright wrong, not merely incomplete: `SamplerHeap` is typed
+  `const FemeDescriptor *` (a placeholder from before sampling existed), and
+  there is no image heap at all, because `FemeDescriptor` cannot express
+  dimensionality, mip/array ranges, sample layout, or plane layout.
+- The fix is to give images and samplers their own descriptor types
+  (`FemeImageDescriptor`, `FemeSamplerDescriptor`) with a rough field list
+  sketched in prose (not a final C layout -- the design explicitly says "the
+  implementation milestone settles exact C-compatible definitions"), and to
+  *embed* `FemeShaderResources` in `FemeDispatchArgs` rather than leaving
+  `FemeDispatchArgs` with its own duplicate resource fields.
+- The G2 milestone breakdown explicitly splits this from R30: R29 is "define
+  the image and sampler descriptors, and fold `FemeShaderResources` into
+  `FemeDispatchArgs`"; R30 is "canonicalize the first load/store/sample/query
+  operations ... implement addressing/mip/filtering/LOD ... format table ...
+  SIMD lowering". So R29 is pure ABI-shape work: no `feme.image.*`/
+  `feme.sampler.*` operations, no sampling math, no format table. Getting this
+  boundary right mattered for scoping the change correctly.
+
+## Design decisions I had to make myself
+
+The design's sketch for `FemeImageDescriptor`/`FemeSamplerDescriptor` is
+prose, not fields:
+
+```text
+FemeImageDescriptor
+  base allocation and byte size
+  dimensionality and extent
+  mip and array ranges
+  plane, sample count, and format
+  row, slice, mip, and sample layout
+  sampled/storage/depth flags
+
+FemeSamplerDescriptor
+  min/mag/mip filter
+  U/V/W addressing modes
+  LOD bias and min/max clamp
+  comparison function
+  border color
+  anisotropy and reduction mode
+```
+
+I settled concrete fields for both, following the codebase's existing
+`FemeDescriptor` conventions (uint32_t-backed `enum class`es, `FlagBits`
+enums, `Reserved` headroom):
+
+- `ImageDimension` mirrors `feme::dxsa::ResourceDimension`
+  (`feme/include/feme/Dialect/DXSA/IR/DXSAOps.td`) minus its `buffer` case,
+  since a buffer stays a `FemeDescriptor`. This reuses an enumeration FeMe
+  already has rather than inventing a fourth spelling of the same concept.
+- "row, slice, mip, and sample layout" cannot be one stride per image, since
+  different mip levels have different byte footprints. I made it a
+  dense-by-mip-level `FemeImageSubresourceLayout` table
+  (`Offset`/`RowPitch`/`SlicePitch`/`SampleStride` per level), pointed to by
+  `MipLayouts`/`MipLayoutCount` on the descriptor -- the same
+  pointer+count-array shape `FemeStageLayout::Elements` already uses
+  elsewhere in this header, so it's an established idiom rather than a new
+  one.
+- `FemeSamplerDescriptor` is a plain-old-data bag with no host storage
+  pointer at all (unlike every other descriptor kind): the zero value is a
+  legal (if unhelpful) `Nearest`/`Repeat` sampler, so there's no "unwritten
+  slot" bounds-checking story to invent for it the way there is for
+  `FemeDescriptor`/`FemeImageDescriptor`.
+- I did *not* add an `AbiVersion` field to `FemeDispatchArgs`. The design's
+  "the `AbiVersion` fields exist so ..." sentence refers to the existing
+  `StageArgsAbiVersion` on `FemeVertexArgs`/`FemeFragmentArgs`, not a new
+  field for dispatch args, and R29's own roadmap description doesn't list
+  one. Adding it would have been scope creep beyond what the roadmap item and
+  design section actually ask for.
+
+## Folding `FemeShaderResources` into `FemeDispatchArgs`
+
+"Embed" here means embedding by value: `FemeDispatchArgs` now has a
+`FemeShaderResources Resources;` member (not a pointer, unlike
+`FemeVertexArgs`/`FemeFragmentArgs`, which already pointed at a
+heap-allocated-by-the-host `FemeShaderResources`). This matches how compute's
+resource fields were always inline scalars/pointers directly in
+`FemeDispatchArgs`, just grouped into the shared struct now, and keeps
+`FemeDispatchArgs` self-contained the way it always was (no extra
+must-outlive-the-call object for the simple compute path to manage).
+
+This ABI change had a wider blast radius than the header itself, because two
+other places hardcode `FemeDispatchArgs`'s field layout at the LLVM-IR level
+rather than going through the C struct:
+
+- `lib/Transforms/CPU/DispatchArgsLayout.h`'s `DispatchArgsField` enum and
+  `getDispatchArgsType()` mirror `FemeDispatchArgs` field-for-field so
+  `EntryWrapperPass`/`ReferenceEntryWrapperPass` can `CreateStructGEP` into a
+  compiled wrapper's `%args` parameter. `Resources` is now field 0 (a nested
+  struct), and `GroupID`/`GroupCount`/`GroupShared`/`Reserved` shifted down
+  from indices 6-9 to 1-4.
+- `lib/Transforms/CPU/StageArgsLayout.h`'s `ShaderResourcesField` enum and
+  `getShaderResourcesType()` mirror `FemeShaderResources` the same way, for
+  `VertexWrapperPass`/`FragmentWrapperPass`, which already read resources
+  through a pointer indirection. I inserted `ImageHeap`/`ImageHeapCount`
+  between `ResourceHeap` and `SamplerHeap`, matching the design sketch's field
+  order, so every existing symbolic field reference in `VertexWrapper.cpp`/
+  `FragmentWrapper.cpp` kept working unchanged (they never hardcoded numeric
+  indices).
+
+Reading `Args->Resources.ResourceHeap` etc. from `EntryWrapperPass`/
+`ReferenceEntryWrapperPass` now needs a two-level GEP (one into
+`FemeDispatchArgs` to reach the embedded `Resources` struct, one into that
+struct for the actual field), so I added a `loadResourcesField` helper next
+to the existing single-level `loadArgsField` in `DispatchArgsLayout.h`,
+built on the already-existing `getShaderResourcesType` from
+`StageArgsLayout.h`. Both wrapper passes' `buildWrapperEnv` now call it for
+the six resource-block fields instead of `loadArgsField` with the old flat
+`DispatchArgsField` enum values.
+
+## Downstream ABI consumers
+
+`feme::cpu::ResourceHeap.h`/`.cpp` (`DispatchResources`, `VertexResources`,
+`FragmentResources`, and the three `Prepared*` classes) are the host-side
+code that actually populates these ABI structs for the JIT/AOT dispatch
+paths. Each gained an `ImageHeap` field (`llvm::ArrayRef<FemeImageDescriptor>`)
+and had its `SamplerHeap` field retyped from
+`llvm::ArrayRef<FemeDescriptor>` to `llvm::ArrayRef<FemeSamplerDescriptor>`.
+Like the pre-existing `SamplerHeap` field, `ImageHeap` is passed straight
+through with no per-binding materialization (`materializeResourceHeap` only
+exists for the register-bound-resource case, which R29 does not extend to
+images/samplers -- that's implicitly R30's job once there are canonical
+image/sampler operations to bind against).
+
+`feme::cpu::PreparedDispatch::argsFor` now writes into the nested
+`Args.Resources.*` fields instead of `Args.*` directly; the `PreparedVertexBatch`/
+`PreparedFragmentBatch` constructors already built a separate
+`FemeShaderResources ShaderResources` member and pointed `Args.Resources` at
+it, so those only needed their `ImageHeap`/`SamplerHeap` population extended,
+not restructured.
+
+I deliberately left `ResourceInfo`/`StageArtifactInfo`
+(`lib/Target/CPU/ResourceInfo.{h,cpp}`) untouched: that's the *serialized
+AOT-artifact reflection* format (heap-usage discovery, `ArtifactAbiVersion`),
+a different and already-versioned concern from the raw
+`FemeDispatchArgs`/`FemeShaderResources` C-struct ABI this row changes. R29's
+roadmap description and G2 checklist don't ask for an artifact-info version
+bump, and nothing about image/sampler usage discovery exists yet for it to
+report (that's R30, once `feme.image.*`/`feme.sampler.*` operations exist for
+a lowering pass to scan for).
+
+## Test and lit-test fallout from the field-index shift
+
+Grepping for hardcoded `getelementptr ... i32 0, i32 N` against
+`FemeDispatchArgs`'s field indices turned up exactly one lit test that
+needed updating: `entry-wrapper-groupshared-host.ll` checked for GEP index 8
+(the old `GroupShared` field position); it's now index 3. Every other
+resource/entry-wrapper lit test either doesn't index into the dispatch-args
+struct directly or references a different, unrelated struct (e.g. the
+barrier-spill context struct), so those needed no changes.
+
+`ResourceHeapTest.cpp` and `AOTDispatchTest.cpp` set/read
+`FemeDispatchArgs::ResourceHeap`/`ResourceHeapCount` directly; those became
+`Args.Resources.ResourceHeap`/`Args.Resources.ResourceHeapCount`. I also
+added new coverage rather than only fixing the compile breaks:
+`PreparedDispatchTest.ArgsForCarriesTheImageAndSamplerHeaps` and
+`PreparedVertexBatchTest.ArgsExposeImageAndSamplerHeaps` construct a
+`FemeImageDescriptor`/`FemeSamplerDescriptor`, thread them through
+`DispatchResources`/`VertexResources`, and assert the resulting
+`FemeDispatchArgs`/`FemeVertexArgs` expose them correctly -- covering the new
+image/sampler-heap plumbing at the same granularity the pre-existing
+resource-heap tests already covered `ResourceHeap`.
+
+## Documentation updated to match
+
+Per this milestone's own framing ("this is the deliberate ABI break"), I
+updated every place the old shape was written down as authoritative:
+
+- FeMeCPUDesign.md's "Kernel ABI" section had the actual (now stale) C
+  struct definition for `FemeDispatchArgs` inline; I respelled it to show
+  `FemeShaderResources` as its own typedef embedded in `FemeDispatchArgs`,
+  and added a status note recording the ABI break explicitly.
+- FeMeGraphicsDesign.md's "Relationship to the compute ABI" and "Separate
+  descriptor kinds" sections each got a "Status (roadmap R29): implemented
+  as ..." paragraph recording the concrete fields chosen and the one
+  deviation from the prose sketch (the per-mip-level layout table instead of
+  a single stride, and why).
+- Roadmap.md: R29's own row in the milestone table gained a "(done: ...)"
+  parenthetical in the same style every other completed row uses; the three
+  §1.8.4 gap-inventory rows this row closes got the `~~struck through~~
+  (closed by R29: ...)` treatment R21/R22/R23/etc. already established.
+
+I left the §1 "two tracks" overview paragraph's "no image or sampler
+descriptor" sentence alone: it's a historical snapshot of the graphics
+track's starting state (it also still says "no `CompiledStage`", which has
+been false since R21), and prior landed rows never edited it either, so
+changing it now would be inconsistent with how this document has actually
+been maintained.
+
+## Testing
+
+Baseline before this row: `ninja -C build check-feme` (assertions-enabled,
+ccache) discovered 1085 tests, 1083 passed, 2 unsupported (verified before
+making any change).
+
+After this row's implementation: 1087 tests discovered, 1085 passed, 2
+unsupported. The +2 is the new `PreparedDispatchTest`/`PreparedVertexBatchTest`
+image/sampler-heap coverage; no regressions in the pre-existing suite. Ran
+`ninja check-feme -j$(nproc)` end to end (not a narrower target) so that
+`check-feme`'s own dependency graph -- which rebuilds `feme-opt`, `feme-run`,
+`feme`, and every gtest binary the lit suite's `RUN:` lines invoke -- is
+exercised, not just the unit-test binaries I touched directly.
