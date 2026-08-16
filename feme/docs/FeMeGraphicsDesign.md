@@ -749,11 +749,15 @@ the entry point by `feme::ShaderStage` instead of assuming compute, and its
 unchanged in behavior, as the compute-only compatibility overload this
 section asks for, and every existing caller (`feme::cpu::JITEngine`/
 `CompiledStage`, `feme::Driver`) still goes through it, always selecting
-`ShaderStage::Compute`. `CompiledStage::create` itself is not yet
-stage-aware -- it still only ever takes the compute-only `JITOptions` -- since
-its stage-specific `invoke*` methods and the vertex/fragment wrappers that
-would produce a dispatchable non-compute artifact do not exist yet; that is
-roadmap R28's job.
+`ShaderStage::Compute`.
+
+Status (roadmap R28): completed for the stages this section scoped to.
+`runPipeline` now selects the final wrapper by stage as this diagram asks:
+`EntryWrapperPass` for compute, `VertexWrapperPass` for vertex, and
+`FragmentWrapperPass` for fragment. `CompiledStage::create(Context &, Module,
+const StageCompileOptions &)` is stage-aware too, and the non-compute path now
+reaches the same shared middle-end phases before those new wrappers instead of
+forking a separate lowering pipeline.
 
 ### Preparation and validation
 
@@ -832,9 +836,7 @@ narrows both masks by `!cond`, `feme.stage.demote(cond)` narrows only the
 side-effect mask, and `feme.stage.is_helper()` lowers to
 `live && !sideeffect`. A plain `load` and a resource load use the live mask; a
 `store`, `atomicrmw`, and resource store use the side-effect mask.
-`feme::cpu::SIMDizePass` needed no code change at all: it already widens
-whatever `i1` value governs a masked call generically, regardless of which of
-the two masks it is. `--reference` mode gets its own counterpart in
+`--reference` mode gets its own counterpart in
 `feme::cpu::ReferenceLoweringPass`: one invocation at a time has no mask to
 narrow, so `discard` becomes a real conditional early return and
 `demote`/`is_helper` read/write a per-invocation `helper` flag instead.
@@ -851,6 +853,18 @@ an unguarded side effect" this paragraph asks for is left to a later
 milestone, once `feme::graphics::ValidateStagePass` or a sibling pass has a
 concrete shape to check that against.
 
+Status (roadmap R28): the shared-middle-end claim held, but not at literally
+zero code change. The localized extensions that turned out to be necessary were
+still confined to the shared phases themselves: `WaveUniformity` now treats
+stage IO, derivatives, quad reads, and pull-model interpolation as per-lane;
+`LinearizePass` rewrites `feme.stage.output.store` into a masked CPU-internal
+helper and records fragment return masks; and `SIMDizePass` widens those stage
+ops/helpers while carrying *two* entry masks (`wave_entry_mask` for live lanes,
+`wave_sideeffect_mask` for stores). `PreparePass`, `ResourceLoweringPass`, and
+the resource/root-constant lowering path needed no stage-specific changes, so
+this remained a localized extension rather than a shared-middle-end boundary
+revision.
+
 ### Vertex wrapper
 
 The vertex wrapper receives a batch of vertex invocations prepared by input
@@ -858,6 +872,15 @@ assembly. Lanes map monotonically to invocation records; unlike fragment
 waves, no 2D quad meaning is imposed. Each invocation record supplies vertex,
 instance, draw, base-vertex, and base-instance IDs plus access to fetched
 attributes.
+
+Status (roadmap R28): implemented for synthetic in-memory stage layouts.
+`feme::cpu::VertexWrapperPass` lowers `feme.stage.input.load` from a
+structure-of-arrays `Inputs` block plus `FemeVertexInvocation` system values,
+forms waves over `InvocationCount`, computes the partial-final-wave live mask,
+and lowers masked stage output stores into the `Outputs` block through
+`FemeStageLayout`. Deviation: the stage-op `vertex` operand is still required
+to be 0 in this synthetic-layout path; the multi-vertex-per-invocation forms
+that later patch/geometry work needs remain out of scope for this row.
 
 The wrapper:
 
@@ -881,6 +904,17 @@ The rasterizer supplies fragment work in 2x2 quads. Lanes `4k..4k+3` use the
 quad ordering already fixed by `FeMeCPUDesign.md`; a wave contains one or more
 whole quads and the wave size is a multiple of four.
 
+Status (roadmap R28): implemented for the synthetic quad-record ABI this row
+introduced. `feme::cpu::FragmentWrapperPass` seeds the widened body's live and
+side-effect entry masks from `FemeFragmentInvocation::{LiveMask,SideEffectMask}`,
+keeps helper lanes live, lowers `feme.stage.input.load` from the linked input
+layout or fragment system-value records, lowers masked stage output stores into
+`Outputs`, and writes the widened body's final live/side-effect masks to
+`FemeFragmentResult` through the lowered `feme.cpu.stage.return.masks` helper.
+Deviation: pull-model interpolation (`InterpolateAtCentroid/AtSample/AtOffset`)
+is still diagnosed as unsupported here rather than miscompiled; that remains a
+later milestone's work.
+
 Each quad record supplies pixel/sample coordinates, interpolants or their
 planes, primitive-facing data, coverage, depth, and initial live and
 side-effect masks. The wrapper:
@@ -900,6 +934,15 @@ requirements without recompiling shader semantics into every API frontend.
 
 Fine derivatives use the immediate 2x2 quad values. With lanes ordered as
 `(0,0), (1,0), (0,1), (1,1)`:
+
+Status (roadmap R28): implemented in `feme::cpu::WaveLoweringPass` for wave
+sizes 4 and 8 only, the two widths this row scoped in. Fine derivatives use
+the row/column-local differences this section specifies; coarse derivatives use
+the top-row (`ddx`) or left-column (`ddy`) difference for all four lanes of one
+quad, and wider wave-8 shaders simply repeat the same mapping independently for
+the second quad. Any other wave size reaching a derivative or quad-read call is
+diagnosed through `LLVMContext::emitError` instead of being mis-lowered or
+crashing.
 
 ```text
 ddx_fine = value[x=1] - value[x=0] on the same row
@@ -1050,6 +1093,16 @@ reflection and pipeline linkage. Each entry gives a stable element ID, scalar
 type, component count, storage offset/stride, and interpolation information.
 The stage wrapper receives only entries used by the compiled shader.
 
+Status (roadmap R28): implemented as the plain-C-compatible `FemeStageElement`
+/`FemeStageLayout` definitions in `feme/include/feme/Target/CPU/RuntimeABI.h`.
+The finalized layout kept the sketch's linked-layout idea but made the storage
+addressing explicit for compiled code: each entry now carries `DataOffset`,
+`InvocationStride`, `ComponentStride`, and `RowStride`, with the table dense by
+`ElementID` so a wrapper can index it directly without a second reflection map.
+System-value/interpolation/frequency fields are retained for reflection even
+when the current synthetic wrappers source those values directly from the
+invocation records rather than from stage storage bytes.
+
 Layouts use structure-of-arrays storage by default. A runtime may fetch packed
 vertex formats directly into this storage, but packed API formats and buffer
 strides are not exposed to compiled shaders. This keeps vertex conversion in
@@ -1147,6 +1200,17 @@ inside the compiled entry wrapper rather than moving into `invokeGroup`
 itself, to keep `feme::cpu::EntryWrapperPass`'s existing barrier-splitting
 machinery intact).
 
+Status (roadmap R28): the stage-aware half is now implemented for vertex and
+fragment stages. `StageCompileOptions` gained the sketch's optimization-policy
+fields (`OptLevel`, `EnableRobustness`), `CompiledStage::create(Context &,
+Module, const StageCompileOptions &)` compiles vertex and fragment entry
+points through the ordinary CPU pipeline, `getStage()` exposes the compiled
+stage, and `invokeVertices`/`invokeFragments` consume the new
+`PreparedVertexBatch`/`PreparedFragmentBatch` helpers. The original
+`create(Context &, Module, const JITOptions &)` / `invokeGroup` compute path is
+kept unchanged as the compatibility API this section and the Vulkan design both
+asked to retain.
+
 ### Artifact reflection
 
 `ArtifactInfo` (today at `ArtifactAbiVersion = 2`) describes a compute
@@ -1188,13 +1252,18 @@ new `feme::cpu::computeSideEffectFlags`), plus `WaveSize`/`GroupSize`/
 `GroupSharedSize`/`GroupSharedAlign` -- part of the version-2 layout already,
 but populated for the first time here (`feme::cpu::CompiledStage::
 getArtifactInfo` for JIT reflection, `feme::Driver`'s CPU retargeting path
-for AOT). Every field is generic enough to describe a non-compute stage, but
-`Signature`/the side-effect flags are unpopulated in practice until roadmap
-R27/R28 make `CompiledStage` itself stage-aware -- every artifact today is
-still `ShaderStage::Compute`. Resource/sampler/root-constant requirements,
-depth/coverage/derivative flags beyond the three landed here, image/sampler
-requirements, and the tessellation/mesh/ray fields this section lists all
-remain open for their own owning milestones (R25/R29/R30/R34/R35/R37).
+for AOT). Resource/sampler/root-constant requirements, depth/coverage/
+derivative flags beyond the three landed here, image/sampler requirements, and
+the tessellation/mesh/ray fields this section lists all remain open for their
+own owning milestones (R25/R29/R30/R34/R35/R37).
+
+Status (roadmap R28): `CompiledStage` now fills the generic stage-tagged pieces
+for vertex and fragment artifacts too: `StageArtifactInfo::Stage` is the real
+compiled stage, not always `Compute`, and `Signature` carries the serialized
+attached `feme::EntrySignature` when one is present on the source module.
+`feme::Driver`'s CPU AOT path still only goes through the compute-only pipeline
+entry point today, so these new non-compute populations are currently a JIT
+reflection capability rather than an AOT one.
 
 ## Images and Samplers
 
