@@ -45,7 +45,9 @@
 
 #include "feme/Transforms/CPU/Linearize.h"
 
+#include "StageMaskCalls.h"
 #include "feme/Analysis/CPU/WaveUniformity.h"
+#include "feme/Core/ShaderStage.h"
 #include "feme/Core/StageOps.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
@@ -56,6 +58,7 @@
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/Analysis/PostDominators.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -171,6 +174,13 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
           Call->eraseFromParent();
           continue;
         }
+        case feme::StageOpKind::OutputStore:
+          createMaskedOutputStore(
+              B, cast<ConstantInt>(Call->getArgOperand(0))->getZExtValue(),
+              Call->getArgOperand(1), Call->getArgOperand(2),
+              Call->getArgOperand(3), Call->getArgOperand(4), Masks.SideEffect);
+          Call->eraseFromParent();
+          continue;
         default:
           break; // Not a mask-affecting stage op; fall through below.
         }
@@ -180,6 +190,14 @@ void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
         Value *Mask = isLoad(Matched->Kind) ? Masks.Live : Masks.SideEffect;
         if (!isa<Constant>(Mask))
           Call->setArgOperand(Call->arg_size() - 1, Mask);
+      }
+      continue;
+    }
+    if (auto *RI = dyn_cast<ReturnInst>(&I)) {
+      if (feme::getShaderStage(*RI->getFunction()) ==
+          feme::ShaderStage::Fragment) {
+        IRBuilder<> B(RI);
+        createReturnMasks(B, Masks.Live, Masks.SideEffect);
       }
       continue;
     }
@@ -232,7 +250,8 @@ bool hasStageMaskOps(Function &F) {
     if (Call && feme::isStageOpCall(*Call, &Kind) &&
         (Kind == feme::StageOpKind::Discard ||
          Kind == feme::StageOpKind::Demote ||
-         Kind == feme::StageOpKind::IsHelper))
+         Kind == feme::StageOpKind::IsHelper ||
+         Kind == feme::StageOpKind::OutputStore))
       return true;
   }
   return false;
@@ -596,7 +615,8 @@ bool DiamondFlattener::run() {
     HasDivergentBranch = true;
     break;
   }
-  if (!HasDivergentBranch && !hasStageMaskOps(F))
+  if (!HasDivergentBranch && !hasStageMaskOps(F) &&
+      feme::getShaderStage(F) != feme::ShaderStage::Fragment)
     return false;
 
   MaskPair AllActive{ConstantInt::getTrue(F.getContext()),

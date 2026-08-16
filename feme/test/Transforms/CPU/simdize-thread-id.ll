@@ -8,7 +8,8 @@
 
 ; CHECK-LABEL: define void @main(
 ; CHECK-SAME: i32 %wave_group_id_x, i32 %wave_group_id_y, i32 %wave_group_id_z,
-; CHECK-SAME: i32 %wave_index, <4 x i1> %wave_entry_mask, ptr %wave_groupshared
+; CHECK-SAME: i32 %wave_index, <4 x i1> %wave_entry_mask,
+; CHECK-SAME: <4 x i1> %wave_sideeffect_mask, ptr %wave_groupshared
 ; CHECK: call <4 x i32> @feme.cpu.builtin.thread_id.v4(
 ; CHECK-SAME: i32 %wave_group_id_x, i32 %wave_group_id_y, i32 %wave_group_id_z,
 ; CHECK-SAME: i32 %wave_index, i32 4, i32 1, i32 1, i32 0)

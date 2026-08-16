@@ -13,6 +13,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   BuiltinCallsTest.cpp
   CFGGenTest.cpp
   EntryWrapperTest.cpp
+  FragmentWrapperTest.cpp
   GroupSharedInfoTest.cpp
   LinearizeTest.cpp
   MaskIntrinsicsTest.cpp
@@ -25,10 +26,12 @@ add_feme_unittest(FeMeTransformsCPUTests
   SPIRVResourceLoweringTest.cpp
   UnsupportedOpsTest.cpp
   VerifyStructuredTest.cpp
+  VertexWrapperTest.cpp
   WaveCallsTest.cpp
   WaveLoweringTest.cpp
   )
 target_link_libraries(FeMeTransformsCPUTests
   PRIVATE
   FeMeTransformsCPU
+  FeMeTransformsDXIL
   )

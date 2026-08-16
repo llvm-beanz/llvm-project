@@ -70,6 +70,7 @@
 
 #include "feme/Transforms/CPU/WaveLowering.h"
 
+#include "feme/Core/StageOps.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/WaveCalls.h"
 
@@ -84,6 +85,7 @@
 #include "llvm/IR/Module.h"
 
 using namespace llvm;
+using namespace feme;
 using namespace feme::cpu;
 
 namespace {
@@ -564,6 +566,158 @@ void lowerWaveCall(const MatchedWaveCall &Matched) {
   CI.eraseFromParent();
 }
 
+unsigned getStageWaveSize(const CallInst &CI) {
+  if (auto *VecTy = dyn_cast<FixedVectorType>(CI.getType()))
+    return VecTy->getNumElements();
+  if (CI.arg_size() != 0)
+    if (auto *VecTy = dyn_cast<FixedVectorType>(CI.getArgOperand(0)->getType()))
+      return VecTy->getNumElements();
+  return 0;
+}
+
+SmallVector<int, 8> getQuadShuffleMask(unsigned WaveSize,
+                                       ArrayRef<unsigned> LaneMap) {
+  SmallVector<int, 8> Mask;
+  Mask.reserve(WaveSize);
+  for (unsigned QuadBase = 0; QuadBase != WaveSize; QuadBase += 4)
+    for (unsigned Lane : LaneMap)
+      Mask.push_back(static_cast<int>(QuadBase + Lane));
+  return Mask;
+}
+
+Value *lowerDerivative(CallInst &CI, StageOpKind Kind) {
+  unsigned WaveSize = getStageWaveSize(CI);
+  if (WaveSize != 4 && WaveSize != 8) {
+    CI.getContext().emitError(&CI,
+                              "feme-cpu-lower-wave: fragment derivatives and "
+                              "quad ops require wave size 4 or 8");
+    return nullptr;
+  }
+
+  Value *WideVal = CI.getArgOperand(0);
+  auto *VecTy = dyn_cast<VectorType>(WideVal->getType());
+  if (!VecTy) {
+    CI.getContext().emitError(
+        &CI,
+        "feme-cpu-lower-wave: derivative operand was not widened to a vector");
+    return nullptr;
+  }
+  Type *EltTy = VecTy->getElementType();
+  if (!EltTy->isFloatingPointTy()) {
+    CI.getContext().emitError(&CI,
+                              "feme-cpu-lower-wave: fragment derivatives are "
+                              "only defined for floating-point values");
+    return nullptr;
+  }
+
+  IRBuilder<> Builder(&CI);
+  SmallVector<int, 8> LeftMask;
+  SmallVector<int, 8> RightMask;
+  switch (Kind) {
+  case StageOpKind::DerivativeXFine:
+    LeftMask = getQuadShuffleMask(WaveSize, {0, 0, 2, 2});
+    RightMask = getQuadShuffleMask(WaveSize, {1, 1, 3, 3});
+    break;
+  case StageOpKind::DerivativeYFine:
+    LeftMask = getQuadShuffleMask(WaveSize, {0, 1, 0, 1});
+    RightMask = getQuadShuffleMask(WaveSize, {2, 3, 2, 3});
+    break;
+  case StageOpKind::DerivativeXCoarse:
+    LeftMask = getQuadShuffleMask(WaveSize, {0, 0, 0, 0});
+    RightMask = getQuadShuffleMask(WaveSize, {1, 1, 1, 1});
+    break;
+  case StageOpKind::DerivativeYCoarse:
+    LeftMask = getQuadShuffleMask(WaveSize, {0, 0, 0, 0});
+    RightMask = getQuadShuffleMask(WaveSize, {2, 2, 2, 2});
+    break;
+  default:
+    llvm_unreachable("not a derivative stage op");
+  }
+
+  Value *Left = Builder.CreateShuffleVector(WideVal, LeftMask, "quad.left");
+  Value *Right = Builder.CreateShuffleVector(WideVal, RightMask, "quad.right");
+  return Builder.CreateFSub(Right, Left, CI.getName());
+}
+
+Value *lowerQuadRead(CallInst &CI) {
+  unsigned WaveSize = getStageWaveSize(CI);
+  if (WaveSize != 4 && WaveSize != 8) {
+    CI.getContext().emitError(&CI,
+                              "feme-cpu-lower-wave: fragment derivatives and "
+                              "quad ops require wave size 4 or 8");
+    return nullptr;
+  }
+
+  IRBuilder<> Builder(&CI);
+  Value *WideVal = CI.getArgOperand(0);
+  if (!isa<VectorType>(WideVal->getType())) {
+    CI.getContext().emitError(
+        &CI,
+        "feme-cpu-lower-wave: quad-read operand was not widened to a vector");
+    return nullptr;
+  }
+  Value *DirArg = CI.getArgOperand(1);
+  Value *Result = PoisonValue::get(WideVal->getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *LaneDirVal =
+        isa<FixedVectorType>(DirArg->getType())
+            ? Builder.CreateExtractElement(DirArg, Builder.getInt32(Lane))
+            : DirArg;
+    auto *LaneDir = dyn_cast<ConstantInt>(LaneDirVal);
+    if (!LaneDir) {
+      CI.getContext().emitError(&CI,
+                                "feme-cpu-lower-wave: quad-read direction must "
+                                "be a compile-time constant");
+      return nullptr;
+    }
+
+    unsigned QuadBase = Lane & ~3u;
+    unsigned InQuad = Lane & 3u;
+    unsigned SrcLane;
+    switch (LaneDir->getZExtValue()) {
+    case 0:
+      SrcLane = QuadBase + (InQuad ^ 1u);
+      break;
+    case 1:
+      SrcLane = QuadBase + (InQuad ^ 2u);
+      break;
+    case 2:
+      SrcLane = QuadBase + (InQuad ^ 3u);
+      break;
+    default:
+      CI.getContext().emitError(&CI,
+                                "feme-cpu-lower-wave: quad-read direction must "
+                                "be 0, 1, or 2");
+      return nullptr;
+    }
+    Value *LaneVal =
+        Builder.CreateExtractElement(WideVal, Builder.getInt32(SrcLane));
+    Result =
+        Builder.CreateInsertElement(Result, LaneVal, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
+bool lowerStageOp(CallInst &CI) {
+  StageOpKind Kind;
+  if (!isStageOpCall(CI, &Kind))
+    return false;
+  if (Kind != StageOpKind::DerivativeXFine &&
+      Kind != StageOpKind::DerivativeYFine &&
+      Kind != StageOpKind::DerivativeXCoarse &&
+      Kind != StageOpKind::DerivativeYCoarse && Kind != StageOpKind::QuadRead)
+    return false;
+
+  Value *Result = Kind == StageOpKind::QuadRead ? lowerQuadRead(CI)
+                                                : lowerDerivative(CI, Kind);
+  if (!Result)
+    return false;
+  Result->takeName(&CI);
+  CI.replaceAllUsesWith(Result);
+  CI.eraseFromParent();
+  return true;
+}
+
 } // namespace
 
 PreservedAnalyses WaveLoweringPass::run(Module &M, ModuleAnalysisManager &) {
@@ -585,6 +739,10 @@ PreservedAnalyses WaveLoweringPass::run(Module &M, ModuleAnalysisManager &) {
         Changed = true;
         continue;
       }
+      if (lowerStageOp(*CI)) {
+        Changed = true;
+        continue;
+      }
     }
   }
 
@@ -593,7 +751,9 @@ PreservedAnalyses WaveLoweringPass::run(Module &M, ModuleAnalysisManager &) {
   for (Function &F : llvm::make_early_inc_range(M.functions()))
     if (F.isDeclaration() && F.use_empty() &&
         (F.getName().starts_with("feme.cpu.builtin.") ||
-         F.getName().starts_with("feme.cpu.wave.")))
+         F.getName().starts_with("feme.cpu.wave.") ||
+         F.getName().starts_with("feme.stage.derivative.") ||
+         F.getName().starts_with("feme.stage.quad.read")))
       F.eraseFromParent();
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

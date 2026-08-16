@@ -32,6 +32,7 @@
 #include "feme/Transforms/AMDGPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
+#include "feme/Transforms/CPU/FragmentWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ReferenceEntryWrapper.h"
@@ -42,6 +43,7 @@
 #include "feme/Transforms/CPU/SPIRVBuiltinFolding.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/VerifyStructured.h"
+#include "feme/Transforms/CPU/VertexWrapper.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/DXIL/IntrinsicExpansion.h"
 #include "feme/Transforms/DXIL/MetadataRaising.h"
@@ -285,6 +287,22 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::cpu::EntryWrapperPass::name())
           return false;
         MPM.addPass(feme::cpu::EntryWrapperPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::VertexWrapperPass::name())
+          return false;
+        MPM.addPass(feme::cpu::VertexWrapperPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::FragmentWrapperPass::name())
+          return false;
+        MPM.addPass(feme::cpu::FragmentWrapperPass());
         return true;
       });
   // `--reference`'s two passes (see the "CFG restructurization test suite"

@@ -314,6 +314,8 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(W);
     else if (Arg.getName() == "wave_entry_mask")
       CallArgs.push_back(Mask);
+    else if (Arg.getName() == "wave_sideeffect_mask")
+      CallArgs.push_back(Mask);
     else if (Arg.getName() == "wave_groupshared")
       CallArgs.push_back(Env.GroupShared);
     else if (Arg.getName() == "barrier_spill")

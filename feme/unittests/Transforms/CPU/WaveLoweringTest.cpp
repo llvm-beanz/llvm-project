@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/WaveLowering.h"
 
+#include "feme/Core/StageOps.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/WaveCalls.h"
@@ -383,6 +384,38 @@ TEST(WaveLoweringTest, LowersPrefixSumToDivergentLaneLoop) {
       FoundWideMul |=
           BO->getOpcode() == Instruction::Mul && BO->getType()->isVectorTy();
   EXPECT_TRUE(FoundWideMul);
+}
+
+TEST(WaveLoweringTest, LowersDerivativesAndQuadRead) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ps_main() #0 {
+      %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %dx = call float @feme.stage.derivative.x.fine.f32(float %in)
+      %qr = call float @feme.stage.quad.read.f32(float %dx, i8 2)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare float @feme.stage.derivative.x.fine.f32(float)
+    declare float @feme.stage.quad.read.f32(float, i8)
+    attributes #0 = { "feme.shader.stage"="fragment" "feme.cpu.wavesize"="8" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(8).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+
+  Function *F = M->getFunction("ps_main");
+  ASSERT_TRUE(F);
+  for (const Instruction &I : instructions(F))
+    if (const auto *CI = dyn_cast<CallInst>(&I)) {
+      feme::StageOpKind Kind;
+      EXPECT_FALSE(isStageOpCall(*CI, &Kind) &&
+                   (Kind == feme::StageOpKind::DerivativeXFine ||
+                    Kind == feme::StageOpKind::QuadRead));
+    }
+  EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
 } // namespace

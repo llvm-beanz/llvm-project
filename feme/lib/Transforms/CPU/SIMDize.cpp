@@ -71,8 +71,10 @@
 #include "feme/Transforms/CPU/SIMDize.h"
 
 #include "GroupShared.h"
+#include "StageMaskCalls.h"
 #include "feme/Analysis/CPU/WaveUniformity.h"
 #include "feme/Core/ShaderStage.h"
+#include "feme/Core/StageOps.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
@@ -122,6 +124,8 @@ std::optional<WaveBodyEnv> getWaveBodyEnv(Function &F) {
       Env.WaveIndex = &Arg, Found = true;
     else if (Arg.getName() == "wave_entry_mask")
       Env.EntryMask = &Arg, Found = true;
+    else if (Arg.getName() == "wave_sideeffect_mask")
+      Env.SideEffectMask = &Arg, Found = true;
     else if (Arg.getName() == "wave_groupshared")
       Env.GroupShared = &Arg, Found = true;
   }
@@ -431,6 +435,9 @@ private:
   void fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN);
   void widenBuiltin(CallInst &CI, BuiltinCallKind Kind, IRBuilder<> &Builder);
   void widenWaveCall(CallInst &CI, WaveCallKind Kind, IRBuilder<> &Builder);
+  void widenStageOp(CallInst &CI, feme::StageOpKind Kind, IRBuilder<> &Builder);
+  void widenMaskedOutputStore(CallInst &CI, IRBuilder<> &Builder);
+  void widenReturnMasks(CallInst &CI, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
                          IRBuilder<> &Builder);
@@ -583,7 +590,7 @@ Function *FunctionWidener::buildWidenedFunction() {
   Type *MaskTy = FixedVectorType::get(Type::getInt1Ty(Ctx), WaveSize);
 
   SmallVector<Type *, 8> ParamTypes(OldF->getFunctionType()->params());
-  ParamTypes.append({I32Ty, I32Ty, I32Ty, I32Ty, MaskTy, PtrTy});
+  ParamTypes.append({I32Ty, I32Ty, I32Ty, I32Ty, MaskTy, MaskTy, PtrTy});
 
   FunctionType *NewTy = FunctionType::get(OldF->getReturnType(), ParamTypes,
                                           OldF->getFunctionType()->isVarArg());
@@ -592,6 +599,10 @@ Function *FunctionWidener::buildWidenedFunction() {
                        OldF->getParent());
   F->copyAttributesFrom(OldF);
   F->setComdat(OldF->getComdat());
+  SmallVector<std::pair<unsigned, MDNode *>, 4> MDs;
+  OldF->getAllMetadata(MDs);
+  for (auto [Kind, Node] : MDs)
+    F->setMetadata(Kind, Node);
   F->splice(F->begin(), OldF);
 
   for (auto [OldArg, NewArg] : llvm::zip(OldF->args(), F->args())) {
@@ -610,6 +621,8 @@ Function *FunctionWidener::buildWidenedFunction() {
   Env.WaveIndex->setName("wave_index");
   Env.EntryMask = &*ArgIt++;
   Env.EntryMask->setName("wave_entry_mask");
+  Env.SideEffectMask = &*ArgIt++;
+  Env.SideEffectMask->setName("wave_sideeffect_mask");
   Env.GroupShared = &*ArgIt++;
   Env.GroupShared->setName("wave_groupshared");
 
@@ -753,6 +766,68 @@ void FunctionWidener::widenWaveCall(CallInst &CI, WaveCallKind Kind,
   ToErase.push_back(&CI);
 }
 
+void FunctionWidener::widenStageOp(CallInst &CI, feme::StageOpKind Kind,
+                                   IRBuilder<> &Builder) {
+  assert(Kind != feme::StageOpKind::Discard &&
+         Kind != feme::StageOpKind::Demote &&
+         Kind != feme::StageOpKind::OutputStore &&
+         Kind != feme::StageOpKind::NumStageOpKinds &&
+         "unexpected stage op for widenStageOp");
+
+  Module *M = NewF->getParent();
+  SmallVector<Value *, 8> WideArgs;
+  SmallVector<Type *, 8> WideArgTys;
+  bool FirstOperandIsElementID =
+      Kind == feme::StageOpKind::InputLoad ||
+      Kind == feme::StageOpKind::InterpolateAtCentroid ||
+      Kind == feme::StageOpKind::InterpolateAtSample ||
+      Kind == feme::StageOpKind::InterpolateAtOffset;
+  for (unsigned I = 0, E = CI.arg_size(); I != E; ++I) {
+    Value *Arg = (I == 0 && FirstOperandIsElementID)
+                     ? CI.getArgOperand(I)
+                     : getWidened(CI.getArgOperand(I), Builder);
+    WideArgs.push_back(Arg);
+    WideArgTys.push_back(Arg->getType());
+  }
+  Type *WideTy = FixedVectorType::get(CI.getType(), WaveSize);
+  FunctionCallee Callee = getOrInsertStageOp(*M, Kind, WideTy, WideArgTys);
+  CallInst *WideCall = Builder.CreateCall(Callee, WideArgs, CI.getName());
+  Widened[&CI] = WideCall;
+  ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenMaskedOutputStore(CallInst &CI,
+                                             IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *Element = CI.getArgOperand(0);
+  Value *Row = getWidened(CI.getArgOperand(1), Builder);
+  Value *Component = getWidened(CI.getArgOperand(2), Builder);
+  Value *ValueArg = getWidened(CI.getArgOperand(3), Builder);
+  Value *Vertex = getWidened(CI.getArgOperand(4), Builder);
+  Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
+                                  getWidened(CI.getArgOperand(5), Builder),
+                                  "stage.output.mask");
+  FunctionCallee Callee = getOrInsertMaskedOutputStore(
+      *M, ValueArg->getType(), Row->getType(), Component->getType(),
+      Vertex->getType(), Mask->getType());
+  Builder.CreateCall(Callee, {Element, Row, Component, ValueArg, Vertex, Mask});
+  ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenReturnMasks(CallInst &CI, IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *Live =
+      Builder.CreateAnd(Env.EntryMask, getWidened(CI.getArgOperand(0), Builder),
+                        "stage.return.live");
+  Value *SideEffect = Builder.CreateAnd(
+      Env.SideEffectMask, getWidened(CI.getArgOperand(1), Builder),
+      "stage.return.sideeffect");
+  FunctionCallee Callee =
+      getOrInsertReturnMasks(*M, Live->getType(), SideEffect->getType());
+  Builder.CreateCall(Callee, {Live, SideEffect});
+  ToErase.push_back(&CI);
+}
+
 void FunctionWidener::replaceGroupIdCall(CallInst &CI) {
   unsigned Component = static_cast<unsigned>(
       cast<ConstantInt>(CI.getArgOperand(0))->getZExtValue());
@@ -810,11 +885,11 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   else if (Matched.StoredValue && !StoredValueIsVector)
     WideStoredValue = getWidened(Matched.StoredValue, Builder);
 
-  Value *LaneMaskBase = Env.EntryMask;
+  Value *BaseMask = Matched.StoredValue ? Env.SideEffectMask : Env.EntryMask;
+  Value *LaneMaskBase = BaseMask;
   if (!isa<Constant>(Matched.Mask)) {
     Value *WideCallMask = getWidened(Matched.Mask, Builder);
-    LaneMaskBase =
-        Builder.CreateAnd(Env.EntryMask, WideCallMask, "resource.mask");
+    LaneMaskBase = Builder.CreateAnd(BaseMask, WideCallMask, "resource.mask");
   }
 
   Value *Result = nullptr;
@@ -949,7 +1024,7 @@ void FunctionWidener::widenMaskedStore(CallInst &CI,
   // alike, at the cost of the same deferred performance work.
   Value *WideMask = getWidened(Matched.Mask, Builder);
   Value *EffectiveMask =
-      Builder.CreateAnd(Env.EntryMask, WideMask, "masked.mask");
+      Builder.CreateAnd(Env.SideEffectMask, WideMask, "masked.mask");
   Value *WidePtr = getWidened(Matched.Ptr, Builder);
   Value *WideVal = getWidened(Matched.ValueOperand, Builder);
 
@@ -1026,7 +1101,7 @@ void FunctionWidener::widenMaskedAtomicRMW(
   // is diagnosed rather than silently wrong.
   Value *WideMask = getWidened(Matched.Mask, Builder);
   Value *EffectiveMask =
-      Builder.CreateAnd(Env.EntryMask, WideMask, "atomicrmw.mask");
+      Builder.CreateAnd(Env.SideEffectMask, WideMask, "atomicrmw.mask");
 
   // A uniform groupshared address (the common case: an array element at a
   // compile-time-constant index) must reuse `Matched.Ptr` directly instead
@@ -1143,7 +1218,8 @@ void FunctionWidener::widenGroupSharedStore(StoreInst &SI,
   Value *WidePtr = Widened.lookup(SI.getPointerOperand());
   Value *WideVal = getWidened(SI.getValueOperand(), Builder);
 
-  Builder.CreateMaskedScatter(WideVal, WidePtr, SI.getAlign(), Env.EntryMask);
+  Builder.CreateMaskedScatter(WideVal, WidePtr, SI.getAlign(),
+                              Env.SideEffectMask);
   ToErase.push_back(&SI);
 }
 
@@ -1351,6 +1427,36 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     if (std::optional<WaveCallKind> Kind = classifyWaveCall(ID)) {
       widenWaveCall(*CI, *Kind, Builder);
       return true;
+    }
+    if (isMaskedOutputStoreCall(*CI)) {
+      widenMaskedOutputStore(*CI, Builder);
+      return true;
+    }
+    if (isReturnMasksCall(*CI)) {
+      widenReturnMasks(*CI, Builder);
+      return true;
+    }
+    feme::StageOpKind StageKind;
+    if (isStageOpCall(*CI, &StageKind)) {
+      switch (StageKind) {
+      case feme::StageOpKind::InputLoad:
+      case feme::StageOpKind::IsHelper:
+      case feme::StageOpKind::DerivativeXFine:
+      case feme::StageOpKind::DerivativeYFine:
+      case feme::StageOpKind::DerivativeXCoarse:
+      case feme::StageOpKind::DerivativeYCoarse:
+      case feme::StageOpKind::QuadRead:
+      case feme::StageOpKind::InterpolateAtCentroid:
+      case feme::StageOpKind::InterpolateAtSample:
+      case feme::StageOpKind::InterpolateAtOffset:
+        widenStageOp(*CI, StageKind, Builder);
+        return true;
+      case feme::StageOpKind::OutputStore:
+      case feme::StageOpKind::Discard:
+      case feme::StageOpKind::Demote:
+      case feme::StageOpKind::NumStageOpKinds:
+        break;
+      }
     }
   }
 

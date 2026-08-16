@@ -45,6 +45,7 @@
 #include "feme/Core/ShaderStage.h"
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Support/Error.h"
 
 #include <string>
@@ -71,6 +72,14 @@ struct StageCompileOptions {
   /// are expected to have already resolved this, exactly as the
   /// compute-only overload requires.
   unsigned WaveSize = 0;
+
+  /// Optimization level used by `feme::cpu::CompiledStage::create`. The
+  /// pipeline-only `runPipeline` entry point ignores it.
+  llvm::CodeGenOptLevel OptLevel = llvm::CodeGenOptLevel::Default;
+
+  /// Accepted for forward compatibility with the full design. No CPU-target
+  /// pipeline phase consults it yet.
+  bool EnableRobustness = true;
 };
 
 /// The two symbol names `runPipeline` produces or consumes, needed by

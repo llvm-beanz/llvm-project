@@ -12,6 +12,7 @@
 #include "feme/Target/CPU/RuntimeCPU.h"
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
+#include "feme/Transforms/CPU/FragmentWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
@@ -20,6 +21,7 @@
 #include "feme/Transforms/CPU/SPIRVBuiltinFolding.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
+#include "feme/Transforms/CPU/VertexWrapper.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
 #include "feme/Transforms/Graphics/ValidateStage.h"
 
@@ -301,8 +303,35 @@ Expected<PipelineResult> runPipeline(Module &M,
       return std::move(E);
     if (Error E = runAndCheck("lowering waves for", WaveLoweringPass()))
       return std::move(E);
-    if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
-      return std::move(E);
+    switch (Opts.Stage) {
+    case feme::ShaderStage::Compute:
+      if (Error E = runAndCheck("wrapping", EntryWrapperPass()))
+        return std::move(E);
+      break;
+    case feme::ShaderStage::Vertex:
+      if (Error E = runAndCheck("wrapping", VertexWrapperPass()))
+        return std::move(E);
+      break;
+    case feme::ShaderStage::Fragment:
+      if (Error E = runAndCheck("wrapping", FragmentWrapperPass()))
+        return std::move(E);
+      break;
+    case feme::ShaderStage::Geometry:
+    case feme::ShaderStage::Hull:
+    case feme::ShaderStage::Domain:
+    case feme::ShaderStage::Amplification:
+    case feme::ShaderStage::Mesh:
+    case feme::ShaderStage::Library:
+    case feme::ShaderStage::RayGeneration:
+    case feme::ShaderStage::AnyHit:
+    case feme::ShaderStage::ClosestHit:
+    case feme::ShaderStage::Miss:
+    case feme::ShaderStage::Intersection:
+    case feme::ShaderStage::Callable:
+    case feme::ShaderStage::NumStages:
+      llvm_unreachable(
+          "unsupported stage reached runPipeline wrapper selection");
+    }
   }
 
   std::string WrapperName = getEntrySymbolName(EntryName);
@@ -333,8 +362,11 @@ Expected<PipelineResult> runPipeline(Module &M,
 
 Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
                                      unsigned WaveSize) {
-  return runPipeline(
-      M, StageCompileOptions{feme::ShaderStage::Compute, EntryPoint, WaveSize});
+  StageCompileOptions Opts;
+  Opts.Stage = feme::ShaderStage::Compute;
+  Opts.EntryPoint = EntryPoint;
+  Opts.WaveSize = WaveSize;
+  return runPipeline(M, Opts);
 }
 
 } // namespace feme::cpu

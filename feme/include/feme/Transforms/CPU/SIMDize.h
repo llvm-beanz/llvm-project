@@ -47,9 +47,13 @@ struct WaveBodyEnv {
   llvm::Value *GroupIDY = nullptr;
   llvm::Value *GroupIDZ = nullptr;
   llvm::Value *WaveIndex = nullptr;
-  /// `<W x i1>`: which lanes of this wave are active (see "Mask
+  /// `<W x i1>`: which lanes of this wave are active/live (see "Mask
   /// representation between phases" in feme/docs/FeMeCPUDesign.md).
   llvm::Value *EntryMask = nullptr;
+  /// `<W x i1>`: which lanes of this wave may perform side effects. Equal to
+  /// `EntryMask` for compute and vertex stages; fragment wrappers seed it from
+  /// helper-lane state.
+  llvm::Value *SideEffectMask = nullptr;
   /// `ptr`: this group's groupshared storage, or null if the shader
   /// declares none (see "Groupshared memory" in "Phase 6").
   llvm::Value *GroupShared = nullptr;

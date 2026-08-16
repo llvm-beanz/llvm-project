@@ -4,10 +4,12 @@ add_mlir_library(FeMeTransformsCPU
   BuiltinCalls.cpp
   CFGGen.cpp
   EntryWrapper.cpp
+  FragmentWrapper.cpp
   GroupShared.cpp
   Linearize.cpp
   MaskIntrinsics.cpp
   Prepare.cpp
+  StageMaskCalls.cpp
   ReferenceEntryWrapper.cpp
   ReferenceLowering.cpp
   ResourceCalls.cpp
@@ -15,6 +17,7 @@ add_mlir_library(FeMeTransformsCPU
   RootConstantLowering.cpp
   SIMDize.cpp
   SPIRVBuiltinFolding.cpp
+  VertexWrapper.cpp
   SPIRVResourceLowering.cpp
   UnsupportedOps.cpp
   VerifyStructured.cpp
@@ -33,4 +36,5 @@ add_mlir_library(FeMeTransformsCPU
   LINK_LIBS PUBLIC
   FeMeAnalysisCPU
   FeMeCore
+  FeMeTransformsDXIL
   )

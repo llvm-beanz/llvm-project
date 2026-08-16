@@ -8,6 +8,7 @@
 
 #include "feme/Analysis/CPU/WaveUniformity.h"
 
+#include "feme/Core/StageOps.h"
 #include "llvm/ADT/GenericUniformityImpl.h"
 #include "llvm/Analysis/CycleAnalysis.h"
 #include "llvm/IR/Dominators.h"
@@ -39,6 +40,28 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
     const Function *Callee = CI->getCalledFunction();
     if (Callee && Callee->getName() == "feme.cpu.mask.any")
       return ValueUniformity::AlwaysUniform;
+
+    StageOpKind Kind;
+    if (Callee && feme::isStageOpCall(*CI, &Kind)) {
+      switch (Kind) {
+      case StageOpKind::InputLoad:
+      case StageOpKind::IsHelper:
+      case StageOpKind::DerivativeXFine:
+      case StageOpKind::DerivativeYFine:
+      case StageOpKind::DerivativeXCoarse:
+      case StageOpKind::DerivativeYCoarse:
+      case StageOpKind::QuadRead:
+      case StageOpKind::InterpolateAtCentroid:
+      case StageOpKind::InterpolateAtSample:
+      case StageOpKind::InterpolateAtOffset:
+        return ValueUniformity::NeverUniform;
+      case StageOpKind::OutputStore:
+      case StageOpKind::Discard:
+      case StageOpKind::Demote:
+      case StageOpKind::NumStageOpKinds:
+        break;
+      }
+    }
   }
 
   const auto *II = dyn_cast<IntrinsicInst>(V);
