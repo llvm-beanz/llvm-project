@@ -46,31 +46,36 @@ materializeResourceHeap(const ResourceInfo &Info,
 }
 
 PreparedDispatch::PreparedDispatch(std::vector<FemeDescriptor> ResourceHeap,
-                                   ArrayRef<FemeDescriptor> SamplerHeap,
+                                   ArrayRef<FemeImageDescriptor> ImageHeap,
+                                   ArrayRef<FemeSamplerDescriptor> SamplerHeap,
                                    ArrayRef<uint8_t> RootConstants,
                                    std::array<uint32_t, 3> GroupCount)
-    : ResourceHeap(std::move(ResourceHeap)), SamplerHeap(SamplerHeap),
-      RootConstants(RootConstants), GroupCount(GroupCount) {}
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
+      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+      GroupCount(GroupCount) {}
 
 PreparedDispatch PreparedDispatch::create(const ResourceInfo &Info,
                                           const DispatchResources &Resources,
                                           std::array<uint32_t, 3> GroupCount) {
-  return PreparedDispatch(
-      materializeResourceHeap(Info, Resources.BoundResources,
-                              Resources.ResourceHeap),
-      Resources.SamplerHeap, Resources.RootConstants, GroupCount);
+  return PreparedDispatch(materializeResourceHeap(Info,
+                                                  Resources.BoundResources,
+                                                  Resources.ResourceHeap),
+                          Resources.ImageHeap, Resources.SamplerHeap,
+                          Resources.RootConstants, GroupCount);
 }
 
 FemeDispatchArgs
 PreparedDispatch::argsFor(std::array<uint32_t, 3> GroupID,
                           MutableArrayRef<uint8_t> GroupShared) const {
   FemeDispatchArgs Args{};
-  Args.ResourceHeap = ResourceHeap.data();
-  Args.ResourceHeapCount = static_cast<uint32_t>(ResourceHeap.size());
-  Args.SamplerHeap = SamplerHeap.data();
-  Args.SamplerHeapCount = static_cast<uint32_t>(SamplerHeap.size());
-  Args.RootConstants = RootConstants.data();
-  Args.RootConstantSize = static_cast<uint32_t>(RootConstants.size());
+  Args.Resources.ResourceHeap = ResourceHeap.data();
+  Args.Resources.ResourceHeapCount = static_cast<uint32_t>(ResourceHeap.size());
+  Args.Resources.ImageHeap = ImageHeap.data();
+  Args.Resources.ImageHeapCount = static_cast<uint32_t>(ImageHeap.size());
+  Args.Resources.SamplerHeap = SamplerHeap.data();
+  Args.Resources.SamplerHeapCount = static_cast<uint32_t>(SamplerHeap.size());
+  Args.Resources.RootConstants = RootConstants.data();
+  Args.Resources.RootConstantSize = static_cast<uint32_t>(RootConstants.size());
   Args.GroupCount[0] = GroupCount[0];
   Args.GroupCount[1] = GroupCount[1];
   Args.GroupCount[2] = GroupCount[2];
@@ -102,16 +107,21 @@ void runDispatch(EntryPointFn EntryFn, const ResourceInfo &Info,
 
 PreparedVertexBatch::PreparedVertexBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeDescriptor> SamplerHeap, ArrayRef<uint8_t> RootConstants,
-    const FemeStageLayout *InputLayout, const void *Inputs,
-    const FemeStageLayout *OutputLayout, void *Outputs,
+    ArrayRef<FemeImageDescriptor> ImageHeap,
+    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
+    const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     ArrayRef<FemeVertexInvocation> Invocations)
-    : ResourceHeap(std::move(ResourceHeap)), SamplerHeap(SamplerHeap),
-      RootConstants(RootConstants), InputLayout(InputLayout), Inputs(Inputs),
-      OutputLayout(OutputLayout), Outputs(Outputs), Invocations(Invocations) {
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
+      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+      InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
+      Outputs(Outputs), Invocations(Invocations) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.ImageHeap = this->ImageHeap.data();
+  ShaderResources.ImageHeapCount =
+      static_cast<uint32_t>(this->ImageHeap.size());
   ShaderResources.SamplerHeap = this->SamplerHeap.data();
   ShaderResources.SamplerHeapCount =
       static_cast<uint32_t>(this->SamplerHeap.size());
@@ -126,9 +136,9 @@ PreparedVertexBatch::create(const ResourceInfo &Info,
   return PreparedVertexBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.SamplerHeap, Resources.RootConstants, Resources.InputLayout,
-      Resources.Inputs, Resources.OutputLayout, Resources.Outputs,
-      Resources.Invocations);
+      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
+      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
+      Resources.Outputs, Resources.Invocations);
 }
 
 FemeVertexArgs PreparedVertexBatch::args() const {
@@ -146,18 +156,22 @@ FemeVertexArgs PreparedVertexBatch::args() const {
 
 PreparedFragmentBatch::PreparedFragmentBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeDescriptor> SamplerHeap, ArrayRef<uint8_t> RootConstants,
-    const FemeStageLayout *InputLayout, const void *Inputs,
-    const FemeStageLayout *OutputLayout, void *Outputs,
+    ArrayRef<FemeImageDescriptor> ImageHeap,
+    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
+    const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     ArrayRef<FemeFragmentInvocation> Invocations,
     MutableArrayRef<FemeFragmentResult> Results)
-    : ResourceHeap(std::move(ResourceHeap)), SamplerHeap(SamplerHeap),
-      RootConstants(RootConstants), InputLayout(InputLayout), Inputs(Inputs),
-      OutputLayout(OutputLayout), Outputs(Outputs), Invocations(Invocations),
-      Results(Results) {
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
+      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+      InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
+      Outputs(Outputs), Invocations(Invocations), Results(Results) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.ImageHeap = this->ImageHeap.data();
+  ShaderResources.ImageHeapCount =
+      static_cast<uint32_t>(this->ImageHeap.size());
   ShaderResources.SamplerHeap = this->SamplerHeap.data();
   ShaderResources.SamplerHeapCount =
       static_cast<uint32_t>(this->SamplerHeap.size());
@@ -172,9 +186,9 @@ PreparedFragmentBatch::create(const ResourceInfo &Info,
   return PreparedFragmentBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.SamplerHeap, Resources.RootConstants, Resources.InputLayout,
-      Resources.Inputs, Resources.OutputLayout, Resources.Outputs,
-      Resources.Invocations, Resources.Results);
+      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
+      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
+      Resources.Outputs, Resources.Invocations, Resources.Results);
 }
 
 FemeFragmentArgs PreparedFragmentBatch::args() const {

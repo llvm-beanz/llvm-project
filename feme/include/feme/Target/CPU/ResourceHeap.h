@@ -45,7 +45,8 @@ materializeResourceHeap(const ResourceInfo &Info,
 struct DispatchResources {
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<BoundResourceBinding> BoundResources;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
   llvm::ArrayRef<uint8_t> RootConstants;
 };
 
@@ -64,12 +65,14 @@ public:
 
 private:
   PreparedDispatch(std::vector<FemeDescriptor> ResourceHeap,
-                   llvm::ArrayRef<FemeDescriptor> SamplerHeap,
+                   llvm::ArrayRef<FemeImageDescriptor> ImageHeap,
+                   llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap,
                    llvm::ArrayRef<uint8_t> RootConstants,
                    std::array<uint32_t, 3> GroupCount);
 
   std::vector<FemeDescriptor> ResourceHeap;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
   llvm::ArrayRef<uint8_t> RootConstants;
   std::array<uint32_t, 3> GroupCount;
 };
@@ -86,7 +89,8 @@ void runDispatch(EntryPointFn EntryFn, const ResourceInfo &Info,
 struct VertexResources {
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<BoundResourceBinding> BoundResources;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
   llvm::ArrayRef<uint8_t> RootConstants;
   const FemeStageLayout *InputLayout = nullptr;
   const void *Inputs = nullptr;
@@ -97,8 +101,8 @@ struct VertexResources {
 
 /// One prepared vertex batch: materialized resources plus borrowed stage
 /// storage and invocation records. The caller owns the stage-storage blocks and
-/// invocation array and must keep them alive through the `invokeVertices` call
-/// that consumes this object.
+/// invocation array and must keep them alive through the `invokeVertices`
+/// call that consumes this object.
 class PreparedVertexBatch {
 public:
   static PreparedVertexBatch create(const ResourceInfo &Info,
@@ -108,14 +112,16 @@ public:
 
 private:
   PreparedVertexBatch(std::vector<FemeDescriptor> ResourceHeap,
-                      llvm::ArrayRef<FemeDescriptor> SamplerHeap,
+                      llvm::ArrayRef<FemeImageDescriptor> ImageHeap,
+                      llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap,
                       llvm::ArrayRef<uint8_t> RootConstants,
                       const FemeStageLayout *InputLayout, const void *Inputs,
                       const FemeStageLayout *OutputLayout, void *Outputs,
                       llvm::ArrayRef<FemeVertexInvocation> Invocations);
 
   std::vector<FemeDescriptor> ResourceHeap;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
   llvm::ArrayRef<uint8_t> RootConstants;
   FemeShaderResources ShaderResources{};
   const FemeStageLayout *InputLayout = nullptr;
@@ -129,7 +135,8 @@ private:
 struct FragmentResources {
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<BoundResourceBinding> BoundResources;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
   llvm::ArrayRef<uint8_t> RootConstants;
   const FemeStageLayout *InputLayout = nullptr;
   const void *Inputs = nullptr;
@@ -150,7 +157,8 @@ public:
 
 private:
   PreparedFragmentBatch(std::vector<FemeDescriptor> ResourceHeap,
-                        llvm::ArrayRef<FemeDescriptor> SamplerHeap,
+                        llvm::ArrayRef<FemeImageDescriptor> ImageHeap,
+                        llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap,
                         llvm::ArrayRef<uint8_t> RootConstants,
                         const FemeStageLayout *InputLayout, const void *Inputs,
                         const FemeStageLayout *OutputLayout, void *Outputs,
@@ -158,7 +166,8 @@ private:
                         llvm::MutableArrayRef<FemeFragmentResult> Results);
 
   std::vector<FemeDescriptor> ResourceHeap;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
   llvm::ArrayRef<uint8_t> RootConstants;
   FemeShaderResources ShaderResources{};
   const FemeStageLayout *InputLayout = nullptr;
