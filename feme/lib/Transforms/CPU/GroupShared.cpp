@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "GroupShared.h"
+#include "feme/Transforms/CPU/GroupSharedInfo.h"
+
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
@@ -41,6 +43,11 @@ GroupSharedLayout computeGroupSharedLayout(const Module &M) {
   Layout.TotalSize = Offset;
   Layout.Alignment = Strictest.value();
   return Layout;
+}
+
+GroupSharedRequirements getGroupSharedRequirements(const Module &M) {
+  GroupSharedLayout Layout = computeGroupSharedLayout(M);
+  return GroupSharedRequirements{Layout.TotalSize, Layout.Alignment};
 }
 
 bool rewriteGroupSharedGlobals(Function &F, Value *GroupSharedBase,

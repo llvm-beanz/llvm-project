@@ -13,6 +13,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   BuiltinCallsTest.cpp
   CFGGenTest.cpp
   EntryWrapperTest.cpp
+  GroupSharedInfoTest.cpp
   LinearizeTest.cpp
   MaskIntrinsicsTest.cpp
   PrepareTest.cpp
