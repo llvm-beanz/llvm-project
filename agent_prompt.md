@@ -23,8 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R23 from the roadmap document?
+Can you implement R24 from the roadmap document?
 
-> Divergent groupshared access in `feme::cpu` — a divergent index, an access
-> through a `getelementptr`, and a masked store at a uniform address (§1.6's
-> three recorded shapes) (see: §1.6, §1.8.1)
+> Barrier inside a surviving *branch*, and a `phi` live across a group-sync
+> barrier (see: §1.6, §1.8.1)
