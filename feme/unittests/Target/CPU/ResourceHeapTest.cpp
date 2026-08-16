@@ -152,4 +152,54 @@ TEST(RunDispatchTest, PassesTheMaterializedHeapToTheEntryPoint) {
   EXPECT_TRUE(SawExpectedResourceHeap);
 }
 
+// Roadmap milestone R21's `PreparedDispatch`/`invokeGroup`: covers the two
+// directly at the granularity `feme::cpu::CompiledStage::invokeGroup` (and,
+// through it, a worker-pool `JITEngine::dispatch`) actually calls them at,
+// rather than only indirectly through `runDispatch`'s own group loop above.
+TEST(PreparedDispatchTest, ArgsForFillsInTheRequestedGroupIDAndGroupCount) {
+  ResourceInfo Info;
+  DispatchResources Resources;
+  PreparedDispatch Prepared =
+      PreparedDispatch::create(Info, Resources, {2, 3, 1});
+
+  FemeDispatchArgs Args = Prepared.argsFor({1, 2, 0}, /*GroupShared=*/{});
+  EXPECT_EQ(Args.GroupID[0], 1u);
+  EXPECT_EQ(Args.GroupID[1], 2u);
+  EXPECT_EQ(Args.GroupID[2], 0u);
+  EXPECT_EQ(Args.GroupCount[0], 2u);
+  EXPECT_EQ(Args.GroupCount[1], 3u);
+  EXPECT_EQ(Args.GroupCount[2], 1u);
+}
+
+TEST(PreparedDispatchTest, ArgsForCarriesTheMaterializedHeapAndGroupShared) {
+  int Dummy = 0;
+  std::vector<FemeDescriptor> Dynamic = {makeDescriptor(&Dummy)};
+
+  ResourceInfo Info;
+  DispatchResources Resources;
+  Resources.ResourceHeap = Dynamic;
+  PreparedDispatch Prepared =
+      PreparedDispatch::create(Info, Resources, {1, 1, 1});
+
+  std::vector<uint8_t> GroupShared(4, 0);
+  FemeDispatchArgs Args = Prepared.argsFor({0, 0, 0}, GroupShared);
+  ASSERT_EQ(Args.ResourceHeapCount, 1u);
+  EXPECT_EQ(Args.ResourceHeap[0].Data, &Dummy);
+  EXPECT_EQ(Args.GroupShared, GroupShared.data());
+}
+
+TEST(InvokeGroupTest, CallsEntryOnceWithTheRequestedGroupID) {
+  std::vector<std::array<uint32_t, 3>> GroupIDs;
+  RecordedGroupIDs = &GroupIDs;
+
+  ResourceInfo Info;
+  DispatchResources Resources;
+  PreparedDispatch Prepared =
+      PreparedDispatch::create(Info, Resources, {2, 1, 1});
+
+  invokeGroup(recordingEntryFn, Prepared, {1, 0, 0}, /*GroupShared=*/{});
+
+  EXPECT_EQ(GroupIDs, (std::vector<std::array<uint32_t, 3>>{{1, 0, 0}}));
+}
+
 } // namespace

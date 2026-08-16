@@ -94,15 +94,62 @@ struct DispatchResources {
 /// in feme/docs/FeMeCPUDesign.md).
 using EntryPointFn = void (*)(const FemeDispatchArgs *);
 
-/// Runs a whole dispatch to completion: materializes \p Resources into the
-/// physical resource heap \p Info's bound-range layout expects (see
-/// `materializeResourceHeap`), then calls \p EntryFn once per group in
-/// \p GroupCount, filling in a fresh `FemeDispatchArgs` each time. Shared by
+/// Everything a group invocation needs from a dispatch except which group:
+/// the materialized physical resource heap, the sampler heap and
+/// root-constant bytes, and the dispatch-wide `GroupCount`. Preparing this
+/// once per dispatch -- rather than once per group -- is what lets
+/// `feme::cpu::CompiledStage::invokeGroup` be cheap enough to call from a
+/// worker pool; see "CPU Runtime API Changes" in feme/docs/
+/// FeMeVulkanDesign.md, whose `PreparedDispatch` this type implements.
+/// Immutable and safe to share across concurrently-invoked groups: every
+/// `argsFor` call only reads this object's own storage and \p Resources'
+/// caller-owned sampler heap/root constants (see `DispatchResources`'s own
+/// comment on their lifetime requirement).
+class PreparedDispatch {
+public:
+  static PreparedDispatch create(const ResourceInfo &Info,
+                                 const DispatchResources &Resources,
+                                 std::array<uint32_t, 3> GroupCount);
+
+  /// Builds the `FemeDispatchArgs` for \p GroupID's invocation, borrowing
+  /// this object's own materialized heap/root-constant storage and
+  /// \p GroupShared (the caller's per-group groupshared buffer -- empty
+  /// until milestone 9's groupshared allocation is wired up to supply one).
+  FemeDispatchArgs argsFor(std::array<uint32_t, 3> GroupID,
+                          llvm::MutableArrayRef<uint8_t> GroupShared) const;
+
+private:
+  PreparedDispatch(std::vector<FemeDescriptor> ResourceHeap,
+                   llvm::ArrayRef<FemeDescriptor> SamplerHeap,
+                   llvm::ArrayRef<uint8_t> RootConstants,
+                   std::array<uint32_t, 3> GroupCount);
+
+  std::vector<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  std::array<uint32_t, 3> GroupCount;
+};
+
+/// Invokes \p EntryFn once for \p GroupID against \p Prepared's
+/// already-materialized dispatch state, filling in a fresh
+/// `FemeDispatchArgs` from it and \p GroupShared. This is the per-workgroup
+/// entry point `feme::cpu::CompiledStage::invokeGroup` and `runDispatch`
+/// below both build on; see the file comment above for why it is factored
+/// out on its own (roadmap milestone R21).
+void invokeGroup(EntryPointFn EntryFn, const PreparedDispatch &Prepared,
+                 std::array<uint32_t, 3> GroupID,
+                 llvm::MutableArrayRef<uint8_t> GroupShared);
+
+/// Runs a whole dispatch to completion: prepares \p Resources once (see
+/// `PreparedDispatch`), then calls `invokeGroup` once per group in
+/// \p GroupCount, in XYZ order, on the calling thread. Shared by
 /// `feme::cpu::JITEngine::dispatch` and `feme-run`'s `--object` AOT path so
 /// the group-iteration/heap-materialization logic has one implementation
-/// (see `DispatchResources`'s own comment). Groups run sequentially on the
-/// calling thread, matching `JITEngine::dispatch`'s own current deviation
-/// from the full design's thread pool.
+/// (see `DispatchResources`'s own comment). Always sequential and
+/// order-preserving -- unlike `JITEngine::dispatch`, which may run groups
+/// across `JITOptions::NumThreads` worker threads -- because this is also
+/// the AOT path's only dispatch loop, with no `JITOptions` of its own to
+/// express a threading policy.
 void runDispatch(EntryPointFn EntryFn, const ResourceInfo &Info,
                  const DispatchResources &Resources,
                  std::array<uint32_t, 3> GroupCount);
