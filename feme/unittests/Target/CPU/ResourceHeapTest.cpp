@@ -24,6 +24,35 @@ FemeDescriptor makeDescriptor(void *Data) {
   return Desc;
 }
 
+FemeImageDescriptor makeImageDescriptor(void *Data) {
+  FemeImageDescriptor Desc{};
+  Desc.Data = Data;
+  Desc.SizeInBytes = 64;
+  Desc.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Desc.Format = static_cast<uint32_t>(ResourceFormat::R8G8B8A8_UNORM);
+  Desc.Width = 4;
+  Desc.Height = 4;
+  Desc.Depth = 1;
+  Desc.MipLevels = 1;
+  Desc.ArrayLayers = 1;
+  Desc.PlaneCount = 1;
+  Desc.SampleCount = 1;
+  Desc.Flags = FEME_IMAGE_SAMPLED;
+  return Desc;
+}
+
+FemeSamplerDescriptor makeSamplerDescriptor() {
+  FemeSamplerDescriptor Desc{};
+  Desc.MinFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  Desc.MagFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  Desc.MipFilter = static_cast<uint32_t>(SamplerFilter::Linear);
+  Desc.AddressU = static_cast<uint32_t>(SamplerAddressMode::Repeat);
+  Desc.AddressV = static_cast<uint32_t>(SamplerAddressMode::Repeat);
+  Desc.AddressW = static_cast<uint32_t>(SamplerAddressMode::Repeat);
+  Desc.MaxLod = 1000.0f;
+  return Desc;
+}
+
 TEST(ResourceHeapTest, NoReservedPrefixIsExactlyTheDynamicHeap) {
   ResourceInfo Info;
   int Dummy = 0;
@@ -118,8 +147,8 @@ void recordingEntryFn(const FemeDispatchArgs *Args) {
   RecordedGroupIDs->push_back(
       {Args->GroupID[0], Args->GroupID[1], Args->GroupID[2]});
   SawExpectedResourceHeap =
-      Args->ResourceHeapCount == 1 &&
-      Args->ResourceHeap[0].Data == ExpectedFirstDescriptorData;
+      Args->Resources.ResourceHeapCount == 1 &&
+      Args->Resources.ResourceHeap[0].Data == ExpectedFirstDescriptorData;
 }
 } // namespace
 
@@ -183,9 +212,32 @@ TEST(PreparedDispatchTest, ArgsForCarriesTheMaterializedHeapAndGroupShared) {
 
   std::vector<uint8_t> GroupShared(4, 0);
   FemeDispatchArgs Args = Prepared.argsFor({0, 0, 0}, GroupShared);
-  ASSERT_EQ(Args.ResourceHeapCount, 1u);
-  EXPECT_EQ(Args.ResourceHeap[0].Data, &Dummy);
+  ASSERT_EQ(Args.Resources.ResourceHeapCount, 1u);
+  EXPECT_EQ(Args.Resources.ResourceHeap[0].Data, &Dummy);
   EXPECT_EQ(Args.GroupShared, GroupShared.data());
+}
+
+// Roadmap R29: `FemeShaderResources` folded into `FemeDispatchArgs`, with its
+// own image heap and a `FemeSamplerDescriptor`-typed sampler heap.
+TEST(PreparedDispatchTest, ArgsForCarriesTheImageAndSamplerHeaps) {
+  int ImageStorage = 0;
+  std::vector<FemeImageDescriptor> Images = {
+      makeImageDescriptor(&ImageStorage)};
+  std::vector<FemeSamplerDescriptor> Samplers = {makeSamplerDescriptor()};
+
+  ResourceInfo Info;
+  DispatchResources Resources;
+  Resources.ImageHeap = Images;
+  Resources.SamplerHeap = Samplers;
+  PreparedDispatch Prepared =
+      PreparedDispatch::create(Info, Resources, {1, 1, 1});
+
+  FemeDispatchArgs Args = Prepared.argsFor({0, 0, 0}, /*GroupShared=*/{});
+  ASSERT_EQ(Args.Resources.ImageHeapCount, 1u);
+  EXPECT_EQ(Args.Resources.ImageHeap[0].Data, &ImageStorage);
+  ASSERT_EQ(Args.Resources.SamplerHeapCount, 1u);
+  EXPECT_EQ(Args.Resources.SamplerHeap[0].AddressU,
+            static_cast<uint32_t>(SamplerAddressMode::Repeat));
 }
 
 TEST(InvokeGroupTest, CallsEntryOnceWithTheRequestedGroupID) {
@@ -224,6 +276,37 @@ TEST(PreparedVertexBatchTest, ArgsExposeCallerOwnedStageStorage) {
   EXPECT_EQ(Args.Inputs, Inputs.data());
   EXPECT_EQ(Args.Outputs, Outputs.data());
   EXPECT_EQ(Args.Invocations, Invocations);
+}
+
+// Roadmap R29: the vertex batch's shared `FemeShaderResources` gains an image
+// heap and a `FemeSamplerDescriptor`-typed sampler heap, same as compute.
+TEST(PreparedVertexBatchTest, ArgsExposeImageAndSamplerHeaps) {
+  ResourceInfo Info;
+  FemeStageLayout Layout{};
+  std::vector<float> Inputs(2, 0.0f);
+  std::vector<float> Outputs(2, 0.0f);
+  FemeVertexInvocation Invocations[2] = {};
+  int ImageStorage = 0;
+  std::vector<FemeImageDescriptor> Images = {
+      makeImageDescriptor(&ImageStorage)};
+  std::vector<FemeSamplerDescriptor> Samplers = {makeSamplerDescriptor()};
+
+  VertexResources Resources;
+  Resources.InputLayout = &Layout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &Layout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = Invocations;
+  Resources.ImageHeap = Images;
+  Resources.SamplerHeap = Samplers;
+  PreparedVertexBatch Prepared = PreparedVertexBatch::create(Info, Resources);
+
+  FemeVertexArgs Args = Prepared.args();
+  ASSERT_EQ(Args.Resources->ImageHeapCount, 1u);
+  EXPECT_EQ(Args.Resources->ImageHeap[0].Data, &ImageStorage);
+  ASSERT_EQ(Args.Resources->SamplerHeapCount, 1u);
+  EXPECT_EQ(Args.Resources->SamplerHeap[0].MinFilter,
+            static_cast<uint32_t>(SamplerFilter::Linear));
 }
 
 TEST(PreparedFragmentBatchTest, ArgsExposeCallerOwnedStageStorage) {

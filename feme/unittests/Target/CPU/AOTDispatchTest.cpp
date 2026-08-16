@@ -163,8 +163,8 @@ TEST(AOTDispatchTest, MatchesJITForShaderMixingTraditionalAndDynamicResources) {
   FemeDescriptor PhysicalHeap[2] = {BoundDesc, DynamicDesc};
 
   FemeDispatchArgs Args{};
-  Args.ResourceHeap = PhysicalHeap;
-  Args.ResourceHeapCount = 2;
+  Args.Resources.ResourceHeap = PhysicalHeap;
+  Args.Resources.ResourceHeapCount = 2;
   Args.GroupCount[0] = 1;
   Args.GroupCount[1] = 1;
   Args.GroupCount[2] = 1;
