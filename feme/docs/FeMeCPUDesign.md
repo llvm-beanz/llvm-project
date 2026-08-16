@@ -131,6 +131,39 @@ completion test is `test/Tools/feme-run/HLSL/front-end-equivalence.hlsl`:
 one shader's DXIL and SPIR-V executions checked against the same expected
 numbers.
 
+Deviation: roadmap step R26 generalizes `feme::cpu::SPIRVResourceLoweringPass`
+from the implicit range-size-1 binding the R10 deviation note above
+describes to a real arrayed one, matching
+`feme::cpu::BoundResourceNormalizationPass`'s own DXIL array-binding support
+(see "Bound-resource normalization" below): `llvm.spv.resource.
+handlefrombinding`'s own range-size and (possibly dynamic) array-index
+operands are read rather than ignored, each (descriptor set, binding)
+identity is assigned a contiguous run of heap slots sized by its declared
+range, and an access through it is range-checked and clamped into that run
+with the same overflow/out-of-range `UINT32_MAX` sentinel the DXIL pass
+uses. An unbounded range (range size 0) is left un-normalized, and two
+handles at the same identity disagreeing about the range size are a
+conflicting declaration, both mirroring the DXIL pass's own rejections. The
+array index is deliberately not cached alongside the handle -- it is
+re-read from the handle's own operand at lowering time instead, avoiding
+the exact stale-`Argument`-pointer bug the R25 deviation note above
+describes fixing in `RootConstantLowering.cpp`, for the same reason
+(`addResourceEnvParams` rebuilds the handle's function, RAUWing every
+argument and erasing the original). A Vulkan *dynamic* storage/uniform
+buffer offset needs no change here at all: per "Memory and Buffers" in
+feme/docs/FeMeVulkanDesign.md, it is folded into `FemeDescriptor::Data` when
+a host materializes a dispatch's physical heap, exactly like every other
+buffer's binding offset, so the existing `BoundResourceRange`/
+`materializeResourceHeap` model already carries it. `SPV_EXT_descriptor_heap`
+remains unraised, so this is still a separate pass rather than a reuse of
+`BoundResourceNormalizationPass`, answering FeMeVulkanDesign.md's open
+question 3 in the negative for good. `test/Transforms/CPU/spirv-resource-
+lowering-array.ll` covers an arrayed, dynamically-indexed binding;
+`spirv-resource-lowering-unsupported.ll`/`-conflicting.ll` gain the
+unbounded-range and range-size-conflict cases; and
+`unittests/Transforms/CPU/SPIRVResourceLoweringTest.cpp` covers the same at
+the pass level.
+
 Deviation: milestone 2's implementation narrowed one thing described in
 "Phase 2: Uniformity Analysis" below:
 
@@ -1541,6 +1574,18 @@ dynamic-resource operation. Resource kinds that `ResourceLoweringPass` does
 not yet canonicalize remain unsupported regardless of whether their source
 handle was bound or dynamic; normalization changes addressing, not the set of
 implemented resource operations.
+
+`feme::cpu::BoundResourceNormalizationPass` itself implements this shape for
+DXIL only (SPIR-V has no raised bindless-heap counterpart to rewrite
+`handlefrombinding` into -- see the SPIR-V bullet above). SPIR-V gets the
+same shape from a separate pass instead: `feme::cpu::SPIRVResourceLoweringPass`
+(roadmap steps R10, R26) normalizes and lowers a bound `spirv.VulkanBuffer`
+handle in one step rather than two, using SPIR-V's (descriptor set, binding)
+pair in the same role as DXIL's (register space, register) and its own
+range-size/array-index operands for steps 1–3 above; it has no bindless-heap
+step 4 of its own to perform, since there is no SPIR-V shader mixing
+traditional and bindless resources to make unambiguous. See that pass's
+header comment for its exact scope.
 
 This arrangement preserves the useful properties of the dynamic-only
 execution model:

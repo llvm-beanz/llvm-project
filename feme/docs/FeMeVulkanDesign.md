@@ -535,12 +535,18 @@ image handle types, but its documented gaps include:
 - Push constants.
 - General descriptor-backed resource operations.
 - Sampling, image fetch/gather, and broad image operation coverage.
-- A binding-to-heap normalization for SPIR-V. `feme::cpu::BoundResourceNormalizationPass`
-  today rewrites only DXIL's `llvm.dx.resource.handlefrombinding`, because
-  SPIR-V has no raised bindless-heap counterpart to rewrite into:
-  `SPV_EXT_descriptor_heap` is unraised and only DXIL defines
-  `llvm.dx.resource.handlefromheap`. Adding a SPIR-V path is required work, not
-  an alternative to be chosen later.
+- A binding-to-heap normalization for SPIR-V (done by roadmap R26):
+  `feme::cpu::SPIRVResourceLoweringPass` now reads a bound
+  `spirv.VulkanBuffer` handle's own range-size and array-index operands
+  rather than assuming an implicit range size of 1, assigning each
+  (descriptor set, binding) identity a contiguous run of heap slots and
+  range-checking a (possibly dynamic) array index into it -- see that
+  pass's header comment and "Bound-resource normalization" in
+  feme/docs/FeMeCPUDesign.md. `SPV_EXT_descriptor_heap` itself is still
+  unraised, and DXIL still defines the only raised bindless-heap
+  counterpart (`handlefromheap`); this row answers open question 3 below
+  by staying a separate, SPIR-V-specific pass rather than routing through
+  one.
 
 Buffer descriptors are the first required extension. Sampling and image
 resources remain a later milestone.
@@ -1187,8 +1193,15 @@ today, which is a multi-pass change of its own and is scheduled in V3.
 
 ### V2: Storage buffers and descriptors
 
-- Add a SPIR-V binding-to-heap normalization, since
-  `BoundResourceNormalizationPass` handles DXIL only.
+- ~~Add a SPIR-V binding-to-heap normalization, since
+  `BoundResourceNormalizationPass` handles DXIL only.~~ (closed by roadmap
+  R26 for the shader-compiler half: `feme::cpu::SPIRVResourceLoweringPass`
+  now normalizes an arrayed binding into a contiguous heap range with a
+  range-checked, possibly-dynamic array index, matching
+  `BoundResourceNormalizationPass`'s own DXIL treatment -- see "Required
+  SPIR-V resource work" above. The Vulkan object-model half -- descriptor
+  pools/sets/updates actually producing `BoundResourceBinding`s for a
+  dispatch -- remains this milestone's own work, listed below.)
 - Complete SPIR-V `StorageBuffer` lowering to the CPU resource model.
 - Implement descriptor layouts, pools, sets, updates, binding, and dynamic
   storage-buffer offsets, with contiguous heap ranges for arrayed bindings.
@@ -1424,10 +1437,9 @@ a blit.
    deserialization, or by adding an unstructured SPIR-V-to-LLVM path that reuses
    `feme::cpu::PreparePass`'s structurizer as the DXIL path already does? This
    is the highest-risk open question and V0.5 exists to answer it.
-3. Should the SPIR-V binding-to-heap normalization reuse
-   `BoundResourceNormalizationPass` by first raising `SPV_EXT_descriptor_heap`,
-   or should it be a separate SPIR-V-specific pass? A general raised
-   descriptor-heap intrinsic is no longer optional, only its shape is open.
+3. Answered by roadmap R26 (see below): `feme::cpu::SPIRVResourceLoweringPass`
+   stays a separate, SPIR-V-specific pass rather than reusing
+   `BoundResourceNormalizationPass` by first raising `SPV_EXT_descriptor_heap`.
 4. Which Vulkan core version is the smallest practical target for the loader,
    ecosystem, and CTS in use when implementation begins?
 5. Should queue submissions execute synchronously for V1 simplicity, or should
@@ -1435,10 +1447,10 @@ a blit.
 6. What host CPU feature policy makes the physical-device and pipeline-cache
    identities stable across heterogeneous cores and process migration, and which
    single wave size should be pinned as the device `subgroupSize`?
-7. Can FeMe's existing resource metadata carry Vulkan descriptor arrays and
-   dynamic indexing as contiguous heap ranges without losing set/binding
-   identity, or does it need a Vulkan-specific reflection record before
-   `ResourceLoweringPass`?
+7. Answered by roadmap R26 (see below): yes, the existing `BoundResourceRange`/
+   `ResourceInfo` metadata already carries a Vulkan descriptor array as a
+   contiguous heap range without losing set/binding identity, with no
+   Vulkan-specific reflection record needed before `ResourceLoweringPass`.
 8. Which robust-buffer-access guarantees can the current scalar runtime helpers
    prove for vector, atomic, and partially out-of-range accesses?
 9. How large is the divergent-groupshared change in `feme::cpu`, and does it
@@ -1455,8 +1467,10 @@ a blit.
     ever tested through `VK_EXT_headless_surface`?
 
 Question 2 is answered first, by prototype, because it gates every later
-milestone. Questions 1, 3, and 7 are answered next with a resource-free
-prototype followed by one storage-buffer shader. Those exercise the
+milestone. Question 1 is answered next with a resource-free prototype
+followed by one storage-buffer shader (questions 3 and 7 no longer need that
+prototype to answer, since R26 settled both against the CPU-execution-track
+implementation directly). Those exercise the
 architectural boundary without prematurely committing to images, graphics, or
 WSI. Questions 11–13 are not answered until V5 is close, because answering
 them earlier commits to a graphics profile before there is a rasterizer to
@@ -1468,4 +1482,10 @@ cost is accepted; Mesa's common Vulkan runtime is not a link-time
 dependency; graphics adds `VK_QUEUE_GRAPHICS_BIT` to the existing queue family
 rather than a second family; `VkRenderPass` and dynamic rendering are both
 implemented, normalized into one internal render-target binding; and WSI
-starts headless.
+starts headless. Roadmap R26 answered questions 3 and 7 above: the SPIR-V
+binding-to-heap normalization is a separate pass
+(`feme::cpu::SPIRVResourceLoweringPass`), not a reuse of
+`BoundResourceNormalizationPass` over a raised `SPV_EXT_descriptor_heap`, and
+the existing `BoundResourceRange`/`ResourceInfo` metadata already carries an
+arrayed binding as a contiguous heap range without a Vulkan-specific
+reflection record.
