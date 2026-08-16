@@ -18,7 +18,8 @@
 // resources, vertex data, attachments and draw counts one draw needs, owned
 // for its duration ("Threading and Lifetime Rules" in
 // feme/docs/FeMeGraphicsDesign.md), but implements no fetch/assembly/raster
-// logic itself. Roadmap R32 adds the executor that consumes one.
+// logic itself. Roadmap R32 ("Basic triangle pipeline") adds the executor
+// (Executor.h) that consumes one.
 //
 //===----------------------------------------------------------------------===//
 
@@ -26,6 +27,7 @@
 #define FEME_GRAPHICS_PREPAREDDRAW_H
 
 #include "feme/Target/CPU/ResourceHeap.h"
+#include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/ArrayRef.h"
 
@@ -34,13 +36,39 @@
 
 namespace feme::graphics {
 
-/// One bound vertex buffer: a byte range plus the stride between
-/// consecutive elements, matching the scene YAML's own `vertex-buffers`
-/// entry shape ("Textual scene and image fixtures" in
+/// One vertex attribute a bound vertex buffer supplies: the shader-input
+/// location it feeds, its storage format, and its byte offset within one
+/// buffer element -- matching the scene YAML's own `vertex-buffers[].
+/// attributes[]` entry shape ("Textual scene and image fixtures" in
+/// feme/docs/Design.md) one-for-one, since the executor's vertex fetch
+/// (roadmap R32) needs exactly this to convert bound bytes into a vertex
+/// shader's input signature elements.
+struct VertexAttribute {
+  uint32_t Location = 0;
+  cpu::ResourceFormat Format = cpu::ResourceFormat::Unknown;
+  uint32_t Offset = 0;
+};
+
+/// One bound vertex buffer: a byte range, the stride between consecutive
+/// elements, and the attributes it supplies, matching the scene YAML's own
+/// `vertex-buffers` entry shape ("Textual scene and image fixtures" in
 /// feme/docs/Design.md).
 struct VertexBufferBinding {
   uint32_t Binding = 0;
   uint32_t Stride = 0;
+  llvm::ArrayRef<uint8_t> Data;
+  llvm::ArrayRef<VertexAttribute> Attributes;
+};
+
+/// The scalar type an index buffer's elements store.
+enum class IndexType : uint8_t {
+  UInt16,
+  UInt32,
+};
+
+/// A bound index buffer for an indexed draw (`DrawCommand::Indexed`).
+struct IndexBufferBinding {
+  IndexType Type = IndexType::UInt32;
   llvm::ArrayRef<uint8_t> Data;
 };
 
@@ -74,14 +102,20 @@ struct AttachmentView {
   uint32_t Height = 0;
 };
 
-/// One non-indexed or indexed draw command: vertex/instance counts plus
-/// their starting offsets, matching the scene YAML's own `draws` entry
-/// shape.
+/// One non-indexed or indexed draw command, matching the scene YAML's own
+/// `draws` entry shape. A non-indexed draw (`Indexed == false`) fetches
+/// vertex `FirstVertex + i` for `i` in `[0, VertexCount)`; an indexed draw
+/// looks `i` up through the bound index buffer at `FirstIndex + i` instead,
+/// adding `VertexOffset` to the index it reads (`VertexCount` is then the
+/// index count), matching Vulkan/Direct3D's own indexed-draw semantics.
 struct DrawCommand {
   uint32_t VertexCount = 0;
   uint32_t InstanceCount = 1;
   uint32_t FirstVertex = 0;
   uint32_t FirstInstance = 0;
+  bool Indexed = false;
+  uint32_t FirstIndex = 0;
+  int32_t VertexOffset = 0;
 };
 
 /// A snapshot of one draw's dynamic state: color attachments, viewport and
@@ -95,6 +129,7 @@ struct PreparedDraw {
   ViewportState Viewport;
   ScissorRect Scissor;
   llvm::ArrayRef<VertexBufferBinding> VertexBuffers;
+  IndexBufferBinding IndexBuffer;
   cpu::DispatchResources Resources;
   llvm::ArrayRef<DrawCommand> Draws;
 };

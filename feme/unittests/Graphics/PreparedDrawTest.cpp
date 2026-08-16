@@ -6,10 +6,10 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// See PipelineTest.cpp's file comment: roadmap R31 only defines the
-// description, so these tests cover `PreparedDraw`'s plumbing (attachments,
-// viewport/scissor, vertex buffers, draw commands), not execution (roadmap
-// R32).
+// See PipelineTest.cpp's file comment: roadmap R31 defined the description;
+// this covers `PreparedDraw`'s plumbing (attachments, viewport/scissor,
+// vertex/index buffers, draw commands) -- Executor.h/ExecutorTest.cpp
+// (roadmap R32) cover execution.
 //
 //===----------------------------------------------------------------------===//
 
@@ -32,10 +32,14 @@ TEST(PreparedDrawTest, DescribesOneDraw) {
 
   std::array<float, 9> VertexData = {-1.0f, -1.0f, 0.0f, 3.0f, -1.0f,
                                      0.0f,  -1.0f, 3.0f, 0.0f};
+  std::array<VertexAttribute, 1> Attributes{
+      VertexAttribute{/*Location=*/0, cpu::ResourceFormat::R32G32B32_FLOAT,
+                      /*Offset=*/0}};
   VertexBufferBinding VertexBuffer{
       /*Binding=*/0, /*Stride=*/12,
       llvm::ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
-                     VertexData.size() * sizeof(float))};
+                     VertexData.size() * sizeof(float)),
+      Attributes};
   std::array<VertexBufferBinding, 1> VertexBuffers{VertexBuffer};
 
   DrawCommand Draw{/*VertexCount=*/3, /*InstanceCount=*/1, /*FirstVertex=*/0,
@@ -58,8 +62,35 @@ TEST(PreparedDrawTest, DescribesOneDraw) {
   EXPECT_EQ(Prepared.Scissor.Width, 4u);
   ASSERT_EQ(Prepared.VertexBuffers.size(), 1u);
   EXPECT_EQ(Prepared.VertexBuffers[0].Stride, 12u);
+  ASSERT_EQ(Prepared.VertexBuffers[0].Attributes.size(), 1u);
+  EXPECT_EQ(Prepared.VertexBuffers[0].Attributes[0].Location, 0u);
   ASSERT_EQ(Prepared.Draws.size(), 1u);
   EXPECT_EQ(Prepared.Draws[0].VertexCount, 3u);
+  EXPECT_FALSE(Prepared.Draws[0].Indexed);
+}
+
+TEST(PreparedDrawTest, DescribesAnIndexedDraw) {
+  std::array<uint32_t, 3> Indices = {0, 1, 2};
+  IndexBufferBinding IndexBuffer{
+      IndexType::UInt32,
+      llvm::ArrayRef(reinterpret_cast<const uint8_t *>(Indices.data()),
+                     Indices.size() * sizeof(uint32_t))};
+
+  PreparedDraw Prepared;
+  Prepared.IndexBuffer = IndexBuffer;
+  DrawCommand Draw;
+  Draw.VertexCount = 3;
+  Draw.Indexed = true;
+  Draw.FirstIndex = 0;
+  Draw.VertexOffset = 1;
+  std::array<DrawCommand, 1> Draws{Draw};
+  Prepared.Draws = Draws;
+
+  EXPECT_EQ(Prepared.IndexBuffer.Type, IndexType::UInt32);
+  EXPECT_EQ(Prepared.IndexBuffer.Data.size(), 12u);
+  ASSERT_EQ(Prepared.Draws.size(), 1u);
+  EXPECT_TRUE(Prepared.Draws[0].Indexed);
+  EXPECT_EQ(Prepared.Draws[0].VertexOffset, 1);
 }
 
 } // namespace
