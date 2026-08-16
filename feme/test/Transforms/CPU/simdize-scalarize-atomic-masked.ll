@@ -16,7 +16,7 @@
 ; this arm.
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %atomicrmw.mask = and <4 x i1> %wave_entry_mask, %mask.t.wide
+; CHECK: %atomicrmw.mask = and <4 x i1> %wave_entry_mask, %sideeffect.t.wide
 ; CHECK: %lane.mask = extractelement <4 x i1> %atomicrmw.mask, i32 0
 ; CHECK-NEXT: %lane.rmw.val = select i1 %lane.mask, i32 1, i32 0
 ; CHECK-NEXT: atomicrmw add ptr @g, i32 %lane.rmw.val seq_cst

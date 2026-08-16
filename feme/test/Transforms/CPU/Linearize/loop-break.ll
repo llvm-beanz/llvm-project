@@ -18,13 +18,14 @@
 
 ; CHECK-LABEL: define void @main(
 ; CHECK: loop:
-; CHECK: %active = phi i1 [ true, %entry ], [ %active.header, %latch ]
+; CHECK: %active.live = phi i1 [ true, %entry ], [ %active.header.live, %latch ]
 ; CHECK: %break.cond = icmp eq i32 %tid, %i
-; CHECK: %active.header = and i1 %active, %{{.*}}
+; CHECK: %active.header.live = and i1 %active.live, %{{.*}}
+; CHECK-NEXT: %active.header.sideeffect = and i1 %active.sideeffect, %{{.*}}
 ; CHECK-NEXT: br label %latch
 ; CHECK: latch:
 ; CHECK: %loop.cond = icmp slt i32 %inc, %n
-; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.header)
+; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.header.live)
 ; CHECK: %loop.continue = and i1 %loop.cond, %loop.any.active
 ; CHECK: br i1 %loop.continue, label %loop, label %exit
 define void @main(i32 %n) #0 {

@@ -12,7 +12,7 @@
 ; `widenMaskedAtomicRMW`'s comment.
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %atomicrmw.mask = and <4 x i1> %wave_entry_mask, %mask.t.wide
+; CHECK: %atomicrmw.mask = and <4 x i1> %wave_entry_mask, %sideeffect.t.wide
 ; CHECK: %lane.mask = extractelement <4 x i1> %atomicrmw.mask, i32 0
 ; CHECK-NEXT: %lane.old = load i32, ptr @g
 ; CHECK-NEXT: %lane.rmw.val = select i1 %lane.mask, i32 7, i32 %lane.old

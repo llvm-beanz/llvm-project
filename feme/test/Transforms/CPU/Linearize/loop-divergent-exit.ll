@@ -13,12 +13,13 @@
 ; 6 deviation note for the (more common) loop shape that does not yet.
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %active = phi i1 [ true, %entry ], [ %active.header, %[[LATCH:.*]] ]
+; CHECK: %active.live = phi i1 [ true, %entry ], [ %active.header.live, %[[LATCH:.*]] ]
 ; CHECK: %break.cond = icmp eq i32 %tid, %inc
-; CHECK: %active.header = and i1 %active, %{{.*}}
+; CHECK: %active.header.live = and i1 %active.live, %{{.*}}
+; CHECK-NEXT: %active.header.sideeffect = and i1 %active.sideeffect, %{{.*}}
 ; CHECK: br label %[[LATCH]]
 ; CHECK: [[LATCH]]:
-; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.header)
+; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.header.live)
 ; CHECK: br i1 %loop.any.active, label %loop, label %exit
 define void @main() #0 {
 entry:

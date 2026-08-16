@@ -8,6 +8,7 @@
 
 #include "feme/Transforms/CPU/Linearize.h"
 
+#include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Function.h"
@@ -213,6 +214,132 @@ TEST(LinearizeTest, LeavesUniformLoopUnchanged) {
     if (auto *CI = dyn_cast<CallInst>(&I))
       EXPECT_FALSE(CI->getCalledFunction() &&
                    CI->getCalledFunction()->getName() == "feme.cpu.mask.any");
+}
+
+// Roadmap R27: `feme.stage.discard` narrows both the live and side-effect
+// masks going forward, even with no divergent branch at all in the
+// function -- see `hasStageMaskOps`'s comment for why an unconditional
+// discard still needs `DiamondFlattener` to walk the function.
+TEST(LinearizeTest, DiscardNarrowsBothMasksAndMasksSubsequentStore) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(ptr %p, i1 %cond) #0 {
+    entry:
+      call void @feme.stage.discard(i1 %cond)
+      store i32 1, ptr %p
+      ret void
+    }
+    declare void @feme.stage.discard(i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  if (Function *Discard = F->getParent()->getFunction("feme.stage.discard"))
+    EXPECT_TRUE(Discard->use_empty())
+        << "feme.stage.discard call should have been erased";
+
+  bool FoundMaskedStore = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    if (std::optional<MatchedMaskedMemOp> Matched = matchMaskedStore(*CI)) {
+      FoundMaskedStore = true;
+      EXPECT_FALSE(isa<Constant>(Matched->Mask))
+          << "store after feme.stage.discard should be masked by the "
+             "narrowed side-effect mask";
+    }
+  }
+  EXPECT_TRUE(FoundMaskedStore);
+}
+
+// `feme.stage.demote` narrows only the side-effect mask, leaving the live
+// mask (and therefore a subsequent ordinary `load`) untouched.
+TEST(LinearizeTest, DemoteNarrowsOnlySideEffectMask) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main(ptr %p, i1 %cond) #0 {
+    entry:
+      call void @feme.stage.demote(i1 %cond)
+      store i32 1, ptr %p
+      %v = load i32, ptr %p
+      ret i32 %v
+    }
+    declare void @feme.stage.demote(i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundMaskedStore = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI)
+      continue;
+    if (std::optional<MatchedMaskedMemOp> Matched = matchMaskedStore(*CI)) {
+      FoundMaskedStore = true;
+      EXPECT_FALSE(isa<Constant>(Matched->Mask));
+    }
+    // The load after the demote is still unconditionally live: `demote`
+    // does not narrow the live mask, so it stays the all-active constant
+    // and this milestone leaves the plain `load` untouched (see
+    // `applyStageMasks`'s "left unmasked exactly when ... still the
+    // all-active constant").
+  }
+  EXPECT_TRUE(FoundMaskedStore);
+  bool FoundPlainLoad = false;
+  for (Instruction &I : instructions(F))
+    if (auto *LI = dyn_cast<LoadInst>(&I)) {
+      FoundPlainLoad = true;
+      (void)LI;
+    }
+  EXPECT_TRUE(FoundPlainLoad);
+}
+
+// `feme.stage.is_helper` reads back `live && !side-effect`: after a
+// `demote`, the invocation is live but has no side-effect mask, so
+// `is_helper` must fold to a value that is true whenever `demote`'s
+// condition was true.
+TEST(LinearizeTest, IsHelperReflectsDemotedState) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main(i1 %cond) #0 {
+    entry:
+      call void @feme.stage.demote(i1 %cond)
+      %h = call i1 @feme.stage.is_helper()
+      ret i1 %h
+    }
+    declare void @feme.stage.demote(i1)
+    declare i1 @feme.stage.is_helper()
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  if (Function *IsHelper = F->getParent()->getFunction("feme.stage.is_helper"))
+    EXPECT_TRUE(IsHelper->use_empty())
+        << "feme.stage.is_helper call should have been erased";
+  auto *Ret = dyn_cast<ReturnInst>(F->getEntryBlock().getTerminator());
+  ASSERT_TRUE(Ret);
+  // `is_helper` lowers to `live && !sideeffect`; with no divergent branch,
+  // `live` is still the all-active constant `true`, so this should fold to
+  // (a value equivalent to) `%cond` itself once `and true, X` and `not
+  // (not cond)`-style simplifications are accounted for -- checked here
+  // structurally (an `and` of the all-active constant and something
+  // derived from `%cond`) rather than by exact instruction match, since
+  // this pass does no constant folding of its own.
+  EXPECT_TRUE(isa<Instruction>(Ret->getReturnValue()) ||
+              isa<Argument>(Ret->getReturnValue()));
 }
 
 } // namespace

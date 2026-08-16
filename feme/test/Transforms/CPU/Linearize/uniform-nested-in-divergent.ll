@@ -15,7 +15,7 @@
 ; CHECK: t.a:
 ; CHECK: t.b:
 ; CHECK: t.end:
-; CHECK-NEXT: br label %f
+; CHECK: br label %f
 ; CHECK: f:
 ; CHECK-NEXT: br label %end
 define void @main(i32 %uniform_cond) #0 {

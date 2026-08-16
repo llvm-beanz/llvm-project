@@ -12,10 +12,11 @@
 ; lowers.
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %mask.t = and i1 true, %c
+; CHECK: %live.t = and i1 true, %c
+; CHECK: %sideeffect.t = and i1 true, %c
 ; CHECK: t:
-; CHECK: %loaded1 = call i32 @feme.cpu.masked.load.i32(ptr %p, i32 4, i1 %mask.t, i32 0)
-; CHECK: call void @feme.cpu.masked.store.i32(i32 %loaded1, ptr %p, i32 4, i1 %mask.t)
+; CHECK: %loaded1 = call i32 @feme.cpu.masked.load.i32(ptr %p, i32 4, i1 %live.t, i32 0)
+; CHECK: call void @feme.cpu.masked.store.i32(i32 %loaded1, ptr %p, i32 4, i1 %sideeffect.t)
 define void @main(ptr %p) #0 {
 entry:
   %tid = call i32 @llvm.dx.thread.id(i32 0)

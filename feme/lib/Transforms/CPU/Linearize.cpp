@@ -19,11 +19,34 @@
 // mutation walk that only runs once validation for the whole function
 // succeeds, so a partially-rewritten function is never left behind.
 //
+// Roadmap R27 splits the single scalar `i1` mask both transforms thread
+// through a function into the **live mask**/**side-effect mask** pair
+// "Shared middle-end phases" in feme/docs/FeMeGraphicsDesign.md describes:
+// `feme.stage.discard` clears both going forward, `feme.stage.demote`
+// clears only the side-effect mask (keeping the invocation live for
+// derivatives while suppressing further writes), and `feme.stage.is_helper`
+// reads back `live && !side-effect`. See `MaskPair` and `applyStageMasks`
+// below. Every ordinary masked memory access still uses the live mask (a
+// `load`, and any resource-load call); every side-effecting one (a `store`,
+// `atomicrmw`, or resource-store call) now uses the side-effect mask
+// instead -- the two coincide exactly (`Live == SideEffect` at every point)
+// for a function with no `feme.stage.discard`/`.demote` call at all, so this
+// is a strict extension of milestone 6/7's behavior, not a change to it.
+// Scoped, like the rest of this milestone's masking, to the same divergent-
+// diamond/divergent-loop-exit shapes `DiamondFlattener`/`LoopLinearizer`
+// already support -- a `feme.stage.discard`/`.demote`/`.is_helper` call
+// inside a loop with no divergent exit of its own (an "otherwise uniform"
+// loop) is not yet lowered by this milestone and is diagnosed rather than
+// left for `feme::cpu::SIMDizePass` to mis-widen; `feme.stage.output.store`
+// masking (a genuine side effect once a vertex/fragment wrapper exists to
+// consume it) is left to roadmap R28, which is what builds that wrapper.
+//
 //===----------------------------------------------------------------------===//
 
 #include "feme/Transforms/CPU/Linearize.h"
 
 #include "feme/Analysis/CPU/WaveUniformity.h"
+#include "feme/Core/StageOps.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 
@@ -54,21 +77,40 @@ void diagnose(Function &F, const Twine &Message) {
                            "': " + Message);
 }
 
-/// Rewrites every memory access in \p BB that needs a governing mask once
-/// \p Mask is not the all-active constant: a `feme.cpu.resource.*` call's
-/// existing mask operand is set to \p Mask (see "Canonical resource calls
-/// are similarly rewritten to masked forms" in "Phase 3"), and a plain,
-/// non-atomic, non-volatile `load`/`store` is replaced with the
-/// corresponding `feme.cpu.masked.load`/`.store` call carrying \p Mask (see
-/// "Side-effecting operations ... are rewritten into the masked intrinsic
-/// forms" and "Loads from addresses that could be lane-varying get the same
-/// treatment", also in "Phase 3"; Phase 4 decides, from the address's own
-/// uniformity, whether that becomes a broadcast scalar access, a
-/// scalarized active-lane loop, or a real vector `llvm.masked.*` op -- this
-/// pass always emits the masked form and lets Phase 4 pick). A masked
-/// load's passthru value is zero, matching "Phase 5"'s "FeMe chooses zero
-/// for deterministic reference execution" for any other lane read this
-/// design leaves undefined. An `atomicrmw` gets the same treatment, via
+/// The pair of masks "Shared middle-end phases" in
+/// feme/docs/FeMeGraphicsDesign.md describes: which invocations still
+/// execute and contribute values (`Live`), and which are additionally
+/// allowed to perform a side effect (`SideEffect`). The two are the exact
+/// same value for a function with no `feme.stage.discard`/`.demote` call --
+/// see `applyStageMasks` -- so every existing compute shader (which has
+/// neither) sees identical behavior to before this pair existed.
+struct MaskPair {
+  Value *Live;
+  Value *SideEffect;
+};
+
+/// Rewrites every memory access and every `feme.stage.discard`/`.demote`/
+/// `.is_helper` call in \p BB, threading \p Masks through in program order
+/// (mutating it in place, since a `feme.stage.discard`/`.demote` call
+/// narrows what governs everything after it in the same block): a
+/// `feme.cpu.resource.*` load's existing mask operand becomes
+/// \p Masks.Live, a store's becomes \p Masks.SideEffect (see "Canonical
+/// resource calls are similarly rewritten to masked forms" in "Phase 3",
+/// and "Shared middle-end phases" in feme/docs/FeMeGraphicsDesign.md:
+/// "ordinary arithmetic ... consume[s] the live mask ... every lowered
+/// side effect consumes the side-effect mask"), and a plain, non-atomic,
+/// non-volatile `load`/`store` is replaced with the corresponding
+/// `feme.cpu.masked.load`/`.store` call carrying the same choice of mask
+/// (see "Side-effecting operations ... are rewritten into the masked
+/// intrinsic forms" and "Loads from addresses that could be lane-varying
+/// get the same treatment", also in "Phase 3"; Phase 4 decides, from the
+/// address's own uniformity, whether that becomes a broadcast scalar
+/// access, a scalarized active-lane loop, or a real vector `llvm.masked.*`
+/// op -- this pass always emits the masked form and lets Phase 4 pick). A
+/// masked load's passthru value is zero, matching "Phase 5"'s "FeMe
+/// chooses zero for deterministic reference execution" for any other lane
+/// read this design leaves undefined. An `atomicrmw` (a side effect) gets
+/// the same treatment against \p Masks.SideEffect, via
 /// `feme.cpu.masked.atomicrmw` (see `feme::cpu::SIMDizePass`'s
 /// `widenMaskedAtomicRMW`, which turns a masked-off lane's contribution
 /// into its operation's identity element rather than skipping the
@@ -81,50 +123,119 @@ void diagnose(Function &F, const Twine &Message) {
 /// should have stayed inactive. An `AtomicCmpXchgInst` needs no equivalent
 /// rewrite here: its `{T, i1}` result is an aggregate, already rejected by
 /// `feme::cpu::SIMDizePass::checkVectorDecompositionSupported` before
-/// masking would ever matter. Shared between `DiamondFlattener` (a
-/// divergent arm's mask) and `LoopLinearizer` (a loop iteration's "active"
-/// mask) below. A no-op when \p Mask is the all-active constant: nothing
-/// outside a divergent region needs masking.
-void maskMemoryOps(BasicBlock &BB, Value *Mask) {
-  if (isa<Constant>(Mask))
-    return;
+/// masking would ever matter.
+///
+/// `feme.stage.discard(cond)` narrows both masks by `!cond` going forward
+/// (killing the invocation); `feme.stage.demote(cond)` narrows only
+/// `Masks.SideEffect` (demoting to a helper invocation, still live for
+/// derivatives); `feme.stage.is_helper()` is replaced with
+/// `Masks.Live && !Masks.SideEffect` -- true exactly for an invocation that
+/// is live but has had its side-effect mask cleared without also clearing
+/// its live mask, which is precisely what `.demote` (and nothing else)
+/// does. All three calls are erased once lowered.
+///
+/// Shared between `DiamondFlattener` (a divergent arm's masks) and
+/// `LoopLinearizer` (a loop iteration's "active" masks) below. A given
+/// memory access is left unmasked exactly when the mask that would govern
+/// it is still the all-active constant at that point in \p BB -- checked
+/// per access rather than once for the whole block, since a
+/// `feme.stage.discard`/`.demote` call earlier in the same block can turn
+/// an initially-constant mask into a real value partway through it.
+void applyStageMasks(BasicBlock &BB, MaskPair &Masks) {
   for (Instruction &I : make_early_inc_range(BB)) {
     if (auto *Call = dyn_cast<CallInst>(&I)) {
-      if (std::optional<MatchedResourceCall> Matched = matchResourceCall(*Call))
-        Call->setArgOperand(Call->arg_size() - 1, Mask);
+      feme::StageOpKind Kind;
+      if (feme::isStageOpCall(*Call, &Kind)) {
+        IRBuilder<> B(Call);
+        switch (Kind) {
+        case feme::StageOpKind::Discard: {
+          Value *NotCond = B.CreateNot(Call->getArgOperand(0), "discard.not");
+          Masks.Live = B.CreateAnd(Masks.Live, NotCond, "live.discard");
+          Masks.SideEffect =
+              B.CreateAnd(Masks.SideEffect, NotCond, "sideeffect.discard");
+          Call->eraseFromParent();
+          continue;
+        }
+        case feme::StageOpKind::Demote: {
+          Value *NotCond = B.CreateNot(Call->getArgOperand(0), "demote.not");
+          Masks.SideEffect =
+              B.CreateAnd(Masks.SideEffect, NotCond, "sideeffect.demote");
+          Call->eraseFromParent();
+          continue;
+        }
+        case feme::StageOpKind::IsHelper: {
+          Value *NotSideEffect =
+              B.CreateNot(Masks.SideEffect, "not.sideeffect");
+          Value *Helper = B.CreateAnd(Masks.Live, NotSideEffect, "is.helper");
+          Call->replaceAllUsesWith(Helper);
+          Call->eraseFromParent();
+          continue;
+        }
+        default:
+          break; // Not a mask-affecting stage op; fall through below.
+        }
+      }
+      if (std::optional<MatchedResourceCall> Matched =
+              matchResourceCall(*Call)) {
+        Value *Mask = isLoad(Matched->Kind) ? Masks.Live : Masks.SideEffect;
+        if (!isa<Constant>(Mask))
+          Call->setArgOperand(Call->arg_size() - 1, Mask);
+      }
       continue;
     }
     if (auto *LI = dyn_cast<LoadInst>(&I)) {
-      if (!LI->isSimple())
+      if (!LI->isSimple() || isa<Constant>(Masks.Live))
         continue; // Atomic/volatile: not this milestone's problem yet.
       IRBuilder<> B(LI);
       Value *Passthru = Constant::getNullValue(LI->getType());
       CallInst *Masked =
           createMaskedLoad(B, LI->getPointerOperand(), LI->getAlign().value(),
-                           Mask, Passthru, LI->getName());
+                           Masks.Live, Passthru, LI->getName());
       LI->replaceAllUsesWith(Masked);
       LI->eraseFromParent();
       continue;
     }
     if (auto *SI = dyn_cast<StoreInst>(&I)) {
-      if (!SI->isSimple())
+      if (!SI->isSimple() || isa<Constant>(Masks.SideEffect))
         continue;
       IRBuilder<> B(SI);
       createMaskedStore(B, SI->getValueOperand(), SI->getPointerOperand(),
-                        SI->getAlign().value(), Mask);
+                        SI->getAlign().value(), Masks.SideEffect);
       SI->eraseFromParent();
       continue;
     }
     if (auto *RMW = dyn_cast<AtomicRMWInst>(&I)) {
+      if (isa<Constant>(Masks.SideEffect))
+        continue;
       IRBuilder<> B(RMW);
       CallInst *Masked = createMaskedAtomicRMW(
           B, RMW->getOperation(), RMW->getPointerOperand(),
-          RMW->getValOperand(), RMW->getAlign().value(), Mask, RMW->getName());
+          RMW->getValOperand(), RMW->getAlign().value(), Masks.SideEffect,
+          RMW->getName());
       RMW->replaceAllUsesWith(Masked);
       RMW->eraseFromParent();
       continue;
     }
   }
+}
+
+/// Whether \p F calls any of the three mask-affecting `feme.stage.*`
+/// operations `applyStageMasks` lowers (`discard`/`demote`/`is_helper`) --
+/// unlike a divergent branch, these can appear in an otherwise fully
+/// uniform, straight-line function (e.g. an unconditional
+/// `feme.stage.discard`), which still needs `DiamondFlattener` to walk it
+/// and lower them rather than being left untouched as "nothing to do".
+bool hasStageMaskOps(Function &F) {
+  for (Instruction &I : instructions(F)) {
+    auto *Call = dyn_cast<CallInst>(&I);
+    feme::StageOpKind Kind;
+    if (Call && feme::isStageOpCall(*Call, &Kind) &&
+        (Kind == feme::StageOpKind::Discard ||
+         Kind == feme::StageOpKind::Demote ||
+         Kind == feme::StageOpKind::IsHelper))
+      return true;
+  }
+  return false;
 }
 
 //===----------------------------------------------------------------------===//
@@ -210,13 +321,20 @@ private:
   /// loop.
   bool validate(BasicBlock *Start, BasicBlock *End);
 
-  /// Mutates the region \p validate already approved, threading \p Mask
-  /// (the scalar `i1` value describing whether the invocation reaching
-  /// \p Cur is active) down through it. The edge that would otherwise land
-  /// on \p End is redirected to \p RedirectTo instead (equal to \p End when
-  /// no redirect is needed, e.g. for an outermost or false-side call).
-  void flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
-               BasicBlock *RedirectTo);
+  /// Mutates the region \p validate already approved, threading \p Masks
+  /// (the live/side-effect mask pair describing whether -- and how -- the
+  /// invocation reaching \p Cur is active; see `MaskPair`) down through it,
+  /// narrowing it in place as `feme.stage.discard`/`.demote` calls are
+  /// encountered (see `applyStageMasks`). The edge that would otherwise
+  /// land on \p End is redirected to \p RedirectTo instead (equal to \p End
+  /// when no redirect is needed, e.g. for an outermost or false-side call).
+  /// Returns the mask pair as narrowed by the time control reaches \p End
+  /// (or returns, for the outermost call), which the caller must fold back
+  /// into whatever mask it threads onward -- see the divergent-branch case
+  /// in the definition for why a `select` on the branch condition, not
+  /// simply reusing the pre-branch masks, is what that folding needs.
+  MaskPair flatten(BasicBlock *Cur, BasicBlock *End, MaskPair Masks,
+                   BasicBlock *RedirectTo);
 
   /// The blocks `validate` stopped at (see its comment) because they were
   /// cycle members, collected across every root `run` has processed so
@@ -288,8 +406,8 @@ bool DiamondFlattener::validate(BasicBlock *Start, BasicBlock *End) {
   return true;
 }
 
-void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
-                               BasicBlock *RedirectTo) {
+MaskPair DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End,
+                                   MaskPair Masks, BasicBlock *RedirectTo) {
   for (;;) {
     if (Cur == End) {
       // A trivial (already-empty) walk: nothing to redirect, `Cur` itself
@@ -297,7 +415,7 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
       // blocks of its own, which `validate`'s "no empty arm" check already
       // rules out for the arms this pass creates recursive calls for; kept
       // as a defensive early return rather than an assertion.
-      return;
+      return Masks;
     }
 
     Instruction *Term = Cur->getTerminator();
@@ -306,7 +424,7 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
     // comment): this walk must stop here too, matching whatever `validate`
     // already approved -- leaving the loop's own iteration decision, and
     // this block's own memory ops (`LoopLinearizer` masks those with the
-    // loop's own "active" mask instead), to `LoopLinearizer`/a later run
+    // loop's own "active" masks instead), to `LoopLinearizer`/a later run
     // instead of misreading it as an ordinary diamond (whose immediate
     // post-dominator is not simply "the reconvergence point of a two-arm
     // branch"). A plain nested `if`/`else` entirely inside a loop body is
@@ -316,19 +434,19 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
         Br && isInCycle(Cur) &&
         (isLoopControlEdge(Cur, Br->getSuccessor(0)) ||
          isLoopControlEdge(Cur, Br->getSuccessor(1))))
-      return;
+      return Masks;
 
-    maskMemoryOps(*Cur, Mask);
+    applyStageMasks(*Cur, Masks);
 
     if (isa<ReturnInst>(Term))
-      return; // Only reachable at the outermost call (End == nullptr).
+      return Masks; // Only reachable at the outermost call (End == nullptr).
 
     if (auto *UBr = dyn_cast<UncondBrInst>(Term)) {
       BasicBlock *Succ = UBr->getSuccessor(0);
       if (Succ == End) {
         if (RedirectTo != End)
           UBr->setSuccessor(0, RedirectTo);
-        return;
+        return Masks;
       }
       Cur = Succ;
       continue;
@@ -342,9 +460,37 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
 
     if (!UI.isDivergentTerminator(Br)) {
       // Uniform: the real branch stays; each arm is flattened on its own,
-      // still reconverging at the same `R`.
-      flatten(T, R, Mask, R);
-      flatten(Fsucc, R, Mask, R);
+      // still reconverging at the same `R`. Uniform control flow cannot
+      // itself narrow the live/side-effect masks (only a
+      // `feme.stage.discard`/`.demote` call can), but either arm may still
+      // contain one, and unlike the divergent case below there is no
+      // single physical path through both arms to select between -- only
+      // one of them actually runs, via the real (preserved) branch -- so
+      // the exiting masks are merged with real `phi`s at `R` instead of a
+      // `select`, the same way any other value the two arms disagree on
+      // would be. `TPred`/`FPred` are identified by dominance before either
+      // arm is mutated, mirroring the divergent case's own classification
+      // below.
+      auto PredIt = pred_begin(R);
+      BasicBlock *Pred0 = *PredIt++;
+      BasicBlock *Pred1 = *PredIt;
+      BasicBlock *TPred = DT.dominates(T, Pred0) ? Pred0 : Pred1;
+      BasicBlock *FPred = TPred == Pred0 ? Pred1 : Pred0;
+
+      MaskPair TExit = flatten(T, R, Masks, R);
+      MaskPair FExit = flatten(Fsucc, R, Masks, R);
+
+      IRBuilder<> MergeBuilder(&*R->getFirstInsertionPt());
+      PHINode *LivePN =
+          MergeBuilder.CreatePHI(Masks.Live->getType(), 2, "live.merge");
+      LivePN->addIncoming(TExit.Live, TPred);
+      LivePN->addIncoming(FExit.Live, FPred);
+      PHINode *SideEffectPN = MergeBuilder.CreatePHI(
+          Masks.SideEffect->getType(), 2, "sideeffect.merge");
+      SideEffectPN->addIncoming(TExit.SideEffect, TPred);
+      SideEffectPN->addIncoming(FExit.SideEffect, FPred);
+      Masks.Live = LivePN;
+      Masks.SideEffect = SideEffectPN;
       Cur = R;
       continue;
     }
@@ -373,8 +519,12 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
 
     IRBuilder<> CondBuilder(Br);
     Value *NotCond = CondBuilder.CreateNot(Cond, "not." + Cond->getName());
-    Value *TMask = CondBuilder.CreateAnd(Mask, Cond, "mask.t");
-    Value *FMask = CondBuilder.CreateAnd(Mask, NotCond, "mask.f");
+    MaskPair TMasks{
+        CondBuilder.CreateAnd(Masks.Live, Cond, "live.t"),
+        CondBuilder.CreateAnd(Masks.SideEffect, Cond, "sideeffect.t")};
+    MaskPair FMasks{
+        CondBuilder.CreateAnd(Masks.Live, NotCond, "live.f"),
+        CondBuilder.CreateAnd(Masks.SideEffect, NotCond, "sideeffect.f")};
 
     UncondBrInst::Create(T, Br->getIterator());
     Br->eraseFromParent();
@@ -383,8 +533,20 @@ void DiamondFlattener::flatten(BasicBlock *Cur, BasicBlock *End, Value *Mask,
     // reconverging directly; the false arm still reconverges at `R`
     // normally -- this is the "unconditional fallthrough" the design
     // describes, see the file comment above.
-    flatten(T, R, TMask, /*RedirectTo=*/Fsucc);
-    flatten(Fsucc, R, FMask, /*RedirectTo=*/R);
+    MaskPair TExit = flatten(T, R, TMasks, /*RedirectTo=*/Fsucc);
+    MaskPair FExit = flatten(Fsucc, R, FMasks, /*RedirectTo=*/R);
+
+    // Fold the two arms' (possibly `feme.stage.discard`/`.demote`-narrowed)
+    // exit masks back together by the same condition that split them:
+    // `select(Cond, Masks.Live & Cond, Masks.Live & !Cond)` is exactly
+    // `Masks.Live` when neither arm narrowed anything, so this is a strict
+    // generalization of simply reusing the pre-branch masks (what this
+    // pass did before roadmap R27 added `feme.stage.discard`/`.demote`).
+    IRBuilder<> MergeBuilder(&*R->getFirstInsertionPt());
+    Masks.Live =
+        MergeBuilder.CreateSelect(Cond, TExit.Live, FExit.Live, "live.merge");
+    Masks.SideEffect = MergeBuilder.CreateSelect(
+        Cond, TExit.SideEffect, FExit.SideEffect, "sideeffect.merge");
 
     Cur = R;
   }
@@ -418,7 +580,11 @@ bool DiamondFlattener::run() {
 
   // A validation pass that found nothing to do is common (most functions
   // have no divergent branch at all); avoid manufacturing an all-active
-  // mask constant and an otherwise no-op mutation walk in that case.
+  // mask constant and an otherwise no-op mutation walk in that case --
+  // unless the function calls a mask-affecting `feme.stage.*` operation
+  // (see `hasStageMaskOps`), which needs this walk to lower it even absent
+  // any divergent branch at all (e.g. an unconditional
+  // `feme.stage.discard`).
   bool HasDivergentBranch = false;
   for (BasicBlock &BB : F) {
     auto *Br = dyn_cast<CondBrInst>(BB.getTerminator());
@@ -430,10 +596,11 @@ bool DiamondFlattener::run() {
     HasDivergentBranch = true;
     break;
   }
-  if (!HasDivergentBranch)
+  if (!HasDivergentBranch && !hasStageMaskOps(F))
     return false;
 
-  Value *AllActive = ConstantInt::getTrue(F.getContext());
+  MaskPair AllActive{ConstantInt::getTrue(F.getContext()),
+                     ConstantInt::getTrue(F.getContext())};
   for (BasicBlock *Root : Roots)
     flatten(Root, nullptr, AllActive, nullptr);
   return true;
@@ -477,17 +644,19 @@ private:
   std::optional<ExitCheck> matchExitCheck(BasicBlock &BB,
                                           BasicBlock *ExitBlock);
 
-  /// Finalizes \p Latch's backedge once its loop-carried "active" mask is
-  /// fully known (\p ActiveAtLatch), returning the resulting backedge
-  /// condition: \p Latch's own natural condition (if it has one -- real,
-  /// uniform control flow the exit check upstream left alone), conjoined
-  /// with `feme.cpu.mask.any` of \p ActiveAtLatch, so a uniform-false
-  /// natural exit still wins and a uniform-true natural continue does not
-  /// resurrect a lane an earlier divergent check already deactivated. \p
-  /// Latch's existing terminator is erased; the caller installs the real
-  /// backedge branch using the returned condition.
+  /// Finalizes \p Latch's backedge once its loop-carried masks are fully
+  /// known (\p MasksAtLatch), returning the resulting backedge condition:
+  /// \p Latch's own natural condition (if it has one -- real, uniform
+  /// control flow the exit check upstream left alone), conjoined with
+  /// `feme.cpu.mask.any` of \p MasksAtLatch.Live (any lane still
+  /// contributing values at all; every side-effect mask is a subset of the
+  /// live mask -- see `MaskPair`'s comment -- so this alone suffices), so a
+  /// uniform-false natural exit still wins and a uniform-true natural
+  /// continue does not resurrect a lane an earlier divergent check already
+  /// deactivated. \p Latch's existing terminator is erased; the caller
+  /// installs the real backedge branch using the returned condition.
   Value *closeLatch(BasicBlock *Latch, BasicBlock *Header,
-                    Value *ActiveAtLatch);
+                    const MaskPair &MasksAtLatch);
 
   bool linearizeCycle(CycleRef C);
 };
@@ -538,10 +707,10 @@ LoopLinearizer::matchExitCheck(BasicBlock &BB, BasicBlock *ExitBlock) {
 }
 
 Value *LoopLinearizer::closeLatch(BasicBlock *Latch, BasicBlock *Header,
-                                  Value *ActiveAtLatch) {
+                                  const MaskPair &MasksAtLatch) {
   auto *NaturalBr = dyn_cast<CondBrInst>(Latch->getTerminator());
   IRBuilder<> B(Latch->getTerminator());
-  Value *AnyActive = createMaskAny(B, ActiveAtLatch, "loop.any.active");
+  Value *AnyActive = createMaskAny(B, MasksAtLatch.Live, "loop.any.active");
   Value *Continue;
   if (NaturalBr) {
     Value *NaturalCond = NaturalBr->getCondition();
@@ -598,13 +767,38 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
 
   LLVMContext &Ctx = F.getContext();
   Type *I1Ty = Type::getInt1Ty(Ctx);
-  auto makeActivePN = [&] {
-    PHINode *PN = PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active");
-    PN->insertBefore(Header->getFirstNonPHIIt());
-    for (BasicBlock *Pred : predecessors(Header))
-      if (!CI.contains(C, Pred))
-        PN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
-    return PN;
+  // Two loop-carried phis (see `MaskPair`) instead of one: `feme.stage.
+  // discard`/`.demote` inside this loop's body narrows one or both of them
+  // per iteration, exactly as `DiamondFlattener::applyStageMasks` does for
+  // a divergent diamond.
+  auto makeActivePNPair = [&] {
+    PHINode *LivePN =
+        PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active.live");
+    LivePN->insertBefore(Header->getFirstNonPHIIt());
+    PHINode *SideEffectPN =
+        PHINode::Create(I1Ty, /*NumReservedValues=*/2, "active.sideeffect");
+    SideEffectPN->insertBefore(Header->getFirstNonPHIIt());
+    for (BasicBlock *Pred : predecessors(Header)) {
+      if (CI.contains(C, Pred))
+        continue;
+      LivePN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+      SideEffectPN->addIncoming(ConstantInt::getTrue(Ctx), Pred);
+    }
+    return MaskPair{LivePN, SideEffectPN};
+  };
+  auto addLatchIncoming = [&](MaskPair &Masks, const MaskPair &AtLatch) {
+    cast<PHINode>(Masks.Live)->addIncoming(AtLatch.Live, Latch);
+    cast<PHINode>(Masks.SideEffect)->addIncoming(AtLatch.SideEffect, Latch);
+  };
+  // Conjoins \p Masks with \p Staying (a uniform "this lane wants to keep
+  // looping" condition, not a `feme.stage.discard`/`.demote` narrowing), the
+  // same way for both fields -- unlike `applyStageMasks`, this never
+  // affects the two masks asymmetrically.
+  auto stayInLoop = [](IRBuilder<> &B, const MaskPair &Masks, Value *Staying,
+                       StringRef Name) {
+    return MaskPair{
+        B.CreateAnd(Masks.Live, Staying, (Name + ".live").str()),
+        B.CreateAnd(Masks.SideEffect, Staying, (Name + ".sideeffect").str())};
   };
 
   if (Header == Latch) {
@@ -632,17 +826,17 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     if (!HeaderExit || !UI.isDivergentTerminator(HeaderExit->Br))
       return false; // No divergence: leave this real uniform loop alone.
 
-    PHINode *ActivePN = makeActivePN();
-    maskMemoryOps(*Header, ActivePN);
+    MaskPair Masks = makeActivePNPair();
+    applyStageMasks(*Header, Masks);
     IRBuilder<> B(HeaderExit->Br);
     Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(HeaderExit->Cond)
                                             : HeaderExit->Cond;
-    Value *ActiveNext = B.CreateAnd(ActivePN, Staying, "active.next");
-    Value *Continue = createMaskAny(B, ActiveNext, "loop.continue");
+    MaskPair MasksNext = stayInLoop(B, Masks, Staying, "active.next");
+    Value *Continue = createMaskAny(B, MasksNext.Live, "loop.continue");
     CondBrInst::Create(Continue, HeaderExit->StayInLoop, ExitBlock,
                        HeaderExit->Br->getIterator());
     HeaderExit->Br->eraseFromParent();
-    ActivePN->addIncoming(ActiveNext, Latch);
+    addLatchIncoming(Masks, MasksNext);
     return true;
   }
 
@@ -691,17 +885,17 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     if (!UI.isDivergentTerminator(CheckExit->Br))
       return false; // No divergence: leave this real uniform loop alone.
 
-    PHINode *ActivePN = makeActivePN();
+    MaskPair Masks = makeActivePNPair();
     for (BasicBlock *BB : *PreChain)
-      maskMemoryOps(*BB, ActivePN);
-    maskMemoryOps(*CheckBlock, ActivePN);
+      applyStageMasks(*BB, Masks);
+    applyStageMasks(*CheckBlock, Masks);
 
     IRBuilder<> CheckBuilder(CheckExit->Br);
     Value *Staying = CheckExit->ExitOnTrue
                          ? CheckBuilder.CreateNot(CheckExit->Cond)
                          : CheckExit->Cond;
-    Value *ActiveAfterCheck =
-        CheckBuilder.CreateAnd(ActivePN, Staying, "active.check");
+    MaskPair MasksAfterCheck =
+        stayInLoop(CheckBuilder, Masks, Staying, "active.check");
     // Never really exit here: always continue toward the latch, letting an
     // inactive lane's iterations become no-ops instead (see "Loops with a
     // divergent exit" below).
@@ -709,26 +903,26 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     CheckExit->Br->eraseFromParent();
 
     for (BasicBlock *BB : *PostChain)
-      maskMemoryOps(*BB, ActiveAfterCheck);
-    maskMemoryOps(*Latch, ActiveAfterCheck);
+      applyStageMasks(*BB, MasksAfterCheck);
+    applyStageMasks(*Latch, MasksAfterCheck);
 
-    Value *Continue = closeLatch(Latch, Header, ActiveAfterCheck);
+    Value *Continue = closeLatch(Latch, Header, MasksAfterCheck);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
-    ActivePN->addIncoming(ActiveAfterCheck, Latch);
+    addLatchIncoming(Masks, MasksAfterCheck);
     return true;
   }
 
   if (!HeaderDivergent && !LatchDivergent)
     return false; // No divergence: a real uniform loop, left alone.
 
-  PHINode *ActivePN = makeActivePN();
-  Value *ActiveAtLatch = ActivePN;
-  maskMemoryOps(*Header, ActivePN);
+  MaskPair Masks = makeActivePNPair();
+  applyStageMasks(*Header, Masks);
+  MaskPair MasksAtLatch = Masks;
   if (HeaderDivergent) {
     IRBuilder<> B(HeaderExit->Br);
     Value *Cond = HeaderExit->Cond;
     Value *Staying = HeaderExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
-    ActiveAtLatch = B.CreateAnd(ActivePN, Staying, "active.header");
+    MasksAtLatch = stayInLoop(B, Masks, Staying, "active.header");
     // Never really exit here: always continue toward the latch, letting an
     // inactive lane's iterations become no-ops instead (see the file
     // comment above).
@@ -736,15 +930,15 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     HeaderExit->Br->eraseFromParent();
   }
 
-  maskMemoryOps(*Latch, ActiveAtLatch);
-  Value *ActiveAfterLatchCheck = ActiveAtLatch;
+  applyStageMasks(*Latch, MasksAtLatch);
+  MaskPair MasksAfterLatchCheck = MasksAtLatch;
   Value *Continue;
   if (LatchDivergent) {
     IRBuilder<> B(LatchExit->Br);
     Value *Cond = LatchExit->Cond;
     Value *Staying = LatchExit->ExitOnTrue ? B.CreateNot(Cond) : Cond;
-    ActiveAfterLatchCheck = B.CreateAnd(ActiveAtLatch, Staying, "active.latch");
-    Continue = createMaskAny(B, ActiveAfterLatchCheck, "loop.continue");
+    MasksAfterLatchCheck = stayInLoop(B, MasksAtLatch, Staying, "active.latch");
+    Continue = createMaskAny(B, MasksAfterLatchCheck.Live, "loop.continue");
     CondBrInst::Create(Continue, Header, ExitBlock,
                        LatchExit->Br->getIterator());
     LatchExit->Br->eraseFromParent();
@@ -754,11 +948,11 @@ bool LoopLinearizer::linearizeCycle(CycleRef C) {
     // active" so a uniform-false natural exit still wins, and so a
     // uniform-true natural continue does not resurrect a lane the header's
     // divergent check already deactivated.
-    Continue = closeLatch(Latch, Header, ActiveAtLatch);
+    Continue = closeLatch(Latch, Header, MasksAtLatch);
     CondBrInst::Create(Continue, Header, ExitBlock, Latch);
   }
 
-  ActivePN->addIncoming(ActiveAfterLatchCheck, Latch);
+  addLatchIncoming(Masks, MasksAfterLatchCheck);
   return true;
 }
 
@@ -807,6 +1001,19 @@ PreservedAnalyses LinearizePass::run(Module &M, ModuleAnalysisManager &) {
     CI2.compute(F);
     UniformityInfo UI2 = computeWaveUniformity(F, DT2, CI2);
     Changed |= LoopLinearizer(F, CI2, UI2).run();
+
+    // `DiamondFlattener`/`LoopLinearizer` only lower a `feme.stage.discard`/
+    // `.demote`/`.is_helper` call inside the divergent-diamond and
+    // divergent-loop-exit shapes they already support (see their own
+    // comments); one inside an otherwise-uniform loop is a shape neither
+    // handles yet (roadmap R27 deviation) and must be diagnosed here rather
+    // than left for `feme::cpu::SIMDizePass` to silently mis-widen as an
+    // ordinary opaque call.
+    if (hasStageMaskOps(F))
+      diagnose(F, "calls a mask-affecting feme.stage.* operation "
+                  "('discard'/'demote'/'is_helper') in a shape this "
+                  "milestone does not lower (e.g. inside an otherwise "
+                  "uniform loop)");
   }
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

@@ -8,9 +8,9 @@
 ; Linearization and Predication" in feme/docs/FeMeCPUDesign.md.
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %mask.t = and i1 true, %c
+; CHECK: %live.t = and i1 true, %c
 ; CHECK: t:
-; CHECK: call float @feme.cpu.resource.load.raw.f32(ptr %heap, i32 %heap_count, i32 %desc, i64 %off, i1 %mask.t)
+; CHECK: call float @feme.cpu.resource.load.raw.f32(ptr %heap, i32 %heap_count, i32 %desc, i64 %off, i1 %live.t)
 define void @main(ptr %heap, i32 %heap_count, i32 %desc) #0 {
 entry:
   %tid = call i32 @llvm.dx.thread.id(i32 0)

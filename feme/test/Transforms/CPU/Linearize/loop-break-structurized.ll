@@ -17,9 +17,9 @@
 ; feme/docs/FeMeCPUDesign.md.
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %active = phi i1 [ true, %entry ], [ %active.check, {{.*}} ]
-; CHECK: %active.check = and i1 %active,
-; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.check)
+; CHECK: %active.live = phi i1 [ true, %entry ], [ %active.check.live, {{.*}} ]
+; CHECK: %active.check.live = and i1 %active.live,
+; CHECK: %loop.any.active = call i1 @feme.cpu.mask.any(i1 %active.check.live)
 ; CHECK: br i1 %loop.any.active, label %loop, label %exit
 define void @main(i32 %n) #0 {
 entry:

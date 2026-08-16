@@ -10,10 +10,11 @@
 
 ; CHECK-LABEL: define void @main(
 ; CHECK: loop:
-; CHECK: %active.header = and i1 %active, %{{.*}}
+; CHECK: %active.header.live = and i1 %active.live, %{{.*}}
+; CHECK-NEXT: %active.header.sideeffect = and i1 %active.sideeffect, %{{.*}}
 ; CHECK-NEXT: br label %latch
 ; CHECK: latch:
-; CHECK: call void @feme.cpu.resource.store.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %{{.*}}, i32 %i, i1 %active.header)
+; CHECK: call void @feme.cpu.resource.store.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 0, i64 %{{.*}}, i32 %i, i1 %active.header.sideeffect)
 define void @main(i32 %n) #0 {
 entry:
   %h = call target("dx.RawBuffer", i32, 1, 0) @llvm.dx.resource.handlefromheap(i32 0, i1 false)

@@ -12,14 +12,15 @@
 ; CHECK-LABEL: define void @main(
 ; CHECK: loop:
 ; CHECK: %i = phi i32 [ 0, %entry ], [ %inc, %latch ]
-; CHECK: %active.wide = phi <4 x i1> [ splat (i1 true), %entry ], [ %active.header.wide, %latch ]
+; CHECK: %active.live.wide = phi <4 x i1> [ splat (i1 true), %entry ], [ %active.header.live.wide, %latch ]
 ; CHECK: %tid{{.*}} = call <4 x i32> @feme.cpu.builtin.thread_id.v4(
 ; CHECK: %break.cond.wide = icmp eq <4 x i32> %tid{{.*}}, %i.splat.splat
-; CHECK: %active.header.wide = and <4 x i1> %active.wide, %{{.*}}
+; CHECK: %active.header.live.wide = and <4 x i1> %active.live.wide, %{{.*}}
+; CHECK-NEXT: %active.header.sideeffect.wide = and <4 x i1> %active.sideeffect.wide, %{{.*}}
 ; CHECK-NEXT: br label %latch
 ; CHECK: latch:
 ; CHECK: %loop.cond = icmp slt i32 %inc, %n
-; CHECK: %loop.any.active = call i1 @llvm.vector.reduce.or.v4i1(<4 x i1> %active.header.wide)
+; CHECK: %loop.any.active = call i1 @llvm.vector.reduce.or.v4i1(<4 x i1> %active.header.live.wide)
 ; CHECK: %loop.continue = and i1 %loop.cond, %loop.any.active
 ; CHECK: br i1 %loop.continue, label %loop, label %exit
 define void @main(i32 %n) #0 {

@@ -10,7 +10,7 @@
 
 ; CHECK-LABEL: define void @main(
 ; CHECK: latch:
-; CHECK: %resource.mask = and <4 x i1> %wave_entry_mask, %active.header.wide
+; CHECK: %resource.mask = and <4 x i1> %wave_entry_mask, %active.header.sideeffect.wide
 ; CHECK-COUNT-4: call void @feme.cpu.resource.store.raw.i32(ptr %resource_heap, i32 %resource_heap_count, i32 0,
 ; CHECK-NOT: call void @feme.cpu.resource.store.raw.i32(
 define void @main(i32 %n) #0 {

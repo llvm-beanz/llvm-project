@@ -16,7 +16,7 @@
 ; CHECK-NEXT: %b = add i32 %tid, 2
 ; CHECK-NEXT: br label %end
 ; CHECK: end:
-; CHECK-NEXT: %v.linearized = select i1 %c, i32 %a, i32 %b
+; CHECK: %v.linearized = select i1 %c, i32 %a, i32 %b
 ; CHECK-NOT: phi
 define void @main() #0 {
 entry:

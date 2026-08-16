@@ -11,9 +11,9 @@
 
 ; CHECK-LABEL: define void @main(
 ; CHECK: t:
-; CHECK: %masked.mask = and <4 x i1> %wave_entry_mask, %mask.t.wide
+; CHECK: %masked.mask = and <4 x i1> %wave_entry_mask, %live.t.wide
 ; CHECK: call <4 x i32> @llvm.masked.gather.v4i32.v4p0(<4 x ptr>{{.*}}, <4 x i1> %masked.mask, <4 x i32> zeroinitializer)
-; CHECK: %masked.mask{{[0-9]*}} = and <4 x i1> %wave_entry_mask, %mask.t.wide
+; CHECK: %masked.mask{{[0-9]*}} = and <4 x i1> %wave_entry_mask, %sideeffect.t.wide
 ; CHECK: call void @llvm.masked.scatter.v4i32.v4p0(<4 x i32> %{{.*}}, <4 x ptr>{{.*}}, <4 x i1> %masked.mask{{[0-9]*}})
 define void @main(ptr %p) #0 {
 entry:

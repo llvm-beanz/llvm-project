@@ -21,13 +21,13 @@
 ; CHECK-NEXT: %x2 = add i32 %tid, 20
 ; CHECK-NEXT: br label %outer.end
 ; CHECK: outer.end:
-; CHECK-NEXT: %inner.v.linearized = select i1 %c2, i32 %x1, i32 %x2
+; CHECK: %inner.v.linearized = select i1 %c2, i32 %x1, i32 %x2
 ; CHECK-NEXT: br label %outer.f
 ; CHECK: outer.f:
 ; CHECK-NEXT: %x3 = add i32 %tid, 30
 ; CHECK-NEXT: br label %end
 ; CHECK: end:
-; CHECK-NEXT: %v.linearized = select i1 %c1, i32 %inner.v.linearized, i32 %x3
+; CHECK: %v.linearized = select i1 %c1, i32 %inner.v.linearized, i32 %x3
 ; CHECK-NOT: phi
 define void @main() #0 {
 entry:

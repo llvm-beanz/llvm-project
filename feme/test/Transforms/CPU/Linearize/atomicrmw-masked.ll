@@ -13,9 +13,9 @@
 ; pass only attaches it.
 
 ; CHECK-LABEL: define void @main(
-; CHECK: %mask.t = and i1 true, %c
+; CHECK: %sideeffect.t = and i1 true, %c
 ; CHECK: t:
-; CHECK: call i32 @feme.cpu.masked.atomicrmw.i32(i32 1, ptr %p, i32 1, i32 4, i1 %mask.t)
+; CHECK: call i32 @feme.cpu.masked.atomicrmw.i32(i32 1, ptr %p, i32 1, i32 4, i1 %sideeffect.t)
 define void @main(ptr %p) #0 {
 entry:
   %tid = call i32 @llvm.dx.thread.id(i32 0)
