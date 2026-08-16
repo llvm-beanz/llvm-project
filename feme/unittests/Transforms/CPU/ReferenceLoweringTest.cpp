@@ -109,4 +109,76 @@ TEST(ReferenceLoweringTest, RejectsWaveIntrinsics) {
   EXPECT_FALSE(F->hasFnAttribute(ReferenceLoweredAttrName));
 }
 
+// Roadmap R27: one invocation at a time has no mask to narrow, so
+// `feme.stage.discard` becomes a real conditional early return instead.
+TEST(ReferenceLoweringTest, DiscardBecomesRealConditionalReturn) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %cond) #0 {
+    entry:
+      call void @feme.stage.discard(i1 %cond)
+      ret void
+    }
+    declare void @feme.stage.discard(i1)
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  ReferenceLoweringPass().run(*M, MAM);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(F->hasFnAttribute(ReferenceLoweredAttrName));
+  EXPECT_EQ(F->arg_size(), 1u);
+
+  unsigned NumCondBr = 0, NumRet = 0;
+  for (BasicBlock &BB : *F) {
+    if (isa<CondBrInst>(BB.getTerminator()))
+      ++NumCondBr;
+    if (isa<ReturnInst>(BB.getTerminator()))
+      ++NumRet;
+  }
+  EXPECT_EQ(NumCondBr, 1u);
+  EXPECT_EQ(NumRet, 2u) << "both the discard-taken and fallthrough paths "
+                           "should return";
+}
+
+// `feme.stage.demote` narrows only a per-invocation `helper` flag, not
+// control flow (see the header comment's Deviation note), and
+// `feme.stage.is_helper` reads it back.
+TEST(ReferenceLoweringTest, DemoteAndIsHelperUseAPerInvocationFlag) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i1 @main(i1 %cond) #0 {
+    entry:
+      call void @feme.stage.demote(i1 %cond)
+      %h = call i1 @feme.stage.is_helper()
+      ret i1 %h
+    }
+    declare void @feme.stage.demote(i1)
+    declare i1 @feme.stage.is_helper()
+    attributes #0 = { "feme.shader.stage"="fragment" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  ReferenceLoweringPass().run(*M, MAM);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundAlloca = false;
+  for (Instruction &I : instructions(F))
+    if (isa<AllocaInst>(I))
+      FoundAlloca = true;
+  EXPECT_TRUE(FoundAlloca) << "demote/is_helper should use a per-invocation "
+                              "helper flag";
+  auto *Ret = dyn_cast<ReturnInst>(F->getEntryBlock().getTerminator());
+  ASSERT_TRUE(Ret);
+  EXPECT_TRUE(isa<LoadInst>(Ret->getReturnValue()))
+      << "is_helper should read the helper flag back";
+}
+
 } // namespace

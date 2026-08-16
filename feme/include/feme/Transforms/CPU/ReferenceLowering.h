@@ -27,6 +27,23 @@
 // no meaning one invocation at a time and are diagnosed rather than
 // silently mis-lowered, matching the design's "the mode rejects them".
 //
+// Roadmap R27 adds this mode's counterpart to `feme::cpu::LinearizePass`'s
+// `feme.stage.discard`/`.demote`/`.is_helper` lowering (see "the reference
+// path" in FeMeGraphicsDesign.md's "CPU Lowering Pipeline"): one invocation
+// at a time has no mask to narrow, so `discard(cond)` becomes a real
+// conditional early return (splitting the block right after the call), and
+// `demote(cond)`/`is_helper()` read and write a per-invocation `helper`
+// flag (a function-local `alloca`) instead. Deviation: unlike the widened
+// path, a `demote`d invocation's later `store`/`atomicrmw`/resource-write
+// calls are *not* suppressed here -- doing so would need the same
+// block-splitting predication machinery `feme::cpu::LinearizePass` builds,
+// which this deliberately-unwidened ground-truth mode has no other use for
+// (see the "CFG restructurization test suite" section this mode serves).
+// `is_helper` and the side-effect summary bits
+// `feme::cpu::computeSideEffectFlags` reports are still correct; only the
+// write suppression itself is left for a later milestone, once a genuine
+// fragment-stage reference test needs it.
+//
 // Runs after `feme::cpu::ResourceLoweringPass` and instead of
 // `feme::cpu::LinearizePass`/`feme::cpu::SIMDizePass`/
 // `feme::cpu::WaveLoweringPass`.

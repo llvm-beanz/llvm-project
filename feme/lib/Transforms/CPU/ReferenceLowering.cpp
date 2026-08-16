@@ -9,6 +9,7 @@
 #include "feme/Transforms/CPU/ReferenceLowering.h"
 
 #include "feme/Core/ShaderStage.h"
+#include "feme/Core/StageOps.h"
 
 #include "DispatchArgsLayout.h"
 
@@ -209,6 +210,90 @@ bool lowerFunction(Function &F) {
   return true;
 }
 
+/// Whether \p Kind is one of the three mask-affecting `feme.stage.*`
+/// operations `lowerStageMaskOps` lowers.
+bool isMaskAffectingStageOp(feme::StageOpKind Kind) {
+  return Kind == feme::StageOpKind::Discard ||
+         Kind == feme::StageOpKind::Demote ||
+         Kind == feme::StageOpKind::IsHelper;
+}
+
+/// Lowers `feme.stage.discard`/`.demote`/`.is_helper` for reference mode
+/// (see the header comment's Deviation note): one invocation at a time has
+/// no live/side-effect mask to narrow, so `discard(cond)` becomes a real
+/// conditional early return instead, splitting the block right after the
+/// call so the discard-taken side returns immediately and the other
+/// continues exactly where it left off. `demote(cond)`/`is_helper()` read
+/// and write a per-invocation `helper` flag (a function-local `alloca`,
+/// created lazily in the entry block the first time either is seen) rather
+/// than narrowing a side-effect mask. Returns whether \p F was rewritten.
+bool lowerStageMaskOps(Function &F) {
+  SmallVector<CallInst *, 4> Calls;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    feme::StageOpKind Kind;
+    if (CI && feme::isStageOpCall(*CI, &Kind) && isMaskAffectingStageOp(Kind))
+      Calls.push_back(CI);
+  }
+  if (Calls.empty())
+    return false;
+
+  AllocaInst *HelperFlag = nullptr;
+  auto getHelperFlag = [&]() -> AllocaInst * {
+    if (!HelperFlag) {
+      IRBuilder<> EntryBuilder(&*F.getEntryBlock().getFirstInsertionPt());
+      HelperFlag = EntryBuilder.CreateAlloca(EntryBuilder.getInt1Ty(), nullptr,
+                                             "reference.helper");
+      EntryBuilder.CreateStore(EntryBuilder.getFalse(), HelperFlag);
+    }
+    return HelperFlag;
+  };
+
+  for (CallInst *CI : Calls) {
+    feme::StageOpKind Kind;
+    isStageOpCall(*CI, &Kind);
+    switch (Kind) {
+    case feme::StageOpKind::Discard: {
+      Value *Cond = CI->getArgOperand(0);
+      BasicBlock *Cur = CI->getParent();
+      BasicBlock *Rest = Cur->splitBasicBlock(CI->getNextNode(),
+                                              Cur->getName() + ".discard.cont");
+      BasicBlock *Killed = BasicBlock::Create(
+          F.getContext(), Cur->getName() + ".discard.killed", &F, Rest);
+      IRBuilder<>(Killed).CreateRetVoid();
+      // `splitBasicBlock` left an unconditional branch to `Rest`; replace
+      // it with the real conditional one.
+      Instruction *Term = Cur->getTerminator();
+      IRBuilder<>(Term).CreateCondBr(Cond, Killed, Rest);
+      Term->eraseFromParent();
+      CI->eraseFromParent();
+      break;
+    }
+    case feme::StageOpKind::Demote: {
+      IRBuilder<> B(CI);
+      AllocaInst *Flag = getHelperFlag();
+      Value *Old = B.CreateLoad(B.getInt1Ty(), Flag, "reference.helper.old");
+      Value *New =
+          B.CreateOr(Old, CI->getArgOperand(0), "reference.helper.next");
+      B.CreateStore(New, Flag);
+      CI->eraseFromParent();
+      break;
+    }
+    case feme::StageOpKind::IsHelper: {
+      IRBuilder<> B(CI);
+      Value *Val =
+          B.CreateLoad(B.getInt1Ty(), getHelperFlag(), "reference.is_helper");
+      CI->replaceAllUsesWith(Val);
+      CI->eraseFromParent();
+      break;
+    }
+    default:
+      llvm_unreachable("Calls was filtered to these three kinds above");
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 PreservedAnalyses ReferenceLoweringPass::run(Module &M,
@@ -219,8 +304,10 @@ PreservedAnalyses ReferenceLoweringPass::run(Module &M,
     if (!F.isDeclaration() && feme::isShaderEntryPoint(F))
       Candidates.push_back(&F);
 
-  for (Function *F : Candidates)
+  for (Function *F : Candidates) {
     Changed = lowerFunction(*F) || Changed;
+    Changed = lowerStageMaskOps(*F) || Changed;
+  }
 
   // A raised builtin declaration left behind once its last caller is
   // rewritten away has nothing left to select it.
