@@ -14866,3 +14866,187 @@ milestone bullet to `~~strikethrough~~ (closed by R26: ...)`, matching the
 existing convention for closed milestone items, and moved open questions 3
 and 7 out of the open list into the "Answered during this design" summary
 at the end, since both are now settled by this row.
+
+# Agent thoughts: roadmap step R27 (`StageCompileOptions`, pre-mutation graphics
+validation, and the live/side-effect mask split)
+
+## Scoping decisions
+
+R27's roadmap row bundles three genuinely separate pieces of work:
+`StageCompileOptions`/stage-aware `runPipeline`, stage-aware `PreparePass` +
+pre-mutation graphics validation, and the live/side-effect mask split through
+`LinearizePass`/`SIMDizePass`/the reference path. I split these into three
+separate commits, in that order, since each is independently testable and the
+later two build on nothing the first doesn't already provide.
+
+Before writing any code I read FeMeGraphicsDesign.md's "CPU Lowering
+Pipeline"/"Preparation and validation"/"Shared middle-end phases" sections in
+full, since (unusually for a roadmap row) they spell out almost the entire
+implementation in prose: the exact new type name, that the compute-only
+overload should be *kept* rather than replaced, that validation should run
+*before* mutation, and the precise semantics of the two masks ("discard
+clears both, demote clears only the second", "ordinary arithmetic ...
+consume[s] the live mask", "every lowered side effect consumes the
+side-effect mask"). Implementing directly against that prose rather than
+inventing a shape avoided a redesign partway through.
+
+## `StageCompileOptions` and the pre-mutation validation gate
+
+Straightforward: added the struct, a new `runPipeline` overload keyed on it,
+and made the old signature delegate to the new one with `Stage ==
+ShaderStage::Compute`. The one design decision was *where* to run
+`feme::graphics::ValidateStagePass` -- before `PreparePass` mutates the
+module, which the design explicitly asks for ("A new graphics validation step
+runs before mutation"). I did not attempt the rest of "Preparation and
+validation"'s checklist (wave-size range, resource/image/sampler kinds,
+patch/mesh/ray limits): none of those have any implementation yet to
+validate against (no image/sampler support, no patch/mesh/ray stages exist),
+so a check today would either always pass trivially or be pure scaffolding
+with nothing testing it. Left as an explicit, itemized gap in the Status note
+rather than a vague "TODO".
+
+Deliberately left `feme::cpu::CompiledStage::create` alone (still takes the
+compute-only `JITOptions`, not `StageCompileOptions`): its own header comment
+already says this is R27's job, but R28 is what actually builds the
+vertex/fragment wrappers that would give a non-compute `CompiledStage`
+something to *dispatch*. Making `create` accept `StageCompileOptions` today,
+with no wrapper able to consume the result, would be API surface with no
+caller and no test that could exercise it honestly. Documented this
+redirection explicitly in both Roadmap.md and the design doc so it doesn't
+read as an oversight.
+
+## The live/side-effect mask split
+
+This was the hard part. `feme::cpu::LinearizePass` already threads a single
+scalar `i1` "mask" value through two classes (`DiamondFlattener` for
+divergent diamonds, `LoopLinearizer` for loops with a divergent exit) that
+recurse over the CFG rewriting memory ops to carry it. The design's ask --
+split that single mask into a `{Live, SideEffect}` pair, with `discard`
+narrowing both and `demote` narrowing only the second -- turns out to
+generalize cleanly onto that existing structure once you notice the right
+invariant: `feme.stage.discard`/`.demote` are ordinary calls that can appear
+*anywhere* in a block a masked region already walks, so the fix is to replace
+the single `Value *Mask` parameter with a `MaskPair` that both classes now
+mutate in place as they walk each block in program order (previously
+`maskMemoryOps` treated a whole block as one atomic masking operation, which
+was fine when nothing inside a block could itself narrow the mask further).
+
+The trickiest correctness point was the divergent-diamond merge. Before this
+change, code after a flattened `if`/`else` just kept using whatever `Mask`
+variable the caller already had (never recomputed), because a mask's value
+was purely a function of ambient divergence, which a diamond can't change.
+Once `discard`/`demote` can narrow the mask *inside* one arm, that's no
+longer true: the two arms' exit-time masks must be folded back together at
+the reconvergence point, per-lane, by which arm each lane actually took. I
+initially reached for `select(Cond, TExit, FExit)` for this (matching how the
+diamond already turns a merged `phi` into a `select`), and it *is* correct
+for the fallthrough-flattened divergent case -- but I made a mistake first
+time through: I used the same `select` approach for the *uniform* branch case
+too, where only one arm's block is ever physically reached at runtime (the
+real conditional branch is preserved). A `select` there is wrong because
+there's no single execution path both arm's mask values are simultaneously
+computed on; it needs a real `phi`, keyed by which of `R`'s two real
+predecessors is reached, the same way the divergent case's own `phi`-to-
+`select` rewrite already classifies `TPred`/`FPred` by dominance. Caught this
+by actually running the pass on a test module and reading the generated
+IR rather than reasoning about it purely on paper -- the bug would have
+produced a `select` on a condition unrelated to which block actually branched
+into the merge point, silently wrong for any uniform if/else with a
+discard/demote in exactly one arm. Fixed by computing `TPred`/`FPred` before
+mutation (mirroring the divergent case) and using a `phi` instead of a
+`select` for the uniform-branch merge.
+
+`LoopLinearizer` needed the same generalization -- one loop-carried `active`
+phi becoming two (`active.live`/`active.sideeffect`) -- which was more
+mechanical since every "AND with the loop's own natural exit condition"
+already had exactly one shape to duplicate for the second mask (the
+`stayInLoop` helper). I deliberately left one gap rather than over-scoping:
+a `discard`/`demote`/`is_helper` call inside a loop with *no divergent exit
+at all* (an otherwise fully uniform loop) is not lowered by this milestone,
+because neither `DiamondFlattener` nor `LoopLinearizer` walks that loop's
+body at all in that shape (both bail out early as "no divergence, nothing to
+do"). Rather than silently leave the raised call behind for
+`feme::cpu::SIMDizePass` to mis-widen as an opaque function call (which
+would compile without error and produce wrong results at runtime -- the
+worst kind of gap), I added an explicit post-pass check in
+`LinearizePass::run` that diagnoses this shape by name, with a lit test
+(`unsupported-stage-op-in-uniform-loop.ll`) proving it fails loudly instead
+of silently.
+
+One pleasant discovery: `feme::cpu::SIMDizePass` needed *zero* code changes.
+By the time it runs, `LinearizePass` has already erased every
+`feme.stage.discard`/`.demote`/`.is_helper` call and replaced it with
+ordinary `and`/`select`/`phi` instructions feeding into the *existing*
+`feme.cpu.masked.load`/`.store`/`.atomicrmw` calls' mask operands.
+`SIMDizePass` already widens whatever `i1` value governs a masked call
+generically -- it has no idea, and needs no idea, whether that value is a
+"live" mask or a "side-effect" mask. This meant the "and `SIMDizePass`" half
+of R27's row title needed only *verification* (updating every existing
+Linearize/SIMDize lit test's `CHECK` lines to the new, mechanically-renamed
+IR shape, and confirming `check-feme` stays 100% green), not new code -- a
+good sign that the two-mask design threads through the existing phase
+boundary cleanly rather than requiring bespoke plumbing at each phase.
+
+## The `--reference` path
+
+`--reference` mode skips `LinearizePass`/`SIMDizePass`/`WaveLoweringPass`
+entirely (it runs a shader one invocation at a time through unwidened IR, as
+"ground truth" for the CFG restructurization test suite), so it has no
+masking infrastructure at all to extend. Rather than force it through a
+scaled-down version of the same masking machinery, I gave it a semantically
+equivalent but structurally different treatment matching what "one
+invocation, real control flow" actually means: `discard(cond)` becomes a
+*real* conditional early return (split the block right after the call; the
+discard-taken side returns immediately, the continuation keeps going exactly
+where it left off) -- not an approximation, this is exactly correct discard
+semantics for a single lane, and it works for a discard anywhere in the CFG,
+not just the diamond/loop shapes `LinearizePass` is scoped to, since it's
+real branches rather than masking. `demote`/`is_helper` use a per-invocation
+`helper` flag (a lazily-created `alloca`) instead of narrowing any mask.
+
+I did deliberately *not* implement suppressing a demoted invocation's later
+side effects in reference mode. Doing that correctly would mean rebuilding
+the same block-splitting predication `LinearizePass` already has, just for a
+single lane -- real work, but this ground-truth mode has no other use for
+that machinery, and no test today exercises a fragment shader through
+`--reference` at all (there's no fragment wrapper yet -- that's R28). Adding
+unused, untested predication machinery here felt like exactly the kind of
+premature generality the codebase's existing "narrow deliberately, document
+the deviation, extend when a real caller needs it" pattern argues against.
+Documented this explicitly as a deviation in both `ReferenceLowering.h`'s
+file comment and the Roadmap/design-doc Status notes, rather than silently
+shipping a `demote` that looks complete but only partially is.
+
+## Testing
+
+For the mask split, I ran `feme-opt` on each existing masked-region lit test
+by hand after the change to see the actual generated IR (variable names
+change from `%mask.t` to `%live.t`/`%sideeffect.t`, an extra
+`%live.merge`/`%sideeffect.merge` phi or select appears at every
+reconvergence point) rather than guessing at the new `CHECK` lines --
+several of my first-draft `CHECK-NEXT` lines turned out to need loosening to
+plain `CHECK` once the merge instructions landed between what used to be
+adjacent lines. Updated all 17 affected `Linearize`/`SIMDize` lit tests this
+way, added two new ones (`discard-in-diamond-masked.ll`,
+`unsupported-stage-op-in-uniform-loop.ll`), added three new `LinearizeTest`
+gtest cases (discard narrows both masks and masks a subsequent store, demote
+narrows only the side-effect mask, is_helper reflects demoted state), a new
+`unittests/Target/CPU/PipelineTest.cpp` for the stage-aware overload and the
+validation gate, and two new `ReferenceLoweringTest` cases plus a lit test
+for the reference-path lowering. Ran `ninja check-feme` (assertions-enabled,
+ccache build) before starting and after every commit: 1064/1066 passing
+before this row (2 pre-existing unsupported, unrelated), 1072/1074 passing
+after (8 new tests, no regressions).
+
+## Documentation
+
+Updated Roadmap.md's R27 row with a "done: ..." note in the established
+style, struck through the two §1.8.3 gap-table rows this closes, and amended
+R21's/R22's gap-table cross-references (which had said "left to R27" for
+`CompiledStage`'s own stage-awareness) to point at R28 instead, matching the
+actual scope decision above. Added Status notes to FeMeGraphicsDesign.md's
+"CPU Lowering Pipeline", "Preparation and validation", and "Shared
+middle-end phases" sections recording what's implemented, what's verified
+needing no change (`SIMDizePass`), and every deviation (loop-shape scope,
+`--reference`'s missing side-effect suppression, validation's un-implemented
+checklist items, `CompiledStage` deferred to R28).
