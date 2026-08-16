@@ -28,8 +28,10 @@ such. Four of them gate the first executing milestone:
 - `feme::SPIRVImporter` cannot yet ingest realistic Vulkan SPIR-V. Its
   structurization limits, not its resource coverage, are the first blocker.
   See "SPIR-V import prerequisites".
-- `feme::cpu::JITEngine` compiles once and dispatches many times, but has no
-  per-workgroup entry point and no worker pool. See "CPU Runtime API Changes".
+- `feme::cpu::JITEngine` compiles once and dispatches many times, and now has
+  a per-workgroup entry point and a real worker pool (closed by roadmap R21:
+  `feme::cpu::CompiledStage::invokeGroup` and `JITOptions::NumThreads`, see
+  "CPU Runtime API Changes").
 - `feme::cpu` supports only *uniform* groupshared accesses today, which
   excludes the `gl_LocalInvocationIndex`-indexed shared arrays that dominate
   real Vulkan compute shaders. See "Physical Device and Capabilities".
@@ -618,6 +620,47 @@ Two further CPU-target changes are required:
 - Groupshared lowering must accept divergent indices. Until it does, the ICD
   cannot honor `maxComputeSharedMemorySize` for realistic shaders.
 
+Status (roadmap R21): `feme::cpu::CompiledStage` (`feme/include/feme/Target/
+CPU/CompiledStage.h`) and `feme::cpu::PreparedDispatch`/`invokeGroup`
+(`feme/include/feme/Target/CPU/ResourceHeap.h`) exist under those names --
+this design's own `CompiledKernel` sketch above is superseded by
+[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md)'s `CompiledStage`, the shared
+final name both this design and FeMeWARPDesign.md's own sketch build
+against (see that document's "Compiled stage API": "there is one type").
+`JITEngine` is now exactly the convenience wrapper described above: it holds
+a `CompiledStage` and, when `JITOptions::NumThreads != 1`, an
+`llvm::DefaultThreadPool` created once and owned for the engine's whole
+lifetime; `dispatch` schedules every group across it (`NumThreads == 1`
+still runs sequentially on the calling thread with no pool at all) rather
+than accepting and ignoring the option.
+
+Deviation: `invokeGroup` does **not** own a separate host-side wave loop as
+sketched above (`for W in 0 .. CeilDiv(GroupSize, WaveSize) - 1:
+feme_cpu_entry_<name>(Args, entry_mask(W))`). That loop already exists, just
+not at the layer this sketch assumed: `feme::cpu::EntryWrapperPass`
+(`feme/lib/Transforms/CPU/EntryWrapper.cpp`) builds it *inside* the compiled
+`feme_cpu_entry_<name>` wrapper itself, computing each wave's entry mask
+there, precisely so it can also split a barrier into separate wave loops
+before and after the sync point and spill values live across it (roadmap
+milestone 9's "Group Execution and Barriers", predating this milestone).
+Moving that loop out to `invokeGroup` as sketched would require either
+duplicating that barrier-splitting machinery on the host side or changing
+the compiled entry point's ABI to take an explicit wave index and mask and
+re-deriving barrier correctness against it -- neither of which R21 needed to
+solve the actual gap it closes (a dispatch's unit of work smaller than the
+whole thing, per §1.6/§1.8.1's "Dispatch is sequential, not thread-pooled").
+`invokeGroup` therefore calls the compiled entry point exactly once per
+group, and the existing per-wave loop inside it is unchanged. `PreparedDispatch`
+and per-group scheduling are otherwise exactly as designed above.
+`CompileOptions` in the sketch is `feme::cpu::JITOptions`
+(`CompiledStage::create` does not yet take a stage-aware
+`StageCompileOptions`; see FeMeGraphicsDesign.md's "Compiled stage API" for
+why that split is left to roadmap R27), and `getArtifactInfo()` is not yet
+exposed (`getResourceInfo()`/`getWaveSize()`/`getGroupSize()` are, matching
+`JITEngine`'s pre-existing accessors; `ArtifactInfo` itself is still
+compute-shaped and its wave/group-size fields are still unpopulated, per
+this section's own "further CPU-target changes" above -- roadmap R22).
+
 ## Memory and Buffers
 
 The initial physical device exposes one memory type and one heap. The type is
@@ -1121,8 +1164,11 @@ blocker. It is scheduled before V1 and its outcome may change V1's design.
 
 - Add device memory, buffers, shader modules, pipeline layouts, command pools,
   and command buffers.
-- Factor `CompiledKernel`/per-workgroup invocation out of `JITEngine`, with the
-  wave loop and entry mask owned by `invokeGroup`.
+- ~~Factor `CompiledKernel`/per-workgroup invocation out of `JITEngine`, with
+  the wave loop and entry mask owned by `invokeGroup`~~ (closed by roadmap
+  R21 under the name `feme::cpu::CompiledStage`, see "CPU Runtime API
+  Changes" for the one deviation: the wave loop stays inside the compiled
+  entry wrapper rather than moving to `invokeGroup`).
 - Resolve group size from `LocalSize`, `LocalSizeId`, and the
   `BuiltIn WorkgroupSize` specialization-constant decoration.
 - Compile and execute a resource-free SPIR-V compute shader using builtins.

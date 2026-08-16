@@ -35,10 +35,14 @@ not ready to back a Direct3D device today. The prerequisites below gate the
 milestones at the end of this document, and all but the last are shared with
 the Vulkan design rather than specific to Direct3D:
 
-- `feme::cpu::JITEngine` has no unit of work smaller than a whole dispatch. It
-  runs every group sequentially on the calling thread and accepts but ignores
-  `JITOptions::NumThreads`, so a command-queue executor needs the per-workgroup
-  API the Vulkan design proposes.
+- ~~`feme::cpu::JITEngine` has no unit of work smaller than a whole dispatch.
+  It runs every group sequentially on the calling thread and accepts but
+  ignores `JITOptions::NumThreads`, so a command-queue executor needs the
+  per-workgroup API the Vulkan design proposes.~~ (closed by roadmap R21:
+  `feme::cpu::CompiledStage::invokeGroup` is that per-workgroup API, shared
+  unchanged with the Vulkan design under FeMeGraphicsDesign.md's
+  `CompiledStage` name, and `JITOptions::NumThreads` now runs a real worker
+  pool; see FeMeVulkanDesign.md's "CPU Runtime API Changes" Status note)
 - Root-constant lowering exists only in the narrow shape roadmap step R12
   landed: `feme::cpu::RootConstantLoweringPass` handles the default
   `(b0, space0)` binding, a non-array `dx.CBuffer`, and a constant row index,
@@ -607,8 +611,10 @@ would invalidate most object-layer work.
   compute pipeline objects, including the direct-queue objects the selected
   feature level requires even though only compute executes.
 - Import and raise DXIL through the existing FeMe path.
-- Factor reusable per-thread-group invocation and prepared-dispatch state out
-  of `feme::cpu::JITEngine`, shared with the Vulkan design.
+- ~~Factor reusable per-thread-group invocation and prepared-dispatch state
+  out of `feme::cpu::JITEngine`, shared with the Vulkan design.~~ (closed by
+  roadmap R21: `feme::cpu::CompiledStage`/`PreparedDispatch`, see the
+  prerequisites list above)
 - Populate `ArtifactInfo`'s wave size, group size, and groupshared fields.
 - Execute a resource-free compute dispatch and verify builtin IDs.
 - Verify workgroup barrier correctness for multi-wave groups under sequential
@@ -734,6 +740,14 @@ lets D3D11-on-12 provide an eventual compatibility route.
    whether the graphics milestones can reuse the same adapter at all.
 3. Can the per-workgroup `CompiledKernel` API proposed by the Vulkan design be
    shared unchanged by D3D12, including barriers and groupshared allocation?
+   Answered by roadmap R21: yes, under the name `feme::cpu::CompiledStage`
+   (FeMeGraphicsDesign.md's "Compiled stage API"); barrier correctness under
+   sequential wave execution is unaffected, since `invokeGroup` calls the
+   compiled entry point once per group and the wave loop -- and the barrier
+   splitting built on it -- stays inside that compiled entry point exactly as
+   before (see FeMeVulkanDesign.md's "CPU Runtime API Changes" Status note).
+   Groupshared allocation above the entry wrapper's own stack threshold
+   remains unimplemented (roadmap milestone 9/R22).
 4. What root-signature reflection survives FeMe's DXIL metadata raising, and
    what explicit binding map must pipeline creation retain before lowering?
 5. Which DXIL validation responsibilities belong to the D3D runtime, the

@@ -1067,6 +1067,29 @@ invoke one stage concurrently, and each concurrent compile uses its own
 shared lower-level code object. It should not become a monolithic API-aware
 graphics device.
 
+Status (roadmap R21): `feme::cpu::CompiledStage` exists under this exact
+name (`feme/include/feme/Target/CPU/CompiledStage.h`), landed first so
+Vulkan V1 and Direct3D W1 can build against it without a later rename, as
+intended above. `JITEngine` is now the thin wrapper described above and in
+FeMeVulkanDesign.md's "CPU Runtime API Changes", holding a `CompiledStage`
+and gaining a real `JITOptions::NumThreads` (a worker pool sized by
+`llvm::hardware_concurrency`, or the calling thread with no pool at all when
+`NumThreads == 1`).
+
+This milestone narrows the sketch above in ways later milestones (R27, the
+stage-aware follow-up) still need to close: `create` takes the existing
+compute-only `JITOptions`, not `StageCompileOptions`, so there is no
+`getStage()` yet and every `CompiledStage` is implicitly
+`ShaderStage::Compute`; the stage-specific `invokeVertices`/`invokeFragments`/
+`invokePatches`/`invokeMeshGroups`/`invokeRay`/`resumeRay` methods do not
+exist yet either, since nothing before R27/R28 compiles a non-compute stage
+in the first place. `invokeGroup`'s own contract is otherwise as designed
+here; see FeMeVulkanDesign.md's "CPU Runtime API Changes" Status note for
+the one deviation from its own sketch of `invokeGroup` (the wave loop stays
+inside the compiled entry wrapper rather than moving into `invokeGroup`
+itself, to keep `feme::cpu::EntryWrapperPass`'s existing barrier-splitting
+machinery intact).
+
 ### Artifact reflection
 
 `ArtifactInfo` (today at `ArtifactAbiVersion = 2`) describes a compute

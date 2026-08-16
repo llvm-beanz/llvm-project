@@ -289,6 +289,16 @@ inline where it's discussed, and summarized here:
   5, diffs against) is implemented as of that milestone -- see its own
   Deviation note below.
 
+  Update (roadmap R21, see feme/docs/Roadmap.md): `feme::cpu::JITEngine`'s
+  compiled-code ownership is factored out into `feme::cpu::CompiledStage`
+  (`feme/include/feme/Target/CPU/CompiledStage.h`), whose `invokeGroup`
+  matches this section's own "JIT Flow" design below at the per-group
+  granularity, and `dispatch` now runs every group across a real
+  `llvm::DefaultThreadPool` sized by `JITOptions::NumThreads` (0 = hardware
+  concurrency, 1 = the calling thread with no pool), rather than accepting
+  and ignoring it. `ObjectCache`-based caching and the object-file/AOT path
+  described in "JIT Flow" remain unwired to this milestone's `create`.
+
   Update (end-to-end HLSL test coverage, see feme/test/Tools/feme-run/HLSL):
   `feme-run` now also accepts a DXIL bitcode file or `DXContainer` directly,
   running the same import + `feme::dxil::OpRaisingPass`/
