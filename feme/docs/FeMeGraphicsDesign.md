@@ -740,6 +740,21 @@ plus complete reflection. The existing
 `runPipeline(llvm::Module &, llvm::StringRef, unsigned)` signature can remain
 as a compute-only compatibility overload.
 
+Status (roadmap R27): implemented. `feme::cpu::StageCompileOptions`
+(feme/include/feme/Target/CPU/Pipeline.h) carries `Stage`, `EntryPoint`, and
+`WaveSize`; `runPipeline(llvm::Module &, const StageCompileOptions &)` selects
+the entry point by `feme::ShaderStage` instead of assuming compute, and its
+`PipelineResult` gains a `Stage` field. The original
+`runPipeline(llvm::Module &, llvm::StringRef, unsigned)` signature is kept,
+unchanged in behavior, as the compute-only compatibility overload this
+section asks for, and every existing caller (`feme::cpu::JITEngine`/
+`CompiledStage`, `feme::Driver`) still goes through it, always selecting
+`ShaderStage::Compute`. `CompiledStage::create` itself is not yet
+stage-aware -- it still only ever takes the compute-only `JITOptions` -- since
+its stage-specific `invoke*` methods and the vertex/fragment wrappers that
+would produce a dispatchable non-compute artifact do not exist yet; that is
+roadmap R28's job.
+
 ### Preparation and validation
 
 `PreparePass` should select any supported `feme.shader.stage` entry and retain
@@ -760,6 +775,22 @@ before mutation and checks:
 
 The validation result should be structured reflection used by both JIT and AOT
 paths, not only diagnostics recreated independently by each caller.
+
+Status (roadmap R27): `PreparePass` selecting by `feme::ShaderStage` was
+already implemented (roadmap R16); the stage-aware `runPipeline` overload
+above now actually passes its `Stage` through to it, rather than always
+requesting `Compute`. The pre-mutation graphics validation gate is
+implemented for the part of this list that already has a real check: a
+non-`Compute` `runPipeline` call runs `feme::graphics::ValidateStagePass`
+(roadmap R20) against the incoming module before `PreparePass` or any other
+pass mutates it, catching a `feme.stage.*` operand/signature/stage-legality
+violation while the module is still in its as-authored shape. The remaining
+bullets -- wave-size-range checking, required resource/image/sampler kinds,
+patch/mesh/ray layout limits -- have no implementation to gate on yet (their
+own stages/kinds do not exist), and structured (non-diagnostic-only)
+validation reflection shared by JIT and AOT is left to whichever milestone
+first needs a caller to act on a validation result rather than merely fail
+on one.
 
 ### Shared middle-end phases
 
@@ -793,6 +824,32 @@ inputs consume the live mask.
 This replaces the current implicit assumption that one active mask controls
 both execution and stores. A fragment shader is accepted only after verifier
 checks prove that no masked-off helper lane can reach an unguarded side effect.
+
+Status (roadmap R27): the live/side-effect mask split is implemented in
+`feme::cpu::LinearizePass` (`DiamondFlattener`/`LoopLinearizer` now thread a
+`MaskPair` instead of a single scalar mask): `feme.stage.discard(cond)`
+narrows both masks by `!cond`, `feme.stage.demote(cond)` narrows only the
+side-effect mask, and `feme.stage.is_helper()` lowers to
+`live && !sideeffect`. A plain `load` and a resource load use the live mask; a
+`store`, `atomicrmw`, and resource store use the side-effect mask.
+`feme::cpu::SIMDizePass` needed no code change at all: it already widens
+whatever `i1` value governs a masked call generically, regardless of which of
+the two masks it is. `--reference` mode gets its own counterpart in
+`feme::cpu::ReferenceLoweringPass`: one invocation at a time has no mask to
+narrow, so `discard` becomes a real conditional early return and
+`demote`/`is_helper` read/write a per-invocation `helper` flag instead.
+Deviation: the mask split (and `--reference`'s early return) only covers the
+same divergent-diamond/divergent-loop-exit shapes this milestone's
+`LinearizePass` already supported before R27 -- a `discard`/`demote`/
+`is_helper` call inside an otherwise-uniform loop is diagnosed rather than
+silently mis-widened; and `--reference` mode does not yet suppress a
+`demote`d invocation's later side effects (only `is_helper` and the
+side-effect summary bits are correct there), since doing so needs the same
+predication machinery this deliberately-unwidened ground-truth mode has no
+other use for. The verifier check that "no masked-off helper lane can reach
+an unguarded side effect" this paragraph asks for is left to a later
+milestone, once `feme::graphics::ValidateStagePass` or a sibling pass has a
+concrete shape to check that against.
 
 ### Vertex wrapper
 
