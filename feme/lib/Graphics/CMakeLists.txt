@@ -1,4 +1,5 @@
 add_mlir_library(FeMeGraphics
+  ImageFixture.cpp
   Pipeline.cpp
 
   LINK_COMPONENTS
