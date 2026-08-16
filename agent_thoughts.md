@@ -14050,3 +14050,174 @@ repeatedly (5+ runs) to rule out flakiness before committing, and confirmed
 existing `JITEngineTest`/`AOTDispatchTest`/`ResourceHeapTest` coverage did
 not need to change at all, since both commits preserved every public API's
 existing observable behavior for `NumThreads` in `{0, 1}`.
+
+# Agent thoughts: roadmap step R22 (`ArtifactInfo`'s execution-shape fields; `StageArtifactInfo`)
+
+R22 has two halves, and the roadmap row spells them out in order for a
+reason: "populate ArtifactInfo's WaveSize/GroupSize/GroupSharedSize/
+GroupSharedAlign, then generalize it into stage-tagged StageArtifactInfo
+with signatures and side-effect summaries; bump the artifact ABI version
+and round-trip JIT and AOT reflection through the same structure." I split
+the work into four commits following that split plus two small
+prerequisite refactors, rather than one big rename-and-add-fields patch.
+
+## Finding the actual gap
+
+`ArtifactInfo` (ResourceInfo.h) already had `WaveSize`/`GroupSize`/
+`GroupSharedSize`/`GroupSharedAlign` in its version-2 byte layout -- the
+struct's own doc comment said as much, and even named the reason: "milestone
+4 (wave size) and milestone 9 (groupshared) both compute the values these
+fields need, but neither is wired into an AOT-facing `ArtifactInfo` builder
+yet." Grepping for `emitArtifactGlobal`/`ArtifactInfo` across `lib/` and
+`tools/` turned up *nothing* outside `ResourceInfoTest.cpp` -- the AOT
+reflection path had never been wired into `feme::Driver::run` at all, and
+`CompiledStage`/`JITEngine` had no equivalent method either. So the real
+scope of "populate" turned out to be "invent both call sites", not just
+"fix a stale zero".
+
+## Two small prerequisite refactors
+
+Before touching `ArtifactInfo` itself I did two small, independently-tested
+extractions, since both `CompiledStage::create` (JIT) and `Driver::run`
+(AOT) would need the same two pieces of information and I did not want them
+to silently drift apart:
+
+1. `feme::cpu::getGroupSharedRequirements` (new
+   `include/feme/Transforms/CPU/GroupSharedInfo.h`): a public wrapper around
+   the already-private `computeGroupSharedLayout` (lib/Transforms/CPU/
+   GroupShared.h) that returns only the aggregate `{Size, Alignment}` a
+   reflection caller needs, not the per-global offset map only
+   `SIMDizePass`/`EntryWrapperPass` themselves need. This is the right
+   layering: the detailed layout stays private to the pass pair that
+   actually allocates against it, while the aggregate becomes a stable,
+   independently-testable public API surface.
+2. `feme::cpu::getDeclaredGroupSize` (moved from a file-local static
+   `getThreadGroupSize` in CompiledStage.cpp into ResourceInfo.h/.cpp): the
+   `hlsl.numthreads` attribute parser. `Driver.cpp` needed the exact same
+   logic and I did not want to re-derive "what does a missing/malformed
+   attribute mean" in a second place.
+
+Both got their own unit tests (`GroupSharedInfoTest.cpp`, three new
+`ResourceInfoTest` cases) before I touched anything execution-shape-related,
+so a regression in either would show up precisely rather than as a mystery
+failure three commits later.
+
+## Wiring both paths through the same computed values
+
+The trap here was timing: `EntryWrapperPass` (Phase 6) *erases* every
+`addrspace(3)` groupshared global once it has allocated a buffer for them,
+so by the time `runPipeline`/`CompiledStage::create` returns, the globals
+`computeGroupSharedLayout` needs to see are gone. Both `CompiledStage::
+create` and `Driver::run`'s CPU-target branch now call
+`getGroupSharedRequirements` *before* invoking the pipeline -- in
+`CompiledStage::create`'s case, right after cloning the module into its own
+context, before entry selection even runs; in `Driver::run`'s case, right
+after the target machine's data layout is set on `M` (so the alignment
+query sees the same data layout `EntryWrapperPass` will), before
+`runPipeline`. Wave size and thread-group size were already resolved before
+each pipeline call in both places, so those two just needed threading
+through to a new accessor rather than any new computation.
+
+`CompiledStage::getArtifactInfo()` and `Driver::run`'s new artifact-building
+block both call `ArtifactInfo::fromResourceInfo` for the
+execution-shape-agnostic fields, then set the four execution-shape fields
+themselves from what each path already resolved. `Driver::run` finishes by
+calling `emitArtifactGlobal` to embed the reflection as a real
+`feme_cpu_info_<entry>` data symbol in the module, which survives to the
+object file `TargetMachineBackend`/the format `Exporter` produce next.
+Verified this end to end with a new lit test
+(`test/Tools/feme/feme-cpu-artifact-reflection.ll`) that compiles a DXIL
+container through `feme --target=%feme_host_triple`, then greps the
+resulting `.o` with `llvm-nm` for the symbol -- the same pattern
+`feme-cpu-loop.ll` already used for `feme_cpu_entry_main`, just for the new
+reflection symbol instead of the entry point itself.
+
+## Generalizing to `StageArtifactInfo`
+
+For the second half I renamed the type outright (`sed`-driven, then
+hand-reviewed) rather than keeping a compat alias: this codebase's own
+convention (R21's `CompiledKernel` → `CompiledStage`) is to rename cleanly
+when a design supersedes an old name, not to accumulate deprecated aliases,
+and the roadmap phrasing ("generalize it into ... `StageArtifactInfo`")
+reads as a rename, not an addition alongside the old name.
+
+New fields:
+
+- `ShaderStage Stage`, defaulting to `Compute` -- matches `CompiledStage.h`'s
+  own documented scope note ("every `CompiledStage` is implicitly that
+  stage for now"), so I did not try to derive it more cleverly than that;
+  doing so would have implied stage-awareness this milestone does not
+  actually have.
+- `std::vector<uint8_t> Signature` -- the entry's serialized
+  `feme::EntrySignature` (R17's `feme::serializeSignature`), as a
+  length-prefixed raw-byte tail rather than another word-aligned field
+  list, since the signature's own serialization is already an opaque,
+  independently-versioned blob (`SignatureAbiVersion`). Left empty for
+  every artifact this milestone produces: neither `CompiledStage` nor
+  `Driver`'s CPU path is stage-aware yet (that's R27/R28), and I decided
+  against reaching into `feme::dxil::getEntrySignature` from `Target/CPU`
+  just to prove the field works, since that function metadata is
+  DXIL-import-owned and pulling it into the CPU target's own library would
+  be exactly the kind of premature cross-library coupling the "Headers &
+  Library Layering" convention warns against. Instead I proved the byte-tail
+  plumbing itself works with a direct unit test that sets
+  `Signature = {1,2,3,4,5}` and round-trips it through `serializeArtifact`/
+  `parseArtifact`.
+- Side-effect-summary `Flags` bits (`FEME_CPU_ARTIFACT_USES_DISCARD`/
+  `_DEMOTE`/`_HELPER`), computed by a new, genuinely reusable
+  `feme::cpu::computeSideEffectFlags` that scans a function's instructions
+  for `feme.stage.discard`/`.demote`/`.is_helper` calls via the existing
+  `feme::isStageOpCall`/`StageOpKind` (Core/StageOps.h, R20). This one *is*
+  wired into both `CompiledStage::create` (scanning the original,
+  pre-pipeline entry function, for the same "before the pipeline can
+  rewrite it" reason as the groupshared requirements) and `Driver::run`
+  (scanning the sole entry point found before `runPipeline` runs) -- it
+  costs nothing to compute even though no compute shader today calls these
+  ops, and it is real, tested code rather than a stub, unlike `Signature`.
+
+Bumped `ArtifactAbiVersion` to 3 and extended `serializeArtifact`/
+`parseArtifact`'s byte layout: `Stage` slots in right after the version as
+a new fixed `uint32_t` field (rejected if `>= ShaderStage::NumStages`), and
+`Signature` becomes a third counted tail after `StaticHeapIndices` and
+`BoundRanges` -- a `uint32_t` byte-length prefix followed by raw bytes,
+distinct from the other two tails' "count of fixed-width elements" shape
+since a signature blob has no natural word alignment of its own. Had to
+double-check the truncation-detection tests
+(`ParseRejectsInconsistentBoundRangeCount` et al.) still failed for the
+*right* reason after adding this third tail -- they still do, since the
+final `Bytes.size() != ExpectedSize` check catches any truncation
+regardless of which tail's byte range it falls in, even though the byte
+position the removed byte corresponds to shifted once `Signature` existed.
+
+## Verification
+
+Built with assertions on and ccache throughout (pre-existing config), and
+ran `ninja check-feme` after every commit-sized increment rather than only
+once at the end: 1027/1029 after the groupshared-reflection helper
+(`GroupSharedInfoTest`'s two new cases), 1027/1029 unchanged after the
+`getDeclaredGroupSize` extraction (a pure refactor, so no new pass/fail
+delta expected, just three new direct unit tests replacing what had been
+untested private logic), 1033/1035 after populating the four
+execution-shape fields (four new cases: two `CompiledStageTest` --
+including one with a real `addrspace(3)` global to prove
+`GroupSharedSize`/`GroupSharedAlign` actually reflect a nonzero allocation,
+not just default to 0 -- and one new lit test), and 1038/1040 after the
+`StageArtifactInfo` generalization (five new `ResourceInfoTest` cases plus
+one `CompiledStageTest` assertion). Ran `git diff | clang-format-diff.py`
+against the pre-R22 commit before each commit and applied its suggested
+fixes in place rather than skipping formatting review, since a few of my
+own line-wrapping choices (constructor parameter lists, multi-line
+namespace-qualified return types) drifted from the project's actual
+`.clang-format` output.
+
+One process note: my first attempt at this step's final commit message
+truncated silently mid-sentence because it was single-quoted end to end and
+contained an apostrophe ("CompiledStage.h's own scope note") that closed the
+shell string early, so bash tried to execute the remainder of the message as
+a command. `git commit` still ran (on the truncated string bash *did* pass
+through as the `-m` argument's tail before erroring), leaving a
+short/malformed commit rather than a hard failure -- worth remembering:
+always double-quote (or write to a file with `-F`) any commit message that
+contains contractions or possessives, and verify with
+`git log -1 --format=%B` afterward rather than assuming a printed error
+means nothing landed.
