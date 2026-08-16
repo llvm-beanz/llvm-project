@@ -10,6 +10,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeRuntimeCPUTests
   RuntimeCPUTest.cpp
+  ImageSamplingTest.cpp
   )
 target_link_libraries(FeMeRuntimeCPUTests
   PRIVATE

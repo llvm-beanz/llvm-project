@@ -47,6 +47,27 @@
 // access site" -- and is added on demand rather than spelled out
 // exhaustively up front.
 //
+// Scope (roadmap R30): the "Canonical image operations"/"Texture layout and
+// formats" helpers below (`feme.cpu.image.*`) cover 2D images only --
+// `femeRTApplyAddressMode` is itself dimension-agnostic (it addresses one
+// coordinate axis at a time), so a 1D entry point is the same mechanical
+// repeat the typed-buffer note above describes, not a new algorithm, and is
+// left for the call site that first needs it. Point and (bilinear) linear
+// filtering, all five `SamplerAddressMode`s, explicit-LOD mip selection and
+// depth-comparison sampling (with PCF-style bilinear-weighted comparison
+// results, matching real hardware's comparison-filter behaviour) are
+// implemented; trilinear (cross-mip) blending and true derivative-based
+// implicit LOD are not -- an implicit-LOD sample uses mip level 0, which is
+// exact whenever the source shader supplies its own explicit level (the
+// common compute-shader case) and only approximate otherwise, since this
+// runtime does not yet compute fragment derivatives (see
+// feme/docs/FeMeGraphicsDesign.md's "Canonical image operations"). The
+// format table covers `R32G32B32A32_FLOAT` (identity) and
+// `R8G8B8A8_UNORM`/`R8G8B8A8_UNORM_SRGB` (packed, the latter sRGB-decoded on
+// every sample/load per "Texture layout and formats"); every other format
+// `feme::cpu::ResourceFormat` lists is the same mechanical extension the
+// typed-buffer note above describes.
+//
 //===----------------------------------------------------------------------===//
 
 #include <stdint.h>
@@ -339,4 +360,481 @@ femeCpuResourceStoreRawF32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
   __builtin_memcpy(Ptr, &Value, sizeof(Value));
+}
+
+//--- Images and samplers (roadmap R30) ----------------------------------------
+
+// Mirrors `feme::cpu::FemeImageSubresourceLayout` (RuntimeABI.h): { Offset,
+// RowPitch, SlicePitch, SampleStride }.
+typedef struct {
+  uint64_t Offset;
+  uint64_t RowPitch;
+  uint64_t SlicePitch;
+  uint64_t SampleStride;
+} FemeRTImageSubresourceLayout;
+
+// Mirrors `feme::cpu::FemeImageDescriptor` (RuntimeABI.h) field for field.
+typedef struct {
+  void *Data;
+  uint64_t SizeInBytes;
+  uint32_t Dimension;
+  uint32_t Format;
+  uint32_t Width;
+  uint32_t Height;
+  uint32_t Depth;
+  uint32_t MipLevels;
+  uint32_t ArrayLayers;
+  uint32_t PlaneCount;
+  uint32_t SampleCount;
+  uint32_t Flags;
+  const FemeRTImageSubresourceLayout *MipLayouts;
+  uint32_t MipLayoutCount;
+  uint32_t Reserved[3];
+} FemeRTImageDescriptor;
+
+// Mirrors `feme::cpu::FemeSamplerDescriptor` (RuntimeABI.h) field for field.
+typedef struct {
+  uint32_t MinFilter;
+  uint32_t MagFilter;
+  uint32_t MipFilter;
+  uint32_t AddressU;
+  uint32_t AddressV;
+  uint32_t AddressW;
+  float LodBias;
+  float MinLod;
+  float MaxLod;
+  uint32_t CompareFunc;
+  float BorderColor[4];
+  float MaxAnisotropy;
+  uint32_t ReductionMode;
+  uint32_t Flags;
+  uint32_t Reserved[3];
+} FemeRTSamplerDescriptor;
+
+// Loads image descriptor `Index` of `Heap`/`HeapCount`, or an all-zero
+// (`Data == NULL`) descriptor if `Index >= HeapCount` -- the same
+// "unwritten descriptor reads as empty" rule `femeRTLoadDescriptor` applies
+// to buffers (see "Bounds checking"), reusing `FemeImageDescriptor`'s own
+// zero-is-empty convention (see RuntimeABI.h) rather than a separate
+// `IndexOK` flag.
+__attribute__((always_inline)) static FemeRTImageDescriptor
+femeRTLoadImageDescriptor(const FemeRTImageDescriptor *Heap,
+                          uint32_t HeapCount, uint32_t Index) {
+  if (Index >= HeapCount) {
+    FemeRTImageDescriptor Empty;
+    __builtin_memset(&Empty, 0, sizeof(Empty));
+    return Empty;
+  }
+  return Heap[Index];
+}
+
+// Loads sampler descriptor `Index` of `Heap`/`HeapCount`. Unlike an image
+// descriptor, an out-of-range index yields the all-zero sampler
+// (`Nearest`/`Repeat` filtering, no comparison or anisotropy) rather than an
+// invalid one: a sampler owns no host storage, so its zero value is always
+// a legal, if unhelpful, sampler (see RuntimeABI.h's
+// `FemeSamplerDescriptor` comment).
+__attribute__((always_inline)) static FemeRTSamplerDescriptor
+femeRTLoadSamplerDescriptor(const FemeRTSamplerDescriptor *Heap,
+                            uint32_t HeapCount, uint32_t Index) {
+  if (Index >= HeapCount) {
+    FemeRTSamplerDescriptor Default;
+    __builtin_memset(&Default, 0, sizeof(Default));
+    return Default;
+  }
+  return Heap[Index];
+}
+
+// The byte size of one texel of `Format` (`feme::cpu::ResourceFormat`), or 0
+// for a format this file does not (yet) decode -- see the file header
+// comment's format-table scope note.
+__attribute__((always_inline)) static uint64_t
+femeRTImageFormatElementSize(uint32_t Format) {
+  switch (Format) {
+  case 4: // R32G32B32A32_FLOAT
+    return 16;
+  case 13: // R8G8B8A8_UNORM
+  case 17: // R8G8B8A8_UNORM_SRGB
+    return 4;
+  default:
+    return 0;
+  }
+}
+
+// Decodes one sRGB-encoded component (`[0, 1]`) to linear light, the IEC
+// 61966-2-1 piecewise transfer function "Texture layout and formats" calls
+// for ("sRGB decode on sampling"). Alpha is never sRGB-encoded by
+// convention, so callers apply this to color channels only.
+__attribute__((always_inline)) static float femeRTSRGBToLinear(float C) {
+  return C <= 0.04045f ? C / 12.92f
+                       : __builtin_powf((C + 0.055f) / 1.055f, 2.4f);
+}
+
+// Unpacks one texel of `Format` at `Ptr` into a linear-light `<4 x float>`,
+// or all-zero for a format `femeRTImageFormatElementSize` doesn't know
+// (guarded by that function's 0 return at every call site below, so this
+// default is unreachable in practice, but kept total rather than partial).
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  switch (Format) {
+  case 4: { // R32G32B32A32_FLOAT: identity format, no conversion.
+    return (FemeRTv4f32) * (const FemeRTv4f32Unaligned *)Ptr;
+  }
+  case 13: { // R8G8B8A8_UNORM
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR8G8B8A8Unorm(Raw);
+  }
+  case 17: { // R8G8B8A8_UNORM_SRGB
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    FemeRTv4f32 V = femeRTUnpackR8G8B8A8Unorm(Raw);
+    V[0] = femeRTSRGBToLinear(V[0]);
+    V[1] = femeRTSRGBToLinear(V[1]);
+    V[2] = femeRTSRGBToLinear(V[2]);
+    return V;
+  }
+  default:
+    return Zero;
+  }
+}
+
+// Applies `SamplerAddressMode` `Mode` to one coordinate axis: `Coord` (an
+// integer texel index, possibly outside `[0, Size)`) against axis extent
+// `Size`. Sets `*UseBorder` if the result should be replaced by the
+// sampler's border color instead of a real texel (only possible for
+// `ClampToBorder`, mode 3); every other mode always returns an in-range
+// index. This is dimension-agnostic -- called once per axis -- so it is
+// the shared building block for 1D and 2D addressing alike (see the file
+// header comment's scope note).
+__attribute__((always_inline)) static int32_t
+femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
+                       _Bool *UseBorder) {
+  if (Size <= 0) {
+    *UseBorder = 1;
+    return 0;
+  }
+  switch (Mode) {
+  case 0: { // Repeat
+    int32_t M = Coord % Size;
+    return M < 0 ? M + Size : M;
+  }
+  case 1: { // MirroredRepeat
+    int32_t Period = 2 * Size;
+    int32_t M = Coord % Period;
+    if (M < 0)
+      M += Period;
+    return M < Size ? M : (Period - 1 - M);
+  }
+  case 3: { // ClampToBorder
+    if (Coord < 0 || Coord >= Size) {
+      *UseBorder = 1;
+      return 0;
+    }
+    return Coord;
+  }
+  case 4: { // MirrorClampToEdge
+    int32_t M = Coord < 0 ? -1 - Coord : Coord;
+    return M >= Size ? Size - 1 : M;
+  }
+  case 2:   // ClampToEdge
+  default:
+    return Coord < 0 ? 0 : (Coord >= Size ? Size - 1 : Coord);
+  }
+}
+
+// Reads one texel at integer coordinates `(X, Y)` of mip level `Level` of
+// `Img`, or `BorderColor` if `UseBorder` is set (a `ClampToBorder` axis
+// resolved out of range), or all-zero for any other unreadable access (no
+// image bound, `Level` beyond `MipLayoutCount`, an unrecognized format, or
+// an access `femeRTImageFormatElementSize`/the mip layout's own
+// `SizeInBytes` bound rejects) -- the same "out-of-range reads zero" rule
+// buffers use (see "Bounds checking").
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level,
+                   int32_t X, int32_t Y, _Bool UseBorder,
+                   const float BorderColor[4]) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (UseBorder) {
+    FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
+                          BorderColor[3]};
+    return Border;
+  }
+  if (!Img->Data || Level >= Img->MipLayoutCount)
+    return Zero;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return Zero;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
+  uint64_t Offset =
+      Layout->Offset + (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return Zero;
+  const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
+  return femeRTUnpackImageTexel(Img->Format, Ptr);
+}
+
+// Selects the mip level a sample reads from: `Lod` clamped to
+// `[0, MipLevels - 1]` for an explicit-LOD sample, or level 0 for an
+// implicit-LOD one (see the file header comment's scope note on why --
+// no fragment-derivative computation exists yet). `MipFilter` is accepted
+// for the API shape a future trilinear blend needs, but not yet consulted:
+// both `Nearest` and `Linear` currently round to the nearer single level.
+__attribute__((always_inline)) static uint32_t
+femeRTSelectMipLevel(const FemeRTImageDescriptor *Img, float Lod,
+                     _Bool UseExplicitLod, uint32_t MipFilter) {
+  (void)MipFilter;
+  if (Img->MipLevels == 0)
+    return 0;
+  float MaxLevel = (float)(Img->MipLevels - 1);
+  float L = UseExplicitLod ? Lod : 0.0f;
+  L = __builtin_fmaxf(0.0f, __builtin_fminf(L, MaxLevel));
+  uint32_t Level = (uint32_t)(L + 0.5f);
+  return Level > Img->MipLevels - 1 ? Img->MipLevels - 1 : Level;
+}
+
+// Halves `BaseExtent` `Level` times (standard mip-chain downsampling),
+// floored to a minimum of 1: mip level `Level`'s width/height, given the
+// base (level 0) extent.
+__attribute__((always_inline)) static uint32_t
+femeRTMipExtent(uint32_t BaseExtent, uint32_t Level) {
+  uint32_t Extent = BaseExtent >> Level;
+  return Extent == 0 ? 1 : Extent;
+}
+
+// The four address-mode-resolved texel corners and fractional weights a 2D
+// bilinear sample at normalized coordinates `(U, V)` blends between, texel
+// centers offset by half a texel per the standard "texel center at
+// `i + 0.5`" convention (matching Direct3D and Vulkan's sampling rules).
+typedef struct {
+  int32_t X0, X1, Y0, Y1;
+  _Bool BorderX0, BorderX1, BorderY0, BorderY1;
+  float Wx, Wy; // Fractional weight toward the X1/Y1 corner.
+} FemeRTBilinearSupport;
+
+__attribute__((always_inline)) static FemeRTBilinearSupport
+femeRTComputeBilinearSupport(const FemeRTImageDescriptor *Img, float U,
+                             float V, const FemeRTSamplerDescriptor *Samp,
+                             uint32_t Level) {
+  uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
+  uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
+  float TexelU = U * (float)LevelWidth - 0.5f;
+  float TexelV = V * (float)LevelHeight - 0.5f;
+  float FloorU = __builtin_floorf(TexelU);
+  float FloorV = __builtin_floorf(TexelV);
+  int32_t BaseX = (int32_t)FloorU;
+  int32_t BaseY = (int32_t)FloorV;
+
+  FemeRTBilinearSupport S;
+  S.Wx = TexelU - FloorU;
+  S.Wy = TexelV - FloorV;
+  S.BorderX0 = S.BorderX1 = S.BorderY0 = S.BorderY1 = 0;
+  S.X0 = femeRTApplyAddressMode(BaseX, (int32_t)LevelWidth, Samp->AddressU,
+                                &S.BorderX0);
+  S.X1 = femeRTApplyAddressMode(BaseX + 1, (int32_t)LevelWidth,
+                                Samp->AddressU, &S.BorderX1);
+  S.Y0 = femeRTApplyAddressMode(BaseY, (int32_t)LevelHeight, Samp->AddressV,
+                                &S.BorderY0);
+  S.Y1 = femeRTApplyAddressMode(BaseY + 1, (int32_t)LevelHeight,
+                                Samp->AddressV, &S.BorderY1);
+  return S;
+}
+
+// Point-samples (nearest texel) `Img` at `(U, V)`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
+                    const FemeRTSamplerDescriptor *Samp, float U, float V,
+                    uint32_t Level) {
+  uint32_t LevelWidth = femeRTMipExtent(Img->Width, Level);
+  uint32_t LevelHeight = femeRTMipExtent(Img->Height, Level);
+  int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
+  int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight);
+  _Bool BorderX = 0, BorderY = 0;
+  int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                        Samp->AddressU, &BorderX);
+  int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
+                                        Samp->AddressV, &BorderY);
+  return femeRTFetchTexel2D(Img, Level, AddrX, AddrY, BorderX || BorderY,
+                            Samp->BorderColor);
+}
+
+// Bilinearly filters `Img` at `(U, V)`, blending the four texels
+// `femeRTComputeBilinearSupport` selects.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
+                     const FemeRTSamplerDescriptor *Samp, float U, float V,
+                     uint32_t Level) {
+  FemeRTBilinearSupport S =
+      femeRTComputeBilinearSupport(Img, U, V, Samp, Level);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(Img, Level, S.X0, S.Y0,
+                                       S.BorderX0 || S.BorderY0,
+                                       Samp->BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(Img, Level, S.X1, S.Y0,
+                                       S.BorderX1 || S.BorderY0,
+                                       Samp->BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(Img, Level, S.X0, S.Y1,
+                                       S.BorderX0 || S.BorderY1,
+                                       Samp->BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(Img, Level, S.X1, S.Y1,
+                                       S.BorderX1 || S.BorderY1,
+                                       Samp->BorderColor);
+  FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
+  FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
+  return Top + (Bottom - Top) * S.Wy;
+}
+
+// Applies `SamplerCompareFunc` `Func` as `Ref Func StoredTexel` (Direct3D's
+// `SamplerComparisonFunc`/Vulkan's `VkCompareOp` convention), returning
+// `1.0f` for pass and `0.0f` for fail.
+__attribute__((always_inline)) static float
+femeRTApplyCompare(uint32_t Func, float Ref, float Texel) {
+  switch (Func) {
+  case 0: // Never
+    return 0.0f;
+  case 1: // Less
+    return Ref < Texel ? 1.0f : 0.0f;
+  case 2: // Equal
+    return Ref == Texel ? 1.0f : 0.0f;
+  case 3: // LessEqual
+    return Ref <= Texel ? 1.0f : 0.0f;
+  case 4: // Greater
+    return Ref > Texel ? 1.0f : 0.0f;
+  case 5: // NotEqual
+    return Ref != Texel ? 1.0f : 0.0f;
+  case 6: // GreaterEqual
+    return Ref >= Texel ? 1.0f : 0.0f;
+  case 7: // Always
+    return 1.0f;
+  default:
+    return 0.0f;
+  }
+}
+
+// `feme.cpu.image.sample.2d.v4f32`: samples a 2D sampled image (an SRV-like
+// texture, `FEME_IMAGE_SAMPLED == 1 << 0`) at normalized coordinates
+// `(U, V)`, using `Samp`'s magnification filter (`MagFilter`) to choose
+// point or bilinear filtering and `Lod`/`UseExplicitLod` to choose the mip
+// level (see `femeRTSelectMipLevel`). An inactive lane, an unsampled or
+// unwritten image, reads as zero (see "Bounds checking").
+FemeRTv4f32 femeCpuImageSample2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
+    _Bool UseExplicitLod,
+    _Bool Mask) asm("feme.cpu.image.sample.2d.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageSample2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
+    _Bool UseExplicitLod, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return Zero;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod,
+                                        Samp.MipFilter);
+  return Samp.MagFilter == 1 // SamplerFilter::Linear.
+             ? femeRTSampleLinear2D(&Img, &Samp, U, V, Level)
+             : femeRTSamplePoint2D(&Img, &Samp, U, V, Level);
+}
+
+// `feme.cpu.image.samplecmp.2d.f32`: depth-comparison samples a 2D sampled
+// image, comparing `Dref` against each fetched texel's first (depth)
+// component via `Samp->CompareFunc`, then filters the per-texel 0/1
+// comparison results with the same point/bilinear weights a color sample
+// would use -- hardware "percentage-closer filtering" behaviour, not a
+// filtered depth value compared once.
+float femeCpuImageSampleCmp2DF32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
+    _Bool UseExplicitLod, float Dref,
+    _Bool Mask) asm("feme.cpu.image.samplecmp.2d.f32");
+
+__attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    const FemeRTSamplerDescriptor *SamplerHeap, uint32_t SamplerHeapCount,
+    uint32_t ImageIndex, uint32_t SamplerIndex, float U, float V, float Lod,
+    _Bool UseExplicitLod, float Dref, _Bool Mask) {
+  if (!Mask)
+    return 0.0f;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data || !(Img.Flags & 1u)) // FEME_IMAGE_SAMPLED.
+    return 0.0f;
+  FemeRTSamplerDescriptor Samp =
+      femeRTLoadSamplerDescriptor(SamplerHeap, SamplerHeapCount, SamplerIndex);
+  uint32_t Level = femeRTSelectMipLevel(&Img, Lod, UseExplicitLod,
+                                        Samp.MipFilter);
+
+  if (Samp.MagFilter != 1) { // Point (nearest).
+    uint32_t LevelWidth = femeRTMipExtent(Img.Width, Level);
+    uint32_t LevelHeight = femeRTMipExtent(Img.Height, Level);
+    int32_t X = (int32_t)__builtin_floorf(U * (float)LevelWidth);
+    int32_t Y = (int32_t)__builtin_floorf(V * (float)LevelHeight);
+    _Bool BorderX = 0, BorderY = 0;
+    int32_t AddrX = femeRTApplyAddressMode(X, (int32_t)LevelWidth,
+                                           Samp.AddressU, &BorderX);
+    int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
+                                           Samp.AddressV, &BorderY);
+    FemeRTv4f32 T = femeRTFetchTexel2D(&Img, Level, AddrX, AddrY,
+                                       BorderX || BorderY, Samp.BorderColor);
+    return femeRTApplyCompare(Samp.CompareFunc, Dref, T[0]);
+  }
+
+  FemeRTBilinearSupport S =
+      femeRTComputeBilinearSupport(&Img, U, V, &Samp, Level);
+  FemeRTv4f32 T00 = femeRTFetchTexel2D(&Img, Level, S.X0, S.Y0,
+                                      S.BorderX0 || S.BorderY0,
+                                      Samp.BorderColor);
+  FemeRTv4f32 T10 = femeRTFetchTexel2D(&Img, Level, S.X1, S.Y0,
+                                      S.BorderX1 || S.BorderY0,
+                                      Samp.BorderColor);
+  FemeRTv4f32 T01 = femeRTFetchTexel2D(&Img, Level, S.X0, S.Y1,
+                                      S.BorderX0 || S.BorderY1,
+                                      Samp.BorderColor);
+  FemeRTv4f32 T11 = femeRTFetchTexel2D(&Img, Level, S.X1, S.Y1,
+                                      S.BorderX1 || S.BorderY1,
+                                      Samp.BorderColor);
+  float C00 = femeRTApplyCompare(Samp.CompareFunc, Dref, T00[0]);
+  float C10 = femeRTApplyCompare(Samp.CompareFunc, Dref, T10[0]);
+  float C01 = femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0]);
+  float C11 = femeRTApplyCompare(Samp.CompareFunc, Dref, T11[0]);
+  float Top = C00 + (C10 - C00) * S.Wx;
+  float Bottom = C01 + (C11 - C01) * S.Wx;
+  return Top + (Bottom - Top) * S.Wy;
+}
+
+// `feme.cpu.image.load.2d.v4f32`: reads one texel of a 2D image (sampled or
+// storage) at integer coordinates `(X, Y)` and explicit mip `Mip`, with no
+// sampler, no addressing mode and no filtering (DXIL's `Load`/Vulkan's
+// `OpImageFetch`/`OpImageRead`): an out-of-range coordinate reads as zero
+// rather than applying any address mode, since there is no sampler to
+// supply one.
+FemeRTv4f32 femeCpuImageLoad2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Mip,
+    _Bool Mask) asm("feme.cpu.image.load.2d.v4f32");
+
+__attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Mip, _Bool Mask) {
+  FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
+    return Zero;
+  static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+  return femeRTFetchTexel2D(&Img, Mip, X, Y, /*UseBorder=*/0, NoBorder);
 }
