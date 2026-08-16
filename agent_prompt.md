@@ -23,9 +23,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R27 from the roadmap document?
+Can you implement R28 from the roadmap document?
 
-> `StageCompileOptions` and a stage-aware `runPipeline` (compute-only overload
-> retained), stage-aware `PreparePass` and pre-mutation graphics validation, and
-> the split of the single active mask into live and side-effect masks through
-> `LinearizePass`/`SIMDizePass` and the reference path (see: §1.8.3)
+> Vertex and fragment wrappers over in-memory synthetic stage layouts,
+> `FemeStageLayout`/`FemeVertexArgs`/`FemeFragmentArgs`, and derivative/quad
+> lowering at wave sizes 4 and 8. **Completes G1**, and is the design's decision
+> point: if either stage cannot pass through the existing middle end with
+> localized extensions, revise the shared-middle-end boundary before building
+> any fixed function (see: §1.8.3)
