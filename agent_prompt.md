@@ -23,8 +23,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R19 from the roadmap document?
+Can you implement R20 from the roadmap document?
 
-> Convert SPIR-V non-builtin `Input`/`Output` variables and their
-> `Location`/`Component`/`Index`/interpolation/per-primitive/per-patch
-> decorations instead of failing to legalize them (see: §1.8.2, §1.2)
+> The `feme.stage.*` operation family for vertex/fragment (input load, output
+> store, discard, demote, is_helper, derivatives, quad read, pull-model
+> interpolation) plus `FeMeTransformsGraphics`' canonicalization and validation
+> pass, rewriting DXIL `loadInput`/`storeOutput` and SPIR-V interface accesses
+> into it. **Completes G0** (see: §1.8.2, §1.4)
