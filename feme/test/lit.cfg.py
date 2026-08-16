@@ -73,6 +73,7 @@ tools = [
     "feme",
     "feme-opt",
     "feme-run",
+    "feme-render",
     "feme-cfg-gen",
     "feme-translate",
     # See the "dxbc-as" section of feme/docs/Design.md: a standalone DXBC

@@ -32,6 +32,8 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 using namespace llvm;
@@ -139,6 +141,44 @@ Expected<uint32_t> getFixtureFormatElementSize(ResourceFormat Format) {
   if (!Info)
     return Info.takeError();
   return Info->Components * Info->ComponentBytes;
+}
+
+Expected<bool> isFixtureFormatFloat(ResourceFormat Format) {
+  Expected<FormatInfo> Info = getFormatInfo(Format);
+  if (!Info)
+    return Info.takeError();
+  return Info->IsFloat;
+}
+
+Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
+                    MutableArrayRef<uint8_t> Texel) {
+  Expected<FormatInfo> Info = getFormatInfo(Format);
+  if (!Info)
+    return Info.takeError();
+  if (Clear.size() != Info->Components)
+    return createStringError(inconvertibleErrorCode(),
+                             "clear color has %zu component(s), expected %u",
+                             Clear.size(), Info->Components);
+
+  if (Info->IsFloat) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      float F = static_cast<float>(Clear[I]);
+      memcpy(Texel.data() + I * Info->ComponentBytes, &F,
+             Info->ComponentBytes);
+    }
+    return Error::success();
+  }
+
+  if (Format != ResourceFormat::R8G8B8A8_UNORM &&
+      Format != ResourceFormat::R8G8B8A8_UNORM_SRGB)
+    return createStringError(inconvertibleErrorCode(),
+                             "attachment clear color is not yet supported "
+                             "for this format");
+  for (unsigned I = 0; I != Info->Components; ++I) {
+    double Clamped = std::clamp(Clear[I], 0.0, 1.0);
+    Texel[I] = static_cast<uint8_t>(std::lround(Clamped * 255.0));
+  }
+  return Error::success();
 }
 
 namespace {

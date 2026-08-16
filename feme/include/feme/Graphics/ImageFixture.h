@@ -23,6 +23,7 @@
 
 #include "feme/Target/CPU/RuntimeABI.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
@@ -66,6 +67,38 @@ parseImageFixtures(llvm::StringRef Text);
 /// accepts, so an actual-output dump can be pasted into a `CHECK` line (see
 /// the file comment above).
 llvm::Error printImageFixture(llvm::raw_ostream &OS, const ImageFixture &Image);
+
+/// Parses a fixture/scene `format` field -- the hyphen-separated spelling
+/// (`r8g8b8a8-unorm`) feme/docs/Design.md's own examples use, for both an
+/// image fixture and a scene attachment's format (see "Textual scene and
+/// image fixtures": "the same format table"). Exposed for `feme-render`'s
+/// scene parser, which needs to build attachment storage in the same
+/// format space image fixtures use.
+llvm::Expected<cpu::ResourceFormat> parseFixtureFormat(llvm::StringRef Format);
+
+/// The byte size of one texel of \p Format in the fixture/scene format
+/// table, or an `Error` for a format `getFormatInfo` (ImageFixture.cpp's
+/// internal table) does not implement yet.
+llvm::Expected<uint32_t> getFixtureFormatElementSize(cpu::ResourceFormat Format);
+
+/// Whether \p Format's components are IEEE-754 floats (true) or
+/// integer/normalized (false) in the fixture/scene format table. Used by
+/// `feme-render`'s `--tolerance` comparison, which is only meaningful for
+/// a floating-point format.
+llvm::Expected<bool> isFixtureFormatFloat(cpu::ResourceFormat Format);
+
+/// Packs one texel's worth of clear-color components (`attachments[].clear`
+/// in the scene YAML, see feme/docs/Design.md's "Textual scene and image
+/// fixtures") into \p Texel, in \p Format's storage encoding. A
+/// floating-point format stores each component as-is; `R8G8B8A8_UNORM`/
+/// `_UNORM_SRGB` treat each component as a `[0, 1]` value scaled to a byte
+/// (sRGB encode-on-store is a later milestone, G4 -- see "Texture layout
+/// and formats" in feme/docs/FeMeGraphicsDesign.md's Status note). Any
+/// other format is an `Error`: a mechanical, on-demand addition once a
+/// test needs it, the same as `getFormatInfo`'s own scope note.
+llvm::Error packClearColor(cpu::ResourceFormat Format,
+                          llvm::ArrayRef<double> Clear,
+                          llvm::MutableArrayRef<uint8_t> Texel);
 
 } // namespace feme::graphics
 

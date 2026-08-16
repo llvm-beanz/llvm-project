@@ -1,0 +1,38 @@
+; RUN: split-file %s %t
+; RUN: feme-render %t/scene.yaml | FileCheck %s
+
+; A scene's `pipeline` compiles both stages into a real
+; feme::graphics::GraphicsPipeline (roadmap R31, "FeMeGraphics skeleton"):
+; this only checks that compilation and validation succeed end to end from
+; a real scene file (the compiled pipeline is not driven by any draw yet,
+; roadmap R32), so the observable output is still just the cleared
+; attachment.
+
+; CHECK: image color0 4x4 r8g8b8a8-unorm
+; CHECK-NEXT: y=0: 000000ff 000000ff 000000ff 000000ff
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [0.0, 0.0, 0.0, 1.0]
+pipeline:
+  vertex: { module: vs.ll, entry: main }
+  fragment: { module: fs.ll, entry: main }
+  cull: back
+  front-face: ccw
+  depth: { test: less, write: true }
+  blend: replace
+
+;--- vs.ll
+define void @main() #0 {
+  ret void
+}
+attributes #0 = { "feme.shader.stage"="vertex" }
+
+;--- fs.ll
+define void @main() #0 {
+  ret void
+}
+attributes #0 = { "feme.shader.stage"="fragment" }

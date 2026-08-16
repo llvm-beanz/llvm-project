@@ -23,6 +23,7 @@ set(FEME_TEST_DEPENDS
   feme-opt
   feme-translate
   feme-run
+  feme-render
   feme-cfg-gen
   feme-dxil-import-fuzzer
   feme-dxbc-import-fuzzer

@@ -1,0 +1,17 @@
+; RUN: split-file %s %t
+; RUN: not feme-render %t/scene.yaml 2>&1 | FileCheck %s
+
+; A non-empty `draws` list is diagnosed as not yet implemented (roadmap
+; R32, "Basic triangle pipeline") rather than silently rendering nothing or
+; the wrong thing.
+
+; CHECK: feme-render: executing 'draws' is not implemented yet
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [0.0, 0.0, 0.0, 1.0]
+draws:
+  - { vertices: 3, instances: 1 }

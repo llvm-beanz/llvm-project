@@ -1,0 +1,20 @@
+; RUN: split-file %s %t
+; RUN: feme-render %t/scene.yaml | FileCheck %s
+
+; Roadmap R31, "FeMeGraphics skeleton" (see feme/docs/Roadmap.md): a scene
+; with attachments and no `draws` clears and dumps them -- draw execution
+; itself is roadmap R32, "Basic triangle pipeline" (see feme-render.cpp's
+; own file comment).
+
+; CHECK: image color0 4x4 r8g8b8a8-unorm
+; CHECK-NEXT: y=0: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=1: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=2: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=3: ff0000ff ff0000ff ff0000ff ff0000ff
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [1.0, 0.0, 0.0, 1.0]

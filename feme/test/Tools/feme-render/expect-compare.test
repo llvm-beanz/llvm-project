@@ -1,0 +1,20 @@
+; RUN: split-file %s %t
+; RUN: feme-render %t/scene.yaml > %t/actual.image
+; RUN: feme-render --expect=%t/actual.image %t/scene.yaml
+; RUN: not feme-render --expect=%t/mismatch.image %t/scene.yaml 2>&1 | FileCheck %s
+
+; `--expect` compares the produced attachments against a checked-in image
+; fixture (see docs/CommandGuide/feme-render.md), exactly by default.
+
+; CHECK: feme-render: 'color0' does not match --expect
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [2, 1]
+    clear: [1.0, 0.0, 0.0, 1.0]
+
+;--- mismatch.image
+image color0 2x1 r8g8b8a8-unorm
+  y=0: 000000ff 000000ff
