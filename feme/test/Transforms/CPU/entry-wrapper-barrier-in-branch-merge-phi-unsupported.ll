@@ -1,11 +1,13 @@
 ; RUN: not feme-opt --llvm -passes=feme-cpu-simdize,feme-cpu-lower-wave,feme-cpu-wrap-entry -feme-cpu-wave-size=4 -S %s 2>&1 | FileCheck %s
 
-; Roadmap milestone 9's narrowing (see the Status section's Deviation note
-; in feme/docs/FeMeCPUDesign.md): a `..._with_group_sync` barrier inside a
-; uniform (group-id-derived, so not rejected by `feme::cpu::SIMDizePass`
-; itself) but still branchy wave body is diagnosed rather than
-; mis-compiled -- `feme::cpu::EntryWrapperPass`'s region splitting only
-; supports a straight-line wave body for now.
+; Roadmap step R24's remaining narrowing (see the Status section's
+; Deviation note in feme/docs/FeMeCPUDesign.md): a branch merge block with
+; a phi -- a value one arm computes differently from the other, needed
+; after the branch -- is diagnosed rather than mis-compiled.
+; `feme::cpu::matchBranchShape` declines this shape (a merge phi means
+; threading a value across the wrapper's own scalar branch choice, not
+; just across a barrier within one region), so region splitting falls
+; back to the straight-line path, which diagnoses the branch itself.
 
 ; CHECK: error: feme-cpu-wrap-entry: function 'main' has a barrier inside non-linear control flow
 define void @main() #0 {
@@ -19,6 +21,8 @@ a:
 b:
   br label %exit
 exit:
+  %val = phi i32 [ 1, %a ], [ 2, %b ]
+  %doubled = mul i32 %val, 2
   ret void
 }
 declare i32 @llvm.dx.group.id(i32)

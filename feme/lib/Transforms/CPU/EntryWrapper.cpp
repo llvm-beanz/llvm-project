@@ -88,7 +88,12 @@
 //    branch) remains diagnosed: threading it would mean spilling across a
 //    control-flow choice made once, scalar, in the wrapper, not just across
 //    a barrier within a single region, which this milestone's spilling
-//    does not yet support.
+//    does not yet support. A value live across a barrier *within* one arm
+//    (not across the branch itself) is also still diagnosed, for the same
+//    reason `buildWaveLoop`'s simple argument-name dispatch narrowed
+//    milestone 9 in the first place: each arm would need its own spill
+//    buffer, and there is only one `barrier_spill` parameter name to go
+//    around.
 //  - **A `phi` live across a barrier**: spilled exactly like any other
 //    value (`spillValuesLiveAcrossBarriers` below), with its spill store
 //    placed after its own block's last phi rather than immediately after
@@ -114,6 +119,7 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -240,8 +246,8 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
 
   Env.BarrierSpill = nullptr;
   if (SpillTy) {
-    AllocaInst *Buf = Entry.CreateAlloca(
-        ArrayType::get(SpillTy, WavesPerGroup), nullptr, "barrier.spill");
+    AllocaInst *Buf = Entry.CreateAlloca(ArrayType::get(SpillTy, WavesPerGroup),
+                                         nullptr, "barrier.spill");
     Env.BarrierSpill = Buf;
   }
   return Env;
@@ -314,7 +320,8 @@ BasicBlock *buildWaveLoop(Function &Wrapper, BasicBlock *Pred,
       CallArgs.push_back(Env.BarrierSpill);
     else if (Arg.getName().starts_with("loopvar")) {
       unsigned N;
-      bool Failed = Arg.getName().drop_front(strlen("loopvar")).getAsInteger(10, N);
+      bool Failed =
+          Arg.getName().drop_front(strlen("loopvar")).getAsInteger(10, N);
       assert(!Failed && N < LoopScalars.size());
       (void)Failed;
       CallArgs.push_back(LoopScalars[N]);
@@ -371,9 +378,8 @@ void replaceMemoryOnlyBarriers(Function &F) {
 /// basic blocks keep their identity (only \p F's own `Argument`s do not),
 /// so any pointer into \p F's body other than to one of its old arguments
 /// remains valid after this call.
-std::pair<Function *, Argument *> appendTrailingParam(Function &F,
-                                                       Type *ExtraType,
-                                                       const Twine &ExtraName) {
+std::pair<Function *, Argument *>
+appendTrailingParam(Function &F, Type *ExtraType, const Twine &ExtraName) {
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
   ParamTypes.push_back(ExtraType);
   FunctionType *NewTy = FunctionType::get(F.getReturnType(), ParamTypes,
@@ -444,14 +450,14 @@ struct RegionBoundary {
 /// phi must stay grouped with any others at the top of its block. Returns
 /// false (having emitted a diagnostic, leaving \p WaveBody unmodified) if a
 /// live value's shape is not one this milestone's spilling supports.
-bool spillValuesLiveAcrossBarriers(Function *&WaveBody,
-                                   ArrayRef<BasicBlock *> Order,
-                                   ArrayRef<CallInst *> Barriers,
-                                   const DenseMap<Instruction *, unsigned> &IndexOf,
-                                   StructType *&SpillTyOut) {
+bool spillValuesLiveAcrossBarriers(
+    Function *&WaveBody, ArrayRef<BasicBlock *> Order,
+    ArrayRef<CallInst *> Barriers,
+    const DenseMap<Instruction *, unsigned> &IndexOf, StructType *&SpillTyOut) {
   SpillTyOut = nullptr;
   SmallSetVector<Instruction *, 4> SpilledDefs;
-  SmallVector<std::tuple<Instruction *, Instruction *, unsigned>, 8> SpilledUses;
+  SmallVector<std::tuple<Instruction *, Instruction *, unsigned>, 8>
+      SpilledUses;
   for (CallInst *Barrier : Barriers) {
     unsigned BarrierIdx = IndexOf.lookup(Barrier);
     for (BasicBlock *BB : Order) {
@@ -497,7 +503,7 @@ bool spillValuesLiveAcrossBarriers(Function *&WaveBody,
   Argument *WaveIndex = WaveBody->getArg(WaveIndexArgNo);
 
   auto buildFieldPtr = [&](IRBuilder<> &Builder, Instruction *Def,
-                          const Twine &Name) {
+                           const Twine &Name) {
     Value *Slot =
         Builder.CreateGEP(SpillTy, SpillArg, {WaveIndex}, Name + ".slot");
     return Builder.CreateStructGEP(SpillTy, Slot, FieldOf[Def], Name);
@@ -509,8 +515,8 @@ bool spillValuesLiveAcrossBarriers(Function *&WaveBody,
     // so a spilled phi's store goes after the block's last phi rather than
     // right after the phi itself.
     Instruction *InsertPt = isa<PHINode>(Def)
-                               ? &*Def->getParent()->getFirstNonPHIOrDbg()
-                               : Def->getNextNode();
+                                ? &*Def->getParent()->getFirstNonPHIOrDbg()
+                                : Def->getNextNode();
     IRBuilder<> Builder(InsertPt);
     Value *Field = buildFieldPtr(Builder, Def, Def->getName() + ".spill");
     Builder.CreateStore(Def, Field);
@@ -603,8 +609,7 @@ splitAtGroupSyncBarriers(Function *&WaveBody,
     for (auto [OldArg, NewArg] : llvm::zip(WaveBody->args(), RegionFn->args()))
       NewArg.setName(OldArg.getName());
 
-    RegionFn->splice(RegionFn->begin(), WaveBody,
-                     Blocks.front()->getIterator(),
+    RegionFn->splice(RegionFn->begin(), WaveBody, Blocks.front()->getIterator(),
                      std::next(Blocks.back()->getIterator()));
 
     // The region's last block still ends with the unconditional branch
@@ -669,7 +674,7 @@ struct LoopShape {
 /// before reaching one (an inner loop/diamond this milestone doesn't
 /// support in a prefix/suffix chain).
 BasicBlock *walkLinearChain(BasicBlock *Start,
-                           SmallVectorImpl<BasicBlock *> &Order) {
+                            SmallVectorImpl<BasicBlock *> &Order) {
   SmallPtrSet<BasicBlock *, 8> Visited;
   BasicBlock *BB = Start;
   while (true) {
@@ -685,14 +690,18 @@ BasicBlock *walkLinearChain(BasicBlock *Start,
 }
 
 /// Whether every instruction in \p Blocks other than a trailing terminator
-/// has no side effects, with every operand either a `Constant` or another
-/// instruction within \p Blocks or in \p AllowedPhis -- the "pure, closed
-/// scalar recurrence" `LoopShape`'s header condition and latch recurrence
-/// must be (see its doc comment): safe to clone directly into the wrapper
-/// as ordinary, once-per-iteration scalar code, run outside any per-wave
-/// loop.
+/// has no side effects, with every operand either a `Constant`, another
+/// instruction within \p Blocks, a phi in \p AllowedPhis, or (if
+/// \p AllowArgument is set) one of \p Blocks' enclosing function's own
+/// parameters \p AllowArgument accepts -- the "pure, closed scalar
+/// recurrence" `LoopShape`'s header condition and latch recurrence must be
+/// (see its doc comment), or `BranchShape`'s header condition must be (see
+/// its doc comment): safe to clone directly into the wrapper as ordinary,
+/// once-per-iteration (or once-per-branch) scalar code, run outside any
+/// per-wave loop.
 bool isPureClosedChain(ArrayRef<BasicBlock *> Blocks,
-                       ArrayRef<PHINode *> AllowedPhis) {
+                       ArrayRef<PHINode *> AllowedPhis,
+                       function_ref<bool(Argument &)> AllowArgument = nullptr) {
   SmallPtrSet<Instruction *, 8> Local;
   for (BasicBlock *BB : Blocks)
     for (Instruction &I : *BB)
@@ -713,7 +722,11 @@ bool isPureClosedChain(ArrayRef<BasicBlock *> Blocks,
           continue;
         if (auto *OpI = dyn_cast<Instruction>(Op); OpI && Local.contains(OpI))
           continue;
-        if (auto *PN = dyn_cast<PHINode>(Op); PN && is_contained(AllowedPhis, PN))
+        if (auto *PN = dyn_cast<PHINode>(Op);
+            PN && is_contained(AllowedPhis, PN))
+          continue;
+        if (auto *Arg = dyn_cast<Argument>(Op);
+            Arg && AllowArgument && AllowArgument(*Arg))
           continue;
         return false;
       }
@@ -729,8 +742,7 @@ bool isPureClosedChain(ArrayRef<BasicBlock *> Blocks,
 /// (and will emit its own diagnostic if that fails too).
 std::optional<LoopShape> matchLoopShape(Function &F) {
   LoopShape Shape;
-  BasicBlock *H =
-      walkLinearChain(&F.getEntryBlock(), Shape.PrefixOrder);
+  BasicBlock *H = walkLinearChain(&F.getEntryBlock(), Shape.PrefixOrder);
   if (!H)
     return std::nullopt;
   auto *HeaderBr = dyn_cast<CondBrInst>(H->getTerminator());
@@ -788,14 +800,14 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
 
   for (LoopInduction &Ind : Shape.Inductions) {
     Value *Initial = Ind.HeaderPhi->getIncomingValueForBlock(
-        Shape.PrefixOrder.empty() ? &F.getEntryBlock() : Shape.PrefixOrder.back());
+        Shape.PrefixOrder.empty() ? &F.getEntryBlock()
+                                  : Shape.PrefixOrder.back());
     Ind.InitialValue = dyn_cast<Constant>(Initial);
     if (!Ind.InitialValue)
       return std::nullopt; // Only a compile-time-constant start is supported.
   }
 
-  BasicBlock *SuffixEnd =
-      walkLinearChain(Shape.ExitBlock, Shape.SuffixOrder);
+  BasicBlock *SuffixEnd = walkLinearChain(Shape.ExitBlock, Shape.SuffixOrder);
   if (!SuffixEnd || !isa<ReturnInst>(SuffixEnd->getTerminator()))
     return std::nullopt;
   Shape.SuffixOrder.push_back(SuffixEnd);
@@ -813,7 +825,123 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
   return Shape;
 }
 
-/// Outlines \p Chain (a linear chain of blocks belonging to \p WaveBody)
+/// One of `feme::cpu::WaveBodyEnv`'s (or `SIMDizePass`'s trailing
+/// resource/root-constant parameters') own parameters that is the *same*
+/// value for every wave of a group, not just every lane of one wave --
+/// group id, the resource/sampler heap, and root constants -- as opposed
+/// to a genuinely per-wave one (`wave_index`, `wave_entry_mask`,
+/// `wave_groupshared`, `barrier_spill`, any `loopvarN`). A `BranchShape`
+/// header condition referencing only these (see `matchBranchShape`) is
+/// what makes cloning it into the wrapper as ordinary, once-per-group
+/// scalar code (rather than once per wave) sound: a divergent branch a
+/// barrier could survive inside has already been turned into masked data
+/// flow by this point (`feme::cpu::LinearizePass`), so a *genuinely*
+/// per-wave-varying condition here would mean this function's own
+/// uniformity classification was wrong, not a shape this milestone should
+/// try to support.
+bool isUniformWaveBodyArgument(Argument &Arg) {
+  StringRef Name = Arg.getName();
+  return Name == "resource_heap" || Name == "resource_heap_count" ||
+         Name == "sampler_heap" || Name == "sampler_heap_count" ||
+         Name == "root_constants" || Name == "root_constant_size" ||
+         Name == "wave_group_id_x" || Name == "wave_group_id_y" ||
+         Name == "wave_group_id_z";
+}
+
+/// The shape "Barrier inside a surviving branch" (see the file comment
+/// above) supports: a uniform two-way branch -- \p Header's own condition
+/// references only constants and `isUniformWaveBodyArgument`-accepted
+/// parameters, verified pure/side-effect-free by `isPureClosedChain`, so
+/// it is safe to compute once, scalar, in the wrapper -- whose two arms
+/// are each a linear chain (\p TrueOrder/\p FalseOrder, empty for a plain
+/// `if` with no `else`) that reconverge at \p MergeBlock without a phi of
+/// its own (a value one arm computes differently from the other, needed
+/// after the branch, is not yet supported -- see `buildWrapperForBranch`),
+/// followed by a linear \p SuffixOrder to a `ret`. Every block of the
+/// function belongs to exactly one of \p PrefixOrder/\p Header/
+/// \p TrueOrder/\p FalseOrder/\p MergeBlock/\p SuffixOrder.
+struct BranchShape {
+  BasicBlock *Header;
+  SmallVector<BasicBlock *, 4> PrefixOrder;
+  SmallVector<BasicBlock *, 4> TrueOrder;
+  SmallVector<BasicBlock *, 4> FalseOrder;
+  BasicBlock *MergeBlock;
+  SmallVector<BasicBlock *, 4> SuffixOrder;
+};
+
+/// Walks from \p Start following only single-successor unconditional
+/// branches, appending every block visited to \p Order, stopping as soon
+/// as a block with more than one predecessor is reached (the arms'
+/// reconvergence point, per `BranchShape`'s doc comment) -- returned
+/// without being added to \p Order -- or returning nullptr (a shape this
+/// milestone doesn't support) if a cycle is found first or the chain ends
+/// in anything other than an unconditional branch before reconverging.
+BasicBlock *walkBranchArm(BasicBlock *Start,
+                          SmallVectorImpl<BasicBlock *> &Order) {
+  SmallPtrSet<BasicBlock *, 8> Visited;
+  BasicBlock *BB = Start;
+  while (true) {
+    if (BB->hasNPredecessorsOrMore(2))
+      return BB;
+    if (!Visited.insert(BB).second)
+      return nullptr;
+    auto *Br = dyn_cast<UncondBrInst>(BB->getTerminator());
+    if (!Br)
+      return nullptr;
+    Order.push_back(BB);
+    BB = Br->getSuccessor(0);
+  }
+}
+
+/// Recognizes \p F's shape as the uniform two-way branch `BranchShape`
+/// describes (see its doc comment), or `std::nullopt` if it is not --
+/// without emitting any diagnostic, exactly like `matchLoopShape`: an
+/// unrecognized shape here just means the existing straight-line
+/// `splitAtGroupSyncBarriers` path should be tried (and will emit its own
+/// diagnostic if that fails too).
+std::optional<BranchShape> matchBranchShape(Function &F) {
+  BranchShape Shape;
+  BasicBlock *H = walkLinearChain(&F.getEntryBlock(), Shape.PrefixOrder);
+  if (!H)
+    return std::nullopt;
+  auto *HeaderBr = dyn_cast<CondBrInst>(H->getTerminator());
+  if (!HeaderBr)
+    return std::nullopt;
+  Shape.Header = H;
+  if (!isPureClosedChain({H}, {}, isUniformWaveBodyArgument))
+    return std::nullopt;
+
+  BasicBlock *TrueMerge =
+      walkBranchArm(HeaderBr->getSuccessor(0), Shape.TrueOrder);
+  BasicBlock *FalseMerge =
+      walkBranchArm(HeaderBr->getSuccessor(1), Shape.FalseOrder);
+  if (!TrueMerge || !FalseMerge || TrueMerge != FalseMerge)
+    return std::nullopt;
+  Shape.MergeBlock = TrueMerge;
+
+  // A value one arm computes differently from the other, needed after the
+  // branch, would show up here as a phi -- not yet supported (see
+  // `BranchShape`'s doc comment).
+  if (!Shape.MergeBlock->phis().empty())
+    return std::nullopt;
+
+  BasicBlock *SuffixEnd = walkLinearChain(Shape.MergeBlock, Shape.SuffixOrder);
+  if (!SuffixEnd || !isa<ReturnInst>(SuffixEnd->getTerminator()))
+    return std::nullopt;
+  Shape.SuffixOrder.push_back(SuffixEnd);
+
+  // Every block of `F` must belong to exactly one region: otherwise some
+  // other block reaches this shape from elsewhere, which is not a shape
+  // this milestone supports (see `matchLoopShape`'s identical check).
+  size_t Covered = Shape.PrefixOrder.size() + 1 /* Header */ +
+                   Shape.TrueOrder.size() + Shape.FalseOrder.size() +
+                   Shape.SuffixOrder.size();
+  if (Covered != F.size())
+    return std::nullopt;
+
+  return Shape;
+}
+
 /// into its own new function named \p WaveBody's name + \p NameSuffix,
 /// splicing those blocks out of \p WaveBody and, unless \p EndsInRet
 /// (the chain's last block already ends with a `ret`), replacing the
@@ -822,17 +950,17 @@ std::optional<LoopShape> matchLoopShape(Function &F) {
 /// corresponding one (see `splitAtGroupSyncBarriers`'s identical rewrite).
 Function *outlineChain(Function &WaveBody, ArrayRef<BasicBlock *> Chain,
                        const Twine &NameSuffix, bool EndsInRet) {
-  Function *Fn = Function::Create(
-      WaveBody.getFunctionType(), GlobalValue::InternalLinkage,
-      WaveBody.getAddressSpace(), WaveBody.getName() + NameSuffix,
-      WaveBody.getParent());
+  Function *Fn =
+      Function::Create(WaveBody.getFunctionType(), GlobalValue::InternalLinkage,
+                       WaveBody.getAddressSpace(),
+                       WaveBody.getName() + NameSuffix, WaveBody.getParent());
   Fn->copyAttributesFrom(&WaveBody);
   Fn->setComdat(WaveBody.getComdat());
   for (auto [OldArg, NewArg] : llvm::zip(WaveBody.args(), Fn->args()))
     NewArg.setName(OldArg.getName());
 
   Fn->splice(Fn->begin(), &WaveBody, Chain.front()->getIterator(),
-            std::next(Chain.back()->getIterator()));
+             std::next(Chain.back()->getIterator()));
 
   if (!EndsInRet) {
     Instruction *Term = Fn->back().getTerminator();
@@ -939,8 +1067,8 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
           UI && is_contained(Shape.BodyOrder, UI->getParent()))
         UsesInBody.push_back(&U);
 
-    auto AppendResult = appendTrailingParam(
-        *WaveBody, Ind.HeaderPhi->getType(), "loopvar" + Twine(N));
+    auto AppendResult = appendTrailingParam(*WaveBody, Ind.HeaderPhi->getType(),
+                                            "loopvar" + Twine(N));
     WaveBody = AppendResult.first;
     Argument *NewArg = AppendResult.second;
     LoopVarArgNo.push_back(NewArg->getArgNo());
@@ -971,9 +1099,9 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     return nullptr;
 
   Function *PrefixFn = Shape.PrefixOrder.empty()
-                          ? nullptr
-                          : outlineChain(*WaveBody, Shape.PrefixOrder,
-                                        ".prefix", /*EndsInRet=*/false);
+                           ? nullptr
+                           : outlineChain(*WaveBody, Shape.PrefixOrder,
+                                          ".prefix", /*EndsInRet=*/false);
   SmallVector<RegionBoundary, 4> Boundaries;
   SmallVector<Function *, 4> BodyRegions = splitLoopBodyAtBarriers(
       *WaveBody, Shape.BodyOrder, Shape.Latch, Boundaries);
@@ -1008,7 +1136,7 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
   BasicBlock *Pred = EntryBB;
   if (PrefixFn)
     Pred = buildWaveLoop(*Wrapper, Pred, *PrefixFn, WEnv, WaveSize,
-                        GroupSizeTotal, WavesPerGroup, "", LoopScalars);
+                         GroupSizeTotal, WavesPerGroup, "", LoopScalars);
 
   BasicBlock *LoopHeaderBB = BasicBlock::Create(Ctx, "loop.header", Wrapper);
   BasicBlock *LoopBodyBB = BasicBlock::Create(Ctx, "loop.body.iter", Wrapper);
@@ -1043,19 +1171,19 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     ClonedCond = Clone;
   }
   auto *HeaderBr = cast<CondBrInst>(Shape.Header->getTerminator());
-  Value *Cond = ClonedCond ? static_cast<Value *>(ClonedCond)
-                          : static_cast<Value *>(
-                                HeaderMap[HeaderBr->getCondition()]);
+  Value *Cond = ClonedCond
+                    ? static_cast<Value *>(ClonedCond)
+                    : static_cast<Value *>(HeaderMap[HeaderBr->getCondition()]);
   bool BodyIsSucc0 = HeaderBr->getSuccessor(0) != Shape.ExitBlock;
   LoopHeader.CreateCondBr(Cond, BodyIsSucc0 ? LoopBodyBB : LoopExitBB,
-                         BodyIsSucc0 ? LoopExitBB : LoopBodyBB);
+                          BodyIsSucc0 ? LoopExitBB : LoopBodyBB);
 
   BasicBlock *BodyPred = LoopBodyBB;
   for (unsigned R = 0, E = BodyRegions.size(); R != E; ++R) {
     Twine Suffix = Twine(".body") + Twine(R);
     BasicBlock *ExitBB =
         buildWaveLoop(*Wrapper, BodyPred, *BodyRegions[R], WEnv, WaveSize,
-                    GroupSizeTotal, WavesPerGroup, Suffix, LoopScalars);
+                      GroupSizeTotal, WavesPerGroup, Suffix, LoopScalars);
     if (R + 1 != E) {
       IRBuilder<> ExitBuilder(ExitBB);
       ExitBuilder.CreateFence(AtomicOrdering::AcquireRelease,
@@ -1088,12 +1216,280 @@ Function *buildWrapperForLoop(Function &WaveBodyIn, LoopShape Shape,
     NewPhi->addIncoming(NextVal, LoopLatchBB);
   }
 
-  BasicBlock *FinalBB = buildWaveLoop(*Wrapper, LoopExitBB, *SuffixFn, WEnv,
-                                     WaveSize, GroupSizeTotal, WavesPerGroup,
-                                     "", LoopScalars);
+  BasicBlock *FinalBB =
+      buildWaveLoop(*Wrapper, LoopExitBB, *SuffixFn, WEnv, WaveSize,
+                    GroupSizeTotal, WavesPerGroup, "", LoopScalars);
   IRBuilder<>(FinalBB).CreateRetVoid();
 
   for (Function *Region : BodyRegions)
+    Region->setLinkage(GlobalValue::InternalLinkage);
+  if (PrefixFn)
+    PrefixFn->setLinkage(GlobalValue::InternalLinkage);
+  SuffixFn->setLinkage(GlobalValue::InternalLinkage);
+
+  if (GSLayout.TotalSize != 0)
+    for (auto &[GVConst, Offset] : GSLayout.Offsets) {
+      auto *GV = const_cast<GlobalVariable *>(GVConst);
+      if (GV->use_empty())
+        GV->eraseFromParent();
+    }
+
+  WaveBody->eraseFromParent();
+  return Wrapper;
+}
+
+/// Splits one arm (\p ArmOrder, possibly empty) of a `BranchShape` at each
+/// `..._with_group_sync` barrier within it -- exactly like
+/// `splitLoopBodyAtBarriers` does for a loop body, and reusing
+/// `spillValuesLiveAcrossBarriers` for any value live across one of those
+/// barriers *within this arm* -- outlining every resulting chunk into its
+/// own new function suffixed \p NameSuffix + `N`. \p WaveBody is
+/// reassigned if spilling recreated it (see `spillValuesLiveAcrossBarriers`);
+/// returns an empty vector, having changed neither \p WaveBody nor
+/// \p Boundaries, if \p ArmOrder is empty (no arm to run at all -- a plain
+/// `if` with no `else`). Returns `std::nullopt` (having emitted a
+/// diagnostic) if spilling failed, or if a value needed spilling at all:
+/// `buildWrapperForBranch` allocates no spill buffer for a branch shape
+/// today (each arm would need its own, which `buildWaveLoop`'s
+/// argument-name dispatch cannot yet tell apart), so this is a deliberate
+/// narrowing rather than a silent null-buffer miscompile.
+std::optional<SmallVector<Function *, 4>>
+splitArmAtBarriers(Function *&WaveBody, ArrayRef<BasicBlock *> ArmOrder,
+                   BasicBlock *MergeBlock, const Twine &NameSuffix,
+                   SmallVectorImpl<RegionBoundary> &Boundaries) {
+  if (ArmOrder.empty())
+    return SmallVector<Function *, 4>();
+
+  SmallVector<CallInst *, 4> Barriers;
+  SmallVector<BarrierMemoryScope, 4> Scopes;
+  DenseMap<Instruction *, unsigned> IndexOf;
+  unsigned Idx = 0;
+  for (BasicBlock *BB : ArmOrder)
+    for (Instruction &I : *BB) {
+      IndexOf[&I] = Idx++;
+      if (auto *CI = dyn_cast<CallInst>(&I))
+        if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+            Matched && Matched->GroupSync) {
+          Barriers.push_back(CI);
+          Scopes.push_back(Matched->MemoryScope);
+        }
+    }
+
+  StructType *SpillTy = nullptr;
+  if (!spillValuesLiveAcrossBarriers(WaveBody, ArmOrder, Barriers, IndexOf,
+                                     SpillTy))
+    return std::nullopt;
+  if (SpillTy) {
+    // `buildWrapperForBranch` never allocates a spill buffer for a branch
+    // shape (each arm would need its own -- `buildWaveLoop`'s simple
+    // argument-name dispatch has no way to tell one arm's `barrier_spill`
+    // parameter from the other's, since both would need the same name to
+    // match `spillValuesLiveAcrossBarriers`'s own convention), so a value
+    // live across a barrier *within* a branch arm is diagnosed rather than
+    // silently passed a null spill buffer.
+    WaveBody->getContext().emitError(
+        "feme-cpu-wrap-entry: function '" + WaveBody->getName() +
+        "' has a value live across a group-sync barrier inside a branch "
+        "arm; only a barrier inside a straight-line wave body or a "
+        "uniform loop supports spilling for now (roadmap step R24 "
+        "deviation)");
+    return std::nullopt;
+  }
+
+  SmallPtrSet<BasicBlock *, 4> BoundaryBlocks;
+  for (CallInst *Barrier : Barriers) {
+    BasicBlock *After = SplitBlock(Barrier->getParent(), Barrier,
+                                   static_cast<DominatorTree *>(nullptr));
+    BoundaryBlocks.insert(After);
+    Barrier->eraseFromParent();
+  }
+  for (BarrierMemoryScope Scope : Scopes)
+    Boundaries.push_back({Scope});
+
+  // The arm's chain may now be longer thanks to `SplitBlock`; rebuild it
+  // from its own first block, stopping once a block's successor is the
+  // (unchanged, since only a barrier's own source block was split) arm's
+  // final target: `MergeBlock` (see `splitLoopBodyAtBarriers`'s identical
+  // technique, stopping at `Latch` there instead).
+  SmallVector<BasicBlock *, 8> PostSplitOrder;
+  BasicBlock *Cur = ArmOrder.front();
+  while (true) {
+    PostSplitOrder.push_back(Cur);
+    auto *Br = cast<UncondBrInst>(Cur->getTerminator());
+    if (Br->getSuccessor(0) == MergeBlock)
+      break;
+    Cur = Br->getSuccessor(0);
+  }
+
+  SmallVector<SmallVector<BasicBlock *, 8>, 4> RegionBlocks(1);
+  for (BasicBlock *BB : PostSplitOrder) {
+    if (BoundaryBlocks.contains(BB))
+      RegionBlocks.emplace_back();
+    RegionBlocks.back().push_back(BB);
+  }
+
+  SmallVector<Function *, 4> Regions;
+  for (unsigned R = 0, E = RegionBlocks.size(); R != E; ++R)
+    Regions.push_back(outlineChain(*WaveBody, RegionBlocks[R],
+                                   NameSuffix + Twine(R), /*EndsInRet=*/false));
+  return Regions;
+}
+
+/// Builds the exported `feme_cpu_entry_<name>` wrapper for a wave body
+/// matching `BranchShape` -- "Barrier inside a surviving branch" in the
+/// file comment above. \p WaveBody's header condition (verified pure and
+/// referencing only uniform parameters by `matchBranchShape`) is cloned
+/// directly into the wrapper as an ordinary scalar `br`, run once for the
+/// whole group rather than once per wave; each arm's barrier-split
+/// regions (`splitArmAtBarriers`) run through the usual per-wave
+/// `buildWaveLoop`, with the wrapper's own real control flow choosing
+/// which arm's wave loops run at all. Returns nullptr (having emitted a
+/// diagnostic) if either arm's cross-barrier liveness is not one this
+/// milestone's spilling supports.
+Function *buildWrapperForBranch(Function &WaveBodyIn, BranchShape Shape,
+                                unsigned WaveSize, uint32_t GroupSizeTotal,
+                                uint32_t WavesPerGroup) {
+  Function *WaveBody = &WaveBodyIn;
+  Module &M = *WaveBody->getParent();
+  LLVMContext &Ctx = M.getContext();
+
+  Function *PrefixFn = Shape.PrefixOrder.empty()
+                           ? nullptr
+                           : outlineChain(*WaveBody, Shape.PrefixOrder,
+                                          ".prefix", /*EndsInRet=*/false);
+
+  SmallVector<RegionBoundary, 4> TrueBoundaries, FalseBoundaries;
+  std::optional<SmallVector<Function *, 4>> TrueRegions =
+      splitArmAtBarriers(WaveBody, Shape.TrueOrder, Shape.MergeBlock,
+                         ".true.body", TrueBoundaries);
+  if (!TrueRegions)
+    return nullptr;
+  std::optional<SmallVector<Function *, 4>> FalseRegions =
+      splitArmAtBarriers(WaveBody, Shape.FalseOrder, Shape.MergeBlock,
+                         ".false.body", FalseBoundaries);
+  if (!FalseRegions)
+    return nullptr;
+
+  Function *SuffixFn = outlineChain(*WaveBody, Shape.SuffixOrder, ".suffix",
+                                    /*EndsInRet=*/true);
+
+  // `WaveBody` now contains only the (dead) header; clone its instructions
+  // directly into the wrapper below, then discard it.
+  GroupSharedLayout GSLayout = computeGroupSharedLayout(M);
+  StructType *ArgsTy = getDispatchArgsType(Ctx);
+  Type *PtrTy = PointerType::get(Ctx, 0);
+  std::string WrapperName = getEntrySymbolName(WaveBody->getName());
+  FunctionType *WrapperTy =
+      FunctionType::get(Type::getVoidTy(Ctx), {PtrTy}, false);
+  Function *Wrapper =
+      Function::Create(WrapperTy, GlobalValue::ExternalLinkage, WrapperName, M);
+  Argument *Args = Wrapper->getArg(0);
+  Args->setName("args");
+
+  BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
+  IRBuilder<> Entry(EntryBB);
+  WrapperEnv WEnv = buildWrapperEnv(Entry, ArgsTy, Args, GSLayout,
+                                    /*SpillTy=*/nullptr, WavesPerGroup);
+
+  BasicBlock *Pred = EntryBB;
+  if (PrefixFn)
+    Pred = buildWaveLoop(*Wrapper, Pred, *PrefixFn, WEnv, WaveSize,
+                         GroupSizeTotal, WavesPerGroup, "");
+
+  // Clone the header's own condition computation directly into the
+  // wrapper: `matchBranchShape` verified it references only constants and
+  // this wave body's own uniform parameters, mapped below to `WEnv` the
+  // same way every region function's call site is (see `buildWaveLoop`),
+  // so it is safe to run once, scalar, for the whole group.
+  ValueToValueMapTy HeaderMap;
+  for (Argument &Arg : WaveBody->args()) {
+    StringRef Name = Arg.getName();
+    Value *EnvVal = nullptr;
+    if (Name == "resource_heap")
+      EnvVal = WEnv.ResourceHeap;
+    else if (Name == "resource_heap_count")
+      EnvVal = WEnv.ResourceHeapCount;
+    else if (Name == "sampler_heap")
+      EnvVal = WEnv.SamplerHeap;
+    else if (Name == "sampler_heap_count")
+      EnvVal = WEnv.SamplerHeapCount;
+    else if (Name == "root_constants")
+      EnvVal = WEnv.RootConstants;
+    else if (Name == "root_constant_size")
+      EnvVal = WEnv.RootConstantSize;
+    else if (Name == "wave_group_id_x")
+      EnvVal = WEnv.GroupIDX;
+    else if (Name == "wave_group_id_y")
+      EnvVal = WEnv.GroupIDY;
+    else if (Name == "wave_group_id_z")
+      EnvVal = WEnv.GroupIDZ;
+    if (EnvVal)
+      HeaderMap[&Arg] = EnvVal;
+  }
+
+  BasicBlock *CondBB = BasicBlock::Create(Ctx, "branch.cond", Wrapper);
+  IRBuilder<>(Pred).CreateBr(CondBB);
+  IRBuilder<> CondBuilder(CondBB);
+  Instruction *ClonedCond = nullptr;
+  for (Instruction &I : *Shape.Header) {
+    if (I.isTerminator())
+      continue;
+    Instruction *Clone = I.clone();
+    RemapInstruction(Clone, HeaderMap, RF_IgnoreMissingLocals);
+    CondBuilder.Insert(Clone);
+    HeaderMap[&I] = Clone;
+    ClonedCond = Clone;
+  }
+  auto *HeaderBr = cast<CondBrInst>(Shape.Header->getTerminator());
+  Value *RawCond = HeaderBr->getCondition();
+  Value *Cond = ClonedCond ? ClonedCond
+                           : (isa<Constant>(RawCond)
+                                  ? RawCond
+                                  : static_cast<Value *>(HeaderMap[RawCond]));
+
+  BasicBlock *TrueEntryBB = BasicBlock::Create(Ctx, "branch.true", Wrapper);
+  BasicBlock *FalseEntryBB = BasicBlock::Create(Ctx, "branch.false", Wrapper);
+  BasicBlock *MergeBB = BasicBlock::Create(Ctx, "branch.merge", Wrapper);
+  CondBuilder.CreateCondBr(Cond, TrueEntryBB, FalseEntryBB);
+
+  BasicBlock *TrueExit = TrueEntryBB;
+  for (unsigned R = 0, E = TrueRegions->size(); R != E; ++R) {
+    Twine Suffix = Twine(".true.body") + Twine(R);
+    BasicBlock *ExitBB =
+        buildWaveLoop(*Wrapper, TrueExit, *(*TrueRegions)[R], WEnv, WaveSize,
+                      GroupSizeTotal, WavesPerGroup, Suffix);
+    if (R + 1 != E) {
+      IRBuilder<> ExitBuilder(ExitBB);
+      ExitBuilder.CreateFence(AtomicOrdering::AcquireRelease,
+                              syncScopeFor(TrueBoundaries[R].MemoryScope));
+    }
+    TrueExit = ExitBB;
+  }
+  IRBuilder<>(TrueExit).CreateBr(MergeBB);
+
+  BasicBlock *FalseExit = FalseEntryBB;
+  for (unsigned R = 0, E = FalseRegions->size(); R != E; ++R) {
+    Twine Suffix = Twine(".false.body") + Twine(R);
+    BasicBlock *ExitBB =
+        buildWaveLoop(*Wrapper, FalseExit, *(*FalseRegions)[R], WEnv, WaveSize,
+                      GroupSizeTotal, WavesPerGroup, Suffix);
+    if (R + 1 != E) {
+      IRBuilder<> ExitBuilder(ExitBB);
+      ExitBuilder.CreateFence(AtomicOrdering::AcquireRelease,
+                              syncScopeFor(FalseBoundaries[R].MemoryScope));
+    }
+    FalseExit = ExitBB;
+  }
+  IRBuilder<>(FalseExit).CreateBr(MergeBB);
+
+  BasicBlock *FinalBB =
+      buildWaveLoop(*Wrapper, MergeBB, *SuffixFn, WEnv, WaveSize,
+                    GroupSizeTotal, WavesPerGroup, "");
+  IRBuilder<>(FinalBB).CreateRetVoid();
+
+  for (Function *Region : *TrueRegions)
+    Region->setLinkage(GlobalValue::InternalLinkage);
+  for (Function *Region : *FalseRegions)
     Region->setLinkage(GlobalValue::InternalLinkage);
   if (PrefixFn)
     PrefixFn->setLinkage(GlobalValue::InternalLinkage);
@@ -1135,17 +1531,21 @@ Function *buildWrapper(Function &WaveBodyIn) {
   SmallVector<RegionBoundary, 4> Boundaries;
   SmallVector<Function *, 4> Regions;
   StructType *SpillTy = nullptr;
-  bool HasGroupSyncBarrier = any_of(instructions(*WaveBody), [](Instruction &I) {
-    auto *CI = dyn_cast<CallInst>(&I);
-    if (!CI)
-      return false;
-    std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
-    return Matched && Matched->GroupSync;
-  });
+  bool HasGroupSyncBarrier =
+      any_of(instructions(*WaveBody), [](Instruction &I) {
+        auto *CI = dyn_cast<CallInst>(&I);
+        if (!CI)
+          return false;
+        std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI);
+        return Matched && Matched->GroupSync;
+      });
   if (HasGroupSyncBarrier) {
     if (std::optional<LoopShape> Shape = matchLoopShape(*WaveBody))
       return buildWrapperForLoop(*WaveBody, *Shape, WaveSize, GroupSizeTotal,
-                                WavesPerGroup);
+                                 WavesPerGroup);
+    if (std::optional<BranchShape> Shape = matchBranchShape(*WaveBody))
+      return buildWrapperForBranch(*WaveBody, *Shape, WaveSize, GroupSizeTotal,
+                                   WavesPerGroup);
     std::optional<SmallVector<Function *, 4>> Split =
         splitAtGroupSyncBarriers(WaveBody, Boundaries, SpillTy);
     if (!Split)

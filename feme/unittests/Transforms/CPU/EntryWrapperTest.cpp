@@ -207,9 +207,13 @@ TEST(EntryWrapperTest, MemoryOnlyBarrierBecomesFenceWithoutSplitting) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
-// Roadmap milestone 9's narrowing: a barrier inside a surviving (uniform)
-// branch is diagnosed rather than mis-split.
-TEST(EntryWrapperTest, NonLinearControlFlowWithBarrierIsDiagnosed) {
+// Roadmap step R24 (feme/docs/Roadmap.md): a `..._with_group_sync` barrier
+// inside a uniform (group-id-derived) surviving branch is split rather
+// than diagnosed -- see "Barrier inside a surviving branch" in
+// EntryWrapper.cpp's file comment. The branch's own uniform condition is
+// cloned into the wrapper as an ordinary scalar `br`; only the arm with a
+// barrier (`a`) is split into regions, the other (`b`) keeps one.
+TEST(EntryWrapperTest, SplitsBarrierInsideUniformBranch) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() #0 {
@@ -223,6 +227,60 @@ TEST(EntryWrapperTest, NonLinearControlFlowWithBarrierIsDiagnosed) {
     b:
       br label %exit
     exit:
+      ret void
+    }
+    declare i32 @llvm.dx.group.id(i32)
+    declare void @llvm.dx.group.memory.barrier.with.group.sync()
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  EntryWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_main");
+  ASSERT_TRUE(Wrapper);
+  EXPECT_TRUE(M->getFunction("main.true.body0"));
+  EXPECT_TRUE(M->getFunction("main.true.body1"));
+  EXPECT_TRUE(M->getFunction("main.false.body0"));
+
+  bool FoundCondBr = false, FoundFence = false;
+  for (BasicBlock &BB : *Wrapper) {
+    if (BB.getName() == "branch.cond")
+      if (isa<CondBrInst>(BB.getTerminator()))
+        FoundCondBr = true;
+    for (Instruction &I : BB)
+      if (isa<FenceInst>(&I))
+        FoundFence = true;
+  }
+  EXPECT_TRUE(FoundCondBr);
+  EXPECT_TRUE(FoundFence);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
+// Roadmap step R24's remaining narrowing: a merge block with a phi (a
+// value one arm of the branch computes differently from the other) is
+// still diagnosed -- threading it would mean spilling across the
+// wrapper's own scalar branch choice, which this milestone's spilling
+// does not support.
+TEST(EntryWrapperTest, BranchMergePhiIsDiagnosed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %gid = call i32 @llvm.dx.group.id(i32 0)
+      %cond = icmp eq i32 %gid, 0
+      br i1 %cond, label %a, label %b
+    a:
+      call void @llvm.dx.group.memory.barrier.with.group.sync()
+      br label %exit
+    b:
+      br label %exit
+    exit:
+      %val = phi i32 [ 1, %a ], [ 2, %b ]
+      %doubled = mul i32 %val, 2
       ret void
     }
     declare i32 @llvm.dx.group.id(i32)

@@ -643,34 +643,49 @@ it's discussed, and summarized here:
 Deviation: milestone 9's implementation narrowed several things described in
 "Phase 6: Group Execution and Barriers" below; each is called out inline
 where it's discussed, and summarized here (roadmap step R5,
-feme/docs/Roadmap.md, closed the first two):
+feme/docs/Roadmap.md, closed the first two; step R24 closed the rest of
+the first two's own remaining narrowings):
 
-- **Region splitting supports a straight-line wave body or a single
-  uniform loop.** A `..._with_group_sync` barrier inside the design's own
-  worked example -- a uniform loop, keeping the iteration outside the
-  region/wave loops -- is recognized by `feme::cpu::matchLoopShape` and
-  split by `feme::cpu::buildWrapperForLoop`: the loop's header/latch (a
-  pure, side-effect-free scalar recurrence -- e.g. a stride-halving
-  reduction's own induction variable) are cloned directly into the wrapper
-  as an ordinary scalar loop, run once per iteration rather than once per
-  wave. A barrier inside a *branch* (as opposed to a loop) is still
-  diagnosed (`feme::cpu::isLinearChain`/`matchLoopShape` both decline it)
-  rather than split -- every branch a divergent-control-flow barrier could
+- **Region splitting supports a straight-line wave body, a single uniform
+  loop, or a single uniform branch.** A `..._with_group_sync` barrier
+  inside the design's own worked example -- a uniform loop, keeping the
+  iteration outside the region/wave loops -- is recognized by
+  `feme::cpu::matchLoopShape` and split by
+  `feme::cpu::buildWrapperForLoop`: the loop's header/latch (a pure,
+  side-effect-free scalar recurrence -- e.g. a stride-halving reduction's
+  own induction variable) are cloned directly into the wrapper as an
+  ordinary scalar loop, run once per iteration rather than once per wave.
+  A barrier inside a uniform two-way *branch* (as opposed to a loop) is
+  recognized by `feme::cpu::matchBranchShape` and split by
+  `feme::cpu::buildWrapperForBranch` the same way: the branch's own
+  condition (pure, referencing only uniform parameters) is cloned into the
+  wrapper as an ordinary scalar `br`, run once for the whole group, and
+  each arm's barrier-split regions run through the usual per-wave
+  `buildWaveLoop` -- every branch a divergent-control-flow barrier could
   have introduced is already gone by this point
-  (`feme::cpu::LinearizePass`), so this narrowing only bites a barrier
-  that survives inside genuinely uniform (e.g. group-id-derived) branchy
-  control flow, not a loop.
-- **Values live across a `..._with_group_sync` barrier are spilled.** Any
-  SSA value defined in one barrier-split region and used by a later one is
-  spilled into a per-wave context array
-  (`feme::cpu::spillValuesLiveAcrossBarriers`) -- `[WavesPerGroup x
-  SpillTy]`, allocated by the wrapper alongside groupshared memory and
-  indexed by the wave loop's `w` -- exactly the design's own "context"
-  allocation. A loop-carried value other than the loop's own (uniform)
-  induction variable -- one that would need spilling *across the loop's
-  own backedge*, not just across a barrier within one iteration -- remains
-  unsupported (`feme::cpu::LoopShape` requires every header phi's
-  recurrence to be a pure, uniform computation).
+  (`feme::cpu::LinearizePass`), so this shape only needs to handle a
+  barrier that survives inside genuinely uniform (e.g. group-id-derived)
+  branchy control flow. Two things about a branch remain out of scope: a
+  merge block with a phi (a value one arm computes differently from the
+  other) and a value live across a barrier *within* one arm (each arm is
+  barrier-split independently, and `feme::cpu::EntryWrapperPass` allocates
+  only one `barrier_spill` buffer per wrapper, which two independently
+  split arms cannot safely share) -- both are diagnosed rather than
+  mis-compiled.
+- **Values live across a `..._with_group_sync` barrier, including a
+  `phi`, are spilled.** Any SSA value -- a `phi` included -- defined in
+  one barrier-split region and used by a later one is spilled into a
+  per-wave context array (`feme::cpu::spillValuesLiveAcrossBarriers`) --
+  `[WavesPerGroup x SpillTy]`, allocated by the wrapper alongside
+  groupshared memory and indexed by the wave loop's `w` -- exactly the
+  design's own "context" allocation. A spilled `phi`'s store goes after
+  its own block's last phi rather than immediately after itself, since
+  every phi in a block must stay grouped at its top. A loop-carried value
+  other than the loop's own (uniform) induction variable -- one that would
+  need spilling *across the loop's own backedge*, not just across a
+  barrier within one iteration -- remains unsupported (`feme::cpu::LoopShape`
+  requires every header phi's recurrence to be a pure, uniform
+  computation).
 - **Only a uniform, unconditionally-executed groupshared access is
   canonicalized -- closed by roadmap step R23.** Three shapes used to
   scalarize into one `getelementptr`/broadcast clone per lane before
