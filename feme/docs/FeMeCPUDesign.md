@@ -1788,23 +1788,38 @@ of both settings is testable.
 A bindless shader still has to learn its heap indices from somewhere, and
 in practice that is root constants. The CPU ABI therefore carries a small
 opaque byte block in the dispatch arguments, and exactly one register-bound
-constant buffer — by default `(b0, space0)`, overridable with
-`--cpu-root-constants=bN,spaceM` — is lowered to loads from it instead of
-being rejected. Everything else must come from the heap.
+constant buffer — whichever single binding the shader itself declares, by
+default `(b0, space0)` — is lowered to loads from it instead of being
+rejected. Everything else must come from the heap.
 
-Deviation (roadmap step R12): `feme::cpu::RootConstantLoweringPass`
-implements exactly the default `(b0, space0)` binding above, and only for
-a DXIL-sourced module (SPIR-V's `PushConstant`-storage-class equivalent is
+Deviation (roadmap steps R12, then R25): `feme::cpu::RootConstantLoweringPass`
+recognizes any single `(space, register)` binding now (R25 lifted R12's
+original restriction to exactly `(b0, space0)`), and only for a
+DXIL-sourced module (SPIR-V's `PushConstant`-storage-class equivalent is
 not yet recognized -- see "Non-Goals"/the SPIR-V conversion coverage notes
-for the analogous, still-open gap on that side); the
-`--cpu-root-constants=bN,spaceM` CLI override is not yet wired up (there is
-only one binding to key off, so nothing exercises it yet). Only a
-non-array binding whose every access is a DXIL `cbufferrow.4` load (32-bit
-components, the shape a plain `float`/`uint`/`int`-typed `cbuffer` member
-produces) with a *constant* row index is accepted; `cbufferrow.2`/`.8`
-(64-/16-bit components) and a dynamically-indexed row are left for
-`feme::cpu::checkSupportedRaisedOps` to reject, same as before this pass
-existed. Getting there needed a real, previously-missing raiser
+for the analogous, still-open gap on that side). An array binding
+(`register(bN[K])`) is accepted too, with either a constant or dynamic
+array index; an *unbounded* range (`register(bN[])`) is not, since it has
+no fixed advertised size to bounds-check reads against. A DXIL
+`cbufferrow.4` load (32-bit components, the shape a plain
+`float`/`uint`/`int`-typed `cbuffer` member produces) is accepted with
+either a constant or dynamic row index (R25 lifted R12's constant-row-only
+restriction); `cbufferrow.2`/`.8` (64-/16-bit components) are left for
+`feme::cpu::checkSupportedRaisedOps` to reject, same as before either pass
+existed. The root-constant span a shader requires is now always the
+binding's *full advertised size* (its declared per-element byte size times
+its array length), not merely the rows a function's own loads happen to
+touch statically -- required the moment a row or array index can be
+dynamic, since there is then no longer a fixed set of rows to inspect
+ahead of time. A function with two or more distinct bindings remains
+ambiguous (there is still only one root-constant block) and is left
+entirely alone, for `checkSupportedRaisedOps` to reject as ordinary
+register-bound resources this target has no other way to address.
+`ResourceInfo`/`StageArtifactInfo` (bumping `ArtifactAbiVersion` to 4)
+report which binding a given `RootConstantSize` belongs to, via new
+`RootConstantSpace`/`RootConstantRegister` fields, so a host can place its
+data correctly no matter which binding a shader chose. Getting to R12 in
+the first place needed a real, previously-missing raiser
 (`feme::dxil::OpRaisingPass::raiseCBufferLoadLegacy`): `dx.op.
 cbufferLoadLegacy` was not raised into any canonical intrinsic at all
 before R12 (see `feme::dxil::OpRaisingPass`'s file comment). A shader that
@@ -1815,12 +1830,20 @@ every function it touches (`feme::cpu::RootConstantLoweringPass` adding
 its own pair would collide by name with `feme::cpu::EntryWrapperPass`'s
 by-name argument wiring); see RootConstantLowering.h's file comment for
 the exact split. Out-of-range reads (including a null, empty root-constant
-block) are guarded by a real, uniform branch around the load itself, not a
-`select` after an unconditional one — the bounds check depends only on the
-dispatch-wide `RootConstantSize`, never on per-lane data, so introducing
-this narrow, always-uniform control flow this early in the pipeline
-(before `feme::cpu::LinearizePass`/`SIMDizePass` run) needs no divergence
-handling of its own.
+block, an out-of-range array index, or an out-of-range row) are guarded by
+a real, uniform branch around the load itself, not a `select` after an
+unconditional one — the bounds check depends only on the dispatch-wide
+`RootConstantSize` and this access's own operands, never on per-lane data,
+so introducing this narrow, always-uniform control flow this early in the
+pipeline (before `feme::cpu::LinearizePass`/`SIMDizePass` run) needs no
+divergence handling of its own.
+
+The `--cpu-root-constants=bN,spaceM` CLI override the original design
+sketched is still not implemented, and is no longer needed for the reason
+it was proposed: R25 already recognizes whichever single binding a shader
+declares, rather than requiring the host to point at one out of several.
+An override would only matter once more than one binding must be
+disambiguated, which remains future work (see "Limitations" below).
 
 The block is untyped bytes on the ABI side. Accesses into it keep the
 layout the source model already fixed (HLSL `cbuffer` packing rules for
@@ -1841,7 +1864,7 @@ two APIs FeMe imports from:
 
 | Capability | D3D12 | Vulkan | FeMe CPU v1 |
 |---|---|---|---|
-| Inline constants | Root constants, any number of `bN` entries, sharing a 64-DWORD root signature budget | One push constant block per pipeline, ≥128 bytes guaranteed | One block, `(b0, space0)` by default |
+| Inline constants | Root constants, any number of `bN` entries, sharing a 64-DWORD root signature budget | One push constant block per pipeline, ≥128 bytes guaranteed | One block, whichever single binding the shader declares |
 | Per-stage constants | Per-stage visibility flags on each entry | Per-stage ranges within the one block | Compute only, so one block |
 | Root descriptors (a CBV/SRV/UAV bound as a raw address) | Yes | Buffer device address, inline uniform blocks | None — everything else is a heap descriptor |
 | Descriptor tables / sets | Yes | Yes | Finite ranges, emulated in the dynamic heap |
@@ -1850,15 +1873,16 @@ two APIs FeMe imports from:
 
 Two directions of divergence matter:
 
-- **FeMe is more restrictive** in that only the designated binding is
-  supplied through the inline root-constant block. Another constant buffer
-  (`b1`, or `b0` in another space) is an ordinary bound resource and is
-  emulated through the dynamic descriptor heap, provided constant-buffer
-  resource lowering supports its access form; the host cannot promote
-  several arbitrary bindings into separate inline blocks. Shaders that keep
-  all their heap indices in one root-constant struct — the common bindless
-  style, and the one both APIs' documentation recommends — avoid the extra
-  descriptor access.
+- **FeMe is more restrictive** in that only one binding is supplied through
+  the inline root-constant block. A second, distinct constant buffer
+  (`b1`, or `b0` in another space) remains an unsupported register-bound
+  resource today (constant-buffer resource lowering through the dynamic
+  descriptor heap does not exist yet -- see "Resource Model"); the host
+  cannot promote several arbitrary bindings into separate inline blocks.
+  Shaders that keep all their heap indices in one root-constant struct —
+  the common bindless style, and the one both APIs' documentation
+  recommends — avoid this restriction entirely, since R25 no longer cares
+  which single binding that struct happens to use.
 - **FeMe is more permissive** about size, because there is no register file
   to spend: the block is ordinary memory, and dynamically indexing it is
   fine. A shader that relies on that will not port back to either GPU API,
