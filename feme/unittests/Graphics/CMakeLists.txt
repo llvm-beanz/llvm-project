@@ -8,6 +8,7 @@ add_feme_unittest(FeMeGraphicsTests
   ImageFixtureTest.cpp
   PipelineTest.cpp
   PreparedDrawTest.cpp
+  SceneTest.cpp
   )
 target_link_libraries(FeMeGraphicsTests
   PRIVATE

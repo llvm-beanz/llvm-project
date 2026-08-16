@@ -92,6 +92,8 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
   }
 }
 
+} // namespace
+
 /// Parses a fixture's `format` field, the hyphen-separated spelling
 /// feme/docs/Design.md's own example uses (`r8g8b8a8-unorm`) -- distinct
 /// from feme-run's underscore-separated heap YAML spelling, since each is
@@ -131,6 +133,15 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
                              Format.str().c_str());
   return Result;
 }
+
+Expected<uint32_t> getFixtureFormatElementSize(ResourceFormat Format) {
+  Expected<FormatInfo> Info = getFormatInfo(Format);
+  if (!Info)
+    return Info.takeError();
+  return Info->Components * Info->ComponentBytes;
+}
+
+namespace {
 
 StringRef formatFixtureName(ResourceFormat Format) {
   switch (Format) {
