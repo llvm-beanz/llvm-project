@@ -15050,3 +15050,141 @@ middle-end phases" sections recording what's implemented, what's verified
 needing no change (`SIMDizePass`), and every deviation (loop-shape scope,
 `--reference`'s missing side-effect suppression, validation's un-implemented
 checklist items, `CompiledStage` deferred to R28).
+
+# Agent thoughts: roadmap step R28 (vertex/fragment wrappers, stage ABI, and quad lowering)
+
+## Scoping the real work
+
+R28 looked like three separable asks on paper -- a stage ABI, derivative/quad
+lowering, and stage-specific wrappers -- but reading the existing code closely
+showed one hidden dependency: the shared middle end still assumed a
+compute-style single entry mask and had no notion of a stage output as a masked
+side effect. That meant the implementation had to start one phase earlier than
+I expected, with small extensions to `WaveUniformity`, `LinearizePass`, and
+`SIMDizePass`, or the vertex/fragment wrappers would never see correct IR to
+lower.
+
+The good news is that this was still the design's "localized extension" path,
+not a reason to redraw the shared-middle-end boundary. `PreparePass`, resource
+lowering, root-constant lowering, and the overall pass order remained shared and
+unchanged; the only shared-phase changes were exactly the ones a graphics stage
+needed: stage-IO results classified as per-lane, `feme.stage.output.store`
+threaded through the same masking model ordinary stores already used, and a
+second entry mask (`wave_sideeffect_mask`) so fragment helper lanes can stay
+live while writes are suppressed.
+
+## The ABI shape I settled on
+
+The design text calls the runtime structs "shape sketches, not final field
+layouts", so I treated `RuntimeABI.h` the same way `FemeDispatchArgs` had been
+handled earlier: plain C-compatible structs, explicit fixed-width integer
+fields, and reserved headroom arrays rather than clever nested C++ wrappers.
+The important choice was making `FemeStageLayout` dense by `ElementID` and
+teaching each `FemeStageElement` to carry explicit `DataOffset`,
+`InvocationStride`, `ComponentStride`, and `RowStride` fields. That gave the
+compiled wrapper a direct address calculation it can JIT into ordinary IR,
+without inventing a second reflection lookup table or hard-coding any API-side
+vertex format numbering into the ABI.
+
+I deliberately kept user varyings in structure-of-arrays byte storage and kept
+system values in the invocation records. The wrapper still consults the attached
+`EntrySignature` at compile time to decide which is which, so this does *not*
+make the runtime ABI signature-unaware; it just means the synthetic test/runtime
+path for R28 does not have to redundantly materialize `VertexID`,
+`SV_Position`, `IsFrontFace`, and friends into the stage-storage byte blocks
+before calling JIT code.
+
+## The middle-end extensions that turned out to be necessary
+
+Two places mattered more than anything else.
+
+1. **`LinearizePass` had to learn about stage outputs.** Before this row,
+   `feme.stage.output.store` would have stayed as an ordinary call inside a
+   flattened divergent region, which is wrong for exactly the same reason an
+   unmasked `store` is wrong there: every lane would execute it after the CFG is
+   linearized. Rewriting it to a CPU-internal masked helper (`feme.cpu.masked.
+   stage.output.store`) let it share the same mask plumbing resource stores and
+   masked memory ops already used.
+2. **`SIMDizePass` needed a second entry mask.** R27 had split the *internal*
+   live and side-effect masks, but the widened function ABI still had only one
+   incoming `wave_entry_mask`, because compute uses the same value for both.
+   Fragment helper lanes make that false at function entry. Extending the wave
+   body ABI with `wave_sideeffect_mask` and ANDing it into widened stage-output
+   stores / return-mask writes was enough; nothing deeper in the pipeline needed
+   to be redesigned.
+
+One subtle follow-on change was preserving function metadata when `SIMDizePass`
+(and later the stage wrappers themselves) recreate a `Function` with appended
+parameters. Without that, `!feme.signature` disappeared during widening and the
+wrapper pass looked like it had no signature at all, even though the original
+entry point had one. Copying metadata explicitly fixed both the wrappers and the
+stage-aware artifact reflection.
+
+## Wrapper structure and why I kept it synthetic
+
+I kept the new wrappers intentionally narrow and synthetic:
+
+- **Vertex** batches are just `InvocationCount` monotonically-mapped records
+  plus SoA input/output storage.
+- **Fragment** batches are `QuadCount` quad records with explicit
+  live/side-effect masks, per-lane system values, and SoA input/output storage.
+
+That matches the roadmap row's wording ("in-memory synthetic stage layouts") and
+lets the CPU backend prove the shared middle end works for vertex/fragment IR
+*before* any fixed-function rasterizer, linker, or API-specific vertex-fetch
+machinery exists. It also explains two deliberate scope cuts:
+
+- the stage-op `vertex` operand is still required to be 0 in this synthetic
+  path, because the multi-vertex-per-invocation semantics that matter for later
+  tessellation/geometry work are not part of R28's executor model;
+- pull-model interpolation is diagnosed, not lowered, because none of the input
+  data planes / linkage state that make it meaningful exist in this synthetic
+  runtime yet.
+
+## Derivative and quad lowering
+
+The derivative work itself was pleasantly self-contained once the widened stage
+ops reached `WaveLoweringPass` in the right shape. I chose the simplest explicit
+contract that matches the design text:
+
+- lane ordering within each quad is fixed at `(0,0),(1,0),(0,1),(1,1)`;
+- fine `ddx`/`ddy` use the row- or column-local difference for each lane;
+- coarse `ddx` uses the top-row horizontal difference for all four lanes of the
+  quad, and coarse `ddy` uses the left-column vertical difference for all four
+  lanes;
+- wave size 8 is just two independent quads, not a cross-quad shuffle.
+
+I *did not* try to silently generalize to larger wave sizes. The roadmap row is
+explicitly about wave sizes 4 and 8, and a clean diagnostic is much better than
+pretending a 16-lane fragment wave has semantics this implementation has never
+been tested against.
+
+## Decision-point outcome
+
+The design's decision point was real, but it resolved in favor of the existing
+boundary. After the implementation and tests were in place, the evidence was:
+
+- `PreparePass` needed no graphics-specific revision.
+- `ResourceLoweringPass`, root constants, and bound-resource normalization
+  needed no stage-specific changes at all.
+- `LinearizePass` and `SIMDizePass` needed localized extensions, but they stayed
+  generic shared passes rather than splitting into compute-vs-graphics forks.
+- `WaveLoweringPass` was the right place for derivatives/quad reads; there was
+  no need for a separate fragment-only cross-lane phase.
+
+So the result I recorded in the roadmap/design docs is: **no shared-middle-end
+boundary revision was required for vertex and fragment shaders**. The shared
+phases held; they just needed the small stage-aware hooks R28 exposed.
+
+## Testing
+
+Baseline before this row (same branch, with the worktree stashed away):
+`ninja -C build check-feme` discovered 1074 tests, 1072 passed, 2 were
+unsupported.
+
+After the completed R28 implementation: `ninja -C build check-feme` discovered
+1085 tests, 1083 passed, 2 were unsupported. The delta is the expected growth
+from the new vertex/fragment wrapper lit coverage, derivative/quad lit
+coverage, the new wrapper unit tests, the prepared-batch unit tests, and the
+stage-aware `CompiledStage` end-to-end tests; there were no regressions in the
+pre-existing suite.
