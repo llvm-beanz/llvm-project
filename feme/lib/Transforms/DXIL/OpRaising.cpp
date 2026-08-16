@@ -13,6 +13,7 @@
 #include "llvm/ADT/FloatingPointMode.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/DXILResource.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
@@ -648,30 +649,141 @@ Type *getOpaqueSizedType(LLVMContext &Ctx, uint32_t SizeInBytes,
       Ctx, {AlignFieldTy, ArrayType::get(Int8Ty, SizeInBytes - AlignBytes)});
 }
 
+/// Returns whether \p Kind is one of the non-multisampled, non-feedback
+/// texture dimensions (`Texture1D`.."TextureCubeArray`), which share
+/// `TypedBuffer`'s component-type/count encoding and therefore raise to
+/// `dx.Texture` via the same `widenToTypedBufferElement` decode (see
+/// Design.md's "Decision: texture and sampler handle kinds": "`isTyped()`
+/// returns true for every non-feedback texture kind, which is why the
+/// component type/count/sample-count layout is shared with `TypedBuffer`").
+bool isPlainTextureKind(dxil::ResourceKind Kind) {
+  switch (Kind) {
+  case dxil::ResourceKind::Texture1D:
+  case dxil::ResourceKind::Texture1DArray:
+  case dxil::ResourceKind::Texture2D:
+  case dxil::ResourceKind::Texture2DArray:
+  case dxil::ResourceKind::Texture3D:
+  case dxil::ResourceKind::TextureCube:
+  case dxil::ResourceKind::TextureCubeArray:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/// Reconstructs the `target("dx.")` handle type an `AnnotateHandle`'s
+/// `%dx.types.ResourceProperties` two-word constant (\p Word0/\p Word1)
+/// describes -- the decode `raiseResourceHandleFromBinding` and
+/// `raiseResourceHandleFromHeap` both need identically, factored out here so
+/// the two paths cannot disagree. See Design.md's "Decision: texture and
+/// sampler handle kinds" for the field layout and the raised handle type
+/// table this implements verbatim: `TypedBuffer` and the plain texture
+/// dimensions (`isPlainTextureKind`) share their component type/count decode
+/// and raise to `dx.TypedBuffer`/`dx.Texture` respectively; `Texture2DMS(Array)`
+/// additionally carries a sample count and raises to `dx.MSTexture`;
+/// `FeedbackTexture2D(Array)` carries only a `SamplerFeedbackType` (the whole
+/// of \p Word1) and raises to `dx.FeedbackTexture`; `Sampler` raises to
+/// `dx.Sampler`, keyed off `SamplerCmpOrHasCounter` (Word0 bit 15). An
+/// unstructured `RawBuffer` (`ByteAddressBuffer`), `StructuredBuffer` and
+/// `CBuffer` are unchanged from before this function existed. Returns
+/// nullptr for a resource kind or element format this pass doesn't (yet)
+/// reconstruct: `TBuffer`, `RTAccelerationStructure`, and any UNORM/SNORM/
+/// packed typed element format (see `getElementLLVMType`) on any of the
+/// typed/texture/multisample-texture kinds.
+TargetExtType *buildAnnotatedHandleType(LLVMContext &Ctx, uint64_t Word0,
+                                        uint64_t Word1) {
+  auto Kind = static_cast<dxil::ResourceKind>(Word0 & 0xFF);
+  bool IsUAV = (Word0 >> 12) & 1;
+  bool IsROV = (Word0 >> 13) & 1;
+
+  if (Kind == dxil::ResourceKind::TypedBuffer || isPlainTextureKind(Kind)) {
+    auto ElemKind = static_cast<dxil::ElementType>(Word1 & 0xFF);
+    Type *ElemTy =
+        widenToTypedBufferElement(getElementLLVMType(ElemKind, Ctx), Word1);
+    if (!ElemTy)
+      return nullptr;
+    unsigned IsSigned = isSignedElementType(ElemKind);
+    if (Kind == dxil::ResourceKind::TypedBuffer)
+      return TargetExtType::get(Ctx, "dx.TypedBuffer", {ElemTy},
+                                {static_cast<unsigned>(IsUAV),
+                                 static_cast<unsigned>(IsROV), IsSigned});
+    return TargetExtType::get(
+        Ctx, "dx.Texture", {ElemTy},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV), IsSigned,
+         static_cast<unsigned>(Kind)});
+  }
+
+  if (Kind == dxil::ResourceKind::Texture2DMS ||
+      Kind == dxil::ResourceKind::Texture2DMSArray) {
+    auto ElemKind = static_cast<dxil::ElementType>(Word1 & 0xFF);
+    Type *ElemTy =
+        widenToTypedBufferElement(getElementLLVMType(ElemKind, Ctx), Word1);
+    if (!ElemTy)
+      return nullptr;
+    uint32_t SampleCount = (Word1 >> 16) & 0xFF;
+    return TargetExtType::get(
+        Ctx, "dx.MSTexture", {ElemTy},
+        {static_cast<unsigned>(IsUAV), SampleCount,
+         static_cast<unsigned>(isSignedElementType(ElemKind)),
+         static_cast<unsigned>(Kind)});
+  }
+
+  if (Kind == dxil::ResourceKind::FeedbackTexture2D ||
+      Kind == dxil::ResourceKind::FeedbackTexture2DArray) {
+    // A feedback texture's whole `Word1` is its `SamplerFeedbackType`, not a
+    // packed component-type/count/sample-count field (see the field table
+    // in Design.md's "Decision" section).
+    return TargetExtType::get(
+        Ctx, "dx.FeedbackTexture", {},
+        {static_cast<unsigned>(Word1), static_cast<unsigned>(Kind)});
+  }
+
+  if (Kind == dxil::ResourceKind::Sampler) {
+    // `SamplerCmpOrHasCounter` is a single bit whose two values (0, 1)
+    // already match `dxil::SamplerType::{Default,Comparison}`.
+    unsigned SamplerTy = (Word0 >> 15) & 1;
+    return TargetExtType::get(Ctx, "dx.Sampler", {}, {SamplerTy});
+  }
+
+  if (Kind == dxil::ResourceKind::RawBuffer && Word1 == 0)
+    return TargetExtType::get(
+        Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
+
+  if (Kind == dxil::ResourceKind::StructuredBuffer) {
+    // Word0's AlignLog2 field (bits 8-11) is only populated for structured
+    // buffers (see `ResourceInfo::getAnnotateProps`), and Word1 is the
+    // element stride in bytes for this kind.
+    uint32_t AlignLog2 = (Word0 >> 8) & 0xF;
+    Type *ElemTy =
+        getOpaqueSizedType(Ctx, static_cast<uint32_t>(Word1), AlignLog2);
+    return TargetExtType::get(
+        Ctx, "dx.RawBuffer", {ElemTy},
+        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
+  }
+
+  if (Kind == dxil::ResourceKind::CBuffer) {
+    // CBuffer's ResourceProperties encoding carries no alignment bits at
+    // all (`AlignLog2` is only ever set for `StructuredBuffer`), so there's
+    // nothing to recover beyond size here.
+    Type *ElemTy = getOpaqueSizedType(Ctx, static_cast<uint32_t>(Word1), 0);
+    return TargetExtType::get(Ctx, "dx.CBuffer", {ElemTy});
+  }
+
+  return nullptr; // TBuffer, RTAccelerationStructure: not (yet) reconstructed.
+}
+
 /// Raises a `dx.op.annotateHandle` (opcode 216) call whose handle operand is
 /// a `dx.op.createHandleFromBinding` (opcode 217) call back into a single
 /// `llvm.dx.resource.handlefrombinding` intrinsic call, reconstructing the
 /// resource's `target("dx.")` handle type from the two ops' constant
-/// `%dx.types.ResBind`/`%dx.types.ResourceProperties` struct operands -- the
-/// `llvm::hlsl`-style resource metadata reconstruction called out as future
-/// work in an earlier version of this pass (see feme/docs/Design.md).
-///
-/// `TypedBuffer` and unstructured `RawBuffer` (`ByteAddressBuffer`) element
-/// types are recovered exactly, since their full shape (a scalar, or
-/// nothing) is present in `ResourceProperties`. `StructuredBuffer`/`CBuffer`
-/// only have their element/layout struct's size (and, for
-/// `StructuredBuffer`, alignment) recoverable, not its original field
-/// layout -- raising those still matters for re-targeting the IR that
-/// consumes the handle (its binding, and the byte size buffer indexing
-/// depends on, are exactly reconstructed), so this raises them too, via an
-/// opaque size-only placeholder element type (`getOpaqueSizedType` above)
-/// rather than leaving them as unrecognized `dx.op.*` calls. Textures and
-/// samplers still need dimension/multi-sample/feedback information this
-/// pass doesn't yet decode, so those remain unraised for now (see
-/// feme/docs/Design.md). Since the buffer/texture load and store ops that
-/// would actually consume this handle aren't raised yet either, the
-/// reconstructed handle is bridged back to the legacy `%dx.types.Handle`
-/// type via `llvm.dx.resource.casthandle` -- the same "temporary" cast
+/// `%dx.types.ResBind`/`%dx.types.ResourceProperties` struct operands via
+/// `buildAnnotatedHandleType` (see that function for which resource kinds,
+/// including texture and sampler, are reconstructed and which are not).
+/// Since the buffer/texture load and store ops that would actually consume
+/// this handle aren't all raised yet either, the reconstructed handle is
+/// bridged back to the legacy `%dx.types.Handle` type via
+/// `llvm.dx.resource.casthandle` -- the same "temporary" cast
 /// `DXILOpLowering` itself uses for this exact purpose (see
 /// `DXILOpLowering::createTmpHandleCast`) -- so the result stays valid IR.
 bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
@@ -702,47 +814,10 @@ bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
   if (!LowerBound || !UpperBound || !Space || !Word0 || !Word1)
     return false;
 
-  // See ResourceInfo::getAnnotateProps (llvm/lib/Analysis/DXILResource.cpp)
-  // for this bit layout -- it's the exact forward direction this inverts.
-  auto Kind = static_cast<dxil::ResourceKind>(*Word0 & 0xFF);
-  bool IsUAV = (*Word0 >> 12) & 1;
-  bool IsROV = (*Word0 >> 13) & 1;
-
   LLVMContext &Ctx = AnnotateCI.getContext();
-  TargetExtType *HandleTy = nullptr;
-  if (Kind == dxil::ResourceKind::TypedBuffer) {
-    auto ElemKind = static_cast<dxil::ElementType>(*Word1 & 0xFF);
-    Type *ElemTy =
-        widenToTypedBufferElement(getElementLLVMType(ElemKind, Ctx), *Word1);
-    if (!ElemTy)
-      return false;
-    HandleTy = TargetExtType::get(
-        Ctx, "dx.TypedBuffer", {ElemTy},
-        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV),
-         static_cast<unsigned>(isSignedElementType(ElemKind))});
-  } else if (Kind == dxil::ResourceKind::RawBuffer && *Word1 == 0) {
-    HandleTy = TargetExtType::get(
-        Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
-        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
-  } else if (Kind == dxil::ResourceKind::StructuredBuffer) {
-    // Word0's AlignLog2 field (bits 8-11) is only populated for structured
-    // buffers (see `ResourceInfo::getAnnotateProps`), and Word1 is the
-    // element stride in bytes for this kind.
-    uint32_t AlignLog2 = (*Word0 >> 8) & 0xF;
-    Type *ElemTy =
-        getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), AlignLog2);
-    HandleTy = TargetExtType::get(
-        Ctx, "dx.RawBuffer", {ElemTy},
-        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
-  } else if (Kind == dxil::ResourceKind::CBuffer) {
-    // CBuffer's ResourceProperties encoding carries no alignment bits at
-    // all (`AlignLog2` is only ever set for `StructuredBuffer`), so there's
-    // nothing to recover beyond size here.
-    Type *ElemTy = getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), 0);
-    HandleTy = TargetExtType::get(Ctx, "dx.CBuffer", {ElemTy});
-  } else {
+  TargetExtType *HandleTy = buildAnnotatedHandleType(Ctx, *Word0, *Word1);
+  if (!HandleTy)
     return false; // Unsupported resource kind: leave both ops unmodified.
-  }
 
   uint32_t Size = *UpperBound == std::numeric_limits<uint32_t>::max()
                       ? 0
@@ -794,17 +869,12 @@ bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
 /// to reconstruct a register binding from -- a heap index is not a
 /// register -- so this only needs `AnnotateHandle`'s
 /// `%dx.types.ResourceProperties` operand to recover the resource's
-/// `target("dx.")` handle type, exactly as `raiseResourceHandleFromBinding`
-/// does; see that function's comment for the same scope notes (which
-/// resource kinds are reconstructed, and why unhandled ones are left
-/// unmodified rather than erroring). The heap index and non-uniform-index
-/// operands carry over unchanged. The raw op's `SamplerHeap` operand
-/// (`CreateHandleFromHeap`'s second argument) does not need to survive
-/// separately: which heap a handle indexes is already implied by whether
-/// its reconstructed resource kind is a sampler, which this pass does not
-/// yet reconstruct (sampling is a non-goal for the CPU target's v1, see
-/// feme/docs/FeMeCPUDesign.md), so a sampler heap access is left unmodified
-/// like any other not-yet-covered resource kind.
+/// `target("dx.")` handle type, via `buildAnnotatedHandleType`, exactly as
+/// `raiseResourceHandleFromBinding` does. The heap index and
+/// non-uniform-index operands carry over unchanged. The raw op's
+/// `SamplerHeap` operand (`CreateHandleFromHeap`'s second argument) does not
+/// need to survive separately: which heap a handle indexes is already
+/// implied by whether its reconstructed resource kind is `dx.Sampler`.
 bool raiseResourceHandleFromHeap(CallInst &AnnotateCI) {
   if (AnnotateCI.arg_size() != 3)
     return false;
@@ -828,42 +898,10 @@ bool raiseResourceHandleFromHeap(CallInst &AnnotateCI) {
   if (!Word0 || !Word1)
     return false;
 
-  // See ResourceInfo::getAnnotateProps (llvm/lib/Analysis/DXILResource.cpp)
-  // for this bit layout -- the same encoding raiseResourceHandleFromBinding
-  // inverts.
-  auto Kind = static_cast<dxil::ResourceKind>(*Word0 & 0xFF);
-  bool IsUAV = (*Word0 >> 12) & 1;
-  bool IsROV = (*Word0 >> 13) & 1;
-
   LLVMContext &Ctx = AnnotateCI.getContext();
-  TargetExtType *HandleTy = nullptr;
-  if (Kind == dxil::ResourceKind::TypedBuffer) {
-    auto ElemKind = static_cast<dxil::ElementType>(*Word1 & 0xFF);
-    Type *ElemTy =
-        widenToTypedBufferElement(getElementLLVMType(ElemKind, Ctx), *Word1);
-    if (!ElemTy)
-      return false;
-    HandleTy = TargetExtType::get(
-        Ctx, "dx.TypedBuffer", {ElemTy},
-        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV),
-         static_cast<unsigned>(isSignedElementType(ElemKind))});
-  } else if (Kind == dxil::ResourceKind::RawBuffer && *Word1 == 0) {
-    HandleTy = TargetExtType::get(
-        Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
-        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
-  } else if (Kind == dxil::ResourceKind::StructuredBuffer) {
-    uint32_t AlignLog2 = (*Word0 >> 8) & 0xF;
-    Type *ElemTy =
-        getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), AlignLog2);
-    HandleTy = TargetExtType::get(
-        Ctx, "dx.RawBuffer", {ElemTy},
-        {static_cast<unsigned>(IsUAV), static_cast<unsigned>(IsROV)});
-  } else if (Kind == dxil::ResourceKind::CBuffer) {
-    Type *ElemTy = getOpaqueSizedType(Ctx, static_cast<uint32_t>(*Word1), 0);
-    HandleTy = TargetExtType::get(Ctx, "dx.CBuffer", {ElemTy});
-  } else {
-    return false; // Samplers and other unreconstructed kinds: leave alone.
-  }
+  TargetExtType *HandleTy = buildAnnotatedHandleType(Ctx, *Word0, *Word1);
+  if (!HandleTy)
+    return false; // Unsupported resource kind: leave both ops unmodified.
 
   IRBuilder<> Builder(&AnnotateCI);
   Value *Index = HandleCI->getArgOperand(1);
@@ -1164,6 +1202,319 @@ bool raiseTypedBufferLoad(CallInst &CI) {
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// Texture sampling and loading (roadmap R30)
+//
+// Scope: only the DXIL ops LLVM's own DirectX backend already lowers a
+// canonical intrinsic to (cross-checked against `-dxil-op-lower`, the same
+// standard every other raiser in this file holds itself to -- see the file
+// header comment): `Sample` (60), `SampleLevel` (62), `TextureLoad` (66) and
+// `GetDimensions`' `.x` field (72, via `int_dx_resource_getdimensions_x`
+// only -- `DXILOpLowering.cpp` has no `xy`/`levels_xy` lowering to verify
+// against yet). `SampleBias`/`SampleGrad` (bias/gradient sampling) and
+// comparison sampling/gather have no numbered `DXILOp<N, ...>` definition in
+// this LLVM tree at all yet (`sampleCmp`/`textureGather` are declared
+// `DXILOpClass`es with no op assigned a wire opcode), so there is nothing to
+// raise from or verify against on the DXIL side; comparison sampling is
+// still implemented end-to-end for SPIR-V and the CPU target's runtime
+// helpers (see feme/docs/FeMeGraphicsDesign.md's "Canonical image
+// operations"), just not reachable from a DXIL module until upstream adds
+// that lowering.
+//===----------------------------------------------------------------------===//
+
+/// The number of texture coordinate components DXIL's sample/load ops
+/// expect for \p Dim, i.e. the width of the vector `int_dx_resource_sample*`
+/// /`load_level`'s `coord` operand packs (see Design.md's "Decision: texture
+/// and sampler handle kinds" -- `Dim` is exactly `TextureExtType::
+/// getDimension()`). An array dimension adds one component (the array
+/// slice) beyond its non-array counterpart. Returns 0 for a dimension this
+/// pass does not raise texture accesses for (multisampled and feedback
+/// textures; MSTexture's `Load` op takes a sample index DXIL encodes
+/// differently, and no feedback-texture op is raised at all yet).
+unsigned getTextureCoordComponents(dxil::ResourceKind Dim) {
+  switch (Dim) {
+  case dxil::ResourceKind::Texture1D:
+    return 1;
+  case dxil::ResourceKind::Texture1DArray:
+    return 2;
+  case dxil::ResourceKind::Texture2D:
+    return 2;
+  case dxil::ResourceKind::Texture2DArray:
+    return 3;
+  case dxil::ResourceKind::Texture3D:
+    return 3;
+  case dxil::ResourceKind::TextureCube:
+    return 3;
+  case dxil::ResourceKind::TextureCubeArray:
+    return 4;
+  default:
+    return 0;
+  }
+}
+
+/// The number of texel-offset components DXIL's `Sample`/`SampleLevel` ops
+/// accept for \p Dim, or 0 if \p Dim allows none at all (DXIL disallows an
+/// offset when sampling a cube map, since there is no well-defined adjacent
+/// face direction -- see the `Sample`/`SampleLevel` intrinsic reference).
+unsigned getTextureOffsetComponents(dxil::ResourceKind Dim) {
+  switch (Dim) {
+  case dxil::ResourceKind::Texture1D:
+  case dxil::ResourceKind::Texture1DArray:
+    return 1;
+  case dxil::ResourceKind::Texture2D:
+  case dxil::ResourceKind::Texture2DArray:
+    return 2;
+  case dxil::ResourceKind::Texture3D:
+    return 3;
+  default:
+    return 0; // Cube, CubeArray: no offset operand.
+  }
+}
+
+/// Packs \p Components (already-extracted scalar operands) into the fixed
+/// vector `int_dx_resource_sample*`/`load_level`'s coord/offset operand
+/// expects, or returns the lone scalar unwrapped for a single-component
+/// dimension (`Texture1D`'s coordinate, matching how `TypedBufferExtType`'s
+/// scalar-vs-vector element type distinction already works). Returns
+/// nullptr for an empty \p Components (a dimension with no offset operand
+/// at all, e.g. `TextureCube`).
+Value *packTextureVector(IRBuilder<> &Builder, ArrayRef<Value *> Components) {
+  if (Components.empty())
+    return nullptr;
+  if (Components.size() == 1)
+    return Components[0];
+  Value *Vec = PoisonValue::get(
+      FixedVectorType::get(Components[0]->getType(), Components.size()));
+  for (unsigned I = 0; I != Components.size(); ++I)
+    Vec = Builder.CreateInsertElement(Vec, Components[I], Builder.getInt32(I));
+  return Vec;
+}
+
+/// Rewrites every `extractvalue` reading a raised sample/load's `%dx.types.
+/// ResRet` result -- exactly `replaceLoadResultUses`'s DXIL-import-side
+/// counterpart in `feme/lib/Transforms/CPU/ResourceLowering.cpp`, but for
+/// the raising direction: DXIL's `ResRet` struct always carries 4 value
+/// fields plus a trailing status field regardless of the texture's real
+/// texel width, so only extracts up to \p Width (the handle's actual
+/// component count) are recognized; anything else (including any read of
+/// the status field, which the raised intrinsic has no equivalent for) is
+/// left unraised, exactly as `raiseTypedBufferLoad` already does for
+/// buffers. Returns false leaving \p CI untouched if any use doesn't match.
+bool replaceResRetExtracts(CallInst &CI, unsigned Width, Value *Loaded,
+                           IRBuilder<> &Builder) {
+  SmallVector<ExtractValueInst *, 4> Extracts;
+  for (User *U : CI.users()) {
+    auto *EV = dyn_cast<ExtractValueInst>(U);
+    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] >= Width)
+      return false;
+    Extracts.push_back(EV);
+  }
+
+  auto *VecTy = dyn_cast<FixedVectorType>(Loaded->getType());
+  for (ExtractValueInst *EV : Extracts) {
+    Builder.SetInsertPoint(EV);
+    Value *Component = VecTy ? Builder.CreateExtractElement(
+                                   Loaded, EV->getIndices()[0])
+                             : Loaded;
+    EV->replaceAllUsesWith(Component);
+    EV->eraseFromParent();
+  }
+  return true;
+}
+
+/// Raises a `dx.op.sample` (opcode 60, implicit-LOD sample) call on an
+/// already-raised `dx.Texture` handle and `dx.Sampler` handle into
+/// `llvm.dx.resource.sample`, reassembling the split `Coord0..3`/`Offset0..2`
+/// scalar operands back into the fixed vectors the canonical intrinsic
+/// expects (see `lowerSampleOp` in
+/// `llvm/lib/Target/DirectX/DXILOpLowering.cpp`, the exact forward direction
+/// this inverts), keyed by the handle's dimensionality for how many of each
+/// are meaningful. `Clamp` (the trailing operand) must be `undef`/`poison`:
+/// a real clamp value means the op was actually lowered from
+/// `int_dx_resource_sample_clamp`, a separate call this pass does not (yet)
+/// raise to.
+bool raiseSample(CallInst &CI) {
+  if (CI.arg_size() != 11) // opcode, Handle, Sampler, Coord0-3, Offset0-2, Clamp
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy = Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType())
+                          : nullptr;
+  Value *Sampler = lookThroughCastHandle(CI.getArgOperand(2));
+  if (!HandleTy || !Sampler || !isa<dxil::SamplerExtType>(Sampler->getType()))
+    return false;
+  Value *Clamp = CI.getArgOperand(10);
+  if (!isa<UndefValue>(Clamp))
+    return false;
+
+  unsigned NumCoords = getTextureCoordComponents(HandleTy->getDimension());
+  if (NumCoords == 0)
+    return false;
+  unsigned NumOffsets = getTextureOffsetComponents(HandleTy->getDimension());
+
+  IRBuilder<> Builder(&CI);
+  SmallVector<Value *, 4> Coords;
+  for (unsigned I = 0; I != NumCoords; ++I)
+    Coords.push_back(CI.getArgOperand(3 + I));
+  SmallVector<Value *, 3> Offsets;
+  for (unsigned I = 0; I != NumOffsets; ++I)
+    Offsets.push_back(CI.getArgOperand(7 + I));
+
+  Value *Coord = packTextureVector(Builder, Coords);
+  Value *Offset = packTextureVector(Builder, Offsets);
+  if (!Offset)
+    Offset = PoisonValue::get(Type::getInt32Ty(CI.getContext()));
+
+  Type *ElemTy = HandleTy->getResourceType();
+  unsigned Width = isa<FixedVectorType>(ElemTy)
+                       ? cast<FixedVectorType>(ElemTy)->getNumElements()
+                       : 1;
+  Function *SampleFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_sample,
+      {ElemTy, HandleTy, Sampler->getType(), Coord->getType(),
+       Offset->getType()});
+  Value *Loaded =
+      Builder.CreateCall(SampleFn, {Handle, Sampler, Coord, Offset});
+  if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
+    return false;
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises a `dx.op.sampleLevel` (opcode 62, explicit-LOD sample) call into
+/// `llvm.dx.resource.samplelevel`, the same coordinate/offset reassembly as
+/// `raiseSample` plus the explicit LOD operand (`SampleLevel` has no
+/// `Clamp` operand at all -- see DXIL.td).
+bool raiseSampleLevel(CallInst &CI) {
+  if (CI.arg_size() != 11) // opcode, Handle, Sampler, Coord0-3, Offset0-2, LOD
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy = Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType())
+                          : nullptr;
+  Value *Sampler = lookThroughCastHandle(CI.getArgOperand(2));
+  if (!HandleTy || !Sampler || !isa<dxil::SamplerExtType>(Sampler->getType()))
+    return false;
+
+  unsigned NumCoords = getTextureCoordComponents(HandleTy->getDimension());
+  if (NumCoords == 0)
+    return false;
+  unsigned NumOffsets = getTextureOffsetComponents(HandleTy->getDimension());
+
+  IRBuilder<> Builder(&CI);
+  SmallVector<Value *, 4> Coords;
+  for (unsigned I = 0; I != NumCoords; ++I)
+    Coords.push_back(CI.getArgOperand(3 + I));
+  SmallVector<Value *, 3> Offsets;
+  for (unsigned I = 0; I != NumOffsets; ++I)
+    Offsets.push_back(CI.getArgOperand(7 + I));
+
+  Value *Coord = packTextureVector(Builder, Coords);
+  Value *Offset = packTextureVector(Builder, Offsets);
+  if (!Offset)
+    Offset = PoisonValue::get(Type::getInt32Ty(CI.getContext()));
+  Value *Lod = CI.getArgOperand(10);
+
+  Type *ElemTy = HandleTy->getResourceType();
+  unsigned Width = isa<FixedVectorType>(ElemTy)
+                       ? cast<FixedVectorType>(ElemTy)->getNumElements()
+                       : 1;
+  Function *SampleLevelFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_samplelevel,
+      {ElemTy, HandleTy, Sampler->getType(), Coord->getType(),
+       Offset->getType()});
+  Value *Loaded = Builder.CreateCall(SampleLevelFn,
+                                     {Handle, Sampler, Coord, Lod, Offset});
+  if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
+    return false;
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises a `dx.op.textureLoad` (opcode 66) call on an already-raised
+/// `dx.Texture` handle into `llvm.dx.resource.load.level`: an explicit-mip,
+/// no-sampler texel fetch (see `lowerTextureLoad` in DXILOpLowering.cpp, the
+/// forward direction this inverts). Coordinates are integer, unlike
+/// `Sample`'s floating-point ones, so no separate offset-component helper is
+/// needed -- `TextureLoad`'s own 3-wide `Coord0..2`/`Offset0..2` operand
+/// pairs are simply truncated to \p Dim's component count.
+bool raiseTextureLoad(CallInst &CI) {
+  if (CI.arg_size() != 9) // opcode, Handle, MipLevel, Coord0-2, Offset0-2
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy = Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType())
+                          : nullptr;
+  if (!HandleTy)
+    return false;
+
+  unsigned NumCoords = getTextureCoordComponents(HandleTy->getDimension());
+  if (NumCoords == 0 || NumCoords > 3)
+    return false;
+  unsigned NumOffsets = getTextureOffsetComponents(HandleTy->getDimension());
+
+  IRBuilder<> Builder(&CI);
+  Value *MipLevel = CI.getArgOperand(2);
+  SmallVector<Value *, 3> Coords;
+  for (unsigned I = 0; I != NumCoords; ++I)
+    Coords.push_back(CI.getArgOperand(3 + I));
+  SmallVector<Value *, 3> Offsets;
+  for (unsigned I = 0; I != NumOffsets; ++I)
+    Offsets.push_back(CI.getArgOperand(6 + I));
+
+  Value *Coord = packTextureVector(Builder, Coords);
+  Value *Offset = packTextureVector(Builder, Offsets);
+  if (!Offset)
+    Offset = PoisonValue::get(Type::getInt32Ty(CI.getContext()));
+
+  Type *ElemTy = HandleTy->getResourceType();
+  unsigned Width = isa<FixedVectorType>(ElemTy)
+                       ? cast<FixedVectorType>(ElemTy)->getNumElements()
+                       : 1;
+  Function *LoadLevelFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_load_level,
+      {ElemTy, HandleTy, Coord->getType(), MipLevel->getType(),
+       Offset->getType()});
+  Value *Loaded =
+      Builder.CreateCall(LoadLevelFn, {Handle, Coord, MipLevel, Offset});
+  if (!replaceResRetExtracts(CI, Width, Loaded, Builder))
+    return false;
+  CI.eraseFromParent();
+  return true;
+}
+
+/// Raises a `dx.op.getDimensions` (opcode 72) call's field-0 (`.x`, i.e.
+/// width) extract into `llvm.dx.resource.getdimensions_x`, the only overload
+/// LLVM's own `DXILOpLowering.cpp` lowers a canonical intrinsic to yet (see
+/// this section's header comment): any other field, or a use that isn't a
+/// field-0 `extractvalue`, is left unraised.
+bool raiseGetDimensionsX(CallInst &CI) {
+  if (CI.arg_size() != 3) // opcode, Handle, MipLevel
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  if (!Handle || !isa<dxil::TextureExtType, dxil::MSTextureExtType>(Handle->getType()))
+    return false;
+
+  SmallVector<ExtractValueInst *, 1> Extracts;
+  for (User *U : CI.users()) {
+    auto *EV = dyn_cast<ExtractValueInst>(U);
+    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] != 0)
+      return false;
+    Extracts.push_back(EV);
+  }
+  if (Extracts.empty())
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  Function *GetDimensionsXFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_getdimensions_x,
+      {Handle->getType()});
+  Value *Width = Builder.CreateCall(GetDimensionsXFn, {Handle});
+  for (ExtractValueInst *EV : Extracts) {
+    EV->replaceAllUsesWith(Width);
+    EV->eraseFromParent();
+  }
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Raises a `dx.op.cbufferLoadLegacy` (opcode 59) call on an already-raised
 /// constant-buffer handle into `llvm.dx.resource.load.cbufferrow.4`, the
 /// standard 32-bit-per-component row shape (`%dx.types.CBufRet.i32`/`.f32`,
@@ -1358,6 +1709,18 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(59, [](CallInst &CI) { // CBufferLoadLegacy
     return raiseCBufferLoadLegacy(CI);
+  });
+  Changed |= forEachDXOpCall(60, [](CallInst &CI) { // Sample
+    return raiseSample(CI);
+  });
+  Changed |= forEachDXOpCall(62, [](CallInst &CI) { // SampleLevel
+    return raiseSampleLevel(CI);
+  });
+  Changed |= forEachDXOpCall(66, [](CallInst &CI) { // TextureLoad
+    return raiseTextureLoad(CI);
+  });
+  Changed |= forEachDXOpCall(72, [](CallInst &CI) { // GetDimensions
+    return raiseGetDimensionsX(CI);
   });
 
   for (Function &F : llvm::make_early_inc_range(M.functions())) {

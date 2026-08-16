@@ -68,14 +68,46 @@ define %dx.types.Handle @unbounded_array(i32 %idx) {
   ret %dx.types.Handle %h2
 }
 
-; A resource kind this pass doesn't (yet) reconstruct (Texture2D, kind 1)
-; must be left as unmodified `dx.op.*` calls rather than erroring.
+; A texture (Texture1D, kind 1) whose `ResourceProperties` has no recoverable
+; component type/count (Word1 = 0, i.e. `ElementType::Invalid`, `CompCount`
+; 0 -- malformed input, not a real DXIL module) must be left as unmodified
+; `dx.op.*` calls rather than erroring: see `buildAnnotatedHandleType`'s
+; `widenToTypedBufferElement`/`getElementLLVMType` calls, shared with
+; `TypedBuffer`.
 ; CHECK-LABEL: define %dx.types.Handle @unhandled_texture(
 define %dx.types.Handle @unhandled_texture(i32 %idx) {
   ; CHECK: call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217,
   ; CHECK: call %dx.types.Handle @dx.op.annotateHandle(i32 216,
   %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 0, i32 0, i32 0, i8 0 }, i32 0, i1 false)
   %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 1, i32 0 })
+  ret %dx.types.Handle %h2
+}
+
+; A `Texture2D<float4>` (SRV, kind 2) bound at register t3, exercising
+; `buildAnnotatedHandleType`'s texture path (see Design.md's "Decision:
+; texture and sampler handle kinds"): raises to `dx.Texture` with the
+; dimension (`ResourceKind::Texture2D` == 2) as the trailing int parameter,
+; sharing `TypedBuffer`'s component type/count decode (Word1 = 1033 is
+; `ElementType::F32` (9) with `CompCount` 4, exactly as
+; `typed_buffer_uav_vec4` above).
+; CHECK-LABEL: define %dx.types.Handle @texture2d_srv(
+define %dx.types.Handle @texture2d_srv(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 3, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[HANDLE]])
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 3, i32 3, i32 0, i8 0 }, i32 3, i1 false)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 2, i32 1033 })
+  ret %dx.types.Handle %h2
+}
+
+; A comparison sampler bound at register s0, exercising `dx.Sampler`'s
+; single-bit `SamplerCmpOrHasCounter` decode (Word0 bit 15): `Sampler` ==
+; kind 14, with bit 15 set, i.e. Word0 = 14 | (1 << 15) = 32782.
+; CHECK-LABEL: define %dx.types.Handle @comparison_sampler(
+define %dx.types.Handle @comparison_sampler(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.Sampler", 1) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 0, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.Sampler", 1) [[HANDLE]])
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind { i32 0, i32 0, i32 0, i8 3 }, i32 0, i1 false)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 32782, i32 0 })
   ret %dx.types.Handle %h2
 }
 
