@@ -23,10 +23,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R20 from the roadmap document?
+Can you implement R21 from the roadmap document?
 
-> The `feme.stage.*` operation family for vertex/fragment (input load, output
-> store, discard, demote, is_helper, derivatives, quad read, pull-model
-> interpolation) plus `FeMeTransformsGraphics`' canonicalization and validation
-> pass, rewriting DXIL `loadInput`/`storeOutput` and SPIR-V interface accesses
-> into it. **Completes G0** (see: §1.8.2, §1.4)
+> Factor `CompiledStage`/`PreparedDispatch`/`invokeGroup` out of `JITEngine`,
+> with the wave loop and entry mask owned by `invokeGroup`; `JITEngine` becomes
+> a convenience wrapper and `JITOptions::NumThreads` becomes real. Land it under
+> the final `CompiledStage` name so V1/W1 never build against `CompiledKernel`
+> (see: §1.6, §1.8.1, §1.8.3)
