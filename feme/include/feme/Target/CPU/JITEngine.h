@@ -50,6 +50,7 @@
 
 namespace llvm {
 class Module;
+class ThreadPoolInterface;
 } // namespace llvm
 
 namespace feme {
@@ -146,16 +147,22 @@ public:
 
   /// Runs the whole dispatch to completion: prepares \p Resources once
   /// (see `PreparedDispatch`), then runs every group in \p GroupCount
-  /// against `CompiledStage::invokeGroup`, across `JITOptions::NumThreads`
-  /// worker threads (see that field's own comment), and joins.
+  /// against `CompiledStage::invokeGroup`, across the engine's own worker
+  /// pool (see `JITOptions::NumThreads`'s comment), and joins.
   llvm::Error dispatch(const DispatchResources &Resources,
                        std::array<uint32_t, 3> GroupCount) const;
 
 private:
-  JITEngine(std::unique_ptr<CompiledStage> Stage, unsigned NumThreads);
+  JITEngine(std::unique_ptr<CompiledStage> Stage,
+           std::unique_ptr<llvm::ThreadPoolInterface> Pool);
 
   std::unique_ptr<CompiledStage> Stage;
-  unsigned NumThreads;
+  /// The worker pool `dispatch` schedules groups across, owned by the
+  /// engine for its whole lifetime (see "Dispatch parallelism" in
+  /// feme/docs/FeMeCPUDesign.md's "JIT Flow" section) -- null when
+  /// `JITOptions::NumThreads == 1`, so `dispatch` runs every group on the
+  /// calling thread with no pool at all.
+  std::unique_ptr<llvm::ThreadPoolInterface> Pool;
 };
 
 } // namespace feme::cpu
