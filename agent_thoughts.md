@@ -14722,3 +14722,147 @@ longer needed for the reason it was proposed (disambiguating between
 several bindings), since any single one is now recognized automatically.
 Marked R25 done in Roadmap.md's milestone table (mirroring R21-R24's own
 "done: ..." parenthetical) and closed its §1.8.1 narrowing row.
+
+# Roadmap step R26: SPIR-V descriptor-set binding-to-heap normalization
+
+## Reading the request
+
+R26's roadmap text: "A SPIR-V descriptor-set binding-to-heap normalization
+matching DXIL's `BoundResourceNormalizationPass`, with arrayed bindings in
+contiguous heap ranges and dynamic buffer offsets (see: §1.2, §1.9)."
+
+First step was figuring out what already exists versus what's missing,
+since "add a SPIR-V binding-to-heap normalization" sounds like it could
+mean building something from scratch. It isn't: roadmap step R10 already
+added `feme::cpu::SPIRVResourceLoweringPass`, which normalizes a bound
+`spirv.VulkanBuffer` handle directly into the canonical
+`feme.cpu.resource.*` calls (SPIR-V has no bindless heap concept to
+normalize *into* the way DXIL does, so it's one pass instead of two -- see
+that pass's own header comment). Reading its implementation closely,
+though, revealed it *always* treated every binding as an implicit
+single-slot range: `collectHandles` read only the `(set, binding)`
+operands and completely ignored `handlefrombinding`'s own range-size and
+array-index operands, and `lowerAccesses` built a bare `ConstantInt` heap
+index from a single hardcoded per-identity counter (`Base++` in
+`assignHeapBases`). So R26's actual work is generalizing this existing
+pass to match `BoundResourceNormalizationPass`'s DXIL-side array-binding
+support, not writing a new pass or reusing `BoundResourceNormalizationPass`
+via a raised `SPV_EXT_descriptor_heap` intrinsic (open question 3 in
+FeMeVulkanDesign.md, which this closes by *not* doing that).
+
+## Deciding what "dynamic buffer offsets" means here
+
+The roadmap bullet bundles "arrayed bindings in contiguous heap ranges"
+with "dynamic buffer offsets" as if both need shader-compiler-side work.
+Reading FeMeVulkanDesign.md's "Memory and Buffers" section settled this:
+Vulkan's dynamic storage/uniform buffer offset
+(`VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC`) is resolved entirely at
+dispatch-preparation time, on the host: `Data = memory allocation base +
+buffer binding offset + descriptor offset`. It's folded into
+`FemeDescriptor::Data` the same way every other buffer's binding offset
+is; a compiled shader (and this pass) has no way to distinguish a dynamic
+descriptor from a static one, because there is nothing to distinguish --
+`BoundResourceRange`/`materializeResourceHeap` (feme/include/feme/Target/
+CPU/ResourceInfo.h, ResourceHeap.h) already carry this without any change.
+This also directly answers FeMeVulkanDesign.md's open question 7. I
+recorded this reasoning in the roadmap row and design docs rather than
+writing any code for it, since there's genuinely nothing to write yet (no
+`lib/Vulkan` exists at all -- that's V0 onward, far beyond this
+prerequisite compiler-track item).
+
+## The actual code change
+
+Generalized `feme::cpu::SPIRVResourceLoweringPass`:
+
+- `collectHandles` now reads `handlefrombinding`'s range-size operand
+  (must be a compile-time constant, like the `(set, binding)` identity
+  itself) and rejects an unbounded range (`RangeSize == 0`) the same way
+  `BoundResourceNormalizationPass` rejects an unbounded DXIL range.
+- `RangeEntry`/`BoundHandle` grew a `RangeSize` field; the conflict check
+  in `run()` now also flags a range-size disagreement between two handles
+  at the same identity, not just a stride disagreement.
+- `assignHeapBases` assigns a contiguous *run* of `RangeSize` slots per
+  identity instead of a single slot (`Base += Entry.RangeSize` instead of
+  `Base++`).
+- Added `computeOverflowClampedIndex`/`computeClampedIndex`, copied from
+  `BoundResourceNormalizationPass.cpp` rather than shared -- this file
+  already had a documented precedent for that (`addResourceEnvParams` is
+  already its own copy, per the existing header comment, matching how
+  `feme::amdgpu::ResourceLoweringPass` duplicates its own differently-
+  shaped `addBindingArguments`). Sharing would mean introducing a new
+  shared header just for two small static functions used by exactly two
+  translation units; the existing codebase's convention is clearly to
+  duplicate small per-target index-clamping logic instead.
+- `lowerAccesses` now computes the real per-access descriptor index --
+  `HeapBase + clamp(Index, RangeSize)` -- instead of a bare
+  `ConstantInt::get(I32Ty, HeapBase)`.
+
+## A bug I almost introduced: stale `Argument*`
+
+My first draft cached the handle's array-index operand
+(`CI->getArgOperand(3)`) directly in the `BoundHandle` struct at collection
+time, alongside `Stride`/`RangeSize`. This is exactly the bug roadmap R25
+fixed in `RootConstantLowering.cpp`: `addResourceEnvParams` (called from
+`run()`, once per function, before `lowerAccesses`) moves the function's
+body into a *new* `Function` via `splice`, RAUWs every old `Argument` to
+the corresponding new one, and then erases the *old* `Function` --
+destroying its `Argument` list. If the array index happened to be one of
+the original function's own parameters (the common case -- a shader
+indexing a resource array by e.g. `SV_DispatchThreadID`-derived value),
+the cached `Value*` would point at a destroyed `Argument` object by the
+time `lowerAccesses` used it, a clean use-after-free that would likely
+only manifest as corrupted codegen or an ASan failure, not a crash at the
+point of use.
+
+Caught this by re-reading the R25 deviation note in Roadmap.md (which
+describes fixing the *identical* shape of bug in a sibling pass) while
+writing this pass's own doc comments, and fixed it the same way conceptually:
+rather than re-matching against the rebuilt function (R25's fix, since
+`RootConstantLowering` needed the *access pattern*, not just one operand,
+after rebuilding), I simply stopped caching the `Value*` at all --
+`lowerAccesses` re-reads `BH.Handle->getArgOperand(3)` fresh, at the point
+it's needed, after `addResourceEnvParams` has already run and already
+RAUW'd everything. `BH.Handle` itself stays a valid, non-dangling
+`CallInst*` throughout (its parent basic block is *moved* into the new
+function by `splice`, not copied), so its own operand list is always
+current. This is simpler than R25's fix and avoids adding an equivalent
+`Value*`-typed field to `BoundHandle` at all; documented the reasoning
+directly in `BoundHandle`'s own comment and `lowerAccesses`'s, since this
+is exactly the kind of subtle invariant a future reader (or a future
+patch adding a similar cached field) needs spelled out to avoid
+reintroducing.
+
+## Testing
+
+Extended the existing lit test suite for this pass rather than replacing
+it: `spirv-resource-lowering.ll` (the original scalar-binding case) was
+left untouched and still passes byte-for-byte; added
+`spirv-resource-lowering-array.ll` for an arrayed, dynamically-indexed
+binding, checking the exact overflow/range-check instruction sequence
+generated; added an unbounded-array case to
+`spirv-resource-lowering-unsupported.ll`; and added a range-size-only
+conflict case to `spirv-resource-lowering-conflicting.ll` (two handles
+agreeing on stride but disagreeing on range size). Also added a new
+`unittests/Transforms/CPU/SPIRVResourceLoweringTest.cpp`, mirroring
+`BoundResourceNormalizationTest.cpp`'s structure and test names one-to-one
+where the shape matches (`LeavesUnboundedRangeUnchanged` ->
+`LeavesUnboundedArrayUnchanged`, etc.), since this pass previously had no
+C++ unit test coverage at all (only lit `.ll` tests) despite its DXIL
+sibling having both. Ran `ninja check-feme` (assertions-enabled, ccache
+build) before and after: 1053/1055 passing before, 1060/1062 after (the
+1 new lit test + 6 new unit tests all pass, no regressions, the 2
+unsupported tests are pre-existing and unrelated).
+
+## Documentation
+
+Updated Roadmap.md's R26 row, §1.2, and §1.9 gap rows to mark this closed
+with a "done: ..." note in the same style as R21-R25. Updated
+FeMeCPUDesign.md's Status section with a new Deviation note (placed right
+after the R10 note it generalizes) and added a paragraph to "Bound-resource
+normalization" clarifying that DXIL and SPIR-V reach the same normalized
+shape through two different passes rather than a shared implementation.
+Updated FeMeVulkanDesign.md's "Required SPIR-V resource work" bullet and V2
+milestone bullet to `~~strikethrough~~ (closed by R26: ...)`, matching the
+existing convention for closed milestone items, and moved open questions 3
+and 7 out of the open list into the "Answered during this design" summary
+at the end, since both are now settled by this row.
