@@ -22,7 +22,6 @@
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 
-#include <algorithm>
 #include <optional>
 
 using namespace llvm;
@@ -35,6 +34,12 @@ namespace {
 /// `int_dx_resource_load_cbufferrow_4`'s TableGen comment: "The total size
 /// of the return should always be 128 bits").
 constexpr uint32_t RowSizeBytes = 16;
+
+/// DXIL's sentinel `RangeSize` for an unbounded array binding
+/// (`register(bN[])`, no upper bound). Such a binding has no fixed
+/// advertised size to report or bounds-check reads against, so it is never
+/// a candidate root-constant binding (see the header comment).
+constexpr uint32_t UnboundedRangeSize = ~0u;
 
 /// Returns the intrinsic ID of the call \p V is, or `not_intrinsic`.
 Intrinsic::ID getIntrinsicID(const Value *V) {
@@ -53,12 +58,15 @@ bool usesResourceHeap(Function &F) {
   return false;
 }
 
-/// Returns \p Handle's binding (source register space and base register) if
-/// it is a `dx.CBuffer` handle bound at any finite, statically-known,
-/// non-array binding (roadmap R25: any single binding is recognized, not
-/// just `(b0, space0)`), or `std::nullopt` otherwise.
-std::optional<std::pair<uint32_t, uint32_t>>
-matchRootConstantHandle(CallInst &Handle) {
+/// Returns \p Handle's declared binding shape (source register space/base
+/// register, declared array length, and one array element's declared byte
+/// size) if it is a `dx.CBuffer` handle whose binding this milestone can
+/// represent (see the header comment: any finite, statically-known
+/// binding), or `std::nullopt` otherwise (a non-`dx.CBuffer` handle, an
+/// unbounded range, or a non-constant space/register/range-size -- none of
+/// which DXIL ever actually produces for these operands, but this pass
+/// still declines rather than assumes).
+std::optional<RootConstantAccess> matchRootConstantHandle(CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
   if (!HandleTy || HandleTy->getName() != "dx.CBuffer")
     return std::nullopt;
@@ -68,18 +76,35 @@ matchRootConstantHandle(CallInst &Handle) {
   auto *RangeSizeC = dyn_cast<ConstantInt>(Handle.getArgOperand(2));
   if (!SpaceC || !RegisterC || !RangeSizeC)
     return std::nullopt;
-  if (RangeSizeC->getZExtValue() != 1)
+
+  uint64_t RangeSize = RangeSizeC->getZExtValue();
+  if (RangeSize == 0 || RangeSize == UnboundedRangeSize)
     return std::nullopt;
-  return std::make_pair(static_cast<uint32_t>(SpaceC->getZExtValue()),
-                        static_cast<uint32_t>(RegisterC->getZExtValue()));
+
+  // The handle type's own array-of-bytes type parameter (e.g. `[32 x i8]`
+  // for `target("dx.CBuffer", [32 x i8])`) is one array element's declared
+  // byte size.
+  auto *ElemArrayTy = dyn_cast<ArrayType>(HandleTy->getTypeParameter(0));
+  if (!ElemArrayTy || !ElemArrayTy->getElementType()->isIntegerTy(8))
+    return std::nullopt;
+
+  RootConstantAccess Access;
+  Access.Handle = &Handle;
+  Access.Space = static_cast<uint32_t>(SpaceC->getZExtValue());
+  Access.Register = static_cast<uint32_t>(RegisterC->getZExtValue());
+  Access.RangeSize = static_cast<uint32_t>(RangeSize);
+  Access.ElementSize = static_cast<uint32_t>(ElemArrayTy->getNumElements());
+  return Access;
 }
 
 /// Collects every `llvm.dx.resource.load.cbufferrow.4.*` call \p Handle is
 /// used through, or `std::nullopt` if any use is something else (a
-/// non-constant row index, a different `cbufferrow.N` width, or any other
-/// call) -- in which case \p Handle is left entirely alone, for
+/// different `cbufferrow.N` width, or any other call) -- in which case
+/// \p Handle is left entirely alone, for
 /// `feme::cpu::checkSupportedRaisedOps` to reject exactly as before this
-/// pass existed, rather than partially rewriting it.
+/// pass existed, rather than partially rewriting it. A row index need not
+/// be constant (roadmap R25); it is kept as whatever `Value` the load
+/// already uses.
 std::optional<SmallVector<RootConstantRowLoad, 4>>
 collectRowLoads(CallInst &Handle) {
   SmallVector<RootConstantRowLoad, 4> Loads;
@@ -87,10 +112,7 @@ collectRowLoads(CallInst &Handle) {
     auto *CI = dyn_cast<CallInst>(U);
     if (!CI || getIntrinsicID(CI) != Intrinsic::dx_resource_load_cbufferrow_4)
       return std::nullopt;
-    auto *RowC = dyn_cast<ConstantInt>(CI->getArgOperand(1));
-    if (!RowC)
-      return std::nullopt;
-    Loads.push_back(RootConstantRowLoad{CI, RowC->getZExtValue()});
+    Loads.push_back(RootConstantRowLoad{CI, CI->getArgOperand(1)});
   }
   return Loads;
 }
@@ -169,19 +191,24 @@ void attachRootConstantMetadata(Function &F, uint32_t RootConstantSize,
 Function *lowerFunctionRootConstants(Function &F) {
   if (F.isDeclaration() || usesResourceHeap(F))
     return nullptr;
-
-  std::optional<RootConstantAccess> Access = matchRootConstantAccess(F);
-  if (!Access)
+  if (!matchRootConstantAccess(F))
     return nullptr;
 
   Value *RootConstants;
   Value *RootConstantSize;
   Function *NewF = addRootConstantParams(F, RootConstants, RootConstantSize);
 
+  // Re-matched against `NewF` rather than reusing the match against `F`
+  // above: a dynamic row or array index (roadmap R25) may be one of `F`'s
+  // own arguments, which `addRootConstantParams` has just replaced with
+  // `NewF`'s corresponding one -- the match above only existed to decide
+  // whether this function has anything to lower at all, cheaply, before
+  // committing to rebuilding it.
+  std::optional<RootConstantAccess> Access = matchRootConstantAccess(*NewF);
   uint32_t RootConstantSizeNeeded =
       lowerRootConstantAccess(*Access, RootConstants, RootConstantSize);
   attachRootConstantMetadata(*NewF, RootConstantSizeNeeded, Access->Space,
-                            Access->Register);
+                             Access->Register);
   return NewF;
 }
 
@@ -193,52 +220,73 @@ std::optional<RootConstantAccess> matchRootConstantAccess(Function &F) {
   if (F.isDeclaration())
     return std::nullopt;
 
-  CallInst *Handle = nullptr;
-  uint32_t Space = 0;
-  uint32_t Register = 0;
+  std::optional<RootConstantAccess> Access;
   for (Instruction &I : instructions(F)) {
     auto *CI = dyn_cast<CallInst>(&I);
     if (!CI || getIntrinsicID(CI) != Intrinsic::dx_resource_handlefrombinding)
       continue;
-    if (std::optional<std::pair<uint32_t, uint32_t>> Binding =
+    if (std::optional<RootConstantAccess> Matched =
             matchRootConstantHandle(*CI)) {
-      if (Handle)
+      if (Access)
         return std::nullopt; // More than one candidate: reject both.
-      Handle = CI;
-      Space = Binding->first;
-      Register = Binding->second;
+      Access = std::move(Matched);
     }
   }
-  if (!Handle)
+  if (!Access)
     return std::nullopt;
 
   std::optional<SmallVector<RootConstantRowLoad, 4>> Loads =
-      collectRowLoads(*Handle);
+      collectRowLoads(*Access->Handle);
   if (!Loads)
     return std::nullopt;
 
-  return RootConstantAccess{Handle, std::move(*Loads), Space, Register};
+  Access->Loads = std::move(*Loads);
+  return Access;
 }
 
 uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
                                  Value *RootConstants,
                                  Value *RootConstantSize) {
-  uint32_t RootConstantSizeNeeded = 0;
+  LLVMContext &Ctx = Access.Handle->getContext();
+  Type *I32Ty = Type::getInt32Ty(Ctx);
+  Type *I64Ty = Type::getInt64Ty(Ctx);
+  // Roadmap R25: the required span is the binding's full advertised size
+  // (every byte a host is expected to supply for it), not merely the
+  // subset of rows this function's own loads happen to touch statically --
+  // which is no longer even knowable once a row or the array index is
+  // dynamic (see the file comment above).
+  uint32_t RootConstantSizeNeeded = Access.ElementSize * Access.RangeSize;
+
+  // The array index is the same for every load through this one handle
+  // (DXIL's `handlefrombinding` binds one specific element); constant-folds
+  // away entirely for the common non-array (`RangeSize == 1`, `Index ==
+  // 0`) case, leaving the exact code a narrower binding produced before
+  // R25.
+  Value *Index = Access.Handle->getArgOperand(3);
+
   for (const RootConstantRowLoad &RL : Access.Loads) {
     // Rewrites `RL` into a bounds-checked load from `RootConstants`: reads
     // zero for any component wholly or partly outside `RootConstantSize`'s
     // declared span, matching "root-constant accesses outside
     // `RootConstantSize` read zero" in feme/docs/FeMeCPUDesign.md's "Root
     // constants" section (the same behaviour a descriptor-backed constant
-    // buffer's bounds check gives an out-of-range read).
+    // buffer's bounds check gives an out-of-range read). Both an
+    // out-of-range row and an out-of-range array index end up caught by
+    // the same check: `BaseOffset` grows past `RootConstantSize` either
+    // way, since that is the binding's full advertised size.
     auto *RetTy = cast<StructType>(RL.Load->getType());
     unsigned NumComponents = RetTy->getNumElements();
     Type *ElemTy = RetTy->getElementType(0);
     uint32_t ComponentSize = RowSizeBytes / NumComponents;
-    uint64_t RowByteOffset = RL.Row * RowSizeBytes;
-    RootConstantSizeNeeded =
-        std::max(RootConstantSizeNeeded,
-                 static_cast<uint32_t>(RowByteOffset) + RowSizeBytes);
+
+    IRBuilder<> Builder(RL.Load);
+    Value *ElementOffset =
+        Builder.CreateMul(Index, ConstantInt::get(I32Ty, Access.ElementSize),
+                          "root_const.elem_off");
+    Value *RowOffset = Builder.CreateMul(
+        RL.Row, ConstantInt::get(I32Ty, RowSizeBytes), "root_const.row_off");
+    Value *BaseOffset =
+        Builder.CreateAdd(ElementOffset, RowOffset, "root_const.base_off");
 
     // A `select` between the loaded value and zero is not enough on its
     // own: unlike a descriptor-backed load (whose bounds check guards a
@@ -247,13 +295,13 @@ uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
     // `RootConstants` even when the whole block is empty (a null
     // pointer -- see `feme::cpu::DispatchResources::RootConstants`) or too
     // small for this row. A real (uniform -- this bounds check depends
-    // only on the dispatch-wide `RootConstantSize`, never on per-lane
-    // data) branch guards the load itself instead.
-    IRBuilder<> Builder(RL.Load);
-    Value *InBounds = Builder.CreateICmpUGE(
-        RootConstantSize,
-        Builder.getInt32(static_cast<uint32_t>(RowByteOffset) + RowSizeBytes),
-        "root_const.inbounds");
+    // only on the dispatch-wide `RootConstantSize` and this access's own
+    // operands, never on per-lane data) branch guards the load itself
+    // instead.
+    Value *RowEnd =
+        Builder.CreateAdd(BaseOffset, ConstantInt::get(I32Ty, RowSizeBytes));
+    Value *InBounds =
+        Builder.CreateICmpUGE(RootConstantSize, RowEnd, "root_const.inbounds");
 
     Instruction *ThenTerm = nullptr;
     Instruction *ElseTerm = nullptr;
@@ -266,9 +314,12 @@ uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
     // assembling `Result` (itself ordinary, non-`phi` instructions) below.
     SmallVector<PHINode *, 4> Merged(NumComponents);
     for (unsigned Component = 0; Component != NumComponents; ++Component) {
-      uint64_t ByteOffset = RowByteOffset + Component * ComponentSize;
-      Value *Ptr = ThenBuilder.CreateConstInBoundsGEP1_64(
-          ThenBuilder.getInt8Ty(), RootConstants, ByteOffset, "root_const.ptr");
+      Value *ComponentOffset = ThenBuilder.CreateAdd(
+          BaseOffset, ConstantInt::get(I32Ty, Component * ComponentSize));
+      Value *ComponentOffset64 = ThenBuilder.CreateZExt(ComponentOffset, I64Ty);
+      Value *Ptr =
+          ThenBuilder.CreateInBoundsGEP(ThenBuilder.getInt8Ty(), RootConstants,
+                                        ComponentOffset64, "root_const.ptr");
       Value *Loaded = ThenBuilder.CreateAlignedLoad(ElemTy, Ptr, Align(4),
                                                     "root_const.load");
       Merged[Component] = MergeBuilder.CreatePHI(ElemTy, 2, "root_const.value");

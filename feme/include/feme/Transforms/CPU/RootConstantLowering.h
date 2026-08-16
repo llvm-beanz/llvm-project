@@ -24,12 +24,22 @@
 //    Two or more distinct bindings remain ambiguous and are left entirely
 //    alone, for `checkSupportedRaisedOps` to reject, exactly as a single
 //    non-default binding was before R25.
-//  - Only a non-array (`RangeSize == 1`) `dx.CBuffer` handle whose every use
-//    is a `llvm.dx.resource.load.cbufferrow.4.*` call (DXIL's 32-bit-per-
+//  - An array binding (`RangeSize > 1`) is accepted, with either a constant
+//    or dynamic array index (the `handlefrombinding` call's own `Index`
+//    operand); an *unbounded* range (DXIL's `RangeSize == -1` sentinel) is
+//    not, since it has no fixed advertised size to bounds-check against.
+//  - A `llvm.dx.resource.load.cbufferrow.4.*` access (DXIL's 32-bit-per-
 //    component row shape; `cbufferrow.2`/`.8`, 64- and 16-bit components,
-//    are not yet lowered) with a *constant* row index is accepted; anything
-//    else is left for `checkSupportedRaisedOps` to reject exactly as before
-//    this pass existed.
+//    are not yet lowered) is accepted with either a constant or dynamic row
+//    index; anything else is left for `checkSupportedRaisedOps` to reject
+//    exactly as before this pass existed.
+//  - The root-constant span this access requires is the binding's full
+//    advertised size (its declared per-element byte size, from the
+//    `dx.CBuffer` handle's own type, times `RangeSize`) rather than only
+//    the span rows actually touched happen to cover -- see "Root
+//    constants" in feme/docs/FeMeCPUDesign.md for why this is required
+//    once a row or array index can be dynamic (there is no longer a fixed
+//    set of rows to inspect statically).
 //  - A function that also performs bindless (`handlefromheap`) resource
 //    access is still supported, but lowered differently: rather than this
 //    pass adding its own `root_constants`/`root_constant_size` parameters
@@ -60,17 +70,22 @@ class Value;
 
 namespace feme::cpu {
 
-/// One `llvm.dx.resource.load.cbufferrow.4.*` call reading a constant,
-/// compile-time-known row of the recognized root-constant binding.
+/// One `llvm.dx.resource.load.cbufferrow.4.*` call reading a row of the
+/// recognized root-constant binding. \p Row is the load's own row-index
+/// operand, kept as a `Value` rather than a resolved constant: roadmap R25
+/// lifted the constant-row-index restriction, so this may be a
+/// dynamically-computed `i32` just as easily as a `ConstantInt` (in which
+/// case `lowerRootConstantAccess`'s arithmetic on it constant-folds back
+/// down to the same code a compile-time-known row produced before).
 struct RootConstantRowLoad {
   llvm::CallInst *Load;
-  uint64_t Row;
+  llvm::Value *Row;
 };
 
 /// A single function's complete, supported root-constant access: the one
-/// recognized `dx.CBuffer` handle, and every `cbufferrow` load through it.
-/// See RootConstantLowering.cpp's `matchRootConstantAccess` for exactly
-/// what is recognized.
+/// recognized `dx.CBuffer` handle, every `cbufferrow` load through it, and
+/// the binding's own declared shape. See RootConstantLowering.cpp's
+/// `matchRootConstantAccess` for exactly what is recognized.
 struct RootConstantAccess {
   llvm::CallInst *Handle;
   llvm::SmallVector<RootConstantRowLoad, 4> Loads;
@@ -81,6 +96,13 @@ struct RootConstantAccess {
   /// constant block corresponds to.
   uint32_t Space = 0;
   uint32_t Register = 0;
+  /// The binding's declared array length (the `handlefrombinding` call's
+  /// own `RangeSize` operand); 1 for a non-array binding.
+  uint32_t RangeSize = 1;
+  /// One array element's declared byte size (the `dx.CBuffer` handle
+  /// type's own byte length, e.g. 32 for `target("dx.CBuffer", [32 x
+  /// i8])`).
+  uint32_t ElementSize = 0;
 };
 
 /// Returns \p F's root-constant access, if it has exactly one recognized
@@ -101,9 +123,12 @@ std::optional<RootConstantAccess> matchRootConstantAccess(llvm::Function &F);
 /// Rewrites every load in \p Access into a bounds-checked load from \p
 /// RootConstants (zero for any component outside \p RootConstantSize's
 /// declared span, see "Root constants" in feme/docs/FeMeCPUDesign.md), and
-/// erases \p Access.Handle. Returns the total root-constant byte span \p
-/// Access's own loads read, for the caller to attach to whichever
-/// `!feme.cpu.resources` metadata entry it emits.
+/// erases \p Access.Handle. Returns \p Access's binding's full advertised
+/// byte span (`Access.ElementSize * Access.RangeSize`), for the caller to
+/// attach to whichever `!feme.cpu.resources` metadata entry it emits --
+/// not merely the span \p Access's own loads happen to statically cover,
+/// which roadmap R25 made insufficient the moment a row or array index can
+/// be dynamic (see the file comment above).
 uint32_t lowerRootConstantAccess(const RootConstantAccess &Access,
                                  llvm::Value *RootConstants,
                                  llvm::Value *RootConstantSize);
