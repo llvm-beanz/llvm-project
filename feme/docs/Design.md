@@ -1015,6 +1015,27 @@ parts that are *not* mechanical:
    the Deviation note above still applies: a shader using a texture is not
    retargetable until both halves land.
 
+Status (roadmap R30): `buildAnnotatedHandleType` in `feme/lib/Transforms/
+DXIL/OpRaising.cpp` implements the table above exactly, for the bindless
+`createHandleFromHeap`/`createHandleFromBinding` path (item 1's legacy
+`!dx.resources` path remains unraised for textures/samplers, matching
+R29's own bindless-first precedent). `raiseSample`/`raiseSampleLevel`/
+`raiseTextureLoad`/`raiseGetDimensionsX` cover item 3's "raising the
+access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
+`dx.op.textureLoad` (66) and `dx.op.getDimensions`'s `.x` field (72) --
+the only texture ops LLVM's own `DXILOpLowering.cpp` already lowers a
+canonical intrinsic to, cross-checked against `-dxil-op-lower` the same
+way every other raiser in that file is. `dx.op.sampleBias`/`sampleGrad`
+(bias/gradient sampling) and every comparison-sampling/gather op
+(`sampleCmp*`, `textureGather*`) have no numbered `DXILOp<N, ...>`
+definition in this LLVM tree at all yet (`sampleCmp`/`textureGather` are
+declared `DXILOpClass`es with no wire opcode assigned), so there is
+nothing to raise from or verify against on the DXIL side -- that gap is
+upstream LLVM's, not FeMe's. See "Canonical image operations" in
+feme/docs/FeMeGraphicsDesign.md for where the canonical
+`llvm.dx.resource.sample*`/`llvm.spv.resource.sample*` intrinsics these
+raisers produce are consumed by the CPU target.
+
 #### Module metadata raising: `feme::dxil::MetadataRaisingPass`
 
 Op raising alone is not enough to retarget a DXIL module, because DXIL

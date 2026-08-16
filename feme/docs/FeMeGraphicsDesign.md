@@ -1352,6 +1352,58 @@ stages where the source specification does not define it unless an API feature
 explicitly supplies semantics. Helper invocations may sample and contribute to
 LOD calculation but may not perform storage-image writes or atomics.
 
+Status (roadmap R30): DXIL's `dx.op.sample`/`dx.op.sampleLevel`/
+`dx.op.textureLoad` raise to LLVM's own `llvm.dx.resource.sample`/
+`samplelevel`/`load.level` intrinsics (see Design.md's "Decision: texture
+and sampler handle kinds" status note); these -- not a bespoke
+`feme.image.*` MLIR dialect -- are the "canonical calls" this section
+describes, since they are already target-generic in spelling across DXIL
+and SPIR-V (`llvm.spv.resource.sample*` is SPIR-V's counterpart, produced
+by the new `ImageSampleExplicitLodPattern`/existing
+`ImageSampleImplicitLodPattern` in `feme/lib/Conversion/SPIRVToLLVM/
+SPIRVToLLVMPatterns.cpp`) and LLVM's DirectX/SPIR-V backends already
+lower them to real wire-format ops, exactly mirroring how a typed buffer
+access was never given its own `feme.buffer.*` spelling either.
+`feme::cpu::ResourceLoweringPass` (`lowerImageAccesses` in
+ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
+`dx.Texture`/`dx.Sampler` handle pair's sample/load into
+`feme.cpu.image.sample.2d.v4f32`/`samplecmp.2d.f32`/`load.2d.v4f32`
+(`feme::cpu::ImageCalls`), implemented by `runtime/CPU/FeMeRuntimeCPU.c`'s
+point/bilinear filtering, all five addressing modes, explicit-LOD mip
+selection and PCF-style comparison sampling.
+
+What R30 leaves for a later increment, each for a concrete, documented
+reason rather than an oversight:
+
+- **Bias/gradient sampling and gather.** DXIL has no numbered wire opcode
+  for comparison sampling/gather in this LLVM tree yet (see Design.md's
+  status note), so only the DXIL import half is blocked upstream; bias/
+  gradient sampling has no import-side blocker but is simply not
+  implemented yet.
+- **Active-lane SIMD widening for a divergent sample.**
+  `feme::cpu::SIMDize.cpp`'s `FunctionWidener` recognizes
+  `feme.cpu.resource.*` calls (`MatchedResourceCall`) specifically for its
+  per-lane scalarization; `feme.cpu.image.*` calls are a different,
+  wider operand shape (two heaps, two descriptor indices, multiple
+  coordinate operands) that does not fit that abstraction (see
+  ImageCalls.h's file comment), so a texture sample under a divergent wave
+  condition is not yet widened/scalarized the way a divergent buffer
+  access already is. A uniform sample (every lane samples the same
+  coordinates and descriptor, the common compute-shader case) already
+  works today, since `SIMDize` only needs to touch a genuinely divergent
+  value at all.
+- **1D and 3D/cube sampling and CPU-side SPIR-V-sourced image lowering**
+  are not implemented; the runtime helpers' addressing/format/filtering
+  building blocks are dimension-agnostic (see `runtime/CPU`'s own scope
+  note) and `feme::cpu::SPIRVResourceLoweringPass` does not yet
+  materialize an image/sampler heap for a bound (non-bindless) SPIR-V
+  handle, so both are a mechanical, on-demand extension rather than a
+  redesign.
+- **Texel offsets.** `feme::cpu::ResourceLoweringPass` only lowers a
+  sample/load whose offset operand is a compile-time-zero constant;
+  a nonzero offset is left as an unraised `llvm.dx.resource.*` call
+  rather than silently dropped.
+
 ### Texture layout and formats
 
 The API-neutral image descriptor supports linear and FeMe-private tiled
@@ -1374,6 +1426,23 @@ compatibility rules in the API runtime.
 All image address arithmetic uses checked operations before forming a host
 pointer. Out-of-range shader accesses return the source API's required robust
 value or suppress writes; they never access unrelated process memory.
+
+Status (roadmap R30): `runtime/CPU/FeMeRuntimeCPU.c`'s `femeRTImageFormatElementSize`/
+`femeRTUnpackImageTexel` implement this table's "initial" slice --
+`R32G32B32A32_FLOAT` (the identity format) and `R8G8B8A8_UNORM`/
+`R8G8B8A8_UNORM_SRGB` (packed, with sRGB-to-linear decode on sampling for
+the latter, per the bullet list above) -- covering typed load/store
+conversion and the sRGB bullet concretely; render-target/blend/depth-
+stencil/multisample support and encode-on-attachment-store are graphics-
+executor (G3+) concerns this milestone does not reach. Every other
+`feme::cpu::ResourceFormat` is a mechanical repeat of the same
+format-to-decoder switch, added on demand -- the same "Additional formats
+extend one helper implementation rather than every access site" pattern
+`FeMeCPUDesign.md`'s "Descriptor formats" already establishes for buffers.
+All image address arithmetic is checked before forming a host pointer via
+the per-mip `FemeImageSubresourceLayout`'s own `SizeInBytes` bound (see
+`femeRTFetchTexel2D`), matching the buffer-access bounds-checking rule
+this section's own paragraph above requires.
 
 ## Software Graphics Executor
 
