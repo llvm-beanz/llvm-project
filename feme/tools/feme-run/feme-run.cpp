@@ -73,6 +73,16 @@
 // using a traditional binding (heap YAML `bindings`) is rejected -- only
 // the logical dynamic heap (`resource-heap`) is supported.
 //
+// Roadmap step R31 adds the heap YAML file's `images` list (see
+// `ImageEntry`): a `feme::cpu::FemeImageDescriptor` per entry, placed in the
+// separate image heap `feme::cpu::DispatchResources::ImageHeap` already
+// threads through both `JITEngine::dispatch` and `runDispatch` (see roadmap
+// step R29's ABI fold) -- needed by every test exercising a bindless
+// `feme.cpu.image.*` access (see feme/docs/Roadmap.md's §2.6.1,
+// "Infrastructure prerequisites"). Only a single mip level and (for a
+// non-array dimension) a single array layer are supported for now; see
+// `ImageEntry`'s own comment for the full scope note.
+//
 // Roadmap step R14 adds `-O` (see feme/docs/Roadmap.md's §2.2.5
 // "Optimization level"): `feme::cpu::JITEngine::create` has always run
 // `feme::OptimizerPipeline` on the CPU-lowered module before JIT-ing it
@@ -158,17 +168,48 @@ struct BindingFile {
   std::vector<HeapEntry> Entries;
 };
 
+/// One `images` entry in the heap YAML file (roadmap R31, "heap YAML image
+/// resource class" -- see feme/docs/Roadmap.md's §2.6.1): a
+/// `feme::cpu::FemeImageDescriptor`, described the same declarative way a
+/// `resource-heap`/`bindings` entry describes a `FemeDescriptor`, but placed
+/// in the separate image heap the ABI already threads alongside the buffer
+/// heap (see `feme::cpu::DispatchResources::ImageHeap`) rather than as a
+/// `resource-heap` `kind`, since the two are distinct ABI arrays with
+/// distinct descriptor shapes. `Dimension` and `Format` use the same
+/// lowercase, hyphen/underscore-separated spellings as `resource-heap`'s own
+/// `kind`/`format` (see `parseImageDimension`/`parseResourceFormat`).
+///
+/// Scope note: only a single mip level and (for a non-array dimension) a
+/// single array layer are supported for now, and multisample dimensions are
+/// rejected -- multisampling is explicitly a later milestone (G4, roadmap
+/// step R33), and no test yet needs a real mip chain or texture array
+/// through this tool, so their layout arithmetic (mechanical but currently
+/// untested) is deferred rather than shipped unverified.
+struct ImageEntry {
+  uint32_t Index = 0;
+  std::string Dimension;
+  std::vector<uint32_t> Extent;
+  std::string Format;
+  uint32_t ArrayLayers = 1;
+  bool Sampled = true;
+  bool Storage = false;
+  bool Depth = false;
+  std::vector<uint32_t> Data;
+};
+
 /// The whole heap YAML file's contents.
 struct HeapFile {
   std::vector<uint32_t> RootConstants;
   std::vector<HeapEntry> ResourceHeap;
   std::vector<BindingFile> Bindings;
+  std::vector<ImageEntry> Images;
 };
 
 } // namespace
 
 LLVM_YAML_IS_SEQUENCE_VECTOR(HeapEntry)
 LLVM_YAML_IS_SEQUENCE_VECTOR(BindingFile)
+LLVM_YAML_IS_SEQUENCE_VECTOR(ImageEntry)
 
 namespace llvm::yaml {
 /// A `std::vector<uint32_t>` sequence: `LLVM_YAML_IS_SEQUENCE_VECTOR`
@@ -204,11 +245,26 @@ template <> struct MappingTraits<BindingFile> {
   }
 };
 
+template <> struct MappingTraits<ImageEntry> {
+  static void mapping(IO &Io, ImageEntry &Entry) {
+    Io.mapRequired("index", Entry.Index);
+    Io.mapOptional("dimension", Entry.Dimension);
+    Io.mapOptional("extent", Entry.Extent);
+    Io.mapOptional("format", Entry.Format);
+    Io.mapOptional("array-layers", Entry.ArrayLayers, 1u);
+    Io.mapOptional("sampled", Entry.Sampled, true);
+    Io.mapOptional("storage", Entry.Storage, false);
+    Io.mapOptional("depth", Entry.Depth, false);
+    Io.mapOptional("data", Entry.Data);
+  }
+};
+
 template <> struct MappingTraits<HeapFile> {
   static void mapping(IO &Io, HeapFile &File) {
     Io.mapOptional("root-constants", File.RootConstants);
     Io.mapOptional("resource-heap", File.ResourceHeap);
     Io.mapOptional("bindings", File.Bindings);
+    Io.mapOptional("images", File.Images);
   }
 };
 } // namespace llvm::yaml
@@ -359,6 +415,173 @@ Expected<HeapStorage> buildHeapStorage(const HeapFile &File) {
   return buildEntryStorage(File.ResourceHeap);
 }
 
+/// Parses an `images` entry's `dimension` string into
+/// `feme::cpu::ImageDimension`, defaulting an empty string to `Texture2D`
+/// (the only dimension a test needs today). Returns an `Error` for any
+/// other, unrecognized spelling, and for either multisample dimension --
+/// see `ImageEntry`'s own comment for why multisampling is out of scope.
+Expected<ImageDimension> parseImageDimension(StringRef Dimension) {
+  if (Dimension.empty() || Dimension == "2d")
+    return ImageDimension::Texture2D;
+  if (Dimension == "1d")
+    return ImageDimension::Texture1D;
+  if (Dimension == "1d-array")
+    return ImageDimension::Texture1DArray;
+  if (Dimension == "2d-array")
+    return ImageDimension::Texture2DArray;
+  if (Dimension == "3d")
+    return ImageDimension::Texture3D;
+  if (Dimension == "cube")
+    return ImageDimension::TextureCube;
+  if (Dimension == "cube-array")
+    return ImageDimension::TextureCubeArray;
+  if (Dimension == "2d-ms" || Dimension == "2d-ms-array")
+    return createStringError(inconvertibleErrorCode(),
+                             "heap entry image 'dimension: %s' is not yet "
+                             "supported: multisample images are a later "
+                             "milestone (roadmap step R33)",
+                             Dimension.str().c_str());
+  return createStringError(inconvertibleErrorCode(),
+                           "unknown heap entry image 'dimension': '%s'",
+                           Dimension.str().c_str());
+}
+
+/// The byte size of one texel of \p Format, covering every
+/// `feme::cpu::ResourceFormat` enumerator (mechanical: each is a fixed
+/// number of fixed-width components). This only describes host-side
+/// storage layout for the heap YAML's own `images` entries; whether
+/// `runtime/CPU`'s image helpers can actually convert a given format is a
+/// separate, format-table concern (see "Texture layout and formats" in
+/// feme/docs/FeMeGraphicsDesign.md).
+uint32_t imageFormatElementSize(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::Unknown:
+    return 0;
+  case ResourceFormat::R32_FLOAT:
+  case ResourceFormat::R32_UINT:
+  case ResourceFormat::R32_SINT:
+  case ResourceFormat::R8G8B8A8_UNORM:
+  case ResourceFormat::R8G8B8A8_SNORM:
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_SINT:
+  case ResourceFormat::R8G8B8A8_UNORM_SRGB:
+  case ResourceFormat::R11G11B10_FLOAT:
+  case ResourceFormat::R10G10B10A2_UNORM:
+  case ResourceFormat::R10G10B10A2_UINT:
+    return 4;
+  case ResourceFormat::R32G32_FLOAT:
+  case ResourceFormat::R32G32_UINT:
+  case ResourceFormat::R32G32_SINT:
+  case ResourceFormat::R16G16B16A16_FLOAT:
+  case ResourceFormat::R16G16B16A16_UNORM:
+  case ResourceFormat::R16G16B16A16_SNORM:
+  case ResourceFormat::R16G16B16A16_UINT:
+  case ResourceFormat::R16G16B16A16_SINT:
+    return 8;
+  case ResourceFormat::R32G32B32_FLOAT:
+  case ResourceFormat::R32G32B32_UINT:
+  case ResourceFormat::R32G32B32_SINT:
+    return 12;
+  case ResourceFormat::R32G32B32A32_FLOAT:
+  case ResourceFormat::R32G32B32A32_UINT:
+  case ResourceFormat::R32G32B32A32_SINT:
+    return 16;
+  }
+  llvm_unreachable("unhandled ResourceFormat");
+}
+
+/// One `images` entry's backing storage: the byte buffer, its single
+/// `FemeImageSubresourceLayout` (see `ImageEntry`'s scope note: one mip
+/// level only), and the `FemeImageDescriptor` pointing at both. Kept
+/// alive for the dispatch's duration the same way `HeapStorage` keeps its
+/// buffers alive.
+struct ImageStorage {
+  std::vector<std::vector<uint8_t>> Buffers;
+  std::vector<FemeImageSubresourceLayout> MipLayouts;
+  std::vector<FemeImageDescriptor> Descriptors;
+};
+
+/// Builds \p Entries' backing storage, dense by each entry's own `index`
+/// field, the same convention `buildEntryStorage` uses for `resource-heap`/
+/// `bindings`.
+Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
+  ImageStorage Storage;
+  uint32_t MaxIndex = 0;
+  for (const ImageEntry &Entry : Entries)
+    MaxIndex = std::max(MaxIndex, Entry.Index);
+
+  size_t Count = Entries.empty() ? 0 : MaxIndex + 1;
+  Storage.Buffers.resize(Count);
+  Storage.MipLayouts.resize(Count);
+  Storage.Descriptors.resize(Count);
+
+  for (const ImageEntry &Entry : Entries) {
+    Expected<ImageDimension> Dimension = parseImageDimension(Entry.Dimension);
+    if (!Dimension)
+      return Dimension.takeError();
+    Expected<ResourceFormat> Format = parseResourceFormat(Entry.Format);
+    if (!Format)
+      return Format.takeError();
+    uint32_t ElemSize = imageFormatElementSize(*Format);
+    if (ElemSize == 0)
+      return createStringError(inconvertibleErrorCode(),
+                               "heap entry image %u needs a 'format'",
+                               Entry.Index);
+
+    bool IsArray = *Dimension == ImageDimension::Texture1DArray ||
+                   *Dimension == ImageDimension::Texture2DArray ||
+                   *Dimension == ImageDimension::TextureCubeArray;
+    bool Is3D = *Dimension == ImageDimension::Texture3D;
+    if (Entry.ArrayLayers != 1 && !IsArray)
+      return createStringError(inconvertibleErrorCode(),
+                               "heap entry image %u sets 'array-layers' "
+                               "but 'dimension: %s' is not an array "
+                               "dimension",
+                               Entry.Index, Entry.Dimension.c_str());
+
+    uint32_t Width = Entry.Extent.size() > 0 ? Entry.Extent[0] : 1;
+    uint32_t Height = Entry.Extent.size() > 1 ? Entry.Extent[1] : 1;
+    uint32_t Depth = Is3D && Entry.Extent.size() > 2 ? Entry.Extent[2] : 1;
+    uint32_t ArrayLayers = IsArray ? std::max<uint32_t>(1, Entry.ArrayLayers)
+                                   : 1;
+
+    FemeImageSubresourceLayout &Layout = Storage.MipLayouts[Entry.Index];
+    Layout.Offset = 0;
+    Layout.RowPitch = (uint64_t)Width * ElemSize;
+    Layout.SlicePitch = Layout.RowPitch * Height;
+    Layout.SampleStride = 0;
+    uint64_t LayerCount = Is3D ? Depth : ArrayLayers;
+    uint64_t ByteSize = Layout.SlicePitch * LayerCount;
+
+    std::vector<uint8_t> &Buffer = Storage.Buffers[Entry.Index];
+    Buffer.assign(ByteSize, 0);
+    size_t CopySize =
+        std::min<size_t>(Buffer.size(), Entry.Data.size() * sizeof(uint32_t));
+    if (CopySize > 0)
+      memcpy(Buffer.data(), Entry.Data.data(), CopySize);
+
+    FemeImageDescriptor &Desc = Storage.Descriptors[Entry.Index];
+    Desc = FemeImageDescriptor{};
+    Desc.Data = Buffer.data();
+    Desc.SizeInBytes = Buffer.size();
+    Desc.Dimension = static_cast<uint32_t>(*Dimension);
+    Desc.Format = static_cast<uint32_t>(*Format);
+    Desc.Width = Width;
+    Desc.Height = Height;
+    Desc.Depth = Depth;
+    Desc.MipLevels = 1;
+    Desc.ArrayLayers = ArrayLayers;
+    Desc.PlaneCount = 1;
+    Desc.SampleCount = 1;
+    Desc.Flags = (Entry.Sampled ? FEME_IMAGE_SAMPLED : 0u) |
+                 (Entry.Storage ? FEME_IMAGE_STORAGE : 0u) |
+                 (Entry.Depth ? FEME_IMAGE_DEPTH : 0u);
+    Desc.MipLayouts = &Layout;
+    Desc.MipLayoutCount = 1;
+  }
+  return Storage;
+}
+
 /// One `bindings` entry's backing storage: `Entries`' buffers/descriptors
 /// (see `buildEntryStorage`) plus the (space, register) identity a
 /// `feme::cpu::BoundResourceBinding` is matched by.
@@ -398,11 +621,13 @@ toBoundResourceBindings(const std::vector<BindingStorage> &Storage) {
 /// Prints every heap entry's final contents as `uint32` words, one line
 /// per entry: `heap[<index>]: <word0> <word1> ...` for a `resource-heap`
 /// entry, `binding[<space>:<register>][<index>]: <word0> <word1> ...` for a
-/// `bindings` entry, for `FileCheck` to match against (see the file
-/// comment above).
+/// `bindings` entry, and `image[<index>]: <word0> <word1> ...` for an
+/// `images` entry, for `FileCheck` to match against (see the file comment
+/// above).
 void printHeapContents(raw_ostream &OS, const HeapFile &File,
                        const HeapStorage &Storage,
-                       const std::vector<BindingStorage> &BindingsStorage) {
+                       const std::vector<BindingStorage> &BindingsStorage,
+                       const ImageStorage &Images) {
   auto PrintBuffer = [&](const std::vector<uint8_t> &Buffer) {
     for (size_t I = 0; I + sizeof(uint32_t) <= Buffer.size();
          I += sizeof(uint32_t)) {
@@ -423,6 +648,10 @@ void printHeapContents(raw_ostream &OS, const HeapFile &File,
          << Entry.Index << "]:";
       PrintBuffer(Binding.Entries.Buffers[Entry.Index]);
     }
+  }
+  for (const ImageEntry &Entry : File.Images) {
+    OS << "image[" << Entry.Index << "]:";
+    PrintBuffer(Images.Buffers[Entry.Index]);
   }
 }
 
@@ -563,7 +792,7 @@ Expected<feme::Module> loadModule(StringRef Filename, feme::Context &Ctx) {
 /// is reserved at all).
 Error runObjectMode(StringRef Filename, StringRef EntryPoint,
                     const HeapFile &Heap, std::array<uint32_t, 3> GroupCount,
-                    const HeapStorage &Storage) {
+                    const HeapStorage &Storage, const ImageStorage &Images) {
   if (!Heap.Bindings.empty())
     return createStringError(
         inconvertibleErrorCode(),
@@ -592,6 +821,7 @@ Error runObjectMode(StringRef Filename, StringRef EntryPoint,
 
   DispatchResources Resources;
   Resources.ResourceHeap = Storage.Descriptors;
+  Resources.ImageHeap = Images.Descriptors;
   runDispatch(EntryAddr->toPtr<EntryPointFn>(), ResourceInfo{}, Resources,
               GroupCount);
   return Error::success();
@@ -682,13 +912,19 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  Expected<ImageStorage> Images = buildImageStorage(Heap.Images);
+  if (!Images) {
+    errs() << "feme-run: " << toString(Images.takeError()) << "\n";
+    return 1;
+  }
+
   if (ObjectMode) {
     if (Error E = runObjectMode(InputFilename, EntryPoint, Heap, GroupCount,
-                                *Storage)) {
+                                *Storage, *Images)) {
       errs() << "feme-run: " << toString(std::move(E)) << "\n";
       return 1;
     }
-    printHeapContents(outs(), Heap, *Storage, /*BindingsStorage=*/{});
+    printHeapContents(outs(), Heap, *Storage, /*BindingsStorage=*/{}, *Images);
     return 0;
   }
 
@@ -741,12 +977,13 @@ int main(int argc, char **argv) {
   Resources.ResourceHeap = Storage->Descriptors;
   Resources.BoundResources = Bindings;
   Resources.RootConstants = RootConstantBytes;
+  Resources.ImageHeap = Images->Descriptors;
 
   if (Error E = (*Engine)->dispatch(Resources, GroupCount)) {
     errs() << "feme-run: " << toString(std::move(E)) << "\n";
     return 1;
   }
 
-  printHeapContents(outs(), Heap, *Storage, *BindingsStorage);
+  printHeapContents(outs(), Heap, *Storage, *BindingsStorage, *Images);
   return 0;
 }
