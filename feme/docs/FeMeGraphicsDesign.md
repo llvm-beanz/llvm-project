@@ -539,6 +539,57 @@ validates constant element IDs and component ranges, rewrites DXIL
 source-independent module for target lowering. A non-CPU backend may lower the
 same operations differently.
 
+Status: implemented for the vertex and fragment stages (roadmap R20,
+**completing G0**). `feme::StageOpKind`/`getOrInsertStageOp`/the
+`createStage*` builders and matchers (`feme/include/feme/Core/StageOps.h`)
+declare the `feme.stage.*` family as named calls, mangled per overload the
+same way DXIL's own `dx.op.*` calling convention is (e.g.
+`feme.stage.input.load.f32`). A new `FeMeTransformsGraphics` library
+(`feme/lib/Transforms/Graphics`) provides the canonicalization and
+validation passes this section calls for:
+
+- `feme::graphics::CanonicalizeStagePass` (`feme-graphics-canonicalize-stage`)
+  rewrites a vertex/fragment entry point's DXIL- and SPIR-V-derived stage IR
+  into `feme.stage.*`. On the DXIL side, it raises `loadInput`(4)/
+  `storeOutput`(5) directly (neither has an LLVM intrinsic form for
+  `feme::dxil::OpRaisingPass` to raise through, since both need the entry's
+  `!feme.signature` to resolve their signature-ID operand to an `ElementID`
+  -- context that context-free pass does not have), along with
+  `IsHelperLane`(221) and the pull-model interpolation family
+  (`EvalCentroid`/`EvalSampleIndex`/`EvalSnapped`, opcodes 89/88/87); it also
+  renames the `llvm.dx.discard`/derivative/quad-read intrinsic calls
+  `OpRaisingPass` already produces into their `feme.stage.*` peers. On the
+  SPIR-V side, it rewrites a non-builtin `Input`/`Output` stage-IO global's
+  load/store (address space 7/8 with `!spirv.Decorations` metadata, from
+  roadmap R19) into `feme.stage.input.load`/`output.store`, building and
+  attaching the entry's `feme::EntrySignature` from those decorations along
+  the way -- the piece R19's own status note explicitly left to this
+  milestone -- and renames the analogous `llvm.spv.discard`/derivative/
+  quad-read intrinsics the same way (mapping the unconditional
+  `llvm.spv.discard` onto a constant-true `feme.stage.discard`, and SPIR-V's
+  implicit-precision `llvm.spv.ddx`/`.ddy` conservatively onto the *fine*
+  derivative variant, since DXIL has no implicit-precision op to pair it
+  with).
+- `feme::graphics::ValidateStagePass` (`feme-graphics-validate-stage`)
+  diagnoses (through `LLVMContext::emitError`, never rewrites) a
+  `feme.stage.*` call whose element/row/component operands are non-constant,
+  refer to an unknown element, use the wrong `SignatureDirection`, or fall
+  outside the element's declared row/component range, and any stage
+  operation that is not legal for the entry's declared stage (e.g. `discard`
+  in a vertex shader).
+
+Both passes are registered in `feme-opt`; see
+`test/Transforms/Graphics/*.ll` and
+`unittests/Transforms/Graphics/{CanonicalizeStage,ValidateStage}Test.cpp`.
+Left for later milestones, matching "only operations required by
+implemented stages are legal" above: the patch, stream-emission, mesh-output
+and ray operation families; SPIR-V's `demote`/`is_helper` (there is no
+upstream `llvm.spv.*` intrinsic to raise from yet, unlike DXIL's `Discard`/
+`IsHelperLane`); arrays/structs of stage-IO variables (the same limitation
+R19's SPIR-V conversion already has); and mesh output-count/ray
+payload-size uniformity validation, which needs those later operation
+families to exist first.
+
 ### Builtins and system values
 
 System values use the same signature model when they are stage inputs or
