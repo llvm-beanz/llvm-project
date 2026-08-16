@@ -82,22 +82,6 @@ getShaderWaveSizeRequirement(const llvm::Module &M) {
   return std::nullopt;
 }
 
-std::array<uint32_t, 3> getThreadGroupSize(const Function &F) {
-  std::array<uint32_t, 3> Size{1, 1, 1};
-  if (!F.hasFnAttribute("hlsl.numthreads"))
-    return Size;
-  StringRef NumThreads = F.getFnAttribute("hlsl.numthreads").getValueAsString();
-  SmallVector<StringRef, 3> Components;
-  NumThreads.split(Components, ',');
-  if (Components.size() != 3)
-    return Size;
-  std::array<uint32_t, 3> Result;
-  for (unsigned I = 0; I != 3; ++I)
-    if (!llvm::to_integer(Components[I], Result[I], 10))
-      return Size;
-  return Result;
-}
-
 /// Finds the sole (or named) `hlsl.shader="compute"` function in \p M,
 /// mirroring `feme::cpu::PreparePass`'s own selection rule -- needed here
 /// because this runs *before* that pass, to resolve the wave size that gets
@@ -326,7 +310,7 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
                              "pipeline",
                              EntryName.c_str());
 
-  std::array<uint32_t, 3> GroupSize = getThreadGroupSize(*WaveBody);
+  std::array<uint32_t, 3> GroupSize = getDeclaredGroupSize(*WaveBody);
   if (GroupSize[0] * GroupSize[1] * GroupSize[2] == 0)
     return createStringError(inconvertibleErrorCode(),
                              "shader declares an empty thread group");

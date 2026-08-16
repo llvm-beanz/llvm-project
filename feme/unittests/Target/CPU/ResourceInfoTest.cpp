@@ -65,6 +65,38 @@ TEST(ResourceInfoTest, ArtifactSymbolName) {
   EXPECT_EQ(getArtifactSymbolName("main"), "feme_cpu_info_main");
 }
 
+TEST(ResourceInfoTest, GetDeclaredGroupSizeReadsNumThreadsAttribute) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 { ret void }
+    attributes #0 = { "hlsl.numthreads"="8,2,1" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_EQ(getDeclaredGroupSize(*M->getFunction("main")),
+            (std::array<uint32_t, 3>{8, 2, 1}));
+}
+
+TEST(ResourceInfoTest, GetDeclaredGroupSizeDefaultsToOnesWithoutAttribute) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() { ret void }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_EQ(getDeclaredGroupSize(*M->getFunction("main")),
+            (std::array<uint32_t, 3>{1, 1, 1}));
+}
+
+TEST(ResourceInfoTest, GetDeclaredGroupSizeDefaultsToOnesWhenMalformed) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 { ret void }
+    attributes #0 = { "hlsl.numthreads"="8,2" }
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_EQ(getDeclaredGroupSize(*M->getFunction("main")),
+            (std::array<uint32_t, 3>{1, 1, 1}));
+}
+
 TEST(ResourceInfoTest, SerializeParseRoundTrips) {
   ArtifactInfo Info;
   Info.WaveSize = 8;

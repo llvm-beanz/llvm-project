@@ -8,7 +8,10 @@
 
 #include "feme/Target/CPU/ResourceInfo.h"
 
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringExtras.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
@@ -57,6 +60,22 @@ readBoundResourceMetadata(const Module &M, StringRef EntryName) {
 }
 
 } // namespace
+
+std::array<uint32_t, 3> feme::cpu::getDeclaredGroupSize(const Function &F) {
+  std::array<uint32_t, 3> Size{1, 1, 1};
+  if (!F.hasFnAttribute("hlsl.numthreads"))
+    return Size;
+  StringRef NumThreads = F.getFnAttribute("hlsl.numthreads").getValueAsString();
+  SmallVector<StringRef, 3> Components;
+  NumThreads.split(Components, ',');
+  if (Components.size() != 3)
+    return Size;
+  std::array<uint32_t, 3> Result;
+  for (unsigned I = 0; I != 3; ++I)
+    if (!llvm::to_integer(Components[I], Result[I], 10))
+      return Size;
+  return Result;
+}
 
 std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
                                                      StringRef EntryName) {

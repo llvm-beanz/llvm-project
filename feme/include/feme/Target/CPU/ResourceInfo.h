@@ -41,17 +41,29 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace llvm {
+class Function;
 class GlobalVariable;
 class Module;
 } // namespace llvm
 
 namespace feme::cpu {
+
+/// The declared thread-group dimensions (an entry point's `hlsl.numthreads`
+/// function attribute), or `{1, 1, 1}` if \p F declares none, or the
+/// attribute is not exactly three comma-separated integers. Shared by
+/// `feme::cpu::CompiledStage::create` (resolving the shape it compiles
+/// against) and `feme::Driver`'s AOT retargeting path (resolving the same
+/// shape for `ArtifactInfo` reflection, see "Heap usage discovery" in
+/// feme/docs/FeMeCPUDesign.md), so both stay in agreement about what a
+/// missing/malformed attribute means.
+std::array<uint32_t, 3> getDeclaredGroupSize(const llvm::Function &F);
 
 /// One traditionally-bound resource range's assignment in the reserved heap
 /// prefix `feme::cpu::BoundResourceNormalizationPass` builds (see
