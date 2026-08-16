@@ -13,6 +13,7 @@ add_feme_unittest(FeMeTargetCPUTests
   AOTDispatchTest.cpp
   CompiledStageTest.cpp
   JITEngineTest.cpp
+  PipelineTest.cpp
   ResourceHeapTest.cpp
   ResourceInfoTest.cpp
   WaveSizeTest.cpp

@@ -21,6 +21,7 @@
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
+#include "feme/Transforms/Graphics/ValidateStage.h"
 
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
@@ -90,34 +91,42 @@ private:
   bool SawError = false;
 };
 
-/// Finds the sole (or named) `hlsl.shader` function in \p M -- see
+/// Finds the sole (or named) \p Stage entry point in \p M -- see
 /// `feme::cpu::PreparePass`'s own (equivalent, but `Error`-reporting-via-
 /// diagnostic-handler rather than `Expected`-returning) selection rule,
 /// which this mirrors so `runPipeline` can name-check its own precondition
 /// before handing \p EntryPoint to that pass.
-Expected<Function *> selectEntryPoint(Module &M, StringRef EntryPoint) {
+Expected<Function *> selectEntryPoint(Module &M, StringRef EntryPoint,
+                                      feme::ShaderStage Stage) {
+  StringRef StageName = feme::getShaderStageName(Stage);
+  auto declaresStage = [Stage](const Function &F) {
+    return feme::getShaderStage(F) == Stage;
+  };
+
   if (!EntryPoint.empty()) {
     Function *F = M.getFunction(EntryPoint);
-    if (!F || !feme::isShaderEntryPoint(*F))
-      return createStringError(inconvertibleErrorCode(),
-                               "no compute entry point named '%s'",
-                               EntryPoint.str().c_str());
+    if (!F || !declaresStage(*F))
+      return createStringError(
+          inconvertibleErrorCode(), "no %s entry point named '%s'",
+          StageName.str().c_str(), EntryPoint.str().c_str());
     return F;
   }
   Function *Found = nullptr;
   for (Function &F : M) {
-    if (!feme::isShaderEntryPoint(F))
+    if (!declaresStage(F))
       continue;
     if (Found)
       return createStringError(
           inconvertibleErrorCode(),
-          "module has more than one compute entry point; select one by "
-          "name");
+          "module has more than one %s entry point; select one by "
+          "name",
+          StageName.str().c_str());
     Found = &F;
   }
   if (!Found)
     return createStringError(inconvertibleErrorCode(),
-                             "module has no compute entry point");
+                             "module has no %s entry point",
+                             StageName.str().c_str());
   return Found;
 }
 
@@ -167,12 +176,35 @@ void alignRuntimeModuleTriple(Module &RuntimeMod, const Module &M) {
 
 namespace feme::cpu {
 
-Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
-                                     unsigned WaveSize) {
-  Expected<Function *> Entry = selectEntryPoint(M, EntryPoint);
+Expected<PipelineResult> runPipeline(Module &M,
+                                     const StageCompileOptions &Opts) {
+  Expected<Function *> Entry = selectEntryPoint(M, Opts.EntryPoint, Opts.Stage);
   if (!Entry)
     return Entry.takeError();
   std::string EntryName = (*Entry)->getName().str();
+
+  // "Preparation and validation" in feme/docs/FeMeGraphicsDesign.md asks
+  // for a graphics validation step that runs *before* mutation -- i.e.
+  // before `feme::cpu::PreparePass` below restructures control flow --
+  // diagnosing a `feme.stage.*` operand/signature/stage-legality violation
+  // against the shader exactly as authored. Every existing (compute)
+  // caller selects `ShaderStage::Compute`, which has no `feme.stage.*`
+  // operations to validate, so this is a no-op for them.
+  if (Opts.Stage != feme::ShaderStage::Compute) {
+    PassBuilder ValidatePB;
+    ModuleAnalysisManager ValidateMAM;
+    ValidatePB.registerModuleAnalyses(ValidateMAM);
+    ErrorDiagnosticGuard ValidateGuard(M.getContext());
+    ModulePassManager ValidateMPM;
+    ValidateMPM.addPass(feme::graphics::ValidateStagePass());
+    ValidateMPM.run(M, ValidateMAM);
+    if (ValidateGuard.sawError())
+      return createStringError(
+          inconvertibleErrorCode(),
+          "feme-cpu pipeline: graphics validation failed for '%s' (see "
+          "stderr)",
+          EntryName.c_str());
+  }
 
   {
     PassBuilder PB;
@@ -211,7 +243,7 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
     // module's `llvm.dx.thread.id` already is. A no-op for a DXIL-sourced
     // module, which has no such construct to fold.
     Normalize.addPass(SPIRVBuiltinFoldingPass());
-    Normalize.addPass(PreparePass(EntryPoint));
+    Normalize.addPass(PreparePass(Opts.EntryPoint, Opts.Stage));
     Normalize.addPass(BoundResourceNormalizationPass());
     // Lowers the one register-bound constant buffer "Root constants" in
     // feme/docs/FeMeCPUDesign.md carves out an exception for, before
@@ -265,7 +297,7 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
       return std::move(E);
     if (Error E = runAndCheck("linearizing", LinearizePass()))
       return std::move(E);
-    if (Error E = runAndCheck("widening", SIMDizePass(WaveSize)))
+    if (Error E = runAndCheck("widening", SIMDizePass(Opts.WaveSize)))
       return std::move(E);
     if (Error E = runAndCheck("lowering waves for", WaveLoweringPass()))
       return std::move(E);
@@ -295,7 +327,14 @@ Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
     return createStringError(inconvertibleErrorCode(),
                              "failed to link libFeMeRuntimeCPU");
 
-  return PipelineResult{std::move(EntryName), std::move(WrapperName)};
+  return PipelineResult{std::move(EntryName), std::move(WrapperName),
+                        Opts.Stage};
+}
+
+Expected<PipelineResult> runPipeline(Module &M, StringRef EntryPoint,
+                                     unsigned WaveSize) {
+  return runPipeline(
+      M, StageCompileOptions{feme::ShaderStage::Compute, EntryPoint, WaveSize});
 }
 
 } // namespace feme::cpu

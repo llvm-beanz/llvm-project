@@ -23,4 +23,5 @@ add_mlir_library(FeMeTargetCPU
   FeMeOptimizer
   FeMeRuntimeCPU
   FeMeTransformsCPU
+  FeMeTransformsGraphics
   )
