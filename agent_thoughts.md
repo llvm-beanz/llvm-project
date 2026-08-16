@@ -15409,3 +15409,411 @@ image/sampler-heap coverage; no regressions in the pre-existing suite. Ran
 `check-feme`'s own dependency graph -- which rebuilds `feme-opt`, `feme-run`,
 `feme`, and every gtest binary the lit suite's `RUN:` lines invoke -- is
 exercised, not just the unit-test binaries I touched directly.
+
+# Agent thoughts: roadmap step R30 (image/sampler canonicalization from DXIL/SPIR-V, `runtime/CPU` sampling helpers, format table, CPU consumption)
+
+## Task
+
+The user asked me to implement roadmap R30, quoting its own summary:
+`feme.image.*`/`feme.sampler.*` canonicalization from DXIL (including
+§1.3's handle-kind gap) and SPIR-V (including §1.2's sampling variants),
+the `runtime/CPU` sampling helpers (1D/2D addressing, mip layout,
+point/linear filtering, explicit and implicit LOD, addressing modes,
+comparison sampling), the initial format table with sRGB, and active-lane
+SIMD lowering -- "Completes G2, unblocking V5 and W3". The generic
+instructions also asked for small, individually-tested commits, a
+clang-formatted/LLVM-coding-standards-conforming change, design-doc updates
+for any deviation, and this file's own append-only log.
+
+## Reading the request against reality first
+
+R30 is a large milestone by the roadmap's own accounting -- R29's own
+closing note explicitly scoped "canonical operations, format conversion,
+and sampling/addressing math" out to R30, i.e. R30 is where an entire new
+subsystem (image/sampler access, not just descriptors) gets built from
+nothing. Before writing any code I spent real effort establishing what
+"canonical `feme.image.*`/`feme.sampler.*` operations" actually means in
+this codebase, because the roadmap's prose is easy to misread as "invent a
+new MLIR dialect." It does not mean that. Two background `explore` agents
+plus direct reading established:
+
+- There is no `feme` MLIR dialect for canonical IR at all; the only
+  in-tree FeMe dialect is `dxsa` (DXBC's own IR). Every existing "canonical
+  op" (`feme.stage.*`, `feme.cpu.resource.*`) is an ordinary named LLVM
+  call, not a dialect operation.
+- More importantly: LLVM's own DirectX and SPIR-V backends *already*
+  define target-generic-in-spelling canonical intrinsics for texture
+  sampling -- `llvm.dx.resource.sample`/`samplelevel`/`load_level`/
+  `samplecmp*`/`gather*`/`getdimensions_*` and their `llvm.spv.resource.*`
+  counterparts (`llvm/include/llvm/IR/IntrinsicsDirectX.td`/
+  `IntrinsicsSPIRV.td`) -- exactly the same relationship a typed buffer
+  access already has (`llvm.dx.resource.load_typedbuffer`, never a
+  bespoke `feme.buffer.load`). So "canonicalization from DXIL/SPIR-V"
+  means: raise the legacy numeric `dx.op.*`/structured SPIR-V ops into
+  *these* intrinsics, the same job `feme::dxil::OpRaisingPass` and
+  `feme/lib/Conversion/SPIRVToLLVM` already do for buffers. I recorded
+  this explicitly in Design.md/FeMeGraphicsDesign.md rather than silently
+  picking it, since the roadmap's own phrasing invites the dialect
+  misreading.
+- `feme::cpu::ResourceLoweringPass`'s job is then to convert *those*
+  intrinsics into new CPU-target-private canonical calls
+  (`feme.cpu.image.*`, mirroring `feme.cpu.resource.*`), which
+  `runtime/CPU/FeMeRuntimeCPU.c` implements as scalar helpers -- the same
+  three-layer shape (source-specific op -> generic LLVM intrinsic ->
+  CPU-private call -> C helper) buffers already use.
+
+## Scope decisions I made, and why
+
+R30 as originally scoped is bigger than one session can responsibly land
+with the testing rigor this codebase holds itself to (every existing pass
+here is covered at the unit-test and lit-test level, cross-checked against
+real forward-direction lowering where one exists). I made these explicit,
+documented scope cuts rather than attempt a superficial pass at everything:
+
+1. **DXIL access raising is limited to `Sample`, `SampleLevel`,
+   `TextureLoad`, and `GetDimensions`'s `.x` field.** This file's own
+   testing discipline requires cross-checking a raiser against LLVM's own
+   `-dxil-op-lower` (the forward direction it inverts) before trusting a
+   `.td` file's opcode/intrinsic association alone. I discovered while
+   implementing this that `llvm/lib/Target/DirectX/DXIL.td` in this tree
+   has **no numbered `DXILOp<N, ...>` definition at all** for
+   `sampleCmp*`/`textureGather*` -- they are declared `DXILOpClass`
+   enumerators with no opcode assigned, and `DXILOpLowering.cpp` has no
+   case for `int_dx_resource_samplecmp*`/`gather*`/`getdimensions_xy`
+   either. There is nothing to raise from or verify against; this is an
+   upstream LLVM gap, not a FeMe one, and I recorded it prominently
+   (OpRaising.cpp's new section header comment, Design.md, Roadmap.md)
+   rather than silently only implementing three ops with no explanation.
+2. **DXIL handle-kind raising covers every kind Design.md's decision table
+   names** (`dx.Texture`/`dx.MSTexture`/`dx.FeedbackTexture`/`dx.Sampler`),
+   for the bindless `handlefromheap`/`handlefrombinding` path only --
+   matching R29's own explicit "bindless-first" precedent ("This is
+   required raised IR for the CPU target, which accepts bindless shaders
+   only"). The legacy `!dx.resources` metadata path remains unraised for
+   textures (component-count-from-access-scan, Design.md's own
+   "consequence" #1, is separate future work I did not also take on).
+3. **CPU consumption (`ResourceLoweringPass`/`runtime/CPU`) covers 2D
+   images only.** `runtime/CPU`'s own file-header scope note already
+   establishes the pattern of "cover the format-switch/access pattern
+   concretely once, extend mechanically on demand" for buffer formats;
+   I followed the same discipline for images rather than trying to cover
+   1D/3D/cube/MSAA in one pass. `femeRTApplyAddressMode` (the addressing
+   helper) is dimension-agnostic by construction specifically so a later
+   1D entry point is a mechanical repeat, not a redesign.
+4. **SPIR-V gets exactly one new conversion pattern,
+   `ImageSampleExplicitLodPattern`.** I had planned dref (comparison)
+   sampling too, based on the first explore agent's report that MLIR's
+   SPIR-V dialect has `ImageSampleDrefImplicitLod`/`DrefExplicitLod` ops.
+   That report was wrong (or matched something else): this tree's
+   `SPIRVImageOps.td` only defines `ImageSampleExplicitLod`,
+   `ImageSampleImplicitLod`, `ImageSampleProjDrefImplicitLod` (projective,
+   not plain), `ImageFetch`, `ImageRead`, `ImageWrite`, `ImageDrefGather`
+   and `ImageQuerySize`. I verified this myself by grepping the actual
+   `.td` file before writing any pattern, rather than trusting the
+   sub-agent's summary a second time -- a good reminder that
+   background-agent research needs the same skepticism as any other
+   secondhand claim, especially for "does X exist" questions.
+5. **Comparison sampling (`feme.cpu.image.samplecmp.2d.f32`) is
+   implemented in the runtime helper and the canonical-call plumbing, but
+   is currently unreachable from either DXIL (blocked upstream, see #1) or
+   SPIR-V (no plain Dref op to convert from, see #4).** I judged it still
+   worth building and testing directly (`ImageSamplingTest.
+   ComparisonSamplingLessEqualPasses` calls the compiled helper function
+   directly, bypassing the frontend) since a future MLIR upgrade or a
+   hand-written `.mlir`/`.ll` producer could reach it immediately, and the
+   design explicitly calls comparison sampling out as required. Building
+   it un-exercised-by-any-frontend-yet felt better than leaving a
+   documented TODO with no code, given the runtime-helper half is
+   genuinely complete and independently testable.
+6. **Active-lane SIMD widening for a *divergent* sample is not
+   implemented.** `feme::cpu::SIMDize.cpp`'s `FunctionWidener` scalarizes
+   a divergent `feme.cpu.resource.*` call through `MatchedResourceCall`'s
+   fixed (heap, heap-count, descriptor-index, offset, [value], mask)
+   shape. A sample call's shape -- two heaps, two descriptor indices,
+   multiple coordinate/LOD/comparison operands -- does not fit that
+   abstraction at all (which is exactly why I gave images their own
+   `ImageCalls` module rather than extending `ResourceCallKind`, see
+   ImageCalls.h's file comment). Generalizing `SIMDize.cpp`'s widening to
+   a variable-arity call shape is a real, separate piece of engineering I
+   did not have budget for this session. The practical consequence: a
+   *uniform* sample (same coordinates/descriptor for every lane -- the
+   ordinary compute-shader case, and any of this session's own tests)
+   already works today, since `SIMDize` only touches a value it proves is
+   actually divergent; a fragment-shader-style per-pixel-varying sample
+   would currently hit the pass's existing "unsupported vector type"
+   diagnostic rather than silently miscompiling. I documented this
+   explicitly rather than leave it to be discovered as a silent gap.
+
+Given all of this, **G2 is not complete** despite the roadmap's own R30
+description saying it would be; I said so plainly in the roadmap-table
+edit rather than mark the row done, and itemized exactly what remains (in
+FeMeGraphicsDesign.md's two new "Status" notes, which are the single
+source of truth I pointed both the roadmap-table edit and this log back
+to, to avoid three slightly-differently-worded copies of the same list
+drifting apart).
+
+## The canonical CPU-side call shape
+
+`feme::cpu::ImageCalls` (ImageCalls.h/.cpp) is new, deliberately separate
+from `feme::cpu::ResourceCalls`: I first tried fitting a sample access into
+`ResourceCallKind`/`MatchedResourceCall` and concluded quickly it would
+either break every existing buffer caller's assumption about that struct's
+shape or force every consumer (`SIMDize.cpp`, `Linearize.cpp`) to branch on
+which "kind" of resource call they're looking at with wildly different
+operand counts. Two calls, matching what `runtime/CPU` actually
+implements:
+
+- `feme.cpu.image.sample.2d.v4f32(image_heap, image_heap_count,
+  sampler_heap, sampler_heap_count, image_index, sampler_index, u, v, lod,
+  use_explicit_lod, mask) -> <4 x float>`
+- `feme.cpu.image.samplecmp.2d.f32(..., dref, mask) -> float`
+- `feme.cpu.image.load.2d.v4f32(image_heap, image_heap_count, image_index,
+  x, y, mip, mask) -> <4 x float>`
+
+`use_explicit_lod`/an always-`i1 true` mask (until SIMDize widening
+exists, every call this pass emits is scalar-uniform by construction) let
+one call cover both the explicit- and implicit-LOD DXIL ops
+(`SampleLevel` vs `Sample`) without two near-duplicate entry points.
+
+## `ResourceLoweringPass` extension: a genuinely separate collection pass
+
+`collectHandles`/`HandleInfo`/`lowerAccesses` (the existing buffer
+machinery) bail a function's *entire* buffer lowering if any
+`handlefromheap` call has an unrecognized handle type -- which, before my
+change, included every texture/sampler handle, since `classifyHandle` only
+recognized `dx.TypedBuffer`/`dx.RawBuffer`. I changed `collectHandles` to
+*skip* (not bail on) a `dx.Texture`/`dx.MSTexture`/`dx.FeedbackTexture`/
+`dx.Sampler` handle, and added a wholly separate `lowerImageAccesses` that
+scans the function directly for `llvm.dx.resource.sample`/`samplelevel`/
+`load_level` calls (not per-handle, since a sample call's texture and
+sampler handles are two independent operands, not a single handle's
+`.users()` list). This is deliberately **per-access, not per-function,
+tolerant**: an access `lowerImageAccesses` cannot model (a texture
+dimension other than 2D, a non-constant/nonzero texel offset) is left
+unraised on its own, independent of every other access in the same
+function -- unlike the buffer path's all-or-nothing policy, this is safe
+here because an unlowered `llvm.dx.resource.*` call remains valid,
+freestanding IR on its own (it just isn't retargetable to the CPU target
+yet), not half of one handle's accesses rewritten out from under the other
+half the way a partially-rewritten buffer handle would be.
+
+`addResourceEnvParams` now always appends **eight** trailing parameters
+instead of six: the existing `resource_heap`/`_count`,
+`sampler_heap`/`_count`, `root_constants`/`_size`, plus new
+`image_heap`/`image_heap_count` -- unconditionally, for any function that
+gets its signature grown at all, matching the existing convention that
+`sampler_heap` is already always appended even for a buffer-only function.
+`sampler_heap`/`sampler_heap_count` needed no new plumbing at all: R29
+already retyped `FemeShaderResources::SamplerHeap` to
+`const FemeSamplerDescriptor *` and threads it everywhere, so the buffer
+path's existing sampler-heap parameter is exactly the same heap
+`feme.cpu.image.*` needs.
+
+### A double-processing bug I found and fixed before it shipped
+
+My first version of `hasImageAccesses` (deciding whether a function with
+no buffer handle still needs its signature grown for images) simply
+checked "does this function contain any `dx_resource_sample*`/
+`load_level` call at all". That is wrong: for the "left unraised"
+per-access case above, the intrinsic call is still literally present after
+the pass runs, so a second look at the *same, already-grown* replacement
+function -- which happens because `ResourceLoweringPass::run`'s
+`make_early_inc_range(M.functions())` loop can revisit a function appended
+to the end of the module's function list during the same top-level pass
+run, once an earlier function in the original ordering gets replaced --
+would see `hasImageAccesses` still true and grow the signature *again*,
+producing a function with sixteen trailing parameters instead of eight. I
+caught this by writing a "leave unraised" lit test case
+(`sample_with_offset_unsupported` in resource-lowering-image-sample.ll)
+before assuming the happy path was the only path worth testing, and fixed
+`hasImageAccesses` to mirror `lowerImageAccesses`'s own eligibility check
+exactly (handle+sampler classification and zero-offset), read-only, so it
+only reports "true" for an access that would actually be rewritten.
+
+### Wiring `image_heap`/`image_heap_count` through every ABI consumer
+
+Because `addResourceEnvParams` appends the new pair *unconditionally* the
+moment any function gets its signature grown at all -- not only when it
+actually uses an image -- I had to update every place that enumerates the
+prior six parameters by name to also recognize the new two, or the very
+first `ninja check-feme` after this change would hit
+`EntryWrapperPass`'s `llvm_unreachable("unexpected wave-body parameter for
+EntryWrapperPass")` for literally any shader using any heap resource at
+all. I found this the hard way: after implementing `ResourceLoweringPass`
+in isolation and its own new lit test, the full `check-feme` run showed 33
+failures across `FeMeTransformsCPUTests`/`FeMeTargetCPUTests` -- every
+compute/vertex/fragment shader compiled end to end through the real
+pipeline. I fixed all four consumers identically (`EntryWrapperPass`'s
+`WrapperEnv`/`buildWrapperEnv` and both of its `CallArgs`-building call
+sites, `ReferenceEntryWrapperPass`, `VertexWrapperPass`,
+`FragmentWrapperPass`), loading the new fields from
+`ShaderResourcesFieldImageHeap`/`ImageHeapCount` (already defined by R29)
+and adding an `image_heap`/`image_heap_count` case to each name-matching
+`if`/`else if` chain. This is exactly the kind of "one field addition,
+four call sites" ripple I would have missed with a narrower test run --
+another reminder that `ninja check-feme` end to end, not a single
+target's unit tests, is the right validation gate for an ABI-shaped
+change, even one that looks self-contained.
+
+## Runtime helper design (`runtime/CPU/FeMeRuntimeCPU.c`)
+
+`FemeRTImageDescriptor`/`FemeRTSamplerDescriptor` mirror
+`FemeImageDescriptor`/`FemeSamplerDescriptor` (RuntimeABI.h) field for
+field, the same convention the existing `FemeRTDescriptor` buffer mirror
+already establishes (this file is compiled freestanding/as C and cannot
+include the C++ header, so the two must be kept in sync by hand, and I
+called that out at each numeric-literal use site the same way the
+existing buffer code does for `ResourceKind`/`ResourceFormat`).
+
+Concretely implemented, all covered by `ImageSamplingTest.cpp`'s nine new
+tests (JIT-compiling the real bitcode and calling the helpers directly,
+the same strategy `RuntimeCPUTest.cpp` already uses for buffers):
+
+- `femeRTApplyAddressMode`: all five `SamplerAddressMode` values (Repeat,
+  MirroredRepeat, ClampToEdge, ClampToBorder, MirrorClampToEdge),
+  operating on one coordinate axis at a time -- dimension-agnostic by
+  construction, so it is already the correct 1D building block even
+  though only a 2D entry point exists.
+- Point and bilinear filtering (`femeRTSamplePoint2D`/
+  `femeRTSampleLinear2D`/`femeRTComputeBilinearSupport`), texel centers at
+  `i + 0.5` (Direct3D/Vulkan's convention).
+- Mip selection (`femeRTSelectMipLevel`): explicit LOD clamped to
+  `[0, MipLevels - 1]`; implicit LOD defaults to level 0. I want to be
+  explicit about why, since it is the one place I made a real accuracy
+  trade-off rather than a pure scope cut: "Implicit LOD uses fragment
+  derivatives of the coordinates" is FeMeGraphicsDesign.md's own
+  requirement, and no fragment-derivative computation exists in this
+  runtime yet (quad/derivative lowering is its own explicit v1 non-goal
+  per FeMeCPUDesign.md, and R28's own deviation note already establishes
+  that quad ops are raised but not lowered). Defaulting to level 0 is
+  *exact* whenever a shader supplies its own explicit level (the ordinary
+  compute-shader case, and the only case reachable from DXIL today, since
+  `Sample`'s implicit path has no derivative source in a compute shader
+  either), and is a documented approximation, not silently wrong,
+  everywhere else.
+- Comparison sampling (`femeRTApplyCompare`, `Ref CompareFunc
+  StoredTexel`, matching D3D's `SamplerComparisonFunc`/Vulkan's
+  `VkCompareOp` convention) filters with the *same* bilinear weights a
+  color sample would use, applied to the four taps' individual 0/1
+  compare results rather than to one filtered depth value compared once
+  -- real hardware "percentage-closer filtering" behavior, and a
+  deliberate choice over the simpler-but-wrong "filter depth then
+  compare once" reading.
+- Format table: `R32G32B32A32_FLOAT` (identity) and `R8G8B8A8_UNORM`/
+  `R8G8B8A8_UNORM_SRGB` (packed, the latter IEC 61966-2-1 sRGB-decoded on
+  every sample/load, alpha never decoded). Every other
+  `feme::cpu::ResourceFormat` is the same mechanical
+  format-to-decoder-case extension the file's own pre-existing
+  buffer-format scope note already establishes as the pattern; I did not
+  try to front-load every format.
+
+### A real bug I found and fixed via testing, not review
+
+My first `femeRTComputeBilinearSupport`/`femeRTSamplePoint2D` used the
+image's *base* (`MipLevels[0]`) `Width`/`Height` to convert normalized
+`(U, V)` into texel space, regardless of which mip `Level` was actually
+selected. `ImageSamplingTest.ExplicitLodSelectsMipLevel` (a two-level
+mip chain, level 0 all-1s, level 1 a single texel of value 9, sampled at
+level 1 explicitly) caught this immediately -- it read back 0 instead of
+9, because level 1's 1x1 texel space was being addressed as if it were
+still 2x2. I added `femeRTMipExtent` (halve-and-floor-to-1, the standard
+mip-chain rule) and threaded the level-adjusted width/height through
+every texel-space computation (`femeRTComputeBilinearSupport`,
+`femeRTSamplePoint2D`, and the inline point-sample path inside
+`femeCpuImageSampleCmp2DF32`, which does not call either helper directly
+since it needs the raw compare, not a filtered color). This is a good
+demonstration of why I wrote the mip-level test *before* declaring the
+sampling helpers done -- the other eight tests (all single-mip) would
+never have exercised this path at all.
+
+## DXIL raising details worth recording
+
+`buildAnnotatedHandleType` (OpRaising.cpp) factors what used to be two
+near-identical inline `if`/`else if` chains (in
+`raiseResourceHandleFromBinding` and `raiseResourceHandleFromHeap`) into
+one shared function, extended for `Texture1D`..`TextureCubeArray`
+(-> `dx.Texture`, sharing `TypedBuffer`'s exact component-type/count
+decode, per Design.md's own observation that `ResourceTypeInfo::isTyped()`
+is true for every non-feedback texture kind), `Texture2DMS(Array)`
+(-> `dx.MSTexture`, with an extra sample-count field), `FeedbackTexture2D
+(Array)` (-> `dx.FeedbackTexture`, whose whole `Word1` is a
+`SamplerFeedbackType`, not a packed component field) and `Sampler`
+(-> `dx.Sampler`, keyed off a single `SamplerCmpOrHasCounter` bit). I did
+this refactor because both call sites needed the *exact* same new logic
+and duplicating it would have been a real risk of the two paths silently
+disagreeing on a resource kind.
+
+For the *access* raisers (`raiseSample`/`raiseSampleLevel`/
+`raiseTextureLoad`), I found the exact operand correspondence by reading
+`llvm/lib/Target/DirectX/DXILOpLowering.cpp`'s `lowerSampleOp`/
+`lowerSample`/`lowerSampleLevel`/`lowerTextureLoad` (the forward direction
+these invert) rather than guessing from the `.td` argument lists alone,
+matching this file's own stated verification standard. Two implementation
+bugs I caught via a manual `feme-opt` round-trip before committing to a
+lit test (not review): `raiseTextureLoad`'s argument-count check was off
+by one (`8` instead of the correct `9` -- opcode, handle, mip, three
+coords, three offsets), and `llvm.dx.resource.load_level`'s overload list
+was missing the mip-level operand's own type parameter (the intrinsic
+overloads on *four* `any_ty` occurrences -- result, handle, coord, level,
+offset -- and I had only supplied three), which crashed
+`Intrinsic::getOrInsertDeclaration` with an `ArrayRef` out-of-bounds
+assertion the moment a real `--reference`-mode `opt` run exercised it,
+rather than failing more legibly. Both were caught immediately by running
+`feme-opt` on a hand-written `.ll` file before writing the corresponding
+lit test's `CHECK` lines, which is the workflow I'd recommend for any
+future raiser: get the real tool's actual output first, then write the
+test against *that*, rather than writing the test from the design first
+and debugging both at once.
+
+## Testing
+
+Baseline before this step: `ninja -C build check-feme` (assertions
+enabled, ccache) discovered 1087 tests, 1085 passed, 2 unsupported.
+
+After all of this step's commits: 1098 tests discovered, 1096 passed, 2
+unsupported (the SPIR-V explicit-LOD test was appended to an existing
+`--split-input-file` lit file rather than adding a new one, so it does not
+add to the file count on its own). New coverage added along the way:
+
+- `dxil-raise-resource-handles.ll`/`dxil-raise-resource-heap-handles.ll`:
+  extended with real texture/MSTexture/FeedbackTexture/sampler cases
+  (previously only a deliberately-malformed "unhandled" case existed).
+- `dxil-raise-texture-ops.ll` (new): `Sample`/`SampleLevel`/`TextureLoad`/
+  `GetDimensions.x` raising.
+- `unittests/Runtime/CPU/ImageSamplingTest.cpp` (new): nine tests
+  JIT-calling the real compiled helpers.
+- `resource-lowering-image-sample.ll` (new): the DXIL-intrinsic ->
+  `feme.cpu.image.*` lowering, including the "left unraised" nonzero-
+  offset case that caught the double-processing bug above.
+- `resource-lowering-typed-buffer.ll`: updated for the six-to-eight
+  trailing-parameter change (the only *existing* lit test the change
+  actually broke; every other pre-existing `resource-lowering-*.ll`/
+  `simdize-*resource*.ll` test happened not to assert the exact parameter
+  list).
+- `unittests/Transforms/CPU/ResourceLoweringTest.cpp`: the one existing
+  `arg_size()` assertion updated from 7 to 9.
+- `spirv-to-llvm-sampling.mlir`: one new `--split-input-file` block for
+  `ImageSampleExplicitLod`.
+
+Ran the *full* `ninja check-feme -j$(nproc)` after every substantive change
+(not a narrower target), which is what actually caught both the
+double-processing bug and the four-ABI-consumer wiring gap -- neither
+would have shown up running only the pass's own new lit test or unit test
+in isolation.
+
+## Documentation
+
+Updated (see the separate "document roadmap step R30" commit):
+Design.md's "Decision: texture and sampler handle kinds" (a "Status
+(roadmap R30): ..." paragraph, including the upstream-DXIL-opcode-gap
+finding); FeMeGraphicsDesign.md's "Canonical image operations" (what the
+"canonical calls" concretely are and are not -- correcting the
+dialect-shaped misreading up front -- plus the itemized list of what
+remains and why) and "Texture layout and formats" (the format table's
+actual initial coverage); Roadmap.md's §1.8.4 gap-table rows (struck
+through, in the file's own established style, with care not to overclaim:
+the DXIL-comparison-sampling sub-gap is explicitly called out as still
+open and upstream-blocked even inside a "closed by R30" row), the R30
+milestone-table row itself (annotated with real status rather than marked
+simply "done", since G2 is not complete), and the §1.2/§1.3 narrative
+bullets that had referenced this work as still-open.
