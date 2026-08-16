@@ -13737,3 +13737,165 @@ unit/lit tests could give alone.
   pre-existing builtin-variable tests already do, rather than via
   deserialized binaries.
 - **`feme::EntrySignature` population**: left to R20, as discussed above.
+
+# Agent thoughts: roadmap step R20 (`feme.stage.*` and `FeMeTransformsGraphics`)
+
+## What R20 actually asks for
+
+> The `feme.stage.*` operation family for vertex/fragment (input load,
+> output store, discard, demote, is_helper, derivatives, quad read,
+> pull-model interpolation) plus `FeMeTransformsGraphics`' canonicalization
+> and validation pass, rewriting DXIL `loadInput`/`storeOutput` and SPIR-V
+> interface accesses into it. Completes G0 (see: §1.8.2, §1.4)
+
+This is the last G0 step, and the one every earlier R16-R19 status note
+pointed at as "left to R20" or "which is what actually consumes it" -- so
+before writing any code I re-read all four of their Status notes plus the
+"Canonical stage operations" design section itself to make sure I actually
+understood what each earlier step deliberately left undone, rather than
+re-deriving it from scratch. That paid off directly: R18's note says
+DXIL's `loadInput`/`storeOutput` opcodes still aren't raised by
+`OpRaisingPass` because it's opcode-only and context-free, and R19's note
+says SPIR-V's stage-IO globals convert but don't populate
+`feme::EntrySignature` yet. Both were exactly the two pieces R20 needed to
+close, and both explanations told me *why* they weren't already done
+(no signature context vs. deliberately narrow scope), which shaped the
+design directly.
+
+## Scoping decision: vertex/fragment only, and why that's not a cop-out
+
+The design text is explicit that "only operations required by implemented
+stages are legal," and the roadmap's own milestone table only requires G0
+(this step) before G1 (stage compilation) -- patch/mesh/ray canonicalization
+is explicitly listed against G5-G8, many milestones away. Implementing a
+DXIL `EvalSnapped`/mesh/ray op family with no consumer anywhere in the tree
+yet would have been speculative surface area with no test I could write
+against real behavior (no CPU lowering, no pipeline, nothing to check the
+op's *meaning* against beyond "it parses"). I scoped strictly to what
+vertex/fragment need, and said so explicitly in both the design doc Status
+note and the roadmap table entry, rather than silently doing less than the
+roadmap text technically lists ("... discard, demote, is_helper,
+derivatives, quad read, pull-model interpolation" -- I built all of those;
+what I didn't build is the patch/geometry/mesh/ray families the same
+sentence's parenthetical omits, which the "Canonical stage operations"
+section's own op-list separately covers under later milestones).
+
+## `feme.stage.*` as named calls, not an MLIR dialect
+
+The design text says plainly: "represented as named calls until LLVM has an
+appropriate intrinsic." I nearly over-engineered this into a small custom
+MLIR dialect (`feme.stage.input_load` etc.) before rereading that line --
+FeMe already has exactly one custom dialect (`dxsa`), built for a real
+structural reason (DXBC's own SM5 instruction encoding needs first-class
+operand shapes MLIR's generic call op can't express). Stage operations have
+no such need: every operand is a scalar `i32`/`i8`/value, exactly the shape
+DXIL's own `dx.op.*` calling convention already uses successfully as plain
+LLVM IR. So `feme::StageOps` mirrors that convention directly -- a callee
+name plus a type-mangled suffix for the overloaded ops -- rather than
+inventing new machinery. This also means `feme.stage.*` calls are ordinary
+LLVM IR from the moment they exist: no MLIR round-trip, no extra
+dialect-registration surface for `feme-opt`, and every pass here is a plain
+`ModulePass` over `llvm::Module`, consistent with `OpRaisingPass`/
+`MetadataRaisingPass`.
+
+## Reconstructing DXIL's own ID numbering without re-deriving DXC's rules
+
+`loadInput`/`storeOutput`'s first real operand is DXIL's own per-list
+signature ID (0-based, independent for each of input/output/patch-constant),
+but `feme::dxil::convertEntrySignature` (R18) deliberately discards that
+field and renumbers by combined position instead -- and does not even read
+DXIL's `ElementIDField` from the metadata at all, relying on metadata list
+order matching ID order (a safe, already-established assumption; see
+SignatureImport.cpp's own comment on why). By the time `CanonicalizeStagePass`
+runs, `!dx.entryPoints` is already gone (`MetadataRaisingPass` erased it),
+so I can't re-read the original ID field even if I wanted to. Instead I
+reconstruct the same per-direction ordering `convertEntrySignature` already
+established: partition `EntrySignature::Elements` by `Direction`, preserving
+relative order, and the Nth element in a direction's partition is exactly
+DXIL's own per-list ID N for that direction (since both were assigned by
+walking the same ordered list). This means the two passes are coupled by an
+*invariant*, not by sharing code -- I made sure to document that invariant
+explicitly in `collectElementIDsByDirection`'s comment so it doesn't silently
+break if `convertEntrySignature`'s numbering ever changes.
+
+## Getting DXIL's actual operand shapes right required checking DXC, not just LLVM's own tables
+
+`llvm/lib/Target/DirectX/DXIL.td` only lists `loadInput`/`storeOutput`/
+`isHelperLane`/`evalCentroid`/`evalSampleIndex`/`evalSnapped` as bare
+`DXILOpClass` enumerators with no operand shape at all (LLVM's own DXIL
+backend has never implemented lowering *to* them, only classifies them) --
+unlike the ops `OpRaisingPass` already covers, which came with LLVM
+intrinsics whose signatures I could read directly. I found the actual
+per-opcode operand lists in the real DirectX Shader Compiler's
+`DxilOperations.cpp` (`OpCodeProperty` construction, the `A(pI32)`/`A(pI8)`/
+`A(pETy)` sequences), which is the authoritative source real `dx.op.*`
+calls are encoded against. This caught a mistake I would otherwise have
+shipped silently: I first assumed `EvalCentroid` took just
+`(inputSigId, rowIndex)` by analogy with `loadInput`'s shape, but DXC's
+table shows it also takes an explicit `i8` component index as its third
+operand, matching `loadInput`/`storeOutput`'s own column operand -- I only
+caught this by reading the real operand-building code rather than
+guessing from the opcode's one-line comment.
+
+## Splitting "raise directly" from "rename already-raised" cleanly
+
+`CanonicalizeStagePass` does two structurally different things and I kept
+them visibly separate rather than blurring them into one generic
+opcode-dispatch table: `loadInput`/`storeOutput`/`isHelperLane`/the eval
+family are raised directly from `dx.op.*` (opcode-matched, mirroring
+`OpRaisingPass`'s own `forEachDXOpCall` pattern, reimplemented locally
+since it's `OpRaising.cpp`-internal and this pass needs a `Function`-scoped
+version anyway), while `discard`/derivatives/quad-reads are *renamed* from
+the `llvm.dx.*` intrinsics `OpRaisingPass` already produces. This means
+`CanonicalizeStagePass` has a real ordering dependency on `OpRaisingPass`
+for that second half only -- I documented this explicitly (both in the
+pass's own comments and by writing two separate lit tests, one exercising
+each half in isolation) rather than leaving it implicit, since silently
+depending on pipeline order without saying so is exactly the kind of thing
+that breaks quietly when someone reorders a pipeline later.
+
+## The SPIR-V side reuses R19's exact metadata shape, verified against real test fixtures
+
+Rather than guessing the shape SPIR-V import leaves behind, I re-read
+`spirv-to-llvmir-stage-io.mlir` (R19's own end-to-end test) and copied its
+exact `!spirv.Decorations` encoding into my lit tests byte-for-byte
+(decoration codes 30/31/13/14/etc., matching `StageIOFlagDecorations` in
+`SPIRVToLLVMPatterns.cpp`), so `CanonicalizeStagePass`'s SPIR-V half is
+tested against IR shaped exactly like what the real pipeline produces, not
+an idealized shape I invented independently. Building `feme::EntrySignature`
+from these decorations for the first time (there being no prior SPIR-V
+signature import to extend, unlike DXIL's R18) meant writing my own
+DXIL-independent decoration parser and interpolation-mode/component-type
+mapping, deliberately mirroring `SignatureImport.cpp`'s DXIL equivalents
+function-for-function (`getInterpolationMode`, `getComponentType`) so the
+two formats' models read the same way side by side, even though neither
+shares code with the other (their inputs -- DXIL metadata rows vs. LLVM
+`!spirv.Decorations` -- are different enough that sharing would have meant
+a needless abstraction over two three-line functions).
+
+## One deliberate asymmetry: SPIR-V `demote`/`is_helper` are not implemented
+
+I checked `llvm/include/llvm/IR/IntrinsicsSPIRV.td` for `OpDemoteToHelperInvocation`/
+`OpIsHelperInvocationEXT` equivalents before writing any code for them, and
+found neither exists upstream (`int_spv_discard` exists; nothing named
+`demote`/`helper` does). Inventing a new upstream LLVM intrinsic is out of
+scope for a FeMe-only change, so I left both explicitly unimplemented on the
+SPIR-V side (DXIL's `Discard`/`IsHelperLane` *are* implemented, since both
+already have a real 1:1 mapping) and said so in three places -- the design
+doc Status note, the roadmap table entry, and this file -- rather than
+silently shipping a `feme.stage.demote` nobody's import path can ever
+produce and letting a future reader assume it was an oversight.
+
+## Verification
+
+Built with `-DLLVM_ENABLE_ASSERTIONS=ON` and ccache throughout (the
+pre-existing build config already had both). Ran `ninja check-feme` after
+every commit-sized increment, watching the passed-test count grow by
+exactly the tests I added each time (991 -> 1003 -> 1005 -> 1019) rather
+than only checking my own new tests in isolation, to catch any regression
+in the other ~1000 pre-existing tests immediately. Added both `gtest` unit
+coverage (operand-shape/overload-mangling correctness, diagnostic-message
+assertions via a custom `DiagnosticHandler`) and `lit` coverage (real
+`dx.op.*`/SPIR-V-shaped textual IR through the actual registered
+`feme-opt` pass names), matching the "each phase... individually testable
+and tested" instruction rather than relying on one test style alone.
