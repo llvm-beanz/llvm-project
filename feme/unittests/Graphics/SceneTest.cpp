@@ -110,4 +110,27 @@ TEST(SceneTest, RejectsUnknownKey) {
   ASSERT_THAT_EXPECTED(ParsedOrErr, Failed());
 }
 
+TEST(SceneTest, ParsesIndexBufferAndIndexedDraw) {
+  StringRef Text = R"(
+index-buffer:
+  format: uint32
+  data: [0, 1, 2]
+draws:
+  - { vertices: 3, indexed: true, first-index: 0, vertex-offset: 1 }
+)";
+  Expected<Scene> ParsedOrErr = parseScene(Text);
+  ASSERT_THAT_EXPECTED(ParsedOrErr, Succeeded());
+  Scene &S = *ParsedOrErr;
+
+  ASSERT_TRUE(S.IndexBuffer.has_value());
+  EXPECT_EQ(S.IndexBuffer->Format, "uint32");
+  ASSERT_EQ(S.IndexBuffer->Data.size(), 3u);
+  EXPECT_EQ(S.IndexBuffer->Data[2], 2u);
+
+  ASSERT_EQ(S.Draws.size(), 1u);
+  EXPECT_TRUE(S.Draws[0].Indexed);
+  EXPECT_EQ(S.Draws[0].FirstIndex, 0u);
+  EXPECT_EQ(S.Draws[0].VertexOffset, 1);
+}
+
 } // namespace

@@ -2144,10 +2144,14 @@ vertex-buffers:
     attributes:
       - { location: 0, format: r32g32b32-float, offset: 0 }
     data: [-1.0, -1.0, 0.0,  3.0, -1.0, 0.0,  -1.0, 3.0, 0.0]
+index-buffer:
+  format: uint32               # uint16 | uint32
+  data: [0, 1, 2]
 textures:
   - { index: 0, file: checker.image }
 draws:
   - { vertices: 3, instances: 1 }
+  - { vertices: 3, indexed: true, first-index: 0, vertex-offset: 0 }
 ```
 
 - Every enumerated value is FeMe's own spelling, never a `VkFormat` or `DXGI`
@@ -2158,6 +2162,10 @@ draws:
   `.ll`/`.hlsl`/`spirv`-dialect files built by the same `RUN:` line
   machinery every other test uses.
 - Textures are referenced by path to an image fixture in the format above.
+- A `draws` entry with `indexed: true` reads `vertices` indices from
+  `index-buffer` starting at `first-index`, adding `vertex-offset` to each
+  index read, matching Vulkan/Direct3D's own indexed-draw semantics
+  (roadmap R32).
 - State the scene does not mention takes the executor's documented default,
   and a scene naming state the executor does not implement is an error at
   load time, not a silently ignored key. Both properties are what keep a

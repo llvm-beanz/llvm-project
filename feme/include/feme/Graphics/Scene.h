@@ -109,10 +109,24 @@ struct SceneTexture {
   std::string File;
 };
 
-/// One `draws` entry.
+/// One `draws` entry. When `Indexed` is set, `Vertices` is interpreted as an
+/// index count read from the scene's `index-buffer` starting at
+/// `FirstIndex`, with `VertexOffset` added to each index read -- matching
+/// Vulkan/Direct3D's own indexed-draw semantics (see `feme::graphics::
+/// DrawCommand` in PreparedDraw.h, which this maps onto one-for-one).
 struct SceneDraw {
   uint32_t Vertices = 0;
   uint32_t Instances = 1;
+  bool Indexed = false;
+  uint32_t FirstIndex = 0;
+  int32_t VertexOffset = 0;
+};
+
+/// The `index-buffer` key: an index type (`uint16`/`uint32`) plus the flat
+/// index data, matching `vertex-buffers[].data`'s own flat-array shape.
+struct SceneIndexBuffer {
+  std::string Format = "uint32";
+  std::vector<uint32_t> Data;
 };
 
 /// The whole scene YAML file's contents (see the file comment above).
@@ -122,6 +136,7 @@ struct Scene {
   std::optional<SceneViewport> Viewport;
   std::vector<uint32_t> Scissor;
   std::vector<SceneVertexBuffer> VertexBuffers;
+  std::optional<SceneIndexBuffer> IndexBuffer;
   std::vector<SceneTexture> Textures;
   std::vector<SceneDraw> Draws;
 };

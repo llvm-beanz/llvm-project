@@ -118,6 +118,16 @@ template <> struct MappingTraits<feme::graphics::SceneDraw> {
   static void mapping(IO &Io, feme::graphics::SceneDraw &Draw) {
     Io.mapRequired("vertices", Draw.Vertices);
     Io.mapOptional("instances", Draw.Instances, 1u);
+    Io.mapOptional("indexed", Draw.Indexed, false);
+    Io.mapOptional("first-index", Draw.FirstIndex, 0u);
+    Io.mapOptional("vertex-offset", Draw.VertexOffset, 0);
+  }
+};
+
+template <> struct MappingTraits<feme::graphics::SceneIndexBuffer> {
+  static void mapping(IO &Io, feme::graphics::SceneIndexBuffer &IB) {
+    Io.mapOptional("format", IB.Format, std::string("uint32"));
+    Io.mapOptional("data", IB.Data);
   }
 };
 
@@ -128,6 +138,7 @@ template <> struct MappingTraits<feme::graphics::Scene> {
     Io.mapOptional("viewport", S.Viewport);
     Io.mapOptional("scissor", S.Scissor);
     Io.mapOptional("vertex-buffers", S.VertexBuffers);
+    Io.mapOptional("index-buffer", S.IndexBuffer);
     Io.mapOptional("textures", S.Textures);
     Io.mapOptional("draws", S.Draws);
   }
