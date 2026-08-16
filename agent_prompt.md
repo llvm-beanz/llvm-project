@@ -23,11 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R28 from the roadmap document?
+Can you implement R29 from the roadmap document?
 
-> Vertex and fragment wrappers over in-memory synthetic stage layouts,
-> `FemeStageLayout`/`FemeVertexArgs`/`FemeFragmentArgs`, and derivative/quad
-> lowering at wave sizes 4 and 8. **Completes G1**, and is the design's decision
-> point: if either stage cannot pass through the existing middle end with
-> localized extensions, revise the shared-middle-end boundary before building
-> any fixed function (see: §1.8.3)
+> The image and sampler descriptors, `FemeShaderResources` folded into
+> `FemeDispatchArgs`, and `SamplerHeap` retyped. This is the deliberate ABI
+> break: artifacts built before it stop loading (see: §1.8.4)
