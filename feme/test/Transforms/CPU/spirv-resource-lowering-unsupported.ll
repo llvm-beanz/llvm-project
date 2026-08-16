@@ -1,13 +1,16 @@
 ; RUN: feme-opt --llvm -passes=feme-cpu-lower-spirv-resources -S %s | FileCheck %s
 
-; Two shapes feme::cpu::SPIRVResourceLoweringPass doesn't (yet) canonicalize
+; Shapes feme::cpu::SPIRVResourceLoweringPass doesn't (yet) canonicalize
 ; leave the whole function untouched rather than being partially rewritten
 ; -- see the "Scope" note in
 ; feme/include/feme/Transforms/CPU/SPIRVResourceLowering.h: an image/sampler
-; handle (`Buffer<T>`/`RWBuffer<T>` -- a texture, not a storage buffer), and
-; a storage-buffer element accessed through a further `getelementptr` into
-; its own fields (a `StructuredBuffer` with more than one field, read
-; through one of them individually).
+; handle (`Buffer<T>`/`RWBuffer<T>` -- a texture, not a storage buffer), a
+; storage-buffer element accessed through a further `getelementptr` into its
+; own fields (a `StructuredBuffer` with more than one field, read through
+; one of them individually), and (roadmap R26) an unbounded descriptor
+; array -- SPIR-V's own spelling of an unbounded range, mirroring
+; `feme::cpu::BoundResourceNormalizationPass`'s own rejection of an
+; unbounded DXIL `handlefrombinding` range.
 
 target triple = "spirv-unknown-vulkan-compute"
 
@@ -34,6 +37,18 @@ define void @field_access(i32 %idx) {
           target("spirv.VulkanBuffer", [0 x {<4 x i32>, <4 x float>}], 12, 0) %h, i32 %idx)
   %field = getelementptr inbounds {<4 x i32>, <4 x float>}, ptr %ptr, i32 0, i32 1
   %v = load <4 x float>, ptr %field
+  ret void
+}
+
+; CHECK-LABEL: define void @unbounded_array(
+; CHECK-NOT: resource_heap
+; CHECK: call target("spirv.VulkanBuffer", {{.*}}) @llvm.spv.resource.handlefrombinding
+define void @unbounded_array(i32 %idx, i32 %which) {
+  %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+      @llvm.spv.resource.handlefrombinding(i32 0, i32 2, i32 0, i32 %which, ptr null)
+  %ptr = call ptr
+      @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 %idx)
+  %v = load float, ptr %ptr
   ret void
 }
 

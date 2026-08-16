@@ -28,12 +28,31 @@
 // lowers a bound handle in one step rather than two: a (descriptor set,
 // binding) identity plays the same role DXIL's (register space, register)
 // does (see `feme::spirv::RaisedLoweringPass`'s header comment for the
-// SPIR-V -> raised direction's own use of that same correspondence), always
-// with an implicit range size of 1 -- SPIR-V has no notion of an array of
-// resources bound to one descriptor slot the way a DXIL `register(t0,
-// space0, numDescriptors=N)` range does.
+// SPIR-V -> raised direction's own use of that same correspondence).
 //
-// Scope (roadmap step R10, see feme/docs/Roadmap.md's §1.2/§2.4.2):
+// Roadmap step R26 generalized this from an implicit range size of 1 to a
+// real arrayed binding: `llvm.spv.resource.handlefrombinding`'s own range
+// size and index operands (SPIR-V's descriptor-array count and array index,
+// the same role DXIL's `register(t0, space0, numDescriptors=N)` range and
+// `handlefrombinding`'s own dynamic index operand play) are read and
+// normalized exactly like `feme::cpu::BoundResourceNormalizationPass` does
+// for DXIL: each (set, binding) identity's declared array is assigned a
+// contiguous run of heap slots, and an access through it is rewritten into
+// `HeapBase + clamp(Index, RangeSize)`, with an out-of-range index or an
+// overflow while forming the physical heap index selecting the same
+// `UINT32_MAX` out-of-heap sentinel the DXIL side uses (see that pass's
+// header comment and "Bound-resource normalization" in
+// feme/docs/FeMeCPUDesign.md). A Vulkan *dynamic* storage/uniform buffer
+// offset (`VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC`/
+// `..._UNIFORM_BUFFER_DYNAMIC`) needs no shader-side support at all: per
+// "Memory and Buffers" in feme/docs/FeMeVulkanDesign.md, a dynamic offset is
+// folded into the `FemeDescriptor::Data` pointer the host materializes for
+// a dispatch, exactly like every other buffer's binding offset -- this pass
+// (and the `FemeDescriptor` it lowers accesses to reference) look identical
+// whether or not the descriptor behind a given heap slot happens to be a
+// dynamic one.
+//
+// Scope (roadmap steps R10, R26; see feme/docs/Roadmap.md's §1.2/§1.9):
 //
 //  - Only a `StorageBuffer`-derived `spirv.VulkanBuffer` handle (an
 //    `RWStructuredBuffer<T>`/`StructuredBuffer<T>` in HLSL, see
@@ -51,11 +70,20 @@
 //    accessed individually is left untouched, exactly as
 //    `feme::cpu::ResourceLoweringPass` leaves any access shape it does not
 //    itself model.
+//  - A binding's range size must be a compile-time constant (matching the
+//    set/binding identity itself); its array index need not be -- a
+//    dynamic index is accepted and clamped at run time, exactly as
+//    `feme::cpu::BoundResourceNormalizationPass` accepts a dynamic
+//    `handlefrombinding` index.
+//  - An unbounded range (range size 0, SPIR-V's own spelling of an
+//    unbounded descriptor array) is left un-normalized, matching the DXIL
+//    side's own rejection of an unbounded `handlefrombinding` range.
 //  - As with the DXIL passes this mirrors, an unsupported access shape or a
 //    conflicting re-declaration of the same (descriptor set, binding)
-//    identity (two handles disagreeing about the buffer element's stride)
-//    leaves every handle at that identity un-normalized, so
-//    `feme::cpu::checkSupportedRaisedOps` still rejects it.
+//    identity (two handles disagreeing about the buffer element's stride
+//    or the array's range size) leaves every handle at that identity
+//    un-normalized, so `feme::cpu::checkSupportedRaisedOps` still rejects
+//    it.
 //
 //===----------------------------------------------------------------------===//
 

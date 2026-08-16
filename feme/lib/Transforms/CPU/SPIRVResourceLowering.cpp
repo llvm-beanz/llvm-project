@@ -24,6 +24,7 @@
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 
+#include <limits>
 #include <map>
 #include <optional>
 #include <tuple>
@@ -47,20 +48,32 @@ struct RangeKey {
 };
 
 /// The outcome of collecting one identity's uses: either a single,
-/// consistent element stride, or a conflicting re-declaration that leaves
-/// every handle at that identity un-normalized.
+/// consistent element stride and array range size, or a conflicting
+/// re-declaration that leaves every handle at that identity un-normalized
+/// (see the header comment's "Scope" note).
 struct RangeEntry {
   uint64_t Stride = 0;
+  uint32_t RangeSize = 0;
   bool Conflicting = false;
   /// Assigned once every range has been collected (see `assignHeapBases`).
   uint32_t HeapBase = 0;
 };
 
-/// One `handlefrombinding` call this pass will rewrite, plus its identity.
+/// One `handlefrombinding` call this pass will rewrite, plus its identity
+/// and declared array range size. The (possibly dynamic) array index is
+/// deliberately *not* cached here -- it is re-read from `Handle`'s own
+/// operand at lowering time instead (`BH.Handle->getArgOperand(3)` in
+/// `lowerAccesses`), because `addResourceEnvParams` below rebuilds the
+/// handle's function (moving its body to a new `Function`, RAUWing every
+/// argument, then erasing the original), which would otherwise leave a
+/// `Value*` captured from a stale `Argument` dangling -- exactly the bug
+/// roadmap step R25 fixed in `feme::cpu::lowerFunctionRootConstants` for the
+/// same reason (see that pass's own header comment).
 struct BoundHandle {
   CallInst *Handle;
   RangeKey Key;
   uint64_t Stride;
+  uint32_t RangeSize;
 };
 
 /// Returns the intrinsic ID of the call \p V is, or `not_intrinsic`.
@@ -143,26 +156,77 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     if (!SetC || !BindingC)
       return std::nullopt; // Non-constant binding: not produced today.
 
+    // The array range size, unlike the array index below, must be a
+    // compile-time constant: it is part of the (set, binding) identity
+    // itself, exactly like DXIL's `handlefrombinding` range-size operand
+    // (see `feme::cpu::BoundResourceNormalizationPass::collectBoundHandles`).
+    auto *RangeSizeC = dyn_cast<ConstantInt>(CI->getArgOperand(2));
+    if (!RangeSizeC)
+      return std::nullopt; // Non-constant range size: not produced today.
+    uint32_t RangeSize = static_cast<uint32_t>(RangeSizeC->getZExtValue());
+    if (RangeSize == 0)
+      return std::nullopt; // Unbounded range: see the header comment.
+
     RangeKey Key{static_cast<uint32_t>(SetC->getZExtValue()),
                  static_cast<uint32_t>(BindingC->getZExtValue())};
-    Handles.push_back(BoundHandle{CI, Key, *Stride});
+    Handles.push_back(BoundHandle{CI, Key, *Stride, RangeSize});
   }
   return Handles;
 }
 
-/// Assigns each non-conflicting identity a contiguous single-slot base in
-/// the reserved heap prefix, sorted by identity for a deterministic layout
-/// -- mirroring `feme::cpu::BoundResourceNormalizationPass`'s
-/// `assignHeapBases`, with every range implicitly of size 1 (see the header
-/// comment). Returns the total reserved prefix size.
+/// Assigns each non-conflicting identity a contiguous run of
+/// `Entry.RangeSize` heap slots, sorted by identity for a deterministic
+/// layout -- mirroring `feme::cpu::BoundResourceNormalizationPass`'s own
+/// `assignHeapBases` (roadmap R26 generalized this pass from an implicit
+/// range size of 1, see the header comment). Returns the total reserved
+/// prefix size.
 uint32_t assignHeapBases(std::map<RangeKey, RangeEntry> &Ranges) {
   uint32_t Base = 0;
   for (auto &[Key, Entry] : Ranges) {
     if (Entry.Conflicting)
       continue;
-    Entry.HeapBase = Base++;
+    Entry.HeapBase = Base;
+    Base += Entry.RangeSize;
   }
   return Base;
+}
+
+/// Builds `select(Base + Index > UINT32_MAX, UINT32_MAX, Base + Index)`,
+/// computed in i64 so the overflow itself can be detected exactly --
+/// duplicated from `feme::cpu::BoundResourceNormalizationPass`'s own helper
+/// of the same name (matching how `addResourceEnvParams` below is already a
+/// separate copy of that pass's `addResourceEnvParams`, per this file's own
+/// header comment).
+Value *computeOverflowClampedIndex(IRBuilderBase &Builder, Value *Index,
+                                   uint32_t Base) {
+  LLVMContext &Ctx = Builder.getContext();
+  Type *I32Ty = Type::getInt32Ty(Ctx);
+  Type *I64Ty = Type::getInt64Ty(Ctx);
+
+  Value *Sum64 = Builder.CreateAdd(ConstantInt::get(I64Ty, Base),
+                                   Builder.CreateZExt(Index, I64Ty));
+  Value *Overflow = Builder.CreateICmpUGT(
+      Sum64, ConstantInt::get(I64Ty, std::numeric_limits<uint32_t>::max()));
+  return Builder.CreateSelect(
+      Overflow, ConstantInt::get(I32Ty, std::numeric_limits<uint32_t>::max()),
+      Builder.CreateTrunc(Sum64, I32Ty));
+}
+
+/// Builds `select(OutOfRange, UINT32_MAX, Base + Index)`, using
+/// `computeOverflowClampedIndex` for the addition itself: `Index` is
+/// unsigned and compared against \p RangeSize first, so only a range this
+/// large ever exercises the overflow path in practice, but the design
+/// requires both checks (see "Bound-resource normalization" in
+/// feme/docs/FeMeCPUDesign.md).
+Value *computeClampedIndex(IRBuilderBase &Builder, Value *Index, uint32_t Base,
+                           uint32_t RangeSize) {
+  Type *I32Ty = Type::getInt32Ty(Builder.getContext());
+  Value *OutOfRange =
+      Builder.CreateICmpUGE(Index, ConstantInt::get(I32Ty, RangeSize));
+  Value *Clamped = computeOverflowClampedIndex(Builder, Index, Base);
+  return Builder.CreateSelect(
+      OutOfRange, ConstantInt::get(I32Ty, std::numeric_limits<uint32_t>::max()),
+      Clamped);
 }
 
 /// Builds \p F's replacement: the same function with the six trailing
@@ -216,13 +280,20 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
 /// Rewrites every access through \p BH.Handle -- a `getpointer` call
 /// followed by a load or store, see `hasOnlySupportedUses` -- into the
 /// corresponding canonical `feme.cpu.resource.load.raw`/`store.raw` call,
-/// using \p Env and the constant heap index \p BH.Key was assigned.
+/// using \p Env and the range-checked heap index `HeapBase +
+/// clamp(Index, BH.RangeSize)` (see `computeClampedIndex` and the header
+/// comment's roadmap R26 note). `Index` is re-read from \p BH.Handle's own
+/// operand here rather than cached in `BoundHandle` -- see that struct's
+/// comment for why. Computed once, at \p BH.Handle's own location -- which
+/// dominates every use rewritten below -- rather than once per access.
 void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
                    uint32_t HeapBase) {
   LLVMContext &Ctx = BH.Handle->getContext();
-  Type *I32Ty = Type::getInt32Ty(Ctx);
   Type *I64Ty = Type::getInt64Ty(Ctx);
-  Value *DescriptorIndex = ConstantInt::get(I32Ty, HeapBase);
+  IRBuilder<> IndexBuilder(BH.Handle);
+  Value *Index = BH.Handle->getArgOperand(3);
+  Value *DescriptorIndex =
+      computeClampedIndex(IndexBuilder, Index, HeapBase, BH.RangeSize);
   Value *Mask = ConstantInt::getTrue(Ctx);
 
   for (User *U : llvm::make_early_inc_range(BH.Handle->users())) {
@@ -258,11 +329,13 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
 /// constants into this form), whether the sampler heap is used (always
 /// false -- no SPIR-V sampler handle is normalized by this pass), a
 /// root-constant binding (always `(space0, register0)`, unused since the
-/// size above is always 0), and an empty statically-known-heap-index tail
-/// (every heap index this pass assigns is already static by construction,
-/// but none is a *dynamic* heap access the way
-/// `feme::cpu::ResourceLoweringPass`'s own tail records -- see "Heap usage
-/// discovery" in feme/docs/FeMeCPUDesign.md).
+/// size above is always 0), and an empty statically-known-heap-index tail.
+/// That tail always stays empty here regardless of whether a given access
+/// went through a compile-time-constant or (roadmap R26) dynamic array
+/// index -- it is `feme::cpu::ResourceLoweringPass`'s own dynamic-heap
+/// discovery mechanism, unrelated to the bound-range assignment
+/// `attachBoundResourceMetadata` below records unconditionally (see "Heap
+/// usage discovery" in feme/docs/FeMeCPUDesign.md).
 void attachResourceMetadata(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
@@ -282,7 +355,8 @@ void attachResourceMetadata(Function &F) {
 /// produces: name, the reserved prefix size, then each accepted identity as
 /// a (space, register, range-size, heap-base) tuple -- SPIR-V's (set,
 /// binding) filling the (space, register) slots per the header comment's
-/// correspondence, and range-size always 1.
+/// correspondence, and range-size the binding's own declared descriptor
+/// array count (roadmap R26 generalized this from an implicit 1).
 void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
                                  const std::map<RangeKey, RangeEntry> &Ranges) {
   LLVMContext &Ctx = F.getContext();
@@ -296,7 +370,8 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
     Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, Key.Set)));
     Ops.push_back(
         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Key.Binding)));
-    Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, 1)));
+    Ops.push_back(
+        ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.RangeSize)));
     Ops.push_back(
         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.HeapBase)));
   }
@@ -310,10 +385,10 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
 PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
                                                  ModuleAnalysisManager &) {
   // Collect every function's normalizable handles first, and every
-  // identity's element stride across the whole module, before rewriting
-  // anything -- a conflicting re-declaration can only be detected once all
-  // of them are known (see `feme::cpu::BoundResourceNormalizationPass`'s
-  // own two-phase shape).
+  // identity's element stride/range size across the whole module, before
+  // rewriting anything -- a conflicting re-declaration can only be detected
+  // once all of them are known (see
+  // `feme::cpu::BoundResourceNormalizationPass`'s own two-phase shape).
   DenseMap<Function *, SmallVector<BoundHandle, 4>> PerFunctionHandles;
   std::map<RangeKey, RangeEntry> Ranges;
   for (Function &F : M) {
@@ -323,8 +398,10 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     for (const BoundHandle &BH : *Handles) {
       auto It = Ranges.find(BH.Key);
       if (It == Ranges.end())
-        Ranges.emplace(BH.Key, RangeEntry{BH.Stride, /*Conflicting=*/false});
-      else if (It->second.Stride != BH.Stride)
+        Ranges.emplace(BH.Key, RangeEntry{BH.Stride, BH.RangeSize,
+                                          /*Conflicting=*/false});
+      else if (It->second.Stride != BH.Stride ||
+               It->second.RangeSize != BH.RangeSize)
         It->second.Conflicting = true;
     }
     PerFunctionHandles[&F] = std::move(*Handles);
