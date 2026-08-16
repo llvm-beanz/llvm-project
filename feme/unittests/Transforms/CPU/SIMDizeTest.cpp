@@ -446,4 +446,173 @@ TEST(SIMDizeTest, DiagnosesNonConstantIndexExtractElement) {
   EXPECT_TRUE(SawError);
 }
 
+// Roadmap step R23's "divergent index" shape: `FunctionWidener::
+// widenGroupSharedGEP` must widen the divergent `getelementptr` into a
+// real vector-of-pointers access (rather than `widenScalarizedFallback`'s
+// per-lane clone-and-reassemble via `insertelement`), which
+// `widenGroupSharedLoad` then turns into a real `llvm.masked.gather` --
+// and `feme::cpu::rewriteGroupSharedGlobals` (run at the end of the same
+// pass) must retarget both into the flat, address-space-0 form without
+// diagnosing them. See test/Transforms/CPU/simdize-groupshared-
+// divergent-index.ll for the full end-to-end IR shape this produces.
+TEST(SIMDizeTest, WidensGroupSharedDivergentIndexToVectorGEPAndGather) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 %tid
+      %val = load i32, ptr addrspace(3) %ptr
+      ret void
+    }
+    @shared = internal addrspace(3) global [4 x i32] undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundVectorGEP = false;
+  bool FoundGather = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      FoundVectorGEP |= GEP->getType()->isVectorTy();
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getIntrinsicID() == Intrinsic::masked_gather)
+        FoundGather = true;
+    // `@shared`'s address space must be canonicalized away entirely, not
+    // just left divergent.
+    EXPECT_FALSE(I.getType()->isPointerTy() &&
+                 I.getType()->getPointerAddressSpace() == 3);
+  }
+  EXPECT_TRUE(FoundVectorGEP);
+  EXPECT_TRUE(FoundGather);
+}
+
+// Roadmap step R23's "access through a getelementptr" shape: an
+// `atomicrmw` always scalarizes (see `ScalarizesAtomicRMWFallback` above),
+// even when its groupshared address is uniform (a compile-time-constant
+// array index here) -- `FunctionWidener::widenGroupSharedAtomicRMW` must
+// reuse that uniform `getelementptr` directly for every lane's clone
+// instead of broadcasting it, so `rewriteGroupSharedGlobals` sees a single
+// real `getelementptr` with several ordinary `atomicrmw` users, exactly
+// as it already does for a direct (non-indexed) global.
+TEST(SIMDizeTest, WidensGroupSharedAtomicRMWThroughUniformGEP) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %ptr = getelementptr inbounds [4 x i32], ptr addrspace(3) @shared, i32 0, i32 2
+      %old = atomicrmw add ptr addrspace(3) %ptr, i32 1 monotonic
+      ret void
+    }
+    @shared = internal addrspace(3) global [4 x i32] undef
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned AtomicRMWCount = 0;
+  GetElementPtrInst *SharedGEP = nullptr;
+  for (Instruction &I : instructions(F)) {
+    if (auto *GEP = dyn_cast<GetElementPtrInst>(&I))
+      if (GEP->getSourceElementType()->isArrayTy())
+        SharedGEP = GEP;
+    if (isa<AtomicRMWInst>(&I))
+      ++AtomicRMWCount;
+  }
+  EXPECT_EQ(AtomicRMWCount, 4u);
+  // Every widened `atomicrmw` shares the *same* `getelementptr` -- the
+  // broadcast this test guards against would instead have left each one
+  // reading a separate `extractelement` of a splat.
+  ASSERT_TRUE(SharedGEP);
+  for (User *U : SharedGEP->users())
+    EXPECT_TRUE(isa<AtomicRMWInst>(U));
+}
+
+// Roadmap step R23's "masked store at a uniform address" shape: a `store`
+// masked by `feme::cpu::LinearizePass` into a `feme.cpu.masked.store` call
+// widens (`FunctionWidener::widenMaskedStore`) into a real
+// `llvm.masked.scatter` even when the address never varies by lane, which
+// `rewriteGroupSharedGlobals` must still retarget by recognizing the
+// resulting same-value broadcast (`matchPointerBroadcast`) instead of
+// diagnosing it.
+TEST(SIMDizeTest, RewritesGroupSharedMaskedStoreAtUniformAddress) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id.in.group(i32 0)
+      %cond = icmp eq i32 %tid, 0
+      br i1 %cond, label %t, label %f
+    t:
+      store i32 42, ptr addrspace(3) @shared
+      br label %end
+    f:
+      br label %end
+    end:
+      ret void
+    }
+    @shared = internal addrspace(3) global i32 undef
+    declare i32 @llvm.dx.thread.id.in.group(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  ModuleAnalysisManager MAM;
+  feme::cpu::LinearizePass().run(*M, MAM);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  bool FoundScatter = false;
+  for (Instruction &I : instructions(F)) {
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (CI->getCalledFunction() &&
+          CI->getCalledFunction()->getIntrinsicID() ==
+              Intrinsic::masked_scatter)
+        FoundScatter = true;
+    EXPECT_FALSE(I.getType()->isPointerTy() &&
+                 I.getType()->getPointerAddressSpace() == 3);
+  }
+  EXPECT_TRUE(FoundScatter);
+}
+
+// A *nested* `getelementptr` (one level deeper than a single index --
+// e.g. a groupshared array of arrays) remains outside roadmap step R23's
+// scope and must still be diagnosed, not silently miscompiled.
+TEST(SIMDizeTest, DiagnosesNestedGroupSharedGetElementPtr) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %p1 = getelementptr inbounds [2 x [4 x i32]], ptr addrspace(3) @shared, i32 0, i32 0
+      %p2 = getelementptr inbounds [4 x i32], ptr addrspace(3) %p1, i32 0, i32 2
+      %val = load i32, ptr addrspace(3) %p2
+      ret void
+    }
+    @shared = internal addrspace(3) global [2 x [4 x i32]] undef
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+
+  bool SawError = false;
+  LLVMContext &MCtx = M->getContext();
+  MCtx.setDiagnosticHandlerCallBack(
+      [](const DiagnosticInfo *DI, void *Ctx) {
+        *static_cast<bool *>(Ctx) = DI->getSeverity() == DS_Error;
+      },
+      &SawError);
+  runPass(*M);
+  EXPECT_TRUE(SawError);
+}
+
 } // namespace
