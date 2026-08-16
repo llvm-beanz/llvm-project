@@ -15817,3 +15817,233 @@ open and upstream-blocked even inside a "closed by R30" row), the R30
 milestone-table row itself (annotated with real status rather than marked
 simply "done", since G2 is not complete), and the §1.2/§1.3 narrative
 bullets that had referenced this work as still-open.
+
+# Agent thoughts: roadmap step R31 (`FeMeGraphics` skeleton, `feme-render`, heap YAML image resource class)
+
+## Scoping the milestone before writing any code
+
+R31's own roadmap text is explicit that it is a *skeleton*: "normalized
+pipeline and prepared-draw descriptions", the `feme-render` tool (already
+specified), and the heap YAML image resource class. R32 ("Basic triangle
+pipeline") is the row that actually adds vertex/index fetch, triangle
+assembly, clipping, viewport transform, culling, tile binning, coverage and
+interpolation, and "completes G3". Reading G3's own completion test
+("render off-screen triangles ... compare ... against Mesa's lavapipe and
+Microsoft's WARP") confirmed real rasterization is out of scope here --
+R31's job is to make the *shapes* (data descriptions, tool CLI surface,
+file formats) real and testable without yet being able to draw a triangle.
+
+This mattered for every downstream decision: `GraphicsPipeline`/
+`PreparedDraw` are declared as data (no clip/raster methods), and
+`feme-render` needed a principled way to handle a scene that names
+`draws` it cannot execute. The codebase's own established convention
+answered that: "a scene naming state the executor does not implement is
+an error at load time, not a silently ignored key" (Design.md's own
+words, almost) -- so a non-empty `draws` list is a clean diagnostic, not
+a silent no-op, and not a build failure either (the tool still does
+everything it *can* do -- attachments, pipeline compilation -- so a test
+gets maximum signal from what's actually implemented).
+
+## Heap YAML image resource class: modeling scope cuts as roadmap facts
+
+`feme-run`'s heap YAML needed an `images` list building
+`FemeImageDescriptor`s the same way `resource-heap`/`bindings` already
+build `FemeDescriptor`s. The full field list Roadmap.md's §2.6.1 names
+(dimensionality, extent, mip and array ranges, format, layout) is more
+than a first test needs, and multisample images have specific enough
+layout arithmetic (per-sample storage) that getting it right without a
+test to verify it felt like the wrong trade. Rather than silently
+skipping fields, I picked a defensible, literal justification already in
+the design doc: multisampling is explicitly G4/R33's job ("multisample
+coverage and resolves"), so rejecting `2d-ms`/`2d-ms-array` at parse time
+with a message pointing at R33 is not a shortcut, it's the roadmap's own
+sequencing. Same reasoning for "one mip level, one array layer for
+non-array dimensions" -- mechanical to extend, but nothing exercises it
+yet, so I left it un-implemented rather than un-verified, and said so in
+the code comment (`ImageEntry`'s own doc comment) instead of leaving it
+to be discovered as a surprise later.
+
+Getting the test working took one real false start: I first wrote a
+divergent-coordinate (`(tid, 0)`) image load and ran it through the normal
+SIMD path, which failed with "feme-cpu-simdize: ... only a constant-index
+insertelement chain or a resource load is supported". That's not a bug I
+introduced -- it's R30's own documented open item ("active-lane SIMD
+widening for a *divergent* sample ... a uniform sample already works").
+Rather than work around it with a uniform coordinate (which would have
+tested less), I ran the same test with `--reference` instead, which
+matches how `reference-mode.ll` already tests unrelated features whose
+only blocker is the still-open SIMD-widening gap -- the test's own
+contract is the heap YAML entry, not SIMD widening, so `--reference` is
+the right tool, not a workaround.
+
+## `FeMeGraphics`: a new library, and where it lives
+
+Design.md's directory layout section (written before graphics existed as
+more than a design doc) doesn't mention a `Graphics/` library, so I added
+`feme/include/feme/Graphics` and `feme/lib/Graphics` following the same
+pattern every other top-level component uses (`Target/CPU`,
+`Transforms/DXIL`, etc.), and named the CMake target `FeMeGraphics` --
+which happens to be exactly the name the roadmap row's own title uses
+("`FeMeGraphics` skeleton"), so this wasn't a naming choice so much as
+recognizing the name was already chosen for me.
+
+I kept `GraphicsPipeline`/`PreparedDraw` as `class`/`struct` respectively
+per the instructions file's own rule ("`struct` only for all-public
+data"): `PreparedDraw` really is just a bag of borrowed `ArrayRef`s with
+no invariant to protect, so `struct`; `GraphicsPipeline` owns
+`shared_ptr<CompiledStage>`s and has getters instead of public fields,
+matching how `CompiledStage` itself is shaped, so `class`.
+
+## The image fixture format: filling a real gap in the spec
+
+Design.md's "Textual scene and image fixtures" section gives exactly one
+worked example (`r8g8b8a8-unorm`, hex-encoded, one concatenated hex value
+per texel) and one sentence of general rule: "one token per texel, most
+significant component first ... hexadecimal for integer and normalized
+formats, and a fixed-precision decimal for floating-point ones." That
+sentence is actually under-specified for any multi-component
+floating-point format: a `+1.0000e+00`-style decimal token cannot hold
+four components, so "one token per texel" and "a decimal for
+floating-point" can't both be literally true for `r32g32b32a32-float`.
+Rather than treat this as blocking, I made a concrete, documented choice
+consistent with the one worked example: for a float format, a texel is
+still exactly one whitespace-delimited token, just one with an internal
+`,`-separated list of per-component decimals -- satisfies "one token,
+whitespace-wise" while still printing every component's value, and
+round-trips exactly (covered by `ImageFixtureTest.RoundTripsFloatFormat`).
+I recorded this explicitly in the code comment at the top of
+`ImageFixture.cpp` rather than leaving a future reader to reverse-engineer
+it from the implementation.
+
+Format coverage is deliberately narrower than the full `ResourceFormat`
+enum: I only implemented the formats `runtime/CPU/FeMeRuntimeCPU.c`'s own
+image helpers and `feme-run`'s new heap-image support already handle
+(`R8G8B8A8_*` and the `R32*_FLOAT/UINT/SINT` family), rejecting anything
+else with a message pointing at "Texture layout and formats"'s own
+"mechanical, added on demand" pattern -- the same pattern FeMeCPUDesign.md
+already established for buffer formats, so this isn't a new convention,
+just the same one applied here. Half-float (`R16G16B16A16_*`) and
+bit-packed (`R11G11B10_FLOAT`, `R10G10B10A2_*`) formats need real
+conversion helpers neither the runtime nor this fixture format has yet,
+so they're out of scope rather than half-implemented.
+
+## Scene parsing: reusing `llvm::yaml`'s default strictness
+
+Design.md's own rule for the scene format -- "a scene naming state the
+executor does not implement is an error at load time, not a silently
+ignored key" -- turned out to already be `llvm::yaml::Input`'s *default*
+behavior (`AllowUnknownKeys = false`), not something I had to build.
+`SceneTest.RejectsUnknownKey` exists specifically to pin that down as an
+intentional property this parser relies on, not an accident of the
+library's defaults that could silently regress.
+
+One real modeling mistake, caught by the test I wrote against Design.md's
+own worked example rather than one I invented: I first modeled
+`pipeline.depth.test` as a `bool`, but the example scene spells it
+`depth: { test: less, write: true }` -- `test` is a `CompareOp` name (or
+`none` to disable), not a boolean. Running the test against the exact
+Design.md text caught this immediately; I mention it here because it's a
+good example of why I copied the design doc's literal example into the
+test rather than writing my own scene YAML from scratch -- a
+hand-written test scene would not have caught a misreading of the design
+doc itself.
+
+## `feme-render`: what "skeleton" concretely means for the CLI
+
+The CommandGuide already specifies the full CLI surface (`--wave-size`,
+`--workers`, `--tile-order`, `--reference`, `--dump`, `--expect`,
+`--tolerance`, `-O`), written against the *completed* G3 executor. Rather
+than only implementing the subset that does something today, I accepted
+every documented flag (so a test file written against the CommandGuide
+today doesn't need to change syntax once R32 lands) but made the
+currently-inert ones (`--workers`, `--tile-order`, `--reference`) visibly
+inert in both their `cl::desc` text and the CommandGuide's own new status
+note, rather than silently accepting and ignoring them without comment.
+
+Building a `GraphicsPipeline` from a real scene file surfaced a real gap:
+`feme::cpu::VertexWrapperPass`/`FragmentWrapperPass` require
+`!feme.signature` function metadata unconditionally, even for a shader
+with no `feme.stage.input.load`/`output.store` calls at all (an empty
+vertex/fragment body, exactly what a "no draws yet" pipeline-compile test
+needs). A real DXIL/SPIR-V import always attaches this; a hand-authored
+`.ll` fixture (which is all `feme-render` loads today) does not. Rather
+than authoring a synthetic 128-byte metadata blob by hand (as some
+existing lit tests do, awkwardly, for a *specific* signature shape) or
+loosening the wrapper passes' own requirement (which would weaken a real
+invariant for every other caller), I attach an empty
+`feme::EntrySignature{}` via the existing
+`feme::dxil::setEntrySignature` API when an entry point has none --
+exactly what an import would produce for a shader with zero signature
+elements, so this isn't a workaround, it's completing what "already-raised
+IR" is supposed to mean for a shader that happens to need no signature at
+all.
+
+A second real bug, caught only by actually running the tool rather than
+just building it: `StringSwitch<Expected<CompareOp>>(...).Default(
+createStringError(...))` crashed with "`Expected<T>` must be checked
+before access or destruction" *even on the success path* (`depth: {
+test: less }`). `StringSwitch::Default`'s argument is evaluated eagerly,
+so an `Expected<CompareOp>` holding an `Error` was constructed and then
+discarded unchecked whenever a *different* case matched. The fix was to
+switch over `std::optional<CompareOp>` (a type with no "must be checked"
+invariant) and only construct the `Expected`/`Error` once, after the
+switch, exactly when it is actually needed. I'm noting this because it
+is a subtle trap specific to `Expected<T>`'s API contract combined with
+`StringSwitch`'s eager-evaluation semantics, not obvious from either
+API's own documentation, and is a good candidate for a repository-wide
+"don't do this" note if it turns up again elsewhere.
+
+Module paths in `pipeline.vertex.module`/`.fragment.module` needed a
+resolution rule the design doc doesn't spell out (it only says shader
+modules are "referenced by path"). I resolved a relative path against the
+scene file's own directory (not the process's CWD), which is what makes
+a `split-file`-based lit test with `RUN: feme-render %t/scene.yaml`
+actually portable -- a CWD-relative rule would have made every test's
+`RUN:` line fragile to being invoked from a different working directory,
+which is exactly the kind of thing `lit` is designed to avoid depending
+on.
+
+## Testing strategy actually used
+
+- `feme-run`: two new lit tests -- `heap-image.ll` (a real
+  `--reference`-mode dispatch reading a 4x1 `r32g32b32a32-float` image
+  heap entry and copying each lane's texel into a raw buffer, so the
+  `FileCheck` line is checking real, JIT-executed image loads, not just
+  that the tool parses YAML) and
+  `heap-image-unsupported-dimension.ll` (the multisample rejection).
+- `unittests/Graphics/`: `PipelineTest`/`PreparedDrawTest` cover the
+  description structs' plumbing (getters, attachment lists); `ImageFixture
+  Test` covers the exact Design.md worked example byte-for-byte, a
+  floating-point round trip, and two malformed-input rejections;
+  `SceneTest` covers the exact Design.md worked scene example plus the
+  unknown-key rejection and omitted-state defaulting.
+- `test/Tools/feme-render/`: four `split-file`-based lit tests --
+  clear-only rendering (the primary supported path), the
+  `draws`-not-implemented diagnostic, `--expect` comparing a real
+  produced attachment against itself and against a deliberately wrong
+  fixture, and end-to-end pipeline compilation from a real scene file
+  with real (if trivial) vertex/fragment `.ll` modules.
+
+Ran the full `ninja check-feme` (assertions-enabled, ccache build) after
+every substantive change, not just the new tests in isolation -- this is
+what caught the `feme-render` binary not being registered in
+`lit.cfg.py`'s tool substitutions (a new-tool wiring gap, not a logic
+bug) and the two real bugs above (the `StringSwitch<Expected<T>>` crash
+and the missing signature metadata), both of which only surfaced by
+actually invoking the built tool against a real scene rather than relying
+on compilation succeeding.
+
+## Documentation
+
+Updated (see the separate "record roadmap R31 completion" commit):
+FeMeGraphicsDesign.md's "Normalized pipeline" section gained a Status
+paragraph describing exactly what `GraphicsPipeline`/`PreparedDraw`/
+`feme-render`/the image fixture and scene formats/the heap YAML image
+class do and do not implement, with explicit deviations (no
+`StageInterfaceMap`, sample locations, restart, or provoking-vertex
+field; only the conventional vertex+fragment path); Roadmap.md's R31 row
+annotated "done" with the same level of detail every other completed row
+in that table carries, listing the concrete test files that cover it;
+docs/CommandGuide/feme-render.md gained a Status note up front so a
+reader hits the skeleton's scope before the OPTIONS section, not only at
+the end.
