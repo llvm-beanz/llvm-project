@@ -82,8 +82,7 @@ namespace {
 /// a shader with no signature elements.
 Expected<feme::Module> loadShaderModule(StringRef Path, StringRef EntryPoint,
                                         feme::Context &Ctx) {
-  ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr =
-      MemoryBuffer::getFile(Path);
+  ErrorOr<std::unique_ptr<MemoryBuffer>> BufOrErr = MemoryBuffer::getFile(Path);
   if (std::error_code EC = BufOrErr.getError())
     return createStringError(EC, "could not open '%s': %s", Path.str().c_str(),
                              EC.message().c_str());
@@ -180,8 +179,8 @@ Expected<DepthState> buildDepthState(const SceneDepthState &Depth) {
 /// feme/docs/Design.md: shader modules are "referenced by path").
 Expected<std::shared_ptr<cpu::CompiledStage>>
 compileStage(feme::Context &Ctx, StringRef SceneDir,
-            const SceneShaderStage &Stage, feme::ShaderStage Kind,
-            unsigned WaveSize, CodeGenOptLevel OptLevel) {
+             const SceneShaderStage &Stage, feme::ShaderStage Kind,
+             unsigned WaveSize, CodeGenOptLevel OptLevel) {
   SmallString<128> ModulePath(Stage.Module);
   if (!SceneDir.empty() && !sys::path::is_absolute(ModulePath)) {
     ModulePath = SceneDir;
@@ -210,17 +209,15 @@ compileStage(feme::Context &Ctx, StringRef SceneDir,
 /// feme/include/feme/Graphics/Pipeline.h).
 Expected<GraphicsPipeline>
 buildPipeline(feme::Context &Ctx, StringRef SceneDir, const ScenePipeline &P,
-             unsigned WaveSize,
-             CodeGenOptLevel OptLevel,
-             std::vector<AttachmentFormat> Attachments) {
-  Expected<std::shared_ptr<cpu::CompiledStage>> Vertex =
-      compileStage(Ctx, SceneDir, P.Vertex, feme::ShaderStage::Vertex,
-                  WaveSize, OptLevel);
+              unsigned WaveSize, CodeGenOptLevel OptLevel,
+              std::vector<AttachmentFormat> Attachments) {
+  Expected<std::shared_ptr<cpu::CompiledStage>> Vertex = compileStage(
+      Ctx, SceneDir, P.Vertex, feme::ShaderStage::Vertex, WaveSize, OptLevel);
   if (!Vertex)
     return Vertex.takeError();
   Expected<std::shared_ptr<cpu::CompiledStage>> Fragment =
       compileStage(Ctx, SceneDir, P.Fragment, feme::ShaderStage::Fragment,
-                  WaveSize, OptLevel);
+                   WaveSize, OptLevel);
   if (!Fragment)
     return Fragment.takeError();
   Expected<CullMode> Cull = parseCullMode(P.Cull);
@@ -369,9 +366,8 @@ int main(int argc, char **argv) {
                "Accepted for forward compatibility (roadmap R32); this "
                "skeleton executes no draws either way"));
   cl::list<std::string> Dump(
-      "dump",
-      cl::desc("Print attachment <name> after the last draw. May be "
-               "repeated; the default is every color attachment"));
+      "dump", cl::desc("Print attachment <name> after the last draw. May be "
+                       "repeated; the default is every color attachment"));
   cl::opt<std::string> Expect(
       "expect",
       cl::desc("Compare the produced attachments against a checked-in "
@@ -430,7 +426,7 @@ int main(int argc, char **argv) {
   Ctx.setDiagnosticHandler([](const feme::Diagnostic &D) {
     errs() << "feme-render: "
            << (D.Severity == feme::DiagnosticSeverity::Warning ? "warning"
-                                                                : "note")
+                                                               : "note")
            << ": " << D.Message << "\n";
   });
 
@@ -443,7 +439,7 @@ int main(int argc, char **argv) {
     StringRef SceneDir = sys::path::parent_path(SceneFilename);
     Expected<GraphicsPipeline> Pipeline =
         buildPipeline(Ctx, SceneDir, *ParsedScene->Pipeline, WaveSize,
-                     *ResolvedOptLevel, std::move(Formats));
+                      *ResolvedOptLevel, std::move(Formats));
     if (!Pipeline) {
       errs() << "feme-render: " << toString(Pipeline.takeError()) << "\n";
       return 1;
@@ -490,8 +486,7 @@ int main(int argc, char **argv) {
     Expected<std::vector<ImageFixture>> ExpectedImages =
         parseImageFixtures((*ExpectBuf)->getBuffer());
     if (!ExpectedImages) {
-      errs() << "feme-render: " << toString(ExpectedImages.takeError())
-             << "\n";
+      errs() << "feme-render: " << toString(ExpectedImages.takeError()) << "\n";
       return 1;
     }
 

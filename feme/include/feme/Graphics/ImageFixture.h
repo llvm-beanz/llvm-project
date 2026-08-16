@@ -79,7 +79,8 @@ llvm::Expected<cpu::ResourceFormat> parseFixtureFormat(llvm::StringRef Format);
 /// The byte size of one texel of \p Format in the fixture/scene format
 /// table, or an `Error` for a format `getFormatInfo` (ImageFixture.cpp's
 /// internal table) does not implement yet.
-llvm::Expected<uint32_t> getFixtureFormatElementSize(cpu::ResourceFormat Format);
+llvm::Expected<uint32_t>
+getFixtureFormatElementSize(cpu::ResourceFormat Format);
 
 /// Whether \p Format's components are IEEE-754 floats (true) or
 /// integer/normalized (false) in the fixture/scene format table. Used by
@@ -97,8 +98,8 @@ llvm::Expected<bool> isFixtureFormatFloat(cpu::ResourceFormat Format);
 /// other format is an `Error`: a mechanical, on-demand addition once a
 /// test needs it, the same as `getFormatInfo`'s own scope note.
 llvm::Error packClearColor(cpu::ResourceFormat Format,
-                          llvm::ArrayRef<double> Clear,
-                          llvm::MutableArrayRef<uint8_t> Texel);
+                           llvm::ArrayRef<double> Clear,
+                           llvm::MutableArrayRef<uint8_t> Texel);
 
 } // namespace feme::graphics
 

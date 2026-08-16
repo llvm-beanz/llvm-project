@@ -542,8 +542,8 @@ Expected<ImageStorage> buildImageStorage(ArrayRef<ImageEntry> Entries) {
     uint32_t Width = Entry.Extent.size() > 0 ? Entry.Extent[0] : 1;
     uint32_t Height = Entry.Extent.size() > 1 ? Entry.Extent[1] : 1;
     uint32_t Depth = Is3D && Entry.Extent.size() > 2 ? Entry.Extent[2] : 1;
-    uint32_t ArrayLayers = IsArray ? std::max<uint32_t>(1, Entry.ArrayLayers)
-                                   : 1;
+    uint32_t ArrayLayers =
+        IsArray ? std::max<uint32_t>(1, Entry.ArrayLayers) : 1;
 
     FemeImageSubresourceLayout &Layout = Storage.MipLayouts[Entry.Index];
     Layout.Offset = 0;

@@ -25,9 +25,9 @@
 #include "feme/Graphics/ImageFixture.h"
 
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/raw_ostream.h"
@@ -151,7 +151,7 @@ Expected<bool> isFixtureFormatFloat(ResourceFormat Format) {
 }
 
 Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
-                    MutableArrayRef<uint8_t> Texel) {
+                     MutableArrayRef<uint8_t> Texel) {
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -163,8 +163,7 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
   if (Info->IsFloat) {
     for (unsigned I = 0; I != Info->Components; ++I) {
       float F = static_cast<float>(Clear[I]);
-      memcpy(Texel.data() + I * Info->ComponentBytes, &F,
-             Info->ComponentBytes);
+      memcpy(Texel.data() + I * Info->ComponentBytes, &F, Info->ComponentBytes);
     }
     return Error::success();
   }
@@ -273,8 +272,8 @@ Error decodeTexel(StringRef Token, const FormatInfo &Info,
                              "for its format",
                              Token.str().c_str());
   for (unsigned I = 0; I != Info.Components; ++I) {
-    StringRef Chunk = Token.substr(I * Info.ComponentBytes * 2,
-                                   Info.ComponentBytes * 2);
+    StringRef Chunk =
+        Token.substr(I * Info.ComponentBytes * 2, Info.ComponentBytes * 2);
     uint64_t Value;
     if (Chunk.getAsInteger(16, Value))
       return createStringError(inconvertibleErrorCode(),
