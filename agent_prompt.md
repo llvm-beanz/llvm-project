@@ -23,10 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R22 from the roadmap document?
+Can you implement R23 from the roadmap document?
 
-> Populate `ArtifactInfo`'s
-> `WaveSize`/`GroupSize`/`GroupSharedSize`/`GroupSharedAlign`, then generalize
-> it into stage-tagged `StageArtifactInfo` with signatures and side-effect
-> summaries; bump the artifact ABI version and round-trip JIT and AOT reflection
-> through the same structure (see: §1.8.1, §1.8.3)
+> Divergent groupshared access in `feme::cpu` — a divergent index, an access
+> through a `getelementptr`, and a masked store at a uniform address (§1.6's
+> three recorded shapes) (see: §1.6, §1.8.1)
