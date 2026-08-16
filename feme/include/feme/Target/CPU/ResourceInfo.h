@@ -34,15 +34,13 @@
 // object-file path over the JIT one.
 //
 // `StageArtifactInfo` (roadmap R22) generalizes what was, before this
-// milestone, a compute-only `ArtifactInfo`: it is now tagged with the
-// `feme::ShaderStage` that produced it and carries the entry point's
-// serialized `feme::EntrySignature` (feme/include/feme/Core/Signature.h)
-// plus a side-effect summary, so the same structure and serialization can
-// describe a vertex/fragment stage artifact once roadmap R27/R28 make
-// `CompiledStage` itself stage-aware -- neither of those populate the new
-// fields yet (every `CompiledStage` today is implicitly
-// `feme::ShaderStage::Compute`, see CompiledStage.h), but the layout exists
-// from the start so that milestone does not need another ABI break.
+// milestone, a compute-only `ArtifactInfo`: it is tagged with the
+// `feme::ShaderStage` that produced it, carries the entry point's serialized
+// `feme::EntrySignature` (feme/include/feme/Core/Signature.h), and summarizes
+// stage side effects so the same structure and serialization can describe a
+// compute, vertex, or fragment artifact. Roadmap R28 now populates `Stage`
+// and `Signature` for stage-aware `CompiledStage`s; the layout existed from the
+// start so that milestone did not need another ABI break.
 //
 //===----------------------------------------------------------------------===//
 
@@ -204,9 +202,9 @@ enum ArtifactFlagBits : uint32_t {
 /// of which path produced the compiled code.
 ///
 /// `Stage` and `Signature` generalize this compute-only structure into a
-/// stage-tagged one (roadmap R22); see the file comment above for why
-/// neither is populated with anything but `feme::ShaderStage::Compute`/
-/// empty yet.
+/// stage-tagged one (roadmap R22); stage-aware `CompiledStage`s populate both,
+/// while the compute-only compatibility paths leave the defaults (`Compute` /
+/// empty) unless a caller sets them explicitly.
 struct StageArtifactInfo {
   ShaderStage Stage = ShaderStage::Compute;
   uint32_t WaveSize = 0;
@@ -223,8 +221,7 @@ struct StageArtifactInfo {
   uint32_t ReservedResourceHeapSize = 0;
   std::vector<BoundResourceRange> BoundRanges;
   /// The entry point's serialized `feme::EntrySignature`
-  /// (`feme::serializeSignature`), or empty if none is attached -- true for
-  /// every compute entry point today (see the file comment above).
+  /// (`feme::serializeSignature`), or empty if none is attached.
   std::vector<uint8_t> Signature;
 
   /// Builds the execution-shape-agnostic fields of a `StageArtifactInfo`

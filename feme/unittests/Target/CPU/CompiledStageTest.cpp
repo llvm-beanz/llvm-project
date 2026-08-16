@@ -18,7 +18,9 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Core/Signature.h"
 #include "feme/Target/CPU/JITEngine.h"
+#include "feme/Transforms/DXIL/SignatureImport.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
@@ -60,7 +62,7 @@ constexpr char ShaderIR[] = R"(
 )";
 
 Expected<std::unique_ptr<CompiledStage>> compile(Context &Ctx,
-                                                  unsigned WaveSize = 4) {
+                                                 unsigned WaveSize = 4) {
   SMDiagnostic Err;
   auto LLVMMod = parseAssemblyString(ShaderIR, Err, Ctx.getLLVMContext());
   if (!LLVMMod)
@@ -102,8 +104,7 @@ TEST(CompiledStageTest, InvokeGroupRunsExactlyOneGroup) {
   EXPECT_EQ(Buffer, (std::vector<int32_t>{-1, -1, 2, -1}));
 }
 
-TEST(CompiledStageTest,
-    ConcurrentInvokeGroupCallsAreSafeForIndependentGroups) {
+TEST(CompiledStageTest, ConcurrentInvokeGroupCallsAreSafeForIndependentGroups) {
   Context Ctx;
   Expected<std::unique_ptr<CompiledStage>> Stage = compile(Ctx);
   ASSERT_THAT_EXPECTED(Stage, Succeeded());
@@ -181,6 +182,189 @@ TEST(CompiledStageTest, GetArtifactInfoReportsGroupSharedRequirements) {
   StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
   EXPECT_EQ(Artifact.GroupSharedSize, 16u);
   EXPECT_EQ(Artifact.GroupSharedAlign, 16u);
+}
+
+constexpr char VertexShaderIR[] = R"(
+  define void @vs_main() #0 {
+    %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %vid = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+    %vidf = uitofp i32 %vid to float
+    %sum = fadd float %in, %vidf
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %sum, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="vertex" }
+)";
+
+constexpr char FragmentShaderIR[] = R"(
+  define void @ps_main() #0 {
+    %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %dx = call float @feme.stage.derivative.x.fine.f32(float %in)
+    call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %dx, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare float @feme.stage.derivative.x.fine.f32(float)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="fragment" }
+)";
+
+SignatureElement makeFloatInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.ComponentType = SignatureComponentType::Float;
+  Elt.BitWidth = 32;
+  return Elt;
+}
+
+SignatureElement makeFloatOutput(uint32_t ElementID) {
+  SignatureElement Elt = makeFloatInput(ElementID);
+  Elt.Direction = SignatureDirection::Output;
+  return Elt;
+}
+
+SignatureElement makeVertexIDInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::VertexID;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.BitWidth = 32;
+  return Elt;
+}
+
+Expected<std::unique_ptr<CompiledStage>>
+compileGraphicsStage(Context &Ctx, StringRef IR, const EntrySignature &Sig,
+                     ShaderStage Stage, unsigned WaveSize) {
+  SMDiagnostic Err;
+  auto LLVMMod = parseAssemblyString(IR, Err, Ctx.getLLVMContext());
+  if (!LLVMMod)
+    return createStringError(inconvertibleErrorCode(), "parse error: %s",
+                             Err.getMessage().str().c_str());
+  dxil::setEntrySignature(*LLVMMod->getFunction(Stage == ShaderStage::Vertex
+                                                    ? "vs_main"
+                                                    : "ps_main"),
+                          Sig);
+  feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
+  StageCompileOptions Opts;
+  Opts.Stage = Stage;
+  Opts.WaveSize = WaveSize;
+  return CompiledStage::create(Ctx, std::move(Mod), Opts);
+}
+
+TEST(CompiledStageTest, InvokeVerticesRunsStageAwarePath) {
+  Context Ctx;
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInput(0), makeVertexIDInput(1), makeFloatOutput(2)};
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileGraphicsStage(Ctx, VertexShaderIR, Sig, ShaderStage::Vertex, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Vertex);
+
+  FemeStageElement InputElements[2] = {};
+  InputElements[0].ElementID = 0;
+  InputElements[0].FirstComponent = 0;
+  InputElements[0].ComponentCount = 1;
+  InputElements[0].RowCount = 1;
+  InputElements[0].InvocationStride = 4;
+  InputElements[1].ElementID = 1;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 2;
+
+  FemeStageElement OutputElements[3] = {};
+  OutputElements[2].ElementID = 2;
+  OutputElements[2].FirstComponent = 0;
+  OutputElements[2].ComponentCount = 1;
+  OutputElements[2].RowCount = 1;
+  OutputElements[2].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 3;
+
+  std::vector<float> Inputs = {1.0f, 2.0f, 3.0f};
+  std::vector<float> Outputs(3, -1.0f);
+  FemeVertexInvocation Invocations[3] = {};
+  Invocations[0].VertexID = 0;
+  Invocations[1].VertexID = 10;
+  Invocations[2].VertexID = 20;
+
+  VertexResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = Invocations;
+  PreparedVertexBatch Prepared =
+      PreparedVertexBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeVertices(Prepared), Succeeded());
+  EXPECT_EQ(Outputs[0], 1.0f);
+  EXPECT_EQ(Outputs[1], 12.0f);
+  EXPECT_EQ(Outputs[2], 23.0f);
+
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.Stage, ShaderStage::Vertex);
+  EXPECT_FALSE(Artifact.Signature.empty());
+}
+
+TEST(CompiledStageTest, InvokeFragmentsRunsStageAwarePath) {
+  Context Ctx;
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInput(0), makeFloatOutput(1)};
+  Expected<std::unique_ptr<CompiledStage>> Stage = compileGraphicsStage(
+      Ctx, FragmentShaderIR, Sig, ShaderStage::Fragment, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Fragment);
+
+  FemeStageElement InputElements[1] = {};
+  InputElements[0].ElementID = 0;
+  InputElements[0].FirstComponent = 0;
+  InputElements[0].ComponentCount = 1;
+  InputElements[0].RowCount = 1;
+  InputElements[0].InvocationStride = 4;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 1;
+
+  FemeStageElement OutputElements[2] = {};
+  OutputElements[1].ElementID = 1;
+  OutputElements[1].FirstComponent = 0;
+  OutputElements[1].ComponentCount = 1;
+  OutputElements[1].RowCount = 1;
+  OutputElements[1].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 2;
+
+  std::vector<float> Inputs = {0.0f, 1.0f, 10.0f, 11.0f};
+  std::vector<float> Outputs(4, -1.0f);
+  FemeFragmentInvocation Invocation{};
+  Invocation.LiveMask = 0xf;
+  Invocation.SideEffectMask = 0x7;
+  FemeFragmentResult Result{};
+
+  FragmentResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = ArrayRef<FemeFragmentInvocation>(&Invocation, 1);
+  Resources.Results = MutableArrayRef<FemeFragmentResult>(&Result, 1);
+  PreparedFragmentBatch Prepared =
+      PreparedFragmentBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeFragments(Prepared), Succeeded());
+  EXPECT_EQ(Outputs[0], 1.0f);
+  EXPECT_EQ(Outputs[1], 1.0f);
+  EXPECT_EQ(Outputs[2], 1.0f);
+  EXPECT_EQ(Outputs[3], -1.0f);
+  EXPECT_EQ(Result.LiveMask, 0xfu);
+  EXPECT_EQ(Result.SideEffectMask, 0x7u);
 }
 
 } // namespace

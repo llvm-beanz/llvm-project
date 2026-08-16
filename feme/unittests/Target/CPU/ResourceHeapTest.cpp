@@ -202,4 +202,56 @@ TEST(InvokeGroupTest, CallsEntryOnceWithTheRequestedGroupID) {
   EXPECT_EQ(GroupIDs, (std::vector<std::array<uint32_t, 3>>{{1, 0, 0}}));
 }
 
+TEST(PreparedVertexBatchTest, ArgsExposeCallerOwnedStageStorage) {
+  ResourceInfo Info;
+  FemeStageLayout Layout{};
+  std::vector<float> Inputs(2, 0.0f);
+  std::vector<float> Outputs(2, 0.0f);
+  FemeVertexInvocation Invocations[2] = {};
+
+  VertexResources Resources;
+  Resources.InputLayout = &Layout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &Layout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = Invocations;
+  PreparedVertexBatch Prepared = PreparedVertexBatch::create(Info, Resources);
+
+  FemeVertexArgs Args = Prepared.args();
+  EXPECT_EQ(Args.AbiVersion, StageArgsAbiVersion);
+  EXPECT_EQ(Args.InvocationCount, 2u);
+  EXPECT_EQ(Args.InputLayout, &Layout);
+  EXPECT_EQ(Args.Inputs, Inputs.data());
+  EXPECT_EQ(Args.Outputs, Outputs.data());
+  EXPECT_EQ(Args.Invocations, Invocations);
+}
+
+TEST(PreparedFragmentBatchTest, ArgsExposeCallerOwnedStageStorage) {
+  ResourceInfo Info;
+  FemeStageLayout Layout{};
+  std::vector<float> Inputs(4, 0.0f);
+  std::vector<float> Outputs(4, 0.0f);
+  FemeFragmentInvocation Invocation{};
+  FemeFragmentResult Result{};
+
+  FragmentResources Resources;
+  Resources.InputLayout = &Layout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &Layout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = ArrayRef<FemeFragmentInvocation>(&Invocation, 1);
+  Resources.Results = MutableArrayRef<FemeFragmentResult>(&Result, 1);
+  PreparedFragmentBatch Prepared =
+      PreparedFragmentBatch::create(Info, Resources);
+
+  FemeFragmentArgs Args = Prepared.args();
+  EXPECT_EQ(Args.AbiVersion, StageArgsAbiVersion);
+  EXPECT_EQ(Args.QuadCount, 1u);
+  EXPECT_EQ(Args.InputLayout, &Layout);
+  EXPECT_EQ(Args.Inputs, Inputs.data());
+  EXPECT_EQ(Args.Outputs, Outputs.data());
+  EXPECT_EQ(Args.Invocations, &Invocation);
+  EXPECT_EQ(Args.Results, &Result);
+}
+
 } // namespace

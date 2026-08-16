@@ -11,9 +11,9 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
 #include "feme/Core/ShaderStage.h"
+#include "feme/Core/Signature.h"
 #include "feme/Optimizer/OptimizerPipeline.h"
 #include "feme/Target/CPU/JITEngine.h"
-#include "feme/Target/CPU/Pipeline.h"
 #include "feme/Target/CPU/RuntimeCPU.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
@@ -23,6 +23,7 @@
 #include "feme/Transforms/CPU/ReferenceLowering.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
+#include "feme/Transforms/DXIL/SignatureImport.h"
 
 #include "llvm/Bitcode/BitcodeReader.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
@@ -43,18 +44,13 @@
 #include <array>
 
 using namespace llvm;
+using namespace feme;
 using namespace feme::cpu;
 
 namespace {
 
-/// Serializes \p M to bitcode and re-parses it against \p NewCtx, giving an
-/// equivalent module owned by a different `LLVMContext`. `CompiledStage`
-/// needs this because the incoming module lives in `feme::Context`'s
-/// `LLVMContext` (a plain, non-thread-safe one), while ORC's
-/// `ThreadSafeModule` needs a module owned by an `orc::ThreadSafeContext`
-/// -- see the "JIT Flow" section of feme/docs/FeMeCPUDesign.md.
-Expected<std::unique_ptr<Module>> cloneIntoContext(Module &M,
-                                                    LLVMContext &NewCtx) {
+Expected<std::unique_ptr<llvm::Module>> cloneIntoContext(llvm::Module &M,
+                                                         LLVMContext &NewCtx) {
   SmallVector<char, 0> Buffer;
   raw_svector_ostream OS(Buffer);
   WriteBitcodeToFile(M, OS);
@@ -63,15 +59,9 @@ Expected<std::unique_ptr<Module>> cloneIntoContext(Module &M,
   return parseBitcodeFile(MemBuf->getMemBufferRef(), NewCtx);
 }
 
-/// The host's default vector width for "Wave Size Selection"'s host-derived
-/// default (see feme::Driver's `getHostVectorBits`, whose actual
-/// `TargetTransformInfo`-based query is deliberately not duplicated here:
-/// `CompiledStage` always retargets to the running host, so a conservative
-/// 128-bit fallback is exactly as informative here as it is there when no
-/// party expresses a wave-size opinion).
 constexpr unsigned DefaultHostVectorBits = 128;
 
-std::optional<feme::cpu::ShaderWaveSizeRequirement>
+std::optional<ShaderWaveSizeRequirement>
 getShaderWaveSizeRequirement(const llvm::Module &M) {
   for (const Function &F : M)
     if (F.hasFnAttribute("hlsl.wavesize"))
@@ -82,33 +72,36 @@ getShaderWaveSizeRequirement(const llvm::Module &M) {
   return std::nullopt;
 }
 
-/// Finds the sole (or named) `hlsl.shader="compute"` function in \p M,
-/// mirroring `feme::cpu::PreparePass`'s own selection rule -- needed here
-/// because this runs *before* that pass, to resolve the wave size that gets
-/// stamped onto the entry point's attributes before the CPU pipeline runs.
-Expected<Function *> selectEntryPoint(llvm::Module &M, StringRef EntryPoint) {
+Expected<Function *> selectEntryPoint(llvm::Module &M, StringRef EntryPoint,
+                                      ShaderStage Stage) {
+  auto isStage = [Stage](const Function &F) {
+    return feme::getShaderStage(F) == Stage;
+  };
+
   if (!EntryPoint.empty()) {
     Function *F = M.getFunction(EntryPoint);
-    if (!F || !feme::isShaderEntryPoint(*F))
-      return createStringError(inconvertibleErrorCode(),
-                                "no compute entry point named '%s'",
-                                EntryPoint.str().c_str());
+    if (!F || !isStage(*F))
+      return createStringError(
+          inconvertibleErrorCode(), "no %s entry point named '%s'",
+          getShaderStageName(Stage).str().c_str(), EntryPoint.str().c_str());
     return F;
   }
+
   Function *Found = nullptr;
   for (Function &F : M) {
-    if (!feme::isShaderEntryPoint(F))
+    if (!isStage(F))
       continue;
     if (Found)
       return createStringError(
           inconvertibleErrorCode(),
-          "module has more than one compute entry point; select one with "
-          "JITOptions::EntryPoint");
+          "module has more than one %s entry point; select one",
+          getShaderStageName(Stage).str().c_str());
     Found = &F;
   }
   if (!Found)
     return createStringError(inconvertibleErrorCode(),
-                              "module has no compute entry point");
+                             "module has no %s entry point",
+                             getShaderStageName(Stage).str().c_str());
   return Found;
 }
 
@@ -126,71 +119,10 @@ llvm::OptimizationLevel toOptimizationLevel(CodeGenOptLevel Level) {
   llvm_unreachable("unknown CodeGenOptLevel");
 }
 
-} // namespace
-
-namespace feme::cpu::detail {
-
-/// `FeMeRuntimeCPU.c`'s externally-visible helpers are given their
-/// canonical dotted `feme.cpu.resource.*`/`feme.cpu.rt.*` names via a GNU
-/// `asm` label (see that file's top comment), since a dotted name is not a
-/// valid C identifier. On Mach-O targets, Clang spells an `asm`-labeled
-/// symbol's LLVM IR name with a leading `'\1'` (SOH) byte, a convention the
-/// AsmPrinter recognizes as "emit this name verbatim, without the
-/// platform's usual global-symbol mangling" (i.e. without Mach-O's leading
-/// underscore) -- see `Mangler::getNameWithPrefix`. That byte is part of
-/// the `GlobalValue`'s actual name, though, so it also defeats the
-/// exact-name matching `Linker::linkInModule(..., LinkOnlyNeeded)` uses
-/// below: the plain (unescaped) declaration `feme::cpu::ResourceCalls`
-/// creates in the shader module never matches the runtime module's
-/// `'\1'`-prefixed definition, so the helper never gets linked in, leaving
-/// the declaration to fail JIT symbol resolution instead. Strip that
-/// leading byte from every global in the freshly-parsed runtime module so
-/// its names line up with the plain canonical names regardless of host
-/// object format.
-void stripAsmLabelManglingEscape(llvm::Module &M) {
-  for (GlobalValue &GV : M.global_values()) {
-    StringRef Name = GV.getName();
-    if (Name.starts_with('\1'))
-      GV.setName(Name.drop_front());
-  }
-}
-
-/// `FeMeRuntimeCPU.c` is compiled to bitcode by an unadorned `clang -c
-/// -emit-llvm` invocation (see feme/runtime/CPU/CMakeLists.txt), with no
-/// explicit `-target`, so its module carries whichever triple Clang treats
-/// as its default for the build host -- which need not be textually
-/// identical to the (already normalized) triple `feme::Driver::run`
-/// resolved from `--target`/`%feme_host_triple` for the *shader* module,
-/// even when both name the very same target (e.g. Clang's Mach-O default
-/// spells its OS component "macosx<ver>" where an explicit "--target=...
-/// -darwin<ver>" triple spells it "darwin<ver>"). `RuntimeMod` is plain
-/// freestanding C with no target-specific codegen of its own, so it is
-/// always safe to retarget to the shader module's triple -- doing so before
-/// linking avoids `Linker::linkInModule` emitting a spurious "Linking two
-/// modules of different target triples" warning for what is, in truth, the
-/// same target.
-void alignRuntimeModuleTriple(llvm::Module &RuntimeMod,
-                              const llvm::Module &M) {
-  RuntimeMod.setTargetTriple(M.getTargetTriple());
-}
-
-} // namespace feme::cpu::detail
-
-CompiledStage::CompiledStage(std::unique_ptr<orc::LLJIT> JIT, void *EntryFn,
-                             ResourceInfo Info, unsigned WaveSize,
-                             std::array<uint32_t, 3> GroupSize,
-                             GroupSharedRequirements GroupSharedReqs,
-                             uint32_t SideEffectFlags)
-    : JIT(std::move(JIT)), EntryFn(EntryFn), Info(std::move(Info)),
-      WaveSize(WaveSize), GroupSize(GroupSize),
-      GroupSharedReqs(GroupSharedReqs), SideEffectFlags(SideEffectFlags) {}
-
-CompiledStage::~CompiledStage() = default;
-CompiledStage::CompiledStage(CompiledStage &&) noexcept = default;
-CompiledStage &CompiledStage::operator=(CompiledStage &&) noexcept = default;
-
 Expected<std::unique_ptr<CompiledStage>>
-CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
+createStage(Context &Ctx, feme::Module M, ShaderStage Stage,
+            StringRef EntryPoint, unsigned RequestedWaveSize,
+            CodeGenOptLevel OptLevel, bool Reference) {
   static llvm::once_flag InitFlag;
   llvm::call_once(InitFlag, [] {
     InitializeNativeTarget();
@@ -198,15 +130,10 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   });
 
   if (M.getKind() != feme::Module::Kind::LLVMIR)
-    return createStringError(inconvertibleErrorCode(),
-                             "CompiledStage::create expects an "
-                             "already-translated llvm::Module (see "
-                             "feme::Driver)");
+    return createStringError(
+        inconvertibleErrorCode(),
+        "CompiledStage::create expects an already-translated llvm::Module");
 
-  // Transplant the module into a fresh `ThreadSafeContext` before doing
-  // anything else, so every later step (wave-size resolution, the whole CPU
-  // pipeline, linking, optimization) runs directly on the module ORC will
-  // eventually own -- see `cloneIntoContext`'s comment.
   orc::ThreadSafeContext TSCtx(std::make_unique<LLVMContext>());
   Expected<std::unique_ptr<llvm::Module>> Cloned =
       TSCtx.withContextDo([&](LLVMContext *NewCtx) {
@@ -216,34 +143,23 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     return Cloned.takeError();
 
   llvm::Module &Mod = **Cloned;
-
-  Expected<Function *> Entry = selectEntryPoint(Mod, Opts.EntryPoint);
+  Expected<Function *> Entry = selectEntryPoint(Mod, EntryPoint, Stage);
   if (!Entry)
     return Entry.takeError();
   std::string EntryName = (*Entry)->getName().str();
 
-  // Computed before the pipeline below runs: the non-`--reference` path's
-  // `EntryWrapperPass` (Phase 6) erases every `addrspace(3)` groupshared
-  // global once it has allocated a buffer for them (see "Groupshared
-  // memory" in feme/docs/FeMeCPUDesign.md's Phase 6 section), so this is
-  // the last point at which they still exist to measure.
   GroupSharedRequirements GroupSharedReqs = getGroupSharedRequirements(Mod);
-
-  // Likewise computed against the original entry point, before any
-  // pipeline pass has a chance to rewrite or replace it (see
-  // `computeSideEffectFlags`'s own comment for why this scans for a
-  // `feme.stage.*` family this milestone's compute-only pipeline never
-  // itself introduces).
   uint32_t SideEffectFlags = computeSideEffectFlags(**Entry);
+  std::vector<uint8_t> Signature;
+  if (std::optional<EntrySignature> Sig =
+          feme::dxil::getEntrySignature(**Entry))
+    Signature = serializeSignature(*Sig);
 
-  // `--reference` resolves no wave size at all: it never widens anything
-  // (see the "CFG restructurization test suite" section of
-  // feme/docs/FeMeCPUDesign.md), so there is no `<W x T>` for one to
-  // describe.
   unsigned WaveSize = 1;
-  if (!Opts.Reference) {
+  if (!Reference) {
     Expected<unsigned> ResolvedWaveSize = resolveWaveSize(
-        Opts.WaveSize ? std::optional<unsigned>(Opts.WaveSize) : std::nullopt,
+        RequestedWaveSize ? std::optional<unsigned>(RequestedWaveSize)
+                          : std::nullopt,
         getShaderWaveSizeRequirement(Mod), DefaultHostVectorBits);
     if (!ResolvedWaveSize)
       return ResolvedWaveSize.takeError();
@@ -252,13 +168,7 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
   }
 
   std::string WrapperName;
-  if (Opts.Reference) {
-    // `--reference` runs its own, simpler pipeline shape (Prepare +
-    // BoundResourceNormalization + ResourceLowering, then the reference
-    // lowering/wrapper passes instead of Linearize/SIMDize/WaveLowering/
-    // EntryWrapper) -- see `feme::cpu::runPipeline`'s file comment for why
-    // that pipeline is factored out on its own rather than covering this
-    // shape too.
+  if (Reference) {
     PassBuilder PB;
     LoopAnalysisManager LAM;
     FunctionAnalysisManager FAM;
@@ -271,12 +181,10 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
     ModulePassManager Normalize;
-    Normalize.addPass(PreparePass(Opts.EntryPoint));
+    Normalize.addPass(PreparePass(EntryPoint, Stage));
     Normalize.addPass(BoundResourceNormalizationPass());
     Normalize.run(Mod, MAM);
 
-    // See `checkSupportedRaisedOps`'s call site in `feme::cpu::runPipeline`
-    // for why this runs after normalization rather than before it.
     if (Error E = checkSupportedRaisedOps(Mod))
       return std::move(E);
 
@@ -290,48 +198,38 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     if (!Mod.getFunction(WrapperName))
       return createStringError(
           inconvertibleErrorCode(),
-          "feme-cpu-wrap-reference-entry did not produce '%s'; the shader "
-          "likely uses a wave intrinsic, which has no meaning one "
-          "invocation at a time (--reference)",
+          "feme-cpu-wrap-reference-entry did not produce '%s'",
           WrapperName.c_str());
 
-    // Link in only the referenced `libFeMeRuntimeCPU` helper definitions
-    // (see "Runtime Support Library" in feme/docs/FeMeCPUDesign.md).
     Expected<std::unique_ptr<llvm::Module>> RuntimeMod =
         parseBitcodeFile(getRuntimeCPUBitcode(), Mod.getContext());
     if (!RuntimeMod)
       return RuntimeMod.takeError();
-    detail::stripAsmLabelManglingEscape(**RuntimeMod);
-    detail::alignRuntimeModuleTriple(**RuntimeMod, Mod);
+    feme::cpu::detail::stripAsmLabelManglingEscape(**RuntimeMod);
+    feme::cpu::detail::alignRuntimeModuleTriple(**RuntimeMod, Mod);
     Linker L(Mod);
     if (L.linkInModule(std::move(*RuntimeMod), Linker::Flags::LinkOnlyNeeded))
       return createStringError(inconvertibleErrorCode(),
                                "failed to link libFeMeRuntimeCPU");
   } else {
-    Expected<PipelineResult> Result =
-        runPipeline(Mod, Opts.EntryPoint, WaveSize);
+    StageCompileOptions PipeOpts;
+    PipeOpts.Stage = Stage;
+    PipeOpts.EntryPoint = EntryPoint;
+    PipeOpts.WaveSize = WaveSize;
+    PipeOpts.OptLevel = OptLevel;
+    Expected<PipelineResult> Result = runPipeline(Mod, PipeOpts);
     if (!Result)
       return Result.takeError();
     WrapperName = std::move(Result->WrapperName);
   }
 
-  // `*Entry` was captured before the pipeline above ran; `SIMDizePass`
-  // replaces the entry point's `Function` object entirely (see its own
-  // comment), so `*Entry` is dangling by now -- look the (still
-  // same-named, per `Function::takeName`) function back up by name
-  // instead.
   Function *WaveBody = Mod.getFunction(EntryName);
   if (!WaveBody)
-    return createStringError(inconvertibleErrorCode(),
-                             "entry point '%s' did not survive the CPU "
-                             "pipeline",
-                             EntryName.c_str());
+    return createStringError(
+        inconvertibleErrorCode(),
+        "entry point '%s' did not survive the CPU pipeline", EntryName.c_str());
 
   std::array<uint32_t, 3> GroupSize = getDeclaredGroupSize(*WaveBody);
-  if (GroupSize[0] * GroupSize[1] * GroupSize[2] == 0)
-    return createStringError(inconvertibleErrorCode(),
-                             "shader declares an empty thread group");
-
   std::optional<ResourceInfo> Info = ResourceInfo::fromModule(Mod, EntryName);
   ResourceInfo ResolvedInfo = Info.value_or([&] {
     ResourceInfo Default;
@@ -339,9 +237,7 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     return Default;
   }());
 
-  OptimizerPipeline().run(Mod,
-                          OptimizerOptions{toOptimizationLevel(Opts.OptLevel)});
-
+  OptimizerPipeline().run(Mod, OptimizerOptions{toOptimizationLevel(OptLevel)});
   if (verifyModule(Mod, &errs()))
     return createStringError(inconvertibleErrorCode(),
                              "JIT module failed verification");
@@ -356,22 +252,97 @@ CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
     return EntryAddr.takeError();
 
   return std::unique_ptr<CompiledStage>(new CompiledStage(
-      std::move(JIT), EntryAddr->toPtr<void *>(), std::move(ResolvedInfo),
-      WaveSize, GroupSize, GroupSharedReqs, SideEffectFlags));
+      std::move(JIT), EntryAddr->toPtr<void *>(), Stage,
+      std::move(ResolvedInfo), WaveSize, GroupSize, GroupSharedReqs,
+      SideEffectFlags, std::move(Signature)));
+}
+
+} // namespace
+
+namespace feme::cpu::detail {
+
+void stripAsmLabelManglingEscape(llvm::Module &M) {
+  for (GlobalValue &GV : M.global_values()) {
+    StringRef Name = GV.getName();
+    if (Name.starts_with('\1'))
+      GV.setName(Name.drop_front());
+  }
+}
+
+void alignRuntimeModuleTriple(llvm::Module &RuntimeMod, const llvm::Module &M) {
+  RuntimeMod.setTargetTriple(M.getTargetTriple());
+}
+
+} // namespace feme::cpu::detail
+
+CompiledStage::CompiledStage(std::unique_ptr<orc::LLJIT> JIT, void *EntryFn,
+                             ShaderStage Stage, ResourceInfo Info,
+                             unsigned WaveSize,
+                             std::array<uint32_t, 3> GroupSize,
+                             GroupSharedRequirements GroupSharedReqs,
+                             uint32_t SideEffectFlags,
+                             std::vector<uint8_t> Signature)
+    : JIT(std::move(JIT)), EntryFn(EntryFn), Stage(Stage),
+      Info(std::move(Info)), WaveSize(WaveSize), GroupSize(GroupSize),
+      GroupSharedReqs(GroupSharedReqs), SideEffectFlags(SideEffectFlags),
+      Signature(std::move(Signature)) {}
+
+CompiledStage::~CompiledStage() = default;
+CompiledStage::CompiledStage(CompiledStage &&) noexcept = default;
+CompiledStage &CompiledStage::operator=(CompiledStage &&) noexcept = default;
+
+Expected<std::unique_ptr<CompiledStage>>
+CompiledStage::create(Context &Ctx, feme::Module M, const JITOptions &Opts) {
+  if (Opts.Reference)
+    return createStage(Ctx, std::move(M), ShaderStage::Compute, Opts.EntryPoint,
+                       /*RequestedWaveSize=*/0, Opts.OptLevel,
+                       /*Reference=*/true);
+
+  return createStage(Ctx, std::move(M), ShaderStage::Compute, Opts.EntryPoint,
+                     Opts.WaveSize, Opts.OptLevel, /*Reference=*/false);
+}
+
+Expected<std::unique_ptr<CompiledStage>>
+CompiledStage::create(Context &Ctx, feme::Module M,
+                      const StageCompileOptions &Opts) {
+  return createStage(Ctx, std::move(M), Opts.Stage, Opts.EntryPoint,
+                     Opts.WaveSize, Opts.OptLevel, /*Reference=*/false);
 }
 
 Error CompiledStage::invokeGroup(const PreparedDispatch &Prepared,
                                  std::array<uint32_t, 3> GroupID,
                                  MutableArrayRef<uint8_t> GroupShared) const {
-  // Qualified to reach `feme::cpu::invokeGroup` (ResourceHeap.h) rather
-  // than recursing into this member function of the same name.
+  if (Stage != ShaderStage::Compute)
+    return createStringError(inconvertibleErrorCode(),
+                             "invokeGroup is only legal for compute stages");
   feme::cpu::invokeGroup(reinterpret_cast<EntryPointFn>(EntryFn), Prepared,
                          GroupID, GroupShared);
   return Error::success();
 }
 
+Error CompiledStage::invokeVertices(const PreparedVertexBatch &Prepared) const {
+  if (Stage != ShaderStage::Vertex)
+    return createStringError(inconvertibleErrorCode(),
+                             "invokeVertices is only legal for vertex stages");
+  FemeVertexArgs Args = Prepared.args();
+  reinterpret_cast<VertexEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
+Error CompiledStage::invokeFragments(
+    const PreparedFragmentBatch &Prepared) const {
+  if (Stage != ShaderStage::Fragment)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "invokeFragments is only legal for fragment stages");
+  FemeFragmentArgs Args = Prepared.args();
+  reinterpret_cast<FragmentEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
 StageArtifactInfo CompiledStage::getArtifactInfo() const {
   StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(Info);
+  Artifact.Stage = Stage;
   Artifact.WaveSize = WaveSize;
   Artifact.GroupSize[0] = GroupSize[0];
   Artifact.GroupSize[1] = GroupSize[1];
@@ -379,5 +350,6 @@ StageArtifactInfo CompiledStage::getArtifactInfo() const {
   Artifact.GroupSharedSize = static_cast<uint32_t>(GroupSharedReqs.Size);
   Artifact.GroupSharedAlign = static_cast<uint32_t>(GroupSharedReqs.Alignment);
   Artifact.Flags |= SideEffectFlags;
+  Artifact.Signature = Signature;
   return Artifact;
 }

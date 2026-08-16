@@ -33,7 +33,7 @@ materializeResourceHeap(const ResourceInfo &Info,
         break;
       }
     if (!Matched)
-      continue; // Every slot in this range stays the zero descriptor.
+      continue;
 
     size_t NumToCopy =
         std::min<size_t>(Range.RangeSize, Matched->Descriptors.size());
@@ -55,10 +55,10 @@ PreparedDispatch::PreparedDispatch(std::vector<FemeDescriptor> ResourceHeap,
 PreparedDispatch PreparedDispatch::create(const ResourceInfo &Info,
                                           const DispatchResources &Resources,
                                           std::array<uint32_t, 3> GroupCount) {
-  return PreparedDispatch(materializeResourceHeap(Info, Resources.BoundResources,
-                                                   Resources.ResourceHeap),
-                          Resources.SamplerHeap, Resources.RootConstants,
-                          GroupCount);
+  return PreparedDispatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      Resources.SamplerHeap, Resources.RootConstants, GroupCount);
 }
 
 FemeDispatchArgs
@@ -77,11 +77,6 @@ PreparedDispatch::argsFor(std::array<uint32_t, 3> GroupID,
   Args.GroupID[0] = GroupID[0];
   Args.GroupID[1] = GroupID[1];
   Args.GroupID[2] = GroupID[2];
-  // Groupshared allocation: `feme::cpu::EntryWrapperPass` (milestone 9)
-  // allocates a small `groupshared` declaration on its own stack, so most
-  // groups need nothing from here. A shader declaring more than that
-  // pass's `GroupSharedStackLimit` needs a real host-supplied buffer no
-  // caller of this function provides yet.
   Args.GroupShared = GroupShared.data();
   return Args;
 }
@@ -103,6 +98,97 @@ void runDispatch(EntryPointFn EntryFn, const ResourceInfo &Info,
     for (uint32_t Y = 0; Y != GroupCount[1]; ++Y)
       for (uint32_t X = 0; X != GroupCount[0]; ++X)
         invokeGroup(EntryFn, Prepared, {X, Y, Z}, /*GroupShared=*/{});
+}
+
+PreparedVertexBatch::PreparedVertexBatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    ArrayRef<FemeDescriptor> SamplerHeap, ArrayRef<uint8_t> RootConstants,
+    const FemeStageLayout *InputLayout, const void *Inputs,
+    const FemeStageLayout *OutputLayout, void *Outputs,
+    ArrayRef<FemeVertexInvocation> Invocations)
+    : ResourceHeap(std::move(ResourceHeap)), SamplerHeap(SamplerHeap),
+      RootConstants(RootConstants), InputLayout(InputLayout), Inputs(Inputs),
+      OutputLayout(OutputLayout), Outputs(Outputs), Invocations(Invocations) {
+  ShaderResources.ResourceHeap = this->ResourceHeap.data();
+  ShaderResources.ResourceHeapCount =
+      static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.SamplerHeap = this->SamplerHeap.data();
+  ShaderResources.SamplerHeapCount =
+      static_cast<uint32_t>(this->SamplerHeap.size());
+  ShaderResources.RootConstants = this->RootConstants.data();
+  ShaderResources.RootConstantSize =
+      static_cast<uint32_t>(this->RootConstants.size());
+}
+
+PreparedVertexBatch
+PreparedVertexBatch::create(const ResourceInfo &Info,
+                            const VertexResources &Resources) {
+  return PreparedVertexBatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      Resources.SamplerHeap, Resources.RootConstants, Resources.InputLayout,
+      Resources.Inputs, Resources.OutputLayout, Resources.Outputs,
+      Resources.Invocations);
+}
+
+FemeVertexArgs PreparedVertexBatch::args() const {
+  FemeVertexArgs Args{};
+  Args.AbiVersion = StageArgsAbiVersion;
+  Args.InvocationCount = static_cast<uint32_t>(Invocations.size());
+  Args.Resources = &ShaderResources;
+  Args.InputLayout = InputLayout;
+  Args.Inputs = Inputs;
+  Args.OutputLayout = OutputLayout;
+  Args.Outputs = Outputs;
+  Args.Invocations = Invocations.data();
+  return Args;
+}
+
+PreparedFragmentBatch::PreparedFragmentBatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    ArrayRef<FemeDescriptor> SamplerHeap, ArrayRef<uint8_t> RootConstants,
+    const FemeStageLayout *InputLayout, const void *Inputs,
+    const FemeStageLayout *OutputLayout, void *Outputs,
+    ArrayRef<FemeFragmentInvocation> Invocations,
+    MutableArrayRef<FemeFragmentResult> Results)
+    : ResourceHeap(std::move(ResourceHeap)), SamplerHeap(SamplerHeap),
+      RootConstants(RootConstants), InputLayout(InputLayout), Inputs(Inputs),
+      OutputLayout(OutputLayout), Outputs(Outputs), Invocations(Invocations),
+      Results(Results) {
+  ShaderResources.ResourceHeap = this->ResourceHeap.data();
+  ShaderResources.ResourceHeapCount =
+      static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.SamplerHeap = this->SamplerHeap.data();
+  ShaderResources.SamplerHeapCount =
+      static_cast<uint32_t>(this->SamplerHeap.size());
+  ShaderResources.RootConstants = this->RootConstants.data();
+  ShaderResources.RootConstantSize =
+      static_cast<uint32_t>(this->RootConstants.size());
+}
+
+PreparedFragmentBatch
+PreparedFragmentBatch::create(const ResourceInfo &Info,
+                              const FragmentResources &Resources) {
+  return PreparedFragmentBatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      Resources.SamplerHeap, Resources.RootConstants, Resources.InputLayout,
+      Resources.Inputs, Resources.OutputLayout, Resources.Outputs,
+      Resources.Invocations, Resources.Results);
+}
+
+FemeFragmentArgs PreparedFragmentBatch::args() const {
+  FemeFragmentArgs Args{};
+  Args.AbiVersion = StageArgsAbiVersion;
+  Args.QuadCount = static_cast<uint32_t>(Invocations.size());
+  Args.Resources = &ShaderResources;
+  Args.InputLayout = InputLayout;
+  Args.Inputs = Inputs;
+  Args.OutputLayout = OutputLayout;
+  Args.Outputs = Outputs;
+  Args.Invocations = Invocations.data();
+  Args.Results = Results.data();
+  return Args;
 }
 
 } // namespace feme::cpu
