@@ -11,14 +11,11 @@
 ; once per lane -- each clone a fresh, direct use of `@shared` this pass
 ; must still rewrite to `wave_groupshared`, "the address space cast away."
 ; A groupshared *array* element's `atomicrmw` (reached through a
-; `getelementptr`, even one with every index constant) is not yet
-; supported here -- widening's generic broadcast of that `getelementptr`
-; (`FunctionWidener::getWidened`, since it is an `Instruction` and not
-; itself a `Constant` the way `@shared` used directly here is) produces a
-; real broadcast `insertelement`/`shufflevector` this pass does not yet see
-; through, the same "divergent (per-lane) groupshared access" narrowing
-; roadmap milestone 9 already documents (feme/docs/Roadmap.md's §1.6) --
-; `histogram.hlsl` sidesteps it with a scalar counter instead.
+; `getelementptr`, even one with every index constant) is a separate,
+; narrower shape -- see simdize-groupshared-atomic-array.ll -- that
+; `FunctionWidener::widenGroupSharedAtomicRMW` now also supports (roadmap
+; step R23, closing the "access through a getelementptr" gap
+; feme/docs/Roadmap.md's §1.6 recorded).
 
 ; CHECK-LABEL: define void @main(
 ; CHECK-SAME: ptr %wave_groupshared)
