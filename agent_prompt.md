@@ -23,10 +23,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R21 from the roadmap document?
+Can you implement R22 from the roadmap document?
 
-> Factor `CompiledStage`/`PreparedDispatch`/`invokeGroup` out of `JITEngine`,
-> with the wave loop and entry mask owned by `invokeGroup`; `JITEngine` becomes
-> a convenience wrapper and `JITOptions::NumThreads` becomes real. Land it under
-> the final `CompiledStage` name so V1/W1 never build against `CompiledKernel`
-> (see: §1.6, §1.8.1, §1.8.3)
+> Populate `ArtifactInfo`'s
+> `WaveSize`/`GroupSize`/`GroupSharedSize`/`GroupSharedAlign`, then generalize
+> it into stage-tagged `StageArtifactInfo` with signatures and side-effect
+> summaries; bump the artifact ABI version and round-trip JIT and AOT reflection
+> through the same structure (see: §1.8.1, §1.8.3)
