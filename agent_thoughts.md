@@ -14221,3 +14221,177 @@ always double-quote (or write to a file with `-F`) any commit message that
 contains contractions or possessives, and verify with
 `git log -1 --format=%B` afterward rather than assuming a printed error
 means nothing landed.
+
+# Agent thoughts: roadmap step R23 (divergent groupshared access in `feme::cpu`)
+
+## Task
+
+Implement R23: close §1.6's "Divergent groupshared access is diagnosed"
+narrowing, closing all three recorded shapes -- a divergent index, an
+access through a `getelementptr`, and a masked store at a uniform address
+-- rather than diagnosing them.
+
+## Reproducing the three shapes first
+
+Before touching any code I built `feme-opt` (already configured with
+assertions on and ccache) and hand-wrote small `.ll` files for each shape
+to see the *actual* current diagnostic and, more importantly, to work out
+*why* it fires, since GroupShared.h's own comment ("a divergent
+(vector-of-pointers) access, or a groupshared pointer feeding anything
+other than a first-level `getelementptr`/direct `load`/`store`") undersold
+how narrow the real implementation was:
+
+- A genuinely divergent index (`groupshared[tid]`, no branch at all) never
+  even reaches the "vector-of-pointers GEP" diagnostic
+  `rewriteGroupSharedGlobals` has a check for -- `FunctionWidener` has no
+  vector-GEP-producing code path at all; a divergent `getelementptr`
+  always goes through the generic `widenScalarizedFallback`, which clones
+  it once per lane and reassembles the results with `insertelement`. Each
+  clone's pointer operand is `extractelement(getWidened(@shared), lane)`;
+  since `@shared` is a `Constant`, `getWidened`'s broadcast folds away
+  entirely (the default `IRBuilder<>` uses `ConstantFolder`), so the clone
+  ends up using `@shared` directly again -- but the *GEP's own* pointer
+  operand, likewise `@shared`, means `@shared`'s real user after widening
+  is the `insertelement` reassembling the vector, not any load/store/
+  atomicrmw, which is what actually trips the "feeds a nested
+  getelementptr or another unsupported user" diagnostic.
+- An `atomicrmw` through a **uniform** `getelementptr` (constant array
+  index, no divergence anywhere) fails for a related but distinct reason:
+  `widenInstruction` always routes *every* `atomicrmw` through
+  `widenElementwise`/`widenScalarizedFallback` regardless of its own
+  operands' uniformity (correctly -- an atomic's effect accumulates, so it
+  must execute once per lane even at a uniform address). But
+  `getWidened`'s broadcast of a `getelementptr` (an `Instruction`, unlike a
+  direct global reference) does *not* constant-fold, so it leaves a real
+  `insertelement`+`shufflevector` broadcast in the IR that
+  `rewriteGroupSharedGlobals` cannot see through -- the *same* failure mode
+  as the divergent-index case above, just reached from atomicrmw's
+  unconditional scalarization instead of a genuinely divergent GEP.
+- A masked store at a uniform address (`if (tid==0) shared = ...`, no
+  indexing at all) fails for yet another reason: `LinearizePass` masks
+  *any* store inside a divergent branch into a `feme.cpu.masked.store`
+  call regardless of its address's own uniformity;
+  `FunctionWidener::widenMaskedStore` always widens that into a real
+  `llvm.masked.scatter`, and `getWidened(@shared)` again produces a
+  `ConstantVector` splat that folds away as a *value* -- but
+  `rewriteGroupSharedGlobals`'s own `convertUsersOfConstantsToInstructions`
+  call re-materializes that exact constant back into real `insertelement`
+  instructions (a `ConstantVector` expands into one `insertelement` per
+  lane, per `llvm/lib/IR/ReplaceConstant.cpp`), so the global's use is
+  *still* a broadcast the existing code doesn't recognize.
+
+All three, in other words, funnel into one of two underlying gaps: (1)
+`FunctionWidener` never produces a *real* vector-of-pointers
+`getelementptr` for a divergent groupshared index, always a scalarized
+per-lane reassembly instead; and (2) neither `FunctionWidener` nor
+`rewriteGroupSharedGlobals` has any notion of "this groupshared pointer
+feeds a same-value broadcast, which itself feeds a gather/scatter" even
+though that shape is unavoidable whenever a masked load/store/atomicrmw's
+address happens to be uniform (which is common and correct -- see
+`widenMaskedLoad`'s own comment: "correct whether that vector turns out to
+hold the same pointer in every lane ... or a genuinely different one per
+lane").
+
+## Design
+
+**SIMDize.cpp (Phase 4 widening):**
+
+- `widenGroupSharedGEP`: for a *divergent* `getelementptr` whose pointer
+  operand is `addrspace(3)`, build a genuine vector-of-pointers
+  `getelementptr` directly (LLVM allows a scalar base with one or more
+  vector index operands, implicitly broadcasting the base and any other
+  scalar index) instead of routing it through the generic scalarization
+  fallback. Every already-widened (divergent) index operand is looked up
+  in the `Widened` map; every uniform one (typically a leading constant
+  `0`) is passed through unchanged.
+- `widenGroupSharedLoad`/`widenGroupSharedStore`: for a *raw* (never
+  masked by `LinearizePass`, since it's not conditionally executed --
+  only lane-varying in its address) divergent `load`/`store` off a
+  groupshared pointer, build a real `llvm.masked.gather`/`.scatter`
+  directly, mirroring `widenMaskedLoad`/`widenMaskedStore` but masked only
+  by the wave's own entry mask (there is no extra governing mask to AND
+  in). The pointer operand is always already in `Widened` -- a `load`'s
+  divergence tracks its pointer operand's exactly, and that operand,
+  being divergent, was necessarily widened earlier in reverse post-order
+  by `widenGroupSharedGEP`.
+- `widenGroupSharedAtomicRMW` (replacing the unconditional
+  `widenElementwise` call for a groupshared-addressed `atomicrmw`) and a
+  matching fix to the existing `widenMaskedAtomicRMW`: both now reuse a
+  *uniform* pointer operand directly, once per lane, instead of
+  `getWidened`'s broadcast-then-extract -- sidestepping the broadcast
+  entirely for the overwhelmingly common case (a compile-time-constant
+  array index). A genuinely divergent index still extracts one real
+  address per lane from the real vector `getelementptr`
+  `widenGroupSharedGEP` built for it.
+
+**GroupShared.cpp (Phase 4's end-of-pass canonicalization,
+`rewriteGroupSharedGlobals`):**
+
+- A `getelementptr` may now be vector-typed (previously diagnosed
+  outright) -- `computeGroupSharedLayout`'s flat-offset arithmetic doesn't
+  care, and the rewritten `getelementptr` off the flat pointer naturally
+  inherits the same vector-ness from its (already-widened) indices.
+- A gather/scatter call (`llvm.masked.gather`/`.scatter`) is now a
+  recognized leaf alongside `load`/`store`/`atomicrmw`. By the time this
+  runs (the very end of `FunctionWidener::widen()`, after every
+  `feme.cpu.masked.*` call has *already* been widened away by
+  `widenMaskedLoad`/`Store`/`AtomicRMW`), a gather/scatter call is the
+  only surviving "masked access" shape left to retarget -- no
+  `feme.cpu.masked.*` call ever needs its own case here. Retargeting one
+  means rebuilding it (`rebuildGatherScatterCall`): unlike a plain
+  `load`/`store`/`atomicrmw`, whose pointer operand carries no address
+  space in the *instruction's* type, `llvm.masked.gather`/`.scatter` are
+  overloaded intrinsics mangled by their pointer vector's type including
+  address space, so an in-place `Use::set` would leave the call
+  referencing the wrong (stale) declaration.
+- A new `matchPointerBroadcast` recognizes the same-value `<W x ptr>`
+  broadcast a masked gather/scatter's pointer argument still needs even
+  when the underlying address is uniform -- both shapes it can arise as:
+  `IRBuilderBase::CreateVectorSplat`'s two-instruction
+  `insertelement`+`shufflevector` (a uniform *`getelementptr`*, an
+  `Instruction`, so its broadcast doesn't fold), and
+  `llvm::convertUsersOfConstantsToInstructions`'s per-lane `insertelement`
+  chain (a direct *global reference*, a `Constant`, whose broadcast
+  *does* fold away as a value, leaving only this later re-materialization
+  to canonicalize). `retargetGroupSharedProducer` handles either shape by
+  rebuilding a fresh splat of the new flat pointer, retargeting every
+  gather/scatter it feeds, and erasing the old, now-dead broadcast chain
+  in dependency order (each link becomes unused only once the one built
+  on top of it is erased first).
+- The mutate loop now snapshots every top-level node a global feeds
+  (`getelementptr`s, whether it has a broadcast, and any other direct
+  leaf use) *before* mutating anything, rather than iterating
+  `GV->uses()` live with `make_early_inc_range`: `retargetGroupSharedProducer`
+  can erase several `Use`s of the same global at once (the whole broadcast
+  chain), which a live use-list iterator cannot safely survive being
+  mutated out from under it mid-traversal.
+- A *nested* `getelementptr` (a groupshared array of arrays/structs, one
+  level deeper than a single index) remains diagnosed -- deliberately out
+  of scope; nothing in the three recorded shapes needs it, and supporting
+  it would mean generalizing the "first-level only" restriction this file
+  already documents rather than just closing the three gaps R23 named.
+
+## Testing
+
+Added five new lit tests under `test/Transforms/CPU/simdize-groupshared-*`:
+`divergent-index.ll` (replacing the old `divergent-unsupported.ll`, now
+that the shape is supported), `atomic-array.ll` (uniform GEP + atomicrmw),
+`masked-store-uniform.ll` and `masked-store-gep.ll` (the two masked-store
+variants), and `nested-gep-unsupported.ll` (confirming the one narrower
+shape still deliberately out of scope stays diagnosed, not silently
+miscompiled). Updated `simdize-groupshared-atomic-scalar.ll`'s comment,
+which had described the array case as unsupported. Added four new
+`SIMDizeTest` GTest cases mirroring the lit tests at the IR-shape level
+(vector GEP present, `llvm.masked.gather`/`.scatter` present, address
+space 3 gone entirely, the shared `getelementptr`'s users are *all*
+`atomicrmw`s rather than one broadcast feeding several extracts, etc.).
+
+Built with assertions on and ccache throughout (pre-existing config).
+`ninja check-feme` (which builds every `FEME_TEST_DEPENDS` target first,
+including the fuzzers and `feme-run`) passed at 1046/1048 (2 unsupported,
+platform-gated) both before removing the old "unsupported" test and after
+adding the five new ones and the four new unit tests; the CPU unit test
+binary alone went from 112 to 116 passing tests. Ran `clang-format -i` on
+every modified/added C++ file before the final commit and rebuilt/reran
+the full suite afterward to confirm formatting alone hadn't shifted any
+behavior.
