@@ -23,10 +23,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R31 from the roadmap document?
+Can you implement R32 from the roadmap document?
 
-> `FeMeGraphics` skeleton: normalized pipeline and prepared-draw descriptions,
-> the `feme-render` tool (already specified in Design.md's "Testing Tools" and
-> `docs/CommandGuide/feme-render.md`, along with its scene and image fixture
-> formats -- only the implementation is left), and the heap YAML image resource
-> class (see: §2.6.1)
+> Vertex/index fetch, triangle assembly, clipping, viewport transform, culling,
+> tile binning, top-left coverage, interpolation, and both stages run through
+> the executor: one color attachment, one viewport/scissor, no MSAA. **Completes
+> G3** (see: §1.8.5)
