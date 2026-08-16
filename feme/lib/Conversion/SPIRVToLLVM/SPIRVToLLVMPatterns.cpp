@@ -831,6 +831,58 @@ public:
     return mlir::success();
   }
 };
+/// Converts a `spirv.ImageSampleExplicitLod` with exactly the `Lod` image
+/// operand (not `Grad`, and not combined with any other modifier) into the
+/// `llvm.spv.resource.samplelevel` intrinsic call, mirroring
+/// `ImageSampleImplicitLodPattern` above but threading the explicit LOD
+/// operand through instead of defaulting it (see roadmap R30, "SPIR-V
+/// (including Design.md's §1.2 sampling variants)"). A `Grad` (gradient)
+/// operand -- `ImageSampleExplicitLod`'s other legal modifier -- is not yet
+/// covered, since it needs a `llvm.spv.resource.samplegrad` call with two
+/// additional operands this pattern does not build.
+class ImageSampleExplicitLodPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::ImageSampleExplicitLodOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageSampleExplicitLodOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageSampleExplicitLodOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getImageOperands() != mlir::spirv::ImageOperands::Lod ||
+        Adaptor.getOperandArguments().size() != 1)
+      return Rewriter.notifyMatchFailure(
+          Op, "only a lone Lod image operand is supported");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value SampledImage = Adaptor.getSampledImage();
+    mlir::Value Image = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{0});
+    mlir::Value Sampler = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, SampledImage, llvm::ArrayRef<int64_t>{1});
+    mlir::Value Lod = Adaptor.getOperandArguments()[0];
+
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    mlir::Type OffsetType =
+        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
+                         CoordVecTy.getShape(), Rewriter.getI32Type()))
+                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+    mlir::Value Offset = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.samplelevel",
+                                ResultType,
+                                {Image, Sampler, Coordinate, Lod, Offset}));
+    return mlir::success();
+  }
+};
 /// array is nested.
 void flattenConstantElements(mlir::Attribute Value,
                              llvm::SmallVectorImpl<mlir::Attribute> &Out) {
@@ -1194,7 +1246,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
                BuiltInGlobalVariablePattern, CompositeConstructPattern,
                ExecutionModePattern, ImageFetchPattern,
-               ImageSampleImplicitLodPattern, ImageQuerySizePattern,
+               ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
+               ImageQuerySizePattern,
                ImageReadPattern, ImageWritePattern, LoadValuePattern,
                PushConstantGlobalVariablePattern, SampledImagePattern,
                StageIOGlobalVariablePattern, StorageBufferAccessChainPattern>(
