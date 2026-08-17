@@ -23,9 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R33 from the roadmap document?
+Can you implement R34 from the roadmap document?
 
-> Depth/stencil attachments with legal early/late scheduling, blending, write
-> masks, logic ops, multiple render targets, multisample coverage and resolves,
-> the format expansion the first advertised profile needs, and deterministic
-> parallel tiled schedules (see: §1.8.5, §2.6.3)
+> Geometry/hull/domain signatures and wrappers, patch storage, control-stage
+> barriers, tessellator state and domain-coordinate generation, bounded geometry
+> streams, stream output, adjacency, layered rendering (see: §1.8.5)
