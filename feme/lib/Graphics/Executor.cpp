@@ -20,8 +20,10 @@
 //    images, not one packed surface -- see PreparedDraw.h's
 //    `DepthStencilAttachment`), with early or late scheduling chosen from
 //    the fragment stage's own `SV_Depth`/`SV_StencilRef`/discard
-//    reflection. Blending beyond `BlendMode::Replace`, multiple render
-//    targets, and multisampling remain rejected rather than run.
+//    reflection. Full blend-factor/op combinations, write masks (per
+//    `BlendState`), and logic ops (`R8G8B8A8_*` only) are implemented;
+//    multiple render targets and multisampling remain rejected rather than
+//    run.
 //  - Vertex/fragment stage elements are 32-bit scalars/vectors only
 //    (`RowCount == 1`, `BitWidth == 32`); matrices and 16-/64-bit varyings
 //    are a mechanical, on-demand addition once a test needs them.
@@ -674,6 +676,175 @@ Expected<bool> testDepthStencil(const DepthState &Depth,
   return true;
 }
 
+//===----------------------------------------------------------------------===//
+// Blending, write masks, and logic ops
+//===----------------------------------------------------------------------===//
+
+/// Evaluates one blend operand (`Src`/`DstColorFactor`/`SrcAlphaFactor`/
+/// etc.) at color channel \p Channel (0=R, 1=G, 2=B, 3=A), matching
+/// Vulkan's `VkBlendFactor`/Direct3D's `D3D12_BLEND` semantics.
+double blendFactorValue(BlendFactor F, unsigned Channel,
+                        const std::array<double, 4> &Src,
+                        const std::array<double, 4> &Dst,
+                        const std::array<float, 4> &Constant) {
+  switch (F) {
+  case BlendFactor::Zero:
+    return 0.0;
+  case BlendFactor::One:
+    return 1.0;
+  case BlendFactor::SrcColor:
+    return Src[Channel];
+  case BlendFactor::OneMinusSrcColor:
+    return 1.0 - Src[Channel];
+  case BlendFactor::DstColor:
+    return Dst[Channel];
+  case BlendFactor::OneMinusDstColor:
+    return 1.0 - Dst[Channel];
+  case BlendFactor::SrcAlpha:
+    return Src[3];
+  case BlendFactor::OneMinusSrcAlpha:
+    return 1.0 - Src[3];
+  case BlendFactor::DstAlpha:
+    return Dst[3];
+  case BlendFactor::OneMinusDstAlpha:
+    return 1.0 - Dst[3];
+  case BlendFactor::ConstantColor:
+    return Constant[Channel];
+  case BlendFactor::OneMinusConstantColor:
+    return 1.0 - Constant[Channel];
+  case BlendFactor::ConstantAlpha:
+    return Constant[3];
+  case BlendFactor::OneMinusConstantAlpha:
+    return 1.0 - Constant[3];
+  case BlendFactor::SrcAlphaSaturate:
+    return Channel == 3 ? 1.0 : std::min(Src[3], 1.0 - Dst[3]);
+  }
+  llvm_unreachable("unhandled BlendFactor");
+}
+
+double applyBlendOp(BlendOp Op, double SrcTerm, double DstTerm) {
+  switch (Op) {
+  case BlendOp::Add:
+    return SrcTerm + DstTerm;
+  case BlendOp::Subtract:
+    return SrcTerm - DstTerm;
+  case BlendOp::ReverseSubtract:
+    return DstTerm - SrcTerm;
+  case BlendOp::Min:
+    return std::min(SrcTerm, DstTerm);
+  case BlendOp::Max:
+    return std::max(SrcTerm, DstTerm);
+  }
+  llvm_unreachable("unhandled BlendOp");
+}
+
+/// Blends \p Src (the fragment's new color) with \p Dst (the attachment's
+/// existing color) per \p Blend's equation, matching every graphics API's
+/// shared "scale each operand, then combine" blend model.
+std::array<double, 4> blendColor(const BlendState &Blend,
+                                 const std::array<double, 4> &Src,
+                                 const std::array<double, 4> &Dst,
+                                 const std::array<float, 4> &Constant) {
+  std::array<double, 4> Result;
+  for (unsigned C = 0; C != 3; ++C) {
+    double SF = blendFactorValue(Blend.SrcColorFactor, C, Src, Dst, Constant);
+    double DF = blendFactorValue(Blend.DstColorFactor, C, Src, Dst, Constant);
+    Result[C] = applyBlendOp(Blend.ColorOp, Src[C] * SF, Dst[C] * DF);
+  }
+  double SFA = blendFactorValue(Blend.SrcAlphaFactor, 3, Src, Dst, Constant);
+  double DFA = blendFactorValue(Blend.DstAlphaFactor, 3, Src, Dst, Constant);
+  Result[3] = applyBlendOp(Blend.AlphaOp, Src[3] * SFA, Dst[3] * DFA);
+  return Result;
+}
+
+/// Applies \p Op ("Set"/"Copy"/"And"/etc., matching Vulkan's `VkLogicOp`)
+/// bitwise to one byte of a fragment's new color (\p Src) and an
+/// attachment's existing value (\p Dst).
+uint8_t applyLogicOp(LogicOp Op, uint8_t Src, uint8_t Dst) {
+  switch (Op) {
+  case LogicOp::Clear:
+    return 0;
+  case LogicOp::Set:
+    return 0xFF;
+  case LogicOp::Copy:
+    return Src;
+  case LogicOp::CopyInverted:
+    return static_cast<uint8_t>(~Src);
+  case LogicOp::NoOp:
+    return Dst;
+  case LogicOp::Invert:
+    return static_cast<uint8_t>(~Dst);
+  case LogicOp::And:
+    return Src & Dst;
+  case LogicOp::Nand:
+    return static_cast<uint8_t>(~(Src & Dst));
+  case LogicOp::Or:
+    return Src | Dst;
+  case LogicOp::Nor:
+    return static_cast<uint8_t>(~(Src | Dst));
+  case LogicOp::Xor:
+    return Src ^ Dst;
+  case LogicOp::Equivalent:
+    return static_cast<uint8_t>(~(Src ^ Dst));
+  case LogicOp::AndReverse:
+    return Src & static_cast<uint8_t>(~Dst);
+  case LogicOp::AndInverted:
+    return static_cast<uint8_t>(~Src) & Dst;
+  case LogicOp::OrReverse:
+    return Src | static_cast<uint8_t>(~Dst);
+  case LogicOp::OrInverted:
+    return static_cast<uint8_t>(~Src) | Dst;
+  }
+  llvm_unreachable("unhandled LogicOp");
+}
+
+/// Merges a fragment's new color \p Src into \p Texel (the attachment's
+/// existing texel, read and overwritten in place) per \p Pipeline's blend/
+/// logic-op/write-mask state (roadmap R33). A logic op, when enabled,
+/// takes priority over blending -- matching Vulkan/Direct3D, where
+/// enabling one disables the other -- and is only implemented for 8-bit
+/// unsigned-normalized formats (`R8G8B8A8_*`), the same restriction both
+/// APIs place on which formats support a logic op at all.
+Error mergeColor(const GraphicsPipeline &Pipeline, cpu::ResourceFormat Format,
+                 const std::array<double, 4> &Src,
+                 MutableArrayRef<uint8_t> Texel) {
+  if (Pipeline.getLogicOpEnable()) {
+    if (Format != cpu::ResourceFormat::R8G8B8A8_UNORM &&
+        Format != cpu::ResourceFormat::R8G8B8A8_UINT &&
+        Format != cpu::ResourceFormat::R8G8B8A8_SINT)
+      return createStringError(inconvertibleErrorCode(),
+                               "logic ops are only implemented for "
+                               "R8G8B8A8_UNORM/_UINT/_SINT attachments "
+                               "(mechanical, added on demand)");
+    std::array<uint8_t, 4> SrcBytes{};
+    if (Error E = packClearColor(Format, Src, SrcBytes))
+      return E;
+    const BlendState &Blend = Pipeline.getColorBlend();
+    for (unsigned C = 0; C != 4; ++C)
+      if ((Blend.WriteMask >> C) & 1u)
+        Texel[C] = applyLogicOp(Pipeline.getLogicOp(), SrcBytes[C], Texel[C]);
+    return Error::success();
+  }
+
+  const BlendState &Blend = Pipeline.getColorBlend();
+  std::array<double, 4> Final = Src;
+  if (Blend.BlendEnable) {
+    std::array<double, 4> Dst{};
+    if (Error E = unpackColor(Format, Texel, Dst))
+      return E;
+    Final = blendColor(Blend, Src, Dst, Pipeline.getBlendConstants());
+  }
+  if (Blend.WriteMask != 0xF) {
+    std::array<double, 4> Dst{};
+    if (Error E = unpackColor(Format, Texel, Dst))
+      return E;
+    for (unsigned C = 0; C != 4; ++C)
+      if (!((Blend.WriteMask >> C) & 1u))
+        Final[C] = Dst[C];
+  }
+  return packClearColor(Format, Final, Texel);
+}
+
 } // namespace
 
 Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
@@ -1303,8 +1474,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
               RGBA[C] =
                   FSOutput->readFloat(FSColor->ElementID, C, Q * 4 + Lane);
             size_t Off = ((size_t)PY * Color.Width + PX) * *ColorElemSize;
-            if (Error E = packClearColor(
-                    Color.Format, RGBA,
+            if (Error E = mergeColor(
+                    Pipeline, Color.Format, RGBA,
                     MutableArrayRef(Color.Data.data() + Off, *ColorElemSize)))
               return E;
           }

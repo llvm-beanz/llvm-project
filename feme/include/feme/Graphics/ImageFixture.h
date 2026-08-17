@@ -101,6 +101,17 @@ llvm::Error packClearColor(cpu::ResourceFormat Format,
                            llvm::ArrayRef<double> Clear,
                            llvm::MutableArrayRef<uint8_t> Texel);
 
+/// The inverse of `packClearColor`: unpacks one texel's worth of \p Format
+/// components from \p Texel into \p Out as `[0, 1]`-range (or raw, for a
+/// floating-point format) doubles. Used by blending (roadmap R33), which
+/// needs an attachment's *existing* color as an operand alongside a
+/// fragment's new one. Supports the same format subset `packClearColor`
+/// does, plus every floating-point format `getFormatInfo` already
+/// describes generically.
+llvm::Error unpackColor(cpu::ResourceFormat Format,
+                        llvm::ArrayRef<uint8_t> Texel,
+                        llvm::MutableArrayRef<double> Out);
+
 } // namespace feme::graphics
 
 #endif // FEME_GRAPHICS_IMAGEFIXTURE_H

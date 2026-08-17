@@ -212,6 +212,24 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
+  if (Format == ResourceFormat::R16G16B16A16_UNORM) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      double Clamped = std::clamp(Clear[I], 0.0, 1.0);
+      uint16_t V = static_cast<uint16_t>(std::lround(Clamped * 65535.0));
+      memcpy(Texel.data() + I * 2, &V, 2);
+    }
+    return Error::success();
+  }
+
+  if (Format == ResourceFormat::R16G16B16A16_SNORM) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      double Clamped = std::clamp(Clear[I], -1.0, 1.0);
+      int16_t V = static_cast<int16_t>(std::lround(Clamped * 32767.0));
+      memcpy(Texel.data() + I * 2, &V, 2);
+    }
+    return Error::success();
+  }
+
   if (Format == ResourceFormat::D16_UNORM) {
     double Clamped = std::clamp(Clear[0], 0.0, 1.0);
     uint16_t V = static_cast<uint16_t>(std::lround(Clamped * 65535.0));
@@ -229,6 +247,56 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
   return createStringError(inconvertibleErrorCode(),
                            "attachment clear color is not yet supported "
                            "for this format");
+}
+
+Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
+                  MutableArrayRef<double> Out) {
+  Expected<FormatInfo> Info = getFormatInfo(Format);
+  if (!Info)
+    return Info.takeError();
+  if (Out.size() != Info->Components)
+    return createStringError(inconvertibleErrorCode(),
+                             "unpack destination has %zu component(s), "
+                             "expected %u",
+                             Out.size(), Info->Components);
+
+  if (Info->IsFloat) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      float F;
+      memcpy(&F, Texel.data() + I * Info->ComponentBytes, Info->ComponentBytes);
+      Out[I] = F;
+    }
+    return Error::success();
+  }
+
+  if (Format == ResourceFormat::R8G8B8A8_UNORM ||
+      Format == ResourceFormat::R8G8B8A8_UNORM_SRGB) {
+    for (unsigned I = 0; I != Info->Components; ++I)
+      Out[I] = Texel[I] / 255.0;
+    return Error::success();
+  }
+
+  if (Format == ResourceFormat::R16G16B16A16_UNORM) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      uint16_t V;
+      memcpy(&V, Texel.data() + I * 2, 2);
+      Out[I] = V / 65535.0;
+    }
+    return Error::success();
+  }
+
+  if (Format == ResourceFormat::R16G16B16A16_SNORM) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      int16_t V;
+      memcpy(&V, Texel.data() + I * 2, 2);
+      Out[I] = std::clamp(V / 32767.0, -1.0, 1.0);
+    }
+    return Error::success();
+  }
+
+  return createStringError(inconvertibleErrorCode(),
+                           "attachment color is not yet unpackable for "
+                           "this format");
 }
 
 namespace {

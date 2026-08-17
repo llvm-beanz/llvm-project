@@ -28,6 +28,7 @@
 
 #include "llvm/ADT/ArrayRef.h"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -74,12 +75,84 @@ enum class CompareOp : uint8_t {
 };
 
 /// How a fragment's color is combined with an attachment's existing value.
-/// Only `Replace` (no blending, matching the scene YAML's own `blend:
-/// replace` spelling -- see "Textual scene and image fixtures" in
-/// feme/docs/Design.md) has an executor yet; full blend-factor combinations
-/// are roadmap R33's "Depth, stencil, blending, and multisampling".
+/// `Replace` (no blending) matches the scene YAML's own `blend: replace`
+/// spelling ("Textual scene and image fixtures" in feme/docs/Design.md).
+/// The executor's actual blend behavior is driven by `BlendState` (below,
+/// part of `GraphicsPipeline`'s color-attachment state since roadmap R33);
+/// this enum is retained only for the scene YAML's simple `blend: replace`
+/// spelling and existing call sites that pass it directly.
 enum class BlendMode : uint8_t {
   Replace,
+};
+
+/// One operand of a blend equation, matching Vulkan's `VkBlendFactor`/
+/// Direct3D's `D3D12_BLEND` one-for-one (dual-source factors are not
+/// modelled yet: no test needs a second fragment output).
+enum class BlendFactor : uint8_t {
+  Zero,
+  One,
+  SrcColor,
+  OneMinusSrcColor,
+  DstColor,
+  OneMinusDstColor,
+  SrcAlpha,
+  OneMinusSrcAlpha,
+  DstAlpha,
+  OneMinusDstAlpha,
+  ConstantColor,
+  OneMinusConstantColor,
+  ConstantAlpha,
+  OneMinusConstantAlpha,
+  SrcAlphaSaturate,
+};
+
+/// How a blend equation combines its two scaled operands, matching
+/// Vulkan's `VkBlendOp`/Direct3D's `D3D12_BLEND_OP`.
+enum class BlendOp : uint8_t {
+  Add,
+  Subtract,
+  ReverseSubtract,
+  Min,
+  Max,
+};
+
+/// A bitwise logic operation between a fragment's integer color and an
+/// attachment's existing value, matching Vulkan's `VkLogicOp`/Direct3D's
+/// `D3D12_LOGIC_OP`. Mutually exclusive with blending: enabling a logic op
+/// disables blending for every color attachment, per both APIs.
+enum class LogicOp : uint8_t {
+  Clear,
+  Set,
+  Copy,
+  CopyInverted,
+  NoOp,
+  Invert,
+  And,
+  Nand,
+  Or,
+  Nor,
+  Xor,
+  Equivalent,
+  AndReverse,
+  AndInverted,
+  OrReverse,
+  OrInverted,
+};
+
+/// One color attachment's blend/write-mask state. `WriteMask` bit 0/1/2/3
+/// gate the R/G/B/A channels respectively; a cleared bit leaves that
+/// channel's stored value untouched regardless of `BlendEnable`.
+/// `BlendEnable == false` is the `BlendMode::Replace` equation (the
+/// fragment's color entirely replaces the masked channels).
+struct BlendState {
+  bool BlendEnable = false;
+  BlendFactor SrcColorFactor = BlendFactor::One;
+  BlendFactor DstColorFactor = BlendFactor::Zero;
+  BlendOp ColorOp = BlendOp::Add;
+  BlendFactor SrcAlphaFactor = BlendFactor::One;
+  BlendFactor DstAlphaFactor = BlendFactor::Zero;
+  BlendOp AlphaOp = BlendOp::Add;
+  uint8_t WriteMask = 0xF;
 };
 
 /// What a passing/failing depth or stencil test does to a bound stencil
@@ -160,7 +233,11 @@ public:
                    PrimitiveTopology Topology, RasterState Raster,
                    DepthState Depth, BlendMode Blend, uint32_t SampleCount,
                    std::vector<AttachmentFormat> Attachments,
-                   StencilState Stencil = StencilState{});
+                   StencilState Stencil = StencilState{},
+                   BlendState ColorBlend = BlendState{},
+                   bool LogicOpEnable = false, LogicOp Logic = LogicOp::Copy,
+                   std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f,
+                                                          0.0f});
 
   const cpu::CompiledStage &getVertexStage() const { return *VertexStage; }
   const cpu::CompiledStage &getFragmentStage() const { return *FragmentStage; }
@@ -169,6 +246,12 @@ public:
   const DepthState &getDepthState() const { return Depth; }
   const StencilState &getStencilState() const { return Stencil; }
   BlendMode getBlendMode() const { return Blend; }
+  const BlendState &getColorBlend() const { return ColorBlend; }
+  bool getLogicOpEnable() const { return LogicOpEnable; }
+  LogicOp getLogicOp() const { return Logic; }
+  const std::array<float, 4> &getBlendConstants() const {
+    return BlendConstants;
+  }
   uint32_t getSampleCount() const { return SampleCount; }
   llvm::ArrayRef<AttachmentFormat> getAttachments() const {
     return Attachments;
@@ -184,6 +267,10 @@ private:
   uint32_t SampleCount;
   std::vector<AttachmentFormat> Attachments;
   StencilState Stencil;
+  BlendState ColorBlend;
+  bool LogicOpEnable;
+  LogicOp Logic;
+  std::array<float, 4> BlendConstants;
 };
 
 } // namespace feme::graphics

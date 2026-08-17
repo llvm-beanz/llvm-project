@@ -145,4 +145,19 @@ TEST(ImageFixtureTest, PacksDepthAndStencilClearColors) {
   EXPECT_EQ(StencilTexel[0], 42);
 }
 
+TEST(ImageFixtureTest, UnpackColorIsThePackInverse) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R8G8B8A8_UNORM,
+                                   {1.0, 0.5, 0.0, 0.75}, Texel),
+                    Succeeded());
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::R8G8B8A8_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.5, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.01);
+  EXPECT_NEAR(Unpacked[3], 0.75, 0.01);
+}
+
 } // namespace

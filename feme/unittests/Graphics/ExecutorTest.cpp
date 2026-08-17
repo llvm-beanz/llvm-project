@@ -128,7 +128,10 @@ Expected<GraphicsPipeline>
 buildPipeline(Context &Ctx, RasterState Raster,
               PrimitiveTopology Topology = PrimitiveTopology::TriangleList,
               DepthState Depth = DepthState{},
-              StencilState Stencil = StencilState{}) {
+              StencilState Stencil = StencilState{},
+              BlendState ColorBlend = BlendState{}, bool LogicOpEnable = false,
+              LogicOp Logic = LogicOp::Copy,
+              std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f, 0.0f}) {
   EntrySignature VSSig;
   VSSig.Elements = {
       makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
@@ -154,7 +157,8 @@ buildPipeline(Context &Ctx, RasterState Raster,
       {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
   return GraphicsPipeline(std::move(*VS), std::move(*FS), Topology, Raster,
                           Depth, BlendMode::Replace,
-                          /*SampleCount=*/1, std::move(Attachments), Stencil);
+                          /*SampleCount=*/1, std::move(Attachments), Stencil,
+                          ColorBlend, LogicOpEnable, Logic, BlendConstants);
 }
 
 struct TriangleScene {
@@ -553,6 +557,98 @@ TEST(ExecutorTest, RejectsStencilStateWithoutBoundAttachment) {
                       -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
   PreparedDraw Draw = Scene.prepare(); // BindStencil left false.
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
+}
+
+// Roadmap R33: blending, write masks, and logic ops.
+TEST(ExecutorTest, AlphaBlendsOverExistingColor) {
+  Context Ctx;
+  BlendState Blend;
+  Blend.BlendEnable = true;
+  Blend.SrcColorFactor = BlendFactor::SrcAlpha;
+  Blend.DstColorFactor = BlendFactor::OneMinusSrcAlpha;
+  Blend.SrcAlphaFactor = BlendFactor::One;
+  Blend.DstAlphaFactor = BlendFactor::Zero;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Blend);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Every texel starts opaque green.
+  for (uint32_t I = 0; I != 16; ++I) {
+    Scene.AttachmentStorage[I * 4] = 0;
+    Scene.AttachmentStorage[I * 4 + 1] = 255;
+    Scene.AttachmentStorage[I * 4 + 2] = 0;
+    Scene.AttachmentStorage[I * 4 + 3] = 255;
+  }
+  // A half-alpha red triangle covering the whole viewport.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 0.5f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  0.5f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  0.5f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  // result = src*srcAlpha + dst*(1-srcAlpha) = (1,0,0)*0.5 + (0,1,0)*0.5
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 128, 2) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 128, 2) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 2], 0) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, WriteMaskLeavesUnselectedChannelsUnchanged) {
+  Context Ctx;
+  BlendState Blend;
+  Blend.WriteMask = 0b0001; // Only the red channel may be written.
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{}, Blend);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  for (uint32_t I = 0; I != 16; ++I) {
+    Scene.AttachmentStorage[I * 4] = 10;
+    Scene.AttachmentStorage[I * 4 + 1] = 20;
+    Scene.AttachmentStorage[I * 4 + 2] = 30;
+    Scene.AttachmentStorage[I * 4 + 3] = 40;
+  }
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 1.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      1.0f,  1.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 1.0f, 1.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 1], 20) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 2], 30) << "texel " << I;
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4 + 3], 40) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, LogicOpAndsWithExistingColor) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, StencilState{},
+      BlendState{}, /*LogicOpEnable=*/true, LogicOp::And);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  for (uint32_t I = 0; I != 16; ++I)
+    for (unsigned C = 0; C != 4; ++C)
+      Scene.AttachmentStorage[I * 4 + C] = 0b11001100;
+  // Solid white (0xFF per channel): AND with 0b11001100 keeps 0b11001100.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  1.0f, 1.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      1.0f,  1.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 1.0f, 1.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I)
+    for (unsigned C = 0; C != 4; ++C)
+      EXPECT_EQ(Scene.AttachmentStorage[I * 4 + C], 0b11001100)
+          << "texel " << I << " channel " << C;
 }
 
 } // namespace

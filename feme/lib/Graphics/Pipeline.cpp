@@ -15,8 +15,12 @@ GraphicsPipeline::GraphicsPipeline(
     std::shared_ptr<cpu::CompiledStage> FragmentStage,
     PrimitiveTopology Topology, RasterState Raster, DepthState Depth,
     BlendMode Blend, uint32_t SampleCount,
-    std::vector<AttachmentFormat> Attachments, StencilState Stencil)
+    std::vector<AttachmentFormat> Attachments, StencilState Stencil,
+    BlendState ColorBlend, bool LogicOpEnable, LogicOp Logic,
+    std::array<float, 4> BlendConstants)
     : VertexStage(std::move(VertexStage)),
       FragmentStage(std::move(FragmentStage)), Topology(Topology),
       Raster(Raster), Depth(Depth), Blend(Blend), SampleCount(SampleCount),
-      Attachments(std::move(Attachments)), Stencil(Stencil) {}
+      Attachments(std::move(Attachments)), Stencil(Stencil),
+      ColorBlend(ColorBlend), LogicOpEnable(LogicOpEnable), Logic(Logic),
+      BlendConstants(BlendConstants) {}
