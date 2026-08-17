@@ -36,30 +36,41 @@ Can you continue the R34 implementation from the roadmap document?
 > coordinates/connectivity for isoline/triangle/quad domains across every
 > partitioning/output-primitive combination; triangle/quad interiors subdivide
 > uniformly from the largest/inside factor rather than placing per-edge boundary
-> vertices and stitching a crack-free fan, a documented scope note in its own file
-> comment), bounded patch storage (`feme::graphics::PatchRecord`, new Patch.h --
-> control-stage barriers need no new code, since `feme::cpu`'s groupshared/barrier
-> lowering is already stage-agnostic), the four adjacency `PrimitiveTopology`
-> variants plus list-topology adjacency splitting (Pipeline.h; strip-topology
-> splitting is a documented follow-up), a bounded per-invocation multi-stream
-> geometry builder (`feme::graphics::GeometryStreamBuilder`, new GeometryStream.h)
-> retaining strip boundaries/emission order for stream output and rasterization to
-> share, and layered-rendering array-layer selection that discards rather than
-> clamps an out-of-range index (`feme::graphics::resolveRenderTargetArrayLayer`,
-> new LayeredRendering.h, plus `AttachmentView::ArrayLayers`). Deferred, each
+> vertices and stitching a crack-free fan, a documented scope note in its own
+> file comment), bounded patch storage (`feme::graphics::PatchRecord`, new
+> Patch.h -- control-stage barriers need no new code, since `feme::cpu`'s
+> groupshared/barrier lowering is already stage-agnostic), the four adjacency
+> `PrimitiveTopology` variants plus list- and strip-topology adjacency splitting
+> (Pipeline.h's `splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`), a
+> bounded per-invocation multi-stream geometry builder
+> (`feme::graphics::GeometryStreamBuilder`, new GeometryStream.h) retaining
+> strip boundaries/emission order for stream output and rasterization to share,
+> and layered-rendering array-layer selection that discards rather than clamps
+> an out-of-range index (`feme::graphics::resolveRenderTargetArrayLayer`, new
+> LayeredRendering.h, plus `AttachmentView::ArrayLayers`). Deferred, each
 > documented in its own file's comment: compiling a real hull/domain/geometry
-> entry point through the CPU lowering pipeline into an invokable `CompiledStage`
-> batch (neither stage has a `VertexWrapperPass`/`FragmentWrapperPass` counterpart
-> yet) and wiring the result into `executeDraws`/`feme-render`; SIMD-lane
-> stream-range reservation via checked prefix sums; and crack-free non-uniform
-> per-edge tessellation/strip-adjacency splitting.
+> entry point through the CPU lowering pipeline into an invokable
+> `CompiledStage` batch (neither stage has a
+> `VertexWrapperPass`/`FragmentWrapperPass` counterpart yet) and wiring the
+> result into `executeDraws`/`feme-render`; SIMD-lane stream-range reservation
+> via checked prefix sums; and crack-free non-uniform per-edge tessellation.
 > `unittests/Graphics/{Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp`
 > and `PipelineTest.cpp`'s/`SignatureTest.cpp`'s/`StageOpsTest.cpp`'s new cases
 > cover today's scope; `ninja check-feme` (assertions-enabled, ccache build)
 > passes in full before and after -- G5 is not yet complete, since no
 > image-comparison completion test exists) (see: §1.8.5)
->   `VertexWrapperPass`'s shape: batch-ABI argument layout, SIMDize/wave
->   lowering support for `feme.stage.stream.*` and patch-storage access
->   ops, and `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry`.
->   This is the single largest remaining piece and the reason "wrappers" in
->   R34's own name isn't fully done yet.
+
+Open issues form the last agent task:
+
+> 1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
+>    `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry` -- still the
+>    single largest remaining piece, deliberately not attempted here for the
+>    reasons above. A future session should budget for it as its own
+>    multi-commit body of work, likely starting with the hull/control stage
+>    alone (structurally closest to compute, since barriers already work
+>    unmodified) before domain and geometry.
+> 2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
+> 3. Crack-free non-uniform per-edge tessellation (real per-edge boundary
+>    vertex placement + fan stitching).
+> 4. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, which
+>    still needs a real widened geometry invocation (item 1) to drive it.
