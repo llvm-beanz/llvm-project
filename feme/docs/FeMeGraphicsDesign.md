@@ -989,7 +989,10 @@ them.
 The geometry wrapper receives primitive records and owns a bounded stream
 builder per invocation. Emission is side-effecting even when no framebuffer
 write occurs, so it consumes the current side-effect mask. SIMD lanes reserve
-stream ranges with checked prefix sums; deterministic mode uses lane order.
+stream ranges with checked prefix sums; deterministic mode uses lane order
+(`feme::graphics::mergeGeometryStreamsInLaneOrder`, GeometryStream.h, merges
+one per-lane builder into a combined one this way -- driving it from a real
+widened geometry invocation remains a follow-up, see G5 above).
 
 ### Amplification and mesh wrappers
 
@@ -1946,16 +1949,25 @@ added after R34's initial landing to close its own "documented follow-up");
 `feme::graphics::GeometryStreamBuilder`
 (GeometryStream.h), bounded per-invocation multi-stream emit/cut storage
 retaining strip boundaries and emission order for both rasterization and
-stream-output capture to share; and `feme::graphics::
+stream-output capture to share, plus `mergeGeometryStreamsInLaneOrder`
+(added after R34's initial landing to close its own "documented
+follow-up"): SIMD-lane stream-range reservation via a checked prefix sum,
+merging one per-lane builder into a combined one in deterministic lane
+order, rejecting a lane's whole reservation (and every later lane's, for
+that stream) rather than overflowing the combined builder's declared
+capacity, and forcing a strip boundary at every lane edge even when a
+lane's own trailing strip was left open; and `feme::graphics::
 resolveRenderTargetArrayLayer`/`AttachmentView::ArrayLayers`
 (LayeredRendering.h/PreparedDraw.h), layer selection that discards (rather
-than clamps) an out-of-range index. Deferred, each documented in its own
-file's comment: compiling a real hull/domain/geometry entry point through
+than clamps) an out-of-range index. Deferred, documented in its own file's
+comment: compiling a real hull/domain/geometry entry point through
 the CPU lowering pipeline into an invokable `CompiledStage` batch (the
 `VertexWrapperPass`/`FragmentWrapperPass` counterpart neither stage has
-yet) and wiring the result into `executeDraws`/`feme-render`; SIMD-lane
-stream-range reservation via checked prefix sums (today's builder models
-the deterministic, lane-order case only). (Crack-free non-uniform per-edge
+yet) and wiring the result into `executeDraws`/`feme-render` -- SIMD-lane
+stream-range reservation no longer waits on this, since
+`mergeGeometryStreamsInLaneOrder` is a standalone, host-side algorithm on
+top of the existing per-invocation builder, but *driving* it from a real
+widened geometry invocation still does. (Crack-free non-uniform per-edge
 tessellation, previously deferred here, was added after R34's initial
 landing -- see the tessellator's own comment above.) `unittests/Graphics/
 {Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp` and
