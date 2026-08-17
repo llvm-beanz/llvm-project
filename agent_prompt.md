@@ -64,13 +64,10 @@ Open issues form the last agent task:
 
 > 1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
 >    `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry` -- still the
->    single largest remaining piece, deliberately not attempted here for the
->    reasons above. A future session should budget for it as its own
->    multi-commit body of work, likely starting with the hull/control stage
->    alone (structurally closest to compute, since barriers already work
->    unmodified) before domain and geometry.
+>    single largest remaining piece. A future session should budget for it
+>    as its own multi-commit body of work, likely starting with the
+>    hull/control stage alone (structurally closest to compute, since
+>    barriers already work unmodified) before domain and geometry.
 > 2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
-> 3. Crack-free non-uniform per-edge tessellation (real per-edge boundary
->    vertex placement + fan stitching).
-> 4. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, which
+> 3. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, which
 >    still needs a real widened geometry invocation (item 1) to drive it.
