@@ -1152,8 +1152,10 @@ after submission generally become device loss.
 No shader execution is required in this milestone.
 
 **Status: done.** `feme/utils/vk_gen_entrypoints.py` reads Vulkan-Headers'
-`vk.xml` directly (core `VK_VERSION_1_0`/`VK_VERSION_1_1` commands only) and
-generates an `FEME_VK_COMMAND`/`FEME_VK_COMMAND_IMPL` X-macro table, classifying
+`vk.xml` directly (core `VK_VERSION_1_0`/`VK_VERSION_1_1` commands only,
+resolved transitively through any `VK_{BASE,COMPUTE,GRAPHICS}_VERSION_1_x`
+sub-features a `vk.xml` revision links in via `depends`) and generates an
+`FEME_VK_COMMAND`/`FEME_VK_COMMAND_IMPL` X-macro table, classifying
 each command's dispatch level (global/instance/device) the same way the
 Vulkan loader itself does; `lib/Vulkan/ImplementedEntrypoints.txt` lists the
 ~29 commands this milestone actually implements; every other core command
