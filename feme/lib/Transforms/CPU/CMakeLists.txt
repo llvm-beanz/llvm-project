@@ -6,6 +6,7 @@ add_mlir_library(FeMeTransformsCPU
   DomainWrapper.cpp
   EntryWrapper.cpp
   FragmentWrapper.cpp
+  GeometryWrapper.cpp
   GroupShared.cpp
   HullPhase.cpp
   HullWrapper.cpp

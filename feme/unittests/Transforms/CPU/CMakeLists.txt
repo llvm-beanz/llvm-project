@@ -15,6 +15,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   DomainWrapperTest.cpp
   EntryWrapperTest.cpp
   FragmentWrapperTest.cpp
+  GeometryWrapperTest.cpp
   GroupSharedInfoTest.cpp
   HullWrapperTest.cpp
   LinearizeTest.cpp
