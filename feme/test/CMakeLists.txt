@@ -45,7 +45,11 @@ if(FEME_HAVE_VULKAN_HEADERS)
   list(APPEND FEME_TEST_DEPENDS FeMeVulkanTests)
 endif()
 if(FEME_HAVE_VULKAN_LOADER)
-  list(APPEND FEME_TEST_DEPENDS feme-vulkan-loader-smoke)
+  # The loader-smoke and two-ICD-coexistence tests load `feme_vulkan`
+  # through the real Vulkan loader via its build-tree manifest rather than
+  # linking it directly, so it must be listed explicitly here to be built
+  # before they run.
+  list(APPEND FEME_TEST_DEPENDS feme_vulkan feme-vulkan-loader-smoke)
 endif()
 
 add_custom_target(feme-test-depends DEPENDS ${FEME_TEST_DEPENDS})
