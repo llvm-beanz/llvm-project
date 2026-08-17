@@ -16640,3 +16640,151 @@ committing.
    vertex placement + fan stitching).
 4. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, which
    still needs a real widened geometry invocation (item 1) to drive it.
+
+# Agent thoughts: continuing R34 (crack-free non-uniform per-edge tessellation)
+
+## Scope decision
+
+The prior session's open-issues list had four items. Item 1
+(`HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
+`CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry`) was explicitly
+flagged as "the single largest remaining piece... a future session should
+budget for it as its own multi-commit body of work". Having read
+`VertexWrapper.cpp`/`FragmentWrapper.cpp` (500-700 lines each, deeply
+integrated with `StageArgsLayout`, `WaveBodyEnv`/SIMDize, `RuntimeABI`,
+groupshared lowering) plus `CompiledStage`'s JIT plumbing, I agree with
+that assessment: a hull-stage wrapper alone is realistically its own
+multi-day, multi-commit effort to do correctly (new args-layout structs,
+patch-level batching semantics distinct from per-vertex/per-fragment
+batching, wiring `PatchRecord` through it, `executeDraws`/scene-YAML
+changes, and a full unit-test suite mirroring `VertexWrapperTest.cpp`).
+Attempting it under this session's effort budget would produce something
+either incomplete or insufficiently tested, contradicting the "no partial
+solutions" instruction as much as skipping it does. Item 4 (SIMD-lane
+stream-range reservation) explicitly depends on item 1's real widened
+geometry invocation to have anything to reserve ranges for.
+
+That left item 3, crack-free non-uniform per-edge tessellation, as this
+session's target: a standalone, host-side, already-unit-tested surface
+(`feme::graphics::tessellate`, Tessellator.h/.cpp) with no dependency on
+the wrapper-pass work, directly named in R34's own deferred list, and
+scoped tightly enough to fully implement, test, and document in one
+session.
+
+## Design
+
+Direct3D/Vulkan hardware tessellators place extra vertices along each edge
+to match that edge's own (possibly different) factor, then stitch a
+crack-free transition to a coarser/finer interior. The prior
+implementation instead picked one factor (the max of all edges + inside)
+and subdivided the whole patch uniformly from it -- correct in isolation,
+but two patches sharing an edge with different *other* factors would tile
+with visible cracks along that edge, since the edge's own vertex
+placement depended on unrelated data.
+
+I designed a simpler (not hardware-exact) crack-free scheme:
+
+1. **Outer boundary ring**: each edge's own `computeSegmentCount(factor)`
+   determines that edge's vertex count and placement (`t = k / count`
+   spacing). Two patches agreeing on a shared edge's factor therefore
+   produce bit-identical vertices along it, full stop -- no dependency on
+   any other factor.
+2. **Inner core**: a uniform lattice/grid sized from the inside factor(s),
+   inset strictly within the outer boundary (never touching it) by
+   blending toward the centroid (triangle) or margin-shrinking `[0,1]^2`
+   (quad). Being strictly interior, it's never itself a cross-patch
+   cracking concern, so uniform subdivision there is fine.
+3. **Bridging**: `bridgeRingsByEdge` connects the outer boundary and core
+   with a concentric-ring triangulation. I initially wrote this as one
+   flat "walk the whole ring by index/total-count proportion" zipper
+   (a well-known LOD-transition/terrain-skirt technique), but that let a
+   phase mismatch at one ring's corner distort triangles near a
+   *different* edge's corner, occasionally inverting one. Restructuring to
+   bridge each of the 3 (triangle) or 4 (quad) corresponding edge pairs
+   *independently* -- each pair starting and ending at the same corner
+   pair -- fixed this by construction, since corner alignment is now
+   exact per edge rather than approximate around the whole ring.
+
+I do not reproduce either API's exact hardware fractional-vertex placement
+or multi-ring interior falloff -- consistent with `computeSegmentCount`'s
+own "FeMe's own normalized rule" precedent already established in this
+file. Isoline is unchanged (no interior to stitch).
+
+## What I built
+
+- `bridgeRingsByEdge`, `RingEdges` (`SmallVector<SmallVector<uint32_t>>`,
+  one entry per boundary edge), `appendTriangle` (a small shared triangle-
+  winding helper factored out of what used to be three duplicated
+  Cw/!Cw insert-pairs).
+- `appendTriangleBoundaryRing`/`appendQuadBoundaryRing`: per-edge outer
+  boundary construction from each edge's own factor.
+- `appendTriangleLattice` (renamed/generalized from the old
+  `tessellateTriangleLattice`, now taking a `Transform` callback so the
+  same code serves both a standalone full-size triangle and an inset
+  core) and the quad interior grid, both now also returning their own
+  ring split by edge for bridging.
+- Rewrote `tessellateTriangle`/`tessellateQuad` to build boundary + core +
+  bridge instead of one flat uniform lattice/grid.
+
+## Debugging the winding bug
+
+The first version's flat (non-per-edge) zipper passed my initial ad hoc
+stress checks *most* of the time but occasionally inverted one triangle
+per patch (found via a `signedArea2D` sanity check I wrote into a throwaway
+debug binary linked against the built `libFeMeGraphics.a`, since the
+existing unit tests only checked aggregate counts, not per-triangle
+orientation). I reproduced it in a small Python replica to iterate faster
+than rebuilding C++, confirmed the corner-phase-mismatch theory, then
+fixed it in the real code by switching to per-edge bridging. I also found
+(via the *first* rebuild after refactoring to per-edge structure) an
+unconditional out-of-bounds read in `bridgeRingsByEdge` -- both branches'
+"current"/"next" locals were computed before checking which branch's
+pointer had already run out, so a ring whose pointer reached `size()`
+still had its now-out-of-range element read. Moving those reads inside
+each branch (after the branch is chosen) fixed the assertion failure this
+tripped in an assertions-enabled build (glad I built with
+`LLVM_ENABLE_ASSERTIONS=ON`, since this would otherwise have been silent
+UB in a release build).
+
+## Verification
+
+Beyond the checked-in unit tests (see the test-commit message), I wrote
+two throwaway ad hoc stress harnesses (linked against the built
+`libFeMeGraphics.a`, not checked in, since they're one-off exploratory
+tools rather than part of the durable test suite):
+
+- ~28M triangles across 5,000 random `(Edges, Inside)` combinations x
+  4 partitionings x 2 domains x 2 windings: 0 winding inversions.
+- 3,000 random shared-edge-factor pairs x 4 partitionings, for both the
+  triangle domain's `P1->P2` edge and the quad domain's `u==1`/`u==0`
+  edge pair: 0 vertex-set mismatches along the shared edge.
+
+`ninja check-feme` (the pre-existing `build/` directory: `ccache` compiler
+launcher, `LLVM_ENABLE_ASSERTIONS=ON` already configured) passed in full
+before this change (1185/1187 discovered tests passing, 2 unsupported) and
+after (1188/1190, net +3: two analytic-size tests rewritten in place, four
+new tests added, one old single-triangle winding test replaced by the more
+general winding-consistency test). `clang-format` was run on every changed
+file before committing.
+
+## Documentation updates
+
+Updated Roadmap.md's R34 row and FeMeGraphicsDesign.md's G5 status
+paragraph in place: crack-free non-uniform per-edge tessellation, listed
+as deferred since R34's initial landing, is now implemented and described
+alongside the tessellator's other done work. G5 overall is still not
+complete -- the wrapper-pass/`CompiledStage` piece (item 1 above) and its
+`executeDraws`/`feme-render` wiring remain, so no image-comparison
+completion test exists yet.
+
+## What's still open (unchanged from the prior session's list, minus item 3)
+
+1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
+   `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry` -- still the
+   single largest remaining piece. A future session should budget for it
+   as its own multi-commit body of work, likely starting with the
+   hull/control stage alone (structurally closest to compute, since
+   barriers already work unmodified) before domain and geometry.
+2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
+3. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, which
+   still needs a real widened geometry invocation (item 1) to drive it.
