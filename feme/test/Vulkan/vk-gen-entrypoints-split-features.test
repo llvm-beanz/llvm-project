@@ -1,0 +1,28 @@
+// vk_gen_entrypoints.py must resolve a command's containing core-version
+// feature transitively through `depends` (see the note above
+// `vk_gen_entrypoints.py`'s `CORE_FEATURES`): newer Vulkan-Headers releases
+// split `VK_VERSION_1_x` into several `VK_{BASE,COMPUTE,GRAPHICS}_VERSION_1_x`
+// features linked this way, and a `VK_VERSION_1_x` feature itself ends up
+// requiring no commands directly.
+//
+// RUN: %python %S/../../utils/vk_gen_entrypoints.py \
+// RUN:   %S/Inputs/vk-split-features.xml %t.inc \
+// RUN:   --implemented %S/Inputs/vk-split-features-implemented.txt
+// RUN: FileCheck %s < %t.inc
+
+// Global and instance commands come from `VK_BASE_VERSION_1_0`, reached only
+// by walking VK_VERSION_1_0 -> VK_GRAPHICS_VERSION_1_0 ->
+// VK_COMPUTE_VERSION_1_0 -> VK_BASE_VERSION_1_0.
+// CHECK-DAG: FEME_VK_COMMAND_IMPL(vkGlobalCmd, GLOBAL)
+// CHECK-DAG: FEME_VK_COMMAND(vkInstanceCmd, INSTANCE)
+
+// vkDeviceCmd comes from VK_COMPUTE_VERSION_1_0.
+// CHECK-DAG: FEME_VK_COMMAND(vkDeviceCmd, DEVICE)
+
+// vkAliasCmd, from VK_GRAPHICS_VERSION_1_0, aliases vkDeviceCmd and so must
+// resolve to the same (DEVICE) dispatch level.
+// CHECK-DAG: FEME_VK_COMMAND(vkAliasCmd, DEVICE)
+
+// vkExtCmd sits in a `<require depends="...">` block gated on an optional
+// extension, not on the core version itself, so it must not appear at all.
+// CHECK-NOT: vkExtCmd

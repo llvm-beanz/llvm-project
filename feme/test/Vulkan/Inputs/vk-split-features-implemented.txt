@@ -1,0 +1,2 @@
+# Implemented-commands fixture for vk-gen-entrypoints-split-features.test.
+vkGlobalCmd
