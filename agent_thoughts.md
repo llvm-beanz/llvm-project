@@ -16788,3 +16788,156 @@ completion test exists yet.
 2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
 3. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, which
    still needs a real widened geometry invocation (item 1) to drive it.
+
+# Agent thoughts: continuing R34 (SIMD-lane stream-range reservation)
+
+## Scope decision
+
+The prior session's open-issues list carried over three items, in the same
+priority order it left them:
+
+1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
+   `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry`, flagged as
+   "the single largest remaining piece... a future session should budget
+   for it as its own multi-commit body of work".
+2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML --
+   strictly downstream of item 1.
+3. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, noted
+   as needing "a real widened geometry invocation (item 1) to drive it".
+
+I started by reading item 1's actual surface area before accepting that
+assessment at face value: `VertexWrapper.cpp`/`FragmentWrapper.cpp` (each
+500-700 lines, tightly coupled to their own `FemeVertexArgs`/
+`FemeFragmentArgs` ABI structs and a bespoke, barrier-free wave loop they
+build directly) plus `EntryWrapper.cpp` (1600+ lines, compute's own
+groupshared-allocation and barrier-region-splitting machinery, itself
+built specifically around `FemeDispatchArgs`' `GroupID`/`GroupShared`
+fields rather than as a stage-agnostic library another wrapper could call
+into). A hull-stage wrapper needs real workgroup-barrier semantics
+(control points must be able to read each other's outputs after a
+barrier, the classic hull-shader pattern), which per `Patch.h`'s own
+comment means reusing `feme::cpu`'s existing barrier lowering -- but that
+lowering lives inside `EntryWrapperPass` as compute-specific code, not
+as a factored-out, stage-parameterized utility. Doing this properly means
+either duplicating and adapting ~1600 lines of barrier-splitting logic for
+a new patch-batching ABI, or first refactoring `EntryWrapperPass` to be
+generic over its args struct -- either one is exactly the "own multi-day,
+multi-commit effort" the prior session predicted, and attempting a
+truncated version of it here would produce something neither complete nor
+adequately tested. I confirmed rather than second-guessed that
+assessment, and left item 1 (and therefore item 2) deferred again.
+
+That left item 3. Re-reading `GeometryStream.h`'s own file comment,
+though, showed the prior session's "needs item 1" framing was about
+*driving* SIMD-lane reservation from a real widened geometry invocation,
+not about the reservation algorithm itself: "SIMD-lane range reservation
+(batching many invocations' emissions together with a checked prefix sum
+so lanes do not race for stream storage) is an executor/wrapper-level
+concern once a compiled geometry stage exists ... this builder is what
+such a wrapper needs to batch on top of." The algorithm -- given N lanes'
+independent `GeometryStreamBuilder`s (exactly what N parallel geometry
+invocations would each produce on their own), merge them into one combined
+builder via a checked prefix sum, in deterministic lane order -- is itself
+a standalone, host-side, already-unit-testable surface with no dependency
+on a compiled entry point, directly named in R34's own deferred list, and
+scoped tightly enough to fully implement, test and document in one
+session. This mirrors exactly how the previous session found crack-free
+tessellation inside R34's larger deferred list: a real, bounded,
+independently-valuable slice of a much bigger epic.
+
+## Design
+
+`mergeGeometryStreamsInLaneOrder(ArrayRef<GeometryStreamBuilder> Lanes,
+GeometryStreamBuilder &Combined)`:
+
+- Lanes merge strictly in order (lane 0's emissions first, then lane 1's,
+  ...) -- the "deterministic mode uses lane order" case
+  FeMeGraphicsDesign.md's "Patch and geometry wrappers" section names.
+- Per stream, a running `Reserved` count is the "checked prefix sum":
+  before copying a lane's vertices, I check whether `Reserved +
+  Lane.size()` fits within the combined builder's own
+  `getMaxVerticesPerStream()` bound. If not, that lane contributes nothing
+  to the stream, and -- since this models a monotonic bump allocator, the
+  same shape `GeometryStreamBuilder::emit` itself already uses -- no later
+  lane is considered for that stream either. I deliberately chose
+  all-or-nothing per lane (reject the lane's whole reservation, not a
+  partial prefix of it) rather than copying as many of its vertices as
+  still fit, so a later, smaller lane can never sneak ahead of an earlier,
+  larger one out of order, and so a lane's own trailing strip is never
+  clipped mid-primitive.
+- A lane's own strip boundaries are preserved by walking
+  `Lane.getStrips(Stream)` (which already reports a trailing open strip
+  alongside closed ones) and calling `Combined.cut(Stream)` after copying
+  each one -- including the lane's last strip, whether or not the lane
+  itself ever called `cut`. This unconditional post-lane cut is what
+  guarantees a strip never merges across a lane boundary, matching real
+  stream-output/rasterization hardware treating each invocation's
+  primitives independently of its neighbors'.
+
+## What I built
+
+- `GeometryStreamMergeResult` (`MergedVertexCount` per stream,
+  `Truncated` flag) and `mergeGeometryStreamsInLaneOrder` in
+  GeometryStream.h/.cpp.
+- `GeometryStreamMergeTest` cases in GeometryStreamTest.cpp: lane-order
+  merging within one stream and across independent streams, forcing a
+  strip boundary at every lane edge (including an unclosed trailing
+  lane strip), preserving a within-lane `cut` as its own strip alongside
+  the lane-edge boundary, truncating rather than overflowing capacity
+  (including the case where a later, smaller lane would individually have
+  fit into the remaining space but is dropped anyway because the
+  reservation is monotonic), and empty lanes contributing nothing.
+
+## A build hiccup worth recording
+
+My first attempt at the `.cpp` definition used the file's existing `using
+namespace feme::graphics;` directive rather than an explicit
+`feme::graphics::` qualifier on the out-of-line function definition itself
+(matching what every *other* function in the file does by being lexically
+inside the header's namespace via the class it's a member of -- but this
+was a new free function, not a member, so it had no such automatic
+qualification). That silently defined a same-named function in the global
+namespace instead of overriding/defining the header's declared one --
+`using namespace` affects lookup at the call site, not where a
+free-standing definition itself lives -- which `ninja check-feme` caught
+immediately as an unresolved-symbol link failure (`ld.lld: undefined
+symbol: feme::graphics::mergeGeometryStreamsInLaneOrder(...)`), since the
+Itanium mangled name of my accidental global-namespace definition
+didn't match the mangled name of the header's namespaced declaration.
+Fixed by qualifying the definition explicitly, per the codebase's own
+convention ("Use full namespace qualifiers for out-of-line definitions").
+
+## Verification
+
+The prior session's own record left `ninja check-feme` at 1188/1190
+passing (2 unsupported). After this change it reports 1194/1196 passing (2
+unsupported), the expected +6 from the new `GeometryStreamMergeTest`
+cases with nothing else added or removed. `clang-format` was run on every
+changed file before committing (no changes needed).
+
+## Documentation updates
+
+Updated Roadmap.md's R34 row and FeMeGraphicsDesign.md's G5 status
+paragraph and "Patch and geometry wrappers" section in place:
+`mergeGeometryStreamsInLaneOrder`, listed as deferred since R34's initial
+landing, is now implemented and described. G5 overall is still not
+complete -- the wrapper-pass/`CompiledStage` piece and its
+`executeDraws`/`feme-render` wiring remain, so no image-comparison
+completion test exists yet.
+
+## What's still open (unchanged from the prior session's list, minus item 3)
+
+1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
+   `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry` -- still
+   the single largest remaining piece, confirmed again this session after
+   reading the actual wrapper/barrier code involved. A future session
+   should budget for it as its own multi-commit body of work. Two
+   sub-options worth considering up front, since barrier support is the
+   hard part: (a) refactor `EntryWrapperPass`'s groupshared/barrier-region-
+   splitting logic to be generic over its args-struct ABI so a hull
+   wrapper can reuse it directly, or (b) accept a hull-stage-specific
+   duplication of that machinery sized to patch batching. Starting with
+   the hull/control stage alone (structurally closest to compute) before
+   domain and geometry remains the right order, per the prior session's
+   own recommendation.
+2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
