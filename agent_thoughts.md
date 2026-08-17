@@ -17281,3 +17281,154 @@ closed:
 4. An `InputPatch` parameter on the patch-constant function, newly deferred
    this session (see above) -- a smaller, more scoped gap than the other
    three.
+
+# Agent thoughts: continuing R34 (InputPatch parameter on the patch-constant function)
+
+Continuing roadmap R34 from the prior session (`PatchConstantWrapperPass`,
+the hull shader's patch-constant phase). Its own open-issues list named four
+remaining items; this session closes #4, "an `InputPatch` parameter on the
+patch-constant function, newly deferred this session -- a smaller, more
+scoped gap than the other three."
+
+## Approach
+
+Read `feme/.instructions.md`, the R34 roadmap entry (`feme/docs/Roadmap.md`),
+"Patch and geometry wrappers" in `feme/docs/FeMeGraphicsDesign.md`, and the
+prior session's own `agent_thoughts.md` entry before writing anything, then
+read `PatchConstantWrapper.h/.cpp`, `HullWrapper.cpp`, `Patch.h`, `Signature.h`,
+and `RuntimeABI.h`'s `FemePatchArgs`/`FemePatchConstantArgs` end to end to
+understand exactly what "InputPatch parameter" meant here and what already
+existed to build on.
+
+The scope question worth recording: real HLSL lets a patch-constant function
+declare *both* an `OutputPatch<HSOut, N>` parameter (the completed control
+points -- already modeled, as `FemePatchConstantArgs::Inputs`) and an
+`InputPatch<VSOut, M>` parameter (the *original*, pre-control-stage input
+control points -- not modeled at all until now, and not even stored
+anywhere: `feme::graphics::PatchRecord` tracks an `InputControlPointCount`
+but has no storage array for it, only `ControlPointData` sized by the output
+count). I considered three ways to let a `feme.stage.input.load` in the
+patch-constant phase pick which of the two blocks it addresses:
+
+1. Reuse the existing `SignatureDirection::PatchInput` enumerator. Rejected:
+   that already means something else entirely (a *domain* shader consuming
+   the patch-constant function's own output, i.e. tessellation factors/patch
+   constants, as its own patch input) -- reusing it here for "the original
+   input control points" would collide two unrelated concepts under one
+   name, in a different stage's function.
+2. Add a brand-new `SignatureDirection` enumerator (e.g. `InputPatch`).
+   Rejected: `Direction` is meant to describe an element's role in the
+   *general* stage-IO model shared by every stage (input/output/patch-input/
+   patch-output), not a shape specific to one stage's one phase; adding a
+   fifth direction would force `verifySignature`'s `checkDirectionFrequency`
+   and every other direction-driven switch to reason about a case that is a
+   `Direction::Input` in every way that matters (it is read via an ordinary
+   `feme.stage.input.load`, per-vertex frequency, etc.) except *which
+   physical buffer* backs it.
+3. Add a scoped boolean flag, `SignatureElement::FromInputPatch`, defaulting
+   false and documented as only meaningful for a patch-constant phase's
+   `Input`-direction element. Chosen: this is the smallest change that lets
+   `PatchConstantWrapperPass` alone interpret it (every other wrapper leaves
+   it false and ignores it, the same way `Stream` is only meaningful for a
+   geometry-stage element already), and keeps `Direction`'s cross-stage
+   meaning untouched.
+
+Choosing (3) meant `SignatureElement` grew a field, which meant
+`serializeSignature`/`parseSignature`'s byte layout changed -- an
+incompatible change, so `SignatureAbiVersion` bumped from 1 to 2. That in
+turn broke every test that hand-encodes a raw serialized-signature byte
+blob directly in an `.ll`/`.test` file rather than calling
+`dxil::setEntrySignature` at parse time (`vertex-wrapper-stage-io.ll`,
+`fragment-wrapper-stage-io.ll`, and the four `feme-render` draw tests). I
+wrote a small one-off Python script to parse each old-format (version 1,
+15-fixed-field) blob and re-emit it in the new (version 2, 16-field) format
+with the new field zeroed, rather than hand-editing 6 opaque hex blobs by
+hand -- much less error-prone, and `ninja check-feme` catching every
+resulting mismatch immediately confirmed each conversion. (The two
+`Transforms/DXIL/dxil-raise-metadata-*.ll` tests that also embed a
+signature blob use a `FileCheck` regex (`{{.*}}`) for it, so needed no
+change.)
+
+## What I built
+
+- `SignatureElement::FromInputPatch` (Signature.h): the discriminator
+  described above. `SignatureAbiVersion` bumped to 2;
+  `serializeSignature`/`parseSignature` (Signature.cpp) grow the matching
+  16th fixed field. Every hand-encoded signature blob in the test suite
+  regenerated to match (a mechanical, scripted conversion, not a
+  hand-edit -- see above).
+- `FemePatchConstantArgs` (RuntimeABI.h) grows a second, independent
+  structure-of-arrays input block: `InputPatch`/`InputPatchLayout`/
+  `InputPatchControlPointCount`, alongside the existing `Inputs`/
+  `InputLayout` (which still means "the completed `OutputPatch`", unchanged).
+  `PatchConstantResources`/`PreparedPatchConstantBatch` (ResourceHeap.h/.cpp)
+  and `getPatchConstantArgsType`/`PatchConstantArgsField`
+  (StageArgsLayout.h) grow matching fields, all defaulting to null/zero so
+  every existing caller (that declares no `InputPatch` parameter) needs no
+  changes.
+- `PatchConstantWrapperPass` (PatchConstantWrapper.cpp):
+  `appendPatchConstantStageParams` now always appends two more parameters
+  (`stage_input_patch_layout`/`stage_input_patch`, matching the existing
+  "always append every param, whether or not the function ends up using
+  it" convention the other four already follow); `lowerPatchConstantInputLoad`
+  now takes the addressed layout/storage pair from `Elt.FromInputPatch`
+  instead of always assuming `PEnv.InputLayout`/`Inputs`. `buildWrapper`'s
+  `WrapperEnv` and its `CallArgs` mapping grow the matching two cases.
+- `HullWrapper.cpp`'s file comment updated: the "still deferred" bullet
+  naming this item is now "closed... in a further follow-up", pointing at
+  `PatchConstantWrapper.cpp`'s own comment for detail.
+- `unittests/Transforms/CPU/PatchConstantWrapperTest.cpp`'s new
+  `LowersInputPatchAndOutputPatchReadsSeparately`: a patch-constant function
+  reading one element from each block by distinct `ElementID`, checking the
+  compiled body gains both new parameters and the module still verifies.
+- `unittests/Target/CPU/CompiledStageTest.cpp`'s new
+  `InvokePatchConstantReadsInputPatchSeparatelyFromOutputPatch`: an
+  end-to-end JIT run with *different* values in the two blocks (`InputPatch`
+  = 3.0, completed `OutputPatch` = 10.0) computing their difference, so a
+  bug that aliased the two blocks (e.g. wiring `InputPatch` to the same
+  pointer as `Inputs`) would produce 0.0 instead of the expected 7.0 --
+  this is the strongest test available short of driving a real hull
+  `InputPatch` end to end through `executeDraws`, which remains out of
+  scope (see "What's still open" below).
+- Roadmap.md's R34 entry and FeMeGraphicsDesign.md's "Patch and geometry
+  wrappers" section updated to record this and drop it from R34's deferred
+  list.
+
+## Verification
+
+Baseline (before this session) was `ninja check-feme` at 1202/1204 passing
+(2 unsupported). After this session it reports 1204/1206 passing (2
+unsupported) -- the expected +2 (1 `PatchConstantWrapperTest` case, 1
+`CompiledStageTest` case; the lit-test count is unchanged, since the 6
+regenerated signature blobs are edits to existing tests, not new ones), and
+the intermediate step (after the `SignatureAbiVersion` bump alone, before
+touching `PatchConstantWrapperTest.cpp`) confirmed the same 1202/1204 held
+once the regenerated blobs were in place, ruling out any hidden dependency
+on the exact byte layout beyond what `serializeSignature`/`parseSignature`
+own. Built and tested with the existing `build/` directory (ccache launcher
+configured, `LLVM_ENABLE_ASSERTIONS=ON` already set in its CMakeCache), via
+`ninja -C build check-feme`. `clang-format` was run on every changed file
+before committing; a few lines it reflowed (call-argument wrapping, one
+long `TEST(...)` name) were folded into their own small follow-up commit
+rather than hand-fixed, since none were meaningful judgment calls.
+
+## What's still open
+
+Unchanged from the prior session's own list, minus the item this session
+closed:
+
+1. `DomainWrapperPass`/`GeometryWrapperPass` and
+   `CompiledStage::invokeDomain`/`invokeGeometry` -- not started.
+2. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+   the control-point batch ABI, for a hull shader whose control points
+   cooperate through groupshared memory before every one finishes.
+3. Wiring any compiled hull stage (now both phases, including `InputPatch`)
+   into `executeDraws`/`feme-render`/the scene YAML -- still strictly
+   downstream of the domain wrapper (control points and patch constants
+   alone produce no rasterizable geometry without going through the
+   tessellator and a domain-stage evaluation). Note this also means
+   `feme::graphics::PatchRecord` (Patch.h) still has no storage for the
+   original input control points at all (only an `InputControlPointCount`
+   used for validation) -- feeding a real `InputPatch` block from host-side
+   patch storage into `FemePatchConstantArgs::InputPatch` needs that
+   storage added too, whenever this item is picked up.
