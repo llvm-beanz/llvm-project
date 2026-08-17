@@ -31,8 +31,19 @@ class Value;
 
 namespace feme::cpu {
 
+// Roadmap R34's continuation: `feme.stage.stream.emit`/`.cut` are
+// side-effecting the same way `feme.stage.output.store` is (see
+// GeometryWrapper.cpp's file comment and "Patch and geometry wrappers" in
+// feme/docs/FeMeGraphicsDesign.md, "emission is side-effecting even when no
+// framebuffer write occurs"), so `LinearizePass` threads the same per-lane
+// side-effect mask onto masked variants of them, exactly as it already does
+// for output stores.
 inline constexpr llvm::StringLiteral MaskedOutputStorePrefix =
     "feme.cpu.masked.stage.output.store";
+inline constexpr llvm::StringLiteral MaskedStreamEmitPrefix =
+    "feme.cpu.masked.stage.stream.emit";
+inline constexpr llvm::StringLiteral MaskedStreamCutPrefix =
+    "feme.cpu.masked.stage.stream.cut";
 inline constexpr llvm::StringLiteral ReturnMasksPrefix =
     "feme.cpu.stage.return.masks";
 
@@ -53,6 +64,20 @@ llvm::CallInst *createMaskedOutputStore(llvm::IRBuilderBase &B,
                                         llvm::Value *Value, llvm::Value *Vertex,
                                         llvm::Value *Mask);
 
+llvm::FunctionCallee getOrInsertMaskedStreamEmit(llvm::Module &M,
+                                                 llvm::Type *StreamTy,
+                                                 llvm::Type *MaskTy);
+
+llvm::CallInst *createMaskedStreamEmit(llvm::IRBuilderBase &B,
+                                       llvm::Value *Stream, llvm::Value *Mask);
+
+llvm::FunctionCallee getOrInsertMaskedStreamCut(llvm::Module &M,
+                                                llvm::Type *StreamTy,
+                                                llvm::Type *MaskTy);
+
+llvm::CallInst *createMaskedStreamCut(llvm::IRBuilderBase &B,
+                                      llvm::Value *Stream, llvm::Value *Mask);
+
 llvm::FunctionCallee getOrInsertReturnMasks(llvm::Module &M, llvm::Type *LiveTy,
                                             llvm::Type *SideEffectTy);
 
@@ -60,6 +85,8 @@ llvm::CallInst *createReturnMasks(llvm::IRBuilderBase &B, llvm::Value *Live,
                                   llvm::Value *SideEffect);
 
 bool isMaskedOutputStoreCall(const llvm::CallInst &CI);
+bool isMaskedStreamEmitCall(const llvm::CallInst &CI);
+bool isMaskedStreamCutCall(const llvm::CallInst &CI);
 bool isReturnMasksCall(const llvm::CallInst &CI);
 
 } // namespace feme::cpu

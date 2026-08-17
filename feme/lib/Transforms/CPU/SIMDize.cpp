@@ -437,6 +437,8 @@ private:
   void widenWaveCall(CallInst &CI, WaveCallKind Kind, IRBuilder<> &Builder);
   void widenStageOp(CallInst &CI, feme::StageOpKind Kind, IRBuilder<> &Builder);
   void widenMaskedOutputStore(CallInst &CI, IRBuilder<> &Builder);
+  void widenMaskedStreamEmit(CallInst &CI, IRBuilder<> &Builder);
+  void widenMaskedStreamCut(CallInst &CI, IRBuilder<> &Builder);
   void widenReturnMasks(CallInst &CI, IRBuilder<> &Builder);
   void replaceGroupIdCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
@@ -811,6 +813,31 @@ void FunctionWidener::widenMaskedOutputStore(CallInst &CI,
       *M, ValueArg->getType(), Row->getType(), Component->getType(),
       Vertex->getType(), Mask->getType());
   Builder.CreateCall(Callee, {Element, Row, Component, ValueArg, Vertex, Mask});
+  ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenMaskedStreamEmit(CallInst &CI,
+                                            IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *Stream = getWidened(CI.getArgOperand(0), Builder);
+  Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
+                                  getWidened(CI.getArgOperand(1), Builder),
+                                  "stage.stream.emit.mask");
+  FunctionCallee Callee =
+      getOrInsertMaskedStreamEmit(*M, Stream->getType(), Mask->getType());
+  Builder.CreateCall(Callee, {Stream, Mask});
+  ToErase.push_back(&CI);
+}
+
+void FunctionWidener::widenMaskedStreamCut(CallInst &CI, IRBuilder<> &Builder) {
+  Module *M = NewF->getParent();
+  Value *Stream = getWidened(CI.getArgOperand(0), Builder);
+  Value *Mask = Builder.CreateAnd(Env.SideEffectMask,
+                                  getWidened(CI.getArgOperand(1), Builder),
+                                  "stage.stream.cut.mask");
+  FunctionCallee Callee =
+      getOrInsertMaskedStreamCut(*M, Stream->getType(), Mask->getType());
+  Builder.CreateCall(Callee, {Stream, Mask});
   ToErase.push_back(&CI);
 }
 
@@ -1430,6 +1457,14 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     }
     if (isMaskedOutputStoreCall(*CI)) {
       widenMaskedOutputStore(*CI, Builder);
+      return true;
+    }
+    if (isMaskedStreamEmitCall(*CI)) {
+      widenMaskedStreamEmit(*CI, Builder);
+      return true;
+    }
+    if (isMaskedStreamCutCall(*CI)) {
+      widenMaskedStreamCut(*CI, Builder);
       return true;
     }
     if (isReturnMasksCall(*CI)) {

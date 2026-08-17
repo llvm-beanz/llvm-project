@@ -93,6 +93,56 @@ bool feme::cpu::isMaskedOutputStoreCall(const CallInst &CI) {
   return Callee && Callee->getName().starts_with(MaskedOutputStorePrefix);
 }
 
+FunctionCallee feme::cpu::getOrInsertMaskedStreamEmit(Module &M, Type *StreamTy,
+                                                      Type *MaskTy) {
+  // Name-mangled by `MaskTy` (scalar vs. widened): the only type that
+  // varies between the scalar call `LinearizePass` creates and the widened
+  // one `FunctionWidener` later creates under the same prefix, mirroring
+  // `getOrInsertMaskedOutputStore`'s own `ValueTy`-based mangling.
+  SmallString<64> Name(MaskedStreamEmitPrefix);
+  Name.push_back('.');
+  appendTypeSuffix(Name, MaskTy);
+  FunctionType *FTy = FunctionType::get(Type::getVoidTy(M.getContext()),
+                                        {StreamTy, MaskTy}, /*isVarArg=*/false);
+  return M.getOrInsertFunction(Name, FTy);
+}
+
+CallInst *feme::cpu::createMaskedStreamEmit(IRBuilderBase &B, Value *Stream,
+                                            Value *Mask) {
+  Module *M = B.GetInsertBlock()->getModule();
+  FunctionCallee Callee =
+      getOrInsertMaskedStreamEmit(*M, Stream->getType(), Mask->getType());
+  return B.CreateCall(Callee, {Stream, Mask});
+}
+
+FunctionCallee feme::cpu::getOrInsertMaskedStreamCut(Module &M, Type *StreamTy,
+                                                     Type *MaskTy) {
+  SmallString<64> Name(MaskedStreamCutPrefix);
+  Name.push_back('.');
+  appendTypeSuffix(Name, MaskTy);
+  FunctionType *FTy = FunctionType::get(Type::getVoidTy(M.getContext()),
+                                        {StreamTy, MaskTy}, /*isVarArg=*/false);
+  return M.getOrInsertFunction(Name, FTy);
+}
+
+CallInst *feme::cpu::createMaskedStreamCut(IRBuilderBase &B, Value *Stream,
+                                           Value *Mask) {
+  Module *M = B.GetInsertBlock()->getModule();
+  FunctionCallee Callee =
+      getOrInsertMaskedStreamCut(*M, Stream->getType(), Mask->getType());
+  return B.CreateCall(Callee, {Stream, Mask});
+}
+
+bool feme::cpu::isMaskedStreamEmitCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee && Callee->getName().starts_with(MaskedStreamEmitPrefix);
+}
+
+bool feme::cpu::isMaskedStreamCutCall(const CallInst &CI) {
+  const Function *Callee = CI.getCalledFunction();
+  return Callee && Callee->getName().starts_with(MaskedStreamCutPrefix);
+}
+
 bool feme::cpu::isReturnMasksCall(const CallInst &CI) {
   const Function *Callee = CI.getCalledFunction();
   return Callee && Callee->getName().starts_with(ReturnMasksPrefix);
