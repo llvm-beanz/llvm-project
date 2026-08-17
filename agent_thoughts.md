@@ -17764,3 +17764,134 @@ before committing.
    vertices into a `FemeGeometryInvocation`/`Inputs` block, and nothing
    chains the four stage invocations (hull control-point phase,
    patch-constant phase, domain, geometry) together per patch/primitive.
+
+# Agent thoughts: continuing R34 (host-side wiring glue toward chained hull/domain/geometry execution)
+
+Continuing roadmap R34. The prior session's open-issues list carried two
+items unchanged since it started (issue 1, barrier-region generalization)
+plus one it had just narrowed to the *only* remaining thing blocking G5's
+image-comparison completion test (issue 2, wiring the compiled hull/domain/
+geometry stages into `executeDraws`/`feme-render`). Issue 2's own text named
+three concrete missing pieces: `PatchRecord` has no storage for the original
+input control points; nothing marshals a tessellator `DomainPoint` array into
+`FemeDomainInvocation`; nothing marshals an assembled primitive's vertices
+into `FemeGeometryInvocation`/`Inputs`.
+
+## Scope decision
+
+Read `feme/.instructions.md`, the full R34 roadmap row, "Patch and geometry
+wrappers" in `feme/docs/FeMeGraphicsDesign.md`, and skimmed the prior five
+sessions' `agent_thoughts.md` entries. Then read `Patch.h/.cpp`,
+`Tessellator.h` (`DomainPoint`/`TessellatedPatch`), `RuntimeABI.h`'s
+`FemeDomainArgs`/`FemeDomainInvocation`/`FemeGeometryArgs`/
+`FemeGeometryInvocation`, `Pipeline.h` (`SplitPrimitiveAdjacency` and the
+adjacency-splitting functions), `GeometryStreamCollection.h/.cpp` (the
+closest existing precedent for "`feme::graphics` glue bridging a
+`feme::cpu` ABI struct and a `feme::graphics` concept"), and
+`lib/Graphics/Executor.cpp` (~1700 lines) to confirm it does not yet call
+any of `invokePatch`/`invokePatchConstant`/`invokeDomain`/`invokeGeometry` --
+only vertex/fragment. `GraphicsPipeline` (Pipeline.h) also has no hull/
+domain/geometry `CompiledStage` members yet.
+
+Chaining all four stages together end-to-end in `Executor`/`feme-render`
+(issue 2's actual remaining goal) is a large, multi-part change: it needs
+`GraphicsPipeline` to grow optional hull/domain/geometry stage members, a
+real per-draw control flow (assemble input patch -> invoke control-point
+phase per control point with the barrier-region question issue 1 raises ->
+invoke patch-constant phase once -> tessellate -> invoke domain per point ->
+assemble primitives from the domain-shaded vertices -> invoke geometry per
+primitive -> feed emitted vertices to rasterization), and a scene-YAML
+surface to author a tessellation/geometry draw at all. That is too large to
+land safely as one session's work without either rushing the barrier-region
+design (issue 1, explicitly still open) or leaving the new control flow
+untested against a real compiled shader.
+
+Given that, this session's scope is deliberately narrower: land the three
+named missing pieces as their own tested units, each independent of the
+others and of the not-yet-decided full chaining design, so a future session
+wiring `Executor` has real, tested building blocks to call instead of having
+to invent and test them inline in the middle of that larger change. This
+mirrors how earlier R34 sessions treated the tessellator/patch-storage/
+geometry-stream-builder work as standalone, tested pieces well before any
+wrapper pass consumed them.
+
+## Three pieces landed
+
+1. **`PatchRecord` input control point storage.** Added a second,
+   independent structure-of-arrays block (`InputControlPointData`,
+   `writeInputControlPoint`/`readInputControlPoint`) alongside the existing
+   output-control-point storage, with its own `InputControlPointScalarCount`
+   -- independent from the output scalar count, since a hull shader's input
+   and output control point signatures need not agree in shape. This is a
+   breaking constructor signature change (`PatchRecord`'s only call site was
+   its own unit test), so I updated `PatchTest.cpp` in the same commit rather
+   than leaving it broken.
+
+   I checked `FeMeGraphicsDesign.md` before writing this: "A patch record
+   contains input control points, output control points, ..." already
+   describes this shape (line 621) -- so this closes a gap between the
+   design and the implementation rather than introducing a design decision
+   of its own; no design doc update needed for this piece.
+
+2. **`buildDomainInvocations`** (new `DomainInvocations.h/.cpp`): converts a
+   `TessellatedPatch`'s `DomainPoint` array into a
+   `std::vector<FemeDomainInvocation>` in the same order, zeroing the
+   ABI-headroom `Reserved` field. Trivial by design -- kept as its own
+   function (rather than inlined wherever `Executor` eventually drives a
+   domain batch) so that call site doesn't have to re-derive the field
+   mapping, and so it's unit-testable without a compiled domain shader at
+   all.
+
+3. **`buildGeometryInputs`/`buildGeometryInvocations`** (new
+   `GeometryInputs.h/.cpp`): `buildGeometryInputs` is a pure gather -- given
+   which vertex-output slot supplies each geometry-input slot (the same
+   index lists `splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`
+   already compute per primitive), it copies each vertex's scalars into
+   `FemeGeometryArgs::Inputs`'s primitive-major layout. I made an
+   out-of-range vertex slot gather as zero rather than reading out of bounds
+   or asserting, matching `PatchRecord`'s own bounds-checking philosophy
+   ("this storage layer checks independently rather than trusting that
+   validation transitively") since a real caller's index list is itself
+   host-computed and worth defending against independently.
+   `buildGeometryInvocations` mirrors `buildDomainInvocations` for the
+   geometry stage's `SV_PrimitiveID` per invocation.
+
+All three live in `feme::graphics` (not `feme::cpu`) for the layering reason
+`GeometryStreamCollection.h` already documents: `FeMeTargetCPU` does not
+depend on `FeMeGraphics`, and `Pipeline.h`'s adjacency-splitting functions
+(the natural source of `buildGeometryInputs`'s index lists) already live in
+`feme::graphics`.
+
+## One build hazard worth recording
+
+`std::vector<cpu::FemeDomainInvocation> feme::graphics::buildDomainInvocations(...)`
+(return type spelled with the *unqualified* `cpu::` prefix, function name
+fully qualified) failed to compile: `cpu` don't resolve unqualified there,
+because a qualified out-of-line function definition's *return type* is
+looked up at the point of declaration (ordinary unqualified lookup, which
+sees only what `using namespace feme::graphics;` brought in -- not
+`feme::cpu`, which is not a member of `feme::graphics`), while its
+*parameter types* are looked up within the scope the qualified name
+implies (here, within `feme`, where `cpu` resolves as a sibling namespace).
+`GeometryStreamCollection.cpp`'s existing `cpu::FemeGeometryArgs` *parameter*
+works for exactly that reason and was not a counterexample once I noticed
+the return-type/parameter-type asymmetry. Fixed by fully qualifying the
+return type (`feme::cpu::FemeDomainInvocation`) instead.
+
+## What's still open
+
+Unchanged from every prior session: generalizing `EntryWrapperPass`'s
+barrier-region-splitting machinery to the control-point batch ABI, for a
+hull shader whose control points cooperate through groupshared memory
+before every one finishes.
+
+Narrowed but not closed: wiring the compiled hull, domain, and geometry
+stages into `executeDraws`/`feme-render`. This session's three pieces are
+real, tested building blocks, but `feme::graphics::Executor` still does not
+call `invokePatch`/`invokePatchConstant`/`invokeDomain`/`invokeGeometry` at
+all, and `GraphicsPipeline` still has no hull/domain/geometry `CompiledStage`
+members to call them through. The actual per-draw control flow chaining all
+four stages (and a scene-YAML surface to author such a draw) remains a
+single, larger piece of remaining work -- deliberately left to its own
+session rather than rushed alongside issue 1's barrier-region design
+question, per this session's scope decision above.
