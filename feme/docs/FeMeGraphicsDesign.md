@@ -1550,6 +1550,22 @@ in place of a `StageInterfaceMap`. `unittests/Graphics/ExecutorTest.cpp`
 and `test/Tools/feme-render/draw-{triangle,vertex-buffer,indexed}.test`
 cover this row; see Roadmap.md's own R32 entry for the full status note.
 
+Status (roadmap R33, "Depth, stencil, blending, and multisampling"): depth
+(`D16_UNORM`/`D32_FLOAT`)/stencil (`S8_UINT`) testing and writes, full
+blend-factor/op combinations, per-channel write masks, logic ops
+(`R8G8B8A8_*` only), multiple render targets, 1/2/4-sample multisampling
+with coverage/resolve, and a deterministic parallel tile schedule (a
+`WorkerCount` worker pool over disjoint tiles, wiring up `feme-render`'s
+previously-inert `--workers`) are all now implemented, replacing the "no
+depth/stencil, no multisampling, `BlendMode::Replace`" scope the paragraph
+above still describes for R32's original shape. Output merge is no longer
+unconditionally painter's-order: depth/stencil tests -- scheduled early
+(before the fragment stage runs) or late (after it returns) from the
+fragment stage's own `SV_Depth`/`SV_StencilRef`/discard reflection, per
+"Early and late tests" below -- now gate whether a fragment's color
+reaches an attachment at all. See Roadmap.md's own R33 entry for the full
+status note and deferred scope.
+
 The conventional tessellation path inserts patch control, fixed tessellation,
 domain evaluation, and optional geometry execution between vertex shading and
 primitive assembly. The mesh path replaces input assembly and conventional
@@ -1607,6 +1623,14 @@ Rasterizer-ordered views, fragment shader interlocks, and ordered blending are
 scheduler constraints. The existing `FEME_DESCRIPTOR_ROV` bit may participate
 in reflection, but setting it does not by itself implement ordering.
 
+Status (roadmap R33): `feme::graphics::executeDraws` takes a `WorkerCount`
+parameter; vertex work for a draw command completes and joins before any
+tile runs (unchanged from R32), and tiles then run on a small thread pool
+pulling the next unprocessed flat tile index from a shared atomic cursor,
+exactly the "parallel tiles without locks in the common case" this section
+describes. Rasterizer-ordered views/interlocks/ordered blending remain
+unimplemented scheduler constraints, as this section already anticipates.
+
 ### Rasterization correctness
 
 The rasterizer needs focused tests for:
@@ -1637,6 +1661,19 @@ execution only when the source API permits it. Helper lanes may still be
 required for neighboring surviving fragments. When tests must be late, the
 fragment stage returns masks and outputs to output merge, which performs depth,
 stencil, blend, and attachment writes in specification order.
+
+Status (roadmap R33): `feme::graphics::executeDraws` chooses early vs. late
+scheduling from `SignatureSystemValue::Depth`/`StencilRef` fragment outputs
+and `FEME_CPU_ARTIFACT_USES_DISCARD`/`_DEMOTE` (`cpu::StageArtifactInfo::
+Flags`) -- exactly the reflection this section already specified, already
+populated by the compute track's existing discard/demote lowering and the
+graphics signature model, so no new reflection pass was needed. An early
+test runs per sample (per the rasterizer's own fixed sample positions)
+during quad generation, narrowing `FemeFragmentInvocation::Coverage`'s
+per-lane bitmask before the fragment stage runs; a late test runs per
+sample after the fragment stage returns, honoring a shader-written
+`SV_Depth`/`SV_StencilRef` and gating output merge's color write exactly as
+this section specifies.
 
 ## Determinism and Reference Execution
 
@@ -1830,6 +1867,19 @@ checks and `test/Tools/feme-render/draw-*.test`.
 
 Completion test: pass focused raster and output-merge suites plus the Vulkan
 and Direct3D frontend tests for every advertised format/state combination.
+
+Status: roadmap R33 ("Depth, stencil, blending, and multisampling")
+implements every bullet above except the API-runtime conformance-run bullet,
+which has no runtime to run against yet (V1/W1 land the Vulkan/Direct3D
+object models first) -- see "Software Graphics Executor" and "Early and
+late tests" earlier in this document, and Roadmap.md's own R33 entry, for
+the full status note and deferred scope (combined `D24_UNORM_S8_UINT`/
+`D32_FLOAT_S8X24_UINT` depth-stencil attachments, per-sample shading/
+interpolation, depth/stencil resolve, and 8+ sample counts are each a
+mechanical, on-demand addition to the same shape). Today's coverage is
+`unittests/Graphics/ExecutorTest.cpp`'s depth/stencil/blend/write-mask/
+logic-op/MRT/multisample/determinism checks and
+`test/Tools/feme-render/draw-depth.test`.
 
 ### G5: Tessellation and geometry
 
