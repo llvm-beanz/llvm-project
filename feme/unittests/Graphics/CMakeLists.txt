@@ -6,6 +6,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeGraphicsTests
   ExecutorTest.cpp
+  GeometryStreamCollectionTest.cpp
   GeometryStreamTest.cpp
   ImageFixtureTest.cpp
   LayeredRenderingTest.cpp
