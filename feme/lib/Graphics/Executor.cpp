@@ -15,11 +15,13 @@
 //  - No post-transform vertex cache: every (instance, vertex-or-index) pair
 //    re-runs the vertex stage, matching "the first implementation may
 //    perform all vertex work before tile work" in "Draw flow".
-//  - Depth testing/writes (roadmap R33) support `D16_UNORM`/`D32_FLOAT`
-//    depth attachments with early or late scheduling chosen from the
-//    fragment stage's own `SV_Depth`/discard reflection; stencil testing,
-//    blending beyond `BlendMode::Replace`, multiple render targets, and
-//    multisampling remain rejected rather than run.
+//  - Depth/stencil testing/writes (roadmap R33) support `D16_UNORM`/
+//    `D32_FLOAT` depth and `S8_UINT` stencil attachments (two separate
+//    images, not one packed surface -- see PreparedDraw.h's
+//    `DepthStencilAttachment`), with early or late scheduling chosen from
+//    the fragment stage's own `SV_Depth`/`SV_StencilRef`/discard
+//    reflection. Blending beyond `BlendMode::Replace`, multiple render
+//    targets, and multisampling remain rejected rather than run.
 //  - Vertex/fragment stage elements are 32-bit scalars/vectors only
 //    (`RowCount == 1`, `BitWidth == 32`); matrices and 16-/64-bit varyings
 //    are a mechanical, on-demand addition once a test needs them.
@@ -55,6 +57,7 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <vector>
 
 using namespace llvm;
@@ -574,6 +577,103 @@ Error writeDepth(AttachmentView &Depth, int32_t PX, int32_t PY, float Value) {
   }
 }
 
+uint8_t readStencil(const AttachmentView &Stencil, int32_t PX, int32_t PY) {
+  return Stencil.Data[(size_t)PY * Stencil.Width + PX];
+}
+
+void writeStencil(AttachmentView &Stencil, int32_t PX, int32_t PY,
+                  uint8_t Value) {
+  Stencil.Data[(size_t)PY * Stencil.Width + PX] = Value;
+}
+
+/// Applies \p Op ("Depth/Stencil" per Vulkan's `VkStencilOp`/Direct3D's
+/// `D3D12_STENCIL_OP`) to \p Current, using \p Reference for `Replace`.
+uint8_t applyStencilOp(StencilOp Op, uint8_t Current, uint8_t Reference) {
+  switch (Op) {
+  case StencilOp::Keep:
+    return Current;
+  case StencilOp::Zero:
+    return 0;
+  case StencilOp::Replace:
+    return Reference;
+  case StencilOp::IncrementClamp:
+    return Current == 0xFF ? 0xFF : static_cast<uint8_t>(Current + 1);
+  case StencilOp::DecrementClamp:
+    return Current == 0 ? 0 : static_cast<uint8_t>(Current - 1);
+  case StencilOp::Invert:
+    return static_cast<uint8_t>(~Current);
+  case StencilOp::IncrementWrap:
+    return static_cast<uint8_t>(Current + 1);
+  case StencilOp::DecrementWrap:
+    return static_cast<uint8_t>(Current - 1);
+  }
+  llvm_unreachable("unhandled StencilOp");
+}
+
+/// Runs the combined depth/stencil test at pixel (\p PX, \p PY) against
+/// candidate depth \p NewDepth, in the fixed-function order every API
+/// shares: the stencil test first (applying `FailOp` on failure), then --
+/// only if stencil passed -- the depth test (applying `DepthFailOp`/
+/// `PassOp`). Returns whether the fragment may proceed to color write.
+/// \p DepthAttachment/\p StencilAttachment are only dereferenced when the
+/// corresponding test/write is enabled (the caller already validated they
+/// are bound in that case).
+Expected<bool> testDepthStencil(const DepthState &Depth,
+                                const StencilState &Stencil,
+                                AttachmentView &DepthAttachment,
+                                AttachmentView &StencilAttachment,
+                                bool FrontFacing, int32_t PX, int32_t PY,
+                                float NewDepth,
+                                std::optional<uint8_t> RefOverride = {}) {
+  StencilFaceState Face = FrontFacing ? Stencil.Front : Stencil.Back;
+  if (RefOverride)
+    Face.Reference = *RefOverride;
+  bool StencilPass = true;
+  uint8_t StoredStencil = 0;
+  if (Stencil.TestEnable) {
+    StoredStencil = readStencil(StencilAttachment, PX, PY);
+    uint8_t Masked = StoredStencil & Face.CompareMask;
+    uint8_t Ref = Face.Reference & Face.CompareMask;
+    StencilPass = compareOp(Face.Compare, static_cast<float>(Ref),
+                            static_cast<float>(Masked));
+  }
+
+  auto applyFace = [&](StencilOp Op) {
+    uint8_t Updated = applyStencilOp(Op, StoredStencil, Face.Reference);
+    uint8_t Merged =
+        (StoredStencil & ~Face.WriteMask) | (Updated & Face.WriteMask);
+    writeStencil(StencilAttachment, PX, PY, Merged);
+  };
+
+  if (!StencilPass) {
+    if (Stencil.TestEnable)
+      applyFace(Face.FailOp);
+    return false;
+  }
+
+  bool DepthPass = true;
+  if (Depth.TestEnable) {
+    Expected<float> OldDepth = readDepth(DepthAttachment, PX, PY);
+    if (!OldDepth)
+      return OldDepth.takeError();
+    DepthPass = compareOp(Depth.Compare, NewDepth, *OldDepth);
+  }
+
+  if (!DepthPass) {
+    if (Stencil.TestEnable)
+      applyFace(Face.DepthFailOp);
+    return false;
+  }
+
+  if (Stencil.TestEnable)
+    applyFace(Face.PassOp);
+  if (Depth.WriteEnable) {
+    if (Error E = writeDepth(DepthAttachment, PX, PY, NewDepth))
+      return std::move(E);
+  }
+  return true;
+}
+
 } // namespace
 
 Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
@@ -588,6 +688,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
     return createStringError(inconvertibleErrorCode(),
                              "depth testing/writes are enabled but the draw "
                              "has no bound depth attachment");
+  const StencilState &PipelineStencil = Pipeline.getStencilState();
+  if (PipelineStencil.TestEnable && Draw.DepthStencil.Stencil.Data.empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "stencil testing is enabled but the draw has "
+                             "no bound stencil attachment");
   if (Draw.Attachments.size() != 1)
     return createStringError(inconvertibleErrorCode(),
                              "exactly one color attachment is implemented "
@@ -667,26 +772,31 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
   if (!ColorElemSize)
     return ColorElemSize.takeError();
 
-  // --- Depth test/write setup (roadmap R33). ---
+  // --- Depth/stencil test/write setup (roadmap R33). ---
   //
-  // An early depth test/write -- performed before the fragment stage runs,
-  // using the rasterizer's own interpolated depth -- is only correct when
-  // the fragment stage cannot override that depth (no `SV_Depth` output)
-  // and cannot conditionally suppress its own side effects (no
-  // discard/demote): "An early depth pass may reject side-effect
-  // invocations before fragment execution only when the source API
-  // permits it" ("Early and late tests" in
+  // An early test -- performed before the fragment stage runs, using the
+  // rasterizer's own interpolated depth and each face's fixed stencil
+  // reference -- is only correct when the fragment stage cannot override
+  // either (no `SV_Depth`/`SV_StencilRef` output) and cannot conditionally
+  // suppress its own side effects (no discard/demote): "An early depth
+  // pass may reject side-effect invocations before fragment execution only
+  // when the source API permits it" ("Early and late tests" in
   // feme/docs/FeMeGraphicsDesign.md). Every other case defers the test
   // until after the fragment stage returns, matching output merge's own
   // "depth, stencil, blend, and attachment writes in specification order".
   const SignatureElement *FSDepthOut = findElement(
       *FSSig, SignatureDirection::Output, SignatureSystemValue::Depth);
+  const SignatureElement *FSStencilRefOut = findElement(
+      *FSSig, SignatureDirection::Output, SignatureSystemValue::StencilRef);
   uint32_t FSFlags = FS.getArtifactInfo().Flags;
   bool FSMayDiscard = (FSFlags & (cpu::FEME_CPU_ARTIFACT_USES_DISCARD |
                                   cpu::FEME_CPU_ARTIFACT_USES_DEMOTE)) != 0;
   bool DepthTestOrWrite = PipelineDepth.TestEnable || PipelineDepth.WriteEnable;
-  bool UseEarlyDepth = DepthTestOrWrite && !FSDepthOut && !FSMayDiscard;
+  bool NeedsDepthStencil = DepthTestOrWrite || PipelineStencil.TestEnable;
+  bool UseEarlyDepthStencil =
+      NeedsDepthStencil && !FSDepthOut && !FSStencilRefOut && !FSMayDiscard;
   AttachmentView DepthAttachment = Draw.DepthStencil.Depth;
+  AttachmentView StencilAttachment = Draw.DepthStencil.Stencil;
 
   int32_t ScissorMinX = std::max<int32_t>(0, Draw.Scissor.X);
   int32_t ScissorMinY = std::max<int32_t>(0, Draw.Scissor.Y);
@@ -1051,22 +1161,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
                 Inv.Coverage[Lane] = (Quad.Coverage >> Lane) & 1u;
                 Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
 
-                if (UseEarlyDepth && Inv.Coverage[Lane]) {
+                if (UseEarlyDepthStencil && Inv.Coverage[Lane]) {
                   int32_t PX = Quad.PixelX[Lane], PY = Quad.PixelY[Lane];
-                  bool Pass = true;
-                  if (PipelineDepth.TestEnable) {
-                    Expected<float> OldDepth =
-                        readDepth(DepthAttachment, PX, PY);
-                    if (!OldDepth)
-                      return OldDepth.takeError();
-                    Pass = compareOp(PipelineDepth.Compare, Depth, *OldDepth);
-                  }
-                  if (!Pass) {
+                  Expected<bool> Pass = testDepthStencil(
+                      PipelineDepth, PipelineStencil, DepthAttachment,
+                      StencilAttachment, Tri.FrontFacing, PX, PY, Depth);
+                  if (!Pass)
+                    return Pass.takeError();
+                  if (!*Pass) {
                     Quad.Coverage &= ~(1u << Lane);
                     Inv.Coverage[Lane] = 0;
-                  } else if (PipelineDepth.WriteEnable) {
-                    if (Error E = writeDepth(DepthAttachment, PX, PY, Depth))
-                      return E;
                   }
                 }
               }
@@ -1170,28 +1274,28 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
             int32_t PX = Quad.PixelX[Lane];
             int32_t PY = Quad.PixelY[Lane];
 
-            // A late depth test/write happens here, after the fragment
-            // stage ran, using its `SV_Depth` output when it wrote one
-            // (an early test already handled the alternative above and
-            // is not repeated here -- see "Depth test/write setup").
-            if (!UseEarlyDepth && DepthTestOrWrite) {
+            // A late depth/stencil test/write happens here, after the
+            // fragment stage ran, using its `SV_Depth`/`SV_StencilRef`
+            // outputs when it wrote them (an early test already handled
+            // the alternative above and is not repeated here -- see
+            // "Depth/stencil test/write setup").
+            if (!UseEarlyDepthStencil && NeedsDepthStencil) {
               float FragDepth = QuadInvocations[Q].Position[Lane][2];
               if (FSDepthOut)
                 FragDepth =
                     FSOutput->readFloat(FSDepthOut->ElementID, 0, Q * 4 + Lane);
-              bool Pass = true;
-              if (PipelineDepth.TestEnable) {
-                Expected<float> OldDepth = readDepth(DepthAttachment, PX, PY);
-                if (!OldDepth)
-                  return OldDepth.takeError();
-                Pass = compareOp(PipelineDepth.Compare, FragDepth, *OldDepth);
-              }
+              std::optional<uint8_t> RefOverride;
+              if (FSStencilRefOut)
+                RefOverride = static_cast<uint8_t>(FSOutput->readRaw(
+                    FSStencilRefOut->ElementID, 0, Q * 4 + Lane));
+              Expected<bool> Pass = testDepthStencil(
+                  PipelineDepth, PipelineStencil, DepthAttachment,
+                  StencilAttachment, QuadInvocations[Q].IsFrontFace[Lane] != 0,
+                  PX, PY, FragDepth, RefOverride);
               if (!Pass)
+                return Pass.takeError();
+              if (!*Pass)
                 continue;
-              if (PipelineDepth.WriteEnable) {
-                if (Error E = writeDepth(DepthAttachment, PX, PY, FragDepth))
-                  return E;
-              }
             }
 
             std::array<double, 4> RGBA;

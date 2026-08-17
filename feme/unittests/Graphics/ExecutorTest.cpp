@@ -127,7 +127,8 @@ compileStage(Context &Ctx, StringRef IR, StringRef EntryName,
 Expected<GraphicsPipeline>
 buildPipeline(Context &Ctx, RasterState Raster,
               PrimitiveTopology Topology = PrimitiveTopology::TriangleList,
-              DepthState Depth = DepthState{}) {
+              DepthState Depth = DepthState{},
+              StencilState Stencil = StencilState{}) {
   EntrySignature VSSig;
   VSSig.Elements = {
       makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
@@ -153,7 +154,7 @@ buildPipeline(Context &Ctx, RasterState Raster,
       {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
   return GraphicsPipeline(std::move(*VS), std::move(*FS), Topology, Raster,
                           Depth, BlendMode::Replace,
-                          /*SampleCount=*/1, std::move(Attachments));
+                          /*SampleCount=*/1, std::move(Attachments), Stencil);
 }
 
 struct TriangleScene {
@@ -163,6 +164,9 @@ struct TriangleScene {
   // from a sensible default.
   std::array<float, 16> DepthStorage;
   bool BindDepth = false;
+  // 4x4 stencil attachment, one byte per texel.
+  std::array<uint8_t, 16> StencilStorage{};
+  bool BindStencil = false;
   // Interleaved position (xyz) + color (rgba) per vertex, 7 floats/vertex.
   std::vector<float> VertexData;
   std::vector<VertexAttribute> Attributes = {
@@ -188,6 +192,9 @@ struct TriangleScene {
           MutableArrayRef(reinterpret_cast<uint8_t *>(DepthStorage.data()),
                           DepthStorage.size() * sizeof(float)),
           cpu::ResourceFormat::D32_FLOAT, 4, 4};
+    if (BindStencil)
+      Draw.DepthStencil.Stencil =
+          AttachmentView{StencilStorage, cpu::ResourceFormat::S8_UINT, 4, 4};
     Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
     Draw.Scissor = ScissorRect{0, 0, 4, 4};
 
@@ -470,6 +477,81 @@ TEST(ExecutorTest, RejectsDepthStateWithoutBoundAttachment) {
                       3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
                       -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
   PreparedDraw Draw = Scene.prepare(); // BindDepth left false.
+  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
+}
+
+// Roadmap R33: stencil testing/writes with a real `S8_UINT` attachment.
+TEST(ExecutorTest, StencilTestRejectsMismatchedReference) {
+  Context Ctx;
+  StencilState Stencil;
+  Stencil.TestEnable = true;
+  Stencil.Front.Compare = CompareOp::Equal;
+  Stencil.Front.Reference = 5;
+  Stencil.Front.PassOp = StencilOp::Replace;
+  Stencil.Front.FailOp = StencilOp::Zero;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, Stencil);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.BindStencil = true;
+  Scene.StencilStorage.fill(3); // Every texel starts unequal to Reference=5.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    // The stencil test failed everywhere (3 != 5): no color write, and
+    // `FailOp` (Zero) ran on every texel.
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 0) << "texel " << I;
+    EXPECT_EQ(Scene.StencilStorage[I], 0) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, StencilTestPassesAndReplacesReference) {
+  Context Ctx;
+  StencilState Stencil;
+  Stencil.TestEnable = true;
+  Stencil.Front.Compare = CompareOp::Equal;
+  Stencil.Front.Reference = 5;
+  Stencil.Front.PassOp = StencilOp::Replace;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, Stencil);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.BindStencil = true;
+  Scene.StencilStorage.fill(5); // Matches Reference=5 everywhere.
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
+    EXPECT_EQ(Scene.StencilStorage[I], 5) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, RejectsStencilStateWithoutBoundAttachment) {
+  Context Ctx;
+  StencilState Stencil;
+  Stencil.TestEnable = true;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, DepthState{}, Stencil);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {-1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+  PreparedDraw Draw = Scene.prepare(); // BindStencil left false.
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
 }
 

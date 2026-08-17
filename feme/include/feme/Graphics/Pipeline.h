@@ -82,6 +82,42 @@ enum class BlendMode : uint8_t {
   Replace,
 };
 
+/// What a passing/failing depth or stencil test does to a bound stencil
+/// attachment's value, shared by both stencil faces (`StencilFaceState`).
+enum class StencilOp : uint8_t {
+  Keep,
+  Zero,
+  Replace,
+  IncrementClamp,
+  DecrementClamp,
+  Invert,
+  IncrementWrap,
+  DecrementWrap,
+};
+
+/// One face's (front- or back-facing primitive's) stencil test/update
+/// state, matching Vulkan's `VkStencilOpState`/Direct3D's
+/// `D3D12_DEPTH_STENCILOP_DESC` one-for-one.
+struct StencilFaceState {
+  CompareOp Compare = CompareOp::Always;
+  StencilOp FailOp = StencilOp::Keep;
+  StencilOp DepthFailOp = StencilOp::Keep;
+  StencilOp PassOp = StencilOp::Keep;
+  uint8_t CompareMask = 0xFF;
+  uint8_t WriteMask = 0xFF;
+  uint8_t Reference = 0;
+};
+
+/// Stencil test/write state for one pipeline (roadmap R33): a bound
+/// `S8_UINT` attachment (`DepthStencilAttachment::Stencil` in
+/// PreparedDraw.h) is required whenever `TestEnable` is set, matching
+/// `DepthState`'s own attachment requirement.
+struct StencilState {
+  bool TestEnable = false;
+  StencilFaceState Front;
+  StencilFaceState Back;
+};
+
 /// Depth test/write state for one pipeline.
 struct DepthState {
   bool TestEnable = false;
@@ -123,13 +159,15 @@ public:
                    std::shared_ptr<cpu::CompiledStage> FragmentStage,
                    PrimitiveTopology Topology, RasterState Raster,
                    DepthState Depth, BlendMode Blend, uint32_t SampleCount,
-                   std::vector<AttachmentFormat> Attachments);
+                   std::vector<AttachmentFormat> Attachments,
+                   StencilState Stencil = StencilState{});
 
   const cpu::CompiledStage &getVertexStage() const { return *VertexStage; }
   const cpu::CompiledStage &getFragmentStage() const { return *FragmentStage; }
   PrimitiveTopology getTopology() const { return Topology; }
   const RasterState &getRasterState() const { return Raster; }
   const DepthState &getDepthState() const { return Depth; }
+  const StencilState &getStencilState() const { return Stencil; }
   BlendMode getBlendMode() const { return Blend; }
   uint32_t getSampleCount() const { return SampleCount; }
   llvm::ArrayRef<AttachmentFormat> getAttachments() const {
@@ -145,6 +183,7 @@ private:
   BlendMode Blend;
   uint32_t SampleCount;
   std::vector<AttachmentFormat> Attachments;
+  StencilState Stencil;
 };
 
 } // namespace feme::graphics
