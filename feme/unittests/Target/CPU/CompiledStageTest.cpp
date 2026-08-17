@@ -541,7 +541,8 @@ TEST(CompiledStageTest, InvokePatchConstantRunsStageAwarePath) {
   EXPECT_FALSE(Artifact.Signature.empty());
 }
 
-TEST(CompiledStageTest, InvokePatchConstantReadsInputPatchSeparatelyFromOutputPatch) {
+TEST(CompiledStageTest,
+     InvokePatchConstantReadsInputPatchSeparatelyFromOutputPatch) {
   Context Ctx;
   EntrySignature Sig;
   Sig.Elements = {makeFloatInputPatchInput(0), makeFloatInput(1),

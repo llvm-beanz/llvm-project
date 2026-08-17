@@ -215,9 +215,9 @@ inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
 inline llvm::StructType *getPatchConstantArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
-  return llvm::StructType::get(
-      Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
-            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 2)});
+  return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy,
+                                     PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+                                     llvm::ArrayType::get(PtrTy, 2)});
 }
 
 inline llvm::Value *loadStructField(llvm::IRBuilder<> &Builder,

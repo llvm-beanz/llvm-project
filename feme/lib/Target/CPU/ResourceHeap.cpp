@@ -290,8 +290,7 @@ PreparedPatchConstantBatch::create(const ResourceInfo &Info,
       Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
       Resources.InputLayout, Resources.Inputs, Resources.InputPatchLayout,
       Resources.InputPatch, Resources.OutputLayout, Resources.Outputs,
-      Resources.OutputControlPointCount,
-      Resources.InputPatchControlPointCount);
+      Resources.OutputControlPointCount, Resources.InputPatchControlPointCount);
 }
 
 FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
