@@ -645,6 +645,21 @@ checks the declared maximum output count before every emission. Stream output
 and rasterization consume the same emitted records but retain their distinct
 API ordering and capture rules.
 
+#### Status (roadmap R34)
+
+The signature/stage-op model this section needs is in place
+(`SignatureSystemValue::TessFactorEdge/TessFactorInside/DomainLocation/
+OutputControlPointID`, `StageOpKind::StreamEmit/StreamCut`), alongside the
+host-side, standalone-tested tessellator (`feme::graphics::tessellate`,
+Tessellator.h), patch storage (`feme::graphics::PatchRecord`, Patch.h),
+adjacency topologies (Pipeline.h), and geometry stream builder
+(`feme::graphics::GeometryStreamBuilder`, GeometryStream.h). Compiling a
+real hull/domain/geometry entry point into an invokable `CompiledStage`
+batch -- this section's "wrappers" -- and driving the tessellator/stream
+builder from one through `feme::graphics::executeDraws` remains open; see
+each header's own file comment and G5's status note under "Implementation
+Milestones" for the exact scope split.
+
 ### Amplification/task and mesh stage model
 
 Amplification (Direct3D) and task (SPIR-V) stages are normalized as workgroups
@@ -1899,6 +1914,43 @@ Completion test: render isolines, triangles, and quads across partitioning,
 winding, point-mode, patch-size, adjacency, and multi-stream cases, comparing
 generated coordinates and primitives with analytic references before image
 comparison.
+
+Status: roadmap R34 implements this milestone's reusable, host-side core,
+each piece unit tested standalone against the completion test's own
+"analytic references" language, but stops short of compiling a real hull/
+domain/geometry entry point and wiring it into `executeDraws` -- so no
+image-comparison test exists yet, and the milestone is not complete. Done:
+the signature/stage-op model (`SignatureSystemValue::TessFactorEdge/
+TessFactorInside/DomainLocation/OutputControlPointID`,
+`StageOpKind::StreamEmit/StreamCut` -- patch input/output access reuses the
+existing `InputLoad`/`OutputStore` ops rather than a new family);
+`feme::graphics::tessellate` (Tessellator.h), the fixed-function tessellator
+generating domain coordinates/connectivity for isoline/triangle/quad domains
+across every partitioning/output-primitive combination (triangle/quad
+interiors subdivide uniformly from the largest/inside factor rather than
+placing per-edge boundary vertices and stitching a crack-free fan -- see
+its own file comment); `feme::graphics::PatchRecord` (Patch.h), bounded
+per-patch control-point/patch-constant/tess-factor storage (control-stage
+barriers need no new code: `feme::cpu`'s groupshared/barrier lowering is
+already stage-agnostic); the four adjacency `PrimitiveTopology` variants
+plus list-topology adjacency splitting (Pipeline.h; strip-topology
+splitting is a documented follow-up); `feme::graphics::GeometryStreamBuilder`
+(GeometryStream.h), bounded per-invocation multi-stream emit/cut storage
+retaining strip boundaries and emission order for both rasterization and
+stream-output capture to share; and `feme::graphics::
+resolveRenderTargetArrayLayer`/`AttachmentView::ArrayLayers`
+(LayeredRendering.h/PreparedDraw.h), layer selection that discards (rather
+than clamps) an out-of-range index. Deferred, each documented in its own
+file's comment: compiling a real hull/domain/geometry entry point through
+the CPU lowering pipeline into an invokable `CompiledStage` batch (the
+`VertexWrapperPass`/`FragmentWrapperPass` counterpart neither stage has
+yet) and wiring the result into `executeDraws`/`feme-render`; SIMD-lane
+stream-range reservation via checked prefix sums (today's builder models
+the deterministic, lane-order case only); and crack-free non-uniform
+per-edge tessellation/strip-adjacency splitting. `unittests/Graphics/
+{Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp` and
+`PipelineTest.cpp`'s adjacency cases cover today's scope; `ninja check-feme`
+(assertions-enabled, ccache build) passes in full before and after.
 
 ### G6: Amplification and mesh shading
 
