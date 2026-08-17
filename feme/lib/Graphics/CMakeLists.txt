@@ -3,6 +3,7 @@ add_mlir_library(FeMeGraphics
   ImageFixture.cpp
   Pipeline.cpp
   Scene.cpp
+  Tessellator.cpp
 
   LINK_COMPONENTS
   Core
