@@ -17895,3 +17895,127 @@ four stages (and a scene-YAML surface to author such a draw) remains a
 single, larger piece of remaining work -- deliberately left to its own
 session rather than rushed alongside issue 1's barrier-region design
 question, per this session's scope decision above.
+
+# Agent thoughts: implementing Roadmap V0 (the Vulkan ICD's loader-visible skeleton)
+
+## Task
+
+The prompt asked for Roadmap V0 specifically: "Loader-visible skeleton:
+optional Vulkan-Headers dependency, `vk.xml` entrypoint generator,
+hidden-visibility ICD with a version script and development manifest,
+instance/physical device/device/compute queue, truthful properties and
+limits, loader smoke and two-ICD coexistence tests." This is the first line
+of code in feme/docs/FeMeVulkanDesign.md's entire Vulkan track --
+`feme/lib/Vulkan` did not exist at session start.
+
+## A stroke of environment luck, used deliberately
+
+Before writing anything I checked whether this sandbox actually has a real
+Vulkan stack, since half of V0's acceptance criteria (a loader smoke test,
+a two-ICD coexistence test) are meaningless without one. It does:
+`libvulkan-dev` (loader + headers + `vk.xml`), `mesa-vulkan-drivers`
+(lavapipe, a genuine LLVM-based software ICD), and `vulkan-tools` are all
+already installed. That changed my approach from "write code that should
+work against a hypothetical loader" to "write code and immediately prove it
+against the real one" -- every claim in the design doc's "Process
+Coexistence and Symbol Visibility" section (hidden visibility, a version
+script, no symbol collisions with another LLVM copy) was checked with `nm
+-D` and by actually running a hand-written client with both
+`feme_icd.json` and `/usr/share/vulkan/icd.d/lvp_icd.json` on
+`VK_DRIVER_FILES` at the same time, in the same process, before I ever
+wrote the lit tests that codify it.
+
+## Scope decisions, and why I made them explicit in the design doc
+
+Two places where I deliberately did less than the design doc's prose
+literally implies, both recorded as Deviation notes in
+FeMeVulkanDesign.md's V0 Status section rather than silently narrowed:
+
+1. **apiVersion 1.1, not 1.2.** "Device identity" discusses
+   `VkPhysicalDeviceDriverProperties` and `VkDriverId` as if they need to be
+   queryable now, but that struct is a Vulkan 1.2 core promotion (originally
+   `VK_KHR_driver_properties`). Advertising 1.2 honestly would mean
+   satisfying every other 1.2 mandatory-core requirement too (timeline
+   semaphores as a *command*, `VkPhysicalDeviceVulkan12Properties`, etc.) --
+   completely out of proportion for a milestone that does no shader
+   execution at all. I compute and store `vendorID`/`deviceID`/`VkDriverId`
+   now (folded into the UUIDs) so the *values* don't have to change later,
+   just where they're exposed.
+2. **No `TargetMachine` for host-vector-width detection.** The "Subgroup
+   size" section implies deriving the wave size from the host the same way
+   `feme::Driver::getHostVectorBits` does (build a real `TargetMachine`,
+   query `TargetTransformInfo`). That machinery exists to serve JIT
+   compilation, which doesn't happen at all in V0 -- so standing it up now
+   would mean doing the "one-shot LLVM target-registry initialization under
+   `std::once_flag`" the coexistence section requires, for no shader that
+   needs it yet. I used `llvm::sys::getHostCPUFeatures()` instead (already
+   used elsewhere in FeMe's CPU target for the same "best-effort default"
+   purpose) and left the real one-shot init as a documented prerequisite for
+   whichever milestone (V0.5 or V1) first JIT-compiles a pipeline.
+
+Both are explained inline as code comments too, not just in the design doc,
+so a future contributor hits the same reasoning at the point of surprise
+either way.
+
+## A build detail worth recording: visibility vs. version scripts
+
+The first build of `libfeme_vulkan.so` linked cleanly but `nm -D` showed
+*zero* defined symbols -- not even the four loader-facing ones the version
+script explicitly lists as `global:`. The reason: `CXX_VISIBILITY_PRESET
+hidden` compiles every symbol as `STV_HIDDEN` in the object file itself,
+and a GNU ld version script can only *filter* symbols that already have
+default (external) visibility -- it cannot promote a hidden symbol back to
+exported. The fix was `__attribute__((visibility("default")))` on exactly
+the four loader-facing functions (a small `FEME_VULKAN_EXPORT` macro),
+*in addition to* the version script, not instead of it: the attribute makes
+them visible-if-exported, the version script then still does the real work
+of hiding everything else, which matters because plenty of other symbols in
+the same translation units (LLVM statics pulled in transitively, `FeMeVulkanCore`'s
+own functions) would otherwise also become visibility-default and leak.
+
+This also shaped how I split the CMake targets: `FeMeVulkanCore` (a static
+library, all the actual object-model/entrypoint/proc-addr logic) is linked
+into two places -- `feme_vulkan` (the real hidden-visibility shared
+object, plus a small `VulkanICD.cpp` for just the four exported functions)
+and `FeMeVulkanTests` (the gtest binary, linked directly, since visibility
+attributes have no effect on same-binary linkage and static libraries don't
+themselves have a dynamic symbol table to hide). Splitting it this way
+meant unit tests could call `feme::vulkan::vkCreateInstance` and friends
+directly, without going through a dynamically-loaded ICD at all.
+
+## The other environment-driven correction: the loader's *required* set
+
+My first loader-smoke-test run failed outright:
+`terminator_CreateInstance: Failed to find required entrypoints ... Skipping
+this driver.` I'd assumed "truthful properties and limits" plus the object
+model commands were enough, but the Khronos loader itself refuses to load
+*any* ICD missing a fixed set of entrypoints regardless of what version it
+claims -- I fetched `loader_icd_init_entries` from the actual
+Vulkan-Loader source (`vk_loader_extensions.c`) rather than guessing, and
+added the two I was missing:
+`vkGetPhysicalDeviceImageFormatProperties`/
+`vkGetPhysicalDeviceSparseImageFormatProperties`. Both are honestly
+unimplemented (no image support exists until V5), so both return the
+"unsupported" answer unconditionally -- which is exactly the "may report a
+feature as unsupported; may not omit a command" rule the design doc's
+"Initial Non-Goals" section already states for the device-group/sparse
+case; I'd just missed that this specific pair is *also* a loader
+precondition unrelated to any feature bit, not merely a nice-to-have.
+
+## What's still open
+
+Everything the design doc schedules after V0: V0.5's SPIR-V import
+prerequisite work, and V1's actual compute dispatch (memory, buffers,
+shader modules, command buffers, real queue submission). `vkDeviceWaitIdle`
+is a true no-op today because no queue work exists yet to wait for --
+that's correct for V0's stated scope ("No shader execution is required in
+this milestone") but is the first thing that stops being a no-op.
+
+`FEME_VULKAN_XML`'s vk.xml discovery walks up from `Vulkan::Headers`'
+`INTERFACE_INCLUDE_DIRECTORIES` assuming the standard
+`<prefix>/include` + `<prefix>/share/vulkan/registry/vk.xml` sibling
+layout (true for both the apt-installed package used here and a normal
+Vulkan-Headers CMake install); a Vulkan-Headers source checkout added via
+`add_subdirectory` rather than `find_package` would need the explicit
+`-DFEME_VULKAN_XML=<path>` override this already supports, but that path
+is untested since this environment never needed it.
