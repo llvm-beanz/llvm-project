@@ -180,12 +180,14 @@ The proposed source layout is:
 
 ```text
 feme/
-  include/feme/Vulkan/       Public embedding and test interfaces, if any
-  lib/Vulkan/                ICD objects, entrypoints, and queue execution
-  tools/feme-vulkan-info/    Optional testing-only driver introspection tool
-  test/Vulkan/               Lit tests with small Vulkan clients
-  unittests/Vulkan/          Object, descriptor, and synchronization tests
-  share/vulkan/icd.d/        Configured development manifest template
+  include/feme/Vulkan/            Public embedding and test interfaces, if any
+  lib/Vulkan/                     FeMeVulkanCore: ICD objects, entrypoints,
+                                   and queue execution
+  tools/feme-vulkan/               The loader-facing feme_vulkan shared object
+  tools/feme-vulkan-loader-smoke/ Tiny client used by the lit tests below
+  test/Vulkan/                    Lit tests with small Vulkan clients
+  unittests/Vulkan/               Object, descriptor, and synchronization tests
+  share/vulkan/icd.d/             Configured development manifest template
 ```
 
 The ICD is an optional FeMe component because Vulkan-Headers may not be present
@@ -1174,12 +1176,13 @@ implements every command needed for the acceptance-test scenario in
 (`vkGetPhysicalDeviceImageFormatProperties`/
 `vkGetPhysicalDeviceSparseImageFormatProperties`, honestly unsupported since
 no image exists yet, but present because the loader refuses to load an ICD
-missing them). `lib/Vulkan/VulkanICD.cpp` defines the four loader-facing
-symbols (`vk_icdNegotiateLoaderICDInterfaceVersion`,
+missing them). `feme/tools/feme-vulkan/VulkanICD.cpp` defines the four
+loader-facing symbols (`vk_icdNegotiateLoaderICDInterfaceVersion`,
 `vk_icdGetInstanceProcAddr`, `vk_icdGetPhysicalDeviceProcAddr`, the legacy
 `vkGetInstanceProcAddr`) with explicit default visibility, restoring it
 against `feme_vulkan`'s hidden-by-default preset; `libfeme_vulkan.map`
-exports exactly those four. `feme/tools/feme-vulkan-loader-smoke` is a tiny
+(alongside it in that same directory) exports exactly those four.
+`feme/tools/feme-vulkan-loader-smoke` is a tiny
 client linked against the *real* Vulkan loader (not `libfeme_vulkan`
 directly); `feme/test/Vulkan/loader-smoke.test` runs it against the
 build-tree manifest, and `two-icd-coexistence.test` runs it again with
