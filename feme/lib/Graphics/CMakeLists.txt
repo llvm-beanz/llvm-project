@@ -1,4 +1,5 @@
 add_mlir_library(FeMeGraphics
+  DomainInvocations.cpp
   Executor.cpp
   GeometryStream.cpp
   GeometryStreamCollection.cpp
