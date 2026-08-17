@@ -182,6 +182,14 @@ struct SignatureElement {
   /// `feme::graphics::GeometryStreamBuilder`, feme/include/feme/Graphics/
   /// GeometryStream.h). Always 0 for every non-geometry stage.
   uint32_t Stream = 0;
+
+  /// Only meaningful for an `Input`-direction element of a hull shader's
+  /// patch-constant phase (see `feme::cpu::PatchConstantWrapperPass`): true
+  /// if the element is read from the original, pre-control-stage
+  /// `InputPatch` rather than the completed `OutputPatch` the control-point
+  /// phase produced. Every other stage's `Input` elements leave this false,
+  /// since they have only one input source to begin with.
+  bool FromInputPatch = false;
 };
 
 /// One entry point's whole signature: its input, output, patch-input and
@@ -213,7 +221,9 @@ bool verifySignature(const EntrySignature &Sig,
 /// The current version of the `EntrySignature` byte layout. Bumped whenever
 /// that layout changes incompatibly; `parseSignature` rejects any other
 /// value rather than guessing at a different field order.
-constexpr uint32_t SignatureAbiVersion = 1;
+///
+/// Version 2 appends `SignatureElement::FromInputPatch`.
+constexpr uint32_t SignatureAbiVersion = 2;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each

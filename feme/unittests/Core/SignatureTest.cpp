@@ -255,6 +255,10 @@ EntrySignature makeRichSignature() {
   NoName.BitWidth = 64;
   Sig.Elements.push_back(NoName);
 
+  SignatureElement InputPatch = validInputElement(4);
+  InputPatch.FromInputPatch = true;
+  Sig.Elements.push_back(InputPatch);
+
   return Sig;
 }
 
@@ -284,6 +288,7 @@ TEST(SignatureTest, SerializeParseRoundTrips) {
     EXPECT_EQ(Got.Interpolation, Want.Interpolation);
     EXPECT_EQ(Got.Frequency, Want.Frequency);
     EXPECT_EQ(Got.Stream, Want.Stream);
+    EXPECT_EQ(Got.FromInputPatch, Want.FromInputPatch);
   }
 }
 

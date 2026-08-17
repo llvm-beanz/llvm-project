@@ -137,8 +137,8 @@ bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
 /// direction, has-location flag, location, semantic-name length (the tail's
 /// own count), semantic index, system value, component type, bit width,
 /// first component, component count, row count, interpolation, frequency,
-/// stream.
-constexpr size_t NumFixedFieldsPerElement = 15;
+/// stream, from-input-patch flag.
+constexpr size_t NumFixedFieldsPerElement = 16;
 
 std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
   size_t TotalSemanticBytes = 0;
@@ -178,6 +178,7 @@ std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
     WriteNext(static_cast<uint32_t>(Elt.Interpolation));
     WriteNext(static_cast<uint32_t>(Elt.Frequency));
     WriteNext(Elt.Stream);
+    WriteNext(Elt.FromInputPatch ? 1u : 0u);
   }
   assert(P == Bytes.data() + Bytes.size() &&
          "computed size did not match bytes actually written");
@@ -337,6 +338,11 @@ Expected<EntrySignature> feme::parseSignature(ArrayRef<uint8_t> Bytes) {
     if (!Stream)
       return Stream.takeError();
     Elt.Stream = *Stream;
+
+    Expected<uint32_t> FromInputPatch = ReadField("from-input-patch flag");
+    if (!FromInputPatch)
+      return FromInputPatch.takeError();
+    Elt.FromInputPatch = *FromInputPatch != 0;
 
     Sig.Elements.push_back(std::move(Elt));
   }
