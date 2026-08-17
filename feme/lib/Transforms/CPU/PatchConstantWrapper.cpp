@@ -264,7 +264,8 @@ Value *lowerPatchConstantInputLoad(CallInst &CI, const SignatureElement &Elt,
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
   IRBuilder<> Builder(&CI);
-  Value *LayoutArg = Elt.FromInputPatch ? PEnv.InputPatchLayout : PEnv.InputLayout;
+  Value *LayoutArg =
+      Elt.FromInputPatch ? PEnv.InputPatchLayout : PEnv.InputLayout;
   Value *StorageArg = Elt.FromInputPatch ? PEnv.InputPatch : PEnv.Inputs;
 
   Value *Result = PoisonValue::get(CI.getType());
@@ -456,11 +457,10 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
                                     PatchConstantArgsFieldInputLayout, PtrTy);
   Env.Inputs = loadStructField(Builder, ArgsTy, Args,
                                PatchConstantArgsFieldInputs, PtrTy);
-  Env.InputPatchLayout =
-      loadStructField(Builder, ArgsTy, Args,
-                      PatchConstantArgsFieldInputPatchLayout, PtrTy);
-  Env.InputPatch = loadStructField(
-      Builder, ArgsTy, Args, PatchConstantArgsFieldInputPatch, PtrTy);
+  Env.InputPatchLayout = loadStructField(
+      Builder, ArgsTy, Args, PatchConstantArgsFieldInputPatchLayout, PtrTy);
+  Env.InputPatch = loadStructField(Builder, ArgsTy, Args,
+                                   PatchConstantArgsFieldInputPatch, PtrTy);
   Env.OutputLayout = loadStructField(Builder, ArgsTy, Args,
                                      PatchConstantArgsFieldOutputLayout, PtrTy);
   Env.Outputs = loadStructField(Builder, ArgsTy, Args,
