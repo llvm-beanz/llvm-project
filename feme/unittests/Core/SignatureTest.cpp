@@ -163,6 +163,38 @@ TEST(SignatureTest, VerifyAcceptsPatchDirectionWithPerPatchFrequency) {
   EXPECT_TRUE(verifySignature(Sig));
 }
 
+TEST(SignatureTest, VerifyAcceptsTessellationAndDomainSystemValues) {
+  EntrySignature Sig;
+  // A quad domain's 4 outer tessellation factors, one per-patch element with
+  // RowCount == 4 (see SignatureSystemValue::TessFactorEdge's own comment).
+  SignatureElement EdgeFactors = validInputElement(0);
+  EdgeFactors.Direction = SignatureDirection::PatchOutput;
+  EdgeFactors.Frequency = SignatureFrequency::PerPatch;
+  EdgeFactors.SystemValue = SignatureSystemValue::TessFactorEdge;
+  EdgeFactors.RowCount = 4;
+  Sig.Elements.push_back(EdgeFactors);
+
+  SignatureElement InsideFactors = validInputElement(1);
+  InsideFactors.Direction = SignatureDirection::PatchOutput;
+  InsideFactors.Frequency = SignatureFrequency::PerPatch;
+  InsideFactors.SystemValue = SignatureSystemValue::TessFactorInside;
+  InsideFactors.RowCount = 2;
+  Sig.Elements.push_back(InsideFactors);
+
+  // The domain stage's own generated-coordinate input.
+  SignatureElement Domain = validInputElement(2);
+  Domain.SystemValue = SignatureSystemValue::DomainLocation;
+  Domain.ComponentCount = 3;
+  Sig.Elements.push_back(Domain);
+
+  SignatureElement ControlPointID = validInputElement(3);
+  ControlPointID.SystemValue = SignatureSystemValue::OutputControlPointID;
+  ControlPointID.ComponentType = SignatureComponentType::UInt;
+  Sig.Elements.push_back(ControlPointID);
+
+  EXPECT_TRUE(verifySignature(Sig));
+}
+
 TEST(SignatureTest, VerifyReportsEveryViolationNotJustTheFirst) {
   EntrySignature Sig;
   SignatureElement Elt = validInputElement(0);

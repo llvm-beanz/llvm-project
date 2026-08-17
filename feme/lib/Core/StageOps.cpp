@@ -45,6 +45,8 @@ constexpr StageOpInfo StageOpTable[] = {
      true},
     {StageOpKind::InterpolateAtOffset, "feme.stage.interpolate.at.offset",
      true},
+    {StageOpKind::StreamEmit, "feme.stage.stream.emit", false},
+    {StageOpKind::StreamCut, "feme.stage.stream.cut", false},
 };
 // clang-format on
 
@@ -215,6 +217,16 @@ CallInst *feme::createStageInterpolateAtOffset(IRBuilderBase &B, Type *ResultTy,
   Value *Element = ConstantInt::get(B.getInt32Ty(), ElementID);
   return createCall(B, StageOpKind::InterpolateAtOffset, ResultTy,
                     {Element, Component, OffsetX, OffsetY});
+}
+
+CallInst *feme::createStageStreamEmit(IRBuilderBase &B, uint32_t Stream) {
+  Value *StreamVal = ConstantInt::get(B.getInt32Ty(), Stream);
+  return createCall(B, StageOpKind::StreamEmit, B.getVoidTy(), {StreamVal});
+}
+
+CallInst *feme::createStageStreamCut(IRBuilderBase &B, uint32_t Stream) {
+  Value *StreamVal = ConstantInt::get(B.getInt32Ty(), Stream);
+  return createCall(B, StageOpKind::StreamCut, B.getVoidTy(), {StreamVal});
 }
 
 std::optional<uint64_t> feme::getStageOpConstantOperand(const CallInst &CI,

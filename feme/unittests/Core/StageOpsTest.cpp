@@ -131,6 +131,19 @@ TEST_F(StageOpsTest, InterpolateAtVariants) {
   EXPECT_EQ(Offset->arg_size(), 4u);
 }
 
+TEST_F(StageOpsTest, StreamEmitAndCutCarryStreamIndex) {
+  CallInst *Emit = createStageStreamEmit(B, /*Stream=*/1);
+  CallInst *Cut = createStageStreamCut(B, /*Stream=*/1);
+  EXPECT_EQ(Emit->getCalledFunction()->getName(), "feme.stage.stream.emit");
+  EXPECT_EQ(Cut->getCalledFunction()->getName(), "feme.stage.stream.cut");
+  EXPECT_FALSE(isStageOpKindOverloaded(StageOpKind::StreamEmit));
+  ASSERT_EQ(getStageOpConstantOperand(*Emit, 0), 1u);
+  ASSERT_EQ(getStageOpConstantOperand(*Cut, 0), 1u);
+  StageOpKind Kind;
+  ASSERT_TRUE(isStageOpCall(*Emit, &Kind));
+  EXPECT_EQ(Kind, StageOpKind::StreamEmit);
+}
+
 TEST_F(StageOpsTest, NonStageOpCallIsRejected) {
   FunctionCallee Callee =
       M->getOrInsertFunction("not.a.stage.op", B.getVoidTy());

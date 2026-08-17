@@ -49,6 +49,12 @@ bool isStageOpLegalForStage(StageOpKind Kind, ShaderStage Stage) {
   case StageOpKind::InterpolateAtSample:
   case StageOpKind::InterpolateAtOffset:
     return Stage == ShaderStage::Fragment;
+  case StageOpKind::StreamEmit:
+  case StageOpKind::StreamCut:
+    // Not yet reachable: `ValidateStagePass` only runs for Vertex/Fragment
+    // today (see its `run` below). Recorded now so this switch stays
+    // exhaustive once the geometry stage is validated here too.
+    return Stage == ShaderStage::Geometry;
   case StageOpKind::NumStageOpKinds:
     break;
   }
@@ -175,6 +181,8 @@ void validateCall(CallInst &CI, StageOpKind Kind, ShaderStage Stage,
   case StageOpKind::DerivativeXCoarse:
   case StageOpKind::DerivativeYCoarse:
   case StageOpKind::QuadRead:
+  case StageOpKind::StreamEmit:
+  case StageOpKind::StreamCut:
     // No element/row/component operands to validate.
     break;
   case StageOpKind::NumStageOpKinds:

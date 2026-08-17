@@ -58,6 +58,8 @@ ValueUniformity WaveTTIImpl::getValueUniformity(const Value *V) const {
       case StageOpKind::OutputStore:
       case StageOpKind::Discard:
       case StageOpKind::Demote:
+      case StageOpKind::StreamEmit:
+      case StageOpKind::StreamCut:
       case StageOpKind::NumStageOpKinds:
         break;
       }

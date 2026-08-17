@@ -20,9 +20,15 @@
 // operations overloaded on a value type, exactly as `dx.op.*` calls are
 // (e.g. `dx.op.loadInput.f32`).
 //
-// This is roadmap R20, scoped to the vertex and fragment stages: "Only
-// operations required by implemented stages are legal" (patch,
-// stream-emission, mesh-output and ray operations are later milestones).
+// This started as roadmap R20, scoped to the vertex and fragment stages:
+// "Only operations required by implemented stages are legal" (patch,
+// stream-emission, mesh-output and ray operations were later milestones).
+// Roadmap R34 adds the geometry stage's `StreamEmit`/`StreamCut`; patch
+// input/output access reuses the existing `InputLoad`/`OutputStore` ops
+// (a hull/domain stage's control-point/patch-constant elements are
+// ordinary signature elements, distinguished by `SignatureDirection`/
+// `SignatureFrequency`, not a separate op family). Mesh-output and ray
+// operations remain later milestones.
 //
 //===----------------------------------------------------------------------===//
 
@@ -93,6 +99,17 @@ enum class StageOpKind : uint8_t {
   /// scalarized (mirroring DXIL's `EvalSnapped`, whose two offset operands
   /// are likewise separate `i32`s, not a packed vector).
   InterpolateAtOffset,
+  /// `feme.stage.stream.emit(stream)`: the geometry stage's `emit`
+  /// operation -- appends a snapshot of the current output signature values
+  /// to output stream \c stream as one vertex record (see "Tessellation and
+  /// geometry stage model" in feme/docs/FeMeGraphicsDesign.md and
+  /// `feme::graphics::GeometryStreamBuilder`). Side-effecting even when no
+  /// framebuffer write occurs.
+  StreamEmit,
+  /// `feme.stage.stream.cut(stream)`: the geometry stage's `cut` operation
+  /// -- terminates the current primitive strip on output stream \c stream
+  /// without emitting a vertex.
+  StreamCut,
   // Keep last: the number of stage op kinds, for range checks.
   NumStageOpKinds,
 };
@@ -175,6 +192,15 @@ llvm::CallInst *
 createStageInterpolateAtOffset(llvm::IRBuilderBase &B, llvm::Type *ResultTy,
                                uint32_t ElementID, llvm::Value *Component,
                                llvm::Value *OffsetX, llvm::Value *OffsetY);
+
+/// `feme.stage.stream.emit(stream)`, where \p Stream is the output stream
+/// index (an ordinary `i32` constant, typically 0 unless the geometry stage
+/// declares multiple output streams).
+llvm::CallInst *createStageStreamEmit(llvm::IRBuilderBase &B,
+                                      uint32_t Stream);
+
+/// `feme.stage.stream.cut(stream)`.
+llvm::CallInst *createStageStreamCut(llvm::IRBuilderBase &B, uint32_t Stream);
 ///@}
 
 /// Reads back \p CI's operand \p Idx as a constant `i32`/`i8`/`i1`, or

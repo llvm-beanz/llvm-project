@@ -75,6 +75,27 @@ enum class SignatureSystemValue : uint8_t {
   StencilRef,
   RenderTargetArrayIndex,
   ViewportArrayIndex,
+  /// A hull shader's patch-constant output: one outer (edge) tessellation
+  /// factor. `SignatureElement::RowCount` gives how many of these the patch
+  /// declares (2 for an isoline domain, 3 for a triangle domain, 4 for a
+  /// quad domain), matching "outer ... tessellation levels" in
+  /// "Tessellation and geometry stage model"
+  /// (feme/docs/FeMeGraphicsDesign.md).
+  TessFactorEdge,
+  /// A hull shader's patch-constant output: one inner tessellation factor
+  /// (`RowCount` is 0 for an isoline domain, which has none; 1 for a
+  /// triangle domain; 2 for a quad domain).
+  TessFactorInside,
+  /// The domain/evaluation stage's own generated-coordinate input: the
+  /// tessellator's per-invocation (u, v[, w]) domain location (`RowCount`
+  /// gives the number of components the domain needs: 2 for isoline/quad,
+  /// 3 for a triangle's barycentric coordinate).
+  DomainLocation,
+  /// A hull shader control-point-phase output's invocation index: which
+  /// output control point of the patch the current invocation is
+  /// producing, distinct from `VertexID` because a hull shader may declare
+  /// a different output control point count than its input.
+  OutputControlPointID,
   // Keep last: the number of system values, for range checks.
   NumSystemValues,
 };
@@ -157,8 +178,9 @@ struct SignatureElement {
       SignatureInterpolationMode::Perspective;
   SignatureFrequency Frequency = SignatureFrequency::PerVertex;
 
-  /// The geometry-stage output stream this element belongs to. Reserved --
-  /// always 0 -- until that stage is implemented (R34 and peers).
+  /// The geometry-stage output stream this element belongs to (see
+  /// `feme::graphics::GeometryStreamBuilder`, feme/include/feme/Graphics/
+  /// GeometryStream.h). Always 0 for every non-geometry stage.
   uint32_t Stream = 0;
 };
 
