@@ -137,6 +137,27 @@ enum PatchConstantArgsField : unsigned {
   PatchConstantArgsFieldReserved = 11,
 };
 
+enum DomainInvocationField : unsigned {
+  DomainInvocationFieldDomainLocation = 0,
+  DomainInvocationFieldReserved = 1,
+};
+
+enum DomainArgsField : unsigned {
+  DomainArgsFieldAbiVersion = 0,
+  DomainArgsFieldDomainPointCount = 1,
+  DomainArgsFieldOutputControlPointCount = 2,
+  DomainArgsFieldReserved32 = 3,
+  DomainArgsFieldResources = 4,
+  DomainArgsFieldInputLayout = 5,
+  DomainArgsFieldInputs = 6,
+  DomainArgsFieldPatchConstantLayout = 7,
+  DomainArgsFieldPatchConstants = 8,
+  DomainArgsFieldOutputLayout = 9,
+  DomainArgsFieldOutputs = 10,
+  DomainArgsFieldInvocations = 11,
+  DomainArgsFieldReserved = 12,
+};
+
 inline llvm::StructType *getStageElementType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *I64Ty = llvm::Type::getInt64Ty(Ctx);
@@ -217,6 +238,26 @@ inline llvm::StructType *getPatchConstantArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy,
                                      PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+                                     llvm::ArrayType::get(PtrTy, 2)});
+}
+
+/// Mirrors `FemeDomainInvocation`: the tessellator-generated domain
+/// coordinate one domain-stage invocation evaluates.
+inline llvm::StructType *getDomainInvocationType(llvm::LLVMContext &Ctx) {
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  llvm::Type *F32Ty = llvm::Type::getFloatTy(Ctx);
+  return llvm::StructType::get(
+      Ctx, {llvm::ArrayType::get(F32Ty, 3), llvm::ArrayType::get(I32Ty, 5)});
+}
+
+/// Mirrors `FemeDomainArgs`: a vertex-shaped per-invocation batch whose
+/// inputs additionally carry the completed patch's control points and the
+/// per-patch tessellation factors/patch constants.
+inline llvm::StructType *getDomainArgsType(llvm::LLVMContext &Ctx) {
+  llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy,
+                                     PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
                                      llvm::ArrayType::get(PtrTy, 2)});
 }
 

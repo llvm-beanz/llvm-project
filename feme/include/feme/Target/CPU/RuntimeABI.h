@@ -374,6 +374,12 @@ enum class StageLayoutSystemValue : uint32_t {
   /// own per-invocation loop index, matching `SignatureSystemValue::
   /// OutputControlPointID`.
   OutputControlPointID = 18,
+  /// The tessellator-generated domain coordinate a domain/evaluation-stage
+  /// invocation is evaluating, matching `SignatureSystemValue::
+  /// DomainLocation`. Sourced from `FemeDomainInvocation::DomainLocation`
+  /// rather than from a stage-storage block, so an element carrying this
+  /// system value has no meaningful strides or data offset.
+  DomainLocation = 19,
 };
 
 /// The interpolation mode recorded for one stage-layout element, mirroring
@@ -729,6 +735,86 @@ struct FemePatchConstantArgs {
   /// storage, addressed by row/component alone.
   void *Outputs;
   /// ABI headroom for later patch-constant-batch metadata.
+  void *Reserved[2];
+};
+
+/// One domain/evaluation-stage invocation record: the tessellator-generated
+/// domain coordinate this invocation evaluates the patch at. The compiled
+/// wrapper reads `SignatureSystemValue::DomainLocation` from here rather
+/// than from a stage-storage block, exactly as `FemeVertexInvocation` serves
+/// a vertex batch's own system values.
+struct FemeDomainInvocation {
+  /// The (u, v, w) domain coordinate `feme::graphics::tessellate` generated
+  /// (Tessellator.h). An isoline/quad domain uses the first two components
+  /// and leaves the third zero; a triangle domain uses all three as a
+  /// barycentric coordinate.
+  float DomainLocation[3];
+  /// ABI headroom for later domain-stage invocation metadata (a primitive
+  /// ID, for instance).
+  uint32_t Reserved[5];
+};
+
+/// The single argument a compiled domain/evaluation entry point takes:
+///
+/// \code
+///   void feme_cpu_entry_<name>(const FemeDomainArgs *Args);
+/// \endcode
+///
+/// Roadmap R34's continuation, closing its "domain wrapper" open item: one
+/// invocation per tessellator-generated domain point, batched over
+/// `DomainPointCount` the way `FemeVertexArgs` batches vertices, evaluating
+/// the completed patch the hull stage produced. Three input sources meet
+/// here, which is what distinguishes this ABI from every earlier stage's:
+///
+///  - `Inputs`/`InputLayout`: the completed `OutputPatch` control points,
+///    the same structure-of-arrays block `FemePatchArgs::Outputs` /
+///    `FemePatchConstantArgs::Inputs` describe, and readable at *any*
+///    control-point index in `[0, OutputControlPointCount)` -- evaluating a
+///    patch means blending its control points, not reading just one.
+///  - `PatchConstants`/`PatchConstantLayout`: the per-patch tessellation
+///    factors and patch constants `FemePatchConstantArgs::Outputs` received,
+///    read through this stage's `SignatureDirection::PatchInput` elements.
+///    Per-patch, not per-invocation: addressed by row/component alone.
+///  - `Invocations`: this batch's domain coordinates.
+///
+/// `Outputs`/`OutputLayout` are then ordinary per-vertex outputs, addressed
+/// per invocation exactly like a vertex batch's -- a domain shader's result
+/// is a vertex, and the rasterizer consumes it as one.
+struct FemeDomainArgs {
+  /// `StageArgsAbiVersion`.
+  uint32_t AbiVersion;
+  /// Number of domain points this batch evaluates: the number of records in
+  /// `Invocations`, and of structure-of-arrays slots in `Outputs`.
+  uint32_t DomainPointCount;
+  /// Number of control points in `Inputs`, bounding the control-point-index
+  /// operand a `feme.stage.input.load` reading the completed patch may
+  /// legally use.
+  uint32_t OutputControlPointCount;
+  /// Reserved 32-bit field to keep pointer fields naturally aligned and
+  /// leave room for later scalar metadata.
+  uint32_t Reserved32;
+  /// Resource/root-constant block shared by every stage.
+  const FemeShaderResources *Resources;
+  /// Layout describing `Inputs`.
+  const FemeStageLayout *InputLayout;
+  /// Structure-of-arrays storage for the completed patch's control points,
+  /// one slot per control point.
+  const void *Inputs;
+  /// Layout describing `PatchConstants`: this stage's
+  /// `SignatureDirection::PatchInput` elements. Null if the domain shader
+  /// reads no patch constant or tessellation factor.
+  const FemeStageLayout *PatchConstantLayout;
+  /// Per-patch storage for the tessellation factors and patch constants the
+  /// hull shader's patch-constant phase wrote, addressed by row/component
+  /// alone. Null if the domain shader reads none.
+  const void *PatchConstants;
+  /// Layout describing `Outputs`.
+  const FemeStageLayout *OutputLayout;
+  /// Structure-of-arrays output storage for this batch's evaluated vertices.
+  void *Outputs;
+  /// Per-invocation domain-coordinate records.
+  const FemeDomainInvocation *Invocations;
+  /// ABI headroom for later domain-batch metadata.
   void *Reserved[2];
 };
 
