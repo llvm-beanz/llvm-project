@@ -653,12 +653,14 @@ OutputControlPointID`, `StageOpKind::StreamEmit/StreamCut`), alongside the
 host-side, standalone-tested tessellator (`feme::graphics::tessellate`,
 Tessellator.h), patch storage (`feme::graphics::PatchRecord`, Patch.h),
 adjacency topologies (Pipeline.h), and geometry stream builder
-(`feme::graphics::GeometryStreamBuilder`, GeometryStream.h). Compiling a
-real hull/domain/geometry entry point into an invokable `CompiledStage`
-batch -- this section's "wrappers" -- and driving the tessellator/stream
-builder from one through `feme::graphics::executeDraws` remains open; see
-each header's own file comment and G5's status note under "Implementation
-Milestones" for the exact scope split.
+(`feme::graphics::GeometryStreamBuilder`, GeometryStream.h). Compiling a real
+hull/domain/geometry entry point into an invokable `CompiledStage` batch --
+this section's "wrappers" -- is now done for all three stages
+(`HullWrapperPass`/`PatchConstantWrapperPass`/`DomainWrapperPass`/
+`GeometryWrapperPass`); driving the tessellator/stream builder from one
+through `feme::graphics::executeDraws` remains open. See each header's own
+file comment and G5's status note under "Implementation Milestones" for the
+exact scope split.
 
 ### Amplification/task and mesh stage model
 
@@ -1047,8 +1049,45 @@ builder per invocation. Emission is side-effecting even when no framebuffer
 write occurs, so it consumes the current side-effect mask. SIMD lanes reserve
 stream ranges with checked prefix sums; deterministic mode uses lane order
 (`feme::graphics::mergeGeometryStreamsInLaneOrder`, GeometryStream.h, merges
-one per-lane builder into a combined one this way -- driving it from a real
-widened geometry invocation remains a follow-up, see G5 above).
+one per-lane builder into a combined one this way).
+
+Landed, closing R34's last remaining wrapper open item
+(`feme::cpu::GeometryWrapperPass`, new GeometryWrapper.h/.cpp, plus
+`FemeGeometryInvocation`/`FemeGeometryArgs`/`GeometryResources`/
+`PreparedGeometryBatch`/`CompiledStage::invokeGeometry`): one invocation per
+assembled input primitive, batched over `FemeGeometryArgs::PrimitiveCount`
+the way `VertexWrapperPass` batches vertices. `Inputs`/`InputLayout` is
+structure-of-arrays over `PrimitiveCount * VerticesPerPrimitive` slots
+(primitive-major), and a `feme.stage.input.load`'s vertex-in-primitive
+operand may name *any* of a primitive's vertices -- unlike
+`HullWrapperPass`'s control-point phase, a geometry shader legitimately reads
+more than one input vertex (an adjacency triangle's "opposite" vertices, for
+instance), so there is no "own index only" restriction here. `feme.stage.
+output.store` still writes ordinary per-invocation scratch storage, but
+`feme.stage.stream.emit`/`.cut` (`StageOpKind::StreamEmit`/`StreamCut`) are
+what turn that scratch storage into the stage's real, bounded, variable-count
+result: `emit` snapshots the scratch storage's current values into one
+record of three flat, host-owned arrays (`FemeGeometryArgs::
+EmittedVertices`/`EmittedVertexCounts`/`StripEndsAfter`) rather than calling
+back into a live `GeometryStreamBuilder` object from JIT-compiled code (no
+precedent in this codebase for that), and `cut` flags a strip boundary in the
+same flat storage. `feme::graphics::collectGeometryStreams`
+(feme/include/feme/Graphics/GeometryStreamCollection.h -- living in
+`feme::graphics` rather than `feme::cpu`, since `FeMeTargetCPU` does not
+depend on `FeMeGraphics`, the reverse of `FeMeGraphics`'s own dependency)
+replays those flat records back into one real `GeometryStreamBuilder` per
+primitive and merges them via `mergeGeometryStreamsInLaneOrder`, closing that
+function's own "driving it from a real widened invocation" deferral without
+the two objects ever literally sharing memory. `emit`/`cut` are properly
+masked by the per-lane side-effect mask, not just the wave's entry mask:
+`LinearizePass` now threads it onto masked variants of them
+(`feme.cpu.masked.stage.stream.emit`/`.cut`, StageMaskCalls.h/.cpp) exactly as
+it already did for `feme.stage.output.store`, and `FunctionWidener` widens
+those masked variants (SIMDize.cpp) the same way. Two shapes remain
+diagnosed rather than silently mishandled: more than one output stream (this
+milestone's `FemeGeometryArgs` only carries storage for stream 0), and a
+group-sync barrier (geometry invocations are independent, like the domain
+stage's). See GeometryWrapper.cpp's file comment for the full design.
 
 ### Amplification and mesh wrappers
 
@@ -2046,23 +2085,59 @@ point that must read a sibling's *output*, which requires generalizing
 done). The patch-constant phase (`PatchConstantWrapperPass`, including its
 `InputPatch` parameter) and the domain stage (`DomainWrapperPass` plus
 `FemeDomainArgs`/`CompiledStage::invokeDomain`, see "Patch and geometry
-wrappers" above) have since landed in follow-up sessions. Deferred,
-documented in its own file's comment: the geometry wrapper
-(`CompiledStage::invokeGeometry` still does not exist), and
-wiring any of this into `executeDraws`/`feme-render` -- SIMD-lane
-stream-range reservation no longer waits on this, since
-`mergeGeometryStreamsInLaneOrder` is a standalone, host-side algorithm on
-top of the existing per-invocation builder, but *driving* it from a real
-widened geometry invocation still does. (Crack-free non-uniform per-edge
+wrappers" above) have since landed in follow-up sessions. And, added in a
+further follow-up session to close that deferred list's last remaining
+"wrapper" item, `feme::cpu::GeometryWrapperPass` (new GeometryWrapper.h/.cpp)
+plus `FemeGeometryInvocation`/`FemeGeometryArgs`/`GeometryResources`/
+`PreparedGeometryBatch`/`CompiledStage::invokeGeometry`: one invocation per
+assembled input primitive, batched over `FemeGeometryArgs::PrimitiveCount`
+the way `VertexWrapperPass` batches vertices, reading a structure-of-arrays
+input block addressed `primitive * VerticesPerPrimitive + vertexInPrimitive`
+(any vertex in the primitive, not just the invocation's own -- an adjacency
+triangle's "opposite" vertices, for instance). `feme.stage.stream.emit`/
+`.cut` (`StageOpKind::StreamEmit`/`StreamCut`) turn ordinary per-invocation
+output-store scratch storage into the stage's real, bounded, variable-count
+result: `emit` snapshots that scratch storage into one record of three flat,
+host-owned arrays rather than calling back into a live
+`GeometryStreamBuilder` object from JIT-compiled code (no precedent in this
+codebase for that), and `feme::graphics::collectGeometryStreams` (new
+feme/include/feme/Graphics/GeometryStreamCollection.h/feme/lib/Graphics/
+GeometryStreamCollection.cpp -- living in `feme::graphics` since
+`FeMeTargetCPU` does not depend on `FeMeGraphics`, the reverse of
+`FeMeGraphics`'s own dependency) replays those flat records back into one
+real `GeometryStreamBuilder` per primitive and merges them via
+`mergeGeometryStreamsInLaneOrder`, finally closing *that* function's own
+"driving it from a real widened invocation" deferral. This also closed a
+latent gap `mergeGeometryStreamsInLaneOrder`'s own landing had not yet
+exposed: `feme.stage.stream.emit`/`.cut` needed the same per-lane
+side-effect-mask threading `feme.stage.output.store` already had
+(`LinearizePass` now creates masked variants of them,
+`feme.cpu.masked.stage.stream.emit`/`.cut` in StageMaskCalls.h/.cpp, and
+`FunctionWidener` widens those variants in SIMDize.cpp) -- without it, SIMDize
+left a `feme.stage.stream.emit`/`.cut` call with a uniform (constant) operand
+completely unwidened, so it fired once per *wave* rather than once per
+active *lane*. Two shapes remain diagnosed rather than silently mishandled:
+more than one output stream (this milestone's `FemeGeometryArgs` only
+carries storage for stream 0), and a group-sync barrier (geometry
+invocations are independent, like the domain stage's). Deferred, documented
+in GeometryWrapper.cpp's own file comment: generalizing
+`EntryWrapperPass`'s barrier-region-splitting machinery to the control-point
+batch ABI for a hull shader that needs it, and wiring any of this into
+`executeDraws`/`feme-render`. (Crack-free non-uniform per-edge
 tessellation, previously deferred here, was added after R34's initial
 landing -- see the tessellator's own comment above.) `unittests/Graphics/
-{Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp`,
-`unittests/Transforms/CPU/{HullWrapper,PatchConstantWrapper,DomainWrapper}Test.cpp`,
+{Tessellator,Patch,GeometryStream,GeometryStreamCollection,LayeredRendering}Test.cpp`,
+`unittests/Transforms/CPU/{HullWrapper,PatchConstantWrapper,DomainWrapper,GeometryWrapper}Test.cpp`,
 `unittests/Target/CPU/CompiledStageTest.cpp`'s
-`InvokePatch{,Constant}RunsStageAwarePath` and
-`InvokeDomainRunsStageAwarePath` cases, and `PipelineTest.cpp`'s adjacency cases (including the new
+`InvokePatch{,Constant}RunsStageAwarePath`,
+`InvokeDomainRunsStageAwarePath` and `InvokeGeometryRunsStageAwarePath`
+cases, and `PipelineTest.cpp`'s adjacency cases (including the new
 strip-splitting cases) cover today's scope; `ninja check-feme`
-(assertions-enabled, ccache build) passes in full before and after.
+(assertions-enabled, ccache build) passes in full before and after -- G5 is
+not yet complete, since no image-comparison completion test exists (that
+still needs the host-side glue "What's still open" in agent_thoughts.md's
+most recent R34 session describes: wiring the compiled hull/domain/geometry
+stages into `executeDraws`/`feme-render`).
 
 ### G6: Amplification and mesh shading
 
