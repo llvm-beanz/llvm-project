@@ -7,6 +7,7 @@ set(LLVM_LINK_COMPONENTS
 add_feme_unittest(FeMeGraphicsTests
   ExecutorTest.cpp
   ImageFixtureTest.cpp
+  PatchTest.cpp
   PipelineTest.cpp
   PreparedDrawTest.cpp
   SceneTest.cpp
