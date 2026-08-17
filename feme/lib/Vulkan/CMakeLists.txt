@@ -50,17 +50,15 @@ add_custom_target(FeMeVulkanEntrypointsGen DEPENDS ${feme_vulkan_entrypoints_inc
 # version-script packaging. Visibility attributes only govern a *shared*
 # object's dynamic symbol table, so building this static library with the
 # same hidden-by-default flags has no effect on the unit tests linking it
-# directly into their own executable.
-add_library(FeMeVulkanCore STATIC
-  EntryPoints.cpp
-  PhysicalDeviceInfo.cpp
-  ProcAddr.cpp
-  )
-add_dependencies(FeMeVulkanCore FeMeVulkanEntrypointsGen)
-target_include_directories(FeMeVulkanCore PUBLIC
-  ${feme_vulkan_gen_dir}
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  )
+# directly into their own executable. Built via `add_feme_library(... STATIC
+# ...)` (rather than a bare `add_library(... STATIC ...)`) so it still picks
+# up LLVM's build-configuration options (e.g. LTO, sanitizer
+# instrumentation); STATIC is passed explicitly since, unlike `feme_vulkan`
+# below, this must never become a shared object even when BUILD_SHARED_LIBS
+# is set, given the unit tests linking it directly. It is never installed
+# (DISABLE_INSTALL): it exists solely to be linked into `feme_vulkan` and the
+# unit tests below, not as a standalone deliverable.
+#
 # PhysicalDeviceInfo.cpp calls directly into these two components
 # (`llvm::Expected`/`consumeError` and `llvm::MD5` from Support;
 # `getHostCPUFeatures`/`getProcessTriple`/`getHostCPUName`/`Triple` from
@@ -75,18 +73,33 @@ target_include_directories(FeMeVulkanCore PUBLIC
 # `libFeMeVulkanCore.a`'s own need for it (e.g. the `ErrorInfo<ErrorList,
 # ErrorInfoBase>` RTTI that `llvm::consumeError` pulls in) appears later on
 # the command line, producing an undefined "typeinfo for
-# llvm::ErrorInfoBase". Declaring the dependency directly lets CMake's own
-# library ordering account for it no matter what FeMeTargetCPU or anything
-# else in a given link needs.
-llvm_map_components_to_libnames(feme_vulkan_core_llvm_libs
+# llvm::ErrorInfoBase". Declaring the dependency directly (via
+# LINK_COMPONENTS below) lets CMake's own library ordering account for it no
+# matter what FeMeTargetCPU or anything else in a given link needs.
+add_feme_library(FeMeVulkanCore STATIC
+  EntryPoints.cpp
+  PhysicalDeviceInfo.cpp
+  ProcAddr.cpp
+
+  # This directory also builds `feme_vulkan` (VulkanICD.cpp) below as its own
+  # target, so LLVM's build system's "one target per directory" source-file
+  # coverage check needs to be told that's intentional.
+  PARTIAL_SOURCES_INTENDED
+
+  DISABLE_INSTALL
+
+  LINK_COMPONENTS
   Support
   TargetParser
-  )
-target_link_libraries(FeMeVulkanCore PUBLIC
+
+  LINK_LIBS PUBLIC
   Vulkan::Headers
   FeMeTargetCPU
-  PRIVATE
-  ${feme_vulkan_core_llvm_libs}
+  )
+add_dependencies(FeMeVulkanCore FeMeVulkanEntrypointsGen)
+target_include_directories(FeMeVulkanCore PUBLIC
+  ${feme_vulkan_gen_dir}
+  ${CMAKE_CURRENT_SOURCE_DIR}
   )
 
 add_library(feme_vulkan SHARED VulkanICD.cpp)
