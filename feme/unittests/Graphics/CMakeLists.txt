@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
   )
 
 add_feme_unittest(FeMeGraphicsTests
+  ExecutorTest.cpp
   ImageFixtureTest.cpp
   PipelineTest.cpp
   PreparedDrawTest.cpp
@@ -13,4 +14,5 @@ add_feme_unittest(FeMeGraphicsTests
 target_link_libraries(FeMeGraphicsTests
   PRIVATE
   FeMeGraphics
+  FeMeTransformsDXIL
   )

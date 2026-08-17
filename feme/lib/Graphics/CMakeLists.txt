@@ -1,4 +1,5 @@
 add_mlir_library(FeMeGraphics
+  Executor.cpp
   ImageFixture.cpp
   Pipeline.cpp
   Scene.cpp
