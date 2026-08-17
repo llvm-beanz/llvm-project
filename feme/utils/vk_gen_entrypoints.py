@@ -26,8 +26,17 @@
 # Extension commands are out of scope for V0 (see FeMeVulkanDesign.md's
 # "Loader Integration": "The driver reports no device extension merely
 # because Vulkan-Headers declares it").
+#
+# Newer vk.xml revisions split each `VK_VERSION_1_x` feature into several
+# `VK_{BASE,COMPUTE,GRAPHICS}_VERSION_1_x` features linked by a `depends`
+# attribute (e.g. `VK_VERSION_1_0` itself now requires no commands directly;
+# it just `depends` on `VK_GRAPHICS_VERSION_1_0`, which in turn `depends` on
+# `VK_COMPUTE_VERSION_1_0`, and so on), so a command's containing feature must
+# be resolved transitively through `depends` rather than assumed to be a
+# direct `<feature name="VK_VERSION_1_x">`.
 
 import argparse
+import re
 import sys
 import xml.etree.ElementTree as ET
 
@@ -39,6 +48,29 @@ CORE_FEATURES = ("VK_VERSION_1_0", "VK_VERSION_1_1")
 # device dispatch table), matching the Vulkan loader's own convention.
 INSTANCE_HANDLE_TYPES = {"VkInstance", "VkPhysicalDevice"}
 DEVICE_HANDLE_TYPES = {"VkDevice", "VkQueue", "VkCommandBuffer"}
+
+
+def resolve_dependent_features(name, features_by_name, resolved=None):
+    """Returns the transitive closure of `name` and every feature it
+    (recursively) `depends` on, per `features_by_name` (name -> <feature>).
+
+    A `depends` attribute is a boolean expression combining feature/extension
+    names with `+` (AND) and `,` (OR), optionally parenthesized; every name it
+    mentions is walked regardless of which operator joins it; because core
+    version features never gate a `<command>` requirement behind an OR'd
+    extension (see the `depends` note above `CORE_FEATURES`), this closure is
+    exactly the set of sub-features a core version is built from.
+    """
+    if resolved is None:
+        resolved = set()
+    if name in resolved or name not in features_by_name:
+        return resolved
+    resolved.add(name)
+    depends = features_by_name[name].get("depends")
+    if depends:
+        for dependency in re.findall(r"[A-Za-z0-9_]+", depends):
+            resolve_dependent_features(dependency, features_by_name, resolved)
+    return resolved
 
 
 def parse_commands(vk_xml_path):
@@ -76,16 +108,30 @@ def parse_commands(vk_xml_path):
             return "DEVICE"
         return "GLOBAL"
 
+    features_by_name = {
+        feature.get("name"): feature for feature in root.findall("./feature")
+    }
+    core_feature_names = set()
+    for feature_name in CORE_FEATURES:
+        core_feature_names |= resolve_dependent_features(feature_name, features_by_name)
+
     commands = {}
-    for feature in root.findall("./feature"):
-        if feature.get("name") not in CORE_FEATURES:
-            continue
+    for feature_name in core_feature_names:
+        feature = features_by_name[feature_name]
         api = feature.get("api", "")
         if "vulkan" not in api.split(","):
             continue
-        for command_ref in feature.findall("./require/command"):
-            name = command_ref.get("name")
-            commands[name] = dispatch_level(name)
+        for require in feature.findall("require"):
+            # A `<require depends="...">` conditions its contents on an
+            # optional extension or struct field rather than the core
+            # version itself; core versions never gate a `<command>` this
+            # way (see the note above `CORE_FEATURES`), but skip such blocks
+            # defensively rather than assume that always holds.
+            if require.get("depends"):
+                continue
+            for command_ref in require.findall("command"):
+                name = command_ref.get("name")
+                commands[name] = dispatch_level(name)
     return commands
 
 
