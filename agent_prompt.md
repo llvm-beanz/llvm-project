@@ -62,21 +62,16 @@ Can you continue the R34 implementation from the roadmap document?
 
 Open issues form the last agent task:
 
-> 1. The patch-constant function: no ABI struct or wrapper pass yet. It needs
->    its own shape (`OutputPatch`/`InputPatch` inputs, a single
->    non-batched/scalar invocation per patch rather than a wave loop, tess
->    factor + patch constant outputs feeding `feme::graphics::PatchRecord`).
-> 2. `DomainWrapperPass`/`GeometryWrapperPass` and
+> 1. `DomainWrapperPass`/`GeometryWrapperPass` and
 >    `CompiledStage::invokeDomain`/`invokeGeometry` -- not started.
-> 3. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+> 2. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
 >    the control-point batch ABI, for a hull shader whose control points
->    cooperate through groupshared memory before every one finishes (today
->    diagnosed by `HullWrapperPass` rather than supported). Still, as the
->    prior two sessions found for the whole wrapper item, "its own
->    multi-commit body of work" -- but now scoped to exactly this one
->    narrower case rather than the whole hull/domain/geometry wrapper
->    surface.
-> 4. Wiring any compiled hull stage into `executeDraws`/`feme-render`/the
->    scene YAML -- still strictly downstream of the above, and of the domain
->    wrapper (a control-point batch alone produces no rasterizable geometry
->    without going through the tessellator and a domain-stage evaluation).
+>    cooperate through groupshared memory before every one finishes.
+> 3. Wiring any compiled hull stage (now both phases) into
+>    `executeDraws`/`feme-render`/the scene YAML -- still strictly downstream
+>    of the domain wrapper (control points and patch constants alone produce
+>    no rasterizable geometry without going through the tessellator and a
+>    domain-stage evaluation).
+> 4. An `InputPatch` parameter on the patch-constant function, newly deferred
+>    this session (see above) -- a smaller, more scoped gap than the other
+>    three.
