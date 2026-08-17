@@ -75,6 +75,7 @@ public:
   llvm::Error invokePatch(const PreparedPatchBatch &Prepared) const;
   llvm::Error
   invokePatchConstant(const PreparedPatchConstantBatch &Prepared) const;
+  llvm::Error invokeDomain(const PreparedDomainBatch &Prepared) const;
 
   CompiledStage(std::unique_ptr<llvm::orc::LLJIT> JIT, void *EntryFn,
                 ShaderStage Stage, ResourceInfo Info, unsigned WaveSize,

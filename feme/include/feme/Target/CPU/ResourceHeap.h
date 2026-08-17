@@ -55,6 +55,7 @@ using VertexEntryPointFn = void (*)(const FemeVertexArgs *);
 using FragmentEntryPointFn = void (*)(const FemeFragmentArgs *);
 using PatchEntryPointFn = void (*)(const FemePatchArgs *);
 using PatchConstantEntryPointFn = void (*)(const FemePatchConstantArgs *);
+using DomainEntryPointFn = void (*)(const FemeDomainArgs *);
 
 class PreparedDispatch {
 public:
@@ -291,6 +292,66 @@ private:
   void *Outputs = nullptr;
   uint32_t OutputControlPointCount = 0;
   uint32_t InputPatchControlPointCount = 0;
+};
+
+/// Caller-owned storage for one domain/evaluation batch (roadmap R34's
+/// continuation): the completed patch's control points and per-patch
+/// tessellation factors/patch constants this batch evaluates against, the
+/// tessellator-generated domain coordinates it evaluates at, and the
+/// per-domain-point vertex outputs it produces. See `FemeDomainArgs`'s own
+/// comment for why three input sources meet here.
+struct DomainResources {
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *PatchConstantLayout = nullptr;
+  const void *PatchConstants = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  llvm::ArrayRef<FemeDomainInvocation> Invocations;
+  uint32_t OutputControlPointCount = 0;
+};
+
+/// One prepared domain batch: materialized resources plus borrowed stage
+/// storage and domain-coordinate records. The caller owns the stage-storage
+/// blocks and invocation array and must keep them alive through the
+/// `invokeDomain` call that consumes this object.
+class PreparedDomainBatch {
+public:
+  static PreparedDomainBatch create(const ResourceInfo &Info,
+                                    const DomainResources &Resources);
+
+  FemeDomainArgs args() const;
+
+private:
+  PreparedDomainBatch(std::vector<FemeDescriptor> ResourceHeap,
+                      llvm::ArrayRef<FemeImageDescriptor> ImageHeap,
+                      llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+                      llvm::ArrayRef<uint8_t> RootConstants,
+                      const FemeStageLayout *InputLayout, const void *Inputs,
+                      const FemeStageLayout *PatchConstantLayout,
+                      const void *PatchConstants,
+                      const FemeStageLayout *OutputLayout, void *Outputs,
+                      llvm::ArrayRef<FemeDomainInvocation> Invocations,
+                      uint32_t OutputControlPointCount);
+
+  std::vector<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  FemeShaderResources ShaderResources{};
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *PatchConstantLayout = nullptr;
+  const void *PatchConstants = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  llvm::ArrayRef<FemeDomainInvocation> Invocations;
+  uint32_t OutputControlPointCount = 0;
 };
 
 } // namespace feme::cpu

@@ -308,4 +308,61 @@ FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
   return Args;
 }
 
+PreparedDomainBatch::PreparedDomainBatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    ArrayRef<FemeImageDescriptor> ImageHeap,
+    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
+    const void *Inputs, const FemeStageLayout *PatchConstantLayout,
+    const void *PatchConstants, const FemeStageLayout *OutputLayout,
+    void *Outputs, ArrayRef<FemeDomainInvocation> Invocations,
+    uint32_t OutputControlPointCount)
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
+      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+      InputLayout(InputLayout), Inputs(Inputs),
+      PatchConstantLayout(PatchConstantLayout), PatchConstants(PatchConstants),
+      OutputLayout(OutputLayout), Outputs(Outputs), Invocations(Invocations),
+      OutputControlPointCount(OutputControlPointCount) {
+  ShaderResources.ResourceHeap = this->ResourceHeap.data();
+  ShaderResources.ResourceHeapCount =
+      static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.ImageHeap = this->ImageHeap.data();
+  ShaderResources.ImageHeapCount =
+      static_cast<uint32_t>(this->ImageHeap.size());
+  ShaderResources.SamplerHeap = this->SamplerHeap.data();
+  ShaderResources.SamplerHeapCount =
+      static_cast<uint32_t>(this->SamplerHeap.size());
+  ShaderResources.RootConstants = this->RootConstants.data();
+  ShaderResources.RootConstantSize =
+      static_cast<uint32_t>(this->RootConstants.size());
+}
+
+PreparedDomainBatch
+PreparedDomainBatch::create(const ResourceInfo &Info,
+                            const DomainResources &Resources) {
+  return PreparedDomainBatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
+      Resources.InputLayout, Resources.Inputs, Resources.PatchConstantLayout,
+      Resources.PatchConstants, Resources.OutputLayout, Resources.Outputs,
+      Resources.Invocations, Resources.OutputControlPointCount);
+}
+
+FemeDomainArgs PreparedDomainBatch::args() const {
+  FemeDomainArgs Args{};
+  Args.AbiVersion = StageArgsAbiVersion;
+  Args.DomainPointCount = static_cast<uint32_t>(Invocations.size());
+  Args.OutputControlPointCount = OutputControlPointCount;
+  Args.Resources = &ShaderResources;
+  Args.InputLayout = InputLayout;
+  Args.Inputs = Inputs;
+  Args.PatchConstantLayout = PatchConstantLayout;
+  Args.PatchConstants = PatchConstants;
+  Args.OutputLayout = OutputLayout;
+  Args.Outputs = Outputs;
+  Args.Invocations = Invocations.data();
+  return Args;
+}
+
 } // namespace feme::cpu

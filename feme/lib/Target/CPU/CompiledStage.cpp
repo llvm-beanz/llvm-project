@@ -360,6 +360,15 @@ Error CompiledStage::invokePatchConstant(
   return Error::success();
 }
 
+Error CompiledStage::invokeDomain(const PreparedDomainBatch &Prepared) const {
+  if (Stage != ShaderStage::Domain)
+    return createStringError(inconvertibleErrorCode(),
+                             "invokeDomain is only legal for domain stages");
+  FemeDomainArgs Args = Prepared.args();
+  reinterpret_cast<DomainEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
 StageArtifactInfo CompiledStage::getArtifactInfo() const {
   StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(Info);
   Artifact.Stage = Stage;
