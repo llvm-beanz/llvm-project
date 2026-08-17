@@ -54,6 +54,7 @@ using EntryPointFn = void (*)(const FemeDispatchArgs *);
 using VertexEntryPointFn = void (*)(const FemeVertexArgs *);
 using FragmentEntryPointFn = void (*)(const FemeFragmentArgs *);
 using PatchEntryPointFn = void (*)(const FemePatchArgs *);
+using PatchConstantEntryPointFn = void (*)(const FemePatchConstantArgs *);
 
 class PreparedDispatch {
 public:
@@ -215,6 +216,56 @@ private:
                      const FemeStageLayout *InputLayout, const void *Inputs,
                      const FemeStageLayout *OutputLayout, void *Outputs,
                      uint32_t OutputControlPointCount);
+
+  std::vector<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  FemeShaderResources ShaderResources{};
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  uint32_t OutputControlPointCount = 0;
+};
+
+/// Caller-owned storage for one patch-constant invocation (added after
+/// roadmap R34's initial landing): the completed output control points this
+/// phase reads, and the per-patch storage its tessellation-factor/patch-
+/// constant writes go to. See `FemePatchConstantArgs`'s own comment.
+struct PatchConstantResources {
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  uint32_t OutputControlPointCount = 0;
+};
+
+/// One prepared patch-constant invocation: materialized resources plus
+/// borrowed stage storage. The caller owns the stage-storage blocks and must
+/// keep them alive through the `invokePatchConstant` call that consumes this
+/// object.
+class PreparedPatchConstantBatch {
+public:
+  static PreparedPatchConstantBatch
+  create(const ResourceInfo &Info, const PatchConstantResources &Resources);
+
+  FemePatchConstantArgs args() const;
+
+private:
+  PreparedPatchConstantBatch(std::vector<FemeDescriptor> ResourceHeap,
+                             llvm::ArrayRef<FemeImageDescriptor> ImageHeap,
+                             llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+                             llvm::ArrayRef<uint8_t> RootConstants,
+                             const FemeStageLayout *InputLayout,
+                             const void *Inputs,
+                             const FemeStageLayout *OutputLayout, void *Outputs,
+                             uint32_t OutputControlPointCount);
 
   std::vector<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<FemeImageDescriptor> ImageHeap;

@@ -252,4 +252,52 @@ FemePatchArgs PreparedPatchBatch::args() const {
   return Args;
 }
 
+PreparedPatchConstantBatch::PreparedPatchConstantBatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    ArrayRef<FemeImageDescriptor> ImageHeap,
+    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
+    const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
+    uint32_t OutputControlPointCount)
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
+      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+      InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
+      Outputs(Outputs), OutputControlPointCount(OutputControlPointCount) {
+  ShaderResources.ResourceHeap = this->ResourceHeap.data();
+  ShaderResources.ResourceHeapCount =
+      static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.ImageHeap = this->ImageHeap.data();
+  ShaderResources.ImageHeapCount =
+      static_cast<uint32_t>(this->ImageHeap.size());
+  ShaderResources.SamplerHeap = this->SamplerHeap.data();
+  ShaderResources.SamplerHeapCount =
+      static_cast<uint32_t>(this->SamplerHeap.size());
+  ShaderResources.RootConstants = this->RootConstants.data();
+  ShaderResources.RootConstantSize =
+      static_cast<uint32_t>(this->RootConstants.size());
+}
+
+PreparedPatchConstantBatch
+PreparedPatchConstantBatch::create(const ResourceInfo &Info,
+                                   const PatchConstantResources &Resources) {
+  return PreparedPatchConstantBatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
+      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
+      Resources.Outputs, Resources.OutputControlPointCount);
+}
+
+FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
+  FemePatchConstantArgs Args{};
+  Args.AbiVersion = StageArgsAbiVersion;
+  Args.OutputControlPointCount = OutputControlPointCount;
+  Args.Resources = &ShaderResources;
+  Args.InputLayout = InputLayout;
+  Args.Inputs = Inputs;
+  Args.OutputLayout = OutputLayout;
+  Args.Outputs = Outputs;
+  return Args;
+}
+
 } // namespace feme::cpu

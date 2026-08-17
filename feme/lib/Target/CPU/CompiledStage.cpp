@@ -349,6 +349,17 @@ Error CompiledStage::invokePatch(const PreparedPatchBatch &Prepared) const {
   return Error::success();
 }
 
+Error CompiledStage::invokePatchConstant(
+    const PreparedPatchConstantBatch &Prepared) const {
+  if (Stage != ShaderStage::Hull)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "invokePatchConstant is only legal for hull stages");
+  FemePatchConstantArgs Args = Prepared.args();
+  reinterpret_cast<PatchConstantEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
 StageArtifactInfo CompiledStage::getArtifactInfo() const {
   StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(Info);
   Artifact.Stage = Stage;

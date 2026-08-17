@@ -12,7 +12,9 @@
 // (`FemeShaderResources`, `FemeStageLayout`, `FemeVertexArgs`, and
 // `FemeFragmentArgs`), and roadmap R29's image/sampler descriptors
 // (`FemeImageDescriptor`, `FemeSamplerDescriptor`), and roadmap R34's
-// control-stage control-point batch ABI (`FemePatchArgs`), plus the
+// control-stage control-point batch ABI (`FemePatchArgs`) and, added after
+// R34's initial landing, the patch-constant phase's own single-invocation
+// batch ABI (`FemePatchConstantArgs`), plus the
 // descriptor/layout/system-value enumerators that give those structs' fields
 // meaning. R29 also folded `FemeShaderResources` into `FemeDispatchArgs` and
 // retyped `FemeShaderResources::SamplerHeap`, breaking the ABI on purpose
@@ -622,9 +624,10 @@ struct FemeFragmentArgs {
 /// per-invocation record array (a control point's identity *is* its index;
 /// unlike a vertex, it has no independent system values of its own). The
 /// patch-constant phase (reading the completed `OutputPatch` this phase
-/// produces plus `InputPatch`, and writing tessellation factors) is not yet
-/// modeled -- see HullWrapper.cpp's file comment for current scope and what
-/// remains.
+/// produces, and writing tessellation factors and patch constants) is
+/// `FemePatchConstantArgs` below, added after R34's initial landing -- see
+/// PatchConstantWrapper.cpp's file comment for its own scope and what
+/// remains (an `InputPatch` parameter is not yet modeled).
 struct FemePatchArgs {
   /// `StageArgsAbiVersion`.
   uint32_t AbiVersion;
@@ -651,6 +654,57 @@ struct FemePatchArgs {
   /// Structure-of-arrays output storage for this batch's control points.
   void *Outputs;
   /// ABI headroom for later patch-batch metadata.
+  void *Reserved[4];
+};
+
+/// The single argument a compiled patch-constant entry point takes:
+///
+/// \code
+///   void feme_cpu_entry_<name>(const FemePatchConstantArgs *Args);
+/// \endcode
+///
+/// Added after roadmap R34's initial landing, closing its "patch-constant
+/// function" open item: exactly one invocation computes a whole patch's
+/// tessellation factors and patch constants, reading the completed
+/// `OutputPatch` `feme::cpu::HullWrapperPass`'s control-point phase produced
+/// -- so `Inputs`/`InputLayout` here match `FemePatchArgs::Outputs`/
+/// `OutputLayout`'s own shape and are addressed the same way, except that
+/// this phase's `feme.stage.input.load` control-point-index operand may
+/// legally name *any* control point in `[0, OutputControlPointCount)`, not
+/// only the invoking lane's own (there is only one invocation, and it alone
+/// computes every tessellation factor and patch constant, typically by
+/// reading more than one control point to do so -- e.g. an edge factor from
+/// two adjacent corners' positions). See PatchConstantWrapper.cpp's file
+/// comment for this milestone's scope (an `InputPatch` parameter, i.e. the
+/// original, pre-control-stage input control points, is not yet modeled --
+/// only the completed `OutputPatch`) and what remains.
+struct FemePatchConstantArgs {
+  /// `StageArgsAbiVersion`.
+  uint32_t AbiVersion;
+  /// Number of output control points in `Inputs`, bounding the
+  /// control-point-index operand a `feme.stage.input.load` in this phase may
+  /// legally use.
+  uint32_t OutputControlPointCount;
+  /// Reserved 32-bit fields to keep pointer fields naturally aligned and leave
+  /// room for later scalar metadata.
+  uint32_t Reserved32[2];
+  /// Resource/root-constant block shared by every stage.
+  const FemeShaderResources *Resources;
+  /// Layout describing `Inputs`.
+  const FemeStageLayout *InputLayout;
+  /// Structure-of-arrays storage for the completed output control points'
+  /// attributes, one slot per control point (matching `FemePatchArgs::
+  /// Outputs`'s own layout).
+  const void *Inputs;
+  /// Layout describing `Outputs`: this phase's `SignatureDirection::
+  /// PatchOutput` elements (tessellation factors and patch constants).
+  const FemeStageLayout *OutputLayout;
+  /// Per-patch scalar storage for this invocation's tessellation-factor and
+  /// patch-constant writes. Unlike `Inputs`, this is not structure-of-arrays
+  /// over a control-point count: there is exactly one patch's worth of
+  /// storage, addressed by row/component alone.
+  void *Outputs;
+  /// ABI headroom for later patch-constant-batch metadata.
   void *Reserved[4];
 };
 

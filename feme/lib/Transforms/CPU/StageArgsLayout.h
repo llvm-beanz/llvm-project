@@ -122,6 +122,18 @@ enum PatchArgsField : unsigned {
   PatchArgsFieldReserved = 8,
 };
 
+enum PatchConstantArgsField : unsigned {
+  PatchConstantArgsFieldAbiVersion = 0,
+  PatchConstantArgsFieldOutputControlPointCount = 1,
+  PatchConstantArgsFieldReserved32 = 2,
+  PatchConstantArgsFieldResources = 3,
+  PatchConstantArgsFieldInputLayout = 4,
+  PatchConstantArgsFieldInputs = 5,
+  PatchConstantArgsFieldOutputLayout = 6,
+  PatchConstantArgsFieldOutputs = 7,
+  PatchConstantArgsFieldReserved = 8,
+};
+
 inline llvm::StructType *getStageElementType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *I64Ty = llvm::Type::getInt64Ty(Ctx);
@@ -185,6 +197,17 @@ inline llvm::StructType *getFragmentArgsType(llvm::LLVMContext &Ctx) {
 }
 
 inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
+  llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  return llvm::StructType::get(
+      Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 2), PtrTy, PtrTy, PtrTy,
+            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
+}
+
+/// Same field shape as `getPatchArgsType` (see `FemePatchConstantArgs`'s own
+/// comment for why): a distinct name keeps call sites naming the ABI struct
+/// they actually mean rather than reusing `getPatchArgsType` by coincidence.
+inline llvm::StructType *getPatchConstantArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(

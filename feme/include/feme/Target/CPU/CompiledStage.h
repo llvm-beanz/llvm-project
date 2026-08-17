@@ -73,6 +73,8 @@ public:
   llvm::Error invokeVertices(const PreparedVertexBatch &Prepared) const;
   llvm::Error invokeFragments(const PreparedFragmentBatch &Prepared) const;
   llvm::Error invokePatch(const PreparedPatchBatch &Prepared) const;
+  llvm::Error
+  invokePatchConstant(const PreparedPatchConstantBatch &Prepared) const;
 
   CompiledStage(std::unique_ptr<llvm::orc::LLJIT> JIT, void *EntryFn,
                 ShaderStage Stage, ResourceInfo Info, unsigned WaveSize,
