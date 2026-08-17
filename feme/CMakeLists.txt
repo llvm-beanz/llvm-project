@@ -41,6 +41,9 @@ include_directories(SYSTEM ${MLIR_TABLEGEN_OUTPUT_DIR})
 include_directories(${FEME_SOURCE_DIR}/include)
 include_directories(${FEME_BINARY_DIR}/include)
 
+list(APPEND CMAKE_MODULE_PATH "${FEME_SOURCE_DIR}/cmake/modules")
+include(AddFeMe)
+
 set(FEME_INCLUDE_TESTS ${LLVM_INCLUDE_TESTS} CACHE BOOL
   "Generate build targets for the feme unit and lit tests.")
 
