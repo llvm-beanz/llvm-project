@@ -93,19 +93,47 @@ uint32_t getListPrimitiveVertexCount(PrimitiveTopology Topology);
 /// Topology)` fetched indices in \p FetchedIndices (which must have
 /// exactly that many entries) per `SplitPrimitiveAdjacency`'s own comment.
 ///
-/// Scope note: only list topologies are implemented. A strip topology's
-/// adjacency vertices interleave across a sliding window of consecutive
-/// primitives rather than each primitive owning a disjoint index range,
-/// which needs its own windowing logic in whatever assembles primitives
-/// from a strip (the executor's vertex/index fetch, which does not yet
-/// exist for any adjacency topology at all -- roadmap R32's executor only
-/// implements `TriangleList`/`TriangleStrip`). `LineStripWithAdjacency`/
-/// `TriangleStripWithAdjacency` are declared enumerators for a pipeline
-/// description to name, matching this header's "reject rather than
-/// silently misinterpret" convention, but have no split helper yet.
+/// Scope note: only list topologies are implemented here. A strip
+/// topology's adjacency vertices interleave across a sliding window of
+/// consecutive primitives rather than each primitive owning a disjoint
+/// index range; see `splitStripPrimitiveAdjacency` below for that case.
 SplitPrimitiveAdjacency
 splitListPrimitiveAdjacency(PrimitiveTopology Topology,
                             llvm::ArrayRef<uint32_t> FetchedIndices);
+
+/// The number of primitives a *strip*-topology's \p IndexCount fetched
+/// indices produce, per Direct3D/Vulkan's shared sliding-window convention
+/// (\p Topology must be `LineStripWithAdjacency` or
+/// `TriangleStripWithAdjacency`): a line strip with adjacency advances its
+/// 4-vertex window by 1 each primitive (`IndexCount - 3` primitives, 0 if
+/// \p IndexCount < 4); a triangle strip with adjacency advances its
+/// 6-vertex window by 2 each primitive (`(IndexCount - 4) / 2` primitives,
+/// 0 if \p IndexCount < 6 or `IndexCount` is not `4 + 2 * primitiveCount`
+/// for a whole number of primitives, i.e. `(IndexCount - 4)` is odd).
+uint32_t getStripPrimitiveCount(PrimitiveTopology Topology,
+                                uint32_t IndexCount);
+
+/// Splits primitive \p PrimitiveIndex (< `getStripPrimitiveCount(Topology,
+/// FetchedIndices.size())`) of a *strip*-topology's full \p FetchedIndices
+/// per `SplitPrimitiveAdjacency`'s own comment, following the same
+/// Vulkan/Direct3D vertex order `splitListPrimitiveAdjacency` documents
+/// (line adjacency `(adj0, v0, v1, adj1)`; triangle adjacency `(v0, adj01,
+/// v1, adj12, v2, adj20)`), just windowed rather than partitioned:
+/// primitive \p PrimitiveIndex's window starts at \p PrimitiveIndex for a
+/// line strip (the shared "leading vertices are 1, 2, 3, ..." convention)
+/// or `2 * PrimitiveIndex` for a triangle strip ("leading vertices are 0,
+/// 2, 4, ..."), matching Microsoft's "Winding Direction and Leading Vertex
+/// Positions" documentation for D3D_PRIMITIVE_TOPOLOGY_*_ADJ.
+///
+/// \p Topology must be `LineStripWithAdjacency` or
+/// `TriangleStripWithAdjacency`; a non-adjacency or list topology's strip
+/// has no separate adjacency-splitting step (a plain strip's own vertex
+/// fetch already produces its primitive directly) and is not accepted
+/// here.
+SplitPrimitiveAdjacency
+splitStripPrimitiveAdjacency(PrimitiveTopology Topology,
+                             llvm::ArrayRef<uint32_t> FetchedIndices,
+                             uint32_t PrimitiveIndex);
 
 /// Which primitive-facing direction, if any, is discarded before
 /// rasterization.

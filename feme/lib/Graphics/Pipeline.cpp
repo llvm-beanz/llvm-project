@@ -126,3 +126,68 @@ SplitPrimitiveAdjacency feme::graphics::splitListPrimitiveAdjacency(
   }
   return Split;
 }
+
+uint32_t feme::graphics::getStripPrimitiveCount(PrimitiveTopology Topology,
+                                                uint32_t IndexCount) {
+  switch (Topology) {
+  case PrimitiveTopology::LineStripWithAdjacency:
+    return IndexCount < 4 ? 0 : IndexCount - 3;
+  case PrimitiveTopology::TriangleStripWithAdjacency:
+    if (IndexCount < 6 || (IndexCount - 4) % 2 != 0)
+      return 0;
+    return (IndexCount - 4) / 2;
+  case PrimitiveTopology::PointList:
+  case PrimitiveTopology::LineList:
+  case PrimitiveTopology::LineStrip:
+  case PrimitiveTopology::TriangleList:
+  case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::LineListWithAdjacency:
+  case PrimitiveTopology::TriangleListWithAdjacency:
+    llvm_unreachable("getStripPrimitiveCount only supports the two "
+                     "strip-with-adjacency topologies");
+  }
+  llvm_unreachable("unhandled PrimitiveTopology");
+}
+
+SplitPrimitiveAdjacency feme::graphics::splitStripPrimitiveAdjacency(
+    PrimitiveTopology Topology, llvm::ArrayRef<uint32_t> FetchedIndices,
+    uint32_t PrimitiveIndex) {
+  assert(PrimitiveIndex <
+             getStripPrimitiveCount(Topology, FetchedIndices.size()) &&
+         "primitive index out of range for this strip");
+  SplitPrimitiveAdjacency Split;
+  switch (Topology) {
+  case PrimitiveTopology::LineStripWithAdjacency: {
+    // Window [i, i+3]: (adj0, v0, v1, adj1), advancing by 1 each primitive
+    // ("leading vertices are 1, 2, 3, ...").
+    uint32_t Base = PrimitiveIndex;
+    Split.Adjacent.push_back(FetchedIndices[Base]);
+    Split.Primitive.push_back(FetchedIndices[Base + 1]);
+    Split.Primitive.push_back(FetchedIndices[Base + 2]);
+    Split.Adjacent.push_back(FetchedIndices[Base + 3]);
+    break;
+  }
+  case PrimitiveTopology::TriangleStripWithAdjacency: {
+    // Window [2i, 2i+5]: (v0, adj01, v1, adj12, v2, adj20), advancing by 2
+    // each primitive ("leading vertices are 0, 2, 4, ...").
+    uint32_t Base = 2 * PrimitiveIndex;
+    Split.Primitive.push_back(FetchedIndices[Base]);
+    Split.Adjacent.push_back(FetchedIndices[Base + 1]);
+    Split.Primitive.push_back(FetchedIndices[Base + 2]);
+    Split.Adjacent.push_back(FetchedIndices[Base + 3]);
+    Split.Primitive.push_back(FetchedIndices[Base + 4]);
+    Split.Adjacent.push_back(FetchedIndices[Base + 5]);
+    break;
+  }
+  case PrimitiveTopology::PointList:
+  case PrimitiveTopology::LineList:
+  case PrimitiveTopology::LineStrip:
+  case PrimitiveTopology::TriangleList:
+  case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::LineListWithAdjacency:
+  case PrimitiveTopology::TriangleListWithAdjacency:
+    llvm_unreachable("splitStripPrimitiveAdjacency only supports the two "
+                     "strip-with-adjacency topologies");
+  }
+  return Split;
+}
