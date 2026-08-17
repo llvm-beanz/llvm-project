@@ -21,17 +21,20 @@
 // completion test asks for (point/primitive counts, coordinate ranges, no
 // gaps) rather than only through image comparison.
 //
-// Scope note: Direct3D/Vulkan hardware tessellators place extra vertices
-// along each edge to match that edge's own (possibly different) outer
-// factor, then stitch a crack-free fan between that boundary ring and the
-// uniformly-subdivided interior. This implementation deliberately stops
-// short of that: the triangle and quad domains subdivide their whole
-// interior uniformly from the inside factor(s) alone (edge factors are
-// still read and validated -- a non-positive factor culls the patch exactly
-// as the full algorithm would -- but do not yet independently perturb
-// boundary spacing). Crack-free non-uniform edge stitching is a documented,
-// mechanical follow-up once a completion test needs adjacent patches with
-// different neighbor-facing factors to tile without a visible seam.
+// Crack-free non-uniform per-edge tessellation: the triangle and quad
+// domains place their boundary vertices from each edge's own outer factor
+// (so two adjacent patches that agree on a shared edge's factor produce
+// identical vertices along it, regardless of their other edges' or their
+// interior's factors), then bridge that boundary ring to a uniformly
+// subdivided interior "core" -- inset strictly inside the boundary, hence
+// never itself a cross-patch cracking concern -- with a standard
+// concentric-ring triangulation that walks both rings by proportional arc
+// length, always advancing whichever ring's next vertex comes first (see
+// `bridgeRings` in Tessellator.cpp). This deliberately does not reproduce
+// either API's exact hardware fractional-vertex placement or its
+// multi-ring interior falloff (FeMe's own normalized rule, as with
+// `computeSegmentCount`) -- only the boundary-matching property a
+// crack-free completion test observes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -144,9 +147,9 @@ uint32_t computeSegmentCount(float Factor, TessPartitioning Partitioning,
                              uint32_t MaxTessFactor = DefaultMaxTessFactor);
 
 /// Generates domain coordinates and connectivity for one patch, per the
-/// file comment's scope note. Returns an empty `TessellatedPatch` (no
-/// points, no indices) when any factor `Factors` reads for \p Domain is
-/// `<= 0`, per `TessFactors`'s own comment.
+/// file comment's crack-free per-edge tessellation note. Returns an empty
+/// `TessellatedPatch` (no points, no indices) when any factor `Factors`
+/// reads for \p Domain is `<= 0`, per `TessFactors`'s own comment.
 TessellatedPatch tessellate(TessellatorDomain Domain,
                             TessPartitioning Partitioning,
                             TessOutputPrimitive OutputPrimitive,
