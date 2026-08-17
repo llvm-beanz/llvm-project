@@ -93,4 +93,16 @@ TEST(PreparedDrawTest, DescribesAnIndexedDraw) {
   EXPECT_EQ(Prepared.Draws[0].VertexOffset, 1);
 }
 
+TEST(PreparedDrawTest, AttachmentViewDefaultsToOneArrayLayer) {
+  AttachmentView Color;
+  EXPECT_EQ(Color.ArrayLayers, 1u);
+}
+
+TEST(PreparedDrawTest, AttachmentViewCanDeclareMultipleArrayLayers) {
+  std::array<uint8_t, 256> Storage{};
+  AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4,
+                       /*ArrayLayers=*/4};
+  EXPECT_EQ(Color.ArrayLayers, 4u);
+}
+
 } // namespace

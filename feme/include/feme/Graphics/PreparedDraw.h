@@ -100,6 +100,14 @@ struct AttachmentView {
   cpu::ResourceFormat Format = cpu::ResourceFormat::Unknown;
   uint32_t Width = 0;
   uint32_t Height = 0;
+  /// The number of array layers `Data` holds (roadmap R34, "layered
+  /// rendering" -- see `feme::graphics::resolveRenderTargetArrayLayer` in
+  /// LayeredRendering.h), each `Width * Height * (bytes per pixel)` bytes,
+  /// stored consecutively layer-major. `1` for a non-layered attachment
+  /// (every draw before R34, and any R34 draw whose pre-raster stages
+  /// write no `RenderTargetArrayIndex` output, since that output is what
+  /// selects a layer other than 0).
+  uint32_t ArrayLayers = 1;
 };
 
 /// The optional depth/stencil attachments a draw tests/writes against
