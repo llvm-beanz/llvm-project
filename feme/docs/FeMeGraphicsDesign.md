@@ -992,12 +992,27 @@ point, structure-of-arrays addressed exactly like a vertex wave, for the
 common shape where a control point depends only on its own input control
 point's attributes. "Workgroup barrier semantics" for *this* phase reduces to
 nothing more than `feme::cpu::CompiledStage::invokePatch` running the whole
-phase to completion before a (not yet built) patch-constant invocation reads
-its output -- a hull shader whose control points cooperate through
-groupshared memory *within* the control-point phase itself still needs a
-real group-sync barrier, which needs `feme::cpu::EntryWrapperPass`'s
-barrier-region-splitting machinery generalized to this batch ABI, not yet
-done (diagnosed rather than silently mishandled, see HullWrapper.cpp).
+phase to completion before a patch-constant invocation reads its output -- a
+hull shader whose control points cooperate through groupshared memory
+*within* the control-point phase itself still needs a real group-sync
+barrier, which needs `feme::cpu::EntryWrapperPass`'s barrier-region-splitting
+machinery generalized to this batch ABI, not yet done (diagnosed rather than
+silently mishandled, see HullWrapper.cpp).
+
+Landed for the patch-constant phase, added after R34's initial landing
+(`feme::cpu::PatchConstantWrapperPass`, PatchConstantWrapper.h/.cpp): a
+single, non-batched invocation per patch that reads any (not just "its own")
+output control point of the completed `OutputPatch` and writes tessellation
+factors/patch constants to unbatched per-patch storage
+(`FemePatchConstantArgs`). `feme::cpu::isPatchConstantPhase` (HullPhase.h)
+discriminates a hull-stage function's two phases -- Direct3D/Vulkan give the
+patch-constant function no stage of its own -- by checking for a
+`SignatureDirection::PatchOutput` element, which only the patch-constant
+phase ever writes. A group-sync barrier is diagnosed here too, for a simpler
+reason than the control-point phase's own: a single invocation has no
+sibling to synchronize with. Deferred: an `InputPatch` parameter (the
+original, pre-control-stage input control points) is not modeled, only the
+completed `OutputPatch` (see PatchConstantWrapper.cpp's own scope note).
 
 The geometry wrapper receives primitive records and owns a bounded stream
 builder per invocation. Emission is side-effecting even when no framebuffer
