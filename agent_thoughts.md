@@ -18191,3 +18191,119 @@ lucky-accident, order-independent archive re-scan.
 No design deviation: this is a build-system dependency-declaration fix,
 not a behavioral or architectural change, so `FeMeVulkanDesign.md` was not
 touched.
+
+# Agent thoughts: adding an add_feme_library() CMake macro
+
+## The problem
+
+Two related CMake smells, both pointed out in the task:
+
+1. `FeMeVulkanCore` (`feme/lib/Vulkan/CMakeLists.txt`) was declared with a
+   bare `add_library(FeMeVulkanCore STATIC ...)`. Unlike every other
+   in-tree library, that bypasses all of LLVM's build-configuration
+   plumbing that `add_llvm_library()`/`add_mlir_library()` normally provide
+   -- LTO, sanitizer instrumentation flags, unity builds, install rules,
+   etc. -- none of it applies to this one target.
+2. Every other feme library (`FeMeCore`, `FeMeDriver`, `FeMeGraphics`, the
+   Import/Export/Translate/Transforms/Conversion libraries, `FeMeTargetCPU`,
+   19 in total) was declared via `add_mlir_library`. That's an MLIR-internal
+   macro, and using it for feme's own libraries has a real (if minor) cost:
+   `add_mlir_library`'s install path
+   (`mlir/cmake/modules/AddMLIR.cmake:add_mlir_library_install`) calls
+   `get_target_export_arg(name MLIR ...)`, which folds every target into
+   MLIR's own `MLIRTargets` export set and `MLIR_ALL_LIBS`/`MLIR_EXPORTS`
+   global-property bookkeeping (confirmed this is really wired up end to
+   end: `mlir/cmake/modules/CMakeLists.txt` does
+   `export(TARGETS ${MLIR_EXPORTS} FILE .../MLIRTargets.cmake)` and
+   `install_distribution_exports(MLIR)`). An installed MLIR package would
+   end up advertising feme's own libraries as MLIR's.
+
+## The fix
+
+Looked at how MLIR and Clang each solve exactly this problem for their own
+libraries -- `mlir/cmake/modules/AddMLIR.cmake`'s `add_mlir_library()` and
+`clang/cmake/modules/AddClang.cmake`'s `add_clang_library()` -- both are
+thin wrappers around LLVM's own `llvm_add_library()` that:
+- resolve the library type (SHARED vs. STATIC vs. BUILD_SHARED_LIBS-derived,
+  plus an OBJECT library on the side for IDE generators without proper
+  object-library support),
+- forward LINK_COMPONENTS/LINK_LIBS/DEPENDS/ADDITIONAL_HEADERS straight to
+  `llvm_add_library()` (which already understands all of them), and
+- do their own project-named install/export bookkeeping afterward.
+
+`add_mlir_library` additionally supports aggregation (`ENABLE_AGGREGATION`,
+for things like `libMLIR-C.so`) that feme doesn't need at all -- none of
+feme's 19 converted call sites used anything beyond `LINK_COMPONENTS` and
+`LINK_LIBS PUBLIC`, confirmed by grepping every `add_mlir_library(...)` call
+site in `feme/` before touching anything. So the new macro follows Clang's
+simpler shape rather than reimplementing MLIR's aggregation machinery.
+
+Added `feme/cmake/modules/AddFeMe.cmake` with `add_feme_library()`,
+mirroring that pattern with its own `FeMe`-named export set
+(`get_target_export_arg(name FeMe ...)` instead of hardcoding `MLIR`), and
+wired it into `feme/CMakeLists.txt` via
+`list(APPEND CMAKE_MODULE_PATH ...); include(AddFeMe)`, right after the
+existing `include_directories()` calls and before `add_subdirectory(lib)`.
+
+Left `add_mlir_dialect_library`/`add_mlir_translation_library` alone for
+`FeMeDXSADialect`/`FeMeTargetDXSA` -- confirmed those two really are
+MLIR-ecosystem registrations (`add_mlir_dialect_library` appends to
+`MLIR_DIALECT_LIBS` and unconditionally depends on `mlir-headers`;
+`add_mlir_translation_library` similarly appends to
+`MLIR_TRANSLATION_LIBS`), not just a convenient wrapper feme happened to
+reach for, so converting them would lose real MLIR bookkeeping that other
+in-tree MLIR-dependent tooling may reasonably expect to find.
+
+### FeMeVulkanCore specifics
+
+Converted `add_library(FeMeVulkanCore STATIC ...)` to
+`add_feme_library(FeMeVulkanCore STATIC ...)`, keeping `STATIC` explicit
+(matches the original intent: unit tests link this directly, so it must
+never become a shared object regardless of `BUILD_SHARED_LIBS`) and adding:
+- `DISABLE_INSTALL`, to preserve its previous never-installed behavior (it
+  was never installed as a bare `add_library` target either -- it's an
+  internal component linked into `libfeme_vulkan.so` and the unit tests, not
+  a standalone deliverable).
+- `PARTIAL_SOURCES_INTENDED`, because `llvm_add_library` (unlike the bare
+  `add_library` it replaces) enforces LLVM's "exactly one target's sources
+  per directory" convention via `llvm_check_source_file_list`, and this
+  directory also builds the separate `feme_vulkan` target from
+  `VulkanICD.cpp`. Found this by just trying the conversion first and
+  reading the resulting CMake error, rather than guessing up front.
+- Replaced the manual `llvm_map_components_to_libnames(... Support
+  TargetParser)` + `target_link_libraries(... PRIVATE ...)` pair (added in
+  a previous session, see the immediately preceding "vk_gen_entrypoints.py"
+  heading above) with plain `LINK_COMPONENTS Support TargetParser`, matching
+  every other feme library's style. This does change those two components
+  from PRIVATE to PUBLIC linkage (STATIC libraries default to PUBLIC in
+  `llvm_add_library`), but that only affects transitive propagation to
+  further consumers, not `libFeMeVulkanCore.a`'s own contents or the
+  single-pass-linker ordering fix that was the point of declaring the
+  dependency directly in the first place.
+
+Left the SHARED `feme_vulkan` ICD target itself as a bare `add_library`:
+its own top-of-file comment already explains, correctly, that it needs full
+manual control over hidden visibility and the version-script link flag in a
+way `add_llvm_library`-family macros don't support -- that's a deliberate,
+justified exception, not the same "weird choice" the task called out for
+`FeMeVulkanCore` and the `add_mlir_library` call sites.
+
+## Verification
+
+- Reconfigured after each change (`cmake .` in the existing
+  `LLVM_ENABLE_ASSERTIONS=ON`, ccache-enabled build tree) and fixed the
+  `PARTIAL_SOURCES_INTENDED` issue this surfaced.
+- Built `FeMeVulkanCore`, `feme_vulkan`, and `FeMeVulkanTests` individually
+  after the Vulkan conversion; ran `FeMeVulkanTests` directly (21/21 pass).
+- After converting all 19 `add_mlir_library` call sites, ran the full
+  `check-feme` target end to end (which depends on `feme-test-depends`,
+  building every feme tool/library/unittest binary first, including
+  `FeMeUnitTests`, the gtest aggregate that `check-feme`'s lit run also
+  exercises via `feme/test/Unit/`): 1249/1251 discovered tests pass, 2
+  unsupported (pre-existing, unrelated).
+
+No design deviation: this is purely a build-system macro
+introduction/call-site migration, not a behavioral or architectural change,
+so no `*Design.md` file needed updating beyond documenting the new
+`add_feme_library` macro itself in `feme/docs/Design.md`'s "Build System
+Integration" and "Directory / Library Layout" sections.
