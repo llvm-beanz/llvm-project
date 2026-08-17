@@ -369,6 +369,17 @@ Error CompiledStage::invokeDomain(const PreparedDomainBatch &Prepared) const {
   return Error::success();
 }
 
+Error CompiledStage::invokeGeometry(
+    const PreparedGeometryBatch &Prepared) const {
+  if (Stage != ShaderStage::Geometry)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "invokeGeometry is only legal for geometry stages");
+  FemeGeometryArgs Args = Prepared.args();
+  reinterpret_cast<GeometryEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
 StageArtifactInfo CompiledStage::getArtifactInfo() const {
   StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(Info);
   Artifact.Stage = Stage;

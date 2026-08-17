@@ -365,4 +365,71 @@ FemeDomainArgs PreparedDomainBatch::args() const {
   return Args;
 }
 
+PreparedGeometryBatch::PreparedGeometryBatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    ArrayRef<FemeImageDescriptor> ImageHeap,
+    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
+    const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
+    ArrayRef<FemeGeometryInvocation> Invocations, uint32_t VerticesPerPrimitive,
+    uint32_t MaxVerticesPerStream, uint32_t OutputScalarsPerVertex,
+    MutableArrayRef<float> EmittedVertices,
+    MutableArrayRef<uint32_t> EmittedVertexCounts,
+    MutableArrayRef<uint8_t> StripEndsAfter)
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
+      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+      InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
+      Outputs(Outputs), Invocations(Invocations),
+      VerticesPerPrimitive(VerticesPerPrimitive),
+      MaxVerticesPerStream(MaxVerticesPerStream),
+      OutputScalarsPerVertex(OutputScalarsPerVertex),
+      EmittedVertices(EmittedVertices),
+      EmittedVertexCounts(EmittedVertexCounts), StripEndsAfter(StripEndsAfter) {
+  ShaderResources.ResourceHeap = this->ResourceHeap.data();
+  ShaderResources.ResourceHeapCount =
+      static_cast<uint32_t>(this->ResourceHeap.size());
+  ShaderResources.ImageHeap = this->ImageHeap.data();
+  ShaderResources.ImageHeapCount =
+      static_cast<uint32_t>(this->ImageHeap.size());
+  ShaderResources.SamplerHeap = this->SamplerHeap.data();
+  ShaderResources.SamplerHeapCount =
+      static_cast<uint32_t>(this->SamplerHeap.size());
+  ShaderResources.RootConstants = this->RootConstants.data();
+  ShaderResources.RootConstantSize =
+      static_cast<uint32_t>(this->RootConstants.size());
+}
+
+PreparedGeometryBatch
+PreparedGeometryBatch::create(const ResourceInfo &Info,
+                              const GeometryResources &Resources) {
+  return PreparedGeometryBatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
+      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
+      Resources.Outputs, Resources.Invocations, Resources.VerticesPerPrimitive,
+      Resources.MaxVerticesPerStream, Resources.OutputScalarsPerVertex,
+      Resources.EmittedVertices, Resources.EmittedVertexCounts,
+      Resources.StripEndsAfter);
+}
+
+FemeGeometryArgs PreparedGeometryBatch::args() const {
+  FemeGeometryArgs Args{};
+  Args.AbiVersion = StageArgsAbiVersion;
+  Args.PrimitiveCount = static_cast<uint32_t>(Invocations.size());
+  Args.VerticesPerPrimitive = VerticesPerPrimitive;
+  Args.MaxVerticesPerStream = MaxVerticesPerStream;
+  Args.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Args.Resources = &ShaderResources;
+  Args.InputLayout = InputLayout;
+  Args.Inputs = Inputs;
+  Args.OutputLayout = OutputLayout;
+  Args.Outputs = Outputs;
+  Args.Invocations = Invocations.data();
+  Args.EmittedVertices = EmittedVertices.data();
+  Args.EmittedVertexCounts = EmittedVertexCounts.data();
+  Args.StripEndsAfter = StripEndsAfter.data();
+  return Args;
+}
+
 } // namespace feme::cpu

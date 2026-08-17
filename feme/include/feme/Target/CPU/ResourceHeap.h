@@ -56,6 +56,7 @@ using FragmentEntryPointFn = void (*)(const FemeFragmentArgs *);
 using PatchEntryPointFn = void (*)(const FemePatchArgs *);
 using PatchConstantEntryPointFn = void (*)(const FemePatchConstantArgs *);
 using DomainEntryPointFn = void (*)(const FemeDomainArgs *);
+using GeometryEntryPointFn = void (*)(const FemeGeometryArgs *);
 
 class PreparedDispatch {
 public:
@@ -352,6 +353,84 @@ private:
   void *Outputs = nullptr;
   llvm::ArrayRef<FemeDomainInvocation> Invocations;
   uint32_t OutputControlPointCount = 0;
+};
+
+/// Caller-owned storage for one geometry batch (roadmap R34's continuation,
+/// closing its "geometry wrapper" open item): the assembled input
+/// primitives' vertex attributes this batch reads, per-invocation output
+/// scratch storage, and the flat, bounded `emit`/`cut` record storage
+/// `feme::cpu::GeometryWrapperPass` lowers `StageOpKind::StreamEmit`/
+/// `StreamCut` to write. See `FemeGeometryArgs`'s own comment for why output
+/// is recorded this way rather than through one fixed per-invocation result
+/// slot, and `feme::graphics::collectGeometryStreams`
+/// (feme/include/feme/Graphics/GeometryStreamCollection.h) for how a caller
+/// turns a completed batch's flat records back into real
+/// `feme::graphics::GeometryStreamBuilder`s.
+struct GeometryResources {
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  llvm::ArrayRef<FemeGeometryInvocation> Invocations;
+  uint32_t VerticesPerPrimitive = 0;
+  uint32_t MaxVerticesPerStream = 0;
+  uint32_t OutputScalarsPerVertex = 0;
+  /// `PrimitiveCount * MaxVerticesPerStream * OutputScalarsPerVertex`
+  /// elements, zero-initialized by the caller before `invokeGeometry`.
+  llvm::MutableArrayRef<float> EmittedVertices;
+  /// `PrimitiveCount` elements, zero-initialized by the caller.
+  llvm::MutableArrayRef<uint32_t> EmittedVertexCounts;
+  /// `PrimitiveCount * MaxVerticesPerStream` elements, zero-initialized by
+  /// the caller.
+  llvm::MutableArrayRef<uint8_t> StripEndsAfter;
+};
+
+/// One prepared geometry batch: materialized resources plus borrowed stage
+/// and stream storage. The caller owns every referenced block and must keep
+/// them alive through the `invokeGeometry` call that consumes this object.
+class PreparedGeometryBatch {
+public:
+  static PreparedGeometryBatch create(const ResourceInfo &Info,
+                                      const GeometryResources &Resources);
+
+  FemeGeometryArgs args() const;
+
+private:
+  PreparedGeometryBatch(std::vector<FemeDescriptor> ResourceHeap,
+                        llvm::ArrayRef<FemeImageDescriptor> ImageHeap,
+                        llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+                        llvm::ArrayRef<uint8_t> RootConstants,
+                        const FemeStageLayout *InputLayout, const void *Inputs,
+                        const FemeStageLayout *OutputLayout, void *Outputs,
+                        llvm::ArrayRef<FemeGeometryInvocation> Invocations,
+                        uint32_t VerticesPerPrimitive,
+                        uint32_t MaxVerticesPerStream,
+                        uint32_t OutputScalarsPerVertex,
+                        llvm::MutableArrayRef<float> EmittedVertices,
+                        llvm::MutableArrayRef<uint32_t> EmittedVertexCounts,
+                        llvm::MutableArrayRef<uint8_t> StripEndsAfter);
+
+  std::vector<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  FemeShaderResources ShaderResources{};
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  llvm::ArrayRef<FemeGeometryInvocation> Invocations;
+  uint32_t VerticesPerPrimitive = 0;
+  uint32_t MaxVerticesPerStream = 0;
+  uint32_t OutputScalarsPerVertex = 0;
+  llvm::MutableArrayRef<float> EmittedVertices;
+  llvm::MutableArrayRef<uint32_t> EmittedVertexCounts;
+  llvm::MutableArrayRef<uint8_t> StripEndsAfter;
 };
 
 } // namespace feme::cpu
