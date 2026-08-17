@@ -1010,9 +1010,14 @@ patch-constant function no stage of its own -- by checking for a
 `SignatureDirection::PatchOutput` element, which only the patch-constant
 phase ever writes. A group-sync barrier is diagnosed here too, for a simpler
 reason than the control-point phase's own: a single invocation has no
-sibling to synchronize with. Deferred: an `InputPatch` parameter (the
-original, pre-control-stage input control points) is not modeled, only the
-completed `OutputPatch` (see PatchConstantWrapper.cpp's own scope note).
+sibling to synchronize with. An `InputPatch` parameter (the original,
+pre-control-stage input control points, as opposed to the completed
+`OutputPatch`) is now modeled too, in a further follow-up:
+`FemePatchConstantArgs` grows a second, independent structure-of-arrays
+input block (`InputPatch`/`InputPatchLayout`), and
+`SignatureElement::FromInputPatch` on a `Direction::Input` element tells
+`lowerPatchConstantInputLoad` which of the two blocks a given
+`feme.stage.input.load` addresses.
 
 The geometry wrapper receives primitive records and owns a bounded stream
 builder per invocation. Emission is side-effecting even when no framebuffer
