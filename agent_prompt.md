@@ -23,56 +23,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue the R34 implementation from the roadmap document?
+Can you implement V0 from the roadmap document?
 
-> Geometry/hull/domain signatures and wrappers, patch storage, control-stage
-> barriers, tessellator state and domain-coordinate generation, bounded geometry
-> streams, stream output, adjacency, layered rendering (status: the host-side,
-> standalone-tested core lands -- the signature/stage-op model
-> (`SignatureSystemValue::TessFactorEdge`/`TessFactorInside`/`DomainLocation`/`OutputControlPointID`,
-> `StageOpKind::StreamEmit`/`StreamCut`, patch input/output reusing the existing
-> `InputLoad`/`OutputStore` ops), the fixed-function tessellator
-> (`feme::graphics::tessellate`, new Tessellator.h, generating domain
-> coordinates/connectivity for isoline/triangle/quad domains across every
-> partitioning/output-primitive combination; triangle/quad interiors subdivide
-> uniformly from the largest/inside factor rather than placing per-edge boundary
-> vertices and stitching a crack-free fan, a documented scope note in its own
-> file comment), bounded patch storage (`feme::graphics::PatchRecord`, new
-> Patch.h -- control-stage barriers need no new code, since `feme::cpu`'s
-> groupshared/barrier lowering is already stage-agnostic), the four adjacency
-> `PrimitiveTopology` variants plus list- and strip-topology adjacency splitting
-> (Pipeline.h's `splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`), a
-> bounded per-invocation multi-stream geometry builder
-> (`feme::graphics::GeometryStreamBuilder`, new GeometryStream.h) retaining
-> strip boundaries/emission order for stream output and rasterization to share,
-> and layered-rendering array-layer selection that discards rather than clamps
-> an out-of-range index (`feme::graphics::resolveRenderTargetArrayLayer`, new
-> LayeredRendering.h, plus `AttachmentView::ArrayLayers`). Deferred, each
-> documented in its own file's comment: compiling a real hull/domain/geometry
-> entry point through the CPU lowering pipeline into an invokable
-> `CompiledStage` batch (neither stage has a
-> `VertexWrapperPass`/`FragmentWrapperPass` counterpart yet) and wiring the
-> result into `executeDraws`/`feme-render`; SIMD-lane stream-range reservation
-> via checked prefix sums; and crack-free non-uniform per-edge tessellation.
-> `unittests/Graphics/{Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp`
-> and `PipelineTest.cpp`'s/`SignatureTest.cpp`'s/`StageOpsTest.cpp`'s new cases
-> cover today's scope; `ninja check-feme` (assertions-enabled, ccache build)
-> passes in full before and after -- G5 is not yet complete, since no
-> image-comparison completion test exists) (see: §1.8.5)
-
-Open issues form the last agent task:
-
-> 1. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
->    the control-point batch ABI, for a hull shader whose control points
->    cooperate through groupshared memory before every one finishes. Unchanged
->    from every prior session's list.
-> 2. Wiring the compiled hull, domain, and (now) geometry stages into
->    `executeDraws`/`feme-render`/the scene YAML: this is now the *only*
->    remaining item blocking G5's image-comparison completion test, since all
->    four wrapper passes exist. It still needs host-side glue that does not
->    exist: `feme::graphics::PatchRecord` has no storage for the original
->    input control points, nothing marshals a tessellator's `DomainPoint`
->    output into a `FemeDomainInvocation` array or a primitive's assembled
->    vertices into a `FemeGeometryInvocation`/`Inputs` block, and nothing
->    chains the four stage invocations (hull control-point phase,
->    patch-constant phase, domain, geometry) together per patch/primitive.
+> Loader-visible skeleton: optional Vulkan-Headers dependency, `vk.xml`
+> entrypoint generator, hidden-visibility ICD with a version script and
+> development manifest, instance/physical device/device/compute queue, truthful
+> properties and limits, loader smoke and two-ICD coexistence tests
