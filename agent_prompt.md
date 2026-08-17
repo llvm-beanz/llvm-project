@@ -23,9 +23,16 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement V0 from the roadmap document?
+Building the current branch against the latest VulkanHeaders from GitHub
+produces this error:
 
-> Loader-visible skeleton: optional Vulkan-Headers dependency, `vk.xml`
-> entrypoint generator, hidden-visibility ICD with a version script and
-> development manifest, instance/physical device/device/compute queue, truthful
-> properties and limits, loader smoke and two-ICD coexistence tests
+```
+[1/375] Generating FeMe Vulkan ICD entrypoint table
+FAILED: tools/feme/lib/Vulkan/VulkanEntrypoints.inc /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/lib/Vulkan/VulkanEntrypoints.inc
+cd /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/lib/Vulkan && /Applications/Xcode.app/Contents/Developer/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9 /Users/cbieneman/dev/llvm-project/feme/utils/vk_gen_entrypoints.py /Users/cbieneman/dev/Vulkan-Headers/build/install/share/vulkan/registry/vk.xml /Users/cbieneman/dev/llvm-project/build-rel/tools/feme/lib/Vulkan/VulkanEntrypoints.inc --implemented /Users/cbieneman/dev/llvm-project/feme/lib/Vulkan/ImplementedEntrypoints.txt
+vk_gen_entrypoints.py: --implemented lists commands that are not core Vulkan 1.0/1.1 entrypoints: vkCreateDevice, vkCreateInstance, vkDestroyDevice, vkDestroyInstance, vkDeviceWaitIdle, vkEnumerateDeviceExtensionProperties, vkEnumerateDeviceLayerProperties, vkEnumerateInstanceExtensionProperties, vkEnumerateInstanceLayerProperties, vkEnumerateInstanceVersion, vkEnumeratePhysicalDevices, vkGetDeviceProcAddr, vkGetDeviceQueue, vkGetDeviceQueue2, vkGetInstanceProcAddr, vkGetPhysicalDeviceFeatures, vkGetPhysicalDeviceFeatures2, vkGetPhysicalDeviceFormatProperties, vkGetPhysicalDeviceFormatProperties2, vkGetPhysicalDeviceImageFormatProperties, vkGetPhysicalDeviceMemoryProperties, vkGetPhysicalDeviceMemoryProperties2, vkGetPhysicalDeviceProperties, vkGetPhysicalDeviceProperties2, vkGetPhysicalDeviceQueueFamilyProperties, vkGetPhysicalDeviceQueueFamilyProperties2, vkGetPhysicalDeviceSparseImageFormatProperties
+[18/375] Building CXX object lib/ObjCopy/CMakeFiles/LLVMObjCopy.dir/ELF/ELFObject.cpp.o
+ninja: build stopped: subcommand failed.
+```
+
+Can you fix this?
