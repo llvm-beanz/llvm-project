@@ -16545,3 +16545,98 @@ new/modified file before each commit.
 I logged all four in Roadmap.md's R34 row and FeMeGraphicsDesign.md's G5
 status note so a future session (mine or someone else's) doesn't have to
 rediscover the gap by reading code.
+
+# Agent thoughts: continuing R34 (strip-topology adjacency splitting)
+
+## What was asked and the scoping decision I made
+
+The prompt for this session was "continue the R34 implementation from the
+roadmap", quoting R34's own status text verbatim -- including the closing
+callout that `VertexWrapperPass`'s hull/domain/geometry counterpart
+(batch-ABI layout, SIMDize/wave lowering for `feme.stage.stream.*` and
+patch-storage ops, `CompiledStage::invokePatch`/`invokeDomain`/
+`invokeGeometry`) is "the single largest remaining piece."
+
+I read that piece in full before deciding what to do: `VertexWrapper.cpp`
+and `FragmentWrapper.cpp` are 571 and 701 lines respectively for *one*
+stage each, built on top of `EntryWrapper.cpp` (1644 lines) and
+`StageArgsLayout`/`SIMDize`/`WaveLowering` machinery that would all need
+new stream/patch-storage-access lowering support. Doing that for three new
+stages (hull, domain, geometry) at the quality bar this codebase holds
+itself to -- every wrapper has full standalone unit tests plus IR-level
+`.ll` regression tests, and a batch-ABI mistake here is exactly the kind of
+"plausible but wrong images" bug the design explicitly calls out as
+unacceptable -- is a multi-thousand-line, multi-week undertaking. Attempting
+it in one session at typical review depth would produce exactly the kind
+of rushed, undertested code this repository's own conventions (and the
+"Break your changes into small... individually testable" instruction) argue
+against.
+
+So rather than a shallow first cut at the large piece, I picked a genuinely
+separable, already-identified item from R34's own deferred list that I
+could implement completely and test to the same bar as everything else in
+this codebase: **strip-topology adjacency splitting** in
+`feme/include/feme/Graphics/Pipeline.h` / `lib/Graphics/Pipeline.cpp`. The
+R34 status text explicitly called this out as "a documented follow-up"
+separate from the wrapper work, and it has no dependency on any compiled
+stage existing -- it is pure host-side index-buffer arithmetic, exactly
+the kind of "standalone-tested core" R34's own landed pieces already are.
+
+## What I built
+
+- `getStripPrimitiveCount(Topology, IndexCount)`: how many primitives a
+  `LineStripWithAdjacency`/`TriangleStripWithAdjacency` index run produces,
+  rejecting index counts that don't describe a whole number of primitives
+  (an odd `IndexCount - 4` for a triangle strip) by returning 0 rather than
+  guessing.
+- `splitStripPrimitiveAdjacency(Topology, FetchedIndices, PrimitiveIndex)`:
+  splits one primitive's window out of the full strip, using the same
+  `SplitPrimitiveAdjacency` shape (`Primitive`/`Adjacent`) the existing
+  list-topology splitter already returns, so callers that eventually
+  consume both (the still-unwritten adjacency-aware vertex/index fetch in
+  `Executor.cpp`) share one result type.
+- I verified the vertex ordering against Microsoft's own
+  "Primitive Topologies" documentation ("Winding Direction and Leading
+  Vertex Positions": line-strip-with-adjacency leading vertices are
+  1, 2, 3, ...; triangle-strip-with-adjacency leading vertices are
+  0, 2, 4, ...) rather than guessing at the sliding-window offsets, and
+  encoded that reasoning in the header comment so a future reader does not
+  have to re-derive it from a diagram.
+- Unit tests in `PipelineTest.cpp` cover both primitive-count edge cases
+  (too few indices, an odd remainder) and both topologies' index splits
+  across two consecutive (overlapping) primitives, checking the window
+  actually slides by 1/2 as documented rather than just checking one
+  primitive in isolation.
+
+## Documentation updates
+
+Updated Roadmap.md's R34 row and FeMeGraphicsDesign.md's G5 status
+paragraph in place, following this codebase's convention of correcting
+status prose rather than leaving stale "documented follow-up" language
+once the follow-up lands: the deferred list under G5 no longer mentions
+strip-adjacency splitting, only "crack-free non-uniform per-edge
+tessellation" and the wrapper/`CompiledStage` piece remain.
+
+## Verification
+
+`ninja check-feme` (the pre-existing `build/` directory: `ccache` compiler
+launcher, `LLVM_ENABLE_ASSERTIONS=ON` already configured) passed in full
+before this change (1181/1183 discovered tests passing, 2 unsupported) and
+after (1185/1187, the delta being the 4 new `PipelineTest.cpp` cases).
+`clang-format --dry-run --Werror` was run against every changed file before
+committing.
+
+## What's still open (unchanged from the prior R34 session's list, minus item 3's second half)
+
+1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
+   `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry` -- still the
+   single largest remaining piece, deliberately not attempted here for the
+   reasons above. A future session should budget for it as its own
+   multi-commit body of work, likely starting with the hull/control stage
+   alone (structurally closest to compute, since barriers already work
+   unmodified) before domain and geometry.
+2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
+3. Crack-free non-uniform per-edge tessellation (real per-edge boundary
+   vertex placement + fan stitching).
+4. SIMD-lane stream-range reservation for `GeometryStreamBuilder`, which
+   still needs a real widened geometry invocation (item 1) to drive it.
