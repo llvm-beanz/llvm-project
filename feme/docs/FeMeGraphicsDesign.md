@@ -986,6 +986,19 @@ generated domain coordinates and use the same structure-of-arrays output
 layout as vertex waves. Patch records never outlive the draw work that consumes
 them.
 
+Landed for the control-point phase (`feme::cpu::HullWrapperPass`,
+HullWrapper.h/.cpp, see G5 above): batching one invocation per output control
+point, structure-of-arrays addressed exactly like a vertex wave, for the
+common shape where a control point depends only on its own input control
+point's attributes. "Workgroup barrier semantics" for *this* phase reduces to
+nothing more than `feme::cpu::CompiledStage::invokePatch` running the whole
+phase to completion before a (not yet built) patch-constant invocation reads
+its output -- a hull shader whose control points cooperate through
+groupshared memory *within* the control-point phase itself still needs a
+real group-sync barrier, which needs `feme::cpu::EntryWrapperPass`'s
+barrier-region-splitting machinery generalized to this batch ABI, not yet
+done (diagnosed rather than silently mishandled, see HullWrapper.cpp).
+
 The geometry wrapper receives primitive records and owns a bounded stream
 builder per invocation. Emission is side-effecting even when no framebuffer
 write occurs, so it consumes the current side-effect mask. SIMD lanes reserve
@@ -1065,15 +1078,21 @@ struct FemeFragmentArgs {
   uint32_t QuadCount;
 };
 
-struct FemePatchArgs;
 struct FemeMeshArgs;
 struct FemeRayInvocation;
 struct FemeContinuationFrame;
 ```
 
-These are shape sketches, not final field layouts. The implementation
-milestone settles exact C-compatible definitions, explicit sizes, alignment,
-and reserved fields after two end-to-end prototype shaders establish the data
+`FemePatchArgs` has since been settled (roadmap R34's continuation) as the
+control-point phase's real, C-compatible ABI struct -- see
+feme/include/feme/Target/CPU/RuntimeABI.h's own comment for its final field
+layout, which follows `FemeVertexArgs`'s shape closely (an
+`OutputControlPointCount` in place of an explicit per-invocation record
+array, since a control point's identity is its own index).
+`FemeMeshArgs`/`FemeRayInvocation`/`FemeContinuationFrame` remain shape
+sketches, not final field layouts. The implementation milestone settles
+their exact C-compatible definitions, explicit sizes, alignment, and
+reserved fields after two end-to-end prototype shaders establish the data
 actually required. All pointer ranges are accompanied by validated counts or
 layouts; compiled code never follows API object pointers.
 
@@ -1959,20 +1978,41 @@ capacity, and forcing a strip boundary at every lane edge even when a
 lane's own trailing strip was left open; and `feme::graphics::
 resolveRenderTargetArrayLayer`/`AttachmentView::ArrayLayers`
 (LayeredRendering.h/PreparedDraw.h), layer selection that discards (rather
-than clamps) an out-of-range index. Deferred, documented in its own file's
-comment: compiling a real hull/domain/geometry entry point through
-the CPU lowering pipeline into an invokable `CompiledStage` batch (the
-`VertexWrapperPass`/`FragmentWrapperPass` counterpart neither stage has
-yet) and wiring the result into `executeDraws`/`feme-render` -- SIMD-lane
+than clamps) an out-of-range index; and, added after R34's initial landing to
+begin closing its largest deferred item, `feme::cpu::HullWrapperPass`
+(HullWrapper.h/.cpp) plus `FemePatchArgs`/`PreparedPatchBatch`/
+`CompiledStage::invokePatch`: the control-point phase of a real hull entry
+point compiled through the CPU lowering pipeline into an invokable batch, for
+the common per-control-point-independent shape (each control point reads
+only its own input control point's attributes, addressed by
+`StageLayoutSystemValue::OutputControlPointID`). This phase alone needs none
+of `EntryWrapperPass`'s barrier-region-splitting machinery: the
+patch-constant function is a separate compiled entry receiving the
+*completed* `OutputPatch` this phase produces, so the phase boundary itself
+-- a plain sequential call from `CompiledStage::invokePatch` -- is the only
+synchronization a hull shader whose control points are otherwise independent
+needs. Two shapes remain diagnosed rather than silently mishandled: a control
+point indexing a sibling control point's input (this milestone's wrapper
+always addresses stage storage using the invoking lane's own flat invocation
+index, exactly like `VertexWrapperPass`'s single-vertex-per-invocation
+model), and a group-sync barrier within the phase (needed only by a control
+point that must read a sibling's *output*, which requires generalizing
+`EntryWrapperPass`'s barrier-splitting machinery to this batch ABI -- not yet
+done). Deferred, documented in its own file's comment: the patch-constant
+function itself (no ABI or wrapper yet), the domain and geometry wrappers
+(`CompiledStage::invokeDomain`/`invokeGeometry` still do not exist), and
+wiring any of this into `executeDraws`/`feme-render` -- SIMD-lane
 stream-range reservation no longer waits on this, since
 `mergeGeometryStreamsInLaneOrder` is a standalone, host-side algorithm on
 top of the existing per-invocation builder, but *driving* it from a real
 widened geometry invocation still does. (Crack-free non-uniform per-edge
 tessellation, previously deferred here, was added after R34's initial
 landing -- see the tessellator's own comment above.) `unittests/Graphics/
-{Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp` and
-`PipelineTest.cpp`'s adjacency cases (including the new strip-splitting
-cases) cover today's scope; `ninja check-feme`
+{Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp`,
+`unittests/Transforms/CPU/HullWrapperTest.cpp`,
+`unittests/Target/CPU/CompiledStageTest.cpp`'s `InvokePatchRunsStageAwarePath`
+case, and `PipelineTest.cpp`'s adjacency cases (including the new
+strip-splitting cases) cover today's scope; `ninja check-feme`
 (assertions-enabled, ccache build) passes in full before and after.
 
 ### G6: Amplification and mesh shading
