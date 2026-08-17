@@ -12,6 +12,7 @@ add_feme_unittest(FeMeTransformsCPUTests
   BoundResourceNormalizationTest.cpp
   BuiltinCallsTest.cpp
   CFGGenTest.cpp
+  DomainWrapperTest.cpp
   EntryWrapperTest.cpp
   FragmentWrapperTest.cpp
   GroupSharedInfoTest.cpp

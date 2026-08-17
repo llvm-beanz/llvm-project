@@ -11,6 +11,7 @@
 #include "feme/Core/ShaderStage.h"
 #include "feme/Target/CPU/RuntimeCPU.h"
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
+#include "feme/Transforms/CPU/DomainWrapper.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
 #include "feme/Transforms/CPU/FragmentWrapper.h"
 #include "feme/Transforms/CPU/HullWrapper.h"
@@ -324,8 +325,11 @@ Expected<PipelineResult> runPipeline(Module &M,
       if (Error E = runAndCheck("wrapping", PatchConstantWrapperPass()))
         return std::move(E);
       break;
-    case feme::ShaderStage::Geometry:
     case feme::ShaderStage::Domain:
+      if (Error E = runAndCheck("wrapping", DomainWrapperPass()))
+        return std::move(E);
+      break;
+    case feme::ShaderStage::Geometry:
     case feme::ShaderStage::Amplification:
     case feme::ShaderStage::Mesh:
     case feme::ShaderStage::Library:

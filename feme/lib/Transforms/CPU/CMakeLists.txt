@@ -3,6 +3,7 @@ add_mlir_library(FeMeTransformsCPU
   BoundResourceNormalization.cpp
   BuiltinCalls.cpp
   CFGGen.cpp
+  DomainWrapper.cpp
   EntryWrapper.cpp
   FragmentWrapper.cpp
   GroupShared.cpp
