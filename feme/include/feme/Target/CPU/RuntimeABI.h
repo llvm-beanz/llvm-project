@@ -14,7 +14,9 @@
 // (`FemeImageDescriptor`, `FemeSamplerDescriptor`), and roadmap R34's
 // control-stage control-point batch ABI (`FemePatchArgs`) and, added after
 // R34's initial landing, the patch-constant phase's own single-invocation
-// batch ABI (`FemePatchConstantArgs`), plus the
+// batch ABI (`FemePatchConstantArgs`), the domain/evaluation stage's
+// per-domain-point batch ABI (`FemeDomainArgs`), and the geometry stage's
+// per-primitive batch ABI (`FemeGeometryArgs`), plus the
 // descriptor/layout/system-value enumerators that give those structs' fields
 // meaning. R29 also folded `FemeShaderResources` into `FemeDispatchArgs` and
 // retyped `FemeShaderResources::SamplerHeap`, breaking the ABI on purpose
@@ -815,6 +817,107 @@ struct FemeDomainArgs {
   /// Per-invocation domain-coordinate records.
   const FemeDomainInvocation *Invocations;
   /// ABI headroom for later domain-batch metadata.
+  void *Reserved[2];
+};
+
+/// One geometry-stage invocation's own system value: which assembled input
+/// primitive it processes. Mirrors `FemeDomainInvocation`'s role of holding
+/// per-invocation system-value data separate from stage storage.
+struct FemeGeometryInvocation {
+  /// `SV_PrimitiveID`: this invocation's input primitive index within the
+  /// draw (`StageLayoutSystemValue::PrimitiveID`), not necessarily the same
+  /// as its index within this batch.
+  uint32_t PrimitiveID;
+  /// ABI headroom for later geometry-invocation metadata (an instance ID,
+  /// for instance).
+  uint32_t Reserved[7];
+};
+
+/// The single argument a compiled geometry entry point takes:
+///
+/// \code
+///   void feme_cpu_entry_<name>(const FemeGeometryArgs *Args);
+/// \endcode
+///
+/// Roadmap R34's continuation, closing its "geometry wrapper" open item: one
+/// invocation per assembled input primitive, batched over `PrimitiveCount`
+/// the way `FemeVertexArgs` batches vertices. Two things distinguish this
+/// ABI from every earlier stage's, both covered in depth by
+/// GeometryWrapper.cpp's file comment:
+///
+///  - `Inputs`/`InputLayout` is structure-of-arrays over `PrimitiveCount *
+///    VerticesPerPrimitive` slots, primitive-major (primitive P's vertex V is
+///    slot `P * VerticesPerPrimitive + V`), read through ordinary
+///    `feme.stage.input.load`s whose vertex-in-primitive operand may name
+///    *any* of the primitive's `VerticesPerPrimitive` vertices -- unlike
+///    `HullWrapperPass`'s control-point phase, a geometry invocation
+///    legitimately reads more than one input vertex (e.g. an adjacency
+///    triangle's 6 vertices), so there is no "own index only" restriction
+///    here.
+///  - Output is not a per-invocation storage slot read back afterward the
+///    way every earlier stage's `Outputs` is: a geometry invocation may
+///    `emit` zero or more vertices per stream, so `Outputs`/`OutputLayout`
+///    are ordinary per-invocation scratch storage that `feme.stage.output.
+///    store` writes into, and `feme.stage.stream.emit`
+///    (`StageOpKind::StreamEmit`) is what snapshots that scratch storage's
+///    *current* values into the bounded `EmittedVertices` record below.
+///    This milestone supports exactly one output stream (stream 0); a
+///    `feme.stage.stream.emit`/`.cut` naming any other stream is diagnosed.
+struct FemeGeometryArgs {
+  /// `StageArgsAbiVersion`.
+  uint32_t AbiVersion;
+  /// Number of input primitives this batch processes: the number of records
+  /// in `Invocations`, and (times `VerticesPerPrimitive`) the number of
+  /// structure-of-arrays slots in `Inputs`.
+  uint32_t PrimitiveCount;
+  /// Number of vertices in one input primitive (3 for an ordinary triangle,
+  /// 6 for a triangle-with-adjacency, and so on).
+  uint32_t VerticesPerPrimitive;
+  /// The maximum number of vertices one invocation may `emit` onto stream 0
+  /// -- the wrapper checks this bound before every emission, exactly as
+  /// `feme::graphics::GeometryStreamBuilder` itself does.
+  uint32_t MaxVerticesPerStream;
+  /// The number of scalar components one emitted vertex record holds: the
+  /// total component count across every `SignatureDirection::Output`
+  /// element on stream 0, in signature order. The caller (which already has
+  /// the entry point's `EntrySignature`) computes this the same way the
+  /// wrapper itself does -- see GeometryWrapper.cpp's file comment.
+  uint32_t OutputScalarsPerVertex;
+  /// Reserved 32-bit field to keep pointer fields naturally aligned and
+  /// leave room for later scalar metadata.
+  uint32_t Reserved32;
+  /// Resource/root-constant block shared by every stage.
+  const FemeShaderResources *Resources;
+  /// Layout describing `Inputs`.
+  const FemeStageLayout *InputLayout;
+  /// Structure-of-arrays storage for the assembled input primitives' vertex
+  /// attributes, `PrimitiveCount * VerticesPerPrimitive` slots.
+  const void *Inputs;
+  /// Layout describing `Outputs`.
+  const FemeStageLayout *OutputLayout;
+  /// Per-invocation scratch storage for the output signature values in
+  /// flight at the moment of the next `emit` snapshot: `PrimitiveCount`
+  /// structure-of-arrays slots, addressed exactly like a vertex batch's own
+  /// `Outputs`.
+  void *Outputs;
+  /// Per-invocation system-value records.
+  const FemeGeometryInvocation *Invocations;
+  /// Flat `PrimitiveCount * MaxVerticesPerStream * OutputScalarsPerVertex`
+  /// storage for stream 0's emitted vertex records (primitive-major, then
+  /// vertex-slot, then scalar), written by `feme.stage.stream.emit`
+  /// lowering.
+  float *EmittedVertices;
+  /// `PrimitiveCount` counts of how many vertices each invocation actually
+  /// emitted onto stream 0, bounded to `MaxVerticesPerStream`.
+  uint32_t *EmittedVertexCounts;
+  /// Flat `PrimitiveCount * MaxVerticesPerStream` strip-boundary flags:
+  /// `StripEndsAfter[P * MaxVerticesPerStream + I]` is nonzero if a
+  /// `feme.stage.stream.cut` closed the strip immediately after emitted
+  /// vertex `I` of primitive `P` -- see GeometryWrapper.cpp's file comment
+  /// for why this flat representation is equivalent to replaying the
+  /// invocation's actual `emit`/`cut` call sequence.
+  uint8_t *StripEndsAfter;
+  /// ABI headroom for later geometry-batch metadata.
   void *Reserved[2];
 };
 

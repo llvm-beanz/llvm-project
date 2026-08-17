@@ -158,6 +158,30 @@ enum DomainArgsField : unsigned {
   DomainArgsFieldReserved = 12,
 };
 
+enum GeometryInvocationField : unsigned {
+  GeometryInvocationFieldPrimitiveID = 0,
+  GeometryInvocationFieldReserved = 1,
+};
+
+enum GeometryArgsField : unsigned {
+  GeometryArgsFieldAbiVersion = 0,
+  GeometryArgsFieldPrimitiveCount = 1,
+  GeometryArgsFieldVerticesPerPrimitive = 2,
+  GeometryArgsFieldMaxVerticesPerStream = 3,
+  GeometryArgsFieldOutputScalarsPerVertex = 4,
+  GeometryArgsFieldReserved32 = 5,
+  GeometryArgsFieldResources = 6,
+  GeometryArgsFieldInputLayout = 7,
+  GeometryArgsFieldInputs = 8,
+  GeometryArgsFieldOutputLayout = 9,
+  GeometryArgsFieldOutputs = 10,
+  GeometryArgsFieldInvocations = 11,
+  GeometryArgsFieldEmittedVertices = 12,
+  GeometryArgsFieldEmittedVertexCounts = 13,
+  GeometryArgsFieldStripEndsAfter = 14,
+  GeometryArgsFieldReserved = 15,
+};
+
 inline llvm::StructType *getStageElementType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *I64Ty = llvm::Type::getInt64Ty(Ctx);
@@ -259,6 +283,26 @@ inline llvm::StructType *getDomainArgsType(llvm::LLVMContext &Ctx) {
   return llvm::StructType::get(Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy,
                                      PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
                                      llvm::ArrayType::get(PtrTy, 2)});
+}
+
+/// Mirrors `FemeGeometryInvocation`: the input primitive one geometry-stage
+/// invocation processes.
+inline llvm::StructType *getGeometryInvocationType(llvm::LLVMContext &Ctx) {
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  return llvm::StructType::get(Ctx, {I32Ty, llvm::ArrayType::get(I32Ty, 7)});
+}
+
+/// Mirrors `FemeGeometryArgs`: a vertex-shaped per-invocation batch whose
+/// inputs are structure-of-arrays over assembled primitives (not single
+/// vertices) and whose output is bounded, multi-vertex `emit`/`cut` stream
+/// storage rather than one fixed per-invocation result slot.
+inline llvm::StructType *getGeometryArgsType(llvm::LLVMContext &Ctx) {
+  llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  return llvm::StructType::get(Ctx,
+                               {I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, PtrTy,
+                                PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+                                PtrTy, llvm::ArrayType::get(PtrTy, 2)});
 }
 
 inline llvm::Value *loadStructField(llvm::IRBuilder<> &Builder,
