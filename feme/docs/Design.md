@@ -2129,6 +2129,16 @@ attachments:
     format: r8g8b8a8-unorm
     extent: [4, 4]
     clear: [0.0, 0.0, 0.0, 1.0]
+  - name: depth0
+    format: d32-float
+    extent: [4, 4]
+    clear: [1.0]
+  - name: stencil0
+    format: s8-uint
+    extent: [4, 4]
+    clear: [0]
+depth-attachment: depth0     # names an `attachments` entry; omit for none
+stencil-attachment: stencil0 # names an `attachments` entry; omit for none
 pipeline:
   vertex: { module: vs.ll, entry: main }
   fragment: { module: fs.ll, entry: main }
@@ -2166,6 +2176,14 @@ draws:
   `index-buffer` starting at `first-index`, adding `vertex-offset` to each
   index read, matching Vulkan/Direct3D's own indexed-draw semantics
   (roadmap R32).
+- `depth-attachment`/`stencil-attachment` name one of the scene's own
+  `attachments` entries rather than adding a second attachment list; every
+  other `attachments` entry is a color attachment. A depth attachment uses
+  the `D16_UNORM`/`D32_FLOAT` format family and a stencil attachment uses
+  `S8_UINT` -- kept as two separate images rather than one packed
+  `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT` surface (roadmap R33; see
+  `feme::graphics::DepthStencilAttachment`'s own header comment in
+  PreparedDraw.h for why).
 - State the scene does not mention takes the executor's documented default,
   and a scene naming state the executor does not implement is an error at
   load time, not a silently ignored key. Both properties are what keep a
