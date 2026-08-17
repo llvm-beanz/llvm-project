@@ -340,6 +340,15 @@ Error CompiledStage::invokeFragments(
   return Error::success();
 }
 
+Error CompiledStage::invokePatch(const PreparedPatchBatch &Prepared) const {
+  if (Stage != ShaderStage::Hull)
+    return createStringError(inconvertibleErrorCode(),
+                             "invokePatch is only legal for hull stages");
+  FemePatchArgs Args = Prepared.args();
+  reinterpret_cast<PatchEntryPointFn>(EntryFn)(&Args);
+  return Error::success();
+}
+
 StageArtifactInfo CompiledStage::getArtifactInfo() const {
   StageArtifactInfo Artifact = StageArtifactInfo::fromResourceInfo(Info);
   Artifact.Stage = Stage;

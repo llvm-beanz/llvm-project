@@ -53,6 +53,7 @@ struct DispatchResources {
 using EntryPointFn = void (*)(const FemeDispatchArgs *);
 using VertexEntryPointFn = void (*)(const FemeVertexArgs *);
 using FragmentEntryPointFn = void (*)(const FemeFragmentArgs *);
+using PatchEntryPointFn = void (*)(const FemePatchArgs *);
 
 class PreparedDispatch {
 public:
@@ -176,6 +177,55 @@ private:
   void *Outputs = nullptr;
   llvm::ArrayRef<FemeFragmentInvocation> Invocations;
   llvm::MutableArrayRef<FemeFragmentResult> Results;
+};
+
+/// Caller-owned storage for one control-point batch (roadmap R34's
+/// continuation): the control-point phase's inputs/outputs, addressed the
+/// same way `VertexResources` is, batched over `OutputControlPointCount`
+/// control points rather than an explicit invocation array (see
+/// `FemePatchArgs`'s own comment for why a control point needs none).
+struct PatchResources {
+  llvm::ArrayRef<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<BoundResourceBinding> BoundResources;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  uint32_t OutputControlPointCount = 0;
+};
+
+/// One prepared control-point batch: materialized resources plus borrowed
+/// stage storage. The caller owns the stage-storage blocks and must keep
+/// them alive through the `invokePatch` call that consumes this object.
+class PreparedPatchBatch {
+public:
+  static PreparedPatchBatch create(const ResourceInfo &Info,
+                                   const PatchResources &Resources);
+
+  FemePatchArgs args() const;
+
+private:
+  PreparedPatchBatch(std::vector<FemeDescriptor> ResourceHeap,
+                     llvm::ArrayRef<FemeImageDescriptor> ImageHeap,
+                     llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+                     llvm::ArrayRef<uint8_t> RootConstants,
+                     const FemeStageLayout *InputLayout, const void *Inputs,
+                     const FemeStageLayout *OutputLayout, void *Outputs,
+                     uint32_t OutputControlPointCount);
+
+  std::vector<FemeDescriptor> ResourceHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
+  llvm::ArrayRef<uint8_t> RootConstants;
+  FemeShaderResources ShaderResources{};
+  const FemeStageLayout *InputLayout = nullptr;
+  const void *Inputs = nullptr;
+  const FemeStageLayout *OutputLayout = nullptr;
+  void *Outputs = nullptr;
+  uint32_t OutputControlPointCount = 0;
 };
 
 } // namespace feme::cpu

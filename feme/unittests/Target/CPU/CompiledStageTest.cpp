@@ -212,6 +212,23 @@ constexpr char FragmentShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="fragment" }
 )";
 
+// Each control point reads its own `OutputControlPointID`-indexed input
+// attribute and doubles it -- the common per-control-point-independent
+// shape `feme::cpu::HullWrapperPass` supports (see HullWrapper.cpp).
+constexpr char HullShaderIR[] = R"(
+  define void @hs_main() #0 {
+    %id = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+    %in = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 %id)
+    %doubled = fmul float %in, 2.0
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %doubled, i32 0)
+    ret void
+  }
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
 SignatureElement makeFloatInput(uint32_t ElementID) {
   SignatureElement Elt;
   Elt.ElementID = ElementID;
@@ -237,18 +254,26 @@ SignatureElement makeVertexIDInput(uint32_t ElementID) {
   return Elt;
 }
 
+SignatureElement makeOutputControlPointIDInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::OutputControlPointID;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.BitWidth = 32;
+  return Elt;
+}
+
 Expected<std::unique_ptr<CompiledStage>>
-compileGraphicsStage(Context &Ctx, StringRef IR, const EntrySignature &Sig,
-                     ShaderStage Stage, unsigned WaveSize) {
+compileGraphicsStage(Context &Ctx, StringRef IR, StringRef EntryName,
+                     const EntrySignature &Sig, ShaderStage Stage,
+                     unsigned WaveSize) {
   SMDiagnostic Err;
   auto LLVMMod = parseAssemblyString(IR, Err, Ctx.getLLVMContext());
   if (!LLVMMod)
     return createStringError(inconvertibleErrorCode(), "parse error: %s",
                              Err.getMessage().str().c_str());
-  dxil::setEntrySignature(*LLVMMod->getFunction(Stage == ShaderStage::Vertex
-                                                    ? "vs_main"
-                                                    : "ps_main"),
-                          Sig);
+  dxil::setEntrySignature(*LLVMMod->getFunction(EntryName), Sig);
   feme::Module Mod = feme::Module::fromLLVMIR(std::move(LLVMMod));
   StageCompileOptions Opts;
   Opts.Stage = Stage;
@@ -260,8 +285,8 @@ TEST(CompiledStageTest, InvokeVerticesRunsStageAwarePath) {
   Context Ctx;
   EntrySignature Sig;
   Sig.Elements = {makeFloatInput(0), makeVertexIDInput(1), makeFloatOutput(2)};
-  Expected<std::unique_ptr<CompiledStage>> Stage =
-      compileGraphicsStage(Ctx, VertexShaderIR, Sig, ShaderStage::Vertex, 4);
+  Expected<std::unique_ptr<CompiledStage>> Stage = compileGraphicsStage(
+      Ctx, VertexShaderIR, "vs_main", Sig, ShaderStage::Vertex, 4);
   ASSERT_THAT_EXPECTED(Stage, Succeeded());
   EXPECT_EQ((*Stage)->getStage(), ShaderStage::Vertex);
 
@@ -317,7 +342,7 @@ TEST(CompiledStageTest, InvokeFragmentsRunsStageAwarePath) {
   EntrySignature Sig;
   Sig.Elements = {makeFloatInput(0), makeFloatOutput(1)};
   Expected<std::unique_ptr<CompiledStage>> Stage = compileGraphicsStage(
-      Ctx, FragmentShaderIR, Sig, ShaderStage::Fragment, 4);
+      Ctx, FragmentShaderIR, "ps_main", Sig, ShaderStage::Fragment, 4);
   ASSERT_THAT_EXPECTED(Stage, Succeeded());
   EXPECT_EQ((*Stage)->getStage(), ShaderStage::Fragment);
 
@@ -365,6 +390,59 @@ TEST(CompiledStageTest, InvokeFragmentsRunsStageAwarePath) {
   EXPECT_EQ(Outputs[3], -1.0f);
   EXPECT_EQ(Result.LiveMask, 0xfu);
   EXPECT_EQ(Result.SideEffectMask, 0x7u);
+}
+
+TEST(CompiledStageTest, InvokePatchRunsStageAwarePath) {
+  Context Ctx;
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInput(0), makeOutputControlPointIDInput(1),
+                  makeFloatOutput(2)};
+  Expected<std::unique_ptr<CompiledStage>> Stage = compileGraphicsStage(
+      Ctx, HullShaderIR, "hs_main", Sig, ShaderStage::Hull, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Hull);
+
+  FemeStageElement InputElements[2] = {};
+  InputElements[0].ElementID = 0;
+  InputElements[0].FirstComponent = 0;
+  InputElements[0].ComponentCount = 1;
+  InputElements[0].RowCount = 1;
+  InputElements[0].InvocationStride = 4;
+  InputElements[1].ElementID = 1;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 2;
+
+  FemeStageElement OutputElements[3] = {};
+  OutputElements[2].ElementID = 2;
+  OutputElements[2].FirstComponent = 0;
+  OutputElements[2].ComponentCount = 1;
+  OutputElements[2].RowCount = 1;
+  OutputElements[2].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 3;
+
+  std::vector<float> Inputs = {1.0f, 2.0f, 3.0f};
+  std::vector<float> Outputs(3, -1.0f);
+
+  PatchResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.OutputControlPointCount = 3;
+  PreparedPatchBatch Prepared =
+      PreparedPatchBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokePatch(Prepared), Succeeded());
+  EXPECT_EQ(Outputs[0], 2.0f);
+  EXPECT_EQ(Outputs[1], 4.0f);
+  EXPECT_EQ(Outputs[2], 6.0f);
+
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.Stage, ShaderStage::Hull);
+  EXPECT_FALSE(Artifact.Signature.empty());
 }
 
 } // namespace
