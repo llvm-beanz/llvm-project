@@ -800,4 +800,125 @@ TEST(ExecutorTest, RejectsMismatchedColorBlendCount) {
   EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw), Failed());
 }
 
+// Roadmap R33: multisample coverage and resolve. A vertical-edged triangle
+// covers the left half of a 4-wide viewport, with its edge running exactly
+// through pixel 2's center -- splitting its 4 fixed sample offsets (see
+// Executor.cpp's own "Fixed per-pixel sample offsets") 2 covered / 2
+// uncovered by construction (each has an x offset on a different side of
+// 0.5), independent of which two exact positions the table uses.
+TEST(ExecutorTest, MultisampleResolveAveragesPerPixelCoverage) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/4,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}});
+
+  constexpr uint32_t Samples = 4;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);
+  // Clear every sample to opaque black.
+  for (size_t I = 0; I + 3 < MSStorage.size(); I += 4)
+    MSStorage[I + 3] = 255;
+  std::array<uint8_t, 64> ResolveStorage{};
+
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  AttachmentView Resolve{ResolveStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4,
+                         4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+  std::array<AttachmentView, 1> Resolves{Resolve};
+
+  // Two CCW triangles forming a quad covering ndc_x in [-3, 0.25] (see the
+  // comment above for why 0.25 lands the edge on pixel 2's center).
+  std::vector<float> VertexData = {
+      -3.0f, -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      0.25f, -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      0.25f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -3.0f, -3.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      0.25f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -3.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+
+  PreparedDraw Draw;
+  Draw.Attachments = Attachs;
+  Draw.ResolveAttachments = Resolves;
+  Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+  Draw.Scissor = ScissorRect{0, 0, 4, 4};
+  Draw.VertexBuffers = Bindings;
+  DrawCommand Cmd;
+  Cmd.VertexCount = 6;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+  Draw.Draws = Draws;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  // Row 0, pixels 0/1 fully covered (solid red), pixel 2 half-covered (a
+  // red/black blend), pixel 3 fully uncovered (solid black).
+  EXPECT_EQ(ResolveStorage[0 * 4], 255); // pixel 0 red
+  EXPECT_EQ(ResolveStorage[0 * 4 + 3], 255);
+  EXPECT_EQ(ResolveStorage[1 * 4], 255);      // pixel 1 red
+  EXPECT_NEAR(ResolveStorage[2 * 4], 128, 2); // pixel 2 ~50% red
+  EXPECT_EQ(ResolveStorage[2 * 4 + 3], 255);  // alpha was opaque both sides
+  EXPECT_EQ(ResolveStorage[3 * 4], 0);        // pixel 3 black
+}
+
+TEST(ExecutorTest, RejectsUnsupportedSampleCount) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/8,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}});
+
+  TriangleScene Scene;
+  Scene.VertexData = {-1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+  PreparedDraw Draw = Scene.prepare();
+  EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw), Failed());
+}
+
 } // namespace

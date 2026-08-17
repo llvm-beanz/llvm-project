@@ -149,6 +149,18 @@ struct PreparedDraw {
   IndexBufferBinding IndexBuffer;
   cpu::DispatchResources Resources;
   llvm::ArrayRef<DrawCommand> Draws;
+  /// When the pipeline's sample count is greater than 1, `Attachments`
+  /// stores each color attachment's multisample data (samples interleaved
+  /// per pixel: see Executor.cpp's `readDepth` comment for the exact
+  /// layout every multisample attachment shares). `ResolveAttachments`,
+  /// when non-empty, names one single-sample attachment per entry of
+  /// `Attachments` (same index, same format/extent) that the executor
+  /// resolves (box-filter average) into once every draw in this
+  /// `PreparedDraw` completes -- matching Vulkan/Direct3D's own explicit
+  /// resolve-attachment model rather than an implicit "always resolve"
+  /// rule. Empty for a single-sample pipeline, which has nothing to
+  /// resolve.
+  llvm::MutableArrayRef<AttachmentView> ResolveAttachments;
 };
 
 } // namespace feme::graphics

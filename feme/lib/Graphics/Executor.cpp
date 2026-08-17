@@ -7,10 +7,10 @@
 //===----------------------------------------------------------------------===//
 //
 // Implements the "Draw flow" Executor.h describes. Roadmap R32 ("Basic
-// triangle pipeline") scopes this to one triangle-list/triangle-strip draw,
-// one color attachment, one viewport/scissor, and no multisampling; the
-// scope decisions this file makes -- each deliberately deferred to a later
-// roadmap step rather than silently approximated -- are:
+// triangle pipeline") scopes this to one triangle-list/triangle-strip draw
+// and one viewport/scissor; the scope decisions this file makes -- each
+// deliberately deferred to a later roadmap step rather than silently
+// approximated -- are:
 //
 //  - No post-transform vertex cache: every (instance, vertex-or-index) pair
 //    re-runs the vertex stage, matching "the first implementation may
@@ -21,10 +21,15 @@
 //    `DepthStencilAttachment`), with early or late scheduling chosen from
 //    the fragment stage's own `SV_Depth`/`SV_StencilRef`/discard
 //    reflection. Full blend-factor/op combinations, write masks (per
-//    `BlendState`), logic ops (`R8G8B8A8_*` only), and multiple render
-//    targets (one `BlendState`/`SV_TargetN` per color attachment,
-//    `GraphicsPipeline::getColorBlends()`) are implemented; multisampling
-//    remains rejected rather than run.
+//    `BlendState`), logic ops (`R8G8B8A8_*` only), multiple render targets
+//    (one `BlendState`/`SV_TargetN` per color attachment,
+//    `GraphicsPipeline::getColorBlends()`), and 1/2/4-sample multisampling
+//    (coverage tested at fixed per-sample offsets, "Fixed per-pixel sample
+//    offsets" below; shading, depth, and stencil interpolation stay
+//    per-pixel, not per-sample -- a documented precision scope decision,
+//    not a correctness gap in the coverage/resolve behavior a completion
+//    test observes) are implemented. Depth/stencil resolve and 8+ sample
+//    counts are mechanical, on-demand additions to this same shape.
 //  - Vertex/fragment stage elements are 32-bit scalars/vectors only
 //    (`RowCount == 1`, `BitWidth == 32`); matrices and 16-/64-bit varyings
 //    are a mechanical, on-demand addition once a test needs them.
@@ -513,6 +518,35 @@ bool isTopLeftEdge(std::array<float, 2> A, std::array<float, 2> B) {
   return (Dy == 0.0f && Dx > 0.0f) || Dy < 0.0f;
 }
 
+/// Fixed per-pixel sample offsets (relative to the pixel's top-left
+/// corner) for a given multisample count (roadmap R33, "multisample
+/// coverage and resolves"). These are FeMe's own deterministic convention
+/// -- "Determinism and Reference Execution" in
+/// feme/docs/FeMeGraphicsDesign.md requires fixed sample locations, not
+/// any particular API's -- rather than a copy of Vulkan's or Direct3D's
+/// standard sample pattern table. Only 1/2/4 samples are implemented; a
+/// higher count is a mechanical, on-demand addition of another row here.
+Expected<ArrayRef<std::array<float, 2>>> samplePositions(uint32_t Count) {
+  static constexpr std::array<float, 2> One[] = {{0.5f, 0.5f}};
+  static constexpr std::array<float, 2> Two[] = {{0.25f, 0.25f},
+                                                 {0.75f, 0.75f}};
+  static constexpr std::array<float, 2> Four[] = {
+      {0.375f, 0.125f}, {0.875f, 0.375f}, {0.125f, 0.625f}, {0.625f, 0.875f}};
+  switch (Count) {
+  case 1:
+    return ArrayRef(One);
+  case 2:
+    return ArrayRef(Two);
+  case 4:
+    return ArrayRef(Four);
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "sample count %u is not yet supported (only 1, "
+                             "2, and 4 are implemented)",
+                             Count);
+  }
+}
+
 /// Evaluates \p Op for a candidate depth/stencil value \p New against the
 /// attachment's current value \p Old, per the `CompareOp` semantics
 /// Vulkan/Direct3D share (`Always`/`Never` ignore both operands).
@@ -539,10 +573,14 @@ bool compareOp(CompareOp Op, float New, float Old) {
 }
 
 /// Reads the depth attachment's stored value at pixel (\p PX, \p PY),
-/// converting `D16_UNORM` to the same [0, 1] float convention every other
-/// depth format already uses.
-Expected<float> readDepth(const AttachmentView &Depth, int32_t PX, int32_t PY) {
-  size_t Idx = (size_t)PY * Depth.Width + PX;
+/// sample \p Sample of \p SampleCount (0/1 for a single-sample
+/// attachment), converting `D16_UNORM` to the same [0, 1] float
+/// convention every other depth format already uses. Multisample storage
+/// interleaves samples within a pixel: texel `(PX, PY, Sample)` is at
+/// flat index `(PY * Width + PX) * SampleCount + Sample`.
+Expected<float> readDepth(const AttachmentView &Depth, uint32_t SampleCount,
+                          int32_t PX, int32_t PY, uint32_t Sample) {
+  size_t Idx = ((size_t)PY * Depth.Width + PX) * SampleCount + Sample;
   switch (Depth.Format) {
   case cpu::ResourceFormat::D32_FLOAT: {
     float V;
@@ -561,8 +599,9 @@ Expected<float> readDepth(const AttachmentView &Depth, int32_t PX, int32_t PY) {
   }
 }
 
-Error writeDepth(AttachmentView &Depth, int32_t PX, int32_t PY, float Value) {
-  size_t Idx = (size_t)PY * Depth.Width + PX;
+Error writeDepth(AttachmentView &Depth, uint32_t SampleCount, int32_t PX,
+                 int32_t PY, uint32_t Sample, float Value) {
+  size_t Idx = ((size_t)PY * Depth.Width + PX) * SampleCount + Sample;
   switch (Depth.Format) {
   case cpu::ResourceFormat::D32_FLOAT:
     memcpy(Depth.Data.data() + Idx * 4, &Value, 4);
@@ -580,13 +619,15 @@ Error writeDepth(AttachmentView &Depth, int32_t PX, int32_t PY, float Value) {
   }
 }
 
-uint8_t readStencil(const AttachmentView &Stencil, int32_t PX, int32_t PY) {
-  return Stencil.Data[(size_t)PY * Stencil.Width + PX];
+uint8_t readStencil(const AttachmentView &Stencil, uint32_t SampleCount,
+                    int32_t PX, int32_t PY, uint32_t Sample) {
+  return Stencil.Data[((size_t)PY * Stencil.Width + PX) * SampleCount + Sample];
 }
 
-void writeStencil(AttachmentView &Stencil, int32_t PX, int32_t PY,
-                  uint8_t Value) {
-  Stencil.Data[(size_t)PY * Stencil.Width + PX] = Value;
+void writeStencil(AttachmentView &Stencil, uint32_t SampleCount, int32_t PX,
+                  int32_t PY, uint32_t Sample, uint8_t Value) {
+  Stencil.Data[((size_t)PY * Stencil.Width + PX) * SampleCount + Sample] =
+      Value;
 }
 
 /// Applies \p Op ("Depth/Stencil" per Vulkan's `VkStencilOp`/Direct3D's
@@ -613,28 +654,32 @@ uint8_t applyStencilOp(StencilOp Op, uint8_t Current, uint8_t Reference) {
   llvm_unreachable("unhandled StencilOp");
 }
 
-/// Runs the combined depth/stencil test at pixel (\p PX, \p PY) against
-/// candidate depth \p NewDepth, in the fixed-function order every API
-/// shares: the stencil test first (applying `FailOp` on failure), then --
-/// only if stencil passed -- the depth test (applying `DepthFailOp`/
-/// `PassOp`). Returns whether the fragment may proceed to color write.
-/// \p DepthAttachment/\p StencilAttachment are only dereferenced when the
-/// corresponding test/write is enabled (the caller already validated they
-/// are bound in that case).
-Expected<bool> testDepthStencil(const DepthState &Depth,
-                                const StencilState &Stencil,
-                                AttachmentView &DepthAttachment,
-                                AttachmentView &StencilAttachment,
-                                bool FrontFacing, int32_t PX, int32_t PY,
-                                float NewDepth,
-                                std::optional<uint8_t> RefOverride = {}) {
+/// Runs the combined depth/stencil test at pixel (\p PX, \p PY), sample
+/// \p Sample of \p SampleCount, against candidate depth \p NewDepth, in
+/// the fixed-function order every API shares: the stencil test first
+/// (applying `FailOp` on failure), then -- only if stencil passed -- the
+/// depth test (applying `DepthFailOp`/`PassOp`). Returns whether the
+/// fragment may proceed to color write. \p DepthAttachment/
+/// \p StencilAttachment are only dereferenced when the corresponding
+/// test/write is enabled (the caller already validated they are bound in
+/// that case). Every sample of one pixel shares \p NewDepth (the
+/// rasterizer interpolates once per pixel, not per sample -- true
+/// per-sample depth divergence is a later precision improvement, see the
+/// file comment above), but each sample's stored depth/stencil value, and
+/// therefore each sample's test result, is independent.
+Expected<bool>
+testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
+                 AttachmentView &DepthAttachment,
+                 AttachmentView &StencilAttachment, uint32_t SampleCount,
+                 bool FrontFacing, int32_t PX, int32_t PY, uint32_t Sample,
+                 float NewDepth, std::optional<uint8_t> RefOverride = {}) {
   StencilFaceState Face = FrontFacing ? Stencil.Front : Stencil.Back;
   if (RefOverride)
     Face.Reference = *RefOverride;
   bool StencilPass = true;
   uint8_t StoredStencil = 0;
   if (Stencil.TestEnable) {
-    StoredStencil = readStencil(StencilAttachment, PX, PY);
+    StoredStencil = readStencil(StencilAttachment, SampleCount, PX, PY, Sample);
     uint8_t Masked = StoredStencil & Face.CompareMask;
     uint8_t Ref = Face.Reference & Face.CompareMask;
     StencilPass = compareOp(Face.Compare, static_cast<float>(Ref),
@@ -645,7 +690,7 @@ Expected<bool> testDepthStencil(const DepthState &Depth,
     uint8_t Updated = applyStencilOp(Op, StoredStencil, Face.Reference);
     uint8_t Merged =
         (StoredStencil & ~Face.WriteMask) | (Updated & Face.WriteMask);
-    writeStencil(StencilAttachment, PX, PY, Merged);
+    writeStencil(StencilAttachment, SampleCount, PX, PY, Sample, Merged);
   };
 
   if (!StencilPass) {
@@ -656,7 +701,8 @@ Expected<bool> testDepthStencil(const DepthState &Depth,
 
   bool DepthPass = true;
   if (Depth.TestEnable) {
-    Expected<float> OldDepth = readDepth(DepthAttachment, PX, PY);
+    Expected<float> OldDepth =
+        readDepth(DepthAttachment, SampleCount, PX, PY, Sample);
     if (!OldDepth)
       return OldDepth.takeError();
     DepthPass = compareOp(Depth.Compare, NewDepth, *OldDepth);
@@ -671,7 +717,8 @@ Expected<bool> testDepthStencil(const DepthState &Depth,
   if (Stencil.TestEnable)
     applyFace(Face.PassOp);
   if (Depth.WriteEnable) {
-    if (Error E = writeDepth(DepthAttachment, PX, PY, NewDepth))
+    if (Error E =
+            writeDepth(DepthAttachment, SampleCount, PX, PY, Sample, NewDepth))
       return std::move(E);
   }
   return true;
@@ -848,11 +895,25 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
 } // namespace
 
 Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
-  if (Pipeline.getSampleCount() != 1)
+  uint32_t SampleCount = Pipeline.getSampleCount();
+  if (SampleCount != 1 && SampleCount != 2 && SampleCount != 4)
     return createStringError(inconvertibleErrorCode(),
-                             "multisampling is not yet implemented (roadmap "
-                             "R33, 'Depth, stencil, blending, and "
-                             "multisampling')");
+                             "sample count %u is not yet supported (only 1, "
+                             "2, and 4 are implemented, roadmap R33)",
+                             SampleCount);
+  Expected<ArrayRef<std::array<float, 2>>> SamplePositions =
+      samplePositions(SampleCount);
+  if (!SamplePositions)
+    return SamplePositions.takeError();
+  if (!Draw.ResolveAttachments.empty() &&
+      Draw.ResolveAttachments.size() != Draw.Attachments.size())
+    return createStringError(inconvertibleErrorCode(),
+                             "the draw has %zu resolve attachment(s) but "
+                             "%zu color attachment(s); they must match "
+                             "one-for-one or ResolveAttachments must be "
+                             "empty",
+                             Draw.ResolveAttachments.size(),
+                             Draw.Attachments.size());
   const DepthState &PipelineDepth = Pipeline.getDepthState();
   if ((PipelineDepth.TestEnable || PipelineDepth.WriteEnable) &&
       Draw.DepthStencil.Depth.Data.empty())
@@ -957,6 +1018,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
     if (!ElemSize)
       return ElemSize.takeError();
     ColorElemSizes.push_back(*ElemSize);
+    size_t ExpectedSize = (size_t)A.Width * A.Height * SampleCount * *ElemSize;
+    if (A.Data.size() != ExpectedSize)
+      return createStringError(inconvertibleErrorCode(),
+                               "a color attachment's data is %zu byte(s), "
+                               "expected %zu (width * height * sample "
+                               "count * element size)",
+                               A.Data.size(), ExpectedSize);
   }
 
   // --- Depth/stencil test/write setup (roadmap R33). ---
@@ -1260,7 +1328,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
         int32_t TileMaxY = std::min(MaxY, TileMinY + TileSize);
 
         struct PendingQuad {
-          uint32_t Coverage = 0; // per-lane bit
+          uint32_t Coverage = 0; // per-lane bit: any sample covered
+          std::array<uint32_t, 4> SampleMask{}; // per-lane sample bitmask
           std::array<int32_t, 4> PixelX;
           std::array<int32_t, 4> PixelY;
           uint32_t TriIdx = 0;
@@ -1308,26 +1377,49 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
                 int32_t PY = QY + Dy[Lane];
                 Quad.PixelX[Lane] = PX;
                 Quad.PixelY[Lane] = PY;
-                std::array<float, 2> Center{PX + 0.5f, PY + 0.5f};
-                float E0 = edgeFn(Tri.Pos[1], Tri.Pos[2], Center);
-                float E1 = edgeFn(Tri.Pos[2], Tri.Pos[0], Center);
-                float E2 = edgeFn(Tri.Pos[0], Tri.Pos[1], Center);
-                bool In0 = E0 > 0.0f || (E0 == 0.0f &&
-                                         isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
-                bool In1 = E1 > 0.0f || (E1 == 0.0f &&
-                                         isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
-                bool In2 = E2 > 0.0f || (E2 == 0.0f &&
-                                         isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
                 bool InBounds =
                     PX >= MinX && PX < MaxX && PY >= MinY && PY < MaxY;
-                bool Covered = InBounds && In0 && In1 && In2;
-                if (Covered) {
+                // Coverage is tested once per sample position (a fixed
+                // offset within the pixel, "Fixed per-pixel sample
+                // offsets" above); with one sample this is exactly the
+                // pixel-center test the single-sample path always used.
+                uint32_t SampleMask = 0;
+                if (InBounds) {
+                  for (uint32_t S = 0; S != SampleCount; ++S) {
+                    std::array<float, 2> Offset = (*SamplePositions)[S];
+                    std::array<float, 2> P{PX + Offset[0], PY + Offset[1]};
+                    float E0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P);
+                    float E1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P);
+                    float E2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P);
+                    bool In0 =
+                        E0 > 0.0f ||
+                        (E0 == 0.0f && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
+                    bool In1 =
+                        E1 > 0.0f ||
+                        (E1 == 0.0f && isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
+                    bool In2 =
+                        E2 > 0.0f ||
+                        (E2 == 0.0f && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
+                    if (In0 && In1 && In2)
+                      SampleMask |= (1u << S);
+                  }
+                }
+                if (SampleMask) {
                   Quad.Coverage |= (1u << Lane);
                   AnyCovered = true;
                 }
-                Quad.Bary0[Lane] = E0 / Area;
-                Quad.Bary1[Lane] = E1 / Area;
-                Quad.Bary2[Lane] = E2 / Area;
+                Quad.SampleMask[Lane] = SampleMask;
+                // Barycentric coordinates for shading/depth interpolation
+                // are still evaluated once, at the pixel center: only the
+                // coverage test itself is per-sample (see the file
+                // comment above's precision scope note).
+                std::array<float, 2> Center{PX + 0.5f, PY + 0.5f};
+                Quad.Bary0[Lane] =
+                    edgeFn(Tri.Pos[1], Tri.Pos[2], Center) / Area;
+                Quad.Bary1[Lane] =
+                    edgeFn(Tri.Pos[2], Tri.Pos[0], Center) / Area;
+                Quad.Bary2[Lane] =
+                    edgeFn(Tri.Pos[0], Tri.Pos[1], Center) / Area;
               }
               if (!AnyCovered)
                 continue;
@@ -1345,20 +1437,28 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
                 Inv.Position[Lane][3] = InvW;
                 Inv.PrimitiveID[Lane] = Tri.PrimitiveID;
                 Inv.SampleIndex[Lane] = 0;
-                Inv.Coverage[Lane] = (Quad.Coverage >> Lane) & 1u;
+                Inv.Coverage[Lane] = Quad.SampleMask[Lane];
                 Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
 
-                if (UseEarlyDepthStencil && Inv.Coverage[Lane]) {
+                if (UseEarlyDepthStencil && Quad.SampleMask[Lane]) {
                   int32_t PX = Quad.PixelX[Lane], PY = Quad.PixelY[Lane];
-                  Expected<bool> Pass = testDepthStencil(
-                      PipelineDepth, PipelineStencil, DepthAttachment,
-                      StencilAttachment, Tri.FrontFacing, PX, PY, Depth);
-                  if (!Pass)
-                    return Pass.takeError();
-                  if (!*Pass) {
-                    Quad.Coverage &= ~(1u << Lane);
-                    Inv.Coverage[Lane] = 0;
+                  uint32_t Survived = 0;
+                  for (uint32_t S = 0; S != SampleCount; ++S) {
+                    if (!((Quad.SampleMask[Lane] >> S) & 1u))
+                      continue;
+                    Expected<bool> Pass = testDepthStencil(
+                        PipelineDepth, PipelineStencil, DepthAttachment,
+                        StencilAttachment, SampleCount, Tri.FrontFacing, PX, PY,
+                        S, Depth);
+                    if (!Pass)
+                      return Pass.takeError();
+                    if (*Pass)
+                      Survived |= (1u << S);
                   }
+                  Quad.SampleMask[Lane] = Survived;
+                  Inv.Coverage[Lane] = Survived;
+                  if (Survived == 0)
+                    Quad.Coverage &= ~(1u << Lane);
                 }
               }
               Inv.LiveMask = 0xF;
@@ -1464,8 +1564,13 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
             // A late depth/stencil test/write happens here, after the
             // fragment stage ran, using its `SV_Depth`/`SV_StencilRef`
             // outputs when it wrote them (an early test already handled
-            // the alternative above and is not repeated here -- see
-            // "Depth/stencil test/write setup").
+            // the alternative above, per sample, and is not repeated here
+            // -- see "Depth/stencil test/write setup"). Every sample this
+            // lane covers is tested independently: they share the
+            // fragment's one shaded color/depth candidate, but each has
+            // its own stored depth/stencil value and therefore its own
+            // pass/fail result.
+            uint32_t PassMask = QuadInvocations[Q].Coverage[Lane];
             if (!UseEarlyDepthStencil && NeedsDepthStencil) {
               float FragDepth = QuadInvocations[Q].Position[Lane][2];
               if (FSDepthOut)
@@ -1475,15 +1580,23 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
               if (FSStencilRefOut)
                 RefOverride = static_cast<uint8_t>(FSOutput->readRaw(
                     FSStencilRefOut->ElementID, 0, Q * 4 + Lane));
-              Expected<bool> Pass = testDepthStencil(
-                  PipelineDepth, PipelineStencil, DepthAttachment,
-                  StencilAttachment, QuadInvocations[Q].IsFrontFace[Lane] != 0,
-                  PX, PY, FragDepth, RefOverride);
-              if (!Pass)
-                return Pass.takeError();
-              if (!*Pass)
-                continue;
+              PassMask = 0;
+              for (uint32_t S = 0; S != SampleCount; ++S) {
+                if (!((QuadInvocations[Q].Coverage[Lane] >> S) & 1u))
+                  continue;
+                Expected<bool> Pass = testDepthStencil(
+                    PipelineDepth, PipelineStencil, DepthAttachment,
+                    StencilAttachment, SampleCount,
+                    QuadInvocations[Q].IsFrontFace[Lane] != 0, PX, PY, S,
+                    FragDepth, RefOverride);
+                if (!Pass)
+                  return Pass.takeError();
+                if (*Pass)
+                  PassMask |= (1u << S);
+              }
             }
+            if (PassMask == 0)
+              continue;
 
             for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
                  ++AttIdx) {
@@ -1492,18 +1605,60 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
               for (unsigned C = 0; C != 4; ++C)
                 RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
                                               Q * 4 + Lane);
-              size_t Off =
-                  ((size_t)PY * Att.Width + PX) * ColorElemSizes[AttIdx];
               const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
-              if (Error E =
-                      mergeColor(AttBlend, Pipeline.getLogicOpEnable(),
-                                 Pipeline.getLogicOp(),
-                                 Pipeline.getBlendConstants(), Att.Format, RGBA,
-                                 MutableArrayRef(Att.Data.data() + Off,
-                                                 ColorElemSizes[AttIdx])))
-                return E;
+              for (uint32_t S = 0; S != SampleCount; ++S) {
+                if (!((PassMask >> S) & 1u))
+                  continue;
+                size_t Off = (((size_t)PY * Att.Width + PX) * SampleCount + S) *
+                             ColorElemSizes[AttIdx];
+                if (Error E = mergeColor(
+                        AttBlend, Pipeline.getLogicOpEnable(),
+                        Pipeline.getLogicOp(), Pipeline.getBlendConstants(),
+                        Att.Format, RGBA,
+                        MutableArrayRef(Att.Data.data() + Off,
+                                        ColorElemSizes[AttIdx])))
+                  return E;
+              }
             }
           }
+        }
+      }
+    }
+  }
+
+  // --- Multisample resolve (roadmap R33): box-filter average every
+  // sample of each color attachment into its resolve attachment, once
+  // every draw above has run. A single-sample pipeline has nothing to
+  // resolve (`ResolveAttachments` is required to be empty in that case by
+  // convention -- see PreparedDraw.h). ---
+  if (!Draw.ResolveAttachments.empty()) {
+    for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size(); ++AttIdx) {
+      const AttachmentView &Src = Draw.Attachments[AttIdx];
+      AttachmentView &Dst = Draw.ResolveAttachments[AttIdx];
+      for (uint32_t PY = 0; PY != Src.Height; ++PY) {
+        for (uint32_t PX = 0; PX != Src.Width; ++PX) {
+          std::array<double, 4> Sum{};
+          for (uint32_t S = 0; S != SampleCount; ++S) {
+            size_t Off = (((size_t)PY * Src.Width + PX) * SampleCount + S) *
+                         ColorElemSizes[AttIdx];
+            std::array<double, 4> Sample{};
+            if (Error E = unpackColor(
+                    Src.Format,
+                    ArrayRef(Src.Data.data() + Off, ColorElemSizes[AttIdx]),
+                    Sample))
+              return E;
+            for (unsigned C = 0; C != 4; ++C)
+              Sum[C] += Sample[C];
+          }
+          std::array<double, 4> Avg{};
+          for (unsigned C = 0; C != 4; ++C)
+            Avg[C] = Sum[C] / SampleCount;
+          size_t DstOff =
+              ((size_t)PY * Dst.Width + PX) * ColorElemSizes[AttIdx];
+          if (Error E = packClearColor(Dst.Format, Avg,
+                                       MutableArrayRef(Dst.Data.data() + DstOff,
+                                                       ColorElemSizes[AttIdx])))
+            return E;
         }
       }
     }
