@@ -23,10 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-The FeMeVulkanCore is added in CMake using `add_library` instead of one of the
-LLVM macros which means it doesn't respect the LLVM build configuration options.
-
-Similarly all the other libraries are using `add_mlir_library`, which is a weird
-choice. Can you add an `add_feme_library` macro following the patterns that MLIR
-and Clang use to implement an add_library wrapper that respects LLVM's build
-configuration?
+Following LLVM conventions, the `feme_vulkan` target as a shared library should
+be built out of the `tools` directory. Can you move the CMake logic and any
+sources specific to `feme_vulkan` into a new subdirectory under `feme/tools`,
+and have the `feme_vulkan` library use the `add_feme_library` macro so that it
+correctly handles the LLVM component-based build and install logic?
