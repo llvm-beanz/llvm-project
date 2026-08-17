@@ -1019,6 +1019,29 @@ input block (`InputPatch`/`InputPatchLayout`), and
 `lowerPatchConstantInputLoad` which of the two blocks a given
 `feme.stage.input.load` addresses.
 
+Landed for the domain (evaluation) stage, added in a further follow-up
+(`feme::cpu::DomainWrapperPass`, DomainWrapper.h/.cpp, plus `FemeDomainArgs`/
+`PreparedDomainBatch`/`CompiledStage::invokeDomain`): "evaluation
+invocations are batched over generated domain coordinates and use the same
+structure-of-arrays output layout as vertex waves" above, now real. The
+wrapper shape is `VertexWrapperPass`'s -- one independent invocation per
+tessellator-generated domain point, waves of `<W x T>` over
+`FemeDomainArgs::DomainPointCount` -- and what is new is that three input
+sources meet in one entry point, each `feme.stage.input.load` routed to one
+of them by the signature element it names: the completed patch's control
+points (`SignatureDirection::Input`, readable at *any* control-point index,
+since evaluating a patch means blending its control points), the per-patch
+tessellation factors and patch constants (`SignatureDirection::PatchInput`,
+addressed by row/component alone -- the mirror image of the patch-constant
+phase's own unbatched output store), and `SV_DomainLocation`
+(`SignatureSystemValue::DomainLocation`, read from the per-invocation
+`FemeDomainInvocation` record the way a vertex batch reads `SV_VertexID`
+from its own). Outputs are ordinary per-vertex outputs: a domain shader's
+result is a vertex. Two shapes are diagnosed rather than silently
+mishandled: a dynamically indexed domain-location component (the record is a
+fixed-size ABI struct) and a group-sync barrier (domain invocations are
+independent; there is no groupshared cooperation model for this stage).
+
 The geometry wrapper receives primitive records and owns a bounded stream
 builder per invocation. Emission is side-effecting even when no framebuffer
 write occurs, so it consumes the current side-effect mask. SIMD lanes reserve
@@ -1109,6 +1132,8 @@ feme/include/feme/Target/CPU/RuntimeABI.h's own comment for its final field
 layout, which follows `FemeVertexArgs`'s shape closely (an
 `OutputControlPointCount` in place of an explicit per-invocation record
 array, since a control point's identity is its own index).
+`FemePatchConstantArgs` and `FemeDomainArgs` have likewise been settled, as
+the patch-constant phase's and the domain stage's own ABI structs.
 `FemeMeshArgs`/`FemeRayInvocation`/`FemeContinuationFrame` remain shape
 sketches, not final field layouts. The implementation milestone settles
 their exact C-compatible definitions, explicit sizes, alignment, and
@@ -2018,9 +2043,12 @@ index, exactly like `VertexWrapperPass`'s single-vertex-per-invocation
 model), and a group-sync barrier within the phase (needed only by a control
 point that must read a sibling's *output*, which requires generalizing
 `EntryWrapperPass`'s barrier-splitting machinery to this batch ABI -- not yet
-done). Deferred, documented in its own file's comment: the patch-constant
-function itself (no ABI or wrapper yet), the domain and geometry wrappers
-(`CompiledStage::invokeDomain`/`invokeGeometry` still do not exist), and
+done). The patch-constant phase (`PatchConstantWrapperPass`, including its
+`InputPatch` parameter) and the domain stage (`DomainWrapperPass` plus
+`FemeDomainArgs`/`CompiledStage::invokeDomain`, see "Patch and geometry
+wrappers" above) have since landed in follow-up sessions. Deferred,
+documented in its own file's comment: the geometry wrapper
+(`CompiledStage::invokeGeometry` still does not exist), and
 wiring any of this into `executeDraws`/`feme-render` -- SIMD-lane
 stream-range reservation no longer waits on this, since
 `mergeGeometryStreamsInLaneOrder` is a standalone, host-side algorithm on
@@ -2029,9 +2057,10 @@ widened geometry invocation still does. (Crack-free non-uniform per-edge
 tessellation, previously deferred here, was added after R34's initial
 landing -- see the tessellator's own comment above.) `unittests/Graphics/
 {Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp`,
-`unittests/Transforms/CPU/HullWrapperTest.cpp`,
-`unittests/Target/CPU/CompiledStageTest.cpp`'s `InvokePatchRunsStageAwarePath`
-case, and `PipelineTest.cpp`'s adjacency cases (including the new
+`unittests/Transforms/CPU/{HullWrapper,PatchConstantWrapper,DomainWrapper}Test.cpp`,
+`unittests/Target/CPU/CompiledStageTest.cpp`'s
+`InvokePatch{,Constant}RunsStageAwarePath` and
+`InvokeDomainRunsStageAwarePath` cases, and `PipelineTest.cpp`'s adjacency cases (including the new
 strip-splitting cases) cover today's scope; `ninja check-feme`
 (assertions-enabled, ccache build) passes in full before and after.
 
