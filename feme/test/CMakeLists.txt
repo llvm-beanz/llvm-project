@@ -44,6 +44,9 @@ set(FEME_TEST_DEPENDS
 if(FEME_HAVE_VULKAN_HEADERS)
   list(APPEND FEME_TEST_DEPENDS FeMeVulkanTests)
 endif()
+if(FEME_HAVE_VULKAN_LOADER)
+  list(APPEND FEME_TEST_DEPENDS feme-vulkan-loader-smoke)
+endif()
 
 add_custom_target(feme-test-depends DEPENDS ${FEME_TEST_DEPENDS})
 

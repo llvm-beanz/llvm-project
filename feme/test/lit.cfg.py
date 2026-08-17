@@ -113,3 +113,37 @@ tools = [
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
+
+# "V0: Loader-visible skeleton" (feme/docs/FeMeVulkanDesign.md): only
+# available when configured with Vulkan-Headers and a real Vulkan loader to
+# link the smoke-test client against (see feme/CMakeLists.txt's
+# `FEME_HAVE_VULKAN_LOADER`); tests needing either the ICD or a loader to
+# run through use `REQUIRES: system-vulkan-loader`.
+if config.feme_have_vulkan_loader == "ON":
+    config.available_features.add("system-vulkan-loader")
+    llvm_config.add_tool_substitutions(["feme-vulkan-loader-smoke"], tool_dirs)
+    config.substitutions.append(
+        ("%feme_vulkan_icd_manifest", config.feme_vulkan_icd_manifest)
+    )
+
+    # The two-ICD coexistence test ("Process Coexistence and Symbol
+    # Visibility": "verified by a test that runs a client with both the
+    # FeMe manifest and a system driver manifest visible") needs a second,
+    # genuinely LLVM-based ICD manifest already installed on the test host.
+    # Mesa's lavapipe (`lvp_icd*.json`) is the common case on Linux CI
+    # images and developer machines alike; this looks for it in the
+    # standard system ICD directory rather than assuming a fixed name,
+    # since distributions suffix it differently (e.g. an architecture
+    # multiarch tag).
+    _icd_dir = "/usr/share/vulkan/icd.d"
+    _lavapipe_manifest = None
+    if os.path.isdir(_icd_dir):
+        for _name in sorted(os.listdir(_icd_dir)):
+            if _name.startswith("lvp_icd") and _name.endswith(".json"):
+                _lavapipe_manifest = os.path.join(_icd_dir, _name)
+                break
+    if _lavapipe_manifest:
+        config.available_features.add("system-second-vulkan-icd")
+        config.substitutions.append(
+            ("%system_second_icd_manifest", _lavapipe_manifest)
+        )

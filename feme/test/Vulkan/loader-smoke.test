@@ -1,0 +1,15 @@
+// Loader smoke test for "V0: Loader-visible skeleton" (see
+// feme/docs/FeMeVulkanDesign.md): the ICD is only visible to the loader
+// through the build-tree development manifest ("Loader Integration": "The
+// build-tree manifest uses an absolute path into the build directory"), and
+// a small client linked against the real Vulkan loader must be able to
+// enumerate FeMe's device, create a compute-only device and one queue, and
+// tear everything down cleanly.
+//
+// REQUIRES: system-vulkan-loader
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-loader-smoke | FileCheck %s
+
+// CHECK: found device: FeMe CPU Vulkan Device (vendorID=0x10000, apiVersion=1.1.0)
+// CHECK: compute queue family: {{[0-9]+}} (flags=0x{{[0-9a-f]+}})
+// CHECK: PASS
