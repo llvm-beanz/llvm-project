@@ -725,4 +725,113 @@ TEST(CompiledStageTest, InvokeDomainRunsStageAwarePath) {
   EXPECT_FALSE(Artifact.Signature.empty());
 }
 
+// One input vertex per primitive (`VerticesPerPrimitive` == 1): scales that
+// vertex's own attribute (element 0) by `SV_PrimitiveID` (element 1) and
+// emits/cuts a single-vertex strip onto stream 0 -- covers input load,
+// `SV_PrimitiveID`, output store, `emit`, and `cut` lowering all at once
+// (see GeometryWrapper.cpp).
+constexpr char GeometryShaderIR[] = R"(
+  define void @gs_main() #0 {
+    %v = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %pid = call i32 @feme.stage.input.load.i32(i32 1, i32 0, i32 0, i32 0)
+    %pidf = uitofp i32 %pid to float
+    %r = fmul float %v, %pidf
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %r, i32 0)
+    call void @feme.stage.stream.emit(i32 0)
+    call void @feme.stage.stream.cut(i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  declare void @feme.stage.stream.emit(i32)
+  declare void @feme.stage.stream.cut(i32)
+  attributes #0 = { "feme.shader.stage"="geometry" }
+)";
+
+SignatureElement makePrimitiveIDInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::PrimitiveID;
+  Elt.ComponentType = SignatureComponentType::UInt;
+  Elt.BitWidth = 32;
+  return Elt;
+}
+
+TEST(CompiledStageTest, InvokeGeometryRunsStageAwarePath) {
+  Context Ctx;
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInput(0), makePrimitiveIDInput(1),
+                  makeFloatOutput(2)};
+  Expected<std::unique_ptr<CompiledStage>> Stage = compileGraphicsStage(
+      Ctx, GeometryShaderIR, "gs_main", Sig, ShaderStage::Geometry, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Geometry);
+
+  FemeStageElement InputElements[1] = {};
+  InputElements[0].ElementID = 0;
+  InputElements[0].FirstComponent = 0;
+  InputElements[0].ComponentCount = 1;
+  InputElements[0].RowCount = 1;
+  InputElements[0].InvocationStride = 4;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 1;
+
+  FemeStageElement OutputElements[3] = {};
+  OutputElements[2].ElementID = 2;
+  OutputElements[2].FirstComponent = 0;
+  OutputElements[2].ComponentCount = 1;
+  OutputElements[2].RowCount = 1;
+  OutputElements[2].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 3;
+
+  constexpr uint32_t PrimitiveCount = 2;
+  constexpr uint32_t MaxVerticesPerStream = 2;
+  constexpr uint32_t OutputScalarsPerVertex = 1;
+
+  std::vector<float> Inputs = {10.0f, 20.0f};
+  std::vector<float> Outputs(PrimitiveCount, -1.0f);
+  FemeGeometryInvocation Invocations[PrimitiveCount] = {};
+  Invocations[0].PrimitiveID = 2;
+  Invocations[1].PrimitiveID = 3;
+
+  std::vector<float> EmittedVertices(
+      PrimitiveCount * MaxVerticesPerStream * OutputScalarsPerVertex, 0.0f);
+  std::vector<uint32_t> EmittedVertexCounts(PrimitiveCount, 0);
+  std::vector<uint8_t> StripEndsAfter(PrimitiveCount * MaxVerticesPerStream, 0);
+
+  GeometryResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = Invocations;
+  Resources.VerticesPerPrimitive = 1;
+  Resources.MaxVerticesPerStream = MaxVerticesPerStream;
+  Resources.OutputScalarsPerVertex = OutputScalarsPerVertex;
+  Resources.EmittedVertices = EmittedVertices;
+  Resources.EmittedVertexCounts = EmittedVertexCounts;
+  Resources.StripEndsAfter = StripEndsAfter;
+  PreparedGeometryBatch Prepared =
+      PreparedGeometryBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeGeometry(Prepared), Succeeded());
+  // 10 * 2 and 20 * 3: one vertex emitted (and immediately cut into its own
+  // strip) per primitive.
+  EXPECT_EQ(EmittedVertexCounts[0], 1u);
+  EXPECT_EQ(EmittedVertexCounts[1], 1u);
+  EXPECT_EQ(EmittedVertices[0 * MaxVerticesPerStream], 20.0f);
+  EXPECT_EQ(EmittedVertices[1 * MaxVerticesPerStream], 60.0f);
+  EXPECT_TRUE(StripEndsAfter[0 * MaxVerticesPerStream]);
+  EXPECT_TRUE(StripEndsAfter[1 * MaxVerticesPerStream]);
+
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.Stage, ShaderStage::Geometry);
+  EXPECT_FALSE(Artifact.Signature.empty());
+}
+
 } // namespace
