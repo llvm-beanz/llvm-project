@@ -1151,6 +1151,68 @@ after submission generally become device loss.
 
 No shader execution is required in this milestone.
 
+**Status: done.** `feme/utils/vk_gen_entrypoints.py` reads Vulkan-Headers'
+`vk.xml` directly (core `VK_VERSION_1_0`/`VK_VERSION_1_1` commands only) and
+generates an `FEME_VK_COMMAND`/`FEME_VK_COMMAND_IMPL` X-macro table, classifying
+each command's dispatch level (global/instance/device) the same way the
+Vulkan loader itself does; `lib/Vulkan/ImplementedEntrypoints.txt` lists the
+~29 commands this milestone actually implements; every other core command
+still occupies a table entry that resolves to null. `lib/Vulkan/Objects.h`
+implements `Instance`/`PhysicalDevice`/`Device`/`Queue` with
+`VkAllocationCallbacks`-aware allocation (`Icd.h`'s `Allocator`);
+`PhysicalDeviceInfo.cpp` computes truthful properties, Vulkan 1.0 core
+limits (the spec's own required minima, plus host-derived values for memory
+size and the pinned subgroup size -- see `feme::cpu::resolveWaveSize`), an
+all-false `VkPhysicalDeviceFeatures` (nothing is implemented well enough to
+claim any yet), a single compute+transfer queue family, and an
+`llvm::MD5`-derived device/pipeline-cache UUID pair folding in the LLVM
+version, host triple/CPU name, and subgroup size. `lib/Vulkan/EntryPoints.cpp`
+implements every command needed for the acceptance-test scenario in
+"Testing Strategy" below, plus the loader's *required* entrypoints
+(`vkGetPhysicalDeviceImageFormatProperties`/
+`vkGetPhysicalDeviceSparseImageFormatProperties`, honestly unsupported since
+no image exists yet, but present because the loader refuses to load an ICD
+missing them). `lib/Vulkan/VulkanICD.cpp` defines the four loader-facing
+symbols (`vk_icdNegotiateLoaderICDInterfaceVersion`,
+`vk_icdGetInstanceProcAddr`, `vk_icdGetPhysicalDeviceProcAddr`, the legacy
+`vkGetInstanceProcAddr`) with explicit default visibility, restoring it
+against `feme_vulkan`'s hidden-by-default preset; `libfeme_vulkan.map`
+exports exactly those four. `feme/tools/feme-vulkan-loader-smoke` is a tiny
+client linked against the *real* Vulkan loader (not `libfeme_vulkan`
+directly); `feme/test/Vulkan/loader-smoke.test` runs it against the
+build-tree manifest, and `two-icd-coexistence.test` runs it again with
+Mesa's lavapipe manifest also on `VK_DRIVER_FILES`, both gated on lit
+features (`system-vulkan-loader`/`system-second-vulkan-icd`) so a host
+without a real loader or a second LLVM-based ICD installed skips them
+instead of failing. `unittests/Vulkan` covers the object model, capability
+truthfulness/determinism, and entrypoint-table dispatch-level filtering
+directly against `FeMeVulkanCore` (a static library `feme_vulkan` links
+into a real shared object; unit tests link it directly instead, since
+hidden visibility only affects a *shared* object's exports).
+
+Two scope decisions, recorded as deviations from this document's original
+text:
+
+- The device advertises `apiVersion = VK_API_VERSION_1_1`, not the 1.2 this
+  document's "Device identity" section's `VkPhysicalDeviceDriverProperties`
+  discussion presumes. That struct is a Vulkan 1.2 core promotion; requiring
+  it at V0 would mean this milestone has to satisfy every other Vulkan 1.2
+  mandatory core requirement too (timeline semaphores, `VkPhysicalDeviceVulkan12Properties`,
+  etc.), which is out of scope before shader execution exists at all. FeMe's
+  `vendorID`/`deviceID`/`VkDriverId` values are still computed now and folded
+  into the device/pipeline-cache UUIDs (`PhysicalDeviceInfo::DriverId`), so
+  whichever milestone first claims Vulkan 1.2 need only add the
+  `VkPhysicalDeviceDriverProperties` `pNext` handler, not change the
+  identity values themselves.
+- "Subgroup size"'s host-vector-width detection does not stand up a full
+  `llvm::TargetMachine`/`TargetTransformInfo` the way `feme::Driver`'s own
+  `getHostVectorBits` does; it uses `llvm::sys::getHostCPUFeatures()`
+  directly instead. V0 does no shader compilation and therefore has no
+  reason yet to perform the one-shot LLVM target-registry initialization
+  "Process Coexistence and Symbol Visibility" requires before any such
+  machinery runs; that initialization is deferred to whichever milestone
+  (V0.5/V1) first JIT-compiles a pipeline.
+
 ### V0.5: SPIR-V import that survives real shaders
 
 This milestone exists because the importer, not the runtime, is the first

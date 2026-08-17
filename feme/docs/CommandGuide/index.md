@@ -29,6 +29,13 @@ tool has its own page:
 - [`feme-cpu-restructure-fuzzer`](feme-cpu-restructure-fuzzer.md) —
   libFuzzer harness for CFG restructurization (`FixIrreducible` +
   `StructurizeCFG`), over `feme-cfg-gen` seeds.
+- `feme-vulkan-loader-smoke` — testing-only client for the FeMe Vulkan ICD
+  (`libfeme_vulkan`, see
+  [FeMeVulkanDesign.md](../FeMeVulkanDesign.md)), linked against the real
+  Khronos Vulkan loader rather than the ICD directly; only built when
+  Vulkan-Headers and a system Vulkan loader are both found
+  (`FEME_ENABLE_VULKAN`). No dedicated page: it takes no arguments and exists
+  solely for `test/Vulkan`'s loader-smoke and two-ICD coexistence lit tests.
 
 `feme-opt`, `feme-run`, `feme-render`, `feme-translate`, and `dxbc-as` are
 testing-only entry points
