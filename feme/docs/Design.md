@@ -2313,6 +2313,10 @@ feme/
       feme.cmake             (CMake cache script setting the variables
                               needed to build feme in-tree, e.g.
                               LLVM_ENABLE_PROJECTS=feme)
+    modules/
+      AddFeMe.cmake           (add_feme_library(), feme's own
+                              add_llvm_library() wrapper -- see "Build
+                              System Integration" below)
 ```
 
 ## Build System Integration
@@ -2336,8 +2340,19 @@ feme/
 - Standalone (out-of-tree, against an installed LLVM+MLIR) build support is
   intentionally out of scope for now (see Goals above); it can be added
   later without restructuring the in-tree build.
-- Uses standard LLVM CMake helpers (`add_llvm_library`, `add_mlir_dialect`,
-  `add_mlir_library`, `add_llvm_tool`) rather than hand-rolled build rules.
+- Uses standard LLVM CMake helpers rather than hand-rolled build rules:
+  `add_llvm_library`/`add_llvm_tool` for libraries and tools with no MLIR
+  dependency; `add_mlir_dialect`/`add_mlir_dialect_library`/
+  `add_mlir_translation_library` for the DXSA MLIR dialect and its
+  translation registration, which really are MLIR-ecosystem registrations
+  (they append to MLIR's own `MLIR_DIALECT_LIBS`/`MLIR_TRANSLATION_LIBS`
+  bookkeeping and depend on `mlir-headers`); and `add_feme_library`
+  (`feme/cmake/modules/AddFeMe.cmake`) -- a thin `add_llvm_library()` wrapper
+  following the same pattern as `add_mlir_library`/`add_clang_library` -- for
+  every other feme library. feme libraries previously used
+  `add_mlir_library` for this last case too, which had the effect of folding
+  them into MLIR's own `MLIRTargets` export set; `add_feme_library` gives
+  them their own export-set/install bookkeeping instead.
 
 ## Diagnostics and Error Handling
 
