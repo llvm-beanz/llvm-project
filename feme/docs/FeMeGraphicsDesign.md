@@ -1933,8 +1933,10 @@ its own file comment); `feme::graphics::PatchRecord` (Patch.h), bounded
 per-patch control-point/patch-constant/tess-factor storage (control-stage
 barriers need no new code: `feme::cpu`'s groupshared/barrier lowering is
 already stage-agnostic); the four adjacency `PrimitiveTopology` variants
-plus list-topology adjacency splitting (Pipeline.h; strip-topology
-splitting is a documented follow-up); `feme::graphics::GeometryStreamBuilder`
+plus list- and strip-topology adjacency splitting (Pipeline.h's
+`splitListPrimitiveAdjacency`/`splitStripPrimitiveAdjacency`, the latter
+added after R34's initial landing to close its own "documented follow-up");
+`feme::graphics::GeometryStreamBuilder`
 (GeometryStream.h), bounded per-invocation multi-stream emit/cut storage
 retaining strip boundaries and emission order for both rasterization and
 stream-output capture to share; and `feme::graphics::
@@ -1947,9 +1949,10 @@ the CPU lowering pipeline into an invokable `CompiledStage` batch (the
 yet) and wiring the result into `executeDraws`/`feme-render`; SIMD-lane
 stream-range reservation via checked prefix sums (today's builder models
 the deterministic, lane-order case only); and crack-free non-uniform
-per-edge tessellation/strip-adjacency splitting. `unittests/Graphics/
+per-edge tessellation. `unittests/Graphics/
 {Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp` and
-`PipelineTest.cpp`'s adjacency cases cover today's scope; `ninja check-feme`
+`PipelineTest.cpp`'s adjacency cases (including the new strip-splitting
+cases) cover today's scope; `ninja check-feme`
 (assertions-enabled, ccache build) passes in full before and after.
 
 ### G6: Amplification and mesh shading
