@@ -262,6 +262,28 @@ constexpr char PatchConstantShaderWithInputPatchIR[] = R"(
   attributes #0 = { "feme.shader.stage"="hull" }
 )";
 
+// Evaluates the completed patch at this invocation's own domain location:
+// linearly blends control points 0 and 1 by `u` and scales the result by a
+// per-patch constant -- one load from each of the domain stage's three
+// input sources (see DomainWrapper.cpp).
+constexpr char DomainShaderIR[] = R"(
+  define void @ds_main() #0 {
+    %u = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %p0 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %p1 = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 1)
+    %k = call float @feme.stage.input.load.f32(i32 2, i32 0, i32 0, i32 0)
+    %d = fsub float %p1, %p0
+    %s = fmul float %d, %u
+    %b = fadd float %p0, %s
+    %r = fmul float %b, %k
+    call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %r, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="domain" }
+)";
+
 SignatureElement makeFloatInput(uint32_t ElementID) {
   SignatureElement Elt;
   Elt.ElementID = ElementID;
@@ -307,6 +329,24 @@ SignatureElement makeFloatPatchOutput(uint32_t ElementID) {
 SignatureElement makeFloatInputPatchInput(uint32_t ElementID) {
   SignatureElement Elt = makeFloatInput(ElementID);
   Elt.FromInputPatch = true;
+  return Elt;
+}
+
+SignatureElement makeDomainLocationInput(uint32_t ElementID) {
+  SignatureElement Elt;
+  Elt.ElementID = ElementID;
+  Elt.Direction = SignatureDirection::Input;
+  Elt.SystemValue = SignatureSystemValue::DomainLocation;
+  Elt.ComponentType = SignatureComponentType::Float;
+  Elt.ComponentCount = 3;
+  Elt.BitWidth = 32;
+  return Elt;
+}
+
+SignatureElement makeFloatPatchInput(uint32_t ElementID) {
+  SignatureElement Elt = makeFloatInput(ElementID);
+  Elt.Direction = SignatureDirection::PatchInput;
+  Elt.Frequency = SignatureFrequency::PerPatch;
   return Elt;
 }
 
@@ -609,6 +649,79 @@ TEST(CompiledStageTest,
 
   StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
   EXPECT_EQ(Artifact.Stage, ShaderStage::Hull);
+  EXPECT_FALSE(Artifact.Signature.empty());
+}
+
+TEST(CompiledStageTest, InvokeDomainRunsStageAwarePath) {
+  Context Ctx;
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInput(0), makeDomainLocationInput(1),
+                  makeFloatPatchInput(2), makeFloatOutput(3)};
+  Expected<std::unique_ptr<CompiledStage>> Stage = compileGraphicsStage(
+      Ctx, DomainShaderIR, "ds_main", Sig, ShaderStage::Domain, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Domain);
+
+  // The completed patch's control points, indexed by control point.
+  FemeStageElement InputElements[2] = {};
+  InputElements[0].ElementID = 0;
+  InputElements[0].FirstComponent = 0;
+  InputElements[0].ComponentCount = 1;
+  InputElements[0].RowCount = 1;
+  InputElements[0].InvocationStride = 4;
+  InputElements[1].ElementID = 1;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 2;
+
+  // The patch constants, addressed per patch rather than per invocation.
+  FemeStageElement PatchConstantElements[3] = {};
+  PatchConstantElements[2].ElementID = 2;
+  PatchConstantElements[2].FirstComponent = 0;
+  PatchConstantElements[2].ComponentCount = 1;
+  PatchConstantElements[2].RowCount = 1;
+  FemeStageLayout PatchConstantLayout{};
+  PatchConstantLayout.Elements = PatchConstantElements;
+  PatchConstantLayout.ElementCount = 3;
+
+  FemeStageElement OutputElements[4] = {};
+  OutputElements[3].ElementID = 3;
+  OutputElements[3].FirstComponent = 0;
+  OutputElements[3].ComponentCount = 1;
+  OutputElements[3].RowCount = 1;
+  OutputElements[3].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 4;
+
+  std::vector<float> Inputs = {2.0f, 6.0f};
+  std::vector<float> PatchConstants = {10.0f};
+  std::vector<float> Outputs(3, -1.0f);
+  FemeDomainInvocation Invocations[3] = {};
+  Invocations[0].DomainLocation[0] = 0.0f;
+  Invocations[1].DomainLocation[0] = 0.5f;
+  Invocations[2].DomainLocation[0] = 1.0f;
+
+  DomainResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.PatchConstantLayout = &PatchConstantLayout;
+  Resources.PatchConstants = PatchConstants.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.Invocations = Invocations;
+  Resources.OutputControlPointCount = 2;
+  PreparedDomainBatch Prepared =
+      PreparedDomainBatch::create((*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokeDomain(Prepared), Succeeded());
+  // lerp(2, 6, u) * 10, evaluated at u = 0, 0.5 and 1.
+  EXPECT_EQ(Outputs[0], 20.0f);
+  EXPECT_EQ(Outputs[1], 40.0f);
+  EXPECT_EQ(Outputs[2], 60.0f);
+
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.Stage, ShaderStage::Domain);
   EXPECT_FALSE(Artifact.Signature.empty());
 }
 
