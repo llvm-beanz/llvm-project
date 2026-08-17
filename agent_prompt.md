@@ -62,23 +62,17 @@ Can you continue the R34 implementation from the roadmap document?
 
 Open issues form the last agent task:
 
-> 1. `GeometryWrapperPass`/`CompiledStage::invokeGeometry` -- not started; the
->    remaining half of the previous list's item 1. It is the one wrapper with
->    genuinely new machinery (per-invocation `GeometryStreamBuilder`,
->    `StageOpKind::StreamEmit`/`StreamCut` lowering, primitive-record input),
->    and `mergeGeometryStreamsInLaneOrder` already waits on it to be driven
->    from a real widened invocation.
-> 2. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+> 1. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
 >    the control-point batch ABI, for a hull shader whose control points
->    cooperate through groupshared memory before every one finishes.
-> 3. Wiring the compiled hull and domain stages into `executeDraws`/
->    `feme-render`/the scene YAML: now unblocked in principle (hull's two
->    phases, the fixed-function `feme::graphics::tessellate`, and a domain
->    evaluation together do produce rasterizable geometry), and the natural
->    next milestone -- it is what would finally let G5 have an
->    image-comparison completion test. It still needs host-side glue that
->    does not exist: `feme::graphics::PatchRecord` has no storage for the
->    original input control points (only an `InputControlPointCount`), and
->    nothing yet marshals a tessellator's `DomainPoint` output into a
->    `FemeDomainInvocation` array or chains the three stage invocations per
->    patch.
+>    cooperate through groupshared memory before every one finishes. Unchanged
+>    from every prior session's list.
+> 2. Wiring the compiled hull, domain, and (now) geometry stages into
+>    `executeDraws`/`feme-render`/the scene YAML: this is now the *only*
+>    remaining item blocking G5's image-comparison completion test, since all
+>    four wrapper passes exist. It still needs host-side glue that does not
+>    exist: `feme::graphics::PatchRecord` has no storage for the original
+>    input control points, nothing marshals a tessellator's `DomainPoint`
+>    output into a `FemeDomainInvocation` array or a primitive's assembled
+>    vertices into a `FemeGeometryInvocation`/`Inputs` block, and nothing
+>    chains the four stage invocations (hull control-point phase,
+>    patch-constant phase, domain, geometry) together per patch/primitive.
