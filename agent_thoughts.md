@@ -18307,3 +18307,102 @@ introduction/call-site migration, not a behavioral or architectural change,
 so no `*Design.md` file needed updating beyond documenting the new
 `add_feme_library` macro itself in `feme/docs/Design.md`'s "Build System
 Integration" and "Directory / Library Layout" sections.
+
+# Agent thoughts: move `feme_vulkan` under `feme/tools`
+
+## Request
+
+Move the `feme_vulkan` shared library's CMake logic and feme_vulkan-specific
+sources out of `feme/lib/Vulkan` into a new `feme/tools/feme-vulkan`
+subdirectory, following LLVM's convention that deliverable
+tools/shared-libraries live under a project's `tools` directory, and have
+`feme_vulkan` itself built via `add_feme_library` (rather than a bare
+`add_library(... SHARED ...)`) so it picks up LLVM's component-based build
+and install logic.
+
+## What moved, and what didn't
+
+`feme/lib/Vulkan` contains two conceptually separate things: `FeMeVulkanCore`
+(the ICD's object model/entrypoint table/`vk*` implementations, a static
+library unit tests link directly, per `feme/docs/FeMeVulkanDesign.md`'s
+"Process Coexistence and Symbol Visibility"), and `feme_vulkan` itself (a thin
+shared object that adds nothing but the four loader-facing exported symbols
+in `VulkanICD.cpp` plus the hidden-visibility/version-script packaging).
+
+Only what's genuinely specific to the `feme_vulkan` target moved:
+`VulkanICD.cpp`, `libfeme_vulkan.map`, the `add_library`/`add_feme_library`
+call building it, and the build-tree ICD manifest (`file(GENERATE ...)`)
+that embeds `$<TARGET_FILE:feme_vulkan>`. `FeMeVulkanCore` -- including the
+Vulkan-entrypoint-table code generation from `vk.xml`, which only
+`FeMeVulkanCore`'s `ProcAddr.cpp` `#include`s -- stayed in `feme/lib/Vulkan`,
+since it is still a `lib`-shaped static library linked into both
+`feme_vulkan` and `FeMeVulkanTests`, not a tool in its own right. This
+mirrors LLVM's own layering: e.g. `clang/tools/driver` (the `clang` tool)
+lives separately from `clang/lib/Driver` (the library it links), even though
+both are "driver" code.
+
+## `add_feme_library` for a genuine `SHARED` target
+
+The original `lib/Vulkan/CMakeLists.txt` comment explained *why* `feme_vulkan`
+bypassed `add_feme_library`/`llvm_add_library`: those macros assume LLVM's
+own component/dylib conventions, and the ICD needs full control over hidden
+visibility and the version script instead. Switching it to
+`add_feme_library(feme_vulkan SHARED ...)` turned out to still work for
+that: `set_target_properties()`/`target_link_options()` calls after the
+`add_feme_library()` call itself layer the hidden-visibility/version-script
+packaging on top exactly as before, since these are ordinary CMake target
+properties applied post-hoc regardless of how the target was declared.
+
+One real behavioral difference surfaced by testing: `llvm_add_library()`
+unconditionally gives every UNIX `SHARED` target it builds an
+LLVM-release-versioned `SOVERSION`/`VERSION` (e.g.
+`libfeme_vulkan.so.<version>`, symlinked from `libfeme_vulkan.so`) unless
+`SONAME` is explicitly requested (in which case it instead gets a
+differently-versioned `OUTPUT_NAME`). Neither is what a Vulkan ICD wants:
+the Vulkan loader always opens it by an absolute manifest path, never by
+soname, and it negotiates its own version through the loader-driver
+interface (`vk_icdNegotiateLoaderICDInterfaceVersion`) rather than through
+the shared object's filename. `set_property(TARGET feme_vulkan PROPERTY
+VERSION)`/`... PROPERTY SOVERSION)` (with no value, which *clears* the
+property rather than setting it to an empty string -- verified in a scratch
+CMake project, since `VERSION ""` on its own left a trailing-dot filename)
+restores the plain `libfeme_vulkan.so` name, matching the original
+non-`add_feme_library` build and `feme/docs/FeMeVulkanDesign.md`'s
+`library_path` examples.
+
+The switch also means `feme_vulkan` now gets a real `install(TARGETS
+feme_vulkan ...)` rule (via `add_feme_library_install`), which it never had
+before; verified by installing to a scratch prefix and confirming
+`lib/libfeme_vulkan.so` lands there un-versioned.
+
+## Test dependency gap found along the way
+
+`feme/test/CMakeLists.txt`'s `FEME_TEST_DEPENDS` never listed `feme_vulkan`
+itself, only `feme-vulkan-loader-smoke` (which links the real Vulkan loader,
+not `feme_vulkan`) and `FeMeVulkanTests` (which links `FeMeVulkanCore`
+directly). The loader-smoke and two-ICD-coexistence lit tests reach
+`feme_vulkan` only indirectly, through the Vulkan loader loading the
+build-tree manifest at `VK_DRIVER_FILES`, so nothing in `check-feme`'s
+dependency graph actually required building it first. This is tightly
+coupled to the code this change touches (it's the same target being moved),
+so I fixed it by adding `feme_vulkan` to `FEME_TEST_DEPENDS` alongside
+`feme-vulkan-loader-smoke`.
+
+## Verification
+
+Configured and built (Release, assertions on, `ccache` launcher, pre-existing
+build directory) `feme-test-depends` then `check-feme`: 1249 passed, 2
+unsupported (pre-existing, unrelated to Vulkan), 0 failures. Specifically
+re-ran `feme/test/Vulkan` (`loader-smoke`, `two-icd-coexistence`,
+`vk-gen-entrypoints-split-features`) and `FeMeVulkanTests` directly: all
+pass. Confirmed `nm -D lib/libfeme_vulkan.so` still exports exactly the
+same four symbols as before the move.
+
+## Design doc update
+
+`feme/docs/FeMeVulkanDesign.md`'s "Project and Library Boundaries" source
+layout and the `VulkanICD.cpp` file-path reference in "Process Coexistence
+and Symbol Visibility" both named `lib/Vulkan/VulkanICD.cpp`; updated both to
+`feme/tools/feme-vulkan/VulkanICD.cpp` (and to list `tools/feme-vulkan` as
+its own layout entry) to match the new location, since this is a real,
+if small, deviation from what the design doc described.
