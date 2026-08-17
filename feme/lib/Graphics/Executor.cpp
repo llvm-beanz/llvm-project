@@ -21,9 +21,10 @@
 //    `DepthStencilAttachment`), with early or late scheduling chosen from
 //    the fragment stage's own `SV_Depth`/`SV_StencilRef`/discard
 //    reflection. Full blend-factor/op combinations, write masks (per
-//    `BlendState`), and logic ops (`R8G8B8A8_*` only) are implemented;
-//    multiple render targets and multisampling remain rejected rather than
-//    run.
+//    `BlendState`), logic ops (`R8G8B8A8_*` only), and multiple render
+//    targets (one `BlendState`/`SV_TargetN` per color attachment,
+//    `GraphicsPipeline::getColorBlends()`) are implemented; multisampling
+//    remains rejected rather than run.
 //  - Vertex/fragment stage elements are 32-bit scalars/vectors only
 //    (`RowCount == 1`, `BitWidth == 32`); matrices and 16-/64-bit varyings
 //    are a mechanical, on-demand addition once a test needs them.
@@ -805,10 +806,11 @@ uint8_t applyLogicOp(LogicOp Op, uint8_t Src, uint8_t Dst) {
 /// enabling one disables the other -- and is only implemented for 8-bit
 /// unsigned-normalized formats (`R8G8B8A8_*`), the same restriction both
 /// APIs place on which formats support a logic op at all.
-Error mergeColor(const GraphicsPipeline &Pipeline, cpu::ResourceFormat Format,
-                 const std::array<double, 4> &Src,
+Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
+                 const std::array<float, 4> &BlendConstants,
+                 cpu::ResourceFormat Format, const std::array<double, 4> &Src,
                  MutableArrayRef<uint8_t> Texel) {
-  if (Pipeline.getLogicOpEnable()) {
+  if (LogicOpEnable) {
     if (Format != cpu::ResourceFormat::R8G8B8A8_UNORM &&
         Format != cpu::ResourceFormat::R8G8B8A8_UINT &&
         Format != cpu::ResourceFormat::R8G8B8A8_SINT)
@@ -819,20 +821,18 @@ Error mergeColor(const GraphicsPipeline &Pipeline, cpu::ResourceFormat Format,
     std::array<uint8_t, 4> SrcBytes{};
     if (Error E = packClearColor(Format, Src, SrcBytes))
       return E;
-    const BlendState &Blend = Pipeline.getColorBlend();
     for (unsigned C = 0; C != 4; ++C)
       if ((Blend.WriteMask >> C) & 1u)
-        Texel[C] = applyLogicOp(Pipeline.getLogicOp(), SrcBytes[C], Texel[C]);
+        Texel[C] = applyLogicOp(Logic, SrcBytes[C], Texel[C]);
     return Error::success();
   }
 
-  const BlendState &Blend = Pipeline.getColorBlend();
   std::array<double, 4> Final = Src;
   if (Blend.BlendEnable) {
     std::array<double, 4> Dst{};
     if (Error E = unpackColor(Format, Texel, Dst))
       return E;
-    Final = blendColor(Blend, Src, Dst, Pipeline.getBlendConstants());
+    Final = blendColor(Blend, Src, Dst, BlendConstants);
   }
   if (Blend.WriteMask != 0xF) {
     std::array<double, 4> Dst{};
@@ -864,11 +864,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
     return createStringError(inconvertibleErrorCode(),
                              "stencil testing is enabled but the draw has "
                              "no bound stencil attachment");
-  if (Draw.Attachments.size() != 1)
+  if (Draw.Attachments.empty())
     return createStringError(inconvertibleErrorCode(),
-                             "exactly one color attachment is implemented "
-                             "yet (roadmap R33 adds multiple render "
-                             "targets); got %zu",
+                             "a draw needs at least one color attachment");
+  if (Pipeline.getColorBlends().size() != Draw.Attachments.size())
+    return createStringError(inconvertibleErrorCode(),
+                             "the pipeline has %zu color blend state(s) but "
+                             "the draw has %zu color attachment(s)",
+                             Pipeline.getColorBlends().size(),
                              Draw.Attachments.size());
   if (Pipeline.getTopology() != PrimitiveTopology::TriangleList &&
       Pipeline.getTopology() != PrimitiveTopology::TriangleStrip)
@@ -926,22 +929,35 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
                         FSIn.ComponentType, FSIn.Interpolation});
   }
 
-  const SignatureElement *FSColor =
-      findElementByLocation(*FSSig, SignatureDirection::Output, 0);
-  if (!FSColor)
-    return createStringError(inconvertibleErrorCode(),
-                             "fragment stage has no output at location 0 "
-                             "(SV_Target0)");
-  if (FSColor->ComponentCount != 4 ||
-      FSColor->ComponentType != SignatureComponentType::Float)
-    return createStringError(inconvertibleErrorCode(),
-                             "SV_Target0 must be a 4-component "
-                             "floating-point output");
+  // One `SV_TargetN` fragment output per color attachment (roadmap R33's
+  // "multiple render targets"), linked by `Location` the same way varyings
+  // are: `FSColors[i]` writes into `Draw.Attachments[i]`.
+  SmallVector<const SignatureElement *, 4> FSColors;
+  for (uint32_t I = 0; I != Draw.Attachments.size(); ++I) {
+    const SignatureElement *FSColor =
+        findElementByLocation(*FSSig, SignatureDirection::Output, I);
+    if (!FSColor)
+      return createStringError(inconvertibleErrorCode(),
+                               "fragment stage has no output at location %u "
+                               "(SV_Target%u)",
+                               I, I);
+    if (FSColor->ComponentCount != 4 ||
+        FSColor->ComponentType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "SV_Target%u must be a 4-component "
+                               "floating-point output",
+                               I);
+    FSColors.push_back(FSColor);
+  }
 
   AttachmentView &Color = Draw.Attachments[0];
-  Expected<uint32_t> ColorElemSize = getFixtureFormatElementSize(Color.Format);
-  if (!ColorElemSize)
-    return ColorElemSize.takeError();
+  SmallVector<uint32_t, 4> ColorElemSizes;
+  for (const AttachmentView &A : Draw.Attachments) {
+    Expected<uint32_t> ElemSize = getFixtureFormatElementSize(A.Format);
+    if (!ElemSize)
+      return ElemSize.takeError();
+    ColorElemSizes.push_back(*ElemSize);
+  }
 
   // --- Depth/stencil test/write setup (roadmap R33). ---
   //
@@ -1469,15 +1485,24 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
                 continue;
             }
 
-            std::array<double, 4> RGBA;
-            for (unsigned C = 0; C != 4; ++C)
-              RGBA[C] =
-                  FSOutput->readFloat(FSColor->ElementID, C, Q * 4 + Lane);
-            size_t Off = ((size_t)PY * Color.Width + PX) * *ColorElemSize;
-            if (Error E = mergeColor(
-                    Pipeline, Color.Format, RGBA,
-                    MutableArrayRef(Color.Data.data() + Off, *ColorElemSize)))
-              return E;
+            for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
+                 ++AttIdx) {
+              AttachmentView &Att = Draw.Attachments[AttIdx];
+              std::array<double, 4> RGBA;
+              for (unsigned C = 0; C != 4; ++C)
+                RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
+                                              Q * 4 + Lane);
+              size_t Off =
+                  ((size_t)PY * Att.Width + PX) * ColorElemSizes[AttIdx];
+              const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
+              if (Error E =
+                      mergeColor(AttBlend, Pipeline.getLogicOpEnable(),
+                                 Pipeline.getLogicOp(),
+                                 Pipeline.getBlendConstants(), Att.Format, RGBA,
+                                 MutableArrayRef(Att.Data.data() + Off,
+                                                 ColorElemSizes[AttIdx])))
+                return E;
+            }
           }
         }
       }

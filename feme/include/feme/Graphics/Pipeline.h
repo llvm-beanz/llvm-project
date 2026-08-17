@@ -234,7 +234,7 @@ public:
                    DepthState Depth, BlendMode Blend, uint32_t SampleCount,
                    std::vector<AttachmentFormat> Attachments,
                    StencilState Stencil = StencilState{},
-                   BlendState ColorBlend = BlendState{},
+                   std::vector<BlendState> ColorBlends = {BlendState{}},
                    bool LogicOpEnable = false, LogicOp Logic = LogicOp::Copy,
                    std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f,
                                                           0.0f});
@@ -246,7 +246,10 @@ public:
   const DepthState &getDepthState() const { return Depth; }
   const StencilState &getStencilState() const { return Stencil; }
   BlendMode getBlendMode() const { return Blend; }
-  const BlendState &getColorBlend() const { return ColorBlend; }
+  /// One `BlendState` per color attachment (roadmap R33's "multiple render
+  /// targets"), indexed the same way `PreparedDraw::Attachments` and each
+  /// fragment output `Location` are.
+  llvm::ArrayRef<BlendState> getColorBlends() const { return ColorBlends; }
   bool getLogicOpEnable() const { return LogicOpEnable; }
   LogicOp getLogicOp() const { return Logic; }
   const std::array<float, 4> &getBlendConstants() const {
@@ -267,7 +270,7 @@ private:
   uint32_t SampleCount;
   std::vector<AttachmentFormat> Attachments;
   StencilState Stencil;
-  BlendState ColorBlend;
+  std::vector<BlendState> ColorBlends;
   bool LogicOpEnable;
   LogicOp Logic;
   std::array<float, 4> BlendConstants;
