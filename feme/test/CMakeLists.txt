@@ -41,6 +41,9 @@ set(FEME_TEST_DEPENDS
   split-file
   yaml2obj
   )
+if(FEME_HAVE_VULKAN_HEADERS)
+  list(APPEND FEME_TEST_DEPENDS FeMeVulkanTests)
+endif()
 
 add_custom_target(feme-test-depends DEPENDS ${FEME_TEST_DEPENDS})
 
