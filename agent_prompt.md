@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -60,21 +60,25 @@ Can you continue the R34 implementation from the roadmap document?
 > passes in full before and after -- G5 is not yet complete, since no
 > image-comparison completion test exists) (see: §1.8.5)
 
-
 Open issues form the last agent task:
 
-> 1. `DomainWrapperPass`/`GeometryWrapperPass` and
->    `CompiledStage::invokeDomain`/`invokeGeometry` -- not started.
+> 1. `GeometryWrapperPass`/`CompiledStage::invokeGeometry` -- not started; the
+>    remaining half of the previous list's item 1. It is the one wrapper with
+>    genuinely new machinery (per-invocation `GeometryStreamBuilder`,
+>    `StageOpKind::StreamEmit`/`StreamCut` lowering, primitive-record input),
+>    and `mergeGeometryStreamsInLaneOrder` already waits on it to be driven
+>    from a real widened invocation.
 > 2. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
 >    the control-point batch ABI, for a hull shader whose control points
 >    cooperate through groupshared memory before every one finishes.
-> 3. Wiring any compiled hull stage (now both phases, including `InputPatch`)
->    into `executeDraws`/`feme-render`/the scene YAML -- still strictly
->    downstream of the domain wrapper (control points and patch constants
->    alone produce no rasterizable geometry without going through the
->    tessellator and a domain-stage evaluation). Note this also means
->    `feme::graphics::PatchRecord` (Patch.h) still has no storage for the
->    original input control points at all (only an `InputControlPointCount`
->    used for validation) -- feeding a real `InputPatch` block from host-side
->    patch storage into `FemePatchConstantArgs::InputPatch` needs that
->    storage added too, whenever this item is picked up.
+> 3. Wiring the compiled hull and domain stages into `executeDraws`/
+>    `feme-render`/the scene YAML: now unblocked in principle (hull's two
+>    phases, the fixed-function `feme::graphics::tessellate`, and a domain
+>    evaluation together do produce rasterizable geometry), and the natural
+>    next milestone -- it is what would finally let G5 have an
+>    image-comparison completion test. It still needs host-side glue that
+>    does not exist: `feme::graphics::PatchRecord` has no storage for the
+>    original input control points (only an `InputControlPointCount`), and
+>    nothing yet marshals a tessellator's `DomainPoint` output into a
+>    `FemeDomainInvocation` array or chains the three stage invocations per
+>    patch.
