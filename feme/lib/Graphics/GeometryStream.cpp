@@ -54,3 +54,33 @@ GeometryStreamBuilder::getStrips(uint32_t Stream) const {
     Strips.push_back({State.OpenStripBegin, End});
   return Strips;
 }
+
+GeometryStreamMergeResult feme::graphics::mergeGeometryStreamsInLaneOrder(
+    llvm::ArrayRef<GeometryStreamBuilder> Lanes,
+    GeometryStreamBuilder &Combined) {
+  GeometryStreamMergeResult Result;
+  uint32_t StreamCount = Combined.getStreamCount();
+  Result.MergedVertexCount.assign(StreamCount, 0);
+  uint32_t MaxVertices = Combined.getMaxVerticesPerStream();
+
+  for (uint32_t Stream = 0; Stream != StreamCount; ++Stream) {
+    uint32_t Reserved = 0;
+    for (const GeometryStreamBuilder &Lane : Lanes) {
+      llvm::ArrayRef<StreamVertex> Vertices = Lane.getVertices(Stream);
+      // Checked prefix sum: reject this lane's whole reservation up front
+      // if it would overflow, rather than copying a partial strip.
+      if (Reserved + Vertices.size() > MaxVertices) {
+        Result.Truncated = true;
+        break;
+      }
+      for (const StreamStrip &Strip : Lane.getStrips(Stream)) {
+        for (uint32_t I = Strip.Begin; I != Strip.End; ++I)
+          Combined.emit(Stream, Vertices[I]);
+        Combined.cut(Stream);
+      }
+      Reserved += static_cast<uint32_t>(Vertices.size());
+    }
+    Result.MergedVertexCount[Stream] = Reserved;
+  }
+  return Result;
+}

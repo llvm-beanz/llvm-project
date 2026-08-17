@@ -24,12 +24,16 @@
 // `createStageStreamCut`, feme/include/feme/Core/StageOps.h) would target.
 // The emitted vertex records it accumulates are what both rasterization and
 // stream-output capture read from, in the same emission order, matching the
-// design's "same emitted records" language above. SIMD-lane range
-// reservation (batching many invocations' emissions together with a
-// checked prefix sum so lanes do not race for stream storage) is an
-// executor/wrapper-level concern once a compiled geometry stage exists and
-// is a documented follow-up; this builder is what such a wrapper needs to
-// batch on top of.
+// design's "same emitted records" language above.
+//
+// `mergeGeometryStreamsInLaneOrder` below is R34's follow-up "SIMD lanes
+// reserve stream ranges with checked prefix sums; deterministic mode uses
+// lane order" piece: it is still a host-side, standalone-testable
+// algorithm on top of per-lane `GeometryStreamBuilder`s, independent of a
+// compiled geometry stage actually existing yet (a real widened geometry
+// invocation producing one `GeometryStreamBuilder` per SIMD lane, and
+// wiring the merge below into it, remains a documented follow-up -- see
+// FeMeGraphicsDesign.md's "Patch and geometry wrappers").
 //
 //===----------------------------------------------------------------------===//
 
@@ -37,6 +41,7 @@
 #define FEME_GRAPHICS_GEOMETRYSTREAM_H
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <cstdint>
 #include <utility>
@@ -107,6 +112,50 @@ private:
   std::vector<StreamState> Streams;
   uint32_t MaxVerticesPerStream;
 };
+
+/// The outcome of `mergeGeometryStreamsInLaneOrder`: per-stream bookkeeping
+/// a caller needs to know whether every lane's emissions made it into the
+/// combined builder.
+struct GeometryStreamMergeResult {
+  /// `MergedVertexCount[Stream]` is the number of vertices from \p Lanes
+  /// that `mergeGeometryStreamsInLaneOrder` actually copied onto that
+  /// stream of the combined builder.
+  llvm::SmallVector<uint32_t, 4> MergedVertexCount;
+
+  /// Whether any stream ran out of the combined builder's declared
+  /// capacity before every lane's emissions fit.
+  bool Truncated = false;
+};
+
+/// Merges \p Lanes -- one `GeometryStreamBuilder` per SIMD lane's
+/// independent emissions, as a real widened geometry invocation would
+/// produce -- into \p Combined, in deterministic lane order (lane 0's
+/// emissions first, then lane 1's, and so on), per "deterministic mode
+/// uses lane order" in FeMeGraphicsDesign.md.
+///
+/// For each stream, this reserves that lane's output range with a checked
+/// prefix sum: it tracks the running total of vertices already placed on
+/// the stream and, before copying a lane's vertices, checks whether they
+/// fit within \p Combined's own declared `getMaxVerticesPerStream()`
+/// bound. A lane that does not fit contributes nothing to that stream, and
+/// (matching a bounded bump allocator, as `GeometryStreamBuilder::emit`
+/// itself already is) no later lane is considered for that stream either,
+/// since the reservation is monotonic -- this avoids letting a later,
+/// smaller lane's emissions land ahead of an earlier lane's in violation
+/// of lane order. \p Combined's `Truncated` flag records whether this
+/// happened on any stream; `MergedVertexCount` records how many vertices
+/// of each stream actually landed.
+///
+/// A lane's own strip boundaries (`GeometryStreamBuilder::cut`) are
+/// preserved by copying one closed-or-trailing-open strip
+/// (`GeometryStreamBuilder::getStrips`) at a time and cutting \p Combined
+/// after each: a strip never merges across a lane boundary, even if that
+/// lane's own trailing strip was left open (no explicit `cut`), matching
+/// real stream-output/rasterization hardware treating each invocation's
+/// primitives as independent of its neighbors'.
+GeometryStreamMergeResult
+mergeGeometryStreamsInLaneOrder(llvm::ArrayRef<GeometryStreamBuilder> Lanes,
+                                GeometryStreamBuilder &Combined);
 
 } // namespace feme::graphics
 
