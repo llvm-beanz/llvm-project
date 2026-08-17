@@ -1926,10 +1926,17 @@ TessFactorInside/DomainLocation/OutputControlPointID`,
 existing `InputLoad`/`OutputStore` ops rather than a new family);
 `feme::graphics::tessellate` (Tessellator.h), the fixed-function tessellator
 generating domain coordinates/connectivity for isoline/triangle/quad domains
-across every partitioning/output-primitive combination (triangle/quad
-interiors subdivide uniformly from the largest/inside factor rather than
-placing per-edge boundary vertices and stitching a crack-free fan -- see
-its own file comment); `feme::graphics::PatchRecord` (Patch.h), bounded
+across every partitioning/output-primitive combination, including
+crack-free non-uniform per-edge tessellation for the triangle/quad
+domains: each edge's own factor places that edge's own boundary vertices
+(so two adjacent patches agreeing on a shared edge's factor produce
+identical vertices along it, regardless of their other edges' or their
+interior's factors), bridged to a uniformly-subdivided interior core --
+strictly inset from the boundary, hence never itself a cross-patch
+cracking concern -- via a concentric-ring triangulation that walks
+corresponding boundary/core edges by proportional arc length
+(`bridgeRingsByEdge` in Tessellator.cpp); `feme::graphics::PatchRecord`
+(Patch.h), bounded
 per-patch control-point/patch-constant/tess-factor storage (control-stage
 barriers need no new code: `feme::cpu`'s groupshared/barrier lowering is
 already stage-agnostic); the four adjacency `PrimitiveTopology` variants
@@ -1948,8 +1955,9 @@ the CPU lowering pipeline into an invokable `CompiledStage` batch (the
 `VertexWrapperPass`/`FragmentWrapperPass` counterpart neither stage has
 yet) and wiring the result into `executeDraws`/`feme-render`; SIMD-lane
 stream-range reservation via checked prefix sums (today's builder models
-the deterministic, lane-order case only); and crack-free non-uniform
-per-edge tessellation. `unittests/Graphics/
+the deterministic, lane-order case only). (Crack-free non-uniform per-edge
+tessellation, previously deferred here, was added after R34's initial
+landing -- see the tessellator's own comment above.) `unittests/Graphics/
 {Tessellator,Patch,GeometryStream,LayeredRendering}Test.cpp` and
 `PipelineTest.cpp`'s adjacency cases (including the new strip-splitting
 cases) cover today's scope; `ninja check-feme`
