@@ -23,8 +23,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Following LLVM conventions, the `feme_vulkan` target as a shared library should
-be built out of the `tools` directory. Can you move the CMake logic and any
-sources specific to `feme_vulkan` into a new subdirectory under `feme/tools`,
-and have the `feme_vulkan` library use the `add_feme_library` macro so that it
-correctly handles the LLVM component-based build and install logic?
+A bunch of the CMake logic around the Vulkan dependencies is more complicated
+than it really needs to be. Rather than depending on a CMake-configured
+directory of the VulkanHeaders, we should be able to get everything we need from
+a Vulkan SDK installation using `find_package(Vulkan)`. That also simplifies
+linking against the vulkan loader directory and provides platform agnostic ways
+to refer to various files.
+
+Can you update the CMake configuration to be based on finding installed Vulkan
+package?
