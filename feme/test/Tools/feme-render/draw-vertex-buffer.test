@@ -1,0 +1,89 @@
+; RUN: split-file %s %t
+; RUN: feme-render %t/scene.yaml | FileCheck %s
+
+; Roadmap R32, "Basic triangle pipeline": a `vertex-buffers` entry with two
+; interleaved attributes (position, color) feeds a real vertex/index fetch,
+; exercising the scene's own vertex-buffer glue (as opposed to
+; draw-triangle.test's `SV_VertexID`-only shader).
+
+; CHECK: image color0 4x4 r8g8b8a8-unorm
+; CHECK-NEXT: y=0: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=1: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=2: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=3: ff0000ff ff0000ff ff0000ff ff0000ff
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [0.0, 0.0, 0.0, 1.0]
+pipeline:
+  vertex: { module: vs.ll, entry: vs_main }
+  fragment: { module: fs.ll, entry: fs_main }
+  cull: none
+  front-face: ccw
+vertex-buffers:
+  - binding: 0
+    stride: 28
+    attributes:
+      - { location: 0, format: r32g32b32-float, offset: 0 }
+      - { location: 1, format: r32g32b32a32-float, offset: 12 }
+    data: [-1.0, -1.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+            3.0, -1.0, 0.0, 1.0, 0.0, 0.0, 1.0,
+           -1.0,  3.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+draws:
+  - { vertices: 3, instances: 1 }
+
+;--- vs.ll
+
+; Two inputs (location 0: float3 position, location 1: float4 color) and
+; two outputs (element 2: SV_Position, element 3, location 0: float4 color
+; passthrough).
+define void @vs_main() #0 !feme.signature !0 {
+  %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+  %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+  %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+  %cr = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+  %cg = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 1, i32 0)
+  %cb = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 2, i32 0)
+  %ca = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 3, i32 0)
+  call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %px, i32 0)
+  call void @feme.stage.output.store.f32(i32 2, i32 0, i32 1, float %py, i32 0)
+  call void @feme.stage.output.store.f32(i32 2, i32 0, i32 2, float %pz, i32 0)
+  call void @feme.stage.output.store.f32(i32 2, i32 0, i32 3, float 1.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 3, i32 0, i32 0, float %cr, i32 0)
+  call void @feme.stage.output.store.f32(i32 3, i32 0, i32 1, float %cg, i32 0)
+  call void @feme.stage.output.store.f32(i32 3, i32 0, i32 2, float %cb, i32 0)
+  call void @feme.stage.output.store.f32(i32 3, i32 0, i32 3, float %ca, i32 0)
+  ret void
+}
+declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="vertex" }
+
+; feme::serializeSignature encoding of: element 0 input float3 (location 0),
+; element 1 input float4 (location 1), element 2 output SV_Position, element
+; 3 output float4 (location 0).
+!0 = !{[248 x i8] c"\01\00\00\00\04\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\03\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\02\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\03\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00"}
+
+;--- fs.ll
+
+; One input (element 0, location 0: float4 color), passed through to
+; SV_Target0 (element 1, location 0).
+define void @fs_main() #0 !feme.signature !0 {
+  %r = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+  %g = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+  %b = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+  %a = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 3, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %r, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %g, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %b, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float %a, i32 0)
+  ret void
+}
+declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="fragment" }
+
+!0 = !{[128 x i8] c"\01\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00"}

@@ -40,8 +40,10 @@
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
+#include "feme/Graphics/Executor.h"
 #include "feme/Graphics/ImageFixture.h"
 #include "feme/Graphics/Pipeline.h"
+#include "feme/Graphics/PreparedDraw.h"
 #include "feme/Graphics/Scene.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/Pipeline.h"
@@ -338,6 +340,100 @@ Error compareAttachment(const AttachmentStorage &Attachment,
   return Error::success();
 }
 
+/// The component count of a floating-point vertex-attribute format --
+/// `feme-render`'s scene glue only supports the floating-point 32-bit
+/// family today (a mechanical, on-demand addition, matching the executor's
+/// own `decodeAttribute` scope note in Executor.cpp).
+Expected<uint32_t> getFloatFormatComponentCount(cpu::ResourceFormat Format) {
+  switch (Format) {
+  case cpu::ResourceFormat::R32_FLOAT:
+    return 1;
+  case cpu::ResourceFormat::R32G32_FLOAT:
+    return 2;
+  case cpu::ResourceFormat::R32G32B32_FLOAT:
+    return 3;
+  case cpu::ResourceFormat::R32G32B32A32_FLOAT:
+    return 4;
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "feme-render only supports floating-point "
+                             "vertex attribute formats today");
+  }
+}
+
+/// Encodes \p VB's flat `data` field into \p Storage's tightly-packed,
+/// per-vertex byte layout its own `stride`/`attributes` describe, and
+/// returns the `feme::graphics::VertexAttribute` list \p Storage's bytes
+/// match. `data` is the concatenation, per vertex, of each attribute's
+/// components in the order `attributes` lists them (the only layout the
+/// design doc's own example needs so far -- see "Textual scene and image
+/// fixtures" in feme/docs/Design.md).
+Expected<std::vector<VertexAttribute>>
+encodeVertexBufferData(const SceneVertexBuffer &VB,
+                       std::vector<uint8_t> &Storage) {
+  std::vector<VertexAttribute> Attrs;
+  std::vector<uint32_t> ComponentCounts;
+  uint32_t ComponentsPerVertex = 0;
+  for (const SceneVertexAttribute &A : VB.Attributes) {
+    Expected<cpu::ResourceFormat> Format = parseFixtureFormat(A.Format);
+    if (!Format)
+      return Format.takeError();
+    Expected<uint32_t> Count = getFloatFormatComponentCount(*Format);
+    if (!Count)
+      return Count.takeError();
+    Attrs.push_back(VertexAttribute{A.Location, *Format, A.Offset});
+    ComponentCounts.push_back(*Count);
+    ComponentsPerVertex += *Count;
+  }
+  if (ComponentsPerVertex == 0 || VB.Data.size() % ComponentsPerVertex != 0)
+    return createStringError(inconvertibleErrorCode(),
+                             "vertex buffer %u's 'data' length is not a "
+                             "multiple of its attributes' component count",
+                             VB.Binding);
+
+  uint32_t VertexCount =
+      static_cast<uint32_t>(VB.Data.size() / ComponentsPerVertex);
+  Storage.assign((size_t)VertexCount * VB.Stride, 0);
+  size_t DataIdx = 0;
+  for (uint32_t V = 0; V != VertexCount; ++V) {
+    for (auto [Attr, Count] : llvm::zip(Attrs, ComponentCounts)) {
+      for (uint32_t C = 0; C != Count; ++C) {
+        float F = static_cast<float>(VB.Data[DataIdx++]);
+        memcpy(Storage.data() + (size_t)V * VB.Stride + Attr.Offset + C * 4, &F,
+               4);
+      }
+    }
+  }
+  return Attrs;
+}
+
+/// Encodes \p IB's `uint16`/`uint32` index list into \p Storage's raw byte
+/// form.
+Expected<IndexType> encodeIndexBufferData(const SceneIndexBuffer &IB,
+                                          std::vector<uint8_t> &Storage) {
+  IndexType Type;
+  if (IB.Format == "uint16")
+    Type = IndexType::UInt16;
+  else if (IB.Format == "uint32")
+    Type = IndexType::UInt32;
+  else
+    return createStringError(inconvertibleErrorCode(),
+                             "unknown index-buffer 'format: %s'",
+                             IB.Format.c_str());
+
+  size_t ElemSize = Type == IndexType::UInt16 ? 2 : 4;
+  Storage.assign(IB.Data.size() * ElemSize, 0);
+  for (size_t I = 0; I != IB.Data.size(); ++I) {
+    if (Type == IndexType::UInt16) {
+      uint16_t V = static_cast<uint16_t>(IB.Data[I]);
+      memcpy(Storage.data() + I * ElemSize, &V, ElemSize);
+    } else {
+      memcpy(Storage.data() + I * ElemSize, &IB.Data[I], ElemSize);
+    }
+  }
+  return Type;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -430,6 +526,7 @@ int main(int argc, char **argv) {
            << ": " << D.Message << "\n";
   });
 
+  std::optional<GraphicsPipeline> Pipeline;
   if (ParsedScene->Pipeline) {
     std::vector<AttachmentFormat> Formats;
     Formats.reserve(Attachments->size());
@@ -437,24 +534,117 @@ int main(int argc, char **argv) {
       Formats.push_back(AttachmentFormat{A.Format, A.Width, A.Height});
 
     StringRef SceneDir = sys::path::parent_path(SceneFilename);
-    Expected<GraphicsPipeline> Pipeline =
+    Expected<GraphicsPipeline> BuiltPipeline =
         buildPipeline(Ctx, SceneDir, *ParsedScene->Pipeline, WaveSize,
                       *ResolvedOptLevel, std::move(Formats));
-    if (!Pipeline) {
-      errs() << "feme-render: " << toString(Pipeline.takeError()) << "\n";
+    if (!BuiltPipeline) {
+      errs() << "feme-render: " << toString(BuiltPipeline.takeError()) << "\n";
       return 1;
     }
+    Pipeline = std::move(*BuiltPipeline);
   }
 
-  // Draw execution (vertex/index fetch, clipping, rasterization,
-  // interpolation) is roadmap R32, "Basic triangle pipeline" -- see the
-  // file comment above. This skeleton renders only the cleared attachments
-  // a scene with no draws describes.
   if (!ParsedScene->Draws.empty()) {
-    errs() << "feme-render: executing 'draws' is not implemented yet "
-              "(roadmap R32, 'Basic triangle pipeline'); this build only "
-              "supports a scene with an empty (or absent) 'draws' list\n";
-    return 1;
+    if (!Pipeline) {
+      errs() << "feme-render: a scene with 'draws' needs a 'pipeline'\n";
+      return 1;
+    }
+    if (Attachments->size() != 1) {
+      errs() << "feme-render: executing 'draws' supports exactly one "
+                "color attachment today (roadmap R33 adds more)\n";
+      return 1;
+    }
+
+    AttachmentStorage &ColorStorage = (*Attachments)[0];
+    AttachmentView Color{ColorStorage.Data, ColorStorage.Format,
+                         ColorStorage.Width, ColorStorage.Height};
+    std::array<AttachmentView, 1> AttachmentViews{Color};
+
+    // Owned byte buffers (and attribute lists) for every vertex/index buffer
+    // the scene declares, kept alive for the `executeDraws` call below.
+    std::vector<std::vector<uint8_t>> VertexBufferStorage(
+        ParsedScene->VertexBuffers.size());
+    std::vector<std::vector<VertexAttribute>> VertexAttributeStorage(
+        ParsedScene->VertexBuffers.size());
+    std::vector<VertexBufferBinding> VertexBuffers;
+    for (auto [Idx, VB] : llvm::enumerate(ParsedScene->VertexBuffers)) {
+      Expected<std::vector<VertexAttribute>> Attrs =
+          encodeVertexBufferData(VB, VertexBufferStorage[Idx]);
+      if (!Attrs) {
+        errs() << "feme-render: " << toString(Attrs.takeError()) << "\n";
+        return 1;
+      }
+      VertexAttributeStorage[Idx] = std::move(*Attrs);
+      VertexBuffers.push_back(VertexBufferBinding{VB.Binding, VB.Stride,
+                                                  VertexBufferStorage[Idx],
+                                                  VertexAttributeStorage[Idx]});
+    }
+
+    IndexBufferBinding IndexBuffer;
+    std::vector<uint8_t> IndexStorage;
+    if (ParsedScene->IndexBuffer) {
+      Expected<IndexType> Type =
+          encodeIndexBufferData(*ParsedScene->IndexBuffer, IndexStorage);
+      if (!Type) {
+        errs() << "feme-render: " << toString(Type.takeError()) << "\n";
+        return 1;
+      }
+      IndexBuffer = IndexBufferBinding{*Type, IndexStorage};
+    }
+
+    std::vector<DrawCommand> Draws;
+    for (const SceneDraw &D : ParsedScene->Draws)
+      Draws.push_back(DrawCommand{D.Vertices, D.Instances, /*FirstVertex=*/0,
+                                  /*FirstInstance=*/0, D.Indexed, D.FirstIndex,
+                                  D.VertexOffset});
+
+    ViewportState Viewport{0.0f,
+                           0.0f,
+                           static_cast<float>(ColorStorage.Width),
+                           static_cast<float>(ColorStorage.Height),
+                           0.0f,
+                           1.0f};
+    if (ParsedScene->Viewport) {
+      const SceneViewport &V = *ParsedScene->Viewport;
+      if (V.Rect.size() != 4) {
+        errs() << "feme-render: 'viewport.rect' must be [x, y, width, "
+                  "height]\n";
+        return 1;
+      }
+      Viewport.X = static_cast<float>(V.Rect[0]);
+      Viewport.Y = static_cast<float>(V.Rect[1]);
+      Viewport.Width = static_cast<float>(V.Rect[2]);
+      Viewport.Height = static_cast<float>(V.Rect[3]);
+      if (V.Depth.size() == 2) {
+        Viewport.MinDepth = static_cast<float>(V.Depth[0]);
+        Viewport.MaxDepth = static_cast<float>(V.Depth[1]);
+      }
+    }
+
+    ScissorRect Scissor{0, 0, ColorStorage.Width, ColorStorage.Height};
+    if (!ParsedScene->Scissor.empty()) {
+      if (ParsedScene->Scissor.size() != 4) {
+        errs() << "feme-render: 'scissor' must be [x, y, width, height]\n";
+        return 1;
+      }
+      Scissor.X = static_cast<int32_t>(ParsedScene->Scissor[0]);
+      Scissor.Y = static_cast<int32_t>(ParsedScene->Scissor[1]);
+      Scissor.Width = ParsedScene->Scissor[2];
+      Scissor.Height = ParsedScene->Scissor[3];
+    }
+
+    PreparedDraw Draw;
+    Draw.Attachments = AttachmentViews;
+    Draw.Viewport = Viewport;
+    Draw.Scissor = Scissor;
+    Draw.VertexBuffers = VertexBuffers;
+    Draw.IndexBuffer = IndexBuffer;
+    Draw.Draws = Draws;
+
+    if (Error E = executeDraws(*Pipeline, Draw)) {
+      errs() << "feme-render: " << toString(std::move(E)) << "\n";
+      return 1;
+    }
   }
 
   std::vector<const AttachmentStorage *> ToDump;

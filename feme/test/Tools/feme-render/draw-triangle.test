@@ -1,0 +1,73 @@
+; RUN: split-file %s %t
+; RUN: feme-render %t/scene.yaml | FileCheck %s
+
+; Roadmap R32, "Basic triangle pipeline" (see feme/docs/Roadmap.md): a
+; single oversized CCW triangle (vertex/index fetch driven only by
+; SV_VertexID, no vertex buffer needed) covers the whole 4x4 viewport after
+; clipping, so every texel is the fragment stage's solid red output.
+
+; CHECK: image color0 4x4 r8g8b8a8-unorm
+; CHECK-NEXT: y=0: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=1: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=2: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=3: ff0000ff ff0000ff ff0000ff ff0000ff
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [0.0, 0.0, 0.0, 1.0]
+pipeline:
+  vertex: { module: vs.ll, entry: vs_main }
+  fragment: { module: fs.ll, entry: fs_main }
+  cull: none
+  front-face: ccw
+draws:
+  - { vertices: 3, instances: 1 }
+
+;--- vs.ll
+
+; The vertex shader has no user vertex-buffer input: its lone input element
+; is SV_VertexID, and it selects one of the 3 hardcoded, oversized-triangle
+; corners from it -- (-1,-1), (3,-1), (-1,3) -- which, clipped against the
+; NDC cube, exactly covers the [-1, 1] unit square (see Executor.cpp's own
+; "clip in homogeneous coordinates" step).
+define void @vs_main() #0 !feme.signature !0 {
+  %vid = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+  %is0 = icmp eq i32 %vid, 0
+  %is1 = icmp eq i32 %vid, 1
+  %xb = select i1 %is1, float 3.0, float -1.0
+  %x = select i1 %is0, float -1.0, float %xb
+  %yb = select i1 %is1, float -1.0, float 3.0
+  %y = select i1 %is0, float -1.0, float %yb
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %x, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %y, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+  ret void
+}
+declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="vertex" }
+
+; The signature above encoded (feme::serializeSignature): element 0 is an
+; input, SV_VertexID (UInt, 1 component); element 1 is an output,
+; SV_Position (Float, 4 components).
+!0 = !{[128 x i8] c"\01\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\04\00\00\00\02\00\00\00\20\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00"}
+
+;--- fs.ll
+
+; No inputs at all: the fragment stage always writes solid red to
+; SV_Target0 (element 0, location 0, 4 components).
+define void @fs_main() #0 !feme.signature !0 {
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+  ret void
+}
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="fragment" }
+
+!0 = !{[68 x i8] c"\01\00\00\00\01\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00"}
