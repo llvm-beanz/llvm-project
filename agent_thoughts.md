@@ -17111,3 +17111,173 @@ before committing (no further changes needed after formatting).
    scene YAML -- still strictly downstream of the above, and of the domain
    wrapper (a control-point batch alone produces no rasterizable geometry
    without going through the tessellator and a domain-stage evaluation).
+
+# Agent thoughts: continuing R34 (PatchConstantWrapperPass, the patch-constant phase)
+
+Continuing roadmap R34 from where the prior session (HullWrapperPass, the
+hull shader's control-point phase) left off. Its own open-issues list named
+four remaining items; this session closes #1, "the patch-constant function:
+no ABI struct or wrapper pass yet."
+
+## Approach
+
+Read `feme/.instructions.md`, the R34 roadmap entry (`feme/docs/Roadmap.md`),
+"Tessellation and geometry stage model" and "Patch and geometry wrappers" in
+`feme/docs/FeMeGraphicsDesign.md`, and the prior session's own
+`agent_thoughts.md` entry before writing anything, then read the whole
+existing control-point-phase implementation
+(`HullWrapper.h`/`.cpp`, `FemePatchArgs`, `PatchResources`/
+`PreparedPatchBatch`, `CompiledStage::invokePatch`) end to end, since the
+patch-constant phase's own shape is defined by contrast with it throughout.
+
+The single hardest design question, not fully settled by the design doc or
+prior session: Direct3D and Vulkan give a hull shader's patch-constant
+function no pipeline stage of its own -- it shares `feme::ShaderStage::Hull`
+with the control-point phase, the same one `HullWrapperPass` already claims
+every candidate of. Something has to tell the two phases apart before
+`feme::cpu::runPipeline`'s per-stage wrapper dispatch (`Pipeline.cpp`'s
+`switch (Opts.Stage)`) can route each to the right wrapper, and it can't be
+`Opts.Stage` itself, since that's one value per whole-module compile.
+`feme::SignatureDirection::PatchOutput` already exists for exactly this
+signature's own elements (see `feme::dxil::convertEntrySignature`'s "a hull
+shader's patch-constant signature is its own output" rule, and its own test
+`dxil-raise-metadata-patch-constant.ll`) -- so I used its presence as the
+discriminator (`feme::cpu::isPatchConstantPhase`, new HullPhase.h/.cpp,
+private to `lib/Transforms/CPU`, mirroring `BarrierCalls.h`/
+`StageMaskCalls.h`'s existing precedent for a small cross-cutting helper
+shared between wrapper passes rather than duplicated into each). A
+control-point-phase function's own signature never has a `PatchOutput`
+element (only `Input`/`Output`, per `HullWrapper.cpp`'s own scope), so this
+is unambiguous for the shape both passes actually support today.
+`HullWrapperPass` now skips any Hull-stage candidate `isPatchConstantPhase`
+identifies, leaving it entirely to the new pass -- I added a regression test
+(`HullWrapperSkipsPatchConstantPhase`) specifically to pin this down, since a
+silent double-claim (or double-skip) of the same function would be a subtle
+correctness bug neither pass's own existing tests would otherwise catch.
+
+This discriminator is deliberately *not* a real linkage from a hull entry
+point to its separately-declared patch-constant function the way DXIL's
+`hs.patchconstantfunc` HS-state property would give (that property isn't
+parsed anywhere in this codebase yet -- I checked `MetadataRaising.cpp`,
+which only handles `EntryRootSigTag`). So today, as with the control-point
+phase before it, each phase must be compiled as its own independently named
+`feme::ShaderStage::Hull` entry point; wiring a real hull/patch-constant
+function pair from DXIL import is still future work, and I said so explicitly
+in HullPhase.h's own comment rather than implying more than this milestone
+built.
+
+The second design question was what "a single, non-batched invocation" (the
+open-issues list's own phrasing) should mean mechanically, given that every
+other CPU-target stage -- including the control-point phase, despite being
+"per control point" rather than "per thread" -- goes through the same
+general `SIMDize`/`WaveLoweringPass` machinery uniformly, widening its body
+into `<WaveSize x T>` lane operations regardless of the stage's own true
+parallelism shape. I decided *not* to bypass that machinery (which would
+have meant either a wholly separate, unvectorized lowering path through
+`Prepare`/`Linearize`/`ResourceLowering`, or teaching all of those passes a
+new scalar-only mode) -- both are far larger changes than this milestone
+warrants, and the general machinery already handles a genuinely scalar body
+correctly (it just never widens anything that doesn't need to be). Instead,
+`PatchConstantWrapperPass`'s `buildWrapper` still calls the widened body, but
+exactly once, with a compile-time-constant lane mask that only ever marks
+lane 0 active -- no wave-loop `PHI`/loop blocks at all, unlike every other
+wrapper's `buildWrapper`. This keeps the ABI's host-visible contract ("one
+invocation per patch") faithful without inventing a second lowering
+pipeline.
+
+Two structural differences from the control-point phase's own lowering
+follow directly from "reads the whole patch, not just its own control
+point":
+
+- `lowerPatchConstantInputLoad` has no self-indexing restriction at all
+  (unlike `lowerHullInputLoad`'s "must be `OutputControlPointID` or
+  constant 0" check) -- the control-point-index operand of a
+  `feme.stage.input.load` may be any value, since reading more than one
+  control point (e.g. two adjacent corners to compute an edge factor) is
+  the entire point of this phase.
+- `lowerPatchConstantOutputStore` always addresses invocation index 0 --
+  there is exactly one patch's worth of tessellation-factor/patch-constant
+  storage, not one structure-of-arrays slot per control point the way
+  `lowerHullOutputStore` addresses `FemePatchArgs::Outputs`.
+
+A group-sync barrier is still diagnosed rather than silently accepted, for a
+different reason than the control-point phase's own "needs
+`EntryWrapperPass`'s unported region-splitting machinery": a single
+invocation has no sibling invocation left to synchronize with in the first
+place, so a barrier reaching this phase is a shape this milestone doesn't
+attempt to make sense of, not merely one it hasn't gotten to yet.
+
+Scoped out, and said so in `PatchConstantWrapper.cpp`'s own file comment
+(mirroring the prior session's own precedent of a documented scope note
+rather than a silently narrower implementation): an `InputPatch` parameter.
+A real patch-constant function may read both the completed `OutputPatch` and
+the *original* pre-control-stage `InputPatch`; `FemePatchConstantArgs` only
+carries one structure-of-arrays input block today (`Inputs`, matching
+`FemePatchArgs::Outputs`'s own shape), addressed identically whether the
+source data is conceptually "input" or "output" control points -- this
+model's `SignatureElement::Direction` only distinguishes a *function's own*
+input/output, not which patch phase originally produced the data, so
+supporting both inputs would need a second block and layout this milestone's
+ABI does not yet carry.
+
+## What I built
+
+- `FemePatchConstantArgs` (RuntimeABI.h): the patch-constant phase's single-
+  invocation ABI struct, matching `FemePatchArgs`'s own field shape
+  (`Resources`, `InputLayout`/`Inputs`, `OutputLayout`/`Outputs`,
+  `OutputControlPointCount`) but with `Outputs` addressed unbatched.
+  `PatchConstantArgsField`/`getPatchConstantArgsType` (StageArgsLayout.h).
+- `PatchConstantResources`/`PreparedPatchConstantBatch` (ResourceHeap.h/.cpp,
+  mirroring `PatchResources`/`PreparedPatchBatch` exactly);
+  `CompiledStage::invokePatchConstant` (CompiledStage.h/.cpp, gated on
+  `Stage == ShaderStage::Hull` like `invokePatch`).
+- `feme::cpu::isPatchConstantPhase` (new HullPhase.h/.cpp): the
+  control-point-vs-patch-constant discriminator both wrapper passes share.
+  `HullWrapperPass` updated to skip any candidate it identifies.
+- `feme::cpu::PatchConstantWrapperPass` (new PatchConstantWrapper.h/.cpp):
+  the patch-constant phase's lowering and single-invocation wrapper-building,
+  as described above. Wired into `Pipeline.cpp`'s `ShaderStage::Hull` case,
+  after `HullWrapperPass`.
+- `unittests/Transforms/CPU/PatchConstantWrapperTest.cpp`: the common
+  multi-control-point-read shape building a real wrapper and lowering every
+  stage op away, a group-sync barrier being diagnosed, and
+  `HullWrapperPass` correctly skipping a patch-constant-phase function
+  (leaving its stage ops untouched) while `PatchConstantWrapperPass` still
+  wraps it afterward.
+- `unittests/Target/CPU/CompiledStageTest.cpp`'s new
+  `InvokePatchConstantRunsStageAwarePath`: an end-to-end JIT compile through
+  `runPipeline`'s `ShaderStage::Hull` path (now running both wrapper passes)
+  and a real `invokePatchConstant` call, reading two output control points'
+  attributes and producing their sum as a patch-constant output.
+
+## Verification
+
+Baseline (before this session) was `ninja check-feme` at 1198/1200 passing (2
+unsupported). After this session it reports 1202/1204 passing (2
+unsupported) -- the expected +4 (3 `PatchConstantWrapperTest` cases, 1
+`CompiledStageTest` case), nothing else added or removed. Built and tested
+with the existing `build/` directory (ccache launcher configured,
+`LLVM_ENABLE_ASSERTIONS=ON` already set in its CMakeCache), via
+`ninja -C build check-feme`, which itself depends on and builds every
+target's tests first. `clang-format` was run on every changed/added file
+before committing (no further changes needed after formatting in every case
+but one, where it only reflowed a doc-comment paragraph).
+
+## What's still open
+
+Unchanged from the prior session's own list, minus the item this session
+closed:
+
+1. `DomainWrapperPass`/`GeometryWrapperPass` and
+   `CompiledStage::invokeDomain`/`invokeGeometry` -- not started.
+2. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+   the control-point batch ABI, for a hull shader whose control points
+   cooperate through groupshared memory before every one finishes.
+3. Wiring any compiled hull stage (now both phases) into
+   `executeDraws`/`feme-render`/the scene YAML -- still strictly downstream
+   of the domain wrapper (control points and patch constants alone produce
+   no rasterizable geometry without going through the tessellator and a
+   domain-stage evaluation).
+4. An `InputPatch` parameter on the patch-constant function, newly deferred
+   this session (see above) -- a smaller, more scoped gap than the other
+   three.
