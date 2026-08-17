@@ -27,6 +27,7 @@
 #include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <array>
 #include <cstdint>
@@ -38,14 +39,73 @@ namespace feme::graphics {
 /// How vertices are assembled into primitives. Only the two triangle
 /// topologies have an executor yet (roadmap R32); the rest are recorded
 /// here since a pipeline description must reject a topology it does not
-/// implement rather than silently misinterpret it.
+/// implement rather than silently misinterpret it. The four `*WithAdjacency`
+/// topologies (roadmap R34) supply a geometry stage with each primitive's
+/// neighboring vertices in addition to its own -- see
+/// `topologyHasAdjacency`/`splitListPrimitiveAdjacency` below and
+/// "Geometry stages consume assembled primitives plus adjacency" in
+/// feme/docs/FeMeGraphicsDesign.md.
 enum class PrimitiveTopology : uint8_t {
   PointList,
   LineList,
   LineStrip,
   TriangleList,
   TriangleStrip,
+  LineListWithAdjacency,
+  LineStripWithAdjacency,
+  TriangleListWithAdjacency,
+  TriangleStripWithAdjacency,
 };
+
+/// Whether \p Topology is one of the four "with adjacency" topologies.
+bool topologyHasAdjacency(PrimitiveTopology Topology);
+
+/// The non-adjacency topology sharing \p Topology's assembled primitives,
+/// e.g. `TriangleListWithAdjacency` -> `TriangleList`. A geometry stage's
+/// own primitives (the ones clipping/rasterization sees) are these;
+/// adjacency vertices are visible only inside the geometry invocation. A
+/// non-adjacency \p Topology maps to itself.
+PrimitiveTopology stripAdjacency(PrimitiveTopology Topology);
+
+/// One list-topology primitive's fetched indices, split into the
+/// primitive's own vertices (`Primitive`, in the same order and count as
+/// `stripAdjacency(Topology)`'s primitive would fetch) and, for an
+/// adjacency topology, its adjacency-only vertices (`Adjacent`, empty for
+/// a non-adjacency topology). Matches Vulkan/Direct3D's shared adjacency
+/// vertex order: line adjacency is `(adj0, v0, v1, adj1)`; triangle
+/// adjacency is `(v0, adj01, v1, adj12, v2, adj20)`.
+struct SplitPrimitiveAdjacency {
+  llvm::SmallVector<uint32_t, 3> Primitive;
+  llvm::SmallVector<uint32_t, 3> Adjacent;
+};
+
+/// The number of vertex/index slots one *list*-topology (not strip)
+/// primitive occupies: `getListPrimitiveVertexCount(PointList) == 1`,
+/// `LineList == 2` (`LineListWithAdjacency == 4`), `TriangleList == 3`
+/// (`TriangleListWithAdjacency == 6`). Strip topologies have no fixed
+/// per-primitive count (each primitive after the first reuses vertices
+/// from the last); splitting a strip topology's adjacency is a documented
+/// follow-up (see `splitListPrimitiveAdjacency`'s own comment), so this
+/// asserts \p Topology is not a strip topology.
+uint32_t getListPrimitiveVertexCount(PrimitiveTopology Topology);
+
+/// Splits one *list*-topology primitive's `getListPrimitiveVertexCount(
+/// Topology)` fetched indices in \p FetchedIndices (which must have
+/// exactly that many entries) per `SplitPrimitiveAdjacency`'s own comment.
+///
+/// Scope note: only list topologies are implemented. A strip topology's
+/// adjacency vertices interleave across a sliding window of consecutive
+/// primitives rather than each primitive owning a disjoint index range,
+/// which needs its own windowing logic in whatever assembles primitives
+/// from a strip (the executor's vertex/index fetch, which does not yet
+/// exist for any adjacency topology at all -- roadmap R32's executor only
+/// implements `TriangleList`/`TriangleStrip`). `LineStripWithAdjacency`/
+/// `TriangleStripWithAdjacency` are declared enumerators for a pipeline
+/// description to name, matching this header's "reject rather than
+/// silently misinterpret" convention, but have no split helper yet.
+SplitPrimitiveAdjacency
+splitListPrimitiveAdjacency(PrimitiveTopology Topology,
+                            llvm::ArrayRef<uint32_t> FetchedIndices);
 
 /// Which primitive-facing direction, if any, is discarded before
 /// rasterization.

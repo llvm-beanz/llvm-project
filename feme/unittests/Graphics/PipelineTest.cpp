@@ -48,4 +48,59 @@ TEST(GraphicsPipelineTest, DescribesFixedFunctionState) {
   EXPECT_EQ(Pipeline.getAttachments()[0].Height, 4u);
 }
 
+TEST(PrimitiveTopologyTest, HasAdjacencyIdentifiesTheFourAdjacencyKinds) {
+  EXPECT_FALSE(topologyHasAdjacency(PrimitiveTopology::PointList));
+  EXPECT_FALSE(topologyHasAdjacency(PrimitiveTopology::TriangleStrip));
+  EXPECT_TRUE(topologyHasAdjacency(PrimitiveTopology::LineListWithAdjacency));
+  EXPECT_TRUE(topologyHasAdjacency(PrimitiveTopology::LineStripWithAdjacency));
+  EXPECT_TRUE(
+      topologyHasAdjacency(PrimitiveTopology::TriangleListWithAdjacency));
+  EXPECT_TRUE(
+      topologyHasAdjacency(PrimitiveTopology::TriangleStripWithAdjacency));
+}
+
+TEST(PrimitiveTopologyTest, StripAdjacencyReturnsTheAssembledTopology) {
+  EXPECT_EQ(stripAdjacency(PrimitiveTopology::LineListWithAdjacency),
+            PrimitiveTopology::LineList);
+  EXPECT_EQ(stripAdjacency(PrimitiveTopology::TriangleListWithAdjacency),
+            PrimitiveTopology::TriangleList);
+  // A non-adjacency topology maps to itself.
+  EXPECT_EQ(stripAdjacency(PrimitiveTopology::TriangleList),
+            PrimitiveTopology::TriangleList);
+}
+
+TEST(PrimitiveTopologyTest, ListPrimitiveVertexCounts) {
+  EXPECT_EQ(getListPrimitiveVertexCount(PrimitiveTopology::PointList), 1u);
+  EXPECT_EQ(getListPrimitiveVertexCount(PrimitiveTopology::LineList), 2u);
+  EXPECT_EQ(
+      getListPrimitiveVertexCount(PrimitiveTopology::LineListWithAdjacency),
+      4u);
+  EXPECT_EQ(getListPrimitiveVertexCount(PrimitiveTopology::TriangleList), 3u);
+  EXPECT_EQ(
+      getListPrimitiveVertexCount(PrimitiveTopology::TriangleListWithAdjacency),
+      6u);
+}
+
+TEST(PrimitiveTopologyTest, SplitListPrimitiveAdjacencyForLines) {
+  SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
+      PrimitiveTopology::LineListWithAdjacency, {10, 11, 12, 13});
+  EXPECT_EQ(Split.Primitive, (llvm::SmallVector<uint32_t, 3>{11, 12}));
+  EXPECT_EQ(Split.Adjacent, (llvm::SmallVector<uint32_t, 3>{10, 13}));
+}
+
+TEST(PrimitiveTopologyTest, SplitListPrimitiveAdjacencyForTriangles) {
+  SplitPrimitiveAdjacency Split = splitListPrimitiveAdjacency(
+      PrimitiveTopology::TriangleListWithAdjacency, {0, 1, 2, 3, 4, 5});
+  EXPECT_EQ(Split.Primitive, (llvm::SmallVector<uint32_t, 3>{0, 2, 4}));
+  EXPECT_EQ(Split.Adjacent, (llvm::SmallVector<uint32_t, 3>{1, 3, 5}));
+}
+
+TEST(PrimitiveTopologyTest,
+     SplitListPrimitiveAdjacencyWithoutAdjacencyIsIdentity) {
+  SplitPrimitiveAdjacency Split =
+      splitListPrimitiveAdjacency(PrimitiveTopology::TriangleList, {5, 6, 7});
+  EXPECT_EQ(Split.Primitive, (llvm::SmallVector<uint32_t, 3>{5, 6, 7}));
+  EXPECT_TRUE(Split.Adjacent.empty());
+}
+
 } // namespace
