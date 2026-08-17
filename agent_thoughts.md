@@ -16941,3 +16941,173 @@ completion test exists yet.
    domain and geometry remains the right order, per the prior session's
    own recommendation.
 2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
+
+# Agent thoughts: continuing R34 (HullWrapperPass control-point phase)
+
+## Scope decision
+
+The prior session's open-issues list still led with the same item, unchanged:
+
+1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
+   `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry` -- "the
+   single largest remaining piece", with two sub-options recorded: (a)
+   refactor `EntryWrapperPass`'s barrier-region-splitting machinery to be
+   generic over its args-struct ABI, or (b) accept a hull-stage-specific
+   duplication of it. The prior session recommended starting with the
+   hull/control stage alone, since it is structurally closest to compute.
+
+I started, as the prior two sessions did, by reading the actual code this
+time would touch: `VertexWrapper.cpp` (571 lines, the closest existing
+precedent for "batch one invocation per element of a count, structure-of-
+arrays addressed"), `EntryWrapper.cpp` (1644 lines, barrier-region
+splitting), `CompiledStage.h/.cpp` and `ResourceHeap.h/.cpp`'s
+`PreparedVertexBatch`/`invokeVertices` (the exact host-side plumbing shape
+a new stage needs), and `RuntimeABI.h`'s own comment on `FemePatchArgs`
+("shape sketches, not final field layouts... after two end-to-end
+prototype shaders establish the data actually required").
+
+That last point turned into the session's key realization: DXIL/HLSL's own
+hull-shader model is *already* two separate compiled functions -- the
+per-control-point main function, and a separate patch-constant function
+that receives the *already-synchronized* `OutputPatch` (every control
+point's output) plus `InputPatch`. The "workgroup barrier semantics" the
+design's own "Patch and geometry wrappers" section names is not something
+one function needs to synchronize *within itself* for this common
+shape -- it is simply "phase 1 (control points) finishes before phase 2
+(patch constants) starts", which a host runtime gets for free from
+sequential C++ (`CompiledStage::invokePatch` calling one wave loop to
+completion before another) with **no barrier-splitting machinery at all**.
+This only stops being true for a hull shader whose control points
+themselves cooperate (e.g. via groupshared memory) *before* every one has
+finished -- which is exactly the shape `EntryWrapperPass`'s machinery
+exists for, and exactly what I scoped out and diagnosed rather than
+attempting.
+
+This reframing turned "the single largest remaining piece" into something
+substantially smaller for its *first* phase: the control-point phase of a
+hull shader is structurally identical to `VertexWrapperPass` (batch over a
+count, structure-of-arrays stage storage, no barriers), with the interesting
+new case being how a control point identifies and validates access to its
+*own* slot (`SV_OutputControlPointID`) rather than an externally-supplied
+per-invocation record. I judged this a genuinely completable, well-bounded,
+and honestly-scoped slice for one session -- not the "own multi-day,
+multi-commit effort" the whole item still is, but a real, tested piece of
+it, in the same spirit as how the previous two sessions found crack-free
+tessellation and SIMD-lane stream merging inside R34's larger deferred
+list.
+
+## Design
+
+**`FemePatchArgs`** (RuntimeABI.h): settles the "shape sketch" the design
+doc left open, following `FemeVertexArgs`'s shape almost exactly --
+`AbiVersion`, `Resources`, `InputLayout`/`Inputs`, `OutputLayout`/`Outputs`
+-- but with `OutputControlPointCount` in place of an explicit
+`FemeVertexInvocation`-style per-invocation array: a control point has no
+system values independent of its own index, unlike a vertex (which carries
+`VertexID`/`InstanceID`/etc.), so nothing needs storing per invocation
+beyond the count.
+
+**`StageLayoutSystemValue::OutputControlPointID`** (RuntimeABI.h): the new
+enumerator a `FemeStageElement` can name, mirroring
+`SignatureSystemValue::OutputControlPointID` (already added by R34's
+initial landing) the same way every other `StageLayoutSystemValue` mirrors
+its `SignatureSystemValue` counterpart.
+
+**`HullWrapperPass`** (new HullWrapper.h/.cpp): a close structural mirror of
+`VertexWrapperPass` -- same wave-loop wrapper shape, same
+`computeStageStorageAddress`/`loadLayoutField` helpers (duplicated rather
+than shared, matching this codebase's own convention of each wrapper pass
+owning its small helpers rather than factoring out a shared base, visible
+already between `VertexWrapper.cpp` and `FragmentWrapper.cpp`) -- batching
+`FemePatchArgs::OutputControlPointCount` invocations instead of
+`FemeVertexArgs::InvocationCount` vertices. Two things needed real design
+choices beyond a mechanical rename:
+
+- **`OutputControlPointID` lowering.** Computed directly as the invoking
+  lane's own flat invocation index (`WaveIndex * WaveSize + Lane`) -- no
+  invocation-record array to read it from, unlike a vertex's `VertexID`.
+- **Validating self-indexed input loads.** A hull main function's
+  `InputPatch<T, N>` parameter can legally be indexed by any expression,
+  but this wrapper's stage-storage addressing (like `VertexWrapperPass`'s)
+  always uses the invoking lane's own flat index regardless of what
+  expression appears in the source IR -- so a control point reading a
+  *different* control point's input would silently read its own slot
+  instead if not caught. I require the load's control-point-index operand
+  to be exactly the same SSA value `OutputControlPointID`'s own lowering
+  produced (checked by lowering that system-value load *first*, in its own
+  pre-pass over `instructions(F)`, so a subsequent ordinary load referencing
+  it already sees the replacement via the earlier call's `replaceAllUsesWith`
+  -- forward iteration order guarantees def-before-use here), or the
+  constant `0` if the function never reads `OutputControlPointID` at all
+  (mirroring `VertexWrapperPass`'s own precedent for its "vertex" operand,
+  which is *always* constant 0 for the same underlying reason -- no
+  runtime-varying "which one" concept the wrapper's addressing model
+  actually honors). Anything else is diagnosed via `emitError`, not
+  silently mis-addressed.
+- **Diagnosing barriers.** `lowerHullStageOps` scans for any
+  `..._with_group_sync` call (`feme::cpu::matchBarrierCall`) before doing
+  anything else and diagnoses it immediately: this phase's wave loop has no
+  region-splitting to honor one, so silently dropping it (or running it as
+  a no-op fence) would be a correctness bug, not a scope narrowing.
+
+**Host-side plumbing**: `PatchResources`/`PreparedPatchBatch` in
+ResourceHeap.h/.cpp (mirroring `VertexResources`/`PreparedVertexBatch`
+exactly), `CompiledStage::invokePatch` (mirroring `invokeVertices`, gated on
+`Stage == ShaderStage::Hull`), and wiring `HullWrapperPass` into
+`Pipeline.cpp`'s per-stage switch for `ShaderStage::Hull` (previously
+`llvm_unreachable`).
+
+## What I built
+
+- `FemePatchArgs`, `StageLayoutSystemValue::OutputControlPointID`
+  (RuntimeABI.h); `PatchArgsField`/`getPatchArgsType` (StageArgsLayout.h).
+- `feme::cpu::HullWrapperPass` (HullWrapper.h/.cpp): control-point-phase
+  lowering and wrapper-building as described above.
+- `PatchResources`/`PreparedPatchBatch` (ResourceHeap.h/.cpp);
+  `CompiledStage::invokePatch` (CompiledStage.h/.cpp);
+  `ShaderStage::Hull` wired into `Pipeline.cpp`'s `runPipeline` switch.
+- `unittests/Transforms/CPU/HullWrapperTest.cpp`: the common self-indexed
+  shape building a real wrapper and lowering every stage op away, a
+  cross-control-point input load being diagnosed, and a group-sync barrier
+  being diagnosed.
+- `unittests/Target/CPU/CompiledStageTest.cpp`'s new
+  `InvokePatchRunsStageAwarePath`: an end-to-end JIT compile through
+  `runPipeline`'s `ShaderStage::Hull` path and a real `invokePatch` call
+  producing correct per-control-point output, plus an `getArtifactInfo`
+  check. (`compileGraphicsStage`'s hard-coded `vs_main`/`ps_main` entry-name
+  guess was generalized to take the entry name explicitly, since a third
+  stage broke the binary guess -- updated both existing call sites, no
+  behavior change for them.)
+
+## Verification
+
+Baseline (before this session) was `ninja check-feme` at 1194/1196 passing
+(2 unsupported). After this session it reports 1198/1200 passing (2
+unsupported) -- the expected +4 (3 `HullWrapperTest` cases, 1
+`CompiledStageTest` case), nothing else added or removed. Built and tested
+with the existing `build/` directory (ccache launcher configured,
+`LLVM_ENABLE_ASSERTIONS=ON` already set in its CMakeCache), via
+`ninja -C build check-feme`, which itself depends on and builds every
+target's tests first. `clang-format` was run on every changed/added file
+before committing (no further changes needed after formatting).
+
+## What's still open
+
+1. The patch-constant function: no ABI struct or wrapper pass yet. It needs
+   its own shape (`OutputPatch`/`InputPatch` inputs, a single
+   non-batched/scalar invocation per patch rather than a wave loop, tess
+   factor + patch constant outputs feeding `feme::graphics::PatchRecord`).
+2. `DomainWrapperPass`/`GeometryWrapperPass` and
+   `CompiledStage::invokeDomain`/`invokeGeometry` -- not started.
+3. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+   the control-point batch ABI, for a hull shader whose control points
+   cooperate through groupshared memory before every one finishes (today
+   diagnosed by `HullWrapperPass` rather than supported). Still, as the
+   prior two sessions found for the whole wrapper item, "its own
+   multi-commit body of work" -- but now scoped to exactly this one
+   narrower case rather than the whole hull/domain/geometry wrapper
+   surface.
+4. Wiring any compiled hull stage into `executeDraws`/`feme-render`/the
+   scene YAML -- still strictly downstream of the above, and of the domain
+   wrapper (a control-point batch alone produces no rasterizable geometry
+   without going through the tessellator and a domain-stage evaluation).
