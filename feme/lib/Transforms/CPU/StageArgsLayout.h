@@ -110,6 +110,18 @@ enum FragmentArgsField : unsigned {
   FragmentArgsFieldReserved = 10,
 };
 
+enum PatchArgsField : unsigned {
+  PatchArgsFieldAbiVersion = 0,
+  PatchArgsFieldOutputControlPointCount = 1,
+  PatchArgsFieldReserved32 = 2,
+  PatchArgsFieldResources = 3,
+  PatchArgsFieldInputLayout = 4,
+  PatchArgsFieldInputs = 5,
+  PatchArgsFieldOutputLayout = 6,
+  PatchArgsFieldOutputs = 7,
+  PatchArgsFieldReserved = 8,
+};
+
 inline llvm::StructType *getStageElementType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   llvm::Type *I64Ty = llvm::Type::getInt64Ty(Ctx);
@@ -170,6 +182,14 @@ inline llvm::StructType *getFragmentArgsType(llvm::LLVMContext &Ctx) {
   return llvm::StructType::get(
       Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 2), PtrTy, PtrTy, PtrTy,
             PtrTy, PtrTy, PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
+}
+
+inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
+  llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
+  llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
+  return llvm::StructType::get(
+      Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 2), PtrTy, PtrTy, PtrTy,
+            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
 }
 
 inline llvm::Value *loadStructField(llvm::IRBuilder<> &Builder,

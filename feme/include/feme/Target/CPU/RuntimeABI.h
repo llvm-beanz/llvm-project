@@ -11,7 +11,8 @@
 // (`FemeDispatchArgs`), roadmap R28's graphics-stage batch ABI
 // (`FemeShaderResources`, `FemeStageLayout`, `FemeVertexArgs`, and
 // `FemeFragmentArgs`), and roadmap R29's image/sampler descriptors
-// (`FemeImageDescriptor`, `FemeSamplerDescriptor`), plus the
+// (`FemeImageDescriptor`, `FemeSamplerDescriptor`), and roadmap R34's
+// control-stage control-point batch ABI (`FemePatchArgs`), plus the
 // descriptor/layout/system-value enumerators that give those structs' fields
 // meaning. R29 also folded `FemeShaderResources` into `FemeDispatchArgs` and
 // retyped `FemeShaderResources::SamplerHeap`, breaking the ABI on purpose
@@ -366,6 +367,11 @@ enum class StageLayoutSystemValue : uint32_t {
   StencilRef = 15,
   RenderTargetArrayIndex = 16,
   ViewportArrayIndex = 17,
+  /// The output control point index a hull/control-stage invocation is
+  /// computing (roadmap R34's continuation): `feme::cpu::HullWrapperPass`'s
+  /// own per-invocation loop index, matching `SignatureSystemValue::
+  /// OutputControlPointID`.
+  OutputControlPointID = 18,
 };
 
 /// The interpolation mode recorded for one stage-layout element, mirroring
@@ -598,6 +604,53 @@ struct FemeFragmentArgs {
   /// Per-quad final masks written by the fragment wrapper.
   FemeFragmentResult *Results;
   /// ABI headroom for later fragment-batch metadata.
+  void *Reserved[4];
+};
+
+/// The single argument a compiled control (hull) stage's control-point entry
+/// point takes:
+///
+/// \code
+///   void feme_cpu_entry_<name>(const FemePatchArgs *Args);
+/// \endcode
+///
+/// Roadmap R34's continuation: `feme::cpu::HullWrapperPass` batches the
+/// control-point phase of a hull shader -- one invocation per output control
+/// point, addressed by `StageLayoutSystemValue::OutputControlPointID` -- the
+/// same structure-of-arrays shape `FemeVertexArgs` uses for a vertex batch,
+/// with `OutputControlPointCount` invocations rather than an explicit
+/// per-invocation record array (a control point's identity *is* its index;
+/// unlike a vertex, it has no independent system values of its own). The
+/// patch-constant phase (reading the completed `OutputPatch` this phase
+/// produces plus `InputPatch`, and writing tessellation factors) is not yet
+/// modeled -- see HullWrapper.cpp's file comment for current scope and what
+/// remains.
+struct FemePatchArgs {
+  /// `StageArgsAbiVersion`.
+  uint32_t AbiVersion;
+  /// Number of output control points this batch computes, and therefore the
+  /// number of structure-of-arrays slots in `Outputs`.
+  uint32_t OutputControlPointCount;
+  /// Reserved 32-bit fields to keep pointer fields naturally aligned and leave
+  /// room for later scalar metadata.
+  uint32_t Reserved32[2];
+  /// Resource/root-constant block shared by every stage.
+  const FemeShaderResources *Resources;
+  /// Layout describing `Inputs`.
+  const FemeStageLayout *InputLayout;
+  /// Structure-of-arrays input storage for the input control points' user
+  /// attributes, addressed the same way `Outputs` is: this milestone's
+  /// wrapper only supports a control point reading its own input control
+  /// point's attributes (see HullWrapper.cpp), so callers with an unequal
+  /// input/output control point count still provide one input slot per
+  /// *output* control point (duplicating shared input data across output
+  /// slots if the source patch has fewer inputs than outputs).
+  const void *Inputs;
+  /// Layout describing `Outputs`.
+  const FemeStageLayout *OutputLayout;
+  /// Structure-of-arrays output storage for this batch's control points.
+  void *Outputs;
+  /// ABI headroom for later patch-batch metadata.
   void *Reserved[4];
 };
 
