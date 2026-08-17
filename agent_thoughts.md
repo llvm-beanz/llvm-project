@@ -16256,3 +16256,156 @@ row (matching the detail level every other "done" row in that table
 carries), docs/CommandGuide/feme-render.md's Status note, and
 feme-render.cpp's own file/option-help comments, rather than leaving any of
 them describing the pre-R32 "not implemented yet" state.
+
+# Agent thoughts: roadmap step R33 (depth/stencil, blending, MRT, MSAA, parallel tiling)
+
+This records the reasoning behind implementing roadmap R33, "Depth, stencil,
+blending, and multisampling" (feme/docs/Roadmap.md), which completes G4:
+"Depth/stencil attachments with legal early/late scheduling, blending, write
+masks, logic ops, multiple render targets, multisample coverage and
+resolves, the format expansion the first advertised profile needs, and
+deterministic parallel tiled schedules."
+
+## Reading before writing
+
+This is a genuinely large umbrella row -- eight distinct features bundled
+into one roadmap step -- so I spent real time up front reading
+feme/docs/FeMeGraphicsDesign.md's "Software Graphics Executor" section in
+full ("Normalized pipeline", "Draw flow", "Tiling and scheduling", "Early
+and late tests", "Determinism and Reference Execution"), the G3/G4
+milestone text, and R32's own Roadmap.md status note, before touching
+Executor.cpp. Two things from that reading shaped every later decision:
+
+- "Determinism and Reference Execution" requires *fixed* sample locations,
+  worker counts, and tile traversal order to produce identical output --
+  not any particular API's own standard sample-position table. That freed
+  me to define FeMe's own 1/2/4-sample position table rather than
+  reverse-engineering Vulkan's or Direct3D's (which would also have been a
+  copyright-adjacent thing to copy verbatim).
+- "Tiling and scheduling"'s "each tile task owns disjoint attachment
+  regions... this allows parallel tiles without locks in the common case"
+  is precisely the property that makes a real, non-mutex thread pool over
+  tiles both safe and required to produce worker-count-independent output
+  -- I didn't have to invent a synchronization scheme, just recognize that
+  one wasn't needed given the existing tile-binning code already only ever
+  touches pixels inside its own tile's bounds.
+
+I also re-read Executor.cpp's existing code (not just its header comment)
+before changing it, since R32's file comment already enumerated the exact
+scope cuts R33 needed to undo one at a time: "no depth/stencil, no
+multisampling, `BlendMode::Replace` only, one color attachment".
+
+## Splitting R33 into eight small, separately-tested commits
+
+feme/.instructions.md asks for changes "broken into as small granularity as
+possible where each change... is individually testable and tested", and
+R33's own bullet list is already a natural set of seams. I built and ran
+`ninja check-feme` (assertions-enabled, ccache build) after every single
+phase below, never batching two features into one commit even where they
+touched the same functions, because a later phase's tests would otherwise
+have masked an earlier phase's regression:
+
+1. **Format expansion first.** Added `D16_UNORM`/`D32_FLOAT`/
+   `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`/`S8_UINT` to
+   `cpu::ResourceFormat`, with fixture parse/print/clear support for the
+   ones the executor would actually use (`D32_FLOAT`, `S8_UINT`; `D16_UNORM`
+   as a mechanical bonus). I did this before anything else needed it,
+   since every later phase's tests read/write these formats. The packed
+   combined depth-stencil formats are declared but deliberately left
+   without clear/pack support -- see the scope note below.
+2. **Depth test/write with early/late scheduling.** This is where the
+   biggest reading payoff was: I expected to need a new fragment-stage
+   reflection pass for "does this shader write depth" / "does this shader
+   discard", but `SignatureSystemValue::Depth`/`StencilRef` and
+   `FEME_CPU_ARTIFACT_USES_DISCARD`/`_DEMOTE` already existed from earlier
+   compute-track work, fully populated, just unused by the graphics
+   executor. Building the early-vs-late scheduling decision was then a
+   two-line boolean, not a new pass.
+3. **Stencil**, folded into a single combined `testDepthStencil()` doing
+   the fixed-function stencil-then-depth order every API shares, rather
+   than two independent test functions -- real hardware/API behavior
+   genuinely couples them (`DepthFailOp` only exists because the depth
+   test can fail *after* stencil already passed).
+4. **Blending, write masks, logic ops** together, since they all modify
+   the same output-merge color-write call site and are easiest to reason
+   about as one "how does a fragment's color become an attachment's new
+   value" function (`mergeColor()`). This needed a genuinely new primitive,
+   `unpackColor()` (the inverse of the existing `packClearColor()`), since
+   blending needs to read an attachment's *existing* color as an operand --
+   nothing before this needed to read a color back out.
+5. **Multiple render targets**, converting the single `BlendState` from
+   phase 4 into one-per-attachment and linking each fragment `SV_TargetN`
+   output by `Location`, mirroring how vertex/fragment varyings already
+   link by `Location` elsewhere in the same file.
+6. **Multisample coverage and resolve.** This was the highest-risk phase
+   for scope creep -- true per-sample shading/interpolation is a much
+   bigger feature than per-sample coverage/depth/stencil. I made a
+   deliberate, documented precision cut: shading and the depth/stencil
+   *candidate value* stay per-pixel (one interpolation, like a non-oversampled
+   G-buffer), but *coverage* and each sample's *stored* depth/stencil/color
+   value are genuinely per-sample -- which is enough for the antialiasing
+   effect a completion test can observe (a triangle edge through a pixel's
+   center resolves to an exact 50% blend), without requiring the sample
+   interpolation modes (`PerspectiveSample` etc.) to actually diverge per
+   sample yet.
+7. **Deterministic parallel tiled schedules**, last, since it needed
+   every earlier phase's per-tile code to already be correct and
+   self-contained before it was safe to run concurrently. Extracting the
+   existing (by then very long) per-tile loop body into a `processTile`
+   closure was mechanical but error-prone: I initially miscounted closing
+   braces when collapsing the old nested `for (TY) { for (TX) { ... } }`
+   into a single lambda, and missed that `if (Quads.empty()) continue;`
+   was a *second* location (not just the `Bin.empty()` check at the top)
+   that needed to become `return Error::success();` instead of `continue;`
+   once it was no longer inside a real loop. Both were caught immediately
+   by the build (`'continue' statement not in loop statement`, then a
+   cascade of "undeclared identifier" errors from the brace miscount
+   shifting scope), not by a test -- a good reminder that a large manual
+   AST-level refactor like this benefits from compiling after every
+   incremental brace change rather than writing the whole thing at once.
+8. **Documentation last.** Updated Design.md's scene YAML example (new
+   `depth-attachment`/`stencil-attachment` keys), and Roadmap.md/
+   FeMeGraphicsDesign.md's G4 status notes, in their own commits separate
+   from the code that motivated them, matching this codebase's existing
+   convention of keeping "what changed" and "why the design now says this"
+   as distinct, reviewable commits.
+
+## Scope cuts I made and recorded in the code, not just here
+
+- **Two separate depth/stencil images, not one packed surface.** Real APIs
+  expose combined `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`
+  depth-stencil formats; I declared them in `cpu::ResourceFormat` for a
+  future API frontend to translate into, but implemented depth and stencil
+  as two independent attachments in the executor. This avoids sub-word
+  packing logic in the hottest part of the file for a first
+  correctness-focused pass, at the cost of not yet matching a real
+  driver's exact memory layout -- exactly the kind of "declared, mechanical
+  follow-up" pattern this codebase already uses elsewhere for
+  not-yet-wired formats.
+- **Logic ops only for `R8G8B8A8_*`.** Both Vulkan and Direct3D restrict
+  logic ops to unsigned-normalized/integer formats anyway, so this isn't a
+  narrower restriction than the APIs themselves -- I just didn't implement
+  the bit-packing math for every other integer format up front.
+- **`feme-render`/scene YAML growth stopped at the depth attachment.** I
+  added `depth-attachment`/`stencil-attachment` scene keys (needed for a
+  real end-to-end lit test, `test/Tools/feme-render/draw-depth.test`), but
+  did not wire MRT/blend-state/logic-op/MSAA into the scene YAML schema or
+  `feme-render`'s pipeline builder. The roadmap/design status notes say so
+  explicitly: the executor library itself is what a completion test
+  exercises directly (`unittests/Graphics/ExecutorTest.cpp`), and growing
+  the scene format for every one of these is a mechanical, on-demand
+  follow-up the same way earlier rows treated format-table growth.
+- **8+ sample counts and depth/stencil resolve are not implemented.**
+  `samplePositions()` only has rows for 1/2/4; a higher count is a
+  rejected `Error`, not a silent truncation.
+
+## Verification
+
+Every phase above ended with a full `ninja -j$(nproc) check-feme`
+(assertions-enabled, ccache build) pass, not just the new unit tests in
+isolation, and I re-ran the final multisample/parallel-tile tests several
+times in a loop to build confidence against nondeterministic failures
+before committing (no TSan build was available in this environment to
+verify the thread-pool phase more rigorously; the disjoint-tile-region
+argument in "Tiling and scheduling" is what makes me confident it's
+race-free rather than empirical replay counts alone).
