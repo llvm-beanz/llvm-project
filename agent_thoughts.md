@@ -17432,3 +17432,122 @@ closed:
    used for validation) -- feeding a real `InputPatch` block from host-side
    patch storage into `FemePatchConstantArgs::InputPatch` needs that
    storage added too, whenever this item is picked up.
+
+# Agent thoughts: continuing R34 (DomainWrapperPass, the domain/evaluation stage)
+
+Continuing roadmap R34 from the prior session (`InputPatch` parameter on the
+patch-constant function). Its open-issues list named three remaining items;
+this session closes the first half of #1, "`DomainWrapperPass`/
+`GeometryWrapperPass` and `CompiledStage::invokeDomain`/`invokeGeometry` --
+not started", by landing the domain half.
+
+## Approach
+
+Read `feme/.instructions.md`, the R34 roadmap entry, "Patch and geometry
+wrappers" in `feme/docs/FeMeGraphicsDesign.md` and the prior three sessions'
+`agent_thoughts.md` entries first, then read `VertexWrapper.cpp`,
+`HullWrapper.cpp`, `PatchConstantWrapper.cpp`, `RuntimeABI.h`,
+`ResourceHeap.h/.cpp`, `CompiledStage.h/.cpp` and `Pipeline.cpp` end to end.
+
+I picked the domain wrapper over the geometry wrapper deliberately: the
+domain stage is the one that makes the already-landed hull work *reachable*
+(control points and patch constants produce no rasterizable geometry without
+a domain evaluation), and its wrapper shape is a known quantity -- one
+independent invocation per generated domain point, i.e. structurally a
+vertex wave -- whereas a geometry wrapper needs a per-invocation
+`GeometryStreamBuilder`, primitive-record input, and `StreamEmit`/`StreamCut`
+lowering, none of which resemble anything already built. Splitting the two
+also keeps this change reviewable on its own.
+
+The interesting design content of the domain stage is not its batching (a
+copy of `VertexWrapperPass`'s wave loop) but that **three input sources meet
+in a single entry point**, all reached through the same
+`feme.stage.input.load` op:
+
+1. the completed patch's control points -- structure-of-arrays, indexed by
+   control point, readable at *any* index (blending control points is the
+   whole point of evaluation, so no self-indexing restriction of the kind
+   `HullWrapperPass` needs applies here);
+2. the per-patch tessellation factors and patch constants -- unbatched,
+   addressed by row/component alone, exactly the mirror image of
+   `PatchConstantWrapperPass`'s own unbatched *output* store; and
+3. `SV_DomainLocation` -- a per-invocation system value read from an
+   invocation record, exactly as `VertexWrapperPass` reads `SV_VertexID`.
+
+The discriminator question was which signal routes a given load. I used the
+signature element itself: `SignatureDirection::PatchInput` already means
+precisely "a domain shader consuming the patch-constant function's output"
+(the prior session's notes call this out explicitly while rejecting reuse of
+that enumerator for `InputPatch`), so (2) needs no new flag at all; among the
+`Direction::Input` elements, `SystemValue == DomainLocation` separates (3)
+from (1). No new `SignatureElement` field, no `SignatureAbiVersion` bump.
+
+Two shapes I chose to diagnose rather than implement:
+
+- **A dynamically indexed domain-location component.**
+  `FemeDomainInvocation::DomainLocation` is a fixed-size, three-element ABI
+  array; a runtime component index would need either an unbounded dynamic
+  GEP into an ABI record (unsafe) or a silent clamp (wrong data, no
+  diagnostic). Every real domain shader reads u/v/w by constant component.
+  Note the component operand arrives *after* SIMDize, so it is typically a
+  splat `<W x i32>` constant rather than a scalar `ConstantInt` -- the first
+  version of this check rejected the ordinary case for that reason, which the
+  unit test caught immediately; `getLaneConstantInt` now resolves the
+  constant per lane via `Constant::getAggregateElement`.
+- **A group-sync barrier.** Domain invocations are independent; there is no
+  groupshared cooperation model for this stage. Same treatment (and same
+  reasoning shape) as the two hull phases already use.
+
+## What I built
+
+- `FemeDomainInvocation`/`FemeDomainArgs` (RuntimeABI.h) plus
+  `StageLayoutSystemValue::DomainLocation`, and their private LLVM struct
+  mirrors `getDomainInvocationType`/`getDomainArgsType` and field enums
+  (StageArgsLayout.h).
+- `DomainResources`/`PreparedDomainBatch` (ResourceHeap.h/.cpp),
+  `DomainEntryPointFn`, and `CompiledStage::invokeDomain`
+  (CompiledStage.h/.cpp), rejecting a non-domain stage the way its peers do.
+- `feme::cpu::DomainWrapperPass` (new DomainWrapper.h/.cpp), wired into
+  `runPipeline`'s per-stage wrapper switch (`ShaderStage::Domain` moves out
+  of the `llvm_unreachable` group).
+- `unittests/Transforms/CPU/DomainWrapperTest.cpp`: all three input sources
+  lowered in one shader plus the two diagnosed shapes.
+- `unittests/Target/CPU/CompiledStageTest.cpp`'s
+  `InvokeDomainRunsStageAwarePath`: an end-to-end JIT run evaluating
+  `lerp(2, 6, u) * k` at u = 0, 0.5, 1 with a per-patch `k` of 10, so a bug
+  that aliased any two of the three input blocks, or that read the wrong
+  invocation's domain location, changes the result.
+- Roadmap.md's R34 entry and FeMeGraphicsDesign.md's "Patch and geometry
+  wrappers"/G5/ABI-strategy sections updated; G5's deferral list, which was
+  written when only `HullWrapperPass` existed and still claimed the
+  patch-constant function had "no ABI or wrapper yet", corrected to reality.
+
+## Verification
+
+`ninja check-feme` in the existing `build/` (ccache launcher, assertions on)
+passed 1204/1206 before and 1208/1210 after -- the expected +4 (3
+`DomainWrapperTest` cases, 1 `CompiledStageTest` case). `clang-format` was
+run on every changed file before each commit.
+
+## What's still open
+
+1. `GeometryWrapperPass`/`CompiledStage::invokeGeometry` -- not started; the
+   remaining half of the previous list's item 1. It is the one wrapper with
+   genuinely new machinery (per-invocation `GeometryStreamBuilder`,
+   `StageOpKind::StreamEmit`/`StreamCut` lowering, primitive-record input),
+   and `mergeGeometryStreamsInLaneOrder` already waits on it to be driven
+   from a real widened invocation.
+2. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+   the control-point batch ABI, for a hull shader whose control points
+   cooperate through groupshared memory before every one finishes.
+3. Wiring the compiled hull and domain stages into `executeDraws`/
+   `feme-render`/the scene YAML: now unblocked in principle (hull's two
+   phases, the fixed-function `feme::graphics::tessellate`, and a domain
+   evaluation together do produce rasterizable geometry), and the natural
+   next milestone -- it is what would finally let G5 have an
+   image-comparison completion test. It still needs host-side glue that
+   does not exist: `feme::graphics::PatchRecord` has no storage for the
+   original input control points (only an `InputControlPointCount`), and
+   nothing yet marshals a tessellator's `DomainPoint` output into a
+   `FemeDomainInvocation` array or chains the three stage invocations per
+   patch.
