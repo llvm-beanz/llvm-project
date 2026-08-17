@@ -37,6 +37,8 @@
 
 #include "llvm/Support/Error.h"
 
+#include <cstdint>
+
 namespace feme::graphics {
 
 class GraphicsPipeline;
@@ -48,8 +50,18 @@ struct PreparedDraw;
 /// pipeline state, or vertex-attribute binding this milestone does not
 /// implement (see the file comment above), rather than silently
 /// misrendering.
+///
+/// \p WorkerCount selects the tile scheduling roadmap R33 adds ("Tiling
+/// and scheduling" in feme/docs/FeMeGraphicsDesign.md): `1` (the default)
+/// processes tiles sequentially in row-major order; a higher value
+/// dispatches tiles across that many worker threads. Every tile owns a
+/// disjoint attachment region, so the result is bit-identical regardless
+/// of \p WorkerCount or tile processing order -- the "identical
+/// deterministic output across worker counts and tile traversal orders"
+/// metamorphic property "Determinism and Reference Execution" and
+/// feme/docs/Roadmap.md's §2.6.3 both require.
 llvm::Error executeDraws(const GraphicsPipeline &Pipeline,
-                         const PreparedDraw &Draw);
+                         const PreparedDraw &Draw, uint32_t WorkerCount = 1);
 
 } // namespace feme::graphics
 

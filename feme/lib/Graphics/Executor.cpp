@@ -62,10 +62,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <thread>
 #include <vector>
 
 using namespace llvm;
@@ -894,7 +897,8 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
 
 } // namespace
 
-Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
+Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
+                   uint32_t WorkerCount) {
   uint32_t SampleCount = Pipeline.getSampleCount();
   if (SampleCount != 1 && SampleCount != 2 && SampleCount != 4)
     return createStringError(inconvertibleErrorCode(),
@@ -1315,314 +1319,358 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
     }
 
     // --- Per tile: generate covered 2x2 quads, interpolate, run fragments,
-    // and perform output merge (painter's-order, since no depth test is
-    // implemented -- see the file comment above). ---
-    for (int32_t TY = 0; TY != TilesY; ++TY) {
-      for (int32_t TX = 0; TX != TilesX; ++TX) {
-        ArrayRef<uint32_t> Bin = Bins[tileIndex(TX, TY)];
-        if (Bin.empty())
+    // and perform output merge (painter's-order for a color/depth/stencil
+    // value one tile writes more than once; across tiles, "Tiling and
+    // scheduling" in feme/docs/FeMeGraphicsDesign.md's "each tile task
+    // owns disjoint attachment regions" means processing order across
+    // tiles cannot change the result, which is what makes the parallel
+    // dispatch below (roadmap R33, "deterministic parallel tiled
+    // schedules") safe). ---
+    auto processTile = [&](int32_t TX, int32_t TY) -> Error {
+      ArrayRef<uint32_t> Bin = Bins[tileIndex(TX, TY)];
+      if (Bin.empty())
+        return Error::success();
+      int32_t TileMinX = MinX + TX * TileSize;
+      int32_t TileMinY = MinY + TY * TileSize;
+      int32_t TileMaxX = std::min(MaxX, TileMinX + TileSize);
+      int32_t TileMaxY = std::min(MaxY, TileMinY + TileSize);
+
+      struct PendingQuad {
+        uint32_t Coverage = 0; // per-lane bit: any sample covered
+        std::array<uint32_t, 4> SampleMask{}; // per-lane sample bitmask
+        std::array<int32_t, 4> PixelX;
+        std::array<int32_t, 4> PixelY;
+        uint32_t TriIdx = 0;
+        std::array<float, 4> Bary0, Bary1, Bary2;
+      };
+      std::vector<PendingQuad> Quads;
+      std::vector<cpu::FemeFragmentInvocation> QuadInvocations;
+
+      for (uint32_t TriIdx : Bin) {
+        const ScreenTriangle &Tri = ScreenTris[TriIdx];
+        float BBMinXf = std::min({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
+        float BBMaxXf = std::max({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
+        float BBMinYf = std::min({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
+        float BBMaxYf = std::max({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
+        int32_t QMinX =
+            std::max(TileMinX, static_cast<int32_t>(std::floor(BBMinXf)));
+        int32_t QMaxX =
+            std::min(TileMaxX, static_cast<int32_t>(std::ceil(BBMaxXf)));
+        int32_t QMinY =
+            std::max(TileMinY, static_cast<int32_t>(std::floor(BBMinYf)));
+        int32_t QMaxY =
+            std::min(TileMaxY, static_cast<int32_t>(std::ceil(BBMaxYf)));
+        if (QMinX >= QMaxX || QMinY >= QMaxY)
           continue;
-        int32_t TileMinX = MinX + TX * TileSize;
-        int32_t TileMinY = MinY + TY * TileSize;
-        int32_t TileMaxX = std::min(MaxX, TileMinX + TileSize);
-        int32_t TileMaxY = std::min(MaxY, TileMinY + TileSize);
+        // Align the 2x2 quad grid globally so adjacent tiles/primitives
+        // share quad boundaries.
+        int32_t QStartX = QMinX - (QMinX & 1);
+        int32_t QStartY = QMinY - (QMinY & 1);
 
-        struct PendingQuad {
-          uint32_t Coverage = 0; // per-lane bit: any sample covered
-          std::array<uint32_t, 4> SampleMask{}; // per-lane sample bitmask
-          std::array<int32_t, 4> PixelX;
-          std::array<int32_t, 4> PixelY;
-          uint32_t TriIdx = 0;
-          std::array<float, 4> Bary0, Bary1, Bary2;
-        };
-        std::vector<PendingQuad> Quads;
-        std::vector<cpu::FemeFragmentInvocation> QuadInvocations;
-
-        for (uint32_t TriIdx : Bin) {
-          const ScreenTriangle &Tri = ScreenTris[TriIdx];
-          float BBMinXf =
-              std::min({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
-          float BBMaxXf =
-              std::max({Tri.Pos[0][0], Tri.Pos[1][0], Tri.Pos[2][0]});
-          float BBMinYf =
-              std::min({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
-          float BBMaxYf =
-              std::max({Tri.Pos[0][1], Tri.Pos[1][1], Tri.Pos[2][1]});
-          int32_t QMinX =
-              std::max(TileMinX, static_cast<int32_t>(std::floor(BBMinXf)));
-          int32_t QMaxX =
-              std::min(TileMaxX, static_cast<int32_t>(std::ceil(BBMaxXf)));
-          int32_t QMinY =
-              std::max(TileMinY, static_cast<int32_t>(std::floor(BBMinYf)));
-          int32_t QMaxY =
-              std::min(TileMaxY, static_cast<int32_t>(std::ceil(BBMaxYf)));
-          if (QMinX >= QMaxX || QMinY >= QMaxY)
-            continue;
-          // Align the 2x2 quad grid globally so adjacent tiles/primitives
-          // share quad boundaries.
-          int32_t QStartX = QMinX - (QMinX & 1);
-          int32_t QStartY = QMinY - (QMinY & 1);
-
-          float Area = edgeFn(Tri.Pos[0], Tri.Pos[1], Tri.Pos[2]);
-          for (int32_t QY = QStartY; QY < QMaxY; QY += 2) {
-            for (int32_t QX = QStartX; QX < QMaxX; QX += 2) {
-              PendingQuad Quad;
-              Quad.TriIdx = TriIdx;
-              cpu::FemeFragmentInvocation Inv{};
-              bool AnyCovered = false;
-              static constexpr int32_t Dx[4] = {0, 1, 0, 1};
-              static constexpr int32_t Dy[4] = {0, 0, 1, 1};
-              for (unsigned Lane = 0; Lane != 4; ++Lane) {
-                int32_t PX = QX + Dx[Lane];
-                int32_t PY = QY + Dy[Lane];
-                Quad.PixelX[Lane] = PX;
-                Quad.PixelY[Lane] = PY;
-                bool InBounds =
-                    PX >= MinX && PX < MaxX && PY >= MinY && PY < MaxY;
-                // Coverage is tested once per sample position (a fixed
-                // offset within the pixel, "Fixed per-pixel sample
-                // offsets" above); with one sample this is exactly the
-                // pixel-center test the single-sample path always used.
-                uint32_t SampleMask = 0;
-                if (InBounds) {
-                  for (uint32_t S = 0; S != SampleCount; ++S) {
-                    std::array<float, 2> Offset = (*SamplePositions)[S];
-                    std::array<float, 2> P{PX + Offset[0], PY + Offset[1]};
-                    float E0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P);
-                    float E1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P);
-                    float E2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P);
-                    bool In0 =
-                        E0 > 0.0f ||
-                        (E0 == 0.0f && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
-                    bool In1 =
-                        E1 > 0.0f ||
-                        (E1 == 0.0f && isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
-                    bool In2 =
-                        E2 > 0.0f ||
-                        (E2 == 0.0f && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
-                    if (In0 && In1 && In2)
-                      SampleMask |= (1u << S);
-                  }
-                }
-                if (SampleMask) {
-                  Quad.Coverage |= (1u << Lane);
-                  AnyCovered = true;
-                }
-                Quad.SampleMask[Lane] = SampleMask;
-                // Barycentric coordinates for shading/depth interpolation
-                // are still evaluated once, at the pixel center: only the
-                // coverage test itself is per-sample (see the file
-                // comment above's precision scope note).
-                std::array<float, 2> Center{PX + 0.5f, PY + 0.5f};
-                Quad.Bary0[Lane] =
-                    edgeFn(Tri.Pos[1], Tri.Pos[2], Center) / Area;
-                Quad.Bary1[Lane] =
-                    edgeFn(Tri.Pos[2], Tri.Pos[0], Center) / Area;
-                Quad.Bary2[Lane] =
-                    edgeFn(Tri.Pos[0], Tri.Pos[1], Center) / Area;
-              }
-              if (!AnyCovered)
-                continue;
-
-              for (unsigned Lane = 0; Lane != 4; ++Lane) {
-                float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
-                      B2 = Quad.Bary2[Lane];
-                float InvW =
-                    B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
-                float Depth =
-                    B0 * Tri.Depth[0] + B1 * Tri.Depth[1] + B2 * Tri.Depth[2];
-                Inv.Position[Lane][0] = Quad.PixelX[Lane] + 0.5f;
-                Inv.Position[Lane][1] = Quad.PixelY[Lane] + 0.5f;
-                Inv.Position[Lane][2] = Depth;
-                Inv.Position[Lane][3] = InvW;
-                Inv.PrimitiveID[Lane] = Tri.PrimitiveID;
-                Inv.SampleIndex[Lane] = 0;
-                Inv.Coverage[Lane] = Quad.SampleMask[Lane];
-                Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
-
-                if (UseEarlyDepthStencil && Quad.SampleMask[Lane]) {
-                  int32_t PX = Quad.PixelX[Lane], PY = Quad.PixelY[Lane];
-                  uint32_t Survived = 0;
-                  for (uint32_t S = 0; S != SampleCount; ++S) {
-                    if (!((Quad.SampleMask[Lane] >> S) & 1u))
-                      continue;
-                    Expected<bool> Pass = testDepthStencil(
-                        PipelineDepth, PipelineStencil, DepthAttachment,
-                        StencilAttachment, SampleCount, Tri.FrontFacing, PX, PY,
-                        S, Depth);
-                    if (!Pass)
-                      return Pass.takeError();
-                    if (*Pass)
-                      Survived |= (1u << S);
-                  }
-                  Quad.SampleMask[Lane] = Survived;
-                  Inv.Coverage[Lane] = Survived;
-                  if (Survived == 0)
-                    Quad.Coverage &= ~(1u << Lane);
+        float Area = edgeFn(Tri.Pos[0], Tri.Pos[1], Tri.Pos[2]);
+        for (int32_t QY = QStartY; QY < QMaxY; QY += 2) {
+          for (int32_t QX = QStartX; QX < QMaxX; QX += 2) {
+            PendingQuad Quad;
+            Quad.TriIdx = TriIdx;
+            cpu::FemeFragmentInvocation Inv{};
+            bool AnyCovered = false;
+            static constexpr int32_t Dx[4] = {0, 1, 0, 1};
+            static constexpr int32_t Dy[4] = {0, 0, 1, 1};
+            for (unsigned Lane = 0; Lane != 4; ++Lane) {
+              int32_t PX = QX + Dx[Lane];
+              int32_t PY = QY + Dy[Lane];
+              Quad.PixelX[Lane] = PX;
+              Quad.PixelY[Lane] = PY;
+              bool InBounds =
+                  PX >= MinX && PX < MaxX && PY >= MinY && PY < MaxY;
+              // Coverage is tested once per sample position (a fixed
+              // offset within the pixel, "Fixed per-pixel sample
+              // offsets" above); with one sample this is exactly the
+              // pixel-center test the single-sample path always used.
+              uint32_t SampleMask = 0;
+              if (InBounds) {
+                for (uint32_t S = 0; S != SampleCount; ++S) {
+                  std::array<float, 2> Offset = (*SamplePositions)[S];
+                  std::array<float, 2> P{PX + Offset[0], PY + Offset[1]};
+                  float E0 = edgeFn(Tri.Pos[1], Tri.Pos[2], P);
+                  float E1 = edgeFn(Tri.Pos[2], Tri.Pos[0], P);
+                  float E2 = edgeFn(Tri.Pos[0], Tri.Pos[1], P);
+                  bool In0 =
+                      E0 > 0.0f ||
+                      (E0 == 0.0f && isTopLeftEdge(Tri.Pos[1], Tri.Pos[2]));
+                  bool In1 =
+                      E1 > 0.0f ||
+                      (E1 == 0.0f && isTopLeftEdge(Tri.Pos[2], Tri.Pos[0]));
+                  bool In2 =
+                      E2 > 0.0f ||
+                      (E2 == 0.0f && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
+                  if (In0 && In1 && In2)
+                    SampleMask |= (1u << S);
                 }
               }
-              Inv.LiveMask = 0xF;
-              Inv.SideEffectMask = Quad.Coverage;
-              if (Quad.Coverage == 0)
-                continue;
-
-              QuadInvocations.push_back(Inv);
-              Quads.push_back(Quad);
+              if (SampleMask) {
+                Quad.Coverage |= (1u << Lane);
+                AnyCovered = true;
+              }
+              Quad.SampleMask[Lane] = SampleMask;
+              // Barycentric coordinates for shading/depth interpolation
+              // are still evaluated once, at the pixel center: only the
+              // coverage test itself is per-sample (see the file
+              // comment above's precision scope note).
+              std::array<float, 2> Center{PX + 0.5f, PY + 0.5f};
+              Quad.Bary0[Lane] = edgeFn(Tri.Pos[1], Tri.Pos[2], Center) / Area;
+              Quad.Bary1[Lane] = edgeFn(Tri.Pos[2], Tri.Pos[0], Center) / Area;
+              Quad.Bary2[Lane] = edgeFn(Tri.Pos[0], Tri.Pos[1], Center) / Area;
             }
+            if (!AnyCovered)
+              continue;
+
+            for (unsigned Lane = 0; Lane != 4; ++Lane) {
+              float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
+                    B2 = Quad.Bary2[Lane];
+              float InvW =
+                  B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
+              float Depth =
+                  B0 * Tri.Depth[0] + B1 * Tri.Depth[1] + B2 * Tri.Depth[2];
+              Inv.Position[Lane][0] = Quad.PixelX[Lane] + 0.5f;
+              Inv.Position[Lane][1] = Quad.PixelY[Lane] + 0.5f;
+              Inv.Position[Lane][2] = Depth;
+              Inv.Position[Lane][3] = InvW;
+              Inv.PrimitiveID[Lane] = Tri.PrimitiveID;
+              Inv.SampleIndex[Lane] = 0;
+              Inv.Coverage[Lane] = Quad.SampleMask[Lane];
+              Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
+
+              if (UseEarlyDepthStencil && Quad.SampleMask[Lane]) {
+                int32_t PX = Quad.PixelX[Lane], PY = Quad.PixelY[Lane];
+                uint32_t Survived = 0;
+                for (uint32_t S = 0; S != SampleCount; ++S) {
+                  if (!((Quad.SampleMask[Lane] >> S) & 1u))
+                    continue;
+                  Expected<bool> Pass = testDepthStencil(
+                      PipelineDepth, PipelineStencil, DepthAttachment,
+                      StencilAttachment, SampleCount, Tri.FrontFacing, PX, PY,
+                      S, Depth);
+                  if (!Pass)
+                    return Pass.takeError();
+                  if (*Pass)
+                    Survived |= (1u << S);
+                }
+                Quad.SampleMask[Lane] = Survived;
+                Inv.Coverage[Lane] = Survived;
+                if (Survived == 0)
+                  Quad.Coverage &= ~(1u << Lane);
+              }
+            }
+            Inv.LiveMask = 0xF;
+            Inv.SideEffectMask = Quad.Coverage;
+            if (Quad.Coverage == 0)
+              continue;
+
+            QuadInvocations.push_back(Inv);
+            Quads.push_back(Quad);
           }
         }
+      }
 
-        if (Quads.empty())
-          continue;
+      if (Quads.empty())
+        return Error::success();
 
-        uint32_t QuadCount = static_cast<uint32_t>(Quads.size());
-        Expected<StageStorage> FSInput =
-            buildStageStorage(*FSSig, SignatureDirection::Input, QuadCount * 4);
-        if (!FSInput)
-          return FSInput.takeError();
-        for (uint32_t Q = 0; Q != QuadCount; ++Q) {
-          const PendingQuad &Quad = Quads[Q];
-          const ScreenTriangle &Tri = ScreenTris[Quad.TriIdx];
-          for (unsigned Lane = 0; Lane != 4; ++Lane) {
-            float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
-                  B2 = Quad.Bary2[Lane];
-            uint32_t Invocation = Q * 4 + Lane;
-            size_t Idx = 0;
-            for (const LinkedVarying &LV : Varyings) {
-              for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
-                uint32_t Bits;
-                if (LV.ComponentType == SignatureComponentType::Float) {
-                  float V0, V1, V2;
-                  memcpy(&V0, &Tri.Varyings[0][Idx], 4);
-                  memcpy(&V1, &Tri.Varyings[1][Idx], 4);
-                  memcpy(&V2, &Tri.Varyings[2][Idx], 4);
-                  float Value;
-                  bool Perspective =
-                      LV.Interpolation !=
-                          SignatureInterpolationMode::NoPerspective &&
-                      LV.Interpolation !=
-                          SignatureInterpolationMode::NoPerspectiveCentroid &&
-                      LV.Interpolation !=
-                          SignatureInterpolationMode::NoPerspectiveSample;
-                  if (LV.Interpolation == SignatureInterpolationMode::Flat) {
-                    Value = V0;
-                  } else if (Perspective) {
-                    float InvW =
-                        B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
-                    float Numerator = B0 * Tri.InvW[0] * V0 +
-                                      B1 * Tri.InvW[1] * V1 +
-                                      B2 * Tri.InvW[2] * V2;
-                    Value = Numerator / InvW;
-                  } else {
-                    Value = B0 * V0 + B1 * V1 + B2 * V2;
-                  }
-                  memcpy(&Bits, &Value, 4);
+      uint32_t QuadCount = static_cast<uint32_t>(Quads.size());
+      Expected<StageStorage> FSInput =
+          buildStageStorage(*FSSig, SignatureDirection::Input, QuadCount * 4);
+      if (!FSInput)
+        return FSInput.takeError();
+      for (uint32_t Q = 0; Q != QuadCount; ++Q) {
+        const PendingQuad &Quad = Quads[Q];
+        const ScreenTriangle &Tri = ScreenTris[Quad.TriIdx];
+        for (unsigned Lane = 0; Lane != 4; ++Lane) {
+          float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
+                B2 = Quad.Bary2[Lane];
+          uint32_t Invocation = Q * 4 + Lane;
+          size_t Idx = 0;
+          for (const LinkedVarying &LV : Varyings) {
+            for (uint32_t C = 0; C != LV.ComponentCount; ++C, ++Idx) {
+              uint32_t Bits;
+              if (LV.ComponentType == SignatureComponentType::Float) {
+                float V0, V1, V2;
+                memcpy(&V0, &Tri.Varyings[0][Idx], 4);
+                memcpy(&V1, &Tri.Varyings[1][Idx], 4);
+                memcpy(&V2, &Tri.Varyings[2][Idx], 4);
+                float Value;
+                bool Perspective =
+                    LV.Interpolation !=
+                        SignatureInterpolationMode::NoPerspective &&
+                    LV.Interpolation !=
+                        SignatureInterpolationMode::NoPerspectiveCentroid &&
+                    LV.Interpolation !=
+                        SignatureInterpolationMode::NoPerspectiveSample;
+                if (LV.Interpolation == SignatureInterpolationMode::Flat) {
+                  Value = V0;
+                } else if (Perspective) {
+                  float InvW =
+                      B0 * Tri.InvW[0] + B1 * Tri.InvW[1] + B2 * Tri.InvW[2];
+                  float Numerator = B0 * Tri.InvW[0] * V0 +
+                                    B1 * Tri.InvW[1] * V1 +
+                                    B2 * Tri.InvW[2] * V2;
+                  Value = Numerator / InvW;
                 } else {
-                  Bits = Tri.Varyings[0][Idx];
+                  Value = B0 * V0 + B1 * V1 + B2 * V2;
                 }
-                FSInput->writeRaw(LV.FSElementID, C, Invocation, Bits);
+                memcpy(&Bits, &Value, 4);
+              } else {
+                Bits = Tri.Varyings[0][Idx];
               }
-            }
-          }
-        }
-
-        Expected<StageStorage> FSOutput = buildStageStorage(
-            *FSSig, SignatureDirection::Output, QuadCount * 4);
-        if (!FSOutput)
-          return FSOutput.takeError();
-
-        cpu::FemeStageLayout FSInLayout = FSInput->layout();
-        cpu::FemeStageLayout FSOutLayout = FSOutput->layout();
-        std::vector<cpu::FemeFragmentResult> Results(QuadCount);
-
-        cpu::FragmentResources FRes;
-        FRes.ResourceHeap = Draw.Resources.ResourceHeap;
-        FRes.BoundResources = Draw.Resources.BoundResources;
-        FRes.ImageHeap = Draw.Resources.ImageHeap;
-        FRes.SamplerHeap = Draw.Resources.SamplerHeap;
-        FRes.RootConstants = Draw.Resources.RootConstants;
-        FRes.InputLayout = &FSInLayout;
-        FRes.Inputs = FSInput->Data.data();
-        FRes.OutputLayout = &FSOutLayout;
-        FRes.Outputs = FSOutput->Data.data();
-        FRes.Invocations = QuadInvocations;
-        FRes.Results = Results;
-        cpu::PreparedFragmentBatch PFB =
-            cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
-        if (Error E = FS.invokeFragments(PFB))
-          return E;
-
-        for (uint32_t Q = 0; Q != QuadCount; ++Q) {
-          const cpu::FemeFragmentResult &Result = Results[Q];
-          const PendingQuad &Quad = Quads[Q];
-          for (unsigned Lane = 0; Lane != 4; ++Lane) {
-            if (!((Result.SideEffectMask >> Lane) & 1u))
-              continue;
-            int32_t PX = Quad.PixelX[Lane];
-            int32_t PY = Quad.PixelY[Lane];
-
-            // A late depth/stencil test/write happens here, after the
-            // fragment stage ran, using its `SV_Depth`/`SV_StencilRef`
-            // outputs when it wrote them (an early test already handled
-            // the alternative above, per sample, and is not repeated here
-            // -- see "Depth/stencil test/write setup"). Every sample this
-            // lane covers is tested independently: they share the
-            // fragment's one shaded color/depth candidate, but each has
-            // its own stored depth/stencil value and therefore its own
-            // pass/fail result.
-            uint32_t PassMask = QuadInvocations[Q].Coverage[Lane];
-            if (!UseEarlyDepthStencil && NeedsDepthStencil) {
-              float FragDepth = QuadInvocations[Q].Position[Lane][2];
-              if (FSDepthOut)
-                FragDepth =
-                    FSOutput->readFloat(FSDepthOut->ElementID, 0, Q * 4 + Lane);
-              std::optional<uint8_t> RefOverride;
-              if (FSStencilRefOut)
-                RefOverride = static_cast<uint8_t>(FSOutput->readRaw(
-                    FSStencilRefOut->ElementID, 0, Q * 4 + Lane));
-              PassMask = 0;
-              for (uint32_t S = 0; S != SampleCount; ++S) {
-                if (!((QuadInvocations[Q].Coverage[Lane] >> S) & 1u))
-                  continue;
-                Expected<bool> Pass = testDepthStencil(
-                    PipelineDepth, PipelineStencil, DepthAttachment,
-                    StencilAttachment, SampleCount,
-                    QuadInvocations[Q].IsFrontFace[Lane] != 0, PX, PY, S,
-                    FragDepth, RefOverride);
-                if (!Pass)
-                  return Pass.takeError();
-                if (*Pass)
-                  PassMask |= (1u << S);
-              }
-            }
-            if (PassMask == 0)
-              continue;
-
-            for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
-                 ++AttIdx) {
-              AttachmentView &Att = Draw.Attachments[AttIdx];
-              std::array<double, 4> RGBA;
-              for (unsigned C = 0; C != 4; ++C)
-                RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
-                                              Q * 4 + Lane);
-              const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
-              for (uint32_t S = 0; S != SampleCount; ++S) {
-                if (!((PassMask >> S) & 1u))
-                  continue;
-                size_t Off = (((size_t)PY * Att.Width + PX) * SampleCount + S) *
-                             ColorElemSizes[AttIdx];
-                if (Error E = mergeColor(
-                        AttBlend, Pipeline.getLogicOpEnable(),
-                        Pipeline.getLogicOp(), Pipeline.getBlendConstants(),
-                        Att.Format, RGBA,
-                        MutableArrayRef(Att.Data.data() + Off,
-                                        ColorElemSizes[AttIdx])))
-                  return E;
-              }
+              FSInput->writeRaw(LV.FSElementID, C, Invocation, Bits);
             }
           }
         }
       }
+
+      Expected<StageStorage> FSOutput =
+          buildStageStorage(*FSSig, SignatureDirection::Output, QuadCount * 4);
+      if (!FSOutput)
+        return FSOutput.takeError();
+
+      cpu::FemeStageLayout FSInLayout = FSInput->layout();
+      cpu::FemeStageLayout FSOutLayout = FSOutput->layout();
+      std::vector<cpu::FemeFragmentResult> Results(QuadCount);
+
+      cpu::FragmentResources FRes;
+      FRes.ResourceHeap = Draw.Resources.ResourceHeap;
+      FRes.BoundResources = Draw.Resources.BoundResources;
+      FRes.ImageHeap = Draw.Resources.ImageHeap;
+      FRes.SamplerHeap = Draw.Resources.SamplerHeap;
+      FRes.RootConstants = Draw.Resources.RootConstants;
+      FRes.InputLayout = &FSInLayout;
+      FRes.Inputs = FSInput->Data.data();
+      FRes.OutputLayout = &FSOutLayout;
+      FRes.Outputs = FSOutput->Data.data();
+      FRes.Invocations = QuadInvocations;
+      FRes.Results = Results;
+      cpu::PreparedFragmentBatch PFB =
+          cpu::PreparedFragmentBatch::create(FS.getResourceInfo(), FRes);
+      if (Error E = FS.invokeFragments(PFB))
+        return E;
+
+      for (uint32_t Q = 0; Q != QuadCount; ++Q) {
+        const cpu::FemeFragmentResult &Result = Results[Q];
+        const PendingQuad &Quad = Quads[Q];
+        for (unsigned Lane = 0; Lane != 4; ++Lane) {
+          if (!((Result.SideEffectMask >> Lane) & 1u))
+            continue;
+          int32_t PX = Quad.PixelX[Lane];
+          int32_t PY = Quad.PixelY[Lane];
+
+          // A late depth/stencil test/write happens here, after the
+          // fragment stage ran, using its `SV_Depth`/`SV_StencilRef`
+          // outputs when it wrote them (an early test already handled
+          // the alternative above, per sample, and is not repeated here
+          // -- see "Depth/stencil test/write setup"). Every sample this
+          // lane covers is tested independently: they share the
+          // fragment's one shaded color/depth candidate, but each has
+          // its own stored depth/stencil value and therefore its own
+          // pass/fail result.
+          uint32_t PassMask = QuadInvocations[Q].Coverage[Lane];
+          if (!UseEarlyDepthStencil && NeedsDepthStencil) {
+            float FragDepth = QuadInvocations[Q].Position[Lane][2];
+            if (FSDepthOut)
+              FragDepth =
+                  FSOutput->readFloat(FSDepthOut->ElementID, 0, Q * 4 + Lane);
+            std::optional<uint8_t> RefOverride;
+            if (FSStencilRefOut)
+              RefOverride = static_cast<uint8_t>(FSOutput->readRaw(
+                  FSStencilRefOut->ElementID, 0, Q * 4 + Lane));
+            PassMask = 0;
+            for (uint32_t S = 0; S != SampleCount; ++S) {
+              if (!((QuadInvocations[Q].Coverage[Lane] >> S) & 1u))
+                continue;
+              Expected<bool> Pass = testDepthStencil(
+                  PipelineDepth, PipelineStencil, DepthAttachment,
+                  StencilAttachment, SampleCount,
+                  QuadInvocations[Q].IsFrontFace[Lane] != 0, PX, PY, S,
+                  FragDepth, RefOverride);
+              if (!Pass)
+                return Pass.takeError();
+              if (*Pass)
+                PassMask |= (1u << S);
+            }
+          }
+          if (PassMask == 0)
+            continue;
+
+          for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
+               ++AttIdx) {
+            AttachmentView &Att = Draw.Attachments[AttIdx];
+            std::array<double, 4> RGBA;
+            for (unsigned C = 0; C != 4; ++C)
+              RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
+                                            Q * 4 + Lane);
+            const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
+            for (uint32_t S = 0; S != SampleCount; ++S) {
+              if (!((PassMask >> S) & 1u))
+                continue;
+              size_t Off = (((size_t)PY * Att.Width + PX) * SampleCount + S) *
+                           ColorElemSizes[AttIdx];
+              if (Error E =
+                      mergeColor(AttBlend, Pipeline.getLogicOpEnable(),
+                                 Pipeline.getLogicOp(),
+                                 Pipeline.getBlendConstants(), Att.Format, RGBA,
+                                 MutableArrayRef(Att.Data.data() + Off,
+                                                 ColorElemSizes[AttIdx])))
+                return E;
+            }
+          }
+        }
+      }
+      return Error::success();
+    };
+
+    // "The conservative implementation completes vertex work, joins, then
+    // processes tiles" ("Tiling and scheduling"): vertex work above is
+    // already complete and joined by this point, so every tile below may
+    // run on any worker in any order. `WorkerCount == 1` uses the plain
+    // sequential row-major order every earlier roadmap step's tests
+    // already assume; a higher count partitions the flat tile index space
+    // across a small thread pool, each worker claiming the next
+    // unprocessed tile from a shared atomic cursor. Because tiles own
+    // disjoint attachment regions (no two tiles ever read or write the
+    // same pixel), the result is identical regardless of which worker
+    // processes which tile or in what order -- the deterministic
+    // parallel schedule this milestone adds.
+    if (WorkerCount <= 1) {
+      for (int32_t TY = 0; TY != TilesY; ++TY)
+        for (int32_t TX = 0; TX != TilesX; ++TX)
+          if (Error E = processTile(TX, TY))
+            return E;
+    } else {
+      std::atomic<int32_t> Cursor{0};
+      int32_t TotalTiles = TilesX * TilesY;
+      unsigned NumThreads =
+          std::min<unsigned>(WorkerCount, std::max(TotalTiles, 1));
+      std::mutex ErrorMutex;
+      std::vector<std::string> ErrorMessages;
+      std::vector<std::thread> Threads;
+      Threads.reserve(NumThreads);
+      for (unsigned T = 0; T != NumThreads; ++T) {
+        Threads.emplace_back([&]() {
+          for (;;) {
+            int32_t Idx = Cursor.fetch_add(1);
+            if (Idx >= TotalTiles)
+              return;
+            int32_t TX = Idx % TilesX, TY = Idx / TilesX;
+            if (Error E = processTile(TX, TY)) {
+              std::lock_guard<std::mutex> Lock(ErrorMutex);
+              ErrorMessages.push_back(toString(std::move(E)));
+            }
+          }
+        });
+      }
+      for (std::thread &Th : Threads)
+        Th.join();
+      if (!ErrorMessages.empty())
+        return createStringError(inconvertibleErrorCode(), "%s",
+                                 ErrorMessages.front().c_str());
     }
   }
 

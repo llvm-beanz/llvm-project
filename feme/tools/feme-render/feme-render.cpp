@@ -445,9 +445,9 @@ int main(int argc, char **argv) {
                "from the host, matching feme-run"));
   cl::opt<unsigned> Workers(
       "workers", cl::init(1),
-      cl::desc("The number of tile workers. The executor is single-threaded "
-               "today, so every value produces identical output; true "
-               "parallel tiling is a later scheduling optimization"));
+      cl::desc("The number of tile workers to dispatch across. Every value "
+               "produces identical output: tiles own disjoint attachment "
+               "regions, so worker count/order cannot change the result"));
   cl::opt<std::string> TileOrder(
       "tile-order", cl::init(""),
       cl::desc("The tile traversal order. Accepted for forward "
@@ -477,7 +477,6 @@ int main(int argc, char **argv) {
 
   cl::ParseCommandLineOptions(argc, argv,
                               "FeMe software graphics executor runner\n");
-  (void)Workers;
   (void)TileOrder;
   (void)Reference;
 
@@ -680,7 +679,7 @@ int main(int argc, char **argv) {
     Draw.IndexBuffer = IndexBuffer;
     Draw.Draws = Draws;
 
-    if (Error E = executeDraws(*Pipeline, Draw)) {
+    if (Error E = executeDraws(*Pipeline, Draw, Workers)) {
       errs() << "feme-render: " << toString(std::move(E)) << "\n";
       return 1;
     }

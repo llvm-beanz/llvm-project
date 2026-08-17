@@ -921,4 +921,61 @@ TEST(ExecutorTest, RejectsUnsupportedSampleCount) {
   EXPECT_THAT_ERROR(executeDraws(Pipeline, Draw), Failed());
 }
 
+// Roadmap R33: deterministic parallel tiled schedules. A 64x64 attachment
+// (16 tiles at the executor's fixed 16x16 tile size) with several
+// triangles spanning many of them must produce byte-identical output
+// whether the tile schedule runs on 1 worker or several.
+TEST(ExecutorTest, ParallelTileScheduleMatchesSequentialOutput) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // Four overlapping, differently-colored triangles covering different
+  // parts of the viewport, so different tiles see different bins.
+  std::vector<float> VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // red, bottom-left half
+      1.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      -1.0f, 1.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, //
+      1.0f,  -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // green, top-right half
+      1.0f,  1.0f,  0.0f, 0.0f, 1.0f, 0.0f, 1.0f, //
+      -1.0f, 1.0f,  0.0f, 0.0f, 1.0f, 0.0f, 1.0f, //
+      -0.5f, -0.5f, 0.0f, 0.0f, 0.0f, 1.0f, 0.5f, // translucent blue diamond
+      0.5f,  -0.5f, 0.0f, 0.0f, 0.0f, 1.0f, 0.5f, //
+      0.0f,  0.5f,  0.0f, 0.0f, 0.0f, 1.0f, 0.5f, //
+  };
+  std::vector<VertexAttribute> Attributes = {
+      {0, cpu::ResourceFormat::R32G32B32_FLOAT, 0},
+      {1, cpu::ResourceFormat::R32G32B32A32_FLOAT, 12}};
+  std::array<VertexBufferBinding, 1> Bindings = {VertexBufferBinding{
+      0, 28,
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexData.data()),
+               VertexData.size() * sizeof(float)),
+      Attributes}};
+  DrawCommand Cmd;
+  Cmd.VertexCount = 9;
+  Cmd.InstanceCount = 1;
+  std::array<DrawCommand, 1> Draws = {Cmd};
+
+  auto render = [&](uint32_t Workers) {
+    std::vector<uint8_t> Storage(64u * 64u * 4u, 0);
+    AttachmentView Color{Storage, cpu::ResourceFormat::R8G8B8A8_UNORM, 64, 64};
+    std::array<AttachmentView, 1> Attachs{Color};
+    PreparedDraw Draw;
+    Draw.Attachments = Attachs;
+    Draw.Viewport = ViewportState{0.0f, 0.0f, 64.0f, 64.0f, 0.0f, 1.0f};
+    Draw.Scissor = ScissorRect{0, 0, 64, 64};
+    Draw.VertexBuffers = Bindings;
+    Draw.Draws = Draws;
+    EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw, Workers), Succeeded());
+    return Storage;
+  };
+
+  std::vector<uint8_t> Sequential = render(1);
+  std::vector<uint8_t> EightWorkers = render(8);
+  std::vector<uint8_t> SixtyFourWorkers = render(64);
+  EXPECT_EQ(Sequential, EightWorkers);
+  EXPECT_EQ(Sequential, SixtyFourWorkers);
+}
+
 } // namespace
