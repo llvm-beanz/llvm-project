@@ -674,20 +674,37 @@ struct FemePatchArgs {
 /// only the invoking lane's own (there is only one invocation, and it alone
 /// computes every tessellation factor and patch constant, typically by
 /// reading more than one control point to do so -- e.g. an edge factor from
-/// two adjacent corners' positions). See PatchConstantWrapper.cpp's file
-/// comment for this milestone's scope (an `InputPatch` parameter, i.e. the
-/// original, pre-control-stage input control points, is not yet modeled --
-/// only the completed `OutputPatch`) and what remains.
+/// two adjacent corners' positions).
+///
+/// `InputPatch`/`InputPatchLayout`/`InputPatchControlPointCount`, added in a
+/// further follow-up, close that milestone's own "InputPatch parameter"
+/// deferral: a patch-constant function may also declare an `InputPatch<T,
+/// M>` parameter naming the *original*, pre-control-stage input control
+/// points (a hull shader's own input, not its output) -- a second, distinct
+/// structure-of-arrays block from `Inputs`, addressed the same way but with
+/// its own control-point count (`M` need not equal `OutputControlPointCount`
+/// any more than a hull shader's own input/output control point counts need
+/// to agree). `SignatureElement::FromInputPatch` on a `SignatureDirection::
+/// Input` element is what tells `feme::cpu::PatchConstantWrapperPass` which
+/// of the two blocks a given `feme.stage.input.load` addresses -- see
+/// PatchConstantWrapper.cpp's file comment for this milestone's scope and
+/// what remains.
 struct FemePatchConstantArgs {
   /// `StageArgsAbiVersion`.
   uint32_t AbiVersion;
   /// Number of output control points in `Inputs`, bounding the
-  /// control-point-index operand a `feme.stage.input.load` in this phase may
-  /// legally use.
+  /// control-point-index operand a `feme.stage.input.load` reading the
+  /// completed `OutputPatch` in this phase may legally use.
   uint32_t OutputControlPointCount;
-  /// Reserved 32-bit fields to keep pointer fields naturally aligned and leave
-  /// room for later scalar metadata.
-  uint32_t Reserved32[2];
+  /// Number of input control points in `InputPatch`, bounding the
+  /// control-point-index operand a `feme.stage.input.load` reading the
+  /// original `InputPatch` (`SignatureElement::FromInputPatch`) may legally
+  /// use. Zero if the patch-constant function declares no `InputPatch`
+  /// parameter.
+  uint32_t InputPatchControlPointCount;
+  /// Reserved 32-bit field to keep pointer fields naturally aligned and
+  /// leave room for later scalar metadata.
+  uint32_t Reserved32;
   /// Resource/root-constant block shared by every stage.
   const FemeShaderResources *Resources;
   /// Layout describing `Inputs`.
@@ -696,6 +713,13 @@ struct FemePatchConstantArgs {
   /// attributes, one slot per control point (matching `FemePatchArgs::
   /// Outputs`'s own layout).
   const void *Inputs;
+  /// Layout describing `InputPatch`. Null if the patch-constant function
+  /// declares no `InputPatch` parameter.
+  const FemeStageLayout *InputPatchLayout;
+  /// Structure-of-arrays storage for the original, pre-control-stage input
+  /// control points' attributes, one slot per input control point. Null if
+  /// the patch-constant function declares no `InputPatch` parameter.
+  const void *InputPatch;
   /// Layout describing `Outputs`: this phase's `SignatureDirection::
   /// PatchOutput` elements (tessellation factors and patch constants).
   const FemeStageLayout *OutputLayout;
@@ -705,7 +729,7 @@ struct FemePatchConstantArgs {
   /// storage, addressed by row/component alone.
   void *Outputs;
   /// ABI headroom for later patch-constant-batch metadata.
-  void *Reserved[4];
+  void *Reserved[2];
 };
 
 /// The single argument every compiled compute entry point takes:

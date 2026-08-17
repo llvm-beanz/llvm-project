@@ -125,13 +125,16 @@ enum PatchArgsField : unsigned {
 enum PatchConstantArgsField : unsigned {
   PatchConstantArgsFieldAbiVersion = 0,
   PatchConstantArgsFieldOutputControlPointCount = 1,
-  PatchConstantArgsFieldReserved32 = 2,
-  PatchConstantArgsFieldResources = 3,
-  PatchConstantArgsFieldInputLayout = 4,
-  PatchConstantArgsFieldInputs = 5,
-  PatchConstantArgsFieldOutputLayout = 6,
-  PatchConstantArgsFieldOutputs = 7,
-  PatchConstantArgsFieldReserved = 8,
+  PatchConstantArgsFieldInputPatchControlPointCount = 2,
+  PatchConstantArgsFieldReserved32 = 3,
+  PatchConstantArgsFieldResources = 4,
+  PatchConstantArgsFieldInputLayout = 5,
+  PatchConstantArgsFieldInputs = 6,
+  PatchConstantArgsFieldInputPatchLayout = 7,
+  PatchConstantArgsFieldInputPatch = 8,
+  PatchConstantArgsFieldOutputLayout = 9,
+  PatchConstantArgsFieldOutputs = 10,
+  PatchConstantArgsFieldReserved = 11,
 };
 
 inline llvm::StructType *getStageElementType(llvm::LLVMContext &Ctx) {
@@ -204,15 +207,17 @@ inline llvm::StructType *getPatchArgsType(llvm::LLVMContext &Ctx) {
             PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
 }
 
-/// Same field shape as `getPatchArgsType` (see `FemePatchConstantArgs`'s own
-/// comment for why): a distinct name keeps call sites naming the ABI struct
-/// they actually mean rather than reusing `getPatchArgsType` by coincidence.
+/// Distinct from `getPatchArgsType` (see `FemePatchConstantArgs`'s own
+/// comment for why): this phase's ABI carries a second, independent
+/// structure-of-arrays input block (`InputPatch`/`InputPatchLayout`) for the
+/// original, pre-control-stage input control points, alongside the
+/// completed `OutputPatch` every patch-constant invocation reads.
 inline llvm::StructType *getPatchConstantArgsType(llvm::LLVMContext &Ctx) {
   llvm::Type *PtrTy = llvm::PointerType::get(Ctx, 0);
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(
-      Ctx, {I32Ty, I32Ty, llvm::ArrayType::get(I32Ty, 2), PtrTy, PtrTy, PtrTy,
-            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 4)});
+      Ctx, {I32Ty, I32Ty, I32Ty, I32Ty, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy,
+            PtrTy, PtrTy, llvm::ArrayType::get(PtrTy, 2)});
 }
 
 inline llvm::Value *loadStructField(llvm::IRBuilder<> &Builder,

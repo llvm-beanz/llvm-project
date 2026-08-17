@@ -257,12 +257,16 @@ PreparedPatchConstantBatch::PreparedPatchConstantBatch(
     ArrayRef<FemeImageDescriptor> ImageHeap,
     ArrayRef<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
-    const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
-    uint32_t OutputControlPointCount)
+    const void *Inputs, const FemeStageLayout *InputPatchLayout,
+    const void *InputPatch, const FemeStageLayout *OutputLayout, void *Outputs,
+    uint32_t OutputControlPointCount, uint32_t InputPatchControlPointCount)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
       SamplerHeap(SamplerHeap), RootConstants(RootConstants),
-      InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
-      Outputs(Outputs), OutputControlPointCount(OutputControlPointCount) {
+      InputLayout(InputLayout), Inputs(Inputs),
+      InputPatchLayout(InputPatchLayout), InputPatch(InputPatch),
+      OutputLayout(OutputLayout), Outputs(Outputs),
+      OutputControlPointCount(OutputControlPointCount),
+      InputPatchControlPointCount(InputPatchControlPointCount) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
@@ -284,17 +288,22 @@ PreparedPatchConstantBatch::create(const ResourceInfo &Info,
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
       Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
-      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
-      Resources.Outputs, Resources.OutputControlPointCount);
+      Resources.InputLayout, Resources.Inputs, Resources.InputPatchLayout,
+      Resources.InputPatch, Resources.OutputLayout, Resources.Outputs,
+      Resources.OutputControlPointCount,
+      Resources.InputPatchControlPointCount);
 }
 
 FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
   FemePatchConstantArgs Args{};
   Args.AbiVersion = StageArgsAbiVersion;
   Args.OutputControlPointCount = OutputControlPointCount;
+  Args.InputPatchControlPointCount = InputPatchControlPointCount;
   Args.Resources = &ShaderResources;
   Args.InputLayout = InputLayout;
   Args.Inputs = Inputs;
+  Args.InputPatchLayout = InputPatchLayout;
+  Args.InputPatch = InputPatch;
   Args.OutputLayout = OutputLayout;
   Args.Outputs = Outputs;
   return Args;

@@ -232,7 +232,12 @@ private:
 /// Caller-owned storage for one patch-constant invocation (added after
 /// roadmap R34's initial landing): the completed output control points this
 /// phase reads, and the per-patch storage its tessellation-factor/patch-
-/// constant writes go to. See `FemePatchConstantArgs`'s own comment.
+/// constant writes go to. `InputPatch`/`InputPatchLayout`/
+/// `InputPatchControlPointCount`, added in a further follow-up, are the
+/// original, pre-control-stage input control points a patch-constant
+/// function's own `InputPatch` parameter (if any) reads -- left null/zero
+/// when the function declares none. See `FemePatchConstantArgs`'s own
+/// comment.
 struct PatchConstantResources {
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<BoundResourceBinding> BoundResources;
@@ -241,9 +246,12 @@ struct PatchConstantResources {
   llvm::ArrayRef<uint8_t> RootConstants;
   const FemeStageLayout *InputLayout = nullptr;
   const void *Inputs = nullptr;
+  const FemeStageLayout *InputPatchLayout = nullptr;
+  const void *InputPatch = nullptr;
   const FemeStageLayout *OutputLayout = nullptr;
   void *Outputs = nullptr;
   uint32_t OutputControlPointCount = 0;
+  uint32_t InputPatchControlPointCount = 0;
 };
 
 /// One prepared patch-constant invocation: materialized resources plus
@@ -264,8 +272,11 @@ private:
                              llvm::ArrayRef<uint8_t> RootConstants,
                              const FemeStageLayout *InputLayout,
                              const void *Inputs,
+                             const FemeStageLayout *InputPatchLayout,
+                             const void *InputPatch,
                              const FemeStageLayout *OutputLayout, void *Outputs,
-                             uint32_t OutputControlPointCount);
+                             uint32_t OutputControlPointCount,
+                             uint32_t InputPatchControlPointCount);
 
   std::vector<FemeDescriptor> ResourceHeap;
   llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
@@ -274,9 +285,12 @@ private:
   FemeShaderResources ShaderResources{};
   const FemeStageLayout *InputLayout = nullptr;
   const void *Inputs = nullptr;
+  const FemeStageLayout *InputPatchLayout = nullptr;
+  const void *InputPatch = nullptr;
   const FemeStageLayout *OutputLayout = nullptr;
   void *Outputs = nullptr;
   uint32_t OutputControlPointCount = 0;
+  uint32_t InputPatchControlPointCount = 0;
 };
 
 } // namespace feme::cpu
