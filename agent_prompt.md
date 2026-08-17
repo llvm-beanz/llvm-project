@@ -62,17 +62,21 @@ Can you continue the R34 implementation from the roadmap document?
 
 Open issues form the last agent task:
 
-> 1. `HullWrapperPass`/`DomainWrapperPass`/`GeometryWrapperPass` plus
->    `CompiledStage::invokePatch`/`invokeDomain`/`invokeGeometry` -- still
->    the single largest remaining piece, confirmed again this session after
->    reading the actual wrapper/barrier code involved. A future session
->    should budget for it as its own multi-commit body of work. Two
->    sub-options worth considering up front, since barrier support is the
->    hard part: (a) refactor `EntryWrapperPass`'s groupshared/barrier-region-
->    splitting logic to be generic over its args-struct ABI so a hull
->    wrapper can reuse it directly, or (b) accept a hull-stage-specific
->    duplication of that machinery sized to patch batching. Starting with
->    the hull/control stage alone (structurally closest to compute) before
->    domain and geometry remains the right order, per the prior session's
->    own recommendation.
-> 2. Wiring the above into `executeDraws`/`feme-render`/the scene YAML.
+> 1. The patch-constant function: no ABI struct or wrapper pass yet. It needs
+>    its own shape (`OutputPatch`/`InputPatch` inputs, a single
+>    non-batched/scalar invocation per patch rather than a wave loop, tess
+>    factor + patch constant outputs feeding `feme::graphics::PatchRecord`).
+> 2. `DomainWrapperPass`/`GeometryWrapperPass` and
+>    `CompiledStage::invokeDomain`/`invokeGeometry` -- not started.
+> 3. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+>    the control-point batch ABI, for a hull shader whose control points
+>    cooperate through groupshared memory before every one finishes (today
+>    diagnosed by `HullWrapperPass` rather than supported). Still, as the
+>    prior two sessions found for the whole wrapper item, "its own
+>    multi-commit body of work" -- but now scoped to exactly this one
+>    narrower case rather than the whole hull/domain/geometry wrapper
+>    surface.
+> 4. Wiring any compiled hull stage into `executeDraws`/`feme-render`/the
+>    scene YAML -- still strictly downstream of the above, and of the domain
+>    wrapper (a control-point batch alone produces no rasterizable geometry
+>    without going through the tessellator and a domain-stage evaluation).
