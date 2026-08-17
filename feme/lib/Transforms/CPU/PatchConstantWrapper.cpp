@@ -1,4 +1,4 @@
-//===- HullWrapper.cpp - CPU target hull control-point wrapper -----------===//
+//===- PatchConstantWrapper.cpp - CPU target patch-constant wrapper -----===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM
 // Exceptions. See https://llvm.org/LICENSE.txt for license information.
@@ -6,72 +6,75 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Roadmap R34's continuation ("Deferred" list in Roadmap.md's R34 entry and
-// Patch.h's file comment): compiling a real hull entry point through the CPU
-// lowering pipeline into an invokable `feme::cpu::CompiledStage` batch. This
-// file lands the *control-point phase* of that work -- the part of a hull
-// shader structurally closest to a vertex shader (see the prior session's
-// own recommendation in agent_thoughts.md): one invocation per output
-// control point, each independently computing that control point's output
-// attributes from its own input control point's attributes, with no
-// dependency on any sibling control point's result.
+// Roadmap R34's continuation, closing its "patch-constant function" open
+// item (see HullWrapper.cpp's file comment and agent_thoughts.md's prior
+// session): compiling a hull shader's patch-constant function -- the
+// *second* phase, distinct from the control-point phase `HullWrapperPass`
+// already handles -- through the CPU lowering pipeline into an invokable
+// `feme::cpu::CompiledStage` batch.
 //
-// This pass is deliberately a close mirror of `feme::cpu::VertexWrapperPass`
-// rather than a generalization of it: `FemeStageLayout`-addressed stage
-// storage, `feme.stage.input.load`/`output.store` lowering, and the same
-// "loop over `<W x T>` waves of independent invocations" wrapper shape,
-// batching over output control points (`FemePatchArgs::
-// OutputControlPointCount`) instead of vertices. See RuntimeABI.h's
-// `FemePatchArgs` comment for the ABI this produces.
+// Unlike the control-point phase (one invocation per output control point,
+// batched like a vertex wave), the patch-constant function is a single,
+// non-batched invocation per patch: it reads the *whole* completed
+// `OutputPatch` the control-point phase produced (potentially every one of
+// its control points, not just "its own" the way a control point's own
+// input load is restricted to) and writes the patch's tessellation factors
+// and patch constants. "Workgroup barrier semantics" needs nothing here
+// either, for a much simpler reason than the control-point phase's own
+// (see that file's comment): there is only one invocation, so there is no
+// sibling invocation to synchronize with in the first place -- a
+// group-sync barrier reaching this phase is therefore diagnosed as an
+// unsupported shape, not silently accepted as a no-op, exactly as
+// `HullWrapperPass` already does for its own (structurally different)
+// reason.
 //
-// Two real hull-shader shapes are deliberately out of scope, and diagnosed
-// rather than silently mishandled:
+// This pass is, like `HullWrapperPass`, a close mirror of the general
+// wrapper shape the rest of feme::cpu's stage wrappers share
+// (`FemeStageLayout`-addressed stage storage, `feme.stage.input.load`/
+// `output.store` lowering) rather than a generalization of any of them,
+// duplicating its own small address-computation helpers per this
+// codebase's own convention (see HullWrapper.cpp's file comment for the
+// same note). The wrapper it builds still goes through the same general
+// SIMDize/WaveLowering machinery every other stage does (see
+// feme/lib/Target/CPU/Pipeline.cpp) -- widening the compiled body into a
+// `<WaveSize x T>` wave, even though only one invocation is ever wanted --
+// but calls that widened body exactly once, with only lane 0 marked active
+// (`buildWrapper` below), rather than looping over waves of some batch
+// count the way every other stage's wrapper does. That is what "a single,
+// non-batched invocation ... rather than a wave loop"
+// (`FemePatchConstantArgs`'s own comment) means concretely: the *host*-visible
+// ABI is one invocation, regardless of how many SIMD lanes the compiled body
+// happens to use internally.
 //
-//  - **A control-point index other than the invocation's own.** A hull main
-//    function's `InputPatch<T, N>` parameter may legally be indexed by any
-//    expression, not just `SV_OutputControlPointID` -- but this wrapper
-//    always addresses stage storage using the invoking lane's own flat
-//    invocation index (exactly like `VertexWrapperPass`'s single-vertex-per-
-//    invocation model), so a control point reading a *different* control
-//    point's input needs an addressing model this milestone does not build.
-//    `lowerHullInputLoad` requires the load's control-point-index operand to
-//    be either the invocation's own `OutputControlPointID` value (the
-//    common, and structurally required for embarrassingly-parallel
-//    per-control-point processing, case) or, when the function never reads
-//    that system value at all, the constant `0` -- matching
-//    `VertexWrapperPass`'s own precedent for its analogous "vertex" operand
-//    -- and is diagnosed otherwise instead of silently reading the wrong
-//    control point.
-//  - **A group-sync barrier inside the control-point phase.** A control
-//    point that must read a *sibling* control point's output (rather than
-//    only its own input) needs one after writing its own output and before
-//    reading another's -- exactly the barrier `feme::cpu::EntryWrapperPass`
-//    already knows how to split a compute wave body around. Generalizing
-//    that barrier-region-splitting machinery to this batch-over-control-
-//    points ABI (rather than duplicating close to 1000 lines of it) is the
-//    right next step, and is left as this milestone's own documented
-//    follow-up -- see `lowerHullStageOps`'s barrier check below, which
-//    diagnoses any surviving `..._with_group_sync` call rather than
-//    dropping it silently.
+// Two things follow from "a single invocation reads a whole patch":
 //
-// The patch-constant function -- a second, separate compiled entry that
-// receives the *completed* `OutputPatch` this phase produces (already
-// requiring the phase to run to completion first, which
-// `feme::cpu::CompiledStage::invokePatch` naturally provides simply by
-// running this phase's whole wave loop before returning) and writes
-// tessellation factors/patch constants -- is now modeled by
-// `feme::cpu::PatchConstantWrapperPass` (PatchConstantWrapper.h/.cpp, added
-// after this milestone's initial landing). `isPatchConstantPhase`
-// (HullPhase.h) is the discriminator that keeps the two wrappers from both
-// claiming the same hull-stage function: this pass now skips any candidate
-// it identifies as the patch-constant phase, leaving it entirely to that
-// pass. Still deferred alongside the domain and geometry wrappers: an
-// `InputPatch` parameter on the patch-constant function (see
-// PatchConstantWrapper.cpp's own scope note).
+//  - **No self-indexing restriction.** Unlike `lowerHullInputLoad`, an
+//    ordinary (non-system-value) `feme.stage.input.load`'s control-point-
+//    index operand here may be *any* value in `[0, OutputControlPointCount)`
+//    -- reading more than one control point (e.g. two adjacent corners, to
+//    compute the edge between them) is the whole point of this phase.
+//  - **Output storage is not batched.** A tessellation-factor/patch-constant
+//    `feme.stage.output.store` addresses `FemePatchConstantArgs::Outputs` by
+//    row/component alone (`lowerPatchConstantOutputStore` always uses
+//    invocation index 0), not per-control-point the way
+//    `lowerHullOutputStore` does -- there is exactly one patch's worth of
+//    storage, not one slot per output control point.
+//
+// `feme::cpu::isPatchConstantPhase` (HullPhase.h) is the discriminator this
+// pass and `HullWrapperPass` both use to agree on which of a module's
+// `feme::ShaderStage::Hull` functions each of them wraps -- see that file's
+// own comment for why one stage tag alone cannot tell the two phases apart.
+//
+// Deferred, as HullWrapper.cpp's own comment already notes: an `InputPatch`
+// parameter (the *original*, pre-control-stage input control points) is not
+// modeled -- only the completed `OutputPatch`, addressed via
+// `FemePatchConstantArgs::Inputs`. A patch-constant function that also
+// declares an `InputPatch` parameter needs a second structure-of-arrays
+// input block and layout this milestone's ABI does not yet carry.
 //
 //===----------------------------------------------------------------------===//
 
-#include "feme/Transforms/CPU/HullWrapper.h"
+#include "feme/Transforms/CPU/PatchConstantWrapper.h"
 
 #include "BarrierCalls.h"
 #include "HullPhase.h"
@@ -113,15 +116,15 @@ const SignatureElement *findElement(const EntrySignature &Sig,
   return nullptr;
 }
 
-struct HullStageEnv {
+struct PatchConstantStageEnv {
   Value *InputLayout = nullptr;
   Value *Inputs = nullptr;
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
 };
 
-std::optional<HullStageEnv> getHullStageEnv(Function &F) {
-  HullStageEnv Env;
+std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
+  PatchConstantStageEnv Env;
   bool Found = false;
   for (Argument &Arg : F.args()) {
     if (Arg.getName() == InputLayoutParamName)
@@ -138,7 +141,7 @@ std::optional<HullStageEnv> getHullStageEnv(Function &F) {
   return Env;
 }
 
-Function *appendHullStageParams(Function &F) {
+Function *appendPatchConstantStageParams(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
@@ -177,13 +180,6 @@ Value *extractLaneOrScalar(IRBuilder<> &Builder, Value *V, unsigned Lane) {
   if (isa<FixedVectorType>(V->getType()))
     return Builder.CreateExtractElement(V, Builder.getInt32(Lane));
   return V;
-}
-
-Value *getFlatInvocationIndex(IRBuilder<> &Builder, const WaveBodyEnv &WEnv,
-                              unsigned WaveSize, unsigned Lane) {
-  Value *Base = Builder.CreateMul(WEnv.WaveIndex, Builder.getInt32(WaveSize),
-                                  "flat.base");
-  return Builder.CreateAdd(Base, Builder.getInt32(Lane), "flat.index");
 }
 
 Value *loadLayoutField(IRBuilder<> &Builder, Value *LayoutArg,
@@ -235,53 +231,16 @@ Value *computeStageStorageAddress(IRBuilder<> &Builder, Value *LayoutArg,
   return Builder.CreateInBoundsGEP(Builder.getInt8Ty(), Bytes, ByteOffset);
 }
 
-/// Lowers a `feme.stage.input.load` of the `OutputControlPointID` system
-/// value to the invoking lane's own flat invocation index. Also records that
-/// index's `<W x i32>` vector so `lowerHullInputLoad` below can recognize a
-/// later ordinary attribute load that indexes by it (see the file comment's
-/// "control-point index other than the invocation's own" scope note).
-Value *lowerOutputControlPointID(CallInst &CI, const WaveBodyEnv &WEnv) {
-  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
-  IRBuilder<> Builder(&CI);
-  Value *Result = PoisonValue::get(CI.getType());
-  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
-    Value *Active =
-        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
-    Value *Index = getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
-    Value *LaneResult =
-        Builder.CreateSelect(Active, Index, Builder.getInt32(0));
-    Result =
-        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
-  }
-  return Result;
-}
-
-/// Lowers an ordinary (non-system-value) `feme.stage.input.load`, requiring
-/// the load's control-point-index operand (`CI`'s 4th argument) to be either
-/// \p SelfIndex (the invocation's own `OutputControlPointID`, already
-/// lowered by `lowerOutputControlPointID` above and therefore already
-/// present at every use by the time this runs) or the constant `0` if the
-/// function never reads that system value at all -- see the file comment's
-/// scope note. Returns null (having emitted a diagnostic) for any other
-/// operand.
-Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
-                          const WaveBodyEnv &WEnv, const HullStageEnv &HEnv,
-                          Value *SelfIndex) {
+/// Lowers an ordinary `feme.stage.input.load` reading the completed
+/// `OutputPatch`: unlike `HullWrapper.cpp`'s `lowerHullInputLoad`, the
+/// control-point-index operand (`CI`'s 4th argument) may be any value --
+/// this phase's whole point is reading more than one control point.
+Value *lowerPatchConstantInputLoad(CallInst &CI, const SignatureElement &Elt,
+                                   const WaveBodyEnv &WEnv,
+                                   const PatchConstantStageEnv &PEnv) {
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
   IRBuilder<> Builder(&CI);
-
-  Value *ControlPoint = CI.getArgOperand(3);
-  bool SelfReference = ControlPoint == SelfIndex;
-  auto *ControlPointConst = dyn_cast<ConstantInt>(ControlPoint);
-  bool ZeroConstant = ControlPointConst && ControlPointConst->isZero();
-  if (!SelfReference && !(ZeroConstant && !SelfIndex)) {
-    CI.getContext().emitError(
-        &CI, "feme-cpu-wrap-hull: control-point phase only supports a "
-             "control point reading its own input control point's "
-             "attributes");
-    return nullptr;
-  }
 
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
@@ -289,11 +248,11 @@ Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
         Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
     Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
-    Value *InvocationIndex =
-        getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
-    Value *Addr = computeStageStorageAddress(Builder, HEnv.InputLayout,
-                                             HEnv.Inputs, Elt.ElementID, Elt,
-                                             Row, Component, InvocationIndex);
+    Value *ControlPoint =
+        extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
+    Value *Addr = computeStageStorageAddress(Builder, PEnv.InputLayout,
+                                             PEnv.Inputs, Elt.ElementID, Elt,
+                                             Row, Component, ControlPoint);
     Value *LaneResult = Builder.CreateLoad(ScalarTy, Addr);
     LaneResult = Builder.CreateSelect(Active, LaneResult,
                                       Constant::getNullValue(ScalarTy));
@@ -303,11 +262,18 @@ Value *lowerHullInputLoad(CallInst &CI, const SignatureElement &Elt,
   return Result;
 }
 
-void lowerHullOutputStore(CallInst &CI, const SignatureElement &Elt,
-                          const WaveBodyEnv &WEnv, const HullStageEnv &HEnv) {
+/// Lowers a `feme.stage.output.store` writing a tessellation factor or patch
+/// constant. Storage is per-patch, not per-control-point (see this file's
+/// comment): every lane's write always uses invocation index 0, addressing
+/// the same single patch record rather than a structure-of-arrays slot of
+/// its own.
+void lowerPatchConstantOutputStore(CallInst &CI, const SignatureElement &Elt,
+                                   const WaveBodyEnv &WEnv,
+                                   const PatchConstantStageEnv &PEnv) {
   IRBuilder<> Builder(&CI);
   unsigned WaveSize =
       cast<FixedVectorType>(CI.getArgOperand(3)->getType())->getNumElements();
+  Value *InvocationIndex = Builder.getInt32(0);
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
     Value *Mask = extractLaneOrScalar(Builder, CI.getArgOperand(5), Lane);
     auto *MaskConst = dyn_cast<ConstantInt>(Mask);
@@ -316,10 +282,8 @@ void lowerHullOutputStore(CallInst &CI, const SignatureElement &Elt,
 
     Value *Row = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
-    Value *InvocationIndex =
-        getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
-    Value *Addr = computeStageStorageAddress(Builder, HEnv.OutputLayout,
-                                             HEnv.Outputs, Elt.ElementID, Elt,
+    Value *Addr = computeStageStorageAddress(Builder, PEnv.OutputLayout,
+                                             PEnv.Outputs, Elt.ElementID, Elt,
                                              Row, Component, InvocationIndex);
     Value *LaneVal = extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
     if (!(MaskConst && MaskConst->isOne())) {
@@ -330,11 +294,10 @@ void lowerHullOutputStore(CallInst &CI, const SignatureElement &Elt,
   }
 }
 
-bool lowerHullStageOps(Function &F) {
-  // A group-sync barrier needs the same region-splitting machinery
-  // `feme::cpu::EntryWrapperPass` already implements for compute; this
-  // milestone does not yet generalize it to the control-point batch ABI
-  // (see the file comment above), so diagnose rather than silently drop it.
+bool lowerPatchConstantStageOps(Function &F) {
+  // A single invocation has no sibling to synchronize with; see this file's
+  // comment for why a group-sync barrier here is diagnosed rather than
+  // treated as a (structurally meaningless) no-op.
   for (Instruction &I : instructions(F)) {
     auto *CI = dyn_cast<CallInst>(&I);
     if (!CI)
@@ -342,8 +305,8 @@ bool lowerHullStageOps(Function &F) {
     if (std::optional<MatchedBarrier> Matched = matchBarrierCall(*CI)) {
       if (Matched->GroupSync) {
         F.getContext().emitError(
-            CI, "feme-cpu-wrap-hull: a group-sync barrier inside the "
-                "control-point phase is not yet supported");
+            CI, "feme-cpu-wrap-patch-constant: a group-sync barrier is not "
+                "supported in the single-invocation patch-constant phase");
         return false;
       }
     }
@@ -358,41 +321,15 @@ bool lowerHullStageOps(Function &F) {
     return true;
   if (!Sig) {
     F.getContext().emitError(
-        "feme-cpu-wrap-hull: hull stage wrapper requires attached "
-        "feme.signature metadata");
+        "feme-cpu-wrap-patch-constant: patch-constant wrapper requires "
+        "attached feme.signature metadata");
     return false;
   }
 
   std::optional<WaveBodyEnv> WEnv = getWaveBodyEnv(F);
-  std::optional<HullStageEnv> HEnv = getHullStageEnv(F);
-  if (!WEnv || !HEnv)
+  std::optional<PatchConstantStageEnv> PEnv = getPatchConstantStageEnv(F);
+  if (!WEnv || !PEnv)
     return false;
-
-  // Lower the `OutputControlPointID` input load(s) first (see
-  // `lowerHullInputLoad`'s comment): any later ordinary attribute load
-  // indexed by that same value already sees the replacement, since a
-  // forward pass over `instructions(F)` visits a def before any use that
-  // followed it in the source.
-  Value *SelfIndex = nullptr;
-  for (Instruction &I : make_early_inc_range(instructions(F))) {
-    auto *CI = dyn_cast<CallInst>(&I);
-    if (!CI)
-      continue;
-    StageOpKind Kind;
-    if (!isStageOpCall(*CI, &Kind) || Kind != StageOpKind::InputLoad)
-      continue;
-    auto *EltID = dyn_cast<ConstantInt>(CI->getArgOperand(0));
-    if (!EltID)
-      continue;
-    const SignatureElement *Elt =
-        findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
-                    SignatureDirection::Input);
-    if (!Elt || Elt->SystemValue != SignatureSystemValue::OutputControlPointID)
-      continue;
-    SelfIndex = lowerOutputControlPointID(*CI, *WEnv);
-    CI->replaceAllUsesWith(SelfIndex);
-    CI->eraseFromParent();
-  }
 
   for (Instruction &I : make_early_inc_range(instructions(F))) {
     auto *CI = dyn_cast<CallInst>(&I);
@@ -403,15 +340,15 @@ bool lowerHullStageOps(Function &F) {
       const SignatureElement *Elt =
           EltID
               ? findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
-                            SignatureDirection::Output)
+                            SignatureDirection::PatchOutput)
               : nullptr;
       if (!Elt) {
         F.getContext().emitError(
-            CI, "feme-cpu-wrap-hull: masked output store references an "
-                "unknown signature element");
+            CI, "feme-cpu-wrap-patch-constant: masked output store "
+                "references an unknown patch-output signature element");
         return false;
       }
-      lowerHullOutputStore(*CI, *Elt, *WEnv, *HEnv);
+      lowerPatchConstantOutputStore(*CI, *Elt, *WEnv, *PEnv);
       CI->eraseFromParent();
       continue;
     }
@@ -422,7 +359,8 @@ bool lowerHullStageOps(Function &F) {
     auto *EltID = dyn_cast<ConstantInt>(CI->getArgOperand(0));
     if (!EltID) {
       F.getContext().emitError(
-          CI, "feme-cpu-wrap-hull: stage IO requires a constant element ID");
+          CI, "feme-cpu-wrap-patch-constant: stage IO requires a constant "
+              "element ID");
       return false;
     }
 
@@ -433,21 +371,33 @@ bool lowerHullStageOps(Function &F) {
                       SignatureDirection::Input);
       if (!Elt) {
         F.getContext().emitError(
-            CI, "feme-cpu-wrap-hull: input load refers to an unknown "
-                "signature element");
+            CI, "feme-cpu-wrap-patch-constant: input load refers to an "
+                "unknown signature element");
         return false;
       }
-      Value *Lowered = lowerHullInputLoad(*CI, *Elt, *WEnv, *HEnv, SelfIndex);
-      if (!Lowered)
-        return false;
+      Value *Lowered = lowerPatchConstantInputLoad(*CI, *Elt, *WEnv, *PEnv);
       CI->replaceAllUsesWith(Lowered);
+      CI->eraseFromParent();
+      break;
+    }
+    case StageOpKind::OutputStore: {
+      const SignatureElement *Elt =
+          findElement(*Sig, static_cast<uint32_t>(EltID->getZExtValue()),
+                      SignatureDirection::PatchOutput);
+      if (!Elt) {
+        F.getContext().emitError(
+            CI, "feme-cpu-wrap-patch-constant: output store refers to an "
+                "unknown patch-output signature element");
+        return false;
+      }
+      lowerPatchConstantOutputStore(*CI, *Elt, *WEnv, *PEnv);
       CI->eraseFromParent();
       break;
     }
     default:
       F.getContext().emitError(
-          CI, "feme-cpu-wrap-hull: unexpected stage op left for the hull "
-              "wrapper");
+          CI, "feme-cpu-wrap-patch-constant: unexpected stage op left for "
+              "the patch-constant wrapper");
       return false;
     }
   }
@@ -467,7 +417,6 @@ struct WrapperEnv {
   Value *Inputs = nullptr;
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
-  Value *OutputControlPointCount = nullptr;
 };
 
 WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
@@ -476,19 +425,17 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Builder.getInt32Ty();
   WrapperEnv Env;
-  Env.OutputControlPointCount = loadStructField(
-      Builder, ArgsTy, Args, PatchArgsFieldOutputControlPointCount, I32Ty);
-  Env.InputLayout =
-      loadStructField(Builder, ArgsTy, Args, PatchArgsFieldInputLayout, PtrTy);
-  Env.Inputs =
-      loadStructField(Builder, ArgsTy, Args, PatchArgsFieldInputs, PtrTy);
-  Env.OutputLayout =
-      loadStructField(Builder, ArgsTy, Args, PatchArgsFieldOutputLayout, PtrTy);
-  Env.Outputs =
-      loadStructField(Builder, ArgsTy, Args, PatchArgsFieldOutputs, PtrTy);
+  Env.InputLayout = loadStructField(Builder, ArgsTy, Args,
+                                    PatchConstantArgsFieldInputLayout, PtrTy);
+  Env.Inputs = loadStructField(Builder, ArgsTy, Args,
+                               PatchConstantArgsFieldInputs, PtrTy);
+  Env.OutputLayout = loadStructField(Builder, ArgsTy, Args,
+                                     PatchConstantArgsFieldOutputLayout, PtrTy);
+  Env.Outputs = loadStructField(Builder, ArgsTy, Args,
+                                PatchConstantArgsFieldOutputs, PtrTy);
 
-  Value *ResourcesRaw =
-      loadStructField(Builder, ArgsTy, Args, PatchArgsFieldResources, PtrTy);
+  Value *ResourcesRaw = loadStructField(Builder, ArgsTy, Args,
+                                        PatchConstantArgsFieldResources, PtrTy);
   StructType *ResourcesTy = getShaderResourcesType(Ctx);
   Value *Resources =
       Builder.CreateBitCast(ResourcesRaw, PointerType::get(Ctx, 0));
@@ -524,9 +471,8 @@ Function *buildWrapper(Function &Body) {
       cast<FixedVectorType>(getWaveBodyEnv(Body)->EntryMask->getType())
           ->getNumElements();
 
-  StructType *ArgsTy = getPatchArgsType(Ctx);
+  StructType *ArgsTy = getPatchConstantArgsType(Ctx);
   Type *PtrTy = PointerType::get(Ctx, 0);
-  Type *I32Ty = Type::getInt32Ty(Ctx);
 
   std::string WrapperName = getEntrySymbolName(Body.getName());
   Function *Wrapper =
@@ -536,33 +482,16 @@ Function *buildWrapper(Function &Body) {
   Args->setName("args");
 
   BasicBlock *EntryBB = BasicBlock::Create(Ctx, "entry", Wrapper);
-  BasicBlock *HeaderBB = BasicBlock::Create(Ctx, "wave.loop.header", Wrapper);
-  BasicBlock *BodyBB = BasicBlock::Create(Ctx, "wave.loop.body", Wrapper);
-  BasicBlock *ExitBB = BasicBlock::Create(Ctx, "wave.loop.exit", Wrapper);
-
   IRBuilder<> Entry(EntryBB);
   WrapperEnv Env = buildWrapperEnv(Entry, ArgsTy, Args);
-  Value *Waves = Entry.CreateUDiv(Entry.CreateAdd(Env.OutputControlPointCount,
-                                                  Entry.getInt32(WaveSize - 1)),
-                                  Entry.getInt32(WaveSize), "waves");
-  Entry.CreateBr(HeaderBB);
 
-  IRBuilder<> Header(HeaderBB);
-  PHINode *W = Header.CreatePHI(I32Ty, 2, "w");
-  W->addIncoming(Header.getInt32(0), EntryBB);
-  Value *Cond = Header.CreateICmpULT(W, Waves, "wave.cond");
-  Header.CreateCondBr(Cond, BodyBB, ExitBB);
-
-  IRBuilder<> BodyIR(BodyBB);
-  Value *Base = BodyIR.CreateMul(W, BodyIR.getInt32(WaveSize));
-  Value *WideBase = BodyIR.CreateVectorSplat(WaveSize, Base);
-  SmallVector<Constant *, 8> Lanes;
+  // A single, non-batched invocation (this file's own comment): one call to
+  // the widened body, with only lane 0 marked active -- there is no wave
+  // loop over some batch count the way every other stage's wrapper has.
+  SmallVector<Constant *, 8> LaneIsZero;
   for (unsigned I = 0; I != WaveSize; ++I)
-    Lanes.push_back(BodyIR.getInt32(I));
-  Value *Indices = BodyIR.CreateAdd(WideBase, ConstantVector::get(Lanes));
-  Value *WideCount =
-      BodyIR.CreateVectorSplat(WaveSize, Env.OutputControlPointCount);
-  Value *Mask = BodyIR.CreateICmpULT(Indices, WideCount, "wave.mask");
+    LaneIsZero.push_back(Entry.getInt1(I == 0));
+  Value *Mask = ConstantVector::get(LaneIsZero);
 
   SmallVector<Value *, 16> CallArgs;
   for (const Argument &Arg : Body.args()) {
@@ -585,9 +514,9 @@ Function *buildWrapper(Function &Body) {
     else if (Arg.getName() == "wave_group_id_x" ||
              Arg.getName() == "wave_group_id_y" ||
              Arg.getName() == "wave_group_id_z")
-      CallArgs.push_back(BodyIR.getInt32(0));
+      CallArgs.push_back(Entry.getInt32(0));
     else if (Arg.getName() == "wave_index")
-      CallArgs.push_back(W);
+      CallArgs.push_back(Entry.getInt32(0));
     else if (Arg.getName() == "wave_entry_mask" ||
              Arg.getName() == "wave_sideeffect_mask")
       CallArgs.push_back(Mask);
@@ -603,34 +532,32 @@ Function *buildWrapper(Function &Body) {
     else if (Arg.getName() == OutputsParamName)
       CallArgs.push_back(Env.Outputs);
     else
-      llvm_unreachable("unexpected parameter for HullWrapperPass");
+      llvm_unreachable("unexpected parameter for PatchConstantWrapperPass");
   }
-  BodyIR.CreateCall(&Body, CallArgs);
-  Value *WNext = BodyIR.CreateAdd(W, BodyIR.getInt32(1), "w.next");
-  BodyIR.CreateBr(HeaderBB);
-  W->addIncoming(WNext, BodyBB);
+  Entry.CreateCall(&Body, CallArgs);
+  Entry.CreateRetVoid();
 
-  IRBuilder<>(ExitBB).CreateRetVoid();
   Body.setLinkage(GlobalValue::InternalLinkage);
   return Wrapper;
 }
 
 } // namespace
 
-PreservedAnalyses HullWrapperPass::run(Module &M, ModuleAnalysisManager &) {
+PreservedAnalyses PatchConstantWrapperPass::run(Module &M,
+                                                ModuleAnalysisManager &) {
   bool Changed = false;
   SmallVector<Function *, 4> Candidates;
   for (Function &F : M)
     if (!F.isDeclaration() &&
         feme::getShaderStage(F) == feme::ShaderStage::Hull &&
-        !isPatchConstantPhase(F))
+        isPatchConstantPhase(F))
       Candidates.push_back(&F);
 
   for (Function *F : Candidates) {
     if (!getWaveBodyEnv(*F))
       continue;
-    Function *Body = appendHullStageParams(*F);
-    if (!lowerHullStageOps(*Body))
+    Function *Body = appendPatchConstantStageParams(*F);
+    if (!lowerPatchConstantStageOps(*Body))
       continue;
     if (buildWrapper(*Body))
       Changed = true;

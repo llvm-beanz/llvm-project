@@ -15,6 +15,7 @@
 #include "feme/Transforms/CPU/FragmentWrapper.h"
 #include "feme/Transforms/CPU/HullWrapper.h"
 #include "feme/Transforms/CPU/Linearize.h"
+#include "feme/Transforms/CPU/PatchConstantWrapper.h"
 #include "feme/Transforms/CPU/Prepare.h"
 #include "feme/Transforms/CPU/ResourceLowering.h"
 #include "feme/Transforms/CPU/RootConstantLowering.h"
@@ -319,6 +320,8 @@ Expected<PipelineResult> runPipeline(Module &M,
       break;
     case feme::ShaderStage::Hull:
       if (Error E = runAndCheck("wrapping", HullWrapperPass()))
+        return std::move(E);
+      if (Error E = runAndCheck("wrapping", PatchConstantWrapperPass()))
         return std::move(E);
       break;
     case feme::ShaderStage::Geometry:
