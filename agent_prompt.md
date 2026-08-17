@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -67,11 +67,13 @@ Open issues form the last agent task:
 > 2. Generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
 >    the control-point batch ABI, for a hull shader whose control points
 >    cooperate through groupshared memory before every one finishes.
-> 3. Wiring any compiled hull stage (now both phases) into
->    `executeDraws`/`feme-render`/the scene YAML -- still strictly downstream
->    of the domain wrapper (control points and patch constants alone produce
->    no rasterizable geometry without going through the tessellator and a
->    domain-stage evaluation).
-> 4. An `InputPatch` parameter on the patch-constant function, newly deferred
->    this session (see above) -- a smaller, more scoped gap than the other
->    three.
+> 3. Wiring any compiled hull stage (now both phases, including `InputPatch`)
+>    into `executeDraws`/`feme-render`/the scene YAML -- still strictly
+>    downstream of the domain wrapper (control points and patch constants
+>    alone produce no rasterizable geometry without going through the
+>    tessellator and a domain-stage evaluation). Note this also means
+>    `feme::graphics::PatchRecord` (Patch.h) still has no storage for the
+>    original input control points at all (only an `InputControlPointCount`
+>    used for validation) -- feeding a real `InputPatch` block from host-side
+>    patch storage into `FemePatchConstantArgs::InputPatch` needs that
+>    storage added too, whenever this item is picked up.
