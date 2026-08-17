@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTransformsCPU
+add_feme_library(FeMeTransformsCPU
   BarrierCalls.cpp
   BoundResourceNormalization.cpp
   BuiltinCalls.cpp

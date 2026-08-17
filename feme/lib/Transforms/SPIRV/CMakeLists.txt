@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTransformsSPIRV
+add_feme_library(FeMeTransformsSPIRV
   RaisedLowering.cpp
 
   LINK_COMPONENTS

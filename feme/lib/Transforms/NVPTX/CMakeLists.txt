@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTransformsNVPTX
+add_feme_library(FeMeTransformsNVPTX
   RaisedLowering.cpp
   ResourceLowering.cpp
 

@@ -1,4 +1,4 @@
-add_mlir_library(FeMeExportDXIL
+add_feme_library(FeMeExportDXIL
   DXILExporter.cpp
 
   LINK_COMPONENTS

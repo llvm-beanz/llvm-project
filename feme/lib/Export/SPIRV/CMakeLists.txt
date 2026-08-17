@@ -1,4 +1,4 @@
-add_mlir_library(FeMeExportSPIRV
+add_feme_library(FeMeExportSPIRV
   SPIRVExporter.cpp
 
   LINK_COMPONENTS

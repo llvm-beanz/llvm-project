@@ -1,4 +1,4 @@
-add_mlir_library(FeMeImportDXBC
+add_feme_library(FeMeImportDXBC
   DXBCImporter.cpp
   TranslateRegistration.cpp
 

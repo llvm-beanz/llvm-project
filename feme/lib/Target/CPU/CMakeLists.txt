@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTargetCPU
+add_feme_library(FeMeTargetCPU
   CompiledStage.cpp
   JITEngine.cpp
   Pipeline.cpp

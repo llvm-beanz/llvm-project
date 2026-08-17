@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTranslateSPIRV
+add_feme_library(FeMeTranslateSPIRV
   SPIRVToLLVMDialectTranslator.cpp
   SPIRVToLLVMTranslator.cpp
   TranslateRegistration.cpp

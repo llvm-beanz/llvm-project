@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTransformsGraphics
+add_feme_library(FeMeTransformsGraphics
   CanonicalizeStage.cpp
   ValidateStage.cpp
 

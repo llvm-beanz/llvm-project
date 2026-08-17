@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTransformsDXIL
+add_feme_library(FeMeTransformsDXIL
   IntrinsicExpansion.cpp
   MetadataRaising.cpp
   OpRaising.cpp

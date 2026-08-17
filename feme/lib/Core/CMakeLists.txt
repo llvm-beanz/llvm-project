@@ -1,4 +1,4 @@
-add_mlir_library(FeMeCore
+add_feme_library(FeMeCore
   Context.cpp
   FormatRegistry.cpp
   Module.cpp

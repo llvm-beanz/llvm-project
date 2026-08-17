@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTransformsAMDGPU
+add_feme_library(FeMeTransformsAMDGPU
   RaisedLowering.cpp
   ResourceLowering.cpp
 

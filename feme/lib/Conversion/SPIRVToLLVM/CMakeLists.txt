@@ -1,4 +1,4 @@
-add_mlir_library(FeMeConversionSPIRVToLLVM
+add_feme_library(FeMeConversionSPIRVToLLVM
   ConvertSPIRVToLLVMPass.cpp
   SPIRVToLLVMPatterns.cpp
   StageIODecorations.cpp

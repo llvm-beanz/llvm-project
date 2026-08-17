@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTranslateLLVMIR
+add_feme_library(FeMeTranslateLLVMIR
   LLVMDialectToLLVMIRTranslator.cpp
   TranslateRegistration.cpp
 

@@ -1,4 +1,4 @@
-add_mlir_library(FeMeDriver
+add_feme_library(FeMeDriver
   Driver.cpp
 
   LINK_COMPONENTS

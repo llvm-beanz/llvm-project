@@ -1,4 +1,4 @@
-add_mlir_library(FeMeGraphics
+add_feme_library(FeMeGraphics
   DomainInvocations.cpp
   Executor.cpp
   GeometryInputs.cpp

@@ -1,4 +1,4 @@
-add_mlir_library(FeMeImportSPIRV
+add_feme_library(FeMeImportSPIRV
   SPIRVImporter.cpp
   TranslateRegistration.cpp
 

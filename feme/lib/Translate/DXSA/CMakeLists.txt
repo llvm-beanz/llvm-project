@@ -1,4 +1,4 @@
-add_mlir_library(FeMeTranslateDXSA
+add_feme_library(FeMeTranslateDXSA
   DXSAToLLVMIRTranslator.cpp
   DXSATranslator.cpp
   TranslateRegistration.cpp
