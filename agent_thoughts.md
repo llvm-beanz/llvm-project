@@ -18019,3 +18019,81 @@ Vulkan-Headers CMake install); a Vulkan-Headers source checkout added via
 `add_subdirectory` rather than `find_package` would need the explicit
 `-DFEME_VULKAN_XML=<path>` override this already supports, but that path
 is untested since this environment never needed it.
+
+# Agent thoughts: fixing vk_gen_entrypoints.py against newer Vulkan-Headers
+
+## The bug
+
+A build against a current Vulkan-Headers checkout failed generating
+`VulkanEntrypoints.inc`: `vk_gen_entrypoints.py` rejected every single name in
+`ImplementedEntrypoints.txt` -- including obviously-core commands like
+`vkCreateInstance` and `vkGetPhysicalDeviceProperties` -- as "not core Vulkan
+1.0/1.1 entrypoints". That error only fires when `parse_commands()` finds
+zero matching commands for a name the `--implemented` file lists, so the
+generator's idea of "every command required by `VK_VERSION_1_0`/
+`VK_VERSION_1_1`" had gone empty for practically the whole core API.
+
+## Root cause
+
+I diffed the vk.xml the script was written against with a freshly-fetched
+`Vulkan-Docs/main/xml/vk.xml`. Newer revisions split each
+`VK_VERSION_1_x` `<feature>` into `VK_BASE_VERSION_1_x`,
+`VK_COMPUTE_VERSION_1_x`, and `VK_GRAPHICS_VERSION_1_x` sub-features chained
+together with a `depends="..."` attribute (e.g.
+`VK_GRAPHICS_VERSION_1_0` depends on `VK_COMPUTE_VERSION_1_0`, which depends
+on `VK_BASE_VERSION_1_0`), and `VK_VERSION_1_0` itself now requires *zero*
+commands directly -- it just `depends="VK_GRAPHICS_VERSION_1_0"`. The
+script's `parse_commands()` only ever looked at `<feature name="VK_VERSION_1_x">`'s
+own `<require><command>` children, so on this newer schema it silently found
+nothing under either core feature.
+
+I confirmed this is purely a schema/authoring change, not a semantic one: I
+fetched an older (pre-split, flat `VK_VERSION_1_x`) vk.xml release and
+diffed the full resolved command set my fix produces against both revisions
+-- byte-for-byte identical.
+
+## The fix
+
+Rather than assume core commands live directly under
+`VK_VERSION_1_0`/`VK_VERSION_1_1`, the generator now resolves the
+`depends` attribute transitively: `resolve_dependent_features()` walks
+`depends` recursively (regex-extracting every feature/extension name it
+mentions, regardless of whether the underlying boolean expression uses `+`
+(AND) or `,` (OR) -- since for the purpose of enumerating which commands a
+core version pulls in, every name it depends on is relevant either way), and
+`parse_commands()` unions the `<require><command>` entries from every
+feature in that closure for both `VK_VERSION_1_0` and `VK_VERSION_1_1`.
+
+One wrinkle worth a defensive check: a `<require depends="...">` block
+(distinct from the feature-level `depends` attribute) marks its contents as
+conditioned on an optional extension or struct field rather than the core
+version proper. I confirmed no such block currently contains a `<command>`
+anywhere in vk.xml, but the fix skips any such block anyway rather than rely
+on that continuing to hold silently.
+
+## Testing
+
+Added `feme/test/Vulkan/vk-gen-entrypoints-split-features.test`, a lit test
+that runs the generator directly (no Vulkan-Headers/CMake dependency needed)
+against a small hand-written `vk.xml` fixture
+(`Inputs/vk-split-features.xml`) reproducing the split-feature/`depends`
+chain, an alias, and a `<require depends="...">` block, `FileCheck`ing that:
+commands from every level of the chain are included with the right dispatch
+level, an aliased command resolves to its target's dispatch level, and the
+extension-gated command is excluded. This exercises the actual bug's root
+cause directly rather than only via an end-to-end build.
+
+I verified the fix two ways: (1) reverted it and reran the real build with
+`-DFEME_VULKAN_XML` pointed at a freshly-downloaded current vk.xml, which
+reproduced the reported error message exactly; restoring the fix built
+`VulkanEntrypoints.inc` cleanly. (2) Ran the full `check-feme` target
+(ninja, ccache, assertions-enabled build) against both the split-feature
+vk.xml and the system package's older flat vk.xml -- all 1249 tests pass
+either way, and the Vulkan unit/lit tests specifically still pass.
+
+## Design doc
+
+Updated `FeMeVulkanDesign.md`'s V0 status note to mention that core-command
+resolution now walks `depends` transitively, since the prior wording
+("reads ... core `VK_VERSION_1_0`/`VK_VERSION_1_1` commands only") no longer
+fully describes how those commands are located.
