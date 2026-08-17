@@ -141,6 +141,8 @@ template <> struct MappingTraits<feme::graphics::Scene> {
     Io.mapOptional("index-buffer", S.IndexBuffer);
     Io.mapOptional("textures", S.Textures);
     Io.mapOptional("draws", S.Draws);
+    Io.mapOptional("depth-attachment", S.DepthAttachment, std::string());
+    Io.mapOptional("stencil-attachment", S.StencilAttachment, std::string());
   }
 };
 

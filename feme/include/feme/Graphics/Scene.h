@@ -139,6 +139,11 @@ struct Scene {
   std::optional<SceneIndexBuffer> IndexBuffer;
   std::vector<SceneTexture> Textures;
   std::vector<SceneDraw> Draws;
+  /// The `depth-attachment`/`stencil-attachment` keys: the `name` of an
+  /// `attachments` entry to bind as the draw's depth/stencil attachment
+  /// (roadmap R33), or empty if the scene binds neither.
+  std::string DepthAttachment;
+  std::string StencilAttachment;
 };
 
 /// Parses \p Text as a scene YAML file. Returns an `Error` for a malformed

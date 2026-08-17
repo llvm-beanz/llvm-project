@@ -102,6 +102,22 @@ struct AttachmentView {
   uint32_t Height = 0;
 };
 
+/// The optional depth/stencil attachments a draw tests/writes against
+/// (roadmap R33, "Depth, stencil, blending, and multisampling"). `Depth`
+/// and `Stencil` are two separate single-component images (`D16_UNORM`/
+/// `D32_FLOAT` and `S8_UINT` respectively) rather than one packed
+/// `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT` surface: the combined
+/// formats are declared in `cpu::ResourceFormat` for a future API
+/// frontend to translate into (or out of), but splitting them keeps this
+/// milestone's output-merge code free of sub-word packing. An empty
+/// `Data` member means that attachment is not bound; `Pipeline`'s
+/// `DepthState::TestEnable`/`WriteEnable` and `StencilState::TestEnable`
+/// require the matching attachment to be bound.
+struct DepthStencilAttachment {
+  AttachmentView Depth;
+  AttachmentView Stencil;
+};
+
 /// One non-indexed or indexed draw command, matching the scene YAML's own
 /// `draws` entry shape. A non-indexed draw (`Indexed == false`) fetches
 /// vertex `FirstVertex + i` for `i` in `[0, VertexCount)`; an indexed draw
@@ -126,6 +142,7 @@ struct DrawCommand {
 /// buffers/heaps it references.
 struct PreparedDraw {
   llvm::MutableArrayRef<AttachmentView> Attachments;
+  DepthStencilAttachment DepthStencil;
   ViewportState Viewport;
   ScissorRect Scissor;
   llvm::ArrayRef<VertexBufferBinding> VertexBuffers;

@@ -547,16 +547,56 @@ int main(int argc, char **argv) {
       errs() << "feme-render: a scene with 'draws' needs a 'pipeline'\n";
       return 1;
     }
-    if (Attachments->size() != 1) {
+
+    // `depth-attachment`/`stencil-attachment` name one of the scene's own
+    // `attachments` entries rather than adding a second list (roadmap R33):
+    // every other `attachments` entry is a color attachment.
+    auto findNamed = [&](StringRef Name) -> AttachmentStorage * {
+      if (Name.empty())
+        return nullptr;
+      auto It = llvm::find_if(*Attachments, [&](const AttachmentStorage &A) {
+        return A.Name == Name;
+      });
+      return It == Attachments->end() ? nullptr : &*It;
+    };
+    AttachmentStorage *DepthStorage = findNamed(ParsedScene->DepthAttachment);
+    AttachmentStorage *StencilStorage =
+        findNamed(ParsedScene->StencilAttachment);
+    if (!ParsedScene->DepthAttachment.empty() && !DepthStorage) {
+      errs() << "feme-render: 'depth-attachment' names no attachment in "
+                "this scene\n";
+      return 1;
+    }
+    if (!ParsedScene->StencilAttachment.empty() && !StencilStorage) {
+      errs() << "feme-render: 'stencil-attachment' names no attachment in "
+                "this scene\n";
+      return 1;
+    }
+
+    std::vector<AttachmentStorage *> ColorStorages;
+    for (AttachmentStorage &A : *Attachments)
+      if (&A != DepthStorage && &A != StencilStorage)
+        ColorStorages.push_back(&A);
+    if (ColorStorages.size() != 1) {
       errs() << "feme-render: executing 'draws' supports exactly one "
                 "color attachment today (roadmap R33 adds more)\n";
       return 1;
     }
 
-    AttachmentStorage &ColorStorage = (*Attachments)[0];
+    AttachmentStorage &ColorStorage = *ColorStorages[0];
     AttachmentView Color{ColorStorage.Data, ColorStorage.Format,
                          ColorStorage.Width, ColorStorage.Height};
     std::array<AttachmentView, 1> AttachmentViews{Color};
+
+    DepthStencilAttachment DepthStencil;
+    if (DepthStorage)
+      DepthStencil.Depth =
+          AttachmentView{DepthStorage->Data, DepthStorage->Format,
+                         DepthStorage->Width, DepthStorage->Height};
+    if (StencilStorage)
+      DepthStencil.Stencil =
+          AttachmentView{StencilStorage->Data, StencilStorage->Format,
+                         StencilStorage->Width, StencilStorage->Height};
 
     // Owned byte buffers (and attribute lists) for every vertex/index buffer
     // the scene declares, kept alive for the `executeDraws` call below.
@@ -633,6 +673,7 @@ int main(int argc, char **argv) {
 
     PreparedDraw Draw;
     Draw.Attachments = AttachmentViews;
+    Draw.DepthStencil = DepthStencil;
     Draw.Viewport = Viewport;
     Draw.Scissor = Scissor;
     Draw.VertexBuffers = VertexBuffers;

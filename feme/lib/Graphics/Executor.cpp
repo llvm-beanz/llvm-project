@@ -15,8 +15,11 @@
 //  - No post-transform vertex cache: every (instance, vertex-or-index) pair
 //    re-runs the vertex stage, matching "the first implementation may
 //    perform all vertex work before tile work" in "Draw flow".
-//  - Depth/stencil testing, blending beyond `BlendMode::Replace`, and
-//    multisampling are rejected rather than run (roadmap R33).
+//  - Depth testing/writes (roadmap R33) support `D16_UNORM`/`D32_FLOAT`
+//    depth attachments with early or late scheduling chosen from the
+//    fragment stage's own `SV_Depth`/discard reflection; stencil testing,
+//    blending beyond `BlendMode::Replace`, multiple render targets, and
+//    multisampling remain rejected rather than run.
 //  - Vertex/fragment stage elements are 32-bit scalars/vectors only
 //    (`RowCount == 1`, `BitWidth == 32`); matrices and 16-/64-bit varyings
 //    are a mechanical, on-demand addition once a test needs them.
@@ -504,6 +507,73 @@ bool isTopLeftEdge(std::array<float, 2> A, std::array<float, 2> B) {
   return (Dy == 0.0f && Dx > 0.0f) || Dy < 0.0f;
 }
 
+/// Evaluates \p Op for a candidate depth/stencil value \p New against the
+/// attachment's current value \p Old, per the `CompareOp` semantics
+/// Vulkan/Direct3D share (`Always`/`Never` ignore both operands).
+bool compareOp(CompareOp Op, float New, float Old) {
+  switch (Op) {
+  case CompareOp::Never:
+    return false;
+  case CompareOp::Less:
+    return New < Old;
+  case CompareOp::Equal:
+    return New == Old;
+  case CompareOp::LessEqual:
+    return New <= Old;
+  case CompareOp::Greater:
+    return New > Old;
+  case CompareOp::NotEqual:
+    return New != Old;
+  case CompareOp::GreaterEqual:
+    return New >= Old;
+  case CompareOp::Always:
+    return true;
+  }
+  llvm_unreachable("unhandled CompareOp");
+}
+
+/// Reads the depth attachment's stored value at pixel (\p PX, \p PY),
+/// converting `D16_UNORM` to the same [0, 1] float convention every other
+/// depth format already uses.
+Expected<float> readDepth(const AttachmentView &Depth, int32_t PX, int32_t PY) {
+  size_t Idx = (size_t)PY * Depth.Width + PX;
+  switch (Depth.Format) {
+  case cpu::ResourceFormat::D32_FLOAT: {
+    float V;
+    memcpy(&V, Depth.Data.data() + Idx * 4, 4);
+    return V;
+  }
+  case cpu::ResourceFormat::D16_UNORM: {
+    uint16_t V;
+    memcpy(&V, Depth.Data.data() + Idx * 2, 2);
+    return V / 65535.0f;
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "depth attachment format is not yet supported "
+                             "(mechanical, added on demand)");
+  }
+}
+
+Error writeDepth(AttachmentView &Depth, int32_t PX, int32_t PY, float Value) {
+  size_t Idx = (size_t)PY * Depth.Width + PX;
+  switch (Depth.Format) {
+  case cpu::ResourceFormat::D32_FLOAT:
+    memcpy(Depth.Data.data() + Idx * 4, &Value, 4);
+    return Error::success();
+  case cpu::ResourceFormat::D16_UNORM: {
+    uint16_t V = static_cast<uint16_t>(
+        std::lround(std::clamp(Value, 0.0f, 1.0f) * 65535.0f));
+    memcpy(Depth.Data.data() + Idx * 2, &V, 2);
+    return Error::success();
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "depth attachment format is not yet supported "
+                             "(mechanical, added on demand)");
+  }
+}
+
 } // namespace
 
 Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
@@ -512,16 +582,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
                              "multisampling is not yet implemented (roadmap "
                              "R33, 'Depth, stencil, blending, and "
                              "multisampling')");
-  if (Pipeline.getDepthState().TestEnable ||
-      Pipeline.getDepthState().WriteEnable)
+  const DepthState &PipelineDepth = Pipeline.getDepthState();
+  if ((PipelineDepth.TestEnable || PipelineDepth.WriteEnable) &&
+      Draw.DepthStencil.Depth.Data.empty())
     return createStringError(inconvertibleErrorCode(),
-                             "depth testing/writes are not yet implemented "
-                             "(roadmap R33)");
+                             "depth testing/writes are enabled but the draw "
+                             "has no bound depth attachment");
   if (Draw.Attachments.size() != 1)
     return createStringError(inconvertibleErrorCode(),
                              "exactly one color attachment is implemented "
-                             "yet (roadmap R33 adds depth/stencil and "
-                             "multiple render targets); got %zu",
+                             "yet (roadmap R33 adds multiple render "
+                             "targets); got %zu",
                              Draw.Attachments.size());
   if (Pipeline.getTopology() != PrimitiveTopology::TriangleList &&
       Pipeline.getTopology() != PrimitiveTopology::TriangleStrip)
@@ -595,6 +666,27 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
   Expected<uint32_t> ColorElemSize = getFixtureFormatElementSize(Color.Format);
   if (!ColorElemSize)
     return ColorElemSize.takeError();
+
+  // --- Depth test/write setup (roadmap R33). ---
+  //
+  // An early depth test/write -- performed before the fragment stage runs,
+  // using the rasterizer's own interpolated depth -- is only correct when
+  // the fragment stage cannot override that depth (no `SV_Depth` output)
+  // and cannot conditionally suppress its own side effects (no
+  // discard/demote): "An early depth pass may reject side-effect
+  // invocations before fragment execution only when the source API
+  // permits it" ("Early and late tests" in
+  // feme/docs/FeMeGraphicsDesign.md). Every other case defers the test
+  // until after the fragment stage returns, matching output merge's own
+  // "depth, stencil, blend, and attachment writes in specification order".
+  const SignatureElement *FSDepthOut = findElement(
+      *FSSig, SignatureDirection::Output, SignatureSystemValue::Depth);
+  uint32_t FSFlags = FS.getArtifactInfo().Flags;
+  bool FSMayDiscard = (FSFlags & (cpu::FEME_CPU_ARTIFACT_USES_DISCARD |
+                                  cpu::FEME_CPU_ARTIFACT_USES_DEMOTE)) != 0;
+  bool DepthTestOrWrite = PipelineDepth.TestEnable || PipelineDepth.WriteEnable;
+  bool UseEarlyDepth = DepthTestOrWrite && !FSDepthOut && !FSMayDiscard;
+  AttachmentView DepthAttachment = Draw.DepthStencil.Depth;
 
   int32_t ScissorMinX = std::max<int32_t>(0, Draw.Scissor.X);
   int32_t ScissorMinY = std::max<int32_t>(0, Draw.Scissor.Y);
@@ -958,9 +1050,30 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
                 Inv.SampleIndex[Lane] = 0;
                 Inv.Coverage[Lane] = (Quad.Coverage >> Lane) & 1u;
                 Inv.IsFrontFace[Lane] = Tri.FrontFacing ? 1 : 0;
+
+                if (UseEarlyDepth && Inv.Coverage[Lane]) {
+                  int32_t PX = Quad.PixelX[Lane], PY = Quad.PixelY[Lane];
+                  bool Pass = true;
+                  if (PipelineDepth.TestEnable) {
+                    Expected<float> OldDepth =
+                        readDepth(DepthAttachment, PX, PY);
+                    if (!OldDepth)
+                      return OldDepth.takeError();
+                    Pass = compareOp(PipelineDepth.Compare, Depth, *OldDepth);
+                  }
+                  if (!Pass) {
+                    Quad.Coverage &= ~(1u << Lane);
+                    Inv.Coverage[Lane] = 0;
+                  } else if (PipelineDepth.WriteEnable) {
+                    if (Error E = writeDepth(DepthAttachment, PX, PY, Depth))
+                      return E;
+                  }
+                }
               }
               Inv.LiveMask = 0xF;
               Inv.SideEffectMask = Quad.Coverage;
+              if (Quad.Coverage == 0)
+                continue;
 
               QuadInvocations.push_back(Inv);
               Quads.push_back(Quad);
@@ -1056,6 +1169,31 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw) {
               continue;
             int32_t PX = Quad.PixelX[Lane];
             int32_t PY = Quad.PixelY[Lane];
+
+            // A late depth test/write happens here, after the fragment
+            // stage ran, using its `SV_Depth` output when it wrote one
+            // (an early test already handled the alternative above and
+            // is not repeated here -- see "Depth test/write setup").
+            if (!UseEarlyDepth && DepthTestOrWrite) {
+              float FragDepth = QuadInvocations[Q].Position[Lane][2];
+              if (FSDepthOut)
+                FragDepth =
+                    FSOutput->readFloat(FSDepthOut->ElementID, 0, Q * 4 + Lane);
+              bool Pass = true;
+              if (PipelineDepth.TestEnable) {
+                Expected<float> OldDepth = readDepth(DepthAttachment, PX, PY);
+                if (!OldDepth)
+                  return OldDepth.takeError();
+                Pass = compareOp(PipelineDepth.Compare, FragDepth, *OldDepth);
+              }
+              if (!Pass)
+                continue;
+              if (PipelineDepth.WriteEnable) {
+                if (Error E = writeDepth(DepthAttachment, PX, PY, FragDepth))
+                  return E;
+              }
+            }
+
             std::array<double, 4> RGBA;
             for (unsigned C = 0; C != 4; ++C)
               RGBA[C] =

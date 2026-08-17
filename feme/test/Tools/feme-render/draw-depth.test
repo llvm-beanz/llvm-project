@@ -1,0 +1,82 @@
+; RUN: split-file %s %t
+; RUN: feme-render %t/scene.yaml | FileCheck %s
+
+; Roadmap R33, "Depth, stencil, blending, and multisampling" (see
+; feme/docs/Roadmap.md): the same oversized CCW triangle draw-triangle.test
+; uses, but with a `d32-float` depth attachment cleared to the far plane
+; (1.0) and `pipeline.depth: { test: less, write: true }`. The triangle's
+; SV_Position.z is 0.0, so every covered texel passes the depth test and the
+; depth attachment ends up at 0.0 everywhere.
+
+; CHECK: image color0 4x4 r8g8b8a8-unorm
+; CHECK-NEXT: y=0: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=1: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=2: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=3: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK: image depth0 4x4 d32-float
+; CHECK-NEXT: y=0: +0.0000e+00 +0.0000e+00 +0.0000e+00 +0.0000e+00
+; CHECK-NEXT: y=1: +0.0000e+00 +0.0000e+00 +0.0000e+00 +0.0000e+00
+; CHECK-NEXT: y=2: +0.0000e+00 +0.0000e+00 +0.0000e+00 +0.0000e+00
+; CHECK-NEXT: y=3: +0.0000e+00 +0.0000e+00 +0.0000e+00 +0.0000e+00
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [0.0, 0.0, 0.0, 1.0]
+  - name: depth0
+    format: d32-float
+    extent: [4, 4]
+    clear: [1.0]
+depth-attachment: depth0
+pipeline:
+  vertex: { module: vs.ll, entry: vs_main }
+  fragment: { module: fs.ll, entry: fs_main }
+  cull: none
+  front-face: ccw
+  depth: { test: less, write: true }
+draws:
+  - { vertices: 3, instances: 1 }
+
+;--- vs.ll
+
+; Identical to draw-triangle.test's vertex shader: selects one of 3
+; hardcoded, oversized-triangle corners from SV_VertexID, at z=0.0.
+define void @vs_main() #0 !feme.signature !0 {
+  %vid = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+  %is0 = icmp eq i32 %vid, 0
+  %is1 = icmp eq i32 %vid, 1
+  %xb = select i1 %is1, float 3.0, float -1.0
+  %x = select i1 %is0, float -1.0, float %xb
+  %yb = select i1 %is1, float -1.0, float 3.0
+  %y = select i1 %is0, float -1.0, float %yb
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %x, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %y, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+  ret void
+}
+declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="vertex" }
+
+!0 = !{[128 x i8] c"\01\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\04\00\00\00\02\00\00\00\20\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00"}
+
+;--- fs.ll
+
+; Identical to draw-triangle.test's fragment shader: always writes solid
+; red to SV_Target0. No `SV_Depth` output, so the depth test/write above
+; runs early (before this shader), matching "Depth test/write setup" in
+; Executor.cpp's own file comment.
+define void @fs_main() #0 !feme.signature !0 {
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+  ret void
+}
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="fragment" }
+
+!0 = !{[68 x i8] c"\01\00\00\00\01\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\20\00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00"}

@@ -126,7 +126,8 @@ compileStage(Context &Ctx, StringRef IR, StringRef EntryName,
 /// shaders above implement, with the given raster state and topology.
 Expected<GraphicsPipeline>
 buildPipeline(Context &Ctx, RasterState Raster,
-              PrimitiveTopology Topology = PrimitiveTopology::TriangleList) {
+              PrimitiveTopology Topology = PrimitiveTopology::TriangleList,
+              DepthState Depth = DepthState{}) {
   EntrySignature VSSig;
   VSSig.Elements = {
       makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
@@ -151,12 +152,17 @@ buildPipeline(Context &Ctx, RasterState Raster,
   std::vector<AttachmentFormat> Attachments = {
       {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
   return GraphicsPipeline(std::move(*VS), std::move(*FS), Topology, Raster,
-                          DepthState{}, BlendMode::Replace,
+                          Depth, BlendMode::Replace,
                           /*SampleCount=*/1, std::move(Attachments));
 }
 
 struct TriangleScene {
   std::array<uint8_t, 64> AttachmentStorage{};
+  // 4x4 depth attachment, one float per texel, initialized to the far
+  // plane so a test that binds it without an explicit clear still starts
+  // from a sensible default.
+  std::array<float, 16> DepthStorage;
+  bool BindDepth = false;
   // Interleaved position (xyz) + color (rgba) per vertex, 7 floats/vertex.
   std::vector<float> VertexData;
   std::vector<VertexAttribute> Attributes = {
@@ -169,12 +175,19 @@ struct TriangleScene {
   std::vector<VertexBufferBinding> Bindings;
   std::array<DrawCommand, 1> Draws;
 
+  TriangleScene() { DepthStorage.fill(1.0f); }
+
   PreparedDraw prepare(bool Indexed = false) {
     PreparedDraw Draw;
     Color = AttachmentView{AttachmentStorage,
                            cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
     Attachments = {Color};
     Draw.Attachments = Attachments;
+    if (BindDepth)
+      Draw.DepthStencil.Depth = AttachmentView{
+          MutableArrayRef(reinterpret_cast<uint8_t *>(DepthStorage.data()),
+                          DepthStorage.size() * sizeof(float)),
+          cpu::ResourceFormat::D32_FLOAT, 4, 4};
     Draw.Viewport = ViewportState{0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
     Draw.Scissor = ScissorRect{0, 0, 4, 4};
 
@@ -366,6 +379,98 @@ TEST(ExecutorTest, AdjacentTrianglesShareAnEdgeWithoutGapsOrOverlaps) {
         << "," << (int)Texel[2] << "," << (int)Texel[3] << ")";
     EXPECT_EQ(Texel[3], 255) << "texel " << I;
   }
+}
+
+// Roadmap R33 ("Depth, stencil, blending, and multisampling"): depth
+// testing/writes with a real `D32_FLOAT` attachment.
+TEST(ExecutorTest, DepthTestRejectsFartherFragment) {
+  Context Ctx;
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = true;
+  Depth.Compare = CompareOp::Less;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, Depth);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A near red triangle (z=0.0) drawn after clearing depth to the far
+  // plane (1.0, `TriangleScene`'s default): every texel should pass and be
+  // red, with the depth attachment updated to 0.0.
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
+    EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 0.0f) << "texel " << I;
+  }
+
+  // A farther green triangle (z=0.5) drawn next must fail the depth test
+  // everywhere: the color and depth attachments stay exactly as the first
+  // draw left them.
+  TriangleScene Scene2 = Scene;
+  Scene2.VertexData = {
+      -1.0f, -1.0f, 0.5f, 0.0f, 1.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.5f, 0.0f, 1.0f, 0.0f, 1.0f, // v1
+      -1.0f, 3.0f,  0.5f, 0.0f, 1.0f, 0.0f, 1.0f, // v2
+  };
+  PreparedDraw Draw2 = Scene2.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw2), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_EQ(Scene2.AttachmentStorage[I * 4], 255) << "texel " << I;
+    EXPECT_EQ(Scene2.AttachmentStorage[I * 4 + 1], 0) << "texel " << I;
+    EXPECT_FLOAT_EQ(Scene2.DepthStorage[I], 0.0f) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, DepthWriteDisabledLeavesAttachmentUnchanged) {
+  Context Ctx;
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Depth.WriteEnable = false;
+  Depth.Compare = CompareOp::Less;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, Depth);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.BindDepth = true;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+  for (uint32_t I = 0; I != 16; ++I) {
+    // The fragment still passes the test (0.0 < 1.0) and is shaded...
+    EXPECT_EQ(Scene.AttachmentStorage[I * 4], 255) << "texel " << I;
+    // ...but the depth attachment is untouched since writes are disabled.
+    EXPECT_FLOAT_EQ(Scene.DepthStorage[I], 1.0f) << "texel " << I;
+  }
+}
+
+TEST(ExecutorTest, RejectsDepthStateWithoutBoundAttachment) {
+  Context Ctx;
+  DepthState Depth;
+  Depth.TestEnable = true;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleList, Depth);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {-1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+  PreparedDraw Draw = Scene.prepare(); // BindDepth left false.
+  EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
 }
 
 } // namespace
