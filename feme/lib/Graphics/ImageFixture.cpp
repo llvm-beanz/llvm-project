@@ -85,6 +85,36 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SINT:
   case ResourceFormat::R8G8B8A8_UNORM_SRGB:
     return FormatInfo{4, 1, false};
+  case ResourceFormat::R16G16B16A16_FLOAT:
+    return FormatInfo{4, 2, true};
+  case ResourceFormat::R16G16B16A16_UNORM:
+  case ResourceFormat::R16G16B16A16_SNORM:
+  case ResourceFormat::R16G16B16A16_UINT:
+  case ResourceFormat::R16G16B16A16_SINT:
+    return FormatInfo{4, 2, false};
+  case ResourceFormat::R11G11B10_FLOAT:
+    // Packed into a single 4-byte word; not a per-component layout, so it
+    // is described as a single opaque 4-byte "component" here (see
+    // `packClearColor`/`decodeAttribute`'s own dedicated packing code for
+    // this format).
+    return FormatInfo{1, 4, false};
+  case ResourceFormat::R10G10B10A2_UNORM:
+  case ResourceFormat::R10G10B10A2_UINT:
+    return FormatInfo{1, 4, false};
+  case ResourceFormat::D16_UNORM:
+    return FormatInfo{1, 2, false};
+  case ResourceFormat::D32_FLOAT:
+    return FormatInfo{1, 4, true};
+  case ResourceFormat::D24_UNORM_S8_UINT:
+    // Depth (24 bits, stored in the low 24 bits of a 32-bit word) and
+    // stencil (8 bits, the high byte) packed into one 4-byte word.
+    return FormatInfo{1, 4, false};
+  case ResourceFormat::D32_FLOAT_S8X24_UINT:
+    // Depth (32-bit float) and stencil (8 bits, in the low byte of the
+    // second word) stored as two 4-byte words.
+    return FormatInfo{2, 4, false};
+  case ResourceFormat::S8_UINT:
+    return FormatInfo{1, 1, false};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "image fixture format is not yet supported "
@@ -128,6 +158,11 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("r11g11b10-float", ResourceFormat::R11G11B10_FLOAT)
           .Case("r10g10b10a2-unorm", ResourceFormat::R10G10B10A2_UNORM)
           .Case("r10g10b10a2-uint", ResourceFormat::R10G10B10A2_UINT)
+          .Case("d16-unorm", ResourceFormat::D16_UNORM)
+          .Case("d32-float", ResourceFormat::D32_FLOAT)
+          .Case("d24-unorm-s8-uint", ResourceFormat::D24_UNORM_S8_UINT)
+          .Case("d32-float-s8x24-uint", ResourceFormat::D32_FLOAT_S8X24_UINT)
+          .Case("s8-uint", ResourceFormat::S8_UINT)
           .Default(ResourceFormat::Unknown);
   if (Result == ResourceFormat::Unknown)
     return createStringError(inconvertibleErrorCode(),
@@ -168,16 +203,32 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
     return Error::success();
   }
 
-  if (Format != ResourceFormat::R8G8B8A8_UNORM &&
-      Format != ResourceFormat::R8G8B8A8_UNORM_SRGB)
-    return createStringError(inconvertibleErrorCode(),
-                             "attachment clear color is not yet supported "
-                             "for this format");
-  for (unsigned I = 0; I != Info->Components; ++I) {
-    double Clamped = std::clamp(Clear[I], 0.0, 1.0);
-    Texel[I] = static_cast<uint8_t>(std::lround(Clamped * 255.0));
+  if (Format == ResourceFormat::R8G8B8A8_UNORM ||
+      Format == ResourceFormat::R8G8B8A8_UNORM_SRGB) {
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      double Clamped = std::clamp(Clear[I], 0.0, 1.0);
+      Texel[I] = static_cast<uint8_t>(std::lround(Clamped * 255.0));
+    }
+    return Error::success();
   }
-  return Error::success();
+
+  if (Format == ResourceFormat::D16_UNORM) {
+    double Clamped = std::clamp(Clear[0], 0.0, 1.0);
+    uint16_t V = static_cast<uint16_t>(std::lround(Clamped * 65535.0));
+    memcpy(Texel.data(), &V, sizeof(V));
+    return Error::success();
+  }
+
+  if (Format == ResourceFormat::S8_UINT) {
+    // Stencil clear values are an integer reference value, not a
+    // normalized fraction (matching `VkClearDepthStencilValue::stencil`).
+    Texel[0] = static_cast<uint8_t>(std::clamp(Clear[0], 0.0, 255.0));
+    return Error::success();
+  }
+
+  return createStringError(inconvertibleErrorCode(),
+                           "attachment clear color is not yet supported "
+                           "for this format");
 }
 
 namespace {
@@ -236,6 +287,16 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "r10g10b10a2-unorm";
   case ResourceFormat::R10G10B10A2_UINT:
     return "r10g10b10a2-uint";
+  case ResourceFormat::D16_UNORM:
+    return "d16-unorm";
+  case ResourceFormat::D32_FLOAT:
+    return "d32-float";
+  case ResourceFormat::D24_UNORM_S8_UINT:
+    return "d24-unorm-s8-uint";
+  case ResourceFormat::D32_FLOAT_S8X24_UINT:
+    return "d32-float-s8x24-uint";
+  case ResourceFormat::S8_UINT:
+    return "s8-uint";
   }
   llvm_unreachable("unhandled ResourceFormat");
 }

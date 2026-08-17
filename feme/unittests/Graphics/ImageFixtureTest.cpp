@@ -19,6 +19,9 @@
 #include "llvm/Testing/Support/Error.h"
 #include "gtest/gtest.h"
 
+#include <array>
+#include <cstring>
+
 using namespace feme;
 using namespace feme::graphics;
 using namespace llvm;
@@ -87,6 +90,59 @@ TEST(ImageFixtureTest, RejectsUnknownFormat) {
   StringRef Text = "image bad 1x1 not-a-format\n  y=0: 00\n";
   Expected<std::vector<ImageFixture>> Images = parseImageFixtures(Text);
   ASSERT_THAT_EXPECTED(Images, Failed());
+}
+
+// Roadmap R33 ("Depth, stencil, blending, and multisampling") adds the
+// depth/stencil formats a depth/stencil attachment needs; they round-trip
+// through the same fixture format every color attachment uses.
+TEST(ImageFixtureTest, RoundTripsDepthFloatFormat) {
+  StringRef Text = "image depth0 2x1 d32-float\n"
+                   "  y=0: +1.0000e+00 +5.0000e-01\n";
+  Expected<std::vector<ImageFixture>> Images = parseImageFixtures(Text);
+  ASSERT_THAT_EXPECTED(Images, Succeeded());
+  ASSERT_EQ(Images->size(), 1u);
+  const ImageFixture &Img = (*Images)[0];
+  EXPECT_EQ(Img.Format, cpu::ResourceFormat::D32_FLOAT);
+  ASSERT_EQ(Img.Data.size(), 2u * 4u);
+  float V0, V1;
+  memcpy(&V0, Img.Data.data(), 4);
+  memcpy(&V1, Img.Data.data() + 4, 4);
+  EXPECT_FLOAT_EQ(V0, 1.0f);
+  EXPECT_FLOAT_EQ(V1, 0.5f);
+
+  std::string Printed;
+  raw_string_ostream OS(Printed);
+  ASSERT_THAT_ERROR(printImageFixture(OS, Img), Succeeded());
+  EXPECT_EQ(Printed, Text);
+}
+
+TEST(ImageFixtureTest, RoundTripsStencilFormat) {
+  StringRef Text = "image stencil0 2x1 s8-uint\n"
+                   "  y=0: 00 ff\n";
+  Expected<std::vector<ImageFixture>> Images = parseImageFixtures(Text);
+  ASSERT_THAT_EXPECTED(Images, Succeeded());
+  ASSERT_EQ(Images->size(), 1u);
+  const ImageFixture &Img = (*Images)[0];
+  EXPECT_EQ(Img.Format, cpu::ResourceFormat::S8_UINT);
+  ASSERT_EQ(Img.Data.size(), 2u);
+  EXPECT_EQ(Img.Data[0], 0x00);
+  EXPECT_EQ(Img.Data[1], 0xff);
+}
+
+TEST(ImageFixtureTest, PacksDepthAndStencilClearColors) {
+  std::array<uint8_t, 4> DepthTexel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::D32_FLOAT, {0.75}, DepthTexel),
+      Succeeded());
+  float Depth;
+  memcpy(&Depth, DepthTexel.data(), 4);
+  EXPECT_FLOAT_EQ(Depth, 0.75f);
+
+  std::array<uint8_t, 1> StencilTexel{};
+  ASSERT_THAT_ERROR(
+      packClearColor(cpu::ResourceFormat::S8_UINT, {42.0}, StencilTexel),
+      Succeeded());
+  EXPECT_EQ(StencilTexel[0], 42);
 }
 
 } // namespace

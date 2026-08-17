@@ -82,6 +82,15 @@ enum class ResourceFormat : uint32_t {
   R11G11B10_FLOAT,
   R10G10B10A2_UNORM,
   R10G10B10A2_UINT,
+
+  // Depth/stencil formats (roadmap R33, "the format expansion the first
+  // advertised profile needs"): used only for a `GraphicsPipeline`/
+  // `PreparedDraw` depth/stencil attachment, never for a typed buffer.
+  D16_UNORM,
+  D32_FLOAT,
+  D24_UNORM_S8_UINT,
+  D32_FLOAT_S8X24_UINT,
+  S8_UINT,
 };
 
 /// Bits of `FemeDescriptor::Flags`.

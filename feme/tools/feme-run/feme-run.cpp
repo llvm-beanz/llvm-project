@@ -486,6 +486,16 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
   case ResourceFormat::R32G32B32A32_UINT:
   case ResourceFormat::R32G32B32A32_SINT:
     return 16;
+  case ResourceFormat::D16_UNORM:
+    return 2;
+  case ResourceFormat::D32_FLOAT:
+    return 4;
+  case ResourceFormat::D24_UNORM_S8_UINT:
+    return 4;
+  case ResourceFormat::D32_FLOAT_S8X24_UINT:
+    return 8;
+  case ResourceFormat::S8_UINT:
+    return 1;
   }
   llvm_unreachable("unhandled ResourceFormat");
 }
