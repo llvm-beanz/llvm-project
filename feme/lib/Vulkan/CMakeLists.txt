@@ -1,10 +1,12 @@
-# libfeme_vulkan: the FeMe Vulkan ICD (see feme/docs/FeMeVulkanDesign.md,
-# "V0: Loader-visible skeleton" and Roadmap.md's V0). Built as a genuine
-# `SHARED` library (not through `add_llvm_library`/`add_mlir_library`, which
-# assume LLVM's own component/dylib conventions) so this CMakeLists.txt has
-# full control over hidden visibility and the exported-symbol version script
-# "Process Coexistence and Symbol Visibility" requires.
-
+# FeMeVulkanCore: the FeMe Vulkan ICD's object model, entrypoint table, and
+# `feme::vulkan::vk*` implementations (see feme/docs/FeMeVulkanDesign.md,
+# "V0: Loader-visible skeleton" and Roadmap.md's V0). The loader-facing
+# `feme_vulkan` shared object that links this static library lives under
+# feme/tools/feme-vulkan, following LLVM's convention of building deliverable
+# tools/libraries out of a `tools` directory; only what that target's build
+# needs directly (its own source and version script) lives there, while the
+# entrypoint-table generation below is shared with FeMeVulkanCore's own
+# build here.
 set(feme_vulkan_gen_dir ${CMAKE_CURRENT_BINARY_DIR})
 set(feme_vulkan_entrypoints_inc
   ${feme_vulkan_gen_dir}/VulkanEntrypoints.inc)
@@ -81,11 +83,6 @@ add_feme_library(FeMeVulkanCore STATIC
   PhysicalDeviceInfo.cpp
   ProcAddr.cpp
 
-  # This directory also builds `feme_vulkan` (VulkanICD.cpp) below as its own
-  # target, so LLVM's build system's "one target per directory" source-file
-  # coverage check needs to be told that's intentional.
-  PARTIAL_SOURCES_INTENDED
-
   DISABLE_INSTALL
 
   LINK_COMPONENTS
@@ -100,40 +97,4 @@ add_dependencies(FeMeVulkanCore FeMeVulkanEntrypointsGen)
 target_include_directories(FeMeVulkanCore PUBLIC
   ${feme_vulkan_gen_dir}
   ${CMAKE_CURRENT_SOURCE_DIR}
-  )
-
-add_library(feme_vulkan SHARED VulkanICD.cpp)
-target_link_libraries(feme_vulkan PRIVATE FeMeVulkanCore)
-set_target_properties(feme_vulkan PROPERTIES
-  CXX_VISIBILITY_PRESET hidden
-  VISIBILITY_INLINES_HIDDEN ON
-  PREFIX "lib"
-  OUTPUT_NAME "feme_vulkan"
-  )
-target_link_options(feme_vulkan PRIVATE
-  "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libfeme_vulkan.map"
-  )
-set_target_properties(feme_vulkan PROPERTIES
-  LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/libfeme_vulkan.map)
-
-# The build-tree development manifest ("Loader Integration"): an absolute
-# path into the build directory, usable via `VK_DRIVER_FILES` without
-# installing anything. `file(GENERATE ...)` (rather than `configure_file`)
-# so `$<TARGET_FILE:feme_vulkan>` -- the actual built shared library path --
-# can be substituted; `configure_file` cannot evaluate generator
-# expressions.
-set(FEME_VULKAN_ICD_MANIFEST
-  ${CMAKE_CURRENT_BINARY_DIR}/feme_icd.json
-  CACHE INTERNAL "Path to the FeMe Vulkan ICD's build-tree development manifest")
-file(GENERATE
-  OUTPUT ${FEME_VULKAN_ICD_MANIFEST}
-  CONTENT "{
-  \"file_format_version\": \"1.0.1\",
-  \"ICD\": {
-    \"library_path\": \"$<TARGET_FILE:feme_vulkan>\",
-    \"api_version\": \"1.1.0\",
-    \"is_portability_driver\": false
-  }
-}
-"
   )
