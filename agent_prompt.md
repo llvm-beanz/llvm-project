@@ -60,6 +60,7 @@ Can you continue the R34 implementation from the roadmap document?
 > passes in full before and after -- G5 is not yet complete, since no
 > image-comparison completion test exists) (see: §1.8.5)
 
+
 Open issues form the last agent task:
 
 > 1. `DomainWrapperPass`/`GeometryWrapperPass` and
