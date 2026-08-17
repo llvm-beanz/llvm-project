@@ -1,5 +1,6 @@
 add_mlir_library(FeMeGraphics
   Executor.cpp
+  GeometryStream.cpp
   ImageFixture.cpp
   Patch.cpp
   Pipeline.cpp
