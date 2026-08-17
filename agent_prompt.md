@@ -23,9 +23,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement R32 from the roadmap document?
+Can you implement R33 from the roadmap document?
 
-> Vertex/index fetch, triangle assembly, clipping, viewport transform, culling,
-> tile binning, top-left coverage, interpolation, and both stages run through
-> the executor: one color attachment, one viewport/scissor, no MSAA. **Completes
-> G3** (see: §1.8.5)
+> Depth/stencil attachments with legal early/late scheduling, blending, write
+> masks, logic ops, multiple render targets, multisample coverage and resolves,
+> the format expansion the first advertised profile needs, and deterministic
+> parallel tiled schedules (see: §1.8.5, §2.6.3)
