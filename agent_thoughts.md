@@ -16047,3 +16047,212 @@ in that table carries, listing the concrete test files that cover it;
 docs/CommandGuide/feme-render.md gained a Status note up front so a
 reader hits the skeleton's scope before the OPTIONS section, not only at
 the end.
+
+# Agent thoughts: roadmap step R32 (software graphics executor)
+
+This records the reasoning behind implementing roadmap R32, "Basic triangle
+pipeline" (feme/docs/Roadmap.md): vertex/index fetch, triangle assembly,
+clipping, viewport transform, culling, tile binning, top-left coverage,
+interpolation, and both stages run through the executor, for one color
+attachment, one viewport/scissor, no MSAA. This completes G3.
+
+## Reading before writing
+
+I read feme/.instructions.md, feme/docs/FeMeGraphicsDesign.md in full
+(particularly "Normalized pipeline", "Draw flow", "Rasterization
+correctness", and the G3 milestone), the R31/R32 rows of Roadmap.md, and the
+existing `FeMeGraphics` skeleton (`Pipeline.h`/`PreparedDraw.h`/`Scene.h` and
+their `.cpp`s, plus `feme-render.cpp`) R31 left in place. I also read the
+CPU-target graphics ABI R28/R29 already built --
+`feme/include/feme/Target/CPU/RuntimeABI.h`'s `FemeVertexArgs`/
+`FemeFragmentArgs`/`FemeStageLayout`, `ResourceHeap.h`'s
+`PreparedVertexBatch`/`PreparedFragmentBatch`, and `CompiledStage::
+invokeVertices`/`invokeFragments` -- since R32's whole job is to drive that
+ABI from a real triangle pipeline, not to reinvent it. Reading
+`VertexWrapper.cpp`/`FragmentWrapper.cpp`'s lowering code directly (not just
+their header comments) turned out to be essential: it's the only place that
+settles a genuinely ambiguous question the ABI header doesn't spell out --
+whether a *system-value* stage element (e.g. `SV_Position` as a vertex
+*output*) is sourced from the invocation record or from stage storage. The
+answer differs by direction (inputs source system values from the
+invocation record; *outputs* always go through stage storage, regardless of
+`SystemValue`), and getting this wrong was the first bug I hit (see below).
+
+## Scoping decisions and where I recorded them
+
+R32's design-doc bullets ("vertex/index fetch... clipping... tile
+binning... interpolation") describe a full rasterizer's worth of work, and
+the existing `PreparedDraw`/`Scene` types from R31 were missing two things a
+real vertex/index fetch needs: a vertex buffer's attribute list (location/
+format/offset) and an index buffer at all. I added both
+(`VertexBufferBinding::Attributes`, `IndexBufferBinding`,
+`DrawCommand::Indexed`/`FirstIndex`/`VertexOffset`, plus the matching scene
+YAML `index-buffer` key and per-draw fields) as their own small, separately
+tested and committed change before touching the executor itself, since they
+are genuine (if small) API surface, not executor-internal detail.
+
+For the executor itself, I made a deliberate set of scope cuts and wrote
+each one directly into Executor.cpp's file comment (not just this log),
+since that's what a future reader actually consults:
+
+- **No post-transform vertex cache.** Every (instance, vertex-or-index)
+  pair re-runs the vertex stage. The design doc explicitly permits this
+  ("the first implementation may perform all vertex work before tile
+  work"), and a cache is a pure performance optimization that must not
+  change observable output, so it's safe to defer without weakening
+  correctness.
+- **32-bit scalars/vectors only** (`RowCount == 1`, `BitWidth == 32`) for
+  stage elements. Matrices and narrower/wider scalars are a mechanical,
+  on-demand addition to `buildStageStorage`, matching this codebase's
+  established "grow a table on demand" convention elsewhere (image
+  formats, resource formats).
+- **`Location`-based varying linkage** between vertex outputs and fragment
+  inputs, since no `StageInterfaceMap` exists yet (R31 already noted this
+  gap in "Normalized pipeline"). This is also literally what the Vulkan
+  design's own linkage model needs, so it's not a throwaway shortcut.
+- **A non-`Float` (flat-shaded) varying is carried from the first vertex of
+  the *rasterized* (post-clip) triangle**, not the original mesh's
+  provoking vertex. Tracking true provoking-vertex identity through
+  clipping needs a convention ("Normalized pipeline" flags this as
+  unmodeled) this milestone doesn't add; since almost every realistic test
+  varying is `Float` (perspective-interpolated), this is a narrow,
+  documented gap rather than a load-bearing one.
+- **Depth/stencil, blending beyond `Replace`, and multisampling are
+  rejected, not silently ignored.** `PreparedDraw` has no depth attachment
+  at all (that's R33), so a pipeline requesting depth test/write gets an
+  `Error`, consistent with this codebase's repeated principle ("a scene
+  naming state the executor does not implement is an error at load time").
+- **`--workers`/`--tile-order`/`--reference` in `feme-render` stay
+  accepted-but-inert.** The executor is a deterministic, single-threaded
+  scalar implementation; every value of each flag therefore produces
+  identical output today (satisfying, but not yet *exercising*, the
+  metamorphic checks "Determinism and Reference Execution" describes).
+  True parallel tiling and a differential scalar-reference path are
+  scheduling optimizations layered on top of the same tile-binning
+  structure I built, not a change to it.
+
+## Rasterizer design choices worth recording
+
+A few implementation choices needed to be made once, explicitly, rather
+than rediscovered by trial and error every time they mattered:
+
+- **One directed-edge-function convention for everything.** Culling
+  (front/back-face), the top-left fill rule, and barycentric interpolation
+  all need to agree on which triangle winding counts as "positive," in
+  pixel space (y increasing downward, which flips chirality relative to
+  NDC's y-up convention). I picked one edge function,
+  `edgeFn(A, B, P) = (P.x-A.x)(B.y-A.y) - (P.y-A.y)(B.x-A.x)`, computed the
+  concrete sign relationship between "CCW in NDC" and "positive by this
+  formula in pixel space" by hand for a known triangle, and then used that
+  single derivation everywhere: to classify front/back-facing, to
+  normalize triangle vertex order before rasterizing (so edge values are
+  guaranteed non-negative inside a positively-wound triangle), and to
+  derive barycentric weights (`E_i / totalArea`, which is sign-correct
+  regardless of orientation since the same signed area appears in the
+  numerator and denominator). Deriving this once, in a code comment, and
+  then testing it (see below) beat guessing-and-checking against pixel
+  dumps.
+- **Deferred per-tile binning, not immediate-mode rasterization.** The
+  design doc lists "bin primitives into tiles" as its own pipeline stage,
+  distinct from rasterization -- not just an implementation detail of a
+  scalar loop. I implemented it as two real passes: first assemble/clip/
+  cull every triangle in the draw and bin it into whichever fixed-size
+  tiles its screen-space bounding box overlaps; then iterate tiles in
+  row-major order and, for each tile, rasterize only that tile's binned
+  triangles, batching every covered quad from every triangle in the tile
+  into one `invokeFragments` call, and only then writing outputs back
+  (in submission order, so a later triangle overwriting an earlier one at
+  the same pixel is well-defined -- painter's algorithm, since there's no
+  depth test yet). Because tiles are pixel-disjoint, this needs no
+  cross-tile ordering guarantee, which is exactly the property a later
+  parallel-tile scheduler needs and gets for free from this structure.
+- **Reused `feme::graphics::packClearColor` for fragment output color
+  writes** instead of writing a second float-to-attachment-format encoder:
+  it already implements exactly "clamp/scale an RGBA `double` tuple into a
+  format's byte encoding" for the two formats (`R8G8B8A8_*`,
+  `R32G32B32A32_FLOAT`) this milestone's tests need, and reusing it means
+  the executor's output encoding and `feme-render --dump`'s/an
+  `attachments[].clear`'s encoding can never silently disagree.
+
+## The one real bug, and how I found it
+
+The first version of `buildStageStorage` treated "does this element carry a
+`SystemValue`?" as a single, direction-independent test for "skip
+allocating storage; the wrapper sources it from the invocation record
+instead." That's correct for an *input* (`SV_VertexID`, `SV_Position` on a
+fragment input) but wrong for an *output*: `SV_Position` as a *vertex
+output* is a completely ordinary stage-storage write as far as
+`VertexWrapper.cpp`'s `lowerVertexOutputStore` is concerned -- it never
+special-cases `SystemValue` at all on the output side. My bug skipped
+allocating storage for it, so every vertex's clip position silently
+collapsed onto memory meant for a different (nonexistent, since it was
+never allocated) element, and every triangle in my first end-to-end unit
+test read back an identical, wrong clip-space position for all 3 vertices.
+
+I found this by adding targeted `llvm::errs()` prints (input attribute
+fetch, raw output bytes, per-element storage size) rather than staring at
+the 700-line function guessing, confirmed the raw byte layout was half the
+expected size, worked backward from "which element didn't get an offset"
+to the `continue` that skipped it regardless of direction, and fixed the
+condition to check `Direction == Input` before the resource-value-sourced
+early exit. I removed every debug print afterward rather than leaving any
+commented out, and the regression this bug represents is exactly why
+`unittests/Graphics/ExecutorTest.cpp` checks real pixel output against
+hand-computed expected colors, not just "did it return success."
+
+## Testing strategy
+
+`unittests/Graphics/ExecutorTest.cpp` compiles two real, hand-authored
+vertex/fragment shaders (feme.stage.* IR, not a synthetic ABI-level struct
+fixture) through the full `CompiledStage` pipeline and drives them through
+`executeDraws`, then asserts on actual attachment bytes:
+
+- full coverage with a solid color (every texel identical, oversized CCW
+  triangle covering the viewport after clipping);
+- the same scene driven through an index buffer with a nonzero
+  `VertexOffset`, checked byte-for-byte against the non-indexed case;
+- back-face culling (same triangle, opposite winding, `CullMode::Back`
+  leaves the attachment untouched);
+- rejecting an unsupported topology (`PointList`) as an `Error`;
+- perspective-correct color interpolation, checked against a hand-derived
+  affine barycentric formula at every pixel center (with a small tolerance
+  for float rounding, not an exact match, since the formula and the
+  rasterizer's own math are algebraically but not bit-identically
+  equivalent);
+- the top-left tie-break's defining correctness property: two triangles
+  sharing a diagonal edge, covering the whole viewport between them, must
+  give every texel to exactly one triangle (no gaps, no double-write) --
+  this is the test that would have caught a wrong tie-break polarity had I
+  guessed instead of deriving it.
+
+`test/Tools/feme-render/draw-{triangle,vertex-buffer,indexed}.test` cover
+the same executor through the CLI/scene-YAML path, each hand-encoding its
+shaders' `!feme.signature` metadata as a raw byte blob the same way
+existing `test/Transforms/CPU/*-wrapper-stage-io.ll` lit tests already do
+(a real DXIL/SPIR-V-imported `.ll` fixture would carry this automatically;
+a hand-authored one for a CLI-level test has to spell it out, so I wrote a
+tiny throwaway C++ program linked against `libFeMeCore.a` to call
+`feme::serializeSignature` and print the resulting byte literal, rather
+than hand-computing 15-field-per-element byte offsets by hand -- and
+deleted the throwaway program once its output was pasted into the lit
+tests). `draws-unimplemented.test` (which asserted the now-stale "not
+implemented" diagnostic) was removed since that diagnostic no longer
+fires.
+
+Every commit in this step was built and tested with
+`ninja check-feme` (this build's cache: `CMAKE_C(XX)_COMPILER_LAUNCHER=
+ccache`, `LLVM_ENABLE_ASSERTIONS=ON`) before moving to the next, and the
+full suite (1121 passed, 2 pre-existing unsupported, 0 failed) passes
+after every commit in this series, not just the last one.
+
+## Documentation updates
+
+Since R32 substantively changes what `feme-render`, `PreparedDraw`, and the
+scene YAML actually do (not just what's planned), I updated -- in their own
+commit, per this project's "when you deviate from the design document,
+update it" convention -- FeMeGraphicsDesign.md's "Normalized pipeline" and
+"Draw flow" status notes and the G3 milestone section, Roadmap.md's R32
+row (matching the detail level every other "done" row in that table
+carries), docs/CommandGuide/feme-render.md's Status note, and
+feme-render.cpp's own file/option-help comments, rather than leaving any of
+them describing the pre-R32 "not implemented yet" state.
