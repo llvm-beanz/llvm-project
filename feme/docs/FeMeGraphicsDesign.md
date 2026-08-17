@@ -1472,27 +1472,29 @@ PreparedDraw}.h`, new `FeMeGraphics` library) implement these as plain
 description types -- `GraphicsPipeline` owns the compiled vertex/fragment
 `cpu::CompiledStage`s plus primitive topology, raster/depth/blend state and
 attachment formats; `PreparedDraw` holds one draw's attachments, viewport/
-scissor, vertex buffers, resource heap and draw commands -- but neither type
-implements clip/raster/interpolation logic yet; that is roadmap R32, "Basic
-triangle pipeline". Deviations from the sketch above: no `StageInterfaceMap`,
-sample locations, restart behavior, or provoking-vertex field exists yet
-(nothing yet consumes them), and only the conventional vertex+fragment path
-is described (tessellation/geometry/mesh, G5-G6, have their own signature
-shapes and are out of scope here). `feme-render`
+scissor, vertex buffers, resource heap and draw commands. Deviations from
+the sketch above: no `StageInterfaceMap`, sample locations, restart
+behavior, or provoking-vertex field exists yet (nothing yet consumes
+them), and only the conventional vertex+fragment path is described
+(tessellation/geometry/mesh, G5-G6, have their own signature shapes and
+are out of scope here). Roadmap R32 ("Basic triangle pipeline") adds the
+executor that walks a `GraphicsPipeline`/`PreparedDraw` pair -- see "Draw
+flow" below -- and grew `PreparedDraw`'s `VertexBufferBinding` an
+`Attributes` list and added `IndexBufferBinding`/`DrawCommand::Indexed`
+for indexed draws. `feme-render`
 (`feme/tools/feme-render/feme-render.cpp`, see docs/CommandGuide/
-feme-render.md) is the new testing tool this section's design and "Testing
+feme-render.md) is the testing tool this section's design and "Testing
 Tools" in feme/docs/Design.md specify: it parses a scene YAML
-(`feme::graphics::parseScene`), builds and clears every attachment, and
-compiles `pipeline.vertex`/`pipeline.fragment` into a real `GraphicsPipeline`
-when a scene has one -- proving the description builds end to end from a real
-scene file and real compiled stages -- but a scene with a non-empty `draws`
-list is diagnosed as not implemented rather than silently misrendering, since
-no executor exists yet to run one. The heap YAML image resource class this
-row also adds (§2.6.1 of feme/docs/Roadmap.md) lives in `feme-run` itself
-(`ImageEntry` in feme-run.cpp): a new `images` list builds
-`FemeImageDescriptor`s into the ABI's separate image heap, alongside
-`resource-heap`/`bindings`, covering a single mip level and (for a
-non-array dimension) a single array layer; multisample dimensions are
+(`feme::graphics::parseScene`), builds and clears every attachment,
+compiles `pipeline.vertex`/`pipeline.fragment` into a real
+`GraphicsPipeline` when a scene has one, and (roadmap R32) executes a
+non-empty `draws` list against it, encoding the scene's `vertex-buffers`/
+`index-buffer` data into the executor's byte layouts. The heap YAML image
+resource class this row also adds (§2.6.1 of feme/docs/Roadmap.md) lives
+in `feme-run` itself (`ImageEntry` in feme-run.cpp): a new `images` list
+builds `FemeImageDescriptor`s into the ABI's separate image heap,
+alongside `resource-heap`/`bindings`, covering a single mip level and (for
+a non-array dimension) a single array layer; multisample dimensions are
 rejected, matching G4's later multisample milestone. The textual image
 fixture (`feme::graphics::ImageFixture`) and scene
 (`feme::graphics::Scene`) formats "Textual scene and image fixtures" in
@@ -1524,6 +1526,29 @@ validate draw and materialize descriptors
 The first implementation may perform all vertex work before tile work. Later
 streaming and pipelining are scheduling optimizations that must not change
 observable ordering.
+
+Status (roadmap R32, "Basic triangle pipeline"): `feme::graphics::
+executeDraws` (`feme/include/feme/Graphics/Executor.h`, new `Executor.cpp`)
+implements this flow for one `TriangleList`/`TriangleStrip` draw against one
+color attachment, no depth/stencil, no multisampling, and `BlendMode::
+Replace` -- every other pipeline/draw combination is a rejected `Error`
+rather than a silent approximation. No post-transform cache exists yet
+(every (instance, vertex-or-index) pair re-runs the vertex stage, exactly
+the deferral the paragraph above permits); primitives are still binned into
+fixed-size tiles, each batching its own quads into one `invokeFragments`
+call and performing output merge in submission order once that call
+returns -- painter's algorithm, since depth testing is roadmap R33's.
+Clipping is Sutherland-Hodgman against all 6 homogeneous half-spaces (plus
+a `w > 0` guard), fan-triangulating the result; a non-`Float` varying
+survives clipping from the first vertex of the rasterized (possibly
+clipped) triangle rather than the original mesh's provoking vertex, since
+no provoking-vertex convention is modelled yet (see "Normalized pipeline"'s
+own deviation note). Vertex/fragment stage elements are 32-bit scalars/
+vectors only (`RowCount == 1`); vertex-output/fragment-input varyings link
+by `Location`, the same Vulkan-style convention "Normalized pipeline" notes
+in place of a `StageInterfaceMap`. `unittests/Graphics/ExecutorTest.cpp`
+and `test/Tools/feme-render/draw-{triangle,vertex-buffer,indexed}.test`
+cover this row; see Roadmap.md's own R32 entry for the full status note.
 
 The conventional tessellation path inserts patch control, fixed tessellation,
 domain evaluation, and optional geometry execution between vertex shading and
@@ -1782,6 +1807,16 @@ out-of-range coordinates, and helper lanes.
 Completion test: render off-screen triangles with analytic expected coverage
 and interpolants, then compare supported cases against Mesa's lavapipe and
 Microsoft's WARP without requiring presentation.
+
+Status: roadmap R31 ("FeMeGraphics skeleton") and R32 ("Basic triangle
+pipeline") implement every bullet above -- see "Normalized pipeline" and
+"Draw flow" earlier in this document, and their own Roadmap.md entries, for
+the full status notes and deferred scope (no post-transform vertex cache,
+32-bit-scalar-only stage elements, `Location`-based varying linkage in
+place of a `StageInterfaceMap`). The lavapipe/WARP differential half of the
+completion test above is not yet automated; today's coverage is
+`unittests/Graphics/ExecutorTest.cpp`'s analytic-coverage/interpolation
+checks and `test/Tools/feme-render/draw-*.test`.
 
 ### G4: Depth, stencil, blending, and multisampling
 

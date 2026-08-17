@@ -9,24 +9,22 @@
 // feme-render is the tool described in "Testing Tools" in
 // feme/docs/Design.md and docs/CommandGuide/feme-render.md: it renders a
 // textual scene description (feme::graphics::parseScene) through FeMe's
-// software graphics executor and prints the resulting attachments as
-// textual image fixtures (feme::graphics::printImageFixture) -- the
-// graphics counterpart of feme-run.
+// software graphics executor (feme::graphics::executeDraws) and prints the
+// resulting attachments as textual image fixtures
+// (feme::graphics::printImageFixture) -- the graphics counterpart of
+// feme-run.
 //
-// Roadmap R31 ("FeMeGraphics skeleton", see feme/docs/Roadmap.md) is a
-// skeleton milestone: it implements the normalized pipeline/prepared-draw
-// *descriptions* (feme/include/feme/Graphics/{Pipeline,PreparedDraw}.h),
-// not the executor that walks them. This tool therefore:
+// Roadmap R32 ("Basic triangle pipeline", see feme/docs/Roadmap.md): this
+// tool
 //
 //   - always builds and clears every `attachments` entry;
 //   - compiles `pipeline.vertex`/`pipeline.fragment` into a real
 //     `feme::graphics::GraphicsPipeline` when the scene has a `pipeline`
-//     key, proving the normalized-pipeline description builds end to end
-//     from a real scene file and real compiled stages;
-//   - diagnoses a non-empty `draws` list as not yet implemented, rather
-//     than silently rendering nothing or the wrong thing -- draw execution
-//     (vertex/index fetch, clipping, rasterization, interpolation) is
-//     roadmap R32, "Basic triangle pipeline";
+//     key;
+//   - executes a non-empty `draws` list against that pipeline, encoding
+//     the scene's `vertex-buffers`/`index-buffer` data into the executor's
+//     `PreparedDraw` byte layouts (see Executor.cpp's own scope notes for
+//     what a draw/pipeline may describe);
 //   - dumps attachments (`--dump`, default every color attachment) and
 //     supports `--expect`/`--tolerance` comparison against a checked-in
 //     image fixture.
@@ -447,20 +445,20 @@ int main(int argc, char **argv) {
                "from the host, matching feme-run"));
   cl::opt<unsigned> Workers(
       "workers", cl::init(1),
-      cl::desc("The number of tile workers. Accepted for forward "
-               "compatibility with the tiled scheduler (roadmap R32); this "
-               "skeleton has no tiled schedule to vary, so any value "
-               "behaves identically"));
+      cl::desc("The number of tile workers. The executor is single-threaded "
+               "today, so every value produces identical output; true "
+               "parallel tiling is a later scheduling optimization"));
   cl::opt<std::string> TileOrder(
       "tile-order", cl::init(""),
       cl::desc("The tile traversal order. Accepted for forward "
-               "compatibility (roadmap R32); this skeleton has no tiled "
-               "schedule yet"));
+               "compatibility; the executor's tile order is fixed "
+               "(row-major) today"));
   cl::opt<bool> Reference(
       "reference",
       cl::desc("Run the scalar reference path instead of the SIMD one. "
-               "Accepted for forward compatibility (roadmap R32); this "
-               "skeleton executes no draws either way"));
+               "Accepted for forward compatibility; the executor is "
+               "already a deterministic scalar implementation today, so "
+               "this produces identical output"));
   cl::list<std::string> Dump(
       "dump", cl::desc("Print attachment <name> after the last draw. May be "
                        "repeated; the default is every color attachment"));
