@@ -1,0 +1,37 @@
+# Vulkan commands implemented by the FeMe Vulkan ICD (see "V0: Loader-visible
+# skeleton" in feme/docs/FeMeVulkanDesign.md). One command name per line,
+# consumed by feme/utils/vk_gen_entrypoints.py via `--implemented`.
+#
+# Every name here must have a matching `feme::vulkan::<name>` declaration in
+# EntryPoints.h and definition in EntryPoints.cpp (or ProcAddr.cpp, for the
+# loader-facing proc-address commands).
+
+vkCreateInstance
+vkDestroyInstance
+vkEnumerateInstanceVersion
+vkEnumerateInstanceExtensionProperties
+vkEnumerateInstanceLayerProperties
+vkGetInstanceProcAddr
+
+vkEnumeratePhysicalDevices
+vkGetPhysicalDeviceProperties
+vkGetPhysicalDeviceProperties2
+vkGetPhysicalDeviceFeatures
+vkGetPhysicalDeviceFeatures2
+vkGetPhysicalDeviceMemoryProperties
+vkGetPhysicalDeviceMemoryProperties2
+vkGetPhysicalDeviceQueueFamilyProperties
+vkGetPhysicalDeviceQueueFamilyProperties2
+vkGetPhysicalDeviceFormatProperties
+vkGetPhysicalDeviceFormatProperties2
+vkGetPhysicalDeviceImageFormatProperties
+vkGetPhysicalDeviceSparseImageFormatProperties
+vkEnumerateDeviceExtensionProperties
+vkEnumerateDeviceLayerProperties
+vkCreateDevice
+
+vkDestroyDevice
+vkGetDeviceQueue
+vkGetDeviceQueue2
+vkDeviceWaitIdle
+vkGetDeviceProcAddr
