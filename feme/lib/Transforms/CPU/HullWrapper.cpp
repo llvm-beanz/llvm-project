@@ -65,9 +65,13 @@
 // (HullPhase.h) is the discriminator that keeps the two wrappers from both
 // claiming the same hull-stage function: this pass now skips any candidate
 // it identifies as the patch-constant phase, leaving it entirely to that
-// pass. Still deferred alongside the domain and geometry wrappers: an
-// `InputPatch` parameter on the patch-constant function (see
-// PatchConstantWrapper.cpp's own scope note).
+// pass. That pass's own `InputPatch` parameter deferral (a patch-constant
+// function reading the original, pre-control-stage input control points) is
+// now closed too, in a further follow-up -- see PatchConstantWrapper.cpp's
+// own comment. Still deferred alongside the domain and geometry wrappers:
+// generalizing `EntryWrapperPass`'s barrier-region-splitting machinery to
+// this batch-over-control-points ABI (this file's own "group-sync barrier"
+// bullet above).
 //
 //===----------------------------------------------------------------------===//
 

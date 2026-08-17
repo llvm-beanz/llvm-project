@@ -65,12 +65,23 @@
 // `feme::ShaderStage::Hull` functions each of them wraps -- see that file's
 // own comment for why one stage tag alone cannot tell the two phases apart.
 //
-// Deferred, as HullWrapper.cpp's own comment already notes: an `InputPatch`
-// parameter (the *original*, pre-control-stage input control points) is not
-// modeled -- only the completed `OutputPatch`, addressed via
-// `FemePatchConstantArgs::Inputs`. A patch-constant function that also
-// declares an `InputPatch` parameter needs a second structure-of-arrays
-// input block and layout this milestone's ABI does not yet carry.
+// Added in a further follow-up, closing this milestone's own "InputPatch
+// parameter" deferral: a patch-constant function may declare a second
+// parameter, an `InputPatch<T, M>` naming the *original*, pre-control-stage
+// input control points (a hull shader's own input, not its output) -- e.g.
+// to compute a tessellation factor from an edge's undisplaced length before
+// any control-point-phase displacement. This is a second, independent
+// structure-of-arrays input block from the `OutputPatch` one
+// (`FemePatchConstantArgs::InputPatch`/`InputPatchLayout`, distinct from
+// `Inputs`/`InputLayout`), addressed the same way but with its own control
+// point count. `SignatureElement::FromInputPatch`, set on a `Direction::
+// Input` element that is authored against the `InputPatch` parameter rather
+// than the `OutputPatch` one, is what `lowerPatchConstantInputLoad` below
+// switches on to pick which of the two blocks a given
+// `feme.stage.input.load` addresses -- the two parameters may otherwise
+// share overlapping `ElementID`s' *row* shape (both are per-control-point
+// blocks of the same general shape), so the direction alone does not tell
+// them apart.
 //
 //===----------------------------------------------------------------------===//
 
@@ -104,6 +115,8 @@ namespace {
 
 constexpr StringLiteral InputLayoutParamName = "stage_input_layout";
 constexpr StringLiteral InputsParamName = "stage_inputs";
+constexpr StringLiteral InputPatchLayoutParamName = "stage_input_patch_layout";
+constexpr StringLiteral InputPatchParamName = "stage_input_patch";
 constexpr StringLiteral OutputLayoutParamName = "stage_output_layout";
 constexpr StringLiteral OutputsParamName = "stage_outputs";
 
@@ -119,6 +132,8 @@ const SignatureElement *findElement(const EntrySignature &Sig,
 struct PatchConstantStageEnv {
   Value *InputLayout = nullptr;
   Value *Inputs = nullptr;
+  Value *InputPatchLayout = nullptr;
+  Value *InputPatch = nullptr;
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
 };
@@ -131,6 +146,10 @@ std::optional<PatchConstantStageEnv> getPatchConstantStageEnv(Function &F) {
       Env.InputLayout = &Arg, Found = true;
     else if (Arg.getName() == InputsParamName)
       Env.Inputs = &Arg, Found = true;
+    else if (Arg.getName() == InputPatchLayoutParamName)
+      Env.InputPatchLayout = &Arg, Found = true;
+    else if (Arg.getName() == InputPatchParamName)
+      Env.InputPatch = &Arg, Found = true;
     else if (Arg.getName() == OutputLayoutParamName)
       Env.OutputLayout = &Arg, Found = true;
     else if (Arg.getName() == OutputsParamName)
@@ -145,7 +164,7 @@ Function *appendPatchConstantStageParams(Function &F) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
   SmallVector<Type *, 12> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy});
+  ParamTypes.append({PtrTy, PtrTy, PtrTy, PtrTy, PtrTy, PtrTy});
 
   FunctionType *NewTy =
       FunctionType::get(F.getReturnType(), ParamTypes, F.isVarArg());
@@ -167,6 +186,8 @@ Function *appendPatchConstantStageParams(Function &F) {
   auto ArgIt = NewF->arg_begin() + F.arg_size();
   (&*ArgIt++)->setName(InputLayoutParamName);
   (&*ArgIt++)->setName(InputsParamName);
+  (&*ArgIt++)->setName(InputPatchLayoutParamName);
+  (&*ArgIt++)->setName(InputPatchParamName);
   (&*ArgIt++)->setName(OutputLayoutParamName);
   (&*ArgIt++)->setName(OutputsParamName);
 
@@ -231,16 +252,20 @@ Value *computeStageStorageAddress(IRBuilder<> &Builder, Value *LayoutArg,
   return Builder.CreateInBoundsGEP(Builder.getInt8Ty(), Bytes, ByteOffset);
 }
 
-/// Lowers an ordinary `feme.stage.input.load` reading the completed
-/// `OutputPatch`: unlike `HullWrapper.cpp`'s `lowerHullInputLoad`, the
-/// control-point-index operand (`CI`'s 4th argument) may be any value --
-/// this phase's whole point is reading more than one control point.
+/// Lowers an ordinary `feme.stage.input.load` reading either the completed
+/// `OutputPatch` or, when `Elt.FromInputPatch` is set, the original
+/// `InputPatch` (see this file's comment). Unlike `HullWrapper.cpp`'s
+/// `lowerHullInputLoad`, the control-point-index operand (`CI`'s 4th
+/// argument) may be any value -- this phase's whole point is reading more
+/// than one control point.
 Value *lowerPatchConstantInputLoad(CallInst &CI, const SignatureElement &Elt,
                                    const WaveBodyEnv &WEnv,
                                    const PatchConstantStageEnv &PEnv) {
   unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
   Type *ScalarTy = cast<VectorType>(CI.getType())->getElementType();
   IRBuilder<> Builder(&CI);
+  Value *LayoutArg = Elt.FromInputPatch ? PEnv.InputPatchLayout : PEnv.InputLayout;
+  Value *StorageArg = Elt.FromInputPatch ? PEnv.InputPatch : PEnv.Inputs;
 
   Value *Result = PoisonValue::get(CI.getType());
   for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
@@ -250,9 +275,9 @@ Value *lowerPatchConstantInputLoad(CallInst &CI, const SignatureElement &Elt,
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
     Value *ControlPoint =
         extractLaneOrScalar(Builder, CI.getArgOperand(3), Lane);
-    Value *Addr = computeStageStorageAddress(Builder, PEnv.InputLayout,
-                                             PEnv.Inputs, Elt.ElementID, Elt,
-                                             Row, Component, ControlPoint);
+    Value *Addr = computeStageStorageAddress(Builder, LayoutArg, StorageArg,
+                                             Elt.ElementID, Elt, Row, Component,
+                                             ControlPoint);
     Value *LaneResult = Builder.CreateLoad(ScalarTy, Addr);
     LaneResult = Builder.CreateSelect(Active, LaneResult,
                                       Constant::getNullValue(ScalarTy));
@@ -415,6 +440,8 @@ struct WrapperEnv {
   Value *ImageHeapCount = nullptr;
   Value *InputLayout = nullptr;
   Value *Inputs = nullptr;
+  Value *InputPatchLayout = nullptr;
+  Value *InputPatch = nullptr;
   Value *OutputLayout = nullptr;
   Value *Outputs = nullptr;
 };
@@ -429,6 +456,11 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
                                     PatchConstantArgsFieldInputLayout, PtrTy);
   Env.Inputs = loadStructField(Builder, ArgsTy, Args,
                                PatchConstantArgsFieldInputs, PtrTy);
+  Env.InputPatchLayout =
+      loadStructField(Builder, ArgsTy, Args,
+                      PatchConstantArgsFieldInputPatchLayout, PtrTy);
+  Env.InputPatch = loadStructField(
+      Builder, ArgsTy, Args, PatchConstantArgsFieldInputPatch, PtrTy);
   Env.OutputLayout = loadStructField(Builder, ArgsTy, Args,
                                      PatchConstantArgsFieldOutputLayout, PtrTy);
   Env.Outputs = loadStructField(Builder, ArgsTy, Args,
@@ -527,6 +559,10 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.InputLayout);
     else if (Arg.getName() == InputsParamName)
       CallArgs.push_back(Env.Inputs);
+    else if (Arg.getName() == InputPatchLayoutParamName)
+      CallArgs.push_back(Env.InputPatchLayout);
+    else if (Arg.getName() == InputPatchParamName)
+      CallArgs.push_back(Env.InputPatch);
     else if (Arg.getName() == OutputLayoutParamName)
       CallArgs.push_back(Env.OutputLayout);
     else if (Arg.getName() == OutputsParamName)

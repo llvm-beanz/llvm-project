@@ -245,6 +245,23 @@ constexpr char PatchConstantShaderIR[] = R"(
   attributes #0 = { "feme.shader.stage"="hull" }
 )";
 
+// Reads one control point from the original `InputPatch` (element 0,
+// `FromInputPatch`) and one from the completed `OutputPatch` (element 1),
+// writing their difference -- proving the two blocks address distinct
+// storage rather than aliasing one another.
+constexpr char PatchConstantShaderWithInputPatchIR[] = R"(
+  define void @pc_main() #0 {
+    %orig = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+    %completed = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+    %diff = fsub float %completed, %orig
+    call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %diff, i32 0)
+    ret void
+  }
+  declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+  declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+  attributes #0 = { "feme.shader.stage"="hull" }
+)";
+
 SignatureElement makeFloatInput(uint32_t ElementID) {
   SignatureElement Elt;
   Elt.ElementID = ElementID;
@@ -284,6 +301,12 @@ SignatureElement makeFloatPatchOutput(uint32_t ElementID) {
   SignatureElement Elt = makeFloatInput(ElementID);
   Elt.Direction = SignatureDirection::PatchOutput;
   Elt.Frequency = SignatureFrequency::PerPatch;
+  return Elt;
+}
+
+SignatureElement makeFloatInputPatchInput(uint32_t ElementID) {
+  SignatureElement Elt = makeFloatInput(ElementID);
+  Elt.FromInputPatch = true;
   return Elt;
 }
 
@@ -512,6 +535,76 @@ TEST(CompiledStageTest, InvokePatchConstantRunsStageAwarePath) {
 
   ASSERT_THAT_ERROR((*Stage)->invokePatchConstant(Prepared), Succeeded());
   EXPECT_EQ(Outputs[0], 12.0f);
+
+  StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
+  EXPECT_EQ(Artifact.Stage, ShaderStage::Hull);
+  EXPECT_FALSE(Artifact.Signature.empty());
+}
+
+TEST(CompiledStageTest, InvokePatchConstantReadsInputPatchSeparatelyFromOutputPatch) {
+  Context Ctx;
+  EntrySignature Sig;
+  Sig.Elements = {makeFloatInputPatchInput(0), makeFloatInput(1),
+                  makeFloatPatchOutput(2)};
+  Expected<std::unique_ptr<CompiledStage>> Stage =
+      compileGraphicsStage(Ctx, PatchConstantShaderWithInputPatchIR, "pc_main",
+                           Sig, ShaderStage::Hull, 4);
+  ASSERT_THAT_EXPECTED(Stage, Succeeded());
+  EXPECT_EQ((*Stage)->getStage(), ShaderStage::Hull);
+
+  FemeStageElement InputPatchElements[1] = {};
+  InputPatchElements[0].ElementID = 0;
+  InputPatchElements[0].FirstComponent = 0;
+  InputPatchElements[0].ComponentCount = 1;
+  InputPatchElements[0].RowCount = 1;
+  InputPatchElements[0].InvocationStride = 4;
+  FemeStageLayout InputPatchLayout{};
+  InputPatchLayout.Elements = InputPatchElements;
+  InputPatchLayout.ElementCount = 1;
+
+  FemeStageElement InputElements[2] = {};
+  InputElements[1].ElementID = 1;
+  InputElements[1].FirstComponent = 0;
+  InputElements[1].ComponentCount = 1;
+  InputElements[1].RowCount = 1;
+  InputElements[1].InvocationStride = 4;
+  FemeStageLayout InputLayout{};
+  InputLayout.Elements = InputElements;
+  InputLayout.ElementCount = 2;
+
+  FemeStageElement OutputElements[3] = {};
+  OutputElements[2].ElementID = 2;
+  OutputElements[2].FirstComponent = 0;
+  OutputElements[2].ComponentCount = 1;
+  OutputElements[2].RowCount = 1;
+  OutputElements[2].InvocationStride = 4;
+  FemeStageLayout OutputLayout{};
+  OutputLayout.Elements = OutputElements;
+  OutputLayout.ElementCount = 3;
+
+  // The original (pre-hull) input control point's own attribute...
+  std::vector<float> InputPatch = {3.0f};
+  // ... distinct from the completed output control point's attribute the
+  // control-point phase produced.
+  std::vector<float> Inputs = {10.0f};
+  std::vector<float> Outputs(1, -1.0f);
+
+  PatchConstantResources Resources;
+  Resources.InputLayout = &InputLayout;
+  Resources.Inputs = Inputs.data();
+  Resources.InputPatchLayout = &InputPatchLayout;
+  Resources.InputPatch = InputPatch.data();
+  Resources.OutputLayout = &OutputLayout;
+  Resources.Outputs = Outputs.data();
+  Resources.OutputControlPointCount = 1;
+  Resources.InputPatchControlPointCount = 1;
+  PreparedPatchConstantBatch Prepared = PreparedPatchConstantBatch::create(
+      (*Stage)->getResourceInfo(), Resources);
+
+  ASSERT_THAT_ERROR((*Stage)->invokePatchConstant(Prepared), Succeeded());
+  // 10.0 (OutputPatch) - 3.0 (InputPatch): reading the wrong block would
+  // instead alias the two and produce 0.
+  EXPECT_EQ(Outputs[0], 7.0f);
 
   StageArtifactInfo Artifact = (*Stage)->getArtifactInfo();
   EXPECT_EQ(Artifact.Stage, ShaderStage::Hull);

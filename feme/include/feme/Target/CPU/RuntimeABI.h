@@ -626,8 +626,8 @@ struct FemeFragmentArgs {
 /// patch-constant phase (reading the completed `OutputPatch` this phase
 /// produces, and writing tessellation factors and patch constants) is
 /// `FemePatchConstantArgs` below, added after R34's initial landing -- see
-/// PatchConstantWrapper.cpp's file comment for its own scope and what
-/// remains (an `InputPatch` parameter is not yet modeled).
+/// PatchConstantWrapper.cpp's file comment for its own scope, including its
+/// `InputPatch` parameter support (a further follow-up).
 struct FemePatchArgs {
   /// `StageArgsAbiVersion`.
   uint32_t AbiVersion;

@@ -86,6 +86,73 @@ TEST(PatchConstantWrapperTest, LowersOutputPatchReadsAndBuildsWrapper) {
   EXPECT_FALSE(verifyModule(*M, &errs()));
 }
 
+TEST(PatchConstantWrapperTest, LowersInputPatchAndOutputPatchReadsSeparately) {
+  LLVMContext Ctx;
+  // Element 0 is an `Input`-direction element read from the *original*
+  // `InputPatch` (`FromInputPatch`); element 1 is an ordinary `Input`
+  // element read from the completed `OutputPatch`, matching
+  // `LowersOutputPatchReadsAndBuildsWrapper` above -- both may legally
+  // appear in the same patch-constant function, addressed by two distinct
+  // `feme.stage.input.load` element IDs.
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @pc_main() #0 {
+      %orig = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %completed = call float @feme.stage.input.load.f32(i32 1, i32 0, i32 0, i32 0)
+      %sum = fadd float %orig, %completed
+      call void @feme.stage.output.store.f32(i32 2, i32 0, i32 0, float %sum, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="hull" "feme.cpu.wavesize"="4" }
+  )");
+  ASSERT_TRUE(M);
+
+  EntrySignature Sig;
+  SignatureElement InputPatchElt;
+  InputPatchElt.ElementID = 0;
+  InputPatchElt.Direction = SignatureDirection::Input;
+  InputPatchElt.ComponentType = SignatureComponentType::Float;
+  InputPatchElt.FromInputPatch = true;
+  SignatureElement OutputPatchElt;
+  OutputPatchElt.ElementID = 1;
+  OutputPatchElt.Direction = SignatureDirection::Input;
+  OutputPatchElt.ComponentType = SignatureComponentType::Float;
+  SignatureElement Out;
+  Out.ElementID = 2;
+  Out.Direction = SignatureDirection::PatchOutput;
+  Out.Frequency = SignatureFrequency::PerPatch;
+  Out.ComponentType = SignatureComponentType::Float;
+  Sig.Elements = {InputPatchElt, OutputPatchElt, Out};
+  dxil::setEntrySignature(*M->getFunction("pc_main"), Sig);
+
+  ModuleAnalysisManager MAM;
+  LinearizePass().run(*M, MAM);
+  SIMDizePass(4).run(*M, MAM);
+  WaveLoweringPass().run(*M, MAM);
+  PatchConstantWrapperPass().run(*M, MAM);
+
+  Function *Wrapper = M->getFunction("feme_cpu_entry_pc_main");
+  ASSERT_TRUE(Wrapper);
+  for (const Instruction &I : instructions(*M->getFunction("pc_main")))
+    if (const auto *CI = dyn_cast<CallInst>(&I))
+      EXPECT_FALSE(isStageOpCall(*CI)) << *CI;
+
+  // The compiled body takes both an `InputPatch` block and an `OutputPatch`
+  // block as distinct parameters, not a single shared one.
+  Function *Body = M->getFunction("pc_main");
+  ASSERT_TRUE(Body);
+  bool HasInputPatchLayout = false, HasInputPatch = false;
+  for (const Argument &Arg : Body->args()) {
+    HasInputPatchLayout |= Arg.getName() == "stage_input_patch_layout";
+    HasInputPatch |= Arg.getName() == "stage_input_patch";
+  }
+  EXPECT_TRUE(HasInputPatchLayout);
+  EXPECT_TRUE(HasInputPatch);
+
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+}
+
 TEST(PatchConstantWrapperTest, DiagnosesGroupSyncBarrier) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
