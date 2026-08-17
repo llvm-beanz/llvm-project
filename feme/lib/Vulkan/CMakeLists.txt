@@ -61,9 +61,32 @@ target_include_directories(FeMeVulkanCore PUBLIC
   ${feme_vulkan_gen_dir}
   ${CMAKE_CURRENT_SOURCE_DIR}
   )
+# PhysicalDeviceInfo.cpp calls directly into these two components
+# (`llvm::Expected`/`consumeError` and `llvm::MD5` from Support;
+# `getHostCPUFeatures`/`getProcessTriple`/`getHostCPUName`/`Triple` from
+# TargetParser), but FeMeVulkanCore never declared that dependency itself --
+# it only ever got Support and TargetParser transitively through
+# FeMeTargetCPU, leaving the link order these two static archives need
+# relative to `libFeMeVulkanCore.a` entirely up to whatever else FeMeTargetCPU
+# (or a given link job's other libraries) happened to require. That is not
+# safe with a single-pass linker (e.g. Apple's classic `ld64`): if nothing
+# else in the link needs a symbol from `Error.cpp`'s object file by the time
+# the linker reaches it, `libLLVMSupport.a` is never re-scanned once
+# `libFeMeVulkanCore.a`'s own need for it (e.g. the `ErrorInfo<ErrorList,
+# ErrorInfoBase>` RTTI that `llvm::consumeError` pulls in) appears later on
+# the command line, producing an undefined "typeinfo for
+# llvm::ErrorInfoBase". Declaring the dependency directly lets CMake's own
+# library ordering account for it no matter what FeMeTargetCPU or anything
+# else in a given link needs.
+llvm_map_components_to_libnames(feme_vulkan_core_llvm_libs
+  Support
+  TargetParser
+  )
 target_link_libraries(FeMeVulkanCore PUBLIC
   Vulkan::Headers
   FeMeTargetCPU
+  PRIVATE
+  ${feme_vulkan_core_llvm_libs}
   )
 
 add_library(feme_vulkan SHARED VulkanICD.cpp)
