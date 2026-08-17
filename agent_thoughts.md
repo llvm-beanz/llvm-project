@@ -18097,3 +18097,97 @@ Updated `FeMeVulkanDesign.md`'s V0 status note to mention that core-command
 resolution now walks `depends` transitively, since the prior wording
 ("reads ... core `VK_VERSION_1_0`/`VK_VERSION_1_1` commands only") no longer
 fully describes how those commands are located.
+
+## Session: Fixing a macOS-only link failure in FeMeVulkanTests
+
+### The report
+
+Building the current branch against the *latest* Vulkan-Headers from GitHub
+(rather than whatever version happened to be installed) produced a macOS
+(arm64) link failure for `FeMeVulkanTests`:
+
+```
+Undefined symbols for architecture arm64:
+  "typeinfo for llvm::ErrorInfoBase", referenced from:
+      typeinfo for llvm::ErrorInfo<llvm::ErrorList, llvm::ErrorInfoBase> in libFeMeVulkanCore.a[3](PhysicalDeviceInfo.cpp.o)
+ld: symbol(s) not found for architecture arm64
+```
+
+### Investigation
+
+I could not reproduce the exact failure on this session's Linux/lld setup --
+I cloned Vulkan-Headers' `main` from GitHub, built and installed it, pointed
+`-DVulkanHeaders_DIR`/`-DFEME_VULKAN_XML` at it, and `FeMeVulkanTests` still
+linked and passed. That ruled out "the newer vk.xml itself changed generated
+code in a way that's broken" as the root cause; the underlying bug had to be
+about the link line's *library ordering*, which is something a single build
+environment's LLVM/CMake/linker combination can paper over while another
+fails outright.
+
+Comparing the reported failing link command against this session's own
+successful one for the same target confirmed it: in the failing command,
+`lib/libLLVMSupport.a` appears exactly once, *before*
+`lib/libFeMeVulkanCore.a`. In this session's link line (before any fix),
+`libLLVMSupport.a` happened to appear a second time, much later, after
+`libFeMeVulkanCore.a` and everything that depends on it. That second,
+later appearance is what let a single-pass linker satisfy
+`FeMeVulkanCore.a`'s need for `llvm::ErrorInfoBase`'s RTTI (pulled in by
+`PhysicalDeviceInfo.cpp`'s use of `llvm::Expected`/`consumeError`, which
+instantiates `ErrorInfo<ErrorList, ErrorInfoBase>` and references the base
+class's typeinfo, itself only strongly defined in `Error.cpp`'s object
+file inside `libLLVMSupport.a`). Whether that second appearance shows up at
+all is an accident of exactly which other libraries CMake's dependency
+graph happens to thread `LLVMSupport` through and in what order -- it is
+not something `FeMeVulkanCore`'s own `CMakeLists.txt` ever asked for.
+Apple's classic `ld64` linker (and any other strict single-pass linker)
+does not re-scan an archive once it's moved past it in the command line,
+so if the *only* copy of `libLLVMSupport.a` in the whole link happens to
+land before `libFeMeVulkanCore.a`, the build fails; on this session's
+Linux/lld setup, a lucky second copy already existed, so it worked despite
+the same underlying bug.
+
+### Root cause
+
+`feme/lib/Vulkan/CMakeLists.txt` builds `FeMeVulkanCore` as a plain
+`add_library(... STATIC ...)`, linked only against `Vulkan::Headers` and
+`FeMeTargetCPU`. It never declared its own, very real, direct dependency on
+LLVM's `Support` (`llvm::Expected`, `llvm::consumeError`, `llvm::MD5`) and
+`TargetParser` (`llvm::sys::getHostCPUFeatures`, `getProcessTriple`,
+`getHostCPUName`, `llvm::Triple`) components, both used directly in
+`PhysicalDeviceInfo.cpp`. It got away with this because it happened to
+receive both transitively through `FeMeTargetCPU`'s own component list --
+but a transitive, undeclared dependency gives CMake no reason to place
+those archives correctly relative to `FeMeVulkanCore.a` on every possible
+link line; it only works when something else in the specific link job
+also happens to need them again afterward.
+
+### The fix
+
+Added an explicit `llvm_map_components_to_libnames(... Support TargetParser)`
+call and linked the result `PRIVATE` into `FeMeVulkanCore` (private, since
+Support/TargetParser use is confined to the `.cpp` file, not exposed by
+`PhysicalDeviceInfo.h`). This makes the dependency an ordinary, direct
+edge in CMake's own library graph, so CMake's link-order computation places
+`libLLVMSupport.a`/`libLLVMTargetParser.a` correctly relative to
+`libFeMeVulkanCore.a` for *any* linker, not just ones tolerant of a
+lucky-accident, order-independent archive re-scan.
+
+### Verification
+
+- Rebuilt against the real, freshly-cloned-and-installed latest
+  Vulkan-Headers `main` (not just whatever was preinstalled) and confirmed
+  `FeMeVulkanTests` still links and all 21 of its tests pass.
+- Reconfigured back to the environment's originally preinstalled
+  Vulkan-Headers and re-verified the same.
+- Inspected the generated link command in both configurations and confirmed
+  `libLLVMSupport.a` (and now `libLLVMTargetParser.a`) is placed after
+  `libFeMeVulkanCore.a` on the command line, which is the necessary
+  condition for a single-pass linker to resolve the reference.
+- Ran the full `check-feme` target (with `LLVM_ENABLE_ASSERTIONS=ON` and
+  ccache already configured in this build tree) end to end: 1249/1251
+  applicable tests pass (2 unsupported, none failed), confirming no
+  regressions elsewhere.
+
+No design deviation: this is a build-system dependency-declaration fix,
+not a behavioral or architectural change, so `FeMeVulkanDesign.md` was not
+touched.
