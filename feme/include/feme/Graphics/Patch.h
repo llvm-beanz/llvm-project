@@ -62,12 +62,22 @@ constexpr uint32_t MaxPatchControlPoints = 32;
 class PatchRecord {
 public:
   /// Constructs an empty patch record for \p InputControlPointCount input
-  /// and \p OutputControlPointCount output control points, each holding
-  /// \p ControlPointScalarCount scalars, plus \p PatchConstantScalarCount
-  /// per-patch scalars. Every count is independent of the others (an output
-  /// control point count need not match the input one, matching a hull
-  /// shader's own freedom to do so).
+  /// and \p OutputControlPointCount output control points, holding
+  /// \p InputControlPointScalarCount and \p ControlPointScalarCount scalars
+  /// respectively, plus \p PatchConstantScalarCount per-patch scalars. Every
+  /// count is independent of the others (an output control point count need
+  /// not match the input one, matching a hull shader's own freedom to do
+  /// so, and the two scalar counts are independent for the same reason --
+  /// the input and output control point signatures need not agree).
+  ///
+  /// Storing the original input control points (not only the hull stage's
+  /// completed output ones) is what lets a `PatchRecord` feed both
+  /// `feme::cpu::HullWrapperPass`'s control-point phase (which reads only
+  /// its own input control point) and `PatchConstantWrapperPass`'s
+  /// `InputPatch` parameter (which may read any of them) from one piece of
+  /// per-patch storage.
   PatchRecord(uint32_t InputControlPointCount, uint32_t OutputControlPointCount,
+              uint32_t InputControlPointScalarCount,
               uint32_t ControlPointScalarCount,
               uint32_t PatchConstantScalarCount);
 
@@ -75,6 +85,14 @@ public:
   uint32_t getOutputControlPointCount() const {
     return OutputControlPointCount;
   }
+
+  /// Writes scalar \p ScalarIndex of the original input control point
+  /// \p ControlPoint (before the control stage runs). Returns false
+  /// (leaving the record unmodified) if either index is out of range.
+  bool writeInputControlPoint(uint32_t ControlPoint, uint32_t ScalarIndex,
+                              float Value);
+  float readInputControlPoint(uint32_t ControlPoint,
+                              uint32_t ScalarIndex) const;
 
   /// Writes scalar \p ScalarIndex of output control point \p ControlPoint.
   /// Returns false (leaving the record unmodified) if either index is out
@@ -100,8 +118,11 @@ public:
 private:
   uint32_t InputControlPointCount;
   uint32_t OutputControlPointCount;
+  uint32_t InputControlPointScalarCount;
   uint32_t ControlPointScalarCount;
   uint32_t PatchConstantScalarCount;
+  /// Row-major `InputControlPointCount` x `InputControlPointScalarCount`.
+  std::vector<float> InputControlPointData;
   /// Row-major `OutputControlPointCount` x `ControlPointScalarCount`.
   std::vector<float> ControlPointData;
   std::vector<float> PatchConstantData;
