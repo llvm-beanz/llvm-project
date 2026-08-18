@@ -47,9 +47,9 @@ protected:
   }
 
   /// A one-color-attachment render pass over \p Format at \p Samples.
-  VkResult createSimpleRenderPass(VkFormat Format, VkRenderPass &Out,
-                                  VkSampleCountFlagBits Samples =
-                                      VK_SAMPLE_COUNT_1_BIT) {
+  VkResult createSimpleRenderPass(
+      VkFormat Format, VkRenderPass &Out,
+      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
     VkAttachmentDescription Attachment{};
     Attachment.format = Format;
     Attachment.samples = Samples;

@@ -321,9 +321,9 @@ findSystemValue(const feme::EntrySignature &Sig, feme::SignatureDirection Dir,
   return nullptr;
 }
 
-const feme::SignatureElement *
-findLocation(const feme::EntrySignature &Sig, feme::SignatureDirection Dir,
-             uint32_t Location) {
+const feme::SignatureElement *findLocation(const feme::EntrySignature &Sig,
+                                           feme::SignatureDirection Dir,
+                                           uint32_t Location) {
   for (const feme::SignatureElement &Elt : Sig.Elements)
     if (Elt.Direction == Dir &&
         Elt.SystemValue == feme::SignatureSystemValue::None && Elt.Location &&
@@ -443,8 +443,7 @@ struct PipelineRenderTargets {
   std::optional<feme::cpu::ResourceFormat> DepthStencil;
 };
 
-const VkPipelineRenderingCreateInfo *
-findRenderingCreateInfo(const void *Next) {
+const VkPipelineRenderingCreateInfo *findRenderingCreateInfo(const void *Next) {
   for (const auto *Header = static_cast<const VkBaseInStructure *>(Next);
        Header; Header = Header->pNext)
     if (Header->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO)
@@ -493,9 +492,10 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
                                I);
     Targets.Colors.push_back(*Format);
   }
-  VkFormat DepthStencilFormat = Rendering->depthAttachmentFormat != VK_FORMAT_UNDEFINED
-                                    ? Rendering->depthAttachmentFormat
-                                    : Rendering->stencilAttachmentFormat;
+  VkFormat DepthStencilFormat =
+      Rendering->depthAttachmentFormat != VK_FORMAT_UNDEFINED
+          ? Rendering->depthAttachmentFormat
+          : Rendering->stencilAttachmentFormat;
   if (DepthStencilFormat != VK_FORMAT_UNDEFINED) {
     std::optional<feme::cpu::ResourceFormat> Format =
         mapVkFormat(DepthStencilFormat);
@@ -667,10 +667,14 @@ Error translateColorBlendState(const VkPipelineColorBlendStateCreateInfo *Info,
     Dst.WriteMask = static_cast<uint8_t>(Src.colorWriteMask & 0xF);
     if (!Dst.BlendEnable)
       continue;
-    std::optional<BlendFactor> SrcColor = mapBlendFactor(Src.srcColorBlendFactor);
-    std::optional<BlendFactor> DstColor = mapBlendFactor(Src.dstColorBlendFactor);
-    std::optional<BlendFactor> SrcAlpha = mapBlendFactor(Src.srcAlphaBlendFactor);
-    std::optional<BlendFactor> DstAlpha = mapBlendFactor(Src.dstAlphaBlendFactor);
+    std::optional<BlendFactor> SrcColor =
+        mapBlendFactor(Src.srcColorBlendFactor);
+    std::optional<BlendFactor> DstColor =
+        mapBlendFactor(Src.dstColorBlendFactor);
+    std::optional<BlendFactor> SrcAlpha =
+        mapBlendFactor(Src.srcAlphaBlendFactor);
+    std::optional<BlendFactor> DstAlpha =
+        mapBlendFactor(Src.dstAlphaBlendFactor);
     std::optional<BlendOp> ColorOp = mapBlendOp(Src.colorBlendOp);
     std::optional<BlendOp> AlphaOp = mapBlendOp(Src.alphaBlendOp);
     if (!SrcColor || !DstColor || !SrcAlpha || !DstAlpha || !ColorOp ||
@@ -715,9 +719,8 @@ Error translateViewportState(const VkPipelineViewportStateCreateInfo *Info,
   }
   if (Info->pScissors) {
     const VkRect2D &Src = *Info->pScissors;
-    Out.Scissor = feme::graphics::ScissorRect{Src.offset.x, Src.offset.y,
-                                              Src.extent.width,
-                                              Src.extent.height};
+    Out.Scissor = feme::graphics::ScissorRect{
+        Src.offset.x, Src.offset.y, Src.extent.width, Src.extent.height};
   }
   return Error::success();
 }

@@ -714,9 +714,8 @@ public:
 /// rather than the shared upstream one. Returns null for a struct this
 /// cannot lay out (a declared offset naturally-aligned layout cannot
 /// reproduce, or an unconvertible member type).
-mlir::Type
-convertOffsetStructTypeIgnoringDecorations(mlir::spirv::StructType Type,
-                                           const mlir::TypeConverter &Converter) {
+mlir::Type convertOffsetStructTypeIgnoringDecorations(
+    mlir::spirv::StructType Type, const mlir::TypeConverter &Converter) {
   llvm::SmallVector<mlir::Type, 8> Members;
   for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I) {
     mlir::Type MemberTy = Converter.convertType(Type.getElementType(I));
@@ -1285,14 +1284,13 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   // `std::nullopt` (not a struct this can lay out) falls through to
   // MLIR's own conversion, which will also fail identically, so no
   // real coverage is lost by preferring this one.
-  TypeConverter.addConversion(
-      [&TypeConverter](
-          mlir::spirv::StructType Type) -> std::optional<mlir::Type> {
-        if (mlir::Type Converted = convertOffsetStructTypeIgnoringDecorations(
-                Type, TypeConverter))
-          return Converted;
-        return std::nullopt;
-      });
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::StructType Type)
+                                  -> std::optional<mlir::Type> {
+    if (mlir::Type Converted =
+            convertOffsetStructTypeIgnoringDecorations(Type, TypeConverter))
+      return Converted;
+    return std::nullopt;
+  });
 
   // A non-builtin `Output` variable (a stage-IO variable: a vertex shader's
   // output, a fragment shader's render target, and so on) is real memory,

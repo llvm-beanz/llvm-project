@@ -34,9 +34,8 @@ class Image;
 
 /// `vkCmdClearColorImage`: fills every texel of every named subresource
 /// with \p Color, converted into each subresource's own format.
-llvm::Error
-runClearColorImage(Image *Img, const VkClearColorValue &Color,
-                   llvm::ArrayRef<VkImageSubresourceRange> Ranges);
+llvm::Error runClearColorImage(Image *Img, const VkClearColorValue &Color,
+                               llvm::ArrayRef<VkImageSubresourceRange> Ranges);
 
 /// `vkCmdClearDepthStencilImage`: the depth/stencil peer of
 /// `runClearColorImage`, writing whichever of the two \p Img's format holds

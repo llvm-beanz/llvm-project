@@ -662,10 +662,9 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
   } else if (isSupportedStencilAttachmentFormat(Attachment->Format)) {
     Texel[0] = static_cast<uint8_t>(View.ClearValue.depthStencil.stencil);
   } else {
-    std::array<double, 4> Color{View.ClearValue.color.float32[0],
-                                View.ClearValue.color.float32[1],
-                                View.ClearValue.color.float32[2],
-                                View.ClearValue.color.float32[3]};
+    std::array<double, 4> Color{
+        View.ClearValue.color.float32[0], View.ClearValue.color.float32[1],
+        View.ClearValue.color.float32[2], View.ClearValue.color.float32[3]};
     if (Error E =
             feme::graphics::packClearColor(Attachment->Format, Color, Texel))
       return E;
@@ -673,8 +672,8 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
 
   uint32_t MinX = std::max<int32_t>(0, Area.offset.x);
   uint32_t MinY = std::max<int32_t>(0, Area.offset.y);
-  uint32_t MaxX = std::min<uint64_t>(Attachment->Width,
-                                     uint64_t(MinX) + Area.extent.width);
+  uint32_t MaxX =
+      std::min<uint64_t>(Attachment->Width, uint64_t(MinX) + Area.extent.width);
   uint32_t MaxY = std::min<uint64_t>(Attachment->Height,
                                      uint64_t(MinY) + Area.extent.height);
   for (uint32_t Y = MinY; Y < MaxY; ++Y)
@@ -806,9 +805,9 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
     feme::graphics::VertexBufferBinding VB;
     VB.Binding = BindingDecl.Binding;
     VB.Stride = BindingDecl.Stride;
-    VB.Data = llvm::ArrayRef<uint8_t>(
-        static_cast<const uint8_t *>(Buf.data()) + Offset,
-        static_cast<size_t>(Buf.size() - Offset));
+    VB.Data = llvm::ArrayRef<uint8_t>(static_cast<const uint8_t *>(Buf.data()) +
+                                          Offset,
+                                      static_cast<size_t>(Buf.size() - Offset));
     VB.Attributes = AttributeStorage.back();
     VertexBuffers.push_back(VB);
   }
@@ -853,9 +852,8 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   int32_t MinY = std::max(Scissor.Y, Area.offset.y);
   int64_t MaxX = std::min<int64_t>(int64_t(Scissor.X) + Scissor.Width,
                                    int64_t(Area.offset.x) + Area.extent.width);
-  int64_t MaxY =
-      std::min<int64_t>(int64_t(Scissor.Y) + Scissor.Height,
-                        int64_t(Area.offset.y) + Area.extent.height);
+  int64_t MaxY = std::min<int64_t>(int64_t(Scissor.Y) + Scissor.Height,
+                                   int64_t(Area.offset.y) + Area.extent.height);
   Scissor.X = MinX;
   Scissor.Y = MinY;
   Scissor.Width = MaxX > MinX ? uint32_t(MaxX - MinX) : 0;
@@ -1166,9 +1164,9 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       break;
     case RecordedCommand::Kind::ExecuteCommands:
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
-        if (Error E = executeCommandsInto(
-                Secondary->commands(), DeviceInfo, BoundPipeline,
-                BoundGraphicsPipeline, Gfx, BoundSets, PushConstants))
+        if (Error E = executeCommandsInto(Secondary->commands(), DeviceInfo,
+                                          BoundPipeline, BoundGraphicsPipeline,
+                                          Gfx, BoundSets, PushConstants))
           return E;
       break;
     case RecordedCommand::Kind::CopyBufferToImage:
@@ -1344,8 +1342,8 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       bool Indexed = Cmd.Op == RecordedCommand::Kind::DrawIndexedIndirect;
       Expected<std::vector<feme::graphics::DrawCommand>> Draws =
           readIndirectDraws(Cmd.IndirectBuffer, Cmd.IndirectOffset,
-                            Cmd.Count[0],
-                            static_cast<uint32_t>(Cmd.DstSize), Indexed);
+                            Cmd.Count[0], static_cast<uint32_t>(Cmd.DstSize),
+                            Indexed);
       if (!Draws)
         return Draws.takeError();
       for (const feme::graphics::DrawCommand &Draw : *Draws)
@@ -1708,13 +1706,12 @@ vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount,
 // V6: render pass instances, vertex/index binding, dynamic state, draws
 //===----------------------------------------------------------------------===//
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
-                     const VkRenderPassBeginInfo *pRenderPassBegin,
-                     VkSubpassContents) {
-  std::vector<VkClearValue> ClearValues(
-      pRenderPassBegin->pClearValues,
-      pRenderPassBegin->pClearValues + pRenderPassBegin->clearValueCount);
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo *pRenderPassBegin, VkSubpassContents) {
+  std::vector<VkClearValue> ClearValues(pRenderPassBegin->pClearValues,
+                                        pRenderPassBegin->pClearValues +
+                                            pRenderPassBegin->clearValueCount);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->beginRenderPass(fromHandle<RenderPass>(pRenderPassBegin->renderPass),
                         fromHandle<Framebuffer>(pRenderPassBegin->framebuffer),
@@ -1746,9 +1743,8 @@ normalizeRenderingAttachment(const VkRenderingAttachmentInfo &Src) {
 
 } // namespace
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdBeginRenderingKHR(VkCommandBuffer commandBuffer,
-                    const VkRenderingInfo *pRenderingInfo) {
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderingKHR(
+    VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo) {
   RenderTargetBinding Binding;
   Binding.RenderArea = pRenderingInfo->renderArea;
   Binding.Layers = pRenderingInfo->layerCount;
@@ -1823,9 +1819,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->setScissor(pScissors[0]);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetBlendConstants(VkCommandBuffer commandBuffer,
-                       const float blendConstants[4]) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetBlendConstants(
+    VkCommandBuffer commandBuffer, const float blendConstants[4]) {
   std::array<float, 4> Constants{blendConstants[0], blendConstants[1],
                                  blendConstants[2], blendConstants[3]};
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
@@ -1865,10 +1860,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(VkCommandBuffer commandBuffer,
       ->draw(vertexCount, instanceCount, firstVertex, firstInstance);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
-                 uint32_t instanceCount, uint32_t firstIndex,
-                 int32_t vertexOffset, uint32_t firstInstance) {
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount,
+    uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->drawIndexed(indexCount, instanceCount, firstIndex, vertexOffset,
                     firstInstance);
@@ -1881,10 +1875,10 @@ VKAPI_ATTR void VKAPI_CALL vkCmdClearColorImage(
   VkClearValue Value{};
   Value.color = *pColor;
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->clearImage(RecordedCommand::Kind::ClearColorImage,
-                   fromHandle<Image>(image), Value,
-                   std::vector<VkImageSubresourceRange>(pRanges,
-                                                        pRanges + rangeCount));
+      ->clearImage(
+          RecordedCommand::Kind::ClearColorImage, fromHandle<Image>(image),
+          Value,
+          std::vector<VkImageSubresourceRange>(pRanges, pRanges + rangeCount));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(
@@ -1894,36 +1888,39 @@ VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(
   VkClearValue Value{};
   Value.depthStencil = *pDepthStencil;
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->clearImage(RecordedCommand::Kind::ClearDepthStencilImage,
-                   fromHandle<Image>(image), Value,
-                   std::vector<VkImageSubresourceRange>(pRanges,
-                                                        pRanges + rangeCount));
+      ->clearImage(
+          RecordedCommand::Kind::ClearDepthStencilImage,
+          fromHandle<Image>(image), Value,
+          std::vector<VkImageSubresourceRange>(pRanges, pRanges + rangeCount));
 }
 
-VKAPI_ATTR void VKAPI_CALL vkCmdClearAttachments(
-    VkCommandBuffer commandBuffer, uint32_t attachmentCount,
-    const VkClearAttachment *pAttachments, uint32_t rectCount,
-    const VkClearRect *pRects) {
+VKAPI_ATTR void VKAPI_CALL
+vkCmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
+                      const VkClearAttachment *pAttachments, uint32_t rectCount,
+                      const VkClearRect *pRects) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->clearAttachments(std::vector<VkClearAttachment>(
                              pAttachments, pAttachments + attachmentCount),
                          std::vector<VkClearRect>(pRects, pRects + rectCount));
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout,
-               VkImage dstImage, VkImageLayout, uint32_t regionCount,
-               const VkImageBlit *pRegions, VkFilter filter) {
+VKAPI_ATTR void VKAPI_CALL vkCmdBlitImage(VkCommandBuffer commandBuffer,
+                                          VkImage srcImage, VkImageLayout,
+                                          VkImage dstImage, VkImageLayout,
+                                          uint32_t regionCount,
+                                          const VkImageBlit *pRegions,
+                                          VkFilter filter) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->blitImage(fromHandle<Image>(srcImage), fromHandle<Image>(dstImage),
                   std::vector<VkImageBlit>(pRegions, pRegions + regionCount),
                   filter);
 }
 
-VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(
-    VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout,
-    VkImage dstImage, VkImageLayout, uint32_t regionCount,
-    const VkImageResolve *pRegions) {
+VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(VkCommandBuffer commandBuffer,
+                                             VkImage srcImage, VkImageLayout,
+                                             VkImage dstImage, VkImageLayout,
+                                             uint32_t regionCount,
+                                             const VkImageResolve *pRegions) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->resolveImage(
           fromHandle<Image>(srcImage), fromHandle<Image>(dstImage),
@@ -1941,10 +1938,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,
                      stride);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
-                         VkDeviceSize offset, uint32_t drawCount,
-                         uint32_t stride) {
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexedIndirect(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    uint32_t drawCount, uint32_t stride) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->drawIndirect(RecordedCommand::Kind::DrawIndexedIndirect,
                      fromHandle<vulkan::Buffer>(buffer), offset, drawCount,

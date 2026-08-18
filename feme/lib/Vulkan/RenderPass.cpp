@@ -123,10 +123,9 @@ normalizeAttachment(const VkAttachmentDescription &Src) {
 
 namespace feme::vulkan {
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateRenderPass(VkDevice, const VkRenderPassCreateInfo *pCreateInfo,
-                   const VkAllocationCallbacks *pAllocator,
-                   VkRenderPass *pRenderPass) {
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
+    VkDevice, const VkRenderPassCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass) {
   std::vector<AttachmentDescription> Attachments;
   Attachments.reserve(pCreateInfo->attachmentCount);
   for (uint32_t I = 0; I != pCreateInfo->attachmentCount; ++I) {
@@ -211,18 +210,17 @@ vkDestroyRenderPass(VkDevice, VkRenderPass renderPass,
   Alloc.destroy(fromHandle<RenderPass>(renderPass));
 }
 
-VKAPI_ATTR void VKAPI_CALL vkGetRenderAreaGranularity(
-    VkDevice, VkRenderPass, VkExtent2D *pGranularity) {
+VKAPI_ATTR void VKAPI_CALL
+vkGetRenderAreaGranularity(VkDevice, VkRenderPass, VkExtent2D *pGranularity) {
   // A software rasterizer has no tile-alignment requirement an application
   // could exploit: any render area is exactly as efficient as any other.
   pGranularity->width = 1;
   pGranularity->height = 1;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateFramebuffer(VkDevice, const VkFramebufferCreateInfo *pCreateInfo,
-                    const VkAllocationCallbacks *pAllocator,
-                    VkFramebuffer *pFramebuffer) {
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
+    VkDevice, const VkFramebufferCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkFramebuffer *pFramebuffer) {
   if (!pCreateInfo->renderPass)
     return VK_ERROR_INITIALIZATION_FAILED;
   const RenderPass &Pass = *fromHandle<RenderPass>(pCreateInfo->renderPass);

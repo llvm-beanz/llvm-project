@@ -181,20 +181,18 @@ vkDestroySampler(VkDevice device, VkSampler sampler,
 
 // V6: render passes and framebuffers (see "Render passes and dynamic
 // rendering").
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateRenderPass(VkDevice device, const VkRenderPassCreateInfo *pCreateInfo,
-                   const VkAllocationCallbacks *pAllocator,
-                   VkRenderPass *pRenderPass);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
+    VkDevice device, const VkRenderPassCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyRenderPass(VkDevice device, VkRenderPass renderPass,
                     const VkAllocationCallbacks *pAllocator);
-VKAPI_ATTR void VKAPI_CALL
-vkGetRenderAreaGranularity(VkDevice device, VkRenderPass renderPass,
-                           VkExtent2D *pGranularity);
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateFramebuffer(VkDevice device, const VkFramebufferCreateInfo *pCreateInfo,
-                    const VkAllocationCallbacks *pAllocator,
-                    VkFramebuffer *pFramebuffer);
+VKAPI_ATTR void VKAPI_CALL vkGetRenderAreaGranularity(VkDevice device,
+                                                      VkRenderPass renderPass,
+                                                      VkExtent2D *pGranularity);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
+    VkDevice device, const VkFramebufferCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkFramebuffer *pFramebuffer);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyFramebuffer(VkDevice device, VkFramebuffer framebuffer,
                      const VkAllocationCallbacks *pAllocator);
@@ -391,24 +389,23 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
 
 // V6: render pass instances, vertex/index buffer binding, the dynamic-state
 // subset, and draws (see "Draw commands and vertex data").
-VKAPI_ATTR void VKAPI_CALL
-vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
-                     const VkRenderPassBeginInfo *pRenderPassBegin,
-                     VkSubpassContents contents);
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo *pRenderPassBegin, VkSubpassContents contents);
 VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass(VkCommandBuffer commandBuffer,
                                             VkSubpassContents contents);
 /// `VK_KHR_dynamic_rendering`'s two commands, exposed under their `KHR`
 /// names (dynamic rendering is core only in 1.3; this driver advertises
 /// 1.2 plus the extension -- see "Render passes and dynamic rendering").
-VKAPI_ATTR void VKAPI_CALL
-vkCmdBeginRenderingKHR(VkCommandBuffer commandBuffer,
-                    const VkRenderingInfo *pRenderingInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderingKHR(
+    VkCommandBuffer commandBuffer, const VkRenderingInfo *pRenderingInfo);
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderingKHR(VkCommandBuffer commandBuffer);
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(VkCommandBuffer commandBuffer);
-VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
-    VkCommandBuffer commandBuffer, uint32_t firstBinding,
-    uint32_t bindingCount, const VkBuffer *pBuffers,
-    const VkDeviceSize *pOffsets);
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(VkCommandBuffer commandBuffer,
+                                                  uint32_t firstBinding,
+                                                  uint32_t bindingCount,
+                                                  const VkBuffer *pBuffers,
+                                                  const VkDeviceSize *pOffsets);
 VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,
                                                 VkBuffer buffer,
                                                 VkDeviceSize offset,
@@ -421,9 +418,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
                                            uint32_t firstScissor,
                                            uint32_t scissorCount,
                                            const VkRect2D *pScissors);
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetBlendConstants(VkCommandBuffer commandBuffer,
-                       const float blendConstants[4]);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetBlendConstants(
+    VkCommandBuffer commandBuffer, const float blendConstants[4]);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetStencilReference(VkCommandBuffer commandBuffer,
                          VkStencilFaceFlags faceMask, uint32_t reference);
@@ -438,10 +434,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDraw(VkCommandBuffer commandBuffer,
                                      uint32_t instanceCount,
                                      uint32_t firstVertex,
                                      uint32_t firstInstance);
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
-                 uint32_t instanceCount, uint32_t firstIndex,
-                 int32_t vertexOffset, uint32_t firstInstance);
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexed(
+    VkCommandBuffer commandBuffer, uint32_t indexCount, uint32_t instanceCount,
+    uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance);
 VKAPI_ATTR void VKAPI_CALL vkCmdClearColorImage(
     VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout,
     const VkClearColorValue *pColor, uint32_t rangeCount,
@@ -450,29 +445,30 @@ VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(
     VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout,
     const VkClearDepthStencilValue *pDepthStencil, uint32_t rangeCount,
     const VkImageSubresourceRange *pRanges);
-VKAPI_ATTR void VKAPI_CALL vkCmdClearAttachments(
-    VkCommandBuffer commandBuffer, uint32_t attachmentCount,
-    const VkClearAttachment *pAttachments, uint32_t rectCount,
-    const VkClearRect *pRects);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
+                      const VkClearAttachment *pAttachments, uint32_t rectCount,
+                      const VkClearRect *pRects);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage,
                VkImageLayout srcImageLayout, VkImage dstImage,
                VkImageLayout dstImageLayout, uint32_t regionCount,
                const VkImageBlit *pRegions, VkFilter filter);
-VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(
-    VkCommandBuffer commandBuffer, VkImage srcImage,
-    VkImageLayout srcImageLayout, VkImage dstImage,
-    VkImageLayout dstImageLayout, uint32_t regionCount,
-    const VkImageResolve *pRegions);
+VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(VkCommandBuffer commandBuffer,
+                                             VkImage srcImage,
+                                             VkImageLayout srcImageLayout,
+                                             VkImage dstImage,
+                                             VkImageLayout dstImageLayout,
+                                             uint32_t regionCount,
+                                             const VkImageResolve *pRegions);
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,
                                              VkBuffer buffer,
                                              VkDeviceSize offset,
                                              uint32_t drawCount,
                                              uint32_t stride);
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
-                         VkDeviceSize offset, uint32_t drawCount,
-                         uint32_t stride);
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndexedIndirect(
+    VkCommandBuffer commandBuffer, VkBuffer buffer, VkDeviceSize offset,
+    uint32_t drawCount, uint32_t stride);
 
 // V3: secondary command buffers (see "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL

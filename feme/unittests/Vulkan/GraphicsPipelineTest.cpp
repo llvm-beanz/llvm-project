@@ -116,8 +116,7 @@ protected:
     Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
     Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkAttachmentReference ColorRef{0,
-                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription Subpass{};
     Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     Subpass.colorAttachmentCount = 1;
@@ -205,8 +204,7 @@ protected:
     return Info;
   }
 
-  VkResult create(const VkGraphicsPipelineCreateInfo &Info,
-                  VkPipeline &Out) {
+  VkResult create(const VkGraphicsPipelineCreateInfo &Info, VkPipeline &Out) {
     return vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
                                      &Out);
   }

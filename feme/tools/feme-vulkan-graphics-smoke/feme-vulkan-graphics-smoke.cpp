@@ -239,8 +239,7 @@ int main(int argc, char **argv) {
   Stages[1].pName = "main";
 
   VkPipelineVertexInputStateCreateInfo VertexInput{};
-  VertexInput.sType =
-      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  VertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
   VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
   InputAssembly.sType =
       VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
@@ -284,8 +283,8 @@ int main(int argc, char **argv) {
   PipelineInfo.layout = Layout;
   PipelineInfo.renderPass = RenderPass;
   VkPipeline Pipeline;
-  if (VkResult R = vkCreateGraphicsPipelines(
-          Device, VK_NULL_HANDLE, 1, &PipelineInfo, nullptr, &Pipeline))
+  if (VkResult R = vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1,
+                                             &PipelineInfo, nullptr, &Pipeline))
     fail("vkCreateGraphicsPipelines", R);
 
   VkCommandPoolCreateInfo PoolInfo{};

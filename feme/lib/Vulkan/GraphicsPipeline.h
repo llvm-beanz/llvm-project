@@ -87,7 +87,7 @@ struct DynamicGraphicsState {
   feme::graphics::ViewportState Viewport;
   feme::graphics::ScissorRect Scissor;
   std::array<float, 4> BlendConstants{0.0f, 0.0f, 0.0f, 0.0f};
-  uint32_t StencilReference[2] = {0, 0};   // [front, back]
+  uint32_t StencilReference[2] = {0, 0}; // [front, back]
   uint32_t StencilCompareMask[2] = {0xFF, 0xFF};
   uint32_t StencilWriteMask[2] = {0xFF, 0xFF};
 };

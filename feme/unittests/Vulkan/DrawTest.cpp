@@ -178,8 +178,7 @@ protected:
     Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
     Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    VkAttachmentReference ColorRef{0,
-                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
     VkSubpassDescription Subpass{};
     Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     Subpass.colorAttachmentCount = 1;
@@ -236,9 +235,9 @@ protected:
 
   /// \p Rendering, when non-null, replaces the fixture's `VkRenderPass`
   /// with a chained `VkPipelineRenderingCreateInfo` (dynamic rendering).
-  VkPipeline createPipeline(VkShaderModule Vertex, VkShaderModule Fragment,
-                            const VkPipelineRenderingCreateInfo *Rendering =
-                                nullptr) {
+  VkPipeline
+  createPipeline(VkShaderModule Vertex, VkShaderModule Fragment,
+                 const VkPipelineRenderingCreateInfo *Rendering = nullptr) {
     VkPipelineShaderStageCreateInfo Stages[2]{};
     Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -497,9 +496,8 @@ TEST_F(DrawTest, RendersIndirectDraw) {
   VkPipeline Pipe = createPipeline(Vertex, Fragment);
 
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  VkBuffer Indirect =
-      createBuffer(sizeof(VkDrawIndirectCommand), Memory,
-                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkBuffer Indirect = createBuffer(sizeof(VkDrawIndirectCommand), Memory,
+                                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
   VkDrawIndirectCommand Args{};
   Args.vertexCount = 3;
   Args.instanceCount = 1;
@@ -531,9 +529,8 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndirectDraw) {
   VkPipeline Pipe = createPipeline(Vertex, Fragment);
 
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  VkBuffer Indirect =
-      createBuffer(sizeof(VkDrawIndirectCommand), Memory,
-                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkBuffer Indirect = createBuffer(sizeof(VkDrawIndirectCommand), Memory,
+                                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
 
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
   vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
@@ -639,9 +636,9 @@ TEST_F(DrawTest, RendersThroughDynamicRendering) {
 /// device creation; anything it does not implement is still refused.
 TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   uint32_t Count = 0;
-  ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
-                                                 nullptr),
-            VK_SUCCESS);
+  ASSERT_EQ(
+      vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
+      VK_SUCCESS);
   ASSERT_EQ(Count, 1u);
   VkExtensionProperties Properties{};
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
@@ -651,8 +648,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
                VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
-  Features.sType =
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+  Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
   VkPhysicalDeviceFeatures2 Features2{};
   Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features2.pNext = &Features;

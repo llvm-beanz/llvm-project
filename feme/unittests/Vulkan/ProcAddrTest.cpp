@@ -51,8 +51,7 @@ TEST(ProcAddr, UnimplementedCommandNeverResolves) {
   // silently ignoring it); the generated table still carries an entry for
   // it (mapped to null), matching "Loader Integration"'s requirement that
   // the table cover every known command name.
-  EXPECT_EQ(getInstanceProcAddr(dummyInstance(), "vkCmdSetDepthBias"),
-            nullptr);
+  EXPECT_EQ(getInstanceProcAddr(dummyInstance(), "vkCmdSetDepthBias"), nullptr);
   EXPECT_EQ(getDeviceProcAddr("vkCmdSetDepthBias"), nullptr);
 }
 

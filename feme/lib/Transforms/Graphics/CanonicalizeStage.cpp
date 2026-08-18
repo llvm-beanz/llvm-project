@@ -395,7 +395,7 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
 /// `InstanceIndex`, and Vulkan only ever produces the latter pair.
 SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
   switch (BuiltIn) {
-  case 0: // Position
+  case 0:  // Position
   case 15: // FragCoord
     return SignatureSystemValue::Position;
   case 3: // ClipDistance

@@ -73,8 +73,8 @@ protected:
 
   static std::array<uint8_t, 4> texel(VkImage Img, uint32_t X, uint32_t Y,
                                       uint32_t Sample = 0) {
-    const void *Ptr = fromHandle<Image>(Img)->texelPointer(0, 0, X, Y, 0,
-                                                           Sample);
+    const void *Ptr =
+        fromHandle<Image>(Img)->texelPointer(0, 0, X, Y, 0, Sample);
     std::array<uint8_t, 4> Result{};
     std::memcpy(Result.data(), Ptr, 4);
     return Result;
@@ -165,8 +165,8 @@ TEST_F(ImageOpsTest, RejectsFormatConvertingBlit) {
 /// Resolving a 4-sample image averages its samples, the same box filter the
 /// executor's own resolve attachments use.
 TEST_F(ImageOpsTest, ResolvesMultisampleImage) {
-  VkImage Src = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM,
-                            VK_SAMPLE_COUNT_4_BIT);
+  VkImage Src =
+      createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT);
   VkImage Dst = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM);
   for (uint32_t Y = 0; Y != 2; ++Y)
     for (uint32_t X = 0; X != 2; ++X)

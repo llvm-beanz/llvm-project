@@ -222,7 +222,9 @@ feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties(
     VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
     VkQueueFamilyProperties *pQueueFamilyProperties) {
   const VkQueueFamilyProperties &Family =
-      fromHandle<PhysicalDevice>(physicalDevice)->getInfo().UniversalQueueFamily;
+      fromHandle<PhysicalDevice>(physicalDevice)
+          ->getInfo()
+          .UniversalQueueFamily;
   enumerate<VkQueueFamilyProperties>(1, &Family, pQueueFamilyPropertyCount,
                                      pQueueFamilyProperties);
 }
@@ -232,7 +234,9 @@ feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties2(
     VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
     VkQueueFamilyProperties2 *pQueueFamilyProperties) {
   const VkQueueFamilyProperties &Family =
-      fromHandle<PhysicalDevice>(physicalDevice)->getInfo().UniversalQueueFamily;
+      fromHandle<PhysicalDevice>(physicalDevice)
+          ->getInfo()
+          .UniversalQueueFamily;
   if (!pQueueFamilyProperties) {
     *pQueueFamilyPropertyCount = 1;
     return;
@@ -307,7 +311,8 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateDevice(
   // silently accepted and then not honored.
   for (uint32_t I = 0; I != pCreateInfo->enabledExtensionCount; ++I) {
     bool Supported = false;
-    for (const VkExtensionProperties &Extension : getSupportedDeviceExtensions())
+    for (const VkExtensionProperties &Extension :
+         getSupportedDeviceExtensions())
       Supported |= std::strcmp(Extension.extensionName,
                                pCreateInfo->ppEnabledExtensionNames[I]) == 0;
     if (!Supported)

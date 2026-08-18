@@ -223,10 +223,12 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     if (SrcLevel >= Src->mipLevels() || DstLevel >= Dst->mipLevels())
       return createStringError(inconvertibleErrorCode(),
                                "a blit region names a mip level out of range");
-    uint32_t SrcWidth = uint32_t(Region.srcOffsets[1].x - Region.srcOffsets[0].x);
+    uint32_t SrcWidth =
+        uint32_t(Region.srcOffsets[1].x - Region.srcOffsets[0].x);
     uint32_t SrcHeight =
         uint32_t(Region.srcOffsets[1].y - Region.srcOffsets[0].y);
-    uint32_t DstWidth = uint32_t(Region.dstOffsets[1].x - Region.dstOffsets[0].x);
+    uint32_t DstWidth =
+        uint32_t(Region.dstOffsets[1].x - Region.dstOffsets[0].x);
     uint32_t DstHeight =
         uint32_t(Region.dstOffsets[1].y - Region.dstOffsets[0].y);
     uint32_t LayerCount = std::min(Region.srcSubresource.layerCount,
@@ -249,10 +251,10 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
           auto srcTexel = [&](int64_t SX, int64_t SY) {
             SX = std::clamp<int64_t>(SX, 0, int64_t(SrcWidth) - 1);
             SY = std::clamp<int64_t>(SY, 0, int64_t(SrcHeight) - 1);
-            return Src->texelPointer(
-                SrcLevel, SrcLayer, uint32_t(Region.srcOffsets[0].x + SX),
-                uint32_t(Region.srcOffsets[0].y + SY),
-                uint32_t(Region.srcOffsets[0].z));
+            return Src->texelPointer(SrcLevel, SrcLayer,
+                                     uint32_t(Region.srcOffsets[0].x + SX),
+                                     uint32_t(Region.srcOffsets[0].y + SY),
+                                     uint32_t(Region.srcOffsets[0].z));
           };
 
           if (Filter == VK_FILTER_NEAREST) {
@@ -273,10 +275,10 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
             std::array<double, 4> Sample{};
             if (Error E = feme::graphics::unpackColor(
                     Src->format(),
-                    ArrayRef<uint8_t>(static_cast<const uint8_t *>(srcTexel(
-                                          Neighbors[N].first,
-                                          Neighbors[N].second)),
-                                      TexelSize),
+                    ArrayRef<uint8_t>(
+                        static_cast<const uint8_t *>(
+                            srcTexel(Neighbors[N].first, Neighbors[N].second)),
+                        TexelSize),
                     Sample))
               return E;
             for (unsigned C = 0; C != 4; ++C)
