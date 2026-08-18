@@ -508,6 +508,48 @@ The second is likely cheaper and lower-risk because FeMe's CPU pipeline already
 does not require structured input, but it is a genuine architectural decision
 and should be settled with a prototype before V1 work is scheduled.
 
+**Status (V0.5): decided in favor of the second option**, and implemented as
+`SPIRVImporter`'s default behavior rather than a fallback path. The prototype
+found a second, independent reason beyond the deserialization failure this
+section originally documented: even on the shaders where MLIR's structurizer
+*does* successfully rebuild a `spirv.mlir.loop`, that op's own conversion to
+the `llvm` dialect (`LoopPattern` in
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) asserts
+("incorrect # of replacement values") on a loop-carried value -- which every
+loop with an induction variable has, not only ones with an early `break`.
+That crash happens in a later, independent pass, so no deserialize-time retry
+can route around it; only skipping structured reconstruction entirely does.
+`ImportOptions::SPIRVEnableControlFlowStructurization` therefore now defaults
+to `false`: every SPIR-V import deserializes straight to plain block
+arguments and branches, which convert to the `llvm` dialect and then LLVM IR
+unconditionally, and `feme::cpu::PreparePass`'s existing restructurer (see
+FeMeCPUDesign.md) recovers structure for the CPU target the same way it
+already does for DXIL's naturally unstructured CFGs. Opting back into
+structured deserialization remains possible (see
+`ImportOptions::SPIRVFallBackToUnstructuredControlFlow`'s retry-on-failure
+behavior) for a caller that wants the structured form for some other reason,
+but no in-tree caller does.
+
+Validated against a real `dxc -spirv` corpus rather than only hand-written
+fixtures: `feme/test/Tools/feme-run/SPIRV/diamond.hlsl` JIT-dispatches an
+`if`/`else` merge end to end, and `.../loop-merge-phi.hlsl` imports and
+translates the exact loop-with-value-producing-`break` shape that motivated
+this milestone all the way to raised LLVM IR (a full JIT dispatch of that
+specific shape is separately blocked on `feme::cpu::LinearizePass`'s loop
+linearizer, which only supports a narrow set of restructured loop shapes
+today -- a pre-existing, format-independent limitation reproduced with
+hand-written LLVM IR carrying the identical CFG, not a SPIR-V import gap).
+`feme-spirv-import-fuzzer`'s seed corpus gained a matching unstructured,
+multi-block seed (`loop-merge-phi.spv`) so the fuzzer mutates from a shape
+representative of real shaders instead of only single-block ones. glslang
+was not available in the environment this milestone was validated in, so
+the corpus is DXC- and (pre-existing) `llc`/SPIRV-backend-sourced only;
+growing it with a glslang-compiled (GLSL-sourced) shader remains open. The
+`OpCopyObject` failure mode this section previously documented was not
+reproduced with the DXC shaders this pass tried (a resource-taking helper
+function and a local struct copy both round-tripped cleanly); it is left
+here as un-confirmed-fixed rather than closed outright.
+
 ### Builtin and execution-shape mapping
 
 The compute builtins the driver must map onto the CPU entry ABI, and their
@@ -1235,6 +1277,27 @@ blocker. It is scheduled before V1 and its outcome may change V1's design.
 - Import the whole corpus without failure and round-trip it through the CPU
   pipeline's front half.
 - Extend the SPIR-V importer fuzzer to the new path.
+
+Status: decided in favor of the unstructured-CFG path and implemented as
+`SPIRVImporter`'s unconditional default (see "SPIR-V import prerequisites"
+above for the full writeup, including the downstream `spirv.mlir.loop` ->
+`llvm` dialect conversion crash the prototype found and that the decision
+avoids entirely, not only the originally-documented deserialization
+rejection). Corpus: DXC-compiled (`feme/test/Tools/feme-run/SPIRV/{diamond,
+loop-merge-phi}.hlsl`, gated on a new `system-dxc` lit feature so builds
+without `dxc` installed skip cleanly) plus the pre-existing `llc`/SPIRV-
+backend-sourced fixtures (`feme/test/Import/SPIRV/spirv-import-unstructured-
+{default,fallback}.ll`); glslang was unavailable, so a GLSL-sourced entry is
+still missing. "Round-trip it through the CPU pipeline's front half" is done
+for both DXC entries -- `diamond.hlsl` JIT-dispatches end to end,
+`loop-merge-phi.hlsl` imports/translates to raised LLVM IR (its own full
+dispatch is blocked on `feme::cpu::LinearizePass`'s separate, pre-existing
+loop-shape limitation, not on import). The fuzzer's seed corpus
+(`feme/tools/feme-spirv-import-fuzzer/seed-corpus`) gained
+`loop-merge-phi.spv`, an unstructured multi-block seed with a
+merge-block-phi shape, alongside the pre-existing single-block seeds.
+`OpCopyObject` was not reproduced with the DXC shaders this pass tried, so
+it stays open rather than confirmed closed.
 
 ### V1: Empty compute dispatch
 

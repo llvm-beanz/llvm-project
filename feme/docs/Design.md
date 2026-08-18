@@ -2532,6 +2532,25 @@ end-to-end test coverage that should grow alongside it, see
 2. **SPIR-V import**: wrap MLIR's existing `spirv` deserializer behind
    FeMe's `Importer` interface; round-trip test (SPIR-V in → `spirv` dialect
    text out); add a fuzzing harness for the SPIR-V importer.
+
+   Status: this step's own scope (deserializer wrapper, round-trip test,
+   fuzzer) is done, but roadmap milestone V0.5 (see Roadmap.md's §3.3) found
+   that wrapping the deserializer was not enough for the importer to
+   "survive real shaders" -- its structured-reconstruction mode rejects an
+   `OpPhi` in a loop merge block outright (any loop with a value-producing
+   `break`) and, even when structurization *does* succeed, the resulting
+   `spirv.mlir.loop`'s own conversion to the `llvm` dialect crashes on a
+   loop-carried value (upstream MLIR bug, not a FeMe one). `SPIRVImporter`
+   therefore never attempts structured reconstruction by default any more
+   (`ImportOptions::SPIRVEnableControlFlowStructurization` now defaults to
+   `false`; see that flag's own comment and "SPIR-V import prerequisites" in
+   FeMeVulkanDesign.md): it deserializes straight to the unstructured form --
+   plain block arguments and branches -- which converts to LLVM IR
+   unconditionally, then leans on `feme::cpu::PreparePass`'s existing
+   restructurer (already required for DXIL's naturally unstructured CFGs) to
+   recover structure for the CPU target. Validated against a real
+   `dxc -spirv`-compiled corpus (`feme/test/Tools/feme-run/SPIRV`), not only
+   hand-written fixtures.
 3. **SPIR-V retargeting**: `spirv` dialect → `SPIRVToLLVM` → `llvm::Module`
    → `TargetMachine`, implemented as the `feme::Translator`
    (`SPIRVToLLVMTranslator`) and `feme::Backend`
