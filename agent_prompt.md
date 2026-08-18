@@ -23,23 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement V2 from the roadmap document?
+Can you implement V3 from the roadmap document?
 
-> Storage buffers and descriptors, descriptor pools/sets/updates and dynamic
-> offsets, buffer copies and barriers, lavapipe differential
-
-The previous agent left the notes:
-
-> - Descriptor sets/pools/updates, dynamic offsets, buffer copies, and barriers --
->   exactly what V2's own bullet list already says.
-> - General `VkSpecializationInfo` application beyond group-size-relevant
->   constants (see above).
-> - Parallelizing independent workgroups within one dispatch across a worker pool
->   (currently sequential; see the `JITEngine` bypass note above) -- a performance
->   follow-up, not a correctness gap.
-> - `feme::spirv`/MLIR's own `BuiltIn WorkgroupSize`-on-spec-constant- composite
->   deserialization gap is unfixed upstream; it only affects group- size
->   resolution today because this milestone routes around it entirely, but any
->   future consumer that needs the same information through MLIR's structured API
->   (e.g. a hypothetical SPIR-V `dxc`/`spirv-opt` combining pass) will hit the
->   same wall.
+> Push constants onto FeMe root constants, uniform buffers, binary and timeline
+> semaphores, secondary command buffers, events, query pools
