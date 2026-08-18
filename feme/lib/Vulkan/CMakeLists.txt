@@ -13,18 +13,15 @@ set(feme_vulkan_entrypoints_inc
 set(feme_vulkan_implemented
   ${CMAKE_CURRENT_SOURCE_DIR}/ImplementedEntrypoints.txt)
 
-# Vulkan-Headers installs vk.xml at `<prefix>/share/vulkan/registry/vk.xml`,
-# a sibling of the `<prefix>/include` directory `Vulkan::Headers` exposes;
-# `FEME_VULKAN_XML` lets a build whose Vulkan-Headers doesn't follow that
-# layout (e.g. a bare source checkout) point at it directly.
+# A Vulkan SDK installs vk.xml at `<prefix>/share/vulkan/registry/vk.xml`, a
+# sibling of the `<prefix>/include` directory `find_package(Vulkan)` records
+# as `Vulkan_INCLUDE_DIR`; `FEME_VULKAN_XML` lets a build whose Vulkan SDK
+# doesn't follow that layout point at it directly.
 if(NOT FEME_VULKAN_XML)
-  get_target_property(feme_vulkan_headers_include_dir Vulkan::Headers
-    INTERFACE_INCLUDE_DIRECTORIES)
-  get_filename_component(feme_vulkan_headers_prefix
-    ${feme_vulkan_headers_include_dir} DIRECTORY)
+  get_filename_component(feme_vulkan_prefix ${Vulkan_INCLUDE_DIR} DIRECTORY)
   set(FEME_VULKAN_XML
-    ${feme_vulkan_headers_prefix}/share/vulkan/registry/vk.xml
-    CACHE FILEPATH "Path to Vulkan-Headers' vk.xml")
+    ${feme_vulkan_prefix}/share/vulkan/registry/vk.xml
+    CACHE FILEPATH "Path to the Vulkan SDK's vk.xml")
 endif()
 if(NOT EXISTS ${FEME_VULKAN_XML})
   message(FATAL_ERROR
