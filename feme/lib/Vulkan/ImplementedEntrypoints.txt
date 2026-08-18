@@ -78,6 +78,17 @@ vkCmdDispatch
 vkCmdDispatchBase
 vkCmdDispatchIndirect
 
+# V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
+# Model").
+vkCreateDescriptorSetLayout
+vkDestroyDescriptorSetLayout
+vkCreateDescriptorPool
+vkDestroyDescriptorPool
+vkResetDescriptorPool
+vkAllocateDescriptorSets
+vkFreeDescriptorSets
+vkUpdateDescriptorSets
+
 # V1: fences and queue submission (see "Queues, Scheduling, and
 # Synchronization").
 vkCreateFence

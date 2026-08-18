@@ -78,6 +78,7 @@ add_custom_target(FeMeVulkanEntrypointsGen DEPENDS ${feme_vulkan_entrypoints_inc
 add_feme_library(FeMeVulkanCore STATIC
   Buffer.cpp
   CommandBuffer.cpp
+  Descriptor.cpp
   EntryPoints.cpp
   GroupSize.cpp
   Memory.cpp
