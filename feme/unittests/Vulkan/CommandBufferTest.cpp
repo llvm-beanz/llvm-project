@@ -437,8 +437,7 @@ protected:
     DSAllocInfo.descriptorPool = DescPool;
     DSAllocInfo.descriptorSetCount = 1;
     DSAllocInfo.pSetLayouts = &SetLayout;
-    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set),
-              VK_SUCCESS);
+    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
 
     VkCommandPoolCreateInfo CmdPoolInfo{};
     CmdPoolInfo.queueFamilyIndex = 0;

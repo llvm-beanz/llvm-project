@@ -234,16 +234,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
 // Model").
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
     VkDevice device, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator,
-    VkDescriptorSetLayout *pSetLayout);
-VKAPI_ATTR void VKAPI_CALL
-vkDestroyDescriptorSetLayout(VkDevice device,
-                             VkDescriptorSetLayout descriptorSetLayout,
-                             const VkAllocationCallbacks *pAllocator);
+    const VkAllocationCallbacks *pAllocator, VkDescriptorSetLayout *pSetLayout);
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorSetLayout(
+    VkDevice device, VkDescriptorSetLayout descriptorSetLayout,
+    const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorPool(
     VkDevice device, const VkDescriptorPoolCreateInfo *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator,
-    VkDescriptorPool *pDescriptorPool);
+    const VkAllocationCallbacks *pAllocator, VkDescriptorPool *pDescriptorPool);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool descriptorPool,
                         const VkAllocationCallbacks *pAllocator);

@@ -110,8 +110,7 @@ public:
     Cmd.Pipeline = Pipeline;
     Commands.push_back(Cmd);
   }
-  void bindDescriptorSets(uint32_t FirstSet,
-                          std::vector<DescriptorSet *> Sets,
+  void bindDescriptorSets(uint32_t FirstSet, std::vector<DescriptorSet *> Sets,
                           std::vector<uint32_t> DynamicOffsets) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BindDescriptorSets;

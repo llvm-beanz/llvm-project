@@ -107,7 +107,7 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
         Dst.SizeInBytes = Range;
         Dst.Kind = static_cast<uint32_t>(feme::cpu::ResourceKind::Raw);
         Dst.Flags = feme::cpu::FEME_DESCRIPTOR_UAV; // Storage buffers are
-                                                     // always read-write.
+                                                    // always read-write.
       }
       Result.Storage.push_back(std::move(Descriptors));
       Result.Bindings.push_back(feme::cpu::BoundResourceBinding{
@@ -164,8 +164,8 @@ Error runCopyBuffer(Buffer *Src, Buffer *Dst,
       return createStringError(inconvertibleErrorCode(),
                                "buffer copy region is out of range");
     std::memcpy(static_cast<uint8_t *>(Dst->data()) + Region.dstOffset,
-               static_cast<const uint8_t *>(Src->data()) + Region.srcOffset,
-               Region.size);
+                static_cast<const uint8_t *>(Src->data()) + Region.srcOffset,
+                Region.size);
   }
   return Error::success();
 }
@@ -177,7 +177,8 @@ Error runFillBuffer(Buffer *Dst, VkDeviceSize Offset, VkDeviceSize Size,
   if (!Dst || !Dst->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "fill buffer destination is not bound");
-  VkDeviceSize ResolvedSize = Size == VK_WHOLE_SIZE ? Dst->size() - Offset : Size;
+  VkDeviceSize ResolvedSize =
+      Size == VK_WHOLE_SIZE ? Dst->size() - Offset : Size;
   if (Offset + ResolvedSize > Dst->size())
     return createStringError(inconvertibleErrorCode(),
                              "fill buffer region is out of range");
@@ -190,7 +191,7 @@ Error runFillBuffer(Buffer *Dst, VkDeviceSize Offset, VkDeviceSize Size,
 /// `vkCmdUpdateBuffer`: copies the recorded payload into \p Dst at
 /// \p Offset.
 Error runUpdateBuffer(Buffer *Dst, VkDeviceSize Offset,
-                     llvm::ArrayRef<uint8_t> Data) {
+                      llvm::ArrayRef<uint8_t> Data) {
   if (!Dst || !Dst->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "update buffer destination is not bound");
@@ -198,7 +199,7 @@ Error runUpdateBuffer(Buffer *Dst, VkDeviceSize Offset,
     return createStringError(inconvertibleErrorCode(),
                              "update buffer region is out of range");
   std::memcpy(static_cast<uint8_t *>(Dst->data()) + Offset, Data.data(),
-             Data.size());
+              Data.size());
   return Error::success();
 }
 
@@ -223,7 +224,7 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
         std::vector<uint32_t> Offsets;
         if (OffsetCursor + Consumed <= Cmd.DynamicOffsets.size())
           Offsets.assign(Cmd.DynamicOffsets.begin() + OffsetCursor,
-                        Cmd.DynamicOffsets.begin() + OffsetCursor + Consumed);
+                         Cmd.DynamicOffsets.begin() + OffsetCursor + Consumed);
         OffsetCursor += Consumed;
         BoundSets[Cmd.FirstSet + I] = BoundSetState{Set, std::move(Offsets)};
       }
@@ -265,7 +266,8 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
       break;
     }
     case RecordedCommand::Kind::CopyBuffer:
-      if (Error E = runCopyBuffer(Cmd.SrcBuffer, Cmd.DstBuffer, Cmd.CopyRegions))
+      if (Error E =
+              runCopyBuffer(Cmd.SrcBuffer, Cmd.DstBuffer, Cmd.CopyRegions))
         return E;
       break;
     case RecordedCommand::Kind::FillBuffer:
@@ -422,7 +424,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyBuffer(VkCommandBuffer commandBuffer,
   std::vector<VkBufferCopy> Regions(pRegions, pRegions + regionCount);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->copyBuffer(fromHandle<vulkan::Buffer>(srcBuffer),
-                  fromHandle<vulkan::Buffer>(dstBuffer), std::move(Regions));
+                   fromHandle<vulkan::Buffer>(dstBuffer), std::move(Regions));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdFillBuffer(VkCommandBuffer commandBuffer,
@@ -435,7 +437,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdFillBuffer(VkCommandBuffer commandBuffer,
     return;
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->fillBuffer(fromHandle<vulkan::Buffer>(dstBuffer), dstOffset, size,
-                  data);
+                   data);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdUpdateBuffer(VkCommandBuffer commandBuffer,
@@ -451,7 +453,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdUpdateBuffer(VkCommandBuffer commandBuffer,
   const auto *Bytes = static_cast<const uint8_t *>(pData);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->updateBuffer(fromHandle<vulkan::Buffer>(dstBuffer), dstOffset,
-                    std::vector<uint8_t>(Bytes, Bytes + dataSize));
+                     std::vector<uint8_t>(Bytes, Bytes + dataSize));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(

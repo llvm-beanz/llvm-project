@@ -58,9 +58,8 @@ DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout)
     Bindings[B.Binding].resize(B.Count);
 }
 
-void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
-                          Buffer *Buf, VkDeviceSize Offset,
-                          VkDeviceSize Range) {
+void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement, Buffer *Buf,
+                          VkDeviceSize Offset, VkDeviceSize Range) {
   auto It = Bindings.find(Binding);
   if (It == Bindings.end() || ArrayElement >= It->second.size())
     return;
@@ -124,18 +123,19 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkDestroyDescriptorSetLayout(VkDevice, VkDescriptorSetLayout descriptorSetLayout,
-                             const VkAllocationCallbacks *pAllocator) {
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorSetLayout(
+    VkDevice, VkDescriptorSetLayout descriptorSetLayout,
+    const VkAllocationCallbacks *pAllocator) {
   if (!descriptorSetLayout)
     return;
   Allocator Alloc(pAllocator);
   Alloc.destroy(fromHandle<DescriptorSetLayout>(descriptorSetLayout));
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorPool(
-    VkDevice, const VkDescriptorPoolCreateInfo *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator, VkDescriptorPool *pDescriptorPool) {
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateDescriptorPool(VkDevice, const VkDescriptorPoolCreateInfo *pCreateInfo,
+                       const VkAllocationCallbacks *pAllocator,
+                       VkDescriptorPool *pDescriptorPool) {
   for (uint32_t I = 0; I != pCreateInfo->poolSizeCount; ++I)
     if (!isSupportedDescriptorType(pCreateInfo->pPoolSizes[I].type))
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -158,16 +158,15 @@ vkDestroyDescriptorPool(VkDevice, VkDescriptorPool descriptorPool,
   Alloc.destroy(fromHandle<DescriptorPool>(descriptorPool));
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkResetDescriptorPool(VkDevice, VkDescriptorPool descriptorPool,
-                      VkDescriptorPoolResetFlags) {
+VKAPI_ATTR VkResult VKAPI_CALL vkResetDescriptorPool(
+    VkDevice, VkDescriptorPool descriptorPool, VkDescriptorPoolResetFlags) {
   fromHandle<DescriptorPool>(descriptorPool)->reset();
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkAllocateDescriptorSets(VkDevice, const VkDescriptorSetAllocateInfo *pAllocateInfo,
-                         VkDescriptorSet *pDescriptorSets) {
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateDescriptorSets(
+    VkDevice, const VkDescriptorSetAllocateInfo *pAllocateInfo,
+    VkDescriptorSet *pDescriptorSets) {
   auto *Pool = fromHandle<DescriptorPool>(pAllocateInfo->descriptorPool);
   for (uint32_t I = 0; I != pAllocateInfo->descriptorSetCount; ++I) {
     auto *Layout =
@@ -201,8 +200,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFreeDescriptorSets(
 
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     VkDevice, uint32_t descriptorWriteCount,
-    const VkWriteDescriptorSet *pDescriptorWrites,
-    uint32_t descriptorCopyCount, const VkCopyDescriptorSet *pDescriptorCopies) {
+    const VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount,
+    const VkCopyDescriptorSet *pDescriptorCopies) {
   for (uint32_t I = 0; I != descriptorWriteCount; ++I) {
     const VkWriteDescriptorSet &Write = pDescriptorWrites[I];
     if (!isSupportedDescriptorType(Write.descriptorType))
@@ -211,7 +210,7 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
       const VkDescriptorBufferInfo &Info = Write.pBufferInfo[J];
       Set->write(Write.dstBinding, Write.dstArrayElement + J,
-                fromHandle<Buffer>(Info.buffer), Info.offset, Info.range);
+                 fromHandle<Buffer>(Info.buffer), Info.offset, Info.range);
     }
   }
 
@@ -227,7 +226,7 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
         break;
       const DescriptorBufferBinding &B = SrcArray[SrcElement];
       Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.Buf, B.Offset,
-                B.Range);
+                 B.Range);
     }
   }
 }

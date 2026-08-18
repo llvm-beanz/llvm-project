@@ -71,8 +71,7 @@ std::vector<uint32_t> readSPIRVFile(const char *Path) {
 
 int main(int argc, char **argv) {
   if (argc != 3) {
-    std::fprintf(stderr,
-                 "usage: %s <shader.spv> <element-count>\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <shader.spv> <element-count>\n", argv[0]);
     return 1;
   }
   std::vector<uint32_t> SPIRVWords = readSPIRVFile(argv[1]);
@@ -132,7 +131,8 @@ int main(int argc, char **argv) {
   DeviceInfo.pQueueCreateInfos = &QueueInfo;
 
   VkDevice Device;
-  if (VkResult R = vkCreateDevice(PhysicalDevice, &DeviceInfo, nullptr, &Device))
+  if (VkResult R =
+          vkCreateDevice(PhysicalDevice, &DeviceInfo, nullptr, &Device))
     fail("vkCreateDevice", R);
 
   VkQueue Queue;
@@ -161,7 +161,8 @@ int main(int argc, char **argv) {
   LayoutInfo.setLayoutCount = 1;
   LayoutInfo.pSetLayouts = &SetLayout;
   VkPipelineLayout Layout;
-  if (VkResult R = vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout))
+  if (VkResult R =
+          vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout))
     fail("vkCreatePipelineLayout", R);
 
   VkShaderModuleCreateInfo ShaderInfo{};
@@ -174,7 +175,8 @@ int main(int argc, char **argv) {
 
   VkComputePipelineCreateInfo PipelineInfo{};
   PipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-  PipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  PipelineInfo.stage.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
   PipelineInfo.stage.module = Module;
   PipelineInfo.stage.pName = "main";
@@ -226,7 +228,8 @@ int main(int argc, char **argv) {
   PoolInfo.poolSizeCount = 1;
   PoolInfo.pPoolSizes = &PoolSize;
   VkDescriptorPool DescPool;
-  if (VkResult R = vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool))
+  if (VkResult R =
+          vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool))
     fail("vkCreateDescriptorPool", R);
 
   VkDescriptorSetAllocateInfo DSAllocInfo{};
@@ -277,7 +280,7 @@ int main(int argc, char **argv) {
     fail("vkBeginCommandBuffer", R);
   vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
   vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
-                         &Set, 0, nullptr);
+                          &Set, 0, nullptr);
   vkCmdDispatch(CmdBuf, ElementCount, 1, 1);
   if (VkResult R = vkEndCommandBuffer(CmdBuf))
     fail("vkEndCommandBuffer", R);

@@ -178,7 +178,7 @@ TEST_F(DescriptorTest, PoolExhaustionFailsAllocation) {
   AllocInfo.descriptorSetCount = 2;
   AllocInfo.pSetLayouts = Layouts;
   VkDescriptorSet Sets[2] = {reinterpret_cast<VkDescriptorSet>(1),
-                            reinterpret_cast<VkDescriptorSet>(1)};
+                             reinterpret_cast<VkDescriptorSet>(1)};
   EXPECT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, Sets),
             VK_ERROR_OUT_OF_POOL_MEMORY);
   EXPECT_EQ(Sets[0], VK_NULL_HANDLE);

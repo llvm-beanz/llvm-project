@@ -70,7 +70,8 @@ struct DescriptorSetLayoutBinding {
 /// contiguous heap ranges per binding array).
 class DescriptorSetLayout {
 public:
-  explicit DescriptorSetLayout(std::vector<DescriptorSetLayoutBinding> Bindings);
+  explicit DescriptorSetLayout(
+      std::vector<DescriptorSetLayoutBinding> Bindings);
 
   llvm::ArrayRef<DescriptorSetLayoutBinding> bindings() const {
     return Bindings;
