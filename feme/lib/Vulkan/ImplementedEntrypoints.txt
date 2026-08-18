@@ -145,6 +145,22 @@ vkCmdEndQuery
 vkCmdWriteTimestamp
 vkCmdCopyQueryPoolResults
 
+# V6: render pass instances, vertex/index buffer binding, the dynamic-state
+# subset, and draws (see "Draw commands and vertex data").
+vkCmdBeginRenderPass
+vkCmdNextSubpass
+vkCmdEndRenderPass
+vkCmdBindVertexBuffers
+vkCmdBindIndexBuffer
+vkCmdSetViewport
+vkCmdSetScissor
+vkCmdSetBlendConstants
+vkCmdSetStencilReference
+vkCmdSetStencilCompareMask
+vkCmdSetStencilWriteMask
+vkCmdDraw
+vkCmdDrawIndexed
+
 # V3: secondary command buffers (see "Command Buffers").
 vkCmdExecuteCommands
 

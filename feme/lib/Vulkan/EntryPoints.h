@@ -389,6 +389,53 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
     uint32_t queryCount, VkBuffer dstBuffer, VkDeviceSize dstOffset,
     VkDeviceSize stride, VkQueryResultFlags flags);
 
+// V6: render pass instances, vertex/index buffer binding, the dynamic-state
+// subset, and draws (see "Draw commands and vertex data").
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
+                     const VkRenderPassBeginInfo *pRenderPassBegin,
+                     VkSubpassContents contents);
+VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass(VkCommandBuffer commandBuffer,
+                                            VkSubpassContents contents);
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(VkCommandBuffer commandBuffer);
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding,
+    uint32_t bindingCount, const VkBuffer *pBuffers,
+    const VkDeviceSize *pOffsets);
+VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,
+                                                VkBuffer buffer,
+                                                VkDeviceSize offset,
+                                                VkIndexType indexType);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer,
+                                            uint32_t firstViewport,
+                                            uint32_t viewportCount,
+                                            const VkViewport *pViewports);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
+                                           uint32_t firstScissor,
+                                           uint32_t scissorCount,
+                                           const VkRect2D *pScissors);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetBlendConstants(VkCommandBuffer commandBuffer,
+                       const float blendConstants[4]);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilReference(VkCommandBuffer commandBuffer,
+                         VkStencilFaceFlags faceMask, uint32_t reference);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilCompareMask(VkCommandBuffer commandBuffer,
+                           VkStencilFaceFlags faceMask, uint32_t compareMask);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
+                         VkStencilFaceFlags faceMask, uint32_t writeMask);
+VKAPI_ATTR void VKAPI_CALL vkCmdDraw(VkCommandBuffer commandBuffer,
+                                     uint32_t vertexCount,
+                                     uint32_t instanceCount,
+                                     uint32_t firstVertex,
+                                     uint32_t firstInstance);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
+                 uint32_t instanceCount, uint32_t firstIndex,
+                 int32_t vertexOffset, uint32_t firstInstance);
+
 // V3: secondary command buffers (see "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL
 vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount,

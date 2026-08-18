@@ -10,19 +10,26 @@
 #include "Buffer.h"
 #include "Descriptor.h"
 #include "Format.h"
+#include "GraphicsPipeline.h"
 #include "Icd.h"
 #include "Image.h"
 #include "Objects.h"
 #include "Pipeline.h"
 #include "QueryPool.h"
+#include "RenderPass.h"
 #include "Sync.h"
 
+#include "feme/Graphics/Executor.h"
+#include "feme/Graphics/ImageFixture.h"
+#include "feme/Graphics/Pipeline.h"
+#include "feme/Graphics/PreparedDraw.h"
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 
 using namespace feme::vulkan;
 using namespace llvm;
@@ -548,6 +555,384 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
   return Error::success();
 }
 
+//===----------------------------------------------------------------------===//
+// Graphics: render-target binding and draws (V6)
+//===----------------------------------------------------------------------===//
+
+/// The command buffer's graphics execution state: what `vkCmdBeginRenderPass`/
+/// `vkCmdBeginRendering` bound, what `vkCmdBindVertexBuffers`/
+/// `vkCmdBindIndexBuffer` bound, and every piece of dynamic state a
+/// `vkCmdSet*` recorded. A draw snapshots all of it (see "Dynamic state is
+/// what makes the prepared draw a snapshot rather than a pipeline pointer"
+/// in feme/docs/FeMeVulkanDesign.md).
+struct GraphicsState {
+  const RenderPass *Pass = nullptr;
+  const Framebuffer *Fb = nullptr;
+  uint32_t Subpass = 0;
+  VkRect2D RenderArea{};
+  std::vector<VkClearValue> ClearValues;
+  bool Rendering = false;
+  RenderTargetBinding Binding;
+
+  std::vector<Buffer *> VertexBuffers;
+  std::vector<VkDeviceSize> VertexBufferOffsets;
+  Buffer *IndexBuffer = nullptr;
+  VkDeviceSize IndexBufferOffset = 0;
+  VkIndexType IndexType = VK_INDEX_TYPE_UINT32;
+
+  DynamicGraphicsState Dynamic;
+};
+
+/// One attachment's linear host storage, as the executor addresses it: the
+/// mip level's own tightly packed `width * height * samples` texels (see
+/// `Image`'s packed subresource layout, which is exactly the layout
+/// `feme::graphics::AttachmentView` assumes).
+Expected<feme::graphics::AttachmentView>
+resolveAttachmentView(ImageView *View) {
+  if (!View || !View->image() || !View->image()->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "a render target attachment is not bound to "
+                             "memory");
+  Image &Img = *View->image();
+  const VkImageSubresourceRange &Range = View->range();
+  if (View->dimension() != feme::cpu::ImageDimension::Texture2D ||
+      Range.baseArrayLayer != 0 ||
+      (Range.layerCount != VK_REMAINING_ARRAY_LAYERS && Range.layerCount != 1))
+    return createStringError(inconvertibleErrorCode(),
+                             "only a single-layer 2D image view may be a "
+                             "render target (layered rendering is V7)");
+  if (Range.baseMipLevel >= Img.mipLevels())
+    return createStringError(inconvertibleErrorCode(),
+                             "a render target view's base mip level is out "
+                             "of range");
+
+  uint32_t Level = Range.baseMipLevel;
+  const feme::cpu::FemeImageSubresourceLayout &Layout =
+      Img.mipLayouts()[Level];
+  feme::graphics::AttachmentView Result;
+  Result.Format = View->format();
+  Result.Width = std::max(1u, Img.width() >> Level);
+  Result.Height = std::max(1u, Img.height() >> Level);
+  Result.ArrayLayers = 1;
+  auto *Base = static_cast<uint8_t *>(Img.data()) + Layout.Offset;
+  Result.Data = llvm::MutableArrayRef<uint8_t>(
+      Base, static_cast<size_t>(Layout.SlicePitch));
+  return Result;
+}
+
+/// Builds the normalized render-target binding \p Subpass of \p Pass
+/// resolves to against \p Fb's views -- the single internal shape
+/// `vkCmdBeginRendering` also produces (see RenderPass.h).
+Expected<RenderTargetBinding>
+buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
+                         uint32_t Subpass, VkRect2D RenderArea,
+                         llvm::ArrayRef<VkClearValue> ClearValues) {
+  if (Subpass >= Pass.subpasses().size())
+    return createStringError(inconvertibleErrorCode(),
+                             "subpass %u is out of range of its render pass",
+                             Subpass);
+  const SubpassDescription &Desc = Pass.subpasses()[Subpass];
+  RenderTargetBinding Binding;
+  Binding.RenderArea = RenderArea;
+
+  auto makeView = [&](uint32_t Index) -> RenderTargetView {
+    const AttachmentDescription &Attachment = Pass.attachments()[Index];
+    RenderTargetView View;
+    View.View = Fb.attachments()[Index];
+    View.Format = Attachment.Format;
+    View.SampleCount = Attachment.SampleCount;
+    View.LoadOp = isSupportedStencilAttachmentFormat(Attachment.Format)
+                      ? Attachment.StencilLoadOp
+                      : Attachment.LoadOp;
+    View.StoreOp = isSupportedStencilAttachmentFormat(Attachment.Format)
+                       ? Attachment.StencilStoreOp
+                       : Attachment.StoreOp;
+    if (Index < ClearValues.size())
+      View.ClearValue = ClearValues[Index];
+    return View;
+  };
+
+  for (size_t I = 0; I != Desc.ColorAttachments.size(); ++I) {
+    uint32_t Index = Desc.ColorAttachments[I];
+    if (Index == VK_ATTACHMENT_UNUSED)
+      return createStringError(inconvertibleErrorCode(),
+                               "an unused color attachment slot is not "
+                               "implemented");
+    RenderTargetView View = makeView(Index);
+    if (I < Desc.ResolveAttachments.size() &&
+        Desc.ResolveAttachments[I] != VK_ATTACHMENT_UNUSED)
+      View.ResolveView = Fb.attachments()[Desc.ResolveAttachments[I]];
+    Binding.Colors.push_back(View);
+  }
+  if (Desc.DepthStencilAttachment != VK_ATTACHMENT_UNUSED) {
+    RenderTargetView View = makeView(Desc.DepthStencilAttachment);
+    if (isSupportedStencilAttachmentFormat(View.Format))
+      Binding.Stencil = View;
+    else
+      Binding.Depth = View;
+  }
+  return Binding;
+}
+
+/// Applies one attachment's `VK_ATTACHMENT_LOAD_OP_CLEAR` over \p Area,
+/// which is the render area rather than the whole attachment: Vulkan clears
+/// exactly what the render pass instance covers.
+Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
+                 const VkRect2D &Area) {
+  if (View.LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
+    return Error::success();
+  Expected<feme::graphics::AttachmentView> Attachment =
+      resolveAttachmentView(View.View);
+  if (!Attachment)
+    return Attachment.takeError();
+  Expected<uint32_t> ElemSize =
+      feme::graphics::getFixtureFormatElementSize(Attachment->Format);
+  if (!ElemSize)
+    return ElemSize.takeError();
+
+  std::vector<uint8_t> Texel(*ElemSize);
+  if (isSupportedDepthAttachmentFormat(Attachment->Format)) {
+    if (Error E = feme::graphics::packClearColor(
+            Attachment->Format, {View.ClearValue.depthStencil.depth}, Texel))
+      return E;
+  } else if (isSupportedStencilAttachmentFormat(Attachment->Format)) {
+    Texel[0] = static_cast<uint8_t>(View.ClearValue.depthStencil.stencil);
+  } else {
+    std::array<double, 4> Color{View.ClearValue.color.float32[0],
+                                View.ClearValue.color.float32[1],
+                                View.ClearValue.color.float32[2],
+                                View.ClearValue.color.float32[3]};
+    if (Error E =
+            feme::graphics::packClearColor(Attachment->Format, Color, Texel))
+      return E;
+  }
+
+  uint32_t MinX = std::max<int32_t>(0, Area.offset.x);
+  uint32_t MinY = std::max<int32_t>(0, Area.offset.y);
+  uint32_t MaxX = std::min<uint64_t>(Attachment->Width,
+                                     uint64_t(MinX) + Area.extent.width);
+  uint32_t MaxY = std::min<uint64_t>(Attachment->Height,
+                                     uint64_t(MinY) + Area.extent.height);
+  for (uint32_t Y = MinY; Y < MaxY; ++Y)
+    for (uint32_t X = MinX; X < MaxX; ++X)
+      for (uint32_t S = 0; S != SampleCount; ++S) {
+        size_t Offset =
+            (((size_t)Y * Attachment->Width + X) * SampleCount + S) * *ElemSize;
+        std::memcpy(Attachment->Data.data() + Offset, Texel.data(), *ElemSize);
+      }
+  return Error::success();
+}
+
+/// Applies every attachment's load op when a render pass instance begins.
+Error applyLoadOps(const RenderTargetBinding &Binding) {
+  for (const RenderTargetView &View : Binding.Colors)
+    if (Error E = applyClear(View, View.SampleCount, Binding.RenderArea))
+      return E;
+  if (Binding.Depth)
+    if (Error E = applyClear(*Binding.Depth, Binding.Depth->SampleCount,
+                             Binding.RenderArea))
+      return E;
+  if (Binding.Stencil)
+    if (Error E = applyClear(*Binding.Stencil, Binding.Stencil->SampleCount,
+                             Binding.RenderArea))
+      return E;
+  return Error::success();
+}
+
+/// Runs one draw command: materializes the bound descriptor sets, resolves
+/// the pipeline's static state against the command buffer's dynamic state,
+/// converts the render-target binding and vertex/index bindings into a
+/// `feme::graphics::PreparedDraw`, and hands the pair to the software
+/// graphics executor. The ICD never acquires knowledge of rasterization,
+/// and `FeMeGraphics` never acquires knowledge of `VkRenderPass` (see
+/// "Ownership boundary").
+Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
+              const feme::graphics::DrawCommand &Draw,
+              llvm::ArrayRef<BoundSetState> BoundSets,
+              llvm::ArrayRef<uint8_t> PushConstants) {
+  if (!Gfx.Rendering)
+    return createStringError(inconvertibleErrorCode(),
+                             "a draw must be recorded inside a render pass "
+                             "instance");
+  if (Gfx.Binding.Colors.size() != Pipeline.colorAttachmentCount())
+    return createStringError(inconvertibleErrorCode(),
+                             "the bound pipeline has %u color attachment(s) "
+                             "but the render target has %zu",
+                             Pipeline.colorAttachmentCount(),
+                             Gfx.Binding.Colors.size());
+  if (Pipeline.needsDepthAttachment() && !Gfx.Binding.Depth)
+    return createStringError(inconvertibleErrorCode(),
+                             "the bound pipeline tests/writes depth but the "
+                             "render target has no depth attachment");
+  if (Pipeline.needsStencilAttachment() && !Gfx.Binding.Stencil)
+    return createStringError(inconvertibleErrorCode(),
+                             "the bound pipeline tests stencil but the "
+                             "render target has no stencil attachment");
+
+  std::vector<feme::graphics::AttachmentView> Attachments;
+  std::vector<feme::graphics::AttachmentView> ResolveAttachments;
+  bool AnyResolve = false;
+  for (const RenderTargetView &View : Gfx.Binding.Colors) {
+    Expected<feme::graphics::AttachmentView> Attachment =
+        resolveAttachmentView(View.View);
+    if (!Attachment)
+      return Attachment.takeError();
+    if (View.SampleCount != Pipeline.sampleCount())
+      return createStringError(inconvertibleErrorCode(),
+                               "the render target's sample count disagrees "
+                               "with the bound pipeline's");
+    Attachments.push_back(*Attachment);
+    AnyResolve |= View.ResolveView != nullptr;
+  }
+  if (AnyResolve)
+    for (const RenderTargetView &View : Gfx.Binding.Colors) {
+      if (!View.ResolveView)
+        return createStringError(inconvertibleErrorCode(),
+                                 "either every color attachment resolves or "
+                                 "none does");
+      Expected<feme::graphics::AttachmentView> Attachment =
+          resolveAttachmentView(View.ResolveView);
+      if (!Attachment)
+        return Attachment.takeError();
+      ResolveAttachments.push_back(*Attachment);
+    }
+
+  feme::graphics::DepthStencilAttachment DepthStencil;
+  if (Gfx.Binding.Depth) {
+    Expected<feme::graphics::AttachmentView> Attachment =
+        resolveAttachmentView(Gfx.Binding.Depth->View);
+    if (!Attachment)
+      return Attachment.takeError();
+    DepthStencil.Depth = *Attachment;
+  }
+  if (Gfx.Binding.Stencil) {
+    Expected<feme::graphics::AttachmentView> Attachment =
+        resolveAttachmentView(Gfx.Binding.Stencil->View);
+    if (!Attachment)
+      return Attachment.takeError();
+    DepthStencil.Stencil = *Attachment;
+  }
+
+  // Vertex fetch: one `VertexBufferBinding` per bound buffer the pipeline
+  // declares, carrying the attributes that binding supplies.
+  std::vector<std::vector<feme::graphics::VertexAttribute>> AttributeStorage;
+  std::vector<feme::graphics::VertexBufferBinding> VertexBuffers;
+  for (const VertexInputBinding &BindingDecl : Pipeline.vertexBindings()) {
+    if (BindingDecl.Binding >= Gfx.VertexBuffers.size() ||
+        !Gfx.VertexBuffers[BindingDecl.Binding] ||
+        !Gfx.VertexBuffers[BindingDecl.Binding]->isBound())
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex binding %u is not bound to a buffer",
+                               BindingDecl.Binding);
+    Buffer &Buf = *Gfx.VertexBuffers[BindingDecl.Binding];
+    VkDeviceSize Offset = Gfx.VertexBufferOffsets[BindingDecl.Binding];
+    if (Offset > Buf.size())
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex binding %u's offset is out of range "
+                               "of its buffer",
+                               BindingDecl.Binding);
+
+    std::vector<feme::graphics::VertexAttribute> Attributes;
+    for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes())
+      if (Attr.Binding == BindingDecl.Binding)
+        Attributes.push_back(feme::graphics::VertexAttribute{
+            Attr.Location, Attr.Format, Attr.Offset});
+    AttributeStorage.push_back(std::move(Attributes));
+
+    feme::graphics::VertexBufferBinding VB;
+    VB.Binding = BindingDecl.Binding;
+    VB.Stride = BindingDecl.Stride;
+    VB.Data = llvm::ArrayRef<uint8_t>(
+        static_cast<const uint8_t *>(Buf.data()) + Offset,
+        static_cast<size_t>(Buf.size() - Offset));
+    VB.Attributes = AttributeStorage.back();
+    VertexBuffers.push_back(VB);
+  }
+
+  feme::graphics::IndexBufferBinding IndexBinding;
+  if (Draw.Indexed) {
+    if (!Gfx.IndexBuffer || !Gfx.IndexBuffer->isBound())
+      return createStringError(inconvertibleErrorCode(),
+                               "an indexed draw has no bound index buffer");
+    if (Gfx.IndexType != VK_INDEX_TYPE_UINT16 &&
+        Gfx.IndexType != VK_INDEX_TYPE_UINT32)
+      return createStringError(inconvertibleErrorCode(),
+                               "only 16- and 32-bit index types are "
+                               "implemented");
+    if (Gfx.IndexBufferOffset > Gfx.IndexBuffer->size())
+      return createStringError(inconvertibleErrorCode(),
+                               "the index buffer's offset is out of range of "
+                               "its buffer");
+    IndexBinding.Type = Gfx.IndexType == VK_INDEX_TYPE_UINT16
+                            ? feme::graphics::IndexType::UInt16
+                            : feme::graphics::IndexType::UInt32;
+    IndexBinding.Data = llvm::ArrayRef<uint8_t>(
+        static_cast<const uint8_t *>(Gfx.IndexBuffer->data()) +
+            Gfx.IndexBufferOffset,
+        static_cast<size_t>(Gfx.IndexBuffer->size() - Gfx.IndexBufferOffset));
+  }
+
+  MaterializedBoundResources Materialized = buildBoundResources(BoundSets);
+  feme::cpu::DispatchResources Resources;
+  Resources.BoundResources = Materialized.Bindings;
+  Resources.BoundImages = Materialized.ImageBindings;
+  Resources.BoundSamplers = Materialized.SamplerBindings;
+  Resources.RootConstants = PushConstants;
+
+  // The scissor a draw actually rasterizes against is the intersection of
+  // the pipeline's (or `vkCmdSetScissor`'s) rectangle and the render area:
+  // "the render area" is part of the render-target binding, and nothing
+  // outside it may be written.
+  feme::graphics::ScissorRect Scissor = Pipeline.resolveScissor(Gfx.Dynamic);
+  const VkRect2D &Area = Gfx.Binding.RenderArea;
+  int32_t MinX = std::max(Scissor.X, Area.offset.x);
+  int32_t MinY = std::max(Scissor.Y, Area.offset.y);
+  int64_t MaxX = std::min<int64_t>(int64_t(Scissor.X) + Scissor.Width,
+                                   int64_t(Area.offset.x) + Area.extent.width);
+  int64_t MaxY =
+      std::min<int64_t>(int64_t(Scissor.Y) + Scissor.Height,
+                        int64_t(Area.offset.y) + Area.extent.height);
+  Scissor.X = MinX;
+  Scissor.Y = MinY;
+  Scissor.Width = MaxX > MinX ? uint32_t(MaxX - MinX) : 0;
+  Scissor.Height = MaxY > MinY ? uint32_t(MaxY - MinY) : 0;
+
+  feme::graphics::PreparedDraw Prepared;
+  Prepared.Attachments = Attachments;
+  Prepared.DepthStencil = DepthStencil;
+  Prepared.Viewport = Pipeline.resolveViewport(Gfx.Dynamic);
+  Prepared.Scissor = Scissor;
+  Prepared.VertexBuffers = VertexBuffers;
+  Prepared.IndexBuffer = IndexBinding;
+  Prepared.Resources = Resources;
+  Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
+  Prepared.ResolveAttachments = ResolveAttachments;
+
+  return feme::graphics::executeDraws(
+      Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared);
+}
+
+/// Validates a draw's own counts against the advertised limits, per "every
+/// one of them is checked at pipeline creation and at draw time".
+Error validateDrawCounts(const PhysicalDeviceInfo *Info,
+                         const feme::graphics::DrawCommand &Draw) {
+  if (!Info)
+    return Error::success();
+  const VkPhysicalDeviceLimits &Limits = Info->Properties.limits;
+  if (!Draw.Indexed && Draw.VertexCount > Limits.maxDrawIndexedIndexValue)
+    return createStringError(inconvertibleErrorCode(),
+                             "the draw's vertex count exceeds the advertised "
+                             "maximum");
+  if (Draw.Indexed) {
+    uint64_t LastIndex = uint64_t(Draw.FirstIndex) + Draw.VertexCount;
+    if (LastIndex > Limits.maxDrawIndexedIndexValue)
+      return createStringError(inconvertibleErrorCode(),
+                               "the indexed draw's index range exceeds "
+                               "maxDrawIndexedIndexValue");
+  }
+  return Error::success();
+}
+
 /// Interprets \p Commands into \p BoundPipeline/\p BoundSets/
 /// \p PushConstants -- shared, mutable execution state a primary command
 /// buffer's own commands and every `vkCmdExecuteCommands`-referenced
@@ -561,12 +946,17 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
 Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
                           const PhysicalDeviceInfo *DeviceInfo,
                           ComputePipeline *&BoundPipeline,
+                          GraphicsPipeline *&BoundGraphicsPipeline,
+                          GraphicsState &Gfx,
                           std::vector<BoundSetState> &BoundSets,
                           std::vector<uint8_t> &PushConstants) {
   for (const RecordedCommand &Cmd : Commands) {
     switch (Cmd.Op) {
     case RecordedCommand::Kind::BindPipeline:
-      BoundPipeline = Cmd.Pipeline;
+      if (Cmd.Pipeline && Cmd.Pipeline->kind() == Pipeline::Kind::Graphics)
+        BoundGraphicsPipeline = static_cast<GraphicsPipeline *>(Cmd.Pipeline);
+      else
+        BoundPipeline = static_cast<ComputePipeline *>(Cmd.Pipeline);
       break;
     case RecordedCommand::Kind::BindDescriptorSets: {
       uint32_t Required = Cmd.FirstSet + Cmd.DescriptorSets.size();
@@ -686,9 +1076,9 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       break;
     case RecordedCommand::Kind::ExecuteCommands:
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
-        if (Error E =
-                executeCommandsInto(Secondary->commands(), DeviceInfo,
-                                    BoundPipeline, BoundSets, PushConstants))
+        if (Error E = executeCommandsInto(
+                Secondary->commands(), DeviceInfo, BoundPipeline,
+                BoundGraphicsPipeline, Gfx, BoundSets, PushConstants))
           return E;
       break;
     case RecordedCommand::Kind::CopyBufferToImage:
@@ -706,6 +1096,119 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
               runCopyImage(Cmd.SrcImage, Cmd.DstImage, Cmd.ImageCopyRegions))
         return E;
       break;
+    case RecordedCommand::Kind::BeginRenderPass: {
+      if (!Cmd.BeginPass || !Cmd.BeginFramebuffer)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdBeginRenderPass needs both a render "
+                                 "pass and a framebuffer");
+      Gfx.Pass = Cmd.BeginPass;
+      Gfx.Fb = Cmd.BeginFramebuffer;
+      Gfx.Subpass = 0;
+      Gfx.RenderArea = Cmd.RenderArea;
+      Gfx.ClearValues = Cmd.ClearValues;
+      Expected<RenderTargetBinding> Binding = buildRenderTargetBinding(
+          *Gfx.Pass, *Gfx.Fb, Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
+      if (!Binding)
+        return Binding.takeError();
+      Gfx.Binding = std::move(*Binding);
+      Gfx.Rendering = true;
+      if (Error E = applyLoadOps(Gfx.Binding))
+        return E;
+      break;
+    }
+    case RecordedCommand::Kind::NextSubpass: {
+      if (!Gfx.Rendering || !Gfx.Pass || !Gfx.Fb)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdNextSubpass outside a render pass "
+                                 "instance");
+      // A subpass boundary is a full join, which this ICD's strictly
+      // sequential execution already satisfies; the next subpass's own
+      // attachment references simply become the render-target binding.
+      ++Gfx.Subpass;
+      Expected<RenderTargetBinding> Binding = buildRenderTargetBinding(
+          *Gfx.Pass, *Gfx.Fb, Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
+      if (!Binding)
+        return Binding.takeError();
+      Gfx.Binding = std::move(*Binding);
+      break;
+    }
+    case RecordedCommand::Kind::EndRenderPass:
+      Gfx.Rendering = false;
+      Gfx.Binding = RenderTargetBinding{};
+      Gfx.Pass = nullptr;
+      Gfx.Fb = nullptr;
+      break;
+    case RecordedCommand::Kind::BindVertexBuffers: {
+      size_t Required = Cmd.FirstSet + Cmd.VertexBuffers.size();
+      if (Gfx.VertexBuffers.size() < Required) {
+        Gfx.VertexBuffers.resize(Required, nullptr);
+        Gfx.VertexBufferOffsets.resize(Required, 0);
+      }
+      for (size_t I = 0; I != Cmd.VertexBuffers.size(); ++I) {
+        Gfx.VertexBuffers[Cmd.FirstSet + I] = Cmd.VertexBuffers[I];
+        Gfx.VertexBufferOffsets[Cmd.FirstSet + I] =
+            I < Cmd.VertexBufferOffsets.size() ? Cmd.VertexBufferOffsets[I] : 0;
+      }
+      break;
+    }
+    case RecordedCommand::Kind::BindIndexBuffer:
+      Gfx.IndexBuffer = Cmd.SrcBuffer;
+      Gfx.IndexBufferOffset = Cmd.IndirectOffset;
+      Gfx.IndexType = Cmd.IndexType;
+      break;
+    case RecordedCommand::Kind::SetViewport:
+      Gfx.Dynamic.Viewport = feme::graphics::ViewportState{
+          Cmd.ViewportValue.x,        Cmd.ViewportValue.y,
+          Cmd.ViewportValue.width,    Cmd.ViewportValue.height,
+          Cmd.ViewportValue.minDepth, Cmd.ViewportValue.maxDepth};
+      break;
+    case RecordedCommand::Kind::SetScissor:
+      Gfx.Dynamic.Scissor = feme::graphics::ScissorRect{
+          Cmd.ScissorValue.offset.x, Cmd.ScissorValue.offset.y,
+          Cmd.ScissorValue.extent.width, Cmd.ScissorValue.extent.height};
+      break;
+    case RecordedCommand::Kind::SetBlendConstants:
+      Gfx.Dynamic.BlendConstants = Cmd.BlendConstants;
+      break;
+    case RecordedCommand::Kind::SetStencilReference:
+    case RecordedCommand::Kind::SetStencilCompareMask:
+    case RecordedCommand::Kind::SetStencilWriteMask:
+      for (unsigned Face = 0; Face != 2; ++Face) {
+        VkStencilFaceFlags Bit =
+            Face == 0 ? VK_STENCIL_FACE_FRONT_BIT : VK_STENCIL_FACE_BACK_BIT;
+        if ((Cmd.StencilFaceMask & Bit) == 0)
+          continue;
+        if (Cmd.Op == RecordedCommand::Kind::SetStencilReference)
+          Gfx.Dynamic.StencilReference[Face] = Cmd.StencilValue;
+        else if (Cmd.Op == RecordedCommand::Kind::SetStencilCompareMask)
+          Gfx.Dynamic.StencilCompareMask[Face] = Cmd.StencilValue;
+        else
+          Gfx.Dynamic.StencilWriteMask[Face] = Cmd.StencilValue;
+      }
+      break;
+    case RecordedCommand::Kind::Draw:
+    case RecordedCommand::Kind::DrawIndexed: {
+      if (!BoundGraphicsPipeline)
+        return createStringError(inconvertibleErrorCode(),
+                                 "draw with no bound graphics pipeline");
+      feme::graphics::DrawCommand Draw;
+      Draw.VertexCount = Cmd.VertexOrIndexCount;
+      Draw.InstanceCount = Cmd.InstanceCount;
+      Draw.FirstInstance = Cmd.FirstInstance;
+      Draw.Indexed = Cmd.Op == RecordedCommand::Kind::DrawIndexed;
+      if (Draw.Indexed) {
+        Draw.FirstIndex = Cmd.FirstVertexOrIndex;
+        Draw.VertexOffset = Cmd.VertexOffset;
+      } else {
+        Draw.FirstVertex = Cmd.FirstVertexOrIndex;
+      }
+      if (Error E = validateDrawCounts(DeviceInfo, Draw))
+        return E;
+      if (Error E = runDraw(*BoundGraphicsPipeline, Gfx, Draw, BoundSets,
+                            PushConstants))
+        return E;
+      break;
+    }
     }
   }
   return Error::success();
@@ -715,6 +1218,8 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
 
 llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   ComputePipeline *BoundPipeline = nullptr;
+  GraphicsPipeline *BoundGraphicsPipeline = nullptr;
+  GraphicsState Gfx;
   std::vector<BoundSetState> BoundSets;
   // Push-constant state, sized to the device's full advertised
   // `maxPushConstantsSize` and zero-initialized: a byte a `vkCmdPushConstants`
@@ -724,7 +1229,8 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   std::vector<uint8_t> PushConstants(
       DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
   return executeCommandsInto(CmdBuf.commands(), DeviceInfo, BoundPipeline,
-                             BoundSets, PushConstants);
+                             BoundGraphicsPipeline, Gfx, BoundSets,
+                             PushConstants);
 }
 
 namespace feme::vulkan {
@@ -804,10 +1310,14 @@ vkResetCommandBuffer(VkCommandBuffer commandBuffer, VkCommandBufferResetFlags) {
 VKAPI_ATTR void VKAPI_CALL
 vkCmdBindPipeline(VkCommandBuffer commandBuffer,
                   VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline) {
-  if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_COMPUTE)
-    return; // No other bind point is implemented yet (graphics is V6+).
+  if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_COMPUTE &&
+      pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS)
+    return; // Ray tracing is V8.
+  // Which bind point the object belongs to is recorded on the object itself
+  // (`Pipeline::kind`), so the bind point argument only selects which
+  // pipelines this ICD accepts at all.
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->bindPipeline(fromHandle<ComputePipeline>(pipeline));
+      ->bindPipeline(fromHandle<Pipeline>(pipeline));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
@@ -815,8 +1325,12 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     VkPipelineLayout, uint32_t firstSet, uint32_t descriptorSetCount,
     const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount,
     const uint32_t *pDynamicOffsets) {
-  if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_COMPUTE)
-    return; // No other bind point is implemented yet (graphics is V6+).
+  if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_COMPUTE &&
+      pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS)
+    return; // Ray tracing is V8.
+  // Both bind points share one set of bound descriptor sets here, matching
+  // how a draw and a dispatch both materialize their resources from the
+  // same `buildBoundResources` (see "Descriptor Model").
   std::vector<DescriptorSet *> Sets;
   Sets.reserve(descriptorSetCount);
   for (uint32_t I = 0; I != descriptorSetCount; ++I)
@@ -1042,6 +1556,126 @@ vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount,
     Secondary.push_back(fromHandle<vulkan::CommandBuffer>(pCommandBuffers[I]));
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->executeCommands(std::move(Secondary));
+}
+
+//===----------------------------------------------------------------------===//
+// V6: render pass instances, vertex/index binding, dynamic state, draws
+//===----------------------------------------------------------------------===//
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
+                     const VkRenderPassBeginInfo *pRenderPassBegin,
+                     VkSubpassContents) {
+  std::vector<VkClearValue> ClearValues(
+      pRenderPassBegin->pClearValues,
+      pRenderPassBegin->pClearValues + pRenderPassBegin->clearValueCount);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->beginRenderPass(fromHandle<RenderPass>(pRenderPassBegin->renderPass),
+                        fromHandle<Framebuffer>(pRenderPassBegin->framebuffer),
+                        pRenderPassBegin->renderArea, std::move(ClearValues));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass(VkCommandBuffer commandBuffer,
+                                            VkSubpassContents) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->nextSubpass();
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(VkCommandBuffer commandBuffer) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->endRenderPass();
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer *pBuffers, const VkDeviceSize *pOffsets) {
+  std::vector<vulkan::Buffer *> Buffers;
+  std::vector<VkDeviceSize> Offsets;
+  Buffers.reserve(bindingCount);
+  Offsets.reserve(bindingCount);
+  for (uint32_t I = 0; I != bindingCount; ++I) {
+    Buffers.push_back(fromHandle<vulkan::Buffer>(pBuffers[I]));
+    Offsets.push_back(pOffsets ? pOffsets[I] : 0);
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->bindVertexBuffers(firstBinding, std::move(Buffers), std::move(Offsets));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,
+                                                VkBuffer buffer,
+                                                VkDeviceSize offset,
+                                                VkIndexType indexType) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->bindIndexBuffer(fromHandle<vulkan::Buffer>(buffer), offset, indexType);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer,
+                                            uint32_t firstViewport,
+                                            uint32_t viewportCount,
+                                            const VkViewport *pViewports) {
+  // Only one viewport is advertised (`maxViewports` is 1), so a call naming
+  // any other slot has nothing to set.
+  if (firstViewport != 0 || viewportCount == 0)
+    return;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setViewport(pViewports[0]);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
+                                           uint32_t firstScissor,
+                                           uint32_t scissorCount,
+                                           const VkRect2D *pScissors) {
+  if (firstScissor != 0 || scissorCount == 0)
+    return;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setScissor(pScissors[0]);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetBlendConstants(VkCommandBuffer commandBuffer,
+                       const float blendConstants[4]) {
+  std::array<float, 4> Constants{blendConstants[0], blendConstants[1],
+                                 blendConstants[2], blendConstants[3]};
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setBlendConstants(Constants);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilReference(VkCommandBuffer commandBuffer,
+                         VkStencilFaceFlags faceMask, uint32_t reference) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setStencilState(RecordedCommand::Kind::SetStencilReference, faceMask,
+                        reference);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilCompareMask(VkCommandBuffer commandBuffer,
+                           VkStencilFaceFlags faceMask, uint32_t compareMask) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setStencilState(RecordedCommand::Kind::SetStencilCompareMask, faceMask,
+                        compareMask);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
+                         VkStencilFaceFlags faceMask, uint32_t writeMask) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setStencilState(RecordedCommand::Kind::SetStencilWriteMask, faceMask,
+                        writeMask);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDraw(VkCommandBuffer commandBuffer,
+                                     uint32_t vertexCount,
+                                     uint32_t instanceCount,
+                                     uint32_t firstVertex,
+                                     uint32_t firstInstance) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->draw(vertexCount, instanceCount, firstVertex, firstInstance);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
+                 uint32_t instanceCount, uint32_t firstIndex,
+                 int32_t vertexOffset, uint32_t firstInstance) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->drawIndexed(indexCount, instanceCount, firstIndex, vertexOffset,
+                    firstInstance);
 }
 
 } // namespace feme::vulkan

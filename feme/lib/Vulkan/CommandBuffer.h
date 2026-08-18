@@ -26,6 +26,7 @@
 
 #include "Icd.h"
 #include "PhysicalDeviceInfo.h"
+#include "RenderPass.h"
 
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
@@ -43,8 +44,12 @@ class CommandBuffer;
 class ComputePipeline;
 class DescriptorSet;
 class Event;
+class Framebuffer;
+class GraphicsPipeline;
 class Image;
+class Pipeline;
 class QueryPool;
+class RenderPass;
 
 /// (V5) One `VkImageMemoryBarrier`'s layout-transition payload, recorded by
 /// `vkCmdPipelineBarrier` and applied to its target `Image`'s tracked
@@ -84,11 +89,24 @@ struct RecordedCommand {
     CopyBufferToImage,
     CopyImageToBuffer,
     CopyImage,
+    BeginRenderPass,
+    NextSubpass,
+    EndRenderPass,
+    BindVertexBuffers,
+    BindIndexBuffer,
+    SetViewport,
+    SetScissor,
+    SetBlendConstants,
+    SetStencilReference,
+    SetStencilCompareMask,
+    SetStencilWriteMask,
+    Draw,
+    DrawIndexed,
   };
 
   Kind Op;
-  /// `BindPipeline`: the pipeline to bind.
-  ComputePipeline *Pipeline = nullptr;
+  /// `BindPipeline`: the pipeline to bind, of either bind point.
+  vulkan::Pipeline *Pipeline = nullptr;
   /// `Dispatch`/`DispatchBase`: the group-id base (`{0,0,0}` for a plain
   /// `vkCmdDispatch`) and group count.
   std::array<uint32_t, 3> Base{0, 0, 0};
@@ -157,6 +175,37 @@ struct RecordedCommand {
   std::vector<VkBufferImageCopy> BufferImageCopyRegions;
   /// (V5) `CopyImage`: the copy regions between `SrcImage` and `DstImage`.
   std::vector<VkImageCopy> ImageCopyRegions;
+  /// (V6) `BeginRenderPass`: the render pass, the framebuffer supplying its
+  /// attachments' views, the render area, and one clear value per
+  /// attachment (consumed only by an attachment whose load op is
+  /// `VK_ATTACHMENT_LOAD_OP_CLEAR`).
+  const vulkan::RenderPass *BeginPass = nullptr;
+  const vulkan::Framebuffer *BeginFramebuffer = nullptr;
+  VkRect2D RenderArea{};
+  std::vector<VkClearValue> ClearValues;
+  /// (V6) `BindVertexBuffers`: the buffers bound at `[FirstSet, FirstSet +
+  /// VertexBuffers.size())` (`FirstSet` reused as `firstBinding`) and their
+  /// byte offsets. `BindIndexBuffer` reuses `SrcBuffer`/`IndirectOffset`
+  /// plus `IndexType` below.
+  std::vector<Buffer *> VertexBuffers;
+  std::vector<VkDeviceSize> VertexBufferOffsets;
+  VkIndexType IndexType = VK_INDEX_TYPE_UINT32;
+  /// (V6) `SetViewport`/`SetScissor`/`SetBlendConstants`/`SetStencil*`: the
+  /// dynamic state this command records, snapshotted into the next draw
+  /// (see "Dynamic state is what makes the prepared draw a snapshot").
+  VkViewport ViewportValue{};
+  VkRect2D ScissorValue{};
+  std::array<float, 4> BlendConstants{0.0f, 0.0f, 0.0f, 0.0f};
+  VkStencilFaceFlags StencilFaceMask = 0;
+  uint32_t StencilValue = 0;
+  /// (V6) `Draw`/`DrawIndexed`: the draw's own arguments, in the same shape
+  /// `feme::graphics::DrawCommand` uses (`FirstQuery` above is reused for
+  /// neither -- a draw needs all six of these at once).
+  uint32_t VertexOrIndexCount = 0;
+  uint32_t InstanceCount = 1;
+  uint32_t FirstVertexOrIndex = 0;
+  uint32_t FirstInstance = 0;
+  int32_t VertexOffset = 0;
 };
 
 /// A `VkCommandBuffer`: an append-only typed command stream while
@@ -185,7 +234,7 @@ public:
 
   bool isRecording() const { return Recording; }
 
-  void bindPipeline(ComputePipeline *Pipeline) {
+  void bindPipeline(vulkan::Pipeline *Pipeline) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BindPipeline;
     Cmd.Pipeline = Pipeline;
@@ -391,6 +440,107 @@ public:
     Cmd.DstImage = Dst;
     Cmd.ImageCopyRegions = std::move(Regions);
     Commands.push_back(std::move(Cmd));
+  }
+
+  /// (V6) `vkCmdBeginRenderPass`/`vkCmdNextSubpass`/`vkCmdEndRenderPass`.
+  /// The render pass and framebuffer are normalized into one
+  /// `RenderTargetBinding` at execution time (see RenderPass.h), so a
+  /// subpass boundary is a full join and nothing downstream distinguishes
+  /// this from `vkCmdBeginRendering`.
+  void beginRenderPass(const vulkan::RenderPass *Pass,
+                       const vulkan::Framebuffer *Fb, VkRect2D RenderArea,
+                       std::vector<VkClearValue> ClearValues) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BeginRenderPass;
+    Cmd.BeginPass = Pass;
+    Cmd.BeginFramebuffer = Fb;
+    Cmd.RenderArea = RenderArea;
+    Cmd.ClearValues = std::move(ClearValues);
+    Commands.push_back(std::move(Cmd));
+  }
+  void nextSubpass() {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::NextSubpass;
+    Commands.push_back(Cmd);
+  }
+  void endRenderPass() {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::EndRenderPass;
+    Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdBindVertexBuffers`.
+  void bindVertexBuffers(uint32_t FirstBinding, std::vector<Buffer *> Buffers,
+                         std::vector<VkDeviceSize> Offsets) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BindVertexBuffers;
+    Cmd.FirstSet = FirstBinding;
+    Cmd.VertexBuffers = std::move(Buffers);
+    Cmd.VertexBufferOffsets = std::move(Offsets);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (V6) `vkCmdBindIndexBuffer`.
+  void bindIndexBuffer(Buffer *Buf, VkDeviceSize Offset, VkIndexType Type) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BindIndexBuffer;
+    Cmd.SrcBuffer = Buf;
+    Cmd.IndirectOffset = Offset;
+    Cmd.IndexType = Type;
+    Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdSetViewport`/`vkCmdSetScissor`.
+  void setViewport(const VkViewport &Viewport) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetViewport;
+    Cmd.ViewportValue = Viewport;
+    Commands.push_back(Cmd);
+  }
+  void setScissor(const VkRect2D &Scissor) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetScissor;
+    Cmd.ScissorValue = Scissor;
+    Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdSetBlendConstants`.
+  void setBlendConstants(std::array<float, 4> Constants) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetBlendConstants;
+    Cmd.BlendConstants = Constants;
+    Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdSetStencilReference`/`vkCmdSetStencilCompareMask`/
+  /// `vkCmdSetStencilWriteMask`, each applying to the faces named by
+  /// \p FaceMask.
+  void setStencilState(RecordedCommand::Kind Op, VkStencilFaceFlags FaceMask,
+                       uint32_t Value) {
+    RecordedCommand Cmd;
+    Cmd.Op = Op;
+    Cmd.StencilFaceMask = FaceMask;
+    Cmd.StencilValue = Value;
+    Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdDraw`.
+  void draw(uint32_t VertexCount, uint32_t InstanceCount, uint32_t FirstVertex,
+            uint32_t FirstInstance) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::Draw;
+    Cmd.VertexOrIndexCount = VertexCount;
+    Cmd.InstanceCount = InstanceCount;
+    Cmd.FirstVertexOrIndex = FirstVertex;
+    Cmd.FirstInstance = FirstInstance;
+    Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdDrawIndexed`.
+  void drawIndexed(uint32_t IndexCount, uint32_t InstanceCount,
+                   uint32_t FirstIndex, int32_t VertexOffset,
+                   uint32_t FirstInstance) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::DrawIndexed;
+    Cmd.VertexOrIndexCount = IndexCount;
+    Cmd.InstanceCount = InstanceCount;
+    Cmd.FirstVertexOrIndex = FirstIndex;
+    Cmd.VertexOffset = VertexOffset;
+    Cmd.FirstInstance = FirstInstance;
+    Commands.push_back(Cmd);
   }
 
   llvm::ArrayRef<RecordedCommand> commands() const { return Commands; }
