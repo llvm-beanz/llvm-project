@@ -19391,3 +19391,163 @@ structural test is what actually proves the split/dispatch composition.
   the `pNext` chain (rather than ignoring it, as the pre-V3 code did) --
   exactly the kind of bug real Vulkan applications are required by the spec
   to avoid, but a test fixture can accidentally omit just as easily.
+
+# Agent thoughts: closing V3's uniform buffer shader-side lowering gap
+
+A previous session implemented V3 in full except for one explicitly
+documented, deliberate scope cut: the Vulkan object model for uniform
+buffers (`VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_DYNAMIC`) landed, but the
+SPIR-V `Uniform` storage-class shader-side lowering that would let a real
+compiled shader actually *read* one did not, with a long, honest note in
+Descriptor.h and FeMeVulkanDesign.md explaining why: a uniform block's
+access shape (fixed, heterogeneously-typed named fields at fixed byte
+offsets) fits neither the storage-buffer model (homogeneous, dynamically-
+indexed array) nor the push-constant model (no descriptor-heap identity)
+directly, and building a correct new mechanism was estimated as its own
+roadmap-step-sized piece of work. This session's job was to close that
+gap.
+
+## Design: reusing storage buffers' handle representation, not their access shape
+
+The key realization, once I read `SPIRVToLLVMPatterns.cpp` and LLVM's own
+SPIRV backend (`SPIRVGlobalRegistry::getOrCreateVulkanBufferType`,
+`SPIRVBuiltins.cpp`'s `getVulkanBufferType`) closely: `spirv.VulkanBuffer`
+the LLVM target extension type is *not* storage-buffer-specific at all --
+it is a generic "one Block-decorated resource, wrapping one type
+parameter, tagged with a storage class and a writability flag" shape. A
+storage buffer's type parameter happens to be a runtime array (so
+`llvm.spv.resource.getpointer`'s index is a dynamically-indexed array
+element); nothing about the handle itself requires that. A uniform block
+just wraps its own field struct directly as that same type parameter
+instead, and the *same* `getpointer` intrinsic's index becomes a
+compile-time-constant struct-field selector rather than an array index --
+confirmed directly against `llvm/lib/Target/SPIRV/SPIRVCBufferAccess.cpp`,
+which does exactly this for the (different, LLVM-IR-level) DXIL/clang
+cbuffer path: `getpointer(handle, structFieldIndex)` with the *field's own
+type* as the result, computed via `StructLayout::getElementContainingOffset`.
+
+This meant I didn't need a fundamentally new mechanism after all -- I
+needed the *same* mechanism (`spirv.VulkanBuffer` handle +
+`llvm.spv.resource.getpointer`, `feme::cpu::SPIRVResourceLoweringPass`'s
+existing bound-resource heap-range/dynamic-offset machinery from roadmap
+R26) with a second *shape* for what the handle's contents mean:
+
+- `feme::spirv::getUniformBlockElementStruct`/`convertUniformBlockType`
+  (SPIRVToLLVMPatterns.cpp): recognizes a `Uniform` storage-class pointer
+  whose pointee is the same single-member `Block`-decorated wrapper shape
+  `getBufferBlockElementArray` already recognizes for storage buffers,
+  except the sole member is itself a struct (the cbuffer's own field
+  layout) rather than a runtime array, and converts to
+  `spirv.VulkanBuffer` with that struct as the sole type parameter
+  (writability always 0, matching Vulkan's read-only restriction).
+- `UniformBufferAccessChainPattern`: the `Uniform` counterpart of
+  `StorageBufferAccessChainPattern`, dropping the same leading
+  member-selector index and turning the field index into
+  `llvm.spv.resource.getpointer`'s index -- but restricted to *exactly*
+  two indices (member selector + field index), no deeper GEP, since a
+  cbuffer's per-field offset only makes sense resolved one field at a
+  time (see "why I capped nesting" below).
+- `feme::cpu::SPIRVResourceLoweringPass`: generalized with a `BufferKind`
+  (`Storage`/`Uniform`) throughout its handle classification, conflict
+  detection, and access lowering. The only real branch is in
+  `lowerAccesses`: a storage buffer's offset is
+  `index (dynamic, per access) * stride (fixed)`; a uniform buffer's is
+  `DataLayout::getStructLayout(ElementStruct)->getElementOffset(fieldIdx)`
+  -- a compile-time constant, computed once per `getpointer` call, no
+  runtime arithmetic at all. Everything above that (the (set, binding)
+  heap-range assignment, the dynamic-offset clamping, the metadata shape)
+  is untouched and shared.
+
+## Why I capped uniform-buffer field access at exactly one member
+
+A storage buffer's flat-element restriction (no GEP into the element's own
+fields) was already an existing, explicitly documented scope cut in this
+pass -- I didn't invent that pattern, I matched it. For uniform buffers I
+went slightly further and made the *MLIR conversion pattern itself*
+(not just the CPU lowering pass) reject anything but exactly two access-
+chain indices, rather than letting the pattern emit a GEP chain the CPU
+pass would then just leave unlowered (which is what happens for a
+storage-buffer structured-field access today). I chose this because a
+uniform block's fields have *heterogeneous* types -- unlike a storage
+buffer's homogeneous array, where "the element type" is one well-defined
+thing regardless of index, a cbuffer's Nth field's own sub-fields need
+that specific field's own converted type to GEP into correctly, which
+would have meant either constant-folding the field index at the MLIR
+level (adding a requirement the pattern doesn't otherwise need) or wiring
+up per-field type lookups I judged not worth it for a first version. This
+mirrors `SPIRVPushConstantLoweringPass`'s own "one member per access,
+skip the whole function otherwise" scope decision for the structurally
+identical push-constant case, which I called out directly in both the new
+pattern's comment and the design doc.
+
+## Verifying the whole thing end to end, not just unit-by-unit
+
+Given the instructions asked for tests covering each phase of translation,
+I added:
+
+- `spirv-to-llvm-uniform-buffer.mlir`: the lit test for the MLIR
+  conversion pattern itself, including a `Block`-decorated-both-levels
+  regression case mirroring the existing push-constant test's own
+  regression coverage for `convertOffsetStructTypeIgnoringDecorations`.
+- Six new `SPIRVResourceLoweringTest` cases: a basic load, a *second*-field
+  case (to actually prove struct-layout offset resolution rather than
+  coincidentally reading field 0 correctly), a rejected store (Vulkan's
+  read-only restriction), a rejected dynamic field index, and a rejected
+  conflicting-kind re-declaration at the same (set, binding) identity. The
+  conflicting-kind test needed real LLVM-mangled intrinsic names
+  (`llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_..._2_0t`) for
+  its two differently-typed `spirv.VulkanBuffer` overloads in one module --
+  IR text does not auto-mangle an overloaded intrinsic declaration the way
+  `Intrinsic::getOrInsertDeclaration` does, and my first attempt (reusing
+  the same literal name across both) failed to parse at all
+  (`invalid redefinition of function`); I derived the correct mangled
+  names with a small throwaway C++ program linked against the built LLVM
+  libraries rather than guessing.
+- `UniformBufferDispatchTest` (CommandBufferTest.cpp): a genuine
+  `vkCreateShaderModule` → `vkCreateComputePipelines` →
+  `vkCmdBindDescriptorSets` → `vkCmdDispatch` round trip, through the same
+  `feme::SPIRVImporter`/`mlir::spirv::serialize`+`deserialize` path real
+  Vulkan shader modules already use in this tree (not a shortcut specific
+  to this test) -- reading a cbuffer's *second* field and writing it to a
+  bound storage buffer, so a bug that silently read field 0 for every
+  field would be caught.
+
+All of these passed on the first fully-correct attempt at the underlying
+logic; the only real back-and-forth was working out the address space
+(12, `Uniform`) for the field-pointer fallback conversion and the mangled
+intrinsic names above.
+
+## What I did *not* extend, and said so in the docs
+
+- No support for a nested field within one of a uniform block's own
+  struct- or array-typed fields (see "why I capped nesting" above) --
+  documented in the new pattern's own comment, the CPU pass's header
+  comment, and FeMeVulkanDesign.md's V3 status note, using the same
+  language this codebase already uses for storage buffers' identical
+  "flat access only" restriction.
+- No change to arrayed uniform-buffer *descriptor* handling at the
+  `handlefrombinding`-generation level (`ResourceAddressOfPattern` still
+  hardcodes range size 1 there) -- this was already true, identically, for
+  storage buffers before this session, so it is not a new gap I
+  introduced; I left it exactly as-is rather than silently expanding this
+  session's scope beyond "close V3's own documented gap."
+
+## Process notes
+
+- Built with ccache and `LLVM_ENABLE_ASSERTIONS=ON` (this session's
+  `build/` directory already had both configured, confirmed via
+  `CMakeCache.txt` before making any changes). Ran the full
+  `ninja check-feme` after all substantive changes -- 1286 passed / 34
+  unsupported, no failures, no change in what's skipped for lacking the
+  DirectX target. `feme-opt`'s lit suite and the targeted CPU/Vulkan
+  gtest binaries were also run individually after each smaller step,
+  before running the full suite at the end.
+- Kept commits small and independently buildable/testable, per
+  feme/.instructions.md: the MLIR conversion pattern (+ lit test), the CPU
+  resource-lowering-pass generalization (+ unit tests), the end-to-end
+  Vulkan dispatch test, and the design-doc status updates each landed as
+  their own commit.
+- Ran `git-clang-format` against the base commit for every changed C++
+  file before committing (per feme/.instructions.md's coding-standards
+  rule), rebuilding and re-running the affected tests afterward to confirm
+  the formatting pass alone did not change behavior.
