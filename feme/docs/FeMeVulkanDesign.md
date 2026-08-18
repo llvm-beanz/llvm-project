@@ -779,7 +779,7 @@ advertising any descriptor indexing feature.
 | Storage buffer | Raw/structured `FemeDescriptor`, writable | Done (V2) |
 | Uniform buffer | Read-only raw `FemeDescriptor` | Done (V3) |
 | Dynamic storage/uniform buffer | Same, with bound dynamic offset | Done (V2 storage, V3 uniform) |
-| Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Done (V4, `R32G32B32A32_{SFLOAT,UINT,SINT}`/`R8G8B8A8_UNORM` only) |
+| Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Done (V4, `R32G32B32A32_{SFLOAT,UINT,SINT}`/`R8G8B8A8_{UNORM,SNORM,UINT,SINT}` only) |
 | Uniform texel buffer | Typed read-only `FemeDescriptor` | Done (V4, same format scope) |
 | Sampled/storage image | Future image descriptor ABI | Deferred |
 | Sampler/combined image sampler | Future sampler descriptor ABI | Deferred |
@@ -1625,18 +1625,22 @@ Deviations from this section's sketch:
   `VK_FORMAT_R32G32B32A32_SFLOAT`, `VK_FORMAT_R32G32B32A32_{UINT,SINT}`
   (added in a later V4 pass, alongside `femeCpuResourceLoadTypedV4I32`/
   `StoreTypedV4I32` and `isSupportedTexelElementType`'s `<4 x i32>`
-  acceptance), and `VK_FORMAT_R8G8B8A8_UNORM` are usable in a texel
-  buffer's `VkBufferView`, matching the formats the CPU runtime's
-  typed-load/store helpers implement a conversion for; every other format
-  `Format.h` maps is rejected at `vkCreateBufferView` by
+  acceptance), and `VK_FORMAT_R8G8B8A8_{UNORM,SNORM,UINT,SINT}` (the
+  latter three added in a still-later V4 follow-up pass, alongside
+  `femeRTUnpackR8G8B8A8Snorm`/`Uint`/`Sint` and their `Pack` counterparts
+  in FeMeRuntimeCPU.c) are usable in a texel buffer's `VkBufferView`,
+  matching the formats the CPU runtime's typed-load/store helpers
+  implement a conversion for; every other format `Format.h` maps is
+  rejected at `vkCreateBufferView` by
   `feme::vulkan::isTexelBufferFormatSupported` (previously unenforced --
   any `mapVkFormat`-recognized format was silently accepted and would
   have been misconverted at dispatch time rather than rejected up front).
-  Broader coverage (narrower-than-`<4 x T>` channel counts, the packed 8-
-  and 16-bit-per-component formats) needs the runtime helper library to
-  grow more `ResourceCallKind` mangled variants and, for the narrower
-  channel counts, per-format zero/one-padding logic -- see Descriptor.h's
-  file comment).
+  Broader coverage (narrower-than-`<4 x T>` channel counts, the remaining
+  16-bit-per-component packed formats, `R11G11B10_FLOAT`/
+  `R10G10B10A2_*`) needs the runtime helper library to grow more
+  `ResourceCallKind` mangled variants and, for the narrower channel
+  counts, per-format zero/one-padding logic -- see Descriptor.h's file
+  comment).
 - ~~Expand subgroup, atomic, numeric-type, and robustness coverage~~ (done,
   scoped -- see "Deviations" below): `robustBufferAccess` is now
   advertised (`feme::cpu`'s bounds checking was already unconditional, so
@@ -1682,19 +1686,22 @@ Deviations from this section's sketch:
   atomic-widening support. Deferred past V4.
 - **Numeric-type coverage is broader but still bounded.** The runtime now
   converts `R32G32B32A32_UINT`/`_SINT` (identity `<4 x i32>` reinterpret,
-  `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32`) alongside
-  `R8G8B8A8_UNORM` and the 32-bit float identity formats -- see
-  `feme::vulkan::isTexelBufferFormatSupported`, now the single place that
-  whitelist lives and is enforced at `vkCreateBufferView`. Every other
+  `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32`) and all four
+  `R8G8B8A8_{UNORM,SNORM,UINT,SINT}` packed 8-bit-per-component formats
+  (`femeRTUnpackR8G8B8A8Snorm`/`Uint`/`Sint` and their `Pack`
+  counterparts, added in a follow-up V4 pass alongside the 32-bit float
+  identity formats and `R8G8B8A8_UNORM` -- see
+  `feme::vulkan::isTexelBufferFormatSupported`, the single place that
+  whitelist lives and is enforced at `vkCreateBufferView`). Every other
   format `feme::cpu::ResourceFormat` lists -- the narrower-channel-count
   32-bit-identity formats (`R32_UINT`, `R32G32_UINT`, ...: SPIR-V's own
   `OpImageRead`/`OpImageFetch`/`OpImageWrite` always operate on a full
   four-component vector regardless of the underlying format's real
   channel count, so supporting these needs per-format zero/one-padding
   logic this milestone does not add, not just another mangled call), the
-  8-/16-bit packed formats beyond `R8G8B8A8_UNORM`, and the `R11G11B10`/
-  `R10G10B10A2` formats -- is rejected at `vkCreateBufferView` rather
-  than misconverted.
+  16-bit-per-component packed formats (`R16G16B16A16_*`), and the
+  `R11G11B10_FLOAT`/`R10G10B10A2_*` formats -- is rejected at
+  `vkCreateBufferView` rather than misconverted.
 - **The persistent pipeline cache blob carries no object code.** Per this
   section's own original sketch: "Persistent cache support therefore
   depends on a FeMe API that emits relocatable object code plus complete
