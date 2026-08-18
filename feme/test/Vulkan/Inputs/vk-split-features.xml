@@ -7,7 +7,9 @@
      sub-features that do. It also covers alias resolution (`vkAliasCmd`)
      and a `<require depends="...">` block, which vk_gen_entrypoints.py must
      skip since it's conditioned on an optional extension, not the core
-     version itself. -->
+     version itself. It also declares `VK_KHR_dynamic_rendering`, the one
+     extension `SUPPORTED_EXTENSIONS` lists, whose commands must be read out
+     of `<extensions>` rather than out of any core feature. -->
 <registry>
   <commands>
     <command>
@@ -23,6 +25,14 @@
       <param><type>VkDevice</type><name>device</name></param>
     </command>
     <command name="vkAliasCmd" alias="vkDeviceCmd"/>
+    <command>
+      <proto><type>void</type><name>vkCmdBeginRenderingKHR</name></proto>
+      <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkCmdEndRenderingKHR</name></proto>
+      <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
     <command>
       <proto><type>void</type><name>vkExtCmd</name></proto>
       <param><type>VkInstance</type><name>instance</name></param>
@@ -55,4 +65,19 @@
   <feature api="vulkan" name="VK_VERSION_1_1" number="1.1"
             depends="VK_VERSION_1_0">
   </feature>
+  <extensions>
+    <extension name="VK_KHR_dynamic_rendering" number="45" type="device"
+               supported="vulkan">
+      <require>
+        <command name="vkCmdBeginRenderingKHR"/>
+        <command name="vkCmdEndRenderingKHR"/>
+      </require>
+    </extension>
+    <extension name="VK_fake_extension" number="46" type="device"
+               supported="vulkan">
+      <require>
+        <command name="vkExtCmd"/>
+      </require>
+    </extension>
+  </extensions>
 </registry>

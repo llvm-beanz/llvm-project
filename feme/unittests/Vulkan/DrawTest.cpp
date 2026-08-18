@@ -234,7 +234,11 @@ protected:
     return Buf;
   }
 
-  VkPipeline createPipeline(VkShaderModule Vertex, VkShaderModule Fragment) {
+  /// \p Rendering, when non-null, replaces the fixture's `VkRenderPass`
+  /// with a chained `VkPipelineRenderingCreateInfo` (dynamic rendering).
+  VkPipeline createPipeline(VkShaderModule Vertex, VkShaderModule Fragment,
+                            const VkPipelineRenderingCreateInfo *Rendering =
+                                nullptr) {
     VkPipelineShaderStageCreateInfo Stages[2]{};
     Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -278,7 +282,10 @@ protected:
     Info.pMultisampleState = &Multisample;
     Info.pColorBlendState = &Blend;
     Info.layout = Layout;
-    Info.renderPass = Pass;
+    if (Rendering)
+      Info.pNext = Rendering;
+    else
+      Info.renderPass = Pass;
 
     VkPipeline Pipe = VK_NULL_HANDLE;
     EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
@@ -575,6 +582,95 @@ TEST_F(DrawTest, RejectsOutOfBoundsIndexRange) {
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Dynamic rendering reaches the same normalized render-target binding a
+/// `VkRenderPass` compiles into: the same shaders, clear and draw produce
+/// the same image through `vkCmdBeginRenderingKHR`.
+TEST_F(DrawTest, RendersThroughDynamicRendering) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, &Rendering);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  VkRenderingAttachmentInfo ColorAttachment{};
+  ColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachment.imageView = ColorView;
+  ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachment.clearValue.color = {{0.0f, 1.0f, 0.0f, 1.0f}};
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 1;
+  RenderingInfo.pColorAttachments = &ColorAttachment;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      EXPECT_EQ(texel(X, Y)[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(texel(X, Y)[1], 0x00) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// The driver advertises `VK_KHR_dynamic_rendering` and accepts it at
+/// device creation; anything it does not implement is still refused.
+TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
+  uint32_t Count = 0;
+  ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
+                                                 nullptr),
+            VK_SUCCESS);
+  ASSERT_EQ(Count, 1u);
+  VkExtensionProperties Properties{};
+  ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
+                                                 &Properties),
+            VK_SUCCESS);
+  EXPECT_STREQ(Properties.extensionName,
+               VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+
+  VkPhysicalDeviceDynamicRenderingFeatures Features{};
+  Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(Features.dynamicRendering, VK_TRUE);
+
+  const char *Enabled = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
+  VkDeviceCreateInfo DevInfo{};
+  DevInfo.enabledExtensionCount = 1;
+  DevInfo.ppEnabledExtensionNames = &Enabled;
+  VkDevice Second = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second), VK_SUCCESS);
+  vkDestroyDevice(Second, nullptr);
+
+  const char *Unsupported = "VK_KHR_swapchain";
+  DevInfo.ppEnabledExtensionNames = &Unsupported;
+  EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second),
+            VK_ERROR_EXTENSION_NOT_PRESENT);
 }
 
 } // namespace

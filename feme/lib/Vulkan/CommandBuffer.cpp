@@ -1242,6 +1242,16 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
         return E;
       break;
     }
+    case RecordedCommand::Kind::BeginRendering:
+      Gfx.Pass = nullptr;
+      Gfx.Fb = nullptr;
+      Gfx.Subpass = 0;
+      Gfx.Binding = Cmd.RenderingBinding;
+      Gfx.RenderArea = Gfx.Binding.RenderArea;
+      Gfx.Rendering = true;
+      if (Error E = applyLoadOps(Gfx.Binding))
+        return E;
+      break;
     case RecordedCommand::Kind::NextSubpass: {
       if (!Gfx.Rendering || !Gfx.Pass || !Gfx.Fb)
         return createStringError(inconvertibleErrorCode(),
@@ -1715,6 +1725,56 @@ vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
       ->beginRenderPass(fromHandle<RenderPass>(pRenderPassBegin->renderPass),
                         fromHandle<Framebuffer>(pRenderPassBegin->framebuffer),
                         pRenderPassBegin->renderArea, std::move(ClearValues));
+}
+
+namespace {
+
+/// Normalizes one `VkRenderingAttachmentInfo` into the render-target view
+/// the internal binding holds. The format and sample count come from the
+/// view's own image, so a dynamic-rendering attachment needs no separate
+/// format declaration the way a `VkRenderPass` attachment does.
+RenderTargetView
+normalizeRenderingAttachment(const VkRenderingAttachmentInfo &Src) {
+  RenderTargetView View;
+  View.View = fromHandle<ImageView>(Src.imageView);
+  if (View.View) {
+    View.Format = View.View->format();
+    if (View.View->image())
+      View.SampleCount = View.View->image()->sampleCount();
+  }
+  View.LoadOp = Src.loadOp;
+  View.StoreOp = Src.storeOp;
+  View.ClearValue = Src.clearValue;
+  if (Src.resolveMode != VK_RESOLVE_MODE_NONE)
+    View.ResolveView = fromHandle<ImageView>(Src.resolveImageView);
+  return View;
+}
+
+} // namespace
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRenderingKHR(VkCommandBuffer commandBuffer,
+                    const VkRenderingInfo *pRenderingInfo) {
+  RenderTargetBinding Binding;
+  Binding.RenderArea = pRenderingInfo->renderArea;
+  Binding.Layers = pRenderingInfo->layerCount;
+  for (uint32_t I = 0; I != pRenderingInfo->colorAttachmentCount; ++I)
+    Binding.Colors.push_back(
+        normalizeRenderingAttachment(pRenderingInfo->pColorAttachments[I]));
+  if (pRenderingInfo->pDepthAttachment &&
+      pRenderingInfo->pDepthAttachment->imageView)
+    Binding.Depth =
+        normalizeRenderingAttachment(*pRenderingInfo->pDepthAttachment);
+  if (pRenderingInfo->pStencilAttachment &&
+      pRenderingInfo->pStencilAttachment->imageView)
+    Binding.Stencil =
+        normalizeRenderingAttachment(*pRenderingInfo->pStencilAttachment);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->beginRendering(std::move(Binding));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderingKHR(VkCommandBuffer commandBuffer) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->endRenderPass();
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass(VkCommandBuffer commandBuffer,

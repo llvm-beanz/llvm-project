@@ -397,6 +397,13 @@ vkCmdBeginRenderPass(VkCommandBuffer commandBuffer,
                      VkSubpassContents contents);
 VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass(VkCommandBuffer commandBuffer,
                                             VkSubpassContents contents);
+/// `VK_KHR_dynamic_rendering`'s two commands, exposed under their `KHR`
+/// names (dynamic rendering is core only in 1.3; this driver advertises
+/// 1.2 plus the extension -- see "Render passes and dynamic rendering").
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRenderingKHR(VkCommandBuffer commandBuffer,
+                    const VkRenderingInfo *pRenderingInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderingKHR(VkCommandBuffer commandBuffer);
 VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(VkCommandBuffer commandBuffer);
 VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
     VkCommandBuffer commandBuffer, uint32_t firstBinding,

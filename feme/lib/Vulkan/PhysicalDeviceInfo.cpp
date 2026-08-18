@@ -316,3 +316,12 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
 
   return Info;
 }
+
+llvm::ArrayRef<VkExtensionProperties>
+feme::vulkan::getSupportedDeviceExtensions() {
+  static const VkExtensionProperties Extensions[] = {
+      {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
+       VK_KHR_DYNAMIC_RENDERING_SPEC_VERSION},
+  };
+  return Extensions;
+}

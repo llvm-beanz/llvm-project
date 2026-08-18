@@ -84,8 +84,11 @@ feme::vulkan::vkEnumerateInstanceExtensionProperties(
     VkExtensionProperties *pProperties) {
   if (pLayerName)
     return VK_ERROR_LAYER_NOT_PRESENT;
-  return enumerate<VkExtensionProperties>(0, nullptr, pPropertyCount,
-                                          pProperties);
+  llvm::ArrayRef<VkExtensionProperties> Extensions =
+      getSupportedDeviceExtensions();
+  return enumerate<VkExtensionProperties>(
+      static_cast<uint32_t>(Extensions.size()), Extensions.data(),
+      pPropertyCount, pProperties);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkEnumerateInstanceLayerProperties(
@@ -176,6 +179,14 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan12Features *>(Base);
       Features->timelineSemaphore = VK_TRUE;
+      break;
+    }
+    // (V6) `VK_KHR_dynamic_rendering`'s own feature struct, whose 1.3 core
+    // and `KHR` spellings share one `sType`.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceDynamicRenderingFeatures *>(Base);
+      Features->dynamicRendering = VK_TRUE;
       break;
     }
     default:
@@ -275,8 +286,11 @@ feme::vulkan::vkEnumerateDeviceExtensionProperties(
     VkExtensionProperties *pProperties) {
   if (pLayerName)
     return VK_ERROR_LAYER_NOT_PRESENT;
-  return enumerate<VkExtensionProperties>(0, nullptr, pPropertyCount,
-                                          pProperties);
+  llvm::ArrayRef<VkExtensionProperties> Extensions =
+      getSupportedDeviceExtensions();
+  return enumerate<VkExtensionProperties>(
+      static_cast<uint32_t>(Extensions.size()), Extensions.data(),
+      pPropertyCount, pProperties);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkEnumerateDeviceLayerProperties(
@@ -288,9 +302,17 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkEnumerateDeviceLayerProperties(
 VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateDevice(
     VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkDevice *pDevice) {
-  // V0 implements no device extension yet.
-  if (pCreateInfo->enabledExtensionCount > 0)
-    return VK_ERROR_EXTENSION_NOT_PRESENT;
+  // Only an extension this driver actually implements may be enabled (see
+  // `getSupportedDeviceExtensions`); anything else is refused rather than
+  // silently accepted and then not honored.
+  for (uint32_t I = 0; I != pCreateInfo->enabledExtensionCount; ++I) {
+    bool Supported = false;
+    for (const VkExtensionProperties &Extension : getSupportedDeviceExtensions())
+      Supported |= std::strcmp(Extension.extensionName,
+                               pCreateInfo->ppEnabledExtensionNames[I]) == 0;
+    if (!Supported)
+      return VK_ERROR_EXTENSION_NOT_PRESENT;
+  }
 
   PhysicalDevice *Physical = fromHandle<PhysicalDevice>(physicalDevice);
   Allocator Alloc(pAllocator);

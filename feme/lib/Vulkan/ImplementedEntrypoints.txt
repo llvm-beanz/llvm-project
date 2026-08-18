@@ -163,6 +163,12 @@ vkCmdDrawIndexed
 vkCmdDrawIndirect
 vkCmdDrawIndexedIndirect
 
+# V6: VK_KHR_dynamic_rendering (core only in 1.3, which this driver does not
+# advertise; see "Render passes and dynamic rendering" and
+# vk_gen_entrypoints.py's SUPPORTED_EXTENSIONS).
+vkCmdBeginRenderingKHR
+vkCmdEndRenderingKHR
+
 # V3: secondary command buffers (see "Command Buffers").
 vkCmdExecuteCommands
 

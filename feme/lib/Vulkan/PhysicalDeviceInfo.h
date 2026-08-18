@@ -20,6 +20,8 @@
 #ifndef FEME_LIB_VULKAN_PHYSICALDEVICEINFO_H
 #define FEME_LIB_VULKAN_PHYSICALDEVICEINFO_H
 
+#include "llvm/ADT/ArrayRef.h"
+
 #include <vulkan/vulkan_core.h>
 
 #include <cstdint>
@@ -62,6 +64,15 @@ struct PhysicalDeviceInfo {
 /// identity"'s UUID requirement), and safe to call more than once (e.g. once
 /// per `VkInstance`).
 PhysicalDeviceInfo computePhysicalDeviceInfo();
+
+/// The device extensions this driver implements and advertises. An
+/// extension appears here only once every command and feature it declares
+/// is implemented -- never merely because Vulkan-Headers declares it (see
+/// "Loader Integration"). V6 adds `VK_KHR_dynamic_rendering`, whose two
+/// commands are core only in Vulkan 1.3 while this driver advertises 1.2;
+/// `feme/utils/vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` must list
+/// exactly the same set.
+llvm::ArrayRef<VkExtensionProperties> getSupportedDeviceExtensions();
 
 } // namespace feme::vulkan
 

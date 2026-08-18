@@ -23,6 +23,13 @@
 // resolve to the same (DEVICE) dispatch level.
 // CHECK-DAG: FEME_VK_COMMAND(vkAliasCmd, DEVICE)
 
+// A command of an extension `SUPPORTED_EXTENSIONS` lists is read out of
+// `<extensions>` even though no core feature requires it (V6's
+// `VK_KHR_dynamic_rendering`).
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdBeginRenderingKHR, DEVICE)
+// CHECK-DAG: FEME_VK_COMMAND(vkCmdEndRenderingKHR, DEVICE)
+
 // vkExtCmd sits in a `<require depends="...">` block gated on an optional
-// extension, not on the core version itself, so it must not appear at all.
+// extension `SUPPORTED_EXTENSIONS` does not list, so it must not appear at
+// all -- an unsupported extension's commands are never exposed.
 // CHECK-NOT: vkExtCmd

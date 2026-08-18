@@ -90,6 +90,7 @@ struct RecordedCommand {
     CopyImageToBuffer,
     CopyImage,
     BeginRenderPass,
+    BeginRendering,
     NextSubpass,
     EndRenderPass,
     BindVertexBuffers,
@@ -185,6 +186,10 @@ struct RecordedCommand {
   const vulkan::Framebuffer *BeginFramebuffer = nullptr;
   VkRect2D RenderArea{};
   std::vector<VkClearValue> ClearValues;
+  /// (V6) `BeginRendering`: the render-target binding `vkCmdBeginRendering`
+  /// builds directly, with no render pass or framebuffer in between (see
+  /// RenderPass.h: both entry points normalize into this one shape).
+  RenderTargetBinding RenderingBinding;
   /// (V6) `BindVertexBuffers`: the buffers bound at `[FirstSet, FirstSet +
   /// VertexBuffers.size())` (`FirstSet` reused as `firstBinding`) and their
   /// byte offsets. `BindIndexBuffer` reuses `SrcBuffer`/`IndirectOffset`
@@ -460,11 +465,21 @@ public:
     Cmd.ClearValues = std::move(ClearValues);
     Commands.push_back(std::move(Cmd));
   }
+  /// (V6) `vkCmdBeginRendering`: the same render-target binding a
+  /// `VkRenderPass` compiles into, supplied directly by the application.
+  void beginRendering(RenderTargetBinding Binding) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BeginRendering;
+    Cmd.RenderingBinding = std::move(Binding);
+    Commands.push_back(std::move(Cmd));
+  }
   void nextSubpass() {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::NextSubpass;
     Commands.push_back(Cmd);
   }
+  /// `vkCmdEndRenderPass` and `vkCmdEndRendering` alike: both end the one
+  /// render-target binding in flight.
   void endRenderPass() {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::EndRenderPass;

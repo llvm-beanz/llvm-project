@@ -22,15 +22,17 @@
 # symbol) never takes the address of a function that doesn't exist for an
 # unimplemented command.
 #
-# Only the VK_VERSION_1_0, VK_VERSION_1_1, and VK_VERSION_1_2 core features
-# are read (V3 needs 1.2's core, non-`KHR`-suffixed timeline-semaphore
+# Only the VK_VERSION_1_0, VK_VERSION_1_1, and VK_VERSION_1_2 core features,
+# plus the extensions in `SUPPORTED_EXTENSIONS`, are read (V3 needs 1.2's core, non-`KHR`-suffixed timeline-semaphore
 # commands -- `vkWaitSemaphores`/`vkSignalSemaphore`/
 # `vkGetSemaphoreCounterValue` -- rather than adding extension support for
 # `VK_KHR_timeline_semaphore`; every other 1.2 command this ICD does not
 # implement is simply left unimplemented, exactly like most of 1.1's own
-# surface already is). Extension commands proper remain out of scope (see
-# FeMeVulkanDesign.md's "Loader Integration": "The driver reports no device
-# extension merely because Vulkan-Headers declares it").
+# surface already is). An extension's commands are read only when the
+# extension is listed in `SUPPORTED_EXTENSIONS`, which means this driver
+# genuinely implements and advertises it -- never merely because
+# Vulkan-Headers declares it (see FeMeVulkanDesign.md's "Loader
+# Integration").
 #
 # Newer vk.xml revisions split each `VK_VERSION_1_x` feature into several
 # `VK_{BASE,COMPUTE,GRAPHICS}_VERSION_1_x` features linked by a `depends`
@@ -46,6 +48,14 @@ import sys
 import xml.etree.ElementTree as ET
 
 CORE_FEATURES = ("VK_VERSION_1_0", "VK_VERSION_1_1", "VK_VERSION_1_2")
+
+# Extensions this driver implements and advertises, whose commands the
+# generated table must therefore carry (V6: `vkCmdBeginRenderingKHR`/
+# `vkCmdEndRenderingKHR`, since dynamic rendering is core only in 1.3 while
+# this driver advertises 1.2 -- see "Render passes and dynamic rendering" in
+# feme/docs/FeMeVulkanDesign.md). Every name here must also appear in
+# `feme::vulkan::getSupportedDeviceExtensions`.
+SUPPORTED_EXTENSIONS = ("VK_KHR_dynamic_rendering",)
 
 # First-parameter handle types that make a command dispatched at the
 # instance level rather than the device level. VkPhysicalDevice commands are
@@ -120,7 +130,20 @@ def parse_commands(vk_xml_path):
     for feature_name in CORE_FEATURES:
         core_feature_names |= resolve_dependent_features(feature_name, features_by_name)
 
+    extensions_by_name = {
+        extension.get("name"): extension
+        for extension in root.findall("./extensions/extension")
+    }
+
     commands = {}
+    for extension_name in SUPPORTED_EXTENSIONS:
+        extension = extensions_by_name.get(extension_name)
+        if extension is None:
+            raise ValueError(f"{extension_name} is not declared in vk.xml")
+        for require in extension.findall("require"):
+            for command_ref in require.findall("command"):
+                name = command_ref.get("name")
+                commands[name] = dispatch_level(name)
     for feature_name in core_feature_names:
         feature = features_by_name[feature_name]
         api = feature.get("api", "")
@@ -168,7 +191,8 @@ def main():
     if unknown_implemented:
         sys.exit(
             "vk_gen_entrypoints.py: --implemented lists commands that are "
-            "not core Vulkan 1.0/1.1 entrypoints: "
+            "neither core Vulkan entrypoints nor commands of a supported "
+            "extension: "
             + ", ".join(sorted(unknown_implemented))
         )
 
