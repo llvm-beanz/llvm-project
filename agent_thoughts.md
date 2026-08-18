@@ -19931,3 +19931,189 @@ separate NFC pass, since each commit here only touches one or two files.
   actual Vulkan CTS run: unchanged from every previous session's assessment
   (still no `CompiledStage`/`CompiledKernel` API, still no `deqp-vk` in this
   sandboxed environment).
+
+# Agent thoughts: V5 (images and sampling)
+
+## Task
+
+Implement roadmap item V5 from `feme/docs/Roadmap.md`/`FeMeVulkanDesign.md`:
+"Images and sampling: image memory requirements, views, layout tracking,
+copies, storage and sampled images, samplers".
+
+## Scoping decision
+
+Before touching anything I read Roadmap.md's §1.9 row for this milestone
+("Images, image views, layout tracking, copies, storage/sampled images and
+samplers | V5 | P1 (blocked on G2)") and its own R30 row, which is explicit
+that G2 is *not* fully complete: "CPU-side lowering of a SPIR-V-sourced
+image/sampler heap all remain[s]" even though 2D sampling/loading landed for
+a DXIL/register-bound resource. I confirmed this directly:
+`feme::cpu::ResourceInfo::UsesSamplerHeap` is unconditionally `false` (no
+pass anywhere sets it to `true` -- `grep`'d for the assignment and found
+none), and `feme::cpu::SPIRVResourceLoweringPass` only recognizes a
+`Dim::Buffer` image handle (the V4 texel-buffer case), not a real 2D
+sampled/storage image bound through a descriptor set.
+
+This means a Vulkan descriptor-set-bound image or sampler cannot yet be
+normalized into `feme::cpu`'s image/sampler heap for a real dispatch -- that
+needs the same kind of `BoundResourceRange` reflection the compiler already
+builds for a bound *buffer*, generalized to images, which is squarely R30's
+remaining scope, not V5's. Rather than either (a) silently doing nothing
+useful, or (b) trying to also finish R30's compiler-side work in the same
+pass (a much larger, differently-owned change spanning `feme::cpu`'s SPIR-V
+resource lowering, not the Vulkan runtime), I scoped V5 to exactly what its
+own bullet list asks for and what the Vulkan runtime alone can deliver: the
+full `VkImage`/`VkImageView`/`VkSampler` object model, memory requirements,
+layout tracking, copies, and descriptor-set support for the four
+image/sampler descriptor types. I documented the boundary explicitly in both
+design docs rather than leaving it implicit, so a future reader does not
+mistake "images can be created and copied" for "a shader can sample one".
+
+Usefully, the *image/sampler descriptor ABI* itself already existed:
+roadmap R29 landed `feme::cpu::FemeImageDescriptor`/`FemeSamplerDescriptor`
+(`feme/include/feme/Target/CPU/RuntimeABI.h`) ahead of this milestone,
+anticipating exactly this need. V5's own design bullet "design an image
+layout and sampler ABI" was therefore already satisfied; I said so in the
+Status note rather than re-describing R29's work as if it were new.
+
+## Implementation
+
+- `feme/lib/Vulkan/Image.h`/`Image.cpp` (new): `Image` (dimension, format,
+  extent, mips, layers, usage; a packed mip-major subresource layout table
+  computed once at construction via `computeSubresourceLayouts`, matching
+  `FemeImageSubresourceLayout`'s documented semantics exactly; per-
+  subresource `VkImageLayout` tracking via a flat `[mip * slicesPerLevel +
+  slice]` array, where `slicesPerLevel = max(arrayLayers, depth)` since
+  Vulkan never allows both to exceed 1 for a dimension this milestone
+  supports); `ImageView` (image + view type + format + subresource range,
+  with `dimension()` mapping a `VkImageViewType` to `feme::cpu::
+  ImageDimension` for whenever the image-heap materialization work lands);
+  `Sampler` (translates a `VkSamplerCreateInfo` to a
+  `feme::cpu::FemeSamplerDescriptor` once, at creation time -- filters,
+  address modes, compare op, anisotropy, border color; reduction mode is
+  always `WeightedAverage` since no `VK_EXT_sampler_filter_minmax` pNext
+  chain is walked).
+  - Deliberately did *not* try to model real GPU tiling: `VK_IMAGE_TILING_
+    LINEAR` and `_OPTIMAL` produce the same packed CPU-side layout, since
+    there is no hardware tiling to be faithful to (documented in Image.h's
+    file comment, mirroring how the buffer/memory model already treats
+    every allocation identically regardless of Vulkan's memory-type
+    abstraction).
+  - `texelPointer(mip, layer, x, y, z)` unifies the array-layer and 3D-depth
+    addressing into one "slice index" (`layer + z`) since exactly one of
+    the two is ever nonzero for a supported dimension -- this is the one
+    piece of the implementation I want to flag as a place a reviewer should
+    double check: it depends on Vulkan's own invariant that a 3D image
+    always has `arrayLayers == 1`, which `vkCreateImage` enforces.
+- `feme/lib/Vulkan/CommandBuffer.{h,cpp}`: `vkCmdCopyBufferToImage`/
+  `vkCmdCopyImageToBuffer`/`vkCmdCopyImage`, each copying row-by-row through
+  `Image::texelPointer` rather than as one contiguous `memcpy`, since an
+  image's own row/slice pitch need not match a copy's `bufferRowLength`/
+  `bufferImageHeight` (0 meaning "tightly packed to the copy's own extent"
+  per spec) or a source/destination mip level's narrower pitch.
+  `vkCmdCopyImage` requires matching formats -- a narrower but honest
+  restriction versus real Vulkan's "compatible texel size" rule, since no
+  format-conversion path exists to misconvert through.
+  - `vkCmdPipelineBarrier` gained real payload for the first time: an image
+    memory barrier's layout transition (`ImageLayoutTransition`) is
+    recorded and applied to its target image's tracked layout at
+    `executeCommandBuffer` time. Every other barrier array (memory, buffer)
+    is still the no-op join V2 already documented and left completely
+    unchanged -- this ICD's single-threaded, strictly-sequential execution
+    already satisfies that join by construction, so there was nothing new
+    to do there.
+- `feme/lib/Vulkan/Descriptor.{h,cpp}`: `DescriptorSet` now holds a second
+  per-binding map, `ImageBindings` (`DescriptorImageBinding`: view + sampler
+  + tracked `VkImageLayout`), populated at construction time by binding
+  type (image/sampler bindings go to the new map, everything else keeps
+  going to the existing buffer-oriented one) rather than trying to unify
+  the two into one variant-like binding — the two are read through
+  entirely different call sites downstream (`bindingArray` for a real
+  dispatch's buffer heap, `imageBindingArray` for... nothing yet, honestly,
+  until R30 lands), so keeping them structurally separate seemed clearer
+  than a tagged union nobody consumes yet. `vkUpdateDescriptorSets`/
+  `vkCmdCopyDescriptorSet`'s existing loops gained an image-aware branch
+  each; I verified the existing buffer-copy loop's `bindingArray` call
+  returns empty for an image-type binding (since it's never populated in
+  `Bindings` for one) so it was safe to just add a second loop alongside it
+  rather than needing to branch on descriptor type there too.
+- `Pipeline.cpp`: left `compileComputePipeline`'s existing
+  `Info.UsesSamplerHeap` rejection in place, with an updated comment
+  explaining it is still unreachable dead code today (nothing sets the
+  flag) and *why* -- so it isn't mistaken for leftover cruft and deleted
+  by a future pass before R30 actually lands and makes it reachable.
+- Entry points: `vkCreateImage`/`vkDestroyImage`/
+  `vkGetImageMemoryRequirements{,2}`/`vkBindImageMemory{,2}`/
+  `vkCreateImageView`/`vkDestroyImageView`/`vkCreateSampler`/
+  `vkDestroySampler`/`vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`/
+  `vkCmdCopyImage` added to `EntryPoints.h`/`ImplementedEntrypoints.txt`
+  (consumed automatically by `vk_gen_entrypoints.py` at build time, no
+  further registration needed) and `Image.cpp` added to
+  `lib/Vulkan/CMakeLists.txt`.
+
+## Tests
+
+- `unittests/Vulkan/ImageTest.cpp` (new): create/bind/destroy a 2D image and
+  check its computed size; a 3-mip chain's per-level byte offsets (hand-
+  computed: 4x4/2x2/1x1 at 4 bytes/texel -> 64+16+4 = 84 bytes, offsets
+  0/64/80); rejecting an unmapped format and a multisample image; view +
+  sampler creation with descriptor field readback; layout tracking through
+  a real `vkCmdPipelineBarrier`; a buffer->image->buffer round trip with a
+  byte-pattern payload (catches a copy direction or addressing bug, since a
+  bug would show up as wrong bytes, not just a crash); an image->image copy
+  with a byte-pattern payload for the same reason.
+- Extended `DescriptorTest.cpp` with a combined-image-sampler write/read-
+  back test, checking both that `imageBindingArray` gets the write and that
+  the plain `bindingArray` for the same binding is untouched (i.e. the two
+  maps really are independent).
+- Two pre-existing tests were testing "this command/type is not implemented
+  yet" and now fail honestly because V5 implements them:
+  `DescriptorTest.Unsupported{DescriptorType,PoolSizeType}IsRejected` used
+  `VK_DESCRIPTOR_TYPE_SAMPLER` as its "unsupported" example -- retargeted to
+  `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` (a real still-unsupported,
+  graphics-only type). `ProcAddr.UnimplementedCommandNeverResolves` used
+  `vkCreateImage` as its "known but unimplemented" example -- retargeted to
+  `vkCreateGraphicsPipelines` (still correctly unimplemented, deferred to
+  V6). I did not just delete these tests: the pattern they're checking
+  (rejected-type / null-proc-address for a real but not-yet-implemented
+  command) is still worth covering, it just needed a different example now
+  that images exist.
+- Did not add a new lit test / loader-facing C client (the way
+  `storage-buffer-lavapipe-diff.test` exercises V2 end to end): with no
+  shader-side image/sampler consumption yet (see the scoping decision
+  above), the only thing a loader-level test could add over the unit tests
+  is exercising the same calls through the real Khronos loader rather than
+  linking `FeMeVulkanCore` directly -- valuable for V0's own "does the ICD
+  load at all" question, much less so for a pure object-model milestone
+  with no new process-boundary-sensitive behavior. Left as a gap a future
+  end-to-end milestone (once dispatch can actually sample an image) should
+  pick up rather than adding a low-value test now.
+
+## Validation
+
+Reconfigured the existing `build/` tree with `-DLLVM_CCACHE_BUILD=ON` (it
+was off; enabled per this session's instructions) and confirmed
+`LLVM_ENABLE_ASSERTIONS=ON` was already set in `CMakeCache.txt`. Ran a full
+baseline `ninja check-feme` before making any change (1324 passed, 35
+unsupported, 0 failed) to know what "no regressions" meant. After each
+logical change, rebuilt `FeMeVulkanCore`/`FeMeVulkanTests` and ran the
+Vulkan unit tests directly; ran the full `ninja check-feme` (which builds
+every test dependency itself, including `feme-opt`/`feme`/the fuzzers,
+before running `lit`) at the end: 1333 passed, 35 unsupported (environment-
+gated, unchanged from baseline), 0 failed -- the +9 over baseline is exactly
+the 8 new `ImageTest` cases plus 1 new `DescriptorTest` case. Ran
+`clang-format` on every touched file before committing.
+
+## Deliberately deferred
+
+- Real shader-side image/sampler consumption (materializing an `ImageHeap`/
+  `SamplerHeap` from a Vulkan descriptor set for a dispatch): blocked on
+  R30's remaining compiler-side work, as scoped above. This is the
+  milestone's one real gap versus its own bullet list ("storage and sampled
+  images" exist as objects and descriptor bindings, but nothing can read or
+  write one from a compiled shader yet).
+- Multisample images (`VK_SAMPLE_COUNT_1_BIT` only), format-converting
+  `vkCmdCopyImage` (same format required), and a loader-level end-to-end
+  lit test, all for the reasons given above.
+- `VK_EXT_custom_border_color`/`_border_color_swizzle`: rejected outright
+  at `vkCreateSampler`, since neither extension is advertised.
