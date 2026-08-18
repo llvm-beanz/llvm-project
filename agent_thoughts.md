@@ -20470,3 +20470,155 @@ offsets, and a SPIR-V image view over a nonzero base array layer. None of
 these is a redesign; each is a bounded extension of one helper or one
 classifier, which is why I preferred to close the structural gap
 completely for one shape rather than half-close it for several.
+
+# V6: Graphics queue and basic rendering (Vulkan ICD)
+
+## What the milestone actually needed
+
+V6 reads like a large milestone, and on the Vulkan side it is; but the
+graphics *work* was already done. R31/R32/R33 landed `FeMeGraphics` --
+`GraphicsPipeline`, `PreparedDraw`, and an `executeDraws` that implements
+the whole draw flow including depth, stencil, blending, logic ops, MRT,
+2/4-sample coverage and resolves. So V6 is, almost entirely, translation:
+turn Vulkan state into that normalized pair and hand it over, without
+either side learning about the other. The one place I could have cheated --
+letting the executor peek at a `VkRenderPass` -- is exactly what the
+ownership-boundary table forbids, so `RenderTargetBinding` exists precisely
+to absorb that knowledge on the ICD side.
+
+Two things were *not* already done, and neither was visible from the
+milestone text.
+
+## Surprise 1: no SPIR-V vertex shader could reach the rasterizer
+
+`executeDraws` requires an `SV_Position` output. A real SPIR-V vertex
+shader writes `gl_Position`, a `BuiltIn`-decorated `Output` interface
+variable. Tracing it through: MLIR's SPIR-V dialect keeps the decoration;
+`SPIRVToLLVMPatterns.cpp`'s `getBuiltInMapping` only knows the *compute*
+builtins (thread id, workgroup id, subgroup id...), so a graphics builtin
+fell through to the ordinary stage-IO path -- correct, it *is* ordinary
+interface memory -- but `buildStageIODecorationsAttr` only preserved
+`Location`/`Component`/`Index` and the interpolation flags. A variable with
+a `BuiltIn` decoration and no `Location` therefore arrived at
+`CanonicalizeStagePass` carrying nothing at all: no location to link by, no
+system value to find. `gl_Position` was invisible.
+
+The fix is small (preserve decoration 11; map it onto
+`SignatureSystemValue` in `getSystemValueForBuiltIn`) but I want to record
+*why* it was V6's problem rather than R19's or R20's: nothing before this
+milestone ran a graphics stage end to end, so nothing could observe that
+the signature it produced was unusable. That is the general shape of this
+tree's gaps -- a phase looks complete against its own tests and is only
+falsified by the first consumer.
+
+I chose to map `FragCoord` and `Position` to the same
+`SignatureSystemValue::Position`, and `VertexId`/`VertexIndex` (and the
+Instance pair) together. Both collapses are deliberate: the CPU stage ABI
+sources each from the invocation record under one identity, and Vulkan only
+ever produces the `*Index` spellings. A builtin FeMe has no representation
+for (`PointSize`, `SamplePosition`, the multiview family) maps to `None`
+rather than to something adjacent, so it surfaces as an unlinkable element
+and gets diagnosed instead of silently misinterpreted.
+
+## Surprise 2: vector stage IO does not survive SIMDize
+
+With the builtin mapped, the vertex shader compiled up to
+`feme-cpu-simdize`, which rejected it: "divergent vector value used outside
+a supported insertelement-chain/resource-store/extractelement pattern". The
+`feme.stage.output.store.v4f32` form -- a whole `<4 x float>` stored in one
+op -- has no widened form there.
+
+I decomposed the access into per-component operations in
+`CanonicalizeStagePass` rather than teaching `SIMDizePass` a new pattern.
+That is the more honest fix: the `feme.stage.*` family already carries a
+`Component` operand, DXIL's own `loadInput`/`storeOutput` are inherently
+scalar, and `feme-render`'s hand-written fixtures were already written that
+way. The vector form was the odd one out, not the missing capability. It
+did mean updating an existing lit test's CHECK lines, which I took as
+confirmation rather than as a warning sign.
+
+## Design decisions worth recording
+
+**Dynamic rendering is an extension, not 1.3 core.** The driver advertises
+`apiVersion` 1.2, and V3's precedent for reaching 1.2 was to bump the
+generator's `CORE_FEATURES`. Bumping to 1.3 would advertise a version whose
+feature/property surface I have not made truthful, so I added
+`SUPPORTED_EXTENSIONS` to `vk_gen_entrypoints.py` instead and exposed
+`vkCmdBeginRenderingKHR`/`vkCmdEndRenderingKHR`. The rule I wrote into both
+the generator and the design doc is that an extension appears there only
+once every command it declares is implemented -- which keeps "the driver
+reports no device extension merely because Vulkan-Headers declares it"
+true while making it possible to report one at all.
+
+**Dynamic state is resolved per draw, not baked into the pipeline.**
+`feme::graphics::GraphicsPipeline` is immutable and holds blend constants
+and stencil reference/masks, so a pipeline declaring any of them dynamic
+cannot own one. `feme::vulkan::GraphicsPipeline` therefore stores the
+*translated state* and builds an executor pipeline per draw
+(`buildExecutorPipeline`). This is what the design already asked for --
+"the prepared draw is a snapshot rather than a pipeline pointer" -- and it
+falls out for free rather than costing anything.
+
+**Failing at creation is a feature, and I leaned on it hard.** The design's
+rule that a draw may not be the place a state combination is discovered
+unsupported is what makes an honest `VK_QUEUE_GRAPHICS_BIT` possible at
+all: the queue accepts every core graphics *command*, and the combinations
+it cannot honor were refused earlier, at render pass, framebuffer or
+pipeline creation. Roughly twenty such rejections are listed in the V6
+status note. The alternative -- clamping, or silently ignoring depth bias
+-- would have produced a driver that renders the wrong image, which is
+strictly worse than one that says no.
+
+**One `runValidatedDraw` for direct and indirect draws.** Indirect
+arguments are attacker-controlled, so they must be validated; but writing
+that validation only on the indirect path would leave two subtly different
+notions of "a legal draw". Both paths converge on one function that checks
+limits and then checks the fetch reach against the bound vertex and index
+buffers, so `firstInstance`/`vertexOffset` participate in bounds checking
+rather than only in arithmetic, as the design requires.
+
+**Depth and stencil stay two images.** `FeMeGraphics` models them
+separately, so a packed `D24_UNORM_S8_UINT` attachment has no
+representation. Rather than synthesizing one at the ICD boundary (which
+would mean packing and unpacking on every test), `vkCreateRenderPass`
+rejects the packed formats. The consequence -- a subpass may bind depth or
+stencil but not both -- is a real deviation and is written down as one.
+
+## Validation
+
+Existing `build/` tree, `LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`check-feme` (which builds every test dependency, including the
+loader-linked smoke clients, before running). Baseline before any change:
+1385 passed, 1 unsupported. Final: 1413 passed, 1 unsupported -- +28.
+`clang-format` on every touched C++ file, in its own NFC commit.
+
+Coverage is per translation phase, as asked: the SPIR-V builtin decoration
+in `test/Conversion/SPIRVToLLVM/spirv-to-llvm-stage-io.mlir`, its
+system-value mapping and the vector decomposition in
+`unittests/Transforms/Graphics/CanonicalizeStageTest.cpp` and
+`test/Transforms/Graphics/spirv-canonicalize-stage.ll`, the object model in
+`unittests/Vulkan/RenderPassTest.cpp`, stage compilation and state
+translation in `GraphicsPipelineTest.cpp`, the image operations in
+`ImageOpsTest.cpp`, the whole path end to end in `DrawTest.cpp`, and the
+same scene through the real Khronos loader in
+`test/Vulkan/graphics-loader-smoke.test`.
+
+## Deliberately still open
+
+The completion test says "match lavapipe for every format and state
+combination the driver reports". That did not happen: `deqp-vk` was not
+available here, and I did not stand up an off-screen lavapipe differential.
+I have said so plainly in the status note rather than letting the
+milestone's own completion criterion quietly become "the unit tests pass".
+Whoever picks this up next should treat that as V6's outstanding debt, not
+as V7 work -- the differential harness `feme-vulkan-storage-buffer-diff`
+already established for compute is the obvious model, and
+`feme-vulkan-graphics-smoke` is already the client to generalize.
+
+Also open, and smaller: no graphics pipeline cache entry (the key must
+cover the normalized pipeline description and the render-target binding,
+and a key covering less is worse than none); blits do not convert formats,
+mirror, or handle multisample sources; per-instance vertex input rate and
+primitive restart are unimplemented; and secondary command buffers recorded
+*inside* a render pass are V7's own bullet, so `VkCommandBufferInheritance
+Info` is not interpreted yet.
