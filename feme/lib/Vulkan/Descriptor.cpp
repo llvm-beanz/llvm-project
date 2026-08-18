@@ -9,6 +9,7 @@
 #include "Descriptor.h"
 #include "Buffer.h"
 #include "Icd.h"
+#include "Image.h"
 #include "Objects.h"
 
 #include "llvm/ADT/STLExtras.h"
@@ -23,12 +24,24 @@ bool feme::vulkan::isSupportedDescriptorType(VkDescriptorType Type) {
          Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC ||
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-         isTexelBufferDescriptorType(Type);
+         isTexelBufferDescriptorType(Type) || isImageDescriptorType(Type) ||
+         Type == VK_DESCRIPTOR_TYPE_SAMPLER;
 }
 
 bool feme::vulkan::isTexelBufferDescriptorType(VkDescriptorType Type) {
   return Type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
          Type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+}
+
+bool feme::vulkan::isImageDescriptorType(VkDescriptorType Type) {
+  return Type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+         Type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
+         Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+}
+
+bool feme::vulkan::isSamplerDescriptorType(VkDescriptorType Type) {
+  return Type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+         Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 }
 
 bool feme::vulkan::isDynamicDescriptorType(VkDescriptorType Type) {
@@ -39,7 +52,9 @@ bool feme::vulkan::isDynamicDescriptorType(VkDescriptorType Type) {
 bool feme::vulkan::isReadOnlyDescriptorType(VkDescriptorType Type) {
   return Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
-         Type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+         Type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+         Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 }
 
 DescriptorSetLayout::DescriptorSetLayout(
@@ -69,8 +84,12 @@ uint32_t DescriptorSetLayout::dynamicOffsetCount() const {
 
 DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout)
     : Layout(&Layout) {
-  for (const DescriptorSetLayoutBinding &B : Layout.bindings())
-    Bindings[B.Binding].resize(B.Count);
+  for (const DescriptorSetLayoutBinding &B : Layout.bindings()) {
+    if (isImageDescriptorType(B.Type) || isSamplerDescriptorType(B.Type))
+      ImageBindings[B.Binding].resize(B.Count);
+    else
+      Bindings[B.Binding].resize(B.Count);
+  }
 }
 
 void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement, Buffer *Buf,
@@ -91,10 +110,27 @@ void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
       DescriptorBufferBinding{/*Buf=*/nullptr, /*Offset=*/0, /*Range=*/0, View};
 }
 
+void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
+                          ImageView *View, Sampler *Samp,
+                          VkImageLayout Layout) {
+  auto It = ImageBindings.find(Binding);
+  if (It == ImageBindings.end() || ArrayElement >= It->second.size())
+    return;
+  It->second[ArrayElement] = DescriptorImageBinding{View, Samp, Layout};
+}
+
 llvm::ArrayRef<DescriptorBufferBinding>
 DescriptorSet::bindingArray(uint32_t Binding) const {
   auto It = Bindings.find(Binding);
   if (It == Bindings.end())
+    return {};
+  return It->second;
+}
+
+llvm::ArrayRef<DescriptorImageBinding>
+DescriptorSet::imageBindingArray(uint32_t Binding) const {
+  auto It = ImageBindings.find(Binding);
+  if (It == ImageBindings.end())
     return {};
   return It->second;
 }
@@ -238,6 +274,19 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
                    fromHandle<BufferView>(Write.pTexelBufferView[J]));
       continue;
     }
+    if (isImageDescriptorType(Write.descriptorType) ||
+        isSamplerDescriptorType(Write.descriptorType)) {
+      bool WantsImage = isImageDescriptorType(Write.descriptorType);
+      bool WantsSampler = isSamplerDescriptorType(Write.descriptorType);
+      for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
+        const VkDescriptorImageInfo &Info = Write.pImageInfo[J];
+        Set->write(Write.dstBinding, Write.dstArrayElement + J,
+                   WantsImage ? fromHandle<ImageView>(Info.imageView) : nullptr,
+                   WantsSampler ? fromHandle<Sampler>(Info.sampler) : nullptr,
+                   Info.imageLayout);
+      }
+      continue;
+    }
     for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
       const VkDescriptorBufferInfo &Info = Write.pBufferInfo[J];
       Set->write(Write.dstBinding, Write.dstArrayElement + J,
@@ -261,6 +310,21 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
       else
         Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.Buf, B.Offset,
                    B.Range);
+    }
+
+    // (V5) A binding this set's layout declared as an image/sampler type
+    // lives in `ImageBindings` instead (see `DescriptorSet`'s constructor);
+    // `bindingArray` above returns empty for one, so it needs its own copy
+    // loop rather than falling out of the buffer one above.
+    llvm::ArrayRef<DescriptorImageBinding> SrcImageArray =
+        Src->imageBindingArray(Copy.srcBinding);
+    for (uint32_t J = 0; J != Copy.descriptorCount; ++J) {
+      uint32_t SrcElement = Copy.srcArrayElement + J;
+      if (SrcElement >= SrcImageArray.size())
+        break;
+      const DescriptorImageBinding &B = SrcImageArray[SrcElement];
+      Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.View, B.Samp,
+                 B.Layout);
     }
   }
 }

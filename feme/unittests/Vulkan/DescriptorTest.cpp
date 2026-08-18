@@ -11,6 +11,7 @@
 #include "Buffer.h"
 #include "EntryPoints.h"
 #include "Icd.h"
+#include "Image.h"
 #include "Objects.h"
 
 #include "gtest/gtest.h"
@@ -77,7 +78,7 @@ TEST_F(DescriptorTest, CreateSetLayoutWithStorageBuffers) {
 TEST_F(DescriptorTest, UnsupportedDescriptorTypeIsRejected) {
   VkDescriptorSetLayoutBinding Binding{};
   Binding.binding = 0;
-  Binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
   Binding.descriptorCount = 1;
 
   VkDescriptorSetLayoutCreateInfo LayoutInfo{};
@@ -89,7 +90,7 @@ TEST_F(DescriptorTest, UnsupportedDescriptorTypeIsRejected) {
 }
 
 TEST_F(DescriptorTest, UnsupportedPoolSizeTypeIsRejected) {
-  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1};
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
   VkDescriptorPoolCreateInfo PoolInfo{};
   PoolInfo.maxSets = 1;
   PoolInfo.poolSizeCount = 1;
@@ -272,6 +273,68 @@ TEST_F(DescriptorTest, UniformBufferLayoutAcceptedAndDynamicOffsetCounted) {
   EXPECT_EQ(Array[0].Range, 32u);
 
   vkDestroyBuffer(Device, Buf, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// (V5) A `VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER` binding writes both
+/// halves of `DescriptorImageBinding` from one `VkDescriptorImageInfo`, and
+/// is materialized through `imageBindingArray` rather than `bindingArray`
+/// (see `DescriptorSet`'s constructor).
+TEST_F(DescriptorTest, CombinedImageSamplerWriteAndReadBack) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  VkSamplerCreateInfo SamplerInfo{};
+  VkSampler Samp = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp), VK_SUCCESS);
+
+  VkDescriptorImageInfo ImageInfo{};
+  ImageInfo.sampler = Samp;
+  ImageInfo.imageView = reinterpret_cast<VkImageView>(0x1234);
+  ImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+  Write.pImageInfo = &ImageInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  ASSERT_EQ(Array.size(), 1u);
+  EXPECT_EQ(Array[0].View, fromHandle<ImageView>(ImageInfo.imageView));
+  EXPECT_EQ(Array[0].Samp, fromHandle<Sampler>(Samp));
+  EXPECT_EQ(Array[0].Layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  // The plain (non-image) binding array is unaffected.
+  EXPECT_TRUE(S->bindingArray(0).empty());
+
+  vkDestroySampler(Device, Samp, nullptr);
   vkDestroyDescriptorPool(Device, Pool, nullptr);
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }

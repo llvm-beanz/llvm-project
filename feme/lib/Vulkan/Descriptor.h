@@ -59,6 +59,18 @@
 // regardless of the underlying format's real channel count) -- deferred
 // past V4.
 //
+// (V5) `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`/`_STORAGE_IMAGE`/`_SAMPLER`/
+// `_COMBINED_IMAGE_SAMPLER` are also accepted -- see `DescriptorImageBinding`
+// and `DescriptorSet::write`'s image overload. A shader that actually reads
+// through the image/sampler heap still fails pipeline creation: normalizing
+// a Vulkan descriptor-set-bound image/sampler into `feme::cpu`'s image/
+// sampler heap needs the same kind of `BoundResourceRange` reflection
+// `feme::cpu::ResourceLoweringPass` already builds for a bound buffer, which
+// does not exist yet for images (see Roadmap.md's "blocked on G2" note and
+// FeMeVulkanDesign.md's V5 Status note) -- so this milestone's descriptor
+// sets can *hold* an image/sampler binding (created, updated, copied, bound)
+// but a real dispatch cannot yet consume one.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_DESCRIPTOR_H
@@ -77,9 +89,12 @@ namespace feme::vulkan {
 
 class Buffer;
 class BufferView;
+class ImageView;
+class Sampler;
 
-/// Whether \p Type is one of the six descriptor types this milestone
-/// supports (see the file comment).
+/// Whether \p Type is one of the descriptor types this ICD supports (see
+/// the file comment): the six buffer-oriented types from V2/V3/V4, plus
+/// (V5) `SAMPLED_IMAGE`/`STORAGE_IMAGE`/`SAMPLER`/`COMBINED_IMAGE_SAMPLER`.
 bool isSupportedDescriptorType(VkDescriptorType Type);
 
 /// Whether \p Type is a uniform/storage texel buffer, i.e. resolves to a
@@ -88,13 +103,24 @@ bool isSupportedDescriptorType(VkDescriptorType Type);
 /// the file comment).
 bool isTexelBufferDescriptorType(VkDescriptorType Type);
 
+/// (V5) Whether \p Type carries an image resource (a `VkImageView`, with or
+/// without a combined sampler) rather than a buffer -- i.e. is materialized
+/// through `DescriptorSet::write`'s image overload and `imageBindingArray`
+/// rather than the buffer-oriented `write`/`bindingArray`.
+bool isImageDescriptorType(VkDescriptorType Type);
+
+/// (V5) Whether \p Type carries a sampler (a plain `VK_DESCRIPTOR_TYPE_
+/// SAMPLER`, or a `COMBINED_IMAGE_SAMPLER`'s sampler half).
+bool isSamplerDescriptorType(VkDescriptorType Type);
+
 /// Whether \p Type consumes a dynamic offset supplied at
 /// `vkCmdBindDescriptorSets` time.
 bool isDynamicDescriptorType(VkDescriptorType Type);
 
-/// Whether \p Type's materialized `FemeDescriptor` must never carry
-/// `FEME_DESCRIPTOR_UAV` -- true for a uniform buffer, matching Vulkan's
-/// own read-only restriction on that descriptor type.
+/// Whether \p Type's materialized `FemeDescriptor`/`FemeImageDescriptor`
+/// must never carry `FEME_DESCRIPTOR_UAV`/`FEME_IMAGE_STORAGE` -- true for a
+/// uniform buffer or a sampled (non-storage) image, matching Vulkan's own
+/// read-only restriction on those descriptor types.
 bool isReadOnlyDescriptorType(VkDescriptorType Type);
 
 /// One `VkDescriptorSetLayoutBinding`, retained for later validation
@@ -151,9 +177,24 @@ struct DescriptorBufferBinding {
   BufferView *View = nullptr;
 };
 
-/// A `VkDescriptorSet`: per-binding arrays of `DescriptorBufferBinding`,
-/// sized from its `DescriptorSetLayout` at allocation time. Not
-/// dispatchable.
+/// (V5) One descriptor array element's source image/sampler record: an
+/// image binding (`SAMPLED_IMAGE`/`STORAGE_IMAGE`) sets \p View and leaves
+/// \p Samp null; a plain `SAMPLER` sets \p Samp and leaves \p View null; a
+/// `COMBINED_IMAGE_SAMPLER` sets both. \p Layout is the `VkImageLayout`
+/// `vkUpdateDescriptorSets` recorded for the image half (per
+/// `VkDescriptorImageInfo::imageLayout`) -- tracked for parity with the
+/// image object model's own layout bookkeeping, but (like every other
+/// layout here, see Image.h's file comment) not re-validated against the
+/// image's current tracked layout at dispatch time.
+struct DescriptorImageBinding {
+  ImageView *View = nullptr;
+  Sampler *Samp = nullptr;
+  VkImageLayout Layout = VK_IMAGE_LAYOUT_UNDEFINED;
+};
+
+/// A `VkDescriptorSet`: per-binding arrays of `DescriptorBufferBinding` or
+/// (V5) `DescriptorImageBinding`, sized from its `DescriptorSetLayout` at
+/// allocation time. Not dispatchable.
 class DescriptorSet {
 public:
   explicit DescriptorSet(const DescriptorSetLayout &Layout);
@@ -172,13 +213,27 @@ public:
   /// texel buffer's `VkBufferView` (V4), per the same rule above.
   void write(uint32_t Binding, uint32_t ArrayElement, BufferView *View);
 
+  /// (V5) Writes array element \p ArrayElement of binding \p Binding from a
+  /// sampled/storage image, plain sampler, or combined image-sampler
+  /// binding, per the same rule above. \p View and/or \p Samp may be null
+  /// depending on the binding's descriptor type -- see
+  /// `DescriptorImageBinding`'s comment.
+  void write(uint32_t Binding, uint32_t ArrayElement, ImageView *View,
+             Sampler *Samp, VkImageLayout Layout);
+
   /// The full declared array for \p Binding, or empty if this set's layout
   /// declares no such binding.
   llvm::ArrayRef<DescriptorBufferBinding> bindingArray(uint32_t Binding) const;
 
+  /// (V5) The full declared image/sampler array for \p Binding, or empty if
+  /// this set's layout declares no such binding.
+  llvm::ArrayRef<DescriptorImageBinding>
+  imageBindingArray(uint32_t Binding) const;
+
 private:
   const DescriptorSetLayout *Layout;
   std::map<uint32_t, std::vector<DescriptorBufferBinding>> Bindings;
+  std::map<uint32_t, std::vector<DescriptorImageBinding>> ImageBindings;
 };
 
 /// A `VkDescriptorPool`: owns every `DescriptorSet` allocated from it and
