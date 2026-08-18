@@ -27,8 +27,7 @@ protected:
     ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
               VK_SUCCESS);
     VkDeviceCreateInfo DevInfo{};
-    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
-              VK_SUCCESS);
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
   }
   void TearDown() override {
     vkDestroyDevice(Device, nullptr);
@@ -58,8 +57,7 @@ TEST_F(BufferTest, CreateBindDestroy) {
   AllocInfo.allocationSize = Reqs.size;
   AllocInfo.memoryTypeIndex = 0;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
 
   EXPECT_EQ(vkBindBufferMemory(Device, Buf, Memory, 0), VK_SUCCESS);
 
@@ -83,8 +81,7 @@ TEST_F(BufferTest, BindBufferMemory2) {
   AllocInfo.allocationSize = 64;
   AllocInfo.memoryTypeIndex = 0;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
 
   VkBindBufferMemoryInfo BindInfo{};
   BindInfo.buffer = Buf;

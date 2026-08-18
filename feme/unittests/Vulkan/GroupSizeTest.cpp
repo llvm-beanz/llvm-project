@@ -84,8 +84,8 @@ public:
   }
 
   void addLocalSizeId(uint32_t FnId, std::array<uint32_t, 3> Ids) {
-    addInstruction(OpExecutionModeId, {FnId, ExecutionModeLocalSizeId, Ids[0],
-                                      Ids[1], Ids[2]});
+    addInstruction(OpExecutionModeId,
+                   {FnId, ExecutionModeLocalSizeId, Ids[0], Ids[1], Ids[2]});
   }
 
   void addSpecId(uint32_t TargetId, uint32_t SpecId) {
@@ -172,8 +172,8 @@ TEST(GroupSize, BuiltInWorkgroupSizeOverridesLocalSize) {
   Builder.addSpecConstantComposite(/*ResultId=*/23, {20, 21, 22});
   Builder.addBuiltInWorkgroupSize(/*TargetId=*/23);
 
-  std::array<SpecializationOverride, 2> Overrides{
-      SpecializationOverride{0, 32}, SpecializationOverride{1, 4}};
+  std::array<SpecializationOverride, 2> Overrides{SpecializationOverride{0, 32},
+                                                  SpecializationOverride{1, 4}};
   Expected<std::array<uint32_t, 3>> Result =
       resolveComputeGroupSize(Builder.words(), "main", Overrides);
   ASSERT_THAT_ERROR(Result.takeError(), Succeeded());

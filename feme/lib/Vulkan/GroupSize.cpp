@@ -86,9 +86,9 @@ std::string decodeLiteralString(ArrayRef<uint32_t> Operands, size_t &Index) {
   for (; Index < Operands.size(); ++Index) {
     uint32_t Word = Operands[Index];
     char Bytes[4] = {static_cast<char>(Word & 0xFF),
-                    static_cast<char>((Word >> 8) & 0xFF),
-                    static_cast<char>((Word >> 16) & 0xFF),
-                    static_cast<char>((Word >> 24) & 0xFF)};
+                     static_cast<char>((Word >> 8) & 0xFF),
+                     static_cast<char>((Word >> 16) & 0xFF),
+                     static_cast<char>((Word >> 24) & 0xFF)};
     bool Terminated = false;
     for (char C : Bytes) {
       if (C == '\0') {
@@ -159,7 +159,7 @@ Expected<std::array<uint32_t, 3>> feme::vulkan::resolveComputeGroupSize(
   // execution modes.
   DenseMap<uint32_t, ScalarConstant> Scalars;
   DenseMap<uint32_t, SmallVector<uint32_t, 3>> Composites;
-  DenseMap<uint32_t, uint32_t> SpecIds;    // target id -> SpecId
+  DenseMap<uint32_t, uint32_t> SpecIds; // target id -> SpecId
   uint32_t WorkgroupSizeComposite = 0;
   bool HasWorkgroupSizeComposite = false;
   std::array<uint32_t, 3> LocalSize{1, 1, 1};
@@ -177,7 +177,7 @@ Expected<std::array<uint32_t, 3>> feme::vulkan::resolveComputeGroupSize(
       if (Decoration == DecorationSpecId && Insn.Operands.size() >= 3)
         SpecIds[Target] = Insn.Operands[2];
       else if (Decoration == DecorationBuiltIn && Insn.Operands.size() >= 3 &&
-              Insn.Operands[2] == BuiltInWorkgroupSize) {
+               Insn.Operands[2] == BuiltInWorkgroupSize) {
         WorkgroupSizeComposite = Target;
         HasWorkgroupSizeComposite = true;
       }

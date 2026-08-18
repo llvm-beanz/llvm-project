@@ -26,7 +26,7 @@ namespace {
 /// Validates \p Count against `maxComputeWorkGroupCount`, per "Limits and
 /// features": "must be checked both at pipeline creation and dispatch".
 Error validateGroupCount(const PhysicalDeviceInfo *Info,
-                        std::array<uint32_t, 3> Count) {
+                         std::array<uint32_t, 3> Count) {
   if (!Info)
     return Error::success();
   const VkPhysicalDeviceLimits &Limits = Info->Properties.limits;
@@ -53,16 +53,14 @@ Error runDispatch(ComputePipeline &Pipeline, std::array<uint32_t, 3> Base,
   feme::cpu::StageArtifactInfo Artifact = Stage.getArtifactInfo();
 
   feme::cpu::DispatchResources Resources; // V1 is resource-free.
-  feme::cpu::PreparedDispatch Prepared =
-      feme::cpu::PreparedDispatch::create(Stage.getResourceInfo(), Resources,
-                                          Count);
+  feme::cpu::PreparedDispatch Prepared = feme::cpu::PreparedDispatch::create(
+      Stage.getResourceInfo(), Resources, Count);
 
   std::vector<uint8_t> GroupShared(Artifact.GroupSharedSize);
   for (uint32_t Z = 0; Z != Count[2]; ++Z)
     for (uint32_t Y = 0; Y != Count[1]; ++Y)
       for (uint32_t X = 0; X != Count[0]; ++X) {
-        std::array<uint32_t, 3> GroupID{Base[0] + X, Base[1] + Y,
-                                        Base[2] + Z};
+        std::array<uint32_t, 3> GroupID{Base[0] + X, Base[1] + Y, Base[2] + Z};
         if (Error E = Stage.invokeGroup(Prepared, GroupID, GroupShared))
           return E;
       }
@@ -103,13 +101,11 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
                                  "dispatch indirect offset is out of range "
                                  "of its buffer");
       std::array<uint32_t, 3> Count{};
-      std::memcpy(
-          Count.data(),
-          static_cast<const uint8_t *>(Cmd.IndirectBuffer->data()) +
-              Cmd.IndirectOffset,
-          sizeof(Count));
-      if (Error E =
-              validateGroupCount(CmdBuf.getPhysicalDeviceInfo(), Count))
+      std::memcpy(Count.data(),
+                  static_cast<const uint8_t *>(Cmd.IndirectBuffer->data()) +
+                      Cmd.IndirectOffset,
+                  sizeof(Count));
+      if (Error E = validateGroupCount(CmdBuf.getPhysicalDeviceInfo(), Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count))
         return E;
@@ -122,10 +118,9 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
 
 namespace feme::vulkan {
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
-                   const VkAllocationCallbacks *pAllocator,
-                   VkCommandPool *pCommandPool) {
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
+    VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkCommandPool *pCommandPool) {
   // Only the single compute/transfer queue family (index 0) exists.
   if (pCreateInfo->queueFamilyIndex != 0)
     return VK_ERROR_INITIALIZATION_FAILED;
@@ -150,9 +145,9 @@ vkDestroyCommandPool(VkDevice, VkCommandPool commandPool,
   Alloc.destroy(fromHandle<vulkan::CommandPool>(commandPool));
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkResetCommandPool(VkDevice, VkCommandPool commandPool,
-                   VkCommandPoolResetFlags) {
+VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(VkDevice,
+                                                  VkCommandPool commandPool,
+                                                  VkCommandPoolResetFlags) {
   fromHandle<vulkan::CommandPool>(commandPool)->reset();
   return VK_SUCCESS;
 }
@@ -171,19 +166,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkFreeCommandBuffers(VkDevice, VkCommandPool commandPool,
-                     uint32_t commandBufferCount,
-                     const VkCommandBuffer *pCommandBuffers) {
+VKAPI_ATTR void VKAPI_CALL vkFreeCommandBuffers(
+    VkDevice, VkCommandPool commandPool, uint32_t commandBufferCount,
+    const VkCommandBuffer *pCommandBuffers) {
   auto *Pool = fromHandle<vulkan::CommandPool>(commandPool);
   for (uint32_t I = 0; I != commandBufferCount; ++I)
     if (pCommandBuffers[I])
       Pool->free(fromHandle<vulkan::CommandBuffer>(pCommandBuffers[I]));
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkBeginCommandBuffer(VkCommandBuffer commandBuffer,
-                    const VkCommandBufferBeginInfo *) {
+VKAPI_ATTR VkResult VKAPI_CALL vkBeginCommandBuffer(
+    VkCommandBuffer commandBuffer, const VkCommandBufferBeginInfo *) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->begin();
   return VK_SUCCESS;
 }
@@ -217,19 +210,18 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
       ->dispatch({groupCountX, groupCountY, groupCountZ});
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
-                  uint32_t baseGroupY, uint32_t baseGroupZ,
-                  uint32_t groupCountX, uint32_t groupCountY,
-                  uint32_t groupCountZ) {
+VKAPI_ATTR void VKAPI_CALL vkCmdDispatchBase(
+    VkCommandBuffer commandBuffer, uint32_t baseGroupX, uint32_t baseGroupY,
+    uint32_t baseGroupZ, uint32_t groupCountX, uint32_t groupCountY,
+    uint32_t groupCountZ) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->dispatchBase({baseGroupX, baseGroupY, baseGroupZ},
                      {groupCountX, groupCountY, groupCountZ});
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
-                     VkDeviceSize offset) {
+VKAPI_ATTR void VKAPI_CALL vkCmdDispatchIndirect(VkCommandBuffer commandBuffer,
+                                                 VkBuffer buffer,
+                                                 VkDeviceSize offset) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->dispatchIndirect(fromHandle<vulkan::Buffer>(buffer), offset);
 }

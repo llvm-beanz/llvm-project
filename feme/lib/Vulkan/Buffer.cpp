@@ -30,7 +30,7 @@ namespace feme::vulkan {
 
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
-              const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer) {
+               const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer) {
   (void)device;
   // No sparse binding is supported (see "Initial Non-Goals").
   if (pCreateInfo->flags != 0)
@@ -55,8 +55,9 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(
   Alloc.destroy(fromHandle<Buffer>(buffer));
 }
 
-VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
-    VkDevice device, VkBuffer buffer, VkMemoryRequirements *pMemoryRequirements) {
+VKAPI_ATTR void VKAPI_CALL
+vkGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer,
+                              VkMemoryRequirements *pMemoryRequirements) {
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
   getRequirements(*fromHandle<Buffer>(buffer), Info, *pMemoryRequirements);
@@ -71,17 +72,17 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
                   pMemoryRequirements->memoryRequirements);
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkBindBufferMemory(VkDevice, VkBuffer buffer, VkDeviceMemory memory,
-                   VkDeviceSize memoryOffset) {
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice, VkBuffer buffer,
+                                                  VkDeviceMemory memory,
+                                                  VkDeviceSize memoryOffset) {
   fromHandle<Buffer>(buffer)->bind(fromHandle<DeviceMemory>(memory),
                                    memoryOffset);
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2(
-    VkDevice device, uint32_t bindInfoCount,
-    const VkBindBufferMemoryInfo *pBindInfos) {
+VKAPI_ATTR VkResult VKAPI_CALL
+vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
+                    const VkBindBufferMemoryInfo *pBindInfos) {
   for (uint32_t I = 0; I != bindInfoCount; ++I)
     feme::vulkan::vkBindBufferMemory(device, pBindInfos[I].buffer,
                                      pBindInfos[I].memory,

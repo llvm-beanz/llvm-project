@@ -75,8 +75,7 @@ protected:
     ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
               VK_SUCCESS);
     VkDeviceCreateInfo DevInfo{};
-    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
-              VK_SUCCESS);
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
 
     VkPipelineLayoutCreateInfo LayoutInfo{};
     ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
@@ -164,8 +163,7 @@ TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {
   CreateInfo.codeSize = 3; // Not a multiple of 4.
   CreateInfo.pCode = Code;
   VkShaderModule Module = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreateShaderModule(VK_NULL_HANDLE, &CreateInfo, nullptr,
-                                 &Module),
+  EXPECT_EQ(vkCreateShaderModule(VK_NULL_HANDLE, &CreateInfo, nullptr, &Module),
             VK_ERROR_INITIALIZATION_FAILED);
 }
 

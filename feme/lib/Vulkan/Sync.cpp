@@ -20,7 +20,7 @@ namespace feme::vulkan {
 
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateFence(VkDevice, const VkFenceCreateInfo *pCreateInfo,
-             const VkAllocationCallbacks *pAllocator, VkFence *pFence) {
+              const VkAllocationCallbacks *pAllocator, VkFence *pFence) {
   Allocator Alloc(pAllocator);
   Fence *Obj = Alloc.create<Fence>(
       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
@@ -40,7 +40,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyFence(
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(VkDevice, uint32_t fenceCount,
-                                            const VkFence *pFences) {
+                                             const VkFence *pFences) {
   for (uint32_t I = 0; I != fenceCount; ++I)
     fromHandle<Fence>(pFences[I])->reset();
   return VK_SUCCESS;
@@ -66,9 +66,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice, uint32_t fenceCount,
   return (waitAll ? All : Any) ? VK_SUCCESS : VK_TIMEOUT;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkQueueSubmit(VkQueue, uint32_t submitCount, const VkSubmitInfo *pSubmits,
-             VkFence fence) {
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue, uint32_t submitCount,
+                                             const VkSubmitInfo *pSubmits,
+                                             VkFence fence) {
   for (uint32_t I = 0; I != submitCount; ++I) {
     const VkSubmitInfo &Submit = pSubmits[I];
     // No `VkSemaphore` exists in the object model yet (see the file

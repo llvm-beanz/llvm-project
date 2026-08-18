@@ -29,8 +29,7 @@ protected:
               VK_SUCCESS);
 
     VkDeviceCreateInfo DevInfo{};
-    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
-              VK_SUCCESS);
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
   }
   void TearDown() override {
     vkDestroyDevice(Device, nullptr);
@@ -48,8 +47,7 @@ TEST_F(MemoryTest, AllocateMapWriteFree) {
   AllocInfo.memoryTypeIndex = 0;
 
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_NE(Memory, VK_NULL_HANDLE);
 
   void *Data = nullptr;
@@ -90,8 +88,7 @@ TEST_F(MemoryTest, MapRejectsOutOfRange) {
   AllocInfo.memoryTypeIndex = 0;
 
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
 
   void *Data = nullptr;
   EXPECT_EQ(vkMapMemory(Device, Memory, 32, 64, 0, &Data),

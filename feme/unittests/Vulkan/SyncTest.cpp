@@ -65,8 +65,7 @@ protected:
     VkDeviceCreateInfo DevInfo{};
     DevInfo.queueCreateInfoCount = 1;
     DevInfo.pQueueCreateInfos = &QueueInfo;
-    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
-              VK_SUCCESS);
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
     vkGetDeviceQueue(Device, 0, 0, &Queue);
 
     VkPipelineLayoutCreateInfo LayoutInfo{};
@@ -86,8 +85,8 @@ protected:
     PipelineInfo.stage.module = Module;
     PipelineInfo.stage.pName = "main";
     PipelineInfo.layout = Layout;
-    ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1,
-                                       &PipelineInfo, nullptr, &Pipeline),
+    ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                       nullptr, &Pipeline),
               VK_SUCCESS);
 
     VkCommandPoolCreateInfo PoolInfo{};

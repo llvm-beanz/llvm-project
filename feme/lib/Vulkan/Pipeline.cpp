@@ -37,8 +37,8 @@ feme::vulkan::ComputePipeline::ComputePipeline(
 feme::vulkan::ComputePipeline::~ComputePipeline() = default;
 feme::vulkan::ComputePipeline::ComputePipeline(ComputePipeline &&) noexcept =
     default;
-feme::vulkan::ComputePipeline &feme::vulkan::ComputePipeline::operator=(
-    ComputePipeline &&) noexcept = default;
+feme::vulkan::ComputePipeline &
+feme::vulkan::ComputePipeline::operator=(ComputePipeline &&) noexcept = default;
 
 namespace {
 
@@ -80,8 +80,7 @@ buildSpecializationOverrides(const VkSpecializationInfo *Info) {
     uint32_t Value = 0;
     if (Entry.size >= sizeof(uint32_t))
       std::memcpy(&Value, Data + Entry.offset, sizeof(uint32_t));
-    Overrides.push_back(
-        SpecializationOverride{Entry.constantID, Value});
+    Overrides.push_back(SpecializationOverride{Entry.constantID, Value});
   }
   return Overrides;
 }
@@ -93,7 +92,8 @@ namespace feme::vulkan {
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     VkDevice, const VkShaderModuleCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule) {
-  if (pCreateInfo->codeSize == 0 || pCreateInfo->codeSize % sizeof(uint32_t) != 0)
+  if (pCreateInfo->codeSize == 0 ||
+      pCreateInfo->codeSize % sizeof(uint32_t) != 0)
     return VK_ERROR_INITIALIZATION_FAILED;
 
   size_t WordCount = pCreateInfo->codeSize / sizeof(uint32_t);
@@ -111,17 +111,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
 
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyShaderModule(VkDevice, VkShaderModule shaderModule,
-                     const VkAllocationCallbacks *pAllocator) {
+                      const VkAllocationCallbacks *pAllocator) {
   if (!shaderModule)
     return;
   Allocator Alloc(pAllocator);
   Alloc.destroy(fromHandle<vulkan::ShaderModule>(shaderModule));
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineLayout(
-    VkDevice, const VkPipelineLayoutCreateInfo *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator,
-    VkPipelineLayout *pPipelineLayout) {
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreatePipelineLayout(VkDevice, const VkPipelineLayoutCreateInfo *pCreateInfo,
+                       const VkAllocationCallbacks *pAllocator,
+                       VkPipelineLayout *pPipelineLayout) {
   // V1 only supports a resource-free pipeline layout (see PipelineLayout's
   // own comment): descriptor sets are V2, push constants are V3.
   if (pCreateInfo->setLayoutCount != 0 ||
@@ -178,8 +178,8 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
     return GroupSize.takeError();
 
   const VkPhysicalDeviceLimits &Limits = DeviceInfo.Properties.limits;
-  uint64_t Invocations = uint64_t(GroupSize->at(0)) * GroupSize->at(1) *
-                        GroupSize->at(2);
+  uint64_t Invocations =
+      uint64_t(GroupSize->at(0)) * GroupSize->at(1) * GroupSize->at(2);
   if ((*GroupSize)[0] > Limits.maxComputeWorkGroupSize[0] ||
       (*GroupSize)[1] > Limits.maxComputeWorkGroupSize[1] ||
       (*GroupSize)[2] > Limits.maxComputeWorkGroupSize[2] ||
@@ -193,7 +193,7 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
 
   MemoryBufferRef Buffer(
       StringRef(reinterpret_cast<const char *>(Module->words().data()),
-               Module->words().size() * sizeof(uint32_t)),
+                Module->words().size() * sizeof(uint32_t)),
       "shader-module");
   feme::SPIRVImporter Importer;
   feme::ImportOptions ImportOpts;
@@ -216,10 +216,10 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   // which `feme::spirv::createConvertSPIRVToLLVMPass` does not resolve on
   // its own (see GroupSize.h's file comment).
   if (llvm::Function *EntryFn = LLVMMod.getFunction(EntryPoint)) {
-    std::string NumThreads = (Twine(GroupSize->at(0)) + "," +
-                             Twine(GroupSize->at(1)) + "," +
-                             Twine(GroupSize->at(2)))
-                                .str();
+    std::string NumThreads =
+        (Twine(GroupSize->at(0)) + "," + Twine(GroupSize->at(1)) + "," +
+         Twine(GroupSize->at(2)))
+            .str();
     EntryFn->addFnAttr("hlsl.numthreads", NumThreads);
   }
 
@@ -241,8 +241,7 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
         "shader uses descriptor/root-constant resources, which this "
         "milestone's resource-free VkPipelineLayout cannot bind (see V2/V3)");
 
-  return std::make_unique<ComputePipeline>(std::move(Ctx),
-                                           std::move(*Stage));
+  return std::make_unique<ComputePipeline>(std::move(Ctx), std::move(*Stage));
 }
 
 } // namespace

@@ -99,49 +99,46 @@ vkGetInstanceProcAddr(VkInstance instance, const char *pName);
 
 // V1: device memory (see "Memory and Buffers" in
 // feme/docs/FeMeVulkanDesign.md).
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
+    VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
+    const VkAllocationCallbacks *pAllocator, VkDeviceMemory *pMemory);
+VKAPI_ATTR void VKAPI_CALL
+vkFreeMemory(VkDevice device, VkDeviceMemory memory,
+             const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL
-vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
-                 const VkAllocationCallbacks *pAllocator,
-                 VkDeviceMemory *pMemory);
-VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice device,
-                                        VkDeviceMemory memory,
-                                        const VkAllocationCallbacks *pAllocator);
-VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(VkDevice device,
-                                           VkDeviceMemory memory,
-                                           VkDeviceSize offset,
-                                           VkDeviceSize size,
-                                           VkMemoryMapFlags flags,
-                                           void **ppData);
+vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset,
+            VkDeviceSize size, VkMemoryMapFlags flags, void **ppData);
 VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice device,
                                          VkDeviceMemory memory);
-VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
-    VkDevice device, uint32_t memoryRangeCount,
-    const VkMappedMemoryRange *pMemoryRanges);
-VKAPI_ATTR VkResult VKAPI_CALL vkInvalidateMappedMemoryRanges(
-    VkDevice device, uint32_t memoryRangeCount,
-    const VkMappedMemoryRange *pMemoryRanges);
-VKAPI_ATTR void VKAPI_CALL vkGetDeviceMemoryCommitment(
-    VkDevice device, VkDeviceMemory memory,
-    VkDeviceSize *pCommittedMemoryInBytes);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkFlushMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
+                          const VkMappedMemoryRange *pMemoryRanges);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
+                               const VkMappedMemoryRange *pMemoryRanges);
+VKAPI_ATTR void VKAPI_CALL
+vkGetDeviceMemoryCommitment(VkDevice device, VkDeviceMemory memory,
+                            VkDeviceSize *pCommittedMemoryInBytes);
 
 // V1: buffers (see "Object Model" and "Memory and Buffers").
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
-              const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer);
+               const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer);
 VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(
     VkDevice device, VkBuffer buffer, const VkAllocationCallbacks *pAllocator);
-VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
-    VkDevice device, VkBuffer buffer,
-    VkMemoryRequirements *pMemoryRequirements);
+VKAPI_ATTR void VKAPI_CALL
+vkGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer,
+                              VkMemoryRequirements *pMemoryRequirements);
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
     VkDevice device, const VkBufferMemoryRequirementsInfo2 *pInfo,
     VkMemoryRequirements2 *pMemoryRequirements);
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice device,
+                                                  VkBuffer buffer,
+                                                  VkDeviceMemory memory,
+                                                  VkDeviceSize memoryOffset);
 VKAPI_ATTR VkResult VKAPI_CALL
-vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory,
-                   VkDeviceSize memoryOffset);
-VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2(
-    VkDevice device, uint32_t bindInfoCount,
-    const VkBindBufferMemoryInfo *pBindInfos);
+vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
+                    const VkBindBufferMemoryInfo *pBindInfos);
 
 // V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
 // Pipeline Compilation").
@@ -150,50 +147,44 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyShaderModule(VkDevice device, VkShaderModule shaderModule,
-                     const VkAllocationCallbacks *pAllocator);
+                      const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineLayout(
     VkDevice device, const VkPipelineLayoutCreateInfo *pCreateInfo,
-    const VkAllocationCallbacks *pAllocator,
-    VkPipelineLayout *pPipelineLayout);
+    const VkAllocationCallbacks *pAllocator, VkPipelineLayout *pPipelineLayout);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyPipelineLayout(VkDevice device, VkPipelineLayout pipelineLayout,
-                       const VkAllocationCallbacks *pAllocator);
+                        const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
     VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
     const VkComputePipelineCreateInfo *pCreateInfos,
     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines);
-VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
-    VkDevice device, VkPipeline pipeline,
-    const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyPipeline(VkDevice device, VkPipeline pipeline,
+                  const VkAllocationCallbacks *pAllocator);
 
 // V1: command pools/buffers, and the V1 command set (bind compute
 // pipeline, dispatch, dispatch base, dispatch indirect -- see "Command
 // Buffers").
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
-                   const VkAllocationCallbacks *pAllocator,
-                   VkCommandPool *pCommandPool);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
+    VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkCommandPool *pCommandPool);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyCommandPool(VkDevice device, VkCommandPool commandPool,
                      const VkAllocationCallbacks *pAllocator);
-VKAPI_ATTR VkResult VKAPI_CALL
-vkResetCommandPool(VkDevice device, VkCommandPool commandPool,
-                   VkCommandPoolResetFlags flags);
+VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(
+    VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags);
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
     VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
     VkCommandBuffer *pCommandBuffers);
-VKAPI_ATTR void VKAPI_CALL
-vkFreeCommandBuffers(VkDevice device, VkCommandPool commandPool,
-                     uint32_t commandBufferCount,
-                     const VkCommandBuffer *pCommandBuffers);
-VKAPI_ATTR VkResult VKAPI_CALL
-vkBeginCommandBuffer(VkCommandBuffer commandBuffer,
-                    const VkCommandBufferBeginInfo *pBeginInfo);
+VKAPI_ATTR void VKAPI_CALL vkFreeCommandBuffers(
+    VkDevice device, VkCommandPool commandPool, uint32_t commandBufferCount,
+    const VkCommandBuffer *pCommandBuffers);
+VKAPI_ATTR VkResult VKAPI_CALL vkBeginCommandBuffer(
+    VkCommandBuffer commandBuffer, const VkCommandBufferBeginInfo *pBeginInfo);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkEndCommandBuffer(VkCommandBuffer commandBuffer);
-VKAPI_ATTR VkResult VKAPI_CALL
-vkResetCommandBuffer(VkCommandBuffer commandBuffer,
-                    VkCommandBufferResetFlags flags);
+VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandBuffer(
+    VkCommandBuffer commandBuffer, VkCommandBufferResetFlags flags);
 VKAPI_ATTR void VKAPI_CALL
 vkCmdBindPipeline(VkCommandBuffer commandBuffer,
                   VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline);
@@ -201,35 +192,34 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
                                          uint32_t groupCountX,
                                          uint32_t groupCountY,
                                          uint32_t groupCountZ);
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
-                  uint32_t baseGroupY, uint32_t baseGroupZ,
-                  uint32_t groupCountX, uint32_t groupCountY,
-                  uint32_t groupCountZ);
-VKAPI_ATTR void VKAPI_CALL
-vkCmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
-                     VkDeviceSize offset);
+VKAPI_ATTR void VKAPI_CALL vkCmdDispatchBase(
+    VkCommandBuffer commandBuffer, uint32_t baseGroupX, uint32_t baseGroupY,
+    uint32_t baseGroupZ, uint32_t groupCountX, uint32_t groupCountY,
+    uint32_t groupCountZ);
+VKAPI_ATTR void VKAPI_CALL vkCmdDispatchIndirect(VkCommandBuffer commandBuffer,
+                                                 VkBuffer buffer,
+                                                 VkDeviceSize offset);
 
 // V1: fences and queue submission (see "Queues, Scheduling, and
 // Synchronization").
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateFence(VkDevice device, const VkFenceCreateInfo *pCreateInfo,
-             const VkAllocationCallbacks *pAllocator, VkFence *pFence);
+              const VkAllocationCallbacks *pAllocator, VkFence *pFence);
 VKAPI_ATTR void VKAPI_CALL vkDestroyFence(
     VkDevice device, VkFence fence, const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(VkDevice device,
                                              uint32_t fenceCount,
                                              const VkFence *pFences);
-VKAPI_ATTR VkResult VKAPI_CALL vkGetFenceStatus(VkDevice device,
-                                                VkFence fence);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetFenceStatus(VkDevice device, VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice device,
                                                uint32_t fenceCount,
                                                const VkFence *pFences,
                                                VkBool32 waitAll,
                                                uint64_t timeout);
-VKAPI_ATTR VkResult VKAPI_CALL
-vkQueueSubmit(VkQueue queue, uint32_t submitCount,
-             const VkSubmitInfo *pSubmits, VkFence fence);
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue,
+                                             uint32_t submitCount,
+                                             const VkSubmitInfo *pSubmits,
+                                             VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue);
 
 } // namespace feme::vulkan

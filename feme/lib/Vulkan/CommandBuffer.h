@@ -79,8 +79,8 @@ public:
   bool isRecording() const { return Recording; }
 
   void bindPipeline(ComputePipeline *Pipeline) {
-    Commands.push_back(RecordedCommand{RecordedCommand::Kind::BindPipeline,
-                                       Pipeline});
+    Commands.push_back(
+        RecordedCommand{RecordedCommand::Kind::BindPipeline, Pipeline});
   }
   void dispatch(std::array<uint32_t, 3> Count) {
     RecordedCommand Cmd{RecordedCommand::Kind::Dispatch};

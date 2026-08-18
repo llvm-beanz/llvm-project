@@ -24,8 +24,8 @@ namespace {
 /// Returns null on failure, matching every other allocation path here.
 void *allocateAligned(size_t Size, size_t Alignment) {
   void *Ptr = nullptr;
-  if (posix_memalign(&Ptr, Alignment < sizeof(void *) ? sizeof(void *)
-                                                       : Alignment,
+  if (posix_memalign(&Ptr,
+                     Alignment < sizeof(void *) ? sizeof(void *) : Alignment,
                      Size) != 0)
     return nullptr;
   return Ptr;
@@ -35,10 +35,9 @@ void *allocateAligned(size_t Size, size_t Alignment) {
 
 namespace feme::vulkan {
 
-VKAPI_ATTR VkResult VKAPI_CALL
-vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
-                 const VkAllocationCallbacks *pAllocator,
-                 VkDeviceMemory *pMemory) {
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(
+    VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
+    const VkAllocationCallbacks *pAllocator, VkDeviceMemory *pMemory) {
   Device *Dev = fromHandle<Device>(device);
   const PhysicalDeviceInfo &Info = Dev->getPhysicalDevice().getInfo();
 
@@ -64,8 +63,8 @@ vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice, VkDeviceMemory memory,
-                                        const VkAllocationCallbacks *pAllocator) {
+VKAPI_ATTR void VKAPI_CALL vkFreeMemory(
+    VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks *pAllocator) {
   if (!memory)
     return;
   DeviceMemory *Obj = fromHandle<DeviceMemory>(memory);
@@ -80,8 +79,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(VkDevice, VkDeviceMemory memory,
                                            void **ppData) {
   DeviceMemory *Obj = fromHandle<DeviceMemory>(memory);
   // `VK_WHOLE_SIZE` maps from `offset` to the end of the allocation.
-  VkDeviceSize MapSize =
-      size == VK_WHOLE_SIZE ? Obj->size() - offset : size;
+  VkDeviceSize MapSize = size == VK_WHOLE_SIZE ? Obj->size() - offset : size;
   if (offset > Obj->size() || MapSize > Obj->size() - offset)
     return VK_ERROR_MEMORY_MAP_FAILED;
   *ppData = static_cast<uint8_t *>(Obj->data()) + offset;
@@ -93,9 +91,9 @@ VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice, VkDeviceMemory) {
   // Buffers": "Coherent memory avoids cache-management work").
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
-    VkDevice, uint32_t memoryRangeCount,
-    const VkMappedMemoryRange *pMemoryRanges) {
+VKAPI_ATTR VkResult VKAPI_CALL
+vkFlushMappedMemoryRanges(VkDevice, uint32_t memoryRangeCount,
+                          const VkMappedMemoryRange *pMemoryRanges) {
   // Every reported memory type is `HOST_COHERENT`, so flush/invalidate only
   // validate ranges and otherwise do nothing (see "Memory and Buffers").
   for (uint32_t I = 0; I != memoryRangeCount; ++I) {
@@ -110,9 +108,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
   return VK_SUCCESS;
 }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkInvalidateMappedMemoryRanges(
-    VkDevice device, uint32_t memoryRangeCount,
-    const VkMappedMemoryRange *pMemoryRanges) {
+VKAPI_ATTR VkResult VKAPI_CALL
+vkInvalidateMappedMemoryRanges(VkDevice device, uint32_t memoryRangeCount,
+                               const VkMappedMemoryRange *pMemoryRanges) {
   return feme::vulkan::vkFlushMappedMemoryRanges(device, memoryRangeCount,
                                                  pMemoryRanges);
 }

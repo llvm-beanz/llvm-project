@@ -7,8 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #define VK_NO_PROTOTYPES
-#include "Buffer.h"
 #include "CommandBuffer.h"
+#include "Buffer.h"
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
@@ -63,8 +63,7 @@ protected:
     ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
               VK_SUCCESS);
     VkDeviceCreateInfo DevInfo{};
-    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device),
-              VK_SUCCESS);
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
 
     VkPipelineLayoutCreateInfo LayoutInfo{};
     ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
@@ -83,8 +82,8 @@ protected:
     PipelineInfo.stage.module = Module;
     PipelineInfo.stage.pName = "main";
     PipelineInfo.layout = Layout;
-    ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1,
-                                       &PipelineInfo, nullptr, &Pipeline),
+    ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                       nullptr, &Pipeline),
               VK_SUCCESS);
 
     VkCommandPoolCreateInfo PoolInfo{};
@@ -160,8 +159,7 @@ TEST_F(CommandBufferTest, DispatchIndirectReadsBuffer) {
   AllocInfo.allocationSize = 16;
   AllocInfo.memoryTypeIndex = 0;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_EQ(vkBindBufferMemory(Device, IndirectBuf, Memory, 0), VK_SUCCESS);
 
   void *Data = nullptr;
