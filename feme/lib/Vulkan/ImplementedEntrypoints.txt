@@ -77,3 +77,13 @@ vkCmdBindPipeline
 vkCmdDispatch
 vkCmdDispatchBase
 vkCmdDispatchIndirect
+
+# V1: fences and queue submission (see "Queues, Scheduling, and
+# Synchronization").
+vkCreateFence
+vkDestroyFence
+vkResetFences
+vkGetFenceStatus
+vkWaitForFences
+vkQueueSubmit
+vkQueueWaitIdle

@@ -210,6 +210,28 @@ VKAPI_ATTR void VKAPI_CALL
 vkCmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
                      VkDeviceSize offset);
 
+// V1: fences and queue submission (see "Queues, Scheduling, and
+// Synchronization").
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateFence(VkDevice device, const VkFenceCreateInfo *pCreateInfo,
+             const VkAllocationCallbacks *pAllocator, VkFence *pFence);
+VKAPI_ATTR void VKAPI_CALL vkDestroyFence(
+    VkDevice device, VkFence fence, const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkResetFences(VkDevice device,
+                                             uint32_t fenceCount,
+                                             const VkFence *pFences);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetFenceStatus(VkDevice device,
+                                                VkFence fence);
+VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice device,
+                                               uint32_t fenceCount,
+                                               const VkFence *pFences,
+                                               VkBool32 waitAll,
+                                               uint64_t timeout);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkQueueSubmit(VkQueue queue, uint32_t submitCount,
+             const VkSubmitInfo *pSubmits, VkFence fence);
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H

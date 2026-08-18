@@ -12,6 +12,7 @@ add_feme_unittest(FeMeVulkanTests
   PhysicalDeviceInfoTest.cpp
   PipelineTest.cpp
   ProcAddrTest.cpp
+  SyncTest.cpp
   )
 target_link_libraries(FeMeVulkanTests
   PRIVATE

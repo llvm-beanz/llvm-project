@@ -313,8 +313,9 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetDeviceQueue2(
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkDeviceWaitIdle(VkDevice) {
-  // No queue submission machinery exists yet (see V1), so every queue is
-  // trivially idle.
+  // vkQueueSubmit executes every submission synchronously (see Sync.h's
+  // file comment), so every queue is always already idle by the time this
+  // is called.
   return VK_SUCCESS;
 }
 

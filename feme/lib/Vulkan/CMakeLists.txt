@@ -84,6 +84,7 @@ add_feme_library(FeMeVulkanCore STATIC
   PhysicalDeviceInfo.cpp
   Pipeline.cpp
   ProcAddr.cpp
+  Sync.cpp
 
   DISABLE_INSTALL
 
