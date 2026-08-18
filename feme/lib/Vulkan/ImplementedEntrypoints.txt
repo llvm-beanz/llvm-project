@@ -62,3 +62,18 @@ vkCreatePipelineLayout
 vkDestroyPipelineLayout
 vkCreateComputePipelines
 vkDestroyPipeline
+
+# V1: command pools/buffers, and the V1 command set (bind compute pipeline,
+# dispatch, dispatch base, dispatch indirect -- see "Command Buffers").
+vkCreateCommandPool
+vkDestroyCommandPool
+vkResetCommandPool
+vkAllocateCommandBuffers
+vkFreeCommandBuffers
+vkBeginCommandBuffer
+vkEndCommandBuffer
+vkResetCommandBuffer
+vkCmdBindPipeline
+vkCmdDispatch
+vkCmdDispatchBase
+vkCmdDispatchIndirect

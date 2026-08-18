@@ -30,6 +30,10 @@
 using namespace feme::vulkan;
 using namespace llvm;
 
+feme::vulkan::ComputePipeline::ComputePipeline(
+    std::unique_ptr<feme::Context> Ctx,
+    std::unique_ptr<feme::cpu::CompiledStage> Stage)
+    : Ctx(std::move(Ctx)), Stage(std::move(Stage)) {}
 feme::vulkan::ComputePipeline::~ComputePipeline() = default;
 feme::vulkan::ComputePipeline::ComputePipeline(ComputePipeline &&) noexcept =
     default;

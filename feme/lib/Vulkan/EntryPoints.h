@@ -166,6 +166,50 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
     VkDevice device, VkPipeline pipeline,
     const VkAllocationCallbacks *pAllocator);
 
+// V1: command pools/buffers, and the V1 command set (bind compute
+// pipeline, dispatch, dispatch base, dispatch indirect -- see "Command
+// Buffers").
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
+                   const VkAllocationCallbacks *pAllocator,
+                   VkCommandPool *pCommandPool);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyCommandPool(VkDevice device, VkCommandPool commandPool,
+                     const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkResetCommandPool(VkDevice device, VkCommandPool commandPool,
+                   VkCommandPoolResetFlags flags);
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
+    VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
+    VkCommandBuffer *pCommandBuffers);
+VKAPI_ATTR void VKAPI_CALL
+vkFreeCommandBuffers(VkDevice device, VkCommandPool commandPool,
+                     uint32_t commandBufferCount,
+                     const VkCommandBuffer *pCommandBuffers);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkBeginCommandBuffer(VkCommandBuffer commandBuffer,
+                    const VkCommandBufferBeginInfo *pBeginInfo);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkEndCommandBuffer(VkCommandBuffer commandBuffer);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkResetCommandBuffer(VkCommandBuffer commandBuffer,
+                    VkCommandBufferResetFlags flags);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBindPipeline(VkCommandBuffer commandBuffer,
+                  VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline);
+VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
+                                         uint32_t groupCountX,
+                                         uint32_t groupCountY,
+                                         uint32_t groupCountZ);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
+                  uint32_t baseGroupY, uint32_t baseGroupZ,
+                  uint32_t groupCountX, uint32_t groupCountY,
+                  uint32_t groupCountZ);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                     VkDeviceSize offset);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H

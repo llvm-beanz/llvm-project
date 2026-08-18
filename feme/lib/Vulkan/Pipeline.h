@@ -64,8 +64,7 @@ class PipelineLayout {};
 class ComputePipeline {
 public:
   ComputePipeline(std::unique_ptr<feme::Context> Ctx,
-                  std::unique_ptr<feme::cpu::CompiledStage> Stage)
-      : Ctx(std::move(Ctx)), Stage(std::move(Stage)) {}
+                  std::unique_ptr<feme::cpu::CompiledStage> Stage);
   ~ComputePipeline();
   ComputePipeline(ComputePipeline &&) noexcept;
   ComputePipeline &operator=(ComputePipeline &&) noexcept;
