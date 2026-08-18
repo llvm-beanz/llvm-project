@@ -23,8 +23,6 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Authentication failed for an unspecified reason, can you retry the request below.
-
 Can you flesh out the R30 and V5 gaps from the roadmap document?
 
 The previous agent left the comment:
