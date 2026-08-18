@@ -1,0 +1,36 @@
+// V4 ("first CTS runs over the advertised subset", see
+// feme/docs/FeMeVulkanDesign.md's V4 status note): filters a Vulkan-CTS
+// case list down to FeMe's advertised (compute-only) subset with
+// feme/utils/filter_vulkan_cts_cases.py, then runs `deqp-vk` against
+// libfeme_vulkan with exactly that filtered list.
+//
+// `vulkan-cts-case-list-sample.txt` is a small, hand-picked sample of real
+// dEQP-VK case names (not the full upstream mustpass list, which this tree
+// does not vendor) covering both groups the filter should keep (buffer,
+// buffer_view, pipeline_cache, binding_model, compute, robustness,
+// synchronization, query_pool, spirv_assembly.instruction.compute) and
+// groups it must drop (graphics -- pipeline.render_to_image, texture
+// sampling, sparse_resources, ray_tracing_pipeline -- none of which this
+// ICD implements; see "Initial Non-Goals").
+//
+// REQUIRES: system-vulkan-loader, system-vulkan-cts
+// RUN: %filter_vulkan_cts_cases %S/Inputs/vulkan-cts-case-list-sample.txt \
+// RUN:   -o %t.filtered.txt
+// RUN: FileCheck --check-prefix=KEEP %s < %t.filtered.txt
+// RUN: not grep -q render_to_image %t.filtered.txt
+// RUN: not grep -q texture.filtering %t.filtered.txt
+// RUN: not grep -q sparse_resources %t.filtered.txt
+// RUN: not grep -q ray_tracing_pipeline %t.filtered.txt
+
+// KEEP: dEQP-VK.api.buffer.basic
+// KEEP: dEQP-VK.api.buffer_view.create.suballocation.texel_buffer
+// KEEP: dEQP-VK.api.pipeline_cache.data
+// KEEP: dEQP-VK.robustness.buffer_access.robustness2.storage_buffer
+// KEEP: dEQP-VK.spirv_assembly.instruction.compute.opatomic
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   %deqp_vk --deqp-caselist-file=%t.filtered.txt \
+// RUN:   --deqp-log-filename=%t.qpa > %t.deqp.log 2>&1 || true
+// RUN: FileCheck --check-prefix=RAN %s < %t.deqp.log
+
+// RAN: {{.}}

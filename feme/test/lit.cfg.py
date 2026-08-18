@@ -69,6 +69,18 @@ config.substitutions.append(
     )
 )
 
+# The Vulkan-CTS case-list filter (see feme/utils/filter_vulkan_cts_cases.py
+# and the file comment above's "system-vulkan-cts" note).
+filter_vulkan_cts_cases = os.path.join(
+    config.test_source_root, "..", "utils", "filter_vulkan_cts_cases.py"
+)
+config.substitutions.append(
+    (
+        "%filter_vulkan_cts_cases",
+        "'%s' %s" % (config.python_executable, filter_vulkan_cts_cases),
+    )
+)
+
 tool_dirs = [config.feme_tools_dir, config.llvm_tools_dir]
 tools = [
     "feme",
@@ -166,3 +178,17 @@ if config.feme_have_vulkan_loader == "ON":
         config.substitutions.append(
             ("%system_second_icd_manifest", _lavapipe_manifest)
         )
+
+    # V4 ("first CTS runs over the advertised subset", see
+    # feme/docs/FeMeVulkanDesign.md's V4 status note): Vulkan-CTS's
+    # `deqp-vk` binary is a separate, large upstream project this tree does
+    # not build or vendor -- tests that run it use `REQUIRES:
+    # system-vulkan-cts` so they skip cleanly (rather than fail) on a host
+    # that has not built/installed it, the same way `system-dxc` gates the
+    # DXC-corpus tests above. `FEME_VULKAN_CTS_DEQP_VK` overrides the
+    # default `deqp-vk`-on-`PATH` lookup for a build that vendors it
+    # elsewhere.
+    _deqp_vk = os.environ.get("FEME_VULKAN_CTS_DEQP_VK") or shutil.which("deqp-vk")
+    if _deqp_vk:
+        config.available_features.add("system-vulkan-cts")
+        config.substitutions.append(("%deqp_vk", _deqp_vk))

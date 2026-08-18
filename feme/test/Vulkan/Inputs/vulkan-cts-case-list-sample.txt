@@ -1,0 +1,14 @@
+dEQP-VK.api.info.device
+dEQP-VK.api.buffer.basic
+dEQP-VK.api.buffer_view.create.suballocation.texel_buffer
+dEQP-VK.api.pipeline_cache.data
+dEQP-VK.binding_model.descriptor_type.storage_buffer
+dEQP-VK.compute.basic.max_local_size_x
+dEQP-VK.robustness.buffer_access.robustness2.storage_buffer
+dEQP-VK.synchronization.fence.basic
+dEQP-VK.query_pool.statistics_query.compute.primitives
+dEQP-VK.spirv_assembly.instruction.compute.opatomic
+dEQP-VK.pipeline.render_to_image.core.attachments
+dEQP-VK.texture.filtering.2d.formats.r8g8b8a8_unorm
+dEQP-VK.sparse_resources.buffer.buffer_size_2_25
+dEQP-VK.ray_tracing_pipeline.build.basic
