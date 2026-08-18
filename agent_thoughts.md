@@ -20622,3 +20622,143 @@ mirror, or handle multisample sources; per-instance vertex input rate and
 primitive restart are unimplemented; and secondary command buffers recorded
 *inside* a render pass are V7's own bullet, so `VkCommandBufferInheritance
 Info` is not interpreted yet.
+
+# V6 follow-up: closing the lavapipe differential debt
+
+The previous pass left two things written down plainly rather than swept
+under a passing test suite: the completion test's "match lavapipe for
+every format and state combination the driver reports" bullet never ran
+against a real second renderer, and `DrawTest.cpp`'s own coverage of the
+completion scenario stopped at a single color attachment with no depth
+test, no stencil test, no blending, no MRT, and no multisample resolve.
+Both were flagged as this milestone's own debt, not V7's.
+
+## What changed
+
+**Environment check first.** Before writing anything, I checked whether
+the thing the previous agent said was unavailable actually was: `deqp-vk`
+is still not installed here (so the CTS bullet stays open, exactly as
+recorded), but Mesa lavapipe (`lvp_icd.json`) *is* installed and
+`vulkaninfo` against it works. That changes the honest status of "did not
+stand up an off-screen lavapipe differential" from "can't" to "didn't yet"
+-- worth doing before writing another status note that repeats the same
+caveat.
+
+**Unit tests for the state combinations the completion test names.**
+`DrawTest.cpp` gained `RendersWithDepthTest`, `RendersWithStencilTest`,
+`RendersWithAlphaBlending`, `RendersToMultipleColorAttachments`, and
+`ResolvesMultisampleColorDuringRenderPass`, each building its own render
+pass/framebuffer/pipeline(s) (the fixture's default single-color-attachment
+setup does not stretch to depth/stencil/MRT/MSAA) and asserting on the
+resulting attachment bytes through `feme::vulkan`'s own entry points. All
+five passed on the first attempt with no executor changes needed: V6's
+`feme::graphics::Executor` already implements depth/stencil/blend/MRT/
+resolve correctly, and simply had no end-to-end Vulkan-level test proving
+it. Untested correct code and untested code that happens to be broken look
+identical from the outside; this closes that gap for the parts of the
+completion scenario the design doc's own words call out by name.
+
+**Generalizing the smoke client into a differential harness.** The
+previous agent's note named the exact model (`feme-vulkan-storage-buffer-
+diff`, V2's own compute differential) and the exact client to generalize
+(`feme-vulkan-graphics-smoke`). I rewrote the latter from a single fixed
+scene into a scenario-selectable client (`render-pass`, `dynamic-
+rendering`, `depth`, `stencil`, `blend`, `mrt`, `msaa-resolve`), each
+scenario built from the same shared `GraphicsSmoke` device/queue/pool
+state and a `createPipeline` helper taking a configuration callback, to
+avoid seven near-identical copies of the ~80-line pipeline-creation
+boilerplate diverging from each other over time. New `.mlir` fixtures
+(`red-fs`, `green-fs`, `dual-output-fs`, `near-depth-vs`, `far-depth-vs`,
+`three-quarter-alpha-red-fs`) supply the additional shader stages each
+scenario needs, compiled to `.spv` at test time exactly like the existing
+fixtures.
+
+`test/Vulkan/graphics-lavapipe-diff.test` runs all seven scenarios against
+both FeMe and lavapipe, with `VK_DRIVER_FILES` restricted to one manifest
+at a time (the same pattern `storage-buffer-lavapipe-diff.test` already
+established), and diffs the printed texels byte-for-byte. All seven
+matched on the first environment-clean run after two real bugs were found
+and fixed -- both invisible when this client only ever ran against FeMe's
+own lenient ICD:
+
+- `vkCmdBeginRenderingKHR`/`vkCmdEndRenderingKHR` are `VK_KHR_dynamic_
+  rendering` entry points. The Khronos loader has no static trampoline for
+  an extension function, so linking against them directly (as the original
+  single-scenario client did, and as it happened to link successfully
+  against FeMe's own `.so` build) fails to *link* at all once a real
+  system loader is the only thing in the link line; they must be resolved
+  through `vkGetDeviceProcAddr`. A real driver also refuses to resolve them
+  unless the extension is both named in `ppEnabledExtensionNames` *and*
+  `VkPhysicalDeviceDynamicRenderingFeatures::dynamicRendering` is chained
+  onto device creation -- FeMe's ICD accepts the calls regardless of
+  either, which is itself a leniency worth knowing about but not a bug
+  this pass needed to fix.
+- Memory type index 0 is not reliably host-visible on every driver. The
+  original client hardcoded `memoryTypeIndex = 0` for every allocation,
+  which happened to work against both FeMe and lavapipe here, but is not a
+  safe assumption for a client meant to run against "whichever ICD the
+  loader reports." `findMemoryType` now searches
+  `VkPhysicalDeviceMemoryProperties` for a type carrying
+  `HOST_VISIBLE | HOST_COHERENT`, the way any correct Vulkan client must.
+
+**The blend scenario's alpha is 0.75, not 0.5, deliberately.** The first
+differential run mismatched exactly one scenario: `blend`, by one ULP in
+one channel (`0x80` on FeMe vs. `0x7f` on lavapipe). A source alpha of
+exactly 0.5 blended against a fully-covered background lands every
+blended channel exactly on an 8-bit unorm quantization tie (0.5 * 255 =
+127.5), and two independent renderers are free to round a tie either way
+without either being "wrong" by the Vulkan spec's own accuracy rules for
+blending. That is not a driver bug to chase down -- it is a bad choice of
+test input, the same way a numerical test should not assert on a value
+sitting exactly on a rounding boundary. Moving to 0.75 (191.25 and 63.75,
+neither near a tie) made the two renderers agree exactly, which is the
+useful thing to have verified.
+
+## What this closes and what it does not
+
+The lavapipe half of "match lavapipe for every format and state
+combination the driver reports" is closed for the seven scenarios the
+completion test names by category (a `VkRenderPass`, dynamic rendering,
+depth, stencil, blending, MRT, a multisample resolve). It is *not* closed
+in full: the completion test's own words ask for every *format and state
+combination* the driver reports, which would mean the same treatment for
+every attachment format this milestone accepts, every sample count, both
+topologies, and so on -- a combinatorial expansion I did not attempt,
+because doing it shallowly (one scenario per category, as here) is more
+useful than doing it exhaustively badly under time pressure, and the
+harness is now in place for whoever next needs a specific combination to
+matter to add it cheaply. The CTS bullet remains open in this environment
+(`deqp-vk` is still not installed) exactly as V4 and the previous V6 pass
+both recorded for their own CTS work.
+
+I did not attempt the graphics pipeline cache entry this pass, after
+looking at it seriously enough to explain why: unlike compute's cache key
+(computed from raw SPIR-V words and the pipeline layout *before*
+compiling, so a hit skips compilation entirely), a graphics pipeline's
+normalized state includes vertex attributes and attachment formats that
+this ICD currently only finalizes after `compileGraphicsPipeline` has
+already run the (expensive) stage compilation. A cache key computed after
+compiling buys only artifact-sharing across pipeline handles, not a
+skipped recompile, unless the fixed-function-state translation is hoisted
+ahead of stage compilation first -- a real refactor of
+`compileGraphicsPipeline`'s control flow, not the glue code a cache key
+function alone would be. Rather than land a cache that reads as complete
+but provides none of the compute cache's actual benefit, I left it open
+and said why here instead of quietly declaring it done. Blits still do not
+convert formats, mirror, or handle multisample sources; per-instance
+vertex input rate and primitive restart remain unimplemented; and
+secondary command buffers inside a render pass are still V7's own bullet.
+
+## Validation
+
+Existing `build/` tree, `LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`check-feme` (builds every test dependency, including the loader-linked
+smoke clients, before running). Baseline before any change in this pass:
+1413 passed, 1 unsupported. Final: 1419 passed, 1 unsupported -- +6 (five
+new `DrawTest` cases, one new lit test; `graphics-lavapipe-diff.test`
+itself only counts once toward lit's total despite covering seven
+scenarios, since `RUN` lines within one `.test` file are one test).
+`clang-format` on every touched/new C++ file. Manually re-verified the
+lavapipe differential's environment dependency by running it once with
+`VK_DRIVER_FILES` pointed at each manifest directly, outside `lit`, before
+trusting the automated version of the same comparison.
