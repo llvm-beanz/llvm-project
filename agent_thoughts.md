@@ -19686,3 +19686,130 @@ invalid) handle shape I'd assumed.
   (the design doc's own anticipated dependency).
 - An actual Vulkan CTS run and its result: no `deqp-vk` build available
   in this environment; only the filtering/harness infrastructure landed.
+
+# Agent thoughts: V4 follow-up (broader texel-buffer format coverage)
+
+This session continued the outstanding V4 roadmap items the previous agent's
+notes flagged, picking the one that was both well-scoped and independently
+testable within this effort budget: broadening texel-buffer `VkFormat`
+coverage beyond `R32G32B32A32_SFLOAT`/`R8G8B8A8_UNORM`. Atomics (needs a new
+MLIR `spirv.Atomic*` dialect-conversion pattern, a substantially larger
+change) and an actual Vulkan CTS run (`deqp-vk` still unavailable in this
+sandbox) were left deferred again, as was relocatable pipeline-cache object
+code (still blocked on the `CompiledStage`/`CompiledKernel` API dependency
+the design doc itself calls out).
+
+## Investigation
+
+Read `feme/docs/{Roadmap,FeMeVulkanDesign}.md`'s V4 sections and the previous
+agent's notes, then traced the texel-buffer path end to end:
+`feme::vulkan::mapVkFormat`/`vkCreateBufferView` (Format.{h,cpp}, Buffer.cpp)
+-> `feme::cpu::SPIRVResourceLoweringPass::isSupportedTexelElementType`
+(gatekeeps the shader-visible load/store *type*, not the handle's own
+per-channel scalar type) -> `feme::cpu::ResourceCalls` (already fully
+generic: `mangleResourceCallName` mangles by LLVM `Type*`, so a new
+`<4 x i32>` variant needs zero changes there) -> `runtime/CPU/FeMeRuntimeCPU.c`
+(the actual format-conversion switch, currently only implementing `<4 x
+float>`).
+
+Two findings shaped the scope:
+
+1. **A real, previously-unenforced bug**: despite FeMeVulkanDesign.md and
+   Descriptor.h's comments claiming every format but the two supported ones
+   is "rejected at `vkCreateBufferView`", no such check existed in the code
+   — `vkCreateBufferView` accepted any format `mapVkFormat` mapped at all.
+   This was silently latent rather than exploitable today, because
+   `isSupportedTexelElementType` already rejects any shader load/store shape
+   other than `<4 x float>`, so no currently-representable shader could
+   actually reach the runtime's un-format-checked conversion path with a
+   mismatched format. Still, it was a real doc/code mismatch worth fixing
+   before adding a second supported format, since two formats sharing one
+   shader-visible shape (`<4 x i32>`, for both UINT and SINT) makes the gap
+   reachable in principle. Fixed with a single new
+   `feme::vulkan::isTexelBufferFormatSupported()` whitelist function.
+2. **Per-format channel-count padding is the real remaining barrier**, not
+   just "more mangled variants" as the previous note suggested. SPIR-V's
+   `OpImageRead`/`OpImageFetch`/`OpImageWrite` always operate on a full
+   four-component vector regardless of the underlying format's actual
+   channel count (a `R32_UINT` texel buffer's `OpImageFetch` still returns
+   `vector<4xi32>`, with unused components padded by the spec). The existing
+   `R32G32B32A32_FLOAT` support sidesteps this because it's already a
+   4-channel, 16-byte-per-texel identity format — a straight 16-byte
+   reinterpret needs no padding logic. The exact same reasoning extends
+   cleanly to `R32G32B32A32_UINT`/`_SINT` (also 4-channel, 16-byte,
+   identity), which is why those two were this session's actual target
+   rather than the single/dual/triple-channel formats or the 8-/16-bit
+   packed ones, which would need real per-format padding work that doesn't
+   yet exist anywhere in this runtime.
+
+## What landed
+
+- `feme::vulkan::isTexelBufferFormatSupported()` (Format.h/cpp), enforced by
+  `vkCreateBufferView` (Buffer.cpp) — closes the doc/code mismatch above.
+  Committed and tested first, independently of everything else, since it's a
+  correctness fix rather than new capability.
+- `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32`
+  (runtime/CPU/FeMeRuntimeCPU.c): the `<4 x i32>` counterpart of the existing
+  `<4 x float>` typed-buffer view, covering the `R32G32B32A32_UINT`/`_SINT`
+  identity formats. No scalar conversion switch needed (unlike the packed
+  `R8G8B8A8_UNORM` case) — the shader's own `<4 x i32>` load/store type
+  already carries the signed/unsigned distinction for the same raw bytes.
+- `isSupportedTexelElementType` in `SPIRVResourceLoweringPass` now accepts
+  `<4 x i32>` alongside `<4 x float>`. This was the only gate that needed to
+  move for the whole pipeline (handle classification, `ResourceCalls`
+  mangling, dispatch resource materialization) to pick up the new shape —
+  everything downstream was already generic by element type.
+- Unit tests at every layer: `FormatTest`/`BufferTest`
+  (whitelist enforcement, including a format `mapVkFormat` itself
+  recognizes but that must still be rejected), `RuntimeCPUTest` (JIT-level
+  load/store/mask/UAV-flag coverage for the new runtime helpers, mirroring
+  the existing float tests), `SPIRVResourceLoweringTest` (IR-level lowering
+  to the `.v4i32`-mangled calls), and a new end-to-end
+  `IntTexelBufferDispatchTest` in `CommandBufferTest.cpp` (real SPIR-V
+  assembled via MLIR, real dispatch, real host-visible result) — refactored
+  `TexelBufferDispatchTest` to take its shader source through an overridable
+  `getShaderSource()` hook so the new fixture could reuse all its
+  descriptor-set/pipeline-layout boilerplate rather than duplicating it.
+- Updated FeMeVulkanDesign.md (V4 status note and Descriptor Model table),
+  Roadmap.md's V4 row, and the Descriptor.h/Format.h file comments to
+  describe the broadened scope and keep the still-deferred items (atomics,
+  narrower-channel-count and packed-format texel buffers beyond
+  `R8G8B8A8_UNORM`, relocatable pipeline-cache object code, an actual CTS
+  run) accurately described rather than silently stale.
+
+## Validation
+
+Built with the existing `build/` tree (ccache-enabled `CMAKE_*_COMPILER_LAUNCHER`,
+`LLVM_ENABLE_ASSERTIONS=ON` already configured — confirmed via
+`CMakeCache.txt` rather than reconfiguring). Ran `ninja check-feme` before
+any change (1306 passed / 0 failed / 35 unsupported baseline) and again
+after every commit (1316 passed / 0 failed / 35 unsupported at the end — the
++10 passed is exactly the new tests added, no regressions or newly-skipped
+tests). Also ran the individual `FeMeRuntimeCPUTests`, `FeMeTransformsCPUTests`,
+and `FeMeVulkanTests` binaries directly while iterating, filtered to the
+relevant suites first and then in full, before folding each change into a
+commit. Ran `clang-format` over every touched file and folded the (mostly
+line-wrapping) diffs into a dedicated NFC commit rather than each individual
+change's own commit, to keep those commits' diffs focused on behavior.
+
+## Deliberately deferred (unchanged from the previous session's assessment)
+
+- SPIR-V atomic buffer/image access (`spirv.Atomic*`): still no dialect
+  conversion pattern at all in MLIR's `SPIRVToLLVM.cpp`; still needs a new
+  `feme::spirv` conversion pattern plus a `feme::cpu` canonicalization step.
+  Left untouched this session — a strictly larger change than the format
+  work above, and not one that could be split into small, independently
+  testable commits without first landing the conversion pattern itself.
+- Texel-buffer formats needing per-format channel-count padding (`R32_UINT`,
+  `R32G32_UINT`, ...) or additional packed-format scalar conversions
+  (`R8G8B8A8_SNORM`/`_UINT`/`_SINT`, `R16G16B16A16_*`, `R11G11B10_FLOAT`,
+  `R10G10B10A2_*`): each is a mechanical repeat of this session's pattern
+  once the per-format padding/conversion logic exists, but that logic itself
+  doesn't yet, so widening the whitelist to include them now would silently
+  misconvert rather than correctly handle them.
+- Relocatable object code in the persistent pipeline cache blob: still
+  depends on a `CompiledStage`/`CompiledKernel` API this milestone doesn't
+  add.
+- An actual Vulkan CTS run and its result: `deqp-vk` remains unavailable in
+  this sandboxed environment; only the filtering/harness infrastructure from
+  the previous session exists.
