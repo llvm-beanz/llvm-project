@@ -1313,19 +1313,32 @@ void FunctionWidener::widenInsertElement(InsertElementInst &IE,
                                          IRBuilder<> &Builder) {
   // Decompose a divergent `insertelement` into its widened per-component
   // form (see `checkVectorDecompositionSupported`'s file comment): start
-  // from the base's own components (an all-null placeholder for the
-  // chain's first link, whose base is the `poison`/`undef`
-  // `raiseTypedBufferStore` always starts from), fill in the inserted
-  // element's widened value at its constant index, and record the result
-  // for the next link (or `widenResourceCall`) to consume -- this
-  // instruction itself never gets a single widened `<W x T>` replacement.
+  // from the base's own components, fill in the inserted element's widened
+  // value at its constant index, and record the result for the next link
+  // (or `widenResourceCall`) to consume -- this instruction itself never
+  // gets a single widened `<W x T>` replacement.
+  //
+  // A base that is not itself a decomposed vector is uniform (a divergent
+  // one would already be in `WidenedVectorComponents`), so each of its
+  // components widens to a splat. Only a `poison`/`undef` base -- what
+  // `raiseTypedBufferStore` starts a fresh chain from -- has no component
+  // values to carry over, and a component such a chain never writes really
+  // is poison.
   auto *VecTy = cast<FixedVectorType>(IE.getType());
+  Value *Base = IE.getOperand(0);
   SmallVector<Value *, 4> Components;
-  if (auto It = WidenedVectorComponents.find(IE.getOperand(0));
-      It != WidenedVectorComponents.end())
+  if (auto It = WidenedVectorComponents.find(Base);
+      It != WidenedVectorComponents.end()) {
     Components = It->second;
-  else
-    Components.resize(VecTy->getNumElements(), nullptr);
+  } else if (isa<UndefValue>(Base)) {
+    Components.assign(VecTy->getNumElements(),
+                      PoisonValue::get(FixedVectorType::get(
+                          VecTy->getElementType(), WaveSize)));
+  } else {
+    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
+      Components.push_back(getWidened(
+          Builder.CreateExtractElement(Base, Builder.getInt32(I)), Builder));
+  }
 
   uint64_t Index = cast<ConstantInt>(IE.getOperand(2))->getZExtValue();
   Components[Index] = getWidened(IE.getOperand(1), Builder);
