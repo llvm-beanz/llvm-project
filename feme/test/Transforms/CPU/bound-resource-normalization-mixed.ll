@@ -30,7 +30,7 @@ define void @main(i32 %idx, i32 %dyn) {
 
 ; CHECK-NOT: @llvm.dx.resource.handlefrombinding
 ; CHECK: !feme.cpu.bound_resources = !{![[MD:[0-9]+]]}
-; CHECK: ![[MD]] = !{!"main", i32 4, i32 0, i32 0, i32 4, i32 0}
+; CHECK: ![[MD]] = !{!"main", i32 4, i32 0, i32 0, i32 0, i32 0, i32 4, i32 0, i32 0}
 
 declare target("dx.RawBuffer", i8, 1, 0)
     @llvm.dx.resource.handlefrombinding.tdx.RawBuffer_i8_1_0t(i32, i32, i32, i32, ptr)

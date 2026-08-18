@@ -222,7 +222,7 @@ TEST(ResourceInfoTest, FromModuleMergesBoundResourceMetadata) {
     !feme.cpu.resources = !{!0}
     !feme.cpu.bound_resources = !{!1}
     !0 = !{!"main", i32 0, i1 false, i32 0, i32 0, i32 3, i32 5}
-    !1 = !{!"main", i32 8, i32 0, i32 0, i32 8, i32 0}
+    !1 = !{!"main", i32 8, i32 0, i32 0, i32 0, i32 0, i32 8, i32 0, i32 0}
   )");
   ASSERT_TRUE(M);
 
@@ -250,8 +250,69 @@ TEST(ResourceInfoTest, FromModuleWithoutBoundResourcesLeavesThemEmpty) {
   EXPECT_TRUE(Info->BoundRanges.empty());
 }
 
-TEST(ResourceInfoTest, ArtifactAbiVersionIsFour) {
-  EXPECT_EQ(ArtifactAbiVersion, 4u);
+TEST(ResourceInfoTest, ArtifactAbiVersionIsFive) {
+  EXPECT_EQ(ArtifactAbiVersion, 5u);
+}
+
+TEST(ResourceInfoTest, FromModuleReadsImageAndSamplerHeapPrefixes) {
+  // Roadmap R30's SPIR-V completion: a bound sampled image and sampler are
+  // assigned slots in the image and sampler heaps, which have their own
+  // reserved prefixes and their own slot numbering -- so heap base 0 shows
+  // up once per class without ambiguity.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    !feme.cpu.resources = !{!0}
+    !feme.cpu.bound_resources = !{!1}
+    !0 = !{!"main", i32 0, i1 true, i32 0, i32 0}
+    !1 = !{!"main", i32 0, i32 1, i32 1,
+           i32 0, i32 0, i32 1, i32 0, i32 1,
+           i32 0, i32 1, i32 1, i32 0, i32 2}
+  )");
+  ASSERT_TRUE(M);
+
+  std::optional<ResourceInfo> Info = ResourceInfo::fromModule(*M, "main");
+  ASSERT_TRUE(Info);
+  EXPECT_TRUE(Info->UsesSamplerHeap);
+  EXPECT_EQ(Info->ReservedResourceHeapSize, 0u);
+  EXPECT_EQ(Info->ReservedImageHeapSize, 1u);
+  EXPECT_EQ(Info->ReservedSamplerHeapSize, 1u);
+  ASSERT_EQ(Info->BoundRanges.size(), 2u);
+  EXPECT_EQ(Info->BoundRanges[0].Class, BoundResourceClass::Image);
+  EXPECT_EQ(Info->BoundRanges[0].HeapBase, 0u);
+  EXPECT_EQ(Info->BoundRanges[1].Class, BoundResourceClass::Sampler);
+  EXPECT_EQ(Info->BoundRanges[1].BaseRegister, 1u);
+  EXPECT_EQ(Info->BoundRanges[1].HeapBase, 0u);
+}
+
+TEST(ResourceInfoTest, SerializeParseRoundTripsResourceClasses) {
+  StageArtifactInfo Info;
+  Info.ReservedResourceHeapSize = 2;
+  Info.ReservedImageHeapSize = 3;
+  Info.ReservedSamplerHeapSize = 1;
+  Info.BoundRanges = {
+      BoundResourceRange{0, 0, 2, 0, BoundResourceClass::Buffer},
+      BoundResourceRange{0, 1, 3, 0, BoundResourceClass::Image},
+      BoundResourceRange{0, 2, 1, 0, BoundResourceClass::Sampler},
+  };
+
+  Expected<StageArtifactInfo> Parsed = parseArtifact(serializeArtifact(Info));
+  ASSERT_THAT_EXPECTED(Parsed, Succeeded());
+  EXPECT_EQ(Parsed->ReservedImageHeapSize, 3u);
+  EXPECT_EQ(Parsed->ReservedSamplerHeapSize, 1u);
+  ASSERT_EQ(Parsed->BoundRanges.size(), 3u);
+  EXPECT_EQ(Parsed->BoundRanges[0].Class, BoundResourceClass::Buffer);
+  EXPECT_EQ(Parsed->BoundRanges[1].Class, BoundResourceClass::Image);
+  EXPECT_EQ(Parsed->BoundRanges[2].Class, BoundResourceClass::Sampler);
+}
+
+TEST(ResourceInfoTest, ParseRejectsUnknownResourceClass) {
+  StageArtifactInfo Info;
+  Info.BoundRanges = {BoundResourceRange{0, 0, 1, 0}};
+  std::vector<uint8_t> Bytes = serializeArtifact(Info);
+  // The class is the fifth (last) field of the sole bound range, which is
+  // itself followed only by the four-byte signature length.
+  Bytes[Bytes.size() - sizeof(uint32_t) * 2] = 7;
+  EXPECT_THAT_EXPECTED(parseArtifact(Bytes), Failed());
 }
 
 TEST(ResourceInfoTest, SerializeParseRoundTripsBoundRanges) {

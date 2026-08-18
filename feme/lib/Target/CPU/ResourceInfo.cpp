@@ -27,38 +27,48 @@ using namespace feme::cpu;
 
 namespace {
 
+/// The reserved prefix sizes of the three physical heaps, as
+/// `readBoundResourceMetadata` reports them.
+struct BoundResourcePrefixes {
+  uint32_t Resource = 0;
+  uint32_t Image = 0;
+  uint32_t Sampler = 0;
+};
+
 /// Reads \p EntryName's entry from \p M's `!feme.cpu.bound_resources`
 /// metadata (see `attachBoundResourceMetadata` in
-/// BoundResourceNormalization.cpp for the node shape: {name, prefix-size,
-/// (space, register, range-size, heap-base)...}), or `std::nullopt` if that
-/// entry (or the node itself) isn't present -- e.g. because the shader uses
-/// no traditionally-bound resource, so that pass never rewrote it.
-std::optional<std::pair<uint32_t, std::vector<BoundResourceRange>>>
+/// BoundResourceNormalization.cpp for the node shape: {name, resource-,
+/// image- and sampler-heap prefix sizes, then (space, register, range-size,
+/// heap-base, class)...}), or `std::nullopt` if that entry (or the node
+/// itself) isn't present -- e.g. because the shader uses no traditionally-
+/// bound resource, so that pass never rewrote it.
+std::optional<std::pair<BoundResourcePrefixes, std::vector<BoundResourceRange>>>
 readBoundResourceMetadata(const Module &M, StringRef EntryName) {
   const NamedMDNode *MD = M.getNamedMetadata("feme.cpu.bound_resources");
   if (!MD)
     return std::nullopt;
 
   for (const MDNode *Entry : MD->operands()) {
-    if (Entry->getNumOperands() < 2)
+    if (Entry->getNumOperands() < 4)
       continue;
     const auto *Name = dyn_cast<MDString>(Entry->getOperand(0));
     if (!Name || Name->getString() != EntryName)
       continue;
 
-    uint32_t PrefixSize = static_cast<uint32_t>(
-        mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue());
+    auto GetOperand = [&](unsigned Index) {
+      return static_cast<uint32_t>(
+          mdconst::extract<ConstantInt>(Entry->getOperand(Index))
+              ->getZExtValue());
+    };
+    BoundResourcePrefixes Prefixes{GetOperand(1), GetOperand(2), GetOperand(3)};
     std::vector<BoundResourceRange> Ranges;
-    for (unsigned I = 2, E = Entry->getNumOperands(); I + 4 <= E; I += 4) {
-      auto GetField = [&](unsigned Offset) {
-        return static_cast<uint32_t>(
-            mdconst::extract<ConstantInt>(Entry->getOperand(I + Offset))
-                ->getZExtValue());
-      };
-      Ranges.push_back(BoundResourceRange{GetField(0), GetField(1), GetField(2),
-                                          GetField(3)});
+    for (unsigned I = 4, E = Entry->getNumOperands(); I + 5 <= E; I += 5) {
+      uint32_t ClassValue = GetOperand(I + 4);
+      Ranges.push_back(BoundResourceRange{
+          GetOperand(I), GetOperand(I + 1), GetOperand(I + 2),
+          GetOperand(I + 3), static_cast<BoundResourceClass>(ClassValue)});
     }
-    return std::make_pair(PrefixSize, std::move(Ranges));
+    return std::make_pair(Prefixes, std::move(Ranges));
   }
   return std::nullopt;
 }
@@ -141,7 +151,9 @@ std::optional<ResourceInfo> ResourceInfo::fromModule(const Module &M,
           mdconst::extract<ConstantInt>(Entry->getOperand(I))->getZExtValue()));
 
     if (auto BoundInfo = readBoundResourceMetadata(M, EntryName)) {
-      Info.ReservedResourceHeapSize = BoundInfo->first;
+      Info.ReservedResourceHeapSize = BoundInfo->first.Resource;
+      Info.ReservedImageHeapSize = BoundInfo->first.Image;
+      Info.ReservedSamplerHeapSize = BoundInfo->first.Sampler;
       Info.BoundRanges = std::move(BoundInfo->second);
     }
     return Info;
@@ -159,6 +171,8 @@ StageArtifactInfo::fromResourceInfo(const ResourceInfo &Info) {
       Info.UsesSamplerHeap ? FEME_CPU_ARTIFACT_USES_SAMPLER_HEAP : 0u;
   Artifact.StaticHeapIndices = Info.StaticHeapIndices;
   Artifact.ReservedResourceHeapSize = Info.ReservedResourceHeapSize;
+  Artifact.ReservedImageHeapSize = Info.ReservedImageHeapSize;
+  Artifact.ReservedSamplerHeapSize = Info.ReservedSamplerHeapSize;
   Artifact.BoundRanges = Info.BoundRanges;
   return Artifact;
 }
@@ -171,13 +185,14 @@ std::string feme::cpu::getArtifactSymbolName(StringRef EntryName) {
 /// the three counted tails: version, stage, wave size, 3 group-size
 /// dimensions, groupshared size/align, root constant size, root constant
 /// space/register, flags, the `StaticHeapIndices` tail's own count, the
-/// reserved resource-heap prefix size, the `BoundRanges` tail's own count,
-/// and the `Signature` tail's own byte length.
-constexpr size_t NumFixedFields = 16;
+/// reserved resource-, image- and sampler-heap prefix sizes, the
+/// `BoundRanges` tail's own count, and the `Signature` tail's own byte
+/// length.
+constexpr size_t NumFixedFields = 18;
 
 /// The number of `uint32_t` fields one `BoundResourceRange` serializes to
-/// (its four fields, in declaration order).
-constexpr size_t FieldsPerBoundRange = 4;
+/// (its five fields, in declaration order).
+constexpr size_t FieldsPerBoundRange = 5;
 
 std::vector<uint8_t>
 feme::cpu::serializeArtifact(const StageArtifactInfo &Info) {
@@ -207,12 +222,15 @@ feme::cpu::serializeArtifact(const StageArtifactInfo &Info) {
   for (uint32_t Idx : Info.StaticHeapIndices)
     WriteNext(Idx);
   WriteNext(Info.ReservedResourceHeapSize);
+  WriteNext(Info.ReservedImageHeapSize);
+  WriteNext(Info.ReservedSamplerHeapSize);
   WriteNext(static_cast<uint32_t>(Info.BoundRanges.size()));
   for (const BoundResourceRange &Range : Info.BoundRanges) {
     WriteNext(Range.Space);
     WriteNext(Range.BaseRegister);
     WriteNext(Range.RangeSize);
     WriteNext(Range.HeapBase);
+    WriteNext(static_cast<uint32_t>(Range.Class));
   }
   WriteNext(static_cast<uint32_t>(Info.Signature.size()));
   llvm::copy(Info.Signature, P);
@@ -281,6 +299,8 @@ Expected<StageArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
     Info.StaticHeapIndices.push_back(ReadNext());
 
   Info.ReservedResourceHeapSize = ReadNext();
+  Info.ReservedImageHeapSize = ReadNext();
+  Info.ReservedSamplerHeapSize = ReadNext();
   uint32_t NumRanges = ReadNext();
 
   size_t MinSizeForSignatureLength =
@@ -302,6 +322,13 @@ Expected<StageArtifactInfo> feme::cpu::parseArtifact(ArrayRef<uint8_t> Bytes) {
     Range.BaseRegister = ReadNext();
     Range.RangeSize = ReadNext();
     Range.HeapBase = ReadNext();
+    uint32_t ClassValue = ReadNext();
+    if (ClassValue > static_cast<uint32_t>(BoundResourceClass::Sampler))
+      return createStringError(inconvertibleErrorCode(),
+                               "FeMe CPU artifact's bound range names an "
+                               "unknown resource class (%u)",
+                               ClassValue);
+    Range.Class = static_cast<BoundResourceClass>(ClassValue);
     Info.BoundRanges.push_back(Range);
   }
 

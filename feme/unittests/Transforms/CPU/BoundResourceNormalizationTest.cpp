@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
 
+#include "feme/Target/CPU/ResourceInfo.h"
+
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -100,19 +102,26 @@ TEST(BoundResourceNormalizationTest, RecordsBoundResourceMetadata) {
   ASSERT_TRUE(MD);
   ASSERT_EQ(MD->getNumOperands(), 1u);
   MDNode *Entry = MD->getOperand(0);
-  // {name, prefix-size, (space, register, range-size, heap-base)...}.
-  ASSERT_EQ(Entry->getNumOperands(), 6u);
+  // {name, resource-/image-/sampler-prefix-size,
+  //  (space, register, range-size, heap-base, class)...}.
+  ASSERT_EQ(Entry->getNumOperands(), 9u);
   EXPECT_EQ(cast<MDString>(Entry->getOperand(0))->getString(), "main");
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue(),
             8u);
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(2))->getZExtValue(),
-            2u); // space
+            0u); // image-heap prefix size: this pass binds no image
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(3))->getZExtValue(),
-            1u); // register
+            0u); // sampler-heap prefix size
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(4))->getZExtValue(),
-            8u); // range size
+            2u); // space
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(5))->getZExtValue(),
+            1u); // register
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(6))->getZExtValue(),
+            8u); // range size
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(7))->getZExtValue(),
             0u); // heap base
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(8))->getZExtValue(),
+            static_cast<uint64_t>(feme::cpu::BoundResourceClass::Buffer));
 }
 
 TEST(BoundResourceNormalizationTest, OffsetsNativeDynamicHeapIndex) {

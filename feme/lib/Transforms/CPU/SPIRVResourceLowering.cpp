@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 
+#include "feme/Target/CPU/ResourceInfo.h"
+
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "llvm/ADT/DenseMap.h"
@@ -556,28 +558,32 @@ void attachResourceMetadata(Function &F, uint32_t RootConstantSize) {
 /// Attaches the `!feme.cpu.bound_resources` metadata node
 /// `feme::cpu::ResourceInfo::fromModule` reads, in the same shape
 /// `feme::cpu::BoundResourceNormalizationPass::attachBoundResourceMetadata`
-/// produces: name, the reserved prefix size, then each accepted identity as
-/// a (space, register, range-size, heap-base) tuple -- SPIR-V's (set,
-/// binding) filling the (space, register) slots per the header comment's
-/// correspondence, and range-size the binding's own declared descriptor
-/// array count (roadmap R26 generalized this from an implicit 1).
+/// produces: name, the reserved resource-, image- and sampler-heap prefix
+/// sizes, then each accepted identity as a (space, register, range-size,
+/// heap-base, class) tuple -- SPIR-V's (set, binding) filling the (space,
+/// register) slots per the header comment's correspondence, and range-size
+/// the binding's own declared descriptor array count (roadmap R26
+/// generalized this from an implicit 1).
 void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
                                  const std::map<RangeKey, RangeEntry> &Ranges) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   SmallVector<Metadata *, 8> Ops;
+  auto PushInt = [&](uint32_t V) {
+    Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, V)));
+  };
   Ops.push_back(MDString::get(Ctx, F.getName()));
-  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, PrefixSize)));
+  PushInt(PrefixSize);
+  PushInt(0);
+  PushInt(0);
   for (const auto &[Key, Entry] : Ranges) {
     if (Entry.Conflicting)
       continue;
-    Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, Key.Set)));
-    Ops.push_back(
-        ConstantAsMetadata::get(ConstantInt::get(I32Ty, Key.Binding)));
-    Ops.push_back(
-        ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.RangeSize)));
-    Ops.push_back(
-        ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.HeapBase)));
+    PushInt(Key.Set);
+    PushInt(Key.Binding);
+    PushInt(Entry.RangeSize);
+    PushInt(Entry.HeapBase);
+    PushInt(static_cast<uint32_t>(BoundResourceClass::Buffer));
   }
   F.getParent()
       ->getOrInsertNamedMetadata("feme.cpu.bound_resources")

@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 
+#include "feme/Target/CPU/ResourceInfo.h"
+
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -123,19 +125,26 @@ TEST(SPIRVResourceLoweringTest, RecordsArrayRangeSizeInBoundResourceMetadata) {
   ASSERT_TRUE(MD);
   ASSERT_EQ(MD->getNumOperands(), 1u);
   MDNode *Entry = MD->getOperand(0);
-  // {name, prefix-size, (set, binding, range-size, heap-base)...}.
-  ASSERT_EQ(Entry->getNumOperands(), 6u);
+  // {name, resource-/image-/sampler-prefix-size,
+  //  (set, binding, range-size, heap-base, class)...}.
+  ASSERT_EQ(Entry->getNumOperands(), 9u);
   EXPECT_EQ(cast<MDString>(Entry->getOperand(0))->getString(), "main");
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(1))->getZExtValue(),
-            4u); // prefix size
+            4u); // resource-heap prefix size
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(2))->getZExtValue(),
-            0u); // set
+            0u); // image-heap prefix size
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(3))->getZExtValue(),
-            1u); // binding
+            0u); // sampler-heap prefix size
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(4))->getZExtValue(),
-            4u); // range size
+            0u); // set
   EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(5))->getZExtValue(),
+            1u); // binding
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(6))->getZExtValue(),
+            4u); // range size
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(7))->getZExtValue(),
             0u); // heap base
+  EXPECT_EQ(mdconst::extract<ConstantInt>(Entry->getOperand(8))->getZExtValue(),
+            static_cast<uint64_t>(feme::cpu::BoundResourceClass::Buffer));
 }
 
 TEST(SPIRVResourceLoweringTest, LowersDynamicArrayIndexToRangeCheckedAccess) {

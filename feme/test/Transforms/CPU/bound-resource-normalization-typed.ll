@@ -37,7 +37,7 @@ define void @main(i32 %idx) {
 ; range (space 0, register 0, range size 4, heap base 0) are published for
 ; `feme::cpu::ResourceInfo` to read (see "Bound-resource normalization").
 ; CHECK: !feme.cpu.bound_resources = !{![[MD:[0-9]+]]}
-; CHECK: ![[MD]] = !{!"main", i32 4, i32 0, i32 0, i32 4, i32 0}
+; CHECK: ![[MD]] = !{!"main", i32 4, i32 0, i32 0, i32 0, i32 0, i32 4, i32 0, i32 0}
 
 declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
     @llvm.dx.resource.handlefrombinding.tdx.TypedBuffer_v4f32_1_0_0t(i32, i32, i32, i32, ptr)

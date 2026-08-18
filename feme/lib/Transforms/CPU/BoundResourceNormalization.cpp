@@ -8,6 +8,8 @@
 
 #include "feme/Transforms/CPU/BoundResourceNormalization.h"
 
+#include "feme/Target/CPU/ResourceInfo.h"
+
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -234,10 +236,14 @@ void offsetNativeDynamicIndices(Module &M, uint32_t PrefixSize,
 
 /// Attaches the `!feme.cpu.bound_resources` metadata node "Publishing"
 /// (see the design doc's "Bound-resource normalization"/"Descriptor
-/// heaps" sections) describes for \p F: its name, the reserved resource
-/// heap prefix size, then each accepted range as a (space, register,
-/// range-size, heap-base) tuple, sorted the same deterministic way
-/// `assignHeapBases` assigned them.
+/// heaps" sections) describes for \p F: its name, the reserved resource-,
+/// image- and sampler-heap prefix sizes, then each accepted range as a
+/// (space, register, range-size, heap-base, class) tuple, sorted the same
+/// deterministic way `assignHeapBases` assigned them. Every range this
+/// DXIL-side pass accepts is a buffer -- a bound texture/sampler is not one
+/// of the handle kinds it normalizes -- so the image/sampler prefixes are
+/// always 0 here and every class is `Buffer`; the SPIR-V-side
+/// `feme::cpu::SPIRVResourceLoweringPass` is what populates the other two.
 void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
                                  const std::map<RangeKey, RangeEntry> &Ranges) {
   LLVMContext &Ctx = F.getContext();
@@ -245,6 +251,8 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
   SmallVector<Metadata *, 8> Ops;
   Ops.push_back(MDString::get(Ctx, F.getName()));
   Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, PrefixSize)));
+  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)));
+  Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)));
   for (const auto &[Key, Entry] : Ranges) {
     if (Entry.Conflicting)
       continue;
@@ -255,6 +263,8 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.RangeSize)));
     Ops.push_back(
         ConstantAsMetadata::get(ConstantInt::get(I32Ty, Entry.HeapBase)));
+    Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(
+        I32Ty, static_cast<uint32_t>(feme::cpu::BoundResourceClass::Buffer))));
   }
 
   F.getParent()

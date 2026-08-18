@@ -37,4 +37,4 @@ define void @main(i32 %idx, i32 %which) {
 ; {name, prefix-size, (set, binding, range-size, heap-base)}: a range size
 ; of 4 is now recorded, rather than the implicit 1 this pass assigned every
 ; binding before R26.
-; CHECK: ![[BMD]] = !{!"main", i32 4, i32 0, i32 1, i32 4, i32 0}
+; CHECK: ![[BMD]] = !{!"main", i32 4, i32 0, i32 0, i32 0, i32 1, i32 4, i32 0, i32 0}

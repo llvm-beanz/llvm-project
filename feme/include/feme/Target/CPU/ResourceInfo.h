@@ -86,19 +86,35 @@ std::array<uint32_t, 3> getDeclaredGroupSize(const llvm::Function &F);
 /// those stages too.
 uint32_t computeSideEffectFlags(const llvm::Function &F);
 
+/// Which of the three physical heaps a `BoundResourceRange`'s slots belong
+/// to. The three are separate arrays with independently numbered slots
+/// (`FemeShaderResources::ResourceHeap`/`ImageHeap`/`SamplerHeap`), so a
+/// range's `HeapBase` is only meaningful together with its class -- an
+/// image range's base 0 and a buffer range's base 0 name different storage.
+enum class BoundResourceClass : uint32_t {
+  /// A `FemeDescriptor` in the resource heap: every buffer kind.
+  Buffer = 0,
+  /// A `FemeImageDescriptor` in the image heap.
+  Image = 1,
+  /// A `FemeSamplerDescriptor` in the sampler heap.
+  Sampler = 2,
+};
+
 /// One traditionally-bound resource range's assignment in the reserved heap
 /// prefix `feme::cpu::BoundResourceNormalizationPass` builds (see
 /// "Bound-resource normalization" in feme/docs/FeMeCPUDesign.md): source
-/// register space and base register, the range's declared array length, and
-/// the contiguous base slot it was assigned in the resource heap. A host
-/// materializing a physical heap for a dispatch matches its own bound
-/// resources to one of these by (Space, BaseRegister), then writes array
-/// element `j`'s descriptor at heap index `HeapBase + j`.
+/// register space and base register, the range's declared array length, the
+/// heap its slots live in, and the contiguous base slot it was assigned
+/// there. A host materializing a physical heap for a dispatch matches its
+/// own bound resources to one of these by (Space, BaseRegister), then writes
+/// array element `j`'s descriptor at index `HeapBase + j` of the heap
+/// `Class` names.
 struct BoundResourceRange {
   uint32_t Space = 0;
   uint32_t BaseRegister = 0;
   uint32_t RangeSize = 0;
   uint32_t HeapBase = 0;
+  BoundResourceClass Class = BoundResourceClass::Buffer;
 };
 
 /// One entry point's descriptor-heap usage, as
@@ -115,9 +131,9 @@ struct ResourceInfo {
   /// `(b0, space0)`), meaningful only when `RootConstantSize != 0`.
   uint32_t RootConstantSpace = 0;
   uint32_t RootConstantRegister = 0;
-  /// Whether the shader reads the sampler heap. Always false for now --
-  /// `feme::dxil::OpRaisingPass` does not yet reconstruct a sampler handle
-  /// from the heap (see `raiseResourceHandleFromHeap`'s comment).
+  /// Whether the shader reads the sampler heap: set when the shader samples
+  /// through a bound (`BoundResourceClass::Sampler`) or heap-indexed
+  /// sampler descriptor.
   bool UsesSamplerHeap = false;
   /// The heap indices the shader reads through a compile-time-constant
   /// descriptor index, sorted and deduplicated. A dynamically-indexed
@@ -132,8 +148,14 @@ struct ResourceInfo {
   /// resource heap must place its logical dynamic heap starting at this
   /// index (see "Descriptor heaps").
   uint32_t ReservedResourceHeapSize = 0;
+  /// The same, for the image and sampler heaps: the reserved prefix each
+  /// needs for this shader's bound (`BoundResourceClass::Image`/`Sampler`)
+  /// ranges, or 0 if it binds none. A host's logical dynamic image/sampler
+  /// heap starts at these indices, exactly as it does for buffers.
+  uint32_t ReservedImageHeapSize = 0;
+  uint32_t ReservedSamplerHeapSize = 0;
   /// Each traditionally-bound range's assignment within the reserved
-  /// prefix above.
+  /// prefix of the heap its `Class` names.
   std::vector<BoundResourceRange> BoundRanges;
 
   /// Reads \p EntryName's entry from \p M's `!feme.cpu.resources` metadata,
@@ -167,7 +189,14 @@ struct ResourceInfo {
 /// root-constant support now recognizes any single register binding rather
 /// than only the default `(b0, space0)`, so a host needs to be told which
 /// one a given `RootConstantSize` corresponds to.
-constexpr uint32_t ArtifactAbiVersion = 4;
+///
+/// Version 5 (roadmap R30's SPIR-V image/sampler completion) added
+/// `ReservedImageHeapSize`/`ReservedSamplerHeapSize` and gave every
+/// `BoundResourceRange` a `BoundResourceClass`: a bound sampled image or
+/// sampler is assigned a slot in the image or sampler heap, not the
+/// buffer-oriented resource heap, so a host cannot place either from the
+/// version 4 layout's fields alone.
+constexpr uint32_t ArtifactAbiVersion = 5;
 
 /// Bits of `StageArtifactInfo::Flags`, mirrored in the serialized byte
 /// layout.
@@ -217,8 +246,11 @@ struct StageArtifactInfo {
   uint32_t RootConstantRegister = 0;
   uint32_t Flags = 0;
   std::vector<uint32_t> StaticHeapIndices;
-  /// See `ResourceInfo::ReservedResourceHeapSize`/`BoundRanges`.
+  /// See `ResourceInfo::ReservedResourceHeapSize`/`ReservedImageHeapSize`/
+  /// `ReservedSamplerHeapSize`/`BoundRanges`.
   uint32_t ReservedResourceHeapSize = 0;
+  uint32_t ReservedImageHeapSize = 0;
+  uint32_t ReservedSamplerHeapSize = 0;
   std::vector<BoundResourceRange> BoundRanges;
   /// The entry point's serialized `feme::EntrySignature`
   /// (`feme::serializeSignature`), or empty if none is attached.
