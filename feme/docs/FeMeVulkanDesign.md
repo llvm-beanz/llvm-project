@@ -1324,6 +1324,67 @@ here: they require root constant lowering broader than the single
 `(b0, space0)`, non-array, constant-row-index shape `feme::cpu` implements
 today, which is a multi-pass change of its own and is scheduled in V3.
 
+**Status: done**, implemented across `feme/lib/Vulkan/{Memory,Buffer,
+Pipeline,CommandBuffer,Sync,GroupSize}.{h,cpp}`, covered by
+`feme/unittests/Vulkan/{Memory,Buffer,Pipeline,CommandBuffer,Sync,
+GroupSize}Test.cpp`. `SyncTest.SubmitDispatchAndWaitOnFence` is this
+milestone's own end-to-end scenario: it records `vkCmdBindPipeline` +
+`vkCmdDispatch` against a real (MLIR-assembled) SPIR-V compute shader,
+submits it to a queue, and observes the fence signal.
+
+Deviations from this section's sketch, all with fuller rationale in the
+implementing headers' own file comments:
+
+- Group-size resolution (`LocalSize`/`LocalSizeId`/`BuiltIn WorkgroupSize`)
+  is a Vulkan-ICD-local raw-SPIR-V-word scanner
+  (`feme::vulkan::resolveComputeGroupSize`, GroupSize.h), not a change to
+  the shared `feme::spirv::createConvertSPIRVToLLVMPass`. MLIR's
+  `mlir::spirv::deserialize` does not preserve a `BuiltIn` decoration
+  applied to a specialization-constant composite at all -- verified by
+  reading `Deserializer::processSpecConstantComposite`/
+  `processConstantComposite`, which never consult the generic
+  per-result-id `decorations` map the way ops dispatched through the
+  auto-generated instruction table do -- so there is no structured API
+  left to recover it from. `VkSpecializationInfo` overrides are honored
+  only for the specialization constants group-size resolution itself
+  depends on (`SpecId`s reachable from `LocalSizeId`/the `WorkgroupSize`
+  composite); a shader's other, unrelated specialization constants are
+  not applied at all, since nothing in V1's own resource-free scope
+  exercises them.
+- `vkQueueSubmit` executes every submitted command buffer synchronously on
+  the calling thread, one of the two first-implementation options
+  "Queues, Scheduling, and Synchronization" explicitly allows, rather than
+  a dedicated per-queue executor thread. A fence is therefore always
+  already in its final state by the time `vkGetFenceStatus`/
+  `vkWaitForFences`/`vkQueueWaitIdle`/`vkDeviceWaitIdle` could observe it.
+- Dispatch execution (`feme::vulkan::executeCommandBuffer`,
+  CommandBuffer.cpp) calls `feme::cpu::CompiledStage::invokeGroup`
+  directly, one group at a time on the calling thread, rather than going
+  through `feme::cpu::JITEngine::dispatch`: `JITEngine` always starts a
+  dispatch's `GroupID`s at `{0,0,0}`, which cannot express
+  `vkCmdDispatchBase`'s offset or `vkCmdDispatchIndirect`'s
+  runtime-read group count without bypassing it anyway. Parallelizing
+  independent groups across a worker pool the way `JITEngine` does is a
+  later performance enhancement, not a V1 correctness requirement.
+- `VkPipelineLayout` accepts only `setLayoutCount == 0` and
+  `pushConstantRangeCount == 0` (descriptor sets are V2, push constants
+  are V3), matching "compile and execute a resource-free SPIR-V compute
+  shader using builtins"; `vkCreateComputePipelines` also rejects a
+  shader whose `ResourceInfo` shows it needs descriptor-heap, root-
+  constant, or sampler-heap resources, since this milestone's pipeline
+  layout has nothing to bind them to.
+- The V1 command set is restricted to exactly the bullet list above:
+  `vkCmdBindPipeline` (compute only), `vkCmdDispatch`, `vkCmdDispatchBase`,
+  `vkCmdDispatchIndirect`. Buffer copies/fills, pipeline barriers, query
+  pools, events, and secondary command buffers from "Command Buffers"'s
+  fuller first command set are not yet implemented; buffer copies and
+  barriers are explicitly scheduled in V2.
+- `ArtifactInfo`'s wave size/group size/groupshared fields were already
+  populated by roadmap R22 before this milestone began (see "CPU Runtime
+  API Changes"); this milestone only consumes them
+  (`StageArtifactInfo::GroupSharedSize` sizes each dispatch's private
+  groupshared allocation).
+
 ### V2: Storage buffers and descriptors
 
 - ~~Add a SPIR-V binding-to-heap normalization, since
