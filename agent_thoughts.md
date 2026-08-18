@@ -19551,3 +19551,138 @@ intrinsic names above.
   file before committing (per feme/.instructions.md's coding-standards
   rule), rebuilding and re-running the affected tests afterward to confirm
   the formatting pass alone did not change behavior.
+
+# Agent thoughts: V4 (typed buffers, VkFormat mapping, texel buffers,
+# broader subgroup/atomic/robustness coverage, persistent pipeline cache,
+# first CTS runs)
+
+## Approach
+
+Read the roadmap's V4 bullet list, FeMeVulkanDesign.md's own V4 sketch, and
+the surrounding "Descriptor Model"/"Pipeline Cache"/"Builtin and
+execution-shape mapping" sections before writing any code, then explored
+the actual codebase (lib/Vulkan, lib/Transforms/CPU/SPIRVResourceLowering.cpp,
+lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp, runtime/CPU/FeMeRuntimeCPU.c)
+to find out exactly how much of each bullet already existed versus was a
+real gap, rather than assuming the design doc's prose was still accurate.
+That investigation changed the plan twice:
+
+- Texel buffers turned out to be far more tractable than a first read
+  suggested: `OpImageRead`/`OpImageFetch`/`OpImageWrite` already had a
+  generic MLIR-dialect-conversion pattern (`ImageReadPattern`/
+  `ImageWritePattern` in SPIRVToLLVMPatterns.cpp), and the CPU runtime
+  already had a `<4 x float>`-shaped typed-load/store helper
+  (`femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32`, built for DXIL typed
+  buffers). The only real gap was `feme::cpu::SPIRVResourceLoweringPass`
+  never recognizing a `Dim::Buffer` image handle at all. I scoped the
+  format support to exactly the two formats that runtime helper already
+  converts (`R32G32B32A32_SFLOAT` identity, `R8G8B8A8_UNORM` packed)
+  rather than claiming broader format coverage the runtime can't back.
+- "Broader atomic coverage" looked, at first, like it might already work
+  (feme::cpu::SIMDize.cpp has extensive DXIL/SPIR-V wave-op handling, and
+  groupshared-atomic widening tests already exist), so I went looking for
+  the actual gap before writing anything. I found it: MLIR's own
+  `SPIRVToLLVM.cpp` has *no* conversion pattern for any `spirv.Atomic*` op
+  at all — a buffer atomic never reaches LLVM IR in the first place, so
+  `feme::cpu`'s own (otherwise mature) atomic-widening support never gets
+  a chance to run. Closing that needs a new dialect-conversion pattern
+  *and* a new `SPIRVResourceLoweringPass` access shape (an `AtomicRMWInst`
+  alongside the existing load/store recognition) — a two-layer feature in
+  its own right, not a small addition, so I left it for a future roadmap
+  step rather than rushing a partial version, and documented the finding
+  explicitly in FeMeVulkanDesign.md's V4 status note so it doesn't have to
+  be rediscovered. Subgroup builtins turned out to have exactly this same
+  shape of gap but at a much smaller scale — `SubgroupSize`/
+  `SubgroupLocalInvocationId` converted to real LLVM calls already, but
+  `SIMDizePass` never classified those two intrinsic IDs, so I closed that
+  one (two `switch` cases, reusing existing `WaveCallKind::GetLaneCount`/
+  `BuiltinCallKind::LaneIndex` machinery built for the DXIL-sourced
+  equivalents).
+- The persistent pipeline cache didn't exist *at all* (not even
+  `vkCreatePipelineCache`'s declaration) — `vkCreateComputePipelines`
+  silently ignored its `VkPipelineCache` parameter. I implemented the
+  full object plus the blob format the design's own "Pipeline Cache"
+  section specifies (header/UUID/digest/bounds-checked, "any failure is
+  an empty cache"), and additionally made an in-process cache hit actually
+  skip recompilation (refactoring `ComputePipeline` from an owning
+  `unique_ptr<Context>`/`CompiledStage` pair to a `shared_ptr<
+  CachedPipelineArtifact>`) — a real, testable improvement the design
+  didn't explicitly ask for but that the object model naturally supports
+  once the key/lookup machinery exists.
+- CTS: no `deqp-vk` binary or Vulkan-CTS checkout is available in this
+  sandboxed environment (no network access to fetch either). Rather than
+  fabricate a "CTS passed" claim I cannot back, I built the
+  infrastructure a host that *does* have `deqp-vk` can use immediately
+  (a case-list filter scoped to this ICD's actual compute-only advertised
+  surface, plus a `system-vulkan-cts`-gated lit test mirroring how
+  `system-dxc`/`system-second-vulkan-icd` already gate their own optional
+  external dependencies) and documented the gap explicitly rather than
+  silently dropping the bullet.
+
+## What I built
+
+- `feme::vulkan::mapVkFormat`/`formatElementSize` (Format.h/cpp): a table
+  covering every `feme::cpu::ResourceFormat` value.
+- `feme::vulkan::BufferView` (Buffer.h/cpp) plus
+  `vkCreateBufferView`/`vkDestroyBufferView`; `Descriptor.h/cpp` accepts
+  `VK_DESCRIPTOR_TYPE_{UNIFORM,STORAGE}_TEXEL_BUFFER`, writable through a
+  `VkBufferView` (a new `DescriptorBufferBinding::View` field alongside the
+  existing buffer/offset/range fields); `CommandBuffer.cpp`'s dispatch-heap
+  materialization resolves a texel-buffer binding to `Kind::Typed`.
+- `feme::cpu::SPIRVResourceLoweringPass` gained `BufferKind::TexelStorage`/
+  `TexelUniform`, classified by a `Dim::Buffer` `target("spirv.Image", ...)`
+  handle's `Sampled` operand, lowering through `createTypedLoad`/
+  `createTypedStore` instead of the raw-buffer family.
+- `PhysicalDeviceInfo.cpp` now advertises `robustBufferAccess = VK_TRUE`
+  (the CPU runtime's bounds checking was already unconditional; this was
+  an honesty gap, not a new guarantee).
+- `feme::cpu::SIMDizePass::classifyWaveCall`/`classifyBuiltin` recognize
+  `llvm.spv.subgroup.size`/`llvm.spv.subgroup.local.invocation.id`.
+- `feme::vulkan::PipelineCache` (PipelineCache.h/cpp):
+  `computePipelineCacheKey` (SHA-256 over shader words/entry point/spec
+  data/pipeline-layout binding map/push-constant ranges/device UUID),
+  `parsePipelineCacheBlob`/`serializePipelineCacheBlob` (header/UUID/
+  digest/bounds, "any failure -> empty cache"),
+  `vkCreate/Destroy/GetData/MergePipelineCaches`,
+  `FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA` build option,
+  `feme-vulkan-pipeline-cache-fuzzer` (+ seed corpus, wired into
+  `check-feme-fuzz` and CommandGuide docs).
+- `feme/utils/filter_vulkan_cts_cases.py` and
+  `test/Vulkan/cts-compute-subset.test` (gated on a new
+  `system-vulkan-cts` lit feature).
+
+## Validation
+
+Built with assertions enabled and ccache (the pre-existing `build/`
+directory's own configuration), ran `ninja check-feme` after every
+commit-sized change (baseline 1286 passed / 0 failed before this session;
+1306 passed / 0 failed / 35 unsupported — the +1 unsupported is the new
+CTS lit test correctly skipping without `deqp-vk` installed — after it),
+plus targeted unit/lit suites (`check-feme-vulkan`,
+`check-feme-transforms-cpu`, `check-feme-fuzz`) while iterating on each
+piece. Ran `clang-format` on every changed file before each commit. Found
+and fixed one real bug while writing the end-to-end texel-buffer test:
+`classifyTexelBufferHandle` originally required the *handle's* type
+parameter to be `<4 x float>`, but SPIR-V's own `OpTypeImage` "Sampled
+Type" operand is always the per-channel scalar type (`f32`), not a
+vector — the actual `<4 x float>` shape only appears at each
+`OpImageRead`/`OpImageFetch`/`OpImageWrite`'s own load/store type. Caught
+this by actually running the dispatch test rather than trusting the
+narrower unit tests, which happened to construct the (technically
+invalid) handle shape I'd assumed.
+
+## Deliberately deferred to later roadmap steps
+
+- SPIR-V atomic buffer/image access (`spirv.Atomic*`): no dialect
+  conversion pattern exists at all; needs one plus a new
+  `SPIRVResourceLoweringPass` access shape. Documented in
+  FeMeVulkanDesign.md's V4 Status note rather than left silently
+  unaddressed.
+- Texel-buffer format coverage beyond `R32G32B32A32_SFLOAT`/
+  `R8G8B8A8_UNORM`: needs the CPU runtime helper library to grow more
+  `ResourceCallKind`-mangled `<N x T>` variants.
+- Relocatable object code in the persistent pipeline cache blob: depends
+  on a `CompiledStage`/`CompiledKernel` API this milestone doesn't add
+  (the design doc's own anticipated dependency).
+- An actual Vulkan CTS run and its result: no `deqp-vk` build available
+  in this environment; only the filtering/harness infrastructure landed.
