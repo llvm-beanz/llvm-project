@@ -23,12 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you flesh out the R30 and V5 gaps from the roadmap document?
+Can you implement V6 from the roadmap document?
 
-The previous agent left the comment:
-
-> - Real shader-side image/sampler consumption: still blocked on R30's
->   remaining compiler-side reflection work, as scoped above. This is the
->   one gap this follow-up pass did not attempt, and it is the largest one
->   by far -- closing it is its own multi-step project, not a small addition
->   to this session's four smaller fixes.
+> Graphics queue and basic rendering: graphics stage compilation, `VkRenderPass`
+> and dynamic rendering, graphics pipeline state, draws, and
+> `VK_QUEUE_GRAPHICS_BIT`
