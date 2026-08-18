@@ -217,4 +217,169 @@ TEST(SPIRVResourceLoweringTest, LeavesConflictingRangeSizeUnchanged) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
+// V3: a uniform buffer block (`cbuffer`/`ConstantBuffer<T>`) shares the same
+// `spirv.VulkanBuffer` handle representation a storage buffer does, but its
+// sole type parameter is the block's own field struct directly (see
+// `feme::spirv::convertUniformBlockType` in SPIRVToLLVMPatterns.cpp) rather
+// than a runtime array, and a field access resolves to a compile-time
+// struct-layout byte offset rather than `index * stride`.
+TEST(SPIRVResourceLoweringTest, LowersUniformBufferFieldToResourceLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main() {
+      %h = call target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 2, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0) %h, i32 0)
+      %v = load float, ptr %ptr
+      ret float %v
+    }
+    declare target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LowersUniformBufferSecondFieldToItsOwnStructLayoutOffset) {
+  // `{float, i32}`'s second field (`i32`) is naturally aligned at byte
+  // offset 4 -- the field index (1) itself is not a byte offset, so this
+  // confirms the pass resolves it through the struct's own layout rather
+  // than passing the field index straight through.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main() {
+      %h = call target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 2, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0) %h, i32 1)
+      %v = load i32, ptr %ptr
+      ret i32 %v
+    }
+    declare target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  bool FoundExpectedOffset = false;
+  for (Instruction &I : instructions(F)) {
+    auto *CI = dyn_cast<CallInst>(&I);
+    if (!CI || !CI->getCalledFunction() ||
+        !CI->getCalledFunction()->getName().starts_with(
+            "feme.cpu.resource.load.raw"))
+      continue;
+    // Args: {heap, heap_count, descriptor_index, byte_offset, mask}.
+    auto *Offset = dyn_cast<ConstantInt>(CI->getArgOperand(3));
+    FoundExpectedOffset = Offset && Offset->getZExtValue() == 4;
+  }
+  EXPECT_TRUE(FoundExpectedOffset);
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesUniformBufferStoreUnchanged) {
+  // Vulkan disallows writing `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`: a store
+  // through a uniform-buffer handle is not an access shape this pass models
+  // (see `hasOnlySupportedUses`), so the whole function is left alone.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() {
+      %h = call target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 2, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0) %h, i32 0)
+      store float 1.0, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesUniformBufferDynamicFieldIndexUnchanged) {
+  // A cbuffer field access is always statically typed, so its
+  // `getpointer` index is always a compile-time constant in practice;
+  // a dynamic one is not an access shape this pass models.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define float @main(i32 %field) {
+      %h = call target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 2, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0) %h, i32 %field)
+      %v = load float, ptr %ptr
+      ret float %v
+    }
+    declare target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", {float, i32}, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesConflictingBufferKindAtSameIdentityUnchanged) {
+  // A storage buffer and a uniform buffer declared at the same (set,
+  // binding) identity is a conflicting re-declaration, exactly like two
+  // storage buffers disagreeing about stride/range size. The two
+  // `handlefrombinding`/`getpointer` overloads need their real (LLVM-
+  // mangled) intrinsic names spelled out here, since IR text does not
+  // auto-mangle an overloaded intrinsic's declared name the way an
+  // `IRBuilder`/`Intrinsic::getOrInsertDeclaration` caller gets for free.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @storage(i32 %idx) {
+      %h = call target("spirv.VulkanBuffer", [0 x float], 12, 1)
+          @llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_a0f32_12_1t(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer.p0.tspirv.VulkanBuffer_a0f32_12_1t.i32(target("spirv.VulkanBuffer", [0 x float], 12, 1) %h, i32 %idx)
+      %v = load float, ptr %ptr
+      ret void
+    }
+    define float @uniform() {
+      %h = call target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+          @llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_sl_f32i32s_2_0t(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer.p0.tspirv.VulkanBuffer_sl_f32i32s_2_0t.i32(target("spirv.VulkanBuffer", {float, i32}, 2, 0) %h, i32 0)
+      %v = load float, ptr %ptr
+      ret float %v
+    }
+    declare target("spirv.VulkanBuffer", [0 x float], 12, 1)
+        @llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_a0f32_12_1t(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.p0.tspirv.VulkanBuffer_a0f32_12_1t.i32(target("spirv.VulkanBuffer", [0 x float], 12, 1), i32)
+    declare target("spirv.VulkanBuffer", {float, i32}, 2, 0)
+        @llvm.spv.resource.handlefrombinding.tspirv.VulkanBuffer_sl_f32i32s_2_0t(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.p0.tspirv.VulkanBuffer_sl_f32i32s_2_0t.i32(target("spirv.VulkanBuffer", {float, i32}, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  EXPECT_FALSE(hasResourceLoadCall(*M->getFunction("storage")));
+  EXPECT_FALSE(hasResourceLoadCall(*M->getFunction("uniform")));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 } // namespace

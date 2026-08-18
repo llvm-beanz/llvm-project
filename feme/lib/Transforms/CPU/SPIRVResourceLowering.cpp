@@ -15,6 +15,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
@@ -35,6 +36,17 @@ using namespace feme::cpu;
 
 namespace {
 
+/// Whether a bound handle wraps a storage buffer -- a homogeneous,
+/// dynamically-indexed runtime array (`RWStructuredBuffer<T>`/
+/// `StructuredBuffer<T>`) -- or a uniform buffer -- a fixed set of
+/// differently-typed named fields at fixed byte offsets
+/// (`cbuffer`/`ConstantBuffer<T>`). The two need different offset
+/// arithmetic (see `lowerAccesses`): a storage buffer access multiplies a
+/// (possibly dynamic) array index by a fixed element stride, while a
+/// uniform buffer access resolves a (always compile-time-constant) field
+/// index directly to a fixed struct-layout byte offset.
+enum class BufferKind { Storage, Uniform };
+
 /// A bound `spirv.VulkanBuffer` handle's identity: (descriptor set,
 /// binding), playing the same role DXIL's (register space, register) pair
 /// does -- see the header comment's "SPIR-V's (descriptor set, binding)
@@ -49,11 +61,19 @@ struct RangeKey {
 };
 
 /// The outcome of collecting one identity's uses: either a single,
-/// consistent element stride and array range size, or a conflicting
-/// re-declaration that leaves every handle at that identity un-normalized
-/// (see the header comment's "Scope" note).
+/// consistent buffer shape (kind, element stride or struct layout, and
+/// array range size), or a conflicting re-declaration that leaves every
+/// handle at that identity un-normalized (see the header comment's "Scope"
+/// note).
 struct RangeEntry {
+  BufferKind Kind = BufferKind::Storage;
+  /// The storage-buffer element stride (`Kind == Storage`); unused, always
+  /// 0, for a uniform buffer, whose offsets come from `ElementStruct`'s own
+  /// layout instead.
   uint64_t Stride = 0;
+  /// The uniform-buffer field struct (`Kind == Uniform`); null for a
+  /// storage buffer.
+  StructType *ElementStruct = nullptr;
   uint32_t RangeSize = 0;
   bool Conflicting = false;
   /// Assigned once every range has been collected (see `assignHeapBases`).
@@ -73,7 +93,9 @@ struct RangeEntry {
 struct BoundHandle {
   CallInst *Handle;
   RangeKey Key;
+  BufferKind Kind;
   uint64_t Stride;
+  StructType *ElementStruct;
   uint32_t RangeSize;
 };
 
@@ -84,47 +106,73 @@ Intrinsic::ID getIntrinsicID(const Value *V) {
   return Callee ? Callee->getIntrinsicID() : Intrinsic::not_intrinsic;
 }
 
-/// Returns \p Handle's buffer element stride (in bytes) if its type is a
+/// One handle's classification: which kind of buffer it is, and the
+/// element shape needed to compute an access's byte offset later (see
+/// `BufferKind`).
+struct HandleClassification {
+  BufferKind Kind;
+  uint64_t Stride = 0;
+  StructType *ElementStruct = nullptr;
+};
+
+/// Returns \p Handle's buffer classification if its type is a
 /// `spirv.VulkanBuffer` handle over a flat (non-aggregate-accessed) element
-/// -- see `feme::spirv::convertBufferBlockType` in SPIRVToLLVMPatterns.cpp
-/// for the handle type this recognizes: one type parameter (the buffer's
-/// `!llvm.array<0 x ElemTy>` runtime array) and two integer parameters
-/// (storage class, writability), neither of which is the stride itself --
-/// SPIR-V records that implicitly via `ElemTy`'s own store size, mirroring
-/// how `feme::cpu::ResourceLoweringPass::classifyHandle` recovers a DXIL
-/// `dx.RawBuffer`'s stride from its element type parameter. Returns
-/// `std::nullopt` for any other handle kind (an image/sampler resource, not
-/// yet covered -- see the header comment).
-std::optional<uint64_t> classifyVulkanBufferStride(const CallInst &Handle,
-                                                   const DataLayout &DL) {
+/// -- see `feme::spirv::convertBufferBlockType`/`convertUniformBlockType`
+/// in SPIRVToLLVMPatterns.cpp for the two handle shapes this recognizes:
+/// one type parameter (either a storage buffer's `!llvm.array<0 x ElemTy>`
+/// runtime array, or a uniform buffer's own field struct directly) and two
+/// integer parameters (storage class, writability), neither of which is
+/// the stride itself -- SPIR-V records that implicitly via `ElemTy`'s own
+/// store size, mirroring how `feme::cpu::ResourceLoweringPass::
+/// classifyHandle` recovers a DXIL `dx.RawBuffer`'s stride from its element
+/// type parameter. Returns `std::nullopt` for any other handle kind (an
+/// image/sampler resource, not yet covered -- see the header comment).
+std::optional<HandleClassification>
+classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
   if (!HandleTy || HandleTy->getName() != "spirv.VulkanBuffer")
     return std::nullopt;
   if (HandleTy->getNumTypeParameters() != 1)
     return std::nullopt;
-  auto *ArrayTy = dyn_cast<ArrayType>(HandleTy->getTypeParameter(0));
-  if (!ArrayTy)
-    return std::nullopt;
-  return DL.getTypeStoreSize(ArrayTy->getElementType());
+  Type *Param = HandleTy->getTypeParameter(0);
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Param))
+    return HandleClassification{BufferKind::Storage,
+                                DL.getTypeStoreSize(ArrayTy->getElementType()),
+                                nullptr};
+  if (auto *StructTy = dyn_cast<StructType>(Param))
+    return HandleClassification{BufferKind::Uniform, 0, StructTy};
+  return std::nullopt;
 }
 
-/// Checks that every use of \p Handle is the flat-element access shape this
-/// pass models: a `llvm.spv.resource.getpointer` call whose own result is
-/// used only by an ordinary `load`, or a `store` it is the pointer operand
-/// (not the stored value) of -- see the header comment's "access shape"
-/// bullet. Any further `getelementptr` into the element's own fields (a
-/// structured-buffer field access) is left unmodeled, matching
+/// Checks that every use of \p Handle is the flat access shape this pass
+/// models for \p Kind: a `llvm.spv.resource.getpointer` call whose own
+/// result is used only by an ordinary `load` (both kinds), or a `store` it
+/// is the pointer operand (not the stored value) of (`BufferKind::Storage`
+/// only -- a uniform buffer is always read-only, matching Vulkan's own
+/// restriction on `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`) -- see the header
+/// comment's "access shape" bullet. For `BufferKind::Uniform`, the
+/// `getpointer` index (the field selected within the block's struct) must
+/// also be a compile-time constant, unlike a storage buffer's (possibly
+/// dynamic) array index -- a real cbuffer field access is always
+/// statically typed. Any further `getelementptr` into the element's own
+/// fields (a structured-buffer field access, or a nested uniform-buffer
+/// field) is left unmodeled, matching
 /// `feme::cpu::ResourceLoweringPass::hasOnlySupportedUses`'s own narrowing.
-bool hasOnlySupportedUses(const CallInst &Handle) {
+bool hasOnlySupportedUses(const CallInst &Handle, BufferKind Kind) {
   for (const User *U : Handle.users()) {
     const auto *GetPtr = dyn_cast<CallInst>(U);
     if (!GetPtr || getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer)
       return false;
+    if (Kind == BufferKind::Uniform &&
+        !isa<ConstantInt>(GetPtr->getArgOperand(1)))
+      return false;
     for (const User *PU : GetPtr->users()) {
-      if (const auto *SI = dyn_cast<StoreInst>(PU)) {
-        if (SI->getPointerOperand() != GetPtr)
-          return false;
-        continue;
+      if (Kind == BufferKind::Storage) {
+        if (const auto *SI = dyn_cast<StoreInst>(PU)) {
+          if (SI->getPointerOperand() != GetPtr)
+            return false;
+          continue;
+        }
       }
       if (!isa<LoadInst>(PU))
         return false;
@@ -146,10 +194,11 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     if (!CI || getIntrinsicID(CI) != Intrinsic::spv_resource_handlefrombinding)
       continue;
 
-    std::optional<uint64_t> Stride = classifyVulkanBufferStride(*CI, DL);
-    if (!Stride)
+    std::optional<HandleClassification> Classification =
+        classifyVulkanBufferHandle(*CI, DL);
+    if (!Classification)
       return std::nullopt; // Not one of the kinds this pass normalizes.
-    if (!hasOnlySupportedUses(*CI))
+    if (!hasOnlySupportedUses(*CI, Classification->Kind))
       return std::nullopt;
 
     auto *SetC = dyn_cast<ConstantInt>(CI->getArgOperand(0));
@@ -170,7 +219,9 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
 
     RangeKey Key{static_cast<uint32_t>(SetC->getZExtValue()),
                  static_cast<uint32_t>(BindingC->getZExtValue())};
-    Handles.push_back(BoundHandle{CI, Key, *Stride, RangeSize});
+    Handles.push_back(BoundHandle{CI, Key, Classification->Kind,
+                                  Classification->Stride,
+                                  Classification->ElementStruct, RangeSize});
   }
   return Handles;
 }
@@ -287,6 +338,16 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
 /// operand here rather than cached in `BoundHandle` -- see that struct's
 /// comment for why. Computed once, at \p BH.Handle's own location -- which
 /// dominates every use rewritten below -- rather than once per access.
+///
+/// The per-access byte offset differs by \p BH.Kind: a storage-buffer
+/// access multiplies its `getpointer` array index (re-read per call, since
+/// -- unlike the descriptor index above -- a distinct array element may be
+/// read per access) by \p BH.Stride, while a uniform-buffer access resolves
+/// its `getpointer` field index (a compile-time constant, guaranteed by
+/// `hasOnlySupportedUses`) directly to \p BH.ElementStruct's own declared
+/// byte offset for that field -- no runtime arithmetic needed at all, since
+/// a cbuffer's fields have no dynamic index the way a storage buffer's
+/// array elements do.
 void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
                    uint32_t HeapBase) {
   LLVMContext &Ctx = BH.Handle->getContext();
@@ -296,13 +357,22 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
   Value *DescriptorIndex =
       computeClampedIndex(IndexBuilder, Index, HeapBase, BH.RangeSize);
   Value *Mask = ConstantInt::getTrue(Ctx);
+  const DataLayout &DL = BH.Handle->getModule()->getDataLayout();
 
   for (User *U : llvm::make_early_inc_range(BH.Handle->users())) {
     auto *GetPtr = cast<CallInst>(U);
-    IRBuilder<> PtrBuilder(GetPtr);
-    Value *ElemIdx = PtrBuilder.CreateZExt(GetPtr->getArgOperand(1), I64Ty);
-    Value *Offset =
-        PtrBuilder.CreateMul(ElemIdx, ConstantInt::get(I64Ty, BH.Stride));
+    Value *Offset;
+    if (BH.Kind == BufferKind::Storage) {
+      IRBuilder<> PtrBuilder(GetPtr);
+      Value *ElemIdx = PtrBuilder.CreateZExt(GetPtr->getArgOperand(1), I64Ty);
+      Offset =
+          PtrBuilder.CreateMul(ElemIdx, ConstantInt::get(I64Ty, BH.Stride));
+    } else {
+      auto *FieldIdxC = cast<ConstantInt>(GetPtr->getArgOperand(1));
+      const StructLayout *SL = DL.getStructLayout(BH.ElementStruct);
+      uint64_t ByteOffset = SL->getElementOffset(FieldIdxC->getZExtValue());
+      Offset = ConstantInt::get(I64Ty, ByteOffset);
+    }
 
     for (User *PU : llvm::make_early_inc_range(GetPtr->users())) {
       if (auto *LI = dyn_cast<LoadInst>(PU)) {
@@ -313,7 +383,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
         LI->eraseFromParent();
         continue;
       }
-      auto *SI = cast<StoreInst>(PU);
+      auto *SI = cast<StoreInst>(PU); // Only reachable for BufferKind::Storage.
       IRBuilder<> Builder(SI);
       createRawStore(Builder, Env, DescriptorIndex, Offset,
                      SI->getValueOperand(), Mask);
@@ -404,9 +474,10 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     for (const BoundHandle &BH : *Handles) {
       auto It = Ranges.find(BH.Key);
       if (It == Ranges.end())
-        Ranges.emplace(BH.Key, RangeEntry{BH.Stride, BH.RangeSize,
-                                          /*Conflicting=*/false});
-      else if (It->second.Stride != BH.Stride ||
+        Ranges.emplace(BH.Key, RangeEntry{BH.Kind, BH.Stride, BH.ElementStruct,
+                                          BH.RangeSize, /*Conflicting=*/false});
+      else if (It->second.Kind != BH.Kind || It->second.Stride != BH.Stride ||
+               It->second.ElementStruct != BH.ElementStruct ||
                It->second.RangeSize != BH.RangeSize)
         It->second.Conflicting = true;
     }

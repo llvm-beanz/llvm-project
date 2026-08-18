@@ -52,24 +52,37 @@
 // whether or not the descriptor behind a given heap slot happens to be a
 // dynamic one.
 //
-// Scope (roadmap steps R10, R26; see feme/docs/Roadmap.md's §1.2/§1.9):
+// Scope (roadmap steps R10, R26, V3; see feme/docs/Roadmap.md's §1.2/§1.9):
 //
-//  - Only a `StorageBuffer`-derived `spirv.VulkanBuffer` handle (an
+//  - A `StorageBuffer`-derived `spirv.VulkanBuffer` handle (an
 //    `RWStructuredBuffer<T>`/`StructuredBuffer<T>` in HLSL, see
-//    `feme::spirv::convertBufferBlockType` in SPIRVToLLVMPatterns.cpp) is
-//    normalized; an image/sampler handle (`Buffer`/`RWBuffer<T>`/
-//    `Texture*`/`Sampler*`) is left untouched, matching the DXIL side's own
-//    "typed and raw buffers only" narrowing (constant buffers, textures,
-//    and samplers are not yet covered there either -- see
-//    `feme::cpu::ResourceLoweringPass`'s header comment).
-//  - Only the access shape `feme::spirv::StorageBufferAccessChainPattern`
-//    itself produces for a flat (non-aggregate) buffer element -- a direct
+//    `feme::spirv::convertBufferBlockType` in SPIRVToLLVMPatterns.cpp) and a
+//    `Uniform`-derived one (a `cbuffer`/`ConstantBuffer<T>`, see
+//    `feme::spirv::convertUniformBlockType`) are both normalized; an
+//    image/sampler handle (`Buffer`/`RWBuffer<T>`/`Texture*`/`Sampler*`) is
+//    left untouched, matching the DXIL side's own "typed and raw buffers
+//    only" narrowing (textures and samplers are not yet covered there
+//    either -- see `feme::cpu::ResourceLoweringPass`'s header comment).
+//  - For a storage buffer, only the access shape
+//    `feme::spirv::StorageBufferAccessChainPattern` itself produces for a
+//    flat (non-aggregate) buffer element -- a direct
 //    `llvm.spv.resource.getpointer` followed immediately by an ordinary
 //    `load`/`store`, with no intervening `getelementptr` into the element's
 //    own fields -- is rewritten. A structured-buffer element with fields
 //    accessed individually is left untouched, exactly as
 //    `feme::cpu::ResourceLoweringPass` leaves any access shape it does not
 //    itself model.
+//  - For a uniform buffer, only the analogous shape
+//    `feme::spirv::UniformBufferAccessChainPattern` produces -- a direct
+//    `llvm.spv.resource.getpointer` selecting one field of the block's own
+//    struct (its index always a compile-time constant, unlike a storage
+//    buffer's array index) followed immediately by an ordinary `load` -- is
+//    rewritten; the field index resolves directly to that field's
+//    compile-time struct-layout byte offset, with no runtime multiplication
+//    needed. There is no `store` case at all: Vulkan disallows writing
+//    `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`. A nested field within one of the
+//    block's own struct- or array-typed fields is left untouched, the same
+//    "flat access only" narrowing the storage-buffer case above uses.
 //  - A binding's range size must be a compile-time constant (matching the
 //    set/binding identity itself); its array index need not be -- a
 //    dynamic index is accepted and clamped at run time, exactly as
@@ -80,10 +93,10 @@
 //    side's own rejection of an unbounded `handlefrombinding` range.
 //  - As with the DXIL passes this mirrors, an unsupported access shape or a
 //    conflicting re-declaration of the same (descriptor set, binding)
-//    identity (two handles disagreeing about the buffer element's stride
-//    or the array's range size) leaves every handle at that identity
-//    un-normalized, so `feme::cpu::checkSupportedRaisedOps` still rejects
-//    it.
+//    identity (two handles disagreeing about the buffer's kind, element
+//    stride/struct layout, or the array's range size) leaves every handle
+//    at that identity un-normalized, so `feme::cpu::checkSupportedRaisedOps`
+//    still rejects it.
 //
 //===----------------------------------------------------------------------===//
 
@@ -94,10 +107,10 @@
 
 namespace feme::cpu {
 
-/// Normalizes and lowers SPIR-V `spirv.VulkanBuffer` storage-buffer access
-/// directly into the same canonical `feme.cpu.resource.*` calls the DXIL
-/// `BoundResourceNormalizationPass` + `ResourceLoweringPass` pair produces.
-/// See the file comment above for current scope.
+/// Normalizes and lowers SPIR-V `spirv.VulkanBuffer` storage- and uniform-
+/// buffer access directly into the same canonical `feme.cpu.resource.*`
+/// calls the DXIL `BoundResourceNormalizationPass` + `ResourceLoweringPass`
+/// pair produces. See the file comment above for current scope.
 class SPIRVResourceLoweringPass
     : public llvm::PassInfoMixin<SPIRVResourceLoweringPass> {
 public:
