@@ -1,0 +1,32 @@
+// V5's own "Images and sampling" milestone: exercises the object model this
+// milestone lands -- image/view/sampler creation, `vkCmdCopyBufferToImage`,
+// a "compatible formats" `vkCmdCopyImage` between two differently-typed but
+// texel-size-compatible images, and `vkCmdCopyImageToBuffer` -- through the
+// real Khronos loader rather than only `unittests/Vulkan/ImageTest.cpp`'s
+// direct `libfeme_vulkan` linkage (see "Testing Strategy" in
+// feme/docs/FeMeVulkanDesign.md and this milestone's own "Deliberately
+// deferred" agent-thoughts note on why no such test existed before). No
+// shader consumes the image -- that remains R30's own remaining scope (see
+// FeMeVulkanDesign.md's "V5" deviation note) -- so this only round-trips
+// bytes through copies.
+//
+// REQUIRES: system-vulkan-loader
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-image-loader-smoke | FileCheck %s
+
+// CHECK: 01
+// CHECK-NEXT: 02
+// CHECK-NEXT: 03
+// CHECK-NEXT: 04
+// CHECK-NEXT: 05
+// CHECK-NEXT: 06
+// CHECK-NEXT: 07
+// CHECK-NEXT: 08
+// CHECK-NEXT: 09
+// CHECK-NEXT: 0a
+// CHECK-NEXT: 0b
+// CHECK-NEXT: 0c
+// CHECK-NEXT: 0d
+// CHECK-NEXT: 0e
+// CHECK-NEXT: 0f
+// CHECK-NEXT: 10
