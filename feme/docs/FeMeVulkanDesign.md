@@ -779,8 +779,8 @@ advertising any descriptor indexing feature.
 | Storage buffer | Raw/structured `FemeDescriptor`, writable | Done (V2) |
 | Uniform buffer | Read-only raw `FemeDescriptor` | Done (V3) |
 | Dynamic storage/uniform buffer | Same, with bound dynamic offset | Done (V2 storage, V3 uniform) |
-| Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Requires format map |
-| Uniform texel buffer | Typed read-only `FemeDescriptor` | Requires format map |
+| Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Done (V4, `R32G32B32A32_SFLOAT`/`R8G8B8A8_UNORM` only) |
+| Uniform texel buffer | Typed read-only `FemeDescriptor` | Done (V4, same format scope) |
 | Sampled/storage image | Future image descriptor ABI | Deferred |
 | Sampler/combined image sampler | Future sampler descriptor ABI | Deferred |
 | Inline uniform block | Push/root-data or cbuffer descriptor | Deferred |
@@ -946,6 +946,22 @@ direct code-execution vector. The format must therefore:
   data.
 - Be excluded from the trust boundary entirely under a build option, so that
   security-sensitive embedders can disable persistent cache loading.
+
+**Status (V4):** `feme::vulkan::PipelineCache` (lib/Vulkan/PipelineCache.h/cpp)
+implements the process-local strong-key cache above, keyed by
+`computePipelineCacheKey` over exactly this section's listed inputs (the
+device's own `pipelineCacheUUID` already folds in the FeMe/LLVM
+versions/CPU target triple/feature policy/wave size row, so the key itself
+does not need to re-derive it separately). The blob format's every bullet
+is implemented (`parsePipelineCacheBlob`/`serializePipelineCacheBlob`,
+fuzzed by `feme-vulkan-pipeline-cache-fuzzer`, gated by the
+`FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA` build option), but -- as this
+section's own sketch anticipated -- it carries no relocatable object code
+(`CompiledStage`/`CompiledKernel` still has no such API), so persistent
+data round-trips a key set only, letting a *fresh* process recognize "this
+was known-good before" without letting it skip recompilation; a hit
+within the same process (the same `VkPipelineCache` object) does skip it,
+sharing one `CachedPipelineArtifact`.
 
 ## Graphics, Presentation, and Window-System Integration
 
@@ -1595,12 +1611,93 @@ Deviations from this section's sketch:
 
 ### V4: Typed buffers and broader compute
 
-- Map supported `VkFormat` values to `ResourceFormat`.
-- Implement uniform/storage texel buffers.
-- Expand subgroup, atomic, numeric-type, and robustness coverage.
-- Add persistent pipeline cache object-code serialization, with header, UUID,
-  and digest validation and a fuzzer over the blob parser.
-- Begin Vulkan CTS runs for the intentionally advertised subset.
+- ~~Map supported `VkFormat` values to `ResourceFormat`~~ (done:
+  `feme::vulkan::mapVkFormat`/`formatElementSize`, Format.h/cpp, cover
+  every format `feme::cpu::ResourceFormat` itself lists).
+- ~~Implement uniform/storage texel buffers~~ (done, scoped: `VkBufferView`
+  (Buffer.h/cpp) plus `VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER`/
+  `_STORAGE_TEXEL_BUFFER` resolve to a `Kind::Typed` `FemeDescriptor`;
+  `feme::cpu::SPIRVResourceLoweringPass` normalizes the `Dim::Buffer`
+  `target("spirv.Image", ...)` handle LLVM's SPIRV backend materializes
+  for one -- `OpImageRead`/`OpImageFetch`/`OpImageWrite` were already
+  converted generically by the pre-existing `ImageReadPattern`/
+  `ImageWritePattern` -- into `createTypedLoad`/`createTypedStore`. Only
+  `VK_FORMAT_R32G32B32A32_SFLOAT` and `VK_FORMAT_R8G8B8A8_UNORM` are
+  usable in a texel buffer's `VkBufferView`, matching the two formats the
+  CPU runtime's typed-load/store helpers (`femeCpuResourceLoadTypedV4F32`/
+  `StoreTypedV4F32`) implement a conversion for; every other format
+  `Format.h` maps is rejected at `vkCreateBufferView`. Broader coverage
+  needs the runtime helper library to grow more `ResourceCallKind`
+  mangled variants -- see Descriptor.h's file comment).
+- ~~Expand subgroup, atomic, numeric-type, and robustness coverage~~ (done,
+  scoped -- see "Deviations" below): `robustBufferAccess` is now
+  advertised (`feme::cpu`'s bounds checking was already unconditional, so
+  this closes an honesty gap rather than adding new checking), and
+  `feme::cpu::SIMDizePass` now lowers Vulkan's `SubgroupSize`/
+  `SubgroupLocalInvocationId` builtins -- previously raised to
+  `llvm.spv.subgroup.*` calls with no CPU-target lowering at all, despite
+  every other row of "Builtin and execution-shape mapping"'s table already
+  working. Atomic and general numeric-type coverage are unchanged this
+  milestone: SPIR-V has no dialect-conversion pattern for any
+  `OpAtomic*` op at all yet (a gap this milestone's investigation found,
+  not one already tracked), so a shader using one still fails to import a
+  full pipeline; closing that is deferred, see "Deviations".
+- ~~Add persistent pipeline cache object-code serialization, with header,
+  UUID, and digest validation and a fuzzer over the blob parser~~ (done,
+  scoped: `feme::vulkan::PipelineCache` -- previously `vkCreatePipelineCache`
+  et al. did not exist at all, and `vkCreateComputePipelines` silently
+  ignored its `VkPipelineCache` argument. The persistent blob is a
+  `VkPipelineCacheHeaderVersionOne` header plus this ICD's own recorded
+  key set and a SHA-256 digest, not relocatable object code -- see
+  "Deviations" -- validated by `feme::vulkan::parsePipelineCacheBlob`
+  (header/UUID/digest/bounds, any failure treated as an empty cache) and
+  fuzzed by `feme-vulkan-pipeline-cache-fuzzer`. An in-process
+  `CachedPipelineArtifact` *is* actually shared across a cache hit within
+  one process, skipping recompilation).
+- Begin Vulkan CTS runs for the intentionally advertised subset (see
+  "Deviations": infrastructure only, no actual run).
+
+**Status: partially done.** Deviations from this section's sketch:
+
+- **Atomics are unraised from SPIR-V entirely.** MLIR's own
+  `SPIRVToLLVM.cpp` conversion has no pattern for any `spirv.Atomic*` op
+  (confirmed by inspection while scoping this milestone, not merely
+  undocumented), unlike the buffer/image/sampling coverage this milestone
+  otherwise builds on. Closing it needs a new `feme::spirv` conversion
+  pattern (an atomic op's pointer already resolves through the same
+  `spirv.VulkanBuffer`/image handle machinery this milestone extended for
+  texel buffers) *and* a corresponding `feme::cpu` canonicalization step
+  (a new `ResourceCallKind`-shaped call, or extending
+  `SPIRVResourceLoweringPass`'s `hasOnlySupportedUses`/`lowerAccesses` to
+  recognize an `AtomicRMWInst` alongside `load`/`store`) before it reaches
+  `feme::cpu::SIMDizePass`'s existing (and already broad, DXIL-proven)
+  atomic-widening support. Deferred past V4.
+- **Numeric-type coverage is unchanged.** No new `ResourceFormat` gained
+  runtime conversion support (still only `R8G8B8A8_UNORM` and the 32-bit
+  identity formats, per `feme::cpu::ResourceFormat`'s own comment); a
+  texel buffer over any other format is rejected at `vkCreateBufferView`
+  rather than misconverting it.
+- **The persistent pipeline cache blob carries no object code.** Per this
+  section's own original sketch: "Persistent cache support therefore
+  depends on a FeMe API that emits relocatable object code plus complete
+  `ArtifactInfo`", which does not exist yet. `vkCreatePipelineCache`'s
+  initial data can therefore only tell a fresh process which keys were
+  known-good in some earlier one (real value for diagnostics/telemetry,
+  and for `PipelineCacheTest.cpp`'s round-trip/tamper coverage, and for
+  the fuzzer), not skip recompiling them -- an in-process hit (the same
+  `VkPipelineCache` object, same process) *is* a real skip.
+- **No actual Vulkan CTS run happened.** `deqp-vk` is a separate, large
+  upstream binary this sandboxed environment has no way to build or fetch
+  (no network access to the Vulkan-CTS repository). What this milestone
+  actually delivers is the infrastructure a host that *does* have it can
+  use immediately: `feme/utils/filter_vulkan_cts_cases.py` (filtering a
+  full case list to this ICD's advertised, compute-only subset) and
+  `test/Vulkan/cts-compute-subset.test` (gated on a new `system-vulkan-cts`
+  lit feature, so it skips cleanly everywhere `deqp-vk` is absent, the same
+  way `system-dxc`/`system-second-vulkan-icd` already gate their own
+  optional external tools). "Begin Vulkan CTS runs" -- an actual pass/fail
+  result recorded somewhere -- remains for whoever next has a CTS build
+  available.
 
 ### V5: Images and sampling
 
