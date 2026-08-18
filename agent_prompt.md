@@ -23,9 +23,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement V0.5 from the roadmap document?
+Can you implement V1 from the roadmap document?
 
-> SPIR-V import that survives real shaders: a glslang/DXC/Clang corpus, the
-> decision between fixing MLIR's structurized deserializer and translating the
-> SPIR-V CFG to unstructured LLVM IR for `PreparePass` to restructure, a
-> prototype of the chosen approach, and the importer fuzzer extended to it
+> Empty compute dispatch: memory, buffers, shader modules, pipeline layouts,
+> command pools/buffers, group-size resolution, submit/fences/idle, direct, base
+> and indirect dispatch
