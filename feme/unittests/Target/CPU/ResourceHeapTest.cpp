@@ -133,6 +133,99 @@ TEST(ResourceHeapTest, MultipleRangesFillTheirOwnHeapBase) {
   EXPECT_EQ(Heap[2].Kind, static_cast<uint32_t>(ResourceKind::None));
 }
 
+TEST(ResourceHeapTest, ImageAndSamplerRangesFillTheirOwnHeaps) {
+  // The three heaps are numbered independently, so a class-`Image` range at
+  // heap base 0 and a class-`Sampler` range at heap base 0 must land in
+  // different arrays, and neither may disturb the buffer heap.
+  ResourceInfo Info;
+  Info.ReservedResourceHeapSize = 1;
+  Info.ReservedImageHeapSize = 1;
+  Info.ReservedSamplerHeapSize = 1;
+  Info.BoundRanges = {
+      BoundResourceRange{0, 0, 1, 0, BoundResourceClass::Buffer},
+      BoundResourceRange{0, 1, 1, 0, BoundResourceClass::Image},
+      BoundResourceRange{0, 2, 1, 0, BoundResourceClass::Sampler},
+  };
+
+  int Buf = 0, Texels = 0;
+  std::vector<FemeDescriptor> BufDescs = {makeDescriptor(&Buf)};
+  BoundResourceBinding BufBinding{0, 0, BufDescs};
+  std::vector<FemeImageDescriptor> ImgDescs = {makeImageDescriptor(&Texels)};
+  BoundImageBinding ImgBinding{0, 1, ImgDescs};
+  std::vector<FemeSamplerDescriptor> SampDescs = {makeSamplerDescriptor()};
+  BoundSamplerBinding SampBinding{0, 2, SampDescs};
+
+  std::vector<FemeDescriptor> Buffers =
+      materializeResourceHeap(Info, {BufBinding}, /*DynamicHeap=*/{});
+  std::vector<FemeImageDescriptor> Images =
+      materializeImageHeap(Info, {ImgBinding}, /*DynamicHeap=*/{});
+  std::vector<FemeSamplerDescriptor> Samplers =
+      materializeSamplerHeap(Info, {SampBinding}, /*DynamicHeap=*/{});
+
+  ASSERT_EQ(Buffers.size(), 1u);
+  EXPECT_EQ(Buffers[0].Data, &Buf);
+  ASSERT_EQ(Images.size(), 1u);
+  EXPECT_EQ(Images[0].Data, &Texels);
+  ASSERT_EQ(Samplers.size(), 1u);
+  EXPECT_EQ(Samplers[0].MagFilter,
+            static_cast<uint32_t>(SamplerFilter::Linear));
+}
+
+TEST(ResourceHeapTest, UnboundImageRangeIsAZeroedImageDescriptor) {
+  ResourceInfo Info;
+  Info.ReservedImageHeapSize = 1;
+  Info.BoundRanges = {
+      BoundResourceRange{0, 0, 1, 0, BoundResourceClass::Image}};
+
+  std::vector<FemeImageDescriptor> Images =
+      materializeImageHeap(Info, /*Bindings=*/{}, /*DynamicHeap=*/{});
+  ASSERT_EQ(Images.size(), 1u);
+  EXPECT_EQ(Images[0].Data, nullptr);
+  EXPECT_EQ(Images[0].SizeInBytes, 0u);
+}
+
+TEST(ResourceHeapTest, DynamicImageHeapFollowsTheReservedPrefix) {
+  // A DXIL-sourced (bindless) shader reserves no image prefix at all, so
+  // its caller-provided heap is the whole image heap; a mixed shader's
+  // dynamic heap starts after the bound prefix.
+  ResourceInfo Info;
+  Info.ReservedImageHeapSize = 1;
+  Info.BoundRanges = {
+      BoundResourceRange{0, 0, 1, 0, BoundResourceClass::Image}};
+
+  int Bound = 0, Dynamic = 0;
+  std::vector<FemeImageDescriptor> BoundDescs = {makeImageDescriptor(&Bound)};
+  BoundImageBinding Binding{0, 0, BoundDescs};
+  std::vector<FemeImageDescriptor> DynamicHeap = {
+      makeImageDescriptor(&Dynamic)};
+
+  std::vector<FemeImageDescriptor> Images =
+      materializeImageHeap(Info, {Binding}, DynamicHeap);
+  ASSERT_EQ(Images.size(), 2u);
+  EXPECT_EQ(Images[0].Data, &Bound);
+  EXPECT_EQ(Images[1].Data, &Dynamic);
+}
+
+TEST(ResourceHeapTest, BufferHeapIgnoresImageAndSamplerRanges) {
+  // A range of another class must not consume a buffer heap slot, even when
+  // its (space, register) identity happens to match a buffer binding's.
+  ResourceInfo Info;
+  Info.ReservedResourceHeapSize = 1;
+  Info.BoundRanges = {
+      BoundResourceRange{0, 0, 1, 0, BoundResourceClass::Image},
+      BoundResourceRange{0, 1, 1, 0, BoundResourceClass::Buffer},
+  };
+
+  int Buf = 0;
+  std::vector<FemeDescriptor> Descs = {makeDescriptor(&Buf)};
+  BoundResourceBinding Wrong{0, 0, Descs};
+
+  std::vector<FemeDescriptor> Heap =
+      materializeResourceHeap(Info, {Wrong}, /*DynamicHeap=*/{});
+  ASSERT_EQ(Heap.size(), 1u);
+  EXPECT_EQ(Heap[0].Kind, static_cast<uint32_t>(ResourceKind::None));
+}
+
 namespace {
 // Records every `FemeDispatchArgs::GroupID` `runDispatch` calls it with,
 // and (for the second test below) whether the resource heap it saw inside

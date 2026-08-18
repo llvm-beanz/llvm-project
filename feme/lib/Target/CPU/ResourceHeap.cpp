@@ -16,17 +16,27 @@ using namespace llvm;
 
 namespace feme::cpu {
 
-std::vector<FemeDescriptor>
-materializeResourceHeap(const ResourceInfo &Info,
-                        ArrayRef<BoundResourceBinding> Bindings,
-                        ArrayRef<FemeDescriptor> DynamicHeap) {
-  std::vector<FemeDescriptor> Heap(
-      static_cast<size_t>(Info.ReservedResourceHeapSize) + DynamicHeap.size(),
-      FemeDescriptor{});
+namespace {
 
-  for (const BoundResourceRange &Range : Info.BoundRanges) {
-    const BoundResourceBinding *Matched = nullptr;
-    for (const BoundResourceBinding &Binding : Bindings)
+/// Copies each of \p Info's bound ranges of class \p Class into \p Heap from
+/// the \p Bindings entry that matches it by (Space, BaseRegister), then
+/// appends \p DynamicHeap after the reserved prefix. Shared by the three
+/// `materialize*Heap` entry points below, which differ only in descriptor
+/// type and which reserved prefix size they start from.
+template <typename DescriptorT, typename BindingT>
+std::vector<DescriptorT>
+materializeHeap(llvm::ArrayRef<BoundResourceRange> Ranges,
+                BoundResourceClass Class, uint32_t ReservedSize,
+                llvm::ArrayRef<BindingT> Bindings,
+                llvm::ArrayRef<DescriptorT> DynamicHeap) {
+  std::vector<DescriptorT> Heap(
+      static_cast<size_t>(ReservedSize) + DynamicHeap.size(), DescriptorT{});
+
+  for (const BoundResourceRange &Range : Ranges) {
+    if (Range.Class != Class)
+      continue;
+    const BindingT *Matched = nullptr;
+    for (const BindingT &Binding : Bindings)
       if (Binding.Space == Range.Space &&
           Binding.BaseRegister == Range.BaseRegister) {
         Matched = &Binding;
@@ -41,27 +51,58 @@ materializeResourceHeap(const ResourceInfo &Info,
       Heap[Range.HeapBase + J] = Matched->Descriptors[J];
   }
 
-  llvm::copy(DynamicHeap, Heap.begin() + Info.ReservedResourceHeapSize);
+  llvm::copy(DynamicHeap, Heap.begin() + ReservedSize);
   return Heap;
 }
 
-PreparedDispatch::PreparedDispatch(std::vector<FemeDescriptor> ResourceHeap,
-                                   ArrayRef<FemeImageDescriptor> ImageHeap,
-                                   ArrayRef<FemeSamplerDescriptor> SamplerHeap,
-                                   ArrayRef<uint8_t> RootConstants,
-                                   std::array<uint32_t, 3> GroupCount)
-    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
-      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+} // namespace
+
+std::vector<FemeDescriptor>
+materializeResourceHeap(const ResourceInfo &Info,
+                        ArrayRef<BoundResourceBinding> Bindings,
+                        ArrayRef<FemeDescriptor> DynamicHeap) {
+  return materializeHeap<FemeDescriptor>(
+      Info.BoundRanges, BoundResourceClass::Buffer,
+      Info.ReservedResourceHeapSize, Bindings, DynamicHeap);
+}
+
+std::vector<FemeImageDescriptor>
+materializeImageHeap(const ResourceInfo &Info,
+                     ArrayRef<BoundImageBinding> Bindings,
+                     ArrayRef<FemeImageDescriptor> DynamicHeap) {
+  return materializeHeap<FemeImageDescriptor>(
+      Info.BoundRanges, BoundResourceClass::Image, Info.ReservedImageHeapSize,
+      Bindings, DynamicHeap);
+}
+
+std::vector<FemeSamplerDescriptor>
+materializeSamplerHeap(const ResourceInfo &Info,
+                       ArrayRef<BoundSamplerBinding> Bindings,
+                       ArrayRef<FemeSamplerDescriptor> DynamicHeap) {
+  return materializeHeap<FemeSamplerDescriptor>(
+      Info.BoundRanges, BoundResourceClass::Sampler,
+      Info.ReservedSamplerHeapSize, Bindings, DynamicHeap);
+}
+
+PreparedDispatch::PreparedDispatch(
+    std::vector<FemeDescriptor> ResourceHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
+    ArrayRef<uint8_t> RootConstants, std::array<uint32_t, 3> GroupCount)
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       GroupCount(GroupCount) {}
 
 PreparedDispatch PreparedDispatch::create(const ResourceInfo &Info,
                                           const DispatchResources &Resources,
                                           std::array<uint32_t, 3> GroupCount) {
-  return PreparedDispatch(materializeResourceHeap(Info,
-                                                  Resources.BoundResources,
-                                                  Resources.ResourceHeap),
-                          Resources.ImageHeap, Resources.SamplerHeap,
-                          Resources.RootConstants, GroupCount);
+  return PreparedDispatch(
+      materializeResourceHeap(Info, Resources.BoundResources,
+                              Resources.ResourceHeap),
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, GroupCount);
 }
 
 FemeDispatchArgs
@@ -107,13 +148,13 @@ void runDispatch(EntryPointFn EntryFn, const ResourceInfo &Info,
 
 PreparedVertexBatch::PreparedVertexBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeImageDescriptor> ImageHeap,
-    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     ArrayRef<FemeVertexInvocation> Invocations)
-    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
-      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
       Outputs(Outputs), Invocations(Invocations) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
@@ -136,9 +177,11 @@ PreparedVertexBatch::create(const ResourceInfo &Info,
   return PreparedVertexBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
-      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
-      Resources.Outputs, Resources.Invocations);
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
+      Resources.OutputLayout, Resources.Outputs, Resources.Invocations);
 }
 
 FemeVertexArgs PreparedVertexBatch::args() const {
@@ -156,14 +199,14 @@ FemeVertexArgs PreparedVertexBatch::args() const {
 
 PreparedFragmentBatch::PreparedFragmentBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeImageDescriptor> ImageHeap,
-    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     ArrayRef<FemeFragmentInvocation> Invocations,
     MutableArrayRef<FemeFragmentResult> Results)
-    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
-      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
       Outputs(Outputs), Invocations(Invocations), Results(Results) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
@@ -186,9 +229,12 @@ PreparedFragmentBatch::create(const ResourceInfo &Info,
   return PreparedFragmentBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
-      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
-      Resources.Outputs, Resources.Invocations, Resources.Results);
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
+      Resources.OutputLayout, Resources.Outputs, Resources.Invocations,
+      Resources.Results);
 }
 
 FemeFragmentArgs PreparedFragmentBatch::args() const {
@@ -207,13 +253,13 @@ FemeFragmentArgs PreparedFragmentBatch::args() const {
 
 PreparedPatchBatch::PreparedPatchBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeImageDescriptor> ImageHeap,
-    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     uint32_t OutputControlPointCount)
-    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
-      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
       Outputs(Outputs), OutputControlPointCount(OutputControlPointCount) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
@@ -235,9 +281,12 @@ PreparedPatchBatch PreparedPatchBatch::create(const ResourceInfo &Info,
   return PreparedPatchBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
-      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
-      Resources.Outputs, Resources.OutputControlPointCount);
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
+      Resources.OutputLayout, Resources.Outputs,
+      Resources.OutputControlPointCount);
 }
 
 FemePatchArgs PreparedPatchBatch::args() const {
@@ -254,14 +303,14 @@ FemePatchArgs PreparedPatchBatch::args() const {
 
 PreparedPatchConstantBatch::PreparedPatchConstantBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeImageDescriptor> ImageHeap,
-    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *InputPatchLayout,
     const void *InputPatch, const FemeStageLayout *OutputLayout, void *Outputs,
     uint32_t OutputControlPointCount, uint32_t InputPatchControlPointCount)
-    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
-      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs),
       InputPatchLayout(InputPatchLayout), InputPatch(InputPatch),
       OutputLayout(OutputLayout), Outputs(Outputs),
@@ -287,10 +336,13 @@ PreparedPatchConstantBatch::create(const ResourceInfo &Info,
   return PreparedPatchConstantBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
-      Resources.InputLayout, Resources.Inputs, Resources.InputPatchLayout,
-      Resources.InputPatch, Resources.OutputLayout, Resources.Outputs,
-      Resources.OutputControlPointCount, Resources.InputPatchControlPointCount);
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
+      Resources.InputPatchLayout, Resources.InputPatch, Resources.OutputLayout,
+      Resources.Outputs, Resources.OutputControlPointCount,
+      Resources.InputPatchControlPointCount);
 }
 
 FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
@@ -310,15 +362,15 @@ FemePatchConstantArgs PreparedPatchConstantBatch::args() const {
 
 PreparedDomainBatch::PreparedDomainBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeImageDescriptor> ImageHeap,
-    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *PatchConstantLayout,
     const void *PatchConstants, const FemeStageLayout *OutputLayout,
     void *Outputs, ArrayRef<FemeDomainInvocation> Invocations,
     uint32_t OutputControlPointCount)
-    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
-      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs),
       PatchConstantLayout(PatchConstantLayout), PatchConstants(PatchConstants),
       OutputLayout(OutputLayout), Outputs(Outputs), Invocations(Invocations),
@@ -343,10 +395,13 @@ PreparedDomainBatch::create(const ResourceInfo &Info,
   return PreparedDomainBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
-      Resources.InputLayout, Resources.Inputs, Resources.PatchConstantLayout,
-      Resources.PatchConstants, Resources.OutputLayout, Resources.Outputs,
-      Resources.Invocations, Resources.OutputControlPointCount);
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
+      Resources.PatchConstantLayout, Resources.PatchConstants,
+      Resources.OutputLayout, Resources.Outputs, Resources.Invocations,
+      Resources.OutputControlPointCount);
 }
 
 FemeDomainArgs PreparedDomainBatch::args() const {
@@ -367,8 +422,8 @@ FemeDomainArgs PreparedDomainBatch::args() const {
 
 PreparedGeometryBatch::PreparedGeometryBatch(
     std::vector<FemeDescriptor> ResourceHeap,
-    ArrayRef<FemeImageDescriptor> ImageHeap,
-    ArrayRef<FemeSamplerDescriptor> SamplerHeap,
+    std::vector<FemeImageDescriptor> ImageHeap,
+    std::vector<FemeSamplerDescriptor> SamplerHeap,
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     ArrayRef<FemeGeometryInvocation> Invocations, uint32_t VerticesPerPrimitive,
@@ -376,8 +431,8 @@ PreparedGeometryBatch::PreparedGeometryBatch(
     MutableArrayRef<float> EmittedVertices,
     MutableArrayRef<uint32_t> EmittedVertexCounts,
     MutableArrayRef<uint8_t> StripEndsAfter)
-    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(ImageHeap),
-      SamplerHeap(SamplerHeap), RootConstants(RootConstants),
+    : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
+      SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
       Outputs(Outputs), Invocations(Invocations),
       VerticesPerPrimitive(VerticesPerPrimitive),
@@ -405,12 +460,14 @@ PreparedGeometryBatch::create(const ResourceInfo &Info,
   return PreparedGeometryBatch(
       materializeResourceHeap(Info, Resources.BoundResources,
                               Resources.ResourceHeap),
-      Resources.ImageHeap, Resources.SamplerHeap, Resources.RootConstants,
-      Resources.InputLayout, Resources.Inputs, Resources.OutputLayout,
-      Resources.Outputs, Resources.Invocations, Resources.VerticesPerPrimitive,
-      Resources.MaxVerticesPerStream, Resources.OutputScalarsPerVertex,
-      Resources.EmittedVertices, Resources.EmittedVertexCounts,
-      Resources.StripEndsAfter);
+      materializeImageHeap(Info, Resources.BoundImages, Resources.ImageHeap),
+      materializeSamplerHeap(Info, Resources.BoundSamplers,
+                             Resources.SamplerHeap),
+      Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
+      Resources.OutputLayout, Resources.Outputs, Resources.Invocations,
+      Resources.VerticesPerPrimitive, Resources.MaxVerticesPerStream,
+      Resources.OutputScalarsPerVertex, Resources.EmittedVertices,
+      Resources.EmittedVertexCounts, Resources.StripEndsAfter);
 }
 
 FemeGeometryArgs PreparedGeometryBatch::args() const {
