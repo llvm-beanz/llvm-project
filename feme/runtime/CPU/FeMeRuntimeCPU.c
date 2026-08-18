@@ -265,14 +265,16 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Value;
 }
 
-//--- Typed-buffer `<4 x i32>` view ---------------------------------------------
+//--- Typed-buffer `<4 x i32>` view
+//---------------------------------------------
 
 // A 4-lane `int32_t` vector, compiled to LLVM IR's `<4 x i32>`.
 typedef int32_t FemeRTv4i32 __attribute__((vector_size(16)));
 
 // The same vector type, with its assumed pointer alignment relaxed to 4
 // bytes, matching `FemeRTv4f32Unaligned` above.
-typedef int32_t FemeRTv4i32Unaligned __attribute__((vector_size(16), aligned(4)));
+typedef int32_t FemeRTv4i32Unaligned
+    __attribute__((vector_size(16), aligned(4)));
 
 // `feme.cpu.resource.load.typed.v4i32` (V4, see `feme::cpu::ResourceCalls`):
 // reads a `<4 x i32>` element through a bindless typed-buffer descriptor.

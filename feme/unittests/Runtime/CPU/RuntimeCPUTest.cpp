@@ -338,10 +338,9 @@ TEST_F(RuntimeCPUTest, TypedStoreV4I32RoundTrips) {
   Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
   Heap[0].Flags = FEME_DESCRIPTOR_UAV;
 
-  StoreFn Store =
-      getStoreWrapper("test_typed_store_v4i32",
-                      "feme.cpu.resource.store.typed.v4i32",
-                      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  StoreFn Store = getStoreWrapper(
+      "test_typed_store_v4i32", "feme.cpu.resource.store.typed.v4i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
   ASSERT_TRUE(Store);
   int32_t ToStore[4] = {7, 8, 9, 10};
   Store(Heap, 1, 0, 0, ToStore, true);
@@ -359,10 +358,9 @@ TEST_F(RuntimeCPUTest, TypedStoreV4I32DroppedWithoutUavFlag) {
   Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_UINT);
   Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
 
-  StoreFn Store =
-      getStoreWrapper("test_typed_store_v4i32_no_uav",
-                      "feme.cpu.resource.store.typed.v4i32",
-                      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  StoreFn Store = getStoreWrapper(
+      "test_typed_store_v4i32_no_uav", "feme.cpu.resource.store.typed.v4i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
   ASSERT_TRUE(Store);
   int32_t ToStore[4] = {9, 9, 9, 9};
   Store(Heap, 1, 0, 0, ToStore, true);

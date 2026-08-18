@@ -482,11 +482,12 @@ TEST(SPIRVResourceLoweringTest, LowersIntegerStorageTexelBufferToV4I32Calls) {
 }
 
 TEST(SPIRVResourceLoweringTest, LeavesUnsupportedTexelElementTypeUnchanged) {
-  // Only <4 x float>/<4 x i32> are supported (see `isSupportedTexelElementType`'s
-  // comment). A *scalar* i32 load/store -- the shape a single-channel format
-  // like R32_UINT would need, since SPIR-V's own image ops always return a
-  // full 4-component vector regardless of the underlying format's real
-  // channel count -- is left un-normalized rather than mis-lowered.
+  // Only <4 x float>/<4 x i32> are supported (see
+  // `isSupportedTexelElementType`'s comment). A *scalar* i32 load/store -- the
+  // shape a single-channel format like R32_UINT would need, since SPIR-V's own
+  // image ops always return a full 4-component vector regardless of the
+  // underlying format's real channel count -- is left un-normalized rather than
+  // mis-lowered.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define i32 @main(i32 %idx) {

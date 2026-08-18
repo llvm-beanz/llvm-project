@@ -52,8 +52,7 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   // exactly these formats (see femeCpuResourceLoadTypedV4F32/V4I32 in
   // feme/runtime/CPU/FeMeRuntimeCPU.c) -- every other format, even one
   // `mapVkFormat` itself recognizes, is not usable in a texel buffer.
-  EXPECT_TRUE(
-      isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_FLOAT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_FLOAT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_UINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_SINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM));

@@ -131,17 +131,15 @@ protected:
 /// conversion for is usable in a texel buffer's `VkBufferView` -- see
 /// `feme::vulkan::isTexelBufferFormatSupported`'s comment.
 TEST_F(BufferViewTest, AcceptsRuntimeSupportedFormats) {
-  for (VkFormat Format : {VK_FORMAT_R32G32B32A32_SFLOAT,
-                          VK_FORMAT_R32G32B32A32_UINT,
-                          VK_FORMAT_R32G32B32A32_SINT,
-                          VK_FORMAT_R8G8B8A8_UNORM}) {
+  for (VkFormat Format :
+       {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R32G32B32A32_UINT,
+        VK_FORMAT_R32G32B32A32_SINT, VK_FORMAT_R8G8B8A8_UNORM}) {
     VkBufferViewCreateInfo ViewInfo{};
     ViewInfo.buffer = Buf;
     ViewInfo.format = Format;
     ViewInfo.range = VK_WHOLE_SIZE;
     VkBufferView View = VK_NULL_HANDLE;
-    EXPECT_EQ(vkCreateBufferView(Device, &ViewInfo, nullptr, &View),
-              VK_SUCCESS)
+    EXPECT_EQ(vkCreateBufferView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS)
         << "format " << Format;
     vkDestroyBufferView(Device, View, nullptr);
   }
