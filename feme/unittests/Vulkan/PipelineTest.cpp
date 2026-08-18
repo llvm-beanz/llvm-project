@@ -90,6 +90,29 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// V3: a `void main()` that reads a `PushConstant` block's sole `i32`
+/// member and stores it into a `StorageBuffer` block -- exercises
+/// `feme::cpu::SPIRVPushConstantLoweringPass` end to end through a real
+/// compiled pipeline.
+const char *kPushConstantShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %1 = spirv.mlir.addressof @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
+    %pcac = spirv.AccessChain %1[%c0] : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>, i32 -> !spirv.ptr<i32, PushConstant>
+    %v = spirv.Load "PushConstant" %pcac : i32
+    spirv.Store "StorageBuffer" %ac, %v : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @buf, @pc
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 class PipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -194,15 +217,20 @@ TEST_F(PipelineTest, PipelineLayoutAcceptsDescriptorSetLayouts) {
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
-TEST_F(PipelineTest, PipelineLayoutRejectsPushConstantRanges) {
+TEST_F(PipelineTest, PipelineLayoutAcceptsPushConstantRanges) {
+  // V3: push-constant ranges are accepted and recorded (see
+  // "CompileRejectsRootConstantAccessNotCoveredByLayout"/
+  // "CompilesRootConstantShaderWithCoveringLayout" below for the coverage
+  // check this enables at pipeline-creation time).
   VkPushConstantRange Range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
   VkPipelineLayoutCreateInfo LayoutInfo{};
   LayoutInfo.pushConstantRangeCount = 1;
   LayoutInfo.pPushConstantRanges = &Range;
 
-  VkPipelineLayout Rejected = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Rejected),
-            VK_ERROR_INITIALIZATION_FAILED);
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+  vkDestroyPipelineLayout(Device, Layout, nullptr);
 }
 
 TEST_F(PipelineTest, CompilesStorageBufferShaderWithCompatibleLayout) {
@@ -265,6 +293,124 @@ TEST_F(PipelineTest, RejectsStorageBufferShaderWithoutMatchingBinding) {
   EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
 
   vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+namespace {
+/// Builds a layout with one storage-buffer binding at (set 0, binding 0)
+/// (`kPushConstantShader`'s own requirement), plus \p PushConstantRanges.
+/// The caller owns and must destroy both the returned layout and
+/// `*SetLayout`.
+VkPipelineLayout createPushConstantShaderLayout(
+    VkDevice Device, llvm::ArrayRef<VkPushConstantRange> PushConstantRanges,
+    VkDescriptorSetLayout &SetLayout) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  if (vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                  &SetLayout) != VK_SUCCESS)
+    return VK_NULL_HANDLE;
+
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  LayoutInfo.pushConstantRangeCount = PushConstantRanges.size();
+  LayoutInfo.pPushConstantRanges = PushConstantRanges.data();
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout);
+  return Layout;
+}
+} // namespace
+
+TEST_F(PipelineTest, RejectsRootConstantAccessNotCoveredByLayout) {
+  // No push-constant range at all: the shader's root-constant span (4
+  // bytes) is not covered by anything, so pipeline creation must fail (see
+  // "Descriptor Model": "reject a shader whose accessed range is not
+  // fully covered").
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout UncoveredLayout =
+      createPushConstantShaderLayout(Device, {}, SetLayout);
+  ASSERT_NE(UncoveredLayout, VK_NULL_HANDLE);
+
+  VkShaderModule Module = createShaderModule(kPushConstantShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = UncoveredLayout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Module, nullptr);
+  vkDestroyPipelineLayout(Device, UncoveredLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+}
+
+TEST_F(PipelineTest, CompilesRootConstantShaderWithCoveringLayout) {
+  VkPushConstantRange Range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout CoveredLayout =
+      createPushConstantShaderLayout(Device, Range, SetLayout);
+  ASSERT_NE(CoveredLayout, VK_NULL_HANDLE);
+
+  VkShaderModule Module = createShaderModule(kPushConstantShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = CoveredLayout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+  vkDestroyPipelineLayout(Device, CoveredLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+}
+
+TEST_F(PipelineTest, RejectsNonComputeVisiblePushConstantRange) {
+  // A range that exists but does not carry the compute stage bit does not
+  // count as coverage (see "Descriptor Model": "...declared in the
+  // layout with the compute stage bit set").
+  VkPushConstantRange Range{VK_SHADER_STAGE_VERTEX_BIT, 0, 4};
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout NonComputeLayout =
+      createPushConstantShaderLayout(Device, Range, SetLayout);
+  ASSERT_NE(NonComputeLayout, VK_NULL_HANDLE);
+
+  VkShaderModule Module = createShaderModule(kPushConstantShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = NonComputeLayout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Module, nullptr);
+  vkDestroyPipelineLayout(Device, NonComputeLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
 TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {

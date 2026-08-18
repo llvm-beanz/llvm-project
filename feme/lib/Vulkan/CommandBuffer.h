@@ -49,6 +49,7 @@ struct RecordedCommand {
     FillBuffer,
     UpdateBuffer,
     PipelineBarrier,
+    PushConstants,
   };
 
   Kind Op;
@@ -82,6 +83,12 @@ struct RecordedCommand {
   /// time (see "Command Buffers": "owned copies of variable-sized data
   /// where Vulkan requires recording-time capture").
   std::vector<uint8_t> UpdateData;
+  /// `PushConstants`: the byte range `vkCmdPushConstants` writes into the
+  /// command buffer's push-constant state (`DstOffset` reused as the byte
+  /// offset, `UpdateData` reused as the owned payload copy -- see "Command
+  /// Buffers": "Push constants" is its own row of the first command set,
+  /// but needs no new payload shape beyond what `UpdateBuffer` already
+  /// carries).
 };
 
 /// A `VkCommandBuffer`: an append-only typed command stream while
@@ -179,6 +186,17 @@ public:
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::PipelineBarrier;
     Commands.push_back(Cmd);
+  }
+  /// `vkCmdPushConstants`: records \p Offset and an owned copy of \p Data,
+  /// consumed at execution time into the command buffer's push-constant
+  /// state (see "Descriptor Model": "Push constants are copied into
+  /// command-buffer state by `vkCmdPushConstants`").
+  void pushConstants(uint32_t Offset, std::vector<uint8_t> Data) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::PushConstants;
+    Cmd.DstOffset = Offset;
+    Cmd.UpdateData = std::move(Data);
+    Commands.push_back(std::move(Cmd));
   }
 
   llvm::ArrayRef<RecordedCommand> commands() const { return Commands; }

@@ -20,6 +20,8 @@
 
 #include "llvm/ADT/ArrayRef.h"
 
+#include <vulkan/vulkan_core.h>
+
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -49,25 +51,32 @@ private:
   std::vector<uint32_t> Words;
 };
 
-/// A `VkPipelineLayout`: an ordered list of `VkDescriptorSetLayout`s (see
-/// "Descriptor Model" in feme/docs/FeMeVulkanDesign.md). Push-constant
-/// ranges are still rejected at creation (V3). A (descriptor set, binding)
-/// identity is exactly `feme::cpu::BoundResourceRange`'s
+/// A `VkPipelineLayout`: an ordered list of `VkDescriptorSetLayout`s, plus
+/// the declared push-constant ranges (V3: "map Vulkan push constants onto
+/// [FeMe root constants]", see "Descriptor Model" in
+/// feme/docs/FeMeVulkanDesign.md) -- see the file comment. A (descriptor
+/// set, binding) identity is exactly `feme::cpu::BoundResourceRange`'s
 /// `(Space, BaseRegister)`, with `Space` equal to the set's index in this
 /// list, so no translation table is needed between the two -- see
 /// `compileComputePipeline`'s use of this list to validate a shader's
 /// bound-resource requirements against it.
 class PipelineLayout {
 public:
-  explicit PipelineLayout(std::vector<const DescriptorSetLayout *> SetLayouts)
-      : SetLayouts(std::move(SetLayouts)) {}
+  PipelineLayout(std::vector<const DescriptorSetLayout *> SetLayouts,
+                std::vector<VkPushConstantRange> PushConstantRanges)
+      : SetLayouts(std::move(SetLayouts)),
+        PushConstantRanges(std::move(PushConstantRanges)) {}
 
   llvm::ArrayRef<const DescriptorSetLayout *> setLayouts() const {
     return SetLayouts;
   }
+  llvm::ArrayRef<VkPushConstantRange> pushConstantRanges() const {
+    return PushConstantRanges;
+  }
 
 private:
   std::vector<const DescriptorSetLayout *> SetLayouts;
+  std::vector<VkPushConstantRange> PushConstantRanges;
 };
 
 /// A `VkPipeline` compute pipeline: the compiled CPU kernel `vkCmdDispatch`

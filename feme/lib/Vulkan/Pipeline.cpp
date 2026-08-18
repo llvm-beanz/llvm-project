@@ -20,6 +20,7 @@
 #include "feme/Target/CPU/ResourceInfo.h"
 #include "feme/Translate/SPIRV/SPIRVToLLVMTranslator.h"
 
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -123,20 +124,20 @@ VKAPI_ATTR VkResult VKAPI_CALL
 vkCreatePipelineLayout(VkDevice, const VkPipelineLayoutCreateInfo *pCreateInfo,
                        const VkAllocationCallbacks *pAllocator,
                        VkPipelineLayout *pPipelineLayout) {
-  // Push-constant ranges are still rejected (V3); descriptor set layouts
-  // are this milestone's own work (see PipelineLayout's own comment).
-  if (pCreateInfo->pushConstantRangeCount != 0)
-    return VK_ERROR_INITIALIZATION_FAILED;
-
   std::vector<const DescriptorSetLayout *> SetLayouts;
   SetLayouts.reserve(pCreateInfo->setLayoutCount);
   for (uint32_t I = 0; I != pCreateInfo->setLayoutCount; ++I)
     SetLayouts.push_back(
         fromHandle<DescriptorSetLayout>(pCreateInfo->pSetLayouts[I]));
 
+  std::vector<VkPushConstantRange> PushConstantRanges(
+      pCreateInfo->pPushConstantRanges,
+      pCreateInfo->pPushConstantRanges + pCreateInfo->pushConstantRangeCount);
+
   Allocator Alloc(pAllocator);
   PipelineLayout *Obj = Alloc.create<PipelineLayout>(
-      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(SetLayouts));
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(SetLayouts),
+      std::move(PushConstantRanges));
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pPipelineLayout = toHandle<VkPipelineLayout>(Obj);
@@ -153,6 +154,35 @@ vkDestroyPipelineLayout(VkDevice, VkPipelineLayout pipelineLayout,
 }
 
 namespace {
+
+/// Whether \p Layout's compute-visible push-constant ranges fully cover
+/// `[0, RootConstantSize)` with no gap -- see "Descriptor Model": "reject a
+/// shader whose accessed range is not fully covered by a range declared in
+/// the layout with the compute stage bit set". `RootConstantSize` is
+/// always a shader's *full* advertised root-constant span (roadmap R25 for
+/// DXIL; `feme::cpu::SPIRVPushConstantLoweringPass` for SPIR-V, both
+/// starting at byte 0), so coverage is checked byte-by-byte rather than
+/// merely comparing against a single range's own offset/size -- multiple
+/// declared ranges (e.g. one per shader stage in a shared layout) may
+/// jointly cover it with gaps only a full walk catches.
+bool pushConstantsCoverRootConstantSize(
+    const PipelineLayout &Layout, uint32_t RootConstantSize,
+    uint32_t MaxPushConstantsSize) {
+  if (RootConstantSize == 0)
+    return true;
+  if (RootConstantSize > MaxPushConstantsSize)
+    return false;
+  std::vector<bool> Covered(RootConstantSize, false);
+  for (const VkPushConstantRange &Range : Layout.pushConstantRanges()) {
+    if ((Range.stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) == 0)
+      continue;
+    uint32_t Begin = std::min(Range.offset, RootConstantSize);
+    uint32_t End = std::min(Range.offset + Range.size, RootConstantSize);
+    for (uint32_t I = Begin; I != End; ++I)
+      Covered[I] = true;
+  }
+  return llvm::all_of(Covered, [](bool B) { return B; });
+}
 
 /// Compiles one `VkComputePipelineCreateInfo` end to end: imports its
 /// shader module's SPIR-V, translates it to LLVM IR, resolves and stamps
@@ -236,13 +266,24 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   if (!Stage)
     return Stage.takeError();
 
-  // V3 push constants and image/sampler resources remain unimplemented.
+  // Image/sampler resources remain unimplemented (V5+); push constants are
+  // this milestone's own work, validated below.
   const feme::cpu::ResourceInfo &Info = (*Stage)->getResourceInfo();
-  if (Info.RootConstantSize != 0 || Info.UsesSamplerHeap)
+  if (Info.UsesSamplerHeap)
     return createStringError(
         inconvertibleErrorCode(),
-        "shader uses root-constant/sampler-heap resources, which this "
-        "milestone's VkPipelineLayout cannot bind (see V3)");
+        "shader uses sampler-heap resources, which this milestone's "
+        "VkPipelineLayout cannot bind (see V5)");
+
+  const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
+  if (!pushConstantsCoverRootConstantSize(
+          Layout, Info.RootConstantSize,
+          DeviceInfo.Properties.limits.maxPushConstantsSize))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "shader's root-constant span is not fully covered by a "
+        "VK_SHADER_STAGE_COMPUTE_BIT VkPushConstantRange in its "
+        "VkPipelineLayout");
 
   // Every bound storage-buffer range the shader reads must have a
   // compatible binding in the pipeline layout's descriptor set layouts: the
@@ -251,8 +292,7 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   // cover the shader's range (see "Descriptor Model": "Descriptor arrays
   // whose length exceeds what the reserved heap can represent must fail
   // pipeline creation rather than silently truncate").
-  llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts =
-      fromHandle<PipelineLayout>(CreateInfo.layout)->setLayouts();
+  llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts = Layout.setLayouts();
   for (const feme::cpu::BoundResourceRange &Range : Info.BoundRanges) {
     if (Range.Space >= SetLayouts.size())
       return createStringError(inconvertibleErrorCode(),

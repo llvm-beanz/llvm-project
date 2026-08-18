@@ -128,13 +128,21 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
 /// "Command Buffers"'s Deviation note in FeMeVulkanDesign.md's V1 status).
 Error runDispatch(ComputePipeline &Pipeline, std::array<uint32_t, 3> Base,
                   std::array<uint32_t, 3> Count,
-                  llvm::ArrayRef<BoundSetState> BoundSets) {
+                  llvm::ArrayRef<BoundSetState> BoundSets,
+                  llvm::ArrayRef<uint8_t> PushConstants) {
   feme::cpu::CompiledStage &Stage = Pipeline.getStage();
   feme::cpu::StageArtifactInfo Artifact = Stage.getArtifactInfo();
 
   MaterializedBoundResources Materialized = buildBoundResources(BoundSets);
   feme::cpu::DispatchResources Resources;
   Resources.BoundResources = Materialized.Bindings;
+  // Every dispatch snapshots the command buffer's current push-constant
+  // bytes as `RootConstants`, regardless of whether this pipeline's shader
+  // actually reads any of them (see "Descriptor Model": "Each dispatch
+  // snapshots the bytes visible through its pipeline layout and passes
+  // them as RootConstants"); a shader with no root-constant access simply
+  // never reads through the pointer.
+  Resources.RootConstants = PushConstants;
   feme::cpu::PreparedDispatch Prepared = feme::cpu::PreparedDispatch::create(
       Stage.getResourceInfo(), Resources, Count);
 
@@ -208,6 +216,13 @@ Error runUpdateBuffer(Buffer *Dst, VkDeviceSize Offset,
 llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   ComputePipeline *BoundPipeline = nullptr;
   std::vector<BoundSetState> BoundSets;
+  // Push-constant state, sized to the device's full advertised
+  // `maxPushConstantsSize` and zero-initialized: a byte a `vkCmdPushConstants`
+  // never wrote reads as zero, matching every other "declared but never
+  // written" resource in this ICD (see "Descriptor Model").
+  const PhysicalDeviceInfo *DeviceInfo = CmdBuf.getPhysicalDeviceInfo();
+  std::vector<uint8_t> PushConstants(
+      DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
   for (const RecordedCommand &Cmd : CmdBuf.commands()) {
     switch (Cmd.Op) {
     case RecordedCommand::Kind::BindPipeline:
@@ -238,7 +253,8 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
       if (Error E =
               validateGroupCount(CmdBuf.getPhysicalDeviceInfo(), Cmd.Count))
         return E;
-      if (Error E = runDispatch(*BoundPipeline, Cmd.Base, Cmd.Count, BoundSets))
+      if (Error E = runDispatch(*BoundPipeline, Cmd.Base, Cmd.Count, BoundSets,
+                                PushConstants))
         return E;
       break;
     }
@@ -261,7 +277,8 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
                   sizeof(Count));
       if (Error E = validateGroupCount(CmdBuf.getPhysicalDeviceInfo(), Count))
         return E;
-      if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count, BoundSets))
+      if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count, BoundSets,
+                                PushConstants))
         return E;
       break;
     }
@@ -283,6 +300,14 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
     case RecordedCommand::Kind::PipelineBarrier:
       // See `pipelineBarrier`'s own comment: already a no-op join under
       // this milestone's strictly-sequential execution model.
+      break;
+    case RecordedCommand::Kind::PushConstants:
+      if (Cmd.DstOffset + Cmd.UpdateData.size() > PushConstants.size())
+        return createStringError(inconvertibleErrorCode(),
+                                 "push constant range is out of range of "
+                                 "maxPushConstantsSize");
+      std::memcpy(PushConstants.data() + Cmd.DstOffset, Cmd.UpdateData.data(),
+                  Cmd.UpdateData.size());
       break;
     }
   }
@@ -465,6 +490,24 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
   // `CommandBuffer::pipelineBarrier`'s own comment for why this is a plain
   // join marker.
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->pipelineBarrier();
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
+                                              VkPipelineLayout, uint32_t,
+                                              uint32_t offset, uint32_t size,
+                                              const void *pValues) {
+  // The Vulkan specification requires both a 4-byte-aligned offset and
+  // size (`VUID-vkCmdPushConstants-offset-00368`/`-size-00369`); `layout`
+  // and `stageFlags` need no validation here -- V3's single compute stage
+  // means every push constant is compute-visible, and coverage against the
+  // pipeline layout's declared ranges is instead checked once, at
+  // `vkCreateComputePipelines` time (see `pushConstantsCoverRootConstantSize`
+  // in Pipeline.cpp), not per push here.
+  if (size == 0 || offset % 4 != 0 || size % 4 != 0)
+    return;
+  const auto *Bytes = static_cast<const uint8_t *>(pValues);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pushConstants(offset, std::vector<uint8_t>(Bytes, Bytes + size));
 }
 
 } // namespace feme::vulkan

@@ -230,6 +230,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     uint32_t imageMemoryBarrierCount,
     const VkImageMemoryBarrier *pImageMemoryBarriers);
 
+// V3: push constants (see "Descriptor Model" and "Command Buffers").
+VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
+                                              VkPipelineLayout layout,
+                                              VkShaderStageFlags stageFlags,
+                                              uint32_t offset, uint32_t size,
+                                              const void *pValues);
+
 // V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
 // Model").
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(

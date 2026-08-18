@@ -82,6 +82,7 @@ vkCmdCopyBuffer
 vkCmdFillBuffer
 vkCmdUpdateBuffer
 vkCmdPipelineBarrier
+vkCmdPushConstants
 
 # V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
 # Model").
