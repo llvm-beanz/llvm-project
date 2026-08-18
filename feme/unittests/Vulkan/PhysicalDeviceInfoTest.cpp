@@ -21,7 +21,7 @@ TEST(PhysicalDeviceInfo, ReportsHonestVersionAndIdentity) {
 
   // See "Loader Integration"'s V0 Deviation note: 1.1, not 1.2 (which would
   // require VkPhysicalDeviceDriverProperties to be queryable).
-  EXPECT_EQ(Info.Properties.apiVersion, VK_API_VERSION_1_1);
+  EXPECT_EQ(Info.Properties.apiVersion, VK_API_VERSION_1_2);
 
   // The Khronos "not yet assigned an official vendor ID" reserved value
   // (see "Device identity").

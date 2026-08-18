@@ -22,10 +22,15 @@
 # symbol) never takes the address of a function that doesn't exist for an
 # unimplemented command.
 #
-# Only the VK_VERSION_1_0 and VK_VERSION_1_1 core features are read.
-# Extension commands are out of scope for V0 (see FeMeVulkanDesign.md's
-# "Loader Integration": "The driver reports no device extension merely
-# because Vulkan-Headers declares it").
+# Only the VK_VERSION_1_0, VK_VERSION_1_1, and VK_VERSION_1_2 core features
+# are read (V3 needs 1.2's core, non-`KHR`-suffixed timeline-semaphore
+# commands -- `vkWaitSemaphores`/`vkSignalSemaphore`/
+# `vkGetSemaphoreCounterValue` -- rather than adding extension support for
+# `VK_KHR_timeline_semaphore`; every other 1.2 command this ICD does not
+# implement is simply left unimplemented, exactly like most of 1.1's own
+# surface already is). Extension commands proper remain out of scope (see
+# FeMeVulkanDesign.md's "Loader Integration": "The driver reports no device
+# extension merely because Vulkan-Headers declares it").
 #
 # Newer vk.xml revisions split each `VK_VERSION_1_x` feature into several
 # `VK_{BASE,COMPUTE,GRAPHICS}_VERSION_1_x` features linked by a `depends`
@@ -40,7 +45,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
-CORE_FEATURES = ("VK_VERSION_1_0", "VK_VERSION_1_1")
+CORE_FEATURES = ("VK_VERSION_1_0", "VK_VERSION_1_1", "VK_VERSION_1_2")
 
 # First-parameter handle types that make a command dispatched at the
 # instance level rather than the device level. VkPhysicalDevice commands are

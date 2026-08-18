@@ -104,3 +104,11 @@ vkGetFenceStatus
 vkWaitForFences
 vkQueueSubmit
 vkQueueWaitIdle
+
+# V3: binary and timeline semaphores (see "Queues, Scheduling, and
+# Synchronization").
+vkCreateSemaphore
+vkDestroySemaphore
+vkGetSemaphoreCounterValue
+vkWaitSemaphores
+vkSignalSemaphore

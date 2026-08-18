@@ -69,7 +69,12 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkDestroyInstance(
 
 VKAPI_ATTR VkResult VKAPI_CALL
 feme::vulkan::vkEnumerateInstanceVersion(uint32_t *pApiVersion) {
-  *pApiVersion = VK_API_VERSION_1_1;
+  // V3 bumped this from 1.1 to 1.2 for `vkWaitSemaphores`/
+  // `vkSignalSemaphore`/`vkGetSemaphoreCounterValue`'s core (non-`KHR`)
+  // names -- see vk_gen_entrypoints.py's `CORE_FEATURES` comment. This ICD
+  // still implements only a growing subset of either version's full
+  // mandatory surface, exactly as it already did advertising 1.1.
+  *pApiVersion = VK_API_VERSION_1_2;
   return VK_SUCCESS;
 }
 
@@ -151,10 +156,40 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFeatures(
   *pFeatures = fromHandle<PhysicalDevice>(physicalDevice)->getInfo().Features;
 }
 
+namespace {
+/// Fills every `pNext` extension struct `vkGetPhysicalDeviceFeatures2` this
+/// ICD recognizes with truthful values -- V3: `timelineSemaphore` (see
+/// "Queues, Scheduling, and Synchronization"), reported through either the
+/// dedicated 1.2 feature struct or the aggregate `VkPhysicalDeviceVulkan12
+/// Features` struct, matching whichever one an application chained.
+void fillFeatures2Chain(void *pNext) {
+  for (auto *Base = static_cast<VkBaseOutStructure *>(pNext); Base;
+       Base = Base->pNext) {
+    switch (Base->sType) {
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceTimelineSemaphoreFeatures *>(Base);
+      Features->timelineSemaphore = VK_TRUE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceVulkan12Features *>(Base);
+      Features->timelineSemaphore = VK_TRUE;
+      break;
+    }
+    default:
+      break;
+    }
+  }
+}
+} // namespace
+
 VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFeatures2(
     VkPhysicalDevice physicalDevice, VkPhysicalDeviceFeatures2 *pFeatures) {
   pFeatures->features =
       fromHandle<PhysicalDevice>(physicalDevice)->getInfo().Features;
+  fillFeatures2Chain(pFeatures->pNext);
 }
 
 VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceMemoryProperties(

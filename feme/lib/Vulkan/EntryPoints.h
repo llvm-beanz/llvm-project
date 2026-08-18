@@ -287,6 +287,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue,
                                              VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue);
 
+// V3: binary and timeline semaphores (see "Queues, Scheduling, and
+// Synchronization").
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo *pCreateInfo,
+                  const VkAllocationCallbacks *pAllocator,
+                  VkSemaphore *pSemaphore);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroySemaphore(VkDevice device, VkSemaphore semaphore,
+                   const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetSemaphoreCounterValue(VkDevice device,
+                                                          VkSemaphore semaphore,
+                                                          uint64_t *pValue);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkWaitSemaphores(VkDevice device, const VkSemaphoreWaitInfo *pWaitInfo,
+                 uint64_t timeout);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkSignalSemaphore(VkDevice device, const VkSemaphoreSignalInfo *pSignalInfo);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H

@@ -10,6 +10,6 @@
 // RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
 // RUN:   feme-vulkan-loader-smoke | FileCheck %s
 
-// CHECK: found device: FeMe CPU Vulkan Device (vendorID=0x10000, apiVersion=1.1.0)
+// CHECK: found device: FeMe CPU Vulkan Device (vendorID=0x10000, apiVersion=1.2.0)
 // CHECK: compute queue family: {{[0-9]+}} (flags=0x{{[0-9a-f]+}})
 // CHECK: PASS

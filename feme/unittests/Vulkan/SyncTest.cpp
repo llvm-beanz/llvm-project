@@ -170,15 +170,117 @@ TEST_F(SyncTest, SubmitWithoutFenceSucceeds) {
   EXPECT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
 }
 
-TEST_F(SyncTest, SubmitRejectsSemaphores) {
-  VkSemaphore FakeSemaphore = reinterpret_cast<VkSemaphore>(1);
+TEST_F(SyncTest, SubmitRejectsUnsignaledBinarySemaphore) {
+  // Waiting on a binary semaphore nothing has signaled yet is a real
+  // ordering error under this ICD's synchronous execution model (see
+  // Sync.h's file comment): there is no future signal left to wait for.
+  VkSemaphoreCreateInfo SemInfo{};
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
   VkSubmitInfo Submit{};
   Submit.waitSemaphoreCount = 1;
-  Submit.pWaitSemaphores = &FakeSemaphore;
+  Submit.pWaitSemaphores = &Sem;
   Submit.commandBufferCount = 1;
   Submit.pCommandBuffers = &CmdBuf;
   EXPECT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE),
             VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+TEST_F(SyncTest, BinarySemaphoreSignalThenWaitSucceeds) {
+  VkSemaphoreCreateInfo SemInfo{};
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  VkSubmitInfo Signal{};
+  Signal.signalSemaphoreCount = 1;
+  Signal.pSignalSemaphores = &Sem;
+  Signal.commandBufferCount = 1;
+  Signal.pCommandBuffers = &CmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Signal, VK_NULL_HANDLE), VK_SUCCESS);
+
+  VkSubmitInfo Wait{};
+  Wait.waitSemaphoreCount = 1;
+  Wait.pWaitSemaphores = &Sem;
+  Wait.commandBufferCount = 1;
+  Wait.pCommandBuffers = &CmdBuf;
+  EXPECT_EQ(vkQueueSubmit(Queue, 1, &Wait, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // A binary semaphore is consumed by the wait: submitting a second wait
+  // with nothing signaling it again in between must fail.
+  EXPECT_EQ(vkQueueSubmit(Queue, 1, &Wait, VK_NULL_HANDLE),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+TEST_F(SyncTest, TimelineSemaphoreHostSignalAndWait) {
+  VkSemaphoreTypeCreateInfo TypeInfo{};
+  TypeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+  TypeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+  TypeInfo.initialValue = 0;
+  VkSemaphoreCreateInfo SemInfo{};
+  SemInfo.pNext = &TypeInfo;
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  uint64_t Value = 0;
+  ASSERT_EQ(vkGetSemaphoreCounterValue(Device, Sem, &Value), VK_SUCCESS);
+  EXPECT_EQ(Value, 0u);
+
+  VkSemaphoreSignalInfo SignalInfo{};
+  SignalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO;
+  SignalInfo.semaphore = Sem;
+  SignalInfo.value = 5;
+  ASSERT_EQ(vkSignalSemaphore(Device, &SignalInfo), VK_SUCCESS);
+
+  ASSERT_EQ(vkGetSemaphoreCounterValue(Device, Sem, &Value), VK_SUCCESS);
+  EXPECT_EQ(Value, 5u);
+
+  uint64_t WaitValue = 5;
+  VkSemaphoreWaitInfo WaitInfo{};
+  WaitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
+  WaitInfo.semaphoreCount = 1;
+  WaitInfo.pSemaphores = &Sem;
+  WaitInfo.pValues = &WaitValue;
+  EXPECT_EQ(vkWaitSemaphores(Device, &WaitInfo, UINT64_MAX), VK_SUCCESS);
+
+  uint64_t TooHigh = 6;
+  WaitInfo.pValues = &TooHigh;
+  EXPECT_EQ(vkWaitSemaphores(Device, &WaitInfo, 0), VK_TIMEOUT);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+TEST_F(SyncTest, TimelineSemaphoreAcrossQueueSubmit) {
+  VkSemaphoreTypeCreateInfo TypeInfo{};
+  TypeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+  TypeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+  VkSemaphoreCreateInfo SemInfo{};
+  SemInfo.pNext = &TypeInfo;
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  uint64_t SignalValue = 3;
+  VkTimelineSemaphoreSubmitInfo TimelineInfo{};
+  TimelineInfo.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+  TimelineInfo.signalSemaphoreValueCount = 1;
+  TimelineInfo.pSignalSemaphoreValues = &SignalValue;
+  VkSubmitInfo Submit{};
+  Submit.pNext = &TimelineInfo;
+  Submit.signalSemaphoreCount = 1;
+  Submit.pSignalSemaphores = &Sem;
+  Submit.commandBufferCount = 1;
+  Submit.pCommandBuffers = &CmdBuf;
+  ASSERT_EQ(vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE), VK_SUCCESS);
+
+  uint64_t Value = 0;
+  ASSERT_EQ(vkGetSemaphoreCounterValue(Device, Sem, &Value), VK_SUCCESS);
+  EXPECT_EQ(Value, SignalValue);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
 }
 
 } // namespace
