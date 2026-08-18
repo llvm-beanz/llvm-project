@@ -84,6 +84,33 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// V3: reads a single `StorageBuffer` element, adds a `PushConstant`
+/// block's sole `i32` member, and writes the result back -- exercises the
+/// "combined" push-constant + bound-resource lowering path end to end
+/// through a real dispatch (see
+/// `feme::cpu::SPIRVResourceLoweringPass`'s own header comment for that
+/// combination).
+const char *kPushConstantAddShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.GlobalVariable @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %v = spirv.Load "StorageBuffer" %ac : i32
+    %1 = spirv.mlir.addressof @pc : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>
+    %pcac = spirv.AccessChain %1[%c0] : !spirv.ptr<!spirv.struct<(i32 [0])>, PushConstant>, i32 -> !spirv.ptr<i32, PushConstant>
+    %pcv = spirv.Load "PushConstant" %pcac : i32
+    %v2 = spirv.IAdd %v, %pcv : i32
+    spirv.Store "StorageBuffer" %ac, %v2 : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @buf, @pc
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 class CommandBufferTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -590,6 +617,201 @@ TEST_F(StorageBufferDispatchTest, DynamicOffsetShiftsBoundBinding) {
   vkDestroyBuffer(Device, Out.Buf, nullptr);
   vkFreeMemory(Device, In.Memory, nullptr);
   vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+class PushConstantDispatchTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    VkDescriptorSetLayoutBinding Binding{};
+    Binding.binding = 0;
+    Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Binding.descriptorCount = 1;
+    VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+    SetLayoutInfo.bindingCount = 1;
+    SetLayoutInfo.pBindings = &Binding;
+    ASSERT_EQ(
+        vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+        VK_SUCCESS);
+
+    VkPushConstantRange Range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    LayoutInfo.setLayoutCount = 1;
+    LayoutInfo.pSetLayouts = &SetLayout;
+    LayoutInfo.pushConstantRangeCount = 1;
+    LayoutInfo.pPushConstantRanges = &Range;
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    std::vector<uint32_t> Words = assembleSPIRV(kPushConstantAddShader);
+    ASSERT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo ShaderInfo{};
+    ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+    ShaderInfo.pCode = Words.data();
+    ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &Module),
+              VK_SUCCESS);
+
+    VkComputePipelineCreateInfo PipelineInfo{};
+    PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    PipelineInfo.stage.module = Module;
+    PipelineInfo.stage.pName = "main";
+    PipelineInfo.layout = Layout;
+    ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                       nullptr, &Pipeline),
+              VK_SUCCESS);
+
+    VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+    VkDescriptorPoolCreateInfo PoolInfo{};
+    PoolInfo.maxSets = 1;
+    PoolInfo.poolSizeCount = 1;
+    PoolInfo.pPoolSizes = &PoolSize;
+    ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+              VK_SUCCESS);
+
+    VkDescriptorSetAllocateInfo DSAllocInfo{};
+    DSAllocInfo.descriptorPool = DescPool;
+    DSAllocInfo.descriptorSetCount = 1;
+    DSAllocInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+    VkCommandPoolCreateInfo CmdPoolInfo{};
+    CmdPoolInfo.queueFamilyIndex = 0;
+    ASSERT_EQ(vkCreateCommandPool(Device, &CmdPoolInfo, nullptr, &Pool),
+              VK_SUCCESS);
+  }
+  void TearDown() override {
+    vkDestroyCommandPool(Device, Pool, nullptr);
+    vkDestroyDescriptorPool(Device, DescPool, nullptr);
+    vkDestroyPipeline(Device, Pipeline, nullptr);
+    vkDestroyShaderModule(Device, Module, nullptr);
+    vkDestroyPipelineLayout(Device, Layout, nullptr);
+    vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+    vkDestroyDevice(Device, nullptr);
+    vkDestroyInstance(Instance, nullptr);
+  }
+
+  VkCommandBuffer allocateCommandBuffer() {
+    VkCommandBufferAllocateInfo AllocInfo{};
+    AllocInfo.commandPool = Pool;
+    AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    AllocInfo.commandBufferCount = 1;
+    VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+    EXPECT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &CmdBuf),
+              VK_SUCCESS);
+    return CmdBuf;
+  }
+
+  HostBuffer createStorageBuffer(VkDeviceSize Size) {
+    HostBuffer Result;
+    VkBufferCreateInfo BufferInfo{};
+    BufferInfo.size = Size;
+    BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    EXPECT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Result.Buf),
+              VK_SUCCESS);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = Size;
+    AllocInfo.memoryTypeIndex = 0;
+    EXPECT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Result.Memory),
+              VK_SUCCESS);
+    EXPECT_EQ(vkBindBufferMemory(Device, Result.Buf, Result.Memory, 0),
+              VK_SUCCESS);
+    EXPECT_EQ(
+        vkMapMemory(Device, Result.Memory, 0, VK_WHOLE_SIZE, 0, &Result.Data),
+        VK_SUCCESS);
+    return Result;
+  }
+
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+  VkDevice Device = VK_NULL_HANDLE;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  VkShaderModule Module = VK_NULL_HANDLE;
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  VkCommandPool Pool = VK_NULL_HANDLE;
+};
+
+TEST_F(PushConstantDispatchTest, PushedBytesReachTheDispatch) {
+  HostBuffer Buf = createStorageBuffer(4);
+  uint32_t InitialValue = 10;
+  std::memcpy(Buf.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo BufInfo{Buf.Buf, 0, 4};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  uint32_t PushValue = 32;
+  vkCmdPushConstants(CmdBuf, Layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                     sizeof(PushValue), &PushValue);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Buf.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + PushValue);
+
+  vkDestroyBuffer(Device, Buf.Buf, nullptr);
+  vkFreeMemory(Device, Buf.Memory, nullptr);
+}
+
+TEST_F(PushConstantDispatchTest, UnpushedBytesReadAsZero) {
+  // No `vkCmdPushConstants` call at all: the command buffer's push-constant
+  // state starts zero-initialized (see "Descriptor Model"'s "declared but
+  // never written" convention), so the shader observes 0.
+  HostBuffer Buf = createStorageBuffer(4);
+  uint32_t InitialValue = 10;
+  std::memcpy(Buf.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo BufInfo{Buf.Buf, 0, 4};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Buf.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue);
+
+  vkDestroyBuffer(Device, Buf.Buf, nullptr);
+  vkFreeMemory(Device, Buf.Memory, nullptr);
 }
 
 } // namespace
