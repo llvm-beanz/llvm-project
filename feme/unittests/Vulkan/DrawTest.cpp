@@ -98,6 +98,116 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// Solid green into SV_Target0.
+constexpr llvm::StringLiteral GreenFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[0.0, 1.0, 0.0, 1.0]> : vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
+/// Half-alpha red into SV_Target0, for `BlendState::BlendEnable` coverage.
+constexpr llvm::StringLiteral HalfAlphaRedFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[1.0, 0.0, 0.0, 0.5]> : vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
+/// Solid red into SV_Target0 and solid green into SV_Target1, for
+/// multiple-render-target coverage.
+constexpr llvm::StringLiteral DualOutputFragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color0 {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.GlobalVariable @color1 {location = 1 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c0 = spirv.Constant dense<[1.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %c1 = spirv.Constant dense<[0.0, 1.0, 0.0, 1.0]> : vector<4xf32>
+    %p0 = spirv.mlir.addressof @color0 : !spirv.ptr<vector<4xf32>, Output>
+    %p1 = spirv.mlir.addressof @color1 : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p0, %c0 : vector<4xf32>
+    spirv.Store "Output" %p1, %c1 : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color0, @color1
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
+/// One oversized counter-clockwise triangle at a fixed depth of 0.2 (nearer
+/// to the viewer under `CompareOp::Less`), for `DepthState` coverage.
+constexpr llvm::StringLiteral NearDepthVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z = spirv.Constant 0.2 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @pos
+}
+)mlir";
+
+/// The same oversized triangle, at a fixed depth of 0.8 (farther from the
+/// viewer under `CompareOp::Less`).
+constexpr llvm::StringLiteral FarDepthVertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z = spirv.Constant 0.8 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @pos
+}
+)mlir";
+
 class DrawTest : public ::testing::Test {
 protected:
   static constexpr uint32_t Extent = 4;
@@ -314,13 +424,57 @@ protected:
     return vkQueueSubmit(Queue, 1, &Submit, VK_NULL_HANDLE);
   }
 
-  /// Texel (X, Y) of the color target, as four bytes.
-  std::array<uint8_t, 4> texel(uint32_t X, uint32_t Y) {
+  /// Texel (X, Y) of \p Img, as four bytes -- any 4-byte-per-texel color
+  /// target, not only the fixture's default one.
+  std::array<uint8_t, 4> texelOf(VkImage Img, uint32_t X, uint32_t Y) {
     const auto *Data =
-        static_cast<const uint8_t *>(fromHandle<Image>(ColorImage)->data());
+        static_cast<const uint8_t *>(fromHandle<Image>(Img)->data());
     std::array<uint8_t, 4> Result{};
     std::memcpy(Result.data(), Data + ((size_t)Y * Extent + X) * 4, 4);
     return Result;
+  }
+
+  /// Texel (X, Y) of the fixture's default color target, as four bytes.
+  std::array<uint8_t, 4> texel(uint32_t X, uint32_t Y) {
+    return texelOf(ColorImage, X, Y);
+  }
+
+  /// Creates and binds a `Extent`x`Extent` image (and its view) with
+  /// \p Format, \p Usage, \p Aspect, and \p Samples -- used by tests needing
+  /// an attachment beyond the fixture's single default color target (depth,
+  /// stencil, a second color attachment, or a multisample source).
+  void
+  createImageAndView(VkFormat Format, VkImageUsageFlags Usage,
+                     VkImageAspectFlags Aspect, VkImage &OutImage,
+                     VkImageView &OutView, VkDeviceMemory &OutMemory,
+                     VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = Format;
+    ImageInfo.extent = {Extent, Extent, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 1;
+    ImageInfo.samples = Samples;
+    ImageInfo.usage = Usage;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &OutImage),
+              VK_SUCCESS);
+    VkMemoryRequirements Reqs{};
+    vkGetImageMemoryRequirements(Device, OutImage, &Reqs);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = Reqs.size;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &OutMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, OutImage, OutMemory, 0), VK_SUCCESS);
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = OutImage;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = Format;
+    ViewInfo.subresourceRange.aspectMask = Aspect;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &OutView),
+              VK_SUCCESS);
   }
 
   VkInstance Instance = VK_NULL_HANDLE;
@@ -700,6 +854,687 @@ TEST_F(DrawTest, ClearsAttachmentInsideRenderPass) {
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// `DepthState::TestEnable`/`WriteEnable`: a nearer draw's depth write
+/// (`CompareOp::Less`) rejects a farther draw covering the same pixels, so
+/// the nearer draw's color survives -- the completion scenario's own "depth"
+/// bullet (see "V6: Graphics queue and basic rendering" in
+/// feme/docs/FeMeVulkanDesign.md).
+TEST_F(DrawTest, RendersWithDepthTest) {
+  VkImage DepthImage = VK_NULL_HANDLE;
+  VkImageView DepthView = VK_NULL_HANDLE;
+  VkDeviceMemory DepthMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_DEPTH_BIT, DepthImage, DepthView, DepthMemory);
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_D32_SFLOAT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference DepthRef{
+      1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pDepthStencilAttachment = &DepthRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {ColorView, DepthView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  VkPipelineDepthStencilStateCreateInfo DepthStencil{};
+  DepthStencil.depthTestEnable = VK_TRUE;
+  DepthStencil.depthWriteEnable = VK_TRUE;
+  DepthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+  auto makePipeline = [&](llvm::StringRef VertexSource,
+                          llvm::StringRef FragmentSource) {
+    VkShaderModule Vertex = createModule(VertexSource);
+    VkShaderModule Fragment = createModule(FragmentSource);
+    VkPipelineShaderStageCreateInfo Stages[2]{};
+    Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    Stages[0].module = Vertex;
+    Stages[0].pName = "main";
+    Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    Stages[1].module = Fragment;
+    Stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo VertexInput{};
+    VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+    InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+    VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+    VkPipelineViewportStateCreateInfo ViewportState{};
+    ViewportState.viewportCount = 1;
+    ViewportState.pViewports = &Viewport;
+    ViewportState.scissorCount = 1;
+    ViewportState.pScissors = &Scissor;
+    VkPipelineRasterizationStateCreateInfo Raster{};
+    Raster.cullMode = VK_CULL_MODE_NONE;
+    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    Raster.polygonMode = VK_POLYGON_MODE_FILL;
+    VkPipelineMultisampleStateCreateInfo Multisample{};
+    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState BlendAttachment{};
+    BlendAttachment.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo Blend{};
+    Blend.attachmentCount = 1;
+    Blend.pAttachments = &BlendAttachment;
+    VkGraphicsPipelineCreateInfo Info{};
+    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    Info.stageCount = 2;
+    Info.pStages = Stages;
+    Info.pVertexInputState = &VertexInput;
+    Info.pInputAssemblyState = &InputAssembly;
+    Info.pViewportState = &ViewportState;
+    Info.pRasterizationState = &Raster;
+    Info.pMultisampleState = &Multisample;
+    Info.pDepthStencilState = &DepthStencil;
+    Info.pColorBlendState = &Blend;
+    Info.layout = Layout;
+    Info.renderPass = LocalPass;
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
+                                        nullptr, &Pipe),
+              VK_SUCCESS);
+    vkDestroyShaderModule(Device, Fragment, nullptr);
+    vkDestroyShaderModule(Device, Vertex, nullptr);
+    return Pipe;
+  };
+  VkPipeline NearRed = makePipeline(NearDepthVertexSource, RedFragmentSource);
+  VkPipeline FarGreen = makePipeline(FarDepthVertexSource, GreenFragmentSource);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ClearValues[1].depthStencil = {1.0f, 0};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  // The nearer (red) draw first, writing depth 0.2; the farther (green)
+  // draw second, rejected by the depth test since 0.8 is not less than 0.2.
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, NearRed);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, FarGreen);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0x00) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, FarGreen, nullptr);
+  vkDestroyPipeline(Device, NearRed, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, DepthView, nullptr);
+  vkDestroyImage(Device, DepthImage, nullptr);
+  vkFreeMemory(Device, DepthMemory, nullptr);
+}
+
+/// `StencilState::TestEnable`: a first draw (`CompareOp::Always`,
+/// `StencilOp::Replace`) writes a stencil reference over half the render
+/// area; a second draw (`CompareOp::Equal`) then only reaches the half whose
+/// stencil value matches -- the completion scenario's own "stencil" bullet.
+TEST_F(DrawTest, RendersWithStencilTest) {
+  VkImage StencilImage = VK_NULL_HANDLE;
+  VkImageView StencilView = VK_NULL_HANDLE;
+  VkDeviceMemory StencilMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_S8_UINT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_STENCIL_BIT, StencilImage, StencilView, StencilMemory);
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_S8_UINT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference StencilRef{
+      1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pDepthStencilAttachment = &StencilRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {ColorView, StencilView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  auto makePipeline = [&](llvm::StringRef FragmentSource,
+                          const VkRect2D &Scissor, VkCompareOp Compare,
+                          VkStencilOp PassOp) {
+    VkShaderModule Vertex = createModule(FullscreenVertexSource);
+    VkShaderModule Fragment = createModule(FragmentSource);
+    VkPipelineShaderStageCreateInfo Stages[2]{};
+    Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    Stages[0].module = Vertex;
+    Stages[0].pName = "main";
+    Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    Stages[1].module = Fragment;
+    Stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo VertexInput{};
+    VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+    InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+    VkRect2D LocalScissor = Scissor;
+    VkPipelineViewportStateCreateInfo ViewportState{};
+    ViewportState.viewportCount = 1;
+    ViewportState.pViewports = &Viewport;
+    ViewportState.scissorCount = 1;
+    ViewportState.pScissors = &LocalScissor;
+    VkPipelineRasterizationStateCreateInfo Raster{};
+    Raster.cullMode = VK_CULL_MODE_NONE;
+    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    Raster.polygonMode = VK_POLYGON_MODE_FILL;
+    VkPipelineMultisampleStateCreateInfo Multisample{};
+    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState BlendAttachment{};
+    BlendAttachment.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo Blend{};
+    Blend.attachmentCount = 1;
+    Blend.pAttachments = &BlendAttachment;
+    VkStencilOpState Face{};
+    Face.failOp = VK_STENCIL_OP_KEEP;
+    Face.passOp = PassOp;
+    Face.depthFailOp = VK_STENCIL_OP_KEEP;
+    Face.compareOp = Compare;
+    Face.compareMask = 0xFF;
+    Face.writeMask = 0xFF;
+    Face.reference = 1;
+    VkPipelineDepthStencilStateCreateInfo DepthStencil{};
+    DepthStencil.stencilTestEnable = VK_TRUE;
+    DepthStencil.front = Face;
+    DepthStencil.back = Face;
+    VkGraphicsPipelineCreateInfo Info{};
+    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    Info.stageCount = 2;
+    Info.pStages = Stages;
+    Info.pVertexInputState = &VertexInput;
+    Info.pInputAssemblyState = &InputAssembly;
+    Info.pViewportState = &ViewportState;
+    Info.pRasterizationState = &Raster;
+    Info.pMultisampleState = &Multisample;
+    Info.pDepthStencilState = &DepthStencil;
+    Info.pColorBlendState = &Blend;
+    Info.layout = Layout;
+    Info.renderPass = LocalPass;
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
+                                        nullptr, &Pipe),
+              VK_SUCCESS);
+    vkDestroyShaderModule(Device, Fragment, nullptr);
+    vkDestroyShaderModule(Device, Vertex, nullptr);
+    return Pipe;
+  };
+  // Writer: always passes, replaces stencil with 1, restricted to the left
+  // half of the render area.
+  VkPipeline Writer =
+      makePipeline(RedFragmentSource, VkRect2D{{0, 0}, {Extent / 2, Extent}},
+                   VK_COMPARE_OP_ALWAYS, VK_STENCIL_OP_REPLACE);
+  // Tester: only passes where stencil already equals 1, covering the whole
+  // render area.
+  VkPipeline Tester =
+      makePipeline(GreenFragmentSource, VkRect2D{{0, 0}, {Extent, Extent}},
+                   VK_COMPARE_OP_EQUAL, VK_STENCIL_OP_KEEP);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].color = {{0.0f, 0.0f, 1.0f, 1.0f}};
+  ClearValues[1].depthStencil = {1.0f, 0};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Writer);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Tester);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Left half: the writer's stencil (1) matched the tester's reference, so
+  // the tester's green landed. Right half: stencil stayed 0, so the tester
+  // was rejected and the clear color (blue) survives.
+  EXPECT_EQ(texel(0, 0)[1], 0xFF);
+  EXPECT_EQ(texel(1, 3)[1], 0xFF);
+  EXPECT_EQ(texel(2, 0)[2], 0xFF);
+  EXPECT_EQ(texel(3, 3)[2], 0xFF);
+
+  vkDestroyPipeline(Device, Tester, nullptr);
+  vkDestroyPipeline(Device, Writer, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, StencilView, nullptr);
+  vkDestroyImage(Device, StencilImage, nullptr);
+  vkFreeMemory(Device, StencilMemory, nullptr);
+}
+
+/// `BlendState::BlendEnable`: a half-alpha fragment source-over-blends with
+/// the attachment's existing (clear) color, rather than replacing it -- the
+/// completion scenario's own "blending" bullet.
+TEST_F(DrawTest, RendersWithAlphaBlending) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(HalfAlphaRedFragmentSource);
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.blendEnable = VK_TRUE;
+  BlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+  BlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+  BlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+  BlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+  BlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+  BlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = Pass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 1.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // 0.5*red + 0.5*blue (clear) = (0.5, 0, 0.5); 0.5 rounds to 0x80 in
+  // `R8G8B8A8_UNORM`.
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0x80) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[2], 0x80) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Multiple color attachments: a fragment stage with two `Output`s writes
+/// distinct colors to each, and both land in their own attachment -- the
+/// completion scenario's own "MRT" bullet.
+TEST_F(DrawTest, RendersToMultipleColorAttachments) {
+  VkImage SecondImage = VK_NULL_HANDLE;
+  VkImageView SecondView = VK_NULL_HANDLE;
+  VkDeviceMemory SecondMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, SecondImage, SecondView, SecondMemory);
+
+  VkAttachmentDescription Attachments[2]{};
+  for (VkAttachmentDescription &A : Attachments) {
+    A.format = VK_FORMAT_R8G8B8A8_UNORM;
+    A.samples = VK_SAMPLE_COUNT_1_BIT;
+    A.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    A.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  }
+  VkAttachmentReference ColorRefs[2] = {
+      {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+      {1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL}};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 2;
+  Subpass.pColorAttachments = ColorRefs;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {ColorView, SecondView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(DualOutputFragmentSource);
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachments[2]{};
+  BlendAttachments[0].colorWriteMask = 0xF;
+  BlendAttachments[1].colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = LocalPass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ClearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel0 = texelOf(ColorImage, X, Y);
+      std::array<uint8_t, 4> Texel1 = texelOf(SecondImage, X, Y);
+      EXPECT_EQ(Texel0[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel0[1], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel1[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel1[1], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, SecondView, nullptr);
+  vkDestroyImage(Device, SecondImage, nullptr);
+  vkFreeMemory(Device, SecondMemory, nullptr);
+}
+
+/// A multisample color attachment with a resolve attachment: a draw fully
+/// covering the render area resolves to a uniform color in the
+/// single-sample target -- the completion scenario's own "multisample
+/// resolves" bullet.
+TEST_F(DrawTest, ResolvesMultisampleColorDuringRenderPass) {
+  VkImage MSImage = VK_NULL_HANDLE;
+  VkImageView MSView = VK_NULL_HANDLE;
+  VkDeviceMemory MSMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_COLOR_BIT, MSImage, MSView, MSMemory,
+                     VK_SAMPLE_COUNT_4_BIT);
+  VkImage ResolveImage = VK_NULL_HANDLE;
+  VkImageView ResolveView = VK_NULL_HANDLE;
+  VkDeviceMemory ResolveMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, ResolveImage, ResolveView, ResolveMemory);
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_4_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference ResolveRef{1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pResolveAttachments = &ResolveRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {MSView, ResolveView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  BlendAttachment.colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 1;
+  Blend.pAttachments = &BlendAttachment;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.renderPass = LocalPass;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ClearValues[1].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Every sample of every covered pixel is the same solid red, so the
+  // resolve target's box-filtered average is exactly red too.
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texelOf(ResolveImage, X, Y);
+      EXPECT_EQ(Texel[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[3], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, ResolveView, nullptr);
+  vkDestroyImage(Device, ResolveImage, nullptr);
+  vkFreeMemory(Device, ResolveMemory, nullptr);
+  vkDestroyImageView(Device, MSView, nullptr);
+  vkDestroyImage(Device, MSImage, nullptr);
+  vkFreeMemory(Device, MSMemory, nullptr);
 }
 
 } // namespace
