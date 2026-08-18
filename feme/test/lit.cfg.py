@@ -1,6 +1,7 @@
 # -*- Python -*-
 
 import os
+import shutil
 
 import lit.formats
 from lit.llvm import llvm_config
@@ -113,6 +114,22 @@ tools = [
 ]
 
 llvm_config.add_tool_substitutions(tools, tool_dirs)
+
+# `dxc` (the Microsoft DirectX Shader Compiler) is an external tool this tree
+# does not build, unlike every other tool above -- it is the only way this
+# tree can turn real HLSL into a SPIR-V binary carrying a *structured*
+# selection/loop construct with genuine merge instructions (the shape real
+# Vulkan shaders take; `spirv-registered-target`'s own `llc`-built fixtures
+# never carry those, since LLVM's SPIRV backend does not target the
+# `Shader`/structured-CF profile). Tests validating roadmap milestone V0.5's
+# "a glslang/DXC/Clang corpus" (feme/docs/Roadmap.md) against real compiler
+# output use `REQUIRES: system-dxc` and `%dxc` so they skip cleanly wherever
+# `dxc` is not installed, the same way `system-vulkan-loader` gates the
+# Vulkan loader below.
+_dxc = shutil.which("dxc")
+if _dxc:
+    config.available_features.add("system-dxc")
+    config.substitutions.append(("%dxc", _dxc))
 
 # "V0: Loader-visible skeleton" (feme/docs/FeMeVulkanDesign.md): only
 # available when configured with Vulkan-Headers and a real Vulkan loader to
