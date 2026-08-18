@@ -71,6 +71,14 @@ vkDestroyImageView
 vkCreateSampler
 vkDestroySampler
 
+# V6: render passes and framebuffers (see "Render passes and dynamic
+# rendering").
+vkCreateRenderPass
+vkDestroyRenderPass
+vkGetRenderAreaGranularity
+vkCreateFramebuffer
+vkDestroyFramebuffer
+
 # V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
 # Pipeline Compilation").
 vkCreateShaderModule

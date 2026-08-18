@@ -89,6 +89,7 @@ add_feme_library(FeMeVulkanCore STATIC
   PipelineCache.cpp
   ProcAddr.cpp
   QueryPool.cpp
+  RenderPass.cpp
   Sync.cpp
 
   DISABLE_INSTALL

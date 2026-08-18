@@ -16,6 +16,7 @@ add_feme_unittest(FeMeVulkanTests
   PipelineTest.cpp
   PipelineCacheTest.cpp
   ProcAddrTest.cpp
+  RenderPassTest.cpp
   SyncTest.cpp
   )
 target_link_libraries(FeMeVulkanTests
