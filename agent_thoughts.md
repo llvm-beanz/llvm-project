@@ -18596,3 +18596,218 @@ there; the fix rests on `add_llvm_symbol_exports()`'s existing, already
 -- exercised-elsewhere-in-tree Darwin branch (`-exported_symbols_list`
 with underscore-prefixed symbol names) rather than on new,
 unverified-on-Darwin logic of my own.
+
+# Agent thoughts: Roadmap V0.5 -- SPIR-V import that survives real shaders
+
+## Task
+
+Implement roadmap milestone V0.5: "SPIR-V import that survives real
+shaders: a glslang/DXC/Clang corpus, the decision between fixing MLIR's
+structurized deserializer and translating the SPIR-V CFG to unstructured
+LLVM IR for `PreparePass` to restructure, a prototype of the chosen
+approach, and the importer fuzzer extended to it."
+
+## Starting state was further along than I expected
+
+A prior session had already landed the core mechanism: `SPIRVImporter`
+already retried with `mlir::spirv::DeserializationOptions::
+enableControlFlowStructurization = false` when structured deserialization
+failed (commit `8591d3e7a26b`), with a lit test
+(`spirv-import-unstructured-fallback.ll`) proving it recovers from the
+documented `OpPhi`-in-loop-merge-block rejection using a real SPIR-V binary
+built by `llc`'s own SPIR-V backend. So the "decide, then prototype" framing
+of this milestone was partly already done -- the retry-on-failure shape of
+the decision was in place. What was missing was validation against a real,
+independent *compiler's* SPIR-V (not LLVM's own backend acting as both
+producer and consumer), a corpus, and the fuzzer extension.
+
+## Environment inventory
+
+- `dxc` (Microsoft's DirectX Shader Compiler, `libdxcompiler.so` 1.10) was
+  installed at `/usr/local/bin/dxc` and supports `-spirv`.
+- `glslang`/`glslangValidator` were not installed anywhere on the system;
+  I did not install new tooling per the "don't add new build/test tooling
+  unless necessary" guidance and instead scoped the corpus to what the
+  environment already had, documenting the gap rather than pretending it
+  doesn't exist.
+- This build's `LLVM_TARGETS_TO_BUILD=all` cache variable notwithstanding,
+  `llc --version` only actually registers AArch64 and SPIR-V targets in
+  this environment -- no DirectX/X86. That means every existing
+  `REQUIRES: directx-registered-target` HLSL end-to-end test (the bulk of
+  `test/Tools/feme-run/HLSL`) is silently skipped here (part of the 34
+  "Unsupported" in every `check-feme` run I saw), and DXIL-side corpus
+  validation for this milestone was simply not possible in this session.
+  That made the SPIR-V-registered-target path the only one I could actually
+  execute end to end, which turned out to matter (see below).
+
+## First real finding: dxc needs a modern target environment
+
+`dxc`'s *default* target environment (`vulkan1.0`) emits `BufferBlock`-
+decorated `Uniform` storage-buffer globals -- the legacy SPIR-V <1.3
+encoding. FeMe's `spirv` -> `llvm` dialect resource-lowering patterns only
+handle the modern `Block`-decorated `StorageBuffer` shape (matching
+`target("spirv.VulkanBuffer", ...)`), so a default-`dxc` shader failed to
+legalize with "failed to legalize operation 'spirv.GlobalVariable'". Passing
+`-fspv-target-env=vulkan1.3` fixed this. I did not chase whether FeMe should
+also accept the legacy encoding -- Vulkan's own R26/R29 work already settled
+on `StorageBuffer`, and dxc trivially supports asking for the modern
+encoding, so there was no design question here, just a corpus-authoring
+detail worth recording so the next person building a DXC-sourced fixture
+doesn't rediscover it.
+
+## Second, bigger finding: even a *successful* structurization crashes downstream
+
+I compiled a trivial counted loop (`for (i = 0; i < 4; i++) sum += ...;`,
+no early exit at all) with `dxc -spirv`, expecting it to be the easy case.
+`feme-translate --import-spirv` succeeded -- MLIR's structurizer *did*
+rebuild a `spirv.mlir.loop` for it, since there's no merge-block phi problem
+without a `break`. But feeding that through to LLVM IR crashed:
+
+```
+Assertion `op->getNumResults() == newValues.size() && "incorrect # of replacement values"' failed.
+...
+#10 (anonymous namespace)::LoopPattern::matchAndRewrite(...) SPIRVToLLVM.cpp:0:0
+```
+
+`LoopPattern` (upstream MLIR, `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`)
+is the pattern that converts `spirv.mlir.loop` to `llvm.br`/`llvm.cond_br`.
+It asserts on a loop whose merge block carries a value -- which *every*
+loop with a loop-carried induction variable produces, break or no break.
+This is a strictly larger problem than the one FeMeVulkanDesign.md
+originally documented (only the `OpPhi`-in-merge-block *deserialization*
+rejection): even shaders that structurize cleanly are not safe to convert
+structurally. Worse, this failure happens in a separate pass
+(`ConvertSPIRVToLLVMPass`), invoked well after `SPIRVImporter::import`
+returns successfully, so no retry inside the importer itself can ever catch
+it -- the existing "retry unstructured on deserialize failure" design could
+not have prevented this crash no matter how it was tuned.
+
+This settled the milestone's central decision for me, with evidence rather
+than just cost/risk reasoning: unstructured translation cannot be a
+fallback-on-failure, it has to be the unconditional default. I flipped
+`ImportOptions::SPIRVEnableControlFlowStructurization`'s default to `false`
+so `SPIRVImporter` never attempts structured reconstruction at all unless a
+caller explicitly opts back in (kept reachable, since I added
+`--import-spirv-structurize-control-flow`/`--import-spirv-fallback-to-
+unstructured` flags to `feme-translate` so the retry logic stays directly
+testable -- no in-tree caller uses anything but the new default). I verified
+the fix both ways: the same shader that crashed now imports and converts to
+clean, `phi`-based LLVM IR with the new default, and a hand-authored
+`llc`-sourced fixture reproducing the identical CFG shape is now a
+regression test (`spirv-import-unstructured-default.ll`) that would have
+caught this before it shipped.
+
+## The other documented gap (loop with value-producing break) validated cleanly
+
+The shader that motivated this milestone in the first place -- a loop with a
+`break` that assigns and exits with a value, forcing an `OpPhi` in the loop
+merge block -- now imports and translates to well-formed, unstructured LLVM
+IR through the default path (`loop-merge-phi.hlsl`). I could not get a *full
+JIT dispatch* of this specific shape working, though: `feme::cpu::
+LinearizePass`'s loop linearizer rejected the restructured CFG with "loop
+... has an internal branch in 'Flow'; only a straight-line chain to/from the
+exit check is supported yet (roadmap milestone 6 deviation)". I spent time
+confirming this is *not* a SPIR-V import regression: I reproduced the
+identical failure with hand-written LLVM IR carrying the same CFG shape
+(same trivial counted loop, `feme-run` fed a `.ll` file directly, no SPIR-V
+in the loop at all) and got the exact same diagnostic. It reproduces even
+for a shader with *no* early exit and a *uniform* (non-divergent)
+loop-carried accumulator, so it's not specifically about divergence or
+`break` either -- `feme::cpu::PreparePass`'s `StructurizeCFG`-based
+restructuring apparently inserts a synthetic "Flow" block even for an
+already-reducible loop, and `LinearizePass`'s loop-shape matcher doesn't
+recognize the result. That is a pre-existing, format-independent CPU-target
+limitation (the diagnostic literally cites "roadmap milestone 6 deviation"),
+not something V0.5 owns, so I left it as documented, open work for whichever
+step widens that matcher, and scoped my own corpus test
+(`loop-merge-phi.hlsl`) to check raised LLVM IR rather than a JIT dispatch.
+I did find one shader shape that *does* fully JIT-dispatch through the new
+default path end to end -- an `if`/`else` merge (`diamond.hlsl`,
+`if (tid.x > 1) v = tid.x*10; else v = tid.x+100;`) -- which gave the corpus
+at least one genuinely-executing, numerically-checked entry
+(`binding[0:0][0]: 100 101 20 30`, matching by-hand computation for each of
+4 lanes).
+
+## OpCopyObject: tried, didn't reproduce, left open rather than claiming closed
+
+FeMeVulkanDesign.md's original text also mentioned "a Clang- or
+glslang-compiled compute shader with resources has also been observed to
+fail to round-trip on `OpCopyObject`". I tried two shapes likely to produce
+it -- a resource-parameter helper function (`uint helper(RWStructuredBuffer<uint>
+buf, uint idx)`) and a local struct copy (`Data d2 = d;`) -- compiled with
+`dxc -Od` (unoptimized, more likely to leave copies un-eliminated) via
+`-spirv`. Neither reproduced a round-trip failure; both imported cleanly.
+Rather than assert this gap is closed (I have no glslang to try, and "not
+reproduced with the two shapes I tried" is not the same as "fixed"), I left
+it explicitly open in both the design doc and roadmap entry.
+
+## Fuzzer extension
+
+Both pre-existing `feme-spirv-import-fuzzer` seeds (`minimal.spv`,
+`constant.spv`) are single basic block, so the fuzzer's entire mutation
+space, seeded from them, never touched branches/block-arguments at all --
+exactly the shape space this milestone's decision makes the importer's
+*default*, everyday path, not a rare fallback. I hand-authored a third seed,
+`loop-merge-phi.spv`/`.mlir`, in the `spirv` dialect directly (a loop with
+two predecessors merging into a block-argument-taking merge block, carrying
+different values -- the exact `OpPhi`-in-loop-merge shape), serialized with
+`feme-translate --serialize-spirv` per the existing corpus's own
+regeneration convention, and confirmed it round-trips through
+`SPIRVImporter` before checking it in. I could not run `libFuzzer` proper in
+this environment (`feme-spirv-import-fuzzer` here is "not linked to
+libFuzzer" -- this build has no fuzzer-instrumented sanitizer config), so I
+validated the new seed the same way the existing ones presumably were: by
+hand round-tripping it, not by an actual fuzzing run.
+
+## Testing
+
+Added a `system-dxc` lit feature (`shutil.which("dxc")`-gated, mirroring the
+existing `system-vulkan-loader` pattern) and a `%dxc` substitution to
+`feme/test/lit.cfg.py`, rather than adding `dxc` as a hard tool dependency --
+it is an external tool this tree does not build (glslang would need the
+same treatment if it were available), and every other in-tree test
+dependency is either an LLVM/feme tool this repo builds or gated the same
+optional way Vulkan's loader is. Two new lit tests under
+`test/Tools/feme-run/SPIRV/` (`diamond.hlsl` executing end to end,
+`loop-merge-phi.hlsl` checking raised IR) require it and therefore skip
+cleanly in environments without `dxc`, exactly like the DXIL tests already
+skip here without a DirectX target.
+
+Ran the full `check-feme` target (ninja, ccache, `LLVM_ENABLE_ASSERTIONS=ON`)
+before and after every change: 1217/1251 passing before, 1220/1254 after
+(three new tests, zero regressions, the same pre-existing 34 "Unsupported"
+both times -- all `directx-registered-target`-gated tests this environment
+cannot build for).
+
+## Design doc updates
+
+- `FeMeVulkanDesign.md`'s "SPIR-V import prerequisites" section gets a
+  Status note (the decision, why it had to be unconditional rather than
+  fallback-only, what was validated, what's still open) and its "V0.5"
+  milestone bullet list gets the matching status writeup.
+- `Design.md`'s roadmap step 2 ("SPIR-V import") gets a short Status note,
+  since this milestone changed that step's own described behavior
+  (deserializer wrapper "just" wraps `mlir::spirv::deserialize`, but now
+  with a specific, load-bearing default).
+- `Roadmap.md`'s V0.5 row and its surrounding "largest single unknown"
+  paragraph (§1.9) both get updated to record the decision as settled,
+  matching how every other closed roadmap row in that file records its own
+  resolution inline.
+
+## What's still open
+
+- No glslang-sourced (GLSL) corpus entry -- environment limitation, not a
+  design gap; whoever next touches this should add one.
+- `OpCopyObject` status genuinely unknown (see above) -- left open, not
+  claimed fixed.
+- `feme::cpu::LinearizePass`'s loop-shape matcher rejects the restructured
+  CFG for a loop with a value-producing `break` (and, as far as I could
+  tell, plenty of other simple loops too) with "internal branch in 'Flow'";
+  this is pre-existing, shared with DXIL, and out of this milestone's scope,
+  but it is the reason `loop-merge-phi.hlsl` stops at raised IR instead of a
+  full JIT dispatch. Worth its own investigation independent of SPIR-V
+  import.
+- `feme::SPIRVExporter`/LLVM SPIR-V backend round-trip incompatibility
+  (Design.md's pre-existing "Known gap: `feme::SPIRVImporter` cannot
+  deserialize LLVM SPIR-V backend output", opcode 83/`OpAccessChain`) is
+  unrelated to this milestone's decision and was left untouched.
