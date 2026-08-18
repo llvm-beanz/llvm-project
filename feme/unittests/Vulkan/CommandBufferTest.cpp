@@ -1102,7 +1102,83 @@ TEST_F(TexelBufferDispatchTest, ReadsAndWritesThroughBoundBufferViews) {
   vkFreeMemory(Device, Out.Memory, nullptr);
 }
 
-/// V4: the `<4 x i32>` (integer texel buffer format) counterpart of
+/// V4 follow-up: the packed `R8G8B8A8_SNORM` counterpart of
+/// `ReadsAndWritesThroughBoundBufferViews` above, reusing the same
+/// `<4 x float>` shader (`kTexelBufferAddShader`) and only swapping the
+/// bound `VkFormat` and buffer size (one packed `uint32_t` texel instead of
+/// one `<4 x float>` texel) -- proving `femeCpuResourceLoadTypedV4F32`/
+/// `StoreTypedV4F32`'s `R8G8B8A8_SNORM` conversion end to end through a
+/// real compiled-and-dispatched SPIR-V shader.
+TEST_F(TexelBufferDispatchTest, ReadsAndWritesThroughSnormBufferViews) {
+  HostBuffer In = createTexelBuffer(4); // One packed R8G8B8A8_SNORM texel.
+  HostBuffer Out = createTexelBuffer(4);
+  // R=1.0 (0x7F), G=-1.0 (0x81), B=0.5 (~0x40), A=-0.5 (~0xC0).
+  uint32_t InitialValue = 0xC0u << 24 | 0x40u << 16 | 0x81u << 8 | 0x7Fu;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkBufferViewCreateInfo InViewInfo{};
+  InViewInfo.buffer = In.Buf;
+  InViewInfo.format = VK_FORMAT_R8G8B8A8_SNORM;
+  InViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView InView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &InViewInfo, nullptr, &InView),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo OutViewInfo{};
+  OutViewInfo.buffer = Out.Buf;
+  OutViewInfo.format = VK_FORMAT_R8G8B8A8_SNORM;
+  OutViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView OutView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &OutViewInfo, nullptr, &OutView),
+            VK_SUCCESS);
+
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &InView;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[1].pTexelBufferView = &OutView;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // The shader adds 1.0 to every lane before writing back; SNORM clamps
+  // the result to [-1.0, 1.0]: R (1.0+1.0) and B (~0.504+1.0) both
+  // saturate to 1.0 (127), G (-1.0+1.0) lands exactly at 0.0 (0), and A
+  // (~-0.504+1.0) lands at ~0.496 (63).
+  uint32_t RawResult;
+  std::memcpy(&RawResult, Out.Data, sizeof(RawResult));
+  int8_t R = (int8_t)(uint8_t)RawResult;
+  int8_t G = (int8_t)(uint8_t)(RawResult >> 8);
+  int8_t B = (int8_t)(uint8_t)(RawResult >> 16);
+  int8_t A = (int8_t)(uint8_t)(RawResult >> 24);
+  EXPECT_EQ(R, 127);
+  EXPECT_EQ(G, 0);
+  EXPECT_EQ(B, 127);
+  EXPECT_NEAR(A, 63, 1);
+
+  vkDestroyBufferView(Device, InView, nullptr);
+  vkDestroyBufferView(Device, OutView, nullptr);
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
 /// `TexelBufferDispatchTest` above -- see `kIntTexelBufferAddShader`'s
 /// comment. Reuses the base fixture's object-model setup, only swapping the
 /// dispatched shader.
@@ -1163,6 +1239,76 @@ TEST_F(IntTexelBufferDispatchTest, ReadsAndWritesThroughIntegerBufferViews) {
   EXPECT_EQ(Result[1], InitialValue[1] + 1);
   EXPECT_EQ(Result[2], InitialValue[2] + 1);
   EXPECT_EQ(Result[3], InitialValue[3] + 1);
+
+  vkDestroyBufferView(Device, InView, nullptr);
+  vkDestroyBufferView(Device, OutView, nullptr);
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// V4 follow-up: the packed `R8G8B8A8_UINT`/`_SINT` counterpart of
+/// `ReadsAndWritesThroughIntegerBufferViews` above -- same
+/// `kIntTexelBufferAddShader`, only bound over the packed 8-bit-per-
+/// component formats (one packed `uint32_t` texel each) instead of the
+/// 32-bit identity ones, proving `femeCpuResourceLoadTypedV4I32`/
+/// `StoreTypedV4I32`'s packed-byte conversion end to end.
+TEST_F(IntTexelBufferDispatchTest, ReadsAndWritesThroughPackedByteBufferViews) {
+  HostBuffer In = createTexelBuffer(4);  // One packed R8G8B8A8_UINT texel.
+  HostBuffer Out = createTexelBuffer(4); // One packed R8G8B8A8_SINT texel.
+  uint8_t InitialValue[4] = {1, 200, 3, 250};
+  std::memcpy(In.Data, InitialValue, sizeof(InitialValue));
+
+  VkBufferViewCreateInfo InViewInfo{};
+  InViewInfo.buffer = In.Buf;
+  InViewInfo.format = VK_FORMAT_R8G8B8A8_UINT;
+  InViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView InView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &InViewInfo, nullptr, &InView),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo OutViewInfo{};
+  OutViewInfo.buffer = Out.Buf;
+  OutViewInfo.format = VK_FORMAT_R8G8B8A8_SINT;
+  OutViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView OutView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &OutViewInfo, nullptr, &OutView),
+            VK_SUCCESS);
+
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &InView;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[1].pTexelBufferView = &OutView;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // Read as unsigned bytes (255 + 1 == 0 read as UINT), zero-extended by
+  // the load, incremented, and truncated back to one byte on store --
+  // matching plain modular byte arithmetic, not signed saturation.
+  int8_t Result[4];
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result[0], 2);
+  EXPECT_EQ((uint8_t)Result[1], 201u);
+  EXPECT_EQ(Result[2], 4);
+  EXPECT_EQ((uint8_t)Result[3], 251u);
 
   vkDestroyBufferView(Device, InView, nullptr);
   vkDestroyBufferView(Device, OutView, nullptr);
