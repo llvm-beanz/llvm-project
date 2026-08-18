@@ -282,6 +282,7 @@ bool canonicalizeDXILStage(Function &F, const EntrySignature &Sig) {
 /// feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp, the writer side
 /// of this same encoding).
 enum SPIRVDecorationCode : uint32_t {
+  SPIRVDecorationBuiltIn = 11,
   SPIRVDecorationNoPerspective = 13,
   SPIRVDecorationFlat = 14,
   SPIRVDecorationPatch = 15,
@@ -306,6 +307,7 @@ std::optional<uint64_t> getConstMDInt(const Metadata *MD) {
 /// A stage-IO global's decorations, parsed out of its `!spirv.Decorations`
 /// metadata (see `SPIRVDecorationCode`).
 struct ParsedSPIRVDecorations {
+  std::optional<uint32_t> BuiltIn;
   std::optional<uint32_t> Location;
   std::optional<uint32_t> Component;
   bool NoPerspective = false;
@@ -331,6 +333,10 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
                                       ? getConstMDInt(Entry->getOperand(1))
                                       : std::nullopt;
     switch (*Code) {
+    case SPIRVDecorationBuiltIn:
+      if (Arg)
+        Result.BuiltIn = static_cast<uint32_t>(*Arg);
+      break;
     case SPIRVDecorationLocation:
       if (Arg)
         Result.Location = static_cast<uint32_t>(*Arg);
@@ -366,6 +372,67 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
     }
   }
   return Result;
+}
+
+/// The `feme::SignatureSystemValue` a SPIR-V `BuiltIn` decoration's value
+/// names, or `None` for a builtin FeMe's signature model has no
+/// representation for yet (`PointSize`, `PointCoord`, `SamplePosition`,
+/// the multiview/device-index family, ...), which is then treated as an
+/// ordinary -- and, having no `Location` either, unlinkable -- varying and
+/// diagnosed by `feme::graphics::ValidateStagePass`/the executor rather
+/// than silently mapped onto an unrelated system value. Numbering is the
+/// SPIR-V specification's own `BuiltIn` enumeration; see
+/// `buildStageIODecorationsAttr` in
+/// feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp, the writer side
+/// of this encoding.
+///
+/// `FragCoord` maps to `Position` because both APIs' fragment stages spell
+/// the rasterizer-supplied window-space position that way (SV_Position in
+/// Direct3D, `gl_FragCoord` in SPIR-V), and the CPU stage ABI sources it
+/// from the fragment invocation record under that one identity. The two
+/// vertex-index spellings likewise collapse: `VertexId`/`InstanceId` are
+/// the OpenGL-flavored, non-base-relative forms of `VertexIndex`/
+/// `InstanceIndex`, and Vulkan only ever produces the latter pair.
+SignatureSystemValue getSystemValueForBuiltIn(uint32_t BuiltIn) {
+  switch (BuiltIn) {
+  case 0: // Position
+  case 15: // FragCoord
+    return SignatureSystemValue::Position;
+  case 3: // ClipDistance
+    return SignatureSystemValue::ClipDistance;
+  case 4: // CullDistance
+    return SignatureSystemValue::CullDistance;
+  case 5:  // VertexId
+  case 42: // VertexIndex
+    return SignatureSystemValue::VertexID;
+  case 6:  // InstanceId
+  case 43: // InstanceIndex
+    return SignatureSystemValue::InstanceID;
+  case 7: // PrimitiveId
+    return SignatureSystemValue::PrimitiveID;
+  case 9: // Layer
+    return SignatureSystemValue::RenderTargetArrayIndex;
+  case 10: // ViewportIndex
+    return SignatureSystemValue::ViewportArrayIndex;
+  case 17: // FrontFacing
+    return SignatureSystemValue::IsFrontFace;
+  case 18: // SampleId
+    return SignatureSystemValue::SampleIndex;
+  case 20: // SampleMask
+    return SignatureSystemValue::Coverage;
+  case 22: // FragDepth
+    return SignatureSystemValue::Depth;
+  case 4424: // BaseVertex
+    return SignatureSystemValue::BaseVertex;
+  case 4425: // BaseInstance
+    return SignatureSystemValue::BaseInstance;
+  case 4426: // DrawIndex
+    return SignatureSystemValue::DrawID;
+  case 5014: // FragStencilRefEXT
+    return SignatureSystemValue::StencilRef;
+  default:
+    return SignatureSystemValue::None;
+  }
 }
 
 /// The interpolation-mode pairing "InterpolationMode" in
@@ -410,7 +477,7 @@ std::pair<SignatureComponentType, uint32_t> getComponentType(Type *Scalar) {
   return {SignatureComponentType::Float, 32};
 }
 
-/// Whether \p GV is a non-builtin stage-IO variable -- the shape
+/// Whether \p GV is a stage-IO variable -- the shape
 /// `StageIOGlobalVariablePattern`/`feme::spirv::attachStageIODecorations`
 /// (feme/lib/Conversion/SPIRVToLLVM/) produce: address space 7 (`Input`) or
 /// 8 (`Output`), carrying `!spirv.Decorations` metadata. Sets \p AddrSpace
@@ -425,8 +492,8 @@ bool isSPIRVStageIOGlobal(const GlobalVariable *GV, unsigned &AddrSpace) {
 }
 
 /// Rewrites \p F's SPIR-V-derived stage IR into `feme.stage.*`: its
-/// non-builtin `Input`/`Output` interface-variable loads/stores (address
-/// space 7/8, see `isSPIRVStageIOGlobal`) into `feme.stage.input.load`/
+/// `Input`/`Output` interface-variable loads/stores (address space 7/8,
+/// see `isSPIRVStageIOGlobal`) into `feme.stage.input.load`/
 /// `output.store` -- building and attaching this entry's
 /// `feme::EntrySignature` along the way, the piece roadmap R19 explicitly
 /// deferred to this milestone (see "Signature reflection" in
@@ -469,6 +536,8 @@ bool canonicalizeSPIRVStage(Function &F) {
         Elt.ElementID = NextID;
         Elt.Direction = Dir;
         Elt.Location = D.Location;
+        if (D.BuiltIn)
+          Elt.SystemValue = getSystemValueForBuiltIn(*D.BuiltIn);
 
         Type *ValueTy = GV->getValueType();
         Type *Scalar = ValueTy;

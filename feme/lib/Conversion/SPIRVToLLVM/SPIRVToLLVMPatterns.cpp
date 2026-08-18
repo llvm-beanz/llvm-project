@@ -268,11 +268,20 @@ constexpr StageIODecoration StageIOFlagDecorations[] = {
     {"centroid", 16},       {"sample", 17}, {"per_primitive_ext", 5271},
 };
 
-/// Builds the getStageIODecorationsAttrName() attribute for \p Op -- a
-/// non-builtin `Input`/`Output` variable -- from its `Location`/`Component`/
-/// `Index` and boolean interpolation/per-primitive/per-patch attributes
-/// (`StageIOFlagDecorations`), or a null attribute if it carries none of
-/// them.
+/// Builds the getStageIODecorationsAttrName() attribute for \p Op -- an
+/// `Input`/`Output` variable that is not one of the compute builtins
+/// `BuiltInMappings` legalizes to an `llvm.spv.*` intrinsic -- from its
+/// `BuiltIn`/`Location`/`Component`/`Index` and boolean interpolation/
+/// per-primitive/per-patch attributes (`StageIOFlagDecorations`), or a null
+/// attribute if it carries none of them.
+///
+/// A *graphics* builtin (`Position`, `VertexIndex`, `FragCoord`, ...) is
+/// ordinary interface memory here, exactly like a user varying: it has no
+/// `llvm.spv.*` intrinsic to read, and the stage ABI sources it from the
+/// invocation record instead (see `feme::SignatureSystemValue`). Preserving
+/// its `BuiltIn` decoration (code 11) is what lets
+/// `feme::graphics::CanonicalizeStagePass` recover that system-value
+/// identity when it builds the entry's `feme::EntrySignature`.
 mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
   mlir::Builder Builder(Op.getContext());
   llvm::SmallVector<mlir::Attribute> Decorations;
@@ -292,6 +301,12 @@ mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
   // in `SPIRVStructureOps.td`), so those are read as plain attributes by the
   // name MLIR's deserializer would give them
   // (`llvm::convertToSnakeFromCamelCase`).
+  if (std::optional<llvm::StringRef> BuiltInName = Op.getBuiltIn())
+    if (std::optional<mlir::spirv::BuiltIn> BuiltIn =
+            mlir::spirv::symbolizeBuiltIn(*BuiltInName))
+      Decorations.push_back(Builder.getArrayAttr(
+          {Builder.getI32IntegerAttr(11),
+           Builder.getI32IntegerAttr(static_cast<int32_t>(*BuiltIn))}));
   addIntDecoration(30, Op.getLocationAttr());
   addIntDecoration(31, Op->getAttr("component"));
   addIntDecoration(32, Op->getAttr("index"));
@@ -317,17 +332,20 @@ mlir::ArrayAttr buildStageIODecorationsAttr(mlir::spirv::GlobalVariableOp Op) {
 /// though, MLIR's `GlobalVariablePattern` *does* claim `Input`/`Output`
 /// already, just at address space 0 (its `storageClassToAddressSpace`
 /// overload is Vulkan-unaware), so this needs a higher benefit to win over
-/// it here too. `Location`/`Component`/`Index`/interpolation/per-primitive/
+/// it here too. `BuiltIn`/`Location`/`Component`/`Index`/interpolation/
+/// per-primitive/
 /// per-patch decorations are preserved as a getStageIODecorationsAttrName()
 /// attribute (see buildStageIODecorationsAttr), which
 /// feme::spirv::attachStageIODecorations later turns into real
 /// `!spirv.Decorations` metadata once a genuine `llvm::Module` exists.
-/// Returns the address space a non-builtin stage-IO variable's storage
-/// class converts to (7 for `Input`, 8 for `Output` -- see
+/// Returns the address space a stage-IO variable's storage class converts
+/// to (7 for `Input`, 8 for `Output` -- see
 /// `storageClassToAddressSpace` in `llvm/lib/Target/SPIRV/SPIRVUtils.h`), or
 /// `std::nullopt` if \p Op is not one (a different storage class, or a
-/// builtin variable, which converts through BuiltInAddressOfPattern/
-/// BuiltInGlobalVariablePattern instead).
+/// *compute* builtin variable, which converts through
+/// BuiltInAddressOfPattern/BuiltInGlobalVariablePattern instead -- a
+/// graphics builtin such as `Position` has no `llvm.spv.*` intrinsic and is
+/// ordinary interface memory here, see buildStageIODecorationsAttr).
 std::optional<unsigned>
 getStageIOAddressSpace(mlir::spirv::GlobalVariableOp Op) {
   auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());

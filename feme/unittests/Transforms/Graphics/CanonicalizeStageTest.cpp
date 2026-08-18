@@ -8,7 +8,9 @@
 
 #include "feme/Transforms/Graphics/CanonicalizeStage.h"
 
+#include "feme/Core/Signature.h"
 #include "feme/Core/StageOps.h"
+#include "feme/Transforms/DXIL/SignatureImport.h"
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
@@ -148,6 +150,57 @@ TEST(CanonicalizeStageTest, RewritesSPIRVStageIOAndBuildsSignature) {
   }
   EXPECT_EQ(SawLoad, 1u);
   EXPECT_EQ(SawStore, 1u);
+}
+
+/// A SPIR-V *graphics* builtin interface variable (a `BuiltIn` decoration,
+/// code 11, rather than a `Location` one) becomes a system-value signature
+/// element -- the identity the software rasterizer needs to find a vertex
+/// stage's `SV_Position` output and a fragment stage's `SV_Depth` one
+/// (roadmap V6's graphics stage compilation).
+TEST(CanonicalizeStageTest, MapsSPIRVBuiltInsToSystemValues) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    @gl_VertexIndex = external addrspace(7) constant i32, !spirv.Decorations !0
+    @gl_Position = external addrspace(8) global <4 x float>, !spirv.Decorations !1
+    @out_var = external addrspace(8) global <4 x float>, !spirv.Decorations !2
+    define void @main() #0 {
+      %vid = load i32, ptr addrspace(7) @gl_VertexIndex
+      %f = sitofp i32 %vid to float
+      %v = insertelement <4 x float> poison, float %f, i32 0
+      store <4 x float> %v, ptr addrspace(8) @gl_Position
+      store <4 x float> %v, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="vertex" }
+    !0 = !{!3}
+    !1 = !{!4}
+    !2 = !{!5}
+    !3 = !{i32 11, i32 42}
+    !4 = !{i32 11, i32 0}
+    !5 = !{i32 30, i32 0}
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_TRUE(run(*M));
+  Function *F = M->getFunction("main");
+  std::optional<EntrySignature> Sig = dxil::getEntrySignature(*F);
+  ASSERT_TRUE(Sig.has_value());
+  ASSERT_EQ(Sig->Elements.size(), 3u);
+
+  const SignatureElement &VertexIndex = Sig->Elements[0];
+  EXPECT_EQ(VertexIndex.Direction, SignatureDirection::Input);
+  EXPECT_EQ(VertexIndex.SystemValue, SignatureSystemValue::VertexID);
+  EXPECT_FALSE(VertexIndex.Location.has_value());
+
+  const SignatureElement &Position = Sig->Elements[1];
+  EXPECT_EQ(Position.Direction, SignatureDirection::Output);
+  EXPECT_EQ(Position.SystemValue, SignatureSystemValue::Position);
+  EXPECT_EQ(Position.ComponentCount, 4u);
+
+  const SignatureElement &Varying = Sig->Elements[2];
+  EXPECT_EQ(Varying.Direction, SignatureDirection::Output);
+  EXPECT_EQ(Varying.SystemValue, SignatureSystemValue::None);
+  ASSERT_TRUE(Varying.Location.has_value());
+  EXPECT_EQ(*Varying.Location, 0u);
 }
 
 } // namespace

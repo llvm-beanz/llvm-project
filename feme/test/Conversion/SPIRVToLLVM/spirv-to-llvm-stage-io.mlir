@@ -77,3 +77,24 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %1 : i32
   }
 }
+
+// -----
+
+// A *graphics* builtin (`Position` here) has no `llvm.spv.*` intrinsic to
+// legalize to, so it converts through the ordinary stage-IO path above --
+// with its `BuiltIn` decoration (code 11) preserved, which is what lets
+// `feme::graphics::CanonicalizeStagePass` recover the element's
+// `feme::SignatureSystemValue` identity later.
+
+// CHECK: llvm.mlir.global external @gl_Position() {addr_space = 8 : i32, feme.spirv.decorations = {{\[}}[11 : i32, 0 : i32]{{\]}}} : vector<4xf32>
+// CHECK-LABEL: llvm.func @write_position
+// CHECK: %[[PTR:.*]] = llvm.mlir.addressof @gl_Position : !llvm.ptr<8>
+// CHECK: llvm.store %{{.*}}, %[[PTR]] : vector<4xf32>, !llvm.ptr<8>
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @gl_Position built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @write_position(%v: vector<4xf32>) -> () "None" {
+    %0 = spirv.mlir.addressof @gl_Position : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %0, %v : vector<4xf32>
+    spirv.Return
+  }
+}
