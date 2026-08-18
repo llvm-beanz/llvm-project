@@ -223,17 +223,19 @@ The driver must therefore:
 
 - Link LLVM and MLIR statically, never against `libLLVM.so`/`libMLIR.so`, and
   never be opened with `RTLD_GLOBAL`.
-- Build with `-fvisibility=hidden -fvisibility-inlines-hidden` and a link
-  version script that exports only the loader-facing `vk_icd*` symbols plus the
-  legacy `vkGetInstanceProcAddr` alias. No LLVM, MLIR, or FeMe symbol may be
-  dynamically exported.
+- Build with `-fvisibility=hidden -fvisibility-inlines-hidden` and a linker
+  symbol-export list (a version script on ELF, `-exported_symbols_list` on
+  Darwin, a module-definition file on Windows -- see
+  `LLVM_EXPORTED_SYMBOL_FILE`/`add_llvm_symbol_exports()`) that exports only
+  the loader-facing `vk_icd*` symbols plus the legacy `vkGetInstanceProcAddr`
+  alias. No LLVM, MLIR, or FeMe symbol may be dynamically exported.
 - Register no `llvm::cl` option from any code reachable in the ICD, and perform
   LLVM's process-global target initialization exactly once under a
   `std::once_flag` during `vkCreateInstance`. FeMe itself has no process-global
   mutable state; LLVM's target registry does.
 - Be verified by a test that runs a client with both the FeMe manifest and a
   system driver manifest visible, and by a link-time check that the exported
-  dynamic symbol set matches the version script exactly.
+  dynamic symbol set matches the export list exactly.
 
 ## Loader Integration
 

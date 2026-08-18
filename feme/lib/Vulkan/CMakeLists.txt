@@ -4,7 +4,7 @@
 # `feme_vulkan` shared object that links this static library lives under
 # feme/tools/feme-vulkan, following LLVM's convention of building deliverable
 # tools/libraries out of a `tools` directory; only what that target's build
-# needs directly (its own source and version script) lives there, while the
+# needs directly (its own source and symbol-export list) lives there, while the
 # entrypoint-table generation below is shared with FeMeVulkanCore's own
 # build here.
 set(feme_vulkan_gen_dir ${CMAKE_CURRENT_BINARY_DIR})
@@ -46,7 +46,7 @@ add_custom_target(FeMeVulkanEntrypointsGen DEPENDS ${feme_vulkan_entrypoints_inc
 # call `feme::vulkan::vkCreate*`/`ProcAddr.h`'s helpers without going through
 # a dynamically-loaded ICD at all, while `feme_vulkan` below adds nothing but
 # the loader-facing `vk_icd*` exports and this target's hidden-visibility/
-# version-script packaging. Visibility attributes only govern a *shared*
+# symbol-export packaging. Visibility attributes only govern a *shared*
 # object's dynamic symbol table, so building this static library with the
 # same hidden-by-default flags has no effect on the unit tests linking it
 # directly into their own executable. Built via `add_feme_library(... STATIC
