@@ -257,8 +257,16 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   if (!Stage)
     return Stage.takeError();
 
-  // Image/sampler resources remain unimplemented (V5+); push constants are
-  // this milestone's own work, validated below.
+  // (V5) The Vulkan object model now supports images, image views, and
+  // samplers (see Image.h/Descriptor.h), but consuming one from a real
+  // compute dispatch needs `feme::cpu::ResourceLoweringPass`'s SPIR-V path
+  // to normalize a descriptor-set-bound image/sampler into the image/
+  // sampler heap the same way it already does for a bound buffer -- that
+  // reflection does not exist yet (`ResourceInfo::UsesSamplerHeap` is
+  // unconditionally false today, see its own comment), so this check
+  // remains unreachable until that lands. It stays here rather than being
+  // removed so a future shader that does set it is still rejected
+  // truthfully instead of silently misdispatching.
   const feme::cpu::ResourceInfo &Info = (*Stage)->getResourceInfo();
   if (Info.UsesSamplerHeap)
     return createStringError(
