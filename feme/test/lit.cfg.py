@@ -152,7 +152,8 @@ if config.feme_have_vulkan_loader == "ON":
     config.available_features.add("system-vulkan-loader")
     llvm_config.add_tool_substitutions(
         ["feme-vulkan-loader-smoke", "feme-vulkan-storage-buffer-diff",
-         "feme-vulkan-image-loader-smoke"],
+         "feme-vulkan-image-loader-smoke",
+         "feme-vulkan-sampled-image-smoke"],
         tool_dirs,
     )
     config.substitutions.append(

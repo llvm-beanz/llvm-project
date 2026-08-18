@@ -1,0 +1,21 @@
+// Roadmap R30 / V5: a real compute dispatch that *consumes* a bound image,
+// run through the real Khronos loader rather than by linking
+// `libfeme_vulkan` directly. V5's own image lit test
+// (image-loader-smoke.test) could only round-trip bytes through copies,
+// because no shader-side image reflection existed yet; this one closes that
+// note by sampling the image the dispatch is handed.
+//
+// The image is 2x2 `R32G32B32A32_SFLOAT` with texel `i`'s channels holding
+// `4i .. 4i+3`, and the shader samples it at uv (0.75, 0.75) with a
+// nearest/clamp-to-edge sampler -- which selects texel (1, 1), linear
+// index 3.
+//
+// REQUIRES: system-vulkan-loader, spirv-registered-target
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/sampled-image-fetch.mlir -o %t.spv
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-sampled-image-smoke %t.spv | FileCheck %s
+
+// CHECK: 12.0
+// CHECK-NEXT: 13.0
+// CHECK-NEXT: 14.0
+// CHECK-NEXT: 15.0

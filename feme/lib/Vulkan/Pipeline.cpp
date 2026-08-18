@@ -175,6 +175,27 @@ bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
   return llvm::all_of(Covered, [](bool B) { return B; });
 }
 
+/// Whether a binding declared as \p Type can serve a bound range the
+/// compiler assigned to \p Class's heap. A buffer range accepts every
+/// non-image, non-sampler supported type (the buffer heap holds all of
+/// them); an image or sampler range accepts only a descriptor type that
+/// actually carries one, so a shader that samples through (set, binding)
+/// cannot be handed a storage buffer there. A `COMBINED_IMAGE_SAMPLER`
+/// satisfies both an image and a sampler range, matching how
+/// `runDispatch` materializes one into both heaps.
+bool descriptorTypeMatchesClass(VkDescriptorType Type,
+                                feme::cpu::BoundResourceClass Class) {
+  switch (Class) {
+  case feme::cpu::BoundResourceClass::Buffer:
+    return !isImageDescriptorType(Type) && !isSamplerDescriptorType(Type);
+  case feme::cpu::BoundResourceClass::Image:
+    return isImageDescriptorType(Type);
+  case feme::cpu::BoundResourceClass::Sampler:
+    return isSamplerDescriptorType(Type);
+  }
+  return false;
+}
+
 /// Compiles one `VkComputePipelineCreateInfo` end to end: imports its
 /// shader module's SPIR-V, translates it to LLVM IR, resolves and stamps
 /// its group size (see GroupSize.h), and compiles it with the FeMe CPU
@@ -257,22 +278,14 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   if (!Stage)
     return Stage.takeError();
 
-  // (V5) The Vulkan object model now supports images, image views, and
-  // samplers (see Image.h/Descriptor.h), but consuming one from a real
-  // compute dispatch needs `feme::cpu::ResourceLoweringPass`'s SPIR-V path
-  // to normalize a descriptor-set-bound image/sampler into the image/
-  // sampler heap the same way it already does for a bound buffer -- that
-  // reflection does not exist yet (`ResourceInfo::UsesSamplerHeap` is
-  // unconditionally false today, see its own comment), so this check
-  // remains unreachable until that lands. It stays here rather than being
-  // removed so a future shader that does set it is still rejected
-  // truthfully instead of silently misdispatching.
+  // (V5, completed by roadmap R30's SPIR-V image lowering) A shader that
+  // samples an image is no longer rejected here: `feme::cpu::
+  // SPIRVResourceLoweringPass` now assigns a descriptor-set-bound image and
+  // sampler slots in the image and sampler heaps, and `runDispatch`
+  // materializes both from the bound sets, exactly as it already did for a
+  // bound buffer. What each bound range needs from the pipeline layout is
+  // checked per class below instead.
   const feme::cpu::ResourceInfo &Info = (*Stage)->getResourceInfo();
-  if (Info.UsesSamplerHeap)
-    return createStringError(
-        inconvertibleErrorCode(),
-        "shader uses sampler-heap resources, which this milestone's "
-        "VkPipelineLayout cannot bind (see V5)");
 
   const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
   if (!pushConstantsCoverRootConstantSize(
@@ -284,10 +297,11 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
         "VK_SHADER_STAGE_COMPUTE_BIT VkPushConstantRange in its "
         "VkPipelineLayout");
 
-  // Every bound storage-buffer range the shader reads must have a
-  // compatible binding in the pipeline layout's descriptor set layouts: the
-  // same (set, binding) identity (see PipelineLayout's own comment), a
-  // storage-buffer descriptor type, and a declared array big enough to
+  // Every bound range the shader reads must have a compatible binding in
+  // the pipeline layout's descriptor set layouts: the same (set, binding)
+  // identity (see PipelineLayout's own comment), a descriptor type of the
+  // matching *class* (a shader that samples through (set, binding) must not
+  // be handed a storage buffer there), and a declared array big enough to
   // cover the shader's range (see "Descriptor Model": "Descriptor arrays
   // whose length exceeds what the reserved heap can represent must fail
   // pipeline creation rather than silently truncate").
@@ -301,7 +315,8 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
     const DescriptorSetLayoutBinding *Binding =
         SetLayouts[Range.Space]->find(Range.BaseRegister);
     if (!Binding || !isSupportedDescriptorType(Binding->Type) ||
-        Binding->Count < Range.RangeSize)
+        Binding->Count < Range.RangeSize ||
+        !descriptorTypeMatchesClass(Binding->Type, Range.Class))
       return createStringError(
           inconvertibleErrorCode(),
           "shader's (set %u, binding %u) requirement is not satisfied by "

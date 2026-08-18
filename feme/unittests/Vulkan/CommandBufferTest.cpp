@@ -116,6 +116,50 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// (Roadmap R30 / V5) Samples a bound 2D sampled image through a separate
+/// bound sampler and writes the four resulting components to a
+/// `StorageBuffer` -- the first shader in this ICD that *consumes* an
+/// image, which V5 could only create and copy. An explicit LOD is used
+/// rather than an implicit one because a compute shader has no fragment
+/// derivatives to compute one from.
+const char *kSampledImageShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @img bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.GlobalVariable @samp bind(0, 1) : !spirv.ptr<!spirv.sampler, UniformConstant>
+  spirv.GlobalVariable @out bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @img : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %image = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %1 = spirv.mlir.addressof @samp : !spirv.ptr<!spirv.sampler, UniformConstant>
+    %sampler = spirv.Load "UniformConstant" %1 : !spirv.sampler
+    %si = spirv.SampledImage %image, %sampler : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, !spirv.sampler -> !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>
+    %uv = spirv.Constant dense<[7.500000e-01, 7.500000e-01]> : vector<2xf32>
+    %lod = spirv.Constant 0.000000e+00 : f32
+    %texel = spirv.ImageSampleExplicitLod %si, %uv ["Lod"], %lod : !spirv.sampled_image<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>>, vector<2xf32>, f32 -> vector<4xf32>
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %c2 = spirv.Constant 2 : i32
+    %c3 = spirv.Constant 3 : i32
+    %r = spirv.CompositeExtract %texel[0 : i32] : vector<4xf32>
+    %g = spirv.CompositeExtract %texel[1 : i32] : vector<4xf32>
+    %b = spirv.CompositeExtract %texel[2 : i32] : vector<4xf32>
+    %a = spirv.CompositeExtract %texel[3 : i32] : vector<4xf32>
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac0, %r : f32
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac1, %g : f32
+    %ac2 = spirv.AccessChain %2[%c0, %c2] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac2, %b : f32
+    %ac3 = spirv.AccessChain %2[%c0, %c3] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<f32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<f32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac3, %a : f32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @img, @samp, @out
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 /// V3: reads a single `StorageBuffer` element, adds a `PushConstant`
 /// block's sole `i32` member, and writes the result back -- exercises the
 /// "combined" push-constant + bound-resource lowering path end to end
@@ -1751,3 +1795,353 @@ TEST_F(CommandBufferTest, ExecuteCommandsInterpretsSecondaryIntoPrimary) {
 }
 
 } // namespace
+
+namespace {
+
+/// (Roadmap R30 / V5) A dispatch that samples a bound 2x2
+/// `R32G32B32A32_SFLOAT` image through a bound sampler and writes the
+/// sampled texel to a storage buffer. This is the scenario V5's status note
+/// recorded as its one remaining deviation ("a real dispatch still cannot
+/// consume an image or sampler").
+class SampledImageDispatchTest : public ::testing::Test {
+protected:
+  static constexpr uint32_t Extent = 2;
+  static constexpr VkDeviceSize TexelSize = 16; // R32G32B32A32_SFLOAT
+  static constexpr VkDeviceSize ImageSize = Extent * Extent * TexelSize;
+
+  void SetUp() override {
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    createImage();
+    createSampler();
+    createOutputBuffer();
+
+    VkDescriptorSetLayoutBinding Bindings[3]{};
+    Bindings[0].binding = 0;
+    Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    Bindings[0].descriptorCount = 1;
+    Bindings[1].binding = 1;
+    Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    Bindings[1].descriptorCount = 1;
+    Bindings[2].binding = 2;
+    Bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[2].descriptorCount = 1;
+    VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+    SetLayoutInfo.bindingCount = 3;
+    SetLayoutInfo.pBindings = Bindings;
+    ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                          &SetLayout),
+              VK_SUCCESS);
+
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    LayoutInfo.setLayoutCount = 1;
+    LayoutInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    std::vector<uint32_t> Words = assembleSPIRV(kSampledImageShader);
+    ASSERT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo ShaderInfo{};
+    ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+    ShaderInfo.pCode = Words.data();
+    ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &Module),
+              VK_SUCCESS);
+
+    VkDescriptorPoolSize PoolSizes[3] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+        {VK_DESCRIPTOR_TYPE_SAMPLER, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+    };
+    VkDescriptorPoolCreateInfo PoolInfo{};
+    PoolInfo.maxSets = 1;
+    PoolInfo.poolSizeCount = 3;
+    PoolInfo.pPoolSizes = PoolSizes;
+    ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+              VK_SUCCESS);
+
+    VkDescriptorSetAllocateInfo DSAllocInfo{};
+    DSAllocInfo.descriptorPool = DescPool;
+    DSAllocInfo.descriptorSetCount = 1;
+    DSAllocInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+    VkCommandPoolCreateInfo CmdPoolInfo{};
+    CmdPoolInfo.queueFamilyIndex = 0;
+    ASSERT_EQ(vkCreateCommandPool(Device, &CmdPoolInfo, nullptr, &Pool),
+              VK_SUCCESS);
+  }
+
+  void TearDown() override {
+    vkDestroyCommandPool(Device, Pool, nullptr);
+    vkDestroyDescriptorPool(Device, DescPool, nullptr);
+    vkDestroyPipeline(Device, Pipeline, nullptr);
+    vkDestroyShaderModule(Device, Module, nullptr);
+    vkDestroyPipelineLayout(Device, Layout, nullptr);
+    vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+    vkDestroySampler(Device, Samp, nullptr);
+    vkDestroyImageView(Device, View, nullptr);
+    vkDestroyImage(Device, Img, nullptr);
+    vkFreeMemory(Device, ImageMemory, nullptr);
+    vkDestroyBuffer(Device, Out.Buf, nullptr);
+    vkFreeMemory(Device, Out.Memory, nullptr);
+    vkDestroyDevice(Device, nullptr);
+    vkDestroyInstance(Instance, nullptr);
+  }
+
+  void createImage() {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ImageInfo.extent = {Extent, Extent, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 1;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = ImageSize;
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+
+    // Each texel carries its own linear index in every channel, so a wrong
+    // row/column resolves to an obviously wrong value rather than to a
+    // plausible neighbor.
+    auto *F = static_cast<float *>(Texels);
+    for (uint32_t I = 0; I != Extent * Extent; ++I)
+      for (uint32_t C = 0; C != 4; ++C)
+        F[I * 4 + C] = static_cast<float>(I * 4 + C);
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+
+  void createSampler() {
+    VkSamplerCreateInfo SamplerInfo{};
+    SamplerInfo.magFilter = VK_FILTER_NEAREST;
+    SamplerInfo.minFilter = VK_FILTER_NEAREST;
+    SamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    SamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    SamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    SamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ASSERT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp),
+              VK_SUCCESS);
+  }
+
+  void createOutputBuffer() {
+    VkBufferCreateInfo BufferInfo{};
+    BufferInfo.size = 4 * sizeof(float);
+    BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Out.Buf),
+              VK_SUCCESS);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = BufferInfo.size;
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Out.Memory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindBufferMemory(Device, Out.Buf, Out.Memory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, Out.Memory, 0, VK_WHOLE_SIZE, 0, &Out.Data),
+              VK_SUCCESS);
+  }
+
+  VkResult createPipeline() {
+    VkComputePipelineCreateInfo PipelineInfo{};
+    PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    PipelineInfo.stage.module = Module;
+    PipelineInfo.stage.pName = "main";
+    PipelineInfo.layout = Layout;
+    return vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                    nullptr, &Pipeline);
+  }
+
+  void writeDescriptorSet() {
+    VkDescriptorImageInfo ImgInfo{};
+    ImgInfo.imageView = View;
+    ImgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkDescriptorImageInfo SampInfo{};
+    SampInfo.sampler = Samp;
+    VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4 * sizeof(float)};
+
+    VkWriteDescriptorSet Writes[3]{};
+    Writes[0].dstSet = Set;
+    Writes[0].dstBinding = 0;
+    Writes[0].descriptorCount = 1;
+    Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    Writes[0].pImageInfo = &ImgInfo;
+    Writes[1].dstSet = Set;
+    Writes[1].dstBinding = 1;
+    Writes[1].descriptorCount = 1;
+    Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    Writes[1].pImageInfo = &SampInfo;
+    Writes[2].dstSet = Set;
+    Writes[2].dstBinding = 2;
+    Writes[2].descriptorCount = 1;
+    Writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Writes[2].pBufferInfo = &OutInfo;
+    vkUpdateDescriptorSets(Device, 3, Writes, 0, nullptr);
+  }
+
+  VkCommandBuffer allocateCommandBuffer() {
+    VkCommandBufferAllocateInfo AllocInfo{};
+    AllocInfo.commandPool = Pool;
+    AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    AllocInfo.commandBufferCount = 1;
+    VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+    EXPECT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &CmdBuf),
+              VK_SUCCESS);
+    return CmdBuf;
+  }
+
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+  VkDevice Device = VK_NULL_HANDLE;
+  VkImage Img = VK_NULL_HANDLE;
+  VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
+  void *Texels = nullptr;
+  VkImageView View = VK_NULL_HANDLE;
+  VkSampler Samp = VK_NULL_HANDLE;
+  HostBuffer Out;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  VkShaderModule Module = VK_NULL_HANDLE;
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  VkCommandPool Pool = VK_NULL_HANDLE;
+};
+
+} // namespace
+
+TEST_F(SampledImageDispatchTest, PipelineWithASamplerIsNoLongerRejected) {
+  // V5 rejected any shader whose reflection set `UsesSamplerHeap`; there is
+  // now a real image/sampler heap for it to bind against.
+  EXPECT_EQ(createPipeline(), VK_SUCCESS);
+}
+
+TEST_F(SampledImageDispatchTest, SamplesABoundImageThroughABoundSampler) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // Nearest sampling at uv (0.75, 0.75) of a 2x2 image selects texel
+  // (1, 1), i.e. linear index 3, whose channels the fixture filled with
+  // 12, 13, 14, 15.
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 12.0f);
+  EXPECT_FLOAT_EQ(Result[1], 13.0f);
+  EXPECT_FLOAT_EQ(Result[2], 14.0f);
+  EXPECT_FLOAT_EQ(Result[3], 15.0f);
+}
+
+TEST_F(SampledImageDispatchTest, UnwrittenImageBindingSamplesAsZero) {
+  // Only the sampler and the output buffer are written; the image binding
+  // is left unwritten, so its heap slot stays the all-zero descriptor and
+  // the sample reads the robust zero result rather than a wild pointer.
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  VkDescriptorImageInfo SampInfo{};
+  SampInfo.sampler = Samp;
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4 * sizeof(float)};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 1;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+  Writes[0].pImageInfo = &SampInfo;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 2;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[1].pBufferInfo = &OutInfo;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  auto *Sentinel = static_cast<float *>(Out.Data);
+  for (uint32_t I = 0; I != 4; ++I)
+    Sentinel[I] = -1.0f;
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  for (float Component : Result)
+    EXPECT_FLOAT_EQ(Component, 0.0f);
+}
+
+TEST_F(SampledImageDispatchTest, RejectsAPipelineLayoutOfTheWrongClass) {
+  // The shader samples through (set 0, binding 0), so a layout declaring a
+  // storage buffer there cannot satisfy it: the compiler assigned that
+  // range an *image* heap slot, which no buffer descriptor can fill.
+  VkDescriptorSetLayoutBinding Bindings[3]{};
+  Bindings[0].binding = 0;
+  Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[0].descriptorCount = 1;
+  Bindings[1].binding = 1;
+  Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+  Bindings[1].descriptorCount = 1;
+  Bindings[2].binding = 2;
+  Bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[2].descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 3;
+  SetLayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout WrongSetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                        &WrongSetLayout),
+            VK_SUCCESS);
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &WrongSetLayout;
+  VkPipelineLayout WrongLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &WrongLayout),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo PipelineInfo{};
+  PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  PipelineInfo.stage.module = Module;
+  PipelineInfo.stage.pName = "main";
+  PipelineInfo.layout = WrongLayout;
+  VkPipeline Rejected = VK_NULL_HANDLE;
+  EXPECT_NE(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                     nullptr, &Rejected),
+            VK_SUCCESS);
+
+  vkDestroyPipelineLayout(Device, WrongLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, WrongSetLayout, nullptr);
+}

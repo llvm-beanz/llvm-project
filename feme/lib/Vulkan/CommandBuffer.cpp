@@ -54,13 +54,101 @@ struct BoundSetState {
   std::vector<uint32_t> DynamicOffsets;
 };
 
-/// Owns the `FemeDescriptor` arrays `buildBoundResources` materializes,
+/// Owns the descriptor arrays `buildBoundResources` materializes,
 /// referenced by `Bindings`' `llvm::ArrayRef`s. Kept alive for exactly as
 /// long as the dispatch that consumes them runs.
 struct MaterializedBoundResources {
   std::vector<std::vector<feme::cpu::FemeDescriptor>> Storage;
   std::vector<feme::cpu::BoundResourceBinding> Bindings;
+  std::vector<std::vector<feme::cpu::FemeImageDescriptor>> ImageStorage;
+  std::vector<feme::cpu::BoundImageBinding> ImageBindings;
+  std::vector<std::vector<feme::cpu::FemeSamplerDescriptor>> SamplerStorage;
+  std::vector<feme::cpu::BoundSamplerBinding> SamplerBindings;
 };
+
+/// Resolves one `VkImageView` binding into the `feme::cpu::
+/// FemeImageDescriptor` a compiled stage's image heap holds (V5's remaining
+/// deviation, now closed by roadmap R30's SPIR-V image lowering), or leaves
+/// \p Dst zero-filled -- an empty image, which every runtime helper reads
+/// as the robust all-zero result -- when the binding names something the
+/// shader-side image path cannot address.
+///
+/// A view's mip subrange is expressed by handing the shader a *slice* of
+/// the image's own mip-layout table while keeping `Data` at the image base:
+/// a `FemeImageSubresourceLayout::Offset` is relative to that base, so the
+/// view's base level simply becomes level 0 of the descriptor.
+/// `baseArrayLayer > 0` has no such expression -- the layer offset differs
+/// per mip level, and the ABI has no base-layer field -- so it, like every
+/// non-2D view, is left unwritten rather than silently addressed as layer 0
+/// (see FeMeVulkanDesign.md's V5 status note).
+void materializeImageDescriptor(const DescriptorImageBinding &Src,
+                                VkDescriptorType Type,
+                                feme::cpu::FemeImageDescriptor &Dst) {
+  ImageView *View = Src.View;
+  if (!View || !View->image() || !View->image()->isBound())
+    return;
+  Image *Img = View->image();
+  if (View->dimension() != feme::cpu::ImageDimension::Texture2D)
+    return;
+
+  const VkImageSubresourceRange &Range = View->range();
+  if (Range.baseArrayLayer != 0)
+    return;
+  if (Range.baseMipLevel >= Img->mipLevels())
+    return;
+  uint32_t LevelCount = Range.levelCount == VK_REMAINING_MIP_LEVELS
+                            ? Img->mipLevels() - Range.baseMipLevel
+                            : Range.levelCount;
+  LevelCount = std::min(LevelCount, Img->mipLevels() - Range.baseMipLevel);
+  if (LevelCount == 0)
+    return;
+
+  Dst.Data = Img->data();
+  Dst.SizeInBytes = Img->sizeInBytes();
+  Dst.Dimension = static_cast<uint32_t>(feme::cpu::ImageDimension::Texture2D);
+  Dst.Format = static_cast<uint32_t>(View->format());
+  Dst.Width = std::max(1u, Img->width() >> Range.baseMipLevel);
+  Dst.Height = std::max(1u, Img->height() >> Range.baseMipLevel);
+  Dst.Depth = 1;
+  Dst.MipLevels = LevelCount;
+  Dst.ArrayLayers = 1;
+  Dst.PlaneCount = 1;
+  Dst.SampleCount = Img->sampleCount();
+  Dst.Flags = isReadOnlyDescriptorType(Type) ? feme::cpu::FEME_IMAGE_SAMPLED
+                                             : feme::cpu::FEME_IMAGE_STORAGE;
+  Dst.MipLayouts = Img->mipLayouts().data() + Range.baseMipLevel;
+  Dst.MipLayoutCount = LevelCount;
+}
+
+/// Builds the image and sampler descriptor arrays one binding of a bound
+/// set resolves to. A `COMBINED_IMAGE_SAMPLER` contributes to *both*, at
+/// the same (set, binding) identity: FeMe keeps the two descriptors
+/// separate throughout (see FeMeGraphicsDesign.md's "Combined image
+/// samplers remain two logical descriptors paired by lowering"), and the
+/// compiled stage asks for whichever class its own reflection named.
+void buildImageAndSamplerBinding(uint32_t SetIdx,
+                                 const DescriptorSetLayoutBinding &BindingDecl,
+                                 llvm::ArrayRef<DescriptorImageBinding> Array,
+                                 MaterializedBoundResources &Result) {
+  if (isImageDescriptorType(BindingDecl.Type)) {
+    std::vector<feme::cpu::FemeImageDescriptor> Descriptors(Array.size());
+    for (size_t J = 0; J != Array.size(); ++J)
+      materializeImageDescriptor(Array[J], BindingDecl.Type, Descriptors[J]);
+    Result.ImageStorage.push_back(std::move(Descriptors));
+    Result.ImageBindings.push_back(feme::cpu::BoundImageBinding{
+        SetIdx, BindingDecl.Binding, Result.ImageStorage.back()});
+  }
+
+  if (!isSamplerDescriptorType(BindingDecl.Type))
+    return;
+  std::vector<feme::cpu::FemeSamplerDescriptor> Samplers(Array.size());
+  for (size_t J = 0; J != Array.size(); ++J)
+    if (Array[J].Samp)
+      Samplers[J] = Array[J].Samp->descriptor();
+  Result.SamplerStorage.push_back(std::move(Samplers));
+  Result.SamplerBindings.push_back(feme::cpu::BoundSamplerBinding{
+      SetIdx, BindingDecl.Binding, Result.SamplerStorage.back()});
+}
 
 /// Builds the `FemeDescriptor` arrays a dispatch's currently bound
 /// descriptor sets resolve to: one array per (set, binding) with a
@@ -80,6 +168,14 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
     const DescriptorSetLayout &Layout = State.Set->getLayout();
     uint32_t DynamicOffsetCursor = 0;
     for (const DescriptorSetLayoutBinding &BindingDecl : Layout.bindings()) {
+      if (isImageDescriptorType(BindingDecl.Type) ||
+          isSamplerDescriptorType(BindingDecl.Type)) {
+        llvm::ArrayRef<DescriptorImageBinding> ImageArray =
+            State.Set->imageBindingArray(BindingDecl.Binding);
+        if (!ImageArray.empty())
+          buildImageAndSamplerBinding(SetIdx, BindingDecl, ImageArray, Result);
+        continue;
+      }
       llvm::ArrayRef<DescriptorBufferBinding> Array =
           State.Set->bindingArray(BindingDecl.Binding);
       bool Dynamic = isDynamicDescriptorType(BindingDecl.Type);
@@ -173,6 +269,8 @@ Error runDispatch(ComputePipeline &Pipeline, std::array<uint32_t, 3> Base,
   MaterializedBoundResources Materialized = buildBoundResources(BoundSets);
   feme::cpu::DispatchResources Resources;
   Resources.BoundResources = Materialized.Bindings;
+  Resources.BoundImages = Materialized.ImageBindings;
+  Resources.BoundSamplers = Materialized.SamplerBindings;
   // Every dispatch snapshots the command buffer's current push-constant
   // bytes as `RootConstants`, regardless of whether this pipeline's shader
   // actually reads any of them (see "Descriptor Model": "Each dispatch

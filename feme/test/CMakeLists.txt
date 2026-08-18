@@ -29,7 +29,6 @@ set(FEME_TEST_DEPENDS
   feme-dxbc-import-fuzzer
   feme-spirv-import-fuzzer
   feme-cpu-restructure-fuzzer
-  feme-vulkan-image-loader-smoke
   FeMeUnitTests
   llc
   llvm-as
@@ -51,7 +50,9 @@ if(FEME_HAVE_VULKAN_LOADER)
   # through the real Vulkan loader via its build-tree manifest rather than
   # linking it directly, so it must be listed explicitly here to be built
   # before they run.
-  list(APPEND FEME_TEST_DEPENDS feme_vulkan feme-vulkan-loader-smoke)
+  list(APPEND FEME_TEST_DEPENDS feme_vulkan feme-vulkan-loader-smoke
+    feme-vulkan-storage-buffer-diff feme-vulkan-image-loader-smoke
+    feme-vulkan-sampled-image-smoke)
 endif()
 
 add_custom_target(feme-test-depends DEPENDS ${FEME_TEST_DEPENDS})
