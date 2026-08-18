@@ -35,7 +35,10 @@ struct PhysicalDeviceInfo {
   VkPhysicalDeviceProperties Properties{};
   VkPhysicalDeviceFeatures Features{};
   VkPhysicalDeviceMemoryProperties MemoryProperties{};
-  VkQueueFamilyProperties ComputeQueueFamily{};
+  /// The single universal queue family (see "Graphics queue family":
+  /// adding graphics does *not* add a second family, since a software
+  /// device with one worker pool has no independent graphics engine).
+  VkQueueFamilyProperties UniversalQueueFamily{};
 
   /// The `VkPhysicalDeviceIDProperties::deviceUUID` value (a Vulkan 1.1
   /// core `Properties2` pNext struct); kept alongside

@@ -312,10 +312,19 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   MemProps.memoryHeaps[0].size = detectHostMemorySize();
   MemProps.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 
-  // "Queue families": compute + transfer, not graphics; one queue is
-  // sufficient for this milestone.
-  VkQueueFamilyProperties &QueueFamily = Info.ComputeQueueFamily;
-  QueueFamily.queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
+  // "Graphics queue family": V6 adds `VK_QUEUE_GRAPHICS_BIT` to the one
+  // existing family rather than inventing a second one -- a single software
+  // device with one worker pool has no independent graphics engine, and
+  // reporting two families would be an untruthful description of the
+  // hardware model. The bit commits this queue to accepting every core
+  // graphics command, which is why it lands only now that render passes,
+  // graphics pipelines, draws, clears, blits and resolves are all
+  // implemented (see the V6 status note in FeMeVulkanDesign.md for the
+  // state combinations that are rejected at creation rather than at draw
+  // time). One queue is still sufficient.
+  VkQueueFamilyProperties &QueueFamily = Info.UniversalQueueFamily;
+  QueueFamily.queueFlags =
+      VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
   QueueFamily.queueCount = 1;
   QueueFamily.timestampValidBits = 0;
   QueueFamily.minImageTransferGranularity = {1, 1, 1};

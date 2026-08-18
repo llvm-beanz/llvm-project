@@ -1,0 +1,37 @@
+// V6's own completion scenario, run through the real Khronos loader rather
+// than by linking `libfeme_vulkan` directly (see "V6: Graphics queue and
+// basic rendering" in feme/docs/FeMeVulkanDesign.md, and
+// unittests/Vulkan/DrawTest.cpp for the same scenario against
+// `feme::vulkan`'s own entry points): a graphics queue is selected by
+// `VK_QUEUE_GRAPHICS_BIT`, a `VkRenderPass` clears a 4x4 color attachment
+// to opaque black, and one oversized triangle covers all of it with the
+// fragment stage's half-green.
+//
+// Only a real-loader client exercises entry-point resolution and struct
+// ABI at the process boundary, which matters most here: a graphics
+// pipeline's create-info chain is the largest structure this driver
+// accepts.
+//
+// REQUIRES: system-vulkan-loader, spirv-registered-target
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/fullscreen-triangle-vs.mlir -o %t.vs.spv
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/solid-color-fs.mlir -o %t.fs.spv
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke %t.vs.spv %t.fs.spv | FileCheck %s
+
+// 0.5 in `R8G8B8A8_UNORM` rounds to 0x80.
+// CHECK: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff
+// CHECK-NEXT: 008000ff

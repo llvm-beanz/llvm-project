@@ -222,7 +222,7 @@ feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties(
     VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
     VkQueueFamilyProperties *pQueueFamilyProperties) {
   const VkQueueFamilyProperties &Family =
-      fromHandle<PhysicalDevice>(physicalDevice)->getInfo().ComputeQueueFamily;
+      fromHandle<PhysicalDevice>(physicalDevice)->getInfo().UniversalQueueFamily;
   enumerate<VkQueueFamilyProperties>(1, &Family, pQueueFamilyPropertyCount,
                                      pQueueFamilyProperties);
 }
@@ -232,7 +232,7 @@ feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties2(
     VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
     VkQueueFamilyProperties2 *pQueueFamilyProperties) {
   const VkQueueFamilyProperties &Family =
-      fromHandle<PhysicalDevice>(physicalDevice)->getInfo().ComputeQueueFamily;
+      fromHandle<PhysicalDevice>(physicalDevice)->getInfo().UniversalQueueFamily;
   if (!pQueueFamilyProperties) {
     *pQueueFamilyPropertyCount = 1;
     return;

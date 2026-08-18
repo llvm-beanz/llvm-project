@@ -52,7 +52,7 @@ if(FEME_HAVE_VULKAN_LOADER)
   # before they run.
   list(APPEND FEME_TEST_DEPENDS feme_vulkan feme-vulkan-loader-smoke
     feme-vulkan-storage-buffer-diff feme-vulkan-image-loader-smoke
-    feme-vulkan-sampled-image-smoke)
+    feme-vulkan-sampled-image-smoke feme-vulkan-graphics-smoke)
 endif()
 
 add_custom_target(feme-test-depends DEPENDS ${FEME_TEST_DEPENDS})

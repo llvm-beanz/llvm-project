@@ -1383,7 +1383,8 @@ namespace feme::vulkan {
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
     VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkCommandPool *pCommandPool) {
-  // Only the single compute/transfer queue family (index 0) exists.
+  // Only the single universal (graphics/compute/transfer) queue family
+  // (index 0) exists -- see "Graphics queue family".
   if (pCreateInfo->queueFamilyIndex != 0)
     return VK_ERROR_INITIALIZATION_FAILED;
 

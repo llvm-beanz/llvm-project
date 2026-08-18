@@ -44,15 +44,18 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
       << "subgroup size must be a power of two";
 }
 
-TEST(PhysicalDeviceInfo, ComputeQueueFamilyIsComputeAndTransferOnly) {
+TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
-  const VkQueueFamilyProperties &Family = Info.ComputeQueueFamily;
+  const VkQueueFamilyProperties &Family = Info.UniversalQueueFamily;
   EXPECT_TRUE(Family.queueFlags & VK_QUEUE_COMPUTE_BIT);
   EXPECT_TRUE(Family.queueFlags & VK_QUEUE_TRANSFER_BIT);
-  // No graphics queue family exists yet (see "Queue families").
-  EXPECT_FALSE(Family.queueFlags & VK_QUEUE_GRAPHICS_BIT);
+  // (V6) Graphics joins the one existing universal family rather than
+  // adding a second one (see "Graphics queue family").
+  EXPECT_TRUE(Family.queueFlags & VK_QUEUE_GRAPHICS_BIT);
   EXPECT_GE(Family.queueCount, 1u);
-  // Timestamp queries are not implemented yet.
+  // Timestamp queries report no valid bits: `VkQueryPool` accepts a
+  // timestamp query but every value it produces is zero (see QueryPool.h),
+  // which is exactly what `timestampValidBits == 0` tells an application.
   EXPECT_EQ(Family.timestampValidBits, 0u);
 }
 
