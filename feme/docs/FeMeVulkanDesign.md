@@ -1732,6 +1732,64 @@ Deviations from this section's sketch:
   storage images, sampled images, and samplers.
 - Add the corresponding SPIR-V raising and CPU runtime helpers.
 
+**Status: partially done.** The image layout/sampler ABI this section asked
+for is not new work: roadmap R29 already designed and landed it as
+`feme::cpu::FemeImageDescriptor`/`FemeSamplerDescriptor`
+(feme/include/feme/Target/CPU/RuntimeABI.h), ahead of this milestone, exactly
+so images did not have to be forced into `FemeDescriptor`'s buffer-oriented
+shape -- this milestone's own work is entirely the Vulkan object model that
+produces and consumes those descriptors:
+
+- `feme::vulkan::Image`/`ImageView`/`Sampler` (lib/Vulkan/Image.{h,cpp}):
+  `vkCreateImage`/`vkGetImageMemoryRequirements{,2}`/`vkBindImageMemory{,2}`/
+  `vkCreateImageView`/`vkCreateSampler` and their destroy entry points. An
+  image's storage is a packed, mip-major table of
+  `feme::cpu::FemeImageSubresourceLayout` entries computed once at creation
+  time (`Image`'s own file comment): `VK_IMAGE_TILING_LINEAR` and `_OPTIMAL`
+  are not distinguished, since there is no real hardware tiling to model.
+  Every subresource's `VkImageLayout` is tracked independently
+  (`Image::layout`/`setLayout`).
+- `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`/`vkCmdCopyImage`
+  (lib/Vulkan/CommandBuffer.cpp), and `vkCmdPipelineBarrier` gained real
+  payload for the first time: an image memory barrier's layout transition is
+  applied to its target image's tracked layout at execution time (every
+  other barrier, buffer or memory, remains the no-op join V2 already
+  documents, since this ICD's single-threaded sequential execution already
+  satisfies it by construction).
+- `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`/`_STORAGE_IMAGE`/`_SAMPLER`/
+  `_COMBINED_IMAGE_SAMPLER` descriptor types (lib/Vulkan/Descriptor.{h,cpp}):
+  a `DescriptorSet` now holds a per-binding `DescriptorImageBinding` array
+  alongside its existing buffer-oriented one, written by
+  `vkUpdateDescriptorSets`/`vkCmdBindDescriptorSets`'s existing paths and
+  copyable by `vkCmdCopyDescriptorSet`, exactly like a buffer binding.
+
+**Deviation: a real dispatch still cannot consume an image or sampler.**
+This milestone deliberately stopped at the object model. Materializing a
+`FemeImageDescriptor`/`FemeSamplerDescriptor` heap from a Vulkan descriptor
+set at dispatch time needs the same kind of reflection
+`feme::cpu::ResourceLoweringPass` already builds for a *bound buffer*
+(`BoundResourceRange`, feme/include/feme/Target/CPU/ResourceInfo.h) -- a
+`(descriptor set, binding) -> heap slot` assignment the CPU compiler
+discovers from the shader itself -- which does not exist yet for an image or
+sampler handle. Roadmap.md's R30 row is explicit that this is still open:
+"CPU-side lowering of a SPIR-V-sourced image/sampler heap all remain[s]" even
+though 2D sampling/loading itself landed end to end for a DXIL/register-bound
+resource. `feme::cpu::ResourceInfo::UsesSamplerHeap` is therefore still
+unconditionally `false` (no pass sets it), and `compileComputePipeline`'s
+existing rejection of a shader that sets it is left in place rather than
+removed, so a future shader that does is still rejected truthfully instead of
+silently misdispatching -- see Pipeline.cpp's updated comment at that check.
+This is the same "blocked on G2" gap Roadmap.md's §1.9 table already records
+for this row; closing it is R30's own remaining scope, not a new gap this
+milestone introduced.
+
+Also out of scope, narrower deviations: only `VK_SAMPLE_COUNT_1_BIT` images
+are accepted (no multisample image support); `vkCmdCopyImage` requires both
+images to share the same `VkFormat` (no format-conversion copy); a 3D array
+image is not modeled (Vulkan itself does not allow one); and
+`VK_EXT_custom_border_color` is rejected outright, since no such extension is
+advertised.
+
 ### V6: Graphics queue and basic rendering
 
 The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
