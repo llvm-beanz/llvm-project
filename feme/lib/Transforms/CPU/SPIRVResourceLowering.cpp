@@ -85,8 +85,12 @@ struct RangeEntry {
   /// storage buffer.
   StructType *ElementStruct = nullptr;
   /// The texel-buffer shader-side element type (`isTexelBufferKind(Kind)`);
-  /// null otherwise. Always `<4 x float>` in this milestone (see the header
-  /// comment's texel-buffer scope note).
+  /// null otherwise. This is the scalar per-*channel* type
+  /// `classifyTexelBufferHandle` reads from the handle (`f32` or, V4,
+  /// `i32`), used only to detect a conflicting re-declaration of the same
+  /// binding below -- not the `<4 x T>` vector type an actual load/store
+  /// uses, which `isSupportedTexelElementType` checks directly against each
+  /// access instead (see that function's comment).
   Type *TexelElementType = nullptr;
   uint32_t RangeSize = 0;
   bool Conflicting = false;
@@ -175,23 +179,33 @@ constexpr unsigned SPIRVSampledWithoutSampler = 2;
 constexpr unsigned SPIRVSampledWithSampler = 1;
 
 /// Returns \p Handle's buffer classification if its type is a `Dim::Buffer`
-/// Returns whether \p Ty is `<4 x float>`, the only shader-side element
-/// shape the CPU runtime's typed-load/store helpers implement a format
-/// conversion for today (see femeCpuResourceLoadTypedV4F32/StoreTypedV4F32
-/// in feme/runtime/CPU/FeMeRuntimeCPU.c).
+/// Returns whether \p Ty is `<4 x float>` or (V4) `<4 x i32>`, the shader-
+/// side element shapes the CPU runtime's typed-load/store helpers
+/// implement a format conversion for today (see
+/// femeCpuResourceLoadTypedV4F32/StoreTypedV4F32 and
+/// femeCpuResourceLoadTypedV4I32/StoreTypedV4I32 in
+/// feme/runtime/CPU/FeMeRuntimeCPU.c). A scalar element (a single-channel
+/// format's own shader-visible type, e.g. plain `i32`) is not yet modeled:
+/// SPIR-V's `OpImageRead`/`OpImageFetch` always return a full four-component
+/// vector regardless of the underlying format's real channel count (see
+/// classifyTexelBufferHandle's comment), so supporting it needs the
+/// physically-narrower-than-`<4 x T>` per-format padding this milestone does
+/// not add -- see FeMeVulkanDesign.md's V4 status note.
 bool isSupportedTexelElementType(Type *Ty) {
   auto *VecTy = dyn_cast<FixedVectorType>(Ty);
-  return VecTy && VecTy->getNumElements() == 4 &&
-         VecTy->getElementType()->isFloatTy();
+  if (!VecTy || VecTy->getNumElements() != 4)
+    return false;
+  Type *ElemTy = VecTy->getElementType();
+  return ElemTy->isFloatTy() || ElemTy->isIntegerTy(32);
 }
 
 /// Returns \p Handle's buffer classification if its type is a `Dim::Buffer`
 /// `target("spirv.Image", ElemTy, [Dim, Depth, Arrayed, MS, Sampled,
 /// Format])` handle. `ElemTy` here is SPIR-V's own per-*channel* sampled
-/// type (`OpTypeImage`'s "Sampled Type" operand, e.g. `f32` for any
-/// floating-point-format image, never a vector) -- the shader-visible
-/// `<4 x float>` texel width this milestone actually requires (see the
-/// header comment's texel-buffer scope note) shows up only at each
+/// type (`OpTypeImage`'s "Sampled Type" operand, e.g. `f32`/`i32` for any
+/// floating-point-/integer-format image, never a vector) -- the
+/// shader-visible `<4 x T>` texel width this milestone actually requires
+/// (see the header comment's texel-buffer scope note) shows up only at each
 /// `OpImageRead`/`OpImageFetch`/`OpImageWrite`'s own load/store type, so
 /// `hasOnlySupportedUses` checks that instead of anything recorded here.
 /// `Sampled == 0` ("runtime known") is ambiguous and rejected rather than
@@ -231,8 +245,8 @@ classifyTexelBufferHandle(const CallInst &Handle) {
 /// also be a compile-time constant, unlike a storage buffer's (possibly
 /// dynamic) array index -- a real cbuffer field access is always
 /// statically typed. For a texel-buffer kind, every load's result type (or
-/// store's stored-value type) must be exactly `<4 x float>`
-/// (`isSupportedTexelElementType`) -- see `classifyTexelBufferHandle`'s
+/// store's stored-value type) must be one of the shapes
+/// `isSupportedTexelElementType` accepts -- see `classifyTexelBufferHandle`'s
 /// comment for why that check belongs here rather than on the handle type.
 /// Any further `getelementptr` into the element's own fields (a
 /// structured-buffer field access, or a nested uniform-buffer field) is

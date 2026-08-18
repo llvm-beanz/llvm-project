@@ -65,9 +65,13 @@
 //    see `feme::cpu::ResourceLoweringPass`'s header comment). (V4) A
 //    `Dim::Buffer` image handle (`Buffer<T>`/`RWBuffer<T>` in HLSL --
 //    Vulkan's uniform/storage texel buffer) *is* normalized, but only over
-//    exactly a `<4 x float>` shader-side element -- see
-//    `classifyTexelBufferHandle`'s comment for why this milestone's CPU
-//    runtime only supports that one shape.
+//    a `<4 x float>` or `<4 x i32>` shader-side element -- see
+//    `isSupportedTexelElementType`'s comment for why this milestone's CPU
+//    runtime only supports those two shapes (every real per-format texel
+//    fetch/write is still a full four-component vector, per SPIR-V's own
+//    `OpImageRead`/`OpImageFetch`/`OpImageWrite` semantics; a physically
+//    narrower channel count needs per-format padding this milestone does
+//    not add).
 //  - For a storage buffer, only the access shape
 //    `feme::spirv::StorageBufferAccessChainPattern` itself produces for a
 //    flat (non-aggregate) buffer element -- a direct

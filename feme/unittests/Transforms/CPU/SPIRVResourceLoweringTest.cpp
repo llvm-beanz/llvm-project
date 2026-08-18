@@ -448,10 +448,45 @@ TEST(SPIRVResourceLoweringTest, LowersUniformTexelBufferToTypedLoadOnly) {
   EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed"));
 }
 
+TEST(SPIRVResourceLoweringTest, LowersIntegerStorageTexelBufferToV4I32Calls) {
+  // (V4) A `<4 x i32>` texel element -- the R32G32B32A32_UINT/_SINT
+  // identity-format shape `isSupportedTexelElementType` accepts alongside
+  // `<4 x float>` -- lowers to the `.v4i32`-mangled typed calls, the same
+  // way the float shape lowers to `.v4f32` ones. The handle's own channel
+  // type (`i32` here, SPIR-V's per-*channel* sampled type) stays scalar per
+  // `classifyTexelBufferHandle`'s comment; only the load/store's own type
+  // is the 4-wide vector.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx, <4 x i32> %v) {
+      %h = call target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
+      %loaded = load <4 x i32>, ptr %ptr
+      store <4 x i32> %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed.v4i32"));
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.store.typed.v4i32"));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
 TEST(SPIRVResourceLoweringTest, LeavesUnsupportedTexelElementTypeUnchanged) {
-  // Only <4 x float> is supported (see the header comment); an i32 element
-  // -- a format this milestone's CPU runtime has no typed helper for -- is
-  // left un-normalized rather than mis-lowered.
+  // Only <4 x float>/<4 x i32> are supported (see `isSupportedTexelElementType`'s
+  // comment). A *scalar* i32 load/store -- the shape a single-channel format
+  // like R32_UINT would need, since SPIR-V's own image ops always return a
+  // full 4-component vector regardless of the underlying format's real
+  // channel count -- is left un-normalized rather than mis-lowered.
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define i32 @main(i32 %idx) {
