@@ -11,6 +11,7 @@
 #include "Descriptor.h"
 #include "Format.h"
 #include "Icd.h"
+#include "Image.h"
 #include "Objects.h"
 #include "Pipeline.h"
 #include "QueryPool.h"
@@ -20,6 +21,7 @@
 #include "feme/Target/CPU/ResourceHeap.h"
 #include "feme/Target/CPU/ResourceInfo.h"
 
+#include <algorithm>
 #include <cstring>
 
 using namespace feme::vulkan;
@@ -246,6 +248,126 @@ Error runUpdateBuffer(Buffer *Dst, VkDeviceSize Offset,
   return Error::success();
 }
 
+/// (V5) One `VkBufferImageCopy` region's texel-per-texel byte copy between
+/// \p Img's own packed subresource layout and a flat buffer region, in
+/// either direction (\p ToImage selects which). `bufferRowLength`/
+/// `bufferImageHeight` of 0 mean "tightly packed to the copy's own extent",
+/// per the specification. Copies row by row rather than as one contiguous
+/// `memcpy`, since the image's row/slice pitch need not match the buffer's
+/// (a non-zero `bufferRowLength`/`bufferImageHeight`, or simply a
+/// mip level narrower than level 0, both make them differ).
+Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
+                            VkDeviceSize BufferSize,
+                            const VkBufferImageCopy &Region) {
+  uint32_t TexelSize = formatElementSize(Img.format());
+  uint32_t RowLength = Region.bufferRowLength ? Region.bufferRowLength
+                                              : Region.imageExtent.width;
+  uint32_t ImageHeight = Region.bufferImageHeight ? Region.bufferImageHeight
+                                                  : Region.imageExtent.height;
+  uint64_t BufferRowBytes = uint64_t(RowLength) * TexelSize;
+  uint64_t BufferSliceBytes = BufferRowBytes * ImageHeight;
+  uint32_t MipLevel = Region.imageSubresource.mipLevel;
+  if (MipLevel >= Img.mipLevels())
+    return createStringError(inconvertibleErrorCode(),
+                             "buffer/image copy mip level is out of range");
+
+  for (uint32_t Layer = 0; Layer != Region.imageSubresource.layerCount;
+       ++Layer) {
+    uint32_t ArrayLayer = Region.imageSubresource.baseArrayLayer + Layer;
+    for (uint32_t Z = 0; Z != Region.imageExtent.depth; ++Z) {
+      uint64_t SliceIndex = uint64_t(Layer) * Region.imageExtent.depth + Z;
+      for (uint32_t Y = 0; Y != Region.imageExtent.height; ++Y) {
+        uint64_t BufferOffset = Region.bufferOffset +
+                                SliceIndex * BufferSliceBytes +
+                                uint64_t(Y) * BufferRowBytes;
+        uint64_t RowBytes = uint64_t(Region.imageExtent.width) * TexelSize;
+        if (BufferOffset + RowBytes > BufferSize)
+          return createStringError(inconvertibleErrorCode(),
+                                   "buffer/image copy region is out of "
+                                   "range of its buffer");
+        auto *BufferRow = static_cast<uint8_t *>(BufferBase) + BufferOffset;
+        void *ImageRow = Img.texelPointer(
+            MipLevel, ArrayLayer, Region.imageOffset.x,
+            Region.imageOffset.y + Y, Region.imageOffset.z + Z);
+        if (ToImage)
+          std::memcpy(ImageRow, BufferRow, RowBytes);
+        else
+          std::memcpy(BufferRow, ImageRow, RowBytes);
+      }
+    }
+  }
+  return Error::success();
+}
+
+/// `vkCmdCopyBufferToImage`.
+Error runCopyBufferToImage(Buffer *Src, Image *Dst,
+                           llvm::ArrayRef<VkBufferImageCopy> Regions) {
+  if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "buffer-to-image copy source/destination is "
+                             "not bound");
+  for (const VkBufferImageCopy &Region : Regions)
+    if (Error E = copyBufferImageRegion(*Dst, /*ToImage=*/true, Src->data(),
+                                        Src->size(), Region))
+      return E;
+  return Error::success();
+}
+
+/// `vkCmdCopyImageToBuffer`.
+Error runCopyImageToBuffer(Image *Src, Buffer *Dst,
+                           llvm::ArrayRef<VkBufferImageCopy> Regions) {
+  if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "image-to-buffer copy source/destination is "
+                             "not bound");
+  for (const VkBufferImageCopy &Region : Regions)
+    if (Error E = copyBufferImageRegion(*Src, /*ToImage=*/false, Dst->data(),
+                                        Dst->size(), Region))
+      return E;
+  return Error::success();
+}
+
+/// `vkCmdCopyImage`: copies each region's texels from \p Src to \p Dst.
+/// Both images must share the same format (see Image.h's file comment: no
+/// format conversion is implemented for this milestone, unlike a real
+/// `vkCmdCopyImage`'s "compatible texel size" rule -- a narrower but honest
+/// restriction, enforced here rather than misconverting).
+Error runCopyImage(Image *Src, Image *Dst,
+                   llvm::ArrayRef<VkImageCopy> Regions) {
+  if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "image copy source/destination is not bound");
+  if (Src->format() != Dst->format())
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdCopyImage between differing formats is "
+                             "not supported");
+  uint32_t TexelSize = formatElementSize(Src->format());
+  for (const VkImageCopy &Region : Regions) {
+    if (Region.srcSubresource.mipLevel >= Src->mipLevels() ||
+        Region.dstSubresource.mipLevel >= Dst->mipLevels())
+      return createStringError(inconvertibleErrorCode(),
+                               "image copy mip level is out of range");
+    uint64_t RowBytes = uint64_t(Region.extent.width) * TexelSize;
+    for (uint32_t Layer = 0; Layer != Region.srcSubresource.layerCount;
+         ++Layer) {
+      for (uint32_t Z = 0; Z != Region.extent.depth; ++Z) {
+        for (uint32_t Y = 0; Y != Region.extent.height; ++Y) {
+          void *SrcRow = Src->texelPointer(
+              Region.srcSubresource.mipLevel,
+              Region.srcSubresource.baseArrayLayer + Layer, Region.srcOffset.x,
+              Region.srcOffset.y + Y, Region.srcOffset.z + Z);
+          void *DstRow = Dst->texelPointer(
+              Region.dstSubresource.mipLevel,
+              Region.dstSubresource.baseArrayLayer + Layer, Region.dstOffset.x,
+              Region.dstOffset.y + Y, Region.dstOffset.z + Z);
+          std::memcpy(DstRow, SrcRow, RowBytes);
+        }
+      }
+    }
+  }
+  return Error::success();
+}
+
 /// `vkCmdWaitEvents`: see "Queues, Scheduling, and Synchronization": "The
 /// same join applies ... at `vkCmdWaitEvents`". Under this ICD's strictly
 /// sequential execution model every event this could observe is already
@@ -391,8 +513,14 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
         return E;
       break;
     case RecordedCommand::Kind::PipelineBarrier:
-      // See `pipelineBarrier`'s own comment: already a no-op join under
-      // this milestone's strictly-sequential execution model.
+      // See `pipelineBarrier`'s own comment: the join itself is a no-op
+      // under this milestone's strictly-sequential execution model, but
+      // (V5) an image memory barrier's layout transition is real state.
+      for (const ImageLayoutTransition &Barrier : Cmd.ImageBarriers)
+        Barrier.Img->setLayout(Barrier.Range.baseMipLevel,
+                               Barrier.Range.levelCount,
+                               Barrier.Range.baseArrayLayer,
+                               Barrier.Range.layerCount, Barrier.NewLayout);
       break;
     case RecordedCommand::Kind::PushConstants:
       if (Cmd.DstOffset + Cmd.UpdateData.size() > PushConstants.size())
@@ -438,6 +566,21 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
                 executeCommandsInto(Secondary->commands(), DeviceInfo,
                                     BoundPipeline, BoundSets, PushConstants))
           return E;
+      break;
+    case RecordedCommand::Kind::CopyBufferToImage:
+      if (Error E = runCopyBufferToImage(Cmd.SrcBuffer, Cmd.DstImage,
+                                         Cmd.BufferImageCopyRegions))
+        return E;
+      break;
+    case RecordedCommand::Kind::CopyImageToBuffer:
+      if (Error E = runCopyImageToBuffer(Cmd.SrcImage, Cmd.DstBuffer,
+                                         Cmd.BufferImageCopyRegions))
+        return E;
+      break;
+    case RecordedCommand::Kind::CopyImage:
+      if (Error E =
+              runCopyImage(Cmd.SrcImage, Cmd.DstImage, Cmd.ImageCopyRegions))
+        return E;
       break;
     }
   }
@@ -624,15 +767,57 @@ VKAPI_ATTR void VKAPI_CALL vkCmdUpdateBuffer(VkCommandBuffer commandBuffer,
                      std::vector<uint8_t>(Bytes, Bytes + dataSize));
 }
 
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage(
+    VkCommandBuffer commandBuffer, VkBuffer srcBuffer, VkImage dstImage,
+    VkImageLayout, uint32_t regionCount, const VkBufferImageCopy *pRegions) {
+  std::vector<VkBufferImageCopy> Regions(pRegions, pRegions + regionCount);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyBufferToImage(fromHandle<vulkan::Buffer>(srcBuffer),
+                          fromHandle<vulkan::Image>(dstImage),
+                          std::move(Regions));
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyImageToBuffer(VkCommandBuffer commandBuffer, VkImage srcImage,
+                       VkImageLayout, VkBuffer dstBuffer, uint32_t regionCount,
+                       const VkBufferImageCopy *pRegions) {
+  std::vector<VkBufferImageCopy> Regions(pRegions, pRegions + regionCount);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyImageToBuffer(fromHandle<vulkan::Image>(srcImage),
+                          fromHandle<vulkan::Buffer>(dstBuffer),
+                          std::move(Regions));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer commandBuffer,
+                                          VkImage srcImage, VkImageLayout,
+                                          VkImage dstImage, VkImageLayout,
+                                          uint32_t regionCount,
+                                          const VkImageCopy *pRegions) {
+  std::vector<VkImageCopy> Regions(pRegions, pRegions + regionCount);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyImage(fromHandle<vulkan::Image>(srcImage),
+                  fromHandle<vulkan::Image>(dstImage), std::move(Regions));
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     VkCommandBuffer commandBuffer, VkPipelineStageFlags, VkPipelineStageFlags,
     VkDependencyFlags, uint32_t, const VkMemoryBarrier *, uint32_t,
-    const VkBufferMemoryBarrier *, uint32_t, const VkImageMemoryBarrier *) {
-  // Image memory barriers are unreachable today (no VkImage exists yet, V5),
-  // so nothing here needs to inspect the barrier arrays themselves -- see
-  // `CommandBuffer::pipelineBarrier`'s own comment for why this is a plain
-  // join marker.
-  fromHandle<vulkan::CommandBuffer>(commandBuffer)->pipelineBarrier();
+    const VkBufferMemoryBarrier *, uint32_t imageMemoryBarrierCount,
+    const VkImageMemoryBarrier *pImageMemoryBarriers) {
+  // (V5) Each image memory barrier's layout transition is recorded for
+  // `executeCommandBuffer` to apply to its target image's tracked layout;
+  // see `ImageLayoutTransition`'s comment for why the buffer/memory
+  // barrier arrays still carry no payload.
+  std::vector<ImageLayoutTransition> ImageBarriers;
+  ImageBarriers.reserve(imageMemoryBarrierCount);
+  for (uint32_t I = 0; I != imageMemoryBarrierCount; ++I) {
+    const VkImageMemoryBarrier &Barrier = pImageMemoryBarriers[I];
+    ImageBarriers.push_back(ImageLayoutTransition{
+        fromHandle<vulkan::Image>(Barrier.image), Barrier.oldLayout,
+        Barrier.newLayout, Barrier.subresourceRange});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pipelineBarrier(std::move(ImageBarriers));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,

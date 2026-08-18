@@ -283,6 +283,23 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     uint32_t imageMemoryBarrierCount,
     const VkImageMemoryBarrier *pImageMemoryBarriers);
 
+// V5: image/buffer copies (see "V5: Images and sampling").
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer srcBuffer,
+                       VkImage dstImage, VkImageLayout dstImageLayout,
+                       uint32_t regionCount, const VkBufferImageCopy *pRegions);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyImageToBuffer(VkCommandBuffer commandBuffer, VkImage srcImage,
+                       VkImageLayout srcImageLayout, VkBuffer dstBuffer,
+                       uint32_t regionCount, const VkBufferImageCopy *pRegions);
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer commandBuffer,
+                                          VkImage srcImage,
+                                          VkImageLayout srcImageLayout,
+                                          VkImage dstImage,
+                                          VkImageLayout dstImageLayout,
+                                          uint32_t regionCount,
+                                          const VkImageCopy *pRegions);
+
 // V3: push constants (see "Descriptor Model" and "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
                                               VkPipelineLayout layout,

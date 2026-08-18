@@ -107,6 +107,11 @@ vkCmdUpdateBuffer
 vkCmdPipelineBarrier
 vkCmdPushConstants
 
+# V5: image/buffer copies (see "V5: Images and sampling").
+vkCmdCopyBufferToImage
+vkCmdCopyImageToBuffer
+vkCmdCopyImage
+
 # V3: events (see "Command Buffers" and "Queues, Scheduling, and
 # Synchronization").
 vkCreateEvent

@@ -13,7 +13,11 @@
 // ("Storage buffers and descriptors") adds bind descriptor sets (with
 // dynamic offsets), buffer copy/fill/update, and pipeline barriers. V3
 // ("Uniform data, push constants, and synchronization") adds push
-// constants, events, query pools, and secondary command buffers.
+// constants, events, query pools, and secondary command buffers. V5
+// ("Images and sampling") adds `vkCmdCopyBufferToImage`/
+// `vkCmdCopyImageToBuffer`/`vkCmdCopyImage`, and gives
+// `vkCmdPipelineBarrier` real payload for the first time: an image memory
+// barrier's layout transition (see `ImageLayoutTransition`).
 //
 //===----------------------------------------------------------------------===//
 
@@ -39,7 +43,20 @@ class CommandBuffer;
 class ComputePipeline;
 class DescriptorSet;
 class Event;
+class Image;
 class QueryPool;
+
+/// (V5) One `VkImageMemoryBarrier`'s layout-transition payload, recorded by
+/// `vkCmdPipelineBarrier` and applied to its target `Image`'s tracked
+/// per-subresource layout at execution time (see `Image::setLayout` and
+/// Image.h's file comment on why this is bookkeeping only, not a
+/// precondition re-checked by a later command).
+struct ImageLayoutTransition {
+  Image *Img = nullptr;
+  VkImageLayout OldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageLayout NewLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  VkImageSubresourceRange Range{};
+};
 
 /// One recorded command. A compact tagged record rather than a class
 /// hierarchy, matching "Command Buffers": "record a compact typed stream".
@@ -64,6 +81,9 @@ struct RecordedCommand {
     WriteTimestamp,
     CopyQueryPoolResults,
     ExecuteCommands,
+    CopyBufferToImage,
+    CopyImageToBuffer,
+    CopyImage,
   };
 
   Kind Op;
@@ -121,6 +141,22 @@ struct RecordedCommand {
   /// "Command Buffers": "Secondary command buffers are interpreted into
   /// the primary execution state").
   std::vector<const CommandBuffer *> SecondaryBuffers;
+  /// (V5) `PipelineBarrier`: every `VkImageMemoryBarrier`'s layout
+  /// transition this call carries, applied to its target image's tracked
+  /// layout at execution time (see `ImageLayoutTransition`'s comment). The
+  /// buffer/memory barrier arrays carry no payload here, for the same
+  /// reason the barrier itself did not before V5 -- see `pipelineBarrier`'s
+  /// comment.
+  std::vector<ImageLayoutTransition> ImageBarriers;
+  /// (V5) `CopyBufferToImage`/`CopyImageToBuffer`: the buffer half of the
+  /// copy (`SrcBuffer` reused for `CopyImageToBuffer`'s source buffer,
+  /// `DstBuffer` reused for `CopyBufferToImage`'s destination buffer). The
+  /// image half is `SrcImage`/`DstImage` below.
+  Image *SrcImage = nullptr;
+  Image *DstImage = nullptr;
+  std::vector<VkBufferImageCopy> BufferImageCopyRegions;
+  /// (V5) `CopyImage`: the copy regions between `SrcImage` and `DstImage`.
+  std::vector<VkImageCopy> ImageCopyRegions;
 };
 
 /// A `VkCommandBuffer`: an append-only typed command stream while
@@ -129,7 +165,8 @@ struct RecordedCommand {
 /// per-command-buffer dispatch table.
 class CommandBuffer : public DispatchableBase {
 public:
-  explicit CommandBuffer(VkCommandBufferLevel Level = VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+  explicit CommandBuffer(
+      VkCommandBufferLevel Level = VK_COMMAND_BUFFER_LEVEL_PRIMARY)
       : Level(Level) {}
 
   VkCommandBufferLevel level() const { return Level; }
@@ -212,17 +249,22 @@ public:
     Commands.push_back(std::move(Cmd));
   }
   /// `vkCmdPipelineBarrier`: see "Queues, Scheduling, and Synchronization"'s
-  /// join semantics. Recorded as a plain marker with no payload: this
-  /// milestone's execution model already runs every command to completion
-  /// strictly in record order on a single thread (see `runDispatch`'s own
-  /// comment), so every earlier command's effects are always visible to
-  /// every later one -- a barrier's join is therefore already satisfied by
-  /// construction, and this command exists so applications that correctly
-  /// insert one (as the specification requires) are not rejected.
-  void pipelineBarrier() {
+  /// join semantics. The buffer/memory barrier arrays carry no payload,
+  /// since this milestone's execution model already runs every command to
+  /// completion strictly in record order on a single thread (see
+  /// `runDispatch`'s own comment), so every earlier command's effects are
+  /// always visible to every later one -- a barrier's join is therefore
+  /// already satisfied by construction, and this command exists so
+  /// applications that correctly insert one (as the specification
+  /// requires) are not rejected. (V5) \p ImageBarriers is not similarly
+  /// elided: it carries real per-subresource layout-tracking state (see
+  /// `ImageLayoutTransition`'s comment), applied to each target image at
+  /// execution time.
+  void pipelineBarrier(std::vector<ImageLayoutTransition> ImageBarriers) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::PipelineBarrier;
-    Commands.push_back(Cmd);
+    Cmd.ImageBarriers = std::move(ImageBarriers);
+    Commands.push_back(std::move(Cmd));
   }
   /// `vkCmdPushConstants`: records \p Offset and an owned copy of \p Data,
   /// consumed at execution time into the command buffer's push-constant
@@ -319,6 +361,35 @@ public:
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::ExecuteCommands;
     Cmd.SecondaryBuffers = std::move(Secondary);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (V5) `vkCmdCopyBufferToImage`.
+  void copyBufferToImage(Buffer *Src, Image *Dst,
+                         std::vector<VkBufferImageCopy> Regions) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::CopyBufferToImage;
+    Cmd.SrcBuffer = Src;
+    Cmd.DstImage = Dst;
+    Cmd.BufferImageCopyRegions = std::move(Regions);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (V5) `vkCmdCopyImageToBuffer`.
+  void copyImageToBuffer(Image *Src, Buffer *Dst,
+                         std::vector<VkBufferImageCopy> Regions) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::CopyImageToBuffer;
+    Cmd.SrcImage = Src;
+    Cmd.DstBuffer = Dst;
+    Cmd.BufferImageCopyRegions = std::move(Regions);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (V5) `vkCmdCopyImage`.
+  void copyImage(Image *Src, Image *Dst, std::vector<VkImageCopy> Regions) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::CopyImage;
+    Cmd.SrcImage = Src;
+    Cmd.DstImage = Dst;
+    Cmd.ImageCopyRegions = std::move(Regions);
     Commands.push_back(std::move(Cmd));
   }
 
