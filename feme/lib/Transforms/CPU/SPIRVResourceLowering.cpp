@@ -10,12 +10,15 @@
 
 #include "feme/Target/CPU/ResourceInfo.h"
 
+#include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DerivedTypes.h"
@@ -38,7 +41,9 @@ using namespace feme::cpu;
 
 namespace {
 
-/// Whether a bound handle wraps a storage buffer -- a homogeneous,
+/// Which kind of resource a bound handle wraps.
+///
+/// The first four are buffers -- a storage buffer -- a homogeneous,
 /// dynamically-indexed runtime array (`RWStructuredBuffer<T>`/
 /// `StructuredBuffer<T>`) -- a uniform buffer -- a fixed set of
 /// differently-typed named fields at fixed byte offsets
@@ -52,11 +57,46 @@ namespace {
 /// through its format at a fixed element index with no byte-offset
 /// arithmetic of its own (see `feme::cpu::createTypedLoad`/`createTypedStore`
 /// in ResourceCalls.h).
-enum class BufferKind { Storage, Uniform, TexelStorage, TexelUniform };
+///
+/// The last two are the image and sampler halves of a texture sample
+/// (roadmap R30's SPIR-V completion): they live in the *image* and
+/// *sampler* heaps rather than the buffer-oriented resource heap, and their
+/// accesses lower to `feme.cpu.image.*` rather than `feme.cpu.resource.*`
+/// (see ImageCalls.h).
+enum class HandleKind {
+  Storage,
+  Uniform,
+  TexelStorage,
+  TexelUniform,
+  SampledImage2D,
+  Sampler
+};
 
-/// Whether \p Kind is one of the two texel-buffer kinds (see `BufferKind`).
-bool isTexelBufferKind(BufferKind Kind) {
-  return Kind == BufferKind::TexelStorage || Kind == BufferKind::TexelUniform;
+/// Whether \p Kind is one of the two texel-buffer kinds (see `HandleKind`).
+bool isTexelHandleKind(HandleKind Kind) {
+  return Kind == HandleKind::TexelStorage || Kind == HandleKind::TexelUniform;
+}
+
+/// Whether \p Kind's accesses go through `feme.cpu.resource.*` (every
+/// buffer kind) rather than `feme.cpu.image.*`.
+bool isBufferHandleKind(HandleKind Kind) {
+  return Kind != HandleKind::SampledImage2D && Kind != HandleKind::Sampler;
+}
+
+/// The heap \p Kind's descriptors are assigned slots in.
+BoundResourceClass getResourceClass(HandleKind Kind) {
+  switch (Kind) {
+  case HandleKind::Storage:
+  case HandleKind::Uniform:
+  case HandleKind::TexelStorage:
+  case HandleKind::TexelUniform:
+    return BoundResourceClass::Buffer;
+  case HandleKind::SampledImage2D:
+    return BoundResourceClass::Image;
+  case HandleKind::Sampler:
+    return BoundResourceClass::Sampler;
+  }
+  llvm_unreachable("unhandled HandleKind");
 }
 
 /// A bound `spirv.VulkanBuffer` handle's identity: (descriptor set,
@@ -78,7 +118,7 @@ struct RangeKey {
 /// handle at that identity un-normalized (see the header comment's "Scope"
 /// note).
 struct RangeEntry {
-  BufferKind Kind = BufferKind::Storage;
+  HandleKind Kind = HandleKind::Storage;
   /// The storage-buffer element stride (`Kind == Storage`); unused, always
   /// 0, for a uniform buffer, whose offsets come from `ElementStruct`'s own
   /// layout instead.
@@ -86,7 +126,7 @@ struct RangeEntry {
   /// The uniform-buffer field struct (`Kind == Uniform`); null for a
   /// storage buffer.
   StructType *ElementStruct = nullptr;
-  /// The texel-buffer shader-side element type (`isTexelBufferKind(Kind)`);
+  /// The texel-buffer shader-side element type (`isTexelHandleKind(Kind)`);
   /// null otherwise. This is the scalar per-*channel* type
   /// `classifyTexelBufferHandle` reads from the handle (`f32` or, V4,
   /// `i32`), used only to detect a conflicting re-declaration of the same
@@ -113,7 +153,7 @@ struct RangeEntry {
 struct BoundHandle {
   CallInst *Handle;
   RangeKey Key;
-  BufferKind Kind;
+  HandleKind Kind;
   uint64_t Stride;
   StructType *ElementStruct;
   Type *TexelElementType;
@@ -129,9 +169,9 @@ Intrinsic::ID getIntrinsicID(const Value *V) {
 
 /// One handle's classification: which kind of buffer it is, and the
 /// element shape needed to compute an access's byte offset later (see
-/// `BufferKind`).
+/// `HandleKind`).
 struct HandleClassification {
-  BufferKind Kind;
+  HandleKind Kind;
   uint64_t Stride = 0;
   StructType *ElementStruct = nullptr;
   Type *TexelElementType = nullptr;
@@ -158,11 +198,11 @@ classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
     return std::nullopt;
   Type *Param = HandleTy->getTypeParameter(0);
   if (auto *ArrayTy = dyn_cast<ArrayType>(Param))
-    return HandleClassification{BufferKind::Storage,
+    return HandleClassification{HandleKind::Storage,
                                 DL.getTypeStoreSize(ArrayTy->getElementType()),
                                 nullptr};
   if (auto *StructTy = dyn_cast<StructType>(Param))
-    return HandleClassification{BufferKind::Uniform, 0, StructTy};
+    return HandleClassification{HandleKind::Uniform, 0, StructTy};
   return std::nullopt;
 }
 
@@ -227,22 +267,170 @@ classifyTexelBufferHandle(const CallInst &Handle) {
   Type *ChannelType = HandleTy->getTypeParameter(0);
   unsigned Sampled = HandleTy->getIntParameter(4);
   if (Sampled == SPIRVSampledWithoutSampler)
-    return HandleClassification{BufferKind::TexelStorage, 0, nullptr,
+    return HandleClassification{HandleKind::TexelStorage, 0, nullptr,
                                 ChannelType};
   if (Sampled == SPIRVSampledWithSampler)
-    return HandleClassification{BufferKind::TexelUniform, 0, nullptr,
+    return HandleClassification{HandleKind::TexelUniform, 0, nullptr,
                                 ChannelType};
   return std::nullopt;
+}
+
+/// SPIR-V's `Dim` operand value for `OpTypeImage 2D`.
+constexpr unsigned SPIRVDim2D = 1;
+
+/// Returns \p Handle's classification if its type is a single-sampled,
+/// non-arrayed, floating-point 2D `spirv.Image`/`spirv.SignedImage` handle
+/// used *with* a sampler -- the one image shape `runtime/CPU`'s sampling
+/// helpers implement (see ImageCalls.h's own scope note). Every other
+/// dimension, an arrayed or multisampled image, and a storage image
+/// (`Sampled == 2`, which would need a `feme.cpu.image.store.*` helper that
+/// does not exist yet) return `std::nullopt`.
+std::optional<HandleClassification>
+classifySampledImage2DHandle(const CallInst &Handle) {
+  auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
+  if (!HandleTy || (HandleTy->getName() != "spirv.Image" &&
+                    HandleTy->getName() != "spirv.SignedImage"))
+    return std::nullopt;
+  if (HandleTy->getNumTypeParameters() != 1 ||
+      HandleTy->getNumIntParameters() != 6)
+    return std::nullopt;
+  if (HandleTy->getIntParameter(0) != SPIRVDim2D)
+    return std::nullopt;
+  // [Dim, Depth, Arrayed, MS, Sampled, Format]: an arrayed or multisampled
+  // image needs a layer/sample coordinate the 2D helpers do not take.
+  if (HandleTy->getIntParameter(2) != 0 || HandleTy->getIntParameter(3) != 0)
+    return std::nullopt;
+  if (HandleTy->getIntParameter(4) != SPIRVSampledWithSampler)
+    return std::nullopt;
+
+  Type *ChannelType = HandleTy->getTypeParameter(0);
+  if (!ChannelType->isFloatTy())
+    return std::nullopt; // Only `<4 x float>`-returning samples today.
+  return HandleClassification{HandleKind::SampledImage2D, 0, nullptr,
+                              ChannelType};
+}
+
+/// Returns \p Handle's classification if its type is a `spirv.Sampler`
+/// handle (`feme::spirv::convertSamplerType` in SPIRVToLLVMPatterns.cpp
+/// gives it no parameters at all -- a sampler's own state lives entirely in
+/// the `FemeSamplerDescriptor` the host binds, never in the shader's type).
+std::optional<HandleClassification>
+classifySamplerHandle(const CallInst &Handle) {
+  auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
+  if (!HandleTy || HandleTy->getName() != "spirv.Sampler")
+    return std::nullopt;
+  if (HandleTy->getNumTypeParameters() != 0 ||
+      HandleTy->getNumIntParameters() != 0)
+    return std::nullopt;
+  return HandleClassification{HandleKind::Sampler, 0, nullptr, nullptr};
+}
+
+/// Whether \p CI is one of the two SPIR-V sample intrinsics this pass
+/// lowers, setting \p ExplicitLod for `samplelevel`.
+bool isSampleIntrinsic(const CallInst &CI, bool &ExplicitLod) {
+  Intrinsic::ID ID = getIntrinsicID(&CI);
+  if (ID == Intrinsic::spv_resource_sample) {
+    ExplicitLod = false;
+    return true;
+  }
+  if (ID == Intrinsic::spv_resource_samplelevel) {
+    ExplicitLod = true;
+    return true;
+  }
+  return false;
+}
+
+/// Whether \p Ty is `<N x ElemTy>`.
+bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
+  const auto *VecTy = dyn_cast<FixedVectorType>(Ty);
+  return VecTy && VecTy->getNumElements() == N &&
+         (VecTy->getElementType()->*Is)();
+}
+
+/// Whether \p Ty is the `<4 x float>` texel every `feme.cpu.image.*` color
+/// operation produces.
+bool isV4F32(const Type *Ty) { return isVectorOf(Ty, 4, &Type::isFloatTy); }
+
+/// Whether \p Coord is a two-component coordinate of the right element type
+/// for \p Float (normalized `<2 x float>` for a sample, integer
+/// `<2 x i32>` for a fetch).
+bool isCoord2D(const Value *Coord, bool Float) {
+  const auto *VecTy = dyn_cast<FixedVectorType>(Coord->getType());
+  if (!VecTy || VecTy->getNumElements() != 2)
+    return false;
+  return Float ? VecTy->getElementType()->isFloatTy()
+               : VecTy->getElementType()->isIntegerTy(32);
+}
+
+/// Whether \p Offset is a compile-time-zero texel offset, the only value
+/// `runtime/CPU`'s sampling/loading helpers accept -- matching
+/// `feme::cpu::ResourceLoweringPass::isZeroOffset`'s identical narrowing on
+/// the DXIL side. A nonzero offset is left unlowered rather than dropped.
+bool isZeroOffset(const Value *Offset) {
+  const auto *C = dyn_cast<Constant>(Offset);
+  return C && C->isNullValue();
+}
+
+/// Checks that every use of a 2D sampled-image handle is one this pass can
+/// rewrite: the image operand of an `llvm.spv.resource.sample`/
+/// `samplelevel` whose coordinate, offset and result shapes the CPU
+/// runtime's 2D helpers implement, or an `llvm.spv.resource.getpointer`
+/// texel fetch (`OpImageFetch`, see `feme::spirv::ImageLoadPattern`) whose
+/// pointer is only loaded from.
+bool hasOnlySupportedImageUses(const CallInst &Handle) {
+  for (const User *U : Handle.users()) {
+    const auto *CI = dyn_cast<CallInst>(U);
+    if (!CI)
+      return false;
+
+    bool ExplicitLod = false;
+    if (isSampleIntrinsic(*CI, ExplicitLod)) {
+      if (CI->getArgOperand(0) != &Handle)
+        return false;
+      unsigned OffsetIdx = ExplicitLod ? 4 : 3;
+      if (!isCoord2D(CI->getArgOperand(2), /*Float=*/true) ||
+          !isZeroOffset(CI->getArgOperand(OffsetIdx)) ||
+          !isV4F32(CI->getType()))
+        return false;
+      continue;
+    }
+
+    if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer)
+      return false;
+    if (!isCoord2D(CI->getArgOperand(1), /*Float=*/false))
+      return false;
+    for (const User *PU : CI->users()) {
+      const auto *LI = dyn_cast<LoadInst>(PU);
+      if (!LI || !isV4F32(LI->getType()))
+        return false;
+    }
+  }
+  return true;
+}
+
+/// Checks that every use of a sampler handle is the sampler operand of a
+/// sample intrinsic. A sampler has no accesses of its own -- it only ever
+/// pairs with an image -- so there is nothing else it can legitimately be.
+bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
+  for (const User *U : Handle.users()) {
+    const auto *CI = dyn_cast<CallInst>(U);
+    bool ExplicitLod = false;
+    if (!CI || !isSampleIntrinsic(*CI, ExplicitLod))
+      return false;
+    if (CI->getArgOperand(1) != &Handle)
+      return false;
+  }
+  return true;
 }
 
 /// Checks that every use of \p Handle is the flat access shape this pass
 /// models for \p Kind: a `llvm.spv.resource.getpointer` call whose own
 /// result is used only by an ordinary `load` (both kinds), or a `store` it
-/// is the pointer operand (not the stored value) of (`BufferKind::Storage`/
+/// is the pointer operand (not the stored value) of (`HandleKind::Storage`/
 /// `TexelStorage` only -- a uniform/texel-uniform buffer is always
 /// read-only, matching Vulkan's own restriction on
 /// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_UNIFORM_TEXEL_BUFFER`) -- see the
-/// header comment's "access shape" bullet. For `BufferKind::Uniform`, the
+/// header comment's "access shape" bullet. For `HandleKind::Uniform`, the
 /// `getpointer` index (the field selected within the block's struct) must
 /// also be a compile-time constant, unlike a storage buffer's (possibly
 /// dynamic) array index -- a real cbuffer field access is always
@@ -254,15 +442,15 @@ classifyTexelBufferHandle(const CallInst &Handle) {
 /// structured-buffer field access, or a nested uniform-buffer field) is
 /// left unmodeled, matching
 /// `feme::cpu::ResourceLoweringPass::hasOnlySupportedUses`'s own narrowing.
-bool hasOnlySupportedUses(const CallInst &Handle, BufferKind Kind) {
+bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
   bool Writable =
-      Kind == BufferKind::Storage || Kind == BufferKind::TexelStorage;
-  bool IsTexel = isTexelBufferKind(Kind);
+      Kind == HandleKind::Storage || Kind == HandleKind::TexelStorage;
+  bool IsTexel = isTexelHandleKind(Kind);
   for (const User *U : Handle.users()) {
     const auto *GetPtr = dyn_cast<CallInst>(U);
     if (!GetPtr || getIntrinsicID(GetPtr) != Intrinsic::spv_resource_getpointer)
       return false;
-    if (Kind == BufferKind::Uniform &&
+    if (Kind == HandleKind::Uniform &&
         !isa<ConstantInt>(GetPtr->getArgOperand(1)))
       return false;
     for (const User *PU : GetPtr->users()) {
@@ -287,6 +475,47 @@ bool hasOnlySupportedUses(const CallInst &Handle, BufferKind Kind) {
   return true;
 }
 
+/// Folds away the `{image, sampler}` struct
+/// `feme::spirv::SampledImagePattern` builds for `OpSampledImage`: every
+/// `extractvalue` over the pair is replaced with the handle the matching
+/// `insertvalue` put there, leaving each sample intrinsic's image/sampler
+/// operand as a direct use of its own `handlefrombinding` call. Nothing
+/// downstream of this pass understands a combined sampled-image value --
+/// the CPU image ABI keeps the two descriptors separate, per
+/// FeMeGraphicsDesign.md's "Combined image samplers remain two logical
+/// descriptors paired by lowering" -- so folding it here is what lets a
+/// single forward walk over a handle's users classify it at all.
+void foldSampledImageStructs(Function &F) {
+  SmallVector<ExtractValueInst *, 4> Extracts;
+  for (Instruction &I : instructions(F))
+    if (auto *EV = dyn_cast<ExtractValueInst>(&I))
+      if (EV->getNumIndices() == 1 &&
+          isa<StructType>(EV->getAggregateOperand()->getType()) &&
+          isa<TargetExtType>(EV->getType()))
+        Extracts.push_back(EV);
+
+  for (ExtractValueInst *EV : Extracts) {
+    Value *Found = FindInsertedValue(EV->getAggregateOperand(),
+                                     EV->getIndices(), EV->getIterator());
+    if (!Found || Found == EV)
+      continue;
+    EV->replaceAllUsesWith(Found);
+    EV->eraseFromParent();
+  }
+
+  // The `insertvalue` chain (and the `poison` seed it started from) is dead
+  // once every reader is folded; leaving it would make each handle look
+  // like it had an unsupported use. Collected first, then erased in reverse
+  // so an earlier link's last user is already gone when it is reached.
+  SmallVector<InsertValueInst *, 4> Inserts;
+  for (Instruction &I : instructions(F))
+    if (auto *IV = dyn_cast<InsertValueInst>(&I))
+      Inserts.push_back(IV);
+  for (InsertValueInst *IV : llvm::reverse(Inserts))
+    if (IV->use_empty())
+      IV->eraseFromParent();
+}
+
 /// Collects every normalizable `handlefrombinding` call in \p F, or
 /// `std::nullopt` if any of them uses a resource kind or access shape this
 /// pass cannot model -- in which case \p F is left entirely unmodified
@@ -305,9 +534,26 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
     if (!Classification)
       Classification = classifyTexelBufferHandle(*CI);
     if (!Classification)
+      Classification = classifySampledImage2DHandle(*CI);
+    if (!Classification)
+      Classification = classifySamplerHandle(*CI);
+    if (!Classification)
       return std::nullopt; // Not one of the kinds this pass normalizes.
-    if (!hasOnlySupportedUses(*CI, Classification->Kind))
-      return std::nullopt;
+
+    switch (Classification->Kind) {
+    case HandleKind::SampledImage2D:
+      if (!hasOnlySupportedImageUses(*CI))
+        return std::nullopt;
+      break;
+    case HandleKind::Sampler:
+      if (!hasOnlySupportedSamplerUses(*CI))
+        return std::nullopt;
+      break;
+    default:
+      if (!hasOnlySupportedUses(*CI, Classification->Kind))
+        return std::nullopt;
+      break;
+    }
 
     auto *SetC = dyn_cast<ConstantInt>(CI->getArgOperand(0));
     auto *BindingC = dyn_cast<ConstantInt>(CI->getArgOperand(1));
@@ -335,21 +581,43 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
   return Handles;
 }
 
+/// The reserved prefix size each of the three heaps needs (see
+/// `assignHeapBases`).
+struct HeapPrefixSizes {
+  uint32_t Resource = 0;
+  uint32_t Image = 0;
+  uint32_t Sampler = 0;
+};
+
 /// Assigns each non-conflicting identity a contiguous run of
-/// `Entry.RangeSize` heap slots, sorted by identity for a deterministic
-/// layout -- mirroring `feme::cpu::BoundResourceNormalizationPass`'s own
-/// `assignHeapBases` (roadmap R26 generalized this pass from an implicit
-/// range size of 1, see the header comment). Returns the total reserved
-/// prefix size.
-uint32_t assignHeapBases(std::map<RangeKey, RangeEntry> &Ranges) {
-  uint32_t Base = 0;
+/// `Entry.RangeSize` slots *in the heap its kind belongs to*, sorted by
+/// identity for a deterministic layout -- mirroring
+/// `feme::cpu::BoundResourceNormalizationPass`'s own `assignHeapBases`
+/// (roadmap R26 generalized this pass from an implicit range size of 1, see
+/// the header comment). The three heaps are numbered independently, so a
+/// buffer and an image binding may each be assigned base 0. Returns each
+/// heap's total reserved prefix size.
+HeapPrefixSizes assignHeapBases(std::map<RangeKey, RangeEntry> &Ranges) {
+  HeapPrefixSizes Sizes;
   for (auto &[Key, Entry] : Ranges) {
     if (Entry.Conflicting)
       continue;
-    Entry.HeapBase = Base;
-    Base += Entry.RangeSize;
+    uint32_t *Base = nullptr;
+    switch (getResourceClass(Entry.Kind)) {
+    case BoundResourceClass::Buffer:
+      Base = &Sizes.Resource;
+      break;
+    case BoundResourceClass::Image:
+      Base = &Sizes.Image;
+      break;
+    case BoundResourceClass::Sampler:
+      Base = &Sizes.Sampler;
+      break;
+    }
+    Entry.HeapBase = *Base;
+    *Base += Entry.RangeSize;
   }
-  return Base;
+  return Sizes;
 }
 
 /// Builds `select(Base + Index > UINT32_MAX, UINT32_MAX, Base + Index)`,
@@ -390,20 +658,23 @@ Value *computeClampedIndex(IRBuilderBase &Builder, Value *Index, uint32_t Base,
       Clamped);
 }
 
-/// Builds \p F's replacement: the same function with the six trailing
-/// resource/root-constant ABI parameters appended, exactly as
-/// `feme::cpu::ResourceLoweringPass`'s own (anonymous-namespace, so
-/// duplicated here rather than shared -- matching how
+/// Builds \p F's replacement: the same function with the eight trailing
+/// resource/root-constant/image ABI parameters appended, in exactly the
+/// order and naming `feme::cpu::ResourceLoweringPass`'s own (anonymous-
+/// namespace, so duplicated here rather than shared -- matching how
 /// `feme::amdgpu::ResourceLoweringPass`'s own `addBindingArguments` is
 /// likewise a separate copy for its differently-shaped parameter list)
-/// `addResourceEnvParams` does.
+/// `addResourceEnvParams` does. Sharing the order matters because the
+/// stage wrappers (`feme::cpu::EntryWrapperPass` and friends) resolve these
+/// by *name*, so a SPIR-V-sourced stage and a DXIL-sourced one present the
+/// host with one identical resource-binding ABI.
 Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
   LLVMContext &Ctx = F.getContext();
   Type *PtrTy = PointerType::get(Ctx, 0);
   Type *I32Ty = Type::getInt32Ty(Ctx);
 
-  SmallVector<Type *, 6> ParamTypes(F.getFunctionType()->params());
-  ParamTypes.append({PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty});
+  SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
+  ParamTypes.append({PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty});
 
   FunctionType *NewTy = FunctionType::get(F.getReturnType(), ParamTypes,
                                           F.getFunctionType()->isVarArg());
@@ -431,6 +702,10 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
   Env.RootConstants->setName("root_constants");
   Env.RootConstantSize = &*ArgIt++;
   Env.RootConstantSize->setName("root_constant_size");
+  Env.ImageHeap = &*ArgIt++;
+  Env.ImageHeap->setName("image_heap");
+  Env.ImageHeapCount = &*ArgIt++;
+  Env.ImageHeapCount->setName("image_heap_count");
 
   NewF->takeName(&F);
   F.replaceAllUsesWith(NewF);
@@ -458,7 +733,7 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
 /// own declared byte offset for that field, also through the raw family --
 /// no runtime arithmetic needed at all, since a cbuffer's fields have no
 /// dynamic index the way a storage buffer's array elements do. A texel
-/// buffer access (`isTexelBufferKind(BH.Kind)`) needs no byte-offset
+/// buffer access (`isTexelHandleKind(BH.Kind)`) needs no byte-offset
 /// arithmetic either: its `getpointer` "index" is already the image
 /// coordinate `OpImageRead`/`OpImageFetch`/`OpImageWrite` themselves address
 /// by, so it goes through `feme::cpu::createTypedLoad`/`createTypedStore`
@@ -474,7 +749,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
       computeClampedIndex(IndexBuilder, Index, HeapBase, BH.RangeSize);
   Value *Mask = ConstantInt::getTrue(Ctx);
   const DataLayout &DL = BH.Handle->getModule()->getDataLayout();
-  bool IsTexel = isTexelBufferKind(BH.Kind);
+  bool IsTexel = isTexelHandleKind(BH.Kind);
 
   for (User *U : llvm::make_early_inc_range(BH.Handle->users())) {
     auto *GetPtr = cast<CallInst>(U);
@@ -483,7 +758,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
     if (IsTexel) {
       IRBuilder<> PtrBuilder(GetPtr);
       ElementIndex = PtrBuilder.CreateZExt(GetPtr->getArgOperand(1), I64Ty);
-    } else if (BH.Kind == BufferKind::Storage) {
+    } else if (BH.Kind == HandleKind::Storage) {
       IRBuilder<> PtrBuilder(GetPtr);
       Value *ElemIdx = PtrBuilder.CreateZExt(GetPtr->getArgOperand(1), I64Ty);
       Offset =
@@ -508,7 +783,7 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
         LI->eraseFromParent();
         continue;
       }
-      // Only reachable for BufferKind::Storage/TexelStorage.
+      // Only reachable for HandleKind::Storage/TexelStorage.
       auto *SI = cast<StoreInst>(PU);
       IRBuilder<> Builder(SI);
       if (IsTexel)
@@ -524,14 +799,85 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
   BH.Handle->eraseFromParent();
 }
 
+/// Rewrites every sample and texel fetch performed through the image and
+/// sampler handles in \p HeapIndices -- a map from each accepted
+/// `handlefrombinding` call to the range-checked heap index it resolves to
+/// -- into the corresponding canonical `feme.cpu.image.*` call (see
+/// ImageCalls.h), then erases the handles themselves.
+///
+/// `hasOnlySupportedImageUses`/`hasOnlySupportedSamplerUses` already
+/// guaranteed at collection time that every use is one of these shapes, so
+/// there is no partially-rewritten state to worry about: either the whole
+/// function was accepted, or none of it was.
+void lowerImageAccesses(const MapVector<CallInst *, Value *> &HeapIndices,
+                        const ImageCallEnv &Env) {
+  LLVMContext &Ctx = Env.ImageHeap->getContext();
+  Value *Mask = ConstantInt::getTrue(Ctx);
+
+  for (const auto &[Handle, ImageIndex] : HeapIndices) {
+    for (User *U : llvm::make_early_inc_range(Handle->users())) {
+      auto *CI = cast<CallInst>(U);
+      bool ExplicitLod = false;
+      if (isSampleIntrinsic(*CI, ExplicitLod)) {
+        // A sample is reached twice -- once from its image handle, once
+        // from its sampler handle -- so only rewrite it from the image
+        // side, where both descriptor indices are already resolvable.
+        if (CI->getArgOperand(0) != Handle)
+          continue;
+        IRBuilder<> Builder(CI);
+        Value *Coord = CI->getArgOperand(2);
+        Value *U0 = Builder.CreateExtractElement(Coord, uint64_t{0});
+        Value *V0 = Builder.CreateExtractElement(Coord, uint64_t{1});
+        Value *Lod = ExplicitLod ? CI->getArgOperand(3)
+                                 : ConstantFP::get(Builder.getFloatTy(), 0.0);
+        Value *SamplerIndex =
+            HeapIndices.lookup(cast<CallInst>(CI->getArgOperand(1)));
+        CallInst *NewCall =
+            createSample2D(Builder, Env, ImageIndex, SamplerIndex, U0, V0, Lod,
+                           Builder.getInt1(ExplicitLod), Mask, CI->getName());
+        CI->replaceAllUsesWith(NewCall);
+        CI->eraseFromParent();
+        continue;
+      }
+
+      // `OpImageFetch`: a `getpointer` whose result is only loaded from.
+      IRBuilder<> Builder(CI);
+      Value *Coord = CI->getArgOperand(1);
+      Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
+      Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
+      for (User *PU : llvm::make_early_inc_range(CI->users())) {
+        auto *LI = cast<LoadInst>(PU);
+        IRBuilder<> LoadBuilder(LI);
+        // Mip level 0: `feme::spirv::ImageLoadPattern` does not thread
+        // `OpImageFetch`'s optional `Lod` image operand through today, so
+        // there is no level operand to honor here yet.
+        CallInst *Loaded =
+            createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
+                         LoadBuilder.getInt32(0), Mask, LI->getName());
+        LI->replaceAllUsesWith(Loaded);
+        LI->eraseFromParent();
+      }
+      CI->eraseFromParent();
+    }
+  }
+
+  // Erased last: a sampler handle still had the sample calls as users while
+  // the image side of the loop above was rewriting them.
+  for (const auto &[Handle, ImageIndex] : HeapIndices) {
+    (void)ImageIndex;
+    Handle->eraseFromParent();
+  }
+}
+
 /// Attaches the `!feme.cpu.resources` metadata node
 /// `feme::cpu::ResourceInfo::fromModule` reads: name, \p RootConstantSize
 /// (V3: a SPIR-V push-constant access `lowerFunctionResources` below found
 /// and lowered through this same function's already-added
 /// `root_constants`/`root_constant_size` parameters, or 0 if it has none --
-/// see `feme::cpu::matchSPIRVPushConstantAccess`), whether the sampler heap
-/// is used (always false -- no SPIR-V sampler handle is normalized by this
-/// pass), a root-constant binding (always `(space0, register0)`: a SPIR-V
+/// see `feme::cpu::matchSPIRVPushConstantAccess`), \p UsesSamplerHeap
+/// (roadmap R30's SPIR-V completion: true once this pass normalizes a bound
+/// `spirv.Sampler` handle), a root-constant binding (always
+/// `(space0, register0)`: a SPIR-V
 /// push-constant block has no register identity of its own, unlike DXIL's
 /// register-bound root constant, so there is nothing else to report), and
 /// an empty statically-known-heap-index tail. That tail always stays empty
@@ -541,13 +887,14 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
 /// mechanism, unrelated to the bound-range assignment
 /// `attachBoundResourceMetadata` below records unconditionally (see "Heap
 /// usage discovery" in feme/docs/FeMeCPUDesign.md).
-void attachResourceMetadata(Function &F, uint32_t RootConstantSize) {
+void attachResourceMetadata(Function &F, uint32_t RootConstantSize,
+                            bool UsesSamplerHeap) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
   Metadata *Ops[] = {
       MDString::get(Ctx, F.getName()),
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantSize)),
-      ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)),
+      ConstantAsMetadata::get(ConstantInt::getBool(Ctx, UsesSamplerHeap)),
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
       ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0))};
   F.getParent()
@@ -564,7 +911,7 @@ void attachResourceMetadata(Function &F, uint32_t RootConstantSize) {
 /// register) slots per the header comment's correspondence, and range-size
 /// the binding's own declared descriptor array count (roadmap R26
 /// generalized this from an implicit 1).
-void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
+void attachBoundResourceMetadata(Function &F, HeapPrefixSizes PrefixSizes,
                                  const std::map<RangeKey, RangeEntry> &Ranges) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
@@ -573,9 +920,9 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
     Ops.push_back(ConstantAsMetadata::get(ConstantInt::get(I32Ty, V)));
   };
   Ops.push_back(MDString::get(Ctx, F.getName()));
-  PushInt(PrefixSize);
-  PushInt(0);
-  PushInt(0);
+  PushInt(PrefixSizes.Resource);
+  PushInt(PrefixSizes.Image);
+  PushInt(PrefixSizes.Sampler);
   for (const auto &[Key, Entry] : Ranges) {
     if (Entry.Conflicting)
       continue;
@@ -583,7 +930,7 @@ void attachBoundResourceMetadata(Function &F, uint32_t PrefixSize,
     PushInt(Key.Binding);
     PushInt(Entry.RangeSize);
     PushInt(Entry.HeapBase);
-    PushInt(static_cast<uint32_t>(BoundResourceClass::Buffer));
+    PushInt(static_cast<uint32_t>(getResourceClass(Entry.Kind)));
   }
   F.getParent()
       ->getOrInsertNamedMetadata("feme.cpu.bound_resources")
@@ -599,9 +946,15 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
   // rewriting anything -- a conflicting re-declaration can only be detected
   // once all of them are known (see
   // `feme::cpu::BoundResourceNormalizationPass`'s own two-phase shape).
-  DenseMap<Function *, SmallVector<BoundHandle, 4>> PerFunctionHandles;
+  // A `MapVector`, not a `DenseMap`: the rewrite order below decides both
+  // the order rewritten functions end up in and the order their metadata
+  // nodes are emitted, and neither may depend on pointer values.
+  MapVector<Function *, SmallVector<BoundHandle, 4>> PerFunctionHandles;
   std::map<RangeKey, RangeEntry> Ranges;
   for (Function &F : M) {
+    // A combined sampled-image value has to be taken apart before a handle's
+    // own users can be classified (see `foldSampledImageStructs`).
+    foldSampledImageStructs(F);
     std::optional<SmallVector<BoundHandle, 4>> Handles = collectHandles(F);
     if (!Handles || Handles->empty())
       continue;
@@ -622,7 +975,7 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
   if (PerFunctionHandles.empty())
     return PreservedAnalyses::all();
 
-  uint32_t PrefixSize = assignHeapBases(Ranges);
+  HeapPrefixSizes PrefixSizes = assignHeapBases(Ranges);
 
   bool Changed = false;
   for (auto &[F, Handles] : PerFunctionHandles) {
@@ -634,6 +987,11 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     bool RewroteAny = false;
     ResourceCallEnv Env;
     Function *NewF = F;
+    // Image and sampler handles are rewritten together, after this loop:
+    // a sample needs *both* of its descriptor indices, which are computed
+    // at two different handles.
+    MapVector<CallInst *, Value *> ImageHeapIndices;
+    bool UsesSamplerHeap = false;
     for (const BoundHandle &BH : Handles) {
       const RangeEntry &Entry = Ranges.at(BH.Key);
       if (Entry.Conflicting)
@@ -642,11 +1000,27 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
         NewF = addResourceEnvParams(*F, Env);
         RewroteAny = true;
       }
-      lowerAccesses(BH, Env, Entry.HeapBase);
+      if (isBufferHandleKind(BH.Kind)) {
+        lowerAccesses(BH, Env, Entry.HeapBase);
+        continue;
+      }
+      UsesSamplerHeap |= BH.Kind == HandleKind::Sampler;
+      IRBuilder<> Builder(BH.Handle);
+      ImageHeapIndices[BH.Handle] = computeClampedIndex(
+          Builder, BH.Handle->getArgOperand(3), Entry.HeapBase, BH.RangeSize);
     }
     if (!RewroteAny)
       continue;
     Changed = true;
+
+    if (!ImageHeapIndices.empty()) {
+      ImageCallEnv ImgEnv;
+      ImgEnv.ImageHeap = Env.ImageHeap;
+      ImgEnv.ImageHeapCount = Env.ImageHeapCount;
+      ImgEnv.SamplerHeap = Env.SamplerHeap;
+      ImgEnv.SamplerHeapCount = Env.SamplerHeapCount;
+      lowerImageAccesses(ImageHeapIndices, ImgEnv);
+    }
 
     // A function with its own bound-resource access already has
     // `root_constants`/`root_constant_size` parameters from
@@ -660,17 +1034,25 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
       RootConstantSize = lowerSPIRVPushConstantAccess(
           *PCAccess, Env.RootConstants, Env.RootConstantSize);
 
-    attachResourceMetadata(*NewF, RootConstantSize);
-    attachBoundResourceMetadata(*NewF, PrefixSize, Ranges);
+    attachResourceMetadata(*NewF, RootConstantSize, UsesSamplerHeap);
+    attachBoundResourceMetadata(*NewF, PrefixSizes, Ranges);
   }
 
   // An unused `handlefrombinding` declaration is left behind once its last
   // accepted caller is rewritten away; a conflicting one may still have
   // users, left for `feme::cpu::checkSupportedRaisedOps` to reject.
-  for (Function &F : llvm::make_early_inc_range(M.functions()))
-    if (F.isDeclaration() && F.use_empty() &&
-        F.getIntrinsicID() == Intrinsic::spv_resource_handlefrombinding)
+  // The sample/getpointer declarations `lowerImageAccesses` rewrote away go
+  // with them.
+  for (Function &F : llvm::make_early_inc_range(M.functions())) {
+    if (!F.isDeclaration() || !F.use_empty())
+      continue;
+    Intrinsic::ID ID = F.getIntrinsicID();
+    if (ID == Intrinsic::spv_resource_handlefrombinding ||
+        ID == Intrinsic::spv_resource_sample ||
+        ID == Intrinsic::spv_resource_samplelevel ||
+        ID == Intrinsic::spv_resource_getpointer)
       F.eraseFromParent();
+  }
 
   return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }

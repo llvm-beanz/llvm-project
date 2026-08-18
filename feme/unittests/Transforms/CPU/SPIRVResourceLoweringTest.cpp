@@ -521,3 +521,227 @@ TEST(SPIRVResourceLoweringTest, LeavesUnsupportedTexelElementTypeUnchanged) {
 }
 
 } // namespace
+
+// --- Roadmap R30: bound 2D sampled images and samplers -------------------
+
+namespace {
+
+/// The IR shape `feme::spirv::SampledImagePattern` +
+/// `ImageSampleImplicitLodPattern` produce for `texture.Sample(sampler, uv)`:
+/// two `handlefrombinding` handles combined into a `{image, sampler}` struct,
+/// unpacked again at the sample itself.
+constexpr const char *SampleShader = R"(
+    %pair = type { target("spirv.Image", float, 1, 0, 0, 0, 1, 0), target("spirv.Sampler") }
+    define <4 x float> @main(<2 x float> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %p0 = insertvalue %pair poison, target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, 0
+      %p1 = insertvalue %pair %p0, target("spirv.Sampler") %samp, 1
+      %i = extractvalue %pair %p1, 0
+      %s = extractvalue %pair %p1, 1
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %i,
+          target("spirv.Sampler") %s, <2 x float> %coord, <2 x i32> zeroinitializer)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+)";
+
+/// Returns \p F's sole call to the named canonical image helper, or null.
+CallInst *findImageCall(Function &F, StringRef Name) {
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName() == Name)
+          return CI;
+  return nullptr;
+}
+
+/// Reads \p EntryName's `!feme.cpu.bound_resources` node, or null.
+MDNode *findBoundNode(Module &M, StringRef EntryName) {
+  NamedMDNode *MD = M.getNamedMetadata("feme.cpu.bound_resources");
+  if (!MD)
+    return nullptr;
+  for (MDNode *Entry : MD->operands())
+    if (cast<MDString>(Entry->getOperand(0))->getString() == EntryName)
+      return Entry;
+  return nullptr;
+}
+
+uint64_t mdInt(const MDNode *N, unsigned Index) {
+  return mdconst::extract<ConstantInt>(N->getOperand(Index))->getZExtValue();
+}
+
+} // namespace
+
+TEST(SPIRVResourceLoweringTest, LowersSampledImageAndSamplerPairToImageSample) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, SampleShader);
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Sample = findImageCall(*F, "feme.cpu.image.sample.2d.v4f32");
+  ASSERT_TRUE(Sample);
+  // (image_heap, count, sampler_heap, count, image_index, sampler_index,
+  //  u, v, lod, use_explicit_lod, mask).
+  EXPECT_EQ(Sample->getArgOperand(0)->getName(), "image_heap");
+  EXPECT_EQ(Sample->getArgOperand(2)->getName(), "sampler_heap");
+  // Both are the sole binding of their own heap, so both resolve to slot 0.
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(4))->isZero());
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(5))->isZero());
+  // An implicit-LOD sample asks the runtime for level 0, not for `%lod`.
+  EXPECT_TRUE(cast<ConstantInt>(Sample->getArgOperand(9))->isZero());
+
+  // Neither the combined sampled-image struct nor the handles survive.
+  for (Instruction &I : instructions(*F))
+    EXPECT_FALSE(isa<InsertValueInst>(&I) || isa<ExtractValueInst>(&I));
+}
+
+TEST(SPIRVResourceLoweringTest, AssignsImageAndSamplerTheirOwnHeapClasses) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, SampleShader);
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  MDNode *Bound = findBoundNode(*M, "main");
+  ASSERT_TRUE(Bound);
+  // {name, resource/image/sampler prefix sizes, then two five-field ranges}.
+  ASSERT_EQ(Bound->getNumOperands(), 14u);
+  EXPECT_EQ(mdInt(Bound, 1), 0u); // no buffer binding at all
+  EXPECT_EQ(mdInt(Bound, 2), 1u); // one image slot
+  EXPECT_EQ(mdInt(Bound, 3), 1u); // one sampler slot
+  EXPECT_EQ(mdInt(Bound, 8), static_cast<uint64_t>(BoundResourceClass::Image));
+  EXPECT_EQ(mdInt(Bound, 13),
+            static_cast<uint64_t>(BoundResourceClass::Sampler));
+
+  NamedMDNode *Resources = M->getNamedMetadata("feme.cpu.resources");
+  ASSERT_TRUE(Resources);
+  ASSERT_EQ(Resources->getNumOperands(), 1u);
+  EXPECT_EQ(mdInt(Resources->getOperand(0), 2), 1u); // UsesSamplerHeap
+}
+
+TEST(SPIRVResourceLoweringTest, LowersImageFetchToImageLoad) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x i32> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, <2 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 0, 0, 1, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.2d.v4f32");
+  ASSERT_TRUE(Load);
+  EXPECT_EQ(Load->getArgOperand(0)->getName(), "image_heap");
+  // A fetch takes no sampler, so nothing reports sampler-heap usage.
+  NamedMDNode *Resources = M->getNamedMetadata("feme.cpu.resources");
+  ASSERT_TRUE(Resources);
+  EXPECT_EQ(mdInt(Resources->getOperand(0), 2), 0u);
+}
+
+TEST(SPIRVResourceLoweringTest, ClampsAnArrayedImageBindingIndex) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x i32> %coord, i32 %which) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 4, i32 %which, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, <2 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 0, 0, 1, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.2d.v4f32");
+  ASSERT_TRUE(Load);
+  // A dynamic array index is range-checked exactly like a buffer's, so the
+  // descriptor index is a `select`, not the raw operand.
+  EXPECT_TRUE(isa<SelectInst>(Load->getArgOperand(2)));
+
+  MDNode *Bound = findBoundNode(*M, "main");
+  ASSERT_TRUE(Bound);
+  EXPECT_EQ(mdInt(Bound, 2), 4u); // four reserved image slots
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesAnArrayedImageHandleAlone) {
+  // An arrayed image needs a layer coordinate the 2D runtime helpers do not
+  // take, so the whole function is left for `checkSupportedRaisedOps` to
+  // reject rather than lowered into a helper that would silently ignore it.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x i32> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", float, 1, 0, 1, 0, 1, 0) %img, <2 x i32> %coord)
+      %v = load <4 x float>, ptr %p
+      ret <4 x float> %v
+    }
+    declare target("spirv.Image", float, 1, 0, 1, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", float, 1, 0, 1, 0, 1, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.load.2d.v4f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetSampleAlone) {
+  // `runtime/CPU`'s helpers take no texel offset yet; dropping one would be
+  // a real semantic change, so the sample is left unlowered instead.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(<2 x float> %coord) {
+      %img = call target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x float> @llvm.spv.resource.sample(
+          target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord, <2 x i32> <i32 1, i32 0>)
+      ret <4 x float> %r
+    }
+    declare target("spirv.Image", float, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}

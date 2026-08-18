@@ -58,11 +58,7 @@
 //    `RWStructuredBuffer<T>`/`StructuredBuffer<T>` in HLSL, see
 //    `feme::spirv::convertBufferBlockType` in SPIRVToLLVMPatterns.cpp) and a
 //    `Uniform`-derived one (a `cbuffer`/`ConstantBuffer<T>`, see
-//    `feme::spirv::convertUniformBlockType`) are both normalized; a
-//    sampled-image or sampler handle (`Texture*`/`Sampler*`) is left
-//    untouched, matching the DXIL side's own "typed and raw buffers only"
-//    narrowing (general images/samplers are not yet covered there either --
-//    see `feme::cpu::ResourceLoweringPass`'s header comment). (V4) A
+//    `feme::spirv::convertUniformBlockType`) are both normalized. (V4) A
 //    `Dim::Buffer` image handle (`Buffer<T>`/`RWBuffer<T>` in HLSL --
 //    Vulkan's uniform/storage texel buffer) *is* normalized, but only over
 //    a `<4 x float>` or `<4 x i32>` shader-side element -- see
@@ -100,6 +96,29 @@
 //  - An unbounded range (range size 0, SPIR-V's own spelling of an
 //    unbounded descriptor array) is left un-normalized, matching the DXIL
 //    side's own rejection of an unbounded `handlefrombinding` range.
+//  - (Roadmap R30) A bound 2D *sampled image* handle and a `spirv.Sampler`
+//    handle are normalized too, into the *image* and *sampler* heaps rather
+//    than the buffer-oriented resource heap -- the three are separate
+//    arrays with independently numbered slots, so each range records the
+//    `feme::cpu::BoundResourceClass` its own heap base indexes. Their
+//    accesses lower to the canonical `feme.cpu.image.*` calls (ImageCalls.h)
+//    the DXIL bindless path already produces, not to
+//    `feme.cpu.resource.*`: `llvm::spv::resource::sample`/`samplelevel`
+//    become `feme.cpu.image.sample.2d.v4f32` (implicit LOD asking for level
+//    0, explicit LOD threading its own operand through), and an
+//    `OpImageFetch`'s `getpointer`+`load` pair becomes
+//    `feme.cpu.image.load.2d.v4f32`. The `{image, sampler}` struct
+//    `feme::spirv::SampledImagePattern` builds for `OpSampledImage` is
+//    folded away first (`foldSampledImageStructs`), since FeMe's image ABI
+//    keeps the two descriptors separate throughout.
+//
+//    Scoped out for the same reasons the DXIL side scopes them out (see
+//    "Canonical image operations" in feme/docs/FeMeGraphicsDesign.md): any
+//    dimension other than 2D, an arrayed or multisampled image, a storage
+//    image (`Sampled == 2`, which would need a `feme.cpu.image.store.*`
+//    helper `runtime/CPU` does not implement), a non-`f32` channel type,
+//    and a nonzero texel offset. Each is left un-normalized rather than
+//    approximated, so `feme::cpu::checkSupportedRaisedOps` still rejects it.
 //  - As with the DXIL passes this mirrors, an unsupported access shape or a
 //    conflicting re-declaration of the same (descriptor set, binding)
 //    identity (two handles disagreeing about the buffer's kind, element
@@ -116,10 +135,11 @@
 
 namespace feme::cpu {
 
-/// Normalizes and lowers SPIR-V `spirv.VulkanBuffer` storage- and uniform-
-/// buffer access directly into the same canonical `feme.cpu.resource.*`
-/// calls the DXIL `BoundResourceNormalizationPass` + `ResourceLoweringPass`
-/// pair produces. See the file comment above for current scope.
+/// Normalizes and lowers SPIR-V bound resource access -- storage, uniform
+/// and texel buffers, plus 2D sampled images and samplers -- directly into
+/// the same canonical `feme.cpu.resource.*`/`feme.cpu.image.*` calls the
+/// DXIL `BoundResourceNormalizationPass` + `ResourceLoweringPass` pair
+/// produces. See the file comment above for current scope.
 class SPIRVResourceLoweringPass
     : public llvm::PassInfoMixin<SPIRVResourceLoweringPass> {
 public:
