@@ -291,6 +291,84 @@ TEST_F(RuntimeCPUTest, TypedStoreDroppedWithoutUavFlag) {
   EXPECT_FLOAT_EQ(Storage[0], 3.0f);
 }
 
+TEST_F(RuntimeCPUTest, TypedLoadV4I32IdentityFormat) {
+  // (V4) `<4 x i32>`, the `R32G32B32A32_UINT`/`_SINT` identity-format
+  // counterpart of the `<4 x float>` view above -- see
+  // femeCpuResourceLoadTypedV4I32 in FeMeRuntimeCPU.c.
+  int32_t Storage[4] = {-1, 2, -3, 4};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_SINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_v4i32",
+                               "feme.cpu.resource.load.typed.v4i32");
+  ASSERT_TRUE(Load);
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], -1);
+  EXPECT_EQ(Result[1], 2);
+  EXPECT_EQ(Result[2], -3);
+  EXPECT_EQ(Result[3], 4);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadV4I32InactiveMaskReadsZero) {
+  int32_t Storage[4] = {5, 5, 5, 5};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_v4i32_inactive_mask",
+                               "feme.cpu.resource.load.typed.v4i32");
+  ASSERT_TRUE(Load);
+  int32_t Result[4] = {1, 1, 1, 1};
+  Load(Heap, 1, 0, 0, /*mask=*/false, Result);
+  EXPECT_EQ(Result[0], 0);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV4I32RoundTrips) {
+  int32_t Storage[4] = {0, 0, 0, 0};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  StoreFn Store =
+      getStoreWrapper("test_typed_store_v4i32",
+                      "feme.cpu.resource.store.typed.v4i32",
+                      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  ASSERT_TRUE(Store);
+  int32_t ToStore[4] = {7, 8, 9, 10};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 7);
+  EXPECT_EQ(Storage[1], 8);
+  EXPECT_EQ(Storage[2], 9);
+  EXPECT_EQ(Storage[3], 10);
+}
+
+TEST_F(RuntimeCPUTest, TypedStoreV4I32DroppedWithoutUavFlag) {
+  int32_t Storage[4] = {3, 3, 3, 3};
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R32G32B32A32_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  StoreFn Store =
+      getStoreWrapper("test_typed_store_v4i32_no_uav",
+                      "feme.cpu.resource.store.typed.v4i32",
+                      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  ASSERT_TRUE(Store);
+  int32_t ToStore[4] = {9, 9, 9, 9};
+  Store(Heap, 1, 0, 0, ToStore, true);
+  EXPECT_EQ(Storage[0], 3);
+}
+
 TEST_F(RuntimeCPUTest, TypedLoadOutOfRangeOffsetReadsZero) {
   float Storage[4] = {1.0f, 2.0f, 3.0f, 4.0f};
   FemeDescriptor Heap[1] = {};

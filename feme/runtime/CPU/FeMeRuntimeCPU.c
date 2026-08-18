@@ -36,16 +36,17 @@
 // likewise called out at each use so a future enumerator renumbering in
 // RuntimeABI.h is easy to find and fix here.
 //
-// Scope (roadmap milestone 3): this file covers the typed-buffer view
+// Scope (roadmap milestone 3, V4): this file covers the typed-buffer views
 // `<4 x float>` (covering the `R32G32B32A32_FLOAT` identity format and the
 // packed `R8G8B8A8_UNORM` format, to establish the format-switch pattern
-// concretely) and the raw/structured-buffer views `i32`/`float`. Every
-// other canonical call `feme::cpu::ResourceCalls` can create (other typed
-// views, the remaining formats "Descriptor formats" lists, atomics) is a
-// mechanical repeat of the same pattern once a call site actually needs it
-// -- "Additional formats extend one helper implementation rather than every
-// access site" -- and is added on demand rather than spelled out
-// exhaustively up front.
+// concretely) and `<4 x i32>` (the `R32G32B32A32_UINT`/`_SINT` identity
+// formats -- see "Typed-buffer `<4 x i32>` view" below), and the
+// raw/structured-buffer views `i32`/`float`. Every other canonical call
+// `feme::cpu::ResourceCalls` can create (other typed views, the remaining
+// formats "Descriptor formats" lists, atomics) is a mechanical repeat of the
+// same pattern once a call site actually needs it -- "Additional formats
+// extend one helper implementation rather than every access site" -- and is
+// added on demand rather than spelled out exhaustively up front.
 //
 // Scope (roadmap R30): the "Canonical image operations"/"Texture layout and
 // formats" helpers below (`feme.cpu.image.*`) cover 2D images only --
@@ -262,6 +263,74 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     return;
   }
   *(FemeRTv4f32Unaligned *)Ptr = (FemeRTv4f32Unaligned)Value;
+}
+
+//--- Typed-buffer `<4 x i32>` view ---------------------------------------------
+
+// A 4-lane `int32_t` vector, compiled to LLVM IR's `<4 x i32>`.
+typedef int32_t FemeRTv4i32 __attribute__((vector_size(16)));
+
+// The same vector type, with its assumed pointer alignment relaxed to 4
+// bytes, matching `FemeRTv4f32Unaligned` above.
+typedef int32_t FemeRTv4i32Unaligned __attribute__((vector_size(16), aligned(4)));
+
+// `feme.cpu.resource.load.typed.v4i32` (V4, see `feme::cpu::ResourceCalls`):
+// reads a `<4 x i32>` element through a bindless typed-buffer descriptor.
+// Unlike the `<4 x float>` view above, every format this helper is reachable
+// for -- `R32G32B32A32_UINT`/`_SINT` (see
+// `feme::vulkan::isTexelBufferFormatSupported`) -- is a 32-bit-per-component
+// identity format, so no scalar conversion switch is needed: the four
+// 32-bit lanes are reinterpreted directly, matching the signed/unsigned
+// distinction entirely by the shader's own choice of `<4 x i32>` load/store
+// type (SPIR-V's `OpTypeInt`'s signedness bit plays no role in the raw
+// bytes). `ResourceKind::Typed == 1`. An inactive lane or a failing
+// bounds/kind check reads as zero, never touching `Heap`'s memory, exactly
+// like the `<4 x float>` load above (see "Bounds checking").
+FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex,
+    _Bool Mask) asm("feme.cpu.resource.load.typed.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  uint64_t ElemSize = 16;
+  uint64_t ByteOffset = ElementIndex * ElemSize;
+  _Bool AccessOK =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
+                        Desc.Flags, ByteOffset, ElemSize);
+  if (!(AccessOK && Mask)) {
+    FemeRTv4i32 Zero = {0, 0, 0, 0};
+    return Zero;
+  }
+  const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  return (FemeRTv4i32) * (const FemeRTv4i32Unaligned *)Ptr;
+}
+
+// `feme.cpu.resource.store.typed.v4i32`: the store counterpart of
+// `feme.cpu.resource.load.typed.v4i32` above, with the same UAV check every
+// typed-buffer store requires (see `femeCpuResourceStoreTypedV4F32`).
+void femeCpuResourceStoreTypedV4I32(
+    const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
+    uint64_t ElementIndex, FemeRTv4i32 Value,
+    _Bool Mask) asm("feme.cpu.resource.store.typed.v4i32");
+
+__attribute__((always_inline)) void
+femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
+                               uint32_t DescriptorIndex, uint64_t ElementIndex,
+                               FemeRTv4i32 Value, _Bool Mask) {
+  FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
+  uint64_t ElemSize = 16;
+  uint64_t ByteOffset = ElementIndex * ElemSize;
+  _Bool AccessOK =
+      femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
+                        Desc.Flags, ByteOffset, ElemSize);
+  _Bool IsUAV = (Desc.Flags & 1u) != 0; // FEME_DESCRIPTOR_UAV.
+  if (!(AccessOK && Mask && IsUAV))
+    return;
+  unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  *(FemeRTv4i32Unaligned *)Ptr = (FemeRTv4i32Unaligned)Value;
 }
 
 //--- Raw/structured-buffer views ----------------------------------------------
