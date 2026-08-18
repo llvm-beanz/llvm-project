@@ -45,3 +45,11 @@ vkUnmapMemory
 vkFlushMappedMemoryRanges
 vkInvalidateMappedMemoryRanges
 vkGetDeviceMemoryCommitment
+
+# V1: buffers (see "Object Model" and "Memory and Buffers").
+vkCreateBuffer
+vkDestroyBuffer
+vkGetBufferMemoryRequirements
+vkGetBufferMemoryRequirements2
+vkBindBufferMemory
+vkBindBufferMemory2

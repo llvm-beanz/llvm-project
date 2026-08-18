@@ -46,12 +46,13 @@ TEST(ProcAddr, NonNullInstanceResolvesEveryImplementedLevel) {
 }
 
 TEST(ProcAddr, UnimplementedCommandNeverResolves) {
-  // `vkCreateBuffer` is a real core Vulkan 1.0 command this milestone does
-  // not implement yet (see V1); the generated table still carries an entry
-  // for it (mapped to null), matching "Loader Integration"'s requirement
-  // that the table cover every known command name.
-  EXPECT_EQ(getInstanceProcAddr(dummyInstance(), "vkCreateBuffer"), nullptr);
-  EXPECT_EQ(getDeviceProcAddr("vkCreateBuffer"), nullptr);
+  // `vkCreateImage` is a real core Vulkan 1.0 command this milestone does
+  // not implement yet (images are deferred to V5, see "Initial Non-Goals");
+  // the generated table still carries an entry for it (mapped to null),
+  // matching "Loader Integration"'s requirement that the table cover every
+  // known command name.
+  EXPECT_EQ(getInstanceProcAddr(dummyInstance(), "vkCreateImage"), nullptr);
+  EXPECT_EQ(getDeviceProcAddr("vkCreateImage"), nullptr);
 }
 
 TEST(ProcAddr, UnknownNameNeverResolves) {

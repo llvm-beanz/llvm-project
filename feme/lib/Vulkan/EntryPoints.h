@@ -124,6 +124,25 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceMemoryCommitment(
     VkDevice device, VkDeviceMemory memory,
     VkDeviceSize *pCommittedMemoryInBytes);
 
+// V1: buffers (see "Object Model" and "Memory and Buffers").
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
+              const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer);
+VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(
+    VkDevice device, VkBuffer buffer, const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(
+    VkDevice device, VkBuffer buffer,
+    VkMemoryRequirements *pMemoryRequirements);
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
+    VkDevice device, const VkBufferMemoryRequirementsInfo2 *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory,
+                   VkDeviceSize memoryOffset);
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2(
+    VkDevice device, uint32_t bindInfoCount,
+    const VkBindBufferMemoryInfo *pBindInfos);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H

@@ -76,6 +76,7 @@ add_custom_target(FeMeVulkanEntrypointsGen DEPENDS ${feme_vulkan_entrypoints_inc
 # LINK_COMPONENTS below) lets CMake's own library ordering account for it no
 # matter what FeMeTargetCPU or anything else in a given link needs.
 add_feme_library(FeMeVulkanCore STATIC
+  Buffer.cpp
   EntryPoints.cpp
   GroupSize.cpp
   Memory.cpp
