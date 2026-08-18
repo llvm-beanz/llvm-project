@@ -1,0 +1,394 @@
+//===- GraphicsPipelineTest.cpp - vkCreateGraphicsPipelines tests -------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+//
+// (V6) Covers graphics stage compilation and pipeline state translation:
+// real SPIR-V vertex/fragment modules compiled into `feme::cpu::
+// CompiledStage`s, their cross-stage interface validated against the core
+// reflection, and every state combination with no implemented path rejected
+// at creation rather than at draw time (see "Graphics pipeline state" in
+// feme/docs/FeMeVulkanDesign.md).
+//
+//===----------------------------------------------------------------------===//
+
+#define VK_NO_PROTOTYPES
+#include "GraphicsPipeline.h"
+#include "EntryPoints.h"
+#include "Icd.h"
+#include "Objects.h"
+#include "RenderPass.h"
+
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
+#include "mlir/IR/MLIRContext.h"
+#include "mlir/Parser/Parser.h"
+#include "mlir/Target/SPIRV/Serialization.h"
+
+#include "gtest/gtest.h"
+
+#include <string>
+#include <vector>
+
+using namespace feme::vulkan;
+
+namespace {
+
+std::vector<uint32_t> assembleSPIRV(llvm::StringRef Source) {
+  mlir::MLIRContext Ctx;
+  Ctx.loadDialect<mlir::spirv::SPIRVDialect>();
+  mlir::OwningOpRef<mlir::spirv::ModuleOp> Module =
+      mlir::parseSourceString<mlir::spirv::ModuleOp>(Source, &Ctx);
+  if (!Module)
+    return {};
+  llvm::SmallVector<uint32_t, 0> Binary;
+  if (mlir::failed(mlir::spirv::serialize(*Module, Binary)))
+    return {};
+  return std::vector<uint32_t>(Binary.begin(), Binary.end());
+}
+
+/// A vertex stage selecting one of three hard-coded oversized-triangle
+/// corners from `gl_VertexIndex`, exactly like the executor's own
+/// `feme-render` triangle fixture -- no vertex buffer needed.
+constexpr llvm::StringLiteral VertexSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @vid built_in("VertexIndex") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @pos built_in("Position") : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %vidp = spirv.mlir.addressof @vid : !spirv.ptr<i32, Input>
+    %v = spirv.Load "Input" %vidp : i32
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %is0 = spirv.IEqual %v, %c0 : i32
+    %is1 = spirv.IEqual %v, %c1 : i32
+    %neg1 = spirv.Constant -1.0 : f32
+    %three = spirv.Constant 3.0 : f32
+    %xb = spirv.Select %is1, %three, %neg1 : i1, f32
+    %x = spirv.Select %is0, %neg1, %xb : i1, f32
+    %yb = spirv.Select %is1, %neg1, %three : i1, f32
+    %y = spirv.Select %is0, %neg1, %yb : i1, f32
+    %z = spirv.Constant 0.0 : f32
+    %w = spirv.Constant 1.0 : f32
+    %p = spirv.CompositeConstruct %x, %y, %z, %w : (f32, f32, f32, f32) -> vector<4xf32>
+    %posp = spirv.mlir.addressof @pos : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %posp, %p : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Vertex" @main, @vid, @pos
+}
+)mlir";
+
+/// A fragment stage writing solid red to location 0 (SV_Target0).
+constexpr llvm::StringLiteral FragmentSource = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %c = spirv.Constant dense<[1.0, 0.0, 0.0, 1.0]> : vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %c : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir";
+
+class GraphicsPipelineTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    VkAttachmentDescription Attachment{};
+    Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+    Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkAttachmentReference ColorRef{0,
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription Subpass{};
+    Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    Subpass.colorAttachmentCount = 1;
+    Subpass.pColorAttachments = &ColorRef;
+    VkRenderPassCreateInfo PassInfo{};
+    PassInfo.attachmentCount = 1;
+    PassInfo.pAttachments = &Attachment;
+    PassInfo.subpassCount = 1;
+    PassInfo.pSubpasses = &Subpass;
+    ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &Pass),
+              VK_SUCCESS);
+  }
+
+  void TearDown() override {
+    vkDestroyRenderPass(Device, Pass, nullptr);
+    vkDestroyPipelineLayout(Device, Layout, nullptr);
+    vkDestroyDevice(Device, nullptr);
+    vkDestroyInstance(Instance, nullptr);
+  }
+
+  VkShaderModule createModule(llvm::StringRef Source) {
+    std::vector<uint32_t> Words = assembleSPIRV(Source);
+    EXPECT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo Info{};
+    Info.codeSize = Words.size() * sizeof(uint32_t);
+    Info.pCode = Words.data();
+    VkShaderModule Module = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateShaderModule(Device, &Info, nullptr, &Module),
+              VK_SUCCESS);
+    return Module;
+  }
+
+  /// A fully populated `VkGraphicsPipelineCreateInfo` over the fixture's
+  /// render pass, with every state block at its supported default. The
+  /// caller may mutate the state structures (kept alive as members) before
+  /// calling `create`.
+  VkGraphicsPipelineCreateInfo makeCreateInfo(VkShaderModule Vertex,
+                                              VkShaderModule Fragment) {
+    Stages[0] = {};
+    Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    Stages[0].module = Vertex;
+    Stages[0].pName = "main";
+    Stages[1] = {};
+    Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    Stages[1].module = Fragment;
+    Stages[1].pName = "main";
+
+    VertexInput = {};
+    InputAssembly = {};
+    InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    Viewport = {0.0f, 0.0f, 4.0f, 4.0f, 0.0f, 1.0f};
+    Scissor = {{0, 0}, {4, 4}};
+    ViewportState = {};
+    ViewportState.viewportCount = 1;
+    ViewportState.pViewports = &Viewport;
+    ViewportState.scissorCount = 1;
+    ViewportState.pScissors = &Scissor;
+    Raster = {};
+    Raster.cullMode = VK_CULL_MODE_NONE;
+    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    Raster.polygonMode = VK_POLYGON_MODE_FILL;
+    Raster.lineWidth = 1.0f;
+    Multisample = {};
+    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    BlendAttachment = {};
+    BlendAttachment.colorWriteMask = 0xF;
+    Blend = {};
+    Blend.attachmentCount = 1;
+    Blend.pAttachments = &BlendAttachment;
+
+    VkGraphicsPipelineCreateInfo Info{};
+    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    Info.stageCount = 2;
+    Info.pStages = Stages;
+    Info.pVertexInputState = &VertexInput;
+    Info.pInputAssemblyState = &InputAssembly;
+    Info.pViewportState = &ViewportState;
+    Info.pRasterizationState = &Raster;
+    Info.pMultisampleState = &Multisample;
+    Info.pColorBlendState = &Blend;
+    Info.layout = Layout;
+    Info.renderPass = Pass;
+    return Info;
+  }
+
+  VkResult create(const VkGraphicsPipelineCreateInfo &Info,
+                  VkPipeline &Out) {
+    return vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                     &Out);
+  }
+
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+  VkDevice Device = VK_NULL_HANDLE;
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  VkRenderPass Pass = VK_NULL_HANDLE;
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  VkViewport Viewport{};
+  VkRect2D Scissor{};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  VkPipelineColorBlendAttachmentState BlendAttachment{};
+  VkPipelineColorBlendStateCreateInfo Blend{};
+};
+
+TEST_F(GraphicsPipelineTest, CompilesVertexAndFragmentStages) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Obj = fromHandle<Pipeline>(Pipe);
+  ASSERT_EQ(Obj->kind(), Pipeline::Kind::Graphics);
+  auto *Graphics = static_cast<GraphicsPipeline *>(Obj);
+  EXPECT_EQ(Graphics->colorAttachmentCount(), 1u);
+  EXPECT_EQ(Graphics->sampleCount(), 1u);
+  EXPECT_FALSE(Graphics->needsDepthAttachment());
+  EXPECT_EQ(Graphics->vertexStage().getStage(), feme::ShaderStage::Vertex);
+  EXPECT_EQ(Graphics->fragmentStage().getStage(), feme::ShaderStage::Fragment);
+
+  // The executor pipeline this builds per draw carries the translated
+  // state, one blend state per color attachment.
+  DynamicGraphicsState Dynamic;
+  feme::graphics::GraphicsPipeline Executor =
+      Graphics->buildExecutorPipeline(Dynamic);
+  EXPECT_EQ(Executor.getTopology(),
+            feme::graphics::PrimitiveTopology::TriangleList);
+  EXPECT_EQ(Executor.getColorBlends().size(), 1u);
+  EXPECT_EQ(Graphics->resolveViewport(Dynamic).Width, 4.0f);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+
+  // An unimplemented topology.
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  // Rasterizer discard.
+  Info = makeCreateInfo(Vertex, Fragment);
+  Raster.rasterizerDiscardEnable = VK_TRUE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  // Multiple viewports.
+  Info = makeCreateInfo(Vertex, Fragment);
+  ViewportState.viewportCount = 2;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  // A dynamic state with no implemented path.
+  Info = makeCreateInfo(Vertex, Fragment);
+  VkDynamicState Unsupported = VK_DYNAMIC_STATE_DEPTH_BIAS;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Unsupported;
+  Info.pDynamicState = &DynamicInfo;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  // Depth testing with no depth attachment in the render target.
+  Info = makeCreateInfo(Vertex, Fragment);
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  DepthInfo.depthTestEnable = VK_TRUE;
+  DepthInfo.depthCompareOp = VK_COMPARE_OP_LESS;
+  Info.pDepthStencilState = &DepthInfo;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  // A stage this milestone does not compile.
+  Info = makeCreateInfo(Vertex, Fragment);
+  Stages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// A fragment stage writing no `SV_Target0` cannot fill the render pass's
+/// one color attachment; the mismatch is a creation failure, not a draw-time
+/// surprise.
+TEST_F(GraphicsPipelineTest, RejectsMissingFragmentOutput) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir");
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// A fragment input at a location no vertex output writes is a mislinked
+/// varying; cross-stage interface matching catches it at creation.
+TEST_F(GraphicsPipelineTest, RejectsUnmatchedVarying) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @in_var {location = 3 : i32} : !spirv.ptr<vector<4xf32>, Input>
+  spirv.GlobalVariable @color {location = 0 : i32} : !spirv.ptr<vector<4xf32>, Output>
+  spirv.func @main() -> () "None" {
+    %ip = spirv.mlir.addressof @in_var : !spirv.ptr<vector<4xf32>, Input>
+    %v = spirv.Load "Input" %ip : vector<4xf32>
+    %p = spirv.mlir.addressof @color : !spirv.ptr<vector<4xf32>, Output>
+    spirv.Store "Output" %p, %v : vector<4xf32>
+    spirv.Return
+  }
+  spirv.EntryPoint "Fragment" @main, @in_var, @color
+  spirv.ExecutionMode @main "OriginUpperLeft"
+}
+)mlir");
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// A dynamic-rendering pipeline names its attachment formats through a
+/// chained `VkPipelineRenderingCreateInfo` instead of a `VkRenderPass`, and
+/// normalizes into exactly the same translated state.
+TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  Info.renderPass = VK_NULL_HANDLE;
+  Info.pNext = &Rendering;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  EXPECT_EQ(static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe))
+                ->colorAttachmentCount(),
+            1u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+} // namespace

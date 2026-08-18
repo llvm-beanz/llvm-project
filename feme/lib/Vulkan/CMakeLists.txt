@@ -81,6 +81,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Descriptor.cpp
   EntryPoints.cpp
   Format.cpp
+  GraphicsPipeline.cpp
   GroupSize.cpp
   Image.cpp
   Memory.cpp
@@ -101,8 +102,10 @@ add_feme_library(FeMeVulkanCore STATIC
   LINK_LIBS PUBLIC
   Vulkan::Headers
   FeMeCore
+  FeMeGraphics
   FeMeImportSPIRV
   FeMeTargetCPU
+  FeMeTransformsGraphics
   FeMeTranslateSPIRV
   )
 add_dependencies(FeMeVulkanCore FeMeVulkanEntrypointsGen)

@@ -82,6 +82,29 @@ buildSpecializationOverrides(const VkSpecializationInfo *Info) {
 
 namespace feme::vulkan {
 
+Pipeline::~Pipeline() = default;
+
+Expected<feme::Module> importShaderModule(feme::Context &Ctx,
+                                          llvm::ArrayRef<uint32_t> Words) {
+  MemoryBufferRef Buffer(StringRef(reinterpret_cast<const char *>(Words.data()),
+                                   Words.size() * sizeof(uint32_t)),
+                         "shader-module");
+  feme::SPIRVImporter Importer;
+  feme::ImportOptions ImportOpts;
+  Expected<feme::Module> Imported = Importer.import(Buffer, ImportOpts, Ctx);
+  if (!Imported)
+    return Imported.takeError();
+
+  feme::SPIRVToLLVMTranslator ToLLVMIR;
+  Expected<feme::Module> AsLLVMIR =
+      ToLLVMIR.translate(std::move(*Imported), Ctx);
+  if (!AsLLVMIR)
+    return AsLLVMIR.takeError();
+
+  clearHostAgnosticMetadata(AsLLVMIR->getLLVMModule());
+  return AsLLVMIR;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
     VkDevice, const VkShaderModuleCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule) {
@@ -144,9 +167,7 @@ vkDestroyPipelineLayout(VkDevice, VkPipelineLayout pipelineLayout,
   Alloc.destroy(fromHandle<PipelineLayout>(pipelineLayout));
 }
 
-namespace {
-
-/// Whether \p Layout's compute-visible push-constant ranges fully cover
+/// Whether \p Layout's \p StageFlags-visible push-constant ranges fully cover
 /// `[0, RootConstantSize)` with no gap -- see "Descriptor Model": "reject a
 /// shader whose accessed range is not fully covered by a range declared in
 /// the layout with the compute stage bit set". `RootConstantSize` is
@@ -158,14 +179,15 @@ namespace {
 /// jointly cover it with gaps only a full walk catches.
 bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
                                         uint32_t RootConstantSize,
-                                        uint32_t MaxPushConstantsSize) {
+                                        uint32_t MaxPushConstantsSize,
+                                        VkShaderStageFlags StageFlags) {
   if (RootConstantSize == 0)
     return true;
   if (RootConstantSize > MaxPushConstantsSize)
     return false;
   std::vector<bool> Covered(RootConstantSize, false);
   for (const VkPushConstantRange &Range : Layout.pushConstantRanges()) {
-    if ((Range.stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) == 0)
+    if ((Range.stageFlags & StageFlags) == 0)
       continue;
     uint32_t Begin = std::min(Range.offset, RootConstantSize);
     uint32_t End = std::min(Range.offset + Range.size, RootConstantSize);
@@ -174,6 +196,8 @@ bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
   }
   return llvm::all_of(Covered, [](bool B) { return B; });
 }
+
+namespace {
 
 /// Whether a binding declared as \p Type can serve a bound range the
 /// compiler assigned to \p Class's heap. A buffer range accepts every
@@ -195,6 +219,41 @@ bool descriptorTypeMatchesClass(VkDescriptorType Type,
   }
   return false;
 }
+
+} // namespace
+
+// Every bound range the shader reads must have a compatible binding in the
+// pipeline layout's descriptor set layouts: the same (set, binding)
+// identity (see PipelineLayout's own comment), a descriptor type of the
+// matching *class* (a shader that samples through (set, binding) must not
+// be handed a storage buffer there), and a declared array big enough to
+// cover the shader's range (see "Descriptor Model": "Descriptor arrays
+// whose length exceeds what the reserved heap can represent must fail
+// pipeline creation rather than silently truncate").
+Error validateBoundRanges(const feme::cpu::ResourceInfo &Info,
+                          const PipelineLayout &Layout) {
+  llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts = Layout.setLayouts();
+  for (const feme::cpu::BoundResourceRange &Range : Info.BoundRanges) {
+    if (Range.Space >= SetLayouts.size())
+      return createStringError(inconvertibleErrorCode(),
+                               "shader binds descriptor set %u, which "
+                               "VkPipelineLayout does not declare",
+                               Range.Space);
+    const DescriptorSetLayoutBinding *Binding =
+        SetLayouts[Range.Space]->find(Range.BaseRegister);
+    if (!Binding || !isSupportedDescriptorType(Binding->Type) ||
+        Binding->Count < Range.RangeSize ||
+        !descriptorTypeMatchesClass(Binding->Type, Range.Class))
+      return createStringError(
+          inconvertibleErrorCode(),
+          "shader's (set %u, binding %u) requirement is not satisfied by "
+          "its VkPipelineLayout",
+          Range.Space, Range.BaseRegister);
+  }
+  return Error::success();
+}
+
+namespace {
 
 /// Compiles one `VkComputePipelineCreateInfo` end to end: imports its
 /// shader module's SPIR-V, translates it to LLVM IR, resolves and stamps
@@ -239,24 +298,11 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   auto Ctx = std::make_unique<feme::Context>();
   Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
 
-  MemoryBufferRef Buffer(
-      StringRef(reinterpret_cast<const char *>(Module->words().data()),
-                Module->words().size() * sizeof(uint32_t)),
-      "shader-module");
-  feme::SPIRVImporter Importer;
-  feme::ImportOptions ImportOpts;
-  Expected<feme::Module> Imported = Importer.import(Buffer, ImportOpts, *Ctx);
-  if (!Imported)
-    return Imported.takeError();
-
-  feme::SPIRVToLLVMTranslator ToLLVMIR;
-  Expected<feme::Module> AsLLVMIR =
-      ToLLVMIR.translate(std::move(*Imported), *Ctx);
+  Expected<feme::Module> AsLLVMIR = importShaderModule(*Ctx, Module->words());
   if (!AsLLVMIR)
     return AsLLVMIR.takeError();
 
   llvm::Module &LLVMMod = AsLLVMIR->getLLVMModule();
-  clearHostAgnosticMetadata(LLVMMod);
 
   // Stamp the spec-resolved group size onto the entry point, overriding
   // whatever (if anything) the plain `LocalSize` execution mode already
@@ -290,39 +336,16 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
   if (!pushConstantsCoverRootConstantSize(
           Layout, Info.RootConstantSize,
-          DeviceInfo.Properties.limits.maxPushConstantsSize))
+          DeviceInfo.Properties.limits.maxPushConstantsSize,
+          VK_SHADER_STAGE_COMPUTE_BIT))
     return createStringError(
         inconvertibleErrorCode(),
         "shader's root-constant span is not fully covered by a "
         "VK_SHADER_STAGE_COMPUTE_BIT VkPushConstantRange in its "
         "VkPipelineLayout");
 
-  // Every bound range the shader reads must have a compatible binding in
-  // the pipeline layout's descriptor set layouts: the same (set, binding)
-  // identity (see PipelineLayout's own comment), a descriptor type of the
-  // matching *class* (a shader that samples through (set, binding) must not
-  // be handed a storage buffer there), and a declared array big enough to
-  // cover the shader's range (see "Descriptor Model": "Descriptor arrays
-  // whose length exceeds what the reserved heap can represent must fail
-  // pipeline creation rather than silently truncate").
-  llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts = Layout.setLayouts();
-  for (const feme::cpu::BoundResourceRange &Range : Info.BoundRanges) {
-    if (Range.Space >= SetLayouts.size())
-      return createStringError(inconvertibleErrorCode(),
-                               "shader binds descriptor set %u, which "
-                               "VkPipelineLayout does not declare",
-                               Range.Space);
-    const DescriptorSetLayoutBinding *Binding =
-        SetLayouts[Range.Space]->find(Range.BaseRegister);
-    if (!Binding || !isSupportedDescriptorType(Binding->Type) ||
-        Binding->Count < Range.RangeSize ||
-        !descriptorTypeMatchesClass(Binding->Type, Range.Class))
-      return createStringError(
-          inconvertibleErrorCode(),
-          "shader's (set %u, binding %u) requirement is not satisfied by "
-          "its VkPipelineLayout",
-          Range.Space, Range.BaseRegister);
-  }
+  if (Error E = validateBoundRanges(Info, Layout))
+    return std::move(E);
 
   return std::make_shared<CachedPipelineArtifact>(
       CachedPipelineArtifact{std::move(Ctx), std::move(*Stage)});
@@ -392,8 +415,11 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
     VkDevice, VkPipeline pipeline, const VkAllocationCallbacks *pAllocator) {
   if (!pipeline)
     return;
+  // Either bind point's object is freed through the common `Pipeline` base,
+  // whose destructor is virtual precisely so this call site does not have to
+  // know which kind it holds.
   Allocator Alloc(pAllocator);
-  Alloc.destroy(fromHandle<ComputePipeline>(pipeline));
+  Alloc.destroy(fromHandle<Pipeline>(pipeline));
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(

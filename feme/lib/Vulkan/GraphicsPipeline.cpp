@@ -1,0 +1,961 @@
+//===- GraphicsPipeline.cpp - VkPipeline graphics state ------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "GraphicsPipeline.h"
+#include "Descriptor.h"
+#include "Format.h"
+#include "Icd.h"
+#include "Objects.h"
+#include "PhysicalDeviceInfo.h"
+#include "RenderPass.h"
+
+#include "feme/Core/Context.h"
+#include "feme/Core/Module.h"
+#include "feme/Core/Signature.h"
+#include "feme/Target/CPU/CompiledStage.h"
+#include "feme/Target/CPU/Pipeline.h"
+#include "feme/Target/CPU/ResourceInfo.h"
+#include "feme/Transforms/Graphics/CanonicalizeStage.h"
+
+#include "llvm/IR/Module.h"
+#include "llvm/IR/PassManager.h"
+
+#include <optional>
+
+using namespace feme::vulkan;
+using namespace llvm;
+
+namespace {
+
+using feme::graphics::AttachmentFormat;
+using feme::graphics::BlendFactor;
+using feme::graphics::BlendOp;
+using feme::graphics::BlendState;
+using feme::graphics::CompareOp;
+using feme::graphics::CullMode;
+using feme::graphics::FrontFace;
+using feme::graphics::LogicOp;
+using feme::graphics::PrimitiveTopology;
+using feme::graphics::StencilFaceState;
+using feme::graphics::StencilOp;
+
+//===----------------------------------------------------------------------===//
+// Fixed-function state translation
+//===----------------------------------------------------------------------===//
+
+std::optional<PrimitiveTopology> mapTopology(VkPrimitiveTopology Topology) {
+  switch (Topology) {
+  case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+    return PrimitiveTopology::TriangleList;
+  case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+    return PrimitiveTopology::TriangleStrip;
+  default:
+    // Point/line topologies have no rasterization path yet, and the
+    // adjacency ones need a geometry stage (V7): "validated against the
+    // advertised topologies".
+    return std::nullopt;
+  }
+}
+
+std::optional<CullMode> mapCullMode(VkCullModeFlags Cull) {
+  switch (Cull) {
+  case VK_CULL_MODE_NONE:
+    return CullMode::None;
+  case VK_CULL_MODE_FRONT_BIT:
+    return CullMode::Front;
+  case VK_CULL_MODE_BACK_BIT:
+    return CullMode::Back;
+  default:
+    // `VK_CULL_MODE_FRONT_AND_BACK` discards every primitive, which the
+    // executor has no representation for.
+    return std::nullopt;
+  }
+}
+
+std::optional<CompareOp> mapCompareOp(VkCompareOp Op) {
+  switch (Op) {
+  case VK_COMPARE_OP_NEVER:
+    return CompareOp::Never;
+  case VK_COMPARE_OP_LESS:
+    return CompareOp::Less;
+  case VK_COMPARE_OP_EQUAL:
+    return CompareOp::Equal;
+  case VK_COMPARE_OP_LESS_OR_EQUAL:
+    return CompareOp::LessEqual;
+  case VK_COMPARE_OP_GREATER:
+    return CompareOp::Greater;
+  case VK_COMPARE_OP_NOT_EQUAL:
+    return CompareOp::NotEqual;
+  case VK_COMPARE_OP_GREATER_OR_EQUAL:
+    return CompareOp::GreaterEqual;
+  case VK_COMPARE_OP_ALWAYS:
+    return CompareOp::Always;
+  default:
+    return std::nullopt;
+  }
+}
+
+std::optional<StencilOp> mapStencilOp(VkStencilOp Op) {
+  switch (Op) {
+  case VK_STENCIL_OP_KEEP:
+    return StencilOp::Keep;
+  case VK_STENCIL_OP_ZERO:
+    return StencilOp::Zero;
+  case VK_STENCIL_OP_REPLACE:
+    return StencilOp::Replace;
+  case VK_STENCIL_OP_INCREMENT_AND_CLAMP:
+    return StencilOp::IncrementClamp;
+  case VK_STENCIL_OP_DECREMENT_AND_CLAMP:
+    return StencilOp::DecrementClamp;
+  case VK_STENCIL_OP_INVERT:
+    return StencilOp::Invert;
+  case VK_STENCIL_OP_INCREMENT_AND_WRAP:
+    return StencilOp::IncrementWrap;
+  case VK_STENCIL_OP_DECREMENT_AND_WRAP:
+    return StencilOp::DecrementWrap;
+  default:
+    return std::nullopt;
+  }
+}
+
+std::optional<BlendFactor> mapBlendFactor(VkBlendFactor Factor) {
+  switch (Factor) {
+  case VK_BLEND_FACTOR_ZERO:
+    return BlendFactor::Zero;
+  case VK_BLEND_FACTOR_ONE:
+    return BlendFactor::One;
+  case VK_BLEND_FACTOR_SRC_COLOR:
+    return BlendFactor::SrcColor;
+  case VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR:
+    return BlendFactor::OneMinusSrcColor;
+  case VK_BLEND_FACTOR_DST_COLOR:
+    return BlendFactor::DstColor;
+  case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR:
+    return BlendFactor::OneMinusDstColor;
+  case VK_BLEND_FACTOR_SRC_ALPHA:
+    return BlendFactor::SrcAlpha;
+  case VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA:
+    return BlendFactor::OneMinusSrcAlpha;
+  case VK_BLEND_FACTOR_DST_ALPHA:
+    return BlendFactor::DstAlpha;
+  case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA:
+    return BlendFactor::OneMinusDstAlpha;
+  case VK_BLEND_FACTOR_CONSTANT_COLOR:
+    return BlendFactor::ConstantColor;
+  case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR:
+    return BlendFactor::OneMinusConstantColor;
+  case VK_BLEND_FACTOR_CONSTANT_ALPHA:
+    return BlendFactor::ConstantAlpha;
+  case VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA:
+    return BlendFactor::OneMinusConstantAlpha;
+  case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE:
+    return BlendFactor::SrcAlphaSaturate;
+  default:
+    // The dual-source factors have no `BlendFactor` peer: no fragment stage
+    // writes a second output yet.
+    return std::nullopt;
+  }
+}
+
+std::optional<BlendOp> mapBlendOp(VkBlendOp Op) {
+  switch (Op) {
+  case VK_BLEND_OP_ADD:
+    return BlendOp::Add;
+  case VK_BLEND_OP_SUBTRACT:
+    return BlendOp::Subtract;
+  case VK_BLEND_OP_REVERSE_SUBTRACT:
+    return BlendOp::ReverseSubtract;
+  case VK_BLEND_OP_MIN:
+    return BlendOp::Min;
+  case VK_BLEND_OP_MAX:
+    return BlendOp::Max;
+  default:
+    return std::nullopt;
+  }
+}
+
+std::optional<LogicOp> mapLogicOp(VkLogicOp Op) {
+  switch (Op) {
+  case VK_LOGIC_OP_CLEAR:
+    return LogicOp::Clear;
+  case VK_LOGIC_OP_AND:
+    return LogicOp::And;
+  case VK_LOGIC_OP_AND_REVERSE:
+    return LogicOp::AndReverse;
+  case VK_LOGIC_OP_COPY:
+    return LogicOp::Copy;
+  case VK_LOGIC_OP_AND_INVERTED:
+    return LogicOp::AndInverted;
+  case VK_LOGIC_OP_NO_OP:
+    return LogicOp::NoOp;
+  case VK_LOGIC_OP_XOR:
+    return LogicOp::Xor;
+  case VK_LOGIC_OP_OR:
+    return LogicOp::Or;
+  case VK_LOGIC_OP_NOR:
+    return LogicOp::Nor;
+  case VK_LOGIC_OP_EQUIVALENT:
+    return LogicOp::Equivalent;
+  case VK_LOGIC_OP_INVERT:
+    return LogicOp::Invert;
+  case VK_LOGIC_OP_OR_REVERSE:
+    return LogicOp::OrReverse;
+  case VK_LOGIC_OP_COPY_INVERTED:
+    return LogicOp::CopyInverted;
+  case VK_LOGIC_OP_OR_INVERTED:
+    return LogicOp::OrInverted;
+  case VK_LOGIC_OP_NAND:
+    return LogicOp::Nand;
+  case VK_LOGIC_OP_SET:
+    return LogicOp::Set;
+  default:
+    return std::nullopt;
+  }
+}
+
+std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
+  switch (State) {
+  case VK_DYNAMIC_STATE_VIEWPORT:
+    return DynamicStateViewport;
+  case VK_DYNAMIC_STATE_SCISSOR:
+    return DynamicStateScissor;
+  case VK_DYNAMIC_STATE_BLEND_CONSTANTS:
+    return DynamicStateBlendConstants;
+  case VK_DYNAMIC_STATE_STENCIL_REFERENCE:
+    return DynamicStateStencilReference;
+  case VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK:
+    return DynamicStateStencilCompareMask;
+  case VK_DYNAMIC_STATE_STENCIL_WRITE_MASK:
+    return DynamicStateStencilWriteMask;
+  default:
+    return std::nullopt;
+  }
+}
+
+/// Whether \p Format may be fetched as a vertex attribute: the subset
+/// `feme::graphics`' own `decodeAttribute` (Executor.cpp) implements.
+bool isSupportedVertexAttributeFormat(feme::cpu::ResourceFormat Format) {
+  switch (Format) {
+  case feme::cpu::ResourceFormat::R32_FLOAT:
+  case feme::cpu::ResourceFormat::R32G32_FLOAT:
+  case feme::cpu::ResourceFormat::R32G32B32_FLOAT:
+  case feme::cpu::ResourceFormat::R32G32B32A32_FLOAT:
+  case feme::cpu::ResourceFormat::R32_UINT:
+  case feme::cpu::ResourceFormat::R32G32_UINT:
+  case feme::cpu::ResourceFormat::R32G32B32_UINT:
+  case feme::cpu::ResourceFormat::R32G32B32A32_UINT:
+  case feme::cpu::ResourceFormat::R32_SINT:
+  case feme::cpu::ResourceFormat::R32G32_SINT:
+  case feme::cpu::ResourceFormat::R32G32B32_SINT:
+  case feme::cpu::ResourceFormat::R32G32B32A32_SINT:
+  case feme::cpu::ResourceFormat::R8G8B8A8_UNORM:
+  case feme::cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB:
+  case feme::cpu::ResourceFormat::R8G8B8A8_SNORM:
+  case feme::cpu::ResourceFormat::R8G8B8A8_UINT:
+  case feme::cpu::ResourceFormat::R8G8B8A8_SINT:
+    return true;
+  default:
+    return false;
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Stage compilation
+//===----------------------------------------------------------------------===//
+
+/// Compiles one `VkPipelineShaderStageCreateInfo` into a
+/// `feme::cpu::CompiledStage` for \p Stage: the same import/translate flow
+/// the compute path uses, plus `feme::graphics::CanonicalizeStagePass` --
+/// which rewrites the SPIR-V interface accesses into the `feme.stage.*`
+/// family and builds the entry's `feme::EntrySignature` -- and
+/// `StageCompileOptions` naming the stage (see "Graphics pipeline state").
+Expected<std::shared_ptr<feme::cpu::CompiledStage>>
+compileGraphicsStage(feme::Context &Ctx,
+                     const VkPipelineShaderStageCreateInfo &StageInfo,
+                     feme::ShaderStage Stage) {
+  if (!StageInfo.module)
+    return createStringError(inconvertibleErrorCode(),
+                             "graphics pipeline stage has no VkShaderModule");
+  // Specialization constants are not resolved for a graphics stage yet: the
+  // compute path's own resolution is group-size-specific (GroupSize.h), and
+  // nothing here consumes a specialized value. Accepting the structure
+  // silently would compile the shader's default constants instead of the
+  // application's, so it is rejected.
+  if (StageInfo.pSpecializationInfo &&
+      StageInfo.pSpecializationInfo->mapEntryCount != 0)
+    return createStringError(inconvertibleErrorCode(),
+                             "specialization constants are not implemented "
+                             "for a graphics stage yet");
+
+  auto *Module = fromHandle<ShaderModule>(StageInfo.module);
+  std::string EntryPoint = StageInfo.pName ? StageInfo.pName : "main";
+
+  Expected<feme::Module> AsLLVMIR = importShaderModule(Ctx, Module->words());
+  if (!AsLLVMIR)
+    return AsLLVMIR.takeError();
+
+  ModuleAnalysisManager MAM;
+  feme::graphics::CanonicalizeStagePass().run(AsLLVMIR->getLLVMModule(), MAM);
+
+  feme::cpu::StageCompileOptions Opts;
+  Opts.Stage = Stage;
+  Opts.EntryPoint = EntryPoint;
+  Expected<std::unique_ptr<feme::cpu::CompiledStage>> Compiled =
+      feme::cpu::CompiledStage::create(Ctx, std::move(*AsLLVMIR), Opts);
+  if (!Compiled)
+    return Compiled.takeError();
+  return std::shared_ptr<feme::cpu::CompiledStage>(std::move(*Compiled));
+}
+
+const feme::SignatureElement *
+findSystemValue(const feme::EntrySignature &Sig, feme::SignatureDirection Dir,
+                feme::SignatureSystemValue SysVal) {
+  for (const feme::SignatureElement &Elt : Sig.Elements)
+    if (Elt.Direction == Dir && Elt.SystemValue == SysVal)
+      return &Elt;
+  return nullptr;
+}
+
+const feme::SignatureElement *
+findLocation(const feme::EntrySignature &Sig, feme::SignatureDirection Dir,
+             uint32_t Location) {
+  for (const feme::SignatureElement &Elt : Sig.Elements)
+    if (Elt.Direction == Dir &&
+        Elt.SystemValue == feme::SignatureSystemValue::None && Elt.Location &&
+        *Elt.Location == Location)
+      return &Elt;
+  return nullptr;
+}
+
+Expected<feme::EntrySignature>
+getStageSignature(const feme::cpu::CompiledStage &Stage) {
+  std::vector<uint8_t> Bytes = Stage.getArtifactInfo().Signature;
+  if (Bytes.empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "compiled stage carries no signature "
+                             "reflection");
+  return feme::parseSignature(Bytes);
+}
+
+/// Validates the vertex -> fragment interface against the core reflection
+/// G0 produces: "Cross-stage interface matching is validated at pipeline
+/// creation ... and a mismatch is a pipeline-creation failure with a
+/// diagnostic, never a silently mislinked varying." Also checks the two
+/// interface obligations the executor itself has -- an `SV_Position` vertex
+/// output and one `SV_TargetN` fragment output per color attachment -- here,
+/// at creation, rather than leaving them for the first draw.
+Error validateStageInterfaces(const feme::cpu::CompiledStage &VertexStage,
+                              const feme::cpu::CompiledStage &FragmentStage,
+                              uint32_t ColorAttachmentCount,
+                              llvm::ArrayRef<VertexInputAttribute> Attributes) {
+  Expected<feme::EntrySignature> VSSig = getStageSignature(VertexStage);
+  if (!VSSig)
+    return VSSig.takeError();
+  Expected<feme::EntrySignature> FSSig = getStageSignature(FragmentStage);
+  if (!FSSig)
+    return FSSig.takeError();
+
+  const feme::SignatureElement *Position =
+      findSystemValue(*VSSig, feme::SignatureDirection::Output,
+                      feme::SignatureSystemValue::Position);
+  if (!Position || Position->ComponentCount != 4)
+    return createStringError(inconvertibleErrorCode(),
+                             "vertex stage does not write a 4-component "
+                             "SV_Position output");
+
+  for (const feme::SignatureElement &FSIn : FSSig->Elements) {
+    if (FSIn.Direction != feme::SignatureDirection::Input ||
+        FSIn.SystemValue != feme::SignatureSystemValue::None)
+      continue;
+    if (!FSIn.Location)
+      return createStringError(inconvertibleErrorCode(),
+                               "fragment input element %u has no location to "
+                               "link against a vertex output",
+                               FSIn.ElementID);
+    const feme::SignatureElement *VSOut =
+        findLocation(*VSSig, feme::SignatureDirection::Output, *FSIn.Location);
+    if (!VSOut)
+      return createStringError(inconvertibleErrorCode(),
+                               "fragment input location %u has no matching "
+                               "vertex stage output",
+                               *FSIn.Location);
+    if (VSOut->ComponentCount != FSIn.ComponentCount ||
+        VSOut->ComponentType != FSIn.ComponentType)
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex output and fragment input at location "
+                               "%u disagree on component count/type",
+                               *FSIn.Location);
+  }
+
+  for (uint32_t I = 0; I != ColorAttachmentCount; ++I) {
+    const feme::SignatureElement *Color =
+        findLocation(*FSSig, feme::SignatureDirection::Output, I);
+    if (!Color || Color->ComponentCount != 4 ||
+        Color->ComponentType != feme::SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "fragment stage has no 4-component "
+                               "floating-point output at location %u "
+                               "(SV_Target%u)",
+                               I, I);
+  }
+
+  // Every located vertex *input* must be supplied by a vertex attribute:
+  // an unbound one would read as zero at every vertex, which is a silently
+  // wrong image rather than a diagnosable failure.
+  for (const feme::SignatureElement &VSIn : VSSig->Elements) {
+    if (VSIn.Direction != feme::SignatureDirection::Input ||
+        VSIn.SystemValue != feme::SignatureSystemValue::None)
+      continue;
+    if (!VSIn.Location)
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex input element %u has no location",
+                               VSIn.ElementID);
+    bool Found = false;
+    for (const VertexInputAttribute &Attr : Attributes)
+      Found |= Attr.Location == *VSIn.Location;
+    if (!Found)
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex input location %u has no matching "
+                               "VkVertexInputAttributeDescription",
+                               *VSIn.Location);
+  }
+  return Error::success();
+}
+
+//===----------------------------------------------------------------------===//
+// Render-target identity
+//===----------------------------------------------------------------------===//
+
+/// The color attachment formats, sample count, and depth/stencil formats a
+/// graphics pipeline is created against: either from its `VkRenderPass` and
+/// subpass index, or -- for a dynamic-rendering pipeline -- from the
+/// `VkPipelineRenderingCreateInfo` chained onto its create info. Both
+/// normalize into the same shape, exactly as the render-target binding
+/// itself does at draw time.
+struct PipelineRenderTargets {
+  std::vector<feme::cpu::ResourceFormat> Colors;
+  uint32_t SampleCount = 1;
+  std::optional<feme::cpu::ResourceFormat> DepthStencil;
+};
+
+const VkPipelineRenderingCreateInfo *
+findRenderingCreateInfo(const void *Next) {
+  for (const auto *Header = static_cast<const VkBaseInStructure *>(Next);
+       Header; Header = Header->pNext)
+    if (Header->sType == VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO)
+      return reinterpret_cast<const VkPipelineRenderingCreateInfo *>(Header);
+  return nullptr;
+}
+
+Expected<PipelineRenderTargets>
+getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
+  PipelineRenderTargets Targets;
+  if (CreateInfo.renderPass) {
+    const RenderPass &Pass = *fromHandle<RenderPass>(CreateInfo.renderPass);
+    if (CreateInfo.subpass >= Pass.subpasses().size())
+      return createStringError(inconvertibleErrorCode(),
+                               "graphics pipeline names subpass %u, which its "
+                               "VkRenderPass does not have",
+                               CreateInfo.subpass);
+    const SubpassDescription &Subpass = Pass.subpasses()[CreateInfo.subpass];
+    for (uint32_t Index : Subpass.ColorAttachments) {
+      if (Index == VK_ATTACHMENT_UNUSED)
+        return createStringError(inconvertibleErrorCode(),
+                                 "an unused color attachment slot is not "
+                                 "implemented");
+      Targets.Colors.push_back(Pass.attachments()[Index].Format);
+      Targets.SampleCount = Pass.attachments()[Index].SampleCount;
+    }
+    if (Subpass.DepthStencilAttachment != VK_ATTACHMENT_UNUSED)
+      Targets.DepthStencil =
+          Pass.attachments()[Subpass.DepthStencilAttachment].Format;
+    return Targets;
+  }
+
+  const VkPipelineRenderingCreateInfo *Rendering =
+      findRenderingCreateInfo(CreateInfo.pNext);
+  if (!Rendering)
+    return createStringError(inconvertibleErrorCode(),
+                             "a graphics pipeline needs either a VkRenderPass "
+                             "or a chained VkPipelineRenderingCreateInfo");
+  for (uint32_t I = 0; I != Rendering->colorAttachmentCount; ++I) {
+    std::optional<feme::cpu::ResourceFormat> Format =
+        mapVkFormat(Rendering->pColorAttachmentFormats[I]);
+    if (!Format || !isSupportedColorAttachmentFormat(*Format))
+      return createStringError(inconvertibleErrorCode(),
+                               "color attachment %u names a format this "
+                               "driver cannot render into",
+                               I);
+    Targets.Colors.push_back(*Format);
+  }
+  VkFormat DepthStencilFormat = Rendering->depthAttachmentFormat != VK_FORMAT_UNDEFINED
+                                    ? Rendering->depthAttachmentFormat
+                                    : Rendering->stencilAttachmentFormat;
+  if (DepthStencilFormat != VK_FORMAT_UNDEFINED) {
+    std::optional<feme::cpu::ResourceFormat> Format =
+        mapVkFormat(DepthStencilFormat);
+    if (!Format || (!isSupportedDepthAttachmentFormat(*Format) &&
+                    !isSupportedStencilAttachmentFormat(*Format)))
+      return createStringError(inconvertibleErrorCode(),
+                               "the depth/stencil attachment names a format "
+                               "this driver cannot render into");
+    Targets.DepthStencil = *Format;
+  }
+  return Targets;
+}
+
+//===----------------------------------------------------------------------===//
+// Pipeline creation
+//===----------------------------------------------------------------------===//
+
+Error translateVertexInput(const VkPipelineVertexInputStateCreateInfo *Info,
+                           const VkPhysicalDeviceLimits &Limits,
+                           GraphicsPipelineState &Out) {
+  if (!Info)
+    return Error::success();
+  if (Info->vertexBindingDescriptionCount > Limits.maxVertexInputBindings ||
+      Info->vertexAttributeDescriptionCount > Limits.maxVertexInputAttributes)
+    return createStringError(inconvertibleErrorCode(),
+                             "vertex input exceeds maxVertexInputBindings/"
+                             "maxVertexInputAttributes");
+  for (uint32_t I = 0; I != Info->vertexBindingDescriptionCount; ++I) {
+    const VkVertexInputBindingDescription &Src =
+        Info->pVertexBindingDescriptions[I];
+    if (Src.inputRate != VK_VERTEX_INPUT_RATE_VERTEX)
+      return createStringError(inconvertibleErrorCode(),
+                               "per-instance vertex input rate is not "
+                               "implemented yet");
+    if (Src.stride > Limits.maxVertexInputBindingStride)
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex binding stride exceeds "
+                               "maxVertexInputBindingStride");
+    Out.VertexBindings.push_back(VertexInputBinding{Src.binding, Src.stride});
+  }
+  for (uint32_t I = 0; I != Info->vertexAttributeDescriptionCount; ++I) {
+    const VkVertexInputAttributeDescription &Src =
+        Info->pVertexAttributeDescriptions[I];
+    if (Src.offset > Limits.maxVertexInputAttributeOffset)
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex attribute offset exceeds "
+                               "maxVertexInputAttributeOffset");
+    std::optional<feme::cpu::ResourceFormat> Format = mapVkFormat(Src.format);
+    if (!Format || !isSupportedVertexAttributeFormat(*Format))
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex attribute at location %u names a "
+                               "format the vertex fetch cannot decode",
+                               Src.location);
+    bool HasBinding = false;
+    for (const VertexInputBinding &Binding : Out.VertexBindings)
+      HasBinding |= Binding.Binding == Src.binding;
+    if (!HasBinding)
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex attribute at location %u names "
+                               "binding %u, which the pipeline does not "
+                               "declare",
+                               Src.location, Src.binding);
+    Out.VertexAttributes.push_back(
+        VertexInputAttribute{Src.location, Src.binding, Src.offset, *Format});
+  }
+  return Error::success();
+}
+
+Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
+                           GraphicsPipelineState &Out) {
+  if (!Info)
+    return createStringError(inconvertibleErrorCode(),
+                             "a graphics pipeline needs rasterization state");
+  if (Info->rasterizerDiscardEnable || Info->depthClampEnable ||
+      Info->depthBiasEnable || Info->polygonMode != VK_POLYGON_MODE_FILL)
+    return createStringError(inconvertibleErrorCode(),
+                             "rasterizer discard, depth clamp, depth bias, "
+                             "and non-fill polygon modes are not implemented");
+  std::optional<CullMode> Cull = mapCullMode(Info->cullMode);
+  if (!Cull)
+    return createStringError(inconvertibleErrorCode(),
+                             "VK_CULL_MODE_FRONT_AND_BACK is not implemented");
+  Out.Raster.Cull = *Cull;
+  Out.Raster.Front = Info->frontFace == VK_FRONT_FACE_CLOCKWISE
+                         ? FrontFace::Clockwise
+                         : FrontFace::CounterClockwise;
+  return Error::success();
+}
+
+Error translateDepthStencilState(
+    const VkPipelineDepthStencilStateCreateInfo *Info,
+    const PipelineRenderTargets &Targets, GraphicsPipelineState &Out) {
+  if (!Info)
+    return Error::success();
+  if (Info->depthBoundsTestEnable)
+    return createStringError(inconvertibleErrorCode(),
+                             "the depth bounds test is not implemented");
+
+  if (Info->depthTestEnable || Info->depthWriteEnable) {
+    if (!Targets.DepthStencil ||
+        !isSupportedDepthAttachmentFormat(*Targets.DepthStencil))
+      return createStringError(inconvertibleErrorCode(),
+                               "depth testing/writes need a depth attachment "
+                               "in the pipeline's render target");
+    std::optional<CompareOp> Compare = mapCompareOp(Info->depthCompareOp);
+    if (!Compare)
+      return createStringError(inconvertibleErrorCode(),
+                               "unrecognized depth compare operation");
+    Out.Depth.TestEnable = Info->depthTestEnable != VK_FALSE;
+    Out.Depth.WriteEnable = Info->depthWriteEnable != VK_FALSE;
+    Out.Depth.Compare = *Compare;
+  }
+
+  if (!Info->stencilTestEnable)
+    return Error::success();
+  if (!Targets.DepthStencil ||
+      !isSupportedStencilAttachmentFormat(*Targets.DepthStencil))
+    return createStringError(inconvertibleErrorCode(),
+                             "stencil testing needs an S8_UINT attachment in "
+                             "the pipeline's render target");
+  auto translateFace = [](const VkStencilOpState &Src,
+                          StencilFaceState &Dst) -> Error {
+    std::optional<CompareOp> Compare = mapCompareOp(Src.compareOp);
+    std::optional<StencilOp> Fail = mapStencilOp(Src.failOp);
+    std::optional<StencilOp> DepthFail = mapStencilOp(Src.depthFailOp);
+    std::optional<StencilOp> Pass = mapStencilOp(Src.passOp);
+    if (!Compare || !Fail || !DepthFail || !Pass)
+      return createStringError(inconvertibleErrorCode(),
+                               "unrecognized stencil compare/operation");
+    Dst.Compare = *Compare;
+    Dst.FailOp = *Fail;
+    Dst.DepthFailOp = *DepthFail;
+    Dst.PassOp = *Pass;
+    Dst.CompareMask = static_cast<uint8_t>(Src.compareMask);
+    Dst.WriteMask = static_cast<uint8_t>(Src.writeMask);
+    Dst.Reference = static_cast<uint8_t>(Src.reference);
+    return Error::success();
+  };
+  Out.Stencil.TestEnable = true;
+  if (Error E = translateFace(Info->front, Out.Stencil.Front))
+    return E;
+  return translateFace(Info->back, Out.Stencil.Back);
+}
+
+Error translateColorBlendState(const VkPipelineColorBlendStateCreateInfo *Info,
+                               const PipelineRenderTargets &Targets,
+                               GraphicsPipelineState &Out) {
+  Out.ColorBlends.assign(Targets.Colors.size(), BlendState{});
+  if (!Info)
+    return Error::success();
+  if (Info->attachmentCount != Targets.Colors.size())
+    return createStringError(inconvertibleErrorCode(),
+                             "the pipeline declares %u color blend state(s) "
+                             "but its render target has %zu color "
+                             "attachment(s)",
+                             Info->attachmentCount, Targets.Colors.size());
+  if (Info->logicOpEnable) {
+    std::optional<LogicOp> Logic = mapLogicOp(Info->logicOp);
+    if (!Logic)
+      return createStringError(inconvertibleErrorCode(),
+                               "unrecognized logic operation");
+    Out.LogicOpEnable = true;
+    Out.Logic = *Logic;
+  }
+  for (uint32_t I = 0; I != Info->attachmentCount; ++I) {
+    const VkPipelineColorBlendAttachmentState &Src = Info->pAttachments[I];
+    BlendState &Dst = Out.ColorBlends[I];
+    Dst.BlendEnable = Src.blendEnable != VK_FALSE;
+    Dst.WriteMask = static_cast<uint8_t>(Src.colorWriteMask & 0xF);
+    if (!Dst.BlendEnable)
+      continue;
+    std::optional<BlendFactor> SrcColor = mapBlendFactor(Src.srcColorBlendFactor);
+    std::optional<BlendFactor> DstColor = mapBlendFactor(Src.dstColorBlendFactor);
+    std::optional<BlendFactor> SrcAlpha = mapBlendFactor(Src.srcAlphaBlendFactor);
+    std::optional<BlendFactor> DstAlpha = mapBlendFactor(Src.dstAlphaBlendFactor);
+    std::optional<BlendOp> ColorOp = mapBlendOp(Src.colorBlendOp);
+    std::optional<BlendOp> AlphaOp = mapBlendOp(Src.alphaBlendOp);
+    if (!SrcColor || !DstColor || !SrcAlpha || !DstAlpha || !ColorOp ||
+        !AlphaOp)
+      return createStringError(inconvertibleErrorCode(),
+                               "color attachment %u names a blend factor or "
+                               "operation that is not implemented",
+                               I);
+    Dst.SrcColorFactor = *SrcColor;
+    Dst.DstColorFactor = *DstColor;
+    Dst.SrcAlphaFactor = *SrcAlpha;
+    Dst.DstAlphaFactor = *DstAlpha;
+    Dst.ColorOp = *ColorOp;
+    Dst.AlphaOp = *AlphaOp;
+  }
+  for (unsigned I = 0; I != 4; ++I)
+    Out.BlendConstants[I] = Info->blendConstants[I];
+  return Error::success();
+}
+
+Error translateViewportState(const VkPipelineViewportStateCreateInfo *Info,
+                             const VkPhysicalDeviceLimits &Limits,
+                             GraphicsPipelineState &Out) {
+  if (!Info)
+    return createStringError(inconvertibleErrorCode(),
+                             "a graphics pipeline needs viewport state");
+  // Multiple viewports/scissors need viewport array indexing (V7); a
+  // pipeline declaring more than one is rejected rather than silently
+  // rasterized through the first.
+  if (Info->viewportCount != 1 || Info->scissorCount != 1)
+    return createStringError(inconvertibleErrorCode(),
+                             "exactly one viewport and one scissor are "
+                             "implemented (maxViewports is 1)");
+  if (Info->pViewports) {
+    const VkViewport &Src = *Info->pViewports;
+    if (Src.width > float(Limits.maxViewportDimensions[0]) ||
+        Src.height > float(Limits.maxViewportDimensions[1]))
+      return createStringError(inconvertibleErrorCode(),
+                               "viewport exceeds maxViewportDimensions");
+    Out.Viewport = feme::graphics::ViewportState{
+        Src.x, Src.y, Src.width, Src.height, Src.minDepth, Src.maxDepth};
+  }
+  if (Info->pScissors) {
+    const VkRect2D &Src = *Info->pScissors;
+    Out.Scissor = feme::graphics::ScissorRect{Src.offset.x, Src.offset.y,
+                                              Src.extent.width,
+                                              Src.extent.height};
+  }
+  return Error::success();
+}
+
+Error translateDynamicState(const VkPipelineDynamicStateCreateInfo *Info,
+                            GraphicsPipelineState &Out) {
+  if (!Info)
+    return Error::success();
+  for (uint32_t I = 0; I != Info->dynamicStateCount; ++I) {
+    std::optional<DynamicStateBits> Bit =
+        mapDynamicState(Info->pDynamicStates[I]);
+    if (!Bit)
+      return createStringError(inconvertibleErrorCode(),
+                               "dynamic state %u is not implemented",
+                               unsigned(Info->pDynamicStates[I]));
+    Out.DynamicStates |= *Bit;
+  }
+  return Error::success();
+}
+
+Expected<GraphicsPipelineState>
+compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
+                        const PhysicalDeviceInfo &DeviceInfo) {
+  if (!CreateInfo.layout)
+    return createStringError(inconvertibleErrorCode(),
+                             "graphics pipeline requires a VkPipelineLayout");
+
+  const VkPipelineShaderStageCreateInfo *VertexInfo = nullptr;
+  const VkPipelineShaderStageCreateInfo *FragmentInfo = nullptr;
+  for (uint32_t I = 0; I != CreateInfo.stageCount; ++I) {
+    const VkPipelineShaderStageCreateInfo &Stage = CreateInfo.pStages[I];
+    switch (Stage.stage) {
+    case VK_SHADER_STAGE_VERTEX_BIT:
+      VertexInfo = &Stage;
+      break;
+    case VK_SHADER_STAGE_FRAGMENT_BIT:
+      FragmentInfo = &Stage;
+      break;
+    default:
+      // Tessellation, geometry, mesh and task stages are later milestones
+      // (V7/V8); a pipeline naming one fails here rather than rendering
+      // without it.
+      return createStringError(inconvertibleErrorCode(),
+                               "only the vertex and fragment stages are "
+                               "implemented (V6)");
+    }
+  }
+  if (!VertexInfo || !FragmentInfo)
+    return createStringError(inconvertibleErrorCode(),
+                             "a graphics pipeline needs both a vertex and a "
+                             "fragment stage");
+
+  Expected<PipelineRenderTargets> Targets = getRenderTargets(CreateInfo);
+  if (!Targets)
+    return Targets.takeError();
+  if (Targets->Colors.empty())
+    return createStringError(inconvertibleErrorCode(),
+                             "a graphics pipeline needs at least one color "
+                             "attachment");
+  if (Targets->Colors.size() > DeviceInfo.Properties.limits.maxColorAttachments)
+    return createStringError(inconvertibleErrorCode(),
+                             "the render target exceeds maxColorAttachments");
+
+  const VkPipelineInputAssemblyStateCreateInfo *InputAssembly =
+      CreateInfo.pInputAssemblyState;
+  if (!InputAssembly)
+    return createStringError(inconvertibleErrorCode(),
+                             "a graphics pipeline needs input assembly state");
+  if (InputAssembly->primitiveRestartEnable)
+    return createStringError(inconvertibleErrorCode(),
+                             "primitive restart is not implemented");
+  std::optional<PrimitiveTopology> Topology =
+      mapTopology(InputAssembly->topology);
+  if (!Topology)
+    return createStringError(inconvertibleErrorCode(),
+                             "primitive topology %u is not implemented",
+                             unsigned(InputAssembly->topology));
+
+  auto Ctx = std::make_unique<feme::Context>();
+  Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
+
+  Expected<std::shared_ptr<feme::cpu::CompiledStage>> VertexStage =
+      compileGraphicsStage(*Ctx, *VertexInfo, feme::ShaderStage::Vertex);
+  if (!VertexStage)
+    return VertexStage.takeError();
+  Expected<std::shared_ptr<feme::cpu::CompiledStage>> FragmentStage =
+      compileGraphicsStage(*Ctx, *FragmentInfo, feme::ShaderStage::Fragment);
+  if (!FragmentStage)
+    return FragmentStage.takeError();
+
+  auto Artifact = std::make_shared<GraphicsPipelineArtifact>();
+  Artifact->Ctx = std::move(Ctx);
+  Artifact->VertexStage = std::move(*VertexStage);
+  Artifact->FragmentStage = std::move(*FragmentStage);
+
+  GraphicsPipelineState Result;
+  Result.Artifact = Artifact;
+  Result.Topology = *Topology;
+  Result.SampleCount = Targets->SampleCount;
+
+  const VkPhysicalDeviceLimits &Limits = DeviceInfo.Properties.limits;
+  if (Error E =
+          translateVertexInput(CreateInfo.pVertexInputState, Limits, Result))
+    return std::move(E);
+  if (Error E = translateRasterState(CreateInfo.pRasterizationState, Result))
+    return std::move(E);
+  if (Error E =
+          translateViewportState(CreateInfo.pViewportState, Limits, Result))
+    return std::move(E);
+  if (Error E = translateDepthStencilState(CreateInfo.pDepthStencilState,
+                                           *Targets, Result))
+    return std::move(E);
+  if (Error E = translateColorBlendState(CreateInfo.pColorBlendState, *Targets,
+                                         Result))
+    return std::move(E);
+  if (Error E = translateDynamicState(CreateInfo.pDynamicState, Result))
+    return std::move(E);
+
+  if (const VkPipelineMultisampleStateCreateInfo *Multisample =
+          CreateInfo.pMultisampleState) {
+    uint32_t Samples = static_cast<uint32_t>(Multisample->rasterizationSamples);
+    if (!isSupportedAttachmentSampleCount(Samples))
+      return createStringError(inconvertibleErrorCode(),
+                               "rasterization sample count %u is not "
+                               "implemented (1, 2 and 4 are)",
+                               Samples);
+    if (Samples != Targets->SampleCount)
+      return createStringError(inconvertibleErrorCode(),
+                               "the pipeline's rasterization sample count "
+                               "disagrees with its render target's");
+    if (Multisample->sampleShadingEnable ||
+        Multisample->alphaToCoverageEnable || Multisample->alphaToOneEnable)
+      return createStringError(inconvertibleErrorCode(),
+                               "sample shading, alpha-to-coverage and "
+                               "alpha-to-one are not implemented");
+    if (Multisample->pSampleMask && Samples <= 32 &&
+        (*Multisample->pSampleMask & ((1u << Samples) - 1)) !=
+            ((1u << Samples) - 1))
+      return createStringError(inconvertibleErrorCode(),
+                               "a partial VkSampleMask is not implemented");
+  }
+
+  // A pipeline's attachment identity is its formats; the extent is a
+  // per-draw property of the render-target binding, and the executor reads
+  // this list as cache identity only.
+  for (feme::cpu::ResourceFormat Format : Targets->Colors)
+    Result.Attachments.push_back(AttachmentFormat{Format, 0, 0});
+
+  const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
+  const feme::cpu::ResourceInfo &VSInfo =
+      Artifact->VertexStage->getResourceInfo();
+  const feme::cpu::ResourceInfo &FSInfo =
+      Artifact->FragmentStage->getResourceInfo();
+  if (!pushConstantsCoverRootConstantSize(Layout, VSInfo.RootConstantSize,
+                                          Limits.maxPushConstantsSize,
+                                          VK_SHADER_STAGE_VERTEX_BIT) ||
+      !pushConstantsCoverRootConstantSize(Layout, FSInfo.RootConstantSize,
+                                          Limits.maxPushConstantsSize,
+                                          VK_SHADER_STAGE_FRAGMENT_BIT))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "a stage's root-constant span is not fully covered by a "
+        "VkPushConstantRange visible to it in its VkPipelineLayout");
+  if (Error E = validateBoundRanges(VSInfo, Layout))
+    return std::move(E);
+  if (Error E = validateBoundRanges(FSInfo, Layout))
+    return std::move(E);
+
+  if (Error E = validateStageInterfaces(
+          *Artifact->VertexStage, *Artifact->FragmentStage,
+          static_cast<uint32_t>(Targets->Colors.size()),
+          Result.VertexAttributes))
+    return std::move(E);
+
+  return Result;
+}
+
+} // namespace
+
+namespace feme::vulkan {
+
+feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
+    const DynamicGraphicsState &Dynamic) const {
+  feme::graphics::StencilState ResolvedStencil = State.Stencil;
+  feme::graphics::StencilFaceState *Resolved[2] = {&ResolvedStencil.Front,
+                                                   &ResolvedStencil.Back};
+  for (unsigned I = 0; I != 2; ++I) {
+    if (isDynamic(DynamicStateStencilReference))
+      Resolved[I]->Reference =
+          static_cast<uint8_t>(Dynamic.StencilReference[I]);
+    if (isDynamic(DynamicStateStencilCompareMask))
+      Resolved[I]->CompareMask =
+          static_cast<uint8_t>(Dynamic.StencilCompareMask[I]);
+    if (isDynamic(DynamicStateStencilWriteMask))
+      Resolved[I]->WriteMask =
+          static_cast<uint8_t>(Dynamic.StencilWriteMask[I]);
+  }
+
+  return feme::graphics::GraphicsPipeline(
+      State.Artifact->VertexStage, State.Artifact->FragmentStage,
+      State.Topology, State.Raster, State.Depth,
+      feme::graphics::BlendMode::Replace, State.SampleCount, State.Attachments,
+      ResolvedStencil, State.ColorBlends, State.LogicOpEnable, State.Logic,
+      isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants
+                                            : State.BlendConstants);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
+    VkDevice device, VkPipelineCache, uint32_t createInfoCount,
+    const VkGraphicsPipelineCreateInfo *pCreateInfos,
+    const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
+  const PhysicalDeviceInfo &DeviceInfo =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  Allocator Alloc(pAllocator);
+
+  VkResult Result = VK_SUCCESS;
+  for (uint32_t I = 0; I != createInfoCount; ++I) {
+    pPipelines[I] = VK_NULL_HANDLE;
+    // The pipeline cache carries no graphics entry yet: its key would have
+    // to cover the normalized pipeline description and the render-target
+    // binding as well as both stages' SPIR-V (see "Graphics pipeline
+    // state"), and nothing is served by a key that covers less.
+    Expected<GraphicsPipelineState> Compiled =
+        compileGraphicsPipeline(pCreateInfos[I], DeviceInfo);
+    if (!Compiled) {
+      consumeError(Compiled.takeError());
+      Result = VK_ERROR_INITIALIZATION_FAILED;
+      continue;
+    }
+    GraphicsPipeline *Obj = Alloc.create<GraphicsPipeline>(
+        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(*Compiled));
+    if (!Obj) {
+      Result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      continue;
+    }
+    pPipelines[I] = toHandle<VkPipeline>(static_cast<Pipeline *>(Obj));
+  }
+  return Result;
+}
+
+} // namespace feme::vulkan

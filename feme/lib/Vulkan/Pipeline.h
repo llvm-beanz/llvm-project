@@ -18,7 +18,11 @@
 #ifndef FEME_LIB_VULKAN_PIPELINE_H
 #define FEME_LIB_VULKAN_PIPELINE_H
 
+#include "feme/Core/ShaderStage.h"
+
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Error.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -28,14 +32,17 @@
 
 namespace feme {
 class Context;
+class Module;
 namespace cpu {
 class CompiledStage;
+struct ResourceInfo;
 } // namespace cpu
 } // namespace feme
 
 namespace feme::vulkan {
 
 class DescriptorSetLayout;
+struct PhysicalDeviceInfo;
 
 /// A `VkShaderModule`: a validated, owned copy of the application's SPIR-V
 /// words (see "Input and specialization": "`vkCreateShaderModule` copies
@@ -91,21 +98,65 @@ struct CachedPipelineArtifact {
   std::unique_ptr<feme::cpu::CompiledStage> Stage;
 };
 
+/// The common base of every `VkPipeline` object, so the single Vulkan
+/// handle type can carry either bind point (V6 adds the graphics one) and
+/// `vkDestroyPipeline` can free either without knowing which it holds.
+class Pipeline {
+public:
+  enum class Kind : uint8_t {
+    Compute,
+    Graphics,
+  };
+
+  explicit Pipeline(Kind PipelineKind) : PipelineKind(PipelineKind) {}
+  virtual ~Pipeline();
+
+  Kind kind() const { return PipelineKind; }
+
+private:
+  Kind PipelineKind;
+};
+
 /// A `VkPipeline` compute pipeline: a handle sharing ownership of a
 /// `CachedPipelineArtifact` -- see "Compilation flow": "the JIT-compiled
 /// code object and the `llvm::LLVMContext` behind it stay alive as long as
 /// the `VkPipeline` does" (true of every handle sharing the artifact, not
 /// just the first one compiled).
-class ComputePipeline {
+class ComputePipeline : public Pipeline {
 public:
   explicit ComputePipeline(std::shared_ptr<CachedPipelineArtifact> Artifact)
-      : Artifact(std::move(Artifact)) {}
+      : Pipeline(Kind::Compute), Artifact(std::move(Artifact)) {}
 
   feme::cpu::CompiledStage &getStage() const { return *Artifact->Stage; }
 
 private:
   std::shared_ptr<CachedPipelineArtifact> Artifact;
 };
+
+/// Imports \p Words (a `VkShaderModule`'s SPIR-V) into \p Ctx and translates
+/// it to LLVM IR, normalizing away the module-level attributes SPIR-V import
+/// leaves that have no meaning to `feme::cpu`'s JIT. Shared by the compute
+/// and graphics pipeline compilation paths (see "Compilation flow" in
+/// feme/docs/FeMeVulkanDesign.md).
+llvm::Expected<feme::Module> importShaderModule(feme::Context &Ctx,
+                                                llvm::ArrayRef<uint32_t> Words);
+
+/// Whether \p Layout's push-constant ranges visible to \p StageFlags fully
+/// cover `[0, RootConstantSize)` with no gap -- see "Descriptor Model":
+/// "reject a shader whose accessed range is not fully covered by a range
+/// declared in the layout with the [shader] stage bit set".
+bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
+                                        uint32_t RootConstantSize,
+                                        uint32_t MaxPushConstantsSize,
+                                        VkShaderStageFlags StageFlags);
+
+/// Checks that every bound range \p Info reports has a compatible binding in
+/// \p Layout's descriptor set layouts: the same (set, binding) identity, a
+/// descriptor type of the matching class, and a declared array big enough to
+/// cover the shader's range. Shared by compute and graphics pipeline
+/// creation.
+llvm::Error validateBoundRanges(const feme::cpu::ResourceInfo &Info,
+                                const PipelineLayout &Layout);
 
 } // namespace feme::vulkan
 

@@ -573,8 +573,24 @@ bool canonicalizeSPIRVStage(Function &F) {
       auto It = GV ? ElementIDs.find(GV) : ElementIDs.end();
       if (It == ElementIDs.end())
         continue;
-      CallInst *New = createStageInputLoad(B, LI->getType(), It->second, Zero,
-                                           Zero, Zero, LI->getName());
+      Value *New = nullptr;
+      // A vector-typed interface variable is loaded one component at a
+      // time, matching both the `feme.stage.*` family's own per-component
+      // `Component` operand and the scalar shape DXIL's `loadInput` always
+      // produces -- and, in turn, what `feme::cpu::SIMDizePass` widens (a
+      // whole divergent vector value has no widened form there).
+      if (auto *VecTy = dyn_cast<FixedVectorType>(LI->getType())) {
+        New = PoisonValue::get(VecTy);
+        for (unsigned C = 0, E = VecTy->getNumElements(); C != E; ++C) {
+          CallInst *Component =
+              createStageInputLoad(B, VecTy->getElementType(), It->second, Zero,
+                                   B.getInt32(C), Zero, LI->getName());
+          New = B.CreateInsertElement(New, Component, C);
+        }
+      } else {
+        New = createStageInputLoad(B, LI->getType(), It->second, Zero, Zero,
+                                   Zero, LI->getName());
+      }
       LI->replaceAllUsesWith(New);
       LI->eraseFromParent();
       Changed = true;
@@ -583,8 +599,14 @@ bool canonicalizeSPIRVStage(Function &F) {
       auto It = GV ? ElementIDs.find(GV) : ElementIDs.end();
       if (It == ElementIDs.end())
         continue;
-      createStageOutputStore(B, It->second, Zero, Zero, SI->getValueOperand(),
-                             Zero);
+      Value *Val = SI->getValueOperand();
+      if (auto *VecTy = dyn_cast<FixedVectorType>(Val->getType())) {
+        for (unsigned C = 0, E = VecTy->getNumElements(); C != E; ++C)
+          createStageOutputStore(B, It->second, Zero, B.getInt32(C),
+                                 B.CreateExtractElement(Val, C), Zero);
+      } else {
+        createStageOutputStore(B, It->second, Zero, Zero, Val, Zero);
+      }
       SI->eraseFromParent();
       Changed = true;
     }

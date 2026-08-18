@@ -88,6 +88,9 @@ vkDestroyPipelineLayout
 vkCreateComputePipelines
 vkDestroyPipeline
 
+# V6: graphics pipelines (see "Graphics pipeline state").
+vkCreateGraphicsPipelines
+
 # V4: persistent pipeline cache (see "Pipeline Cache").
 vkCreatePipelineCache
 vkDestroyPipelineCache

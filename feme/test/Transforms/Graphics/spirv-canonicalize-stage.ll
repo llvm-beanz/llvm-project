@@ -24,7 +24,15 @@ define void @main() #0 {
   %f = sitofp i32 %v to float
   %cst = insertelement <4 x float> poison, float %f, i32 0
 
-  ; CHECK: call void @feme.stage.output.store.v4f32(i32 1, i32 0, i32 0, <4 x float> {{.*}}, i32 0)
+  ; A vector-typed interface variable is stored one component at a time:
+  ; the `feme.stage.*` family carries a `Component` operand precisely so a
+  ; varying is addressed the same scalar way DXIL's own `storeOutput` does,
+  ; and `feme::cpu::SIMDizePass` has no widened form for a whole divergent
+  ; vector value.
+  ; CHECK: [[C0:%.*]] = extractelement <4 x float> {{.*}}, i64 0
+  ; CHECK: call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float [[C0]], i32 0)
+  ; CHECK: [[C3:%.*]] = extractelement <4 x float> {{.*}}, i64 3
+  ; CHECK: call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float [[C3]], i32 0)
   store <4 x float> %cst, ptr addrspace(8) @out_var
 
   ret void
