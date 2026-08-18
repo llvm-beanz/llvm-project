@@ -67,12 +67,18 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
   EXPECT_TRUE(Flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 }
 
-TEST(PhysicalDeviceInfo, NoFeatureIsAdvertisedYet) {
-  // "No shader execution is required in this milestone": nothing has been
-  // implemented that could honestly back a `VkBool32` feature yet.
+TEST(PhysicalDeviceInfo, OnlyRobustBufferAccessIsAdvertised) {
+  // (V4) robustBufferAccess is the one core feature this milestone can
+  // honestly claim (see PhysicalDeviceInfo.cpp's comment); every other
+  // VkBool32 stays false, since nothing else has been implemented that
+  // could back one yet.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
+
+  VkPhysicalDeviceFeatures WithoutRobustness = Info.Features;
+  WithoutRobustness.robustBufferAccess = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
-  EXPECT_EQ(std::memcmp(&Info.Features, &Zero, sizeof(Zero)), 0);
+  EXPECT_EQ(std::memcmp(&WithoutRobustness, &Zero, sizeof(Zero)), 0);
 }
 
 TEST(PhysicalDeviceInfo, DeviceAndPipelineCacheUUIDsDiffer) {

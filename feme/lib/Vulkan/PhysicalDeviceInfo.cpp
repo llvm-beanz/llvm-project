@@ -266,10 +266,17 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // memory coherence, honest for both x86-64 and AArch64 hosts.
   Limits.nonCoherentAtomSize = 64;
 
-  // Vulkan 1.0 core features: false across the board. Nothing is compiled
-  // or executed yet (see "No shader execution is required in this
-  // milestone"), so none of these could be honestly claimed true.
+  // Vulkan 1.0 core features. Everything defaults false, except (V4)
+  // `robustBufferAccess`: `feme::cpu`'s per-descriptor bounds checking (see
+  // "Bounds checking" in feme/docs/FeMeCPUDesign.md) is not optional --
+  // `feme::cpu::JITOptions::EnableRobustness` defaults true and nothing in
+  // this ICD ever overrides it -- so an out-of-bounds buffer access already
+  // reads zero / drops the write unconditionally for every dispatch this
+  // milestone can run. That is a stronger guarantee than the feature
+  // requires (Vulkan allows it to be enabled only per pipeline), so
+  // advertising it unconditionally is honest.
   Info.Features = VkPhysicalDeviceFeatures{};
+  Info.Features.robustBufferAccess = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

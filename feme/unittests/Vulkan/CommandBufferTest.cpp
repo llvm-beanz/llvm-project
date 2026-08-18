@@ -677,6 +677,62 @@ TEST_F(StorageBufferDispatchTest, DynamicOffsetShiftsBoundBinding) {
   vkFreeMemory(Device, Out.Memory, nullptr);
 }
 
+/// V4 ("broader ... robustness coverage"): a descriptor's *declared* range
+/// (4 bytes -- one element), not the underlying buffer's real size (8
+/// bytes -- two), is what bounds every access through it (see "Bounds
+/// checking" in feme/docs/FeMeCPUDesign.md). Dispatching two groups reads
+/// element 0 (in range) normally but must read element 1 as zero and drop
+/// its write entirely, exactly as `robustBufferAccess` requires -- see
+/// PhysicalDeviceInfoTest.cpp's `OnlyRobustBufferAccessIsAdvertised` for
+/// why this ICD can advertise that feature unconditionally.
+TEST_F(StorageBufferDispatchTest,
+       OutOfRangeDescriptorAccessReadsZeroAndDropsWrite) {
+  HostBuffer In = createStorageBuffer(8);
+  HostBuffer Out = createStorageBuffer(8);
+  uint32_t InValues[2] = {41, 99};
+  std::memcpy(In.Data, InValues, sizeof(InValues));
+  uint32_t OutSentinel[2] = {0xDEADBEEF, 0xDEADBEEF};
+  std::memcpy(Out.Data, OutSentinel, sizeof(OutSentinel));
+
+  VkDescriptorBufferInfo InInfo{In.Buf, 0, 4};
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[0].pBufferInfo = &InInfo;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+  Writes[1].pBufferInfo = &OutInfo;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  uint32_t DynamicOffset = 0;
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 1, &DynamicOffset);
+  vkCmdDispatch(CmdBuf, 2, 1, 1); // GlobalInvocationId.x in {0, 1}.
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result[2];
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result[0], InValues[0] + 1); // In range: reads/writes normally.
+  EXPECT_EQ(Result[1], OutSentinel[1]);  // Out of range: write dropped.
+
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
 /// End-to-end V4 scenario: bind a uniform texel buffer and a storage texel
 /// buffer over `VK_FORMAT_R32G32B32A32_SFLOAT` `VkBufferView`s, dispatch a
 /// shader that reads one texel, adds a constant, and writes it to the
