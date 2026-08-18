@@ -1783,12 +1783,24 @@ This is the same "blocked on G2" gap Roadmap.md's §1.9 table already records
 for this row; closing it is R30's own remaining scope, not a new gap this
 milestone introduced.
 
-Also out of scope, narrower deviations: only `VK_SAMPLE_COUNT_1_BIT` images
-are accepted (no multisample image support); `vkCmdCopyImage` requires both
-images to share the same `VkFormat` (no format-conversion copy); a 3D array
-image is not modeled (Vulkan itself does not allow one); and
-`VK_EXT_custom_border_color` is rejected outright, since no such extension is
-advertised.
+Also out of scope, narrower deviations: a 3D array image is not modeled
+(Vulkan itself does not allow one). Three of this section's own former
+narrower gaps closed in a follow-up pass rather than staying open for R30:
+multisample images are now accepted at the object-model level (a 2D
+sampled/storage image may request up to 4 samples per texel, each stored
+contiguously per R29's own `FemeImageSubresourceLayout::SampleStride` --
+`Image.h`'s file comment; `vkCmdCopyImage` copies every sample of a
+matching-sample-count region verbatim, but nothing resolves or reads an
+individual sample from a shader yet, so a multisample image remains a pure
+copy source/destination until R30 *and* V6 both land); `vkCmdCopyImage` now
+requires only a matching texel size between its two images, not an
+identical `VkFormat` (`CommandBuffer.cpp`'s `runCopyImage`) -- matching real
+Vulkan's own "compatible formats" copy rule, which never converts values on
+either side; and `vkCreateSampler` now explicitly rejects a chained
+`VkSamplerCustomBorderColorCreateInfoEXT`/
+`VkSamplerBorderColorComponentMappingCreateInfoEXT`, not only the
+`..._CUSTOM_EXT` `VkBorderColor` enumerators it already rejected, since
+neither extension is advertised.
 
 ### V6: Graphics queue and basic rendering
 
