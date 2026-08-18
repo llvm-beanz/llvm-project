@@ -7,12 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The V1 shader/pipeline object model (see "Object Model" and "Shader and
+// The shader/pipeline object model (see "Object Model" and "Shader and
 // Pipeline Compilation" in feme/docs/FeMeVulkanDesign.md): `VkShaderModule`
-// (owned SPIR-V words), `VkPipelineLayout` (restricted to no descriptor
-// sets/push constants -- see "Required SPIR-V resource work": descriptors
-// are V2, push constants are V3), and `VkPipeline` (a compiled compute
-// kernel).
+// (owned SPIR-V words), `VkPipelineLayout` (an ordered list of
+// `VkDescriptorSetLayout`s -- push constants are still V3), and `VkPipeline`
+// (a compiled compute kernel).
 //
 //===----------------------------------------------------------------------===//
 
@@ -34,6 +33,8 @@ class CompiledStage;
 
 namespace feme::vulkan {
 
+class DescriptorSetLayout;
+
 /// A `VkShaderModule`: a validated, owned copy of the application's SPIR-V
 /// words (see "Input and specialization": "`vkCreateShaderModule` copies
 /// the SPIR-V and performs cheap structural checks").
@@ -48,12 +49,26 @@ private:
   std::vector<uint32_t> Words;
 };
 
-/// A `VkPipelineLayout`. V1 supports only the resource-free shape needed by
-/// "compile and execute a resource-free SPIR-V compute shader using
-/// builtins": no descriptor set layouts (V2) and no push-constant ranges
-/// (V3), enforced at creation (`vkCreatePipelineLayout` rejects any other
-/// shape). Carries no state of its own yet.
-class PipelineLayout {};
+/// A `VkPipelineLayout`: an ordered list of `VkDescriptorSetLayout`s (see
+/// "Descriptor Model" in feme/docs/FeMeVulkanDesign.md). Push-constant
+/// ranges are still rejected at creation (V3). A (descriptor set, binding)
+/// identity is exactly `feme::cpu::BoundResourceRange`'s
+/// `(Space, BaseRegister)`, with `Space` equal to the set's index in this
+/// list, so no translation table is needed between the two -- see
+/// `compileComputePipeline`'s use of this list to validate a shader's
+/// bound-resource requirements against it.
+class PipelineLayout {
+public:
+  explicit PipelineLayout(std::vector<const DescriptorSetLayout *> SetLayouts)
+      : SetLayouts(std::move(SetLayouts)) {}
+
+  llvm::ArrayRef<const DescriptorSetLayout *> setLayouts() const {
+    return SetLayouts;
+  }
+
+private:
+  std::vector<const DescriptorSetLayout *> SetLayouts;
+};
 
 /// A `VkPipeline` compute pipeline: the compiled CPU kernel `vkCmdDispatch`
 /// et al. invoke. Owns the `feme::Context` its compiled code was JIT-ed

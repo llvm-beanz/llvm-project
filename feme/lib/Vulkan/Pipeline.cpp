@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Pipeline.h"
+#include "Descriptor.h"
 #include "GroupSize.h"
 #include "Icd.h"
 #include "Objects.h"
@@ -122,15 +123,20 @@ VKAPI_ATTR VkResult VKAPI_CALL
 vkCreatePipelineLayout(VkDevice, const VkPipelineLayoutCreateInfo *pCreateInfo,
                        const VkAllocationCallbacks *pAllocator,
                        VkPipelineLayout *pPipelineLayout) {
-  // V1 only supports a resource-free pipeline layout (see PipelineLayout's
-  // own comment): descriptor sets are V2, push constants are V3.
-  if (pCreateInfo->setLayoutCount != 0 ||
-      pCreateInfo->pushConstantRangeCount != 0)
+  // Push-constant ranges are still rejected (V3); descriptor set layouts
+  // are this milestone's own work (see PipelineLayout's own comment).
+  if (pCreateInfo->pushConstantRangeCount != 0)
     return VK_ERROR_INITIALIZATION_FAILED;
 
+  std::vector<const DescriptorSetLayout *> SetLayouts;
+  SetLayouts.reserve(pCreateInfo->setLayoutCount);
+  for (uint32_t I = 0; I != pCreateInfo->setLayoutCount; ++I)
+    SetLayouts.push_back(
+        fromHandle<DescriptorSetLayout>(pCreateInfo->pSetLayouts[I]));
+
   Allocator Alloc(pAllocator);
-  PipelineLayout *Obj =
-      Alloc.create<PipelineLayout>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+  PipelineLayout *Obj = Alloc.create<PipelineLayout>(
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(SetLayouts));
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pPipelineLayout = toHandle<VkPipelineLayout>(Obj);
@@ -230,16 +236,39 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
   if (!Stage)
     return Stage.takeError();
 
-  // V1 is resource-free (see PipelineLayout's own comment): a shader that
-  // needs descriptor-heap resources, root constants, or the sampler heap
-  // has nothing this pipeline layout could bind them to.
+  // V3 push constants and image/sampler resources remain unimplemented.
   const feme::cpu::ResourceInfo &Info = (*Stage)->getResourceInfo();
-  if (Info.ReservedResourceHeapSize != 0 || Info.RootConstantSize != 0 ||
-      Info.UsesSamplerHeap)
+  if (Info.RootConstantSize != 0 || Info.UsesSamplerHeap)
     return createStringError(
         inconvertibleErrorCode(),
-        "shader uses descriptor/root-constant resources, which this "
-        "milestone's resource-free VkPipelineLayout cannot bind (see V2/V3)");
+        "shader uses root-constant/sampler-heap resources, which this "
+        "milestone's VkPipelineLayout cannot bind (see V3)");
+
+  // Every bound storage-buffer range the shader reads must have a
+  // compatible binding in the pipeline layout's descriptor set layouts: the
+  // same (set, binding) identity (see PipelineLayout's own comment), a
+  // storage-buffer descriptor type, and a declared array big enough to
+  // cover the shader's range (see "Descriptor Model": "Descriptor arrays
+  // whose length exceeds what the reserved heap can represent must fail
+  // pipeline creation rather than silently truncate").
+  llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts =
+      fromHandle<PipelineLayout>(CreateInfo.layout)->setLayouts();
+  for (const feme::cpu::BoundResourceRange &Range : Info.BoundRanges) {
+    if (Range.Space >= SetLayouts.size())
+      return createStringError(inconvertibleErrorCode(),
+                               "shader binds descriptor set %u, which "
+                               "VkPipelineLayout does not declare",
+                               Range.Space);
+    const DescriptorSetLayoutBinding *Binding =
+        SetLayouts[Range.Space]->find(Range.BaseRegister);
+    if (!Binding || !isSupportedDescriptorType(Binding->Type) ||
+        Binding->Count < Range.RangeSize)
+      return createStringError(
+          inconvertibleErrorCode(),
+          "shader's (set %u, binding %u) requirement is not satisfied by "
+          "its VkPipelineLayout",
+          Range.Space, Range.BaseRegister);
+  }
 
   return std::make_unique<ComputePipeline>(std::move(Ctx), std::move(*Stage));
 }

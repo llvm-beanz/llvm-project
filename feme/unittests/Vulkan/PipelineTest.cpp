@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #define VK_NO_PROTOTYPES
+#include "Descriptor.h"
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
@@ -63,6 +64,29 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.Return
   }
   spirv.EntryPoint "GLCompute" @main
+}
+)mlir";
+
+/// A `void main()` that reads and increments a `StorageBuffer` block bound
+/// at (descriptor set 0, binding 0) -- V2's own "run a Vulkan compute
+/// shader that reads and writes storage buffers" scenario, using a flat
+/// (non-aggregate) `i32` element so `feme::cpu::SPIRVResourceLoweringPass`
+/// normalizes the access (see that pass's header comment).
+const char *kStorageBufferShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @buf bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @buf : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %ac = spirv.AccessChain %0[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    %v = spirv.Load "StorageBuffer" %ac : i32
+    %c1 = spirv.Constant 1 : i32
+    %v2 = spirv.IAdd %v, %c1 : i32
+    spirv.Store "StorageBuffer" %ac, %v2 : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @buf
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
 }
 )mlir";
 
@@ -145,16 +169,102 @@ TEST_F(PipelineTest, RejectsMissingGroupSizeInformation) {
   vkDestroyShaderModule(Device, Module, nullptr);
 }
 
-TEST_F(PipelineTest, PipelineLayoutRejectsDescriptorSets) {
-  VkDescriptorSetLayout FakeSetLayout =
-      reinterpret_cast<VkDescriptorSetLayout>(1);
+TEST_F(PipelineTest, PipelineLayoutAcceptsDescriptorSetLayouts) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+
   VkPipelineLayoutCreateInfo LayoutInfo{};
   LayoutInfo.setLayoutCount = 1;
-  LayoutInfo.pSetLayouts = &FakeSetLayout;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout Accepted = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Accepted),
+            VK_SUCCESS);
+  EXPECT_NE(Accepted, VK_NULL_HANDLE);
+
+  vkDestroyPipelineLayout(Device, Accepted, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+}
+
+TEST_F(PipelineTest, PipelineLayoutRejectsPushConstantRanges) {
+  VkPushConstantRange Range{VK_SHADER_STAGE_COMPUTE_BIT, 0, 4};
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.pushConstantRangeCount = 1;
+  LayoutInfo.pPushConstantRanges = &Range;
 
   VkPipelineLayout Rejected = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Rejected),
             VK_ERROR_INITIALIZATION_FAILED);
+}
+
+TEST_F(PipelineTest, CompilesStorageBufferShaderWithCompatibleLayout) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout StorageLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &StorageLayout),
+      VK_SUCCESS);
+
+  VkShaderModule Module = createShaderModule(kStorageBufferShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = StorageLayout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+  vkDestroyPipelineLayout(Device, StorageLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+}
+
+TEST_F(PipelineTest, RejectsStorageBufferShaderWithoutMatchingBinding) {
+  // `Layout` (from SetUp) declares no descriptor sets at all, so the
+  // shader's (set 0, binding 0) requirement cannot be satisfied.
+  VkShaderModule Module = createShaderModule(kStorageBufferShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Module, nullptr);
 }
 
 TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {
