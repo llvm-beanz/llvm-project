@@ -673,4 +673,37 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
             VK_ERROR_EXTENSION_NOT_PRESENT);
 }
 
+/// `vkCmdClearAttachments` clears the bound attachment over its rectangles,
+/// inside the render pass instance, after a draw has already written it.
+TEST_F(DrawTest, ClearsAttachmentInsideRenderPass) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  VkClearAttachment Clear{};
+  Clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  Clear.colorAttachment = 0;
+  Clear.clearValue.color = {{0.0f, 0.0f, 1.0f, 1.0f}};
+  VkClearRect Rect{};
+  Rect.rect = {{0, 0}, {2, 2}};
+  Rect.layerCount = 1;
+  vkCmdClearAttachments(Cmd, 1, &Clear, 1, &Rect);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  // Inside the cleared rectangle: blue. Outside it: the draw's red.
+  EXPECT_EQ(texel(0, 0)[2], 0xFF);
+  EXPECT_EQ(texel(0, 0)[0], 0x00);
+  EXPECT_EQ(texel(3, 3)[0], 0xFF);
+  EXPECT_EQ(texel(3, 3)[2], 0x00);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 } // namespace

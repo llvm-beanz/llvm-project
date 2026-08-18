@@ -11,6 +11,7 @@ add_feme_unittest(FeMeVulkanTests
   FormatTest.cpp
   GraphicsPipelineTest.cpp
   GroupSizeTest.cpp
+  ImageOpsTest.cpp
   ImageTest.cpp
   MemoryTest.cpp
   ObjectModelTest.cpp

@@ -442,6 +442,28 @@ VKAPI_ATTR void VKAPI_CALL
 vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
                  uint32_t instanceCount, uint32_t firstIndex,
                  int32_t vertexOffset, uint32_t firstInstance);
+VKAPI_ATTR void VKAPI_CALL vkCmdClearColorImage(
+    VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout,
+    const VkClearColorValue *pColor, uint32_t rangeCount,
+    const VkImageSubresourceRange *pRanges);
+VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(
+    VkCommandBuffer commandBuffer, VkImage image, VkImageLayout imageLayout,
+    const VkClearDepthStencilValue *pDepthStencil, uint32_t rangeCount,
+    const VkImageSubresourceRange *pRanges);
+VKAPI_ATTR void VKAPI_CALL vkCmdClearAttachments(
+    VkCommandBuffer commandBuffer, uint32_t attachmentCount,
+    const VkClearAttachment *pAttachments, uint32_t rectCount,
+    const VkClearRect *pRects);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage,
+               VkImageLayout srcImageLayout, VkImage dstImage,
+               VkImageLayout dstImageLayout, uint32_t regionCount,
+               const VkImageBlit *pRegions, VkFilter filter);
+VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(
+    VkCommandBuffer commandBuffer, VkImage srcImage,
+    VkImageLayout srcImageLayout, VkImage dstImage,
+    VkImageLayout dstImageLayout, uint32_t regionCount,
+    const VkImageResolve *pRegions);
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,
                                              VkBuffer buffer,
                                              VkDeviceSize offset,

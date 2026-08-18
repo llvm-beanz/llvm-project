@@ -30,9 +30,11 @@
 #ifndef FEME_LIB_VULKAN_RENDERPASS_H
 #define FEME_LIB_VULKAN_RENDERPASS_H
 
+#include "feme/Graphics/PreparedDraw.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/Support/Error.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -143,6 +145,16 @@ struct RenderTargetBinding {
   VkRect2D RenderArea{};
   uint32_t Layers = 1;
 };
+
+/// One attachment's linear host storage, as the software graphics executor
+/// addresses it: the mip level's own tightly packed `width * height *
+/// samples` texels. `Image`'s packed subresource layout is exactly the
+/// layout `feme::graphics::AttachmentView` assumes, so this is a pointer
+/// and an extent, never a copy. Fails for a view this driver cannot render
+/// into (an unbound image, a non-2D view, or a layered one -- layered
+/// rendering is V7).
+llvm::Expected<feme::graphics::AttachmentView>
+resolveAttachmentView(ImageView *View);
 
 /// Whether \p Format may back a color attachment: the executor's own
 /// supported color format subset (see "Texture layout and formats" in

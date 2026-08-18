@@ -232,23 +232,31 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxFramebufferWidth = 4096;
   Limits.maxFramebufferHeight = 4096;
   Limits.maxFramebufferLayers = 256;
-  // Every framebuffer-attachment sample count stays at 1: there is no
-  // render-target/rasterizer path at all yet (`VK_QUEUE_GRAPHICS_BIT` is
-  // V6+), so a multisample color/depth/stencil attachment has nothing that
-  // could render into it, unlike a plain sampled/storage image below (whose
-  // multisample data a copy can still legitimately move around).
-  Limits.framebufferColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
-  Limits.framebufferDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT;
-  Limits.framebufferStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT;
-  Limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+  // (V6) Framebuffer attachments may now be multisample, up to the 4
+  // samples the software rasterizer implements coverage and resolves for
+  // (roadmap R33; `feme::graphics::executeDraws` rejects anything else).
+  // These stopped being unreachable numbers with the graphics path and are
+  // contracts now: `vkCreateRenderPass` checks every attachment's sample
+  // count against them, and so does graphics pipeline creation.
+  Limits.framebufferColorSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+  Limits.framebufferDepthSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+  Limits.framebufferStencilSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+  Limits.framebufferNoAttachmentsSampleCounts =
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
   Limits.maxColorAttachments = 4;
   // A sampled/storage image may be created with up to 4 samples (see "V5:
   // Images and sampling"'s multisample-object-model scope note in
   // FeMeVulkanDesign.md): this ICD stores every sample's data, but nothing
   // yet reads a single sample from a shader or resolves one, so there is no
   // reason to advertise a wider count than the CTS/an application might
-  // exercise for the object model alone. Depth/stencil sample counts stay
-  // at 1: no depth/stencil format is mapped at all yet (`mapVkFormat`).
+  // exercise for the object model alone. A *sampled* depth/stencil image
+  // stays single-sample: reading an individual sample of one from a shader
+  // needs `OpImageFetch`-with-sample-index raising, which R30 left out of
+  // scope -- unlike a depth/stencil *attachment*, whose per-sample tests
+  // the executor does implement (see the framebuffer counts above).
   Limits.sampledImageColorSampleCounts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
   Limits.sampledImageIntegerSampleCounts =

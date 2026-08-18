@@ -84,6 +84,7 @@ add_feme_library(FeMeVulkanCore STATIC
   GraphicsPipeline.cpp
   GroupSize.cpp
   Image.cpp
+  ImageOps.cpp
   Memory.cpp
   PhysicalDeviceInfo.cpp
   Pipeline.cpp

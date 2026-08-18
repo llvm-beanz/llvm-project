@@ -13,6 +13,7 @@
 #include "GraphicsPipeline.h"
 #include "Icd.h"
 #include "Image.h"
+#include "ImageOps.h"
 #include "Objects.h"
 #include "Pipeline.h"
 #include "QueryPool.h"
@@ -582,43 +583,6 @@ struct GraphicsState {
 
   DynamicGraphicsState Dynamic;
 };
-
-/// One attachment's linear host storage, as the executor addresses it: the
-/// mip level's own tightly packed `width * height * samples` texels (see
-/// `Image`'s packed subresource layout, which is exactly the layout
-/// `feme::graphics::AttachmentView` assumes).
-Expected<feme::graphics::AttachmentView>
-resolveAttachmentView(ImageView *View) {
-  if (!View || !View->image() || !View->image()->isBound())
-    return createStringError(inconvertibleErrorCode(),
-                             "a render target attachment is not bound to "
-                             "memory");
-  Image &Img = *View->image();
-  const VkImageSubresourceRange &Range = View->range();
-  if (View->dimension() != feme::cpu::ImageDimension::Texture2D ||
-      Range.baseArrayLayer != 0 ||
-      (Range.layerCount != VK_REMAINING_ARRAY_LAYERS && Range.layerCount != 1))
-    return createStringError(inconvertibleErrorCode(),
-                             "only a single-layer 2D image view may be a "
-                             "render target (layered rendering is V7)");
-  if (Range.baseMipLevel >= Img.mipLevels())
-    return createStringError(inconvertibleErrorCode(),
-                             "a render target view's base mip level is out "
-                             "of range");
-
-  uint32_t Level = Range.baseMipLevel;
-  const feme::cpu::FemeImageSubresourceLayout &Layout =
-      Img.mipLayouts()[Level];
-  feme::graphics::AttachmentView Result;
-  Result.Format = View->format();
-  Result.Width = std::max(1u, Img.width() >> Level);
-  Result.Height = std::max(1u, Img.height() >> Level);
-  Result.ArrayLayers = 1;
-  auto *Base = static_cast<uint8_t *>(Img.data()) + Layout.Offset;
-  Result.Data = llvm::MutableArrayRef<uint8_t>(
-      Base, static_cast<size_t>(Layout.SlicePitch));
-  return Result;
-}
 
 /// Builds the normalized render-target binding \p Subpass of \p Pass
 /// resolves to against \p Fb's views -- the single internal shape
@@ -1343,6 +1307,35 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
         return E;
       break;
     }
+    case RecordedCommand::Kind::ClearColorImage:
+      if (Error E = runClearColorImage(Cmd.DstImage, Cmd.ClearValues[0].color,
+                                       Cmd.ClearRanges))
+        return E;
+      break;
+    case RecordedCommand::Kind::ClearDepthStencilImage:
+      if (Error E = runClearDepthStencilImage(
+              Cmd.DstImage, Cmd.ClearValues[0].depthStencil, Cmd.ClearRanges))
+        return E;
+      break;
+    case RecordedCommand::Kind::ClearAttachments:
+      if (!Gfx.Rendering)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdClearAttachments outside a render pass "
+                                 "instance");
+      if (Error E = runClearAttachments(Gfx.Binding, Cmd.ClearAttachments,
+                                        Cmd.ClearRects))
+        return E;
+      break;
+    case RecordedCommand::Kind::BlitImage:
+      if (Error E = runBlitImage(Cmd.SrcImage, Cmd.DstImage, Cmd.BlitRegions,
+                                 Cmd.BlitFilter))
+        return E;
+      break;
+    case RecordedCommand::Kind::ResolveImage:
+      if (Error E =
+              runResolveImage(Cmd.SrcImage, Cmd.DstImage, Cmd.ResolveRegions))
+        return E;
+      break;
     case RecordedCommand::Kind::DrawIndirect:
     case RecordedCommand::Kind::DrawIndexedIndirect: {
       if (!BoundGraphicsPipeline)
@@ -1878,6 +1871,62 @@ vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->drawIndexed(indexCount, instanceCount, firstIndex, vertexOffset,
                     firstInstance);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdClearColorImage(
+    VkCommandBuffer commandBuffer, VkImage image, VkImageLayout,
+    const VkClearColorValue *pColor, uint32_t rangeCount,
+    const VkImageSubresourceRange *pRanges) {
+  VkClearValue Value{};
+  Value.color = *pColor;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->clearImage(RecordedCommand::Kind::ClearColorImage,
+                   fromHandle<Image>(image), Value,
+                   std::vector<VkImageSubresourceRange>(pRanges,
+                                                        pRanges + rangeCount));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdClearDepthStencilImage(
+    VkCommandBuffer commandBuffer, VkImage image, VkImageLayout,
+    const VkClearDepthStencilValue *pDepthStencil, uint32_t rangeCount,
+    const VkImageSubresourceRange *pRanges) {
+  VkClearValue Value{};
+  Value.depthStencil = *pDepthStencil;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->clearImage(RecordedCommand::Kind::ClearDepthStencilImage,
+                   fromHandle<Image>(image), Value,
+                   std::vector<VkImageSubresourceRange>(pRanges,
+                                                        pRanges + rangeCount));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdClearAttachments(
+    VkCommandBuffer commandBuffer, uint32_t attachmentCount,
+    const VkClearAttachment *pAttachments, uint32_t rectCount,
+    const VkClearRect *pRects) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->clearAttachments(std::vector<VkClearAttachment>(
+                             pAttachments, pAttachments + attachmentCount),
+                         std::vector<VkClearRect>(pRects, pRects + rectCount));
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBlitImage(VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout,
+               VkImage dstImage, VkImageLayout, uint32_t regionCount,
+               const VkImageBlit *pRegions, VkFilter filter) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->blitImage(fromHandle<Image>(srcImage), fromHandle<Image>(dstImage),
+                  std::vector<VkImageBlit>(pRegions, pRegions + regionCount),
+                  filter);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(
+    VkCommandBuffer commandBuffer, VkImage srcImage, VkImageLayout,
+    VkImage dstImage, VkImageLayout, uint32_t regionCount,
+    const VkImageResolve *pRegions) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->resolveImage(
+          fromHandle<Image>(srcImage), fromHandle<Image>(dstImage),
+          std::vector<VkImageResolve>(pRegions, pRegions + regionCount));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,

@@ -105,6 +105,11 @@ struct RecordedCommand {
     DrawIndexed,
     DrawIndirect,
     DrawIndexedIndirect,
+    ClearColorImage,
+    ClearDepthStencilImage,
+    ClearAttachments,
+    BlitImage,
+    ResolveImage,
   };
 
   Kind Op;
@@ -197,6 +202,19 @@ struct RecordedCommand {
   std::vector<Buffer *> VertexBuffers;
   std::vector<VkDeviceSize> VertexBufferOffsets;
   VkIndexType IndexType = VK_INDEX_TYPE_UINT32;
+  /// (V6) `ClearColorImage`/`ClearDepthStencilImage`: the cleared value
+  /// (`ClearValues[0]`, shared with `BeginRenderPass`'s own list) and the
+  /// subresource ranges it covers; the target image is `DstImage`.
+  std::vector<VkImageSubresourceRange> ClearRanges;
+  /// (V6) `ClearAttachments`: the attachments to clear and the rectangles
+  /// to clear them over.
+  std::vector<VkClearAttachment> ClearAttachments;
+  std::vector<VkClearRect> ClearRects;
+  /// (V6) `BlitImage`/`ResolveImage`: the regions between `SrcImage` and
+  /// `DstImage`, plus a blit's filter.
+  std::vector<VkImageBlit> BlitRegions;
+  std::vector<VkImageResolve> ResolveRegions;
+  VkFilter BlitFilter = VK_FILTER_NEAREST;
   /// (V6) `SetViewport`/`SetScissor`/`SetBlendConstants`/`SetStencil*`: the
   /// dynamic state this command records, snapshotted into the next draw
   /// (see "Dynamic state is what makes the prepared draw a snapshot").
@@ -545,6 +563,46 @@ public:
     Cmd.FirstVertexOrIndex = FirstVertex;
     Cmd.FirstInstance = FirstInstance;
     Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdClearColorImage`/`vkCmdClearDepthStencilImage`.
+  void clearImage(RecordedCommand::Kind Op, Image *Img, VkClearValue Value,
+                  std::vector<VkImageSubresourceRange> Ranges) {
+    RecordedCommand Cmd;
+    Cmd.Op = Op;
+    Cmd.DstImage = Img;
+    Cmd.ClearValues.push_back(Value);
+    Cmd.ClearRanges = std::move(Ranges);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (V6) `vkCmdClearAttachments`.
+  void clearAttachments(std::vector<VkClearAttachment> Attachments,
+                        std::vector<VkClearRect> Rects) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::ClearAttachments;
+    Cmd.ClearAttachments = std::move(Attachments);
+    Cmd.ClearRects = std::move(Rects);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (V6) `vkCmdBlitImage`.
+  void blitImage(Image *Src, Image *Dst, std::vector<VkImageBlit> Regions,
+                 VkFilter Filter) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BlitImage;
+    Cmd.SrcImage = Src;
+    Cmd.DstImage = Dst;
+    Cmd.BlitRegions = std::move(Regions);
+    Cmd.BlitFilter = Filter;
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (V6) `vkCmdResolveImage`.
+  void resolveImage(Image *Src, Image *Dst,
+                    std::vector<VkImageResolve> Regions) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::ResolveImage;
+    Cmd.SrcImage = Src;
+    Cmd.DstImage = Dst;
+    Cmd.ResolveRegions = std::move(Regions);
+    Commands.push_back(std::move(Cmd));
   }
   /// (V6) `vkCmdDrawIndirect`/`vkCmdDrawIndexedIndirect`: the buffer and
   /// offset the `VkDrawIndirectCommand`/`VkDrawIndexedIndirectCommand`

@@ -53,6 +53,38 @@ bool isSupportedAttachmentSampleCount(uint32_t SampleCount) {
   return SampleCount == 1 || SampleCount == 2 || SampleCount == 4;
 }
 
+llvm::Expected<feme::graphics::AttachmentView>
+resolveAttachmentView(ImageView *View) {
+  if (!View || !View->image() || !View->image()->isBound())
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "a render target attachment is not bound "
+                                   "to memory");
+  Image &Img = *View->image();
+  const VkImageSubresourceRange &Range = View->range();
+  if (View->dimension() != feme::cpu::ImageDimension::Texture2D ||
+      Range.baseArrayLayer != 0 ||
+      (Range.layerCount != VK_REMAINING_ARRAY_LAYERS && Range.layerCount != 1))
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "only a single-layer 2D image view may be "
+                                   "a render target (layered rendering is V7)");
+  if (Range.baseMipLevel >= Img.mipLevels())
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "a render target view's base mip level is "
+                                   "out of range");
+
+  uint32_t Level = Range.baseMipLevel;
+  const feme::cpu::FemeImageSubresourceLayout &Layout = Img.mipLayouts()[Level];
+  feme::graphics::AttachmentView Result;
+  Result.Format = View->format();
+  Result.Width = std::max(1u, Img.width() >> Level);
+  Result.Height = std::max(1u, Img.height() >> Level);
+  Result.ArrayLayers = 1;
+  auto *Base = static_cast<uint8_t *>(Img.data()) + Layout.Offset;
+  Result.Data = llvm::MutableArrayRef<uint8_t>(
+      Base, static_cast<size_t>(Layout.SlicePitch));
+  return Result;
+}
+
 } // namespace feme::vulkan
 
 namespace {
