@@ -1405,15 +1405,81 @@ implementing headers' own file comments:
   SPIR-V resource work" above. The Vulkan object-model half -- descriptor
   pools/sets/updates actually producing `BoundResourceBinding`s for a
   dispatch -- remains this milestone's own work, listed below.)
-- Complete SPIR-V `StorageBuffer` lowering to the CPU resource model.
-- Implement descriptor layouts, pools, sets, updates, binding, and dynamic
-  storage-buffer offsets, with contiguous heap ranges for arrayed bindings.
-- Implement buffer copy/fill/update commands and buffer barriers with the join
-  semantics described above.
-- Implement divergent groupshared access in `feme::cpu`, without which
-  `maxComputeSharedMemorySize` cannot be honored for realistic shaders.
-- Run a Vulkan compute shader that reads and writes storage buffers.
-- Differentially compare results with lavapipe for the supported subset.
+- ~~Complete SPIR-V `StorageBuffer` lowering to the CPU resource model.~~
+  (already covered by R26's `SPIRVResourceLoweringPass`, plus this
+  milestone's own storage-buffer descriptor writes/dynamic offsets below --
+  no further shader-compiler change was needed once both existed)
+- ~~Implement descriptor layouts, pools, sets, updates, binding, and dynamic
+  storage-buffer offsets, with contiguous heap ranges for arrayed
+  bindings.~~ (done: `feme::vulkan::DescriptorSetLayout`/`DescriptorPool`/
+  `DescriptorSet` (Descriptor.h/.cpp) implement the object model; a
+  descriptor set stores source Vulkan records -- bound buffer, offset,
+  range -- per "Descriptor Model", not a `FemeDescriptor` directly.
+  `vkCmdBindDescriptorSets` records the bound sets and the dynamic offsets
+  consumed for them, in ascending (set, binding) order per spec; dispatch
+  execution's `buildBoundResources` (CommandBuffer.cpp) then materializes
+  one `FemeDescriptor` array per (set, binding) with a non-empty declared
+  array, folding a dynamic binding's offset into the descriptor's `Data`
+  pointer with no shader-side change, matching "Memory and Buffers". A
+  (descriptor set, binding) identity is exactly
+  `feme::cpu::BoundResourceRange`'s `(Space, BaseRegister)`, so
+  `VkPipelineLayout`'s ordered `VkDescriptorSetLayout` list needs no
+  translation table -- `vkCreateComputePipelines` validates each of a
+  shader's `BoundResourceRange`s directly against it)
+- ~~Implement buffer copy/fill/update commands and buffer barriers with the
+  join semantics described above.~~ (done: `vkCmdCopyBuffer`/
+  `vkCmdFillBuffer`/`vkCmdUpdateBuffer` (CommandBuffer.cpp) bounds-check
+  every region before copying; `vkCmdPipelineBarrier` is recorded as a
+  plain marker, since this milestone's execution model already runs every
+  command to completion strictly in record order on a single thread -- see
+  "Queues, Scheduling, and Synchronization" -- so the join it specifies is
+  already satisfied by construction rather than needing any tracked
+  dependency state)
+- ~~Implement divergent groupshared access in `feme::cpu`, without which
+  `maxComputeSharedMemorySize` cannot be honored for realistic shaders.~~
+  (closed by roadmap R23, a prerequisite that landed before this milestone
+  began; this milestone's own remaining work was raising the Vulkan-
+  advertised `maxComputeSharedMemorySize` itself from the core-required
+  minimum (16384) to 32768 now that the CPU-target gap is closed -- see
+  "Limits and features")
+- ~~Run a Vulkan compute shader that reads and writes storage buffers.~~
+  (`StorageBufferDispatchTest.ReadsAndWritesThroughBoundDescriptorSet`/
+  `.DynamicOffsetShiftsBoundBinding`, feme/unittests/Vulkan/
+  CommandBufferTest.cpp, are this milestone's own end-to-end scenario:
+  bind a descriptor set over two storage buffers, dispatch a shader that
+  reads one and writes the other, and observe the host-visible result)
+- ~~Differentially compare results with lavapipe for the supported
+  subset.~~ (`feme-vulkan-storage-buffer-diff` (feme/tools/
+  feme-vulkan-storage-buffer-diff) links the real Khronos loader, binds
+  the same two storage buffers through a real `VkDescriptorSet`, and
+  prints its output; `test/Vulkan/storage-buffer-lavapipe-diff.test` runs
+  it once against FeMe's ICD and once against Mesa lavapipe's, with
+  `VK_DRIVER_FILES` restricted to a single manifest each time, and diffs
+  the two outputs)
+
+**Status: done**, implemented across `feme/lib/Vulkan/{Descriptor,
+Pipeline,CommandBuffer}.{h,cpp}`, covered by
+`feme/unittests/Vulkan/{Descriptor,Pipeline,CommandBuffer}Test.cpp` and
+`feme/test/Vulkan/storage-buffer-lavapipe-diff.test`.
+
+Deviations from this section's sketch:
+
+- Per-descriptor-type pool-size accounting (`VkDescriptorPoolCreateInfo::
+  pPoolSizes`) is not modeled -- `DescriptorPool` only enforces `maxSets`.
+  This milestone's only two descriptor types share one simple accounting
+  rule, and a real application's pool-size list beyond that is otherwise
+  upstream validation's job, not this ICD's own correctness surface.
+- Descriptor copies (`vkUpdateDescriptorSets`'s `pDescriptorCopies`) are
+  implemented (`DescriptorSet::write` reused from the copy source's
+  already-written array), even though "Descriptor updates obey Vulkan's
+  host synchronization rules" above only discusses writes -- it was no
+  additional design surface once writes existed, so it is not left as a
+  gap.
+- Update-after-bind and descriptor update templates remain unimplemented,
+  matching "The first version should omit those features and snapshot all
+  used descriptors into a prepared dispatch before worker execution" --
+  `buildBoundResources` runs once per dispatch preparation, reading
+  whatever a descriptor set's bindings hold at that moment.
 
 ### V3: Uniform data, push constants, and synchronization
 
