@@ -776,9 +776,9 @@ advertising any descriptor indexing feature.
 
 | Vulkan descriptor type | Initial FeMe representation | Status |
 |---|---|---|
-| Storage buffer | Raw/structured `FemeDescriptor`, writable | Required first |
-| Uniform buffer | `CBuffer` or read-only raw descriptor | Requires CPU cbuffer path |
-| Dynamic storage/uniform buffer | Same, with bound dynamic offset | Required after base buffers |
+| Storage buffer | Raw/structured `FemeDescriptor`, writable | Done (V2) |
+| Uniform buffer | Read-only raw `FemeDescriptor` | Vulkan object model done (V3); SPIR-V `Uniform` storage-class shader lowering still required |
+| Dynamic storage/uniform buffer | Same, with bound dynamic offset | Done (V2 storage, V3 uniform) |
 | Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Requires format map |
 | Uniform texel buffer | Typed read-only `FemeDescriptor` | Requires format map |
 | Sampled/storage image | Future image descriptor ABI | Deferred |
@@ -792,23 +792,25 @@ descriptor update templates before advertising those features. The first
 version should omit those features and snapshot all used descriptors into a
 prepared dispatch before worker execution.
 
-Push constants are copied into command-buffer state by `vkCmdPushConstants`.
-Each dispatch snapshots the bytes visible through its pipeline layout and
-passes them as `RootConstants`. Vulkan push-constant members carry absolute
-offsets within the push-constant block, while FeMe's root constant parameter is
-a flat byte blob, so the translation must record the base offset of the
-pipeline layout's ranges and reject a shader whose accessed range is not fully
-covered by a range declared in the layout with the compute stage bit set.
+Push constants are copied into command-buffer state by `vkCmdPushConstants`
+(done, V3). Each dispatch snapshots the bytes visible through its pipeline
+layout and passes them as `RootConstants`. Vulkan push-constant members carry
+absolute offsets within the push-constant block, while FeMe's root constant
+parameter is a flat byte blob, so the translation records the base offset of
+the pipeline layout's ranges and rejects a shader whose accessed range is not
+fully covered by a range declared in the layout with the compute stage bit
+set.
 
-This depends on FeMe root constant lowering broader than what exists: roadmap
-step R12 landed `feme::cpu::RootConstantLoweringPass`, so the default
-`(b0, space0)` binding with a non-array constant buffer and a constant row
-index does lower and `ResourceInfo::RootConstantSize` is populated, but any
-other register binding, an array, or a dynamic row index is still rejected,
-and `BoundResourceNormalizationPass` explicitly does not normalize constant
-buffers. Covering the full advertised `maxPushConstantsSize` is therefore
-still a multi-pass CPU-target change, and is scheduled accordingly in the
-milestones below rather than bundled into the first executing milestone.
+This depended on FeMe root constant lowering broader than what existed: R25
+closed the DXIL half (any single register binding, an array, and a dynamic
+row index are all accepted, and `ResourceInfo::RootConstantSize` reports the
+binding's full advertised size). The SPIR-V half needed its own, separate
+work R25 did not cover, since Vulkan push constants are a SPIR-V-only
+concept with no DXIL register binding at all: `feme::cpu::
+SPIRVPushConstantLoweringPass` (plus `feme::cpu::SPIRVResourceLoweringPass`'s
+own combined-case handling) now lowers a load through the push-constant
+global -- directly, or through a constant-index `getelementptr` into it --
+into a bounds-checked `RootConstants` read.
 
 ## Command Buffers
 
@@ -851,6 +853,15 @@ Secondary command buffers are interpreted into the primary execution state.
 Simultaneous-use support requires immutable command streams and submission-local
 execution state; no cursor or bound state may be stored back into the command
 buffer during execution.
+
+**Status (V3): done as specified above.** Every row of the first command set
+now has a real implementation; `debug labels` remain unimplemented (still
+harmless to omit, matching Vulkan's optional-feature convention for a
+debugging aid). `executeCommandBuffer`'s per-command interpretation loop is
+`executeCommandsInto`, taking the bound-pipeline/descriptor-set/push-constant
+state by reference so `vkCmdExecuteCommands` recurses into it for a
+secondary buffer's own commands without any state living on the command
+buffer object itself.
 
 ## Queues, Scheduling, and Synchronization
 
@@ -1483,16 +1494,83 @@ Deviations from this section's sketch:
 
 ### V3: Uniform data, push constants, and synchronization
 
-- Complete FeMe root constant lowering beyond the single `(b0, space0)`,
-  non-array, constant-row-index shape it supports today, and map Vulkan push
-  constants onto it, covering the full advertised `maxPushConstantsSize`.
-- Implement uniform buffers and dynamic uniform offsets.
-- Implement binary and timeline semaphores across queues, including the host
-  `vkSignalSemaphore`/`vkWaitSemaphores` paths.
-- Add secondary command buffers and the supported event subset.
-- Implement query pools with zero-valued timestamps.
-- Verify workgroup barrier correctness for multi-wave groups under sequential
-  wave execution.
+- ~~Complete FeMe root constant lowering beyond the single `(b0, space0)`,
+  non-array, constant-row-index shape it supports today~~ (closed by roadmap
+  R25, a prerequisite that landed before this milestone began -- see V3's
+  own dependency on R25 in Roadmap.md), ~~and map Vulkan push constants onto
+  it, covering the full advertised `maxPushConstantsSize`~~ (done: discovered
+  a second, SPIR-V-specific prerequisite R25 did not cover -- a SPIR-V
+  push-constant block had no CPU-target lowering into the root-constant
+  block at all, since `feme::cpu::RootConstantLoweringPass` only recognizes
+  DXIL's register-bound `dx.CBuffer`. `feme::cpu::
+  SPIRVPushConstantLoweringPass` (plus `feme::cpu::
+  SPIRVResourceLoweringPass`'s own combined-case handling for a function
+  that also uses bound resources) fills that gap, recognizing a load
+  through the push-constant global directly or through a constant-index
+  `getelementptr` into it. Doing this also surfaced and fixed a real,
+  previously-latent MLIR SPIRVToLLVM conversion bug: any `Block`-decorated
+  struct with explicit per-member `Offset` decorations -- the shape every
+  real (`dxc`-compiled or binary-round-tripped) push-constant or uniform
+  block actually has -- failed to convert at all, because MLIR's own
+  `convertStructTypeWithOffset` sanity-checks itself by comparing against
+  `VulkanLayoutUtils::decorateType`, which drops any struct-level
+  decoration when it recomputes a canonical layout. `feme::vulkan::
+  PipelineLayout` now records `VkPushConstantRange`s, and
+  `vkCreateComputePipelines` validates a shader's root-constant span is
+  fully covered, byte for byte, by the layout's compute-visible ranges and
+  fits `maxPushConstantsSize`; `vkCmdPushConstants` writes into new
+  per-command-buffer push-constant execution state, snapshotted into
+  `RootConstants` for every dispatch)
+- Implement uniform buffers and dynamic uniform offsets (done for the
+  Vulkan object model -- `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_DYNAMIC`
+  share storage buffers' pool/set/dynamic-offset accounting, materializing
+  a read-only `FemeDescriptor`; deliberately *not* done for the SPIR-V
+  shader-compiler side, which remains a separately-scoped follow-up --
+  see Descriptor.h's file comment for why: a `Uniform` storage-class
+  block's access shape, heterogeneously-typed fixed fields at fixed byte
+  offsets, does not fit `feme::cpu::SPIRVResourceLoweringPass`'s existing
+  homogeneous-indexed-array model at all, and needs its own lowering work
+  comparable in scope to roadmap step R26's storage-buffer one)
+- ~~Implement binary and timeline semaphores across queues, including the
+  host `vkSignalSemaphore`/`vkWaitSemaphores` paths~~ (done:
+  `feme::vulkan::Semaphore` covers both kinds; the host timeline-semaphore
+  functions are core-only, not `KHR`-suffixed, in Vulkan 1.2's feature set
+  rather than 1.1's, so the advertised API version and
+  `vk_gen_entrypoints.py`'s `CORE_FEATURES` both moved to 1.2, consistent
+  with this ICD's existing precedent of advertising a version while
+  implementing only a growing subset of its mandatory surface)
+- ~~Add secondary command buffers and the supported event subset~~ (done:
+  `vkAllocateCommandBuffers` accepts `VK_COMMAND_BUFFER_LEVEL_SECONDARY`,
+  and `vkCmdExecuteCommands` interprets one into the primary command
+  buffer's own execution state -- `executeCommandBuffer`'s per-command
+  switch is now `executeCommandsInto`, taking the bound-pipeline/
+  descriptor-set/push-constant state by reference so it composes for
+  this rather than each secondary buffer needing its own; `feme::vulkan::
+  Event` plus `vkCreateEvent`/`vkSetEvent`/`vkResetEvent`/`vkGetEventStatus`
+  (host) and `vkCmdSetEvent`/`vkCmdResetEvent`/`vkCmdWaitEvents` (device))
+- ~~Implement query pools with zero-valued timestamps~~ (done:
+  `feme::vulkan::QueryPool` accepts only `VK_QUERY_TYPE_TIMESTAMP` --
+  occlusion/pipeline-statistics queries measure rasterization/shading work
+  this compute-only device does not perform yet, graphics is V6+ -- and
+  every query this milestone ever produces reports zero)
+- ~~Verify workgroup barrier correctness for multi-wave groups under
+  sequential wave execution~~ (done: every prior barrier/groupshared test,
+  end to end and at the `feme::cpu::EntryWrapperPass` structural level
+  alike, dispatched a group of exactly one wave;
+  entry-wrapper-barrier-multi-wave.ll and multi-wave-barrier-groupshared.ll
+  are the first coverage of a group spanning more than one -- see the
+  latter's own comment for exactly what it does and does not prove, and
+  why a per-wave-uniform published value cannot yet be expressed to prove
+  the rest)
+
+**Status: mostly done.** Deviations from this section's sketch:
+
+- Uniform buffer *shader-side* SPIR-V lowering is deferred (see above);
+  the Vulkan object model is complete and tested independently of it.
+- Dynamic uniform buffer offsets are covered by the same
+  `isDynamicDescriptorType`/dynamic-offset machinery storage buffers
+  already used -- no separate implementation was needed once the
+  descriptor-type acceptance was extended.
 
 ### V4: Typed buffers and broader compute
 
