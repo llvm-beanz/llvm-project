@@ -80,6 +80,7 @@ add_feme_library(FeMeVulkanCore STATIC
   CommandBuffer.cpp
   Descriptor.cpp
   EntryPoints.cpp
+  Format.cpp
   GroupSize.cpp
   Memory.cpp
   PhysicalDeviceInfo.cpp
