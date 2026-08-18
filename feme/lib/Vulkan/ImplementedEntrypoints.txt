@@ -35,3 +35,13 @@ vkGetDeviceQueue
 vkGetDeviceQueue2
 vkDeviceWaitIdle
 vkGetDeviceProcAddr
+
+# V1: device memory (see "Memory and Buffers" in
+# feme/docs/FeMeVulkanDesign.md).
+vkAllocateMemory
+vkFreeMemory
+vkMapMemory
+vkUnmapMemory
+vkFlushMappedMemoryRanges
+vkInvalidateMappedMemoryRanges
+vkGetDeviceMemoryCommitment

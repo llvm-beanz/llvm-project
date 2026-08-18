@@ -97,6 +97,33 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device,
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vkGetInstanceProcAddr(VkInstance instance, const char *pName);
 
+// V1: device memory (see "Memory and Buffers" in
+// feme/docs/FeMeVulkanDesign.md).
+VKAPI_ATTR VkResult VKAPI_CALL
+vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo *pAllocateInfo,
+                 const VkAllocationCallbacks *pAllocator,
+                 VkDeviceMemory *pMemory);
+VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice device,
+                                        VkDeviceMemory memory,
+                                        const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(VkDevice device,
+                                           VkDeviceMemory memory,
+                                           VkDeviceSize offset,
+                                           VkDeviceSize size,
+                                           VkMemoryMapFlags flags,
+                                           void **ppData);
+VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice device,
+                                         VkDeviceMemory memory);
+VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(
+    VkDevice device, uint32_t memoryRangeCount,
+    const VkMappedMemoryRange *pMemoryRanges);
+VKAPI_ATTR VkResult VKAPI_CALL vkInvalidateMappedMemoryRanges(
+    VkDevice device, uint32_t memoryRangeCount,
+    const VkMappedMemoryRange *pMemoryRanges);
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceMemoryCommitment(
+    VkDevice device, VkDeviceMemory memory,
+    VkDeviceSize *pCommittedMemoryInBytes);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H

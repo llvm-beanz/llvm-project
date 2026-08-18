@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
 
 add_feme_unittest(FeMeVulkanTests
   GroupSizeTest.cpp
+  MemoryTest.cpp
   ObjectModelTest.cpp
   PhysicalDeviceInfoTest.cpp
   ProcAddrTest.cpp
