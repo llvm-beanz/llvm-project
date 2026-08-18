@@ -46,13 +46,14 @@
 // `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32` in
 // feme/runtime/CPU/FeMeRuntimeCPU.c), so only the `VkFormat`s that map to one
 // of those -- `VK_FORMAT_R32G32B32A32_SFLOAT`/`_UINT`/`_SINT` (the identity
-// cases) and `VK_FORMAT_R8G8B8A8_UNORM` (packed) -- are usable in a texel
-// buffer's `VkBufferView` here; every other format `Format.h` maps is
-// rejected by `feme::vulkan::isTexelBufferFormatSupported` at
-// `vkCreateBufferView` for a texel-buffer-typed view specifically (a
+// cases) and `VK_FORMAT_R8G8B8A8_{UNORM,SNORM,UINT,SINT}` (packed) -- are
+// usable in a texel buffer's `VkBufferView` here; every other format
+// `Format.h` maps is rejected by `feme::vulkan::isTexelBufferFormatSupported`
+// at `vkCreateBufferView` for a texel-buffer-typed view specifically (a
 // non-texel `VkBufferView` use does not exist in Vulkan). Broader format
 // coverage needs the runtime helper library to grow more `ResourceCallKind`
-// mangled variants (for the remaining packed formats) and, for a
+// mangled variants (for the remaining packed formats, e.g.
+// `R16G16B16A16_*`, `R11G11B10_FLOAT`, `R10G10B10A2_*`) and, for a
 // narrower-than-`<4 x T>` channel count, per-format zero/one-padding logic
 // (SPIR-V's own image ops always operate on a full four-component vector
 // regardless of the underlying format's real channel count) -- deferred

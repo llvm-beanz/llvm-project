@@ -133,9 +133,14 @@ bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   case ResourceFormat::R32G32B32A32_FLOAT:
   case ResourceFormat::R32G32B32A32_UINT:
   case ResourceFormat::R32G32B32A32_SINT:
-  // The one packed format `femeCpuResourceLoadTypedV4F32`/
-  // `StoreTypedV4F32` implements a scalar conversion for.
+  // The packed 8-bit-per-component formats `femeCpuResourceLoadTypedV4F32`/
+  // `StoreTypedV4F32` (`_UNORM`/`_SNORM`) and
+  // `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32` (`_UINT`/`_SINT`)
+  // implement a scalar conversion for.
   case ResourceFormat::R8G8B8A8_UNORM:
+  case ResourceFormat::R8G8B8A8_SNORM:
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_SINT:
     return true;
   default:
     return false;

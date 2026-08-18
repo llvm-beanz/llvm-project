@@ -56,11 +56,15 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_UINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_SINT));
   EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SNORM));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SINT));
 
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::R32_FLOAT));
   EXPECT_FALSE(
       isTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_FLOAT));
-  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SNORM));
+  EXPECT_FALSE(
+      isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM_SRGB));
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::Unknown));
 }
 
