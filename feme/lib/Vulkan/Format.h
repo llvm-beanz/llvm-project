@@ -42,6 +42,15 @@ std::optional<feme::cpu::ResourceFormat> mapVkFormat(VkFormat Format);
 /// `mapVkFormat` does not recognize.
 uint32_t formatElementSize(feme::cpu::ResourceFormat Format);
 
+/// Returns whether \p Format is one of the formats the CPU runtime's
+/// typed-load/store helpers (feme/runtime/CPU/FeMeRuntimeCPU.c) actually
+/// implement a conversion for, and so may legally back a texel buffer's
+/// `VkBufferView` (see Descriptor.h's file comment). `vkCreateBufferView`
+/// rejects every other format -- including one `mapVkFormat` itself maps
+/// successfully -- with `VK_ERROR_FORMAT_NOT_SUPPORTED` rather than silently
+/// misconverting it.
+bool isTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_FORMAT_H

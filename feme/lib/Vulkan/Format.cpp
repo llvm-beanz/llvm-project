@@ -122,3 +122,22 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   }
   llvm_unreachable("unhandled ResourceFormat");
 }
+
+bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
+  switch (Format) {
+  // The identity 32-bit-per-component formats: the CPU runtime's
+  // `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32` (`R32G32B32A32_UINT`/
+  // `_SINT`) and `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32`
+  // (`R32G32B32A32_FLOAT`) reinterpret the full 16-byte element directly,
+  // with no scalar conversion needed.
+  case ResourceFormat::R32G32B32A32_FLOAT:
+  case ResourceFormat::R32G32B32A32_UINT:
+  case ResourceFormat::R32G32B32A32_SINT:
+  // The one packed format `femeCpuResourceLoadTypedV4F32`/
+  // `StoreTypedV4F32` implements a scalar conversion for.
+  case ResourceFormat::R8G8B8A8_UNORM:
+    return true;
+  default:
+    return false;
+  }
+}

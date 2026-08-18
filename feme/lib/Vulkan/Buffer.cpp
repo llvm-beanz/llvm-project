@@ -95,7 +95,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateBufferView(
     const VkAllocationCallbacks *pAllocator, VkBufferView *pView) {
   std::optional<feme::cpu::ResourceFormat> Format =
       mapVkFormat(pCreateInfo->format);
-  if (!Format)
+  // A `VkBufferView` only ever backs a texel buffer (Vulkan has no other use
+  // for one), so this is always the texel-buffer format check, not merely
+  // "is this format known at all" -- see `isTexelBufferFormatSupported`'s
+  // comment and Descriptor.h's file comment for why the two differ.
+  if (!Format || !isTexelBufferFormatSupported(*Format))
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
   auto *Buf = fromHandle<Buffer>(pCreateInfo->buffer);

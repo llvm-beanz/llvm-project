@@ -47,4 +47,22 @@ TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::Unknown), 0u);
 }
 
+TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
+  // The CPU runtime's typed-load/store helpers implement a conversion for
+  // exactly these formats (see femeCpuResourceLoadTypedV4F32/V4I32 in
+  // feme/runtime/CPU/FeMeRuntimeCPU.c) -- every other format, even one
+  // `mapVkFormat` itself recognizes, is not usable in a texel buffer.
+  EXPECT_TRUE(
+      isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_FLOAT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_UINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R32G32B32A32_SINT));
+  EXPECT_TRUE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM));
+
+  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::R32_FLOAT));
+  EXPECT_FALSE(
+      isTexelBufferFormatSupported(ResourceFormat::R16G16B16A16_FLOAT));
+  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_SNORM));
+  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::Unknown));
+}
+
 } // namespace

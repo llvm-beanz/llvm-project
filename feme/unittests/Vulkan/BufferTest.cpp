@@ -102,4 +102,73 @@ TEST_F(BufferTest, RejectsZeroSize) {
             VK_ERROR_INITIALIZATION_FAILED);
 }
 
+class BufferViewTest : public BufferTest {
+protected:
+  void SetUp() override {
+    BufferTest::SetUp();
+    VkBufferCreateInfo BufferInfo{};
+    BufferInfo.size = 64;
+    BufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
+    ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = 64;
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindBufferMemory(Device, Buf, Memory, 0), VK_SUCCESS);
+  }
+  void TearDown() override {
+    vkDestroyBuffer(Device, Buf, nullptr);
+    vkFreeMemory(Device, Memory, nullptr);
+    BufferTest::TearDown();
+  }
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+};
+
+/// Every format the CPU runtime's typed-load/store helpers implement a
+/// conversion for is usable in a texel buffer's `VkBufferView` -- see
+/// `feme::vulkan::isTexelBufferFormatSupported`'s comment.
+TEST_F(BufferViewTest, AcceptsRuntimeSupportedFormats) {
+  for (VkFormat Format : {VK_FORMAT_R32G32B32A32_SFLOAT,
+                          VK_FORMAT_R32G32B32A32_UINT,
+                          VK_FORMAT_R32G32B32A32_SINT,
+                          VK_FORMAT_R8G8B8A8_UNORM}) {
+    VkBufferViewCreateInfo ViewInfo{};
+    ViewInfo.buffer = Buf;
+    ViewInfo.format = Format;
+    ViewInfo.range = VK_WHOLE_SIZE;
+    VkBufferView View = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateBufferView(Device, &ViewInfo, nullptr, &View),
+              VK_SUCCESS)
+        << "format " << Format;
+    vkDestroyBufferView(Device, View, nullptr);
+  }
+}
+
+/// A format `mapVkFormat` itself recognizes, but that the CPU runtime has no
+/// typed-load/store conversion for, must still be rejected -- silently
+/// misconverting it would be worse than refusing to create the view at all.
+TEST_F(BufferViewTest, RejectsFormatWithNoRuntimeConversion) {
+  VkBufferViewCreateInfo ViewInfo{};
+  ViewInfo.buffer = Buf;
+  ViewInfo.format = VK_FORMAT_R16G16B16A16_SFLOAT;
+  ViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView View = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateBufferView(Device, &ViewInfo, nullptr, &View),
+            VK_ERROR_FORMAT_NOT_SUPPORTED);
+  EXPECT_EQ(View, VK_NULL_HANDLE);
+}
+
+TEST_F(BufferViewTest, RejectsUnknownFormat) {
+  VkBufferViewCreateInfo ViewInfo{};
+  ViewInfo.buffer = Buf;
+  ViewInfo.format = VK_FORMAT_UNDEFINED;
+  ViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView View = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateBufferView(Device, &ViewInfo, nullptr, &View),
+            VK_ERROR_FORMAT_NOT_SUPPORTED);
+}
+
 } // namespace
