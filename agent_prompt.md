@@ -31,20 +31,20 @@ Can you continue V6 from the roadmap document?
 
 The previous agent left the notes:
 
-> The completion test says "match lavapipe for every format and state
-> combination the driver reports". That did not happen: `deqp-vk` was not
-> available here, and I did not stand up an off-screen lavapipe differential.
-> I have said so plainly in the status note rather than letting the
-> milestone's own completion criterion quietly become "the unit tests pass".
-> Whoever picks this up next should treat that as V6's outstanding debt, not
-> as V7 work -- the differential harness `feme-vulkan-storage-buffer-diff`
-> already established for compute is the obvious model, and
-> `feme-vulkan-graphics-smoke` is already the client to generalize.
->
-> Also open, and smaller: no graphics pipeline cache entry (the key must
-> cover the normalized pipeline description and the render-target binding,
-> and a key covering less is worse than none); blits do not convert formats,
-> mirror, or handle multisample sources; per-instance vertex input rate and
-> primitive restart are unimplemented; and secondary command buffers recorded
-> *inside* a render pass are V7's own bullet, so `VkCommandBufferInheritance
-> Info` is not interpreted yet.
+> I did not attempt the graphics pipeline cache entry this pass, after
+> looking at it seriously enough to explain why: unlike compute's cache key
+> (computed from raw SPIR-V words and the pipeline layout *before*
+> compiling, so a hit skips compilation entirely), a graphics pipeline's
+> normalized state includes vertex attributes and attachment formats that
+> this ICD currently only finalizes after `compileGraphicsPipeline` has
+> already run the (expensive) stage compilation. A cache key computed after
+> compiling buys only artifact-sharing across pipeline handles, not a
+> skipped recompile, unless the fixed-function-state translation is hoisted
+> ahead of stage compilation first -- a real refactor of
+> `compileGraphicsPipeline`'s control flow, not the glue code a cache key
+> function alone would be. Rather than land a cache that reads as complete
+> but provides none of the compute cache's actual benefit, I left it open
+> and said why here instead of quietly declaring it done. Blits still do not
+> convert formats, mirror, or handle multisample sources; per-instance
+> vertex input rate and primitive restart remain unimplemented; and
+> secondary command buffers inside a render pass are still V7's own bullet.
