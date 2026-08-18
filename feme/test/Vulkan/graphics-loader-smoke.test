@@ -16,7 +16,7 @@
 // RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/fullscreen-triangle-vs.mlir -o %t.vs.spv
 // RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/solid-color-fs.mlir -o %t.fs.spv
 // RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
-// RUN:   feme-vulkan-graphics-smoke %t.vs.spv %t.fs.spv | FileCheck %s
+// RUN:   feme-vulkan-graphics-smoke render-pass %t.vs.spv %t.fs.spv | FileCheck %s
 
 // 0.5 in `R8G8B8A8_UNORM` rounds to 0x80.
 // CHECK: 008000ff

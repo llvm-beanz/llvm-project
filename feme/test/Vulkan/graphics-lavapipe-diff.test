@@ -1,0 +1,83 @@
+// V6's own "off-screen differential against lavapipe" milestone bullet
+// (see "V6: Graphics queue and basic rendering" in
+// feme/docs/FeMeVulkanDesign.md), previously outstanding: its own status
+// note recorded that "neither a CTS run nor a lavapipe differential
+// happened in this pass" because `deqp-vk` was unavailable and Mesa
+// lavapipe's own off-screen graphics path was never exercised. This closes
+// the lavapipe half of that debt (a `deqp-vk` run remains gated behind
+// `system-vulkan-cts`, see storage-buffer-lavapipe-diff.test's own
+// precedent for compute) for every bullet the completion test names:
+// a VkRenderPass, dynamic rendering, depth, stencil, blending, MRT, and a
+// multisample resolve. `feme-vulkan-graphics-smoke` runs once per ICD, with
+// `VK_DRIVER_FILES` restricted to exactly one manifest each time so the
+// loader always reports that single device, and the two devices' printed
+// texels must be byte-for-byte identical.
+//
+// REQUIRES: system-vulkan-loader, system-second-vulkan-icd, spirv-registered-target
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/fullscreen-triangle-vs.mlir -o %t.vs.spv
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/red-fs.mlir -o %t.red-fs.spv
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/green-fs.mlir -o %t.green-fs.spv
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/three-quarter-alpha-red-fs.mlir -o %t.blend-fs.spv
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/dual-output-fs.mlir -o %t.dual-fs.spv
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/near-depth-vs.mlir -o %t.near-vs.spv
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/far-depth-vs.mlir -o %t.far-vs.spv
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke render-pass %t.vs.spv %t.red-fs.spv > %t.feme.render-pass.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke render-pass %t.vs.spv %t.red-fs.spv > %t.lavapipe.render-pass.txt
+// RUN: diff %t.feme.render-pass.txt %t.lavapipe.render-pass.txt
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke dynamic-rendering %t.vs.spv %t.red-fs.spv > %t.feme.dynamic-rendering.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke dynamic-rendering %t.vs.spv %t.red-fs.spv > %t.lavapipe.dynamic-rendering.txt
+// RUN: diff %t.feme.dynamic-rendering.txt %t.lavapipe.dynamic-rendering.txt
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke depth %t.near-vs.spv %t.red-fs.spv %t.far-vs.spv %t.green-fs.spv > %t.feme.depth.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke depth %t.near-vs.spv %t.red-fs.spv %t.far-vs.spv %t.green-fs.spv > %t.lavapipe.depth.txt
+// RUN: diff %t.feme.depth.txt %t.lavapipe.depth.txt
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke stencil %t.vs.spv %t.red-fs.spv %t.green-fs.spv > %t.feme.stencil.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke stencil %t.vs.spv %t.red-fs.spv %t.green-fs.spv > %t.lavapipe.stencil.txt
+// RUN: diff %t.feme.stencil.txt %t.lavapipe.stencil.txt
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke blend %t.vs.spv %t.blend-fs.spv > %t.feme.blend.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke blend %t.vs.spv %t.blend-fs.spv > %t.lavapipe.blend.txt
+// RUN: diff %t.feme.blend.txt %t.lavapipe.blend.txt
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke mrt %t.vs.spv %t.dual-fs.spv > %t.feme.mrt.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke mrt %t.vs.spv %t.dual-fs.spv > %t.lavapipe.mrt.txt
+// RUN: diff %t.feme.mrt.txt %t.lavapipe.mrt.txt
+
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke msaa-resolve %t.vs.spv %t.red-fs.spv > %t.feme.msaa-resolve.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-graphics-smoke msaa-resolve %t.vs.spv %t.red-fs.spv > %t.lavapipe.msaa-resolve.txt
+// RUN: diff %t.feme.msaa-resolve.txt %t.lavapipe.msaa-resolve.txt
+
+// RUN: FileCheck %s < %t.feme.render-pass.txt
+// CHECK: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
+// CHECK-NEXT: ff0000ff
