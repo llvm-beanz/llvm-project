@@ -19153,3 +19153,241 @@ the resolved range against the remaining space before ever computing a
 - Every commit in this session builds and passes `check-feme` on its own
   (I built and ran tests after each one before moving on), so bisecting
   this history should never land on a broken intermediate state.
+
+# Agent thoughts: implementing Roadmap V3 (uniform data, push constants, and synchronization)
+
+This records the reasoning behind implementing V3 from
+`feme/docs/FeMeVulkanDesign.md`:
+
+> Push constants onto FeMe root constants, uniform buffers, binary and
+> timeline semaphores, secondary command buffers, events, query pools
+
+## Starting point
+
+V2 (storage buffers and descriptors) was already done. I read
+FeMeVulkanDesign.md's V3 section, the "Descriptor Model" and "Command
+Buffers" and "Queues, Scheduling, and Synchronization" sections it depends
+on, and Roadmap.md's own V3 row and its R25 dependency, before writing any
+code.
+
+## The first surprise: push constants needed new CPU-target work, not just
+## Vulkan-side plumbing
+
+My first assumption, based on Roadmap.md's R25 row ("Root-constant
+breadth... done"), was that the shader-compiler side of push constants was
+already finished and V3's push-constant work was purely a Vulkan runtime
+change: record `VkPushConstantRange`s, validate coverage, snapshot bytes at
+dispatch time. Reading R25's own text carefully showed it only closed the
+*DXIL* half (`feme::cpu::RootConstantLoweringPass`, matching a
+`dx.CBuffer`/`cbufferrow.4` handle) -- Vulkan push constants are a SPIR-V
+concept with no DXIL register binding at all, and nothing in the existing
+pipeline lowered a SPIR-V push-constant global into the CPU ABI's root-
+constant block. `feme::spirv::PushConstantGlobalVariablePattern`
+(SPIRVToLLVMPatterns.cpp) converts the storage class into an ordinary LLVM
+global in address space 13, but nothing downstream ever consumed it -- any
+shader that read a push constant would fail to link (an undefined external
+symbol), a silent, not even cleanly-diagnosed failure mode.
+
+I confirmed this before writing any Vulkan code by checking whether the
+`root_constants`/`root_constant_size` ABI parameters `feme::cpu::
+ResourceLoweringPass`/`SPIRVResourceLoweringPass` always append would ever
+actually get populated for a SPIR-V push-constant access, and found they
+would not. So the real first step was a new CPU-target pass,
+`feme::cpu::SPIRVPushConstantLoweringPass`, mirroring
+`RootConstantLoweringPass`'s split between "standalone" (adds its own ABI
+params) and "combined with bound-resource access" (reuses
+`SPIRVResourceLoweringPass`'s already-added ones) cases -- but much simpler
+than the DXIL row-based shape, since a push-constant access is just an
+ordinary `getelementptr`+`load` with (usually) constant indices, not a
+`cbufferrow.4` call. I scoped it to constant-index GEP chains only (matching
+`hasOnlySupportedUses`'s own precedent of declining rather than partially
+rewriting an unsupported shape), which covers every realistic "read one
+push-constant member" case and leaves a dynamically-indexed push-constant
+array element entirely unlowered for `checkSupportedRaisedOps` to reject.
+
+## The second surprise: a real, previously-latent MLIR bug
+
+Testing the new pass against a hand-written SPIR-V push-constant shader
+through the *real* end-to-end pipeline (PipelineTest.cpp, which round-trips
+through `mlir::spirv::serialize`/`SPIRVImporter`'s deserialize, not just a
+hand-written MLIR text parse) surfaced a genuine bug: any `Block`-decorated
+struct with explicit per-member `Offset` decorations failed to convert at
+all, even though the *identical* struct without `Block` converted fine. I
+bisected this down to `convertStructTypeWithOffset` in MLIR's own
+`SPIRVToLLVM.cpp`: its sanity check compares the source type against
+`VulkanLayoutUtils::decorateType(type)`, which recomputes a struct's
+*canonical* layout from scratch and never re-attaches any struct-level
+decoration the original had -- so a `Block`-decorated type always compares
+unequal to its own recomputed self and is rejected, regardless of whether
+the actual byte layout is representable. This matters a great deal for V3,
+since `Block` plus explicit `Offset` is not a corner case -- it is the
+*only* shape real (`dxc`-compiled, or any binary-round-tripped) SPIR-V
+push-constant or uniform block ever has; the working hand-written `.mlir`
+test that predates this work simply never carried the decoration because
+MLIR's text parser doesn't require it, so the bug had never been exercised.
+
+I considered patching MLIR's own `SPIRVToLLVM.cpp` directly (it is in-tree),
+but chose instead to add feme's own struct-type conversion
+(`convertOffsetStructTypeIgnoringDecorations`, registered ahead of MLIR's
+via the existing "FeMe patterns win" precedent already used for
+`PointerType`) that checks each member's own natural (ABI-alignment-driven)
+offset directly rather than comparing whole-type identity including a
+decoration the check never actually needed. This keeps the fix scoped to
+feme's own conversion library rather than touching shared MLIR code, and
+is regression-tested with a second `--split-input-file` module in the
+existing `spirv-to-llvm-push-constant.mlir` test.
+
+## Vulkan-side push constants
+
+Once the CPU-target lowering worked, the Vulkan-side change was much more
+straightforward and matched the design doc's own sketch closely:
+`PipelineLayout` gained `VkPushConstantRange` storage, `vkCreateComputePipelines`
+validates a shader's `RootConstantSize` is fully (byte-for-byte, since
+multiple ranges could leave gaps) covered by the layout's compute-visible
+ranges and fits `maxPushConstantsSize`, and `CommandBuffer` gained a
+zero-initialized push-constant byte buffer written by `vkCmdPushConstants`
+and snapshotted into every dispatch's `RootConstants`.
+`PushConstantDispatchTest` in CommandBufferTest.cpp is the real end-to-end
+proof: a compiled SPIR-V shader that reads *both* a storage buffer and a
+push constant (exercising the "combined" lowering path), through a real
+`vkCmdPushConstants` + `vkCmdDispatch`.
+
+## Semaphores, events, query pools, secondary command buffers
+
+These were much more self-contained, each following the existing "coarse
+but obviously correct" synchronous-execution philosophy Sync.h's file
+comment already established for fences: since `vkQueueSubmit` runs every
+command buffer to completion on the calling thread before returning, any
+semaphore/event/query this ICD could ever observe is already in its final
+state by the time a wait or query result read happens. An unsignaled wait
+is therefore a genuine application-ordering error (`VK_ERROR_
+INITIALIZATION_FAILED`), not a real deadlock this driver's model could ever
+resolve by waiting longer -- I applied this same reasoning uniformly to
+`vkWaitSemaphores`, `vkCmdWaitEvents`, and (implicitly) `vkGetQueryPoolResults`'s
+`VK_QUERY_RESULT_WAIT_BIT`.
+
+Binary/timeline semaphores needed one non-obvious change: `vkWaitSemaphores`/
+`vkSignalSemaphore`/`vkGetSemaphoreCounterValue` are core-only (not
+`KHR`-suffixed) in Vulkan 1.2's feature set, not 1.1's, which
+`vk_gen_entrypoints.py`'s `CORE_FEATURES` only read up through. Rather than
+teach the generator about extensions (a much bigger, separately-scoped
+change the generator's own comments already anticipate as "future work once
+an extension is implemented"), I moved the advertised core API version and
+`CORE_FEATURES` to 1.2 outright, matching this ICD's own existing precedent
+of advertising a version while implementing only a growing subset of its
+mandatory surface (1.1 was already advertised despite no image/graphics
+support at all).
+
+Query pools only accept `VK_QUERY_TYPE_TIMESTAMP`: occlusion and
+pipeline-statistics queries measure rasterization/shading work this
+compute-only device does not perform yet (graphics is V6+), so there is
+nothing truthful they could report -- rejecting them at creation matches
+this ICD's convention of refusing to advertise/accept a feature it cannot
+back with real behavior, rather than silently reporting a fabricated
+result.
+
+Secondary command buffers required refactoring `executeCommandBuffer`'s
+per-command `switch` into a new `executeCommandsInto` taking the bound-
+pipeline/descriptor-set/push-constant state by reference, so
+`vkCmdExecuteCommands` can recurse into a secondary buffer's own commands
+threaded through the *same* state -- matching the design's own "no cursor
+or bound state may be stored back into the command buffer during
+execution."
+
+## Uniform buffers: a genuine, documented scope cut
+
+This is the one item I did not fully close, and I want to be explicit about
+why rather than quietly shipping a half-working shader path. A Vulkan
+uniform buffer maps to SPIR-V's `Uniform` storage class, and real UBO access
+looks nothing like `StorageBuffer`'s existing bound-resource model: a
+storage buffer wraps one *homogeneous, dynamically-indexed* runtime array
+(`getpointer(handle, index)` then load/store the whole element, optionally
+GEP'd further into that one element's own fields), which is exactly what
+`feme::cpu::SPIRVResourceLoweringPass` already normalizes. A uniform block
+is instead one *fixed* set of differently-typed named fields at fixed byte
+offsets -- much closer in shape to the push-constant fix I'd just built
+(constant-offset GEP + load) than to storage buffers' indexed-array model,
+except it also needs a (descriptor set, binding) heap identity storage
+buffers get from their handle and push constants (a single global, no
+identity needed) do not. Neither existing mechanism fits it directly, and
+building a correct new one (global-with-binding-identity conversion pattern,
+a new access-chain pattern, resource-lowering-pass integration, careful
+handling of arrayed UBOs) is realistically its own roadmap-sized piece of
+work, comparable to R26's own scope for storage buffers.
+
+Given that, I made the same kind of pragmatic, explicitly-documented scope
+decision this codebase's own roadmap uses repeatedly (e.g. V2's storage-buffer
+object model landing separately from, but depending on, R26's shader-compiler
+side): I implemented the Vulkan object model in full --
+`VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_DYNAMIC` sharing storage buffers' pool/
+set/dynamic-offset accounting, producing a read-only `FemeDescriptor` -- and
+left the SPIR-V shader-side lowering as a documented, separately-scoped
+follow-up (Descriptor.h's file comment, and the Descriptor Model table's
+status column in FeMeVulkanDesign.md). This is real, tested, valuable work on
+its own (the runtime is fully ready the moment shader-side support lands),
+not a stub -- but it is honestly incomplete relative to the milestone's own
+one-line summary, and I said so in both the design doc and the roadmap
+rather than letting the roadmap's own accounting overstate what's done.
+
+## Verifying multi-wave barrier correctness
+
+The milestone's last bullet asked me to *verify* (not necessarily fix)
+workgroup barrier correctness for multi-wave groups. I used an explore
+sub-agent to survey the barrier-splitting mechanism
+(`feme::cpu::EntryWrapperPass`'s region-split-plus-per-wave-spill design,
+described in FeMeCPUDesign.md's "Group Execution and Barriers") and every
+existing barrier/groupshared test, and it found the implementation correct
+by construction but confirmed a real, precise test gap: literally every
+barrier test in the tree (`entry-wrapper-barrier-*.ll`,
+`EntryWrapperTest.cpp`'s barrier cases, `barrier-groupshared.hlsl`,
+`multi-group-barrier.hlsl`) dispatches a group of exactly one wave, so none
+of them could catch a regression specific to a group spanning more than
+one.
+
+I added two tests: a structural one
+(`entry-wrapper-barrier-multi-wave.ll`, combining the existing
+single-wave barrier-split test with the existing barrier-free multi-wave
+test) checking that each of a barrier's two regions still gets its own full
+wave loop rather than one silently assuming a single wave, and an
+end-to-end one (`multi-wave-barrier-groupshared.ll`, hand-written LLVM IR
+fed directly to `feme-run` so it does not depend on the DirectX target
+this sandbox lacks) checking real dispatched output across a two-wave
+group. While writing the end-to-end test I realized -- and want to record,
+since it's a subtlety worth remembering -- that this model's own
+sequential (wave 0 to completion, then wave 1) execution already guarantees
+write-then-read visibility regardless of whether the barrier call does
+anything at all; I verified this directly by deleting the barrier
+intrinsic call from a copy of the test and observing identical output. So
+the end-to-end test proves groupshared memory is genuinely one allocation
+shared across a group's waves (a real thing that could regress), but it
+does *not*, by itself, prove the barrier is load-bearing -- doing that
+would need a per-wave-uniform (not per-group-uniform) published value,
+which the current "only a compile-time-constant groupshared index is
+canonicalized" restriction (documented in `feme::cpu::
+rewriteGroupSharedGlobals`'s own comment, GroupShared.cpp) does not yet let
+a shader express. I said this explicitly in the test's own comment rather
+than let it imply a stronger guarantee than it actually gives; the
+structural test is what actually proves the split/dispatch composition.
+
+## Process notes
+
+- Built with ccache and `LLVM_ENABLE_ASSERTIONS=ON` throughout (this
+  session's build directory already had both configured); ran the full
+  `ninja check-feme` after every change, not just the new tests, and it
+  stayed green (1261 passed / 34 unsupported at the start of this session,
+  1279 passed / 34 unsupported at the end -- the unsupported count is
+  unchanged, confirming no regression in what's skipped for lacking the
+  DirectX target).
+- Kept commits small and independently buildable/testable, per
+  feme/.instructions.md: the SPIR-V push-constant CPU lowering, the MLIR
+  struct-conversion fix, Vulkan push constants, the end-to-end push-constant
+  dispatch test, semaphores, events/query-pools/secondary-command-buffers,
+  the uniform-buffer object model, and the multi-wave barrier tests each
+  landed as their own commit.
+- Two test-only bugs I found and fixed along the way, worth remembering as
+  a general lesson: a hand-rolled `VkSubmitInfo`/`VkSemaphoreTypeCreateInfo`
+  etc. in a unit test that forgets to set its own `sType` compiles and links
+  fine but silently takes the wrong code path once the ICD actually reads
+  the `pNext` chain (rather than ignoring it, as the pre-V3 code did) --
+  exactly the kind of bug real Vulkan applications are required by the spec
+  to avoid, but a test fixture can accidentally omit just as easily.
