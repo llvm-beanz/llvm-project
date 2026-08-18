@@ -174,6 +174,36 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// V4: the `<4 x i32>` (integer-format) counterpart of
+/// `kTexelBufferAddShader` above -- reads one texel from a `Rgba32ui`
+/// uniform texel buffer, adds a constant, and writes it to a `Rgba32i`
+/// storage texel buffer, exercising `isSupportedTexelElementType`'s (V4)
+/// `<4 x i32>` acceptance and `femeCpuResourceLoadTypedV4I32`/
+/// `StoreTypedV4I32` end to end. The in/out images intentionally use
+/// different (both 32-bit-identity) integer formats to prove the
+/// conversion is keyed off each descriptor's own bound `Format`, not
+/// baked into the shader.
+const char *kIntTexelBufferAddShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @in bind(0, 0) : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32ui>, UniformConstant>
+  spirv.GlobalVariable @out bind(0, 1) : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32i>, UniformConstant>
+  spirv.func @main() -> () "None" {
+    %idx = spirv.Constant 0 : i32
+    %2 = spirv.mlir.addressof @in : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32ui>, UniformConstant>
+    %img_in = spirv.Load "UniformConstant" %2 : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32ui>
+    %v = spirv.ImageFetch %img_in, %idx : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NeedSampler, Rgba32ui>, i32 -> vector<4xi32>
+    %one = spirv.Constant dense<1> : vector<4xi32>
+    %v2 = spirv.IAdd %v, %one : vector<4xi32>
+    %3 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32i>, UniformConstant>
+    %img_out = spirv.Load "UniformConstant" %3 : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32i>
+    spirv.ImageWrite %img_out, %idx, %v2 : !spirv.image<i32, Buffer, NoDepth, NonArrayed, SingleSampled, NoSampler, Rgba32i>, i32, vector<4xi32>
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @in, @out
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 /// V3: reads the second field of a `Uniform` storage-class block --
 /// `cbuffer`/`ConstantBuffer<T>` in HLSL -- and writes it to a
 /// `StorageBuffer` element, exercising the SPIR-V shader-side uniform-
@@ -883,6 +913,11 @@ TEST_F(CommandBufferTest, SubgroupBuiltinsWriteThroughStorageBuffer) {
 /// format scope).
 class TexelBufferDispatchTest : public ::testing::Test {
 protected:
+  /// The shader `SetUp` assembles and dispatches; overridden by
+  /// `IntTexelBufferDispatchTest` below to exercise the `<4 x i32>` shape
+  /// instead of the default `<4 x float>` one.
+  virtual const char *getShaderSource() { return kTexelBufferAddShader; }
+
   void SetUp() override {
     VkInstanceCreateInfo InstInfo{};
     ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
@@ -912,7 +947,7 @@ protected:
     ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
               VK_SUCCESS);
 
-    std::vector<uint32_t> Words = assembleSPIRV(kTexelBufferAddShader);
+    std::vector<uint32_t> Words = assembleSPIRV(getShaderSource());
     ASSERT_FALSE(Words.empty());
     VkShaderModuleCreateInfo ShaderInfo{};
     ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
@@ -1058,6 +1093,76 @@ TEST_F(TexelBufferDispatchTest, ReadsAndWritesThroughBoundBufferViews) {
   EXPECT_FLOAT_EQ(Result[1], InitialValue[1] + 1.0f);
   EXPECT_FLOAT_EQ(Result[2], InitialValue[2] + 1.0f);
   EXPECT_FLOAT_EQ(Result[3], InitialValue[3] + 1.0f);
+
+  vkDestroyBufferView(Device, InView, nullptr);
+  vkDestroyBufferView(Device, OutView, nullptr);
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// V4: the `<4 x i32>` (integer texel buffer format) counterpart of
+/// `TexelBufferDispatchTest` above -- see `kIntTexelBufferAddShader`'s
+/// comment. Reuses the base fixture's object-model setup, only swapping the
+/// dispatched shader.
+class IntTexelBufferDispatchTest : public TexelBufferDispatchTest {
+protected:
+  const char *getShaderSource() override { return kIntTexelBufferAddShader; }
+};
+
+TEST_F(IntTexelBufferDispatchTest, ReadsAndWritesThroughIntegerBufferViews) {
+  HostBuffer In = createTexelBuffer(16); // One <4 x i32> texel.
+  HostBuffer Out = createTexelBuffer(16);
+  int32_t InitialValue[4] = {1, -2, 3, -4};
+  std::memcpy(In.Data, InitialValue, sizeof(InitialValue));
+
+  VkBufferViewCreateInfo InViewInfo{};
+  InViewInfo.buffer = In.Buf;
+  InViewInfo.format = VK_FORMAT_R32G32B32A32_UINT;
+  InViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView InView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &InViewInfo, nullptr, &InView),
+            VK_SUCCESS);
+  VkBufferViewCreateInfo OutViewInfo{};
+  OutViewInfo.buffer = Out.Buf;
+  OutViewInfo.format = VK_FORMAT_R32G32B32A32_SINT;
+  OutViewInfo.range = VK_WHOLE_SIZE;
+  VkBufferView OutView = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBufferView(Device, &OutViewInfo, nullptr, &OutView),
+            VK_SUCCESS);
+
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstSet = Set;
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+  Writes[0].pTexelBufferView = &InView;
+  Writes[1].dstSet = Set;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+  Writes[1].pTexelBufferView = &OutView;
+  vkUpdateDescriptorSets(Device, 2, Writes, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  int32_t Result[4];
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result[0], InitialValue[0] + 1);
+  EXPECT_EQ(Result[1], InitialValue[1] + 1);
+  EXPECT_EQ(Result[2], InitialValue[2] + 1);
+  EXPECT_EQ(Result[3], InitialValue[3] + 1);
 
   vkDestroyBufferView(Device, InView, nullptr);
   vkDestroyBufferView(Device, OutView, nullptr);
