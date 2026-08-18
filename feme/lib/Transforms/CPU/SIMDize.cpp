@@ -77,6 +77,7 @@
 #include "feme/Core/StageOps.h"
 #include "feme/Target/CPU/WaveSize.h"
 #include "feme/Transforms/CPU/BuiltinCalls.h"
+#include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/MaskIntrinsics.h"
 #include "feme/Transforms/CPU/ResourceCalls.h"
 #include "feme/Transforms/CPU/WaveCalls.h"
@@ -455,6 +456,8 @@ private:
   void replaceGroupIdCall(CallInst &CI);
   void widenResourceCall(CallInst &CI, const MatchedResourceCall &Matched,
                          IRBuilder<> &Builder);
+  void widenImageCall(CallInst &CI, const MatchedImageCall &Matched,
+                      IRBuilder<> &Builder);
   void widenMaskAny(CallInst &CI, IRBuilder<> &Builder);
   void widenMaskedLoad(CallInst &CI, const MatchedMaskedMemOp &Matched,
                        IRBuilder<> &Builder);
@@ -561,7 +564,10 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
     bool IsVectorLoad = false;
     if (auto *CI = dyn_cast<CallInst>(&I)) {
       std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
-      IsVectorLoad = Matched && !Matched->StoredValue;
+      // A `feme.cpu.image.*` sample/load returns `<4 x float>` and is
+      // decomposed into per-component wide vectors exactly like a typed
+      // buffer load (see `widenImageCall`).
+      IsVectorLoad = (Matched && !Matched->StoredValue) || matchImageCall(*CI);
     }
 
     if (!IsInsertChain && !IsVectorLoad) {
@@ -569,7 +575,8 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent value '" + I.getName() +
           "' of vector type; only a constant-index insertelement chain or "
-          "a resource load is supported (roadmap milestone 7 deviation)");
+          "a resource/image load is supported (roadmap milestone 7 "
+          "deviation)");
       return false;
     }
 
@@ -1011,6 +1018,85 @@ void FunctionWidener::widenResourceCall(CallInst &CI,
   ToErase.push_back(&CI);
 }
 
+void FunctionWidener::widenImageCall(CallInst &CI,
+                                     const MatchedImageCall &Matched,
+                                     IRBuilder<> &Builder) {
+  // Roadmap R30's remaining SIMD gap. A `feme.cpu.image.*` call does not
+  // fit `widenResourceCall`'s fixed (heap, index, offset, [value], mask)
+  // shape -- it carries two heaps, two descriptor indices and several
+  // coordinate operands (see ImageCalls.h's file comment) -- but its
+  // scalarization is the same shape: call the scalar helper once per lane
+  // with that lane's operands, then reassemble the result.
+  //
+  // Every operand except the trailing mask is widened generically, so a
+  // divergent coordinate, LOD, comparison reference, or descriptor index
+  // is handled without this function knowing which kind of call it is; the
+  // leading heap pointer/count operands are entry-point parameters and
+  // therefore never divergent.
+  unsigned MaskIdx = CI.arg_size() - 1;
+  bool AnyDivergent = Widened.count(Matched.Mask) != 0;
+  for (unsigned I = 0; I != MaskIdx; ++I)
+    AnyDivergent |= Widened.count(CI.getArgOperand(I)) != 0;
+  if (!AnyDivergent)
+    return; // A uniform sample: leave the scalar call as-is.
+
+  SmallVector<Value *, 12> WideArgs(MaskIdx, nullptr);
+  for (unsigned I = 0; I != MaskIdx; ++I)
+    if (Widened.count(CI.getArgOperand(I)))
+      WideArgs[I] = getWidened(CI.getArgOperand(I), Builder);
+
+  // Every image operation is a read, so the wave's entry mask (not its
+  // side-effect mask) is what decides which lanes may run the helper.
+  Value *LaneMaskBase = Env.EntryMask;
+  if (!isa<Constant>(Matched.Mask))
+    LaneMaskBase = Builder.CreateAnd(
+        LaneMaskBase, getWidened(Matched.Mask, Builder), "image.mask");
+
+  Function *Callee = CI.getCalledFunction();
+  Value *Result = nullptr;
+  SmallVector<Value *, 4> LoadComponents;
+  bool ResultIsVector = CI.getType()->isVectorTy();
+  if (ResultIsVector) {
+    auto *VecTy = cast<FixedVectorType>(CI.getType());
+    LoadComponents.assign(VecTy->getNumElements(),
+                          PoisonValue::get(FixedVectorType::get(
+                              VecTy->getElementType(), WaveSize)));
+  } else {
+    Result = PoisonValue::get(FixedVectorType::get(CI.getType(), WaveSize));
+  }
+
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    SmallVector<Value *, 12> CallArgs;
+    for (unsigned I = 0; I != MaskIdx; ++I)
+      CallArgs.push_back(WideArgs[I] ? Builder.CreateExtractElement(
+                                           WideArgs[I], Builder.getInt32(Lane),
+                                           "lane.image.arg")
+                                     : CI.getArgOperand(I));
+    CallArgs.push_back(Builder.CreateExtractElement(
+        LaneMaskBase, Builder.getInt32(Lane), "lane.mask"));
+
+    Value *LaneResult = Builder.CreateCall(Callee, CallArgs);
+    if (!ResultIsVector) {
+      Result = Builder.CreateInsertElement(Result, LaneResult,
+                                           Builder.getInt32(Lane));
+      continue;
+    }
+    for (unsigned Component = 0, NumComponents = LoadComponents.size();
+         Component != NumComponents; ++Component) {
+      Value *LaneScalar = Builder.CreateExtractElement(
+          LaneResult, Builder.getInt32(Component), "lane.result.elt");
+      LoadComponents[Component] = Builder.CreateInsertElement(
+          LoadComponents[Component], LaneScalar, Builder.getInt32(Lane));
+    }
+  }
+
+  if (ResultIsVector)
+    WidenedVectorComponents[&CI] = std::move(LoadComponents);
+  else
+    Widened[&CI] = Result;
+  ToErase.push_back(&CI);
+}
+
 void FunctionWidener::widenMaskAny(CallInst &CI, IRBuilder<> &Builder) {
   // `feme.cpu.mask.any` is uniform (see `feme::cpu::WaveTTIImpl`), so the
   // generic `!UI.isDivergentAtDef` rule in `widenInstruction` would leave it
@@ -1315,15 +1401,15 @@ void FunctionWidener::widenInsertElement(InsertElementInst &IE,
   // form (see `checkVectorDecompositionSupported`'s file comment): start
   // from the base's own components, fill in the inserted element's widened
   // value at its constant index, and record the result for the next link
-  // (or `widenResourceCall`) to consume -- this instruction itself never
-  // gets a single widened `<W x T>` replacement.
+  // (or `widenResourceCall`/`widenImageCall`) to consume -- this
+  // instruction itself never gets a single widened `<W x T>` replacement.
   //
   // A base that is not itself a decomposed vector is uniform (a divergent
   // one would already be in `WidenedVectorComponents`), so each of its
   // components widens to a splat. Only a `poison`/`undef` base -- what
   // `raiseTypedBufferStore` starts a fresh chain from -- has no component
-  // values to carry over, and a component such a chain never writes really
-  // is poison.
+  // values to carry over, and a component the chain never writes really is
+  // poison.
   auto *VecTy = cast<FixedVectorType>(IE.getType());
   Value *Base = IE.getOperand(0);
   SmallVector<Value *, 4> Components;
@@ -1446,6 +1532,10 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
   if (auto *CI = dyn_cast<CallInst>(&I)) {
     if (std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI)) {
       widenResourceCall(*CI, *Matched, Builder);
+      return true;
+    }
+    if (std::optional<MatchedImageCall> Matched = matchImageCall(*CI)) {
+      widenImageCall(*CI, *Matched, Builder);
       return true;
     }
     if (isMaskAnyCall(*CI)) {
