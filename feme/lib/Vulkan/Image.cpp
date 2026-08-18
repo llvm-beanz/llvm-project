@@ -441,6 +441,25 @@ vkCreateSampler(VkDevice, const VkSamplerCreateInfo *pCreateInfo,
   if (pCreateInfo->borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT ||
       pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT)
     return VK_ERROR_FEATURE_NOT_PRESENT;
+  // Neither extension's own `pNext` struct is meaningful without its
+  // extension enabled either -- reject a chained
+  // `VkSamplerCustomBorderColorCreateInfoEXT`/
+  // `VkSamplerBorderColorComponentMappingCreateInfoEXT` explicitly rather
+  // than silently ignoring it the way an unrecognized `pNext` struct
+  // normally is (see e.g. `fillProperties2Chain`'s comment in
+  // EntryPoints.cpp): an application that chained one believing either
+  // extension were supported would otherwise get a sampler that silently
+  // ignores its custom border color/component swizzle, not a diagnosable
+  // failure.
+  for (const auto *Base =
+           static_cast<const VkBaseInStructure *>(pCreateInfo->pNext);
+       Base; Base = Base->pNext) {
+    if (Base->sType ==
+            VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT ||
+        Base->sType ==
+            VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT)
+      return VK_ERROR_FEATURE_NOT_PRESENT;
+  }
 
   Allocator Alloc(pAllocator);
   Sampler *Obj =

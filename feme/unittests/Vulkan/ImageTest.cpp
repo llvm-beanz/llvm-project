@@ -564,4 +564,26 @@ TEST_F(ImageTest, CopyMultisampleImagePreservesEverySample) {
   vkFreeMemory(Device, DstMemory, nullptr);
 }
 
+TEST_F(ImageTest, RejectsCustomBorderColorSwizzlePNext) {
+  // Neither `VK_EXT_custom_border_color` nor `VK_EXT_border_color_swizzle`
+  // is advertised (see `vkCreateSampler`'s own comment); chaining either
+  // extension's create-info struct is rejected explicitly rather than
+  // silently ignored.
+  VkSamplerBorderColorComponentMappingCreateInfoEXT Swizzle{};
+  Swizzle.sType =
+      VK_STRUCTURE_TYPE_SAMPLER_BORDER_COLOR_COMPONENT_MAPPING_CREATE_INFO_EXT;
+  VkSamplerCreateInfo SamplerInfo{};
+  SamplerInfo.pNext = &Swizzle;
+  VkSampler Samp = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp),
+            VK_ERROR_FEATURE_NOT_PRESENT);
+
+  VkSamplerCustomBorderColorCreateInfoEXT CustomColor{};
+  CustomColor.sType =
+      VK_STRUCTURE_TYPE_SAMPLER_CUSTOM_BORDER_COLOR_CREATE_INFO_EXT;
+  SamplerInfo.pNext = &CustomColor;
+  EXPECT_EQ(vkCreateSampler(Device, &SamplerInfo, nullptr, &Samp),
+            VK_ERROR_FEATURE_NOT_PRESENT);
+}
+
 } // namespace
