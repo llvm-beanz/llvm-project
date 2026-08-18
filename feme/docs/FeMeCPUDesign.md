@@ -1584,8 +1584,13 @@ handle in one step rather than two, using SPIR-V's (descriptor set, binding)
 pair in the same role as DXIL's (register space, register) and its own
 range-size/array-index operands for steps 1–3 above; it has no bindless-heap
 step 4 of its own to perform, since there is no SPIR-V shader mixing
-traditional and bindless resources to make unambiguous. See that pass's
-header comment for its exact scope.
+traditional and bindless resources to make unambiguous. Roadmap R30 extended
+it to bound 2D sampled images and samplers as well: those are assigned slots
+in the *image* and *sampler* heaps, which step 2 numbers independently of
+the resource heap and of each other, so `ResourceInfo` reports one
+`BoundResourceClass` per range alongside its heap base (see "Heap usage
+discovery") and a host materializes each heap from the ranges of its own
+class. See that pass's header comment for its exact scope.
 
 This arrangement preserves the useful properties of the dynamic-only
 execution model:
@@ -2047,7 +2052,8 @@ struct DispatchResources {
   // Logical native-dynamic heaps; JITEngine appends these after any reserved
   // prefixes before calling the compiled entry point.
   llvm::ArrayRef<FemeDescriptor> ResourceHeap;
-  llvm::ArrayRef<FemeDescriptor> SamplerHeap;
+  llvm::ArrayRef<FemeImageDescriptor> ImageHeap;
+  llvm::ArrayRef<FemeSamplerDescriptor> SamplerHeap;
   llvm::ArrayRef<BoundDescriptorRange> BoundRanges;
   llvm::ArrayRef<uint8_t> RootConstants;
 };
@@ -2123,7 +2129,13 @@ Notes and constraints:
   the `SourceBinding`/`BoundDescriptorRange` pair sketched above; DXIL is
   the only source model with bound-resource handling yet (see the Status
   section's Deviation note), so there is no other namespace a `Space`/
-  `BaseRegister` pair could collide with today. `materializeResourceHeap`
+  `BaseRegister` pair could collide with today. Roadmap R30 added the image
+  and sampler counterparts -- `BoundImageBinding`/`BoundSamplerBinding` and
+  `materializeImageHeap`/`materializeSamplerHeap` -- so that a bound
+  sampled image or sampler lands in the image or sampler heap rather than
+  the buffer-oriented resource heap; all three share one class-filtered
+  helper, and a range only ever fills the heap its `BoundResourceClass`
+  names. `materializeResourceHeap`
   matches each `ResourceInfo::BoundRanges` entry by `(Space,
   BaseRegister)` and zero-fills an unmatched or short range, but does not
   itself diagnose a duplicate or oversized `BoundResourceBinding`, or one

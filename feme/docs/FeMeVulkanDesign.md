@@ -1763,25 +1763,52 @@ produces and consumes those descriptors:
   `vkUpdateDescriptorSets`/`vkCmdBindDescriptorSets`'s existing paths and
   copyable by `vkCmdCopyDescriptorSet`, exactly like a buffer binding.
 
-**Deviation: a real dispatch still cannot consume an image or sampler.**
-This milestone deliberately stopped at the object model. Materializing a
-`FemeImageDescriptor`/`FemeSamplerDescriptor` heap from a Vulkan descriptor
-set at dispatch time needs the same kind of reflection
-`feme::cpu::ResourceLoweringPass` already builds for a *bound buffer*
-(`BoundResourceRange`, feme/include/feme/Target/CPU/ResourceInfo.h) -- a
-`(descriptor set, binding) -> heap slot` assignment the CPU compiler
-discovers from the shader itself -- which does not exist yet for an image or
-sampler handle. Roadmap.md's R30 row is explicit that this is still open:
-"CPU-side lowering of a SPIR-V-sourced image/sampler heap all remain[s]" even
-though 2D sampling/loading itself landed end to end for a DXIL/register-bound
-resource. `feme::cpu::ResourceInfo::UsesSamplerHeap` is therefore still
-unconditionally `false` (no pass sets it), and `compileComputePipeline`'s
-existing rejection of a shader that sets it is left in place rather than
-removed, so a future shader that does is still rejected truthfully instead of
-silently misdispatching -- see Pipeline.cpp's updated comment at that check.
-This is the same "blocked on G2" gap Roadmap.md's §1.9 table already records
-for this row; closing it is R30's own remaining scope, not a new gap this
-milestone introduced.
+**Former deviation, now closed: a real dispatch can consume an image and a
+sampler.** This milestone originally stopped at the object model, because
+materializing a `FemeImageDescriptor`/`FemeSamplerDescriptor` heap from a
+Vulkan descriptor set at dispatch time needs the same kind of reflection
+the CPU target already built for a *bound buffer* -- a
+`(descriptor set, binding) -> heap slot` assignment discovered from the
+shader itself -- which did not exist for an image or sampler handle. R30's
+follow-up added it:
+
+- `feme::cpu::BoundResourceRange` gained a `BoundResourceClass`, and
+  `ResourceInfo`/`StageArtifactInfo` gained `ReservedImageHeapSize`/
+  `ReservedSamplerHeapSize` (artifact ABI version 5), so a range can name
+  the image or sampler heap rather than the buffer-oriented resource one.
+- `feme::cpu::SPIRVResourceLoweringPass` normalizes a bound 2D sampled
+  image and sampler into those heaps and lowers their accesses to
+  `feme.cpu.image.*` (see "Canonical image operations" in
+  FeMeGraphicsDesign.md).
+- `buildBoundResources` (lib/Vulkan/CommandBuffer.cpp) resolves a set's
+  `SAMPLED_IMAGE`/`STORAGE_IMAGE`/`SAMPLER`/`COMBINED_IMAGE_SAMPLER`
+  bindings into those descriptor arrays -- a combined binding into both,
+  since this ICD keeps the two separate -- and `PreparedDispatch`
+  materializes each heap from the ranges of its own class. A view's mip
+  subrange is expressed by slicing the image's own mip-layout table while
+  keeping `Data` at the image base, which the ABI's base-relative
+  `FemeImageSubresourceLayout::Offset`s make exact.
+- `compileComputePipeline` no longer rejects `UsesSamplerHeap`; instead
+  every bound range must be satisfied by a descriptor type of its own
+  class, so a shader that samples through (set, binding) can no longer be
+  handed a storage buffer there.
+
+`unittests/Vulkan/CommandBufferTest.cpp`'s `SampledImageDispatchTest` runs
+the whole path (a compute shader sampling a bound 2x2
+`R32G32B32A32_SFLOAT` image through a bound sampler, writing the texel to a
+storage buffer), and `feme/test/Vulkan/sampled-image-loader-smoke.test`
+does the same through the real Khronos loader -- the sampling counterpart
+to this milestone's copy-only `image-loader-smoke.test`.
+
+Remaining narrowings, all inherited from R30's own scope (see
+FeMeGraphicsDesign.md's "Canonical image operations") rather than specific
+to this ICD: only a single-sampled, non-arrayed, float 2D sampled image can
+actually be *read* by a shader, a texel offset must be zero, and an image
+view over a nonzero base array layer is left unwritten (an all-zero
+descriptor, which reads as the robust zero result) because the image
+descriptor ABI has no base-layer field. Writing a storage image from a
+shader needs a `feme.cpu.image.store.*` runtime helper that does not exist
+yet, so a `STORAGE_IMAGE` binding is materialized but not yet writable.
 
 Also out of scope, narrower deviations: a 3D array image is not modeled
 (Vulkan itself does not allow one). Three of this section's own former

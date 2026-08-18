@@ -6,9 +6,9 @@
 // direct `libfeme_vulkan` linkage (see "Testing Strategy" in
 // feme/docs/FeMeVulkanDesign.md and this milestone's own "Deliberately
 // deferred" agent-thoughts note on why no such test existed before). No
-// shader consumes the image -- that remains R30's own remaining scope (see
-// FeMeVulkanDesign.md's "V5" deviation note) -- so this only round-trips
-// bytes through copies.
+// shader consumes the image here -- this only round-trips bytes through
+// copies; sampled-image-loader-smoke.test is the counterpart that actually
+// samples one from a dispatch.
 //
 // REQUIRES: system-vulkan-loader
 // RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \

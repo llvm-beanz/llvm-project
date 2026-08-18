@@ -1493,37 +1493,59 @@ ResourceLowering.cpp) is the CPU target's consumer, converting a 2D
 point/bilinear filtering, all five addressing modes, explicit-LOD mip
 selection and PCF-style comparison sampling.
 
-What R30 leaves for a later increment, each for a concrete, documented
-reason rather than an oversight:
+A follow-up pass closed R30's two self-contained remaining items:
+
+- **CPU-side SPIR-V-sourced image lowering.**
+  `feme::cpu::SPIRVResourceLoweringPass` now recognizes a bound,
+  single-sampled, non-arrayed, float 2D `spirv.Image` and a
+  `spirv.Sampler`, assigns them slots in the image and sampler heaps
+  (numbered independently of the resource heap -- see
+  `feme::cpu::BoundResourceClass`), and rewrites
+  `llvm.spv.resource.sample`/`samplelevel` and an `OpImageFetch`'s
+  `getpointer`+`load` pair into `feme.cpu.image.sample.2d.v4f32`/
+  `load.2d.v4f32`. The `{image, sampler}` struct `OpSampledImage` lowers
+  to is folded away first, since this design keeps the two descriptors
+  separate throughout ("Combined image samplers remain two logical
+  descriptors paired by lowering", above). This is what unblocked
+  FeMeVulkanDesign.md's V5 deviation: a real Vulkan dispatch can now
+  consume a descriptor-set-bound image and sampler.
+- **Active-lane SIMD widening for a divergent sample.**
+  `feme::cpu::SIMDize.cpp`'s `FunctionWidener` gained `widenImageCall`,
+  which scalarizes a divergent `feme.cpu.image.*` call per lane the way
+  `widenResourceCall` already did for buffers. It widens operands
+  generically rather than positionally, since an image call's shape (two
+  heaps, two descriptor indices, several coordinate operands) differs per
+  call kind and does not fit `MatchedResourceCall`'s fixed shape (see
+  ImageCalls.h's file comment); its `<4 x float>` result decomposes into
+  one wide vector per component, exactly like a typed buffer load. A
+  uniform sample -- every lane sampling the same coordinates and
+  descriptor, the common compute-shader case -- worked before and still
+  costs nothing.
+
+What R30 still leaves for a later increment, each for a concrete,
+documented reason rather than an oversight:
 
 - **Bias/gradient sampling and gather.** DXIL has no numbered wire opcode
   for comparison sampling/gather in this LLVM tree yet (see Design.md's
   status note), so only the DXIL import half is blocked upstream; bias/
   gradient sampling has no import-side blocker but is simply not
   implemented yet.
-- **Active-lane SIMD widening for a divergent sample.**
-  `feme::cpu::SIMDize.cpp`'s `FunctionWidener` recognizes
-  `feme.cpu.resource.*` calls (`MatchedResourceCall`) specifically for its
-  per-lane scalarization; `feme.cpu.image.*` calls are a different,
-  wider operand shape (two heaps, two descriptor indices, multiple
-  coordinate operands) that does not fit that abstraction (see
-  ImageCalls.h's file comment), so a texture sample under a divergent wave
-  condition is not yet widened/scalarized the way a divergent buffer
-  access already is. A uniform sample (every lane samples the same
-  coordinates and descriptor, the common compute-shader case) already
-  works today, since `SIMDize` only needs to touch a genuinely divergent
-  value at all.
-- **1D and 3D/cube sampling and CPU-side SPIR-V-sourced image lowering**
-  are not implemented; the runtime helpers' addressing/format/filtering
-  building blocks are dimension-agnostic (see `runtime/CPU`'s own scope
-  note) and `feme::cpu::SPIRVResourceLoweringPass` does not yet
-  materialize an image/sampler heap for a bound (non-bindless) SPIR-V
-  handle, so both are a mechanical, on-demand extension rather than a
-  redesign.
-- **Texel offsets.** `feme::cpu::ResourceLoweringPass` only lowers a
-  sample/load whose offset operand is a compile-time-zero constant;
-  a nonzero offset is left as an unraised `llvm.dx.resource.*` call
-  rather than silently dropped.
+- **1D and 3D/cube sampling**, and on the SPIR-V side an arrayed,
+  multisampled, or storage image (a storage image would need a
+  `feme.cpu.image.store.*` helper `runtime/CPU` does not implement yet).
+  The runtime helpers' addressing/format/filtering building blocks are
+  dimension-agnostic (see `runtime/CPU`'s own scope note), so these are a
+  mechanical, on-demand extension rather than a redesign. A SPIR-V image
+  view over a nonzero base array layer is likewise unmodeled: a
+  `FemeImageDescriptor`'s per-mip `Offset`s are relative to the image
+  base, and the ABI has no base-layer field to add the (per-mip) layer
+  offset with, so a Vulkan frontend leaves such a binding unwritten rather
+  than silently addressing layer 0.
+- **Texel offsets.** Both `feme::cpu::ResourceLoweringPass` and
+  `feme::cpu::SPIRVResourceLoweringPass` only lower a sample/load whose
+  offset operand is a compile-time-zero constant; a nonzero offset is left
+  as an unraised `llvm.dx.resource.*`/`llvm.spv.resource.*` call rather
+  than silently dropped.
 
 ### Texture layout and formats
 
