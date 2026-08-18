@@ -10,3 +10,9 @@ target_link_libraries(feme-vulkan-loader-smoke PRIVATE
   Vulkan::Headers
   Vulkan::Vulkan
   )
+
+if (APPLE)
+  get_filename_component(_Vulkan_LIB_DIR ${Vulkan_LIBRARY} DIRECTORY)
+  set_property(TARGET feme-vulkan-loader-smoke APPEND_STRING PROPERTY
+               LINK_FLAGS " -Wl,-rpath,${_Vulkan_LIB_DIR} ")
+endif()

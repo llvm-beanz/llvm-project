@@ -11,3 +11,9 @@ target_link_libraries(FeMeVulkanTests
   PRIVATE
   FeMeVulkanCore
   )
+
+if (APPLE)
+  get_filename_component(_Vulkan_LIB_DIR ${Vulkan_LIBRARY} DIRECTORY)
+  set_property(TARGET FeMeVulkanTests APPEND_STRING PROPERTY
+               LINK_FLAGS " -Wl,-rpath,${_Vulkan_LIB_DIR} ")
+endif()
