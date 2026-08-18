@@ -59,6 +59,18 @@ vkBindBufferMemory2
 vkCreateBufferView
 vkDestroyBufferView
 
+# V5: images, image views, and samplers (see "V5: Images and sampling").
+vkCreateImage
+vkDestroyImage
+vkGetImageMemoryRequirements
+vkGetImageMemoryRequirements2
+vkBindImageMemory
+vkBindImageMemory2
+vkCreateImageView
+vkDestroyImageView
+vkCreateSampler
+vkDestroySampler
+
 # V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
 # Pipeline Compilation").
 vkCreateShaderModule

@@ -1,0 +1,403 @@
+//===- Image.cpp - VkImage/VkImageView/VkSampler implementations --------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM
+// Exceptions. See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "Image.h"
+#include "Format.h"
+#include "Icd.h"
+#include "Objects.h"
+
+#include "llvm/Support/ErrorHandling.h"
+
+#include <algorithm>
+
+using namespace feme::vulkan;
+using namespace feme::cpu;
+
+namespace {
+
+/// The `feme::cpu::ImageDimension` \p Type/\p ArrayLayers/\p Depth
+/// corresponds to. `vkCreateImage` never sees a `VkImageViewType`, only a
+/// `VkImageType` plus the array-layer/depth counts that distinguish an array
+/// image from a plain one and a 3D image from a 2D one.
+ImageDimension mapImageDimension(VkImageType Type, uint32_t ArrayLayers) {
+  switch (Type) {
+  case VK_IMAGE_TYPE_1D:
+    return ArrayLayers > 1 ? ImageDimension::Texture1DArray
+                           : ImageDimension::Texture1D;
+  case VK_IMAGE_TYPE_2D:
+    return ArrayLayers > 1 ? ImageDimension::Texture2DArray
+                           : ImageDimension::Texture2D;
+  case VK_IMAGE_TYPE_3D:
+    return ImageDimension::Texture3D;
+  default:
+    llvm_unreachable("unhandled VkImageType");
+  }
+}
+
+/// Computes a packed, mip-major subresource layout table for an image of
+/// \p Dimension with the given extent/mip/array counts and \p TexelSize --
+/// see Image.h's file comment on why tiling is not distinguished. Mip level
+/// `L`'s slice count is `max(1, Depth >> L)` for a 3D image (its depth
+/// halves per mip, per Vulkan's mip-chain rules) or `ArrayLayers` for every
+/// other dimension (an array image's layer count is constant across mips).
+std::pair<std::vector<FemeImageSubresourceLayout>, VkDeviceSize>
+computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
+                          uint32_t Depth, uint32_t MipLevels,
+                          uint32_t ArrayLayers, uint32_t TexelSize) {
+  std::vector<FemeImageSubresourceLayout> Layouts(MipLevels);
+  uint64_t Offset = 0;
+  for (uint32_t Level = 0; Level != MipLevels; ++Level) {
+    uint32_t LevelWidth = std::max(1u, Width >> Level);
+    uint32_t LevelHeight = std::max(1u, Height >> Level);
+    uint32_t LevelDepth =
+        Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> Level) : 1;
+    uint32_t SliceCount = Type == VK_IMAGE_TYPE_3D ? LevelDepth : ArrayLayers;
+
+    FemeImageSubresourceLayout &L = Layouts[Level];
+    L.Offset = Offset;
+    L.RowPitch = uint64_t(LevelWidth) * TexelSize;
+    L.SlicePitch = L.RowPitch * LevelHeight;
+    L.SampleStride = 0;
+    Offset += L.SlicePitch * SliceCount;
+  }
+  return {std::move(Layouts), Offset};
+}
+
+} // namespace
+
+Image::Image(VkImageType Type, ImageDimension Dimension, ResourceFormat Format,
+             uint32_t Width, uint32_t Height, uint32_t Depth,
+             uint32_t MipLevels, uint32_t ArrayLayers, VkImageUsageFlags Usage)
+    : Type(Type), Dimension(Dimension), Format(Format), Width(Width),
+      Height(Height), Depth(Depth), MipLevels(MipLevels),
+      ArrayLayers(ArrayLayers), Usage(Usage) {
+  uint32_t TexelSize = formatElementSize(Format);
+  std::tie(MipLayouts, TotalSize) = computeSubresourceLayouts(
+      Type, Width, Height, Depth, MipLevels, ArrayLayers, TexelSize);
+  Layouts.assign(size_t(MipLevels) * std::max(ArrayLayers, Depth),
+                 VK_IMAGE_LAYOUT_UNDEFINED);
+}
+
+void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
+                          uint32_t Y, uint32_t Z) const {
+  if (!isBound())
+    return nullptr;
+  const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
+  uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
+  uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +
+                        uint64_t(Y) * L.RowPitch +
+                        uint64_t(X) * formatElementSize(Format);
+  return static_cast<uint8_t *>(data()) + ByteOffset;
+}
+
+VkImageLayout Image::layout(uint32_t MipLevel, uint32_t ArrayLayer) const {
+  size_t SlicesPerLevel = std::max(ArrayLayers, Depth);
+  return Layouts[size_t(MipLevel) * SlicesPerLevel + ArrayLayer];
+}
+
+void Image::setLayout(uint32_t BaseMip, uint32_t MipCount, uint32_t BaseLayer,
+                      uint32_t LayerCount, VkImageLayout NewLayout) {
+  size_t SlicesPerLevel = std::max(ArrayLayers, Depth);
+  uint32_t EndMip =
+      MipCount == VK_REMAINING_MIP_LEVELS ? MipLevels : BaseMip + MipCount;
+  uint32_t EndLayer = LayerCount == VK_REMAINING_ARRAY_LAYERS
+                          ? std::max(ArrayLayers, Depth)
+                          : BaseLayer + LayerCount;
+  for (uint32_t Mip = BaseMip; Mip != EndMip; ++Mip)
+    for (uint32_t Layer = BaseLayer; Layer != EndLayer; ++Layer)
+      Layouts[size_t(Mip) * SlicesPerLevel + Layer] = NewLayout;
+}
+
+ImageDimension ImageView::dimension() const {
+  switch (ViewType) {
+  case VK_IMAGE_VIEW_TYPE_1D:
+    return ImageDimension::Texture1D;
+  case VK_IMAGE_VIEW_TYPE_1D_ARRAY:
+    return ImageDimension::Texture1DArray;
+  case VK_IMAGE_VIEW_TYPE_2D:
+    return ImageDimension::Texture2D;
+  case VK_IMAGE_VIEW_TYPE_2D_ARRAY:
+    return ImageDimension::Texture2DArray;
+  case VK_IMAGE_VIEW_TYPE_3D:
+    return ImageDimension::Texture3D;
+  case VK_IMAGE_VIEW_TYPE_CUBE:
+    return ImageDimension::TextureCube;
+  case VK_IMAGE_VIEW_TYPE_CUBE_ARRAY:
+    return ImageDimension::TextureCubeArray;
+  default:
+    llvm_unreachable("unhandled VkImageViewType");
+  }
+}
+
+namespace {
+
+SamplerFilter mapFilter(VkFilter Filter) {
+  return Filter == VK_FILTER_LINEAR ? SamplerFilter::Linear
+                                    : SamplerFilter::Nearest;
+}
+
+SamplerFilter mapMipmapMode(VkSamplerMipmapMode Mode) {
+  return Mode == VK_SAMPLER_MIPMAP_MODE_LINEAR ? SamplerFilter::Linear
+                                               : SamplerFilter::Nearest;
+}
+
+SamplerAddressMode mapAddressMode(VkSamplerAddressMode Mode) {
+  switch (Mode) {
+  case VK_SAMPLER_ADDRESS_MODE_REPEAT:
+    return SamplerAddressMode::Repeat;
+  case VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT:
+    return SamplerAddressMode::MirroredRepeat;
+  case VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE:
+    return SamplerAddressMode::ClampToEdge;
+  case VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER:
+    return SamplerAddressMode::ClampToBorder;
+  case VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE:
+    return SamplerAddressMode::MirrorClampToEdge;
+  default:
+    llvm_unreachable("unhandled VkSamplerAddressMode");
+  }
+}
+
+SamplerCompareFunc mapCompareOp(VkCompareOp Op) {
+  switch (Op) {
+  case VK_COMPARE_OP_NEVER:
+    return SamplerCompareFunc::Never;
+  case VK_COMPARE_OP_LESS:
+    return SamplerCompareFunc::Less;
+  case VK_COMPARE_OP_EQUAL:
+    return SamplerCompareFunc::Equal;
+  case VK_COMPARE_OP_LESS_OR_EQUAL:
+    return SamplerCompareFunc::LessEqual;
+  case VK_COMPARE_OP_GREATER:
+    return SamplerCompareFunc::Greater;
+  case VK_COMPARE_OP_NOT_EQUAL:
+    return SamplerCompareFunc::NotEqual;
+  case VK_COMPARE_OP_GREATER_OR_EQUAL:
+    return SamplerCompareFunc::GreaterEqual;
+  case VK_COMPARE_OP_ALWAYS:
+    return SamplerCompareFunc::Always;
+  default:
+    llvm_unreachable("unhandled VkCompareOp");
+  }
+}
+
+/// `VK_EXT_border_color_swizzle`-less border-color resolution: only the
+/// four float/int enumerators every core `VkBorderColor` covers are mapped
+/// (`vkCreateSampler` rejects `..._CUSTOM_EXT`, since this ICD advertises no
+/// custom-border-color extension -- see `vkCreateSampler`'s own check).
+void mapBorderColor(VkBorderColor Color, float (&Out)[4]) {
+  switch (Color) {
+  case VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK:
+  case VK_BORDER_COLOR_INT_TRANSPARENT_BLACK:
+    Out[0] = Out[1] = Out[2] = Out[3] = 0.0f;
+    return;
+  case VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK:
+  case VK_BORDER_COLOR_INT_OPAQUE_BLACK:
+    Out[0] = Out[1] = Out[2] = 0.0f;
+    Out[3] = 1.0f;
+    return;
+  case VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE:
+  case VK_BORDER_COLOR_INT_OPAQUE_WHITE:
+    Out[0] = Out[1] = Out[2] = Out[3] = 1.0f;
+    return;
+  default:
+    llvm_unreachable("unhandled VkBorderColor");
+  }
+}
+
+} // namespace
+
+Sampler::Sampler(const VkSamplerCreateInfo &CreateInfo) : Descriptor{} {
+  Descriptor.MinFilter = static_cast<uint32_t>(mapFilter(CreateInfo.minFilter));
+  Descriptor.MagFilter = static_cast<uint32_t>(mapFilter(CreateInfo.magFilter));
+  Descriptor.MipFilter =
+      static_cast<uint32_t>(mapMipmapMode(CreateInfo.mipmapMode));
+  Descriptor.AddressU =
+      static_cast<uint32_t>(mapAddressMode(CreateInfo.addressModeU));
+  Descriptor.AddressV =
+      static_cast<uint32_t>(mapAddressMode(CreateInfo.addressModeV));
+  Descriptor.AddressW =
+      static_cast<uint32_t>(mapAddressMode(CreateInfo.addressModeW));
+  Descriptor.LodBias = CreateInfo.mipLodBias;
+  Descriptor.MinLod = CreateInfo.minLod;
+  Descriptor.MaxLod = CreateInfo.maxLod;
+  Descriptor.ReductionMode =
+      static_cast<uint32_t>(SamplerReductionMode::WeightedAverage);
+
+  uint32_t Flags = 0;
+  if (CreateInfo.compareEnable) {
+    Flags |= FEME_SAMPLER_COMPARE_ENABLE;
+    Descriptor.CompareFunc =
+        static_cast<uint32_t>(mapCompareOp(CreateInfo.compareOp));
+  }
+  if (CreateInfo.anisotropyEnable) {
+    Flags |= FEME_SAMPLER_ANISOTROPY_ENABLE;
+    Descriptor.MaxAnisotropy = CreateInfo.maxAnisotropy;
+  }
+  Descriptor.Flags = Flags;
+  mapBorderColor(CreateInfo.borderColor, Descriptor.BorderColor);
+}
+
+namespace feme::vulkan {
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateImage(VkDevice, const VkImageCreateInfo *pCreateInfo,
+              const VkAllocationCallbacks *pAllocator, VkImage *pImage) {
+  // No sparse binding, and only a single sample per texel (see "V5: Images
+  // and sampling"'s scope and Image.h's file comment on tiling).
+  if (pCreateInfo->flags &
+      ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
+    return VK_ERROR_INITIALIZATION_FAILED;
+  if (pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT)
+    return VK_ERROR_INITIALIZATION_FAILED;
+  if (pCreateInfo->mipLevels == 0 || pCreateInfo->arrayLayers == 0)
+    return VK_ERROR_INITIALIZATION_FAILED;
+  if (pCreateInfo->imageType == VK_IMAGE_TYPE_3D &&
+      pCreateInfo->arrayLayers != 1)
+    return VK_ERROR_INITIALIZATION_FAILED;
+
+  std::optional<feme::cpu::ResourceFormat> Format =
+      mapVkFormat(pCreateInfo->format);
+  if (!Format)
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+  feme::cpu::ImageDimension Dimension =
+      mapImageDimension(pCreateInfo->imageType, pCreateInfo->arrayLayers);
+
+  Allocator Alloc(pAllocator);
+  Image *Obj = Alloc.create<Image>(
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, pCreateInfo->imageType, Dimension,
+      *Format, pCreateInfo->extent.width, pCreateInfo->extent.height,
+      pCreateInfo->extent.depth, pCreateInfo->mipLevels,
+      pCreateInfo->arrayLayers, pCreateInfo->usage);
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pImage = toHandle<VkImage>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
+    VkDevice, VkImage image, const VkAllocationCallbacks *pAllocator) {
+  if (!image)
+    return;
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<Image>(image));
+}
+
+namespace {
+/// Fills \p Reqs for \p Img, mirroring Buffer.cpp's `getRequirements`: only
+/// memory type 0 exists, and the alignment tracks this ICD's own host
+/// allocation granularity since there is no real tiling requirement to
+/// report (see Image.h's file comment).
+void getImageRequirements(const Image &Img, const PhysicalDeviceInfo &Info,
+                          VkMemoryRequirements &Reqs) {
+  Reqs.size = Img.sizeInBytes();
+  Reqs.alignment = Info.Properties.limits.minMemoryMapAlignment;
+  Reqs.memoryTypeBits = 0x1;
+}
+} // namespace
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
+    VkDevice device, VkImage image, VkMemoryRequirements *pMemoryRequirements) {
+  const PhysicalDeviceInfo &Info =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  getImageRequirements(*fromHandle<Image>(image), Info, *pMemoryRequirements);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
+    VkDevice device, const VkImageMemoryRequirementsInfo2 *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements) {
+  const PhysicalDeviceInfo &Info =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  getImageRequirements(*fromHandle<Image>(pInfo->image), Info,
+                       pMemoryRequirements->memoryRequirements);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice, VkImage image,
+                                                 VkDeviceMemory memory,
+                                                 VkDeviceSize memoryOffset) {
+  fromHandle<Image>(image)->bind(fromHandle<DeviceMemory>(memory),
+                                 memoryOffset);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
+                   const VkBindImageMemoryInfo *pBindInfos) {
+  for (uint32_t I = 0; I != bindInfoCount; ++I)
+    feme::vulkan::vkBindImageMemory(device, pBindInfos[I].image,
+                                    pBindInfos[I].memory,
+                                    pBindInfos[I].memoryOffset);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateImageView(VkDevice, const VkImageViewCreateInfo *pCreateInfo,
+                  const VkAllocationCallbacks *pAllocator, VkImageView *pView) {
+  auto *Img = fromHandle<Image>(pCreateInfo->image);
+  std::optional<feme::cpu::ResourceFormat> Format =
+      mapVkFormat(pCreateInfo->format);
+  if (!Format)
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+  const VkImageSubresourceRange &Range = pCreateInfo->subresourceRange;
+  uint32_t LevelCount = Range.levelCount == VK_REMAINING_MIP_LEVELS
+                            ? Img->mipLevels() - Range.baseMipLevel
+                            : Range.levelCount;
+  uint32_t LayerCount = Range.layerCount == VK_REMAINING_ARRAY_LAYERS
+                            ? Img->arrayLayers() - Range.baseArrayLayer
+                            : Range.layerCount;
+  if (Range.baseMipLevel + LevelCount > Img->mipLevels() ||
+      Range.baseArrayLayer + LayerCount > Img->arrayLayers())
+    return VK_ERROR_INITIALIZATION_FAILED;
+
+  Allocator Alloc(pAllocator);
+  ImageView *Obj =
+      Alloc.create<ImageView>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Img,
+                              pCreateInfo->viewType, *Format, Range);
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pView = toHandle<VkImageView>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(
+    VkDevice, VkImageView imageView, const VkAllocationCallbacks *pAllocator) {
+  if (!imageView)
+    return;
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<ImageView>(imageView));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateSampler(VkDevice, const VkSamplerCreateInfo *pCreateInfo,
+                const VkAllocationCallbacks *pAllocator, VkSampler *pSampler) {
+  // No custom border color (see `mapBorderColor`'s comment): this ICD
+  // advertises no `VK_EXT_customBorderColor`/`VK_EXT_border_color_swizzle`.
+  if (pCreateInfo->borderColor == VK_BORDER_COLOR_FLOAT_CUSTOM_EXT ||
+      pCreateInfo->borderColor == VK_BORDER_COLOR_INT_CUSTOM_EXT)
+    return VK_ERROR_FEATURE_NOT_PRESENT;
+
+  Allocator Alloc(pAllocator);
+  Sampler *Obj =
+      Alloc.create<Sampler>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, *pCreateInfo);
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pSampler = toHandle<VkSampler>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroySampler(
+    VkDevice, VkSampler sampler, const VkAllocationCallbacks *pAllocator) {
+  if (!sampler)
+    return;
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<Sampler>(sampler));
+}
+
+} // namespace feme::vulkan

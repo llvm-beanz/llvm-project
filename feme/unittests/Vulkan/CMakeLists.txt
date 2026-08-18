@@ -9,6 +9,7 @@ add_feme_unittest(FeMeVulkanTests
   DescriptorTest.cpp
   FormatTest.cpp
   GroupSizeTest.cpp
+  ImageTest.cpp
   MemoryTest.cpp
   ObjectModelTest.cpp
   PhysicalDeviceInfoTest.cpp

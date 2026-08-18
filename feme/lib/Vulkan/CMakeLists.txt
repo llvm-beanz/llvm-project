@@ -82,6 +82,7 @@ add_feme_library(FeMeVulkanCore STATIC
   EntryPoints.cpp
   Format.cpp
   GroupSize.cpp
+  Image.cpp
   Memory.cpp
   PhysicalDeviceInfo.cpp
   Pipeline.cpp

@@ -149,6 +149,36 @@ VKAPI_ATTR void VKAPI_CALL
 vkDestroyBufferView(VkDevice device, VkBufferView bufferView,
                     const VkAllocationCallbacks *pAllocator);
 
+// V5: images, image views, and samplers (see "V5: Images and sampling").
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
+              const VkAllocationCallbacks *pAllocator, VkImage *pImage);
+VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
+    VkDevice device, VkImage image, const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
+    VkDevice device, VkImage image, VkMemoryRequirements *pMemoryRequirements);
+VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
+    VkDevice device, const VkImageMemoryRequirementsInfo2 *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements);
+VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice device, VkImage image,
+                                                 VkDeviceMemory memory,
+                                                 VkDeviceSize memoryOffset);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
+                   const VkBindImageMemoryInfo *pBindInfos);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateImageView(VkDevice device, const VkImageViewCreateInfo *pCreateInfo,
+                  const VkAllocationCallbacks *pAllocator, VkImageView *pView);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyImageView(VkDevice device, VkImageView imageView,
+                   const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateSampler(VkDevice device, const VkSamplerCreateInfo *pCreateInfo,
+                const VkAllocationCallbacks *pAllocator, VkSampler *pSampler);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroySampler(VkDevice device, VkSampler sampler,
+                 const VkAllocationCallbacks *pAllocator);
+
 // V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
 // Pipeline Compilation").
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
