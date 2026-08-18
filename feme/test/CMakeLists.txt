@@ -29,6 +29,7 @@ set(FEME_TEST_DEPENDS
   feme-dxbc-import-fuzzer
   feme-spirv-import-fuzzer
   feme-cpu-restructure-fuzzer
+  feme-vulkan-image-loader-smoke
   FeMeUnitTests
   llc
   llvm-as
