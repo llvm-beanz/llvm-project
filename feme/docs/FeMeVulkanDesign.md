@@ -190,14 +190,14 @@ feme/
   share/vulkan/icd.d/             Configured development manifest template
 ```
 
-The ICD is an optional FeMe component because Vulkan-Headers may not be present
-in every LLVM build. Configuration should accept a Vulkan-Headers source or
-install location and build `libfeme_vulkan` only when explicitly enabled. The
-driver should depend on Vulkan-Headers, FeMe, LLVM, MLIR, and platform thread/
-dynamic-library support, but not on the Vulkan loader library at runtime. Test
-clients link to the loader.
+The ICD is an optional FeMe component because a Vulkan SDK may not be present
+in every LLVM build. Configuration should accept an installed Vulkan SDK (via
+CMake's `find_package(Vulkan)`) and build `libfeme_vulkan` only when explicitly
+enabled. The driver should depend on the Vulkan headers, FeMe, LLVM, MLIR, and
+platform thread/dynamic-library support, but not on the Vulkan loader library
+at runtime. Test clients link to the loader.
 
-Vulkan-Headers would be FeMe's first external dependency of any kind: FeMe is
+The Vulkan SDK would be FeMe's first external dependency of any kind: FeMe is
 built in-tree only and currently has no optional external packages. The
 configuration surface, the CI coverage for the disabled path, and the version
 floor for `vk.xml` are therefore new project-wide obligations, not a reuse of
@@ -1140,7 +1140,8 @@ after submission generally become device loss.
 
 ### V0: Loader-visible skeleton
 
-- Add the optional Vulkan-Headers dependency and `vk.xml` entrypoint generator.
+- Add the optional Vulkan SDK dependency (via `find_package(Vulkan)`) and
+  `vk.xml` entrypoint generator.
 - Build the ICD shared library with hidden visibility and an export version
   script, and generate the development JSON manifest.
 - Implement instance, physical-device, device, and one compute queue family.
@@ -1153,7 +1154,7 @@ after submission generally become device loss.
 
 No shader execution is required in this milestone.
 
-**Status: done.** `feme/utils/vk_gen_entrypoints.py` reads Vulkan-Headers'
+**Status: done.** `feme/utils/vk_gen_entrypoints.py` reads the Vulkan SDK's
 `vk.xml` directly (core `VK_VERSION_1_0`/`VK_VERSION_1_1` commands only,
 resolved transitively through any `VK_{BASE,COMPUTE,GRAPHICS}_VERSION_1_x`
 sub-features a `vk.xml` revision links in via `depends`) and generates an
@@ -1544,7 +1545,7 @@ them earlier commits to a graphics profile before there is a rasterizer to
 measure it against.
 
 Answered during this design and recorded here so they are not reopened:
-Vulkan-Headers would be FeMe's first optional external dependency, and that
+The Vulkan SDK would be FeMe's first optional external dependency, and that
 cost is accepted; Mesa's common Vulkan runtime is not a link-time
 dependency; graphics adds `VK_QUEUE_GRAPHICS_BIT` to the existing queue family
 rather than a second family; `VkRenderPass` and dynamic rendering are both
