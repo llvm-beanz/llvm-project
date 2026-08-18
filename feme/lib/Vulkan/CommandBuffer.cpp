@@ -306,6 +306,13 @@ Error runCopyBufferToImage(Buffer *Src, Image *Dst,
     return createStringError(inconvertibleErrorCode(),
                              "buffer-to-image copy source/destination is "
                              "not bound");
+  // A multisample image's per-sample data has no linear-buffer layout for
+  // this command to target (`VUID-vkCmdCopyBufferToImage-srcImage-07973`'s
+  // real-Vulkan equivalent): only `vkCmdCopyImage` moves one.
+  if (Dst->sampleCount() != 1)
+    return createStringError(inconvertibleErrorCode(),
+                             "buffer-to-image copy destination must be "
+                             "single-sample");
   for (const VkBufferImageCopy &Region : Regions)
     if (Error E = copyBufferImageRegion(*Dst, /*ToImage=*/true, Src->data(),
                                         Src->size(), Region))
@@ -320,6 +327,10 @@ Error runCopyImageToBuffer(Image *Src, Buffer *Dst,
     return createStringError(inconvertibleErrorCode(),
                              "image-to-buffer copy source/destination is "
                              "not bound");
+  if (Src->sampleCount() != 1)
+    return createStringError(inconvertibleErrorCode(),
+                             "image-to-buffer copy source must be "
+                             "single-sample");
   for (const VkBufferImageCopy &Region : Regions)
     if (Error E = copyBufferImageRegion(*Src, /*ToImage=*/false, Dst->data(),
                                         Dst->size(), Region))
@@ -328,26 +339,41 @@ Error runCopyImageToBuffer(Image *Src, Buffer *Dst,
 }
 
 /// `vkCmdCopyImage`: copies each region's texels from \p Src to \p Dst.
-/// Both images must share the same format (see Image.h's file comment: no
-/// format conversion is implemented for this milestone, unlike a real
-/// `vkCmdCopyImage`'s "compatible texel size" rule -- a narrower but honest
-/// restriction, enforced here rather than misconverting).
+/// Both images must share the same texel size and sample count, matching
+/// real Vulkan's own "compatible formats" copy rule
+/// (`VUID-vkCmdCopyImage-srcImage-01548`): no value conversion takes place
+/// on either side, in this ICD or a real one -- `vkCmdCopyImage` reinterprets
+/// bits, it never converts them (that is what a shader's format-aware
+/// load/store or a blit does). Every sample of a multisample region is
+/// copied verbatim; there is no resolve here either (that is
+/// `vkCmdResolveImage`, not yet implemented -- V6+).
 Error runCopyImage(Image *Src, Image *Dst,
                    llvm::ArrayRef<VkImageCopy> Regions) {
   if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "image copy source/destination is not bound");
-  if (Src->format() != Dst->format())
-    return createStringError(inconvertibleErrorCode(),
-                             "vkCmdCopyImage between differing formats is "
-                             "not supported");
   uint32_t TexelSize = formatElementSize(Src->format());
+  if (TexelSize != formatElementSize(Dst->format()))
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdCopyImage between formats of differing "
+                             "texel size is not supported");
+  if (Src->sampleCount() != Dst->sampleCount())
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdCopyImage between images of differing "
+                             "sample counts is not supported");
+  // Every sample of one texel is stored contiguously
+  // (`FemeImageSubresourceLayout::SampleStride == TexelSize`, see Image.cpp's
+  // `computeSubresourceLayouts`), so one row's `SampleCount` samples of a
+  // region's texels are themselves one contiguous span -- a single
+  // `memcpy` per row moves every sample, there is no need to loop over
+  // samples separately the way looping over `Y`/`Z`/array layer does.
+  uint32_t SampleCount = Src->sampleCount();
   for (const VkImageCopy &Region : Regions) {
     if (Region.srcSubresource.mipLevel >= Src->mipLevels() ||
         Region.dstSubresource.mipLevel >= Dst->mipLevels())
       return createStringError(inconvertibleErrorCode(),
                                "image copy mip level is out of range");
-    uint64_t RowBytes = uint64_t(Region.extent.width) * TexelSize;
+    uint64_t RowBytes = uint64_t(Region.extent.width) * TexelSize * SampleCount;
     for (uint32_t Layer = 0; Layer != Region.srcSubresource.layerCount;
          ++Layer) {
       for (uint32_t Z = 0; Z != Region.extent.depth; ++Z) {

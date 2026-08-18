@@ -43,18 +43,19 @@ protected:
   }
 
   /// Creates and binds a `Width x Height` `R8G8B8A8_UNORM` 2D image with
-  /// \p Usage and \p MipLevels, returning its handle and (via \p OutMemory)
-  /// its backing `VkDeviceMemory`, which the caller must free.
-  VkImage createBoundImage2D(uint32_t Width, uint32_t Height,
-                             VkImageUsageFlags Usage, VkDeviceMemory &OutMemory,
-                             uint32_t MipLevels = 1) {
+  /// \p Usage, \p MipLevels and \p Samples, returning its handle and (via
+  /// \p OutMemory) its backing `VkDeviceMemory`, which the caller must free.
+  VkImage
+  createBoundImage2D(uint32_t Width, uint32_t Height, VkImageUsageFlags Usage,
+                     VkDeviceMemory &OutMemory, uint32_t MipLevels = 1,
+                     VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
     VkImageCreateInfo ImageInfo{};
     ImageInfo.imageType = VK_IMAGE_TYPE_2D;
     ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
     ImageInfo.extent = {Width, Height, 1};
     ImageInfo.mipLevels = MipLevels;
     ImageInfo.arrayLayers = 1;
-    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.samples = Samples;
     ImageInfo.usage = Usage;
     VkImage Img = VK_NULL_HANDLE;
     EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
@@ -130,9 +131,77 @@ TEST_F(ImageTest, RejectsMultisample) {
   ImageInfo.mipLevels = 1;
   ImageInfo.arrayLayers = 1;
   ImageInfo.samples = VK_SAMPLE_COUNT_4_BIT;
+  // No `VK_IMAGE_USAGE_SAMPLED_BIT`/`_STORAGE_BIT`: this ICD's device
+  // limits only advertise a >1 sample count for those two usages (see
+  // PhysicalDeviceInfo.cpp), so a multisample image of any other usage
+  // stays rejected, same as before multisample support existed at all.
   VkImage Img = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
             VK_ERROR_INITIALIZATION_FAILED);
+}
+
+TEST_F(ImageTest, AcceptsMultisampleForSampledOrStorageUsage) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  // 4x4 texels, 4 samples/texel, 4 bytes/sample: 4*4*4*4 = 256 bytes.
+  VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_STORAGE_BIT, Memory,
+                                   /*MipLevels=*/1, VK_SAMPLE_COUNT_4_BIT);
+  ASSERT_NE(Img, VK_NULL_HANDLE);
+  auto *Obj = fromHandle<Image>(Img);
+  EXPECT_EQ(Obj->sampleCount(), 4u);
+  EXPECT_EQ(Obj->sizeInBytes(), 256u);
+  EXPECT_EQ(Obj->mipLayouts()[0].SampleStride, 4u);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+TEST_F(ImageTest, MultisampleImageRejectsBufferCopy) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(
+      2, 2,
+      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      Memory, /*MipLevels=*/1, VK_SAMPLE_COUNT_2_BIT);
+
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 2 * 2 * 2 * 4; // width * height * samples * texel size.
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = BufferInfo.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory BufMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &BufMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Buf, BufMemory, 0), VK_SUCCESS);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkBufferImageCopy Region{};
+  Region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.imageExtent = {2, 2, 1};
+  vkCmdCopyBufferToImage(CmdBuf, Buf, Img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  EXPECT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Failed());
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkFreeMemory(Device, BufMemory, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
 }
 
 TEST_F(ImageTest, CreateViewAndSampler) {
@@ -316,6 +385,175 @@ TEST_F(ImageTest, CopyImageToImage) {
                     llvm::Succeeded());
 
   auto *DstObj = fromHandle<Image>(DstImg);
+  EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
+            0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
+TEST_F(ImageTest, CopyImageBetweenCompatibleFormats) {
+  // `vkCmdCopyImage` requires matching texel size, not matching `VkFormat`
+  // (see CommandBuffer.cpp's `runCopyImage`): `R8G8B8A8_UNORM` and
+  // `R8G8B8A8_UINT` are both 4 bytes/texel but distinct formats, exactly
+  // the "compatible formats" case real Vulkan's own copy rule allows and
+  // this ICD used to reject outright.
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  VkImage SrcImg =
+      createBoundImage2D(2, 2, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, SrcMemory);
+
+  VkImageCreateInfo DstInfo{};
+  DstInfo.imageType = VK_IMAGE_TYPE_2D;
+  DstInfo.format = VK_FORMAT_R8G8B8A8_UINT;
+  DstInfo.extent = {2, 2, 1};
+  DstInfo.mipLevels = 1;
+  DstInfo.arrayLayers = 1;
+  DstInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  DstInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage DstImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &DstInfo, nullptr, &DstImg), VK_SUCCESS);
+  VkMemoryRequirements DstReqs{};
+  vkGetImageMemoryRequirements(Device, DstImg, &DstReqs);
+  VkMemoryAllocateInfo DstAllocInfo{};
+  DstAllocInfo.allocationSize = DstReqs.size;
+  DstAllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &DstAllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, DstImg, DstMemory, 0), VK_SUCCESS);
+
+  auto *SrcObj = fromHandle<Image>(SrcImg);
+  for (uint32_t I = 0; I != SrcObj->sizeInBytes(); ++I)
+    static_cast<uint8_t *>(SrcObj->data())[I] = static_cast<uint8_t>(I + 5);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {2, 2, 1};
+  vkCmdCopyImage(CmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DstImg,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  auto *DstObj = fromHandle<Image>(DstImg);
+  EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
+            0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
+TEST_F(ImageTest, CopyImageRejectsIncompatibleTexelSize) {
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  VkImage SrcImg =
+      createBoundImage2D(2, 2, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, SrcMemory);
+
+  VkImageCreateInfo DstInfo{};
+  DstInfo.imageType = VK_IMAGE_TYPE_2D;
+  DstInfo.format = VK_FORMAT_R32G32B32A32_UINT; // 16 bytes/texel.
+  DstInfo.extent = {2, 2, 1};
+  DstInfo.mipLevels = 1;
+  DstInfo.arrayLayers = 1;
+  DstInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  DstInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage DstImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &DstInfo, nullptr, &DstImg), VK_SUCCESS);
+  VkMemoryRequirements DstReqs{};
+  vkGetImageMemoryRequirements(Device, DstImg, &DstReqs);
+  VkMemoryAllocateInfo DstAllocInfo{};
+  DstAllocInfo.allocationSize = DstReqs.size;
+  DstAllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &DstAllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, DstImg, DstMemory, 0), VK_SUCCESS);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {2, 2, 1};
+  vkCmdCopyImage(CmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DstImg,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  EXPECT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Failed());
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
+TEST_F(ImageTest, CopyMultisampleImagePreservesEverySample) {
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  VkImage SrcImg = createBoundImage2D(
+      2, 2, VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+      SrcMemory, /*MipLevels=*/1, VK_SAMPLE_COUNT_4_BIT);
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  VkImage DstImg = createBoundImage2D(
+      2, 2, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+      DstMemory, /*MipLevels=*/1, VK_SAMPLE_COUNT_4_BIT);
+
+  auto *SrcObj = fromHandle<Image>(SrcImg);
+  for (uint32_t I = 0; I != SrcObj->sizeInBytes(); ++I)
+    static_cast<uint8_t *>(SrcObj->data())[I] = static_cast<uint8_t>(I + 9);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {2, 2, 1};
+  vkCmdCopyImage(CmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DstImg,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  auto *DstObj = fromHandle<Image>(DstImg);
+  EXPECT_EQ(SrcObj->sizeInBytes(), DstObj->sizeInBytes());
   EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
             0);
 

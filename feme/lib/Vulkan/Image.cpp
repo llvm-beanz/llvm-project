@@ -40,15 +40,19 @@ ImageDimension mapImageDimension(VkImageType Type, uint32_t ArrayLayers) {
 }
 
 /// Computes a packed, mip-major subresource layout table for an image of
-/// \p Dimension with the given extent/mip/array counts and \p TexelSize --
-/// see Image.h's file comment on why tiling is not distinguished. Mip level
-/// `L`'s slice count is `max(1, Depth >> L)` for a 3D image (its depth
-/// halves per mip, per Vulkan's mip-chain rules) or `ArrayLayers` for every
-/// other dimension (an array image's layer count is constant across mips).
+/// \p Dimension with the given extent/mip/array counts, \p SampleCount and
+/// \p TexelSize -- see Image.h's file comment on why tiling is not
+/// distinguished. Mip level `L`'s slice count is `max(1, Depth >> L)` for a
+/// 3D image (its depth halves per mip, per Vulkan's mip-chain rules) or
+/// `ArrayLayers` for every other dimension (an array image's layer count is
+/// constant across mips). Every sample of one texel is stored contiguously
+/// (`SampleStride == TexelSize`), so a texel's `SampleCount` samples occupy
+/// `SampleCount * TexelSize` bytes and a row is `Width` texels wide of that.
 std::pair<std::vector<FemeImageSubresourceLayout>, VkDeviceSize>
 computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
                           uint32_t Depth, uint32_t MipLevels,
-                          uint32_t ArrayLayers, uint32_t TexelSize) {
+                          uint32_t ArrayLayers, uint32_t SampleCount,
+                          uint32_t TexelSize) {
   std::vector<FemeImageSubresourceLayout> Layouts(MipLevels);
   uint64_t Offset = 0;
   for (uint32_t Level = 0; Level != MipLevels; ++Level) {
@@ -60,9 +64,9 @@ computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
 
     FemeImageSubresourceLayout &L = Layouts[Level];
     L.Offset = Offset;
-    L.RowPitch = uint64_t(LevelWidth) * TexelSize;
+    L.SampleStride = SampleCount > 1 ? TexelSize : 0;
+    L.RowPitch = uint64_t(LevelWidth) * TexelSize * SampleCount;
     L.SlicePitch = L.RowPitch * LevelHeight;
-    L.SampleStride = 0;
     Offset += L.SlicePitch * SliceCount;
   }
   return {std::move(Layouts), Offset};
@@ -72,26 +76,29 @@ computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
 
 Image::Image(VkImageType Type, ImageDimension Dimension, ResourceFormat Format,
              uint32_t Width, uint32_t Height, uint32_t Depth,
-             uint32_t MipLevels, uint32_t ArrayLayers, VkImageUsageFlags Usage)
+             uint32_t MipLevels, uint32_t ArrayLayers, uint32_t SampleCount,
+             VkImageUsageFlags Usage)
     : Type(Type), Dimension(Dimension), Format(Format), Width(Width),
       Height(Height), Depth(Depth), MipLevels(MipLevels),
-      ArrayLayers(ArrayLayers), Usage(Usage) {
+      ArrayLayers(ArrayLayers), SampleCount(SampleCount), Usage(Usage) {
   uint32_t TexelSize = formatElementSize(Format);
-  std::tie(MipLayouts, TotalSize) = computeSubresourceLayouts(
-      Type, Width, Height, Depth, MipLevels, ArrayLayers, TexelSize);
+  std::tie(MipLayouts, TotalSize) =
+      computeSubresourceLayouts(Type, Width, Height, Depth, MipLevels,
+                                ArrayLayers, SampleCount, TexelSize);
   Layouts.assign(size_t(MipLevels) * std::max(ArrayLayers, Depth),
                  VK_IMAGE_LAYOUT_UNDEFINED);
 }
 
 void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
-                          uint32_t Y, uint32_t Z) const {
+                          uint32_t Y, uint32_t Z, uint32_t Sample) const {
   if (!isBound())
     return nullptr;
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
+  uint64_t TexelStride = formatElementSize(Format) * SampleCount;
   uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +
-                        uint64_t(Y) * L.RowPitch +
-                        uint64_t(X) * formatElementSize(Format);
+                        uint64_t(Y) * L.RowPitch + uint64_t(X) * TexelStride +
+                        uint64_t(Sample) * formatElementSize(Format);
   return static_cast<uint8_t *>(data()) + ByteOffset;
 }
 
@@ -245,20 +252,71 @@ Sampler::Sampler(const VkSamplerCreateInfo &CreateInfo) : Descriptor{} {
 
 namespace feme::vulkan {
 
+namespace {
+
+/// The `VkSampleCountFlags` mask `pCreateInfo->samples` must intersect for
+/// \p Usage, mirroring how real Vulkan intersects the per-usage sample-count
+/// limits (`VkPhysicalDeviceLimits`' `sampledImageColorSampleCounts`/
+/// `storageImageSampleCounts`/`framebufferColorSampleCounts`/
+/// `framebufferDepthSampleCounts`). An image whose usage names none of
+/// these (e.g. transfer-only) is conservatively restricted to
+/// `VK_SAMPLE_COUNT_1_BIT`: nothing downstream (copy, shader, render target)
+/// needs more than one sample for such an image, so there is no limit field
+/// to honestly report a wider mask from.
+VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
+                                         VkImageUsageFlags Usage) {
+  const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
+  VkSampleCountFlags Mask = ~VkSampleCountFlags(0);
+  bool Constrained = false;
+  if (Usage & VK_IMAGE_USAGE_SAMPLED_BIT) {
+    Mask &= Limits.sampledImageColorSampleCounts;
+    Constrained = true;
+  }
+  if (Usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+    Mask &= Limits.storageImageSampleCounts;
+    Constrained = true;
+  }
+  if (Usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) {
+    Mask &= Limits.framebufferColorSampleCounts;
+    Constrained = true;
+  }
+  if (Usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+    Mask &= Limits.framebufferDepthSampleCounts &
+            Limits.framebufferStencilSampleCounts;
+    Constrained = true;
+  }
+  return Constrained ? Mask : VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT);
+}
+
+} // namespace
+
 VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateImage(VkDevice, const VkImageCreateInfo *pCreateInfo,
+vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
               const VkAllocationCallbacks *pAllocator, VkImage *pImage) {
-  // No sparse binding, and only a single sample per texel (see "V5: Images
-  // and sampling"'s scope and Image.h's file comment on tiling).
+  // No sparse binding (see "V5: Images and sampling"'s scope). A multisample
+  // `samples` is accepted at the object-model level -- see Image.h's file
+  // comment -- as long as it is one this device's limits actually advertise
+  // for the image's usage (`supportedSampleCounts`); every other image
+  // continues to require exactly one sample, same as before multisample
+  // support existed.
   if (pCreateInfo->flags &
       ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
     return VK_ERROR_INITIALIZATION_FAILED;
-  if (pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT)
+  const PhysicalDeviceInfo &Info =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  if (!(pCreateInfo->samples & supportedSampleCounts(Info, pCreateInfo->usage)))
     return VK_ERROR_INITIALIZATION_FAILED;
   if (pCreateInfo->mipLevels == 0 || pCreateInfo->arrayLayers == 0)
     return VK_ERROR_INITIALIZATION_FAILED;
   if (pCreateInfo->imageType == VK_IMAGE_TYPE_3D &&
       pCreateInfo->arrayLayers != 1)
+    return VK_ERROR_INITIALIZATION_FAILED;
+  // A multisample image is only ever a flat 2D render-target-shaped
+  // resource in real Vulkan (`VUID-VkImageCreateInfo-samples-02257`): no
+  // mips, and 2D only.
+  if (pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT &&
+      (pCreateInfo->imageType != VK_IMAGE_TYPE_2D ||
+       pCreateInfo->mipLevels != 1))
     return VK_ERROR_INITIALIZATION_FAILED;
 
   std::optional<feme::cpu::ResourceFormat> Format =
@@ -274,7 +332,8 @@ vkCreateImage(VkDevice, const VkImageCreateInfo *pCreateInfo,
       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, pCreateInfo->imageType, Dimension,
       *Format, pCreateInfo->extent.width, pCreateInfo->extent.height,
       pCreateInfo->extent.depth, pCreateInfo->mipLevels,
-      pCreateInfo->arrayLayers, pCreateInfo->usage);
+      pCreateInfo->arrayLayers, static_cast<uint32_t>(pCreateInfo->samples),
+      pCreateInfo->usage);
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pImage = toHandle<VkImage>(Obj);

@@ -24,6 +24,18 @@
 // `pipelineBarrier` comment on this ICD's single-threaded, strictly
 // sequential execution model).
 //
+// A multisample image (`samples > VK_SAMPLE_COUNT_1_BIT`) is accepted at the
+// object-model level -- every sample of a texel is stored contiguously
+// (`FemeImageSubresourceLayout::SampleStride`, R29's own ABI, anticipated
+// exactly this), and `vkCmdCopyImage` may copy one whole multisample image
+// to another of the same sample count. Nothing can *read* an individual
+// sample from a shader or resolve one to single-sample, though: there is no
+// render-target/rasterizer path (`VK_QUEUE_GRAPHICS_BIT` is V6+) and no
+// `OpImageFetch`-with-sample-index raising yet (R30's own remaining scope).
+// A multisample image is therefore only ever useful as an opaque copy
+// source/destination today, same as a single-sample one before V5's shader
+// consumption gap closes.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_IMAGE_H
@@ -51,7 +63,7 @@ public:
   Image(VkImageType Type, feme::cpu::ImageDimension Dimension,
         feme::cpu::ResourceFormat Format, uint32_t Width, uint32_t Height,
         uint32_t Depth, uint32_t MipLevels, uint32_t ArrayLayers,
-        VkImageUsageFlags Usage);
+        uint32_t SampleCount, VkImageUsageFlags Usage);
 
   VkImageType type() const { return Type; }
   feme::cpu::ImageDimension dimension() const { return Dimension; }
@@ -61,6 +73,12 @@ public:
   uint32_t depth() const { return Depth; }
   uint32_t mipLevels() const { return MipLevels; }
   uint32_t arrayLayers() const { return ArrayLayers; }
+  /// Samples per texel (`VkSampleCountFlagBits`'s numeric value, e.g. 1, 2,
+  /// 4...). Only meaningful as an object-model/copy-source-of-truth today
+  /// -- no shader or render-target path consumes a sample index yet (see
+  /// this file's own comment) -- but `vkCmdCopyImage` needs it to require a
+  /// matching sample count between its two images, per real Vulkan.
+  uint32_t sampleCount() const { return SampleCount; }
   VkImageUsageFlags usage() const { return Usage; }
 
   /// The total packed byte size every mip level/array layer/depth slice of
@@ -87,14 +105,15 @@ public:
     return static_cast<uint8_t *>(BoundMemory->data()) + BoundOffset;
   }
 
-  /// A pointer to texel `(X, Y, Z)` of mip level \p MipLevel, array layer
-  /// \p ArrayLayer (0 for a non-array, non-3D image). `Z` and `ArrayLayer`
-  /// are never both nonzero for a supported dimension (a 3D image has
-  /// exactly one array layer, and an array image has depth 1), so their sum
-  /// is always the correct slice index into `MipLayouts[MipLevel]`'s
-  /// `SlicePitch`-derived stride. Null if the image is unbound.
+  /// A pointer to sample \p Sample (0 for a single-sample image) of texel
+  /// `(X, Y, Z)` of mip level \p MipLevel, array layer \p ArrayLayer (0 for
+  /// a non-array, non-3D image). `Z` and `ArrayLayer` are never both
+  /// nonzero for a supported dimension (a 3D image has exactly one array
+  /// layer, and an array image has depth 1), so their sum is always the
+  /// correct slice index into `MipLayouts[MipLevel]`'s `SlicePitch`-derived
+  /// stride. Null if the image is unbound.
   void *texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
-                     uint32_t Y, uint32_t Z) const;
+                     uint32_t Y, uint32_t Z, uint32_t Sample = 0) const;
 
   /// The current `VkImageLayout` of subresource (\p MipLevel, \p ArrayLayer),
   /// or `VK_IMAGE_LAYOUT_UNDEFINED` if never transitioned.
@@ -115,6 +134,7 @@ private:
   uint32_t Depth;
   uint32_t MipLevels;
   uint32_t ArrayLayers;
+  uint32_t SampleCount;
   VkImageUsageFlags Usage;
 
   std::vector<feme::cpu::FemeImageSubresourceLayout> MipLayouts;
