@@ -41,6 +41,7 @@
 #include "feme/Transforms/CPU/RootConstantLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/SPIRVBuiltinFolding.h"
+#include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/VerifyStructured.h"
 #include "feme/Transforms/CPU/VertexWrapper.h"
@@ -247,6 +248,14 @@ void registerFeMePasses(PassBuilder &PB) {
         if (Name != feme::cpu::SPIRVResourceLoweringPass::name())
           return false;
         MPM.addPass(feme::cpu::SPIRVResourceLoweringPass());
+        return true;
+      });
+  PB.registerPipelineParsingCallback(
+      [](StringRef Name, ModulePassManager &MPM,
+         ArrayRef<PassBuilder::PipelineElement>) {
+        if (Name != feme::cpu::SPIRVPushConstantLoweringPass::name())
+          return false;
+        MPM.addPass(feme::cpu::SPIRVPushConstantLoweringPass());
         return true;
       });
   PB.registerPipelineParsingCallback(

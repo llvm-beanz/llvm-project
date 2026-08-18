@@ -23,6 +23,7 @@
 #include "feme/Transforms/CPU/RootConstantLowering.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/CPU/SPIRVBuiltinFolding.h"
+#include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/VertexWrapper.h"
@@ -265,6 +266,11 @@ Expected<PipelineResult> runPipeline(Module &M,
     // expect, rather than feeding `feme::cpu::ResourceLoweringPass` a
     // `handlefromheap` call the way the DXIL pass above does.
     Normalize.addPass(SPIRVResourceLoweringPass());
+    // V3: lowers a SPIR-V push-constant block access for a function with no
+    // bound-resource access of its own (the combined case is
+    // `feme::cpu::SPIRVResourceLoweringPass`'s own responsibility, run just
+    // above -- see that pass's header comment).
+    Normalize.addPass(SPIRVPushConstantLoweringPass());
     Normalize.run(M, MAM);
     if (DiagGuard.sawError())
       return createStringError(inconvertibleErrorCode(),

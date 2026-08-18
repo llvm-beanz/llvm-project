@@ -9,6 +9,7 @@
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
 
 #include "feme/Transforms/CPU/ResourceCalls.h"
+#include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -324,26 +325,31 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
 }
 
 /// Attaches the `!feme.cpu.resources` metadata node
-/// `feme::cpu::ResourceInfo::fromModule` reads: name, root constant size
-/// (always 0 -- root constants are not yet raised from SPIR-V push
-/// constants into this form), whether the sampler heap is used (always
-/// false -- no SPIR-V sampler handle is normalized by this pass), a
-/// root-constant binding (always `(space0, register0)`, unused since the
-/// size above is always 0), and an empty statically-known-heap-index tail.
-/// That tail always stays empty here regardless of whether a given access
-/// went through a compile-time-constant or (roadmap R26) dynamic array
-/// index -- it is `feme::cpu::ResourceLoweringPass`'s own dynamic-heap
-/// discovery mechanism, unrelated to the bound-range assignment
+/// `feme::cpu::ResourceInfo::fromModule` reads: name, \p RootConstantSize
+/// (V3: a SPIR-V push-constant access `lowerFunctionResources` below found
+/// and lowered through this same function's already-added
+/// `root_constants`/`root_constant_size` parameters, or 0 if it has none --
+/// see `feme::cpu::matchSPIRVPushConstantAccess`), whether the sampler heap
+/// is used (always false -- no SPIR-V sampler handle is normalized by this
+/// pass), a root-constant binding (always `(space0, register0)`: a SPIR-V
+/// push-constant block has no register identity of its own, unlike DXIL's
+/// register-bound root constant, so there is nothing else to report), and
+/// an empty statically-known-heap-index tail. That tail always stays empty
+/// here regardless of whether a given access went through a compile-time-
+/// constant or (roadmap R26) dynamic array index -- it is
+/// `feme::cpu::ResourceLoweringPass`'s own dynamic-heap discovery
+/// mechanism, unrelated to the bound-range assignment
 /// `attachBoundResourceMetadata` below records unconditionally (see "Heap
 /// usage discovery" in feme/docs/FeMeCPUDesign.md).
-void attachResourceMetadata(Function &F) {
+void attachResourceMetadata(Function &F, uint32_t RootConstantSize) {
   LLVMContext &Ctx = F.getContext();
   Type *I32Ty = Type::getInt32Ty(Ctx);
-  Metadata *Ops[] = {MDString::get(Ctx, F.getName()),
-                     ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
-                     ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)),
-                     ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
-                     ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0))};
+  Metadata *Ops[] = {
+      MDString::get(Ctx, F.getName()),
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, RootConstantSize)),
+      ConstantAsMetadata::get(ConstantInt::getFalse(Ctx)),
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0)),
+      ConstantAsMetadata::get(ConstantInt::get(I32Ty, 0))};
   F.getParent()
       ->getOrInsertNamedMetadata("feme.cpu.resources")
       ->addOperand(MDNode::get(Ctx, Ops));
@@ -434,7 +440,20 @@ PreservedAnalyses SPIRVResourceLoweringPass::run(Module &M,
     if (!RewroteAny)
       continue;
     Changed = true;
-    attachResourceMetadata(*NewF);
+
+    // A function with its own bound-resource access already has
+    // `root_constants`/`root_constant_size` parameters from
+    // `addResourceEnvParams` above -- reuse them for a push-constant access
+    // too, rather than leaving `feme::cpu::SPIRVPushConstantLoweringPass`
+    // to add a second, colliding pair (see that pass's header comment's
+    // "combined case").
+    uint32_t RootConstantSize = 0;
+    if (std::optional<SPIRVPushConstantAccess> PCAccess =
+            matchSPIRVPushConstantAccess(*NewF))
+      RootConstantSize = lowerSPIRVPushConstantAccess(
+          *PCAccess, Env.RootConstants, Env.RootConstantSize);
+
+    attachResourceMetadata(*NewF, RootConstantSize);
     attachBoundResourceMetadata(*NewF, PrefixSize, Ranges);
   }
 

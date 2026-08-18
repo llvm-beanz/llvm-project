@@ -24,6 +24,7 @@ add_feme_library(FeMeTransformsCPU
   SIMDize.cpp
   SPIRVBuiltinFolding.cpp
   VertexWrapper.cpp
+  SPIRVPushConstantLowering.cpp
   SPIRVResourceLowering.cpp
   UnsupportedOps.cpp
   VerifyStructured.cpp
