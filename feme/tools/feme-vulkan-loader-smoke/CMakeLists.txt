@@ -8,5 +8,5 @@ add_executable(feme-vulkan-loader-smoke
   )
 target_link_libraries(feme-vulkan-loader-smoke PRIVATE
   Vulkan::Headers
-  ${FEME_VULKAN_LOADER_LIBRARY}
+  Vulkan::Vulkan
   )
