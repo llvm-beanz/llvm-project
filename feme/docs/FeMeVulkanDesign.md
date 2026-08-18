@@ -348,11 +348,11 @@ change generated code or serialized data.
 ### Queue families
 
 The first queue family exposes `VK_QUEUE_COMPUTE_BIT` and
-`VK_QUEUE_TRANSFER_BIT`, but not `VK_QUEUE_GRAPHICS_BIT`. Queue count should be
-small and truthful; one queue is sufficient for the first milestone. Timestamp
-valid bits are zero until query timestamps are implemented. Graphics does not
-add a second family; see "Graphics queue family" below for when
-`VK_QUEUE_GRAPHICS_BIT` may be added to this one.
+`VK_QUEUE_TRANSFER_BIT`, and -- since V6 -- `VK_QUEUE_GRAPHICS_BIT` as well
+(see "Graphics queue family" below for the rule that gates it). Queue count
+should be small and truthful; one queue is sufficient for the first
+milestone. Timestamp valid bits are zero until query timestamps are
+implemented. Graphics does not add a second family.
 
 ### Subgroup size
 
@@ -416,7 +416,12 @@ In particular:
 
 The driver reports no device extension merely because Vulkan-Headers declares
 it. Each extension has an implementation owner and a focused test before it is
-enumerated.
+enumerated. The enumerated set lives in one place --
+`feme::vulkan::getSupportedDeviceExtensions`, mirrored by
+`feme/utils/vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS`, which is what
+makes an extension's commands resolvable at all -- and `vkCreateDevice`
+refuses to enable anything outside it. V6 adds the first entry,
+`VK_KHR_dynamic_rendering`.
 
 ## Shader and Pipeline Compilation
 
@@ -1859,6 +1864,73 @@ Completion test: render off-screen through a `VkRenderPass` and through
 dynamic rendering, with depth, stencil, blending, MRT, and multisample
 resolves, and match lavapipe for every format and state combination the driver
 reports.
+
+**Status (done, scoped).** Every bullet above is implemented; what follows is
+the deviation list this milestone's own capability rule requires, since a
+queue advertising graphics must be truthful about what it accepts.
+
+*Graphics stage compilation.* `feme::vulkan::compileGraphicsStage`
+(lib/Vulkan/GraphicsPipeline.cpp) runs a `VkShaderModule`'s SPIR-V through
+the same import/translate flow the compute path uses --
+`importShaderModule`, factored out of `compileComputePipeline` -- then
+`feme::graphics::CanonicalizeStagePass` and `feme::cpu::CompiledStage::
+create` with `StageCompileOptions::Stage`. Two compiler-side changes were
+prerequisites, both outside this ICD: a SPIR-V *graphics* builtin
+(`Position`, `VertexIndex`, `FragCoord`, `FragDepth`, ...) now keeps its
+`BuiltIn` decoration through `SPIRVToLLVMPatterns.cpp`'s stage-IO conversion
+and is mapped onto `feme::SignatureSystemValue` by `CanonicalizeStagePass`
+(`getSystemValueForBuiltIn`) -- without which no real vertex shader's
+`gl_Position` write was visible to the rasterizer at all -- and a
+vector-typed interface variable access is decomposed into per-component
+`feme.stage.*` operations, matching DXIL's own scalar shape, because
+`feme::cpu::SIMDizePass` has no widened form for a whole divergent vector
+value.
+
+*Render passes and dynamic rendering.* Both normalize into
+`feme::vulkan::RenderTargetBinding` (lib/Vulkan/RenderPass.h) exactly as this
+document's "Render passes and dynamic rendering" section specifies, and the
+draw path cannot tell which produced it. A subpass boundary is a full join,
+already satisfied by this ICD's strictly sequential execution. Dynamic
+rendering is exposed as `VK_KHR_dynamic_rendering` rather than as 1.3 core,
+since the advertised `apiVersion` is 1.2; `feme/utils/vk_gen_entrypoints.py`
+grew a `SUPPORTED_EXTENSIONS` list for it, and an extension may only appear
+there once every command it declares is implemented.
+
+*Deviations, all failing at creation rather than at draw time* (the rule
+"a draw is not permitted to be the place a state combination is discovered
+to be unsupported"): input attachments and subpass-local merging are not
+implemented, so a subpass declaring one fails `vkCreateRenderPass`;
+attachment formats are the executor's own supported set (the 32-bit float
+family, `R8G8B8A8_UNORM`/`_SRGB`, `R16G16B16A16_{FLOAT,UNORM,SNORM}` for
+color, `D16_UNORM`/`D32_FLOAT` for depth, `S8_UINT` for stencil), and a
+*packed* depth/stencil format is rejected outright because `FeMeGraphics`
+models depth and stencil as two separate single-component images -- which
+also means a subpass may bind one or the other, never both; sample counts
+are 1, 2 and 4; only the two triangle topologies rasterize; primitive
+restart, per-instance vertex input rate, rasterizer discard, depth clamp,
+depth bias, non-fill polygon modes, `VK_CULL_MODE_FRONT_AND_BACK`, the depth
+bounds test, sample shading, alpha-to-coverage/one, a partial sample mask,
+dual-source blend factors, multiple viewports/scissors, layered framebuffers,
+tessellation/geometry/mesh stages, and specialization constants on a
+graphics stage are each rejected at pipeline (or render pass, or framebuffer)
+creation. The implemented dynamic state is viewport, scissor, blend
+constants, and the three stencil ones; any other `VkDynamicState` fails
+creation rather than being silently treated as static.
+
+*Also deferred.* The pipeline cache carries no graphics entry: its key would
+have to cover the normalized pipeline description and the render-target
+binding as well as both stages' SPIR-V, and a key covering less is worse than
+none. A blit does not convert between formats (it requires a matching one)
+and cannot mirror a region or blit a multisample image. No CTS run and no
+lavapipe differential happened in this pass: `deqp-vk` was not available in
+this environment, and Mesa lavapipe's own off-screen graphics path was not
+exercised -- so "match lavapipe for every format and state combination"
+remains genuinely unverified, exactly as V4 recorded for its own CTS bullet.
+The milestone's completion scenario is covered instead by
+`unittests/Vulkan/DrawTest.cpp` (render pass, dynamic rendering, indexed and
+indirect draws, dynamic scissor, attachment clears) and
+`test/Vulkan/graphics-loader-smoke.test`, which renders the same scene
+through the real Khronos loader.
 
 ### V7: Tessellation, geometry, and graphics completeness
 
