@@ -5,9 +5,22 @@
 # SHARED ...)` (rather than a bare `add_library(... SHARED ...)`) so it
 # still honors LLVM's own component-based build and install logic (e.g.
 # BUILD_SHARED_LIBS, LTO, sanitizer instrumentation, and the standard
-# `install(TARGETS ...)` rules), while the hidden-visibility/version-script
+# `install(TARGETS ...)` rules), while the hidden-visibility/symbol-export
 # packaging "Process Coexistence and Symbol Visibility" requires is layered
-# on top via set_target_properties()/target_link_options() below.
+# on top via LLVM_EXPORTED_SYMBOL_FILE below.
+#
+# libfeme_vulkan.exports lists only the loader-facing entrypoints; every
+# other symbol -- LLVM, MLIR, and FeMe's own -- must stay hidden so this ICD
+# can share a process with another LLVM-based Vulkan driver without
+# colliding global state. Setting LLVM_EXPORTED_SYMBOL_FILE before calling
+# add_feme_library() (which forwards it to llvm_add_library()) reuses
+# add_llvm_symbol_exports()'s existing per-platform handling -- a generated
+# `--version-script` on ELF, `-exported_symbols_list` (with the leading
+# underscore each symbol needs there) on Darwin, `.def`/`-bE:` on
+# Windows/AIX -- rather than hard-coding the GNU-ld-only
+# `-Wl,--version-script=` flag, which Apple's linker rejects outright.
+set(LLVM_EXPORTED_SYMBOL_FILE
+  ${CMAKE_CURRENT_SOURCE_DIR}/libfeme_vulkan.exports)
 add_feme_library(feme_vulkan SHARED
   VulkanICD.cpp
 
@@ -30,11 +43,6 @@ set_target_properties(feme_vulkan PROPERTIES
 # these properties keeps the plain name "libfeme_vulkan.so".
 set_property(TARGET feme_vulkan PROPERTY VERSION)
 set_property(TARGET feme_vulkan PROPERTY SOVERSION)
-target_link_options(feme_vulkan PRIVATE
-  "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/libfeme_vulkan.map"
-  )
-set_target_properties(feme_vulkan PROPERTIES
-  LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/libfeme_vulkan.map)
 
 # The build-tree development manifest ("Loader Integration"): an absolute
 # path into the build directory, usable via `VK_DRIVER_FILES` without
