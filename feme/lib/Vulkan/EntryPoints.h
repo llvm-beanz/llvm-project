@@ -143,6 +143,29 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory2(
     VkDevice device, uint32_t bindInfoCount,
     const VkBindBufferMemoryInfo *pBindInfos);
 
+// V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
+// Pipeline Compilation").
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
+    VkDevice device, const VkShaderModuleCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkShaderModule *pShaderModule);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyShaderModule(VkDevice device, VkShaderModule shaderModule,
+                     const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineLayout(
+    VkDevice device, const VkPipelineLayoutCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkPipelineLayout *pPipelineLayout);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyPipelineLayout(VkDevice device, VkPipelineLayout pipelineLayout,
+                       const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
+    VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
+    const VkComputePipelineCreateInfo *pCreateInfos,
+    const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines);
+VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
+    VkDevice device, VkPipeline pipeline,
+    const VkAllocationCallbacks *pAllocator);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H

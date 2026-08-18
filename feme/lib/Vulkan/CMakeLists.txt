@@ -81,6 +81,7 @@ add_feme_library(FeMeVulkanCore STATIC
   GroupSize.cpp
   Memory.cpp
   PhysicalDeviceInfo.cpp
+  Pipeline.cpp
   ProcAddr.cpp
 
   DISABLE_INSTALL
@@ -91,7 +92,10 @@ add_feme_library(FeMeVulkanCore STATIC
 
   LINK_LIBS PUBLIC
   Vulkan::Headers
+  FeMeCore
+  FeMeImportSPIRV
   FeMeTargetCPU
+  FeMeTranslateSPIRV
   )
 add_dependencies(FeMeVulkanCore FeMeVulkanEntrypointsGen)
 target_include_directories(FeMeVulkanCore PUBLIC

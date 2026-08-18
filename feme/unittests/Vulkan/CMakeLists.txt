@@ -9,11 +9,14 @@ add_feme_unittest(FeMeVulkanTests
   MemoryTest.cpp
   ObjectModelTest.cpp
   PhysicalDeviceInfoTest.cpp
+  PipelineTest.cpp
   ProcAddrTest.cpp
   )
 target_link_libraries(FeMeVulkanTests
   PRIVATE
   FeMeVulkanCore
+  MLIRSPIRVSerialization
+  MLIRParser
   )
 
 if (APPLE)

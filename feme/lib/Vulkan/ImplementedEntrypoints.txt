@@ -53,3 +53,12 @@ vkGetBufferMemoryRequirements
 vkGetBufferMemoryRequirements2
 vkBindBufferMemory
 vkBindBufferMemory2
+
+# V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
+# Pipeline Compilation").
+vkCreateShaderModule
+vkDestroyShaderModule
+vkCreatePipelineLayout
+vkDestroyPipelineLayout
+vkCreateComputePipelines
+vkDestroyPipeline
