@@ -1,8 +1,10 @@
 set(LLVM_LINK_COMPONENTS
   Support
+  TestingSupport
   )
 
 add_feme_unittest(FeMeVulkanTests
+  GroupSizeTest.cpp
   ObjectModelTest.cpp
   PhysicalDeviceInfoTest.cpp
   ProcAddrTest.cpp
