@@ -14,9 +14,11 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MathExtras.h"
 
 namespace {
 
@@ -593,6 +595,58 @@ public:
   }
 };
 
+/// Converts a SPIR-V struct type to a non-packed LLVM struct with the same
+/// member sequence (no inserted padding fields, so member index N still
+/// means the same thing to whatever other conversion pattern GEPs into it),
+/// after verifying LLVM's own natural (ABI-alignment-driven) layout for
+/// those member types reproduces \p Type's declared offsets exactly.
+///
+/// Unlike MLIR's own `convertStructTypeWithOffset` (`SPIRVToLLVM.cpp`),
+/// this does not reject a struct decorated `Block` (or any other
+/// whole-struct decoration): that upstream helper's own sanity check
+/// compares \p Type against `VulkanLayoutUtils::decorateType(Type)`, which
+/// recomputes a struct's *canonical* layout from scratch and never
+/// re-attaches any struct-level decoration the original had -- so any
+/// `Block`-decorated struct with explicit member offsets (real SPIR-V's
+/// actual shape for every uniform/push-constant block: `Offset` is a
+/// mandatory per-member decoration whenever `Block` is present) always
+/// compares unequal and is spuriously rejected, regardless of whether the
+/// byte layout itself is representable. Checking each member's own natural
+/// offset directly, as this does, is both correct (a mismatch really is
+/// unrepresentable without packing, which would break index
+/// correspondence) and immune to a struct decoration the comparison never
+/// needed to care about. A push-constant block is always `Block`-decorated
+/// in real (`dxc`-compiled or binary-round-tripped) SPIR-V, so
+/// `PushConstantGlobalVariablePattern` below needs its own conversion
+/// rather than the shared upstream one. Returns null for a struct this
+/// cannot lay out (a declared offset naturally-aligned layout cannot
+/// reproduce, or an unconvertible member type).
+mlir::Type
+convertOffsetStructTypeIgnoringDecorations(mlir::spirv::StructType Type,
+                                           const mlir::TypeConverter &Converter) {
+  llvm::SmallVector<mlir::Type, 8> Members;
+  for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I) {
+    mlir::Type MemberTy = Converter.convertType(Type.getElementType(I));
+    if (!MemberTy)
+      return nullptr;
+    Members.push_back(MemberTy);
+  }
+  if (!Type.hasOffset())
+    return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
+                                                  /*isPacked=*/false);
+
+  mlir::DataLayout DL;
+  uint64_t Cursor = 0;
+  for (unsigned I = 0, E = Members.size(); I != E; ++I) {
+    Cursor = llvm::alignTo(Cursor, DL.getTypeABIAlignment(Members[I]));
+    if (Cursor != Type.getMemberOffset(I))
+      return nullptr; // Declared offset doesn't match the natural layout.
+    Cursor += DL.getTypeSize(Members[I]);
+  }
+  return mlir::LLVM::LLVMStructType::getLiteral(Type.getContext(), Members,
+                                                /*isPacked=*/false);
+}
+
 /// Converts a push constant `spirv.GlobalVariable` to an ordinary
 /// `llvm.mlir.global` in the address space LLVM's SPIRV backend recognizes
 /// as a push constant block (13, see `storageClassToAddressSpace` in
@@ -605,7 +659,11 @@ public:
 /// storage class needs translating into that address space (see
 /// feme::spirv::populateSPIRVToLLVMTargetTypeConversions), matching how
 /// MLIR's own `GlobalVariablePattern` handles the storage classes it
-/// supports -- `PushConstant` is just not one of them.
+/// supports -- `PushConstant` is just not one of them. The pointee type
+/// itself goes through the ordinary type converter, which
+/// `populateSPIRVToLLVMTargetTypeConversions` arranges to lay out a
+/// `Block`-decorated struct's declared offsets correctly (see
+/// `convertOffsetStructTypeIgnoringDecorations`'s comment).
 class PushConstantGlobalVariablePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
 public:
@@ -1104,6 +1162,22 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
       return std::nullopt;
     return TypeConverter.convertType(Type.getPointeeType());
   });
+
+  // Supersedes MLIR's own `spirv::StructType` conversion (see
+  // `convertOffsetStructTypeIgnoringDecorations`'s comment for why: a
+  // `Block`-decorated struct with explicit member offsets -- every real
+  // uniform/push-constant block -- is otherwise spuriously rejected).
+  // `std::nullopt` (not a struct this can lay out) falls through to
+  // MLIR's own conversion, which will also fail identically, so no
+  // real coverage is lost by preferring this one.
+  TypeConverter.addConversion(
+      [&TypeConverter](
+          mlir::spirv::StructType Type) -> std::optional<mlir::Type> {
+        if (mlir::Type Converted = convertOffsetStructTypeIgnoringDecorations(
+                Type, TypeConverter))
+          return Converted;
+        return std::nullopt;
+      });
 
   // A non-builtin `Output` variable (a stage-IO variable: a vertex shader's
   // output, a fragment shader's render target, and so on) is real memory,
