@@ -7,11 +7,11 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The V1 command-buffer object model (see "Command Buffers" in
-// feme/docs/FeMeVulkanDesign.md). V1's own command set is restricted to
-// exactly what the roadmap's V1 bullet asks for: bind compute pipeline,
-// dispatch, dispatch base, and dispatch indirect (buffer copies, barriers,
-// queries, events, and secondary command buffers are V2 and later).
+// The command-buffer object model (see "Command Buffers" in
+// feme/docs/FeMeVulkanDesign.md). V1 restricted the command set to bind
+// compute pipeline, dispatch, dispatch base, and dispatch indirect; V2
+// ("Storage buffers and descriptors") adds bind descriptor sets (with
+// dynamic offsets), buffer copy/fill/update, and pipeline barriers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -34,15 +34,21 @@ namespace feme::vulkan {
 
 class Buffer;
 class ComputePipeline;
+class DescriptorSet;
 
 /// One recorded command. A compact tagged record rather than a class
 /// hierarchy, matching "Command Buffers": "record a compact typed stream".
 struct RecordedCommand {
   enum class Kind {
     BindPipeline,
+    BindDescriptorSets,
     Dispatch,
     DispatchBase,
     DispatchIndirect,
+    CopyBuffer,
+    FillBuffer,
+    UpdateBuffer,
+    PipelineBarrier,
   };
 
   Kind Op;
@@ -56,6 +62,26 @@ struct RecordedCommand {
   /// three `uint32_t`s are read from at execution time.
   Buffer *IndirectBuffer = nullptr;
   uint64_t IndirectOffset = 0;
+  /// `BindDescriptorSets`: the first bound set index, the sets themselves,
+  /// and the flat dynamic-offset array consumed across them in ascending
+  /// (set, binding) order (see `DescriptorSetLayout::dynamicOffsetCount`).
+  uint32_t FirstSet = 0;
+  std::vector<DescriptorSet *> DescriptorSets;
+  std::vector<uint32_t> DynamicOffsets;
+  /// `CopyBuffer`: source/destination buffers and the copy regions.
+  Buffer *SrcBuffer = nullptr;
+  Buffer *DstBuffer = nullptr;
+  std::vector<VkBufferCopy> CopyRegions;
+  /// `FillBuffer`/`UpdateBuffer`: destination offset/size (`UpdateBuffer`'s
+  /// payload is captured below; `FillBuffer`'s repeating word is `FillData`).
+  /// `DstBuffer` above is shared by both.
+  VkDeviceSize DstOffset = 0;
+  VkDeviceSize DstSize = 0;
+  uint32_t FillData = 0;
+  /// `UpdateBuffer`: an owned copy of the source data, captured at record
+  /// time (see "Command Buffers": "owned copies of variable-sized data
+  /// where Vulkan requires recording-time capture").
+  std::vector<uint8_t> UpdateData;
 };
 
 /// A `VkCommandBuffer`: an append-only typed command stream while
@@ -79,25 +105,80 @@ public:
   bool isRecording() const { return Recording; }
 
   void bindPipeline(ComputePipeline *Pipeline) {
-    Commands.push_back(
-        RecordedCommand{RecordedCommand::Kind::BindPipeline, Pipeline});
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BindPipeline;
+    Cmd.Pipeline = Pipeline;
+    Commands.push_back(Cmd);
+  }
+  void bindDescriptorSets(uint32_t FirstSet,
+                          std::vector<DescriptorSet *> Sets,
+                          std::vector<uint32_t> DynamicOffsets) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BindDescriptorSets;
+    Cmd.FirstSet = FirstSet;
+    Cmd.DescriptorSets = std::move(Sets);
+    Cmd.DynamicOffsets = std::move(DynamicOffsets);
+    Commands.push_back(std::move(Cmd));
   }
   void dispatch(std::array<uint32_t, 3> Count) {
-    RecordedCommand Cmd{RecordedCommand::Kind::Dispatch};
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::Dispatch;
     Cmd.Count = Count;
     Commands.push_back(Cmd);
   }
   void dispatchBase(std::array<uint32_t, 3> Base,
                     std::array<uint32_t, 3> Count) {
-    RecordedCommand Cmd{RecordedCommand::Kind::DispatchBase};
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::DispatchBase;
     Cmd.Base = Base;
     Cmd.Count = Count;
     Commands.push_back(Cmd);
   }
   void dispatchIndirect(Buffer *IndirectBuffer, uint64_t Offset) {
-    RecordedCommand Cmd{RecordedCommand::Kind::DispatchIndirect};
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::DispatchIndirect;
     Cmd.IndirectBuffer = IndirectBuffer;
     Cmd.IndirectOffset = Offset;
+    Commands.push_back(Cmd);
+  }
+  void copyBuffer(Buffer *Src, Buffer *Dst, std::vector<VkBufferCopy> Regions) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::CopyBuffer;
+    Cmd.SrcBuffer = Src;
+    Cmd.DstBuffer = Dst;
+    Cmd.CopyRegions = std::move(Regions);
+    Commands.push_back(std::move(Cmd));
+  }
+  void fillBuffer(Buffer *Dst, VkDeviceSize Offset, VkDeviceSize Size,
+                  uint32_t Data) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::FillBuffer;
+    Cmd.DstBuffer = Dst;
+    Cmd.DstOffset = Offset;
+    Cmd.DstSize = Size;
+    Cmd.FillData = Data;
+    Commands.push_back(Cmd);
+  }
+  void updateBuffer(Buffer *Dst, VkDeviceSize Offset,
+                    std::vector<uint8_t> Data) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::UpdateBuffer;
+    Cmd.DstBuffer = Dst;
+    Cmd.DstOffset = Offset;
+    Cmd.UpdateData = std::move(Data);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// `vkCmdPipelineBarrier`: see "Queues, Scheduling, and Synchronization"'s
+  /// join semantics. Recorded as a plain marker with no payload: this
+  /// milestone's execution model already runs every command to completion
+  /// strictly in record order on a single thread (see `runDispatch`'s own
+  /// comment), so every earlier command's effects are always visible to
+  /// every later one -- a barrier's join is therefore already satisfied by
+  /// construction, and this command exists so applications that correctly
+  /// insert one (as the specification requires) are not rejected.
+  void pipelineBarrier() {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::PipelineBarrier;
     Commands.push_back(Cmd);
   }
 

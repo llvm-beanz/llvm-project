@@ -188,6 +188,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandBuffer(
 VKAPI_ATTR void VKAPI_CALL
 vkCmdBindPipeline(VkCommandBuffer commandBuffer,
                   VkPipelineBindPoint pipelineBindPoint, VkPipeline pipeline);
+VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
+    VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount,
+    const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount,
+    const uint32_t *pDynamicOffsets);
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
                                          uint32_t groupCountX,
                                          uint32_t groupCountY,
@@ -199,6 +204,31 @@ VKAPI_ATTR void VKAPI_CALL vkCmdDispatchBase(
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatchIndirect(VkCommandBuffer commandBuffer,
                                                  VkBuffer buffer,
                                                  VkDeviceSize offset);
+
+// V2: buffer copy/fill/update and pipeline barriers (see "Command
+// Buffers").
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBuffer(VkCommandBuffer commandBuffer,
+                                           VkBuffer srcBuffer,
+                                           VkBuffer dstBuffer,
+                                           uint32_t regionCount,
+                                           const VkBufferCopy *pRegions);
+VKAPI_ATTR void VKAPI_CALL vkCmdFillBuffer(VkCommandBuffer commandBuffer,
+                                           VkBuffer dstBuffer,
+                                           VkDeviceSize dstOffset,
+                                           VkDeviceSize size, uint32_t data);
+VKAPI_ATTR void VKAPI_CALL vkCmdUpdateBuffer(VkCommandBuffer commandBuffer,
+                                             VkBuffer dstBuffer,
+                                             VkDeviceSize dstOffset,
+                                             VkDeviceSize dataSize,
+                                             const void *pData);
+VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
+    VkCommandBuffer commandBuffer, VkPipelineStageFlags srcStageMask,
+    VkPipelineStageFlags dstStageMask, VkDependencyFlags dependencyFlags,
+    uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers,
+    uint32_t bufferMemoryBarrierCount,
+    const VkBufferMemoryBarrier *pBufferMemoryBarriers,
+    uint32_t imageMemoryBarrierCount,
+    const VkImageMemoryBarrier *pImageMemoryBarriers);
 
 // V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
 // Model").

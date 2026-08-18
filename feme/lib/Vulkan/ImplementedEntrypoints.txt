@@ -74,9 +74,14 @@ vkBeginCommandBuffer
 vkEndCommandBuffer
 vkResetCommandBuffer
 vkCmdBindPipeline
+vkCmdBindDescriptorSets
 vkCmdDispatch
 vkCmdDispatchBase
 vkCmdDispatchIndirect
+vkCmdCopyBuffer
+vkCmdFillBuffer
+vkCmdUpdateBuffer
+vkCmdPipelineBarrier
 
 # V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
 # Model").
