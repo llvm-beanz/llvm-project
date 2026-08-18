@@ -18811,3 +18811,184 @@ cannot build for).
   (Design.md's pre-existing "Known gap: `feme::SPIRVImporter` cannot
   deserialize LLVM SPIR-V backend output", opcode 83/`OpAccessChain`) is
   unrelated to this milestone's decision and was left untouched.
+
+# Agent thoughts: implementing Roadmap V1 (empty compute dispatch)
+
+## Task
+
+Implement Vulkan V1 from Roadmap.md/FeMeVulkanDesign.md: "Empty compute
+dispatch: memory, buffers, shader modules, pipeline layouts, command
+pools/buffers, group-size resolution, submit/fences/idle, direct, base and
+indirect dispatch." This is the first end-to-end milestone that actually
+JIT-compiles and dispatches a shader through the Vulkan ICD.
+
+## Approach
+
+Read the whole V1-relevant slice of FeMeVulkanDesign.md ("Object Model",
+"Physical Device and Capabilities", "Shader and Pipeline Compilation",
+"CPU Runtime API Changes", "Memory and Buffers", "Descriptor Model",
+"Command Buffers", "Queues, Scheduling, and Synchronization") plus the
+existing V0 code (`lib/Vulkan/{Objects,Icd,EntryPoints,PhysicalDeviceInfo,
+ProcAddr}.{h,cpp}`) and the CPU target's compiled-code API
+(`CompiledStage`/`JITEngine`/`ResourceHeap`/`ResourceInfo`) to see exactly
+what was already available to build against. `feme-run`'s own
+SPIRVImporter -> SPIRVToLLVMTranslator -> JITEngine pipeline was the
+existing reference for "how does an already-working caller turn SPIR-V
+into a running dispatch" and its `clearHostAgnosticMetadata` helper is
+reused (reimplemented locally, not shared, to avoid a Vulkan -> feme-run
+tool dependency) verbatim.
+
+Broke the milestone into six small, separately-committed, separately-
+tested pieces, each following V0's established file-per-object-family
+convention (`Objects.h` style class + a matching `.cpp` of `feme::vulkan::
+vk*` entrypoints, declared in the single shared `EntryPoints.h`, registered
+in `ImplementedEntrypoints.txt`):
+
+1. `GroupSize.h/.cpp` -- SPIR-V group-size resolution, standalone with no
+   Vulkan object-model dependency, so it could be written and tested
+   first in isolation.
+2. `Memory.h/.cpp` -- `VkDeviceMemory`.
+3. `Buffer.h/.cpp` -- `VkBuffer`, depends on (2).
+4. `Pipeline.h/.cpp` -- `VkShaderModule`/`VkPipelineLayout`/`VkPipeline`
+   (the actual JIT compilation step), depends on (1).
+5. `CommandBuffer.h/.cpp` -- `VkCommandPool`/`VkCommandBuffer` plus the V1
+   command set and `executeCommandBuffer`, depends on (3) and (4).
+6. `Sync.h/.cpp` -- `VkFence` and `vkQueueSubmit`, depends on (5).
+
+Each commit built (`FeMeVulkanCore`/`FeMeVulkanTests`) and ran green before
+moving to the next, and the final state was validated with a full
+`ninja check-feme` (1245 passed, 0 failed, 34 unsupported -- unrelated
+platform-gated tests) to make sure nothing else in the tree regressed and
+that `check-feme`'s target dependencies (building `feme_vulkan` and every
+test binary before running lit) are still correctly wired.
+
+## Design decisions and why
+
+**Group-size resolution as a raw-word scan, not a `ConvertSPIRVToLLVMPass`
+change.** The roadmap bullet explicitly asks for `LocalSize`/`LocalSizeId`/
+`BuiltIn WorkgroupSize` resolution. I first checked whether MLIR's own
+`spirv` dialect could carry this through structurally (the design
+document's own "should use SPIR-V/MLIR structured APIs rather than
+patching binary words" principle, from the SPIR-V import section, pushed
+hard in that direction). `LocalSizeId` works fine through the structured
+API (`spirv.ExecutionModeId`'s operands are `FlatSymbolRefAttr`s to real
+`spirv.SpecConstant` ops). `BuiltIn WorkgroupSize` does not: I traced
+`Deserializer::processSpecConstantComposite`/`processConstantComposite`
+in `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp` and confirmed
+neither ever consults the per-result-id `decorations` map the way ops
+dispatched through the auto-generated instruction table do (see
+`DeserializeOps.cpp`'s "Attach attributes from decorations" comment) --
+the `BuiltIn` decoration is silently dropped during deserialization, with
+no MLIR test coverage anywhere exercising this shape. That is an upstream
+MLIR gap, not something fixable from feme's side without patching MLIR
+itself, which felt out of scope for this milestone. Given that, a small,
+well-tested, narrowly-scoped raw-SPIR-V-word scanner
+(`feme::vulkan::resolveComputeGroupSize`) that never touches the shared
+SPIR-V/LLVM conversion path felt like the lesser deviation, especially
+since the priority-ordering and specialization-override rules it
+implements are Vulkan-spec-mandated logic, not a general SPIR-V/LLVM IR
+concern other consumers (DXIL, `feme-run`) need. Documented this reasoning
+in both `GroupSize.h`'s file comment and FeMeVulkanDesign.md's new V1
+Status note so a future contributor doesn't wonder why this isn't just
+another `ConvertSPIRVToLLVMPass` change.
+
+**`VkSpecializationInfo` overrides are only applied where group-size
+resolution consults them.** Implementing general specialization-constant
+patching across an entire shader body (rewriting arbitrary
+`spirv.SpecConstant` default values before lowering) is real, separate
+work the design document itself flags ("Specialization constants must be
+applied before FeMe lowers SPIR-V to LLVM IR") but V1's own scope --
+"compile and execute a resource-free SPIR-V compute shader using
+builtins" -- never exercises a specialization constant for anything other
+than group size. Building the general mechanism now, untested against
+any real use case, felt like scope creep with no way to validate it was
+even correct. Left as an explicit, documented gap rather than a silent
+one.
+
+**`vkQueueSubmit` executes synchronously.** The design document explicitly
+offers this as one of two acceptable first implementations ("may use one
+dedicated executor thread per queue, or execute submissions
+synchronously"). Given the milestone's own dispatch model has no
+asynchronous work to hide latency behind yet (no images, no descriptors,
+no push constants), a dedicated executor thread would add real
+complexity (thread lifetime, cross-thread fence signaling, shutdown
+ordering) for no observable behavior difference at this milestone. Chose
+the simpler option and documented it as a deviation everywhere relevant
+(Sync.h's file comment, the design doc's V1 Status note, Roadmap.md's V1
+row) so whoever adds semaphores/multi-queue submission later knows this
+will need revisiting.
+
+**Dispatch execution bypasses `JITEngine`, calling `CompiledStage::
+invokeGroup` directly.** `JITEngine::dispatch` always starts a dispatch's
+groups at `GroupID = {0,0,0}`; there is no way to ask it for an offset
+base (needed for `vkCmdDispatchBase`) or to hand it a group count only
+known after reading an indirect buffer's contents (needed for
+`vkCmdDispatchIndirect`) without reaching around it anyway. Since I needed
+direct control regardless, I built a small sequential per-group loop
+(`feme::vulkan::executeCommandBuffer`'s `runDispatch` helper) directly
+against `CompiledStage`/`PreparedDispatch`. This drops `JITEngine`'s
+worker-pool parallelism across groups, which I flagged as a deliberate,
+documented performance-only deviation (not a correctness gap) rather than
+building a second, ICD-specific worker-pool scheduler duplicating what
+`JITEngine` already does internally -- that felt like a good candidate
+for a follow-up roadmap step once V1's correctness is established, not
+something to rush in this pass.
+
+**`VkPipelineLayout` restricted to empty (no descriptor sets, no push
+constants).** This isn't a design requirement stated outright, but it
+follows directly from V1's own scope ("resource-free SPIR-V compute
+shader") and the fact that `VkDescriptorSetLayout`/descriptor sets are
+explicitly V2 and push constants are explicitly V3. Rather than silently
+accepting a non-empty layout and having it do nothing (which would be a
+correctness trap for any real application), `vkCreatePipelineLayout`
+rejects a non-empty one outright, and `vkCreateComputePipelines`
+separately rejects a shader whose `ResourceInfo` shows descriptor/root-
+constant/sampler-heap usage even if the layout happened to allow it
+structurally. Fail loudly rather than silently drop functionality.
+
+## Testing
+
+Every piece has a table-driven or scenario-based gtest file
+(`feme/unittests/Vulkan/{GroupSize,Memory,Buffer,Pipeline,CommandBuffer,
+Sync}Test.cpp`), 46 new/updated test cases total, all passing. The two
+most important ones for confidence this milestone actually works
+end-to-end:
+
+- `PipelineTest.CompilesEmptyComputeShader` -- assembles a real SPIR-V
+  module via MLIR's own textual `spirv` dialect parser + `mlir::spirv::
+  serialize` (rather than requiring `glslc`/`dxc` in the test environment,
+  which are not guaranteed to be present), feeds it through
+  `vkCreateShaderModule`/`vkCreateComputePipelines`, and confirms it
+  compiles through the real FeMe CPU JIT pipeline.
+- `SyncTest.SubmitDispatchAndWaitOnFence` -- the milestone's full scenario:
+  record `vkCmdBindPipeline` + `vkCmdDispatch(2,2,2)` against that same
+  compiled pipeline, `vkQueueSubmit` it with a fence, and confirm the
+  fence observably signals afterward.
+
+`GroupSizeTest` hand-builds minimal SPIR-V word streams (not through MLIR)
+to test the three resolution paths (`LocalSize`, `LocalSizeId` with/without
+a `VkSpecializationInfo` override, and `BuiltIn WorkgroupSize` overriding
+`LocalSize`) plus two failure modes (`entry point not found`, `no group-size
+information at all`) in complete isolation from the rest of the ICD.
+
+`ninja check-feme` (the full lit + unit test suite, built with
+`-DLLVM_ENABLE_ASSERTIONS=ON` and `ccache`) passed clean at 1245/1245 after
+the final commit, confirming no regression elsewhere in the tree and that
+`check-feme`'s dependency graph already correctly builds `feme_vulkan` and
+`FeMeVulkanTests` before running.
+
+## What's still open for the next milestone (V2)
+
+- Descriptor sets/pools/updates, dynamic offsets, buffer copies, and
+  barriers -- exactly what V2's own bullet list already says.
+- General `VkSpecializationInfo` application beyond group-size-relevant
+  constants (see above).
+- Parallelizing independent workgroups within one dispatch across a
+  worker pool (currently sequential; see the `JITEngine` bypass note
+  above) -- a performance follow-up, not a correctness gap.
+- `feme::spirv`/MLIR's own `BuiltIn WorkgroupSize`-on-spec-constant-
+  composite deserialization gap is unfixed upstream; it only affects group-
+  size resolution today because this milestone routes around it entirely,
+  but any future consumer that needs the same information through MLIR's
+  structured API (e.g. a hypothetical SPIR-V `dxc`/`spirv-opt` combining
+  pass) will hit the same wall.
