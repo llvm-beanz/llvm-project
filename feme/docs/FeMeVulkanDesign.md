@@ -1921,15 +1921,36 @@ creation rather than being silently treated as static.
 have to cover the normalized pipeline description and the render-target
 binding as well as both stages' SPIR-V, and a key covering less is worse than
 none. A blit does not convert between formats (it requires a matching one)
-and cannot mirror a region or blit a multisample image. No CTS run and no
-lavapipe differential happened in this pass: `deqp-vk` was not available in
-this environment, and Mesa lavapipe's own off-screen graphics path was not
-exercised -- so "match lavapipe for every format and state combination"
-remains genuinely unverified, exactly as V4 recorded for its own CTS bullet.
-The milestone's completion scenario is covered instead by
-`unittests/Vulkan/DrawTest.cpp` (render pass, dynamic rendering, indexed and
-indirect draws, dynamic scissor, attachment clears) and
-`test/Vulkan/graphics-loader-smoke.test`, which renders the same scene
+and cannot mirror a region or blit a multisample image. No CTS run happened
+in this pass: `deqp-vk` was not available in this environment, exactly as V4
+recorded for its own CTS bullet -- so this milestone still does not carry
+Vulkan CTS coverage. The lavapipe half of "match lavapipe for every format
+and state combination" is closed, in a follow-up pass: this environment does
+have Mesa lavapipe installed, and `feme-vulkan-graphics-smoke`
+(`test/Vulkan/graphics-lavapipe-diff.test`) now runs seven scenarios --
+a `VkRenderPass`, dynamic rendering, depth, stencil, blending, MRT, and a
+multisample resolve, one per completion-test bullet -- against both FeMe and
+lavapipe with `VK_DRIVER_FILES` restricted to one manifest at a time, and
+diffs the printed texels; all seven match byte-for-byte. That generalization
+also surfaced two real portability bugs invisible against this ICD alone:
+dynamic rendering's entry points must be resolved through
+`vkGetDeviceProcAddr` rather than linked statically (the loader has no
+static trampoline for a KHR extension) and enabled by name plus
+`VkPhysicalDeviceDynamicRenderingFeatures` at device creation (this ICD
+accepts the calls regardless of either); and a real driver's host-visible
+memory type is not reliably index 0, so it must be found through
+`vkGetPhysicalDeviceMemoryProperties`. The blend scenario deliberately uses
+a 0.75 source alpha rather than 0.5, since an exact half-alpha blend lands
+every channel on an 8-bit unorm quantization tie (127.5) where two
+independent renderers may round either way without either being wrong. Only
+the seven scenarios above are covered -- not "every format and state
+combination the driver reports" in full, which would need the same
+treatment for every attachment format, sample count, and topology this
+milestone accepts, left for whoever next needs a specific one of them to
+matter. `unittests/Vulkan/DrawTest.cpp` covers the same scenarios (plus
+indexed and indirect draws, dynamic scissor, and attachment clears) against
+`feme::vulkan`'s own entry points, and
+`test/Vulkan/graphics-loader-smoke.test` renders the original fixed scene
 through the real Khronos loader.
 
 ### V7: Tessellation, geometry, and graphics completeness
