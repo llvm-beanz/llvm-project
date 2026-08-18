@@ -179,7 +179,12 @@ unsigned resolveWaveSizeForFunction(const Function &F,
 /// Which per-lane-varying raised builtin \p ID is, if any (see
 /// feme::cpu::BuiltinCallKind); `std::nullopt` for anything else, including
 /// `llvm.{dx,spv}.group.id` (uniform, handled separately -- see the file
-/// comment above).
+/// comment above). (V4) `llvm.spv.subgroup.local.invocation.id` -- the
+/// `SPIRV_BuiltIn::SubgroupLocalInvocationId` a Vulkan shader's lane index
+/// within its subgroup, per "Builtin and execution-shape mapping" in
+/// feme/docs/FeMeVulkanDesign.md -- is the exact same per-lane value
+/// `llvm.dx.wave.getlaneindex` already is, so it shares that
+/// `BuiltinCallKind::LaneIndex` classification rather than needing its own.
 std::optional<BuiltinCallKind> classifyBuiltin(Intrinsic::ID ID) {
   switch (ID) {
   case Intrinsic::dx_thread_id:
@@ -192,6 +197,7 @@ std::optional<BuiltinCallKind> classifyBuiltin(Intrinsic::ID ID) {
   case Intrinsic::spv_flattened_thread_id_in_group:
     return BuiltinCallKind::FlattenedThreadIdInGroup;
   case Intrinsic::dx_wave_getlaneindex:
+  case Intrinsic::spv_subgroup_local_invocation_id:
     return BuiltinCallKind::LaneIndex;
   default:
     return std::nullopt;
@@ -204,11 +210,17 @@ std::optional<BuiltinCallKind> classifyBuiltin(Intrinsic::ID ID) {
 /// `classifyBuiltin` above) and `QuadOp`'s `llvm.dx.quad.read.*` family
 /// (raised, per roadmap step R4, but not yet lowered -- quad/derivative
 /// support is an explicit v1 non-goal, see feme/docs/FeMeCPUDesign.md's
-/// "Non-Goals").
+/// "Non-Goals"). (V4) `llvm.spv.subgroup.size` -- Vulkan's
+/// `SPIRV_BuiltIn::SubgroupSize` -- reports the same value
+/// `llvm.{dx,spv}.wave.get.lane.count` already does (the pinned wave size,
+/// per "Builtin and execution-shape mapping" in
+/// feme/docs/FeMeVulkanDesign.md), so it shares `WaveCallKind::GetLaneCount`
+/// rather than needing its own classification.
 std::optional<WaveCallKind> classifyWaveCall(Intrinsic::ID ID) {
   switch (ID) {
   case Intrinsic::dx_wave_get_lane_count:
   case Intrinsic::spv_wave_get_lane_count:
+  case Intrinsic::spv_subgroup_size:
     return WaveCallKind::GetLaneCount;
   case Intrinsic::dx_wave_is_first_lane:
   case Intrinsic::spv_wave_is_first_lane:

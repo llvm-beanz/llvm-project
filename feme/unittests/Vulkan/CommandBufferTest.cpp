@@ -55,6 +55,38 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// V4 ("broader subgroup ... coverage"): reads the `SubgroupSize` and
+/// `SubgroupLocalInvocationId` builtins and writes both into a
+/// `StorageBuffer` -- exercises the CPU target's lowering of
+/// `llvm.spv.subgroup.size`/`llvm.spv.subgroup.local.invocation.id`
+/// (feme::cpu::SIMDizePass's `classifyWaveCall`/`classifyBuiltin`) end to
+/// end through a real dispatch, closing a gap where those two builtins
+/// converted to intrinsic calls with no CPU-target lowering at all (see
+/// "Builtin and execution-shape mapping" in feme/docs/FeMeVulkanDesign.md).
+const char *kSubgroupBuiltinShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, GroupNonUniform], []> {
+  spirv.GlobalVariable @size built_in("SubgroupSize") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @lane built_in("SubgroupLocalInvocationId") : !spirv.ptr<i32, Input>
+  spirv.GlobalVariable @out bind(0, 0) : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+  spirv.func @main() -> () "None" {
+    %0 = spirv.mlir.addressof @size : !spirv.ptr<i32, Input>
+    %size = spirv.Load "Input" %0 : i32
+    %1 = spirv.mlir.addressof @lane : !spirv.ptr<i32, Input>
+    %lane = spirv.Load "Input" %1 : i32
+    %2 = spirv.mlir.addressof @out : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>
+    %c0 = spirv.Constant 0 : i32
+    %c1 = spirv.Constant 1 : i32
+    %ac0 = spirv.AccessChain %2[%c0, %c0] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac0, %size : i32
+    %ac1 = spirv.AccessChain %2[%c0, %c1] : !spirv.ptr<!spirv.struct<(!spirv.rtarray<i32, stride=4> [0])>, StorageBuffer>, i32, i32 -> !spirv.ptr<i32, StorageBuffer>
+    spirv.Store "StorageBuffer" %ac1, %lane : i32
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main, @size, @lane, @out
+  spirv.ExecutionMode @main "LocalSize", 1, 1, 1
+}
+)mlir";
+
 /// Reads `in[gid.x]`, adds one, and writes the result to `out[gid.x]` --
 /// two flat (non-aggregate) `i32` `StorageBuffer` bindings in one
 /// descriptor set, matching V2's own "run a Vulkan compute shader that
@@ -731,6 +763,116 @@ TEST_F(StorageBufferDispatchTest,
   vkDestroyBuffer(Device, Out.Buf, nullptr);
   vkFreeMemory(Device, In.Memory, nullptr);
   vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// End-to-end V4 scenario ("broader subgroup ... coverage"): compiles and
+/// dispatches `kSubgroupBuiltinShader`, observing `SubgroupSize`/
+/// `SubgroupLocalInvocationId` through a real `StorageBuffer` write. A
+/// single-invocation dispatch (`LocalSize 1, 1, 1`) keeps the expected
+/// values simple (lane 0 of a one-lane-active wave) without depending on
+/// the host's own pinned wave size for the assertion itself.
+TEST_F(CommandBufferTest, SubgroupBuiltinsWriteThroughStorageBuffer) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+  SetLayoutInfo.bindingCount = 1;
+  SetLayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr, &SetLayout),
+      VK_SUCCESS);
+
+  VkPipelineLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.setLayoutCount = 1;
+  LayoutInfo.pSetLayouts = &SetLayout;
+  VkPipelineLayout SubgroupLayout = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &SubgroupLayout),
+      VK_SUCCESS);
+
+  std::vector<uint32_t> Words = assembleSPIRV(kSubgroupBuiltinShader);
+  ASSERT_FALSE(Words.empty());
+  VkShaderModuleCreateInfo ShaderInfo{};
+  ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+  ShaderInfo.pCode = Words.data();
+  VkShaderModule SubgroupModule = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &SubgroupModule),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo PipelineInfo{};
+  PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  PipelineInfo.stage.module = SubgroupModule;
+  PipelineInfo.stage.pName = "main";
+  PipelineInfo.layout = SubgroupLayout;
+  VkPipeline SubgroupPipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                     nullptr, &SubgroupPipeline),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool DescPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescPool),
+            VK_SUCCESS);
+  VkDescriptorSetAllocateInfo DSAllocInfo{};
+  DSAllocInfo.descriptorPool = DescPool;
+  DSAllocInfo.descriptorSetCount = 1;
+  DSAllocInfo.pSetLayouts = &SetLayout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &DSAllocInfo, &Set), VK_SUCCESS);
+
+  HostBuffer Out;
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 8;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Out.Buf), VK_SUCCESS);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 8;
+  AllocInfo.memoryTypeIndex = 0;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Out.Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Out.Buf, Out.Memory, 0), VK_SUCCESS);
+  ASSERT_EQ(vkMapMemory(Device, Out.Memory, 0, VK_WHOLE_SIZE, 0, &Out.Data),
+            VK_SUCCESS);
+
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 8};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &OutInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, SubgroupPipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          SubgroupLayout, 0, 1, &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result[2];
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_GE(Result[0], 1u); // SubgroupSize: at least one lane.
+  EXPECT_EQ(Result[1], 0u); // SubgroupLocalInvocationId: the only invocation.
+
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+  vkDestroyDescriptorPool(Device, DescPool, nullptr);
+  vkDestroyPipeline(Device, SubgroupPipeline, nullptr);
+  vkDestroyShaderModule(Device, SubgroupModule, nullptr);
+  vkDestroyPipelineLayout(Device, SubgroupLayout, nullptr);
+  vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
 /// End-to-end V4 scenario: bind a uniform texel buffer and a storage texel
