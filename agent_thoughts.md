@@ -19813,3 +19813,121 @@ change's own commit, to keep those commits' diffs focused on behavior.
 - An actual Vulkan CTS run and its result: `deqp-vk` remains unavailable in
   this sandboxed environment; only the filtering/harness infrastructure from
   the previous session exists.
+
+# Agent thoughts: V4 follow-up 2 (R8G8B8A8_SNORM/UINT/SINT texel buffers)
+
+## Starting point
+
+Picked up from the previous session's own "outstanding V4 items" note,
+which called out the SPIR-V atomic dialect-conversion gap as a strictly
+larger change not splittable into small independently-testable commits
+without first landing the conversion pattern itself, and separately listed
+`R8G8B8A8_SNORM`/`_UINT`/`_SINT` (plus `R16G16B16A16_*`,
+`R11G11B10_FLOAT`, `R10G10B10A2_*`) as "a mechanical repeat of this
+session's pattern once the per-format padding/conversion logic exists."
+Chose the mechanical, well-scoped item over the atomics gap: the roadmap
+explicitly lists "broader ... robustness coverage" as a V4 goal, and the
+per-format conversion logic for the three `R8G8B8A8_*` variants is genuinely
+mechanical (still a 4-byte packed element, no channel-count padding
+needed) — unlike `R16G16B16A16_*` (8-byte packed, needs a new element-size
+class in the runtime helpers) or the narrower-channel 32-bit formats (need
+zero/one-padding logic that doesn't exist anywhere yet). Left the atomics
+gap and the 16-bit-packed/padding-needing formats for a future session, per
+the same reasoning the previous session gave.
+
+## What changed, and why split this way
+
+- `FeMeRuntimeCPU.c`: added `femeRTUnpackR8G8B8A8Snorm`/`Pack...` (SNORM's
+  Vulkan-spec `value = max(c / 127, -1.0)` conversion) and
+  `femeRTUnpackR8G8B8A8Uint`/`Sint` + their `Pack` counterparts (packed-byte
+  zero-/sign-extension into `<4 x i32>` lanes; packing is bit-identical for
+  both since truncating an `int32_t` lane to its low byte doesn't care about
+  the lane's own signedness — `femeRTPackR8G8B8A8Sint` just forwards to
+  `femeRTPackR8G8B8A8Uint`). Wired these into the existing `Desc.Format`
+  runtime switch in `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` (SNORM,
+  alongside the pre-existing UNORM case) and
+  `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32` (UINT/SINT — previously
+  this helper had no packed-format branch at all, only the 16-byte identity
+  path). Committed alone first, before touching the Vulkan-side whitelist,
+  so the runtime conversion logic is tested (`RuntimeCPUTest` round-trips)
+  independent of whether anything can reach it yet.
+- `Format.cpp`'s `isTexelBufferFormatSupported`: widened to accept the three
+  new formats now that the runtime implements them — this is the one gate
+  that actually exposes the new conversions to `vkCreateBufferView`, so it's
+  its own commit with `FormatTest.cpp`'s whitelist-scope test flipped from
+  asserting `R8G8B8A8_SNORM` false to true (that assertion existed
+  specifically to prove the previous session's narrower scope, so it had to
+  change here, not just gain new cases).
+- End-to-end `CommandBufferTest.cpp` coverage: added
+  `ReadsAndWritesThroughSnormBufferViews` (reuses the existing `<4 x float>`
+  `kTexelBufferAddShader`/`TexelBufferDispatchTest`, only swapping the bound
+  `VkFormat` and buffer size to one packed `uint32_t` texel) and
+  `ReadsAndWritesThroughPackedByteBufferViews` (same idea, reusing
+  `kIntTexelBufferAddShader`/`IntTexelBufferDispatchTest`). This was possible
+  with zero shader/fixture changes because the format conversion is
+  entirely a runtime property of the bound descriptor (`Desc.Format`), not
+  something baked into the compiled shader — the shader's SPIR-V image
+  format token (`Rgba32f`/`Rgba32ui`) only selects which mangled
+  `.v4f32`/`.v4i32` call `SPIRVResourceLoweringPass` emits, matching the
+  same "conversion is keyed off each descriptor's own bound format, not
+  baked into the shader" point the previous session's own
+  `kIntTexelBufferAddShader` comment already made about the 32-bit-identity
+  case.
+- Docs: updated `FeMeVulkanDesign.md`'s V4 status note (both the "Typed
+  buffers and broader compute" narrative and its Deviations bullet) and its
+  Descriptor Model table, plus `Roadmap.md`'s V4 row and `Descriptor.h`'s
+  file comment, to describe the widened scope and keep the still-deferred
+  items (atomics, `R16G16B16A16_*`/`R11G11B10_FLOAT`/`R10G10B10A2_*`,
+  narrower-channel-count padding, relocatable pipeline-cache object code, an
+  actual CTS run) accurately scoped rather than silently stale.
+
+## Numeric details worth recording
+
+- SNORM unpack clamps at `-1.0` (not `-128/127`) per the Vulkan spec's own
+  fixed-point-to-float conversion formula, so `-128`'s raw byte and `-127`'s
+  both unpack to exactly `-1.0` — verified with a load test using a `-128`
+  byte specifically to catch a regression that used `/128` instead of
+  `/127`, or that skipped the clamp.
+- The end-to-end SNORM dispatch test's expected output was computed with a
+  small Python harness (not by hand) to avoid a copy-paste rounding mistake
+  in the test itself: `R`/`B` saturate to `1.0` (127) after the shader's
+  `+1.0`, `G` lands at exactly `0.0`, and `A` lands at `~0.496` (127,
+  rounds to 63) — asymmetric enough between lanes to actually exercise both
+  the clamp and the round-to-nearest packing, not just the identity case.
+
+## Validation
+
+Built with the existing `build/` tree (ccache-enabled
+`CMAKE_*_COMPILER_LAUNCHER`, `LLVM_ENABLE_ASSERTIONS=ON` — confirmed via
+`CMakeCache.txt`, not reconfigured). Ran `FeMeRuntimeCPUTests` and
+`FeMeVulkanTests` directly after each commit's change (30 and 97 passed
+respectively, up from the pre-session 24 and 95 — exactly the new tests
+added, no regressions), then `ninja check-feme` at the end: 1324 passed,
+35 unsupported (environment-gated, e.g. the CTS lit test), 0 failed. Ran
+`clang-format` on every touched file before each commit rather than as a
+separate NFC pass, since each commit here only touches one or two files.
+
+## Deliberately deferred (unchanged from the previous session's assessment)
+
+- SPIR-V atomic buffer/image access (`spirv.Atomic*`): still no dialect
+  conversion pattern at all in MLIR's `SPIRVToLLVM.cpp`. Untouched this
+  session for the same reason the previous session gave: a strictly larger
+  change than the format work above, not splittable into small
+  independently-testable commits without first landing the conversion
+  pattern itself.
+- `R16G16B16A16_{FLOAT,UNORM,SNORM,UINT,SINT}`: needs a new 8-byte-packed
+  element-size class in the runtime helpers (`R8G8B8A8_*`'s packed path is
+  4 bytes; these are 8), plus FLOAT16-to-FP32 conversion logic that doesn't
+  exist yet.
+- `R11G11B10_FLOAT`/`R10G10B10A2_{UNORM,UINT}`: packed formats with
+  non-byte-aligned per-channel bit widths, needing their own bit-twiddling
+  conversion, not a mechanical repeat of the byte-aligned formats this
+  session added.
+- The narrower-than-`<4 x T>` channel-count 32-bit formats (`R32_UINT`,
+  `R32G32_UINT`, ...): still need per-format zero/one-padding logic, since
+  SPIR-V's own image ops always operate on a full four-component vector
+  regardless of the underlying format's real channel count.
+- Relocatable object code in the persistent pipeline cache blob, and an
+  actual Vulkan CTS run: unchanged from every previous session's assessment
+  (still no `CompiledStage`/`CompiledKernel` API, still no `deqp-vk` in this
+  sandboxed environment).
