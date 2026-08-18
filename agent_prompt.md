@@ -23,8 +23,24 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement V4 from the roadmap document?
+Can you continue working on outstanding V4 items from the roadmap document?
 
 > Typed buffers, `VkFormat` mapping, texel buffers, broader
 > subgroup/atomic/robustness coverage, persistent pipeline cache with a blob
 > fuzzer, first CTS runs over the advertised subset
+
+The previous agent left the notes:
+
+> - SPIR-V atomic buffer/image access (`spirv.Atomic*`): no dialect
+>   conversion pattern exists at all; needs one plus a new
+>   `SPIRVResourceLoweringPass` access shape. Documented in
+>   FeMeVulkanDesign.md's V4 Status note rather than left silently
+>   unaddressed.
+> - Texel-buffer format coverage beyond `R32G32B32A32_SFLOAT`/
+>   `R8G8B8A8_UNORM`: needs the CPU runtime helper library to grow more
+>   `ResourceCallKind`-mangled `<N x T>` variants.
+> - Relocatable object code in the persistent pipeline cache blob: depends
+>   on a `CompiledStage`/`CompiledKernel` API this milestone doesn't add
+>   (the design doc's own anticipated dependency).
+> - An actual Vulkan CTS run and its result: no `deqp-vk` build available
+>   in this environment; only the filtering/harness infrastructure landed.
