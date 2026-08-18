@@ -39,18 +39,24 @@
 // (V4) `VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER`/`_STORAGE_TEXEL_BUFFER` are
 // also accepted, resolving to a `Kind::Typed` `feme::cpu::FemeDescriptor`
 // instead of `Kind::Raw`: a texel buffer's shader-side access converts
-// through its declared `VkFormat`, unlike a raw/structured buffer's. This
-// milestone's CPU runtime only implements that format conversion for
-// `<4 x float>`-shaped shader element types (see
-// `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` in
-// feme/runtime/CPU/FeMeRuntimeCPU.c), so only the two `VkFormat`s that map
-// to it -- `VK_FORMAT_R32G32B32A32_SFLOAT` (the identity case) and
-// `VK_FORMAT_R8G8B8A8_UNORM` (packed) -- are usable in a texel buffer's
-// `VkBufferView` here; every other format `Format.h` maps is rejected at
+// through its declared `VkFormat`, unlike a raw/structured buffer's. The CPU
+// runtime implements that format conversion only for `<4 x float>`- and
+// `<4 x i32>`-shaped shader element types (see
+// `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` and
+// `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32` in
+// feme/runtime/CPU/FeMeRuntimeCPU.c), so only the `VkFormat`s that map to one
+// of those -- `VK_FORMAT_R32G32B32A32_SFLOAT`/`_UINT`/`_SINT` (the identity
+// cases) and `VK_FORMAT_R8G8B8A8_UNORM` (packed) -- are usable in a texel
+// buffer's `VkBufferView` here; every other format `Format.h` maps is
+// rejected by `feme::vulkan::isTexelBufferFormatSupported` at
 // `vkCreateBufferView` for a texel-buffer-typed view specifically (a
 // non-texel `VkBufferView` use does not exist in Vulkan). Broader format
 // coverage needs the runtime helper library to grow more `ResourceCallKind`
-// mangled variants, deferred past V4.
+// mangled variants (for the remaining packed formats) and, for a
+// narrower-than-`<4 x T>` channel count, per-format zero/one-padding logic
+// (SPIR-V's own image ops always operate on a full four-component vector
+// regardless of the underlying format's real channel count) -- deferred
+// past V4.
 //
 //===----------------------------------------------------------------------===//
 
