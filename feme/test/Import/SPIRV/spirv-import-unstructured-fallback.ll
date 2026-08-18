@@ -1,6 +1,6 @@
 ; REQUIRES: spirv-registered-target
 ; RUN: llc -mtriple=spirv-unknown-vulkan-compute -O0 --filetype=obj %s -o %t.spv
-; RUN: feme-translate --import-spirv %t.spv | FileCheck %s
+; RUN: feme-translate --import-spirv --import-spirv-structurize-control-flow %t.spv | FileCheck %s
 
 ; MLIR's SPIR-V deserializer cannot structurize every legal SPIR-V control
 ; flow graph: an `OpPhi` in a loop merge block -- which any loop carrying a
@@ -10,7 +10,12 @@
 ; least as directly onto LLVM IR as the structured form does.
 ;
 ; feme::SPIRVImporter therefore retries with structurization disabled rather
-; than failing. This checks that: the fixture below is a loop with a
+; than failing (`--import-spirv-structurize-control-flow` above opts back
+; into attempting structurization first, purely so this test can exercise
+; that retry path directly; see ImportOptions::SPIRVEnableControlFlowStructurization's
+; comment for why FeMe's default import path skips straight to unstructured
+; deserialization instead of ever attempting -- and retrying away from --
+; structurization). This checks that: the fixture below is a loop with a
 ; conditional early exit, built into a real SPIR-V binary by `llc` rather
 ; than checked in, per "Avoiding binary test fixtures" in
 ; feme/docs/Design.md.

@@ -37,15 +37,34 @@ struct ImportOptions {
   /// SPIR-V only: structurize control flow into `spirv.mlir.selection`/
   /// `spirv.mlir.loop` ops during deserialization. See
   /// mlir::spirv::DeserializationOptions.
-  bool SPIRVEnableControlFlowStructurization = true;
+  ///
+  /// Defaults to `false` -- see "SPIR-V import prerequisites" in
+  /// feme/docs/FeMeVulkanDesign.md for the roadmap decision this codifies.
+  /// MLIR's structurizer rejects some legal SPIR-V control flow graphs
+  /// outright (notably an `OpPhi` in a loop merge block, which any loop
+  /// with a value-producing `break` emits), which `SPIRVFallBackToUnstructuredControlFlow`
+  /// alone would be enough to route around. But a real compiler's *simple*
+  /// loops (no early exit at all) structurize successfully and still crash
+  /// downstream: MLIR's own `spirv.mlir.loop` -> `llvm.br`/`llvm.cond_br`
+  /// conversion pattern (`LoopPattern` in
+  /// mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp) asserts on a loop
+  /// whose merge block carries a value, which every loop with a
+  /// loop-carried induction variable does. That failure happens in a
+  /// later, independent pass (`feme::spirv::createConvertSPIRVToLLVMPass`),
+  /// not during deserialization, so no retry here can catch it. FeMe's CPU
+  /// pipeline already has to restructure DXIL's naturally unstructured
+  /// CFGs (`feme::cpu::PreparePass`), so there is no benefit to attempting
+  /// structured reconstruction for SPIR-V at all: unstructured
+  /// deserialization -- plain block arguments and branches -- both
+  /// succeeds unconditionally and converts to LLVM IR without going
+  /// through the buggy structured patterns.
+  bool SPIRVEnableControlFlowStructurization = false;
 
   /// SPIR-V only: if structurized deserialization fails, retry with
-  /// structurization disabled rather than reporting the failure. MLIR's
-  /// structurizer does not yet handle every legal SPIR-V control flow graph
-  /// (notably an `OpPhi` in a loop merge block, which any loop with a
-  /// `break` produces), while its unstructured mode -- which keeps the
-  /// original CFG as block arguments and branches -- handles them fine and
-  /// maps at least as directly onto LLVM IR. Ignored when
+  /// structurization disabled rather than reporting the failure. Only
+  /// consulted when a caller explicitly opts back into
+  /// `SPIRVEnableControlFlowStructurization`; see that flag's comment for
+  /// why structurization is off by default. Ignored when
   /// `SPIRVEnableControlFlowStructurization` is already false.
   bool SPIRVFallBackToUnstructuredControlFlow = true;
 };
