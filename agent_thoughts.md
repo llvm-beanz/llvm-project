@@ -18493,3 +18493,106 @@ must preserve still holds: `ldd lib/libfeme_vulkan.so` has no
 `libvulkan.so*` entry (the ICD never depends on the loader at runtime), while
 `ldd bin/feme-vulkan-loader-smoke` does link `libvulkan.so.1` (via
 `Vulkan::Vulkan`).
+
+# macOS link failure: `ld: unknown options: --version-script=...`
+
+## Problem
+
+Building `feme_vulkan` on macOS failed at the link step:
+
+```
+ld: unknown options: --version-script=/.../libfeme_vulkan.map
+```
+
+`feme/tools/feme-vulkan/CMakeLists.txt` hard-coded
+`target_link_options(feme_vulkan PRIVATE "-Wl,--version-script=...")` to
+restrict the shared object's dynamic symbol table to only the
+loader-facing `vk_icd*` entrypoints (see "Process Coexistence and Symbol
+Visibility" in `feme/docs/FeMeVulkanDesign.md`: two LLVM copies sharing a
+process is a known failure mode, so nothing but the ICD's own entrypoints
+may be dynamically visible). `--version-script` is a GNU
+ld/gold/lld-emulating-GNU-ld option for ELF; Apple's `ld64` has no
+equivalent flag by that name and rejects it outright, so the flag can't
+just be reused as-is on Darwin.
+
+## Fix
+
+Rather than hand-writing an `if(APPLE) ... else() ...` branch in the
+`feme-vulkan` `CMakeLists.txt`, I used the mechanism LLVM's own build
+already provides for exactly this problem:
+`llvm_add_library()` (which `add_feme_library()` forwards to) checks the
+`LLVM_EXPORTED_SYMBOL_FILE` variable and, if set, calls
+`add_llvm_symbol_exports()` (`llvm/cmake/modules/AddLLVM.cmake`) on the
+target. That function already picks the right linker mechanism per
+platform: a generated `--version-script` wrapper on ELF (gold/BFD), a
+generated `-exported_symbols_list` file with each symbol name prefixed by
+`_` on Darwin (mangled/link-time symbol names on Mach-O carry a leading
+underscore), `-bE:` on AIX, and a generated `.def` file passed to
+`link.exe`/`lld-link` on Windows. In-tree examples already follow this
+pattern (e.g. `llvm/tools/remarks-shlib/CMakeLists.txt` sets
+`LLVM_EXPORTED_SYMBOL_FILE` before calling `add_llvm_library()`), so this
+isn't new machinery, just reusing what's already there instead of
+reinventing a narrower, GNU-ld-only version of it.
+
+Concretely:
+
+- Renamed `feme/tools/feme-vulkan/libfeme_vulkan.map` (GNU version-script
+  syntax: `FEME_VULKAN_1.0 { global: ...; local: *; };`) to
+  `libfeme_vulkan.exports`, a plain newline-separated list of the four
+  symbol names -- the format `add_llvm_symbol_exports()` expects (see
+  every other in-tree `.exports` file, e.g.
+  `llvm/tools/remarks-shlib/Remarks.exports`, `llvm/tools/gold/gold.exports`).
+  This format has no comment syntax (each line becomes a raw
+  `global:`/`-exported_symbols_list` entry or gets a literal `_` prefixed
+  on Darwin), so I moved the file's explanatory comment into the
+  `CMakeLists.txt` instead of losing it.
+- In `feme/tools/feme-vulkan/CMakeLists.txt`, replaced the manual
+  `target_link_options(... "-Wl,--version-script=...")` /
+  `set_target_properties(... LINK_DEPENDS ...)` pair with
+  `set(LLVM_EXPORTED_SYMBOL_FILE ${CMAKE_CURRENT_SOURCE_DIR}/libfeme_vulkan.exports)`
+  placed immediately before the `add_feme_library(feme_vulkan SHARED ...)`
+  call (variable scope: `add_feme_library()`/`llvm_add_library()` read it
+  as an ordinary, un-shadowed CMake variable from the calling directory
+  scope, exactly like `remarks-shlib` does). Left it set for the rest of
+  the file since `tools/feme-vulkan` has no `add_subdirectory()` calls
+  after this point, so there's no later target it could leak onto.
+- One cosmetic side effect on ELF: the auto-generated version script names
+  its version node `LLVM_<major>.<minor>` (LLVM's own convention) rather
+  than the hand-written file's `FEME_VULKAN_1.0`. That name is an internal
+  ELF versioning label, not part of the ABI surface the design doc cares
+  about (the loader looks up entrypoints by plain symbol name via
+  `dlsym`-equivalent APIs, never by version node), so I did not try to
+  preserve it -- doing so would mean re-deriving the ELF-specific
+  generation logic `add_llvm_symbol_exports()` already owns, defeating the
+  point of reusing it.
+- Updated the "Process Coexistence and Symbol Visibility" section of
+  `feme/docs/FeMeVulkanDesign.md`, and a comment in
+  `feme/lib/Vulkan/CMakeLists.txt`, to describe the requirement generically
+  ("a linker symbol-export list") instead of assuming a GNU-ld version
+  script specifically, since that assumption is exactly what the macOS
+  build broke on.
+
+## Verification
+
+Reconfigured the existing build directory (`ccache` launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`) with `cmake .`; configure log still shows
+`-- feme: found Vulkan 1.3.275; building libfeme_vulkan`. Built
+`feme_vulkan` directly: `ninja feme_vulkan` now succeeds (this is on
+Linux, so it exercises the ELF `--version-script` branch of
+`add_llvm_symbol_exports()`, generated via the new
+`LLVM_EXPORTED_SYMBOL_FILE` plumbing rather than the old hand-written
+flag). Confirmed with `nm -D --defined-only lib/libfeme_vulkan.so` that
+the dynamic symbol table still exports exactly the four intended
+entrypoints (`vk_icdNegotiateLoaderICDInterfaceVersion`,
+`vk_icdGetInstanceProcAddr`, `vk_icdGetPhysicalDeviceProcAddr`,
+`vkGetInstanceProcAddr`) and nothing else -- the coexistence requirement
+this packaging exists for is unaffected. Ran `ninja check-feme`: 1217
+passed, 34 unsupported (pre-existing, unrelated to this change), 0
+failures.
+
+I do not have access to a macOS machine in this environment, so I could
+not directly reproduce the reported `ld64` failure or confirm the fix
+there; the fix rests on `add_llvm_symbol_exports()`'s existing, already
+-- exercised-elsewhere-in-tree Darwin branch (`-exported_symbols_list`
+with underscore-prefixed symbol names) rather than on new,
+unverified-on-Darwin logic of my own.
