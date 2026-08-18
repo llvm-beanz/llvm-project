@@ -18406,3 +18406,90 @@ and Symbol Visibility" both named `lib/Vulkan/VulkanICD.cpp`; updated both to
 `feme/tools/feme-vulkan/VulkanICD.cpp` (and to list `tools/feme-vulkan` as
 its own layout entry) to match the new location, since this is a real,
 if small, deviation from what the design doc described.
+
+# Simplify Vulkan CMake to use find_package(Vulkan)
+
+## Task
+
+The prompt observed that feme's CMake logic for its Vulkan dependency was
+more complicated than necessary: it depended on a CMake-configured
+Vulkan-Headers package (`find_package(VulkanHeaders 1.3 CONFIG)`) plus a
+separate, manual `find_library(... vulkan)` to find the loader for the
+loader-smoke test tool. The ask was to switch to CMake's own built-in
+`find_package(Vulkan)`, which finds an installed Vulkan SDK and provides
+both the headers and the loader from one lookup, in a platform-agnostic way.
+
+## Investigation
+
+I inspected the CMake module cache on this machine
+(`/usr/share/cmake-3.28/Modules/FindVulkan.cmake`, CMake 3.28.3) to confirm
+what it actually provides:
+
+- `Vulkan_FOUND`, `Vulkan_INCLUDE_DIR(S)`, `Vulkan_LIBRARY`/`Vulkan_LIBRARIES`,
+  `Vulkan_VERSION` (parsed straight out of `vulkan_core.h`'s
+  `VK_HEADER_VERSION`/`VK_HEADER_VERSION_COMPLETE`).
+- Imported targets `Vulkan::Vulkan` (the loader import library, `UNKNOWN
+  IMPORTED`) and `Vulkan::Headers` (an `INTERFACE IMPORTED` target for the
+  include directory alone) -- both created only if `Vulkan_FOUND`.
+- It searches `$ENV{VULKAN_SDK}/include` and `/lib` first, then falls back to
+  system-standard search paths, so it works equally well against a full
+  Vulkan SDK tarball (with `VULKAN_SDK` set) or, as on this box, distro
+  packages (`libvulkan-dev`, `vulkan-validationlayers`, etc. under
+  `/usr/include`, `/usr/lib`).
+- It does *not* know about `vk.xml`'s location (that's a Vulkan SDK/registry
+  concept the module has no opinion on), so `feme/lib/Vulkan/CMakeLists.txt`'s
+  `FEME_VULKAN_XML` derivation logic still has to exist; it now walks
+  `Vulkan_INCLUDE_DIR` (a plain cache variable FindVulkan sets) instead of
+  reading `Vulkan::Headers`' `INTERFACE_INCLUDE_DIRECTORIES` target property
+  to get to the same answer, since both name the same directory but the cache
+  variable doesn't require the target to exist and is simpler to read.
+
+This confirmed the whole `find_package(VulkanHeaders CONFIG)` +
+`find_library(vulkan)` pair could collapse into one `find_package(Vulkan
+1.3)`, with `TARGET Vulkan::Headers` and `TARGET Vulkan::Vulkan` as the two
+existence checks feme already had (`FEME_HAVE_VULKAN_HEADERS`,
+`FEME_HAVE_VULKAN_LOADER`).
+
+## Changes, one commit each
+
+1. `feme/CMakeLists.txt`: replaced `find_package(VulkanHeaders 1.3 CONFIG
+   QUIET)` + the `FEME_VULKAN_LOADER_LIBRARY` `find_library()` block with a
+   single `find_package(Vulkan 1.3 QUIET)`, gating
+   `FEME_HAVE_VULKAN_HEADERS` on `TARGET Vulkan::Headers` (as before) and
+   `FEME_HAVE_VULKAN_LOADER` on `TARGET Vulkan::Vulkan` existing alongside
+   it, rather than a manual `find_library(NAMES vulkan)` call.
+2. `feme/tools/feme-vulkan-loader-smoke/CMakeLists.txt`: linked against
+   `Vulkan::Vulkan` instead of the now-gone `${FEME_VULKAN_LOADER_LIBRARY}`
+   cache variable.
+3. `feme/lib/Vulkan/CMakeLists.txt`: changed the `FEME_VULKAN_XML` default
+   derivation to `get_filename_component(... ${Vulkan_INCLUDE_DIR}
+   DIRECTORY)` instead of reading `Vulkan::Headers`'
+   `INTERFACE_INCLUDE_DIRECTORIES` target property -- same directory, but
+   using the variable FindVulkan already publishes rather than introspecting
+   a target's properties for something CMake already computed for us.
+4. `feme/docs/FeMeVulkanDesign.md` and `feme/docs/Roadmap.md`: updated the
+   "Project and Library Boundaries" and V0 status prose, and the closed
+   Roadmap gap entry, to describe the dependency as "the Vulkan SDK" found
+   via `find_package(Vulkan)` rather than "Vulkan-Headers" found via its own
+   CMake config package. Left the one reference to the upstream
+   Vulkan-Headers GitHub repo (a citation, not a build-system description)
+   and the one sentence about `vk.xml` declaring extensions (a statement
+   about the registry file's content, not about CMake) alone.
+
+## Verification
+
+The existing build directory (Release, `LLVM_ENABLE_ASSERTIONS=ON`,
+`ccache` launcher via `CMAKE_{C,CXX}_COMPILER_LAUNCHER`,
+`LLVM_ENABLE_PROJECTS=feme;clang`) had its `CMakeCache.txt` accidentally
+deleted while testing a from-scratch reconfigure; recreated it with the same
+flags read back out of the original cache before it was removed. Reconfigured
+cleanly, with `-- feme: found Vulkan 1.3.275; building libfeme_vulkan` in the
+configure log and `Vulkan_INCLUDE_DIR`/`Vulkan_LIBRARY` (not
+`VulkanHeaders_DIR` or `FEME_VULKAN_LOADER_LIBRARY`) in the resulting
+`CMakeCache.txt`. Built `feme-test-depends` (full success, ccache-accelerated)
+and ran `check-feme`: 1217 passed, 34 unsupported (pre-existing, unrelated),
+0 failures. Directly confirmed the ICD/loader dependency split this change
+must preserve still holds: `ldd lib/libfeme_vulkan.so` has no
+`libvulkan.so*` entry (the ICD never depends on the loader at runtime), while
+`ldd bin/feme-vulkan-loader-smoke` does link `libvulkan.so.1` (via
+`Vulkan::Vulkan`).
