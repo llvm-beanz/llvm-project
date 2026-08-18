@@ -777,7 +777,7 @@ advertising any descriptor indexing feature.
 | Vulkan descriptor type | Initial FeMe representation | Status |
 |---|---|---|
 | Storage buffer | Raw/structured `FemeDescriptor`, writable | Done (V2) |
-| Uniform buffer | Read-only raw `FemeDescriptor` | Vulkan object model done (V3); SPIR-V `Uniform` storage-class shader lowering still required |
+| Uniform buffer | Read-only raw `FemeDescriptor` | Done (V3) |
 | Dynamic storage/uniform buffer | Same, with bound dynamic offset | Done (V2 storage, V3 uniform) |
 | Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Requires format map |
 | Uniform texel buffer | Typed read-only `FemeDescriptor` | Requires format map |
@@ -1521,16 +1521,33 @@ Deviations from this section's sketch:
   fits `maxPushConstantsSize`; `vkCmdPushConstants` writes into new
   per-command-buffer push-constant execution state, snapshotted into
   `RootConstants` for every dispatch)
-- Implement uniform buffers and dynamic uniform offsets (done for the
+- ~~Implement uniform buffers and dynamic uniform offsets~~ (done: the
   Vulkan object model -- `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_DYNAMIC`
   share storage buffers' pool/set/dynamic-offset accounting, materializing
-  a read-only `FemeDescriptor`; deliberately *not* done for the SPIR-V
-  shader-compiler side, which remains a separately-scoped follow-up --
-  see Descriptor.h's file comment for why: a `Uniform` storage-class
-  block's access shape, heterogeneously-typed fixed fields at fixed byte
-  offsets, does not fit `feme::cpu::SPIRVResourceLoweringPass`'s existing
-  homogeneous-indexed-array model at all, and needs its own lowering work
-  comparable in scope to roadmap step R26's storage-buffer one)
+  a read-only `FemeDescriptor` -- and the SPIR-V shader-compiler side both
+  landed: a `Uniform` storage-class block's access shape,
+  heterogeneously-typed fixed fields at fixed byte offsets, does not fit
+  `feme::spirv::convertBufferBlockType`'s existing homogeneous-runtime-
+  array model, so it needed its own conversion
+  (`feme::spirv::convertUniformBlockType`, wrapping the block's own field
+  struct directly in the same `spirv.VulkanBuffer` handle representation)
+  and access-chain pattern (`feme::spirv::UniformBufferAccessChainPattern`,
+  resolving a field access to `llvm.spv.resource.getpointer` with the
+  field's own struct index, one member per access -- deeper nesting into a
+  field's own fields is left unmodeled, matching
+  `feme::cpu::SPIRVPushConstantLoweringPass`'s own "one member per access"
+  scope). `feme::cpu::SPIRVResourceLoweringPass` was generalized
+  (`BufferKind::Storage`/`Uniform`) to lower that shape too: a uniform
+  buffer's field index (always a compile-time constant) resolves directly
+  to the field's own struct-layout byte offset -- no runtime index
+  multiplication needed, unlike a storage buffer's dynamically-indexed
+  array element -- and there is no `store` case at all, matching Vulkan's
+  own read-only restriction on `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`.
+  `UniformBufferDispatchTest` (feme/unittests/Vulkan/CommandBufferTest.cpp)
+  is the end-to-end scenario: bind a uniform buffer and a storage buffer in
+  one descriptor set, dispatch a shader that reads the uniform buffer's
+  *second* field (proving the field resolves to its own offset, not just
+  field 0's) and writes it to the storage buffer, and observe the result)
 - ~~Implement binary and timeline semaphores across queues, including the
   host `vkSignalSemaphore`/`vkWaitSemaphores` paths~~ (done:
   `feme::vulkan::Semaphore` covers both kinds; the host timeline-semaphore
@@ -1563,14 +1580,18 @@ Deviations from this section's sketch:
   why a per-wave-uniform published value cannot yet be expressed to prove
   the rest)
 
-**Status: mostly done.** Deviations from this section's sketch:
+**Status: done.** Deviations from this section's sketch:
 
-- Uniform buffer *shader-side* SPIR-V lowering is deferred (see above);
-  the Vulkan object model is complete and tested independently of it.
+- A uniform buffer's field access supports only one struct member per
+  access -- a nested field within one of the block's own struct- or
+  array-typed fields is left unmodeled, the same "flat access only"
+  narrowing `feme::cpu::SPIRVResourceLoweringPass` already applied to a
+  storage buffer's own element fields (see that pass's header comment).
 - Dynamic uniform buffer offsets are covered by the same
   `isDynamicDescriptorType`/dynamic-offset machinery storage buffers
   already used -- no separate implementation was needed once the
   descriptor-type acceptance was extended.
+
 
 ### V4: Typed buffers and broader compute
 

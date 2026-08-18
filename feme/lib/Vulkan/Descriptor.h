@@ -25,16 +25,13 @@
 // rows); every other descriptor type is rejected at `VkDescriptorSetLayout`
 // creation. A uniform buffer resolves to the same read-only
 // `feme::cpu::FemeDescriptor` shape a non-writable `StructuredBuffer<T>`
-// already does -- see `isReadOnlyDescriptorType` -- since this milestone's
-// object-model support is deliberately ahead of the SPIR-V shader-compiler
-// side: no SPIR-V `Uniform` storage-class lowering into a bound resource
-// exists yet (`feme::cpu::SPIRVResourceLoweringPass`'s own header comment
-// still only normalizes a `StorageBuffer`-storage-class handle), so a
-// uniform-buffer descriptor cannot yet be consumed by a real compiled
-// shader; only the Vulkan object model itself -- pool/set/dynamic-offset
-// accounting and `FemeDescriptor` materialization -- is this milestone's
-// own scope, exercised directly rather than through a compiled pipeline
-// (see DescriptorTest.cpp/CommandBufferTest.cpp). A (descriptor set,
+// already does -- see `isReadOnlyDescriptorType` -- and (V3)
+// `feme::cpu::SPIRVResourceLoweringPass` normalizes a SPIR-V `Uniform`
+// storage-class handle (a `cbuffer`/`ConstantBuffer<T>`) into a bound
+// resource access the same way it does a `StorageBuffer` one, so a
+// uniform-buffer descriptor is consumed by a real compiled shader exactly
+// like a storage buffer is (see `UniformBufferDispatchTest` in
+// CommandBufferTest.cpp for the end-to-end scenario). A (descriptor set,
 // binding) identity is exactly `feme::cpu::BoundResourceRange`'s
 // `(Space, BaseRegister)` (see `feme::cpu::SPIRVResourceLoweringPass`'s file
 // comment): no translation table is needed between the two.

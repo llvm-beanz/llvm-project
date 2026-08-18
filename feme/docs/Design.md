@@ -680,20 +680,30 @@ What is still missing is breadth rather than a structural gap:
   `OpImageGather`/`OpImageDrefGather` each need their own pattern supplying
   the additional operand(s) `llvm.spv.resource.samplebias`/`samplegrad`/
   `samplelevel`/`samplecmp*`/`gather*` expect.
-- **`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`).
-  These share `spirv.VulkanBuffer`'s representation in principle (see
-  `llvm/test/CodeGen/SPIRV/hlsl-resources/cbuffer*.ll`), but real
-  `clang`-compiled cbuffer access does not go through `spirv.AccessChain`
-  into the handle at all -- it flattens each cbuffer member into its own
-  external global in a separate address space (12) tied back to the
-  cbuffer's handle only via `!hlsl.cbs` module metadata, a shape SPIR-V
-  *import* has no reason to reproduce and that therefore needs its own
-  design decision before implementation, rather than reusing the storage
-  buffer access chain pattern.
 
-Until they exist, the SPIR-V *input* half of the translation matrix does not
-yet cover every shader stage or every resource kind a real HLSL program can
-use.
+Roadmap step V3 closed what used to be a second bullet here,
+**`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`):
+`feme::spirv::convertUniformBlockType`/`UniformBufferAccessChainPattern`
+(SPIRVToLLVMPatterns.cpp) convert the standard SPIR-V *binary* shape for a
+uniform block -- a single `Block`-decorated wrapper struct whose sole
+member is the block's own field struct, reached through `spirv.AccessChain`
+exactly like a storage buffer block is -- into the same `spirv.VulkanBuffer`
+handle representation a storage buffer uses. Real `clang`-compiled cbuffer
+access at the *LLVM IR* level (before LLVM's own SPIR-V backend runs, see
+`llvm/lib/Target/SPIRV/SPIRVCBufferAccess.cpp`) flattens each cbuffer
+member into its own external global tied back to the handle via `!hlsl.cbs`
+module metadata instead, but that shape never reaches this conversion: it
+is purely an intermediate representation the SPIR-V backend itself
+consumes and lowers into ordinary `OpAccessChain`/`OpTypeStruct` by the
+time a real binary exists, which is exactly the shape FeMe's own SPIR-V
+*import* (`feme::SPIRVImporter`, `mlir::spirv::deserialize`) produces the
+`spirv` dialect from. Actually importing an arbitrary real-world binary
+that way remains gated on the separate, pre-existing round-trip gap
+described next -- unrelated to cbuffers specifically.
+
+Until the sampling-variant bullet above is closed, the SPIR-V *input* half
+of the translation matrix does not yet cover every shader stage or every
+resource kind a real HLSL program can use.
 
 Non-builtin `Input`/`Output` variables (a vertex shader's inputs, a fragment
 shader's outputs, and so on -- roadmap R19) closed what used to be a third
