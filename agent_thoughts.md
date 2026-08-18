@@ -20279,3 +20279,194 @@ rejected"). Ran `clang-format` on every touched C++ file before committing.
   one gap this follow-up pass did not attempt, and it is the largest one
   by far -- closing it is its own multi-step project, not a small addition
   to this session's four smaller fixes.
+
+# Agent thoughts: closing the R30 / V5 image-consumption gaps
+
+## The gap I was asked to close
+
+The previous session's note was explicit that one thing was left:
+
+> Real shader-side image/sampler consumption: still blocked on R30's
+> remaining compiler-side reflection work [...] closing it is its own
+> multi-step project, not a small addition.
+
+That framing was right, and it turned out to be exactly four separable
+pieces plus a fifth, unrelated-but-listed R30 item (SIMD widening).
+
+## Why the reflection had to change first
+
+R30 landed 2D sampling for a *DXIL bindless* resource, where the shader
+indexes a caller-numbered image heap directly. Nothing about that path
+needs a `(set, binding) -> slot` map. Vulkan's is the opposite: the shader
+names a binding and the host has to be told which heap slot the compiler
+assigned it. That map already existed for buffers -- `BoundResourceRange`
+-- but it is a *single* map into a *single* heap, and there are three
+physical heaps (`FemeShaderResources::ResourceHeap`/`ImageHeap`/
+`SamplerHeap`) with independent slot numbering. A range at heap base 0 is
+ambiguous without saying which array it means.
+
+So step 1 was purely reflection: a `BoundResourceClass` on every range,
+plus `ReservedImageHeapSize`/`ReservedSamplerHeapSize`. I deliberately
+landed that with both existing producers still reporting `Buffer` and zero
+image/sampler prefixes, so the commit is behaviour-preserving and the
+metadata/artifact-ABI change is reviewable on its own. The artifact byte
+layout went to version 5; the `!feme.cpu.bound_resources` node grew from
+`{name, prefix, (space, reg, size, base)...}` to `{name, resource/image/
+sampler prefixes, (space, reg, size, base, class)...}`.
+
+I considered putting `BoundResourceClass` in a Transforms-side header to
+avoid Transforms including a Target header (the link direction is
+Target -> Transforms). I went with `Target/CPU/ResourceInfo.h` anyway: the
+enum belongs next to `BoundResourceRange`, header inclusion creates no link
+cycle, and `Transforms/CPU` already includes `Target/CPU/RuntimeABI.h` in
+seven files for exactly the same "shared contract" reason.
+
+## The SPIR-V lowering, and one thing that surprised me
+
+`SPIRVResourceLoweringPass` classifies a handle and then validates its uses
+by walking forward from the handle. That works for buffers, whose handle
+feeds `getpointer` directly. It does *not* work for a sampled image,
+because `feme::spirv::SampledImagePattern` lowers `OpSampledImage` to an
+`insertvalue` pair building a `{image, sampler}` struct, which the sample
+pattern then `extractvalue`s back apart. Forward from the image handle you
+see an `insertvalue`, not a sample.
+
+I could have taught the use-walk to see through the struct. Instead I fold
+the struct away first (`foldSampledImageStructs`, using LLVM's own
+`FindInsertedValue`). That is better than a smarter walk for a reason
+beyond convenience: FeMe's image ABI *never* has a combined sampled-image
+value -- FeMeGraphicsDesign.md's "Combined image samplers remain two
+logical descriptors paired by lowering" -- so the struct is a pure
+artifact of the MLIR conversion's intermediate representation and deleting
+it early is the honest normalization, not a shortcut.
+
+Two further shape notes:
+
+- A sample is reachable from *two* handles (its image and its sampler), so
+  the lowering rewrites it only when reached from the image side, where
+  both descriptor indices are already resolvable. Sampler handles are
+  erased in a second loop, after every sample that used them is gone.
+- I also gave the SPIR-V path the trailing `image_heap`/`image_heap_count`
+  parameters the DXIL path already appended. That is not strictly required
+  by anything except the image calls themselves, but it means a lowered
+  stage has one identical resource-binding ABI regardless of source
+  language, and the wrappers resolve these by name anyway.
+
+While there I changed `PerFunctionHandles` from a `DenseMap` to a
+`MapVector`: rewrite order decides both the order rewritten functions end
+up in and the order metadata nodes are emitted, and it was keyed on
+`Function *`. That was latent non-determinism, not something my change
+introduced, but my new test would have been flaky because of it.
+
+## Scope choices in the SPIR-V classifier
+
+I accept a bound `spirv.Image` only when it is 2D, non-arrayed,
+single-sampled, `Sampled == 1`, and `f32`-channelled. Each rejection has a
+reason rather than being conservatism:
+
+- arrayed/multisampled: the runtime helper takes no layer/sample
+  coordinate, and quietly addressing layer 0 would be wrong answers, not
+  missing functionality;
+- `Sampled == 2` (storage image): a write would need a
+  `feme.cpu.image.store.*` helper that does not exist;
+- non-`f32` channels: `feme.cpu.image.sample.2d.v4f32` returns `<4 x
+  float>`.
+
+Same reasoning for the nonzero texel offset the DXIL path already refuses.
+An unrecognized shape leaves the function un-normalized so
+`checkSupportedRaisedOps` still rejects it truthfully.
+
+## Vulkan side: the mip-subrange trick, and what I could not express
+
+`FemeImageSubresourceLayout::Offset` is relative to the image's base
+pointer. That makes a view's mip subrange free to express: keep `Data` at
+the image base and hand the shader a *slice* of the mip-layout table
+starting at `baseMipLevel`. The view's base level simply becomes level 0.
+
+`baseArrayLayer > 0` has no equivalent, because the layer offset differs
+per mip level and the descriptor has no base-layer field. Rather than
+address layer 0 and silently return the wrong texels, such a binding is
+left unwritten -- an all-zero descriptor, which every runtime helper reads
+as the robust zero result. I wrote that down in the design doc rather than
+leaving it as a surprise.
+
+I also made pipeline-layout validation class-aware. Previously it only
+checked "supported descriptor type, big enough array"; now a range's
+`BoundResourceClass` must match the declared type, so a shader that samples
+through (set, binding) cannot be handed a storage buffer there. A
+`COMBINED_IMAGE_SAMPLER` satisfies both an image and a sampler range, and
+`buildBoundResources` materializes one into both heaps, which is the same
+"two logical descriptors" rule the compiler side follows.
+
+## A bug I found on the way
+
+Writing the SIMDize test surfaced a real, pre-existing miscompile:
+`widenInsertElement` seeded a decomposed vector's components with null
+whenever the chain's base was not itself a decomposed divergent vector.
+That is only correct for the `poison` base a freshly raised typed-buffer
+store starts from; for a chain over a constant or otherwise uniform vector,
+every component the chain did not overwrite was silently lost and the
+scalarized store passed `poison`. It has its own commit and its own test,
+because it is a correctness bug in the buffer path that happens to be
+reachable from the image path too -- it would have been wrong to bury it
+inside the image feature.
+
+## SIMDize
+
+`widenResourceCall` extracts operands positionally because
+`MatchedResourceCall` has one fixed shape. Image calls have three shapes
+(sample / samplecmp / load) with different operand counts. Rather than
+three positional cases, `widenImageCall` widens every operand generically
+and special-cases only the trailing mask, which is last for all three. The
+leading heap pointer/count operands are entry-point parameters and can
+never be divergent, so passing them through unchanged is safe by
+construction, not by inspection.
+
+Image operations are reads, so lanes are governed by the wave's *entry*
+mask, not its side-effect mask.
+
+## Testing
+
+Each phase is covered where it lives, which is what "unit tests covering
+each phase of translation" asks for:
+
+- reflection: `ResourceInfoTest` (metadata read, artifact round trip,
+  unknown-class rejection) and `ResourceHeapTest` (three heaps numbered
+  independently, unbound image range zero-fills, dynamic heap follows the
+  prefix, a non-buffer range never consumes a buffer slot);
+- SPIR-V lowering: `spirv-resource-lowering-image.ll` plus six
+  `SPIRVResourceLoweringTest` cases including two rejection cases;
+- SIMDize: `simdize-image-call-scalarize.ll` (divergent *and* uniform) and
+  `simdize-vector-partial-insert.ll` for the bug above;
+- Vulkan: `SampledImageDispatchTest` (real dispatch, unwritten binding
+  reads zero, wrong-class layout rejected) and
+  `sampled-image-loader-smoke.test`, which runs the whole thing through the
+  real Khronos loader.
+
+I added the loader-level test deliberately. V5's own follow-up added
+`image-loader-smoke.test` for the object model precisely because linking
+`libfeme_vulkan` directly cannot catch process-boundary problems; the
+sampling path deserved the same treatment, and `feme-vulkan-sampled-image-
+smoke` is its client. While wiring it up I noticed `check-feme`'s dependency
+list named `feme-vulkan-image-loader-smoke` unconditionally even though that
+target only exists when a loader is found, and never named
+`feme-vulkan-storage-buffer-diff` at all; both are fixed in the same commit.
+
+## Validation
+
+Existing `build/` tree, `LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`.
+Baseline `ninja check-feme` before any change: 1364 passed, 1 unsupported.
+After every commit: green. Final: 1385 passed, 1 unsupported (the
+environment-gated one, unchanged) -- +21 over baseline. `clang-format` run
+on every touched C++ file.
+
+## Deliberately still open
+
+Everything itemized in FeMeGraphicsDesign.md's updated "Canonical image
+operations" note: 1D/3D/cube sampling, arrayed/multisampled/storage images,
+bias/gradient sampling, gather, DXIL comparison sampling (blocked upstream
+-- no numbered wire opcode exists in this LLVM tree), nonzero texel
+offsets, and a SPIR-V image view over a nonzero base array layer. None of
+these is a redesign; each is a bounded extension of one helper or one
+classifier, which is why I preferred to close the structural gap
+completely for one shape rather than half-close it for several.
