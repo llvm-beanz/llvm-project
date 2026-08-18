@@ -20,11 +20,19 @@ using namespace llvm;
 
 bool feme::vulkan::isSupportedDescriptorType(VkDescriptorType Type) {
   return Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
-         Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+         Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC ||
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 }
 
 bool feme::vulkan::isDynamicDescriptorType(VkDescriptorType Type) {
-  return Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+  return Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC ||
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+}
+
+bool feme::vulkan::isReadOnlyDescriptorType(VkDescriptorType Type) {
+  return Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
 }
 
 DescriptorSetLayout::DescriptorSetLayout(

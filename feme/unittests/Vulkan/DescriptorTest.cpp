@@ -77,7 +77,7 @@ TEST_F(DescriptorTest, CreateSetLayoutWithStorageBuffers) {
 TEST_F(DescriptorTest, UnsupportedDescriptorTypeIsRejected) {
   VkDescriptorSetLayoutBinding Binding{};
   Binding.binding = 0;
-  Binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
   Binding.descriptorCount = 1;
 
   VkDescriptorSetLayoutCreateInfo LayoutInfo{};
@@ -89,7 +89,7 @@ TEST_F(DescriptorTest, UnsupportedDescriptorTypeIsRejected) {
 }
 
 TEST_F(DescriptorTest, UnsupportedPoolSizeTypeIsRejected) {
-  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1};
   VkDescriptorPoolCreateInfo PoolInfo{};
   PoolInfo.maxSets = 1;
   PoolInfo.poolSizeCount = 1;
@@ -220,6 +220,58 @@ TEST_F(DescriptorTest, ResetDescriptorPoolRestoresCapacity) {
   ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
   EXPECT_NE(Set, VK_NULL_HANDLE);
 
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+TEST_F(DescriptorTest, UniformBufferLayoutAcceptedAndDynamicOffsetCounted) {
+  // V3: uniform buffers (see Descriptor.h's file comment for this
+  // milestone's object-model-only scope).
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+  EXPECT_EQ(fromHandle<DescriptorSetLayout>(Layout)->dynamicOffsetCount(), 1u);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  VkBuffer Buf = createStorageBuffer(64);
+  VkDescriptorBufferInfo BufInfo{Buf, 0, 32};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<DescriptorBufferBinding> Array = S->bindingArray(0);
+  ASSERT_EQ(Array.size(), 1u);
+  EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Buf));
+  EXPECT_EQ(Array[0].Range, 32u);
+
+  vkDestroyBuffer(Device, Buf, nullptr);
   vkDestroyDescriptorPool(Device, Pool, nullptr);
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }

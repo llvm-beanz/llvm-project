@@ -108,8 +108,12 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
         Dst.Data = static_cast<uint8_t *>(Src.Buf->data()) + Base;
         Dst.SizeInBytes = Range;
         Dst.Kind = static_cast<uint32_t>(feme::cpu::ResourceKind::Raw);
-        Dst.Flags = feme::cpu::FEME_DESCRIPTOR_UAV; // Storage buffers are
-                                                    // always read-write.
+        // A uniform buffer's descriptor never carries the UAV flag (see
+        // Descriptor.h's file comment); a storage buffer's always does --
+        // it is always read-write.
+        Dst.Flags = isReadOnlyDescriptorType(BindingDecl.Type)
+                       ? 0
+                       : feme::cpu::FEME_DESCRIPTOR_UAV;
       }
       Result.Storage.push_back(std::move(Descriptors));
       Result.Bindings.push_back(feme::cpu::BoundResourceBinding{

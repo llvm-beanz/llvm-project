@@ -7,7 +7,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// The V2 descriptor object model (see "Descriptor Model" in
+// The descriptor object model (see "Descriptor Model" in
 // feme/docs/FeMeVulkanDesign.md): `VkDescriptorSetLayout`, `VkDescriptorPool`,
 // and `VkDescriptorSet`. A descriptor set stores source Vulkan records --
 // bound buffer, offset, and range per array element -- rather than a
@@ -19,11 +19,22 @@
 // actually reference and builds the physical `FemeDescriptor` heap from
 // them there.
 //
-// Only `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER` and its dynamic-offset
-// counterpart are accepted (see the Descriptor Model table's "Required
-// first"/"Required after base buffers" rows); every other descriptor type
-// is rejected at `VkDescriptorSetLayout` creation, matching this milestone's
-// "Complete SPIR-V `StorageBuffer` lowering" scope. A (descriptor set,
+// `VK_DESCRIPTOR_TYPE_STORAGE_BUFFER`/`_DYNAMIC` and (V3)
+// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_DYNAMIC` are accepted (see the
+// Descriptor Model table's "Required first"/"Required after base buffers"
+// rows); every other descriptor type is rejected at `VkDescriptorSetLayout`
+// creation. A uniform buffer resolves to the same read-only
+// `feme::cpu::FemeDescriptor` shape a non-writable `StructuredBuffer<T>`
+// already does -- see `isReadOnlyDescriptorType` -- since this milestone's
+// object-model support is deliberately ahead of the SPIR-V shader-compiler
+// side: no SPIR-V `Uniform` storage-class lowering into a bound resource
+// exists yet (`feme::cpu::SPIRVResourceLoweringPass`'s own header comment
+// still only normalizes a `StorageBuffer`-storage-class handle), so a
+// uniform-buffer descriptor cannot yet be consumed by a real compiled
+// shader; only the Vulkan object model itself -- pool/set/dynamic-offset
+// accounting and `FemeDescriptor` materialization -- is this milestone's
+// own scope, exercised directly rather than through a compiled pipeline
+// (see DescriptorTest.cpp/CommandBufferTest.cpp). A (descriptor set,
 // binding) identity is exactly `feme::cpu::BoundResourceRange`'s
 // `(Space, BaseRegister)` (see `feme::cpu::SPIRVResourceLoweringPass`'s file
 // comment): no translation table is needed between the two.
@@ -46,13 +57,18 @@ namespace feme::vulkan {
 
 class Buffer;
 
-/// Whether \p Type is one of the two descriptor types this milestone
+/// Whether \p Type is one of the four descriptor types this milestone
 /// supports (see the file comment).
 bool isSupportedDescriptorType(VkDescriptorType Type);
 
 /// Whether \p Type consumes a dynamic offset supplied at
 /// `vkCmdBindDescriptorSets` time.
 bool isDynamicDescriptorType(VkDescriptorType Type);
+
+/// Whether \p Type's materialized `FemeDescriptor` must never carry
+/// `FEME_DESCRIPTOR_UAV` -- true for a uniform buffer, matching Vulkan's
+/// own read-only restriction on that descriptor type.
+bool isReadOnlyDescriptorType(VkDescriptorType Type);
 
 /// One `VkDescriptorSetLayoutBinding`, retained for later validation
 /// (pipeline-layout compatibility, `vkAllocateDescriptorSets`'s implicit
@@ -132,7 +148,7 @@ private:
 /// A `VkDescriptorPool`: owns every `DescriptorSet` allocated from it and
 /// accounts for `maxSets`, per "Object Model". Per-descriptor-type pool
 /// size accounting is intentionally not modeled -- only `maxSets` is
-/// enforced -- since this milestone's only two descriptor types share one
+/// enforced -- since this milestone's four descriptor types share one
 /// simple accounting rule and a real application's `VkDescriptorPoolSize`
 /// list is otherwise unchecked upstream validation's job, not this ICD's.
 class DescriptorPool {
