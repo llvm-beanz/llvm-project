@@ -128,6 +128,33 @@ bool isBufferBlockWritable(mlir::spirv::StructType Struct) {
   return true;
 }
 
+/// A Vulkan uniform block (`cbuffer`/`ConstantBuffer<T>` in HLSL) is spelled
+/// the same way a storage/uniform buffer block is -- a single SPIR-V
+/// `Block`-decorated struct with exactly one member (see
+/// getBufferBlockElementArray's own comment and
+/// https://github.com/llvm/wg-hlsl/blob/main/proposals/0018-spirv-resource-representation.md)
+/// -- except that member is the block's own user-visible, heterogeneously-
+/// typed field struct directly, rather than a homogeneous runtime array:
+/// a uniform block has a fixed, statically-typed field layout, unlike a
+/// storage buffer's dynamically-indexed element array. Returns that sole
+/// member if it is itself a struct, or a null type for any other shape
+/// (which does not convert).
+mlir::spirv::StructType
+getUniformBlockElementStruct(mlir::spirv::PointerType Type) {
+  if (Type.getStorageClass() != mlir::spirv::StorageClass::Uniform)
+    return nullptr;
+  auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(Type.getPointeeType());
+  if (!Struct || Struct.getNumElements() != 1)
+    return nullptr;
+  return mlir::dyn_cast<mlir::spirv::StructType>(Struct.getElementType(0));
+}
+
+/// Returns true if \p Type is a pointer to a uniform buffer block -- see
+/// getUniformBlockElementStruct.
+bool isUniformBlockPointer(mlir::spirv::PointerType Type) {
+  return static_cast<bool>(getUniformBlockElementStruct(Type));
+}
+
 /// Emits a call to \p Intrinsic returning \p ResultType, with \p Args.
 mlir::Value createIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
                                 mlir::Location Loc, llvm::StringRef Intrinsic,
@@ -591,6 +618,54 @@ public:
     Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
         Op, ResultType, ElementType, ElementPtr, GEPIndices,
         mlir::LLVM::GEPNoWrapFlags::inbounds);
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.AccessChain` into a uniform buffer block whose base
+/// pointer converted to a `spirv.VulkanBuffer` handle over a struct (see
+/// convertUniformBlockType below), the `Uniform`-storage-class counterpart
+/// of StorageBufferAccessChainPattern above. The leading member-selector
+/// index (always 0, selecting the wrapper struct's sole member) is dropped
+/// the same way, but the second index selects a *field* of the block's own
+/// struct directly rather than an element of a dynamically-indexed runtime
+/// array -- a fixed, statically-typed field layout unique to each access,
+/// so (unlike the storage-buffer case) no further index navigating into a
+/// nested field is supported here: `feme::cpu::SPIRVResourceLoweringPass`'s
+/// own uniform-buffer handling resolves the field index directly to a
+/// compile-time struct-layout byte offset, and stops there, matching
+/// `feme::cpu::SPIRVPushConstantLoweringPass`'s own "one member per access"
+/// scope for the same underlying reason (see that pass's header comment).
+class UniformBufferAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
+        Adaptor.getBasePtr().getType());
+    if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer" ||
+        !mlir::isa<mlir::LLVM::LLVMStructType>(
+            HandleType.getTypeParams().front()))
+      return Rewriter.notifyMatchFailure(Op, "not a uniform buffer access");
+
+    mlir::ValueRange Indices = Adaptor.getIndices();
+    if (Indices.size() != 2)
+      return Rewriter.notifyMatchFailure(
+          Op, "expected exactly a member selector and a field index");
+
+    mlir::Type ResultType =
+        getTypeConverter()->convertType(Op.getComponentPtr().getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    Rewriter.replaceOp(Op, createIntrinsicCall(
+                               Rewriter, Loc, "llvm.spv.resource.getpointer",
+                               ResultType, {Adaptor.getBasePtr(), Indices[1]}));
     return mlir::success();
   }
 };
@@ -1138,6 +1213,28 @@ convertBufferBlockType(mlir::spirv::PointerType Type,
       {static_cast<unsigned>(Type.getStorageClass()), Writable ? 1u : 0u});
 }
 
+/// Converts a uniform buffer block pointer to the same `spirv.VulkanBuffer`
+/// handle type convertBufferBlockType produces for a storage buffer block,
+/// except its sole type parameter is the block's own field struct directly
+/// (see getUniformBlockElementStruct) rather than a 0-sized `!llvm.array`,
+/// since a uniform block has no runtime array to wrap. Vulkan disallows
+/// writing `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`, so the writability integer
+/// parameter is always 0, unlike a storage buffer block's.
+mlir::Type
+convertUniformBlockType(mlir::spirv::PointerType Type,
+                        const mlir::LLVMTypeConverter &TypeConverter) {
+  mlir::spirv::StructType Element = getUniformBlockElementStruct(Type);
+  if (!Element)
+    return nullptr;
+  mlir::Type ElementType = TypeConverter.convertType(Element);
+  if (!ElementType)
+    return nullptr;
+
+  return mlir::LLVM::LLVMTargetExtType::get(
+      Type.getContext(), "spirv.VulkanBuffer", {ElementType},
+      {static_cast<unsigned>(Type.getStorageClass()), /*Writable=*/0u});
+}
+
 } // namespace
 
 void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
@@ -1217,6 +1314,23 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
                                             /*addressSpace=*/11);
   });
 
+  // A uniform buffer block's own pointer converts to the `spirv.VulkanBuffer`
+  // handle representation too (see convertUniformBlockType above); any other
+  // `Uniform` pointer -- an access chain result reaching one of the block's
+  // own fields -- is ordinary memory, in address space 12, the same way a
+  // storage buffer's own non-block pointer converts to address space 11
+  // above (see `storageClassToAddressSpace` in
+  // `llvm/lib/Target/SPIRV/SPIRVUtils.h`).
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
+                                  -> std::optional<mlir::Type> {
+    if (Type.getStorageClass() != mlir::spirv::StorageClass::Uniform)
+      return std::nullopt;
+    if (mlir::Type Handle = convertUniformBlockType(Type, TypeConverter))
+      return Handle;
+    return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                            /*addressSpace=*/12);
+  });
+
   // A push constant pointer is ordinary memory too, in the address space
   // (13) `feme::spirv::PushConstantGlobalVariablePattern`'s global lives in
   // -- LLVM's own `SPIRVPushConstantAccess` pass finds it there and rewrites
@@ -1278,8 +1392,9 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
   for (auto Global : Module.getOps<mlir::spirv::GlobalVariableOp>()) {
     auto PointerType =
         mlir::dyn_cast<mlir::spirv::PointerType>(Global.getType());
-    if (!PointerType ||
-        (!isResourcePointer(PointerType) && !isBufferBlockPointer(PointerType)))
+    if (!PointerType || (!isResourcePointer(PointerType) &&
+                         !isBufferBlockPointer(PointerType) &&
+                         !isUniformBlockPointer(PointerType)))
       continue;
     std::optional<uint32_t> Set = Global.getDescriptorSet();
     std::optional<uint32_t> Binding = Global.getBinding();
@@ -1317,15 +1432,15 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables) {
-  Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
-               BuiltInGlobalVariablePattern, CompositeConstructPattern,
-               ExecutionModePattern, ImageFetchPattern,
-               ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
-               ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
-               LoadValuePattern, PushConstantGlobalVariablePattern,
-               SampledImagePattern, StageIOGlobalVariablePattern,
-               StorageBufferAccessChainPattern>(Patterns.getContext(),
-                                                TypeConverter, FeMeBenefit);
+  Patterns.add<
+      ArrayConstantPattern, BuiltInAddressOfPattern,
+      BuiltInGlobalVariablePattern, CompositeConstructPattern,
+      ExecutionModePattern, ImageFetchPattern, ImageSampleExplicitLodPattern,
+      ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
+      ImageWritePattern, LoadValuePattern, PushConstantGlobalVariablePattern,
+      SampledImagePattern, StageIOGlobalVariablePattern,
+      StorageBufferAccessChainPattern, UniformBufferAccessChainPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
