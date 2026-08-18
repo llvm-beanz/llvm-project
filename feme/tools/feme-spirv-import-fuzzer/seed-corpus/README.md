@@ -15,7 +15,19 @@ after a breaking change to the SPIR-V binary format) with `feme-translate`:
 ```shell
 feme-translate --no-implicit-module --serialize-spirv minimal.mlir -o minimal.spv
 feme-translate --no-implicit-module --serialize-spirv constant.mlir -o constant.spv
+feme-translate --no-implicit-module --serialize-spirv loop-merge-phi.mlir -o loop-merge-phi.spv
 ```
+
+`loop-merge-phi.spv` (roadmap milestone V0.5, see
+[../../../docs/FeMeVulkanDesign.md](../../../docs/FeMeVulkanDesign.md)'s
+"SPIR-V import prerequisites") adds unstructured control flow: a loop whose
+merge block is reached from two predecessors carrying different values --
+the `OpPhi`-in-loop-merge-block shape a value-producing `break` produces in
+real compiler output, and the shape MLIR's structured deserializer rejects
+outright. `minimal.spv`/`constant.spv` are both single-block, so this is the
+corpus's first seed exercising the multi-block/branch mutation space
+`SPIRVImporter`'s default (always-unstructured) deserialization now has to
+handle robustly.
 
 See [../../../docs/CommandGuide/feme-spirv-import-fuzzer.md](../../../docs/CommandGuide/feme-spirv-import-fuzzer.md)
 for how to run the fuzzer against this corpus.
