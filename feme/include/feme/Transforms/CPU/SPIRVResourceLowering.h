@@ -58,11 +58,16 @@
 //    `RWStructuredBuffer<T>`/`StructuredBuffer<T>` in HLSL, see
 //    `feme::spirv::convertBufferBlockType` in SPIRVToLLVMPatterns.cpp) and a
 //    `Uniform`-derived one (a `cbuffer`/`ConstantBuffer<T>`, see
-//    `feme::spirv::convertUniformBlockType`) are both normalized; an
-//    image/sampler handle (`Buffer`/`RWBuffer<T>`/`Texture*`/`Sampler*`) is
-//    left untouched, matching the DXIL side's own "typed and raw buffers
-//    only" narrowing (textures and samplers are not yet covered there
-//    either -- see `feme::cpu::ResourceLoweringPass`'s header comment).
+//    `feme::spirv::convertUniformBlockType`) are both normalized; a
+//    sampled-image or sampler handle (`Texture*`/`Sampler*`) is left
+//    untouched, matching the DXIL side's own "typed and raw buffers only"
+//    narrowing (general images/samplers are not yet covered there either --
+//    see `feme::cpu::ResourceLoweringPass`'s header comment). (V4) A
+//    `Dim::Buffer` image handle (`Buffer<T>`/`RWBuffer<T>` in HLSL --
+//    Vulkan's uniform/storage texel buffer) *is* normalized, but only over
+//    exactly a `<4 x float>` shader-side element -- see
+//    `classifyTexelBufferHandle`'s comment for why this milestone's CPU
+//    runtime only supports that one shape.
 //  - For a storage buffer, only the access shape
 //    `feme::spirv::StorageBufferAccessChainPattern` itself produces for a
 //    flat (non-aggregate) buffer element -- a direct

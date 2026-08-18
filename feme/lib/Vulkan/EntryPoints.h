@@ -140,6 +140,15 @@ VKAPI_ATTR VkResult VKAPI_CALL
 vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
                     const VkBindBufferMemoryInfo *pBindInfos);
 
+// V4: buffer views, for uniform/storage texel buffer descriptors (see
+// "Descriptor Model").
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateBufferView(
+    VkDevice device, const VkBufferViewCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkBufferView *pView);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyBufferView(VkDevice device, VkBufferView bufferView,
+                    const VkAllocationCallbacks *pAllocator);
+
 // V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
 // Pipeline Compilation").
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateShaderModule(
@@ -241,18 +250,18 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
 // Synchronization").
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
-             const VkAllocationCallbacks *pAllocator, VkEvent *pEvent);
+              const VkAllocationCallbacks *pAllocator, VkEvent *pEvent);
 VKAPI_ATTR void VKAPI_CALL vkDestroyEvent(
     VkDevice device, VkEvent event, const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkGetEventStatus(VkDevice device, VkEvent event);
 VKAPI_ATTR VkResult VKAPI_CALL vkSetEvent(VkDevice device, VkEvent event);
 VKAPI_ATTR VkResult VKAPI_CALL vkResetEvent(VkDevice device, VkEvent event);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetEvent(VkCommandBuffer commandBuffer,
-                                        VkEvent event,
-                                        VkPipelineStageFlags stageMask);
+                                         VkEvent event,
+                                         VkPipelineStageFlags stageMask);
 VKAPI_ATTR void VKAPI_CALL vkCmdResetEvent(VkCommandBuffer commandBuffer,
-                                          VkEvent event,
-                                          VkPipelineStageFlags stageMask);
+                                           VkEvent event,
+                                           VkPipelineStageFlags stageMask);
 VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents(
     VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent *pEvents,
     VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
@@ -269,27 +278,27 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateQueryPool(
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyQueryPool(VkDevice device, VkQueryPool queryPool,
                    const VkAllocationCallbacks *pAllocator);
-VKAPI_ATTR VkResult VKAPI_CALL
-vkResetQueryPool(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
-                 uint32_t queryCount);
+VKAPI_ATTR VkResult VKAPI_CALL vkResetQueryPool(VkDevice device,
+                                                VkQueryPool queryPool,
+                                                uint32_t firstQuery,
+                                                uint32_t queryCount);
 VKAPI_ATTR VkResult VKAPI_CALL vkGetQueryPoolResults(
     VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
     uint32_t queryCount, size_t dataSize, void *pData, VkDeviceSize stride,
     VkQueryResultFlags flags);
 VKAPI_ATTR void VKAPI_CALL vkCmdResetQueryPool(VkCommandBuffer commandBuffer,
-                                              VkQueryPool queryPool,
-                                              uint32_t firstQuery,
-                                              uint32_t queryCount);
+                                               VkQueryPool queryPool,
+                                               uint32_t firstQuery,
+                                               uint32_t queryCount);
 VKAPI_ATTR void VKAPI_CALL vkCmdBeginQuery(VkCommandBuffer commandBuffer,
-                                          VkQueryPool queryPool,
-                                          uint32_t query,
-                                          VkQueryControlFlags flags);
+                                           VkQueryPool queryPool,
+                                           uint32_t query,
+                                           VkQueryControlFlags flags);
 VKAPI_ATTR void VKAPI_CALL vkCmdEndQuery(VkCommandBuffer commandBuffer,
-                                        VkQueryPool queryPool, uint32_t query);
-VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(VkCommandBuffer commandBuffer,
-                                              VkPipelineStageFlagBits pipelineStage,
-                                              VkQueryPool queryPool,
-                                              uint32_t query);
+                                         VkQueryPool queryPool, uint32_t query);
+VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(
+    VkCommandBuffer commandBuffer, VkPipelineStageFlagBits pipelineStage,
+    VkQueryPool queryPool, uint32_t query);
 VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
     VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery,
     uint32_t queryCount, VkBuffer dstBuffer, VkDeviceSize dstOffset,
@@ -297,8 +306,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
 
 // V3: secondary command buffers (see "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL
-vkCmdExecuteCommands(VkCommandBuffer commandBuffer,
-                     uint32_t commandBufferCount,
+vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount,
                      const VkCommandBuffer *pCommandBuffers);
 
 // V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
@@ -353,19 +361,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue);
 
 // V3: binary and timeline semaphores (see "Queues, Scheduling, and
 // Synchronization").
-VKAPI_ATTR VkResult VKAPI_CALL
-vkCreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo *pCreateInfo,
-                  const VkAllocationCallbacks *pAllocator,
-                  VkSemaphore *pSemaphore);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSemaphore(
+    VkDevice device, const VkSemaphoreCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkSemaphore *pSemaphore);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroySemaphore(VkDevice device, VkSemaphore semaphore,
                    const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkGetSemaphoreCounterValue(VkDevice device,
                                                           VkSemaphore semaphore,
                                                           uint64_t *pValue);
-VKAPI_ATTR VkResult VKAPI_CALL
-vkWaitSemaphores(VkDevice device, const VkSemaphoreWaitInfo *pWaitInfo,
-                 uint64_t timeout);
+VKAPI_ATTR VkResult VKAPI_CALL vkWaitSemaphores(
+    VkDevice device, const VkSemaphoreWaitInfo *pWaitInfo, uint64_t timeout);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkSignalSemaphore(VkDevice device, const VkSemaphoreSignalInfo *pSignalInfo);
 

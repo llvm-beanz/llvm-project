@@ -22,7 +22,13 @@ bool feme::vulkan::isSupportedDescriptorType(VkDescriptorType Type) {
   return Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
          Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC ||
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+         isTexelBufferDescriptorType(Type);
+}
+
+bool feme::vulkan::isTexelBufferDescriptorType(VkDescriptorType Type) {
+  return Type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
+         Type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
 }
 
 bool feme::vulkan::isDynamicDescriptorType(VkDescriptorType Type) {
@@ -32,7 +38,8 @@ bool feme::vulkan::isDynamicDescriptorType(VkDescriptorType Type) {
 
 bool feme::vulkan::isReadOnlyDescriptorType(VkDescriptorType Type) {
   return Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+         Type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
 }
 
 DescriptorSetLayout::DescriptorSetLayout(
@@ -71,7 +78,17 @@ void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement, Buffer *Buf,
   auto It = Bindings.find(Binding);
   if (It == Bindings.end() || ArrayElement >= It->second.size())
     return;
-  It->second[ArrayElement] = DescriptorBufferBinding{Buf, Offset, Range};
+  It->second[ArrayElement] = DescriptorBufferBinding{Buf, Offset, Range,
+                                                     /*View=*/nullptr};
+}
+
+void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
+                          BufferView *View) {
+  auto It = Bindings.find(Binding);
+  if (It == Bindings.end() || ArrayElement >= It->second.size())
+    return;
+  It->second[ArrayElement] =
+      DescriptorBufferBinding{/*Buf=*/nullptr, /*Offset=*/0, /*Range=*/0, View};
 }
 
 llvm::ArrayRef<DescriptorBufferBinding>
@@ -215,6 +232,12 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     if (!isSupportedDescriptorType(Write.descriptorType))
       continue;
     auto *Set = fromHandle<DescriptorSet>(Write.dstSet);
+    if (isTexelBufferDescriptorType(Write.descriptorType)) {
+      for (uint32_t J = 0; J != Write.descriptorCount; ++J)
+        Set->write(Write.dstBinding, Write.dstArrayElement + J,
+                   fromHandle<BufferView>(Write.pTexelBufferView[J]));
+      continue;
+    }
     for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
       const VkDescriptorBufferInfo &Info = Write.pBufferInfo[J];
       Set->write(Write.dstBinding, Write.dstArrayElement + J,
@@ -233,8 +256,11 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
       if (SrcElement >= SrcArray.size())
         break;
       const DescriptorBufferBinding &B = SrcArray[SrcElement];
-      Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.Buf, B.Offset,
-                 B.Range);
+      if (B.View)
+        Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.View);
+      else
+        Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.Buf, B.Offset,
+                   B.Range);
     }
   }
 }

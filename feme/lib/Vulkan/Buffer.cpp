@@ -90,4 +90,41 @@ vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
   return VK_SUCCESS;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateBufferView(
+    VkDevice, const VkBufferViewCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkBufferView *pView) {
+  std::optional<feme::cpu::ResourceFormat> Format =
+      mapVkFormat(pCreateInfo->format);
+  if (!Format)
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+  auto *Buf = fromHandle<Buffer>(pCreateInfo->buffer);
+  if (!Buf->isBound())
+    return VK_ERROR_INITIALIZATION_FAILED;
+  VkDeviceSize Range = pCreateInfo->range == VK_WHOLE_SIZE
+                           ? Buf->size() - pCreateInfo->offset
+                           : pCreateInfo->range;
+  if (pCreateInfo->offset > Buf->size() ||
+      Range > Buf->size() - pCreateInfo->offset)
+    return VK_ERROR_INITIALIZATION_FAILED;
+
+  Allocator Alloc(pAllocator);
+  vulkan::BufferView *Obj =
+      Alloc.create<vulkan::BufferView>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Buf,
+                                       *Format, pCreateInfo->offset, Range);
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pView = toHandle<VkBufferView>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyBufferView(VkDevice, VkBufferView bufferView,
+                    const VkAllocationCallbacks *pAllocator) {
+  if (!bufferView)
+    return;
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<vulkan::BufferView>(bufferView));
+}
+
 } // namespace feme::vulkan

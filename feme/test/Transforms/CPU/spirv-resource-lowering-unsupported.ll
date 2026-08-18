@@ -3,12 +3,13 @@
 ; Shapes feme::cpu::SPIRVResourceLoweringPass doesn't (yet) canonicalize
 ; leave the whole function untouched rather than being partially rewritten
 ; -- see the "Scope" note in
-; feme/include/feme/Transforms/CPU/SPIRVResourceLowering.h: an image/sampler
-; handle (`Buffer<T>`/`RWBuffer<T>` -- a texture, not a storage buffer), a
-; storage-buffer element accessed through a further `getelementptr` into its
-; own fields (a `StructuredBuffer` with more than one field, read through
-; one of them individually), and (roadmap R26) an unbounded descriptor
-; array -- SPIR-V's own spelling of an unbounded range, mirroring
+; feme/include/feme/Transforms/CPU/SPIRVResourceLowering.h: a non-buffer-dim
+; image/sampler handle (a `Texture2D`/`Sampler`, not a storage buffer or (V4)
+; a `Dim::Buffer` texel buffer), a storage-buffer element accessed through a
+; further `getelementptr` into its own fields (a `StructuredBuffer` with
+; more than one field, read through one of them individually), and (roadmap
+; R26) an unbounded descriptor array -- SPIR-V's own spelling of an
+; unbounded range, mirroring
 ; `feme::cpu::BoundResourceNormalizationPass`'s own rejection of an
 ; unbounded DXIL `handlefrombinding` range.
 
@@ -18,10 +19,10 @@ target triple = "spirv-unknown-vulkan-compute"
 ; CHECK-NOT: resource_heap
 ; CHECK: call target("spirv.Image", {{.*}}) @llvm.spv.resource.handlefrombinding
 define void @image_resource(i32 %idx) {
-  %h = call target("spirv.Image", float, 5, 2, 0, 0, 2, 1)
+  %h = call target("spirv.Image", float, 1, 2, 0, 0, 2, 1)
       @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
   %ptr = call ptr
-      @llvm.spv.resource.getpointer(target("spirv.Image", float, 5, 2, 0, 0, 2, 1) %h, i32 %idx)
+      @llvm.spv.resource.getpointer(target("spirv.Image", float, 1, 2, 0, 0, 2, 1) %h, i32 %idx)
   %v = load <4 x float>, ptr %ptr
   ret void
 }

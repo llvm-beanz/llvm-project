@@ -51,6 +51,17 @@ bool hasResourceLoadCall(Function &F) {
   return false;
 }
 
+/// Returns whether \p F contains a canonical `feme.cpu.resource.*.typed.*`
+/// call -- see `hasResourceLoadCall`'s comment.
+bool hasResourceTypedCall(Function &F, StringRef Prefix) {
+  for (Instruction &I : instructions(F))
+    if (auto *CI = dyn_cast<CallInst>(&I))
+      if (Function *Callee = CI->getCalledFunction())
+        if (Callee->getName().starts_with(Prefix))
+          return true;
+  return false;
+}
+
 TEST(SPIRVResourceLoweringTest, LeavesModuleWithNoBoundHandlesUnchanged) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
@@ -379,6 +390,88 @@ TEST(SPIRVResourceLoweringTest,
 
   EXPECT_FALSE(hasResourceLoadCall(*M->getFunction("storage")));
   EXPECT_FALSE(hasResourceLoadCall(*M->getFunction("uniform")));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersStorageTexelBufferToTypedResourceCalls) {
+  // Sampled == 2 ("used without a sampler"): a storage texel buffer
+  // (RWBuffer<float4> in HLSL), read-write, over the one shader element
+  // shape the CPU runtime's typed-load/store helpers support: <4 x float>
+  // (see classifyTexelBufferHandle's comment).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx, <4 x float> %v) {
+      %h = call target("spirv.Image", <4 x float>, 5, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", <4 x float>, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
+      %loaded = load <4 x float>, ptr %ptr
+      store <4 x float> %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.Image", <4 x float>, 5, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", <4 x float>, 5, 0, 0, 0, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed"));
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.store.typed"));
+  EXPECT_FALSE(M->getFunction("llvm.spv.resource.handlefrombinding"));
+}
+
+TEST(SPIRVResourceLoweringTest, LowersUniformTexelBufferToTypedLoadOnly) {
+  // Sampled == 1 ("used with a sampler"): a uniform texel buffer
+  // (Buffer<float4> in HLSL), read-only.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x float> @main(i32 %idx) {
+      %h = call target("spirv.Image", <4 x float>, 5, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", <4 x float>, 5, 0, 0, 0, 1, 0) %h, i32 %idx)
+      %loaded = load <4 x float>, ptr %ptr
+      ret <4 x float> %loaded
+    }
+    declare target("spirv.Image", <4 x float>, 5, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", <4 x float>, 5, 0, 0, 0, 1, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_TRUE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed"));
+}
+
+TEST(SPIRVResourceLoweringTest, LeavesUnsupportedTexelElementTypeUnchanged) {
+  // Only <4 x float> is supported (see the header comment); an i32 element
+  // -- a format this milestone's CPU runtime has no typed helper for -- is
+  // left un-normalized rather than mis-lowered.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define i32 @main(i32 %idx) {
+      %h = call target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0) %h, i32 %idx)
+      %loaded = load i32, ptr %ptr
+      ret i32 %loaded
+    }
+    declare target("spirv.Image", i32, 5, 0, 0, 0, 2, 0)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.Image", i32, 5, 0, 0, 0, 2, 0), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.load.typed"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 

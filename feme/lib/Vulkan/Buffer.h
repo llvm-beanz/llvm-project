@@ -10,14 +10,18 @@
 // The V1 `VkBuffer` object (see "Object Model" and "Memory and Buffers" in
 // feme/docs/FeMeVulkanDesign.md): a size/usage record plus a bound memory
 // range, bound in a separate `vkBindBufferMemory` call per the Vulkan
-// binding model.
+// binding model. (V4) `VkBufferView`: a typed window into a `VkBuffer`,
+// consumed by a uniform/storage texel buffer descriptor.
 //
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_BUFFER_H
 #define FEME_LIB_VULKAN_BUFFER_H
 
+#include "Format.h"
 #include "Memory.h"
+
+#include "feme/Target/CPU/RuntimeABI.h"
 
 #include <vulkan/vulkan_core.h>
 
@@ -59,6 +63,32 @@ private:
   VkBufferUsageFlags Usage;
   DeviceMemory *BoundMemory = nullptr;
   VkDeviceSize BoundOffset = 0;
+};
+
+/// A `VkBufferView`: a typed window into a `VkBuffer`, consumed only by a
+/// uniform/storage texel buffer descriptor (see "Descriptor Model" in
+/// feme/docs/FeMeVulkanDesign.md's texel-buffer rows, and Descriptor.h's
+/// file comment for exactly which formats V4 supports). Not dispatchable.
+class BufferView {
+public:
+  BufferView(Buffer *Buf, feme::cpu::ResourceFormat Format, VkDeviceSize Offset,
+             VkDeviceSize Range)
+      : Buf(Buf), Format(Format), Offset(Offset), Range(Range) {}
+
+  Buffer *buffer() const { return Buf; }
+  feme::cpu::ResourceFormat format() const { return Format; }
+  VkDeviceSize offset() const { return Offset; }
+
+  /// The view's byte range, with `VK_WHOLE_SIZE` already resolved against
+  /// the bound buffer's size at creation time (Vulkan requires the buffer
+  /// to already be bound when a `VkBufferView` over it is created).
+  VkDeviceSize range() const { return Range; }
+
+private:
+  Buffer *Buf;
+  feme::cpu::ResourceFormat Format;
+  VkDeviceSize Offset;
+  VkDeviceSize Range;
 };
 
 } // namespace feme::vulkan

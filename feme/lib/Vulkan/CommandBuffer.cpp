@@ -9,6 +9,7 @@
 #include "CommandBuffer.h"
 #include "Buffer.h"
 #include "Descriptor.h"
+#include "Format.h"
 #include "Icd.h"
 #include "Objects.h"
 #include "Pipeline.h"
@@ -92,6 +93,34 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
             DynOffset = State.DynamicOffsets[DynamicOffsetCursor];
           ++DynamicOffsetCursor;
         }
+
+        // (V4) A texel buffer descriptor resolves through its
+        // `VkBufferView` to a `Kind::Typed` descriptor instead of the
+        // `Kind::Raw` one every other supported descriptor type below
+        // produces -- see Descriptor.h's file comment.
+        if (isTexelBufferDescriptorType(BindingDecl.Type)) {
+          if (!Src.View || !Src.View->buffer() ||
+              !Src.View->buffer()->isBound())
+            continue; // Kind::None (never written).
+          Buffer *Buf = Src.View->buffer();
+          VkDeviceSize BufSize = Buf->size();
+          VkDeviceSize Base = Src.View->offset();
+          if (Base > BufSize || Src.View->range() > BufSize - Base)
+            continue; // Overrun (should not happen: validated at view
+                      // creation), treated as never-written for safety.
+
+          feme::cpu::FemeDescriptor &Dst = Descriptors[J];
+          Dst.Data = static_cast<uint8_t *>(Buf->data()) + Base;
+          Dst.SizeInBytes = Src.View->range();
+          Dst.Stride = formatElementSize(Src.View->format());
+          Dst.Format = static_cast<uint32_t>(Src.View->format());
+          Dst.Kind = static_cast<uint32_t>(feme::cpu::ResourceKind::Typed);
+          Dst.Flags = isReadOnlyDescriptorType(BindingDecl.Type)
+                          ? 0
+                          : feme::cpu::FEME_DESCRIPTOR_UAV;
+          continue;
+        }
+
         if (!Src.Buf || !Src.Buf->isBound())
           continue; // Kind::None (never written).
 
@@ -112,8 +141,8 @@ buildBoundResources(llvm::ArrayRef<BoundSetState> BoundSets) {
         // Descriptor.h's file comment); a storage buffer's always does --
         // it is always read-write.
         Dst.Flags = isReadOnlyDescriptorType(BindingDecl.Type)
-                       ? 0
-                       : feme::cpu::FEME_DESCRIPTOR_UAV;
+                        ? 0
+                        : feme::cpu::FEME_DESCRIPTOR_UAV;
       }
       Result.Storage.push_back(std::move(Descriptors));
       Result.Bindings.push_back(feme::cpu::BoundResourceBinding{
@@ -258,8 +287,8 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
                                "range");
     auto *Out = static_cast<uint8_t *>(Dst->data()) + Offset;
     std::memset(Out, 0, ResultWidth); // Every value this ICD ever writes is
-                                     // zero (see QueryPool.h's file
-                                     // comment).
+                                      // zero (see QueryPool.h's file
+                                      // comment).
     if (WithAvailability) {
       uint64_t AvailFlag = Pool->isAvailable(FirstQuery + I) ? 1 : 0;
       if (Is64Bit)
@@ -640,8 +669,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdResetEvent(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents(
     VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent *pEvents,
     VkPipelineStageFlags, VkPipelineStageFlags, uint32_t,
-    const VkMemoryBarrier *, uint32_t, const VkBufferMemoryBarrier *,
-    uint32_t, const VkImageMemoryBarrier *) {
+    const VkMemoryBarrier *, uint32_t, const VkBufferMemoryBarrier *, uint32_t,
+    const VkImageMemoryBarrier *) {
   // Image/buffer memory barriers need no inspection here for the same
   // reason `vkCmdPipelineBarrier` does not -- see that command's own
   // comment.
@@ -663,24 +692,24 @@ VKAPI_ATTR void VKAPI_CALL vkCmdResetQueryPool(VkCommandBuffer commandBuffer,
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBeginQuery(VkCommandBuffer commandBuffer,
-                                          VkQueryPool queryPool,
-                                          uint32_t query,
-                                          VkQueryControlFlags) {
+                                           VkQueryPool queryPool,
+                                           uint32_t query,
+                                           VkQueryControlFlags) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->beginQuery(fromHandle<QueryPool>(queryPool), query);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdEndQuery(VkCommandBuffer commandBuffer,
-                                        VkQueryPool queryPool,
-                                        uint32_t query) {
+                                         VkQueryPool queryPool,
+                                         uint32_t query) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->endQuery(fromHandle<QueryPool>(queryPool), query);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(VkCommandBuffer commandBuffer,
-                                              VkPipelineStageFlagBits,
-                                              VkQueryPool queryPool,
-                                              uint32_t query) {
+                                               VkPipelineStageFlagBits,
+                                               VkQueryPool queryPool,
+                                               uint32_t query) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->writeTimestamp(fromHandle<QueryPool>(queryPool), query);
 }
@@ -691,13 +720,12 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
     VkDeviceSize stride, VkQueryResultFlags flags) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->copyQueryPoolResults(fromHandle<QueryPool>(queryPool), firstQuery,
-                            queryCount, fromHandle<vulkan::Buffer>(dstBuffer),
-                            dstOffset, stride, flags);
+                             queryCount, fromHandle<vulkan::Buffer>(dstBuffer),
+                             dstOffset, stride, flags);
 }
 
 VKAPI_ATTR void VKAPI_CALL
-vkCmdExecuteCommands(VkCommandBuffer commandBuffer,
-                     uint32_t commandBufferCount,
+vkCmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCount,
                      const VkCommandBuffer *pCommandBuffers) {
   std::vector<const vulkan::CommandBuffer *> Secondary;
   Secondary.reserve(commandBufferCount);

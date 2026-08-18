@@ -36,6 +36,22 @@
 // `(Space, BaseRegister)` (see `feme::cpu::SPIRVResourceLoweringPass`'s file
 // comment): no translation table is needed between the two.
 //
+// (V4) `VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER`/`_STORAGE_TEXEL_BUFFER` are
+// also accepted, resolving to a `Kind::Typed` `feme::cpu::FemeDescriptor`
+// instead of `Kind::Raw`: a texel buffer's shader-side access converts
+// through its declared `VkFormat`, unlike a raw/structured buffer's. This
+// milestone's CPU runtime only implements that format conversion for
+// `<4 x float>`-shaped shader element types (see
+// `femeCpuResourceLoadTypedV4F32`/`StoreTypedV4F32` in
+// feme/runtime/CPU/FeMeRuntimeCPU.c), so only the two `VkFormat`s that map
+// to it -- `VK_FORMAT_R32G32B32A32_SFLOAT` (the identity case) and
+// `VK_FORMAT_R8G8B8A8_UNORM` (packed) -- are usable in a texel buffer's
+// `VkBufferView` here; every other format `Format.h` maps is rejected at
+// `vkCreateBufferView` for a texel-buffer-typed view specifically (a
+// non-texel `VkBufferView` use does not exist in Vulkan). Broader format
+// coverage needs the runtime helper library to grow more `ResourceCallKind`
+// mangled variants, deferred past V4.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_DESCRIPTOR_H
@@ -53,10 +69,17 @@
 namespace feme::vulkan {
 
 class Buffer;
+class BufferView;
 
-/// Whether \p Type is one of the four descriptor types this milestone
+/// Whether \p Type is one of the six descriptor types this milestone
 /// supports (see the file comment).
 bool isSupportedDescriptorType(VkDescriptorType Type);
+
+/// Whether \p Type is a uniform/storage texel buffer, i.e. resolves to a
+/// `Kind::Typed` `feme::cpu::FemeDescriptor` through a `VkBufferView`
+/// rather than a `Kind::Raw` one through a `VkDescriptorBufferInfo` (see
+/// the file comment).
+bool isTexelBufferDescriptorType(VkDescriptorType Type);
 
 /// Whether \p Type consumes a dynamic offset supplied at
 /// `vkCmdBindDescriptorSets` time.
@@ -102,11 +125,13 @@ private:
   std::vector<DescriptorSetLayoutBinding> Bindings;
 };
 
-/// One descriptor array element's source Vulkan record: the buffer it
-/// refers to, plus the offset/range `vkUpdateDescriptorSets` wrote (see
-/// "Memory and Buffers": "Data = memory allocation base + buffer binding
-/// offset + descriptor offset"). `Buf == nullptr` means never written --
-/// treated as an out-of-bounds access, matching a zero-filled
+/// One descriptor array element's source Vulkan record: either a plain
+/// buffer binding (raw/structured/uniform buffer -- `Buf` set, `View`
+/// null), with the offset/range `vkUpdateDescriptorSets` wrote (see "Memory
+/// and Buffers": "Data = memory allocation base + buffer binding offset +
+/// descriptor offset"), or (V4) a texel buffer's `VkBufferView` (`View`
+/// set, `Buf`/`Offset`/`Range` unused). Both null/unset means never
+/// written -- treated as an out-of-bounds access, matching a zero-filled
 /// `FemeDescriptor`.
 struct DescriptorBufferBinding {
   Buffer *Buf = nullptr;
@@ -114,6 +139,9 @@ struct DescriptorBufferBinding {
   /// The declared range, or `VK_WHOLE_SIZE`; resolved against the bound
   /// buffer's size when the physical heap is materialized.
   VkDeviceSize Range = 0;
+  /// Set instead of `Buf` for a texel buffer descriptor (see
+  /// `isTexelBufferDescriptorType`).
+  BufferView *View = nullptr;
 };
 
 /// A `VkDescriptorSet`: per-binding arrays of `DescriptorBufferBinding`,
@@ -132,6 +160,10 @@ public:
   /// and valid-usage rules, not a runtime-checked error path).
   void write(uint32_t Binding, uint32_t ArrayElement, Buffer *Buf,
              VkDeviceSize Offset, VkDeviceSize Range);
+
+  /// Writes array element \p ArrayElement of binding \p Binding from a
+  /// texel buffer's `VkBufferView` (V4), per the same rule above.
+  void write(uint32_t Binding, uint32_t ArrayElement, BufferView *View);
 
   /// The full declared array for \p Binding, or empty if this set's layout
   /// declares no such binding.

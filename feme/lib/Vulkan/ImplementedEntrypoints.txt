@@ -54,6 +54,11 @@ vkGetBufferMemoryRequirements2
 vkBindBufferMemory
 vkBindBufferMemory2
 
+# V4: buffer views, for uniform/storage texel buffer descriptors (see
+# "Descriptor Model").
+vkCreateBufferView
+vkDestroyBufferView
+
 # V1: shader modules, pipeline layouts, compute pipelines (see "Shader and
 # Pipeline Compilation").
 vkCreateShaderModule
