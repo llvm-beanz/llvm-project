@@ -18992,3 +18992,164 @@ the final commit, confirming no regression elsewhere in the tree and that
   but any future consumer that needs the same information through MLIR's
   structured API (e.g. a hypothetical SPIR-V `dxc`/`spirv-opt` combining
   pass) will hit the same wall.
+
+# Agent thoughts: implementing Roadmap V2 (storage buffers and descriptors)
+
+## Starting point
+
+V1 ("Empty compute dispatch") was done: memory, buffers, shader modules,
+pipeline layouts restricted to zero descriptor sets/push-constant ranges,
+command pools/buffers with exactly bind-pipeline/dispatch/dispatch-base/
+dispatch-indirect, and queue submit/fences. V2's own bullet list (see
+FeMeVulkanDesign.md and Roadmap.md's V2 row) is:
+
+- Storage buffers and descriptors
+- Descriptor pools/sets/updates and dynamic offsets
+- Buffer copies and barriers
+- Lavapipe differential
+
+Two of V2's prerequisites (R26 and R23) were already closed before this
+session began:
+
+- R26 (`feme::cpu::SPIRVResourceLoweringPass`) already normalizes an arrayed
+  SPIR-V `spirv.VulkanBuffer` binding into a contiguous heap range with a
+  range-checked (possibly dynamic) index -- the shader-compiler half of
+  "binding-to-heap normalization". What it does *not* do is anything
+  Vulkan-object-model-shaped: no `VkDescriptorSetLayout`/`VkDescriptorPool`/
+  `VkDescriptorSet` existed yet, so nothing could produce the
+  `feme::cpu::BoundResourceBinding`s a dispatch needs.
+- R23 (`feme::cpu::FunctionWidener`) already made divergent groupshared
+  access (index, load/store, atomic) lower correctly instead of being
+  diagnosed. This closes V2's own "Implement divergent groupshared access"
+  bullet *before* V2 starts -- the design doc's own bullet list hadn't been
+  updated to reflect that yet, which I found by reading Roadmap.md's R23 row
+  carefully rather than assuming V2's document text was still accurate. The
+  one piece of follow-through V2 itself still owed: the Vulkan-advertised
+  `maxComputeSharedMemorySize` limit was still pinned at the spec minimum
+  with a comment blaming the (by-then-already-closed) CPU-target gap. I
+  bumped it to 32768 and updated the stale comment.
+
+## Design decisions
+
+**(descriptor set, binding) == (Space, BaseRegister), no translation
+table.** I confirmed this by reading `SPIRVResourceLoweringPass`'s own
+header comment (it says exactly this) and its implementation
+(`classifyVulkanBufferStride`/`collectHandles` reads the SPIR-V binding's
+own `(set, binding)` decoration pair as the identity). This meant
+`VkPipelineLayout` just needs to remember its ordered
+`VkDescriptorSetLayout` list -- `Space` is that list's index, `BaseRegister`
+is the binding number within it -- and `vkCreateComputePipelines`'s
+compatibility check is a direct lookup, not a remapping.
+
+**A descriptor set stores source Vulkan records, not `FemeDescriptor`
+directly.** The design doc says this explicitly ("Descriptor Model": "This
+is important because buffers can be rebound, dynamic offsets are supplied
+at command recording/execution, and the same set may be consumed by
+pipelines with different compact heap layouts"). I followed it exactly:
+`DescriptorSet::write` stores `{Buffer*, Offset, Range}` per array element;
+the actual `FemeDescriptor` array is materialized fresh at dispatch
+preparation time by a new `buildBoundResources` helper in
+`CommandBuffer.cpp`, which also folds a dynamic binding's offset into the
+descriptor's `Data` pointer -- exactly what "Memory and Buffers" says a
+dynamic offset needs (no shader-side model at all).
+
+**`vkCmdPipelineBarrier` as a plain marker.** V1's status note already
+documents that `vkQueueSubmit` runs every command buffer synchronously on
+the calling thread. Given that, a barrier's "join" semantics (drain
+everything scheduled so far before continuing) are automatically true: there
+is nothing concurrent to join. I recorded the command (so applications that
+correctly insert one, as the spec requires, are not rejected) but gave it an
+empty execution-time body, with a comment explaining exactly why that's
+sound *today* and what would have to change (a real worker pool across
+dispatches) before it stopped being sufficient.
+
+**`ResourceKind::Raw`, not `Structured`, for storage-buffer descriptors.**
+I checked `SPIRVResourceLoweringPass.cpp` and confirmed it computes the
+byte offset for an indexed access as a compile-time-constant `Stride`
+baked directly into the generated IR (`PtrBuilder.CreateMul(ElemIdx,
+ConstantInt::get(I64Ty, BH.Stride))`), never reading
+`FemeDescriptor::Stride` at runtime at all. `FeMeRuntimeCPU.c`'s own
+`feme.cpu.resource.load.raw.*` family accepts both `Raw` and `Structured`
+kinds identically. Since the host has no independently-verified stride to
+put in the descriptor (Vulkan doesn't surface it separately from the
+shader's own SPIR-V), `Raw` with `Stride = 0` is the honest choice --
+`Structured` would imply a stride the host isn't actually supplying.
+
+**Bounds-checking every offset/range computation, resolving to
+`Kind::None` rather than a wild pointer on failure.** This follows "Error
+Handling and Security"'s general rule directly. `buildBoundResources`
+checks the dynamic-offset-shifted base offset against the buffer size and
+the resolved range against the remaining space before ever computing a
+`Data` pointer; any failure just leaves that descriptor zero-initialized
+(the same state as "never written"), which the existing
+`femeRTCheckAccess`/bounds-checking runtime helpers already treat safely.
+
+## What I verified, concretely
+
+- `PipelineTest.CompilesStorageBufferShaderWithCompatibleLayout` proves the
+  whole shader-compiler chain (SPIR-V import -> LLVM IR translation ->
+  `SPIRVResourceLoweringPass` -> CPU JIT) accepts a real
+  `RWStructuredBuffer`-shaped storage buffer access and that the new
+  pipeline-layout compatibility check accepts it when the layout matches,
+  and `RejectsStorageBufferShaderWithoutMatchingBinding` proves it rejects
+  the same shader against an empty layout.
+- `StorageBufferDispatchTest.ReadsAndWritesThroughBoundDescriptorSet` is the
+  actual end-to-end scenario V2 asks for: two real host buffers, a real
+  `VkDescriptorSet`, `vkCmdBindDescriptorSets`, a dispatch, and a read-back
+  showing the shader's `+1` actually happened through the host's own
+  buffer memory -- not just that the pipeline compiled.
+  `DynamicOffsetShiftsBoundBinding` proves the dynamic-offset path
+  specifically: a descriptor declared at buffer offset 0 with a
+  `vkCmdBindDescriptorSets`-supplied dynamic offset actually lands the
+  write at a different buffer element, and the *other* element is
+  untouched.
+- The lavapipe differential test is a *real* differential, not a
+  simulated one: `feme-vulkan-storage-buffer-diff` links the actual
+  Khronos Vulkan loader (same pattern as the existing
+  `feme-vulkan-loader-smoke`), and the lit test runs it twice with
+  `VK_DRIVER_FILES` restricted to exactly one manifest each time -- once
+  FeMe's build-tree manifest, once Mesa lavapipe's system manifest (found
+  at `/usr/share/vulkan/icd.d/lvp_icd.json` in this environment) -- then
+  diffs the two devices' output buffers byte-for-byte. I ran this by hand
+  first (`VK_DRIVER_FILES=... feme-vulkan-storage-buffer-diff /tmp/sb.spv
+  8`) against both ICDs before wiring it into lit, to make sure a real
+  bug in my host-side code (not just a shader-compiler bug) would actually
+  show up as a diff rather than two ICDs coincidentally agreeing on
+  garbage.
+
+## What I deliberately left out of V2's scope
+
+- Per-descriptor-type pool-size accounting (`VkDescriptorPoolCreateInfo::
+  pPoolSizes`'s actual per-type counts): only `maxSets` is enforced. The
+  design doc doesn't ask for this level of accounting, and it's the kind
+  of validation upstream Vulkan validation layers already own -- getting
+  it wrong here would be a robustness gap, not a correctness one, since a
+  real application that oversubscribes a pool size without hitting
+  `maxSets` is already relying on undefined behavior per spec.
+- Update-after-bind and descriptor update templates: "Descriptor Model"
+  explicitly says the first version should omit these and snapshot
+  descriptors into a prepared dispatch before worker execution, which is
+  exactly what `buildBoundResources` does (it runs once per dispatch
+  preparation).
+- `VkDescriptorType` values beyond storage buffer and its dynamic variant:
+  uniform buffers are V3 ("Requires CPU cbuffer path" per the Descriptor
+  Model table), texel buffers/images/samplers are V4/V5.
+
+## Process notes
+
+- I built with the existing `build/` tree (`ccache`, `LLVM_ENABLE_ASSERTIONS
+  =ON`, `LLVM_ENABLE_PROJECTS=feme;clang`, `FEME_ENABLE_VULKAN=ON` already
+  configured) rather than reconfiguring, and used `ninja -C build
+  check-feme` as the standard test command throughout, plus targeted
+  `ninja <target>` builds (`FeMeVulkanCore`, `FeMeVulkanTests`,
+  `feme-vulkan-storage-buffer-diff`) while iterating on a single piece to
+  keep the edit-build-test loop fast.
+- I ran `git-clang-format --diff` against every commit's file set at the
+  end and found real drift (my own hand-written continuation-line
+  indentation didn't match clang-format's alignment rules in several
+  places) -- fixed with a plain `clang-format -i` pass and a small,
+  clearly-labeled NFC commit, then re-ran the full suite to confirm the
+  reformatting didn't change behavior.
+- Every commit in this session builds and passes `check-feme` on its own
+  (I built and ran tests after each one before moving on), so bisecting
+  this history should never land on a broken intermediate state.
