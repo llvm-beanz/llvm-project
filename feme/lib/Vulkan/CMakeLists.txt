@@ -85,6 +85,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Memory.cpp
   PhysicalDeviceInfo.cpp
   Pipeline.cpp
+  PipelineCache.cpp
   ProcAddr.cpp
   QueryPool.cpp
   Sync.cpp
@@ -107,3 +108,10 @@ target_include_directories(FeMeVulkanCore PUBLIC
   ${feme_vulkan_gen_dir}
   ${CMAKE_CURRENT_SOURCE_DIR}
   )
+if(FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA)
+  target_compile_definitions(FeMeVulkanCore PRIVATE
+    FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA=1)
+else()
+  target_compile_definitions(FeMeVulkanCore PRIVATE
+    FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA=0)
+endif()

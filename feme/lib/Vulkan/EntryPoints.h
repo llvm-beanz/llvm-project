@@ -171,6 +171,20 @@ VKAPI_ATTR void VKAPI_CALL
 vkDestroyPipeline(VkDevice device, VkPipeline pipeline,
                   const VkAllocationCallbacks *pAllocator);
 
+// V4: persistent pipeline cache (see "Pipeline Cache").
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(
+    VkDevice device, const VkPipelineCacheCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkPipelineCache *pPipelineCache);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyPipelineCache(VkDevice device, VkPipelineCache pipelineCache,
+                       const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkGetPipelineCacheData(VkDevice device, VkPipelineCache pipelineCache,
+                       size_t *pDataSize, void *pData);
+VKAPI_ATTR VkResult VKAPI_CALL vkMergePipelineCaches(
+    VkDevice device, VkPipelineCache dstCache, uint32_t srcCacheCount,
+    const VkPipelineCache *pSrcCaches);
+
 // V1: command pools/buffers, and the V1 command set (bind compute
 // pipeline, dispatch, dispatch base, dispatch indirect -- see "Command
 // Buffers").

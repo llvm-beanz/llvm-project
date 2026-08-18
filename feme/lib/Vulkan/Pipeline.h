@@ -63,7 +63,7 @@ private:
 class PipelineLayout {
 public:
   PipelineLayout(std::vector<const DescriptorSetLayout *> SetLayouts,
-                std::vector<VkPushConstantRange> PushConstantRanges)
+                 std::vector<VkPushConstantRange> PushConstantRanges)
       : SetLayouts(std::move(SetLayouts)),
         PushConstantRanges(std::move(PushConstantRanges)) {}
 
@@ -79,27 +79,32 @@ private:
   std::vector<VkPushConstantRange> PushConstantRanges;
 };
 
-/// A `VkPipeline` compute pipeline: the compiled CPU kernel `vkCmdDispatch`
-/// et al. invoke. Owns the `feme::Context` its compiled code was JIT-ed
-/// into, so the code (and the `llvm::LLVMContext` behind it) stay alive for
-/// exactly as long as this pipeline does -- see "Compilation flow": "the
-/// JIT-compiled code object and the `llvm::LLVMContext` behind it stay
-/// alive as long as the `VkPipeline` does".
-class ComputePipeline {
-public:
-  ComputePipeline(std::unique_ptr<feme::Context> Ctx,
-                  std::unique_ptr<feme::cpu::CompiledStage> Stage);
-  ~ComputePipeline();
-  ComputePipeline(ComputePipeline &&) noexcept;
-  ComputePipeline &operator=(ComputePipeline &&) noexcept;
-  ComputePipeline(const ComputePipeline &) = delete;
-  ComputePipeline &operator=(const ComputePipeline &) = delete;
-
-  feme::cpu::CompiledStage &getStage() const { return *Stage; }
-
-private:
+/// The shareable, compiled part of a `VkPipeline` compute pipeline: the
+/// `feme::Context` its compiled code was JIT-ed into (so the code, and the
+/// `llvm::LLVMContext` behind it, stay alive as long as anything references
+/// this artifact) and the compiled kernel itself. Factored out of
+/// `ComputePipeline` (V4) so a `PipelineCache` hit can share one already-
+/// compiled artifact between multiple `VkPipeline` handles instead of
+/// recompiling -- see PipelineCache.h.
+struct CachedPipelineArtifact {
   std::unique_ptr<feme::Context> Ctx;
   std::unique_ptr<feme::cpu::CompiledStage> Stage;
+};
+
+/// A `VkPipeline` compute pipeline: a handle sharing ownership of a
+/// `CachedPipelineArtifact` -- see "Compilation flow": "the JIT-compiled
+/// code object and the `llvm::LLVMContext` behind it stay alive as long as
+/// the `VkPipeline` does" (true of every handle sharing the artifact, not
+/// just the first one compiled).
+class ComputePipeline {
+public:
+  explicit ComputePipeline(std::shared_ptr<CachedPipelineArtifact> Artifact)
+      : Artifact(std::move(Artifact)) {}
+
+  feme::cpu::CompiledStage &getStage() const { return *Artifact->Stage; }
+
+private:
+  std::shared_ptr<CachedPipelineArtifact> Artifact;
 };
 
 } // namespace feme::vulkan

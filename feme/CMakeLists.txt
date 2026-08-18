@@ -90,6 +90,18 @@ if(FEME_ENABLE_VULKAN)
   endif()
 endif()
 
+# `vkCreatePipelineCache`'s initial data is fully attacker-controlled input
+# (see "Pipeline Cache" in feme/docs/FeMeVulkanDesign.md); this option
+# removes it from the trust boundary entirely for embedders who do not want
+# the ICD to parse arbitrary bytes at all, at the cost of every
+# VkPipelineCache always starting empty regardless of what a caller
+# supplies. `feme::vulkan::parsePipelineCacheBlob`'s own validation (header,
+# UUID, digest, bounds) is unconditional either way -- this option only
+# controls whether it is ever called.
+option(FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA
+  "Parse vkCreatePipelineCache's initial data (validated: header/UUID/digest/bounds)"
+  ON)
+
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(runtime)

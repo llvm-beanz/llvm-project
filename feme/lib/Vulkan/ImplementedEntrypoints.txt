@@ -68,6 +68,12 @@ vkDestroyPipelineLayout
 vkCreateComputePipelines
 vkDestroyPipeline
 
+# V4: persistent pipeline cache (see "Pipeline Cache").
+vkCreatePipelineCache
+vkDestroyPipelineCache
+vkGetPipelineCacheData
+vkMergePipelineCaches
+
 # V1: command pools/buffers, and the V1 command set (bind compute pipeline,
 # dispatch, dispatch base, dispatch indirect -- see "Command Buffers").
 vkCreateCommandPool

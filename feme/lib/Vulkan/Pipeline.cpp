@@ -11,6 +11,7 @@
 #include "GroupSize.h"
 #include "Icd.h"
 #include "Objects.h"
+#include "PipelineCache.h"
 
 #include "feme/Core/Context.h"
 #include "feme/Core/Module.h"
@@ -31,16 +32,6 @@
 
 using namespace feme::vulkan;
 using namespace llvm;
-
-feme::vulkan::ComputePipeline::ComputePipeline(
-    std::unique_ptr<feme::Context> Ctx,
-    std::unique_ptr<feme::cpu::CompiledStage> Stage)
-    : Ctx(std::move(Ctx)), Stage(std::move(Stage)) {}
-feme::vulkan::ComputePipeline::~ComputePipeline() = default;
-feme::vulkan::ComputePipeline::ComputePipeline(ComputePipeline &&) noexcept =
-    default;
-feme::vulkan::ComputePipeline &
-feme::vulkan::ComputePipeline::operator=(ComputePipeline &&) noexcept = default;
 
 namespace {
 
@@ -165,9 +156,9 @@ namespace {
 /// merely comparing against a single range's own offset/size -- multiple
 /// declared ranges (e.g. one per shader stage in a shared layout) may
 /// jointly cover it with gaps only a full walk catches.
-bool pushConstantsCoverRootConstantSize(
-    const PipelineLayout &Layout, uint32_t RootConstantSize,
-    uint32_t MaxPushConstantsSize) {
+bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
+                                        uint32_t RootConstantSize,
+                                        uint32_t MaxPushConstantsSize) {
   if (RootConstantSize == 0)
     return true;
   if (RootConstantSize > MaxPushConstantsSize)
@@ -188,7 +179,7 @@ bool pushConstantsCoverRootConstantSize(
 /// shader module's SPIR-V, translates it to LLVM IR, resolves and stamps
 /// its group size (see GroupSize.h), and compiles it with the FeMe CPU
 /// pipeline. See "Compilation flow" in feme/docs/FeMeVulkanDesign.md.
-Expected<std::unique_ptr<ComputePipeline>>
+Expected<std::shared_ptr<CachedPipelineArtifact>>
 compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
                        const PhysicalDeviceInfo &DeviceInfo) {
   if (CreateInfo.stage.stage != VK_SHADER_STAGE_COMPUTE_BIT)
@@ -310,31 +301,61 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
           Range.Space, Range.BaseRegister);
   }
 
-  return std::make_unique<ComputePipeline>(std::move(Ctx), std::move(*Stage));
+  return std::make_shared<CachedPipelineArtifact>(
+      CachedPipelineArtifact{std::move(Ctx), std::move(*Stage)});
 }
 
 } // namespace
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
-    VkDevice device, VkPipelineCache, uint32_t createInfoCount,
+    VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
     const VkComputePipelineCreateInfo *pCreateInfos,
     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
   const PhysicalDeviceInfo &DeviceInfo =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  auto *Cache =
+      pipelineCache ? fromHandle<PipelineCache>(pipelineCache) : nullptr;
   Allocator Alloc(pAllocator);
 
   VkResult Result = VK_SUCCESS;
   for (uint32_t I = 0; I != createInfoCount; ++I) {
     pPipelines[I] = VK_NULL_HANDLE;
-    Expected<std::unique_ptr<ComputePipeline>> Pipeline =
-        compileComputePipeline(pCreateInfos[I], DeviceInfo);
-    if (!Pipeline) {
-      consumeError(Pipeline.takeError());
-      Result = VK_ERROR_INITIALIZATION_FAILED;
-      continue;
+    const VkComputePipelineCreateInfo &CreateInfo = pCreateInfos[I];
+
+    std::optional<PipelineCacheKey> Key;
+    if (Cache && CreateInfo.layout && CreateInfo.stage.module) {
+      auto *Module = fromHandle<vulkan::ShaderModule>(CreateInfo.stage.module);
+      Expected<SmallVector<SpecializationOverride, 4>> Overrides =
+          buildSpecializationOverrides(CreateInfo.stage.pSpecializationInfo);
+      if (Overrides) {
+        const PipelineLayout &Layout =
+            *fromHandle<PipelineLayout>(CreateInfo.layout);
+        Key = computePipelineCacheKey(
+            DeviceInfo.Properties.pipelineCacheUUID, Module->words(),
+            CreateInfo.stage.pName ? CreateInfo.stage.pName : "main",
+            *Overrides, Layout.setLayouts(), Layout.pushConstantRanges());
+      } else {
+        consumeError(Overrides.takeError());
+      }
     }
+
+    std::shared_ptr<CachedPipelineArtifact> Artifact =
+        Key ? Cache->lookup(*Key) : nullptr;
+    if (!Artifact) {
+      Expected<std::shared_ptr<CachedPipelineArtifact>> Compiled =
+          compileComputePipeline(CreateInfo, DeviceInfo);
+      if (!Compiled) {
+        consumeError(Compiled.takeError());
+        Result = VK_ERROR_INITIALIZATION_FAILED;
+        continue;
+      }
+      Artifact = std::move(*Compiled);
+      if (Key)
+        Cache->insert(*Key, Artifact);
+    }
+
     ComputePipeline *Obj = Alloc.create<ComputePipeline>(
-        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(**Pipeline));
+        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Artifact);
     if (!Obj) {
       Result = VK_ERROR_OUT_OF_HOST_MEMORY;
       continue;
@@ -350,6 +371,73 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyPipeline(
     return;
   Allocator Alloc(pAllocator);
   Alloc.destroy(fromHandle<ComputePipeline>(pipeline));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(
+    VkDevice device, const VkPipelineCacheCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkPipelineCache *pPipelineCache) {
+  const PhysicalDeviceInfo &DeviceInfo =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+
+  std::vector<PipelineCacheKey> InitialKeys;
+  if (pipelineCacheDataIsTrusted() && pCreateInfo->initialDataSize != 0) {
+    ArrayRef<uint8_t> Data(
+        static_cast<const uint8_t *>(pCreateInfo->pInitialData),
+        pCreateInfo->initialDataSize);
+    if (std::optional<std::vector<PipelineCacheKey>> Parsed =
+            parsePipelineCacheBlob(
+                Data, DeviceInfo.Properties.pipelineCacheUUID,
+                DeviceInfo.Properties.vendorID, DeviceInfo.Properties.deviceID))
+      InitialKeys = std::move(*Parsed);
+    // Any validation failure is silently treated as an empty cache -- see
+    // "Pipeline Cache": "never as an error and never as a partial load".
+  }
+
+  Allocator Alloc(pAllocator);
+  PipelineCache *Obj = Alloc.create<PipelineCache>(
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(InitialKeys));
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pPipelineCache = toHandle<VkPipelineCache>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyPipelineCache(VkDevice, VkPipelineCache pipelineCache,
+                       const VkAllocationCallbacks *pAllocator) {
+  if (!pipelineCache)
+    return;
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<PipelineCache>(pipelineCache));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vkGetPipelineCacheData(VkDevice device, VkPipelineCache pipelineCache,
+                       size_t *pDataSize, void *pData) {
+  const PhysicalDeviceInfo &DeviceInfo =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  std::vector<uint8_t> Blob = serializePipelineCacheBlob(
+      fromHandle<PipelineCache>(pipelineCache)->keys(),
+      DeviceInfo.Properties.pipelineCacheUUID, DeviceInfo.Properties.vendorID,
+      DeviceInfo.Properties.deviceID);
+
+  if (!pData) {
+    *pDataSize = Blob.size();
+    return VK_SUCCESS;
+  }
+  size_t CopySize = std::min(*pDataSize, Blob.size());
+  std::memcpy(pData, Blob.data(), CopySize);
+  *pDataSize = CopySize;
+  return CopySize == Blob.size() ? VK_SUCCESS : VK_INCOMPLETE;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkMergePipelineCaches(
+    VkDevice, VkPipelineCache dstCache, uint32_t srcCacheCount,
+    const VkPipelineCache *pSrcCaches) {
+  auto *Dst = fromHandle<PipelineCache>(dstCache);
+  for (uint32_t I = 0; I != srcCacheCount; ++I)
+    Dst->merge(*fromHandle<PipelineCache>(pSrcCaches[I]));
+  return VK_SUCCESS;
 }
 
 } // namespace feme::vulkan

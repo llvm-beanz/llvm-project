@@ -42,7 +42,8 @@ set(FEME_TEST_DEPENDS
   yaml2obj
   )
 if(FEME_HAVE_VULKAN_HEADERS)
-  list(APPEND FEME_TEST_DEPENDS FeMeVulkanTests)
+  list(APPEND FEME_TEST_DEPENDS FeMeVulkanTests
+    feme-vulkan-pipeline-cache-fuzzer)
 endif()
 if(FEME_HAVE_VULKAN_LOADER)
   # The loader-smoke and two-ICD-coexistence tests load `feme_vulkan`
@@ -75,6 +76,9 @@ set(FEME_FUZZ_TARGETS
   dxbc-as-fuzzer
   feme-cpu-restructure-fuzzer
   )
+if(FEME_HAVE_VULKAN_HEADERS)
+  list(APPEND FEME_FUZZ_TARGETS feme-vulkan-pipeline-cache-fuzzer)
+endif()
 
 set(FEME_FUZZ_ARGS "")
 foreach(fuzzer ${FEME_FUZZ_TARGETS})

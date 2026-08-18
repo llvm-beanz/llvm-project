@@ -29,6 +29,10 @@ tool has its own page:
 - [`feme-cpu-restructure-fuzzer`](feme-cpu-restructure-fuzzer.md) —
   libFuzzer harness for CFG restructurization (`FixIrreducible` +
   `StructurizeCFG`), over `feme-cfg-gen` seeds.
+- [`feme-vulkan-pipeline-cache-fuzzer`](feme-vulkan-pipeline-cache-fuzzer.md)
+  — libFuzzer harness for `feme::vulkan::parsePipelineCacheBlob`, the
+  `vkCreatePipelineCache` blob parser; only built when Vulkan-Headers is
+  found (`FEME_ENABLE_VULKAN`).
 - `feme-vulkan-loader-smoke` — testing-only client for the FeMe Vulkan ICD
   (`libfeme_vulkan`, see
   [FeMeVulkanDesign.md](../FeMeVulkanDesign.md)), linked against the real
