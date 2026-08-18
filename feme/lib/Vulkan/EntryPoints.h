@@ -435,6 +435,15 @@ VKAPI_ATTR void VKAPI_CALL
 vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
                  uint32_t instanceCount, uint32_t firstIndex,
                  int32_t vertexOffset, uint32_t firstInstance);
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,
+                                             VkBuffer buffer,
+                                             VkDeviceSize offset,
+                                             uint32_t drawCount,
+                                             uint32_t stride);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                         VkDeviceSize offset, uint32_t drawCount,
+                         uint32_t stride);
 
 // V3: secondary command buffers (see "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL

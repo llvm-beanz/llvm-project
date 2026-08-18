@@ -160,6 +160,8 @@ vkCmdSetStencilCompareMask
 vkCmdSetStencilWriteMask
 vkCmdDraw
 vkCmdDrawIndexed
+vkCmdDrawIndirect
+vkCmdDrawIndexedIndirect
 
 # V3: secondary command buffers (see "Command Buffers").
 vkCmdExecuteCommands

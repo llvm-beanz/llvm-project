@@ -912,6 +912,59 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
       Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared);
 }
 
+/// Validates that every byte a draw's vertex/index fetch may read lies
+/// inside the bound buffers: "read once, bounds-checked against the bound
+/// buffers and the advertised limits, and rejected rather than clamped when
+/// they cannot be honored. `firstInstance`/`vertexOffset` participate in the
+/// fetch bounds check, not only in the index arithmetic."
+///
+/// An indexed draw's vertex reach depends on index values this does not
+/// read, so its index *range* is what is checked here; the executor's own
+/// fetch is bounds-checked against the same buffer sizes for the values it
+/// then reads.
+Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
+                              const GraphicsState &Gfx,
+                              const feme::graphics::DrawCommand &Draw) {
+  if (Draw.Indexed) {
+    if (!Gfx.IndexBuffer || !Gfx.IndexBuffer->isBound())
+      return createStringError(inconvertibleErrorCode(),
+                               "an indexed draw has no bound index buffer");
+    uint64_t IndexSize = Gfx.IndexType == VK_INDEX_TYPE_UINT16 ? 2 : 4;
+    uint64_t End = (uint64_t(Draw.FirstIndex) + Draw.VertexCount) * IndexSize +
+                   Gfx.IndexBufferOffset;
+    if (End > Gfx.IndexBuffer->size())
+      return createStringError(inconvertibleErrorCode(),
+                               "the indexed draw's index range overruns its "
+                               "bound index buffer");
+    return Error::success();
+  }
+
+  if (Draw.VertexCount == 0)
+    return Error::success();
+  uint64_t LastVertex = uint64_t(Draw.FirstVertex) + Draw.VertexCount - 1;
+  for (const VertexInputBinding &BindingDecl : Pipeline.vertexBindings()) {
+    if (BindingDecl.Binding >= Gfx.VertexBuffers.size() ||
+        !Gfx.VertexBuffers[BindingDecl.Binding] ||
+        !Gfx.VertexBuffers[BindingDecl.Binding]->isBound())
+      return createStringError(inconvertibleErrorCode(),
+                               "vertex binding %u is not bound to a buffer",
+                               BindingDecl.Binding);
+    uint64_t Base = Gfx.VertexBufferOffsets[BindingDecl.Binding] +
+                    LastVertex * BindingDecl.Stride;
+    for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes()) {
+      if (Attr.Binding != BindingDecl.Binding)
+        continue;
+      uint64_t End = Base + Attr.Offset + formatElementSize(Attr.Format);
+      if (End > Gfx.VertexBuffers[BindingDecl.Binding]->size())
+        return createStringError(inconvertibleErrorCode(),
+                                 "the draw's vertex fetch of location %u "
+                                 "overruns its bound vertex buffer",
+                                 Attr.Location);
+    }
+  }
+  return Error::success();
+}
+
 /// Validates a draw's own counts against the advertised limits, per "every
 /// one of them is checked at pipeline creation and at draw time".
 Error validateDrawCounts(const PhysicalDeviceInfo *Info,
@@ -931,6 +984,79 @@ Error validateDrawCounts(const PhysicalDeviceInfo *Info,
                                "maxDrawIndexedIndexValue");
   }
   return Error::success();
+}
+
+/// Runs one draw after checking its counts against the advertised limits
+/// and its fetches against the bound buffers -- the single path every
+/// direct and indirect draw goes through, so an indirect command's
+/// attacker-controlled arguments are validated exactly like a direct one's.
+Error runValidatedDraw(const GraphicsPipeline &Pipeline,
+                       const GraphicsState &Gfx,
+                       const feme::graphics::DrawCommand &Draw,
+                       const PhysicalDeviceInfo *DeviceInfo,
+                       llvm::ArrayRef<BoundSetState> BoundSets,
+                       llvm::ArrayRef<uint8_t> PushConstants) {
+  if (Error E = validateDrawCounts(DeviceInfo, Draw))
+    return E;
+  if (Error E = validateDrawFetchBounds(Pipeline, Gfx, Draw))
+    return E;
+  return runDraw(Pipeline, Gfx, Draw, BoundSets, PushConstants);
+}
+
+/// Reads \p DrawCount `VkDrawIndirectCommand`/`VkDrawIndexedIndirectCommand`
+/// structures from \p Buf at \p Offset with \p Stride, bounds-checking the
+/// whole span before reading any of it (see "Error Handling and Security":
+/// indirect arguments are attacker-controlled). Each command is read exactly
+/// once, so a concurrent write cannot make a validated argument differ from
+/// the one used.
+Expected<std::vector<feme::graphics::DrawCommand>>
+readIndirectDraws(Buffer *Buf, uint64_t Offset, uint32_t DrawCount,
+                  uint32_t Stride, bool Indexed) {
+  if (!Buf || !Buf->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "the indirect draw buffer is not bound");
+  uint32_t CommandSize = Indexed ? sizeof(VkDrawIndexedIndirectCommand)
+                                 : sizeof(VkDrawIndirectCommand);
+  if (Stride == 0)
+    Stride = CommandSize;
+  if (Stride < CommandSize || Stride % 4 != 0)
+    return createStringError(inconvertibleErrorCode(),
+                             "the indirect draw stride is smaller than its "
+                             "command or is not 4-byte aligned");
+  if (DrawCount != 0) {
+    uint64_t End = Offset + uint64_t(Stride) * (DrawCount - 1) + CommandSize;
+    if (End > Buf->size() || End < Offset)
+      return createStringError(inconvertibleErrorCode(),
+                               "the indirect draw commands overrun their "
+                               "buffer");
+  }
+
+  std::vector<feme::graphics::DrawCommand> Draws;
+  Draws.reserve(DrawCount);
+  const auto *Base = static_cast<const uint8_t *>(Buf->data());
+  for (uint32_t I = 0; I != DrawCount; ++I) {
+    const uint8_t *Src = Base + Offset + uint64_t(Stride) * I;
+    feme::graphics::DrawCommand Draw;
+    if (Indexed) {
+      VkDrawIndexedIndirectCommand Args{};
+      std::memcpy(&Args, Src, sizeof(Args));
+      Draw.VertexCount = Args.indexCount;
+      Draw.InstanceCount = Args.instanceCount;
+      Draw.FirstIndex = Args.firstIndex;
+      Draw.VertexOffset = Args.vertexOffset;
+      Draw.FirstInstance = Args.firstInstance;
+      Draw.Indexed = true;
+    } else {
+      VkDrawIndirectCommand Args{};
+      std::memcpy(&Args, Src, sizeof(Args));
+      Draw.VertexCount = Args.vertexCount;
+      Draw.InstanceCount = Args.instanceCount;
+      Draw.FirstVertex = Args.firstVertex;
+      Draw.FirstInstance = Args.firstInstance;
+    }
+    Draws.push_back(Draw);
+  }
+  return Draws;
 }
 
 /// Interprets \p Commands into \p BoundPipeline/\p BoundSets/
@@ -1202,11 +1328,27 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       } else {
         Draw.FirstVertex = Cmd.FirstVertexOrIndex;
       }
-      if (Error E = validateDrawCounts(DeviceInfo, Draw))
+      if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
+                                     DeviceInfo, BoundSets, PushConstants))
         return E;
-      if (Error E = runDraw(*BoundGraphicsPipeline, Gfx, Draw, BoundSets,
-                            PushConstants))
-        return E;
+      break;
+    }
+    case RecordedCommand::Kind::DrawIndirect:
+    case RecordedCommand::Kind::DrawIndexedIndirect: {
+      if (!BoundGraphicsPipeline)
+        return createStringError(inconvertibleErrorCode(),
+                                 "draw with no bound graphics pipeline");
+      bool Indexed = Cmd.Op == RecordedCommand::Kind::DrawIndexedIndirect;
+      Expected<std::vector<feme::graphics::DrawCommand>> Draws =
+          readIndirectDraws(Cmd.IndirectBuffer, Cmd.IndirectOffset,
+                            Cmd.Count[0],
+                            static_cast<uint32_t>(Cmd.DstSize), Indexed);
+      if (!Draws)
+        return Draws.takeError();
+      for (const feme::graphics::DrawCommand &Draw : *Draws)
+        if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
+                                       DeviceInfo, BoundSets, PushConstants))
+          return E;
       break;
     }
     }
@@ -1676,6 +1818,27 @@ vkCmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->drawIndexed(indexCount, instanceCount, firstIndex, vertexOffset,
                     firstInstance);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,
+                                             VkBuffer buffer,
+                                             VkDeviceSize offset,
+                                             uint32_t drawCount,
+                                             uint32_t stride) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->drawIndirect(RecordedCommand::Kind::DrawIndirect,
+                     fromHandle<vulkan::Buffer>(buffer), offset, drawCount,
+                     stride);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdDrawIndexedIndirect(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                         VkDeviceSize offset, uint32_t drawCount,
+                         uint32_t stride) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->drawIndirect(RecordedCommand::Kind::DrawIndexedIndirect,
+                     fromHandle<vulkan::Buffer>(buffer), offset, drawCount,
+                     stride);
 }
 
 } // namespace feme::vulkan

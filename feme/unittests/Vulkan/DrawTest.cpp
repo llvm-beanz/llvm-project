@@ -215,6 +215,25 @@ protected:
     return Module;
   }
 
+  /// Creates and binds a \p Size-byte buffer with \p Usage, returning its
+  /// handle and (via \p OutMemory) its backing allocation.
+  VkBuffer createBuffer(VkDeviceSize Size, VkDeviceMemory &OutMemory,
+                        VkBufferUsageFlags Usage) {
+    VkBufferCreateInfo Info{};
+    Info.size = Size;
+    Info.usage = Usage;
+    VkBuffer Buf = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateBuffer(Device, &Info, nullptr, &Buf), VK_SUCCESS);
+    VkMemoryRequirements Reqs{};
+    vkGetBufferMemoryRequirements(Device, Buf, &Reqs);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = Reqs.size;
+    EXPECT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &OutMemory),
+              VK_SUCCESS);
+    EXPECT_EQ(vkBindBufferMemory(Device, Buf, OutMemory, 0), VK_SUCCESS);
+    return Buf;
+  }
+
   VkPipeline createPipeline(VkShaderModule Vertex, VkShaderModule Fragment) {
     VkPipelineShaderStageCreateInfo Stages[2]{};
     Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -427,21 +446,9 @@ TEST_F(DrawTest, RendersIndexedDraw) {
   VkShaderModule Fragment = createModule(RedFragmentSource);
   VkPipeline Pipe = createPipeline(Vertex, Fragment);
 
-  VkBufferCreateInfo BufferInfo{};
-  BufferInfo.size = 3 * sizeof(uint32_t);
-  BufferInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-  VkBuffer IndexBuffer = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &IndexBuffer),
-            VK_SUCCESS);
-  VkMemoryRequirements Reqs{};
-  vkGetBufferMemoryRequirements(Device, IndexBuffer, &Reqs);
-  VkMemoryAllocateInfo AllocInfo{};
-  AllocInfo.allocationSize = Reqs.size;
   VkDeviceMemory IndexMemory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &IndexMemory),
-            VK_SUCCESS);
-  ASSERT_EQ(vkBindBufferMemory(Device, IndexBuffer, IndexMemory, 0),
-            VK_SUCCESS);
+  VkBuffer IndexBuffer = createBuffer(3 * sizeof(uint32_t), IndexMemory,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
   uint32_t Indices[3] = {0, 1, 2};
   std::memcpy(fromHandle<Buffer>(IndexBuffer)->data(), Indices,
               sizeof(Indices));
@@ -473,6 +480,101 @@ TEST_F(DrawTest, RejectsDrawOutsideRenderPass) {
   vkCmdDraw(Cmd, 3, 1, 0, 0);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
   EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+}
+
+/// An indirect draw reads its `VkDrawIndirectCommand` from a bound buffer,
+/// validated exactly like an indirect dispatch's group counts.
+TEST_F(DrawTest, RendersIndirectDraw) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer Indirect =
+      createBuffer(sizeof(VkDrawIndirectCommand), Memory,
+                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+  VkDrawIndirectCommand Args{};
+  Args.vertexCount = 3;
+  Args.instanceCount = 1;
+  std::memcpy(fromHandle<Buffer>(Indirect)->data(), &Args, sizeof(Args));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawIndirect(Cmd, Indirect, 0, 1, sizeof(VkDrawIndirectCommand));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(1, 2)[0], 0xFF);
+  EXPECT_EQ(texel(1, 2)[3], 0xFF);
+
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// An indirect draw whose command array overruns its buffer is rejected,
+/// not clamped -- and so is one whose stride is smaller than the command it
+/// describes.
+TEST_F(DrawTest, RejectsOutOfBoundsIndirectDraw) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer Indirect =
+      createBuffer(sizeof(VkDrawIndirectCommand), Memory,
+                   VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Two commands in a one-command buffer.
+  vkCmdDrawIndirect(Cmd, Indirect, 0, 2, sizeof(VkDrawIndirectCommand));
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkResetCommandBuffer(Cmd, 0);
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDrawIndirect(Cmd, Indirect, 0, 1, 4);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyBuffer(Device, Indirect, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// An indexed draw whose index range overruns its bound index buffer is
+/// rejected before anything is fetched.
+TEST_F(DrawTest, RejectsOutOfBoundsIndexRange) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkBuffer IndexBuffer = createBuffer(3 * sizeof(uint32_t), Memory,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindIndexBuffer(Cmd, IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(Cmd, 6, 1, 0, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyBuffer(Device, IndexBuffer, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
 } // namespace

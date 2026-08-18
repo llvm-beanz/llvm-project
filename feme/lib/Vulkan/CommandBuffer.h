@@ -102,6 +102,8 @@ struct RecordedCommand {
     SetStencilWriteMask,
     Draw,
     DrawIndexed,
+    DrawIndirect,
+    DrawIndexedIndirect,
   };
 
   Kind Op;
@@ -527,6 +529,22 @@ public:
     Cmd.InstanceCount = InstanceCount;
     Cmd.FirstVertexOrIndex = FirstVertex;
     Cmd.FirstInstance = FirstInstance;
+    Commands.push_back(Cmd);
+  }
+  /// (V6) `vkCmdDrawIndirect`/`vkCmdDrawIndexedIndirect`: the buffer and
+  /// offset the `VkDrawIndirectCommand`/`VkDrawIndexedIndirectCommand`
+  /// array is read from at execution time (`IndirectBuffer`/
+  /// `IndirectOffset`), the number of commands (`Count[0]`) and the byte
+  /// stride between them (`DstSize`). Every argument is read once and
+  /// validated then, exactly like an indirect dispatch's group counts.
+  void drawIndirect(RecordedCommand::Kind Op, Buffer *IndirectBuffer,
+                    uint64_t Offset, uint32_t DrawCount, uint32_t Stride) {
+    RecordedCommand Cmd;
+    Cmd.Op = Op;
+    Cmd.IndirectBuffer = IndirectBuffer;
+    Cmd.IndirectOffset = Offset;
+    Cmd.Count[0] = DrawCount;
+    Cmd.DstSize = Stride;
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdDrawIndexed`.
