@@ -202,6 +202,26 @@ TEST_F(RuntimeCPUTest, TypedLoadPackedR8G8B8A8Unorm) {
   EXPECT_NEAR(Result[3], 0.0f, 1e-6f);
 }
 
+TEST_F(RuntimeCPUTest, TypedLoadPackedR8G8B8A8Snorm) {
+  // R=127 (1.0), G=-127 (-1.0), B=64, A=-128 (clamped to -1.0), little-endian.
+  uint32_t Storage = 0x80u << 24 | 0x40u << 16 | 0x81u << 8 | 0x7Fu;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R8G8B8A8_SNORM);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_snorm_packed",
+                               "feme.cpu.resource.load.typed.v4f32");
+  ASSERT_TRUE(Load);
+  float Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_NEAR(Result[0], 1.0f, 1e-6f);
+  EXPECT_NEAR(Result[1], -1.0f, 1e-6f);
+  EXPECT_NEAR(Result[2], 64.0f / 127.0f, 1e-6f);
+  EXPECT_NEAR(Result[3], -1.0f, 1e-6f); // -128 clamps to -1.0.
+}
+
 TEST_F(RuntimeCPUTest, TypedLoadOutOfBoundsIndexReadsZeroWithoutTouchingHeap) {
   LoadFn Load = getLoadWrapper("test_typed_load_oob",
                                "feme.cpu.resource.load.typed.v4f32");
@@ -291,6 +311,40 @@ TEST_F(RuntimeCPUTest, TypedStoreDroppedWithoutUavFlag) {
   EXPECT_FLOAT_EQ(Storage[0], 3.0f);
 }
 
+TEST_F(RuntimeCPUTest, TypedStoreSnormRoundTrips) {
+  uint32_t Storage = 0;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R8G8B8A8_SNORM);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  // Both wrappers must be added before either address is resolved (see
+  // `resolve`'s comment above): MCJIT compiles the whole module on the
+  // first address resolution.
+  Function *StoreWrapper = addStoreWrapper(
+      "test_typed_store_snorm", "feme.cpu.resource.store.typed.v4f32",
+      FixedVectorType::get(Type::getFloatTy(Ctx), 4));
+  Function *LoadWrapper = addLoadWrapper("test_typed_load_snorm_roundtrip",
+                                         "feme.cpu.resource.load.typed.v4f32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  // 1.0, -1.0, 0.5 (rounds to 64/127), out-of-range 2.0 clamped to 1.0.
+  float ToStore[4] = {1.0f, -1.0f, 0.5f, 2.0f};
+  Store(Heap, 1, 0, 0, ToStore, true);
+
+  float Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_NEAR(Result[0], 1.0f, 1e-6f);
+  EXPECT_NEAR(Result[1], -1.0f, 1e-6f);
+  EXPECT_NEAR(Result[2], 64.0f / 127.0f, 1e-2f);
+  EXPECT_NEAR(Result[3], 1.0f, 1e-6f);
+}
+
 TEST_F(RuntimeCPUTest, TypedLoadV4I32IdentityFormat) {
   // (V4) `<4 x i32>`, the `R32G32B32A32_UINT`/`_SINT` identity-format
   // counterpart of the `<4 x float>` view above -- see
@@ -365,6 +419,112 @@ TEST_F(RuntimeCPUTest, TypedStoreV4I32DroppedWithoutUavFlag) {
   int32_t ToStore[4] = {9, 9, 9, 9};
   Store(Heap, 1, 0, 0, ToStore, true);
   EXPECT_EQ(Storage[0], 3);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadPackedR8G8B8A8Uint) {
+  // R=255, G=128, B=64, A=0, little-endian, zero-extended to i32.
+  uint32_t Storage = 0x00u << 24 | 0x40u << 16 | 0x80u << 8 | 0xFFu;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R8G8B8A8_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_uint_packed",
+                               "feme.cpu.resource.load.typed.v4i32");
+  ASSERT_TRUE(Load);
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], 255);
+  EXPECT_EQ(Result[1], 128);
+  EXPECT_EQ(Result[2], 64);
+  EXPECT_EQ(Result[3], 0);
+}
+
+TEST_F(RuntimeCPUTest, TypedLoadPackedR8G8B8A8Sint) {
+  // R=-1 (0xFF), G=127 (0x7F), B=-128 (0x80), A=1, little-endian,
+  // sign-extended to i32.
+  uint32_t Storage = 0x01u << 24 | 0x80u << 16 | 0x7Fu << 8 | 0xFFu;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R8G8B8A8_SINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+
+  LoadFn Load = getLoadWrapper("test_typed_load_sint_packed",
+                               "feme.cpu.resource.load.typed.v4i32");
+  ASSERT_TRUE(Load);
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], -1);
+  EXPECT_EQ(Result[1], 127);
+  EXPECT_EQ(Result[2], -128);
+  EXPECT_EQ(Result[3], 1);
+}
+
+TEST_F(RuntimeCPUTest, TypedStorePackedR8G8B8A8UintRoundTrips) {
+  uint32_t Storage = 0;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R8G8B8A8_UINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  // Both wrappers must be added before either address is resolved (see
+  // `resolve`'s comment above): MCJIT compiles the whole module on the
+  // first address resolution.
+  Function *StoreWrapper = addStoreWrapper(
+      "test_typed_store_uint_packed", "feme.cpu.resource.store.typed.v4i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  Function *LoadWrapper =
+      addLoadWrapper("test_typed_load_uint_packed_roundtrip",
+                     "feme.cpu.resource.load.typed.v4i32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int32_t ToStore[4] = {255, 128, 64, 0};
+  Store(Heap, 1, 0, 0, ToStore, true);
+
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], 255);
+  EXPECT_EQ(Result[1], 128);
+  EXPECT_EQ(Result[2], 64);
+  EXPECT_EQ(Result[3], 0);
+}
+
+TEST_F(RuntimeCPUTest, TypedStorePackedR8G8B8A8SintRoundTrips) {
+  uint32_t Storage = 0;
+  FemeDescriptor Heap[1] = {};
+  Heap[0].Data = &Storage;
+  Heap[0].SizeInBytes = sizeof(Storage);
+  Heap[0].Format = static_cast<uint32_t>(ResourceFormat::R8G8B8A8_SINT);
+  Heap[0].Kind = static_cast<uint32_t>(ResourceKind::Typed);
+  Heap[0].Flags = FEME_DESCRIPTOR_UAV;
+
+  Function *StoreWrapper = addStoreWrapper(
+      "test_typed_store_sint_packed", "feme.cpu.resource.store.typed.v4i32",
+      FixedVectorType::get(Type::getInt32Ty(Ctx), 4));
+  Function *LoadWrapper =
+      addLoadWrapper("test_typed_load_sint_packed_roundtrip",
+                     "feme.cpu.resource.load.typed.v4i32");
+  StoreFn Store = resolve<StoreFn>(StoreWrapper);
+  LoadFn Load = resolve<LoadFn>(LoadWrapper);
+  ASSERT_TRUE(Store);
+  ASSERT_TRUE(Load);
+
+  int32_t ToStore[4] = {-1, 127, -128, 1};
+  Store(Heap, 1, 0, 0, ToStore, true);
+
+  int32_t Result[4] = {};
+  Load(Heap, 1, 0, 0, true, Result);
+  EXPECT_EQ(Result[0], -1);
+  EXPECT_EQ(Result[1], 127);
+  EXPECT_EQ(Result[2], -128);
+  EXPECT_EQ(Result[3], 1);
 }
 
 TEST_F(RuntimeCPUTest, TypedLoadOutOfRangeOffsetReadsZero) {

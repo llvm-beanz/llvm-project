@@ -188,16 +188,51 @@ femeRTPackR8G8B8A8Unorm(FemeRTv4f32 Value) {
          ((uint32_t)I3 << 24);
 }
 
+// Unpacks a `R8G8B8A8_SNORM` value (four signed-normalized bytes,
+// little-endian: R, G, B, A) into a `<4 x float>` in `[-1.0, 1.0]`, per the
+// Vulkan spec's SNORM conversion (47.3 "Conversion from Normalized Fixed-
+// Point to Floating-Point"): `value = max(c / 127, -1.0)`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR8G8B8A8Snorm(uint32_t Raw) {
+  int8_t B0 = (int8_t)(uint8_t)Raw;
+  int8_t B1 = (int8_t)(uint8_t)(Raw >> 8);
+  int8_t B2 = (int8_t)(uint8_t)(Raw >> 16);
+  int8_t B3 = (int8_t)(uint8_t)(Raw >> 24);
+  FemeRTv4f32 V;
+  V[0] = __builtin_fmaxf((float)B0 / 127.0f, -1.0f);
+  V[1] = __builtin_fmaxf((float)B1 / 127.0f, -1.0f);
+  V[2] = __builtin_fmaxf((float)B2 / 127.0f, -1.0f);
+  V[3] = __builtin_fmaxf((float)B3 / 127.0f, -1.0f);
+  return V;
+}
+
+// The inverse of `femeRTUnpackR8G8B8A8Snorm`: clamps each component to
+// `[-1.0, 1.0]`, scales to `[-127, 127]`, and packs the four rounded bytes
+// little-endian into one `uint32_t`.
+__attribute__((always_inline)) static uint32_t
+femeRTPackR8G8B8A8Snorm(FemeRTv4f32 Value) {
+  float C0 = __builtin_fminf(__builtin_fmaxf(Value[0], -1.0f), 1.0f);
+  float C1 = __builtin_fminf(__builtin_fmaxf(Value[1], -1.0f), 1.0f);
+  float C2 = __builtin_fminf(__builtin_fmaxf(Value[2], -1.0f), 1.0f);
+  float C3 = __builtin_fminf(__builtin_fmaxf(Value[3], -1.0f), 1.0f);
+  uint8_t I0 = (uint8_t)(int8_t)__builtin_roundf(C0 * 127.0f);
+  uint8_t I1 = (uint8_t)(int8_t)__builtin_roundf(C1 * 127.0f);
+  uint8_t I2 = (uint8_t)(int8_t)__builtin_roundf(C2 * 127.0f);
+  uint8_t I3 = (uint8_t)(int8_t)__builtin_roundf(C3 * 127.0f);
+  return (uint32_t)I0 | ((uint32_t)I1 << 8) | ((uint32_t)I2 << 16) |
+         ((uint32_t)I3 << 24);
+}
+
 //--- Typed-buffer `<4 x float>` view ------------------------------------------
 
 // `feme.cpu.resource.load.typed.v4f32` (see `feme::cpu::ResourceCalls`):
 // reads a `<4 x float>` element through a bindless typed-buffer descriptor,
 // switching on `Format` between the `R32G32B32A32_FLOAT` identity format
-// (`== 4`) and the packed `R8G8B8A8_UNORM` format (`== 13`) -- see
-// `feme::cpu::ResourceFormat` in RuntimeABI.h for those numeric values, and
-// "Descriptor formats" for why the conversion has to be a runtime switch
-// rather than something the compiler can select at compile time.
-// `ResourceKind::Typed == 1`. An inactive lane (`Mask == false`) or a
+// (`== 4`) and the packed `R8G8B8A8_UNORM`/`_SNORM` formats (`== 13`/`14`)
+// -- see `feme::cpu::ResourceFormat` in RuntimeABI.h for those numeric
+// values, and "Descriptor formats" for why the conversion has to be a
+// runtime switch rather than something the compiler can select at compile
+// time. `ResourceKind::Typed == 1`. An inactive lane (`Mask == false`) or a
 // failing bounds/kind check reads as zero, never touching `Heap`'s memory
 // (see "Bounds checking").
 FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
@@ -209,7 +244,9 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  _Bool IsPacked = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
+  _Bool IsUnorm = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
+  _Bool IsSnorm = Desc.Format == 14; // ResourceFormat::R8G8B8A8_SNORM.
+  _Bool IsPacked = IsUnorm || IsSnorm;
   uint64_t ElemSize = IsPacked ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
@@ -223,7 +260,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuResourceLoadTypedV4F32(
   if (IsPacked) {
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
-    return femeRTUnpackR8G8B8A8Unorm(Raw);
+    return IsSnorm ? femeRTUnpackR8G8B8A8Snorm(Raw)
+                   : femeRTUnpackR8G8B8A8Unorm(Raw);
   }
   return (FemeRTv4f32) * (const FemeRTv4f32Unaligned *)Ptr;
 }
@@ -247,7 +285,9 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
                                uint32_t DescriptorIndex, uint64_t ElementIndex,
                                FemeRTv4f32 Value, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  _Bool IsPacked = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
+  _Bool IsUnorm = Desc.Format == 13; // ResourceFormat::R8G8B8A8_UNORM.
+  _Bool IsSnorm = Desc.Format == 14; // ResourceFormat::R8G8B8A8_SNORM.
+  _Bool IsPacked = IsUnorm || IsSnorm;
   uint64_t ElemSize = IsPacked ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
@@ -258,7 +298,8 @@ femeCpuResourceStoreTypedV4F32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
   if (IsPacked) {
-    uint32_t Raw = femeRTPackR8G8B8A8Unorm(Value);
+    uint32_t Raw = IsSnorm ? femeRTPackR8G8B8A8Snorm(Value)
+                           : femeRTPackR8G8B8A8Unorm(Value);
     __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
     return;
   }
@@ -276,18 +317,67 @@ typedef int32_t FemeRTv4i32 __attribute__((vector_size(16)));
 typedef int32_t FemeRTv4i32Unaligned
     __attribute__((vector_size(16), aligned(4)));
 
+// Unpacks a `R8G8B8A8_UINT` value (four unsigned bytes, little-endian: R,
+// G, B, A) into a `<4 x i32>` by zero-extending each byte.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR8G8B8A8Uint(uint32_t Raw) {
+  FemeRTv4i32 V;
+  V[0] = (int32_t)(uint8_t)Raw;
+  V[1] = (int32_t)(uint8_t)(Raw >> 8);
+  V[2] = (int32_t)(uint8_t)(Raw >> 16);
+  V[3] = (int32_t)(uint8_t)(Raw >> 24);
+  return V;
+}
+
+// The inverse of `femeRTUnpackR8G8B8A8Uint`: truncates each lane to its low
+// byte (clamping is the application's own responsibility, matching D3D/
+// Vulkan's "out of range values ... produce undefined results" rule for a
+// UINT format) and packs the four bytes little-endian into one `uint32_t`.
+__attribute__((always_inline)) static uint32_t
+femeRTPackR8G8B8A8Uint(FemeRTv4i32 Value) {
+  uint8_t I0 = (uint8_t)Value[0];
+  uint8_t I1 = (uint8_t)Value[1];
+  uint8_t I2 = (uint8_t)Value[2];
+  uint8_t I3 = (uint8_t)Value[3];
+  return (uint32_t)I0 | ((uint32_t)I1 << 8) | ((uint32_t)I2 << 16) |
+         ((uint32_t)I3 << 24);
+}
+
+// Unpacks a `R8G8B8A8_SINT` value (four signed bytes, little-endian: R, G,
+// B, A) into a `<4 x i32>` by sign-extending each byte.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR8G8B8A8Sint(uint32_t Raw) {
+  FemeRTv4i32 V;
+  V[0] = (int32_t)(int8_t)(uint8_t)Raw;
+  V[1] = (int32_t)(int8_t)(uint8_t)(Raw >> 8);
+  V[2] = (int32_t)(int8_t)(uint8_t)(Raw >> 16);
+  V[3] = (int32_t)(int8_t)(uint8_t)(Raw >> 24);
+  return V;
+}
+
+// The inverse of `femeRTUnpackR8G8B8A8Sint`: truncating each lane to its low
+// byte produces the same bit pattern regardless of signedness, so this
+// shares `femeRTPackR8G8B8A8Uint`'s implementation exactly -- kept as a
+// separate, identically named-per-format entry point for symmetry with the
+// unpack side, where the sign extension does differ.
+__attribute__((always_inline)) static uint32_t
+femeRTPackR8G8B8A8Sint(FemeRTv4i32 Value) {
+  return femeRTPackR8G8B8A8Uint(Value);
+}
+
 // `feme.cpu.resource.load.typed.v4i32` (V4, see `feme::cpu::ResourceCalls`):
 // reads a `<4 x i32>` element through a bindless typed-buffer descriptor.
-// Unlike the `<4 x float>` view above, every format this helper is reachable
-// for -- `R32G32B32A32_UINT`/`_SINT` (see
-// `feme::vulkan::isTexelBufferFormatSupported`) -- is a 32-bit-per-component
-// identity format, so no scalar conversion switch is needed: the four
-// 32-bit lanes are reinterpreted directly, matching the signed/unsigned
-// distinction entirely by the shader's own choice of `<4 x i32>` load/store
-// type (SPIR-V's `OpTypeInt`'s signedness bit plays no role in the raw
-// bytes). `ResourceKind::Typed == 1`. An inactive lane or a failing
-// bounds/kind check reads as zero, never touching `Heap`'s memory, exactly
-// like the `<4 x float>` load above (see "Bounds checking").
+// The `R32G32B32A32_UINT`/`_SINT` identity formats need no scalar
+// conversion switch: the four 32-bit lanes are reinterpreted directly,
+// matching the signed/unsigned distinction entirely by the shader's own
+// choice of `<4 x i32>` load/store type (SPIR-V's `OpTypeInt`'s signedness
+// bit plays no role in the raw bytes). The packed `R8G8B8A8_UINT`/`_SINT`
+// formats (`== 15`/`16` -- see `feme::cpu::ResourceFormat` in RuntimeABI.h)
+// do need one, analogous to the `<4 x float>` view's `R8G8B8A8_UNORM`/
+// `_SNORM` handling above. `ResourceKind::Typed == 1`. An inactive lane or
+// a failing bounds/kind check reads as zero, never touching `Heap`'s
+// memory, exactly like the `<4 x float>` load above (see "Bounds
+// checking").
 FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex,
@@ -297,7 +387,10 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     const FemeRTDescriptor *Heap, uint32_t HeapCount, uint32_t DescriptorIndex,
     uint64_t ElementIndex, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  uint64_t ElemSize = 16;
+  _Bool IsUint = Desc.Format == 15; // ResourceFormat::R8G8B8A8_UINT.
+  _Bool IsSint = Desc.Format == 16; // ResourceFormat::R8G8B8A8_SINT.
+  _Bool IsPacked = IsUint || IsSint;
+  uint64_t ElemSize = IsPacked ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -307,6 +400,12 @@ __attribute__((always_inline)) FemeRTv4i32 femeCpuResourceLoadTypedV4I32(
     return Zero;
   }
   const unsigned char *Ptr = (const unsigned char *)Desc.Data + ByteOffset;
+  if (IsPacked) {
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return IsSint ? femeRTUnpackR8G8B8A8Sint(Raw)
+                  : femeRTUnpackR8G8B8A8Uint(Raw);
+  }
   return (FemeRTv4i32) * (const FemeRTv4i32Unaligned *)Ptr;
 }
 
@@ -323,7 +422,10 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
                                uint32_t DescriptorIndex, uint64_t ElementIndex,
                                FemeRTv4i32 Value, _Bool Mask) {
   FemeRTLoaded Desc = femeRTLoadDescriptor(Heap, HeapCount, DescriptorIndex);
-  uint64_t ElemSize = 16;
+  _Bool IsUint = Desc.Format == 15; // ResourceFormat::R8G8B8A8_UINT.
+  _Bool IsSint = Desc.Format == 16; // ResourceFormat::R8G8B8A8_SINT.
+  _Bool IsPacked = IsUint || IsSint;
+  uint64_t ElemSize = IsPacked ? 4 : 16;
   uint64_t ByteOffset = ElementIndex * ElemSize;
   _Bool AccessOK =
       femeRTCheckAccess(Desc.Kind, /*ResourceKind::Typed=*/1, Desc.SizeInBytes,
@@ -332,6 +434,12 @@ femeCpuResourceStoreTypedV4I32(const FemeRTDescriptor *Heap, uint32_t HeapCount,
   if (!(AccessOK && Mask && IsUAV))
     return;
   unsigned char *Ptr = (unsigned char *)Desc.Data + ByteOffset;
+  if (IsPacked) {
+    uint32_t Raw =
+        IsSint ? femeRTPackR8G8B8A8Sint(Value) : femeRTPackR8G8B8A8Uint(Value);
+    __builtin_memcpy(Ptr, &Raw, sizeof(Raw));
+    return;
+  }
   *(FemeRTv4i32Unaligned *)Ptr = (FemeRTv4i32Unaligned)Value;
 }
 
