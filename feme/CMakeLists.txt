@@ -47,7 +47,7 @@ include(AddFeMe)
 set(FEME_INCLUDE_TESTS ${LLVM_INCLUDE_TESTS} CACHE BOOL
   "Generate build targets for the feme unit and lit tests.")
 
-# Vulkan-Headers is feme's first external (non-LLVM/MLIR) dependency, and
+# The Vulkan SDK is feme's first external (non-LLVM/MLIR) dependency, and
 # feme has no prior optional-external-package pattern to copy (see
 # feme/docs/FeMeVulkanDesign.md's "Project and Library Boundaries"). It backs
 # the `libfeme_vulkan` ICD (feme/docs/FeMeVulkanDesign.md); when it can't be
@@ -55,36 +55,37 @@ set(FEME_INCLUDE_TESTS ${LLVM_INCLUDE_TESTS} CACHE BOOL
 # failing configuration, so every other feme component stays buildable
 # without it.
 option(FEME_ENABLE_VULKAN
-  "Build the FeMe Vulkan ICD (libfeme_vulkan) if Vulkan-Headers is found"
+  "Build the FeMe Vulkan ICD (libfeme_vulkan) if a Vulkan SDK is found"
   ON)
 
 set(FEME_HAVE_VULKAN_HEADERS OFF)
+set(FEME_HAVE_VULKAN_LOADER OFF)
 if(FEME_ENABLE_VULKAN)
   # vk.xml's schema and the loader-driver interface features this design
   # relies on (loader-driver interface version 7, `vk_icdGetPhysicalDeviceProcAddr`,
-  # `LocalSizeId`) are all present by Vulkan-Headers 1.3; older trees are
-  # rejected rather than silently generating a smaller entrypoint table.
-  find_package(VulkanHeaders 1.3 CONFIG QUIET)
+  # `LocalSizeId`) are all present by Vulkan 1.3; older SDKs are rejected
+  # rather than silently generating a smaller entrypoint table. CMake's
+  # built-in FindVulkan module finds a single Vulkan SDK installation (e.g.
+  # via the `VULKAN_SDK` environment variable) and exposes both the headers
+  # (`Vulkan::Headers`) and the loader import library (`Vulkan::Vulkan`)
+  # from it, so no separate Vulkan-Headers CMake package or manual
+  # `find_library()` for the loader is needed.
+  find_package(Vulkan 1.3 QUIET)
   if(TARGET Vulkan::Headers)
     set(FEME_HAVE_VULKAN_HEADERS ON)
-    message(STATUS "feme: found Vulkan-Headers ${VulkanHeaders_VERSION}; "
-      "building libfeme_vulkan")
+    message(STATUS "feme: found Vulkan ${Vulkan_VERSION}; building libfeme_vulkan")
   else()
-    message(STATUS "feme: Vulkan-Headers >= 1.3 not found; "
+    message(STATUS "feme: Vulkan SDK >= 1.3 not found; "
       "libfeme_vulkan will not be built (see FEME_ENABLE_VULKAN)")
   endif()
-endif()
 
-# The Vulkan *loader* (as opposed to Vulkan-Headers) is only needed to link
-# the loader-smoke-test client tool below and to run the lit tests that
-# exercise `libfeme_vulkan` through it ("Testing Strategy": "Lit tests
-# invoking tiny Vulkan clients"); it is never a dependency of the ICD itself
-# (see "Project and Library Boundaries": "not ... the Vulkan loader library
-# at runtime").
-set(FEME_HAVE_VULKAN_LOADER OFF)
-if(FEME_HAVE_VULKAN_HEADERS)
-  find_library(FEME_VULKAN_LOADER_LIBRARY NAMES vulkan)
-  if(FEME_VULKAN_LOADER_LIBRARY)
+  # The Vulkan *loader* (as opposed to the headers) is only needed to link
+  # the loader-smoke-test client tool below and to run the lit tests that
+  # exercise `libfeme_vulkan` through it ("Testing Strategy": "Lit tests
+  # invoking tiny Vulkan clients"); it is never a dependency of the ICD
+  # itself (see "Project and Library Boundaries": "not ... the Vulkan loader
+  # library at runtime").
+  if(FEME_HAVE_VULKAN_HEADERS AND TARGET Vulkan::Vulkan)
     set(FEME_HAVE_VULKAN_LOADER ON)
   endif()
 endif()
