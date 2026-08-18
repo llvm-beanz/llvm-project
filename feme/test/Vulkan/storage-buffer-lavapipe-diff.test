@@ -1,0 +1,26 @@
+// V2's own "Differentially compare results with lavapipe for the supported
+// subset" milestone bullet (see "V2: Storage buffers and descriptors" in
+// feme/docs/FeMeVulkanDesign.md): the same compiled SPIR-V compute shader,
+// binding the same two storage buffers through a real VkDescriptorSet, runs
+// against FeMe's ICD and then against Mesa lavapipe -- with VK_DRIVER_FILES
+// restricted to exactly one manifest each time, so the loader always picks
+// that single reported device -- and the two devices' output buffers must
+// be byte-for-byte identical.
+//
+// REQUIRES: system-vulkan-loader, system-second-vulkan-icd, spirv-registered-target
+// RUN: feme-translate --no-implicit-module --serialize-spirv %S/Inputs/storage-buffer-increment.mlir -o %t.spv
+// RUN: env VK_DRIVER_FILES=%feme_vulkan_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-storage-buffer-diff %t.spv 8 > %t.feme.txt
+// RUN: env VK_DRIVER_FILES=%system_second_icd_manifest VK_LOADER_DEBUG=error \
+// RUN:   feme-vulkan-storage-buffer-diff %t.spv 8 > %t.lavapipe.txt
+// RUN: diff %t.feme.txt %t.lavapipe.txt
+// RUN: FileCheck %s < %t.feme.txt
+
+// CHECK: 1
+// CHECK-NEXT: 2
+// CHECK-NEXT: 3
+// CHECK-NEXT: 4
+// CHECK-NEXT: 5
+// CHECK-NEXT: 6
+// CHECK-NEXT: 7
+// CHECK-NEXT: 8

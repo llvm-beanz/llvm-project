@@ -138,7 +138,9 @@ if _dxc:
 # run through use `REQUIRES: system-vulkan-loader`.
 if config.feme_have_vulkan_loader == "ON":
     config.available_features.add("system-vulkan-loader")
-    llvm_config.add_tool_substitutions(["feme-vulkan-loader-smoke"], tool_dirs)
+    llvm_config.add_tool_substitutions(
+        ["feme-vulkan-loader-smoke", "feme-vulkan-storage-buffer-diff"], tool_dirs
+    )
     config.substitutions.append(
         ("%feme_vulkan_icd_manifest", config.feme_vulkan_icd_manifest)
     )

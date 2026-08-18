@@ -32,9 +32,13 @@ such. Four of them gate the first executing milestone:
   a per-workgroup entry point and a real worker pool (closed by roadmap R21:
   `feme::cpu::CompiledStage::invokeGroup` and `JITOptions::NumThreads`, see
   "CPU Runtime API Changes").
-- `feme::cpu` supports only *uniform* groupshared accesses today, which
+- ~~`feme::cpu` supports only *uniform* groupshared accesses today, which
   excludes the `gl_LocalInvocationIndex`-indexed shared arrays that dominate
-  real Vulkan compute shaders. See "Physical Device and Capabilities".
+  real Vulkan compute shaders. See "Physical Device and Capabilities".~~
+  (closed by roadmap R23: `feme::cpu::FunctionWidener` now widens a
+  divergent groupshared index, load, store, and atomic into real
+  vector-of-pointers/masked-gather-scatter operations rather than
+  diagnosing them; see "Limits and features")
 - Root constant lowering covers only one narrow binding shape, so covering
   Vulkan's advertised push-constant range is a multi-pass CPU-target change
   rather than a translation detail. See "Descriptor Model".
@@ -374,7 +378,7 @@ In particular:
   lowering and practical stack/groupshared limits.
 - `maxComputeWorkGroupSize` and `maxComputeWorkGroupCount` must be checked both
   at pipeline creation and dispatch.
-- `maxComputeSharedMemorySize` cannot be advertised at the core-required
+- ~~`maxComputeSharedMemorySize` cannot be advertised at the core-required
   minimum until FeMe's groupshared lowering supports *divergent* accesses.
   Today `feme::cpu` accepts only uniform groupshared indices and diagnoses
   anything else, which excludes the `gl_LocalInvocationIndex`-indexed shared
@@ -382,7 +386,12 @@ In particular:
   divergently must fail pipeline creation with a clear diagnostic until that
   lands; the advertised limit stays at whatever the driver can actually honor
   for the advertised core version, which means the divergent path is a
-  prerequisite for claiming that version at all.
+  prerequisite for claiming that version at all.~~ (closed by roadmap R23 --
+  a divergent groupshared index, load/store, and atomic all lower correctly
+  now, see the "Summary" note above -- so V2 raises
+  `maxComputeSharedMemorySize` from the core-required minimum to 32768
+  bytes, a value every `feme::cpu` groupshared allocation this milestone's
+  host stack/heap can actually satisfy)
 - `minMemoryMapAlignment`, `minStorageBufferOffsetAlignment`,
   `minUniformBufferOffsetAlignment`, `minTexelBufferOffsetAlignment`,
   `maxStorageBufferRange`, `maxUniformBufferRange`, and `nonCoherentAtomSize`

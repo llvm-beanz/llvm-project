@@ -190,11 +190,11 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxFragmentOutputAttachments = 4;
   Limits.maxFragmentDualSrcAttachments = 1;
   Limits.maxFragmentCombinedOutputResources = 4;
-  // `feme::cpu` accepts only uniform groupshared accesses today (see
-  // "Limits and features"), so `maxComputeSharedMemorySize` stays at the
-  // spec minimum rather than a larger, aspirational value until divergent
-  // groupshared lowering lands.
-  Limits.maxComputeSharedMemorySize = 16384;
+  // Roadmap R23 closed `feme::cpu`'s divergent-groupshared-access gap (see
+  // "Limits and features"), so this is no longer pinned at the spec
+  // minimum: 32768 bytes is a value every groupshared allocation this
+  // milestone's host stack/heap can actually satisfy.
+  Limits.maxComputeSharedMemorySize = 32768;
   Limits.maxComputeWorkGroupCount[0] = 65535;
   Limits.maxComputeWorkGroupCount[1] = 65535;
   Limits.maxComputeWorkGroupCount[2] = 65535;
