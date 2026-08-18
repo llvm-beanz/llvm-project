@@ -814,4 +814,74 @@ TEST_F(PushConstantDispatchTest, UnpushedBytesReadAsZero) {
   vkFreeMemory(Device, Buf.Memory, nullptr);
 }
 
+TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
+  VkQueryPoolCreateInfo PoolInfo{};
+  PoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+  PoolInfo.queryCount = 2;
+  VkQueryPool QPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool), VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdResetQueryPool(CmdBuf, QPool, 0, 2);
+  vkCmdWriteTimestamp(CmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, QPool, 0);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  // stride must fit one entry: value + availability flag, when
+  // VK_QUERY_RESULT_WITH_AVAILABILITY_BIT is set.
+  uint64_t Results[4] = {0xDEADBEEFDEADBEEFull, 0xDEADBEEFDEADBEEFull,
+                        0xDEADBEEFDEADBEEFull, 0xDEADBEEFDEADBEEFull};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 2, sizeof(Results),
+                                 Results, 2 * sizeof(uint64_t),
+                                 VK_QUERY_RESULT_64_BIT |
+                                     VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_NOT_READY); // Query 1 is not yet available.
+  // Every value this ICD reports is zero (see QueryPool.h's file comment);
+  // only the availability flag distinguishes query 0 (written) from query
+  // 1 (reset but never written).
+  EXPECT_EQ(Results[0], 0u); // Query 0's value.
+  EXPECT_EQ(Results[1], 1u); // Query 0's availability: available.
+  EXPECT_EQ(Results[2], 0u); // Query 1's value.
+  EXPECT_EQ(Results[3], 0u); // Query 1's availability: unavailable.
+
+  uint64_t Availability[2] = {0, 0};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QPool, 0, 2, sizeof(Availability),
+                                 Availability, sizeof(uint64_t),
+                                 VK_QUERY_RESULT_64_BIT),
+            VK_NOT_READY); // Query 1 is still unavailable.
+
+  vkDestroyQueryPool(Device, QPool, nullptr);
+}
+
+TEST_F(CommandBufferTest, ExecuteCommandsInterpretsSecondaryIntoPrimary) {
+  VkCommandBufferAllocateInfo SecondaryAllocInfo{};
+  SecondaryAllocInfo.commandPool = Pool;
+  SecondaryAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+  SecondaryAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer Secondary = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &SecondaryAllocInfo, &Secondary),
+            VK_SUCCESS);
+  EXPECT_EQ(fromHandle<CommandBuffer>(Secondary)->level(),
+            VK_COMMAND_BUFFER_LEVEL_SECONDARY);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(Secondary, &BeginInfo);
+  vkCmdBindPipeline(Secondary, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdDispatch(Secondary, 1, 1, 1);
+  vkEndCommandBuffer(Secondary);
+
+  VkCommandBuffer Primary = allocateCommandBuffer();
+  vkBeginCommandBuffer(Primary, &BeginInfo);
+  vkCmdExecuteCommands(Primary, 1, &Secondary);
+  vkEndCommandBuffer(Primary);
+
+  auto *Recorded = fromHandle<CommandBuffer>(Primary);
+  ASSERT_EQ(Recorded->commands().size(), 1u);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+}
+
 } // namespace

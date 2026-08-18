@@ -12,6 +12,8 @@
 #include "Icd.h"
 #include "Objects.h"
 #include "Pipeline.h"
+#include "QueryPool.h"
+#include "Sync.h"
 
 #include "feme/Target/CPU/CompiledStage.h"
 #include "feme/Target/CPU/ResourceHeap.h"
@@ -211,19 +213,78 @@ Error runUpdateBuffer(Buffer *Dst, VkDeviceSize Offset,
   return Error::success();
 }
 
-} // namespace
+/// `vkCmdWaitEvents`: see "Queues, Scheduling, and Synchronization": "The
+/// same join applies ... at `vkCmdWaitEvents`". Under this ICD's strictly
+/// sequential execution model every event this could observe is already
+/// in its final state (see `Event`'s own comment): one still unsignaled
+/// here is a real application ordering error, exactly like an unsignaled
+/// semaphore wait (see Sync.h's file comment).
+Error runWaitEvents(llvm::ArrayRef<Event *> Events) {
+  for (Event *Ev : Events)
+    if (!Ev || !Ev->isSignaled())
+      return createStringError(inconvertibleErrorCode(),
+                               "vkCmdWaitEvents observed an unsignaled event");
+  return Error::success();
+}
 
-llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
-  ComputePipeline *BoundPipeline = nullptr;
-  std::vector<BoundSetState> BoundSets;
-  // Push-constant state, sized to the device's full advertised
-  // `maxPushConstantsSize` and zero-initialized: a byte a `vkCmdPushConstants`
-  // never wrote reads as zero, matching every other "declared but never
-  // written" resource in this ICD (see "Descriptor Model").
-  const PhysicalDeviceInfo *DeviceInfo = CmdBuf.getPhysicalDeviceInfo();
-  std::vector<uint8_t> PushConstants(
-      DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
-  for (const RecordedCommand &Cmd : CmdBuf.commands()) {
+/// `vkCmdCopyQueryPoolResults`: writes `[FirstQuery, FirstQuery+QueryCount)`
+/// of \p Pool into \p Dst starting at \p DstOffset, honoring \p Flags
+/// exactly as `vkGetQueryPoolResults` does (see QueryPool.h's file comment:
+/// every value is zero).
+Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
+                              uint32_t QueryCount, Buffer *Dst,
+                              VkDeviceSize DstOffset, VkDeviceSize Stride,
+                              VkQueryResultFlags Flags) {
+  if (!Pool)
+    return createStringError(inconvertibleErrorCode(),
+                             "copy query pool results with no query pool");
+  if (!Dst || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "copy query pool results destination is not "
+                             "bound");
+  bool Is64Bit = (Flags & VK_QUERY_RESULT_64_BIT) != 0;
+  bool WithAvailability = (Flags & VK_QUERY_RESULT_WITH_AVAILABILITY_BIT) != 0;
+  VkDeviceSize ResultWidth = Is64Bit ? sizeof(uint64_t) : sizeof(uint32_t);
+  for (uint32_t I = 0; I != QueryCount; ++I) {
+    VkDeviceSize Offset = DstOffset + Stride * I;
+    VkDeviceSize EntrySize = ResultWidth * (WithAvailability ? 2 : 1);
+    if (Offset + EntrySize > Dst->size())
+      return createStringError(inconvertibleErrorCode(),
+                               "copy query pool results region is out of "
+                               "range");
+    auto *Out = static_cast<uint8_t *>(Dst->data()) + Offset;
+    std::memset(Out, 0, ResultWidth); // Every value this ICD ever writes is
+                                     // zero (see QueryPool.h's file
+                                     // comment).
+    if (WithAvailability) {
+      uint64_t AvailFlag = Pool->isAvailable(FirstQuery + I) ? 1 : 0;
+      if (Is64Bit)
+        std::memcpy(Out + ResultWidth, &AvailFlag, sizeof(AvailFlag));
+      else {
+        uint32_t AvailFlag32 = static_cast<uint32_t>(AvailFlag);
+        std::memcpy(Out + ResultWidth, &AvailFlag32, sizeof(AvailFlag32));
+      }
+    }
+  }
+  return Error::success();
+}
+
+/// Interprets \p Commands into \p BoundPipeline/\p BoundSets/
+/// \p PushConstants -- shared, mutable execution state a primary command
+/// buffer's own commands and every `vkCmdExecuteCommands`-referenced
+/// secondary command buffer's commands are interpreted into alike, per
+/// "Command Buffers": "Secondary command buffers are interpreted into the
+/// primary execution state ... no cursor or bound state may be stored back
+/// into the command buffer during execution." \p DeviceInfo is threaded
+/// through for `validateGroupCount`, which does not otherwise have access
+/// to a secondary command buffer's own (possibly null, if never set)
+/// `PhysicalDeviceInfo`.
+Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
+                          const PhysicalDeviceInfo *DeviceInfo,
+                          ComputePipeline *&BoundPipeline,
+                          std::vector<BoundSetState> &BoundSets,
+                          std::vector<uint8_t> &PushConstants) {
+  for (const RecordedCommand &Cmd : Commands) {
     switch (Cmd.Op) {
     case RecordedCommand::Kind::BindPipeline:
       BoundPipeline = Cmd.Pipeline;
@@ -250,8 +311,7 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
       if (!BoundPipeline)
         return createStringError(inconvertibleErrorCode(),
                                  "dispatch with no bound compute pipeline");
-      if (Error E =
-              validateGroupCount(CmdBuf.getPhysicalDeviceInfo(), Cmd.Count))
+      if (Error E = validateGroupCount(DeviceInfo, Cmd.Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, Cmd.Base, Cmd.Count, BoundSets,
                                 PushConstants))
@@ -275,7 +335,7 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
                   static_cast<const uint8_t *>(Cmd.IndirectBuffer->data()) +
                       Cmd.IndirectOffset,
                   sizeof(Count));
-      if (Error E = validateGroupCount(CmdBuf.getPhysicalDeviceInfo(), Count))
+      if (Error E = validateGroupCount(DeviceInfo, Count))
         return E;
       if (Error E = runDispatch(*BoundPipeline, {0, 0, 0}, Count, BoundSets,
                                 PushConstants))
@@ -309,9 +369,62 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
       std::memcpy(PushConstants.data() + Cmd.DstOffset, Cmd.UpdateData.data(),
                   Cmd.UpdateData.size());
       break;
+    case RecordedCommand::Kind::SetEvent:
+      Cmd.Events[0]->set();
+      break;
+    case RecordedCommand::Kind::ResetEvent:
+      Cmd.Events[0]->reset();
+      break;
+    case RecordedCommand::Kind::WaitEvents:
+      if (Error E = runWaitEvents(Cmd.Events))
+        return E;
+      break;
+    case RecordedCommand::Kind::ResetQueryPool:
+      Cmd.TargetQueryPool->reset(Cmd.FirstQuery, Cmd.Count[0]);
+      break;
+    case RecordedCommand::Kind::BeginQuery:
+      // See QueryPool.h's file comment: there is no real counter to start
+      // sampling, so beginning a query has nothing to record; only ending
+      // one (or a timestamp write) marks it available.
+      break;
+    case RecordedCommand::Kind::EndQuery:
+      Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
+      break;
+    case RecordedCommand::Kind::WriteTimestamp:
+      Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
+      break;
+    case RecordedCommand::Kind::CopyQueryPoolResults:
+      if (Error E = runCopyQueryPoolResults(
+              Cmd.TargetQueryPool, Cmd.FirstQuery, Cmd.Count[0], Cmd.DstBuffer,
+              Cmd.DstOffset, Cmd.DstSize, Cmd.FillData))
+        return E;
+      break;
+    case RecordedCommand::Kind::ExecuteCommands:
+      for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
+        if (Error E =
+                executeCommandsInto(Secondary->commands(), DeviceInfo,
+                                    BoundPipeline, BoundSets, PushConstants))
+          return E;
+      break;
     }
   }
   return Error::success();
+}
+
+} // namespace
+
+llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
+  ComputePipeline *BoundPipeline = nullptr;
+  std::vector<BoundSetState> BoundSets;
+  // Push-constant state, sized to the device's full advertised
+  // `maxPushConstantsSize` and zero-initialized: a byte a `vkCmdPushConstants`
+  // never wrote reads as zero, matching every other "declared but never
+  // written" resource in this ICD (see "Descriptor Model").
+  const PhysicalDeviceInfo *DeviceInfo = CmdBuf.getPhysicalDeviceInfo();
+  std::vector<uint8_t> PushConstants(
+      DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
+  return executeCommandsInto(CmdBuf.commands(), DeviceInfo, BoundPipeline,
+                             BoundSets, PushConstants);
 }
 
 namespace feme::vulkan {
@@ -353,14 +466,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(VkDevice,
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
     VkDevice, const VkCommandBufferAllocateInfo *pAllocateInfo,
     VkCommandBuffer *pCommandBuffers) {
-  // Secondary command buffers are not implemented yet (see "Command
-  // Buffers": that command set is V2+); only primary is available.
-  if (pAllocateInfo->level != VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-    return VK_ERROR_INITIALIZATION_FAILED;
-
+  // V3: secondary command buffers (see "Command Buffers").
   auto *Pool = fromHandle<vulkan::CommandPool>(pAllocateInfo->commandPool);
   for (uint32_t I = 0; I != pAllocateInfo->commandBufferCount; ++I)
-    pCommandBuffers[I] = toHandle<VkCommandBuffer>(Pool->allocate());
+    pCommandBuffers[I] =
+        toHandle<VkCommandBuffer>(Pool->allocate(pAllocateInfo->level));
   return VK_SUCCESS;
 }
 
@@ -508,6 +618,89 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
   const auto *Bytes = static_cast<const uint8_t *>(pValues);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->pushConstants(offset, std::vector<uint8_t>(Bytes, Bytes + size));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetEvent(VkCommandBuffer commandBuffer,
+                                         VkEvent event, VkPipelineStageFlags) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setEvent(fromHandle<Event>(event));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdResetEvent(VkCommandBuffer commandBuffer,
+                                           VkEvent event,
+                                           VkPipelineStageFlags) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->resetEvent(fromHandle<Event>(event));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents(
+    VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent *pEvents,
+    VkPipelineStageFlags, VkPipelineStageFlags, uint32_t,
+    const VkMemoryBarrier *, uint32_t, const VkBufferMemoryBarrier *,
+    uint32_t, const VkImageMemoryBarrier *) {
+  // Image/buffer memory barriers need no inspection here for the same
+  // reason `vkCmdPipelineBarrier` does not -- see that command's own
+  // comment.
+  std::vector<Event *> Events;
+  Events.reserve(eventCount);
+  for (uint32_t I = 0; I != eventCount; ++I)
+    Events.push_back(fromHandle<Event>(pEvents[I]));
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->waitEvents(std::move(Events));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdResetQueryPool(VkCommandBuffer commandBuffer,
+                                               VkQueryPool queryPool,
+                                               uint32_t firstQuery,
+                                               uint32_t queryCount) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->resetQueryPool(fromHandle<QueryPool>(queryPool), firstQuery,
+                       queryCount);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginQuery(VkCommandBuffer commandBuffer,
+                                          VkQueryPool queryPool,
+                                          uint32_t query,
+                                          VkQueryControlFlags) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->beginQuery(fromHandle<QueryPool>(queryPool), query);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndQuery(VkCommandBuffer commandBuffer,
+                                        VkQueryPool queryPool,
+                                        uint32_t query) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->endQuery(fromHandle<QueryPool>(queryPool), query);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(VkCommandBuffer commandBuffer,
+                                              VkPipelineStageFlagBits,
+                                              VkQueryPool queryPool,
+                                              uint32_t query) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->writeTimestamp(fromHandle<QueryPool>(queryPool), query);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
+    VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery,
+    uint32_t queryCount, VkBuffer dstBuffer, VkDeviceSize dstOffset,
+    VkDeviceSize stride, VkQueryResultFlags flags) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyQueryPoolResults(fromHandle<QueryPool>(queryPool), firstQuery,
+                            queryCount, fromHandle<vulkan::Buffer>(dstBuffer),
+                            dstOffset, stride, flags);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdExecuteCommands(VkCommandBuffer commandBuffer,
+                     uint32_t commandBufferCount,
+                     const VkCommandBuffer *pCommandBuffers) {
+  std::vector<const vulkan::CommandBuffer *> Secondary;
+  Secondary.reserve(commandBufferCount);
+  for (uint32_t I = 0; I != commandBufferCount; ++I)
+    Secondary.push_back(fromHandle<vulkan::CommandBuffer>(pCommandBuffers[I]));
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->executeCommands(std::move(Secondary));
 }
 
 } // namespace feme::vulkan

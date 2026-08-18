@@ -237,6 +237,70 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
                                               uint32_t offset, uint32_t size,
                                               const void *pValues);
 
+// V3: events (see "Command Buffers" and "Queues, Scheduling, and
+// Synchronization").
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateEvent(VkDevice device, const VkEventCreateInfo *pCreateInfo,
+             const VkAllocationCallbacks *pAllocator, VkEvent *pEvent);
+VKAPI_ATTR void VKAPI_CALL vkDestroyEvent(
+    VkDevice device, VkEvent event, const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetEventStatus(VkDevice device, VkEvent event);
+VKAPI_ATTR VkResult VKAPI_CALL vkSetEvent(VkDevice device, VkEvent event);
+VKAPI_ATTR VkResult VKAPI_CALL vkResetEvent(VkDevice device, VkEvent event);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetEvent(VkCommandBuffer commandBuffer,
+                                        VkEvent event,
+                                        VkPipelineStageFlags stageMask);
+VKAPI_ATTR void VKAPI_CALL vkCmdResetEvent(VkCommandBuffer commandBuffer,
+                                          VkEvent event,
+                                          VkPipelineStageFlags stageMask);
+VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents(
+    VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent *pEvents,
+    VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
+    uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers,
+    uint32_t bufferMemoryBarrierCount,
+    const VkBufferMemoryBarrier *pBufferMemoryBarriers,
+    uint32_t imageMemoryBarrierCount,
+    const VkImageMemoryBarrier *pImageMemoryBarriers);
+
+// V3: query pools (see "Command Buffers").
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateQueryPool(
+    VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkQueryPool *pQueryPool);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyQueryPool(VkDevice device, VkQueryPool queryPool,
+                   const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkResetQueryPool(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
+                 uint32_t queryCount);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetQueryPoolResults(
+    VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
+    uint32_t queryCount, size_t dataSize, void *pData, VkDeviceSize stride,
+    VkQueryResultFlags flags);
+VKAPI_ATTR void VKAPI_CALL vkCmdResetQueryPool(VkCommandBuffer commandBuffer,
+                                              VkQueryPool queryPool,
+                                              uint32_t firstQuery,
+                                              uint32_t queryCount);
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginQuery(VkCommandBuffer commandBuffer,
+                                          VkQueryPool queryPool,
+                                          uint32_t query,
+                                          VkQueryControlFlags flags);
+VKAPI_ATTR void VKAPI_CALL vkCmdEndQuery(VkCommandBuffer commandBuffer,
+                                        VkQueryPool queryPool, uint32_t query);
+VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(VkCommandBuffer commandBuffer,
+                                              VkPipelineStageFlagBits pipelineStage,
+                                              VkQueryPool queryPool,
+                                              uint32_t query);
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
+    VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery,
+    uint32_t queryCount, VkBuffer dstBuffer, VkDeviceSize dstOffset,
+    VkDeviceSize stride, VkQueryResultFlags flags);
+
+// V3: secondary command buffers (see "Command Buffers").
+VKAPI_ATTR void VKAPI_CALL
+vkCmdExecuteCommands(VkCommandBuffer commandBuffer,
+                     uint32_t commandBufferCount,
+                     const VkCommandBuffer *pCommandBuffers);
+
 // V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
 // Model").
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorSetLayout(

@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #define VK_NO_PROTOTYPES
+#include "CommandBuffer.h"
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
@@ -18,6 +19,7 @@
 #include "mlir/Parser/Parser.h"
 #include "mlir/Target/SPIRV/Serialization.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Testing/Support/Error.h"
 
 #include "gtest/gtest.h"
 
@@ -281,6 +283,81 @@ TEST_F(SyncTest, TimelineSemaphoreAcrossQueueSubmit) {
   EXPECT_EQ(Value, SignalValue);
 
   vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+TEST_F(SyncTest, HostEventSetResetStatus) {
+  VkEventCreateInfo EventInfo{};
+  VkEvent Ev = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateEvent(Device, &EventInfo, nullptr, &Ev), VK_SUCCESS);
+  EXPECT_EQ(vkGetEventStatus(Device, Ev), VK_EVENT_RESET);
+
+  ASSERT_EQ(vkSetEvent(Device, Ev), VK_SUCCESS);
+  EXPECT_EQ(vkGetEventStatus(Device, Ev), VK_EVENT_SET);
+
+  ASSERT_EQ(vkResetEvent(Device, Ev), VK_SUCCESS);
+  EXPECT_EQ(vkGetEventStatus(Device, Ev), VK_EVENT_RESET);
+
+  vkDestroyEvent(Device, Ev, nullptr);
+}
+
+TEST_F(SyncTest, CommandBufferSetEventThenWaitSucceeds) {
+  VkEventCreateInfo EventInfo{};
+  VkEvent Ev = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateEvent(Device, &EventInfo, nullptr, &Ev), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer SetCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &SetCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(SetCmdBuf, &BeginInfo);
+  vkCmdSetEvent(SetCmdBuf, Ev, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
+  vkEndCommandBuffer(SetCmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(SetCmdBuf)),
+                    llvm::Succeeded());
+  EXPECT_EQ(vkGetEventStatus(Device, Ev), VK_EVENT_SET);
+
+  VkCommandBuffer WaitCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &WaitCmdBuf),
+            VK_SUCCESS);
+  vkBeginCommandBuffer(WaitCmdBuf, &BeginInfo);
+  vkCmdWaitEvents(WaitCmdBuf, 1, &Ev, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, nullptr, 0, nullptr,
+                  0, nullptr);
+  vkEndCommandBuffer(WaitCmdBuf);
+  EXPECT_THAT_ERROR(
+      executeCommandBuffer(*fromHandle<CommandBuffer>(WaitCmdBuf)),
+      llvm::Succeeded());
+
+  vkDestroyEvent(Device, Ev, nullptr);
+}
+
+TEST_F(SyncTest, CommandBufferWaitEventsFailsWhenUnsignaled) {
+  VkEventCreateInfo EventInfo{};
+  VkEvent Ev = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateEvent(Device, &EventInfo, nullptr, &Ev), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer WaitCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &WaitCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(WaitCmdBuf, &BeginInfo);
+  vkCmdWaitEvents(WaitCmdBuf, 1, &Ev, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, nullptr, 0, nullptr,
+                  0, nullptr);
+  vkEndCommandBuffer(WaitCmdBuf);
+  EXPECT_THAT_ERROR(
+      executeCommandBuffer(*fromHandle<CommandBuffer>(WaitCmdBuf)),
+      llvm::Failed());
+
+  vkDestroyEvent(Device, Ev, nullptr);
 }
 
 } // namespace

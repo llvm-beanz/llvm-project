@@ -202,4 +202,38 @@ vkSignalSemaphore(VkDevice, const VkSemaphoreSignalInfo *pSignalInfo) {
   return VK_SUCCESS;
 }
 
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCreateEvent(VkDevice, const VkEventCreateInfo *,
+             const VkAllocationCallbacks *pAllocator, VkEvent *pEvent) {
+  Allocator Alloc(pAllocator);
+  Event *Obj = Alloc.create<Event>(VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pEvent = toHandle<VkEvent>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyEvent(
+    VkDevice, VkEvent event, const VkAllocationCallbacks *pAllocator) {
+  if (!event)
+    return;
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<Event>(event));
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkGetEventStatus(VkDevice, VkEvent event) {
+  return fromHandle<Event>(event)->isSignaled() ? VK_EVENT_SET
+                                                : VK_EVENT_RESET;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkSetEvent(VkDevice, VkEvent event) {
+  fromHandle<Event>(event)->set();
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkResetEvent(VkDevice, VkEvent event) {
+  fromHandle<Event>(event)->reset();
+  return VK_SUCCESS;
+}
+
 } // namespace feme::vulkan

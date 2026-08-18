@@ -84,6 +84,31 @@ vkCmdUpdateBuffer
 vkCmdPipelineBarrier
 vkCmdPushConstants
 
+# V3: events (see "Command Buffers" and "Queues, Scheduling, and
+# Synchronization").
+vkCreateEvent
+vkDestroyEvent
+vkGetEventStatus
+vkSetEvent
+vkResetEvent
+vkCmdSetEvent
+vkCmdResetEvent
+vkCmdWaitEvents
+
+# V3: query pools (see "Command Buffers").
+vkCreateQueryPool
+vkDestroyQueryPool
+vkResetQueryPool
+vkGetQueryPoolResults
+vkCmdResetQueryPool
+vkCmdBeginQuery
+vkCmdEndQuery
+vkCmdWriteTimestamp
+vkCmdCopyQueryPoolResults
+
+# V3: secondary command buffers (see "Command Buffers").
+vkCmdExecuteCommands
+
 # V2: descriptor set layouts, pools, sets, and updates (see "Descriptor
 # Model").
 vkCreateDescriptorSetLayout

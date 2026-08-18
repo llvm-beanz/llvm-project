@@ -56,6 +56,25 @@ private:
   bool Signaled;
 };
 
+/// A `VkEvent`: device-set/reset state participating in command execution
+/// (V3, per "Queues, Scheduling, and Synchronization": "An event stores
+/// device-set/reset state and participates in command execution"),
+/// settable from either the host (`vkSetEvent`/`vkResetEvent`) or a command
+/// buffer (`vkCmdSetEvent`/`vkCmdResetEvent`). Unlike a fence or semaphore,
+/// nothing consumes an event's state on a successful wait -- it stays
+/// signaled until something explicitly resets it.
+class Event {
+public:
+  explicit Event(bool Signaled = false) : Signaled(Signaled) {}
+
+  bool isSignaled() const { return Signaled; }
+  void set() { Signaled = true; }
+  void reset() { Signaled = false; }
+
+private:
+  bool Signaled;
+};
+
 /// A `VkSemaphore`: either binary (unsignaled/signaled, consumed by a
 /// wait) or timeline (a monotonically increasing 64-bit counter), per
 /// "Queues, Scheduling, and Synchronization". Which kind this is is fixed

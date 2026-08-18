@@ -11,7 +11,9 @@
 // feme/docs/FeMeVulkanDesign.md). V1 restricted the command set to bind
 // compute pipeline, dispatch, dispatch base, and dispatch indirect; V2
 // ("Storage buffers and descriptors") adds bind descriptor sets (with
-// dynamic offsets), buffer copy/fill/update, and pipeline barriers.
+// dynamic offsets), buffer copy/fill/update, and pipeline barriers. V3
+// ("Uniform data, push constants, and synchronization") adds push
+// constants, events, query pools, and secondary command buffers.
 //
 //===----------------------------------------------------------------------===//
 
@@ -33,8 +35,11 @@
 namespace feme::vulkan {
 
 class Buffer;
+class CommandBuffer;
 class ComputePipeline;
 class DescriptorSet;
+class Event;
+class QueryPool;
 
 /// One recorded command. A compact tagged record rather than a class
 /// hierarchy, matching "Command Buffers": "record a compact typed stream".
@@ -50,6 +55,15 @@ struct RecordedCommand {
     UpdateBuffer,
     PipelineBarrier,
     PushConstants,
+    SetEvent,
+    ResetEvent,
+    WaitEvents,
+    ResetQueryPool,
+    BeginQuery,
+    EndQuery,
+    WriteTimestamp,
+    CopyQueryPoolResults,
+    ExecuteCommands,
   };
 
   Kind Op;
@@ -89,6 +103,24 @@ struct RecordedCommand {
   /// Buffers": "Push constants" is its own row of the first command set,
   /// but needs no new payload shape beyond what `UpdateBuffer` already
   /// carries).
+  /// `SetEvent`/`ResetEvent`: the single target event.
+  /// `WaitEvents`: every event this command waits on.
+  std::vector<Event *> Events;
+  /// `ResetQueryPool`/`BeginQuery`/`EndQuery`/`WriteTimestamp`/
+  /// `CopyQueryPoolResults`: the target query pool.
+  QueryPool *TargetQueryPool = nullptr;
+  /// `ResetQueryPool`: `[FirstQuery, FirstQuery+QueryCount)` (`Count[0]`
+  /// reused for `QueryCount`). `BeginQuery`/`EndQuery`/`WriteTimestamp`: the
+  /// single query index (`FirstQuery`). `CopyQueryPoolResults`: the same
+  /// range as `ResetQueryPool`, plus `DstBuffer`/`DstOffset` (reused above)
+  /// and `DstSize` (reused for `stride`) and `FillData` (reused for
+  /// `VkQueryResultFlags`).
+  uint32_t FirstQuery = 0;
+  /// `ExecuteCommands`: the secondary command buffers to interpret into
+  /// this (primary) command buffer's own execution state, in order (see
+  /// "Command Buffers": "Secondary command buffers are interpreted into
+  /// the primary execution state").
+  std::vector<const CommandBuffer *> SecondaryBuffers;
 };
 
 /// A `VkCommandBuffer`: an append-only typed command stream while
@@ -97,6 +129,11 @@ struct RecordedCommand {
 /// per-command-buffer dispatch table.
 class CommandBuffer : public DispatchableBase {
 public:
+  explicit CommandBuffer(VkCommandBufferLevel Level = VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+      : Level(Level) {}
+
+  VkCommandBufferLevel level() const { return Level; }
+
   void begin() {
     Commands.clear();
     Recording = true;
@@ -198,6 +235,92 @@ public:
     Cmd.UpdateData = std::move(Data);
     Commands.push_back(std::move(Cmd));
   }
+  /// `vkCmdSetEvent`/`vkCmdResetEvent`.
+  void setEvent(Event *Ev) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetEvent;
+    Cmd.Events.push_back(Ev);
+    Commands.push_back(std::move(Cmd));
+  }
+  void resetEvent(Event *Ev) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::ResetEvent;
+    Cmd.Events.push_back(Ev);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// `vkCmdWaitEvents`: see "Queues, Scheduling, and Synchronization": "The
+  /// same join applies ... at `vkCmdWaitEvents`" -- already satisfied by
+  /// this milestone's strictly-sequential execution, exactly like
+  /// `pipelineBarrier`, so the memory-barrier arrays a real
+  /// `vkCmdWaitEvents` call also carries need no payload here either.
+  void waitEvents(std::vector<Event *> Events) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::WaitEvents;
+    Cmd.Events = std::move(Events);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// `vkCmdResetQueryPool`.
+  void resetQueryPool(QueryPool *Pool, uint32_t FirstQuery,
+                      uint32_t QueryCount) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::ResetQueryPool;
+    Cmd.TargetQueryPool = Pool;
+    Cmd.FirstQuery = FirstQuery;
+    Cmd.Count[0] = QueryCount;
+    Commands.push_back(Cmd);
+  }
+  /// `vkCmdBeginQuery`.
+  void beginQuery(QueryPool *Pool, uint32_t Query) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::BeginQuery;
+    Cmd.TargetQueryPool = Pool;
+    Cmd.FirstQuery = Query;
+    Commands.push_back(Cmd);
+  }
+  /// `vkCmdEndQuery`.
+  void endQuery(QueryPool *Pool, uint32_t Query) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::EndQuery;
+    Cmd.TargetQueryPool = Pool;
+    Cmd.FirstQuery = Query;
+    Commands.push_back(Cmd);
+  }
+  /// `vkCmdWriteTimestamp`.
+  void writeTimestamp(QueryPool *Pool, uint32_t Query) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::WriteTimestamp;
+    Cmd.TargetQueryPool = Pool;
+    Cmd.FirstQuery = Query;
+    Commands.push_back(Cmd);
+  }
+  /// `vkCmdCopyQueryPoolResults`.
+  void copyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
+                            uint32_t QueryCount, Buffer *Dst,
+                            VkDeviceSize DstOffset, VkDeviceSize Stride,
+                            VkQueryResultFlags Flags) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::CopyQueryPoolResults;
+    Cmd.TargetQueryPool = Pool;
+    Cmd.FirstQuery = FirstQuery;
+    Cmd.Count[0] = QueryCount;
+    Cmd.DstBuffer = Dst;
+    Cmd.DstOffset = DstOffset;
+    Cmd.DstSize = Stride;
+    Cmd.FillData = Flags;
+    Commands.push_back(Cmd);
+  }
+  /// `vkCmdExecuteCommands`: see "Command Buffers": "Secondary command
+  /// buffers are interpreted into the primary execution state." The
+  /// secondary buffers' own recorded streams are referenced, not copied --
+  /// they must stay alive and unmodified (simultaneous-use requires
+  /// immutable command streams, per that same section) through this
+  /// (primary) buffer's own execution.
+  void executeCommands(std::vector<const CommandBuffer *> Secondary) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::ExecuteCommands;
+    Cmd.SecondaryBuffers = std::move(Secondary);
+    Commands.push_back(std::move(Cmd));
+  }
 
   llvm::ArrayRef<RecordedCommand> commands() const { return Commands; }
 
@@ -210,6 +333,7 @@ private:
   std::vector<RecordedCommand> Commands;
   bool Recording = false;
   const PhysicalDeviceInfo *Info = nullptr;
+  VkCommandBufferLevel Level;
 };
 
 /// A `VkCommandPool`: allocator and reset domain for the command buffers
@@ -219,8 +343,8 @@ class CommandPool {
 public:
   explicit CommandPool(const PhysicalDeviceInfo &Info) : Info(&Info) {}
 
-  CommandBuffer *allocate() {
-    auto Buf = std::make_unique<CommandBuffer>();
+  CommandBuffer *allocate(VkCommandBufferLevel Level) {
+    auto Buf = std::make_unique<CommandBuffer>(Level);
     Buf->setPhysicalDeviceInfo(Info);
     CommandBuffer *Result = Buf.get();
     Buffers.push_back(std::move(Buf));
