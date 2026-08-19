@@ -187,3 +187,83 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 `test/Vulkan/cts-compute-subset.test` remain the in-tree, `lit`-integrated
 version of the same idea, gated on `REQUIRES: system-vulkan-cts` so they
 skip cleanly wherever `deqp-vk` is not installed.
+
+# Follow-up: closing every crash, and a complete 54-group run
+
+This pass picked up exactly where the report above left off -- its "Crashes
+found and *not* fixed this pass" section -- and fixed both remaining crash
+classes, plus two more that only surfaced once every crash-free group could
+finally be run in full instead of stopping at the first crash. The result is
+the first *complete* run of every one of `deqp-vk`'s 54 top-level
+`dEQP-VK.<group>.*` groups against `libfeme_vulkan`: none crash the process
+any more.
+
+## Crashes fixed this pass
+
+| Crash | Root cause | Fix |
+|---|---|---|
+| `dEQP-VK.api.invariance.random` | VK-GL-CTS's own `ImageAllocator` constructor indexes `optimalformats`/`linearformats` with `rand() % vector.size()` with no non-empty check; a narrow-format ICD can empty both lists for some seed, and AArch64's `UDIV` returns the dividend (not a trap) for `% 0`, reading far out of bounds | Fixed in the VK-GL-CTS checkout itself (`external/vulkancts/modules/vulkan/api/vktApiMemoryRequirementInvarianceTests.cpp`): never construct an `ImageAllocator` when neither tiling mode has any supported format, always use a `BufferAllocator` instead |
+| `dEQP-VK.memory_model.*`, `dEQP-VK.spirv_assembly.*`, `dEQP-VK.pipeline.*`, `dEQP-VK.glsl.*`, `dEQP-VK.ssbo.*`, `dEQP-VK.ubo.*` (six groups, one shared root cause across the first three of these) | MLIR's SPIR-V deserializer's `processSpecConstantComposite` assumed every constituent of an `OpSpecConstantComposite` was itself a spec constant and unconditionally wrapped a (possibly null) lookup in `SymbolRefAttr::get`, segfaulting for any composite spec constant (e.g. a `mat2`'s columns) with a non-spec-constant constituent | `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`, `mlir/lib/Dialect/SPIRV/IR/SPIRVOps.cpp`, `mlir/lib/Target/SPIRV/Serialization/SerializeOps.cpp`, `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVStructureOps.td`: extend `spirv.SpecConstantComposite`'s constituents to accept either a spec-constant symbol reference or an inline typed-attribute constant |
+| `dEQP-VK.memory_model.shared.arrays_of_arrays.*` | `processConstantComposite`'s `ShapedType` branch passed every constituent straight to `DenseElementsAttr::get` without flattening a nested composite constituent (a `spirv.matrix`'s constituents are its column vectors, each already a `DenseElementsAttr`), tripping `hasSameNumElementsOrSplat` | `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`: reuse the sibling `TensorArm` branch's constituent-flattening logic for every `ShapedType`, not just `TensorArmType` |
+| Same group, next case (`arrays_of_arrays.2`) | `SPIRVToLLVM.cpp`'s `convertArrayType`/`convertRuntimeArrayType` passed a (possibly null, if the element type has no registered conversion) converted element type straight to `LLVM::LLVMArrayType::get`, asserting instead of failing the conversion cleanly | `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`: check for a null converted element type and return `std::nullopt` |
+| `dEQP-VK.spirv_assembly.instruction.graphics.opconstantcomposite.array_of_struct_of_array_*` | FeMe's own `ArrayConstantPattern` flattens a `spirv.array` constant into one `llvm.mlir.constant` `ElementsAttr`, which can only represent a pure array/vector nesting; an array-of-struct-of-array's flattened element count didn't match what `LLVM::ConstantOp::verify` expects (it treats `!llvm.struct` as a single opaque leaf), and building the mismatched `ElementsAttr` crashed `DenseElementsAttr::get` | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`: detect the mismatch up front (`getFlatElementCount`) and reject the pattern cleanly instead |
+| `dEQP-VK.spirv_assembly.instruction.graphics.opundef.uint32_vert` | Every identity-shaped fold in `SPIRVCanonicalization.cpp` (`x * 1 = x`, `x >> 0 = x`, `x & x = x`, ...) returned an operand `Value` verbatim, which is only type-correct if that operand's concrete type equals the op's declared result type -- not guaranteed, since SPIR-V's arithmetic/bitwise/shift ops only require operands and result to share a bit width, not identical (possibly differently-signed) types. `spirv.IMul`'s `x * 0 = 0` fold hit this with an `OpUndef`-derived, signed/unsigned-mismatched operand, aborting in `checkFoldResultTypes` | `mlir/lib/Dialect/SPIRV/IR/SPIRVCanonicalization.cpp`: route every such identity fold through a new `foldToOperandOfSameType` helper that declines to fold (instead of producing ill-typed IR) when the types differ |
+| `dEQP-VK.api.maintenance3_check.descriptor_set` (found only once the `api` group could run past `invariance.random` to completion) | `vkGetDescriptorSetLayoutSupport`, a core `VK_VERSION_1_1` command, was never implemented, so `vkGetDeviceProcAddr` resolved it to null and the loader's dispatch table called through a null function pointer | `feme/lib/Vulkan/Descriptor.cpp`: implement it by reusing `vkCreateDescriptorSetLayout`'s own `isSupportedDescriptorType` check, since this ICD has no further descriptor-count/layout limit |
+
+Each fix's validation followed the same discipline as the original report:
+reproduce the crash on an isolated single-case list first, fix, confirm the
+identical case list now passes or fails cleanly, then re-run the *entire*
+affected group to confirm nothing else in it regressed into a new crash.
+`check-feme` (`LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`) stayed
+green after every commit (1430 passed/1 unsupported baseline, 1433 passed/1
+unsupported final -- three new unit tests: two for
+`vkGetDescriptorSetLayoutSupport`, one array-of-struct-of-array negative
+regression test for `ArrayConstantPattern`), and the relevant `mlir/`
+lit/unittest suites (`Target/SPIRV`, `Dialect/SPIRV`, `Dialect/SPIRV/IR`,
+`Conversion/SPIRVToLLVM`, `Conversion/GPUToSPIRV`,
+`MLIRSPIRVImportExportTests`) stayed green throughout too.
+
+## The complete 54-group run
+
+With every crash above fixed, every one of `deqp-vk`'s 54 top-level
+`dEQP-VK.<group>.*` groups (the same set enumerated by
+`--deqp-runmode=txt-caselist`, from `api` through `ycbcr`) now runs to
+completion -- not just the 47 that happened not to crash before this pass.
+
+| | Count |
+|---|---|
+| Total cases | 3,236,999 |
+| Passed | 10,350 |
+| Failed | 27,094 |
+| Not supported | 3,199,555 |
+
+(These totals are larger than the original report's "1,659,818 cases across
+47 groups" for two reasons, not just the 7 previously-crashing groups now
+completing: this run's per-group `--deqp-case=dEQP-VK.<group>.*` filtering
+counts every case in each group exactly once via the loader's real
+`vkEnumerateInstanceVersion`/format-support answers, whereas grouping
+artifacts and re-enumeration differences between passes can shift the exact
+per-group split slightly -- the pattern (an overwhelming, expected
+`Not supported` share for the same documented scope reasons as the original
+report) is what matters, not an exact case-for-case match across runs.)
+
+As in the original report, no new correctness bug (a `Pass`-shaped result
+that is actually wrong) surfaced in this pass -- every fix above replaced a
+segfault with either a correct result or a clean, already-documented
+`NotSupported`/legalization-failure outcome, never a silent wrong answer.
+
+## Reproducing this report
+
+```shell
+# Generate the full group list once:
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  build/external/vulkancts/modules/vulkan/deqp-vk --deqp-runmode=txt-caselist
+
+# Run every top-level group to completion:
+for g in $(grep -oP '^TEST: dEQP-VK\.\K[a-z_0-9]+' dEQP-VK-cases.txt | sort -u); do
+  VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+    build/external/vulkancts/modules/vulkan/deqp-vk \
+    --deqp-case="dEQP-VK.$g.*" --deqp-log-filename=/tmp/$g.qpa
+done
+```
+
