@@ -444,8 +444,11 @@ private:
   bool checkVectorDecompositionSupported();
   Function *buildWidenedFunction();
   Value *getWidened(Value *V, IRBuilderBase &Builder);
+  SmallVector<Value *, 4> getVectorComponents(Value *V, IRBuilderBase &Builder);
   PHINode *createWidenedPHIStub(PHINode &PN);
+  void createWidenedVectorPHIStub(PHINode &PN);
   void fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN);
+  void fillWidenedVectorPHIIncoming(PHINode &PN);
   void widenBuiltin(CallInst &CI, BuiltinCallKind Kind, IRBuilder<> &Builder);
   void widenWaveCall(CallInst &CI, WaveCallKind Kind, IRBuilder<> &Builder);
   void widenStageOp(CallInst &CI, feme::StageOpKind Kind, IRBuilder<> &Builder);
@@ -471,6 +474,9 @@ private:
   void widenGroupSharedAtomicRMW(AtomicRMWInst &RMW, IRBuilder<> &Builder);
   void widenInsertElement(InsertElementInst &IE, IRBuilder<> &Builder);
   void widenExtractElement(ExtractElementInst &EE, IRBuilder<> &Builder);
+  void widenShuffleVector(ShuffleVectorInst &SV, IRBuilder<> &Builder);
+  void widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder);
+  void widenVectorElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenElementwise(Instruction &I, IRBuilder<> &Builder);
   void widenScalarizedFallback(Instruction &I, IRBuilder<> &Builder);
   bool widenInstruction(Instruction &I, IRBuilder<> &Builder);
@@ -502,27 +508,52 @@ bool FunctionWidener::checkSupportedControlFlow() {
 bool FunctionWidener::checkVectorDecompositionSupported() {
   // "Vectors become components, not nested vectors" in "Phase 4: Widening"
   // describes decomposing a divergent `<N x T>` (or aggregate) value into
-  // `N` separate `<W x T>` components -- LLVM has no `<W x <N x T>>`. Full
-  // decomposition (a divergent `shufflevector`/`phi`/`select` of vector
-  // type, and aggregates of any kind) is not yet implemented; what *is*
-  // supported, narrower than the design, is:
+  // `N` separate `<W x T>` components -- LLVM has no `<W x <N x T>>`.
+  // Aggregates of any kind remain unimplemented (still diagnosed below), but
+  // roadmap step C3 (feme/docs/Roadmap.md) closed the vector narrowing: the
+  // producer shapes are now
   //
   //  - a chain of constant-index `insertelement`s assembling a vector from
   //    scalar components, the shape `raiseTypedBufferStore` in
-  //    OpRaising.cpp produces (see `widenInsertElement`), and
+  //    OpRaising.cpp produces (see `widenInsertElement`),
   //  - a vector-typed `feme.cpu.resource.*` load call (e.g. a typed-buffer
   //    load's `<N x T>` element), decomposed into `N` widened components
   //    directly as it is scalarized (see `widenResourceCall`'s per-lane
   //    loop), rather than one nested-vector `Widened` entry,
+  //  - a `phi` of vector type, decomposed into `N` per-component `phi`s
+  //    (see `createWidenedVectorPHIStub`/`fillWidenedVectorPHIIncoming`) --
+  //    the shape `feme::cpu::LinearizePass`'s merge blocks give a value
+  //    reconciled across a uniform diamond's arms,
+  //  - a `select` of vector type with a scalar `i1` condition, decomposed
+  //    into `N` per-component `select`s sharing that one widened condition
+  //    (see `widenVectorSelect`) -- a `select` with a per-lane `<N x i1>`
+  //    condition remains diagnosed, since none of the shapes that reach
+  //    this pass need it, and
+  //  - a `shufflevector` (its mask is always a compile-time constant in
+  //    LLVM IR), decomposed at compile time into a selection among its two
+  //    operands' own components with no runtime work at all (see
+  //    `widenShuffleVector`) -- the common HLSL/GLSL swizzle shape, and
+  //  - ordinary elementwise arithmetic/cast (`BinaryOperator`/
+  //    `UnaryOperator`/`CastInst`) over a vector -- the "color = a + b"
+  //    shape shader code is full of -- decomposed into `N` per-component
+  //    scalar-element ops (see `widenVectorElementwise`), exactly the same
+  //    rule `widenElementwise` already applies to a scalar-typed divergent
+  //    value; a `CastInst` whose operand's element count would not line up
+  //    component-for-component with the result (e.g. `bitcast <4 x i32> to
+  //    <2 x i64>`) is excluded, unlike a `BinaryOperator`/`UnaryOperator`,
+  //    whose operand and result element counts are always equal,
   //
-  // each consumed only by another link of an insertelement chain, a
-  // matched resource-store call's stored-value operand, or a constant-index
-  // `extractelement` (see `widenExtractElement`). Verify every divergent
-  // vector value matches one of those two producer shapes, and every use of
-  // one matches one of the three consumer shapes, up front and bail with a
-  // diagnostic, matching every other precondition this pass checks before
-  // mutating anything, rather than let a later step build an invalid
-  // nested vector type and assert.
+  // each consumed only by another link of an insertelement chain, a matched
+  // resource-store call's stored-value operand, an `extractelement` (a
+  // constant index reads a component directly; a non-constant one chains
+  // selects across every component instead, see `widenExtractElement`), a
+  // vector-typed `select`'s true/false operand, a `shufflevector`'s vector
+  // operand, a vector-typed `phi`'s incoming value, or another elementwise
+  // arithmetic/cast operand. Verify every divergent vector value matches
+  // one of those producer shapes, and every use of one matches one of the
+  // consumer shapes, up front and bail with a diagnostic, matching every
+  // other precondition this pass checks before mutating anything, rather
+  // than let a later step build an invalid nested vector type and assert.
   for (Instruction &I : instructions(*OldF)) {
     if (!UI.isDivergentAtDef(&I))
       continue;
@@ -535,48 +566,66 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
       return false;
     }
 
-    // A constant-index `extractelement` is a supported *consumer* of a
-    // decomposed vector (validated from the producer's side below, since
-    // every divergent vector-typed value in this function is visited by
-    // this same loop); its own result is scalar, so it does not fall
-    // through to the vector-producer checks below. A non-constant index
-    // would need a genuinely per-lane-varying gather this milestone does
-    // not support.
-    if (auto *EE = dyn_cast<ExtractElementInst>(&I)) {
-      if (!isa<ConstantInt>(EE->getIndexOperand())) {
-        Ctx.emitError(
-            "feme-cpu-simdize: function '" + OldF->getName() +
-            "' has a divergent value '" + I.getName() +
-            "' from a non-constant-index extractelement; component "
-            "decomposition is not yet supported for this use (roadmap "
-            "milestone 7 deviation)");
-        return false;
-      }
+    // Both a constant-index and a non-constant-index `extractelement` are
+    // supported *consumers* of a decomposed vector (validated from the
+    // producer's side below, since every divergent vector-typed value in
+    // this function is visited by this same loop); its own result is
+    // scalar, so it does not fall through to the vector-producer checks
+    // below.
+    if (isa<ExtractElementInst>(&I))
       continue;
-    }
 
     if (!I.getType()->isVectorTy())
       continue;
 
-    auto *IE = dyn_cast<InsertElementInst>(&I);
-    bool IsInsertChain = IE && isa<ConstantInt>(IE->getOperand(2));
-
-    bool IsVectorLoad = false;
-    if (auto *CI = dyn_cast<CallInst>(&I)) {
+    bool IsSupportedProducer = false;
+    if (auto *IE = dyn_cast<InsertElementInst>(&I)) {
+      IsSupportedProducer = isa<ConstantInt>(IE->getOperand(2));
+    } else if (isa<PHINode>(&I)) {
+      IsSupportedProducer = true;
+    } else if (auto *SI = dyn_cast<SelectInst>(&I)) {
+      IsSupportedProducer = SI->getCondition()->getType()->isIntegerTy(1);
+    } else if (isa<ShuffleVectorInst>(&I)) {
+      IsSupportedProducer = true;
+    } else if (isa<BinaryOperator>(&I) || isa<UnaryOperator>(&I)) {
+      // Ordinary elementwise arithmetic over a vector -- the common
+      // "color = a + b" shape every shader is full of -- decomposes exactly
+      // like a `phi`/`select`/`shufflevector`: one scalar-element op per
+      // component instead of a single illegal `<W x <N x T>>` result (see
+      // `widenVectorElementwise`). Every operand of a `BinaryOperator`/
+      // `UnaryOperator` has the same element count as its result (an LLVM
+      // IR requirement), so components always line up.
+      IsSupportedProducer = true;
+    } else if (auto *Cast = dyn_cast<CastInst>(&I)) {
+      // A `CastInst`'s single operand need not share the result's element
+      // count (`bitcast <4 x i32> to <2 x i64>`, unlike a `BinaryOperator`/
+      // `UnaryOperator`): only accept the shapes `widenVectorElementwise`
+      // can actually line up component-for-component -- a scalar operand
+      // (impossible for a vector-typed cast result, kept for symmetry) or
+      // one with the same element count (e.g. `sitofp <4 x i32> to
+      // <4 x float>`, the common typed-load/store conversion).
+      Value *Op = Cast->getOperand(0);
+      IsSupportedProducer =
+          !Op->getType()->isVectorTy() ||
+          cast<FixedVectorType>(Op->getType())->getNumElements() ==
+              cast<FixedVectorType>(I.getType())->getNumElements();
+    } else if (auto *CI = dyn_cast<CallInst>(&I)) {
       std::optional<MatchedResourceCall> Matched = matchResourceCall(*CI);
       // A `feme.cpu.image.*` sample/load returns `<4 x float>` and is
       // decomposed into per-component wide vectors exactly like a typed
       // buffer load (see `widenImageCall`).
-      IsVectorLoad = (Matched && !Matched->StoredValue) || matchImageCall(*CI);
+      IsSupportedProducer =
+          (Matched && !Matched->StoredValue) || matchImageCall(*CI);
     }
 
-    if (!IsInsertChain && !IsVectorLoad) {
+    if (!IsSupportedProducer) {
       Ctx.emitError(
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent value '" + I.getName() +
-          "' of vector type; only a constant-index insertelement chain or "
-          "a resource/image load is supported (roadmap milestone 7 "
-          "deviation)");
+          "' of vector type; only a constant-index insertelement chain, a "
+          "phi, a scalar-condition select, a shufflevector, elementwise "
+          "arithmetic/cast, or a resource/image load is supported (roadmap "
+          "milestone 7 deviation)");
       return false;
     }
 
@@ -589,16 +638,32 @@ bool FunctionWidener::checkVectorDecompositionSupported() {
         if (Matched && Matched->StoredValue == &I)
           continue;
       }
-      if (auto *UserEE = dyn_cast<ExtractElementInst>(U))
-        if (UserEE->getVectorOperand() == &I &&
-            isa<ConstantInt>(UserEE->getIndexOperand()))
+      if (isa<ExtractElementInst>(U))
+        continue;
+      if (auto *UserSel = dyn_cast<SelectInst>(U))
+        if ((UserSel->getTrueValue() == &I || UserSel->getFalseValue() == &I) &&
+            UserSel->getCondition()->getType()->isIntegerTy(1))
           continue;
+      if (auto *UserShuffle = dyn_cast<ShuffleVectorInst>(U))
+        if (UserShuffle->getOperand(0) == &I || UserShuffle->getOperand(1) == &I)
+          continue;
+      if (isa<PHINode>(U))
+        continue;
+      // A vector-typed elementwise arithmetic/cast user is itself visited
+      // (and validated as a producer) by this same top-level loop, so
+      // accept it here unconditionally rather than re-checking its operand
+      // positions.
+      if (U->getType()->isVectorTy() &&
+          (isa<BinaryOperator>(U) || isa<UnaryOperator>(U) ||
+           isa<CastInst>(U)))
+        continue;
       Ctx.emitError(
           "feme-cpu-simdize: function '" + OldF->getName() +
           "' has a divergent vector value '" + I.getName() +
           "' used outside a supported insertelement-chain/resource-store/"
-          "extractelement pattern; component decomposition is not yet "
-          "supported for this use (roadmap milestone 7 deviation)");
+          "extractelement/select/shufflevector/phi/elementwise pattern; "
+          "component decomposition is not yet supported for this use "
+          "(roadmap milestone 7 deviation)");
       return false;
     }
   }
@@ -687,6 +752,33 @@ Value *FunctionWidener::getWidened(Value *V, IRBuilderBase &Builder) {
   return Splat;
 }
 
+SmallVector<Value *, 4>
+FunctionWidener::getVectorComponents(Value *V, IRBuilderBase &Builder) {
+  // The dual of `getWidened` for a vector-typed value: either read back an
+  // already-decomposed divergent vector's components, or build the widened
+  // form of each of a *uniform* vector's (constant or not) components
+  // directly, one `getWidened` broadcast per lane of the vector itself --
+  // exactly what `widenInsertElement`'s non-decomposed-base case used to do
+  // inline before this helper was factored out to be shared by every other
+  // producer of a decomposed vector (`phi`/`select`/`shufflevector`).
+  if (auto It = WidenedVectorComponents.find(V);
+      It != WidenedVectorComponents.end())
+    return It->second;
+
+  auto *VecTy = cast<FixedVectorType>(V->getType());
+  if (isa<UndefValue>(V))
+    return SmallVector<Value *, 4>(
+        VecTy->getNumElements(),
+        PoisonValue::get(
+            FixedVectorType::get(VecTy->getElementType(), WaveSize)));
+
+  SmallVector<Value *, 4> Components;
+  for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
+    Components.push_back(getWidened(
+        Builder.CreateExtractElement(V, Builder.getInt32(I)), Builder));
+  return Components;
+}
+
 PHINode *FunctionWidener::createWidenedPHIStub(PHINode &PN) {
   Type *WideTy = FixedVectorType::get(PN.getType(), WaveSize);
   PHINode *NewPN = PHINode::Create(WideTy, PN.getNumIncomingValues(),
@@ -695,6 +787,26 @@ PHINode *FunctionWidener::createWidenedPHIStub(PHINode &PN) {
   Widened[&PN] = NewPN;
   ToErase.push_back(&PN);
   return NewPN;
+}
+
+void FunctionWidener::createWidenedVectorPHIStub(PHINode &PN) {
+  // The vector analogue of `createWidenedPHIStub`: one `<W x elemT>` `phi`
+  // stub per component, recorded in `WidenedVectorComponents` rather than a
+  // single (illegal, nested-vector) `Widened` entry -- see
+  // `checkVectorDecompositionSupported`'s file comment for why a divergent
+  // vector `phi` is a supported producer shape.
+  auto *VecTy = cast<FixedVectorType>(PN.getType());
+  Type *WideElemTy = FixedVectorType::get(VecTy->getElementType(), WaveSize);
+  SmallVector<Value *, 4> Components;
+  for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I) {
+    PHINode *NewPN = PHINode::Create(
+        WideElemTy, PN.getNumIncomingValues(),
+        PN.getName() + ".wide" + Twine(I));
+    NewPN->insertBefore(PN.getIterator());
+    Components.push_back(NewPN);
+  }
+  WidenedVectorComponents[&PN] = std::move(Components);
+  ToErase.push_back(&PN);
 }
 
 void FunctionWidener::fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN) {
@@ -711,6 +823,24 @@ void FunctionWidener::fillWidenedPHIIncoming(PHINode &PN, PHINode &NewPN) {
     IRBuilder<> IncomingBuilder(PN.getIncomingBlock(I)->getTerminator());
     NewPN.addIncoming(getWidened(PN.getIncomingValue(I), IncomingBuilder),
                       PN.getIncomingBlock(I));
+  }
+}
+
+void FunctionWidener::fillWidenedVectorPHIIncoming(PHINode &PN) {
+  // The vector analogue of `fillWidenedPHIIncoming`, run in the same third
+  // pass and for the same reason (a loop header's backedge value is not
+  // widened yet during pass 1/2): fill each per-component stub `phi` from
+  // the matching component of the incoming value's own widened form,
+  // whether that incoming value is itself a decomposed divergent vector or
+  // a uniform one `getVectorComponents` broadcasts on demand.
+  SmallVector<Value *, 4> &Components = WidenedVectorComponents[&PN];
+  for (unsigned I = 0, E = PN.getNumIncomingValues(); I != E; ++I) {
+    IRBuilder<> IncomingBuilder(PN.getIncomingBlock(I)->getTerminator());
+    SmallVector<Value *, 4> IncomingComponents =
+        getVectorComponents(PN.getIncomingValue(I), IncomingBuilder);
+    for (unsigned C = 0, CE = Components.size(); C != CE; ++C)
+      cast<PHINode>(Components[C])
+          ->addIncoming(IncomingComponents[C], PN.getIncomingBlock(I));
   }
 }
 
@@ -1399,32 +1529,14 @@ void FunctionWidener::widenInsertElement(InsertElementInst &IE,
                                          IRBuilder<> &Builder) {
   // Decompose a divergent `insertelement` into its widened per-component
   // form (see `checkVectorDecompositionSupported`'s file comment): start
-  // from the base's own components, fill in the inserted element's widened
-  // value at its constant index, and record the result for the next link
-  // (or `widenResourceCall`/`widenImageCall`) to consume -- this
-  // instruction itself never gets a single widened `<W x T>` replacement.
-  //
-  // A base that is not itself a decomposed vector is uniform (a divergent
-  // one would already be in `WidenedVectorComponents`), so each of its
-  // components widens to a splat. Only a `poison`/`undef` base -- what
-  // `raiseTypedBufferStore` starts a fresh chain from -- has no component
-  // values to carry over, and a component the chain never writes really is
-  // poison.
-  auto *VecTy = cast<FixedVectorType>(IE.getType());
-  Value *Base = IE.getOperand(0);
-  SmallVector<Value *, 4> Components;
-  if (auto It = WidenedVectorComponents.find(Base);
-      It != WidenedVectorComponents.end()) {
-    Components = It->second;
-  } else if (isa<UndefValue>(Base)) {
-    Components.assign(VecTy->getNumElements(),
-                      PoisonValue::get(FixedVectorType::get(
-                          VecTy->getElementType(), WaveSize)));
-  } else {
-    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
-      Components.push_back(getWidened(
-          Builder.CreateExtractElement(Base, Builder.getInt32(I)), Builder));
-  }
+  // from the base's own components (`getVectorComponents` handles both a
+  // decomposed divergent base and a uniform one, including `poison`/
+  // `undef`), fill in the inserted element's widened value at its constant
+  // index, and record the result for the next link (or a select/shuffle/
+  // resource-store/`extractelement` consumer) -- this instruction itself
+  // never gets a single widened `<W x T>` replacement.
+  SmallVector<Value *, 4> Components =
+      getVectorComponents(IE.getOperand(0), Builder);
 
   uint64_t Index = cast<ConstantInt>(IE.getOperand(2))->getZExtValue();
   Components[Index] = getWidened(IE.getOperand(1), Builder);
@@ -1436,19 +1548,138 @@ void FunctionWidener::widenInsertElement(InsertElementInst &IE,
 void FunctionWidener::widenExtractElement(ExtractElementInst &EE,
                                           IRBuilder<> &Builder) {
   // The dual of `widenInsertElement`: reads one already-decomposed `<W x
-  // elemT>` component straight out of `WidenedVectorComponents` rather than
+  // elemT>` component straight out of `getVectorComponents` rather than
   // extracting a per-lane scalar out of a single widened vector (there is
   // none -- see `checkVectorDecompositionSupported`'s file comment for why
-  // a divergent vector is never given one). `checkVectorDecompositionSupported`
-  // already verified the vector operand is one of the two decomposed
-  // producer shapes and the index is constant, so the lookup below cannot
-  // fail.
-  auto It = WidenedVectorComponents.find(EE.getVectorOperand());
-  assert(It != WidenedVectorComponents.end() &&
-         "extractelement's vector operand should already be decomposed");
-  uint64_t Index = cast<ConstantInt>(EE.getIndexOperand())->getZExtValue();
-  Widened[&EE] = It->second[Index];
+  // a divergent vector is never given one).
+  SmallVector<Value *, 4> Components =
+      getVectorComponents(EE.getVectorOperand(), Builder);
+
+  if (auto *ConstIdx = dyn_cast<ConstantInt>(EE.getIndexOperand())) {
+    Widened[&EE] = Components[ConstIdx->getZExtValue()];
+    ToErase.push_back(&EE);
+    return;
+  }
+
+  // A non-constant index ("a shuffle or a dynamic index becomes selects
+  // across the components", "Vectors become components, not nested
+  // vectors" in "Phase 4: Widening"): there is no single `<W x elemT>`
+  // vector a real per-lane-varying `extractelement` could read a component
+  // out of, so chain a `select` per component instead, comparing the
+  // widened index against that component's compile-time position.
+  Value *WideIndex = getWidened(EE.getIndexOperand(), Builder);
+  Value *Result = PoisonValue::get(Components[0]->getType());
+  for (unsigned I = 0, E = Components.size(); I != E; ++I) {
+    Value *Splat = ConstantVector::getSplat(
+        ElementCount::getFixed(WaveSize),
+        ConstantInt::get(EE.getIndexOperand()->getType(), I));
+    Value *Match = Builder.CreateICmpEQ(WideIndex, Splat);
+    Result = Builder.CreateSelect(Match, Components[I], Result,
+                                  EE.getName() + ".wide");
+  }
+  Widened[&EE] = Result;
   ToErase.push_back(&EE);
+}
+
+void FunctionWidener::widenShuffleVector(ShuffleVectorInst &SV,
+                                         IRBuilder<> &Builder) {
+  // "A shuffle ... becomes selects across the components" ("Vectors become
+  // components, not nested vectors"): a `shufflevector`'s mask is always a
+  // compile-time constant in LLVM IR, so each output component is simply
+  // one of the two operands' already-widened components, chosen at compile
+  // time -- no runtime select needed, unlike a dynamic-index
+  // `extractelement` (`widenExtractElement`).
+  SmallVector<Value *, 4> LHS = getVectorComponents(SV.getOperand(0), Builder);
+  SmallVector<Value *, 4> RHS = getVectorComponents(SV.getOperand(1), Builder);
+  unsigned NumSrcElts =
+      cast<FixedVectorType>(SV.getOperand(0)->getType())->getNumElements();
+  Type *WideElemTy = FixedVectorType::get(
+      cast<FixedVectorType>(SV.getType())->getElementType(), WaveSize);
+
+  SmallVector<Value *, 4> Components;
+  for (int Idx : SV.getShuffleMask()) {
+    if (Idx < 0) {
+      Components.push_back(PoisonValue::get(WideElemTy));
+      continue;
+    }
+    Components.push_back(static_cast<unsigned>(Idx) < NumSrcElts
+                              ? LHS[Idx]
+                              : RHS[Idx - NumSrcElts]);
+  }
+
+  WidenedVectorComponents[&SV] = std::move(Components);
+  ToErase.push_back(&SV);
+}
+
+void FunctionWidener::widenVectorSelect(SelectInst &SI, IRBuilder<> &Builder) {
+  // A vector-typed `select` with a scalar `i1` condition (the shape
+  // `checkVectorDecompositionSupported` accepts) decomposes into one
+  // `select` per component, all sharing that single widened condition --
+  // "Vectors become components, not nested vectors" applies to a `select`
+  // exactly like a `phi`/`shufflevector`/`insertelement` chain.
+  Value *WideCond = getWidened(SI.getCondition(), Builder);
+  SmallVector<Value *, 4> TrueComponents =
+      getVectorComponents(SI.getTrueValue(), Builder);
+  SmallVector<Value *, 4> FalseComponents =
+      getVectorComponents(SI.getFalseValue(), Builder);
+
+  SmallVector<Value *, 4> Components;
+  for (unsigned I = 0, E = TrueComponents.size(); I != E; ++I)
+    Components.push_back(Builder.CreateSelect(
+        WideCond, TrueComponents[I], FalseComponents[I],
+        SI.getName() + ".wide" + Twine(I)));
+
+  WidenedVectorComponents[&SI] = std::move(Components);
+  ToErase.push_back(&SI);
+}
+
+void FunctionWidener::widenVectorElementwise(Instruction &I,
+                                             IRBuilder<> &Builder) {
+  // The vector analogue of `widenElementwise`'s generic `BinaryOperator`/
+  // `UnaryOperator`/`CastInst` rule: apply the same scalar-element op once
+  // per decomposed component instead of building a single, illegal
+  // `<W x <N x T>>` result -- "Vectors become components, not nested
+  // vectors" covers ordinary elementwise arithmetic on a vector exactly
+  // like a `phi`/`select`/`shufflevector`. Every vector-typed operand of
+  // one of these instructions has the same element count as the result
+  // (an LLVM IR requirement), so all of a multi-operand op's operand
+  // component lists line up component-for-component.
+  SmallVector<SmallVector<Value *, 4>, 2> OperandComponents;
+  for (Value *Op : I.operands())
+    OperandComponents.push_back(
+        Op->getType()->isVectorTy() ? getVectorComponents(Op, Builder)
+                                     : SmallVector<Value *, 4>());
+
+  Type *WideElemTy = FixedVectorType::get(
+      cast<FixedVectorType>(I.getType())->getElementType(), WaveSize);
+  unsigned NumComponents =
+      cast<FixedVectorType>(I.getType())->getNumElements();
+
+  SmallVector<Value *, 4> Components;
+  for (unsigned C = 0; C != NumComponents; ++C) {
+    auto ComponentOperand = [&](unsigned OpIdx) -> Value * {
+      return OperandComponents[OpIdx].empty()
+                 ? getWidened(I.getOperand(OpIdx), Builder)
+                 : OperandComponents[OpIdx][C];
+    };
+    Value *NewV = nullptr;
+    if (auto *BO = dyn_cast<BinaryOperator>(&I)) {
+      NewV = Builder.CreateBinOp(BO->getOpcode(), ComponentOperand(0),
+                                 ComponentOperand(1),
+                                 I.getName() + ".wide" + Twine(C));
+    } else if (auto *Cast = dyn_cast<CastInst>(&I)) {
+      NewV = Builder.CreateCast(Cast->getOpcode(), ComponentOperand(0),
+                                WideElemTy, I.getName() + ".wide" + Twine(C));
+    } else {
+      auto *UO = cast<UnaryOperator>(&I);
+      NewV = Builder.CreateUnOp(UO->getOpcode(), ComponentOperand(0),
+                               I.getName() + ".wide" + Twine(C));
+    }
+    Components.push_back(NewV);
+  }
+
+  WidenedVectorComponents[&I] = std::move(Components);
+  ToErase.push_back(&I);
 }
 
 void FunctionWidener::widenElementwise(Instruction &I, IRBuilder<> &Builder) {
@@ -1684,6 +1915,23 @@ bool FunctionWidener::widenInstruction(Instruction &I, IRBuilder<> &Builder) {
     return true;
   }
 
+  if (auto *SV = dyn_cast<ShuffleVectorInst>(&I)) {
+    widenShuffleVector(*SV, Builder);
+    return true;
+  }
+
+  if (auto *VSel = dyn_cast<SelectInst>(&I); VSel && I.getType()->isVectorTy()) {
+    widenVectorSelect(*VSel, Builder);
+    return true;
+  }
+
+  if (I.getType()->isVectorTy() &&
+      (isa<BinaryOperator>(&I) || isa<UnaryOperator>(&I) ||
+       isa<CastInst>(&I))) {
+    widenVectorElementwise(I, Builder);
+    return true;
+  }
+
   widenElementwise(I, Builder);
   return true;
 }
@@ -1710,8 +1958,12 @@ Function *FunctionWidener::widen() {
         DivergentPHIs.push_back(&PN);
     }
   }
-  for (PHINode *PN : DivergentPHIs)
-    createWidenedPHIStub(*PN);
+  for (PHINode *PN : DivergentPHIs) {
+    if (PN->getType()->isVectorTy())
+      createWidenedVectorPHIStub(*PN);
+    else
+      createWidenedPHIStub(*PN);
+  }
 
   // Pass 2: widen every non-phi instruction. Reverse post-order is
   // sufficient here even for a loop body: only a `phi` can observe a value
@@ -1736,8 +1988,12 @@ Function *FunctionWidener::widen() {
   // Pass 3: fill in every widened PHI's incoming values, now that every
   // instruction anywhere in the function (including one reachable only
   // through a backedge) has its final widened form.
-  for (PHINode *PN : DivergentPHIs)
-    fillWidenedPHIIncoming(*PN, *cast<PHINode>(Widened[PN]));
+  for (PHINode *PN : DivergentPHIs) {
+    if (PN->getType()->isVectorTy())
+      fillWidenedVectorPHIIncoming(*PN);
+    else
+      fillWidenedPHIIncoming(*PN, *cast<PHINode>(Widened[PN]));
+  }
 
   // Every instruction being erased may still be used by another
   // soon-to-be-erased instruction: a loop header's old scalar `phi` and its

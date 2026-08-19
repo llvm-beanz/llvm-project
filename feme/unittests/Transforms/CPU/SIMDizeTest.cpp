@@ -420,7 +420,12 @@ TEST(SIMDizeTest, DecomposesResourceLoadIntoExtractElement) {
   EXPECT_TRUE(FoundWideAdd);
 }
 
-TEST(SIMDizeTest, DiagnosesNonConstantIndexExtractElement) {
+TEST(SIMDizeTest, WidensNonConstantIndexExtractElementIntoSelectChain) {
+  // Roadmap step C3: a non-constant-index `extractelement` out of a
+  // decomposed vector is no longer diagnosed -- "a shuffle or a dynamic
+  // index becomes selects across the components" (FeMeCPUDesign.md's
+  // "Phase 4: Widening") is now implemented as a `select` chain over the
+  // widened index (see `FunctionWidener::widenExtractElement`).
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
     define void @main() #0 {
@@ -434,16 +439,184 @@ TEST(SIMDizeTest, DiagnosesNonConstantIndexExtractElement) {
     attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
   )");
   ASSERT_TRUE(M);
-
-  bool SawError = false;
-  LLVMContext &MCtx = M->getContext();
-  MCtx.setDiagnosticHandlerCallBack(
-      [](const DiagnosticInfo *DI, void *Ctx) {
-        *static_cast<bool *>(Ctx) = DI->getSeverity() == DS_Error;
-      },
-      &SawError);
   runPass(*M);
-  EXPECT_TRUE(SawError);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned WideSelectCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *SI = dyn_cast<SelectInst>(&I))
+      if (SI->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        ++WideSelectCount;
+  }
+  // One select per component, chaining the match against each compile-time
+  // position (0..3).
+  EXPECT_EQ(WideSelectCount, 4u);
+}
+
+TEST(SIMDizeTest, DecomposesVectorPHIAcrossUniformDiamond) {
+  // Roadmap step C3: a divergent `phi` of vector type -- the shape
+  // `feme::cpu::LinearizePass` leaves at a uniform diamond's merge block
+  // reconciling two divergent vector values -- decomposes into one
+  // per-component `phi` instead of being diagnosed (see
+  // `FunctionWidener::createWidenedVectorPHIStub`/
+  // `fillWidenedVectorPHIIncoming`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %cond) #0 {
+    entry:
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      br i1 %cond, label %a, label %b
+    a:
+      %va = insertelement <4 x float> poison, float %tidf, i32 0
+      br label %end
+    b:
+      %vb = insertelement <4 x float> poison, float 1.000000e+00, i32 0
+      br label %end
+    end:
+      %v = phi <4 x float> [ %va, %a ], [ %vb, %b ]
+      %e0 = extractelement <4 x float> %v, i32 0
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned WidePHICount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *PN = dyn_cast<PHINode>(&I))
+      if (PN->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        ++WidePHICount;
+  }
+  // One per-component `phi` for each of the vector's four components.
+  EXPECT_EQ(WidePHICount, 4u);
+}
+
+TEST(SIMDizeTest, DecomposesScalarConditionVectorSelect) {
+  // Roadmap step C3: a vector-typed `select` with a scalar `i1` condition
+  // decomposes into one `select` per component sharing that condition (see
+  // `FunctionWidener::widenVectorSelect`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i1 %cond) #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %va = insertelement <4 x float> poison, float %tidf, i32 0
+      %vb = insertelement <4 x float> poison, float 1.000000e+00, i32 0
+      %v = select i1 %cond, <4 x float> %va, <4 x float> %vb
+      %e0 = extractelement <4 x float> %v, i32 0
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned WideSelectCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *SI = dyn_cast<SelectInst>(&I))
+      if (SI->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        ++WideSelectCount;
+  }
+  EXPECT_EQ(WideSelectCount, 4u);
+}
+
+TEST(SIMDizeTest, DecomposesShuffleVectorAtCompileTime) {
+  // Roadmap step C3: a `shufflevector`'s mask is always a compile-time
+  // constant, so it decomposes with no runtime `select` at all -- each
+  // output component is simply one of the two operands' already-widened
+  // components (see `FunctionWidener::widenShuffleVector`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %v = insertelement <4 x float> poison, float %tidf, i32 0
+      %swz = shufflevector <4 x float> %v, <4 x float> poison,
+                            <4 x i32> <i32 1, i32 0, i32 2, i32 3>
+      %e0 = extractelement <4 x float> %swz, i32 1
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(isa<ShuffleVectorInst>(&I));
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+  }
+}
+
+TEST(SIMDizeTest, DecomposesElementwiseBinaryOpOnTwoDivergentVectors) {
+  // Roadmap step C3: ordinary elementwise arithmetic over two divergent
+  // vectors -- the "color = a + b" shape every shader is full of --
+  // decomposes into one scalar-element op per component instead of being
+  // diagnosed (see `FunctionWidener::widenVectorElementwise`).
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %tidf = sitofp i32 %tid to float
+      %va0 = insertelement <4 x float> poison, float %tidf, i32 0
+      %va1 = insertelement <4 x float> %va0, float 1.000000e+00, i32 1
+      %va2 = insertelement <4 x float> %va1, float 2.000000e+00, i32 2
+      %va3 = insertelement <4 x float> %va2, float 3.000000e+00, i32 3
+      %vb0 = insertelement <4 x float> poison, float 4.000000e+00, i32 0
+      %vb1 = insertelement <4 x float> %vb0, float 5.000000e+00, i32 1
+      %vb2 = insertelement <4 x float> %vb1, float 6.000000e+00, i32 2
+      %vb3 = insertelement <4 x float> %vb2, float 7.000000e+00, i32 3
+      %sum = fadd <4 x float> %va3, %vb3
+      %e0 = extractelement <4 x float> %sum, i32 0
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned WideFAddCount = 0;
+  for (Instruction &I : instructions(F)) {
+    EXPECT_FALSE(I.getType()->isVectorTy() &&
+                 cast<VectorType>(I.getType())->getElementType()->isVectorTy());
+    if (auto *BO = dyn_cast<BinaryOperator>(&I))
+      if (BO->getOpcode() == Instruction::FAdd &&
+          BO->getType() == FixedVectorType::get(Type::getFloatTy(Ctx), 4))
+        ++WideFAddCount;
+  }
+  // One `fadd` per decomposed component.
+  EXPECT_EQ(WideFAddCount, 4u);
 }
 
 // Roadmap step R23's "divergent index" shape: `FunctionWidener::
