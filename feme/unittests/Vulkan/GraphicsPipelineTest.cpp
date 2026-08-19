@@ -128,10 +128,36 @@ protected:
     PassInfo.pSubpasses = &Subpass;
     ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &Pass),
               VK_SUCCESS);
+
+    // (roadmap C4c) A second render pass, identical but for a depth
+    // attachment: used only by tests exercising a dynamic depth/stencil
+    // state, which -- unlike the fixture's other tests -- needs one
+    // declared for the pipeline to legally test/write into.
+    VkAttachmentDescription DepthAttachment{};
+    DepthAttachment.format = VK_FORMAT_D32_SFLOAT;
+    DepthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    DepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    DepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkAttachmentReference DepthRef{
+        1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentDescription DepthAttachments[2] = {Attachment, DepthAttachment};
+    VkSubpassDescription DepthSubpass{};
+    DepthSubpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    DepthSubpass.colorAttachmentCount = 1;
+    DepthSubpass.pColorAttachments = &ColorRef;
+    DepthSubpass.pDepthStencilAttachment = &DepthRef;
+    VkRenderPassCreateInfo DepthPassInfo{};
+    DepthPassInfo.attachmentCount = 2;
+    DepthPassInfo.pAttachments = DepthAttachments;
+    DepthPassInfo.subpassCount = 1;
+    DepthPassInfo.pSubpasses = &DepthSubpass;
+    ASSERT_EQ(vkCreateRenderPass(Device, &DepthPassInfo, nullptr, &PassWithDepth),
+              VK_SUCCESS);
   }
 
   void TearDown() override {
     vkDestroyRenderPass(Device, Pass, nullptr);
+    vkDestroyRenderPass(Device, PassWithDepth, nullptr);
     vkDestroyPipelineLayout(Device, Layout, nullptr);
     vkDestroyDevice(Device, nullptr);
     vkDestroyInstance(Instance, nullptr);
@@ -214,6 +240,7 @@ protected:
   VkDevice Device = VK_NULL_HANDLE;
   VkPipelineLayout Layout = VK_NULL_HANDLE;
   VkRenderPass Pass = VK_NULL_HANDLE;
+  VkRenderPass PassWithDepth = VK_NULL_HANDLE;
 
   VkPipelineShaderStageCreateInfo Stages[2]{};
   VkPipelineVertexInputStateCreateInfo VertexInput{};
@@ -396,6 +423,74 @@ TEST_F(GraphicsPipelineTest, DynamicCullModeAndFrontFaceOverrideStaticState) {
       Graphics->buildExecutorPipeline(Dynamic).getRasterState();
   EXPECT_EQ(Resolved.Cull, feme::graphics::CullMode::FrontAndBack);
   EXPECT_EQ(Resolved.Front, feme::graphics::FrontFace::CounterClockwise);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap C4c) A pipeline declaring `VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE`
+/// (or `_WRITE_ENABLE`) dynamic may still enable the test at draw time even
+/// though its own static `depthTestEnable`/`depthWriteEnable` are both
+/// `VK_FALSE` -- so it still needs a depth attachment in its render target,
+/// exactly like a pipeline whose *static* fields already enable the test.
+TEST_F(GraphicsPipelineTest, DynamicDepthTestEnableRequiresDepthAttachment) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+  // `Info.renderPass` (set by `makeCreateInfo`) is the fixture's
+  // depth-less `Pass`.
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipe, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// The same three dynamic states, this time over `PassWithDepth`: creation
+/// succeeds despite a static depth-stencil state with the test disabled
+/// (and, deliberately, `depthCompareOp` left at its zero-initialized
+/// `VK_COMPARE_OP_NEVER`, which `translateDepthStencilState` never even
+/// looks at while `DynamicStateDepthCompareOp` is set), and
+/// `buildExecutorPipeline` resolves depth state from the per-draw snapshot.
+TEST_F(GraphicsPipelineTest, DynamicDepthStateOverridesStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = PassWithDepth;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  Info.pDepthStencilState = &DepthInfo;
+  VkDynamicState DynStates[3] = {VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE,
+                                 VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+                                 VK_DYNAMIC_STATE_DEPTH_COMPARE_OP};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 3;
+  DynamicInfo.pDynamicStates = DynStates;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  Dynamic.DepthTestEnable = true;
+  Dynamic.DepthWriteEnable = true;
+  Dynamic.DepthCompare = feme::graphics::CompareOp::Greater;
+  feme::graphics::DepthState Resolved =
+      Graphics->buildExecutorPipeline(Dynamic).getDepthState();
+  EXPECT_TRUE(Resolved.TestEnable);
+  EXPECT_TRUE(Resolved.WriteEnable);
+  EXPECT_EQ(Resolved.Compare, feme::graphics::CompareOp::Greater);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);

@@ -79,6 +79,34 @@ feme::graphics::FrontFace toFrontFace(VkFrontFace Front) {
                                           : feme::graphics::FrontFace::CounterClockwise;
 }
 
+/// (roadmap C4c) `vkCmdSetDepthCompareOpEXT`'s payload, converted the same
+/// way `GraphicsPipeline.cpp`'s (static) `mapCompareOp` converts
+/// `VkPipelineDepthStencilStateCreateInfo::depthCompareOp` -- see
+/// `toCullMode`'s comment on why this is a duplicate rather than a shared
+/// helper. An unrecognized value (impossible from a conformant caller)
+/// falls back to `Always`, matching every comparison passing.
+feme::graphics::CompareOp toCompareOp(VkCompareOp Op) {
+  switch (Op) {
+  case VK_COMPARE_OP_NEVER:
+    return feme::graphics::CompareOp::Never;
+  case VK_COMPARE_OP_LESS:
+    return feme::graphics::CompareOp::Less;
+  case VK_COMPARE_OP_EQUAL:
+    return feme::graphics::CompareOp::Equal;
+  case VK_COMPARE_OP_LESS_OR_EQUAL:
+    return feme::graphics::CompareOp::LessEqual;
+  case VK_COMPARE_OP_GREATER:
+    return feme::graphics::CompareOp::Greater;
+  case VK_COMPARE_OP_NOT_EQUAL:
+    return feme::graphics::CompareOp::NotEqual;
+  case VK_COMPARE_OP_GREATER_OR_EQUAL:
+    return feme::graphics::CompareOp::GreaterEqual;
+  case VK_COMPARE_OP_ALWAYS:
+  default:
+    return feme::graphics::CompareOp::Always;
+  }
+}
+
 /// One currently-bound `VkDescriptorSet` slot, as `vkCmdBindDescriptorSets`
 /// leaves it (see "Descriptor Model"): the set itself and the dynamic
 /// offsets supplied for it in that call, consumed in ascending
@@ -1349,6 +1377,18 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
     case RecordedCommand::Kind::SetFrontFace:
       Gfx.Dynamic.Front = toFrontFace(Cmd.FrontFaceValue);
       break;
+    case RecordedCommand::Kind::SetDepthTestEnable:
+      Gfx.Dynamic.DepthTestEnable = Cmd.Bool32Value != VK_FALSE;
+      break;
+    case RecordedCommand::Kind::SetDepthWriteEnable:
+      Gfx.Dynamic.DepthWriteEnable = Cmd.Bool32Value != VK_FALSE;
+      break;
+    case RecordedCommand::Kind::SetDepthCompareOp:
+      Gfx.Dynamic.DepthCompare = toCompareOp(Cmd.DepthCompareOpValue);
+      break;
+    case RecordedCommand::Kind::SetDepthBoundsTestEnable:
+      Gfx.Dynamic.DepthBoundsTestEnable = Cmd.Bool32Value != VK_FALSE;
+      break;
     case RecordedCommand::Kind::Draw:
     case RecordedCommand::Kind::DrawIndexed: {
       if (!BoundGraphicsPipeline)
@@ -1966,6 +2006,42 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFaceEXT(VkCommandBuffer commandBuffer,
                                                 VkFrontFace frontFace) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->setFrontFace(frontFace);
+}
+
+// (roadmap C4c) `vkCmdSetDepthTestEnableEXT`/`vkCmdSetDepthWriteEnableEXT`/
+// `vkCmdSetDepthCompareOpEXT`/`vkCmdSetDepthBoundsTestEnableEXT`: the
+// remaining `VK_EXT_extended_dynamic_state` states with an existing static
+// path (or, for depth bounds, a feature this ICD never advertises as
+// enabled -- see `DynamicStateBits`'s comment).
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthTestEnableEXT(VkCommandBuffer commandBuffer,
+                          VkBool32 depthTestEnable) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setDepthBool(RecordedCommand::Kind::SetDepthTestEnable,
+                     depthTestEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthWriteEnableEXT(VkCommandBuffer commandBuffer,
+                           VkBool32 depthWriteEnable) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setDepthBool(RecordedCommand::Kind::SetDepthWriteEnable,
+                     depthWriteEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthCompareOpEXT(VkCommandBuffer commandBuffer,
+                         VkCompareOp depthCompareOp) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setDepthCompareOp(depthCompareOp);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthBoundsTestEnableEXT(VkCommandBuffer commandBuffer,
+                                VkBool32 depthBoundsTestEnable) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setDepthBool(RecordedCommand::Kind::SetDepthBoundsTestEnable,
+                     depthBoundsTestEnable);
 }
 
 // Four more core commands this ICD must at least resolve (found missing

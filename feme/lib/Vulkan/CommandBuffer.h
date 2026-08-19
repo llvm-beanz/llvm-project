@@ -103,6 +103,10 @@ struct RecordedCommand {
     SetStencilWriteMask,
     SetCullMode,
     SetFrontFace,
+    SetDepthTestEnable,
+    SetDepthWriteEnable,
+    SetDepthCompareOp,
+    SetDepthBoundsTestEnable,
     Draw,
     DrawIndexed,
     DrawIndirect,
@@ -231,6 +235,16 @@ struct RecordedCommand {
   /// `SetStencil*` above.
   VkCullModeFlags CullModeValue = VK_CULL_MODE_NONE;
   VkFrontFace FrontFaceValue = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  /// (roadmap C4c) `SetDepthTestEnable`/`SetDepthWriteEnable`/
+  /// `SetDepthBoundsTestEnable`: `vkCmdSetDepthTestEnableEXT`/
+  /// `vkCmdSetDepthWriteEnableEXT`/`vkCmdSetDepthBoundsTestEnableEXT`'s
+  /// boolean payload (`Bool32Value`, shared across the three since only
+  /// one is ever meaningful per recorded command). `SetDepthCompareOp`:
+  /// `vkCmdSetDepthCompareOpEXT`'s raw `VkCompareOp` (`DepthCompareOpValue`,
+  /// mapped through the same `mapCompareOp` the static path uses when this
+  /// command replays into `Gfx.Dynamic`).
+  VkBool32 Bool32Value = VK_FALSE;
+  VkCompareOp DepthCompareOpValue = VK_COMPARE_OP_ALWAYS;
   /// (V6) `Draw`/`DrawIndexed`: the draw's own arguments, in the same shape
   /// `feme::graphics::DrawCommand` uses (`FirstQuery` above is reused for
   /// neither -- a draw needs all six of these at once).
@@ -572,6 +586,22 @@ public:
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::SetFrontFace;
     Cmd.FrontFaceValue = Front;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap C4c) `vkCmdSetDepthTestEnableEXT`/`vkCmdSetDepthWriteEnableEXT`/
+  /// `vkCmdSetDepthBoundsTestEnableEXT`, sharing one boolean-payload record
+  /// shape distinguished only by \p Op.
+  void setDepthBool(RecordedCommand::Kind Op, VkBool32 Value) {
+    RecordedCommand Cmd;
+    Cmd.Op = Op;
+    Cmd.Bool32Value = Value;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap C4c) `vkCmdSetDepthCompareOpEXT`.
+  void setDepthCompareOp(VkCompareOp Op) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetDepthCompareOp;
+    Cmd.DepthCompareOpValue = Op;
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdDraw`.

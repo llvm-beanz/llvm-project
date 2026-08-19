@@ -448,6 +448,18 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer,
                                                VkCullModeFlags cullMode);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFaceEXT(VkCommandBuffer commandBuffer,
                                                 VkFrontFace frontFace);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthTestEnableEXT(VkCommandBuffer commandBuffer,
+                          VkBool32 depthTestEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthWriteEnableEXT(VkCommandBuffer commandBuffer,
+                           VkBool32 depthWriteEnable);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthCompareOpEXT(VkCommandBuffer commandBuffer,
+                         VkCompareOp depthCompareOp);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetDepthBoundsTestEnableEXT(VkCommandBuffer commandBuffer,
+                                VkBool32 depthBoundsTestEnable);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
                                              float lineWidth);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer,

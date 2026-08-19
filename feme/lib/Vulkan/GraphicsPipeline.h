@@ -96,6 +96,10 @@ enum DynamicStateBits : uint32_t {
   // already isn't (see `translateDepthStencilState`'s rejection of it).
   DynamicStateCullMode = 1u << 6,
   DynamicStateFrontFace = 1u << 7,
+  DynamicStateDepthTestEnable = 1u << 8,
+  DynamicStateDepthWriteEnable = 1u << 9,
+  DynamicStateDepthCompareOp = 1u << 10,
+  DynamicStateDepthBoundsTestEnable = 1u << 11,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -112,6 +116,12 @@ struct DynamicGraphicsState {
   uint32_t StencilWriteMask[2] = {0xFF, 0xFF};
   feme::graphics::CullMode Cull = feme::graphics::CullMode::None;
   feme::graphics::FrontFace Front = feme::graphics::FrontFace::CounterClockwise;
+  bool DepthTestEnable = false;
+  bool DepthWriteEnable = false;
+  feme::graphics::CompareOp DepthCompare = feme::graphics::CompareOp::Less;
+  // `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE`'s own value: stored for
+  // completeness but never consulted (see `DynamicStateBits`'s comment).
+  bool DepthBoundsTestEnable = false;
 };
 
 /// The shareable, compiled part of a graphics `VkPipeline`: the
@@ -188,8 +198,17 @@ public:
     return static_cast<uint32_t>(State.ColorBlends.size());
   }
   uint32_t sampleCount() const { return State.SampleCount; }
+  /// Whether a draw through this pipeline needs a bound depth attachment
+  /// (`CommandBuffer.cpp`'s own draw-time check): true if the *static*
+  /// state enables testing/writes, or if either is dynamic -- a
+  /// dynamically-enabled test needs the same attachment `translate
+  /// DepthStencilState` already required the render target to declare at
+  /// creation time, even though the static booleans it reads by default
+  /// here may both be false.
   bool needsDepthAttachment() const {
-    return State.Depth.TestEnable || State.Depth.WriteEnable;
+    return State.Depth.TestEnable || State.Depth.WriteEnable ||
+           isDynamic(DynamicStateDepthTestEnable) ||
+           isDynamic(DynamicStateDepthWriteEnable);
   }
   bool needsStencilAttachment() const { return State.Stencil.TestEnable; }
   const feme::cpu::CompiledStage &vertexStage() const {

@@ -238,6 +238,14 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateCullMode;
   case VK_DYNAMIC_STATE_FRONT_FACE:
     return DynamicStateFrontFace;
+  case VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE:
+    return DynamicStateDepthTestEnable;
+  case VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE:
+    return DynamicStateDepthWriteEnable;
+  case VK_DYNAMIC_STATE_DEPTH_COMPARE_OP:
+    return DynamicStateDepthCompareOp;
+  case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE:
+    return DynamicStateDepthBoundsTestEnable;
   default:
     return std::nullopt;
   }
@@ -597,25 +605,56 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
 Error translateDepthStencilState(
     const VkPipelineDepthStencilStateCreateInfo *Info,
     const PipelineRenderTargets &Targets, GraphicsPipelineState &Out) {
-  if (!Info)
+  // (roadmap C4c) Whether depth test/write/compare-op is dynamic: per
+  // `VK_EXT_extended_dynamic_state`, a pipeline declaring one of these
+  // dynamic must ignore the corresponding static field entirely (its value
+  // is unspecified/irrelevant), not merely treat it as an initial value --
+  // so neither its boolean fields nor `depthCompareOp` may gate whether
+  // this function accepts or rejects the pipeline. `DepthBoundsTestEnable`
+  // gets the same treatment for the same reason, even though the test
+  // itself is never implemented: see `DynamicStateBits`'s own comment on
+  // why that combination is still safe to accept.
+  bool TestDynamic = (Out.DynamicStates & DynamicStateDepthTestEnable) != 0;
+  bool WriteDynamic = (Out.DynamicStates & DynamicStateDepthWriteEnable) != 0;
+  bool CompareDynamic = (Out.DynamicStates & DynamicStateDepthCompareOp) != 0;
+  bool BoundsDynamic =
+      (Out.DynamicStates & DynamicStateDepthBoundsTestEnable) != 0;
+
+  if (!Info) {
+    // A dynamically-enabled test still needs somewhere to test/write into.
+    if ((TestDynamic || WriteDynamic) &&
+        (!Targets.DepthStencil ||
+         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil)))
+      return createStringError(inconvertibleErrorCode(),
+                               "depth testing/writes need a depth attachment "
+                               "in the pipeline's render target");
     return Error::success();
-  if (Info->depthBoundsTestEnable)
+  }
+  if (!BoundsDynamic && Info->depthBoundsTestEnable)
     return createStringError(inconvertibleErrorCode(),
                              "the depth bounds test is not implemented");
 
-  if (Info->depthTestEnable || Info->depthWriteEnable) {
+  bool MayTestOrWrite = (TestDynamic || WriteDynamic) ||
+                        (Info->depthTestEnable || Info->depthWriteEnable);
+  if (MayTestOrWrite) {
     if (!Targets.DepthStencil ||
         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil))
       return createStringError(inconvertibleErrorCode(),
                                "depth testing/writes need a depth attachment "
                                "in the pipeline's render target");
-    std::optional<CompareOp> Compare = mapCompareOp(Info->depthCompareOp);
-    if (!Compare)
-      return createStringError(inconvertibleErrorCode(),
-                               "unrecognized depth compare operation");
     Out.Depth.TestEnable = Info->depthTestEnable != VK_FALSE;
     Out.Depth.WriteEnable = Info->depthWriteEnable != VK_FALSE;
-    Out.Depth.Compare = *Compare;
+    if (CompareDynamic) {
+      // Ignored per the comment above; the resolved value always comes
+      // from `DynamicGraphicsState::DepthCompare` instead.
+      Out.Depth.Compare = CompareOp::Always;
+    } else {
+      std::optional<CompareOp> Compare = mapCompareOp(Info->depthCompareOp);
+      if (!Compare)
+        return createStringError(inconvertibleErrorCode(),
+                                 "unrecognized depth compare operation");
+      Out.Depth.Compare = *Compare;
+    }
   }
 
   if (!Info->stencilTestEnable)
@@ -927,6 +966,13 @@ Error translateFixedFunctionState(
   Result.SampleCount = Targets->SampleCount;
 
   const VkPhysicalDeviceLimits &Limits = DeviceInfo.Properties.limits;
+  // Dynamic state is translated first: `translateDepthStencilState` below
+  // needs to know whether `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE` was
+  // declared before it can decide whether the static
+  // `depthBoundsTestEnable` field is meaningful (see that function's own
+  // comment).
+  if (Error E = translateDynamicState(CreateInfo.pDynamicState, Result))
+    return E;
   if (Error E =
           translateVertexInput(CreateInfo.pVertexInputState, Limits, Result))
     return E;
@@ -940,8 +986,6 @@ Error translateFixedFunctionState(
     return E;
   if (Error E = translateColorBlendState(CreateInfo.pColorBlendState, *Targets,
                                          Result))
-    return E;
-  if (Error E = translateDynamicState(CreateInfo.pDynamicState, Result))
     return E;
 
   if (const VkPipelineMultisampleStateCreateInfo *Multisample =
@@ -1104,9 +1148,19 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
   if (isDynamic(DynamicStateFrontFace))
     ResolvedRaster.Front = Dynamic.Front;
 
+  feme::graphics::DepthState ResolvedDepth = State.Depth;
+  if (isDynamic(DynamicStateDepthTestEnable))
+    ResolvedDepth.TestEnable = Dynamic.DepthTestEnable;
+  if (isDynamic(DynamicStateDepthWriteEnable))
+    ResolvedDepth.WriteEnable = Dynamic.DepthWriteEnable;
+  if (isDynamic(DynamicStateDepthCompareOp))
+    ResolvedDepth.Compare = Dynamic.DepthCompare;
+  // `Dynamic.DepthBoundsTestEnable` is intentionally never read here: see
+  // `DynamicStateBits`'s comment on why it can only ever be `VK_FALSE`.
+
   return feme::graphics::GraphicsPipeline(
       State.Artifact->VertexStage, State.Artifact->FragmentStage,
-      State.Topology, ResolvedRaster, State.Depth,
+      State.Topology, ResolvedRaster, ResolvedDepth,
       feme::graphics::BlendMode::Replace, State.SampleCount, State.Attachments,
       ResolvedStencil, State.ColorBlends, State.LogicOpEnable, State.Logic,
       isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants
