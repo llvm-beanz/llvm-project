@@ -7,16 +7,15 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `3f87f5b1fb73` (roadmap C4c, "Graphics pipeline state
-  breadth": all 12 `VK_EXT_extended_dynamic_state` dynamic states
-  implemented and the extension advertised -- see "Roadmap C4c: measured
-  impact" below).
+- FeMe revision: `f91258124320` (roadmap C4e, "Dual-source blend factors":
+  the last item in C4's "Graphics pipeline state breadth" row -- see
+  "Roadmap C4d/C4e: measured impact" below).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
   robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
   empty image format lists" -- see "Deviations from a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1470 passed, 1 unsupported.
+- `check-feme`: 1478 passed, 1 unsupported.
 
 ## Headline
 
@@ -295,7 +294,9 @@ immediately afterward, completed cleanly (7,445 passed / 287 failed /
 259,490 not supported / 267,222 total, the same numbers the C1 report
 recorded). As before, the clean standalone run's numbers are what this
 report's totals use, and the flake is recorded here rather than silently
-worked around.
+worked around. (This same flake, and the identical standalone-clean
+numbers, recurred once more in the C4d/C4e pass below -- see that
+section's own headline.)
 
 ## Roadmap C4c: measured impact
 
@@ -480,6 +481,79 @@ below their required minimums, and `dEQP-VK.api.driver_properties.*` fails
 four cases on `VkPhysicalDeviceDriverProperties` (no registered
 `VkDriverId`, no conformance version, non-null-terminated name/info
 strings).
+
+## Roadmap C4d/C4e: measured impact
+
+Roadmap C4 is now closed in full: point/line/line-strip/triangle-fan
+topologies (C4d) and dual-source blend factors (C4e), the row's last two
+open items, are both implemented -- see FeMeGraphicsDesign.md's updated
+status notes.
+
+**Headline is byte-for-byte identical to the previous edition's**
+(10,560 passed, 27,018 failed, 3,199,421 not supported, same 3,237,000
+total; the same 28 groups have zero failures). Unlike C4c's dynamic-state
+work, neither C4d nor C4e moved a single case, and both root causes are
+directly attributable rather than a mystery:
+
+- **Dual-source blend (C4e): every one of the 32,312
+  `dEQP-VK.pipeline.*.blend.dual_source.*` cases is `NotSupported`**, and
+  all 32,312 fail the same check, at the same source line, before ever
+  reaching pipeline creation: `NotSupported (VK_FORMAT_<X> does not
+  support blending at vktPipelineBlendTests.cpp:73)` -- for every format
+  the case list tries, including `R8G8B8A8_UNORM`, the one format this
+  ICD's blend path actually implements. This is the exact "necessary
+  companion change" gap the C1 measured-impact section above already
+  named and deliberately left unfixed: `vkGetPhysicalDeviceFormatProperties`/
+  `vkGetPhysicalDeviceFormatProperties2` (`EntryPoints.cpp`) still
+  unconditionally report an all-zero `VkFormatProperties` for every
+  format, so `deqp-vk`'s own format-capability check rejects every
+  dual-source-blend case before any of `executeDraws`' new `FSColor1`
+  path, `mapBlendFactor`'s new `VK_BLEND_FACTOR_SRC1_*` cases, or the
+  newly-advertised `dualSrcBlend` feature is ever exercised. Fixing the
+  format-properties stub is out of this milestone's scope (the C1 section
+  above already found doing so surfaces three unrelated crashes elsewhere
+  that need their own investigation first), so this is recorded as a
+  measured, understood zero rather than a silent one.
+
+- **New topologies (C4d): every CTS case that reaches a point/line/
+  triangle-fan pipeline is blocked by an unrelated, pre-existing stacked
+  blocker, and the small number that reach real execution fail identically
+  to an already-implemented topology (not a regression).**
+  `dEQP-VK.rasterization.provoking_vertex.draw.default.{line_list,
+  line_strip,triangle_fan,triangle_list,triangle_strip}` all fail
+  pipeline creation with the same `feme-cpu-simdize` "divergent vector
+  value... used outside a supported... pattern" diagnostic (roadmap C8's
+  own bucket) regardless of topology -- confirming this is a stage-IO
+  compilation gap the shader itself hits, not anything topology-specific.
+  `dEQP-VK.pipeline.*.depth.format.d16_unorm.compare_ops.point_list_*`
+  (and the equivalent for every other topology) are `NotSupported` on
+  `VK_FORMAT_D16_UNORM` alone, before topology is ever considered. The one
+  case that *does* reach real image comparison for a new topology,
+  `dEQP-VK.pipeline.monolithic.input_assembly.primitive_restart.
+  index_type_uint16.restart_disabled_{line_strip,triangle_fan}`, fails
+  (`Fail (Fail)`, a genuine rendered-image mismatch) -- but so does
+  `restart_disabled_triangle_strip`, a topology this ICD implemented long
+  before C4d, with the identical result. Since the pre-existing topology
+  fails exactly the same way the new ones do, this is not a defect C4d
+  introduced; it is a pre-existing gap in this Amber-test bucket (not yet
+  root-caused) that happens to also cover the newly-implemented
+  topologies. `dEQP-VK.rasterization.line_continuity.line-strip`
+  similarly reaches real execution and fails a genuine image comparison
+  (line continuity at strip joints is not modelled by the fixed-width
+  quad-expansion approach FeMeGraphicsDesign.md's status note already
+  flags as a deviation) -- a real, if narrow, correctness gap worth
+  tracking separately rather than folding into this measurement's
+  "clean rejection" framing, since it is the one case in this whole
+  measurement where a pipeline actually renders and produces a wrong
+  image rather than failing to create at all.
+
+Both findings reinforce the same "stacked blockers" pattern C1's and
+C3's own measured-impact sections already established: a correctly
+implemented, unit-tested piece of state translation can still move zero
+real CTS cases when an unrelated, earlier-in-the-pipeline gap (a
+format-properties stub, a stage-IO compilation limitation, an
+unadvertised depth format) rejects the case before the new code path is
+ever reached.
 
 ## What the 3,199,421 `Not supported` results mean
 
