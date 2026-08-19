@@ -3694,13 +3694,19 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
     return translateMad(Op, Mad.getDst(), Mad.getLhs(), Mad.getRhs(),
                         Mad.getAcc(), Saturate);
   if (auto S = llvm::dyn_cast<dxsa::Sample>(Op)) {
-    SampleForm Form{DXILOp::Sample, "sample", {}, /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::Sample;
+    Form.Name = "sample";
+    Form.Clamp = true;
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleClampFeedback>(Op)) {
-    SampleForm Form{DXILOp::Sample, "sample", {}, /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::Sample;
+    Form.Name = "sample";
+    Form.Clamp = true;
     Form.ClampValue = S.getClampFeedback().getLodClamp();
     Form.Feedback = S.getClampFeedback().getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
@@ -3708,32 +3714,40 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleL>(Op)) {
-    SampleForm Form{DXILOp::SampleLevel, "sampleLevel", {S.getSrcLod()}};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleLevel;
+    Form.Name = "sampleLevel";
+    Form.Extra = {S.getSrcLod()};
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleLFeedback>(Op)) {
-    SampleForm Form{DXILOp::SampleLevel, "sampleLevel", {S.getSrcLod()}};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleLevel;
+    Form.Name = "sampleLevel";
+    Form.Extra = {S.getSrcLod()};
     Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleB>(Op)) {
-    SampleForm Form{DXILOp::SampleBias,
-                    "sampleBias",
-                    {S.getSrcLodBias()},
-                    /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleBias;
+    Form.Name = "sampleBias";
+    Form.Extra = {S.getSrcLodBias()};
+    Form.Clamp = true;
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleBClampFeedback>(Op)) {
-    SampleForm Form{DXILOp::SampleBias,
-                    "sampleBias",
-                    {S.getSrcLodBias()},
-                    /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleBias;
+    Form.Name = "sampleBias";
+    Form.Extra = {S.getSrcLodBias()};
+    Form.Clamp = true;
     Form.ClampValue = S.getClampFeedback().getLodClamp();
     Form.Feedback = S.getClampFeedback().getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
@@ -3741,14 +3755,20 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleD>(Op)) {
-    SampleForm Form{DXILOp::SampleGrad, "sampleGrad", {}, /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleGrad;
+    Form.Name = "sampleGrad";
+    Form.Clamp = true;
     Form.Gradients = {S.getSrcXDerivatives(), S.getSrcYDerivatives()};
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleDClampFeedback>(Op)) {
-    SampleForm Form{DXILOp::SampleGrad, "sampleGrad", {}, /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleGrad;
+    Form.Name = "sampleGrad";
+    Form.Clamp = true;
     Form.Gradients = {S.getSrcXDerivatives(), S.getSrcYDerivatives()};
     Form.ClampValue = S.getClampFeedback().getLodClamp();
     Form.Feedback = S.getClampFeedback().getFeedback();
@@ -3757,19 +3777,21 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleC>(Op)) {
-    SampleForm Form{DXILOp::SampleCmp,
-                    "sampleCmp",
-                    {S.getSrcReferenceValue()},
-                    /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleCmp;
+    Form.Name = "sampleCmp";
+    Form.Extra = {S.getSrcReferenceValue()};
+    Form.Clamp = true;
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleCClampFeedback>(Op)) {
-    SampleForm Form{DXILOp::SampleCmp,
-                    "sampleCmp",
-                    {S.getSrcReferenceValue()},
-                    /*Clamp=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleCmp;
+    Form.Name = "sampleCmp";
+    Form.Extra = {S.getSrcReferenceValue()};
+    Form.Clamp = true;
     Form.ClampValue = S.getClampFeedback().getLodClamp();
     Form.Feedback = S.getClampFeedback().getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
@@ -3777,75 +3799,85 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleCLZ>(Op)) {
-    SampleForm Form{DXILOp::SampleCmpLevelZero,
-                    "sampleCmpLevelZero",
-                    {S.getSrcReferenceValue()}};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleCmpLevelZero;
+    Form.Name = "sampleCmpLevelZero";
+    Form.Extra = {S.getSrcReferenceValue()};
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::SampleCLZFeedback>(Op)) {
-    SampleForm Form{DXILOp::SampleCmpLevelZero,
-                    "sampleCmpLevelZero",
-                    {S.getSrcReferenceValue()}};
+    SampleForm Form;
+    Form.Op = DXILOp::SampleCmpLevelZero;
+    Form.Name = "sampleCmpLevelZero";
+    Form.Extra = {S.getSrcReferenceValue()};
     Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4>(Op)) {
-    SampleForm Form{DXILOp::TextureGather, "textureGather",  {},
-                    /*Clamp=*/false,       /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGather;
+    Form.Name = "textureGather";
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4Feedback>(Op)) {
-    SampleForm Form{DXILOp::TextureGather, "textureGather",  {},
-                    /*Clamp=*/false,       /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGather;
+    Form.Name = "textureGather";
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4C>(Op)) {
-    SampleForm Form{DXILOp::TextureGatherCmp,
-                    "textureGatherCmp",
-                    {S.getSrcReferenceValue()},
-                    /*Clamp=*/false,
-                    /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGatherCmp;
+    Form.Name = "textureGatherCmp";
+    Form.Extra = {S.getSrcReferenceValue()};
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4CFeedback>(Op)) {
-    SampleForm Form{DXILOp::TextureGatherCmp,
-                    "textureGatherCmp",
-                    {S.getSrcReferenceValue()},
-                    /*Clamp=*/false,
-                    /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGatherCmp;
+    Form.Name = "textureGatherCmp";
+    Form.Extra = {S.getSrcReferenceValue()};
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            S.getOffset().value_or(SampleOffsetAttr()), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4PO>(Op)) {
-    SampleForm Form{DXILOp::TextureGather, "textureGather",  {},
-                    /*Clamp=*/false,       /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGather;
+    Form.Name = "textureGather";
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     Form.OffsetSource = S.getSrcOffset();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            SampleOffsetAttr(), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4POFeedback>(Op)) {
-    SampleForm Form{DXILOp::TextureGather, "textureGather",  {},
-                    /*Clamp=*/false,       /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGather;
+    Form.Name = "textureGather";
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     Form.OffsetSource = S.getSrcOffset();
     Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
@@ -3853,24 +3885,24 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            SampleOffsetAttr(), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4POC>(Op)) {
-    SampleForm Form{DXILOp::TextureGatherCmp,
-                    "textureGatherCmp",
-                    {S.getSrcReferenceValue()},
-                    /*Clamp=*/false,
-                    /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGatherCmp;
+    Form.Name = "textureGatherCmp";
+    Form.Extra = {S.getSrcReferenceValue()};
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     Form.OffsetSource = S.getSrcOffset();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
                            S.getSrcResource(), S.getSrcSampler(),
                            SampleOffsetAttr(), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::Gather4POCFeedback>(Op)) {
-    SampleForm Form{DXILOp::TextureGatherCmp,
-                    "textureGatherCmp",
-                    {S.getSrcReferenceValue()},
-                    /*Clamp=*/false,
-                    /*Channel=*/true,
-                    /*NarrowOffsets=*/true};
+    SampleForm Form;
+    Form.Op = DXILOp::TextureGatherCmp;
+    Form.Name = "textureGatherCmp";
+    Form.Extra = {S.getSrcReferenceValue()};
+    Form.Channel = true;
+    Form.NarrowOffsets = true;
     Form.OffsetSource = S.getSrcOffset();
     Form.Feedback = S.getFeedback();
     return translateSample(Op, S.getDst(), S.getSrcAddress(),
@@ -3878,7 +3910,9 @@ bool Translator::translateInstruction(mlir::Operation *Op) {
                            SampleOffsetAttr(), Form);
   }
   if (auto S = llvm::dyn_cast<dxsa::LOD>(Op)) {
-    SampleForm Form{DXILOp::CalculateLOD, "calculateLOD", {}};
+    SampleForm Form;
+    Form.Op = DXILOp::CalculateLOD;
+    Form.Name = "calculateLOD";
     return translateSample(Op, S.getDst(), S.getSrc0(), S.getSrc1(),
                            S.getSrc2(), SampleOffsetAttr(), Form);
   }
