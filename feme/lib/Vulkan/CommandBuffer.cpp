@@ -132,6 +132,26 @@ feme::graphics::StencilOp toStencilOp(VkStencilOp Op) {
   }
 }
 
+/// (roadmap C4c) `vkCmdSetPrimitiveTopologyEXT`'s payload, converted the
+/// same triangle-class-only way `GraphicsPipeline.cpp`'s (static)
+/// `mapTopology` converts `VkPipelineInputAssemblyStateCreateInfo::
+/// topology` -- see `toCullMode`'s comment on why this is a duplicate.
+/// `std::nullopt` here means "outside the triangle class this executor
+/// implements"; see `DynamicGraphicsState::Topology`'s own comment on why
+/// that is only ever a defensive case, never one a conformant caller
+/// actually reaches.
+std::optional<feme::graphics::PrimitiveTopology>
+toDynamicTopology(VkPrimitiveTopology Topology) {
+  switch (Topology) {
+  case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+    return feme::graphics::PrimitiveTopology::TriangleList;
+  case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+    return feme::graphics::PrimitiveTopology::TriangleStrip;
+  default:
+    return std::nullopt;
+  }
+}
+
 /// One currently-bound `VkDescriptorSet` slot, as `vkCmdBindDescriptorSets`
 /// leaves it (see "Descriptor Model"): the set itself and the dynamic
 /// offsets supplied for it in that call, consumed in ascending
@@ -1430,6 +1450,9 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
         Op.Compare = toCompareOp(Cmd.StencilCompareOpValue);
       }
       break;
+    case RecordedCommand::Kind::SetPrimitiveTopology:
+      Gfx.Dynamic.Topology = toDynamicTopology(Cmd.PrimitiveTopologyValue);
+      break;
     case RecordedCommand::Kind::Draw:
     case RecordedCommand::Kind::DrawIndexed: {
       if (!BoundGraphicsPipeline)
@@ -2124,6 +2147,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(
     VkCompareOp compareOp) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setStencilOp(faceMask, failOp, passOp, depthFailOp, compareOp);
+}
+
+// (roadmap C4c) `vkCmdSetPrimitiveTopologyEXT`: the last
+// `VK_EXT_extended_dynamic_state` state with an existing static path
+// (restricted to the triangle class this executor already implements --
+// see `DynamicStateBits`'s comment on `DynamicStatePrimitiveTopology`).
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetPrimitiveTopologyEXT(VkCommandBuffer commandBuffer,
+                           VkPrimitiveTopology primitiveTopology) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setPrimitiveTopology(primitiveTopology);
 }
 
 // Four more core commands this ICD must at least resolve (found missing

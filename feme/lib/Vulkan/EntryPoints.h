@@ -474,6 +474,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(
     VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
     VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
     VkCompareOp compareOp);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetPrimitiveTopologyEXT(VkCommandBuffer commandBuffer,
+                           VkPrimitiveTopology primitiveTopology);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
                                              float lineWidth);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer,

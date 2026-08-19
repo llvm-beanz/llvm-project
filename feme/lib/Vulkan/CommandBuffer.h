@@ -109,6 +109,7 @@ struct RecordedCommand {
     SetDepthBoundsTestEnable,
     SetStencilTestEnable,
     SetStencilOp,
+    SetPrimitiveTopology,
     Draw,
     DrawIndexed,
     DrawIndirect,
@@ -254,6 +255,12 @@ struct RecordedCommand {
   VkStencilOp StencilPassOpValue = VK_STENCIL_OP_KEEP;
   VkStencilOp StencilDepthFailOpValue = VK_STENCIL_OP_KEEP;
   VkCompareOp StencilCompareOpValue = VK_COMPARE_OP_ALWAYS;
+  /// (roadmap C4c) `SetPrimitiveTopology`: `vkCmdSetPrimitiveTopologyEXT`'s
+  /// raw payload, mapped through the same triangle-class-only conversion
+  /// `mapTopology` (GraphicsPipeline.cpp) uses statically when this
+  /// command replays into `Gfx.Dynamic`.
+  VkPrimitiveTopology PrimitiveTopologyValue =
+      VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
   /// (V6) `Draw`/`DrawIndexed`: the draw's own arguments, in the same shape
   /// `feme::graphics::DrawCommand` uses (`FirstQuery` above is reused for
   /// neither -- a draw needs all six of these at once).
@@ -632,6 +639,13 @@ public:
     Cmd.StencilPassOpValue = PassOp;
     Cmd.StencilDepthFailOpValue = DepthFailOp;
     Cmd.StencilCompareOpValue = CompareOp;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap C4c) `vkCmdSetPrimitiveTopologyEXT`.
+  void setPrimitiveTopology(VkPrimitiveTopology Topology) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetPrimitiveTopology;
+    Cmd.PrimitiveTopologyValue = Topology;
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdDraw`.

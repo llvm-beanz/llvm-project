@@ -259,6 +259,8 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateStencilTestEnable;
   case VK_DYNAMIC_STATE_STENCIL_OP:
     return DynamicStateStencilOp;
+  case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY:
+    return DynamicStatePrimitiveTopology;
   default:
     return std::nullopt;
   }
@@ -1216,9 +1218,14 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
   // `Dynamic.DepthBoundsTestEnable` is intentionally never read here: see
   // `DynamicStateBits`'s comment on why it can only ever be `VK_FALSE`.
 
+  feme::graphics::PrimitiveTopology ResolvedTopology =
+      (isDynamic(DynamicStatePrimitiveTopology) && Dynamic.Topology)
+          ? *Dynamic.Topology
+          : State.Topology;
+
   return feme::graphics::GraphicsPipeline(
       State.Artifact->VertexStage, State.Artifact->FragmentStage,
-      State.Topology, ResolvedRaster, ResolvedDepth,
+      ResolvedTopology, ResolvedRaster, ResolvedDepth,
       feme::graphics::BlendMode::Replace, State.SampleCount, State.Attachments,
       ResolvedStencil, State.ColorBlends, State.LogicOpEnable, State.Logic,
       isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants

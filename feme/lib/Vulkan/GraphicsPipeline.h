@@ -42,6 +42,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace feme {
@@ -102,6 +103,18 @@ enum DynamicStateBits : uint32_t {
   DynamicStateDepthBoundsTestEnable = 1u << 11,
   DynamicStateStencilTestEnable = 1u << 12,
   DynamicStateStencilOp = 1u << 13,
+  // `VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY`: unlike every other state above,
+  // Vulkan does *not* say the pipeline's static `topology` becomes
+  // irrelevant once this is dynamic -- it still fixes the topology
+  // *class* (point/line/triangle) every value set at draw time must
+  // share. Since `mapTopology` only ever accepts the triangle class
+  // (`TriangleList`/`TriangleStrip`), that requirement is automatically
+  // satisfied here: `translateFixedFunctionState`'s existing topology
+  // translation is untouched by this state at all.
+  DynamicStatePrimitiveTopology = 1u << 14,
+  // `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT`/`_SCISSOR_WITH_COUNT` reuse
+  // `DynamicStateViewport`/`DynamicStateScissor` above rather than adding
+  // their own bits -- see `mapDynamicState`'s comment.
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -137,6 +150,15 @@ struct DynamicGraphicsState {
     feme::graphics::CompareOp Compare = feme::graphics::CompareOp::Always;
   };
   StencilOpState StencilOps[2]; // [front, back]
+  /// `vkCmdSetPrimitiveTopologyEXT`'s payload, already mapped through
+  /// `mapTopology` -- `std::nullopt` when the value it was last set to is
+  /// outside the triangle class this executor implements (a pipeline may
+  /// only legally do this if its own static topology is also triangle-
+  /// class, so a conformant caller never actually produces `nullopt`
+  /// here; `buildExecutorPipeline` falls back to the pipeline's own
+  /// static topology in that defensive case rather than rendering with an
+  /// unspecified one).
+  std::optional<feme::graphics::PrimitiveTopology> Topology;
 };
 
 /// The shareable, compiled part of a graphics `VkPipeline`: the

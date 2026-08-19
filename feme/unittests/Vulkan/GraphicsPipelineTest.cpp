@@ -611,6 +611,46 @@ TEST_F(GraphicsPipelineTest, ViewportWithCountIsTheSameDynamicStateAsViewport) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap C4c) `VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY`, restricted to the
+/// triangle class this executor implements: a pipeline created with
+/// `TriangleList` may resolve to `TriangleStrip` at draw time (still the
+/// same class), and an out-of-class dynamic value (a defensive case no
+/// conformant caller reaches, per `DynamicGraphicsState::Topology`'s own
+/// comment) falls back to the pipeline's own static topology rather than
+/// resolving to something unspecified.
+TEST_F(GraphicsPipelineTest, DynamicPrimitiveTopologySwitchesWithinTriangleClass) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkDynamicState Dynamic = VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY;
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 1;
+  DynamicInfo.pDynamicStates = &Dynamic;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dyn;
+  Dyn.Topology = feme::graphics::PrimitiveTopology::TriangleStrip;
+  EXPECT_EQ(Graphics->buildExecutorPipeline(Dyn).getTopology(),
+            feme::graphics::PrimitiveTopology::TriangleStrip);
+
+  // The defensive fallback: an unmapped dynamic value (`nullopt`) resolves
+  // to the pipeline's own static topology (`TriangleList`, per
+  // `makeCreateInfo`) instead.
+  DynamicGraphicsState Fallback;
+  EXPECT_EQ(Graphics->buildExecutorPipeline(Fallback).getTopology(),
+            feme::graphics::PrimitiveTopology::TriangleList);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A fragment stage writing no `SV_Target0` cannot fill the render pass's
 /// one color attachment; the mismatch is a creation failure, not a draw-time
 /// surprise.
