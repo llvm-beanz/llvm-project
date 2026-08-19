@@ -272,6 +272,24 @@ std::optional<uint64_t> getConstInt(const Value *V) {
   return std::nullopt;
 }
 
+/// Returns \p V read as a constant struct with exactly \p NumFields fields,
+/// or nullptr if it isn't one. `CreateHandleFromBinding`'s `%dx.types.
+/// ResBind`/`AnnotateHandle`'s `%dx.types.ResourceProperties` struct operands
+/// are `ConstantStruct`s in general, but LLVM folds an *all-zero* struct
+/// literal (e.g. the very common `t0`/`u0`/space-0 binding, whose `LowerBound`
+/// /`UpperBound`/`Space` fields -- or `s0`'s `Word0`/`Word1` -- are then all
+/// zero) into a `ConstantAggregateZero` instead, a different `Constant`
+/// subclass `dyn_cast<ConstantStruct>` alone does not recognize. Callers read
+/// fields back out via `Constant::getAggregateElement`, which (unlike
+/// `ConstantStruct::getOperand`) already handles both subclasses uniformly.
+Constant *getConstStruct(Value *V, unsigned NumFields) {
+  auto *C = dyn_cast<Constant>(V);
+  auto *Ty = C ? dyn_cast<StructType>(C->getType()) : nullptr;
+  if (!Ty || Ty->getNumElements() != NumFields)
+    return nullptr;
+  return C;
+}
+
 /// The `Barrier` DXIL op's (opcode 80) constant mode operand -> the LLVM
 /// intrinsic it was lowered from (see `Barrier`'s `intrinsics` list in
 /// `llvm/lib/Target/DirectX/DXIL.td`, which enumerates exactly these six
@@ -801,17 +819,20 @@ bool raiseResourceHandleFromBinding(CallInst &AnnotateCI) {
   if (HandleOpcode != 217)
     return false;
 
-  auto *ResBind = dyn_cast<ConstantStruct>(HandleCI->getArgOperand(1));
-  auto *ResProps = dyn_cast<ConstantStruct>(AnnotateCI.getArgOperand(2));
-  if (!ResBind || ResBind->getNumOperands() != 4 || !ResProps ||
-      ResProps->getNumOperands() != 2)
+  Constant *ResBind = getConstStruct(HandleCI->getArgOperand(1), 4);
+  Constant *ResProps = getConstStruct(AnnotateCI.getArgOperand(2), 2);
+  if (!ResBind || !ResProps)
     return false;
 
-  std::optional<uint64_t> LowerBound = getConstInt(ResBind->getOperand(0));
-  std::optional<uint64_t> UpperBound = getConstInt(ResBind->getOperand(1));
-  std::optional<uint64_t> Space = getConstInt(ResBind->getOperand(2));
-  std::optional<uint64_t> Word0 = getConstInt(ResProps->getOperand(0));
-  std::optional<uint64_t> Word1 = getConstInt(ResProps->getOperand(1));
+  std::optional<uint64_t> LowerBound =
+      getConstInt(ResBind->getAggregateElement(0u));
+  std::optional<uint64_t> UpperBound =
+      getConstInt(ResBind->getAggregateElement(1u));
+  std::optional<uint64_t> Space = getConstInt(ResBind->getAggregateElement(2u));
+  std::optional<uint64_t> Word0 =
+      getConstInt(ResProps->getAggregateElement(0u));
+  std::optional<uint64_t> Word1 =
+      getConstInt(ResProps->getAggregateElement(1u));
   if (!LowerBound || !UpperBound || !Space || !Word0 || !Word1)
     return false;
 
@@ -890,12 +911,14 @@ bool raiseResourceHandleFromHeap(CallInst &AnnotateCI) {
   if (HandleOpcode != 218)
     return false;
 
-  auto *ResProps = dyn_cast<ConstantStruct>(AnnotateCI.getArgOperand(2));
-  if (!ResProps || ResProps->getNumOperands() != 2)
+  Constant *ResProps = getConstStruct(AnnotateCI.getArgOperand(2), 2);
+  if (!ResProps)
     return false;
 
-  std::optional<uint64_t> Word0 = getConstInt(ResProps->getOperand(0));
-  std::optional<uint64_t> Word1 = getConstInt(ResProps->getOperand(1));
+  std::optional<uint64_t> Word0 =
+      getConstInt(ResProps->getAggregateElement(0u));
+  std::optional<uint64_t> Word1 =
+      getConstInt(ResProps->getAggregateElement(1u));
   if (!Word0 || !Word1)
     return false;
 
