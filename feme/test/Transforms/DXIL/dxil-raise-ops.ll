@@ -125,6 +125,18 @@ define float @dot3_f32(float %ax, float %ay, float %az, float %bx, float %by, fl
   ret float %1
 }
 
+; SM6.9's unified `FDot` op (opcode 311) unlike Dot2..Dot4 above takes its
+; two operand vectors directly rather than 2*N interleaved scalars (see the
+; comment on the `{311, ...}` DirectOps row in OpRaising.cpp) -- e.g. the
+; `dot(half2, half2)`/`dot(half3, half3)` calls `dxc -T cs_6_9` emits as
+; `dx.op.dot.v2f16`/`dx.op.dot.v3f16`.
+; CHECK-LABEL: define half @fdot_v2f16(
+define half @fdot_v2f16(<2 x half> %a, <2 x half> %b) {
+  ; CHECK: call half @llvm.dx.fdot.v2f16(<2 x half> %a, <2 x half> %b)
+  %1 = call half @dx.op.dot.v2f16(i32 311, <2 x half> %a, <2 x half> %b)
+  ret half %1
+}
+
 ; CHECK-LABEL: define float @deriv_coarse_x_f32(
 define float @deriv_coarse_x_f32(float %a) {
   ; CHECK: call float @llvm.dx.ddx.coarse.f32(float %a)
@@ -224,6 +236,7 @@ declare i32 @dx.op.binary.i32(i32, i32, i32)
 declare float @dx.op.tertiary.f32(i32, float, float, float)
 declare i32 @dx.op.tertiary.i32(i32, i32, i32, i32)
 declare float @dx.op.dot3.f32(i32, float, float, float, float, float, float)
+declare half @dx.op.dot.v2f16(i32, <2 x half>, <2 x half>)
 declare double @dx.op.makeDouble.f64(i32, i32, i32)
 declare i1 @dx.op.waveActiveAllEqual.i32(i32, i32)
 declare i32 @dx.op.waveReadLaneAt.i32(i32, i32, i32)

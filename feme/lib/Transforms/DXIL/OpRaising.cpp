@@ -130,6 +130,15 @@ static const RaisableOp DirectOps[] = {
     {55, Intrinsic::dx_dot3, true}, // Dot3
     {56, Intrinsic::dx_dot4, true}, // Dot4
 
+    // SM6.9's unified, arity-agnostic vector dot product: unlike Dot2..Dot4
+    // above (which take 2*N separate scalar operands), FDot takes its two
+    // operand *vectors* directly (`int_dx_fdot`'s signature), so a single
+    // opcode covers every vector width DXC emits it for (see
+    // `dx.op.dot.v2f32`/`dx.op.dot.v3f32` in a `-T cs_6_9` shader that calls
+    // HLSL's `dot()`). It still fits this table's generic `raiseCall` path:
+    // the overload key is still the (sole) first operand's type.
+    {311, Intrinsic::dx_fdot, true}, // FDot
+
     // Pixel-shader-family screen-space derivatives. Like the arithmetic ops
     // above, raising doesn't need to re-validate DXIL's stage restrictions
     // (pixel/library/mesh/amplification/node) -- these calls are only

@@ -12,6 +12,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/IR/Constants.h"
+#include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
@@ -38,6 +39,35 @@ Value *expandDot(IRBuilder<> &Builder, CallInst &CI, unsigned N) {
   for (unsigned I = 1; I != N; ++I)
     Result = Builder.CreateCall(
         FMulAdd, {CI.getArgOperand(I), CI.getArgOperand(N + I), Result});
+  return Result;
+}
+
+/// Builds the dot product of `llvm.dx.fdot`'s two vector operands (SM6.9's
+/// unified, arity-agnostic replacement for `Dot2`..`Dot4`, see the `FDot`
+/// comment in OpRaising.cpp) as a chain of `llvm.fmuladd` calls over each
+/// lane, the same way `expandDot` does for its interleaved-scalar-operand
+/// predecessors. Returns nullptr if \p CI's first operand isn't a fixed
+/// vector, which is the only shape `int_dx_fdot` is ever raised with.
+Value *expandFDot(IRBuilder<> &Builder, CallInst &CI) {
+  Value *A = CI.getArgOperand(0);
+  Value *B = CI.getArgOperand(1);
+  auto *VecTy = dyn_cast<FixedVectorType>(A->getType());
+  if (!VecTy)
+    return nullptr;
+
+  unsigned N = VecTy->getNumElements();
+  Type *ElemTy = VecTy->getElementType();
+  Function *FMulAdd = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::fmuladd, ElemTy);
+
+  Value *Result =
+      Builder.CreateFMul(Builder.CreateExtractElement(A, uint64_t(0)),
+                         Builder.CreateExtractElement(B, uint64_t(0)));
+  for (unsigned I = 1; I != N; ++I) {
+    Value *Ai = Builder.CreateExtractElement(A, I);
+    Value *Bi = Builder.CreateExtractElement(B, I);
+    Result = Builder.CreateCall(FMulAdd, {Ai, Bi, Result});
+  }
   return Result;
 }
 
@@ -87,6 +117,8 @@ Value *expandCall(IRBuilder<> &Builder, CallInst &CI, Intrinsic::ID ID) {
     return expandDot(Builder, CI, 3);
   case Intrinsic::dx_dot4:
     return expandDot(Builder, CI, 4);
+  case Intrinsic::dx_fdot:
+    return expandFDot(Builder, CI);
   case Intrinsic::dx_isinf:
   case Intrinsic::dx_isnan: {
     Function *IsFPClass = Intrinsic::getOrInsertDeclaration(

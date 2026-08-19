@@ -47,6 +47,24 @@ define float @dot3_f32(float %a0, float %a1, float %a2, float %b0, float %b1, fl
   ret float %1
 }
 
+; `llvm.dx.fdot` (SM6.9's unified, vector-operand `Dot2`..`Dot4` replacement,
+; see the `FDot` comment in OpRaising.cpp) expands the same way, extracting
+; each lane instead of reading it from a separate scalar operand.
+; CHECK-LABEL: define half @fdot_v3f16(
+define half @fdot_v3f16(<3 x half> %a, <3 x half> %b) {
+  ; CHECK: [[A0:%.*]] = extractelement <3 x half> %a, i64 0
+  ; CHECK: [[B0:%.*]] = extractelement <3 x half> %b, i64 0
+  ; CHECK: [[M:%.*]] = fmul half [[A0]], [[B0]]
+  ; CHECK: [[A1:%.*]] = extractelement <3 x half> %a, i64 1
+  ; CHECK: [[B1:%.*]] = extractelement <3 x half> %b, i64 1
+  ; CHECK: [[F1:%.*]] = call half @llvm.fmuladd.f16(half [[A1]], half [[B1]], half [[M]])
+  ; CHECK: [[A2:%.*]] = extractelement <3 x half> %a, i64 2
+  ; CHECK: [[B2:%.*]] = extractelement <3 x half> %b, i64 2
+  ; CHECK: call half @llvm.fmuladd.f16(half [[A2]], half [[B2]], half [[F1]])
+  %1 = call half @llvm.dx.fdot.v3f16(<3 x half> %a, <3 x half> %b)
+  ret half %1
+}
+
 ; CHECK-LABEL: define i1 @isinf_f32(
 define i1 @isinf_f32(float %a) {
   ; CHECK: call i1 @llvm.is.fpclass.f32(float %a, {{.*}}i32 516)
@@ -68,5 +86,6 @@ declare float @llvm.dx.saturate.f32(float)
 declare float @llvm.dx.rsqrt.f32(float)
 declare i32 @llvm.dx.imad.i32(i32, i32, i32)
 declare float @llvm.dx.dot3.f32(float, float, float, float, float, float)
+declare half @llvm.dx.fdot.v3f16(<3 x half>, <3 x half>)
 declare i1 @llvm.dx.isinf.f32(float)
 declare i32 @llvm.dx.wave.getlaneindex()
