@@ -26,9 +26,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement the C3 milestone for Vulkan conformance?
+Can you implement the C4 milestone for Vulkan conformance?
 
-> **Divergent-vector decomposition in `feme-cpu-simdize`.** The single largest
-> *FeMe-owned* compute-track gap, already tracked as "roadmap milestone 7
-> deviation" by the pass's own diagnostic (§1.6). Conformance makes it P0 rather
-> than P1: it is the first blocker for a third of all failures once C2 lands
+> **Graphics pipeline state breadth.** `mapTopology` beyond triangles (point,
+> line, line-strip, fan), `mapDynamicState` beyond its six states,
+> `FRONT_AND_BACK` culling, dual-source blend factors, and the sample counts
+> `isSupportedAttachmentSampleCount` declines. Every one of these is a
+> rasterizer/executor feature, not a translation gap, so this is really G-track
+> work surfaced by the Vulkan track. **Sub-step C4a, do first and separately:
+> make every silent rejection diagnose itself.** A state-side rejection
+> currently emits nothing at all, so triaging this bucket means reading
+> `GraphicsPipeline.cpp` instead of the ICD's output
