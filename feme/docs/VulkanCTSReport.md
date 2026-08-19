@@ -691,3 +691,24 @@ not fully replicate. Two checks were run instead, both consistent with
   file this change never touches; it is left for a future full run's own
   crash-isolation wrapper to attribute properly rather than guessed at
   here.
+
+## Addendum: DXIL SM6.9 `FDot`/AMDGPU change (out of this report's scope)
+
+A follow-up change (`feme::dxil::OpRaisingPass`'s `{311, Intrinsic::dx_fdot,
+true}` `DirectOps` row, `feme::dxil::IntrinsicExpansionPass::expandFDot`)
+fixed a `dot()` call on a 16-bit vector (e.g. `dot(half2, half2)`) -- shader
+model 6.9's unified `FDot` op (DXIL opcode 311), which `dxc -T cs_6_9`
+emits in place of the older `Dot2`/`Dot3`/`Dot4` -- failing with
+"'dx.op.dot.v2f32' is not supported when targeting 'amdgcn-amd-amdhsa'"
+when retargeting a DXIL compute shader to `amdgcn-*`. Like the
+`GetDimensions.xy` addendum above, none of the touched files
+(`feme/lib/Transforms/DXIL/OpRaising.cpp`,
+`feme/lib/Transforms/DXIL/IntrinsicExpansion.cpp`) are reachable from
+`libfeme_vulkan` (the SPIR-V/Vulkan/CPU-target path this report measures) --
+SPIR-V shaders never lower through `dx.op.*`/`llvm.dx.fdot` at all, only a
+`dxil`-sourced module does, and this report's ICD never consumes one -- so
+no change to the headline numbers above is expected. A `dEQP-VK.api.info.*`
+smoke run (same invocation as the `GetDimensions.xy` addendum's) confirmed
+this: 5,669/10,484 passed, 84/10,484 failed, identical to that addendum's
+own smoke-run numbers, with zero crashes.
+

@@ -873,7 +873,18 @@ it now covers the two largest opcode families:
   thread/wave/quad queries (`ThreadId`, `WaveActiveAllEqual`,
   `WaveReadLaneAt`, ...), plus `IsFinite`/`IsNormal` (raised via the generic
   `llvm.is.fpclass` intrinsic, keyed off its `FPClassTest` mask operand,
-  rather than a dedicated per-op intrinsic like `IsNaN`/`IsInf`).
+  rather than a dedicated per-op intrinsic like `IsNaN`/`IsInf`). This
+  includes shader model 6.9's unified `FDot` op (opcode 311, `dx.op.dot.*`),
+  which `dxc -T cs_6_9`/higher emits for HLSL's `dot()` in place of the
+  older, arity-specific `Dot2`/`Dot3`/`Dot4` -- unlike those (which take
+  2*N separate scalar operands), `FDot` takes its two operand *vectors*
+  directly, raised to `llvm.dx.fdot` (matching the intrinsic's own
+  `int_dx_fdot` signature). LLVM's own DirectX backend never actually
+  *emits* opcode 311 (`DXILIntrinsicExpansion` scalarizes `llvm.dx.fdot`
+  before `DXILOpLowering` runs), so unlike `Dot3` this has no
+  `-dxil-op-lower` round-trip test -- only a real `dxc`-compiled module
+  exercises it, which is why `feme-dxil-to-amdgpu-dot.ll` feeds one in via
+  the raw-bitcode path instead of `llc`-produced `DXContainer`.
 - Resource-handle creation, in both of DXIL's spellings. A
   `dx.op.annotateHandle` call over a
   `dx.op.createHandleFromBinding` call is rewritten into a single

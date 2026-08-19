@@ -192,6 +192,26 @@ DXIL import is the most complete path, and its gaps are enumerable.
   getdimensions.ll`); a mip-count out-parameter (`.z`/`.w`) is still left
   unraised, since there is no `levels_xy`-shaped forward lowering to verify
   against yet.
+- **P1 — shader model 6.9's unified `FDot` op (done by this roadmap step).**
+  A real `dxc -T cs_6_9` shader calling HLSL's `dot()` on a 16-bit vector
+  (e.g. `dot(half2, half2)`) emits DXIL opcode 311 (`dx.op.dot.*`), not the
+  older arity-specific `Dot2`/`Dot3`/`Dot4` (opcodes 54-56) this pass already
+  covered -- `feme::dxil::OpRaisingPass` had no row for it at all, so
+  retargeting such a shader to `amdgcn-*` failed with "'dx.op.dot.v2f32' is
+  not supported when targeting 'amdgcn-amd-amdhsa'". `FDot` still fits
+  the same table-driven `raiseCall` path as `Dot2`..`Dot4` (its overload key
+  is still the first operand's type), it just takes its two operand
+  *vectors* directly rather than 2*N separate scalars, matching
+  `int_dx_fdot`'s existing signature; `feme::dxil::IntrinsicExpansionPass`
+  gained a matching `expandFDot` (per-lane `extractelement` +
+  `llvm.fmuladd` chain, mirroring `expandDot`'s scalar-operand version) so
+  every non-DXIL target still sees plain LLVM IR. LLVM's own DirectX backend
+  never emits opcode 311 itself (`DXILIntrinsicExpansion` scalarizes
+  `llvm.dx.fdot` before `DXILOpLowering` runs), so this has no
+  `-dxil-op-lower` round-trip test -- `feme-dxil-to-amdgpu-dot.ll` instead
+  feeds a hand-written `dx.op.dot` call through the raw-bitcode import path
+  (`llvm-as`, no `llc`) straight into the full `feme` CLI targeting
+  `amdgcn-amd-amdhsa`.
 
 ### 1.4 DXBC / `dxsa`
 
