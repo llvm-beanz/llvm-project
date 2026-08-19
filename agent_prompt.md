@@ -52,10 +52,23 @@ Can you complete the C4 milestone for Vulkan conformance?
 > "mechanical, on-demand addition of another row" in `Executor.cpp`,
 > `isSupportedAttachmentSampleCount` in `RenderPass.cpp`, and the matching
 > `VK_SAMPLE_COUNT_8_BIT` advertisement in `PhysicalDeviceInfo.cpp`) are both
-> implemented and tested. `mapTopology` beyond `TriangleList`/`TriangleStrip`,
-> `mapDynamicState` beyond its six states, and the dual-source blend factors
-> remain open: each needs new rasterizer primitives (point/line assembly and
-> width, a second fragment-stage color output) that are a materially larger,
-> separate unit of G-track work rather than a mechanical table addition -- see
+> implemented and tested. ~~`mapDynamicState` beyond its six states... each
+> needs new rasterizer primitives... that are a materially larger, separate unit
+> of G-track work rather than a mechanical table addition~~ (C4c done, and this
+> framing turned out to be wrong for dynamic state specifically: every one of
+> `VK_EXT_extended_dynamic_state`'s 12 dynamic states -- cull mode, front face,
+> depth test/write/compare-op, depth-bounds-test-enable, stencil test-enable/op,
+> viewport/scissor "with count", primitive topology restricted to the triangle
+> class already implemented, and vertex-input-binding-stride via
+> `vkCmdBindVertexBuffers2EXT` -- already had a complete *static* path or a
+> bounded, mechanical extension of one before this milestone, so all 12 are now
+> implemented and the extension is advertised
+> (`feme/lib/Vulkan/{GraphicsPipeline,CommandBuffer,PhysicalDeviceInfo,EntryPoints}.{h,cpp}`,
+> `feme/utils/vk_gen_entrypoints.py`) -- see FeMeGraphicsDesign.md's updated
+> status note for the full per-state breakdown. `mapTopology` beyond
+> `TriangleList`/`TriangleStrip` and the dual-source blend factors remain open:
+> each needs new rasterizer primitives (point/line assembly and width, a second
+> fragment-stage color output) that are a materially larger, separate unit of
+> G-track work rather than a mechanical table addition -- see
 > FeMeGraphicsDesign.md's own status note for the deferred scope)
 
