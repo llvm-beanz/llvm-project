@@ -1127,34 +1127,50 @@ TEST_F(DrawTest, RendersThroughDynamicRendering) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// The driver advertises `VK_KHR_dynamic_rendering` and accepts it at
+/// The driver advertises `VK_KHR_dynamic_rendering` and
+/// `VK_EXT_extended_dynamic_state` (roadmap C4c) and accepts either at
 /// device creation; anything it does not implement is still refused.
 TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   uint32_t Count = 0;
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 1u);
-  VkExtensionProperties Properties{};
+  ASSERT_EQ(Count, 2u);
+  std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
-                                                 &Properties),
+                                                 Properties.data()),
             VK_SUCCESS);
-  EXPECT_STREQ(Properties.extensionName,
-               VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
+  auto HasExtension = [&](const char *Name) {
+    for (const VkExtensionProperties &P : Properties)
+      if (std::strcmp(P.extensionName, Name) == 0)
+        return true;
+    return false;
+  };
+  EXPECT_TRUE(HasExtension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME));
+  EXPECT_TRUE(HasExtension(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+  VkPhysicalDeviceExtendedDynamicStateFeaturesEXT ExtDynState{};
+  ExtDynState.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+  Features.pNext = &ExtDynState;
   VkPhysicalDeviceFeatures2 Features2{};
   Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
   Features2.pNext = &Features;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(Features.dynamicRendering, VK_TRUE);
+  EXPECT_EQ(ExtDynState.extendedDynamicState, VK_TRUE);
 
   const char *Enabled = VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME;
   VkDeviceCreateInfo DevInfo{};
   DevInfo.enabledExtensionCount = 1;
   DevInfo.ppEnabledExtensionNames = &Enabled;
   VkDevice Second = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second), VK_SUCCESS);
+  vkDestroyDevice(Second, nullptr);
+
+  Enabled = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
   EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second), VK_SUCCESS);
   vkDestroyDevice(Second, nullptr);
 

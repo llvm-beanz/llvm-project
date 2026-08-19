@@ -346,6 +346,13 @@ feme::vulkan::getSupportedDeviceExtensions() {
   static const VkExtensionProperties Extensions[] = {
       {VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
        VK_KHR_DYNAMIC_RENDERING_SPEC_VERSION},
+      // (roadmap C4c) Every one of this extension's 12 dynamic states is
+      // implemented (GraphicsPipeline.cpp's DynamicStateBits/
+      // mapDynamicState, vkCmdSet*EXT/vkCmdBindVertexBuffers2EXT in
+      // CommandBuffer.cpp), closing roadmap C4's "mapDynamicState beyond
+      // its six states" -- see FeMeVulkanDesign.md's updated status note.
+      {VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
+       VK_EXT_EXTENDED_DYNAMIC_STATE_SPEC_VERSION},
   };
   return Extensions;
 }

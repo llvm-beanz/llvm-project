@@ -53,9 +53,14 @@ CORE_FEATURES = ("VK_VERSION_1_0", "VK_VERSION_1_1", "VK_VERSION_1_2")
 # generated table must therefore carry (V6: `vkCmdBeginRenderingKHR`/
 # `vkCmdEndRenderingKHR`, since dynamic rendering is core only in 1.3 while
 # this driver advertises 1.2 -- see "Render passes and dynamic rendering" in
-# feme/docs/FeMeVulkanDesign.md). Every name here must also appear in
-# `feme::vulkan::getSupportedDeviceExtensions`.
-SUPPORTED_EXTENSIONS = ("VK_KHR_dynamic_rendering",)
+# feme/docs/FeMeVulkanDesign.md; roadmap C4c: `VK_EXT_extended_dynamic_
+# state`'s 12 `vkCmdSet*EXT`/`vkCmdBindVertexBuffers2EXT` commands, closing
+# roadmap C4's "mapDynamicState beyond its six states"). Every name here
+# must also appear in `feme::vulkan::getSupportedDeviceExtensions`.
+SUPPORTED_EXTENSIONS = (
+    "VK_KHR_dynamic_rendering",
+    "VK_EXT_extended_dynamic_state",
+)
 
 # First-parameter handle types that make a command dispatched at the
 # instance level rather than the device level. VkPhysicalDevice commands are

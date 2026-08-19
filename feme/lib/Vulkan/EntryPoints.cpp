@@ -189,6 +189,16 @@ void fillFeatures2Chain(void *pNext) {
       Features->dynamicRendering = VK_TRUE;
       break;
     }
+    // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:
+    // all 12 dynamic states it adds are implemented (GraphicsPipeline.cpp/
+    // CommandBuffer.cpp), so this is unconditionally true, exactly like
+    // `dynamicRendering` above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *>(Base);
+      Features->extendedDynamicState = VK_TRUE;
+      break;
+    }
     default:
       break;
     }

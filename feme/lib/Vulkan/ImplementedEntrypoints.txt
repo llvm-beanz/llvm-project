@@ -167,6 +167,19 @@ vkCmdSetLineWidth
 vkCmdSetDepthBias
 vkCmdSetDepthBounds
 vkCmdSetDeviceMask
+# (roadmap C4c) VK_EXT_extended_dynamic_state's 12 dynamic states.
+vkCmdSetCullModeEXT
+vkCmdSetFrontFaceEXT
+vkCmdSetPrimitiveTopologyEXT
+vkCmdSetViewportWithCountEXT
+vkCmdSetScissorWithCountEXT
+vkCmdBindVertexBuffers2EXT
+vkCmdSetDepthTestEnableEXT
+vkCmdSetDepthWriteEnableEXT
+vkCmdSetDepthCompareOpEXT
+vkCmdSetDepthBoundsTestEnableEXT
+vkCmdSetStencilTestEnableEXT
+vkCmdSetStencilOpEXT
 vkCmdDraw
 vkCmdDrawIndexed
 vkCmdDrawIndirect
