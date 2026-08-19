@@ -79,6 +79,23 @@ enum DynamicStateBits : uint32_t {
   DynamicStateStencilReference = 1u << 3,
   DynamicStateStencilCompareMask = 1u << 4,
   DynamicStateStencilWriteMask = 1u << 5,
+  // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s states. Every one of
+  // these already has a real, fully-implemented *static* path (cull mode,
+  // front face, depth test/write/compare, stencil test/op); making each
+  // dynamic is the same "read from the per-draw snapshot instead of the
+  // pipeline's own creation-time value" pattern the six states above
+  // already use, not a new rasterizer feature -- unlike mapTopology's
+  // still-open point/line topologies or the dual-source blend factors (see
+  // FeMeGraphicsDesign.md's status note). `DynamicStateDepthBoundsTest
+  // Enable` is the one exception worth calling out: the depth bounds test
+  // itself is not implemented, but the `depthBounds` feature this ICD
+  // advertises is also `VK_FALSE` (PhysicalDeviceInfo.cpp), so a
+  // conformant application can never legally set this dynamic state to
+  // `VK_TRUE` in the first place -- it is accepted and stored but never
+  // consulted, exactly as `depthBoundsTestEnable` in the static path
+  // already isn't (see `translateDepthStencilState`'s rejection of it).
+  DynamicStateCullMode = 1u << 6,
+  DynamicStateFrontFace = 1u << 7,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -93,6 +110,8 @@ struct DynamicGraphicsState {
   uint32_t StencilReference[2] = {0, 0}; // [front, back]
   uint32_t StencilCompareMask[2] = {0xFF, 0xFF};
   uint32_t StencilWriteMask[2] = {0xFF, 0xFF};
+  feme::graphics::CullMode Cull = feme::graphics::CullMode::None;
+  feme::graphics::FrontFace Front = feme::graphics::FrontFace::CounterClockwise;
 };
 
 /// The shareable, compiled part of a graphics `VkPipeline`: the

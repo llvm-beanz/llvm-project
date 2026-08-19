@@ -234,6 +234,10 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateStencilCompareMask;
   case VK_DYNAMIC_STATE_STENCIL_WRITE_MASK:
     return DynamicStateStencilWriteMask;
+  case VK_DYNAMIC_STATE_CULL_MODE:
+    return DynamicStateCullMode;
+  case VK_DYNAMIC_STATE_FRONT_FACE:
+    return DynamicStateFrontFace;
   default:
     return std::nullopt;
   }
@@ -1094,9 +1098,15 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
           static_cast<uint8_t>(Dynamic.StencilWriteMask[I]);
   }
 
+  feme::graphics::RasterState ResolvedRaster = State.Raster;
+  if (isDynamic(DynamicStateCullMode))
+    ResolvedRaster.Cull = Dynamic.Cull;
+  if (isDynamic(DynamicStateFrontFace))
+    ResolvedRaster.Front = Dynamic.Front;
+
   return feme::graphics::GraphicsPipeline(
       State.Artifact->VertexStage, State.Artifact->FragmentStage,
-      State.Topology, State.Raster, State.Depth,
+      State.Topology, ResolvedRaster, State.Depth,
       feme::graphics::BlendMode::Replace, State.SampleCount, State.Attachments,
       ResolvedStencil, State.ColorBlends, State.LogicOpEnable, State.Logic,
       isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants

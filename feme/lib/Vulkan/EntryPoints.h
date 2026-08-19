@@ -444,6 +444,10 @@ vkCmdSetStencilCompareMask(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
                          VkStencilFaceFlags faceMask, uint32_t writeMask);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer,
+                                               VkCullModeFlags cullMode);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFaceEXT(VkCommandBuffer commandBuffer,
+                                                VkFrontFace frontFace);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
                                              float lineWidth);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer,

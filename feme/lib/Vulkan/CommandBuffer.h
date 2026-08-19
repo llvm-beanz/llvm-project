@@ -101,6 +101,8 @@ struct RecordedCommand {
     SetStencilReference,
     SetStencilCompareMask,
     SetStencilWriteMask,
+    SetCullMode,
+    SetFrontFace,
     Draw,
     DrawIndexed,
     DrawIndirect,
@@ -223,6 +225,12 @@ struct RecordedCommand {
   std::array<float, 4> BlendConstants{0.0f, 0.0f, 0.0f, 0.0f};
   VkStencilFaceFlags StencilFaceMask = 0;
   uint32_t StencilValue = 0;
+  /// (roadmap C4c) `SetCullMode`/`SetFrontFace`:
+  /// `VK_EXT_extended_dynamic_state`'s `vkCmdSetCullModeEXT`/
+  /// `vkCmdSetFrontFaceEXT`, the same dynamic-state-snapshot shape as
+  /// `SetStencil*` above.
+  VkCullModeFlags CullModeValue = VK_CULL_MODE_NONE;
+  VkFrontFace FrontFaceValue = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   /// (V6) `Draw`/`DrawIndexed`: the draw's own arguments, in the same shape
   /// `feme::graphics::DrawCommand` uses (`FirstQuery` above is reused for
   /// neither -- a draw needs all six of these at once).
@@ -551,6 +559,19 @@ public:
     Cmd.Op = Op;
     Cmd.StencilFaceMask = FaceMask;
     Cmd.StencilValue = Value;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap C4c) `vkCmdSetCullModeEXT`/`vkCmdSetFrontFaceEXT`.
+  void setCullMode(VkCullModeFlags Cull) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetCullMode;
+    Cmd.CullModeValue = Cull;
+    Commands.push_back(Cmd);
+  }
+  void setFrontFace(VkFrontFace Front) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetFrontFace;
+    Cmd.FrontFaceValue = Front;
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdDraw`.

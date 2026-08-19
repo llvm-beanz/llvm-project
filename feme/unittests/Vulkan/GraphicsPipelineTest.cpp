@@ -366,6 +366,42 @@ TEST_F(GraphicsPipelineTest, AcceptsFrontAndBackCulling) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap C4c) `VK_DYNAMIC_STATE_CULL_MODE`/`VK_DYNAMIC_STATE_FRONT_FACE`:
+/// a pipeline may now declare either dynamic, and `buildExecutorPipeline`
+/// must then read the per-draw snapshot rather than this pipeline's own
+/// (here, deliberately mismatched) creation-time value.
+TEST_F(GraphicsPipelineTest, DynamicCullModeAndFrontFaceOverrideStaticState) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.cullMode = VK_CULL_MODE_BACK_BIT;
+  Raster.frontFace = VK_FRONT_FACE_CLOCKWISE;
+  VkDynamicState DynStates[2] = {VK_DYNAMIC_STATE_CULL_MODE,
+                                 VK_DYNAMIC_STATE_FRONT_FACE};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = DynStates;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  Dynamic.Cull = feme::graphics::CullMode::FrontAndBack;
+  Dynamic.Front = feme::graphics::FrontFace::CounterClockwise;
+  feme::graphics::RasterState Resolved =
+      Graphics->buildExecutorPipeline(Dynamic).getRasterState();
+  EXPECT_EQ(Resolved.Cull, feme::graphics::CullMode::FrontAndBack);
+  EXPECT_EQ(Resolved.Front, feme::graphics::FrontFace::CounterClockwise);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A fragment stage writing no `SV_Target0` cannot fill the render pass's
 /// one color attachment; the mismatch is a creation failure, not a draw-time
 /// surprise.

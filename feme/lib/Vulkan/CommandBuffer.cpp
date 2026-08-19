@@ -53,6 +53,32 @@ Error validateGroupCount(const PhysicalDeviceInfo *Info,
   return Error::success();
 }
 
+/// (roadmap C4c) `vkCmdSetCullModeEXT`'s payload, converted the same way
+/// `GraphicsPipeline.cpp`'s (static, creation-time) `mapCullMode` converts
+/// `VkPipelineRasterizationStateCreateInfo::cullMode` -- duplicated rather
+/// than shared, since that function is file-local to GraphicsPipeline.cpp
+/// and a dynamic-state setter has no `Error` return to report an
+/// unrecognized value through (matching `VK_EXT_extended_dynamic_state`'s
+/// own contract: `vkCmdSetCullModeEXT` cannot fail).
+feme::graphics::CullMode toCullMode(VkCullModeFlags Cull) {
+  switch (Cull) {
+  case VK_CULL_MODE_FRONT_BIT:
+    return feme::graphics::CullMode::Front;
+  case VK_CULL_MODE_BACK_BIT:
+    return feme::graphics::CullMode::Back;
+  case VK_CULL_MODE_FRONT_AND_BACK:
+    return feme::graphics::CullMode::FrontAndBack;
+  case VK_CULL_MODE_NONE:
+  default:
+    return feme::graphics::CullMode::None;
+  }
+}
+
+feme::graphics::FrontFace toFrontFace(VkFrontFace Front) {
+  return Front == VK_FRONT_FACE_CLOCKWISE ? feme::graphics::FrontFace::Clockwise
+                                          : feme::graphics::FrontFace::CounterClockwise;
+}
+
 /// One currently-bound `VkDescriptorSet` slot, as `vkCmdBindDescriptorSets`
 /// leaves it (see "Descriptor Model"): the set itself and the dynamic
 /// offsets supplied for it in that call, consumed in ascending
@@ -1317,6 +1343,12 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
           Gfx.Dynamic.StencilWriteMask[Face] = Cmd.StencilValue;
       }
       break;
+    case RecordedCommand::Kind::SetCullMode:
+      Gfx.Dynamic.Cull = toCullMode(Cmd.CullModeValue);
+      break;
+    case RecordedCommand::Kind::SetFrontFace:
+      Gfx.Dynamic.Front = toFrontFace(Cmd.FrontFaceValue);
+      break;
     case RecordedCommand::Kind::Draw:
     case RecordedCommand::Kind::DrawIndexed: {
       if (!BoundGraphicsPipeline)
@@ -1918,6 +1950,22 @@ vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setStencilState(RecordedCommand::Kind::SetStencilWriteMask, faceMask,
                         writeMask);
+}
+
+// (roadmap C4c) `VK_EXT_extended_dynamic_state`'s `vkCmdSetCullModeEXT`/
+// `vkCmdSetFrontFaceEXT`: both already have a fully-implemented static
+// path (`CullMode`/`FrontFace` in `feme::graphics::RasterState`), so
+// making them dynamic needs no new rasterizer machinery, unlike the
+// topology/dual-source-blend gaps this milestone's own status note
+// documents as still needing it.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer,
+                                               VkCullModeFlags cullMode) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setCullMode(cullMode);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFaceEXT(VkCommandBuffer commandBuffer,
+                                                VkFrontFace frontFace) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setFrontFace(frontFace);
 }
 
 // Four more core commands this ICD must at least resolve (found missing
