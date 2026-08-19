@@ -395,3 +395,32 @@ spirv.func @f_unord_not_equal_vector(%arg0: vector<4xf64>, %arg1: vector<4xf64>)
   %0 = spirv.FUnordNotEqual %arg0, %arg1 : vector<4xf64>
   spirv.Return
 }
+
+//===----------------------------------------------------------------------===//
+// Signed and unsigned operand types
+//===----------------------------------------------------------------------===//
+
+// A SPIR-V `OpTypeInt 32 1` deserializes to a *signed* `si32`, which the type
+// converter maps to signless `i32`. The comparison must use the converted
+// operands, since `llvm.icmp` accepts signless integers only.
+
+// CHECK-LABEL: @s_less_than_signed_scalar
+spirv.func @s_less_than_signed_scalar(%arg0: si32, %arg1: si32) "None" {
+  // CHECK: llvm.icmp "slt" %{{.*}}, %{{.*}} : i32
+  %0 = spirv.SLessThan %arg0, %arg1 : si32
+  spirv.Return
+}
+
+// CHECK-LABEL: @u_greater_than_unsigned_vector
+spirv.func @u_greater_than_unsigned_vector(%arg0: vector<4xui32>, %arg1: vector<4xui32>) "None" {
+  // CHECK: llvm.icmp "ugt" %{{.*}}, %{{.*}} : vector<4xi32>
+  %0 = spirv.UGreaterThan %arg0, %arg1 : vector<4xui32>
+  spirv.Return
+}
+
+// CHECK-LABEL: @i_equal_signed_scalar
+spirv.func @i_equal_signed_scalar(%arg0: si64, %arg1: si64) "None" {
+  // CHECK: llvm.icmp "eq" %{{.*}}, %{{.*}} : i64
+  %0 = spirv.IEqual %arg0, %arg1 : si64
+  spirv.Return
+}

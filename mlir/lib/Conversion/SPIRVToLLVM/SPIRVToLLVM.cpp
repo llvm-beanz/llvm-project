@@ -988,7 +988,7 @@ public:
       return rewriter.notifyMatchFailure(op, "type conversion failed");
 
     rewriter.template replaceOpWithNewOp<LLVM::FCmpOp>(
-        op, dstType, predicate, op.getOperand1(), op.getOperand2());
+        op, dstType, predicate, adaptor.getOperand1(), adaptor.getOperand2());
     return success();
   }
 };
@@ -1008,7 +1008,7 @@ public:
       return rewriter.notifyMatchFailure(op, "type conversion failed");
 
     rewriter.template replaceOpWithNewOp<LLVM::ICmpOp>(
-        op, dstType, predicate, op.getOperand1(), op.getOperand2());
+        op, dstType, predicate, adaptor.getOperand1(), adaptor.getOperand2());
     return success();
   }
 };
