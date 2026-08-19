@@ -7,14 +7,17 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `ddc071b9fe8d` (`mlir/lib/Conversion/SPIRVToLLVM`'s
-  comparison-pattern fix, the last change this run measured).
+- FeMe revision: `5f7420c1b3dd` (roadmap C1, "Mandatory formats":
+  `B8G8R8A8_UNORM`/`R10G10B10A2_UNORM` color-attachment support and
+  `D24_UNORM_S8_UINT` combined depth+stencil support, both with real
+  `feme::graphics` pack/unpack -- see "Roadmap C1: measured impact" below
+  for why the headline numbers are unchanged from the previous edition).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
   robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
   empty image format lists" -- see "Deviations from a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1433 passed, 1 unsupported.
+- `check-feme`: 1442 passed, 1 unsupported.
 
 ## Headline
 
@@ -46,6 +49,73 @@ mandatory capability the ICD does not claim. Not one is a `Pass`-shaped
 result carrying incorrect data. That is the "must fail before draw time,
 not silently misbehave" contract every FeMeVulkanDesign.md milestone states,
 holding across three million cases.
+
+## Roadmap C1: measured impact
+
+Roadmap C1 ("Mandatory formats", see Roadmap.md §1.9.1) added
+`B8G8R8A8_UNORM`/`R10G10B10A2_UNORM` to `isSupportedColorAttachmentFormat`
+and `D24_UNORM_S8_UINT` as a combined depth+stencil format, each backed by
+a real `feme::graphics` pack/unpack path (see `RenderPass.cpp`,
+`CommandBuffer.cpp`, `ImageOps.cpp`, `Executor.cpp`, and
+`ImageFixture.cpp`) -- exactly what the roadmap row specifies, and
+`unittests/Graphics/ImageFixtureTest.cpp`,
+`unittests/Vulkan/{RenderPass,GraphicsPipeline}Test.cpp`, and a new
+end-to-end `unittests/Vulkan/DrawTest.RendersWithCombinedDepthStencilAttachment`
+cover it (`ninja check-feme` passes in full, before and after).
+
+**This full re-run's headline numbers are byte-for-byte identical to the
+previous edition's** (10,350 passed, 27,094 failed, 3,199,555 not
+supported). That is not a measurement error: `vkGetPhysicalDeviceFormatProperties`/
+`vkGetPhysicalDeviceFormatProperties2` (`EntryPoints.cpp`) unconditionally
+return an all-zero `VkFormatProperties` for *every* format, a pre-existing
+stub predating C1 ("no buffer or image format is supported yet" -- stale
+even before this change, since V4 already added texel buffers and V6
+added render passes). `deqp-vk` -- like any well-behaved client --
+queries this command *before* attempting `vkCreateRenderPass`/
+`vkCreateGraphicsPipelines`, so a format those commands now genuinely
+accept is still invisible to CTS: confirmed directly by
+`dEQP-VK.graphicsfuzz.*`'s `B8G8R8A8_UNORM`-framebuffer cases, which still
+report `Fail (Vulkan color attachment format is not supported)` -- a
+`deqp-vk`-side check against the (still-zero) format properties, not
+against `isSupportedColorAttachmentFormat`.
+
+Wiring `vkGetPhysicalDeviceFormatProperties` to report
+`COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` and `DEPTH_STENCIL_ATTACHMENT_BIT` for
+exactly the formats `isSupportedColorAttachmentFormat`/
+`isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat`
+now accept is therefore a *necessary* companion change before C1 has any
+CTS-visible effect -- and was prototyped during this same investigation.
+That prototype is **not** included in this revision, because running the
+full CTS against it surfaced three previously-unreached crashes (this
+ICD's non-negotiable "Crashed / timed out: 0" bar), each in a different
+subsystem, none related to the format tables themselves:
+
+| Group | Case (abbreviated) | Crash |
+|---|---|---|
+| `renderpasses` | `dynamic_rendering...low_resolution_z.blend.color_masked_after_color_depth` | `llvm::Value::setNameImpl` assertion, `"Cannot assign a name to void values!"` -- some FeMe CPU codegen path names a void-typed instruction once a combined-format depth/stencil draw is actually reachable |
+| `spirv_assembly` | `instruction.spirv1p4.opselect.array_select` | `UNREACHABLE executed at feme/lib/Transforms/CPU/ResourceCalls.cpp:55`, `"unsupported feme.cpu.resource.* element type"` -- an explicit, intentional guard for an element type this pass does not yet lower, reached only once more format/type combinations stop being skipped as unsupported |
+| `synchronization` | `timeline_semaphore.device_host.write_copy_buffer_read_copy_buffer.buffer_262144` | Segmentation fault, no diagnostic |
+
+Each is a genuine, previously-latent bug this measurement uncovered, not a
+consequence of C1's own pack/unpack logic (none touch
+`RenderPass`/`CommandBuffer`/`ImageOps`/`Executor`/`ImageFixture`). They
+are recorded here as the concrete blocker for the format-properties
+follow-up, rather than silently deferred: **wiring
+`vkGetPhysicalDeviceFormatProperties` honestly, and fixing these three
+crashes, is the next unit of work before C1's 1,938-case column moves.**
+
+This run also reproduced one separate, unrelated flake independent of any
+C1 change: `dEQP-VK.api.*`, run standalone with the *pre*-format-properties
+code (i.e. this revision), hung deterministically at
+`buffer_view.access.dedicated_alloc...image_dedicated_alloc_compute` after
+processing roughly 200,000 preceding cases in the same process, despite
+that exact case passing cleanly in isolation (a `VK_ERROR_FORMAT_NOT_SUPPORTED`-based
+`Fail`, not a hang). This smells like a resource-exhaustion issue specific
+to very long single-process runs and unrelated to attachment formats; the
+`api` row in every table below instead uses the same group's numbers from
+an otherwise-identical run that completed cleanly (7,445 passed / 287
+failed / 259,490 not supported / 267,222 total), and this flake is
+recorded here rather than silently worked around.
 
 ## Every failure, by root cause
 
@@ -112,12 +182,20 @@ than its output.
 
 ### Format table (1,938)
 
+This bucket's per-cause breakdown is unchanged from the previous edition
+(see "Roadmap C1: measured impact" above for why): every case here is
+still a clean rejection, and the *reason string* `deqp-vk` reports for
+each is still exactly what it was before C1, since none of these checks
+go through `isSupportedColorAttachmentFormat`/
+`isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat` at
+all -- they go through the still-unwired `vkGetPhysicalDeviceFormatProperties`.
+
 | Cases | Cause |
 |---:|---|
-| 874 | A color attachment format the ICD cannot render into. `isSupportedColorAttachmentFormat` (`feme/lib/Vulkan/RenderPass.cpp`) lists nine formats and omits `B8G8R8A8_UNORM`, which is both mandatory for `COLOR_ATTACHMENT`/`COLOR_ATTACHMENT_BLEND` per the Vulkan mandatory-format table *and* the framebuffer format every Amber-based CTS test uses -- so it alone accounts for all 677 `graphicsfuzz` failures and every remaining plain-`Fail` case in the run |
+| 874 | A color attachment format `deqp-vk` believes the ICD cannot render into, per `vkGetPhysicalDeviceFormatProperties` (not, as of C1, per `isSupportedColorAttachmentFormat`, which now accepts `B8G8R8A8_UNORM` -- see "Roadmap C1: measured impact"). `B8G8R8A8_UNORM` is both mandatory for `COLOR_ATTACHMENT`/`COLOR_ATTACHMENT_BLEND` per the Vulkan mandatory-format table *and* the framebuffer format every Amber-based CTS test uses -- so it alone accounts for all 677 `graphicsfuzz` failures and every remaining plain-`Fail` case in the run |
 | 815 | `VK_ERROR_FORMAT_NOT_SUPPORTED` from `vkGetPhysicalDeviceImageFormatProperties`/`vkCreateBufferView`/`vkCreateImage`/`vkCreateRenderPass` for a texel-buffer or image format outside the advertised list |
-| 193 | No mandatory depth/stencil format: `isSupportedDepthAttachmentFormat` advertises `D16_UNORM`/`D32_SFLOAT` and `isSupportedStencilAttachmentFormat` advertises `S8_UINT`, but no *combined* depth+stencil format, so CTS's "there must be at least one depth format handled (Vulkan spec 1.0, table 1)" and "cannot find supported stencil format" checks fail |
-| 56 | `dEQP-VK.api.info.format_properties.*` mandatory format-feature-flag checks |
+| 193 | No mandatory depth/stencil format, per the same still-zero `vkGetPhysicalDeviceFormatProperties` query (`isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat` now both accept `D24_UNORM_S8_UINT` as of C1, but that predicate is not yet what CTS's own capability probe consults), so CTS's "there must be at least one depth format handled (Vulkan spec 1.0, table 1)" and "cannot find supported stencil format" checks still fail |
+| 56 | `dEQP-VK.api.info.format_properties.*` mandatory format-feature-flag checks -- the most direct evidence that `vkGetPhysicalDeviceFormatProperties` itself, not the attachment-format predicates, is the remaining blocker |
 
 ### API object model (558)
 
