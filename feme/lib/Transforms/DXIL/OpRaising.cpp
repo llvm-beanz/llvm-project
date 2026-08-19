@@ -1482,6 +1482,63 @@ bool raiseTextureLoad(CallInst &CI) {
   return true;
 }
 
+/// Raises a `dx.op.textureStore` (opcode 67) call on an already-raised
+/// `dx.Texture` handle into `llvm.dx.resource.store.texture`, the write
+/// counterpart `raiseTextureLoad` inverts the read side of. `TextureStore`'s
+/// `Coord0..2` operands are simply truncated to \p Dim's component count
+/// (as `raiseTextureLoad` does for its own `Coord0..2`); its four scalar
+/// `Val0..3` operands are reassembled into the handle's element (vector)
+/// type the same way `raiseTypedBufferStore` reassembles `BufferStore`'s.
+/// Only a full-width write (a write mask selecting every one of the
+/// element's components, e.g. `0b1111` for a `<4 x T>`) is raised, matching
+/// `raiseTypedBufferStore`'s identical narrowing -- a partial-component
+/// texture write is left unraised for now.
+bool raiseTextureStore(CallInst &CI) {
+  if (CI.arg_size() != 10) // opcode, Handle, Coord0-2, Val0-3, Mask
+    return false;
+  Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
+  auto *HandleTy =
+      Handle ? dyn_cast<dxil::TextureExtType>(Handle->getType()) : nullptr;
+  if (!HandleTy)
+    return false;
+
+  unsigned NumCoords = getTextureCoordComponents(HandleTy->getDimension());
+  if (NumCoords == 0 || NumCoords > 3)
+    return false;
+
+  std::optional<uint64_t> Mask = getConstInt(CI.getArgOperand(9));
+  if (!Mask)
+    return false;
+  unsigned Width = getContiguousMaskWidth(*Mask);
+  Type *ElemTy = HandleTy->getResourceType();
+  auto *VecTy = dyn_cast<FixedVectorType>(ElemTy);
+  if (Width != (VecTy ? VecTy->getNumElements() : 1))
+    return false;
+
+  IRBuilder<> Builder(&CI);
+  SmallVector<Value *, 3> Coords;
+  for (unsigned I = 0; I != NumCoords; ++I)
+    Coords.push_back(CI.getArgOperand(2 + I));
+  Value *Coord = packTextureVector(Builder, Coords);
+
+  Value *Stored = CI.getArgOperand(5);
+  if (VecTy) {
+    Stored = PoisonValue::get(VecTy);
+    for (unsigned I = 0; I != Width; ++I)
+      Stored = Builder.CreateInsertElement(Stored, CI.getArgOperand(5 + I),
+                                           Builder.getInt32(I));
+  }
+  if (Stored->getType() != ElemTy)
+    return false;
+
+  Function *StoreFn = Intrinsic::getOrInsertDeclaration(
+      CI.getModule(), Intrinsic::dx_resource_store_texture,
+      {HandleTy, Coord->getType(), ElemTy});
+  Builder.CreateCall(StoreFn, {Handle, Coord, Stored});
+  CI.eraseFromParent();
+  return true;
+}
+
 /// Raises a `dx.op.getDimensions` (opcode 72) call's field-0 (`.x`, i.e.
 /// width) extract into `llvm.dx.resource.getdimensions_x`, the only overload
 /// LLVM's own `DXILOpLowering.cpp` lowers a canonical intrinsic to yet (see
@@ -1518,15 +1575,43 @@ bool raiseGetDimensionsX(CallInst &CI) {
   return true;
 }
 
+/// Returns the `llvm.dx.resource.load.cbufferrow.*` intrinsic whose row
+/// shape matches \p RetTy (`%dx.types.CBufRet.*`, a fixed-width aggregate of
+/// same-typed fields covering DXIL's 128-bit cbuffer row -- see
+/// `CBufferLoadLegacy`'s `overloads` list in DXIL.td: 2 64-bit fields, 4
+/// 32-bit fields, or 8 16-bit fields), or `not_intrinsic` if \p RetTy is not
+/// one of those three shapes.
+Intrinsic::ID getCBufferRowIntrinsic(StructType &RetTy) {
+  Type *ElemTy = RetTy.getElementType(0);
+  for (Type *Field : RetTy.elements())
+    if (Field != ElemTy)
+      return Intrinsic::not_intrinsic; // Every field must share one type.
+
+  switch (RetTy.getNumElements()) {
+  case 2:
+    return ElemTy->isIntegerTy(64) || ElemTy->isDoubleTy()
+               ? Intrinsic::dx_resource_load_cbufferrow_2
+               : Intrinsic::not_intrinsic;
+  case 4:
+    return ElemTy->isIntegerTy(32) || ElemTy->isFloatTy()
+               ? Intrinsic::dx_resource_load_cbufferrow_4
+               : Intrinsic::not_intrinsic;
+  case 8:
+    return ElemTy->isIntegerTy(16) || ElemTy->isHalfTy()
+               ? Intrinsic::dx_resource_load_cbufferrow_8
+               : Intrinsic::not_intrinsic;
+  default:
+    return Intrinsic::not_intrinsic;
+  }
+}
+
 /// Raises a `dx.op.cbufferLoadLegacy` (opcode 59) call on an already-raised
-/// constant-buffer handle into `llvm.dx.resource.load.cbufferrow.4`, the
-/// standard 32-bit-per-component row shape (`%dx.types.CBufRet.i32`/`.f32`,
-/// a fixed 4-field aggregate covering DXIL's 128-bit cbuffer row -- see
-/// `CBufferLoadLegacy`'s `overloads` list in DXIL.td). The other three
-/// overloads this op has (`.f16`/`.f64`/`.i16`, an 8- or 2-field aggregate
-/// of a different component width) are not yet raised: nothing downstream
-/// (`feme::cpu::RootConstantLoweringPass`) consumes them yet either, so
-/// there is nothing to raise them *into*.
+/// constant-buffer handle into the `llvm.dx.resource.load.cbufferrow.*`
+/// overload `getCBufferRowIntrinsic` selects for its return shape: the
+/// 32-bit-per-component row (`.f32`/`.i32`, `cbufferrow.4`), the 16-bit one
+/// HLSL's `half`/16-bit-int cbuffer members produce with
+/// `-enable-16bit-types` (`.f16`/`.i16`, `cbufferrow.8`), or the 64-bit one
+/// `double`/64-bit-int members produce (`.f64`/`.i64`, `cbufferrow.2`).
 bool raiseCBufferLoadLegacy(CallInst &CI) {
   if (CI.arg_size() != 3)
     return false;
@@ -1537,14 +1622,13 @@ bool raiseCBufferLoadLegacy(CallInst &CI) {
     return false;
 
   auto *RetTy = dyn_cast<StructType>(CI.getType());
-  if (!RetTy || RetTy->getNumElements() != 4)
+  if (!RetTy)
+    return false;
+  Intrinsic::ID LoadID = getCBufferRowIntrinsic(*RetTy);
+  if (LoadID == Intrinsic::not_intrinsic)
     return false;
   Type *ElemTy = RetTy->getElementType(0);
-  if (!ElemTy->isIntegerTy(32) && !ElemTy->isFloatTy())
-    return false;
-  for (Type *Field : RetTy->elements())
-    if (Field != ElemTy)
-      return false; // Every field must share the same 32-bit type.
+  unsigned NumFields = RetTy->getNumElements();
 
   // `CI`'s result type (DXIL's named `%dx.types.CBufRet.*`) and the
   // intrinsic's (a literal struct) are layout- but never `llvm::Type`-
@@ -1552,18 +1636,19 @@ bool raiseCBufferLoadLegacy(CallInst &CI) {
   // `WaveActiveBallot` et al.), so each `extractvalue` of `CI` is rewritten
   // individually to read the new call instead of RAUWing the aggregate
   // value itself.
-  SmallVector<ExtractValueInst *, 4> Extracts;
+  SmallVector<ExtractValueInst *, 8> Extracts;
   for (User *U : CI.users()) {
     auto *EV = dyn_cast<ExtractValueInst>(U);
-    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] >= 4)
+    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] >= NumFields)
       return false;
     Extracts.push_back(EV);
   }
 
   IRBuilder<> Builder(&CI);
-  Function *LoadFn = Intrinsic::getOrInsertDeclaration(
-      CI.getModule(), Intrinsic::dx_resource_load_cbufferrow_4,
-      {ElemTy, ElemTy, ElemTy, ElemTy, HandleTy});
+  SmallVector<Type *, 9> Overloads(NumFields, ElemTy);
+  Overloads.push_back(HandleTy);
+  Function *LoadFn =
+      Intrinsic::getOrInsertDeclaration(CI.getModule(), LoadID, Overloads);
   Value *Loaded = Builder.CreateCall(LoadFn, {Handle, CI.getArgOperand(2)});
 
   for (ExtractValueInst *EV : Extracts) {
@@ -1721,6 +1806,9 @@ bool raiseResourceOps(Module &M) {
   });
   Changed |= forEachDXOpCall(66, [](CallInst &CI) { // TextureLoad
     return raiseTextureLoad(CI);
+  });
+  Changed |= forEachDXOpCall(67, [](CallInst &CI) { // TextureStore
+    return raiseTextureStore(CI);
   });
   Changed |= forEachDXOpCall(72, [](CallInst &CI) { // GetDimensions
     return raiseGetDimensionsX(CI);

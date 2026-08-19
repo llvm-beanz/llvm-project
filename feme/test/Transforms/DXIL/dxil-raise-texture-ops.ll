@@ -1,9 +1,13 @@
 ; RUN: feme-opt --llvm -passes=feme-dxil-raise-ops -S %s | FileCheck %s
 
 ; Covers feme::dxil::OpRaisingPass's texture/sampler access raising
-; (raiseSample/raiseSampleLevel/raiseTextureLoad/raiseGetDimensionsX in
-; OpRaising.cpp), the "only the implementation left" remainder of
-; Design.md's "Decision: texture and sampler handle kinds" (roadmap R30).
+; (raiseSample/raiseSampleLevel/raiseTextureLoad/raiseTextureStore/
+; raiseGetDimensionsX in OpRaising.cpp): the texture/sampler handle
+; reconstruction itself was the "only the implementation left" remainder of
+; Design.md's "Decision: texture and sampler handle kinds" (roadmap R30);
+; raiseTextureStore closes Roadmap.md's "the remaining resource access ops"
+; P1 entry's texture-store half (the load half, raiseTextureLoad, already
+; existed).
 ; Every handle below is bindless (`ResourceDescriptorHeap`/
 ; `SamplerDescriptorHeap`), exactly like dxil-raise-resource-heap-handles.ll,
 ; since the CPU target accepts bindless shaders only.
@@ -114,9 +118,32 @@ define i32 @dimensions_2d(i32 %idx) {
   ret i32 %w
 }
 
+; A writeable `RWTexture2D<float4>` (kind 2, `IsUAV`) texel write:
+; `dx.op.textureStore` (67) raises to `llvm.dx.resource.store.texture`,
+; reassembling `Val0..3` into a `<4 x float>` (mirroring how
+; `raiseTypedBufferStore` reassembles `BufferStore`'s) and truncating
+; `Coord0..2` to 2 components for a `Texture2D`, the same way
+; `textureload_2d` above truncates `TextureLoad`'s.
+; CHECK-LABEL: define void @texturestore_2d(
+define void @texturestore_2d(i32 %idx, i32 %x, i32 %y, <4 x float> %v) {
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 1, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[COORD:%.*]] = insertelement <2 x i32> poison, i32 %x, i32 0
+  ; CHECK: insertelement <2 x i32> [[COORD]], i32 %y, i32 1
+  ; CHECK: call void @llvm.dx.resource.store.texture{{.*}}(target("dx.Texture", <4 x float>, 1, 0, 1, 2) [[TEX]], <2 x i32> {{.*}}, <4 x float> {{.*}})
+  %tex1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %tex2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %tex1, %dx.types.ResourceProperties { i32 4098, i32 1033 })
+  %v0 = extractelement <4 x float> %v, i32 0
+  %v1 = extractelement <4 x float> %v, i32 1
+  %v2 = extractelement <4 x float> %v, i32 2
+  %v3 = extractelement <4 x float> %v, i32 3
+  call void @dx.op.textureStore.f32(i32 67, %dx.types.Handle %tex2, i32 %x, i32 %y, i32 poison, float %v0, float %v1, float %v2, float %v3, i8 15)
+  ret void
+}
+
 declare %dx.types.Handle @dx.op.createHandleFromHeap(i32, i32, i1, i1)
 declare %dx.types.Handle @dx.op.annotateHandle(i32, %dx.types.Handle, %dx.types.ResourceProperties)
 declare %dx.types.ResRet.f32 @dx.op.sample.f32(i32, %dx.types.Handle, %dx.types.Handle, float, float, float, float, i32, i32, i32, float)
 declare %dx.types.ResRet.f32 @dx.op.sampleLevel.f32(i32, %dx.types.Handle, %dx.types.Handle, float, float, float, float, i32, i32, i32, float)
 declare %dx.types.ResRet.f32 @dx.op.textureLoad.f32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i32)
+declare void @dx.op.textureStore.f32(i32, %dx.types.Handle, i32, i32, i32, float, float, float, float, i8)
 declare %dx.types.Dimensions @dx.op.getDimensions(i32, %dx.types.Handle, i32)
