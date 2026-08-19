@@ -746,6 +746,41 @@ public:
   }
 };
 
+/// Returns false if \p Struct's member \p Index is a matrix decorated
+/// `RowMajor` -- a physical layout transposed from the logical column-major
+/// type LLVM's own natural array-of-column-vectors representation always
+/// uses (see the `spirv.MatrixType` conversion in
+/// populateSPIRVToLLVMTargetTypeConversions), which reinterpreting the same
+/// bytes cannot reproduce -- or decorated `MatrixStride` with a value other
+/// than \p ConvertedMember's own natural per-column stride (the size of one
+/// column, since LLVM array elements pack with no interior padding); true
+/// for every other member, including one that is not a matrix at all.
+bool isMatrixMemberLayoutRepresentable(mlir::spirv::StructType Struct,
+                                       unsigned Index,
+                                       mlir::Type ConvertedMember) {
+  if (!mlir::isa<mlir::spirv::MatrixType>(Struct.getElementType(Index)))
+    return true;
+
+  llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 2>
+      Decorations;
+  Struct.getMemberDecorations(Index, Decorations);
+  mlir::DataLayout DL;
+  auto ArrayTy = mlir::cast<mlir::LLVM::LLVMArrayType>(ConvertedMember);
+  uint64_t NaturalStride = DL.getTypeSize(ArrayTy.getElementType());
+  for (const auto &Decoration : Decorations) {
+    if (Decoration.decoration == mlir::spirv::Decoration::RowMajor)
+      return false;
+    if (Decoration.decoration != mlir::spirv::Decoration::MatrixStride)
+      continue;
+    auto StrideAttr =
+        mlir::dyn_cast<mlir::IntegerAttr>(Decoration.decorationValue);
+    if (!StrideAttr ||
+        static_cast<uint64_t>(StrideAttr.getInt()) != NaturalStride)
+      return false;
+  }
+  return true;
+}
+
 /// Converts a SPIR-V struct type to a non-packed LLVM struct with the same
 /// member sequence (no inserted padding fields, so member index N still
 /// means the same thing to whatever other conversion pattern GEPs into it),
@@ -771,13 +806,15 @@ public:
 /// `PushConstantGlobalVariablePattern` below needs its own conversion
 /// rather than the shared upstream one. Returns null for a struct this
 /// cannot lay out (a declared offset naturally-aligned layout cannot
-/// reproduce, or an unconvertible member type).
+/// reproduce, a matrix member's declared layout is not representable --
+/// see isMatrixMemberLayoutRepresentable -- or an unconvertible member
+/// type).
 mlir::Type convertOffsetStructTypeIgnoringDecorations(
     mlir::spirv::StructType Type, const mlir::TypeConverter &Converter) {
   llvm::SmallVector<mlir::Type, 8> Members;
   for (unsigned I = 0, E = Type.getNumElements(); I != E; ++I) {
     mlir::Type MemberTy = Converter.convertType(Type.getElementType(I));
-    if (!MemberTy)
+    if (!MemberTy || !isMatrixMemberLayoutRepresentable(Type, I, MemberTy))
       return nullptr;
     Members.push_back(MemberTy);
   }
@@ -1476,6 +1513,24 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
           return std::nullopt;
         return mlir::LLVM::LLVMArrayType::get(ElementType, 0);
       });
+
+  // MLIR upstream has no `spirv.MatrixType` conversion at all -- SPIR-V's
+  // OpTypeMatrix has no runner equivalent to convert to. LLVM's SPIRV
+  // backend expects the natural (column-major) representation, an array of
+  // column vectors (see
+  // `llvm/test/CodeGen/SPIRV/pointers/load-store-matrix-in-struct.ll`); a
+  // `RowMajor`-decorated member or a `MatrixStride` mismatched with that
+  // natural layout is rejected once the matrix appears inside a struct (see
+  // isMatrixMemberLayoutRepresentable), since that information -- like
+  // `Offset` -- is only ever attached to a *member*, not to the matrix type
+  // itself.
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::MatrixType Type)
+                                  -> std::optional<mlir::Type> {
+    mlir::Type ColumnType = TypeConverter.convertType(Type.getColumnType());
+    if (!ColumnType)
+      return std::nullopt;
+    return mlir::LLVM::LLVMArrayType::get(ColumnType, Type.getNumColumns());
+  });
 
   // Registered after (so tried before) MLIR's own `spirv.sampled_image`
   // conversion, which folds the image and sampler into one combined target
