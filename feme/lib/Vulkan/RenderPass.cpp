@@ -60,7 +60,8 @@ bool isSupportedStencilAttachmentFormat(feme::cpu::ResourceFormat Format) {
 }
 
 bool isSupportedAttachmentSampleCount(uint32_t SampleCount) {
-  return SampleCount == 1 || SampleCount == 2 || SampleCount == 4;
+  return SampleCount == 1 || SampleCount == 2 || SampleCount == 4 ||
+         SampleCount == 8;
 }
 
 llvm::Expected<feme::graphics::AttachmentView>

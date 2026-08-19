@@ -157,8 +157,12 @@ TEST_F(RenderPassTest, RejectsDepthStencilFormatAsColorAttachment) {
 TEST_F(RenderPassTest, RejectsUnsupportedSampleCount) {
   VkRenderPass Pass = VK_NULL_HANDLE;
   EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass,
-                                   VK_SAMPLE_COUNT_8_BIT),
+                                   VK_SAMPLE_COUNT_16_BIT),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
+  EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass,
+                                   VK_SAMPLE_COUNT_8_BIT),
+            VK_SUCCESS);
+  vkDestroyRenderPass(Device, Pass, nullptr);
   EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass,
                                    VK_SAMPLE_COUNT_4_BIT),
             VK_SUCCESS);

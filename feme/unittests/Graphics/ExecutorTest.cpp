@@ -967,7 +967,7 @@ TEST(ExecutorTest, MultisampleResolveAveragesPerPixelCoverage) {
   EXPECT_EQ(ResolveStorage[3 * 4], 0);        // pixel 3 black
 }
 
-TEST(ExecutorTest, RejectsUnsupportedSampleCount) {
+TEST(ExecutorTest, AcceptsEightSampleCount) {
   Context Ctx;
   EntrySignature VSSig;
   VSSig.Elements = {
@@ -991,6 +991,64 @@ TEST(ExecutorTest, RejectsUnsupportedSampleCount) {
       std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
       RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
       BlendMode::Replace, /*SampleCount=*/8,
+      {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}});
+
+  constexpr uint32_t Samples = 8;
+  std::vector<uint8_t> MSStorage(4u * 4u * Samples * 4u, 0);
+  for (size_t I = 0; I + 3 < MSStorage.size(); I += 4)
+    MSStorage[I + 3] = 255;
+  std::array<uint8_t, 64> ResolveStorage{};
+
+  AttachmentView MSColor{MSStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4};
+  AttachmentView Resolve{ResolveStorage, cpu::ResourceFormat::R8G8B8A8_UNORM, 4,
+                         4};
+  std::array<AttachmentView, 1> Attachs{MSColor};
+  std::array<AttachmentView, 1> Resolves{Resolve};
+
+  TriangleScene Scene;
+  Scene.VertexData = {-1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+  PreparedDraw Draw = Scene.prepare();
+  Draw.Attachments = Attachs;
+  Draw.ResolveAttachments = Resolves;
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+  // The triangle fully covers the attachment, so every one of the 8
+  // samples at every pixel is red, and the resolve must be exactly
+  // red at every pixel too -- exercising every one of `samplePositions`'
+  // eight offsets rather than only the fraction a partial-coverage edge
+  // would exercise.
+  for (size_t Pixel = 0; Pixel != 16; ++Pixel) {
+    EXPECT_EQ(ResolveStorage[Pixel * 4], 255) << "pixel " << Pixel;
+    EXPECT_EQ(ResolveStorage[Pixel * 4 + 3], 255) << "pixel " << Pixel;
+  }
+}
+
+TEST(ExecutorTest, RejectsUnsupportedSampleCount) {
+  Context Ctx;
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Input, 4, /*Location=*/1),
+      makeElement(2, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position),
+      makeElement(3, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexShaderIR, "vs_main", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+  EntrySignature FSSig;
+  FSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 4, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0)};
+  Expected<std::shared_ptr<CompiledStage>> FS = compileStage(
+      Ctx, FragmentShaderIR, "fs_main", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace, /*SampleCount=*/16,
       {AttachmentFormat{cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}});
 
   TriangleScene Scene;

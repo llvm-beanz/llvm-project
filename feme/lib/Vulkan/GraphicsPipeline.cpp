@@ -946,7 +946,7 @@ Error translateFixedFunctionState(
     if (!isSupportedAttachmentSampleCount(Samples))
       return createStringError(inconvertibleErrorCode(),
                                "rasterization sample count %u is not "
-                               "implemented (1, 2 and 4 are)",
+                               "implemented (1, 2, 4 and 8 are)",
                                Samples);
     if (Samples != Targets->SampleCount)
       return createStringError(inconvertibleErrorCode(),

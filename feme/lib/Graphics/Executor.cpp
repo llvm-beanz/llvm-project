@@ -530,7 +530,7 @@ bool isTopLeftEdge(std::array<float, 2> A, std::array<float, 2> B) {
 /// -- "Determinism and Reference Execution" in
 /// feme/docs/FeMeGraphicsDesign.md requires fixed sample locations, not
 /// any particular API's -- rather than a copy of Vulkan's or Direct3D's
-/// standard sample pattern table. Only 1/2/4 samples are implemented; a
+/// standard sample pattern table. 1/2/4/8 samples are implemented; a
 /// higher count is a mechanical, on-demand addition of another row here.
 Expected<ArrayRef<std::array<float, 2>>> samplePositions(uint32_t Count) {
   static constexpr std::array<float, 2> One[] = {{0.5f, 0.5f}};
@@ -538,6 +538,15 @@ Expected<ArrayRef<std::array<float, 2>>> samplePositions(uint32_t Count) {
                                                  {0.75f, 0.75f}};
   static constexpr std::array<float, 2> Four[] = {
       {0.375f, 0.125f}, {0.875f, 0.375f}, {0.125f, 0.625f}, {0.625f, 0.875f}};
+  // An "N-rooks" pattern: each sample's X coordinate is a distinct
+  // 1/16-grid center, and the Y coordinates are the same set cyclically
+  // shifted by three (rather than left in X order, which would put every
+  // sample on the pixel's main diagonal) so no two samples share an X or
+  // a Y coordinate and none coincide.
+  static constexpr std::array<float, 2> Eight[] = {
+      {0.0625f, 0.4375f}, {0.1875f, 0.5625f}, {0.3125f, 0.6875f},
+      {0.4375f, 0.8125f}, {0.5625f, 0.9375f}, {0.6875f, 0.0625f},
+      {0.8125f, 0.1875f}, {0.9375f, 0.3125f}};
   switch (Count) {
   case 1:
     return ArrayRef(One);
@@ -545,10 +554,12 @@ Expected<ArrayRef<std::array<float, 2>>> samplePositions(uint32_t Count) {
     return ArrayRef(Two);
   case 4:
     return ArrayRef(Four);
+  case 8:
+    return ArrayRef(Eight);
   default:
     return createStringError(inconvertibleErrorCode(),
                              "sample count %u is not yet supported (only 1, "
-                             "2, and 4 are implemented)",
+                             "2, 4, and 8 are implemented)",
                              Count);
   }
 }
@@ -962,10 +973,11 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
 Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                    uint32_t WorkerCount) {
   uint32_t SampleCount = Pipeline.getSampleCount();
-  if (SampleCount != 1 && SampleCount != 2 && SampleCount != 4)
+  if (SampleCount != 1 && SampleCount != 2 && SampleCount != 4 &&
+      SampleCount != 8)
     return createStringError(inconvertibleErrorCode(),
                              "sample count %u is not yet supported (only 1, "
-                             "2, and 4 are implemented, roadmap R33)",
+                             "2, 4, and 8 are implemented, roadmap R33/C4b)",
                              SampleCount);
   Expected<ArrayRef<std::array<float, 2>>> SamplePositions =
       samplePositions(SampleCount);

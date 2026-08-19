@@ -232,22 +232,26 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxFramebufferWidth = 4096;
   Limits.maxFramebufferHeight = 4096;
   Limits.maxFramebufferLayers = 256;
-  // (V6) Framebuffer attachments may now be multisample, up to the 4
+  // (V6) Framebuffer attachments may now be multisample, up to the 8
   // samples the software rasterizer implements coverage and resolves for
-  // (roadmap R33; `feme::graphics::executeDraws` rejects anything else).
-  // These stopped being unreachable numbers with the graphics path and are
-  // contracts now: `vkCreateRenderPass` checks every attachment's sample
-  // count against them, and so does graphics pipeline creation.
+  // (roadmap R33/C4b; `feme::graphics::executeDraws` rejects anything
+  // else). These stopped being unreachable numbers with the graphics path
+  // and are contracts now: `vkCreateRenderPass` checks every attachment's
+  // sample count against them, and so does graphics pipeline creation.
   Limits.framebufferColorSampleCounts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.framebufferDepthSampleCounts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.framebufferStencilSampleCounts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.framebufferNoAttachmentsSampleCounts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.maxColorAttachments = 4;
-  // A sampled/storage image may be created with up to 4 samples (see "V5:
+  // A sampled/storage image may be created with up to 8 samples (see "V5:
   // Images and sampling"'s multisample-object-model scope note in
   // FeMeVulkanDesign.md): this ICD stores every sample's data, but nothing
   // yet reads a single sample from a shader or resolves one, so there is no
@@ -258,13 +262,16 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // scope -- unlike a depth/stencil *attachment*, whose per-sample tests
   // the executor does implement (see the framebuffer counts above).
   Limits.sampledImageColorSampleCounts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.sampledImageIntegerSampleCounts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.sampledImageDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT;
   Limits.sampledImageStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT;
   Limits.storageImageSampleCounts =
-      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
+      VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT |
+      VK_SAMPLE_COUNT_8_BIT;
   Limits.maxSampleMaskWords = 1;
   Limits.timestampComputeAndGraphics = VK_FALSE;
   Limits.timestampPeriod = 1.0f;
