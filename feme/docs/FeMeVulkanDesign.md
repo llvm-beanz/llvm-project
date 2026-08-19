@@ -1901,11 +1901,14 @@ there once every command it declares is implemented.
 to be unsupported"): input attachments and subpass-local merging are not
 implemented, so a subpass declaring one fails `vkCreateRenderPass`;
 attachment formats are the executor's own supported set (the 32-bit float
-family, `R8G8B8A8_UNORM`/`_SRGB`, `R16G16B16A16_{FLOAT,UNORM,SNORM}` for
-color, `D16_UNORM`/`D32_FLOAT` for depth, `S8_UINT` for stencil), and a
-*packed* depth/stencil format is rejected outright because `FeMeGraphics`
-models depth and stencil as two separate single-component images -- which
-also means a subpass may bind one or the other, never both; sample counts
+family, `R8G8B8A8_UNORM`/`_SRGB`, `B8G8R8A8_UNORM`, `R10G10B10A2_UNORM`,
+`R16G16B16A16_{FLOAT,UNORM,SNORM}` for color -- the Vulkan 1.2 mandatory
+`COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` set, roadmap C1 -- `D16_UNORM`/
+`D32_FLOAT` for depth, `S8_UINT` for stencil, and `D24_UNORM_S8_UINT` as a
+combined depth+stencil format, also roadmap C1: the two halves share one
+word of storage, and a subpass may bind either or both); other packed
+depth/stencil formats (`D32_FLOAT_S8X24_UINT`) remain rejected, a
+mechanical, on-demand addition to the same shape; sample counts
 are 1, 2 and 4; only the two triangle topologies rasterize;
 rasterizer discard, depth clamp,
 depth bias, non-fill polygon modes, `VK_CULL_MODE_FRONT_AND_BACK`, the depth

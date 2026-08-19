@@ -2016,12 +2016,18 @@ implements every bullet above except the API-runtime conformance-run bullet,
 which has no runtime to run against yet (V1/W1 land the Vulkan/Direct3D
 object models first) -- see "Software Graphics Executor" and "Early and
 late tests" earlier in this document, and Roadmap.md's own R33 entry, for
-the full status note and deferred scope (combined `D24_UNORM_S8_UINT`/
-`D32_FLOAT_S8X24_UINT` depth-stencil attachments, per-sample shading/
-interpolation, depth/stencil resolve, and 8+ sample counts are each a
+the full status note and deferred scope (per-sample shading/interpolation,
+depth/stencil resolve, and 8+ sample counts are each a mechanical,
+on-demand addition to the same shape; combined `D24_UNORM_S8_UINT` support
+was added by roadmap C1 -- `packDepthClear`/`packStencilClear` and the
+executor's `readDepth`/`writeDepth`/`readStencil`/`writeStencil` are
+read-modify-writes of their own half of the shared word, so testing/
+writing one never corrupts the other; `D32_FLOAT_S8X24_UINT` remains a
 mechanical, on-demand addition to the same shape). Today's coverage is
 `unittests/Graphics/ExecutorTest.cpp`'s depth/stencil/blend/write-mask/
-logic-op/MRT/multisample/determinism checks and
+logic-op/MRT/multisample/determinism checks,
+`unittests/Graphics/ImageFixtureTest.cpp`'s depth/stencil pack/unpack
+checks (including the combined format), and
 `test/Tools/feme-render/draw-depth.test`.
 
 ### G5: Tessellation and geometry

@@ -2190,10 +2190,14 @@ draws:
   `attachments` entries rather than adding a second attachment list; every
   other `attachments` entry is a color attachment. A depth attachment uses
   the `D16_UNORM`/`D32_FLOAT` format family and a stencil attachment uses
-  `S8_UINT` -- kept as two separate images rather than one packed
-  `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT` surface (roadmap R33; see
-  `feme::graphics::DepthStencilAttachment`'s own header comment in
-  PreparedDraw.h for why).
+  `S8_UINT`. `feme::graphics::DepthStencilAttachment` (and the Vulkan ICD,
+  roadmap C1) also supports a combined `D24_UNORM_S8_UINT` surface -- both
+  halves sharing one word of storage -- but `feme-render`'s scene YAML
+  does not yet exercise that shape: naming the same combined-format
+  attachment from both `depth-attachment` and `stencil-attachment` is a
+  mechanical, on-demand addition to this parser, not a `feme::graphics`
+  limitation (see `feme::graphics::DepthStencilAttachment`'s own header
+  comment in PreparedDraw.h).
 - State the scene does not mention takes the executor's documented default,
   and a scene naming state the executor does not implement is an error at
   load time, not a silently ignored key. Both properties are what keep a

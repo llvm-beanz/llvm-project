@@ -115,14 +115,17 @@ struct AttachmentView {
 };
 
 /// The optional depth/stencil attachments a draw tests/writes against
-/// (roadmap R33, "Depth, stencil, blending, and multisampling"). `Depth`
-/// and `Stencil` are two separate single-component images (`D16_UNORM`/
-/// `D32_FLOAT` and `S8_UINT` respectively) rather than one packed
-/// `D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT` surface: the combined
-/// formats are declared in `cpu::ResourceFormat` for a future API
-/// frontend to translate into (or out of), but splitting them keeps this
-/// milestone's output-merge code free of sub-word packing. An empty
-/// `Data` member means that attachment is not bound; `Pipeline`'s
+/// (roadmap R33, "Depth, stencil, blending, and multisampling"; combined-
+/// format support added by roadmap C1, "Mandatory formats"). For a pure
+/// depth (`D16_UNORM`/`D32_FLOAT`) or pure stencil (`S8_UINT`) attachment,
+/// `Depth` and `Stencil` are two separate single-component images. For a
+/// combined format (`D24_UNORM_S8_UINT`), both are bound and share the
+/// same underlying storage (one 4-byte word per texel: the low 24 bits
+/// depth, the high byte stencil) -- `feme::graphics::packDepthClear`/
+/// `packStencilClear` (and the executor's own `readDepth`/`writeDepth`/
+/// `readStencil`/`writeStencil`) are read-modify-writes of only their own
+/// half, so testing/writing one never corrupts the other. An empty `Data`
+/// member means that attachment is not bound; `Pipeline`'s
 /// `DepthState::TestEnable`/`WriteEnable` and `StencilState::TestEnable`
 /// require the matching attachment to be bound.
 struct DepthStencilAttachment {
