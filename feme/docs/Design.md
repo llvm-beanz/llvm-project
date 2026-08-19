@@ -1053,12 +1053,18 @@ too (generalizing the same access-site component-count recovery a legacy
 `TypedBuffer` already needed -- see its own comment), leaving only
 `Sampler` unraised on that path (matching R29's own bindless-first
 precedent for samplers specifically). `raiseSample`/`raiseSampleLevel`/
-`raiseTextureLoad`/`raiseTextureStore`/`raiseGetDimensionsX` cover item 3's
+`raiseTextureLoad`/`raiseTextureStore`/`raiseGetDimensions` cover item 3's
 "raising the access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
 `dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
-`dx.op.getDimensions`'s `.x` field (72). The first three, plus
-`getDimensions`, were the only texture ops LLVM's own `DXILOpLowering.cpp`
-already lowered a canonical intrinsic to/from; `TextureStore` did not
+`dx.op.getDimensions`'s `.x`/`.xy` fields (72, i.e. a `GetDimensions` call
+whose out-parameters only ever read width, or width and height together --
+a mip-count out-parameter, DXIL's `.z`/`.w` fields, is still left unraised,
+since `DXILOpLowering.cpp` has no `levels_xy`-shaped forward lowering to
+verify against yet). The first three, plus `getDimensions`, were the only
+texture ops LLVM's own `DXILOpLowering.cpp` already lowered a canonical
+intrinsic to/from (`getdimensions.xy`'s own forward lowering was added
+alongside this raiser, the same way `TextureStore`'s was, immediately
+below); `TextureStore` did not
 (unlike `TextureLoad`, it had a `DXILOpClass` but no numbered
 `DXILOp<67, ...>` definition, canonical intrinsic, or lowering at all), so
 raising it needed a new `llvm.dx.resource.store.texture` canonical
@@ -1075,8 +1081,8 @@ image operations" in feme/docs/FeMeGraphicsDesign.md for where the
 canonical `llvm.dx.resource.sample*`/`llvm.spv.resource.sample*`
 intrinsics these raisers produce are consumed by the CPU target, and this
 document's "Raised LLVM IR -> AMDGPU" section for where
-`llvm.dx.resource.load.level`/`store.texture` are consumed when
-retargeting to `amdgcn-*` instead.
+`llvm.dx.resource.load.level`/`store.texture`/`getdimensions.x`/`.xy` are
+consumed when retargeting to `amdgcn-*` instead.
 
 #### Module metadata raising: `feme::dxil::MetadataRaisingPass`
 
