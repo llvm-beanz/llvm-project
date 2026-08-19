@@ -163,6 +163,10 @@ vkCmdSetBlendConstants
 vkCmdSetStencilReference
 vkCmdSetStencilCompareMask
 vkCmdSetStencilWriteMask
+vkCmdSetLineWidth
+vkCmdSetDepthBias
+vkCmdSetDepthBounds
+vkCmdSetDeviceMask
 vkCmdDraw
 vkCmdDrawIndexed
 vkCmdDrawIndirect

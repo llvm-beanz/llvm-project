@@ -444,6 +444,17 @@ vkCmdSetStencilCompareMask(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
                          VkStencilFaceFlags faceMask, uint32_t writeMask);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer commandBuffer,
+                                             float lineWidth);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer,
+                                             float depthBiasConstantFactor,
+                                             float depthBiasClamp,
+                                             float depthBiasSlopeFactor);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBounds(VkCommandBuffer commandBuffer,
+                                               float minDepthBounds,
+                                               float maxDepthBounds);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDeviceMask(VkCommandBuffer commandBuffer,
+                                              uint32_t deviceMask);
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(VkCommandBuffer commandBuffer,
                                      uint32_t vertexCount,
                                      uint32_t instanceCount,

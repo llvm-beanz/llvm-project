@@ -1892,6 +1892,29 @@ vkCmdSetStencilWriteMask(VkCommandBuffer commandBuffer,
                         writeMask);
 }
 
+// Four more core commands this ICD must at least resolve (found missing
+// entirely -- a segfault through a null device-dispatch-table entry, the
+// same root cause as the vkTrimCommandPool/vkCreateRenderPass2/
+// vkCreateDescriptorUpdateTemplate fixes -- by the Vulkan-CTS run's
+// `dEQP-VK.dynamic_state.*` group). Each is legal to call regardless of
+// the currently bound pipeline's state, but only has an observable effect
+// when that pipeline both enables the corresponding fixed-function state
+// *and* declares it dynamic; every state these four commands govern
+// (depth bias/bounds, wide lines, a device mask beyond the one physical
+// device this ICD exposes) is already rejected at graphics-pipeline
+// creation (see V6's own deviation list in
+// feme/docs/FeMeVulkanDesign.md) or, for `vkCmdSetDeviceMask`, has no
+// second device to ever mask out -- so no bound pipeline this ICD
+// accepted could ever have made any of them anything but a no-op record.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetLineWidth(VkCommandBuffer, float) {}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer, float, float,
+                                             float) {}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBounds(VkCommandBuffer, float, float) {}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDeviceMask(VkCommandBuffer, uint32_t) {}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdDraw(VkCommandBuffer commandBuffer,
                                      uint32_t vertexCount,
                                      uint32_t instanceCount,

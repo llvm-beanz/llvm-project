@@ -46,13 +46,13 @@ TEST(ProcAddr, NonNullInstanceResolvesEveryImplementedLevel) {
 }
 
 TEST(ProcAddr, UnimplementedCommandNeverResolves) {
-  // `vkCmdSetDepthBias` is a real core Vulkan 1.0 command this driver does
-  // not implement (V6 rejects depth bias at pipeline creation rather than
-  // silently ignoring it); the generated table still carries an entry for
-  // it (mapped to null), matching "Loader Integration"'s requirement that
-  // the table cover every known command name.
-  EXPECT_EQ(getInstanceProcAddr(dummyInstance(), "vkCmdSetDepthBias"), nullptr);
-  EXPECT_EQ(getDeviceProcAddr("vkCmdSetDepthBias"), nullptr);
+  // `vkQueueBindSparse` is a real core Vulkan 1.0 command this driver does
+  // not implement (sparse resources are an "Initial Non-Goal"); the
+  // generated table still carries an entry for it (mapped to null),
+  // matching "Loader Integration"'s requirement that the table cover
+  // every known command name.
+  EXPECT_EQ(getInstanceProcAddr(dummyInstance(), "vkQueueBindSparse"), nullptr);
+  EXPECT_EQ(getDeviceProcAddr("vkQueueBindSparse"), nullptr);
 }
 
 TEST(ProcAddr, UnknownNameNeverResolves) {
