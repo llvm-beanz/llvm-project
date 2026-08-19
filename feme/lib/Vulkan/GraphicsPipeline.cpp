@@ -791,9 +791,11 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   if (!InputAssembly)
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs input assembly state");
-  if (InputAssembly->primitiveRestartEnable)
+  if (InputAssembly->primitiveRestartEnable &&
+      InputAssembly->topology != VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP)
     return createStringError(inconvertibleErrorCode(),
-                             "primitive restart is not implemented");
+                             "primitive restart is only implemented for "
+                             "VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP");
   std::optional<PrimitiveTopology> Topology =
       mapTopology(InputAssembly->topology);
   if (!Topology)
@@ -821,6 +823,7 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   GraphicsPipelineState Result;
   Result.Artifact = Artifact;
   Result.Topology = *Topology;
+  Result.PrimitiveRestartEnable = InputAssembly->primitiveRestartEnable;
   Result.SampleCount = Targets->SampleCount;
 
   const VkPhysicalDeviceLimits &Limits = DeviceInfo.Properties.limits;
@@ -927,7 +930,8 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
       feme::graphics::BlendMode::Replace, State.SampleCount, State.Attachments,
       ResolvedStencil, State.ColorBlends, State.LogicOpEnable, State.Logic,
       isDynamic(DynamicStateBlendConstants) ? Dynamic.BlendConstants
-                                            : State.BlendConstants);
+                                            : State.BlendConstants,
+      State.PrimitiveRestartEnable);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(

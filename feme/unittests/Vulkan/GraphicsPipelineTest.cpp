@@ -305,6 +305,36 @@ TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   Stages[1].stage = VK_SHADER_STAGE_GEOMETRY_BIT;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
 
+  // Primitive restart with a list topology: only strip topologies restart.
+  Info = makeCreateInfo(Vertex, Fragment);
+  InputAssembly.primitiveRestartEnable = VK_TRUE;
+  EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Primitive restart is implemented for `VK_PRIMITIVE_TOPOLOGY_TRIANGLE_
+/// STRIP`, and the pipeline records it for the executor to honor.
+TEST_F(GraphicsPipelineTest, AcceptsPrimitiveRestartOnTriangleStrip) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+  InputAssembly.primitiveRestartEnable = VK_TRUE;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  feme::graphics::GraphicsPipeline Executor =
+      Graphics->buildExecutorPipeline(Dynamic);
+  EXPECT_TRUE(Executor.getPrimitiveRestartEnable());
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }

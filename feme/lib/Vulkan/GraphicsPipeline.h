@@ -113,6 +113,9 @@ struct GraphicsPipelineState {
   std::shared_ptr<GraphicsPipelineArtifact> Artifact;
   feme::graphics::PrimitiveTopology Topology =
       feme::graphics::PrimitiveTopology::TriangleList;
+  /// `VkPipelineInputAssemblyStateCreateInfo::primitiveRestartEnable`; only
+  /// implemented for `TriangleStrip` (see `translateVertexInput`'s caller).
+  bool PrimitiveRestartEnable = false;
   feme::graphics::RasterState Raster;
   feme::graphics::DepthState Depth;
   feme::graphics::StencilState Stencil;

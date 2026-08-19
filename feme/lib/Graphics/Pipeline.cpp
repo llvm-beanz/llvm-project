@@ -21,13 +21,14 @@ GraphicsPipeline::GraphicsPipeline(
     BlendMode Blend, uint32_t SampleCount,
     std::vector<AttachmentFormat> Attachments, StencilState Stencil,
     std::vector<BlendState> ColorBlends, bool LogicOpEnable, LogicOp Logic,
-    std::array<float, 4> BlendConstants)
+    std::array<float, 4> BlendConstants, bool PrimitiveRestartEnable)
     : VertexStage(std::move(VertexStage)),
       FragmentStage(std::move(FragmentStage)), Topology(Topology),
       Raster(Raster), Depth(Depth), Blend(Blend), SampleCount(SampleCount),
       Attachments(std::move(Attachments)), Stencil(Stencil),
       ColorBlends(std::move(ColorBlends)), LogicOpEnable(LogicOpEnable),
-      Logic(Logic), BlendConstants(BlendConstants) {}
+      Logic(Logic), BlendConstants(BlendConstants),
+      PrimitiveRestartEnable(PrimitiveRestartEnable) {}
 
 bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {
   switch (Topology) {

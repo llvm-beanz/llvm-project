@@ -1906,8 +1906,8 @@ color, `D16_UNORM`/`D32_FLOAT` for depth, `S8_UINT` for stencil), and a
 *packed* depth/stencil format is rejected outright because `FeMeGraphics`
 models depth and stencil as two separate single-component images -- which
 also means a subpass may bind one or the other, never both; sample counts
-are 1, 2 and 4; only the two triangle topologies rasterize; primitive
-restart, rasterizer discard, depth clamp,
+are 1, 2 and 4; only the two triangle topologies rasterize;
+rasterizer discard, depth clamp,
 depth bias, non-fill polygon modes, `VK_CULL_MODE_FRONT_AND_BACK`, the depth
 bounds test, sample shading, alpha-to-coverage/one, a partial sample mask,
 dual-source blend factors, multiple viewports/scissors, layered framebuffers,
@@ -1917,7 +1917,7 @@ creation. The implemented dynamic state is viewport, scissor, blend
 constants, and the three stencil ones; any other `VkDynamicState` fails
 creation rather than being silently treated as static.
 
-*A narrower gap closed in a follow-up pass.* Per-instance vertex input rate
+*Narrower gaps closed in follow-up passes.* Per-instance vertex input rate
 (`VK_VERTEX_INPUT_RATE_INSTANCE`) is implemented:
 `feme::vulkan::translateVertexInput` (GraphicsPipeline.cpp) records each
 binding's rate instead of rejecting anything but
@@ -1925,7 +1925,16 @@ binding's rate instead of rejecting anything but
 check reaches into the instance range rather than the vertex range for such
 a binding, and the executor (`Executor.cpp`) indexes a per-instance
 binding's data by the invocation's instance index (`FirstInstance +`
-instance) rather than its vertex index.
+instance) rather than its vertex index. Primitive restart
+(`primitiveRestartEnable`) is also implemented, but only for
+`VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP` -- a list topology combined with
+restart still fails at creation, matching real Vulkan's own requirement of
+an unadvertised extension for that combination: the executor's index fetch
+recognizes the index type's all-1-bits value, excludes that lane from the
+vertex-attribute fetch (it is not a real vertex, and its raw index is not a
+valid array offset), and splits triangle assembly into independent strip
+segments at each restart marker, each starting its own front/back winding
+parity exactly as an unindexed strip would.
 
 *Also deferred.* The pipeline cache carries no graphics entry: its key would
 have to cover the normalized pipeline description and the render-target

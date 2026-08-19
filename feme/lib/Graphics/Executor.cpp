@@ -1073,6 +1073,16 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     uint32_t PerInstance = Cmd.VertexCount;
     uint32_t Total = PerInstance * Cmd.InstanceCount;
 
+    // Primitive restart (`primitiveRestartEnable`) only applies to an
+    // indexed strip draw: a special index value ends the current strip and
+    // starts a new one, exactly as an unindexed strip would begin fresh.
+    bool RestartEnabled =
+        Cmd.Indexed && Pipeline.getPrimitiveRestartEnable() &&
+        Pipeline.getTopology() == PrimitiveTopology::TriangleStrip;
+    uint32_t RestartValue =
+        Draw.IndexBuffer.Type == IndexType::UInt16 ? 0xFFFFu : 0xFFFFFFFFu;
+    std::vector<bool> IsRestart(PerInstance, false);
+
     // --- Vertex/index fetch: assemble invocation keys. ---
     std::vector<cpu::FemeVertexInvocation> Invocations(Total);
     std::vector<uint32_t> VertexIndices(Total);
@@ -1095,6 +1105,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           } else {
             memcpy(&RawIndex, Draw.IndexBuffer.Data.data() + Off, 4);
           }
+          if (RestartEnabled && RawIndex == RestartValue)
+            IsRestart[J] = true;
           VertexIndex = static_cast<uint32_t>(static_cast<int64_t>(RawIndex) +
                                               Cmd.VertexOffset);
         } else {
@@ -1140,6 +1152,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                  *Elt.Location);
 
       for (uint32_t Flat = 0; Flat != Total; ++Flat) {
+        // A restart-marker index fetches no vertex at all (its lane never
+        // appears in an assembled primitive below), and the raw index
+        // arithmetic above is not a valid array index for it.
+        if (RestartEnabled && IsRestart[Flat % PerInstance])
+          continue;
         // A per-instance binding advances once per instance rather than
         // once per vertex (`VkVertexInputRate::VK_VERTEX_INPUT_RATE_
         // INSTANCE`): it is indexed by the invocation's instance index, not
@@ -1202,15 +1219,34 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       return V;
     };
 
+    // Assembles one strip segment [Start, End)'s triangles, alternating
+    // winding order starting fresh at each segment -- exactly what a
+    // restart does to an unindexed strip, and what a strip with no restart
+    // markers does over its one whole segment.
+    auto emitStripSegment = [](uint32_t Start, uint32_t End,
+                               SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+      uint32_t Local = 0;
+      for (uint32_t T = Start; T + 3 <= End; ++T, ++Local)
+        Out.push_back(Local % 2 == 0
+                          ? std::array<uint32_t, 3>{T, T + 1, T + 2}
+                          : std::array<uint32_t, 3>{T + 1, T, T + 2});
+    };
+
     SmallVector<std::array<uint32_t, 3>, 8> TriIndices;
     if (Pipeline.getTopology() == PrimitiveTopology::TriangleList) {
       for (uint32_t T = 0; T + 3 <= PerInstance; T += 3)
         TriIndices.push_back({T, T + 1, T + 2});
+    } else if (RestartEnabled) {
+      uint32_t SegStart = 0;
+      for (uint32_t J = 0; J != PerInstance; ++J) {
+        if (!IsRestart[J])
+          continue;
+        emitStripSegment(SegStart, J, TriIndices);
+        SegStart = J + 1;
+      }
+      emitStripSegment(SegStart, PerInstance, TriIndices);
     } else {
-      for (uint32_t T = 0; T + 3 <= PerInstance; ++T)
-        TriIndices.push_back(T % 2 == 0
-                                 ? std::array<uint32_t, 3>{T, T + 1, T + 2}
-                                 : std::array<uint32_t, 3>{T + 1, T, T + 2});
+      emitStripSegment(0, PerInstance, TriIndices);
     }
 
     // Screen-space triangles plus their owning varying storage, binned into

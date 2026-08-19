@@ -131,7 +131,8 @@ buildPipeline(Context &Ctx, RasterState Raster,
               StencilState Stencil = StencilState{},
               BlendState ColorBlend = BlendState{}, bool LogicOpEnable = false,
               LogicOp Logic = LogicOp::Copy,
-              std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f, 0.0f}) {
+              std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f, 0.0f},
+              bool PrimitiveRestartEnable = false) {
   EntrySignature VSSig;
   VSSig.Elements = {
       makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
@@ -159,7 +160,7 @@ buildPipeline(Context &Ctx, RasterState Raster,
                           Depth, BlendMode::Replace,
                           /*SampleCount=*/1, std::move(Attachments), Stencil,
                           std::vector<BlendState>{ColorBlend}, LogicOpEnable,
-                          Logic, BlendConstants);
+                          Logic, BlendConstants, PrimitiveRestartEnable);
 }
 
 struct TriangleScene {
@@ -282,6 +283,63 @@ TEST(ExecutorTest, RendersTheSameTriangleThroughAnIndexBuffer) {
     EXPECT_EQ(Texel[2], 0) << "texel " << I;
     EXPECT_EQ(Texel[3], 255) << "texel " << I;
   }
+}
+
+/// A `VK_VERTEX_INPUT_RATE`-unrelated milestone deviation: primitive restart
+/// on an indexed `TriangleStrip`. The restart marker (the index type's
+/// all-1-bits value) between two disjoint triangles must not be treated as
+/// a real vertex index (which would either fetch out of bounds or bridge
+/// the two triangles into one connected, wrongly-shaped strip); each
+/// triangle instead renders only its own solid color.
+TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleStrip) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleStrip, DepthState{}, StencilState{},
+      BlendState{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      /*BlendConstants=*/{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/true);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      // Segment 1: a red triangle in the lower-left region.
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v1
+      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v2
+      // Segment 2: a green triangle in the upper-right region.
+      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v3
+      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v4
+      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v5
+  };
+  // A restart index between the two segments: without primitive restart
+  // this would otherwise be read as a (nonsensical, out-of-bounds) vertex
+  // index bridging the two triangles into one continuous strip.
+  Scene.Indices = {0, 1, 2, 0xFFFFFFFFu, 3, 4, 5};
+  PreparedDraw Draw = Scene.prepare(/*Indexed=*/true);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Centroid of segment 1's triangle: definitely red.
+  const uint8_t *Red = texel(0, 2);
+  EXPECT_EQ(Red[0], 255);
+  EXPECT_EQ(Red[1], 0);
+  EXPECT_EQ(Red[2], 0);
+  // Centroid of segment 2's triangle: definitely green.
+  const uint8_t *Green = texel(3, 1);
+  EXPECT_EQ(Green[0], 0);
+  EXPECT_EQ(Green[1], 255);
+  EXPECT_EQ(Green[2], 0);
+  // The screen center is covered by neither triangle (and no phantom
+  // triangle bridging the restart): still the cleared background.
+  const uint8_t *Center = texel(2, 2);
+  EXPECT_EQ(Center[0], 0);
+  EXPECT_EQ(Center[1], 0);
+  EXPECT_EQ(Center[2], 0);
+  EXPECT_EQ(Center[3], 0);
 }
 
 TEST(ExecutorTest, CullsBackFacingTrianglesWhenConfigured) {

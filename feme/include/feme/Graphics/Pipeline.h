@@ -325,7 +325,8 @@ public:
                    std::vector<BlendState> ColorBlends = {BlendState{}},
                    bool LogicOpEnable = false, LogicOp Logic = LogicOp::Copy,
                    std::array<float, 4> BlendConstants = {0.0f, 0.0f, 0.0f,
-                                                          0.0f});
+                                                          0.0f},
+                   bool PrimitiveRestartEnable = false);
 
   const cpu::CompiledStage &getVertexStage() const { return *VertexStage; }
   const cpu::CompiledStage &getFragmentStage() const { return *FragmentStage; }
@@ -347,6 +348,10 @@ public:
   llvm::ArrayRef<AttachmentFormat> getAttachments() const {
     return Attachments;
   }
+  /// Whether a strip topology's indexed draw restarts primitive assembly at
+  /// the index type's all-1-bits value
+  /// (`VkPipelineInputAssemblyStateCreateInfo::primitiveRestartEnable`).
+  bool getPrimitiveRestartEnable() const { return PrimitiveRestartEnable; }
 
 private:
   std::shared_ptr<cpu::CompiledStage> VertexStage;
@@ -362,6 +367,7 @@ private:
   bool LogicOpEnable;
   LogicOp Logic;
   std::array<float, 4> BlendConstants;
+  bool PrimitiveRestartEnable;
 };
 
 } // namespace feme::graphics
