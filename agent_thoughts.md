@@ -21173,3 +21173,167 @@ still genuinely unimplemented, since its original example,
 `vkCmdSetDepthBias`, is one of the four now-fixed commands).
 `clang-format`/`git-clang-format` clean on every touched file before each
 commit.
+
+# Closing every remaining Vulkan-CTS crash
+
+This pass picked up the two crash classes the previous one deliberately left
+open (CTS's own `ImageAllocator` bug, and MLIR's SPIR-V spec-constant-
+composite deserializer null-deref), and, once those stopped blocking full
+runs, kept going: I re-ran every one of `deqp-vk`'s 54 top-level groups (not
+just the 7 that had crashed before), which surfaced three *more* previously-
+unreached crashes hiding downstream of the ones already found. Fixing a
+crash doesn't just fix that one case -- it can unlock an entire group to run
+far enough to hit the next thing after it, and I did not assume the job was
+done until every group actually printed its totals.
+
+## `OpSpecConstantComposite`: a real dialect modeling gap, not a null check
+
+The previous report's reasoning for not fixing this was right that the real
+fix needed to be a dialect-level modeling change, not a null check -- and
+also right that it was worth doing properly rather than rushing. I extended
+`spirv.SpecConstantComposite`'s `constituents` from a `SymbolRefArrayAttr` to
+a generic `ArrayAttr` whose elements are either a `FlatSymbolRefAttr` (a
+spec-constant reference, the existing case) or an inline `TypedAttr` (a
+regular constant's value, materialized directly rather than through a
+symbol table entry that doesn't exist for it). This touched five places that
+all had to move together: the `.td` argument definition, the op's
+parser/verifier (`SPIRVOps.cpp`), the deserializer (which now checks
+`getSpecConstant` first and falls back to `getConstant` instead of
+unconditionally assuming the former), and the serializer (which now
+serializes a non-symbol constituent as an inline constant via the existing
+`prepareConstant` and references its result <id> directly instead of a
+symbol lookup). I checked every other consumer of `getConstituents()` in the
+tree (`ModuleCombiner`, `ConvertToReplicatedConstantCompositePass`,
+`SerializationTest.cpp`) and each already defensively `dyn_cast<SymbolRefAttr>`s
+its elements rather than assuming every one is a symbol ref, so none of them
+needed touching -- the type signature widened without a behavior change for
+existing code that never encounters the new inline-attribute shape.
+
+## Two crashes past the first one: the value of not stopping at "fixed"
+
+Fixing the spec-constant-composite crash let `dEQP-VK.memory_model` run
+21 cases further, straight into a *second* crash in the exact same
+deserializer function (`processConstantComposite`, the non-spec sibling of
+the op I'd just fixed): a `spirv.matrix` constant's constituents are its
+column vectors, each already a `DenseElementsAttr`, and the `ShapedType`
+branch passed them straight to `DenseElementsAttr::get` without flattening,
+tripping its `hasSameNumElementsOrSplat` assertion. The fix was almost
+embarrassingly small once I saw it: the sibling `TensorArm` branch right
+above it already had exactly this flattening logic, just scoped to the
+wrong type check. Hoisting it to cover every `ShapedType` (not only
+`TensorArmType`) fixed both at once, with no new logic needed -- the shape
+of "a constituent might itself be a composite that needs flattening" is
+identical for a tensor and a matrix.
+
+Fixing *that* let the same group run one case further, into a *third*
+crash: `SPIRVToLLVM.cpp`'s `convertArrayType`/`convertRuntimeArrayType`
+passed a type-converter result straight to `LLVM::LLVMArrayType::get`
+without checking it for null, which happens whenever the element type (a
+`spirv.matrix`, in this case -- this conversion pass never registers a
+conversion for it at all) has no registered conversion. Every other type
+conversion in that same file already checks for this and returns
+`std::nullopt`/`failure()`; these two were simply missed. I checked this was
+the last of its kind by reading every `addConversion` callback in the file
+and confirming each one either can't produce null (a fixed-shape LLVM type
+construction) or already guards it -- these two were the only gap.
+
+I want to name the pattern explicitly, since it repeated three times in one
+group: none of these three bugs were related to each other's *code*, but
+they were all the same *shape* of bug (an assumption that held for the
+common case silently violated by a less common but entirely valid SPIR-V
+construct, crashing instead of failing cleanly), and each was invisible
+until the previous one stopped hiding it. I did not stop investigating a
+group after its first fix "worked" -- I re-ran the *whole* group every time,
+specifically to catch exactly this.
+
+## The `spirv_assembly` group: a struct-shaped variant of the same story, and a fold-safety bug that wasn't feme's
+
+`dEQP-VK.spirv_assembly` had its own two-deep version of the same story.
+First, `array_of_struct_of_array_vert` crashed FeMe's own `ArrayConstantPattern`
+(`SPIRVToLLVMPatterns.cpp`), which flattens a `spirv.array` constant into a
+single `llvm.mlir.constant` `ElementsAttr` -- a trick that only works when
+the array bottoms out purely through `!llvm.array`/`vector` nesting. My
+first attempt (teaching the pattern's `getFlatElementType` helper to also
+see through `!llvm.struct`, on the same "hoist the existing logic" instinct
+that worked for the matrix case above) was wrong: I verified this by hand
+with a synthetic `mlir-opt` repro and found `llvm.mlir.constant`'s own
+verifier rejects a struct-containing `ElementsAttr` outright regardless of
+leaf-type uniformity (its element-count computation treats `!llvm.struct` as
+a single opaque leaf, full stop -- there is no way to flatten through it).
+Catching this before committing it mattered: shipping the "leaf-type-aware"
+version would have swapped one crash (an MLIR assertion) for another
+(`llvm.mlir.constant`'s own verifier failing at a *later*, harder-to-trace
+point, still non-crashing but incorrect reasoning about why it works). The
+actual fix instead computes the flattened element count LLVM's verifier
+itself requires (mirroring its logic in a new `getFlatElementCount` helper)
+and rejects the pattern up front when it doesn't match what was flattened,
+leaving the op a clean legalization failure instead of ever building the
+ill-formed `ElementsAttr`.
+
+Second, past that, `opundef.uint32_vert` crashed inside
+`SPIRVCanonicalization.cpp`'s `checkFoldResultTypes` sanity check: `spirv
+.IMul`'s `x * 0 = 0` fold returned an operand `Value` whose concrete type
+(`si32`) didn't match the op's own declared result type (`i32`). This was
+the most interesting root cause of the pass to reason about, because it is
+*not* a bug in any one op's fold -- SPIR-V's arithmetic/bitwise/shift
+instructions only require operands and result to share a bit width, not to
+be the identical (possibly differently-signed) type, so an
+`OpUndef`-derived operand can legitimately differ in signedness from an op's
+declared type while still passing that op's own structural verification (at
+least, whenever that verification is deferred rather than run eagerly at
+construction -- which the deserializer's own construction path does not do).
+Every identity-shaped fold in the file (`x + 0 = x`, `x >> 0 = x`,
+`x & x = x`, and ten more I found by grep, all following the same "return an
+operand as the result" shape) shares this exact latent bug, not just
+`IMul`'s two. I fixed all of them behind one new `foldToOperandOfSameType`
+helper rather than patching only the one the CTS run happened to reach,
+since I could not construct a good argument for why any of the other twelve
+were somehow immune to the same operand a real (or, per the fold-safety
+rule, even a synthetic) SPIR-V module could hand them. I deliberately left
+every `Logical*`/comparison op's identical-looking `return getOperand1()`
+sites alone, since SPIR-V's boolean type has no signed/unsigned variant to
+begin with -- there is no type this fix would ever need to guard there, and
+"guard everything uniformly whether or not it needs it" would have been
+noise, not thoroughness.
+
+## Extending the sweep to every group, not just the previously-crashed ones
+
+Once every group that had crashed before now ran clean, I re-ran *all* 54
+top-level `dEQP-VK.<group>.*` groups from scratch (not just the 7 in the
+prior report), on the reasoning that "no longer crashes in the cases we
+already know about" is a materially weaker claim than "runs to completion",
+and the task explicitly asked for the latter. This found one more crash in
+`api` -- `maintenance3_check.descriptor_set`, a null function pointer call
+through `vkGetDescriptorSetLayoutSupport`, a core command this ICD had
+simply never implemented (the previous report's own "not attempted in this
+pass" list named it explicitly as one of the 27 real gaps it had found but
+not gotten to). This one, unlike the others, was a one-line reuse of
+`vkCreateDescriptorSetLayout`'s own descriptor-type support check, following
+the same "no new limits beyond what's already enforced elsewhere" reasoning
+as `vkTrimCommandPool`'s original fix.
+
+## Validation
+
+Every fix: reproduced on an isolated single-case list first (confirmed
+deterministic before touching anything), fixed, re-ran that identical case
+list to confirm a `Pass`/clean-failure replaced the crash, then re-ran the
+*entire* affected group (not just the triggering case) to confirm the fix
+didn't merely move the crash somewhere else in the same group -- exactly
+the discipline that caught the `array_of_struct_of_array` false start above
+before it became a commit. `check-feme` (existing `build/` tree,
+`LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`) run after every
+commit: baseline 1430 passed/1 unsupported, final 1433 passed/1 unsupported
+(three new unit tests, no regressions). The relevant `mlir/` lit suites
+(`Target/SPIRV`, `Dialect/SPIRV`, `Dialect/SPIRV/IR`,
+`Conversion/SPIRVToLLVM`, `Conversion/GPUToSPIRV`) and
+`MLIRSPIRVImportExportTests` stayed green throughout. Finally, all 54
+top-level CTS groups were re-run one more time end to end after the very
+last commit, confirming every one prints its totals -- see the updated
+`VulkanCTSReport.md` for the aggregate numbers.
+
+`clang-format`/`git-clang-format` clean on every touched file before each
+commit. The one non-`feme/`, non-`mlir/` change in this pass was to the
+VK-GL-CTS checkout itself (`ImageAllocator`'s empty-format-list guard); it
+is a separate git repository from this one and was committed there
+directly, not folded into an llvm-project commit, since the fix does not
+belong to either project this repository owns.
