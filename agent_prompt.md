@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -26,5 +26,6 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you address the crashes identified in the VulkanCTSReport.md to get a
-complete run of the CTS?
+Can you regenerate the report of the state of the vulkan CTS passing with FeMe
+from scratch, assess the failures, and update the roadmap with a plan for full
+conformance?
