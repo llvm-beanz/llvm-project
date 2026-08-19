@@ -22437,3 +22437,40 @@ regenerated from that run (including re-confirming the known
 resolves identically to every prior measurement when re-run standalone)
 rather than hand-edited from memory, committed separately from the code
 changes it measures.
+
+# Fixing binary-looking bytes in CPU stage-io .ll test files
+
+The C4e commit's "re-serialized programmatically" EntrySignature byte
+blobs in `Transforms/CPU/{fragment,vertex}-wrapper-stage-io.ll` wrote the
+`[144 x i8] c"..."` metadata constant's raw bytes (NUL and other control
+characters) directly into the file instead of using LLVM IR's `\XX`
+hex-escape convention for non-printable bytes. `git log --stat` on that
+commit showed `Bin 1475 -> 1211 bytes` / `Bin 1273 -> 1009 bytes` instead
+of a text diff, because git's binary-file heuristic (a NUL byte in the
+first several KB) misclassified both files.
+
+Root-caused by dumping the offending line with `od -c`: real `\0` bytes
+sat right next to literal ASCII digits inside the string constant, which
+`file(1)` and git both read as "this is binary data," even though every
+other byte in the file was plain ASCII source text. The fix re-encodes
+just that one array literal, decoding whatever escape sequences were
+already present, then re-emitting every byte outside the printable
+0x20-0x7E range (plus `"`/`\` themselves) as an uppercase `\XX` escape --
+the same convention already used by
+`Transforms/DXIL/dxil-raise-metadata-signature.ll`'s
+`c"\01\02\03\04"` root-signature blob. The decoded byte content, and
+therefore what the test actually exercises, is unchanged; only the
+textual encoding changed. No CHECK line in either file depends on the
+metadata blob's literal text, so nothing else needed updating.
+
+Verification: `ninja check-feme` (ccache launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`, existing `build/` tree) - 1478 passed, 1
+unsupported, same as before the fix, confirming the tests still pass
+with the corrected encoding. Confirmed with `file(1)` and a manual
+NUL-byte scan that both files are now plain ASCII text, and verified
+that a synthetic edit made *after* the fix commit produces a normal
+(non-binary) `git diff`, so future changes to these files will diff
+correctly; only the historical commit that introduced the raw bytes will
+still show as a binary diff, which isn't fixable without rewriting
+history. No behavioral/functional code changed, so no Vulkan CTS re-run
+was needed for this commit; `VulkanCTSReport.md` is unaffected.
