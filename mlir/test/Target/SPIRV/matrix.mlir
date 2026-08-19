@@ -89,3 +89,17 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Float16
   // CHECK: spirv.GlobalVariable {{@.*}} : !spirv.ptr<!spirv.matrix<4 x vector<4xf16>>, StorageBuffer>
   spirv.GlobalVariable @var2 : !spirv.ptr<!spirv.matrix<4 x vector<4xf16>>, StorageBuffer>
 }
+
+// -----
+
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, Float16], [SPV_KHR_storage_buffer_storage_class]> {
+  // A regular (non-specialization) matrix constant is composed of vector
+  // constituents (its columns), each already an OpConstantComposite in its
+  // own right -- exercise that nested-composite constituent shape.
+  // CHECK-LABEL: @matrix_const
+  spirv.func @matrix_const() -> (!spirv.matrix<2 x vector<2xf32>>) "None" {
+    // CHECK: spirv.Constant dense<{{\[\[}}1.000000e+00, 2.000000e+00], [3.000000e+00, 4.000000e+00]]> : !spirv.matrix<2 x vector<2xf32>>
+    %0 = spirv.Constant dense<[[1.0, 2.0], [3.0, 4.0]]> : !spirv.matrix<2 x vector<2xf32>>
+    spirv.ReturnValue %0 : !spirv.matrix<2 x vector<2xf32>>
+  }
+}

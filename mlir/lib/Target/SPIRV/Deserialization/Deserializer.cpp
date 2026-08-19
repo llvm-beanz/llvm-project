@@ -1895,8 +1895,13 @@ spirv::Deserializer::processConstantComposite(ArrayRef<uint32_t> operands) {
   }
 
   auto resultID = operands[1];
-  if (auto tensorType = dyn_cast<TensorArmType>(resultType)) {
+  if (auto shapedType = dyn_cast<ShapedType>(resultType)) {
+    // A composite constant's constituents may themselves be composites
+    // (e.g. a spirv.matrix's constituents are its column vectors, each
+    // already a DenseElementsAttr); flatten any such nested composite
+    // constituent to the scalars DenseElementsAttr::get expects.
     SmallVector<Attribute> flattenedElems;
+    flattenedElems.reserve(shapedType.getNumElements());
     for (Attribute element : elements) {
       if (auto denseElemAttr = dyn_cast<DenseElementsAttr>(element)) {
         for (auto value : denseElemAttr.getValues<Attribute>())
@@ -1905,10 +1910,7 @@ spirv::Deserializer::processConstantComposite(ArrayRef<uint32_t> operands) {
         flattenedElems.push_back(element);
       }
     }
-    auto attr = DenseElementsAttr::get(tensorType, flattenedElems);
-    constantMap.try_emplace(resultID, attr, tensorType);
-  } else if (auto shapedType = dyn_cast<ShapedType>(resultType)) {
-    auto attr = DenseElementsAttr::get(shapedType, elements);
+    auto attr = DenseElementsAttr::get(shapedType, flattenedElems);
     // For normal constants, we just record the attribute (and its type) for
     // later materialization at use sites.
     constantMap.try_emplace(resultID, attr, shapedType);
