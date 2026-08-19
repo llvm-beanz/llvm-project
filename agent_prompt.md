@@ -23,28 +23,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you continue V6 from the roadmap document?
-
-> Graphics queue and basic rendering: graphics stage compilation, `VkRenderPass`
-> and dynamic rendering, graphics pipeline state, draws, and
-> `VK_QUEUE_GRAPHICS_BIT`
-
-The previous agent left the notes:
-
-> I did not attempt the graphics pipeline cache entry this pass, after
-> looking at it seriously enough to explain why: unlike compute's cache key
-> (computed from raw SPIR-V words and the pipeline layout *before*
-> compiling, so a hit skips compilation entirely), a graphics pipeline's
-> normalized state includes vertex attributes and attachment formats that
-> this ICD currently only finalizes after `compileGraphicsPipeline` has
-> already run the (expensive) stage compilation. A cache key computed after
-> compiling buys only artifact-sharing across pipeline handles, not a
-> skipped recompile, unless the fixed-function-state translation is hoisted
-> ahead of stage compilation first -- a real refactor of
-> `compileGraphicsPipeline`'s control flow, not the glue code a cache key
-> function alone would be. Rather than land a cache that reads as complete
-> but provides none of the compute cache's actual benefit, I left it open
-> and said why here instead of quietly declaring it done. Blits still do not
-> convert formats, mirror, or handle multisample sources; per-instance
-> vertex input rate and primitive restart remain unimplemented; and
-> secondary command buffers inside a render pass are still V7's own bullet.
+There is a checkout of the Vulkan CTS at /home/dev/dev/VK-GL-CTS/. Can you build
+the CTS and run it against the feme vulkan ICD then provide a report of what
+works and what doesn't work as well as updating the design documentation and
+roadmap documentation to complete a conforming implementation.
