@@ -22781,3 +22781,80 @@ cheap proxy rather than spending hours re-running the full ~3.2M-case CTS
 suite for a change it cannot observe. `VulkanCTSReport.md` stays as its
 last-generated edition, same reasoning the immediately preceding session
 already used for its own, unrelated change.
+
+# 2026-08-19: Fix -Wmissing-field-initializers in DXSAToLLVMIRTranslator.cpp
+
+## The warning
+
+`ninja check-feme` (and any build of `FeMeTranslateDXSA`) emitted ~20
+`-Wmissing-field-initializers` warnings from
+`feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp`, all pointing at
+`SampleForm Form{...}` aggregate-initializer lists in
+`translateInstruction`'s `dxsa::Sample`/`SampleL`/`SampleB`/`SampleD`/
+`SampleC`/`SampleCLZ`/`Gather4*`/`LOD` handling. `SampleForm` (declared at
+line 1054) is a 9-member aggregate with in-class default member
+initializers on every field, but each call site only supplied the first
+2-5 members positionally (e.g. `{DXILOp::Sample, "sample", {}, /*Clamp=*/
+true}` sets `Op`, `Name`, `Extra`, `Clamp` and leaves `Channel`,
+`NarrowOffsets`, `Gradients`, `OffsetSource`, `ClampValue`,
+and `Feedback` to fall back on their default member initializers). Clang
+warns on this even though the omitted members do have defaults, because
+brace-elision aggregate init can't tell "the author meant to only set the
+first N and let the rest default" apart from "the author forgot a field."
+
+## Why not designated initializers
+
+C++20 designated initializers (`SampleForm Form{.Op = ..., .Name = ...}`)
+would silence the warning while keeping call sites terse and
+self-describing, but `feme/.instructions.md` and this project target
+C++17 and explicitly say to avoid vendor extensions -- Clang accepts
+designated initializers in C++17 mode only as a non-conforming extension,
+so that would trade one warning for a portability/standards regression.
+
+## The fix
+
+Replaced each `SampleForm Form{...};` aggregate-brace call with a
+default-constructed `SampleForm Form;` followed by explicit
+`Form.<Member> = ...;` assignments for only the members that call site
+actually needs to set away from their defaults (mirroring the existing
+style already used for `Form.ClampValue`/`Form.Feedback`/
+`Form.OffsetSource`/`Form.Gradients` at several of these same call sites,
+which were already assignment-style because they come after the
+aggregate-init line). This:
+
+- Is self-documenting without relying on comments like `/*Clamp=*/true`
+  next to a bare positional `true` -- the assignment already names the
+  field.
+- Removes the now-redundant `/*Clamp=*/`, `/*Channel=*/`,
+  `/*NarrowOffsets=*/` comments, since `Form.Clamp = true;` etc. need no
+  disambiguating comment.
+- Changes no runtime behavior: the same members end up set to the same
+  values, and the rest still get `SampleForm`'s existing default member
+  initializers, whether reached via aggregate-init elision or via
+  default-construction.
+- Ran `clang-format -i` on the changed region afterward.
+
+## Verification
+
+Rebuilt `tools/feme/lib/Translate/DXSA/CMakeFiles/obj.FeMeTranslateDXSA.dir/DXSAToLLVMIRTranslator.cpp.o`
+directly (existing `build/` tree, `ccache` compiler launcher and
+`LLVM_ENABLE_ASSERTIONS=ON` both already configured from the prior
+session): zero warnings, versus the ~20 in the reported build log. Did a
+second from-scratch rebuild of the whole `FeMeTranslateDXSA` object
+library (after deleting its `CMakeFiles` dir) to confirm no warning
+depends on stale-object incremental-build state.
+
+`ninja check-feme`: 1487/1488 passed, 1 unsupported, no regressions --
+identical totals to the last-recorded baseline in this file, as expected
+for a change that touches only initializer syntax and not control flow or
+values.
+
+Vulkan CTS: not re-run in full. This change is confined to
+`feme/lib/Translate/DXSA`, which lowers DXSA (the in-tree Direct3D
+shader-assembly-like MLIR dialect) operations to LLVM IR DXIL intrinsics
+-- it is not on the SPIR-V-import / `feme::cpu` / `libfeme_vulkan` path
+that `feme-vulkan-*` and the CTS run exercise, and the edit changes no
+runtime value (only how the same field values get written into `Form`).
+Ran `check-feme-vulkan` as the same cheap proxy the immediately preceding
+session used: 8/9 passed, 1 unsupported, unchanged. `VulkanCTSReport.md`
+is left at its last-generated edition for the same reason.
