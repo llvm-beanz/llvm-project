@@ -1716,18 +1716,18 @@ Deviations from this section's sketch:
   and for `PipelineCacheTest.cpp`'s round-trip/tamper coverage, and for
   the fuzzer), not skip recompiling them -- an in-process hit (the same
   `VkPipelineCache` object, same process) *is* a real skip.
-- **No actual Vulkan CTS run happened.** `deqp-vk` is a separate, large
-  upstream binary this sandboxed environment has no way to build or fetch
-  (no network access to the Vulkan-CTS repository). What this milestone
-  actually delivers is the infrastructure a host that *does* have it can
-  use immediately: `feme/utils/filter_vulkan_cts_cases.py` (filtering a
-  full case list to this ICD's advertised, compute-only subset) and
+- **A real Vulkan-CTS run has now happened** (a later pass, once a
+  VK-GL-CTS checkout became available in the environment) -- see
+  `feme/docs/VulkanCTSReport.md` for the full report. `deqp-vk` is a
+  separate, large upstream binary this milestone's own environment had no
+  way to build or fetch (no network access to the Vulkan-CTS repository at
+  the time); `feme/utils/filter_vulkan_cts_cases.py` (filtering a full case
+  list to this ICD's advertised, compute-only subset) and
   `test/Vulkan/cts-compute-subset.test` (gated on a new `system-vulkan-cts`
   lit feature, so it skips cleanly everywhere `deqp-vk` is absent, the same
   way `system-dxc`/`system-second-vulkan-icd` already gate their own
-  optional external tools). "Begin Vulkan CTS runs" -- an actual pass/fail
-  result recorded somewhere -- remains for whoever next has a CTS build
-  available.
+  optional external tools) remain the in-tree, `lit`-integrated version of
+  the same idea for any other host.
 
 ### V5: Images and sampling
 
@@ -1981,8 +1981,17 @@ not a narrower deviation -- real Vulkan itself requires
 `VK_SAMPLE_COUNT_1_BIT` on both images for `vkCmdBlitImage` and provides
 `vkCmdResolveImage` for the multisample case instead. No CTS run happened
 in this pass: `deqp-vk` was not available in this environment, exactly as V4
-recorded for its own CTS bullet -- so this milestone still does not carry
-Vulkan CTS coverage. The lavapipe half of "match lavapipe for every format
+recorded for its own CTS bullet -- so this milestone did not carry Vulkan
+CTS coverage yet. A later pass closed that gap once a VK-GL-CTS checkout
+became available -- see `feme/docs/VulkanCTSReport.md`, which also found
+(and fixed) four core commands this ICD had never implemented at all
+(`vkTrimCommandPool`, `vkCreateRenderPass2`'s family,
+`vkCreateDescriptorUpdateTemplate`'s family, and four dynamic-state
+setters), each crashing the process rather than merely rejecting, plus a
+still-open upstream MLIR SPIR-V deserializer bug (spec-constant composites
+over non-spec-constant constituents, e.g. a `mat2` spec constant's
+columns) responsible for the remaining crashed CTS groups. The lavapipe
+half of "match lavapipe for every format
 and state combination" is closed, in a follow-up pass: this environment does
 have Mesa lavapipe installed, and `feme-vulkan-graphics-smoke`
 (`test/Vulkan/graphics-lavapipe-diff.test`) now runs seven scenarios --
