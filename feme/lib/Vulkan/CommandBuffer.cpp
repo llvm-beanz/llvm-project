@@ -599,18 +599,16 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
   RenderTargetBinding Binding;
   Binding.RenderArea = RenderArea;
 
-  auto makeView = [&](uint32_t Index) -> RenderTargetView {
+  auto makeView = [&](uint32_t Index, bool UseStencilOps) -> RenderTargetView {
     const AttachmentDescription &Attachment = Pass.attachments()[Index];
     RenderTargetView View;
     View.View = Fb.attachments()[Index];
     View.Format = Attachment.Format;
     View.SampleCount = Attachment.SampleCount;
-    View.LoadOp = isSupportedStencilAttachmentFormat(Attachment.Format)
-                      ? Attachment.StencilLoadOp
-                      : Attachment.LoadOp;
-    View.StoreOp = isSupportedStencilAttachmentFormat(Attachment.Format)
-                       ? Attachment.StencilStoreOp
-                       : Attachment.StoreOp;
+    View.LoadOp =
+        UseStencilOps ? Attachment.StencilLoadOp : Attachment.LoadOp;
+    View.StoreOp =
+        UseStencilOps ? Attachment.StencilStoreOp : Attachment.StoreOp;
     if (Index < ClearValues.size())
       View.ClearValue = ClearValues[Index];
     return View;
@@ -622,27 +620,39 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
       return createStringError(inconvertibleErrorCode(),
                                "an unused color attachment slot is not "
                                "implemented");
-    RenderTargetView View = makeView(Index);
+    RenderTargetView View = makeView(Index, /*UseStencilOps=*/false);
     if (I < Desc.ResolveAttachments.size() &&
         Desc.ResolveAttachments[I] != VK_ATTACHMENT_UNUSED)
       View.ResolveView = Fb.attachments()[Desc.ResolveAttachments[I]];
     Binding.Colors.push_back(View);
   }
   if (Desc.DepthStencilAttachment != VK_ATTACHMENT_UNUSED) {
-    RenderTargetView View = makeView(Desc.DepthStencilAttachment);
-    if (isSupportedStencilAttachmentFormat(View.Format))
-      Binding.Stencil = View;
-    else
-      Binding.Depth = View;
+    uint32_t Index = Desc.DepthStencilAttachment;
+    feme::cpu::ResourceFormat Format = Pass.attachments()[Index].Format;
+    // A combined format (`D24_UNORM_S8_UINT`, roadmap C1) binds both
+    // halves, each with its own load/store op but sharing the same
+    // underlying image; a pure depth or pure stencil format binds only
+    // the matching half.
+    if (isSupportedDepthAttachmentFormat(Format))
+      Binding.Depth = makeView(Index, /*UseStencilOps=*/false);
+    if (isSupportedStencilAttachmentFormat(Format))
+      Binding.Stencil = makeView(Index, /*UseStencilOps=*/true);
   }
   return Binding;
 }
+
+/// Which half of a render-target attachment `applyClear`/`applyStoreOps`
+/// operate on -- distinct from the attachment's `Format` alone once a
+/// combined depth+stencil format (`D24_UNORM_S8_UINT`, roadmap C1) means
+/// the same format backs two different `RenderTargetView`s sharing one
+/// underlying image.
+enum class AttachmentKind { Color, Depth, Stencil };
 
 /// Applies one attachment's `VK_ATTACHMENT_LOAD_OP_CLEAR` over \p Area,
 /// which is the render area rather than the whole attachment: Vulkan clears
 /// exactly what the render pass instance covers.
 Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
-                 const VkRect2D &Area) {
+                 const VkRect2D &Area, AttachmentKind Kind) {
   if (View.LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
     return Error::success();
   Expected<feme::graphics::AttachmentView> Attachment =
@@ -654,19 +664,18 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
   if (!ElemSize)
     return ElemSize.takeError();
 
-  std::vector<uint8_t> Texel(*ElemSize);
-  if (isSupportedDepthAttachmentFormat(Attachment->Format)) {
-    if (Error E = feme::graphics::packClearColor(
-            Attachment->Format, {View.ClearValue.depthStencil.depth}, Texel))
-      return E;
-  } else if (isSupportedStencilAttachmentFormat(Attachment->Format)) {
-    Texel[0] = static_cast<uint8_t>(View.ClearValue.depthStencil.stencil);
-  } else {
+  // For a combined depth+stencil format, `Depth`/`Stencil` clears must be a
+  // per-pixel read-modify-write of the shared word (a precomputed, uniform
+  // texel would clobber whatever the other aspect already wrote to that
+  // pixel); pack directly into each pixel's own bytes instead.
+  std::vector<uint8_t> UniformTexel;
+  if (Kind == AttachmentKind::Color) {
+    UniformTexel.resize(*ElemSize);
     std::array<double, 4> Color{
         View.ClearValue.color.float32[0], View.ClearValue.color.float32[1],
         View.ClearValue.color.float32[2], View.ClearValue.color.float32[3]};
-    if (Error E =
-            feme::graphics::packClearColor(Attachment->Format, Color, Texel))
+    if (Error E = feme::graphics::packClearColor(Attachment->Format, Color,
+                                                 UniformTexel))
       return E;
   }
 
@@ -681,7 +690,25 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
       for (uint32_t S = 0; S != SampleCount; ++S) {
         size_t Offset =
             (((size_t)Y * Attachment->Width + X) * SampleCount + S) * *ElemSize;
-        std::memcpy(Attachment->Data.data() + Offset, Texel.data(), *ElemSize);
+        llvm::MutableArrayRef<uint8_t> Texel(
+            Attachment->Data.data() + Offset, *ElemSize);
+        switch (Kind) {
+        case AttachmentKind::Color:
+          std::memcpy(Texel.data(), UniformTexel.data(), *ElemSize);
+          break;
+        case AttachmentKind::Depth:
+          if (Error E = feme::graphics::packDepthClear(
+                  Attachment->Format, View.ClearValue.depthStencil.depth,
+                  Texel))
+            return E;
+          break;
+        case AttachmentKind::Stencil:
+          if (Error E = feme::graphics::packStencilClear(
+                  Attachment->Format, View.ClearValue.depthStencil.stencil,
+                  Texel))
+            return E;
+          break;
+        }
       }
   return Error::success();
 }
@@ -689,15 +716,16 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
 /// Applies every attachment's load op when a render pass instance begins.
 Error applyLoadOps(const RenderTargetBinding &Binding) {
   for (const RenderTargetView &View : Binding.Colors)
-    if (Error E = applyClear(View, View.SampleCount, Binding.RenderArea))
+    if (Error E = applyClear(View, View.SampleCount, Binding.RenderArea,
+                             AttachmentKind::Color))
       return E;
   if (Binding.Depth)
     if (Error E = applyClear(*Binding.Depth, Binding.Depth->SampleCount,
-                             Binding.RenderArea))
+                             Binding.RenderArea, AttachmentKind::Depth))
       return E;
   if (Binding.Stencil)
     if (Error E = applyClear(*Binding.Stencil, Binding.Stencil->SampleCount,
-                             Binding.RenderArea))
+                             Binding.RenderArea, AttachmentKind::Stencil))
       return E;
   return Error::success();
 }

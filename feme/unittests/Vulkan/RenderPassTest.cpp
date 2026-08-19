@@ -135,15 +135,23 @@ TEST_F(RenderPassTest, CompilesDepthAttachment) {
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
-/// A packed depth/stencil format has no `feme::graphics` representation
-/// (depth and stencil are two separate single-component images there), so it
-/// is rejected at creation rather than silently misinterpreted.
+/// A format this driver has no representation for at all is rejected at
+/// creation rather than silently misinterpreted.
 TEST_F(RenderPassTest, RejectsUnsupportedAttachmentFormat) {
   VkRenderPass Pass = VK_NULL_HANDLE;
-  EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_D24_UNORM_S8_UINT, Pass),
-            VK_ERROR_FORMAT_NOT_SUPPORTED);
   EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_R5G6B5_UNORM_PACK16, Pass),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
+}
+
+/// `D24_UNORM_S8_UINT` (roadmap C1) is a depth/stencil format, not a color
+/// one: a render pass may normalize it (it is a supported *attachment*
+/// format), but a subpass naming it as a *color* attachment is still a
+/// role mismatch, caught the same way `VK_FORMAT_R32_SFLOAT` as a
+/// depth/stencil attachment would be.
+TEST_F(RenderPassTest, RejectsDepthStencilFormatAsColorAttachment) {
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  EXPECT_EQ(createSimpleRenderPass(VK_FORMAT_D24_UNORM_S8_UINT, Pass),
+            VK_ERROR_INITIALIZATION_FAILED);
 }
 
 TEST_F(RenderPassTest, RejectsUnsupportedSampleCount) {

@@ -1328,6 +1328,210 @@ TEST_F(DrawTest, RendersWithStencilTest) {
   vkFreeMemory(Device, StencilMemory, nullptr);
 }
 
+/// Roadmap C1 ("Mandatory formats"): a combined `D24_UNORM_S8_UINT`
+/// attachment shares one word of storage between its depth and stencil
+/// halves, so the completion scenario is that writing one half through
+/// `vkCmdDraw` never corrupts the other. One draw enables both depth and
+/// stencil testing/writes together (depth 0.2, stencil 1); a second,
+/// depth-only draw at depth 0.8 must still fail (`LESS`: 0.8 is not less
+/// than 0.2, so the depth half survived); a third, stencil-only draw
+/// (`EQUAL` against 1) must still pass (so the stencil half survived the
+/// first draw's depth write) and its green lands last.
+TEST_F(DrawTest, RendersWithCombinedDepthStencilAttachment) {
+  VkImage DepthStencilImage = VK_NULL_HANDLE;
+  VkImageView DepthStencilView = VK_NULL_HANDLE;
+  VkDeviceMemory DepthStencilMemory = VK_NULL_HANDLE;
+  createImageAndView(VK_FORMAT_D24_UNORM_S8_UINT,
+                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                     VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+                     DepthStencilImage, DepthStencilView, DepthStencilMemory);
+
+  VkAttachmentDescription Attachments[2]{};
+  Attachments[0].format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].format = VK_FORMAT_D24_UNORM_S8_UINT;
+  Attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference DepthStencilRef{
+      1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pDepthStencilAttachment = &DepthStencilRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass LocalPass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &LocalPass),
+            VK_SUCCESS);
+
+  VkImageView FbViews[2] = {ColorView, DepthStencilView};
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.renderPass = LocalPass;
+  FbInfo.attachmentCount = 2;
+  FbInfo.pAttachments = FbViews;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer LocalFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
+            VK_SUCCESS);
+
+  auto makePipeline = [&](llvm::StringRef VertexSource,
+                          llvm::StringRef FragmentSource,
+                          const VkPipelineDepthStencilStateCreateInfo
+                              &DepthStencil) {
+    VkShaderModule Vertex = createModule(VertexSource);
+    VkShaderModule Fragment = createModule(FragmentSource);
+    VkPipelineShaderStageCreateInfo Stages[2]{};
+    Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    Stages[0].module = Vertex;
+    Stages[0].pName = "main";
+    Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    Stages[1].module = Fragment;
+    Stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo VertexInput{};
+    VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+    InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+    VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+    VkPipelineViewportStateCreateInfo ViewportState{};
+    ViewportState.viewportCount = 1;
+    ViewportState.pViewports = &Viewport;
+    ViewportState.scissorCount = 1;
+    ViewportState.pScissors = &Scissor;
+    VkPipelineRasterizationStateCreateInfo Raster{};
+    Raster.cullMode = VK_CULL_MODE_NONE;
+    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    Raster.polygonMode = VK_POLYGON_MODE_FILL;
+    VkPipelineMultisampleStateCreateInfo Multisample{};
+    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState BlendAttachment{};
+    BlendAttachment.colorWriteMask = 0xF;
+    VkPipelineColorBlendStateCreateInfo Blend{};
+    Blend.attachmentCount = 1;
+    Blend.pAttachments = &BlendAttachment;
+    VkPipelineDepthStencilStateCreateInfo LocalDepthStencil = DepthStencil;
+    VkGraphicsPipelineCreateInfo Info{};
+    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    Info.stageCount = 2;
+    Info.pStages = Stages;
+    Info.pVertexInputState = &VertexInput;
+    Info.pInputAssemblyState = &InputAssembly;
+    Info.pViewportState = &ViewportState;
+    Info.pRasterizationState = &Raster;
+    Info.pMultisampleState = &Multisample;
+    Info.pDepthStencilState = &LocalDepthStencil;
+    Info.pColorBlendState = &Blend;
+    Info.layout = Layout;
+    Info.renderPass = LocalPass;
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
+                                        nullptr, &Pipe),
+              VK_SUCCESS);
+    vkDestroyShaderModule(Device, Fragment, nullptr);
+    vkDestroyShaderModule(Device, Vertex, nullptr);
+    return Pipe;
+  };
+
+  // Draw 1: writes depth (0.2, `ALWAYS`) and stencil (1, `REPLACE` on
+  // `ALWAYS`) together, in one draw against the combined attachment.
+  VkStencilOpState WriteFace{};
+  WriteFace.failOp = VK_STENCIL_OP_KEEP;
+  WriteFace.passOp = VK_STENCIL_OP_REPLACE;
+  WriteFace.depthFailOp = VK_STENCIL_OP_KEEP;
+  WriteFace.compareOp = VK_COMPARE_OP_ALWAYS;
+  WriteFace.compareMask = 0xFF;
+  WriteFace.writeMask = 0xFF;
+  WriteFace.reference = 1;
+  VkPipelineDepthStencilStateCreateInfo WriteState{};
+  WriteState.depthTestEnable = VK_TRUE;
+  WriteState.depthWriteEnable = VK_TRUE;
+  WriteState.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+  WriteState.stencilTestEnable = VK_TRUE;
+  WriteState.front = WriteFace;
+  WriteState.back = WriteFace;
+  VkPipeline Writer =
+      makePipeline(NearDepthVertexSource, RedFragmentSource, WriteState);
+
+  // Draw 2: depth-only (`LESS`), no stencil test -- must still fail since
+  // 0.8 is not less than the depth draw 1 stored (0.2), proving the
+  // stencil write did not corrupt the depth half of the shared word.
+  VkPipelineDepthStencilStateCreateInfo DepthOnlyState{};
+  DepthOnlyState.depthTestEnable = VK_TRUE;
+  DepthOnlyState.depthWriteEnable = VK_TRUE;
+  DepthOnlyState.depthCompareOp = VK_COMPARE_OP_LESS;
+  VkPipeline DepthBlocked =
+      makePipeline(FarDepthVertexSource, GreenFragmentSource, DepthOnlyState);
+
+  // Draw 3: stencil-only (`EQUAL` against 1), no depth test -- must still
+  // pass since draw 1 left stencil at 1, proving the depth write did not
+  // corrupt the stencil half.
+  VkStencilOpState TestFace{};
+  TestFace.failOp = VK_STENCIL_OP_KEEP;
+  TestFace.passOp = VK_STENCIL_OP_KEEP;
+  TestFace.depthFailOp = VK_STENCIL_OP_KEEP;
+  TestFace.compareOp = VK_COMPARE_OP_EQUAL;
+  TestFace.compareMask = 0xFF;
+  TestFace.writeMask = 0xFF;
+  TestFace.reference = 1;
+  VkPipelineDepthStencilStateCreateInfo StencilOnlyState{};
+  StencilOnlyState.stencilTestEnable = VK_TRUE;
+  StencilOnlyState.front = TestFace;
+  StencilOnlyState.back = TestFace;
+  VkPipeline StencilPassed = makePipeline(FullscreenVertexSource,
+                                         GreenFragmentSource, StencilOnlyState);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValues[2]{};
+  ClearValues[0].color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ClearValues[1].depthStencil = {1.0f, 0};
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.renderPass = LocalPass;
+  PassBegin.framebuffer = LocalFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 2;
+  PassBegin.pClearValues = ClearValues;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Writer);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, DepthBlocked);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, StencilPassed);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel = texel(X, Y);
+      EXPECT_EQ(Texel[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel[1], 0xFF) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, StencilPassed, nullptr);
+  vkDestroyPipeline(Device, DepthBlocked, nullptr);
+  vkDestroyPipeline(Device, Writer, nullptr);
+  vkDestroyFramebuffer(Device, LocalFb, nullptr);
+  vkDestroyRenderPass(Device, LocalPass, nullptr);
+  vkDestroyImageView(Device, DepthStencilView, nullptr);
+  vkDestroyImage(Device, DepthStencilImage, nullptr);
+  vkFreeMemory(Device, DepthStencilMemory, nullptr);
+}
+
 /// `BlendState::BlendEnable`: a half-alpha fragment source-over-blends with
 /// the attachment's existing (clear) color, rather than replacing it -- the
 /// completion scenario's own "blending" bullet.

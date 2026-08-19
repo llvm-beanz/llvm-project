@@ -12,6 +12,8 @@
 
 #include "feme/Graphics/ImageFixture.h"
 
+#include "llvm/ADT/STLFunctionalExtras.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -35,21 +37,6 @@ Expected<std::vector<uint8_t>> packTexel(feme::cpu::ResourceFormat Format,
   return Texel;
 }
 
-/// The clear value for one texel of \p Format, from either a color or a
-/// depth/stencil clear value. `S8_UINT` is a raw byte rather than a
-/// normalized component, so it bypasses the pack table.
-Expected<std::vector<uint8_t>> buildClearTexel(feme::cpu::ResourceFormat Format,
-                                               const VkClearValue &Value,
-                                               bool DepthStencil) {
-  if (DepthStencil && isSupportedStencilAttachmentFormat(Format))
-    return std::vector<uint8_t>{
-        static_cast<uint8_t>(Value.depthStencil.stencil)};
-  if (DepthStencil)
-    return packTexel(Format, {Value.depthStencil.depth});
-  return packTexel(Format, {Value.color.float32[0], Value.color.float32[1],
-                            Value.color.float32[2], Value.color.float32[3]});
-}
-
 /// Fills every texel (and every sample of it) of subresource
 /// (\p Level, \p Layer) of \p Img with \p Texel.
 void fillSubresource(Image &Img, uint32_t Level, uint32_t Layer,
@@ -65,14 +52,47 @@ void fillSubresource(Image &Img, uint32_t Level, uint32_t Layer,
                       Texel.size());
 }
 
-Error clearImageRanges(Image *Img, const VkClearValue &Value,
-                       ArrayRef<VkImageSubresourceRange> Ranges,
-                       bool DepthStencil) {
+/// Fills the aspect(s) \p AspectMask selects (`DEPTH_BIT`/`STENCIL_BIT`) of
+/// every texel (and sample) of subresource (\p Level, \p Layer) of \p Img
+/// with \p Value, as a per-texel read-modify-write: a combined
+/// depth+stencil format (`D24_UNORM_S8_UINT`, roadmap C1) shares one word
+/// of storage between both aspects, so clearing only one must leave the
+/// other's existing bits untouched.
+Error fillDepthStencilSubresource(Image &Img, uint32_t Level, uint32_t Layer,
+                                  VkImageAspectFlags AspectMask,
+                                  const VkClearDepthStencilValue &Value) {
+  uint32_t Width = std::max(1u, Img.width() >> Level);
+  uint32_t Height = std::max(1u, Img.height() >> Level);
+  uint32_t Depth = std::max(1u, Img.depth() >> Level);
+  uint32_t ElemSize = formatElementSize(Img.format());
+  for (uint32_t Z = 0; Z != Depth; ++Z)
+    for (uint32_t Y = 0; Y != Height; ++Y)
+      for (uint32_t X = 0; X != Width; ++X)
+        for (uint32_t S = 0; S != Img.sampleCount(); ++S) {
+          MutableArrayRef<uint8_t> Texel(
+              static_cast<uint8_t *>(
+                  Img.texelPointer(Level, Layer, X, Y, Z, S)),
+              ElemSize);
+          if (AspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
+            if (Error E = feme::graphics::packDepthClear(
+                    Img.format(), Value.depth, Texel))
+              return E;
+          if (AspectMask & VK_IMAGE_ASPECT_STENCIL_BIT)
+            if (Error E = feme::graphics::packStencilClear(
+                    Img.format(), Value.stencil, Texel))
+              return E;
+        }
+  return Error::success();
+}
+
+Error clearColorImageRanges(Image *Img, const VkClearColorValue &Color,
+                            ArrayRef<VkImageSubresourceRange> Ranges) {
   if (!Img || !Img->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "the cleared image is not bound to memory");
-  Expected<std::vector<uint8_t>> Texel =
-      buildClearTexel(Img->format(), Value, DepthStencil);
+  Expected<std::vector<uint8_t>> Texel = packTexel(
+      Img->format(), {Color.float32[0], Color.float32[1], Color.float32[2],
+                      Color.float32[3]});
   if (!Texel)
     return Texel.takeError();
 
@@ -92,6 +112,35 @@ Error clearImageRanges(Image *Img, const VkClearValue &Value,
       for (uint32_t A = 0; A != LayerCount; ++A)
         fillSubresource(*Img, Range.baseMipLevel + L, Range.baseArrayLayer + A,
                         *Texel);
+  }
+  return Error::success();
+}
+
+Error clearDepthStencilImageRanges(Image *Img,
+                                   const VkClearDepthStencilValue &Value,
+                                   ArrayRef<VkImageSubresourceRange> Ranges) {
+  if (!Img || !Img->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "the cleared image is not bound to memory");
+
+  for (const VkImageSubresourceRange &Range : Ranges) {
+    uint32_t LevelCount = Range.levelCount == VK_REMAINING_MIP_LEVELS
+                              ? Img->mipLevels() - Range.baseMipLevel
+                              : Range.levelCount;
+    uint32_t LayerCount = Range.layerCount == VK_REMAINING_ARRAY_LAYERS
+                              ? Img->arrayLayers() - Range.baseArrayLayer
+                              : Range.layerCount;
+    if (Range.baseMipLevel + LevelCount > Img->mipLevels() ||
+        Range.baseArrayLayer + LayerCount > Img->arrayLayers())
+      return createStringError(inconvertibleErrorCode(),
+                               "a cleared subresource range is out of range "
+                               "of its image");
+    for (uint32_t L = 0; L != LevelCount; ++L)
+      for (uint32_t A = 0; A != LayerCount; ++A)
+        if (Error E = fillDepthStencilSubresource(
+                *Img, Range.baseMipLevel + L, Range.baseArrayLayer + A,
+                Range.aspectMask, Value))
+          return E;
   }
   return Error::success();
 }
@@ -125,76 +174,121 @@ namespace feme::vulkan {
 
 Error runClearColorImage(Image *Img, const VkClearColorValue &Color,
                          ArrayRef<VkImageSubresourceRange> Ranges) {
-  VkClearValue Value{};
-  Value.color = Color;
-  return clearImageRanges(Img, Value, Ranges, /*DepthStencil=*/false);
+  return clearColorImageRanges(Img, Color, Ranges);
 }
 
 Error runClearDepthStencilImage(Image *Img,
                                 const VkClearDepthStencilValue &DepthStencil,
                                 ArrayRef<VkImageSubresourceRange> Ranges) {
-  VkClearValue Value{};
-  Value.depthStencil = DepthStencil;
-  return clearImageRanges(Img, Value, Ranges, /*DepthStencil=*/true);
+  return clearDepthStencilImageRanges(Img, DepthStencil, Ranges);
+}
+
+/// Clears one attachment over one rectangle, writing directly into each
+/// covered texel's own bytes via \p Write -- a per-pixel read-modify-write
+/// rather than a precomputed uniform value, so a partial (single-aspect)
+/// clear of a combined depth+stencil attachment never clobbers the other
+/// aspect's bits (roadmap C1).
+Error clearAttachmentRects(const RenderTargetView &Target,
+                          ArrayRef<VkClearRect> Rects,
+                          llvm::function_ref<Error(MutableArrayRef<uint8_t>)>
+                              Write) {
+  Expected<feme::graphics::AttachmentView> View =
+      resolveAttachmentView(Target.View);
+  if (!View)
+    return View.takeError();
+  Expected<uint32_t> ElemSize =
+      feme::graphics::getFixtureFormatElementSize(View->Format);
+  if (!ElemSize)
+    return ElemSize.takeError();
+
+  for (const VkClearRect &Rect : Rects) {
+    uint32_t MinX = std::max<int32_t>(0, Rect.rect.offset.x);
+    uint32_t MinY = std::max<int32_t>(0, Rect.rect.offset.y);
+    uint32_t MaxX = std::min<uint64_t>(View->Width,
+                                       uint64_t(MinX) + Rect.rect.extent.width);
+    uint32_t MaxY = std::min<uint64_t>(
+        View->Height, uint64_t(MinY) + Rect.rect.extent.height);
+    for (uint32_t Y = MinY; Y < MaxY; ++Y)
+      for (uint32_t X = MinX; X < MaxX; ++X)
+        for (uint32_t S = 0; S != Target.SampleCount; ++S) {
+          size_t Offset =
+              (((size_t)Y * View->Width + X) * Target.SampleCount + S) *
+              *ElemSize;
+          if (Error E =
+                  Write(MutableArrayRef<uint8_t>(View->Data.data() + Offset,
+                                                 *ElemSize)))
+            return E;
+        }
+  }
+  return Error::success();
 }
 
 Error runClearAttachments(const RenderTargetBinding &Binding,
                           ArrayRef<VkClearAttachment> Attachments,
                           ArrayRef<VkClearRect> Rects) {
   for (const VkClearAttachment &Clear : Attachments) {
-    const RenderTargetView *Target = nullptr;
-    bool DepthStencil = false;
-    if (Clear.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+    bool WantColor = Clear.aspectMask & VK_IMAGE_ASPECT_COLOR_BIT;
+    bool WantDepth = Clear.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT;
+    bool WantStencil = Clear.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (!WantColor && !WantDepth && !WantStencil)
+      return createStringError(inconvertibleErrorCode(),
+                               "vkCmdClearAttachments names no aspect");
+
+    if (WantColor) {
       if (Clear.colorAttachment >= Binding.Colors.size())
         return createStringError(inconvertibleErrorCode(),
                                  "vkCmdClearAttachments names color "
                                  "attachment %u, which is not bound",
                                  Clear.colorAttachment);
-      Target = &Binding.Colors[Clear.colorAttachment];
-    } else if (Clear.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) {
+      const RenderTargetView &Target = Binding.Colors[Clear.colorAttachment];
+      Expected<feme::graphics::AttachmentView> View =
+          resolveAttachmentView(Target.View);
+      if (!View)
+        return View.takeError();
+      Expected<std::vector<uint8_t>> Texel = packTexel(
+          View->Format, {Clear.clearValue.color.float32[0],
+                        Clear.clearValue.color.float32[1],
+                        Clear.clearValue.color.float32[2],
+                        Clear.clearValue.color.float32[3]});
+      if (!Texel)
+        return Texel.takeError();
+      if (Error E = clearAttachmentRects(
+              Target, Rects, [&](MutableArrayRef<uint8_t> Texel_) -> Error {
+                std::memcpy(Texel_.data(), Texel->data(), Texel_.size());
+                return Error::success();
+              }))
+        return E;
+    }
+    // Depth and stencil, unlike color, may be named together in one
+    // `VkClearAttachment` (a single combined-format attachment cleared in
+    // one call); handle them independently rather than as mutually
+    // exclusive so that case clears both halves.
+    if (WantDepth) {
       if (!Binding.Depth)
         return createStringError(inconvertibleErrorCode(),
                                  "vkCmdClearAttachments names the depth "
                                  "attachment, which is not bound");
-      Target = &*Binding.Depth;
-      DepthStencil = true;
-    } else if (Clear.aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) {
+      feme::cpu::ResourceFormat Format = Binding.Depth->Format;
+      double Depth = Clear.clearValue.depthStencil.depth;
+      if (Error E = clearAttachmentRects(
+              *Binding.Depth, Rects, [&](MutableArrayRef<uint8_t> Texel) {
+                return feme::graphics::packDepthClear(Format, Depth, Texel);
+              }))
+        return E;
+    }
+    if (WantStencil) {
       if (!Binding.Stencil)
         return createStringError(inconvertibleErrorCode(),
                                  "vkCmdClearAttachments names the stencil "
                                  "attachment, which is not bound");
-      Target = &*Binding.Stencil;
-      DepthStencil = true;
-    } else {
-      return createStringError(inconvertibleErrorCode(),
-                               "vkCmdClearAttachments names no aspect");
-    }
-
-    Expected<feme::graphics::AttachmentView> View =
-        resolveAttachmentView(Target->View);
-    if (!View)
-      return View.takeError();
-    Expected<std::vector<uint8_t>> Texel =
-        buildClearTexel(View->Format, Clear.clearValue, DepthStencil);
-    if (!Texel)
-      return Texel.takeError();
-
-    for (const VkClearRect &Rect : Rects) {
-      uint32_t MinX = std::max<int32_t>(0, Rect.rect.offset.x);
-      uint32_t MinY = std::max<int32_t>(0, Rect.rect.offset.y);
-      uint32_t MaxX = std::min<uint64_t>(
-          View->Width, uint64_t(MinX) + Rect.rect.extent.width);
-      uint32_t MaxY = std::min<uint64_t>(
-          View->Height, uint64_t(MinY) + Rect.rect.extent.height);
-      for (uint32_t Y = MinY; Y < MaxY; ++Y)
-        for (uint32_t X = MinX; X < MaxX; ++X)
-          for (uint32_t S = 0; S != Target->SampleCount; ++S) {
-            size_t Offset =
-                (((size_t)Y * View->Width + X) * Target->SampleCount + S) *
-                Texel->size();
-            std::memcpy(View->Data.data() + Offset, Texel->data(),
-                        Texel->size());
-          }
+      feme::cpu::ResourceFormat Format = Binding.Stencil->Format;
+      uint32_t Stencil = Clear.clearValue.depthStencil.stencil;
+      if (Error E = clearAttachmentRects(
+              *Binding.Stencil, Rects, [&](MutableArrayRef<uint8_t> Texel) {
+                return feme::graphics::packStencilClear(Format, Stencil,
+                                                        Texel);
+              }))
+        return E;
     }
   }
   return Error::success();

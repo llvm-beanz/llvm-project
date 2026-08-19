@@ -134,12 +134,15 @@ struct RenderTargetView {
 /// consumed by every draw recorded inside it.
 struct RenderTargetBinding {
   std::vector<RenderTargetView> Colors;
-  /// The depth and stencil attachments, at most one of which is bound: this
-  /// milestone's depth/stencil support is `feme::graphics`' own two separate
-  /// single-component images (`D16_UNORM`/`D32_FLOAT` and `S8_UINT`), never a
-  /// packed `D24_UNORM_S8_UINT` surface -- see `PreparedDraw.h`'s
-  /// `DepthStencilAttachment` and the V6 status note in
-  /// feme/docs/FeMeVulkanDesign.md.
+  /// The depth and stencil attachments. For a pure depth (`D16_UNORM`/
+  /// `D32_FLOAT`) or pure stencil (`S8_UINT`) format, at most one of these
+  /// is bound and each owns its own image. For a combined format
+  /// (`D24_UNORM_S8_UINT`, roadmap C1), both are bound and share the same
+  /// underlying `ImageView`/storage, distinguished only by which of
+  /// `AttachmentDescription::{LoadOp,StoreOp}` (depth) or
+  /// `{StencilLoadOp,StencilStoreOp}` (stencil) each one carries; see
+  /// `feme::graphics::packDepthClear`/`packStencilClear` for how the two
+  /// halves of that shared word are written independently.
   std::optional<RenderTargetView> Depth;
   std::optional<RenderTargetView> Stencil;
   VkRect2D RenderArea{};
@@ -162,11 +165,13 @@ resolveAttachmentView(ImageView *View);
 bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format);
 
 /// Whether \p Format may back the depth half of a depth/stencil attachment
-/// (`D16_UNORM`/`D32_FLOAT`).
+/// (`D16_UNORM`/`D32_FLOAT`, or the depth half of the combined
+/// `D24_UNORM_S8_UINT` format -- roadmap C1).
 bool isSupportedDepthAttachmentFormat(feme::cpu::ResourceFormat Format);
 
 /// Whether \p Format may back the stencil half of a depth/stencil attachment
-/// (`S8_UINT`).
+/// (`S8_UINT`, or the stencil half of the combined `D24_UNORM_S8_UINT`
+/// format -- roadmap C1).
 bool isSupportedStencilAttachmentFormat(feme::cpu::ResourceFormat Format);
 
 /// Whether \p SampleCount is one the executor rasterizes (1, 2, or 4 --

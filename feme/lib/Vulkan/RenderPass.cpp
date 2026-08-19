@@ -50,11 +50,13 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
 
 bool isSupportedDepthAttachmentFormat(feme::cpu::ResourceFormat Format) {
   return Format == feme::cpu::ResourceFormat::D16_UNORM ||
-         Format == feme::cpu::ResourceFormat::D32_FLOAT;
+         Format == feme::cpu::ResourceFormat::D32_FLOAT ||
+         Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT;
 }
 
 bool isSupportedStencilAttachmentFormat(feme::cpu::ResourceFormat Format) {
-  return Format == feme::cpu::ResourceFormat::S8_UINT;
+  return Format == feme::cpu::ResourceFormat::S8_UINT ||
+         Format == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT;
 }
 
 bool isSupportedAttachmentSampleCount(uint32_t SampleCount) {

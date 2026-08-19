@@ -15,14 +15,17 @@
 //  - No post-transform vertex cache: every (instance, vertex-or-index) pair
 //    re-runs the vertex stage, matching "the first implementation may
 //    perform all vertex work before tile work" in "Draw flow".
-//  - Depth/stencil testing/writes (roadmap R33) support `D16_UNORM`/
-//    `D32_FLOAT` depth and `S8_UINT` stencil attachments (two separate
-//    images, not one packed surface -- see PreparedDraw.h's
-//    `DepthStencilAttachment`), with early or late scheduling chosen from
-//    the fragment stage's own `SV_Depth`/`SV_StencilRef`/discard
-//    reflection. Full blend-factor/op combinations, write masks (per
-//    `BlendState`), logic ops (`R8G8B8A8_*` only), multiple render targets
-//    (one `BlendState`/`SV_TargetN` per color attachment,
+//  - Depth/stencil testing/writes (roadmap R33; combined-format support
+//    added by roadmap C1) support `D16_UNORM`/`D32_FLOAT` depth,
+//    `S8_UINT` stencil, and `D24_UNORM_S8_UINT` combined depth+stencil
+//    attachments -- the last shares one word of storage between
+//    `PreparedDraw.h`'s `DepthStencilAttachment::Depth` and `::Stencil`
+//    views, so each is a read-modify-write of only its own bits -- with
+//    early or late scheduling chosen from the fragment stage's own
+//    `SV_Depth`/`SV_StencilRef`/discard reflection. Full blend-factor/op
+//    combinations, write masks (per `BlendState`), logic ops
+//    (`R8G8B8A8_*` only), multiple render targets (one `BlendState`/
+//    `SV_TargetN` per color attachment,
 //    `GraphicsPipeline::getColorBlends()`), and 1/2/4-sample multisampling
 //    (coverage tested at fixed per-sample offsets, "Fixed per-pixel sample
 //    offsets" below; shading, depth, and stencil interpolation stay
@@ -577,10 +580,11 @@ bool compareOp(CompareOp Op, float New, float Old) {
 
 /// Reads the depth attachment's stored value at pixel (\p PX, \p PY),
 /// sample \p Sample of \p SampleCount (0/1 for a single-sample
-/// attachment), converting `D16_UNORM` to the same [0, 1] float
-/// convention every other depth format already uses. Multisample storage
-/// interleaves samples within a pixel: texel `(PX, PY, Sample)` is at
-/// flat index `(PY * Width + PX) * SampleCount + Sample`.
+/// attachment), converting `D16_UNORM` (and the depth half of
+/// `D24_UNORM_S8_UINT`) to the same [0, 1] float convention every other
+/// depth format already uses. Multisample storage interleaves samples
+/// within a pixel: texel `(PX, PY, Sample)` is at flat index
+/// `(PY * Width + PX) * SampleCount + Sample`.
 Expected<float> readDepth(const AttachmentView &Depth, uint32_t SampleCount,
                           int32_t PX, int32_t PY, uint32_t Sample) {
   size_t Idx = ((size_t)PY * Depth.Width + PX) * SampleCount + Sample;
@@ -594,6 +598,14 @@ Expected<float> readDepth(const AttachmentView &Depth, uint32_t SampleCount,
     uint16_t V;
     memcpy(&V, Depth.Data.data() + Idx * 2, 2);
     return V / 65535.0f;
+  }
+  case cpu::ResourceFormat::D24_UNORM_S8_UINT: {
+    double D;
+    if (Error E = unpackDepth(
+            Depth.Format, ArrayRef<uint8_t>(Depth.Data.data() + Idx * 4, 4),
+            D))
+      return std::move(E);
+    return static_cast<float>(D);
   }
   default:
     return createStringError(inconvertibleErrorCode(),
@@ -615,6 +627,13 @@ Error writeDepth(AttachmentView &Depth, uint32_t SampleCount, int32_t PX,
     memcpy(Depth.Data.data() + Idx * 2, &V, 2);
     return Error::success();
   }
+  case cpu::ResourceFormat::D24_UNORM_S8_UINT:
+    // A read-modify-write of only the low 24 bits: the high byte
+    // (stencil) may be shared with `writeStencil` on the very same word
+    // and must not be clobbered here.
+    return packDepthClear(
+        Depth.Format, Value,
+        MutableArrayRef<uint8_t>(Depth.Data.data() + Idx * 4, 4));
   default:
     return createStringError(inconvertibleErrorCode(),
                              "depth attachment format is not yet supported "
@@ -622,15 +641,50 @@ Error writeDepth(AttachmentView &Depth, uint32_t SampleCount, int32_t PX,
   }
 }
 
-uint8_t readStencil(const AttachmentView &Stencil, uint32_t SampleCount,
-                    int32_t PX, int32_t PY, uint32_t Sample) {
-  return Stencil.Data[((size_t)PY * Stencil.Width + PX) * SampleCount + Sample];
+/// Reads the stencil attachment's stored value, the same indexing
+/// `readDepth` uses. `S8_UINT` is one raw byte per texel; the stencil half
+/// of `D24_UNORM_S8_UINT` is the high byte of the same 4-byte word
+/// `readDepth`/`writeDepth` address for that attachment's depth half.
+Expected<uint8_t> readStencil(const AttachmentView &Stencil,
+                              uint32_t SampleCount, int32_t PX, int32_t PY,
+                              uint32_t Sample) {
+  size_t Idx = ((size_t)PY * Stencil.Width + PX) * SampleCount + Sample;
+  switch (Stencil.Format) {
+  case cpu::ResourceFormat::S8_UINT:
+    return Stencil.Data[Idx];
+  case cpu::ResourceFormat::D24_UNORM_S8_UINT: {
+    uint32_t S;
+    if (Error E = unpackStencil(
+            Stencil.Format,
+            ArrayRef<uint8_t>(Stencil.Data.data() + Idx * 4, 4), S))
+      return std::move(E);
+    return static_cast<uint8_t>(S);
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "stencil attachment format is not yet "
+                             "supported (mechanical, added on demand)");
+  }
 }
 
-void writeStencil(AttachmentView &Stencil, uint32_t SampleCount, int32_t PX,
-                  int32_t PY, uint32_t Sample, uint8_t Value) {
-  Stencil.Data[((size_t)PY * Stencil.Width + PX) * SampleCount + Sample] =
-      Value;
+Error writeStencil(AttachmentView &Stencil, uint32_t SampleCount, int32_t PX,
+                   int32_t PY, uint32_t Sample, uint8_t Value) {
+  size_t Idx = ((size_t)PY * Stencil.Width + PX) * SampleCount + Sample;
+  switch (Stencil.Format) {
+  case cpu::ResourceFormat::S8_UINT:
+    Stencil.Data[Idx] = Value;
+    return Error::success();
+  case cpu::ResourceFormat::D24_UNORM_S8_UINT:
+    // A read-modify-write of only the high byte -- see `writeDepth`'s
+    // comment for why the other half must survive.
+    return packStencilClear(
+        Stencil.Format, Value,
+        MutableArrayRef<uint8_t>(Stencil.Data.data() + Idx * 4, 4));
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "stencil attachment format is not yet "
+                             "supported (mechanical, added on demand)");
+  }
 }
 
 /// Applies \p Op ("Depth/Stencil" per Vulkan's `VkStencilOp`/Direct3D's
@@ -682,23 +736,29 @@ testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
   bool StencilPass = true;
   uint8_t StoredStencil = 0;
   if (Stencil.TestEnable) {
-    StoredStencil = readStencil(StencilAttachment, SampleCount, PX, PY, Sample);
+    Expected<uint8_t> Stored =
+        readStencil(StencilAttachment, SampleCount, PX, PY, Sample);
+    if (!Stored)
+      return Stored.takeError();
+    StoredStencil = *Stored;
     uint8_t Masked = StoredStencil & Face.CompareMask;
     uint8_t Ref = Face.Reference & Face.CompareMask;
     StencilPass = compareOp(Face.Compare, static_cast<float>(Ref),
                             static_cast<float>(Masked));
   }
 
-  auto applyFace = [&](StencilOp Op) {
+  auto applyFace = [&](StencilOp Op) -> Error {
     uint8_t Updated = applyStencilOp(Op, StoredStencil, Face.Reference);
     uint8_t Merged =
         (StoredStencil & ~Face.WriteMask) | (Updated & Face.WriteMask);
-    writeStencil(StencilAttachment, SampleCount, PX, PY, Sample, Merged);
+    return writeStencil(StencilAttachment, SampleCount, PX, PY, Sample,
+                        Merged);
   };
 
   if (!StencilPass) {
     if (Stencil.TestEnable)
-      applyFace(Face.FailOp);
+      if (Error E = applyFace(Face.FailOp))
+        return std::move(E);
     return false;
   }
 
@@ -713,12 +773,14 @@ testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
 
   if (!DepthPass) {
     if (Stencil.TestEnable)
-      applyFace(Face.DepthFailOp);
+      if (Error E = applyFace(Face.DepthFailOp))
+        return std::move(E);
     return false;
   }
 
   if (Stencil.TestEnable)
-    applyFace(Face.PassOp);
+    if (Error E = applyFace(Face.PassOp))
+      return std::move(E);
   if (Depth.WriteEnable) {
     if (Error E =
             writeDepth(DepthAttachment, SampleCount, PX, PY, Sample, NewDepth))
