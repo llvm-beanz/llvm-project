@@ -1792,6 +1792,31 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass(VkCommandBuffer commandBuffer) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->endRenderPass();
 }
 
+// core VK_VERSION_1_2's `*RenderPass2` commands add only a `pNext`-chained
+// depth/stencil resolve mode (unimplemented -- multisample depth/stencil
+// resolve is roadmap V7) to their classic counterparts' begin/end
+// semantics; this driver's own render-pass instance state
+// (`vulkan::CommandBuffer::beginRenderPass`/`nextSubpass`/`endRenderPass`)
+// already carries everything else either variant needs, so these three
+// commands are pure signature adapters onto the exact same state machine.
+VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass2(
+    VkCommandBuffer commandBuffer,
+    const VkRenderPassBeginInfo *pRenderPassBegin, const VkSubpassBeginInfo *) {
+  feme::vulkan::vkCmdBeginRenderPass(commandBuffer, pRenderPassBegin,
+                                     VK_SUBPASS_CONTENTS_INLINE);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass2(VkCommandBuffer commandBuffer,
+                                             const VkSubpassBeginInfo *,
+                                             const VkSubpassEndInfo *) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->nextSubpass();
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass2(VkCommandBuffer commandBuffer,
+                                               const VkSubpassEndInfo *) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->endRenderPass();
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
     VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
     const VkBuffer *pBuffers, const VkDeviceSize *pOffsets) {

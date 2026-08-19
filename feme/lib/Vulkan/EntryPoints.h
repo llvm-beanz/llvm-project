@@ -184,6 +184,9 @@ vkDestroySampler(VkDevice device, VkSampler sampler,
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
     VkDevice device, const VkRenderPassCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
+    VkDevice device, const VkRenderPassCreateInfo2 *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass);
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyRenderPass(VkDevice device, VkRenderPass renderPass,
                     const VkAllocationCallbacks *pAllocator);
@@ -397,6 +400,15 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
     const VkRenderPassBeginInfo *pRenderPassBegin, VkSubpassContents contents);
 VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass(VkCommandBuffer commandBuffer,
                                             VkSubpassContents contents);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBeginRenderPass2(VkCommandBuffer commandBuffer,
+                      const VkRenderPassBeginInfo *pRenderPassBegin,
+                      const VkSubpassBeginInfo *pSubpassBeginInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdNextSubpass2(
+    VkCommandBuffer commandBuffer, const VkSubpassBeginInfo *pSubpassBeginInfo,
+    const VkSubpassEndInfo *pSubpassEndInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdEndRenderPass2(
+    VkCommandBuffer commandBuffer, const VkSubpassEndInfo *pSubpassEndInfo);
 /// `VK_KHR_dynamic_rendering`'s two commands, exposed under their `KHR`
 /// names (dynamic rendering is core only in 1.3; this driver advertises
 /// 1.2 plus the extension -- see "Render passes and dynamic rendering").

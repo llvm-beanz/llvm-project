@@ -74,6 +74,7 @@ vkDestroySampler
 # V6: render passes and framebuffers (see "Render passes and dynamic
 # rendering").
 vkCreateRenderPass
+vkCreateRenderPass2
 vkDestroyRenderPass
 vkGetRenderAreaGranularity
 vkCreateFramebuffer
@@ -151,6 +152,9 @@ vkCmdCopyQueryPoolResults
 vkCmdBeginRenderPass
 vkCmdNextSubpass
 vkCmdEndRenderPass
+vkCmdBeginRenderPass2
+vkCmdNextSubpass2
+vkCmdEndRenderPass2
 vkCmdBindVertexBuffers
 vkCmdBindIndexBuffer
 vkCmdSetViewport

@@ -182,6 +182,72 @@ TEST_F(RenderPassTest, RejectsInputAttachments) {
             VK_ERROR_INITIALIZATION_FAILED);
 }
 
+/// `vkCreateRenderPass2` (core VK_VERSION_1_2) must build the exact same
+/// compiled `RenderPass` as `vkCreateRenderPass` given the equivalent
+/// `...2` structures -- found missing entirely (a segfault through a null
+/// device-dispatch-table entry, not merely a rejection) by the first real
+/// Vulkan-CTS run against this ICD (`dEQP-VK.renderpasses.renderpass2.*`).
+TEST_F(RenderPassTest, RenderPass2MatchesClassicCreation) {
+  VkAttachmentDescription2 Attachment{};
+  Attachment.sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2;
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  Attachment.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+  VkAttachmentReference2 ColorRef{};
+  ColorRef.sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2;
+  ColorRef.attachment = 0;
+  ColorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+  VkSubpassDescription2 Subpass{};
+  Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+
+  VkRenderPassCreateInfo2 Info{};
+  Info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+  Info.attachmentCount = 1;
+  Info.pAttachments = &Attachment;
+  Info.subpassCount = 1;
+  Info.pSubpasses = &Subpass;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  ASSERT_NE(Pass, VK_NULL_HANDLE);
+
+  const auto *Obj = fromHandle<RenderPass>(Pass);
+  ASSERT_EQ(Obj->attachments().size(), 1u);
+  EXPECT_EQ(Obj->attachments()[0].Format,
+            feme::cpu::ResourceFormat::R8G8B8A8_UNORM);
+  ASSERT_EQ(Obj->subpasses().size(), 1u);
+  ASSERT_EQ(Obj->subpasses()[0].ColorAttachments.size(), 1u);
+  EXPECT_EQ(Obj->subpasses()[0].ColorAttachments[0], 0u);
+
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
+/// Multiview (`viewMask`) is only expressible through `...2`'s structures,
+/// and is unimplemented (roadmap V7); a subpass asking for it must fail
+/// creation rather than silently render only view 0.
+TEST_F(RenderPassTest, RenderPass2RejectsMultiview) {
+  VkSubpassDescription2 Subpass{};
+  Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.viewMask = 0x1;
+
+  VkRenderPassCreateInfo2 Info{};
+  Info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+  Info.subpassCount = 1;
+  Info.pSubpasses = &Subpass;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
 TEST_F(RenderPassTest, FramebufferBindsMatchingViews) {
   VkRenderPass Pass = VK_NULL_HANDLE;
   ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);

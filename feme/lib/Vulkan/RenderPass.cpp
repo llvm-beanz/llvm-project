@@ -201,6 +201,105 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
   return VK_SUCCESS;
 }
 
+namespace {
+
+/// Converts one `VkAttachmentReference2` to the classic
+/// `VkAttachmentReference` `vkCreateRenderPass`'s subpass loop already
+/// checks -- dropping only `aspectMask`, which this driver never consults
+/// (no packed depth/stencil surface, no input attachments; see
+/// `vkCreateRenderPass`'s own rejection of both).
+VkAttachmentReference toAttachmentReference(const VkAttachmentReference2 &Src) {
+  return {Src.attachment, Src.layout};
+}
+
+} // namespace
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
+    VkDevice device, const VkRenderPassCreateInfo2 *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator, VkRenderPass *pRenderPass) {
+  // `VkRenderPassCreateInfo2` adds multiview (`viewMask`/
+  // `pCorrelatedViewMasks`) on top of the classic structures' fields --
+  // unimplemented (roadmap R34/V7, same as `vkCreateRenderPass`'s own
+  // layered-framebuffer rejection) -- so a render pass asking for it fails
+  // here rather than being silently flattened to view 0.
+  if (pCreateInfo->correlatedViewMaskCount != 0)
+    return VK_ERROR_INITIALIZATION_FAILED;
+  for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I)
+    if (pCreateInfo->pSubpasses[I].viewMask != 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+  // Every other field `VkRenderPassCreateInfo2`/`VkAttachmentDescription2`/
+  // `VkSubpassDescription2`/`VkSubpassDependency2` carry has the same name
+  // and meaning as their classic counterparts (just with `sType`/`pNext`
+  // spliced in for chained extension structures this driver does not
+  // consume) -- converting to the classic structures and delegating to
+  // `vkCreateRenderPass` reuses its validation and construction rather than
+  // duplicating it.
+  std::vector<VkAttachmentDescription> Attachments;
+  Attachments.reserve(pCreateInfo->attachmentCount);
+  for (uint32_t I = 0; I != pCreateInfo->attachmentCount; ++I) {
+    const VkAttachmentDescription2 &Src = pCreateInfo->pAttachments[I];
+    Attachments.push_back({Src.flags, Src.format, Src.samples, Src.loadOp,
+                           Src.storeOp, Src.stencilLoadOp, Src.stencilStoreOp,
+                           Src.initialLayout, Src.finalLayout});
+  }
+
+  // Each subpass's reference arrays need storage that outlives the
+  // conversion loop below (the classic `VkSubpassDescription` only points
+  // at them), so every subpass's converted references are kept in their
+  // own vector for the whole function's duration.
+  std::vector<std::vector<VkAttachmentReference>> InputRefs(
+      pCreateInfo->subpassCount);
+  std::vector<std::vector<VkAttachmentReference>> ColorRefs(
+      pCreateInfo->subpassCount);
+  std::vector<std::vector<VkAttachmentReference>> ResolveRefs(
+      pCreateInfo->subpassCount);
+  std::vector<VkAttachmentReference> DepthStencilRefs(
+      pCreateInfo->subpassCount);
+  std::vector<VkSubpassDescription> Subpasses;
+  Subpasses.reserve(pCreateInfo->subpassCount);
+  for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I) {
+    const VkSubpassDescription2 &Src = pCreateInfo->pSubpasses[I];
+    for (uint32_t J = 0; J != Src.inputAttachmentCount; ++J)
+      InputRefs[I].push_back(toAttachmentReference(Src.pInputAttachments[J]));
+    for (uint32_t J = 0; J != Src.colorAttachmentCount; ++J)
+      ColorRefs[I].push_back(toAttachmentReference(Src.pColorAttachments[J]));
+    if (Src.pResolveAttachments)
+      for (uint32_t J = 0; J != Src.colorAttachmentCount; ++J)
+        ResolveRefs[I].push_back(
+            toAttachmentReference(Src.pResolveAttachments[J]));
+    const VkAttachmentReference *DepthStencilPtr = nullptr;
+    if (Src.pDepthStencilAttachment) {
+      DepthStencilRefs[I] = toAttachmentReference(*Src.pDepthStencilAttachment);
+      DepthStencilPtr = &DepthStencilRefs[I];
+    }
+    Subpasses.push_back(
+        {Src.flags, Src.pipelineBindPoint, Src.inputAttachmentCount,
+         InputRefs[I].data(), Src.colorAttachmentCount, ColorRefs[I].data(),
+         ResolveRefs[I].empty() ? nullptr : ResolveRefs[I].data(),
+         DepthStencilPtr, Src.preserveAttachmentCount,
+         Src.pPreserveAttachments});
+  }
+
+  VkRenderPassCreateInfo ClassicInfo{
+      VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
+      nullptr,
+      pCreateInfo->flags,
+      static_cast<uint32_t>(Attachments.size()),
+      Attachments.data(),
+      static_cast<uint32_t>(Subpasses.size()),
+      Subpasses.data(),
+      // Dependencies carry no payload this ICD's strictly sequential
+      // execution needs (see RenderPass.h's `RenderPass` doc comment), so
+      // `vkCreateRenderPass` never reads `pCreateInfo->pDependencies`
+      // either; converting them would be pure dead weight.
+      0u,
+      nullptr,
+  };
+  return feme::vulkan::vkCreateRenderPass(device, &ClassicInfo, pAllocator,
+                                          pRenderPass);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 vkDestroyRenderPass(VkDevice, VkRenderPass renderPass,
                     const VkAllocationCallbacks *pAllocator) {
