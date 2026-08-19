@@ -751,15 +751,18 @@ def SPIRV_SpecConstantCompositeOp : SPIRV_Op<"SpecConstantComposite", [
     covered by `spirv.SpecConstant`.
 
     A constituent of a spec constant composite can be:
-    - A symbol referring of another spec constant.
-    - The SSA ID of a non-specialization constant (i.e. defined through
-      `spirv.SpecConstant`).
-    - The SSA ID of a `spirv.Undef`.
+    - A symbol reference to another spec constant (scalar or composite).
+    - An inline typed attribute holding the value of a regular
+      (non-specialization) constant, e.g. one of a composite spec constant's
+      constituents that is itself not individually specializable (a `mat2`
+      spec constant's columns, for instance, are ordinary constant vectors).
 
     ```
     spv-spec-constant-composite-op ::= `spirv.SpecConstantComposite` symbol-ref-id ` (`
-                                       symbol-ref-id (`, ` symbol-ref-id)*
+                                       spec-constant-composite-constituent
+                                       (`, ` spec-constant-composite-constituent)*
                                        `) :` composite-type
+    spec-constant-composite-constituent ::= symbol-ref-id | attribute-value
     ```
 
      where `composite-type` is some non-scalar type that can be represented in the `spv`
@@ -772,18 +775,17 @@ def SPIRV_SpecConstantCompositeOp : SPIRV_Op<"SpecConstantComposite", [
      spirv.SpecConstant @sc2 = 2.5 : f32
      spirv.SpecConstant @sc3 = 3.5 : f32
      spirv.SpecConstantComposite @scc (@sc1, @sc2, @sc3) : !spirv.struct<i32, f32, f32>
+     spirv.SpecConstantComposite @scc2 (@sc1, 4.5 : f32) : !spirv.struct<i32, f32>
      ```
 
     TODO Add support for constituents that are:
-    - regular constants.
-    - undef.
-    - spec constant composite.
+    - the SSA ID of a `spirv.Undef`.
   }];
 
   let arguments = (ins
     TypeAttr:$type,
     StrAttr:$sym_name,
-    SymbolRefArrayAttr:$constituents
+    ArrayAttr:$constituents
   );
 
   let results = (outs);

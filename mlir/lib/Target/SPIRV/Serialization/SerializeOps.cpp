@@ -135,17 +135,29 @@ Serializer::processSpecConstantCompositeOp(spirv::SpecConstantCompositeOp op) {
   operands.push_back(resultID);
 
   auto constituents = op.getConstituents();
+  auto cType = cast<spirv::CompositeType>(op.getType());
 
   for (auto index : llvm::seq<uint32_t>(0, constituents.size())) {
-    auto constituent = dyn_cast<FlatSymbolRefAttr>(constituents[index]);
+    if (auto constituent = dyn_cast<FlatSymbolRefAttr>(constituents[index])) {
+      auto constituentName = constituent.getValue();
+      auto constituentID = getSpecConstID(constituentName);
 
-    auto constituentName = constituent.getValue();
-    auto constituentID = getSpecConstID(constituentName);
+      if (!constituentID) {
+        return op.emitError("unknown result <id> for specialization constant ")
+               << constituentName;
+      }
 
-    if (!constituentID) {
-      return op.emitError("unknown result <id> for specialization constant ")
-             << constituentName;
+      operands.push_back(constituentID);
+      continue;
     }
+
+    // A non-symbol constituent is an inline attribute holding the value of a
+    // regular (non-specialization) constant; serialize it as such and
+    // reference its result <id> directly.
+    auto constituentID = prepareConstant(
+        op.getLoc(), cType.getElementType(index), constituents[index]);
+    if (!constituentID)
+      return failure();
 
     operands.push_back(constituentID);
   }

@@ -93,6 +93,20 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
 
 // -----
 
+// A spec constant composite (e.g. a `mat2` spec constant) may have
+// constituents that are themselves ordinary (non-specialization) constants,
+// not just symbol references to other spec constants -- only the whole
+// composite is specialized, so, e.g., its columns are plain constant
+// vectors.
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
+  spirv.SpecConstant @sc_f32_1 = 1.5 : f32
+
+  // CHECK: spirv.SpecConstantComposite @scc_mixed (@sc_f32_1, 2.500000e+00 : f32) : !spirv.array<2 x f32>
+  spirv.SpecConstantComposite @scc_mixed (@sc_f32_1, 2.5 : f32) : !spirv.array<2 x f32>
+}
+
+// -----
+
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, ReplicatedCompositesEXT], [SPV_EXT_replicated_composites]> {
 
   spirv.SpecConstant @sc_i32_1 = 1 : i32

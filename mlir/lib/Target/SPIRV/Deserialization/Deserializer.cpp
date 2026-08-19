@@ -1994,8 +1994,28 @@ spirv::Deserializer::processSpecConstantComposite(ArrayRef<uint32_t> operands) {
   SmallVector<Attribute, 4> elements;
   elements.reserve(operands.size() - 2);
   for (unsigned i = 2, e = operands.size(); i < e; ++i) {
-    auto elementInfo = getSpecConstant(operands[i]);
-    elements.push_back(SymbolRefAttr::get(elementInfo));
+    // A constituent is either another spec constant (referenced by symbol)
+    // or a regular constant materialized inline as an attribute -- per the
+    // SPIR-V spec, `OpSpecConstantComposite`'s constituents may be any
+    // `Constant` or `Spec Constant` declaration (e.g. a `mat2` spec
+    // constant's columns are ordinary `OpConstantComposite` vectors, not
+    // spec constants, since only the whole matrix is specialized).
+    if (spirv::SpecConstantOp specConstituent = getSpecConstant(operands[i])) {
+      elements.push_back(SymbolRefAttr::get(specConstituent));
+      continue;
+    }
+
+    if (std::optional<std::pair<Attribute, Type>> constituent =
+            getConstant(operands[i])) {
+      elements.push_back(constituent->first);
+      continue;
+    }
+
+    return emitError(unknownLoc,
+                     "OpSpecConstantComposite constituent must be a "
+                     "previously defined constant or specialization "
+                     "constant, but found <id> ")
+           << operands[i];
   }
 
   auto op = spirv::SpecConstantCompositeOp::create(

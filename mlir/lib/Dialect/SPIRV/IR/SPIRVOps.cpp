@@ -1891,13 +1891,15 @@ ParseResult spirv::SpecConstantCompositeOp::parse(OpAsmParser &parser,
   do {
     // The name of the constituent attribute isn't important
     const char *attrName = "spec_const";
-    FlatSymbolRefAttr specConstRef;
+    Attribute constituentAttr;
     NamedAttrList attrs;
 
-    if (parser.parseAttribute(specConstRef, Type(), attrName, attrs))
+    // A constituent is either a symbol reference to another spec constant or
+    // an inline attribute holding the value of a regular constant.
+    if (parser.parseAttribute(constituentAttr, Type(), attrName, attrs))
       return failure();
 
-    constituents.push_back(specConstRef);
+    constituents.push_back(constituentAttr);
   } while (!parser.parseOptionalComma());
 
   if (parser.parseRParen())
@@ -1942,25 +1944,36 @@ LogicalResult spirv::SpecConstantCompositeOp::verify() {
            << constituents.size();
 
   for (auto index : llvm::seq<uint32_t>(0, constituents.size())) {
-    auto constituent = cast<FlatSymbolRefAttr>(constituents[index]);
-
-    Operation *constituentOp = SymbolTable::lookupNearestSymbolFrom(
-        (*this)->getParentOp(), constituent.getAttr());
-
-    if (!constituentOp)
-      return emitError("unknown constituent symbol ") << constituent.getAttr();
-
     Type constituentType;
-    if (auto specConstOp = dyn_cast<spirv::SpecConstantOp>(constituentOp)) {
-      constituentType = specConstOp.getDefaultValue().getType();
-    } else if (auto specConstCompositeOp =
-                   dyn_cast<spirv::SpecConstantCompositeOp>(constituentOp)) {
-      constituentType = specConstCompositeOp.getType();
+
+    if (auto constituent = dyn_cast<FlatSymbolRefAttr>(constituents[index])) {
+      Operation *constituentOp = SymbolTable::lookupNearestSymbolFrom(
+          (*this)->getParentOp(), constituent.getAttr());
+
+      if (!constituentOp)
+        return emitError("unknown constituent symbol ")
+               << constituent.getAttr();
+
+      if (auto specConstOp = dyn_cast<spirv::SpecConstantOp>(constituentOp)) {
+        constituentType = specConstOp.getDefaultValue().getType();
+      } else if (auto specConstCompositeOp =
+                     dyn_cast<spirv::SpecConstantCompositeOp>(constituentOp)) {
+        constituentType = specConstCompositeOp.getType();
+      } else {
+        return emitError("unsupported constituent ")
+               << constituent.getAttr()
+               << ": must reference a spirv.SpecConstant or "
+                  "spirv.SpecConstantComposite";
+      }
     } else {
-      return emitError("unsupported constituent ")
-             << constituent.getAttr()
-             << ": must reference a spirv.SpecConstant or "
-                "spirv.SpecConstantComposite";
+      // A constituent that is not a symbol reference is an inline attribute
+      // holding the value of a regular (non-specialization) constant, e.g. a
+      // `mat2` spec constant's columns, which are ordinary constant vectors
+      // rather than individually specializable.
+      auto constituentAttr = dyn_cast<TypedAttr>(constituents[index]);
+      if (!constituentAttr)
+        return emitError("unsupported constituent ") << constituents[index];
+      constituentType = constituentAttr.getType();
     }
 
     if (constituentType != cType.getElementType(index))
