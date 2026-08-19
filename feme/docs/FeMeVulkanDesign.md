@@ -1934,13 +1934,27 @@ recognizes the index type's all-1-bits value, excludes that lane from the
 vertex-attribute fetch (it is not a real vertex, and its raw index is not a
 valid array offset), and splits triangle assembly into independent strip
 segments at each restart marker, each starting its own front/back winding
-parity exactly as an unindexed strip would.
+parity exactly as an unindexed strip would. `vkCmdBlitImage`
+(`ImageOps.cpp`'s `runBlitImage`) also converts between differing formats
+and mirrors a region along either axis (or both) now: the same
+`unpackColor`/`packClearColor` central pack table the bilinear filter
+already used for its four-neighbor weighting is now used for the nearest
+filter too whenever the two images' formats differ (a same-format nearest
+blit keeps its raw-byte-copy fast path), and every blit region's corners
+are read as signed, independently-orderable extents -- a destination
+texel's fractional position within its own rectangle names the
+correspondingly-interpolated position between the source rectangle's own
+two corners, so a reversed source or destination corner order mirrors that
+axis without a separate code path.
 
 *Also deferred.* The pipeline cache carries no graphics entry: its key would
 have to cover the normalized pipeline description and the render-target
 binding as well as both stages' SPIR-V, and a key covering less is worse than
-none. A blit does not convert between formats (it requires a matching one)
-and cannot mirror a region or blit a multisample image. No CTS run happened
+none. A blit now converts between differing formats and mirrors a region
+(see the next paragraph); it still cannot blit a multisample image, but
+that is not a narrower deviation -- real Vulkan itself requires
+`VK_SAMPLE_COUNT_1_BIT` on both images for `vkCmdBlitImage` and provides
+`vkCmdResolveImage` for the multisample case instead. No CTS run happened
 in this pass: `deqp-vk` was not available in this environment, exactly as V4
 recorded for its own CTS bullet -- so this milestone still does not carry
 Vulkan CTS coverage. The lavapipe half of "match lavapipe for every format

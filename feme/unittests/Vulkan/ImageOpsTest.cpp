@@ -144,20 +144,62 @@ TEST_F(ImageOpsTest, BlitsNearest) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
-/// A blit between differing formats has no conversion path, so it fails
-/// rather than reinterpreting bytes.
-TEST_F(ImageOpsTest, RejectsFormatConvertingBlit) {
-  VkImage Src = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM);
-  VkImage Dst = createImage(2, 2, VK_FORMAT_R32G32B32A32_SFLOAT);
+/// A blit between differing formats converts through the same unpack/pack
+/// path the bilinear filter always used, rather than reinterpreting bytes.
+TEST_F(ImageOpsTest, ConvertsFormatDuringBlit) {
+  VkImage Src = createImage(1, 1, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage(1, 1, VK_FORMAT_R32G32B32A32_SFLOAT);
+  std::array<uint8_t, 4> SrcTexel{0x80, 0x40, 0x00, 0xFF};
+  std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, 0, 0, 0),
+              SrcTexel.data(), 4);
+
   VkImageBlit Region{};
   Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
   Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  Region.srcOffsets[1] = {2, 2, 1};
-  Region.dstOffsets[1] = {2, 2, 1};
-  llvm::Error E = runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
-                               Region, VK_FILTER_NEAREST);
-  EXPECT_TRUE(static_cast<bool>(E));
-  llvm::consumeError(std::move(E));
+  Region.srcOffsets[1] = {1, 1, 1};
+  Region.dstOffsets[1] = {1, 1, 1};
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+
+  std::array<float, 4> DstTexel{};
+  std::memcpy(DstTexel.data(),
+              fromHandle<Image>(Dst)->texelPointer(0, 0, 0, 0, 0),
+              sizeof(DstTexel));
+  EXPECT_NEAR(DstTexel[0], 0x80 / 255.0f, 1e-6f);
+  EXPECT_NEAR(DstTexel[1], 0x40 / 255.0f, 1e-6f);
+  EXPECT_NEAR(DstTexel[2], 0.0f, 1e-6f);
+  EXPECT_NEAR(DstTexel[3], 1.0f, 1e-6f);
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Opposite-corner offsets on an axis mirror a blit along that axis.
+TEST_F(ImageOpsTest, MirrorsBlitRegion) {
+  VkImage Src = createImage(2, 1, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage(2, 1, VK_FORMAT_R8G8B8A8_UNORM);
+  std::array<uint8_t, 4> Left{0x00, 0x00, 0x00, 0xFF};
+  std::array<uint8_t, 4> Right{0xFF, 0xFF, 0xFF, 0xFF};
+  std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, 0, 0, 0), Left.data(),
+              4);
+  std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, 1, 0, 0), Right.data(),
+              4);
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  // A mirrored source: srcOffsets run from (2, 1) down to (0, 0).
+  Region.srcOffsets[0] = {2, 1, 0};
+  Region.srcOffsets[1] = {0, 0, 1};
+  Region.dstOffsets[1] = {2, 1, 1};
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+
+  // The mirrored blit flips the row: the source's white right texel now
+  // lands on the destination's left, and vice versa.
+  EXPECT_EQ(texel(Dst, 0, 0)[0], 0xFF);
+  EXPECT_EQ(texel(Dst, 1, 0)[0], 0x00);
+
   vkDestroyImage(Device, Src, nullptr);
   vkDestroyImage(Device, Dst, nullptr);
 }

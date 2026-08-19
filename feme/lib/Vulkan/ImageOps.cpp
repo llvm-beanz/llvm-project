@@ -96,9 +96,10 @@ Error clearImageRanges(Image *Img, const VkClearValue &Value,
   return Error::success();
 }
 
-/// The two images a blit/resolve names must agree on format and be bound;
-/// neither operation converts between formats (see "Texture layout and
-/// formats" in feme/docs/FeMeGraphicsDesign.md for the conversion scope).
+/// The two images a resolve names must agree on format and be bound; a
+/// resolve, unlike a blit, does not convert between formats (see "Texture
+/// layout and formats" in feme/docs/FeMeGraphicsDesign.md for the
+/// conversion scope).
 Error checkImagePair(Image *Src, Image *Dst, const char *What) {
   if (!Src || !Dst || !Src->isBound() || !Dst->isBound())
     return createStringError(inconvertibleErrorCode(),
@@ -110,10 +111,11 @@ Error checkImagePair(Image *Src, Image *Dst, const char *What) {
   return Error::success();
 }
 
-/// Whether \p Offsets describes a region this driver can address: no
-/// mirroring (a negative extent) and no 3D depth range beyond one slice.
+/// Whether \p Offsets describes a region this driver can address: a
+/// nonzero extent on X and Y (their sign selects mirroring, handled by the
+/// caller) and no 3D depth range beyond one slice.
 bool isSimpleRegion(const VkOffset3D Offsets[2]) {
-  return Offsets[1].x > Offsets[0].x && Offsets[1].y > Offsets[0].y &&
+  return Offsets[1].x != Offsets[0].x && Offsets[1].y != Offsets[0].y &&
          Offsets[1].z - Offsets[0].z == 1;
 }
 
@@ -198,10 +200,22 @@ Error runClearAttachments(const RenderTargetBinding &Binding,
   return Error::success();
 }
 
+/// The two images a blit names must be bound; a blit, unlike a copy or
+/// resolve, is explicitly permitted to convert between formats.
+Error checkBlitImagePair(Image *Src, Image *Dst) {
+  if (!Src || !Dst || !Src->isBound() || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "a blit image is not bound to memory");
+  return Error::success();
+}
+
 Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
                    VkFilter Filter) {
-  if (Error E = checkImagePair(Src, Dst, "blit"))
+  if (Error E = checkBlitImagePair(Src, Dst))
     return E;
+  // Real Vulkan itself disallows a multisample source or destination for
+  // vkCmdBlitImage (`vkCmdResolveImage` exists for that); this is not a
+  // narrower deviation.
   if (Src->sampleCount() != 1 || Dst->sampleCount() != 1)
     return createStringError(inconvertibleErrorCode(),
                              "blitting a multisample image is not "
@@ -210,27 +224,36 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     return createStringError(inconvertibleErrorCode(),
                              "only nearest and linear blit filters are "
                              "implemented");
-  uint32_t TexelSize = formatElementSize(Src->format());
+  uint32_t SrcTexelSize = formatElementSize(Src->format());
+  uint32_t DstTexelSize = formatElementSize(Dst->format());
+  // A same-format nearest blit copies raw bytes verbatim (no unpack/repack
+  // rounding); anything else goes through the central pack table, exactly
+  // as the bilinear path always has.
+  bool SameFormat = Src->format() == Dst->format();
 
   for (const VkImageBlit &Region : Regions) {
     if (!isSimpleRegion(Region.srcOffsets) ||
         !isSimpleRegion(Region.dstOffsets))
       return createStringError(inconvertibleErrorCode(),
-                               "a mirrored or multi-slice blit region is not "
-                               "implemented");
+                               "a multi-slice blit region is not implemented");
     uint32_t SrcLevel = Region.srcSubresource.mipLevel;
     uint32_t DstLevel = Region.dstSubresource.mipLevel;
     if (SrcLevel >= Src->mipLevels() || DstLevel >= Dst->mipLevels())
       return createStringError(inconvertibleErrorCode(),
                                "a blit region names a mip level out of range");
-    uint32_t SrcWidth =
-        uint32_t(Region.srcOffsets[1].x - Region.srcOffsets[0].x);
-    uint32_t SrcHeight =
-        uint32_t(Region.srcOffsets[1].y - Region.srcOffsets[0].y);
-    uint32_t DstWidth =
-        uint32_t(Region.dstOffsets[1].x - Region.dstOffsets[0].x);
-    uint32_t DstHeight =
-        uint32_t(Region.dstOffsets[1].y - Region.dstOffsets[0].y);
+    // Signed corner-to-corner extents: a negative one mirrors that axis
+    // ("Blits" in feme/docs/FeMeVulkanDesign.md), matching Vulkan's own
+    // "opposite corners flip the region" rule.
+    int64_t SrcX0 = Region.srcOffsets[0].x, SrcX1 = Region.srcOffsets[1].x;
+    int64_t SrcY0 = Region.srcOffsets[0].y, SrcY1 = Region.srcOffsets[1].y;
+    int64_t DstX0 = Region.dstOffsets[0].x, DstX1 = Region.dstOffsets[1].x;
+    int64_t DstY0 = Region.dstOffsets[0].y, DstY1 = Region.dstOffsets[1].y;
+    int64_t SrcMinX = std::min(SrcX0, SrcX1), SrcMaxX = std::max(SrcX0, SrcX1);
+    int64_t SrcMinY = std::min(SrcY0, SrcY1), SrcMaxY = std::max(SrcY0, SrcY1);
+    uint32_t DstWidth = uint32_t(std::abs(DstX1 - DstX0));
+    uint32_t DstHeight = uint32_t(std::abs(DstY1 - DstY0));
+    int64_t DstStepX = DstX1 >= DstX0 ? 1 : -1;
+    int64_t DstStepY = DstY1 >= DstY0 ? 1 : -1;
     uint32_t LayerCount = std::min(Region.srcSubresource.layerCount,
                                    Region.dstSubresource.layerCount);
 
@@ -239,30 +262,53 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
       uint32_t DstLayer = Region.dstSubresource.baseArrayLayer + Layer;
       for (uint32_t Y = 0; Y != DstHeight; ++Y) {
         for (uint32_t X = 0; X != DstWidth; ++X) {
-          // Sample the source region at this destination texel's center,
-          // the same convention both APIs specify for a blit.
-          double U = (X + 0.5) * SrcWidth / DstWidth;
-          double V = (Y + 0.5) * SrcHeight / DstHeight;
-          uint32_t DstX = uint32_t(Region.dstOffsets[0].x) + X;
-          uint32_t DstY = uint32_t(Region.dstOffsets[0].y) + Y;
-          void *DstTexel = Dst->texelPointer(DstLevel, DstLayer, DstX, DstY,
+          // Interpolate the destination texel's fraction across [0, 1] of
+          // the destination rectangle, then find the source-space position
+          // that same fraction names between the source rectangle's own
+          // two (possibly reversed) corners -- one formula for every
+          // combination of mirrored/unmirrored source and destination.
+          double Tx = (X + 0.5) / DstWidth;
+          double Ty = (Y + 0.5) / DstHeight;
+          double U = SrcX0 + Tx * (SrcX1 - SrcX0);
+          double V = SrcY0 + Ty * (SrcY1 - SrcY0);
+          int64_t DstX = DstX0 + int64_t(X) * DstStepX;
+          int64_t DstY = DstY0 + int64_t(Y) * DstStepY;
+          void *DstTexel = Dst->texelPointer(DstLevel, DstLayer, uint32_t(DstX),
+                                             uint32_t(DstY),
                                              uint32_t(Region.dstOffsets[0].z));
 
           auto srcTexel = [&](int64_t SX, int64_t SY) {
-            SX = std::clamp<int64_t>(SX, 0, int64_t(SrcWidth) - 1);
-            SY = std::clamp<int64_t>(SY, 0, int64_t(SrcHeight) - 1);
-            return Src->texelPointer(SrcLevel, SrcLayer,
-                                     uint32_t(Region.srcOffsets[0].x + SX),
-                                     uint32_t(Region.srcOffsets[0].y + SY),
+            SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
+            SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
+            return Src->texelPointer(SrcLevel, SrcLayer, uint32_t(SX),
+                                     uint32_t(SY),
                                      uint32_t(Region.srcOffsets[0].z));
           };
 
           if (Filter == VK_FILTER_NEAREST) {
-            std::memcpy(DstTexel, srcTexel(int64_t(U), int64_t(V)), TexelSize);
+            if (SameFormat) {
+              std::memcpy(DstTexel, srcTexel(int64_t(U), int64_t(V)),
+                          SrcTexelSize);
+              continue;
+            }
+            std::array<double, 4> Sample{};
+            if (Error E = feme::graphics::unpackColor(
+                    Src->format(),
+                    ArrayRef<uint8_t>(static_cast<const uint8_t *>(
+                                          srcTexel(int64_t(U), int64_t(V))),
+                                      SrcTexelSize),
+                    Sample))
+              return E;
+            MutableArrayRef<uint8_t> Out(static_cast<uint8_t *>(DstTexel),
+                                         DstTexelSize);
+            if (Error E =
+                    feme::graphics::packClearColor(Dst->format(), Sample, Out))
+              return E;
             continue;
           }
 
-          // Bilinear: unpack the four neighbors, weight them, repack.
+          // Bilinear: unpack the four neighbors, weight them, repack into
+          // the destination's own format.
           double FX = U - 0.5, FY = V - 0.5;
           int64_t X0 = int64_t(std::floor(FX)), Y0 = int64_t(std::floor(FY));
           double WX = FX - X0, WY = FY - Y0;
@@ -278,16 +324,16 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
                     ArrayRef<uint8_t>(
                         static_cast<const uint8_t *>(
                             srcTexel(Neighbors[N].first, Neighbors[N].second)),
-                        TexelSize),
+                        SrcTexelSize),
                     Sample))
               return E;
             for (unsigned C = 0; C != 4; ++C)
               Accum[C] += Sample[C] * Weights[N];
           }
           MutableArrayRef<uint8_t> Out(static_cast<uint8_t *>(DstTexel),
-                                       TexelSize);
+                                       DstTexelSize);
           if (Error E =
-                  feme::graphics::packClearColor(Src->format(), Accum, Out))
+                  feme::graphics::packClearColor(Dst->format(), Accum, Out))
             return E;
         }
       }
