@@ -90,5 +90,5 @@ flesh that out now?
 
 I'm currently seeing the error:
 ```
-feme: 'dx.op.textureLoad.f32' is not supported when targeting 'amdgpu9.0a-amd-amdhsa' (used in function 'main')
+feme: 'dx.op.dot.v2f32' is not supported when targeting 'amdgpu9.0a-amd-amdhsa' (used in function 'main')
 ```
