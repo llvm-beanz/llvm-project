@@ -285,6 +285,47 @@ public:
   }
 };
 
+/// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
+/// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
+/// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
+/// `llvm.dx.fdot` intrinsic on the DXIL side (see
+/// feme/lib/Transforms/DXIL/IntrinsicExpansion.cpp): both take two same-width
+/// float vectors and reduce them to a single scalar with the same
+/// fused-multiply-add semantics, just at different points in the pipeline.
+class DotConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::DotOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<mlir::spirv::DotOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::DotOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Vector1 = Adaptor.getVector1();
+    mlir::Value Vector2 = Adaptor.getVector2();
+    auto VectorType = mlir::cast<mlir::VectorType>(Vector1.getType());
+    int64_t NumElements = VectorType.getNumElements();
+
+    auto ExtractElement = [&](mlir::Value Vector, int64_t Index) {
+      mlir::Value IndexValue =
+          mlir::LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI64Type(),
+                                         Rewriter.getI64IntegerAttr(Index));
+      return mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Vector,
+                                                  IndexValue);
+    };
+
+    mlir::Value Result = mlir::LLVM::FMulOp::create(
+        Rewriter, Loc, ExtractElement(Vector1, 0), ExtractElement(Vector2, 0));
+    for (int64_t I = 1; I != NumElements; ++I)
+      Result = mlir::LLVM::FMulAddOp::create(
+          Rewriter, Loc, ExtractElement(Vector1, I), ExtractElement(Vector2, I),
+          Result);
+
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Replaces `spirv.mlir.addressof` of a builtin input variable with the
 /// `llvm.spv.*` intrinsic reading it. There is no LLVM global to take the
 /// address of: LLVM's SPIRV backend synthesizes the `OpVariable`, and its
@@ -1923,17 +1964,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables) {
-  Patterns
-      .add<ArrayConstantPattern, BuiltInAddressOfPattern,
-           BuiltInGlobalVariablePattern, BlockAccessChainPattern,
-           CompositeConstructPattern, ExecutionModePattern, ImageFetchPattern,
-           ImageFetchLodPattern, ImageSampleExplicitLodPattern,
-           ImageSampleImplicitLodPattern, ImageQuerySizePattern,
-           ImageReadPattern, ImageWritePattern, LoadValuePattern,
-           MatrixCompositeExtractPattern, MatrixCompositeInsertPattern,
-           PushConstantGlobalVariablePattern, SampledImagePattern,
-           StageIOGlobalVariablePattern, SwitchConversionPattern>(
-          Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
+               BuiltInGlobalVariablePattern, BlockAccessChainPattern,
+               CompositeConstructPattern, DotConversionPattern,
+               ExecutionModePattern, ImageFetchPattern, ImageFetchLodPattern,
+               ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
+               ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
+               LoadValuePattern, MatrixCompositeExtractPattern,
+               MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
+               SampledImagePattern, StageIOGlobalVariablePattern,
+               SwitchConversionPattern>(Patterns.getContext(), TypeConverter,
+                                        FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
