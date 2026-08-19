@@ -110,6 +110,17 @@ struct Binding {
   /// this from the bound resource descriptor itself, which a flat AMDGPU
   /// kernel argument list has no equivalent of.
   unsigned NumAuxArgs = 0;
+  /// Extra `i32` kernel arguments this binding needs for a `dx.Texture`
+  /// `GetDimensions` access -- 0 if the binding has none, 1 if every access
+  /// only reads width (`llvm.dx.resource.getdimensions.x`), 2 if any reads
+  /// width and height together (`.xy`). Appended immediately after
+  /// \c NumAuxArgs's own stride arguments, distinct from them: a stride is a
+  /// row/slice *pitch*, which this flat model assumes (but does not
+  /// require) equals the texture's actual width -- see
+  /// `lowerDXTextureAccess`'s comment -- so `GetDimensions` gets its own,
+  /// unambiguous width/height values from the host rather than reusing the
+  /// addressing stride's.
+  unsigned NumDimensionArgs = 0;
   SmallVector<CallInst *, 2> Handles;
 
   bool operator<(const Binding &Other) const {
@@ -174,11 +185,13 @@ unsigned getTextureCoordComponents(dxil::ResourceKind Dim) {
 /// (multiple uses, a store that uses it as the *stored* value, ...) is more
 /// than a single element access, which this pass does not attempt to reason
 /// about. A `dx.Texture` handle's `llvm.dx.resource.load.level`/
-/// `.store.texture` calls need no such per-use check: by the time this pass
-/// runs, `feme::dxil::OpRaisingPass` has already reassembled the whole
-/// element vector on both sides (`replaceResRetExtracts`/the `insertelement`
-/// chain `raiseTextureStore` builds), so the handle's own use is simply
-/// "resource operand of one of those two calls". A `dx.CBuffer` handle's
+/// `.store.texture`/`.getdimensions.x`/`.xy` calls need no such per-use
+/// check: by the time this pass runs, `feme::dxil::OpRaisingPass` has
+/// already reassembled the whole element vector on both sides
+/// (`replaceResRetExtracts`/the `insertelement` chain `raiseTextureStore`
+/// builds, or the `extractelement`s `raiseGetDimensions` builds for
+/// `.xy`), so the handle's own use is simply "resource operand of one of
+/// those calls". A `dx.CBuffer` handle's
 /// `llvm.dx.resource.load.cbufferrow.*` call result, in contrast, is left
 /// as a set of per-field `extractvalue`s (see `raiseCBufferLoadLegacy`'s own
 /// comment for why), so those need the same "only extractvalue" check a
@@ -210,7 +223,9 @@ bool hasOnlySupportedUses(const CallInst &HandleCI, const ResourceOps &Ops) {
     if (Ops.Family == ResourceFamily::DXTexture) {
       Intrinsic::ID ID = getIntrinsicID(CI);
       if ((ID != Intrinsic::dx_resource_load_level &&
-           ID != Intrinsic::dx_resource_store_texture) ||
+           ID != Intrinsic::dx_resource_store_texture &&
+           ID != Intrinsic::dx_resource_getdimensions_x &&
+           ID != Intrinsic::dx_resource_getdimensions_xy) ||
           CI->getArgOperand(0) != &HandleCI)
         return false;
       continue;
@@ -284,6 +299,28 @@ Type *getElementType(const CallInst &HandleCI, const ResourceOps &Ops) {
   return nullptr;
 }
 
+/// Returns the number of `i32` `GetDimensions` kernel arguments
+/// \p HandleCI's `GetDimensions` accesses (if any) need: 0 if it has none,
+/// 1 if every one only reads width (`llvm.dx.resource.getdimensions.x`), 2
+/// if any reads width and height together (`.xy`) -- see
+/// `Binding::NumDimensionArgs`'s comment.
+unsigned getNumDimensionArgs(const CallInst &HandleCI) {
+  unsigned NumDimensionArgs = 0;
+  for (const User *U : HandleCI.users()) {
+    switch (getIntrinsicID(cast<CallInst>(U))) {
+    case Intrinsic::dx_resource_getdimensions_x:
+      NumDimensionArgs = std::max(NumDimensionArgs, 1u);
+      break;
+    case Intrinsic::dx_resource_getdimensions_xy:
+      NumDimensionArgs = std::max(NumDimensionArgs, 2u);
+      break;
+    default:
+      break;
+    }
+  }
+  return NumDimensionArgs;
+}
+
 /// Collects the resource bindings \p F uses, or `std::nullopt` if any of them
 /// is one this pass cannot model (see ResourceLoweringPass's class comment).
 /// Bindings are returned in a deterministic (space, register) order, which is
@@ -315,12 +352,14 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
       return std::nullopt;
 
     unsigned NumAuxArgs = 0;
+    unsigned NumDimensionArgs = 0;
     if (Ops->Family == ResourceFamily::DXTexture) {
       unsigned NumCoords = getTextureCoordComponents(
           cast<dxil::TextureExtType>(HandleTy)->getDimension());
       if (NumCoords == 0)
         return std::nullopt;
       NumAuxArgs = NumCoords - 1;
+      NumDimensionArgs = getNumDimensionArgs(*CI);
     }
     bool IsUAV = (Ops->Family == ResourceFamily::DX ||
                   Ops->Family == ResourceFamily::DXTexture) &&
@@ -346,6 +385,8 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
       // need two differently-typed pointers for one resource.
       if (Existing->ElementType != ElementType)
         return std::nullopt;
+      Existing->NumDimensionArgs =
+          std::max(Existing->NumDimensionArgs, NumDimensionArgs);
       Existing->Handles.push_back(CI);
       continue;
     }
@@ -357,6 +398,7 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
     NewBinding.IsUAV = IsUAV;
     NewBinding.ElementType = ElementType;
     NewBinding.NumAuxArgs = NumAuxArgs;
+    NewBinding.NumDimensionArgs = NumDimensionArgs;
     NewBinding.Handles.push_back(CI);
     Bindings.push_back(std::move(NewBinding));
   }
@@ -369,9 +411,12 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
 /// `ptr addrspace(1)` parameter per entry of \p Bindings, each immediately
 /// followed by that binding's own `Binding::NumAuxArgs` trailing `i32`
 /// stride arguments (nonzero only for a multi-dimensional `dx.Texture`
-/// binding -- see `Binding::NumAuxArgs`'s comment). The body is moved
-/// across rather than cloned, so every instruction (including the handle
-/// calls recorded in \p Bindings) stays valid and belongs to the new
+/// binding -- see `Binding::NumAuxArgs`'s comment), in turn followed by
+/// `Binding::NumDimensionArgs` trailing `i32` `GetDimensions` arguments
+/// (nonzero only for a `dx.Texture` binding some access queries the
+/// dimensions of -- see `Binding::NumDimensionArgs`'s comment). The body is
+/// moved across rather than cloned, so every instruction (including the
+/// handle calls recorded in \p Bindings) stays valid and belongs to the new
 /// function afterwards.
 Function *addBindingArguments(Function &F, ArrayRef<Binding> Bindings) {
   SmallVector<Type *, 8> ParamTypes(F.getFunctionType()->params());
@@ -380,6 +425,7 @@ Function *addBindingArguments(Function &F, ArrayRef<Binding> Bindings) {
   for (const Binding &B : Bindings) {
     ParamTypes.push_back(PtrTy);
     ParamTypes.append(B.NumAuxArgs, Int32Ty);
+    ParamTypes.append(B.NumDimensionArgs, Int32Ty);
   }
 
   FunctionType *NewTy = FunctionType::get(F.getReturnType(), ParamTypes,
@@ -407,6 +453,12 @@ Function *addBindingArguments(Function &F, ArrayRef<Binding> Bindings) {
       raw_svector_ostream(AuxName)
           << Name << ".stride" << I;
       AuxArg.setName(AuxName);
+    }
+    for (unsigned I = 0; I != B.NumDimensionArgs; ++I) {
+      Argument &DimArg = *(NewF->arg_begin() + ArgIndex++);
+      SmallString<32> DimName;
+      raw_svector_ostream(DimName) << Name << ".dim" << I;
+      DimArg.setName(DimName);
     }
   }
 
@@ -468,23 +520,47 @@ void lowerSPIRVAccess(CallInst &Access, Value *Ptr, Type *ElementType) {
   Access.eraseFromParent();
 }
 
-/// Rewrites a `llvm.dx.resource.load.level`/`.store.texture` call \p Access
-/// into an ordinary, aligned load/store of a flat-addressed element of
-/// \p Ptr: \p Access's coordinate operand (a vector for a multi-dimensional
-/// texture, a scalar for a 1D one, per `packTextureVector` in OpRaising.cpp)
-/// is decomposed back into its scalar components, and linearized against
-/// \p Strides (one flat-addressing stride per coordinate beyond the first --
-/// e.g. a `Texture2D`'s row pitch in texels, a `Texture3D`'s additional
-/// slice pitch) the same way an ordinary row-major array index would be:
-/// `coord0 + coord1*Strides[0] + coord2*Strides[1] + ...`. The mip level
-/// operand `load.level` carries (always 0 for a compute shader's
-/// `RWTexture*`/non-mipmapped `Texture*::Load`, which is what this pass is
-/// reached for -- see `ResourceLoweringPass`'s class comment) is not
-/// otherwise consulted: addressing a specific mip would need that level's
-/// own (smaller) strides, which nothing yet supplies.
+/// Rewrites a `llvm.dx.resource.load.level`/`.store.texture`/
+/// `.getdimensions.x`/`.xy` call \p Access. A load/store's coordinate
+/// operand (a vector for a multi-dimensional texture, a scalar for a 1D
+/// one, per `packTextureVector` in OpRaising.cpp) is decomposed back into
+/// its scalar components, and linearized against \p Strides (one
+/// flat-addressing stride per coordinate beyond the first -- e.g. a
+/// `Texture2D`'s row pitch in texels, a `Texture3D`'s additional slice
+/// pitch) the same way an ordinary row-major array index would be:
+/// `coord0 + coord1*Strides[0] + coord2*Strides[1] + ...`, then rewritten
+/// into an ordinary, aligned load/store of that flat-addressed element of
+/// \p Ptr. The mip level operand `load.level` carries (always 0 for a
+/// compute shader's `RWTexture*`/non-mipmapped `Texture*::Load`, which is
+/// what this pass is reached for -- see `ResourceLoweringPass`'s class
+/// comment) is not otherwise consulted: addressing a specific mip would
+/// need that level's own (smaller) strides, which nothing yet supplies. A
+/// `getdimensions.x`/`.xy` call instead simply reads \p Dims -- the
+/// binding's own dedicated `GetDimensions` kernel arguments (see
+/// `Binding::NumDimensionArgs`'s comment) -- directly: `.x` replaces the
+/// call with `Dims[0]`, `.xy` packs `Dims[0]`/`Dims[1]` into the `<2 x i32>`
+/// it returns.
 void lowerDXTextureAccess(CallInst &Access, Value *Ptr, Type *ElementType,
-                          ArrayRef<Value *> Strides, Align Alignment) {
+                          ArrayRef<Value *> Strides, ArrayRef<Value *> Dims,
+                          Align Alignment) {
   IRBuilder<> Builder(&Access);
+
+  Intrinsic::ID ID = getIntrinsicID(&Access);
+  if (ID == Intrinsic::dx_resource_getdimensions_x) {
+    Access.replaceAllUsesWith(Dims[0]);
+    Access.eraseFromParent();
+    return;
+  }
+  if (ID == Intrinsic::dx_resource_getdimensions_xy) {
+    Value *Result = Builder.CreateInsertElement(
+        PoisonValue::get(FixedVectorType::get(Builder.getInt32Ty(), 2)),
+        Dims[0], Builder.getInt32(0));
+    Result = Builder.CreateInsertElement(Result, Dims[1], Builder.getInt32(1));
+    Access.replaceAllUsesWith(Result);
+    Access.eraseFromParent();
+    return;
+  }
+
   Value *Coord = Access.getArgOperand(1);
   SmallVector<Value *, 3> Components;
   if (auto *VecTy = dyn_cast<FixedVectorType>(Coord->getType())) {
@@ -501,7 +577,7 @@ void lowerDXTextureAccess(CallInst &Access, Value *Ptr, Type *ElementType,
         Index, Builder.CreateMul(Components[I], Strides[I - 1]));
   Value *Elem = Builder.CreateGEP(ElementType, Ptr, Index);
 
-  if (getIntrinsicID(&Access) == Intrinsic::dx_resource_store_texture) {
+  if (ID == Intrinsic::dx_resource_store_texture) {
     Builder.CreateAlignedStore(Access.getArgOperand(2), Elem, Alignment);
   } else {
     Value *Loaded = Builder.CreateAlignedLoad(ElementType, Elem, Alignment);
@@ -539,11 +615,13 @@ void lowerDXCBufferAccess(CallInst &Access, Value *Ptr, Type *ElementType,
 }
 
 /// Rewrites every typed buffer/texture/cbuffer access through \p Handle into
-/// ordinary loads/stores of \p Ptr (plus \p Strides, for a `dx.Texture`
-/// binding of more than one coordinate dimension -- see
-/// `Binding::NumAuxArgs`).
+/// ordinary loads/stores of \p Ptr (plus \p Strides/\p Dims, for a
+/// `dx.Texture` binding of more than one coordinate dimension, or with a
+/// `GetDimensions` access, respectively -- see `Binding::NumAuxArgs`/
+/// `Binding::NumDimensionArgs`).
 void lowerHandleAccesses(CallInst &Handle, const ResourceOps &Ops, Value *Ptr,
-                         Type *ElementType, ArrayRef<Value *> Strides) {
+                         Type *ElementType, ArrayRef<Value *> Strides,
+                         ArrayRef<Value *> Dims) {
   const DataLayout &DL = Handle.getModule()->getDataLayout();
   Align Alignment = DL.getABITypeAlign(ElementType);
 
@@ -557,7 +635,8 @@ void lowerHandleAccesses(CallInst &Handle, const ResourceOps &Ops, Value *Ptr,
       lowerSPIRVAccess(*Access, Ptr, ElementType);
       break;
     case ResourceFamily::DXTexture:
-      lowerDXTextureAccess(*Access, Ptr, ElementType, Strides, Alignment);
+      lowerDXTextureAccess(*Access, Ptr, ElementType, Strides, Dims,
+                           Alignment);
       break;
     case ResourceFamily::DXCBuffer:
       lowerDXCBufferAccess(*Access, Ptr, ElementType, Alignment);
@@ -582,14 +661,17 @@ Function *lowerFunctionResources(Function &F) {
 
   unsigned ArgIndex = NewF->arg_size();
   for (const Binding &B : *Bindings)
-    ArgIndex -= 1 + B.NumAuxArgs;
+    ArgIndex -= 1 + B.NumAuxArgs + B.NumDimensionArgs;
   for (const Binding &B : *Bindings) {
     Value *Ptr = NewF->arg_begin() + ArgIndex++;
     SmallVector<Value *, 2> Strides;
     for (unsigned I = 0; I != B.NumAuxArgs; ++I)
       Strides.push_back(NewF->arg_begin() + ArgIndex++);
+    SmallVector<Value *, 2> Dims;
+    for (unsigned I = 0; I != B.NumDimensionArgs; ++I)
+      Dims.push_back(NewF->arg_begin() + ArgIndex++);
     for (CallInst *Handle : B.Handles)
-      lowerHandleAccesses(*Handle, *B.Ops, Ptr, B.ElementType, Strides);
+      lowerHandleAccesses(*Handle, *B.Ops, Ptr, B.ElementType, Strides, Dims);
   }
   return NewF;
 }

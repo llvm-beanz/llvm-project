@@ -61,3 +61,35 @@ define half @cbuffer_row(i32 %idx) #0 {
 }
 
 attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="8,8,1" }
+
+; `GetDimensions`' raised `.x`/`.xy` accesses (`raiseGetDimensions` in
+; OpRaising.cpp) each get their own dedicated trailing `i32` kernel
+; argument(s) -- `Binding::NumDimensionArgs` -- appended after the binding's
+; own addressing stride argument (`Binding::NumAuxArgs`, always present for
+; a 2D `dx.Texture` binding regardless of whether it is also loaded/stored,
+; hence the unused `%dims_x.stride0`/`%dims_xy.stride0` below): a `.x`-only
+; access (`dims_x`) becomes a plain read of that one dedicated argument, and
+; an `.xy` access (`dims_xy`) packs its two dedicated arguments into the
+; `<2 x i32>` it returns.
+; CHECK: define i32 @dims_x(ptr addrspace(1) {{%.*}}, i32 {{%.*}}, i32 [[W:%.*]])
+; CHECK-NEXT: ret i32 [[W]]
+define i32 @dims_x() #0 {
+  %tex = call target("dx.Texture", <4 x half>, 0, 0, 1, 2)
+      @llvm.dx.resource.handlefrombinding.tdx.Texture_v4f16_0_0_1_2t(i32 0, i32 0, i32 1, i32 0, ptr null)
+  %w = call i32 @llvm.dx.resource.getdimensions.x.tdx.Texture_v4f16_0_0_1_2t(
+      target("dx.Texture", <4 x half>, 0, 0, 1, 2) %tex)
+  ret i32 %w
+}
+
+; CHECK: define <2 x i32> @dims_xy(ptr addrspace(1) {{%.*}}, i32 {{%.*}}, i32 [[W2:%.*]], i32 [[H2:%.*]])
+; CHECK-NEXT: [[V0:%.*]] = insertelement <2 x i32> poison, i32 [[W2]], i32 0
+; CHECK-NEXT: [[V1:%.*]] = insertelement <2 x i32> [[V0]], i32 [[H2]], i32 1
+; CHECK-NEXT: ret <2 x i32> [[V1]]
+define <2 x i32> @dims_xy() #0 {
+  %tex = call target("dx.Texture", <4 x half>, 1, 0, 1, 2)
+      @llvm.dx.resource.handlefrombinding.tdx.Texture_v4f16_1_0_1_2t(i32 0, i32 1, i32 1, i32 0, ptr null)
+  %d = call <2 x i32> @llvm.dx.resource.getdimensions.xy.tdx.Texture_v4f16_1_0_1_2t(
+      target("dx.Texture", <4 x half>, 1, 0, 1, 2) %tex)
+  ret <2 x i32> %d
+}
+
