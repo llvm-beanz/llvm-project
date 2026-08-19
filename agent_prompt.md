@@ -26,49 +26,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete the C4 milestone for Vulkan conformance?
+Your last changes are causing git to identify to LLVM IR test files as binary
+instead of text. Can you fix that?
 
-> **Graphics pipeline state breadth.** `mapTopology` beyond triangles (point,
-> line, line-strip, fan), `mapDynamicState` beyond its six states,
-> `FRONT_AND_BACK` culling, dual-source blend factors, and the sample counts
-> `isSupportedAttachmentSampleCount` declines. Every one of these is a
-> rasterizer/executor feature, not a translation gap, so this is really G-track
-> work surfaced by the Vulkan track. ~~**Sub-step C4a, do first and separately:
-> make every silent rejection diagnose itself.** A state-side rejection
-> currently emits nothing at all, so triaging this bucket means reading
-> `GraphicsPipeline.cpp` instead of the ICD's output~~ (C4a done:
-> `feme::vulkan::logCreationFailure` (`feme/lib/Vulkan/Diagnostics.h`/`.cpp`) is
-> the opt-in log callback FeMeVulkanDesign.md's "Error Handling and Security"
-> section already named ahead of it existing; `vkCreateGraphicsPipelines` calls
-> it instead of a bare `consumeError`, printing the discarded `llvm::Error`'s
-> message when `FEME_VULKAN_LOG_CREATION_ERRORS` is set in the host environment
-> and staying silent otherwise, so triaging a state-side rejection no longer
-> requires reading this file's source -- see FeMeVulkanDesign.md's updated
-> bullet for the full deviation note, including why an environment variable
-> rather than `VK_EXT_debug_utils` itself. C4b done in part:
-> `CullMode::FrontAndBack` (culls every primitive, matching
-> `VK_CULL_MODE_FRONT_AND_BACK`'s "no primitive of the pipeline's type is
-> rasterized" semantics) and 8x multisampling (`samplePositions`' documented
-> "mechanical, on-demand addition of another row" in `Executor.cpp`,
-> `isSupportedAttachmentSampleCount` in `RenderPass.cpp`, and the matching
-> `VK_SAMPLE_COUNT_8_BIT` advertisement in `PhysicalDeviceInfo.cpp`) are both
-> implemented and tested. ~~`mapDynamicState` beyond its six states... each
-> needs new rasterizer primitives... that are a materially larger, separate unit
-> of G-track work rather than a mechanical table addition~~ (C4c done, and this
-> framing turned out to be wrong for dynamic state specifically: every one of
-> `VK_EXT_extended_dynamic_state`'s 12 dynamic states -- cull mode, front face,
-> depth test/write/compare-op, depth-bounds-test-enable, stencil test-enable/op,
-> viewport/scissor "with count", primitive topology restricted to the triangle
-> class already implemented, and vertex-input-binding-stride via
-> `vkCmdBindVertexBuffers2EXT` -- already had a complete *static* path or a
-> bounded, mechanical extension of one before this milestone, so all 12 are now
-> implemented and the extension is advertised
-> (`feme/lib/Vulkan/{GraphicsPipeline,CommandBuffer,PhysicalDeviceInfo,EntryPoints}.{h,cpp}`,
-> `feme/utils/vk_gen_entrypoints.py`) -- see FeMeGraphicsDesign.md's updated
-> status note for the full per-state breakdown. `mapTopology` beyond
-> `TriangleList`/`TriangleStrip` and the dual-source blend factors remain open:
-> each needs new rasterizer primitives (point/line assembly and width, a second
-> fragment-stage color output) that are a materially larger, separate unit of
-> G-track work rather than a mechanical table addition -- see
-> FeMeGraphicsDesign.md's own status note for the deferred scope)
-
+The files are:
+ feme/test/Transforms/CPU/fragment-wrapper-stage-io.ll | Bin 1475 -> 1211 bytes
+ feme/test/Transforms/CPU/vertex-wrapper-stage-io.ll   | Bin 1273 -> 1009 bytes
