@@ -23193,3 +23193,107 @@ own "Roadmap C1: measured impact" section already lists as a pre-existing,
 unrelated crash -- i.e. not something this change introduced. Recorded
 this as a dated addendum in `VulkanCTSReport.md` rather than overwriting
 its carefully-built headline numbers with a lower-fidelity run.
+
+# Session: DXIL SM6.9 FDot (opcode 311) unsupported when targeting AMDGPU
+
+## Repro
+
+User's bilateral-filter compute shader (`Texture2D<half4>::Load`,
+`RWTexture2D<half4>` indexed store, a `cbuffer` of two `half`s, and a
+9x9 `[unroll]`ed loop nest calling HLSL's `dot()` on `half2`/`half3`
+vectors) compiled with:
+
+    dxc -T cs_6_9 shader.hlsl -Fo shader.dxil
+
+then fed straight into `feme --target=amdgcn-amd-amdhsa shader.dxil -o
+shader.o` failed cleanly (not actually an assert -- a diagnostic, same as
+every other "opcode not raised yet" case in this codebase) with:
+
+    feme: 'dx.op.dot.v2f32' is not supported when targeting
+    'amdgcn-amd-amdhsa' (used in function 'main')
+
+Root cause: `dxc -T cs_6_9` (shader model 6.9) emits a *new*, unified,
+arity-agnostic vector dot-product op -- DXIL opcode 311, `FDot`
+(`dx.op.dot.v2f32`/`dx.op.dot.v3f32`/...) -- in place of the older,
+arity-specific `Dot2`/`Dot3`/`Dot4` (opcodes 54-56)
+`feme::dxil::OpRaisingPass` already covered. `FDot` was simply missing
+from `OpRaisingPass`'s `DirectOps` table entirely, so it fell through to
+the generic "leave it as an unrecognized `dx.op.*` call" path, and hit
+`RaisedIRVerifier`'s "unsupported when targeting" diagnostic once the
+AMDGPU backend actually tried to select it.
+
+Confirmed LLVM's own DirectX backend (`llvm/include/llvm/IR/
+IntrinsicsDirectX.td`'s `int_dx_fdot`, already defined upstream for other
+purposes) never round-trips through opcode 311 at all in the *forward*
+direction: `DXILIntrinsicExpansion.cpp` unconditionally scalarizes
+`llvm.dx.fdot` into elementwise `fmul`/`fmuladd` before `DXILOpLowering`
+ever sees it, and there is no `DXILOp<311, ...>` entry in `DXIL.td` for it
+to lower to even if it didn't. So `llc` (targeting `dxil-...`) can never
+itself *produce* a `dx.op.dot` call for a round-trip test the way
+`dxil-raise-ops-roundtrip.ll` validates `Dot3` et al. against -- confirmed
+by hand: feeding a module with a raw `dx.op.dot.v2f32` call through `llc
+--filetype=obj` hits `DXILShaderFlags.cpp`'s own
+`!F->getName().starts_with("dx.op.")` assertion, since `llc`'s pipeline
+assumes it's starting from pre-lowering IR. This matches the existing
+precedent of `Dot2AddHalf`/`Dot4AddI8Packed`/`Dot4AddU8Packed` (opcodes
+162-164), which also have no roundtrip-test coverage for the same reason.
+
+## Fix (two small, separately-committed changes)
+
+1. `feme::dxil::OpRaisingPass`: added `{311, Intrinsic::dx_fdot, true}` to
+   the `DirectOps` table. `FDot` still fits the same generic, table-driven
+   `raiseCall` path every other entry uses -- the overload key is still
+   the first operand's type -- it just happens to take its two operand
+   *vectors* directly (matching `int_dx_fdot`'s own signature) rather than
+   `Dot2`..`Dot4`'s 2*N interleaved scalars.
+2. `feme::dxil::IntrinsicExpansionPass`: added `expandFDot`, mirroring
+   `expandDot`'s `fmuladd` chain but reading each lane via
+   `extractelement` instead of a separate scalar operand, so every
+   non-DXIL target (this pass runs whenever the destination isn't DXIL)
+   still only ever sees plain LLVM IR out of `llvm.dx.fdot`.
+
+Both required LLVM Coding Standards' "class/struct headers must compile
+standalone" -- `IntrinsicExpansion.cpp` needed a new `#include
+"llvm/IR/DerivedTypes.h"` for `FixedVectorType`, which it was previously
+getting transitively.
+
+## Tests
+
+- `dxil-raise-ops.ll`: hand-written `dx.op.dot.v2f16` (opcode 311) ->
+  `llvm.dx.fdot.v2f16` case, alongside the existing `Dot3` one, matching
+  this file's existing "hand-write already-lowered IR" precedent for
+  opcodes with no upstream round-trip (like `Dot2AddHalf`).
+- `dxil-expand-intrinsics.ll`: `llvm.dx.fdot.v3f16` -> `extractelement`/
+  `fmul`/`fmuladd` chain, matching `dot3_f32`'s existing shape.
+- `feme-dxil-to-amdgpu-dot.ll`: a genuine, from-scratch end-to-end test
+  through the real `feme` CLI targeting `amdgcn-amd-amdhsa`, feeding a
+  hand-written `dx.op.dot.v2f32` call (alongside already-idiomatic
+  `llvm.dx.resource.*`/`llvm.dx.thread.id` calls for the typed-buffer
+  store) through `llvm-as`'s raw-bitcode path (`test/Import/DXIL/
+  dxil-import.ll`'s precedent) rather than `llc`-producing a `DXContainer`,
+  since (per the root-cause investigation above) `llc` can never itself
+  produce this shape. Checks the resulting object is a real ELF
+  (`7f 45 4c 46`), the same shape `feme-dxil-to-amdgpu.ll` checks.
+
+Re-verified the user's *exact* original shader (real `dxc -T cs_6_9`
+output) compiles through the real `feme --target=amdgcn-amd-amdhsa`
+pipeline to a real AMDGPU ELF object with genuine ISA in it
+(`v_dot2acc_f32_f16`, etc., via `llvm-objdump -d --triple=amdgcn-amd-amdhsa`),
+where it previously failed with the diagnostic above.
+
+`ninja check-feme` (ccache + assertions already configured in `./build`):
+1490/1491 passed, 1 unsupported (pre-existing, unrelated), before and
+after.
+
+## Vulkan CTS
+
+This change is confined to `feme/lib/Transforms/DXIL/{OpRaising,
+IntrinsicExpansion}.cpp` -- neither reachable from `libfeme_vulkan` (the
+SPIR-V-import/`feme::cpu`/software-ICD path `VulkanCTSReport.md` measures):
+a SPIR-V-sourced module never lowers through `dx.op.*`/`llvm.dx.fdot` at
+all. Ran the same `dEQP-VK.api.info.*` smoke subset the `GetDimensions.xy`
+addendum used as a sanity check anyway: 5,669/10,484 passed, 84/10,484
+failed -- identical to that addendum's own numbers, zero crashes. Recorded
+as a new dated addendum in `VulkanCTSReport.md` rather than re-running (and
+overwriting) the full headline report, matching every prior out-of-path
+change's precedent in this file.
