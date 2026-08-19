@@ -1947,12 +1947,37 @@ correspondingly-interpolated position between the source rectangle's own
 two corners, so a reversed source or destination corner order mirrors that
 axis without a separate code path.
 
-*Also deferred.* The pipeline cache carries no graphics entry: its key would
-have to cover the normalized pipeline description and the render-target
-binding as well as both stages' SPIR-V, and a key covering less is worse than
-none. A blit now converts between differing formats and mirrors a region
-(see the next paragraph); it still cannot blit a multisample image, but
-that is not a narrower deviation -- real Vulkan itself requires
+*A narrower gap closed in a follow-up pass.* The pipeline cache now carries
+a graphics entry. The blocker this milestone originally recorded was real:
+a cache key computed only after `compileGraphicsPipeline` had already run
+stage compilation would buy artifact sharing but never a skipped
+recompile, since nothing before compilation had yet computed the vertex
+bindings/attributes or attachment formats a correct key also needs. The fix
+was the refactor that blocker implied rather than glue code alone:
+`translateFixedFunctionState` now runs every fixed-function translation
+(vertex input, raster/viewport/depth-stencil/blend/dynamic state,
+multisample checks, and attachment formats) before either stage is
+compiled, since none of it reads the compiled stages at all --
+`compileGraphicsPipeline` computes `computeGraphicsPipelineCacheKey`
+(PipelineCache.h) from that result plus both stages' SPIR-V/entry points
+and the pipeline layout's binding/push-constant shape, checks
+`PipelineCache::lookupGraphics` *before* calling `compileAndValidateStages`,
+and only that miss path pays for compilation, `validateStageInterfaces`,
+and the push-constant/bound-range checks -- a hit reuses the artifact those
+checks already passed for an identical key. `PipelineCache` gained a
+second, separately-typed table (`GraphicsEntries`) alongside compute's own,
+since the two pipeline kinds share no artifact type; `vkGetPipelineCacheData`
+serializes both tables' keys, and a key loaded from a persisted blob is
+recorded as a placeholder in both (a placeholder never satisfies a lookup
+in either, so this cannot manufacture a false hit across kinds). Every
+fixed-function field is hashed individually rather than as a raw struct
+copy (`serializeFixedFunctionState`'s own comment explains why): an
+aggregate's inter-member padding is indeterminate for a plain,
+non-value-initialized local, and hashing it would make an identical
+logical pipeline state hash differently from one process run to the next.
+
+*Also deferred.* A blit still cannot blit a multisample image, but that is
+not a narrower deviation -- real Vulkan itself requires
 `VK_SAMPLE_COUNT_1_BIT` on both images for `vkCmdBlitImage` and provides
 `vkCmdResolveImage` for the multisample case instead. No CTS run happened
 in this pass: `deqp-vk` was not available in this environment, exactly as V4

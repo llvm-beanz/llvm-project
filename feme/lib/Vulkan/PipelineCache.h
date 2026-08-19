@@ -60,6 +60,7 @@
 namespace feme::vulkan {
 
 struct CachedPipelineArtifact;
+struct GraphicsPipelineArtifact;
 class DescriptorSetLayout;
 struct SpecializationOverride;
 
@@ -82,6 +83,25 @@ computePipelineCacheKey(const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
                         llvm::ArrayRef<SpecializationOverride> Overrides,
                         llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts,
                         llvm::ArrayRef<VkPushConstantRange> PushConstantRanges);
+
+/// Computes the strong key for one graphics pipeline creation: the two
+/// stages' SPIR-V words and entry points (a graphics stage has no
+/// specialization data to fold in -- it is rejected outright at creation,
+/// see GraphicsPipeline.cpp's `compileGraphicsStage`), the pipeline
+/// layout's binding map and push-constant ranges, \p DeviceUUID (as
+/// `computePipelineCacheKey` above), and \p FixedFunctionState -- a
+/// caller-serialized encoding of every piece of translated fixed-function
+/// pipeline state (topology, vertex input, raster/viewport/depth-stencil/
+/// blend state, dynamic-state selection, sample count, and attachment
+/// formats): a hit must be identical in everything a draw through either
+/// pipeline could observe, not only in the two stages' bytes.
+PipelineCacheKey computeGraphicsPipelineCacheKey(
+    const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
+    llvm::ArrayRef<uint32_t> VertexShaderWords, llvm::StringRef VertexEntry,
+    llvm::ArrayRef<uint32_t> FragmentShaderWords, llvm::StringRef FragmentEntry,
+    llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts,
+    llvm::ArrayRef<VkPushConstantRange> PushConstantRanges,
+    llvm::ArrayRef<uint8_t> FixedFunctionState);
 
 /// Whether persistent (serialized) pipeline-cache data is ever trusted as
 /// `vkCreatePipelineCache` input, per `FEME_VULKAN_TRUST_PIPELINE_CACHE_DATA`
@@ -121,16 +141,31 @@ public:
   void insert(const PipelineCacheKey &Key,
               std::shared_ptr<CachedPipelineArtifact> Artifact);
 
+  /// The compiled graphics artifact previously `insertGraphics`ed for
+  /// \p Key, or null on a cache miss. A separate table from `lookup`'s:
+  /// a compute and a graphics pipeline creation never share an artifact
+  /// type, even if (improbably) their keys collided.
+  std::shared_ptr<GraphicsPipelineArtifact>
+  lookupGraphics(const PipelineCacheKey &Key) const;
+
+  /// Records that \p Key compiled to \p Artifact, for a later
+  /// `lookupGraphics` to find.
+  void insertGraphics(const PipelineCacheKey &Key,
+                      std::shared_ptr<GraphicsPipelineArtifact> Artifact);
+
   /// `vkMergePipelineCaches`: adopts every key/artifact \p Other knows that
   /// this cache does not already have.
   void merge(const PipelineCache &Other);
 
-  /// Every key this cache knows, for `vkGetPipelineCacheData` to serialize.
-  /// Order is unspecified but stable across calls absent further `insert`s.
+  /// Every key this cache knows (compute and graphics both), for
+  /// `vkGetPipelineCacheData` to serialize. Order is unspecified but stable
+  /// across calls absent further `insert`/`insertGraphics` calls.
   std::vector<PipelineCacheKey> keys() const;
 
 private:
   std::map<PipelineCacheKey, std::shared_ptr<CachedPipelineArtifact>> Entries;
+  std::map<PipelineCacheKey, std::shared_ptr<GraphicsPipelineArtifact>>
+      GraphicsEntries;
 };
 
 } // namespace feme::vulkan

@@ -37,6 +37,32 @@ template <typename T> void appendPOD(std::vector<uint8_t> &Out, const T &V) {
   Out.insert(Out.end(), Bytes, Bytes + sizeof(T));
 }
 
+/// Hashes \p SetLayouts' binding maps and \p PushConstantRanges into
+/// \p Hash, the part of a pipeline's identity every stage's key (compute or
+/// graphics) shares: the pipeline layout's own binding/push-constant shape.
+void hashSetLayoutsAndPushConstants(
+    SHA256 &Hash, ArrayRef<const DescriptorSetLayout *> SetLayouts,
+    ArrayRef<VkPushConstantRange> PushConstantRanges) {
+  for (const DescriptorSetLayout *Layout : SetLayouts) {
+    for (const DescriptorSetLayoutBinding &Binding : Layout->bindings()) {
+      Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Binding.Binding),
+                           sizeof(Binding.Binding)));
+      Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Binding.Type),
+                           sizeof(Binding.Type)));
+      Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Binding.Count),
+                           sizeof(Binding.Count)));
+    }
+  }
+  for (const VkPushConstantRange &Range : PushConstantRanges) {
+    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Range.stageFlags),
+                         sizeof(Range.stageFlags)));
+    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Range.offset),
+                         sizeof(Range.offset)));
+    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Range.size),
+                         sizeof(Range.size)));
+  }
+}
+
 } // namespace
 
 PipelineCacheKey feme::vulkan::computePipelineCacheKey(
@@ -56,24 +82,29 @@ PipelineCacheKey feme::vulkan::computePipelineCacheKey(
     Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Override.Value),
                          sizeof(Override.Value)));
   }
-  for (const DescriptorSetLayout *Layout : SetLayouts) {
-    for (const DescriptorSetLayoutBinding &Binding : Layout->bindings()) {
-      Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Binding.Binding),
-                           sizeof(Binding.Binding)));
-      Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Binding.Type),
-                           sizeof(Binding.Type)));
-      Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Binding.Count),
-                           sizeof(Binding.Count)));
-    }
-  }
-  for (const VkPushConstantRange &Range : PushConstantRanges) {
-    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Range.stageFlags),
-                         sizeof(Range.stageFlags)));
-    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Range.offset),
-                         sizeof(Range.offset)));
-    Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&Range.size),
-                         sizeof(Range.size)));
-  }
+  hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
+  return Hash.final();
+}
+
+PipelineCacheKey feme::vulkan::computeGraphicsPipelineCacheKey(
+    const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
+    ArrayRef<uint32_t> VertexShaderWords, StringRef VertexEntry,
+    ArrayRef<uint32_t> FragmentShaderWords, StringRef FragmentEntry,
+    ArrayRef<const DescriptorSetLayout *> SetLayouts,
+    ArrayRef<VkPushConstantRange> PushConstantRanges,
+    ArrayRef<uint8_t> FixedFunctionState) {
+  SHA256 Hash;
+  Hash.update(ArrayRef(DeviceUUID, VK_UUID_SIZE));
+  Hash.update(
+      ArrayRef(reinterpret_cast<const uint8_t *>(VertexShaderWords.data()),
+               VertexShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(VertexEntry);
+  Hash.update(
+      ArrayRef(reinterpret_cast<const uint8_t *>(FragmentShaderWords.data()),
+               FragmentShaderWords.size() * sizeof(uint32_t)));
+  Hash.update(FragmentEntry);
+  hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
+  Hash.update(FixedFunctionState);
   return Hash.final();
 }
 
@@ -169,8 +200,15 @@ feme::vulkan::parsePipelineCacheBlob(
 }
 
 PipelineCache::PipelineCache(std::vector<PipelineCacheKey> InitialKeys) {
-  for (const PipelineCacheKey &Key : InitialKeys)
+  // Every initial key is recorded as a placeholder (null artifact) in both
+  // tables: a persisted blob does not record whether a key was originally
+  // compute's or graphics', and a placeholder never satisfies a lookup (see
+  // the file comment's "does not skip recompiling") in either table, so
+  // recording it in both cannot manufacture a false hit.
+  for (const PipelineCacheKey &Key : InitialKeys) {
     Entries.emplace(Key, nullptr);
+    GraphicsEntries.emplace(Key, nullptr);
+  }
 }
 
 std::shared_ptr<CachedPipelineArtifact>
@@ -184,15 +222,32 @@ void PipelineCache::insert(const PipelineCacheKey &Key,
   Entries[Key] = std::move(Artifact);
 }
 
+std::shared_ptr<GraphicsPipelineArtifact>
+PipelineCache::lookupGraphics(const PipelineCacheKey &Key) const {
+  auto It = GraphicsEntries.find(Key);
+  return It == GraphicsEntries.end() ? nullptr : It->second;
+}
+
+void PipelineCache::insertGraphics(
+    const PipelineCacheKey &Key,
+    std::shared_ptr<GraphicsPipelineArtifact> Artifact) {
+  GraphicsEntries[Key] = std::move(Artifact);
+}
+
 void PipelineCache::merge(const PipelineCache &Other) {
   for (const auto &[Key, Artifact] : Other.Entries)
     Entries.try_emplace(Key, Artifact);
+  for (const auto &[Key, Artifact] : Other.GraphicsEntries)
+    GraphicsEntries.try_emplace(Key, Artifact);
 }
 
 std::vector<PipelineCacheKey> PipelineCache::keys() const {
   std::vector<PipelineCacheKey> Result;
-  Result.reserve(Entries.size());
+  Result.reserve(Entries.size() + GraphicsEntries.size());
   for (const auto &[Key, Artifact] : Entries)
     Result.push_back(Key);
+  for (const auto &[Key, Artifact] : GraphicsEntries)
+    if (!Entries.count(Key))
+      Result.push_back(Key);
   return Result;
 }

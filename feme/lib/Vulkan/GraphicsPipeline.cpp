@@ -12,6 +12,7 @@
 #include "Icd.h"
 #include "Objects.h"
 #include "PhysicalDeviceInfo.h"
+#include "PipelineCache.h"
 #include "RenderPass.h"
 
 #include "feme/Core/Context.h"
@@ -743,15 +744,127 @@ Error translateDynamicState(const VkPipelineDynamicStateCreateInfo *Info,
   return Error::success();
 }
 
-Expected<GraphicsPipelineState>
-compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
-                        const PhysicalDeviceInfo &DeviceInfo) {
-  if (!CreateInfo.layout)
-    return createStringError(inconvertibleErrorCode(),
-                             "graphics pipeline requires a VkPipelineLayout");
+//===----------------------------------------------------------------------===//
+// Pipeline cache key
+//===----------------------------------------------------------------------===//
 
-  const VkPipelineShaderStageCreateInfo *VertexInfo = nullptr;
-  const VkPipelineShaderStageCreateInfo *FragmentInfo = nullptr;
+/// Appends \p V's raw bytes to \p Out. Only ever called on a scalar
+/// (integer, float, or enum) field, never a whole aggregate: an aggregate's
+/// inter-member padding is indeterminate for a plain (non-value-initialized)
+/// local, and hashing it would make an identical logical pipeline state
+/// hash differently run to run.
+template <typename T> void appendScalar(std::vector<uint8_t> &Out, T V) {
+  const auto *Bytes = reinterpret_cast<const uint8_t *>(&V);
+  Out.insert(Out.end(), Bytes, Bytes + sizeof(T));
+}
+
+void appendVertexBinding(std::vector<uint8_t> &Out,
+                         const VertexInputBinding &B) {
+  appendScalar(Out, B.Binding);
+  appendScalar(Out, B.Stride);
+  appendScalar(Out, B.PerInstance);
+}
+
+void appendVertexAttribute(std::vector<uint8_t> &Out,
+                           const VertexInputAttribute &A) {
+  appendScalar(Out, A.Location);
+  appendScalar(Out, A.Binding);
+  appendScalar(Out, A.Offset);
+  appendScalar(Out, A.Format);
+}
+
+void appendStencilFace(std::vector<uint8_t> &Out,
+                       const feme::graphics::StencilFaceState &F) {
+  appendScalar(Out, F.Compare);
+  appendScalar(Out, F.FailOp);
+  appendScalar(Out, F.DepthFailOp);
+  appendScalar(Out, F.PassOp);
+  appendScalar(Out, F.CompareMask);
+  appendScalar(Out, F.WriteMask);
+  appendScalar(Out, F.Reference);
+}
+
+void appendBlendState(std::vector<uint8_t> &Out,
+                      const feme::graphics::BlendState &B) {
+  appendScalar(Out, B.BlendEnable);
+  appendScalar(Out, B.SrcColorFactor);
+  appendScalar(Out, B.DstColorFactor);
+  appendScalar(Out, B.ColorOp);
+  appendScalar(Out, B.SrcAlphaFactor);
+  appendScalar(Out, B.DstAlphaFactor);
+  appendScalar(Out, B.AlphaOp);
+  appendScalar(Out, B.WriteMask);
+}
+
+void appendAttachmentFormat(std::vector<uint8_t> &Out,
+                            const AttachmentFormat &A) {
+  appendScalar(Out, A.Format);
+  appendScalar(Out, A.Width);
+  appendScalar(Out, A.Height);
+}
+
+/// Serializes every piece of \p State a draw through the resulting pipeline
+/// could observe, field by field, for `computeGraphicsPipelineCacheKey`
+/// (PipelineCache.h): a cache hit must be identical in all of it, not only
+/// in the two stages' SPIR-V, since a key covering less than the whole
+/// normalized pipeline description is worse than none (see this file's
+/// header comment and "Pipeline Cache" in feme/docs/FeMeVulkanDesign.md).
+std::vector<uint8_t>
+serializeFixedFunctionState(const GraphicsPipelineState &State) {
+  std::vector<uint8_t> Out;
+  appendScalar(Out, State.Topology);
+  appendScalar(Out, State.PrimitiveRestartEnable);
+  appendScalar(Out, State.SampleCount);
+  appendScalar(Out, State.DynamicStates);
+  appendScalar(Out, State.LogicOpEnable);
+  appendScalar(Out, State.Logic);
+  for (float C : State.BlendConstants)
+    appendScalar(Out, C);
+  appendScalar(Out, State.Raster.Cull);
+  appendScalar(Out, State.Raster.Front);
+  appendScalar(Out, State.Depth.TestEnable);
+  appendScalar(Out, State.Depth.WriteEnable);
+  appendScalar(Out, State.Depth.Compare);
+  appendScalar(Out, State.Stencil.TestEnable);
+  appendStencilFace(Out, State.Stencil.Front);
+  appendStencilFace(Out, State.Stencil.Back);
+  appendScalar(Out, State.Viewport.X);
+  appendScalar(Out, State.Viewport.Y);
+  appendScalar(Out, State.Viewport.Width);
+  appendScalar(Out, State.Viewport.Height);
+  appendScalar(Out, State.Viewport.MinDepth);
+  appendScalar(Out, State.Viewport.MaxDepth);
+  appendScalar(Out, State.Scissor.X);
+  appendScalar(Out, State.Scissor.Y);
+  appendScalar(Out, State.Scissor.Width);
+  appendScalar(Out, State.Scissor.Height);
+  appendScalar(Out, State.VertexBindings.size());
+  for (const VertexInputBinding &B : State.VertexBindings)
+    appendVertexBinding(Out, B);
+  appendScalar(Out, State.VertexAttributes.size());
+  for (const VertexInputAttribute &A : State.VertexAttributes)
+    appendVertexAttribute(Out, A);
+  appendScalar(Out, State.ColorBlends.size());
+  for (const feme::graphics::BlendState &B : State.ColorBlends)
+    appendBlendState(Out, B);
+  appendScalar(Out, State.Attachments.size());
+  for (const AttachmentFormat &A : State.Attachments)
+    appendAttachmentFormat(Out, A);
+  return Out;
+}
+
+/// Translates every piece of `VkGraphicsPipelineCreateInfo` fixed-function
+/// state into \p Result (everything but the compiled stages themselves,
+/// `Result.Artifact`), and resolves which stage is which: none of it reads
+/// the compiled stages, so it runs -- and a pipeline-cache key can be
+/// computed from its result -- before paying for stage compilation.
+Error translateFixedFunctionState(
+    const VkGraphicsPipelineCreateInfo &CreateInfo,
+    const PhysicalDeviceInfo &DeviceInfo, GraphicsPipelineState &Result,
+    const VkPipelineShaderStageCreateInfo *&VertexInfo,
+    const VkPipelineShaderStageCreateInfo *&FragmentInfo) {
+  VertexInfo = nullptr;
+  FragmentInfo = nullptr;
   for (uint32_t I = 0; I != CreateInfo.stageCount; ++I) {
     const VkPipelineShaderStageCreateInfo &Stage = CreateInfo.pStages[I];
     switch (Stage.stage) {
@@ -803,25 +916,6 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                              "primitive topology %u is not implemented",
                              unsigned(InputAssembly->topology));
 
-  auto Ctx = std::make_unique<feme::Context>();
-  Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
-
-  Expected<std::shared_ptr<feme::cpu::CompiledStage>> VertexStage =
-      compileGraphicsStage(*Ctx, *VertexInfo, feme::ShaderStage::Vertex);
-  if (!VertexStage)
-    return VertexStage.takeError();
-  Expected<std::shared_ptr<feme::cpu::CompiledStage>> FragmentStage =
-      compileGraphicsStage(*Ctx, *FragmentInfo, feme::ShaderStage::Fragment);
-  if (!FragmentStage)
-    return FragmentStage.takeError();
-
-  auto Artifact = std::make_shared<GraphicsPipelineArtifact>();
-  Artifact->Ctx = std::move(Ctx);
-  Artifact->VertexStage = std::move(*VertexStage);
-  Artifact->FragmentStage = std::move(*FragmentStage);
-
-  GraphicsPipelineState Result;
-  Result.Artifact = Artifact;
   Result.Topology = *Topology;
   Result.PrimitiveRestartEnable = InputAssembly->primitiveRestartEnable;
   Result.SampleCount = Targets->SampleCount;
@@ -829,20 +923,20 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   const VkPhysicalDeviceLimits &Limits = DeviceInfo.Properties.limits;
   if (Error E =
           translateVertexInput(CreateInfo.pVertexInputState, Limits, Result))
-    return std::move(E);
+    return E;
   if (Error E = translateRasterState(CreateInfo.pRasterizationState, Result))
-    return std::move(E);
+    return E;
   if (Error E =
           translateViewportState(CreateInfo.pViewportState, Limits, Result))
-    return std::move(E);
+    return E;
   if (Error E = translateDepthStencilState(CreateInfo.pDepthStencilState,
                                            *Targets, Result))
-    return std::move(E);
+    return E;
   if (Error E = translateColorBlendState(CreateInfo.pColorBlendState, *Targets,
                                          Result))
-    return std::move(E);
+    return E;
   if (Error E = translateDynamicState(CreateInfo.pDynamicState, Result))
-    return std::move(E);
+    return E;
 
   if (const VkPipelineMultisampleStateCreateInfo *Multisample =
           CreateInfo.pMultisampleState) {
@@ -873,12 +967,32 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   // this list as cache identity only.
   for (feme::cpu::ResourceFormat Format : Targets->Colors)
     Result.Attachments.push_back(AttachmentFormat{Format, 0, 0});
+  return Error::success();
+}
 
-  const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
-  const feme::cpu::ResourceInfo &VSInfo =
-      Artifact->VertexStage->getResourceInfo();
-  const feme::cpu::ResourceInfo &FSInfo =
-      Artifact->FragmentStage->getResourceInfo();
+/// Compiles both stages, validates them against \p Layout and each other,
+/// and builds the shareable artifact -- everything a pipeline-cache miss
+/// still has to do that a hit skips entirely.
+Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
+    const VkPipelineShaderStageCreateInfo &VertexInfo,
+    const VkPipelineShaderStageCreateInfo &FragmentInfo,
+    const PipelineLayout &Layout, const VkPhysicalDeviceLimits &Limits,
+    uint32_t ColorAttachmentCount,
+    llvm::ArrayRef<VertexInputAttribute> VertexAttributes) {
+  auto Ctx = std::make_unique<feme::Context>();
+  Ctx->setDiagnosticHandler([](const feme::Diagnostic &) {});
+
+  Expected<std::shared_ptr<feme::cpu::CompiledStage>> VertexStage =
+      compileGraphicsStage(*Ctx, VertexInfo, feme::ShaderStage::Vertex);
+  if (!VertexStage)
+    return VertexStage.takeError();
+  Expected<std::shared_ptr<feme::cpu::CompiledStage>> FragmentStage =
+      compileGraphicsStage(*Ctx, FragmentInfo, feme::ShaderStage::Fragment);
+  if (!FragmentStage)
+    return FragmentStage.takeError();
+
+  const feme::cpu::ResourceInfo &VSInfo = (*VertexStage)->getResourceInfo();
+  const feme::cpu::ResourceInfo &FSInfo = (*FragmentStage)->getResourceInfo();
   if (!pushConstantsCoverRootConstantSize(Layout, VSInfo.RootConstantSize,
                                           Limits.maxPushConstantsSize,
                                           VK_SHADER_STAGE_VERTEX_BIT) ||
@@ -894,12 +1008,66 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   if (Error E = validateBoundRanges(FSInfo, Layout))
     return std::move(E);
 
-  if (Error E = validateStageInterfaces(
-          *Artifact->VertexStage, *Artifact->FragmentStage,
-          static_cast<uint32_t>(Targets->Colors.size()),
-          Result.VertexAttributes))
+  if (Error E = validateStageInterfaces(**VertexStage, **FragmentStage,
+                                        ColorAttachmentCount, VertexAttributes))
     return std::move(E);
 
+  auto Artifact = std::make_shared<GraphicsPipelineArtifact>();
+  Artifact->Ctx = std::move(Ctx);
+  Artifact->VertexStage = std::move(*VertexStage);
+  Artifact->FragmentStage = std::move(*FragmentStage);
+  return Artifact;
+}
+
+Expected<GraphicsPipelineState>
+compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
+                        const PhysicalDeviceInfo &DeviceInfo,
+                        PipelineCache *Cache) {
+  if (!CreateInfo.layout)
+    return createStringError(inconvertibleErrorCode(),
+                             "graphics pipeline requires a VkPipelineLayout");
+
+  GraphicsPipelineState Result;
+  const VkPipelineShaderStageCreateInfo *VertexInfo = nullptr;
+  const VkPipelineShaderStageCreateInfo *FragmentInfo = nullptr;
+  if (Error E = translateFixedFunctionState(CreateInfo, DeviceInfo, Result,
+                                            VertexInfo, FragmentInfo))
+    return std::move(E);
+
+  const PipelineLayout &Layout = *fromHandle<PipelineLayout>(CreateInfo.layout);
+  auto *VertexModule = fromHandle<ShaderModule>(VertexInfo->module);
+  auto *FragmentModule = fromHandle<ShaderModule>(FragmentInfo->module);
+
+  // A cache key needs the whole normalized pipeline description (see
+  // "Pipeline Cache" in feme/docs/FeMeVulkanDesign.md): computed here, it
+  // can be checked *before* paying for stage compilation, unlike a key
+  // computed from the compiled result.
+  std::optional<PipelineCacheKey> Key;
+  if (Cache && VertexModule && FragmentModule) {
+    std::vector<uint8_t> FixedFunctionState =
+        serializeFixedFunctionState(Result);
+    Key = computeGraphicsPipelineCacheKey(
+        DeviceInfo.Properties.pipelineCacheUUID, VertexModule->words(),
+        VertexInfo->pName ? VertexInfo->pName : "main", FragmentModule->words(),
+        FragmentInfo->pName ? FragmentInfo->pName : "main", Layout.setLayouts(),
+        Layout.pushConstantRanges(), FixedFunctionState);
+  }
+
+  std::shared_ptr<GraphicsPipelineArtifact> Artifact =
+      Key ? Cache->lookupGraphics(*Key) : nullptr;
+  if (!Artifact) {
+    Expected<std::shared_ptr<GraphicsPipelineArtifact>> Compiled =
+        compileAndValidateStages(
+            *VertexInfo, *FragmentInfo, Layout, DeviceInfo.Properties.limits,
+            static_cast<uint32_t>(Result.Attachments.size()),
+            Result.VertexAttributes);
+    if (!Compiled)
+      return Compiled.takeError();
+    Artifact = std::move(*Compiled);
+    if (Key)
+      Cache->insertGraphics(*Key, Artifact);
+  }
+  Result.Artifact = std::move(Artifact);
   return Result;
 }
 
@@ -935,22 +1103,20 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
-    VkDevice device, VkPipelineCache, uint32_t createInfoCount,
+    VkDevice device, VkPipelineCache pipelineCache, uint32_t createInfoCount,
     const VkGraphicsPipelineCreateInfo *pCreateInfos,
     const VkAllocationCallbacks *pAllocator, VkPipeline *pPipelines) {
   const PhysicalDeviceInfo &DeviceInfo =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  auto *Cache =
+      pipelineCache ? fromHandle<PipelineCache>(pipelineCache) : nullptr;
   Allocator Alloc(pAllocator);
 
   VkResult Result = VK_SUCCESS;
   for (uint32_t I = 0; I != createInfoCount; ++I) {
     pPipelines[I] = VK_NULL_HANDLE;
-    // The pipeline cache carries no graphics entry yet: its key would have
-    // to cover the normalized pipeline description and the render-target
-    // binding as well as both stages' SPIR-V (see "Graphics pipeline
-    // state"), and nothing is served by a key that covers less.
     Expected<GraphicsPipelineState> Compiled =
-        compileGraphicsPipeline(pCreateInfos[I], DeviceInfo);
+        compileGraphicsPipeline(pCreateInfos[I], DeviceInfo, Cache);
     if (!Compiled) {
       consumeError(Compiled.takeError());
       Result = VK_ERROR_INITIALIZATION_FAILED;

@@ -204,9 +204,9 @@ protected:
     return Info;
   }
 
-  VkResult create(const VkGraphicsPipelineCreateInfo &Info, VkPipeline &Out) {
-    return vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
-                                     &Out);
+  VkResult create(const VkGraphicsPipelineCreateInfo &Info, VkPipeline &Out,
+                  VkPipelineCache Cache = VK_NULL_HANDLE) {
+    return vkCreateGraphicsPipelines(Device, Cache, 1, &Info, nullptr, &Out);
   }
 
   VkInstance Instance = VK_NULL_HANDLE;
@@ -415,6 +415,92 @@ TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
             1u);
 
   vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// An identical `VkGraphicsPipelineCreateInfo` (same SPIR-V, same layout,
+/// same fixed-function state) creates a cache hit that shares the compiled
+/// stages rather than recompiling them.
+TEST_F(GraphicsPipelineTest, CachedPipelineSharesCompiledStages) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, First, Cache), VK_SUCCESS);
+  ASSERT_EQ(create(Info, Second, Cache), VK_SUCCESS);
+
+  auto *FirstPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(First));
+  auto *SecondPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Second));
+  EXPECT_EQ(&FirstPipe->vertexStage(), &SecondPipe->vertexStage());
+  EXPECT_EQ(&FirstPipe->fragmentStage(), &SecondPipe->fragmentStage());
+
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Without a `VkPipelineCache`, two otherwise-identical creations compile
+/// independent artifacts.
+TEST_F(GraphicsPipelineTest, NoCacheCompilesIndependentStagesEachTime) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, First), VK_SUCCESS);
+  ASSERT_EQ(create(Info, Second), VK_SUCCESS);
+
+  auto *FirstPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(First));
+  auto *SecondPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Second));
+  EXPECT_NE(&FirstPipe->vertexStage(), &SecondPipe->vertexStage());
+
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Two pipelines built from the same SPIR-V but disagreeing fixed-function
+/// state (here, cull mode) must not share a cache entry: the key covers the
+/// whole normalized pipeline description, not only the two stages' bytes.
+TEST_F(GraphicsPipelineTest, DifferingFixedFunctionStateIsACacheMiss) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipeline First = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, First, Cache), VK_SUCCESS);
+
+  Info = makeCreateInfo(Vertex, Fragment);
+  Raster.cullMode = VK_CULL_MODE_BACK_BIT;
+  VkPipeline Second = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Second, Cache), VK_SUCCESS);
+
+  auto *FirstPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(First));
+  auto *SecondPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Second));
+  EXPECT_NE(&FirstPipe->vertexStage(), &SecondPipe->vertexStage());
+
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
   vkDestroyShaderModule(Device, Fragment, nullptr);
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
