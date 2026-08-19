@@ -58,6 +58,10 @@ struct VertexBufferBinding {
   uint32_t Stride = 0;
   llvm::ArrayRef<uint8_t> Data;
   llvm::ArrayRef<VertexAttribute> Attributes;
+  /// Whether this binding advances per vertex or per instance
+  /// (`VkVertexInputRate`): a per-instance binding is indexed by the
+  /// invocation's instance index rather than its vertex index.
+  bool PerInstance = false;
 };
 
 /// The scalar type an index buffer's elements store.

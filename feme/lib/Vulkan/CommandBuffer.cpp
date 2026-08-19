@@ -809,6 +809,7 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
                                           Offset,
                                       static_cast<size_t>(Buf.size() - Offset));
     VB.Attributes = AttributeStorage.back();
+    VB.PerInstance = BindingDecl.PerInstance;
     VertexBuffers.push_back(VB);
   }
 
@@ -901,9 +902,10 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
     return Error::success();
   }
 
-  if (Draw.VertexCount == 0)
+  if (Draw.VertexCount == 0 || Draw.InstanceCount == 0)
     return Error::success();
   uint64_t LastVertex = uint64_t(Draw.FirstVertex) + Draw.VertexCount - 1;
+  uint64_t LastInstance = uint64_t(Draw.FirstInstance) + Draw.InstanceCount - 1;
   for (const VertexInputBinding &BindingDecl : Pipeline.vertexBindings()) {
     if (BindingDecl.Binding >= Gfx.VertexBuffers.size() ||
         !Gfx.VertexBuffers[BindingDecl.Binding] ||
@@ -911,8 +913,11 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
       return createStringError(inconvertibleErrorCode(),
                                "vertex binding %u is not bound to a buffer",
                                BindingDecl.Binding);
+    // A per-instance binding's reach depends on the instance range, not the
+    // vertex range: it is read once per instance, not once per vertex.
+    uint64_t LastIndex = BindingDecl.PerInstance ? LastInstance : LastVertex;
     uint64_t Base = Gfx.VertexBufferOffsets[BindingDecl.Binding] +
-                    LastVertex * BindingDecl.Stride;
+                    LastIndex * BindingDecl.Stride;
     for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes()) {
       if (Attr.Binding != BindingDecl.Binding)
         continue;

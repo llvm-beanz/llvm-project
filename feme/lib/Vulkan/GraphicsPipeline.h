@@ -54,6 +54,9 @@ namespace feme::vulkan {
 struct VertexInputBinding {
   uint32_t Binding = 0;
   uint32_t Stride = 0;
+  /// Whether this binding advances per vertex or per instance
+  /// (`VkVertexInputRate`).
+  bool PerInstance = false;
 };
 
 /// One `VkVertexInputAttributeDescription`, normalized: its

@@ -526,15 +526,17 @@ Error translateVertexInput(const VkPipelineVertexInputStateCreateInfo *Info,
   for (uint32_t I = 0; I != Info->vertexBindingDescriptionCount; ++I) {
     const VkVertexInputBindingDescription &Src =
         Info->pVertexBindingDescriptions[I];
-    if (Src.inputRate != VK_VERTEX_INPUT_RATE_VERTEX)
+    if (Src.inputRate != VK_VERTEX_INPUT_RATE_VERTEX &&
+        Src.inputRate != VK_VERTEX_INPUT_RATE_INSTANCE)
       return createStringError(inconvertibleErrorCode(),
-                               "per-instance vertex input rate is not "
-                               "implemented yet");
+                               "unknown VkVertexInputRate");
     if (Src.stride > Limits.maxVertexInputBindingStride)
       return createStringError(inconvertibleErrorCode(),
                                "vertex binding stride exceeds "
                                "maxVertexInputBindingStride");
-    Out.VertexBindings.push_back(VertexInputBinding{Src.binding, Src.stride});
+    Out.VertexBindings.push_back(
+        VertexInputBinding{Src.binding, Src.stride,
+                           Src.inputRate == VK_VERTEX_INPUT_RATE_INSTANCE});
   }
   for (uint32_t I = 0; I != Info->vertexAttributeDescriptionCount; ++I) {
     const VkVertexInputAttributeDescription &Src =

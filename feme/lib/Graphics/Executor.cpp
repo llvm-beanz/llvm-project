@@ -1140,8 +1140,14 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                  *Elt.Location);
 
       for (uint32_t Flat = 0; Flat != Total; ++Flat) {
-        uint64_t SrcOff =
-            (uint64_t)Binding->Stride * VertexIndices[Flat] + Attr->Offset;
+        // A per-instance binding advances once per instance rather than
+        // once per vertex (`VkVertexInputRate::VK_VERTEX_INPUT_RATE_
+        // INSTANCE`): it is indexed by the invocation's instance index, not
+        // its vertex index.
+        uint32_t FetchIndex = Binding->PerInstance
+                                  ? Invocations[Flat].InstanceID
+                                  : VertexIndices[Flat];
+        uint64_t SrcOff = (uint64_t)Binding->Stride * FetchIndex + Attr->Offset;
         Expected<uint32_t> CompByteSize =
             attributeComponentByteSize(Attr->Format);
         if (!CompByteSize)
