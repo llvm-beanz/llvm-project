@@ -388,9 +388,11 @@ TEST(ExecutorTest, CullsEveryTriangleWithFrontAndBack) {
 
 TEST(ExecutorTest, RejectsUnsupportedTopology) {
   Context Ctx;
+  // `*WithAdjacency` topologies need a geometry stage (roadmap R34), still
+  // unimplemented; every other topology is now accepted (roadmap C4).
   Expected<GraphicsPipeline> Pipeline = buildPipeline(
       Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
-      PrimitiveTopology::PointList);
+      PrimitiveTopology::TriangleListWithAdjacency);
   ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
 
   TriangleScene Scene;
@@ -400,6 +402,214 @@ TEST(ExecutorTest, RejectsUnsupportedTopology) {
   PreparedDraw Draw = Scene.prepare();
 
   EXPECT_THAT_ERROR(executeDraws(*Pipeline, Draw), Failed());
+}
+
+// roadmap C4: `mapTopology` beyond `TriangleList`/`TriangleStrip`. A
+// `TriangleFan` needs no new rasterizer primitive at all: it is the same
+// clip/rasterize path as `TriangleList`/`TriangleStrip`, just a different
+// per-primitive vertex-index assembly (every triangle shares the fan's
+// first fetched vertex as its pivot).
+TEST(ExecutorTest, RendersATriangleFan) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleFan);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // A fan pivoting on v0, covering the whole [-1, 1] NDC square with two
+  // triangles: (v0, v1, v2) and (v0, v2, v3).
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v1
+      3.0f,  3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v2
+      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v3
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    const uint8_t *Texel = Scene.AttachmentStorage.data() + I * 4;
+    EXPECT_EQ(Texel[0], 255) << "texel " << I;
+    EXPECT_EQ(Texel[3], 255) << "texel " << I;
+  }
+}
+
+// roadmap C4: an indexed `TriangleFan` honors primitive restart the same
+// way an indexed `TriangleStrip` does (each restarted segment is a fresh
+// fan with its own pivot, not a phantom triangle bridging the two fans).
+TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedTriangleFan) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::TriangleFan, DepthState{}, StencilState{},
+      BlendState{}, /*LogicOpEnable=*/false, LogicOp::Copy,
+      /*BlendConstants=*/{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/true);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      // Segment 1: a red triangle in the lower-left region.
+      -1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // v0
+      0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v1
+      -1.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,  // v2
+      // Segment 2: a green triangle in the upper-right region.
+      0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v3
+      1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f,  // v4
+      1.0f, -1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // v5
+  };
+  Scene.Indices = {0, 1, 2, 0xFFFFFFFFu, 3, 4, 5};
+  PreparedDraw Draw = Scene.prepare(/*Indexed=*/true);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  const uint8_t *Red = texel(0, 2);
+  EXPECT_EQ(Red[0], 255);
+  EXPECT_EQ(Red[1], 0);
+  const uint8_t *Green = texel(3, 1);
+  EXPECT_EQ(Green[0], 0);
+  EXPECT_EQ(Green[1], 255);
+}
+
+// roadmap C4: a `PointList` draws a fixed 1-pixel-square point at each
+// vertex (`largePoints` is not an advertised device feature, so a
+// conformant point size is always 1.0 -- see the executor's own comment).
+TEST(ExecutorTest, RendersAPointList) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::PointList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Two points, pixel centers (1, 1) and (2, 2) of the 4x4 target: NDC
+  // ((1 + 0.5) / 4 * 2 - 1, ...) with Y flipped by the viewport transform.
+  Scene.VertexData = {
+      -0.25f, 0.25f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f, // pixel (1, 1), red
+      0.25f,  -0.25f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, // pixel (2, 2), green
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  const uint8_t *Red = texel(1, 1);
+  EXPECT_EQ(Red[0], 255);
+  EXPECT_EQ(Red[1], 0);
+  EXPECT_EQ(Red[3], 255);
+  const uint8_t *Green = texel(2, 2);
+  EXPECT_EQ(Green[0], 0);
+  EXPECT_EQ(Green[1], 255);
+  EXPECT_EQ(Green[3], 255);
+  // Every other texel is untouched by either 1-pixel point.
+  const uint8_t *Untouched = texel(0, 0);
+  EXPECT_EQ(Untouched[3], 0);
+}
+
+// roadmap C4: a `LineList` draws a fixed 1-pixel-wide line between each
+// pair of vertices (`wideLines` is not an advertised device feature, so a
+// conformant line width is always 1.0, matching `lineWidthRange`'s fixed
+// `[1.0, 1.0]` in `PhysicalDeviceInfo.cpp`).
+TEST(ExecutorTest, RendersAHorizontalLineList) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // A horizontal line through the row of pixels at Y=1 (NDC y = 0.25,
+  // viewport-flipped to screen row 1's center), spanning the target's
+  // full width.
+  Scene.VertexData = {
+      -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t X = 0; X != 4; ++X) {
+    const uint8_t *Texel = texel(X, 1);
+    EXPECT_EQ(Texel[3], 255) << "x=" << X;
+  }
+  // The row above/below the line is untouched.
+  EXPECT_EQ(texel(0, 0)[3], 0);
+  EXPECT_EQ(texel(0, 2)[3], 0);
+}
+
+// roadmap C4: a `LineStrip` connects consecutive vertices, and an indexed
+// strip honors primitive restart exactly as a `TriangleStrip`/`TriangleFan`
+// does (a restart marker starts a fresh strip rather than bridging the two
+// with a phantom segment).
+TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedLineStrip) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::None, FrontFace::CounterClockwise},
+      PrimitiveTopology::LineStrip, DepthState{}, StencilState{}, BlendState{},
+      /*LogicOpEnable=*/false, LogicOp::Copy,
+      /*BlendConstants=*/{0.0f, 0.0f, 0.0f, 0.0f},
+      /*PrimitiveRestartEnable=*/true);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      // Segment 1: a horizontal red line through screen row 0.
+      -1.0f,
+      0.75f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      1.0f,
+      0.75f,
+      0.0f,
+      1.0f,
+      0.0f,
+      0.0f,
+      1.0f,
+      // Segment 2: a horizontal green line through screen row 3.
+      -1.0f,
+      -0.75f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+      1.0f,
+      -0.75f,
+      0.0f,
+      0.0f,
+      1.0f,
+      0.0f,
+      1.0f,
+  };
+  Scene.Indices = {0, 1, 0xFFFFFFFFu, 2, 3};
+  PreparedDraw Draw = Scene.prepare(/*Indexed=*/true);
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  EXPECT_EQ(texel(0, 0)[0], 255);
+  EXPECT_EQ(texel(0, 0)[1], 0);
+  EXPECT_EQ(texel(0, 3)[0], 0);
+  EXPECT_EQ(texel(0, 3)[1], 255);
+  // No phantom segment bridges the restart across the middle rows.
+  EXPECT_EQ(texel(0, 1)[3], 0);
+  EXPECT_EQ(texel(0, 2)[3], 0);
 }
 
 TEST(ExecutorTest, InterpolatesColorAcrossTheTriangle) {

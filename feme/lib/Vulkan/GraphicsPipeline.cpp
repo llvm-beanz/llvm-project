@@ -52,14 +52,21 @@ using feme::graphics::StencilOp;
 
 std::optional<PrimitiveTopology> mapTopology(VkPrimitiveTopology Topology) {
   switch (Topology) {
+  case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+    return PrimitiveTopology::PointList;
+  case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+    return PrimitiveTopology::LineList;
+  case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+    return PrimitiveTopology::LineStrip;
   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
     return PrimitiveTopology::TriangleList;
   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
     return PrimitiveTopology::TriangleStrip;
+  case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+    return PrimitiveTopology::TriangleFan;
   default:
-    // Point/line topologies have no rasterization path yet, and the
-    // adjacency ones need a geometry stage (V7): "validated against the
-    // advertised topologies".
+    // The four adjacency topologies (list/strip, line/triangle) need a
+    // geometry stage (V7): "validated against the advertised topologies".
     return std::nullopt;
   }
 }

@@ -143,10 +143,18 @@ feme::graphics::StencilOp toStencilOp(VkStencilOp Op) {
 std::optional<feme::graphics::PrimitiveTopology>
 toDynamicTopology(VkPrimitiveTopology Topology) {
   switch (Topology) {
+  case VK_PRIMITIVE_TOPOLOGY_POINT_LIST:
+    return feme::graphics::PrimitiveTopology::PointList;
+  case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+    return feme::graphics::PrimitiveTopology::LineList;
+  case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+    return feme::graphics::PrimitiveTopology::LineStrip;
   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
     return feme::graphics::PrimitiveTopology::TriangleList;
   case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
     return feme::graphics::PrimitiveTopology::TriangleStrip;
+  case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+    return feme::graphics::PrimitiveTopology::TriangleFan;
   default:
     return std::nullopt;
   }

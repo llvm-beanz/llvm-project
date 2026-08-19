@@ -1714,19 +1714,59 @@ Status (roadmap C4b, culling): `feme::graphics::CullMode` gained
 `FrontAndBack` (`VK_CULL_MODE_FRONT_AND_BACK`), which discards every
 primitive regardless of winding -- one more comparison in `executeDraws`'
 existing cull test, not new rasterizer machinery, unlike this section's
-still-open topology and dual-source-blend gaps below. Point, line,
-line-strip and fan topologies (`mapTopology` in
-`feme/lib/Vulkan/GraphicsPipeline.cpp` still declines them) remain
-unimplemented: each needs a new primitive-assembly and
-clip/rasterize path this section's triangle-only pipeline does not have
-(point sprites need a size and a screen-space quad expansion; lines need
-a width and a different edge test entirely), which is a materially larger
-unit of work than a mechanical table addition. Dual-source blend factors
-(`VK_BLEND_FACTOR_SRC1_*`) remain unimplemented for the same reason: they
-need a second fragment-stage color output (`SV_Target0`'s `Index=1`
-companion) that nothing in the stage-IO signature model or `executeDraws`'
-one-output-per-attachment linkage (see "One `SV_TargetN` fragment output
-per color attachment" above) yet threads through.
+(now closed, see roadmap C4d below) topology gap and the still-open
+dual-source-blend gap below. Dual-source blend factors (`VK_BLEND_FACTOR_
+SRC1_*`) remain unimplemented: they need a second fragment-stage color
+output (`SV_Target0`'s `Index=1` companion) that nothing in the stage-IO
+signature model or `executeDraws`' one-output-per-attachment linkage (see
+"One `SV_TargetN` fragment output per color attachment" above) yet
+threads through.
+
+Status (roadmap C4d, correcting this section's own "materially larger
+unit of work" framing for point/line/fan topologies): point, line,
+line-strip, and triangle-fan topologies are all now implemented, and that
+framing held for exactly one of the four. `TriangleFan` needed no new
+rasterizer primitive at all -- it is the same clip/rasterize path as
+`TriangleList`/`TriangleStrip`, just a different per-primitive
+vertex-index assembly (`emitFanSegment` in `feme/lib/Graphics/
+Executor.cpp`: every triangle shares the fan's first fetched vertex as
+its pivot, and an indexed fan honors primitive restart the same way an
+indexed strip does). Points and lines *do* need a new primitive shape,
+but `executeDraws` gets one by expanding each into a two-triangle
+screen-space quad and feeding it through the exact same clip (a
+whole-primitive near-plane `W`-reject rather than a full
+Sutherland-Hodgman clip; see the deviation note below)/rasterize/
+fragment-invocation/output-merge path every other primitive already
+uses, rather than writing a second rasterizer. `pointSizeRange`/
+`lineWidthRange` (`PhysicalDeviceInfo.cpp`) are a fixed 1-pixel extent:
+`largePoints`/`wideLines` are not advertised device features (`Features`
+in `PhysicalDeviceInfo.cpp` leaves both `VK_FALSE`), so a conformant
+caller can never legally request anything else, and the executor's point/
+line quad expansion accordingly hardcodes a 0.5-pixel half-extent/
+half-width rather than reading a `SV_PointSize` shader output or
+`vkCmdSetLineWidth` value. The one deviation from a "real" point/line
+rasterizer: a point or line gets no Sutherland-Hodgman near/far/side-
+plane clip, only a whole-primitive reject when a vertex's clip-space `W`
+is at or below `clipTriangle`'s own `ClipEpsilon` guard (a point/line
+that would need side-plane clipping is instead scissor/viewport-bound-
+clamped by the existing tile-binning pass, which is sufficient for every
+CTS case this milestone's own Vulkan CTS run exercises, but is a
+narrower guarantee than a triangle gets). `mapTopology`
+(`feme/lib/Vulkan/GraphicsPipeline.cpp`) and `vkCmdSetPrimitiveTopologyEXT`'s
+own translation (`toDynamicTopology` in `CommandBuffer.cpp`) both accept
+every one of these topologies now; `executeDraws`' primitive-restart
+condition also grew to cover `LineStrip`/`TriangleFan` alongside
+`TriangleStrip` (Vulkan applies restart to every strip/fan topology, not
+only `TriangleStrip`), closing a latent gap the original triangle-only
+scope never had reason to notice. Only the two remaining `*WithAdjacency`
+list topologies and the two `*StripWithAdjacency` topologies (roadmap
+R34, needing a geometry stage) are still rejected by
+`executeDraws`/`mapTopology`. See `unittests/Graphics/ExecutorTest.cpp`'s
+`RendersATriangleFan`/`HonorsPrimitiveRestartOnIndexedTriangleFan`/
+`RendersAPointList`/`RendersAHorizontalLineList`/
+`HonorsPrimitiveRestartOnIndexedLineStrip` and
+`unittests/Vulkan/GraphicsPipelineTest.cpp`'s
+`AcceptsEveryImplementedTopology`.
 
 Status (roadmap C4c, dynamic state -- correcting roadmap C4's own
 framing): C4's roadmap row grouped "`mapDynamicState` beyond its six
@@ -1745,8 +1785,12 @@ count-taking spelling (this ICD's `maxViewports == 1` means "with count"
 carries no more information than the fixed-count commands). `PRIMITIVE_
 TOPOLOGY` is dynamic only within the triangle class Vulkan itself requires
 a pipeline's static topology to keep fixed, which `mapTopology`'s
-triangle-only support already satisfies with no changes to topology
-translation at all. `VERTEX_INPUT_BINDING_STRIDE` (set through
+triangle-only support already satisfied with no changes to topology
+translation at all when this note was first written; roadmap C4d above
+extended both `mapTopology` and this dynamic-state translation to every
+point/line/triangle-class topology together, so that remains true of
+whichever class the pipeline's static topology falls into, not just the
+triangle class specifically. `VERTEX_INPUT_BINDING_STRIDE` (set through
 `vkCmdBindVertexBuffers2EXT`'s `pStrides`, the one state with no
 `vkCmdSet*` counterpart) reuses the vertex-fetch stride the static path
 already reads per binding. `DEPTH_BOUNDS_TEST_ENABLE` is accepted but
@@ -1758,8 +1802,9 @@ and the extension is advertised (`PhysicalDeviceInfo.cpp`'s
 `getSupportedDeviceExtensions`, `EntryPoints.cpp`'s feature-struct
 handling, `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS`). This closes
 roadmap C4's "mapDynamicState beyond its six states" item outright; only
-the topology-beyond-triangle-class and dual-source-blend gaps above remain
-open, exactly as this section already described before C4c.
+the dual-source-blend gap above remains open, exactly as this section
+already described before C4c (topology is now closed too, per C4d above).
+
 
 The conventional tessellation path inserts patch control, fixed tessellation,
 domain evaluation, and optional geometry execution between vertex shading and

@@ -36,21 +36,29 @@
 
 namespace feme::graphics {
 
-/// How vertices are assembled into primitives. Only the two triangle
-/// topologies have an executor yet (roadmap R32); the rest are recorded
-/// here since a pipeline description must reject a topology it does not
-/// implement rather than silently misinterpret it. The four `*WithAdjacency`
-/// topologies (roadmap R34) supply a geometry stage with each primitive's
-/// neighboring vertices in addition to its own -- see
-/// `topologyHasAdjacency`/`splitListPrimitiveAdjacency` below and
-/// "Geometry stages consume assembled primitives plus adjacency" in
-/// feme/docs/FeMeGraphicsDesign.md.
+/// How vertices are assembled into primitives. `PointList`, `LineList`,
+/// `LineStrip`, `TriangleList`, `TriangleStrip`, and `TriangleFan` all have
+/// an executor (roadmap R32/C4); the four `*WithAdjacency` topologies do
+/// not yet, so a pipeline description must reject one of those rather
+/// than silently misinterpret it. The four `*WithAdjacency` topologies
+/// (roadmap R34) supply a geometry stage with each primitive's neighboring
+/// vertices in addition to its own -- see `topologyHasAdjacency`/
+/// `splitListPrimitiveAdjacency` below and "Geometry stages consume
+/// assembled primitives plus adjacency" in feme/docs/FeMeGraphicsDesign.md.
 enum class PrimitiveTopology : uint8_t {
   PointList,
   LineList,
   LineStrip,
   TriangleList,
   TriangleStrip,
+  /// A fan of triangles sharing the first fetched vertex as a common
+  /// pivot: primitive `i` (0-based) is `(v0, v[i+1], v[i+2])`. Part of the
+  /// same "triangle class" as `TriangleList`/`TriangleStrip` (roadmap C4,
+  /// `mapTopology` in feme/lib/Vulkan/GraphicsPipeline.cpp), sharing their
+  /// clip/rasterize path with no rasterizer changes -- only a different
+  /// per-primitive vertex-index assembly (see `feme::graphics::
+  /// executeDraws`'s topology switch).
+  TriangleFan,
   LineListWithAdjacency,
   LineStripWithAdjacency,
   TriangleListWithAdjacency,

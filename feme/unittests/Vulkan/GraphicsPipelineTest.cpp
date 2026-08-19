@@ -289,14 +289,61 @@ TEST_F(GraphicsPipelineTest, CompilesVertexAndFragmentStages) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+// roadmap C4: `mapTopology` beyond `TriangleList`/`TriangleStrip`. Every
+// `VkPrimitiveTopology` this milestone's executor implements
+// (point/line/line-strip/triangle-fan) creates successfully and translates
+// to the matching `feme::graphics::PrimitiveTopology`.
+TEST_F(GraphicsPipelineTest, AcceptsEveryImplementedTopology) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  static constexpr std::pair<VkPrimitiveTopology,
+                             feme::graphics::PrimitiveTopology>
+      Cases[] = {
+          {VK_PRIMITIVE_TOPOLOGY_POINT_LIST,
+           feme::graphics::PrimitiveTopology::PointList},
+          {VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+           feme::graphics::PrimitiveTopology::LineList},
+          {VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
+           feme::graphics::PrimitiveTopology::LineStrip},
+          {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+           feme::graphics::PrimitiveTopology::TriangleList},
+          {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+           feme::graphics::PrimitiveTopology::TriangleStrip},
+          {VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
+           feme::graphics::PrimitiveTopology::TriangleFan},
+      };
+  for (auto [VkTopology, ExpectedTopology] : Cases) {
+    VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+    InputAssembly.topology = VkTopology;
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    ASSERT_EQ(create(Info, Pipe), VK_SUCCESS) << "topology " << VkTopology;
+    ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+    auto *Graphics =
+        static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+    DynamicGraphicsState Dynamic;
+    feme::graphics::GraphicsPipeline Executor =
+        Graphics->buildExecutorPipeline(Dynamic);
+    EXPECT_EQ(Executor.getTopology(), ExpectedTopology)
+        << "topology " << VkTopology;
+
+    vkDestroyPipeline(Device, Pipe, nullptr);
+  }
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 TEST_F(GraphicsPipelineTest, RejectsUnimplementedStateCombinations) {
   VkShaderModule Vertex = createModule(VertexSource);
   VkShaderModule Fragment = createModule(FragmentSource);
   VkPipeline Pipe = VK_NULL_HANDLE;
 
-  // An unimplemented topology.
+  // An unimplemented topology (an adjacency topology, needing a geometry
+  // stage -- roadmap R34/C4c; every other topology is implemented now).
   VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
-  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY;
   EXPECT_EQ(create(Info, Pipe), VK_ERROR_INITIALIZATION_FAILED);
   EXPECT_EQ(Pipe, VK_NULL_HANDLE);
 

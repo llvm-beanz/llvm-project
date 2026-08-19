@@ -1012,11 +1012,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                              "the draw has %zu color attachment(s)",
                              Pipeline.getColorBlends().size(),
                              Draw.Attachments.size());
-  if (Pipeline.getTopology() != PrimitiveTopology::TriangleList &&
-      Pipeline.getTopology() != PrimitiveTopology::TriangleStrip)
+  switch (Pipeline.getTopology()) {
+  case PrimitiveTopology::PointList:
+  case PrimitiveTopology::LineList:
+  case PrimitiveTopology::LineStrip:
+  case PrimitiveTopology::TriangleList:
+  case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::TriangleFan:
+    break;
+  case PrimitiveTopology::LineListWithAdjacency:
+  case PrimitiveTopology::LineStripWithAdjacency:
+  case PrimitiveTopology::TriangleListWithAdjacency:
+  case PrimitiveTopology::TriangleStripWithAdjacency:
     return createStringError(inconvertibleErrorCode(),
-                             "only TriangleList/TriangleStrip topologies are "
-                             "implemented yet (roadmap R32)");
+                             "adjacency topologies are not implemented yet "
+                             "(roadmap R34, need a geometry stage)");
+  }
 
   const cpu::CompiledStage &VS = Pipeline.getVertexStage();
   const cpu::CompiledStage &FS = Pipeline.getFragmentStage();
@@ -1148,11 +1159,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     uint32_t Total = PerInstance * Cmd.InstanceCount;
 
     // Primitive restart (`primitiveRestartEnable`) only applies to an
-    // indexed strip draw: a special index value ends the current strip and
-    // starts a new one, exactly as an unindexed strip would begin fresh.
+    // indexed strip/fan draw: a special index value ends the current
+    // strip/fan and starts a new one, exactly as an unindexed strip/fan
+    // would begin fresh. Vulkan applies this to every strip and fan
+    // topology (`LineStrip`, `TriangleStrip`, `TriangleFan`, and the two
+    // `*StripWithAdjacency` topologies once those are implemented), not
+    // just `TriangleStrip`.
     bool RestartEnabled =
         Cmd.Indexed && Pipeline.getPrimitiveRestartEnable() &&
-        Pipeline.getTopology() == PrimitiveTopology::TriangleStrip;
+        (Pipeline.getTopology() == PrimitiveTopology::LineStrip ||
+         Pipeline.getTopology() == PrimitiveTopology::TriangleStrip ||
+         Pipeline.getTopology() == PrimitiveTopology::TriangleFan);
     uint32_t RestartValue =
         Draw.IndexBuffer.Type == IndexType::UInt16 ? 0xFFFFu : 0xFFFFFFFFu;
     std::vector<bool> IsRestart(PerInstance, false);
@@ -1293,6 +1310,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       return V;
     };
 
+    // Maps one already-clipped vertex's clip-space position to its
+    // rasterizer-space position/`1/w`/viewport-mapped depth (Vulkan's
+    // "coordinate transformations"). Shared by the triangle path below and
+    // the point/line quad-expansion path further down so both apply
+    // exactly the same viewport transform.
+    auto projectVertex = [&](const RasterVertex &Vtx,
+                             std::array<float, 2> &Screen, float &InvW,
+                             float &Depth) {
+      float W = Vtx.Clip[3];
+      float NdcX = Vtx.Clip[0] / W;
+      float NdcY = Vtx.Clip[1] / W;
+      float NdcZ = Vtx.Clip[2] / W;
+      Screen = {Draw.Viewport.X + (NdcX * 0.5f + 0.5f) * Draw.Viewport.Width,
+                Draw.Viewport.Y +
+                    (1.0f - (NdcY * 0.5f + 0.5f)) * Draw.Viewport.Height};
+      InvW = 1.0f / W;
+      Depth = Draw.Viewport.MinDepth +
+              NdcZ * (Draw.Viewport.MaxDepth - Draw.Viewport.MinDepth);
+    };
+
     // Assembles one strip segment [Start, End)'s triangles, alternating
     // winding order starting fresh at each segment -- exactly what a
     // restart does to an unindexed strip, and what a strip with no restart
@@ -1306,21 +1343,74 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                           : std::array<uint32_t, 3>{T + 1, T, T + 2});
     };
 
+    // Assembles one fan segment [Start, End)'s triangles: `Start` (the
+    // segment's first vertex) is every triangle's shared pivot, exactly
+    // as an unindexed fan pivots on its first vertex and a restart begins
+    // a fresh fan (with a fresh pivot) at the next segment.
+    auto emitFanSegment = [](uint32_t Start, uint32_t End,
+                             SmallVectorImpl<std::array<uint32_t, 3>> &Out) {
+      for (uint32_t T = Start + 1; T + 2 <= End; ++T)
+        Out.push_back({Start, T, T + 1});
+    };
+
     SmallVector<std::array<uint32_t, 3>, 8> TriIndices;
     if (Pipeline.getTopology() == PrimitiveTopology::TriangleList) {
       for (uint32_t T = 0; T + 3 <= PerInstance; T += 3)
         TriIndices.push_back({T, T + 1, T + 2});
-    } else if (RestartEnabled) {
-      uint32_t SegStart = 0;
-      for (uint32_t J = 0; J != PerInstance; ++J) {
-        if (!IsRestart[J])
-          continue;
-        emitStripSegment(SegStart, J, TriIndices);
-        SegStart = J + 1;
+    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleFan) {
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitFanSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitFanSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitFanSegment(0, PerInstance, TriIndices);
       }
-      emitStripSegment(SegStart, PerInstance, TriIndices);
-    } else {
-      emitStripSegment(0, PerInstance, TriIndices);
+    } else if (Pipeline.getTopology() == PrimitiveTopology::TriangleStrip) {
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitStripSegment(SegStart, J, TriIndices);
+          SegStart = J + 1;
+        }
+        emitStripSegment(SegStart, PerInstance, TriIndices);
+      } else {
+        emitStripSegment(0, PerInstance, TriIndices);
+      }
+    }
+
+    // Assembles a line-list/line-strip topology's line segments (as
+    // vertex-index pairs), honoring restart on a strip exactly as the
+    // triangle assembly above does.
+    SmallVector<std::array<uint32_t, 2>, 8> LineIndices;
+    if (Pipeline.getTopology() == PrimitiveTopology::LineList) {
+      for (uint32_t T = 0; T + 2 <= PerInstance; T += 2)
+        LineIndices.push_back({T, T + 1});
+    } else if (Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+      auto emitLineStripSegment =
+          [](uint32_t Start, uint32_t End,
+             SmallVectorImpl<std::array<uint32_t, 2>> &Out) {
+            for (uint32_t T = Start; T + 2 <= End; ++T)
+              Out.push_back({T, T + 1});
+          };
+      if (RestartEnabled) {
+        uint32_t SegStart = 0;
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          if (!IsRestart[J])
+            continue;
+          emitLineStripSegment(SegStart, J, LineIndices);
+          SegStart = J + 1;
+        }
+        emitLineStripSegment(SegStart, PerInstance, LineIndices);
+      } else {
+        emitLineStripSegment(0, PerInstance, LineIndices);
+      }
     }
 
     // Screen-space triangles plus their owning varying storage, binned into
@@ -1339,19 +1429,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                                       &Clipped[I + 1]};
           std::array<std::array<float, 2>, 3> Screen;
           std::array<float, 3> InvW, Depth;
-          for (unsigned K = 0; K != 3; ++K) {
-            float W = Poly[K]->Clip[3];
-            float NdcX = Poly[K]->Clip[0] / W;
-            float NdcY = Poly[K]->Clip[1] / W;
-            float NdcZ = Poly[K]->Clip[2] / W;
-            Screen[K] = {Draw.Viewport.X +
-                             (NdcX * 0.5f + 0.5f) * Draw.Viewport.Width,
-                         Draw.Viewport.Y + (1.0f - (NdcY * 0.5f + 0.5f)) *
-                                               Draw.Viewport.Height};
-            InvW[K] = 1.0f / W;
-            Depth[K] = Draw.Viewport.MinDepth +
-                       NdcZ * (Draw.Viewport.MaxDepth - Draw.Viewport.MinDepth);
-          }
+          for (unsigned K = 0; K != 3; ++K)
+            projectVertex(*Poly[K], Screen[K], InvW[K], Depth[K]);
 
           // `SArea` uses the same directed-edge formula (`edgeFn`) the
           // rasterizer's own coverage test does below, so that after the
@@ -1394,6 +1473,112 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           ST.PrimitiveID = PrimitiveCounter++;
           ScreenTris.push_back(ST);
           TriVaryingStore.push_back(std::move(VaryingBits));
+        }
+      }
+    }
+
+    // Points/lines (roadmap C4) reuse the triangle rasterizer above by
+    // expanding each into a two-triangle screen-space quad -- there being
+    // no separate point/line rasterizer, only this mechanical
+    // pre-expansion -- rather than clip/rasterize a 1- or 2-vertex
+    // primitive directly. `Draw.Viewport`/`Draw.Scissor` bounds (via the
+    // tile-binning pass below) are the only "clipping" a point/line gets:
+    // there is no Sutherland-Hodgman-style near/far/side-plane clip here,
+    // only a whole-primitive reject when a vertex is behind the eye (`W`
+    // at or below `clipTriangle`'s own `ClipEpsilon` guard), since
+    // Vulkan's own point/line clipping rules are a documented deviation
+    // this milestone accepts (see FeMeGraphicsDesign.md's status note).
+    // `pointSizeRange`/`lineWidthRange` (`PhysicalDeviceInfo.cpp`) are
+    // fixed at "1.0 is the only legal size" (`largePoints`/`wideLines` are
+    // not advertised device features), so both are a fixed 1-pixel
+    // screen-space extent here rather than a `SV_PointSize` shader output
+    // or `vkCmdSetLineWidth` value this milestone threads through.
+    auto pushQuadTriangle = [&](std::array<float, 2> A, float InvWA,
+                                float DepthA, const RasterVertex &VtxA,
+                                std::array<float, 2> B, float InvWB,
+                                float DepthB, const RasterVertex &VtxB,
+                                std::array<float, 2> C, float InvWC,
+                                float DepthC, const RasterVertex &VtxC) {
+      std::array<std::array<float, 2>, 3> Screen = {A, B, C};
+      std::array<float, 3> InvW = {InvWA, InvWB, InvWC};
+      std::array<float, 3> Depth = {DepthA, DepthB, DepthC};
+      std::array<const RasterVertex *, 3> Src = {&VtxA, &VtxB, &VtxC};
+      float SArea = edgeFn(Screen[0], Screen[1], Screen[2]);
+      if (SArea == 0.0f)
+        return;
+      if (SArea < 0.0f) {
+        std::swap(Screen[1], Screen[2]);
+        std::swap(InvW[1], InvW[2]);
+        std::swap(Depth[1], Depth[2]);
+        std::swap(Src[1], Src[2]);
+      }
+      auto VaryingBits = std::make_unique<SmallVector<uint32_t, 8>>();
+      for (unsigned K = 0; K != 3; ++K)
+        VaryingBits->append(Src[K]->Varyings.begin(), Src[K]->Varyings.end());
+      ScreenTriangle ST;
+      ST.Pos = Screen;
+      ST.InvW = InvW;
+      ST.Depth = Depth;
+      size_t Stride = Src[0]->Varyings.size();
+      for (unsigned K = 0; K != 3; ++K)
+        ST.Varyings[K] = VaryingBits->data() + K * Stride;
+      // Points/lines are never culled: `VkCullModeFlags` only ever applies
+      // to a "polygon" (Vulkan's "Culling" section), never to a point or
+      // line primitive, so this synthetic triangle's winding carries no
+      // front/back-facing meaning worth computing.
+      ST.FrontFacing = true;
+      ST.PrimitiveID = PrimitiveCounter++;
+      ScreenTris.push_back(ST);
+      TriVaryingStore.push_back(std::move(VaryingBits));
+    };
+
+    if (Pipeline.getTopology() == PrimitiveTopology::PointList) {
+      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+        for (uint32_t J = 0; J != PerInstance; ++J) {
+          RasterVertex V = vertexAt(Inst * PerInstance + J);
+          if (V.Clip[3] <= ClipEpsilon)
+            continue;
+          std::array<float, 2> P;
+          float InvW, Depth;
+          projectVertex(V, P, InvW, Depth);
+          constexpr float Half = 0.5f; // fixed 1-pixel point size
+          std::array<float, 2> TL{P[0] - Half, P[1] - Half};
+          std::array<float, 2> TR{P[0] + Half, P[1] - Half};
+          std::array<float, 2> BR{P[0] + Half, P[1] + Half};
+          std::array<float, 2> BL{P[0] - Half, P[1] + Half};
+          pushQuadTriangle(TL, InvW, Depth, V, TR, InvW, Depth, V, BR, InvW,
+                           Depth, V);
+          pushQuadTriangle(TL, InvW, Depth, V, BR, InvW, Depth, V, BL, InvW,
+                           Depth, V);
+        }
+      }
+    } else if (Pipeline.getTopology() == PrimitiveTopology::LineList ||
+               Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+      for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+        for (std::array<uint32_t, 2> Ln : LineIndices) {
+          RasterVertex V0 = vertexAt(Inst * PerInstance + Ln[0]);
+          RasterVertex V1 = vertexAt(Inst * PerInstance + Ln[1]);
+          if (V0.Clip[3] <= ClipEpsilon || V1.Clip[3] <= ClipEpsilon)
+            continue;
+          std::array<float, 2> P0, P1;
+          float InvW0, Depth0, InvW1, Depth1;
+          projectVertex(V0, P0, InvW0, Depth0);
+          projectVertex(V1, P1, InvW1, Depth1);
+          float Dx = P1[0] - P0[0], Dy = P1[1] - P0[1];
+          float Len = std::sqrt(Dx * Dx + Dy * Dy);
+          if (Len == 0.0f)
+            continue;
+          constexpr float HalfWidth = 0.5f; // fixed 1-pixel line width
+          std::array<float, 2> Perp{-Dy / Len * HalfWidth,
+                                    Dx / Len * HalfWidth};
+          std::array<float, 2> A{P0[0] + Perp[0], P0[1] + Perp[1]};
+          std::array<float, 2> B{P0[0] - Perp[0], P0[1] - Perp[1]};
+          std::array<float, 2> C{P1[0] - Perp[0], P1[1] - Perp[1]};
+          std::array<float, 2> D{P1[0] + Perp[0], P1[1] + Perp[1]};
+          pushQuadTriangle(A, InvW0, Depth0, V0, B, InvW0, Depth0, V0, C, InvW1,
+                           Depth1, V1);
+          pushQuadTriangle(A, InvW0, Depth0, V0, C, InvW1, Depth1, V1, D, InvW1,
+                           Depth1, V1);
         }
       }
     }

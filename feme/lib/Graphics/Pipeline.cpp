@@ -42,6 +42,7 @@ bool feme::graphics::topologyHasAdjacency(PrimitiveTopology Topology) {
   case PrimitiveTopology::LineStrip:
   case PrimitiveTopology::TriangleList:
   case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::TriangleFan:
     return false;
   }
   llvm_unreachable("unhandled PrimitiveTopology");
@@ -62,6 +63,7 @@ PrimitiveTopology feme::graphics::stripAdjacency(PrimitiveTopology Topology) {
   case PrimitiveTopology::LineStrip:
   case PrimitiveTopology::TriangleList:
   case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::TriangleFan:
     return Topology;
   }
   llvm_unreachable("unhandled PrimitiveTopology");
@@ -84,6 +86,7 @@ feme::graphics::getListPrimitiveVertexCount(PrimitiveTopology Topology) {
   case PrimitiveTopology::LineStripWithAdjacency:
   case PrimitiveTopology::TriangleStrip:
   case PrimitiveTopology::TriangleStripWithAdjacency:
+  case PrimitiveTopology::TriangleFan:
     llvm_unreachable(
         "getListPrimitiveVertexCount does not support strip topologies -- "
         "see splitListPrimitiveAdjacency's scope note");
@@ -122,6 +125,7 @@ SplitPrimitiveAdjacency feme::graphics::splitListPrimitiveAdjacency(
   case PrimitiveTopology::LineStripWithAdjacency:
   case PrimitiveTopology::TriangleStrip:
   case PrimitiveTopology::TriangleStripWithAdjacency:
+  case PrimitiveTopology::TriangleFan:
     llvm_unreachable("splitListPrimitiveAdjacency does not support strip "
                      "topologies -- see its own scope note");
   }
@@ -142,6 +146,7 @@ uint32_t feme::graphics::getStripPrimitiveCount(PrimitiveTopology Topology,
   case PrimitiveTopology::LineStrip:
   case PrimitiveTopology::TriangleList:
   case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::TriangleFan:
   case PrimitiveTopology::LineListWithAdjacency:
   case PrimitiveTopology::TriangleListWithAdjacency:
     llvm_unreachable("getStripPrimitiveCount only supports the two "
@@ -185,6 +190,7 @@ SplitPrimitiveAdjacency feme::graphics::splitStripPrimitiveAdjacency(
   case PrimitiveTopology::LineStrip:
   case PrimitiveTopology::TriangleList:
   case PrimitiveTopology::TriangleStrip:
+  case PrimitiveTopology::TriangleFan:
   case PrimitiveTopology::LineListWithAdjacency:
   case PrimitiveTopology::TriangleListWithAdjacency:
     llvm_unreachable("splitStripPrimitiveAdjacency only supports the two "
