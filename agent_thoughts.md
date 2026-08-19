@@ -20989,3 +20989,187 @@ edit had accidentally deleted a class's opening brace line, which
 clang-format's re-indentation then made look like a much larger diff than
 it was -- caught by noticing the diff size before committing, reverted,
 and redone as a clean, minimal insertion.
+
+# The first real Vulkan-CTS run
+
+## Why this pass is different
+
+Every single prior Vulkan milestone recorded the identical deviation, in
+almost the identical words: "deqp-vk was not available in this
+environment." V4 wrote it first, and V6's own follow-up passes kept
+re-confirming it rather than re-deriving it, right up through the most
+recent one ("No `deqp-vk` CTS run happened in this pass ... exactly as V4
+recorded for its own CTS bullet"). This pass is the first where that
+sentence is simply false: a real VK-GL-CTS checkout exists at
+`/home/dev/dev/VK-GL-CTS`, `external/` already vendored (glslang,
+SPIRV-Tools, spirv-headers, amber, vulkan-video-samples, ...), so the very
+first thing worth doing was exactly what every prior pass had been unable
+to do -- actually run it.
+
+## Getting deqp-vk to run at all
+
+The first cmake configure (`-DDEQP_TARGET=default`) built cleanly and
+linked, but crashed immediately: `FATAL ERROR: Vulkan is not supported at
+tcuPlatform.cpp:54`. Reading `tcu::Platform`'s base class made the reason
+obvious before I even looked at `targets/`: `getVulkanPlatform()`'s base
+implementation unconditionally `TCU_THROW`s "not supported" -- a target
+has to override it. `targets/` lists eight target directories; the
+windowing-system ones (`x11_egl`, `x11_glx`, `wayland`, ...) exist for GL
+context creation, which this ICD needs none of, and this sandboxed
+environment has neither `DISPLAY` nor `XDG_RUNTIME_DIR` set regardless.
+`vulkan_headless` is exactly the target that implements
+`getVulkanPlatform()` without pulling in any of that -- reconfiguring with
+it and rebuilding `deqp-vk` (a second full rebuild, since `DEQP_TARGET`
+changes which platform object file gets linked in, not just a define) got
+`vulkaninfo`-equivalent enumeration working immediately.
+
+## Choosing what to run, and discovering it barely mattered
+
+My first instinct, given `feme/utils/filter_vulkan_cts_cases.py`'s
+V4-era "compute-only" scope, was to sample heavily -- pick a few thousand
+cases per group to keep total runtime bounded, since a full CTS mustpass
+list is millions of cases and I assumed a software CPU-JIT renderer would
+be slow per case. I benchmarked before committing to that plan, on
+`dEQP-VK.api.info.*` (10,484 simple no-op cases): 0.8 seconds. Then on
+something that actually exercises the compiler,
+`dEQP-VK.compute.pipeline.basic.*` (80 cases, real SPIR-V import + MLIR
+compilation + CPU JIT dispatch): 0.196 seconds. Then
+`dEQP-VK.pipeline.monolithic.*`, sampled at 3,000 cases: 0.246 seconds --
+and the *full* group later, 465,394 cases, still finished in about 12
+seconds. The assumption sampling was based on ("this will be slow, this
+is a software renderer") was simply wrong for this ICD: everything that
+doesn't compile a real pipeline reports `NotSupported` near-instantly (an
+extension check before any real work), and even genuine pipeline
+compilation is fast in absolute terms because these are tiny synthetic
+shaders, not real game workloads. That meant I could just run *every*
+case in *every* group to completion rather than design a sampling
+methodology at all -- the more valuable use of the time that freed up was
+root-causing every crash precisely instead of guessing at coverage.
+
+## The crash-isolation loop
+
+The first full-group run (all ~3.2M cases in one `deqp-vk` invocation) got
+14,074 lines into its log and then silently died -- no `DONE!`, process
+gone. Nothing in `dmesg`/`journalctl` was accessible to explain why (both
+came back empty, presumably a sandbox restriction), so I could not lean on
+crash logs; the diagnostic path had to be entirely reproduce-and-bisect.
+Isolating the exact failing case name from the log's last `Test case`
+line, re-running *only* that one case, reproduced a clean, deterministic
+segfault every time -- meaning it was a real, cold bug, not a
+timing-dependent flake, which made `gdb -batch -ex run -ex bt` against the
+single-case list immediately useful rather than a coin flip.
+
+Every one of the four crashes I fixed had the exact same `bt` shape: frame
+0 at address `0x0`, called from somewhere inside CTS's own driver
+interface layer (`vk::createDescriptorUpdateTemplate`,
+`vk::createRenderPass2`, or inlined directly into the test instance code
+for the two no-symbol cases). That shape -- not a wrong answer, not an
+assertion, a literal jump through a null pointer -- was the tell before I
+even looked at the ICD source: it is exactly what happens when
+`vkGetDeviceProcAddr` returns null for a command name a real loader's
+per-device dispatch table expects every conformant device to resolve.
+Checking `ProcAddr.cpp`'s `getDeviceProcAddr` confirmed the mechanism
+(it returns null whenever `FEME_VK_COMMAND`, not `FEME_VK_COMMAND_IMPL`,
+generated that table entry) and `VulkanEntrypoints.inc` gave me the exact
+list of every other command sharing the same latent bug -- 27 more
+commands nobody had hit yet, several of which (`vkGetImageSubresourceLayout`,
+`vkGetBufferDeviceAddress`, `vkGetDescriptorSetLayoutSupport`) are common
+enough that I would be surprised if a broader CTS run (or a real
+application) didn't eventually reach them too; I did not attempt all 27 in
+this pass, only the four the CTS run actually reached, and recorded the
+rest as an open gap rather than guessing which others matter enough to
+pre-emptively fix.
+
+## Choosing which fixes to reuse existing code versus write new
+
+`vkTrimCommandPool` and the four dynamic-state setters
+(`vkCmdSetLineWidth`/`DepthBias`/`DepthBounds`/`DeviceMask`) needed
+nothing but a correctly-argued no-op: the Vulkan spec makes trimming
+optional, and every piece of state the four setters govern is already
+rejected at pipeline creation by V6's own deviation list (depth bias,
+depth bounds, wide lines) or has no second physical device to ever mask
+(device mask) -- so no pipeline this ICD ever accepts could make any of
+them observable. I checked that argument against the actual deviation
+list text rather than assuming it, since getting it wrong would mean
+silently swallowing a real state change an accepted pipeline expected.
+
+`vkCreateRenderPass2` was a different shape of decision: I could have
+duplicated `vkCreateRenderPass`'s entire validation/construction body
+against the `...2` structures' field names (which are, individually,
+identical), but that duplicates a moderately large function for a real,
+ongoing maintenance cost (two copies of the same validation to keep in
+sync forever). Converting the `...2` structures to their classic
+counterparts and calling `vkCreateRenderPass` directly instead reuses
+100% of the existing logic and makes the two commands' behavior
+identical *by construction*, not by discipline -- the
+`RenderPass2MatchesClassicCreation` test asserts exactly that structural
+identity, not just "it returns `VK_SUCCESS`". The one genuinely new
+condition -- multiview (`viewMask`), expressible only through the `...2`
+structures -- gets its own explicit rejection before the conversion,
+since silently dropping it would be worse than crashing (a pipeline that
+looks like it works but renders only view 0).
+
+`vkCreateDescriptorUpdateTemplate` was the largest of the four: an actual
+feature, not a signature adapter. I refactored `vkUpdateDescriptorSets`'s
+existing per-write body into a shared `writeDescriptorFromRaw` helper
+(dispatching on `VkDescriptorType` from a raw pointer to the relevant
+info struct) rather than writing the template path's own copy of the same
+switch, on the same "keep one copy of the logic, not two" reasoning as
+the render-pass fix -- and this one carried real regression risk, since
+it touches an existing, well-tested code path, not just adds a new one.
+`check-feme` staying green (1430 passed both before and after) was the
+actual evidence that reasoning held, not just the refactor "looking"
+behavior-preserving.
+
+## What I chose not to fix, and why
+
+Two further crash classes surfaced, both clearly outside this ICD's own
+code, and I stopped rather than chase them into other subprojects:
+
+`dEQP-VK.api.invariance.random` crashes inside CTS's own
+`ImageAllocator` constructor -- `optimalformats[rand() %
+optimalformats.size()]` with no check that the vector is non-empty, which
+only matters on an ICD (like this one) supporting few enough formats that
+a random test's filtering can empty the candidate list for some seed.
+On AArch64 this reads as a huge out-of-bounds index rather than trapping,
+because ARM's `UDIV` returns 0 (not a fault) for division by zero, unlike
+x86. This is CTS's own robustness gap, present for *any* narrow-format
+driver, not something to patch around inside FeMe.
+
+The second is more interesting and I want to record the reasoning behind
+*not* attempting it even though I found the exact line: MLIR's
+`processSpecConstantComposite` calls `getSpecConstant()` on every
+constituent and unconditionally wraps the result in `SymbolRefAttr::get`,
+which crashes whenever a constituent isn't itself a previously-declared
+spec constant. Per the SPIR-V spec this is *always* possible for a matrix
+spec constant, whose columns are ordinary (non-spec) constant vectors --
+so this is not a rare edge case, it is the normal shape of a `mat2`/`mat3`/
+`mat4` spec constant, and it explains six different crashed CTS groups at
+once (`memory_model`, `pipeline`, `glsl`, `spirv_assembly`, `ssbo`, `ubo`)
+that looked, before I traced them, like six unrelated bugs. I did not
+attempt a fix because the real fix is not a null check -- `getConstant()`
+returns a plain `Attribute`, not something `SymbolRefAttr::get` can wrap,
+so representing a mixed symbol-reference/inline-constituent list needs a
+change to what `spirv::SpecConstantCompositeOp` itself can hold, which is
+a dialect-level modeling decision in `mlir/`, not a `feme/`-scoped fix,
+and warrants its own review rather than a fix folded into an ICD pass.
+Recording the precise root cause (file, line, and *why* it's not a small
+fix) in both the CTS report and the roadmap felt more valuable than a
+rushed patch to a component this pass does not own.
+
+## Validation
+
+Every one of the four fixes: reproduced the crash first (isolated
+single-case list, confirmed deterministic), fixed, re-ran the identical
+case list to confirm `Pass`/clean rejection replaced the segfault, then
+re-ran the *entire* affected CTS group (not just the one case) to confirm
+no other case in that group regressed into a new crash. `check-feme`
+(existing `build/` tree, `LLVM_CCACHE_BUILD=ON`,
+`LLVM_ENABLE_ASSERTIONS=ON`) run after every individual commit: baseline
+1428 passed/1 unsupported, final 1430 passed/1 unsupported (two new
+`RenderPassTest` cases, two new `DescriptorTest` cases; `ProcAddrTest`'s
+`UnimplementedCommandNeverResolves` had to be updated to a command that is
+still genuinely unimplemented, since its original example,
+`vkCmdSetDepthBias`, is one of the four now-fixed commands).
+`clang-format`/`git-clang-format` clean on every touched file before each
+commit.
