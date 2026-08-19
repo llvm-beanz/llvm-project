@@ -7,6 +7,7 @@ add_feme_unittest(FeMeVulkanTests
   BufferTest.cpp
   CommandBufferTest.cpp
   DescriptorTest.cpp
+  DiagnosticsTest.cpp
   DrawTest.cpp
   FormatTest.cpp
   GraphicsPipelineTest.cpp

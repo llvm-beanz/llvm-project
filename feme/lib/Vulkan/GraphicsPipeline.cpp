@@ -8,6 +8,7 @@
 
 #include "GraphicsPipeline.h"
 #include "Descriptor.h"
+#include "Diagnostics.h"
 #include "Format.h"
 #include "Icd.h"
 #include "Objects.h"
@@ -1118,7 +1119,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
     Expected<GraphicsPipelineState> Compiled =
         compileGraphicsPipeline(pCreateInfos[I], DeviceInfo, Cache);
     if (!Compiled) {
-      consumeError(Compiled.takeError());
+      logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       Result = VK_ERROR_INITIALIZATION_FAILED;
       continue;
     }

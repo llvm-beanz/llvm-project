@@ -79,6 +79,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Buffer.cpp
   CommandBuffer.cpp
   Descriptor.cpp
+  Diagnostics.cpp
   EntryPoints.cpp
   Format.cpp
   GraphicsPipeline.cpp
