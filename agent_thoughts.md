@@ -21769,3 +21769,142 @@ after it judged by today's numbers -- C3 is now the first blocker for
 essentially the same shaders C2 just unblocked, and C8's own "shader long
 tail" remains conditional on being re-measured after both land, exactly as
 planned.
+
+# Implementing Vulkan conformance roadmap step C3
+
+## Scoping the gap
+
+Roadmap.md's C3 row and `feme-cpu-simdize`'s own diagnostic both describe
+the same milestone-7 deviation: `checkVectorDecompositionSupported` only
+recognized two producer shapes for a divergent vector value (a
+constant-index `insertelement` chain and a vector-typed resource load) and
+three consumer shapes (another link of the chain, a resource-store's
+stored value, a constant-index `extractelement`). Everything else --
+a `phi`, a `select`, a `shufflevector`, a non-constant-index
+`extractelement`, and (I initially underestimated this) ordinary
+elementwise arithmetic on two vectors -- was diagnosed rather than
+decomposed. FeMeCPUDesign.md's own "Vectors become components, not nested
+vectors" text names the first four explicitly ("a shuffle or a dynamic
+index becomes selects across the components"), so I started there.
+
+## Implementation
+
+Refactored the duplicated "read a uniform vector's components, or a
+poison base's" logic out of `widenInsertElement` into a shared
+`getVectorComponents` helper -- the vector analogue of the existing
+`getWidened` -- since every new producer (`phi`/`select`/`shufflevector`)
+needs the same thing for its operands, and the old code only handled it
+inline for `insertelement`'s base operand.
+
+- A vector `phi` decomposes into `N` per-component `phi` stubs, following
+  the exact same three-pass structure (`createWidenedVectorPHIStub` in
+  pass 1, `fillWidenedVectorPHIIncoming` in pass 3) the scalar case
+  already used, for the same reason: a loop header's backedge value isn't
+  widened yet in pass 1/2.
+- A vector `select` with a scalar `i1` condition decomposes into `N`
+  per-component `select`s sharing one widened condition. I deliberately
+  left a per-lane `<N x i1>`-condition `select` diagnosed: nothing this
+  pass currently produces has one (a `cmp` of two vectors is itself an
+  unsupported producer), and supporting it would need per-component
+  conditions too, not just per-component values -- a bigger change for a
+  shape that doesn't actually occur yet.
+- A `shufflevector`'s mask is always a compile-time constant in LLVM IR
+  (not a runtime operand), so it decomposes with zero runtime cost: each
+  output component is just one of the two operands' own components,
+  selected at compile time. This surprised me pleasantly when I checked
+  the output IR -- a full 4-wide swizzle collapses to nothing at all.
+- A non-constant-index `extractelement` builds a `select` chain over the
+  widened index compared against each component's compile-time position --
+  exactly what the design's "a dynamic index becomes selects across the
+  components" already promised.
+
+Unit tests (`SIMDizeTest.{DecomposesVectorPHIAcrossUniformDiamond,
+DecomposesScalarConditionVectorSelect,DecomposesShuffleVectorAtCompileTime,
+WidensNonConstantIndexExtractElementIntoSelectChain}`) and matching `lit`
+tests cover each shape, and I replaced the old
+`DiagnosesNonConstantIndexExtractElement` test (asserting behavior this
+change intentionally removes) with a positive test for the same IR shape.
+
+## The measurement that changed my scope mid-task
+
+Ran the full 54-group CTS after the first four shapes landed. The
+headline didn't move at all (10,520/26,924, identical to the pre-C3
+numbers to the case). Before concluding the roadmap's own case estimate
+was simply wrong, I checked what `checkVectorDecompositionSupported`'s
+*consumer*-rejection diagnostic was actually firing on across the run:
+10,224 occurrences, essentially unchanged from before my first four
+shapes landed. That number staying flat while I'd just closed four real
+producer/consumer shapes was the tell that I'd scoped this too narrowly
+against the design doc's own stated examples rather than against what
+shaders actually do.
+
+Extended `widenVectorElementwise` to cover `BinaryOperator`/
+`UnaryOperator`/`CastInst` of vector type -- the "color = a + b" shape
+every fragment shader is built from, and the one shape FeMeCPUDesign.md's
+own design table already calls out generically ("Elementwise op | same op
+on `<W x T>`") without mentioning it needs the vector-decomposition
+treatment too. Added a `CastInst`-specific guard `checkVectorDecomposition
+Supported` doesn't need for `BinaryOperator`/`UnaryOperator`: a `bitcast`
+can change a vector's element count (`<4 x i32>` to `<2 x i64>`), which
+would break `widenVectorElementwise`'s component-for-component pairing,
+so only a `CastInst` whose operand shares the result's element count is
+accepted as a producer.
+
+## The stacked blocker this measurement found
+
+Re-ran the full CTS with the elementwise fix. The headline still didn't
+move (10,520/26,924, identical again). At this point I stopped trusting
+my own hypothesis and added a temporary debug dump to the consumer-
+rejection error site, rebuilt `libfeme_vulkan`, and reran one
+representative failing case
+(`dEQP-VK.glsl.440.linkage.varying.component.frag_out.vec4.as_float_
+float_float_float`) directly. The rejected value's sole use was
+`store <4 x float> %29, ptr addrspace(8) @spirv_var_20` -- a plain,
+non-atomic store of an `insertelement`-chain-built vector straight to a
+raw SPIR-V `Output`-storage-class global, with no `feme.stage.output.store`
+call anywhere in the function.
+
+That is correct output for the GPU-targeting path (LLVM's own SPIRV
+backend wants exactly that shape), but it means the CPU target's stage-IO
+raising -- which DXIL/HLSL-imported shaders always get via
+`feme::dxil::OpRaisingPass` -- never runs for a SPIR-V-imported shader at
+all. Grepping per-group diagnostic counts confirmed this is a graphics-
+track problem specifically (`binding_model`: 6,074, `glsl`: 1,959, `ubo`:
+869, `pipeline`: 689, `spirv_assembly`: 408 occurrences; zero in the
+`compute` group), which matches: SPIR-V-imported *compute* shaders have no
+stage-IO stores to begin with, so this gap is invisible to the pure-compute
+track C3 was actually written against.
+
+This is a different root cause from C3's own mandate (divergent-vector
+decomposition), and a different one again from the existing "graphics
+stage `Output` variable of matrix or aggregate type is not legalized" row
+(a `spirv`-\>`llvm` *conversion* gap; this new one is a CPU-target
+*raising* gap that exists regardless of the variable's type). I chose not
+to chase it inside this task: it is a substantial, separately-scoped
+change (teaching the CPU pipeline to canonicalize a raw stage-IO
+load/store into the `feme.stage.*` call shapes it already knows how to
+widen, most likely as an early `LinearizePass`/`OpRaising`-equivalent
+pass for the SPIR-V import path), and C3's own scope -- every shape
+"Vectors become components" describes -- is genuinely, correctly closed
+on its own terms regardless of what sits ahead of it. Recorded as a new,
+larger member of Roadmap.md's C8 "shader long tail" bucket (whose own row
+already predicted "the true size of this bucket is unknown until the
+stacked blockers ahead of it are gone") rather than silently working
+around it or re-opening C3's scope to also fix it.
+
+I removed the temporary debug `errs()` dump before finishing -- it served
+its purpose as a one-off diagnostic and has no place in the committed
+pass.
+
+## Verification discipline
+
+Every shape has both a `SIMDizeTest` unit test and a matching `lit` test
+built from the exact same IR (so a regression shows up in both the fast
+unit-test loop and the `FileCheck`-verified textual output an actual
+future contributor would read). `check-feme` stayed green throughout
+(908 lit tests, 1456 unit tests passed, 1 unsupported unrelated to this
+change). Confirmed the full 54-group CTS run three times across this
+session (pre-elementwise, post-elementwise, and the final revision) to
+make sure each incremental change was actually measured rather than
+assumed, exactly as the previous C1/C2 sessions' own discipline
+established.
