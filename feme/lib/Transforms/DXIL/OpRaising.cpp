@@ -1252,9 +1252,10 @@ bool raiseTypedBufferLoad(CallInst &CI) {
 // canonical intrinsic to (cross-checked against `-dxil-op-lower`, the same
 // standard every other raiser in this file holds itself to -- see the file
 // header comment): `Sample` (60), `SampleLevel` (62), `TextureLoad` (66) and
-// `GetDimensions`' `.x` field (72, via `int_dx_resource_getdimensions_x`
-// only -- `DXILOpLowering.cpp` has no `xy`/`levels_xy` lowering to verify
-// against yet). `SampleBias`/`SampleGrad` (bias/gradient sampling) and
+// `GetDimensions`' `.x` and `.xy` fields (72, via
+// `int_dx_resource_getdimensions_x`/`_xy` -- `DXILOpLowering.cpp` has no
+// `levels_xy` lowering to verify against yet, so a mip-count query stays
+// unraised). `SampleBias`/`SampleGrad` (bias/gradient sampling) and
 // comparison sampling/gather have no numbered `DXILOp<N, ...>` definition in
 // this LLVM tree at all yet (`sampleCmp`/`textureGather` are declared
 // `DXILOpClass`es with no op assigned a wire opcode), so there is nothing to
@@ -1582,11 +1583,20 @@ bool raiseTextureStore(CallInst &CI) {
 }
 
 /// Raises a `dx.op.getDimensions` (opcode 72) call's field-0 (`.x`, i.e.
-/// width) extract into `llvm.dx.resource.getdimensions_x`, the only overload
-/// LLVM's own `DXILOpLowering.cpp` lowers a canonical intrinsic to yet (see
-/// this section's header comment): any other field, or a use that isn't a
-/// field-0 `extractvalue`, is left unraised.
-bool raiseGetDimensionsX(CallInst &CI) {
+/// width) and/or field-1 (`.y`, i.e. height) extracts into
+/// `llvm.dx.resource.getdimensions_x`/`_xy`, the only two overloads LLVM's
+/// own `DXILOpLowering.cpp` lowers a canonical intrinsic to yet (see this
+/// section's header comment): a use of field 2 or 3 (`.z`/mip count -- a
+/// depth/array-slice count or `GetDimensions`' optional mip-count out
+/// parameter), or a use that isn't a field extract at all, is left
+/// unraised, since there is no `levels_xy`-shaped counterpart to verify
+/// against.
+///
+/// Field 0 alone raises to the scalar `_x` overload (exactly as before this
+/// also covered field 1); fields 0 and/or 1 together raise to the
+/// `<2 x i32>`-returning `_xy` overload instead, with each surviving
+/// `extractvalue` rewritten to the matching `extractelement`.
+bool raiseGetDimensions(CallInst &CI) {
   if (CI.arg_size() != 3) // opcode, Handle, MipLevel
     return false;
   Value *Handle = lookThroughCastHandle(CI.getArgOperand(1));
@@ -1594,23 +1604,48 @@ bool raiseGetDimensionsX(CallInst &CI) {
       !isa<dxil::TextureExtType, dxil::MSTextureExtType>(Handle->getType()))
     return false;
 
-  SmallVector<ExtractValueInst *, 1> Extracts;
+  SmallVector<ExtractValueInst *, 2> Extracts;
+  bool NeedsHeight = false;
   for (User *U : CI.users()) {
     auto *EV = dyn_cast<ExtractValueInst>(U);
-    if (!EV || EV->getNumIndices() != 1 || EV->getIndices()[0] != 0)
+    if (!EV || EV->getNumIndices() != 1)
       return false;
+    uint64_t Field = EV->getIndices()[0];
+    if (Field > 1)
+      return false;
+    NeedsHeight |= (Field == 1);
     Extracts.push_back(EV);
   }
   if (Extracts.empty())
     return false;
+  // `CI.users()`'s order is the def-use list's, not program order; sort by
+  // field index so the emitted `extractelement`s (and this raiser's own
+  // behavior) do not depend on that incidental order.
+  llvm::sort(Extracts, [](const ExtractValueInst *A,
+                          const ExtractValueInst *B) {
+    return A->getIndices()[0] < B->getIndices()[0];
+  });
 
   IRBuilder<> Builder(&CI);
-  Function *GetDimensionsXFn = Intrinsic::getOrInsertDeclaration(
-      CI.getModule(), Intrinsic::dx_resource_getdimensions_x,
-      {Handle->getType()});
-  Value *Width = Builder.CreateCall(GetDimensionsXFn, {Handle});
+  Value *Dimensions;
+  if (NeedsHeight) {
+    Function *GetDimensionsXYFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(), Intrinsic::dx_resource_getdimensions_xy,
+        {Handle->getType()});
+    Dimensions = Builder.CreateCall(GetDimensionsXYFn, {Handle});
+  } else {
+    Function *GetDimensionsXFn = Intrinsic::getOrInsertDeclaration(
+        CI.getModule(), Intrinsic::dx_resource_getdimensions_x,
+        {Handle->getType()});
+    Dimensions = Builder.CreateCall(GetDimensionsXFn, {Handle});
+  }
+
   for (ExtractValueInst *EV : Extracts) {
-    EV->replaceAllUsesWith(Width);
+    Value *Replacement =
+        NeedsHeight ? Builder.CreateExtractElement(
+                          Dimensions, Builder.getInt32(EV->getIndices()[0]))
+                    : Dimensions;
+    EV->replaceAllUsesWith(Replacement);
     EV->eraseFromParent();
   }
   CI.eraseFromParent();
@@ -1853,7 +1888,7 @@ bool raiseResourceOps(Module &M) {
     return raiseTextureStore(CI);
   });
   Changed |= forEachDXOpCall(72, [](CallInst &CI) { // GetDimensions
-    return raiseGetDimensionsX(CI);
+    return raiseGetDimensions(CI);
   });
 
   for (Function &F : llvm::make_early_inc_range(M.functions())) {

@@ -2,7 +2,7 @@
 
 ; Covers feme::dxil::OpRaisingPass's texture/sampler access raising
 ; (raiseSample/raiseSampleLevel/raiseTextureLoad/raiseTextureStore/
-; raiseGetDimensionsX in OpRaising.cpp): the texture/sampler handle
+; raiseGetDimensions in OpRaising.cpp): the texture/sampler handle
 ; reconstruction itself was the "only the implementation left" remainder of
 ; Design.md's "Decision: texture and sampler handle kinds" (roadmap R30);
 ; raiseTextureStore closes Roadmap.md's "the remaining resource access ops"
@@ -102,10 +102,8 @@ define <4 x float> @textureload_2d(i32 %idx, i32 %x, i32 %y, i32 %mip) {
   ret <4 x float> %v3
 }
 
-; `dx.op.getDimensions` (72)'s `.x` (width) field raises to `llvm.dx.
-; resource.getdimensions.x`; the `.y` (height) field is left as an
-; unmodified `extractvalue` since no `getdimensions.xy` lowering exists yet
-; to cross-check against (see the section header comment in OpRaising.cpp).
+; `dx.op.getDimensions` (72)'s `.x` (width) field alone raises to `llvm.dx.
+; resource.getdimensions.x`, the scalar overload -- see `raiseGetDimensions`.
 ; CHECK-LABEL: define i32 @dimensions_2d(
 define i32 @dimensions_2d(i32 %idx) {
   ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
@@ -116,6 +114,29 @@ define i32 @dimensions_2d(i32 %idx) {
   %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %tex2, i32 poison)
   %w = extractvalue %dx.types.Dimensions %d, 0
   ret i32 %w
+}
+
+; `dx.op.getDimensions` (72)'s `.x`/`.y` (width/height) fields together raise
+; to `llvm.dx.resource.getdimensions.xy`, the `<2 x i32>` overload -- e.g. a
+; `Texture2D::GetDimensions(uint, uint)`/`RWTexture2D::GetDimensions` call,
+; whose two out-parameters both read this same op's result.
+; CHECK-LABEL: define <2 x i32> @dimensions_2d_xy(
+define <2 x i32> @dimensions_2d_xy(i32 %idx) {
+  ; CHECK: [[TEX:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap{{.*}}(i32 %idx, i1 false)
+  ; CHECK: [[DIMS:%.*]] = call <2 x i32> @llvm.dx.resource.getdimensions.xy{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[TEX]])
+  ; CHECK: [[W:%.*]] = extractelement <2 x i32> [[DIMS]], i32 0
+  ; CHECK: [[H:%.*]] = extractelement <2 x i32> [[DIMS]], i32 1
+  ; CHECK: [[V0:%.*]] = insertelement <2 x i32> poison, i32 [[W]], i32 0
+  ; CHECK: [[V1:%.*]] = insertelement <2 x i32> [[V0]], i32 [[H]], i32 1
+  ; CHECK: ret <2 x i32> [[V1]]
+  %tex1 = call %dx.types.Handle @dx.op.createHandleFromHeap(i32 218, i32 %idx, i1 false, i1 false)
+  %tex2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %tex1, %dx.types.ResourceProperties { i32 2, i32 1033 })
+  %d = call %dx.types.Dimensions @dx.op.getDimensions(i32 72, %dx.types.Handle %tex2, i32 poison)
+  %w = extractvalue %dx.types.Dimensions %d, 0
+  %h = extractvalue %dx.types.Dimensions %d, 1
+  %v0 = insertelement <2 x i32> poison, i32 %w, i32 0
+  %v1 = insertelement <2 x i32> %v0, i32 %h, i32 1
+  ret <2 x i32> %v1
 }
 
 ; A writeable `RWTexture2D<float4>` (kind 2, `IsUAV`) texel write:
