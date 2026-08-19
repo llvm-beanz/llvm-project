@@ -22858,3 +22858,180 @@ runtime value (only how the same field values get written into `Form`).
 Ran `check-feme-vulkan` as the same cheap proxy the immediately preceding
 session used: 8/9 passed, 1 unsupported, unchanged. `VulkanCTSReport.md`
 is left at its last-generated edition for the same reason.
+
+# 2026-08-19: Fix textureLoad/textureStore/cbufferLoad raising for register/space-0 bindings
+
+## The report
+
+The user's HLSL compute shader -- a bilateral filter reading a
+`Texture2D<half4>` at `t0`, writing a `RWTexture2D<half4>` at `u0`, and
+reading a `cbuffer` of two `half` scalars at `b0` (see the exact source in
+the prompt) -- failed to retarget to AMDGPU with:
+
+```
+feme: 'dx.op.textureLoad.f32' is not supported when targeting
+'amdgpu9.0a-amd-amdhsa' (used in function 'main')
+```
+
+The prompt described this as "feme is hitting an assert," and asked to
+"flesh out" the resource access ops feme's `OpRaisingPass` doesn't yet
+raise. Both turned out to be slightly off from what was actually going on
+here, which is worth recording since it shaped how I investigated this:
+
+- It isn't a real assert. It's `feme::verifyNoRaisedIRRemains`'s clean
+  diagnostic (`RaisedIRVerifier.cpp`) for exactly this situation --
+  `Driver.cpp`'s own comment on that check says as much: it exists so a
+  leftover `dx.op.*` call is reported here rather than reaching AMDGPU's
+  real instruction selection and hitting `llvm::MVT::getVT`'s
+  `llvm_unreachable("Unknown target ext type!")` (a real assert;
+  `b04f81210f22`'s prior session fixed exactly that crash for `feme`'s own
+  CPU-target/`llvm.dx.*` handles, and this is the same failure mode one
+  level further down the raising pipeline, for a genuinely-still-`dx.op.*`
+  call this time).
+- It isn't a missing op. `raiseTextureLoad`/`raiseTextureStore`/
+  `raiseCBufferLoadLegacy` already exist (added across `1f6d62d05179`/
+  `926b03927288`/`bba4d211e503` in earlier sessions, per this file's own
+  prior entries) and, per `feme-dxil-to-amdgpu-texture.ll`, already
+  compile a `Texture2D`/`RWTexture2D`/`cbuffer`-of-`half`s shader shaped
+  almost exactly like this one all the way to a real AMDGPU object file.
+
+## Reproducing for real
+
+Rather than trust that description, I compiled the user's *exact* shader
+with the real `dxc` binary available in this environment (`/usr/local/bin/
+dxc`, plus a full checkout at `/home/dev/dev/DirectXShaderCompiler`) and
+fed the result through the real `feme` CLI:
+
+```
+dxc -T cs_6_2 -E main shader.hlsl -Fo shader.dxil
+feme --target=amdgcn-amd-amdhsa shader.dxil -o shader.o
+```
+
+This *succeeded* -- a real, valid AMDGPU ELF object, and running `llvm-
+objdump`/`file` on it confirmed it. So did every other shader-model/16-bit-
+type combination I tried (`cs_6_0`, `cs_6_2`, `cs_6_2 -enable-16bit-
+types`) -- except one: `cs_6_6`, which reproduced the user's *exact*
+diagnostic verbatim (modulo the target triple spelling -- `feme --target=
+amdgcn-amd-amdhsa` prints `amdgcn-amd-amdhsa`, not `amdgpu9.0a-amd-
+amdhsa`, so that detail in the prompt's error text was evidently a
+paraphrase rather than a literal copy-paste; the rest of the message
+matched exactly).
+
+The reason SM6.6 (and only SM6.6+) reproduces this: LLVM's own DirectX
+backend's `DXILOpLowering` pass switches which DXIL op family it lowers a
+resource handle to based on shader model. Pre-6.6, every handle -- bound
+or (not yet supported by `dxc`) bindless -- goes through the legacy
+`dx.op.createHandle` (opcode 57) `feme::dxil::raiseLegacyCreateHandle`
+handles. SM6.6+ instead uses the newer `dx.op.createHandleFromBinding`
+(217) + `dx.op.annotateHandle` (216) pair `raiseResourceHandleFromBinding`
+handles, encoding the binding as a `%dx.types.ResBind { LowerBound,
+UpperBound, Space, Class }` struct constant. `feme-dxil-to-amdgpu-
+texture.ll`, the existing end-to-end test for this exact resource shape,
+happens to target SM6.2 -- so it only ever exercised the legacy path, and
+never caught this.
+
+## The actual bug
+
+`InputTexture`/`OutputTexture`'s bindings are `t0`/`u0`, i.e. `LowerBound
+= UpperBound = Space = 0`. For the `t0` (SRV) case, the fourth field
+(`Class`) is *also* 0 (SRV is class 0) -- so `%dx.types.ResBind`'s literal
+is `{ i32 0, i32 0, i32 0, i8 0 }`, **every field zero**. LLVM's constant
+folder represents an all-zero struct/array/vector constant as a
+`ConstantAggregateZero`, a distinct `Constant` subclass from
+`ConstantStruct` used for a struct literal with at least one nonzero
+field -- confirmed by disassembling the actual SM6.6 DXIL bitcode via
+`feme-translate --import-dxil` and inspecting it directly, not just
+reasoning about it: `%dx.types.ResBind zeroinitializer` is exactly what
+`llc`'s `DXILOpLowering` emits for this handle, verbatim.
+
+`raiseResourceHandleFromBinding`/`raiseResourceHandleFromHeap` (in
+`OpRaising.cpp`) read `ResBind`/`ResourceProperties` via
+`dyn_cast<ConstantStruct>` -- which returns nullptr for a
+`ConstantAggregateZero`, since the two are unrelated sibling subclasses of
+`Constant`, not a base/derived pair. So for any resource bound at
+register/space 0 (`t0`, `u0`, `b0`, `s0` -- arguably the *single most
+common* HLSL binding of all, and exactly what `OutputTexture : register
+(u0)`'s `Class` field being nonzero (1, UAV) meant `raiseResourceHandleFromBinding`
+happened to still succeed for -- while `InputTexture : register(t0)`'s did
+not), the handle silently failed to raise. Every `dx.op.textureLoad.f32`
+call reading through it was then left in its original, unraised
+`dx.op.*` calling convention, which is exactly what
+`verifyNoRaisedIRRemains` is there to catch before it reaches AMDGPU's
+real instruction selection.
+
+This is not a "missing op" gap (the roadmap's framing, and the prompt's)
+-- it's a plain constant-matching bug in an op that already exists,
+latent since `raiseResourceHandleFromBinding` was first added
+(`bba4d211e503`), that just happened to require *both* an SM6.6+ input
+*and* a register/space-0 binding to observe, a combination no existing
+test exercised.
+
+## The fix
+
+Added a `getConstStruct(Value *V, unsigned NumFields)` helper next to the
+existing `getConstInt` in `OpRaising.cpp`: it accepts any `Constant` whose
+type is a `StructType` with the expected field count, regardless of
+`ConstantStruct`/`ConstantAggregateZero` (or, in principle, `poison`/
+`undef`, though `getConstInt` on the elements those return already fails
+closed for that case since neither round-trips through `ConstantInt`).
+Field access moved from `ConstantStruct::getOperand` (which only
+`ConstantStruct` provides) to the generic `Constant::getAggregateElement`,
+which already dispatches correctly across every constant-aggregate
+subclass. Replaced all three `dyn_cast<ConstantStruct>` call sites
+(`raiseResourceHandleFromBinding`'s `ResBind`/`ResourceProperties`,
+`raiseResourceHandleFromHeap`'s `ResourceProperties`) with this helper.
+No other files needed changes -- `raiseLegacyCreateHandle`'s own binding
+recovery reads a `!dx.resources` metadata operand instead of a call
+argument, and never went through `ConstantStruct` in the first place.
+
+## Verification
+
+Rebuilt the existing `build/` tree (already configured with
+`LLVM_ENABLE_ASSERTIONS=ON` and `ccache` as the compiler launcher from
+prior sessions). Confirmed the fix against:
+
+- The user's *exact* original shader, compiled for real with `dxc`
+  (`cs_6_0`/`cs_6_2`/`cs_6_2 -enable-16bit-types`/`cs_6_6`), all now
+  producing a real AMDGPU object file -- including `cs_6_6`, which failed
+  before the fix and is the combination that actually reproduces this bug.
+- A second, hand-written variant bound at `t3, space2`/`u1` (nonzero
+  fields throughout), to confirm the fix doesn't change behavior for the
+  binding shapes that already worked.
+- Reverted the fix (`git stash`) and re-ran both the new lit test and the
+  user's `cs_6_6` repro to confirm each fails the same way beforehand,
+  not just that they pass after -- the actual regression-test discipline,
+  not just "it works now."
+
+Added two regression tests:
+
+- `test/Transforms/DXIL/dxil-raise-resource-handles.ll`'s new
+  `texture2d_srv_zero_binding` case: the pass-level check, a `Texture2D`
+  bound at `t0` with an explicit `%dx.types.ResBind zeroinitializer`
+  operand (matching real `-dxil-op-lower` output for this exact case, not
+  just a plausible-looking hand-written literal).
+- `test/Tools/feme/feme-dxil-to-amdgpu-zero-binding.ll`: the end-to-end
+  counterpart, the same `Texture2D`/`RWTexture2D` pair as `feme-dxil-to-
+  amdgpu-texture.ll` but targeting SM6.6 rather than SM6.2, through the
+  real `feme` CLI and a real `llc`-emitted DXIL container.
+
+`ninja check-feme`: 1488 -> 1489 total tests (the two new ones merge into
+existing lit files, so only the new standalone `.ll` file adds to the
+count), 1488 passed, 1 unsupported throughout -- no regressions.
+
+Vulkan CTS: not re-run in full. This change is confined to
+`feme/lib/Transforms/DXIL/OpRaising.cpp`, on the DXIL-import/`OpRaising`/
+AMDGPU-retarget path (`feme --target=amdgcn-amd-amdhsa`/`nvptx*`), not the
+SPIR-V-import/`feme::cpu`/`libfeme_vulkan` path `feme-vulkan-*` and the
+CTS run exercise -- the same reasoning the immediately preceding sessions
+in this file used for their own out-of-path changes. Ran `check-feme-
+vulkan` as the same cheap proxy: 8/9 passed, 1 unsupported, unchanged.
+`VulkanCTSReport.md` stays at its last-generated edition.
+
+## Design.md
+
+No update needed: `Design.md`'s existing description of resource-handle
+raising ("reconstructing the resource's `target("dx.")` handle type from
+the two ops' constant `%dx.types.ResBind`/`%dx.types.ResourceProperties`
+operands") is still accurate -- this was a bug in that reconstruction, not
+a change to what it does or a deviation from what the design document
+describes.
