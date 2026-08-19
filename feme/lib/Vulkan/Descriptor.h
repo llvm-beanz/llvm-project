@@ -236,6 +236,28 @@ private:
   std::map<uint32_t, std::vector<DescriptorImageBinding>> ImageBindings;
 };
 
+/// A `VkDescriptorUpdateTemplate`: the entry list `vkUpdateDescriptorSet
+/// WithTemplate` walks against a caller-supplied byte buffer, applying
+/// exactly the descriptor-type dispatch `vkUpdateDescriptorSets` itself
+/// uses (see `writeDescriptorFromRaw` in Descriptor.cpp) to each entry's
+/// `descriptorCount` array elements, read at `offset + i * stride` bytes
+/// into that buffer. Only `VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_
+/// DESCRIPTOR_SET` is supported -- `_PUSH_DESCRIPTORS_KHR` needs
+/// `VK_KHR_push_descriptor`, which this ICD does not implement.
+class DescriptorUpdateTemplate {
+public:
+  explicit DescriptorUpdateTemplate(
+      std::vector<VkDescriptorUpdateTemplateEntry> Entries)
+      : Entries(std::move(Entries)) {}
+
+  llvm::ArrayRef<VkDescriptorUpdateTemplateEntry> entries() const {
+    return Entries;
+  }
+
+private:
+  std::vector<VkDescriptorUpdateTemplateEntry> Entries;
+};
+
 /// A `VkDescriptorPool`: owns every `DescriptorSet` allocated from it and
 /// accounts for `maxSets`, per "Object Model". Per-descriptor-type pool
 /// size accounting is intentionally not modeled -- only `maxSets` is

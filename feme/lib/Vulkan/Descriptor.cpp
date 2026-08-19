@@ -259,6 +259,46 @@ VKAPI_ATTR VkResult VKAPI_CALL vkFreeDescriptorSets(
   return VK_SUCCESS;
 }
 
+namespace {
+
+/// Writes one descriptor array element into \p Set from a raw pointer to
+/// its Vulkan info struct (`VkDescriptorBufferInfo`, `VkDescriptorImageInfo`,
+/// or `VkBufferView`), dispatching on \p Type exactly as
+/// `vkUpdateDescriptorSets` does. Shared with
+/// `vkUpdateDescriptorSetWithTemplate` (Descriptor.cpp), whose source data
+/// is an arbitrary caller-supplied byte layout rather than one of the
+/// three typed arrays `VkWriteDescriptorSet` itself carries -- both need
+/// the exact same per-descriptor-type switch, just addressed differently.
+void writeDescriptorFromRaw(DescriptorSet &Set, VkDescriptorType Type,
+                            uint32_t Binding, uint32_t ArrayElement,
+                            const void *Data) {
+  if (!isSupportedDescriptorType(Type))
+    return;
+  if (isTexelBufferDescriptorType(Type)) {
+    VkBufferView View;
+    std::memcpy(&View, Data, sizeof(View));
+    Set.write(Binding, ArrayElement, fromHandle<BufferView>(View));
+    return;
+  }
+  if (isImageDescriptorType(Type) || isSamplerDescriptorType(Type)) {
+    VkDescriptorImageInfo Info;
+    std::memcpy(&Info, Data, sizeof(Info));
+    bool WantsImage = isImageDescriptorType(Type);
+    bool WantsSampler = isSamplerDescriptorType(Type);
+    Set.write(Binding, ArrayElement,
+              WantsImage ? fromHandle<ImageView>(Info.imageView) : nullptr,
+              WantsSampler ? fromHandle<Sampler>(Info.sampler) : nullptr,
+              Info.imageLayout);
+    return;
+  }
+  VkDescriptorBufferInfo Info;
+  std::memcpy(&Info, Data, sizeof(Info));
+  Set.write(Binding, ArrayElement, fromHandle<Buffer>(Info.buffer), Info.offset,
+            Info.range);
+}
+
+} // namespace
+
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     VkDevice, uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount,
@@ -268,29 +308,17 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     if (!isSupportedDescriptorType(Write.descriptorType))
       continue;
     auto *Set = fromHandle<DescriptorSet>(Write.dstSet);
-    if (isTexelBufferDescriptorType(Write.descriptorType)) {
-      for (uint32_t J = 0; J != Write.descriptorCount; ++J)
-        Set->write(Write.dstBinding, Write.dstArrayElement + J,
-                   fromHandle<BufferView>(Write.pTexelBufferView[J]));
-      continue;
-    }
-    if (isImageDescriptorType(Write.descriptorType) ||
-        isSamplerDescriptorType(Write.descriptorType)) {
-      bool WantsImage = isImageDescriptorType(Write.descriptorType);
-      bool WantsSampler = isSamplerDescriptorType(Write.descriptorType);
-      for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
-        const VkDescriptorImageInfo &Info = Write.pImageInfo[J];
-        Set->write(Write.dstBinding, Write.dstArrayElement + J,
-                   WantsImage ? fromHandle<ImageView>(Info.imageView) : nullptr,
-                   WantsSampler ? fromHandle<Sampler>(Info.sampler) : nullptr,
-                   Info.imageLayout);
-      }
-      continue;
-    }
     for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
-      const VkDescriptorBufferInfo &Info = Write.pBufferInfo[J];
-      Set->write(Write.dstBinding, Write.dstArrayElement + J,
-                 fromHandle<Buffer>(Info.buffer), Info.offset, Info.range);
+      const void *Data;
+      if (isTexelBufferDescriptorType(Write.descriptorType))
+        Data = &Write.pTexelBufferView[J];
+      else if (isImageDescriptorType(Write.descriptorType) ||
+               isSamplerDescriptorType(Write.descriptorType))
+        Data = &Write.pImageInfo[J];
+      else
+        Data = &Write.pBufferInfo[J];
+      writeDescriptorFromRaw(*Set, Write.descriptorType, Write.dstBinding,
+                             Write.dstArrayElement + J, Data);
     }
   }
 
@@ -327,6 +355,59 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
                  B.Layout);
     }
   }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
+    VkDevice, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDescriptorUpdateTemplate *pDescriptorUpdateTemplate) {
+  // `PUSH_DESCRIPTORS_KHR` templates target `VK_KHR_push_descriptor`, which
+  // this ICD does not implement (every other push-descriptor entry point
+  // already rejects with "VK_KHR_push_descriptor is not supported" --
+  // ProcAddr.cpp's table simply has no such command to resolve at all, so
+  // rejecting the template type here is this command's own version of
+  // that same rejection).
+  if (pCreateInfo->templateType !=
+      VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET)
+    return VK_ERROR_INITIALIZATION_FAILED;
+  std::vector<VkDescriptorUpdateTemplateEntry> Entries(
+      pCreateInfo->pDescriptorUpdateEntries,
+      pCreateInfo->pDescriptorUpdateEntries +
+          pCreateInfo->descriptorUpdateEntryCount);
+  for (const VkDescriptorUpdateTemplateEntry &Entry : Entries)
+    if (!isSupportedDescriptorType(Entry.descriptorType))
+      return VK_ERROR_INITIALIZATION_FAILED;
+
+  Allocator Alloc(pAllocator);
+  DescriptorUpdateTemplate *Obj = Alloc.create<DescriptorUpdateTemplate>(
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(Entries));
+  if (!Obj)
+    return VK_ERROR_OUT_OF_HOST_MEMORY;
+  *pDescriptorUpdateTemplate = toHandle<VkDescriptorUpdateTemplate>(Obj);
+  return VK_SUCCESS;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(
+    VkDevice, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const VkAllocationCallbacks *pAllocator) {
+  if (!descriptorUpdateTemplate)
+    return;
+  Allocator Alloc(pAllocator);
+  Alloc.destroy(fromHandle<DescriptorUpdateTemplate>(descriptorUpdateTemplate));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
+    VkDevice, VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void *pData) {
+  auto *Set = fromHandle<DescriptorSet>(descriptorSet);
+  const auto *Template =
+      fromHandle<DescriptorUpdateTemplate>(descriptorUpdateTemplate);
+  const auto *Bytes = static_cast<const uint8_t *>(pData);
+  for (const VkDescriptorUpdateTemplateEntry &Entry : Template->entries())
+    for (uint32_t J = 0; J != Entry.descriptorCount; ++J)
+      writeDescriptorFromRaw(*Set, Entry.descriptorType, Entry.dstBinding,
+                             Entry.dstArrayElement + J,
+                             Bytes + Entry.offset + J * Entry.stride);
 }
 
 } // namespace feme::vulkan

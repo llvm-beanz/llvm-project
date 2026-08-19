@@ -517,6 +517,16 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     VkDevice device, uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount,
     const VkCopyDescriptorSet *pDescriptorCopies);
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
+    VkDevice device, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkDescriptorUpdateTemplate *pDescriptorUpdateTemplate);
+VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorUpdateTemplate(
+    VkDevice device, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
+    VkDevice device, VkDescriptorSet descriptorSet,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate, const void *pData);
 
 // V1: fences and queue submission (see "Queues, Scheduling, and
 // Synchronization").

@@ -192,6 +192,9 @@ vkResetDescriptorPool
 vkAllocateDescriptorSets
 vkFreeDescriptorSets
 vkUpdateDescriptorSets
+vkCreateDescriptorUpdateTemplate
+vkDestroyDescriptorUpdateTemplate
+vkUpdateDescriptorSetWithTemplate
 
 # V1: fences and queue submission (see "Queues, Scheduling, and
 # Synchronization").

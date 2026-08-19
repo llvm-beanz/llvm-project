@@ -152,6 +152,92 @@ TEST_F(DescriptorTest, AllocateUpdateAndReadBackWrite) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
+/// Found missing entirely -- a segfault through a null device-dispatch-
+/// table entry, not merely a rejection -- by the first real Vulkan-CTS run
+/// against this ICD (`dEQP-VK.binding_model.descriptorset_random.*`, which
+/// exercises `vkCreateDescriptorUpdateTemplate` heavily). Writes the same
+/// buffer binding `AllocateUpdateAndReadBackWrite` writes through
+/// `vkUpdateDescriptorSets`, but through a template over a raw byte buffer
+/// instead, and expects the identical `DescriptorBufferBinding` result.
+TEST_F(DescriptorTest, UpdateWithTemplateMatchesDirectWrite) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  VkDescriptorUpdateTemplateEntry Entry{};
+  Entry.dstBinding = 0;
+  Entry.descriptorCount = 1;
+  Entry.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Entry.offset = 0;
+  Entry.stride = sizeof(VkDescriptorBufferInfo);
+  VkDescriptorUpdateTemplateCreateInfo TemplateInfo{};
+  TemplateInfo.descriptorUpdateEntryCount = 1;
+  TemplateInfo.pDescriptorUpdateEntries = &Entry;
+  TemplateInfo.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET;
+  VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
+                                             &Template),
+            VK_SUCCESS);
+
+  VkBuffer Buf = createStorageBuffer(256);
+  VkDescriptorBufferInfo BufInfo{Buf, 16, 64};
+  vkUpdateDescriptorSetWithTemplate(Device, Set, Template, &BufInfo);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<DescriptorBufferBinding> Array = S->bindingArray(0);
+  ASSERT_EQ(Array.size(), 1u);
+  EXPECT_EQ(Array[0].Buf, fromHandle<Buffer>(Buf));
+  EXPECT_EQ(Array[0].Offset, 16u);
+  EXPECT_EQ(Array[0].Range, 64u);
+
+  vkDestroyDescriptorUpdateTemplate(Device, Template, nullptr);
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  vkDestroyBuffer(Device, Buf, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// `_PUSH_DESCRIPTORS_KHR` needs `VK_KHR_push_descriptor`, which this ICD
+/// does not implement -- rejected at creation rather than accepted and
+/// then behaving as an ordinary descriptor-set template.
+TEST_F(DescriptorTest, PushDescriptorTemplateTypeIsRejected) {
+  VkDescriptorUpdateTemplateEntry Entry{};
+  Entry.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Entry.descriptorCount = 1;
+  VkDescriptorUpdateTemplateCreateInfo TemplateInfo{};
+  TemplateInfo.descriptorUpdateEntryCount = 1;
+  TemplateInfo.pDescriptorUpdateEntries = &Entry;
+  TemplateInfo.templateType =
+      VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS_KHR;
+  VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
+                                             &Template),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
 TEST_F(DescriptorTest, PoolExhaustionFailsAllocation) {
   VkDescriptorSetLayoutBinding Binding{};
   Binding.binding = 0;
