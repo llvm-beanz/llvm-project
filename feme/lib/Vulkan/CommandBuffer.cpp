@@ -676,6 +676,11 @@ struct GraphicsState {
 
   std::vector<Buffer *> VertexBuffers;
   std::vector<VkDeviceSize> VertexBufferOffsets;
+  // (roadmap C4c) `vkCmdBindVertexBuffers2EXT`'s optional `pStrides`:
+  // populated (and consulted) only when the bound pipeline declared
+  // `VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE` -- see
+  // `runDraw`'s vertex-fetch loop.
+  std::vector<VkDeviceSize> VertexBufferStrides;
   Buffer *IndexBuffer = nullptr;
   VkDeviceSize IndexBufferOffset = 0;
   VkIndexType IndexType = VK_INDEX_TYPE_UINT32;
@@ -829,6 +834,23 @@ Error applyLoadOps(const RenderTargetBinding &Binding) {
   return Error::success();
 }
 
+/// (roadmap C4c) `BindingDecl`'s effective stride for this draw: its own
+/// static `Stride` unless \p Pipeline declared
+/// `VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE` dynamic *and*
+/// `vkCmdBindVertexBuffers2EXT` actually supplied one for this binding
+/// (`VK_WHOLE_SIZE` marks a slot it didn't -- see the `BindVertexBuffers`
+/// replay case). Shared by the vertex-fetch loop and its own bounds check
+/// below, so the two can never disagree about which stride a draw used.
+uint32_t resolveVertexBindingStride(const GraphicsPipeline &Pipeline,
+                                    const GraphicsState &Gfx,
+                                    const VertexInputBinding &BindingDecl) {
+  if (Pipeline.isDynamic(DynamicStateVertexInputBindingStride) &&
+      BindingDecl.Binding < Gfx.VertexBufferStrides.size() &&
+      Gfx.VertexBufferStrides[BindingDecl.Binding] != VK_WHOLE_SIZE)
+    return static_cast<uint32_t>(Gfx.VertexBufferStrides[BindingDecl.Binding]);
+  return BindingDecl.Stride;
+}
+
 /// Runs one draw command: materializes the bound descriptor sets, resolves
 /// the pipeline's static state against the command buffer's dynamic state,
 /// converts the render-target binding and vertex/index bindings into a
@@ -931,7 +953,7 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
 
     feme::graphics::VertexBufferBinding VB;
     VB.Binding = BindingDecl.Binding;
-    VB.Stride = BindingDecl.Stride;
+    VB.Stride = resolveVertexBindingStride(Pipeline, Gfx, BindingDecl);
     VB.Data = llvm::ArrayRef<uint8_t>(static_cast<const uint8_t *>(Buf.data()) +
                                           Offset,
                                       static_cast<size_t>(Buf.size() - Offset));
@@ -1043,8 +1065,9 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
     // A per-instance binding's reach depends on the instance range, not the
     // vertex range: it is read once per instance, not once per vertex.
     uint64_t LastIndex = BindingDecl.PerInstance ? LastInstance : LastVertex;
+    uint32_t Stride = resolveVertexBindingStride(Pipeline, Gfx, BindingDecl);
     uint64_t Base = Gfx.VertexBufferOffsets[BindingDecl.Binding] +
-                    LastIndex * BindingDecl.Stride;
+                    LastIndex * Stride;
     for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes()) {
       if (Attr.Binding != BindingDecl.Binding)
         continue;
@@ -1369,15 +1392,23 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       Gfx.Fb = nullptr;
       break;
     case RecordedCommand::Kind::BindVertexBuffers: {
+      // `VK_WHOLE_SIZE` (`UINT64_MAX`) is reused here as "no stride
+      // override at this slot", since `VkDeviceSize`'s own zero value is a
+      // legal (if unusual) stride -- see `runDraw`'s vertex-fetch loop.
+      constexpr VkDeviceSize NoStrideOverride = VK_WHOLE_SIZE;
       size_t Required = Cmd.FirstSet + Cmd.VertexBuffers.size();
       if (Gfx.VertexBuffers.size() < Required) {
         Gfx.VertexBuffers.resize(Required, nullptr);
         Gfx.VertexBufferOffsets.resize(Required, 0);
+        Gfx.VertexBufferStrides.resize(Required, NoStrideOverride);
       }
       for (size_t I = 0; I != Cmd.VertexBuffers.size(); ++I) {
         Gfx.VertexBuffers[Cmd.FirstSet + I] = Cmd.VertexBuffers[I];
         Gfx.VertexBufferOffsets[Cmd.FirstSet + I] =
             I < Cmd.VertexBufferOffsets.size() ? Cmd.VertexBufferOffsets[I] : 0;
+        Gfx.VertexBufferStrides[Cmd.FirstSet + I] =
+            I < Cmd.VertexBufferStrides.size() ? Cmd.VertexBufferStrides[I]
+                                               : NoStrideOverride;
       }
       break;
     }
@@ -1994,6 +2025,34 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers(
   }
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->bindVertexBuffers(firstBinding, std::move(Buffers), std::move(Offsets));
+}
+
+// (roadmap C4c) `vkCmdBindVertexBuffers2EXT`: `VK_EXT_extended_dynamic_
+// state`'s last state, VERTEX_INPUT_BINDING_STRIDE, is only reachable
+// through this call's optional `pStrides` (there is no separate
+// `vkCmdSetVertexInputBindingStride*` command). `pSizes` is not modeled --
+// this ICD tracks no notion of a vertex buffer's bound "range" narrower
+// than its own size, matching `vkCmdBindVertexBuffers`' pre-existing scope.
+VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers2EXT(
+    VkCommandBuffer commandBuffer, uint32_t firstBinding, uint32_t bindingCount,
+    const VkBuffer *pBuffers, const VkDeviceSize *pOffsets,
+    const VkDeviceSize * /*pSizes*/, const VkDeviceSize *pStrides) {
+  std::vector<vulkan::Buffer *> Buffers;
+  std::vector<VkDeviceSize> Offsets;
+  std::vector<VkDeviceSize> Strides;
+  Buffers.reserve(bindingCount);
+  Offsets.reserve(bindingCount);
+  if (pStrides)
+    Strides.reserve(bindingCount);
+  for (uint32_t I = 0; I != bindingCount; ++I) {
+    Buffers.push_back(fromHandle<vulkan::Buffer>(pBuffers[I]));
+    Offsets.push_back(pOffsets ? pOffsets[I] : 0);
+    if (pStrides)
+      Strides.push_back(pStrides[I]);
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->bindVertexBuffers(firstBinding, std::move(Buffers), std::move(Offsets),
+                         std::move(Strides));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,

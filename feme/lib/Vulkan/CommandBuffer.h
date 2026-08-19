@@ -210,6 +210,11 @@ struct RecordedCommand {
   /// plus `IndexType` below.
   std::vector<Buffer *> VertexBuffers;
   std::vector<VkDeviceSize> VertexBufferOffsets;
+  /// (roadmap C4c) `vkCmdBindVertexBuffers2EXT`'s optional `pStrides`:
+  /// empty when unused (a plain `vkCmdBindVertexBuffers`, or
+  /// `vkCmdBindVertexBuffers2EXT` called with `pStrides == nullptr`),
+  /// otherwise one entry per `VertexBuffers` slot.
+  std::vector<VkDeviceSize> VertexBufferStrides;
   VkIndexType IndexType = VK_INDEX_TYPE_UINT32;
   /// (V6) `ClearColorImage`/`ClearDepthStencilImage`: the cleared value
   /// (`ClearValues[0]`, shared with `BeginRenderPass`'s own list) and the
@@ -541,14 +546,17 @@ public:
     Cmd.Op = RecordedCommand::Kind::EndRenderPass;
     Commands.push_back(Cmd);
   }
-  /// (V6) `vkCmdBindVertexBuffers`.
+  /// (V6) `vkCmdBindVertexBuffers`. \p Strides is empty unless called from
+  /// `vkCmdBindVertexBuffers2EXT` with a non-null `pStrides` (roadmap C4c).
   void bindVertexBuffers(uint32_t FirstBinding, std::vector<Buffer *> Buffers,
-                         std::vector<VkDeviceSize> Offsets) {
+                        std::vector<VkDeviceSize> Offsets,
+                        std::vector<VkDeviceSize> Strides = {}) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BindVertexBuffers;
     Cmd.FirstSet = FirstBinding;
     Cmd.VertexBuffers = std::move(Buffers);
     Cmd.VertexBufferOffsets = std::move(Offsets);
+    Cmd.VertexBufferStrides = std::move(Strides);
     Commands.push_back(std::move(Cmd));
   }
   /// (V6) `vkCmdBindIndexBuffer`.

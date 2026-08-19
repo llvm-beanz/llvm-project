@@ -115,6 +115,13 @@ enum DynamicStateBits : uint32_t {
   // `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT`/`_SCISSOR_WITH_COUNT` reuse
   // `DynamicStateViewport`/`DynamicStateScissor` above rather than adding
   // their own bits -- see `mapDynamicState`'s comment.
+  // `VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE`: set via
+  // `vkCmdBindVertexBuffers2EXT`'s optional `pStrides` (`CommandBuffer.h`'s
+  // `GraphicsState::VertexBufferStrides`) rather than through
+  // `DynamicGraphicsState` -- it is bound-buffer state, tracked alongside
+  // the buffers/offsets `vkCmdBindVertexBuffers` itself already carries,
+  // not a fixed-size per-draw snapshot field like every other state here.
+  DynamicStateVertexInputBindingStride = 1u << 15,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a

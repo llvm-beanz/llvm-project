@@ -261,6 +261,8 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateStencilOp;
   case VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY:
     return DynamicStatePrimitiveTopology;
+  case VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE:
+    return DynamicStateVertexInputBindingStride;
   default:
     return std::nullopt;
   }
