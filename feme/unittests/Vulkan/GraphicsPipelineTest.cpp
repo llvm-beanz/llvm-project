@@ -573,6 +573,44 @@ TEST_F(GraphicsPipelineTest, DynamicStencilStateOverridesStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap C4c) `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT`/`_SCISSOR_WITH_
+/// COUNT`: the same effective dynamic state as `VIEWPORT`/`SCISSOR`, so a
+/// pipeline may declare `viewportCount`/`scissorCount` as anything (even
+/// `0`, as here) once either "with count" state makes that field ignored,
+/// and `resolveViewport`/`resolveScissor` still read the per-draw snapshot.
+TEST_F(GraphicsPipelineTest, ViewportWithCountIsTheSameDynamicStateAsViewport) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  ViewportState.viewportCount = 0;
+  ViewportState.pViewports = nullptr;
+  ViewportState.scissorCount = 0;
+  ViewportState.pScissors = nullptr;
+  VkDynamicState DynStates[2] = {VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT,
+                                 VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = DynStates;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  Dynamic.Viewport = feme::graphics::ViewportState{1.0f, 2.0f, 8.0f, 8.0f,
+                                                   0.0f, 1.0f};
+  Dynamic.Scissor = feme::graphics::ScissorRect{0, 0, 8, 8};
+  EXPECT_EQ(Graphics->resolveViewport(Dynamic).Width, 8.0f);
+  EXPECT_EQ(Graphics->resolveScissor(Dynamic).Width, 8u);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A fragment stage writing no `SV_Target0` cannot fill the render pass's
 /// one color attachment; the mismatch is a creation failure, not a draw-time
 /// surprise.

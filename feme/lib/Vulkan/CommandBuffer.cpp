@@ -2001,6 +2001,29 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->setScissor(pScissors[0]);
 }
 
+// (roadmap C4c) `vkCmdSetViewportWithCountEXT`/`vkCmdSetScissorWithCountEXT`:
+// the "with count" spelling `VK_EXT_extended_dynamic_state` adds, with no
+// `first*` parameter (a pipeline may only ever use one or the other of a
+// state/its "with count" counterpart, never both). Reuses `setViewport`/
+// `setScissor` directly: `maxViewports == 1` means "with count" carries no
+// more information than the fixed-count commands above already do.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetViewportWithCountEXT(VkCommandBuffer commandBuffer,
+                            uint32_t viewportCount,
+                            const VkViewport *pViewports) {
+  if (viewportCount == 0)
+    return;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setViewport(pViewports[0]);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetScissorWithCountEXT(VkCommandBuffer commandBuffer,
+                           uint32_t scissorCount, const VkRect2D *pScissors) {
+  if (scissorCount == 0)
+    return;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)->setScissor(pScissors[0]);
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdSetBlendConstants(
     VkCommandBuffer commandBuffer, const float blendConstants[4]) {
   std::array<float, 4> Constants{blendConstants[0], blendConstants[1],

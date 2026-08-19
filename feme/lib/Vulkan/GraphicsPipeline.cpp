@@ -223,8 +223,17 @@ std::optional<LogicOp> mapLogicOp(VkLogicOp Op) {
 std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
   switch (State) {
   case VK_DYNAMIC_STATE_VIEWPORT:
+  // (roadmap C4c) `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT` is the same
+  // effective dynamic state as `VIEWPORT` (the Vulkan spec forbids a
+  // pipeline from declaring both): `resolveViewport` already reads
+  // `DynamicGraphicsState::Viewport` whenever `DynamicStateViewport` is
+  // set, and `vkCmdSetViewportWithCountEXT` (this ICD's `maxViewports ==
+  // 1`, so "with count" carries no more information than the fixed-count
+  // command) writes into that same field.
+  case VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT:
     return DynamicStateViewport;
   case VK_DYNAMIC_STATE_SCISSOR:
+  case VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT:
     return DynamicStateScissor;
   case VK_DYNAMIC_STATE_BLEND_CONSTANTS:
     return DynamicStateBlendConstants;
@@ -780,10 +789,19 @@ Error translateViewportState(const VkPipelineViewportStateCreateInfo *Info,
   if (!Info)
     return createStringError(inconvertibleErrorCode(),
                              "a graphics pipeline needs viewport state");
+  // (roadmap C4c) `VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT`/`_SCISSOR_WITH_
+  // COUNT`: per `VK_EXT_extended_dynamic_state`, `Info->viewportCount`/
+  // `scissorCount` are ignored (not just an initial value) whenever the
+  // matching state is dynamic, so this function must not gate on them --
+  // matching the depth/stencil dynamic states' own "ignore the static
+  // field entirely" treatment (see `translateDepthStencilState`).
+  bool ViewportDynamic = (Out.DynamicStates & DynamicStateViewport) != 0;
+  bool ScissorDynamic = (Out.DynamicStates & DynamicStateScissor) != 0;
   // Multiple viewports/scissors need viewport array indexing (V7); a
   // pipeline declaring more than one is rejected rather than silently
   // rasterized through the first.
-  if (Info->viewportCount != 1 || Info->scissorCount != 1)
+  if ((!ViewportDynamic && Info->viewportCount != 1) ||
+      (!ScissorDynamic && Info->scissorCount != 1))
     return createStringError(inconvertibleErrorCode(),
                              "exactly one viewport and one scissor are "
                              "implemented (maxViewports is 1)");

@@ -433,6 +433,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
                                            uint32_t firstScissor,
                                            uint32_t scissorCount,
                                            const VkRect2D *pScissors);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetViewportWithCountEXT(VkCommandBuffer commandBuffer,
+                            uint32_t viewportCount,
+                            const VkViewport *pViewports);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetScissorWithCountEXT(VkCommandBuffer commandBuffer,
+                           uint32_t scissorCount, const VkRect2D *pScissors);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetBlendConstants(
     VkCommandBuffer commandBuffer, const float blendConstants[4]);
 VKAPI_ATTR void VKAPI_CALL
