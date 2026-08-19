@@ -112,3 +112,31 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %v : f32
   }
 }
+
+// -----
+
+// A cbuffer/UBO whose FeMe wrapper's sole member (the block's own field
+// struct) itself has a sized-array field, and that field is indexed
+// further -- caught a real bug during a Vulkan-CTS run
+// (dEQP-VK.ubo.single_struct.per_block_buffer.std140_instance_array_both):
+// rewriteBlockAccess used to assume the wrapper shape's content was always
+// a storage buffer's runtime array, unconditionally casting to
+// `RuntimeArrayType` and asserting on a uniform block's own field struct
+// instead.
+
+// CHECK-LABEL: llvm.func @read_element
+// CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(array<4 x f32>)>, 2, 0>
+// CHECK: %[[FIELD:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
+// CHECK: %[[ELEM:.*]] = llvm.getelementptr inbounds %[[FIELD]][0, %{{.*}}]
+// CHECK: llvm.load %[[ELEM]] : !llvm.ptr<12> -> f32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @cb bind(0, 2) : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0])>, Uniform>
+  spirv.func @read_element(%idx : i32) -> f32 "None" {
+    %0 = spirv.mlir.addressof @cb : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0])>, Uniform>
+    %c0 = spirv.Constant 0 : i32
+    %ac = spirv.AccessChain %0[%c0, %c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0])>, Uniform>, i32, i32, i32 -> !spirv.ptr<f32, Uniform>
+    %v = spirv.Load "Uniform" %ac : f32
+    spirv.ReturnValue %v : f32
+  }
+}

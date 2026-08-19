@@ -685,14 +685,10 @@ std::optional<uint64_t> getConstantMemberIndex(mlir::Value Index) {
 /// binding) below: builds the `llvm.spv.resource.getpointer` call selecting
 /// \p AllIndices[Selector] of \p Element's content from \p Handle, then an
 /// ordinary GEP for any indices beyond it -- see BlockElement's own comment
-/// for what that selector means in each shape, and BlockAccessChainPattern's
-/// for why a further GEP needs \p ElementPointerType (the pointer type
-/// whose pointee is the block's own struct, to recover a selected member's
-/// SPIR-V type) rather than trusting the already-converted handle type.
+/// for what that selector means in each shape.
 mlir::LogicalResult rewriteBlockAccess(
     mlir::spirv::AccessChainOp Op, mlir::ConversionPatternRewriter &Rewriter,
-    const mlir::TypeConverter &TypeConverter,
-    mlir::spirv::PointerType ElementPointerType, const BlockElement &Element,
+    const mlir::TypeConverter &TypeConverter, const BlockElement &Element,
     mlir::Value Handle, mlir::ValueRange AllIndices, unsigned Selector) {
   mlir::Type ResultType =
       TypeConverter.convertType(Op.getComponentPtr().getType());
@@ -709,20 +705,20 @@ mlir::LogicalResult rewriteBlockAccess(
   }
 
   // Further indices navigate what `llvm.spv.resource.getpointer` just
-  // selected -- an array element's own fields, in the wrapper shape (whose
-  // sole content is always that homogeneous array); one of the direct
-  // shape's own members, itself possibly an array, a matrix, or a nested
-  // struct -- so its own SPIR-V type has to be recovered to convert the
+  // selected. Element.Content is either a homogeneous, dynamically-indexed
+  // runtime array (a storage buffer's own content, whether reached through
+  // the wrapper shape or the direct one), whose every element shares one
+  // type regardless of which one Selector names; or a struct (a uniform
+  // block's content, in either shape), whose member Selector names varies
+  // per member and -- like any struct-member-selecting SPIR-V index -- is
+  // always a compile-time constant, so it has to be read to recover the
   // right one. The leading 0 dereferences through the pointer
   // `llvm.spv.resource.getpointer` returned, exactly as an ordinary GEP
   // into a pointer operand would.
   mlir::Type SelectedType;
-  if (Element.HasWrapper) {
-    SelectedType = mlir::cast<mlir::spirv::RuntimeArrayType>(
-                       mlir::cast<mlir::spirv::StructType>(
-                           ElementPointerType.getPointeeType())
-                           .getElementType(0))
-                       .getElementType();
+  if (auto Array =
+          mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(Element.Content)) {
+    SelectedType = Array.getElementType();
   } else {
     std::optional<uint64_t> MemberIndex =
         getConstantMemberIndex(Op.getIndices()[Selector]);
@@ -792,9 +788,8 @@ public:
     if (Indices.size() <= Selector)
       return Rewriter.notifyMatchFailure(Op, "not enough indices");
 
-    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(), PointerType,
-                              *Element, Adaptor.getBasePtr(), Indices,
-                              Selector);
+    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(), *Element,
+                              Adaptor.getBasePtr(), Indices, Selector);
   }
 };
 
@@ -873,9 +868,8 @@ public:
              mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
              It->second.NameSymbol)});
 
-    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(),
-                              ElementPointerType, *Element, Handle, Indices,
-                              Selector);
+    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(), *Element,
+                              Handle, Indices, Selector);
   }
 
 private:
