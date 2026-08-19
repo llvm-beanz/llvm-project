@@ -1440,6 +1440,95 @@ public:
   }
 };
 
+/// Converts `spirv.CompositeExtract` when its container is a matrix, which
+/// converts to LLVM's own natural array-of-column-vectors representation
+/// (see the `spirv.MatrixType` conversion in
+/// populateSPIRVToLLVMTargetTypeConversions) -- MLIR's own
+/// `CompositeExtractPattern` assumes any non-`VectorType` container is a
+/// pure `llvm.extractvalue`-shaped aggregate (struct/array nesting all the
+/// way down) and asserts once an index remains past the array level, which
+/// a matrix's own vector-typed columns are not. One index selects a whole
+/// column (an ordinary `llvm.extractvalue`, same as MLIR's own pattern
+/// would produce); two select a column then a scalar element within it,
+/// needing an `llvm.extractelement` for that second step instead.
+class MatrixCompositeExtractPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeExtractOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CompositeExtractOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CompositeExtractOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (!mlir::isa<mlir::spirv::MatrixType>(Op.getComposite().getType()))
+      return Rewriter.notifyMatchFailure(Op, "not a matrix composite");
+
+    mlir::Type DstType = getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    llvm::ArrayRef<mlir::Attribute> Indices = Op.getIndices().getValue();
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Column = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, Adaptor.getComposite(),
+        mlir::cast<mlir::IntegerAttr>(Indices[0]).getInt());
+    if (Indices.size() == 1) {
+      Rewriter.replaceOp(Op, Column);
+      return mlir::success();
+    }
+
+    mlir::Value RowIndex = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI32Type(),
+        static_cast<int32_t>(
+            mlir::cast<mlir::IntegerAttr>(Indices[1]).getInt()));
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractElementOp>(Op, DstType,
+                                                              Column, RowIndex);
+    return mlir::success();
+  }
+};
+
+/// The `spirv.CompositeInsert` counterpart of MatrixCompositeExtractPattern
+/// above: inserting a whole column is an ordinary `llvm.insertvalue`; a
+/// single element needs its column extracted, updated with
+/// `llvm.insertelement`, and written back with `llvm.insertvalue`, rather
+/// than MLIR's own `CompositeInsertPattern`'s single `llvm.insertvalue`
+/// with both indices, which would try to insert a scalar directly into an
+/// array position expecting a whole vector.
+class MatrixCompositeInsertPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::CompositeInsertOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::CompositeInsertOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::CompositeInsertOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (!mlir::isa<mlir::spirv::MatrixType>(Op.getComposite().getType()))
+      return Rewriter.notifyMatchFailure(Op, "not a matrix composite");
+
+    llvm::ArrayRef<mlir::Attribute> Indices = Op.getIndices().getValue();
+    int64_t ColumnIndex = mlir::cast<mlir::IntegerAttr>(Indices[0]).getInt();
+    mlir::Location Loc = Op.getLoc();
+    if (Indices.size() == 1) {
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::InsertValueOp>(
+          Op, Adaptor.getComposite(), Adaptor.getObject(), ColumnIndex);
+      return mlir::success();
+    }
+
+    mlir::Value Column = mlir::LLVM::ExtractValueOp::create(
+        Rewriter, Loc, Adaptor.getComposite(), ColumnIndex);
+    mlir::Value RowIndex = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI32Type(),
+        static_cast<int32_t>(
+            mlir::cast<mlir::IntegerAttr>(Indices[1]).getInt()));
+    mlir::Value UpdatedColumn = mlir::LLVM::InsertElementOp::create(
+        Rewriter, Loc, Column, Adaptor.getObject(), RowIndex);
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::InsertValueOp>(
+        Op, Adaptor.getComposite(), UpdatedColumn, ColumnIndex);
+    return mlir::success();
+  }
+};
+
 /// Drops `spirv.ExecutionMode`, whose contents FeMe instead reads before
 /// conversion and re-emits as function attributes on the entry point (see
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
@@ -1745,7 +1834,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
            CompositeConstructPattern, ExecutionModePattern, ImageFetchPattern,
            ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
            ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
-           LoadValuePattern, PushConstantGlobalVariablePattern,
+           LoadValuePattern, MatrixCompositeExtractPattern,
+           MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
            SampledImagePattern, StageIOGlobalVariablePattern>(
           Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
