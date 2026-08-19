@@ -580,29 +580,47 @@ called out inline where it's discussed, and summarized here:
   operand the fallback's per-operand extraction does not know to leave
   alone; such a call remains a diagnosed error.
 - **Vector/aggregate leaf decomposition is narrower than the design
-  (widened by roadmap step R12).** "Vectors become components, not nested
-  vectors" describes splitting *any* divergent `<N x T>` (or aggregate)
-  value into `N` separate `<W x T>` components, since LLVM has no `<W x
-  <N x T>>`. `feme::cpu::SIMDizePass` implements two producer shapes: a
-  constant-index `insertelement` chain assembling a vector from scalar
-  components, the one shape a typed-buffer *store*'s raising actually
-  produces (`feme::dxil::OpRaisingPass::raiseTypedBufferStore`), and (R12)
-  a vector-typed `feme.cpu.resource.*` *load* call (e.g. a typed-buffer
-  element read back), decomposed into its `N` components directly as it is
-  scalarized rather than a single nested-vector `Widened` entry. Either
-  producer's components may be consumed by another link of the same
+  (widened by roadmap steps R12 and C3).** "Vectors become components, not
+  nested vectors" describes splitting *any* divergent `<N x T>` (or
+  aggregate) value into `N` separate `<W x T>` components, since LLVM has
+  no `<W x <N x T>>`. `feme::cpu::SIMDizePass` implements six producer
+  shapes: a constant-index `insertelement` chain assembling a vector from
+  scalar components, the one shape a typed-buffer *store*'s raising
+  actually produces (`feme::dxil::OpRaisingPass::raiseTypedBufferStore`);
+  (R12) a vector-typed `feme.cpu.resource.*` *load* call (e.g. a
+  typed-buffer element read back), decomposed into its `N` components
+  directly as it is scalarized rather than a single nested-vector `Widened`
+  entry; and, as of roadmap step C3 (feme/docs/Roadmap.md), a `phi` of
+  vector type (the shape a uniform diamond's merge block gives a value
+  reconciled across two divergent arms), a `select` of vector type with a
+  scalar `i1` condition, a `shufflevector` (its mask is always a
+  compile-time constant in LLVM IR, so it decomposes with no runtime work
+  at all -- see "the common HLSL/GLSL swizzle shape" below), and ordinary
+  elementwise arithmetic/cast (`BinaryOperator`/`UnaryOperator`/`CastInst`)
+  over a vector -- the "color = a + b" shape shader code is full of, and by
+  far the most common of the six once it was actually measured against a
+  real CTS run (see VulkanCTSReport.md's "Roadmap C3: measured impact").
+  Any producer's components may be consumed by another link of an
   insertelement chain, a matched resource-store call's stored-value
-  operand, or (R12) a constant-index `extractelement` (see
+  operand, an `extractelement` (C3: a constant index reads a component
+  directly; a non-constant one now chains `select`s across every component
+  instead of being diagnosed -- "a shuffle or a dynamic index becomes
+  selects across the components"), a vector-typed `select`'s true/false
+  operand, a `shufflevector`'s vector operand, a vector-typed `phi`'s
+  incoming value, or another elementwise arithmetic/cast operand (see
   `FunctionWidener::widenInsertElement`/`widenExtractElement`/
-  `checkVectorDecompositionSupported` in SIMDize.cpp) -- the last of these
-  reads one already-decomposed component straight back out, rather than
-  extracting a per-lane scalar out of a single wide vector that was never
-  built. Anything else that produces or consumes a divergent vector (a
-  non-constant-index `extractelement`, `shufflevector`, a divergent
-  `phi`/`select` of vector type, ...), and every divergent aggregate of any
-  kind, is still diagnosed up front rather than attempting to build an
-  illegal type; generalizing further is a substantial follow-up of its own,
-  not yet scheduled against a specific future milestone.
+  `widenVectorSelect`/`widenShuffleVector`/`widenVectorElementwise`/
+  `createWidenedVectorPHIStub`/`fillWidenedVectorPHIIncoming`/
+  `checkVectorDecompositionSupported` in SIMDize.cpp). A `select` with a
+  per-lane `<N x i1>` condition remains diagnosed -- none of the shapes
+  that reach this pass produce one, and decomposing it would need a
+  per-component condition, not just a per-component value -- a `CastInst`
+  whose operand's element count would not line up component-for-component
+  with the result (e.g. `bitcast <4 x i32> to <2 x i64>`) remains
+  diagnosed too, and every divergent aggregate of any kind is still
+  diagnosed up front rather than attempting to build an illegal type;
+  generalizing either further is a substantial follow-up of its own, not
+  yet scheduled against a specific future milestone.
 - **A divergent call to a homogeneous, single-overload-type math intrinsic
   widens directly to its vector-typed overload**, rather than being
   rejected: this covers both `llvm::isTriviallyVectorizable`'s
