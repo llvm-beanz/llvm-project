@@ -22474,3 +22474,149 @@ correctly; only the historical commit that introduced the raw bytes will
 still show as a binary diff, which isn't fixable without rewriting
 history. No behavioral/functional code changed, so no Vulkan CTS re-run
 was needed for this commit; `VulkanCTSReport.md` is unaffected.
+
+# Fixing the "Unknown target ext type!" assert on `feme --target=amdgpu*`
+
+## The bug report
+
+A user gave a real HLSL compute shader -- a small bilateral-filter-style
+blur reading `Texture2D<half4>`, writing `RWTexture2D<half4>`, and reading
+two `half` scalars out of a `cbuffer` -- compiled with `dxc -T cs_6_8
+-enable-16bit-types`, then retargeted with `feme --target=amdgpu9.0a-amd-
+amdhsa`. That aborted with `UNREACHABLE executed at .../ValueTypes.cpp:287:
+Unknown target ext type!`. First step, before touching anything, was
+reproducing it exactly rather than guessing: `dxc` is on this machine
+(`/usr/local/bin/dxc`), so I compiled the user's shader verbatim and ran it
+through the already-built `build/bin/feme` (assertions-enabled,
+ccache-backed, per this project's established discipline) -- same crash,
+same line, byte for byte.
+
+## Root-causing: two separate, independently-diagnosable gaps, only one of
+## which this shader's crash is actually about
+
+`llvm::MVT::getVT` (`ValueTypes.cpp`) has a fixed set of `target(...)` type
+names it understands (`aarch64.svcount`, `wasm.externref`/`funcref`,
+`spirv.*`, `riscv.vector.tuple`) and `llvm_unreachable`s on anything else.
+So the immediate question was: where does a `target("dx.")` type survive
+long enough to reach real AMDGPU instruction selection, which has no
+notion of it at all?
+
+`feme::amdgpu::ResourceLoweringPass` (the pass that turns a DXIL resource
+binding into an AMDGPU kernel pointer argument) only recognizes two
+resource-handle families: `target("dx.TypedBuffer", ...)` and SPIR-V's
+`target("spirv.Image", ...)`. Its own `collectBindings` -- and Design.md's
+"Raised LLVM IR -> AMDGPU" section, which documents this precisely --
+deliberately leave any *other* resource kind's handle completely
+unrewritten rather than partially rewriting it, "so the failure surfaces
+as a clean 'unsupported' from the backend instead of silently wrong code."
+That promise was real in intent but not in fact: nothing ever checked for
+the leftover handle before handing the module to `TargetMachineBackend`,
+so it silently fell through to real ISel and crashed there instead,
+non-deterministically (depending on the exact shader and subtarget --
+see below).
+
+I confirmed this two ways, deliberately in the *opposite* order from how
+I'd normally build confidence (crash first, minimal repro second), because
+my first minimal repro attempts (a hand-written `.ll` with a `Texture2D`
+handle + `llvm.dx.resource.load.level`, round-tripped through `llc
+--filetype=obj` into a real `DXContainer` the way `Tools/feme/
+feme-dxil-to-amdgpu.ll` already does, then fed to `feme
+--target=amdgcn-amd-amdhsa`) *did not crash* -- and, worse, exited 0 with
+no diagnostic at all, meaning it silently produced some object file. That
+was the bigger red flag than the crash itself: "sometimes silently wrong,
+sometimes an assert" is strictly worse than either alone. Dumping the
+imported+raised IR at each stage (`feme-translate --import-dxil`, then
+`feme-opt -passes=feme-dxil-raise-ops`) on my own hand-written repro
+showed why: `feme::dxil::OpRaisingPass` does not yet raise a *bound*
+(non-bindless, `dx.op.createHandleFromBinding`, not
+`llvm.dx.resource.handlefromheap`) `Texture2D`'s handle/access ops at all
+-- they're left in the raw, pre-raising `dx.op.*` DXIL calling convention
+entirely (`dx.op.createHandleFromBinding`/`dx.op.textureLoad.f16`, using
+`%dx.types.Handle`/`%dx.types.ResRet.f16` struct types, not a
+`target("dx.")` type at all) -- a separate, already-documented gap
+(Design.md's "Decision: texture and sampler handle kinds": "the legacy
+`!dx.resources`-based texture/sampler path... remain[s] future work").
+That gap does not itself hit `ValueTypes.cpp`'s target-ext-type branch
+(struct types are legalizable fine), so it isn't what the user's crash
+report is about -- but it means a texture-only version of this shader was
+*already* silently broken (an unresolved-symbol object rather than a
+crash), which I only found by dumping intermediate IR rather than trusting
+the exit code.
+
+The user's actual crash is about the `cbuffer`: `SpatialScale`/`ColorScale`
+create a `target("dx.CBuffer", ...)` handle via `llvm.dx.resource.
+handlefrombinding`, which `OpRaisingPass` *does* raise fully (cbuffer
+creation goes through the same generic handle-raising logic as typed/raw
+buffers, unlike texture access), and `ResourceLoweringPass` does not
+recognize `dx.CBuffer` as a family it can model any more than
+`dx.Texture` -- so it's left in target-ext-type form, and *that* is what
+survives into real AMDGPU ISel and crashes. I proved this precisely by
+constructing a minimal repro of just the cbuffer shape (a one-`float`
+`cbuffer` read via `llvm.dx.resource.load.cbufferrow.4`, round-tripped
+through `llc` the same way) and confirming it hit the identical assert
+before the fix, and the identical clean diagnostic after.
+
+## The fix
+
+Rather than implement full AMDGPU texture/cbuffer resource support (a
+materially larger project, and explicitly tracked, pre-existing future
+work per Roadmap.md's "P1 -- the remaining resource access ops" and the
+texture/sampler handle-kind decision), I closed the actual gap: Design.md's
+own documented promise ("clean 'unsupported' ... instead of silently wrong
+code") was true in *design* but not in *implementation*. `feme::
+verifyNoRaisedIRRemains` (`feme/include/feme/Core/RaisedIRVerifier.h`,
+`feme/lib/Core/RaisedIRVerifier.cpp`) is a small, target-agnostic check:
+scan every function for (a) a leftover `llvm.dx.*`/`llvm.spv.*` intrinsic
+call, (b) a leftover un-raised `dx.op.*` call (covering the texture gap
+above too, even though this bug report isn't about it), or (c) any value/
+parameter of a `target("dx.")`/`target("spirv.")` type -- and return a
+clean `llvm::Error` naming the first one found and the function it's in.
+Wired into `feme::Driver::run` right after `ResourceLoweringPass`/
+`RaisedLoweringPass` for both AMDGPU and NVPTX (NVPTX has the exact same
+"leave what it cannot model alone" pass pair and would have the exact same
+crash mode), before the module ever reaches `OptimizerPipeline`/
+`TargetMachineBackend`.
+
+This turns the user's crash into: `resource handle type 'dx.CBuffer' is
+not supported when targeting 'amdgpu9.0a-amd-amdhsa' (produced in function
+'main')` -- exit 1, no assert. I did *not* implement AMDGPU cbuffer/texture
+support itself; that remains exactly as unsupported as before, just
+diagnosed instead of crashing (or, worse, silently miscompiling, per the
+texture case above). I updated Design.md's "Raised LLVM IR -> AMDGPU"
+section to describe the mechanism and explicitly call out that a bound
+texture's *access* ops reach this same check via the un-raised `dx.op.*`
+path rather than a `target("dx.")` type, so a future reader doesn't
+have to re-derive that distinction the way I did.
+
+## Verification discipline
+
+Built and tested with the existing `build/` tree (ccache launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`, per this project's established discipline).
+Four small, separately-committed changes: the verifier utility on its own
+(inert, unused) with its own commit; its unit tests (`unittests/Core/
+RaisedIRVerifierTest.cpp`, four cases: clean module, already-lowered typed
+buffer, leftover `target("dx.")` type, leftover `dx.op.*` call) in a
+second; wiring it into `Driver.cpp` (with a synopsis referencing the real
+user shader and its exact command line) in a third; and the end-to-end
+`Tools/feme/feme-dxil-to-amdgpu-unsupported-resource.ll` lit test (a
+`cbuffer`-shaped repro, hand-verified against `llc`'s real DXIL codegen
+round-trip before committing, per the "Avoiding binary test fixtures"
+principle -- my first draft of this test used a texture handle directly in
+"raised" `target("dx.Texture", ...)` form, which is *not* what a real
+`dxc`-compiled bound texture round-trips to today, per the gap above; I
+caught this by actually running the lit test rather than assuming a
+hand-written repro matches reality) in a fourth. `ninja -C build
+check-feme` after every commit: 1478 -> 1484 passed (the four new unit
+tests plus the new lit test), 1 unsupported throughout, no regressions.
+Re-ran the user's exact original repro (`dxc`-compiled, then `feme
+--target=amdgpu9.0a-amd-amdhsa`) after the final commit to confirm the
+clean diagnostic one more time against the actually-committed state, not
+just an intermediate build.
+
+Vulkan CTS: not re-run. This change is entirely inside the `TheTriple.
+isAMDGCN()`/`isNVPTX()` branches of `feme::Driver::run`; the CPU/Vulkan
+path (`isCPUTarget`, `feme::cpu::runPipeline`, `libfeme_vulkan`) is a
+disjoint code path this change does not touch at all, the same reasoning
+the "Fixing binary-looking bytes" entry above already used for a
+non-functional change -- so `VulkanCTSReport.md` is unaffected and stays
+as its last-generated edition.
