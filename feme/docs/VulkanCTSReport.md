@@ -1,269 +1,235 @@
-# FeMe Vulkan ICD: First Real Vulkan-CTS Run Report
+# FeMe Vulkan ICD: Vulkan-CTS Status Report
 
-Every prior FeMeVulkanDesign.md milestone (V4's "Begin Vulkan CTS runs for
-the intentionally advertised subset" and V6's "Run the graphics subset of
-the CTS ... " bullets) recorded the same deviation: `deqp-vk` was not
-available in the environment, so only the *infrastructure* to run it
-(`feme/utils/filter_vulkan_cts_cases.py`, `test/Vulkan/cts-compute-subset.test`)
-existed, with no actual pass/fail result. This pass had a real checkout of
-[VK-GL-CTS](https://github.com/KhronosGroup/VK-GL-CTS) available
-(`/home/dev/dev/VK-GL-CTS`, `vulkan-cts-1.4.6.2-411-g918221c6`) and used it
-to close that gap for the first time.
+This report is regenerated from scratch on every full Vulkan-CTS pass; it
+describes the *current* state of `libfeme_vulkan` against `deqp-vk`, not the
+history of how it got there. Previous editions of this file recorded a
+narrative of individual crash fixes; that narrative is now folded into
+[Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
+and this file is a measurement instead.
 
-## Setup
+- FeMe revision: `ddc071b9fe8d` (`mlir/lib/Conversion/SPIRVToLLVM`'s
+  comparison-pattern fix, the last change this run measured).
+- VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
+  robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
+  empty image format lists" -- see "Deviations from a stock CTS" below).
+- Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+  `RelWithDebInfo`.
+- `check-feme`: 1433 passed, 1 unsupported.
 
-- Built `deqp-vk` from the vendored `external/` sources (`glslang`,
-  `spirv-tools`, `spirv-headers`, `amber`, `vulkan-video-samples`, ...) with
-  `-DDEQP_TARGET=vulkan_headless` -- the `default` target links a
-  `tcu::Platform` base class whose `getVulkanPlatform()` unconditionally
-  throws `NotSupportedError` (no windowing system is needed for a
-  device-only/offscreen ICD, and this sandboxed environment has no `DISPLAY`
-  or `XDG_RUNTIME_DIR` in any case); `vulkan_headless` is the target that
-  actually implements it.
-- Pointed the real Khronos Vulkan loader (`libvulkan.so.1`, already present)
-  at this ICD with `VK_DRIVER_FILES=<build>/tools/feme/tools/feme-vulkan/feme_icd.json`,
-  exactly as `test/Vulkan/*.test`'s `%feme_vulkan_icd_manifest` substitution
-  does -- `vulkaninfo` confirms the loader enumerates exactly one device,
-  `FeMe CPU Vulkan Device`, apiVersion 1.2.
-- Generated `deqp-vk`'s full case list (`--deqp-runmode=txt-caselist`,
-  ~3.2M leaf test cases across every module the binary was built with, not
-  just Vulkan's core -- `ray_tracing`, `video`, `mesh_shader`, `data_graph`,
-  ... included) and ran every top-level group (`dEQP-VK.<group>.*`)
-  separately against `libfeme_vulkan`, each under a 600s timeout, so one
-  group hanging or crashing could not lose data for the rest. Execution
-  turned out fast enough (an entire group is typically under 15 seconds,
-  even the largest ones) that no sampling was needed -- every case in every
-  group that did not crash the process ran to completion.
+## Headline
 
-## Aggregate results (completed groups)
-
-Across the 47 of 54 top-level groups that ran to completion (excluding the
-7 that crashed the process before finishing -- see below):
-
-| | Count |
-|---|---|
-| Total cases | 1,659,818 |
-| Passed | 2,885 |
-| Failed | 14,055 |
-| Not supported | 1,642,877 |
-
-The overwhelming `Not supported` share is expected and by design, not a
-regression: this ICD intentionally advertises a narrow, truthful surface
-(apiVersion 1.2, no WSI/swapchain, no sparse/ray-tracing/mesh/tessellation/
-geometry/video/YCbCr/transform-feedback/protected-memory, a bounded texel-
-buffer and attachment-format list -- see "Initial Non-Goals" and each
-milestone's own deviation list in FeMeVulkanDesign.md), and a CTS case
-naming an unadvertised extension or feature correctly reports
-`NotSupported` rather than running. That is precisely the CTS behavior a
-truthful "must fail before draw time, not silently misbehave" ICD is
-supposed to produce.
-
-## Crashes found and fixed this pass
-
-The most valuable signal a real CTS run adds over this ICD's own unit
-tests is exactly this: four core Vulkan commands crashed the process
-(segfault through a null device-dispatch-table entry) because this ICD
-had never implemented them at all, rather than merely rejecting them at
-creation. All four are fixed and covered by new unit tests in this pass
-(see the corresponding commits):
-
-| Command(s) | Found by | Root cause | Fix |
-|---|---|---|---|
-| `vkTrimCommandPool` | `dEQP-VK.api.command_buffers.trim_command_pool` | Core VK_VERSION_1_1 command, never implemented | No-op body (spec only requires trimming to *possibly* help; never that it does) |
-| `vkCreateRenderPass2`, `vkCmdBeginRenderPass2`, `vkCmdNextSubpass2`, `vkCmdEndRenderPass2` | `dEQP-VK.renderpasses.renderpass2.*` | Core VK_VERSION_1_2 commands, never implemented | `vkCreateRenderPass2` converts to the classic structures and delegates to `vkCreateRenderPass`; the three command-buffer entry points are signature adapters onto the existing render-pass instance state machine |
-| `vkCreateDescriptorUpdateTemplate`, `vkDestroyDescriptorUpdateTemplate`, `vkUpdateDescriptorSetWithTemplate` | `dEQP-VK.binding_model.descriptorset_random.*` | Core VK_VERSION_1_1 feature, never implemented | New `DescriptorUpdateTemplate` object; `vkUpdateDescriptorSetWithTemplate` walks its entries against a `writeDescriptorFromRaw` helper shared with (factored out of) `vkUpdateDescriptorSets` |
-| `vkCmdSetLineWidth`, `vkCmdSetDepthBias`, `vkCmdSetDepthBounds`, `vkCmdSetDeviceMask` | `dEQP-VK.dynamic_state.monolithic.compute_transfer.multi.transfer.after` | Core commands, never implemented | No-op bodies -- every state they would govern (depth bias/bounds, wide lines, a second device) is already rejected at pipeline creation or does not exist on this single-physical-device ICD, so no accepted pipeline could ever observe a difference |
-
-Each was root-caused with `gdb`'s backtrace against the exact failing case
-(isolated to a single-entry case list first), confirmed fixed by rerunning
-that same case list, and confirmed not to regress `check-feme` (1430
-passed, 1 unsupported both before and after, plus the new unit tests).
-
-## Crashes found and *not* fixed this pass
-
-Two further, distinct crash classes were root-caused but are deferred --
-both go well beyond this ICD's own code:
-
-### 1. `dEQP-VK.api.invariance.random` -- a CTS-side robustness gap
-
-Segfaults inside CTS's own
-`vkt::api::(anonymous)::ImageAllocator::ImageAllocator`
-(`external/vulkancts/modules/vulkan/api/vktApiMemoryRequirementInvarianceTests.cpp:183`):
-`m_colorFormat = (VkFormat)optimalformats[deRandom_getUint32(&random) %
-optimalformats.size()]`, with no check that `optimalformats` is non-empty.
-On AArch64 (unlike x86, where integer division by zero traps), a
-`% 0` returns the dividend unmodified per the architecture's `UDIV`
-semantics, so the index becomes a large pseudo-random number and the
-vector access reads out of bounds. This is reachable because this ICD's
-advertised format support is much narrower than a real GPU's (see the
-attachment-format lists throughout FeMeVulkanDesign.md), so the random
-test's format-selection loop can, for some seeds, filter down to zero
-candidate formats -- something the test's own constructor does not defend
-against for *any* driver, not just this one. Not fixed here: the fix
-belongs in VK-GL-CTS's own `ImageAllocator` constructor (check for an
-empty `linearformats`/`optimalformats`/`memoryTypes` vector and report
-`NotSupported` instead of indexing it), not in this ICD.
-
-### 2. SPIR-V spec-constant composites over non-spec-constant constituents
-
-Segfaults inside MLIR's own SPIR-V deserializer,
-`mlir::spirv::Deserializer::processSpecConstantComposite`
-(`mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp:1997`):
-`getSpecConstant(operands[i])` returns null whenever a constituent is not
-itself a previously-declared spec constant, and the very next line,
-`SymbolRefAttr::get(elementInfo)`, dereferences that null unconditionally.
-Per the SPIR-V spec, `OpSpecConstantComposite`'s constituents may be *any*
-`Constant` or `Spec Constant` declaration -- a `mat2` spec constant's
-columns, for instance, are ordinary `OpConstantComposite` vectors, not
-spec constants, since only the whole matrix (not each column) is
-specialized. `mlir::spirv::SpecConstantCompositeOp` models every
-constituent as a symbol reference into the spec-constant symbol table,
-which has no representation for a plain (non-symbol, inline-attribute)
-constant constituent -- so fixing this is a modeling change to the
-`spirv` dialect op itself (allowing a mixed operand list), not a small
-null check, and is out of scope for this pass.
-
-This single root cause is responsible for every one of the remaining six
-crashed groups, confirmed by each group's abort message being one of two
-assertions reached from the same code path (`DenseElementsAttr::get`'s
-`hasSameNumElementsOrSplat`, or `LLVMArrayType::get`'s null-subtype
-assertion further down the same lowering, both downstream of the
-deserializer handing a null-derived attribute forward): `memory_model`
-(crashed after 21 of 17,300 cases), `pipeline` (523,668 of 1,171,653 --
-`spec_constant.compute.composite.array.array_mat2`), `glsl` (74 of
-26,808 -- `arrays.constructor.bool_mat3_vertex`), `spirv_assembly` (7,722
-of 68,734), `ssbo` (123 of 12,225), and `ubo` (537 of 13,240). Each
-group's partial results up to its crash point are preserved in
-`/tmp/cts_runs/<group>.log` for whoever picks this up (not checked into
-the tree -- see "Reproducing this report" below).
-
-## What the `Fail` results represent
-
-Excluding the two crash classes above, the ~14,055 `Fail` results seen in
-completed groups are overwhelmingly *expected* failures against
-documented, already-tracked roadmap gaps, not new discoveries -- spot
-checks across `compute`, `dynamic_state`, `draw`, `image`, `query_pool`,
-`rasterization`, `robustness`, `subgroups`, `synchronization`, `texture`,
-and `ycbcr` all attribute to one of:
-
-- Atomics not raised from SPIR-V at all (V4's own deviation note).
-- A divergent vector value used outside a supported insertelement-chain/
-  resource-store pattern (`feme-cpu-simdize`'s own diagnostic, explicitly
-  labeled "roadmap milestone 7 deviation").
-- An unsupported SPIR-V construct for this ICD's scope (an unsized runtime
-  array in a binding not already tracked, a packed narrow-channel format,
-  a subgroup operation, ...), reported by the importer/legalizer as a
-  clean, non-crashing pipeline-creation failure -- exactly the "fails at
-  creation, not draw time" contract every milestone's deviation list
-  requires.
-- `VK_EXT_shader_object`/`VK_EXT_graphics_pipeline_library`-only test
-  variants (`dynamic_state`'s `shader_object_unlinked_spirv`/
-  `fast_linked_library` groups, `pipeline`'s equivalents), which this ICD
-  does not implement and reports `NotSupported` for at pipeline
-  construction, except where the test itself asserts an internal utility
-  precondition (`vkPipelineConstructionUtil.cpp`) before reaching that
-  check.
-
-No new correctness bug (a `Pass`-shaped result that is actually wrong)
-was found in this pass; every `Fail` traced to a spot check maps onto a
-documented, intentional scope boundary or a `feme-cpu-simdize`/importer
-diagnostic naming its own roadmap deviation.
-
-## Reproducing this report
-
-```shell
-# Build deqp-vk (from a VK-GL-CTS checkout with external/ already vendored):
-cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DDEQP_TARGET=vulkan_headless
-ninja -C build deqp-vk
-
-# Run one group against libfeme_vulkan:
-VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
-  build/external/vulkancts/modules/vulkan/deqp-vk \
-  --deqp-caselist-file=<a case list, e.g. from --deqp-runmode=txt-caselist> \
-  --deqp-log-filename=/tmp/out.qpa
-```
-
-`feme/utils/filter_vulkan_cts_cases.py` (V4) and
-`test/Vulkan/cts-compute-subset.test` remain the in-tree, `lit`-integrated
-version of the same idea, gated on `REQUIRES: system-vulkan-cts` so they
-skip cleanly wherever `deqp-vk` is not installed.
-
-# Follow-up: closing every crash, and a complete 54-group run
-
-This pass picked up exactly where the report above left off -- its "Crashes
-found and *not* fixed this pass" section -- and fixed both remaining crash
-classes, plus two more that only surfaced once every crash-free group could
-finally be run in full instead of stopping at the first crash. The result is
-the first *complete* run of every one of `deqp-vk`'s 54 top-level
-`dEQP-VK.<group>.*` groups against `libfeme_vulkan`: none crash the process
-any more.
-
-## Crashes fixed this pass
-
-| Crash | Root cause | Fix |
+| | Count | Share |
 |---|---|---|
-| `dEQP-VK.api.invariance.random` | VK-GL-CTS's own `ImageAllocator` constructor indexes `optimalformats`/`linearformats` with `rand() % vector.size()` with no non-empty check; a narrow-format ICD can empty both lists for some seed, and AArch64's `UDIV` returns the dividend (not a trap) for `% 0`, reading far out of bounds | Fixed in the VK-GL-CTS checkout itself (`external/vulkancts/modules/vulkan/api/vktApiMemoryRequirementInvarianceTests.cpp`): never construct an `ImageAllocator` when neither tiling mode has any supported format, always use a `BufferAllocator` instead |
-| `dEQP-VK.memory_model.*`, `dEQP-VK.spirv_assembly.*`, `dEQP-VK.pipeline.*`, `dEQP-VK.glsl.*`, `dEQP-VK.ssbo.*`, `dEQP-VK.ubo.*` (six groups, one shared root cause across the first three of these) | MLIR's SPIR-V deserializer's `processSpecConstantComposite` assumed every constituent of an `OpSpecConstantComposite` was itself a spec constant and unconditionally wrapped a (possibly null) lookup in `SymbolRefAttr::get`, segfaulting for any composite spec constant (e.g. a `mat2`'s columns) with a non-spec-constant constituent | `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`, `mlir/lib/Dialect/SPIRV/IR/SPIRVOps.cpp`, `mlir/lib/Target/SPIRV/Serialization/SerializeOps.cpp`, `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVStructureOps.td`: extend `spirv.SpecConstantComposite`'s constituents to accept either a spec-constant symbol reference or an inline typed-attribute constant |
-| `dEQP-VK.memory_model.shared.arrays_of_arrays.*` | `processConstantComposite`'s `ShapedType` branch passed every constituent straight to `DenseElementsAttr::get` without flattening a nested composite constituent (a `spirv.matrix`'s constituents are its column vectors, each already a `DenseElementsAttr`), tripping `hasSameNumElementsOrSplat` | `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`: reuse the sibling `TensorArm` branch's constituent-flattening logic for every `ShapedType`, not just `TensorArmType` |
-| Same group, next case (`arrays_of_arrays.2`) | `SPIRVToLLVM.cpp`'s `convertArrayType`/`convertRuntimeArrayType` passed a (possibly null, if the element type has no registered conversion) converted element type straight to `LLVM::LLVMArrayType::get`, asserting instead of failing the conversion cleanly | `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`: check for a null converted element type and return `std::nullopt` |
-| `dEQP-VK.spirv_assembly.instruction.graphics.opconstantcomposite.array_of_struct_of_array_*` | FeMe's own `ArrayConstantPattern` flattens a `spirv.array` constant into one `llvm.mlir.constant` `ElementsAttr`, which can only represent a pure array/vector nesting; an array-of-struct-of-array's flattened element count didn't match what `LLVM::ConstantOp::verify` expects (it treats `!llvm.struct` as a single opaque leaf), and building the mismatched `ElementsAttr` crashed `DenseElementsAttr::get` | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`: detect the mismatch up front (`getFlatElementCount`) and reject the pattern cleanly instead |
-| `dEQP-VK.spirv_assembly.instruction.graphics.opundef.uint32_vert` | Every identity-shaped fold in `SPIRVCanonicalization.cpp` (`x * 1 = x`, `x >> 0 = x`, `x & x = x`, ...) returned an operand `Value` verbatim, which is only type-correct if that operand's concrete type equals the op's declared result type -- not guaranteed, since SPIR-V's arithmetic/bitwise/shift ops only require operands and result to share a bit width, not identical (possibly differently-signed) types. `spirv.IMul`'s `x * 0 = 0` fold hit this with an `OpUndef`-derived, signed/unsigned-mismatched operand, aborting in `checkFoldResultTypes` | `mlir/lib/Dialect/SPIRV/IR/SPIRVCanonicalization.cpp`: route every such identity fold through a new `foldToOperandOfSameType` helper that declines to fold (instead of producing ill-typed IR) when the types differ |
-| `dEQP-VK.api.maintenance3_check.descriptor_set` (found only once the `api` group could run past `invariance.random` to completion) | `vkGetDescriptorSetLayoutSupport`, a core `VK_VERSION_1_1` command, was never implemented, so `vkGetDeviceProcAddr` resolved it to null and the loader's dispatch table called through a null function pointer | `feme/lib/Vulkan/Descriptor.cpp`: implement it by reusing `vkCreateDescriptorSetLayout`'s own `isSupportedDescriptorType` check, since this ICD has no further descriptor-count/layout limit |
+| Total cases | 3,237,000 | |
+| Passed | 10,350 | 0.32% |
+| Failed | 27,094 | 0.84% |
+| Not supported | 3,199,555 | 98.84% |
+| Quality warning | 1 | |
+| **Crashed / timed out** | **0** | |
 
-Each fix's validation followed the same discipline as the original report:
-reproduce the crash on an isolated single-case list first, fix, confirm the
-identical case list now passes or fails cleanly, then re-run the *entire*
-affected group to confirm nothing else in it regressed into a new crash.
-`check-feme` (`LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`) stayed
-green after every commit (1430 passed/1 unsupported baseline, 1433 passed/1
-unsupported final -- three new unit tests: two for
-`vkGetDescriptorSetLayoutSupport`, one array-of-struct-of-array negative
-regression test for `ArrayConstantPattern`), and the relevant `mlir/`
-lit/unittest suites (`Target/SPIRV`, `Dialect/SPIRV`, `Dialect/SPIRV/IR`,
-`Conversion/SPIRVToLLVM`, `Conversion/GPUToSPIRV`,
-`MLIRSPIRVImportExportTests`) stayed green throughout too.
+All 54 top-level `dEQP-VK.<group>.*` groups run to completion. 28 of the 54
+have **zero** failures (`conditional_rendering`, `cooperative_vector`,
+`data_graph`, `depth`, `descriptor_indexing`, `dgc`,
+`drm_format_modifiers`, `fragment_shader_interlock`,
+`fragment_shading_barycentric`, `fragment_shading_rate`, `geometry`,
+`imageless_framebuffer`, `image_processing`, `mesh_shader`, `multiview`,
+`postmortem`, `protected_memory`, `ray_query`, `ray_tracing_pipeline`,
+`reconvergence`, `shader_object`, `sparse_resources`, `synchronization2`,
+`tensor`, `tessellation`, `transform_feedback`, `video`, `wsi`) -- almost
+all of them because the feature they cover is not advertised at all, which
+is the correct, truthful outcome for this ICD's declared scope.
 
-## The complete 54-group run
+**No case produces a wrong answer.** Every one of the 27,094 failures was
+traced to a *clean rejection* -- a pipeline that failed to create, a format
+or descriptor type the ICD does not advertise, or a `deqp-vk` check of a
+mandatory capability the ICD does not claim. Not one is a `Pass`-shaped
+result carrying incorrect data. That is the "must fail before draw time,
+not silently misbehave" contract every FeMeVulkanDesign.md milestone states,
+holding across three million cases.
 
-With every crash above fixed, every one of `deqp-vk`'s 54 top-level
-`dEQP-VK.<group>.*` groups (the same set enumerated by
-`--deqp-runmode=txt-caselist`, from `api` through `ycbcr`) now runs to
-completion -- not just the 47 that happened not to crash before this pass.
+## Every failure, by root cause
 
-| | Count |
-|---|---|
-| Total cases | 3,236,999 |
-| Passed | 10,350 |
-| Failed | 27,094 |
-| Not supported | 3,199,555 |
+Attribution method: each failing case's `deqp-vk` reason string is joined
+with the ICD's own `stderr` diagnostics emitted between that case's start
+and its result line, and -- for Amber-based cases, which report only
+`Fail` on `stdout` -- with the `<Text>` element of its `.qpa` record.
+27,094 of 27,094 failures are attributed.
 
-(These totals are larger than the original report's "1,659,818 cases across
-47 groups" for two reasons, not just the 7 previously-crashing groups now
-completing: this run's per-group `--deqp-case=dEQP-VK.<group>.*` filtering
-counts every case in each group exactly once via the loader's real
-`vkEnumerateInstanceVersion`/format-support answers, whereas grouping
-artifacts and re-enumeration differences between passes can shift the exact
-per-group split slightly -- the pattern (an overwhelming, expected
-`Not supported` share for the same documented scope reasons as the original
-report) is what matters, not an exact case-for-case match across runs.)
+| Share | Cases | Root cause |
+|---:|---:|---|
+| 78.3% | 21,216 | **Shader compilation** -- the SPIR-V module was rejected by the importer, the `spirv`→`llvm` conversion, or a FeMe CPU pass |
+| 12.4% | 3,354 | **Pipeline state** -- a fixed-function state combination `feme::vulkan` has no path for |
+| 7.2% | 1,938 | **Format table** -- a format, or a format feature, the ICD does not advertise |
+| 2.1% | 558 | **API object model** -- a descriptor type, query type, render pass shape or extension not implemented |
+| 0.1% | 28 | Mandatory feature/limit reporting, and a handful of one-offs |
 
-As in the original report, no new correctness bug (a `Pass`-shaped result
-that is actually wrong) surfaced in this pass -- every fix above replaced a
-segfault with either a correct result or a clean, already-documented
-`NotSupported`/legalization-failure outcome, never a silent wrong answer.
+### Shader compilation (21,216)
+
+| Cases | Cause | Where it belongs |
+|---:|---|---|
+| 10,121 | A `Uniform`-storage-class block is not legalized. `feme::spirv::getBufferBlockElementArray` matches `StorageBuffer` pointers only, and `getUniformBlockElementStruct` matches a `Uniform` pointer only when its pointee is a single-member struct whose member is *itself* a struct. Everything glslang actually emits misses: a `BufferBlock`-decorated struct in `Uniform` (the pre-SPIR-V-1.3 spelling of an SSBO), a `Block` struct with more than one member, a sized (not runtime) array member, a matrix member with `RowMajor`/`ColMajor`/`MatrixStride`, and an array-of-blocks arrayed binding | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` |
+| 9,067 | `feme-cpu-simdize` cannot decompose a divergent vector value used outside an insertelement-chain/resource-store/extractelement pattern (its own diagnostic names this "roadmap milestone 7 deviation") | `feme/lib/Target/CPU` |
+| 816 | A descriptor array of combined image samplers: the access chain converts to an `llvm.getelementptr` whose result type is `!llvm.struct<(target<"spirv.Image">, target<"spirv.Sampler">)>` rather than a pointer | `feme/lib/Conversion/SPIRVToLLVM` |
+| 306 | A graphics stage `Output` variable of matrix or aggregate type is not legalized | `feme/lib/Conversion/SPIRVToLLVM/StageIODecorations.cpp` |
+| 171 | The SPIR-V importer reports `unhandled opcode` | `mlir/lib/Target/SPIRV/Deserialization` |
+| 151 | Another global variable shape (mostly `Workgroup` arrays-of-arrays) is not legalized | `feme/lib/Conversion/SPIRVToLLVM` |
+| 277 | Individual ops with no conversion: `spirv.SpecConstant` (92), `spirv.VectorExtractDynamic` (71), `spirv.CompositeConstruct` (45), `spirv.Variable` (19), `spirv.MemoryBarrier` (18), `spirv.Switch` (9), the `spirv.Atomic*` family (7), and eleven others in ones and twos | mixed |
+| 242 | Long tail of one-off diagnostics: `OpSpecConstantComposite` over a forward-declared constant (36), unhandled `Volatile`/`Component`/`Centroid` decorations (34), unhandled `GLSL.std.450` instructions 33/34/36/55/56/57/60/61/64/70/72 (49), `feme-graphics-validate-stage` component-range and direction errors (14), `feme-cpu-linearize` irreducible-flow errors (6), `OpNop` (8), and ~95 assorted importer strictness errors, most of them on deliberately malformed CTS modules | mixed |
+| 62 | A malformed `llvm.getelementptr` (non-pointer operand) out of the `spirv`→`llvm` conversion | `mlir/lib/Conversion/SPIRVToLLVM` |
+| 3 | A graphics stage `Input` variable of matrix or aggregate type | `feme/lib/Conversion/SPIRVToLLVM/StageIODecorations.cpp` |
+
+The one shader fix that landed with this run --
+`IComparePattern`/`FComparePattern` in
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` building their
+`llvm.icmp`/`llvm.fcmp` from `op.getOperandN()` rather than
+`adaptor.getOperandN()`, so a deserialized `si32` (from `OpTypeInt 32 1`)
+reached `llvm.icmp` unconverted -- eliminated 8,369 occurrences of that
+diagnostic but **did not change the pass/fail totals at all**: every case
+it unblocked failed one stage later, on the `Uniform`-block and
+`feme-cpu-simdize` gaps above. That is the shape of the whole shader
+bucket: these are *stacked* blockers on the same small set of shaders, so
+counting them individually overstates how many independent problems there
+are and understates how much each fix is worth once its successors land.
+
+### Pipeline state (3,354)
+
+`vkCreateGraphicsPipelines` returns `VK_ERROR_INITIALIZATION_FAILED` with
+no diagnostic for a state combination `feme::vulkan::GraphicsPipeline`'s
+translators have no peer for. The mappers in
+`feme/lib/Vulkan/GraphicsPipeline.cpp` name the boundaries directly:
+
+- `mapTopology` accepts `TRIANGLE_LIST`/`TRIANGLE_STRIP` only. Point, line,
+  line-strip, fan and adjacency topologies are the largest single
+  contributor (all 820 `draw` failures, and most of `query_pool`'s 283).
+- `mapCullMode` rejects `FRONT_AND_BACK`; `mapBlendFactor` rejects the
+  dual-source factors; `mapDynamicState` accepts six of the ~40 dynamic
+  states; `isSupportedAttachmentSampleCount` accepts 1/2/4.
+
+That these fail *silently* (no `stderr` line at all) is itself a finding:
+every shader-side rejection names itself, but a state-side one does not,
+which makes triage of this bucket require reading the ICD's source rather
+than its output.
+
+### Format table (1,938)
+
+| Cases | Cause |
+|---:|---|
+| 874 | A color attachment format the ICD cannot render into. `isSupportedColorAttachmentFormat` (`feme/lib/Vulkan/RenderPass.cpp`) lists nine formats and omits `B8G8R8A8_UNORM`, which is both mandatory for `COLOR_ATTACHMENT`/`COLOR_ATTACHMENT_BLEND` per the Vulkan mandatory-format table *and* the framebuffer format every Amber-based CTS test uses -- so it alone accounts for all 677 `graphicsfuzz` failures and every remaining plain-`Fail` case in the run |
+| 815 | `VK_ERROR_FORMAT_NOT_SUPPORTED` from `vkGetPhysicalDeviceImageFormatProperties`/`vkCreateBufferView`/`vkCreateImage`/`vkCreateRenderPass` for a texel-buffer or image format outside the advertised list |
+| 193 | No mandatory depth/stencil format: `isSupportedDepthAttachmentFormat` advertises `D16_UNORM`/`D32_SFLOAT` and `isSupportedStencilAttachmentFormat` advertises `S8_UINT`, but no *combined* depth+stencil format, so CTS's "there must be at least one depth format handled (Vulkan spec 1.0, table 1)" and "cannot find supported stencil format" checks fail |
+| 56 | `dEQP-VK.api.info.format_properties.*` mandatory format-feature-flag checks |
+
+### API object model (558)
+
+| Cases | Cause |
+|---:|---|
+| 135 | `vkCreateDescriptorSetLayout`/`vkCreateDescriptorPool` reject a descriptor type `isSupportedDescriptorType` does not list (input attachment, dynamic uniform/storage buffer, ...) |
+| 126 | `dEQP-VK.api.object_management.*` requires an extension the ICD does not advertise, at `vkCreateDevice` time |
+| 79 | Subgroup support: the ICD reports `subgroupSupportedOperations` without `VK_SUBGROUP_FEATURE_BASIC_BIT` while advertising a compute queue, which the spec forbids |
+| 74 | A `VkRenderPass`/`VkRenderPass2` configuration `feme::vulkan::RenderPass` rejects (resolve attachments, input attachments, multiple subpasses with dependencies) |
+| 50 | `vkCreateImage` parameters (image type, tiling, usage, mip/array combination) with no path |
+| 49 | `vkQueueSubmit` rejected (predominantly downstream of one of the above) |
+| 23 | `VkPhysicalDevice*Features` structures whose `vkGetPhysicalDeviceFeatures2` answer disagrees with the promoted-struct answer for the same feature |
+| 13 | `vkCreateQueryPool` implements `VK_QUERY_TYPE_TIMESTAMP` only; occlusion queries are mandatory in Vulkan 1.0 |
+
+### Mandatory features and limits (28)
+
+`dEQP-VK.info.device_mandatory_features` names exactly what a Vulkan 1.2
+device must expose and this one does not: `multiview`,
+`subgroupBroadcastDynamicId`, `imagelessFramebuffer`,
+`uniformBufferStandardLayout`, `shaderSubgroupExtendedTypes`,
+`separateDepthStencilLayouts` and `hostQueryReset`. Three
+`vulkan1p2_limits_validation` cases fail on
+`maxTimelineSemaphoreValueDifference` and `maxMemoryAllocationSize` being
+below their required minimums, and `dEQP-VK.api.driver_properties.*` fails
+four cases on `VkPhysicalDeviceDriverProperties` (no registered
+`VkDriverId`, no conformance version, non-null-terminated name/info
+strings).
+
+## What the 3,199,555 `Not supported` results mean
+
+A `NotSupported` result is a *pass* for conformance purposes when the
+capability it needs is genuinely optional. The bulk of this run's
+`NotSupported` mass is exactly that:
+
+| Cases | Reason |
+|---:|---|
+| 419,425 | `VK_EXT_shader_object` (241,837 + 177,588 from two different check sites) |
+| 313,141 | An unadvertised optional format (`Format not supported`, `... for sampling`, `... for transfer`, `Source format not supported`) |
+| 244,916 | An unadvertised combined depth/stencil format (`D16_UNORM_S8_UINT`, `D32_SFLOAT_S8_UINT`, `S8_UINT`) |
+| 113,737 | `VK_KHR_fragment_shading_rate` |
+| 107,866 | `VK_EXT_primitives_generated_query` |
+| 99,324 | No queue family with the requested capability combination |
+| 91,516 | Cooperative matrix/vector |
+| 73,433 | `VK_EXT_host_image_copy` |
+| 71,322 | `VK_KHR_acceleration_structure` |
+| 66,310 | `VK_KHR_synchronization2` |
+| 62,047 | `VK_KHR_maintenance4`/`5`/`6` |
+| 59,520 | `shaderSampledImageArrayDynamicIndexing` |
+| 59,090 | `VK_EXT_graphics_pipeline_library` |
+
+Two entries in that list are *not* freely optional for a conformant
+Vulkan 1.2 device and so belong on the conformance critical path, not in
+the "correctly declined" column: the combined depth/stencil formats (at
+least one of `D24_UNORM_S8_UINT`/`D32_SFLOAT_S8_UINT` is mandatory), and
+the queue-capability combinations (a Vulkan queue family exposing
+`GRAPHICS` must also expose `TRANSFER`, and CTS's
+`findQueueFamilyIndexWithCaps` failures indicate this ICD's advertised
+family set does not cover the mandatory combinations).
+
+## Deviations from a stock CTS
+
+One VK-GL-CTS source change is applied locally and must be upstreamed
+before any conformance submission built on this tree is credible:
+`external/vulkancts/modules/vulkan/api/vktApiMemoryRequirementInvarianceTests.cpp`
+constructed an `ImageAllocator` and indexed `optimalformats`/`linearformats`
+with `rand() % vector.size()` without checking the vector is non-empty. A
+narrow-format ICD can empty both for some seed, and on AArch64 `UDIV`
+returns the dividend for `% 0` rather than trapping, so the index read far
+out of bounds and segfaulted `deqp-vk`. The local fix never constructs an
+`ImageAllocator` when neither tiling mode has a supported format.
+
+`deqp-vk` also aborts *after* printing `DONE!` and its totals, in
+`tcuSubprocessTestExecutorLin.cpp`, because device-fault tests are not
+executable on Linux; every group therefore exits 134 with complete results.
+This is a CTS-side teardown issue and does not affect any result.
 
 ## Reproducing this report
 
 ```shell
-# Generate the full group list once:
-VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
-  build/external/vulkancts/modules/vulkan/deqp-vk --deqp-runmode=txt-caselist
+# 1. Build the ICD (assertions + ccache, per the project's build discipline).
+ninja -C <feme-build> feme_vulkan check-feme
 
-# Run every top-level group to completion:
-for g in $(grep -oP '^TEST: dEQP-VK\.\K[a-z_0-9]+' dEQP-VK-cases.txt | sort -u); do
+# 2. Regenerate the case list against this ICD.
+cd <VK-GL-CTS>/build/external/vulkancts/modules/vulkan
+VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
+  ./deqp-vk --deqp-runmode=txt-caselist
+grep -oP '^TEST: dEQP-VK\.\K[a-z_0-9]+' dEQP-VK-cases.txt | sort -u > groups.txt
+
+# 3. Run every top-level group, six at a time, each in its own directory so
+#    the per-group shader cache and .qpa log do not collide.
+xargs -P 6 -n 1 -a groups.txt sh -c 'mkdir -p /tmp/cts/$1 && cd /tmp/cts/$1 &&
   VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
-    build/external/vulkancts/modules/vulkan/deqp-vk \
-    --deqp-case="dEQP-VK.$g.*" --deqp-log-filename=/tmp/$g.qpa
-done
+  <VK-GL-CTS>/build/external/vulkancts/modules/vulkan/deqp-vk \
+    --deqp-case="dEQP-VK.$1.*" --deqp-log-filename=$1.qpa > $1.log 2>&1' _
 ```
 
+The whole run takes about 25 minutes wall-clock on 12 cores. Per-group
+totals are the `Passed:`/`Failed:`/`Not supported:` lines at the end of
+each `$1.log`; per-case attribution comes from joining each
+`Test case '<name>'..` / `  Fail (<reason>)` pair with the `error:` lines
+between them, and, for Amber cases, with the `<Text>` element of the
+matching `.qpa` record.
+
+`feme/utils/filter_vulkan_cts_cases.py` and
+`feme/test/Vulkan/cts-compute-subset.test` remain the in-tree,
+`lit`-integrated version of the same idea, gated on
+`REQUIRES: system-vulkan-cts` so they skip wherever `deqp-vk` is absent.
+
+## Where the plan lives
+
+[Roadmap.md](Roadmap.md) §1.9.1, "The road to Vulkan conformance", turns
+this measurement into an ordered, costed plan: which of the buckets above
+to close in which order, what each is worth in cases, and what "full
+conformance" additionally requires beyond driving this run's failure count
+to zero.
