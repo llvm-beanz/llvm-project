@@ -977,6 +977,86 @@ public:
     });
   }
 
+  [[nodiscard]] bool lowerTextureStore(Function &F) {
+    const DataLayout &DL = F.getDataLayout();
+    IRBuilder<> &IRB = OpBuilder.getIRB();
+    Type *Int8Ty = IRB.getInt8Ty();
+    Type *Int32Ty = IRB.getInt32Ty();
+
+    return replaceFunction(F, [&](CallInst *CI) -> Error {
+      IRB.SetInsertPoint(CI);
+
+      Value *Handle =
+          createTmpHandleCast(CI->getArgOperand(0), OpBuilder.getHandleType());
+      Value *Coords = CI->getArgOperand(1);
+      Value *Data = CI->getArgOperand(2);
+      Type *DataTy = Data->getType();
+      Type *ScalarTy = DataTy->getScalarType();
+
+      uint64_t NumElements =
+          DL.getTypeSizeInBits(DataTy) / DL.getTypeSizeInBits(ScalarTy);
+      if (NumElements > 4)
+        return make_error<StringError>(
+            "Texture store data must have at most 4 elements",
+            inconvertibleErrorCode());
+
+      Value *Undef32 = UndefValue::get(Int32Ty);
+      std::array<Value *, 3> CoordArgs{Undef32, Undef32, Undef32};
+      extractElementsIntoArgs(IRB, CoordArgs, 0, Coords, 3);
+
+      std::array<Value *, 4> DataElements{nullptr, nullptr, nullptr, nullptr};
+      if (DataTy == ScalarTy)
+        DataElements[0] = Data;
+      else {
+        // Since we're post-scalarizer, if we see a vector here it's likely
+        // constructed solely for the argument of the store; see
+        // lowerBufferStore's identical comment for why forwarding the
+        // scalars this way (rather than re-extracting them) matters.
+        auto *IEI = dyn_cast<InsertElementInst>(Data);
+        while (IEI) {
+          auto *IndexOp = dyn_cast<ConstantInt>(IEI->getOperand(2));
+          if (!IndexOp)
+            break;
+          size_t IndexVal = IndexOp->getZExtValue();
+          assert(IndexVal < 4 && "Too many elements for texture store");
+          DataElements[IndexVal] = IEI->getOperand(1);
+          IEI = dyn_cast<InsertElementInst>(IEI->getOperand(0));
+        }
+      }
+
+      for (int I = 0, E = NumElements; I < E; ++I)
+        if (DataElements[I] == nullptr)
+          DataElements[I] =
+              IRB.CreateExtractElement(Data, ConstantInt::get(Int32Ty, I));
+
+      // Matching DXC, elements beyond the value's own width repeat the
+      // first element rather than being undef.
+      for (int I = NumElements, E = 4; I < E; ++I)
+        if (DataElements[I] == nullptr)
+          DataElements[I] = DataElements[0];
+
+      Value *Mask = ConstantInt::get(Int8Ty, 15U);
+      std::array<Value *, 9> Args{
+          Handle,          CoordArgs[0],    CoordArgs[1],    CoordArgs[2],
+          DataElements[0], DataElements[1], DataElements[2], DataElements[3],
+          Mask};
+      Expected<CallInst *> OpCall = OpBuilder.tryCreateOp(
+          OpCode::TextureStore, Args, CI->getName());
+      if (Error E = OpCall.takeError())
+        return E;
+
+      CI->eraseFromParent();
+      auto *IEI = dyn_cast<InsertElementInst>(Data);
+      while (IEI && IEI->use_empty()) {
+        InsertElementInst *Tmp = IEI;
+        IEI = dyn_cast<InsertElementInst>(IEI->getOperand(0));
+        Tmp->eraseFromParent();
+      }
+
+      return Error::success();
+    });
+  }
+
   [[nodiscard]] bool lowerResourceAtomicBinOp(Function &F) {
     IRBuilder<> &IRB = OpBuilder.getIRB();
 
@@ -1232,6 +1312,9 @@ public:
         break;
       case Intrinsic::dx_resource_store_typedbuffer:
         HasErrors |= lowerBufferStore(F, /*IsRaw=*/false);
+        break;
+      case Intrinsic::dx_resource_store_texture:
+        HasErrors |= lowerTextureStore(F);
         break;
       case Intrinsic::dx_resource_load_rawbuffer:
         HasErrors |= lowerRawBufferLoad(F);

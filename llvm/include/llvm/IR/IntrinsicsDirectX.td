@@ -156,6 +156,14 @@ def int_dx_resource_load_level
                              llvm_any_ty],
                             [IntrReadMem]>;
 
+// Writes a texel to a texture resource, mirroring
+// int_dx_resource_store_typedbuffer's (handle, index, value) shape but with
+// a coordinate vector (as int_dx_resource_load_level takes) in place of the
+// typed buffer's single element index.
+def int_dx_resource_store_texture
+    : DefaultAttrsIntrinsic<[], [llvm_any_ty, llvm_any_ty, llvm_any_ty],
+                            [IntrWriteMem]>;
+
 def int_dx_resource_calculate_lod
     : DefaultAttrsIntrinsic<[llvm_float_ty],
                             [llvm_any_ty, llvm_any_ty, llvm_any_ty],
