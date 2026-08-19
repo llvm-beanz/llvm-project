@@ -1619,6 +1619,23 @@ Both are now part of the lookup key (see `Binding::IsUAV`'s comment).
 Roadmap.md's "the remaining resource access ops"/"`RaisedLoweringPass`
 breadth" entries.
 
+A `Texture2D`/`RWTexture2D::GetDimensions` call (raised, on the DXIL side,
+by `raiseGetDimensions`'s `.x`/`.xy` cases -- see "DXIL texture and sampler
+access raising" above) is handled the same "extra trailing kernel argument"
+way the addressing stride is, but as its own, separate argument group
+(`Binding::NumDimensionArgs`): a real texture unit reads a bound resource's
+width/height off its descriptor, which -- like the stride -- a flat AMDGPU
+kernel argument list has no equivalent of, so the host supplies them
+directly instead. They are deliberately not the same argument as the
+addressing stride, even though the two are numerically the same value for
+any texture this flat model already addresses (the stride *is* the row
+pitch, and this model assumes -- but does not require -- that a row's
+pitch equals its width): reusing the stride would make `GetDimensions`'
+correctness depend on that assumption holding, rather than on a value the
+host supplies for exactly this purpose. `feme-dxil-to-amdgpu-texture-
+getdimensions.ll` compiles a `GetDimensions(width, height)` call end to
+end this way.
+
 **`feme::amdgpu::RaisedLoweringPass`**
 (`feme/include/feme/Transforms/AMDGPU/RaisedLowering.h`,
 `feme/lib/Transforms/AMDGPU/RaisedLowering.cpp`) handles the rest:

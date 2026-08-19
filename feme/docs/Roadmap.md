@@ -183,7 +183,15 @@ DXIL import is the most complete path, and its gaps are enumerable.
   of `double`/`half`/16-bit-int members, which `-enable-16bit-types`
   produces. Both were needed by the same real shader
   (`feme-dxil-to-amdgpu-texture.ll`): raw/structured buffer load/store and
-  samplers remain the rest of this entry's scope.
+  samplers remain the rest of this entry's scope. `GetDimensions`' `.xy`
+  (width+height) field pair now raises too (`raiseGetDimensions`, plus a new
+  `DXILOpLowering::lowerGetDimensionsXY` forward lowering added upstream the
+  same way `TextureStore`'s was, and `feme::amdgpu::ResourceLoweringPass`'s
+  new `Binding::NumDimensionArgs` kernel arguments to consume it when
+  retargeting to `amdgcn-*` -- see `feme-dxil-to-amdgpu-texture-
+  getdimensions.ll`); a mip-count out-parameter (`.z`/`.w`) is still left
+  unraised, since there is no `levels_xy`-shaped forward lowering to verify
+  against yet.
 
 ### 1.4 DXBC / `dxsa`
 
