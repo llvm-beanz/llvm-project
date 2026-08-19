@@ -7,26 +7,26 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `116d0b271d8b` (roadmap C3, "Divergent-vector decomposition in
-  `feme-cpu-simdize`": a `phi`/scalar-condition `select`/`shufflevector` of
-  vector type, a non-constant-index `extractelement`, and ordinary
-  elementwise arithmetic/cast over a vector all decompose now -- see
-  "Roadmap C3: measured impact" below).
+- FeMe revision: `60f34352aae6` (roadmap C4a/C4b, "Graphics pipeline state
+  breadth": silent graphics-pipeline-state rejections now diagnose
+  themselves through an opt-in log callback, `VK_CULL_MODE_FRONT_AND_BACK`
+  culling, and 8x multisampling -- see "Roadmap C4a/C4b: measured impact"
+  below).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
   robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
   empty image format lists" -- see "Deviations from a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1456 passed, 1 unsupported.
+- `check-feme`: 1462 passed, 1 unsupported.
 
 ## Headline
 
 | | Count | Share |
 |---|---|---|
-| Total cases | 3,236,999 | |
-| Passed | 10,520 | 0.32% |
-| Failed | 26,924 | 0.83% |
-| Not supported | 3,199,555 | 98.85% |
+| Total cases | 3,237,000 | |
+| Passed | 10,520 | 0.33% |
+| Failed | 26,955 | 0.83% |
+| Not supported | 3,199,524 | 98.84% |
 | Quality warning | 1 | |
 | **Crashed / timed out** | **0** | |
 
@@ -251,7 +251,55 @@ the shapes it closed were never what most of those cases were rejected for
 in the first place -- they were rejected one property earlier, on the
 missing stage-IO raising this section just found.
 
+## Roadmap C4a/C4b: measured impact
+
+Roadmap C4 ("Graphics pipeline state breadth", see Roadmap.md §1.9.1) is
+only partially closed by this revision. C4a (silent-rejection diagnostics)
+and two of C4b's five bullets (`VK_CULL_MODE_FRONT_AND_BACK` culling, 8x
+multisampling) are done; `mapTopology` beyond `TriangleList`/`TriangleStrip`,
+`mapDynamicState` beyond its six states, and the dual-source blend factors
+remain open (see FeMeGraphicsDesign.md's updated R33 status note for why
+each needs new rasterizer primitives rather than a mechanical table
+addition).
+
+**The headline barely moved, and moved in the direction that looks worse
+before the reason is understood: 10,520 passed (+0), 26,955 failed (+31),
+`Not supported` 3,199,524 (-31).** Every one of the 31 newly-`Fail`ed cases
+was previously `NotSupported`, correctly, because `isSupportedAttachmentSampleCount`
+declined 8 samples and `mapCullMode` declined `FRONT_AND_BACK` outright --
+`deqp-vk`'s own capability probes saw that and skipped the case cleanly.
+Now that both are advertised, `deqp-vk` attempts the case for real and
+runs into one of C4's own still-open bullets one step later (predominantly
+the point/line/line-strip/fan topologies `mapTopology` still declines, per
+`query_pool`'s unchanged 283 and `draw`'s 952 `vkCreateGraphicsPipelines`
+failures -- both groups' pipelines mostly ask for a non-triangle topology
+in the same `VkGraphicsPipelineCreateInfo` that also asks for 8x
+multisampling or `FRONT_AND_BACK`-equivalent culling). This is the same
+"stacked blockers" shape C1's format-properties finding and C3's stage-IO
+finding both already established: the two bullets landed here are correct
+and tested in isolation (see their own unit tests), but neither was ever
+independently reachable by a real CTS case without also closing the
+topology bullet still open in the same row. **Whether `logCreationFailure`
+(C4a) actually shortens triage time is not something this measurement can
+show a number for** -- it is silent by default in this run (as in every
+prior run and as it will be in every conformance submission), and its
+value is in a human running `FEME_VULKAN_LOG_CREATION_ERRORS=1` while
+triaging the very bucket this section describes, not in the pass/fail
+totals.
+
+This run also reproduced the same kind of long-single-process flake the
+C1 measurement first recorded (see "Roadmap C1: measured impact" above):
+`dEQP-VK.api.*`, run as one of six groups in parallel, hung deterministically
+partway through `object_management.multithreaded_per_thread_resources.
+device_group` and never printed `DONE!`; the same group run alone,
+immediately afterward, completed cleanly (7,445 passed / 287 failed /
+259,490 not supported / 267,222 total, the same numbers the C1 report
+recorded). As before, the clean standalone run's numbers are what this
+report's totals use, and the flake is recorded here rather than silently
+worked around.
+
 ## Every failure, by root cause
+
 
 **This section's own counts are from the pre-C2 revision** (`5f7420c1b3dd`)
 and are not yet re-attributed; see "Roadmap C2: measured impact" above for
@@ -304,24 +352,37 @@ bucket: these are *stacked* blockers on the same small set of shaders, so
 counting them individually overstates how many independent problems there
 are and understates how much each fix is worth once its successors land.
 
-### Pipeline state (3,354)
+### Pipeline state (3,385)
 
-`vkCreateGraphicsPipelines` returns `VK_ERROR_INITIALIZATION_FAILED` with
-no diagnostic for a state combination `feme::vulkan::GraphicsPipeline`'s
-translators have no peer for. The mappers in
-`feme/lib/Vulkan/GraphicsPipeline.cpp` name the boundaries directly:
+Unlike the rest of this section (see the note above: attributed against the
+pre-C2 revision and not yet re-run), this subsection's numbers are from
+*this* revision's own run, since roadmap C4a/C4b directly changed what it
+describes.
+
+`vkCreateGraphicsPipelines` returns `VK_ERROR_INITIALIZATION_FAILED` for a
+state combination `feme::vulkan::GraphicsPipeline`'s translators have no
+peer for -- no longer *silently*, as of roadmap C4a: setting
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` prints the specific reason
+(`feme::vulkan::logCreationFailure`, `feme/lib/Vulkan/Diagnostics.h`); this
+report's own run left it unset, matching a real conformance submission, so
+the count and causes below are still attributed from `deqp-vk`'s own
+generic `vk.createGraphicsPipelines(...) -> VK_ERROR_INITIALIZATION_FAILED`
+message, not from the ICD's newly-available detail. The mappers in
+`feme/lib/Vulkan/GraphicsPipeline.cpp` name the remaining boundaries
+directly:
 
 - `mapTopology` accepts `TRIANGLE_LIST`/`TRIANGLE_STRIP` only. Point, line,
   line-strip, fan and adjacency topologies are the largest single
-  contributor (all 820 `draw` failures, and most of `query_pool`'s 283).
-- `mapCullMode` rejects `FRONT_AND_BACK`; `mapBlendFactor` rejects the
-  dual-source factors; `mapDynamicState` accepts six of the ~40 dynamic
-  states; `isSupportedAttachmentSampleCount` accepts 1/2/4.
-
-That these fail *silently* (no `stderr` line at all) is itself a finding:
-every shader-side rejection names itself, but a state-side one does not,
-which makes triage of this bucket require reading the ICD's source rather
-than its output.
+  contributor (952 `draw` failures and `query_pool`'s unchanged 283, both
+  up slightly from C1-era numbers now that C4b's `FRONT_AND_BACK`/8x-sample
+  bullets no longer stop a case earlier than this one for any pipeline
+  that also asks for one of them -- see "Roadmap C4a/C4b: measured impact"
+  above).
+- `mapCullMode` and `isSupportedAttachmentSampleCount` are no longer on
+  this list: `VK_CULL_MODE_FRONT_AND_BACK` and 8 samples are both
+  implemented (roadmap C4b). `mapBlendFactor` still rejects the
+  dual-source factors; `mapDynamicState` still accepts six of the ~40
+  dynamic states.
 
 ### Format table (1,938)
 
@@ -367,7 +428,7 @@ four cases on `VkPhysicalDeviceDriverProperties` (no registered
 `VkDriverId`, no conformance version, non-null-terminated name/info
 strings).
 
-## What the 3,199,555 `Not supported` results mean
+## What the 3,199,524 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
 capability it needs is genuinely optional. The bulk of this run's
