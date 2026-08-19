@@ -22620,3 +22620,164 @@ disjoint code path this change does not touch at all, the same reasoning
 the "Fixing binary-looking bytes" entry above already used for a
 non-functional change -- so `VulkanCTSReport.md` is unaffected and stays
 as its last-generated edition.
+
+# Fleshing out DXIL resource access ops for a real Texture2D/RWTexture2D/cbuffer<half> compute shader
+
+## The ask
+
+A user gave me this exact HLSL compute shader (bilateral-ish filter:
+`Texture2D<half4> InputTexture : register(t0)`, `RWTexture2D<half4>
+OutputTexture : register(u0)`, a `cbuffer FilterParameters : register(b0)`
+of two `half` scalars) and said `feme --target=amdgcn-amd-amdhsa` hits an
+assert compiling it, and asked me to "flesh out the resource access ops"
+the previous session's entry above (`Fixing the "Unknown target ext type!"
+assert`) left as future work -- that entry's own final paragraph predicted
+almost exactly this: "a real shader using a texture is not retargetable
+until both halves land" (Design.md's "Decision: texture and sampler handle
+kinds", point 3).
+
+First step: reproduce for real rather than trust the report. Compiled the
+exact shader with the real `dxc` checkout (`-T cs_6_2
+-enable-16bit-types`), inspected the DXIL with `dxc -dumpbin`, and only
+then ran `feme --target=amdgcn-amd-amdhsa` against the real container. It
+did *not* assert -- the previous session's `verifyNoRaisedIRRemains` fix
+had already turned that into a diagnostic (`resource handle type
+'dx.CBuffer' is not supported...`) -- so "hits an assert" was slightly
+stale from the user's perspective (they'd tried this before that fix
+landed, or are describing the underlying crash class rather than today's
+exact symptom), but the underlying ask -- this shader still cannot compile
+through -- was completely real and exactly reproducible.
+
+## What was actually missing, found by iterating on the real error message
+
+Rather than guessing, I fixed one reported error at a time and re-ran the
+real `dxc`-compiled shader after each fix, letting the *next* error message
+tell me the next gap. This surfaced four independent things, in this
+order:
+
+1. `raiseCBufferLoadLegacy` only accepted `CBufferLoadLegacy`'s 4-field
+   32-bit row overload -- `-enable-16bit-types` cbuffers use the 8-field
+   16-bit one. Generalized to all three of `CBufferLoadLegacy`'s overloads
+   (2/4/8-field, 64/32/16-bit) via `getCBufferRowIntrinsic`, all of which
+   `DXILOpLowering::lowerCBufferLoad` already lowers symmetrically -- I
+   checked this against the real LLVM source before assuming it, since
+   getting that wrong would mean raising into an intrinsic nothing can
+   forward-lower back.
+2. `raiseTextureStore` did not exist *at all* -- and DXIL's `TextureStore`
+   op (67) had no canonical LLVM intrinsic, no `DXILOp<67, ...>`
+   definition, and no `DXILOpLowering` support upstream either (unlike its
+   read counterpart `TextureLoad`/66, which already round-trips through
+   `int_dx_resource_load_level`). This is real upstream LLVM work, not
+   just a feme-side gap: added `int_dx_resource_store_texture`
+   (`IntrinsicsDirectX.td`), the `TextureStore` `DXILOp` (`DXIL.td`), and
+   `DXILOpLowering::lowerTextureStore` (mirroring the existing
+   `lowerTextureLoad`/`lowerBufferStore`), with its own new
+   `llvm/test/CodeGen/DirectX/TextureStore.ll` forward-lowering test,
+   *before* touching feme at all -- feme's own raiser needs a real
+   intrinsic to raise into, and I wanted the LLVM-side round-trip proven
+   with its own test independent of feme's.
+3. The legacy (pre-SM6.6) `dx.op.createHandle` + `!dx.resources` metadata
+   path (`buildHandleType`) never reconstructed texture handles at all --
+   only bindless `CreateHandleFromBinding`/`AnnotateHandle` did (R30). This
+   mattered because `dxc -T cs_6_2` (below SM6.6) takes the *legacy* path,
+   confirmed by actually reading the real DXIL disassembly rather than
+   assuming the modern path applied. Generalized `buildHandleType` and
+   `inferTypedBufferWidth` (component-count-from-access-sites, since
+   `!dx.resources` records component type but never count, for a texture
+   the same way it already didn't for a legacy `TypedBuffer`) to cover
+   `isPlainTextureKind` alongside `TypedBuffer`.
+4. `feme::amdgpu::ResourceLoweringPass` only modeled `dx.TypedBuffer`/
+   `spirv.Image` handles. Extended it to `dx.Texture` (flat pointer plus a
+   new per-extra-dimension row/slice-pitch "stride" kernel argument --
+   DXIL carries no such stride itself, so this is a genuinely new
+   addressing convention I had to invent and then document, not something
+   recoverable from existing metadata) and `dx.CBuffer` (a 16-byte-strided
+   flat load, no extra argument needed).
+
+## Two real bugs the first three fixes exposed, not caused
+
+Getting to end-to-end success needed two more fixes inside
+`ResourceLoweringPass::collectBindings`, both pre-existing but invisible
+until more than one DX resource family was actually modeled at once:
+
+- `getResourceOps` matched purely on `llvm.dx.resource.handlefrombinding`'s
+  intrinsic ID, which is the *same* ID for `dx.TypedBuffer`/`dx.Texture`/
+  `dx.CBuffer` (they're overloads of one intrinsic, distinguished only by
+  the handle's own result type). Adding more DX-family `ResourceOps`
+  entries with the same ID would have made `getResourceOps` always return
+  the first (`TypedBuffer`) entry and then immediately fail every other
+  family's name check -- not a no-op, an outright regression that would
+  have aborted lowering for typed buffers too, in any function that also
+  happened to touch a texture or cbuffer. Fixed by disambiguating on
+  `(ID, handle type name)` together.
+- `collectBindings` keyed a binding purely by `(space, register)`. This
+  shader's own `Texture2D InputTexture : register(t0)` and
+  `RWTexture2D OutputTexture : register(u0)` are exactly `(space 0,
+  register 0)` *both* -- HLSL's `t`/`u` registers are independent
+  namespaces, so this is completely normal and not a real ambiguity, but
+  the existing key couldn't tell them apart and treated them as "the same
+  binding reached through two different element types," aborting the
+  whole function's resource lowering. I found this by instrumenting
+  `collectBindings` with temporary `errs()` prints at each `nullopt`
+  return, rebuilding, and running the real `feme` binary against the real
+  compiled shader (my first attempt to reproduce this via `feme-opt`
+  running the raise and lowering passes as two separate manual steps
+  produced misleading "nothing happened, no error" output, because
+  skipping `feme`'s metadata-raising step left `main` without the
+  `hlsl.shader`/`hlsl.numthreads` attributes `isShaderEntryPoint` needs --
+  a reminder that a hand-assembled multi-pass repro isn't the same
+  program as the real pipeline, and debugging should go through the real
+  entry point once a shortcut stops explaining the symptom). Fixed with a
+  `Binding::IsUAV` bit (read off the handle type's own `isWriteable()`-
+  equivalent int parameter, shared by `TypedBuffer` and `Texture`) folded
+  into the lookup key, plus keying on the resource family (`Ops`) too, so
+  a same-numbered `cbuffer` at `b0` and texture at `t0` are never even
+  considered candidates for merging in the first place (rather than being
+  merged and *then* flagged as a conflict, which is a difference in
+  diagnosis, not just implementation): `b`/`t`/`u` are three independent
+  HLSL register namespaces, so colliding on the bare number is expected,
+  not an error.
+
+## Verification
+
+Built with the existing `build/` tree, adding `ccache` as the compiler
+launcher (not previously wired into this checkout) via `cmake
+-DCMAKE_C(XX)_COMPILER_LAUNCHER=ccache .` before the first build --
+`LLVM_ENABLE_ASSERTIONS=ON` was already set. Six commits: the upstream
+LLVM `TextureStore` intrinsic/lowering (with its own `check-llvm-codegen-
+directx` run: 480/481, one pre-existing expected failure, unchanged); the
+feme DXIL raising generalizations (cbuffer widths + `raiseTextureStore`);
+the legacy-path texture handle raising; the AMDGPU `ResourceLoweringPass`
+extension plus its two `collectBindings` fixes; documentation; this file.
+`ninja check-feme` after the feme-side commits: 1478 -> 1487 passed (new
+unit/lit tests for each gap, including a real end-to-end
+`feme-dxil-to-amdgpu-texture.ll` compiling this shader's exact resource
+shape to a real AMDGPU object file), 1 unsupported throughout, no
+regressions -- including re-running `check-feme-transforms-dxil`/
+`-amdgpu` and `check-feme-vulkan` specifically after the resource-key
+fixes, since those are exactly the kind of change that could silently
+break an existing passing case by widening what a shared helper matches.
+Re-verified the user's *exact* original repro shader (not a hand-reduced
+version) compiles to a real, disassemblable AMDGPU ELF object after every
+commit that touched behavior, not just at the end.
+
+One existing test (`feme-dxil-to-amdgpu-unsupported-resource.ll`) now
+passed *for the wrong reason* once cbuffers became supported -- its
+`dx.CBuffer` example started compiling successfully instead of producing
+the diagnostic it asserted. Repointed it at `dx.RawBuffer` (still
+genuinely unmodeled) rather than deleting the coverage, and kept a comment
+explaining the history so a future reader doesn't wonder why the resource
+kind changed.
+
+Vulkan CTS: not re-run. Every change in this session is confined to
+`llvm/lib/Target/DirectX` and `feme/lib/Transforms/{DXIL,AMDGPU}` -- the
+DXIL-import/raise/AMDGPU-retarget path `feme --target=amdgcn-amd-amdhsa`
+drives. `libfeme_vulkan`/`feme-vulkan-*` and the CPU runtime
+`VulkanCTSReport.md` measures are a disjoint code path (SPIR-V import,
+`feme::cpu::runPipeline`, the software Vulkan ICD) that calls none of the
+functions touched here; I confirmed this by checking `check-feme-vulkan`
+still passes (8/9, 1 unsupported, unchanged from before this session) as a
+cheap proxy rather than spending hours re-running the full ~3.2M-case CTS
+suite for a change it cannot observe. `VulkanCTSReport.md` stays as its
+last-generated edition, same reasoning the immediately preceding session
+already used for its own, unrelated change.
