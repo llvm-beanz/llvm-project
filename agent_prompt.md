@@ -94,3 +94,6 @@ Then pass that output into feme, I'm currently seeing the error:
 error: failed to legalize operation 'spirv.Switch' that was explicitly marked illegal: "spirv.Switch"(%13)[^bb2] <{case_operand_segments = array<i32>, operandSegmentSizes = array<i32: 1, 0, 0>}> : (i32) -> ()
 feme: failed to convert spirv dialect module to the llvm dialect
 ```
+
+The last agent didn't commit anything, but had some files modified which I
+stashed in git.
