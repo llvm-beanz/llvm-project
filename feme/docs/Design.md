@@ -1541,8 +1541,23 @@ An entry point using a resource this pass cannot model -- a non-typed
 buffer, a dynamically indexed binding array (which would need one pointer
 per register, something a fixed argument list cannot express), or a handle
 consumed some other way -- is left untouched *entirely* rather than
-partially rewritten, so the failure surfaces as a clean "unsupported" from
-the backend instead of silently wrong code.
+partially rewritten. That leftover `target("dx.")`/`target("spirv.")`
+handle (or, for a resource kind `feme::dxil::OpRaisingPass` itself does not
+yet raise for a bound, non-bindless binding -- e.g. a `Texture2D`/
+`RWTexture2D`'s legacy `dx.op.*` calling convention, see "Decision: texture
+and sampler handle kinds" above -- the un-raised `dx.op.*` call it leaves
+instead) is not valid input to `AMDGPU`'s real ISel: neither is a real
+target intrinsic/type it has any notion of, and `llvm::MVT::getVT` has no
+case for a `target("dx.")`/`target("spirv.")` type at all, so it
+`llvm_unreachable`s once instruction selection actually needs that value's
+type -- non-deterministically late, depending on the exact shader and
+subtarget, rather than at any point specific to this pass. `feme::
+verifyNoRaisedIRRemains` (`feme/include/feme/Core/RaisedIRVerifier.h`) runs
+right after this pass and `RaisedLoweringPass` (also for NVPTX's own
+counterpart pair) specifically to catch this and turn it into the clean
+"unsupported" diagnostic promised above -- and already documented by
+feme/docs/CommandGuide/feme.md's "Current limitations" section -- instead
+of that crash.
 
 **`feme::amdgpu::RaisedLoweringPass`**
 (`feme/include/feme/Transforms/AMDGPU/RaisedLowering.h`,

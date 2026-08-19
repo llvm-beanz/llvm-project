@@ -11,6 +11,7 @@
 #include "feme/Core/Context.h"
 #include "feme/Core/FormatRegistry.h"
 #include "feme/Core/Module.h"
+#include "feme/Core/RaisedIRVerifier.h"
 #include "feme/Core/ShaderStage.h"
 #include "feme/Export/DXIL/DXILExporter.h"
 #include "feme/Export/Exporter.h"
@@ -433,6 +434,15 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     // lowering then sees as an ordinary function.
     feme::amdgpu::ResourceLoweringPass().run(M, MAM);
     feme::amdgpu::RaisedLoweringPass().run(M, MAM);
+
+    // A binding/op either pass above could not model is left entirely
+    // unrewritten (see `ResourceLoweringPass`'s own comment), which is not
+    // valid input to AMDGPU's real ISel -- report that cleanly now rather
+    // than let it reach `Backend.run` below, where it surfaces as an
+    // `llvm::MVT::getVT` assert instead (see `verifyNoRaisedIRRemains`'s
+    // own comment).
+    if (llvm::Error Err = feme::verifyNoRaisedIRRemains(M, TheTriple.str()))
+      return std::move(Err);
   }
 
   // NVPTX's own counterpart (Design.md milestone 9's NVPTX remainder, see
@@ -443,6 +453,9 @@ llvm::Expected<DriverResult> Driver::run(llvm::MemoryBufferRef Input,
     llvm::ModuleAnalysisManager MAM;
     feme::nvptx::ResourceLoweringPass().run(M, MAM);
     feme::nvptx::RaisedLoweringPass().run(M, MAM);
+
+    if (llvm::Error Err = feme::verifyNoRaisedIRRemains(M, TheTriple.str()))
+      return std::move(Err);
   }
 
   // A raised module isn't valid input to a real CPU `TargetMachine` either:
