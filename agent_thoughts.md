@@ -22087,3 +22087,175 @@ each individually gated behind the still-open topology bullet, as the
 measurement above confirms) and regenerated VulkanCTSReport.md from that
 run, including re-measuring (rather than leaving stale) the one
 root-cause subsection C4a/C4b directly changed.
+
+# Implementing Vulkan conformance roadmap step C4c
+
+## Re-reading C4's own verdict before accepting it
+
+The roadmap row for C4 groups three things under one blanket claim:
+`mapTopology` beyond the triangle class, `mapDynamicState` beyond its six
+states, and dual-source blend factors all "need new rasterizer primitives"
+and are therefore G-track work, not a mechanical table addition. Before
+doing anything I went and checked whether that was actually true for all
+three, rather than taking the grouping at face value, because the roadmap
+document itself is explicit that C4a/C4b already found narrower scope than
+the original row implied.
+
+It wasn't true for dynamic state. `feme::graphics::CullMode`, `FrontFace`,
+`DepthState`, and `StencilState` already had complete *static* translation
+paths before this session (some since V6, `FrontAndBack` since C4b). The
+only thing missing was reading each field from a per-draw
+`DynamicGraphicsState` snapshot instead of the pipeline's own creation-time
+value when the corresponding `VkDynamicState` was declared -- exactly the
+pattern the six pre-existing dynamic states (viewport, scissor, blend
+constants, three stencil masks) already used. That meant `VK_EXT_
+extended_dynamic_state`'s 12 states were, without exception, either
+already-mechanical (cull mode, front face, depth test/write/compare-op,
+stencil test-enable/op), trivially reducible to an existing mechanism
+(viewport/scissor "with count", since `maxViewports == 1` already), backed
+by an existing bound of scope (primitive topology, since `mapTopology`
+already only accepts the triangle class and Vulkan itself requires a
+dynamic topology to stay within its pipeline's static class), or a bounded
+new addition (vertex-input-binding-stride, needing one new command,
+`vkCmdBindVertexBuffers2EXT`, with no separate `vkCmdSet*` counterpart) --
+or provably inert (depth-bounds-test-enable, since `depthBounds` is an
+unadvertised feature bit and can therefore never be legally set `VK_TRUE`).
+None of the 12 needed a new primitive-assembly path, a new edge test, or a
+second fragment output the way point/line topologies and dual-source blend
+genuinely do.
+
+Once I'd verified that by reading the actual state structs and executor
+code (not just trusting the roadmap's prose), I treated implementing the
+*entire* extension as the right unit of work, not a partial subset: an
+ICD may only advertise `VK_EXT_extended_dynamic_state` if it truthfully
+supports every state the extension defines, and a partial implementation
+that never advertised the extension would be unreachable by any real
+`deqp-vk` case (which checks for the extension before attempting any of
+its states) -- i.e. it would be dead code from a conformance perspective
+even though individually correct. All-or-nothing was the only version of
+this that would actually move anything.
+
+## Sequencing seven small commits around one shared mechanism
+
+Every state follows the same `DynamicStateBits` / `DynamicGraphicsState` /
+`mapDynamicState` / `buildExecutorPipeline` pattern, but I split the work
+into seven commits by *state group* rather than landing one large diff:
+cull mode + front face; depth test/write/compare-op + depth-bounds (bundled
+because they share `translateDepthStencilState`'s reordering); stencil
+test-enable/op; viewport/scissor "with count"; primitive topology;
+vertex-input-binding-stride (the one genuinely novel piece, needing a new
+command and new `GraphicsState` fields); and finally advertising the
+extension itself once all 12 states existed to advertise honestly. Each
+commit built and ran the full `FeMeVulkanTests` suite (168 → 174 across the
+session) before being committed, and each added at least one new,
+purpose-built test exercising the specific state it introduced -- not just
+extending an existing test's assertions.
+
+One thing worth recording because it was a real mistake, not a stylistic
+choice: partway through I ran `git add -p` incorrectly and ended up
+amending an unrelated commit's file list into the wrong commit (the
+vertex-input-binding-stride commit picked up the extension-advertisement
+commit's files because they were already staged in the index from an
+earlier `git add -A --`). I caught it by noticing the amended commit's
+`--stat` showed 12 files instead of the expected 5, `git reset --soft`ed
+back out, and re-split the change by hand (`git add -p` for the one file
+whose hunks needed to be separated, explicit path lists for the rest),
+rebuilding and re-running the full suite afterward to confirm the split
+hadn't silently dropped anything. Small commits are only actually useful
+if each one's file list is verified, not assumed from the edit history.
+
+## `translateDepthStencilState`'s reordering, and what "ignore the static
+field" actually requires
+
+The subtlest part of this work was not the mechanical resolution pattern
+itself but getting pipeline-creation-time validation right once a state
+could be dynamic. `VK_EXT_extended_dynamic_state`'s contract is not "the
+static field is an initial value that dynamic state overrides" -- it is
+"the static field is *ignored*, full stop," which matters because this
+ICD's own design principle is that an unsupported state combination must
+fail at creation, not at draw time. That meant `translateDynamicState` had
+to move to run *before* `translateDepthStencilState`/`translateViewportState`
+(previously last in the sequence) so those functions could consult which
+states were already known dynamic and skip validating (or requiring) the
+corresponding static fields -- e.g. a pipeline with `DEPTH_TEST_ENABLE`
+dynamic and no depth attachment in its render target must still fail at
+creation (a dynamically-enabled test still needs somewhere to test into),
+while a pipeline with `DEPTH_COMPARE_OP` dynamic must accept an
+unrecognized/placeholder static `depthCompareOp` value rather than reject
+it, since that field is never actually consulted. Getting this backwards
+in either direction would have been a real correctness bug, not just an
+awkward diagnostic, so I wrote `GraphicsPipelineTest.DynamicDepthTestEnable
+RequiresDepthAttachment` and `DynamicDepthStateOverridesStaticState`
+specifically to pin both halves of that contract before moving on to
+stencil, which needed the identical treatment.
+
+## `VK_WHOLE_SIZE` as a sentinel, and why vertex-input-binding-stride
+needed its own shape
+
+Every other dynamic state fits `DynamicGraphicsState`, a fixed-size
+struct snapshotted once per draw. Vertex-input-binding-stride does not:
+it is set through `vkCmdBindVertexBuffers2EXT`'s optional `pStrides`, an
+array with one entry per *bound buffer slot*, not a fixed field -- there
+is no `vkCmdSetVertexInputBindingStride*` command at all. I tracked it as
+bound-buffer state instead (`GraphicsState::VertexBufferStrides`,
+resized in lockstep with the pre-existing `VertexBuffers`/
+`VertexBufferOffsets` arrays `vkCmdBindVertexBuffers` already maintains),
+using `VK_WHOLE_SIZE` as the "no override at this slot" sentinel rather
+than `VkDeviceSize`'s own default-constructed zero, since zero is a legal
+(if unusual) real stride and cannot double as "unset" without silently
+misinterpreting a deliberate zero-stride binding. `resolveVertexBinding
+Stride` is shared by both the vertex-fetch loop and its own bounds check
+(`validateDrawFetchBounds`) specifically so the two could never disagree
+about which stride a draw actually used -- which mattered concretely for
+the test I wrote, where the pipeline's *static* stride is deliberately
+wrong (double the real value) so only the dynamic override, if correctly
+threaded through both places, produces the right rendered color and the
+right bounds check.
+
+## The CTS run found exactly the confirmation I was hoping for, and one I
+wasn't
+
+I ran the full 54-group `deqp-vk` pass once, after all seven commits
+landed, rather than once per commit -- each individual state's own value
+is only reachable once the extension itself is advertised, so measuring
+after every intermediate commit would have shown nothing until the last
+one anyway. The headline moved by a small, exact, and directly-traceable
+amount: +40 passed, every one of them a `dEQP-VK.dynamic_state.*` case
+whose name is literally one of the twelve states this session implemented
+(`cull_mode`, `stencil_op`, `viewport_with_count`, ...), previously
+`NotSupported` outright because `deqp-vk` checks for the extension before
+attempting any of its states. That is about as clean a confirmation as a
+CTS run can give that a change is not just unit-tested but reachable and
+correct against an independent client -- I did not expect to be able to
+attribute the movement this precisely by case name alone.
+
+The other finding was less flattering and I recorded it as such rather
+than glossing over it: `dEQP-VK.pipeline.{monolithic,fast_linked_library,
+pipeline_library}.extended_dynamic_state.*` -- the test group whose name
+most directly suggests it exercises this extension -- moved by exactly
+zero, because every sampled case in this CTS release's version of that
+group also requires `VK_EXT_extended_dynamic_state2`/`_state3`,
+`VK_EXT_vertex_input_dynamic_state`, or `VK_EXT_mesh_shader`, none of
+which this session implements. I checked this by grepping the log's own
+`NotSupported` reason strings rather than assuming the group name meant
+what it sounded like, and wrote it into the report explicitly so a future
+reader does not expect movement there from this milestone alone. Four
+more of the newly-`Fail`ed cases are the same "stacked blockers" pattern
+C1/C3/C4a/C4b's own measurements already established (vertex-input-
+binding-stride cases now reach `vkCreateGraphicsPipelines` and hit an
+unrelated, pre-existing "needs both a vertex and a fragment stage"
+rejection one step later); the remaining ~59 of the +63 new failures I
+could not trace to any of the twelve states by case name, and recorded
+that as an explicit gap in the report's own precision rather than
+guessing at a cause.
+
+## Verification discipline
+
+`ninja check-feme-vulkan` after every one of the seven commits (168 → 174
+`FeMeVulkanTests` across the session, one new test per commit, each
+verified to actually exercise the state it was added for rather than just
+raising the total); a full `ninja check-feme` at the end (1470 passed, 1
+unsupported, unchanged from before this session's start) to confirm
+nothing outside `feme/lib/Vulkan` regressed; and the full 54-group
+Vulkan-CTS pass described above, with `VulkanCTSReport.md` regenerated
+from it rather than hand-edited from memory.
