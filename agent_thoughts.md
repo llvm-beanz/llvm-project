@@ -21613,3 +21613,159 @@ unbounded blast radius under this same session rather than the small,
 individually-testable steps the coding standard asks for. Recording the
 finding precisely, so it's a two-line pointer instead of a rediscovery, is
 the more useful deliverable here.
+
+# Implementing Vulkan conformance roadmap step C2
+
+The ask was Roadmap.md's C2: teach `feme::spirv::getBufferBlockElementArray`/
+`getUniformBlockElementStruct` the shapes glslang actually emits for a
+storage/uniform buffer block, then arrayed (array-of-blocks) bindings.
+10,121 stacked CTS failures point at this gap, more than any other single
+row except C3.
+
+## Understanding the actual gap
+
+The existing code's own comment said it all, once I stopped skimming it:
+both functions require the block variable's pointee to be a struct with
+*exactly one* member, and further require that member be either a runtime
+array (storage buffer) or itself a struct (uniform block) -- FeMe's own
+upstream HLSL resource representation, which always wraps the real content
+in exactly one extra layer because that's what `spirv.VulkanBuffer`'s
+LLVM-backend model expects (I confirmed this by reading
+`selectResourceGetPointer` in `SPIRVInstructionSelector.cpp`: the backend
+*always* synthesizes exactly one implicit wrapping struct around whatever
+type parameter it's given, and `llvm.spv.resource.getpointer`'s single
+index always operates one level inside that parameter -- never zero, never
+two). glslang's own GLSL -> SPIR-V compilation never adds that wrapper at
+all: the block variable points directly at its own `Block`/`BufferBlock`-
+decorated struct, which routinely has more than one member (header fields
+before a trailing runtime array, or several ordinary UBO fields), a sized
+array member, or a matrix member.
+
+The useful realization, once I'd convinced myself the backend's own
+wrapping is fixed and non-negotiable: FeMe's narrow "exactly one member"
+shape and glslang's "however many members" shape are not actually two
+different *runtime* behaviors needing two code paths glued together --
+they're the same access mechanism (one `getpointer` call selecting one
+level, then ordinary GEPs for anything deeper) with the type parameter
+chosen differently. For the narrow N==1 case, the type parameter is the
+*unwrapped* member (matching today's code and its existing tests exactly);
+for everything else, the type parameter is the struct *itself* (no
+unwrapping, since there's no separate wrapper to strip). Both reduce to
+"first selector index -> `getpointer`, dropped if and only if it's an
+always-0 dummy selecting the sole member of a stripped-away wrapper."
+`StorageBufferAccessChainPattern`/`UniformBufferAccessChainPattern` merged
+into one `BlockAccessChainPattern` on exactly this insight, sharing a
+`rewriteBlockAccess` helper for "getpointer then optional GEP" that neither
+storage nor uniform blocks needed to spell separately once the abstraction
+was right.
+
+Matrix members needed one more piece entirely: MLIR upstream has *no*
+`spirv.MatrixType` -> `llvm` dialect conversion at all (no SPIR-V runner
+equivalent to convert to), so any struct with a matrix member failed to
+convert regardless of anything else. I added one -- an array of column
+vectors, confirmed against a real LLVM SPIRV backend test
+(`load-store-matrix-in-struct.ll`) rather than guessed -- and, since
+`RowMajor`/`ColMajor`/`MatrixStride` are *member* decorations (not on the
+matrix type itself), validate them where the struct converter already
+walks members: a `RowMajor` member (whose physical layout is transposed
+from that natural representation, unrepresentable by reinterpreting the
+same bytes) or a mismatched `MatrixStride` declines the whole struct's
+conversion, matching this codebase's established "decline cleanly, don't
+miscompile" discipline rather than attempting a transpose I'd have had no
+way to validate against a real backend test.
+
+Arrayed bindings (`T blocks[N]` in GLSL) needed a genuinely different
+mechanism, not just a bigger `BlockElement`: a non-arrayed block's handle
+needs no runtime information the type converter cannot already supply, but
+an arrayed one's handle needs to know *which* descriptor to bind, only
+available at its own access chain's leading (array) index -- which the
+existing `spirv.mlir.addressof` conversion (`ResourceAddressOfPattern`)
+runs *before* any access chain exists to supply it. Fixed by having that
+pattern erase an arrayed variable's address outright (its only real use is
+always an access chain, which builds the handle itself) and adding
+`ArrayedBlockAccessChainPattern`, which reads the referenced global
+directly off the *original* (pre-conversion) SSA structure -- the same
+`getReferencedGlobal`-style idiom this file already uses elsewhere -- to
+recover the binding info a converted operand can no longer carry.
+
+## Two crashes a real CTS run found that no unit test did
+
+I wrote unit tests for every shape as I went and `check-feme` stayed green
+throughout, but a real Vulkan-CTS run (as the prompt insists on, and as I
+now trust more than my own guessed-at test coverage) found two bugs my own
+tests didn't think to cover:
+
+1. `dEQP-VK.ubo.single_struct.per_block_buffer.std140_instance_array_both`
+   asserted in `rewriteBlockAccess`. I'd written the "further indices"
+   branch assuming the wrapper shape's content was *always* a storage
+   buffer's runtime array (true for every test I'd written, since I kept
+   testing storage and uniform blocks with different member shapes rather
+   than the one combination that breaks it: a uniform block whose wrapped
+   field struct itself has an array member, indexed further). The fix was
+   to dispatch on what the content actually *is* (array vs. struct) rather
+   than on which shape produced it -- which was also simpler code than
+   what it replaced.
+2. `dEQP-VK.glsl.conversions.matrix_to_matrix.mat2_to_mat2x3_vertex`
+   crashed inside MLIR *upstream's own* `CompositeExtractPattern`, which
+   I hadn't touched at all. Adding the matrix type conversion made it
+   newly reachable for a matrix container, and it assumes any non-vector
+   composite is a pure aggregate `llvm.extractvalue` can index all the way
+   down -- true for every SPIR-V type before this revision, false the
+   moment a matrix's own vector-typed columns exist. This is exactly the
+   kind of latent-bug-made-reachable finding C1's own measurement warned
+   about (three crashes surfaced by removing an unrelated skip), and it
+   reinforced the same lesson: a change that makes more of the test matrix
+   reachable can turn a stale upstream assumption into a live crash, and
+   the only way to find that is to actually run the CTS, not just the
+   tests you thought to write. I added `MatrixCompositeExtractPattern`/
+   `MatrixCompositeInsertPattern` (higher benefit, so they win for a matrix
+   container) rather than route around it.
+
+Both are fixed in this revision, each in its own commit with its own
+regression test, rather than documented as a follow-up the way C1's format-
+properties blocker was -- these were reachable, fixable bugs in code this
+session's own commits introduced or newly exposed, not a separate pre-
+existing subsystem outside this row's scope.
+
+## The measurement, and one thing that could have quietly corrupted it
+
+A full 54-group run moved the headline for the first time since C1's own
+measurement: +169 passed, -169 failed, `Not supported` unchanged. Small
+compared to C2's own 10,121-case column, but expected: the
+`Uniform`-storage-class-block diagnostic is gone from every log (grepped
+for directly, not inferred), and `feme-cpu-simdize`'s own diagnostic count
+on the same re-run (10,223, essentially the same shaders) confirms most of
+those cases now fail one stage later on C3 instead of passing outright --
+exactly the stacked-blocker shape C1's own report predicted this row would
+have. The 169 that do pass are the ones C2 was the *only* blocker for.
+
+The one surprise: my first attempt at this measurement produced a total of
+1.9M cases against a case list of 3.2M -- a huge, silent shortfall I could
+easily have missed if I'd only checked pass/fail *ratios* rather than the
+absolute total against the case list's own count. `pipeline`'s own log
+said why: `ResourceError (Failed to open file: './vulkan/amber/...')`
+followed by `Test run was ABORTED!` -- a missing Amber test asset (resolved
+by a relative path from `deqp-vk`'s own working directory, which my
+per-group directories don't share) doesn't fail just that one case the way
+a missing format or extension does; it aborts the *entire* group,
+truncating `pipeline`'s own total by roughly 850,000 cases while still
+printing a plausible-looking (but wrong) summary. I'd already worked around
+this for `glsl`/`graphicsfuzz` specifically (the two groups that visibly
+errored with "Failed to open file" during a smoke test) without realizing
+several more groups needed the identical fix but failed silently instead --
+only the total-vs-case-list sanity check caught it. Symlinking the CTS data
+directory into every group's own directory, not just the two I'd noticed,
+fixed all of them at once. Recorded in VulkanCTSReport.md's "Reproducing
+this report" section so the next person doesn't lose 850,000 cases to the
+same trap.
+
+## What's left of C2, and what's next
+
+All four shapes and arrayed bindings are done and measured. Roadmap.md's
+C2 row is marked done. The stacked-blocker relationship this measurement
+confirmed is exactly why Roadmap.md always sequenced C3 (`feme-cpu-
+simdize`'s divergent-vector decomposition) right alongside C2 rather than
+after it judged by today's numbers -- C3 is now the first blocker for
+essentially the same shaders C2 just unblocked, and C8's own "shader long
+tail" remains conditional on being re-measured after both land, exactly as
+planned.
