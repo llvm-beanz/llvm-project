@@ -21908,3 +21908,182 @@ session (pre-elementwise, post-elementwise, and the final revision) to
 make sure each incremental change was actually measured rather than
 assumed, exactly as the previous C1/C2 sessions' own discipline
 established.
+
+# Implementing Vulkan conformance roadmap step C4
+
+## Reading the row before touching anything
+
+Roadmap.md's C4 row bundles five different rasterizer/executor gaps
+(`mapTopology` beyond the two triangle topologies, `mapDynamicState`
+beyond six states, `FRONT_AND_BACK` culling, dual-source blend factors,
+sample counts beyond 4) behind one framing sentence: "this is really
+G-track work surfaced by the Vulkan track." The row's own prose also
+carves out a sub-step, C4a, and is explicit that it should be done "first
+and separately": every one of those five gaps fails pipeline creation
+today with a genuinely descriptive `llvm::Error` message that
+`vkCreateGraphicsPipelines` then throws away with a bare `consumeError`,
+so triaging this whole bucket meant reading `GraphicsPipeline.cpp`'s
+source rather than the ICD's own output.
+
+I did C4a first, as instructed, then looked at the remaining four C4b
+bullets individually rather than trying to land all of them in one pass.
+Point/line/line-strip/fan topologies and dual-source blend factors both
+need genuinely new rasterizer primitives that don't exist anywhere in
+`Executor.cpp` yet (a point needs a size and a screen-space quad
+expansion; a line needs a width and an entirely different edge test than
+the triangle rasterizer's barycentric one; dual-source blending needs a
+second fragment-stage color output that nothing in the stage-IO signature
+model or `executeDraws`' one-output-per-attachment linkage threads
+through) -- each is its own multi-step unit of work, not a mechanical
+table addition, and attempting all four in the time available would have
+meant shipping something shallow and undertested for every one of them.
+`mapDynamicState` beyond its six states is coupled to those same gaps in
+practice (the remaining core-1.0 dynamic states are `LINE_WIDTH`,
+`DEPTH_BIAS`, and `DEPTH_BOUNDS` -- the first needs line topology to mean
+anything, and the other two are already rejected outright at pipeline
+creation for depth bias/depth bounds testing, so there's no dynamic-state
+plumbing to add without those features existing first). So I picked the
+two bullets that were genuinely self-contained and mechanical --
+`VK_CULL_MODE_FRONT_AND_BACK` and 8x multisampling -- landed those with
+full test coverage, and recorded the rest as explicitly deferred, larger
+G-track work in FeMeGraphicsDesign.md's R33 status note rather than
+silently leaving the roadmap row looking more complete than it is.
+
+## C4a: an opt-in log callback, not `VK_EXT_debug_utils`
+
+FeMeVulkanDesign.md's "Error Handling and Security" section already named
+the destination for this ("preserving diagnostics for `VK_EXT_debug_utils`
+or an opt-in log callback") before either existed. I picked the log
+callback, not the extension: `VK_EXT_debug_utils` is a whole unimplemented
+object model (`VkDebugUtilsMessengerEXT`, severity/type filtering,
+multiple registered callbacks) that C4a's actual problem -- a state-side
+pipeline rejection that requires reading source instead of output --
+doesn't need any of. `feme::vulkan::logCreationFailure`
+(`feme/lib/Vulkan/Diagnostics.h`/`.cpp`) is deliberately small: silent by
+default (consistent with "Never print from reusable library code"), and
+when the host environment sets `FEME_VULKAN_LOG_CREATION_ERRORS`, it
+prints the discarded error's message to a caller-supplied `raw_ostream`
+(`errs()` by default) before consuming it -- a drop-in replacement for a
+bare `consumeError` call.
+
+I made the enabled-check read the environment on every call rather than
+caching it in a function-local `static const bool` the way this codebase's
+own established pattern for immutable, computed-once state does (e.g. the
+`Options.cpp` `OptTable` singleton documented in an earlier session's
+notes). A pipeline-creation failure is never a hot path, so the `getenv`
+call costs nothing measurable, and caching would have made the flag's
+effective value depend on which call happened to run first in a given
+process -- awkward for `DiagnosticsTest.cpp`'s three cases (which toggle
+the environment variable between tests) and not a real driver's actual
+usage pattern anyway (nothing sets this mid-process). I only wired this
+into `vkCreateGraphicsPipelines`, matching the roadmap row's own scope --
+`vkCreateComputePipelines` (`Pipeline.cpp`) has the identical
+`consumeError`-shaped call site and is recorded as an equally
+straightforward, not-yet-done follow-up in FeMeVulkanDesign.md's updated
+bullet, rather than silently expanding this task's scope to cover it too.
+
+## C4b: the two bullets that needed no new rasterizer machinery
+
+`VK_CULL_MODE_FRONT_AND_BACK` discards every primitive regardless of
+winding -- Vulkan's own model culls per-triangle after facing is already
+known, which `executeDraws`' existing cull test already computes, so this
+was one more comparison (`Cull == CullMode::FrontAndBack`) ahead of the
+existing `Front`/`Back` checks, plus the new enumerator itself and
+`mapCullMode`'s new case. `feme-render`'s scene YAML and Design.md's
+example both grew the matching `front-and-back` spelling for symmetry
+with the other three.
+
+8x multisampling followed `samplePositions`' own documented invitation
+("a higher count is a mechanical, on-demand addition of another row
+here"): I generated a fresh 8-sample offset table rather than copying
+Vulkan's or Direct3D's standard pattern (FeMeGraphicsDesign.md's
+"Determinism and Reference Execution" is explicit that fixed sample
+locations are this project's own convention, not a copied one), using an
+"N-rooks" construction -- each sample's X coordinate a distinct 1/16-grid
+center, Y coordinates the same set cyclically shifted by three so no two
+samples share an X or a Y and none land on the diagonal. I first tried a
+bit-reversal permutation for the Y ordering (a more common N-rooks
+construction) and had to discard it once I noticed it has four fixed
+points in 3 bits (0, 2, 5, 7 all map to themselves), which would have put
+four of the eight samples squarely on the pixel's diagonal -- a cyclic
+shift by three has none. Wiring this in surfaced a small pre-existing
+wart: `Executor.cpp` had *two* near-identical sample-count gates (one
+inside `samplePositions` itself, one duplicated at the top of
+`executeDraws`), both needing the same update -- I fixed both rather than
+leaving them able to disagree, though de-duplicating them into one is a
+separate, non-functional refactor I left alone per this task's own
+"small, individually-tested changes" instruction.
+
+`isSupportedAttachmentSampleCount` and every `*SampleCounts` limit in
+`PhysicalDeviceInfo.cpp` that already advertised 1/2/4 grew the matching
+`VK_SAMPLE_COUNT_8_BIT` bit -- except `sampledImageDepthSampleCounts`/
+`sampledImageStencilSampleCounts`, which stay single-sample; that
+restriction predates this change (per-sample `OpImageFetch` raising is
+still R30-scoped-out) and is unrelated to the framebuffer-attachment gap
+this row is actually about.
+
+Existing tests needed updating, not just new ones adding: two hard-coded
+"8 samples is rejected" assertions (`ExecutorTest.
+RejectsUnsupportedSampleCount`, `RenderPassTest.RejectsUnsupportedSampleCount`)
+were testing the exact boundary this change moves. I retargeted both at
+`VK_SAMPLE_COUNT_16_BIT` (the new first-unsupported value) and added
+dedicated positive tests (`ExecutorTest.AcceptsEightSampleCount`,
+extending `RenderPassTest.RejectsUnsupportedSampleCount` itself to also
+assert 8 succeeds) rather than just deleting the negative coverage.
+
+## `clang-format` produced unrelated diffs; I reverted the collateral parts
+
+Running `clang-format` on the whole of `Executor.cpp` after each change
+reformatted three lines I hadn't touched (an `unpackDepth`/`unpackStencil`
+call and a `writeStencil` call, each right at the 80-column boundary),
+apparently because the installed `clang-format` disagrees slightly with
+whatever produced the current formatting. I manually reverted those three
+hunks each time before committing, keeping every commit's diff scoped to
+what it actually changed, per "make precise, surgical changes."
+
+## Measurement, and what it means that the headline moved the "wrong" way
+
+Ran the full 54-group CTS after landing C4a/C4b. Passed count: identical
+(10,520). Failed: +31. Not supported: -31. Every one of those 31 cases
+was previously a clean, correct `NotSupported` (the ICD declined 8
+samples or `FRONT_AND_BACK` at a capability query, and `deqp-vk` skipped
+the case without attempting it); now that both are advertised, `deqp-vk`
+attempts those cases for real and hits the still-open topology bullet one
+step later in the same `VkGraphicsPipelineCreateInfo`. This is the
+identical "stacked blockers" shape C1's and C3's own measurements already
+established, just running in the opposite direction on the headline: a
+correct, tested fix can make the failure *count* go up when what it
+unblocks immediately hits another still-open gap, and the fix is still
+correct. I checked this wasn't a regression by confirming `mapCullMode`/
+`isSupportedAttachmentSampleCount` no longer appear anywhere in the
+"Pipeline state" root-cause bucket's list of open boundaries, and that
+`query_pool`'s topology-attributed failure count (283) is genuinely
+unchanged -- if C4b had somehow broken something in the topology path
+instead of just unblocking pipelines that still fail there for a
+different reason, that number would have moved too.
+
+The same run also reproduced the single-process `dEQP-VK.api.*` hang
+C1's measurement first recorded, this time partway through a different
+test (`object_management.multithreaded_per_thread_resources.device_group`
+rather than the earlier session's `buffer_view.access...`), still absent
+when that group is rerun alone immediately afterward with the identical
+totals the C1 report recorded (7,445/287/259,490/267,222). Treated it the
+same way the C1 report did: used the clean standalone run's numbers, and
+recorded the flake rather than silently working around it or spending
+this task's remaining time chasing a `deqp-vk`-side, long-single-process
+issue orthogonal to C4's own scope.
+
+## Verification discipline
+
+`ninja check-feme` (assertions-enabled, ccache build, using the existing
+configured `/home/dev/dev/llvm-project/build` tree) stayed green after
+each of the three commits (1459/1460, then 1461/1462, then 1462/1463 --
+each new lit/unit test accounted for by name, not just a rising total).
+Ran the full 54-group Vulkan-CTS pass once after both C4a and C4b landed
+together (rather than once per commit, since neither sub-change was
+independently expected to move the CTS headline on its own -- C4a is
+diagnostics-only and silent by default, and C4b's own two bullets are
+each individually gated behind the still-open topology bullet, as the
+measurement above confirms) and regenerated VulkanCTSReport.md from that
+run, including re-measuring (rather than leaving stale) the one
+root-cause subsection C4a/C4b directly changed.
