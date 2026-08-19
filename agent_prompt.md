@@ -88,7 +88,12 @@ void main(uint3 threadID : SV_DispatchThreadID)
 Previous work hasn't completely fleshed out the resource access ops. Can you
 flesh that out now?
 
-I'm currently seeing the error:
+The last agent didn't compile the shader the same way I did, which led it down
+the wrong path. when you compile the shader with the command line:
+
+`dxc -T cs_6_9 <input path> -Fo <output path>`
+
+Then pass that output into feme, I'm currently seeing the error:
 ```
 feme: 'dx.op.dot.v2f32' is not supported when targeting 'amdgpu9.0a-amd-amdhsa' (used in function 'main')
 ```
