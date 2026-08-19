@@ -7,25 +7,25 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `fda8fae39be2` (roadmap C2, "`Uniform`-storage-class
-  blocks": glslang's own direct block shapes, matrix members, and
-  array-of-blocks bindings, plus two crashes a real CTS run against a
-  prototype surfaced and fixed in the same pass -- see "Roadmap C2:
-  measured impact" below).
+- FeMe revision: `116d0b271d8b` (roadmap C3, "Divergent-vector decomposition in
+  `feme-cpu-simdize`": a `phi`/scalar-condition `select`/`shufflevector` of
+  vector type, a non-constant-index `extractelement`, and ordinary
+  elementwise arithmetic/cast over a vector all decompose now -- see
+  "Roadmap C3: measured impact" below).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
   robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
   empty image format lists" -- see "Deviations from a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1447 passed, 1 unsupported.
+- `check-feme`: 1456 passed, 1 unsupported.
 
 ## Headline
 
 | | Count | Share |
 |---|---|---|
 | Total cases | 3,236,999 | |
-| Passed | 10,519 | 0.32% |
-| Failed | 26,925 | 0.83% |
+| Passed | 10,520 | 0.32% |
+| Failed | 26,924 | 0.83% |
 | Not supported | 3,199,555 | 98.85% |
 | Quality warning | 1 | |
 | **Crashed / timed out** | **0** | |
@@ -187,6 +187,70 @@ added everywhere). This is a CTS-side/harness methodology finding, not an
 ICD change, but is recorded here since it would otherwise quietly corrupt
 any future re-run's totals.
 
+## Roadmap C3: measured impact
+
+Roadmap C3 ("Divergent-vector decomposition in `feme-cpu-simdize`", see
+Roadmap.md §1.9.1) closed every producer/consumer shape "Vectors become
+components, not nested vectors" (FeMeCPUDesign.md's "Phase 4: Widening")
+describes but the pass's own milestone-7 deviation note had left diagnosed:
+a `phi` of vector type (the shape a uniform diamond's merge block gives a
+value reconciled across two divergent arms), a `select` of vector type with
+a scalar `i1` condition, a `shufflevector` (decomposed entirely at compile
+time, since its mask is always a constant), a non-constant-index
+`extractelement` (a `select` chain over the widened index), and -- added
+after this session's own first CTS run against the first four showed it,
+by far, the most common real shape -- ordinary elementwise arithmetic/cast
+(`BinaryOperator`/`UnaryOperator`/`CastInst`) over a vector, the
+"color = a + b" pattern almost every fragment/vertex shader contains. See
+FeMeCPUDesign.md's deviation note for the full, updated scope (a per-lane
+`<N x i1>`-condition `select` and every divergent aggregate remain
+diagnosed) and `test/Transforms/CPU/simdize-vector-{phi,select,
+shufflevector,dynamic-extractelement,elementwise}.ll`/`SIMDizeTest.{
+DecomposesVectorPHIAcrossUniformDiamond,DecomposesScalarConditionVectorSelect,
+DecomposesShuffleVectorAtCompileTime,
+WidensNonConstantIndexExtractElementIntoSelectChain,
+DecomposesElementwiseBinaryOpOnTwoDivergentVectors}` for the new coverage.
+
+**The headline barely moved: 10,520 passed (+1) and 26,924 failed (-1),
+`Not supported` unchanged.** That is a far smaller movement than the
+9,067-case column this row is nominally worth, and, per this report's own
+"stacked blockers" pattern (see the C1/C2 sections above), the reason is a
+*different*, newly-discovered gap sitting immediately ahead of this one for
+almost every graphics-track shader that reaches it: a SPIR-V-imported
+fragment/vertex shader's stage-IO stores are a plain, non-atomic `store` to
+a raw `Input`/`Output`-storage-class global (address space 7/8 -- correct
+and exactly what LLVM's own SPIRV backend wants for the GPU-targeting
+path), never canonicalized into the `feme.stage.*` calls
+`feme::cpu::LinearizePass`/`SIMDizePass` already know how to widen the way
+a DXIL/HLSL-imported shader's stage IO always is via
+`feme::dxil::OpRaisingPass`. Confirmed directly: adding a temporary debug
+dump to `checkVectorDecompositionSupported`'s consumer-rejection path and
+re-running one representative failure
+(`dEQP-VK.glsl.440.linkage.varying.component.frag_out.vec4.as_float_float_
+float_float`) showed the rejected value's sole user was
+`store <4 x float> %29, ptr addrspace(8) @spirv_var_20` -- an ordinary
+`insertelement` chain assembling the output vector, stored straight to the
+raw stage-output global, with no `feme.stage.output.store` call anywhere
+in the function for this pass (or any earlier one) to widen instead. This
+is a genuinely different root cause from C3's own scope, and from the
+existing "graphics stage `Output` variable of matrix or aggregate type is
+not legalized" row below (a `spirv`-\>`llvm` *conversion* gap, not a
+CPU-target *raising* gap): C3 is closed, correctly, on its own terms, and
+this newly-discovered raising gap is recorded as a new member of
+Roadmap.md's C8 "shader long tail" bucket rather than re-opening C3 to
+chase it, matching this report's own discipline of recording rather than
+silently working around a stacked-blocker finding.
+
+`feme-cpu-simdize`'s own remaining "used outside a supported ... pattern"
+diagnostic count (10,297 occurrences across the run, concentrated in
+`binding_model` (6,074), `glsl` (1,959), `ubo` (869), `pipeline` (689) and
+`spirv_assembly` (408) -- all graphics-track pipeline creation, none of the
+pure-compute `dEQP-VK.compute.*` group) is consistent with this
+explanation: essentially unchanged from before this row's own fix, because
+the shapes it closed were never what most of those cases were rejected for
+in the first place -- they were rejected one property earlier, on the
+missing stage-IO raising this section just found.
+
 ## Every failure, by root cause
 
 **This section's own counts are from the pre-C2 revision** (`5f7420c1b3dd`)
@@ -217,7 +281,7 @@ and its result line, and -- for Amber-based cases, which report only
 | Cases | Cause | Where it belongs |
 |---:|---|---|
 | 10,121 | ~~A `Uniform`-storage-class block is not legalized. `feme::spirv::getBufferBlockElementArray` matches `StorageBuffer` pointers only, and `getUniformBlockElementStruct` matches a `Uniform` pointer only when its pointee is a single-member struct whose member is *itself* a struct. Everything glslang actually emits misses: a `BufferBlock`-decorated struct in `Uniform` (the pre-SPIR-V-1.3 spelling of an SSBO), a `Block` struct with more than one member, a sized (not runtime) array member, a matrix member with `RowMajor`/`ColMajor`/`MatrixStride`, and an array-of-blocks arrayed binding~~ (fixed by roadmap C2; this diagnostic no longer appears in any log -- see "Roadmap C2: measured impact" above) | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` |
-| 9,067 | `feme-cpu-simdize` cannot decompose a divergent vector value used outside an insertelement-chain/resource-store/extractelement pattern (its own diagnostic names this "roadmap milestone 7 deviation") | `feme/lib/Target/CPU` |
+| 9,067 | ~~`feme-cpu-simdize` cannot decompose a divergent vector value used outside an insertelement-chain/resource-store/extractelement pattern (its own diagnostic names this "roadmap milestone 7 deviation")~~ (fixed by roadmap C3: a `phi`/scalar-condition `select`/`shufflevector`/non-constant-index `extractelement`/elementwise-arithmetic producer or consumer of a divergent vector is now decomposed instead of diagnosed -- see "Roadmap C3: measured impact" above for why the headline barely moved anyway, and this section's own note that these counts predate C2/C3 and are not yet re-attributed) | `feme/lib/Target/CPU` |
 | 816 | A descriptor array of combined image samplers: the access chain converts to an `llvm.getelementptr` whose result type is `!llvm.struct<(target<"spirv.Image">, target<"spirv.Sampler">)>` rather than a pointer | `feme/lib/Conversion/SPIRVToLLVM` |
 | 306 | A graphics stage `Output` variable of matrix or aggregate type is not legalized | `feme/lib/Conversion/SPIRVToLLVM/StageIODecorations.cpp` |
 | 171 | The SPIR-V importer reports `unhandled opcode` | `mlir/lib/Target/SPIRV/Deserialization` |
