@@ -259,6 +259,8 @@ static std::optional<Type> convertArrayType(spirv::ArrayType type,
     return std::nullopt;
 
   auto llvmElementType = converter.convertType(elementType);
+  if (!llvmElementType)
+    return std::nullopt;
   unsigned numElements = type.getNumElements();
   return LLVM::LLVMArrayType::get(llvmElementType, numElements);
 }
@@ -351,6 +353,8 @@ static std::optional<Type> convertRuntimeArrayType(spirv::RuntimeArrayType type,
   if (type.getArrayStride() != 0)
     return std::nullopt;
   auto elementType = converter.convertType(type.getElementType());
+  if (!elementType)
+    return std::nullopt;
   return LLVM::LLVMArrayType::get(elementType, 0);
 }
 

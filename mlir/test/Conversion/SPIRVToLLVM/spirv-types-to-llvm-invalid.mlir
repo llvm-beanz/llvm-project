@@ -22,6 +22,20 @@ spirv.func @struct_with_unnatural_offset(%arg: !spirv.struct<(i32[0], i32[8])>) 
 // -----
 
 // expected-error@+1 {{failed to legalize operation 'spirv.func' that was explicitly marked illegal}}
+spirv.func @array_of_unconvertible_element(%arg: !spirv.array<2 x !spirv.matrix<2 x vector<2xf32>>>) -> () "None" {
+  spirv.Return
+}
+
+// -----
+
+// expected-error@+1 {{failed to legalize operation 'spirv.func' that was explicitly marked illegal}}
+spirv.func @runtime_array_of_unconvertible_element(%arg: !spirv.rtarray<!spirv.matrix<2 x vector<2xf32>>>) -> () "None" {
+  spirv.Return
+}
+
+// -----
+
+// expected-error@+1 {{failed to legalize operation 'spirv.func' that was explicitly marked illegal}}
 spirv.func @struct_with_decorations(%arg: !spirv.struct<(f32 [RelaxedPrecision])>) -> () "None" {
   spirv.Return
 }
