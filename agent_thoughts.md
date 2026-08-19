@@ -21337,3 +21337,141 @@ VK-GL-CTS checkout itself (`ImageAllocator`'s empty-format-list guard); it
 is a separate git repository from this one and was committed there
 directly, not folded into an llvm-project commit, since the fix does not
 belong to either project this repository owns.
+
+# Regenerating the Vulkan-CTS report, and planning for conformance
+
+The ask was to rebuild the CTS report from scratch, work out what the
+failures actually are, and turn that into a conformance plan. The first two
+were mechanical once I stopped trusting the previous report's framing; the
+third turned out to depend on a decision nobody has made yet.
+
+## The run
+
+I rebuilt `feme_vulkan`, confirmed `check-feme` (1433 passed, 1
+unsupported), regenerated `deqp-vk`'s case list against the ICD, and ran
+all 54 top-level `dEQP-VK.<group>.*` groups six at a time in per-group
+directories -- separate directories mattered, because `deqp-vk` writes a
+`shadercache.bin` into its working directory and a shared one across
+parallel processes is a correctness hazard I did not want in a measurement.
+
+Every group exited 134. My first assumption was "still crashing", which
+would have contradicted the previous report; the logs said otherwise. The
+abort is printed *after* `DONE!` and the totals, from
+`tcuSubprocessTestExecutorLin.cpp`: device-fault tests cannot execute on
+Linux, and the throw escapes during teardown. Complete results, worthless
+exit code. Worth writing down in the report so the next person does not
+spend the same ten minutes on it.
+
+Totals: 3,237,000 cases, 10,350 passed, 27,094 failed, 3,199,555 not
+supported, zero crashes, 28 of 54 groups with zero failures. The pass/fail
+numbers reproduce the previous report's exactly, which is a nice
+independent check that the run is deterministic.
+
+## Attribution, and one thing the previous report got wrong
+
+The previous report characterised its failures by spot-check and concluded
+they were "overwhelmingly expected". True, but not useful: "expected" is
+not a work item. So I attributed all 27,094, by joining each case's
+`deqp-vk` reason string with the ICD's own `stderr` diagnostics emitted
+between that case's start line and its result line.
+
+That covers everything except one bucket: 880 cases that report a bare
+`Fail` with no reason and no diagnostic. The previous report called these
+"correctness: wrong result" -- the most alarming category it had -- and I
+would have too, from `stdout` alone. Reading the `.qpa` records instead
+showed all 874 of the ones with any detail say the same thing: *Vulkan
+color attachment format is not supported*. These are Amber-based tests, and
+Amber uses a `B8G8R8A8_UNORM` framebuffer for every test including the
+compute ones. `isSupportedColorAttachmentFormat` in
+`feme/lib/Vulkan/RenderPass.cpp` lists nine formats and that is not one of
+them.
+
+So the headline flips: there are **no** wrong answers anywhere in three
+million cases. Every failure is a clean rejection. That is a much stronger
+statement about the ICD than the previous report made, and it is only
+visible if you read the `.qpa` files. I made "how attribution was done"
+an explicit section of the new report for that reason.
+
+## The one fix I landed, and why it changed nothing
+
+The second-largest diagnostic, 8,371 occurrences, was `'llvm.icmp' op
+operand #0 must be signless integer ... but got 'si32'`. Three lines of
+reading in `mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp` found it:
+`IComparePattern` (and its `FComparePattern` twin) build the replacement
+from `op.getOperand1()/getOperand2()` -- the *original* operands -- instead
+of `adaptor.getOperand1()/getOperand2()`. The adaptor is the entire point
+of a conversion pattern; using the op's own operands discards the
+type-converted values. A SPIR-V `OpTypeInt 32 1` deserializes to `si32`,
+`llvm.icmp` takes signless only, and the conversion dies. Six-line lit
+test, two-word fix.
+
+Then I re-ran all 54 groups and the totals were *identical*. Not close --
+identical, group for group. The `si32` diagnostic went from 8,371
+occurrences to zero, and those same cases now fail one stage later, on the
+`Uniform`-storage-class-block gap and on `feme-cpu-simdize`'s divergent
+vector decomposition.
+
+This is the most useful thing I learned in this pass, and it reframes the
+whole failure table: these blockers are *stacked* on a small set of
+shaders, not spread across independent ones. Counting failures per
+diagnostic overstates how many distinct problems exist and understates
+what each fix is worth once the ones behind it land. I said so explicitly
+in both documents, and made C8 ("shader long tail") conditional on being
+re-measured after C2 and C3 rather than planned against today's numbers.
+A plan built on unstacked counts would be wrong in a way that is very easy
+not to notice.
+
+I kept the fix anyway. It is correct, it is a real upstream bug, and it is
+a prerequisite for the cases behind it -- it just is not, on its own,
+worth a single CTS case.
+
+## What the plan turned out to hinge on
+
+Writing §1.9.1 forced a question the roadmap had not asked: conformance to
+*what*. The ICD advertises apiVersion 1.2, and
+`dEQP-VK.info.device_mandatory_features` lists exactly what that costs --
+`multiview`, `imagelessFramebuffer`, `uniformBufferStandardLayout`,
+`separateDepthStencilLayouts`, `hostQueryReset`,
+`shaderSubgroupExtendedTypes`, `subgroupBroadcastDynamicId`, plus limit
+minimums. Every one is mandatory only because of the 1.2 claim. Dropping
+the advertised version to 1.0 or 1.1 deletes an entire step from the plan.
+That is a product decision, not an engineering one, so I put it at the top
+of §1.9.1 as a decision to make rather than burying it as work to do.
+
+The second framing point: conformance *inverts* the design's stated
+posture. FeMeVulkanDesign.md's V4 and V6 both treat the CTS as validation
+of a deliberately narrow advertised surface, where "reject cleanly" is the
+correct answer. For anything the spec calls mandatory, rejecting cleanly is
+a failure. I recorded that as a deviation in the roadmap rather than
+quietly acting on it, because it changes what a future reader should
+conclude when they find the ICD declining something.
+
+Two things I noticed while ordering the steps that are not obvious from the
+failure counts:
+
+- C1 (mandatory formats) is by far the cheapest and unblocks 1,938 cases,
+  but its real value is that Amber-based tests are most of the CTS's own
+  end-to-end coverage. Until `B8G8R8A8_UNORM` renders, a large part of the
+  suite cannot tell us anything at all.
+- C4a exists as a separate sub-step because graphics-pipeline state
+  rejections emit *nothing*. Every shader-side rejection names itself;
+  triaging the 3,354 state-side ones meant reading `GraphicsPipeline.cpp`'s
+  `mapTopology`/`mapDynamicState` switches instead of the ICD's output.
+  Making rejections self-describing is worth doing before the work it
+  gates, not after.
+
+I also listed C7 (queue family capability combinations) with a failure
+count of zero. 99,324 cases report `NotSupported` because no family matches
+a required capability set. They cost nothing today and would be easy to
+leave off a list ordered by failures -- but a conformance run that declines
+a hundred thousand mandatory cases is not a conformance run. Ordering by
+measured cost is right; ordering *only* by it would have missed this.
+
+## Kept out of scope
+
+I did not start on C1-C10. The ask was a report and a plan, and the plan's
+first step is a decision I should not make unilaterally. C9 (upstreaming
+the local VK-GL-CTS `ImageAllocator` fix, without which no submission can
+claim a stock CTS) and C10 (checked-in expected-failure lists, so this
+report never has to be regenerated by hand again) are both on the list
+precisely so they are not rediscovered later as surprises.
