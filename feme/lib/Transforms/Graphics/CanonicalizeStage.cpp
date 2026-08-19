@@ -310,6 +310,11 @@ struct ParsedSPIRVDecorations {
   std::optional<uint32_t> BuiltIn;
   std::optional<uint32_t> Location;
   std::optional<uint32_t> Component;
+  /// The `Index` decoration's operand (Vulkan's dual-source-blend model,
+  /// SPIR-V/GLSL's `Index` layout qualifier): 0 if absent, matching
+  /// `SignatureElement::Index`'s own "0 for every ordinary output"
+  /// default.
+  uint32_t Index = 0;
   bool NoPerspective = false;
   bool Flat = false;
   bool Patch = false;
@@ -345,6 +350,10 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
       if (Arg)
         Result.Component = static_cast<uint32_t>(*Arg);
       break;
+    case SPIRVDecorationIndex:
+      if (Arg)
+        Result.Index = static_cast<uint32_t>(*Arg);
+      break;
     case SPIRVDecorationNoPerspective:
       Result.NoPerspective = true;
       break;
@@ -364,10 +373,10 @@ ParsedSPIRVDecorations parseSPIRVDecorations(const MDNode *MD) {
       Result.PerPrimitive = true;
       break;
     default:
-      // `Index` and any decoration this milestone does not model yet (e.g.
-      // a future array-of-blocks per-vertex/per-primitive shape) are
-      // preserved on the global itself and simply not reflected into
-      // `feme::SignatureElement`, which has no field for them yet.
+      // Any decoration this milestone does not model yet (e.g. a future
+      // array-of-blocks per-vertex/per-primitive shape) is preserved on
+      // the global itself and simply not reflected into
+      // `feme::SignatureElement`, which has no field for it yet.
       break;
     }
   }
@@ -536,6 +545,7 @@ bool canonicalizeSPIRVStage(Function &F) {
         Elt.ElementID = NextID;
         Elt.Direction = Dir;
         Elt.Location = D.Location;
+        Elt.Index = D.Index;
         if (D.BuiltIn)
           Elt.SystemValue = getSystemValueForBuiltIn(*D.BuiltIn);
 

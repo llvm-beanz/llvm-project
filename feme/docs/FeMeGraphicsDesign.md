@@ -1714,13 +1714,36 @@ Status (roadmap C4b, culling): `feme::graphics::CullMode` gained
 `FrontAndBack` (`VK_CULL_MODE_FRONT_AND_BACK`), which discards every
 primitive regardless of winding -- one more comparison in `executeDraws`'
 existing cull test, not new rasterizer machinery, unlike this section's
-(now closed, see roadmap C4d below) topology gap and the still-open
-dual-source-blend gap below. Dual-source blend factors (`VK_BLEND_FACTOR_
-SRC1_*`) remain unimplemented: they need a second fragment-stage color
-output (`SV_Target0`'s `Index=1` companion) that nothing in the stage-IO
-signature model or `executeDraws`' one-output-per-attachment linkage (see
-"One `SV_TargetN` fragment output per color attachment" above) yet
-threads through.
+(now closed, see roadmap C4d/C4e below) topology and dual-source-blend
+gaps.
+
+Status (roadmap C4e, dual-source blending): `VK_BLEND_FACTOR_SRC1_*`
+reads a fragment stage's second color output -- `SV_Target0`'s `Index=1`
+companion -- which needed the one piece of plumbing this section's
+original note called out as missing: `SignatureElement` gained an
+`Index` field (`feme/include/feme/Core/Signature.h`, bumping the
+serialized signature's ABI version to 3), and `CanonicalizeStage.cpp`'s
+SPIR-V decoration parser (`parseSPIRVDecorations`) now reflects the
+`Index` decoration into it instead of silently dropping it -- the
+decoration itself already survived `spirv` -> `llvm` conversion
+unmodified (`feme::spirv::attachStageIODecorations`'s own comment already
+named `Index` as one of the decorations it threads through), so this was
+a narrower gap than "nothing... yet threads through" originally
+suggested. `executeDraws` looks up an `Index=1` element at `Location=0`
+only when a pipeline's attachment-0 blend state actually uses a
+`Src1Color`/`OneMinusSrc1Color`/`Src1Alpha`/`OneMinusSrc1Alpha` factor
+(Vulkan requires exactly one color attachment for a pipeline using a
+dual-source factor, so no other attachment index is ever consulted), and
+rejects pipeline creation if the fragment stage has no such output.
+`dualSrcBlend` is now an advertised `VkPhysicalDeviceFeatures` bit
+(`PhysicalDeviceInfo.cpp`), honest since `maxFragmentDualSrcAttachments
+== 1` was already set and the executor path now backs it. See
+`unittests/Graphics/ExecutorTest.cpp`'s
+`DualSourceBlendReadsTheSecondFragmentOutput` (a hand-built
+`EntrySignature`) and `unittests/Vulkan/DrawTest.cpp`'s
+`RendersWithDualSourceBlending` (real SPIR-V, exercising the `Index`
+decoration end to end) for coverage. This closes roadmap C4's last open
+item.
 
 Status (roadmap C4d, correcting this section's own "materially larger
 unit of work" framing for point/line/fan topologies): point, line,

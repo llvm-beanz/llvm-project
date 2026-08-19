@@ -186,8 +186,12 @@ enum class BlendMode : uint8_t {
 };
 
 /// One operand of a blend equation, matching Vulkan's `VkBlendFactor`/
-/// Direct3D's `D3D12_BLEND` one-for-one (dual-source factors are not
-/// modelled yet: no test needs a second fragment output).
+/// Direct3D's `D3D12_BLEND` one-for-one, including the four dual-source
+/// (`VK_BLEND_FACTOR_SRC1_*`) factors: `Src1Color`/`Src1Alpha` read the
+/// fragment stage's second color output (`SV_Target0`'s `Index=1`
+/// companion, `feme::graphics::executeDraws`' `FSColor1` -- see "Dual-
+/// source blending" in feme/docs/FeMeGraphicsDesign.md) rather than its
+/// ordinary one (`SrcColor`/`SrcAlpha`).
 enum class BlendFactor : uint8_t {
   Zero,
   One,
@@ -204,6 +208,10 @@ enum class BlendFactor : uint8_t {
   ConstantAlpha,
   OneMinusConstantAlpha,
   SrcAlphaSaturate,
+  Src1Color,
+  OneMinusSrc1Color,
+  Src1Alpha,
+  OneMinusSrc1Alpha,
 };
 
 /// How a blend equation combines its two scaled operands, matching

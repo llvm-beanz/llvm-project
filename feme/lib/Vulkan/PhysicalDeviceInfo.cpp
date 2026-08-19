@@ -304,9 +304,18 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // reads zero / drops the write unconditionally for every dispatch this
   // milestone can run. That is a stronger guarantee than the feature
   // requires (Vulkan allows it to be enabled only per pipeline), so
-  // advertising it unconditionally is honest.
+  // advertising it unconditionally is honest. `dualSrcBlend` (roadmap C4):
+  // the executor's dual-source blend path (`feme::graphics::executeDraws`'
+  // `FSColor1`) is implemented and `maxFragmentDualSrcAttachments` above
+  // is already the honest `1` this feature requires, so advertising it is
+  // likewise honest -- `largePoints`/`wideLines` are left `VK_FALSE`
+  // (unlike `dualSrcBlend`, the executor's point/line quad expansion
+  // hardcodes a fixed 1-pixel size/width rather than reading a
+  // `SV_PointSize` output or `vkCmdSetLineWidth` value, see Executor.cpp's
+  // own comment).
   Info.Features = VkPhysicalDeviceFeatures{};
   Info.Features.robustBufferAccess = VK_TRUE;
+  Info.Features.dualSrcBlend = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

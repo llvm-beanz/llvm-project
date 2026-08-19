@@ -70,18 +70,20 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
   EXPECT_TRUE(Flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 }
 
-TEST(PhysicalDeviceInfo, OnlyRobustBufferAccessIsAdvertised) {
-  // (V4) robustBufferAccess is the one core feature this milestone can
-  // honestly claim (see PhysicalDeviceInfo.cpp's comment); every other
-  // VkBool32 stays false, since nothing else has been implemented that
-  // could back one yet.
+TEST(PhysicalDeviceInfo, OnlyRobustBufferAccessAndDualSrcBlendAreAdvertised) {
+  // (V4/C4) `robustBufferAccess`/`dualSrcBlend` are the only core features
+  // this milestone can honestly claim (see PhysicalDeviceInfo.cpp's
+  // comment); every other `VkBool32` stays false, since nothing else has
+  // been implemented that could back one yet.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
+  EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
 
-  VkPhysicalDeviceFeatures WithoutRobustness = Info.Features;
-  WithoutRobustness.robustBufferAccess = VK_FALSE;
+  VkPhysicalDeviceFeatures Cleared = Info.Features;
+  Cleared.robustBufferAccess = VK_FALSE;
+  Cleared.dualSrcBlend = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
-  EXPECT_EQ(std::memcmp(&WithoutRobustness, &Zero, sizeof(Zero)), 0);
+  EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
 
 TEST(PhysicalDeviceInfo, DeviceAndPipelineCacheUUIDsDiffer) {

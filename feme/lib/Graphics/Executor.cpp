@@ -248,11 +248,12 @@ const SignatureElement *findElement(const EntrySignature &Sig,
 
 const SignatureElement *findElementByLocation(const EntrySignature &Sig,
                                               SignatureDirection Direction,
-                                              uint32_t Location) {
+                                              uint32_t Location,
+                                              uint32_t Index = 0) {
   for (const SignatureElement &Elt : Sig.Elements)
     if (Elt.Direction == Direction &&
         Elt.SystemValue == SignatureSystemValue::None &&
-        Elt.Location == Location)
+        Elt.Location == Location && Elt.Index == Index)
       return &Elt;
   return nullptr;
 }
@@ -806,11 +807,16 @@ testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
 
 /// Evaluates one blend operand (`Src`/`DstColorFactor`/`SrcAlphaFactor`/
 /// etc.) at color channel \p Channel (0=R, 1=G, 2=B, 3=A), matching
-/// Vulkan's `VkBlendFactor`/Direct3D's `D3D12_BLEND` semantics.
+/// Vulkan's `VkBlendFactor`/Direct3D's `D3D12_BLEND` semantics. \p Src1 is
+/// the fragment stage's second color output (`SV_Target0`'s `Index=1`
+/// companion), read by the four dual-source (`VK_BLEND_FACTOR_SRC1_*`)
+/// factors; every other pipeline never reads it (see "Dual-source
+/// blending" in feme/docs/FeMeGraphicsDesign.md).
 double blendFactorValue(BlendFactor F, unsigned Channel,
                         const std::array<double, 4> &Src,
                         const std::array<double, 4> &Dst,
-                        const std::array<float, 4> &Constant) {
+                        const std::array<float, 4> &Constant,
+                        const std::array<double, 4> &Src1) {
   switch (F) {
   case BlendFactor::Zero:
     return 0.0;
@@ -842,6 +848,14 @@ double blendFactorValue(BlendFactor F, unsigned Channel,
     return 1.0 - Constant[3];
   case BlendFactor::SrcAlphaSaturate:
     return Channel == 3 ? 1.0 : std::min(Src[3], 1.0 - Dst[3]);
+  case BlendFactor::Src1Color:
+    return Src1[Channel];
+  case BlendFactor::OneMinusSrc1Color:
+    return 1.0 - Src1[Channel];
+  case BlendFactor::Src1Alpha:
+    return Src1[3];
+  case BlendFactor::OneMinusSrc1Alpha:
+    return 1.0 - Src1[3];
   }
   llvm_unreachable("unhandled BlendFactor");
 }
@@ -864,19 +878,26 @@ double applyBlendOp(BlendOp Op, double SrcTerm, double DstTerm) {
 
 /// Blends \p Src (the fragment's new color) with \p Dst (the attachment's
 /// existing color) per \p Blend's equation, matching every graphics API's
-/// shared "scale each operand, then combine" blend model.
+/// shared "scale each operand, then combine" blend model. \p Src1 is the
+/// fragment stage's second color output, or all-zero for a pipeline with
+/// no dual-source blend factor (see `blendFactorValue`'s own comment).
 std::array<double, 4> blendColor(const BlendState &Blend,
                                  const std::array<double, 4> &Src,
                                  const std::array<double, 4> &Dst,
-                                 const std::array<float, 4> &Constant) {
+                                 const std::array<float, 4> &Constant,
+                                 const std::array<double, 4> &Src1) {
   std::array<double, 4> Result;
   for (unsigned C = 0; C != 3; ++C) {
-    double SF = blendFactorValue(Blend.SrcColorFactor, C, Src, Dst, Constant);
-    double DF = blendFactorValue(Blend.DstColorFactor, C, Src, Dst, Constant);
+    double SF =
+        blendFactorValue(Blend.SrcColorFactor, C, Src, Dst, Constant, Src1);
+    double DF =
+        blendFactorValue(Blend.DstColorFactor, C, Src, Dst, Constant, Src1);
     Result[C] = applyBlendOp(Blend.ColorOp, Src[C] * SF, Dst[C] * DF);
   }
-  double SFA = blendFactorValue(Blend.SrcAlphaFactor, 3, Src, Dst, Constant);
-  double DFA = blendFactorValue(Blend.DstAlphaFactor, 3, Src, Dst, Constant);
+  double SFA =
+      blendFactorValue(Blend.SrcAlphaFactor, 3, Src, Dst, Constant, Src1);
+  double DFA =
+      blendFactorValue(Blend.DstAlphaFactor, 3, Src, Dst, Constant, Src1);
   Result[3] = applyBlendOp(Blend.AlphaOp, Src[3] * SFA, Dst[3] * DFA);
   return Result;
 }
@@ -928,10 +949,14 @@ uint8_t applyLogicOp(LogicOp Op, uint8_t Src, uint8_t Dst) {
 /// takes priority over blending -- matching Vulkan/Direct3D, where
 /// enabling one disables the other -- and is only implemented for 8-bit
 /// unsigned-normalized formats (`R8G8B8A8_*`), the same restriction both
-/// APIs place on which formats support a logic op at all.
+/// APIs place on which formats support a logic op at all. \p Src1 is the
+/// fragment stage's second color output for a dual-source blend factor
+/// (see `blendColor`'s own comment), or all-zero when the pipeline has
+/// none.
 Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
                  const std::array<float, 4> &BlendConstants,
                  cpu::ResourceFormat Format, const std::array<double, 4> &Src,
+                 const std::array<double, 4> &Src1,
                  MutableArrayRef<uint8_t> Texel) {
   if (LogicOpEnable) {
     if (Format != cpu::ResourceFormat::R8G8B8A8_UNORM &&
@@ -955,7 +980,7 @@ Error mergeColor(const BlendState &Blend, bool LogicOpEnable, LogicOp Logic,
     std::array<double, 4> Dst{};
     if (Error E = unpackColor(Format, Texel, Dst))
       return E;
-    Final = blendColor(Blend, Src, Dst, BlendConstants);
+    Final = blendColor(Blend, Src, Dst, BlendConstants, Src1);
   }
   if (Blend.WriteMask != 0xF) {
     std::array<double, 4> Dst{};
@@ -1098,6 +1123,41 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "floating-point output",
                                I);
     FSColors.push_back(FSColor);
+  }
+
+  // Dual-source blending (`VK_BLEND_FACTOR_SRC1_*`, "Dual-source blending"
+  // in feme/docs/FeMeGraphicsDesign.md): `SV_Target0`'s `Index=1`
+  // companion, an `EntrySignature` element sharing `Location == 0` but
+  // with `Index == 1` (see `SignatureElement::Index`'s own comment).
+  // Vulkan requires a pipeline using a `SRC1` factor to have exactly one
+  // color attachment, so this is only ever looked up against attachment
+  // 0; every other attachment's blend state reading a `SRC1` factor would
+  // be a validation bug upstream, not something this executor need
+  // consider.
+  auto usesDualSourceBlend = [](BlendFactor F) {
+    return F == BlendFactor::Src1Color || F == BlendFactor::OneMinusSrc1Color ||
+           F == BlendFactor::Src1Alpha || F == BlendFactor::OneMinusSrc1Alpha;
+  };
+  bool NeedsSrc1 =
+      !Pipeline.getColorBlends().empty() &&
+      (usesDualSourceBlend(Pipeline.getColorBlends()[0].SrcColorFactor) ||
+       usesDualSourceBlend(Pipeline.getColorBlends()[0].DstColorFactor) ||
+       usesDualSourceBlend(Pipeline.getColorBlends()[0].SrcAlphaFactor) ||
+       usesDualSourceBlend(Pipeline.getColorBlends()[0].DstAlphaFactor));
+  const SignatureElement *FSColor1 = nullptr;
+  if (NeedsSrc1) {
+    FSColor1 = findElementByLocation(*FSSig, SignatureDirection::Output, 0,
+                                     /*Index=*/1);
+    if (!FSColor1)
+      return createStringError(inconvertibleErrorCode(),
+                               "a dual-source blend factor is used but the "
+                               "fragment stage has no Index=1 output at "
+                               "location 0");
+    if (FSColor1->ComponentCount != 4 ||
+        FSColor1->ComponentType != SignatureComponentType::Float)
+      return createStringError(inconvertibleErrorCode(),
+                               "the Index=1 output at location 0 must be a "
+                               "4-component floating-point output");
   }
 
   AttachmentView &Color = Draw.Attachments[0];
@@ -1908,18 +1968,27 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             for (unsigned C = 0; C != 4; ++C)
               RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
                                             Q * 4 + Lane);
+            // Only attachment 0 ever has a second source color to read:
+            // Vulkan requires exactly one color attachment for a pipeline
+            // using a dual-source blend factor (see `FSColor1`'s own
+            // comment above).
+            std::array<double, 4> RGBA1{};
+            if (AttIdx == 0 && FSColor1)
+              for (unsigned C = 0; C != 4; ++C)
+                RGBA1[C] =
+                    FSOutput->readFloat(FSColor1->ElementID, C, Q * 4 + Lane);
             const BlendState &AttBlend = Pipeline.getColorBlends()[AttIdx];
             for (uint32_t S = 0; S != SampleCount; ++S) {
               if (!((PassMask >> S) & 1u))
                 continue;
               size_t Off = (((size_t)PY * Att.Width + PX) * SampleCount + S) *
                            ColorElemSizes[AttIdx];
-              if (Error E =
-                      mergeColor(AttBlend, Pipeline.getLogicOpEnable(),
-                                 Pipeline.getLogicOp(),
-                                 Pipeline.getBlendConstants(), Att.Format, RGBA,
-                                 MutableArrayRef(Att.Data.data() + Off,
-                                                 ColorElemSizes[AttIdx])))
+              if (Error E = mergeColor(AttBlend, Pipeline.getLogicOpEnable(),
+                                       Pipeline.getLogicOp(),
+                                       Pipeline.getBlendConstants(), Att.Format,
+                                       RGBA, RGBA1,
+                                       MutableArrayRef(Att.Data.data() + Off,
+                                                       ColorElemSizes[AttIdx])))
                 return E;
             }
           }

@@ -164,9 +164,15 @@ std::optional<BlendFactor> mapBlendFactor(VkBlendFactor Factor) {
     return BlendFactor::OneMinusConstantAlpha;
   case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE:
     return BlendFactor::SrcAlphaSaturate;
+  case VK_BLEND_FACTOR_SRC1_COLOR:
+    return BlendFactor::Src1Color;
+  case VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR:
+    return BlendFactor::OneMinusSrc1Color;
+  case VK_BLEND_FACTOR_SRC1_ALPHA:
+    return BlendFactor::Src1Alpha;
+  case VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA:
+    return BlendFactor::OneMinusSrc1Alpha;
   default:
-    // The dual-source factors have no `BlendFactor` peer: no fragment stage
-    // writes a second output yet.
     return std::nullopt;
   }
 }

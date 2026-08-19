@@ -277,6 +277,7 @@ TEST(SignatureTest, SerializeParseRoundTrips) {
     EXPECT_EQ(Got.ElementID, Want.ElementID);
     EXPECT_EQ(Got.Direction, Want.Direction);
     EXPECT_EQ(Got.Location, Want.Location);
+    EXPECT_EQ(Got.Index, Want.Index);
     EXPECT_EQ(Got.SemanticName, Want.SemanticName);
     EXPECT_EQ(Got.SemanticIndex, Want.SemanticIndex);
     EXPECT_EQ(Got.SystemValue, Want.SystemValue);
@@ -349,8 +350,9 @@ TEST(SignatureTest, ParseRejectsUnknownSystemValue) {
   // overwrite it with a value past `NumSystemValues`.
   size_t SysValueOffset =
       2 * sizeof(uint32_t) /* version, element count */ +
-      5 * sizeof(uint32_t) /* element ID, direction, has-loc, loc, name len */ +
-      Sig.Elements[0].SemanticName.size() + sizeof(uint32_t) /* sem index */;
+      6 * sizeof(uint32_t) /* element ID, direction, has-loc, loc, index,
+                              name len */
+      + Sig.Elements[0].SemanticName.size() + sizeof(uint32_t) /* sem index */;
   uint32_t Bogus = 0xFFFFFFFFu;
   std::memcpy(Bytes.data() + SysValueOffset, &Bogus, sizeof(Bogus));
 

@@ -887,6 +887,101 @@ TEST(ExecutorTest, AlphaBlendsOverExistingColor) {
   }
 }
 
+// roadmap C4: dual-source blend factors (`VK_BLEND_FACTOR_SRC1_*`). A
+// fragment stage's second color output -- `SV_Target0`'s `Index=1`
+// companion, `SignatureElement::Index` -- is read by a `Src1Color`/
+// `Src1Alpha` blend factor instead of the fragment's ordinary
+// (`Index=0`) output. This test's fragment stage writes a fixed (1, 1, 1,
+// 1) to its ordinary output and a fixed (0.25, 0.5, 0.75, 1.0) to its
+// `Index=1` output; `SrcColorFactor`/`SrcAlphaFactor` of `Src1Color`/
+// `Src1Alpha` with `DstColorFactor`/`DstAlphaFactor` of `Zero` isolates
+// exactly the second output's value in the result (`1 * Src1 + Dst * 0`).
+TEST(ExecutorTest, DualSourceBlendReadsTheSecondFragmentOutput) {
+  Context Ctx;
+
+  constexpr char VertexIR[] = R"(
+    define void @vs_dualsrc() #0 {
+      %px = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 0, i32 0)
+      %py = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 1, i32 0)
+      %pz = call float @feme.stage.input.load.f32(i32 0, i32 0, i32 2, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %px, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %py, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float %pz, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare float @feme.stage.input.load.f32(i32, i32, i32, i32)
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="vertex" }
+  )";
+  constexpr char FragmentIR[] = R"(
+    define void @fs_dualsrc() #0 {
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float 0.25, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float 0.5, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.75, i32 0)
+      call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+      ret void
+    }
+    declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )";
+
+  EntrySignature VSSig;
+  VSSig.Elements = {
+      makeElement(0, SignatureDirection::Input, 3, /*Location=*/0),
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/std::nullopt,
+                  SignatureSystemValue::Position)};
+  Expected<std::shared_ptr<CompiledStage>> VS =
+      compileStage(Ctx, VertexIR, "vs_dualsrc", VSSig, ShaderStage::Vertex);
+  ASSERT_THAT_EXPECTED(VS, Succeeded());
+
+  EntrySignature FSSig;
+  SignatureElement Src0 =
+      makeElement(0, SignatureDirection::Output, 4, /*Location=*/0);
+  SignatureElement Src1 =
+      makeElement(1, SignatureDirection::Output, 4, /*Location=*/0);
+  Src1.Index = 1;
+  FSSig.Elements = {Src0, Src1};
+  Expected<std::shared_ptr<CompiledStage>> FS =
+      compileStage(Ctx, FragmentIR, "fs_dualsrc", FSSig, ShaderStage::Fragment);
+  ASSERT_THAT_EXPECTED(FS, Succeeded());
+
+  BlendState Blend;
+  Blend.BlendEnable = true;
+  Blend.SrcColorFactor = BlendFactor::Src1Color;
+  Blend.DstColorFactor = BlendFactor::Zero;
+  Blend.SrcAlphaFactor = BlendFactor::Src1Alpha;
+  Blend.DstAlphaFactor = BlendFactor::Zero;
+  std::vector<AttachmentFormat> Attachments = {
+      {cpu::ResourceFormat::R8G8B8A8_UNORM, 4, 4}};
+  GraphicsPipeline Pipeline(
+      std::move(*VS), std::move(*FS), PrimitiveTopology::TriangleList,
+      RasterState{CullMode::None, FrontFace::CounterClockwise}, DepthState{},
+      BlendMode::Replace,
+      /*SampleCount=*/1, std::move(Attachments), StencilState{},
+      std::vector<BlendState>{Blend});
+
+  TriangleScene Scene;
+  Scene.VertexData = {
+      -1.0f, -1.0f, 0.0f, 1.0f,  0.0f, 0.0f, 1.0f, 3.0f, -1.0f, 0.0f, 1.0f,
+      0.0f,  0.0f,  1.0f, -1.0f, 3.0f, 0.0f, 1.0f, 0.0f, 0.0f,  1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(Pipeline, Draw), Succeeded());
+
+  for (uint32_t I = 0; I != 16; ++I) {
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4], 64, 2) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 1], 128, 2) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 2], 191, 2) << "texel " << I;
+    EXPECT_NEAR(Scene.AttachmentStorage[I * 4 + 3], 255, 2) << "texel " << I;
+  }
+}
+
 TEST(ExecutorTest, WriteMaskLeavesUnselectedChannelsUnchanged) {
   Context Ctx;
   BlendState Blend;

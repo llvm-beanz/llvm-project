@@ -134,11 +134,11 @@ bool feme::verifySignature(const EntrySignature &Sig, raw_ostream *ErrOS) {
 
 /// The number of fixed `uint32_t` fields one `SignatureElement` serializes
 /// to, ahead of its variable-length `SemanticName` tail: element ID,
-/// direction, has-location flag, location, semantic-name length (the tail's
-/// own count), semantic index, system value, component type, bit width,
-/// first component, component count, row count, interpolation, frequency,
-/// stream, from-input-patch flag.
-constexpr size_t NumFixedFieldsPerElement = 16;
+/// direction, has-location flag, location, dual-source-blend index,
+/// semantic-name length (the tail's own count), semantic index, system
+/// value, component type, bit width, first component, component count, row
+/// count, interpolation, frequency, stream, from-input-patch flag.
+constexpr size_t NumFixedFieldsPerElement = 17;
 
 std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
   size_t TotalSemanticBytes = 0;
@@ -166,6 +166,7 @@ std::vector<uint8_t> feme::serializeSignature(const EntrySignature &Sig) {
     WriteNext(static_cast<uint32_t>(Elt.Direction));
     WriteNext(Elt.Location.has_value() ? 1u : 0u);
     WriteNext(Elt.Location.value_or(0u));
+    WriteNext(Elt.Index);
     WriteNext(static_cast<uint32_t>(Elt.SemanticName.size()));
     WriteBytes(Elt.SemanticName);
     WriteNext(Elt.SemanticIndex);
@@ -267,6 +268,11 @@ Expected<EntrySignature> feme::parseSignature(ArrayRef<uint8_t> Bytes) {
       return Location.takeError();
     Elt.Location =
         *HasLocation != 0 ? std::optional<uint32_t>(*Location) : std::nullopt;
+
+    Expected<uint32_t> Index = ReadField("dual-source-blend index");
+    if (!Index)
+      return Index.takeError();
+    Elt.Index = *Index;
 
     Expected<uint32_t> NameLen = ReadField("semantic name length");
     if (!NameLen)

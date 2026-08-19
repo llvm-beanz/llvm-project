@@ -151,6 +151,16 @@ struct SignatureElement {
   /// or one only Direct3D's semantic-based linkage identifies).
   std::optional<uint32_t> Location;
 
+  /// The dual-source-blend index (SPIR-V/GLSL's `Index` layout qualifier,
+  /// Vulkan's own dual-source-blend model): 0 for every ordinary output,
+  /// or 1 for the second color an `Index=1`-decorated fragment output at
+  /// the same `Location` as an `Index=0` one supplies
+  /// (`VK_BLEND_FACTOR_SRC1_*`'s "second color", see "Dual-source
+  /// blending" in feme/docs/FeMeGraphicsDesign.md). Only meaningful for a
+  /// fragment stage's `Output`-direction elements with a `Location`;
+  /// every other element leaves this at its default.
+  uint32_t Index = 0;
+
   /// The DXIL semantic name, or empty if the element has no source-visible
   /// semantic (e.g. it was authored directly against a location). Direct3D
   /// links compatible signatures by semantic name/index; `SemanticIndex` is
@@ -222,8 +232,9 @@ bool verifySignature(const EntrySignature &Sig,
 /// that layout changes incompatibly; `parseSignature` rejects any other
 /// value rather than guessing at a different field order.
 ///
-/// Version 2 appends `SignatureElement::FromInputPatch`.
-constexpr uint32_t SignatureAbiVersion = 2;
+/// Version 2 appends `SignatureElement::FromInputPatch`. Version 3 appends
+/// `SignatureElement::Index`.
+constexpr uint32_t SignatureAbiVersion = 3;
 
 /// Serializes \p Sig to the byte layout `parseSignature` reads back: a
 /// little-endian `SignatureAbiVersion`, the element count, then each
