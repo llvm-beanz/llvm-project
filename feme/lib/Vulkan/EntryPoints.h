@@ -528,6 +528,9 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     VkDevice device, uint32_t descriptorWriteCount,
     const VkWriteDescriptorSet *pDescriptorWrites, uint32_t descriptorCopyCount,
     const VkCopyDescriptorSet *pDescriptorCopies);
+VKAPI_ATTR void VKAPI_CALL vkGetDescriptorSetLayoutSupport(
+    VkDevice device, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+    VkDescriptorSetLayoutSupport *pSupport);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
     VkDevice device, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator,

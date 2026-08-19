@@ -89,6 +89,36 @@ TEST_F(DescriptorTest, UnsupportedDescriptorTypeIsRejected) {
             VK_ERROR_INITIALIZATION_FAILED);
 }
 
+TEST_F(DescriptorTest, GetLayoutSupportReportsSupportedBindings) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Binding.descriptorCount = 1;
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+
+  VkDescriptorSetLayoutSupport Support{};
+  vkGetDescriptorSetLayoutSupport(Device, &LayoutInfo, &Support);
+  EXPECT_EQ(Support.supported, VK_TRUE);
+}
+
+TEST_F(DescriptorTest, GetLayoutSupportReportsUnsupportedBindings) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Binding.descriptorCount = 1;
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+
+  VkDescriptorSetLayoutSupport Support{};
+  vkGetDescriptorSetLayoutSupport(Device, &LayoutInfo, &Support);
+  EXPECT_EQ(Support.supported, VK_FALSE);
+}
+
 TEST_F(DescriptorTest, UnsupportedPoolSizeTypeIsRejected) {
   VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
   VkDescriptorPoolCreateInfo PoolInfo{};

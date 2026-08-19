@@ -357,6 +357,22 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
   }
 }
 
+/// Reports whether \p pCreateInfo could actually be used to create a
+/// `VkDescriptorSetLayout` on this device, per the same limits
+/// `vkCreateDescriptorSetLayout` itself enforces (this ICD advertises no
+/// further descriptor-count or layout limits beyond "every binding's type is
+/// one this ICD implements" -- see `isSupportedDescriptorType`), rather than
+/// actually creating anything.
+VKAPI_ATTR void VKAPI_CALL vkGetDescriptorSetLayoutSupport(
+    VkDevice, const VkDescriptorSetLayoutCreateInfo *pCreateInfo,
+    VkDescriptorSetLayoutSupport *pSupport) {
+  bool Supported = true;
+  for (uint32_t I = 0; Supported && I != pCreateInfo->bindingCount; ++I)
+    Supported =
+        isSupportedDescriptorType(pCreateInfo->pBindings[I].descriptorType);
+  pSupport->supported = Supported ? VK_TRUE : VK_FALSE;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDescriptorUpdateTemplate(
     VkDevice, const VkDescriptorUpdateTemplateCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator,

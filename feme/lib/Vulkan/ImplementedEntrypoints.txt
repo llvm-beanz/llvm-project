@@ -196,6 +196,7 @@ vkResetDescriptorPool
 vkAllocateDescriptorSets
 vkFreeDescriptorSets
 vkUpdateDescriptorSets
+vkGetDescriptorSetLayoutSupport
 vkCreateDescriptorUpdateTemplate
 vkDestroyDescriptorUpdateTemplate
 vkUpdateDescriptorSetWithTemplate
