@@ -1,4 +1,5 @@
 set(LLVM_LINK_COMPONENTS
+  AsmParser
   Core
   Support
   TargetParser
@@ -9,6 +10,7 @@ add_feme_unittest(FeMeCoreTests
   ContextTest.cpp
   FormatRegistryTest.cpp
   ModuleTest.cpp
+  RaisedIRVerifierTest.cpp
   ShaderStageTest.cpp
   SignatureTest.cpp
   StageOpsTest.cpp
