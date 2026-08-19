@@ -1552,7 +1552,7 @@ Deviations from this section's sketch:
   array model, so it needed its own conversion
   (`feme::spirv::convertUniformBlockType`, wrapping the block's own field
   struct directly in the same `spirv.VulkanBuffer` handle representation)
-  and access-chain pattern (`feme::spirv::UniformBufferAccessChainPattern`,
+  and access-chain pattern (`feme::spirv::BlockAccessChainPattern`,
   resolving a field access to `llvm.spv.resource.getpointer` with the
   field's own struct index, one member per access -- deeper nesting into a
   field's own fields is left unmodeled, matching

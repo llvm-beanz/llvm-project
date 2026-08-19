@@ -625,11 +625,13 @@ pointer (the variable's own declared type) converts to the
 `spirv.VulkanBuffer` handle, but every pointer an access chain into it
 produces converts to an ordinary `!llvm.ptr` in address space 11 (the
 address space LLVM's SPIRV backend expects a storage buffer access to use),
-since those are real memory once the handle has been materialized -- MLIR's
-own `AccessChainPattern` still applies past `feme::spirv::
-StorageBufferAccessChainPattern`'s first (member-select + array-index) hop,
-for any further struct field indices. This also needed one narrower fix:
-MLIR's own runtime array conversion refuses one with a nonzero `ArrayStride`
+since those are real memory once the handle has been materialized --
+`feme::spirv::BlockAccessChainPattern` itself builds any further
+`llvm.getelementptr` navigating a selected member's own fields/elements
+(a matrix, a sized array, or a nested struct), rather than falling through
+to MLIR's own `AccessChainPattern`, which cannot: its base pointer is the
+handle type, not `!llvm.ptr`. This also needed one narrower fix: MLIR's own
+runtime array conversion refuses one with a nonzero `ArrayStride`
 decoration, which every runtime array nested in a real (Vulkan-valid)
 storage buffer block carries, so FeMe's own conversion drops the stride (the
 resulting `!llvm.array<0 x T>`'s layout comes from `T` alone).
@@ -683,7 +685,7 @@ What is still missing is breadth rather than a structural gap:
 
 Roadmap step V3 closed what used to be a second bullet here,
 **`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`):
-`feme::spirv::convertUniformBlockType`/`UniformBufferAccessChainPattern`
+`feme::spirv::convertUniformBlockType`/`BlockAccessChainPattern`
 (SPIRVToLLVMPatterns.cpp) convert the standard SPIR-V *binary* shape for a
 uniform block -- a single `Block`-decorated wrapper struct whose sole
 member is the block's own field struct, reached through `spirv.AccessChain`
@@ -701,9 +703,27 @@ time a real binary exists, which is exactly the shape FeMe's own SPIR-V
 that way remains gated on the separate, pre-existing round-trip gap
 described next -- unrelated to cbuffers specifically.
 
+Roadmap step C2 generalized that narrow shape to the ones glslang's GLSL ->
+SPIR-V compilation actually emits, which never adds FeMe's own single-member
+wrapper struct at all: `feme::spirv::getBufferBlockElement`/
+`getUniformBlockElement` also recognize a `Block`/`BufferBlock`-decorated
+struct declared directly, with more than one member (fixed header fields
+alongside a storage buffer's trailing runtime array, or several ordinary
+uniform-block fields), a sized-array member, a `ColMajor` matrix member
+(`RowMajor`, whose physical layout is transposed from LLVM's own natural
+column-major representation, is declined rather than silently
+miscompiled), and the pre-SPIR-V-1.3 SSBO spelling (`Uniform` storage class
+with a `BufferBlock`-decorated struct, rather than `StorageBuffer`/
+`Block`). An array-of-blocks binding (`T blocks[N]` in GLSL) is handled too
+-- `ArrayedBlockAccessChainPattern` builds the `spirv.VulkanBuffer` handle
+itself once its own access chain's leading (array) index is available,
+since unlike a non-arrayed block's handle, *which* descriptor to bind is
+not known until then.
+
 Until the sampling-variant bullet above is closed, the SPIR-V *input* half
 of the translation matrix does not yet cover every shader stage or every
 resource kind a real HLSL program can use.
+
 
 Non-builtin `Input`/`Output` variables (a vertex shader's inputs, a fragment
 shader's outputs, and so on -- roadmap R19) closed what used to be a third
