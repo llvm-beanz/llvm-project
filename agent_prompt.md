@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -26,6 +26,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you regenerate the report of the state of the vulkan CTS passing with FeMe
-from scratch, assess the failures, and update the roadmap with a plan for full
-conformance?
+Can you implement the C1 milestone for Vulkan conformance?
+
+> **Mandatory formats.** Add `B8G8R8A8_UNORM` (and the rest of the Vulkan
+> mandatory color-attachment/blend table) to `isSupportedColorAttachmentFormat`,
+> and at least one combined depth+stencil format (`D24_UNORM_S8_UINT` or
+> `D32_SFLOAT_S8_UINT`) to
+> `isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat`,
+> backing each with a real pack/unpack path in `feme::graphics`. This is the
+> cheapest step by far and unblocks every Amber-based CTS test, which is most of
+> the CTS's own end-to-end coverage
