@@ -87,72 +87,130 @@ bool isResourcePointer(mlir::spirv::PointerType Type) {
                    mlir::spirv::SamplerType>(Type.getPointeeType());
 }
 
-/// A SPIR-V storage/uniform buffer block is always spelled as a single
-/// SPIR-V `Block`-decorated struct with exactly one member (the HLSL ->
-/// SPIR-V compilation FeMe targets never emits more than one, and neither
-/// does the `spirv.VulkanBuffer` representation this converts to -- see
+/// A storage/uniform buffer block's real content, and how
+/// `spirv.AccessChain` reaches it, recovered from the block variable's
+/// pointer type by getBufferBlockElement/getUniformBlockElement below.
+///
+/// FeMe's own upstream HLSL resource representation always spells a block
+/// as a `Block`-decorated struct with exactly one member wrapping the real
+/// content -- a runtime array for `RWStructuredBuffer<T>`/
+/// `StructuredBuffer<T>`, or the block's own field struct for `cbuffer`/
+/// `ConstantBuffer<T>` (see
 /// https://github.com/llvm/wg-hlsl/blob/main/proposals/0018-spirv-resource-representation.md).
-/// Returns that sole member, the runtime array `RWStructuredBuffer<T>`/
-/// `StructuredBuffer<T>` compile down to, or a null type for any other shape
-/// (which does not convert -- see the "Known gap" note in the SPIR-V section
-/// of feme/docs/Design.md for what that leaves out, notably `cbuffer`/
-/// `ConstantBuffer<T>`, whose `Uniform` storage class this does not match).
-mlir::spirv::RuntimeArrayType
-getBufferBlockElementArray(mlir::spirv::PointerType Type) {
-  if (Type.getStorageClass() != mlir::spirv::StorageClass::StorageBuffer)
-    return nullptr;
+/// glslang's own output never adds that wrapper: the block variable points
+/// directly at its own `Block`/`BufferBlock`-decorated struct, which is
+/// free to declare more than one member (fixed header fields alongside a
+/// trailing runtime array -- the only place SPIR-V allows one, and the
+/// shape a plain GLSL `buffer`/`uniform` block with a leading scalar and a
+/// trailing unsized array compiles to), a sized-array member, or a matrix
+/// member. Both shapes convert to the same `spirv.VulkanBuffer` handle (see
+/// convertBlockType below); they differ only in whether `spirv.AccessChain`'s
+/// leading index is a dummy selector into the wrapper (always the constant
+/// 0, dropped by the access chain patterns below) or the content's own
+/// first real member selector.
+struct BlockElement {
+  /// What convertBlockType converts to `spirv.VulkanBuffer`'s sole type
+  /// parameter.
+  mlir::Type Content;
+  /// True if `spirv.AccessChain`'s leading index selects FeMe's own
+  /// wrapper's sole member (always 0) rather than a member of Content
+  /// directly.
+  bool HasWrapper;
+};
+
+/// Returns true if \p Struct is decorated as a storage buffer block, either
+/// the SPIR-V-1.3-and-later spelling (a `StorageBuffer`-class pointer to a
+/// `Block`-decorated struct) or the pre-1.3 one (a `Uniform`-class pointer
+/// to a `BufferBlock`-decorated struct) -- glslang emits the latter when
+/// targeting an older client API version, and the two decorations are
+/// otherwise interchangeable (see the SPIR-V spec's `BufferBlock` entry).
+bool isBufferBlockStorage(mlir::spirv::PointerType Type,
+                          mlir::spirv::StructType Struct) {
+  if (Type.getStorageClass() == mlir::spirv::StorageClass::StorageBuffer)
+    return true;
+  return Type.getStorageClass() == mlir::spirv::StorageClass::Uniform &&
+         Struct.hasDecoration(mlir::spirv::Decoration::BufferBlock);
+}
+
+/// Returns \p Type's storage buffer block content (see BlockElement's own
+/// comment for the two shapes covered), or `std::nullopt` if \p Type is not
+/// a storage buffer block pointer at all.
+std::optional<BlockElement>
+getBufferBlockElement(mlir::spirv::PointerType Type) {
   auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(Type.getPointeeType());
-  if (!Struct || Struct.getNumElements() != 1)
-    return nullptr;
-  return mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(
-      Struct.getElementType(0));
+  if (!Struct || Struct.getNumElements() == 0 ||
+      !isBufferBlockStorage(Type, Struct))
+    return std::nullopt;
+  if (Struct.getNumElements() == 1) {
+    if (auto Array = mlir::dyn_cast<mlir::spirv::RuntimeArrayType>(
+            Struct.getElementType(0)))
+      return BlockElement{Array, /*HasWrapper=*/true};
+  }
+  return BlockElement{Struct, /*HasWrapper=*/false};
 }
 
 /// Returns true if \p Type is a pointer to a storage buffer block -- see
-/// getBufferBlockElementArray.
+/// getBufferBlockElement.
 bool isBufferBlockPointer(mlir::spirv::PointerType Type) {
-  return static_cast<bool>(getBufferBlockElementArray(Type));
+  return static_cast<bool>(getBufferBlockElement(Type));
 }
 
-/// Returns false if \p Struct's sole member -- the runtime array a storage
-/// buffer block wraps -- carries a `NonWritable` decoration, i.e. the buffer
-/// is a `StructuredBuffer<T>` (SRV) rather than a `RWStructuredBuffer<T>`
-/// (UAV); true otherwise.
-bool isBufferBlockWritable(mlir::spirv::StructType Struct) {
+/// Returns the index of \p Struct's trailing runtime array member (the only
+/// place SPIR-V allows one), or `std::nullopt` if it has none -- a plain
+/// multi-member uniform block spelled as a `BufferBlock`/`Block` struct with
+/// no dynamically-indexed content, which is unusual but not invalid.
+std::optional<unsigned>
+getTrailingRuntimeArrayMember(mlir::spirv::StructType Struct) {
+  unsigned Last = Struct.getNumElements() - 1;
+  if (mlir::isa<mlir::spirv::RuntimeArrayType>(Struct.getElementType(Last)))
+    return Last;
+  return std::nullopt;
+}
+
+/// Returns false if \p Struct's member \p Index -- the runtime array a
+/// storage buffer block wraps, whether that is its sole member (see
+/// BlockElement's `HasWrapper` case) or its trailing one (see
+/// getTrailingRuntimeArrayMember) -- carries a `NonWritable` decoration,
+/// i.e. the buffer is a `StructuredBuffer<T>` (SRV) rather than a
+/// `RWStructuredBuffer<T>` (UAV) or a GLSL `readonly buffer`; true
+/// otherwise.
+bool isBufferBlockWritable(mlir::spirv::StructType Struct, unsigned Index) {
   llvm::SmallVector<mlir::spirv::StructType::MemberDecorationInfo, 1>
       Decorations;
-  Struct.getMemberDecorations(0, Decorations);
+  Struct.getMemberDecorations(Index, Decorations);
   for (const auto &Decoration : Decorations)
     if (Decoration.decoration == mlir::spirv::Decoration::NonWritable)
       return false;
   return true;
 }
 
-/// A Vulkan uniform block (`cbuffer`/`ConstantBuffer<T>` in HLSL) is spelled
-/// the same way a storage/uniform buffer block is -- a single SPIR-V
-/// `Block`-decorated struct with exactly one member (see
-/// getBufferBlockElementArray's own comment and
-/// https://github.com/llvm/wg-hlsl/blob/main/proposals/0018-spirv-resource-representation.md)
-/// -- except that member is the block's own user-visible, heterogeneously-
-/// typed field struct directly, rather than a homogeneous runtime array:
-/// a uniform block has a fixed, statically-typed field layout, unlike a
-/// storage buffer's dynamically-indexed element array. Returns that sole
-/// member if it is itself a struct, or a null type for any other shape
-/// (which does not convert).
-mlir::spirv::StructType
-getUniformBlockElementStruct(mlir::spirv::PointerType Type) {
+/// Returns \p Type's uniform buffer block content (the `cbuffer`/
+/// `ConstantBuffer<T>` HLSL construct, or a GLSL `uniform` block), or
+/// `std::nullopt` if \p Type is not a uniform buffer block pointer at all
+/// -- see BlockElement's own comment for the two shapes covered. A
+/// `BufferBlock`-decorated struct is the pre-1.3 storage buffer spelling
+/// getBufferBlockElement matches above, not a uniform block, even though
+/// both use the `Uniform` storage class.
+std::optional<BlockElement>
+getUniformBlockElement(mlir::spirv::PointerType Type) {
   if (Type.getStorageClass() != mlir::spirv::StorageClass::Uniform)
-    return nullptr;
+    return std::nullopt;
   auto Struct = mlir::dyn_cast<mlir::spirv::StructType>(Type.getPointeeType());
-  if (!Struct || Struct.getNumElements() != 1)
-    return nullptr;
-  return mlir::dyn_cast<mlir::spirv::StructType>(Struct.getElementType(0));
+  if (!Struct || Struct.getNumElements() == 0 ||
+      Struct.hasDecoration(mlir::spirv::Decoration::BufferBlock))
+    return std::nullopt;
+  if (Struct.getNumElements() == 1) {
+    if (auto Field =
+            mlir::dyn_cast<mlir::spirv::StructType>(Struct.getElementType(0)))
+      return BlockElement{Field, /*HasWrapper=*/true};
+  }
+  return BlockElement{Struct, /*HasWrapper=*/false};
 }
 
 /// Returns true if \p Type is a pointer to a uniform buffer block -- see
-/// getUniformBlockElementStruct.
+/// getUniformBlockElement.
 bool isUniformBlockPointer(mlir::spirv::PointerType Type) {
-  return static_cast<bool>(getUniformBlockElementStruct(Type));
+  return static_cast<bool>(getUniformBlockElement(Type));
 }
 
 /// Emits a call to \p Intrinsic returning \p ResultType, with \p Args.
@@ -578,20 +636,38 @@ private:
   const feme::spirv::ResourceInfoMap &Resources;
 };
 
-/// Converts `spirv.AccessChain` into a storage buffer whose base pointer
-/// converted to a `spirv.VulkanBuffer` handle rather than an ordinary LLVM
-/// pointer (see feme::spirv::getBufferBlockElementArray), which MLIR's own
-/// `AccessChainPattern` cannot handle since it assumes its base pointer
-/// converts to `!llvm.ptr`. SPIR-V spells a storage buffer access as an
-/// access chain into the wrapping `Block` struct's sole member (its runtime
-/// array) and then into that array's element, so the leading index -- the
-/// member selector, always 0 -- is dropped, and the second -- the array
-/// element -- becomes `llvm.spv.resource.getpointer`'s index; any further
-/// indices navigate the element type's own fields with an ordinary
+/// Returns the constant integer value of \p Index, an `spirv.AccessChain`
+/// index selecting a struct member -- always an `spirv.Constant` per the
+/// SPIR-V spec, unlike an array/vector/matrix-selecting index, which may be
+/// a genuine runtime value -- or `std::nullopt` if it is not one (a
+/// malformed module this declines to convert rather than miscompiles).
+std::optional<uint64_t> getConstantMemberIndex(mlir::Value Index) {
+  auto Constant = Index.getDefiningOp<mlir::spirv::ConstantOp>();
+  if (!Constant)
+    return std::nullopt;
+  auto IntAttr = mlir::dyn_cast<mlir::IntegerAttr>(Constant.getValue());
+  if (!IntAttr)
+    return std::nullopt;
+  return IntAttr.getValue().getZExtValue();
+}
+
+/// Converts `spirv.AccessChain` into a storage/uniform buffer block whose
+/// base pointer converted to a `spirv.VulkanBuffer` handle rather than an
+/// ordinary LLVM pointer (see feme::spirv::getBufferBlockElement/
+/// getUniformBlockElement), which MLIR's own `AccessChainPattern` cannot
+/// handle since it assumes its base pointer converts to `!llvm.ptr`.
+///
+/// The wrapper shape's leading index -- the member selector into FeMe's own
+/// single-member wrapper, always the constant 0 -- is dropped; the shape
+/// glslang emits directly has no such index to drop, and its own leading
+/// index becomes the real selector instead (see BlockElement's comment for
+/// both shapes). Either way, that selector becomes
+/// `llvm.spv.resource.getpointer`'s index, and any further indices navigate
+/// the selected content's own fields/elements with an ordinary
 /// `llvm.getelementptr`, matching how real `dxc`-compiled SPIR-V is
 /// expected to lower on LLVM's SPIRV backend (see
 /// `llvm/test/CodeGen/SPIRV/pointers/structured-buffer-access.ll`).
-class StorageBufferAccessChainPattern
+class BlockAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
 public:
   using mlir::SPIRVToLLVMConversion<
@@ -603,12 +679,20 @@ public:
     auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
         Adaptor.getBasePtr().getType());
     if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer")
-      return Rewriter.notifyMatchFailure(Op, "not a storage buffer access");
+      return Rewriter.notifyMatchFailure(Op, "not a block access");
+
+    auto PointerType =
+        mlir::cast<mlir::spirv::PointerType>(Op.getBasePtr().getType());
+    std::optional<BlockElement> Element = getBufferBlockElement(PointerType);
+    if (!Element)
+      Element = getUniformBlockElement(PointerType);
+    if (!Element)
+      return Rewriter.notifyMatchFailure(Op, "not a block pointer");
 
     mlir::ValueRange Indices = Adaptor.getIndices();
-    if (Indices.size() < 2)
-      return Rewriter.notifyMatchFailure(
-          Op, "expected a member selector and an array index");
+    unsigned Selector = Element->HasWrapper ? 1 : 0;
+    if (Indices.size() <= Selector)
+      return Rewriter.notifyMatchFailure(Op, "not enough indices");
 
     mlir::Type ResultType =
         getTypeConverter()->convertType(Op.getComponentPtr().getType());
@@ -616,74 +700,48 @@ public:
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
-    mlir::Value ElementPtr =
-        createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.getpointer",
-                            ResultType, {Adaptor.getBasePtr(), Indices[1]});
-    if (Indices.size() == 2) {
+    mlir::Value ElementPtr = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.resource.getpointer", ResultType,
+        {Adaptor.getBasePtr(), Indices[Selector]});
+    if (Indices.size() == Selector + 1) {
       Rewriter.replaceOp(Op, ElementPtr);
       return mlir::success();
     }
 
-    // Further indices navigate the array element's own fields; the leading
-    // 0 dereferences through the pointer `llvm.spv.resource.getpointer`
-    // returned, exactly as an ordinary GEP into a pointer operand would.
-    auto ElementType = mlir::cast<mlir::LLVM::LLVMArrayType>(
-                           HandleType.getTypeParams().front())
-                           .getElementType();
+    // Further indices navigate what `llvm.spv.resource.getpointer` just
+    // selected -- an array element's own fields, in the wrapper shape
+    // (whose sole content is always that homogeneous array); one of the
+    // direct shape's own members, itself possibly an array, a matrix, or a
+    // nested struct -- so its own SPIR-V type has to be recovered to
+    // convert the right one. The leading 0 dereferences through the
+    // pointer `llvm.spv.resource.getpointer` returned, exactly as an
+    // ordinary GEP into a pointer operand would.
+    mlir::Type SelectedType;
+    if (Element->HasWrapper) {
+      SelectedType =
+          mlir::cast<mlir::spirv::RuntimeArrayType>(
+              mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType())
+                  .getElementType(0))
+              .getElementType();
+    } else {
+      std::optional<uint64_t> MemberIndex =
+          getConstantMemberIndex(Op.getIndices()[Selector]);
+      if (!MemberIndex)
+        return Rewriter.notifyMatchFailure(Op,
+                                           "member selector is not a constant");
+      SelectedType = mlir::cast<mlir::spirv::StructType>(Element->Content)
+                         .getElementType(*MemberIndex);
+    }
+    mlir::Type ElementType = getTypeConverter()->convertType(SelectedType);
+    if (!ElementType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
     llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
     GEPIndices.push_back(0);
-    llvm::append_range(GEPIndices, Indices.drop_front(2));
+    llvm::append_range(GEPIndices, Indices.drop_front(Selector + 1));
     Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
         Op, ResultType, ElementType, ElementPtr, GEPIndices,
         mlir::LLVM::GEPNoWrapFlags::inbounds);
-    return mlir::success();
-  }
-};
-
-/// Converts `spirv.AccessChain` into a uniform buffer block whose base
-/// pointer converted to a `spirv.VulkanBuffer` handle over a struct (see
-/// convertUniformBlockType below), the `Uniform`-storage-class counterpart
-/// of StorageBufferAccessChainPattern above. The leading member-selector
-/// index (always 0, selecting the wrapper struct's sole member) is dropped
-/// the same way, but the second index selects a *field* of the block's own
-/// struct directly rather than an element of a dynamically-indexed runtime
-/// array -- a fixed, statically-typed field layout unique to each access,
-/// so (unlike the storage-buffer case) no further index navigating into a
-/// nested field is supported here: `feme::cpu::SPIRVResourceLoweringPass`'s
-/// own uniform-buffer handling resolves the field index directly to a
-/// compile-time struct-layout byte offset, and stops there, matching
-/// `feme::cpu::SPIRVPushConstantLoweringPass`'s own "one member per access"
-/// scope for the same underlying reason (see that pass's header comment).
-class UniformBufferAccessChainPattern
-    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
-public:
-  using mlir::SPIRVToLLVMConversion<
-      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
-
-  mlir::LogicalResult
-  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
-                  mlir::ConversionPatternRewriter &Rewriter) const override {
-    auto HandleType = mlir::dyn_cast<mlir::LLVM::LLVMTargetExtType>(
-        Adaptor.getBasePtr().getType());
-    if (!HandleType || HandleType.getExtTypeName() != "spirv.VulkanBuffer" ||
-        !mlir::isa<mlir::LLVM::LLVMStructType>(
-            HandleType.getTypeParams().front()))
-      return Rewriter.notifyMatchFailure(Op, "not a uniform buffer access");
-
-    mlir::ValueRange Indices = Adaptor.getIndices();
-    if (Indices.size() != 2)
-      return Rewriter.notifyMatchFailure(
-          Op, "expected exactly a member selector and a field index");
-
-    mlir::Type ResultType =
-        getTypeConverter()->convertType(Op.getComponentPtr().getType());
-    if (!ResultType)
-      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-
-    mlir::Location Loc = Op.getLoc();
-    Rewriter.replaceOp(Op, createIntrinsicCall(
-                               Rewriter, Loc, "llvm.spv.resource.getpointer",
-                               ResultType, {Adaptor.getBasePtr(), Indices[1]}));
     return mlir::success();
   }
 };
@@ -1236,49 +1294,57 @@ public:
 
 /// Converts a storage buffer block pointer to the `spirv.VulkanBuffer`
 /// handle type LLVM's SPIRV backend materializes it from, mirroring
-/// convertImageTypeAs's role for image/sampler resources: the element type
-/// parameter is the buffer's runtime array, converted to a 0-sized
-/// `!llvm.array`, and the two integer parameters are the storage class
-/// (forwarded unchanged, like an image type's parameters -- see
-/// getBufferBlockElementArray) and whether the buffer is writable
-/// (`RWStructuredBuffer<T>`) or not (`StructuredBuffer<T>`).
+/// convertImageTypeAs's role for image/sampler resources: the type
+/// parameter is the block's content (see getBufferBlockElement -- a 0-sized
+/// `!llvm.array` for the wrapper shape, or the block's own struct,
+/// including any trailing array member, for the shape glslang emits
+/// directly), and the two integer parameters are the storage class
+/// (forwarded unchanged, like an image type's parameters) and whether the
+/// buffer is writable (`RWStructuredBuffer<T>`/a GLSL `buffer` block) or
+/// not (`StructuredBuffer<T>`/a GLSL `readonly buffer` block).
 mlir::Type
 convertBufferBlockType(mlir::spirv::PointerType Type,
                        const mlir::LLVMTypeConverter &TypeConverter) {
-  mlir::spirv::RuntimeArrayType Array = getBufferBlockElementArray(Type);
-  if (!Array)
+  std::optional<BlockElement> Element = getBufferBlockElement(Type);
+  if (!Element)
     return nullptr;
-  mlir::Type ElementType = TypeConverter.convertType(Array.getElementType());
-  if (!ElementType)
+  mlir::Type ContentType = TypeConverter.convertType(Element->Content);
+  if (!ContentType)
     return nullptr;
 
-  bool Writable = isBufferBlockWritable(
-      mlir::cast<mlir::spirv::StructType>(Type.getPointeeType()));
+  auto Struct = mlir::cast<mlir::spirv::StructType>(Type.getPointeeType());
+  bool Writable = true;
+  if (Element->HasWrapper)
+    Writable = isBufferBlockWritable(Struct, 0);
+  else if (std::optional<unsigned> ArrayMember =
+               getTrailingRuntimeArrayMember(Struct))
+    Writable = isBufferBlockWritable(Struct, *ArrayMember);
+
   return mlir::LLVM::LLVMTargetExtType::get(
-      Type.getContext(), "spirv.VulkanBuffer",
-      {mlir::LLVM::LLVMArrayType::get(ElementType, 0)},
+      Type.getContext(), "spirv.VulkanBuffer", {ContentType},
       {static_cast<unsigned>(Type.getStorageClass()), Writable ? 1u : 0u});
 }
 
 /// Converts a uniform buffer block pointer to the same `spirv.VulkanBuffer`
-/// handle type convertBufferBlockType produces for a storage buffer block,
-/// except its sole type parameter is the block's own field struct directly
-/// (see getUniformBlockElementStruct) rather than a 0-sized `!llvm.array`,
-/// since a uniform block has no runtime array to wrap. Vulkan disallows
-/// writing `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`, so the writability integer
-/// parameter is always 0, unlike a storage buffer block's.
+/// handle type convertBufferBlockType produces for a storage buffer block
+/// -- its type parameter is the block's content (see getUniformBlockElement
+/// -- the block's own field struct for the wrapper shape, or that struct
+/// directly for the shape glslang emits, including any sized-array or
+/// matrix member). Vulkan disallows writing
+/// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`, so the writability integer parameter is
+/// always 0, unlike a storage buffer block's.
 mlir::Type
 convertUniformBlockType(mlir::spirv::PointerType Type,
                         const mlir::LLVMTypeConverter &TypeConverter) {
-  mlir::spirv::StructType Element = getUniformBlockElementStruct(Type);
+  std::optional<BlockElement> Element = getUniformBlockElement(Type);
   if (!Element)
     return nullptr;
-  mlir::Type ElementType = TypeConverter.convertType(Element);
-  if (!ElementType)
+  mlir::Type ContentType = TypeConverter.convertType(Element->Content);
+  if (!ContentType)
     return nullptr;
 
   return mlir::LLVM::LLVMTargetExtType::get(
-      Type.getContext(), "spirv.VulkanBuffer", {ElementType},
+      Type.getContext(), "spirv.VulkanBuffer", {ContentType},
       {static_cast<unsigned>(Type.getStorageClass()), /*Writable=*/0u});
 }
 
@@ -1361,16 +1427,20 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
   });
 
   // A uniform buffer block's own pointer converts to the `spirv.VulkanBuffer`
-  // handle representation too (see convertUniformBlockType above); any other
-  // `Uniform` pointer -- an access chain result reaching one of the block's
-  // own fields -- is ordinary memory, in address space 12, the same way a
-  // storage buffer's own non-block pointer converts to address space 11
-  // above (see `storageClassToAddressSpace` in
+  // handle representation too (see convertUniformBlockType above); a
+  // pre-SPIR-V-1.3 SSBO shares the `Uniform` storage class but is a storage
+  // buffer block in every other respect (see isBufferBlockStorage), so it is
+  // tried first. Any other `Uniform` pointer -- an access chain result
+  // reaching one of the block's own fields -- is ordinary memory, in address
+  // space 12, the same way a storage buffer's own non-block pointer
+  // converts to address space 11 above (see `storageClassToAddressSpace` in
   // `llvm/lib/Target/SPIRV/SPIRVUtils.h`).
   TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
                                   -> std::optional<mlir::Type> {
     if (Type.getStorageClass() != mlir::spirv::StorageClass::Uniform)
       return std::nullopt;
+    if (mlir::Type Handle = convertBufferBlockType(Type, TypeConverter))
+      return Handle;
     if (mlir::Type Handle = convertUniformBlockType(Type, TypeConverter))
       return Handle;
     return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
@@ -1478,15 +1548,15 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables) {
-  Patterns.add<
-      ArrayConstantPattern, BuiltInAddressOfPattern,
-      BuiltInGlobalVariablePattern, CompositeConstructPattern,
-      ExecutionModePattern, ImageFetchPattern, ImageSampleExplicitLodPattern,
-      ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
-      ImageWritePattern, LoadValuePattern, PushConstantGlobalVariablePattern,
-      SampledImagePattern, StageIOGlobalVariablePattern,
-      StorageBufferAccessChainPattern, UniformBufferAccessChainPattern>(
-      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns
+      .add<ArrayConstantPattern, BuiltInAddressOfPattern,
+           BuiltInGlobalVariablePattern, BlockAccessChainPattern,
+           CompositeConstructPattern, ExecutionModePattern, ImageFetchPattern,
+           ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
+           ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
+           LoadValuePattern, PushConstantGlobalVariablePattern,
+           SampledImagePattern, StageIOGlobalVariablePattern>(
+          Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
