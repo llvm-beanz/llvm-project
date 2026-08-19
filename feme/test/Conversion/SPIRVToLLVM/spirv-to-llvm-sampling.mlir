@@ -86,3 +86,24 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     spirv.ReturnValue %5 : vector<4xf32>
   }
 }
+
+// -----
+
+// `spirv.ImageFetch` with a lone `Lod` image operand -- what `dxc` always
+// emits for `Texture2D<T>::Load`, even a literal 0 mip -- converts to
+// `llvm.spv.resource.load.level`, threading the explicit mip level through
+// instead of the plain `llvm.load` the unmodified `@fetch` case above uses.
+
+// CHECK-LABEL: llvm.func @fetch_level
+// CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK: %[[OFFSET:.*]] = llvm.mlir.constant(dense<0> : vector<2xi32>) : vector<2xi32>
+// CHECK: llvm.call_intrinsic "llvm.spv.resource.load.level"(%[[HANDLE]], %{{.*}}, %{{.*}}, %[[OFFSET]])
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @tex bind(0, 0) : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+  spirv.func @fetch_level(%coord : vector<2xsi32>, %lod : si32) -> vector<4xf32> "None" {
+    %0 = spirv.mlir.addressof @tex : !spirv.ptr<!spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, UniformConstant>
+    %1 = spirv.Load "UniformConstant" %0 : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>
+    %2 = spirv.ImageFetch %1, %coord ["Lod"], %lod : !spirv.image<f32, Dim2D, NoDepth, NonArrayed, SingleSampled, NeedSampler, Unknown>, vector<2xsi32>, si32 -> vector<4xf32>
+    spirv.ReturnValue %2 : vector<4xf32>
+  }
+}

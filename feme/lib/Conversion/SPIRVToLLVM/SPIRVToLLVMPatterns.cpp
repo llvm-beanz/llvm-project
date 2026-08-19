@@ -1107,6 +1107,57 @@ public:
 using ImageReadPattern = ImageLoadPattern<mlir::spirv::ImageReadOp>;
 using ImageFetchPattern = ImageLoadPattern<mlir::spirv::ImageFetchOp>;
 
+/// Converts a `spirv.ImageFetch` with exactly the `Lod` image operand into
+/// the `llvm.spv.resource.load.level` intrinsic call, mirroring
+/// `ImageFetchPattern`'s unmodified case above but threading the explicit
+/// mip level through instead of rejecting it -- see
+/// `llvm/test/CodeGen/SPIRV/hlsl-resources/LoadLevel.ll` for the backend
+/// side of this intrinsic, which (like `ImageFetchPattern`'s plain load)
+/// selects `OpImageFetch` vs `OpImageRead` itself. `dxc` always emits an
+/// explicit `Lod` operand for `Texture2D<T>::Load` (even a literal 0 mip),
+/// so without this pattern no ordinary non-multisampled texel fetch
+/// converts at all.
+class ImageFetchLodPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageFetchOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageFetchOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageFetchOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getImageOperands() != mlir::spirv::ImageOperands::Lod ||
+        Adaptor.getOperandArguments().size() != 1)
+      return Rewriter.notifyMatchFailure(
+          Op, "only a lone Lod image operand is supported");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Coordinate = Adaptor.getCoordinate();
+    mlir::Value Lod = Adaptor.getOperandArguments()[0];
+
+    // `llvm.spv.resource.load.level` always takes a texel offset, unlike
+    // `spirv.ImageFetch`, which has none here (the `Lod`-only match above
+    // already ruled out a `ConstOffset`/`Offset` modifier); pass zero.
+    auto CoordVecTy = mlir::dyn_cast<mlir::VectorType>(Coordinate.getType());
+    mlir::Type OffsetType =
+        CoordVecTy ? mlir::cast<mlir::Type>(mlir::VectorType::get(
+                         CoordVecTy.getShape(), Rewriter.getI32Type()))
+                   : mlir::cast<mlir::Type>(Rewriter.getI32Type());
+    mlir::Value Offset = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, OffsetType, Rewriter.getZeroAttr(OffsetType));
+
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.load.level",
+                                ResultType,
+                                {Adaptor.getImage(), Coordinate, Lod, Offset}));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.ImageWrite` into a store through the written location.
 class ImageWritePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageWriteOp> {
@@ -1872,16 +1923,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables) {
-  Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
-               BuiltInGlobalVariablePattern, BlockAccessChainPattern,
-               CompositeConstructPattern, ExecutionModePattern,
-               ImageFetchPattern, ImageSampleExplicitLodPattern,
-               ImageSampleImplicitLodPattern, ImageQuerySizePattern,
-               ImageReadPattern, ImageWritePattern, LoadValuePattern,
-               MatrixCompositeExtractPattern, MatrixCompositeInsertPattern,
-               PushConstantGlobalVariablePattern, SampledImagePattern,
-               StageIOGlobalVariablePattern, SwitchConversionPattern>(
-      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns
+      .add<ArrayConstantPattern, BuiltInAddressOfPattern,
+           BuiltInGlobalVariablePattern, BlockAccessChainPattern,
+           CompositeConstructPattern, ExecutionModePattern, ImageFetchPattern,
+           ImageFetchLodPattern, ImageSampleExplicitLodPattern,
+           ImageSampleImplicitLodPattern, ImageQuerySizePattern,
+           ImageReadPattern, ImageWritePattern, LoadValuePattern,
+           MatrixCompositeExtractPattern, MatrixCompositeInsertPattern,
+           PushConstantGlobalVariablePattern, SampledImagePattern,
+           StageIOGlobalVariablePattern, SwitchConversionPattern>(
+          Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);

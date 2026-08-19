@@ -596,9 +596,11 @@ dialect can then name the backend's intrinsics directly, as
 | `spirv.EntryPoint`/`spirv.ExecutionMode` | `hlsl.shader`/`hlsl.numthreads` function attributes | a `__spv__*_execution_mode_info_*` global |
 | builtin input variable (`GlobalInvocationId`, ...) | `llvm.spv.thread.id` & friends, one call per vector component | a load from an `external constant` global |
 | resource variable (image/sampler, `bind(set, binding)`) | `llvm.spv.resource.handlefrombinding` | an `external constant` global whose *name* encodes the binding |
-| `spirv.ImageRead`/`spirv.ImageWrite`/`spirv.ImageFetch` | `llvm.spv.resource.getpointer` + `llvm.load`/`llvm.store` | *(no pattern; fails to legalize)* |
+| `spirv.ImageRead`/`spirv.ImageWrite`/`spirv.ImageFetch` (no modifiers) | `llvm.spv.resource.getpointer` + `llvm.load`/`llvm.store` | *(no pattern; fails to legalize)* |
+| `spirv.ImageFetch` with a lone `Lod` operand (`Texture2D<T>::Load`, which `dxc` always gives an explicit mip) | `llvm.spv.resource.load.level` | *(no pattern; fails to legalize)* |
 | `spirv.ImageQuerySize` | `llvm.spv.resource.getdimensions.{x,xy,xyz}` | *(no pattern; fails to legalize)* |
 | `spirv.SampledImage` + `spirv.ImageSampleImplicitLod` (no modifiers) | `llvm.spv.resource.sample`, image/sampler handles carried as a struct in between | *(folds both handles into one combined runner-facing type; no sampling op pattern at all)* |
+| `spirv.ImageSampleExplicitLod` with a lone `Lod` operand | `llvm.spv.resource.samplelevel` | *(no pattern; fails to legalize)* |
 | `spirv.Switch` | `llvm.switch`, case literals rebuilt against the (post-conversion, signless) selector type | *(no pattern; fails to legalize -- see "`spirv.Switch` op is not supported at the moment" in `mlir::populateSPIRVToLLVMConversionPatterns`)* |
 | `StorageBuffer` block variable (`RWStructuredBuffer<T>`/`StructuredBuffer<T>`) and `spirv.AccessChain` into it | `llvm.spv.resource.handlefrombinding` to a `target("spirv.VulkanBuffer", ...)` handle, `llvm.spv.resource.getpointer` for the buffer index plus an ordinary `llvm.getelementptr` for any further field indices | an `llvm.mlir.global` in the pointer's storage class's address space (memory nothing binds to for the SPIRV backend's consumer) |
 | `PushConstant` block variable | an `llvm.mlir.global` in address space 13, which LLVM's own `SPIRVPushConstantAccess` backend pass finds and rewrites into the `spirv.PushConstant` handle representation itself | *(storage class not among the ones MLIR's `GlobalVariablePattern` converts; fails to legalize)* |
@@ -677,12 +679,12 @@ basic-sampling and stage-IO variable *operations*.
 
 What is still missing is breadth rather than a structural gap:
 
-- **Sampling variants.** Only `spirv.ImageSampleImplicitLod` with no
-  modifiers converts; the bias/gradient/explicit-LOD/depth-comparison
-  variants (`spirv.ImageSampleExplicitLod`, `*DrefImplicitLod`, ...) and
-  `OpImageGather`/`OpImageDrefGather` each need their own pattern supplying
-  the additional operand(s) `llvm.spv.resource.samplebias`/`samplegrad`/
-  `samplelevel`/`samplecmp*`/`gather*` expect.
+- **Sampling variants.** `spirv.ImageSampleImplicitLod` with no modifiers and
+  `spirv.ImageSampleExplicitLod` with a lone `Lod` operand convert; the
+  remaining bias/gradient/depth-comparison variants (`*DrefImplicitLod`,
+  ...) and `OpImageGather`/`OpImageDrefGather` each still need their own
+  pattern supplying the additional operand(s)
+  `llvm.spv.resource.samplebias`/`samplegrad`/`samplecmp*`/`gather*` expect.
 
 Roadmap step V3 closed what used to be a second bullet here,
 **`Uniform`-storage-class buffer blocks** (`cbuffer`/`ConstantBuffer<T>`):
