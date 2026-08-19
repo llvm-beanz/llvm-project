@@ -99,6 +99,24 @@ define %dx.types.Handle @texture2d_srv(i32 %idx) {
   ret %dx.types.Handle %h2
 }
 
+; A `Texture2D<float4>` (SRV, kind 2) bound at register t0, space 0: every
+; field of its `%dx.types.ResBind` (`LowerBound`/`UpperBound`/`Space`, all 0)
+; is zero, so LLVM's constant folder represents the whole struct literal as
+; a `ConstantAggregateZero` rather than a `ConstantStruct` -- a distinct
+; `Constant` subclass `getConstStruct` (used by
+; `raiseResourceHandleFromBinding`/`raiseResourceHandleFromHeap`) must
+; recognize alongside `ConstantStruct`, since `dyn_cast<ConstantStruct>`
+; alone rejects it and leaves every resource bound at register/space 0
+; (i.e. `t0`/`u0`/`b0`/`s0`, the most common binding of all) unraised.
+; CHECK-LABEL: define %dx.types.Handle @texture2d_srv_zero_binding(
+define %dx.types.Handle @texture2d_srv_zero_binding(i32 %idx) {
+  ; CHECK: [[HANDLE:%.*]] = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefrombinding{{.*}}(i32 0, i32 0, i32 1, i32 0, ptr null)
+  ; CHECK: call %dx.types.Handle @llvm.dx.resource.casthandle{{.*}}(target("dx.Texture", <4 x float>, 0, 0, 1, 2) [[HANDLE]])
+  %h1 = call %dx.types.Handle @dx.op.createHandleFromBinding(i32 217, %dx.types.ResBind zeroinitializer, i32 0, i1 false)
+  %h2 = call %dx.types.Handle @dx.op.annotateHandle(i32 216, %dx.types.Handle %h1, %dx.types.ResourceProperties { i32 2, i32 1033 })
+  ret %dx.types.Handle %h2
+}
+
 ; A comparison sampler bound at register s0, exercising `dx.Sampler`'s
 ; single-bit `SamplerCmpOrHasCounter` decode (Word0 bit 15): `Sampler` ==
 ; kind 14, with bit 15 set, i.e. Word0 = 14 | (1 << 15) = 32782.
