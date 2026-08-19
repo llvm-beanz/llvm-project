@@ -26,71 +26,69 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-The build is currently producing a bunch of warnings, can you fix them?
+I have an HLSL shader that I'd like to be able to compile through from DXIL to
+AMD ISA, but feme is hitting an assert when I try.
+
+The shader is:
 
 ```
-1572/1661] Building CXX object tools/feme/lib/Translate/DXSA/CMakeFiles/obj.FeMeTranslateDXSA.dir/DXSAToLLVMIRTranslator.cpp.o
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3697:65: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3697 |     SampleForm Form{DXILOp::Sample, "sample", {}, /*Clamp=*/true};
-      |                                                                 ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3703:65: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3703 |     SampleForm Form{DXILOp::Sample, "sample", {}, /*Clamp=*/true};
-      |                                                                 ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3711:72: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3711 |     SampleForm Form{DXILOp::SampleLevel, "sampleLevel", {S.getSrcLod()}};
-      |                                                                        ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3717:72: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3717 |     SampleForm Form{DXILOp::SampleLevel, "sampleLevel", {S.getSrcLod()}};
-      |                                                                        ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3727:35: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3727 |                     /*Clamp=*/true};
-      |                                   ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3736:35: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3736 |                     /*Clamp=*/true};
-      |                                   ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3744:73: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3744 |     SampleForm Form{DXILOp::SampleGrad, "sampleGrad", {}, /*Clamp=*/true};
-      |                                                                         ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3751:73: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3751 |     SampleForm Form{DXILOp::SampleGrad, "sampleGrad", {}, /*Clamp=*/true};
-      |                                                                         ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3763:35: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3763 |                     /*Clamp=*/true};
-      |                                   ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3772:35: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3772 |                     /*Clamp=*/true};
-      |                                   ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3782:47: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3782 |                     {S.getSrcReferenceValue()}};
-      |                                               ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3790:47: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3790 |                     {S.getSrcReferenceValue()}};
-      |                                               ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3799:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3799 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3807:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3807 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3819:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3819 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3830:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3830 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3839:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3839 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3848:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3848 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3861:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3861 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3873:43: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3873 |                     /*NarrowOffsets=*/true};
-      |                                           ^
-/Users/cbieneman/dev/llvm-project/feme/lib/Translate/DXSA/DXSAToLLVMIRTranslator.cpp:3881:61: warning: missing field 'Gradients' initializer [-Wmissing-field-initializers]
- 3881 |     SampleForm Form{DXILOp::CalculateLOD, "calculateLOD", {}};
-      |
+Texture2D<half4> InputTexture : register(t0);
+RWTexture2D<half4> OutputTexture : register(u0);
+
+cbuffer FilterParameters : register(b0)
+{
+    half SpatialScale;
+    half ColorScale;
+};
+
+[numthreads(8, 8, 1)]
+void main(uint3 threadID : SV_DispatchThreadID)
+{
+    uint width = 2048, height = 2048;
+    //OutputTexture.GetDimensions(width, height);
+
+    int2 pixel = int2(threadID.xy);
+    if (pixel.x >= width || pixel.y >= height)
+        return;
+
+    half3 center = InputTexture.Load(int3(pixel, 0)).rgb;
+    half3 weightedSum = 0.0h;
+    half totalWeight = 0.0h;
+
+    [unroll]
+    for (int y = -4; y <= 4; ++y)
+    {
+        [unroll]
+        for (int x = -4; x <= 4; ++x)
+        {
+            int2 coordinate = clamp(
+                pixel + int2(x, y),
+                int2(0, 0),
+                int2(width, height) - 1);
+
+            half3 color = InputTexture.Load(int3(coordinate, 0)).rgb;
+            half3 difference = color - center;
+            half2 offset = half2(x, y);
+
+            half distance =
+                dot(offset, offset) * SpatialScale +
+                dot(difference, difference) * ColorScale;
+
+            half weight = exp2(-distance);
+            weightedSum += color * weight;
+            totalWeight += weight;
+        }
+    }
+
+    OutputTexture[pixel] =
+        half4(weightedSum / max(totalWeight, 0.0001h), 1.0h);
+}
+```
+
+Previous work hasn't completely fleshed out the resource access ops. Can you
+flesh that out now?
+
+I'm currently seeing the error:
+```
+feme: 'dx.op.textureLoad.f32' is not supported when targeting 'amdgpu9.0a-amd-amdhsa' (used in function 'main')
 ```
