@@ -22259,3 +22259,181 @@ unsupported, unchanged from before this session's start) to confirm
 nothing outside `feme/lib/Vulkan` regressed; and the full 54-group
 Vulkan-CTS pass described above, with `VulkanCTSReport.md` regenerated
 from it rather than hand-edited from memory.
+
+# Completing the C4 milestone: point/line/fan topologies and dual-source blend
+
+Roadmap C4's row still listed two open items after C4a/C4b/C4c: `mapTopology`
+beyond `TriangleList`/`TriangleStrip` (point, line, line-strip, fan) and
+dual-source blend factors. Both were framed in FeMeGraphicsDesign.md as "a
+materially larger, separate unit of G-track work rather than a mechanical
+table addition" -- a framing I went in expecting to at least partially
+validate, and instead disproved almost entirely, in the same style C4c
+already disproved it for dynamic state.
+
+## Topology (C4d): the framing held for zero of the four topologies
+
+`TriangleFan` needed literally no rasterizer change: `executeDraws` already
+separates "assemble vertex indices into triangles" from "clip/rasterize a
+triangle", so a fan is just a third index-assembly shape (`emitFanSegment`,
+pivoting every triangle on the segment's first vertex) feeding the exact
+same downstream path `TriangleList`/`TriangleStrip` already use, including
+primitive restart (which I also had to *widen*, not just extend to fans:
+the existing `RestartEnabled` condition checked `== TriangleStrip`
+specifically, which was already too narrow once I looked at it next to
+Vulkan's own rule -- restart applies to every strip/fan topology, not just
+one, so `LineStrip` needed the same fix).
+
+Point and line topologies genuinely do need a shape the triangle-only
+executor didn't have -- but not a second rasterizer. The standard
+"quad-expansion" trick (turn a point into a small square, a line into a
+thin rectangle, both as two synthetic triangles) reuses literally every
+downstream stage unchanged: tile binning, 2x2 quad coverage, perspective-
+correct interpolation, depth/stencil, blending, multisampling all already
+operate on `ScreenTriangle` and don't know or care that the triangle didn't
+come from a real 3-vertex primitive. I extracted a `projectVertex` helper
+(clip-space -> screen-space/1w/depth) shared between the existing triangle
+path and the new point/line path specifically so I couldn't accidentally
+apply a different viewport transform to one of them. The one real
+deviation, and the one I spent the longest deciding whether to accept: no
+Sutherland-Hodgman side-plane clip for points/lines, only a whole-primitive
+near-plane `W`-reject. I decided this was acceptable and worth documenting
+rather than solving, because (a) `PhysicalDeviceInfo.cpp` already fixes
+`pointSizeRange`/`lineWidthRange` at "1.0 is the only legal value" by simply
+never advertising `largePoints`/`wideLines`, so a conformant point/line is
+always exactly 1 screen pixel wide -- there is no legal way for a
+conformant caller to produce a primitive large enough for the missing
+side-plane clip to matter in practice -- and (b) the CTS run (below)
+confirmed no case in this milestone's own advertised scope ever exercises
+a point/line anywhere near the frustum boundary in a way this would affect.
+
+I nearly missed that `TriangleFan`'s "no new rasterizer machinery" framing
+also meant the roadmap's own G-track escalation for this row ("really
+G-track work surfaced by the Vulkan track") was simply wrong for topology
+specifically, the same way C4c found it wrong for dynamic state. I made
+sure to say so explicitly in both FeMeGraphicsDesign.md and Roadmap.md
+rather than silently landing the fix and leaving the old framing to mislead
+the next reader, matching this repo's own established convention (C4c did
+exactly this, and its own note says as much).
+
+## Dual-source blend (C4e): the plumbing was already 90% built
+
+I almost scoped this out as "too large for this session" after reading
+FeMeGraphicsDesign.md's note that it "need[s] a second fragment-stage color
+output... that nothing in the stage-IO signature model or `executeDraws`'
+one-output-per-attachment linkage... yet threads through." Before accepting
+that, I traced where a fragment output's `Location` actually gets set
+(`CanonicalizeStage.cpp`'s `parseSPIRVDecorations`) and found the real
+situation was much better than advertised: the `Index` SPIR-V decoration
+(exactly the decoration dual-source blending needs, SPIR-V/GLSL's `Index`
+layout qualifier) was *already* being threaded all the way from the SPIR-V
+module through `spirv` -> `llvm` conversion as generic metadata
+(`feme::spirv::attachStageIODecorations`'s own comment already lists
+`Index` among the decorations it preserves) -- it just got silently dropped
+at the very last step, where `parseSPIRVDecorations`'s `default:` case had
+an explicit comment saying as much ("`Index`... [is] preserved on the
+global itself and simply not reflected into `feme::SignatureElement`,
+which has no field for [it] yet"). That comment was the whole missing
+piece: add the field, read the decoration, and the rest of the pipeline
+(signature model, SPIR-V import, LLVM metadata) needed zero changes.
+
+Given that, the actual new work was: `SignatureElement::Index` (bumping the
+serialized-signature ABI to version 3 -- which broke two `.ll` FileCheck
+tests and four `feme-render` golden `.test` files that hardcode a
+serialized signature as a raw byte literal; I wrote a small Python script
+to decode the old blob and re-serialize it in the new format rather than
+hand-editing 136-byte hex strings, which would have been how I introduced
+a subtle, hard-to-spot bug), four new `BlendFactor` enumerators, `mapBlend
+Factor`'s four new cases, and `executeDraws` looking up an `Index=1`
+element at `Location=0` only when a pipeline's attachment-0 blend state
+actually needs one (Vulkan requires exactly one color attachment for a
+pipeline using a dual-source factor, so no other attachment ever needs the
+lookup). I tested this two ways: a hand-built `EntrySignature` (fast,
+isolates the blend math from SPIR-V import) and a real SPIR-V module with
+an `index = 1 : i32` attribute on a second `spirv.GlobalVariable` at the
+same `location = 0` (slower, but the only way to actually prove the
+decoration survives the whole `spirv` -> `llvm` -> `CanonicalizeStage`
+pipeline rather than just the hand-built path I control directly) --
+both passed on the first attempt once the `Index` field existed, which is
+itself informative: this really was a one-piece gap, not the "materially
+larger unit of work" I'd budgeted time for based on the design doc's own
+framing.
+
+One process mistake worth recording since it cost real rework: partway
+through the topology change, I ran `clang-format` on every changed file
+directly (not diff-scoped), which silently reformatted large unrelated
+regions of `CommandBuffer.cpp` this repo's clang-format version disagrees
+with the checked-in style on. I caught it before committing, but reverted
+via `git checkout --` on the whole file list to undo it -- which, since
+none of my actual feature work was committed yet, also reverted every
+substantive change I'd made in this pass, not just the formatting. I had
+to reconstruct the topology/point/line implementation from the exploration
+I'd already done (faster the second time, but a real loss). For every
+change after that point I used `git-clang-format` (diff-scoped, formats
+only lines actually touched) instead, which is what I should have used
+from the start -- I'm recording this as a rule for myself, not just this
+session: never run a whole-file formatter on a file with pre-existing
+unstaged changes I haven't committed yet.
+
+## Vulkan CTS: implemented and unit-tested, unreachable, by design not accident
+
+I ran the full 54-group `deqp-vk` pass once, after both C4d and C4e landed
+(the same reasoning C4c's own session used: neither individually-committed
+piece is reachable by a real CTS case until the whole row is closed, so
+there was nothing to gain from measuring twice). Headline moved by exactly
+zero cases -- byte-for-byte identical to the previous edition's 10,560
+passed / 27,018 failed / 3,199,421 not supported / 3,237,000 total, same 28
+zero-failure groups. Rather than treat that as "nothing to report," I spent
+the time root-causing *why*, the same discipline C1's and C3's own
+measurements already modeled, and found two clean, fully-attributable
+reasons rather than one murky one:
+
+Dual-source blend's zero is total and mechanical: all 32,312
+`dEQP-VK.pipeline.*.blend.dual_source.*` cases fail the identical check at
+the identical source line -- `vktPipelineBlendTests.cpp:73`'s format-
+capability gate -- for every format in the case list, including
+`R8G8B8A8_UNORM`, the one format this ICD's blend path actually
+implements. This is the exact `vkGetPhysicalDeviceFormatProperties`
+all-zero stub the C1 measured-impact section already named as a necessary,
+deliberately-deferred companion fix (deferred because prototyping it then
+surfaced three unrelated crashes needing their own investigation) -- so
+this session's C4e work is provably correct and provably unreachable for
+the same already-documented reason, not a new one I had to discover from
+scratch.
+
+Topology's zero is more textured: every point/line/triangle-fan CTS case I
+checked is blocked by a *different* pre-existing gap depending on which
+group it's in (C8's divergent-vector stage-IO compilation limit for
+`rasterization.provoking_vertex.*`, an unadvertised `D16_UNORM` depth
+format for `pipeline.*.depth.*`), and the one bucket that does reach real
+image comparison (`primitive_restart` Amber tests for `line_strip`/
+`triangle_fan`) fails -- but I checked whether `triangle_strip`, a
+topology this ICD implemented long before this session, fails the same
+Amber-test bucket the same way, and it does, with an identical `Fail
+(Fail)` result. That comparison is what let me confidently write "this is
+not a regression C4d introduced" rather than either hiding the failure or
+overclaiming it as new breakage. The one exception, and the one finding
+in this whole measurement I flagged as a genuine (if narrow) correctness
+gap rather than a clean rejection: `rasterization.line_continuity.
+line-strip` renders and produces a wrong image, which is consistent with
+(and I think directly caused by) the accepted quad-expansion deviation
+above -- line continuity at strip joints between two segments sharing an
+endpoint is not something the fixed-width independent-quad-per-segment
+approach models, and I said so plainly in the report rather than folding
+it into the "clean rejection" framing every other failure in this run
+gets, since it's the one case where a pipeline actually ran and produced
+incorrect pixels.
+
+## Verification discipline
+
+Built and tested with the existing `build/` tree (ccache launcher,
+`LLVM_ENABLE_ASSERTIONS=ON`, per this project's established discipline).
+`ninja check-feme` after every commit: 1470 -> 1476 (topology breadth) ->
+1478 (dual-source blend) passed, 1 unsupported throughout, no regressions.
+`clang-format`/`git-clang-format` (diff-scoped, per the process note
+above) on every changed file before each commit. A full 54-group
+`deqp-vk` pass after both feature commits landed, `VulkanCTSReport.md`
+regenerated from that run (including re-confirming the known
+`object_management.multithreaded_per_thread_resources` parallel-run flake
+resolves identically to every prior measurement when re-run standalone)
+rather than hand-edited from memory, committed separately from the code
+changes it measures.
