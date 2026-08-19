@@ -248,6 +248,9 @@ vkDestroyCommandPool(VkDevice device, VkCommandPool commandPool,
                      const VkAllocationCallbacks *pAllocator);
 VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(
     VkDevice device, VkCommandPool commandPool, VkCommandPoolResetFlags flags);
+VKAPI_ATTR void VKAPI_CALL vkTrimCommandPool(VkDevice device,
+                                             VkCommandPool commandPool,
+                                             VkCommandPoolTrimFlags flags);
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
     VkDevice device, const VkCommandBufferAllocateInfo *pAllocateInfo,
     VkCommandBuffer *pCommandBuffers);

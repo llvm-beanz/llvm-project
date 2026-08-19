@@ -102,6 +102,7 @@ vkMergePipelineCaches
 vkCreateCommandPool
 vkDestroyCommandPool
 vkResetCommandPool
+vkTrimCommandPool
 vkAllocateCommandBuffers
 vkFreeCommandBuffers
 vkBeginCommandBuffer

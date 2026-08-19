@@ -1418,6 +1418,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(VkDevice,
   return VK_SUCCESS;
 }
 
+VKAPI_ATTR void VKAPI_CALL vkTrimCommandPool(VkDevice, VkCommandPool,
+                                             VkCommandPoolTrimFlags) {
+  // A core VK_VERSION_1_1 command this ICD must at least resolve: the spec
+  // only requires that trimming *may* reduce a pool's memory usage, never
+  // that it does, so a no-op is a conformant implementation. Without this,
+  // `vkGetDeviceProcAddr` returned null for a command every loader-linked
+  // client's dispatch table expects to resolve for a core-1.1 device,
+  // which crashed (not merely returned an error) the first caller found by
+  // a Vulkan-CTS run (`dEQP-VK.api.command_buffers.trim_command_pool`).
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(
     VkDevice, const VkCommandBufferAllocateInfo *pAllocateInfo,
     VkCommandBuffer *pCommandBuffers) {
