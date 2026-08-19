@@ -112,6 +112,8 @@ Expected<CullMode> parseCullMode(StringRef Cull) {
     return CullMode::Front;
   if (Cull == "back")
     return CullMode::Back;
+  if (Cull == "front-and-back")
+    return CullMode::FrontAndBack;
   return createStringError(inconvertibleErrorCode(),
                            "unknown pipeline 'cull: %s'", Cull.str().c_str());
 }

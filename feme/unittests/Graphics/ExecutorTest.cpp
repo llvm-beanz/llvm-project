@@ -364,6 +364,28 @@ TEST(ExecutorTest, CullsBackFacingTrianglesWhenConfigured) {
     EXPECT_EQ(Byte, 0);
 }
 
+TEST(ExecutorTest, CullsEveryTriangleWithFrontAndBack) {
+  Context Ctx;
+  Expected<GraphicsPipeline> Pipeline = buildPipeline(
+      Ctx, RasterState{CullMode::FrontAndBack, FrontFace::CounterClockwise});
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  // The same oversized, front-facing (CCW) triangle every other test in
+  // this file leaves unculled: `CullMode::FrontAndBack` must discard it
+  // too, regardless of winding (`VK_CULL_MODE_FRONT_AND_BACK` rasterizes
+  // no primitive of the pipeline's topology at all).
+  TriangleScene Scene;
+  Scene.VertexData = {-1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      3.0f,  -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f,
+                      -1.0f, 3.0f,  0.0f, 1.0f, 0.0f, 0.0f, 1.0f};
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  for (uint8_t Byte : Scene.AttachmentStorage)
+    EXPECT_EQ(Byte, 0);
+}
+
 TEST(ExecutorTest, RejectsUnsupportedTopology) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(

@@ -1354,7 +1354,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           bool FrontFacing = (Pipeline.getRasterState().Front ==
                               FrontFace::CounterClockwise) == IsCCW;
           CullMode Cull = Pipeline.getRasterState().Cull;
-          if ((Cull == CullMode::Front && FrontFacing) ||
+          if (Cull == CullMode::FrontAndBack ||
+              (Cull == CullMode::Front && FrontFacing) ||
               (Cull == CullMode::Back && !FrontFacing))
             continue;
 

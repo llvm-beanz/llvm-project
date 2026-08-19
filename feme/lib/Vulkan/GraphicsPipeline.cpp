@@ -72,9 +72,9 @@ std::optional<CullMode> mapCullMode(VkCullModeFlags Cull) {
     return CullMode::Front;
   case VK_CULL_MODE_BACK_BIT:
     return CullMode::Back;
+  case VK_CULL_MODE_FRONT_AND_BACK:
+    return CullMode::FrontAndBack;
   default:
-    // `VK_CULL_MODE_FRONT_AND_BACK` discards every primitive, which the
-    // executor has no representation for.
     return std::nullopt;
   }
 }
@@ -581,7 +581,8 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
   std::optional<CullMode> Cull = mapCullMode(Info->cullMode);
   if (!Cull)
     return createStringError(inconvertibleErrorCode(),
-                             "VK_CULL_MODE_FRONT_AND_BACK is not implemented");
+                             "unrecognized VkCullModeFlags value %u",
+                             unsigned(Info->cullMode));
   Out.Raster.Cull = *Cull;
   Out.Raster.Front = Info->frontFace == VK_FRONT_FACE_CLOCKWISE
                          ? FrontFace::Clockwise

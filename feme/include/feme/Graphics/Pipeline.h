@@ -136,11 +136,15 @@ splitStripPrimitiveAdjacency(PrimitiveTopology Topology,
                              uint32_t PrimitiveIndex);
 
 /// Which primitive-facing direction, if any, is discarded before
-/// rasterization.
+/// rasterization. `FrontAndBack` (`VK_CULL_MODE_FRONT_AND_BACK`) discards
+/// every primitive regardless of winding -- the executor still assembles
+/// and clips them, since Vulkan's own model culls per triangle after
+/// facing is known, but never rasterizes one.
 enum class CullMode : uint8_t {
   None,
   Front,
   Back,
+  FrontAndBack,
 };
 
 /// Which vertex winding order is front-facing.

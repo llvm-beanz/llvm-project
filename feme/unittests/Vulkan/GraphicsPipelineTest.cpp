@@ -339,6 +339,33 @@ TEST_F(GraphicsPipelineTest, AcceptsPrimitiveRestartOnTriangleStrip) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// `VK_CULL_MODE_FRONT_AND_BACK` is a legal `VkCullModeFlags` value (it
+/// culls every primitive of the pipeline's topology, "no representation
+/// for it" no longer describes this executor -- see
+/// `feme::graphics::CullMode::FrontAndBack`), so pipeline creation must
+/// accept it rather than fail.
+TEST_F(GraphicsPipelineTest, AcceptsFrontAndBackCulling) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Raster.cullMode = VK_CULL_MODE_FRONT_AND_BACK;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  EXPECT_EQ(Graphics->buildExecutorPipeline(DynamicGraphicsState{})
+                .getRasterState()
+                .Cull,
+            feme::graphics::CullMode::FrontAndBack);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A fragment stage writing no `SV_Target0` cannot fill the render pass's
 /// one color attachment; the mismatch is a creation failure, not a draw-time
 /// surprise.
@@ -424,9 +451,9 @@ TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
 /// `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` status to must build
 /// a pipeline the same way `VK_FORMAT_R8G8B8A8_UNORM` already does.
 TEST_F(GraphicsPipelineTest, AcceptsMandatoryColorAttachmentFormats) {
-  for (VkFormat Format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM,
-                          VK_FORMAT_A2B10G10R10_UNORM_PACK32,
-                          VK_FORMAT_R16G16B16A16_SFLOAT}) {
+  for (VkFormat Format :
+       {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM,
+        VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT}) {
     VkShaderModule Vertex = createModule(VertexSource);
     VkShaderModule Fragment = createModule(FragmentSource);
 

@@ -2172,7 +2172,7 @@ stencil-attachment: stencil0 # names an `attachments` entry; omit for none
 pipeline:
   vertex: { module: vs.ll, entry: main }
   fragment: { module: fs.ll, entry: main }
-  cull: none                # none | front | back
+  cull: none                # none | front | back | front-and-back
   front-face: ccw
   depth: { test: less, write: true }
   blend: replace
