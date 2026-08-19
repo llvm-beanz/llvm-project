@@ -984,14 +984,18 @@ unsigned getContiguousMaskWidth(uint64_t Mask) {
   return (Mask >> Width) == 0 ? Width : 0;
 }
 
-/// Infers the number of components in a typed buffer's element type from the
-/// `dx.op.bufferStore`/`dx.op.bufferLoad` calls consuming \p HandleCI's
-/// result. DXIL's metadata only records a typed buffer's *component* type
-/// (`float`), never its vector width (`<4 x float>`), so the width has to be
-/// recovered from how the resource is actually accessed: a store's write mask
-/// names it directly, and a load's `%dx.types.ResRet` components are only
-/// extracted up to it. Defaults to 4 (DXIL's widest typed buffer element)
-/// when the handle has no accesses to learn from.
+/// Infers the number of components in a typed buffer's or texture's element
+/// type from the `dx.op.bufferStore`/`dx.op.bufferLoad` (or, for a texture,
+/// `dx.op.textureStore`/`dx.op.textureLoad`) calls consuming \p HandleCI's
+/// result. DXIL's metadata only records a typed buffer/texture's *component*
+/// type (`float`), never its vector width (`<4 x float>`), so the width has
+/// to be recovered from how the resource is actually accessed: a store's
+/// write mask names it directly (always the *last* operand of both ops,
+/// despite their differing arities -- `BufferStore` has no coordinate
+/// `Coord2`, `TextureStore` does), and a load's `%dx.types.ResRet`
+/// components are only extracted up to it. Defaults to 4 (DXIL's widest
+/// typed buffer/texture element) when the handle has no accesses to learn
+/// from.
 unsigned inferTypedBufferWidth(const CallInst &HandleCI) {
   unsigned Width = 0;
   for (const User *U : HandleCI.users()) {
@@ -999,15 +1003,18 @@ unsigned inferTypedBufferWidth(const CallInst &HandleCI) {
     const Function *Callee = CI ? CI->getCalledFunction() : nullptr;
     if (!Callee)
       continue;
+    StringRef Name = Callee->getName();
 
-    if (Callee->getName().starts_with("dx.op.bufferStore") &&
-        CI->arg_size() == 9) {
-      if (std::optional<uint64_t> Mask = getConstInt(CI->getArgOperand(8)))
+    if (Name.starts_with("dx.op.bufferStore") ||
+        Name.starts_with("dx.op.textureStore")) {
+      if (std::optional<uint64_t> Mask =
+              getConstInt(CI->getArgOperand(CI->arg_size() - 1)))
         Width = std::max(Width, getContiguousMaskWidth(*Mask));
       continue;
     }
 
-    if (!Callee->getName().starts_with("dx.op.bufferLoad"))
+    if (!Name.starts_with("dx.op.bufferLoad") &&
+        !Name.starts_with("dx.op.textureLoad"))
       continue;
     for (const User *LoadUser : CI->users())
       if (const auto *EV = dyn_cast<ExtractValueInst>(LoadUser))
@@ -1018,26 +1025,38 @@ unsigned inferTypedBufferWidth(const CallInst &HandleCI) {
 }
 
 /// Builds the `target("dx.")` handle type for \p Binding, or returns nullptr
-/// for resource kinds this pass doesn't yet reconstruct (textures, samplers,
-/// and the norm/packed typed buffer element formats -- see
-/// `getElementLLVMType`). \p VectorWidth is the typed buffer element vector
-/// width recovered by `inferTypedBufferWidth`.
+/// for resource kinds this pass doesn't yet reconstruct (samplers,
+/// multisampled/feedback textures, and the norm/packed typed buffer/texture
+/// element formats -- see `getElementLLVMType`). \p VectorWidth is the typed
+/// buffer/texture element vector width recovered by `inferTypedBufferWidth`
+/// (legacy `!dx.resources` metadata records a texture's component *type* the
+/// same way it does a typed buffer's, but never its component *count* --
+/// see Design.md's "Decision: texture and sampler handle kinds" -- so both
+/// need the same access-site recovery).
 TargetExtType *buildHandleType(LLVMContext &Ctx, const ResourceBinding &Binding,
                                unsigned VectorWidth) {
   bool IsUAV = Binding.Class == dxil::ResourceClass::UAV;
-  switch (Binding.Kind) {
-  case dxil::ResourceKind::TypedBuffer: {
+  if (Binding.Kind == dxil::ResourceKind::TypedBuffer ||
+      isPlainTextureKind(Binding.Kind)) {
     Type *ScalarTy = getElementLLVMType(Binding.ElementType, Ctx);
     if (!ScalarTy)
       return nullptr;
     Type *ElemTy = VectorWidth > 1
                        ? cast<Type>(FixedVectorType::get(ScalarTy, VectorWidth))
                        : ScalarTy;
+    unsigned IsSigned = isSignedElementType(Binding.ElementType);
+    if (Binding.Kind == dxil::ResourceKind::TypedBuffer)
+      return TargetExtType::get(
+          Ctx, "dx.TypedBuffer", {ElemTy},
+          {static_cast<unsigned>(IsUAV), static_cast<unsigned>(Binding.IsROV),
+           IsSigned});
     return TargetExtType::get(
-        Ctx, "dx.TypedBuffer", {ElemTy},
+        Ctx, "dx.Texture", {ElemTy},
         {static_cast<unsigned>(IsUAV), static_cast<unsigned>(Binding.IsROV),
-         static_cast<unsigned>(isSignedElementType(Binding.ElementType))});
+         IsSigned, static_cast<unsigned>(Binding.Kind)});
   }
+
+  switch (Binding.Kind) {
   case dxil::ResourceKind::RawBuffer:
     return TargetExtType::get(
         Ctx, "dx.RawBuffer", {Type::getInt8Ty(Ctx)},
