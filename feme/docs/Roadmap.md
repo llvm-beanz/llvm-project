@@ -438,7 +438,9 @@ below are what remains for V0.5 onward.
 | ~~Images, image views, layout tracking, copies, storage/sampled images and samplers~~ (closed by V5's `lib/Vulkan/Image.{h,cpp}` plus the `Descriptor.{h,cpp}`/`CommandBuffer.{h,cpp}` extensions it needed, and shader-side consumption closed by R30's follow-up -- a bound sampled image and sampler now reach a real dispatch through the image/sampler heaps; see FeMeVulkanDesign.md's "V5" Status note) | V5 | P1 |
 | Graphics, WSI and presentation: FeMeVulkanDesign.md's V6–V8 (done: its "Graphics, Presentation, and Window-System Integration" section now specifies the graphics queue family, `VkRenderPass`/dynamic rendering normalized into one render-target binding, graphics pipeline state translation, draw commands, the headless-first WSI decision, and mesh/ray exposure, and V6–V8 are written against G3–G8) | "Graphics, Presentation, and Window-System Integration" (Vulkan) | P1 |
 | ~~A real Vulkan-CTS run had never actually happened (every milestone through V6 recorded only the *infrastructure* to run one)~~ (closed, once a VK-GL-CTS checkout became available: see feme/docs/VulkanCTSReport.md. Found and fixed four core commands this ICD had never implemented at all -- each crashed the loader's device dispatch table rather than merely rejecting -- `vkTrimCommandPool`, `vkCreateRenderPass2`'s command family, `vkCreateDescriptorUpdateTemplate`'s command family, and `vkCmdSetLineWidth`/`DepthBias`/`DepthBounds`/`DeviceMask`) | "V4"/"V6" Status notes; VulkanCTSReport.md | P0 |
-| An upstream MLIR SPIR-V deserializer bug (`processSpecConstantComposite`, `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`) crashes on any spec-constant composite whose constituents are not themselves spec constants -- e.g. a `mat2` spec constant's columns, which are ordinary `OpConstantComposite` vectors per the SPIR-V spec. Responsible for the CTS run's remaining crashed groups (`memory_model`, `pipeline`, `glsl`, `spirv_assembly`, `ssbo`, `ubo` -- see VulkanCTSReport.md). Needs a modeling change to `mlir::spirv::SpecConstantCompositeOp` (a mixed symbol-reference/inline-attribute operand list), not a small null check -- deferred past this pass | VulkanCTSReport.md | P1 |
+| ~~An upstream MLIR SPIR-V deserializer bug (`processSpecConstantComposite`, `mlir/lib/Target/SPIRV/Deserialization/Deserializer.cpp`) crashes on any spec-constant composite whose constituents are not themselves spec constants~~ (closed: `spirv.SpecConstantComposite`'s constituents now accept either a spec-constant symbol reference or an inline typed-attribute constant, and the six groups it crashed all run to completion) | VulkanCTSReport.md | P1 |
+| An upstream MLIR `spirv`→`llvm` bug: `IComparePattern`/`FComparePattern` built their `llvm.icmp`/`llvm.fcmp` from the *unconverted* operands, so any comparison over a deserialized `si32` produced ill-typed IR (closed; it was 31% of all CTS failures by diagnostic count, though closing it moved rather than removed those failures -- see VulkanCTSReport.md, "Shader compilation") | VulkanCTSReport.md | P1 |
+| **27,094 `dEQP-VK` cases fail, in 26 of 54 groups.** No case produces a wrong answer -- every failure is a clean rejection -- but the failure count is the gating number for any conformance claim, and it decomposes into four buckets with very different owners (78.3% shader compilation, 12.4% pipeline state, 7.2% format table, 2.1% API object model) | §1.9.1; VulkanCTSReport.md | P0 |
 
 The SPIR-V import row is the largest single unknown in the Vulkan design, and
 it is scheduled as its own milestone (V0.5) *before* V1 precisely because its
@@ -455,6 +457,74 @@ conversion crash on any loop-carried value, not only the originally
 documented `OpPhi`-in-loop-merge-block deserialization rejection) that ruled
 out "fix the upstream structurizer" as sufficient on its own even before
 weighing cost.
+
+#### 1.9.1 The road to Vulkan conformance
+
+[VulkanCTSReport.md](VulkanCTSReport.md) measures where this ICD stands;
+this section is the plan that measurement implies. Conformance is not the
+same as "no failures": a Vulkan 1.2 conformance submission requires that
+the mandatory CTS list run with **zero** `Fail`, *and* that the device
+expose every mandatory feature, limit, format and queue capability, *and*
+that a stock (unpatched) `deqp-vk` be used. The current run satisfies none
+of the three, and the three are not independent -- most mandatory-capability
+gaps are themselves the reason a test fails rather than reports
+`NotSupported`.
+
+Two framing decisions come first, because they change what the rest of this
+list costs:
+
+- **Conformance target version.** This ICD advertises apiVersion 1.2, which
+  drags in every extension promoted through 1.2 as mandatory
+  (`imagelessFramebuffer`, `uniformBufferStandardLayout`,
+  `separateDepthStencilLayouts`, `hostQueryReset`,
+  `shaderSubgroupExtendedTypes`, `subgroupBroadcastDynamicId`, `multiview`,
+  timeline semaphores at their required limits -- all of which
+  `dEQP-VK.info.device_mandatory_features` currently reports missing).
+  Dropping the advertised version to 1.0 or 1.1 removes most of that set
+  from the critical path at the cost of the claim. **This decision should
+  be made before C1 below**, since it determines whether C6 exists at all.
+- **Roadmap deviation to record.** FeMeVulkanDesign.md's V4 and V6 both
+  frame the CTS as validation of an *intentionally narrow* advertised
+  surface. Pursuing conformance inverts that: the surface must grow to the
+  mandatory floor, and "reject cleanly" stops being a sufficient answer
+  for anything the spec calls mandatory. That inversion is recorded here
+  rather than silently applied; FeMeVulkanDesign.md's own scope sections
+  stay authoritative for everything *above* the mandatory floor.
+
+The ordered plan. "Cases" is the number of currently-failing `dEQP-VK`
+cases the step is the *first* blocker for; because these blockers stack on
+the same shaders (see VulkanCTSReport.md's note on the comparison-pattern
+fix moving rather than removing 8,369 failures), the column is an upper
+bound on each step's standalone value and a lower bound on its value once
+its successors land. They do not sum to 27,094.
+
+| # | Step | Cases | Owner | Priority |
+|---|---|---:|---|---|
+| C1 | **Mandatory formats.** Add `B8G8R8A8_UNORM` (and the rest of the Vulkan mandatory color-attachment/blend table) to `isSupportedColorAttachmentFormat`, and at least one combined depth+stencil format (`D24_UNORM_S8_UINT` or `D32_SFLOAT_S8_UINT`) to `isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat`, backing each with a real pack/unpack path in `feme::graphics`. This is the cheapest step by far and unblocks every Amber-based CTS test, which is most of the CTS's own end-to-end coverage | 1,938 | `feme/lib/Vulkan/{RenderPass,Format}.cpp`, `feme::graphics` | P0 |
+| C2 | **`Uniform`-storage-class blocks.** Teach `feme::spirv::getBufferBlockElementArray`/`getUniformBlockElementStruct` the four shapes glslang actually emits: a `BufferBlock`-decorated struct in `Uniform` (the pre-SPIR-V-1.3 SSBO), a `Block` struct with more than one member, a sized-array member, and a matrix member with `RowMajor`/`ColMajor`/`MatrixStride`. Then arrayed bindings (an array-of-blocks pointer) | 10,121 | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` | P0 |
+| C3 | **Divergent-vector decomposition in `feme-cpu-simdize`.** The single largest *FeMe-owned* compute-track gap, already tracked as "roadmap milestone 7 deviation" by the pass's own diagnostic (§1.6). Conformance makes it P0 rather than P1: it is the first blocker for a third of all failures once C2 lands | 9,067 | `feme/lib/Target/CPU` | P0 |
+| C4 | **Graphics pipeline state breadth.** `mapTopology` beyond triangles (point, line, line-strip, fan), `mapDynamicState` beyond its six states, `FRONT_AND_BACK` culling, dual-source blend factors, and the sample counts `isSupportedAttachmentSampleCount` declines. Every one of these is a rasterizer/executor feature, not a translation gap, so this is really G-track work surfaced by the Vulkan track. **Sub-step C4a, do first and separately: make every silent rejection diagnose itself.** A state-side rejection currently emits nothing at all, so triaging this bucket means reading `GraphicsPipeline.cpp` instead of the ICD's output | 3,354 | `feme/lib/Vulkan/GraphicsPipeline.cpp`, `feme::graphics` | P0 |
+| C5 | **Mandatory API object model.** Occlusion queries in `vkCreateQueryPool` (mandatory in 1.0); the descriptor types `isSupportedDescriptorType` declines (input attachment, dynamic uniform/storage buffer); the `VkRenderPass` shapes `feme::vulkan::RenderPass` declines (resolve and input attachments, multi-subpass dependencies); the `VkSubgroupFeatureFlags` contradiction (`BASIC_BIT` must be set whenever a graphics or compute queue exists); and `VkPhysicalDeviceDriverProperties` (a registered `VkDriverId`, a conformance version, null-terminated name/info strings -- the last of which is a prerequisite for *submitting* results, not just passing them) | 558 | `feme/lib/Vulkan/{QueryPool,Descriptor,RenderPass,PhysicalDeviceInfo}.cpp` | P0 |
+| C6 | **Mandatory 1.2 features and limits.** Only if the version decision above keeps 1.2: `multiview`, `imagelessFramebuffer`, `uniformBufferStandardLayout`, `separateDepthStencilLayouts`, `hostQueryReset`, `shaderSubgroupExtendedTypes`, `subgroupBroadcastDynamicId`, plus raising `maxTimelineSemaphoreValueDifference` and `maxMemoryAllocationSize` to their required minimums and fixing the `vkGetPhysicalDeviceFeatures2`-versus-promoted-struct disagreements | 28 | `feme/lib/Vulkan/PhysicalDeviceInfo.cpp`, V7 | P1 |
+| C7 | **Queue family capability combinations.** 99,324 cases report `NotSupported` because no queue family matches a required capability set. A family advertising `GRAPHICS` must also advertise `TRANSFER`; the mandatory combinations must all be coverable. These are `NotSupported`, not `Fail`, today, so they cost nothing in the failure count -- but a conformance run that declines a hundred thousand mandatory cases is not a conformance run | 0 (99,324 `NotSupported`) | `feme/lib/Vulkan/PhysicalDeviceInfo.cpp` | P1 |
+| C8 | **Shader long tail.** Descriptor arrays of combined image samplers (816), matrix/aggregate stage IO (309), the SPIR-V importer's `unhandled opcode` set (171), `Workgroup` arrays-of-arrays (151), the 277 individually-unlegalized ops (`spirv.SpecConstant`, `spirv.VectorExtractDynamic`, `spirv.CompositeConstruct`, the `spirv.Atomic*` family, ...), and the 242-case diagnostic tail. Best attacked *after* C2/C3, since the true size of this bucket is unknown until the stacked blockers ahead of it are gone | 1,966 | mixed, mostly `feme/lib/Conversion/SPIRVToLLVM` and `mlir/lib/Target/SPIRV` | P1 |
+| C9 | **Upstream the CTS fix.** `dEQP-VK.api.invariance.random` segfaults on any narrow-format ICD because CTS's own `ImageAllocator` indexes an empty format vector; the fix is applied locally to the VK-GL-CTS checkout today. A conformance submission must run a stock CTS, so this must land in VK-GL-CTS itself | 0 | VK-GL-CTS | P1 |
+| C10 | **Continuous measurement.** Nothing in this tree runs the CTS automatically: `feme/test/Vulkan/cts-compute-subset.test` is gated on `REQUIRES: system-vulkan-cts` and covers a compute subset only. A conformance push needs the full 54-group run, its per-case root-cause attribution, and a checked-in expected-failure list, so that a regression is a test failure rather than a re-reading of this report | 0 | `feme/utils`, `feme/test/Vulkan` | P1 |
+
+Sequencing: C1 first (cheapest, largest end-to-end unlock, and a hard
+conformance requirement rather than a scope choice), then C4a (so the
+remaining triage is readable), then C2 and C3 in parallel (different
+subsystems, and jointly ~70% of the failure count), then C4, C5 and C7,
+then C6 if the 1.2 claim survives, then C8 measured afresh, with C9 and C10
+running alongside from the start. C10 is what keeps this report from
+needing to be regenerated by hand again.
+
+What is *not* on this list, deliberately: WSI/presentation, ray tracing,
+mesh shading, tessellation, geometry, sparse resources, YCbCr,
+transform feedback, `VK_EXT_shader_object` and cooperative matrix/vector.
+Every one is optional for Vulkan 1.2 conformance, every one is correctly
+reported `NotSupported` today, and each remains scheduled by its own V or G
+milestone rather than by conformance.
 
 ### 1.10 Direct3D software adapter
 
@@ -899,6 +969,12 @@ and with §3.2 once their prerequisites land.
 | W4 | Basic graphics: input assembly through pixel shading with derivatives, interpolation modes, helper lanes, one render target, depth, minimal blend | W3, R32 |
 | W5 | Graphics completeness: depth/stencil, blending, MSAA, formats, MRT, queries, predication, stream output, indirect draw, tessellation and geometry, pipeline libraries and a validated cache, Windows conformance and HLK | W4, R33, R34 |
 | W6 | Interoperability: DXGI presentation or cross-adapter prototype, shared resources and fences, D3D11-on-12 evaluation, mesh-shader and ray-tracing evaluation | W5, R35–R37 |
+
+The Vulkan conformance steps C1–C10 (§1.9.1) are not a milestone row in
+this table. They cut across V4–V7 rather than following them, they are
+ordered by measured CTS cost rather than by feature dependency, and C1/C4a
+in particular should be done *before* the next V milestone, since they are
+what makes the next CTS run's output readable.
 
 The capability rule from FeMeGraphicsDesign.md applies to both tables and is
 the one scheduling constraint that cannot be traded away: neither runtime may

@@ -1987,10 +1987,13 @@ became available -- see `feme/docs/VulkanCTSReport.md`, which also found
 (and fixed) four core commands this ICD had never implemented at all
 (`vkTrimCommandPool`, `vkCreateRenderPass2`'s family,
 `vkCreateDescriptorUpdateTemplate`'s family, and four dynamic-state
-setters), each crashing the process rather than merely rejecting, plus a
-still-open upstream MLIR SPIR-V deserializer bug (spec-constant composites
-over non-spec-constant constituents, e.g. a `mat2` spec constant's
-columns) responsible for the remaining crashed CTS groups. The lavapipe
+setters), each crashing the process rather than merely rejecting. Every
+crash class that report once tracked -- including the upstream MLIR SPIR-V
+deserializer bug on spec-constant composites over non-spec-constant
+constituents (e.g. a `mat2` spec constant's columns) -- is now closed:
+`VulkanCTSReport.md` records a complete, crash-free 54-group run, and
+`feme/docs/Roadmap.md` §1.9.1 owns the plan for the failures that remain.
+The lavapipe
 half of "match lavapipe for every format
 and state combination" is closed, in a follow-up pass: this environment does
 have Mesa lavapipe installed, and `feme-vulkan-graphics-smoke`
