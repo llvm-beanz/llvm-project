@@ -871,6 +871,33 @@ public:
     });
   }
 
+  [[nodiscard]] bool lowerGetDimensionsXY(Function &F) {
+    IRBuilder<> &IRB = OpBuilder.getIRB();
+    Type *Int32Ty = IRB.getInt32Ty();
+
+    return replaceFunction(F, [&](CallInst *CI) -> Error {
+      IRB.SetInsertPoint(CI);
+      Value *Handle =
+          createTmpHandleCast(CI->getArgOperand(0), OpBuilder.getHandleType());
+      Value *Undef = UndefValue::get(Int32Ty);
+
+      Expected<CallInst *> OpCall = OpBuilder.tryCreateOp(
+          OpCode::GetDimensions, {Handle, Undef}, CI->getName(), Int32Ty);
+      if (Error E = OpCall.takeError())
+        return E;
+      Value *Width = IRB.CreateExtractValue(*OpCall, 0);
+      Value *Height = IRB.CreateExtractValue(*OpCall, 1);
+      Value *Dim = IRB.CreateInsertElement(
+          UndefValue::get(FixedVectorType::get(Int32Ty, 2)), Width,
+          IRB.getInt32(0));
+      Dim = IRB.CreateInsertElement(Dim, Height, IRB.getInt32(1));
+
+      CI->replaceAllUsesWith(Dim);
+      CI->eraseFromParent();
+      return Error::success();
+    });
+  }
+
   [[nodiscard]] bool lowerGetPointer(Function &F) {
     // These should have already been handled in DXILResourceAccess, so we can
     // just clean up the dead prototype.
@@ -1335,6 +1362,9 @@ public:
         break;
       case Intrinsic::dx_resource_getdimensions_x:
         HasErrors |= lowerGetDimensionsX(F);
+        break;
+      case Intrinsic::dx_resource_getdimensions_xy:
+        HasErrors |= lowerGetDimensionsXY(F);
         break;
       case Intrinsic::ctpop:
         HasErrors |= lowerCtpopToCountBits(F);
