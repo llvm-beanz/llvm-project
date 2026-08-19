@@ -48,6 +48,8 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::R8G8B8A8_SINT;
   case VK_FORMAT_R8G8B8A8_SRGB:
     return ResourceFormat::R8G8B8A8_UNORM_SRGB;
+  case VK_FORMAT_B8G8R8A8_UNORM:
+    return ResourceFormat::B8G8R8A8_UNORM;
   case VK_FORMAT_R16G16B16A16_SFLOAT:
     return ResourceFormat::R16G16B16A16_FLOAT;
   case VK_FORMAT_R16G16B16A16_UNORM:
@@ -91,6 +93,7 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_UINT:
   case ResourceFormat::R8G8B8A8_SINT:
   case ResourceFormat::R8G8B8A8_UNORM_SRGB:
+  case ResourceFormat::B8G8R8A8_UNORM:
   case ResourceFormat::R11G11B10_FLOAT:
   case ResourceFormat::R10G10B10A2_UNORM:
   case ResourceFormat::R10G10B10A2_UINT:

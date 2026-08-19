@@ -26,9 +26,17 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
   case feme::cpu::ResourceFormat::R32G32B32A32_FLOAT:
   case feme::cpu::ResourceFormat::R8G8B8A8_UNORM:
   case feme::cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB:
+  case feme::cpu::ResourceFormat::B8G8R8A8_UNORM:
+  case feme::cpu::ResourceFormat::R10G10B10A2_UNORM:
   case feme::cpu::ResourceFormat::R16G16B16A16_FLOAT:
   case feme::cpu::ResourceFormat::R16G16B16A16_UNORM:
   case feme::cpu::ResourceFormat::R16G16B16A16_SNORM:
+    // `B8G8R8A8_UNORM`, `R10G10B10A2_UNORM` (`A2B10G10R10_UNORM_PACK32`)
+    // and `R16G16B16A16_FLOAT` (`R16G16B16A16_SFLOAT`), together with
+    // `R8G8B8A8_UNORM`, are the Vulkan 1.2 mandatory
+    // `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` format set that
+    // every conformant implementation must support (roadmap C1) --
+    // backed by real pack/unpack paths in `feme::graphics`.
     return true;
   default:
     // Every other format is either unknown to the executor's own

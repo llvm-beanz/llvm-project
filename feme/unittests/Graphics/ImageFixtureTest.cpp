@@ -160,4 +160,141 @@ TEST(ImageFixtureTest, UnpackColorIsThePackInverse) {
   EXPECT_NEAR(Unpacked[3], 0.75, 0.01);
 }
 
+// Roadmap C1 ("Mandatory formats"): `B8G8R8A8_UNORM` is one of the Vulkan
+// 1.2 mandatory color-attachment/blend formats. It shares `R8G8B8A8_UNORM`'s
+// per-byte encoding but swaps red and blue in storage; `Clear`/`Out` stay
+// in logical [R, G, B, A] order (matching `VkClearColorValue::float32`).
+TEST(ImageFixtureTest, PacksAndUnpacksB8G8R8A8Unorm) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::B8G8R8A8_UNORM,
+                                   {1.0, 0.5, 0.0, 0.25}, Texel),
+                    Succeeded());
+  // Memory order is B, G, R, A: B=0x00, G=~0x80, R=0xff, A=~0x40.
+  EXPECT_EQ(Texel[0], 0);
+  EXPECT_NEAR(Texel[1], 128, 2);
+  EXPECT_EQ(Texel[2], 255);
+  EXPECT_NEAR(Texel[3], 64, 2);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::B8G8R8A8_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.5, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.0, 0.01);
+  EXPECT_NEAR(Unpacked[3], 0.25, 0.01);
+}
+
+// `R10G10B10A2_UNORM` (`VK_FORMAT_A2B10G10R10_UNORM_PACK32`), the other
+// mandatory format roadmap C1 adds: all four components packed into one
+// 32-bit word, 2 bits of alpha at the top down to 10 bits of red at the
+// bottom.
+TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2Unorm) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::R10G10B10A2_UNORM,
+                                   {1.0, 0.0, 0.5, 1.0}, Texel),
+                    Succeeded());
+  uint32_t Word;
+  memcpy(&Word, Texel.data(), 4);
+  EXPECT_EQ(Word & 0x3FF, 1023u);          // R = 1.0
+  EXPECT_EQ((Word >> 10) & 0x3FF, 0u);     // G = 0.0
+  EXPECT_NEAR((Word >> 20) & 0x3FF, 512, 2); // B = 0.5
+  EXPECT_EQ((Word >> 30) & 0x3, 3u);       // A = 1.0
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::R10G10B10A2_UNORM, Texel,
+                               Unpacked),
+                    Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.01);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.01);
+  EXPECT_NEAR(Unpacked[2], 0.5, 0.01);
+  EXPECT_NEAR(Unpacked[3], 1.0, 0.01);
+}
+
+// Roadmap C1's combined depth+stencil format: `packDepthClear`/
+// `packStencilClear` must be independent read-modify-writes of the same
+// 4-byte word, and `unpackDepth`/`unpackStencil` their inverse.
+TEST(ImageFixtureTest, PacksDepthAndStencilIndependentlyForCombinedFormat) {
+  std::array<uint8_t, 4> Texel{0xAA, 0xAA, 0xAA, 0xAA};
+  ASSERT_THAT_ERROR(
+      packDepthClear(cpu::ResourceFormat::D24_UNORM_S8_UINT, 1.0, Texel),
+      Succeeded());
+  // The high byte (stencil) must be unaffected by a depth-only pack.
+  EXPECT_EQ(Texel[3], 0xAA);
+
+  ASSERT_THAT_ERROR(
+      packStencilClear(cpu::ResourceFormat::D24_UNORM_S8_UINT, 0x7B, Texel),
+      Succeeded());
+  EXPECT_EQ(Texel[3], 0x7B);
+
+  double Depth = -1.0;
+  ASSERT_THAT_ERROR(
+      unpackDepth(cpu::ResourceFormat::D24_UNORM_S8_UINT, Texel, Depth),
+      Succeeded());
+  EXPECT_NEAR(Depth, 1.0, 1e-6);
+
+  uint32_t Stencil = 0;
+  ASSERT_THAT_ERROR(
+      unpackStencil(cpu::ResourceFormat::D24_UNORM_S8_UINT, Texel, Stencil),
+      Succeeded());
+  EXPECT_EQ(Stencil, 0x7Bu);
+
+  // The depth pack from earlier must still hold: writing stencil did not
+  // clobber the low 24 bits.
+  ASSERT_THAT_ERROR(
+      unpackDepth(cpu::ResourceFormat::D24_UNORM_S8_UINT, Texel, Depth),
+      Succeeded());
+  EXPECT_NEAR(Depth, 1.0, 1e-6);
+}
+
+TEST(ImageFixtureTest, PackDepthClearStillSupportsPureDepthFormats) {
+  std::array<uint8_t, 4> Texel{};
+  ASSERT_THAT_ERROR(
+      packDepthClear(cpu::ResourceFormat::D32_FLOAT, 0.25, Texel),
+      Succeeded());
+  float V;
+  memcpy(&V, Texel.data(), 4);
+  EXPECT_FLOAT_EQ(V, 0.25f);
+
+  double Depth = -1.0;
+  ASSERT_THAT_ERROR(
+      unpackDepth(cpu::ResourceFormat::D32_FLOAT, Texel, Depth),
+      Succeeded());
+  EXPECT_NEAR(Depth, 0.25, 1e-6);
+}
+
+TEST(ImageFixtureTest, PackStencilClearStillSupportsPureStencilFormat) {
+  std::array<uint8_t, 1> Texel{};
+  ASSERT_THAT_ERROR(
+      packStencilClear(cpu::ResourceFormat::S8_UINT, 200, Texel),
+      Succeeded());
+  EXPECT_EQ(Texel[0], 200);
+
+  uint32_t Stencil = 0;
+  ASSERT_THAT_ERROR(
+      unpackStencil(cpu::ResourceFormat::S8_UINT, Texel, Stencil),
+      Succeeded());
+  EXPECT_EQ(Stencil, 200u);
+}
+
+// The fixture text format also round-trips the two new formats, using the
+// same opaque hex-word encoding `R11G11B10_FLOAT` already established for
+// a packed format.
+TEST(ImageFixtureTest, RoundTripsCombinedDepthStencilFormat) {
+  StringRef Text = "image ds0 1x1 d24-unorm-s8-uint\n"
+                   "  y=0: 00ffffff\n";
+  Expected<std::vector<ImageFixture>> Images = parseImageFixtures(Text);
+  ASSERT_THAT_EXPECTED(Images, Succeeded());
+  ASSERT_EQ(Images->size(), 1u);
+  const ImageFixture &Img = (*Images)[0];
+  EXPECT_EQ(Img.Format, cpu::ResourceFormat::D24_UNORM_S8_UINT);
+  ASSERT_EQ(Img.Data.size(), 4u);
+
+  std::string Printed;
+  raw_string_ostream OS(Printed);
+  ASSERT_THAT_ERROR(printImageFixture(OS, Img), Succeeded());
+  EXPECT_EQ(Printed, Text);
+}
+
 } // namespace
+

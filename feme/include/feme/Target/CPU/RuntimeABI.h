@@ -87,6 +87,7 @@ enum class ResourceFormat : uint32_t {
   R11G11B10_FLOAT,
   R10G10B10A2_UNORM,
   R10G10B10A2_UINT,
+  B8G8R8A8_UNORM,
 
   // Depth/stencil formats (roadmap R33, "the format expansion the first
   // advertised profile needs"): used only for a `GraphicsPipeline`/

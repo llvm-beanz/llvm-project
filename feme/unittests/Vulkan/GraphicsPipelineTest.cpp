@@ -419,6 +419,33 @@ TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap C1 ("Mandatory formats"): every format
+/// `isSupportedColorAttachmentFormat` grants Vulkan 1.2's mandatory
+/// `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` status to must build
+/// a pipeline the same way `VK_FORMAT_R8G8B8A8_UNORM` already does.
+TEST_F(GraphicsPipelineTest, AcceptsMandatoryColorAttachmentFormats) {
+  for (VkFormat Format : {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM,
+                          VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                          VK_FORMAT_R16G16B16A16_SFLOAT}) {
+    VkShaderModule Vertex = createModule(VertexSource);
+    VkShaderModule Fragment = createModule(FragmentSource);
+
+    VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+    VkPipelineRenderingCreateInfo Rendering{};
+    Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    Rendering.colorAttachmentCount = 1;
+    Rendering.pColorAttachmentFormats = &Format;
+    Info.renderPass = VK_NULL_HANDLE;
+    Info.pNext = &Rendering;
+
+    VkPipeline Pipe = VK_NULL_HANDLE;
+    EXPECT_EQ(create(Info, Pipe), VK_SUCCESS) << "format " << Format;
+    vkDestroyPipeline(Device, Pipe, nullptr);
+    vkDestroyShaderModule(Device, Fragment, nullptr);
+    vkDestroyShaderModule(Device, Vertex, nullptr);
+  }
+}
+
 /// An identical `VkGraphicsPipelineCreateInfo` (same SPIR-V, same layout,
 /// same fixed-function state) creates a cache hit that shares the compiled
 /// stages rather than recompiling them.

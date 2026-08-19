@@ -94,9 +94,12 @@ llvm::Expected<bool> isFixtureFormatFloat(cpu::ResourceFormat Format);
 /// floating-point format stores each component as-is; `R8G8B8A8_UNORM`/
 /// `_UNORM_SRGB` treat each component as a `[0, 1]` value scaled to a byte
 /// (sRGB encode-on-store is a later milestone, G4 -- see "Texture layout
-/// and formats" in feme/docs/FeMeGraphicsDesign.md's Status note). Any
-/// other format is an `Error`: a mechanical, on-demand addition once a
-/// test needs it, the same as `getFormatInfo`'s own scope note.
+/// and formats" in feme/docs/FeMeGraphicsDesign.md's Status note).
+/// `B8G8R8A8_UNORM` is the same encoding with red and blue swapped in
+/// storage, and `R10G10B10A2_UNORM` packs all four components into one
+/// 32-bit word (roadmap C1). Any other format is an `Error`: a mechanical,
+/// on-demand addition once a test needs it, the same as `getFormatInfo`'s
+/// own scope note.
 llvm::Error packClearColor(cpu::ResourceFormat Format,
                            llvm::ArrayRef<double> Clear,
                            llvm::MutableArrayRef<uint8_t> Texel);
@@ -111,6 +114,37 @@ llvm::Error packClearColor(cpu::ResourceFormat Format,
 llvm::Error unpackColor(cpu::ResourceFormat Format,
                         llvm::ArrayRef<uint8_t> Texel,
                         llvm::MutableArrayRef<double> Out);
+
+/// Packs \p Depth (a `[0, 1]` fraction, matching
+/// `VkClearDepthStencilValue::depth`) into \p Texel's depth component, in
+/// \p Format's storage encoding. For a pure depth format (`D16_UNORM`/
+/// `D32_FLOAT`) this writes the whole texel; for the combined
+/// `D24_UNORM_S8_UINT` format (roadmap C1) it is a read-modify-write that
+/// only touches the low 24 bits, leaving whatever stencil value already
+/// occupies the high byte untouched -- the two attachment "halves" of a
+/// combined format share the same storage, so packing one must never
+/// clobber the other.
+llvm::Error packDepthClear(cpu::ResourceFormat Format, double Depth,
+                           llvm::MutableArrayRef<uint8_t> Texel);
+
+/// The inverse of `packDepthClear`: unpacks \p Texel's depth component as a
+/// `[0, 1]` fraction.
+llvm::Error unpackDepth(cpu::ResourceFormat Format,
+                        llvm::ArrayRef<uint8_t> Texel, double &Depth);
+
+/// Packs \p Stencil (an integer reference value, matching
+/// `VkClearDepthStencilValue::stencil`) into \p Texel's stencil component,
+/// in \p Format's storage encoding. For `S8_UINT` this writes the whole
+/// (one-byte) texel; for the combined `D24_UNORM_S8_UINT` format it is a
+/// read-modify-write of only the high byte, preserving the low 24 bits'
+/// depth value -- see `packDepthClear`'s comment.
+llvm::Error packStencilClear(cpu::ResourceFormat Format, uint32_t Stencil,
+                             llvm::MutableArrayRef<uint8_t> Texel);
+
+/// The inverse of `packStencilClear`: unpacks \p Texel's stencil component
+/// as a raw integer.
+llvm::Error unpackStencil(cpu::ResourceFormat Format,
+                          llvm::ArrayRef<uint8_t> Texel, uint32_t &Stencil);
 
 } // namespace feme::graphics
 

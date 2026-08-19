@@ -85,6 +85,11 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
   case ResourceFormat::R8G8B8A8_SINT:
   case ResourceFormat::R8G8B8A8_UNORM_SRGB:
     return FormatInfo{4, 1, false};
+  case ResourceFormat::B8G8R8A8_UNORM:
+    // Same 4-byte-per-texel, 1-byte-per-component layout as
+    // `R8G8B8A8_UNORM`, just with the red and blue components swapped in
+    // memory (`packClearColor`/`unpackColor` handle the swap; roadmap C1).
+    return FormatInfo{4, 1, false};
   case ResourceFormat::R16G16B16A16_FLOAT:
     return FormatInfo{4, 2, true};
   case ResourceFormat::R16G16B16A16_UNORM:
@@ -150,6 +155,7 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("r8g8b8a8-uint", ResourceFormat::R8G8B8A8_UINT)
           .Case("r8g8b8a8-sint", ResourceFormat::R8G8B8A8_SINT)
           .Case("r8g8b8a8-unorm-srgb", ResourceFormat::R8G8B8A8_UNORM_SRGB)
+          .Case("b8g8r8a8-unorm", ResourceFormat::B8G8R8A8_UNORM)
           .Case("r16g16b16a16-float", ResourceFormat::R16G16B16A16_FLOAT)
           .Case("r16g16b16a16-unorm", ResourceFormat::R16G16B16A16_UNORM)
           .Case("r16g16b16a16-snorm", ResourceFormat::R16G16B16A16_SNORM)
@@ -187,6 +193,30 @@ Expected<bool> isFixtureFormatFloat(ResourceFormat Format) {
 
 Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
                      MutableArrayRef<uint8_t> Texel) {
+  // `R10G10B10A2_UNORM` is a single packed 32-bit word in the fixture/
+  // clear-color table (`getFormatInfo`'s `Components == 1`, matching its
+  // opaque hex-text representation), but a clear color is still four
+  // logical components; special-cased here rather than forced through
+  // `getFormatInfo`'s generic per-component loop.
+  if (Format == ResourceFormat::R10G10B10A2_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm = [](double V) -> uint32_t {
+      return static_cast<uint32_t>(std::lround(std::clamp(V, 0.0, 1.0) * 1023.0));
+    };
+    // VK_FORMAT_A2B10G10R10_UNORM_PACK32: from the MSB down, 2 bits of A,
+    // 10 bits of B, 10 bits of G, 10 bits of R.
+    uint32_t Word = (static_cast<uint32_t>(std::lround(
+                         std::clamp(Clear[3], 0.0, 1.0) * 3.0))
+                     << 30) |
+                    (Norm(Clear[2]) << 20) | (Norm(Clear[1]) << 10) |
+                    Norm(Clear[0]);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -207,6 +237,18 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
       Format == ResourceFormat::R8G8B8A8_UNORM_SRGB) {
     for (unsigned I = 0; I != Info->Components; ++I) {
       double Clamped = std::clamp(Clear[I], 0.0, 1.0);
+      Texel[I] = static_cast<uint8_t>(std::lround(Clamped * 255.0));
+    }
+    return Error::success();
+  }
+
+  if (Format == ResourceFormat::B8G8R8A8_UNORM) {
+    // Same encoding as `R8G8B8A8_UNORM`, but memory order is B, G, R, A:
+    // `Clear` is always logical [R, G, B, A] (matching
+    // `VkClearColorValue::float32`).
+    static const unsigned Swizzle[4] = {2, 1, 0, 3};
+    for (unsigned I = 0; I != Info->Components; ++I) {
+      double Clamped = std::clamp(Clear[Swizzle[I]], 0.0, 1.0);
       Texel[I] = static_cast<uint8_t>(std::lround(Clamped * 255.0));
     }
     return Error::success();
@@ -251,6 +293,21 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
 
 Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
                   MutableArrayRef<double> Out) {
+  if (Format == ResourceFormat::R10G10B10A2_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    Out[0] = (Word & 0x3FF) / 1023.0;
+    Out[1] = ((Word >> 10) & 0x3FF) / 1023.0;
+    Out[2] = ((Word >> 20) & 0x3FF) / 1023.0;
+    Out[3] = ((Word >> 30) & 0x3) / 3.0;
+    return Error::success();
+  }
+
   Expected<FormatInfo> Info = getFormatInfo(Format);
   if (!Info)
     return Info.takeError();
@@ -276,6 +333,13 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     return Error::success();
   }
 
+  if (Format == ResourceFormat::B8G8R8A8_UNORM) {
+    static const unsigned Swizzle[4] = {2, 1, 0, 3};
+    for (unsigned I = 0; I != Info->Components; ++I)
+      Out[Swizzle[I]] = Texel[I] / 255.0;
+    return Error::success();
+  }
+
   if (Format == ResourceFormat::R16G16B16A16_UNORM) {
     for (unsigned I = 0; I != Info->Components; ++I) {
       uint16_t V;
@@ -297,6 +361,110 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
   return createStringError(inconvertibleErrorCode(),
                            "attachment color is not yet unpackable for "
                            "this format");
+}
+
+Error packDepthClear(ResourceFormat Format, double Depth,
+                     MutableArrayRef<uint8_t> Texel) {
+  double Clamped = std::clamp(Depth, 0.0, 1.0);
+  switch (Format) {
+  case ResourceFormat::D16_UNORM: {
+    uint16_t V = static_cast<uint16_t>(std::lround(Clamped * 65535.0));
+    memcpy(Texel.data(), &V, sizeof(V));
+    return Error::success();
+  }
+  case ResourceFormat::D32_FLOAT: {
+    float F = static_cast<float>(Clamped);
+    memcpy(Texel.data(), &F, sizeof(F));
+    return Error::success();
+  }
+  case ResourceFormat::D24_UNORM_S8_UINT: {
+    // Read-modify-write: only the low 24 bits are depth, and the high
+    // byte (stencil) must survive untouched (see this function's header
+    // comment).
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    uint32_t D = static_cast<uint32_t>(std::lround(Clamped * 16777215.0));
+    Word = (Word & 0xFF000000u) | (D & 0x00FFFFFFu);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "depth clear is not yet supported for this "
+                             "format");
+  }
+}
+
+Error unpackDepth(ResourceFormat Format, ArrayRef<uint8_t> Texel,
+                  double &Depth) {
+  switch (Format) {
+  case ResourceFormat::D16_UNORM: {
+    uint16_t V;
+    memcpy(&V, Texel.data(), sizeof(V));
+    Depth = V / 65535.0;
+    return Error::success();
+  }
+  case ResourceFormat::D32_FLOAT: {
+    float F;
+    memcpy(&F, Texel.data(), sizeof(F));
+    Depth = F;
+    return Error::success();
+  }
+  case ResourceFormat::D24_UNORM_S8_UINT: {
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    Depth = (Word & 0x00FFFFFFu) / 16777215.0;
+    return Error::success();
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "depth unpack is not yet supported for this "
+                             "format");
+  }
+}
+
+Error packStencilClear(ResourceFormat Format, uint32_t Stencil,
+                       MutableArrayRef<uint8_t> Texel) {
+  // Stencil clear/reference values are an integer, not a normalized
+  // fraction (matching `VkClearDepthStencilValue::stencil`).
+  uint8_t S = static_cast<uint8_t>(std::min<uint32_t>(Stencil, 0xFF));
+  switch (Format) {
+  case ResourceFormat::S8_UINT:
+    Texel[0] = S;
+    return Error::success();
+  case ResourceFormat::D24_UNORM_S8_UINT: {
+    // Read-modify-write: only the high byte is stencil; the low 24 bits
+    // (depth) must survive untouched.
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    Word = (Word & 0x00FFFFFFu) | (static_cast<uint32_t>(S) << 24);
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "stencil clear is not yet supported for this "
+                             "format");
+  }
+}
+
+Error unpackStencil(ResourceFormat Format, ArrayRef<uint8_t> Texel,
+                    uint32_t &Stencil) {
+  switch (Format) {
+  case ResourceFormat::S8_UINT:
+    Stencil = Texel[0];
+    return Error::success();
+  case ResourceFormat::D24_UNORM_S8_UINT: {
+    uint32_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    Stencil = Word >> 24;
+    return Error::success();
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "stencil unpack is not yet supported for this "
+                             "format");
+  }
 }
 
 namespace {
@@ -339,6 +507,8 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "r8g8b8a8-sint";
   case ResourceFormat::R8G8B8A8_UNORM_SRGB:
     return "r8g8b8a8-unorm-srgb";
+  case ResourceFormat::B8G8R8A8_UNORM:
+    return "b8g8r8a8-unorm";
   case ResourceFormat::R16G16B16A16_FLOAT:
     return "r16g16b16a16-float";
   case ResourceFormat::R16G16B16A16_UNORM:
