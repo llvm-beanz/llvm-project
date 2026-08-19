@@ -43,6 +43,25 @@ static std::optional<bool> getScalarOrSplatBoolAttr(Attribute attr) {
   return std::nullopt;
 }
 
+/// SPIR-V's integer arithmetic, bitwise, and shift instructions only
+/// require their operand and result types to share a bit width, not to be
+/// identical: a signed- and unsigned-typed value of the same width (e.g.
+/// `si32` and `i32`) may appear interchangeably (see e.g.
+/// `SPIRV_ScalarOrVectorOf<AnySignlessInteger>` and its signed/unsigned
+/// counterparts in the `.td` definitions). A fold that returns one of its
+/// operands verbatim as the result is therefore only type-correct when that
+/// operand's concrete type happens to match the op's declared result type;
+/// otherwise it would silently change the folded value's static type, which
+/// the fold-result-type check in `Operation::fold` rejects (and used to
+/// assert/crash on, before every such identity fold in this file started
+/// routing through this helper). Returns a null Value -- meaning "don't fold
+/// this way" -- when the types differ, letting the caller fall through to a
+/// constant-folding path (or no fold at all) instead of producing ill-typed
+/// IR.
+static Value foldToOperandOfSameType(Value operand, Type resultType) {
+  return operand.getType() == resultType ? operand : Value();
+}
+
 // Extracts an element from the given `composite` by following the given
 // `indices`. Returns a null Attribute if error happens.
 static Attribute extractCompositeElement(Attribute composite,
@@ -416,8 +435,10 @@ OpFoldResult spirv::ConstantOp::fold(FoldAdaptor /*adaptor*/) {
 
 OpFoldResult spirv::IAddOp::fold(FoldAdaptor adaptor) {
   // x + 0 = x
-  if (matchPattern(getOperand2(), m_Zero()))
-    return getOperand1();
+  if (matchPattern(getOperand2(), m_Zero())) {
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
+  }
 
   // According to the SPIR-V spec:
   //
@@ -435,11 +456,15 @@ OpFoldResult spirv::IAddOp::fold(FoldAdaptor adaptor) {
 
 OpFoldResult spirv::IMulOp::fold(FoldAdaptor adaptor) {
   // x * 0 == 0
-  if (matchPattern(getOperand2(), m_Zero()))
-    return getOperand2();
+  if (matchPattern(getOperand2(), m_Zero())) {
+    if (Value zero = foldToOperandOfSameType(getOperand2(), getType()))
+      return zero;
+  }
   // x * 1 = x
-  if (matchPattern(getOperand2(), m_One()))
-    return getOperand1();
+  if (matchPattern(getOperand2(), m_One())) {
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
+  }
 
   // According to the SPIR-V spec:
   //
@@ -476,8 +501,10 @@ OpFoldResult spirv::ISubOp::fold(FoldAdaptor adaptor) {
 
 OpFoldResult spirv::SDivOp::fold(FoldAdaptor adaptor) {
   // sdiv (x, 1) = x
-  if (matchPattern(getOperand2(), m_One()))
-    return getOperand1();
+  if (matchPattern(getOperand2(), m_One())) {
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
+  }
 
   // According to the SPIR-V spec:
   //
@@ -574,8 +601,10 @@ OpFoldResult spirv::SRemOp::fold(FoldAdaptor adaptor) {
 
 OpFoldResult spirv::UDivOp::fold(FoldAdaptor adaptor) {
   // udiv (x, 1) = x
-  if (matchPattern(getOperand2(), m_One()))
-    return getOperand1();
+  if (matchPattern(getOperand2(), m_One())) {
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
+  }
 
   // According to the SPIR-V spec:
   //
@@ -629,8 +658,10 @@ OpFoldResult spirv::UModOp::fold(FoldAdaptor adaptor) {
 OpFoldResult spirv::SNegateOp::fold(FoldAdaptor adaptor) {
   // -(-x) = 0 - (0 - x) = x
   auto op = getOperand();
-  if (auto negateOp = op.getDefiningOp<spirv::SNegateOp>())
-    return negateOp->getOperand(0);
+  if (auto negateOp = op.getDefiningOp<spirv::SNegateOp>()) {
+    if (Value x = foldToOperandOfSameType(negateOp->getOperand(0), getType()))
+      return x;
+  }
 
   // According to the SPIR-V spec:
   //
@@ -649,8 +680,10 @@ OpFoldResult spirv::SNegateOp::fold(FoldAdaptor adaptor) {
 OpFoldResult spirv::NotOp::fold(spirv::NotOp::FoldAdaptor adaptor) {
   // !(!x) = x
   auto op = getOperand();
-  if (auto notOp = op.getDefiningOp<spirv::NotOp>())
-    return notOp->getOperand(0);
+  if (auto notOp = op.getDefiningOp<spirv::NotOp>()) {
+    if (Value x = foldToOperandOfSameType(notOp->getOperand(0), getType()))
+      return x;
+  }
 
   // According to the SPIR-V spec:
   //
@@ -1033,7 +1066,8 @@ OpFoldResult spirv::ShiftLeftLogicalOp::fold(
     spirv::ShiftLeftLogicalOp::FoldAdaptor adaptor) {
   // x << 0 -> x
   if (matchPattern(adaptor.getOperand2(), m_Zero())) {
-    return getOperand1();
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
   }
 
   // Unfortunately due to below undefined behaviour can't fold 0 for Base.
@@ -1064,7 +1098,8 @@ OpFoldResult spirv::ShiftRightArithmeticOp::fold(
     spirv::ShiftRightArithmeticOp::FoldAdaptor adaptor) {
   // x >> 0 -> x
   if (matchPattern(adaptor.getOperand2(), m_Zero())) {
-    return getOperand1();
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
   }
 
   // Unfortunately due to below undefined behaviour can't fold 0, -1 for Base.
@@ -1095,7 +1130,8 @@ OpFoldResult spirv::ShiftRightLogicalOp::fold(
     spirv::ShiftRightLogicalOp::FoldAdaptor adaptor) {
   // x >> 0 -> x
   if (matchPattern(adaptor.getOperand2(), m_Zero())) {
-    return getOperand1();
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
   }
 
   // Unfortunately due to below undefined behaviour can't fold 0 for Base.
@@ -1126,25 +1162,32 @@ OpFoldResult
 spirv::BitwiseAndOp::fold(spirv::BitwiseAndOp::FoldAdaptor adaptor) {
   // x & x -> x
   if (getOperand1() == getOperand2()) {
-    return getOperand1();
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
   }
 
   APInt rhsMask;
   if (matchPattern(adaptor.getOperand2(), m_ConstantInt(&rhsMask))) {
     // x & 0 -> 0
-    if (rhsMask.isZero())
-      return getOperand2();
+    if (rhsMask.isZero()) {
+      if (Value zero = foldToOperandOfSameType(getOperand2(), getType()))
+        return zero;
+    }
 
     // x & <all ones> -> x
-    if (rhsMask.isAllOnes())
-      return getOperand1();
+    if (rhsMask.isAllOnes()) {
+      if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+        return x;
+    }
 
     // (UConvert x : iN to iK) & <mask with N low bits set> -> UConvert x
     if (auto zext = getOperand1().getDefiningOp<spirv::UConvertOp>()) {
       int valueBits =
           getElementTypeOrSelf(zext.getOperand()).getIntOrFloatBitWidth();
-      if (rhsMask.zextOrTrunc(valueBits).isAllOnes())
-        return getOperand1();
+      if (rhsMask.zextOrTrunc(valueBits).isAllOnes()) {
+        if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+          return x;
+      }
     }
   }
 
@@ -1165,18 +1208,23 @@ spirv::BitwiseAndOp::fold(spirv::BitwiseAndOp::FoldAdaptor adaptor) {
 OpFoldResult spirv::BitwiseOrOp::fold(spirv::BitwiseOrOp::FoldAdaptor adaptor) {
   // x | x -> x
   if (getOperand1() == getOperand2()) {
-    return getOperand1();
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
   }
 
   APInt rhsMask;
   if (matchPattern(adaptor.getOperand2(), m_ConstantInt(&rhsMask))) {
     // x | 0 -> x
-    if (rhsMask.isZero())
-      return getOperand1();
+    if (rhsMask.isZero()) {
+      if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+        return x;
+    }
 
     // x | <all ones> -> <all ones>
-    if (rhsMask.isAllOnes())
-      return getOperand2();
+    if (rhsMask.isAllOnes()) {
+      if (Value allOnes = foldToOperandOfSameType(getOperand2(), getType()))
+        return allOnes;
+    }
   }
 
   // According to the SPIR-V spec:
@@ -1197,7 +1245,8 @@ OpFoldResult
 spirv::BitwiseXorOp::fold(spirv::BitwiseXorOp::FoldAdaptor adaptor) {
   // x ^ 0 -> x
   if (matchPattern(adaptor.getOperand2(), m_Zero())) {
-    return getOperand1();
+    if (Value x = foldToOperandOfSameType(getOperand1(), getType()))
+      return x;
   }
 
   // x ^ x -> 0
