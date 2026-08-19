@@ -36,13 +36,18 @@ additionally requires re-expressing the result in that target's own
 intrinsics and resource conventions. All of these passes are deliberately
 incremental (see the DXIL, "Raised LLVM IR -> AMDGPU", and "Raised LLVM IR
 -> SPIR-V" sections of [../Design.md](../Design.md)): typed buffers
-(`Buffer`/`RWBuffer`) are covered, but textures, samplers, raw and
-structured buffer accesses, cbuffer loads, and shader input/output
-signature ops are not, so a shader using those will fail at this stage
-rather than at any point specific to `feme`'s own Driver/CLI logic -- a
-DXBC-derived module is limited to the same set, on top of `feme::dxsa::
-translateToLLVMIR`'s own known gaps (see the DXBC section of
-[../Design.md](../Design.md)): notably, a DXBC compute shader's
+(`Buffer`/`RWBuffer`), textures (`Texture*`/`RWTexture*` load/store, both
+the modern bindless and legacy `!dx.resources` binding paths), and cbuffer
+scalar loads (any of `CBufferLoadLegacy`'s 32-/16-/64-bit row widths) are
+covered, but samplers, raw and structured buffer accesses when retargeting
+to `amdgcn-*` (typed buffer/texture/cbuffer accesses alone are covered
+there; raw/structured buffers are not yet), texture sampling
+(`Sample`/`SampleLevel` raise but have no `amdgcn-*`/NVPTX lowering yet),
+and shader input/output signature ops are not, so a shader using those will
+fail at this stage rather than at any point specific to `feme`'s own
+Driver/CLI logic -- a DXBC-derived module is limited to the same set, on
+top of `feme::dxsa::translateToLLVMIR`'s own known gaps (see the DXBC
+section of [../Design.md](../Design.md)): notably, a DXBC compute shader's
 `dcl_thread_group` dimensions do not yet reach DXIL's `NumThreads`
 metadata, and no DXBC graphics-stage (vertex/pixel/...) shader's signature
 I/O is retargetable to DXIL/AMDGPU yet either, DXBC- or DXIL-derived, since

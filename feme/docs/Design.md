@@ -1047,24 +1047,36 @@ parts that are *not* mechanical:
 
 Status (roadmap R30): `buildAnnotatedHandleType` in `feme/lib/Transforms/
 DXIL/OpRaising.cpp` implements the table above exactly, for the bindless
-`createHandleFromHeap`/`createHandleFromBinding` path (item 1's legacy
-`!dx.resources` path remains unraised for textures/samplers, matching
-R29's own bindless-first precedent). `raiseSample`/`raiseSampleLevel`/
-`raiseTextureLoad`/`raiseGetDimensionsX` cover item 3's "raising the
-access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
-`dx.op.textureLoad` (66) and `dx.op.getDimensions`'s `.x` field (72) --
-the only texture ops LLVM's own `DXILOpLowering.cpp` already lowers a
-canonical intrinsic to, cross-checked against `-dxil-op-lower` the same
-way every other raiser in that file is. `dx.op.sampleBias`/`sampleGrad`
-(bias/gradient sampling) and every comparison-sampling/gather op
-(`sampleCmp*`, `textureGather*`) have no numbered `DXILOp<N, ...>`
-definition in this LLVM tree at all yet (`sampleCmp`/`textureGather` are
-declared `DXILOpClass`es with no wire opcode assigned), so there is
-nothing to raise from or verify against on the DXIL side -- that gap is
-upstream LLVM's, not FeMe's. See "Canonical image operations" in
-feme/docs/FeMeGraphicsDesign.md for where the canonical
-`llvm.dx.resource.sample*`/`llvm.spv.resource.sample*` intrinsics these
-raisers produce are consumed by the CPU target.
+`createHandleFromHeap`/`createHandleFromBinding` path; the legacy
+`!dx.resources`-based `buildHandleType` now reconstructs texture handles
+too (generalizing the same access-site component-count recovery a legacy
+`TypedBuffer` already needed -- see its own comment), leaving only
+`Sampler` unraised on that path (matching R29's own bindless-first
+precedent for samplers specifically). `raiseSample`/`raiseSampleLevel`/
+`raiseTextureLoad`/`raiseTextureStore`/`raiseGetDimensionsX` cover item 3's
+"raising the access" for `dx.op.sample` (60), `dx.op.sampleLevel` (62),
+`dx.op.textureLoad` (66), `dx.op.textureStore` (67) and
+`dx.op.getDimensions`'s `.x` field (72). The first three, plus
+`getDimensions`, were the only texture ops LLVM's own `DXILOpLowering.cpp`
+already lowered a canonical intrinsic to/from; `TextureStore` did not
+(unlike `TextureLoad`, it had a `DXILOpClass` but no numbered
+`DXILOp<67, ...>` definition, canonical intrinsic, or lowering at all), so
+raising it needed a new `llvm.dx.resource.store.texture` canonical
+intrinsic and `DXILOpLowering::lowerTextureStore` added upstream first,
+symmetric with the existing `TextureLoad`/`load.level` pair -- cross-checked
+against `-dxil-op-lower` the same way every other raiser in this file is.
+`dx.op.sampleBias`/`sampleGrad` (bias/gradient sampling) and every
+comparison-sampling/gather op (`sampleCmp*`, `textureGather*`) have no
+numbered `DXILOp<N, ...>` definition in this LLVM tree at all yet
+(`sampleCmp`/`textureGather` are declared `DXILOpClass`es with no wire
+opcode assigned), so there is nothing to raise from or verify against on
+the DXIL side -- that gap is upstream LLVM's, not FeMe's. See "Canonical
+image operations" in feme/docs/FeMeGraphicsDesign.md for where the
+canonical `llvm.dx.resource.sample*`/`llvm.spv.resource.sample*`
+intrinsics these raisers produce are consumed by the CPU target, and this
+document's "Raised LLVM IR -> AMDGPU" section for where
+`llvm.dx.resource.load.level`/`store.texture` are consumed when
+retargeting to `amdgcn-*` instead.
 
 #### Module metadata raising: `feme::dxil::MetadataRaisingPass`
 
@@ -1523,41 +1535,83 @@ a shader's resources out of band, through a descriptor table the shader
 refers to by (register space, register); an AMDGPU kernel receives
 everything it operates on as *kernel arguments*. So each distinct binding an
 entry point uses becomes an additional `ptr addrspace(1)` argument, appended
-in a deterministic (space, register) order, and typed buffer accesses
-through it become ordinary loads/stores. The resulting kernel is
-dispatchable by any host runtime that can bind one global allocation per
-resource, in the order the shader declared its bindings -- the AMDGPU
-equivalent of the descriptor table it started with.
+in a deterministic (space, register, SRV-vs-UAV) order (see below for why
+SRV-vs-UAV has to be part of that key, not just (space, register)), and
+typed buffer/texture/cbuffer accesses through it become ordinary
+loads/stores. The resulting kernel is dispatchable by any host runtime that
+can bind one global allocation per resource, in the order the shader
+declared its bindings -- the AMDGPU equivalent of the descriptor table it
+started with.
+
+`dx.TypedBuffer` and (roadmap step, this document's "Status" note below)
+`dx.Texture`/`dx.CBuffer` handles are all covered this way, alongside
+SPIR-V's `spirv.Image`. A `dx.Texture` binding needs more than its data
+pointer, though: unlike a typed buffer's flat element index, a texture's
+`Coord0..2` are per-dimension, and nothing in DXIL carries the row/slice
+pitch a real texture unit would read off the bound resource descriptor to
+turn those into one flat offset. So a `dx.Texture` binding of more than one
+coordinate dimension gets one extra trailing `i32` "stride" kernel argument
+per coordinate beyond the first (immediately after its own data pointer,
+not batched separately at the end), and an access linearizes its
+coordinates against them the same way an ordinary row-major array index
+would: `coord0 + coord1*stride0 (+ coord2*stride1)`. This only covers
+`Texture1D`/`2D`/`3D` (a cube face or array layer's non-strided indexing
+does not fit the same linear-stride model) and only mip level 0 (a
+specific mip's own, smaller strides are not otherwise available). A
+`dx.CBuffer` binding needs no such extra argument: every cbuffer row is a
+fixed 16 bytes regardless of how many same-typed fields it packs, so a
+row's field N is just an `ElementType`-strided load starting at that row
+index's 16-byte-aligned byte offset -- no pitch to recover.
 
 The alternative -- AMDGPU's own buffer-descriptor conventions
 (`llvm.amdgcn.make.buffer.rsrc` producing a `ptr addrspace(8)`, indexed via
-`ptr addrspace(7)` buffer fat pointers) -- was not chosen: a buffer resource
-descriptor still has to *come from somewhere*, and with no descriptor table
-in the picture that somewhere is a kernel argument anyway, so it would add a
-layer without removing the fundamental one. Revisit if bounds-checked or
-format-converting typed buffer semantics turn out to matter.
+`ptr addrspace(7)` buffer fat pointers, or an image-specific equivalent) --
+was not chosen: a buffer/image resource descriptor still has to *come from
+somewhere*, and with no descriptor table in the picture that somewhere is a
+kernel argument anyway, so it would add a layer without removing the
+fundamental one. Revisit if bounds-checked or format-converting typed
+buffer/texture semantics, or a texture dimension this flat model does not
+cover (cube/array, a non-zero mip), turn out to matter.
 
-An entry point using a resource this pass cannot model -- a non-typed
-buffer, a dynamically indexed binding array (which would need one pointer
-per register, something a fixed argument list cannot express), or a handle
-consumed some other way -- is left untouched *entirely* rather than
-partially rewritten. That leftover `target("dx.")`/`target("spirv.")`
-handle (or, for a resource kind `feme::dxil::OpRaisingPass` itself does not
-yet raise for a bound, non-bindless binding -- e.g. a `Texture2D`/
-`RWTexture2D`'s legacy `dx.op.*` calling convention, see "Decision: texture
-and sampler handle kinds" above -- the un-raised `dx.op.*` call it leaves
-instead) is not valid input to `AMDGPU`'s real ISel: neither is a real
-target intrinsic/type it has any notion of, and `llvm::MVT::getVT` has no
-case for a `target("dx.")`/`target("spirv.")` type at all, so it
-`llvm_unreachable`s once instruction selection actually needs that value's
-type -- non-deterministically late, depending on the exact shader and
-subtarget, rather than at any point specific to this pass. `feme::
-verifyNoRaisedIRRemains` (`feme/include/feme/Core/RaisedIRVerifier.h`) runs
-right after this pass and `RaisedLoweringPass` (also for NVPTX's own
-counterpart pair) specifically to catch this and turn it into the clean
-"unsupported" diagnostic promised above -- and already documented by
+An entry point using a resource this pass cannot model -- a raw/structured
+buffer, a sampler, a multisampled/feedback texture, a dynamically indexed
+binding array (which would need one pointer per register, something a
+fixed argument list cannot express), or a handle consumed some other way --
+is left untouched *entirely* rather than partially rewritten. That leftover
+`target("dx.")`/`target("spirv.")` handle (or, for a resource kind
+`feme::dxil::OpRaisingPass` itself does not yet raise for a bound,
+non-bindless binding -- e.g. a `Sampler`'s legacy `dx.op.*` calling
+convention, see "Decision: texture and sampler handle kinds" above -- the
+un-raised `dx.op.*` call it leaves instead) is not valid input to
+`AMDGPU`'s real ISel: neither is a real target intrinsic/type it has any
+notion of, and `llvm::MVT::getVT` has no case for a `target("dx.")`/
+`target("spirv.")` type at all, so it `llvm_unreachable`s once instruction
+selection actually needs that value's type -- non-deterministically late,
+depending on the exact shader and subtarget, rather than at any point
+specific to this pass. `feme::verifyNoRaisedIRRemains`
+(`feme/include/feme/Core/RaisedIRVerifier.h`) runs right after this pass
+and `RaisedLoweringPass` (also for NVPTX's own counterpart pair)
+specifically to catch this and turn it into the clean "unsupported"
+diagnostic promised above -- and already documented by
 feme/docs/CommandGuide/feme.md's "Current limitations" section -- instead
 of that crash.
+
+Status: a real `dxc -T cs_6_2 -enable-16bit-types` compute shader binding a
+`Texture2D`/`RWTexture2D` pair alongside a `cbuffer` of `half` scalars --
+this section's Motivation shape -- exposed two `collectBindings` bugs
+before `dx.Texture`/`dx.CBuffer` had any lowering to exercise them: it
+matched a handle's resource family purely by the shared
+`llvm.dx.resource.handlefrombinding` intrinsic ID, which cannot
+distinguish `dx.TypedBuffer`/`dx.Texture`/`dx.CBuffer` from each other
+(only the handle's own result type name can), and it keyed a binding by
+(space, register) alone, which cannot distinguish an SRV `Texture2D` at
+`t0` from a UAV `RWTexture2D` at `u0` -- HLSL's `t`/`u` registers are
+independent namespaces -- or either from a `cbuffer` at `b0` sharing the
+same numeric pair, all three of which this exact shader hits at once.
+Both are now part of the lookup key (see `Binding::IsUAV`'s comment).
+`feme-dxil-to-amdgpu-texture.ll` compiles that shape end to end; see
+Roadmap.md's "the remaining resource access ops"/"`RaisedLoweringPass`
+breadth" entries.
 
 **`feme::amdgpu::RaisedLoweringPass`**
 (`feme/include/feme/Transforms/AMDGPU/RaisedLowering.h`,

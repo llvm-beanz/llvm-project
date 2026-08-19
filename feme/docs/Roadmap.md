@@ -149,12 +149,13 @@ DXIL import is the most complete path, and its gaps are enumerable.
   lane-to-quad mapping that remains an explicit v1 non-goal (see
   FeMeCPUDesign.md's "Non-Goals"), so raising `QuadOp` closes the "hard
   pipeline error downstream" risk without yet making it executable.
-- **P1 — texture/sampler handle kinds.** The blocking decision is now
-  recorded in Design.md's DXIL section ("Decision: texture and sampler handle
-  kinds"): the dimension/multi-sample/feedback bits this entry said were
-  missing are in fact carried by `ResourceProperties` (Word0's `ResourceKind`
-  byte *is* the dimension; Word1 carries component type/count, sample count
-  and feedback kind), so the raised handle types are LLVM's own
+- **P1 — texture/sampler handle kinds (legacy path done by this roadmap
+  step).** The blocking decision is now recorded in Design.md's DXIL section
+  ("Decision: texture and sampler handle kinds"): the dimension/multi-sample/
+  feedback bits this entry said were missing are in fact carried by
+  `ResourceProperties` (Word0's `ResourceKind` byte *is* the dimension; Word1
+  carries component type/count, sample count and feedback kind), so the
+  raised handle types are LLVM's own
   `dx.Texture`/`dx.MSTexture`/`dx.FeedbackTexture`/`dx.Sampler`. What is
   actually left is implementation, plus two narrower gaps the decision names:
   the legacy `!dx.resources` path has no component count and must recover the
@@ -162,10 +163,27 @@ DXIL import is the most complete path, and its gaps are enumerable.
   UNORM/SNORM/packed element kinds stay unraised until G2's format table
   exists. Implemented by R30 for the bindless `handlefromheap`/
   `handlefrombinding` path (see Design.md's status note); the legacy
-  `!dx.resources`-based texture/sampler path and UNORM/SNORM/packed formats
-  remain future work.
-- **P1 — the remaining resource access ops** (non-typed buffer and texture
-  load/store beyond the raw/structured forms milestone 10 added).
+  `!dx.resources`-based path's texture kinds (`buildHandleType` generalized
+  the same way `TypedBuffer` already worked, `inferTypedBufferWidth`
+  generalized to read `dx.op.textureLoad`/`textureStore` too) are now raised
+  as well -- `dxil-raise-legacy-resources.ll`'s `load_texture2d` covers this,
+  closing the gap a real `dxc -T cs_6_2` (below SM6.6's dynamic-resource
+  threshold, so it takes this legacy path) compute shader hit. `Sampler`
+  (no access op raises to consume it yet either way) and UNORM/SNORM/packed
+  formats remain future work.
+- **P1 — the remaining resource access ops (done for texture load/store and
+  the 16-/64-bit `CBufferLoadLegacy` row overloads by this roadmap step).**
+  `raiseTextureStore` (DXIL opcode 67) is now symmetric with the existing
+  `raiseTextureLoad`, using a new canonical `llvm.dx.resource.store.texture`
+  intrinsic added upstream (DXIL's `TextureStore` op had a `DXILOpClass` but
+  no numbered `DXILOp<67, ...>` definition, canonical intrinsic, or
+  `DXILOpLowering` support at all, unlike `TextureLoad`/op 66); generalizing
+  `raiseCBufferLoadLegacy` to `getCBufferRowIntrinsic`'s 2-/8-field 64-/16-bit
+  row shapes (alongside the existing 4-field 32-bit one) covers a `cbuffer`
+  of `double`/`half`/16-bit-int members, which `-enable-16bit-types`
+  produces. Both were needed by the same real shader
+  (`feme-dxil-to-amdgpu-texture.ll`): raw/structured buffer load/store and
+  samplers remain the rest of this entry's scope.
 
 ### 1.4 DXBC / `dxsa`
 
@@ -238,9 +256,24 @@ DXIL import is the most complete path, and its gaps are enumerable.
   code changes at all -- `test/Tools/feme/feme-dxil-to-aarch64.ll` is a new
   end-to-end test proving that against a genuine non-host CPU ISA, not a
   new capability.
-- **P1 — `feme::amdgpu::RaisedLoweringPass` breadth** tracks §1.2/§1.3: every
-  newly-raised intrinsic needs an AMDGPU lowering or it becomes a new
-  end-to-end failure on a path that used to work.
+- **P1 — `feme::amdgpu::RaisedLoweringPass`/`ResourceLoweringPass` breadth**
+  tracks §1.2/§1.3: every newly-raised intrinsic needs an AMDGPU lowering or
+  it becomes a new end-to-end failure on a path that used to work.
+  `ResourceLoweringPass` now also models `dx.Texture` (a flat data pointer
+  plus one trailing per-extra-dimension row/slice-pitch stride argument,
+  `Binding::NumAuxArgs` -- DXIL carries no such stride itself, unlike a
+  typed buffer's flat element index) and `dx.CBuffer` (a 16-byte-strided
+  flat load, needing no extra argument) alongside its existing
+  `dx.TypedBuffer`/`spirv.Image` support, closing the two-part gap §1.3's
+  own entry above added raising for; doing so surfaced (and fixed) two
+  `collectBindings` bugs only reachable once more than one DX resource
+  family was modeled at once (mismatching a handle's family by intrinsic ID
+  alone, and keying a binding by (space, register) alone despite HLSL's
+  `t`/`u` registers being independent namespaces) -- see Design.md's status
+  note on this section for both. `feme-dxil-to-amdgpu-texture.ll` is a new
+  end-to-end test proving a real `Texture2D`/`RWTexture2D`/`cbuffer<half>`
+  shader now retargets to AMDGPU; raw/structured buffers and samplers
+  remain unmodeled.
 - **P2 — MLIR `gpu`-dialect retargeting**, deferred by Design.md's Non-Goals
   until a client needs it. No action.
 
