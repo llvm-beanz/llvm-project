@@ -1058,6 +1058,25 @@ mlir::Type getFlatElementType(mlir::Type Type) {
   return Type;
 }
 
+/// Returns the number of scalar leaves `llvm.mlir.constant`'s `ElementsAttr`
+/// encoding requires for \p Type, i.e. the product of every `!llvm.array`/
+/// `vector` nesting's element counts (mirroring
+/// `LLVM::ConstantOp::verify`'s own element-count computation). Any other
+/// type not built purely out of that nesting -- most notably `!llvm.struct`,
+/// which `ElementsAttr` cannot represent regardless of whether its members'
+/// leaf types are uniform -- contributes exactly 1, so a caller comparing
+/// this against its own flattened constituent count can detect (and reject)
+/// that shape instead of building an `ElementsAttr` the verifier will never
+/// accept.
+int64_t getFlatElementCount(mlir::Type Type) {
+  if (auto Array = mlir::dyn_cast<mlir::LLVM::LLVMArrayType>(Type))
+    return static_cast<int64_t>(Array.getNumElements()) *
+           getFlatElementCount(Array.getElementType());
+  if (auto Vector = mlir::dyn_cast<mlir::VectorType>(Type))
+    return Vector.getNumElements();
+  return 1;
+}
+
 /// Converts SPIR-V `ConstantOp` with `spirv.array` type -- MLIR's own
 /// `ConstantScalarAndVectorPattern` only matches a scalar or vector `spirv.
 /// Constant` (see its `srcType` check), leaving an array constant illegal,
@@ -1089,6 +1108,17 @@ public:
 
     llvm::SmallVector<mlir::Attribute, 16> Elements;
     flattenConstantElements(Op.getValue(), Elements);
+
+    // `llvm.mlir.constant`'s `ElementsAttr` encoding can only represent a
+    // pure `!llvm.array`/`vector` nesting (see `LLVM::ConstantOp::verify`'s
+    // own element-count computation): a struct constituent anywhere in
+    // `DstType` (e.g. the array-of-struct-of-array shape an HLSL struct
+    // array compiles down to) makes this flattening unrepresentable, so
+    // reject that case up front instead of building an `ElementsAttr` the
+    // verifier will never accept for it.
+    if (getFlatElementCount(DstType) != static_cast<int64_t>(Elements.size()))
+      return Rewriter.notifyMatchFailure(
+          Op, "array constant is not a pure array/vector nesting");
 
     // Integer leaves need the same signed/unsigned -> signless retyping
     // `ConstantScalarAndVectorPattern` gives a top-level scalar/vector
