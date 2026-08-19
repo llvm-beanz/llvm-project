@@ -1696,18 +1696,37 @@ cover this row; see Roadmap.md's own R32 entry for the full status note.
 Status (roadmap R33, "Depth, stencil, blending, and multisampling"): depth
 (`D16_UNORM`/`D32_FLOAT`)/stencil (`S8_UINT`) testing and writes, full
 blend-factor/op combinations, per-channel write masks, logic ops
-(`R8G8B8A8_*` only), multiple render targets, 1/2/4-sample multisampling
-with coverage/resolve, and a deterministic parallel tile schedule (a
-`WorkerCount` worker pool over disjoint tiles, wiring up `feme-render`'s
-previously-inert `--workers`) are all now implemented, replacing the "no
-depth/stencil, no multisampling, `BlendMode::Replace`" scope the paragraph
-above still describes for R32's original shape. Output merge is no longer
-unconditionally painter's-order: depth/stencil tests -- scheduled early
-(before the fragment stage runs) or late (after it returns) from the
-fragment stage's own `SV_Depth`/`SV_StencilRef`/discard reflection, per
-"Early and late tests" below -- now gate whether a fragment's color
-reaches an attachment at all. See Roadmap.md's own R33 entry for the full
-status note and deferred scope.
+(`R8G8B8A8_*` only), multiple render targets, 1/2/4/8-sample multisampling
+(8 added by roadmap C4b: `samplePositions`' own "N-rooks" 8-sample table in
+Executor.cpp) with coverage/resolve, and a deterministic parallel tile
+schedule (a `WorkerCount` worker pool over disjoint tiles, wiring up
+`feme-render`'s previously-inert `--workers`) are all now implemented,
+replacing the "no depth/stencil, no multisampling, `BlendMode::Replace`"
+scope the paragraph above still describes for R32's original shape. Output
+merge is no longer unconditionally painter's-order: depth/stencil tests --
+scheduled early (before the fragment stage runs) or late (after it returns)
+from the fragment stage's own `SV_Depth`/`SV_StencilRef`/discard
+reflection, per "Early and late tests" below -- now gate whether a
+fragment's color reaches an attachment at all. See Roadmap.md's own R33
+entry for the full status note and deferred scope.
+
+Status (roadmap C4b, culling): `feme::graphics::CullMode` gained
+`FrontAndBack` (`VK_CULL_MODE_FRONT_AND_BACK`), which discards every
+primitive regardless of winding -- one more comparison in `executeDraws`'
+existing cull test, not new rasterizer machinery, unlike this section's
+still-open topology and dual-source-blend gaps below. Point, line,
+line-strip and fan topologies (`mapTopology` in
+`feme/lib/Vulkan/GraphicsPipeline.cpp` still declines them) remain
+unimplemented: each needs a new primitive-assembly and
+clip/rasterize path this section's triangle-only pipeline does not have
+(point sprites need a size and a screen-space quad expansion; lines need
+a width and a different edge test entirely), which is a materially larger
+unit of work than a mechanical table addition. Dual-source blend factors
+(`VK_BLEND_FACTOR_SRC1_*`) remain unimplemented for the same reason: they
+need a second fragment-stage color output (`SV_Target0`'s `Index=1`
+companion) that nothing in the stage-IO signature model or `executeDraws`'
+one-output-per-attachment linkage (see "One `SV_TargetN` fragment output
+per color attachment" above) yet threads through.
 
 The conventional tessellation path inserts patch control, fixed tessellation,
 domain evaluation, and optional geometry execution between vertex shading and

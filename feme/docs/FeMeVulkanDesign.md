@@ -1175,6 +1175,20 @@ dispatch dimensions, and pipeline cache blobs. The runtime must:
 - Cap allocations and compiler resource use according to advertised limits.
 - Translate `llvm::Error` into the narrowest applicable `VkResult`, while
   preserving diagnostics for `VK_EXT_debug_utils` or an opt-in log callback.
+  (Status, roadmap C4a: `feme::vulkan::logCreationFailure`
+  (`feme/lib/Vulkan/Diagnostics.h`) is the opt-in log callback this bullet
+  named ahead of either it or `VK_EXT_debug_utils` existing --
+  `vkCreateGraphicsPipelines` calls it in place of a bare `consumeError`,
+  printing the discarded `llvm::Error`'s message to `errs()` when the host
+  environment sets `FEME_VULKAN_LOG_CREATION_ERRORS`, and remaining silent
+  otherwise. It is deliberately an environment variable rather than
+  `VK_EXT_debug_utils` itself: the latter is an unimplemented extension with
+  its own object model (`VkDebugUtilsMessengerEXT`) and severity/type
+  filtering that roadmap C4a's actual problem -- a state-side pipeline
+  rejection triaged from source instead of from output -- does not need.
+  Other `consumeError`-shaped call sites (e.g. `vkCreateComputePipelines` in
+  `Pipeline.cpp`) are not yet routed through it; C4a's own scope is the
+  graphics pipeline rejections the roadmap named.)
 - Never print from reusable library code or mutate process-global diagnostic
   state.
 - Run SPIR-V import and the new Vulkan-to-FeMe translation surfaces under
