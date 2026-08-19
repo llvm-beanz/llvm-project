@@ -85,16 +85,5 @@ void main(uint3 threadID : SV_DispatchThreadID)
 }
 ```
 
-It can be compiled with DXC as a compute shader with the `-T cs_6_8 -enable-16bit-types` flags.
-
-When I try to compile that DXIL to AMD ISA with feme using the command
-`./bin/feme --target=amdgpu9.0a-amd-amdhsa workload-68.dxil -o workload-68.o`
-I get the assert output:
-
-```
-Unknown target ext type!
-UNREACHABLE executed at /Users/cbieneman/dev/llvm-project/llvm/lib/CodeGen/ValueTypes.cpp:287!
-fish: Job 1, './bin/feme --target=amdgpu9.0a-…' terminated by signal SIGABRT (Abort)
-```
-
-Can you diagnose and fix this issue?
+The last agent didn't flesh out the resource access ops. Can you flesh that out
+now?
