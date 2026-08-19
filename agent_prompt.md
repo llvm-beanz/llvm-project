@@ -16,6 +16,9 @@ dependencies will build before running the tests.
 
 When you deviate from the design document please update the design document.
 
+Also please run the Vulkan CTS from the checkout under /home/dev/dev/VK-GL-CTS/
+after each change and update the VulkanCTSReport.md.
+
 Break your changes into small code changes with each change committed
 spearately. Record your thought process into a file named "agent_thoughts.md" at
 the root of the repository, appending to the file under a new top-level heading
@@ -23,7 +26,5 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-There is a checkout of the Vulkan CTS at /home/dev/dev/VK-GL-CTS/. Can you build
-the CTS and run it against the feme vulkan ICD then provide a report of what
-works and what doesn't work as well as updating the design documentation and
-roadmap documentation to complete a conforming implementation.
+Can you address the crashes identified in the VulkanCTSReport.md to get a
+complete run of the CTS?
