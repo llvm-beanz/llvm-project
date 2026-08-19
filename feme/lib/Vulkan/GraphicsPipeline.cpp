@@ -246,6 +246,10 @@ std::optional<DynamicStateBits> mapDynamicState(VkDynamicState State) {
     return DynamicStateDepthCompareOp;
   case VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE:
     return DynamicStateDepthBoundsTestEnable;
+  case VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE:
+    return DynamicStateStencilTestEnable;
+  case VK_DYNAMIC_STATE_STENCIL_OP:
+    return DynamicStateStencilOp;
   default:
     return std::nullopt;
   }
@@ -605,28 +609,39 @@ Error translateRasterState(const VkPipelineRasterizationStateCreateInfo *Info,
 Error translateDepthStencilState(
     const VkPipelineDepthStencilStateCreateInfo *Info,
     const PipelineRenderTargets &Targets, GraphicsPipelineState &Out) {
-  // (roadmap C4c) Whether depth test/write/compare-op is dynamic: per
+  // (roadmap C4c) Whether depth/stencil test/write/op is dynamic: per
   // `VK_EXT_extended_dynamic_state`, a pipeline declaring one of these
   // dynamic must ignore the corresponding static field entirely (its value
   // is unspecified/irrelevant), not merely treat it as an initial value --
-  // so neither its boolean fields nor `depthCompareOp` may gate whether
-  // this function accepts or rejects the pipeline. `DepthBoundsTestEnable`
-  // gets the same treatment for the same reason, even though the test
-  // itself is never implemented: see `DynamicStateBits`'s own comment on
-  // why that combination is still safe to accept.
+  // so neither its boolean fields nor `depthCompareOp`/the stencil op
+  // fields may gate whether this function accepts or rejects the
+  // pipeline. `DepthBoundsTestEnable` gets the same treatment for the same
+  // reason, even though the test itself is never implemented: see
+  // `DynamicStateBits`'s own comment on why that combination is still
+  // safe to accept.
   bool TestDynamic = (Out.DynamicStates & DynamicStateDepthTestEnable) != 0;
   bool WriteDynamic = (Out.DynamicStates & DynamicStateDepthWriteEnable) != 0;
   bool CompareDynamic = (Out.DynamicStates & DynamicStateDepthCompareOp) != 0;
   bool BoundsDynamic =
       (Out.DynamicStates & DynamicStateDepthBoundsTestEnable) != 0;
+  bool StencilTestDynamic =
+      (Out.DynamicStates & DynamicStateStencilTestEnable) != 0;
+  bool StencilOpDynamic = (Out.DynamicStates & DynamicStateStencilOp) != 0;
 
+  bool NeedsDepth = TestDynamic || WriteDynamic;
+  bool NeedsStencil = StencilTestDynamic;
   if (!Info) {
     // A dynamically-enabled test still needs somewhere to test/write into.
-    if ((TestDynamic || WriteDynamic) &&
-        (!Targets.DepthStencil ||
-         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil)))
+    if (NeedsDepth && (!Targets.DepthStencil ||
+                       !isSupportedDepthAttachmentFormat(*Targets.DepthStencil)))
       return createStringError(inconvertibleErrorCode(),
                                "depth testing/writes need a depth attachment "
+                               "in the pipeline's render target");
+    if (NeedsStencil &&
+        (!Targets.DepthStencil ||
+         !isSupportedStencilAttachmentFormat(*Targets.DepthStencil)))
+      return createStringError(inconvertibleErrorCode(),
+                               "stencil testing needs an S8_UINT attachment "
                                "in the pipeline's render target");
     return Error::success();
   }
@@ -634,9 +649,8 @@ Error translateDepthStencilState(
     return createStringError(inconvertibleErrorCode(),
                              "the depth bounds test is not implemented");
 
-  bool MayTestOrWrite = (TestDynamic || WriteDynamic) ||
-                        (Info->depthTestEnable || Info->depthWriteEnable);
-  if (MayTestOrWrite) {
+  NeedsDepth = NeedsDepth || Info->depthTestEnable || Info->depthWriteEnable;
+  if (NeedsDepth) {
     if (!Targets.DepthStencil ||
         !isSupportedDepthAttachmentFormat(*Targets.DepthStencil))
       return createStringError(inconvertibleErrorCode(),
@@ -657,13 +671,31 @@ Error translateDepthStencilState(
     }
   }
 
-  if (!Info->stencilTestEnable)
+  NeedsStencil = NeedsStencil || Info->stencilTestEnable;
+  if (!NeedsStencil)
     return Error::success();
   if (!Targets.DepthStencil ||
       !isSupportedStencilAttachmentFormat(*Targets.DepthStencil))
     return createStringError(inconvertibleErrorCode(),
                              "stencil testing needs an S8_UINT attachment in "
                              "the pipeline's render target");
+  Out.Stencil.TestEnable = Info->stencilTestEnable != VK_FALSE;
+  if (StencilOpDynamic) {
+    // `Info->front`/`Info->back`'s op/compare fields are ignored per the
+    // comment above; only the reference/compare/write masks (each its own,
+    // separately-dynamic state -- `translateDynamicState`'s existing six)
+    // still come from here when *they* are static. The op fields
+    // themselves always resolve from `DynamicGraphicsState::StencilOps`.
+    Out.Stencil.Front.CompareMask =
+        static_cast<uint8_t>(Info->front.compareMask);
+    Out.Stencil.Front.WriteMask = static_cast<uint8_t>(Info->front.writeMask);
+    Out.Stencil.Front.Reference = static_cast<uint8_t>(Info->front.reference);
+    Out.Stencil.Back.CompareMask =
+        static_cast<uint8_t>(Info->back.compareMask);
+    Out.Stencil.Back.WriteMask = static_cast<uint8_t>(Info->back.writeMask);
+    Out.Stencil.Back.Reference = static_cast<uint8_t>(Info->back.reference);
+    return Error::success();
+  }
   auto translateFace = [](const VkStencilOpState &Src,
                           StencilFaceState &Dst) -> Error {
     std::optional<CompareOp> Compare = mapCompareOp(Src.compareOp);
@@ -682,7 +714,6 @@ Error translateDepthStencilState(
     Dst.Reference = static_cast<uint8_t>(Src.reference);
     return Error::success();
   };
-  Out.Stencil.TestEnable = true;
   if (Error E = translateFace(Info->front, Out.Stencil.Front))
     return E;
   return translateFace(Info->back, Out.Stencil.Back);
@@ -1140,7 +1171,16 @@ feme::graphics::GraphicsPipeline GraphicsPipeline::buildExecutorPipeline(
     if (isDynamic(DynamicStateStencilWriteMask))
       Resolved[I]->WriteMask =
           static_cast<uint8_t>(Dynamic.StencilWriteMask[I]);
+    if (isDynamic(DynamicStateStencilOp)) {
+      const DynamicGraphicsState::StencilOpState &Op = Dynamic.StencilOps[I];
+      Resolved[I]->FailOp = Op.FailOp;
+      Resolved[I]->PassOp = Op.PassOp;
+      Resolved[I]->DepthFailOp = Op.DepthFailOp;
+      Resolved[I]->Compare = Op.Compare;
+    }
   }
+  if (isDynamic(DynamicStateStencilTestEnable))
+    ResolvedStencil.TestEnable = Dynamic.StencilTestEnable;
 
   feme::graphics::RasterState ResolvedRaster = State.Raster;
   if (isDynamic(DynamicStateCullMode))

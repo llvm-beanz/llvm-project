@@ -497,6 +497,82 @@ TEST_F(GraphicsPipelineTest, DynamicDepthStateOverridesStaticState) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap C4c) `VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE`/`_STENCIL_OP`: a
+/// depth-less-but-stencil-attached render target is enough (stencil
+/// testing needs its own `S8_UINT` attachment, not a depth one), and a
+/// pipeline created with stencil testing statically disabled still
+/// resolves the dynamically-enabled test and its ops.
+TEST_F(GraphicsPipelineTest, DynamicStencilStateOverridesStaticState) {
+  // A render pass with an `S8_UINT`-only depth-stencil attachment (see
+  // `isSupportedStencilAttachmentFormat`), distinct from the fixture's own
+  // `PassWithDepth` (`D32_SFLOAT`, which has no stencil aspect at all).
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  Attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  Attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentDescription StencilAttachment{};
+  StencilAttachment.format = VK_FORMAT_S8_UINT;
+  StencilAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+  StencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  StencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkAttachmentDescription Attachments[2] = {Attachment, StencilAttachment};
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkAttachmentReference StencilRef{
+      1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  Subpass.colorAttachmentCount = 1;
+  Subpass.pColorAttachments = &ColorRef;
+  Subpass.pDepthStencilAttachment = &StencilRef;
+  VkRenderPassCreateInfo PassInfo{};
+  PassInfo.attachmentCount = 2;
+  PassInfo.pAttachments = Attachments;
+  PassInfo.subpassCount = 1;
+  PassInfo.pSubpasses = &Subpass;
+  VkRenderPass PassWithStencil = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateRenderPass(Device, &PassInfo, nullptr, &PassWithStencil),
+            VK_SUCCESS);
+
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.renderPass = PassWithStencil;
+  VkPipelineDepthStencilStateCreateInfo DepthInfo{};
+  Info.pDepthStencilState = &DepthInfo;
+  VkDynamicState DynStates[2] = {VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE,
+                                 VK_DYNAMIC_STATE_STENCIL_OP};
+  VkPipelineDynamicStateCreateInfo DynamicInfo{};
+  DynamicInfo.dynamicStateCount = 2;
+  DynamicInfo.pDynamicStates = DynStates;
+  Info.pDynamicState = &DynamicInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  auto *Graphics = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Pipe));
+  DynamicGraphicsState Dynamic;
+  Dynamic.StencilTestEnable = true;
+  Dynamic.StencilOps[0].FailOp = feme::graphics::StencilOp::Replace;
+  Dynamic.StencilOps[0].PassOp = feme::graphics::StencilOp::IncrementClamp;
+  Dynamic.StencilOps[0].DepthFailOp = feme::graphics::StencilOp::Zero;
+  Dynamic.StencilOps[0].Compare = feme::graphics::CompareOp::Equal;
+  feme::graphics::StencilState Resolved =
+      Graphics->buildExecutorPipeline(Dynamic).getStencilState();
+  EXPECT_TRUE(Resolved.TestEnable);
+  EXPECT_EQ(Resolved.Front.FailOp, feme::graphics::StencilOp::Replace);
+  EXPECT_EQ(Resolved.Front.PassOp, feme::graphics::StencilOp::IncrementClamp);
+  EXPECT_EQ(Resolved.Front.DepthFailOp, feme::graphics::StencilOp::Zero);
+  EXPECT_EQ(Resolved.Front.Compare, feme::graphics::CompareOp::Equal);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyRenderPass(Device, PassWithStencil, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// A fragment stage writing no `SV_Target0` cannot fill the render pass's
 /// one color attachment; the mismatch is a creation failure, not a draw-time
 /// surprise.

@@ -107,6 +107,31 @@ feme::graphics::CompareOp toCompareOp(VkCompareOp Op) {
   }
 }
 
+/// (roadmap C4c) `vkCmdSetStencilOpEXT`'s payload, converted the same way
+/// `GraphicsPipeline.cpp`'s (static) `mapStencilOp` converts a
+/// `VkStencilOpState`'s op fields -- see `toCullMode`'s comment.
+feme::graphics::StencilOp toStencilOp(VkStencilOp Op) {
+  switch (Op) {
+  case VK_STENCIL_OP_ZERO:
+    return feme::graphics::StencilOp::Zero;
+  case VK_STENCIL_OP_REPLACE:
+    return feme::graphics::StencilOp::Replace;
+  case VK_STENCIL_OP_INCREMENT_AND_CLAMP:
+    return feme::graphics::StencilOp::IncrementClamp;
+  case VK_STENCIL_OP_DECREMENT_AND_CLAMP:
+    return feme::graphics::StencilOp::DecrementClamp;
+  case VK_STENCIL_OP_INVERT:
+    return feme::graphics::StencilOp::Invert;
+  case VK_STENCIL_OP_INCREMENT_AND_WRAP:
+    return feme::graphics::StencilOp::IncrementWrap;
+  case VK_STENCIL_OP_DECREMENT_AND_WRAP:
+    return feme::graphics::StencilOp::DecrementWrap;
+  case VK_STENCIL_OP_KEEP:
+  default:
+    return feme::graphics::StencilOp::Keep;
+  }
+}
+
 /// One currently-bound `VkDescriptorSet` slot, as `vkCmdBindDescriptorSets`
 /// leaves it (see "Descriptor Model"): the set itself and the dynamic
 /// offsets supplied for it in that call, consumed in ascending
@@ -1389,6 +1414,22 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
     case RecordedCommand::Kind::SetDepthBoundsTestEnable:
       Gfx.Dynamic.DepthBoundsTestEnable = Cmd.Bool32Value != VK_FALSE;
       break;
+    case RecordedCommand::Kind::SetStencilTestEnable:
+      Gfx.Dynamic.StencilTestEnable = Cmd.Bool32Value != VK_FALSE;
+      break;
+    case RecordedCommand::Kind::SetStencilOp:
+      for (unsigned Face = 0; Face != 2; ++Face) {
+        VkStencilFaceFlags Bit =
+            Face == 0 ? VK_STENCIL_FACE_FRONT_BIT : VK_STENCIL_FACE_BACK_BIT;
+        if ((Cmd.StencilFaceMask & Bit) == 0)
+          continue;
+        DynamicGraphicsState::StencilOpState &Op = Gfx.Dynamic.StencilOps[Face];
+        Op.FailOp = toStencilOp(Cmd.StencilFailOpValue);
+        Op.PassOp = toStencilOp(Cmd.StencilPassOpValue);
+        Op.DepthFailOp = toStencilOp(Cmd.StencilDepthFailOpValue);
+        Op.Compare = toCompareOp(Cmd.StencilCompareOpValue);
+      }
+      break;
     case RecordedCommand::Kind::Draw:
     case RecordedCommand::Kind::DrawIndexed: {
       if (!BoundGraphicsPipeline)
@@ -2042,6 +2083,24 @@ vkCmdSetDepthBoundsTestEnableEXT(VkCommandBuffer commandBuffer,
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthBool(RecordedCommand::Kind::SetDepthBoundsTestEnable,
                      depthBoundsTestEnable);
+}
+
+// (roadmap C4c) `vkCmdSetStencilTestEnableEXT`/`vkCmdSetStencilOpEXT`: the
+// last two `VK_EXT_extended_dynamic_state` states, both already fully
+// implemented statically (`StencilState`).
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetStencilTestEnableEXT(VkCommandBuffer commandBuffer,
+                            VkBool32 stencilTestEnable) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setStencilTestEnable(stencilTestEnable);
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(
+    VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
+    VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
+    VkCompareOp compareOp) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setStencilOp(faceMask, failOp, passOp, depthFailOp, compareOp);
 }
 
 // Four more core commands this ICD must at least resolve (found missing

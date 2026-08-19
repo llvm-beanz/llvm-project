@@ -107,6 +107,8 @@ struct RecordedCommand {
     SetDepthWriteEnable,
     SetDepthCompareOp,
     SetDepthBoundsTestEnable,
+    SetStencilTestEnable,
+    SetStencilOp,
     Draw,
     DrawIndexed,
     DrawIndirect,
@@ -245,6 +247,13 @@ struct RecordedCommand {
   /// command replays into `Gfx.Dynamic`).
   VkBool32 Bool32Value = VK_FALSE;
   VkCompareOp DepthCompareOpValue = VK_COMPARE_OP_ALWAYS;
+  /// (roadmap C4c) `SetStencilOp`: `vkCmdSetStencilOpEXT`'s payload, for
+  /// the faces named by `StencilFaceMask` (reused from `SetStencil*`
+  /// above). `SetStencilTestEnable` reuses `Bool32Value`.
+  VkStencilOp StencilFailOpValue = VK_STENCIL_OP_KEEP;
+  VkStencilOp StencilPassOpValue = VK_STENCIL_OP_KEEP;
+  VkStencilOp StencilDepthFailOpValue = VK_STENCIL_OP_KEEP;
+  VkCompareOp StencilCompareOpValue = VK_COMPARE_OP_ALWAYS;
   /// (V6) `Draw`/`DrawIndexed`: the draw's own arguments, in the same shape
   /// `feme::graphics::DrawCommand` uses (`FirstQuery` above is reused for
   /// neither -- a draw needs all six of these at once).
@@ -602,6 +611,27 @@ public:
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::SetDepthCompareOp;
     Cmd.DepthCompareOpValue = Op;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap C4c) `vkCmdSetStencilTestEnableEXT`.
+  void setStencilTestEnable(VkBool32 Enable) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetStencilTestEnable;
+    Cmd.Bool32Value = Enable;
+    Commands.push_back(Cmd);
+  }
+  /// (roadmap C4c) `vkCmdSetStencilOpEXT`, applying to the faces named by
+  /// \p FaceMask (like `setStencilState` above).
+  void setStencilOp(VkStencilFaceFlags FaceMask, VkStencilOp FailOp,
+                    VkStencilOp PassOp, VkStencilOp DepthFailOp,
+                    VkCompareOp CompareOp) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetStencilOp;
+    Cmd.StencilFaceMask = FaceMask;
+    Cmd.StencilFailOpValue = FailOp;
+    Cmd.StencilPassOpValue = PassOp;
+    Cmd.StencilDepthFailOpValue = DepthFailOp;
+    Cmd.StencilCompareOpValue = CompareOp;
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdDraw`.

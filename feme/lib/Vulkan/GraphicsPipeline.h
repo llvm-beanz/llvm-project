@@ -100,6 +100,8 @@ enum DynamicStateBits : uint32_t {
   DynamicStateDepthWriteEnable = 1u << 9,
   DynamicStateDepthCompareOp = 1u << 10,
   DynamicStateDepthBoundsTestEnable = 1u << 11,
+  DynamicStateStencilTestEnable = 1u << 12,
+  DynamicStateStencilOp = 1u << 13,
 };
 
 /// The command-buffer-resolved value of every piece of dynamic state a
@@ -122,6 +124,19 @@ struct DynamicGraphicsState {
   // `VK_DYNAMIC_STATE_DEPTH_BOUNDS_TEST_ENABLE`'s own value: stored for
   // completeness but never consulted (see `DynamicStateBits`'s comment).
   bool DepthBoundsTestEnable = false;
+  bool StencilTestEnable = false;
+  /// `vkCmdSetStencilOpEXT`'s per-face payload ([front, back], like the
+  /// other per-face stencil dynamic state above): unlike
+  /// `StencilReference`/`*Mask`, which only ever override one
+  /// `StencilFaceState` field at a time, this one call sets all three ops
+  /// plus the compare op together.
+  struct StencilOpState {
+    feme::graphics::StencilOp FailOp = feme::graphics::StencilOp::Keep;
+    feme::graphics::StencilOp PassOp = feme::graphics::StencilOp::Keep;
+    feme::graphics::StencilOp DepthFailOp = feme::graphics::StencilOp::Keep;
+    feme::graphics::CompareOp Compare = feme::graphics::CompareOp::Always;
+  };
+  StencilOpState StencilOps[2]; // [front, back]
 };
 
 /// The shareable, compiled part of a graphics `VkPipeline`: the
@@ -210,7 +225,9 @@ public:
            isDynamic(DynamicStateDepthTestEnable) ||
            isDynamic(DynamicStateDepthWriteEnable);
   }
-  bool needsStencilAttachment() const { return State.Stencil.TestEnable; }
+  bool needsStencilAttachment() const {
+    return State.Stencil.TestEnable || isDynamic(DynamicStateStencilTestEnable);
+  }
   const feme::cpu::CompiledStage &vertexStage() const {
     return *State.Artifact->VertexStage;
   }
