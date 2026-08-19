@@ -1728,6 +1728,39 @@ companion) that nothing in the stage-IO signature model or `executeDraws`'
 one-output-per-attachment linkage (see "One `SV_TargetN` fragment output
 per color attachment" above) yet threads through.
 
+Status (roadmap C4c, dynamic state -- correcting roadmap C4's own
+framing): C4's roadmap row grouped "`mapDynamicState` beyond its six
+states" with the topology/dual-source-blend gaps above under one blanket
+"needs new rasterizer primitives" verdict. That turned out not to hold for
+`VK_EXT_extended_dynamic_state`'s 12 dynamic states: cull mode, front
+face, depth test/write/compare-op, and stencil test-enable/op *all*
+already had a complete static path before this milestone (`RasterState`,
+`DepthState`, `StencilState`), so making each dynamic is the same "read
+from the per-draw `DynamicGraphicsState` snapshot instead of the
+pipeline's own creation-time value" pattern the pre-existing six dynamic
+states (viewport, scissor, blend constants, the three stencil-mask states)
+already used -- not a new rasterizer feature. `VIEWPORT_WITH_COUNT`/
+`SCISSOR_WITH_COUNT` are the same states as `VIEWPORT`/`SCISSOR` under a
+count-taking spelling (this ICD's `maxViewports == 1` means "with count"
+carries no more information than the fixed-count commands). `PRIMITIVE_
+TOPOLOGY` is dynamic only within the triangle class Vulkan itself requires
+a pipeline's static topology to keep fixed, which `mapTopology`'s
+triangle-only support already satisfies with no changes to topology
+translation at all. `VERTEX_INPUT_BINDING_STRIDE` (set through
+`vkCmdBindVertexBuffers2EXT`'s `pStrides`, the one state with no
+`vkCmdSet*` counterpart) reuses the vertex-fetch stride the static path
+already reads per binding. `DEPTH_BOUNDS_TEST_ENABLE` is accepted but
+inert: `depthBounds` is an unadvertised `VkPhysicalDeviceFeatures` bit, so
+a conformant caller can never legally set it `VK_TRUE`, and the depth
+bounds test itself remains as unimplemented as it always was. All 12 are
+implemented in `feme/lib/Vulkan/{GraphicsPipeline,CommandBuffer}.{h,cpp}`,
+and the extension is advertised (`PhysicalDeviceInfo.cpp`'s
+`getSupportedDeviceExtensions`, `EntryPoints.cpp`'s feature-struct
+handling, `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS`). This closes
+roadmap C4's "mapDynamicState beyond its six states" item outright; only
+the topology-beyond-triangle-class and dual-source-blend gaps above remain
+open, exactly as this section already described before C4c.
+
 The conventional tessellation path inserts patch control, fixed tessellation,
 domain evaluation, and optional geometry execution between vertex shading and
 primitive assembly. The mesh path replaces input assembly and conventional

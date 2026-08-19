@@ -421,7 +421,9 @@ enumerated. The enumerated set lives in one place --
 `feme/utils/vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS`, which is what
 makes an extension's commands resolvable at all -- and `vkCreateDevice`
 refuses to enable anything outside it. V6 adds the first entry,
-`VK_KHR_dynamic_rendering`.
+`VK_KHR_dynamic_rendering`; roadmap C4c adds the second,
+`VK_EXT_extended_dynamic_state` (see "Graphics pipeline state"'s dynamic
+state row and FeMeGraphicsDesign.md's own status note).
 
 ## Shader and Pipeline Compilation
 
