@@ -650,3 +650,44 @@ this measurement into an ordered, costed plan: which of the buckets above
 to close in which order, what each is worth in cases, and what "full
 conformance" additionally requires beyond driving this run's failure count
 to zero.
+
+## Addendum: DXIL `GetDimensions.xy`/AMDGPU change (out of this report's scope)
+
+A follow-up change (`DXILOpLowering::lowerGetDimensionsXY`,
+`feme::dxil::OpRaisingPass::raiseGetDimensions`,
+`feme::amdgpu::ResourceLoweringPass`'s `Binding::NumDimensionArgs`) fixed a
+`Texture2D`/`RWTexture2D::GetDimensions(width, height)` call asserting when
+retargeting a DXIL shader to `amdgcn-*`. None of the touched files
+(`llvm/lib/Target/DirectX/DXILOpLowering.cpp`,
+`feme/lib/Transforms/DXIL/OpRaising.cpp`,
+`feme/lib/Transforms/AMDGPU/ResourceLowering.cpp`) are reachable from
+`libfeme_vulkan` (the SPIR-V/Vulkan/CPU-target path this report measures),
+so no change to the headline numbers above is expected, and a full re-run
+was not folded into the numbers above to avoid overwriting a report whose
+own methodology (per-group crash isolation, Amber/`graphicsfuzz` asset
+symlinking, etc. -- see "Reproducing this report") this quicker check did
+not fully replicate. Two checks were run instead, both consistent with
+"unaffected":
+
+- A `dEQP-VK.api.info.*` smoke run (`VK_ICD_FILENAMES` pointed at this
+  build's `feme_icd.json`) passed 5,669/10,484, matching the shape (mix of
+  `Pass`/`Fail`/`NotSupported`, zero crashes) an unrelated change should
+  produce.
+- A full 54-group run (this report's own per-group `dEQP-VK.<group>.*`
+  split, minus its crash-isolation wrapper) totaled 2,831 passed / 26,462
+  failed / 2,875,613 not supported across 52 of the 54 groups that ran to
+  completion -- the same "clean rejection, no wrong answers" shape as the
+  headline above. The remaining two, `api` and `synchronization`, each hit
+  a segfault partway through (no per-case isolation in this quicker
+  invocation, so the rest of that group's cases were never reached, which
+  is why the totals above undercount them): `synchronization`'s crash is
+  at `dEQP-VK.synchronization.timeline_semaphore.device_host.
+  write_copy_buffer_read_copy_buffer.buffer_262144`, the exact case this
+  report's own "Roadmap C1: measured impact" section already lists as a
+  known, pre-existing crash unrelated to that section's own change either
+  -- i.e. this DXIL/AMDGPU change did not introduce it. `api`'s crash (in
+  `object_management.multithreaded_per_thread_resources`, a threading
+  stress test) was not separately root-caused, since it is likewise in a
+  file this change never touches; it is left for a future full run's own
+  crash-isolation wrapper to attribute properly rather than guessed at
+  here.
