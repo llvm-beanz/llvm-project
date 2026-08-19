@@ -23035,3 +23035,161 @@ the two ops' constant `%dx.types.ResBind`/`%dx.types.ResourceProperties`
 operands") is still accurate -- this was a bug in that reconstruction, not
 a change to what it does or a deviation from what the design document
 describes.
+
+# 2026-08-19 (cont'd): `dx.op.dot.v2f32` turned out to be `GetDimensions.xy`, not `dot`
+
+## The report, and why I didn't trust it at face value
+
+The user reported the *same* bilateral-filter shader as the two entries
+immediately above, again describing "feme is hitting an assert" and asking
+to "flesh out" the resource access ops, but with a third, different
+diagnostic this time:
+
+```
+feme: 'dx.op.dot.v2f32' is not supported when targeting 'amdgpu9.0a-amd-amdhsa' (used in function 'main')
+```
+
+Given the previous two entries in this file each found the reported error
+text to be stale, paraphrased, or outright not reproducible verbatim, I
+again compiled the user's exact shader with the real `dxc` binary
+(`-T cs_6_2 -enable-16bit-types`, plus `cs_6_0`/no-16-bit and an unrolled-
+vs-dynamic-loop variant to see whether `dot(offset, offset)`, whose
+operands are compile-time-constant loop counters under `[unroll]`, might
+be surviving to codegen unfolded in some configuration) and fed every
+variant through the real `feme` CLI. None reproduced anything -- every one
+compiled to a real AMDGPU ELF object, including a hand-written variant that
+keeps a *dynamic* (non-unrolled) `dot(half2, half2)` alive specifically to
+force `dxc` to emit a real `dx.op.dot2.f16` rather than constant-folding it
+away. `dx.op.dot.v2f32` also isn't a real DXIL op name at all under this
+LLVM tree's own op-naming convention (`dx.op.<opclass>.<scalar-overload>`,
+e.g. `dot2.f32`/`dot3.f16` -- DXIL's `Dot2`/`Dot3`/`Dot4` ops are always
+scalarized, 2/3/4 individual float/half operands, never a single vector
+argument the `.v2f32` mangling would name), and `OpRaising.cpp`'s
+`DirectOps` table already raises opcodes 54-56 (`Dot2`/`Dot3`/`Dot4`)
+unconditionally regardless of overload width. So this specific string is
+not a literal repro of anything reachable from this shader -- consistent
+with the pattern the two prior entries already established for this same
+user's reports.
+
+What *did* reproduce, on the very next thing I tried (the shader's own
+commented-out `//OutputTexture.GetDimensions(width, height);` line,
+un-commented -- exactly what a developer would try next after hardcoding
+`width = 2048, height = 2048` as a workaround, which is what the comment
+in the prompt's own shader source strongly suggests happened):
+
+```
+feme: resource handle type 'dx.Texture' is not supported when targeting 'amdgcn-amd-amdhsa' (produced in function 'main')
+```
+
+So "flesh out the resource access ops" was the accurate part of the
+report, and `GetDimensions` specifically -- not `dot`, and not a
+previously-untouched resource kind -- was the actual remaining gap. This
+matches `test/Transforms/DXIL/dxil-raise-texture-ops.ll`'s own
+long-standing comment, predating this session: "the `.y` (height) field is
+left as an unmodified `extractvalue` since no `getdimensions.xy` lowering
+exists yet to cross-check against" -- i.e. this specific limitation was
+already known and documented, just not yet closed.
+
+## Why `GetDimensions.xy` specifically had no fix available to raise into
+
+Every other raiser in `OpRaising.cpp`'s texture section holds itself to
+one rule (stated in its own header comment): only raise a DXIL op into a
+canonical `llvm.dx.*` intrinsic that LLVM's own `DXILOpLowering.cpp`
+*already* lowers that intrinsic to/from, so the raiser can be verified
+against a real, running `-dxil-op-lower` round-trip rather than trusted on
+inspection alone. `int_dx_resource_getdimensions_xy` already existed
+upstream (`IntrinsicsDirectX.td`, returning `<2 x i32>`) -- but
+`DXILOpLowering.cpp` only implemented the forward lowering for its `_x`
+sibling (`lowerGetDimensionsX`), not `_xy`. Exactly the same shape of gap
+`raiseTextureStore`'s own history (two entries up, and Design.md's own
+"Status" note) already recorded for `TextureStore`: the *forward*
+direction (canonical intrinsic -> real DXIL op) has to exist upstream
+first, or there is nothing to cross-check a raiser against.
+
+So, mirroring that precedent exactly: added
+`DXILOpLowering::lowerGetDimensionsXY` to
+`llvm/lib/Target/DirectX/DXILOpLowering.cpp` first (extracts fields 0 and
+1 of `%dx.types.Dimensions`, packs them into the `<2 x i32>` the intrinsic
+returns), with its own standalone forward-lowering test
+(`llvm/test/CodeGen/DirectX/bufferGetDimensions2D.ll`, run through the real
+`opt -dxil-op-lower`) *before* touching `feme` at all -- same discipline,
+same reason.
+
+## The feme-side raiser and the AMDGPU consumer
+
+With the forward lowering in place, generalized `raiseGetDimensionsX` (now
+`raiseGetDimensions`) to accept extracts of field 0 *and/or* field 1: field
+0 alone still raises to the existing scalar `_x` overload (unchanged
+behavior, verified by re-running the existing `dimensions_2d` test
+unmodified); field 1 present raises to `_xy` instead, packing both fields
+via `extractelement` off the `<2 x i32>` result. (`CI.users()`'s iteration
+order is the def-use list's, not program order, so I explicitly sort the
+collected `extractvalue`s by field index before emitting anything --
+otherwise which `extractelement` comes first in the raised IR, and
+therefore which lit `CHECK` line matches which SSA name, would depend on
+that incidental order. Caught this the straightforward way: wrote the test
+expecting program order, watched `FileCheck` fail on the *other*
+plausible order, fixed the raiser rather than the test.)
+
+`feme::amdgpu::ResourceLoweringPass` needed the bigger addition: nothing
+consumed `llvm.dx.resource.getdimensions.x`/`.xy` on *any* target before
+this (confirmed by grepping the whole tree for "getdimensions" -- CPU and
+NVPTX's `ResourceLowering.cpp` don't mention it either, so it's a genuine,
+target-wide gap, not something AMDGPU alone was behind on). Modeled it the
+same way the existing addressing-stride argument is modeled -- a
+binding-specific, dedicated trailing `i32` kernel argument group
+(`Binding::NumDimensionArgs`, 0/1/2 depending on whether any access needs
+`.x` or `.xy`) the host supplies directly -- rather than reusing the
+existing stride argument for width. I considered reusing it (a 2D
+texture's row pitch *is* numerically its width in this flat model, by
+construction, per `lowerDXTextureAccess`'s own comment), but rejected it:
+that would make `GetDimensions`' correctness depend on an assumption
+("stride == width") the design already only claims as an implementation
+convenience, not a contract, and a 1D texture (whose addressing needs no
+stride argument at all) would still need a dedicated width argument
+regardless -- so reusing would only work inconsistently across dimensions.
+A single, always-dedicated argument group is simpler to reason about and
+matches this file's existing "explicit over implicit" style.
+
+## Verification
+
+Built with the existing `build/` tree (`LLVM_ENABLE_ASSERTIONS=ON`,
+`ccache` compiler launcher, both already configured by prior sessions).
+Four commits, each rebuilt and tested independently before moving to the
+next: the upstream `DXILOpLowering::lowerGetDimensionsXY` forward lowering
+(`check-llvm-codegen-directx`: 482/482, including the new
+`bufferGetDimensions2D.ll`); the feme `raiseGetDimensions` generalization
+(`ninja check-feme`: 1488/1489 passed unchanged plus the extended
+`dxil-raise-texture-ops.ll`); the AMDGPU `ResourceLoweringPass` extension
+(`Binding::NumDimensionArgs`, new `dims_x`/`dims_xy` cases in
+`amdgpu-lower-resources-texture-cbuffer.ll`, and a new end-to-end
+`feme-dxil-to-amdgpu-texture-getdimensions.ll` that runs a raised
+`GetDimensions(width, height)` call through real `llc` -> real `feme` ->
+a real AMDGPU ELF object); documentation. `ninja check-feme` after all
+code changes: 1489/1490 passed, 1 unsupported, no regressions.
+
+Re-verified the user's *exact* original shader with `GetDimensions`
+un-commented (restoring it to what the shader's own hardcoded-`2048`
+workaround comment implies was originally intended) compiles through the
+real `dxc` -> real `feme --target=amdgcn-amd-amdhsa` pipeline to a real,
+`file`-confirmed AMDGPU ELF object, both with and without `[unroll]` on
+the filter loops.
+
+Vulkan CTS: this change is confined to
+`llvm/lib/Target/DirectX/DXILOpLowering.cpp` and
+`feme/lib/Transforms/{DXIL,AMDGPU}/*` -- none of which `libfeme_vulkan`
+(the SPIR-V-import/`feme::cpu`/software-ICD path `VulkanCTSReport.md`
+measures) calls, the same reasoning every prior session's out-of-path
+change in this file used. Rather than only relying on that reasoning,
+though, I actually ran the CTS this time: a `dEQP-VK.api.info.*` smoke
+subset, then a full 54-group run (this report's own per-group split,
+without its crash-isolation wrapper). Totals landed in the same "clean
+rejection, no wrong answers" shape the existing headline report describes;
+two groups (`api`, `synchronization`) hit a segfault partway through in my
+simplified single-shot invocation, but `synchronization`'s crash is at the
+*exact* case (`timeline_semaphore.device_host.
+write_copy_buffer_read_copy_buffer.buffer_262144`) `VulkanCTSReport.md`'s
+own "Roadmap C1: measured impact" section already lists as a pre-existing,
+unrelated crash -- i.e. not something this change introduced. Recorded
+this as a dated addendum in `VulkanCTSReport.md` rather than overwriting
+its carefully-built headline numbers with a lower-fidelity run.
