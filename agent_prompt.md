@@ -26,12 +26,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement the C2 milestone for Vulkan conformance?
+Can you implement the C3 milestone for Vulkan conformance?
 
-> **`Uniform`-storage-class blocks.** Teach
-> `feme::spirv::getBufferBlockElementArray`/`getUniformBlockElementStruct` the
-> four shapes glslang actually emits: a `BufferBlock`-decorated struct in
-> `Uniform` (the pre-SPIR-V-1.3 SSBO), a `Block` struct with more than one
-> member, a sized-array member, and a matrix member with
-> `RowMajor`/`ColMajor`/`MatrixStride`. Then arrayed bindings (an
-> array-of-blocks pointer)
+> **Divergent-vector decomposition in `feme-cpu-simdize`.** The single largest
+> *FeMe-owned* compute-track gap, already tracked as "roadmap milestone 7
+> deviation" by the pass's own diagnostic (§1.6). Conformance makes it P0 rather
+> than P1: it is the first blocker for a third of all failures once C2 lands
