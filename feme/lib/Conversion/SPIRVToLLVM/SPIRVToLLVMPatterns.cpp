@@ -213,6 +213,24 @@ bool isUniformBlockPointer(mlir::spirv::PointerType Type) {
   return static_cast<bool>(getUniformBlockElement(Type));
 }
 
+/// Returns the descriptor count of \p Type if it is an array-of-blocks
+/// pointer -- `T blocks[N]` in GLSL, a single binding covering `N`
+/// descriptors, each its own storage/uniform buffer block instance -- or
+/// `std::nullopt` if it is not an array of blocks at all (an ordinary,
+/// non-arrayed block, an array of some other resource kind, or not a
+/// resource at all).
+std::optional<uint32_t> getArrayedBlockCount(mlir::spirv::PointerType Type) {
+  auto Array = mlir::dyn_cast<mlir::spirv::ArrayType>(Type.getPointeeType());
+  if (!Array)
+    return std::nullopt;
+  auto ElementPointerType = mlir::spirv::PointerType::get(
+      Array.getElementType(), Type.getStorageClass());
+  if (!isBufferBlockPointer(ElementPointerType) &&
+      !isUniformBlockPointer(ElementPointerType))
+    return std::nullopt;
+  return Array.getNumElements();
+}
+
 /// Emits a call to \p Intrinsic returning \p ResultType, with \p Args.
 mlir::Value createIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
                                 mlir::Location Loc, llvm::StringRef Intrinsic,
@@ -561,6 +579,13 @@ public:
 /// backend emits the `OpVariable` and its `DescriptorSet`/`Binding`
 /// decorations from the intrinsic, so `!spirv.ptr<image, UniformConstant>`
 /// converts to the handle type itself.
+///
+/// An array-of-blocks variable's own address is simply erased instead: its
+/// handle needs which descriptor to bind, only known at its own access
+/// chain's leading (array) index -- see ArrayedBlockAccessChainPattern,
+/// which builds that handle itself and is the only legal use of such a
+/// variable's address (a whole descriptor array is never itself loaded
+/// or stored as a value).
 class ResourceAddressOfPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AddressOfOp> {
 public:
@@ -578,6 +603,10 @@ public:
     auto It = Resources.find(Op.getVariable());
     if (It == Resources.end())
       return Rewriter.notifyMatchFailure(Op, "not a resource variable");
+    if (It->second.Count > 1) {
+      Rewriter.eraseOp(Op);
+      return mlir::success();
+    }
 
     mlir::Type HandleType = getTypeConverter()->convertType(Op.getType());
     if (!HandleType)
@@ -590,9 +619,9 @@ public:
         Rewriter, Loc, I32, static_cast<int32_t>(It->second.DescriptorSet)));
     Args.push_back(mlir::LLVM::ConstantOp::create(
         Rewriter, Loc, I32, static_cast<int32_t>(It->second.Binding)));
-    // A `spirv.GlobalVariable` of image type declares exactly one resource,
-    // not an array of them, so the binding holds a single descriptor and the
-    // index into it is always zero.
+    // A non-arrayed `spirv.GlobalVariable` declares exactly one resource,
+    // so the binding holds a single descriptor and the index into it is
+    // always zero.
     Args.push_back(mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, 1));
     Args.push_back(mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, 0));
     Args.push_back(mlir::LLVM::AddressOfOp::create(
@@ -651,6 +680,71 @@ std::optional<uint64_t> getConstantMemberIndex(mlir::Value Index) {
   return IntAttr.getValue().getZExtValue();
 }
 
+/// Shared by BlockAccessChainPattern (a plain block) and
+/// ArrayedBlockAccessChainPattern (one element of an array-of-blocks
+/// binding) below: builds the `llvm.spv.resource.getpointer` call selecting
+/// \p AllIndices[Selector] of \p Element's content from \p Handle, then an
+/// ordinary GEP for any indices beyond it -- see BlockElement's own comment
+/// for what that selector means in each shape, and BlockAccessChainPattern's
+/// for why a further GEP needs \p ElementPointerType (the pointer type
+/// whose pointee is the block's own struct, to recover a selected member's
+/// SPIR-V type) rather than trusting the already-converted handle type.
+mlir::LogicalResult rewriteBlockAccess(
+    mlir::spirv::AccessChainOp Op, mlir::ConversionPatternRewriter &Rewriter,
+    const mlir::TypeConverter &TypeConverter,
+    mlir::spirv::PointerType ElementPointerType, const BlockElement &Element,
+    mlir::Value Handle, mlir::ValueRange AllIndices, unsigned Selector) {
+  mlir::Type ResultType =
+      TypeConverter.convertType(Op.getComponentPtr().getType());
+  if (!ResultType)
+    return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+  mlir::Location Loc = Op.getLoc();
+  mlir::Value ElementPtr =
+      createIntrinsicCall(Rewriter, Loc, "llvm.spv.resource.getpointer",
+                          ResultType, {Handle, AllIndices[Selector]});
+  if (AllIndices.size() == Selector + 1) {
+    Rewriter.replaceOp(Op, ElementPtr);
+    return mlir::success();
+  }
+
+  // Further indices navigate what `llvm.spv.resource.getpointer` just
+  // selected -- an array element's own fields, in the wrapper shape (whose
+  // sole content is always that homogeneous array); one of the direct
+  // shape's own members, itself possibly an array, a matrix, or a nested
+  // struct -- so its own SPIR-V type has to be recovered to convert the
+  // right one. The leading 0 dereferences through the pointer
+  // `llvm.spv.resource.getpointer` returned, exactly as an ordinary GEP
+  // into a pointer operand would.
+  mlir::Type SelectedType;
+  if (Element.HasWrapper) {
+    SelectedType = mlir::cast<mlir::spirv::RuntimeArrayType>(
+                       mlir::cast<mlir::spirv::StructType>(
+                           ElementPointerType.getPointeeType())
+                           .getElementType(0))
+                       .getElementType();
+  } else {
+    std::optional<uint64_t> MemberIndex =
+        getConstantMemberIndex(Op.getIndices()[Selector]);
+    if (!MemberIndex)
+      return Rewriter.notifyMatchFailure(Op,
+                                         "member selector is not a constant");
+    SelectedType = mlir::cast<mlir::spirv::StructType>(Element.Content)
+                       .getElementType(*MemberIndex);
+  }
+  mlir::Type ElementType = TypeConverter.convertType(SelectedType);
+  if (!ElementType)
+    return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+  llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
+  GEPIndices.push_back(0);
+  llvm::append_range(GEPIndices, AllIndices.drop_front(Selector + 1));
+  Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
+      Op, ResultType, ElementType, ElementPtr, GEPIndices,
+      mlir::LLVM::GEPNoWrapFlags::inbounds);
+  return mlir::success();
+}
+
 /// Converts `spirv.AccessChain` into a storage/uniform buffer block whose
 /// base pointer converted to a `spirv.VulkanBuffer` handle rather than an
 /// ordinary LLVM pointer (see feme::spirv::getBufferBlockElement/
@@ -666,7 +760,11 @@ std::optional<uint64_t> getConstantMemberIndex(mlir::Value Index) {
 /// the selected content's own fields/elements with an ordinary
 /// `llvm.getelementptr`, matching how real `dxc`-compiled SPIR-V is
 /// expected to lower on LLVM's SPIRV backend (see
-/// `llvm/test/CodeGen/SPIRV/pointers/structured-buffer-access.ll`).
+/// `llvm/test/CodeGen/SPIRV/pointers/structured-buffer-access.ll`). An
+/// array-of-blocks pointer's own access chain is handled by
+/// ArrayedBlockAccessChainPattern instead, since its handle needs a runtime
+/// index this pattern's own base pointer -- already converted to a handle
+/// with no such index -- cannot supply.
 class BlockAccessChainPattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
 public:
@@ -694,56 +792,94 @@ public:
     if (Indices.size() <= Selector)
       return Rewriter.notifyMatchFailure(Op, "not enough indices");
 
-    mlir::Type ResultType =
-        getTypeConverter()->convertType(Op.getComponentPtr().getType());
-    if (!ResultType)
+    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(), PointerType,
+                              *Element, Adaptor.getBasePtr(), Indices,
+                              Selector);
+  }
+};
+
+/// Converts `spirv.AccessChain` into an array-of-blocks pointer (`T
+/// blocks[N]` in GLSL) -- a single binding covering `N` descriptors, each
+/// its own storage/uniform buffer block instance -- building the
+/// `spirv.VulkanBuffer` handle itself, unlike BlockAccessChainPattern
+/// above: an arrayed block's handle needs *which* descriptor to bind, only
+/// known once this access chain's own leading index (the array index) is
+/// available, whereas a non-arrayed block's handle needs no runtime
+/// information the type converter cannot already supply on its own.
+/// `spirv.mlir.addressof`'s own conversion (ResourceAddressOfPattern)
+/// erases the op instead of building a (necessarily incomplete) handle for
+/// it, since its only use is always an access chain like this one.
+class ArrayedBlockAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  ArrayedBlockAccessChainPattern(mlir::MLIRContext *Context,
+                                 const mlir::LLVMTypeConverter &TypeConverter,
+                                 mlir::PatternBenefit Benefit,
+                                 const feme::spirv::ResourceInfoMap &Resources)
+      : mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp>(
+            Context, TypeConverter, Benefit),
+        Resources(Resources) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto AddrOf = Op.getBasePtr().getDefiningOp<mlir::spirv::AddressOfOp>();
+    if (!AddrOf)
+      return Rewriter.notifyMatchFailure(Op, "base is not a variable address");
+    auto It = Resources.find(AddrOf.getVariable());
+    if (It == Resources.end() || It->second.Count <= 1)
+      return Rewriter.notifyMatchFailure(Op, "not an arrayed block");
+
+    auto PointerType = mlir::cast<mlir::spirv::PointerType>(AddrOf.getType());
+    auto Array =
+        mlir::cast<mlir::spirv::ArrayType>(PointerType.getPointeeType());
+    auto ElementPointerType = mlir::spirv::PointerType::get(
+        Array.getElementType(), PointerType.getStorageClass());
+
+    std::optional<BlockElement> Element =
+        getBufferBlockElement(ElementPointerType);
+    if (!Element)
+      Element = getUniformBlockElement(ElementPointerType);
+    if (!Element)
+      return Rewriter.notifyMatchFailure(Op, "not a block pointer");
+
+    // The leading index selects which descriptor of the array to bind; the
+    // rest apply to that descriptor's own block content exactly like
+    // BlockAccessChainPattern's own selector, shifted over by that one
+    // extra leading index.
+    mlir::ValueRange Indices = Adaptor.getIndices();
+    unsigned Selector = Element->HasWrapper ? 2 : 1;
+    if (Indices.size() <= Selector)
+      return Rewriter.notifyMatchFailure(Op, "not enough indices");
+
+    mlir::Type HandleType = getTypeConverter()->convertType(ElementPointerType);
+    if (!HandleType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
     mlir::Location Loc = Op.getLoc();
-    mlir::Value ElementPtr = createIntrinsicCall(
-        Rewriter, Loc, "llvm.spv.resource.getpointer", ResultType,
-        {Adaptor.getBasePtr(), Indices[Selector]});
-    if (Indices.size() == Selector + 1) {
-      Rewriter.replaceOp(Op, ElementPtr);
-      return mlir::success();
-    }
+    mlir::Type I32 = Rewriter.getI32Type();
+    mlir::Value Handle = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.resource.handlefrombinding", HandleType,
+        {mlir::LLVM::ConstantOp::create(
+             Rewriter, Loc, I32,
+             static_cast<int32_t>(It->second.DescriptorSet)),
+         mlir::LLVM::ConstantOp::create(
+             Rewriter, Loc, I32, static_cast<int32_t>(It->second.Binding)),
+         mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32,
+                                        static_cast<int32_t>(It->second.Count)),
+         Indices[0],
+         mlir::LLVM::AddressOfOp::create(
+             Rewriter, Loc,
+             mlir::LLVM::LLVMPointerType::get(Rewriter.getContext()),
+             It->second.NameSymbol)});
 
-    // Further indices navigate what `llvm.spv.resource.getpointer` just
-    // selected -- an array element's own fields, in the wrapper shape
-    // (whose sole content is always that homogeneous array); one of the
-    // direct shape's own members, itself possibly an array, a matrix, or a
-    // nested struct -- so its own SPIR-V type has to be recovered to
-    // convert the right one. The leading 0 dereferences through the
-    // pointer `llvm.spv.resource.getpointer` returned, exactly as an
-    // ordinary GEP into a pointer operand would.
-    mlir::Type SelectedType;
-    if (Element->HasWrapper) {
-      SelectedType =
-          mlir::cast<mlir::spirv::RuntimeArrayType>(
-              mlir::cast<mlir::spirv::StructType>(PointerType.getPointeeType())
-                  .getElementType(0))
-              .getElementType();
-    } else {
-      std::optional<uint64_t> MemberIndex =
-          getConstantMemberIndex(Op.getIndices()[Selector]);
-      if (!MemberIndex)
-        return Rewriter.notifyMatchFailure(Op,
-                                           "member selector is not a constant");
-      SelectedType = mlir::cast<mlir::spirv::StructType>(Element->Content)
-                         .getElementType(*MemberIndex);
-    }
-    mlir::Type ElementType = getTypeConverter()->convertType(SelectedType);
-    if (!ElementType)
-      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
-
-    llvm::SmallVector<mlir::LLVM::GEPArg> GEPIndices;
-    GEPIndices.push_back(0);
-    llvm::append_range(GEPIndices, Indices.drop_front(Selector + 1));
-    Rewriter.replaceOpWithNewOp<mlir::LLVM::GEPOp>(
-        Op, ResultType, ElementType, ElementPtr, GEPIndices,
-        mlir::LLVM::GEPNoWrapFlags::inbounds);
-    return mlir::success();
+    return rewriteBlockAccess(Op, Rewriter, *getTypeConverter(),
+                              ElementPointerType, *Element, Handle, Indices,
+                              Selector);
   }
+
+private:
+  const feme::spirv::ResourceInfoMap &Resources;
 };
 
 /// Returns false if \p Struct's member \p Index is a matrix decorated
@@ -1563,10 +1699,16 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
   for (auto Global : Module.getOps<mlir::spirv::GlobalVariableOp>()) {
     auto PointerType =
         mlir::dyn_cast<mlir::spirv::PointerType>(Global.getType());
-    if (!PointerType || (!isResourcePointer(PointerType) &&
-                         !isBufferBlockPointer(PointerType) &&
-                         !isUniformBlockPointer(PointerType)))
+    if (!PointerType)
       continue;
+    uint32_t Count = 1;
+    if (!isResourcePointer(PointerType) && !isBufferBlockPointer(PointerType) &&
+        !isUniformBlockPointer(PointerType)) {
+      std::optional<uint32_t> ArrayedCount = getArrayedBlockCount(PointerType);
+      if (!ArrayedCount)
+        continue;
+      Count = *ArrayedCount;
+    }
     std::optional<uint32_t> Set = Global.getDescriptorSet();
     std::optional<uint32_t> Binding = Global.getBinding();
     if (!Set || !Binding)
@@ -1585,7 +1727,7 @@ feme::spirv::prepareResourceVariables(mlir::spirv::ModuleOp Module) {
         mlir::LLVM::LLVMArrayType::get(Builder.getI8Type(), Contents.size()),
         /*isConstant=*/true, mlir::LLVM::Linkage::Private, NameSymbol,
         Builder.getStringAttr(Contents));
-    Resources[SymName] = {*Set, *Binding, NameSymbol};
+    Resources[SymName] = {*Set, *Binding, NameSymbol, Count};
   }
   return Resources;
 }
@@ -1612,7 +1754,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
            LoadValuePattern, PushConstantGlobalVariablePattern,
            SampledImagePattern, StageIOGlobalVariablePattern>(
           Patterns.getContext(), TypeConverter, FeMeBenefit);
-  Patterns.add<ResourceAddressOfPattern, ResourceGlobalVariablePattern>(
+  Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
+               ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit, StageIOVariables);

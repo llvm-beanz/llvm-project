@@ -59,8 +59,8 @@ namespace spirv {
 std::string getTargetTriple(mlir::spirv::ModuleOp Module);
 
 /// What `llvm.spv.resource.handlefrombinding` needs to know about a SPIR-V
-/// resource variable -- an image, a sampler, or a `StorageBuffer` block --
-/// recovered from its declaration before the conversion drops it.
+/// resource variable -- an image, a sampler, or a storage/uniform buffer
+/// block -- recovered from its declaration before the conversion drops it.
 struct ResourceInfo {
   uint32_t DescriptorSet;
   uint32_t Binding;
@@ -68,6 +68,14 @@ struct ResourceInfo {
   /// reads its contents to name the `OpVariable` it emits, so the name has to
   /// exist in the module as real data rather than as an attribute.
   std::string NameSymbol;
+  /// The number of descriptors this binding covers: 1 for an ordinary
+  /// (non-arrayed) resource, or the declared length of an array-of-blocks
+  /// binding (`T blocks[N]` in GLSL). An arrayed block's handle needs which
+  /// descriptor to bind, only known at its own access chain's leading
+  /// (array) index, so its `spirv.mlir.addressof` is erased rather than
+  /// converted (see feme::spirv::populateSPIRVToLLVMTargetPatterns's
+  /// `ArrayedBlockAccessChainPattern`).
+  uint32_t Count = 1;
 };
 
 /// Resource variables, keyed by the symbol declaring them.
