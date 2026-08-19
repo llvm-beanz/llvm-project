@@ -7,26 +7,25 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `60f34352aae6` (roadmap C4a/C4b, "Graphics pipeline state
-  breadth": silent graphics-pipeline-state rejections now diagnose
-  themselves through an opt-in log callback, `VK_CULL_MODE_FRONT_AND_BACK`
-  culling, and 8x multisampling -- see "Roadmap C4a/C4b: measured impact"
-  below).
+- FeMe revision: `3f87f5b1fb73` (roadmap C4c, "Graphics pipeline state
+  breadth": all 12 `VK_EXT_extended_dynamic_state` dynamic states
+  implemented and the extension advertised -- see "Roadmap C4c: measured
+  impact" below).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
   robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
   empty image format lists" -- see "Deviations from a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1462 passed, 1 unsupported.
+- `check-feme`: 1470 passed, 1 unsupported.
 
 ## Headline
 
 | | Count | Share |
 |---|---|---|
 | Total cases | 3,237,000 | |
-| Passed | 10,520 | 0.33% |
-| Failed | 26,955 | 0.83% |
-| Not supported | 3,199,524 | 98.84% |
+| Passed | 10,560 | 0.33% |
+| Failed | 27,018 | 0.83% |
+| Not supported | 3,199,421 | 98.84% |
 | Quality warning | 1 | |
 | **Crashed / timed out** | **0** | |
 
@@ -298,7 +297,61 @@ recorded). As before, the clean standalone run's numbers are what this
 report's totals use, and the flake is recorded here rather than silently
 worked around.
 
-## Every failure, by root cause
+## Roadmap C4c: measured impact
+
+Roadmap C4's "`mapDynamicState` beyond its six states" is now closed: all
+12 `VK_EXT_extended_dynamic_state` dynamic states (cull mode, front face,
+depth test/write/compare-op, depth-bounds-test-enable, stencil test-enable/
+op, viewport/scissor "with count", primitive topology restricted to the
+triangle class, and vertex-input-binding-stride) are implemented and the
+extension is advertised. `mapTopology` beyond `TriangleList`/`TriangleStrip`
+and the dual-source blend factors remain open, exactly as FeMeGraphicsDesign.md's
+updated status note describes.
+
+**10,560 passed (+40), 27,018 failed (+63), `Not supported` 3,199,421
+(-103), same 3,237,000 total.** The +40 is directly attributable and
+exact: every one of `dynamic_state.*.compute_transfer.single.{compute,
+transfer}.{cull_mode,front_face,depth_test_enable,depth_write_enable,
+depth_compare_op,stencil_test_enable,stencil_op,viewport_with_count,
+scissor_with_count}.{before,after}` now passes for real, having previously
+been `NotSupported` outright because `vkEnumerateDeviceExtensionProperties`
+never listed the extension a conformant `deqp-vk` checks for before
+attempting any of them. This is the clearest possible confirmation that
+the dynamic-state resolution added by C4c (`DynamicGraphicsState`,
+`buildExecutorPipeline`) is not just unit-tested but reachable and correct
+against an independent, real conformance client.
+
+Four of the +63 newly-`Fail`ed cases are the same "stacked blockers"
+pattern C1/C3/C4a/C4b's own sections already established:
+`dynamic_state.monolithic.compute_transfer.single.{compute,transfer}.
+vertex_input_binding_stride.{before,after}` now get far enough to attempt
+`vkCreateGraphicsPipelines` (previously `NotSupported` for the missing
+extension) and fail there instead, on a gap this milestone does not touch
+at all -- `translateFixedFunctionState`'s pre-existing "a graphics
+pipeline needs both a vertex and a fragment stage" rejection
+(`GraphicsPipeline.cpp`), because this particular CTS scenario binds a
+compute pipeline into the same command buffer as its vertex-input-stride
+coverage and expects a vertex-only draw path this ICD has never supported
+(V6's own "only the vertex and fragment stages are implemented" scope,
+unrelated to C4c). The remaining ~59 of the +63 were not traced to any
+name containing a `VK_EXT_extended_dynamic_state` state (searched across
+every group's `Fail` case names for the 12 states above); attributing them
+precisely needs a case-by-case diff against a saved pre-C4c run this
+measurement did not keep, and is left as a known gap in this section's own
+precision rather than asserted either way.
+
+`dEQP-VK.pipeline.{monolithic,fast_linked_library,pipeline_library}.
+extended_dynamic_state.*` (4,059 cases per pipeline-construction variant,
+12,177 total) itself moved by exactly zero: every one of its cases is
+`NotSupported` for `VK_EXT_extended_dynamic_state2`/`_state3`,
+`VK_EXT_vertex_input_dynamic_state`, `VK_EXT_mesh_shader`, or a missing
+mandatory color-attachment format, none of which C4c implements (this
+CTS release apparently no longer ships a pure-`VK_EXT_extended_dynamic_
+state`-only variant of this particular test group -- every parameterization
+sampled also needs at least one of those). The `dynamic_state` group above,
+not `pipeline.*.extended_dynamic_state`, is where this milestone's actual
+CTS value shows up.
+
 
 
 **This section's own counts are from the pre-C2 revision** (`5f7420c1b3dd`)
@@ -428,7 +481,7 @@ four cases on `VkPhysicalDeviceDriverProperties` (no registered
 `VkDriverId`, no conformance version, non-null-terminated name/info
 strings).
 
-## What the 3,199,524 `Not supported` results mean
+## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
 capability it needs is genuinely optional. The bulk of this run's
