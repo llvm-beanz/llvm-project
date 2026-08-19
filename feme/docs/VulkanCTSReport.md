@@ -7,26 +7,26 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `5f7420c1b3dd` (roadmap C1, "Mandatory formats":
-  `B8G8R8A8_UNORM`/`R10G10B10A2_UNORM` color-attachment support and
-  `D24_UNORM_S8_UINT` combined depth+stencil support, both with real
-  `feme::graphics` pack/unpack -- see "Roadmap C1: measured impact" below
-  for why the headline numbers are unchanged from the previous edition).
+- FeMe revision: `fda8fae39be2` (roadmap C2, "`Uniform`-storage-class
+  blocks": glslang's own direct block shapes, matrix members, and
+  array-of-blocks bindings, plus two crashes a real CTS run against a
+  prototype surfaced and fixed in the same pass -- see "Roadmap C2:
+  measured impact" below).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
   robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
   empty image format lists" -- see "Deviations from a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1442 passed, 1 unsupported.
+- `check-feme`: 1447 passed, 1 unsupported.
 
 ## Headline
 
 | | Count | Share |
 |---|---|---|
-| Total cases | 3,237,000 | |
-| Passed | 10,350 | 0.32% |
-| Failed | 27,094 | 0.84% |
-| Not supported | 3,199,555 | 98.84% |
+| Total cases | 3,236,999 | |
+| Passed | 10,519 | 0.32% |
+| Failed | 26,925 | 0.83% |
+| Not supported | 3,199,555 | 98.85% |
 | Quality warning | 1 | |
 | **Crashed / timed out** | **0** | |
 
@@ -42,7 +42,7 @@ have **zero** failures (`conditional_rendering`, `cooperative_vector`,
 all of them because the feature they cover is not advertised at all, which
 is the correct, truthful outcome for this ICD's declared scope.
 
-**No case produces a wrong answer.** Every one of the 27,094 failures was
+**No case produces a wrong answer.** Every one of the 26,925 failures was
 traced to a *clean rejection* -- a pipeline that failed to create, a format
 or descriptor type the ICD does not advertise, or a `deqp-vk` check of a
 mandatory capability the ICD does not claim. Not one is a `Pass`-shaped
@@ -117,7 +117,86 @@ an otherwise-identical run that completed cleanly (7,445 passed / 287
 failed / 259,490 not supported / 267,222 total), and this flake is
 recorded here rather than silently worked around.
 
+## Roadmap C2: measured impact
+
+Roadmap C2 ("`Uniform`-storage-class blocks", see Roadmap.md §1.9.1)
+generalized `feme::spirv::getBufferBlockElement`/`getUniformBlockElement`
+to the shapes glslang emits directly (no separate FeMe/dxc wrapper
+struct): a pre-1.3 SSBO (`Uniform` + `BufferBlock`), a `Block`/
+`BufferBlock` struct with more than one member, a sized-array member, and
+a `ColMajor` matrix member (`RowMajor` is declined, not miscompiled); an
+array-of-blocks binding (`T blocks[N]` in GLSL) is handled by a new
+`ArrayedBlockAccessChainPattern`. See the commit series ending at this
+revision for the full breakdown, and `Design.md`'s "Known gap: `spirv`
+dialect -> `llvm` dialect conversion coverage" for the updated scope.
+
+**This is the first roadmap step whose full CTS re-run moved the headline
+numbers**: 10,519 passed (+169) and 26,925 failed (-169), `Not supported`
+unchanged at 3,199,555. That the movement is two orders of magnitude
+smaller than C2's own 10,121-case column is exactly the "stacked
+blockers" effect C1's own measurement first surfaced (see above): the
+`Uniform`-storage-class-block diagnostic itself is now gone from every
+log (grepped for directly), but `feme-cpu-simdize`'s divergent-vector
+diagnostic count on the same re-run (10,223 occurrences, essentially the
+same shaders C2 unblocked) confirms most of column C2's own 10,121 cases
+now fail one stage later, on Roadmap C3, exactly as predicted rather than
+passing outright. The 169 cases that *do* now pass are the ones C2 was the
+*only* blocker for.
+
+Two real bugs surfaced and were fixed in the same pass, both by running
+this exact measurement against a work-in-progress build rather than only
+against the unit tests added alongside each commit:
+
+- `dEQP-VK.ubo.single_struct.per_block_buffer.std140_instance_array_both`
+  hit an assertion in the shared access-chain rewrite helper
+  (`rewriteBlockAccess`), which unconditionally assumed FeMe's own
+  single-member wrapper shape's content was always a storage buffer's
+  runtime array, when a uniform block's own wrapper content is a field
+  *struct* instead -- fixed by dispatching on what the content actually
+  is rather than on which shape produced it (a `spirv-to-llvm-glslang-
+  blocks.mlir` case now covers the exact shape).
+- `dEQP-VK.glsl.conversions.matrix_to_matrix.mat2_to_mat2x3_vertex`
+  crashed in MLIR upstream's own `CompositeExtractPattern`/
+  `CompositeInsertPattern`, both of which assume any non-vector composite
+  converts to a pure `llvm.extractvalue`/`llvm.insertvalue`-shaped
+  aggregate -- true before this revision, since nothing converted
+  `spirv.MatrixType` at all, but no longer once C2 added that conversion.
+  A matrix's own array-of-column-vectors representation needs
+  `llvm.extractelement`/`llvm.insertelement` for the scalar-within-a-
+  column case, which MLIR's own patterns cannot produce; FeMe's own
+  higher-benefit `MatrixCompositeExtractPattern`/
+  `MatrixCompositeInsertPattern` do (`spirv-to-llvm-matrix-composite.mlir`
+  covers all four shapes: column/scalar extract/insert).
+
+Both were caught by this same 54-group run, both are fixed in this
+revision (not merely documented as a follow-up, unlike C1's own format-
+properties blocker), and `check-feme` (1447 passed, 1 unsupported) covers
+both with unit tests independent of a `deqp-vk` checkout.
+
+This run also reproduced the CTS-side data-path methodology gap
+`glsl`/`graphicsfuzz` groups need `deqp-vk`'s own working directory to
+resolve relative Amber/shader-test asset paths (`./vulkan/...`); running
+each group in its own directory (see "Reproducing this report" below)
+needs a `vulkan -> $VK_GL_CTS/external/vulkancts/data/vulkan` symlink in
+every one, not just those two -- `pipeline`'s own Amber cases hit the same
+gap and, unlike a missing-format or missing-extension `NotSupported`,
+`deqp-vk` treats a missing asset file as fatal and aborts the *entire*
+group early (silently under-reporting `pipeline`'s own total by roughly
+850,000 cases in this session's first attempt, until the symlink was
+added everywhere). This is a CTS-side/harness methodology finding, not an
+ICD change, but is recorded here since it would otherwise quietly corrupt
+any future re-run's totals.
+
 ## Every failure, by root cause
+
+**This section's own counts are from the pre-C2 revision** (`5f7420c1b3dd`)
+and are not yet re-attributed; see "Roadmap C2: measured impact" above for
+this revision's actual headline movement (+169 passed) and the two
+diagnostics that changed the most (the `Uniform`-storage-class-block one
+below is now gone entirely; `feme-cpu-simdize`'s own count grew to 10,223).
+Full re-attribution across 26,925 failures is deferred to Roadmap.md's C10
+("Continuous measurement"), which is exactly the gap that makes re-running
+this by hand, rather than automatically, this expensive.
 
 Attribution method: each failing case's `deqp-vk` reason string is joined
 with the ICD's own `stderr` diagnostics emitted between that case's start
@@ -137,7 +216,7 @@ and its result line, and -- for Amber-based cases, which report only
 
 | Cases | Cause | Where it belongs |
 |---:|---|---|
-| 10,121 | A `Uniform`-storage-class block is not legalized. `feme::spirv::getBufferBlockElementArray` matches `StorageBuffer` pointers only, and `getUniformBlockElementStruct` matches a `Uniform` pointer only when its pointee is a single-member struct whose member is *itself* a struct. Everything glslang actually emits misses: a `BufferBlock`-decorated struct in `Uniform` (the pre-SPIR-V-1.3 spelling of an SSBO), a `Block` struct with more than one member, a sized (not runtime) array member, a matrix member with `RowMajor`/`ColMajor`/`MatrixStride`, and an array-of-blocks arrayed binding | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` |
+| 10,121 | ~~A `Uniform`-storage-class block is not legalized. `feme::spirv::getBufferBlockElementArray` matches `StorageBuffer` pointers only, and `getUniformBlockElementStruct` matches a `Uniform` pointer only when its pointee is a single-member struct whose member is *itself* a struct. Everything glslang actually emits misses: a `BufferBlock`-decorated struct in `Uniform` (the pre-SPIR-V-1.3 spelling of an SSBO), a `Block` struct with more than one member, a sized (not runtime) array member, a matrix member with `RowMajor`/`ColMajor`/`MatrixStride`, and an array-of-blocks arrayed binding~~ (fixed by roadmap C2; this diagnostic no longer appears in any log -- see "Roadmap C2: measured impact" above) | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` |
 | 9,067 | `feme-cpu-simdize` cannot decompose a divergent vector value used outside an insertelement-chain/resource-store/extractelement pattern (its own diagnostic names this "roadmap milestone 7 deviation") | `feme/lib/Target/CPU` |
 | 816 | A descriptor array of combined image samplers: the access chain converts to an `llvm.getelementptr` whose result type is `!llvm.struct<(target<"spirv.Image">, target<"spirv.Sampler">)>` rather than a pointer | `feme/lib/Conversion/SPIRVToLLVM` |
 | 306 | A graphics stage `Output` variable of matrix or aggregate type is not legalized | `feme/lib/Conversion/SPIRVToLLVM/StageIODecorations.cpp` |
@@ -285,8 +364,16 @@ VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
 grep -oP '^TEST: dEQP-VK\.\K[a-z_0-9]+' dEQP-VK-cases.txt | sort -u > groups.txt
 
 # 3. Run every top-level group, six at a time, each in its own directory so
-#    the per-group shader cache and .qpa log do not collide.
+#    the per-group shader cache and .qpa log do not collide -- and with a
+#    `vulkan -> data/vulkan` symlink in each one, or the Amber/`glsl`/
+#    `graphicsfuzz`/`pipeline` cases that resolve test assets by a relative
+#    `./vulkan/...` path abort their *entire* group early on the first miss
+#    (a `ResourceError`, not a `NotSupported`) rather than just failing that
+#    one case, silently truncating the group's own total (this cost
+#    `pipeline` roughly 850,000 cases the first time this report's own
+#    numbers were regenerated -- see "Roadmap C2: measured impact" above).
 xargs -P 6 -n 1 -a groups.txt sh -c 'mkdir -p /tmp/cts/$1 && cd /tmp/cts/$1 &&
+  ln -sfn <VK-GL-CTS>/external/vulkancts/data/vulkan vulkan &&
   VK_DRIVER_FILES=<feme-build>/tools/feme/tools/feme-vulkan/feme_icd.json \
   <VK-GL-CTS>/build/external/vulkancts/modules/vulkan/deqp-vk \
     --deqp-case="dEQP-VK.$1.*" --deqp-log-filename=$1.qpa > $1.log 2>&1' _
