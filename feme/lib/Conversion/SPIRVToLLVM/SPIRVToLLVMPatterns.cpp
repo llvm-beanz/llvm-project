@@ -16,6 +16,7 @@
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/MathExtras.h"
@@ -240,6 +241,49 @@ mlir::Value createIntrinsicCall(mlir::ConversionPatternRewriter &Rewriter,
              mlir::StringAttr::get(Rewriter.getContext(), Intrinsic), Args)
       .getResults();
 }
+
+/// Converts `spirv.Switch` to `llvm.switch`, which MLIR has no pattern for
+/// at all (see the "`spirv.Switch` op is not supported at the moment" note
+/// in `mlir::populateSPIRVToLLVMConversionPatterns`'s structured-loop
+/// pattern). The two ops match almost one-to-one: both are a selector value
+/// compared against a set of case literals, each branching to its own
+/// successor with its own successor operands, with a required default
+/// successor for the selector matching none of them. `spirv-opt`'s
+/// merge-return pass emits a case-less `spirv.Switch` (branching
+/// unconditionally to its default successor) to skip the rest of a function
+/// after an early return, which is otherwise indistinguishable from any
+/// other switch here.
+class SwitchConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::SwitchOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::SwitchOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::SwitchOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    // `literals`' element type is the selector's (pre-conversion) SPIR-V
+    // type, which may be signed or unsigned; the LLVM op's verifier requires
+    // its case values to have exactly the (post-conversion, always signless)
+    // selector type, so the literals have to be rebuilt against it rather
+    // than reused as-is.
+    mlir::DenseIntElementsAttr CaseValues;
+    if (mlir::DenseIntElementsAttr Literals = Op.getLiteralsAttr()) {
+      llvm::SmallVector<llvm::APInt> Values(Literals.getValues<llvm::APInt>());
+      auto CaseValueType = mlir::VectorType::get(
+          static_cast<int64_t>(Values.size()), Adaptor.getSelector().getType());
+      CaseValues = mlir::DenseIntElementsAttr::get(CaseValueType, Values);
+    }
+
+    llvm::SmallVector<mlir::ValueRange> TargetOperands =
+        Adaptor.getTargetOperands();
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::SwitchOp>(
+        Op, Adaptor.getSelector(), Op.getDefaultTarget(),
+        Adaptor.getDefaultOperands(), CaseValues, Op.getTargets(),
+        llvm::ArrayRef(TargetOperands));
+    return mlir::success();
+  }
+};
 
 /// Replaces `spirv.mlir.addressof` of a builtin input variable with the
 /// `llvm.spv.*` intrinsic reading it. There is no LLVM global to take the
@@ -1828,16 +1872,16 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables) {
-  Patterns
-      .add<ArrayConstantPattern, BuiltInAddressOfPattern,
-           BuiltInGlobalVariablePattern, BlockAccessChainPattern,
-           CompositeConstructPattern, ExecutionModePattern, ImageFetchPattern,
-           ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
-           ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
-           LoadValuePattern, MatrixCompositeExtractPattern,
-           MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
-           SampledImagePattern, StageIOGlobalVariablePattern>(
-          Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
+               BuiltInGlobalVariablePattern, BlockAccessChainPattern,
+               CompositeConstructPattern, ExecutionModePattern,
+               ImageFetchPattern, ImageSampleExplicitLodPattern,
+               ImageSampleImplicitLodPattern, ImageQuerySizePattern,
+               ImageReadPattern, ImageWritePattern, LoadValuePattern,
+               MatrixCompositeExtractPattern, MatrixCompositeInsertPattern,
+               PushConstantGlobalVariablePattern, SampledImagePattern,
+               StageIOGlobalVariablePattern, SwitchConversionPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
