@@ -20762,3 +20762,230 @@ scenarios, since `RUN` lines within one `.test` file are one test).
 lavapipe differential's environment dependency by running it once with
 `VK_DRIVER_FILES` pointed at each manifest directly, outside `lit`, before
 trusting the automated version of the same comparison.
+
+# Continuing V6: per-instance vertex input rate, primitive restart, blit conversion/mirroring, and the graphics pipeline cache
+
+The previous pass left V6 "done, scoped" with four concrete open items in
+its own notes: the graphics pipeline cache (explained at length, not
+attempted), a blit's missing format conversion/mirroring/multisample-source
+support, per-instance vertex input rate, and primitive restart. Secondary
+command buffers were explicitly called out as V7's own bullet, out of
+scope here. I picked up all four, in the order I judged easiest-to-hardest,
+each as its own commit with its own tests, and re-ran `check-feme` green
+between every one before moving to the next.
+
+## Per-instance vertex input rate
+
+`translateVertexInput` (GraphicsPipeline.cpp) rejected any
+`VkVertexInputBindingDescription` whose `inputRate` was not
+`VK_VERTEX_INPUT_RATE_VERTEX`. The fetch path already threaded a
+`VertexInputBinding`/`VertexBufferBinding` per bound buffer through
+`CommandBuffer.cpp` into the executor, and the executor's own fetch loop
+(`Executor.cpp`) already computed both a vertex index and an instance ID
+per invocation (`Invocations[Flat].InstanceID`) -- it just never used the
+latter for anything. Recording `PerInstance` on the binding and switching
+the fetch index between `VertexIndices[Flat]` and
+`Invocations[Flat].InstanceID` per binding was the entire executor-side
+change. The one non-obvious piece was `CommandBuffer.cpp`'s draw-time fetch
+*bounds* check (`validateDrawFetchBounds`, "read once, bounds-checked
+against the bound buffers ... rejected rather than clamped"): it computed
+its worst-case read as `FirstVertex + VertexCount - 1`, which is the wrong
+range for a per-instance binding -- that binding's last read is
+`FirstInstance + InstanceCount - 1`, and using the vertex range there would
+either falsely reject a valid draw or (worse) pass a draw whose real
+per-instance reach it never checked, depending on which range happened to
+be larger. I added the per-binding branch there too, guarded on
+`InstanceCount == 0` (a draw the executor already skips) to avoid an
+`unsigned` underflow computing `LastInstance`.
+
+The DrawTest fixture had *no* real vertex-buffer test at all before this --
+every existing draw test used a hardcoded `gl_VertexIndex`-selected
+triangle, precisely because V6's original pass never needed a bound
+attribute to exercise draws. So `RendersPerInstanceVertexAttribute` is the
+first DrawTest scene to bind an actual `VkBuffer` as vertex input, feeding a
+per-instance color varying while position still comes from the builtin;
+`firstInstance = 1` selects the buffer's second element, which a
+per-vertex-rate bug would instead resolve to vertex index 0 (the wrong,
+but in-bounds, answer) -- so the test would pass even with a subtly wrong
+fetch if it only checked "some color came through." Picking `firstInstance
+= 1` specifically (not 0) is what makes it actually test the `FirstInstance
++ instance` arithmetic and not just "did per-instance data get read at
+all."
+
+## Primitive restart
+
+Rejected outright at creation before this pass ("primitive restart is not
+implemented"). Real Vulkan restricts primitive restart to strip/fan
+topologies without an extra extension for list topologies, and this ICD
+only implements `TriangleList`/`TriangleStrip` -- so the correct scope was
+"implemented for `TriangleStrip`, still rejected for `TriangleList`",
+matching what a real driver without the list-restart extension would do,
+not "implemented for everything." The restart check went right next to the
+existing topology-mapping code in `compileGraphicsPipeline` (now
+`translateFixedFunctionState` after the pipeline-cache refactor below).
+
+The executor change needed more care than I expected at first. My first
+instinct was "detect the restart index, skip it" -- but the restart index
+(the index type's all-1-bits value) is not a valid vertex index at all: the
+existing per-instance fetch loop computes `VertexIndex = RawIndex +
+VertexOffset`, and for a `0xFFFFFFFF` raw index that arithmetic produces a
+huge, almost-certainly-out-of-bounds value. Simply *not excluding* it from
+the attribute fetch would make every draw with a restart marker fail with
+a spurious "vertex buffer read is out of bounds" error, restart enabled or
+not -- so the fix has two parts, not one: (1) recognize the restart marker
+during index fetch and record it in a `PerInstance`-sized `IsRestart`
+array, and (2) skip the attribute fetch entirely for a restart-marked
+lane (its result is never read, since no triangle in the split-segment
+`TriIndices` construction below references that lane's position). Splitting
+`TriIndices` at each restart marker into independent strip segments, each
+restarting its own front/back winding parity, was the more mechanical half
+once the fetch side was correct -- `emitStripSegment` is exactly the
+original strip-triangle loop, just given a `[Start, End)` sub-range instead
+of always `[0, PerInstance)`.
+
+`ExecutorTest.cpp`'s `HonorsPrimitiveRestartOnIndexedTriangleStrip` builds
+two geometrically disjoint triangles (not sharing any vertex, unlike a real
+continuous strip) so that a bug bridging across the restart marker would
+either produce a visibly wrong third triangle spanning the gap or fail
+outright on the out-of-bounds fetch a mishandled restart index would
+trigger -- I picked centroid query pixels for each triangle (guaranteed
+inside by definition, no near-boundary rounding risk) plus a screen-center
+pixel I hand-verified geometrically sits outside both, to catch exactly
+that bridging failure mode.
+
+## Blit format conversion and mirroring
+
+`runBlitImage` required identical `Format`s (going through the same
+`checkImagePair` a resolve also used) and rejected any region whose second
+offset was not strictly greater than its first (`isSimpleRegion`, "no
+mirroring"). Both restrictions were self-imposed, not spec-required: real
+`vkCmdBlitImage` explicitly performs format conversion and explicitly
+supports mirroring by swapping a region's corners. (I checked the one
+restriction that *is* spec-required before touching it -- blitting a
+multisample image -- and confirmed via the Vulkan spec that
+`vkCmdBlitImage` itself requires `VK_SAMPLE_COUNT_1_BIT` on both images;
+that one was never a deviation, just mis-filed as one in the milestone's
+own status note, so I corrected the note's wording rather than the code.)
+
+Format conversion was the smaller change: the bilinear filter already
+unpacked/packed through the central format table for its four-neighbor
+weighting (it had to, to average), so nearest-filter blits just needed the
+same unpack/pack treatment whenever `Src->format() != Dst->format()`, with
+same-format nearest keeping its byte-copy fast path unchanged (so existing
+byte-for-byte assertions in `BlitsNearest` stayed correct).
+
+Mirroring needed an actual formula change, not just relaxing a check. My
+first draft kept the existing "compute `SrcWidth`/`DstWidth` as unsigned
+deltas, then clamp a signed offset into `[0, Width)`" shape and just tried
+to special-case a negative delta -- but that produces a different formula
+depending on which of the four corner combinations (src mirrored, dst
+mirrored, both, neither) applies, which is exactly the kind of
+special-casing this document's coding standard's "encapsulate loops that
+compute predicates into helper functions" note is warning against turning
+into a maze. The formula that actually generalizes cleanly: a destination
+texel's *fractional* position within its own rectangle (`(X + 0.5) /
+DstWidth`, always in `[0, 1]` regardless of which corner is "first") maps
+to the *same* fraction interpolated between the source rectangle's two
+corners (`SrcX0 + Tx * (SrcX1 - SrcX0)`), and the destination pixel actually
+written is `DstX0 + X * sign(DstX1 - DstX0)`. Every one of the four
+corner-order combinations falls out of that one formula with no branching
+on which axis is mirrored -- mirroring becomes a sign, not a code path.
+`MirrorsBlitRegion` mirrors only one axis of a 2x1 image, verifying the
+formula did not accidentally require both axes to flip together.
+
+## The graphics pipeline cache
+
+The previous pass's reasoning for not attempting this held up under
+re-examination, but the fix it implied was smaller than "a real refactor"
+suggested to me on first read: I checked, and every one of the six
+fixed-function `translate*` calls in `compileGraphicsPipeline` -- vertex
+input, raster, viewport, depth/stencil, color blend, dynamic state -- take
+only the `CreateInfo` structures and device limits, never the compiled
+`Ctx`/`CompiledStage`s. The one call that *does* need the compiled stages,
+`validateStageInterfaces`, only *reads* the already-translated
+`VertexAttributes` to cross-check against the compiled signature; it does
+not populate them. So the six `translate*` calls and stage compilation had
+no real data dependency forcing their existing order -- they were ordered
+that way because the original pass wrote the fixed-function state as
+"whatever's left to do after compiling," not because compilation produces
+an input any of them need.
+
+That made the fix a reordering plus a cache-key/lookup insertion, not a
+redesign: I split `compileGraphicsPipeline` into `translateFixedFunctionState`
+(everything the six `translate*` calls, the multisample check, and the
+attachment-format list need -- none of which touches a compiled stage) and
+`compileAndValidateStages` (stage compilation, the push-constant/bound-range
+checks, and `validateStageInterfaces` -- everything that does). The outer
+function now computes the fixed-function state first, hashes it plus both
+stages' SPIR-V/entry points and the pipeline layout's shape into a key,
+checks `PipelineCache::lookupGraphics` before ever calling
+`compileAndValidateStages`, and only a miss pays for compilation and
+validation at all -- a hit skips both, exactly like compute's own cache.
+
+Two things I had to get right that a naive "just hash the struct bytes"
+approach would have gotten wrong. First, `GraphicsPipelineState` and its
+member structs (`RasterState`, `BlendState`, `StencilFaceState`, ...) are
+ordinary aggregates with no user-declared constructor; a plain
+`GraphicsPipelineState Result;` is *default*-initialized, not
+*value*-initialized, so any inter-member padding the compiler inserts is
+genuinely indeterminate stack garbage, not zero -- hashing that raw would
+make two logically-identical pipelines hash differently from run to run
+depending on what happened to be on the stack before, which is worse than
+useless for a cache key (it would look like it works in one test run and
+silently stop working in the next). `serializeFixedFunctionState` hashes
+every field individually instead, exactly the same discipline
+`computePipelineCacheKey` already used for `DescriptorSetLayoutBinding`/
+`VkPushConstantRange` -- I did not invent a new convention, I extended the
+one already there. Second, `PipelineCache` is not a template and its one
+existing table is typed `shared_ptr<CachedPipelineArtifact>`, which cannot
+hold a `shared_ptr<GraphicsPipelineArtifact>` (compute's single-stage
+artifact and graphics's two-stage one are unrelated types, not a hierarchy)
+-- rather than templatize the whole class (a much larger, riskier change
+touching every existing caller), I gave it a second table
+(`GraphicsEntries`) with its own `lookupGraphics`/`insertGraphics`, and had
+to decide what a persisted blob's initial keys (which do not record which
+table they came from) should do: record each initial key as a null
+placeholder in *both* tables, since a placeholder never satisfies a lookup
+in either one anyway (this ICD's own cache design already treats "known
+key" and "have the artifact" as separate facts -- "the initial data can
+only teach a fresh cache which keys were known-good ... not skip
+recompiling them"), so recording it twice cannot manufacture a false hit
+across the two pipeline kinds.
+
+`GraphicsPipelineTest.cpp` gained three cases mirroring the compute cache's
+own test shape (`CachedPipelineSharesCompiledStages`,
+`NoCacheCompilesIndependentStagesEachTime`) plus one the compute cache
+tests do not need an equivalent of:
+`DifferingFixedFunctionStateIsACacheMiss`, which builds two pipelines from
+byte-identical SPIR-V but different cull modes and asserts they do *not*
+share a compiled artifact -- the one property a cache key computed only
+from the two stages' SPIR-V (skipping this pass's whole point) would have
+gotten silently wrong.
+
+## What remains open
+
+The lavapipe differential (`test/Vulkan/graphics-lavapipe-diff.test`) still
+only exercises the same seven scenarios from the previous pass; none of
+this pass's four changes were re-verified against lavapipe specifically
+(per-instance rate, primitive restart, blit mirroring/conversion, and the
+pipeline cache are all internal-ICD-only properties a lavapipe diff would
+not add signal for, since lavapipe has no equivalent internal cache to
+compare against and the new draw/blit paths are covered end-to-end by
+`DrawTest`/`ExecutorTest`/`ImageOpsTest` instead). No `deqp-vk` CTS run
+happened, unchanged from every prior pass -- still unavailable in this
+environment. Secondary command buffers inside a render pass remain V7's
+own bullet, untouched here.
+
+## Validation
+
+Existing `build/` tree, `LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`check-feme` (builds every test dependency, including the loader-linked
+smoke clients, before running) run green after every individual commit,
+not only at the end. Baseline before this pass: 1419 passed, 1 unsupported.
+Final: 1426 passed, 1 unsupported. `clang-format`/`git-clang-format` on
+every touched file before each commit; one clang-format run early in this
+pass reformatted an entire test file's pre-existing code because my own
+edit had accidentally deleted a class's opening brace line, which
+clang-format's re-indentation then made look like a much larger diff than
+it was -- caught by noticing the diff size before committing, reverted,
+and redone as a clean, minimal insertion.
