@@ -24047,3 +24047,155 @@ buffer_262144` segfault this report has listed as a known, pre-existing,
 unrelated crash since the C1 measurement. Neither is new. I recorded the
 full-run headline with those two caveats rather than silently
 patching around them or omitting the attempt.
+
+# Roadmap C8: shader long tail (stage-IO-raising finding)
+
+## Starting point
+
+The prompt quoted C8's row verbatim, including the large, vaguely-scoped
+bucket ("Descriptor arrays of combined image samplers (816), matrix/
+aggregate stage IO (309), the SPIR-V importer's `unhandled opcode` set
+(171), ...") and one specific, concretely-described sub-finding: "C3's own
+measurement found a new member of this bucket, larger than any row already
+in it" -- a plain SPIR-V `Input`/`Output`-storage-class global `load`/
+`store` (address space 7/8) never canonicalized into `feme.stage.*` calls,
+so a SPIR-V-imported fragment/vertex shader's stage IO reaches
+`feme-cpu-simdize` in raw form and hits its vector-decomposition
+diagnostic. Given the row's own text ("best attacked after C2/C3, since
+the true size of this bucket is unknown until the stacked blockers ahead
+of it are gone" -- both C2 and C3 are already closed per the roadmap's own
+strikethrough history), and that only this one sub-finding came with
+enough concrete detail (file names, function names, a specific reasoning
+chain) to implement directly, I scoped this session to that one finding
+rather than attempting the whole bucket, which the roadmap text itself
+says is unmeasured until this and prior blockers are gone.
+
+## Finding the actual root cause
+
+I read `getStageIOAddressSpace` (SPIRVToLLVMPatterns.cpp) and
+`feme::graphics::CanonicalizeStagePass` (`CanonicalizeStage.cpp`) first.
+`CanonicalizeStagePass` already existed and already did exactly what the
+roadmap finding said was missing -- both `canonicalizeDXILStage` (raising
+DXIL's `loadInput`/`storeOutput` opcodes, which `feme::dxil::OpRaisingPass`
+explicitly does not touch, per that pass's own comment) and
+`canonicalizeSPIRVStage` (raising a raw `Input`/`Output` global's load/
+store, address space 7/8, into `feme.stage.*`) were fully implemented and
+covered by their own standalone `feme-opt` lit tests
+(`test/Transforms/Graphics/{dxil,spirv}-canonicalize-stage*.ll`). The real
+gap was narrower and more structural: grepping for every caller of
+`CanonicalizeStagePass` found exactly one --
+`feme::vulkan::compileGraphicsStage` in `GraphicsPipeline.cpp` -- and
+`feme::cpu::runPipeline` (`Pipeline.cpp`, the CPU target's own pipeline,
+used by `feme-run`/`feme::cpu::JITEngine`) never ran it at all, for either
+import format. `FeMeGraphicsDesign.md`'s own "CPU Lowering Pipeline"
+diagram already drew canonicalization+validation as one box ahead of
+`PreparePass`, but its status note only ever mentioned wiring in
+`ValidateStagePass` -- `CanonicalizeStagePass` had simply been left out of
+that wiring, a gap in the pipeline itself rather than in either
+canonicalization pass. I confirmed this was really unreachable before
+fixing it by writing the two `PipelineTest.cpp` cases first and running
+them against the unmodified tree: the SPIR-V case failed at the fragment
+wrapper ("requires attached feme.signature metadata") and the DXIL case
+failed earlier, at `checkSupportedRaisedOps` ("`dx.op.loadInput.i32` was
+not raised to idiomatic LLVM IR") -- two different failure modes for the
+same underlying missing-canonicalization gap, exactly the kind of
+"different root cause, same missing mechanism" shape the roadmap text
+predicted.
+
+## The fix
+
+One change: `feme::cpu::runPipeline` now runs
+`feme::graphics::CanonicalizeStagePass` immediately before
+`feme::graphics::ValidateStagePass`, for any non-`Compute` stage. This
+matches `ValidateStagePass`'s own header comment ("however they got there,
+whether from `CanonicalizeStagePass` or written by hand") and the
+lowering-pipeline diagram, and needed no new pass, no signature-plumbing
+work, and no CMake changes (`FeMeTargetCPU` already links
+`FeMeTransformsGraphics` publicly). I added the two `PipelineTest.cpp`
+cases described above as the only new test surface, since the two
+canonicalization passes' own behavior already has full lit coverage --
+this row is purely about pipeline *wiring*, which a lit test (which only
+runs the pass explicitly named on its `RUN:` line) cannot exercise; a C++
+unit test against `runPipeline` itself was the only way to prove the
+ordering bug and its fix.
+
+Built and ran `ninja check-feme` (existing `build/` dir, assertions +
+ccache already configured) after the fix: 1517/1518 passed (same
+1-unsupported baseline, +1 over the pre-session 1516 -- `check-feme`
+counts each unittest binary as one lit "test", so the two new gtest cases
+inside the existing `FeMeTargetCPUTests` binary don't each add their own
+row the way a new `.ll`/`.mlir` file would). I also explicitly reverted
+just the `Pipeline.cpp` change, rebuilt, and reran both new
+`PipelineTest` cases to confirm each fails in the way I described above,
+before restoring the fix -- the project's own established regression-test
+discipline (confirm a test fails against the pre-fix code, not just that
+it passes against the post-fix code).
+
+## Measuring the actual CTS impact -- and finding it is zero
+
+Following the report's own "Reproducing this report" recipe (reusing the
+cached `groups.txt` case list), I ran `dEQP-VK.glsl.*` -- the exact group
+the roadmap's C3 section quoted a representative failure from -- against
+the built ICD with the fix applied. It reproduced the diagnostic the
+roadmap named, 1,957 times, completely unchanged. This was suspicious
+enough (why would a fix for a real, confirmed-by-unit-test gap move
+nothing?) that I read `compileGraphicsStage` in `GraphicsPipeline.cpp`
+again, specifically for whether it reaches `runPipeline` with the module
+already canonicalized -- and it does: it calls `CanonicalizeStagePass`
+directly, itself, before ever calling `CompiledStage::create`, and `git
+log -S` showed this call has been there since roadmap V6, long before C3.
+Every real `vkCreateGraphicsPipelines` call in this ICD goes through
+`compileGraphicsStage`; no `dEQP-VK` case talks to this ICD any other way.
+So `runPipeline`'s own missing canonicalization call, while real, was
+never reachable from a CTS case at all -- only from `feme-run`/
+`JITEngine`'s direct entry points.
+
+Rather than assume this from static reading alone, I built a genuine
+before/after comparison: created a git worktree at the pre-fix commit,
+copied its `Pipeline.cpp` over the current one in the existing build tree
+(reusing ccache rather than a from-scratch second build), rebuilt just
+`feme_vulkan`, and reran the identical `dEQP-VK.glsl.*` command. Both runs
+produced byte-identical totals (0/26,808 passed, 3,396 failed, 23,412 not
+supported) and the identical 1,957-occurrence diagnostic count. I then
+restored the fixed `Pipeline.cpp`, rebuilt, and reran `check-feme` once
+more to confirm the tree was back to the committed, fully-tested state
+before finishing.
+
+This directly contradicts the roadmap C3 section's own attribution ("the
+largest single reason C3's own headline barely moved") -- whatever
+produced the quoted representative failure, it cannot have been the raw
+SPIR-V global store shape described, since that shape cannot exist
+downstream of `compileGraphicsStage`'s own `CanonicalizeStagePass` call.
+Grepping the actual log's `error:` lines for what the 1,957 real
+occurrences *are* attributes them entirely to already-named C8 rows
+instead: `spirv.CompositeConstruct`/`spirv.OuterProduct` building a matrix
+value (the existing matrix/aggregate-stage-IO row), `spirv.AtomicIAdd`
+(the `spirv.Atomic*` family row), and unhandled decorations/extension
+instructions (the unhandled-opcode/diagnostic-tail rows). I recorded this
+finding -- including the exact before/after numbers and the reasoning
+chain -- in VulkanCTSReport.md's new "Roadmap C8: measured impact"
+section, and corrected both Roadmap.md's C8 row and
+FeMeGraphicsDesign.md's deviation note (which I had first written assuming
+the fix would move the CTS headline, before actually measuring it) to stop
+claiming an improvement the code does not produce. This matches the
+project's own established discipline (see the C4a/C4b section's "moved in
+the direction that looks worse before the reason is understood") of
+recording what a change's real, measured effect is rather than what its
+own motivating narrative predicted.
+
+## Order of commits
+
+Three commits: (1) the `Pipeline.cpp` fix plus its two `PipelineTest.cpp`
+regression cases, as one unit -- the fix has no value without the tests
+proving it was reachable and now isn't; (2) the first pass at
+documentation (Roadmap.md's C8 row, FeMeGraphicsDesign.md's deviation
+note), written before running the CTS measurement; (3) the correction to
+both of those documents plus the new VulkanCTSReport.md section, once the
+before/after CTS comparison showed the first pass's assumption ("this
+closes the largest measured member of C8") was wrong. I kept (2) and (3)
+as separate commits rather than folding the correction into (2), since the
+sequence -- implement, document an assumption, measure, correct the
+documented assumption -- is itself part of this row's honest record, and
+matches this repository's stated preference for recording a stacked-
+blocker or wrong-prediction finding rather than quietly editing history to
+look right in hindsight.
