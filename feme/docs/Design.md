@@ -1634,6 +1634,48 @@ Both are now part of the lookup key (see `Binding::IsUAV`'s comment).
 Roadmap.md's "the remaining resource access ops"/"`RaisedLoweringPass`
 breadth" entries.
 
+Status: the SPIR-V side of that same shape -- a real `dxc -T cs_6_x -spirv`
+compute shader binding a `Texture2D`/`RWTexture2D` pair alongside a
+`cbuffer` -- hit two gaps of its own once tried end to end, both in
+`collectBindings`/`hasOnlySupportedUses`/`lowerSPIRVAccess`, which had only
+ever been exercised against a 1D `Buffer`/`RWBuffer` (`spirv.Image`'s
+`Buffer` `Dim`) pair (`amdgpu-lower-resources-spirv.ll`): a genuinely 2D/3D
+`spirv.Image` binding's `getpointer`/`load.level` coordinate is a vector,
+which this pass's SPIR-V path GEP'd directly instead of linearizing the
+way the `dx.Texture` path above already does, and `Texture2D<T>::Load`'s
+own access -- `llvm.spv.resource.load.level`, not `getpointer`, since
+`dxc` always gives it an explicit (if always-zero) mip level (see
+`ImageFetchLodPattern` in SPIRVToLLVMPatterns.cpp) -- was not one of the
+shapes `hasOnlySupportedUses` recognized at all, so the whole binding was
+left unrewritten and its still-raised `spirv.Image` handle tripped
+`feme::verifyNoRaisedIRRemains` once `AMDGPU`'s real ISel was reached. A
+`spirv.Image` binding now gets the same per-extra-dimension addressing-
+stride kernel argument a `dx.Texture` one does (`getSPIRVImageCoordComponents`
+mirrors `getTextureCoordComponents`, keyed off the handle's `Dim` type
+parameter instead of `dxil::TextureExtType::getDimension()`), and
+`load.level`'s "the call result *is* the value" shape (mirroring
+`dx.Texture`'s own `load.level`) is now one `hasOnlySupportedUses`/
+`getElementType`/`lowerSPIRVAccess` recognize alongside `getpointer`'s
+"pointer some other load/store reads/writes through" one; the coordinate-
+linearization logic itself is shared (`linearizeCoordinate`) rather than
+duplicated between the DX and SPIR-V paths, since the shape is identical
+once each format's own access op is unwrapped down to "coordinate,
+strides, element type". A cbuffer reaches this pass under a third,
+previously unmodeled SPIR-V handle type, `spirv.VulkanBuffer` (not
+`spirv.Image`) -- but its own access shape (`getpointer` addressing one
+field directly, read through a single ordinary `load`) already matches a
+`Buffer`-dimension `spirv.Image` binding's exactly, so it needed only a
+new `AllResourceOps` entry (`SPIRVCBufferResourceOps`) disambiguated by
+handle type name the same way `dx.Texture`/`dx.CBuffer` already are, not a
+new lowering code path. `amdgpu-lower-resources-spirv-image2d.ll` and
+`amdgpu-lower-resources-spirv-cbuffer.ll` cover the pass in isolation;
+`feme-spirv-to-amdgpu-image2d.mlir` compiles a `Texture2D`/`RWTexture2D`
+pair end to end through the real `feme` CLI. A `spirv.Image` binding's own
+`GetDimensions` equivalent (`llvm.spv.resource.getdimensions.*`) is not yet
+modeled this way -- see `Binding::NumDimensionArgs`'s comment -- so a
+shader calling it is, correctly if not yet usefully, left unrewritten
+rather than miscompiled; revisit if that turns out to matter in practice.
+
 A `Texture2D`/`RWTexture2D::GetDimensions` call (raised, on the DXIL side,
 by `raiseGetDimensions`'s `.x`/`.xy` cases -- see "DXIL texture and sampler
 access raising" above) is handled the same "extra trailing kernel argument"
