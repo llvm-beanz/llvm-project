@@ -1227,6 +1227,79 @@ case in `vkGetPhysicalDeviceFeatures2`, and the texel-buffer-format/
 future roadmap row can close with its own measured before/after, the same
 way this section's own methodology demands.
 
+## Roadmap E1: measured impact
+
+Roadmap E1 ("Wire the aggregate `VkPhysicalDeviceVulkan13Features`/
+`Vulkan14Features` `vkGetPhysicalDeviceFeatures2` cases") closes exactly
+the gap "Roadmap D3: measured impact" documented above ("the missing
+`VkPhysicalDeviceVulkan13Features` case in `vkGetPhysicalDeviceFeatures2`"):
+`EntryPoints.cpp` now has cases for `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+VULKAN_1_3_FEATURES`/`_1_4_FEATURES`, so `dynamicRendering` reads back
+`VK_TRUE` from the aggregate struct, matching the pre-promotion
+`VkPhysicalDeviceDynamicRenderingFeatures` struct instead of silently
+disagreeing with it.
+
+**Targeted before/after run**, the same "diff real per-case results, not
+aggregate counts" rigor D3 established, over the four groups D3's own
+findings named: `api.info`, `draw.dynamic_rendering`,
+`renderpasses.dynamic_rendering`, and
+`pipeline.monolithic.*.dynamic_rendering_postpass` (this checked-out CTS
+revision has drifted since D3's own pass -- see "Roadmap D3: measured
+impact"'s own note on this -- so only 1 case matches the last glob here,
+not D3's cited 5). Built pre-E1 (`git stash` on `EntryPoints.cpp` alone)
+and post-E1, each run against the identical 4-group case list, in
+isolation (not the contended 54-group recipe) to avoid D2's loader race:
+
+| Group | Total | Transition | Count |
+|---|---:|---|---:|
+| `api.info` | 10,484 | `Fail` &rarr; `Pass` | 3 |
+| `draw.dynamic_rendering` | 16,973 | `NotSupported` &rarr; `Fail` | 613 |
+| `renderpasses.dynamic_rendering` | 28,602 | `NotSupported` &rarr; `Fail` | 204 |
+| `renderpasses.dynamic_rendering` | 28,602 | `NotSupported` &rarr; `Pass` | 1 |
+| `pipeline.monolithic.*.dynamic_rendering_postpass` | 1 | `NotSupported` &rarr; `Fail` | 1 |
+
+**The 3 newly-`Pass` cases are exactly this milestone's own target**:
+`get_physical_device_properties2.features.vulkan13_features`,
+`vulkan1p3.feature_extensions_consistency`, and `vulkan1p3.features` --
+the consistency checks that chain the aggregate `VkPhysicalDeviceVulkan13
+Features` blob alongside `VkPhysicalDeviceDynamicRenderingFeatures` and
+compare `dynamicRendering` between them. (D3's report guessed 18 such
+cases from an older CTS revision's group contents; this revision's
+`api.info` subtree only contains these 3 for `dynamicRendering`
+specifically -- the other properties/limits-consistency cases D3 named
+are gated on feature bits E1 does not touch, e.g. `image_robustness`,
+`inline_uniform_block`, and remain `Fail` unchanged.)
+
+**The 818 newly-`NotSupported`&rarr;`Fail` cases are not a regression this
+milestone introduced.** Truthfully advertising `dynamicRendering` makes
+`deqp-vk` actually attempt these cases instead of correctly-but-
+accidentally declining them (per D3's own framing, "converting a bad-
+shaped `Fail` into a correctly-truthful `NotSupported`, purely by accident
+of which struct a version-gated check happens to consult" -- E1 removes
+the accident, so the cases now run against a real implementation gap
+instead). Re-running one failing `draw.dynamic_rendering` case with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` shows the actual cause:
+`vkCreateGraphicsPipelines: rasterizer discard, depth clamp, depth bias,
+and non-fill polygon modes are not implemented` (508 of 613) and a
+`feme-cpu-simdize` divergent-vector diagnostic (105 of 613) --
+`GraphicsPipeline.cpp`'s existing rasterizer-state and shader-compilation
+gaps, both present and equally reachable through the ordinary
+`VkRenderPass` path today: `dEQP-VK.draw.renderpass.basic_draw.draw.
+line_strip.1` (no dynamic rendering involved at all) fails with the
+identical `VK_ERROR_INITIALIZATION_FAILED`/reason, confirming these gaps
+predate E1 and are simply reached through a second code path now that
+`dynamicRendering` is truthfully advertised. `renderpasses.dynamic_
+rendering`'s 204 additionally break down as 100 of the same rasterizer-
+state gap, 98 `vkCreateImage: VK_ERROR_FORMAT_NOT_SUPPORTED` (an
+unadvertised mandatory format, not traced further here), and 4
+`vkQueueSubmit` failures -- each a pre-existing, independent gap outside
+this milestone's "wire the struct plumbing" scope (see
+[FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s own rasterizer-state status
+note for where the largest of these belongs). None of these 818 cases
+crashed, timed out, or produced a
+`Pass`-shaped result with wrong image data -- each is a clean, correctly-
+reasoned `Fail` now that the capability check itself is honest.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
