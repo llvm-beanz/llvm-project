@@ -53,7 +53,7 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
 
 TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
-  const VkQueueFamilyProperties &Family = Info.UniversalQueueFamily;
+  const VkQueueFamilyProperties &Family = Info.QueueFamilies[0];
   EXPECT_TRUE(Family.queueFlags & VK_QUEUE_COMPUTE_BIT);
   EXPECT_TRUE(Family.queueFlags & VK_QUEUE_TRANSFER_BIT);
   // (V6) Graphics joins the one existing universal family rather than
@@ -64,6 +64,33 @@ TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {
   // timestamp query but every value it produces is zero (see QueryPool.h),
   // which is exactly what `timestampValidBits == 0` tells an application.
   EXPECT_EQ(Family.timestampValidBits, 0u);
+}
+
+TEST(PhysicalDeviceInfo,
+     DedicatedTransferQueueFamilyExcludesGraphicsAndCompute) {
+  // Roadmap C7 ("Queue family capability combinations"): a second family
+  // exists purely so a `TRANSFER`-only, `GRAPHICS`/`COMPUTE`-excluding
+  // queue is coverable, which the universal family can never be by
+  // definition.
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  ASSERT_EQ(PhysicalDeviceInfo::NumQueueFamilies, 3u);
+  const VkQueueFamilyProperties &Family = Info.QueueFamilies[1];
+  EXPECT_TRUE(Family.queueFlags & VK_QUEUE_TRANSFER_BIT);
+  EXPECT_FALSE(Family.queueFlags & VK_QUEUE_GRAPHICS_BIT);
+  EXPECT_FALSE(Family.queueFlags & VK_QUEUE_COMPUTE_BIT);
+  EXPECT_GE(Family.queueCount, 1u);
+}
+
+TEST(PhysicalDeviceInfo, DedicatedComputeQueueFamilyExcludesGraphics) {
+  // Roadmap C7: a third family covers the mandatory CTS combination that
+  // needs `COMPUTE` while excluding `GRAPHICS` (e.g.
+  // `dEQP-VK.api.buffer_marker.compute.*`).
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  ASSERT_EQ(PhysicalDeviceInfo::NumQueueFamilies, 3u);
+  const VkQueueFamilyProperties &Family = Info.QueueFamilies[2];
+  EXPECT_TRUE(Family.queueFlags & VK_QUEUE_COMPUTE_BIT);
+  EXPECT_FALSE(Family.queueFlags & VK_QUEUE_GRAPHICS_BIT);
+  EXPECT_GE(Family.queueCount, 1u);
 }
 
 TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {

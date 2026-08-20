@@ -35,10 +35,28 @@ struct PhysicalDeviceInfo {
   VkPhysicalDeviceProperties Properties{};
   VkPhysicalDeviceFeatures Features{};
   VkPhysicalDeviceMemoryProperties MemoryProperties{};
-  /// The single universal queue family (see "Graphics queue family":
-  /// adding graphics does *not* add a second family, since a software
-  /// device with one worker pool has no independent graphics engine).
-  VkQueueFamilyProperties UniversalQueueFamily{};
+
+  /// Every queue family this ICD reports, in `vkGetPhysicalDeviceQueue
+  /// FamilyProperties` order (see "Queue families" and "Graphics queue
+  /// family"). Family 0 is always the universal
+  /// `GRAPHICS | COMPUTE | TRANSFER` family a software device with one
+  /// worker pool truthfully has (adding graphics does *not* add a second
+  /// family for that reason). Families 1 and 2 are narrower, restricted
+  /// families (roadmap C7, "Queue family capability combinations"):
+  /// `TRANSFER`-only and `COMPUTE | TRANSFER`-only (excluding `GRAPHICS`)
+  /// respectively. Several mandatory CTS cases require a queue that
+  /// excludes `GRAPHICS`/`COMPUTE` (e.g.
+  /// `dEQP-VK.pipeline.*.timestamp.transfer_tests.*_transfer_queue`) or
+  /// excludes only `GRAPHICS` (e.g. `dEQP-VK.api.buffer_marker.compute.*`),
+  /// which the universal family can never satisfy by definition. Unlike the
+  /// rejected "separate graphics family" alternative (see
+  /// FeMeVulkanDesign.md's "Expose a separate graphics queue family"),
+  /// neither claims an independent execution engine that does not exist --
+  /// each only *restricts* what one logical submission queue promises to
+  /// accept, which every worker-pool executor can honor regardless of how
+  /// many engines back it.
+  static constexpr uint32_t NumQueueFamilies = 3;
+  VkQueueFamilyProperties QueueFamilies[NumQueueFamilies]{};
 
   /// The `VkPhysicalDeviceIDProperties::deviceUUID` value (a Vulkan 1.1
   /// core `Properties2` pNext struct); kept alongside

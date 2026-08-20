@@ -1611,9 +1611,10 @@ namespace feme::vulkan {
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
     VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkCommandPool *pCommandPool) {
-  // Only the single universal (graphics/compute/transfer) queue family
-  // (index 0) exists -- see "Graphics queue family".
-  if (pCreateInfo->queueFamilyIndex != 0)
+  // Only `PhysicalDeviceInfo::NumQueueFamilies` families exist -- the
+  // universal (graphics/compute/transfer) family and the dedicated
+  // transfer-only family (see "Graphics queue family" and roadmap C7).
+  if (pCreateInfo->queueFamilyIndex >= PhysicalDeviceInfo::NumQueueFamilies)
     return VK_ERROR_INITIALIZATION_FAILED;
 
   const PhysicalDeviceInfo &Info =

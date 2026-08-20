@@ -171,7 +171,10 @@ TEST_F(DeviceTest, CreateDestroyDeviceWithQueue) {
 TEST_F(DeviceTest, RejectsUnknownQueueFamily) {
   float Priority = 1.0f;
   VkDeviceQueueCreateInfo QueueInfo{};
-  QueueInfo.queueFamilyIndex = 1; // Only family 0 exists.
+  // Three families exist (index 0: universal, index 1: dedicated
+  // transfer, index 2: dedicated compute; see roadmap C7), so the first
+  // genuinely unknown index is 3.
+  QueueInfo.queueFamilyIndex = 3;
   QueueInfo.queueCount = 1;
   QueueInfo.pQueuePriorities = &Priority;
 
@@ -182,6 +185,55 @@ TEST_F(DeviceTest, RejectsUnknownQueueFamily) {
   VkDevice Device = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateDevice(Physical, &CreateInfo, nullptr, &Device),
             VK_ERROR_INITIALIZATION_FAILED);
+}
+
+TEST_F(DeviceTest, CreateDestroyDeviceWithDedicatedTransferQueue) {
+  // Roadmap C7: family 1 is the dedicated transfer-only family, and must
+  // be usable to create a device queue exactly like family 0.
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 1;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+
+  VkDeviceCreateInfo CreateInfo{};
+  CreateInfo.queueCreateInfoCount = 1;
+  CreateInfo.pQueueCreateInfos = &QueueInfo;
+
+  VkDevice Device = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDevice(Physical, &CreateInfo, nullptr, &Device),
+            VK_SUCCESS);
+
+  VkQueue Queue = VK_NULL_HANDLE;
+  vkGetDeviceQueue(Device, 1, 0, &Queue);
+  EXPECT_NE(Queue, VK_NULL_HANDLE);
+
+  vkDestroyDevice(Device, nullptr);
+}
+
+TEST_F(DeviceTest, CreateDestroyDeviceWithDedicatedComputeQueue) {
+  // Roadmap C7: family 2 is the dedicated compute-only (excluding
+  // graphics) family, and must be usable to create a device queue exactly
+  // like families 0 and 1.
+  float Priority = 1.0f;
+  VkDeviceQueueCreateInfo QueueInfo{};
+  QueueInfo.queueFamilyIndex = 2;
+  QueueInfo.queueCount = 1;
+  QueueInfo.pQueuePriorities = &Priority;
+
+  VkDeviceCreateInfo CreateInfo{};
+  CreateInfo.queueCreateInfoCount = 1;
+  CreateInfo.pQueueCreateInfos = &QueueInfo;
+
+  VkDevice Device = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDevice(Physical, &CreateInfo, nullptr, &Device),
+            VK_SUCCESS);
+
+  VkQueue Queue = VK_NULL_HANDLE;
+  vkGetDeviceQueue(Device, 2, 0, &Queue);
+  EXPECT_NE(Queue, VK_NULL_HANDLE);
+
+  vkDestroyDevice(Device, nullptr);
 }
 
 TEST_F(DeviceTest, RejectsUnknownExtension) {

@@ -339,21 +339,53 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   MemProps.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 
   // "Graphics queue family": V6 adds `VK_QUEUE_GRAPHICS_BIT` to the one
-  // existing family rather than inventing a second one -- a single software
-  // device with one worker pool has no independent graphics engine, and
-  // reporting two families would be an untruthful description of the
-  // hardware model. The bit commits this queue to accepting every core
-  // graphics command, which is why it lands only now that render passes,
-  // graphics pipelines, draws, clears, blits and resolves are all
-  // implemented (see the V6 status note in FeMeVulkanDesign.md for the
-  // state combinations that are rejected at creation rather than at draw
-  // time). One queue is still sufficient.
-  VkQueueFamilyProperties &QueueFamily = Info.UniversalQueueFamily;
-  QueueFamily.queueFlags =
+  // existing universal family rather than inventing a second *graphics*
+  // family -- a single software device with one worker pool has no
+  // independent graphics engine, and reporting two families would be an
+  // untruthful description of the hardware model. The bit commits this
+  // queue to accepting every core graphics command, which is why it lands
+  // only now that render passes, graphics pipelines, draws, clears, blits
+  // and resolves are all implemented (see the V6 status note in
+  // FeMeVulkanDesign.md for the state combinations that are rejected at
+  // creation rather than at draw time).
+  VkQueueFamilyProperties &Universal = Info.QueueFamilies[0];
+  Universal.queueFlags =
       VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
-  QueueFamily.queueCount = 1;
-  QueueFamily.timestampValidBits = 0;
-  QueueFamily.minImageTransferGranularity = {1, 1, 1};
+  Universal.queueCount = 1;
+  Universal.timestampValidBits = 0;
+  Universal.minImageTransferGranularity = {1, 1, 1};
+
+  // Roadmap C7 ("Queue family capability combinations"): a second,
+  // `TRANSFER`-only family. This is distinct from the rejected "separate
+  // graphics family" alternative above -- it adds no capability the
+  // executor cannot honor and claims no independent engine, it only ever
+  // promises *less* than the universal family already does. Its sole
+  // purpose is to give applications (and the CTS) a queue that genuinely
+  // excludes `GRAPHICS`/`COMPUTE`, which several mandatory CTS cases
+  // require (e.g.
+  // `dEQP-VK.pipeline.*.timestamp.transfer_tests.*_transfer_queue`) and
+  // which no single universal family can ever satisfy by definition.
+  VkQueueFamilyProperties &DedicatedTransfer = Info.QueueFamilies[1];
+  DedicatedTransfer.queueFlags = VK_QUEUE_TRANSFER_BIT;
+  DedicatedTransfer.queueCount = 1;
+  DedicatedTransfer.timestampValidBits = 0;
+  DedicatedTransfer.minImageTransferGranularity = {1, 1, 1};
+
+  // A third, `COMPUTE | TRANSFER`-only family, excluding `GRAPHICS` --
+  // the same reasoning as the dedicated transfer family, for the
+  // mandatory CTS cases that specifically need a compute queue that is
+  // not also a graphics queue (e.g.
+  // `dEQP-VK.api.buffer_marker.compute.*`). `TRANSFER` is included
+  // explicitly rather than left implicit (Vulkan guarantees any
+  // graphics- or compute-capable queue may also be used for transfer
+  // operations even without the bit set) so this family's advertised
+  // flags are self-contained and unambiguous to a caller that only reads
+  // `queueFlags`.
+  VkQueueFamilyProperties &DedicatedCompute = Info.QueueFamilies[2];
+  DedicatedCompute.queueFlags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
+  DedicatedCompute.queueCount = 1;
+  DedicatedCompute.timestampValidBits = 0;
+  DedicatedCompute.minImageTransferGranularity = {1, 1, 1};
 
   Info.DriverId = VK_DRIVER_ID_MAX_ENUM;
   Info.ConformanceVersion = {0, 0, 0, 0};

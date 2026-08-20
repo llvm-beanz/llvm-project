@@ -267,30 +267,29 @@ VKAPI_ATTR void VKAPI_CALL
 feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties(
     VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
     VkQueueFamilyProperties *pQueueFamilyProperties) {
-  const VkQueueFamilyProperties &Family =
-      fromHandle<PhysicalDevice>(physicalDevice)
-          ->getInfo()
-          .UniversalQueueFamily;
-  enumerate<VkQueueFamilyProperties>(1, &Family, pQueueFamilyPropertyCount,
-                                     pQueueFamilyProperties);
+  const PhysicalDeviceInfo &Info =
+      fromHandle<PhysicalDevice>(physicalDevice)->getInfo();
+  enumerate<VkQueueFamilyProperties>(
+      PhysicalDeviceInfo::NumQueueFamilies, Info.QueueFamilies,
+      pQueueFamilyPropertyCount, pQueueFamilyProperties);
 }
 
 VKAPI_ATTR void VKAPI_CALL
 feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties2(
     VkPhysicalDevice physicalDevice, uint32_t *pQueueFamilyPropertyCount,
     VkQueueFamilyProperties2 *pQueueFamilyProperties) {
-  const VkQueueFamilyProperties &Family =
-      fromHandle<PhysicalDevice>(physicalDevice)
-          ->getInfo()
-          .UniversalQueueFamily;
+  const PhysicalDeviceInfo &Info =
+      fromHandle<PhysicalDevice>(physicalDevice)->getInfo();
+  constexpr uint32_t TrueCount = PhysicalDeviceInfo::NumQueueFamilies;
   if (!pQueueFamilyProperties) {
-    *pQueueFamilyPropertyCount = 1;
+    *pQueueFamilyPropertyCount = TrueCount;
     return;
   }
-  uint32_t ToCopy =
-      *pQueueFamilyPropertyCount < 1 ? *pQueueFamilyPropertyCount : 1;
-  if (ToCopy == 1)
-    pQueueFamilyProperties[0].queueFamilyProperties = Family;
+  uint32_t ToCopy = *pQueueFamilyPropertyCount < TrueCount
+                        ? *pQueueFamilyPropertyCount
+                        : TrueCount;
+  for (uint32_t I = 0; I < ToCopy; ++I)
+    pQueueFamilyProperties[I].queueFamilyProperties = Info.QueueFamilies[I];
   *pQueueFamilyPropertyCount = ToCopy;
 }
 
@@ -375,10 +374,11 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateDevice(
   for (uint32_t I = 0; I < pCreateInfo->queueCreateInfoCount; ++I) {
     const VkDeviceQueueCreateInfo &QueueInfo =
         pCreateInfo->pQueueCreateInfos[I];
-    // Only one queue family (index 0) exists; the loader/validation layers
-    // are expected to reject any other index before this point, but this
-    // ICD checks for itself rather than trusting the caller.
-    if (QueueInfo.queueFamilyIndex != 0 ||
+    // Only `PhysicalDeviceInfo::NumQueueFamilies` families exist; the
+    // loader/validation layers are expected to reject any other index
+    // before this point, but this ICD checks for itself rather than
+    // trusting the caller.
+    if (QueueInfo.queueFamilyIndex >= PhysicalDeviceInfo::NumQueueFamilies ||
         !Obj->createQueues(QueueInfo.queueFamilyIndex, QueueInfo.queueCount)) {
       Alloc.destroy(Obj);
       return VK_ERROR_INITIALIZATION_FAILED;
