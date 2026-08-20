@@ -26,73 +26,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-I have an HLSL shader that I'd like to be able to compile through from DXIL to
-AMD ISA, but feme is hitting an assert when I try.
+Can you implement C5 from the roadmap document?
 
-The shader is:
-
-```
-Texture2D<float4> InputTexture : register(t0);
-RWTexture2D<float4> OutputTexture : register(u0);
-
-cbuffer FilterParameters : register(b0)
-{
-    half SpatialScale;
-    half ColorScale;
-};
-
-[numthreads(8, 8, 1)]
-void main(uint3 threadID : SV_DispatchThreadID)
-{
-    uint width = 2048, height = 2048;
-    //OutputTexture.GetDimensions(width, height);
-
-    int2 pixel = int2(threadID.xy);
-    if (pixel.x >= width || pixel.y >= height)
-        return;
-
-    half3 center = InputTexture.Load(int3(pixel, 0)).rgb;
-    half3 weightedSum = 0.0h;
-    half totalWeight = 0.0h;
-
-    [unroll]
-    for (int y = -4; y <= 4; ++y)
-    {
-        [unroll]
-        for (int x = -4; x <= 4; ++x)
-        {
-            int2 coordinate = clamp(
-                pixel + int2(x, y),
-                int2(0, 0),
-                int2(width, height) - 1);
-
-            half3 color = InputTexture.Load(int3(coordinate, 0)).rgb;
-            half3 difference = color - center;
-            half2 offset = half2(x, y);
-
-            half distance =
-                dot(offset, offset) * SpatialScale +
-                dot(difference, difference) * ColorScale;
-
-            half weight = exp2(-distance);
-            weightedSum += color * weight;
-            totalWeight += weight;
-        }
-    }
-
-    OutputTexture[pixel] =
-        half4(weightedSum / max(totalWeight, 0.0001h), 1.0h);
-}
-```
-
-When you compile the shader with the command line:
-
-`dxc -T cs_6_8 <input path> -Fo <output path> -spirv `
-
-Then pass that output into feme, I'm currently seeing the error:
-```
-./bin/feme --target=amdgpu9.0a-amd-amdhsa workload.spv -o workload-spv.o
-feme: resource handle type 'spirv.Image' is not supported when targeting 'amdgpu9.0a-amd-amdhsa' (produced in function 'main')
-```
-
-Can you continue iterating until this compiles successfully?
+> **Mandatory API object model.** Occlusion queries in `vkCreateQueryPool`
+> (mandatory in 1.0); the descriptor types `isSupportedDescriptorType` declines
+> (input attachment, dynamic uniform/storage buffer); the `VkRenderPass` shapes
+> `feme::vulkan::RenderPass` declines (resolve and input attachments,
+> multi-subpass dependencies); the `VkSubgroupFeatureFlags` contradiction
+> (`BASIC_BIT` must be set whenever a graphics or compute queue exists); and
+> `VkPhysicalDeviceDriverProperties` (a registered `VkDriverId`, a conformance
+> version, null-terminated name/info strings -- the last of which is a
+> prerequisite for *submitting* results, not just passing them)
