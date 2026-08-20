@@ -768,7 +768,13 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderTerminateInvocation = VK_FALSE;
       Features->subgroupSizeControl = VK_FALSE;
       Features->computeFullSubgroups = VK_FALSE;
-      Features->synchronization2 = VK_FALSE;
+      // (roadmap E3) `vkCmdPipelineBarrier2`/`vkCmdWriteTimestamp2`/
+      // `vkQueueSubmit2`/`vkCmdSetEvent2`/`vkCmdResetEvent2`/
+      // `vkCmdWaitEvents2` (CommandBuffer.cpp/Sync.cpp) translate
+      // `VkDependencyInfo`'s 2-mask shape down to the existing 1-mask
+      // model, so this bit -- like `dynamicRendering` -- must agree with
+      // the dedicated `VK_KHR_synchronization2` feature struct case below.
+      Features->synchronization2 = VK_TRUE;
       Features->textureCompressionASTC_HDR = VK_FALSE;
       Features->shaderZeroInitializeWorkgroupMemory = VK_FALSE;
       Features->dynamicRendering = VK_TRUE;
@@ -813,6 +819,15 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceDynamicRenderingFeatures *>(Base);
       Features->dynamicRendering = VK_TRUE;
+      break;
+    }
+    // (roadmap E3) `VK_KHR_synchronization2`'s own feature struct, whose
+    // 1.3 core and `KHR` spellings share one `sType`, exactly like
+    // `dynamicRendering` above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceSynchronization2Features *>(Base);
+      Features->synchronization2 = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:

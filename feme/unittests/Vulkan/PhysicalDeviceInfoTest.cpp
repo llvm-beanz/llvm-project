@@ -512,11 +512,31 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features13.shaderTerminateInvocation, VK_FALSE);
   EXPECT_EQ(Features13.subgroupSizeControl, VK_FALSE);
   EXPECT_EQ(Features13.computeFullSubgroups, VK_FALSE);
-  EXPECT_EQ(Features13.synchronization2, VK_FALSE);
+  // Roadmap E3: now genuinely implemented (CommandBuffer.cpp/Sync.cpp),
+  // and must agree with the dedicated `VK_KHR_synchronization2` struct
+  // case below.
+  EXPECT_EQ(Features13.synchronization2, VK_TRUE);
   EXPECT_EQ(Features13.textureCompressionASTC_HDR, VK_FALSE);
   EXPECT_EQ(Features13.shaderZeroInitializeWorkgroupMemory, VK_FALSE);
   EXPECT_EQ(Features13.shaderIntegerDotProduct, VK_FALSE);
   EXPECT_EQ(Features13.maintenance4, VK_FALSE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       Synchronization2IsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E3: `VK_KHR_synchronization2`'s own dedicated feature struct
+  // must agree with the aggregate `VkPhysicalDeviceVulkan13Features` case
+  // above, exactly like `VK_KHR_dynamic_rendering`'s own struct does for
+  // `dynamicRendering`.
+  VkPhysicalDeviceSynchronization2Features Sync2{};
+  Sync2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Sync2;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Sync2.synchronization2, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
