@@ -24551,3 +24551,137 @@ locally, and the `CORE_FEATURES` trim was reverted before finishing rather
 than becoming a real change. I did not attempt D3 (per-bucket attribution
 of D0's regressions) or D4 (continuous measurement tooling), both
 independent of this milestone's own charge.
+
+# Roadmap D3: per-bucket attribution of D0's regressions
+
+## The request
+
+D3's charge is narrow and specific: attribute D0's net +2,553 newly-failing
+cases, bucket by bucket, at the same rigor C1-C8 and D0 itself used for
+`ubo.*.std430`. It is explicitly an attribution milestone, not a fix
+milestone, matching D1's "audit, not an implementation pass" and D2's
+"characterize... not attempt a local workaround" precedent -- I kept that
+scope boundary throughout and made no `feme/` source changes.
+
+## Deciding not to trust the existing numbers
+
+The obvious shortcut would have been to take D0's `ubo`/`spirv_assembly`/
+`synchronization` figures as given and just go hunting for root causes to
+match them. I didn't do that, for the same reason D0 itself didn't stop at
+a first-draft guess for `ubo`: a bucket count from a report is a claim,
+not a measurement, until it's been independently reproduced. So the first
+thing this pass did was rebuild D0's own before/after comparison from
+scratch -- checking out the exact pre-D0 (`45cc60d99cc8`) and post-D0
+(`c0ed4968a920`) commits into separate worktrees, building each with the
+same flags as the main tree (assertions, ccache, `RelWithDebInfo`), and
+running the full documented 54-group recipe against both.
+
+This paid off immediately and changed the shape of the whole milestone:
+the reproduction does not show a net +2,553. It shows a net -417 (525
+newly-`Fail`, 942 no-longer-`Fail`). Two of D0's three explicitly-named
+buckets (`ubo.*.std430` and `synchronization.op.{multi,single}_queue`) do
+not survive a direct per-case diff at all -- both groups produce
+byte-identical or exact-set-identical results whether built at apiVersion
+1.2 or 1.4. Only `spirv_assembly.instruction.compute` reproduces close to
+its original figure (422 vs. 417).
+
+## Why I trust my own numbers over the earlier report's
+
+I did not simply assume the earlier report was wrong and mine right --
+that would be exactly the kind of unverified substitution I'm criticizing
+it for. Three independent pieces of evidence support the correction:
+
+1. **Code inspection, not just log-reading, for `ubo`.** `checkSupport`'s
+   `getUniformBufferStandardLayoutFeatures()` gate depends on
+   `vkDeviceFeatures.cpp`'s `vk12Supported = apiVersion >=
+   VK_MAKE_API_VERSION(0, 1, 2, 0)`, which is already true at *exactly*
+   1.2.0, not just 1.3+. `EntryPoints.cpp`'s
+   `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES` case has set
+   `uniformBufferStandardLayout = VK_TRUE` since roadmap C6, well before
+   D0. Tracing the actual CTS and FeMe source, not just re-running the
+   test, explains *why* the byte-identical log is the correct outcome,
+   not a fluke -- both apiVersions were always going to reach
+   `feme-cpu-simdize`'s diagnostic.
+2. **Determinism checks for `synchronization`.** I ran both `op.multi_
+   queue` and `op.single_queue` standalone (avoiding `api`'s crash
+   entirely) against both commits, then re-ran the post-D0 build a second
+   time to rule out flakiness before trusting a "no difference" result --
+   the same discipline D2 used before trusting its own race-condition
+   findings. All four runs agree exactly.
+3. **An explicit, checkable reason for the CTS revision drift.** Rather
+   than wave at "environments can drift," I diffed the exact CTS commit
+   the earlier report cites against what's actually checked out today and
+   found a real, named commit between them (`716301541136` ->
+   `e4b225a7d7cd`, roadmap C7's own local `ms_then_ss` fix) -- a concrete,
+   verifiable explanation rather than a shrug.
+
+## The `api` group's crash forced a second methodological fix
+
+Both the pre-D0 and post-D0 54-group runs crashed partway through `api`
+this time -- D2's already-tracked loader race, previously observed only at
+1.4, this time reproducing at 1.2 as well once six concurrent `deqp-vk`
+processes contend for the same machine (consistent with a race whose
+trigger is contention, not apiVersion, exactly as D2's own report already
+suspected but didn't have a reason to test explicitly). I re-ran `api`
+alone, uncontended, for both commits before diffing anything -- the same
+"isolate the crashy group, diff complete data" fix D0's own report applied
+to itself. This mattered concretely: D0's own headline table recorded
+`api` as crashed and incomplete for its post-D0 run and never re-measured
+it, so its "1,999 no-longer-failing" figure structurally could not have
+included any of the 120 `api`-group cases my complete diff finds (mostly
+`alloc_callback_fail` tests that now pass because more extensions are
+core-available at 1.4) -- an undercount in the original number, not a
+disagreement about what's true.
+
+## Finding a coherent, code-verified story instead of a pile of one-offs
+
+Rather than stop at "these five groups have new failures, here are the
+error strings," I traced each newly-failing bucket to a specific line of
+FeMe or CTS code and grouped them by shared mechanism:
+
+- `spirv_assembly`'s 422: `SPIRVToLLVMPatterns.cpp`'s `ImageFetchPattern`/
+  `ImageFetchLodPattern` require an exact `image_operands` match and have
+  no case for SPIR-V 1.6's `Nontemporal` bit (only reachable once
+  `apiVersion >= 1.3`) -- confirmed by reading the pattern's match
+  conditions directly, not just inferring from the error text.
+- `graphicsfuzz`'s 72 and `compute`'s 7 share one mechanism:
+  `VK_KHR_shader_terminate_invocation`/`_zero_initialize_workgroup_memory`
+  are both promoted-to-1.3 extensions D1's own inventory already flagged
+  as unimplemented ("no"); deqp-vk assumes any promoted extension is real
+  once the version claim covers it -- the identical mechanism D0's own
+  `copy_commands2` finding established, just recurring for two more
+  extensions D1 already named. I checked `Vulkan14FeatureInventory.md`
+  directly rather than re-guessing whether these were implemented.
+- `api.info.*`'s 18 is D0's own first-draft "vulkan1p3_consistency" guess,
+  which D0 discarded after checking the wrong group (`info`, not
+  `api.info`). I did not repeat that mistake -- grep the actual test names
+  in the diff before deciding a hypothesis is dead.
+- The 822-case `dynamic_rendering` no-longer-failing swing (`draw`,
+  `renderpasses`, `pipeline`) traces to the *same* D1-tracked gap as
+  `api.info.vulkan13_features` above, from a different angle: no
+  `vkGetPhysicalDeviceFeatures2` case exists for
+  `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES` at all (checked
+  by grepping `EntryPoints.cpp` for the literal sType, not assumed), so
+  `dynamicRendering` reads back false through that path even though it is
+  genuinely true through the pre-promotion struct -- turning a crash-
+  adjacent `Fail` into a correctly-truthful `NotSupported` by accident.
+
+Six separate-looking buckets reduce to three actual mechanisms (an
+unhandled SPIR-V 1.6 operand bit, D1's "promoted extension assumed
+implemented" pattern recurring twice, and D1's "missing aggregate feature
+struct" gap recurring twice more, once as a regression and once as an
+accidental improvement) plus one still-open, not-yet-root-caused format/
+robustness inconsistency -- a much smaller, more actionable list than five
+independent one-off bugs would have been.
+
+## Scope discipline
+
+No `feme/` source changes land in this milestone, matching D1/D2's own
+precedent: every finding here (the `Nontemporal` gap, the two unimplemented
+promoted extensions, the missing `Vulkan13Features` case, the texel-buffer
+format inconsistency) is a real, now-documented, still-open gap a future
+roadmap row can close with its own measured before/after, not something
+this attribution pass's own time budget could responsibly also fix and
+still apply this level of rigor to the attribution itself. I did not
+attempt D4 (continuous, crash-tolerant measurement tooling), which remains
+independent of this milestone's own charge.
