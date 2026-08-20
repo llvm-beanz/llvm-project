@@ -311,6 +311,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     uint32_t imageMemoryBarrierCount,
     const VkImageMemoryBarrier *pImageMemoryBarriers);
 
+// Roadmap E3: core Vulkan 1.3 promoted `VK_KHR_synchronization2`'s
+// `vkCmdPipelineBarrier2` (a `VkDependencyInfo`'s 2-stage/2-access-mask
+// barrier arrays wrapped in a single `pNext`-extensible struct, in place of
+// `vkCmdPipelineBarrier`'s separate mask arguments and three flat barrier
+// arrays). Translates that shape down to the identical
+// `ImageLayoutTransition` payload its non-`2` counterpart above already
+// produces -- the same "new entrypoint, old backing model" pattern roadmap
+// C7 used for queue families.
+VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier2(
+    VkCommandBuffer commandBuffer, const VkDependencyInfo *pDependencyInfo);
+
 // V5: image/buffer copies (see "V5: Images and sampling").
 VKAPI_ATTR void VKAPI_CALL
 vkCmdCopyBufferToImage(VkCommandBuffer commandBuffer, VkBuffer srcBuffer,
@@ -386,6 +397,21 @@ VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents(
     uint32_t imageMemoryBarrierCount,
     const VkImageMemoryBarrier *pImageMemoryBarriers);
 
+// Roadmap E3: core Vulkan 1.3 promoted `VK_KHR_synchronization2`'s event
+// commands -- each takes a `VkDependencyInfo` (`vkCmdSetEvent2`/
+// `vkCmdWaitEvents2`) or a 2-stage-mask (`vkCmdResetEvent2`) in place of
+// the 1-mask arguments above, but translates down to the identical
+// `Event`/`waitEvents` payload its non-`2` counterpart already produces.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent event,
+               const VkDependencyInfo *pDependencyInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdResetEvent2(VkCommandBuffer commandBuffer,
+                                            VkEvent event,
+                                            VkPipelineStageFlags2 stageMask);
+VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents2(
+    VkCommandBuffer commandBuffer, uint32_t eventCount, const VkEvent *pEvents,
+    const VkDependencyInfo *pDependencyInfos);
+
 // V3: query pools (see "Command Buffers").
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateQueryPool(
     VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
@@ -414,6 +440,13 @@ VKAPI_ATTR void VKAPI_CALL vkCmdEndQuery(VkCommandBuffer commandBuffer,
 VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(
     VkCommandBuffer commandBuffer, VkPipelineStageFlagBits pipelineStage,
     VkQueryPool queryPool, uint32_t query);
+// Roadmap E3: core Vulkan 1.3 promoted `VK_KHR_synchronization2`'s
+// `vkCmdWriteTimestamp2` -- a 2-stage-mask `pipelineStage`, otherwise
+// identical to its non-`2` counterpart above.
+VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+                                                VkPipelineStageFlags2 stage,
+                                                VkQueryPool queryPool,
+                                                uint32_t query);
 VKAPI_ATTR void VKAPI_CALL vkCmdCopyQueryPoolResults(
     VkCommandBuffer commandBuffer, VkQueryPool queryPool, uint32_t firstQuery,
     uint32_t queryCount, VkBuffer dstBuffer, VkDeviceSize dstOffset,

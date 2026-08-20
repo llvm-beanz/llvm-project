@@ -620,6 +620,26 @@ TEST_F(CommandBufferTest, PipelineBarrierRecordsAsNoOpJoin) {
   ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
 }
 
+// Roadmap E3: `vkCmdPipelineBarrier2`'s empty `VkDependencyInfo` (no
+// image/buffer/memory barriers) mirrors `PipelineBarrierRecordsAsNoOpJoin`
+// above -- recorded the same way its non-`2` counterpart's own no-op join
+// is.
+TEST_F(CommandBufferTest, PipelineBarrier2RecordsAsNoOpJoin) {
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  VkDependencyInfo DepInfo{};
+  DepInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+  vkCmdPipelineBarrier2(CmdBuf, &DepInfo);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_EQ(Recorded->commands().size(), 3u);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+}
+
 /// End-to-end V2 scenario: bind a descriptor set over two storage buffers,
 /// dispatch a shader that reads one and writes the other, and observe the
 /// host-visible result -- "run a Vulkan compute shader that reads and
@@ -1822,6 +1842,36 @@ TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
                                   Availability, sizeof(uint64_t),
                                   VK_QUERY_RESULT_64_BIT),
             VK_NOT_READY); // Query 1 is still unavailable.
+
+  vkDestroyQueryPool(Device, QPool, nullptr);
+}
+
+// Roadmap E3: `vkCmdWriteTimestamp2`'s 2-stage-mask `stage` argument
+// mirrors `QueryPoolWriteTimestampThenGetResults` above.
+TEST_F(CommandBufferTest, QueryPoolWriteTimestamp2ThenGetResults) {
+  VkQueryPoolCreateInfo PoolInfo{};
+  PoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+  PoolInfo.queryCount = 1;
+  VkQueryPool QPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &PoolInfo, nullptr, &QPool), VK_SUCCESS);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdResetQueryPool(CmdBuf, QPool, 0, 1);
+  vkCmdWriteTimestamp2(CmdBuf, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, QPool, 0);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint64_t Results[2] = {0xDEADBEEFDEADBEEFull, 0xDEADBEEFDEADBEEFull};
+  EXPECT_EQ(vkGetQueryPoolResults(
+                Device, QPool, 0, 1, sizeof(Results), Results, sizeof(uint64_t),
+                VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  EXPECT_EQ(Results[0], 0u); // Query 0's value.
+  EXPECT_EQ(Results[1], 1u); // Query 0's availability: available.
 
   vkDestroyQueryPool(Device, QPool, nullptr);
 }

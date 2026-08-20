@@ -360,4 +360,80 @@ TEST_F(SyncTest, CommandBufferWaitEventsFailsWhenUnsignaled) {
   vkDestroyEvent(Device, Ev, nullptr);
 }
 
+// Roadmap E3: mirrors `CommandBufferSetEventThenWaitSucceeds` above through
+// `vkCmdSetEvent2`/`vkCmdWaitEvents2`'s `VkDependencyInfo` shape (empty, so
+// the barrier arrays it could carry are irrelevant here) and
+// `vkCmdResetEvent2`'s 2-stage-mask.
+TEST_F(SyncTest, CommandBufferSetEvent2ThenWaitEvents2Succeeds) {
+  VkEventCreateInfo EventInfo{};
+  VkEvent Ev = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateEvent(Device, &EventInfo, nullptr, &Ev), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer SetCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &SetCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(SetCmdBuf, &BeginInfo);
+  VkDependencyInfo DepInfo{};
+  DepInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+  vkCmdSetEvent2(SetCmdBuf, Ev, &DepInfo);
+  vkEndCommandBuffer(SetCmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(SetCmdBuf)),
+                    llvm::Succeeded());
+  EXPECT_EQ(vkGetEventStatus(Device, Ev), VK_EVENT_SET);
+
+  VkCommandBuffer ResetCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &ResetCmdBuf),
+            VK_SUCCESS);
+  vkBeginCommandBuffer(ResetCmdBuf, &BeginInfo);
+  vkCmdResetEvent2(ResetCmdBuf, Ev, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
+  vkEndCommandBuffer(ResetCmdBuf);
+  ASSERT_THAT_ERROR(
+      executeCommandBuffer(*fromHandle<CommandBuffer>(ResetCmdBuf)),
+      llvm::Succeeded());
+  EXPECT_EQ(vkGetEventStatus(Device, Ev), VK_EVENT_RESET);
+
+  ASSERT_EQ(vkSetEvent(Device, Ev), VK_SUCCESS);
+  VkCommandBuffer WaitCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &WaitCmdBuf),
+            VK_SUCCESS);
+  vkBeginCommandBuffer(WaitCmdBuf, &BeginInfo);
+  vkCmdWaitEvents2(WaitCmdBuf, 1, &Ev, &DepInfo);
+  vkEndCommandBuffer(WaitCmdBuf);
+  EXPECT_THAT_ERROR(
+      executeCommandBuffer(*fromHandle<CommandBuffer>(WaitCmdBuf)),
+      llvm::Succeeded());
+
+  vkDestroyEvent(Device, Ev, nullptr);
+}
+
+TEST_F(SyncTest, CommandBufferWaitEvents2FailsWhenUnsignaled) {
+  VkEventCreateInfo EventInfo{};
+  VkEvent Ev = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateEvent(Device, &EventInfo, nullptr, &Ev), VK_SUCCESS);
+
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer WaitCmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &WaitCmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(WaitCmdBuf, &BeginInfo);
+  VkDependencyInfo DepInfo{};
+  DepInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+  vkCmdWaitEvents2(WaitCmdBuf, 1, &Ev, &DepInfo);
+  vkEndCommandBuffer(WaitCmdBuf);
+  EXPECT_THAT_ERROR(
+      executeCommandBuffer(*fromHandle<CommandBuffer>(WaitCmdBuf)),
+      llvm::Failed());
+
+  vkDestroyEvent(Device, Ev, nullptr);
+}
+
 } // namespace

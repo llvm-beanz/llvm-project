@@ -1956,6 +1956,28 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
       ->pipelineBarrier(std::move(ImageBarriers));
 }
 
+// (Roadmap E3) `VkDependencyInfo`'s per-resource `VkMemoryBarrier2`/
+// `VkBufferMemoryBarrier2`/`VkImageMemoryBarrier2` (2-stage-mask,
+// 2-access-mask shape) translate down to the same `ImageLayoutTransition`
+// payload `vkCmdPipelineBarrier` already produces above: only the image
+// barriers' layout transitions carry any state this ICD tracks, for the
+// same reason that command's own comment gives, and a 2-mask barrier's
+// extra stage/access precision has nothing more to add to that state.
+VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier2(
+    VkCommandBuffer commandBuffer, const VkDependencyInfo *pDependencyInfo) {
+  std::vector<ImageLayoutTransition> ImageBarriers;
+  ImageBarriers.reserve(pDependencyInfo->imageMemoryBarrierCount);
+  for (uint32_t I = 0; I != pDependencyInfo->imageMemoryBarrierCount; ++I) {
+    const VkImageMemoryBarrier2 &Barrier =
+        pDependencyInfo->pImageMemoryBarriers[I];
+    ImageBarriers.push_back(ImageLayoutTransition{
+        fromHandle<vulkan::Image>(Barrier.image), Barrier.oldLayout,
+        Barrier.newLayout, Barrier.subresourceRange});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pipelineBarrier(std::move(ImageBarriers));
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
                                               VkPipelineLayout, uint32_t,
                                               uint32_t offset, uint32_t size,
@@ -2003,6 +2025,39 @@ VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents(
       ->waitEvents(std::move(Events));
 }
 
+// (Roadmap E3) `VK_KHR_synchronization2`'s event commands: `vkCmdSetEvent2`/
+// `vkCmdWaitEvents2` carry a `VkDependencyInfo` (per-event, for
+// `vkCmdWaitEvents2`) in place of the mask arguments above, and
+// `vkCmdResetEvent2` a 2-stage-mask in place of a 1-mask one; none of that
+// extra precision has anything to add to the `Event` state this ICD
+// tracks, for the same reason `vkCmdPipelineBarrier2` gives, so each
+// translates straight down to its non-`2` counterpart's identical payload.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetEvent2(VkCommandBuffer commandBuffer,
+                                          VkEvent event,
+                                          const VkDependencyInfo *) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setEvent(fromHandle<Event>(event));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdResetEvent2(VkCommandBuffer commandBuffer,
+                                            VkEvent event,
+                                            VkPipelineStageFlags2) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->resetEvent(fromHandle<Event>(event));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdWaitEvents2(VkCommandBuffer commandBuffer,
+                                            uint32_t eventCount,
+                                            const VkEvent *pEvents,
+                                            const VkDependencyInfo *) {
+  std::vector<Event *> Events;
+  Events.reserve(eventCount);
+  for (uint32_t I = 0; I != eventCount; ++I)
+    Events.push_back(fromHandle<Event>(pEvents[I]));
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->waitEvents(std::move(Events));
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdResetQueryPool(VkCommandBuffer commandBuffer,
                                                VkQueryPool queryPool,
                                                uint32_t firstQuery,
@@ -2031,6 +2086,17 @@ VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp(VkCommandBuffer commandBuffer,
                                                VkPipelineStageFlagBits,
                                                VkQueryPool queryPool,
                                                uint32_t query) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->writeTimestamp(fromHandle<QueryPool>(queryPool), query);
+}
+
+// (Roadmap E3) `VK_KHR_synchronization2`'s `vkCmdWriteTimestamp2`: a
+// 2-stage-mask `stage` in place of `vkCmdWriteTimestamp`'s single
+// `VkPipelineStageFlagBits`, otherwise identical.
+VKAPI_ATTR void VKAPI_CALL vkCmdWriteTimestamp2(VkCommandBuffer commandBuffer,
+                                                VkPipelineStageFlags2,
+                                                VkQueryPool queryPool,
+                                                uint32_t query) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->writeTimestamp(fromHandle<QueryPool>(queryPool), query);
 }

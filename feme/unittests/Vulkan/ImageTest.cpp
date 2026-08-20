@@ -277,6 +277,50 @@ TEST_F(ImageTest, LayoutTrackingViaPipelineBarrier) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+// Roadmap E3: mirrors `LayoutTrackingViaPipelineBarrier` above through
+// `vkCmdPipelineBarrier2`'s `VkDependencyInfo`/`VkImageMemoryBarrier2`
+// (2-stage/2-access-mask) shape, translated down to the identical
+// `ImageLayoutTransition` payload.
+TEST_F(ImageTest, LayoutTrackingViaPipelineBarrier2) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_STORAGE_BIT, Memory);
+  auto *Obj = fromHandle<Image>(Img);
+  EXPECT_EQ(Obj->layout(0, 0), VK_IMAGE_LAYOUT_UNDEFINED);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo AllocInfo{};
+  AllocInfo.commandPool = Pool;
+  AllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &CmdBuf), VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+
+  VkImageMemoryBarrier2 Barrier{};
+  Barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+  Barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  Barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  Barrier.image = Img;
+  Barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkDependencyInfo DepInfo{};
+  DepInfo.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+  DepInfo.imageMemoryBarrierCount = 1;
+  DepInfo.pImageMemoryBarriers = &Barrier;
+  vkCmdPipelineBarrier2(CmdBuf, &DepInfo);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+  EXPECT_EQ(Obj->layout(0, 0), VK_IMAGE_LAYOUT_GENERAL);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 TEST_F(ImageTest, CopyBufferToImageAndBack) {
   VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
   VkImage Img = createBoundImage2D(
