@@ -75,7 +75,7 @@ TEST_F(DescriptorTest, CreateSetLayoutWithStorageBuffers) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
-TEST_F(DescriptorTest, UnsupportedDescriptorTypeIsRejected) {
+TEST_F(DescriptorTest, InputAttachmentDescriptorTypeIsAccepted) {
   VkDescriptorSetLayoutBinding Binding{};
   Binding.binding = 0;
   Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
@@ -86,7 +86,8 @@ TEST_F(DescriptorTest, UnsupportedDescriptorTypeIsRejected) {
   LayoutInfo.pBindings = &Binding;
   VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
-            VK_ERROR_INITIALIZATION_FAILED);
+            VK_SUCCESS);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
 TEST_F(DescriptorTest, GetLayoutSupportReportsSupportedBindings) {
@@ -104,7 +105,7 @@ TEST_F(DescriptorTest, GetLayoutSupportReportsSupportedBindings) {
   EXPECT_EQ(Support.supported, VK_TRUE);
 }
 
-TEST_F(DescriptorTest, GetLayoutSupportReportsUnsupportedBindings) {
+TEST_F(DescriptorTest, GetLayoutSupportReportsInputAttachmentBindings) {
   VkDescriptorSetLayoutBinding Binding{};
   Binding.binding = 0;
   Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
@@ -116,10 +117,10 @@ TEST_F(DescriptorTest, GetLayoutSupportReportsUnsupportedBindings) {
 
   VkDescriptorSetLayoutSupport Support{};
   vkGetDescriptorSetLayoutSupport(Device, &LayoutInfo, &Support);
-  EXPECT_EQ(Support.supported, VK_FALSE);
+  EXPECT_EQ(Support.supported, VK_TRUE);
 }
 
-TEST_F(DescriptorTest, UnsupportedPoolSizeTypeIsRejected) {
+TEST_F(DescriptorTest, InputAttachmentPoolSizeTypeIsAccepted) {
   VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
   VkDescriptorPoolCreateInfo PoolInfo{};
   PoolInfo.maxSets = 1;
@@ -127,7 +128,8 @@ TEST_F(DescriptorTest, UnsupportedPoolSizeTypeIsRejected) {
   PoolInfo.pPoolSizes = &PoolSize;
   VkDescriptorPool Pool = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
-            VK_ERROR_INITIALIZATION_FAILED);
+            VK_SUCCESS);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
 }
 
 TEST_F(DescriptorTest, AllocateUpdateAndReadBackWrite) {
@@ -389,6 +391,58 @@ TEST_F(DescriptorTest, UniformBufferLayoutAcceptedAndDynamicOffsetCounted) {
   EXPECT_EQ(Array[0].Range, 32u);
 
   vkDestroyBuffer(Device, Buf, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+TEST_F(DescriptorTest, InputAttachmentWriteAndReadBack) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Binding.descriptorCount = 1;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  VkDescriptorImageInfo ImageInfo{};
+  ImageInfo.imageView = reinterpret_cast<VkImageView>(0x1234);
+  ImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+  Write.pImageInfo = &ImageInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<DescriptorImageBinding> Array = S->imageBindingArray(0);
+  ASSERT_EQ(Array.size(), 1u);
+  EXPECT_EQ(Array[0].View, fromHandle<ImageView>(ImageInfo.imageView));
+  EXPECT_EQ(Array[0].Samp, nullptr);
+  EXPECT_EQ(Array[0].Layout, VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_TRUE(S->bindingArray(0).empty());
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
   vkDestroyDescriptorPool(Device, Pool, nullptr);
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }

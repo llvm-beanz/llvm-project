@@ -1,24 +1,28 @@
-# FeMe Vulkan Runtime Design
+#FeMe Vulkan Runtime Design
 
 ## Status
 
-This is an initial design for a Vulkan installable client driver (ICD) backed
-by FeMe's CPU target. The first implementation target is a headless,
-compute-only Vulkan device. It is intended to sit below the standard Vulkan
-loader in the same position as Mesa's lavapipe, but it does not initially aim
-to match lavapipe's graphics, WSI, or extension coverage.
+This is an initial design for a Vulkan installable client driver (ICD)
+backed by
+        FeMe's CPU target. The first implementation target is a headless, compute -
+    only Vulkan device
+        .It is intended to sit below the standard Vulkan loader in the same
+            position as Mesa's lavapipe, but it does not initially aim to
+                match lavapipe's graphics, WSI, or extension coverage.
 
-The CPU shader compiler and execution machinery described in
-[FeMeCPUDesign.md](FeMeCPUDesign.md) already exists. The work designed here is
-the runtime layer which translates Vulkan objects and commands into that
-machinery, plus the FeMe changes needed to make the CPU target usable by a
-driver.
+    The CPU shader compiler and
+        execution machinery described in[FeMeCPUDesign.md](FeMeCPUDesign.md)
+            already exists.The work designed here is the runtime layer which
+    translates Vulkan objects and commands into that machinery,
+    plus the FeMe changes needed to make the CPU target usable by a driver.
 
-The shared compiler, stage ABI, image/sampler, and software-rasterization work
-needed to extend this compute device to graphics is designed separately in
-[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md). This document retains
-ownership of Vulkan pipeline, render-pass, command, synchronization, and WSI
-semantics; those are specified in "Graphics, Presentation, and Window-System
+    The shared compiler,
+    stage ABI, image / sampler,
+    and software - rasterization work needed to extend
+                   this compute device to graphics is designed
+                   separately in[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md)
+                       .This document retains ownership of Vulkan pipeline,
+    render - pass, command, synchronization, and WSI semantics; those are specified in "Graphics, Presentation, and Window-System
 Integration" below and scheduled as milestones V6–V8. Everything before V6 is
 a compute-only device.
 
@@ -115,22 +119,31 @@ and Window-System Integration" and scheduled as V6–V8; nothing below is
 permanently excluded except where it says so.
 
 - Graphics, ray tracing, mesh shading, and video queues. Video queues are
-  permanently out of scope; the rest are V6–V8.
-- Window-system integration, surfaces, swapchains, and presentation (V8).
-- Vulkan conformance. Until the relevant CTS coverage passes, the driver must
-  report a zero `VkConformanceVersion`, must not imply Khronos conformance in
-  its device name, driver name, or documentation, and must not be distributed
-  under a name that asserts a conformant Vulkan implementation.
-- Matching all lavapipe extensions or performance.
-- Reusing Mesa's NIR, Gallium, llvmpipe, or common Vulkan runtime as a link-time
-  dependency.
-- Device group execution, sparse residency, protected memory, external memory,
-  and external synchronization handles. Their *features* report false and their
-  capability queries return empty or degenerate results, but the core
-  entrypoints that carry them -- `vkEnumeratePhysicalDeviceGroups`,
+  permanently out of scope;
+the rest are V6–V8.- Window - system integration, surfaces, swapchains,
+    and presentation(V8).- Vulkan
+                           conformance.Until the relevant CTS coverage passes,
+    the driver must report a zero `VkConformanceVersion`,
+    must not imply Khronos conformance in its device name, driver name,
+    or documentation,
+    and must not be distributed under a name that asserts a conformant Vulkan
+            implementation.-
+            Matching all lavapipe extensions
+        or
+        performance.-
+            Reusing
+            Mesa's NIR, Gallium, llvmpipe, or common Vulkan runtime as a link-time dependency
+                .-
+            Device group execution,
+    sparse residency, protected memory, external memory,
+    and external synchronization handles.Their *features *report false and their
+            capability queries return empty
+        or degenerate results,
+    but the core entrypoints that carry them-- `vkEnumeratePhysicalDeviceGroups`,
   `vkGetPhysicalDeviceSparseImageFormatProperties2`,
-  `vkGetPhysicalDeviceExternalBufferProperties`, and their peers -- are still
-  implemented. An advertised core version may report a feature as unsupported;
+  `vkGetPhysicalDeviceExternalBufferProperties`,
+    and their peers-- are still implemented.An
+        advertised core version may report a feature as unsupported;
   it may not omit a command.
 - Images, sampling, and samplers in the first executing milestone. These are
   required for broader Vulkan compute compatibility, but FeMe's current CPU
@@ -247,11 +260,10 @@ The initial Linux manifest is generated with the built shared library's path:
 
 ```json
 {
-  "file_format_version": "1.0.1",
-  "ICD": {
-    "library_path": "/path/to/build/lib/libfeme_vulkan.so",
-    "api_version": "1.1.0",
-    "is_portability_driver": false
+  "file_format_version" : "1.0.1", "ICD" : {
+    "library_path" : "/path/to/build/lib/libfeme_vulkan.so",
+                     "api_version" : "1.1.0",
+                                     "is_portability_driver" : false
   }
 }
 ```
@@ -358,7 +370,8 @@ implemented. Graphics does not add a second family.
 
 Core Vulkan 1.1 requires a single `VkPhysicalDeviceSubgroupProperties::subgroupSize`
 for the whole device. FeMe's wave size is a compile-time constant chosen per
-compilation from `{4, 8, 16, 32, 64, 128}`. The driver must therefore pin one
+compilation from `{
+  4, 8, 16, 32, 64, 128}`. The driver must therefore pin one
 wave size device-wide, derive it from the host SIMD width once at physical
 device initialization, report it as `subgroupSize`, and fold it into the device
 and pipeline cache UUIDs. Per-pipeline wave sizes are only permissible if the
@@ -628,19 +641,18 @@ Add a lower-level API that exposes per-workgroup invocation, tentatively:
 
 ```c++
 namespace feme::cpu {
+  class CompiledKernel {
+  public:
+    // Takes ownership of the context; the compiled code outlives compilation.
+    static llvm::Expected<std::unique_ptr<CompiledKernel>>
+    create(Context Ctx, feme::Module M, const CompileOptions &Opts);
 
-class CompiledKernel {
-public:
-  // Takes ownership of the context; the compiled code outlives compilation.
-  static llvm::Expected<std::unique_ptr<CompiledKernel>>
-  create(Context Ctx, feme::Module M, const CompileOptions &Opts);
+    const ArtifactInfo &getArtifactInfo() const;
 
-  const ArtifactInfo &getArtifactInfo() const;
-
-  llvm::Error invokeGroup(const PreparedDispatch &Prepared,
-                          std::array<uint32_t, 3> GroupID,
-                          llvm::MutableArrayRef<uint8_t> GroupShared) const;
-};
+    llvm::Error invokeGroup(const PreparedDispatch &Prepared,
+                            std::array<uint32_t, 3> GroupID,
+                            llvm::MutableArrayRef<uint8_t> GroupShared) const;
+  };
 
 } // namespace feme::cpu
 ```
@@ -786,7 +798,9 @@ advertising any descriptor indexing feature.
 | Storage buffer | Raw/structured `FemeDescriptor`, writable | Done (V2) |
 | Uniform buffer | Read-only raw `FemeDescriptor` | Done (V3) |
 | Dynamic storage/uniform buffer | Same, with bound dynamic offset | Done (V2 storage, V3 uniform) |
-| Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Done (V4, `R32G32B32A32_{SFLOAT,UINT,SINT}`/`R8G8B8A8_{UNORM,SNORM,UINT,SINT}` only) |
+| Storage texel buffer | Typed `FemeDescriptor`, writable as allowed | Done (V4, `R32G32B32A32_{
+  SFLOAT, UINT, SINT}`/`R8G8B8A8_{
+  UNORM, SNORM, UINT, SINT}` only) |
 | Uniform texel buffer | Typed read-only `FemeDescriptor` | Done (V4, same format scope) |
 | Sampled/storage image | Future image descriptor ABI | Deferred |
 | Sampler/combined image sampler | Future sampler descriptor ABI | Deferred |
@@ -1382,7 +1396,8 @@ here: they require root constant lowering broader than the single
 today, which is a multi-pass change of its own and is scheduled in V3.
 
 **Status: done**, implemented across `feme/lib/Vulkan/{Memory,Buffer,
-Pipeline,CommandBuffer,Sync,GroupSize}.{h,cpp}`, covered by
+Pipeline,CommandBuffer,Sync,GroupSize}.{
+  h, cpp}`, covered by
 `feme/unittests/Vulkan/{Memory,Buffer,Pipeline,CommandBuffer,Sync,
 GroupSize}Test.cpp`. `SyncTest.SubmitDispatchAndWaitOnFence` is this
 milestone's own end-to-end scenario: it records `vkCmdBindPipeline` +
@@ -1506,7 +1521,8 @@ implementing headers' own file comments:
   the two outputs)
 
 **Status: done**, implemented across `feme/lib/Vulkan/{Descriptor,
-Pipeline,CommandBuffer}.{h,cpp}`, covered by
+Pipeline,CommandBuffer}.{
+  h, cpp}`, covered by
 `feme/unittests/Vulkan/{Descriptor,Pipeline,CommandBuffer}Test.cpp` and
 `feme/test/Vulkan/storage-buffer-lavapipe-diff.test`.
 
@@ -1648,10 +1664,12 @@ Deviations from this section's sketch:
   for one -- `OpImageRead`/`OpImageFetch`/`OpImageWrite` were already
   converted generically by the pre-existing `ImageReadPattern`/
   `ImageWritePattern` -- into `createTypedLoad`/`createTypedStore`.
-  `VK_FORMAT_R32G32B32A32_SFLOAT`, `VK_FORMAT_R32G32B32A32_{UINT,SINT}`
+  `VK_FORMAT_R32G32B32A32_SFLOAT`, `VK_FORMAT_R32G32B32A32_{
+  UINT, SINT}`
   (added in a later V4 pass, alongside `femeCpuResourceLoadTypedV4I32`/
   `StoreTypedV4I32` and `isSupportedTexelElementType`'s `<4 x i32>`
-  acceptance), and `VK_FORMAT_R8G8B8A8_{UNORM,SNORM,UINT,SINT}` (the
+  acceptance), and `VK_FORMAT_R8G8B8A8_{
+  UNORM, SNORM, UINT, SINT}` (the
   latter three added in a still-later V4 follow-up pass, alongside
   `femeRTUnpackR8G8B8A8Snorm`/`Uint`/`Sint` and their `Pack` counterparts
   in FeMeRuntimeCPU.c) are usable in a texel buffer's `VkBufferView`,
@@ -1713,7 +1731,8 @@ Deviations from this section's sketch:
 - **Numeric-type coverage is broader but still bounded.** The runtime now
   converts `R32G32B32A32_UINT`/`_SINT` (identity `<4 x i32>` reinterpret,
   `femeCpuResourceLoadTypedV4I32`/`StoreTypedV4I32`) and all four
-  `R8G8B8A8_{UNORM,SNORM,UINT,SINT}` packed 8-bit-per-component formats
+  `R8G8B8A8_{
+  UNORM, SNORM, UINT, SINT}` packed 8-bit-per-component formats
   (`femeRTUnpackR8G8B8A8Snorm`/`Uint`/`Sint` and their `Pack`
   counterparts, added in a follow-up V4 pass alongside the 32-bit float
   identity formats and `R8G8B8A8_UNORM` -- see
@@ -1767,7 +1786,9 @@ shape -- this milestone's own work is entirely the Vulkan object model that
 produces and consumes those descriptors:
 
 - `feme::vulkan::Image`/`ImageView`/`Sampler` (lib/Vulkan/Image.{h,cpp}):
-  `vkCreateImage`/`vkGetImageMemoryRequirements{,2}`/`vkBindImageMemory{,2}`/
+  `vkCreateImage`/`vkGetImageMemoryRequirements{
+  , 2}`/`vkBindImageMemory{
+  , 2}`/
   `vkCreateImageView`/`vkCreateSampler` and their destroy entry points. An
   image's storage is a packed, mip-major table of
   `feme::cpu::FemeImageSubresourceLayout` entries computed once at creation
@@ -1783,11 +1804,15 @@ produces and consumes those descriptors:
   documents, since this ICD's single-threaded sequential execution already
   satisfies it by construction).
 - `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`/`_STORAGE_IMAGE`/`_SAMPLER`/
-  `_COMBINED_IMAGE_SAMPLER` descriptor types (lib/Vulkan/Descriptor.{h,cpp}):
-  a `DescriptorSet` now holds a per-binding `DescriptorImageBinding` array
-  alongside its existing buffer-oriented one, written by
-  `vkUpdateDescriptorSets`/`vkCmdBindDescriptorSets`'s existing paths and
-  copyable by `vkCmdCopyDescriptorSet`, exactly like a buffer binding.
+  `_COMBINED_IMAGE_SAMPLER`/`_INPUT_ATTACHMENT` descriptor types
+  (lib/Vulkan/Descriptor.{h,cpp}): a `DescriptorSet` now holds a per-binding
+  `DescriptorImageBinding` array alongside its existing buffer-oriented one,
+  written by `vkUpdateDescriptorSets`/`vkCmdBindDescriptorSets`'s existing
+  paths and copyable by `vkCmdCopyDescriptorSet`, exactly like a buffer
+  binding. `INPUT_ATTACHMENT` is retained as the same read-only image-view +
+  layout record as a sampled image here: creation/update/bind are part of the
+  mandatory object model even though subpass-input shader consumption remains a
+  separate follow-up.
 
 **Former deviation, now closed: a real dispatch can consume an image and a
 sampler.** This milestone originally stopped at the object model, because
@@ -1835,6 +1860,10 @@ descriptor, which reads as the robust zero result) because the image
 descriptor ABI has no base-layer field. Writing a storage image from a
 shader needs a `feme.cpu.image.store.*` runtime helper that does not exist
 yet, so a `STORAGE_IMAGE` binding is materialized but not yet writable.
+A shader-side `INPUT_ATTACHMENT` read is likewise not lowered yet: the
+object model can carry the binding, but subpass-input consumption remains
+part of the render-pass follow-up rather than silently pretending an
+ordinary sampled-image lowering exists.
 
 Also out of scope, narrower deviations: a 3D array image is not modeled
 (Vulkan itself does not allow one). Three of this section's own former
@@ -1923,7 +1952,8 @@ to be unsupported"): input attachments and subpass-local merging are not
 implemented, so a subpass declaring one fails `vkCreateRenderPass`;
 attachment formats are the executor's own supported set (the 32-bit float
 family, `R8G8B8A8_UNORM`/`_SRGB`, `B8G8R8A8_UNORM`, `R10G10B10A2_UNORM`,
-`R16G16B16A16_{FLOAT,UNORM,SNORM}` for color -- the Vulkan 1.2 mandatory
+`R16G16B16A16_{
+  FLOAT, UNORM, SNORM}` for color -- the Vulkan 1.2 mandatory
 `COLOR_ATTACHMENT_BIT`/`_BLEND_BIT` set, roadmap C1 -- `D16_UNORM`/
 `D32_FLOAT` for depth, `S8_UINT` for stencil, and `D24_UNORM_S8_UINT` as a
 combined depth+stencil format, also roadmap C1: the two halves share one

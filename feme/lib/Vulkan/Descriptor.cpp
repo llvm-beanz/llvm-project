@@ -36,7 +36,8 @@ bool feme::vulkan::isTexelBufferDescriptorType(VkDescriptorType Type) {
 bool feme::vulkan::isImageDescriptorType(VkDescriptorType Type) {
   return Type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
          Type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE ||
-         Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+         Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+         Type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
 }
 
 bool feme::vulkan::isSamplerDescriptorType(VkDescriptorType Type) {
@@ -54,7 +55,8 @@ bool feme::vulkan::isReadOnlyDescriptorType(VkDescriptorType Type) {
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
          Type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
-         Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+         Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+         Type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
 }
 
 DescriptorSetLayout::DescriptorSetLayout(

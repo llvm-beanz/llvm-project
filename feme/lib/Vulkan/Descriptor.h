@@ -59,9 +59,13 @@
 // regardless of the underlying format's real channel count) -- deferred
 // past V4.
 //
-// (V5) `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`/`_STORAGE_IMAGE`/`_SAMPLER`/
-// `_COMBINED_IMAGE_SAMPLER` are also accepted -- see `DescriptorImageBinding`
-// and `DescriptorSet::write`'s image overload. A shader that actually reads
+// (V5/C5) `VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE`/`_STORAGE_IMAGE`/`_SAMPLER`/
+// `_COMBINED_IMAGE_SAMPLER`/`_INPUT_ATTACHMENT` are also accepted -- see
+// `DescriptorImageBinding` and `DescriptorSet::write`'s image overload. An
+// input attachment is retained exactly like a read-only sampled image here:
+// the object model can create, update, copy, and bind it even though shader-
+// side subpass-input consumption is still a separate, later step. A shader
+// that actually reads
 // through the image/sampler heap still fails pipeline creation: normalizing
 // a Vulkan descriptor-set-bound image/sampler into `feme::cpu`'s image/
 // sampler heap needs the same kind of `BoundResourceRange` reflection
@@ -94,7 +98,8 @@ class Sampler;
 
 /// Whether \p Type is one of the descriptor types this ICD supports (see
 /// the file comment): the six buffer-oriented types from V2/V3/V4, plus
-/// (V5) `SAMPLED_IMAGE`/`STORAGE_IMAGE`/`SAMPLER`/`COMBINED_IMAGE_SAMPLER`.
+/// (V5/C5) `SAMPLED_IMAGE`/`STORAGE_IMAGE`/`SAMPLER`/
+/// `COMBINED_IMAGE_SAMPLER`/`INPUT_ATTACHMENT`.
 bool isSupportedDescriptorType(VkDescriptorType Type);
 
 /// Whether \p Type is a uniform/storage texel buffer, i.e. resolves to a
@@ -103,10 +108,11 @@ bool isSupportedDescriptorType(VkDescriptorType Type);
 /// the file comment).
 bool isTexelBufferDescriptorType(VkDescriptorType Type);
 
-/// (V5) Whether \p Type carries an image resource (a `VkImageView`, with or
-/// without a combined sampler) rather than a buffer -- i.e. is materialized
-/// through `DescriptorSet::write`'s image overload and `imageBindingArray`
-/// rather than the buffer-oriented `write`/`bindingArray`.
+/// (V5/C5) Whether \p Type carries an image resource (a `VkImageView`, with
+/// or without a combined sampler) rather than a buffer -- i.e. is
+/// materialized through `DescriptorSet::write`'s image overload and
+/// `imageBindingArray` rather than the buffer-oriented `write`/
+/// `bindingArray`.
 bool isImageDescriptorType(VkDescriptorType Type);
 
 /// (V5) Whether \p Type carries a sampler (a plain `VK_DESCRIPTOR_TYPE_
