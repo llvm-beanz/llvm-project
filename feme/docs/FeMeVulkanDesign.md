@@ -4,11 +4,12 @@
 
 This is an initial design for a Vulkan installable client driver (ICD)
 backed by
-        FeMe's CPU target. The first implementation target is a headless, compute -
-    only Vulkan device
-        .It is intended to sit below the standard Vulkan loader in the same
-            position as Mesa's lavapipe, but it does not initially aim to
-                match lavapipe's graphics, WSI, or extension coverage.
+    FeMe's CPU target. The first implementation target is a headless, compute - only
+        Vulkan device
+            .It is intended to sit below the standard Vulkan loader in the same
+                position
+                    as Mesa's lavapipe, but it does not initially aim to match
+                        lavapipe's graphics, WSI, or extension coverage.
 
     The CPU shader compiler and
         execution machinery described in[FeMeCPUDesign.md](FeMeCPUDesign.md)
@@ -129,12 +130,10 @@ the rest are V6–V8.- Window - system integration, surfaces, swapchains,
     and must not be distributed under a name that asserts a conformant Vulkan
             implementation.-
             Matching all lavapipe extensions
-        or
-        performance.-
-            Reusing
-            Mesa's NIR, Gallium, llvmpipe, or common Vulkan runtime as a link-time dependency
-                .-
-            Device group execution,
+        or performance.-
+               Reusing Mesa's NIR, Gallium, llvmpipe, or common Vulkan runtime as a link-time dependency
+                   .-
+               Device group execution,
     sparse residency, protected memory, external memory,
     and external synchronization handles.Their *features *report false and their
             capability queries return empty
@@ -1061,10 +1060,13 @@ Subpasses get the deliberately coarse treatment first: each subpass boundary
 is a full join and, where the attachment's store/load ops require it, an
 attachment resolve or clear. Tile-local subpass merging, and therefore
 `VK_ATTACHMENT_LOAD_OP_LOAD` from an input attachment without a round trip
-through memory, is an optimization to be added with tests. Input attachments
-themselves are read as ordinary sampled images at a fixed coordinate, which is
-correct but not fast, and is not permitted to be exposed as
-`VK_SUBPASS_DESCRIPTION_*` behavior it does not implement.
+through memory, is an optimization to be added with tests. Roadmap C5 closes
+only the object-model half of input attachments: a render pass now accepts and
+retains input-attachment references, and the matching
+`VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` descriptor kind is materialized as an
+ordinary read-only image binding, but a shader-side SPIR-V `subpassInput`
+read is still a separate lowering step rather than silently pretending one
+exists.
 
 Attachment layout transitions are tracked, validated, and — for the internal
 tiled layouts FeMeGraphicsDesign.md's "Texture layout and formats" permits —
@@ -1948,9 +1950,13 @@ there once every command it declares is implemented.
 
 *Deviations, all failing at creation rather than at draw time* (the rule
 "a draw is not permitted to be the place a state combination is discovered
-to be unsupported"): input attachments and subpass-local merging are not
-implemented, so a subpass declaring one fails `vkCreateRenderPass`;
-attachment formats are the executor's own supported set (the 32-bit float
+to be unsupported"): subpass-local merging is not implemented, so an input
+attachment still goes through memory rather than a tile-local path, and a
+shader-side `subpassInput` read is still unlowered even though the render-pass
+and descriptor object model now accept the references; subpass dependencies are
+validated and accepted but still collapse to the same full-join semantics this
+ICD already applies at every subpass boundary; attachment formats are the
+executor's own supported set (the 32-bit float family
 family, `R8G8B8A8_UNORM`/`_SRGB`, `B8G8R8A8_UNORM`, `R10G10B10A2_UNORM`,
 `R16G16B16A16_{
   FLOAT, UNORM, SNORM}` for color -- the Vulkan 1.2 mandatory

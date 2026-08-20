@@ -63,6 +63,11 @@ struct AttachmentDescription {
 /// One compiled `VkSubpassDescription`: indices into the render pass's own
 /// attachment list. `VK_ATTACHMENT_UNUSED` keeps its Vulkan meaning.
 struct SubpassDescription {
+  /// Input attachments are retained in the object model even though shader-
+  /// side `subpassInput` consumption is still a separate follow-up: a
+  /// `VkRenderPass` must not reject the mandatory attachment references it can
+  /// already validate and carry forward.
+  std::vector<uint32_t> InputAttachments;
   std::vector<uint32_t> ColorAttachments;
   /// Empty, or exactly as long as `ColorAttachments`; an entry may be
   /// `VK_ATTACHMENT_UNUSED` for a color attachment that is not resolved.
@@ -75,7 +80,9 @@ struct SubpassDescription {
 /// here for the same reason `vkCmdPipelineBarrier` does not (see
 /// CommandBuffer.h's `pipelineBarrier` comment): this ICD executes every
 /// command to completion in record order, so each subpass boundary's join is
-/// already satisfied by construction.
+/// already satisfied by construction. They are still validated at creation
+/// time, though, so out-of-range subpass references or multiview-only flags do
+/// not slip through silently.
 class RenderPass {
 public:
   RenderPass(std::vector<AttachmentDescription> Attachments,

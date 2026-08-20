@@ -169,10 +169,7 @@ TEST_F(RenderPassTest, RejectsUnsupportedSampleCount) {
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
-/// Input attachments would need either tile-local subpass merging or a
-/// sampled-image round trip; neither is implemented, so a subpass declaring
-/// one fails creation instead of rendering something wrong.
-TEST_F(RenderPassTest, RejectsInputAttachments) {
+TEST_F(RenderPassTest, CompilesInputAttachments) {
   VkAttachmentDescription Attachment{};
   Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
   Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -190,8 +187,11 @@ TEST_F(RenderPassTest, RejectsInputAttachments) {
   Info.pSubpasses = &Subpass;
 
   VkRenderPass Pass = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreateRenderPass(Device, &Info, nullptr, &Pass),
-            VK_ERROR_INITIALIZATION_FAILED);
+  ASSERT_EQ(vkCreateRenderPass(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  const auto *Obj = fromHandle<RenderPass>(Pass);
+  ASSERT_EQ(Obj->subpasses()[0].InputAttachments.size(), 1u);
+  EXPECT_EQ(Obj->subpasses()[0].InputAttachments[0], 0u);
+  vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
 /// `vkCreateRenderPass2` (core VK_VERSION_1_2) must build the exact same
@@ -244,6 +244,55 @@ TEST_F(RenderPassTest, RenderPass2MatchesClassicCreation) {
 /// Multiview (`viewMask`) is only expressible through `...2`'s structures,
 /// and is unimplemented (roadmap V7); a subpass asking for it must fail
 /// creation rather than silently render only view 0.
+TEST_F(RenderPassTest, AcceptsDependenciesBetweenSubpasses) {
+  VkAttachmentDescription Attachment{};
+  Attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+  Attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+  VkSubpassDescription Subpasses[2]{};
+  for (VkSubpassDescription &Subpass : Subpasses) {
+    Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    Subpass.colorAttachmentCount = 1;
+    Subpass.pColorAttachments = &ColorRef;
+  }
+  VkSubpassDependency Dependency{};
+  Dependency.srcSubpass = 0;
+  Dependency.dstSubpass = 1;
+  Dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+  Dependency.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+  VkRenderPassCreateInfo Info{};
+  Info.attachmentCount = 1;
+  Info.pAttachments = &Attachment;
+  Info.subpassCount = 2;
+  Info.pSubpasses = Subpasses;
+  Info.dependencyCount = 1;
+  Info.pDependencies = &Dependency;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateRenderPass(Device, &Info, nullptr, &Pass), VK_SUCCESS);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
+TEST_F(RenderPassTest, RejectsDependencyWithOutOfRangeSubpass) {
+  VkSubpassDescription Subpass{};
+  Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  VkSubpassDependency Dependency{};
+  Dependency.srcSubpass = 0;
+  Dependency.dstSubpass = 1;
+
+  VkRenderPassCreateInfo Info{};
+  Info.subpassCount = 1;
+  Info.pSubpasses = &Subpass;
+  Info.dependencyCount = 1;
+  Info.pDependencies = &Dependency;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateRenderPass(Device, &Info, nullptr, &Pass),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
 TEST_F(RenderPassTest, RenderPass2RejectsMultiview) {
   VkSubpassDescription2 Subpass{};
   Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
@@ -254,6 +303,30 @@ TEST_F(RenderPassTest, RenderPass2RejectsMultiview) {
   Info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
   Info.subpassCount = 1;
   Info.pSubpasses = &Subpass;
+
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass),
+            VK_ERROR_INITIALIZATION_FAILED);
+}
+
+TEST_F(RenderPassTest, RenderPass2RejectsNonZeroDependencyViewOffset) {
+  VkSubpassDescription2 Subpasses[2]{};
+  for (VkSubpassDescription2 &Subpass : Subpasses) {
+    Subpass.sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2;
+    Subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+  }
+  VkSubpassDependency2 Dependency{};
+  Dependency.sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2;
+  Dependency.srcSubpass = 0;
+  Dependency.dstSubpass = 1;
+  Dependency.viewOffset = 1;
+
+  VkRenderPassCreateInfo2 Info{};
+  Info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2;
+  Info.subpassCount = 2;
+  Info.pSubpasses = Subpasses;
+  Info.dependencyCount = 1;
+  Info.pDependencies = &Dependency;
 
   VkRenderPass Pass = VK_NULL_HANDLE;
   EXPECT_EQ(vkCreateRenderPass2(Device, &Info, nullptr, &Pass),

@@ -100,6 +100,20 @@ resolveAttachmentView(ImageView *View) {
 
 namespace {
 
+bool isValidSubpassIndex(uint32_t Subpass, uint32_t SubpassCount) {
+  return Subpass == VK_SUBPASS_EXTERNAL || Subpass < SubpassCount;
+}
+
+VkResult validateSubpassDependency(const VkSubpassDependency &Dep,
+                                   uint32_t SubpassCount) {
+  if (!isValidSubpassIndex(Dep.srcSubpass, SubpassCount) ||
+      !isValidSubpassIndex(Dep.dstSubpass, SubpassCount))
+    return VK_ERROR_INITIALIZATION_FAILED;
+  if ((Dep.dependencyFlags & VK_DEPENDENCY_VIEW_LOCAL_BIT) != 0)
+    return VK_ERROR_INITIALIZATION_FAILED;
+  return VK_SUCCESS;
+}
+
 /// Normalizes one `VkAttachmentDescription`, or returns `std::nullopt` for a
 /// format/sample count this driver cannot honor -- which fails
 /// `vkCreateRenderPass` outright, per "a layout the driver cannot honor
@@ -153,14 +167,14 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
     const VkSubpassDescription &Src = pCreateInfo->pSubpasses[I];
     if (Src.pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS)
       return VK_ERROR_INITIALIZATION_FAILED;
-    // Input attachments would need either tile-local subpass merging or a
-    // sampled-image round trip through memory; neither is implemented, and
-    // "Input attachments ... [are] not permitted to be exposed as
-    // VK_SUBPASS_DESCRIPTION_* behavior it does not implement".
-    if (Src.inputAttachmentCount != 0)
-      return VK_ERROR_INITIALIZATION_FAILED;
 
     SubpassDescription Subpass;
+    for (uint32_t J = 0; J != Src.inputAttachmentCount; ++J) {
+      uint32_t Index = Src.pInputAttachments[J].attachment;
+      if (Index != VK_ATTACHMENT_UNUSED && Index >= Attachments.size())
+        return VK_ERROR_INITIALIZATION_FAILED;
+      Subpass.InputAttachments.push_back(Index);
+    }
     for (uint32_t J = 0; J != Src.colorAttachmentCount; ++J) {
       uint32_t Index = Src.pColorAttachments[J].attachment;
       if (Index != VK_ATTACHMENT_UNUSED &&
@@ -201,6 +215,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass(
 
     Subpasses.push_back(std::move(Subpass));
   }
+  for (uint32_t I = 0; I != pCreateInfo->dependencyCount; ++I)
+    if (VkResult Result = validateSubpassDependency(
+            pCreateInfo->pDependencies[I], pCreateInfo->subpassCount);
+        Result != VK_SUCCESS)
+      return Result;
 
   Allocator Alloc(pAllocator);
   RenderPass *Obj =
@@ -217,8 +236,8 @@ namespace {
 /// Converts one `VkAttachmentReference2` to the classic
 /// `VkAttachmentReference` `vkCreateRenderPass`'s subpass loop already
 /// checks -- dropping only `aspectMask`, which this driver never consults
-/// (no packed depth/stencil surface, no input attachments; see
-/// `vkCreateRenderPass`'s own rejection of both).
+/// (no packed depth/stencil-aspect selection, and shader-side input-
+/// attachment lowering still ignores the distinction).
 VkAttachmentReference toAttachmentReference(const VkAttachmentReference2 &Src) {
   return {Src.attachment, Src.layout};
 }
@@ -267,6 +286,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
       pCreateInfo->subpassCount);
   std::vector<VkAttachmentReference> DepthStencilRefs(
       pCreateInfo->subpassCount);
+  std::vector<VkSubpassDependency> Dependencies;
+  Dependencies.reserve(pCreateInfo->dependencyCount);
+  for (uint32_t I = 0; I != pCreateInfo->dependencyCount; ++I) {
+    const VkSubpassDependency2 &Src = pCreateInfo->pDependencies[I];
+    if (Src.viewOffset != 0)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    Dependencies.push_back({Src.srcSubpass, Src.dstSubpass, Src.srcStageMask,
+                            Src.dstStageMask, Src.srcAccessMask,
+                            Src.dstAccessMask, Src.dependencyFlags});
+  }
+
   std::vector<VkSubpassDescription> Subpasses;
   Subpasses.reserve(pCreateInfo->subpassCount);
   for (uint32_t I = 0; I != pCreateInfo->subpassCount; ++I) {
@@ -300,12 +330,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateRenderPass2(
       Attachments.data(),
       static_cast<uint32_t>(Subpasses.size()),
       Subpasses.data(),
-      // Dependencies carry no payload this ICD's strictly sequential
-      // execution needs (see RenderPass.h's `RenderPass` doc comment), so
-      // `vkCreateRenderPass` never reads `pCreateInfo->pDependencies`
-      // either; converting them would be pure dead weight.
-      0u,
-      nullptr,
+      static_cast<uint32_t>(Dependencies.size()),
+      Dependencies.empty() ? nullptr : Dependencies.data(),
   };
   return feme::vulkan::vkCreateRenderPass(device, &ClassicInfo, pAllocator,
                                           pRenderPass);
