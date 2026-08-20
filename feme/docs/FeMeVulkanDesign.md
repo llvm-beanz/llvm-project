@@ -448,6 +448,36 @@ In particular:
   variable pointers, or physical storage buffer addresses are independently
   gated by importer and CPU-lowering coverage.
 
+**Status (roadmap C6, "Mandatory 1.2 features and limits"):** closed, with
+one deliberate exception. `hostQueryReset` (`vkResetQueryPool` already
+existed), `uniformBufferStandardLayout`/`separateDepthStencilLayouts`
+(neither restriction they relax was ever enforced), and
+`shaderSubgroupExtendedTypes`/`subgroupBroadcastDynamicId` (vacuously true:
+no `OpGroupNonUniform*` operation is converted at all yet, so neither bit
+unlocks an untested code path) are now advertised, each through both its
+dedicated feature struct and the aggregate `VkPhysicalDeviceVulkan12Features`
+chain. `maxMemoryAllocationSize` (mirrors the real memory heap size),
+`maxPerSetDescriptors`, `maxMultiviewViewCount`/`maxMultiviewInstanceIndex`,
+and `maxTimelineSemaphoreValueDifference` (`UINT64_MAX`: a timeline
+semaphore's counter is a plain in-memory `uint64_t` compare with no lower
+implementation-side cap) are raised to or above their required minimums in
+both their dedicated properties structs and the promoted
+`VkPhysicalDeviceVulkan11Properties`/`VkPhysicalDeviceVulkan12Properties`
+chains, fixing the `vkGetPhysicalDeviceFeatures2`/`Properties2`-versus-
+promoted-struct disagreement `dEQP-VK.api.info.vulkan1p2_*_consistency`
+checks for each. **`multiview` stays unadvertised**: it needs layered
+rendering (a framebuffer/attachment with more than one array layer bound
+per view), which is roadmap V7, not yet implemented -- see
+`vkCreateFramebuffer`'s `layers != 1` rejection and
+`vkCreateRenderPass2`'s `viewMask != 0` rejection, both untouched by this
+milestone. The `maxMultiviewViewCount`/`maxMultiviewInstanceIndex`
+properties are still raised to their required minimum regardless, since
+`dEQP-VK.api.info.vulkan1p2_limits_validation` checks them unconditionally
+once the advertised API version is >= 1.2, independent of whether
+`multiview` itself is supported. See `feme/lib/Vulkan/PhysicalDeviceInfo.h`'s
+field comments and `EntryPoints.cpp`'s `fillFeatures2Chain`/
+`fillProperties2Chain` case comments for the full per-field reasoning.
+
 The driver reports no device extension merely because Vulkan-Headers declares
 it. Each extension has an implementation owner and a focused test before it is
 enumerated. The enumerated set lives in one place --
@@ -1094,6 +1124,21 @@ Attachment layout transitions are tracked, validated, and — for the internal
 tiled layouts FeMeGraphicsDesign.md's "Texture layout and formats" permits —
 may be real conversions. They may never be silently ignored: a layout the
 driver cannot honor fails at render-pass creation, not at draw time.
+
+**Status (roadmap C6): `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`/
+`imagelessFramebuffer` implemented.** `vkCreateFramebuffer` accepts a
+framebuffer whose attachment views are deferred to each render-pass instance
+(`VkRenderPassAttachmentBeginInfo` at `vkCmdBeginRenderPass`) rather than
+bound at creation time; only the chained `VkFramebufferAttachmentsCreateInfo`
+(attachment count, and, where a candidate view-format list is given, at
+least one format-compatible entry) can be validated eagerly, with the same
+format/sample-count/size check `vkCreateFramebuffer`'s concrete path already
+performed deferred into `buildRenderTargetBinding` (`CommandBuffer.cpp`)
+instead. This needed no layered-rendering support: an imageless framebuffer
+is exactly as single-layer as a concrete one (`vkCreateFramebuffer`'s
+`layers != 1` rejection is untouched), so it stayed in scope even though
+`multiview` itself did not (see "Physical Device and Capabilities"'s
+"Limits and features" status note).
 
 ### Graphics pipeline state
 
