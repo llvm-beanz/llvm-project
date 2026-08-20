@@ -1113,6 +1113,120 @@ crash-isolation (see "Reproducing this report" above) as sufficient
 mitigation, since every other group's totals are unaffected by this one
 group's crash rate.
 
+## Roadmap D3: measured impact
+
+Roadmap D3 is per-bucket attribution of the net +2,553 newly-failing cases
+"Roadmap D0: measured impact" above found but did not individually trace,
+beyond `ubo.*.std430` -- at the same rigor C1-C8 applied to their own
+fixes, and D0 itself applied to that one bucket (diffing real per-case
+result sets, not aggregate counts).
+
+**Reproducing D0's own comparison first, honestly.** Rather than trust
+the earlier headline numbers, this pass rebuilt both sides of D0's own
+diff from the exact commits: the pre-D0 apiVersion-1.2 commit
+(`45cc60d99cc8`) and the post-D0, pre-D1 apiVersion-1.4-plus-copy_commands2
+commit (`c0ed4968a920`), each in its own worktree and build tree (ccache
+shared with the main tree, `LLVM_ENABLE_ASSERTIONS=ON`), and ran the
+identical documented 54-group recipe against each. Both `check-feme` runs
+passed clean (1478/1518 and 1479/1519 respectively, no failures, matching
+each commit's own expected `Unsupported` count). One correction to the
+recipe itself was necessary: `api` crashed partway through the concurrent
+54-group run for *both* commits this time (D2's already-tracked loader
+race, triggered here by resource contention from six concurrent `deqp-vk`
+processes rather than by anything apiVersion-specific -- it reproduced at
+1.2 as readily as at 1.4 once run under the same load), so `api` was
+re-run alone, uncontended, for both commits before diffing; both isolated
+re-runs completed all 267,222 of `api`'s own cases cleanly.
+
+**This does not reproduce a net +2,553.** Diffing the two runs' actual
+per-case `Fail` sets across all 54 groups (not aggregate counts) gives
+525 newly-`Fail` and 942 no-longer-`Fail` -- a net **-417**, the opposite
+sign from what "Roadmap D0: measured impact" recorded. Two things account
+for most of the gap, and neither is a measurement mistake in this pass:
+first, this tree's checked-out VK-GL-CTS has drifted one local commit
+past what D0's own report cites (`vulkan-cts-1.4.6.2-412-g716301541136`
+there, `-413-ge4b225a7d7cd` here -- the local `ms_then_ss` copy_commands2
+fix roadmap C7 added), and this report's own methodology
+("Reproducing this report" above) has never pinned an exact CTS commit,
+only a checked-in tree; second, D0's own headline table explicitly
+recorded `api` as "Crashed / timed out ... 228 cases short" for its
+post-D0 run and never re-measured it complete, so its 1,999-case
+no-longer-failing figure could not have included any of the 120
+`api`-group cases this pass's *complete* diff finds (below) -- an
+undercount baked into the original number, not a new discrepancy this
+pass introduced. Per this file's own stated purpose ("regenerated from
+scratch on every full pass ... describes the *current* state, not the
+history of how it got there"), the numbers below supersede D0's for
+per-bucket attribution purposes; D0's own headline table above is left
+unchanged since it documents what that pass's revisions actually measured
+at the time.
+
+**Newly-`Fail` (525), by group:**
+
+| Group | Cases | Root cause |
+|---|---|---|
+| `spirv_assembly.instruction.compute` | 422 | Genuine regression, matches D0's own 417 closely. `SPIRVToLLVMPatterns.cpp`'s `ImageFetchPattern`/`ImageFetchLodPattern` (and the analogous `spirv.ImageSampleExplicitLod` patterns) each require an *exact* `image_operands` match (no operands, or exactly `Lod`) and reject everything else as illegal; SPIR-V 1.6 (which deqp-vk only emits once `apiVersion >= 1.3`, matching every one of these cases' pre-D0 `NotSupported ("Vulkan higher than or equal to 1.3 is required")`) adds a `Nontemporal` cache hint bit that combines with `Lod` or stands alone, and no pattern in this file tolerates it -- a pure cache hint with no defined effect on the result, currently unhandled anywhere in this ICD, not a semantic gap the way `ubo`'s is. |
+| `graphicsfuzz` | 72 | `VK_KHR_shader_terminate_invocation`, promoted to core at `VK_VERSION_1_3` per `Vulkan14FeatureInventory.md`'s row for it ("no" -- not yet implemented). deqp-vk's own extension-support check treats any extension promoted to core at or below the claimed `apiVersion` as present without querying this ICD's advertised extension list -- the identical mechanism D0's own `copy_commands2` finding already established, now hitting a different extension. These Amber tests exercise `OpTerminateInvocation`'s distinct-from-`discard` semantics, which this ICD does not actually implement differently, so they now run (instead of correctly reporting `NotSupported`) and produce a wrong image (`Fail (Fail)`, an image-comparison mismatch, not a pipeline-creation error). |
+| `api.info.*` | 18 | `dEQP-VK.api.info.vulkan1p3.{features,properties,feature_extensions_consistency}` and ten `get_physical_device_properties2.features.*_features` cases (`image_robustness`, `inline_uniform_block`, `maintenance4`, `pipeline_creation_cache_control`, `private_data`, `shader_demote_to_helper_invocation`, `shader_integer_dot_product`, `shader_terminate_invocation`, `subgroup_size_control`, `synchronization2`, `texture_compression_astc_hdr`, `vulkan13`, plus `vulkan1p3_limits_validation.max_inline_uniform_total_size`) -- exactly the "device_mandatory_features/vulkan1p3_consistency" shape D0's first draft guessed and discarded after checking the top-level `info` group alone (which only gained two new failures, as D0 recorded). It materializes instead in `api.info.*`, a separate subtree deqp-vk also uses for the same class of check; D0's report did not check that subtree. Root cause is D1's already-tracked finding that most of 1.3/1.4's mandatory feature bits are unimplemented, now caught by consistency checks that only run once `apiVersion >= 1.3` makes deqp-vk chain the aggregate `VkPhysicalDeviceVulkan13Features` blob alongside each feature's individual extension struct and compare them. |
+| `compute.pipeline.zero_initialize_workgroup_memory` | 7 | Same "promoted extension assumed implemented" shape as `graphicsfuzz`: `VK_KHR_zero_initialize_workgroup_memory` is promoted to `VK_VERSION_1_3` and, per `Vulkan14FeatureInventory.md`, not yet implemented (`shaderZeroInitializeWorkgroupMemory` feature bit: "no"). Pre-D0 these correctly reported `NotSupported`; post-D0 they run and fail. |
+| `robustness.oob_access` | 6 | `rba_texel_buffer_uniform_*` cases: pre-D0 these reported `NotSupported ("Format not supported for uniform texel buffers")`; post-D0 the same format now passes that check (a mandatory-format-table consequence, not traced further this pass) and reaches `vkCreateBufferView`, which throws `VK_ERROR_FORMAT_NOT_SUPPORTED` -- an internal inconsistency between what this ICD's format-support query reports and what its own `vkCreateBufferView` accepts, not yet root-caused past that point. |
+
+**No-longer-`Fail` (942), by group -- a D1-tracked gap paying off as an
+accidental improvement:**
+
+| Group | Cases | Root cause |
+|---|---|---|
+| `draw.dynamic_rendering.*` | 613 | Pre-D0: `Fail (vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED)` or the equivalent at `vkQueueSubmit`/`vkCmdUtil.cpp` -- a crash-adjacent failure, not a clean rejection. Post-D0: `NotSupported ("VK_KHR_dynamic_rendering is not supported")`. Root cause: deqp-vk's own support check for this extension consults `VkPhysicalDeviceVulkan13Features.dynamicRendering` once `apiVersion >= 1.3` (rather than the pre-promotion `VkPhysicalDeviceDynamicRenderingFeatures` struct these tests' pre-D0 path used); `vkGetPhysicalDeviceFeatures2` has **no case at all** for `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES` (confirmed by inspection -- absent from `EntryPoints.cpp`'s switch), so that blob is left zero-initialized and reads back `dynamicRendering = false` even though it is truthfully advertised through the older struct. This is exactly D1's own finding ("only `dynamicRendering` is genuinely implemented, and only through its pre-promotion ... struct, not yet the aggregate one") now observed converting a bad-shaped `Fail` into a correctly-truthful `NotSupported`, purely by accident of which struct a version-gated check happens to consult. |
+| `renderpasses.dynamic_rendering.*` | 204 | Identical mechanism and identical `NotSupported` message to `draw` above. |
+| `pipeline.monolithic.*.dynamic_rendering_postpass` | 5 | Identical mechanism. |
+| `api.object_management.alloc_callback_fail.*` | 120 | Pre-D0: `Fail (createDeviceInternal(...): VK_ERROR_EXTENSION_NOT_PRESENT)`. Post-D0: `Pass`. These tests request a specific device extension unconditionally; at 1.4 more of the requested extensions are core (not separately enumerable, and no longer rejected as "not present"), so device creation now succeeds -- a genuine, uncomplicated improvement from the version bump, not a gap. |
+
+**Correcting D0's own already-traced bucket.** D0's report treated
+`ubo.*.std430` (2,650 cases) as its one rigorously-traced bucket, gated by
+`apiVersion` reaching `UniformBlockCase::checkSupport`'s
+`getUniformBufferStandardLayoutFeatures()` query for the first time at
+1.3+. Re-checking it at the same rigor applied above: the `ubo` group's
+full log is **byte-identical** between the pre-D0 and post-D0 builds (same
+5,687 `Fail`, 7,553 `NotSupported`, 0 `Pass`, confirmed with a plain
+`diff`) -- neither newly-`Fail` nor no-longer-`Fail` contains a single
+`ubo.*` case. Reading `vkDeviceFeatures.cpp`'s own gate
+(`vk12Supported = apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)`) and
+`EntryPoints.cpp`'s `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES`
+case (which has set `uniformBufferStandardLayout = VK_TRUE` since roadmap
+C6, well before D0) together confirm why: that gate is already satisfied
+at exactly `apiVersion == 1.2.0`, so `checkSupport` already passed and
+already reached `feme-cpu-simdize`'s divergent-vector diagnostic before
+D0's version bump. This bucket's cases were already failing pre-D0; they
+were never newly created *or* newly reached by roadmap D0, and should not
+have been counted in its net delta. The underlying compiler gap itself is
+real and remains open (still C3's own "milestone 7 deviation," still
+unfixed) -- only its attribution to D0 is corrected here.
+
+**`synchronization.op.{multi,single}_queue` does not reproduce either.**
+Both groups were run standalone against both commits (avoiding the `api`
+crash entirely) and re-run a second time against the post-D0 build to
+check for nondeterminism: all four runs produced the exact same 222/276
+`Fail` counts, and a full case-name diff between the pre-D0 and post-D0
+`Fail` sets is empty in both directions. Every failure inspected traces to
+`spirv.AtomicIAdd` legalization failing on a Uniform-storage-class pointer
+-- a pre-existing shader-compilation gap with no version dependency at
+all. D0's 277-case figure for this bucket does not hold up under a direct
+per-case diff; it was likely an artifact of attributing an aggregate
+group-level count difference (between two runs that were not otherwise
+diffed at the case level, unlike `ubo`) rather than a verified newly-`Fail`
+set.
+
+**Scope discipline.** This milestone is attribution, matching D1's own
+"audit, not an implementation pass" framing and D2's "characterize... not
+attempt a local workaround" precedent: no `feme/` source changes land in
+this milestone. The `Nontemporal` image-operand gap, the unimplemented
+`VK_KHR_shader_terminate_invocation`/`VK_KHR_zero_initialize_workgroup_
+memory` functionality, the missing `VkPhysicalDeviceVulkan13Features`
+case in `vkGetPhysicalDeviceFeatures2`, and the texel-buffer-format/
+`vkCreateBufferView` inconsistency are each real, now-documented gaps a
+future roadmap row can close with its own measured before/after, the same
+way this section's own methodology demands.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
