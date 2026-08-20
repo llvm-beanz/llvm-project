@@ -176,6 +176,10 @@ struct PreparedDraw {
   /// rule. Empty for a single-sample pipeline, which has nothing to
   /// resolve.
   llvm::MutableArrayRef<AttachmentView> ResolveAttachments;
+  /// Optional accumulator for the exact number of samples this draw's
+  /// fragments leave surviving the final depth/stencil test -- the quantity
+  /// `VK_QUERY_TYPE_OCCLUSION` queries report. Null when no caller needs it.
+  uint64_t *PassedSampleCounter = nullptr;
 };
 
 } // namespace feme::graphics

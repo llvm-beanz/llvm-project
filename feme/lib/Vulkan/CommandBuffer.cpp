@@ -75,8 +75,9 @@ feme::graphics::CullMode toCullMode(VkCullModeFlags Cull) {
 }
 
 feme::graphics::FrontFace toFrontFace(VkFrontFace Front) {
-  return Front == VK_FRONT_FACE_CLOCKWISE ? feme::graphics::FrontFace::Clockwise
-                                          : feme::graphics::FrontFace::CounterClockwise;
+  return Front == VK_FRONT_FACE_CLOCKWISE
+             ? feme::graphics::FrontFace::Clockwise
+             : feme::graphics::FrontFace::CounterClockwise;
 }
 
 /// (roadmap C4c) `vkCmdSetDepthCompareOpEXT`'s payload, converted the same
@@ -623,8 +624,7 @@ Error runWaitEvents(llvm::ArrayRef<Event *> Events) {
 
 /// `vkCmdCopyQueryPoolResults`: writes `[FirstQuery, FirstQuery+QueryCount)`
 /// of \p Pool into \p Dst starting at \p DstOffset, honoring \p Flags
-/// exactly as `vkGetQueryPoolResults` does (see QueryPool.h's file comment:
-/// every value is zero).
+/// exactly as `vkGetQueryPoolResults` does.
 Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
                               uint32_t QueryCount, Buffer *Dst,
                               VkDeviceSize DstOffset, VkDeviceSize Stride,
@@ -647,9 +647,13 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
                                "copy query pool results region is out of "
                                "range");
     auto *Out = static_cast<uint8_t *>(Dst->data()) + Offset;
-    std::memset(Out, 0, ResultWidth); // Every value this ICD ever writes is
-                                      // zero (see QueryPool.h's file
-                                      // comment).
+    uint64_t Value = Pool->value(FirstQuery + I);
+    if (Is64Bit)
+      std::memcpy(Out, &Value, sizeof(Value));
+    else {
+      uint32_t Value32 = static_cast<uint32_t>(Value);
+      std::memcpy(Out, &Value32, sizeof(Value32));
+    }
     if (WithAvailability) {
       uint64_t AvailFlag = Pool->isAvailable(FirstQuery + I) ? 1 : 0;
       if (Is64Bit)
@@ -717,8 +721,7 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
     View.View = Fb.attachments()[Index];
     View.Format = Attachment.Format;
     View.SampleCount = Attachment.SampleCount;
-    View.LoadOp =
-        UseStencilOps ? Attachment.StencilLoadOp : Attachment.LoadOp;
+    View.LoadOp = UseStencilOps ? Attachment.StencilLoadOp : Attachment.LoadOp;
     View.StoreOp =
         UseStencilOps ? Attachment.StencilStoreOp : Attachment.StoreOp;
     if (Index < ClearValues.size())
@@ -802,8 +805,8 @@ Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
       for (uint32_t S = 0; S != SampleCount; ++S) {
         size_t Offset =
             (((size_t)Y * Attachment->Width + X) * SampleCount + S) * *ElemSize;
-        llvm::MutableArrayRef<uint8_t> Texel(
-            Attachment->Data.data() + Offset, *ElemSize);
+        llvm::MutableArrayRef<uint8_t> Texel(Attachment->Data.data() + Offset,
+                                             *ElemSize);
         switch (Kind) {
         case AttachmentKind::Color:
           std::memcpy(Texel.data(), UniformTexel.data(), *ElemSize);
@@ -869,7 +872,8 @@ uint32_t resolveVertexBindingStride(const GraphicsPipeline &Pipeline,
 Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
               const feme::graphics::DrawCommand &Draw,
               llvm::ArrayRef<BoundSetState> BoundSets,
-              llvm::ArrayRef<uint8_t> PushConstants) {
+              llvm::ArrayRef<uint8_t> PushConstants,
+              llvm::ArrayRef<QueryPool *> ActiveOcclusionQueries) {
   if (!Gfx.Rendering)
     return createStringError(inconvertibleErrorCode(),
                              "a draw must be recorded inside a render pass "
@@ -1017,6 +1021,7 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Scissor.Width = MaxX > MinX ? uint32_t(MaxX - MinX) : 0;
   Scissor.Height = MaxY > MinY ? uint32_t(MaxY - MinY) : 0;
 
+  uint64_t PassedSamples = 0;
   feme::graphics::PreparedDraw Prepared;
   Prepared.Attachments = Attachments;
   Prepared.DepthStencil = DepthStencil;
@@ -1027,9 +1032,14 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Prepared.Resources = Resources;
   Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
   Prepared.ResolveAttachments = ResolveAttachments;
+  Prepared.PassedSampleCounter = &PassedSamples;
 
-  return feme::graphics::executeDraws(
-      Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared);
+  if (Error E = feme::graphics::executeDraws(
+          Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared))
+    return E;
+  for (QueryPool *Pool : ActiveOcclusionQueries)
+    Pool->accumulateActiveOcclusionSamples(PassedSamples);
+  return Error::success();
 }
 
 /// Validates that every byte a draw's vertex/index fetch may read lies
@@ -1074,8 +1084,8 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
     // vertex range: it is read once per instance, not once per vertex.
     uint64_t LastIndex = BindingDecl.PerInstance ? LastInstance : LastVertex;
     uint32_t Stride = resolveVertexBindingStride(Pipeline, Gfx, BindingDecl);
-    uint64_t Base = Gfx.VertexBufferOffsets[BindingDecl.Binding] +
-                    LastIndex * Stride;
+    uint64_t Base =
+        Gfx.VertexBufferOffsets[BindingDecl.Binding] + LastIndex * Stride;
     for (const VertexInputAttribute &Attr : Pipeline.vertexAttributes()) {
       if (Attr.Binding != BindingDecl.Binding)
         continue;
@@ -1120,12 +1130,14 @@ Error runValidatedDraw(const GraphicsPipeline &Pipeline,
                        const feme::graphics::DrawCommand &Draw,
                        const PhysicalDeviceInfo *DeviceInfo,
                        llvm::ArrayRef<BoundSetState> BoundSets,
-                       llvm::ArrayRef<uint8_t> PushConstants) {
+                       llvm::ArrayRef<uint8_t> PushConstants,
+                       llvm::ArrayRef<QueryPool *> ActiveOcclusionQueries) {
   if (Error E = validateDrawCounts(DeviceInfo, Draw))
     return E;
   if (Error E = validateDrawFetchBounds(Pipeline, Gfx, Draw))
     return E;
-  return runDraw(Pipeline, Gfx, Draw, BoundSets, PushConstants);
+  return runDraw(Pipeline, Gfx, Draw, BoundSets, PushConstants,
+                 ActiveOcclusionQueries);
 }
 
 /// Reads \p DrawCount `VkDrawIndirectCommand`/`VkDrawIndexedIndirectCommand`
@@ -1200,7 +1212,8 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
                           GraphicsPipeline *&BoundGraphicsPipeline,
                           GraphicsState &Gfx,
                           std::vector<BoundSetState> &BoundSets,
-                          std::vector<uint8_t> &PushConstants) {
+                          std::vector<uint8_t> &PushConstants,
+                          std::vector<QueryPool *> &ActiveOcclusionQueries) {
   for (const RecordedCommand &Cmd : Commands) {
     switch (Cmd.Op) {
     case RecordedCommand::Kind::BindPipeline:
@@ -1309,12 +1322,17 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       Cmd.TargetQueryPool->reset(Cmd.FirstQuery, Cmd.Count[0]);
       break;
     case RecordedCommand::Kind::BeginQuery:
-      // See QueryPool.h's file comment: there is no real counter to start
-      // sampling, so beginning a query has nothing to record; only ending
-      // one (or a timestamp write) marks it available.
+      Cmd.TargetQueryPool->begin(Cmd.FirstQuery);
+      if (Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION &&
+          llvm::find(ActiveOcclusionQueries, Cmd.TargetQueryPool) ==
+              ActiveOcclusionQueries.end())
+        ActiveOcclusionQueries.push_back(Cmd.TargetQueryPool);
       break;
     case RecordedCommand::Kind::EndQuery:
       Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
+      if (Cmd.TargetQueryPool->queryType() == VK_QUERY_TYPE_OCCLUSION &&
+          !Cmd.TargetQueryPool->hasActiveQueries())
+        llvm::erase(ActiveOcclusionQueries, Cmd.TargetQueryPool);
       break;
     case RecordedCommand::Kind::WriteTimestamp:
       Cmd.TargetQueryPool->markAvailable(Cmd.FirstQuery);
@@ -1329,7 +1347,8 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       for (const CommandBuffer *Secondary : Cmd.SecondaryBuffers)
         if (Error E = executeCommandsInto(Secondary->commands(), DeviceInfo,
                                           BoundPipeline, BoundGraphicsPipeline,
-                                          Gfx, BoundSets, PushConstants))
+                                          Gfx, BoundSets, PushConstants,
+                                          ActiveOcclusionQueries))
           return E;
       break;
     case RecordedCommand::Kind::CopyBufferToImage:
@@ -1509,7 +1528,8 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
         Draw.FirstVertex = Cmd.FirstVertexOrIndex;
       }
       if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
-                                     DeviceInfo, BoundSets, PushConstants))
+                                     DeviceInfo, BoundSets, PushConstants,
+                                     ActiveOcclusionQueries))
         return E;
       break;
     }
@@ -1556,7 +1576,8 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
         return Draws.takeError();
       for (const feme::graphics::DrawCommand &Draw : *Draws)
         if (Error E = runValidatedDraw(*BoundGraphicsPipeline, Gfx, Draw,
-                                       DeviceInfo, BoundSets, PushConstants))
+                                       DeviceInfo, BoundSets, PushConstants,
+                                       ActiveOcclusionQueries))
           return E;
       break;
     }
@@ -1579,9 +1600,10 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
   const PhysicalDeviceInfo *DeviceInfo = CmdBuf.getPhysicalDeviceInfo();
   std::vector<uint8_t> PushConstants(
       DeviceInfo ? DeviceInfo->Properties.limits.maxPushConstantsSize : 0, 0);
+  std::vector<QueryPool *> ActiveOcclusionQueries;
   return executeCommandsInto(CmdBuf.commands(), DeviceInfo, BoundPipeline,
                              BoundGraphicsPipeline, Gfx, BoundSets,
-                             PushConstants);
+                             PushConstants, ActiveOcclusionQueries);
 }
 
 namespace feme::vulkan {
@@ -2060,7 +2082,7 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindVertexBuffers2EXT(
   }
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->bindVertexBuffers(firstBinding, std::move(Buffers), std::move(Offsets),
-                         std::move(Strides));
+                          std::move(Strides));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,
@@ -2097,10 +2119,9 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetScissor(VkCommandBuffer commandBuffer,
 // state/its "with count" counterpart, never both). Reuses `setViewport`/
 // `setScissor` directly: `maxViewports == 1` means "with count" carries no
 // more information than the fixed-count commands above already do.
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetViewportWithCountEXT(VkCommandBuffer commandBuffer,
-                            uint32_t viewportCount,
-                            const VkViewport *pViewports) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetViewportWithCountEXT(
+    VkCommandBuffer commandBuffer, uint32_t viewportCount,
+    const VkViewport *pViewports) {
   if (viewportCount == 0)
     return;
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->setViewport(pViewports[0]);
@@ -2108,7 +2129,7 @@ vkCmdSetViewportWithCountEXT(VkCommandBuffer commandBuffer,
 
 VKAPI_ATTR void VKAPI_CALL
 vkCmdSetScissorWithCountEXT(VkCommandBuffer commandBuffer,
-                           uint32_t scissorCount, const VkRect2D *pScissors) {
+                            uint32_t scissorCount, const VkRect2D *pScissors) {
   if (scissorCount == 0)
     return;
   fromHandle<vulkan::CommandBuffer>(commandBuffer)->setScissor(pScissors[0]);
@@ -2167,32 +2188,28 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetFrontFaceEXT(VkCommandBuffer commandBuffer,
 // remaining `VK_EXT_extended_dynamic_state` states with an existing static
 // path (or, for depth bounds, a feature this ICD never advertises as
 // enabled -- see `DynamicStateBits`'s comment).
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetDepthTestEnableEXT(VkCommandBuffer commandBuffer,
-                          VkBool32 depthTestEnable) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthTestEnableEXT(
+    VkCommandBuffer commandBuffer, VkBool32 depthTestEnable) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthBool(RecordedCommand::Kind::SetDepthTestEnable,
                      depthTestEnable);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetDepthWriteEnableEXT(VkCommandBuffer commandBuffer,
-                           VkBool32 depthWriteEnable) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthWriteEnableEXT(
+    VkCommandBuffer commandBuffer, VkBool32 depthWriteEnable) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthBool(RecordedCommand::Kind::SetDepthWriteEnable,
                      depthWriteEnable);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetDepthCompareOpEXT(VkCommandBuffer commandBuffer,
-                         VkCompareOp depthCompareOp) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthCompareOpEXT(
+    VkCommandBuffer commandBuffer, VkCompareOp depthCompareOp) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthCompareOp(depthCompareOp);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetDepthBoundsTestEnableEXT(VkCommandBuffer commandBuffer,
-                                VkBool32 depthBoundsTestEnable) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBoundsTestEnableEXT(
+    VkCommandBuffer commandBuffer, VkBool32 depthBoundsTestEnable) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setDepthBool(RecordedCommand::Kind::SetDepthBoundsTestEnable,
                      depthBoundsTestEnable);
@@ -2201,17 +2218,18 @@ vkCmdSetDepthBoundsTestEnableEXT(VkCommandBuffer commandBuffer,
 // (roadmap C4c) `vkCmdSetStencilTestEnableEXT`/`vkCmdSetStencilOpEXT`: the
 // last two `VK_EXT_extended_dynamic_state` states, both already fully
 // implemented statically (`StencilState`).
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetStencilTestEnableEXT(VkCommandBuffer commandBuffer,
-                            VkBool32 stencilTestEnable) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilTestEnableEXT(
+    VkCommandBuffer commandBuffer, VkBool32 stencilTestEnable) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setStencilTestEnable(stencilTestEnable);
 }
 
-VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(
-    VkCommandBuffer commandBuffer, VkStencilFaceFlags faceMask,
-    VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
-    VkCompareOp compareOp) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(VkCommandBuffer commandBuffer,
+                                                VkStencilFaceFlags faceMask,
+                                                VkStencilOp failOp,
+                                                VkStencilOp passOp,
+                                                VkStencilOp depthFailOp,
+                                                VkCompareOp compareOp) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setStencilOp(faceMask, failOp, passOp, depthFailOp, compareOp);
 }
@@ -2220,9 +2238,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdSetStencilOpEXT(
 // `VK_EXT_extended_dynamic_state` state with an existing static path
 // (restricted to the triangle class this executor already implements --
 // see `DynamicStateBits`'s comment on `DynamicStatePrimitiveTopology`).
-VKAPI_ATTR void VKAPI_CALL
-vkCmdSetPrimitiveTopologyEXT(VkCommandBuffer commandBuffer,
-                           VkPrimitiveTopology primitiveTopology) {
+VKAPI_ATTR void VKAPI_CALL vkCmdSetPrimitiveTopologyEXT(
+    VkCommandBuffer commandBuffer, VkPrimitiveTopology primitiveTopology) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setPrimitiveTopology(primitiveTopology);
 }

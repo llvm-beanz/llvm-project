@@ -62,6 +62,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
 #include <array>
@@ -614,8 +615,7 @@ Expected<float> readDepth(const AttachmentView &Depth, uint32_t SampleCount,
   case cpu::ResourceFormat::D24_UNORM_S8_UINT: {
     double D;
     if (Error E = unpackDepth(
-            Depth.Format, ArrayRef<uint8_t>(Depth.Data.data() + Idx * 4, 4),
-            D))
+            Depth.Format, ArrayRef<uint8_t>(Depth.Data.data() + Idx * 4, 4), D))
       return std::move(E);
     return static_cast<float>(D);
   }
@@ -667,8 +667,8 @@ Expected<uint8_t> readStencil(const AttachmentView &Stencil,
   case cpu::ResourceFormat::D24_UNORM_S8_UINT: {
     uint32_t S;
     if (Error E = unpackStencil(
-            Stencil.Format,
-            ArrayRef<uint8_t>(Stencil.Data.data() + Idx * 4, 4), S))
+            Stencil.Format, ArrayRef<uint8_t>(Stencil.Data.data() + Idx * 4, 4),
+            S))
       return std::move(E);
     return static_cast<uint8_t>(S);
   }
@@ -763,8 +763,7 @@ testDepthStencil(const DepthState &Depth, const StencilState &Stencil,
     uint8_t Updated = applyStencilOp(Op, StoredStencil, Face.Reference);
     uint8_t Merged =
         (StoredStencil & ~Face.WriteMask) | (Updated & Face.WriteMask);
-    return writeStencil(StencilAttachment, SampleCount, PX, PY, Sample,
-                        Merged);
+    return writeStencil(StencilAttachment, SampleCount, PX, PY, Sample, Merged);
   };
 
   if (!StencilPass) {
@@ -1960,6 +1959,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           }
           if (PassMask == 0)
             continue;
+          if (Draw.PassedSampleCounter)
+            *Draw.PassedSampleCounter += llvm::popcount(PassMask);
 
           for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
                ++AttIdx) {

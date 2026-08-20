@@ -740,8 +740,8 @@ TEST_F(DrawTest, DynamicCullModeControlsCulling) {
   Info.renderPass = Pass;
 
   VkPipeline Pipe = VK_NULL_HANDLE;
-  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
-                                      nullptr, &Pipe),
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
             VK_SUCCESS);
 
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 1.0f, 1.0f}});
@@ -962,7 +962,7 @@ TEST_F(DrawTest, DynamicVertexInputBindingStrideOverridesStaticStride) {
 
   VkDeviceMemory InstanceMemory = VK_NULL_HANDLE;
   VkBuffer InstanceBuffer = createBuffer(2 * sizeof(float) * 4, InstanceMemory,
-                                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+                                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
   float Colors[8] = {
       1.0f, 0.0f, 0.0f, 1.0f, // instance 0: red
       0.0f, 1.0f, 0.0f, 1.0f, // instance 1: green
@@ -975,7 +975,7 @@ TEST_F(DrawTest, DynamicVertexInputBindingStrideOverridesStaticStride) {
   beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
   vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
   vkCmdBindVertexBuffers2EXT(Cmd, 0, 1, &InstanceBuffer, &Offset, nullptr,
-                            &Stride);
+                             &Stride);
   vkCmdDraw(Cmd, 3, 1, 0, 1);
   vkCmdEndRenderPass(Cmd);
   ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
@@ -1611,64 +1611,64 @@ TEST_F(DrawTest, RendersWithCombinedDepthStencilAttachment) {
   ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &LocalFb),
             VK_SUCCESS);
 
-  auto makePipeline = [&](llvm::StringRef VertexSource,
-                          llvm::StringRef FragmentSource,
-                          const VkPipelineDepthStencilStateCreateInfo
-                              &DepthStencil) {
-    VkShaderModule Vertex = createModule(VertexSource);
-    VkShaderModule Fragment = createModule(FragmentSource);
-    VkPipelineShaderStageCreateInfo Stages[2]{};
-    Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-    Stages[0].module = Vertex;
-    Stages[0].pName = "main";
-    Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-    Stages[1].module = Fragment;
-    Stages[1].pName = "main";
-    VkPipelineVertexInputStateCreateInfo VertexInput{};
-    VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
-    InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
-    VkRect2D Scissor{{0, 0}, {Extent, Extent}};
-    VkPipelineViewportStateCreateInfo ViewportState{};
-    ViewportState.viewportCount = 1;
-    ViewportState.pViewports = &Viewport;
-    ViewportState.scissorCount = 1;
-    ViewportState.pScissors = &Scissor;
-    VkPipelineRasterizationStateCreateInfo Raster{};
-    Raster.cullMode = VK_CULL_MODE_NONE;
-    Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    Raster.polygonMode = VK_POLYGON_MODE_FILL;
-    VkPipelineMultisampleStateCreateInfo Multisample{};
-    Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkPipelineColorBlendAttachmentState BlendAttachment{};
-    BlendAttachment.colorWriteMask = 0xF;
-    VkPipelineColorBlendStateCreateInfo Blend{};
-    Blend.attachmentCount = 1;
-    Blend.pAttachments = &BlendAttachment;
-    VkPipelineDepthStencilStateCreateInfo LocalDepthStencil = DepthStencil;
-    VkGraphicsPipelineCreateInfo Info{};
-    Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    Info.stageCount = 2;
-    Info.pStages = Stages;
-    Info.pVertexInputState = &VertexInput;
-    Info.pInputAssemblyState = &InputAssembly;
-    Info.pViewportState = &ViewportState;
-    Info.pRasterizationState = &Raster;
-    Info.pMultisampleState = &Multisample;
-    Info.pDepthStencilState = &LocalDepthStencil;
-    Info.pColorBlendState = &Blend;
-    Info.layout = Layout;
-    Info.renderPass = LocalPass;
-    VkPipeline Pipe = VK_NULL_HANDLE;
-    EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
-                                        nullptr, &Pipe),
-              VK_SUCCESS);
-    vkDestroyShaderModule(Device, Fragment, nullptr);
-    vkDestroyShaderModule(Device, Vertex, nullptr);
-    return Pipe;
-  };
+  auto makePipeline =
+      [&](llvm::StringRef VertexSource, llvm::StringRef FragmentSource,
+          const VkPipelineDepthStencilStateCreateInfo &DepthStencil) {
+        VkShaderModule Vertex = createModule(VertexSource);
+        VkShaderModule Fragment = createModule(FragmentSource);
+        VkPipelineShaderStageCreateInfo Stages[2]{};
+        Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        Stages[0].module = Vertex;
+        Stages[0].pName = "main";
+        Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        Stages[1].module = Fragment;
+        Stages[1].pName = "main";
+        VkPipelineVertexInputStateCreateInfo VertexInput{};
+        VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+        InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport Viewport{0.0f,          0.0f, float(Extent),
+                            float(Extent), 0.0f, 1.0f};
+        VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+        VkPipelineViewportStateCreateInfo ViewportState{};
+        ViewportState.viewportCount = 1;
+        ViewportState.pViewports = &Viewport;
+        ViewportState.scissorCount = 1;
+        ViewportState.pScissors = &Scissor;
+        VkPipelineRasterizationStateCreateInfo Raster{};
+        Raster.cullMode = VK_CULL_MODE_NONE;
+        Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        Raster.polygonMode = VK_POLYGON_MODE_FILL;
+        VkPipelineMultisampleStateCreateInfo Multisample{};
+        Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState BlendAttachment{};
+        BlendAttachment.colorWriteMask = 0xF;
+        VkPipelineColorBlendStateCreateInfo Blend{};
+        Blend.attachmentCount = 1;
+        Blend.pAttachments = &BlendAttachment;
+        VkPipelineDepthStencilStateCreateInfo LocalDepthStencil = DepthStencil;
+        VkGraphicsPipelineCreateInfo Info{};
+        Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        Info.stageCount = 2;
+        Info.pStages = Stages;
+        Info.pVertexInputState = &VertexInput;
+        Info.pInputAssemblyState = &InputAssembly;
+        Info.pViewportState = &ViewportState;
+        Info.pRasterizationState = &Raster;
+        Info.pMultisampleState = &Multisample;
+        Info.pDepthStencilState = &LocalDepthStencil;
+        Info.pColorBlendState = &Blend;
+        Info.layout = Layout;
+        Info.renderPass = LocalPass;
+        VkPipeline Pipe = VK_NULL_HANDLE;
+        EXPECT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info,
+                                            nullptr, &Pipe),
+                  VK_SUCCESS);
+        vkDestroyShaderModule(Device, Fragment, nullptr);
+        vkDestroyShaderModule(Device, Vertex, nullptr);
+        return Pipe;
+      };
 
   // Draw 1: writes depth (0.2, `ALWAYS`) and stencil (1, `REPLACE` on
   // `ALWAYS`) together, in one draw against the combined attachment.
@@ -1715,8 +1715,8 @@ TEST_F(DrawTest, RendersWithCombinedDepthStencilAttachment) {
   StencilOnlyState.stencilTestEnable = VK_TRUE;
   StencilOnlyState.front = TestFace;
   StencilOnlyState.back = TestFace;
-  VkPipeline StencilPassed = makePipeline(FullscreenVertexSource,
-                                         GreenFragmentSource, StencilOnlyState);
+  VkPipeline StencilPassed = makePipeline(
+      FullscreenVertexSource, GreenFragmentSource, StencilOnlyState);
 
   VkCommandBufferBeginInfo BeginInfo{};
   ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
@@ -2065,6 +2065,43 @@ TEST_F(DrawTest, RendersToMultipleColorAttachments) {
   vkDestroyImageView(Device, SecondView, nullptr);
   vkDestroyImage(Device, SecondImage, nullptr);
   vkFreeMemory(Device, SecondMemory, nullptr);
+}
+
+TEST_F(DrawTest, OcclusionQueryCountsPassedSamples) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkQueryPoolCreateInfo QueryInfo{};
+  QueryInfo.queryType = VK_QUERY_TYPE_OCCLUSION;
+  QueryInfo.queryCount = 1;
+  VkQueryPool QueryPool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateQueryPool(Device, &QueryInfo, nullptr, &QueryPool),
+            VK_SUCCESS);
+
+  beginRenderPass({{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdResetQueryPool(Cmd, QueryPool, 0, 1);
+  vkCmdBeginQuery(Cmd, QueryPool, 0, 0);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndQuery(Cmd, QueryPool, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  uint64_t Results[2] = {0, 0};
+  EXPECT_EQ(vkGetQueryPoolResults(Device, QueryPool, 0, 1, sizeof(Results),
+                                  Results, 2 * sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT |
+                                      VK_QUERY_RESULT_WITH_AVAILABILITY_BIT),
+            VK_SUCCESS);
+  EXPECT_EQ(Results[0], uint64_t(Extent * Extent));
+  EXPECT_EQ(Results[1], 1u);
+
+  vkDestroyQueryPool(Device, QueryPool, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
 /// A multisample color attachment with a resolve attachment: a draw fully

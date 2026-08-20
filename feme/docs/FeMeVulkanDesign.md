@@ -1602,11 +1602,16 @@ Deviations from this section's sketch:
   this rather than each secondary buffer needing its own; `feme::vulkan::
   Event` plus `vkCreateEvent`/`vkSetEvent`/`vkResetEvent`/`vkGetEventStatus`
   (host) and `vkCmdSetEvent`/`vkCmdResetEvent`/`vkCmdWaitEvents` (device))
-- ~~Implement query pools with zero-valued timestamps~~ (done:
-  `feme::vulkan::QueryPool` accepts only `VK_QUERY_TYPE_TIMESTAMP` --
-  occlusion/pipeline-statistics queries measure rasterization/shading work
-  this compute-only device does not perform yet, graphics is V6+ -- and
-  every query this milestone ever produces reports zero)
+- ~~Implement query pools with zero-valued timestamps~~ (done, broadened by
+  roadmap C5 now that V6's graphics path exists: `feme::vulkan::QueryPool`
+  still reports zero-valued `VK_QUERY_TYPE_TIMESTAMP` results, but also
+  accepts `VK_QUERY_TYPE_OCCLUSION` and accumulates the exact number of
+  covered samples whose depth/stencil tests pass across draws recorded
+  between `vkCmdBeginQuery`/`vkCmdEndQuery`, reusing
+  `feme::graphics::executeDraws`' real per-sample coverage and
+  depth/stencil-test results rather than fabricating zero. Pipeline-
+  statistics queries remain rejected: unlike occlusion, this ICD still has
+  no truthful counter for them)
 - ~~Verify workgroup barrier correctness for multi-wave groups under
   sequential wave execution~~ (done: every prior barrier/groupshared test,
   end to end and at the `feme::cpu::EntryWrapperPass` structural level
@@ -2050,8 +2055,11 @@ Depends on G5.
   state, and their signature and patch-constant reflection.
 - Implement transform feedback only if it is advertised; otherwise report it
   unsupported truthfully.
-- Add occlusion and pipeline-statistics queries over real draws, and
-  conditional rendering if advertised.
+- Add pipeline-statistics queries and any remaining occlusion-query state
+  breadth not already closed by roadmap C5's exact passed-sample counting
+  over ordinary draws (for example inherited-render-pass secondary-command-
+  buffer coverage, if this ICD ever advertises that path), plus conditional
+  rendering if advertised.
 - Add layered rendering, viewport/layer array indexing, and multiple viewports
   and scissors.
 - Complete the format matrix for the advertised graphics profile, including
