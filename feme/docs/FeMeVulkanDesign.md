@@ -487,18 +487,29 @@ makes an extension's commands resolvable at all -- and `vkCreateDevice`
 refuses to enable anything outside it. V6 adds the first entry,
 `VK_KHR_dynamic_rendering`; roadmap C4c adds the second,
 `VK_EXT_extended_dynamic_state` (see "Graphics pipeline state"'s dynamic
-state row and FeMeGraphicsDesign.md's own status note).
+state row and FeMeGraphicsDesign.md's own status note); roadmap E3 adds the
+third, `VK_KHR_synchronization2` -- an exception to the "mirrored by
+`SUPPORTED_EXTENSIONS`" rule just above, since its six commands are already
+core, non-`KHR`-suffixed `VK_VERSION_1_3` entries `vk_gen_entrypoints.py`'s
+`CORE_FEATURES` already resolves (like `VK_KHR_copy_commands2` before it,
+roadmap D0); it is listed here purely so `vkCreateDevice` accepts the name
+itself, which `dEQP-VK.synchronization2`'s own multi-queue/custom-device
+cases enable explicitly regardless of the advertised `apiVersion` (see
+"Roadmap E3: measured impact" in VulkanCTSReport.md).
 
 **Status (roadmap D1, "An accurate 1.3/1.4 mandatory-feature/limit/
 extension inventory"):** the audit itself is done; closing what it found is
 in progress. [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) is
 the generated checklist (`feme/utils/vk_gen_feature_inventory.py`, reading
 `vk.xml` directly the same way `vk_gen_entrypoints.py` already resolves
-`CORE_FEATURES` transitively): of 1.3/1.4's 36 mandatory feature bits, only
-`dynamicRendering` is genuinely implemented (roadmap E1: now reported
-through both its pre-promotion `VK_KHR_dynamic_rendering` feature struct
-and the aggregate `VkPhysicalDeviceVulkan13Features` struct);
-`synchronization2`, `maintenance4`/`5`/`6`, `subgroupSizeControl`,
+`CORE_FEATURES` transitively): of 1.3/1.4's 36 mandatory feature bits,
+`dynamicRendering` (roadmap E1: now reported through both its pre-promotion
+`VK_KHR_dynamic_rendering` feature struct and the aggregate
+`VkPhysicalDeviceVulkan13Features` struct) and `synchronization2` (roadmap
+E3: `CommandBuffer.cpp`/`Sync.cpp`, likewise reported through both its
+pre-promotion `VkPhysicalDeviceSynchronization2Features` struct and the
+aggregate struct) are genuinely implemented;
+`maintenance4`/`5`/`6`, `subgroupSizeControl`,
 `shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
 `pushDescriptor`, and the rest are all confirmed unimplemented, not merely
 unaudited. Roadmap E2 wires the promoted `...Properties` struct's
@@ -511,9 +522,9 @@ pre-promotion extension struct (none of which has its own
 `Properties2` case yet), so each field's own later row raises it only
 once that row also adds the matching dedicated-struct case (see the
 inventory doc's own "Findings"). Of 39 extensions `vk.xml` records as
-promoted into 1.3 or 1.4, only the two already listed above are
+promoted into 1.3 or 1.4, only the three now listed above are
 implemented. See the inventory doc's own "Findings" for the full
-breakdown and Roadmap.md's D1/E1/E2 rows.
+breakdown and Roadmap.md's D1/E1/E2/E3 rows.
 
 ## Shader and Pipeline Compilation
 

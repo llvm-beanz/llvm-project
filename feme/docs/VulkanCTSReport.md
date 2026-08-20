@@ -13,7 +13,14 @@ and this file is a measurement instead.
   revision's full 54-group run: roadmap D1 (audit-only, no advertised
   feature/limit/extension changed) is not re-measured in full -- see its
   own "Roadmap D1: measured impact" section for the targeted subset run
-  that *is* new in this edition.
+  that *is* new in this edition. Roadmap E1/E2/E3 (aggregate 1.3/1.4
+  feature/property struct wiring and `synchronization2`) are likewise
+  measured only over the targeted case sets each of their own "measured
+  impact" sections names, not a full re-run -- see those sections.
+- `check-feme`: 1533 passed, 1 unsupported as of roadmap E3 (see "Roadmap
+  E3: measured impact" below); the headline table above predates E1/E2/E3
+  and is not affected by any of the three (no crash, timeout, or full
+  54-group case-count change).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-412-g716301541136` plus two local
   fixes (`7163015`, "Guard `dEQP-VK.api.invariance.random` against empty
   image format lists"; and a second one added by roadmap C7's own pass,
@@ -22,9 +29,6 @@ and this file is a measurement instead.
   a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1519 passed, 1 unsupported (this file's own revision;
-  1520/0 once `FEME_VULKAN_CTS_DEQP_VK` points at a built `deqp-vk`, which
-  unsupports one fewer gated test).
 
 ## Headline
 
@@ -1380,6 +1384,77 @@ responsible for raising it together with adding that row's own
 dedicated-struct case, so the two remain honestly in sync -- see
 Roadmap.md's E2 row and `feme/lib/Vulkan/EntryPoints.cpp`'s case comment
 for the full per-row mapping.
+
+## Roadmap E3: measured impact
+
+Roadmap E3 ("`VK_KHR_synchronization2`/`synchronization2`") implements
+`vkCmdPipelineBarrier2`/`vkCmdWriteTimestamp2`/`vkQueueSubmit2`/
+`vkCmdSetEvent2`/`vkCmdResetEvent2`/`vkCmdWaitEvents2`, translating
+`VkDependencyInfo`'s per-resource `VkMemoryBarrier2`/`VkBufferMemoryBarrier2`/
+`VkImageMemoryBarrier2` (2-stage-mask, 2-access-mask shape) down to the
+existing 1-mask `Sync.{h,cpp}`/`CommandBuffer.cpp` model -- the same "new
+entrypoint, old backing model" pattern roadmap C7 used for queue families.
+`synchronization2` now reads `VK_TRUE` from both the aggregate
+`VkPhysicalDeviceVulkan13Features` struct (E1's own case) and its own
+dedicated `VkPhysicalDeviceSynchronization2Features` struct, and
+`VK_KHR_synchronization2` is now listed by `getSupportedDeviceExtensions`
+(unlike `VK_KHR_copy_commands2` in roadmap D0, whose core, non-`KHR`-suffixed
+names alone sufficed: `dEQP-VK.synchronization2`'s own multi-queue/custom-
+device cases explicitly enable this extension by name at `vkCreateDevice`
+regardless of the advertised `apiVersion` -- see below).
+
+**Targeted before/after run**, built pre-E3 (`git stash` on every touched
+`feme/lib/Vulkan/*.cpp`/`*.h` file, keeping tests unstashed) and post-E3,
+each run in isolation against the `synchronization2` group and the
+`api.info.vulkan1p3`/`get_physical_device_properties2.features.
+synchronization2_features` cases D1's own inventory named:
+
+| Case(s) | Before | After |
+|---|---|---|
+| `dEQP-VK.synchronization2.*` (81,617 total) | 2 `Pass`, 0 `Fail`, 81,615 `NotSupported` | 310 `Pass`, 872 `Fail`, 80,435 `NotSupported` |
+| `api.info.get_physical_device_properties2.features.synchronization2_features` | `Fail` (struct mismatch) | `Pass` |
+| `api.info.vulkan1p3.*` (5 cases) | 5 `Pass` (already consistent: both structs agreed on `VK_FALSE`) | 5 `Pass` (now agree on `VK_TRUE`) |
+
+**The dedicated-struct `Fail`&rarr;`Pass` is exactly this milestone's own
+target**, the same consistency check E1/E2 already established for
+`dynamicRendering`: `vulkan1p3.feature_extensions_consistency` was already
+passing before E3 (both the aggregate and -- absent, so implicitly
+zero-initialized by the test -- the dedicated struct agreed on
+`VK_FALSE`), so it is unaffected; the dedicated-struct case above is the one
+that actually exercises `EntryPoints.cpp`'s new
+`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES` case.
+
+**Advertising the extension name was not optional.** A first pass left
+`getSupportedDeviceExtensions` untouched, matching roadmap D0's
+`VK_KHR_copy_commands2` precedent (core names alone, no extension-name
+advertisement, since `apiVersion` already satisfies the promotion). That
+left 305 `dEQP-VK.synchronization2.*` cases failing
+`vkCreateDevice(...)`: `VK_ERROR_EXTENSION_NOT_PRESENT` --
+`vktCustomInstancesDevices.cpp`'s multi-queue/custom-device tests
+explicitly enable `VK_KHR_synchronization2` by name regardless of
+`apiVersion`, unlike the ordinary default-device path most `copy_commands2`
+cases use. Adding the extension to `getSupportedDeviceExtensions` (this
+report's headline numbers above already include it) dropped that to 0 and
+raised the group's `Pass` count from 251 to 310.
+
+**The 872 remaining `Fail` cases are not a regression this milestone
+introduced.** 860 of them (747 `vkCreateComputePipelines`/113
+`vkCreateGraphicsPipelines`, both `VK_ERROR_INITIALIZATION_FAILED`) are
+pre-existing shader/pipeline gaps (e.g. SSBO writes in stages this ICD does
+not yet support in that combination) reached through a second code path
+now that `synchronization2` is truthfully advertised, exactly the same
+"converts `NotSupported` into a real `Fail` against an existing gap"
+pattern E1 documented for `dynamicRendering`. The remaining 12
+(`timeline_semaphore.device_host.*`/`timeline_semaphore.wait.*`, all
+`synchronizationWrapper->queueSubmit(...): VK_ERROR_INITIALIZATION_FAILED`)
+are a pre-existing limitation of this ICD's synchronous `vkQueueSubmit`
+execution model (Sync.h's file comment: a host signal racing a device wait
+is not something a synchronous ICD can resolve), not specific to
+`vkQueueSubmit2`'s own translation -- the identical, non-`2`
+`dEQP-VK.synchronization.timeline_semaphore.device_host.write_copy_buffer_
+read_copy_buffer.buffer_16384` case fails with the exact same error at the
+exact same call site. None of these 872 crashed, timed out, or produced a
+`Pass`-shaped result with wrong data.
 
 ## What the 3,199,421 `Not supported` results mean
 
