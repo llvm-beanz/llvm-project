@@ -26,14 +26,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E1 in the roadmap document?
+Can you implement milestone E2 in the roadmap document?
 
-> **Wire the aggregate `VkPhysicalDeviceVulkan13Features`/`Vulkan14Features`
-> `vkGetPhysicalDeviceFeatures2` cases.** Today only the pre-promotion
-> `VK_KHR_dynamic_rendering` struct case exists; add the two aggregate cases,
-> populating every member from whatever per-extension state already exists
-> (`dynamicRendering=VK_TRUE` today) and `VK_FALSE` for everything still
-> unimplemented, exactly mirroring the existing `VULKAN_1_2_FEATURES` case's
-> pattern. This is what `dEQP-VK.api.info.*`'s consistency checks and every
-> `VK_KHR_dynamic_rendering`-support probe (`draw`/`renderpasses`/`pipeline`,
-> 822 cases) actually read
+> **Wire the aggregate `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties`
+> `vkGetPhysicalDeviceProperties2` cases**, enumerating all 70 mandatory limit
+> fields from `Vulkan14FeatureInventory.md`'s table. Most are either a real
+> minimum this ICD can already compute (e.g. `maxBufferSize`,
+> `storageTexelBufferOffsetAlignmentBytes`) or a truthful `VK_FALSE`/`0` for a
+> capability not yet implemented (every `integerDotProduct*Accelerated` bit
+> until E8 lands, `maxPushDescriptors` until F12 lands). Land the struct case
+> with every field set to a conservative, honest value first, then let each
+> later row (E8, F5, F11, F12, ...) raise its own subset once the feature behind
+> it is real, instead of blocking this row on every other one
