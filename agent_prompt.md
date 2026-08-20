@@ -26,9 +26,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you update the Vulkan API level to 1.4. Then run the CTS to asses the
-current compliance state and update the roadmap and Vulkan design to account for
-this change?
+Can you complete milestone D1 on the roadmap?
 
-Ideally I'd like the FeMe Vulkan layer to have full conformance for 1.4 and all
-KHR extensions and potentially most EXT extensions.
+> **An accurate 1.3/1.4 mandatory-feature/limit/extension inventory.**
+> `vk_gen_entrypoints.py`'s `CORE_FEATURES` now resolves through
+> `VK_VERSION_1_3` (D0), but `VK_VERSION_1_4` is not yet included, and no
+> promoted-1.3/1.4 feature struct
+> (`VkPhysicalDeviceVulkan13Features`/`Vulkan14Features` and their per-extension
+> originals -- `dynamicRendering` is already advertised via its pre-promotion
+> `VK_KHR_dynamic_rendering` path, but `synchronization2`,
+> `maintenance4`/`5`/`6`, `subgroupSizeControl`, `shaderIntegerDotProduct`,
+> `pipelineCreationCacheControl`, `pushDescriptor`, and the rest are not) has
+> been audited against what claiming 1.4 actually requires. This is D0's own
+> "measure honestly" step turned into a checklist: enumerate the full set from
+> `vk.xml` itself (the same way `vk_gen_entrypoints.py` already resolves
+> `CORE_FEATURES` transitively), rather than re-deriving it by hand the way C6
+> did for 1.2's much shorter list
