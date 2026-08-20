@@ -555,6 +555,63 @@ format-properties stub, a stage-IO compilation limitation, an
 unadvertised depth format) rejects the case before the new code path is
 ever reached.
 
+## Roadmap C5: measured impact
+
+Roadmap C5 ("Mandatory API object model", see Roadmap.md §1.9.1) is a
+cluster of API-surface and capability-reporting fixes rather than one
+single shader/runtime path: occlusion-query object-model support,
+input-attachment descriptor and render-pass acceptance, subpass-dependency
+validation, the promoted-subgroup-properties contradiction, and
+`VkPhysicalDeviceDriverProperties`/`VkPhysicalDeviceVulkan12Properties`
+queryability. A full 54-group headline re-run was therefore not the most
+informative measurement after each independently-testable sub-commit: the
+changes are reached directly by much narrower CTS groups, and one of the
+remaining deliberate deviations (a truthful zero `VkConformanceVersion`)
+would dominate any driver-properties signal regardless of the rest of the
+run. The directly relevant groups/subsets were run instead:
+
+- **`dEQP-VK.fragment_operations.occlusion_query.*`**: 0 passed / 0 failed /
+  64 not supported. The new occlusion-query path itself is live --
+  `DrawTest.OcclusionQueryCountsPassedSamples` counts 16 surviving samples
+  through a real draw -- but this CTS group still stops earlier on
+  pre-existing format-property gates (`VK_FORMAT_D16_UNORM` and
+  `VK_FORMAT_UNDEFINED` rejected for the depth attachment shapes it asks
+  for) and on unadvertised precise occlusion queries. This is the same
+  "blocked before the new code path" pattern C1/C4 already established,
+  not a regression in the query implementation.
+- **`dEQP-VK.api.descriptor_pool.*`**: 6/6 pass. **`dEQP-VK.api.descriptor_set.
+  descriptor_set_layout*`**: 2 passed / 3 failed / 1 not supported; the
+  failures remain pre-existing pipeline-creation rejections and the one
+  `push_descriptor` case remains correctly `NotSupported`. Accepting
+  `VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT` does not regress the descriptor
+  object model, but this CTS slice also has no dedicated case whose only
+  blocker was that descriptor kind's prior rejection.
+- **`dEQP-VK.renderpasses.renderpass2.*`**: 1 passed / 122 failed / 32,405
+  not supported. This group is still dominated by broader pre-existing
+  render-pass/format breadth gaps, but the once-missing `vkCreateRenderPass2`
+  path stays live and the new input-attachment/subpass-dependency handling
+  introduces neither crashes nor wrong-answer passes.
+- **`dEQP-VK.api.info.subgroup_features.flags`**: 0 passed / 0 failed /
+  1 not supported, because CTS itself requires Vulkan 1.4 to run this case.
+  The actual C5 fix here is therefore measured by the new direct
+  `vkGetPhysicalDeviceProperties2` unit test instead: it proves
+  `VK_SUBGROUP_FEATURE_BASIC_BIT` now agrees between
+  `VkPhysicalDeviceSubgroupProperties` and the promoted
+  `VkPhysicalDeviceVulkan11Properties` chain, which was the contradiction
+  Roadmap C5 named.
+- **`dEQP-VK.api.driver_properties.*`**: 4/5 pass. `driver_id_match`,
+  `name_is_not_empty`, `name_zero_terminated`, and `info_zero_terminated`
+  all now pass. The lone remaining failure is `conformance_version`, and it
+  is deliberate: FeMe reports a truthful zero `VkConformanceVersion`
+  because it is not yet conformant, rather than fabricating a submission-
+  shaped value at or above the advertised API version.
+
+So C5 closes every object-model bullet except the submission-readiness half
+of driver properties. Its measured CTS effect is therefore intentionally
+narrow: mostly "new API surface is reachable and truthful, but still
+blocked behind older format/feature gates or, for `conformanceVersion`, an
+explicit no-lie policy," not a C2/C3-sized headline pass-count swing.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
