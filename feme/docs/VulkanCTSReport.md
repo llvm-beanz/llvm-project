@@ -671,6 +671,93 @@ is left to whenever roadmap C10 lands continuous measurement, since
 re-running the whole 54-group suite by hand after every roadmap row does
 not scale (the reason C10 exists at all).
 
+## Roadmap C6: measured impact
+
+Roadmap C6 ("Mandatory 1.2 features and limits") targeted the 28 cases
+this report's "Mandatory features and limits" bucket (above) already
+named: `dEQP-VK.info.device_mandatory_features`, the three
+`dEQP-VK.api.info.vulkan1p2_limits_validation.*` limit failures, and the
+`dEQP-VK.api.info.vulkan1p2.*`/`get_physical_device_properties2.*`
+promoted-struct-consistency checks.
+
+**`dEQP-VK.api.info.*`** (10,484 cases) is the direct measure: 77 failed
+before this row's changes (a fresh count -- see the caveat below), 71
+after, all format-table-stub failures already attributed to C1's own
+measured-impact section except two:
+
+- `dEQP-VK.info.device_mandatory_features` (a separate top-level group,
+  not under `api.info`) now fails on exactly one reason,
+  `Mandatory feature multiview not supported`, down from the seven this
+  report's earlier bucket named -- the *only* remaining one, and a
+  deliberate exception: `multiview` needs layered rendering (roadmap V7,
+  not yet implemented), not a mechanical feature-bit flip, so it stays
+  unadvertised (see FeMeVulkanDesign.md's status note). Every other named
+  feature/limit (`imagelessFramebuffer`, `uniformBufferStandardLayout`,
+  `separateDepthStencilLayouts`, `hostQueryReset`,
+  `shaderSubgroupExtendedTypes`, `subgroupBroadcastDynamicId`,
+  `maxTimelineSemaphoreValueDifference`, `maxMemoryAllocationSize`) is
+  closed.
+- `dEQP-VK.api.info.vulkan1p2_limits_validation.general` still fails, but
+  for a pre-existing, unrelated reason this row's own work exposed rather
+  than caused: `limits.sampledImageDepthSampleCounts`/
+  `sampledImageStencilSampleCounts` have always been pinned at
+  `VK_SAMPLE_COUNT_1_BIT` alone (roadmap R30's deliberate "no per-sample
+  fetch from a multisample depth/stencil image" scope note,
+  FeMeVulkanDesign.md), one sample count short of the core-mandatory
+  `VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT` floor -- a real,
+  already-documented functionality gap, not a C6 regression. The same
+  root cause is why `dEQP-VK.info.device_properties` fails (a core-1.0
+  limit check, `validateFeatureLimits`, unrelated to anything version-1.2
+  specific).
+
+Fixing the two limits and the six feature bits surfaced a second,
+narrower category of pre-existing gap along the way: several
+`dEQP-VK.api.info.vulkan1p2.*`/`get_physical_device_properties2.*` cases
+use a guard-value pattern (pre-fill a struct's buffer with a non-zero
+pattern, call the API, fail if any field the offset table lists is
+unmodified) that this ICD had never actually exercised before, since
+nothing previously chained `VkPhysicalDeviceVulkan11/12Features` or their
+promoted `Properties` twins with real content behind every field.
+Closing C6 properly meant closing these too (see
+`EntryPoints.cpp`'s case comments for
+`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES`/
+`_POINT_CLIPPING_PROPERTIES`/`_PROTECTED_MEMORY_PROPERTIES`/
+`_FLOAT_CONTROLS_PROPERTIES`/`_DEPTH_STENCIL_RESOLVE_PROPERTIES`/
+`_MULTIVIEW_FEATURES`) -- `vulkan1p2.features`, `vulkan1p2.properties`,
+`vulkan1p2.property_extensions_consistency`, and
+`get_physical_device_properties2.features.multiview_features` all now
+pass. **Left deliberately unfixed:** roughly a dozen further
+`get_physical_device_properties2.features.*` guard cases for structs
+entirely unrelated to anything C6 names (16/8-bit storage, buffer device
+address, descriptor indexing, protected memory *features* specifically,
+sampler Ycbcr conversion, scalar block layout, shader atomic int64,
+shader draw parameters, shader float16/int8, variable pointers, Vulkan
+memory model) and `VkPhysicalDeviceDescriptorIndexingProperties` --
+these were already broken before this row (nothing in `fillFeatures2Chain`/
+`fillProperties2Chain` ever handled them), are unrelated to any of C6's
+named features, and are recorded here as a follow-up rather than folded
+into this milestone's scope.
+
+**A fresh full-run headline, the first since "Roadmap C4d/C4e: measured
+impact" above** (C5 and C7 each measured only the groups their own change
+could plausibly move, per their own sections): 10,390 passed / 29,532
+failed / 3,132,206 not supported across 53 of 54 groups (`api` re-run
+standalone after hitting the same `object_management.
+multithreaded_per_thread_resources.device_group` flake this report's own
+"Roadmap C4a/C4b: measured impact" section already recorded; `synchronization`
+crashed at the same pre-existing, already-documented
+`timeline_semaphore.device_host.write_copy_buffer_read_copy_buffer.
+buffer_262144` segfault this report's "Roadmap C1: measured impact"
+section lists, so its 60,100-case partial count is excluded from the
+totals above rather than presented as complete). This total is not
+directly comparable to the 10,560/27,018/3,199,421/3,237,000 figures
+above: it reflects the cumulative effect of C5 and C7 as well (neither
+re-ran the full suite), and `synchronization`'s ~86,000 uncounted cases
+mean the total itself is short of 3,237,000. No new crash appeared in any
+of the other 52 groups, and the shape (every failure a clean rejection,
+no wrong `Pass`) is unchanged -- a full, crash-isolated recount is left to
+roadmap C10 as before.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
