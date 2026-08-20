@@ -23297,3 +23297,126 @@ failed -- identical to that addendum's own numbers, zero crashes. Recorded
 as a new dated addendum in `VulkanCTSReport.md` rather than re-running (and
 overwriting) the full headline report, matching every prior out-of-path
 change's precedent in this file.
+
+# Session: SPIR-V `spirv.Switch` assert (bilateral-filter HLSL shader, DXIL -> SPIR-V -> AMDGPU)
+
+## Starting point
+
+Found the working tree on `cbieneman/feme` clean, with one `git stash`
+entry left by a prior agent session containing an (untested, uncommitted)
+fix for exactly the reported bug: `SwitchConversionPattern` in
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, plus a matching
+`spirv-to-llvm-switch.mlir` test. Read it, checked it against
+`feme/.instructions.md` and this file's own established conventions
+(pattern shape, `FeMeBenefit` registration, comment style), popped the
+stash, and clang-formatted it (the stashed version had a few lines that
+didn't match `.clang-format`, e.g. the `Patterns.add<...>` call's wrapping)
+before doing anything else with it.
+
+## Root cause
+
+MLIR's own `populateSPIRVToLLVMConversionPatterns` has no pattern for
+`spirv.Switch` at all -- its own source has a comment noting this
+("`spirv.Switch` op is not supported at the moment"). `spirv-opt`'s
+merge-return pass (which `dxc -spirv` runs, since HLSL's `[unroll]`ed loop
+with an early `return` inside it needs merge-return to linearize the
+early exit before `spirv-opt`'s own loop-unrolling pass can even run on
+it) emits a case-less `spirv.Switch` unconditionally branching to a
+default successor, to skip the rest of a function after that early
+return. With no pattern to convert it, dialect conversion fails to
+legalize -- the `error: failed to legalize operation 'spirv.Switch'`
+from the bug report -- which surfaces to `feme`'s caller as a clean
+`failed to convert spirv dialect module to the llvm dialect` diagnostic
+(not literally a debug assert, but the practical effect -- a shader that
+should compile does not -- matches the report).
+
+## Fix
+
+`SwitchConversionPattern` converts `spirv.Switch` to `llvm.switch`
+one-to-one: both are a selector compared against case literals, each
+branching to its own successor with its own successor operands, with a
+required default successor. One wrinkle: `literals`' element type is the
+selector's *pre-conversion* SPIR-V type (signed or unsigned), but
+`llvm.switch`'s verifier requires case values to have exactly the
+*post-conversion*, always-signless selector type, so the case literals
+are rebuilt against it (`llvm::APInt` values reused, just re-wrapped in a
+`DenseIntElementsAttr` of the right element type) rather than reused as
+the original attribute.
+
+## Iterating past the exact reported shader
+
+Fixing the reported assert was not enough to get the user's *exact* shader
+all the way to an AMDGPU object, so (per this session's instructions to
+verify actual results, not just the one reported symptom) kept iterating,
+compiling with real `dxc -T cs_6_8 -spirv` and feeding the result through
+the real `feme --target=amdgcn-amd-amdhsa` CLI after each fix, same as the
+prior DXIL/AMDGPU sessions this file already records:
+
+1. **`spirv.Switch`** (above) -- fixed first, since it's the literal bug
+   report.
+2. **`spirv.ImageFetch` with a lone `Lod` operand.** `Texture2D<T>::Load`
+   in the shader hit this next: `dxc` always emits an explicit `Lod`
+   image operand for `OpImageFetch` against a non-multisampled image (even
+   a literal `0` mip), and the existing `ImageFetchPattern` only handles
+   the no-modifiers case (it's shared with `spirv.ImageRead`, which really
+   has no LOD concept). Added `ImageFetchLodPattern`, converting to the
+   `llvm.spv.resource.load.level` intrinsic
+   (`llvm/test/CodeGen/SPIRV/hlsl-resources/LoadLevel.ll`) -- like the
+   unmodified case's plain `llvm.load`, LLVM's SPIRV backend picks
+   `OpImageFetch` vs `OpImageRead` itself from the handle's image type, so
+   no separate intrinsic is needed per op, just per LOD-or-not.
+3. **`spirv.Dot`.** The shader's per-tap bilateral weight (`dot(offset,
+   offset)`, `dot(difference, difference)` on `half3`s/`half2`s) hit this:
+   another MLIR-has-no-pattern-at-all gap, this time for arithmetic rather
+   than control flow or resource access. Added `DotConversionPattern`,
+   converting to a per-lane `llvm.intr.fmuladd` chain -- deliberately
+   mirroring `feme::dxil::expandFDot`'s expansion of the *DXIL* side's
+   analogous (post-raising) `llvm.dx.fdot` intrinsic
+   (`feme/lib/Transforms/DXIL/IntrinsicExpansion.cpp`): same reduction,
+   same fused-multiply-add semantics, just at a different pipeline stage
+   (dialect conversion here vs. post-raise LLVM IR expansion there).
+4. **Stopped at:** `feme: resource handle type 'spirv.Image' is not
+   supported when targeting 'amdgcn-amd-amdhsa'`. This is a clean
+   diagnostic from `feme::RaisedIRVerifier`, not a crash, and traces to a
+   real, substantially larger gap: Roadmap.md's AMDGPU section already
+   documents `Texture2D`/`RWTexture2D` support for the *DXIL*-originated
+   path (`target("dx.TypedBuffer", ...)`, via
+   `feme::amdgpu::ResourceLoweringPass`), but nothing yet consumes a
+   *SPIR-V*-originated `target("spirv.Image", ...)` handle for the AMDGPU
+   target -- an entire resource-lowering pass, not a small legalization
+   pattern, and well beyond this session's "fix the reported bug" scope.
+   Documented as the next blocker rather than attempted here.
+
+## Tests
+
+- `spirv-to-llvm-switch.mlir` (already written by the prior session,
+  reused as-is after clang-format): a real-cases switch and a case-less
+  one (the merge-return shape).
+- `spirv-to-llvm-sampling.mlir`: added a `@fetch_level` case alongside the
+  file's existing `@fetch`/`@sample_level` ones.
+- `spirv-to-llvm-dot.mlir`: new file, one case checking the full
+  `fmul`+`fmuladd`+`fmuladd` chain for a 3-component dot product.
+- Re-verified the user's *exact* shader compiles through the real `feme`
+  CLI three legalization failures further than before (past `Switch`,
+  `ImageFetch`+`Lod`, and `Dot`), stopping at the documented AMDGPU
+  resource-handle gap above rather than any assert/crash.
+- `ninja check-feme` (ccache + assertions already configured in `./build`):
+  1492/1493 passed, 1 unsupported (pre-existing, unrelated), verified
+  after each of the three commits individually (temporarily moving the
+  not-yet-applicable test file(s) aside to confirm each commit's own
+  state builds and passes on its own).
+
+## Vulkan CTS
+
+Unlike the DXIL/AMDGPU-only fixes this file's earlier sessions recorded,
+`feme::spirv::SPIRVToLLVMPatterns.cpp` is on `libfeme_vulkan`'s own path.
+Ran `dEQP-VK.compute.pipeline.*` (20,285 cases) before and after (isolating
+just this change via `git checkout <pre-fix commit> --
+SPIRVToLLVMPatterns.cpp` + rebuilding `feme_vulkan`, this report's own
+single-change isolation trick): identical 1 passed / 88 failed / 20,196 not
+supported both times, zero crashes, and none of the 88 (pre-existing)
+failures mention `switch`, `Dot`, or `ImageFetch`/`resource.load.level`.
+Recorded as a new dated addendum in `VulkanCTSReport.md` rather than a full
+re-run, matching this file's own prior-session precedent for a
+methodology-preserving spot check instead of overwriting the headline
+numbers with a differently-isolated quick pass.

@@ -712,3 +712,43 @@ smoke run (same invocation as the `GetDimensions.xy` addendum's) confirmed
 this: 5,669/10,484 passed, 84/10,484 failed, identical to that addendum's
 own smoke-run numbers, with zero crashes.
 
+
+## Addendum: SPIR-V `spirv.Switch`/`spirv.ImageFetch`+`Lod`/`spirv.Dot` conversion fixes
+
+Three follow-up changes to `feme::spirv::SPIRVToLLVMPatterns.cpp`
+(`SwitchConversionPattern`, `ImageFetchLodPattern`, `DotConversionPattern`)
+fixed three separate SPIR-V -> LLVM dialect legalization failures found
+while getting a bilateral-filter-style HLSL compute shader (`InputTexture
+.Load(...)`, a `[unroll]`ed loop with an early `return`, and `dot()` on
+`half3`s) through `dxc -T cs_6_8 -spirv` and then `feme`. Unlike the DXIL/
+AMDGPU addenda above, `feme::spirv::populateSPIRVToLLVMTargetPatterns` --
+the file all three patterns live in -- *is* on `libfeme_vulkan`'s own path
+(`feme::Vulkan::Pipeline.cpp` calls it directly to compile every SPIR-V
+shader module a Vulkan application submits), so this report's headline
+numbers are in scope for re-verification, not out of it.
+
+A full from-scratch pass (this report's own methodology) was not re-run in
+this session: at ~3.2M cases it is multi-hour, and none of the three fixed
+constructs (`OpSwitch`, `OpImageFetch` with an explicit `Lod` operand,
+`OpDot`) previously reached `libfeme_vulkan` successfully enough to produce
+a `Pass`/`Fail` distinguishable from `NotSupported` -- they failed to
+*legalize* at all, i.e. every affected shader was already counted among the
+`NotSupported`/crash buckets before this change, not among the 10,560
+passes this report's methodology already isolates crashes around. Instead,
+`dEQP-VK.compute.pipeline.*` (20,285 cases -- real compute shaders compiled
+and dispatched through the exact code path these patterns live in) was run
+before and after, using the same `git checkout <pre-fix commit> --
+SPIRVToLLVMPatterns.cpp` + rebuild `feme_vulkan` trick this report's own
+"Reproducing this report" section describes for isolating a single change:
+
+- Before: 1 passed / 88 failed / 20,196 not supported.
+- After: 1 passed / 88 failed / 20,196 not supported (identical; the 88
+  failures are pre-existing `llvm.getelementptr` operand-type and
+  `unhandled opcode 68` errors, none mentioning `switch`, `Dot`, or
+  `ImageFetch`/`resource.load.level`).
+
+No regression and no new pass (expected: none of this suite's own compute
+shaders happen to use a `switch` statement, an explicit-LOD texel fetch, or
+`dot()`), and zero crashes in either run. `ninja check-feme`: 1492/1493
+passed, 1 unsupported (pre-existing, unrelated), before and after each of
+the three commits.
