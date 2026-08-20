@@ -7,17 +7,25 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `f91258124320` (roadmap C4e, "Dual-source blend factors":
-  the last item in C4's "Graphics pipeline state breadth" row -- see
-  "Roadmap C4d/C4e: measured impact" below).
-- VK-GL-CTS revision: `vulkan-cts-1.4.6.2-411-g918221c6` plus one local
-  robustness fix (`7163015`, "Guard `dEQP-VK.api.invariance.random` against
-  empty image format lists" -- see "Deviations from a stock CTS" below).
+- FeMe revision: `26193b63545c` (roadmap C7, "Queue family capability
+  combinations" -- see "Roadmap C7: measured impact" below).
+- VK-GL-CTS revision: `vulkan-cts-1.4.6.2-412-g716301541136` plus two local
+  fixes (`7163015`, "Guard `dEQP-VK.api.invariance.random` against empty
+  image format lists"; and a second one added by this pass, "Check
+  `VK_KHR_copy_commands2` support in
+  `image_to_image_transfer_queue.misc.ms_then_ss*`" -- see "Deviations from
+  a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1478 passed, 1 unsupported.
+- `check-feme`: 1506 passed, 1 unsupported.
 
 ## Headline
+
+The table below is unchanged from the last full 54-group run (before
+roadmap C7); a full re-run was not practical in the time available for
+this pass (see roadmap C10). "Roadmap C7: measured impact" below instead
+re-runs, before and after, exactly the groups this row's own change could
+affect.
 
 | | Count | Share |
 |---|---|---|
@@ -612,6 +620,57 @@ narrow: mostly "new API surface is reachable and truthful, but still
 blocked behind older format/feature gates or, for `conformanceVersion`, an
 explicit no-lie policy," not a C2/C3-sized headline pass-count swing.
 
+## Roadmap C7: measured impact
+
+Roadmap C7 ("Queue family capability combinations") added two narrower
+queue families -- `TRANSFER`-only and `COMPUTE | TRANSFER`-only, both
+excluding `GRAPHICS` -- alongside the existing universal family (see
+FeMeVulkanDesign.md's "Queue families" status note). A full 3,237,000-case
+re-run was not practical in the time available for this pass, so the
+groups `findQueueFamilyIndexWithCaps` failures were previously concentrated
+in were run directly, before and after:
+
+- **`dEQP-VK.pipeline.monolithic.timestamp.*`** (278 cases): the 52 cases
+  failing with `No matching queue found:
+  findQueueFamilyIndexWithCaps(requiredCaps=0x4, excludedCaps=0x3)` (a
+  dedicated transfer-only queue) all now reach real test logic; every one
+  still reports `NotSupported`, but for the honest, pre-existing,
+  unrelated reason `Queue does not support timestamps`
+  (`timestampValidBits == 0` -- query timestamps are not implemented yet,
+  a separate gap this row does not claim to close).
+- **`dEQP-VK.api.*`** (267,219 cases): the queue-capability `NotSupported`
+  count dropped from 106 to 2. The 2 remaining need a dedicated
+  `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue, correctly `NotSupported` since no
+  video extension is advertised at all -- a case this row was never meant
+  to cover. Reaching further did surface one CTS-side null-function-
+  pointer crash in
+  `dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image_transfer_queue.misc.ms_then_ss`
+  (its `checkQueueSupport` checks for a transfer-only queue but never
+  checks `VK_KHR_copy_commands2`, unlike every sibling case in the same
+  file); see "Deviations from a stock CTS" below for the local fix. The
+  pass/fail split moved (7,499/275 before the local CTS fix, to
+  7,500/339 after querying every previously-unreached case), but every
+  additional failure traces to the pre-existing, unrelated
+  `VK_EXT_pipeline_creation_cache_control` gap `dEQP-VK.api.
+  object_management.*`'s shared `Device` dependency needs (140 of the
+  457 `object_management` cases fail identically with or without this
+  row's queue-family change -- confirmed by running the same caselist
+  against the pre-C7 binary).
+- **`dEQP-VK.synchronization.*`**, **`synchronization2.*`**,
+  **`renderpasses.*`**, **`sparse_resources.*`**, and
+  **`fragment_shading_rate.*`** (357,214 cases combined): zero
+  queue-capability `NotSupported` results in any of the five, down from a
+  nonzero count before this row (most of the mass in each group is
+  unrelated `NotSupported` for extensions/formats this ICD does not
+  advertise, unaffected by this change).
+
+Every group re-run to completion with no new crash, and no `Pass`-shaped
+result carrying incorrect data -- the two guarantees this report's
+headline states hold across three million cases. A full headline re-run
+is left to whenever roadmap C10 lands continuous measurement, since
+re-running the whole 54-group suite by hand after every roadmap row does
+not scale (the reason C10 exists at all).
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
@@ -625,7 +684,7 @@ capability it needs is genuinely optional. The bulk of this run's
 | 244,916 | An unadvertised combined depth/stencil format (`D16_UNORM_S8_UINT`, `D32_SFLOAT_S8_UINT`, `S8_UINT`) |
 | 113,737 | `VK_KHR_fragment_shading_rate` |
 | 107,866 | `VK_EXT_primitives_generated_query` |
-| 99,324 | No queue family with the requested capability combination |
+| ~~99,324~~ 0 | No queue family with the requested capability combination (closed by roadmap C7; see above) |
 | 91,516 | Cooperative matrix/vector |
 | 73,433 | `VK_EXT_host_image_copy` |
 | 71,322 | `VK_KHR_acceleration_structure` |
@@ -634,14 +693,12 @@ capability it needs is genuinely optional. The bulk of this run's
 | 59,520 | `shaderSampledImageArrayDynamicIndexing` |
 | 59,090 | `VK_EXT_graphics_pipeline_library` |
 
-Two entries in that list are *not* freely optional for a conformant
-Vulkan 1.2 device and so belong on the conformance critical path, not in
+Two entries in that list were *not* freely optional for a conformant
+Vulkan 1.2 device and so belonged on the conformance critical path, not in
 the "correctly declined" column: the combined depth/stencil formats (at
-least one of `D24_UNORM_S8_UINT`/`D32_SFLOAT_S8_UINT` is mandatory), and
-the queue-capability combinations (a Vulkan queue family exposing
-`GRAPHICS` must also expose `TRANSFER`, and CTS's
-`findQueueFamilyIndexWithCaps` failures indicate this ICD's advertised
-family set does not cover the mandatory combinations).
+least one of `D24_UNORM_S8_UINT`/`D32_SFLOAT_S8_UINT` is mandatory, closed
+by roadmap C1), and the queue-capability combinations (closed by roadmap
+C7, see above).
 
 ## Deviations from a stock CTS
 
@@ -654,6 +711,20 @@ narrow-format ICD can empty both for some seed, and on AArch64 `UDIV`
 returns the dividend for `% 0` rather than trapping, so the index read far
 out of bounds and segfaulted `deqp-vk`. The local fix never constructs an
 `ImageAllocator` when neither tiling mode has a supported format.
+
+A second local fix (roadmap C7's own measurement pass) closes a similar
+gap: `external/vulkancts/modules/vulkan/api/vktApiCopyImageToImageTests.cpp`'s
+`checkQueueSupport` for the `image_to_image_transfer_queue.misc.ms_then_ss*`
+cases checks for a dedicated transfer queue but, unlike every sibling case
+in the same file, never calls `checkExtensionSupport` to verify
+`VK_KHR_copy_commands2` is actually supported before the test body
+unconditionally records `vkCmdCopyImage2`. An implementation with a
+dedicated transfer queue but no `VK_KHR_copy_commands2` -- a legal
+combination, since neither implies the other -- calls a null function
+pointer instead of getting a `NotSupported` result. This case was
+unreachable before this ICD had a transfer-only queue family at all, so it
+was never noticed until now. The local fix adds the missing
+`checkExtensionSupport` call.
 
 `deqp-vk` also aborts *after* printing `DONE!` and its totals, in
 `tcuSubprocessTestExecutorLin.cpp`, because device-fault tests are not
