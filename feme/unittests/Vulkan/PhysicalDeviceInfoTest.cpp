@@ -321,4 +321,52 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features12.subgroupBroadcastDynamicId, VK_TRUE);
 }
 
+TEST_F(PhysicalDeviceProperties2Test,
+       MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten) {
+  // Roadmap C6: `multiview` cannot be honestly advertised yet (layered
+  // rendering is V7), but every field must still be an explicit `VK_FALSE`
+  // rather than whatever the caller's own buffer held -- guarded here by
+  // pre-filling with a non-zero pattern before the call, the same pattern
+  // `dEQP-VK.api.info.vulkan1p2.features`/`multiview_features` use to
+  // catch an unwritten field.
+  VkPhysicalDeviceMultiviewFeatures Multiview;
+  std::memset(&Multiview, 0xAA, sizeof(Multiview));
+  Multiview.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES;
+  Multiview.pNext = nullptr;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Multiview;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Multiview.multiview, VK_FALSE);
+  EXPECT_EQ(Multiview.multiviewGeometryShader, VK_FALSE);
+  EXPECT_EQ(Multiview.multiviewTessellationShader, VK_FALSE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       IdPropertiesMatchPromotedVulkan11Properties) {
+  // Roadmap C6: closing this promoted-struct disagreement was a
+  // prerequisite for `vulkan1p2.property_extensions_consistency` (see
+  // EntryPoints.cpp's `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES`
+  // case comment).
+  VkPhysicalDeviceIDProperties IdProps{};
+  IdProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES;
+  VkPhysicalDeviceVulkan11Properties Props11{};
+  Props11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
+  IdProps.pNext = &Props11;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &IdProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(std::memcmp(IdProps.deviceUUID, Props11.deviceUUID, VK_UUID_SIZE),
+            0);
+  EXPECT_EQ(std::memcmp(IdProps.driverUUID, Props11.driverUUID, VK_UUID_SIZE),
+            0);
+  EXPECT_EQ(IdProps.deviceLUIDValid, Props11.deviceLUIDValid);
+  EXPECT_EQ(IdProps.deviceLUIDValid, VK_FALSE);
+}
+
 } // namespace

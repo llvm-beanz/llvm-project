@@ -142,6 +142,15 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
       auto *Props11 =
           reinterpret_cast<VkPhysicalDeviceVulkan11Properties *>(Base);
+      // (roadmap C6) The promoted twin of
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES` below; both must
+      // agree (`dEQP-VK.api.info.vulkan1p2.property_extensions_consistency`).
+      std::memcpy(Props11->deviceUUID, Info.DeviceUUID, VK_UUID_SIZE);
+      std::memcpy(Props11->driverUUID, Info.Properties.pipelineCacheUUID,
+                  VK_UUID_SIZE);
+      std::memset(Props11->deviceLUID, 0, VK_LUID_SIZE);
+      Props11->deviceLUIDValid = VK_FALSE;
+      Props11->deviceNodeMask = 1;
       Props11->subgroupSize = Info.SubgroupSize;
       Props11->subgroupSupportedStages = Info.SubgroupSupportedStages;
       Props11->subgroupSupportedOperations = Info.SubgroupSupportedOperations;
@@ -157,6 +166,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props11->maxMultiviewInstanceIndex = Info.MaxMultiviewInstanceIndex;
       Props11->maxMemoryAllocationSize = Info.MaxMemoryAllocationSize;
       Props11->maxPerSetDescriptors = Info.MaxPerSetDescriptors;
+      // (roadmap C6) Explicitly written, not merely left at whatever the
+      // caller's own buffer held: `dEQP-VK.api.info.vulkan1p2.properties`
+      // fills every promoted-struct buffer with a guard pattern before the
+      // call and fails if any field the offset table lists is
+      // unmodified. `pointClippingBehavior`'s default (`0`, "all clip
+      // planes") is already correct for a device advertising no user clip
+      // planes; `protectedNoFault` is false since protected memory is not
+      // advertised.
+      Props11->pointClippingBehavior =
+          VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
+      Props11->protectedNoFault = VK_FALSE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES: {
@@ -185,14 +205,81 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       std::memcpy(IdProps->deviceUUID, Info.DeviceUUID, VK_UUID_SIZE);
       std::memcpy(IdProps->driverUUID, Info.Properties.pipelineCacheUUID,
                   VK_UUID_SIZE);
+      // Only meaningful when `deviceLUIDValid` is true (it is not), but
+      // still explicitly zeroed rather than left as whatever the caller's
+      // own buffer held -- see the guard-pattern comment on
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES` above.
+      std::memset(IdProps->deviceLUID, 0, VK_LUID_SIZE);
       IdProps->deviceLUIDValid = VK_FALSE;
       IdProps->deviceNodeMask = 1;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES: {
+      // (roadmap C6) The promoted twin of `Vulkan11Properties.protectedNoFault`
+      // above; both must agree (protected memory is not advertised).
+      auto *ProtectedMemory =
+          reinterpret_cast<VkPhysicalDeviceProtectedMemoryProperties *>(Base);
+      ProtectedMemory->protectedNoFault = VK_FALSE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: {
       auto *DriverProps =
           reinterpret_cast<VkPhysicalDeviceDriverProperties *>(Base);
       fillDriverProperties(Info, *DriverProps);
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES: {
+      // (roadmap C6) The promoted twin of
+      // `Vulkan11Properties.pointClippingBehavior` above; both must agree.
+      auto *PointClipping =
+          reinterpret_cast<VkPhysicalDevicePointClippingProperties *>(Base);
+      PointClipping->pointClippingBehavior =
+          VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES: {
+      // (roadmap C6) The promoted twin of the float-controls half of
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES` below;
+      // both must agree -- see that case's comment for why every field is
+      // the conservative "no independent float-controls handling" value.
+      auto *FloatControls =
+          reinterpret_cast<VkPhysicalDeviceFloatControlsProperties *>(Base);
+      FloatControls->denormBehaviorIndependence =
+          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+      FloatControls->roundingModeIndependence =
+          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+      FloatControls->shaderSignedZeroInfNanPreserveFloat16 = VK_FALSE;
+      FloatControls->shaderSignedZeroInfNanPreserveFloat32 = VK_FALSE;
+      FloatControls->shaderSignedZeroInfNanPreserveFloat64 = VK_FALSE;
+      FloatControls->shaderDenormPreserveFloat16 = VK_FALSE;
+      FloatControls->shaderDenormPreserveFloat32 = VK_FALSE;
+      FloatControls->shaderDenormPreserveFloat64 = VK_FALSE;
+      FloatControls->shaderDenormFlushToZeroFloat16 = VK_FALSE;
+      FloatControls->shaderDenormFlushToZeroFloat32 = VK_FALSE;
+      FloatControls->shaderDenormFlushToZeroFloat64 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTEFloat16 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTEFloat32 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTEFloat64 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTZFloat16 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTZFloat32 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTZFloat64 = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES: {
+      // (roadmap C6) The promoted twin of the resolve-mode half of
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES` below;
+      // both must agree -- `VK_KHR_depth_stencil_resolve` itself is not
+      // implemented (only the ordinary color-attachment resolve this ICD
+      // already supports is), so `VK_RESOLVE_MODE_NONE` is the honest
+      // value rather than the `SAMPLE_ZERO` bit a real implementation
+      // would need.
+      auto *DepthStencilResolve =
+          reinterpret_cast<VkPhysicalDeviceDepthStencilResolveProperties *>(
+              Base);
+      DepthStencilResolve->supportedDepthResolveModes = VK_RESOLVE_MODE_NONE;
+      DepthStencilResolve->supportedStencilResolveModes = VK_RESOLVE_MODE_NONE;
+      DepthStencilResolve->independentResolveNone = VK_FALSE;
+      DepthStencilResolve->independentResolve = VK_FALSE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: {
@@ -204,12 +291,81 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
                   sizeof(Info.DriverName));
       std::memcpy(Props12->driverInfo, Info.DriverInfo,
                   sizeof(Info.DriverInfo));
+      // (roadmap C6) Every remaining field is written explicitly, for the
+      // same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+      // VULKAN_1_2_FEATURES` documents. None of these reflect a real
+      // capability this ICD implements (no explicit SPIR-V float-controls
+      // handling, no `VK_EXT_descriptor_indexing`, no
+      // `VK_KHR_depth_stencil_resolve`), so every one is the conservative
+      // "least capable, always-safe" value rather than an aspirational
+      // one -- `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE` (every bit
+      // width must share the same float-controls execution mode) and
+      // `VK_RESOLVE_MODE_NONE` (no resolve mode beyond the ordinary color
+      // resolve this ICD already implements) rather than the `SAMPLE_ZERO`
+      // bit a real `VK_KHR_depth_stencil_resolve` implementation would
+      // need to support.
+      Props12->denormBehaviorIndependence =
+          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+      Props12->roundingModeIndependence =
+          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+      Props12->shaderSignedZeroInfNanPreserveFloat16 = VK_FALSE;
+      Props12->shaderSignedZeroInfNanPreserveFloat32 = VK_FALSE;
+      Props12->shaderSignedZeroInfNanPreserveFloat64 = VK_FALSE;
+      Props12->shaderDenormPreserveFloat16 = VK_FALSE;
+      Props12->shaderDenormPreserveFloat32 = VK_FALSE;
+      Props12->shaderDenormPreserveFloat64 = VK_FALSE;
+      Props12->shaderDenormFlushToZeroFloat16 = VK_FALSE;
+      Props12->shaderDenormFlushToZeroFloat32 = VK_FALSE;
+      Props12->shaderDenormFlushToZeroFloat64 = VK_FALSE;
+      Props12->shaderRoundingModeRTEFloat16 = VK_FALSE;
+      Props12->shaderRoundingModeRTEFloat32 = VK_FALSE;
+      Props12->shaderRoundingModeRTEFloat64 = VK_FALSE;
+      Props12->shaderRoundingModeRTZFloat16 = VK_FALSE;
+      Props12->shaderRoundingModeRTZFloat32 = VK_FALSE;
+      Props12->shaderRoundingModeRTZFloat64 = VK_FALSE;
+      Props12->maxUpdateAfterBindDescriptorsInAllPools = 0;
+      Props12->shaderUniformBufferArrayNonUniformIndexingNative = VK_FALSE;
+      Props12->shaderSampledImageArrayNonUniformIndexingNative = VK_FALSE;
+      Props12->shaderStorageBufferArrayNonUniformIndexingNative = VK_FALSE;
+      Props12->shaderStorageImageArrayNonUniformIndexingNative = VK_FALSE;
+      Props12->shaderInputAttachmentArrayNonUniformIndexingNative = VK_FALSE;
+      Props12->robustBufferAccessUpdateAfterBind = VK_FALSE;
+      Props12->quadDivergentImplicitLod = VK_FALSE;
+      Props12->maxPerStageDescriptorUpdateAfterBindSamplers = 0;
+      Props12->maxPerStageDescriptorUpdateAfterBindUniformBuffers = 0;
+      Props12->maxPerStageDescriptorUpdateAfterBindStorageBuffers = 0;
+      Props12->maxPerStageDescriptorUpdateAfterBindSampledImages = 0;
+      Props12->maxPerStageDescriptorUpdateAfterBindStorageImages = 0;
+      Props12->maxPerStageDescriptorUpdateAfterBindInputAttachments = 0;
+      Props12->maxPerStageUpdateAfterBindResources = 0;
+      Props12->maxDescriptorSetUpdateAfterBindSamplers = 0;
+      Props12->maxDescriptorSetUpdateAfterBindUniformBuffers = 0;
+      Props12->maxDescriptorSetUpdateAfterBindUniformBuffersDynamic = 0;
+      Props12->maxDescriptorSetUpdateAfterBindStorageBuffers = 0;
+      Props12->maxDescriptorSetUpdateAfterBindStorageBuffersDynamic = 0;
+      Props12->maxDescriptorSetUpdateAfterBindSampledImages = 0;
+      Props12->maxDescriptorSetUpdateAfterBindStorageImages = 0;
+      Props12->maxDescriptorSetUpdateAfterBindInputAttachments = 0;
+      Props12->supportedDepthResolveModes = VK_RESOLVE_MODE_NONE;
+      Props12->supportedStencilResolveModes = VK_RESOLVE_MODE_NONE;
+      Props12->independentResolveNone = VK_FALSE;
+      Props12->independentResolve = VK_FALSE;
+      Props12->filterMinmaxSingleComponentFormats = VK_FALSE;
+      Props12->filterMinmaxImageComponentMapping = VK_FALSE;
       // (roadmap C6) The promoted twin of
       // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES`
       // above; both must agree; see PhysicalDeviceInfo.h's field comment
       // for why this is `UINT64_MAX` rather than the spec's `2^31-1` floor.
       Props12->maxTimelineSemaphoreValueDifference =
           Info.MaxTimelineSemaphoreValueDifference;
+      // (roadmap C6) Required unconditionally once apiVersion >= 1.2
+      // (`dEQP-VK.api.info.vulkan1p2_limits_validation.general`), and
+      // honest at the minimum: no `VK_FORMAT_*_UINT`/`_SINT` color format
+      // is an accepted color-attachment format at all yet
+      // (`isSupportedColorAttachmentFormat`, `RenderPass.cpp`), so there is
+      // no multisample integer color attachment this ICD could claim
+      // beyond the trivial single-sample case.
+      Props12->framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
       break;
     }
     default:
@@ -250,6 +406,23 @@ void fillFeatures2Chain(void *pNext) {
   for (auto *Base = static_cast<VkBaseOutStructure *>(pNext); Base;
        Base = Base->pNext) {
     switch (Base->sType) {
+    // (roadmap C6) Explicitly all-false, not merely left untouched:
+    // `dEQP-VK.api.info.vulkan1p2.features`/`multiview_features` fill
+    // every chained struct's buffer with a guard pattern first and fail if
+    // any field the offset table lists is unmodified -- the same
+    // "must be written even when false" requirement `PhysicalDeviceInfo.h`
+    // already documents for `Properties11`'s `pointClippingBehavior`/
+    // `protectedNoFault` above. None of `multiview`'s two shader-stage
+    // amplification bits apply either way: geometry/tessellation stages
+    // are not supported at all (`GraphicsPipeline.cpp`).
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceMultiviewFeatures *>(Base);
+      Features->multiview = VK_FALSE;
+      Features->multiviewGeometryShader = VK_FALSE;
+      Features->multiviewTessellationShader = VK_FALSE;
+      break;
+    }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceTimelineSemaphoreFeatures *>(Base);
@@ -314,15 +487,81 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderSubgroupExtendedTypes = VK_TRUE;
       break;
     }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES: {
+      // (roadmap C6) Explicitly all-false: nothing 1.1 promotes is
+      // advertised (`multiview` cannot be -- see the dedicated-struct case
+      // above), but every field must still be written for the same guard-
+      // pattern reason that case documents.
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceVulkan11Features *>(Base);
+      Features->storageBuffer16BitAccess = VK_FALSE;
+      Features->uniformAndStorageBuffer16BitAccess = VK_FALSE;
+      Features->storagePushConstant16 = VK_FALSE;
+      Features->storageInputOutput16 = VK_FALSE;
+      Features->multiview = VK_FALSE;
+      Features->multiviewGeometryShader = VK_FALSE;
+      Features->multiviewTessellationShader = VK_FALSE;
+      Features->variablePointersStorageBuffer = VK_FALSE;
+      Features->variablePointers = VK_FALSE;
+      Features->protectedMemory = VK_FALSE;
+      Features->samplerYcbcrConversion = VK_FALSE;
+      Features->shaderDrawParameters = VK_FALSE;
+      break;
+    }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan12Features *>(Base);
-      Features->timelineSemaphore = VK_TRUE;
-      Features->hostQueryReset = VK_TRUE;
-      Features->uniformBufferStandardLayout = VK_TRUE;
-      Features->separateDepthStencilLayouts = VK_TRUE;
-      Features->shaderSubgroupExtendedTypes = VK_TRUE;
+      // (roadmap C6) Every field is written explicitly, true or false, for
+      // the same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+      // VULKAN_1_1_FEATURES` above documents -- this struct has no
+      // "leave everything else zeroed" shortcut since some of its fields
+      // are true.
+      Features->samplerMirrorClampToEdge = VK_FALSE;
+      Features->drawIndirectCount = VK_FALSE;
+      Features->storageBuffer8BitAccess = VK_FALSE;
+      Features->uniformAndStorageBuffer8BitAccess = VK_FALSE;
+      Features->storagePushConstant8 = VK_FALSE;
+      Features->shaderBufferInt64Atomics = VK_FALSE;
+      Features->shaderSharedInt64Atomics = VK_FALSE;
+      Features->shaderFloat16 = VK_FALSE;
+      Features->shaderInt8 = VK_FALSE;
+      Features->descriptorIndexing = VK_FALSE;
+      Features->shaderInputAttachmentArrayDynamicIndexing = VK_FALSE;
+      Features->shaderUniformTexelBufferArrayDynamicIndexing = VK_FALSE;
+      Features->shaderStorageTexelBufferArrayDynamicIndexing = VK_FALSE;
+      Features->shaderUniformBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderSampledImageArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderStorageBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderStorageImageArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderInputAttachmentArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderUniformTexelBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->shaderStorageTexelBufferArrayNonUniformIndexing = VK_FALSE;
+      Features->descriptorBindingUniformBufferUpdateAfterBind = VK_FALSE;
+      Features->descriptorBindingSampledImageUpdateAfterBind = VK_FALSE;
+      Features->descriptorBindingStorageImageUpdateAfterBind = VK_FALSE;
+      Features->descriptorBindingStorageBufferUpdateAfterBind = VK_FALSE;
+      Features->descriptorBindingUniformTexelBufferUpdateAfterBind = VK_FALSE;
+      Features->descriptorBindingStorageTexelBufferUpdateAfterBind = VK_FALSE;
+      Features->descriptorBindingUpdateUnusedWhilePending = VK_FALSE;
+      Features->descriptorBindingPartiallyBound = VK_FALSE;
+      Features->descriptorBindingVariableDescriptorCount = VK_FALSE;
+      Features->runtimeDescriptorArray = VK_FALSE;
+      Features->samplerFilterMinmax = VK_FALSE;
+      Features->scalarBlockLayout = VK_FALSE;
       Features->imagelessFramebuffer = VK_TRUE;
+      Features->uniformBufferStandardLayout = VK_TRUE;
+      Features->shaderSubgroupExtendedTypes = VK_TRUE;
+      Features->separateDepthStencilLayouts = VK_TRUE;
+      Features->hostQueryReset = VK_TRUE;
+      Features->timelineSemaphore = VK_TRUE;
+      Features->bufferDeviceAddress = VK_FALSE;
+      Features->bufferDeviceAddressCaptureReplay = VK_FALSE;
+      Features->bufferDeviceAddressMultiDevice = VK_FALSE;
+      Features->vulkanMemoryModel = VK_FALSE;
+      Features->vulkanMemoryModelDeviceScope = VK_FALSE;
+      Features->vulkanMemoryModelAvailabilityVisibilityChains = VK_FALSE;
+      Features->shaderOutputViewportIndex = VK_FALSE;
+      Features->shaderOutputLayer = VK_FALSE;
       // (roadmap C6) No `OpGroupNonUniformBroadcast` conversion exists at
       // all (see the dedicated-struct case above), so there is no
       // non-dynamic-index broadcast this bit could be lying about: every
