@@ -1402,6 +1402,21 @@ text:
   "Process Coexistence and Symbol Visibility" requires before any such
   machinery runs; that initialization is deferred to whichever milestone
   (V0.5/V1) first JIT-compiles a pipeline.
+- **Roadmap D0** bumped the advertised `apiVersion` again, from 1.2 to 1.4
+  (`VK_API_VERSION_1_4`), reversing this document's own "Loader
+  Integration" framing that the advertised version is "selected during
+  implementation from the core command and CTS coverage actually
+  achieved" -- D0 is a deliberate advance *ahead of* that coverage, to
+  give Roadmap.md's new §1.9.2 a fixed target to plan the 1.3/1.4
+  mandatory-feature work against, rather than re-deriving the target
+  version at the end of every future roadmap step the way C6 had to
+  re-derive it for 1.2. `vk_gen_entrypoints.py` still resolves only core
+  `VK_VERSION_1_0`/`VK_VERSION_1_1` commands (see "Loader Integration"
+  below); the 1.2-1.4 core command names it does not yet resolve remain
+  future work, tracked by §1.9.2's D-series rows rather than by this
+  document. See VulkanCTSReport.md's "Roadmap D0: measured impact" for
+  what advertising 1.4 without the corresponding mandatory-feature work
+  costs against a stock CTS run.
 
 ### V0.5: SPIR-V import that survives real shaders
 

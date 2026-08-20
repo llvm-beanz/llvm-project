@@ -587,6 +587,39 @@ Every one is optional for Vulkan 1.2 conformance, every one is correctly
 reported `NotSupported` today, and each remains scheduled by its own V or G
 milestone rather than by conformance.
 
+#### 1.9.2 The road to Vulkan 1.4 conformance
+
+§1.9.1's own framing decision -- "Conformance target version... This
+decision should be made before C1" -- was answered by keeping 1.2
+throughout C1-C8. Roadmap D0 revisits it: the advertised `apiVersion` is
+now `VK_API_VERSION_1_4`, ahead of C1-C8's own discipline of only
+advertising a version once its mandatory surface was actually
+implemented (1.0 -> 1.1 -> 1.2 each happened that way; 1.2 -> 1.4 did
+not). This section is the plan that inversion now needs, mirroring
+§1.9.1's own shape but starting from an honest accounting of what a
+version-ahead-of-implementation claim costs, measured rather than
+assumed.
+
+| # | Step | Owner | Priority |
+|---|---|---|---|
+| D0 | ~~**Advertise `VK_API_VERSION_1_4`, and fix whatever it immediately breaks.**~~ (done: `vkEnumerateInstanceVersion`/`VkPhysicalDeviceProperties::apiVersion` now report 1.4. This alone made `deqp-vk` exercise `VK_KHR_copy_commands2`'s six commands for the first time -- they have no feature-bit gate of their own, so a device claiming `apiVersion >= 1.3` is assumed to implement them unconditionally -- and neither the pre-promotion `KHR`-suffixed names nor the promoted core names existed in this ICD at all, producing a real segfault. Fixed as part of this same step: all six now delegate to their already-implemented, already-tested non-`2` counterparts. A second, distinct crash was found and left open by this step -- see D2) | `feme/lib/Vulkan/{EntryPoints,PhysicalDeviceInfo,CommandBuffer}.cpp`, `vk_gen_entrypoints.py`; VulkanCTSReport.md's "Roadmap D0: measured impact" | P0 |
+| D1 | **An accurate 1.3/1.4 mandatory-feature/limit/extension inventory.** `vk_gen_entrypoints.py`'s `CORE_FEATURES` now resolves through `VK_VERSION_1_3` (D0), but `VK_VERSION_1_4` is not yet included, and no promoted-1.3/1.4 feature struct (`VkPhysicalDeviceVulkan13Features`/`Vulkan14Features` and their per-extension originals -- `dynamicRendering` is already advertised via its pre-promotion `VK_KHR_dynamic_rendering` path, but `synchronization2`, `maintenance4`/`5`/`6`, `subgroupSizeControl`, `shaderIntegerDotProduct`, `pipelineCreationCacheControl`, `pushDescriptor`, and the rest are not) has been audited against what claiming 1.4 actually requires. This is D0's own "measure honestly" step turned into a checklist: enumerate the full set from `vk.xml` itself (the same way `vk_gen_entrypoints.py` already resolves `CORE_FEATURES` transitively), rather than re-deriving it by hand the way C6 did for 1.2's much shorter list | `feme/utils/vk_gen_entrypoints.py`, `feme/lib/Vulkan/PhysicalDeviceInfo.cpp` | P0 |
+| D2 | **The system Vulkan loader crash D0's second CTS pass found.** `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`, run as one sequence, segfaults inside Ubuntu's `libvulkan1` (`vkGetDeviceProcAddr`, called from concurrent `vkCreateDevice`s) -- not inside any FeMe code, and does not reproduce against the pre-D0 (apiVersion 1.2) build. Characterize further (does it reproduce with a *smaller* `apiVersion`-dependent entrypoint table than 1.4's full one? does a newer/older `libvulkan1` avoid it?) and, if confirmed as a loader bug rather than something this ICD's own dispatch-table generation can influence, file it upstream rather than attempt a local workaround in a component this project does not own | VulkanCTSReport.md's "Roadmap D0: measured impact" | P1 |
+| D3 | **Per-bucket attribution of D0's net +2,553 newly-failing cases**, at C1-C8's level of rigor. One bucket is already traced (`ubo.*.std430`'s 2,650 cases: a pre-existing, already-tracked `feme-cpu-simdize` divergent-vector-decomposition gap, C3's own "milestone 7 deviation", newly *reached* rather than newly created); `spirv_assembly.instruction.compute` (417), `synchronization.op.{multi,single}_queue` (277), and the remaining tail are not yet traced | VulkanCTSReport.md's "Roadmap D0: measured impact" | P1 |
+| D4 | **Continuous, crash-tolerant measurement**, generalizing roadmap C10: this pass's own two full runs each needed a hand-rolled Python pass over raw `.log` files to diff two runs' actual per-case result sets against each other, since a single crashed group's totals silently corrupt naive count-only comparisons (see D0's own "diffing the two runs' actual per-case result sets, not just the aggregate counts" step) | `feme/utils`, `feme/test/Vulkan` | P1 |
+
+Sequencing: D1 first (an inventory is a prerequisite for every subsequent
+1.3/1.4 feature-implementation row this section will eventually need, none
+of which are listed yet since D1 hasn't produced them), D2 and D3 alongside
+it (independent of D1, and each already has a concrete lead), D4 whenever
+time allows since it only pays off on the *next* full run. Every row this
+section will need beyond D1's own inventory -- implementing
+`synchronization2`, `maintenance4`/`5`/`6`, `dynamicRendering`'s core
+(non-`KHR`) names, and the rest of §1.9.2's actual conformance-floor work
+-- is deliberately not listed yet, the same way C1-C8's own rows were not
+listed until §1.9.1 existed to schedule them against a similarly-measured
+baseline.
+
 ### 1.10 Direct3D software adapter
 
 Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md). Nothing exists.

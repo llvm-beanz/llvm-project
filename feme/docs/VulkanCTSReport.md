@@ -7,37 +7,40 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `26193b63545c` (roadmap C7, "Queue family capability
-  combinations" -- see "Roadmap C7: measured impact" below).
+- FeMe revision: `2f27e5bd85a5` (roadmap D0, "advertise apiVersion 1.4" +
+  "implement VK_KHR_copy_commands2's core names" -- see "Roadmap D0:
+  measured impact" below).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-412-g716301541136` plus two local
   fixes (`7163015`, "Guard `dEQP-VK.api.invariance.random` against empty
-  image format lists"; and a second one added by this pass, "Check
-  `VK_KHR_copy_commands2` support in
+  image format lists"; and a second one added by roadmap C7's own pass,
+  "Check `VK_KHR_copy_commands2` support in
   `image_to_image_transfer_queue.misc.ms_then_ss*`" -- see "Deviations from
   a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1506 passed, 1 unsupported.
+- `check-feme`: 1518 passed, 1 unsupported.
 
 ## Headline
 
-The table below is unchanged from the last full 54-group run (before
-roadmap C7); a full re-run was not practical in the time available for
-this pass (see roadmap C10). "Roadmap C7: measured impact" below instead
-re-runs, before and after, exactly the groups this row's own change could
-affect.
+This is a genuine full 54-group re-run (unlike roadmap C7's own targeted
+groups-only re-run) -- the first since roadmap C1 -- taken *after* both D0
+commits (the apiVersion bump and the copy_commands2 fix it made
+necessary). See "Roadmap D0: measured impact" below for the before/after
+comparison against the previous (apiVersion 1.2) edition of this table.
 
 | | Count | Share |
 |---|---|---|
-| Total cases | 3,237,000 | |
-| Passed | 10,560 | 0.33% |
-| Failed | 27,018 | 0.83% |
-| Not supported | 3,199,421 | 98.84% |
+| Total cases | 3,236,772 (of 3,237,000 possible: see below) | |
+| Passed | 11,040 | 0.34% |
+| Failed | 29,647 | 0.92% |
+| Not supported | 3,196,084 | 98.74% |
 | Quality warning | 1 | |
-| **Crashed / timed out** | **0** | |
+| **Crashed / timed out** | **1 group (`api`), 228 cases short** | |
 
-All 54 top-level `dEQP-VK.<group>.*` groups run to completion. 28 of the 54
-have **zero** failures (`conditional_rendering`, `cooperative_vector`,
+53 of the 54 top-level `dEQP-VK.<group>.*` groups run to completion; `api`
+aborts partway through on a genuine `SIGSEGV`, unrelated to any FeMe code
+(see "Roadmap D0: measured impact"). 28 of the 54 groups have **zero**
+failures (`conditional_rendering`, `cooperative_vector`,
 `data_graph`, `depth`, `descriptor_indexing`, `dgc`,
 `drm_format_modifiers`, `fragment_shader_interlock`,
 `fragment_shading_barycentric`, `fragment_shading_rate`, `geometry`,
@@ -823,11 +826,129 @@ arrays of combined image samplers, and the remaining unhandled-opcode/
 diagnostic tail -- remains open, unmeasured beyond this `glsl` group, and
 is not moved by this row.**
 
+## Roadmap D0: measured impact
+
+Roadmap D0 (see Roadmap.md's new §1.9.2, "The road to Vulkan 1.4
+conformance") bumped `vkEnumerateInstanceVersion`/
+`VkPhysicalDeviceProperties::apiVersion` from `VK_API_VERSION_1_2` to
+`VK_API_VERSION_1_4`, deliberately *ahead of* implementing 1.3/1.4's
+mandatory feature/limit/extension floor -- the opposite of every previous
+version bump (1.0 -> 1.1 -> 1.2), each of which happened only once the
+newly-claimed version's mandatory surface was actually real. This section
+measures what that inversion costs on its own, before any of §1.9.2's
+D1-onward rows land.
+
+**First measurement (apiVersion 1.4, `vkCmdCopyBuffer2` unimplemented):**
+a full 54-group run crashed for the first time ever recorded by this
+report -- `Crashed / timed out: 0` in every previous edition, including
+the un-versioned-bump baseline this run is compared against. The `api`
+group segfaulted at
+`dEQP-VK.api.copy_and_blit.copy_commands2.buffer_to_buffer.partial`,
+after only 19,424 of its cases. `gdb`'s backtrace showed the crash inside
+`vkt::api::(anonymous namespace)::CopyBufferToBuffer::iterate()`, calling
+through a null function pointer (frame 0 is address `0x0`). Root cause:
+`VK_KHR_copy_commands2`'s six commands (`vkCmdCopyBuffer2` and its
+five siblings) have **no** `VkPhysicalDevice*Features` opt-in bit --
+unlike almost everything else this ICD advertises, a client is entitled
+to call them unconditionally once `apiVersion >= VK_API_VERSION_1_3`, and
+this ICD had implemented neither the pre-promotion `KHR`-suffixed names
+nor the promoted core names for any of the six. Confirmed this was
+genuinely new, not a pre-existing gap merely reached for the first time
+by chance: reverting just `EntryPoints.cpp`/`PhysicalDeviceInfo.cpp` to
+their pre-D0 (apiVersion 1.2) contents and rebuilding only `feme_vulkan`
+(same build tree, ccache-shared) made the identical `deqp-vk` invocation
+pass cleanly instead -- at 1.2, `deqp-vk`'s own function-loading declines
+to call either name at all, correctly reporting `NotSupported` instead,
+exactly as every prior edition of this report recorded.
+
+**The fix**: implement all six `vkCmd*2` commands as thin wrappers that
+unwrap each command's `pNext`-extensible `..Info2` struct and delegate to
+the identical logic its already-implemented, already-tested non-`2`
+counterpart calls (`feme/lib/Vulkan/CommandBuffer.cpp`), and extend
+`vk_gen_entrypoints.py`'s `CORE_FEATURES` to resolve `VK_VERSION_1_3` so
+the promoted core names exist in the generated table at all (mirroring
+the precedent `VK_VERSION_1_2` already set for the 1.1 -> 1.2 bump). With
+the fix applied, `dEQP-VK.api.copy_and_blit.copy_commands2.*` (34,956
+cases) runs to completion: 20 pass, 0 fail, 0 crash, the rest correctly
+`NotSupported` on an unadvertised format/sample-count -- the same clean
+shape every other command in this ICD already produces.
+
+**Second measurement, with the copy_commands2 fix applied**: a second
+full 54-group run still did not reach `Crashed / timed out: 0`. The `api`
+group progressed much further this time (266,994 of its cases, versus
+19,424 before the fix) before a *different* `SIGSEGV`, reproducible
+standalone as `dEQP-VK.api.object_management.multithreaded_per_thread_
+resources.*` run as one sequence (it does not reproduce running
+`...device_group` alone, only after the sequence's earlier cases have
+run). `gdb`'s backtrace is entirely inside the system Vulkan loader
+(`/lib/aarch64-linux-gnu/libvulkan.so.1`, Ubuntu's `libvulkan1`
+1.3.275.0), inside `vkGetDeviceProcAddr`, called from
+`vk::DeviceDriver`'s constructor while multiple `ThreadGroupThread`s each
+construct their own `VkDevice` concurrently -- no FeMe code appears
+anywhere in the backtrace. Reran the identical case sequence against the
+pre-D0 (apiVersion 1.2) build: it passes, 47/47, with no crash. This
+does not prove D0 caused it in the sense of introducing a bug in FeMe's
+own code (the crashing frames are entirely inside the system loader, a
+third-party component this project does not own or build); the more
+likely mechanism is that a higher advertised apiVersion makes the
+loader's own per-device dispatch table larger (it must resolve more core
+command names per `vkCreateDevice`), making a latent loader-side
+concurrency bug more likely to trigger under this specific stress test's
+concurrent device creation, not a bug this ICD's own code can fix.
+**Left open, unfixed, and un-upstreamed** (unlike the C9 CTS-side fix,
+there is no local patch for this either, since it lives in a system
+package rather than this tree's own CTS checkout) -- tracked as
+Roadmap.md's D2. The `api` group's totals in this report's "Headline"
+table above are therefore the partial counts up through this crash
+(266,994 of `api`'s own cases), not `api`'s full total.
+
+**Net effect on the headline, comparing this edit's full run to the
+previous (apiVersion 1.2) full edition**: 11,040 passed (+480), 29,647
+failed (+2,629), 3,196,084 not supported (roughly flat once the `api`
+group's shortfall is accounted for). Diffing the two runs' actual
+per-case result sets (not just the aggregate counts) shows 4,552 cases
+newly `Fail` and 1,999 no longer `Fail` (net +2,553, matching the
+aggregate delta once `api`'s own shortfall is subtracted). This is
+**not** the `vulkan1p*_consistency`/`device_mandatory_features` shape
+guessed at first -- `dEQP-VK.info.*` itself only gained two new
+failures (`device_mandatory_features`, `device_properties`). Tracing the
+single largest newly-failing bucket instead
+(`dEQP-VK.ubo.single_basic_type.std430.*` and its four `*_array`/
+`random` siblings, 2,650 of the 4,552) to its actual cause: at apiVersion
+1.2, every one of these reported `NotSupported ("std430 not supported at
+vktUniformBlockCase.cpp:2679")` -- `deqp-vk`'s own
+`UniformBlockCase::checkSupport` short-circuited before ever generating a
+shader. At 1.4, the identical case instead reaches
+`vkCreateGraphicsPipelines`/`vkCreateComputePipelines` for the first time
+and fails there, with `feme-cpu-simdize`'s own long-known diagnostic:
+"divergent vector value ... used outside a supported ... pattern;
+component decomposition is not yet supported" -- exactly roadmap C3's own
+already-tracked, already-diagnosed "milestone 7 deviation" gap (see
+"Roadmap C3: measured impact" above), not a new bug. `uniformBufferStandardLayout`
+was already truthfully advertised `true` since roadmap C6 (well before
+this session); what changed is that `deqp-vk`'s own `Context` helper only
+trusts a device's promoted-to-1.2 feature bits once the device's own
+apiVersion satisfies the corresponding version gate in the specific code
+path these cases take, which 1.2 itself did not exercise the same way 1.4
+does. This is exactly the shape §1.9.2's own framing predicted in the
+abstract ("most mandatory-capability gaps are themselves the reason a
+test fails rather than reports `NotSupported`") -- now confirmed concretely
+for one bucket, rather than merely asserted. The remaining newly-failing
+buckets (`spirv_assembly.instruction.compute`, 417;
+`synchronization.op.{multi,single}_queue`, 277;
+`pipeline.monolithic.bind_buffers_2`, 57; and a long tail) were not
+individually traced this pass -- that per-bucket attribution, at C1-C8's
+level of rigor, is exactly what §1.9.2's D3 schedules next, once D1's
+mandatory-gap inventory gives it a checklist to work against rather than
+a diagnostic-log grep.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
 capability it needs is genuinely optional. The bulk of this run's
-`NotSupported` mass is exactly that:
+`NotSupported` mass is exactly that (breakdown carried over from the
+pre-D0 edition of this report; re-deriving it against this pass's own run
+is left to whichever roadmap D-row next needs it):
 
 | Cases | Reason |
 |---:|---|
@@ -835,6 +956,7 @@ capability it needs is genuinely optional. The bulk of this run's
 | 313,141 | An unadvertised optional format (`Format not supported`, `... for sampling`, `... for transfer`, `Source format not supported`) |
 | 244,916 | An unadvertised combined depth/stencil format (`D16_UNORM_S8_UINT`, `D32_SFLOAT_S8_UINT`, `S8_UINT`) |
 | 113,737 | `VK_KHR_fragment_shading_rate` |
+
 | 107,866 | `VK_EXT_primitives_generated_query` |
 | ~~99,324~~ 0 | No queue family with the requested capability combination (closed by roadmap C7; see above) |
 | 91,516 | Cooperative matrix/vector |
