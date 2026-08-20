@@ -368,6 +368,21 @@ should be small and truthful; one queue is sufficient for the first
 milestone. Timestamp valid bits are zero until query timestamps are
 implemented. Graphics does not add a second family.
 
+Roadmap C7 ("Queue family capability combinations") added two more,
+narrower families: a `VK_QUEUE_TRANSFER_BIT`-only family and a
+`VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT`-only family (both excluding
+`VK_QUEUE_GRAPHICS_BIT`). Several mandatory `dEQP-VK` cases require a queue
+that excludes graphics (and, for the first of the two, compute as well),
+which no single universal family can ever satisfy by construction. Unlike
+"Expose a separate graphics queue family" below, neither of these invents
+an independent execution engine that does not exist: each only *restricts*
+what one logical submission queue promises to accept, and FeMe's single
+worker pool can honor that restriction regardless of how many queue
+families a caller sees. `feme::vulkan::PhysicalDeviceInfo::NumQueueFamilies`
+(currently 3) and `QueueFamilies` are the source of truth; every command
+that used to hardcode "queue family index 0 is the only one" now checks
+against that count instead.
+
 ### Subgroup size
 
 Core Vulkan 1.1 requires a single `VkPhysicalDeviceSubgroupProperties::subgroupSize`
