@@ -570,6 +570,64 @@ void fillFeatures2Chain(void *pNext) {
       Features->subgroupBroadcastDynamicId = VK_TRUE;
       break;
     }
+    // (roadmap E1) The aggregate `VkPhysicalDeviceVulkan13Features` struct:
+    // every member is written explicitly, true or false, for the same
+    // guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_
+    // FEATURES` above documents. `dynamicRendering` is the one bit this ICD
+    // genuinely implements (RenderPass.cpp/GraphicsPipeline.cpp) -- see the
+    // dedicated `VK_KHR_dynamic_rendering` struct case below, which this
+    // must agree with; every other 1.3 bit remains unimplemented.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceVulkan13Features *>(Base);
+      Features->robustImageAccess = VK_FALSE;
+      Features->inlineUniformBlock = VK_FALSE;
+      Features->descriptorBindingInlineUniformBlockUpdateAfterBind = VK_FALSE;
+      Features->pipelineCreationCacheControl = VK_FALSE;
+      Features->privateData = VK_FALSE;
+      Features->shaderDemoteToHelperInvocation = VK_FALSE;
+      Features->shaderTerminateInvocation = VK_FALSE;
+      Features->subgroupSizeControl = VK_FALSE;
+      Features->computeFullSubgroups = VK_FALSE;
+      Features->synchronization2 = VK_FALSE;
+      Features->textureCompressionASTC_HDR = VK_FALSE;
+      Features->shaderZeroInitializeWorkgroupMemory = VK_FALSE;
+      Features->dynamicRendering = VK_TRUE;
+      Features->shaderIntegerDotProduct = VK_FALSE;
+      Features->maintenance4 = VK_FALSE;
+      break;
+    }
+    // (roadmap E1) The aggregate `VkPhysicalDeviceVulkan14Features` struct:
+    // no 1.4-introduced bit is implemented yet, so every member is an
+    // explicit `VK_FALSE` for the same guard-pattern reason documented
+    // above -- mirroring `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_
+    // FEATURES`'s all-false case rather than 1.2/1.3's mixed one.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceVulkan14Features *>(Base);
+      Features->globalPriorityQuery = VK_FALSE;
+      Features->shaderSubgroupRotate = VK_FALSE;
+      Features->shaderSubgroupRotateClustered = VK_FALSE;
+      Features->shaderFloatControls2 = VK_FALSE;
+      Features->shaderExpectAssume = VK_FALSE;
+      Features->rectangularLines = VK_FALSE;
+      Features->bresenhamLines = VK_FALSE;
+      Features->smoothLines = VK_FALSE;
+      Features->stippledRectangularLines = VK_FALSE;
+      Features->stippledBresenhamLines = VK_FALSE;
+      Features->stippledSmoothLines = VK_FALSE;
+      Features->vertexAttributeInstanceRateDivisor = VK_FALSE;
+      Features->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
+      Features->indexTypeUint8 = VK_FALSE;
+      Features->dynamicRenderingLocalRead = VK_FALSE;
+      Features->maintenance5 = VK_FALSE;
+      Features->maintenance6 = VK_FALSE;
+      Features->pipelineProtectedAccess = VK_FALSE;
+      Features->pipelineRobustness = VK_FALSE;
+      Features->hostImageCopy = VK_FALSE;
+      Features->pushDescriptor = VK_FALSE;
+      break;
+    }
     // (V6) `VK_KHR_dynamic_rendering`'s own feature struct, whose 1.3 core
     // and `KHR` spellings share one `sType`.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES: {

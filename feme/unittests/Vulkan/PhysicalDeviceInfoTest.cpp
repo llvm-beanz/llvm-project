@@ -322,6 +322,81 @@ TEST_F(PhysicalDeviceProperties2Test,
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
+       DynamicRenderingIsAdvertisedThroughAggregateVulkan13Features) {
+  // Roadmap E1: `VkPhysicalDeviceVulkan13Features.dynamicRendering` must
+  // agree with the dedicated `VK_KHR_dynamic_rendering` struct case above
+  // it -- pre-filled with a non-zero pattern first (the same
+  // unwritten-field guard `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten`
+  // below uses) so every other 1.3 bit's explicit `VK_FALSE` is verified
+  // rather than merely a pre-existing zero.
+  VkPhysicalDeviceVulkan13Features Features13;
+  std::memset(&Features13, 0xAA, sizeof(Features13));
+  Features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+  Features13.pNext = nullptr;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Features13;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Features13.dynamicRendering, VK_TRUE);
+  EXPECT_EQ(Features13.robustImageAccess, VK_FALSE);
+  EXPECT_EQ(Features13.inlineUniformBlock, VK_FALSE);
+  EXPECT_EQ(Features13.descriptorBindingInlineUniformBlockUpdateAfterBind,
+            VK_FALSE);
+  EXPECT_EQ(Features13.pipelineCreationCacheControl, VK_FALSE);
+  EXPECT_EQ(Features13.privateData, VK_FALSE);
+  EXPECT_EQ(Features13.shaderDemoteToHelperInvocation, VK_FALSE);
+  EXPECT_EQ(Features13.shaderTerminateInvocation, VK_FALSE);
+  EXPECT_EQ(Features13.subgroupSizeControl, VK_FALSE);
+  EXPECT_EQ(Features13.computeFullSubgroups, VK_FALSE);
+  EXPECT_EQ(Features13.synchronization2, VK_FALSE);
+  EXPECT_EQ(Features13.textureCompressionASTC_HDR, VK_FALSE);
+  EXPECT_EQ(Features13.shaderZeroInitializeWorkgroupMemory, VK_FALSE);
+  EXPECT_EQ(Features13.shaderIntegerDotProduct, VK_FALSE);
+  EXPECT_EQ(Features13.maintenance4, VK_FALSE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       Vulkan14FeaturesAreExplicitlyFalseNotLeftUnwritten) {
+  // Roadmap E1: no 1.4-introduced feature bit is implemented yet, so every
+  // member of the aggregate struct must still be an explicit `VK_FALSE`,
+  // guarded the same way `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten`
+  // below guards `VkPhysicalDeviceMultiviewFeatures`.
+  VkPhysicalDeviceVulkan14Features Features14;
+  std::memset(&Features14, 0xAA, sizeof(Features14));
+  Features14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
+  Features14.pNext = nullptr;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Features14;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(Features14.globalPriorityQuery, VK_FALSE);
+  EXPECT_EQ(Features14.shaderSubgroupRotate, VK_FALSE);
+  EXPECT_EQ(Features14.shaderSubgroupRotateClustered, VK_FALSE);
+  EXPECT_EQ(Features14.shaderFloatControls2, VK_FALSE);
+  EXPECT_EQ(Features14.shaderExpectAssume, VK_FALSE);
+  EXPECT_EQ(Features14.rectangularLines, VK_FALSE);
+  EXPECT_EQ(Features14.bresenhamLines, VK_FALSE);
+  EXPECT_EQ(Features14.smoothLines, VK_FALSE);
+  EXPECT_EQ(Features14.stippledRectangularLines, VK_FALSE);
+  EXPECT_EQ(Features14.stippledBresenhamLines, VK_FALSE);
+  EXPECT_EQ(Features14.stippledSmoothLines, VK_FALSE);
+  EXPECT_EQ(Features14.vertexAttributeInstanceRateDivisor, VK_FALSE);
+  EXPECT_EQ(Features14.vertexAttributeInstanceRateZeroDivisor, VK_FALSE);
+  EXPECT_EQ(Features14.indexTypeUint8, VK_FALSE);
+  EXPECT_EQ(Features14.dynamicRenderingLocalRead, VK_FALSE);
+  EXPECT_EQ(Features14.maintenance5, VK_FALSE);
+  EXPECT_EQ(Features14.maintenance6, VK_FALSE);
+  EXPECT_EQ(Features14.pipelineProtectedAccess, VK_FALSE);
+  EXPECT_EQ(Features14.pipelineRobustness, VK_FALSE);
+  EXPECT_EQ(Features14.hostImageCopy, VK_FALSE);
+  EXPECT_EQ(Features14.pushDescriptor, VK_FALSE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
        MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten) {
   // Roadmap C6: `multiview` cannot be honestly advertised yet (layered
   // rendering is V7), but every field must still be an explicit `VK_FALSE`
