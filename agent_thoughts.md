@@ -23420,3 +23420,181 @@ Recorded as a new dated addendum in `VulkanCTSReport.md` rather than a full
 re-run, matching this file's own prior-session precedent for a
 methodology-preserving spot check instead of overwriting the headline
 numbers with a differently-isolated quick pass.
+
+# Session: SPIR-V `spirv.Image`/`spirv.VulkanBuffer` unsupported when targeting AMDGPU
+
+Continuation of the same bilateral-filter HLSL compute shader (`Texture2D
+InputTexture`, `RWTexture2D<float4> OutputTexture`, a `cbuffer` of `half`
+`SpatialScale`/`ColorScale`, an `[unroll]`ed 9x9 tap loop) the prior
+"`spirv.Switch`" session got past three `SPIRVToLLVMPatterns.cpp`
+legalization failures on. This session's reported error was one step
+further down the same `dxc -T cs_6_8 -spirv` -> `feme
+--target=amdgpu9.0a-amd-amdhsa` pipeline:
+
+```
+feme: resource handle type 'spirv.Image' is not supported when
+targeting 'amdgpu9.0a-amd-amdhsa' (produced in function 'main')
+```
+
+## Reproducing and diagnosing
+
+Compiled the exact shader from the request with the exact `dxc` command
+line given (`-T cs_6_8 -Fo <out> -spirv`, no other flags -- also checked
+`-enable-16bit-types` explicitly, since the shader uses `half`; both
+compile and both hit the same bug) and reproduced the assert with `feme`
+built from `./build` (already configured with `LLVM_ENABLE_PROJECTS=feme;
+mlir`, `LLVM_CCACHE_BUILD=ON`, `LLVM_ENABLE_ASSERTIONS=ON`, ccache).
+
+`feme` itself has no flag to dump intermediate IR, so I rebuilt the raised
+LLVM IR the same way `feme`'s own pipeline would internally, using
+`feme-translate`'s individual translation steps chained through temp
+files (`--import-spirv` to get the `spirv` dialect, then
+`--no-implicit-module --spirv-to-llvmir` on that -- the two have to be
+separate invocations with `--no-implicit-module` on the second, since
+`spirv-to-llvmir`'s own translation registration asserts on a
+`spirv.module` op and MLIR's default parsing wraps a re-read `.mlir` file
+in an outer `builtin.module`). This confirmed exactly what the raised IR
+looked like at the point `feme::amdgpu::ResourceLoweringPass` runs:
+
+- `Texture2D<T>::Load(int3(coord, 0))` -- used eleven times in the tap
+  loop's unrolled body plus once for `center` -- became
+  `llvm.spv.resource.load.level(%handle, <2 x i32> %coord, i32 0,
+  <2 x i32> zeroinitializer)`, not the `llvm.spv.resource.getpointer` +
+  plain `load` pair `ResourceLoweringPass`'s SPIR-V path already handled.
+- `OutputTexture[pixel] = ...` did produce `llvm.spv.resource.getpointer`,
+  but with a `<2 x i32>` coordinate -- `ResourceLoweringPass::
+  lowerSPIRVAccess` GEP'd that vector directly against a scalar `ptr`
+  argument instead of linearizing it, which is not a crash by itself
+  (LLVM allows a vector GEP index against a scalar pointer, producing a
+  vector of pointers) but is silently the wrong address entirely; only
+  `Texture2D::Load`'s different intrinsic shape happened to be what
+  actually tripped the assert first.
+- The `cbuffer FilterParameters` reached this pass as a *third*,
+  previously unmodeled handle type entirely: `target("spirv.VulkanBuffer",
+  { float, float }, 2, 0)`, not `spirv.Image` -- SPIR-V lowers a `cbuffer`
+  to a Uniform-storage-class buffer, not an image, so it gets its own
+  handle type. Its own access shape (`llvm.spv.resource.getpointer`
+  addressing one field, read through a single `load`) turned out to
+  already match the existing 1D `Buffer`-dimension `spirv.Image` code path
+  exactly, so this needed no new lowering logic, just a new
+  `AllResourceOps` table entry disambiguated by handle type name (the
+  same trick `dx.Texture`/`dx.CBuffer` already use to share
+  `llvm.dx.resource.handlefrombinding` without colliding).
+
+Cross-checking `ResourceLoweringPass`'s existing SPIR-V test
+(`amdgpu-lower-resources-spirv.ll`) confirmed the diagnosis: every case in
+it uses `target("spirv.Image", float, 5, ...)` -- SPIR-V `Dim` 5 is
+`Buffer` -- i.e. the pass had only ever been exercised against a flat,
+1D-coordinate resource (`Buffer`/`RWBuffer`), never a genuine 2D/3D
+`Texture`/`RWTexture`, and never a cbuffer at all.
+
+## Fix
+
+Two small, separately-tested, separately-committed changes to
+`feme/lib/Transforms/AMDGPU/ResourceLowering.cpp`, mirroring the exact
+shape the file's own `dx.Texture`/`dx.CBuffer` support already uses for
+the analogous DX-side problem:
+
+1. `spirv.Image` coordinates: added `getSPIRVImageCoordComponents`
+   (mirrors `getTextureCoordComponents`, keyed off the handle's `Dim` type
+   parameter -- `Dim1D`/`Dim2D`/`Dim3D`/`Buffer` get 1/2/3/1 coordinate
+   components, anything else -- `Cube`/`Rect`/array/`SubpassData` -- is
+   left unmodeled the same "leave the whole binding untouched" way an
+   unsupported `dx.Texture` dimension already is). A `spirv.Image` binding
+   of more than one coordinate component now gets the same per-extra-
+   dimension addressing-stride kernel argument (`Binding::NumAuxArgs`) a
+   multi-dimensional `dx.Texture` binding already does. Extracted the
+   coordinate-decomposition-and-linearization logic `lowerDXTextureAccess`
+   already had into a shared `linearizeCoordinate` helper, since the shape
+   (`coord0 + coord1*stride0 + coord2*stride1 + ...`) is identical for
+   both formats once each one's own access op is unwrapped down to
+   "coordinate, strides, element type" -- rather than duplicating it for
+   the SPIR-V side.
+2. `llvm.spv.resource.load.level`: added to `hasOnlySupportedUses` (its
+   own arg0-is-the-handle check, no per-use restriction on its result --
+   mirroring `dx.Texture`'s `llvm.dx.resource.load.level`, whose result
+   likewise *is* the loaded value rather than a pointer some other
+   instruction reads through) and `getElementType` (reads the call's own
+   return type directly, same reasoning), and `lowerSPIRVAccess` now
+   branches on it vs. `getpointer` after computing the shared linearized
+   index, replacing the call with a fresh aligned load instead of
+   repointing some other instruction's pointer operand.
+3. `spirv.VulkanBuffer`: one new `AllResourceOps` entry
+   (`SPIRVCBufferResourceOps`, same `ResourceFamily::SPIRV` as
+   `spirv.Image`, disambiguated by handle type name only -- matching how
+   `DXTextureResourceOps`/`DXCBufferResourceOps` already share `DX`'s
+   intrinsic ID with `DXResourceOps`). `collectBindings`' new Dim-based
+   `NumAuxArgs` computation is deliberately gated on the handle type name
+   being `spirv.Image` specifically, not `Family == SPIRV` alone: a
+   `spirv.VulkanBuffer` handle's identically-positioned first int
+   parameter means something unrelated (a storage-class/writability flag,
+   not `Dim`), so blindly reusing the `Dim`-keyed logic for it would have
+   read that flag as a dimension and miscomputed a stride-argument count
+   for a resource that needs none.
+
+Deliberately did *not* add `spirv.Image`'s own `GetDimensions` support
+(`llvm.spv.resource.getdimensions.*`) in this pass -- the shader's own
+`GetDimensions(width, height)` call is commented out in favor of a
+hardcoded `2048x2048`, so nothing in the reported bug needs it, and adding
+it would be scope creep beyond "fix the reported assert". A shader that
+does call it is still left safely unrewritten (the existing "leave what
+this pass cannot model alone" fallback), not miscompiled; documented as a
+known limitation in `Design.md` and left for a future change.
+
+## Tests
+
+- `amdgpu-lower-resources-spirv-image2d.ll`: a 2D `Texture2D`/
+  `RWTexture2D` read/write pair (checks the exact linearized-GEP shape,
+  including operand order/aliasing of the shared `%coord` vector across
+  both accesses) plus a `Cube`-dimension regression case confirming an
+  unmodeled `Dim` is still left untouched rather than partially rewritten
+  or miscompiled.
+- `amdgpu-lower-resources-spirv-cbuffer.ll`: a two-field `cbuffer` read
+  through `spirv.VulkanBuffer`, checking the plain per-field GEP shape
+  (address space 12 folded away into the ordinary kernel `ptr
+  addrspace(1)`, same as `spirv.Image`'s own `getpointer` path already
+  does).
+- `feme-spirv-to-amdgpu-image2d.mlir`: a hand-written `spirv` dialect
+  module (2D `Texture2D` read via `spirv.ImageFetch` with a lone `Lod`
+  operand, 2D `RWTexture2D` write via `spirv.ImageWrite`) compiled all the
+  way to a real gfx9 object file through the actual `feme` CLI --
+  mirroring the existing `feme-spirv-to-amdgpu.mlir`'s `Buffer`-only
+  coverage, checking the output's ELF magic number the same way that test
+  does.
+- Re-verified the user's *exact* repro command (`dxc -T cs_6_8 -Fo <out>
+  -spirv`, then `feme --target=amdgpu9.0a-amd-amdhsa`) now exits 0 and
+  produces a real object file (`llvm-objdump -d` on it shows genuine gfx9
+  instructions -- `v_mad_u64_u32`, `v_med3_i32` for the `clamp()` calls,
+  etc. -- not just a non-empty file), for both the plain command line and
+  the `-enable-16bit-types` variant.
+- `ninja check-feme`: 1495/1496 passed, 1 unsupported (pre-existing,
+  unrelated to this change -- present before it too), verified after each
+  of the two `ResourceLowering.cpp` commits individually (temporarily
+  staging the not-yet-applicable test file aside and reverting the
+  `AllResourceOps` table/`collectBindings` comment to confirm the first
+  commit's state builds and passes standalone, then restoring both for the
+  second commit -- re-running the exact repro shader after the first
+  commit alone confirmed it still failed, now on `spirv.VulkanBuffer`
+  instead of `spirv.Image`, proving the split was real rather than
+  cosmetic).
+
+## Vulkan CTS
+
+Per this file's and `VulkanCTSReport.md`'s own established precedent for
+an AMDGPU-only change (see the "DXIL `GetDimensions.xy`/AMDGPU" and "DXIL
+SM6.9 `FDot`/AMDGPU" addenda), checked whether `feme::amdgpu::
+ResourceLoweringPass` is reachable from `libfeme_vulkan` before deciding
+whether a CTS run was warranted at all, rather than running (or skipping)
+one by assumption. It is not: `grep -rl amdgpu feme/lib/Vulkan/
+feme/include/feme/Vulkan/` and a `CMakeLists.txt` search under
+`feme/tools/feme-vulkan` both found nothing, and -- a stronger check than
+either of those two prior addenda's own smoke-test spot checks used --
+`ninja lib/libfeme_vulkan.so` in `./build` reported `ninja: no work to do`
+both immediately after the first commit and again after the second,
+meaning Ninja's own dependency graph agrees the shared library did not
+need relinking. A `dEQP-VK` run (of any size) against an unchanged binary
+can only ever reproduce `VulkanCTSReport.md`'s existing headline numbers
+verbatim, at the multi-hour cost its own "Reproducing this report"
+section describes, so none was performed; recorded as a new addendum in
+`VulkanCTSReport.md` explaining this reasoning (and the two checks that
+support it) instead.
