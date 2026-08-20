@@ -285,6 +285,145 @@ TEST_F(SyncTest, TimelineSemaphoreAcrossQueueSubmit) {
   vkDestroySemaphore(Device, Sem, nullptr);
 }
 
+// Roadmap E3: `vkQueueSubmit2`'s own end-to-end scenario, mirroring
+// `SubmitDispatchAndWaitOnFence` above through the `VkSubmitInfo2`/
+// `VkCommandBufferSubmitInfo` shape instead.
+TEST_F(SyncTest, QueueSubmit2DispatchAndWaitOnFence) {
+  VkFenceCreateInfo FenceInfo{};
+  VkFence Fence = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFence(Device, &FenceInfo, nullptr, &Fence), VK_SUCCESS);
+  EXPECT_EQ(vkGetFenceStatus(Device, Fence), VK_NOT_READY);
+
+  VkCommandBufferSubmitInfo CmdBufInfo{};
+  CmdBufInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+  CmdBufInfo.commandBuffer = CmdBuf;
+  VkSubmitInfo2 Submit{};
+  Submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+  Submit.commandBufferInfoCount = 1;
+  Submit.pCommandBufferInfos = &CmdBufInfo;
+  ASSERT_EQ(vkQueueSubmit2(Queue, 1, &Submit, Fence), VK_SUCCESS);
+
+  EXPECT_EQ(vkGetFenceStatus(Device, Fence), VK_SUCCESS);
+  EXPECT_EQ(vkWaitForFences(Device, 1, &Fence, VK_TRUE, UINT64_MAX),
+            VK_SUCCESS);
+
+  vkDestroyFence(Device, Fence, nullptr);
+}
+
+TEST_F(SyncTest, QueueSubmit2RejectsUnsignaledBinarySemaphore) {
+  // Mirrors `SubmitRejectsUnsignaledBinarySemaphore` above through
+  // `vkQueueSubmit2`'s `VkSemaphoreSubmitInfo` shape.
+  VkSemaphoreCreateInfo SemInfo{};
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  VkSemaphoreSubmitInfo WaitInfo{};
+  WaitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+  WaitInfo.semaphore = Sem;
+  VkCommandBufferSubmitInfo CmdBufInfo{};
+  CmdBufInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+  CmdBufInfo.commandBuffer = CmdBuf;
+  VkSubmitInfo2 Submit{};
+  Submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+  Submit.waitSemaphoreInfoCount = 1;
+  Submit.pWaitSemaphoreInfos = &WaitInfo;
+  Submit.commandBufferInfoCount = 1;
+  Submit.pCommandBufferInfos = &CmdBufInfo;
+  EXPECT_EQ(vkQueueSubmit2(Queue, 1, &Submit, VK_NULL_HANDLE),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+TEST_F(SyncTest, QueueSubmit2BinarySemaphoreSignalThenWaitSucceeds) {
+  VkSemaphoreCreateInfo SemInfo{};
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  VkCommandBufferSubmitInfo CmdBufInfo{};
+  CmdBufInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+  CmdBufInfo.commandBuffer = CmdBuf;
+  VkSemaphoreSubmitInfo SignalInfo{};
+  SignalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+  SignalInfo.semaphore = Sem;
+  VkSubmitInfo2 Signal{};
+  Signal.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+  Signal.commandBufferInfoCount = 1;
+  Signal.pCommandBufferInfos = &CmdBufInfo;
+  Signal.signalSemaphoreInfoCount = 1;
+  Signal.pSignalSemaphoreInfos = &SignalInfo;
+  ASSERT_EQ(vkQueueSubmit2(Queue, 1, &Signal, VK_NULL_HANDLE), VK_SUCCESS);
+
+  VkSemaphoreSubmitInfo WaitInfo{};
+  WaitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+  WaitInfo.semaphore = Sem;
+  VkSubmitInfo2 Wait{};
+  Wait.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+  Wait.waitSemaphoreInfoCount = 1;
+  Wait.pWaitSemaphoreInfos = &WaitInfo;
+  Wait.commandBufferInfoCount = 1;
+  Wait.pCommandBufferInfos = &CmdBufInfo;
+  EXPECT_EQ(vkQueueSubmit2(Queue, 1, &Wait, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // Consumed by the wait above: a second wait with nothing signaling it
+  // again must fail, exactly like `vkQueueSubmit`'s own test.
+  EXPECT_EQ(vkQueueSubmit2(Queue, 1, &Wait, VK_NULL_HANDLE),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
+TEST_F(SyncTest, QueueSubmit2TimelineSemaphoreSignalThenWait) {
+  // `VkSemaphoreSubmitInfo::value` unifies `vkQueueSubmit`'s split
+  // `VkSubmitInfo`/`VkTimelineSemaphoreSubmitInfo` shape into one field,
+  // used here for both the signal and the wait.
+  VkSemaphoreTypeCreateInfo TypeInfo{};
+  TypeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+  TypeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+  VkSemaphoreCreateInfo SemInfo{};
+  SemInfo.pNext = &TypeInfo;
+  VkSemaphore Sem = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateSemaphore(Device, &SemInfo, nullptr, &Sem), VK_SUCCESS);
+
+  VkCommandBufferSubmitInfo CmdBufInfo{};
+  CmdBufInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+  CmdBufInfo.commandBuffer = CmdBuf;
+  VkSemaphoreSubmitInfo SignalInfo{};
+  SignalInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+  SignalInfo.semaphore = Sem;
+  SignalInfo.value = 3;
+  VkSubmitInfo2 Signal{};
+  Signal.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+  Signal.commandBufferInfoCount = 1;
+  Signal.pCommandBufferInfos = &CmdBufInfo;
+  Signal.signalSemaphoreInfoCount = 1;
+  Signal.pSignalSemaphoreInfos = &SignalInfo;
+  ASSERT_EQ(vkQueueSubmit2(Queue, 1, &Signal, VK_NULL_HANDLE), VK_SUCCESS);
+
+  uint64_t Value = 0;
+  ASSERT_EQ(vkGetSemaphoreCounterValue(Device, Sem, &Value), VK_SUCCESS);
+  EXPECT_EQ(Value, 3u);
+
+  VkSemaphoreSubmitInfo WaitInfo{};
+  WaitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+  WaitInfo.semaphore = Sem;
+  WaitInfo.value = 3;
+  VkSubmitInfo2 Wait{};
+  Wait.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+  Wait.waitSemaphoreInfoCount = 1;
+  Wait.pWaitSemaphoreInfos = &WaitInfo;
+  Wait.commandBufferInfoCount = 1;
+  Wait.pCommandBufferInfos = &CmdBufInfo;
+  EXPECT_EQ(vkQueueSubmit2(Queue, 1, &Wait, VK_NULL_HANDLE), VK_SUCCESS);
+
+  // Not yet reached: the semaphore is still at 3.
+  WaitInfo.value = 4;
+  EXPECT_EQ(vkQueueSubmit2(Queue, 1, &Wait, VK_NULL_HANDLE),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroySemaphore(Device, Sem, nullptr);
+}
+
 TEST_F(SyncTest, HostEventSetResetStatus) {
   VkEventCreateInfo EventInfo{};
   VkEvent Ev = VK_NULL_HANDLE;

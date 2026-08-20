@@ -11,10 +11,65 @@
 #include "Icd.h"
 #include "Objects.h"
 
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/Support/Error.h"
 
 using namespace feme::vulkan;
 using namespace llvm;
+
+namespace {
+
+/// One semaphore wait or signal operation, shared by `vkQueueSubmit` and
+/// (roadmap E3) `vkQueueSubmit2`'s translation down to it: `Value` is only
+/// meaningful for a timeline semaphore (unifying `vkQueueSubmit`'s split
+/// `VkSubmitInfo`/`VkTimelineSemaphoreSubmitInfo` shape and
+/// `vkQueueSubmit2`'s single `VkSemaphoreSubmitInfo::value` with each
+/// other).
+struct SemaphoreOp {
+  Semaphore *Sem;
+  uint64_t Value;
+};
+
+/// Consumes every wait in \p Waits, in order, returning the first failure
+/// (see `Sync.h`'s file comment: a legally-ordered wait's semaphore is
+/// already signaled by the time this synchronous ICD sees it -- an
+/// unsignaled one is a real application ordering error).
+VkResult consumeWaits(ArrayRef<SemaphoreOp> Waits) {
+  for (const SemaphoreOp &Op : Waits) {
+    if (Op.Sem->isTimeline()) {
+      if (Op.Sem->timelineValue() < Op.Value)
+        return VK_ERROR_INITIALIZATION_FAILED;
+      continue;
+    }
+    if (!Op.Sem->waitAndConsumeBinary())
+      return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  return VK_SUCCESS;
+}
+
+/// Applies every signal in \p Signals, in order.
+void applySignals(ArrayRef<SemaphoreOp> Signals) {
+  for (const SemaphoreOp &Op : Signals) {
+    if (Op.Sem->isTimeline())
+      Op.Sem->signalTimeline(Op.Value);
+    else
+      Op.Sem->signalBinary();
+  }
+}
+
+/// Executes every command buffer in \p CommandBuffers, in order, returning
+/// the first failure if any (shared by `vkQueueSubmit`/`vkQueueSubmit2`).
+VkResult executeCommandBuffers(ArrayRef<CommandBuffer *> CmdBufs) {
+  for (CommandBuffer *CmdBuf : CmdBufs) {
+    if (Error E = executeCommandBuffer(*CmdBuf)) {
+      consumeError(std::move(E));
+      return VK_ERROR_INITIALIZATION_FAILED;
+    }
+  }
+  return VK_SUCCESS;
+}
+
+} // namespace
 
 namespace feme::vulkan {
 
@@ -91,40 +146,83 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue, uint32_t submitCount,
     // execution model, a legally-ordered wait's semaphore is already
     // signaled by the time this runs (see Sync.h's file comment) -- an
     // unsignaled one here is a real application ordering error.
+    std::vector<SemaphoreOp> Waits;
+    Waits.reserve(Submit.waitSemaphoreCount);
     for (uint32_t J = 0; J != Submit.waitSemaphoreCount; ++J) {
       auto *Sem = fromHandle<Semaphore>(Submit.pWaitSemaphores[J]);
-      if (Sem->isTimeline()) {
-        uint64_t Target = (TimelineInfo && J < TimelineInfo->waitSemaphoreValueCount)
-                              ? TimelineInfo->pWaitSemaphoreValues[J]
-                              : 0;
-        if (Sem->timelineValue() < Target)
-          return VK_ERROR_INITIALIZATION_FAILED;
-        continue;
-      }
-      if (!Sem->waitAndConsumeBinary())
-        return VK_ERROR_INITIALIZATION_FAILED;
+      uint64_t Target =
+          (TimelineInfo && J < TimelineInfo->waitSemaphoreValueCount)
+              ? TimelineInfo->pWaitSemaphoreValues[J]
+              : 0;
+      Waits.push_back({Sem, Target});
     }
+    if (VkResult R = consumeWaits(Waits); R != VK_SUCCESS)
+      return R;
 
-    for (uint32_t J = 0; J != Submit.commandBufferCount; ++J) {
-      auto *CmdBuf = fromHandle<CommandBuffer>(Submit.pCommandBuffers[J]);
-      if (Error E = executeCommandBuffer(*CmdBuf)) {
-        consumeError(std::move(E));
-        return VK_ERROR_INITIALIZATION_FAILED;
-      }
-    }
+    std::vector<vulkan::CommandBuffer *> CmdBufs;
+    CmdBufs.reserve(Submit.commandBufferCount);
+    for (uint32_t J = 0; J != Submit.commandBufferCount; ++J)
+      CmdBufs.push_back(fromHandle<CommandBuffer>(Submit.pCommandBuffers[J]));
+    if (VkResult R = executeCommandBuffers(CmdBufs); R != VK_SUCCESS)
+      return R;
 
+    std::vector<SemaphoreOp> Signals;
+    Signals.reserve(Submit.signalSemaphoreCount);
     for (uint32_t J = 0; J != Submit.signalSemaphoreCount; ++J) {
       auto *Sem = fromHandle<Semaphore>(Submit.pSignalSemaphores[J]);
-      if (Sem->isTimeline()) {
-        uint64_t NewValue =
-            (TimelineInfo && J < TimelineInfo->signalSemaphoreValueCount)
-                ? TimelineInfo->pSignalSemaphoreValues[J]
-                : Sem->timelineValue();
-        Sem->signalTimeline(NewValue);
-        continue;
-      }
-      Sem->signalBinary();
+      uint64_t NewValue =
+          Sem->isTimeline()
+              ? ((TimelineInfo && J < TimelineInfo->signalSemaphoreValueCount)
+                     ? TimelineInfo->pSignalSemaphoreValues[J]
+                     : Sem->timelineValue())
+              : 0;
+      Signals.push_back({Sem, NewValue});
     }
+    applySignals(Signals);
+  }
+  if (fence)
+    fromHandle<Fence>(fence)->signal();
+  return VK_SUCCESS;
+}
+
+// (Roadmap E3) `VK_KHR_synchronization2`'s `vkQueueSubmit2`: each wait/
+// signal semaphore and command buffer arrives wrapped in its own
+// `pNext`-extensible info struct instead of `vkQueueSubmit`'s parallel
+// arrays (see `EntryPoints.h`'s declaration), but translates down to the
+// identical `Fence`/`Semaphore`/`CommandBuffer` execution model above --
+// the same "new entrypoint, old backing model" pattern roadmap C7 used for
+// queue families.
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue, uint32_t submitCount,
+                                              const VkSubmitInfo2 *pSubmits,
+                                              VkFence fence) {
+  for (uint32_t I = 0; I != submitCount; ++I) {
+    const VkSubmitInfo2 &Submit = pSubmits[I];
+
+    std::vector<SemaphoreOp> Waits;
+    Waits.reserve(Submit.waitSemaphoreInfoCount);
+    for (uint32_t J = 0; J != Submit.waitSemaphoreInfoCount; ++J) {
+      const VkSemaphoreSubmitInfo &Info = Submit.pWaitSemaphoreInfos[J];
+      Waits.push_back({fromHandle<Semaphore>(Info.semaphore), Info.value});
+    }
+    if (VkResult R = consumeWaits(Waits); R != VK_SUCCESS)
+      return R;
+
+    std::vector<vulkan::CommandBuffer *> CmdBufs;
+    CmdBufs.reserve(Submit.commandBufferInfoCount);
+    for (uint32_t J = 0; J != Submit.commandBufferInfoCount; ++J)
+      CmdBufs.push_back(fromHandle<CommandBuffer>(
+          Submit.pCommandBufferInfos[J].commandBuffer));
+    if (VkResult R = executeCommandBuffers(CmdBufs); R != VK_SUCCESS)
+      return R;
+
+    std::vector<SemaphoreOp> Signals;
+    Signals.reserve(Submit.signalSemaphoreInfoCount);
+    for (uint32_t J = 0; J != Submit.signalSemaphoreInfoCount; ++J) {
+      const VkSemaphoreSubmitInfo &Info = Submit.pSignalSemaphoreInfos[J];
+      auto *Sem = fromHandle<Semaphore>(Info.semaphore);
+      Signals.push_back({Sem, Sem->isTimeline() ? Info.value : 0});
+    }
+    applySignals(Signals);
   }
   if (fence)
     fromHandle<Fence>(fence)->signal();

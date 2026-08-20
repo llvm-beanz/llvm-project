@@ -658,6 +658,19 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue queue,
                                              uint32_t submitCount,
                                              const VkSubmitInfo *pSubmits,
                                              VkFence fence);
+// Roadmap E3: core Vulkan 1.3 promoted `VK_KHR_synchronization2`'s
+// `vkQueueSubmit2` -- wait/signal semaphores and command buffers wrapped in
+// per-element `pNext`-extensible info structs (`VkSemaphoreSubmitInfo`'s
+// single `value` field covers both a binary semaphore, where it is
+// ignored, and a timeline one, unifying `vkQueueSubmit`'s own split
+// `VkSubmitInfo`/`VkTimelineSemaphoreSubmitInfo` shape) instead of
+// `vkQueueSubmit`'s parallel arrays. Translates down to the identical
+// `Fence`/`Semaphore`/`CommandBuffer` execution model its non-`2`
+// counterpart already implements.
+VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit2(VkQueue queue,
+                                              uint32_t submitCount,
+                                              const VkSubmitInfo2 *pSubmits,
+                                              VkFence fence);
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue);
 
 // V3: binary and timeline semaphores (see "Queues, Scheduling, and
