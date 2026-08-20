@@ -4,5 +4,5 @@
 # feme/lib/Vulkan/PhysicalDeviceInfo.cpp's own list and of
 # feme/utils/vk_gen_entrypoints.py's SUPPORTED_EXTENSIONS (see roadmap D1's
 # audit, feme/utils/vk_gen_feature_inventory.py --advertised-extensions).
-VK_KHR_dynamic_rendering = every command and the dynamicRendering feature bit are implemented; see AdvertisedPromotedFeatures.txt for why the *aggregate* Vulkan13Features struct doesn't reflect it yet
+VK_KHR_dynamic_rendering = every command and the dynamicRendering feature bit are implemented, including (roadmap E1) the aggregate Vulkan13Features struct
 VK_EXT_extended_dynamic_state = roadmap C4c: all 12 dynamic states implemented

@@ -35,17 +35,13 @@ table below).
 ## Findings
 
 - **36 mandatory 1.3/1.4 feature bits, 1 advertised** (`dynamicRendering`,
-  and only through its pre-promotion `VK_KHR_dynamic_rendering` feature
-  struct -- the aggregate `VkPhysicalDeviceVulkan13Features` struct itself
-  has no `vkGetPhysicalDeviceFeatures2` case at all yet, so an application
-  that only reads the aggregate struct still sees `VK_FALSE` for it. This
-  is itself a small, pre-existing truthfulness gap this audit surfaced
-  rather than created, independent of the other 35 unimplemented bits).
-  `synchronization2`, `maintenance4`/`5`/`6`, `subgroupSizeControl`,
-  `shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
-  `pushDescriptor`, and the rest of the roadmap D1 prompt's own list are
-  all confirmed unimplemented (no reference to any of their names exists
-  anywhere in `feme/lib`).
+  now advertised through both its pre-promotion `VK_KHR_dynamic_rendering`
+  feature struct and the aggregate `VkPhysicalDeviceVulkan13Features`
+  struct, closed by roadmap E1). `synchronization2`, `maintenance4`/`5`/`6`,
+  `subgroupSizeControl`, `shaderIntegerDotProduct`,
+  `pipelineCreationCacheControl`, `pushDescriptor`, and the rest of the
+  roadmap D1 prompt's own list are all confirmed unimplemented (no
+  reference to any of their names exists anywhere in `feme/lib`).
 - **70 mandatory 1.3/1.4 limit fields**, all currently unenumerated by
   `EntryPoints.cpp`'s `VkPhysicalDeviceVulkan13Properties`/
   `Vulkan14Properties` cases (neither exists), so every one of them reads
@@ -71,7 +67,11 @@ That triage is now done: [Roadmap.md &sect;1.9.4](Roadmap.md#194-closing-the-vul
 [&sect;1.9.5](Roadmap.md#195-closing-the-vulkan-14-mandatory-floor-f-series)
 (the F-series, closing the 1.4 rows) break every row in the table below
 into an independently assignable task, each citing the specific feature/
-limit/extension name it closes.
+limit/extension name it closes. Roadmap E1 is the first of these rows to
+land: the aggregate `VkPhysicalDeviceVulkan13Features`/`Vulkan14Features`
+`vkGetPhysicalDeviceFeatures2` cases now exist, so the "Advertised" column
+above reflects what an application reading only the aggregate struct sees,
+not just each dedicated pre-promotion struct.
 
 | Category | Version | Name | Advertised | Note |
 |---|---|---|---|---|
@@ -87,7 +87,7 @@ limit/extension name it closes.
 | feature | VK_VERSION_1_3 | `synchronization2` | no |  |
 | feature | VK_VERSION_1_3 | `textureCompressionASTC_HDR` | no |  |
 | feature | VK_VERSION_1_3 | `shaderZeroInitializeWorkgroupMemory` | no |  |
-| feature | VK_VERSION_1_3 | `dynamicRendering` | yes | advertised only via VK_KHR_dynamic_rendering's own feature struct; VkPhysicalDeviceVulkan13Features itself is unwired |
+| feature | VK_VERSION_1_3 | `dynamicRendering` | yes |  |
 | feature | VK_VERSION_1_3 | `shaderIntegerDotProduct` | no |  |
 | feature | VK_VERSION_1_3 | `maintenance4` | no |  |
 | limit | VK_VERSION_1_3 | `minSubgroupSize` | n/a |  |
@@ -150,7 +150,7 @@ limit/extension name it closes.
 | extension | VK_VERSION_1_3 | `VK_EXT_tooling_info` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_ycbcr_2plane_444_formats` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_copy_commands2` | no |  |
-| extension | VK_VERSION_1_3 | `VK_KHR_dynamic_rendering` | yes | every command and the dynamicRendering feature bit are implemented; see AdvertisedPromotedFeatures.txt for why the *aggregate* Vulkan13Features struct doesn't reflect it yet |
+| extension | VK_VERSION_1_3 | `VK_KHR_dynamic_rendering` | yes | every command and the dynamicRendering feature bit are implemented, including (roadmap E1) the aggregate Vulkan13Features struct |
 | extension | VK_VERSION_1_3 | `VK_KHR_format_feature_flags2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_maintenance4` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_shader_integer_dot_product` | no |  |
