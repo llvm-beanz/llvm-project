@@ -21,8 +21,6 @@ namespace {
 TEST(PhysicalDeviceInfo, ReportsHonestVersionAndIdentity) {
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
 
-  // See "Loader Integration"'s V0 Deviation note: 1.1, not 1.2 (which would
-  // require VkPhysicalDeviceDriverProperties to be queryable).
   EXPECT_EQ(Info.Properties.apiVersion, VK_API_VERSION_1_2);
 
   // The Khronos "not yet assigned an official vendor ID" reserved value
@@ -30,11 +28,16 @@ TEST(PhysicalDeviceInfo, ReportsHonestVersionAndIdentity) {
   EXPECT_EQ(Info.Properties.vendorID, 0x10000u);
   EXPECT_EQ(Info.DriverId, VK_DRIVER_ID_MAX_ENUM);
 
-  // Zero `VkConformanceVersion` (see "Initial Non-Goals": no conformance
-  // claim). `VkPhysicalDeviceProperties` itself has no conformance field
-  // (that lives in `VkPhysicalDeviceVulkan12Properties`, not queryable at
-  // this milestone's apiVersion), so this documents the intended contract
-  // for whichever milestone first claims Vulkan 1.2.
+  // Zero `VkConformanceVersion` is the truthful value for a non-conformant
+  // development ICD; the driver strings, however, must still be non-empty and
+  // null-terminated once driver properties are queryable.
+  EXPECT_EQ(Info.ConformanceVersion.major, 0u);
+  EXPECT_EQ(Info.ConformanceVersion.minor, 0u);
+  EXPECT_EQ(Info.ConformanceVersion.subminor, 0u);
+  EXPECT_EQ(Info.ConformanceVersion.patch, 0u);
+  EXPECT_STREQ(Info.DriverName, "FeMe Vulkan Driver");
+  EXPECT_STREQ(Info.DriverInfo,
+               "LLVM in-tree development ICD; no Khronos conformance claim");
   EXPECT_EQ(Info.Properties.deviceType, VK_PHYSICAL_DEVICE_TYPE_CPU);
 }
 
@@ -131,6 +134,45 @@ TEST_F(PhysicalDeviceProperties2Test,
               VK_SUBGROUP_FEATURE_BASIC_BIT);
   EXPECT_EQ(Subgroup.subgroupSize, Props11.subgroupSize);
   EXPECT_EQ(Subgroup.supportedStages, Props11.subgroupSupportedStages);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       DriverPropertiesReportTruthfulStringsAndZeroConformance) {
+  VkPhysicalDeviceDriverProperties DriverProps{};
+  DriverProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+  VkPhysicalDeviceVulkan12Properties Props12{};
+  Props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+  DriverProps.pNext = &Props12;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &DriverProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(DriverProps.driverID, VK_DRIVER_ID_MAX_ENUM);
+  EXPECT_EQ(Props12.driverID, DriverProps.driverID);
+  EXPECT_NE(std::strlen(DriverProps.driverName), 0u);
+  EXPECT_NE(std::strlen(DriverProps.driverInfo), 0u);
+  EXPECT_NE(
+      std::memchr(DriverProps.driverName, '\0', sizeof(DriverProps.driverName)),
+      nullptr);
+  EXPECT_NE(
+      std::memchr(DriverProps.driverInfo, '\0', sizeof(DriverProps.driverInfo)),
+      nullptr);
+  EXPECT_STREQ(Props12.driverName, DriverProps.driverName);
+  EXPECT_STREQ(Props12.driverInfo, DriverProps.driverInfo);
+  EXPECT_EQ(DriverProps.conformanceVersion.major, 0u);
+  EXPECT_EQ(DriverProps.conformanceVersion.minor, 0u);
+  EXPECT_EQ(DriverProps.conformanceVersion.subminor, 0u);
+  EXPECT_EQ(DriverProps.conformanceVersion.patch, 0u);
+  EXPECT_EQ(Props12.conformanceVersion.major,
+            DriverProps.conformanceVersion.major);
+  EXPECT_EQ(Props12.conformanceVersion.minor,
+            DriverProps.conformanceVersion.minor);
+  EXPECT_EQ(Props12.conformanceVersion.subminor,
+            DriverProps.conformanceVersion.subminor);
+  EXPECT_EQ(Props12.conformanceVersion.patch,
+            DriverProps.conformanceVersion.patch);
 }
 
 TEST(PhysicalDeviceInfo, IsDeterministic) {

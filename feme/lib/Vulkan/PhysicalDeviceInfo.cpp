@@ -16,6 +16,7 @@
 #include "llvm/TargetParser/Host.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include <algorithm>
 #include <cstring>
 #include <unistd.h>
 
@@ -64,6 +65,12 @@ VkDeviceSize detectHostMemorySize() {
   if (Pages <= 0 || PageSize <= 0)
     return VkDeviceSize{1} << 30;
   return static_cast<VkDeviceSize>(Pages) * static_cast<VkDeviceSize>(PageSize);
+}
+
+template <size_t N> void copyStringField(char (&Dst)[N], llvm::StringRef Src) {
+  size_t Count = std::min(Src.size(), N - 1);
+  std::memcpy(Dst, Src.data(), Count);
+  Dst[Count] = '\0';
 }
 
 /// Fills the device and pipeline cache UUIDs (see "Device identity": both
@@ -349,6 +356,10 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   QueueFamily.minImageTransferGranularity = {1, 1, 1};
 
   Info.DriverId = VK_DRIVER_ID_MAX_ENUM;
+  Info.ConformanceVersion = {0, 0, 0, 0};
+  copyStringField(Info.DriverName, "FeMe Vulkan Driver");
+  copyStringField(Info.DriverInfo,
+                  "LLVM in-tree development ICD; no Khronos conformance claim");
 
   return Info;
 }

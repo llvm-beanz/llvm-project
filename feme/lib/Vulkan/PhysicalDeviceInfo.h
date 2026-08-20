@@ -59,12 +59,14 @@ struct PhysicalDeviceInfo {
   VkShaderStageFlags SubgroupSupportedStages = 0;
   VkSubgroupFeatureFlags SubgroupSupportedOperations = 0;
 
-  /// `VkDriverId` this build would report through
-  /// `VkPhysicalDeviceDriverProperties`, were that struct queryable at the
-  /// Vulkan 1.1 `apiVersion` this milestone advertises (see "Device
-  /// identity" and the Deviation note added there for V0). Recorded now so
-  /// the device UUID already accounts for it.
+  /// `VkDriverId` this build reports through
+  /// `VkPhysicalDeviceDriverProperties`/`VkPhysicalDeviceVulkan12Properties`.
+  /// Still `VK_DRIVER_ID_MAX_ENUM` until FeMe has a Khronos-assigned driver
+  /// ID of its own (see "Device identity").
   VkDriverId DriverId = VK_DRIVER_ID_MAX_ENUM;
+  VkConformanceVersion ConformanceVersion{};
+  char DriverName[VK_MAX_DRIVER_NAME_SIZE]{};
+  char DriverInfo[VK_MAX_DRIVER_INFO_SIZE]{};
 };
 
 /// Computes the one physical device's capabilities from the host this

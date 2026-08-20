@@ -3,17 +3,18 @@
 ## Status
 
 This is an initial design for a Vulkan installable client driver (ICD)
-backed by
-    FeMe's CPU target. The first implementation target is a headless, compute - only Vulkan
-        device
-            .It is intended to sit below the standard Vulkan loader in the same
-                position
-                    as Mesa's lavapipe, but it does not initially aim to match lavapipe's graphics, WSI, or extension coverage.
+backed by FeMe's CPU target. The first implementation target is a headless, compute - only Vulkan device
+    .It is intended to sit below the standard Vulkan loader in the same position
+        as Mesa 's lavapipe, but it does not initially aim to match lavapipe' s
+            graphics,
+    WSI,
+    or extension coverage
+            .
 
-    The CPU shader compiler and
-        execution machinery described in[FeMeCPUDesign.md](FeMeCPUDesign.md)
-            already exists.The work designed here is the runtime layer which
-    translates Vulkan objects and commands into that machinery,
+        The CPU shader compiler and
+            execution machinery described in[FeMeCPUDesign.md](FeMeCPUDesign.md)
+                already exists.The work designed here is the runtime layer which
+        translates Vulkan objects and commands into that machinery,
     plus the FeMe changes needed to make the CPU target usable by a driver.
 
     The shared compiler,
@@ -347,8 +348,11 @@ inventing values collides with real vendors. The driver must either use a
 Khronos-registered `VkDriverId` and a registered vendor ID, or, until one is
 allocated, set `vendorID` to the Khronos-reserved implementation-defined form
 described by the specification and report `VK_DRIVER_ID_MAX_ENUM` rather than
-impersonating another driver. Obtaining a registered `VkDriverId` is an
-explicit prerequisite for distributing the driver.
+impersonating another driver. Roadmap C5 makes these fields queryable through
+`VkPhysicalDeviceDriverProperties`/`VkPhysicalDeviceVulkan12Properties` with
+non-empty identifying strings and a truthful zero `VkConformanceVersion`, but
+obtaining a registered `VkDriverId` remains an explicit prerequisite for
+distributing the driver.
 
 The device UUID and pipeline cache UUID must be deterministic for the FeMe ABI
 version, LLVM version, target triple, host CPU feature policy, selected wave
@@ -1319,17 +1323,17 @@ hidden visibility only affects a *shared* object's exports).
 Two scope decisions, recorded as deviations from this document's original
 text:
 
-- The device advertises `apiVersion = VK_API_VERSION_1_1`, not the 1.2 this
-  document's "Device identity" section's `VkPhysicalDeviceDriverProperties`
-  discussion presumes. That struct is a Vulkan 1.2 core promotion; requiring
-  it at V0 would mean this milestone has to satisfy every other Vulkan 1.2
-  mandatory core requirement too (timeline semaphores, `VkPhysicalDeviceVulkan12Properties`,
-  etc.), which is out of scope before shader execution exists at all. FeMe's
-  `vendorID`/`deviceID`/`VkDriverId` values are still computed now and folded
-  into the device/pipeline-cache UUIDs (`PhysicalDeviceInfo::DriverId`), so
-  whichever milestone first claims Vulkan 1.2 need only add the
-  `VkPhysicalDeviceDriverProperties` `pNext` handler, not change the
-  identity values themselves.
+- Formerly, V0 advertised `apiVersion = VK_API_VERSION_1_1` specifically so
+  `VkPhysicalDeviceDriverProperties` did not need to be queryable yet. That
+  deviation is now closed in part: this ICD advertises 1.2, answers both
+  `VkPhysicalDeviceDriverProperties` and the promoted
+  `VkPhysicalDeviceVulkan12Properties` chain with non-empty identifying
+  strings plus a truthful zero `VkConformanceVersion`, and folds the same
+  identity values into the device/pipeline-cache UUIDs. What remains open is
+  the registered-driver-ID half: until FeMe has a Khronos-assigned
+  `VkDriverId` of its own, the queried value stays `VK_DRIVER_ID_MAX_ENUM`
+  alongside the reserved implementation-defined `vendorID`, rather than
+  impersonating another driver.
 - "Subgroup size"'s host-vector-width detection does not stand up a full
   `llvm::TargetMachine`/`TargetTransformInfo` the way `feme::Driver`'s own
   `getHostVectorBits` does; it uses `llvm::sys::getHostCPUFeatures()`

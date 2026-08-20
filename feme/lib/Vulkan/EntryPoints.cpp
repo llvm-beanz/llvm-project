@@ -113,6 +113,15 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceProperties(
 }
 
 namespace {
+
+void fillDriverProperties(const PhysicalDeviceInfo &Info,
+                          VkPhysicalDeviceDriverProperties &Props) {
+  Props.driverID = Info.DriverId;
+  Props.conformanceVersion = Info.ConformanceVersion;
+  std::memcpy(Props.driverName, Info.DriverName, sizeof(Info.DriverName));
+  std::memcpy(Props.driverInfo, Info.DriverInfo, sizeof(Info.DriverInfo));
+}
+
 /// Fills every Vulkan 1.1 core `pNext` extension struct this ICD recognizes
 /// in a `VkPhysicalDeviceProperties2`/`Features2` chain. An application must
 /// not chain a struct for a feature/extension it didn't enable, so any
@@ -146,6 +155,23 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
                   VK_UUID_SIZE);
       IdProps->deviceLUIDValid = VK_FALSE;
       IdProps->deviceNodeMask = 1;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES: {
+      auto *DriverProps =
+          reinterpret_cast<VkPhysicalDeviceDriverProperties *>(Base);
+      fillDriverProperties(Info, *DriverProps);
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: {
+      auto *Props12 =
+          reinterpret_cast<VkPhysicalDeviceVulkan12Properties *>(Base);
+      Props12->driverID = Info.DriverId;
+      Props12->conformanceVersion = Info.ConformanceVersion;
+      std::memcpy(Props12->driverName, Info.DriverName,
+                  sizeof(Info.DriverName));
+      std::memcpy(Props12->driverInfo, Info.DriverInfo,
+                  sizeof(Info.DriverInfo));
       break;
     }
     default:
