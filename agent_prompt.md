@@ -26,9 +26,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you take a couple steps back with all the data we have and provide an actual
-roadmap breakdown of the engineering work required in FeMe to meet Vulkan 1.3
-and then Vulkan 1.4 conformance?
+Can you implement milestone E1 in the roadmap document?
 
-I need the tasks broken down into sufficient granularity that I can distribute
-the work out to agents and humans to iterate on.
+> **Wire the aggregate `VkPhysicalDeviceVulkan13Features`/`Vulkan14Features`
+> `vkGetPhysicalDeviceFeatures2` cases.** Today only the pre-promotion
+> `VK_KHR_dynamic_rendering` struct case exists; add the two aggregate cases,
+> populating every member from whatever per-extension state already exists
+> (`dynamicRendering=VK_TRUE` today) and `VK_FALSE` for everything still
+> unimplemented, exactly mirroring the existing `VULKAN_1_2_FEATURES` case's
+> pattern. This is what `dEQP-VK.api.info.*`'s consistency checks and every
+> `VK_KHR_dynamic_rendering`-support probe (`draw`/`renderpasses`/`pipeline`,
+> 822 cases) actually read
