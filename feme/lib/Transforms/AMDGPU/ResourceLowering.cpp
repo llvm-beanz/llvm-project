@@ -104,11 +104,12 @@ struct Binding {
   Type *ElementType = nullptr;
   /// Extra `i32` kernel arguments this binding needs beyond its own data
   /// pointer, appended immediately after it. Always 0 except for a
-  /// `DXTexture` binding of more than one coordinate dimension, which needs
-  /// one flat-addressing stride per coordinate beyond the first (see
-  /// `lowerDXTextureAccess`'s comment) -- a real hardware texture unit gets
-  /// this from the bound resource descriptor itself, which a flat AMDGPU
-  /// kernel argument list has no equivalent of.
+  /// `DXTexture`/`spirv.Image` binding of more than one coordinate
+  /// dimension, which needs one flat-addressing stride per coordinate
+  /// beyond the first (see `lowerDXTextureAccess`'s/`lowerSPIRVAccess`'s
+  /// shared `linearizeCoordinate` comment) -- a real hardware texture unit
+  /// gets this from the bound resource descriptor itself, which a flat
+  /// AMDGPU kernel argument list has no equivalent of.
   unsigned NumAuxArgs = 0;
   /// Extra `i32` kernel arguments this binding needs for a `dx.Texture`
   /// `GetDimensions` access -- 0 if the binding has none, 1 if every access
@@ -119,7 +120,11 @@ struct Binding {
   /// require) equals the texture's actual width -- see
   /// `lowerDXTextureAccess`'s comment -- so `GetDimensions` gets its own,
   /// unambiguous width/height values from the host rather than reusing the
-  /// addressing stride's.
+  /// addressing stride's. A `spirv.Image` binding's own `GetDimensions`
+  /// equivalent (`llvm.spv.resource.getdimensions.*`) is not yet modeled
+  /// this way -- see `hasOnlySupportedUses`'s SPIR-V branch, which simply
+  /// leaves a binding queried that way unrewritten -- so this is always 0
+  /// for one.
   unsigned NumDimensionArgs = 0;
   SmallVector<CallInst *, 2> Handles;
 
@@ -169,6 +174,30 @@ unsigned getTextureCoordComponents(dxil::ResourceKind Dim) {
     return 2;
   case dxil::ResourceKind::Texture3D:
     return 3;
+  default:
+    return 0;
+  }
+}
+
+/// Returns the number of coordinate components a `spirv.Image` binding's
+/// `Dim` operand (`target("spirv.Image", ElemTy, Dim, ...)`'s first int
+/// parameter) addresses, mirroring `getTextureCoordComponents`'s DX table
+/// for the SPIR-V `Dim` enum (`Dim1D`/`Dim2D`/`Dim3D`/`Buffer` -- see
+/// `llvm/include/llvm/IR/IntrinsicsSPIRV.td`'s `int_spv_resource_*`
+/// intrinsics' users for the numeric encoding), or 0 for a dimension this
+/// pass does not address (a cube face, an array layer, or a subpass input,
+/// none of which fit this pass's flat linear-stride model any better than
+/// their DX equivalents do).
+unsigned getSPIRVImageCoordComponents(uint64_t Dim) {
+  switch (Dim) {
+  case 0: // Dim1D
+    return 1;
+  case 1: // Dim2D
+    return 2;
+  case 2: // Dim3D
+    return 3;
+  case 5: // Buffer
+    return 1;
   default:
     return 0;
   }
@@ -248,6 +277,22 @@ bool hasOnlySupportedUses(const CallInst &HandleCI, const ResourceOps &Ops) {
       continue;
     }
 
+    // A multi-dimensional `Texture2D<T>::Load` reaches this pass as
+    // `llvm.spv.resource.load.level` instead of `getpointer` -- `dxc` always
+    // gives `Texture2D<T>::Load` an explicit (if always-zero) mip level, so
+    // ordinary non-multisampled texel fetches never produce a plain
+    // `spirv.ImageFetch`/`getpointer` pair (see `ImageFetchLodPattern`'s own
+    // comment in `SPIRVToLLVMPatterns.cpp`) -- and, like `dx.Texture`'s
+    // `load.level` above, its result is the loaded value directly rather
+    // than a pointer some other instruction reads/writes through, so it
+    // needs no per-use check of its own beyond being reached through this
+    // handle.
+    if (getIntrinsicID(CI) == Intrinsic::spv_resource_load_level) {
+      if (CI->getArgOperand(0) != &HandleCI)
+        return false;
+      continue;
+    }
+
     if (getIntrinsicID(CI) != Intrinsic::spv_resource_getpointer ||
         !CI->hasOneUse())
       return false;
@@ -268,8 +313,11 @@ bool hasOnlySupportedUses(const CallInst &HandleCI, const ResourceOps &Ops) {
 /// `target("spirv.Image", ...)` handle type does not -- its parameters
 /// describe the underlying image's dimensionality/sampled type, not the
 /// (possibly vector) type a particular access loads or stores -- so it is
-/// instead read off the load/store through the first `getpointer` call
-/// found. `dx.CBuffer`'s opaque `target("dx.CBuffer", [N x i8])` placeholder
+/// instead read off the first access found: the load/store through a
+/// `getpointer` call's result, or a `load.level` call's own return type
+/// (see `hasOnlySupportedUses`'s comment for why the latter needs no
+/// separate load/store to read it off of). `dx.CBuffer`'s opaque
+/// `target("dx.CBuffer", [N x i8])` placeholder
 /// handle type (see `getOpaqueSizedType` in OpRaising.cpp) carries no
 /// element type at all, so this reads the same way SPIR-V's does: off the
 /// first `llvm.dx.resource.load.cbufferrow.*` call found, whose return
@@ -289,8 +337,13 @@ Type *getElementType(const CallInst &HandleCI, const ResourceOps &Ops) {
   }
 
   for (const User *U : HandleCI.users()) {
-    const auto *GetPointer = cast<CallInst>(U);
-    const User *AccessUser = *GetPointer->user_begin();
+    const auto *Access = cast<CallInst>(U);
+    // `load.level`'s own return value is the loaded element (see
+    // `hasOnlySupportedUses`'s comment), unlike `getpointer`, whose result
+    // is a pointer some other `load`/`store` reads or writes through.
+    if (getIntrinsicID(Access) == Intrinsic::spv_resource_load_level)
+      return Access->getType();
+    const User *AccessUser = *Access->user_begin();
     if (const auto *LI = dyn_cast<LoadInst>(AccessUser))
       return LI->getType();
     if (const auto *SI = dyn_cast<StoreInst>(AccessUser))
@@ -360,6 +413,15 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
         return std::nullopt;
       NumAuxArgs = NumCoords - 1;
       NumDimensionArgs = getNumDimensionArgs(*CI);
+    } else if (Ops->Family == ResourceFamily::SPIRV &&
+               Ops->HandleTypeName == SPIRVResourceOps.HandleTypeName) {
+      // Only a `spirv.Image` binding's own `Dim` type parameter needs this,
+      // so this is keyed off the handle type name, not `Family` alone.
+      unsigned NumCoords =
+          getSPIRVImageCoordComponents(HandleTy->getIntParameter(0));
+      if (NumCoords == 0)
+        return std::nullopt;
+      NumAuxArgs = NumCoords - 1;
     }
     bool IsUAV = (Ops->Family == ResourceFamily::DX ||
                   Ops->Family == ResourceFamily::DXTexture) &&
@@ -498,18 +560,67 @@ void lowerDXAccess(CallInst &Access, Value *Ptr, Type *ElementType,
   Access.eraseFromParent();
 }
 
-/// Rewrites a SPIR-V `llvm.spv.resource.getpointer` call \p Access into the
-/// GEP'd element pointer it addresses within \p Ptr, and points the single
-/// `load`/`store` already reading or writing through it (see
-/// `hasOnlySupportedUses`) at that pointer directly -- it needs no other
-/// changes, since it only cares about the pointer value, not which address
-/// space computed it. (A plain `replaceAllUsesWith` cannot do this instead:
-/// \p Ptr's address space differs from \p Access's generic one, and LLVM's
-/// opaque pointer types encode address space, so the two are different
-/// types.)
-void lowerSPIRVAccess(CallInst &Access, Value *Ptr, Type *ElementType) {
+/// Decomposes \p Coord -- a fixed vector for a multi-dimensional
+/// texture/image coordinate, or an ordinary scalar for a 1D one or a flat
+/// buffer/cbuffer index -- back into its scalar components, and linearizes
+/// them against \p Strides (one flat-addressing stride per coordinate
+/// component beyond the first) the same way an ordinary row-major array
+/// index would be: `coord0 + coord1*Strides[0] + coord2*Strides[1] + ...`.
+/// Shared by `lowerDXTextureAccess` and `lowerSPIRVAccess`, whose raised
+/// texture/image coordinates take exactly this shape (see each's own
+/// comment for which "stride" \p Strides holds -- a `dx.Texture` binding's
+/// row/slice pitch or a `spirv.Image` one's, both supplied as extra kernel
+/// arguments since neither format's raised IR otherwise carries it -- see
+/// `Binding::NumAuxArgs`'s comment).
+Value *linearizeCoordinate(IRBuilder<> &Builder, Value *Coord,
+                           ArrayRef<Value *> Strides) {
+  SmallVector<Value *, 3> Components;
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Coord->getType())) {
+    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
+      Components.push_back(
+          Builder.CreateExtractElement(Coord, Builder.getInt32(I)));
+  } else {
+    Components.push_back(Coord);
+  }
+
+  Value *Index = Components[0];
+  for (unsigned I = 1, E = Components.size(); I != E; ++I)
+    Index = Builder.CreateAdd(
+        Index, Builder.CreateMul(Components[I], Strides[I - 1]));
+  return Index;
+}
+
+/// Rewrites a SPIR-V `llvm.spv.resource.getpointer`/`.load.level` call
+/// \p Access -- whose coordinate operand (argument 1) is a vector for a
+/// multi-dimensional image, a scalar for a 1D one or an untyped `Buffer`/
+/// cbuffer field index -- into an ordinary, aligned access of the flat-
+/// addressed element of \p Ptr the coordinate names once linearized against
+/// \p Strides the same way `lowerDXTextureAccess` linearizes a
+/// `dx.Texture` binding's own coordinate (see its comment for the
+/// `coord0 + coord1*Strides[0] + ...` shape, which is identical here).
+/// `getpointer`'s result is a pointer some other single `load`/`store`
+/// already reads or writes through (see `hasOnlySupportedUses`), so that
+/// user is repointed at the GEP'd element instead -- a plain
+/// `replaceAllUsesWith` cannot do this instead, since \p Ptr's address
+/// space differs from \p Access's generic one and LLVM's opaque pointer
+/// types encode address space, making the two different types.
+/// `load.level`'s result, in contrast, *is* the loaded value directly
+/// (`Texture2D<T>::Load`, mirroring `dx.Texture`'s `load.level`), so it is
+/// replaced with a fresh load of the element instead; its mip-level
+/// operand is not otherwise consulted, matching `lowerDXTextureAccess`'s
+/// own "mip 0 only" limit.
+void lowerSPIRVAccess(CallInst &Access, Value *Ptr, Type *ElementType,
+                      ArrayRef<Value *> Strides, Align Alignment) {
   IRBuilder<> Builder(&Access);
-  Value *Elem = Builder.CreateGEP(ElementType, Ptr, Access.getArgOperand(1));
+  Value *Index = linearizeCoordinate(Builder, Access.getArgOperand(1), Strides);
+  Value *Elem = Builder.CreateGEP(ElementType, Ptr, Index);
+
+  if (getIntrinsicID(&Access) == Intrinsic::spv_resource_load_level) {
+    Value *Loaded = Builder.CreateAlignedLoad(ElementType, Elem, Alignment);
+    Access.replaceAllUsesWith(Loaded);
+    Access.eraseFromParent();
+    return;
+  }
 
   User *AccessUser = *Access.user_begin();
   if (auto *LI = dyn_cast<LoadInst>(AccessUser))
@@ -561,20 +672,8 @@ void lowerDXTextureAccess(CallInst &Access, Value *Ptr, Type *ElementType,
     return;
   }
 
-  Value *Coord = Access.getArgOperand(1);
-  SmallVector<Value *, 3> Components;
-  if (auto *VecTy = dyn_cast<FixedVectorType>(Coord->getType())) {
-    for (unsigned I = 0, E = VecTy->getNumElements(); I != E; ++I)
-      Components.push_back(
-          Builder.CreateExtractElement(Coord, Builder.getInt32(I)));
-  } else {
-    Components.push_back(Coord);
-  }
-
-  Value *Index = Components[0];
-  for (unsigned I = 1, E = Components.size(); I != E; ++I)
-    Index = Builder.CreateAdd(
-        Index, Builder.CreateMul(Components[I], Strides[I - 1]));
+  Value *Index =
+      linearizeCoordinate(Builder, Access.getArgOperand(1), Strides);
   Value *Elem = Builder.CreateGEP(ElementType, Ptr, Index);
 
   if (ID == Intrinsic::dx_resource_store_texture) {
@@ -616,9 +715,9 @@ void lowerDXCBufferAccess(CallInst &Access, Value *Ptr, Type *ElementType,
 
 /// Rewrites every typed buffer/texture/cbuffer access through \p Handle into
 /// ordinary loads/stores of \p Ptr (plus \p Strides/\p Dims, for a
-/// `dx.Texture` binding of more than one coordinate dimension, or with a
-/// `GetDimensions` access, respectively -- see `Binding::NumAuxArgs`/
-/// `Binding::NumDimensionArgs`).
+/// `dx.Texture`/`spirv.Image` binding of more than one coordinate
+/// dimension, or with a `GetDimensions` access, respectively -- see
+/// `Binding::NumAuxArgs`/`Binding::NumDimensionArgs`).
 void lowerHandleAccesses(CallInst &Handle, const ResourceOps &Ops, Value *Ptr,
                          Type *ElementType, ArrayRef<Value *> Strides,
                          ArrayRef<Value *> Dims) {
@@ -632,7 +731,7 @@ void lowerHandleAccesses(CallInst &Handle, const ResourceOps &Ops, Value *Ptr,
       lowerDXAccess(*Access, Ptr, ElementType, Alignment);
       break;
     case ResourceFamily::SPIRV:
-      lowerSPIRVAccess(*Access, Ptr, ElementType);
+      lowerSPIRVAccess(*Access, Ptr, ElementType, Strides, Alignment);
       break;
     case ResourceFamily::DXTexture:
       lowerDXTextureAccess(*Access, Ptr, ElementType, Strides, Dims,
