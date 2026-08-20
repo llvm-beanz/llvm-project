@@ -26,19 +26,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete milestone D1 on the roadmap?
+Can you complete milestone D2 on the roadmap?
 
-> **An accurate 1.3/1.4 mandatory-feature/limit/extension inventory.**
-> `vk_gen_entrypoints.py`'s `CORE_FEATURES` now resolves through
-> `VK_VERSION_1_3` (D0), but `VK_VERSION_1_4` is not yet included, and no
-> promoted-1.3/1.4 feature struct
-> (`VkPhysicalDeviceVulkan13Features`/`Vulkan14Features` and their per-extension
-> originals -- `dynamicRendering` is already advertised via its pre-promotion
-> `VK_KHR_dynamic_rendering` path, but `synchronization2`,
-> `maintenance4`/`5`/`6`, `subgroupSizeControl`, `shaderIntegerDotProduct`,
-> `pipelineCreationCacheControl`, `pushDescriptor`, and the rest are not) has
-> been audited against what claiming 1.4 actually requires. This is D0's own
-> "measure honestly" step turned into a checklist: enumerate the full set from
-> `vk.xml` itself (the same way `vk_gen_entrypoints.py` already resolves
-> `CORE_FEATURES` transitively), rather than re-deriving it by hand the way C6
-> did for 1.2's much shorter list
+> **The system Vulkan loader crash D0's second CTS pass found.**
+> `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`, run as
+> one sequence, segfaults inside Ubuntu's `libvulkan1` (`vkGetDeviceProcAddr`,
+> called from concurrent `vkCreateDevice`s) -- not inside any FeMe code, and
+> does not reproduce against the pre-D0 (apiVersion 1.2) build. Characterize
+> further (does it reproduce with a *smaller* `apiVersion`-dependent entrypoint
+> table than 1.4's full one? does a newer/older `libvulkan1` avoid it?) and, if
+> confirmed as a loader bug rather than something this ICD's own dispatch-table
+> generation can influence, file it upstream rather than attempt a local
+> workaround in a component this project does not own
