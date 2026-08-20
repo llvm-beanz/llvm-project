@@ -100,24 +100,31 @@ private:
 };
 
 /// A `VkFramebuffer`: the image views a render pass's attachments resolve to,
-/// plus the extent they were created against.
+/// plus the extent they were created against. (Roadmap C6) A framebuffer
+/// created with `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT` defers its attachment
+/// views to `vkCmdBeginRenderPass` time (`VkRenderPassAttachmentBeginInfo`)
+/// instead: `Attachments` is empty and `isImageless()` is true, so nothing
+/// here depends on `layers != 1` (still rejected -- layered rendering is
+/// V7) the way a concrete attachment's image view already is.
 class Framebuffer {
 public:
   Framebuffer(std::vector<ImageView *> Attachments, uint32_t Width,
-              uint32_t Height, uint32_t Layers)
+              uint32_t Height, uint32_t Layers, bool Imageless = false)
       : Attachments(std::move(Attachments)), Width(Width), Height(Height),
-        Layers(Layers) {}
+        Layers(Layers), Imageless(Imageless) {}
 
   llvm::ArrayRef<ImageView *> attachments() const { return Attachments; }
   uint32_t width() const { return Width; }
   uint32_t height() const { return Height; }
   uint32_t layers() const { return Layers; }
+  bool isImageless() const { return Imageless; }
 
 private:
   std::vector<ImageView *> Attachments;
   uint32_t Width;
   uint32_t Height;
   uint32_t Layers;
+  bool Imageless;
 };
 
 /// One attachment of a `RenderTargetBinding`: the view it renders into plus
@@ -184,6 +191,18 @@ bool isSupportedStencilAttachmentFormat(feme::cpu::ResourceFormat Format);
 /// Whether \p SampleCount is one the executor rasterizes (1, 2, or 4 --
 /// roadmap R33).
 bool isSupportedAttachmentSampleCount(uint32_t SampleCount);
+
+/// Whether \p View is a legal binding for \p Attachment sized against a
+/// framebuffer's \p Width x \p Height: format and sample count match, and
+/// the view's image is bound and at least as large. Shared by
+/// `vkCreateFramebuffer`'s eager per-attachment validation and, for an
+/// imageless framebuffer (roadmap C6, `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`),
+/// `vkCmdBeginRenderPass`'s deferred one via `VkRenderPassAttachmentBeginInfo`
+/// -- an imageless framebuffer cannot validate this at creation, since it
+/// has no image views yet.
+bool isCompatibleAttachmentView(const AttachmentDescription &Attachment,
+                                ImageView *View, uint32_t Width,
+                                uint32_t Height);
 
 } // namespace feme::vulkan
 

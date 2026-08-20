@@ -47,6 +47,7 @@ class Event;
 class Framebuffer;
 class GraphicsPipeline;
 class Image;
+class ImageView;
 class Pipeline;
 class QueryPool;
 class RenderPass;
@@ -198,6 +199,11 @@ struct RecordedCommand {
   /// `VK_ATTACHMENT_LOAD_OP_CLEAR`).
   const vulkan::RenderPass *BeginPass = nullptr;
   const vulkan::Framebuffer *BeginFramebuffer = nullptr;
+  /// (Roadmap C6) `BeginRenderPass`'s own attachment views, when
+  /// `BeginFramebuffer` is imageless (`VkRenderPassAttachmentBeginInfo`);
+  /// empty otherwise, in which case `BeginFramebuffer->attachments()` is
+  /// used instead (see `buildRenderTargetBinding`'s comment).
+  std::vector<vulkan::ImageView *> BeginAttachments;
   VkRect2D RenderArea{};
   std::vector<VkClearValue> ClearValues;
   /// (V6) `BeginRendering`: the render-target binding `vkCmdBeginRendering`
@@ -514,16 +520,20 @@ public:
   /// The render pass and framebuffer are normalized into one
   /// `RenderTargetBinding` at execution time (see RenderPass.h), so a
   /// subpass boundary is a full join and nothing downstream distinguishes
-  /// this from `vkCmdBeginRendering`.
+  /// this from `vkCmdBeginRendering`. \p Attachments is only non-empty for
+  /// an imageless framebuffer (roadmap C6); see `BeginAttachments`'s
+  /// comment.
   void beginRenderPass(const vulkan::RenderPass *Pass,
                        const vulkan::Framebuffer *Fb, VkRect2D RenderArea,
-                       std::vector<VkClearValue> ClearValues) {
+                       std::vector<VkClearValue> ClearValues,
+                       std::vector<vulkan::ImageView *> Attachments = {}) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BeginRenderPass;
     Cmd.BeginPass = Pass;
     Cmd.BeginFramebuffer = Fb;
     Cmd.RenderArea = RenderArea;
     Cmd.ClearValues = std::move(ClearValues);
+    Cmd.BeginAttachments = std::move(Attachments);
     Commands.push_back(std::move(Cmd));
   }
   /// (V6) `vkCmdBeginRendering`: the same render-target binding a

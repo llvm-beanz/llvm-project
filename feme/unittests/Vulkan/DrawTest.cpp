@@ -600,6 +600,78 @@ TEST_F(DrawTest, RendersTriangleThroughRenderPass) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap C6: an imageless framebuffer (`VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`)
+/// defers its attachment view to `vkCmdBeginRenderPass`'s own
+/// `VkRenderPassAttachmentBeginInfo` instead of binding one at creation
+/// time -- otherwise identical to `RendersTriangleThroughRenderPass` above,
+/// confirming the render-target binding built from that deferred view
+/// renders exactly the same image a concrete framebuffer would.
+TEST_F(DrawTest, RendersThroughImagelessFramebuffer) {
+  VkFramebufferAttachmentImageInfo AttachmentImageInfo{};
+  AttachmentImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  AttachmentImageInfo.width = Extent;
+  AttachmentImageInfo.height = Extent;
+  AttachmentImageInfo.layerCount = 1;
+  VkFormat ViewFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  AttachmentImageInfo.viewFormatCount = 1;
+  AttachmentImageInfo.pViewFormats = &ViewFormat;
+  VkFramebufferAttachmentsCreateInfo AttachmentsInfo{};
+  AttachmentsInfo.sType =
+      VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+  AttachmentsInfo.attachmentImageInfoCount = 1;
+  AttachmentsInfo.pAttachmentImageInfos = &AttachmentImageInfo;
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.pNext = &AttachmentsInfo;
+  FbInfo.flags = VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT;
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.width = Extent;
+  FbInfo.height = Extent;
+  FbInfo.layers = 1;
+  VkFramebuffer ImagelessFb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &ImagelessFb),
+            VK_SUCCESS);
+  EXPECT_TRUE(fromHandle<feme::vulkan::Framebuffer>(ImagelessFb)->isImageless());
+  EXPECT_TRUE(fromHandle<feme::vulkan::Framebuffer>(ImagelessFb)->attachments().empty());
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+  ASSERT_NE(Pipe, VK_NULL_HANDLE);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkClearValue ClearValue{};
+  ClearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  VkRenderPassAttachmentBeginInfo AttachmentBeginInfo{};
+  AttachmentBeginInfo.sType =
+      VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO;
+  AttachmentBeginInfo.attachmentCount = 1;
+  AttachmentBeginInfo.pAttachments = &ColorView;
+  VkRenderPassBeginInfo PassBegin{};
+  PassBegin.pNext = &AttachmentBeginInfo;
+  PassBegin.renderPass = Pass;
+  PassBegin.framebuffer = ImagelessFb;
+  PassBegin.renderArea = {{0, 0}, {Extent, Extent}};
+  PassBegin.clearValueCount = 1;
+  PassBegin.pClearValues = &ClearValue;
+  vkCmdBeginRenderPass(Cmd, &PassBegin, VK_SUBPASS_CONTENTS_INLINE);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(0, 0)[0], 0xFF);
+  EXPECT_EQ(texel(0, 0)[1], 0x00);
+
+  vkDestroyFramebuffer(Device, ImagelessFb, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// `VK_ATTACHMENT_LOAD_OP_CLEAR` clears exactly the render area, and a
 /// dynamic scissor further restricts what a draw may write -- so a draw
 /// covering the whole viewport leaves everything outside the scissor at its

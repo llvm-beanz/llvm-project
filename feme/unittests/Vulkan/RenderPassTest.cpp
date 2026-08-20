@@ -384,4 +384,80 @@ TEST_F(RenderPassTest, FramebufferBindsMatchingViews) {
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
+/// Roadmap C6: `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT` defers attachment
+/// views to each render-pass instance; at creation time only the chained
+/// `VkFramebufferAttachmentsCreateInfo` (attachment count and, where given,
+/// a compatible candidate format) can be validated.
+TEST_F(RenderPassTest, ImagelessFramebufferRequiresAttachmentsCreateInfo) {
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.flags = VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT;
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.width = 4;
+  FbInfo.height = 4;
+  FbInfo.layers = 1;
+  VkFramebuffer Fb = VK_NULL_HANDLE;
+  // No `VkFramebufferAttachmentsCreateInfo` chained at all.
+  EXPECT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  VkFramebufferAttachmentImageInfo ImageInfo{};
+  ImageInfo.width = 4;
+  ImageInfo.height = 4;
+  ImageInfo.layerCount = 1;
+  VkFormat IncompatibleFormat = VK_FORMAT_R32_SFLOAT;
+  ImageInfo.viewFormatCount = 1;
+  ImageInfo.pViewFormats = &IncompatibleFormat;
+  VkFramebufferAttachmentsCreateInfo AttachmentsInfo{};
+  AttachmentsInfo.sType =
+      VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+  AttachmentsInfo.attachmentImageInfoCount = 1;
+  AttachmentsInfo.pAttachmentImageInfos = &ImageInfo;
+  FbInfo.pNext = &AttachmentsInfo;
+  // A candidate format list with none compatible with the render pass's
+  // own attachment format is rejected too.
+  EXPECT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb),
+            VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
+TEST_F(RenderPassTest, ImagelessFramebufferAcceptsCompatibleAttachmentsCreateInfo) {
+  VkRenderPass Pass = VK_NULL_HANDLE;
+  ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);
+
+  VkFormat CompatibleFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkFramebufferAttachmentImageInfo ImageInfo{};
+  ImageInfo.width = 4;
+  ImageInfo.height = 4;
+  ImageInfo.layerCount = 1;
+  ImageInfo.viewFormatCount = 1;
+  ImageInfo.pViewFormats = &CompatibleFormat;
+  VkFramebufferAttachmentsCreateInfo AttachmentsInfo{};
+  AttachmentsInfo.sType =
+      VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+  AttachmentsInfo.attachmentImageInfoCount = 1;
+  AttachmentsInfo.pAttachmentImageInfos = &ImageInfo;
+
+  VkFramebufferCreateInfo FbInfo{};
+  FbInfo.pNext = &AttachmentsInfo;
+  FbInfo.flags = VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT;
+  FbInfo.renderPass = Pass;
+  FbInfo.attachmentCount = 1;
+  FbInfo.width = 4;
+  FbInfo.height = 4;
+  FbInfo.layers = 1;
+  VkFramebuffer Fb = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &Fb), VK_SUCCESS);
+  EXPECT_TRUE(fromHandle<Framebuffer>(Fb)->isImageless());
+  EXPECT_TRUE(fromHandle<Framebuffer>(Fb)->attachments().empty());
+  EXPECT_EQ(fromHandle<Framebuffer>(Fb)->width(), 4u);
+
+  vkDestroyFramebuffer(Device, Fb, nullptr);
+  vkDestroyRenderPass(Device, Pass, nullptr);
+}
+
 } // namespace

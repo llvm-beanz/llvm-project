@@ -290,6 +290,19 @@ void fillFeatures2Chain(void *pNext) {
       Features->separateDepthStencilLayouts = VK_TRUE;
       break;
     }
+    // (roadmap C6) `vkCreateFramebuffer`/`vkCmdBeginRenderPass`
+    // (`RenderPass.cpp`/`CommandBuffer.cpp`) implement
+    // `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`: a framebuffer created with it
+    // defers its attachment views to `VkRenderPassAttachmentBeginInfo` at
+    // each render-pass instance instead of binding concrete image views at
+    // creation time.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceImagelessFramebufferFeatures *>(
+              Base);
+      Features->imagelessFramebuffer = VK_TRUE;
+      break;
+    }
     // (roadmap C6) `shaderSubgroupExtendedTypes` only relaxes the *type*
     // restriction on `OpGroupNonUniform*` operations; this ICD converts
     // none of them at all yet (`SPIRVToLLVMPatterns.cpp` wires up only the
@@ -313,6 +326,7 @@ void fillFeatures2Chain(void *pNext) {
       Features->uniformBufferStandardLayout = VK_TRUE;
       Features->separateDepthStencilLayouts = VK_TRUE;
       Features->shaderSubgroupExtendedTypes = VK_TRUE;
+      Features->imagelessFramebuffer = VK_TRUE;
       // (roadmap C6) No `OpGroupNonUniformBroadcast` conversion exists at
       // all (see the dedicated-struct case above), so there is no
       // non-dynamic-index broadcast this bit could be lying about: every

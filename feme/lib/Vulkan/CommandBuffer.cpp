@@ -680,6 +680,11 @@ Error runCopyQueryPoolResults(QueryPool *Pool, uint32_t FirstQuery,
 struct GraphicsState {
   const RenderPass *Pass = nullptr;
   const Framebuffer *Fb = nullptr;
+  /// The attachment views the current render-pass instance actually binds:
+  /// `Fb->attachments()`, unless `Fb` is imageless (roadmap C6), in which
+  /// case this is `vkCmdBeginRenderPass`'s own
+  /// `VkRenderPassAttachmentBeginInfo` views instead.
+  llvm::ArrayRef<ImageView *> FbAttachments;
   uint32_t Subpass = 0;
   VkRect2D RenderArea{};
   std::vector<VkClearValue> ClearValues;
@@ -701,16 +706,36 @@ struct GraphicsState {
 };
 
 /// Builds the normalized render-target binding \p Subpass of \p Pass
-/// resolves to against \p Fb's views -- the single internal shape
-/// `vkCmdBeginRendering` also produces (see RenderPass.h).
+/// resolves to against \p Attachments -- the single internal shape
+/// `vkCmdBeginRendering` also produces (see RenderPass.h). \p Attachments is
+/// \p Fb's own views, unless \p Fb is imageless (roadmap C6), in which case
+/// it is whatever `vkCmdBeginRenderPass`'s `VkRenderPassAttachmentBeginInfo`
+/// supplied for this render-pass instance -- validated here, since an
+/// imageless framebuffer has no views of its own to have validated at
+/// creation time.
 Expected<RenderTargetBinding>
 buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
+                         llvm::ArrayRef<ImageView *> Attachments,
                          uint32_t Subpass, VkRect2D RenderArea,
                          llvm::ArrayRef<VkClearValue> ClearValues) {
   if (Subpass >= Pass.subpasses().size())
     return createStringError(inconvertibleErrorCode(),
                              "subpass %u is out of range of its render pass",
                              Subpass);
+  if (Fb.isImageless()) {
+    if (Attachments.size() != Pass.attachments().size())
+      return createStringError(inconvertibleErrorCode(),
+                               "an imageless framebuffer's render pass "
+                               "instance did not supply one image view per "
+                               "attachment");
+    for (size_t I = 0; I != Attachments.size(); ++I)
+      if (!isCompatibleAttachmentView(Pass.attachments()[I], Attachments[I],
+                                     Fb.width(), Fb.height()))
+        return createStringError(inconvertibleErrorCode(),
+                                 "an imageless framebuffer's render pass "
+                                 "instance supplied an image view "
+                                 "incompatible with attachment %zu", I);
+  }
   const SubpassDescription &Desc = Pass.subpasses()[Subpass];
   RenderTargetBinding Binding;
   Binding.RenderArea = RenderArea;
@@ -718,7 +743,7 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
   auto makeView = [&](uint32_t Index, bool UseStencilOps) -> RenderTargetView {
     const AttachmentDescription &Attachment = Pass.attachments()[Index];
     RenderTargetView View;
-    View.View = Fb.attachments()[Index];
+    View.View = Attachments[Index];
     View.Format = Attachment.Format;
     View.SampleCount = Attachment.SampleCount;
     View.LoadOp = UseStencilOps ? Attachment.StencilLoadOp : Attachment.LoadOp;
@@ -738,7 +763,7 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
     RenderTargetView View = makeView(Index, /*UseStencilOps=*/false);
     if (I < Desc.ResolveAttachments.size() &&
         Desc.ResolveAttachments[I] != VK_ATTACHMENT_UNUSED)
-      View.ResolveView = Fb.attachments()[Desc.ResolveAttachments[I]];
+      View.ResolveView = Attachments[Desc.ResolveAttachments[I]];
     Binding.Colors.push_back(View);
   }
   if (Desc.DepthStencilAttachment != VK_ATTACHMENT_UNUSED) {
@@ -1373,11 +1398,17 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
                                  "pass and a framebuffer");
       Gfx.Pass = Cmd.BeginPass;
       Gfx.Fb = Cmd.BeginFramebuffer;
+      // (Roadmap C6) An imageless framebuffer's own attachments are empty;
+      // `Cmd.BeginAttachments` (`VkRenderPassAttachmentBeginInfo`) supplies
+      // them for this render-pass instance instead.
+      Gfx.FbAttachments = Gfx.Fb->isImageless() ? llvm::ArrayRef(Cmd.BeginAttachments)
+                                                : Gfx.Fb->attachments();
       Gfx.Subpass = 0;
       Gfx.RenderArea = Cmd.RenderArea;
       Gfx.ClearValues = Cmd.ClearValues;
-      Expected<RenderTargetBinding> Binding = buildRenderTargetBinding(
-          *Gfx.Pass, *Gfx.Fb, Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
+      Expected<RenderTargetBinding> Binding =
+          buildRenderTargetBinding(*Gfx.Pass, *Gfx.Fb, Gfx.FbAttachments,
+                                   Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
       if (!Binding)
         return Binding.takeError();
       Gfx.Binding = std::move(*Binding);
@@ -1389,6 +1420,7 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
     case RecordedCommand::Kind::BeginRendering:
       Gfx.Pass = nullptr;
       Gfx.Fb = nullptr;
+      Gfx.FbAttachments = {};
       Gfx.Subpass = 0;
       Gfx.Binding = Cmd.RenderingBinding;
       Gfx.RenderArea = Gfx.Binding.RenderArea;
@@ -1405,8 +1437,9 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       // sequential execution already satisfies; the next subpass's own
       // attachment references simply become the render-target binding.
       ++Gfx.Subpass;
-      Expected<RenderTargetBinding> Binding = buildRenderTargetBinding(
-          *Gfx.Pass, *Gfx.Fb, Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
+      Expected<RenderTargetBinding> Binding =
+          buildRenderTargetBinding(*Gfx.Pass, *Gfx.Fb, Gfx.FbAttachments,
+                                   Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
       if (!Binding)
         return Binding.takeError();
       Gfx.Binding = std::move(*Binding);
@@ -1417,6 +1450,7 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       Gfx.Binding = RenderTargetBinding{};
       Gfx.Pass = nullptr;
       Gfx.Fb = nullptr;
+      Gfx.FbAttachments = {};
       break;
     case RecordedCommand::Kind::BindVertexBuffers: {
       // `VK_WHOLE_SIZE` (`UINT64_MAX`) is reused here as "no stride
@@ -1954,10 +1988,27 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBeginRenderPass(
   std::vector<VkClearValue> ClearValues(pRenderPassBegin->pClearValues,
                                         pRenderPassBegin->pClearValues +
                                             pRenderPassBegin->clearValueCount);
+  // (Roadmap C6) An imageless framebuffer supplies its attachment views
+  // here rather than at `vkCreateFramebuffer` time; format/sample-count/
+  // size compatibility is validated later, once the render pass and
+  // framebuffer are both known (`buildRenderTargetBinding`).
+  std::vector<ImageView *> Attachments;
+  for (auto *Base =
+           static_cast<const VkBaseInStructure *>(pRenderPassBegin->pNext);
+       Base; Base = Base->pNext)
+    if (Base->sType == VK_STRUCTURE_TYPE_RENDER_PASS_ATTACHMENT_BEGIN_INFO) {
+      const auto *Info =
+          reinterpret_cast<const VkRenderPassAttachmentBeginInfo *>(Base);
+      Attachments.reserve(Info->attachmentCount);
+      for (uint32_t I = 0; I != Info->attachmentCount; ++I)
+        Attachments.push_back(fromHandle<ImageView>(Info->pAttachments[I]));
+      break;
+    }
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->beginRenderPass(fromHandle<RenderPass>(pRenderPassBegin->renderPass),
                         fromHandle<Framebuffer>(pRenderPassBegin->framebuffer),
-                        pRenderPassBegin->renderArea, std::move(ClearValues));
+                        pRenderPassBegin->renderArea, std::move(ClearValues),
+                        std::move(Attachments));
 }
 
 namespace {

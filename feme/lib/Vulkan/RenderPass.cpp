@@ -65,8 +65,7 @@ bool isSupportedAttachmentSampleCount(uint32_t SampleCount) {
 }
 
 llvm::Expected<feme::graphics::AttachmentView>
-resolveAttachmentView(ImageView *View) {
-  if (!View || !View->image() || !View->image()->isBound())
+resolveAttachmentView(ImageView *View) {  if (!View || !View->image() || !View->image()->isBound())
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "a render target attachment is not bound "
                                    "to memory");
@@ -94,6 +93,16 @@ resolveAttachmentView(ImageView *View) {
   Result.Data = llvm::MutableArrayRef<uint8_t>(
       Base, static_cast<size_t>(Layout.SlicePitch));
   return Result;
+}
+
+bool isCompatibleAttachmentView(const AttachmentDescription &Attachment,
+                                ImageView *View, uint32_t Width,
+                                uint32_t Height) {
+  if (!View || !View->image())
+    return false;
+  return View->format() == Attachment.Format &&
+         View->image()->sampleCount() == Attachment.SampleCount &&
+         View->image()->width() >= Width && View->image()->height() >= Height;
 }
 
 } // namespace feme::vulkan
@@ -367,17 +376,64 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
   if (pCreateInfo->layers != 1)
     return VK_ERROR_INITIALIZATION_FAILED;
 
+  // (Roadmap C6) `VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT`: the concrete image
+  // views are supplied per render-pass instance instead
+  // (`VkRenderPassAttachmentBeginInfo` at `vkCmdBeginRenderPass`), so there
+  // is nothing to resolve or validate against real images yet -- only that
+  // the chained `VkFramebufferAttachmentsCreateInfo` names the same
+  // attachment count and, where it names candidate view formats at all, at
+  // least one of them is format-compatible with the render pass's own
+  // attachment. `isCompatibleAttachmentView`'s format/sample-count/size
+  // check happens later, once a real view is bound at
+  // `vkCmdBeginRenderPass` time.
+  if (pCreateInfo->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT) {
+    const VkFramebufferAttachmentsCreateInfo *AttachmentsInfo = nullptr;
+    for (auto *Base =
+             static_cast<const VkBaseInStructure *>(pCreateInfo->pNext);
+         Base; Base = Base->pNext)
+      if (Base->sType ==
+          VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO) {
+        AttachmentsInfo =
+            reinterpret_cast<const VkFramebufferAttachmentsCreateInfo *>(Base);
+        break;
+      }
+    if (!AttachmentsInfo ||
+        AttachmentsInfo->attachmentImageInfoCount != pCreateInfo->attachmentCount)
+      return VK_ERROR_INITIALIZATION_FAILED;
+    for (uint32_t I = 0; I != AttachmentsInfo->attachmentImageInfoCount; ++I) {
+      const VkFramebufferAttachmentImageInfo &ImageInfo =
+          AttachmentsInfo->pAttachmentImageInfos[I];
+      if (ImageInfo.width < pCreateInfo->width ||
+          ImageInfo.height < pCreateInfo->height ||
+          ImageInfo.layerCount < pCreateInfo->layers)
+        return VK_ERROR_INITIALIZATION_FAILED;
+      bool FormatCompatible = ImageInfo.viewFormatCount == 0;
+      for (uint32_t J = 0; J != ImageInfo.viewFormatCount; ++J)
+        if (mapVkFormat(ImageInfo.pViewFormats[J]) == Pass.attachments()[I].Format) {
+          FormatCompatible = true;
+          break;
+        }
+      if (!FormatCompatible)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    Allocator ImagelessAlloc(pAllocator);
+    Framebuffer *ImagelessObj = ImagelessAlloc.create<Framebuffer>(
+        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::vector<ImageView *>{},
+        pCreateInfo->width, pCreateInfo->height, pCreateInfo->layers,
+        /*Imageless=*/true);
+    if (!ImagelessObj)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+    *pFramebuffer = toHandle<VkFramebuffer>(ImagelessObj);
+    return VK_SUCCESS;
+  }
+
   std::vector<ImageView *> Attachments;
   Attachments.reserve(pCreateInfo->attachmentCount);
   for (uint32_t I = 0; I != pCreateInfo->attachmentCount; ++I) {
     auto *View = fromHandle<ImageView>(pCreateInfo->pAttachments[I]);
-    if (!View || !View->image())
-      return VK_ERROR_INITIALIZATION_FAILED;
-    if (View->format() != Pass.attachments()[I].Format ||
-        View->image()->sampleCount() != Pass.attachments()[I].SampleCount)
-      return VK_ERROR_INITIALIZATION_FAILED;
-    if (View->image()->width() < pCreateInfo->width ||
-        View->image()->height() < pCreateInfo->height)
+    if (!isCompatibleAttachmentView(Pass.attachments()[I], View,
+                                   pCreateInfo->width, pCreateInfo->height))
       return VK_ERROR_INITIALIZATION_FAILED;
     Attachments.push_back(View);
   }
