@@ -559,8 +559,8 @@ public:
   /// (V6) `vkCmdBindVertexBuffers`. \p Strides is empty unless called from
   /// `vkCmdBindVertexBuffers2EXT` with a non-null `pStrides` (roadmap C4c).
   void bindVertexBuffers(uint32_t FirstBinding, std::vector<Buffer *> Buffers,
-                        std::vector<VkDeviceSize> Offsets,
-                        std::vector<VkDeviceSize> Strides = {}) {
+                         std::vector<VkDeviceSize> Offsets,
+                         std::vector<VkDeviceSize> Strides = {}) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BindVertexBuffers;
     Cmd.FirstSet = FirstBinding;

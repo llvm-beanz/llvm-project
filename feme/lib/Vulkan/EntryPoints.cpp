@@ -175,8 +175,7 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES: {
       auto *TimelineSemaphore =
-          reinterpret_cast<VkPhysicalDeviceTimelineSemaphoreProperties *>(
-              Base);
+          reinterpret_cast<VkPhysicalDeviceTimelineSemaphoreProperties *>(Base);
       TimelineSemaphore->maxTimelineSemaphoreValueDifference =
           Info.MaxTimelineSemaphoreValueDifference;
       break;
@@ -277,16 +276,14 @@ void fillFeatures2Chain(void *pNext) {
     // stencil-only layout value in the first place. Advertising both is
     // therefore honest, not merely a relaxed floor.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES: {
-      auto *Features =
-          reinterpret_cast<VkPhysicalDeviceUniformBufferStandardLayoutFeatures
-                               *>(Base);
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceUniformBufferStandardLayoutFeatures *>(Base);
       Features->uniformBufferStandardLayout = VK_TRUE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES: {
-      auto *Features =
-          reinterpret_cast<VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures
-                               *>(Base);
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures *>(Base);
       Features->separateDepthStencilLayouts = VK_TRUE;
       break;
     }
@@ -312,9 +309,8 @@ void fillFeatures2Chain(void *pNext) {
     // is vacuously true, the same reasoning `subgroupBroadcastDynamicId`
     // below uses.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES: {
-      auto *Features =
-          reinterpret_cast<
-              VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures *>(Base);
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures *>(Base);
       Features->shaderSubgroupExtendedTypes = VK_TRUE;
       break;
     }

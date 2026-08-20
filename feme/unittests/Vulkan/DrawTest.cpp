@@ -616,8 +616,7 @@ TEST_F(DrawTest, RendersThroughImagelessFramebuffer) {
   AttachmentImageInfo.viewFormatCount = 1;
   AttachmentImageInfo.pViewFormats = &ViewFormat;
   VkFramebufferAttachmentsCreateInfo AttachmentsInfo{};
-  AttachmentsInfo.sType =
-      VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+  AttachmentsInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
   AttachmentsInfo.attachmentImageInfoCount = 1;
   AttachmentsInfo.pAttachmentImageInfos = &AttachmentImageInfo;
 
@@ -632,8 +631,11 @@ TEST_F(DrawTest, RendersThroughImagelessFramebuffer) {
   VkFramebuffer ImagelessFb = VK_NULL_HANDLE;
   ASSERT_EQ(vkCreateFramebuffer(Device, &FbInfo, nullptr, &ImagelessFb),
             VK_SUCCESS);
-  EXPECT_TRUE(fromHandle<feme::vulkan::Framebuffer>(ImagelessFb)->isImageless());
-  EXPECT_TRUE(fromHandle<feme::vulkan::Framebuffer>(ImagelessFb)->attachments().empty());
+  EXPECT_TRUE(
+      fromHandle<feme::vulkan::Framebuffer>(ImagelessFb)->isImageless());
+  EXPECT_TRUE(fromHandle<feme::vulkan::Framebuffer>(ImagelessFb)
+                  ->attachments()
+                  .empty());
 
   VkShaderModule Vertex = createModule(FullscreenVertexSource);
   VkShaderModule Fragment = createModule(RedFragmentSource);

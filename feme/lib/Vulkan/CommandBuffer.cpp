@@ -730,11 +730,12 @@ buildRenderTargetBinding(const RenderPass &Pass, const Framebuffer &Fb,
                                "attachment");
     for (size_t I = 0; I != Attachments.size(); ++I)
       if (!isCompatibleAttachmentView(Pass.attachments()[I], Attachments[I],
-                                     Fb.width(), Fb.height()))
+                                      Fb.width(), Fb.height()))
         return createStringError(inconvertibleErrorCode(),
                                  "an imageless framebuffer's render pass "
                                  "instance supplied an image view "
-                                 "incompatible with attachment %zu", I);
+                                 "incompatible with attachment %zu",
+                                 I);
   }
   const SubpassDescription &Desc = Pass.subpasses()[Subpass];
   RenderTargetBinding Binding;
@@ -1401,14 +1402,15 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       // (Roadmap C6) An imageless framebuffer's own attachments are empty;
       // `Cmd.BeginAttachments` (`VkRenderPassAttachmentBeginInfo`) supplies
       // them for this render-pass instance instead.
-      Gfx.FbAttachments = Gfx.Fb->isImageless() ? llvm::ArrayRef(Cmd.BeginAttachments)
-                                                : Gfx.Fb->attachments();
+      Gfx.FbAttachments = Gfx.Fb->isImageless()
+                              ? llvm::ArrayRef(Cmd.BeginAttachments)
+                              : Gfx.Fb->attachments();
       Gfx.Subpass = 0;
       Gfx.RenderArea = Cmd.RenderArea;
       Gfx.ClearValues = Cmd.ClearValues;
-      Expected<RenderTargetBinding> Binding =
-          buildRenderTargetBinding(*Gfx.Pass, *Gfx.Fb, Gfx.FbAttachments,
-                                   Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
+      Expected<RenderTargetBinding> Binding = buildRenderTargetBinding(
+          *Gfx.Pass, *Gfx.Fb, Gfx.FbAttachments, Gfx.Subpass, Gfx.RenderArea,
+          Gfx.ClearValues);
       if (!Binding)
         return Binding.takeError();
       Gfx.Binding = std::move(*Binding);
@@ -1437,9 +1439,9 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       // sequential execution already satisfies; the next subpass's own
       // attachment references simply become the render-target binding.
       ++Gfx.Subpass;
-      Expected<RenderTargetBinding> Binding =
-          buildRenderTargetBinding(*Gfx.Pass, *Gfx.Fb, Gfx.FbAttachments,
-                                   Gfx.Subpass, Gfx.RenderArea, Gfx.ClearValues);
+      Expected<RenderTargetBinding> Binding = buildRenderTargetBinding(
+          *Gfx.Pass, *Gfx.Fb, Gfx.FbAttachments, Gfx.Subpass, Gfx.RenderArea,
+          Gfx.ClearValues);
       if (!Binding)
         return Binding.takeError();
       Gfx.Binding = std::move(*Binding);

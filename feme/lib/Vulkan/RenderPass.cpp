@@ -65,7 +65,8 @@ bool isSupportedAttachmentSampleCount(uint32_t SampleCount) {
 }
 
 llvm::Expected<feme::graphics::AttachmentView>
-resolveAttachmentView(ImageView *View) {  if (!View || !View->image() || !View->image()->isBound())
+resolveAttachmentView(ImageView *View) {
+  if (!View || !View->image() || !View->image()->isBound())
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "a render target attachment is not bound "
                                    "to memory");
@@ -397,8 +398,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
             reinterpret_cast<const VkFramebufferAttachmentsCreateInfo *>(Base);
         break;
       }
-    if (!AttachmentsInfo ||
-        AttachmentsInfo->attachmentImageInfoCount != pCreateInfo->attachmentCount)
+    if (!AttachmentsInfo || AttachmentsInfo->attachmentImageInfoCount !=
+                                pCreateInfo->attachmentCount)
       return VK_ERROR_INITIALIZATION_FAILED;
     for (uint32_t I = 0; I != AttachmentsInfo->attachmentImageInfoCount; ++I) {
       const VkFramebufferAttachmentImageInfo &ImageInfo =
@@ -409,7 +410,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
         return VK_ERROR_INITIALIZATION_FAILED;
       bool FormatCompatible = ImageInfo.viewFormatCount == 0;
       for (uint32_t J = 0; J != ImageInfo.viewFormatCount; ++J)
-        if (mapVkFormat(ImageInfo.pViewFormats[J]) == Pass.attachments()[I].Format) {
+        if (mapVkFormat(ImageInfo.pViewFormats[J]) ==
+            Pass.attachments()[I].Format) {
           FormatCompatible = true;
           break;
         }
@@ -433,7 +435,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
   for (uint32_t I = 0; I != pCreateInfo->attachmentCount; ++I) {
     auto *View = fromHandle<ImageView>(pCreateInfo->pAttachments[I]);
     if (!isCompatibleAttachmentView(Pass.attachments()[I], View,
-                                   pCreateInfo->width, pCreateInfo->height))
+                                    pCreateInfo->width, pCreateInfo->height))
       return VK_ERROR_INITIALIZATION_FAILED;
     Attachments.push_back(View);
   }

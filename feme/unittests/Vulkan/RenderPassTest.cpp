@@ -412,8 +412,7 @@ TEST_F(RenderPassTest, ImagelessFramebufferRequiresAttachmentsCreateInfo) {
   ImageInfo.viewFormatCount = 1;
   ImageInfo.pViewFormats = &IncompatibleFormat;
   VkFramebufferAttachmentsCreateInfo AttachmentsInfo{};
-  AttachmentsInfo.sType =
-      VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+  AttachmentsInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
   AttachmentsInfo.attachmentImageInfoCount = 1;
   AttachmentsInfo.pAttachmentImageInfos = &ImageInfo;
   FbInfo.pNext = &AttachmentsInfo;
@@ -425,7 +424,8 @@ TEST_F(RenderPassTest, ImagelessFramebufferRequiresAttachmentsCreateInfo) {
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
-TEST_F(RenderPassTest, ImagelessFramebufferAcceptsCompatibleAttachmentsCreateInfo) {
+TEST_F(RenderPassTest,
+       ImagelessFramebufferAcceptsCompatibleAttachmentsCreateInfo) {
   VkRenderPass Pass = VK_NULL_HANDLE;
   ASSERT_EQ(createSimpleRenderPass(VK_FORMAT_R8G8B8A8_UNORM, Pass), VK_SUCCESS);
 
@@ -437,8 +437,7 @@ TEST_F(RenderPassTest, ImagelessFramebufferAcceptsCompatibleAttachmentsCreateInf
   ImageInfo.viewFormatCount = 1;
   ImageInfo.pViewFormats = &CompatibleFormat;
   VkFramebufferAttachmentsCreateInfo AttachmentsInfo{};
-  AttachmentsInfo.sType =
-      VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
+  AttachmentsInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_ATTACHMENTS_CREATE_INFO;
   AttachmentsInfo.attachmentImageInfoCount = 1;
   AttachmentsInfo.pAttachmentImageInfos = &ImageInfo;
 
