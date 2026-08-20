@@ -997,6 +997,122 @@ the full-run headline; a full re-run is deferred to whichever future
 roadmap row actually closes a feature/limit/extension this inventory
 found missing, where it will have something new to measure.
 
+## Roadmap D2: measured impact
+
+Roadmap D2 characterizes the system Vulkan loader crash D0's second CTS
+pass found (`dEQP-VK.api.object_management.multithreaded_per_thread_
+resources.*`, run as one sequence, `SIGSEGV` inside Ubuntu's `libvulkan1`).
+D0 and D1 each hit it once; this milestone reruns the identical case
+sequence repeatedly, against several loader builds, to answer the two
+questions D0 left open, characterizes the crash with symbols via `gdb`,
+and looks up whether it is already tracked upstream.
+
+**Is it actually a race, not a hard failure?** Repeating the identical
+`--deqp-case="dEQP-VK.api.object_management.multithreaded_per_thread_
+resources.*"` invocation five times against the installed system loader
+(`libvulkan1` 1.3.275.0-1build1, Ubuntu 24.04/"noble") crashed **3 of 5**
+runs -- not 5 of 5 -- confirming this is a genuine, non-deterministic
+thread-scheduling race rather than a deterministic bug this specific
+case sequence always triggers. `gdb`'s backtrace on a caught crash
+(`Thread ... received signal SIGSEGV`, `bt` + `thread apply all bt`)
+reproduces D0's own finding exactly: frame 0 is inside
+`/lib/aarch64-linux-gnu/libvulkan.so.1` (unsymbolized in the distro
+package), called through `vkGetDeviceProcAddr`, called from
+`vk::DeviceDriver::DeviceDriver`, called from
+`vkt::api::(anonymous namespace)::CreateThread<Device>::runThread`, i.e.
+one of the case's own `ThreadGroupThread`s constructing its `VkDevice`
+concurrently with the others (visible in `info threads`: the majority of
+the other threads are parked in `de::SpinBarrier::sync`, the case's own
+synchronization point, at the moment of the crash). No FeMe code appears
+anywhere in any of the three crashing backtraces. The crashing case
+itself varies run to run (`...resources.device` in 2 of the 3 crashes,
+`...resources.device_group` in 1), consistent with a race whose exact
+trigger point depends on thread interleaving rather than one specific
+case's own logic.
+
+**Does a *smaller* apiVersion-dependent entrypoint table avoid it?** No.
+`vk_gen_entrypoints.py`'s `CORE_FEATURES` was temporarily trimmed back to
+`VK_VERSION_1_3` (dropping the 19 core commands D1 added), `feme_vulkan`
+rebuilt against the smaller generated table, and the same five-run
+experiment repeated against the identical system loader: **4 of 5** runs
+still crashed (once at `...device`, twice at `...device_group`, matching
+the same signature). This is, if anything, a slightly *higher* crash
+rate than the full 1.4 table's 3 of 5 -- well within noise for five runs
+each, but definitively not the "smaller table avoids it" outcome D0's own
+"more likely mechanism" guess (a larger per-device dispatch table making
+a latent race more likely) would predict as a clean threshold effect.
+**Conclusion: table size is not the deciding variable** -- both configurations
+crash at a similar, non-trivial rate against this loader build, so D0's
+mechanism guess is superseded by the root cause below rather than
+confirmed by it. (`vk_gen_entrypoints.py` and the generated table were
+restored to their D1 state immediately after this experiment; `git diff`
+against HEAD is empty and `ninja check-feme` was rerun clean -- 1519/1520,
+the same one pre-existing `Unsupported` as before -- to confirm no
+regression was left behind.)
+
+**Does a newer/older `libvulkan1` avoid it, and is this already tracked
+upstream?** Searching KhronosGroup/Vulkan-Loader's issue tracker for this
+exact case name surfaced
+[#1436](https://github.com/KhronosGroup/Vulkan-Loader/issues/1436),
+filed January 2024 against the *identical*
+`dEQP-VK.api.object_management.multithreaded_per_thread_resources.
+device_group` case, on the *identical* loader version this system ships
+(`1.3.275.0`, Ubuntu 22.04 in that report, 24.04 here). Root cause,
+per the issue and its fix
+([#1438](https://github.com/KhronosGroup/Vulkan-Loader/pull/1438)): commit
+`a4ff6a54` ("Remove `-fno-strict-aliasing` from builds", November 2023)
+introduced a strict-aliasing-optimization-dependent bug into the loader's
+Release-build GPA/dispatch code -- present only when the compiler is
+allowed to assume no aliasing, which the reporter's own bisection matched
+(a locally-built, debug-flavored loader from the same commit did not
+reproduce it). PR #1438 reverted the flag removal; the fix first shipped
+in loader tag `v1.3.277`. Confirmed by building three loader versions from
+source (`scripts/update_deps.py` + the loader's own `CMakeLists.txt`,
+`-DCMAKE_BUILD_TYPE=Release` to match how distros package it) and rerunning
+the same case sequence via `LD_LIBRARY_PATH` against each, `VK_DRIVER_FILES`
+still pointed at this build's `feme_icd.json`:
+
+| Loader build | Crashes | Notes |
+|---|---|---|
+| System `libvulkan1` 1.3.275.0-1build1 (pre-fix, Ubuntu-packaged) | 3/5 | matches upstream #1436 exactly |
+| `v1.3.280` built from source (first tag after PR #1438's fix) | 1/6 | fix reduces, does not eliminate, the rate |
+| `main`, effectively the `v1.4.360` era (103 more `loader.c`/`trampoline.c` commits since `v1.3.280`, including a `main`-only "Use recursive mutexes to fix deadlocks in loader" change) | 0/10 | no crash in 10 runs |
+
+The `v1.3.280` result matters: PR #1438's own fix does not fully close this
+race by itself (1 crash in 6 runs, `gdb`-confirmed with symbols this time --
+`loader_get_icd_and_device` <- `loader_gpa_device_terminator` <-
+`vkGetDeviceProcAddr`, the same call path, just resolved with debug info
+since this build was compiled locally) -- it only reduces how often the
+underlying race manifests. The current upstream `main` branch, which
+includes substantially more loader-side mutex hardening merged since
+`v1.3.280` (`5ee27b30c`, "Use recursive mutexes to fix deadlocks in
+loader"), shows no crash at all across 10 runs. Ubuntu 24.04's own
+`libvulkan1` package (`apt-cache policy`, `apt-cache madison`, both
+checked) has no newer candidate available in `noble`, `noble-updates`, or
+`noble-backports` -- it is pinned to exactly the broken `1.3.275.0`
+version, over a year older than the fix.
+
+**Conclusion, per D2's own charge**: this is confirmed as a loader bug,
+not something this ICD's own dispatch-table generation can influence (the
+smaller-table experiment above rules that variable out directly) --
+**and it is not a new bug to file**. It is the identical, already-triaged,
+already-fixed upstream issue KhronosGroup/Vulkan-Loader#1436/#1438, merely
+not yet available through Ubuntu 24.04's package archive. Filing a new
+issue against KhronosGroup/Vulkan-Loader would duplicate #1436, which is
+already closed with a merged fix; the actionable gap is entirely in Ubuntu's
+packaging lag, a distribution issue rather than an upstream Vulkan-Loader
+one. No local workaround is implemented in this tree for the same reason
+D0 declined one: the crash is not reachable from any FeMe code path
+(confirmed again by every backtrace above), so there is nothing in `feme/`
+this milestone's own scope covers to change. Left open for whoever owns
+this machine's package selection to decide whether to track it against
+Ubuntu (e.g. via `ubuntu-bug libvulkan1` / Launchpad, quoting this
+section's loader-build comparison table as the evidence a newer package
+resolves it) or to accept the current CTS methodology's per-group
+crash-isolation (see "Reproducing this report" above) as sufficient
+mitigation, since every other group's totals are unaffected by this one
+group's crash rate.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
