@@ -75,9 +75,27 @@ constexpr ResourceOps DXTextureResourceOps = {
 constexpr ResourceOps DXCBufferResourceOps = {
     ResourceFamily::DXCBuffer, Intrinsic::dx_resource_handlefrombinding,
     "dx.CBuffer"};
+// A SPIR-V cbuffer handle (`target("spirv.VulkanBuffer", ...)`) shares the
+// same `llvm.spv.resource.handlefrombinding` intrinsic and the same single-
+// field-per-access shape (`llvm.spv.resource.getpointer` addressing one
+// field, read through the single ordinary `load` of it -- see
+// `feme::SPIRVToLLVMTranslator`'s uniform-buffer access conversion) as a
+// `spirv.Image` `Buffer`-dimension binding's own `getpointer` access, so it
+// is deliberately kept in `ResourceFamily::SPIRV` rather than given its own
+// family: only its handle type name -- not its accesses' shape -- differs,
+// and `collectBindings`/`hasOnlySupportedUses`/`lowerSPIRVAccess` already
+// treat a scalar-coordinate `getpointer` access uniformly regardless of it.
+// Unlike a `dx.CBuffer`'s opaque, size-only handle type, a
+// `spirv.VulkanBuffer` handle's own type parameter is the whole cbuffer's
+// field-struct type, but this pass never reads it (see `getElementType`):
+// SPIR-V's `getpointer` addresses one field directly, needing no row/field
+// decomposition the way `dx.CBuffer`'s packed-row load does.
+constexpr ResourceOps SPIRVCBufferResourceOps = {
+    ResourceFamily::SPIRV, Intrinsic::spv_resource_handlefrombinding,
+    "spirv.VulkanBuffer"};
 constexpr const ResourceOps *AllResourceOps[] = {
     &DXResourceOps, &SPIRVResourceOps, &DXTextureResourceOps,
-    &DXCBufferResourceOps};
+    &DXCBufferResourceOps, &SPIRVCBufferResourceOps};
 
 /// One resource binding an entry point uses, together with every
 /// `...resource.handlefrombinding` call that materializes a handle for it.
@@ -415,8 +433,11 @@ std::optional<SmallVector<Binding, 4>> collectBindings(Function &F) {
       NumDimensionArgs = getNumDimensionArgs(*CI);
     } else if (Ops->Family == ResourceFamily::SPIRV &&
                Ops->HandleTypeName == SPIRVResourceOps.HandleTypeName) {
-      // Only a `spirv.Image` binding's own `Dim` type parameter needs this,
-      // so this is keyed off the handle type name, not `Family` alone.
+      // Only a `spirv.Image` binding's own `Dim` type parameter needs this
+      // -- a `spirv.VulkanBuffer` cbuffer handle's identically-positioned
+      // first int parameter means something else entirely (see
+      // `SPIRVCBufferResourceOps`'s comment), so this is keyed off the
+      // handle type name, not `Family` alone (which the two share).
       unsigned NumCoords =
           getSPIRVImageCoordComponents(HandleTy->getIntParameter(0));
       if (NumCoords == 0)
