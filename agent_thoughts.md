@@ -24685,3 +24685,102 @@ this attribution pass's own time budget could responsibly also fix and
 still apply this level of rigor to the attribution itself. I did not
 attempt D4 (continuous, crash-tolerant measurement tooling), which remains
 independent of this milestone's own charge.
+
+# Roadmap breakdown: from D1's inventory to E/F-series distributable tasks
+
+## The request was for a document, not a fix
+
+This prompt asks for something D1-D3 each explicitly declined to do and
+explicitly promised for later: "a roadmap breakdown of the engineering
+work required... broken into sufficient granularity to distribute to
+agents and humans." §1.9.2's own closing line already named this exact
+debt -- "every row this section will need beyond D1's own inventory is
+deliberately not listed yet" -- so this milestone's job is to write those
+rows, not to implement any of them. I made no `feme/` source change at
+all; the entire diff is `Roadmap.md`, `Vulkan14FeatureInventory.md`'s
+cross-reference, and this file.
+
+## Deriving the task list from measurements already on disk, not from re-reading the Vulkan spec cold
+
+Every one of the 33 E/F rows traces to a specific line in
+`Vulkan14FeatureInventory.md`'s generated table (which `vk.xml` itself
+produced, not hand-transcribed) or to a specific D3 regression finding,
+rather than my own independent read of the Vulkan 1.3/1.4 spec. This
+matters for granularity: D1's table already tells you the *exact* feature
+bit, limit field, or extension name a row must close and D3 already tells
+you *which* CTS regression a handful of them fix, so each row could be
+written narrowly enough for one agent/human to pick up and know
+immediately whether they're done, instead of a vaguer "implement
+synchronization2" task that hides its own acceptance criteria.
+
+For each row I also did a first-pass audit of the actual current
+implementation (`grep`ping the relevant `feme/lib/Vulkan/*.cpp` file, not
+assuming from the feature's name what state it's likely in) to find the
+existing mechanism each new command/struct case should reuse rather than
+inventing a parallel one -- e.g. E3's `synchronization2` barriers reduce to
+the existing `Sync.{h,cpp}` 1-mask model once the 2-mask struct is
+unpacked, E6's `vkCmdBindDescriptorSets2` is a wrapper around
+`Descriptor.cpp`'s existing entrypoint, and E4's `maintenance4`
+info-only memory-requirements queries need only a refactor of
+`vkCreateBuffer`/`vkCreateImage`'s existing sizing logic into a shared
+helper. Two rows (E15's ASTC HDR, F3's `shaderFloatControls2`) I could not
+resolve to "reuse this" from a code read alone, since each depends on a
+sibling capability (LDR ASTC, `shaderFloatControls`) `Vulkan14FeatureInventory.md`
+doesn't itself enumerate -- I left those as explicit "verify first" rows
+(G4) rather than guessing their scope.
+
+## Two structural things this breakdown adds beyond a flat task list
+
+1. **The version-target framing decision §1.9.1 asked for and D0 skipped
+   is surfaced again, explicitly, in §1.9.3**, rather than silently
+   re-committing to "1.4 all the way" a second time. D0's own jump from
+   "advertise only what's implemented" (1.0->1.1->1.2's actual history) to
+   "advertise 1.4 ahead of any 1.3/1.4 work" is exactly the inversion
+   §1.9.1 warned about when it first posed this decision for 1.2. I did
+   not revert the version bump -- that would discard D1-D3's own
+   measurements -- but I did write down that finishing the full 1.3 floor
+   (§1.9.4) before starting any 1.4-only row (§1.9.5) is the recommended
+   default, with an explicit escape hatch (Strategy B) for a distributor
+   with enough independent capacity to run both tracks at once. Leaving
+   this undocumented would repeat D0's own mistake at the next planning
+   step rather than learning from it.
+2. **Lane groupings for parallel assignment.** "Sufficient granularity to
+   distribute" needs more than a numbered list -- two rows that touch the
+   same file need a sequencing note (E6/F12 both touch
+   `vkCmdBindDescriptorSets`'s descriptor-set path and should not be
+   assigned to two agents editing `Descriptor.cpp` simultaneously without
+   coordination) and rows with no shared file at all can genuinely run in
+   parallel. I grouped both E- and F-series rows into lanes by shared
+   file/subsystem for exactly this reason, and called out the two
+   cross-lane conflicts (E6/F12, E16/F10) explicitly rather than leaving a
+   distributor to discover them by merge conflict.
+
+## Why G1-G3 (measurement infrastructure) outrank every remaining feature row
+
+D0's own second-pass loader crash and D3's two false-positive regression
+buckets (`ubo.*.std430`, `synchronization.op.*_queue`, both attributed to
+the version bump and both actually pre-existing once re-measured) are not
+random one-off mistakes -- they are the direct, predictable cost of
+measuring 33 upcoming rows by hand, one at a time, the way D0-D3 did for
+four. I made G1 (finish D4) and G2 (finish C10, still open per §1.9.1's
+own table) explicit P0 cross-cutting prerequisites rather than letting
+them stay "whenever time allows" (D4's own prior framing) once the row
+count crossed from four to thirty-three: at that scale, an unautomated
+measurement process is *more* likely to misattribute a regression, not
+less, and misattribution is exactly what D3 spent a whole milestone
+correcting for D0's own four claims.
+
+## Scope discipline
+
+No `feme/` source, test, or build-system file changes in this milestone --
+purely the roadmap document, the one cross-reference line in
+`Vulkan14FeatureInventory.md`, and this file. Because nothing here changes
+any advertised capability, generated table, or executable behavior, I did
+not run a Vulkan CTS pass: there is no CTS-visible surface for one to
+measure, the same reasoning D1 itself used to scope its own CTS run down
+to a targeted entrypoint-table subset rather than a full 54-group rerun,
+taken one step further here since this milestone's diff has no runtime
+effect at all. `VulkanCTSReport.md` is unchanged. I did not implement any
+of the 33 E/F rows themselves (that is exactly what this milestone hands
+off to future distributed work) and did not revisit D1/D2/D3's own
+findings beyond citing them.
