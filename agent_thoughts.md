@@ -24199,3 +24199,135 @@ documented assumption -- is itself part of this row's honest record, and
 matches this repository's stated preference for recording a stacked-
 blocker or wrong-prediction finding rather than quietly editing history to
 look right in hindsight.
+
+# Roadmap D0: bumping apiVersion to 1.4
+
+## The request
+
+Bump the advertised Vulkan API level to 1.4, run the CTS to see where that
+leaves this ICD, and update Roadmap.md/FeMeVulkanDesign.md to match --
+ideally aiming at full 1.4-plus-KHR (and most EXT) conformance eventually.
+That last goal is the honest scale problem here: reaching it is easily
+several more C1-C8-sized roadmap steps' worth of work (C1-C8 alone took
+this project through eight separately-measured milestones just to get 1.2
+this far, and even that is not yet a clean conformance pass). One session
+cannot responsibly claim to have done that work; what it *can* do is the
+same thing every other roadmap step here has done -- make one well-scoped,
+fully-tested change, measure its real effect against the CTS rather than
+assume it, and leave an honest, actionable plan for the next step instead
+of a claim the measurement doesn't support.
+
+## What "bump the version" actually touched
+
+The version number itself is two constants
+(`vkEnumerateInstanceVersion`/`VkPhysicalDeviceProperties::apiVersion`),
+plus two lit tests and one gtest that hard-coded `1.2.0`/`VK_API_VERSION_1_2`
+in their expectations. That part was mechanical.
+
+The build environment was not: `find_package(Vulkan 1.3)` had resolved to
+the system's Ubuntu `libvulkan-dev` package, whose `vulkan_core.h` is
+`VK_HEADER_VERSION_COMPLETE` 1.3.275 -- it has no `VK_API_VERSION_1_4`
+macro at all. Rather than modify the system package, I fetched
+Vulkan-Headers v1.4.328 from upstream (MIT-licensed, matches the project's
+own "Vulkan SDK" abstraction -- `FindVulkan.cmake` only needs *a* header
+tree and *a* loader import library, not that they come from the same
+installed SDK), built a local `/tmp/vksdk` with those headers, `vk.xml`,
+and a symlink to the system's real `libvulkan.so.1` (the loader binary
+itself doesn't need to match the header version -- it dispatches by
+runtime negotiation, not compile-time struct layout), and pointed CMake's
+cache variables (`Vulkan_INCLUDE_DIR`/`Vulkan_LIBRARY`/`FEME_VULKAN_XML`)
+at it. Verified `vk_gen_entrypoints.py` produces a byte-identical
+`.inc` file from the new `vk.xml` as from the old one before trusting it
+for anything real.
+
+## The two crashes the measurement found
+
+A full 54-group CTS run (reusing the cached `groups.txt`, following this
+report's own documented reproduction recipe) is the only way this project
+ever validates a Vulkan-track change, and it found two real crashes --
+the first ever recorded by any edition of VulkanCTSReport.md, which had
+maintained a clean "Crashed / timed out: 0" since the first full run.
+Both are written up in detail in VulkanCTSReport.md's "Roadmap D0:
+measured impact"; the short version:
+
+1. `VK_KHR_copy_commands2`'s six commands have no feature-bit gate of
+   their own -- a device claiming `apiVersion >= 1.3` is assumed to
+   implement them unconditionally, and this ICD had implemented neither
+   the pre-promotion `KHR` names nor the promoted core names for any of
+   them. `deqp-vk` called one, got a null function pointer through the
+   loader's own dispatch table, and segfaulted. This is a genuine FeMe
+   gap and I fixed it: six thin wrappers, each unwrapping a `..Info2`
+   struct's region array and delegating to the identical, already-tested
+   logic its non-`2` counterpart already calls, plus extending
+   `vk_gen_entrypoints.py`'s `CORE_FEATURES` to resolve `VK_VERSION_1_3`
+   (mirroring the precedent 1.2 already set) so the promoted core names
+   exist in the generated table at all. Proved the fix by reverting just
+   the two apiVersion-bump files in the existing build tree (ccache-shared,
+   so this cost seconds not minutes) and confirming the crash disappears
+   at 1.2 -- the project's own established "confirm it fails before the
+   fix, not just that it passes after" discipline, applied to a whole-CTS
+   crash rather than a unit test this time.
+
+2. A second, full re-run (with the fix applied) crashed again, much
+   further into the same `api` group, on
+   `multithreaded_per_thread_resources.*` run as one sequence. `gdb`'s
+   backtrace is entirely inside the *system* Vulkan loader
+   (`libvulkan.so.1`, Ubuntu's `libvulkan1` 1.3.275), in
+   `vkGetDeviceProcAddr`, called from several threads' concurrent
+   `vkCreateDevice`s -- no FeMe code anywhere in the stack. I did the same
+   revert-and-compare check as #1: the identical case sequence passes
+   47/47 against the pre-D0 build. That comparison does not prove D0
+   introduced a bug in this ICD's own code (the crash literally cannot be
+   in code this project owns), but it is consistent with a plausible
+   mechanism -- a higher apiVersion means the loader must resolve more
+   core command names per `vkCreateDevice`, doing more work in a code path
+   that already appears to have a latent concurrency bug. I left this
+   open rather than attempt a workaround for a bug in a system package
+   this tree does not build, and recorded it as roadmap D2 with what would
+   be needed to characterize it further.
+
+## Getting the "what changed" numbers right
+
+Comparing only the two runs' aggregate pass/fail/not-supported *counts*
+(what C7's own measured-impact section did, since it only needed to
+compare *itself* before/after over the same groups) would have been wrong
+here, because one run's `api` group was genuinely incomplete (cut short by
+crash #2). I wrote a small Python pass over both runs' raw `.log` files
+extracting the actual *set* of failing case names from each, and diffed
+those sets directly -- 4,552 newly-`Fail`, 1,999 no-longer-`Fail`, net
++2,553, which does reconcile against the aggregate delta once `api`'s own
+partial-run shortfall is subtracted. That let me trace the single largest
+newly-failing bucket (`ubo.*.std430`, 2,650 cases) to an exact, verified
+cause rather than a guess: at 1.2, `deqp-vk`'s own
+`UniformBlockCase::checkSupport` reported `NotSupported` for every one of
+these before ever generating a shader; at 1.4 it instead reaches
+`vkCreateGraphicsPipelines`/`vkCreateComputePipelines` for the first time
+and hits `feme-cpu-simdize`'s own pre-existing, already-tracked divergent-
+vector-decomposition diagnostic -- roadmap C3's own "milestone 7
+deviation", not a new bug the version bump created. My first draft of this
+section guessed the cause would be `device_mandatory_features`/
+`vulkan1p3_consistency`-shaped (the pattern §1.9.1's own text predicts in
+the abstract for "claim a version you haven't earned"); checking
+`dEQP-VK.info.*`'s own diff directly showed only two new failures there,
+so I replaced the guess with the traced cause before writing anything
+into VulkanCTSReport.md -- the same "measure before attributing" discipline
+this file's C3/C8 sections already modeled, just caught one draft earlier
+this time since I checked before committing rather than after.
+
+## Order of commits
+
+Four commits: (1) the version bump itself plus the three test-expectation
+updates it required -- small, and the CTS-crash discovery below is a
+*consequence* of this commit, not something bundled into it; (2) the
+copy_commands2 fix (six wrappers, the generator change, one new gtest)
+as its own unit, since it is a real functional gap independent of exactly
+which version bump exposed it; (3) the documentation -- Roadmap.md's new
+§1.9.2, VulkanCTSReport.md's new "Roadmap D0" section, and
+FeMeVulkanDesign.md's deviation note -- written after both measurement
+passes were done, not interleaved with them, so it records what actually
+happened rather than a prediction; (4) this file. I did not attempt any
+of §1.9.2's D1 (the real 1.3/1.4 mandatory-feature inventory) or D3
+(finishing the per-bucket attribution) in this session -- both are
+correctly-scoped follow-on roadmap rows now, not something this pass's
+time budget could responsibly claim to have measured, let alone
+implemented, on top of everything above.
