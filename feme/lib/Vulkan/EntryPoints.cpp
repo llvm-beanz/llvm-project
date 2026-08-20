@@ -69,12 +69,12 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkDestroyInstance(
 
 VKAPI_ATTR VkResult VKAPI_CALL
 feme::vulkan::vkEnumerateInstanceVersion(uint32_t *pApiVersion) {
-  // V3 bumped this from 1.1 to 1.2 for `vkWaitSemaphores`/
-  // `vkSignalSemaphore`/`vkGetSemaphoreCounterValue`'s core (non-`KHR`)
-  // names -- see vk_gen_entrypoints.py's `CORE_FEATURES` comment. This ICD
-  // still implements only a growing subset of either version's full
-  // mandatory surface, exactly as it already did advertising 1.1.
-  *pApiVersion = VK_API_VERSION_1_2;
+  // Roadmap D0 bumped this from 1.2 to 1.4 (see Roadmap.md §1.9.2). This
+  // ICD still implements only a growing subset of 1.4's full mandatory
+  // surface, exactly as it already did advertising 1.1 and then 1.2 --
+  // VulkanCTSReport.md's "Roadmap D0: measured impact" records what
+  // advertising the higher version costs against a stock CTS.
+  *pApiVersion = VK_API_VERSION_1_4;
   return VK_SUCCESS;
 }
 

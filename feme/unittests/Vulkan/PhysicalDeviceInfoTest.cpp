@@ -22,7 +22,7 @@ namespace {
 TEST(PhysicalDeviceInfo, ReportsHonestVersionAndIdentity) {
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
 
-  EXPECT_EQ(Info.Properties.apiVersion, VK_API_VERSION_1_2);
+  EXPECT_EQ(Info.Properties.apiVersion, VK_API_VERSION_1_4);
 
   // The Khronos "not yet assigned an official vendor ID" reserved value
   // (see "Device identity").

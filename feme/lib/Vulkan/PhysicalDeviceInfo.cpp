@@ -130,12 +130,12 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   // Illustrative per "Loader Integration": "The exact advertised API version
   // is selected during implementation from the core command and CTS
   // coverage actually achieved." Development checkpoint version, not a claim
-  // of Vulkan 1.2 conformance (see "Initial Non-Goals": zero
-  // `VkConformanceVersion`). V3 bumped this from 1.1 to 1.2 for
-  // `vkWaitSemaphores`/`vkSignalSemaphore`/`vkGetSemaphoreCounterValue`'s
-  // core (non-`KHR`) names -- see vk_gen_entrypoints.py's `CORE_FEATURES`
-  // comment.
-  Props.apiVersion = VK_API_VERSION_1_2;
+  // of Vulkan 1.4 conformance (see "Initial Non-Goals": zero
+  // `VkConformanceVersion`). Roadmap D0 bumped this from 1.2 to 1.4 (see
+  // Roadmap.md §1.9.2); VulkanCTSReport.md's "Roadmap D0: measured impact"
+  // records the CTS effect of that jump alone, before any 1.3/1.4 mandatory
+  // feature work has landed.
+  Props.apiVersion = VK_API_VERSION_1_4;
   Props.driverVersion = VK_MAKE_API_VERSION(0, 0, 1, 0);
   Props.vendorID = FeMeVendorID;
   Props.deviceID = FeMeDeviceID;
