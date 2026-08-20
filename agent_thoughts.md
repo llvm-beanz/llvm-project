@@ -24899,3 +24899,145 @@ pipelines actually pass CTS"), and each is exactly the kind of
 independently-assignable follow-up row this roadmap's own "small,
 individually testable" discipline asks for rather than folding into this
 commit.
+
+# Roadmap E2: aggregate Vulkan13/14Properties limit-field plumbing
+
+## Task
+
+Implement roadmap E2 ("Wire the aggregate `VkPhysicalDeviceVulkan13Properties`/
+`Vulkan14Properties` `vkGetPhysicalDeviceProperties2` cases"), the second of
+the two prerequisite rows §1.9.3 named ("E1 and E2 below are the one true
+prerequisite"). E1 (aggregate *Features* structs) was already closed by a
+prior session; this one is the *Properties* (limit) side, enumerating all 70
+mandatory 1.3/1.4 limit fields `Vulkan14FeatureInventory.md`'s D1 audit found
+completely unenumerated.
+
+## Where it landed
+
+Same file E1 actually used, `feme/lib/Vulkan/EntryPoints.cpp`'s
+`fillProperties2Chain` (not `PhysicalDeviceInfo.cpp`, the row's own original
+guess in `Roadmap.md` -- I corrected that in the row's closing note, the same
+way E1 needed to update its own row's `Files` column after the fact).
+
+## The draft that looked right and wasn't
+
+The roadmap row's own text explicitly names two fields as "a real minimum
+this ICD can already compute": `maxBufferSize` and
+`storageTexelBufferOffsetAlignmentBytes`. Both are honestly computable from
+state this ICD already tracks (`MaxMemoryAllocationSize`,
+`minTexelBufferOffsetAlignment`). I wrote a first draft doing exactly that
+for several fields -- those two, `minSubgroupSize`/`maxSubgroupSize` (the
+pinned wave size), `maxComputeWorkgroupSubgroups` (derived from the existing
+compute-invocation limit), `lineSubPixelPrecisionBits` (the rasterizer
+precision), `maxVertexAttribDivisor`/`maxCombinedImageSamplerDescriptorCount`
+(each a real `1`), `defaultRobustnessStorageBuffers`/`UniformBuffers`/
+`VertexInputs` (`ROBUST_BUFFER_ACCESS`, since buffer bounds checking is
+unconditionally on), and `identicalMemoryTypeRequirements` (`VK_TRUE`, since
+this ICD reports exactly one memory type) -- with every other field the
+conservative `0`/`VK_FALSE` the task description's second half asked for.
+
+Built it, wrote guard-pattern unit tests mirroring E1's own
+(`Vulkan13PropertiesEnumerateEveryMandatoryLimitConservatively`), all green,
+`ninja check-feme` green. Per this project's own build/test discipline
+("run the repository linters, builds and tests... after each change"), I
+also ran a targeted before/after CTS pass the way D3/E1 established, over
+`dEQP-VK.api.info.*` (10,484 cases) rather than trusting the unit tests
+alone -- unit tests check *this ICD's own* return values in isolation; they
+cannot catch a cross-struct consistency assumption baked into the CTS
+itself, which is exactly what this draft hit.
+
+The diff showed **two** transitions, not the one I expected:
+- `vulkan1p3.properties`: `Fail` -> `Pass` (the intended target).
+- `vulkan1p3.property_extensions_consistency`: `Pass` -> `Fail` (new
+  regression), reason string `"Mismatch between
+  VkPhysicalDeviceSubgroupSizeControlProperties and
+  VkPhysicalDeviceVulkan13Properties"`.
+
+Read `vktApiFeatureInfo.cpp`'s own source for that second test rather than
+guess: it queries the *dedicated*, pre-promotion `VkPhysicalDeviceSubgroup
+SizeControlProperties`/`VkPhysicalDeviceTexelBufferAlignmentProperties`/
+`VkPhysicalDeviceMaintenance4Properties`/etc. structs (one call) and the
+aggregate `VkPhysicalDeviceVulkan13Properties` struct (a separate call), and
+requires every corresponding field to agree -- unconditionally, once
+`apiVersion >= 1.3`, exactly the same "assumed real once the version is
+claimed" shape D3/E1 already established for `dynamicRendering`'s two
+feature structs. This ICD has no case for any of those dedicated *property*
+structs (`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_
+PROPERTIES` and friends), so they all still read back `initVulkanStructure()`'s
+all-zero default. My draft's real, nonzero aggregate values disagreed with
+that zero and failed the check. Grepping the same test function's offset
+table (`properties13OffsetTable`) also showed every single 1.3 property
+field is covered by one of these dedicated-struct checks -- not just the two
+I'd tried to be clever about -- and the 1.4 counterpart
+(`devicePropertyExtensionsConsistencyVulkan14`) covers all 25 of its own
+fields the same way (confirmed `maxCombinedImageSamplerDescriptorCount`,
+`maxVertexAttribDivisor`, and `identicalMemoryTypeRequirements` are each
+tied to `VkPhysicalDeviceMaintenance6PropertiesKHR`/
+`VertexAttributeDivisorPropertiesKHR`/`HostImageCopyPropertiesEXT`
+respectively, so even those "obviously safe" real values would have
+regressed too, once/if the 1.4 test becomes reachable in this environment).
+
+## The fix: every field lands at 0/false/nullptr, none exempted
+
+Rewrote every field in both cases to the conservative placeholder,
+including the ones the roadmap text specifically called out as
+"real-minimum" candidates -- deferring *all* of them to each field's own
+later roadmap row (E4/`maintenance4` for `maxBufferSize`, E7/
+`subgroupSizeControl` for the subgroup fields, E8 for `integerDotProduct*`,
+E18/`texel_buffer_alignment` for the texel alignment pair, F5/F6/F8/F10/
+F11/F12/E6 for the 1.4 groups), each of which is expected to add its own
+dedicated-struct case in lockstep with raising the aggregate value, the same
+paired pattern `dynamicRendering`'s dedicated
+`VkPhysicalDeviceDynamicRenderingFeatures` case and the aggregate
+`VkPhysicalDeviceVulkan13Features` case already establish. Re-ran the same
+before/after `api.info` pass against the corrected build: exactly one
+transition, `vulkan1p3.properties` `Fail` -> `Pass`, nothing else moves.
+`vulkan1p4.properties` stays `NotSupported` in both runs -- confirmed
+byte-identical between the two builds and traced to `Context::
+contextSupports(1,4,0)` returning false in this environment regardless of
+this ICD's own advertised `apiVersion` (a pre-existing, E2-independent
+`deqp-vk` version-negotiation quirk, not chased further -- out of this
+row's stated scope).
+
+## Tests
+
+`Vulkan13PropertiesEnumerateEveryMandatoryLimitConservatively`/
+`Vulkan14PropertiesEnumerateEveryMandatoryLimitConservatively` in
+`PhysicalDeviceInfoTest.cpp`, following the file's existing guard pattern
+(0xAA fill before the call). Both assert every field is the conservative
+placeholder -- there is no "real value" branch left to assert once the
+draft above was reverted.
+
+`ninja check-feme`: 1523/1524 passed (1 unsupported, pre-existing), same
+totals as before this change -- expected, since `check-feme` has no
+system-CTS-backed case for this specific consistency interaction; the CTS
+run above is what actually caught and then confirmed-fixed the regression.
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E2's row, and corrected its own text (the
+  original row proposed real minima for a subset of fields; the closing
+  note explains why every field instead landed as the conservative
+  placeholder, citing the CTS finding). Files column corrected to
+  `EntryPoints.cpp`.
+- `Vulkan14FeatureInventory.md`/`FeMeVulkanDesign.md`: updated the stale "70
+  fields... all unenumerated" finding and D1 status note to reflect E1+E2
+  both landed, with the corrected all-conservative shape.
+- `VulkanCTSReport.md`: new "Roadmap E2: measured impact" section, recording
+  both the intended one-case transition *and* the regression the draft
+  would have introduced (with its exact reason string) as a record of why
+  the landed version looks the way it does -- a future reader shouldn't
+  have to re-discover the property_extensions_consistency trap from
+  scratch the way I did.
+
+## Scope discipline
+
+Touched only `EntryPoints.cpp` (matching E1's own file, not the row's
+original `PhysicalDeviceInfo.cpp` guess), its unit test, and the four
+documents this change directly affects. Did not add any dedicated
+per-extension property struct case (`VkPhysicalDeviceSubgroupSizeControl
+Properties` and the rest) -- each belongs to its own later roadmap row
+(E4/E6/E7/E8/E18/F5/F6/F8/F10/F11/F12), which is also that row's own
+prerequisite: it must add the dedicated case *and* raise the aggregate
+field together, or it will reproduce the exact regression this session's
+CTS run just caught.
