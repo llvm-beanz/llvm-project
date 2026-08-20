@@ -758,6 +758,71 @@ of the other 52 groups, and the shape (every failure a clean rejection,
 no wrong `Pass`) is unchanged -- a full, crash-isolated recount is left to
 roadmap C10 as before.
 
+## Roadmap C8: measured impact
+
+Roadmap C8's own text singled out one specific, concrete member of its
+"shader long tail" bucket as worth measuring in isolation ahead of the rest:
+the "Roadmap C3: measured impact" section's finding that a SPIR-V-imported
+fragment/vertex shader's stage-IO stores reach `feme-cpu-simdize` as a raw,
+un-canonicalized `store` to an `Input`/`Output`-storage-class global,
+because `feme::graphics::CanonicalizeStagePass` was never run by
+`feme::cpu::runPipeline` at all -- only by the separate Vulkan graphics
+pipeline. Reading the code confirmed the gap was real (`runPipeline` never
+ran `CanonicalizeStagePass`, for either import format) and fixed it
+(`feme/lib/Target/CPU/Pipeline.cpp`; see Roadmap.md's updated C8 row and
+FeMeGraphicsDesign.md's deviation note).
+
+**Measuring it against a real `deqp-vk` run found the fix has zero effect
+on any CTS number.** `dEQP-VK.glsl.*` (the exact group C3's own finding
+quoted a representative failure from) was run twice against otherwise
+identical builds -- once with this row's `Pipeline.cpp` change reverted,
+once with it applied -- and produced byte-identical totals both times:
+**0/26,808 passed, 3,396 failed, 23,412 not supported**, including the
+exact same 1,957 occurrences of `feme-cpu-simdize`'s "used outside a
+supported ... pattern" diagnostic in both logs. The reason is
+`feme::vulkan::compileGraphicsStage` (`GraphicsPipeline.cpp`) -- the
+function every real `vkCreateGraphicsPipelines` call in this ICD actually
+goes through to compile a vertex/fragment stage -- already calls
+`feme::graphics::CanonicalizeStagePass` directly on the imported module
+*before* handing it to `feme::cpu::CompiledStage::create` (and so,
+transitively, `runPipeline`), and has done so since roadmap V6, well before
+C3 or this row. `runPipeline`'s own missing call only mattered for a caller
+that reaches it *without* going through `compileGraphicsStage` first --
+`feme::cpu::JITEngine`/`feme-run`'s direct, non-Vulkan compute/graphics
+compilation entry points (exercised by this row's own
+`PipelineTest.Canonicalizes{SPIRV,DXIL}StageIOBeforeWidening`) -- which no
+`dEQP-VK` case ever calls into, since every one of them talks to this ICD
+exclusively through the real Vulkan API.
+
+This means Roadmap.md's C3 section's own attribution -- "the largest single
+reason C3's own headline barely moved" -- does not hold against this
+codebase as it stands today: whatever produced that representative
+`dEQP-VK.glsl.440.linkage.varying.component.frag_out.vec4...` failure the
+C3 section quoted, it was not reachable through `compileGraphicsStage`'s
+already-canonicalizing path, and could not have been the raw-global-store
+shape described (that pattern simply cannot exist downstream of
+`CanonicalizeStagePass`, which converts every stage-IO global load/store to
+`feme.stage.*` calls unconditionally for a Vertex/Fragment entry). The
+1,957 real `glsl` occurrences of this diagnostic in *this* run are outside
+`CanonicalizeStagePass`'s own scope entirely, not stage-IO at all --
+grepping the same log's `error:` lines for shapes immediately preceding it
+shows the divergent values are matrix/aggregate outputs of
+`spirv.CompositeConstruct`/`spirv.OuterProduct` (85+82+67+18 occurrences,
+the pre-existing "graphics stage `Output` variable of matrix or aggregate
+type is not legalized" row), `spirv.Atomic*` calls (16
+`spirv.AtomicIAdd`), and outright unhandled decorations/extension
+instructions (`unhandled Decoration : 'Component'`, `unhandled
+deserializations ... from extension set GLSL.std`) -- every one of them
+already a named row in C8's own bucket, none of them this row's stage-IO
+finding. This row's fix is still worth keeping: it closes a real
+architectural gap between the CPU target's two entry points (documented in
+FeMeGraphicsDesign.md's deviation note, and regression-tested), just not
+one any `dEQP-VK` case can observe. **The rest of C8's bucket -- the
+matrix/aggregate legalization gap, the `spirv.Atomic*` family, descriptor
+arrays of combined image samplers, and the remaining unhandled-opcode/
+diagnostic tail -- remains open, unmeasured beyond this `glsl` group, and
+is not moved by this row.**
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the

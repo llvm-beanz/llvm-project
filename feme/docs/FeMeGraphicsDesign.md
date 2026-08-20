@@ -828,9 +828,15 @@ gap (there were no `feme.stage.*` calls yet to validate), but a real
 correctness gap once `SIMDizePass` reached that shader's stage IO expecting
 one. `runPipeline` now runs `CanonicalizeStagePass` immediately before
 `ValidateStagePass`, so both import paths reach every later pass in their
-already-canonical `feme.stage.*` form, matching the diagram and closing the
-largest measured member of roadmap C8's "shader long tail" bucket (see
-Roadmap.md's C8 row and VulkanCTSReport.md's measured impact).
+already-canonical `feme.stage.*` form, matching the diagram. This closes a
+real gap between `runPipeline`'s two callers, but -- measured against a
+real `deqp-vk` run -- moves no CTS case: `feme::vulkan::compileGraphicsStage`
+(`GraphicsPipeline.cpp`) already calls `CanonicalizeStagePass` directly,
+since roadmap V6, before every real `vkCreateGraphicsPipelines` call
+reaches `runPipeline` at all, so only `feme::cpu::JITEngine`/`feme-run`'s
+direct entry points -- never a `dEQP-VK` case -- were ever routed through
+this gap. See Roadmap.md's C8 row and VulkanCTSReport.md's "Roadmap C8:
+measured impact" for the full before/after comparison.
 
 ### Shared middle-end phases
 
