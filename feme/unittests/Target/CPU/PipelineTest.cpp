@@ -18,6 +18,8 @@
 #include "feme/Target/CPU/Pipeline.h"
 
 #include "feme/Core/ShaderStage.h"
+#include "feme/Core/Signature.h"
+#include "feme/Transforms/DXIL/SignatureImport.h"
 
 #include "llvm/AsmParser/Parser.h"
 #include "llvm/IR/LLVMContext.h"
@@ -121,6 +123,106 @@ TEST(PipelineTest, PreMutationValidationRejectsAnIllegalStageOp) {
   Opts.WaveSize = 4;
   Expected<PipelineResult> Result = runPipeline(*M, Opts);
   ASSERT_THAT_ERROR(Result.takeError(), Failed());
+}
+
+// Roadmap C8's stage-IO-raising finding: a raw SPIR-V `Input`/`Output`-
+// storage-class global load/store (address space 7/8, the shape
+// `feme::spirv::StageIOGlobalVariablePattern`/`attachStageIODecorations`
+// produce -- see spirv-canonicalize-stage.ll) reaches this pipeline
+// un-canonicalized whenever a shader is imported directly rather than
+// routed through the separate Vulkan graphics pipeline first. Before this
+// row, `feme::graphics::CanonicalizeStagePass` was never run by
+// `runPipeline` at all, so the vector-typed `store` below reached
+// `feme::cpu::SIMDizePass` as a plain divergent memory access rather than
+// the per-component `feme.stage.output.store` calls it knows how to widen,
+// hitting that pass's vector-decomposition diagnostic. Now that this
+// pipeline runs `CanonicalizeStagePass` immediately before
+// `ValidateStagePass`, this compiles cleanly end to end.
+TEST(PipelineTest, CanonicalizesRawSPIRVStageIOBeforeWidening) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    target triple = "spirv-unknown-vulkan1.3-pixel"
+
+    @in_var = external addrspace(7) constant i32, !spirv.Decorations !0
+    @out_var = external addrspace(8) global <4 x float>, !spirv.Decorations !0
+
+    define void @ps_main() #0 {
+      %v = load i32, ptr addrspace(7) @in_var
+      %f = sitofp i32 %v to float
+      %vec0 = insertelement <4 x float> poison, float %f, i32 0
+      %vec1 = insertelement <4 x float> %vec0, float %f, i32 1
+      %vec2 = insertelement <4 x float> %vec1, float %f, i32 2
+      %vec3 = insertelement <4 x float> %vec2, float %f, i32 3
+      store <4 x float> %vec3, ptr addrspace(8) @out_var
+      ret void
+    }
+    attributes #0 = { "feme.shader.stage"="fragment" }
+
+    !0 = !{!1}
+    !1 = !{i32 30, i32 0} ; Location 0
+  )");
+  ASSERT_TRUE(M);
+
+  StageCompileOptions Opts;
+  Opts.Stage = ShaderStage::Fragment;
+  Opts.WaveSize = 4;
+  Expected<PipelineResult> Result = runPipeline(*M, Opts);
+  ASSERT_THAT_EXPECTED(Result, Succeeded());
+  EXPECT_EQ(Result->Stage, ShaderStage::Fragment);
+  EXPECT_TRUE(M->getFunction(Result->WrapperName));
+}
+
+// The same gap's DXIL-derived half: `dx.op.loadInput`/`storeOutput`
+// (opcodes 4/5) are never raised by `feme::dxil::OpRaisingPass` (they need
+// signature context that context-free pass does not have -- see
+// `canonicalizeDXILStage`'s comment in CanonicalizeStage.cpp), so a DXIL
+// import reaching this pipeline directly hit the exact same
+// un-canonicalized-stage-IO gap SPIR-V import did. This attaches an
+// `EntrySignature` the way `feme::dxil::SignatureImport` does at DXIL
+// import time, then exercises a vector `storeOutput` the same way the
+// SPIR-V test above does, to prove both import paths are now fixed by the
+// same one-line pipeline change.
+TEST(PipelineTest, CanonicalizesRawDXILStageIOBeforeWidening) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @ps_main() #0 {
+      %v = call i32 @dx.op.loadInput.i32(i32 4, i32 0, i32 0, i8 0, i32 0)
+      %f = sitofp i32 %v to float
+      call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 0, float %f)
+      call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 1, float %f)
+      call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 2, float %f)
+      call void @dx.op.storeOutput.f32(i32 5, i32 0, i32 0, i8 3, float %f)
+      ret void
+    }
+    declare i32 @dx.op.loadInput.i32(i32, i32, i32, i8, i32)
+    declare void @dx.op.storeOutput.f32(i32, i32, i32, i8, float)
+    attributes #0 = { "feme.shader.stage"="fragment" }
+  )");
+  ASSERT_TRUE(M);
+
+  Function *PS = M->getFunction("ps_main");
+  ASSERT_TRUE(PS);
+  EntrySignature Sig;
+  SignatureElement In;
+  In.ElementID = 0;
+  In.Direction = SignatureDirection::Input;
+  In.ComponentType = SignatureComponentType::SInt;
+  Sig.Elements.push_back(In);
+  SignatureElement Out;
+  Out.ElementID = 1;
+  Out.Direction = SignatureDirection::Output;
+  Out.ComponentType = SignatureComponentType::Float;
+  Out.ComponentCount = 4;
+  Sig.Elements.push_back(Out);
+  dxil::setEntrySignature(*PS, Sig);
+
+  StageCompileOptions Opts;
+  Opts.Stage = ShaderStage::Fragment;
+  Opts.WaveSize = 4;
+  Expected<PipelineResult> Result = runPipeline(*M, Opts);
+  ASSERT_THAT_EXPECTED(Result, Succeeded());
+  EXPECT_EQ(Result->Stage, ShaderStage::Fragment);
+  EXPECT_TRUE(M->getFunction(Result->WrapperName));
 }
 
 } // namespace

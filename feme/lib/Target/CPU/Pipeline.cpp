@@ -28,6 +28,7 @@
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/VertexWrapper.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
+#include "feme/Transforms/Graphics/CanonicalizeStage.h"
 #include "feme/Transforms/Graphics/ValidateStage.h"
 
 #include "llvm/Analysis/CGSCCPassManager.h"
@@ -190,19 +191,38 @@ Expected<PipelineResult> runPipeline(Module &M,
     return Entry.takeError();
   std::string EntryName = (*Entry)->getName().str();
 
-  // "Preparation and validation" in feme/docs/FeMeGraphicsDesign.md asks
-  // for a graphics validation step that runs *before* mutation -- i.e.
-  // before `feme::cpu::PreparePass` below restructures control flow --
-  // diagnosing a `feme.stage.*` operand/signature/stage-legality violation
-  // against the shader exactly as authored. Every existing (compute)
-  // caller selects `ShaderStage::Compute`, which has no `feme.stage.*`
-  // operations to validate, so this is a no-op for them.
+  // "CPU Lowering Pipeline" in feme/docs/FeMeGraphicsDesign.md draws this
+  // as one "Graphics canonicalization and validation" box ahead of
+  // `feme::cpu::PreparePass`, but until now only the validation half was
+  // ever wired into this function -- `feme::graphics::CanonicalizeStagePass`
+  // (which rewrites a DXIL `loadInput`/`storeOutput` call or a raw SPIR-V
+  // `Input`/`Output`-storage-class global load/store into the
+  // `feme.stage.*` calls `ValidateStagePass` (immediately below) and
+  // `LinearizePass`/`SIMDizePass` (further down this pipeline) all expect)
+  // was never run at all outside the separate Vulkan graphics pipeline
+  // (`feme::vulkan::compileGraphicsPipeline`/GraphicsPipeline.cpp). A
+  // shader imported straight off disk -- rather than routed through that
+  // Vulkan-specific path first -- therefore reached `SIMDizePass` with its
+  // stage IO still a plain, un-canonicalized memory access, hitting that
+  // pass's vector-decomposition diagnostic (or an unmasked-side-effect gap
+  // for a scalar output) not because widening itself was incomplete, but
+  // because the value being widened was never routed into the mechanism
+  // that already knows how to widen it (roadmap C8's stage-IO-raising
+  // finding). Running it here, before `ValidateStagePass`, closes that gap
+  // for both DXIL and SPIR-V import uniformly and matches
+  // `ValidateStagePass`'s own header comment ("however they got there,
+  // whether from `CanonicalizeStagePass` or written by hand"), which
+  // already assumed this ordering. Every existing (compute) caller selects
+  // `ShaderStage::Compute`, which has no `feme.stage.*` operations (nor any
+  // stage-IO global in address space 7/8) to canonicalize or validate, so
+  // this remains a no-op for them.
   if (Opts.Stage != feme::ShaderStage::Compute) {
     PassBuilder ValidatePB;
     ModuleAnalysisManager ValidateMAM;
     ValidatePB.registerModuleAnalyses(ValidateMAM);
     ErrorDiagnosticGuard ValidateGuard(M.getContext());
     ModulePassManager ValidateMPM;
+    ValidateMPM.addPass(feme::graphics::CanonicalizeStagePass());
     ValidateMPM.addPass(feme::graphics::ValidateStagePass());
     ValidateMPM.run(M, ValidateMAM);
     if (ValidateGuard.sawError())
