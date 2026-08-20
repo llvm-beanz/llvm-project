@@ -66,6 +66,13 @@ Implementing this floor is future roadmap work (tracked as new rows once
 this file's own gap list is triaged), the same sequencing discipline
 roadmap &sect;1.9.1's C1-C8 followed for 1.2.
 
+That triage is now done: [Roadmap.md &sect;1.9.4](Roadmap.md#194-closing-the-vulkan-13-mandatory-floor-e-series)
+(the E-series, closing this file's 1.3 rows) and
+[&sect;1.9.5](Roadmap.md#195-closing-the-vulkan-14-mandatory-floor-f-series)
+(the F-series, closing the 1.4 rows) break every row in the table below
+into an independently assignable task, each citing the specific feature/
+limit/extension name it closes.
+
 | Category | Version | Name | Advertised | Note |
 |---|---|---|---|---|
 | feature | VK_VERSION_1_3 | `robustImageAccess` | no |  |

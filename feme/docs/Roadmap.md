@@ -620,6 +620,137 @@ section will need beyond D1's own inventory -- implementing
 listed until §1.9.1 existed to schedule them against a similarly-measured
 baseline.
 
+D1, D2 and D3 are now done, and §1.9.2's own promise -- "every row this
+section will need beyond D1's own inventory is deliberately not listed yet"
+-- is what §1.9.3-§1.9.5 below deliver: the actual, distributable task
+breakdown, derived directly from `Vulkan14FeatureInventory.md`'s findings
+and D3's regression attribution, at a granularity intended for
+parallel work by independent agents and humans rather than a single
+sequential owner.
+
+#### 1.9.3 Framing decision this breakdown does not get to skip
+
+§1.9.1 flagged "conformance target version... should be made before C1" and
+C1-C8 honored it: 1.0 -> 1.1 -> 1.2 each only advertised once its floor was
+implemented. D0 broke that discipline (apiVersion jumped straight to 1.4
+ahead of any 1.3/1.4 feature work), and D1's inventory is the honest
+accounting of what that costs: **36 mandatory feature bits with 1
+implemented, 70 mandatory limit fields with 0 wired, 39 promoted
+extensions with 2 implemented.** D3 additionally found that the version
+bump alone made three previously-passing buckets regress into `Fail`
+(`spirv_assembly.instruction.compute`, `graphicsfuzz`,
+`compute.pipeline.zero_initialize_workgroup_memory`, 501 cases total) by
+making `deqp-vk` assume promoted-but-unimplemented capabilities are real.
+
+This roadmap does **not** revert the version bump -- undoing D0 would
+throw away D1-D3's own measurements and restart the same climb from a
+different number -- but every row below is written so a distributor can
+choose either of two strategies without redoing the inventory:
+
+- **Strategy A (recommended): finish §1.9.4 (the full 1.3 floor) before
+  starting any §1.9.5 (1.4-only) row**, actually reaching 1.3 conformance
+  as a real, submittable milestone before continuing to 1.4, mirroring
+  C1-C8's own "advertise what's implemented" discipline one level higher
+  instead of abandoning it a second time.
+- **Strategy B: run both tracks in parallel** if the distributor has
+  enough independent agents/humans that §1.9.4 and §1.9.5 do not compete
+  for the same reviewer bandwidth -- the two tracks touch almost entirely
+  disjoint files (§1.9.5's rows are new `lib/Vulkan/*` cases and new
+  `EntryPoints.cpp` command stubs; only E1/E2's struct plumbing is a
+  shared dependency both tracks reuse, so it should land first regardless
+  of which strategy is chosen).
+
+Either way, **E1 and E2 below are the one true prerequisite**: they are
+the aggregate feature/limit struct plumbing every other row in both
+§1.9.4 and §1.9.5 registers itself into, the same "one small addition,
+every subsequent row plugs into it" role R11's `Diagnostic`/`Exporter`
+scaffolding played for §1.1-§1.5.
+
+#### 1.9.4 Closing the Vulkan 1.3 mandatory floor (E-series)
+
+Each row is independently assignable: one agent or human, one feature (or
+a tightly-coupled pair sharing one code path), one commit series, one
+lit/unittest addition, following `.instructions.md`'s "small, individually
+testable" rule. "CTS" cites the specific regression D3 traced to that gap,
+where one is known; most rows have no known regression today because the
+capability is simply unadvertised (`NotSupported`, not `Fail`) rather than
+lied about, so their CTS payoff is newly-*passing* mandatory cases, not
+newly-fixed failures, and is unmeasured until each row's own CTS run.
+
+| # | Task | Depends on | Files | Priority |
+|---|---|---|---|---|
+| E1 | **Wire the aggregate `VkPhysicalDeviceVulkan13Features`/`Vulkan14Features` `vkGetPhysicalDeviceFeatures2` cases.** Today only the pre-promotion `VK_KHR_dynamic_rendering` struct case exists; add the two aggregate cases, populating every member from whatever per-extension state already exists (`dynamicRendering=VK_TRUE` today) and `VK_FALSE` for everything still unimplemented, exactly mirroring the existing `VULKAN_1_2_FEATURES` case's pattern. This is what `dEQP-VK.api.info.*`'s consistency checks and every `VK_KHR_dynamic_rendering`-support probe (`draw`/`renderpasses`/`pipeline`, 822 cases) actually read | none | `feme/lib/Vulkan/EntryPoints.cpp` | P0 |
+| E2 | **Wire the aggregate `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` `vkGetPhysicalDeviceProperties2` cases**, enumerating all 70 mandatory limit fields from `Vulkan14FeatureInventory.md`'s table. Most are either a real minimum this ICD can already compute (e.g. `maxBufferSize`, `storageTexelBufferOffsetAlignmentBytes`) or a truthful `VK_FALSE`/`0` for a capability not yet implemented (every `integerDotProduct*Accelerated` bit until E8 lands, `maxPushDescriptors` until F12 lands). Land the struct case with every field set to a conservative, honest value first, then let each later row (E8, F5, F11, F12, ...) raise its own subset once the feature behind it is real, instead of blocking this row on every other one | none | `feme/lib/Vulkan/PhysicalDeviceInfo.cpp` | P0 |
+| E3 | **`VK_KHR_synchronization2`/`synchronization2`.** `vkCmdPipelineBarrier2`/`vkCmdWriteTimestamp2`/`vkQueueSubmit2`/`vkCmdSetEvent2`/`vkCmdResetEvent2`/`vkCmdWaitEvents2` translate `VkDependencyInfo`'s per-resource `VkMemoryBarrier2`/`VkBufferMemoryBarrier2`/`VkImageMemoryBarrier2` (2-stage-mask, 2-access-mask shape) down to the existing 1-mask `Sync.{h,cpp}` model, the same "new entrypoint, old backing model" pattern C7 used for queue families | E2 (for the feature bit) | `feme/lib/Vulkan/Sync.{h,cpp}`, `EntryPoints.cpp`, `vk_gen_entrypoints.py` | P0 |
+| E4 | **`VK_KHR_maintenance4`/`maintenance4`.** `vkGetDeviceBufferMemoryRequirements`/`vkGetDeviceImageMemoryRequirements`/`vkGetDeviceImageSparseMemoryRequirements` compute requirements from a `VkBufferCreateInfo`/`VkImageCreateInfo` directly (no live object needed) by factoring the existing `vkCreateBuffer`/`vkCreateImage` sizing logic into a shared helper both the live and the info-only entrypoint call; also relaxes `vkCreateShaderModule`'s local-size-id/local-size validation and `VK_KHR_maintenance4`'s zero-size-descriptor-array rule | none | `feme/lib/Vulkan/{Memory,Image}.cpp`, `EntryPoints.cpp` | P1 |
+| E5 | **`VK_KHR_maintenance5`/`maintenance5`.** Chiefly `VkRenderingAttachmentInfo::imageView == VK_NULL_HANDLE` (an attachment slot present but unused, needing `RenderPass.cpp`'s dynamic-rendering path to skip rather than reject a null view), `VK_FORMAT_A8_UNORM`/`A1B5G5R5_UNORM_PACK16`, and `vkCmdBindIndexBuffer2` (a `size`-bounded variant of the existing bind, sharing `CommandBuffer.cpp`'s existing validation minus the "whole buffer" assumption) | E2 | `feme/lib/Vulkan/{RenderPass,CommandBuffer,Format}.cpp` | P1 |
+| E6 | **`VK_KHR_maintenance6`/`maintenance6`.** `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`/`vkCmdPushDescriptorSet2` are shape-compatible wrappers around the existing `Descriptor.cpp`/`CommandBuffer.cpp` entrypoints, taking a `pNext`-extensible info struct instead of a flat argument list; `maxCombinedImageSamplerDescriptorCount`'s reporting is the one new limit (E2 already reserves the field) | E2, E12 (push descriptor sets need F12's `pushDescriptor` groundwork first if implemented together, otherwise stub `PushDescriptorSet` count `0`) | `feme/lib/Vulkan/{Descriptor,CommandBuffer}.cpp` | P1 |
+| E7 | **`VK_EXT_subgroup_size_control`/`subgroupSizeControl` + `computeFullSubgroups`.** `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` lets a compute pipeline request an explicit subgroup size; `GroupSize.cpp` (already the home of subgroup-size computation, per its name) needs an override path, and `minSubgroupSize`/`maxSubgroupSize`/`maxComputeWorkgroupSubgroups`/`requiredSubgroupSizeStages` (E2's placeholders) become real once this lands | E2 | `feme/lib/Vulkan/GroupSize.cpp`, `EntryPoints.cpp` | P1 |
+| E8 | **`VK_KHR_shader_integer_dot_product`/`shaderIntegerDotProduct`.** The largest single limit cluster in E2's placeholder set (36 of the 70 fields are `integerDotProduct*Accelerated` bits): decide, measure, and report truthfully whether this CPU target's `OpSDot`/`OpUDot`/`OpSUDot`-family lowering (new `spirv`->`llvm` conversion patterns, since none exist today per `Vulkan14FeatureInventory.md`) is actually hardware-accelerated (likely `VK_FALSE` for all 36 on a CPU executor -- a truthful "supported but not accelerated" is a valid, conformant answer and cheaper than claiming acceleration this target cannot deliver) | E2, §1.2 (new `spirv` dialect conversion patterns) | `feme/lib/Conversion/SPIRVToLLVM`, `feme/lib/Vulkan/PhysicalDeviceInfo.cpp` | P1 |
+| E9 | **`VK_EXT_pipeline_creation_cache_control`/`pipelineCreationCacheControl`.** `VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`/`VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT` are flag-only additions to `GraphicsPipeline.cpp`/`Pipeline.cpp`'s existing creation path and `PipelineCache.{h,cpp}`'s existing cache object -- no new object model, purely accepting and honoring two new bits | none | `feme/lib/Vulkan/{GraphicsPipeline,Pipeline,PipelineCache}.cpp` | P2 |
+| E10 | **`VK_EXT_private_data`/`privateData`.** `VkPrivateDataSlot` is a new, small object (an opaque per-(object-handle) `uint64_t` map) alongside the existing object model in `Objects.h`; `vkCreatePrivateDataSlot`/`vkSetPrivateData`/`vkGetPrivateData`/`vkDestroyPrivateDataSlot` are new, self-contained entrypoints with no dependency on any other row here | none | `feme/lib/Vulkan/Objects.h`, new `PrivateData.{h,cpp}` | P2 |
+| E11 | **`VK_EXT_shader_demote_to_helper_invocation`/`shaderDemoteToHelperInvocation`.** SPIR-V's `OpDemoteToHelperInvocation` needs a new `spirv`->`llvm` conversion pattern (mark the invocation inactive for further side effects, matching HLSL `discard`'s existing non-terminating semantics rather than DXIL's `discard`'s current lowering, if one exists -- audit `SPIRVToLLVMPatterns.cpp` first) | §1.2 | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` | P1 |
+| E12 | **`VK_KHR_shader_terminate_invocation`/`shaderTerminateInvocation`.** SPIR-V's `OpTerminateInvocation` (a true terminator, unlike `OpDemoteToHelperInvocation`) needs its own conversion pattern lowering to an unconditional discard-and-return. **Closes D3's `graphicsfuzz` 72-case regression** (CTS assumes this promoted-to-1.3 extension is real once `apiVersion >= 1.3`) | §1.2 | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` | P0 |
+| E13 | **`VK_KHR_zero_initialize_workgroup_memory`/`shaderZeroInitializeWorkgroupMemory`.** `Workgroup`-storage-class SPIR-V globals need a zero-initializer emitted once per dispatch (likely in `feme::cpu::SPIRVResourceLoweringPass` or a small new pass run before it) rather than reading whatever the host's memory allocator happened to leave behind. **Closes D3's `compute.pipeline.zero_initialize_workgroup_memory` 7-case regression** | §1.2/§1.6 | `feme/lib/Target/CPU` | P0 |
+| E14 | **`VK_EXT_inline_uniform_block`/`inlineUniformBlock` + `descriptorBindingInlineUniformBlockUpdateAfterBind`.** A new `VkDescriptorType` whose "descriptor" is inline byte storage rather than a handle -- `Descriptor.{h,cpp}`'s existing per-binding storage needs a byte-blob variant alongside its current handle-array one, and `VkWriteDescriptorSetInlineUniformBlock` is a new `pNext` case in the existing `vkUpdateDescriptorSets` walk | none | `feme/lib/Vulkan/Descriptor.{h,cpp}` | P1 |
+| E15 | **`VK_EXT_texture_compression_astc_hdr`/`textureCompressionASTC_HDR`.** A new decode path in `Format.{h,cpp}` for the 14 ASTC HDR block formats, reusing whatever LDR ASTC decode already exists (check `Format.cpp` first — if LDR ASTC is itself unimplemented, this row's scope grows to include it and should be split) | none (verify LDR ASTC status first) | `feme/lib/Vulkan/Format.{h,cpp}` | P2 |
+| E16 | **`VK_EXT_image_robustness`/`robustImageAccess`.** Out-of-bounds image reads/writes must return/discard rather than fault; audit `Image.cpp`'s/`ImageOps.cpp`'s existing bounds handling (Executor's texel read/write path) and add an explicit clamp-or-discard for any coordinate outside the image's declared extent that isn't already handled | none | `feme/lib/Vulkan/{Image,ImageOps}.cpp` | P1 |
+| E17 | **SPIR-V 1.6 `Nontemporal` image-operand bit.** Not a feature-bit gap but a shader-compilation one: `ImageFetchPattern`/`ImageFetchLodPattern`/`ImageSampleExplicitLodPattern` (`SPIRVToLLVMPatterns.cpp`) reject any image operand mask they don't recognize exactly, and SPIR-V 1.6's cache hint bit has no case. Since it has no correctness effect, the fix is to accept and discard it rather than model caching. **Closes D3's `spirv_assembly.instruction.compute` 422-case regression**, the largest single item in this section | none | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` | P0 |
+| E18 | **Texel-buffer-format/robustness inconsistency** (D3's `robustness.oob_access` 6-case regression, not yet root-caused past "format/robustness mismatch" -- this row starts with tracing it to a specific line, the way D3 did for its other five buckets, before fixing it) plus `VK_EXT_texel_buffer_alignment`'s two limit fields (`storageTexelBufferOffsetAlignmentBytes`/`SingleTexelAlignment`, `uniformTexelBufferOffsetAlignmentBytes`/`SingleTexelAlignment`, already reserved by E2) | E2 | `feme/lib/Vulkan/{Format,Buffer}.cpp` | P0 |
+| E19 | **Remaining small 1.3 extensions with no feature bit of their own**, each a mechanical, independent addition: `VK_EXT_4444_formats` (2 new `Format.cpp` formats), `VK_EXT_ycbcr_2plane_444_formats` (1 new format, decline if YCbCr sampling itself is unimplemented — check first), `VK_EXT_pipeline_creation_feedback` (`VkPipelineCreationFeedback` timing struct, can honestly report zero/estimated timings), `VK_KHR_format_feature_flags2` (`VkFormatProperties3`, mirrors the existing `VkFormatProperties2` case with the 2 new bit ranges), `VK_KHR_shader_non_semantic_info` (SPIR-V debug-info-only opcodes the importer can already skip/ignore), `VK_EXT_tooling_info` (`vkGetPhysicalDeviceToolProperties` can truthfully report zero tools) | none | `feme/lib/Vulkan/{Format,Pipeline,EntryPoints}.cpp` | P2 |
+
+Recommended independent lanes for parallel distribution (each lane's rows
+share files/reviewers; lanes themselves are independent once E1/E2 land):
+**Lane 1** (sync/dispatch): E3, E6. **Lane 2** (memory/image queries): E4,
+E5, E16, E18. **Lane 3** (compute/shader): E7, E8, E11, E12, E13 (E12/E13
+are P0 and should not wait for E7/E8/E11 in the same lane). **Lane 4**
+(descriptors/misc small extensions): E9, E10, E14, E15, E19. **Lane 5**
+(shader compilation, no feature-bit dependency, start immediately): E17.
+
+#### 1.9.5 Closing the Vulkan 1.4 mandatory floor (F-series)
+
+Same granularity and testing discipline as §1.9.4. Every row here depends
+on E1/E2's struct plumbing (the 1.4 aggregate cases, not just the 1.3
+ones) but not on any specific E-row otherwise, so — per §1.9.3's Strategy
+B — this whole section can start as soon as E1/E2 land if enough
+independent capacity exists, even before §1.9.4 fully closes.
+
+| # | Task | Depends on | Files | Priority |
+|---|---|---|---|---|
+| F1 | **`VK_KHR_global_priority`/`globalPriorityQuery`.** `VkDeviceQueueGlobalPriorityCreateInfo` at `vkCreateDevice` and `vkGetPhysicalDeviceQueueFamilyProperties2`'s `VkQueueFamilyGlobalPriorityProperties` chain; since this ICD has one worker pool with no real OS-level scheduling priority, report the full mandatory priority list as supported and treat the create-time hint as a no-op (matching the "single logical queue, narrowed by capability flags only" precedent C7 set) | E1/E2 | `feme/lib/Vulkan/PhysicalDeviceInfo.cpp` | P2 |
+| F2 | **`VK_KHR_shader_subgroup_rotate`/`shaderSubgroupRotate`(+`Clustered`).** New `spirv`->`llvm` conversion patterns for `OpGroupNonUniformRotateKHR`; note `Vulkan14FeatureInventory.md`'s existing finding that no `OpGroupNonUniform*` operation converts at all yet (`shaderSubgroupExtendedTypes` is vacuously true for the same reason) — this row should audit and likely close that whole family together rather than add one more vacuous bit | §1.2 | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` | P1 |
+| F3 | **`VK_KHR_shader_float_controls2`/`shaderFloatControls2`.** Per-instruction (rather than per-module) rounding-mode/denorm-preservation execution modes; audit whether `VK_KHR_shader_float_controls`'s per-module form is implemented at all first (`Vulkan14FeatureInventory.md` doesn't list it, so check `SPIRVToLLVMPatterns.cpp`/`ImportSPIRV` before scoping this row) | §1.2 | `feme/lib/Conversion/SPIRVToLLVM` | P2 |
+| F4 | **`VK_KHR_shader_expect_assume`/`shaderExpectAssume`.** `OpAssumeTrueKHR`/`OpExpectKHR` lower directly to `llvm.assume`/`llvm.expect` intrinsics — one of the smallest rows in this whole breakdown, good as a first task for a new contributor | §1.2 | `feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` | P2 |
+| F5 | **`VK_KHR_line_rasterization`** (`rectangularLines`/`bresenhamLines`/`smoothLines` + their `stippled*` variants) **+ its 2 limit fields.** C4d already built a line-topology rasterizer (1-pixel-wide quad expansion); this row generalizes it to variable width and the three line styles, then adds stippling as a per-fragment pattern test against `VkPipelineRasterizationLineStateCreateInfo`'s stipple factor/pattern. The largest single G-track item in this section — consider splitting rectangular/bresenham/smooth from the three `stippled*` variants into two separately assignable pieces | E2, §1.8 (rasterizer) | `feme/lib/Vulkan/GraphicsPipeline.cpp`, `feme::graphics` executor | P1 |
+| F6 | **`VK_KHR_vertex_attribute_divisor`/`vertexAttributeInstanceRateDivisor`(+`Zero`) + `maxVertexAttribDivisor`.** `VkVertexInputBindingDivisorDescription` extends the existing per-binding instance-rate stepping already implied by instanced draws; a divisor of 0 (every instance reads vertex 0) is the one new case, not a new mechanism | E2 | `feme/lib/Vulkan/GraphicsPipeline.cpp` | P2 |
+| F7 | **`VK_KHR_index_type_uint8`/`indexTypeUint8`.** `vkCmdBindIndexBuffer`'s existing 16/32-bit index read in `CommandBuffer.cpp`/the executor gains an 8-bit case — mechanical, narrow, good second task after F4 | none | `feme/lib/Vulkan/CommandBuffer.cpp`, `feme::graphics` executor | P2 |
+| F8 | **`VK_KHR_dynamic_rendering_local_read`/`dynamicRenderingLocalRead` + its 2 limit fields.** `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` let a fragment shader read the current attachment bindings as input attachments without a render-pass restart; builds on V6's dynamic-rendering render-target binding | E2, V6 (done) | `feme/lib/Vulkan/{RenderPass,GraphicsPipeline}.cpp` | P1 |
+| F9 | **`VK_EXT_pipeline_protected_access`/`pipelineProtectedAccess`.** This ICD has no protected-memory model at all (no protected queue/allocation exists); the honest, conformant answer is likely to accept the flag as a no-op restriction (reject creating a protected+unprotected-mixed pipeline, matching the spec's validation rules) without implementing real memory protection — confirm against the spec's exact conformance requirement before assuming this is sufficient | none | `feme/lib/Vulkan/{GraphicsPipeline,Pipeline}.cpp` | P2 |
+| F10 | **`VK_EXT_pipeline_robustness`/`pipelineRobustness` + its 4 `defaultRobustness*` limit fields.** `VkPipelineRobustnessCreateInfo` lets a pipeline opt in/out of robust buffer/image access per-binding-class rather than only device-wide; depends on E16's image-robustness groundwork existing to have something to opt in/out of | E2, E16 | `feme/lib/Vulkan/{GraphicsPipeline,Pipeline}.cpp` | P1 |
+| F11 | **`VK_EXT_host_image_copy`/`hostImageCopy` + its 6 limit/list fields.** The largest single new mechanism in this section: `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`/`vkTransitionImageLayout` copy/transition without a command buffer at all, needing a host-side (not executor-queued) path into `Image.cpp`'s existing layout/format machinery; `pCopySrcLayouts`/`pCopyDstLayouts` (per D1's own finding, an enumerated list, not a scalar limit) is the supported-layout list this new path accepts | E2, Image.cpp | new `feme/lib/Vulkan/HostImageCopy.{h,cpp}` | P1 |
+| F12 | **`VK_KHR_push_descriptor`/`pushDescriptor` + `maxPushDescriptors`.** `vkCmdPushDescriptorSet` writes descriptors directly into a command buffer's recorded state without a `VkDescriptorSet` object at all — a new, lighter-weight descriptor path alongside `Descriptor.{h,cpp}`'s existing pool-backed one, sharing its binding-to-heap-slot translation | E2, E6 (F12 and E6's `vkCmdPushDescriptorSet2` share the same underlying mechanism — implement together or explicitly sequence one before the other) | `feme/lib/Vulkan/{Descriptor,CommandBuffer}.cpp` | P1 |
+| F13 | **`VK_KHR_load_store_op_none` (no feature bit).** `VK_ATTACHMENT_LOAD_OP_NONE`/`VK_ATTACHMENT_STORE_OP_NONE` are two new enumerants `RenderPass.cpp`'s existing load/store-op switch already has a natural "do nothing" case for — one of the smallest rows in this whole breakdown | none | `feme/lib/Vulkan/RenderPass.cpp` | P2 |
+| F14 | **`VK_KHR_map_memory2`.** `vkMapMemory2`/`vkUnmapMemory2` are `pNext`-extensible wrappers around the existing `Memory.cpp` map/unmap, adding `VkMemoryUnmapFlagsKHR`'s reserve-on-unmap bit | none | `feme/lib/Vulkan/Memory.cpp` | P2 |
+
+Recommended independent lanes: **Lane 1** (shader compilation, no
+feature-bit dependency once E1/E2 land): F2, F3, F4. **Lane 2**
+(rasterizer/graphics pipeline): F5, F6, F13. **Lane 3** (command
+buffer/index/memory): F7, F14. **Lane 4** (descriptors, sequence F12 and
+E6 together): F12. **Lane 5** (robustness/protected access, sequence
+after E16): F9, F10. **Lane 6** (new subsystems, largest single items,
+good candidates for a dedicated owner rather than a quick task): F1, F8,
+F11.
+
+#### 1.9.6 Cross-cutting tasks, not gated on any single E/F row
+
+| # | Task | Priority |
+|---|---|---|
+| G1 | **Promote D4 (continuous, crash-tolerant CTS measurement) from "whenever time allows" to a hard prerequisite for merging any E/F row past the first two or three.** With ~33 independent rows landing from potentially-independent agents, a hand-rolled per-run Python diff (D0-D3's own method) does not scale; land D4 early enough that each E/F row's own PR can cite an automated before/after rather than a manually-run one | P0 |
+| G2 | **Finish roadmap C10** (a checked-in expected-failure list and full 54-group CI job), still open per §1.9.1's table. Without it, an E/F row's regression is discovered only by whoever happens to run the full suite next, the same class of gap D0's own second-pass loader crash and D3's misattributed buckets both trace back to | P0 |
+| G3 | **A per-row CTS re-measurement discipline**, matching D1-D3's own precedent: every E/F row's PR should cite the specific `dEQP-VK` group(s) it targets and the actual before/after count for that group — not the whole 54-group suite unless the change plausibly touches more than one (the same "targeted, real, not simulated" scoping D1 used for its own no-op entrypoint-table change) | P0 |
+| G4 | **Re-triage `Vulkan14FeatureInventory.md`'s two verify-first rows** (E15's ASTC HDR depends on LDR ASTC's own status, F3's `shaderFloatControls2` depends on the unpromoted `shaderFloatControls`'s own status) before assigning them, since each may expand into its own separate row once checked | P1 |
+| G5 | **Once §1.9.4 (1.3) is fully closed under Strategy A, or continuously under Strategy B, re-run and update this section's own "not yet measured" rows** with real CTS deltas, the same way §1.9.1's C-rows each grew a "measured impact" parenthetical as they closed | P1 |
+
 ### 1.10 Direct3D software adapter
 
 Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md). Nothing exists.
