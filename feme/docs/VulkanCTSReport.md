@@ -752,3 +752,59 @@ shaders happen to use a `switch` statement, an explicit-LOD texel fetch, or
 `dot()`), and zero crashes in either run. `ninja check-feme`: 1492/1493
 passed, 1 unsupported (pre-existing, unrelated), before and after each of
 the three commits.
+
+## Addendum: SPIR-V `spirv.Image`/`spirv.VulkanBuffer` AMDGPU-lowering fix (out of this report's scope)
+
+Two follow-up commits to `feme::amdgpu::ResourceLoweringPass`
+(`feme/lib/Transforms/AMDGPU/ResourceLowering.cpp`) fixed the same
+bilateral-filter-style HLSL compute shader the "SPIR-V `spirv.Switch`/
+`spirv.ImageFetch`+`Lod`/`spirv.Dot`" addendum above describes hitting a
+further, AMDGPU-only failure once the three `SPIRVToLLVMPatterns.cpp`
+legalization gaps that addendum fixed let it legalize far enough to
+reach `feme --target=amdgpu9.0a-amd-amdhsa`:
+
+```
+feme: resource handle type 'spirv.Image' is not supported when
+targeting 'amdgpu9.0a-amd-amdhsa' (produced in function 'main')
+```
+
+`feme::amdgpu::ResourceLoweringPass`'s SPIR-V-flavored coordinate handling
+had only ever been exercised against a 1D `Buffer`/`RWBuffer` pair; a
+genuinely 2D `Texture2D`/`RWTexture2D` pair's vector coordinate (and
+`Texture2D<T>::Load`'s `llvm.spv.resource.load.level` intrinsic, which
+`hasOnlySupportedUses` did not recognize at all) needed linearizing the
+same way the `dx.Texture`/AMDGPU path's coordinate already is; a second,
+previously unmodeled SPIR-V cbuffer handle (`target("spirv.VulkanBuffer",
+...)`, not `spirv.Image`) needed a single `AllResourceOps` table entry.
+See `feme/docs/Design.md`'s "Raised LLVM IR -> AMDGPU" Status note and
+`agent_thoughts.md` for the full writeup.
+
+Unlike that addendum's own `SPIRVToLLVMPatterns.cpp` fixes -- which *are*
+on `libfeme_vulkan`'s own path -- `feme::amdgpu::ResourceLoweringPass` is
+not: it is reached only from `feme::amdgpu::TargetMachineBackend`'s own
+pass pipeline when retargeting to an `amdgcn-*` triple, a path
+`libfeme_vulkan` (whose Vulkan devices are backed by `feme::cpu`, per
+`feme::Vulkan::PhysicalDeviceInfo.cpp`) never takes. Confirmed two ways
+rather than assumed:
+
+- `grep -rl amdgpu feme/lib/Vulkan/ feme/include/feme/Vulkan/` and
+  `grep FeMeTransformsAMDGPU feme/tools/feme-vulkan/CMakeLists.txt` both
+  found nothing: no source file or CMake target under `libfeme_vulkan`
+  references the AMDGPU transforms library at all.
+- After both commits, `ninja lib/libfeme_vulkan.so` in this report's own
+  `./build` reported `ninja: no work to do` -- Ninja's own dependency
+  graph agrees the shared library did not need relinking, which is
+  stronger evidence of "unreachable" than a comparative CTS run of any
+  size would be (a rebuilt-but-byte-identical binary would still leave
+  some doubt about whether the *right* object files were rebuilt; an
+  unrebuilt one leaves none).
+
+Given that, no `dEQP-VK` run (full or spot-check) was performed for this
+addendum: every one of this report's 3,237,000 cases already exercises the
+exact `libfeme_vulkan.so` these two commits did not touch, so a re-run
+could only ever reproduce the headline numbers above verbatim while
+consuming the multi-hour cost "Reproducing this report" describes, with no
+additional evidence over the two checks already made. `ninja check-feme`
+(includes `FeMeVulkanTests` and `libfeme_vulkan` itself in its dependency
+graph): 1495/1496 passed, 1 unsupported (pre-existing, unrelated), after
+both commits.
