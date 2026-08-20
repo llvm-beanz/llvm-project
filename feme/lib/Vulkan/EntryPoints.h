@@ -328,6 +328,32 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer commandBuffer,
                                           uint32_t regionCount,
                                           const VkImageCopy *pRegions);
 
+// Roadmap D0: core Vulkan 1.3 promoted these `..2` copy commands from
+// `VK_KHR_copy_commands2` (`pRegions`-array parameters wrapped in a single
+// `pNext`-extensible info struct instead of passed as separate arguments,
+// see "Roadmap D0: measured impact" in VulkanCTSReport.md for why these
+// six specifically had to land alongside the apiVersion bump rather than
+// after it). Each just unwraps its info struct and delegates to the
+// identical logic its non-`2` counterpart above already implements.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyBuffer2(VkCommandBuffer commandBuffer,
+                 const VkCopyBufferInfo2 *pCopyBufferInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyImage2(VkCommandBuffer commandBuffer,
+                const VkCopyImageInfo2 *pCopyImageInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
+                        const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
+                        const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBlitImage2(VkCommandBuffer commandBuffer,
+                const VkBlitImageInfo2 *pBlitImageInfo);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdResolveImage2(VkCommandBuffer commandBuffer,
+                   const VkResolveImageInfo2 *pResolveImageInfo);
+
 // V3: push constants (see "Descriptor Model" and "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
                                               VkPipelineLayout layout,

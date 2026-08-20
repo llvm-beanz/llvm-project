@@ -481,6 +481,65 @@ TEST_F(CommandBufferTest, CopyBufferCopiesData) {
   vkFreeMemory(Device, Dst.Memory, nullptr);
 }
 
+// Roadmap D0: `vkCmdCopyBuffer2` (core in Vulkan 1.3, once this driver
+// bumped its advertised apiVersion to 1.4) must produce exactly the copy
+// `vkCmdCopyBuffer` already does -- it is the same command with its
+// region array wrapped in a `pNext`-extensible info struct instead of
+// passed as separate parameters. See "Roadmap D0: measured impact" in
+// VulkanCTSReport.md for the crash this closes.
+TEST_F(CommandBufferTest, CopyBuffer2CopiesData) {
+  HostBuffer Src, Dst;
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 16;
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Src.Buf), VK_SUCCESS);
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Dst.Buf), VK_SUCCESS);
+
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = 16;
+  AllocInfo.memoryTypeIndex = 0;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Src.Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Dst.Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Src.Buf, Src.Memory, 0), VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, Dst.Buf, Dst.Memory, 0), VK_SUCCESS);
+
+  ASSERT_EQ(vkMapMemory(Device, Src.Memory, 0, VK_WHOLE_SIZE, 0, &Src.Data),
+            VK_SUCCESS);
+  uint32_t Payload[4] = {5, 6, 7, 8};
+  std::memcpy(Src.Data, Payload, sizeof(Payload));
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  VkBufferCopy2 Region{};
+  Region.sType = VK_STRUCTURE_TYPE_BUFFER_COPY_2;
+  Region.size = 16;
+  VkCopyBufferInfo2 CopyInfo{};
+  CopyInfo.sType = VK_STRUCTURE_TYPE_COPY_BUFFER_INFO_2;
+  CopyInfo.srcBuffer = Src.Buf;
+  CopyInfo.dstBuffer = Dst.Buf;
+  CopyInfo.regionCount = 1;
+  CopyInfo.pRegions = &Region;
+  vkCmdCopyBuffer2(CmdBuf, &CopyInfo);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  void *DstData = nullptr;
+  ASSERT_EQ(vkMapMemory(Device, Dst.Memory, 0, VK_WHOLE_SIZE, 0, &DstData),
+            VK_SUCCESS);
+  EXPECT_EQ(std::memcmp(DstData, Payload, sizeof(Payload)), 0);
+
+  vkDestroyBuffer(Device, Src.Buf, nullptr);
+  vkDestroyBuffer(Device, Dst.Buf, nullptr);
+  vkFreeMemory(Device, Src.Memory, nullptr);
+  vkFreeMemory(Device, Dst.Memory, nullptr);
+}
+
 TEST_F(CommandBufferTest, FillBufferFillsRegion) {
   HostBuffer Dst;
   VkBufferCreateInfo BufferInfo{};

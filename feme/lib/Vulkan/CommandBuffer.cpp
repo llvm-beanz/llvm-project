@@ -1859,6 +1859,82 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer commandBuffer,
                   fromHandle<vulkan::Image>(dstImage), std::move(Regions));
 }
 
+// The `vkCmd*2` wrappers below each unwrap a `VK_KHR_copy_commands2`
+// `..Info2` struct's own `pNext`-extensible region array (every element the
+// same fields as its non-`2` counterpart, only prefixed by `sType`/`pNext`,
+// which the Vulkan spec guarantees for every one of these region types) and
+// delegate to the identical `vulkan::CommandBuffer` method its non-`2`
+// counterpart above already calls; see "V5: image/buffer copies".
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyBuffer2(VkCommandBuffer commandBuffer,
+                 const VkCopyBufferInfo2 *pCopyBufferInfo) {
+  std::vector<VkBufferCopy> Regions;
+  Regions.reserve(pCopyBufferInfo->regionCount);
+  for (uint32_t I = 0; I < pCopyBufferInfo->regionCount; ++I) {
+    const VkBufferCopy2 &R = pCopyBufferInfo->pRegions[I];
+    Regions.push_back(VkBufferCopy{R.srcOffset, R.dstOffset, R.size});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyBuffer(fromHandle<vulkan::Buffer>(pCopyBufferInfo->srcBuffer),
+                   fromHandle<vulkan::Buffer>(pCopyBufferInfo->dstBuffer),
+                   std::move(Regions));
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdCopyImage2(VkCommandBuffer commandBuffer,
+                const VkCopyImageInfo2 *pCopyImageInfo) {
+  std::vector<VkImageCopy> Regions;
+  Regions.reserve(pCopyImageInfo->regionCount);
+  for (uint32_t I = 0; I < pCopyImageInfo->regionCount; ++I) {
+    const VkImageCopy2 &R = pCopyImageInfo->pRegions[I];
+    Regions.push_back(VkImageCopy{R.srcSubresource, R.srcOffset,
+                                  R.dstSubresource, R.dstOffset, R.extent});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyImage(fromHandle<vulkan::Image>(pCopyImageInfo->srcImage),
+                  fromHandle<vulkan::Image>(pCopyImageInfo->dstImage),
+                  std::move(Regions));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage2(
+    VkCommandBuffer commandBuffer,
+    const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo) {
+  std::vector<VkBufferImageCopy> Regions;
+  Regions.reserve(pCopyBufferToImageInfo->regionCount);
+  for (uint32_t I = 0; I < pCopyBufferToImageInfo->regionCount; ++I) {
+    const VkBufferImageCopy2 &R = pCopyBufferToImageInfo->pRegions[I];
+    Regions.push_back(VkBufferImageCopy{R.bufferOffset, R.bufferRowLength,
+                                        R.bufferImageHeight,
+                                        R.imageSubresource, R.imageOffset,
+                                        R.imageExtent});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyBufferToImage(
+          fromHandle<vulkan::Buffer>(pCopyBufferToImageInfo->srcBuffer),
+          fromHandle<vulkan::Image>(pCopyBufferToImageInfo->dstImage),
+          std::move(Regions));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyImageToBuffer2(
+    VkCommandBuffer commandBuffer,
+    const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo) {
+  std::vector<VkBufferImageCopy> Regions;
+  Regions.reserve(pCopyImageToBufferInfo->regionCount);
+  for (uint32_t I = 0; I < pCopyImageToBufferInfo->regionCount; ++I) {
+    const VkBufferImageCopy2 &R = pCopyImageToBufferInfo->pRegions[I];
+    Regions.push_back(VkBufferImageCopy{R.bufferOffset, R.bufferRowLength,
+                                        R.bufferImageHeight,
+                                        R.imageSubresource, R.imageOffset,
+                                        R.imageExtent});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->copyImageToBuffer(
+          fromHandle<vulkan::Image>(pCopyImageToBufferInfo->srcImage),
+          fromHandle<vulkan::Buffer>(pCopyImageToBufferInfo->dstBuffer),
+          std::move(Regions));
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdPipelineBarrier(
     VkCommandBuffer commandBuffer, VkPipelineStageFlags, VkPipelineStageFlags,
     VkDependencyFlags, uint32_t, const VkMemoryBarrier *, uint32_t,
@@ -2395,6 +2471,41 @@ VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(VkCommandBuffer commandBuffer,
       ->resolveImage(
           fromHandle<Image>(srcImage), fromHandle<Image>(dstImage),
           std::vector<VkImageResolve>(pRegions, pRegions + regionCount));
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdBlitImage2(VkCommandBuffer commandBuffer,
+                const VkBlitImageInfo2 *pBlitImageInfo) {
+  std::vector<VkImageBlit> Regions;
+  Regions.reserve(pBlitImageInfo->regionCount);
+  for (uint32_t I = 0; I < pBlitImageInfo->regionCount; ++I) {
+    const VkImageBlit2 &R = pBlitImageInfo->pRegions[I];
+    Regions.push_back(VkImageBlit{R.srcSubresource,
+                                  {R.srcOffsets[0], R.srcOffsets[1]},
+                                  R.dstSubresource,
+                                  {R.dstOffsets[0], R.dstOffsets[1]}});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->blitImage(fromHandle<Image>(pBlitImageInfo->srcImage),
+                  fromHandle<Image>(pBlitImageInfo->dstImage),
+                  std::move(Regions), pBlitImageInfo->filter);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vkCmdResolveImage2(VkCommandBuffer commandBuffer,
+                   const VkResolveImageInfo2 *pResolveImageInfo) {
+  std::vector<VkImageResolve> Regions;
+  Regions.reserve(pResolveImageInfo->regionCount);
+  for (uint32_t I = 0; I < pResolveImageInfo->regionCount; ++I) {
+    const VkImageResolve2 &R = pResolveImageInfo->pRegions[I];
+    Regions.push_back(VkImageResolve{R.srcSubresource, R.srcOffset,
+                                     R.dstSubresource, R.dstOffset,
+                                     R.extent});
+  }
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->resolveImage(fromHandle<Image>(pResolveImageInfo->srcImage),
+                     fromHandle<Image>(pResolveImageInfo->dstImage),
+                     std::move(Regions));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDrawIndirect(VkCommandBuffer commandBuffer,

@@ -22,11 +22,14 @@
 # symbol) never takes the address of a function that doesn't exist for an
 # unimplemented command.
 #
-# Only the VK_VERSION_1_0, VK_VERSION_1_1, and VK_VERSION_1_2 core features,
-# plus the extensions in `SUPPORTED_EXTENSIONS`, are read (V3 needs 1.2's core, non-`KHR`-suffixed timeline-semaphore
-# commands -- `vkWaitSemaphores`/`vkSignalSemaphore`/
-# `vkGetSemaphoreCounterValue` -- rather than adding extension support for
-# `VK_KHR_timeline_semaphore`; every other 1.2 command this ICD does not
+# Only the VK_VERSION_1_0 through VK_VERSION_1_3 core features, plus the
+# extensions in `SUPPORTED_EXTENSIONS`, are read (V3 needs 1.2's core,
+# non-`KHR`-suffixed timeline-semaphore commands --
+# `vkWaitSemaphores`/`vkSignalSemaphore`/`vkGetSemaphoreCounterValue` --
+# rather than adding extension support for `VK_KHR_timeline_semaphore`;
+# roadmap D0 needs 1.3's core, non-`KHR`-suffixed `VK_KHR_copy_commands2`
+# family for the same reason (see "Roadmap D0: measured impact" in
+# VulkanCTSReport.md); every other 1.2/1.3 command this ICD does not
 # implement is simply left unimplemented, exactly like most of 1.1's own
 # surface already is). An extension's commands are read only when the
 # extension is listed in `SUPPORTED_EXTENSIONS`, which means this driver
@@ -47,7 +50,12 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 
-CORE_FEATURES = ("VK_VERSION_1_0", "VK_VERSION_1_1", "VK_VERSION_1_2")
+CORE_FEATURES = (
+    "VK_VERSION_1_0",
+    "VK_VERSION_1_1",
+    "VK_VERSION_1_2",
+    "VK_VERSION_1_3",
+)
 
 # Extensions this driver implements and advertises, whose commands the
 # generated table must therefore carry (V6: `vkCmdBeginRenderingKHR`/

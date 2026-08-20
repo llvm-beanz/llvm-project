@@ -190,9 +190,27 @@ vkCmdClearAttachments
 vkCmdBlitImage
 vkCmdResolveImage
 
-# V6: VK_KHR_dynamic_rendering (core only in 1.3, which this driver does not
-# advertise; see "Render passes and dynamic rendering" and
-# vk_gen_entrypoints.py's SUPPORTED_EXTENSIONS).
+# Roadmap D0: core Vulkan 1.3 promoted `VK_KHR_copy_commands2`'s six
+# commands (see "Roadmap D0: measured impact" in VulkanCTSReport.md --
+# these had to be implemented alongside the apiVersion bump, since
+# `deqp-vk` calls the core, non-`KHR`-suffixed name directly once the
+# device's apiVersion satisfies the promotion, with no feature bit
+# gating whether it does so).
+vkCmdCopyBuffer2
+vkCmdCopyImage2
+vkCmdCopyBufferToImage2
+vkCmdCopyImageToBuffer2
+vkCmdBlitImage2
+vkCmdResolveImage2
+
+# V6: VK_KHR_dynamic_rendering (promoted to core in 1.3; this driver
+# implements the KHR-suffixed commands, listed under SUPPORTED_EXTENSIONS
+# below, rather than the core names -- see "Render passes and dynamic
+# rendering". Unlike VK_KHR_copy_commands2 above, no CTS crash from this
+# gap has been observed: `dEQP-VK.renderpasses`/`dynamic_rendering`/
+# `pipeline` all still call these through a route that resolves to the
+# implemented KHR name, but the core names remain unimplemented and are
+# tracked as an open gap by Roadmap.md's D-series rows).
 vkCmdBeginRenderingKHR
 vkCmdEndRenderingKHR
 
