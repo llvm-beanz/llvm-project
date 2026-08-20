@@ -23771,3 +23771,133 @@ I kept the functional work split into five independently-testable commits:
 
 This `agent_thoughts.md` entry is committed separately, last, to match the
 existing convention in this repository.
+
+# Roadmap C7: Queue family capability combinations
+
+## Which roadmap row is this?
+
+The prompt asked for "C6" from the roadmap document, and quoted the
+"**Queue family capability combinations.** 99,324 cases report
+`NotSupported` ..." paragraph verbatim. In the `Roadmap.md` checked out for
+this session, that paragraph is actually row **C7** ("Mandatory 1.2
+features and limits" is C6). I implemented the row matching the quoted
+text rather than the row matching the quoted label, since the content is
+unambiguous and the label is very likely a one-off numbering slip (C5 was
+closed just before this task, and rows get renumbered as earlier ones
+split into sub-steps like C4a-C4e). I used "C7" throughout code comments,
+docs, and commit messages to match the live document, and left the actual
+C6 row ("Mandatory 1.2 features and limits") untouched since it is a
+different, unrelated piece of work.
+
+## Finding the real bug
+
+The roadmap text itself is slightly misleading about the mechanism: it
+says "a family advertising `GRAPHICS` must also advertise `TRANSFER`,"
+which FeMe's single universal queue family already satisfied (it reports
+`GRAPHICS | COMPUTE | TRANSFER` together, added in V6). Rather than guess
+further from the prose, I built `deqp-vk` from the VK-GL-CTS checkout
+(it was already configured but not linked) and ran real CTS groups against
+the current ICD to see the actual `NotSupported` reason strings. That
+turned up the real mechanism: `vktTestCase.cpp`'s
+`findQueueFamilyIndexWithCaps(requiredCaps, excludedCaps)` is used
+throughout the CTS to find a queue family that *excludes* certain
+capabilities -- e.g. `dEQP-VK.pipeline.*.timestamp.transfer_tests.*` wants
+`TRANSFER` while excluding `GRAPHICS | COMPUTE`, and
+`dEQP-VK.api.buffer_marker.compute.*` wants `COMPUTE` while excluding
+`GRAPHICS`. No single universal family can ever satisfy an "excludes"
+requirement by construction, so these are `NotSupported` regardless of
+which bits the one family sets.
+
+## The fix
+
+I added two more, narrower queue families to
+`feme::vulkan::PhysicalDeviceInfo`: a `TRANSFER`-only family and a
+`COMPUTE | TRANSFER`-only family, both excluding `GRAPHICS`
+(`PhysicalDeviceInfo::NumQueueFamilies` is now 3). I was careful to frame
+this consistently with `FeMeVulkanDesign.md`'s existing "Expose a separate
+graphics queue family" rejected-alternative note: that note rejects a
+second family because it would claim an independent graphics engine that
+does not exist. Adding a *narrower* family does not have that problem --
+it only ever promises *less* than the universal family already does, and
+FeMe's single worker pool can trivially honor a restriction on what one
+logical submission queue accepts, regardless of how many families a
+caller sees. I updated the design doc's "Queue families" section to record
+this distinction explicitly so a future reader does not think C7
+contradicts the earlier graphics-family decision.
+
+Code changes: `PhysicalDeviceInfo.h`/`.cpp` (the new families),
+`EntryPoints.cpp` (`vkGetPhysicalDeviceQueueFamilyProperties`/`...2` now
+enumerate all families instead of hardcoding one), and
+`CommandBuffer.cpp`/`EntryPoints.cpp` (`vkCreateCommandPool`/`vkCreateDevice`
+now validate `queueFamilyIndex` against `NumQueueFamilies` instead of a
+hardcoded `!= 0` check). `Objects.h`'s `Device`/`Queue` classes already
+keyed everything by family index generically, so they needed no changes.
+
+## Unit tests
+
+Added `PhysicalDeviceInfoTest.cpp` cases asserting family 1 excludes
+`GRAPHICS`/`COMPUTE` and family 2 excludes `GRAPHICS`, and
+`ObjectModelTest.cpp` cases creating a device queue on each of the new
+families. Updated the existing "rejects unknown queue family" test to use
+index 3 (the first genuinely-invalid index now) instead of 1.
+
+## A crash the fix newly exposed
+
+Re-running the full `api` CTS group after adding the dedicated transfer
+family surfaced a real segfault: `dEQP-VK.api.copy_and_blit.copy_commands2.
+image_to_image_transfer_queue.misc.ms_then_ss` calls a null function
+pointer inside `multiSampleThenSingleSampleTest`. This test was
+unreachable before (it needs a dedicated transfer queue, which did not
+exist), so nobody had hit it. Root cause: its `checkQueueSupport` checks
+for the dedicated transfer queue but, unlike every sibling case in the same
+CTS source file, never calls `checkExtensionSupport` to verify
+`VK_KHR_copy_commands2` before the test body unconditionally records
+`vkCmdCopyImage2`. This is a genuine CTS test bug (a missing check), not a
+FeMe bug, but it is now reachable because of this change, so I applied a
+local fix to the VK-GL-CTS checkout (same pattern as the pre-existing
+`ImageAllocator` fix already recorded in `VulkanCTSReport.md`) and recorded
+it as a second upstreamable deviation in that same doc section. I verified
+the fix by rebuilding `deqp-vk` and confirming the case now reports
+`NotSupported (VK_KHR_copy_commands2 is not supported ...)` instead of
+crashing, then re-ran the full `api` group (267,219 cases) to completion
+with zero crashes.
+
+## Ruling out a false regression
+
+The full-`api`-group re-run's failed-case count moved from what looked
+like 275 to 339 partway through this work. I did not want to wave that away
+as "probably fine," so I isolated it: I extracted just the
+`dEQP-VK.api.object_management.*` caselist (457 cases), built the
+*pre-C7* `libfeme_vulkan.so` via `git stash`, and ran that caselist against
+both the pre- and post-C7 binaries. Both produced identical results
+(232 passed / 140 failed / 85 not supported). The apparent jump was an
+artifact of the earlier run having crashed partway through (before the CTS
+fix above landed) rather than completing, not a regression from this
+row's change. The actual root cause of those 140 pre-existing failures is
+`VK_EXT_pipeline_creation_cache_control` not being advertised, which
+`vktApiObjectManagementTests.cpp`'s shared `Device` dependency requires
+unconditionally whenever the advertised API version is below 1.3 -- an
+unrelated gap I left alone (arguably in C6's "Mandatory 1.2 features and
+limits" scope, not this row's).
+
+## Measurement scope
+
+A full 3,237,000-case CTS re-run was not practical in the time available,
+so I re-ran, before and after, exactly the groups where
+`findQueueFamilyIndexWithCaps` failures were concentrated:
+`pipeline.monolithic.timestamp` (278 cases), `api` (267,219 cases),
+`synchronization`/`synchronization2` (146,489 cases), `renderpasses`
+(80,880 cases), `sparse_resources` (19,402 cases), and
+`fragment_shading_rate` (110,443 cases). Queue-capability `NotSupported`
+results across all of them dropped to 2 (both a dedicated video-decode
+queue request, correctly `NotSupported` since no video extension is
+advertised at all -- genuinely out of this row's scope). I recorded this
+as a new "Roadmap C7: measured impact" section in `VulkanCTSReport.md`
+rather than claiming a full headline re-run I did not actually perform.
+
+## Build/test discipline
+
+Used the existing `build/` directory (already configured with
+`LLVM_ENABLE_ASSERTIONS=ON` and `LLVM_CCACHE_BUILD=ON`); ran `ninja
+check-feme` after each code change (1506 passed, 1 unsupported both times,
++2 tests from this row's additions) before touching the CTS at all.
