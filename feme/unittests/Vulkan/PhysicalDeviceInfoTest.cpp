@@ -278,6 +278,168 @@ TEST_F(PhysicalDeviceProperties2Test,
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
+       Vulkan13PropertiesEnumerateEveryMandatoryLimitConservatively) {
+  // Roadmap E2: every one of the aggregate `VkPhysicalDeviceVulkan13
+  // Properties` struct's 46 limit fields must be explicitly written, for
+  // the same unwritten-field guard reason
+  // `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` below uses (a
+  // 0xAA fill pattern would otherwise leave an unset field looking like a
+  // plausible, but coincidental, non-zero value). Every field is `0`/
+  // `VK_FALSE`: each one is cross-checked by
+  // `dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` against
+  // its own still-unimplemented dedicated-extension struct (see
+  // EntryPoints.cpp's case comment), so a real, nonzero value here would
+  // regress that currently-passing case rather than close one.
+  VkPhysicalDeviceVulkan13Properties Props13;
+  std::memset(&Props13, 0xAA, sizeof(Props13));
+  Props13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
+  Props13.pNext = nullptr;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &Props13;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(Props13.minSubgroupSize, 0u);
+  EXPECT_EQ(Props13.maxSubgroupSize, 0u);
+  EXPECT_EQ(Props13.maxComputeWorkgroupSubgroups, 0u);
+  EXPECT_EQ(Props13.requiredSubgroupSizeStages, 0u);
+  EXPECT_EQ(Props13.maxInlineUniformBlockSize, 0u);
+  EXPECT_EQ(Props13.maxPerStageDescriptorInlineUniformBlocks, 0u);
+  EXPECT_EQ(Props13.maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks,
+            0u);
+  EXPECT_EQ(Props13.maxDescriptorSetInlineUniformBlocks, 0u);
+  EXPECT_EQ(Props13.maxDescriptorSetUpdateAfterBindInlineUniformBlocks, 0u);
+  EXPECT_EQ(Props13.maxInlineUniformTotalSize, 0u);
+  // (roadmap E8) All 30 `integerDotProduct*Accelerated` bits stay
+  // `VK_FALSE` until that row lands.
+  EXPECT_EQ(Props13.integerDotProduct8BitUnsignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct8BitSignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct8BitMixedSignednessAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct4x8BitPackedUnsignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct4x8BitPackedSignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct4x8BitPackedMixedSignednessAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct16BitUnsignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct16BitSignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct16BitMixedSignednessAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct32BitUnsignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct32BitSignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct32BitMixedSignednessAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct64BitUnsignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct64BitSignedAccelerated, VK_FALSE);
+  EXPECT_EQ(Props13.integerDotProduct64BitMixedSignednessAccelerated, VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating8BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating8BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13
+          .integerDotProductAccumulatingSaturating8BitMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13
+          .integerDotProductAccumulatingSaturating4x8BitPackedUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13
+          .integerDotProductAccumulatingSaturating4x8BitPackedSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13
+          .integerDotProductAccumulatingSaturating4x8BitPackedMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating16BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating16BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13
+          .integerDotProductAccumulatingSaturating16BitMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating32BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating32BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13
+          .integerDotProductAccumulatingSaturating32BitMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating64BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13.integerDotProductAccumulatingSaturating64BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      Props13
+          .integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(Props13.storageTexelBufferOffsetAlignmentBytes, 0u);
+  EXPECT_EQ(Props13.storageTexelBufferOffsetSingleTexelAlignment, VK_FALSE);
+  EXPECT_EQ(Props13.uniformTexelBufferOffsetAlignmentBytes, 0u);
+  EXPECT_EQ(Props13.uniformTexelBufferOffsetSingleTexelAlignment, VK_FALSE);
+  EXPECT_EQ(Props13.maxBufferSize, 0u);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       Vulkan14PropertiesEnumerateEveryMandatoryLimitConservatively) {
+  // Roadmap E2: every one of the aggregate `VkPhysicalDeviceVulkan14
+  // Properties` struct's 25 limit fields must be explicitly written,
+  // guarded the same way the 1.3 test above guards its own struct, and for
+  // the same "stay in sync with each still-unimplemented dedicated
+  // extension struct" reason.
+  VkPhysicalDeviceVulkan14Properties Props14;
+  std::memset(&Props14, 0xAA, sizeof(Props14));
+  Props14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;
+  Props14.pNext = nullptr;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &Props14;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(Props14.lineSubPixelPrecisionBits, 0u);
+  EXPECT_EQ(Props14.maxVertexAttribDivisor, 0u);
+  EXPECT_EQ(Props14.supportsNonZeroFirstInstance, VK_FALSE);
+  EXPECT_EQ(Props14.maxPushDescriptors, 0u);
+  EXPECT_EQ(Props14.dynamicRenderingLocalReadDepthStencilAttachments, VK_FALSE);
+  EXPECT_EQ(Props14.dynamicRenderingLocalReadMultisampledAttachments, VK_FALSE);
+  EXPECT_EQ(Props14.earlyFragmentMultisampleCoverageAfterSampleCounting,
+            VK_FALSE);
+  EXPECT_EQ(Props14.earlyFragmentSampleMaskTestBeforeSampleCounting, VK_FALSE);
+  EXPECT_EQ(Props14.depthStencilSwizzleOneSupport, VK_FALSE);
+  EXPECT_EQ(Props14.polygonModePointSize, VK_FALSE);
+  EXPECT_EQ(Props14.nonStrictSinglePixelWideLinesUseParallelogram, VK_FALSE);
+  EXPECT_EQ(Props14.nonStrictWideLinesUseParallelogram, VK_FALSE);
+  EXPECT_EQ(Props14.blockTexelViewCompatibleMultipleLayers, VK_FALSE);
+  EXPECT_EQ(Props14.maxCombinedImageSamplerDescriptorCount, 0u);
+  EXPECT_EQ(Props14.fragmentShadingRateClampCombinerInputs, VK_FALSE);
+  EXPECT_EQ(Props14.defaultRobustnessStorageBuffers,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
+  EXPECT_EQ(Props14.defaultRobustnessUniformBuffers,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
+  EXPECT_EQ(Props14.defaultRobustnessVertexInputs,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
+  EXPECT_EQ(Props14.defaultRobustnessImages,
+            VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT);
+  EXPECT_EQ(Props14.copySrcLayoutCount, 0u);
+  EXPECT_EQ(Props14.pCopySrcLayouts, nullptr);
+  EXPECT_EQ(Props14.copyDstLayoutCount, 0u);
+  EXPECT_EQ(Props14.pCopyDstLayouts, nullptr);
+  uint8_t ZeroUUID[VK_UUID_SIZE] = {};
+  EXPECT_EQ(
+      std::memcmp(Props14.optimalTilingLayoutUUID, ZeroUUID, VK_UUID_SIZE), 0);
+  EXPECT_EQ(Props14.identicalMemoryTypeRequirements, VK_FALSE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
        Roadmap6FeaturesAreAdvertisedThroughDedicatedAndVulkan12Chains) {
   // Roadmap C6: each of these is truthfully implemented (see
   // EntryPoints.cpp's `fillFeatures2Chain` case comments), so both the

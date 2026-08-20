@@ -368,6 +368,185 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->framebufferIntegerColorSampleCounts = VK_SAMPLE_COUNT_1_BIT;
       break;
     }
+    // (roadmap E2) The aggregate `VkPhysicalDeviceVulkan13Properties`
+    // struct: every one of its 46 limit fields is written explicitly, for
+    // the same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+    // VULKAN_1_2_PROPERTIES` above documents. Every field here is a
+    // conservative, honest `0`/`VK_FALSE`: `dEQP-VK.api.info.vulkan1p3.
+    // property_extensions_consistency` cross-checks *each one* of them
+    // against its own pre-promotion, per-extension dedicated struct (e.g.
+    // `VkPhysicalDeviceSubgroupSizeControlProperties`,
+    // `VkPhysicalDeviceTexelBufferAlignmentProperties`,
+    // `VkPhysicalDeviceMaintenance4Properties`) once apiVersion >= 1.3,
+    // the same way `dEQP-VK.api.info.vulkan1p3.feature_extensions_
+    // consistency` cross-checked `dynamicRendering` before E1. None of
+    // those dedicated structs has a `vkGetPhysicalDeviceProperties2` case
+    // of its own yet, so they all still read as zero -- claiming a real,
+    // nonzero value here (e.g. this ICD's actual `minTexelBufferOffset
+    // Alignment` for `storageTexelBufferOffsetAlignmentBytes`) would
+    // *disagree* with that zero and regress a currently-passing
+    // consistency case rather than close one. Each field's own later row
+    // (E7's `subgroupSizeControl`, E8's `shaderIntegerDotProduct`, E18's
+    // `VK_EXT_texel_buffer_alignment`, E4's `VK_KHR_maintenance4`, ...) is
+    // therefore the one that gets to raise it, in lockstep with adding
+    // that row's own dedicated-struct case so the two stay honestly in
+    // sync -- exactly how `dynamicRendering`'s dedicated
+    // `VkPhysicalDeviceDynamicRenderingFeatures` case and the aggregate
+    // `VkPhysicalDeviceVulkan13Features` case above agree today.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES: {
+      auto *Props13 =
+          reinterpret_cast<VkPhysicalDeviceVulkan13Properties *>(Base);
+      // (roadmap E7) `subgroupSizeControl` is unimplemented.
+      Props13->minSubgroupSize = 0;
+      Props13->maxSubgroupSize = 0;
+      Props13->maxComputeWorkgroupSubgroups = 0;
+      Props13->requiredSubgroupSizeStages = 0;
+      // `inlineUniformBlock` is unimplemented.
+      Props13->maxInlineUniformBlockSize = 0;
+      Props13->maxPerStageDescriptorInlineUniformBlocks = 0;
+      Props13->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 0;
+      Props13->maxDescriptorSetInlineUniformBlocks = 0;
+      Props13->maxDescriptorSetUpdateAfterBindInlineUniformBlocks = 0;
+      Props13->maxInlineUniformTotalSize = 0;
+      // (roadmap E8) All 36 `integerDotProduct*Accelerated` bits: no
+      // `OpSDot`/`OpUDot`/`OpSUDot`-family lowering exists yet, so every
+      // one is honestly `VK_FALSE` until that row lands.
+      Props13->integerDotProduct8BitUnsignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct8BitSignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct8BitMixedSignednessAccelerated = VK_FALSE;
+      Props13->integerDotProduct4x8BitPackedUnsignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct4x8BitPackedSignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct4x8BitPackedMixedSignednessAccelerated =
+          VK_FALSE;
+      Props13->integerDotProduct16BitUnsignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct16BitSignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct16BitMixedSignednessAccelerated = VK_FALSE;
+      Props13->integerDotProduct32BitUnsignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct32BitSignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct32BitMixedSignednessAccelerated = VK_FALSE;
+      Props13->integerDotProduct64BitUnsignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct64BitSignedAccelerated = VK_FALSE;
+      Props13->integerDotProduct64BitMixedSignednessAccelerated = VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating8BitUnsignedAccelerated =
+          VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating8BitSignedAccelerated =
+          VK_FALSE;
+      Props13
+          ->integerDotProductAccumulatingSaturating8BitMixedSignednessAccelerated =
+          VK_FALSE;
+      Props13
+          ->integerDotProductAccumulatingSaturating4x8BitPackedUnsignedAccelerated =
+          VK_FALSE;
+      Props13
+          ->integerDotProductAccumulatingSaturating4x8BitPackedSignedAccelerated =
+          VK_FALSE;
+      Props13
+          ->integerDotProductAccumulatingSaturating4x8BitPackedMixedSignednessAccelerated =
+          VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating16BitUnsignedAccelerated =
+          VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating16BitSignedAccelerated =
+          VK_FALSE;
+      Props13
+          ->integerDotProductAccumulatingSaturating16BitMixedSignednessAccelerated =
+          VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating32BitUnsignedAccelerated =
+          VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating32BitSignedAccelerated =
+          VK_FALSE;
+      Props13
+          ->integerDotProductAccumulatingSaturating32BitMixedSignednessAccelerated =
+          VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating64BitUnsignedAccelerated =
+          VK_FALSE;
+      Props13->integerDotProductAccumulatingSaturating64BitSignedAccelerated =
+          VK_FALSE;
+      Props13
+          ->integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated =
+          VK_FALSE;
+      // Texel buffer views (`VK_EXT_texel_buffer_alignment`/E18) and the
+      // largest single buffer allocation (`VK_KHR_maintenance4`/E4) are
+      // both unimplemented.
+      Props13->storageTexelBufferOffsetAlignmentBytes = 0;
+      Props13->storageTexelBufferOffsetSingleTexelAlignment = VK_FALSE;
+      Props13->uniformTexelBufferOffsetAlignmentBytes = 0;
+      Props13->uniformTexelBufferOffsetSingleTexelAlignment = VK_FALSE;
+      Props13->maxBufferSize = 0;
+      break;
+    }
+    // (roadmap E2) The aggregate `VkPhysicalDeviceVulkan14Properties`
+    // struct: every one of its 25 limit fields is written explicitly, for
+    // the same reason the 1.3 case above documents -- `dEQP-VK.api.info.
+    // vulkan1p4.property_extensions_consistency` cross-checks every one of
+    // them against its own dedicated struct
+    // (`VkPhysicalDeviceLineRasterizationPropertiesKHR`,
+    // `VkPhysicalDeviceMaintenance5PropertiesKHR`,
+    // `VkPhysicalDeviceMaintenance6PropertiesKHR`,
+    // `VkPhysicalDevicePushDescriptorPropertiesKHR`,
+    // `VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR`,
+    // `VkPhysicalDeviceHostImageCopyPropertiesEXT`,
+    // `VkPhysicalDevicePipelineRobustnessPropertiesEXT`), none of which
+    // this ICD implements yet -- so every field here is the conservative,
+    // honest `0`/`VK_FALSE`/`nullptr` that agrees with each of those
+    // still-unfilled dedicated structs, for each later row (F5, F6, F8,
+    // F10, F11, F12, E6) to raise together with its own dedicated-struct
+    // case.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES: {
+      auto *Props14 =
+          reinterpret_cast<VkPhysicalDeviceVulkan14Properties *>(Base);
+      // (roadmap F5) `VK_KHR_line_rasterization` is unimplemented.
+      Props14->lineSubPixelPrecisionBits = 0;
+      // (roadmap F6) `vertexAttributeInstanceRateDivisor` is unimplemented.
+      Props14->maxVertexAttribDivisor = 0;
+      Props14->supportsNonZeroFirstInstance = VK_FALSE;
+      // (roadmap F12) `pushDescriptor` is unimplemented.
+      Props14->maxPushDescriptors = 0;
+      // (roadmap F8) `dynamicRenderingLocalRead` is unimplemented.
+      Props14->dynamicRenderingLocalReadDepthStencilAttachments = VK_FALSE;
+      Props14->dynamicRenderingLocalReadMultisampledAttachments = VK_FALSE;
+      // (roadmap F5's `VK_KHR_maintenance5`) None of this group's fixed-
+      // function guarantees have been verified for this software
+      // rasterizer yet.
+      Props14->earlyFragmentMultisampleCoverageAfterSampleCounting = VK_FALSE;
+      Props14->earlyFragmentSampleMaskTestBeforeSampleCounting = VK_FALSE;
+      Props14->depthStencilSwizzleOneSupport = VK_FALSE;
+      Props14->polygonModePointSize = VK_FALSE;
+      Props14->nonStrictSinglePixelWideLinesUseParallelogram = VK_FALSE;
+      Props14->nonStrictWideLinesUseParallelogram = VK_FALSE;
+      // (roadmap E6's `VK_KHR_maintenance6`) Unimplemented.
+      Props14->blockTexelViewCompatibleMultipleLayers = VK_FALSE;
+      Props14->maxCombinedImageSamplerDescriptorCount = 0;
+      Props14->fragmentShadingRateClampCombinerInputs = VK_FALSE;
+      // (roadmap F10) `VK_EXT_pipeline_robustness` is unimplemented: even
+      // though buffer bounds checking is unconditionally on elsewhere in
+      // this ICD (see the Vulkan 1.0 core feature comment above), claiming
+      // `ROBUST_BUFFER_ACCESS` here without a matching
+      // `VkPhysicalDevicePipelineRobustnessPropertiesEXT` case would
+      // disagree with that still-unfilled dedicated struct.
+      Props14->defaultRobustnessStorageBuffers =
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+      Props14->defaultRobustnessUniformBuffers =
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+      Props14->defaultRobustnessVertexInputs =
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+      Props14->defaultRobustnessImages =
+          VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT;
+      // (roadmap F11) `hostImageCopy` is unimplemented: no supported
+      // source/destination layout list exists yet, and
+      // `identicalMemoryTypeRequirements` -- though a real, honest
+      // `VK_TRUE` this ICD's single memory type could otherwise support
+      // today -- is this same struct's own field
+      // (`VkPhysicalDeviceHostImageCopyPropertiesEXT`), so it stays
+      // `VK_FALSE` in lockstep with the rest of this group until F11 adds
+      // that dedicated case.
+      Props14->copySrcLayoutCount = 0;
+      Props14->pCopySrcLayouts = nullptr;
+      Props14->copyDstLayoutCount = 0;
+      Props14->pCopyDstLayouts = nullptr;
+      std::memset(Props14->optimalTilingLayoutUUID, 0, VK_UUID_SIZE);
+      Props14->identicalMemoryTypeRequirements = VK_FALSE;
+      break;
+    }
     default:
       break;
     }
