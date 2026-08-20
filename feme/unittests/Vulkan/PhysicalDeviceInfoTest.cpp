@@ -13,6 +13,7 @@
 #include "gtest/gtest.h"
 
 #include <cstring>
+#include <limits>
 
 using namespace feme::vulkan;
 
@@ -210,6 +211,114 @@ TEST(PhysicalDeviceInfo, IsDeterministic) {
   EXPECT_EQ(std::memcmp(A.Properties.pipelineCacheUUID,
                         B.Properties.pipelineCacheUUID, VK_UUID_SIZE),
             0);
+}
+
+TEST(PhysicalDeviceInfo, ReportsMandatory1p2LimitsAtOrAboveTheRequiredMinimum) {
+  // Roadmap C6: `dEQP-VK.api.info.vulkan1p2_limits_validation` checks
+  // these unconditionally once the advertised API version is >= 1.2, even
+  // though the features they are nominally attached to
+  // (`multiview`/`timelineSemaphore`) may not themselves be advertised.
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  EXPECT_GE(Info.MaxMemoryAllocationSize, VkDeviceSize{1} << 30);
+  EXPECT_GE(Info.MaxPerSetDescriptors, 1024u);
+  EXPECT_GE(Info.MaxMultiviewViewCount, 6u);
+  EXPECT_GE(Info.MaxMultiviewInstanceIndex, (1u << 27) - 1);
+  // A timeline semaphore's counter is a plain `uint64_t` compare (see
+  // `feme::vulkan::Semaphore`), so the honest value is the type's own
+  // maximum, not merely the spec's `2^31-1` floor.
+  EXPECT_EQ(Info.MaxTimelineSemaphoreValueDifference,
+            std::numeric_limits<uint64_t>::max());
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       MultiviewAndMaintenance3PropertiesMatchPromotedVulkan11Properties) {
+  VkPhysicalDeviceMultiviewProperties Multiview{};
+  Multiview.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES;
+  VkPhysicalDeviceMaintenance3Properties Maintenance3{};
+  Maintenance3.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+  Multiview.pNext = &Maintenance3;
+  VkPhysicalDeviceVulkan11Properties Props11{};
+  Props11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
+  Props11.pNext = &Multiview;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &Props11;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(Multiview.maxMultiviewViewCount, Props11.maxMultiviewViewCount);
+  EXPECT_EQ(Multiview.maxMultiviewInstanceIndex,
+            Props11.maxMultiviewInstanceIndex);
+  EXPECT_EQ(Maintenance3.maxPerSetDescriptors, Props11.maxPerSetDescriptors);
+  EXPECT_EQ(Maintenance3.maxMemoryAllocationSize,
+            Props11.maxMemoryAllocationSize);
+  EXPECT_GE(Props11.maxMultiviewViewCount, 6u);
+  EXPECT_GE(Props11.maxMemoryAllocationSize, VkDeviceSize{1} << 30);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       TimelineSemaphorePropertiesMatchPromotedVulkan12Properties) {
+  VkPhysicalDeviceTimelineSemaphoreProperties TimelineSemaphore{};
+  TimelineSemaphore.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES;
+  VkPhysicalDeviceVulkan12Properties Props12{};
+  Props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+  TimelineSemaphore.pNext = &Props12;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &TimelineSemaphore;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_EQ(TimelineSemaphore.maxTimelineSemaphoreValueDifference,
+            Props12.maxTimelineSemaphoreValueDifference);
+  EXPECT_EQ(Props12.maxTimelineSemaphoreValueDifference,
+            std::numeric_limits<uint64_t>::max());
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       Roadmap6FeaturesAreAdvertisedThroughDedicatedAndVulkan12Chains) {
+  // Roadmap C6: each of these is truthfully implemented (see
+  // EntryPoints.cpp's `fillFeatures2Chain` case comments), so both the
+  // dedicated feature struct and the aggregate `VkPhysicalDeviceVulkan12
+  // Features` must agree once chained.
+  VkPhysicalDeviceHostQueryResetFeatures HostQueryReset{};
+  HostQueryReset.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES;
+  VkPhysicalDeviceUniformBufferStandardLayoutFeatures UniformBufferLayout{};
+  UniformBufferLayout.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES;
+  HostQueryReset.pNext = &UniformBufferLayout;
+  VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures SeparateDSLayouts{};
+  SeparateDSLayouts.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES;
+  UniformBufferLayout.pNext = &SeparateDSLayouts;
+  VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures ExtendedTypes{};
+  ExtendedTypes.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
+  SeparateDSLayouts.pNext = &ExtendedTypes;
+  VkPhysicalDeviceVulkan12Features Features12{};
+  Features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+  ExtendedTypes.pNext = &Features12;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &HostQueryReset;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+
+  EXPECT_EQ(HostQueryReset.hostQueryReset, VK_TRUE);
+  EXPECT_EQ(UniformBufferLayout.uniformBufferStandardLayout, VK_TRUE);
+  EXPECT_EQ(SeparateDSLayouts.separateDepthStencilLayouts, VK_TRUE);
+  EXPECT_EQ(ExtendedTypes.shaderSubgroupExtendedTypes, VK_TRUE);
+  EXPECT_EQ(Features12.hostQueryReset, HostQueryReset.hostQueryReset);
+  EXPECT_EQ(Features12.uniformBufferStandardLayout,
+            UniformBufferLayout.uniformBufferStandardLayout);
+  EXPECT_EQ(Features12.separateDepthStencilLayouts,
+            SeparateDSLayouts.separateDepthStencilLayouts);
+  EXPECT_EQ(Features12.shaderSubgroupExtendedTypes,
+            ExtendedTypes.shaderSubgroupExtendedTypes);
+  EXPECT_EQ(Features12.subgroupBroadcastDynamicId, VK_TRUE);
 }
 
 } // namespace

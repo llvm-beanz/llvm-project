@@ -146,6 +146,39 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props11->subgroupSupportedStages = Info.SubgroupSupportedStages;
       Props11->subgroupSupportedOperations = Info.SubgroupSupportedOperations;
       Props11->subgroupQuadOperationsInAllStages = VK_FALSE;
+      // (roadmap C6) `multiview` itself is not advertised (layered
+      // rendering is V7), so these two are set to their required minimum
+      // rather than a real capability -- see PhysicalDeviceInfo.h's field
+      // comment. `maxMemoryAllocationSize`/`maxPerSetDescriptors` are
+      // `VK_KHR_maintenance3`'s own fields, promoted here unchanged; see
+      // the `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES`
+      // case below for the dedicated-struct twin these must agree with.
+      Props11->maxMultiviewViewCount = Info.MaxMultiviewViewCount;
+      Props11->maxMultiviewInstanceIndex = Info.MaxMultiviewInstanceIndex;
+      Props11->maxMemoryAllocationSize = Info.MaxMemoryAllocationSize;
+      Props11->maxPerSetDescriptors = Info.MaxPerSetDescriptors;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES: {
+      auto *Multiview =
+          reinterpret_cast<VkPhysicalDeviceMultiviewProperties *>(Base);
+      Multiview->maxMultiviewViewCount = Info.MaxMultiviewViewCount;
+      Multiview->maxMultiviewInstanceIndex = Info.MaxMultiviewInstanceIndex;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES: {
+      auto *Maintenance3 =
+          reinterpret_cast<VkPhysicalDeviceMaintenance3Properties *>(Base);
+      Maintenance3->maxPerSetDescriptors = Info.MaxPerSetDescriptors;
+      Maintenance3->maxMemoryAllocationSize = Info.MaxMemoryAllocationSize;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES: {
+      auto *TimelineSemaphore =
+          reinterpret_cast<VkPhysicalDeviceTimelineSemaphoreProperties *>(
+              Base);
+      TimelineSemaphore->maxTimelineSemaphoreValueDifference =
+          Info.MaxTimelineSemaphoreValueDifference;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES: {
@@ -172,6 +205,12 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
                   sizeof(Info.DriverName));
       std::memcpy(Props12->driverInfo, Info.DriverInfo,
                   sizeof(Info.DriverInfo));
+      // (roadmap C6) The promoted twin of
+      // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_PROPERTIES`
+      // above; both must agree; see PhysicalDeviceInfo.h's field comment
+      // for why this is `UINT64_MAX` rather than the spec's `2^31-1` floor.
+      Props12->maxTimelineSemaphoreValueDifference =
+          Info.MaxTimelineSemaphoreValueDifference;
       break;
     }
     default:
@@ -197,9 +236,17 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFeatures(
 namespace {
 /// Fills every `pNext` extension struct `vkGetPhysicalDeviceFeatures2` this
 /// ICD recognizes with truthful values -- V3: `timelineSemaphore` (see
-/// "Queues, Scheduling, and Synchronization"), reported through either the
-/// dedicated 1.2 feature struct or the aggregate `VkPhysicalDeviceVulkan12
-/// Features` struct, matching whichever one an application chained.
+/// "Queues, Scheduling, and Synchronization"); roadmap C6:
+/// `hostQueryReset`, `uniformBufferStandardLayout`,
+/// `separateDepthStencilLayouts`, `shaderSubgroupExtendedTypes`, and
+/// `subgroupBroadcastDynamicId` (see each case's own comment for why every
+/// one is honest rather than a bare mandatory-floor claim) -- each
+/// reported through either its dedicated 1.2 feature struct or the
+/// aggregate `VkPhysicalDeviceVulkan12Features` struct, matching whichever
+/// one an application chained. `multiview` is deliberately absent: layered
+/// rendering (roadmap V7) is not implemented, so it cannot be honestly
+/// advertised yet (see PhysicalDeviceInfo.h's field comment for the
+/// properties this ICD reports regardless).
 void fillFeatures2Chain(void *pNext) {
   for (auto *Base = static_cast<VkBaseOutStructure *>(pNext); Base;
        Base = Base->pNext) {
@@ -210,10 +257,68 @@ void fillFeatures2Chain(void *pNext) {
       Features->timelineSemaphore = VK_TRUE;
       break;
     }
+    // (roadmap C6) `vkResetQueryPool` (`QueryPool.cpp`) already implements
+    // the host-side reset `VK_EXT_host_query_reset`/core 1.2 promotes, so
+    // this is unconditionally true, not merely a floor.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceHostQueryResetFeatures *>(Base);
+      Features->hostQueryReset = VK_TRUE;
+      break;
+    }
+    // (roadmap C6) `uniformBufferStandardLayout`/`separateDepthStencilLayouts`:
+    // both relax a *default* Vulkan restriction (std140 array/matrix
+    // stride; a single combined layout for a depth/stencil image) that
+    // this ICD never enforced in the first place -- `getUniformBlockElement`
+    // (`SPIRVToLLVMPatterns.cpp`) reads whatever offset/stride the SPIR-V
+    // decorations already carry rather than recomputing or validating
+    // std140 layout, and no image-layout transition path
+    // (`CommandBuffer.cpp`/`Image.cpp`) distinguishes a depth-only from a
+    // stencil-only layout value in the first place. Advertising both is
+    // therefore honest, not merely a relaxed floor.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceUniformBufferStandardLayoutFeatures
+                               *>(Base);
+      Features->uniformBufferStandardLayout = VK_TRUE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures
+                               *>(Base);
+      Features->separateDepthStencilLayouts = VK_TRUE;
+      break;
+    }
+    // (roadmap C6) `shaderSubgroupExtendedTypes` only relaxes the *type*
+    // restriction on `OpGroupNonUniform*` operations; this ICD converts
+    // none of them at all yet (`SPIRVToLLVMPatterns.cpp` wires up only the
+    // basic subgroup builtins -- see `SubgroupSupportedOperations`'s
+    // `VK_SUBGROUP_FEATURE_BASIC_BIT`-only value), so there is no
+    // extended-type operation this bit could let through incorrectly: it
+    // is vacuously true, the same reasoning `subgroupBroadcastDynamicId`
+    // below uses.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES: {
+      auto *Features =
+          reinterpret_cast<
+              VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures *>(Base);
+      Features->shaderSubgroupExtendedTypes = VK_TRUE;
+      break;
+    }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan12Features *>(Base);
       Features->timelineSemaphore = VK_TRUE;
+      Features->hostQueryReset = VK_TRUE;
+      Features->uniformBufferStandardLayout = VK_TRUE;
+      Features->separateDepthStencilLayouts = VK_TRUE;
+      Features->shaderSubgroupExtendedTypes = VK_TRUE;
+      // (roadmap C6) No `OpGroupNonUniformBroadcast` conversion exists at
+      // all (see the dedicated-struct case above), so there is no
+      // non-dynamic-index broadcast this bit could be lying about: every
+      // broadcast operation this ICD implements (none) supports a dynamic
+      // id, vacuously.
+      Features->subgroupBroadcastDynamicId = VK_TRUE;
       break;
     }
     // (V6) `VK_KHR_dynamic_rendering`'s own feature struct, whose 1.3 core

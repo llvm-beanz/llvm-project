@@ -85,6 +85,33 @@ struct PhysicalDeviceInfo {
   VkConformanceVersion ConformanceVersion{};
   char DriverName[VK_MAX_DRIVER_NAME_SIZE]{};
   char DriverInfo[VK_MAX_DRIVER_INFO_SIZE]{};
+
+  /// Roadmap C6 ("Mandatory 1.2 features and limits"): a device advertising
+  /// apiVersion 1.2 must report these regardless of whether `multiview`
+  /// itself is advertised (`dEQP-VK.api.info.vulkan1p2_limits_validation`
+  /// checks them unconditionally once the API version is >= 1.2). They are
+  /// derived host state, like `SubgroupSize` above, so they belong here
+  /// rather than as another literal in `EntryPoints.cpp`'s `pNext` chain
+  /// filler.
+  ///
+  /// `MaxMemoryAllocationSize` mirrors the single memory heap's real size
+  /// (see `detectHostMemorySize`): a `malloc`-backed heap can satisfy one
+  /// allocation as large as the whole heap, so this is honest rather than
+  /// merely the spec's 1 GiB floor. `MaxTimelineSemaphoreValueDifference`
+  /// is `UINT64_MAX`: a timeline semaphore's counter is a plain in-memory
+  /// `uint64_t` compare (see `feme::vulkan::Semaphore`), so nothing about
+  /// this ICD's implementation caps the difference between two values
+  /// below the type's own range. `MaxMultiviewViewCount`/
+  /// `MaxMultiviewInstanceIndex` are set to the spec's required minimum
+  /// (6 / 2^27-1): `multiview` itself stays unadvertised (layered
+  /// rendering is roadmap V7, not yet implemented -- see
+  /// `resolveAttachmentView`'s rejection comment in RenderPass.cpp), so
+  /// there is no real capability to promise beyond that floor.
+  VkDeviceSize MaxMemoryAllocationSize = 0;
+  uint32_t MaxPerSetDescriptors = 0;
+  uint32_t MaxMultiviewViewCount = 0;
+  uint32_t MaxMultiviewInstanceIndex = 0;
+  uint64_t MaxTimelineSemaphoreValueDifference = 0;
 };
 
 /// Computes the one physical device's capabilities from the host this

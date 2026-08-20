@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <unistd.h>
 
 using namespace feme::vulkan;
@@ -335,8 +336,21 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
                                           VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
   MemProps.memoryTypes[0].heapIndex = 0;
   MemProps.memoryHeapCount = 1;
-  MemProps.memoryHeaps[0].size = detectHostMemorySize();
+  VkDeviceSize HostMemorySize = detectHostMemorySize();
+  MemProps.memoryHeaps[0].size = HostMemorySize;
   MemProps.memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
+
+  // Roadmap C6 ("Mandatory 1.2 features and limits"): see the field
+  // comments in PhysicalDeviceInfo.h for why each of these is honest
+  // rather than merely the spec-mandated floor, except
+  // `MaxMultiviewViewCount`/`MaxMultiviewInstanceIndex`, which stay at
+  // their required minimum since `multiview` itself is not advertised.
+  Info.MaxMemoryAllocationSize = HostMemorySize;
+  Info.MaxPerSetDescriptors = 1024;
+  Info.MaxMultiviewViewCount = 6;
+  Info.MaxMultiviewInstanceIndex = (1u << 27) - 1;
+  Info.MaxTimelineSemaphoreValueDifference =
+      std::numeric_limits<uint64_t>::max();
 
   // "Graphics queue family": V6 adds `VK_QUEUE_GRAPHICS_BIT` to the one
   // existing universal family rather than inventing a second *graphics*
