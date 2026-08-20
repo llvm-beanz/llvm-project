@@ -813,6 +813,25 @@ validation reflection shared by JIT and AOT is left to whichever milestone
 first needs a caller to act on a validation result rather than merely fail
 on one.
 
+Deviation (roadmap C8): the R27 status note above described only half of
+what "CPU Lowering Pipeline"'s own diagram draws as one
+"Graphics canonicalization and validation" box ahead of `PreparePass` --
+`feme::graphics::CanonicalizeStagePass` (see "Canonical stage operations"
+above) was never actually run by `runPipeline` at all, only by the separate
+Vulkan graphics pipeline (`feme::vulkan`'s
+`GraphicsPipeline.cpp`). A vertex/fragment entry point imported and run
+through `feme-run`/`feme-cpu-simdize` directly therefore reached
+`ValidateStagePass` (and, past it, `LinearizePass`/`SIMDizePass`) with its
+DXIL `loadInput`/`storeOutput` calls or SPIR-V `Input`/`Output`-global
+loads/stores still in their raw, un-canonicalized form -- not a validation
+gap (there were no `feme.stage.*` calls yet to validate), but a real
+correctness gap once `SIMDizePass` reached that shader's stage IO expecting
+one. `runPipeline` now runs `CanonicalizeStagePass` immediately before
+`ValidateStagePass`, so both import paths reach every later pass in their
+already-canonical `feme.stage.*` form, matching the diagram and closing the
+largest measured member of roadmap C8's "shader long tail" bucket (see
+Roadmap.md's C8 row and VulkanCTSReport.md's measured impact).
+
 ### Shared middle-end phases
 
 Uniformity analysis, control-flow preparation, linearization, SIMDization, and
