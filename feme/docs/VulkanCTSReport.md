@@ -9,7 +9,11 @@ and this file is a measurement instead.
 
 - FeMe revision: `2f27e5bd85a5` (roadmap D0, "advertise apiVersion 1.4" +
   "implement VK_KHR_copy_commands2's core names" -- see "Roadmap D0:
-  measured impact" below).
+  measured impact" below). The headline table below is this same D0
+  revision's full 54-group run: roadmap D1 (audit-only, no advertised
+  feature/limit/extension changed) is not re-measured in full -- see its
+  own "Roadmap D1: measured impact" section for the targeted subset run
+  that *is* new in this edition.
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-412-g716301541136` plus two local
   fixes (`7163015`, "Guard `dEQP-VK.api.invariance.random` against empty
   image format lists"; and a second one added by roadmap C7's own pass,
@@ -18,7 +22,9 @@ and this file is a measurement instead.
   a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
-- `check-feme`: 1518 passed, 1 unsupported.
+- `check-feme`: 1519 passed, 1 unsupported (this file's own revision;
+  1520/0 once `FEME_VULKAN_CTS_DEQP_VK` points at a built `deqp-vk`, which
+  unsupports one fewer gated test).
 
 ## Headline
 
@@ -941,6 +947,55 @@ individually traced this pass -- that per-bucket attribution, at C1-C8's
 level of rigor, is exactly what §1.9.2's D3 schedules next, once D1's
 mandatory-gap inventory gives it a checklist to work against rather than
 a diagnostic-log grep.
+
+## Roadmap D1: measured impact
+
+Roadmap D1 ("An accurate 1.3/1.4 mandatory-feature/limit/extension
+inventory") is an audit milestone: `vk_gen_entrypoints.py`'s `CORE_FEATURES`
+now includes `VK_VERSION_1_4` (purely a generated-table coverage fix, since
+an unlisted entrypoint name and a listed-but-unimplemented one both already
+resolved to null through `ProcAddr.cpp`'s `findEntry`), and a new offline
+tool/doc pair (`feme/utils/vk_gen_feature_inventory.py`,
+`feme/docs/Vulkan14FeatureInventory.md`) enumerate the mandatory 1.3/1.4
+surface. Neither `PhysicalDeviceInfo.cpp` nor `EntryPoints.cpp` gained a
+single new advertised feature, limit, or extension in this milestone --
+so, unlike D0, there is no CTS-visible capability change to measure here at
+all, and a full 54-group/3.2-million-case re-run would not tell this
+report anything a byte-for-byte diff against the previous edition
+wouldn't already predict (the same "this full re-run's headline numbers are
+byte-for-byte identical to the previous edition's" outcome C1's own measured
+section already recorded for an analogous "no CTS-visible surface changed"
+case).
+
+What this section does instead is a **targeted confirmation run**, over the
+11,184 cases in `dEQP-VK.api.{info,device_init,object_management}.*` --
+chosen because these are the groups that most directly exercise
+`vkGetInstanceProcAddr`/`vkGetDeviceProcAddr` and instance/device/queue
+creation, i.e. exactly the code paths a larger generated entrypoint table
+could plausibly perturb. Run in two passes (the loader crash below stops
+`deqp-vk` mid-sequence, so the remaining 207 cases were run as a second,
+separate invocation over the tail of the same case list):
+
+| | Count | Share |
+|---|---|---|
+| Total cases | 11,184 | |
+| Passed | 6,436 | 57.5% |
+| Failed | 112 | 1.0% |
+| Not supported | 4,635 | 41.4% |
+| **Crashed** | **1** (`multithreaded_per_thread_resources.device`) | |
+
+The one crash is **not new**: it reproduces exactly
+`dEQP-VK.api.object_management.multithreaded_per_thread_resources.device`,
+the identical case D0's own second measurement already traced to the
+*system* Vulkan loader's `vkGetDeviceProcAddr` (Ubuntu's `libvulkan1`,
+concurrent `vkCreateDevice`s) and left open as Roadmap.md's D2 -- not a
+regression this milestone introduced. No other case in this subset
+crashed, timed out, or produced a `Pass`-shaped result with wrong data.
+This is consistent with (though, given the subset's size relative to the
+full 3.2M-case corpus, does not itself prove) D1 having zero net effect on
+the full-run headline; a full re-run is deferred to whichever future
+roadmap row actually closes a feature/limit/extension this inventory
+found missing, where it will have something new to measure.
 
 ## What the 3,199,421 `Not supported` results mean
 
