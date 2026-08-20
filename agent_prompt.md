@@ -26,14 +26,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement C5 from the roadmap document?
+Can you implement C6 from the roadmap document?
 
-> **Mandatory API object model.** Occlusion queries in `vkCreateQueryPool`
-> (mandatory in 1.0); the descriptor types `isSupportedDescriptorType` declines
-> (input attachment, dynamic uniform/storage buffer); the `VkRenderPass` shapes
-> `feme::vulkan::RenderPass` declines (resolve and input attachments,
-> multi-subpass dependencies); the `VkSubgroupFeatureFlags` contradiction
-> (`BASIC_BIT` must be set whenever a graphics or compute queue exists); and
-> `VkPhysicalDeviceDriverProperties` (a registered `VkDriverId`, a conformance
-> version, null-terminated name/info strings -- the last of which is a
-> prerequisite for *submitting* results, not just passing them)
+> **Queue family capability combinations.** 99,324 cases report `NotSupported`
+> because no queue family matches a required capability set. A family
+> advertising `GRAPHICS` must also advertise `TRANSFER`; the mandatory
+> combinations must all be coverable. These are `NotSupported`, not `Fail`,
+> today, so they cost nothing in the failure count -- but a conformance run that
+> declines a hundred thousand mandatory cases is not a conformance run
