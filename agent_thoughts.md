@@ -23598,3 +23598,176 @@ verbatim, at the multi-hour cost its own "Reproducing this report"
 section describes, so none was performed; recorded as a new addendum in
 `VulkanCTSReport.md` explaining this reasoning (and the two checks that
 support it) instead.
+
+# Agent thoughts: Roadmap C5 (Mandatory API object model)
+
+The request was to implement Roadmap C5 from `feme/docs/Roadmap.md` in small,
+independently-testable commits, while updating the design/roadmap/CTS docs in
+this tree's existing inline-deviation style rather than hand-waving partial
+closure. Before touching code I re-read `feme/.instructions.md`,
+`.github/instructions/llvm.instructions.md`, the full C1-C10 table in
+`feme/docs/Roadmap.md`, the Queries / Descriptor Sets / Render passes and
+dynamic rendering / Subgroups / Physical Device and Capabilities sections of
+`feme/docs/FeMeVulkanDesign.md`, `feme/docs/VulkanCTSReport.md`'s existing
+C1/C3 addenda and reproducing procedure, and the recent commit/`agent_thoughts`
+conventions on this branch.
+
+## Build/test discipline and scope control
+
+I verified up front that the existing `build/` already had `ccache`
+(`CMAKE_{C,CXX}_COMPILER_LAUNCHER=ccache`) and `LLVM_ENABLE_ASSERTIONS=ON`
+configured, and ran a baseline `ninja -C build check-feme` before any changes.
+All feature commits below were built and re-tested with the same command after
+`clang-format -i`, using the pre-existing build directory rather than a fresh
+one. For CTS coverage I followed `VulkanCTSReport.md`'s own methodology but used
+narrow, directly relevant subsets rather than a full 54-group re-run after each
+sub-commit: C5 is mostly API-object-model surface, so the useful signal is in
+`fragment_operations.occlusion_query`, `api.descriptor_*`,
+`renderpasses.renderpass2`, `api.info.subgroup_features`, and
+`api.driver_properties`, not in spending multi-hours re-counting unrelated
+shader failures.
+
+## QueryPool / occlusion queries
+
+The key design question was whether C5 should merely *accept* occlusion-query
+pools or actually count something truthful. I traced the current V6 graphics
+path (`CommandBuffer.cpp` -> `feme::graphics::executeDraws`) and found that the
+executor already computes exactly the quantity occlusion queries need: a
+per-sample coverage mask, then a per-sample depth/stencil pass mask, for every
+surviving fragment lane. That made a truthful implementation possible with a
+small amount of wiring and without inventing any rasterizer-internal notion of a
+"query object": `PreparedDraw` gained an optional passed-sample accumulator,
+`executeDraws` increments it once per fragment lane after the final pass mask is
+known, `CommandBuffer.cpp` threads active occlusion-query pools through draw
+execution, and `QueryPool` itself now stores per-slot values and active bits.
+
+I explicitly did **not** claim more than that. Timestamp queries remain
+truthful zero-valued queries; pipeline-statistics queries are still rejected;
+and I left `occlusionQueryPrecise` unadvertised even though the ordinary
+single-query draw path is exact, because C5 was about the mandatory 1.0 object
+model, not about claiming optional feature breadth the rest of the state model
+has not been audited for yet. The design doc's former V7 reservation of
+"occlusion queries over real draws" was updated to say that C5 closes the exact
+passed-sample counting part now, leaving pipeline-statistics and any broader
+query-state work to V7.
+
+## Descriptor input attachments
+
+The user's note that dynamic uniform/storage buffer descriptors were already
+accepted was correct; the only real descriptor-type gap was
+`VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT`. The object-model change itself was small:
+FeMe already has an image-binding path (`DescriptorImageBinding`,
+`imageBindingArray`, image/sampler writes/copies), and an input attachment is
+just a read-only image view plus layout from that layer's point of view. So the
+implementation simply extends `isImageDescriptorType`/`isReadOnlyDescriptorType`
+and flips the corresponding unit tests from rejection to acceptance, plus a
+new write/read-back test proving the binding is retained without a sampler.
+
+The important part was *documenting the boundary correctly*: this closes the
+API-object-model half only. A descriptor set can now create, allocate, update,
+copy, and bind an input-attachment binding, but shader-side `subpassInput`
+lowering is still a separate follow-up. I recorded that explicitly in
+`FeMeVulkanDesign.md` instead of letting the broader "image descriptors work"
+text quietly over-claim.
+
+## RenderPass input attachments and subpass dependencies
+
+The RenderPass work had two distinct pieces:
+
+1. **Input attachments in the render-pass object model.** The prior code simply
+   rejected any `VkSubpassDescription` with `inputAttachmentCount != 0`. Since
+   C5's scope explicitly allowed "creation-time acceptance + framebuffer /
+   descriptor wiring only, not shader consumption", I changed `RenderPass`'s
+   compiled `SubpassDescription` to retain input-attachment indices and taught
+   `vkCreateRenderPass`/`vkCreateRenderPass2` to validate/store them exactly the
+   way the existing code already did for color/resolve/depth attachments.
+2. **Subpass-dependency validation.** FeMe's sequential execution model means
+   dependencies still collapse to the same full-join semantics the runtime was
+   already using at every subpass boundary, so there is still no runtime payload
+   to store. But the old code's complete failure to even *look at*
+   `pDependencies` was an object-model bug in its own right: out-of-range
+   `srcSubpass`/`dstSubpass` values and `VkSubpassDependency2::viewOffset` /
+   `VK_DEPENDENCY_VIEW_LOCAL_BIT` (multiview-only state) silently slipped
+   through. I added validation for those structural errors, and passed converted
+   classic dependencies through `vkCreateRenderPass2` instead of dropping them.
+
+I was careful not to expand this into a shader-lowering project. The render-pass
+and descriptor layers now accept the mandatory shape, but `subpassInput`
+consumption itself is still documented as unlowered, and the design doc's V6
+status note now says exactly that.
+
+## Subgroup properties
+
+The subgroup bug was not that `VkPhysicalDeviceSubgroupProperties` omitted
+`BASIC_BIT` -- `EntryPoints.cpp` already hardcoded it there -- but that the
+promoted `VkPhysicalDeviceVulkan11Properties` chain was still unhandled and
+therefore left zero-initialized by callers. That is exactly the sort of
+"contradiction between two ways of asking the same property" Roadmap C5 was
+calling out. I fixed it by moving subgroup-supported stages/operations into
+`PhysicalDeviceInfo` itself and using those values for both query paths, then
+added a direct `vkGetPhysicalDeviceProperties2` unit test chaining both structs
+in one call and asserting the answers match.
+
+One CTS subtlety worth recording: the obvious-looking
+`dEQP-VK.api.info.subgroup_features.flags` case is useless as a movement metric
+for this ICD because CTS itself requires Vulkan 1.4 to run it; this 1.2 device
+correctly returns `NotSupported` before the fix would ever be observed. That is
+why the Vulkan CTS report's C5 section cites the new unit test as the primary
+measurement for this sub-bullet rather than pretending the 1.4-gated CTS case
+said anything about the 1.2 object-model contradiction.
+
+## Driver properties: truthful, but only partially closable
+
+This was the one place where the roadmap's "mandatory object model" wording ran
+head-first into FeMe's established no-lying rule. Implementing the *query path*
+was straightforward: `PhysicalDeviceInfo` now carries a zero
+`VkConformanceVersion` plus non-empty, null-terminated `DriverName`/
+`DriverInfo` strings, and `vkGetPhysicalDeviceProperties2` fills both
+`VkPhysicalDeviceDriverProperties` and the promoted
+`VkPhysicalDeviceVulkan12Properties` fields from that shared source of truth.
+CTS confirms that this closes the string/queryability part: four of the five
+`api.driver_properties.*` cases pass.
+
+The two remaining values are deliberately *not* papered over:
+
+- **`driverID`** still reports `VK_DRIVER_ID_MAX_ENUM`. There is no generic
+  Khronos-assigned "custom software ICD" `VkDriverId` enum value in the Vulkan
+  headers, and reporting Mesa llvmpipe / SwiftShader / any other real driver's
+  ID would be impersonation. FeMe's own design doc had already committed to the
+  reserved implementation-defined vendor ID plus `MAX_ENUM` until a real ID
+  exists, so I kept that truthful behavior and updated the docs to say the C5
+  sub-bullet is only *partially* closed for that reason.
+- **`conformanceVersion`** stays `{0,0,0,0}`. The CTS `api.driver_properties.
+  conformance_version` case expects a version at least as new as the advertised
+  API version, but FeMe is not conformant today; inventing a non-zero
+  conformance version would be exactly the sort of false submission-shaped value
+  the design docs prohibit. I chose to keep the truthful zero, let the CTS case
+  fail, and record that failure explicitly in both `Roadmap.md` and
+  `VulkanCTSReport.md` rather than silently chase the test by lying.
+
+That is why the final C5 roadmap row is written as a **partial** closure of the
+`VkPhysicalDeviceDriverProperties` clause, even though the rest of C5 is closed.
+
+## Documentation and final structure
+
+I updated `FeMeVulkanDesign.md` alongside each feature commit where the code now
+deviates from or broadens the prior text, then finished with one docs-only
+commit that (1) rewrites the Roadmap C5 row in the same strikethrough +
+parenthetical deviation-note style as C1-C4, and (2) adds a new "Roadmap C5:
+measured impact" section to `VulkanCTSReport.md` summarizing the exact targeted
+CTS subsets run during this work and why a full headline re-run was not the
+right measurement for this milestone.
+
+## Commit structure
+
+I kept the functional work split into five independently-testable commits:
+
+1. occlusion-query counting over real draws,
+2. input-attachment descriptor acceptance,
+3. render-pass input-attachment acceptance + subpass-dependency validation,
+4. subgroup-properties chain consistency,
+5. truthful driver-properties queryability,
+6. then a docs-only commit for the final roadmap/CTS write-up.
+
+This `agent_thoughts.md` entry is committed separately, last, to match the
+existing convention in this repository.
