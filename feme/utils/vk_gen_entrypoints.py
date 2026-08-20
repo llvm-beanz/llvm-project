@@ -22,14 +22,20 @@
 # symbol) never takes the address of a function that doesn't exist for an
 # unimplemented command.
 #
-# Only the VK_VERSION_1_0 through VK_VERSION_1_3 core features, plus the
+# Only the VK_VERSION_1_0 through VK_VERSION_1_4 core features, plus the
 # extensions in `SUPPORTED_EXTENSIONS`, are read (V3 needs 1.2's core,
 # non-`KHR`-suffixed timeline-semaphore commands --
 # `vkWaitSemaphores`/`vkSignalSemaphore`/`vkGetSemaphoreCounterValue` --
 # rather than adding extension support for `VK_KHR_timeline_semaphore`;
 # roadmap D0 needs 1.3's core, non-`KHR`-suffixed `VK_KHR_copy_commands2`
 # family for the same reason (see "Roadmap D0: measured impact" in
-# VulkanCTSReport.md); every other 1.2/1.3 command this ICD does not
+# VulkanCTSReport.md); roadmap D1 added VK_VERSION_1_4 itself so the
+# generated table covers its 19 new core commands (e.g. `vkMapMemory2`,
+# `vkCmdBindDescriptorSets2`) even though none of them are implemented yet
+# -- `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr` already returned null for
+# an unlisted name exactly like they do for a listed, unimplemented one
+# (see ProcAddr.cpp's `findEntry`), so this is a coverage fix, not a
+# behavior change; every other 1.2/1.3/1.4 command this ICD does not
 # implement is simply left unimplemented, exactly like most of 1.1's own
 # surface already is). An extension's commands are read only when the
 # extension is listed in `SUPPORTED_EXTENSIONS`, which means this driver
@@ -55,6 +61,7 @@ CORE_FEATURES = (
     "VK_VERSION_1_1",
     "VK_VERSION_1_2",
     "VK_VERSION_1_3",
+    "VK_VERSION_1_4",
 )
 
 # Extensions this driver implements and advertises, whose commands the
