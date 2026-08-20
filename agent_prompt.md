@@ -26,15 +26,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E2 in the roadmap document?
+Can you implement milestone E3 in the roadmap document?
 
-> **Wire the aggregate `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties`
-> `vkGetPhysicalDeviceProperties2` cases**, enumerating all 70 mandatory limit
-> fields from `Vulkan14FeatureInventory.md`'s table. Most are either a real
-> minimum this ICD can already compute (e.g. `maxBufferSize`,
-> `storageTexelBufferOffsetAlignmentBytes`) or a truthful `VK_FALSE`/`0` for a
-> capability not yet implemented (every `integerDotProduct*Accelerated` bit
-> until E8 lands, `maxPushDescriptors` until F12 lands). Land the struct case
-> with every field set to a conservative, honest value first, then let each
-> later row (E8, F5, F11, F12, ...) raise its own subset once the feature behind
-> it is real, instead of blocking this row on every other one
+> **`VK_KHR_synchronization2`/`synchronization2`.**
+> `vkCmdPipelineBarrier2`/`vkCmdWriteTimestamp2`/`vkQueueSubmit2`/`vkCmdSetEvent2`/`vkCmdResetEvent2`/`vkCmdWaitEvents2`
+> translate `VkDependencyInfo`'s per-resource
+> `VkMemoryBarrier2`/`VkBufferMemoryBarrier2`/`VkImageMemoryBarrier2`
+> (2-stage-mask, 2-access-mask shape) down to the existing 1-mask `Sync.{h,cpp}`
+> model, the same "new entrypoint, old backing model" pattern C7 used for queue
+> families | E2 (for the feature bit)
