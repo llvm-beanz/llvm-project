@@ -422,6 +422,19 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // its six states" -- see FeMeVulkanDesign.md's updated status note.
       {VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME,
        VK_EXT_EXTENDED_DYNAMIC_STATE_SPEC_VERSION},
+      // (roadmap E3) `vkCmdPipelineBarrier2`/`vkCmdWriteTimestamp2`/
+      // `vkQueueSubmit2`/`vkCmdSetEvent2`/`vkCmdResetEvent2`/
+      // `vkCmdWaitEvents2` (CommandBuffer.cpp/Sync.cpp) are all
+      // implemented; unlike `VK_KHR_copy_commands2` (roadmap D0), whose
+      // core names alone sufficed once apiVersion reached 1.4,
+      // `dEQP-VK.synchronization2`'s own multi-queue/custom-device cases
+      // (`vktCustomInstancesDevices.cpp`) explicitly enable this
+      // extension by name at `vkCreateDevice` regardless of the
+      // advertised `apiVersion`, so it must be listed here too, or every
+      // one of them fails with `VK_ERROR_EXTENSION_NOT_PRESENT` (see
+      // "Roadmap E3: measured impact" in VulkanCTSReport.md).
+      {VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
+       VK_KHR_SYNCHRONIZATION_2_SPEC_VERSION},
   };
   return Extensions;
 }

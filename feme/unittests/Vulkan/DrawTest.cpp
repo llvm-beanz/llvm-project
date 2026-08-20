@@ -1231,7 +1231,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 2u);
+  ASSERT_EQ(Count, 3u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -1244,6 +1244,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   };
   EXPECT_TRUE(HasExtension(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME));
   EXPECT_TRUE(HasExtension(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME));
+  // Roadmap E3.
+  EXPECT_TRUE(HasExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
@@ -1267,6 +1269,11 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   vkDestroyDevice(Second, nullptr);
 
   Enabled = VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME;
+  EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second), VK_SUCCESS);
+  vkDestroyDevice(Second, nullptr);
+
+  // Roadmap E3.
+  Enabled = VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME;
   EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second), VK_SUCCESS);
   vkDestroyDevice(Second, nullptr);
 
