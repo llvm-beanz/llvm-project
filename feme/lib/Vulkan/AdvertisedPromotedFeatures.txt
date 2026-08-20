@@ -1,0 +1,15 @@
+# Feature-struct member names, from vk_gen_feature_inventory.py's inventoried
+# VkPhysicalDeviceVulkan{13,14}Features, that this ICD's PhysicalDeviceInfo
+# genuinely implements today -- used by roadmap D1's audit
+# (feme/utils/vk_gen_feature_inventory.py --advertised-features).
+#
+# dynamicRendering: implemented (RenderPass.cpp/GraphicsPipeline.cpp), but
+# currently advertised only through its pre-promotion VK_KHR_dynamic_rendering
+# feature struct (EntryPoints.cpp's VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_
+# RENDERING_FEATURES case) -- VkPhysicalDeviceVulkan13Features.dynamicRendering
+# itself is not yet wired (no VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_
+# FEATURES case exists at all), so an application that only reads the
+# aggregate 1.3 struct would see VK_FALSE for a capability this ICD actually
+# has. The note on its own line below keeps that distinction visible for
+# whoever wires the aggregate struct next.
+dynamicRendering = advertised only via VK_KHR_dynamic_rendering's own feature struct; VkPhysicalDeviceVulkan13Features itself is unwired

@@ -1,0 +1,2 @@
+# Advertised-extensions fixture for vk-gen-feature-inventory.test.
+VK_KHR_synchronization2

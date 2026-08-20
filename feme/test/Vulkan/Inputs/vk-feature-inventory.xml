@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal vk.xml fixture for vk-gen-feature-inventory.test: a
+     VkPhysicalDeviceVulkan13Features/Properties struct pair (each with two
+     real members plus the sType/pNext header vk_gen_feature_inventory.py
+     must exclude) and one extension `promotedto="VK_VERSION_1_3"`. -->
+<registry>
+  <types>
+    <type category="struct" name="VkPhysicalDeviceVulkan13Features">
+      <member><type>VkStructureType</type><name>sType</name></member>
+      <member><type>void</type>*<name>pNext</name></member>
+      <member><type>VkBool32</type><name>synchronization2</name></member>
+      <member><type>VkBool32</type><name>maintenance4</name></member>
+    </type>
+    <type category="struct" name="VkPhysicalDeviceVulkan13Properties">
+      <member><type>VkStructureType</type><name>sType</name></member>
+      <member><type>void</type>*<name>pNext</name></member>
+      <member><type>uint32_t</type><name>maxInlineUniformBlockSize</name></member>
+      <member><type>VkDeviceSize</type><name>maxBufferSize</name></member>
+    </type>
+  </types>
+  <extensions>
+    <extension name="VK_KHR_synchronization2" number="1" type="device"
+               supported="vulkan" promotedto="VK_VERSION_1_3">
+    </extension>
+    <extension name="VK_fake_unpromoted_extension" number="2" type="device"
+               supported="vulkan">
+    </extension>
+  </extensions>
+</registry>

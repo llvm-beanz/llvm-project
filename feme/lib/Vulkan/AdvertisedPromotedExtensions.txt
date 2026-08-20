@@ -1,0 +1,8 @@
+# Extension names, from vk_gen_feature_inventory.py's inventoried 1.3/1.4
+# `promotedto` lists, that this ICD's getSupportedDeviceExtensions already
+# implements and advertises -- must be kept a subset of
+# feme/lib/Vulkan/PhysicalDeviceInfo.cpp's own list and of
+# feme/utils/vk_gen_entrypoints.py's SUPPORTED_EXTENSIONS (see roadmap D1's
+# audit, feme/utils/vk_gen_feature_inventory.py --advertised-extensions).
+VK_KHR_dynamic_rendering = every command and the dynamicRendering feature bit are implemented; see AdvertisedPromotedFeatures.txt for why the *aggregate* Vulkan13Features struct doesn't reflect it yet
+VK_EXT_extended_dynamic_state = roadmap C4c: all 12 dynamic states implemented

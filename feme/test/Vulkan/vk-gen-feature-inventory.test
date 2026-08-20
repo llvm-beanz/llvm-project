@@ -1,0 +1,38 @@
+// vk_gen_feature_inventory.py (roadmap D1, "An accurate 1.3/1.4
+// mandatory-feature/limit/extension inventory") must enumerate a version's
+// full feature/limit/extension surface straight from vk.xml -- the
+// VkPhysicalDeviceVulkan13Features/Properties struct members (excluding the
+// sType/pNext header every struct carries) and every extension
+// `promotedto="VK_VERSION_1_3"` -- and cross-check it against the
+// `--advertised-features`/`--advertised-extensions` fixtures.
+//
+// RUN: %python %S/../../utils/vk_gen_feature_inventory.py \
+// RUN:   %S/Inputs/vk-feature-inventory.xml --version VK_VERSION_1_3 \
+// RUN:   --advertised-features %S/Inputs/vk-feature-inventory-advertised-features.txt \
+// RUN:   --advertised-extensions %S/Inputs/vk-feature-inventory-advertised-extensions.txt \
+// RUN:   -o %t.md
+// RUN: FileCheck %s < %t.md
+
+// sType/pNext are excluded from both the feature and the limit struct.
+// CHECK-NOT: sType
+// CHECK-NOT: pNext
+
+// synchronization2 is a real VkPhysicalDeviceVulkan13Features member that
+// neither advertised-features fixture lists, so it's checklisted "no".
+// CHECK-DAG: | feature | VK_VERSION_1_3 | `synchronization2` | no | |
+
+// maintenance4 is listed (with a note) in the advertised-features fixture.
+// CHECK-DAG: | feature | VK_VERSION_1_3 | `maintenance4` | yes | fixture-only note |
+
+// Limit fields are enumerated but never judged ("n/a", regardless of any
+// advertised-features fixture).
+// CHECK-DAG: | limit | VK_VERSION_1_3 | `maxInlineUniformBlockSize` | n/a | |
+// CHECK-DAG: | limit | VK_VERSION_1_3 | `maxBufferSize` | n/a | |
+
+// VK_KHR_synchronization2 is `promotedto="VK_VERSION_1_3"` and listed in the
+// advertised-extensions fixture, so it's checklisted "yes".
+// CHECK-DAG: | extension | VK_VERSION_1_3 | `VK_KHR_synchronization2` | yes | |
+
+// VK_fake_unpromoted_extension has no `promotedto` attribute at all, so it
+// must not appear in the 1.3 inventory.
+// CHECK-NOT: VK_fake_unpromoted_extension

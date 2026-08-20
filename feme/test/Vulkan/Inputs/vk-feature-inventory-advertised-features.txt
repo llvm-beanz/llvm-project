@@ -1,0 +1,2 @@
+# Advertised-features fixture for vk-gen-feature-inventory.test.
+maintenance4 = fixture-only note
