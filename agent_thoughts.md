@@ -24331,3 +24331,114 @@ of §1.9.2's D1 (the real 1.3/1.4 mandatory-feature inventory) or D3
 correctly-scoped follow-on roadmap rows now, not something this pass's
 time budget could responsibly claim to have measured, let alone
 implemented, on top of everything above.
+
+# Roadmap D1: 1.3/1.4 mandatory-feature/limit/extension inventory
+
+## Scoping the milestone correctly
+
+The roadmap row's own text is explicit that this is "D0's own 'measure
+honestly' step turned into a checklist", contrasted against C6's
+hand-derivation of 1.2's much shorter mandatory list. That phrasing is a
+deliberate scope boundary: D1 is an audit, not an implementation pass. I
+read the parenthetical listing `synchronization2`, `maintenance4`/`5`/`6`,
+`subgroupSizeControl`, `shaderIntegerDotProduct`,
+`pipelineCreationCacheControl`, `pushDescriptor` as *examples the prompt
+already knows about*, not a to-do list to implement here -- confirmed by
+grepping for every 1.3/1.4 feature-struct member name across `feme/lib`:
+none of them appear anywhere except `dynamicRendering`. Implementing any
+of this floor is real, separate G/V-track-sized work; conflating it with
+D1 would have blown this milestone's scope past what "measure honestly"
+asks for.
+
+## What the audit tool actually needed to enumerate
+
+Three surfaces, each with a different vk.xml shape:
+
+1. **Features**: `VkPhysicalDeviceVulkan13Features`/`Vulkan14Features` are
+   flat structs in vk.xml's `<types>` -- no `depends` resolution needed at
+   all, unlike `vk_gen_entrypoints.py`'s `CORE_FEATURES`. I originally
+   expected to reuse `resolve_dependent_features` here and had to correct
+   myself once I actually looked at the struct's XML: its members are
+   already the complete, flat list.
+2. **Limits**: the promoted `...Properties` structs, same flat-struct
+   shape. These are enumerated but never judged -- a limit's honesty is
+   about its numeric value, not its name, so unlike a feature bit there is
+   no `--advertised-limits` equivalent; I initially drafted one and
+   removed it once I realized every row would need "yes, but is the
+   *value* honest?" which this tool cannot check without reading
+   `PhysicalDeviceInfo.cpp`'s actual computed values, a different (and
+   much larger) job than an inventory.
+3. **Extensions**: `<extension promotedto="VK_VERSION_1_x">` is a direct
+   attribute, no XML-tree walk needed.
+
+## The one non-audit change: CORE_FEATURES itself
+
+The roadmap row's own premise sentence ("`CORE_FEATURES` now resolves
+through `VK_VERSION_1_3` ..., but `VK_VERSION_1_4` is not yet included")
+described a real, mechanical gap identical in kind to 1.3's own addition
+in D0 -- so I closed it as part of this milestone rather than leaving it
+for the inventory to merely note. I checked first that this is genuinely
+a no-op behaviorally: `ProcAddr.cpp`'s `findEntry` already returns `null`
+for a name absent from the generated table exactly like it does for a
+present-but-unimplemented one, so adding 1.4's 19 new core commands
+(`vkMapMemory2`, `vkCmdBindDescriptorSets2`, ...) to the table changes
+nothing any caller can observe -- confirmed by `ninja check-feme` staying
+at the same pass count before and after.
+
+## Cross-checking against real implementation state, not memory
+
+Rather than writing `AdvertisedPromotedFeatures.txt`/
+`AdvertisedPromotedExtensions.txt` from what the roadmap prompt's own text
+already told me, I `grep`'d every one of the 36 feature-struct member
+names across `feme/lib`/`feme/include` directly. All but `dynamicRendering`
+came back with zero hits, confirming rather than assuming the prompt's own
+"and the rest are not" claim. `dynamicRendering` itself needed the finer
+distinction the "Note" column exists for: it *is* genuinely implemented,
+but only through its pre-promotion `VK_KHR_dynamic_rendering` feature
+struct case in `EntryPoints.cpp` -- there is no
+`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES` case at all, so an
+application that only reads the aggregate struct would see `VK_FALSE` for
+a capability this ICD actually has. That is itself a small, pre-existing
+truthfulness gap the audit surfaced rather than created -- I recorded it
+as a finding rather than silently fixing it (fixing it means adding the
+aggregate-struct case, which is exactly the kind of implementation work
+D1 is scoped to inventory, not perform).
+
+## CTS measurement scope
+
+D0's "measure everything with a full run" precedent doesn't fit D1: D0
+changed the advertised `apiVersion` itself, a real CTS-visible surface
+change worth a full 54-group re-run. D1 changes zero advertised
+capabilities -- the entrypoint-table addition is a no-op by construction
+(see above), and the new script/docs are pure tooling. A full 3.2M-case
+re-run would, by the same logic C1's own measured-impact section already
+demonstrated for an analogous "no CTS-visible surface changed" case,
+reproduce the previous edition's headline byte-for-byte and cost hours to
+confirm something already provable from the diff. Instead I ran a
+targeted, real (not simulated) `deqp-vk` pass over the 11,184 cases most
+likely to be perturbed by a larger entrypoint table --
+`api.{info,device_init,object_management}.*`, the groups that actually
+call `vkGetInstanceProcAddr`/`vkGetDeviceProcAddr` and create
+instances/devices/queues. It hit exactly one crash, and cross-checking it
+against D0's own report confirmed it is the *identical* case
+(`multithreaded_per_thread_resources.device`) already traced to the system
+loader and tracked as D2 -- not something this milestone introduced. I
+split the run into two invocations (before/after the crashing case) to get
+a complete count for the rest of the subset rather than stopping at the
+first crash and reporting a smaller, less confident sample.
+
+## Order of commits
+
+Four commits, each independently buildable and testable: (1) the
+`CORE_FEATURES` addition (mechanical, its own `ninja check-feme` run); (2)
+the new audit tool plus its own lit test and the two checked-in
+`AdvertisedPromoted*.txt` fixtures; (3) the documentation --
+`Vulkan14FeatureInventory.md`, `FeMeVulkanDesign.md`'s status note, and
+Roadmap.md's D1 closure -- generated only after (1) and (2) were both
+correct, since the doc *is* that tool's real output rather than
+hand-written; (4) `VulkanCTSReport.md`'s targeted-subset measurement,
+written after the CTS run actually completed rather than predicted. I did
+not implement any of the 1.3/1.4 mandatory floor this audit found missing
+(D1's own scope boundary), and did not attempt D2 (the loader crash,
+already tracked) or D3 (per-bucket attribution of D0's own regressions,
+unrelated to this milestone).
