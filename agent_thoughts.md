@@ -25041,3 +25041,160 @@ Properties` and the rest) -- each belongs to its own later roadmap row
 prerequisite: it must add the dedicated case *and* raise the aggregate
 field together, or it will reproduce the exact regression this session's
 CTS run just caught.
+
+# Roadmap E3: VK_KHR_synchronization2's six commands, old backing model
+
+## Task
+
+Implement Roadmap.md's E3 row: `vkCmdPipelineBarrier2`/
+`vkCmdWriteTimestamp2`/`vkQueueSubmit2`/`vkCmdSetEvent2`/`vkCmdResetEvent2`/
+`vkCmdWaitEvents2` translating `VkDependencyInfo`'s per-resource
+`VkMemoryBarrier2`/`VkBufferMemoryBarrier2`/`VkImageMemoryBarrier2`
+(2-stage-mask, 2-access-mask shape) down to the existing 1-mask
+`Sync.{h,cpp}` model -- the same "new entrypoint, old backing model"
+pattern roadmap C7 used for queue families. E2 is the row's only listed
+prerequisite (for the `synchronization2` feature bit slot E2 already
+reserved in the aggregate `VkPhysicalDeviceVulkan13Features` struct).
+
+## Investigation
+
+Read `feme/lib/Vulkan/Sync.{h,cpp}` (fence/event/semaphore/`vkQueueSubmit`)
+and the barrier/event/timestamp commands in `CommandBuffer.{h,cpp}` first --
+this ICD's execution model already makes a pipeline barrier, `vkCmdWaitEvents`,
+and `vkQueueSubmit`'s wait/signal semaphores no-ops beyond bookkeeping
+(strictly sequential single-thread execution, per `pipelineBarrier`'s own
+comment), except for an image memory barrier's layout transition, which is
+real per-subresource state (`ImageLayoutTransition`). That meant every `2`
+command's job is purely translation: unwrap the new struct shape, call the
+identical existing method.
+
+Checked `feme/utils/vk_gen_entrypoints.py`: all six `..2` command names
+(non-`KHR`-suffixed) are already core `VK_VERSION_1_3` entries its
+`CORE_FEATURES` tuple resolves -- confirmed this against `vk.xml` directly.
+So, unlike the row's own "Files" column guessed (`vk_gen_entrypoints.py`),
+no generator change was needed at all; only `ImplementedEntrypoints.txt`
+entries (to move each name from `FEME_VK_COMMAND` to `_IMPL`) and real
+`CommandBuffer.cpp`/`Sync.cpp` bodies.
+
+## Implementation
+
+- `CommandBuffer.cpp`: `vkCmdPipelineBarrier2` builds the identical
+  `std::vector<ImageLayoutTransition>` its non-`2` counterpart does, from
+  `VkImageMemoryBarrier2` instead of `VkImageMemoryBarrier` (only the
+  layout/image/subresourceRange fields are read either way -- the 2-stage/
+  2-access masks have nothing to add to state this ICD tracks, exactly as
+  documented for the 1-mask version). `vkCmdSetEvent2`/`vkCmdResetEvent2`/
+  `vkCmdWaitEvents2` are the same pattern for `Event`/`waitEvents`.
+  `vkCmdWriteTimestamp2` is a direct call-through, just with a 2-stage-mask
+  parameter type.
+- `Sync.cpp`: `vkQueueSubmit2` needed more than a call-through, since
+  `VkSubmitInfo2`'s per-element `VkSemaphoreSubmitInfo`/
+  `VkCommandBufferSubmitInfo` don't literally overlay `vkQueueSubmit`'s
+  parallel-array/`VkTimelineSemaphoreSubmitInfo`-in-`pNext` shape. Rather
+  than duplicate the wait/signal/execute logic, factored `vkQueueSubmit`'s
+  own body into three small anonymous-namespace helpers first (`SemaphoreOp`
+  wait/signal consumption, command-buffer execution), each keeping their
+  exact original semantics, then had both `vkQueueSubmit` and
+  `vkQueueSubmit2` build the same `SemaphoreOp`/`CommandBuffer*` vectors
+  from their own struct shape and call the shared helpers. This is the
+  cleanest form of "new entrypoint, old backing model" I could find: the
+  *only* thing that differs between the two entrypoints now is how they
+  parse their own argument shape into the shared intermediate vectors.
+- `EntryPoints.cpp`: flipped `Features->synchronization2` from `VK_FALSE`
+  to `VK_TRUE` in the aggregate `VkPhysicalDeviceVulkan13Features` case
+  (E1's own switch), and added a new
+  `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES` case
+  (`VkPhysicalDeviceSynchronization2Features::synchronization2 = VK_TRUE`),
+  mirroring `dynamicRendering`'s own dedicated-struct-must-agree-with-
+  aggregate pattern exactly -- this is the same
+  `property_extensions_consistency`-shaped trap E2's own session hit,
+  except on the *feature* side this time, and I built both pieces together
+  from the start specifically to avoid re-discovering it.
+
+## The extension-name surprise (and why the design doc's precedent didn't hold)
+
+`VK_KHR_copy_commands2` (roadmap D0) needed no `getSupportedDeviceExtensions`
+entry: its core, non-`KHR` names were enough once `apiVersion` reached 1.4,
+and `dEQP-VK`'s cases resolve those names directly. I assumed the same held
+here and left `getSupportedDeviceExtensions` untouched on the first pass.
+
+A targeted CTS run against the `synchronization2` group (before touching
+`getSupportedDeviceExtensions`) found 305 cases failing `vkCreateDevice`
+with `VK_ERROR_EXTENSION_NOT_PRESENT` -- all in
+`vktCustomInstancesDevices.cpp`'s multi-queue/custom-device path, which
+explicitly enables `VK_KHR_synchronization2` by name at `vkCreateDevice`
+regardless of the advertised `apiVersion` (unlike the ordinary default-
+device path most `copy_commands2` cases use). Adding the extension name to
+`getSupportedDeviceExtensions` fixed all 305 and raised the group's `Pass`
+count from 251 to 310. It deliberately does *not* also touch
+`vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` -- that would only pull in
+the `KHR`-suffixed command aliases (already redundant with the core names)
+plus two unrelated AMD/NV commands the extension's own `<require>` block
+happens to list -- so `getSupportedDeviceExtensions` and
+`SUPPORTED_EXTENSIONS` are deliberately out of sync here, a first for this
+codebase; documented explicitly in both `FeMeVulkanDesign.md`'s "Loader
+Integration" status note and this row's own Roadmap.md closing note so a
+future reader doesn't assume the "mirrored by" invariant always holds.
+
+Updated `DrawTest.AdvertisesDynamicRenderingExtension`'s hardcoded extension
+count (2 -> 3) and added assertions for the new extension/its `vkCreateDevice`
+acceptance, in the same test rather than a new one (it already covers
+exactly this "enumerate + accept at device-creation-time" scenario for the
+other two).
+
+## Testing
+
+- Unit tests, one per new command, each mirroring an existing non-`2` test
+  exactly (same fixture, same scenario, `2`-shaped structs instead):
+  `CommandBufferTest.PipelineBarrier2RecordsAsNoOpJoin`,
+  `CommandBufferTest.QueryPoolWriteTimestamp2ThenGetResults`,
+  `ImageTest.LayoutTrackingViaPipelineBarrier2` (the one test that actually
+  exercises the image-layout-transition payload, not just the no-op-join
+  bookkeeping), `SyncTest.QueueSubmit2*` (four tests: dispatch+fence,
+  rejects-unsignaled-binary-semaphore, binary signal-then-wait including
+  double-consumption, timeline signal-then-wait including
+  not-yet-reached), and `SyncTest.CommandBufferSetEvent2ThenWaitEvents2Succeeds`/
+  `CommandBufferWaitEvents2FailsWhenUnsignaled`. Plus
+  `PhysicalDeviceProperties2Test.Synchronization2IsAdvertisedThroughItsOwnDedicatedFeatureStruct`
+  and the flipped `synchronization2` expectation in
+  `DynamicRenderingIsAdvertisedThroughAggregateVulkan13Features`.
+- `ninja check-feme-unit`/`check-feme` (assertions-enabled, ccache
+  `RelWithDebInfo` build): 1533 passed, 1 unsupported, both before and after
+  -- no regression anywhere in-tree.
+- Vulkan-CTS: rather than a full 54-group re-run (this row's blast radius is
+  narrow enough that D1/E1/E2's own "targeted subset" precedent applies),
+  built pre-E3 (`git stash` on every touched `feme/lib/Vulkan/*.{cpp,h}`
+  file, keeping tests unstashed since they don't affect the ICD binary) and
+  post-E3, each run in isolation against `dEQP-VK.synchronization2.*` and
+  the two `api.info` case sets D1's inventory named for this bit. Recorded
+  in "Roadmap E3: measured impact" in `VulkanCTSReport.md`: 2 `Pass` -> 310
+  `Pass`/872 `Fail` (from 81,615 `NotSupported`), the dedicated feature
+  struct case `Fail` -> `Pass`, and confirmed the 872 remaining `Fail`s are
+  all pre-existing gaps (860 shader/pipeline limitations reached through a
+  newly-truthful capability check, 12 a pre-existing synchronous-execution-
+  model limitation already reproducible on the identical non-`2`
+  `dEQP-VK.synchronization` case) rather than anything E3 itself broke.
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E3's row; closing note corrects the "Files"
+  column guess (no `vk_gen_entrypoints.py` change needed) and records the
+  `getSupportedDeviceExtensions` addition the row itself didn't anticipate.
+- `FeMeVulkanDesign.md`: "Loader Integration" section explains the
+  deliberate `getSupportedDeviceExtensions`/`SUPPORTED_EXTENSIONS`
+  asymmetry; D1 status note updated to move `synchronization2` from the
+  unimplemented list to the implemented one, alongside `dynamicRendering`.
+- `VulkanCTSReport.md`: new "Roadmap E3: measured impact" section (see
+  "Testing" above); top-of-file revision bullets updated to note E1/E2/E3
+  are each measured only over their own targeted case sets, and the
+  `check-feme` count bumped to this session's 1533/1.
+
+## Scope discipline
+
+Touched `Sync.{h,cpp}`, `CommandBuffer.cpp`, `EntryPoints.{h,cpp}`,
+`PhysicalDeviceInfo.cpp`, `ImplementedEntrypoints.txt`, their unit tests,
+and the three documents this change directly affects. Did not touch
+`vk_gen_entrypoints.py` (confirmed unnecessary, see above) or any other
+roadmap row's own scope (E4 and later each get their own dedicated struct
+case for their own limit fields, same discipline E2's own session recorded
+for the properties side).
