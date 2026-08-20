@@ -1300,6 +1300,87 @@ crashed, timed out, or produced a
 `Pass`-shaped result with wrong image data -- each is a clean, correctly-
 reasoned `Fail` now that the capability check itself is honest.
 
+## Roadmap E2: measured impact
+
+Roadmap E2 ("Wire the aggregate `VkPhysicalDeviceVulkan13Properties`/
+`Vulkan14Properties` `vkGetPhysicalDeviceProperties2` cases") closes the
+other half of the gap D1's inventory found alongside E1's own target: all
+70 mandatory 1.3/1.4 limit fields were unenumerated by either promoted
+`...Properties` struct.
+
+**Targeted before/after run over the whole `dEQP-VK.api.info.*` group**
+(10,484 cases -- broader than E1's own four-group pass, since this
+milestone's own target, `vulkan1p3.properties`/`vulkan1p4.properties`,
+lives specifically in `api.info` and nowhere else), diffing real per-case
+results the same way D3/E1 did:
+
+| Case | Transition |
+|---|---|
+| `dEQP-VK.api.info.vulkan1p3.properties` | `Fail` &rarr; `Pass` |
+
+Exactly **one** case transitions. `vulkan1p4.properties` (the 1.4
+counterpart of this milestone's own target) stays `NotSupported` in both
+runs -- a pre-existing, E2-independent gap: `dEQP-VK.api.info.vulkan1p4.*`
+throws `NotSupportedError("At least Vulkan 1.4 required to run test")`
+because `Context::contextSupports(1, 4, 0)` returns false in this
+environment even though this ICD's own `vkGetPhysicalDeviceProperties`
+truthfully reports `apiVersion == VK_API_VERSION_1_4` (confirmed
+byte-identical before and after this change, and unrelated to any field
+this row writes -- `deqp-vk`'s own `usedApiVersion` negotiation, not this
+ICD's advertised version, is the limiting factor here; out of this row's
+scope to chase further).
+
+**This row's first draft was not this conservative, and a CTS run is why
+it changed.** An earlier version of this change reported real,
+already-computable values for a handful of fields this ICD tracks for
+other reasons already (`minSubgroupSize`/`maxSubgroupSize` from the
+pinned wave size, `maxComputeWorkgroupSubgroups` from the existing
+compute-invocation limit, `storageTexelBufferOffsetAlignmentBytes`/
+`uniformTexelBufferOffsetAlignmentBytes` from the existing texel-buffer
+offset alignment, `maxBufferSize` from the host-memory-backed allocation
+ceiling, `lineSubPixelPrecisionBits` from the rasterizer precision,
+`maxVertexAttribDivisor`/`maxCombinedImageSamplerDescriptorCount` as a
+real `1`, `defaultRobustnessStorageBuffers`/`UniformBuffers`/
+`VertexInputs` as `ROBUST_BUFFER_ACCESS`, `identicalMemoryTypeRequirements`
+as `VK_TRUE`). Running the same before/after recipe against that draft
+found a **second** transition alongside the intended one:
+`dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` went
+`Pass` &rarr; `Fail` (`"Mismatch between
+VkPhysicalDeviceSubgroupSizeControlProperties and
+VkPhysicalDeviceVulkan13Properties"`). Reading that test's own source
+(`vktApiFeatureInfo.cpp`) explains why: it cross-checks *every* aggregate
+1.3/1.4 property field against its own pre-promotion, per-extension
+dedicated struct (`VkPhysicalDeviceSubgroupSizeControlProperties`,
+`VkPhysicalDeviceInlineUniformBlockProperties`,
+`VkPhysicalDeviceShaderIntegerDotProductProperties`,
+`VkPhysicalDeviceTexelBufferAlignmentProperties`,
+`VkPhysicalDeviceMaintenance4Properties` for 1.3;
+`VkPhysicalDeviceLineRasterizationPropertiesKHR`,
+`VkPhysicalDeviceMaintenance5PropertiesKHR`,
+`VkPhysicalDeviceMaintenance6PropertiesKHR`,
+`VkPhysicalDevicePushDescriptorPropertiesKHR`,
+`VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR`,
+`VkPhysicalDeviceHostImageCopyPropertiesEXT`,
+`VkPhysicalDevicePipelineRobustnessPropertiesEXT` for 1.4) -- unconditionally,
+once apiVersion >= 1.3/1.4, exactly the same "assumed real once the
+version is claimed" pattern D3/E1 already found for `dynamicRendering`.
+None of those dedicated structs has its own `vkGetPhysicalDeviceProperties2`
+case in this ICD yet, so every one of them still reads back as an
+all-zero `initVulkanStructure()` default. A real, nonzero value in the
+aggregate struct therefore *disagrees* with that zero and fails the
+consistency check -- the draft would have converted one `Fail` into a
+`Pass` while introducing a different one, a net wash rather than the
+intended improvement. Landing every field at the conservative `0`/
+`VK_FALSE`/`nullptr` this report's own table above shows avoids the
+regression entirely while still closing `vulkan1p3.properties` (which
+only requires every field to be *written*, not nonzero -- it fills the
+struct with a guard byte pattern first and fails only if any field still
+holds that pattern afterward). Each field's own later roadmap row is
+responsible for raising it together with adding that row's own
+dedicated-struct case, so the two remain honestly in sync -- see
+Roadmap.md's E2 row and `feme/lib/Vulkan/EntryPoints.cpp`'s case comment
+for the full per-row mapping.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the

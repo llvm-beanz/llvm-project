@@ -491,22 +491,29 @@ state row and FeMeGraphicsDesign.md's own status note).
 
 **Status (roadmap D1, "An accurate 1.3/1.4 mandatory-feature/limit/
 extension inventory"):** the audit itself is done; closing what it found is
-not. [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) is the
-generated checklist (`feme/utils/vk_gen_feature_inventory.py`, reading
+in progress. [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) is
+the generated checklist (`feme/utils/vk_gen_feature_inventory.py`, reading
 `vk.xml` directly the same way `vk_gen_entrypoints.py` already resolves
 `CORE_FEATURES` transitively): of 1.3/1.4's 36 mandatory feature bits, only
-`dynamicRendering` is genuinely implemented, and even that one only through
-its pre-promotion `VK_KHR_dynamic_rendering` feature struct -- neither
-`VkPhysicalDeviceVulkan13Features` nor `Vulkan14Features` has a
-`vkGetPhysicalDeviceFeatures2` case at all yet (`synchronization2`,
-`maintenance4`/`5`/`6`, `subgroupSizeControl`, `shaderIntegerDotProduct`,
-`pipelineCreationCacheControl`, `pushDescriptor`, and the rest are all
-confirmed unimplemented, not merely unaudited). Neither promoted
-`...Properties` struct is wired either, so all 70 mandatory limit fields
-are unenumerated. Of 39 extensions `vk.xml` records as promoted into 1.3 or
-1.4, only the two already listed above are implemented. None of this
-closes in this milestone; see the inventory doc's own "Findings" for the
-full breakdown and Roadmap.md's D1 row.
+`dynamicRendering` is genuinely implemented (roadmap E1: now reported
+through both its pre-promotion `VK_KHR_dynamic_rendering` feature struct
+and the aggregate `VkPhysicalDeviceVulkan13Features` struct);
+`synchronization2`, `maintenance4`/`5`/`6`, `subgroupSizeControl`,
+`shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
+`pushDescriptor`, and the rest are all confirmed unimplemented, not merely
+unaudited. Roadmap E2 wires the promoted `...Properties` struct's
+`vkGetPhysicalDeviceProperties2` case for both versions, enumerating every
+one of the 70 mandatory limit fields as the conservative, honest `0`/
+`VK_FALSE`/`nullptr` a still-unimplemented capability requires -- every
+field is cross-checked by `dEQP-VK.api.info.vulkan1p3`/`vulkan1p4.
+property_extensions_consistency` against its own dedicated,
+pre-promotion extension struct (none of which has its own
+`Properties2` case yet), so each field's own later row raises it only
+once that row also adds the matching dedicated-struct case (see the
+inventory doc's own "Findings"). Of 39 extensions `vk.xml` records as
+promoted into 1.3 or 1.4, only the two already listed above are
+implemented. See the inventory doc's own "Findings" for the full
+breakdown and Roadmap.md's D1/E1/E2 rows.
 
 ## Shader and Pipeline Compilation
 

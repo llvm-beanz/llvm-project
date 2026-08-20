@@ -42,15 +42,26 @@ table below).
   `pipelineCreationCacheControl`, `pushDescriptor`, and the rest of the
   roadmap D1 prompt's own list are all confirmed unimplemented (no
   reference to any of their names exists anywhere in `feme/lib`).
-- **70 mandatory 1.3/1.4 limit fields**, all currently unenumerated by
+- **70 mandatory 1.3/1.4 limit fields, all enumerated (roadmap E2).**
   `EntryPoints.cpp`'s `VkPhysicalDeviceVulkan13Properties`/
-  `Vulkan14Properties` cases (neither exists), so every one of them reads
-  as whatever the caller's own buffer happened to contain rather than a
-  value this ICD computed -- the same class of gap `hostImageCopy`'s
-  `pCopySrcLayouts`/`pCopyDstLayouts` pointer-typed "limits" make
-  concrete: those two are not scalar limits at all, but an enumerated
-  list of supported `VkImageLayout`s a real implementation of
-  `VK_EXT_host_image_copy` would need to fill in.
+  `Vulkan14Properties` cases now exist, writing every field explicitly
+  rather than leaving it as whatever the caller's own buffer happened to
+  contain. A limit's truthfulness is about its numeric value, not its
+  name (see the intro above), so this table's own "Advertised" column
+  stays `n/a` for every limit row regardless. Every field is the
+  conservative `0`/`VK_FALSE`/`nullptr` -- not a mix of real minima and
+  placeholders -- because `dEQP-VK.api.info.vulkan1p3`/`vulkan1p4.
+  property_extensions_consistency` cross-checks every one of them
+  against its own pre-promotion, per-extension dedicated struct
+  (`VkPhysicalDeviceSubgroupSizeControlProperties`,
+  `VkPhysicalDeviceTexelBufferAlignmentProperties`,
+  `VkPhysicalDeviceMaintenance4Properties`,
+  `VkPhysicalDeviceLineRasterizationPropertiesKHR`, ...), none of which
+  has its own `Properties2` case yet -- see Roadmap.md's E2 row and
+  VulkanCTSReport.md's "Roadmap E2: measured impact" for the CTS run that
+  caught this. Each field's own later row (E4, E6, E7, E8, E18, F5, F6,
+  F8, F10, F11, F12) raises it once that row also adds the matching
+  dedicated-struct case, keeping the two honestly in sync.
 - **39 extensions promoted into 1.3/1.4, 2 advertised** (`VK_KHR_dynamic_
   rendering` and `VK_EXT_extended_dynamic_state`, both already promoted
   into 1.3 core and already implemented pre-promotion). 21 of 1.3's 23
@@ -71,7 +82,13 @@ limit/extension name it closes. Roadmap E1 is the first of these rows to
 land: the aggregate `VkPhysicalDeviceVulkan13Features`/`Vulkan14Features`
 `vkGetPhysicalDeviceFeatures2` cases now exist, so the "Advertised" column
 above reflects what an application reading only the aggregate struct sees,
-not just each dedicated pre-promotion struct.
+not just each dedicated pre-promotion struct. Roadmap E2 is the second:
+the aggregate `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties`
+`vkGetPhysicalDeviceProperties2` cases now exist too, closing every limit
+row above (see this file's own "Findings" for what each field now
+reports) -- as the intro above notes, a limit row's own "Advertised"
+column stays `n/a` either way, since its truthfulness is about its
+numeric value rather than a yes/no claim.
 
 | Category | Version | Name | Advertised | Note |
 |---|---|---|---|---|
