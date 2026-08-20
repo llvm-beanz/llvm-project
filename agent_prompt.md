@@ -26,15 +26,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete milestone D2 on the roadmap?
+Can you complete milestone D3 on the roadmap?
 
-> **The system Vulkan loader crash D0's second CTS pass found.**
-> `dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`, run as
-> one sequence, segfaults inside Ubuntu's `libvulkan1` (`vkGetDeviceProcAddr`,
-> called from concurrent `vkCreateDevice`s) -- not inside any FeMe code, and
-> does not reproduce against the pre-D0 (apiVersion 1.2) build. Characterize
-> further (does it reproduce with a *smaller* `apiVersion`-dependent entrypoint
-> table than 1.4's full one? does a newer/older `libvulkan1` avoid it?) and, if
-> confirmed as a loader bug rather than something this ICD's own dispatch-table
-> generation can influence, file it upstream rather than attempt a local
-> workaround in a component this project does not own
+> **Per-bucket attribution of D0's net +2,553 newly-failing cases**, at C1-C8's
+> level of rigor. One bucket is already traced (`ubo.*.std430`'s 2,650 cases: a
+> pre-existing, already-tracked `feme-cpu-simdize`
+> divergent-vector-decomposition gap, C3's own "milestone 7 deviation", newly
+> *reached* rather than newly created); `spirv_assembly.instruction.compute`
+> (417), `synchronization.op.{multi,single}_queue` (277), and the remaining tail
+> are not yet traced
