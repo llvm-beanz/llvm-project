@@ -24784,3 +24784,118 @@ effect at all. `VulkanCTSReport.md` is unchanged. I did not implement any
 of the 33 E/F rows themselves (that is exactly what this milestone hands
 off to future distributed work) and did not revisit D1/D2/D3's own
 findings beyond citing them.
+
+# Roadmap E1: aggregate Vulkan13Features/Vulkan14Features feature struct plumbing
+
+## Task
+
+Implement roadmap E1: wire `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_
+FEATURES`/`_1_4_FEATURES` cases into `EntryPoints.cpp`'s
+`vkGetPhysicalDeviceFeatures2` switch, exactly mirroring the existing
+`VULKAN_1_2_FEATURES` case's pattern (every member written explicitly,
+`dynamicRendering = VK_TRUE`, everything else `VK_FALSE`).
+
+## Implementation
+
+Two new `case` blocks, inserted directly after the existing
+`VULKAN_1_2_FEATURES` case and before the pre-promotion
+`VK_KHR_dynamic_rendering` struct case they now need to agree with:
+
+- `VkPhysicalDeviceVulkan13Features`: 15 members, all `VK_FALSE` except
+  `dynamicRendering`, which mirrors the dedicated
+  `VkPhysicalDeviceDynamicRenderingFeatures` case immediately below it.
+- `VkPhysicalDeviceVulkan14Features`: 21 members, all `VK_FALSE` -- no
+  1.4-introduced bit is implemented yet, so this one is the "all false"
+  shape `VULKAN_1_1_FEATURES` already established, not the "mixed" shape
+  `VULKAN_1_2_FEATURES`/the new 1.3 case use.
+
+Verified against `/tmp/vksdk`'s Vulkan-Headers (the tree
+`Vulkan_INCLUDE_DIR` in the build's `CMakeCache.txt` actually points at,
+header version 328) rather than the older system `/usr/include/vulkan`
+copy (version 275, which has no `VkPhysicalDeviceVulkan14Features` at
+all) -- confirmed this matters up front since `PhysicalDeviceInfoTest.cpp`
+already asserts `apiVersion == VK_API_VERSION_1_4`, so the 1.4 struct has
+to exist in whatever headers this ICD actually builds against.
+
+## Tests
+
+Two new `PhysicalDeviceProperties2Test` cases in
+`PhysicalDeviceInfoTest.cpp`, following the file's existing guard pattern
+(`std::memset(&Struct, 0xAA, sizeof(Struct))` before the call, so an
+unwritten field would read back as the non-zero fill pattern instead of a
+coincidental zero):
+
+- `DynamicRenderingIsAdvertisedThroughAggregateVulkan13Features`: checks
+  every 1.3 member, `dynamicRendering == VK_TRUE` and all others
+  `VK_FALSE`.
+- `Vulkan14FeaturesAreExplicitlyFalseNotLeftUnwritten`: checks every 1.4
+  member is explicitly `VK_FALSE`, the same shape
+  `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` (existing test,
+  just below these two) already uses for an all-false struct.
+
+`ninja check-feme`: 1521/1522 passed (1 unsupported, pre-existing --
+`FEME_VULKAN_CTS_DEQP_VK`-gated), up from 1519/1520 before this change
+(both new tests passing, nothing else regressed).
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E1's row text with a `(closed: ...)` note,
+  matching the strikethrough convention `Design.md`'s "Known problems"
+  tables already use for closed rows (this is the first time that
+  convention is applied inside `Roadmap.md`'s own E-series table, which
+  had no prior closed rows to establish a precedent from -- I followed
+  `Design.md`'s style rather than invent a new one).
+- `AdvertisedPromotedFeatures.txt`/`AdvertisedPromotedExtensions.txt`:
+  `dynamicRendering`'s note (previously explaining the aggregate-struct
+  gap this milestone closes) rewritten past tense; regenerated
+  `Vulkan14FeatureInventory.md` from `vk_gen_feature_inventory.py` against
+  these updated files (`dynamicRendering`'s "Note" column is now empty --
+  no caveat left to record -- and the hand-written "Findings"/intro
+  prose above the generated table updated to match, re-added by hand per
+  the file's own regeneration instructions since the script only emits
+  the table).
+
+## Vulkan-CTS: measured impact
+
+Ran a **targeted before/after** pass (not the full 54-group recipe) over
+the four groups D3's own report named as depending on this gap:
+`api.info`, `draw.dynamic_rendering`, `renderpasses.dynamic_rendering`,
+`pipeline.monolithic.*.dynamic_rendering_postpass`. Built "before" by
+`git stash`-ing just `EntryPoints.cpp`, ran all four groups, restored the
+stash, rebuilt, re-ran the identical four groups, then diffed real
+per-case results (not aggregate counts) -- the same rigor D3 itself
+established as this project's bar.
+
+Result: exactly 3 cases go `Fail` -> `Pass` (the `vulkan1p3`
+features/consistency checks this milestone specifically targets); 818
+cases go `NotSupported` -> `Fail`. Traced the 818 with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` before writing anything down, rather
+than assume D3's own framing still applied unchanged: they are **not** a
+regression this milestone introduced. `dynamicRendering` being honestly
+advertised now makes `deqp-vk` actually attempt these cases instead of
+incidentally declining them; the failures themselves are two pre-existing,
+unrelated gaps (`GraphicsPipeline.cpp`'s rasterizer-state subset and a
+`feme-cpu-simdize` divergent-vector limitation, plus a handful of
+mandatory-format/queue-submit issues in `renderpasses`) equally reachable
+through the ordinary `VkRenderPass` path today -- confirmed by running
+`dEQP-VK.draw.renderpass.basic_draw.draw.line_strip.1` (no dynamic
+rendering involved) and finding the identical failure. Wrote all of this
+into a new "Roadmap E1: measured impact" section in
+`VulkanCTSReport.md`, deliberately citing the exact failing-reason strings
+and the one-line non-dynamic-rendering control test, rather than a bare
+pass/fail count, so a future reader does not need to re-derive "is this
+E1's fault" from scratch.
+
+## Scope discipline
+
+Touched only `EntryPoints.cpp` (the roadmap row's own named file),
+its unit test, and the four documents this change directly affects
+(`Roadmap.md`, `Vulkan14FeatureInventory.md` + its two source `.txt`
+files, `VulkanCTSReport.md`). Did not touch `GraphicsPipeline.cpp`'s
+rasterizer-state gap or the `feme-cpu-simdize` divergent-vector
+limitation the CTS run surfaced -- both are real, but out of E1's stated
+scope ("wire the aggregate ... cases", not "make dynamic-rendering
+pipelines actually pass CTS"), and each is exactly the kind of
+independently-assignable follow-up row this roadmap's own "small,
+individually testable" discipline asks for rather than folding into this
+commit.
