@@ -26,12 +26,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you complete milestone D3 on the roadmap?
+Can you take a couple steps back with all the data we have and provide an actual
+roadmap breakdown of the engineering work required in FeMe to meet Vulkan 1.3
+and then Vulkan 1.4 conformance?
 
-> **Per-bucket attribution of D0's net +2,553 newly-failing cases**, at C1-C8's
-> level of rigor. One bucket is already traced (`ubo.*.std430`'s 2,650 cases: a
-> pre-existing, already-tracked `feme-cpu-simdize`
-> divergent-vector-decomposition gap, C3's own "milestone 7 deviation", newly
-> *reached* rather than newly created); `spirv_assembly.instruction.compute`
-> (417), `synchronization.op.{multi,single}_queue` (277), and the remaining tail
-> are not yet traced
+I need the tasks broken down into sufficient granularity that I can distribute
+the work out to agents and humans to iterate on.
