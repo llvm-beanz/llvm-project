@@ -28,9 +28,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 Can you implement C6 from the roadmap document?
 
-> **Queue family capability combinations.** 99,324 cases report `NotSupported`
-> because no queue family matches a required capability set. A family
-> advertising `GRAPHICS` must also advertise `TRANSFER`; the mandatory
-> combinations must all be coverable. These are `NotSupported`, not `Fail`,
-> today, so they cost nothing in the failure count -- but a conformance run that
-> declines a hundred thousand mandatory cases is not a conformance run
+> **Mandatory 1.2 features and limits.** Only if the version decision above
+> keeps 1.2: `multiview`, `imagelessFramebuffer`, `uniformBufferStandardLayout`,
+> `separateDepthStencilLayouts`, `hostQueryReset`,
+> `shaderSubgroupExtendedTypes`, `subgroupBroadcastDynamicId`, plus raising
+> `maxTimelineSemaphoreValueDifference` and `maxMemoryAllocationSize` to their
+> required minimums and fixing the
+> `vkGetPhysicalDeviceFeatures2`-versus-promoted-struct disagreements
