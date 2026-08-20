@@ -24442,3 +24442,112 @@ not implement any of the 1.3/1.4 mandatory floor this audit found missing
 (D1's own scope boundary), and did not attempt D2 (the loader crash,
 already tracked) or D3 (per-bucket attribution of D0's own regressions,
 unrelated to this milestone).
+
+# Roadmap D2: characterizing and closing the loader crash
+
+D2 asked two concrete empirical questions about D0's second-pass loader
+crash (`dEQP-VK.api.object_management.multithreaded_per_thread_resources.*`
+segfaulting inside Ubuntu's `libvulkan1`) and a conditional action: file it
+upstream if confirmed as a loader bug this ICD can't influence. Since this
+milestone is pure characterization -- no `feme/` source change was ever on
+the table unless the investigation somehow implicated FeMe's own code --
+there is no code commit for this entry, only the two documentation updates
+(`Roadmap.md`'s D2 closure, `VulkanCTSReport.md`'s new "Roadmap D2:
+measured impact" section) plus this one.
+
+## Establishing it's a race before trusting any single run
+
+D0 and D1 each hit this crash exactly once. Before trusting either of D2's
+comparative experiments (smaller table vs. full table, old loader vs. new),
+I first had to establish the crash is non-deterministic at all -- a single
+crash/no-crash data point per configuration would be worthless noise
+otherwise. Five repeated runs of the identical case sequence against the
+unmodified system loader gave 3/5 crashes, confirming a real race (not
+"always crashes" or "this specific run got unlucky once"). Every subsequent
+comparison in this entry uses at least 5 repetitions per configuration for
+the same reason, and I explicitly resisted the temptation to stop at the
+first result matching my hypothesis (the very first smaller-table run
+happened to pass cleanly, which would have wrongly suggested "smaller table
+fixes it" had I stopped there -- the next four ran 4/5 crashed).
+
+## The smaller-table experiment falsified D0's own guess, which is a good outcome
+
+D0's report speculated the mechanism was "a higher advertised apiVersion
+makes the loader's own per-device dispatch table larger... making a latent
+loader-side concurrency bug more likely to trigger." This is a specific,
+falsifiable claim, and D2's own charge ("does it reproduce with a smaller
+apiVersion-dependent entrypoint table") is literally asking to test it. I
+trimmed `vk_gen_entrypoints.py`'s `CORE_FEATURES` tuple back to
+`VK_VERSION_1_3` (removing D1's own 19 newly-added 1.4 core commands),
+rebuilt `feme_vulkan` against the smaller generated table, and reran the
+same five-repetition experiment against the identical system loader: 4/5
+still crashed, if anything a slightly higher rate than the full table's
+3/5. Five runs each is too small a sample to call that difference
+significant, but it's certainly not the clean "smaller table survives"
+result the guess would predict, and combined with the actual root cause
+(below) being entirely unrelated to table size, I'm confident the guess is
+superseded rather than merely unconfirmed. I made sure to revert
+`vk_gen_entrypoints.py` to its exact committed state immediately after the
+experiment (`git diff` empty, `ninja check-feme` rerun at 1519/1520, the
+same pre-existing `Unsupported` count as the checked-in baseline) before
+moving on, since a stray uncommitted generator change would have silently
+broken every subsequent CTS run in this session.
+
+## Finding the exact upstream issue rather than assuming "it's probably known"
+
+Rather than writing "this is likely a known loader bug" and stopping there,
+I searched KhronosGroup/Vulkan-Loader's own issue tracker for the exact CTS
+case name and found #1436 -- filed against the *identical* case, the
+*identical* loader version (`1.3.275.0`), already closed with a merged fix
+(#1438) that reverts a specific commit (`a4ff6a54`, "Remove
+`-fno-strict-aliasing` from builds"). This is a materially stronger claim
+than "probably a loader bug": it's the same bug, not just a similar-shaped
+one, and it means filing a new issue would be a duplicate rather than a
+contribution.
+
+## Why I didn't stop at "the fix is in v1.3.277, done"
+
+Given the exact upstream issue and its exact fix commit, I could have
+declared D2 closed on the paper trail alone. I built the fix instead
+(`v1.3.280`, the first tag after PR #1438 landed) and reran the same
+five/six-repetition experiment, because a *closed* GitHub issue does not
+guarantee a *complete* fix, and 1 crash in 6 runs is exactly the kind of
+residual signal a paper-trail-only conclusion would have missed entirely.
+`gdb`'s backtrace on that residual crash still showed the identical call
+path (`loader_get_icd_and_device` <- `loader_gpa_device_terminator` <-
+`vkGetDeviceProcAddr`, now resolved with symbols since I built it locally),
+confirming it's the same race, only less frequent -- not some new,
+different bug the version bump introduced. This is what justified going
+one step further and building current upstream `main` (mechanically, via
+`git clone` + `scripts/update_deps.py` + the loader's own CMake build,
+exactly how one would build any out-of-tree dependency), which showed
+zero crashes across 10 runs and includes an additional, more recent mutex
+hardening commit (`5ee27b30c`) the `v1.3.280` snapshot didn't have yet.
+
+## Why "file it upstream" became "don't file it, but document why"
+
+D2's own conditional ("if confirmed as a loader bug... file it upstream")
+reads as though filing is the default action once the loader-bug premise
+holds. Given the actual finding -- an already-closed upstream issue with an
+already-merged fix -- filing a new issue would be net-negative for the
+Vulkan-Loader maintainers (duplicate triage work) rather than helpful. The
+real, still-open gap is entirely in Ubuntu's own package archive (`noble`/
+`noble-updates`/`noble-backports` all pinned to the pre-fix `1.3.275.0`,
+confirmed via `apt-cache policy`/`madison`), which is a distribution
+packaging issue, not a Vulkan-Loader one -- and this project has no
+standing to file Ubuntu bugs on this machine's behalf without a decision
+from whoever owns its package selection. I recorded the loader-build
+comparison table and the exact quoting needed for an Ubuntu/Launchpad
+report in `VulkanCTSReport.md` instead, so filing (if wanted) is a copy-
+paste away, rather than either silently doing nothing or filing something
+that would need to be closed as a duplicate.
+
+## Scope discipline
+
+I did not touch any `feme/` source in this milestone's final state --
+every backtrace across every loader build and every table size confirms
+the crash never enters FeMe's own code, so there was never anything to fix
+locally, and the `CORE_FEATURES` trim was reverted before finishing rather
+than becoming a real change. I did not attempt D3 (per-bucket attribution
+of D0's regressions) or D4 (continuous measurement tooling), both
+independent of this milestone's own charge.
