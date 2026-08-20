@@ -4,12 +4,11 @@
 
 This is an initial design for a Vulkan installable client driver (ICD)
 backed by
-    FeMe's CPU target. The first implementation target is a headless, compute - only
-        Vulkan device
+    FeMe's CPU target. The first implementation target is a headless, compute - only Vulkan
+        device
             .It is intended to sit below the standard Vulkan loader in the same
                 position
-                    as Mesa's lavapipe, but it does not initially aim to match
-                        lavapipe's graphics, WSI, or extension coverage.
+                    as Mesa's lavapipe, but it does not initially aim to match lavapipe's graphics, WSI, or extension coverage.
 
     The CPU shader compiler and
         execution machinery described in[FeMeCPUDesign.md](FeMeCPUDesign.md)
@@ -379,7 +378,11 @@ and full-subgroup semantics.
 
 `subgroupSupportedStages` is compute-only, and `subgroupSupportedOperations`
 starts at `VK_SUBGROUP_FEATURE_BASIC_BIT` and grows only as
-`feme::cpu::WaveLoweringPass` coverage is demonstrated by tests.
+`feme::cpu::WaveLoweringPass` coverage is demonstrated by tests. Roadmap C5
+closes the object-model contradiction where `VkPhysicalDeviceSubgroupProperties`
+reported `BASIC_BIT` but the promoted `VkPhysicalDeviceVulkan11Properties`
+chain left `subgroupSupportedOperations` zeroed: both query paths now report
+the same truthful baseline.
 
 ### Limits and features
 

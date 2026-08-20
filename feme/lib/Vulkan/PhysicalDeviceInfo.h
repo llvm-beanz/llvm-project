@@ -53,6 +53,11 @@ struct PhysicalDeviceInfo {
   /// `subgroupSize` for the whole device, so this is derived once here
   /// rather than per pipeline.
   uint32_t SubgroupSize = 0;
+  /// The stages and operations this ICD truthfully supports for subgroup
+  /// operations, reported through both `VkPhysicalDeviceSubgroupProperties`
+  /// and the promoted `VkPhysicalDeviceVulkan11Properties`.
+  VkShaderStageFlags SubgroupSupportedStages = 0;
+  VkSubgroupFeatureFlags SubgroupSupportedOperations = 0;
 
   /// `VkDriverId` this build would report through
   /// `VkPhysicalDeviceDriverProperties`, were that struct queryable at the

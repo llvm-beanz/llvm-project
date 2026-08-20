@@ -6,7 +6,9 @@
 //
 //===----------------------------------------------------------------------===//
 
+#define VK_NO_PROTOTYPES
 #include "PhysicalDeviceInfo.h"
+#include "EntryPoints.h"
 
 #include "gtest/gtest.h"
 
@@ -42,6 +44,8 @@ TEST(PhysicalDeviceInfo, SubgroupSizeIsAPowerOfTwoInRange) {
   EXPECT_LE(Info.SubgroupSize, 128u);
   EXPECT_EQ(Info.SubgroupSize & (Info.SubgroupSize - 1), 0u)
       << "subgroup size must be a power of two";
+  EXPECT_EQ(Info.SubgroupSupportedStages, VK_SHADER_STAGE_COMPUTE_BIT);
+  EXPECT_TRUE(Info.SubgroupSupportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT);
 }
 
 TEST(PhysicalDeviceInfo, UniversalQueueFamilyIsGraphicsComputeAndTransfer) {
@@ -91,6 +95,42 @@ TEST(PhysicalDeviceInfo, DeviceAndPipelineCacheUUIDsDiffer) {
   EXPECT_NE(std::memcmp(Info.DeviceUUID, Info.Properties.pipelineCacheUUID,
                         VK_UUID_SIZE),
             0);
+}
+
+class PhysicalDeviceProperties2Test : public ::testing::Test {
+protected:
+  void SetUp() override {
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+  }
+
+  void TearDown() override { vkDestroyInstance(Instance, nullptr); }
+
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+};
+
+TEST_F(PhysicalDeviceProperties2Test,
+       SubgroupBasicBitMatchesPromotedVulkan11Properties) {
+  VkPhysicalDeviceSubgroupProperties Subgroup{};
+  Subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+  VkPhysicalDeviceVulkan11Properties Props11{};
+  Props11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES;
+  Subgroup.pNext = &Props11;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &Subgroup;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+
+  EXPECT_TRUE(Subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT);
+  EXPECT_TRUE(Props11.subgroupSupportedOperations &
+              VK_SUBGROUP_FEATURE_BASIC_BIT);
+  EXPECT_EQ(Subgroup.subgroupSize, Props11.subgroupSize);
+  EXPECT_EQ(Subgroup.supportedStages, Props11.subgroupSupportedStages);
 }
 
 TEST(PhysicalDeviceInfo, IsDeterministic) {

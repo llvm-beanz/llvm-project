@@ -125,9 +125,18 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       auto *Subgroup =
           reinterpret_cast<VkPhysicalDeviceSubgroupProperties *>(Base);
       Subgroup->subgroupSize = Info.SubgroupSize;
-      Subgroup->supportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
-      Subgroup->supportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+      Subgroup->supportedStages = Info.SubgroupSupportedStages;
+      Subgroup->supportedOperations = Info.SubgroupSupportedOperations;
       Subgroup->quadOperationsInAllStages = VK_FALSE;
+      break;
+    }
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES: {
+      auto *Props11 =
+          reinterpret_cast<VkPhysicalDeviceVulkan11Properties *>(Base);
+      Props11->subgroupSize = Info.SubgroupSize;
+      Props11->subgroupSupportedStages = Info.SubgroupSupportedStages;
+      Props11->subgroupSupportedOperations = Info.SubgroupSupportedOperations;
+      Props11->subgroupQuadOperationsInAllStages = VK_FALSE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES: {
@@ -194,8 +203,9 @@ void fillFeatures2Chain(void *pNext) {
     // CommandBuffer.cpp), so this is unconditionally true, exactly like
     // `dynamicRendering` above.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT: {
-      auto *Features = reinterpret_cast<
-          VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *>(Base);
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceExtendedDynamicStateFeaturesEXT *>(
+              Base);
       Features->extendedDynamicState = VK_TRUE;
       break;
     }

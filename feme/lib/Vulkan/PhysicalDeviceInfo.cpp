@@ -115,6 +115,9 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
     Info.SubgroupSize = feme::cpu::MinWaveSize;
   }
 
+  Info.SubgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
+  Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+
   VkPhysicalDeviceProperties &Props = Info.Properties;
   // Illustrative per "Loader Integration": "The exact advertised API version
   // is selected during implementation from the core command and CTS
