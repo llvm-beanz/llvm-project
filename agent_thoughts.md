@@ -23901,3 +23901,149 @@ Used the existing `build/` directory (already configured with
 `LLVM_ENABLE_ASSERTIONS=ON` and `LLVM_CCACHE_BUILD=ON`); ran `ninja
 check-feme` after each code change (1506 passed, 1 unsupported both times,
 +2 tests from this row's additions) before touching the CTS at all.
+
+# Roadmap C6: Mandatory 1.2 features and limits
+
+## Starting point
+
+Roadmap C6 is the row right after C7's queue-family work, and its own
+text is conditional: "Only if the version decision above keeps 1.2:
+`multiview`, `imagelessFramebuffer`, `uniformBufferStandardLayout`,
+`separateDepthStencilLayouts`, `hostQueryReset`,
+`shaderSubgroupExtendedTypes`, `subgroupBroadcastDynamicId`, plus raising
+`maxTimelineSemaphoreValueDifference` and `maxMemoryAllocationSize` to
+their required minimums and fixing the
+`vkGetPhysicalDeviceFeatures2`-versus-promoted-struct disagreements." I
+checked first whether the version decision actually happened: it had --
+`PhysicalDeviceInfo.cpp` still advertises `VK_API_VERSION_1_2` (V3's
+comment explains why), so C6 is in scope rather than moot.
+
+Before writing any code I went feature-by-feature to decide which of the
+seven named items this ICD can *honestly* claim, since that's the
+project's whole design ethos (see "Physical Device and Capabilities"
+requiring truthful limits, and the historical precedent of `dualSrcBlend`
+only being advertised once the executor path actually existed):
+
+- `hostQueryReset`: `vkResetQueryPool` was already fully implemented
+  (`QueryPool.cpp`) -- just needed the feature bit.
+- `uniformBufferStandardLayout`/`separateDepthStencilLayouts`: I checked
+  whether this ICD enforces the *stricter* default behavior these
+  features relax (std140 layout; combined depth/stencil layout). It
+  doesn't -- `getUniformBlockElement` reads whatever offset/stride the
+  SPIR-V decorations carry with no revalidation, and no image-layout
+  transition path distinguishes depth-only from stencil-only layouts at
+  all. Advertising both is therefore a truthful "this was never
+  restricted in the first place," not an aspirational claim.
+- `shaderSubgroupExtendedTypes`/`subgroupBroadcastDynamicId`: I checked
+  what subgroup operations are actually converted at all
+  (`SPIRVToLLVMPatterns.cpp`) -- only the basic builtins
+  (`SubgroupSize`/`SubgroupId`/etc.), matching the already-advertised
+  `VK_SUBGROUP_FEATURE_BASIC_BIT`. No `OpGroupNonUniformBroadcast` or any
+  other `OpGroupNonUniform*` op is converted, so neither bit unlocks a
+  real, untested code path -- both are vacuously true.
+- `imagelessFramebuffer`: genuinely new work, but bounded, since a
+  framebuffer's `layers != 1` was already rejected regardless (layered
+  rendering is roadmap V7) -- an imageless framebuffer just needed to
+  defer its attachment views from `vkCreateFramebuffer` to
+  `vkCmdBeginRenderPass`.
+- `multiview`: this is the one I decided **not** to advertise.
+  `RenderPass.cpp`'s own `resolveAttachmentView` already documents "only
+  a single-layer 2D image view may be a render target (layered rendering
+  is V7)", and `vkCreateFramebuffer`/`vkCreateRenderPass2` both already
+  reject anything multiview/layered outright. Multiview needs real
+  per-view draw amplification and layer selection this ICD doesn't have,
+  and the roadmap table's own "Owner" column already names `V7` alongside
+  `PhysicalDeviceInfo.cpp` for this row -- a hint I almost missed on first
+  read, and one that saved me from trying to bolt on a fake multiview
+  implementation. I still had to raise `maxMultiviewViewCount`/
+  `maxMultiviewInstanceIndex` to their required minimums regardless,
+  since `dEQP-VK.api.info.vulkan1p2_limits_validation.general` checks
+  those unconditionally once apiVersion >= 1.2, independent of whether
+  `multiview` itself is supported -- a genuinely non-obvious CTS quirk I
+  only found by reading the actual `featureLimitTable` in
+  `vktApiFeatureInfo.cpp` rather than guessing from the roadmap prose.
+
+For the two limits, I looked up the actual CTS-enforced minimums (not
+just "the spec minimum" from memory, which turned out to be closer than
+I expected but still worth verifying against the checked-out CTS source
+rather than trusting a web search): `maxMemoryAllocationSize >= 1 GiB`,
+`maxTimelineSemaphoreValueDifference >= 2^31-1`. I set the former to the
+real host memory heap size (a `malloc`-backed heap can genuinely satisfy
+one allocation as large as the whole heap) and the latter to
+`UINT64_MAX` (`feme::vulkan::Semaphore`'s timeline counter is a plain
+`uint64_t` compare with no implementation-side cap at all) -- both
+comfortably true rather than the bare minimum, consistent with how
+`maxComputeWorkGroupCount` etc. are already set well above their floors
+elsewhere in the same file.
+
+## The `vkGetPhysicalDeviceFeatures2`-versus-promoted-struct disagreements
+
+This phrase in the roadmap text turned out to be doing a lot of work.
+Once I started actually exercising `VkPhysicalDeviceVulkan11/
+12Features`/`Properties` with real content (rather than mostly-untouched
+buffers), several `dEQP-VK.api.info.vulkan1p2.*`/
+`get_physical_device_properties2.*` tests started failing on a pattern I
+hadn't seen described in the roadmap prose: a "guard value" check, where
+the test pre-fills a struct's buffer with a non-zero, alternating pattern
+before calling the API and fails if any field the offset table lists
+comes back unmodified. Since `fillFeatures2Chain`/`fillProperties2Chain`
+never had a case for `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_
+FEATURES` at all (only individual dedicated structs and the 1.2
+aggregate), every field of that struct was leftover garbage from the
+test's own pre-fill, differing across the test's own two calls with
+different patterns -- a "Mismatch"/"initialization failure" rather than
+a wrong-value bug. I traced this iteratively: fix one struct, rerun,
+watch the *next* struct in the chain fail instead (`Vulkan11Properties`
+→ `IDProperties` mismatch → `PointClippingProperties` →
+`FloatControlsProperties` → `DepthStencilResolveProperties` →
+`ProtectedMemoryProperties` → `DescriptorIndexingProperties`), rather
+than trying to enumerate every struct up front from documentation alone.
+I stopped at `DescriptorIndexingProperties` and about a dozen individual
+`get_physical_device_properties2.features.*` guard tests (16/8-bit
+storage, buffer device address, descriptor indexing, protected memory,
+sampler Ycbcr conversion, scalar block layout, shader atomic int64,
+shader draw parameters, shader float16/int8, variable pointers, Vulkan
+memory model) -- none of these concern anything C6 names, they were
+already broken before this row for entirely unrelated features, and
+fixing all of them would have meant writing a case for essentially every
+optional Vulkan 1.0-1.2 feature struct, a much larger and separate unit
+of work. I recorded this boundary explicitly in VulkanCTSReport.md rather
+than quietly leaving it undiscovered or trying to close it under this
+row's own scope.
+
+## Order of commits
+
+I split this into small commits, matching prior rows' discipline
+(C4a-e, C5, C7): (1) the mandatory limits and the vacuously-true feature
+bits, since they needed no new object-model work; (2) `imagelessFramebuffer`,
+the one genuinely new feature, as its own commit since it touches
+`RenderPass.{h,cpp}`/`CommandBuffer.{h,cpp}` rather than just
+`PhysicalDeviceInfo`/`EntryPoints`; (3) a clang-format-only pass (ran
+`git-clang-format` against the pre-C6 commit to catch exactly what my own
+edits misformatted, rather than reformatting whole files); (4) the
+promoted-struct guard-value fixes, once the CTS run surfaced them; (5)
+docs (FeMeVulkanDesign.md/Roadmap.md); (6) VulkanCTSReport.md's measured
+impact. Ran `ninja check-feme` (assertions + ccache build already
+configured) after every code commit -- 1506 → 1516 passed, 1 unsupported
+throughout, +10 tests from this row's additions
+(`PhysicalDeviceInfoTest.cpp`, `RenderPassTest.cpp`, `DrawTest.cpp`).
+
+## CTS measurement
+
+Ran the documented per-group parallel reproduction
+(`feme/docs/VulkanCTSReport.md`'s "Reproducing this report" recipe,
+reusing the cached `/tmp/cts_runs/groups.txt` case-list split from an
+earlier session rather than regenerating it) for a full-suite sanity
+check, plus targeted `dEQP-VK.api.info.*`/`dEQP-VK.info.*` runs after each
+incremental change to track progress before committing to the full run.
+Two pre-existing, already-documented flakes recurred exactly as this
+report's own methodology notes predict: `api` hung in the same
+`object_management.multithreaded_per_thread_resources.device_group` spot
+when run in parallel with everything else (fixed by rerunning it alone,
+which is what this report's numbers use, per established precedent), and
+`synchronization` crashed at the exact
+`timeline_semaphore.device_host.write_copy_buffer_read_copy_buffer.
+buffer_262144` segfault this report has listed as a known, pre-existing,
+unrelated crash since the C1 measurement. Neither is new. I recorded the
+full-run headline with those two caveats rather than silently
+patching around them or omitting the attempt.
