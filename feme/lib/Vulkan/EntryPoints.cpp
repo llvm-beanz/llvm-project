@@ -1358,6 +1358,33 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
     VkFormatProperties2 *pFormatProperties) {
   feme::vulkan::vkGetPhysicalDeviceFormatProperties(
       physicalDevice, format, &pFormatProperties->formatProperties);
+  // (Roadmap E25) `VkFormatProperties3` (core since Vulkan 1.3, which this
+  // ICD's advertised `apiVersion` implies is always available via a
+  // chained `pNext` struct, whether or not `VK_KHR_format_feature_flags2`
+  // is separately listed as an advertised extension name) used to be left
+  // entirely untouched here -- any caller that chained one (as
+  // `dEQP-VK.api.info.unsupported_image_usage.*`'s own `Context::
+  // getFormatProperties` helper does once it sees a >=1.3 device) read
+  // back whatever it had zero-initialized the struct to, not this ICD's
+  // real answer, silently discarding every bit `formatFeatureFlags`
+  // reports. Filling it (with the same 32-bit `VkFormatFeatureFlags`
+  // result widened to `VkFormatFeatureFlags2`, since every bit this ICD
+  // sets today has an identical numeric value in both) fixes that for any
+  // caller of this entry point, not just the format-broadening this row
+  // otherwise does.
+  for (auto *Base =
+           static_cast<VkBaseOutStructure *>(pFormatProperties->pNext);
+       Base; Base = Base->pNext) {
+    if (Base->sType != VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3)
+      continue;
+    auto *Props3 = reinterpret_cast<VkFormatProperties3 *>(Base);
+    Props3->linearTilingFeatures =
+        pFormatProperties->formatProperties.linearTilingFeatures;
+    Props3->optimalTilingFeatures =
+        pFormatProperties->formatProperties.optimalTilingFeatures;
+    Props3->bufferFeatures =
+        pFormatProperties->formatProperties.bufferFeatures;
+  }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

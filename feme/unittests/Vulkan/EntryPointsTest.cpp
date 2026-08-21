@@ -101,13 +101,14 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnrecognizedFormat) {
 }
 
 TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnsupportedUsage) {
-  // `R32_FLOAT` cannot actually be sampled by a shader (only
-  // `R32G32B32A32_FLOAT`/`R8G8B8A8_UNORM`/`_UNORM_SRGB` and ASTC LDR can),
-  // so requesting `SAMPLED_BIT` for it must fail rather than silently
+  // (Roadmap E25) An integer format cannot actually be sampled by a
+  // shader -- no `feme.cpu.image.*` entry point returns an integer vector
+  // yet, only the broadened `<4 x float>` typed sample table -- so
+  // requesting `SAMPLED_BIT` for one must fail rather than silently
   // succeed with a descriptor that would sample as all-zero.
   VkImageFormatProperties Props{};
   EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
-                Physical, VK_FORMAT_R32_SFLOAT, VK_IMAGE_TYPE_2D,
+                Physical, VK_FORMAT_R32_UINT, VK_IMAGE_TYPE_2D,
                 VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
@@ -192,6 +193,31 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesAcceptsASTCLDRTransferOnly) {
           VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, 0,
           &Props),
       VK_SUCCESS);
+}
+
+TEST_F(EntryPointsTest, FormatProperties2FillsChainedFormatProperties3) {
+  // Roadmap E25: a chained `VkFormatProperties3` (core since Vulkan 1.3,
+  // so `dEQP-VK.api.info.unsupported_image_usage.*`'s own `Context::
+  // getFormatProperties` helper chains one onto every query once this
+  // ICD's advertised `apiVersion` implies it's always available) used to
+  // be left entirely untouched -- silently discarding every bit
+  // `formatFeatureFlags` reports for any caller that chained one.
+  VkFormatProperties3 Props3{};
+  Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+  VkFormatProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+  Props2.pNext = &Props3;
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R8G8B8A8_UNORM,
+                                       &Props2);
+  EXPECT_EQ(Props3.linearTilingFeatures,
+            (VkFormatFeatureFlags2)Props2.formatProperties.linearTilingFeatures);
+  EXPECT_EQ(
+      Props3.optimalTilingFeatures,
+      (VkFormatFeatureFlags2)Props2.formatProperties.optimalTilingFeatures);
+  EXPECT_EQ(Props3.bufferFeatures,
+            (VkFormatFeatureFlags2)Props2.formatProperties.bufferFeatures);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT);
 }
 
 } // namespace
