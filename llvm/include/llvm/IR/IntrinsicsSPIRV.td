@@ -174,6 +174,13 @@ def int_spv_rsqrt : DefaultAttrsIntrinsic<[LLVMMatchType<0>], [llvm_anyfloat_ty]
   def int_spv_group_memory_barrier_with_group_sync : ClangBuiltin<"__builtin_spirv_group_barrier">,
     DefaultAttrsIntrinsic<[], [], [IntrConvergent]>;
   def int_spv_discard : DefaultAttrsIntrinsic<[], [], []>;
+  // SPIR-V's OpDemoteToHelperInvocation: unlike int_spv_discard (which this
+  // target's own backend selects to OpKill or OpDemoteToHelperInvocation
+  // depending on target capability -- see SPIRVInstructionSelector.cpp's
+  // selectDiscard), this always represents the non-terminating op exactly,
+  // for importers that need to preserve that distinction rather than
+  // recover it from a single generic "discard" op.
+  def int_spv_demote_to_helper_invocation : DefaultAttrsIntrinsic<[], [], []>;
   def int_spv_ddx : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
   def int_spv_ddy : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
   def int_spv_ddx_coarse : DefaultAttrsIntrinsic<[llvm_anyfloat_ty], [LLVMMatchType<0>], [IntrNoMem]>;
