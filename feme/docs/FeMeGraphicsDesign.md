@@ -569,7 +569,12 @@ validation passes this section calls for:
   `llvm.spv.discard` onto a constant-true `feme.stage.discard`, and SPIR-V's
   implicit-precision `llvm.spv.ddx`/`.ddy` conservatively onto the *fine*
   derivative variant, since DXIL has no implicit-precision op to pair it
-  with).
+  with). Roadmap E11 added `llvm.spv.demote.to.helper.invocation`
+  (SPIR-V's `OpDemoteToHelperInvocation`, which needed a new MLIR
+  `spirv.DemoteToHelperInvocation` op upstream before it could even be
+  imported at all) to this same renaming, onto a constant-true
+  `feme.stage.demote` -- unconditional exactly like `discard`, but not a
+  terminator, matching the op's own non-terminating semantics.
 - `feme::graphics::ValidateStagePass` (`feme-graphics-validate-stage`)
   diagnoses (through `LLVMContext::emitError`, never rewrites) a
   `feme.stage.*` call whose element/row/component operands are non-constant,
