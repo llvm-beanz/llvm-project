@@ -86,16 +86,20 @@ table below).
   this file's own 1.3/1.4-only scope, but hand-added as a row above
   anyway since E20 is what surfaced that it had no tracking of any kind;
   see that row's own "Version" column) and E21 (the original HDR-only
-  scope, depending on E20). **E20 is now closed**: `Format.h`'s
-  `blockWidth`/`blockHeight`/`bytesPerBlock` and `Image.{h,cpp}`'s
-  block-aware subresource layout math both landed, alongside a real,
-  tested ASTC LDR bitstream decoder (`feme::vulkan::decodeASTCBlock`,
-  new `ASTCDecode.{h,cpp}`) -- but `vkCreateImage` still rejects the
-  format outright (no copy/sampling path addresses a block-compressed
-  `Image` per block yet), so `textureCompressionASTC_LDR` stays `VK_FALSE`
-  and a new roadmap row, E22, tracks the remaining pipeline-wiring work
-  that would let it honestly flip. See Roadmap.md's E15/E20/E21/E22 rows
-  and `agent_thoughts.md` for the full investigation and implementation.
+  scope, depending on E20). **E20 and E21 are both now closed**:
+  `Format.h`'s `blockWidth`/`blockHeight`/`bytesPerBlock` and
+  `Image.{h,cpp}`'s block-aware subresource layout math both landed,
+  alongside a real, tested ASTC LDR bitstream decoder
+  (`feme::vulkan::decodeASTCBlock`, new `ASTCDecode.{h,cpp}`) and, for
+  E21, the 14 `_SFLOAT_BLOCK_EXT` `mapVkFormat` entries plus a real HDR
+  decoder (`feme::vulkan::decodeASTCBlockHDR`, same file) -- but
+  `vkCreateImage` still rejects every ASTC `VkFormat` outright (no
+  copy/sampling path addresses a block-compressed `Image` per block yet),
+  so both `textureCompressionASTC_LDR` and `textureCompressionASTC_HDR`
+  stay `VK_FALSE`, and roadmap row E22 tracks the remaining
+  pipeline-wiring work that would let either honestly flip. See
+  Roadmap.md's E15/E20/E21/E22 rows and `agent_thoughts.md` for the full
+  investigation and implementation.
 
 None of this is new work landing in this milestone -- D1 is deliberately
 scoped to the inventory itself, not closing it (see Roadmap.md's D1 row).
@@ -132,7 +136,7 @@ numeric value rather than a yes/no claim.
 | feature | VK_VERSION_1_3 | `subgroupSizeControl` | no |  |
 | feature | VK_VERSION_1_3 | `computeFullSubgroups` | no |  |
 | feature | VK_VERSION_1_3 | `synchronization2` | no |  |
-| feature | VK_VERSION_1_3 | `textureCompressionASTC_HDR` | no | roadmap G4/E15: verified `Format.cpp` has no ASTC decode of any kind (LDR or HDR), and no block-compressed format is recognized at all; split into E20 (LDR prerequisite + block-layout groundwork, closed) and E21 (this row's original HDR scope, depends on E20) |
+| feature | VK_VERSION_1_3 | `textureCompressionASTC_HDR` | no | roadmap G4/E15: verified `Format.cpp` has no ASTC decode of any kind (LDR or HDR), and no block-compressed format is recognized at all; split into E20 (LDR prerequisite + block-layout groundwork, closed) and E21 (this row's original HDR scope, closed: HDR `mapVkFormat` entries + `decodeASTCBlockHDR` land, but `vkCreateImage` still rejects every ASTC format outright, so this bit stays `no` until roadmap E22's copy/sampling pipeline wiring lands) |
 | feature | VK_VERSION_1_0 (hand-added, see "Findings" below) | `textureCompressionASTC_LDR` | no | roadmap E20: `Format.h`/`Image.{h,cpp}`/`ASTCDecode.h` now recognize and can decode LDR ASTC data, but `vkCreateImage` still rejects the format outright (`ImageOps.cpp`'s copy/blit/resolve paths and every shader-sampling path still address an `Image` per texel, not per block) -- tracked explicitly as `VK_FALSE` (`PhysicalDeviceInfo.cpp`) rather than merely defaulting to it; roadmap E22 (new) is the copy/sampling pipeline rework that would let this honestly flip to `VK_TRUE` |
 | feature | VK_VERSION_1_3 | `shaderZeroInitializeWorkgroupMemory` | no |  |
 | feature | VK_VERSION_1_3 | `dynamicRendering` | yes |  |

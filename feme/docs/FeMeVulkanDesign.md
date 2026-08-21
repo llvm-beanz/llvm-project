@@ -2156,6 +2156,15 @@ descriptors, now drawn again one layer down. Roadmap E22 is the follow-up
 that reworks the copy/blit/resolve paths to address a block-compressed
 image per block and removes that rejection.
 
+**Update (roadmap E21, closed):** the 14 HDR-only ASTC `VkFormat` values
+(`VK_EXT_texture_compression_astc_hdr`) are now recognized by
+`mapVkFormat` and have a real decoder (`feme::vulkan::decodeASTCBlockHDR`,
+`ASTCDecode.h`), same as E20's LDR ones. This does not change anything
+above: `vkCreateImage` rejects an HDR ASTC `VkFormat` for the identical
+"no per-block copy/sampling path yet" reason it already rejects an LDR
+one, so E22 covers both dynamic ranges' pipeline wiring together rather
+than needing its own HDR-specific follow-up.
+
 ### V6: Graphics queue and basic rendering
 
 The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
