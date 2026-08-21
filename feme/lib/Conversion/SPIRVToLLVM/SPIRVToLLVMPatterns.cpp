@@ -326,6 +326,179 @@ public:
   }
 };
 
+/// Extracts the lanes `spirv.SDot`/`spirv.UDot`/`spirv.SUDot` and their
+/// `*AccSat` counterparts (roadmap E8, `VK_KHR_shader_integer_dot_product`)
+/// reduce over, each sign- or zero-extended to \p ResultType per \p
+/// Vector1Signed/\p Vector2Signed. A real vector operand's elements are used
+/// directly; a scalar 32-bit operand (legal only together with the
+/// `PackedVectorFormat4x8Bit` format -- the only format value SPIR-V defines
+/// today, per `verifyIntegerDotProduct` in MLIR's `DotProductOps.cpp`) is
+/// unpacked into its four constituent bytes first, byte 0 occupying the
+/// low-order bits, matching the packing HLSL's analogous `dot4add_*8packed`
+/// intrinsics already use.
+void extractIntegerDotProductLanes(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    mlir::Value Vector1, mlir::Value Vector2, mlir::Type ResultType,
+    bool Vector1Signed, bool Vector2Signed,
+    llvm::SmallVectorImpl<mlir::Value> &Lanes1,
+    llvm::SmallVectorImpl<mlir::Value> &Lanes2) {
+  auto ExtendTo = [&](mlir::Value V, bool Signed) -> mlir::Value {
+    if (V.getType() == ResultType)
+      return V;
+    if (Signed)
+      return mlir::LLVM::SExtOp::create(Rewriter, Loc, ResultType, V);
+    return mlir::LLVM::ZExtOp::create(Rewriter, Loc, ResultType, V);
+  };
+
+  if (auto VectorType = mlir::dyn_cast<mlir::VectorType>(Vector1.getType())) {
+    int64_t NumElements = VectorType.getNumElements();
+    for (int64_t I = 0; I != NumElements; ++I) {
+      mlir::Value Index = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+      Lanes1.push_back(ExtendTo(
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Vector1, Index),
+          Vector1Signed));
+      Lanes2.push_back(ExtendTo(
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Vector2, Index),
+          Vector2Signed));
+    }
+    return;
+  }
+
+  mlir::Type ScalarType = Vector1.getType();
+  mlir::Type ByteType = Rewriter.getI8Type();
+  constexpr unsigned NumPackedBytes = 4;
+  auto UnpackByte = [&](mlir::Value Scalar, unsigned ByteIndex,
+                        bool Signed) -> mlir::Value {
+    mlir::Value Shift = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, ScalarType,
+        Rewriter.getIntegerAttr(ScalarType, ByteIndex * 8));
+    mlir::Value Shifted =
+        mlir::LLVM::LShrOp::create(Rewriter, Loc, Scalar, Shift);
+    mlir::Value Byte =
+        mlir::LLVM::TruncOp::create(Rewriter, Loc, ByteType, Shifted);
+    return ExtendTo(Byte, Signed);
+  };
+  for (unsigned I = 0; I != NumPackedBytes; ++I) {
+    Lanes1.push_back(UnpackByte(Vector1, I, Vector1Signed));
+    Lanes2.push_back(UnpackByte(Vector2, I, Vector2Signed));
+  }
+}
+
+/// Multiplies each corresponding pair of already-extended `Lanes1[i]`/
+/// `Lanes2[i]` and sums the products: the integer analogue of
+/// `DotConversionPattern`'s per-lane `llvm.intr.fmuladd` chain above, using
+/// plain multiply/add since an integer dot product has no intermediate-
+/// rounding concern a fused op would need to address.
+mlir::Value reduceIntegerDotProductLanes(
+    mlir::ConversionPatternRewriter &Rewriter, mlir::Location Loc,
+    llvm::ArrayRef<mlir::Value> Lanes1, llvm::ArrayRef<mlir::Value> Lanes2) {
+  mlir::Value Result =
+      mlir::LLVM::MulOp::create(Rewriter, Loc, Lanes1[0], Lanes2[0]);
+  for (size_t I = 1, E = Lanes1.size(); I != E; ++I) {
+    mlir::Value Product =
+        mlir::LLVM::MulOp::create(Rewriter, Loc, Lanes1[I], Lanes2[I]);
+    Result = mlir::LLVM::AddOp::create(Rewriter, Loc, Result, Product);
+  }
+  return Result;
+}
+
+/// Converts `spirv.SDot`/`spirv.UDot`/`spirv.SUDot` (roadmap E8): none of
+/// the three has an upstream MLIR conversion pattern, exactly like
+/// `spirv.Dot` above. \p Vector1Signed/\p Vector2Signed select which of the
+/// three this instantiates: both signed (`SDot`), both unsigned (`UDot`), or
+/// mixed -- vector 1 signed, vector 2 unsigned (`SUDot`), per each op's own
+/// spec-defined extension semantics.
+template <typename OpTy, bool Vector1Signed, bool Vector2Signed>
+class IntegerDotProductConversionPattern
+    : public mlir::SPIRVToLLVMConversion<OpTy> {
+public:
+  using mlir::SPIRVToLLVMConversion<OpTy>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<OpTy>::OpAdaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(OpTy Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    llvm::SmallVector<mlir::Value> Lanes1, Lanes2;
+    extractIntegerDotProductLanes(Rewriter, Loc, Adaptor.getVector1(),
+                                  Adaptor.getVector2(), ResultType,
+                                  Vector1Signed, Vector2Signed, Lanes1,
+                                  Lanes2);
+    Rewriter.replaceOp(Op, reduceIntegerDotProductLanes(Rewriter, Loc, Lanes1,
+                                                        Lanes2));
+    return mlir::success();
+  }
+};
+using SDotConversionPattern =
+    IntegerDotProductConversionPattern<mlir::spirv::SDotOp,
+                                       /*Vector1Signed=*/true,
+                                       /*Vector2Signed=*/true>;
+using UDotConversionPattern =
+    IntegerDotProductConversionPattern<mlir::spirv::UDotOp,
+                                       /*Vector1Signed=*/false,
+                                       /*Vector2Signed=*/false>;
+using SUDotConversionPattern =
+    IntegerDotProductConversionPattern<mlir::spirv::SUDotOp,
+                                       /*Vector1Signed=*/true,
+                                       /*Vector2Signed=*/false>;
+
+/// Converts `spirv.SDotAccSat`/`spirv.SUDotAccSat`/`spirv.UDotAccSat`
+/// (roadmap E8): the same lane extraction and reduction as
+/// `IntegerDotProductConversionPattern` above, followed by a saturating
+/// addition of the accumulator -- signed for `SDotAccSat`/`SUDotAccSat`
+/// (the accumulator is always `Result Type`-signed for these two, per the
+/// spec's "signed saturating addition" wording for both), unsigned only for
+/// `UDotAccSat`.
+template <typename OpTy, bool Vector1Signed, bool Vector2Signed,
+         bool SaturateSigned>
+class IntegerDotProductAccSatConversionPattern
+    : public mlir::SPIRVToLLVMConversion<OpTy> {
+public:
+  using mlir::SPIRVToLLVMConversion<OpTy>::SPIRVToLLVMConversion;
+  using OpAdaptor = typename mlir::SPIRVToLLVMConversion<OpTy>::OpAdaptor;
+
+  mlir::LogicalResult
+  matchAndRewrite(OpTy Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Type ResultType =
+        this->getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::Location Loc = Op.getLoc();
+    llvm::SmallVector<mlir::Value> Lanes1, Lanes2;
+    extractIntegerDotProductLanes(Rewriter, Loc, Adaptor.getVector1(),
+                                  Adaptor.getVector2(), ResultType,
+                                  Vector1Signed, Vector2Signed, Lanes1,
+                                  Lanes2);
+    mlir::Value Sum =
+        reduceIntegerDotProductLanes(Rewriter, Loc, Lanes1, Lanes2);
+    mlir::Value Saturated =
+        SaturateSigned
+            ? mlir::Value(mlir::LLVM::SAddSat::create(
+                  Rewriter, Loc, Sum, Adaptor.getAccumulator()))
+            : mlir::Value(mlir::LLVM::UAddSat::create(
+                  Rewriter, Loc, Sum, Adaptor.getAccumulator()));
+    Rewriter.replaceOp(Op, Saturated);
+    return mlir::success();
+  }
+};
+using SDotAccSatConversionPattern = IntegerDotProductAccSatConversionPattern<
+    mlir::spirv::SDotAccSatOp, /*Vector1Signed=*/true, /*Vector2Signed=*/true,
+    /*SaturateSigned=*/true>;
+using UDotAccSatConversionPattern = IntegerDotProductAccSatConversionPattern<
+    mlir::spirv::UDotAccSatOp, /*Vector1Signed=*/false,
+    /*Vector2Signed=*/false, /*SaturateSigned=*/false>;
+using SUDotAccSatConversionPattern = IntegerDotProductAccSatConversionPattern<
+    mlir::spirv::SUDotAccSatOp, /*Vector1Signed=*/true,
+    /*Vector2Signed=*/false, /*SaturateSigned=*/true>;
+
 /// Replaces `spirv.mlir.addressof` of a builtin input variable with the
 /// `llvm.spv.*` intrinsic reading it. There is no LLVM global to take the
 /// address of: LLVM's SPIRV backend synthesizes the `OpVariable`, and its
@@ -2024,6 +2197,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                ImageReadPattern, ImageWritePattern, LoadValuePattern,
                MatrixCompositeExtractPattern, MatrixCompositeInsertPattern,
                PushConstantGlobalVariablePattern, SampledImagePattern,
+               SDotConversionPattern, UDotConversionPattern,
+               SUDotConversionPattern, SDotAccSatConversionPattern,
+               UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
                SpecConstantErasurePattern, StageIOGlobalVariablePattern,
                SwitchConversionPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit);
