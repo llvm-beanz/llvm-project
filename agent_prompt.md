@@ -26,11 +26,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E12 in the roadmap document?
+Can you implement milestone E13 in the roadmap document?
 
-> **`VK_KHR_shader_terminate_invocation`/`shaderTerminateInvocation`.** SPIR-V's
-> `OpTerminateInvocation` (a true terminator, unlike
-> `OpDemoteToHelperInvocation`) needs its own conversion pattern lowering to an
-> unconditional discard-and-return. **Closes D3's `graphicsfuzz` 72-case
-> regression** (CTS assumes this promoted-to-1.3 extension is real once
-> `apiVersion >= 1.3`)
+> **`VK_KHR_zero_initialize_workgroup_memory`/`shaderZeroInitializeWorkgroupMemory`.**
+> `Workgroup`-storage-class SPIR-V globals need a zero-initializer emitted once
+> per dispatch (likely in `feme::cpu::SPIRVResourceLoweringPass` or a small new
+> pass run before it) rather than reading whatever the host's memory allocator
+> happened to leave behind. **Closes D3's
+> `compute.pipeline.zero_initialize_workgroup_memory` 7-case regression**
