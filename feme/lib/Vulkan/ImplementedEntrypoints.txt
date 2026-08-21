@@ -54,6 +54,12 @@ vkGetBufferMemoryRequirements2
 vkBindBufferMemory
 vkBindBufferMemory2
 
+# Roadmap E4: core Vulkan 1.3 promoted VK_KHR_maintenance4's memory-
+# requirements-without-an-object commands (Buffer.cpp/Image.cpp share
+# their sizing/validation helpers with the corresponding live vkGet*
+# MemoryRequirements(2) entrypoints above/below).
+vkGetDeviceBufferMemoryRequirements
+
 # V4: buffer views, for uniform/storage texel buffer descriptors (see
 # "Descriptor Model").
 vkCreateBufferView
@@ -70,6 +76,11 @@ vkCreateImageView
 vkDestroyImageView
 vkCreateSampler
 vkDestroySampler
+
+# Roadmap E4: VK_KHR_maintenance4's image-side memory-requirements-without-
+# an-object commands (see the note above vkGetDeviceBufferMemoryRequirements).
+vkGetDeviceImageMemoryRequirements
+vkGetDeviceImageSparseMemoryRequirements
 
 # V6: render passes and framebuffers (see "Render passes and dynamic
 # rendering").

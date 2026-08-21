@@ -14,12 +14,31 @@ using namespace feme::vulkan;
 
 namespace {
 
-/// Fills \p Reqs for \p Buf, per "Memory and Buffers": alignment tracks the
-/// real range-check granularity this ICD enforces, and every allocation is
-/// eligible (only memory type 0 exists).
-void getRequirements(const Buffer &Buf, const PhysicalDeviceInfo &Info,
-                     VkMemoryRequirements &Reqs) {
-  Reqs.size = Buf.size();
+/// Returns whether \p CreateInfo describes a `VkBuffer` this ICD can
+/// create, per "Initial Non-Goals" (no sparse binding) -- shared by
+/// `vkCreateBuffer` and, roadmap E4's `VK_KHR_maintenance4`
+/// `vkGetDeviceBufferMemoryRequirements`, which must reject the same
+/// unsupported shapes before computing anything from a `VkBufferCreateInfo`
+/// alone, with no live `VkBuffer` to fall back on.
+bool isValidBufferCreateInfo(const VkBufferCreateInfo &CreateInfo) {
+  if (CreateInfo.flags != 0)
+    return false;
+  if (CreateInfo.size == 0)
+    return false;
+  return true;
+}
+
+/// Fills \p Reqs for a buffer of \p Size, per "Memory and Buffers":
+/// alignment tracks the real range-check granularity this ICD enforces, and
+/// every allocation is eligible (only memory type 0 exists). Shared by the
+/// live `vkGetBufferMemoryRequirements(2)` entrypoints (an already-created
+/// `VkBuffer`'s own size) and roadmap E4's info-only
+/// `vkGetDeviceBufferMemoryRequirements` (a `VkBufferCreateInfo`'s `size`
+/// field, with no `VkBuffer` ever created).
+void computeBufferMemoryRequirements(VkDeviceSize Size,
+                                     const PhysicalDeviceInfo &Info,
+                                     VkMemoryRequirements &Reqs) {
+  Reqs.size = Size;
   Reqs.alignment = Info.Properties.limits.minStorageBufferOffsetAlignment;
   Reqs.memoryTypeBits = 0x1;
 }
@@ -32,10 +51,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
                const VkAllocationCallbacks *pAllocator, VkBuffer *pBuffer) {
   (void)device;
-  // No sparse binding is supported (see "Initial Non-Goals").
-  if (pCreateInfo->flags != 0)
-    return VK_ERROR_INITIALIZATION_FAILED;
-  if (pCreateInfo->size == 0)
+  if (!isValidBufferCreateInfo(*pCreateInfo))
     return VK_ERROR_INITIALIZATION_FAILED;
 
   Allocator Alloc(pAllocator);
@@ -60,7 +76,8 @@ vkGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer,
                               VkMemoryRequirements *pMemoryRequirements) {
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
-  getRequirements(*fromHandle<Buffer>(buffer), Info, *pMemoryRequirements);
+  computeBufferMemoryRequirements(fromHandle<Buffer>(buffer)->size(), Info,
+                                  *pMemoryRequirements);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
@@ -68,8 +85,27 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
     VkMemoryRequirements2 *pMemoryRequirements) {
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
-  getRequirements(*fromHandle<Buffer>(pInfo->buffer), Info,
-                  pMemoryRequirements->memoryRequirements);
+  computeBufferMemoryRequirements(fromHandle<Buffer>(pInfo->buffer)->size(),
+                                  Info, pMemoryRequirements->memoryRequirements);
+}
+
+/// (roadmap E4) `VK_KHR_maintenance4`: computes a `VkBuffer`'s memory
+/// requirements from its `VkBufferCreateInfo` alone, without ever creating
+/// the buffer -- shares `computeBufferMemoryRequirements` with the live
+/// `vkGetBufferMemoryRequirements(2)` entrypoints above, the same way
+/// `vkCreateBuffer` shares `isValidBufferCreateInfo`'s validation with this
+/// entrypoint. Per the Vulkan specification, \p pInfo->pCreateInfo need not
+/// describe a buffer this ICD could actually create for the result to be
+/// meaningful, but this ICD's own requirements depend only on `size`
+/// (`minStorageBufferOffsetAlignment`/memory-type-bits are constant), so no
+/// further validation is needed here.
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceBufferMemoryRequirements(
+    VkDevice device, const VkDeviceBufferMemoryRequirements *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements) {
+  const PhysicalDeviceInfo &Info =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  computeBufferMemoryRequirements(pInfo->pCreateInfo->size, Info,
+                                  pMemoryRequirements->memoryRequirements);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice, VkBuffer buffer,

@@ -139,6 +139,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice device,
 VKAPI_ATTR VkResult VKAPI_CALL
 vkBindBufferMemory2(VkDevice device, uint32_t bindInfoCount,
                     const VkBindBufferMemoryInfo *pBindInfos);
+// (roadmap E4) VK_KHR_maintenance4: buffer memory requirements from a
+// VkBufferCreateInfo alone, no VkBuffer needed.
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceBufferMemoryRequirements(
+    VkDevice device, const VkDeviceBufferMemoryRequirements *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements);
 
 // V4: buffer views, for uniform/storage texel buffer descriptors (see
 // "Descriptor Model").
@@ -166,6 +171,17 @@ VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice device, VkImage image,
 VKAPI_ATTR VkResult VKAPI_CALL
 vkBindImageMemory2(VkDevice device, uint32_t bindInfoCount,
                    const VkBindImageMemoryInfo *pBindInfos);
+// (roadmap E4) VK_KHR_maintenance4: image memory requirements from a
+// VkImageCreateInfo alone, no VkImage needed; sparse variant always
+// reports zero sparse requirements (see "Initial Non-Goals": no sparse
+// binding).
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
+    VkDevice device, const VkDeviceImageMemoryRequirements *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements);
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSparseMemoryRequirements(
+    VkDevice device, const VkDeviceImageMemoryRequirements *pInfo,
+    uint32_t *pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateImageView(VkDevice device, const VkImageViewCreateInfo *pCreateInfo,
                   const VkAllocationCallbacks *pAllocator, VkImageView *pView);

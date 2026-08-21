@@ -288,35 +288,48 @@ VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
   return Constrained ? Mask : VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT);
 }
 
+/// Returns whether \p CreateInfo's shape (flags/samples/mips/array layers)
+/// is one this ICD can create, *not counting* its `format` -- split out
+/// from the format check so `vkCreateImage` can keep reporting the more
+/// specific `VK_ERROR_FORMAT_NOT_SUPPORTED` for an unmapped format while
+/// still sharing this validation with roadmap E4's `VK_KHR_maintenance4`
+/// `vkGetDeviceImageMemoryRequirements`/
+/// `vkGetDeviceImageSparseMemoryRequirements`, which report their result
+/// through a `void`-returning entrypoint with no error code of their own.
+/// A multisample `samples` is accepted at the object-model level -- see
+/// Image.h's file comment -- as long as it is one this device's limits
+/// actually advertise for the image's usage (`supportedSampleCounts`);
+/// every other image continues to require exactly one sample, same as
+/// before multisample support existed.
+bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
+                       const PhysicalDeviceInfo &Info) {
+  // No sparse binding (see "V5: Images and sampling"'s scope).
+  if (CreateInfo.flags &
+      ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
+    return false;
+  if (!(CreateInfo.samples & supportedSampleCounts(Info, CreateInfo.usage)))
+    return false;
+  if (CreateInfo.mipLevels == 0 || CreateInfo.arrayLayers == 0)
+    return false;
+  if (CreateInfo.imageType == VK_IMAGE_TYPE_3D && CreateInfo.arrayLayers != 1)
+    return false;
+  // A multisample image is only ever a flat 2D render-target-shaped
+  // resource in real Vulkan (`VUID-VkImageCreateInfo-samples-02257`): no
+  // mips, and 2D only.
+  if (CreateInfo.samples != VK_SAMPLE_COUNT_1_BIT &&
+      (CreateInfo.imageType != VK_IMAGE_TYPE_2D || CreateInfo.mipLevels != 1))
+    return false;
+  return true;
+}
+
 } // namespace
 
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
               const VkAllocationCallbacks *pAllocator, VkImage *pImage) {
-  // No sparse binding (see "V5: Images and sampling"'s scope). A multisample
-  // `samples` is accepted at the object-model level -- see Image.h's file
-  // comment -- as long as it is one this device's limits actually advertise
-  // for the image's usage (`supportedSampleCounts`); every other image
-  // continues to require exactly one sample, same as before multisample
-  // support existed.
-  if (pCreateInfo->flags &
-      ~VkImageCreateFlags(VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT))
-    return VK_ERROR_INITIALIZATION_FAILED;
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
-  if (!(pCreateInfo->samples & supportedSampleCounts(Info, pCreateInfo->usage)))
-    return VK_ERROR_INITIALIZATION_FAILED;
-  if (pCreateInfo->mipLevels == 0 || pCreateInfo->arrayLayers == 0)
-    return VK_ERROR_INITIALIZATION_FAILED;
-  if (pCreateInfo->imageType == VK_IMAGE_TYPE_3D &&
-      pCreateInfo->arrayLayers != 1)
-    return VK_ERROR_INITIALIZATION_FAILED;
-  // A multisample image is only ever a flat 2D render-target-shaped
-  // resource in real Vulkan (`VUID-VkImageCreateInfo-samples-02257`): no
-  // mips, and 2D only.
-  if (pCreateInfo->samples != VK_SAMPLE_COUNT_1_BIT &&
-      (pCreateInfo->imageType != VK_IMAGE_TYPE_2D ||
-       pCreateInfo->mipLevels != 1))
+  if (!isValidImageShape(*pCreateInfo, Info))
     return VK_ERROR_INITIALIZATION_FAILED;
 
   std::optional<feme::cpu::ResourceFormat> Format =
@@ -349,23 +362,45 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImage(
 }
 
 namespace {
-/// Fills \p Reqs for \p Img, mirroring Buffer.cpp's `getRequirements`: only
-/// memory type 0 exists, and the alignment tracks this ICD's own host
-/// allocation granularity since there is no real tiling requirement to
-/// report (see Image.h's file comment).
-void getImageRequirements(const Image &Img, const PhysicalDeviceInfo &Info,
-                          VkMemoryRequirements &Reqs) {
-  Reqs.size = Img.sizeInBytes();
+
+/// Fills \p Reqs for a `TotalSize`-byte image, mirroring Buffer.cpp's
+/// `computeBufferMemoryRequirements`: only memory type 0 exists, and the
+/// alignment tracks this ICD's own host allocation granularity since there
+/// is no real tiling requirement to report (see Image.h's file comment).
+/// Shared by the live `vkGetImageMemoryRequirements(2)` entrypoints (an
+/// already-created `Image`'s own `sizeInBytes()`) and roadmap E4's
+/// info-only `vkGetDeviceImageMemoryRequirements`.
+void fillImageMemoryRequirements(VkDeviceSize TotalSize,
+                                 const PhysicalDeviceInfo &Info,
+                                 VkMemoryRequirements &Reqs) {
+  Reqs.size = TotalSize;
   Reqs.alignment = Info.Properties.limits.minMemoryMapAlignment;
   Reqs.memoryTypeBits = 0x1;
 }
+
+/// Computes a `VkImageCreateInfo`'s total packed byte size, without ever
+/// constructing an `Image` -- the same `computeSubresourceLayouts` helper
+/// `Image`'s own constructor calls, given \p Format's element size (see
+/// Image.h's file comment on why tiling is not distinguished).
+VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
+                                        feme::cpu::ResourceFormat Format) {
+  uint32_t TexelSize = formatElementSize(Format);
+  return computeSubresourceLayouts(
+             CreateInfo.imageType, CreateInfo.extent.width,
+             CreateInfo.extent.height, CreateInfo.extent.depth,
+             CreateInfo.mipLevels, CreateInfo.arrayLayers,
+             static_cast<uint32_t>(CreateInfo.samples), TexelSize)
+      .second;
+}
+
 } // namespace
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
     VkDevice device, VkImage image, VkMemoryRequirements *pMemoryRequirements) {
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
-  getImageRequirements(*fromHandle<Image>(image), Info, *pMemoryRequirements);
+  fillImageMemoryRequirements(fromHandle<Image>(image)->sizeInBytes(), Info,
+                              *pMemoryRequirements);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
@@ -373,8 +408,43 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
     VkMemoryRequirements2 *pMemoryRequirements) {
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
-  getImageRequirements(*fromHandle<Image>(pInfo->image), Info,
-                       pMemoryRequirements->memoryRequirements);
+  fillImageMemoryRequirements(fromHandle<Image>(pInfo->image)->sizeInBytes(),
+                              Info, pMemoryRequirements->memoryRequirements);
+}
+
+/// (roadmap E4) `VK_KHR_maintenance4`: computes a `VkImage`'s memory
+/// requirements from its `VkImageCreateInfo` alone, without ever creating
+/// the image -- shares `isValidImageShape`/`computeImageCreateInfoSize`
+/// with `vkCreateImage`'s own validation/sizing and
+/// `fillImageMemoryRequirements` with the live `vkGetImageMemoryRequirements(2)`
+/// entrypoints above. An unsupported shape or format is reported as an
+/// all-zero result: unlike `vkCreateImage`, this entrypoint returns no
+/// `VkResult` to report such a `VkImageCreateInfo` as invalid through.
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
+    VkDevice device, const VkDeviceImageMemoryRequirements *pInfo,
+    VkMemoryRequirements2 *pMemoryRequirements) {
+  const PhysicalDeviceInfo &Info =
+      fromHandle<Device>(device)->getPhysicalDevice().getInfo();
+  const VkImageCreateInfo &CreateInfo = *pInfo->pCreateInfo;
+  std::optional<feme::cpu::ResourceFormat> Format =
+      mapVkFormat(CreateInfo.format);
+  if (!isValidImageShape(CreateInfo, Info) || !Format) {
+    pMemoryRequirements->memoryRequirements = VkMemoryRequirements{};
+    return;
+  }
+  fillImageMemoryRequirements(computeImageCreateInfoSize(CreateInfo, *Format),
+                              Info, pMemoryRequirements->memoryRequirements);
+}
+
+/// (roadmap E4) `VK_KHR_maintenance4`: no sparse residency is supported
+/// (see "Initial Non-Goals"), mirroring
+/// `vkGetPhysicalDeviceSparseImageFormatProperties`'s own empty result --
+/// no `VkImageCreateInfo` ever reports a sparse memory requirement.
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSparseMemoryRequirements(
+    VkDevice, const VkDeviceImageMemoryRequirements *,
+    uint32_t *pSparseMemoryRequirementCount,
+    VkSparseImageMemoryRequirements2 *) {
+  *pSparseMemoryRequirementCount = 0;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice, VkImage image,

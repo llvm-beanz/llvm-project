@@ -102,6 +102,30 @@ TEST_F(BufferTest, RejectsZeroSize) {
             VK_ERROR_INITIALIZATION_FAILED);
 }
 
+/// Roadmap E4 (`VK_KHR_maintenance4`): the same requirements a live
+/// `VkBuffer` of this size/usage would report, computed from its
+/// `VkBufferCreateInfo` alone -- no `vkCreateBuffer` call at all.
+TEST_F(BufferTest, GetDeviceBufferMemoryRequirementsMatchesLiveBuffer) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 256;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+  VkMemoryRequirements LiveReqs{};
+  vkGetBufferMemoryRequirements(Device, Buf, &LiveReqs);
+  vkDestroyBuffer(Device, Buf, nullptr);
+
+  VkDeviceBufferMemoryRequirements Info{};
+  Info.pCreateInfo = &BufferInfo;
+  VkMemoryRequirements2 Reqs2{};
+  vkGetDeviceBufferMemoryRequirements(Device, &Info, &Reqs2);
+  EXPECT_EQ(Reqs2.memoryRequirements.size, LiveReqs.size);
+  EXPECT_EQ(Reqs2.memoryRequirements.alignment, LiveReqs.alignment);
+  EXPECT_EQ(Reqs2.memoryRequirements.memoryTypeBits, LiveReqs.memoryTypeBits);
+  EXPECT_EQ(Reqs2.memoryRequirements.size, 256u);
+}
+
 class BufferViewTest : public BufferTest {
 protected:
   void SetUp() override {

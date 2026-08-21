@@ -123,6 +123,76 @@ TEST_F(ImageTest, RejectsUnsupportedFormat) {
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 
+/// Roadmap E4 (`VK_KHR_maintenance4`): the same requirements a live
+/// `VkImage` of this shape would report, computed from its
+/// `VkImageCreateInfo` alone -- no `vkCreateImage` call at all.
+TEST_F(ImageTest, GetDeviceImageMemoryRequirementsMatchesLiveImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 3;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  VkMemoryRequirements LiveReqs{};
+  vkGetImageMemoryRequirements(Device, Img, &LiveReqs);
+  vkDestroyImage(Device, Img, nullptr);
+
+  VkDeviceImageMemoryRequirements Info{};
+  Info.pCreateInfo = &ImageInfo;
+  VkMemoryRequirements2 Reqs2{};
+  vkGetDeviceImageMemoryRequirements(Device, &Info, &Reqs2);
+  EXPECT_EQ(Reqs2.memoryRequirements.size, LiveReqs.size);
+  EXPECT_EQ(Reqs2.memoryRequirements.alignment, LiveReqs.alignment);
+  EXPECT_EQ(Reqs2.memoryRequirements.memoryTypeBits, LiveReqs.memoryTypeBits);
+  // 4x4 (64B) + 2x2 (16B) + 1x1 (4B), same as `MipChainSizeIsSumOfLevels`.
+  EXPECT_EQ(Reqs2.memoryRequirements.size, 84u);
+}
+
+/// An unsupported format/shape is not fatal -- unlike `vkCreateImage`, this
+/// entrypoint has no `VkResult` to report it through, so it reports an
+/// all-zero result instead of asserting or reading uninitialized state.
+TEST_F(ImageTest, GetDeviceImageMemoryRequirementsZeroForUnsupportedFormat) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R16_UNORM;
+  ImageInfo.extent = {1, 1, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkDeviceImageMemoryRequirements Info{};
+  Info.pCreateInfo = &ImageInfo;
+  VkMemoryRequirements2 Reqs2{};
+  Reqs2.memoryRequirements.size = 0xdeadbeef;
+  vkGetDeviceImageMemoryRequirements(Device, &Info, &Reqs2);
+  EXPECT_EQ(Reqs2.memoryRequirements.size, 0u);
+}
+
+/// Roadmap E4: no sparse residency is supported, so this always reports
+/// zero sparse memory requirements, mirroring
+/// `vkGetPhysicalDeviceSparseImageFormatProperties`'s own empty result.
+TEST_F(ImageTest, GetDeviceImageSparseMemoryRequirementsReportsNone) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+  VkDeviceImageMemoryRequirements Info{};
+  Info.pCreateInfo = &ImageInfo;
+  uint32_t Count = 42;
+  vkGetDeviceImageSparseMemoryRequirements(Device, &Info, &Count, nullptr);
+  EXPECT_EQ(Count, 0u);
+}
+
 TEST_F(ImageTest, RejectsMultisample) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_2D;
