@@ -2466,3 +2466,47 @@ stronger-than-a-rebuild evidence the "SPIR-V `spirv.Image`/
 case in this report already exercises the exact binary this change did
 not touch. `ninja check-feme`: 1586/1587 passed, 1 unsupported
 (pre-existing, unrelated), before and after.
+
+## Roadmap E20: measured impact (targeted, not a full re-run)
+
+Unlike E15, this row's own code did change `libfeme_vulkan.so`:
+`Format.h`/`Image.{h,cpp}` gained real block-aware layout math and 28
+new `mapVkFormat` entries, and a new `ASTCDecode.{h,cpp}` landed a real
+decoder. But `vkCreateImage` still rejects every ASTC `VkFormat`
+outright (`VK_ERROR_FORMAT_NOT_SUPPORTED`, the same result an
+unrecognized format already produced before this row), and
+`textureCompressionASTC_LDR` stays `VK_FALSE` -- both unchanged from
+`libfeme_vulkan`'s pre-E20 behavior, by design (see Image.h's file
+comment and Roadmap.md's E20/E22 rows). A full 3-million-case re-run
+would only be expected to reproduce the headline table above verbatim,
+so two targeted subsets were run instead to confirm that expectation
+rather than assume it:
+
+- `dEQP-VK.api.info.*` (10,484 cases, the same subtree the
+  "GetDimensions.xy/AMDGPU change" addendum above used for its own
+  "unaffected" spot check): 5,873 passed / 73 failed / 4,538 not
+  supported -- the same mix-of-outcomes, zero-crash shape as that
+  addendum's own 5,669/10,484 baseline (the difference is this
+  session's CTS revision drift, `vulkan-cts-1.4.6.2-413-ge4b225a7d7cd`
+  vs. that addendum's, not this row's own change: none of the 73
+  failures involve `astc` in their name).
+- `dEQP-VK.*astc*` (98,927 cases spanning `api`, `image`, `pipeline`,
+  `sparse_resources`, and `texture`): 873 passed / 1 failed / 98,053
+  not supported. The one failure,
+  `dEQP-VK.api.info.get_physical_device_properties2.features.
+  texture_compression_astchdr_features`, is roadmap E15/G4's
+  already-tracked, unrelated `textureCompressionASTC_HDR` aggregate-
+  vs-dedicated-struct mismatch (this ICD advertises no
+  `VK_EXT_texture_compression_astc_hdr` struct case at all, since the
+  extension itself is not advertised) -- not a new failure this row
+  introduced, and not an LDR-named case. Every LDR-format-named case
+  (`*_astc_4x4_unorm*`, `*_astc_12x12_srgb*`, ...) is `NotSupported
+  (Format not supported at vktTextureTestUtil.cpp:1678)`, i.e. the
+  exact same clean rejection `libfeme_vulkan` already produced before
+  this row, confirming `vkCreateImage`'s continued rejection did not
+  regress any previously-passing case or newly fail one.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1599/1600
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row.
