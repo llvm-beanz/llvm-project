@@ -500,6 +500,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // instead of running for real.
       {VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME,
        VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_SPEC_VERSION},
+      // (roadmap E10) `vkCreatePrivateDataSlot`/`vkSetPrivateData`/
+      // `vkGetPrivateData`/`vkDestroyPrivateDataSlot` (PrivateData.{h,cpp})
+      // are implemented; like `synchronization2`/`maintenance5`/
+      // `maintenance6`/`shader_integer_dot_product`/
+      // `pipeline_creation_cache_control` above,
+      // `dEQP-VK.api.private_data.*` enables this extension by name
+      // regardless of the advertised `apiVersion`, so it must be listed
+      // here too, or every one of those cases fails `NotSupported` instead
+      // of running for real.
+      {VK_EXT_PRIVATE_DATA_EXTENSION_NAME, VK_EXT_PRIVATE_DATA_SPEC_VERSION},
   };
   return Extensions;
 }
