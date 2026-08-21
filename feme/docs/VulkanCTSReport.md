@@ -1904,6 +1904,61 @@ compute/graphics pipeline creation through this ICD today, with or without
 a private data slot attached, and closing either is out of this row's own
 scope.
 
+## Roadmap E11: measured impact
+
+Roadmap E11 (`VK_EXT_shader_demote_to_helper_invocation`/
+`shaderDemoteToHelperInvocation`) needed more than its own premise
+anticipated: the audit found no `spirv`->`llvm` conversion pattern for
+*either* `OpKill` or `OpDemoteToHelperInvocation`, and MLIR's own upstream
+SPIR-V dialect had no op at all for the latter (despite already having its
+`Capability`/`Extension` enum cases), so `mlir::spirv::deserialize` would
+reject any real module using it. This row added `spirv.
+DemoteToHelperInvocation` to MLIR itself (a non-terminator, unlike the
+deprecated `spirv.Kill`), a new `llvm.spv.demote.to.helper.invocation`
+LLVM intrinsic mirroring `llvm.spv.discard`'s shape,
+`SPIRVToLLVMPatterns.cpp`'s new `DemoteToHelperInvocationConversionPattern`
+converting the op to that intrinsic, and `CanonicalizeStage.cpp` raising
+it into `feme.stage.demote(true)` -- unconditional, matching
+`llvm.spv.discard`'s own existing raising into `feme.stage.discard(true)`
+-- whose reference/SIMD lowering (`StageOpKind::Demote`) already existed.
+`shaderDemoteToHelperInvocation` now reads `VK_TRUE` from both the
+aggregate `VkPhysicalDeviceVulkan13Features` struct and a new dedicated
+`VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures` struct;
+`getSupportedDeviceExtensions` gained `VK_EXT_shader_demote_to_helper_
+invocation` itself, the same "CTS enables it by name regardless of
+`apiVersion`" reason E3/E5/E6/E8/E9/E10 already established.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.shader_demote_to_helper_invocation_features` | `Pass` (previously `Fail`, per D1/D3's own `api.info.*` bucket -- see "Roadmap D3: measured impact" above) |
+| `dEQP-VK.api.info.vulkan1p3.*` (5 total) | 5/5 `Pass`, confirming the new dedicated `VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures` struct agrees with the aggregate `VkPhysicalDeviceVulkan13Features` case rather than repeating E2's own first-draft regression |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.shader_demote_to_helper_invocation_features` | `Pass` |
+| `dEQP-VK.*demote*` (60 total, wildcard across every group naming this concept `demote`) | 2 `Pass` (the two `api.*` cases above), 58 `NotSupported` |
+| `dEQP-VK.*helper_invocation*` (94 total, wildcard across every group naming this concept `helper_invocation`) | 2 `Pass` (the two `api.*` cases above), 5 `Fail`, 87 `NotSupported` |
+
+**Every one of the 58+87 `NotSupported` cases is a pre-existing,
+out-of-scope prerequisite gap, not this row's own bits:** the `demote`-named
+cases need either an unsupported depth/stencil format
+(`vktRenderPassDepthStencilWriteConditionsTests.cpp`'s
+`depth_stencil_write_conditions.*`), `VK_EXT_shader_stencil_export` (its
+`stencil_demote_*` siblings), fragment-shader stores/atomics
+(`rasterization.frag_side_effects.*`), or subgroup operations in the
+fragment stage (`reconvergence.maximal.fragment.demote_*`) -- none of
+which `VK_EXT_shader_demote_to_helper_invocation` itself requires; the
+`helper_invocation`-named cases are almost entirely `VK_KHR_acceleration_
+structure` (ray query), likewise unrelated. **The 5 `Fail` cases
+(`dEQP-VK.glsl.helper_invocations.{load_from_image,load_from_ssbo,
+load_from_texture,load_from_ubo,output_variables}`) are also a
+pre-existing, out-of-scope gap, not this row's own entrypoints:** all five
+fail identically, at `vkCreateRenderPass` with `VK_ERROR_FORMAT_NOT_
+SUPPORTED`, before any shader referencing `demote`/helper-invocation state
+is ever compiled or executed -- an unadvertised render-pass attachment
+format these particular tests happen to need, the same class of
+pre-existing `Format.cpp` gap several earlier rows in this report already
+found, unrelated to `OpDemoteToHelperInvocation`.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
