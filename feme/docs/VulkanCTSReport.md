@@ -1730,6 +1730,62 @@ specialization-constant composite to a real LLVM constant vector is a
 distinct, out-of-scope follow-up for whichever future row needs
 `gl_WorkGroupSize` read from a shader body at all.
 
+## Roadmap E8: measured impact
+
+Roadmap E8 (`VK_KHR_shader_integer_dot_product`/`shaderIntegerDotProduct`)
+adds six new `spirv`->`llvm` conversion patterns
+(`SPIRVToLLVMPatterns.cpp`): `spirv.SDot`/`spirv.UDot`/`spirv.SUDot` and
+their `*AccSat` counterparts, none of which upstream MLIR converts at all
+(the same "MLIR has no pattern for this op" gap `DotConversionPattern`
+already closed for the unrelated float `spirv.Dot`). Each lowers to a
+per-lane sign/zero-extend, multiply, and add chain over either a real
+vector operand's elements or -- for a scalar 32-bit operand, legal only
+with the `PackedVectorFormat4x8Bit` format -- its four unpacked
+constituent bytes, with a final `llvm.intr.sadd.sat`/`uadd.sat` for the
+`*AccSat` variants. `shaderIntegerDotProduct` now reads `VK_TRUE` from
+both the aggregate `VkPhysicalDeviceVulkan13Features` struct and a new
+dedicated `VkPhysicalDeviceShaderIntegerDotProductFeatures` struct.
+`getSupportedDeviceExtensions` gained `VK_KHR_shader_integer_dot_product`,
+the same "CTS enables it by name regardless of `apiVersion`" reason
+E3/E5/E6 already established for their own extensions.
+
+None of the 36 `integerDotProduct*Accelerated` limit bits (E2's largest
+single placeholder cluster) are raised, in either the aggregate
+`VkPhysicalDeviceVulkan13Properties` case or a new dedicated
+`VkPhysicalDeviceShaderIntegerDotProductProperties` case: this CPU target
+executes every one of the six new patterns as an ordinary scalar
+multiply-add sequence, not a genuinely accelerated one, so a uniform
+`VK_FALSE` is the truthful answer this row's own premise anticipated,
+confirmed rather than merely assumed by the runs below.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.shader_integer_dot_product_features` | `Pass` (previously `Fail`, per D1/D3's own `api.info.*` bucket -- see "Roadmap D3: measured impact" above) |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.shader_integer_dot_product_features` | `Pass` |
+| `dEQP-VK.api.info.vulkan1p3.*` (5 total) | 5 `Pass`, confirming the new dedicated `VkPhysicalDeviceShaderIntegerDotProductFeatures`/`Properties` structs agree with the aggregate `VkPhysicalDeviceVulkan13Features`/`Properties` cases rather than repeating E2's own first-draft regression |
+| `dEQP-VK.spirv_assembly.instruction.compute.{opsdotkhr,opudotkhr,opsudotkhr,opsdotaccsatkhr,opudotaccsatkhr,opsudotaccsatkhr}.*` (1,248 total) | 80 `Pass`, 0 `Fail`, 1,168 `NotSupported` |
+
+**The 1,168 `NotSupported` cases are a correct rejection, not a gap this
+row leaves open.** Each requires an operand width or capability this ICD
+does not implement at all, independent of this row's own scope: `i16`
+vectors need `shaderInt16` (unimplemented), `i64` vectors need
+`shaderInt64` (unimplemented), and every combination requiring
+`DotProductInputAll` beyond the 4-lane `i8` vector/4x8-packed-`i32` shapes
+this row's own lane-extraction/unpacking logic handles falls back to the
+same still-missing capability. Every case within this row's actual scope
+(4-lane `vector<4xi8>` operands and 4x8-bit-packed scalar `i32` operands,
+each output width the six ops themselves support) passes: 8 `Pass` each
+for `opsdotkhr`/`opudotkhr`/`opsudotkhr` (the three binary ops), 20 `Pass`
+each for `opsdotaccsatkhr`/`opsudotaccsatkhr`, and 16 `Pass` for
+`opudotaccsatkhr` (fewer combinations, since `UDotAccSat` has no
+mixed-signedness variant of its own). Zero `Fail` across all six groups
+confirms the per-lane extend/multiply/add/saturate sequence
+(`extractIntegerDotProductLanes`/`reduceIntegerDotProductLanes` in
+`SPIRVToLLVMPatterns.cpp`) is correct for every shape CTS actually
+exercises against it, not merely plausible by inspection.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
