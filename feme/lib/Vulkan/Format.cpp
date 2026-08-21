@@ -433,14 +433,12 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   // The formats the CPU runtime's texel-unpack table
   // (`femeRTImageFormatElementSize`/`femeRTUnpackImageTexel`,
   // feme/runtime/CPU/FeMeRuntimeCPU.c) implements can actually be sampled
-  // by a shader; every ASTC LDR format is sampled too, since
-  // `materializeImageDescriptor` (CommandBuffer.cpp) decodes one into
-  // `R8G8B8A8_UNORM`/`_UNORM_SRGB` before the runtime ever sees it (roadmap
-  // E23). An HDR ASTC format samples as all-zero (that bridge is LDR-only)
-  // and a `_UINT`/`_SINT` format is not in this list at all -- no
-  // `feme.cpu.image.*` entry point returns an integer vector yet (roadmap
-  // E25's own scope note, FeMeRuntimeCPU.c) -- so both are honestly left
-  // unset like every other unimplemented format.
+  // (with filtering) by a shader; every ASTC LDR format is sampled too,
+  // since `materializeImageDescriptor` (CommandBuffer.cpp) decodes one
+  // into `R8G8B8A8_UNORM`/`_UNORM_SRGB` before the runtime ever sees it
+  // (roadmap E23). An HDR ASTC format samples as all-zero (that bridge is
+  // LDR-only), so is honestly left unset like every other unimplemented
+  // format.
   switch (Format) {
   case ResourceFormat::R32_FLOAT:
   case ResourceFormat::R32G32_FLOAT:
@@ -457,6 +455,23 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   case ResourceFormat::A1B5G5R5_UNORM:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    break;
+  // (Roadmap E26) The mandatory-sampled `_UINT`/`_SINT` formats
+  // `femeRTUnpackImageTexelI32` (FeMeRuntimeCPU.c) decodes for
+  // `feme.cpu.image.load.2d.v4i32`. No `_FILTER_LINEAR_BIT`: SPIR-V never
+  // legalizes a filtered `OpImageSample*` against an integer-sampled
+  // image, only an unfiltered `OpImageFetch`, and Vulkan's own
+  // `VkFormatFeatureFlagBits` follows suit -- `SAMPLED_IMAGE_FILTER_LINEAR`
+  // is documented as requiring a format whose numeric type supports
+  // filtering, which no integer format's `VkComponentNumericFormat` does.
+  case ResourceFormat::R8G8B8A8_UINT:
+  case ResourceFormat::R8G8B8A8_SINT:
+  case ResourceFormat::R16G16B16A16_UINT:
+  case ResourceFormat::R16G16B16A16_SINT:
+  case ResourceFormat::R10G10B10A2_UINT:
+  case ResourceFormat::R32G32B32A32_UINT:
+  case ResourceFormat::R32G32B32A32_SINT:
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     break;
   default:
     if (ASTCLdr)

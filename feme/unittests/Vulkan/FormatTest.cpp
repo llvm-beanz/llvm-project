@@ -256,7 +256,8 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
   // non-depth/stencil format the CPU runtime's texel-unpack table
   // (femeRTImageFormatElementSize/femeRTUnpackImageTexel, FeMeRuntimeCPU.c)
   // now implements, plus every ASTC LDR format (bridged to one of those by
-  // materializeImageDescriptor, roadmap E23), can actually be sampled.
+  // materializeImageDescriptor, roadmap E23), can actually be sampled --
+  // with filtering.
   for (ResourceFormat Format :
        {ResourceFormat::R32_FLOAT, ResourceFormat::R32G32_FLOAT,
         ResourceFormat::R32G32B32_FLOAT, ResourceFormat::R32G32B32A32_FLOAT,
@@ -270,15 +271,29 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
   }
+  // Roadmap E26: the mandatory-sampled `_UINT`/`_SINT` formats
+  // femeRTUnpackImageTexelI32 (FeMeRuntimeCPU.c) now decodes can also be
+  // sampled, but never with filtering -- SPIR-V never legalizes a filtered
+  // `OpImageSample*` against an integer-sampled image, only an unfiltered
+  // `OpImageFetch`.
+  for (ResourceFormat Format :
+       {ResourceFormat::R32G32B32A32_UINT, ResourceFormat::R32G32B32A32_SINT,
+        ResourceFormat::R8G8B8A8_UINT, ResourceFormat::R8G8B8A8_SINT,
+        ResourceFormat::R16G16B16A16_UINT, ResourceFormat::R16G16B16A16_SINT,
+        ResourceFormat::R10G10B10A2_UINT}) {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+  }
   // An HDR ASTC format samples as all-zero (the RGBA8 bridge is LDR-only),
-  // and an integer format has no `feme.cpu.image.*` entry point that could
-  // consume a decoded value yet (roadmap E25's own scope note,
-  // FeMeRuntimeCPU.c), so both are honestly left unset, same as every
+  // a depth format is never a color-sampled format at all, and
+  // `R32_UINT`/`_SINT`'s partial-component siblings are not mandatory-
+  // sampled and so remain unimplemented (roadmap E26's own scope note,
+  // FeMeRuntimeCPU.c) -- all three are honestly left unset, same as every
   // other unimplemented sampled format.
   for (ResourceFormat Format :
-       {ResourceFormat::R32G32B32A32_UINT, ResourceFormat::R8G8B8A8_UINT,
-        ResourceFormat::R16G16B16A16_UINT, ResourceFormat::D32_FLOAT,
-        ResourceFormat::ASTC_4x4_SFLOAT}) {
+       {ResourceFormat::R32_UINT, ResourceFormat::R32G32_UINT,
+        ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
     EXPECT_FALSE(formatFeatureFlags(Format) &
                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
   }
