@@ -513,7 +513,10 @@ itself, which `dEQP-VK.synchronization2`'s own multi-queue/custom-device
 cases enable explicitly regardless of the advertised `apiVersion` (see
 "Roadmap E3: measured impact" in VulkanCTSReport.md). Roadmap E5 and E6 add
 `VK_KHR_maintenance5`/`VK_KHR_maintenance6` the same way, for the same
-"CTS enables it by name regardless of `apiVersion`" reason.
+"CTS enables it by name regardless of `apiVersion`" reason. Roadmap E8 adds
+the sixth, `VK_KHR_shader_integer_dot_product`, again for that same
+reason (`dEQP-VK.spirv_assembly.instruction.compute`'s own integer-dot-
+product tests enable it by name).
 
 **Status (roadmap D1, "An accurate 1.3/1.4 mandatory-feature/limit/
 extension inventory"):** the audit itself is done; closing what it found is
@@ -549,8 +552,18 @@ likewise reported through both its own dedicated
 `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`, likewise
 reported through both its own dedicated
 `VkPhysicalDeviceSubgroupSizeControlFeatures` struct and the aggregate
-struct) are genuinely implemented;
-`shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
+struct) are genuinely implemented; and `shaderIntegerDotProduct` (roadmap
+E8: `spirv.SDot`/`spirv.UDot`/`spirv.SUDot` and their `*AccSat`
+counterparts now have real `spirv`->`llvm` conversion patterns
+(SPIRVToLLVMPatterns.cpp), likewise reported through both its own
+dedicated `VkPhysicalDeviceShaderIntegerDotProductFeatures` struct and the
+aggregate struct; none of the 36 `integerDotProduct*Accelerated` limit
+bits follow from this -- this CPU target runs the lowering as an ordinary
+multiply-add sequence, not a hardware-accelerated one, so every one stays
+a truthful `VK_FALSE`, both in the dedicated
+`VkPhysicalDeviceShaderIntegerDotProductProperties` struct and the
+aggregate one) is genuinely implemented too;
+`pipelineCreationCacheControl`,
 `pushDescriptor`, and the rest are all confirmed unimplemented, not merely
 unaudited. Roadmap E2 wires the promoted `...Properties` struct's
 `vkGetPhysicalDeviceProperties2` case for both versions, enumerating every
@@ -562,9 +575,9 @@ pre-promotion extension struct (none of which has its own
 `Properties2` case yet), so each field's own later row raises it only
 once that row also adds the matching dedicated-struct case (see the
 inventory doc's own "Findings"). Of 39 extensions `vk.xml` records as
-promoted into 1.3 or 1.4, only the four now listed above are
+promoted into 1.3 or 1.4, only the six now listed above are
 implemented. See the inventory doc's own "Findings" for the full
-breakdown and Roadmap.md's D1/E1/E2/E3/E6 rows.
+breakdown and Roadmap.md's D1/E1/E2/E3/E6/E8 rows.
 
 ## Shader and Pipeline Compilation
 
