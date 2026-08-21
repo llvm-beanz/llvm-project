@@ -2195,6 +2195,26 @@ each side's compressed-ness (and block shape) independently; see
 VulkanCTSReport.md's "Roadmap E24: measured impact" for the CTS numbers
 this unblocked.
 
+**Update (roadmap E25, closed):** the CPU runtime's typed sample table
+(`femeRTImageFormatElementSize`/`femeRTUnpackImageTexel`,
+feme/runtime/CPU/FeMeRuntimeCPU.c) broadened from the three formats above
+to every non-integer, non-block-compressed, non-depth/stencil format
+`feme::cpu::ResourceFormat` lists: the partial-component identity float
+formats (`R32_FLOAT`/`R32G32_FLOAT`/`R32G32B32_FLOAT`, padding a missing
+component the way `OpImageFetch` does), `R8G8B8A8_SNORM`, a hand-written
+binary16-to-`float` conversion for `R16G16B16A16_FLOAT` (this file cannot
+assume hardware half-float support), and three more packed-word formats
+(`R11G11B10_FLOAT`, `R10G10B10A2_UNORM`, `B8G8R8A8_UNORM`) plus the two
+`VK_KHR_maintenance5` formats (`A8_UNORM`, `A1B5G5R5_UNORM`).
+`formatFeatureFlags` (Format.cpp) now advertises `SAMPLED_IMAGE_BIT`/
+`SAMPLED_IMAGE_FILTER_LINEAR_BIT` for exactly this broadened set. A
+`_UINT`/`_SINT` format is deliberately still excluded: every
+`feme.cpu.image.*` entry point returns `<4 x float>`, and no
+integer-returning counterpart exists yet to consume an integer format's
+decoded value, so this row leaves that gap for whichever future milestone
+adds one, the same "mechanical, added on demand" scoping this row's own
+predecessors used.
+
 **Update (roadmap E20, closed):** that block-aligned layout rework has
 landed. `computeSubresourceLayouts` (Image.cpp) now takes a block
 width/height/bytes-per-block triple (`Format.h`'s `blockWidth`/
