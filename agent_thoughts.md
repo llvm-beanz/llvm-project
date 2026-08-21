@@ -25198,3 +25198,234 @@ and the three documents this change directly affects. Did not touch
 roadmap row's own scope (E4 and later each get their own dedicated struct
 case for their own limit fields, same discipline E2's own session recorded
 for the properties side).
+
+# Roadmap E4: VK_KHR_maintenance4's memory-requirements entrypoints, LocalSizeId, zero-size descriptor arrays
+
+## Task
+
+Implement Roadmap.md's E4 row: `vkGetDeviceBufferMemoryRequirements`/
+`vkGetDeviceImageMemoryRequirements`/`vkGetDeviceImageSparseMemoryRequirements`
+compute requirements from a `VkBufferCreateInfo`/`VkImageCreateInfo` alone,
+by factoring `vkCreateBuffer`/`vkCreateImage`'s own sizing logic into a
+shared helper both the live and info-only entrypoints call; the row's own
+text also claims two "relaxes" clauses -- `vkCreateShaderModule`'s
+local-size-id/local-size validation, and `VK_KHR_maintenance4`'s
+zero-size-descriptor-array rule.
+
+## Investigation
+
+`Buffer.cpp`'s `getRequirements(Buf, Info, Reqs)` already computed
+everything from `Buf.size()` alone, and `Image.cpp`'s
+`computeSubresourceLayouts` (the private helper `Image`'s own constructor
+calls) already computed total size from plain scalar parameters with no
+live `Image` needed at all -- both were already exactly the shared helper
+this row asked for, just not exposed to an info-only entrypoint yet. The
+actual factoring work was therefore small: split each `vkCreate*`'s inline
+validation into its own named predicate (`isValidBufferCreateInfo`,
+`isValidImageShape`) so the info-only entrypoint could reuse it without
+duplicating the checks, then add the three new commands.
+
+Before writing any code, audited the row's two "relaxes" claims against
+the actual codebase, the same way E2/E3's own sessions found their own
+premises needed correcting:
+
+- **Local-size-id/local-size validation**: `GroupSize.cpp`'s
+  `resolveComputeGroupSize` already handles `LocalSize`, `LocalSizeId`
+  (via `OpExecutionModeId`), and `BuiltIn WorkgroupSize`, with an existing
+  unit test (`GroupSizeTest.ResolvesFromLocalSizeIdDefaults`) already
+  covering the `LocalSizeId`-only case at the raw-word-scan level. No
+  validation anywhere rejects a `LocalSizeId`-only module.
+- **Zero-size-descriptor-array rule**: `vkCreateDescriptorSetLayout`/
+  `vkAllocateDescriptorSets`/`DescriptorSet`'s constructor
+  (`Bindings[B.Binding].resize(B.Count)`) never special-case or reject
+  `descriptorCount == 0`; `resize(0)` and an empty `bindingArray()` both
+  already behave correctly.
+
+Both looked like nothing-to-do, but "looks fine by inspection" isn't
+"verified" -- the instructions require test coverage per phase of
+translation, so I wrote a genuine end-to-end regression test for each
+(`PipelineTest.CompilesLocalSizeIdComputeShader` through the *whole*
+`vkCreateShaderModule`/`vkCreateComputePipelines` pipeline, not just
+`GroupSize.cpp`'s own raw-word scan; `DescriptorTest.
+AcceptsZeroSizeReservedBinding` through `vkCreateDescriptorSetLayout` +
+`vkAllocateDescriptorSets`) before concluding either needed no code
+change. That distinction mattered: the `LocalSizeId` test failed.
+
+## Implementation
+
+- **`Buffer.cpp`**: `isValidBufferCreateInfo` (flags/size checks,
+  unchanged logic, just named and shared) and
+  `computeBufferMemoryRequirements(VkDeviceSize Size, ...)` (was
+  `getRequirements(const Buffer &Buf, ...)`, now takes the size directly
+  so it works with or without a live `Buffer`). `vkGetDeviceBufferMemoryRequirements`
+  calls both, mirroring `vkCreateBuffer`/`vkGetBufferMemoryRequirements(2)`.
+- **`Image.cpp`**: `isValidImageShape` (the flags/samples/mips/array-layer
+  checks, split out from the format check so `vkCreateImage` can keep its
+  more specific `VK_ERROR_FORMAT_NOT_SUPPORTED` while
+  `vkGetDeviceImageMemoryRequirements` -- a `void`-returning entrypoint
+  with no error code of its own -- reports an unsupported shape as an
+  all-zero result instead), `computeImageCreateInfoSize` (calls the
+  existing `computeSubresourceLayouts` directly), and
+  `fillImageMemoryRequirements` (was `getImageRequirements`, same
+  size-parameter change as Buffer.cpp's). `vkGetDeviceImageSparseMemoryRequirements`
+  always reports zero sparse requirements, mirroring
+  `vkGetPhysicalDeviceSparseImageFormatProperties`'s existing empty result
+  (no sparse binding is supported anywhere in this ICD).
+- **`ImplementedEntrypoints.txt`**: added the three new commands under a
+  new "Roadmap E4" comment block, following D0/E3's own precedent -- all
+  three are already core, non-`KHR`-suffixed `VK_VERSION_1_3` entries in
+  `vk_gen_entrypoints.py`'s generated table, so (like E3 before it) no
+  generator change was needed.
+- **`EntryPoints.cpp`**: flipped `maintenance4` to `VK_TRUE` in the
+  aggregate `VkPhysicalDeviceVulkan13Features` case, added the dedicated
+  `VkPhysicalDeviceMaintenance4Features`/`Properties` cases (mirroring
+  E3's `synchronization2` precedent exactly), and raised
+  `maxBufferSize` (both the aggregate and dedicated struct) from E2's
+  placeholder `0` to `Info.MaxMemoryAllocationSize` -- the same real
+  host-memory-size value `VkPhysicalDeviceMaintenance3Properties::
+  maxMemoryAllocationSize` already reports, since there is no further,
+  buffer-specific limit this ICD enforces beyond that.
+
+## The dedicated-requirements pNext gap (found by CTS, not by inspection)
+
+A first pass stopped there and ran the targeted CTS subset before moving
+to the "relaxes" clauses. `dEQP-VK.api.invariance.
+memory_dedicated_requirements_matching` -- the same
+`vktApiMemoryRequirementInvarianceTests.cpp` file already named in this
+report's "Deviations from a stock CTS" section for an unrelated crash fix
+-- went from `NotSupported` (feature not advertised) to `Fail`, not
+`Pass`. Its own text pinpointed it exactly: it chains a
+`VkMemoryDedicatedRequirements` onto both the live
+`vkGetBufferMemoryRequirements2`/`vkGetImageMemoryRequirements2` call and
+the new info-only call, pre-fills each with a different sentinel value
+(2 and 3), and requires them to end up equal. Neither entrypoint had ever
+walked its `VkMemoryRequirements2` output's `pNext` chain at all (grepped
+for `pNext` in both files -- zero hits before this session), so each
+retained its own sentinel, and the two "disagreed" only because neither
+touched the chain, not because either computed a different answer.
+
+Fixed by adding one shared helper, `fillMemoryRequirements2PNextChain`
+(`Memory.h`/`.cpp`, alongside `DeviceMemory` itself, since every
+`vkGet*MemoryRequirements*` entrypoint already includes `Memory.h`
+transitively through `Buffer.h`/`Image.h`), called by all four
+entrypoints (`vkGetBufferMemoryRequirements2`, `vkGetImageMemoryRequirements2`,
+and both new `vkGetDevice*MemoryRequirements`). It reports `VK_FALSE` for
+both `prefersDedicatedAllocation`/`requiresDedicatedAllocation` -- this
+ICD never requires or prefers a dedicated allocation, since every
+`VkBuffer`/`VkImage` binds into a plain `VkDeviceMemory` suballocation the
+same way. Re-running the case afterward: `Pass`.
+
+I nearly lost this fix once during the session: after finishing it, I ran
+`git checkout 55d8fb02b4b3 -- <files>` to rebuild a pre-E4 baseline for a
+different comparison, then `git checkout HEAD -- <files>` to restore --
+but forgot to list `Memory.h`/`Memory.cpp` in the restore command (only
+`Buffer.cpp`/`Image.cpp`/`EntryPoints.{h,cpp}`/`ImplementedEntrypoints.txt`),
+silently reverting the uncommitted `pNext` fix back to its pre-fix state
+with no diff showing (since `HEAD` didn't have the fix committed yet
+either). Caught it only because `grep -n
+fillMemoryRequirements2PNextChain` came back empty where I expected to
+find it, before it could be lost for good; redid the edit from the
+(fortunately still fresh) understanding of what it needed to do. Lesson
+for next time: commit each finding as soon as it is confirmed working,
+*before* doing any baseline-comparison checkout gymnastics that touch the
+same files.
+
+## The LocalSizeId compilation gap (found by writing the "already works" test)
+
+`PipelineTest.CompilesLocalSizeIdComputeShader` -- a minimal `GLCompute`
+entry point using SPIR-V 1.2's `LocalSizeId` execution mode (three
+`spirv.SpecConstant`s, `spirv.ExecutionModeId @main "LocalSizeId" @wg_x,
+@wg_y, @wg_z`, no `LocalSize` at all, following
+`mlir/test/Target/SPIRV/execution-mode-id.mlir`'s own syntax) -- failed
+`vkCreateComputePipelines` with `error: 'llvm.getelementptr' op operand #0
+must be LLVM pointer type ... but got 'vector<3xi32>'`, not the `VK_SUCCESS`
+I expected from auditing `GroupSize.cpp` alone.
+
+Root cause: `ConvertSPIRVToLLVMPass`'s legalization target marks the whole
+`spirv` dialect illegal, and upstream MLIR's own `SPIRVToLLVM.cpp` has no
+conversion pattern at all for `spirv.SpecConstant` or
+`spirv.ExecutionModeId` -- only for plain `spirv.ExecutionMode` (FeMe's own
+`ExecutionModePattern` already overrides that one to simply erase it,
+since its contents are read from the raw SPIR-V word stream by
+`GroupSize.cpp` before this pass ever runs, and restamped by
+`Pipeline.cpp`'s `compileComputePipeline` afterward). A `LocalSizeId`
+shader's three `spirv.SpecConstant` declarations (there is no other way to
+spell `LocalSizeId`'s operands) and the `spirv.ExecutionModeId` op itself
+therefore had nothing to legalize them, regardless of whether anything in
+the entry point's own body referenced them.
+
+Fixed with two new erase patterns in `SPIRVToLLVMPatterns.cpp`,
+`ExecutionModeIdPattern` and `SpecConstantErasurePattern`, exactly
+mirroring `ExecutionModePattern`'s own precedent. Checked this doesn't
+paper over real specialization-constant support: an in-function reference
+to a spec constant goes through `spirv.mlir.referenceof`, a distinct op
+with no conversion pattern of its own anywhere in this codebase (grepped
+first) -- so a shader that actually reads a spec constant's value in its
+math still fails to legalize, just now at the `referenceof` op instead of
+the `SpecConstant` declaration, a more precise error location, not a
+silently-wrong one.
+
+## Testing
+
+- `BufferTest.GetDeviceBufferMemoryRequirementsMatchesLiveBuffer`,
+  `.DedicatedRequirementsAgreeBetweenLiveAndDeviceEntrypoints`;
+  `ImageTest.GetDeviceImageMemoryRequirementsMatchesLiveImage`,
+  `.GetDeviceImageMemoryRequirementsZeroForUnsupportedFormat`,
+  `.GetDeviceImageSparseMemoryRequirementsReportsNone`;
+  `PhysicalDeviceProperties2Test.
+  Maintenance4IsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs`
+  (plus the flipped `maintenance4`/`maxBufferSize` expectations in the
+  existing aggregate-struct tests); `PipelineTest.
+  CompilesLocalSizeIdComputeShader`; `DescriptorTest.
+  AcceptsZeroSizeReservedBinding`.
+- `ninja check-feme-unit`/`check-feme` (assertions-enabled, ccache
+  `RelWithDebInfo` build): 1541 passed, 1 unsupported, no regression at
+  any point in the session (checked after each commit, not just at the
+  end).
+- Vulkan-CTS: targeted before/after for every touched behavior (see
+  "Roadmap E4: measured impact" in `VulkanCTSReport.md` for the full
+  table) -- `api.buffer_memory_requirements.*` 12->24 `Pass` (the
+  info-only `method2` variant of every `method1` case), the dedicated-
+  requirements case `NotSupported`->`Fail`->`Pass` across the two fix
+  iterations above, `maintenance4_features`/`vulkan1p3_limits_validation.
+  khr_maintenance4` both now `Pass`, and `binding_model.*` (150,259 cases,
+  where zero-size-descriptor-array coverage actually lives, not under a
+  `maintenance4`-named case) byte-for-byte identical before and after --
+  confirming the zero-size-descriptor-array audit's own "nothing to
+  change" finding empirically, not just by code inspection.
+- Additionally ran the full documented 54-group sweep once this session
+  (not attributed to E4 alone -- it is cumulative since D0's own headline
+  run). `dEQP-VK.api.*` needed isolating from the other 53 groups: its
+  `object_management.multithreaded_per_thread_resources.*` subgroup
+  intermittently corrupts this ICD's shared MLIR/JIT state under the
+  six-way concurrent load the documented recipe uses (interleaved/garbled
+  `llvm.getelementptr` diagnostic text, the process exiting with no `Test
+  run totals` printed at all) -- reproduced identically against the
+  pre-E4 baseline, so a pre-existing thread-safety gap this row's own
+  changes do not touch, not a regression. Isolated, the subgroup completes
+  cleanly with the same 2 pre-existing `Fail`s both before and after E4.
+  This gap is not yet a tracked roadmap row.
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E4's row, with the correction to its own
+  two "relaxes" clauses recorded above.
+- `FeMeVulkanDesign.md`: D1 status note moves `maintenance4` from the
+  unimplemented list to the implemented one.
+- `VulkanCTSReport.md`: new "Roadmap E4: measured impact" section; revision
+  bullets updated (`check-feme` 1541/1).
+- `Vulkan14FeatureInventory.md` + `AdvertisedPromotedFeatures.txt`:
+  regenerated via `vk_gen_feature_inventory.py` (`maintenance4`'s
+  `Advertised` column: no -> yes).
+
+## Scope discipline
+
+Touched `Buffer.cpp`, `Image.cpp`, `Memory.{h,cpp}`, `EntryPoints.{h,cpp}`,
+`ImplementedEntrypoints.txt`, `SPIRVToLLVMPatterns.cpp`, their unit tests,
+`AdvertisedPromotedFeatures.txt`, and the three documents this change
+directly affects. Did not touch `vk_gen_entrypoints.py` (confirmed
+unnecessary, same as E3), `getSupportedDeviceExtensions` (the targeted CTS
+run found no case that enables `VK_KHR_maintenance4` by name the way
+`VK_KHR_synchronization2` needed for E3 -- both `maintenance4_features`
+and `vulkan1p3_limits_validation.khr_maintenance4` passed without it), or
+any other roadmap row's own scope.
