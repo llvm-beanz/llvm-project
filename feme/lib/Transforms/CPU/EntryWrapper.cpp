@@ -33,7 +33,11 @@
 //    pass computes the identical layout, allocates the backing buffer --
 //    on the wrapper's own stack if it fits under `GroupSharedStackLimit`,
 //    else from `FemeDispatchArgs::GroupShared` (a host-supplied buffer) --
-//    and erases the now-dead groupshared globals once done with them.
+//    zeroes it (roadmap milestone E13,
+//    `VK_KHR_zero_initialize_workgroup_memory`) if any groupshared global in
+//    the module requested it
+//    (`GroupSharedLayout::NeedsZeroInit`), and erases the now-dead groupshared
+//    globals once done with them.
 //  - **Barrier region splitting**: a `..._with_group_sync` barrier
 //    (`feme::cpu::matchBarrierCall`, see BarrierCalls.h) requires every
 //    invocation in the group to arrive before any proceeds, which the wave
@@ -251,6 +255,21 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Entry, StructType *ArgsTy, Value *Args,
         "groupshared");
     Buf->setAlignment(Align(GSLayout.Alignment));
     Env.GroupShared = Buf;
+  }
+
+  // `VK_KHR_zero_initialize_workgroup_memory` (roadmap milestone E13):
+  // this group's flat buffer -- a fresh stack `alloca` above, or a
+  // host-supplied one this dispatch's caller reuses across every group in
+  // the same `vkCmdDispatch` (see `runDispatch` in
+  // feme/lib/Vulkan/CommandBuffer.cpp) -- is otherwise left holding
+  // whatever the host's allocator or a previous group's own invocation
+  // happened to leave behind. Zeroing it here, once per group, is what
+  // gives a `zero_initialized` groupshared global (`GSLayout.NeedsZeroInit`)
+  // its own guarantee regardless of which of those two backing stores it
+  // ended up in.
+  if (GSLayout.NeedsZeroInit) {
+    Entry.CreateMemSet(Env.GroupShared, Entry.getInt8(0), GSLayout.TotalSize,
+                       Align(GSLayout.Alignment));
   }
 
   Env.BarrierSpill = nullptr;

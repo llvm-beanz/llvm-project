@@ -226,6 +226,8 @@ GroupSharedLayout computeGroupSharedLayout(const Module &M) {
     Offset = alignTo(Offset, GVAlign);
     Layout.Offsets[&GV] = Offset;
     Offset += DL.getTypeAllocSize(GV.getValueType());
+    if (GV.hasInitializer())
+      Layout.NeedsZeroInit = true;
   }
 
   Layout.TotalSize = Offset;

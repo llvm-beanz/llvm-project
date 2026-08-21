@@ -61,6 +61,20 @@ struct GroupSharedLayout {
   uint64_t Alignment = 1;
   /// Each groupshared global's byte offset into the flat buffer.
   llvm::DenseMap<const llvm::GlobalVariable *, uint64_t> Offsets;
+  /// Whether any groupshared global in the module carries an explicit
+  /// zero-initializer (`feme::spirv::WorkgroupGlobalVariablePattern`'s own
+  /// `#llvm.zero` initializer, imported from SPIR-V's `zero_initialized`
+  /// `spirv.GlobalVariable` attribute -- see
+  /// `VK_KHR_zero_initialize_workgroup_memory`, roadmap milestone E13).
+  /// `feme::cpu::EntryWrapperPass` zeros the *entire* flat buffer once per
+  /// group when this is set, rather than tracking each flagged global's own
+  /// byte range individually: every group's buffer is otherwise reused
+  /// as-is between dispatches (see `runDispatch` in
+  /// feme/lib/Vulkan/CommandBuffer.cpp) or left as uninitialized stack
+  /// memory (see `buildWrapperEnv` in EntryWrapper.cpp), so zeroing a
+  /// groupshared global with no zero-initializer of its own alongside a
+  /// flagged one is harmless -- it was already free to read as anything.
+  bool NeedsZeroInit = false;
 };
 
 /// Computes \p M's groupshared layout: every `addrspace(3)` global
