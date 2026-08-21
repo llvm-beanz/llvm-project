@@ -27241,3 +27241,140 @@ dispatch consuming an inline uniform block binding is out of this row's
 own stated scope, the same "object model first, shader consumption
 later" boundary V5's image/sampler descriptor types already drew and
 documented in `Descriptor.h`'s own file comment.
+
+# Roadmap E15: `VK_EXT_texture_compression_astc_hdr` -- verify-first gate resolved, row split
+
+## Task as given
+
+"Implement milestone E15": a new decode path in `Format.{h,cpp}` for the
+14 ASTC HDR block formats, reusing whatever LDR ASTC decode already
+exists -- but the row's own text is explicit that this is conditional:
+"check `Format.cpp` first -- if LDR ASTC is itself unimplemented, this
+row's scope grows to include it and should be split". Roadmap G4
+separately tracked this exact row as one of two "verify-first" items
+needing re-triage before assignment. So the first, mandatory step is not
+writing a decoder -- it is establishing ground truth about what already
+exists.
+
+## Investigation
+
+1. `grep -i astc feme/lib/Vulkan/Format.{h,cpp}`: no match at all. Read
+   both files in full (162 + 56 lines) -- `mapVkFormat`'s `switch`
+   handles only uncompressed 8/16/32-bit formats plus depth/stencil; no
+   compressed case of any kind (ASTC, BC, ETC2) exists, and the file's
+   own header comment confirms its scope is "every format
+   `ResourceFormat` itself lists" -- so the next question is whether
+   `ResourceFormat` (the actual backing enum) lists any compressed
+   format at all.
+2. `feme/include/feme/Target/CPU/RuntimeABI.h`'s `ResourceFormat` enum:
+   read in full. Zero compressed entries -- every value is an
+   uncompressed 8/16/32-bit-per-component or depth/stencil format. This
+   is the runtime ABI a real dispatch's typed loads/stores and a bound
+   sampled image both key off, so there is no lower layer where ASTC
+   support could already live outside `Format.cpp`.
+3. Confirmed independently via `EntryPoints.cpp`:
+   `Features->textureCompressionASTC_HDR = VK_FALSE;` already present
+   (correct, and unaffected by this investigation), and no
+   `textureCompressionASTC_LDR` write exists anywhere -- meaning even the
+   Vulkan 1.0 core (non-promoted) LDR feature bit is not tracked, not
+   just left `VK_FALSE` by omission the way every other 1.3/1.4 bit is
+   handled elsewhere in that file.
+4. Checked whether the *object model*, not just `Format.cpp`, could
+   accept a compressed format at all: `feme/lib/Vulkan/Image.cpp`'s
+   subresource-layout computation (`formatElementSize(Format) *
+   SampleCount`-shaped math, both call sites) is unconditionally
+   per-texel. A block-compressed format's natural unit is a whole NxN
+   (or NxNxM for 3D) block, not a texel, so `Image.cpp`'s current layout
+   model cannot represent one regardless of whether `Format.cpp`
+   recognizes its `VkFormat` enumerant. This is a second, independent
+   scope gap E15's own text did not anticipate (it named only
+   `Format.{h,cpp}` as the file scope).
+5. Read `FeMeVulkanDesign.md`'s "V5: Images and sampling" status note in
+   full to confirm this wasn't a narrowing already known and just
+   undocumented -- it isn't; V5's own deviations list (multisample,
+   format-compatible copies, border-color rejection, ...) says nothing
+   about block-compressed formats at all, because none was ever in V5's
+   stated goals.
+
+## Decision: split, don't implement
+
+Given (2) and (4), a correct "add ASTC HDR decode" change is not a small,
+reusing-existing-infrastructure row any more -- it would require, from
+scratch: a full ASTC bitstream decoder (integer sequence/trit-quint
+decoding, weight-grid interpolation for every block footprint, all color
+endpoint modes, 1-2 partitions, dual-plane, void-extent special blocks --
+a from-spec software codec comparable in size to Mesa's or ARM's own ASTC
+decoders, easily thousands of lines) *and* a block-based rework of
+`Image.{h,cpp}`'s subresource layout, before HDR's own 14 extra formats
+and float endpoint decode are even reachable. Attempting that in one
+undifferentiated pass would violate `.instructions.md`'s "break changes
+into as small granularity as possible where each change ... is
+individually testable and tested" -- and, more importantly, a rushed or
+partial ASTC decoder is worse than no decoder: a subtly wrong decode is a
+silent correctness bug an application cannot detect, whereas an
+unadvertised feature bit is an honest, spec-legal "not supported."
+
+This is exactly the outcome E15's own text and G4 both already
+anticipated ("should be split" / "may expand into its own separate row
+once checked"), so the correct deliverable for this task is the split
+itself, not a best-effort partial decoder. Concretely:
+
+- **E15** marked superseded-by-split in `Roadmap.md`, with the finding
+  recorded in place (not deleted, matching this roadmap's own convention
+  of appending a strikethrough + explanation rather than rewriting rows,
+  e.g. E2's "closed, with a correction to this row's own premise").
+- **E20** (new): the actual prerequisite -- block-layout groundwork in
+  `Image.{h,cpp}` plus a real ASTC LDR decoder, gating the
+  previously-untracked `textureCompressionASTC_LDR` bit. Flagged as the
+  largest single new subsystem in the E-series and given its own "Lane
+  6" rather than folded into the small-extension lane E15 used to share
+  with E9/E10/E14/E19.
+- **E21** (new): E15's original HDR-only scope (14 more block formats,
+  float endpoint decode), depending on E20.
+- `Vulkan14FeatureInventory.md`: both `textureCompressionASTC_HDR` and
+  `VK_EXT_texture_compression_astc_hdr` rows' Note column updated in
+  place (this file's own intro says the table is regenerated by
+  `vk_gen_feature_inventory.py` and hand-notes re-added after, the same
+  pattern already used for e.g. `VK_KHR_shader_integer_dot_product`'s
+  note), plus a new "Findings" bullet. Did **not** add a row for
+  `textureCompressionASTC_LDR` itself -- it's a Vulkan 1.0 core feature,
+  never promoted from an extension, so it is genuinely out of this
+  file's stated 1.3/1.4-promoted-surface scope; it is tracked instead as
+  part of E20's own text.
+- `FeMeVulkanDesign.md`'s "V5" status note: one paragraph recording the
+  `Image.cpp` per-texel-stride finding, since it is new information
+  about an already-closed milestone's own object model, the same way V5
+  already accumulated "former deviation, now closed" and "further
+  narrowing" paragraphs over time as later rows found more about it.
+- `G4`: marked half-done (E15's half), F3's `shaderFloatControls2` half
+  left open since this task's scope is E15 only.
+
+## Why no code change to `Format.cpp`/`Image.cpp`
+
+No production code changed. `mapVkFormat` continues to return
+`std::nullopt` for every ASTC `VkFormat`, and
+`Features->textureCompressionASTC_HDR` stays `VK_FALSE` -- both already
+correct, honest answers for a capability that does not exist, and
+neither needed to change to make that true. Writing new code in this
+pass would only be one of: (a) a partial/incorrect ASTC decoder (rejected
+above as worse than nothing), or (b) inert scaffolding with no real
+decode behind it (a `Format.cpp` case that recognizes the `VkFormat`
+enumerant but cannot actually convert a block, which is worse than
+`std::nullopt` -- it would let `vkCreateImage`/`vkCreateBufferView`
+accept a format this ICD then cannot correctly read back). Neither is an
+improvement over today's honest "not recognized."
+
+## Verification
+
+`ninja check-feme` (this session's existing `./build`, `RelWithDebInfo`
++ `LLVM_ENABLE_ASSERTIONS=ON` + `LLVM_CCACHE_BUILD=ON`) before this
+change: 1586/1587 passed, 1 unsupported. Since this change touches only
+`.md` files, re-running after was a no-op check confirming `ninja` found
+nothing to rebuild for `libfeme_vulkan.so` or its test binaries -- the
+same "no rebuild is stronger evidence than a rebuilt-but-identical one"
+reasoning the "SPIR-V `spirv.Image`/`spirv.VulkanBuffer` AMDGPU-lowering
+fix" addendum in `VulkanCTSReport.md` already used for a similarly
+code-untouched change. No `dEQP-VK` run was performed for the same
+reason: every one of `VulkanCTSReport.md`'s existing cases already
+exercises the exact `libfeme_vulkan.so` this change did not rebuild, so a
+re-run could only reproduce the existing headline numbers verbatim.
