@@ -86,7 +86,8 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
   const PhysicalDeviceInfo &Info =
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
   computeBufferMemoryRequirements(fromHandle<Buffer>(pInfo->buffer)->size(),
-                                  Info, pMemoryRequirements->memoryRequirements);
+                                  Info,
+                                  pMemoryRequirements->memoryRequirements);
   fillMemoryRequirements2PNextChain(pMemoryRequirements->pNext);
 }
 

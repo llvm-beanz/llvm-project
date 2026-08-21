@@ -417,10 +417,11 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
 /// requirements from its `VkImageCreateInfo` alone, without ever creating
 /// the image -- shares `isValidImageShape`/`computeImageCreateInfoSize`
 /// with `vkCreateImage`'s own validation/sizing and
-/// `fillImageMemoryRequirements` with the live `vkGetImageMemoryRequirements(2)`
-/// entrypoints above. An unsupported shape or format is reported as an
-/// all-zero result: unlike `vkCreateImage`, this entrypoint returns no
-/// `VkResult` to report such a `VkImageCreateInfo` as invalid through.
+/// `fillImageMemoryRequirements` with the live
+/// `vkGetImageMemoryRequirements(2)` entrypoints above. An unsupported shape or
+/// format is reported as an all-zero result: unlike `vkCreateImage`, this
+/// entrypoint returns no `VkResult` to report such a `VkImageCreateInfo` as
+/// invalid through.
 VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
     VkDevice device, const VkDeviceImageMemoryRequirements *pInfo,
     VkMemoryRequirements2 *pMemoryRequirements) {

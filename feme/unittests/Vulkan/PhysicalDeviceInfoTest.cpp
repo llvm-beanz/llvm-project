@@ -546,8 +546,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Sync2.synchronization2, VK_TRUE);
 }
 
-TEST_F(PhysicalDeviceProperties2Test,
-       Maintenance4IsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs) {
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    Maintenance4IsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs) {
   // Roadmap E4: `VK_KHR_maintenance4`'s own dedicated feature/properties
   // structs must agree with the aggregate `VkPhysicalDeviceVulkan13
   // Features`/`Properties` cases above, exactly like `VK_KHR_

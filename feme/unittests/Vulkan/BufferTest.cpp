@@ -132,8 +132,7 @@ TEST_F(BufferTest, GetDeviceBufferMemoryRequirementsMatchesLiveBuffer) {
 /// `VkBufferCreateInfo` alone) -- this ICD never requires or prefers a
 /// dedicated allocation (see "Memory and Buffers"), so both must report
 /// `VK_FALSE` for each field, not merely agree by coincidence.
-TEST_F(BufferTest,
-       DedicatedRequirementsAgreeBetweenLiveAndDeviceEntrypoints) {
+TEST_F(BufferTest, DedicatedRequirementsAgreeBetweenLiveAndDeviceEntrypoints) {
   VkBufferCreateInfo BufferInfo{};
   BufferInfo.size = 64;
   BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
