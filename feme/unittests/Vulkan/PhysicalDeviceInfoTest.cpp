@@ -284,8 +284,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   // the same unwritten-field guard reason
   // `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` below uses (a
   // 0xAA fill pattern would otherwise leave an unset field looking like a
-  // plausible, but coincidental, non-zero value). Every field is `0`/
-  // `VK_FALSE`: each one is cross-checked by
+  // plausible, but coincidental, non-zero value). Every field but
+  // `maxBufferSize` (roadmap E4: real once `VK_KHR_maintenance4` landed,
+  // see below) is `0`/`VK_FALSE`: each one is cross-checked by
   // `dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` against
   // its own still-unimplemented dedicated-extension struct (see
   // EntryPoints.cpp's case comment), so a real, nonzero value here would
@@ -385,7 +386,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Props13.storageTexelBufferOffsetSingleTexelAlignment, VK_FALSE);
   EXPECT_EQ(Props13.uniformTexelBufferOffsetAlignmentBytes, 0u);
   EXPECT_EQ(Props13.uniformTexelBufferOffsetSingleTexelAlignment, VK_FALSE);
-  EXPECT_EQ(Props13.maxBufferSize, 0u);
+  // (roadmap E4) Real once `VK_KHR_maintenance4` landed: agrees with
+  // `VkPhysicalDeviceMaintenance3Properties::maxMemoryAllocationSize`
+  // (there is no further, buffer-specific limit beyond the host memory
+  // size both report).
+  EXPECT_GE(Props13.maxBufferSize, VkDeviceSize{1} << 30);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
@@ -519,7 +524,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features13.textureCompressionASTC_HDR, VK_FALSE);
   EXPECT_EQ(Features13.shaderZeroInitializeWorkgroupMemory, VK_FALSE);
   EXPECT_EQ(Features13.shaderIntegerDotProduct, VK_FALSE);
-  EXPECT_EQ(Features13.maintenance4, VK_FALSE);
+  // Roadmap E4: now genuinely implemented (Buffer.cpp/Image.cpp), and must
+  // agree with the dedicated `VK_KHR_maintenance4` struct case below.
+  EXPECT_EQ(Features13.maintenance4, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
@@ -537,6 +544,39 @@ TEST_F(PhysicalDeviceProperties2Test,
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
 
   EXPECT_EQ(Sync2.synchronization2, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       Maintenance4IsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs) {
+  // Roadmap E4: `VK_KHR_maintenance4`'s own dedicated feature/properties
+  // structs must agree with the aggregate `VkPhysicalDeviceVulkan13
+  // Features`/`Properties` cases above, exactly like `VK_KHR_
+  // synchronization2`'s own structs do above.
+  VkPhysicalDeviceMaintenance4Features Maintenance4Features{};
+  Maintenance4Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Maintenance4Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(Maintenance4Features.maintenance4, VK_TRUE);
+
+  VkPhysicalDeviceMaintenance4Properties Maintenance4Props{};
+  Maintenance4Props.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &Maintenance4Props;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_GE(Maintenance4Props.maxBufferSize, VkDeviceSize{1} << 30);
+
+  VkPhysicalDeviceVulkan13Properties Props13{};
+  Props13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
+  Props2.pNext = &Props13;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(Maintenance4Props.maxBufferSize, Props13.maxBufferSize);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

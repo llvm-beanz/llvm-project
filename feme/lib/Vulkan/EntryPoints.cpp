@@ -464,14 +464,30 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props13
           ->integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated =
           VK_FALSE;
-      // Texel buffer views (`VK_EXT_texel_buffer_alignment`/E18) and the
-      // largest single buffer allocation (`VK_KHR_maintenance4`/E4) are
-      // both unimplemented.
+      // Texel buffer views (`VK_EXT_texel_buffer_alignment`/E18) remain
+      // unimplemented.
       Props13->storageTexelBufferOffsetAlignmentBytes = 0;
       Props13->storageTexelBufferOffsetSingleTexelAlignment = VK_FALSE;
       Props13->uniformTexelBufferOffsetAlignmentBytes = 0;
       Props13->uniformTexelBufferOffsetSingleTexelAlignment = VK_FALSE;
-      Props13->maxBufferSize = 0;
+      // (roadmap E4) `VK_KHR_maintenance4`: the largest single buffer
+      // allocation this ICD can create is bounded by the same host memory
+      // size `VkPhysicalDeviceMaintenance3Properties::maxMemoryAllocationSize`
+      // already reports (there is no further, buffer-specific limit to
+      // enforce beyond that), so this must agree with that field and with
+      // the dedicated `VkPhysicalDeviceMaintenance4Properties` case below.
+      Props13->maxBufferSize = Info.MaxMemoryAllocationSize;
+      break;
+    }
+    // (roadmap E4) `VK_KHR_maintenance4`'s own properties struct, whose 1.3
+    // core and `KHR` spellings share one `sType`, agreeing with the
+    // aggregate `VkPhysicalDeviceVulkan13Properties::maxBufferSize` case
+    // above exactly like `VkPhysicalDeviceMaintenance3Properties` (1.1)
+    // already does for its own `maxMemoryAllocationSize`.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES: {
+      auto *Maintenance4 =
+          reinterpret_cast<VkPhysicalDeviceMaintenance4Properties *>(Base);
+      Maintenance4->maxBufferSize = Info.MaxMemoryAllocationSize;
       break;
     }
     // (roadmap E2) The aggregate `VkPhysicalDeviceVulkan14Properties`
@@ -779,7 +795,13 @@ void fillFeatures2Chain(void *pNext) {
       Features->shaderZeroInitializeWorkgroupMemory = VK_FALSE;
       Features->dynamicRendering = VK_TRUE;
       Features->shaderIntegerDotProduct = VK_FALSE;
-      Features->maintenance4 = VK_FALSE;
+      // (roadmap E4) `vkGetDeviceBufferMemoryRequirements`/
+      // `vkGetDeviceImageMemoryRequirements`/
+      // `vkGetDeviceImageSparseMemoryRequirements` (Buffer.cpp/Image.cpp)
+      // are implemented, so this bit -- like `dynamicRendering`/
+      // `synchronization2` -- must agree with the dedicated
+      // `VK_KHR_maintenance4` feature struct case below.
+      Features->maintenance4 = VK_TRUE;
       break;
     }
     // (roadmap E1) The aggregate `VkPhysicalDeviceVulkan14Features` struct:
@@ -828,6 +850,15 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceSynchronization2Features *>(Base);
       Features->synchronization2 = VK_TRUE;
+      break;
+    }
+    // (roadmap E4) `VK_KHR_maintenance4`'s own feature struct, whose 1.3
+    // core and `KHR` spellings share one `sType`, exactly like
+    // `synchronization2` above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceMaintenance4Features *>(Base);
+      Features->maintenance4 = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:
