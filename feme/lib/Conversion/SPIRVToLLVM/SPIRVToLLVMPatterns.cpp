@@ -318,6 +318,37 @@ public:
   }
 };
 
+/// Converts `spirv.TerminateInvocation` (roadmap E12,
+/// VK_KHR_shader_terminate_invocation) -- which, like `spirv.Switch` above,
+/// MLIR has no pattern for at all (indeed no op at all, until this same
+/// roadmap milestone added one) -- into an unconditional discard-and-return:
+/// a call to the same `llvm.spv.discard` intrinsic `OpKill` itself would use
+/// (already raised into `feme.stage.discard(true)` by
+/// `feme::graphics::CanonicalizeStagePass`, unmodified by this milestone),
+/// followed by an `llvm.return`. Unlike `spirv.DemoteToHelperInvocation`,
+/// this op is a true terminator -- SPIR-V requires it be the last
+/// instruction in its block and no further instructions of the invocation
+/// execute -- so, unlike that op's conversion, this one has to replace the
+/// terminator itself rather than simply erase the (non-terminator) op in
+/// place.
+class TerminateInvocationConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::TerminateInvocationOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::TerminateInvocationOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::TerminateInvocationOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::LLVM::CallIntrinsicOp::create(
+        Rewriter, Op.getLoc(),
+        mlir::StringAttr::get(Rewriter.getContext(), "llvm.spv.discard"),
+        mlir::ValueRange{});
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ReturnOp>(Op, mlir::ValueRange{});
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -2236,8 +2267,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
                SUDotConversionPattern, SDotAccSatConversionPattern,
                UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
                SpecConstantErasurePattern, StageIOGlobalVariablePattern,
-               SwitchConversionPattern>(Patterns.getContext(), TypeConverter,
-                                        FeMeBenefit);
+               SwitchConversionPattern, TerminateInvocationConversionPattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
