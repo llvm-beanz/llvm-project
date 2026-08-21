@@ -960,7 +960,7 @@ advertising any descriptor indexing feature.
 | Uniform texel buffer | Typed read-only `FemeDescriptor` | Done (V4, same format scope) |
 | Sampled/storage image | Future image descriptor ABI | Deferred |
 | Sampler/combined image sampler | Future sampler descriptor ABI | Deferred |
-| Inline uniform block | Push/root-data or cbuffer descriptor | Deferred |
+| Inline uniform block | Byte-blob descriptor storage | Object model only (E14); dispatch consumption deferred |
 | Acceleration structure | None | Out of scope |
 
 Descriptor updates obey Vulkan's host synchronization rules. Queue submission
