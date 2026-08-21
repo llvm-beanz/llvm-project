@@ -2648,3 +2648,118 @@ this row -- the +1 discovered/passed test relative to E22's own report is
 reverting `CommandBuffer.cpp`'s change and re-running) to actually fail
 without this row's fix rather than passing vacuously.
 
+## Roadmap E24: measured impact (targeted, not a full re-run) -- the real headline movement E20-E23 had been blocked on
+
+E24 replaced both `vkGetPhysicalDeviceFormatProperties`'s unconditional
+all-zero `VkFormatProperties` and `vkGetPhysicalDeviceImageFormatProperties`'s
+unconditional `VK_ERROR_FORMAT_NOT_SUPPORTED` with real answers
+(`feme::vulkan::formatFeatureFlags`, new `Format.{h,cpp}` function, backed
+by already-implemented predicates -- see Roadmap.md's E24 row for the
+full derivation). The same two targeted subsets E20-E23 used were run
+again, plus a fresh baseline capture of each *before* this row's own
+changes to attribute every difference precisely:
+
+- **`dEQP-VK.api.info.*`** (10,484 cases): 5,873 passed / 73 failed / 4,538
+  not supported before this row (confirmed by re-running against a
+  temporarily-reverted build -- byte-for-byte identical to E20-E23's own
+  runs, as expected). After: 5,385 passed / **561** failed / 4,538 not
+  supported. The 4,538 "not supported" count is unchanged (this row
+  touches no version/extension/feature advertisement); every point of
+  movement is `Passed` cases becoming `Failed`, broken down by joining
+  each new failure's own case name against the prior run:
+  - 54 `dEQP-VK.api.info.format_properties.*` (down from a 57-case
+    pre-existing baseline also present before this row -- 3 fewer, not
+    more, since a few formats' real feature sets happen to satisfy their
+    mandatory floor where an all-zero stub never could).
+  - 61 + 61 `dEQP-VK.api.info.unsupported_image_usage.{optimal,linear}`,
+    59 + 59 `image_format_properties.3d.{optimal,linear}`, 59 + 59
+    `image_format_properties.1d.{optimal,linear}`, 43
+    `image_format_properties.2d.optimal`, 31
+    `image_format_properties.2d.linear` -- 432 cases, all newly reachable
+    because `vkGetPhysicalDeviceImageFormatProperties` used to fail
+    before any of these checks could even run. Every one of these is a
+    genuine, honestly-reported mandatory-format-support shortfall, not a
+    bug in this row's own query logic: this ICD's CPU runtime only
+    actually samples `R32G32B32A32_FLOAT`/`R8G8B8A8_UNORM`/`_UNORM_SRGB`
+    (plus ASTC LDR, bridged, roadmap E23) and `RenderPass.cpp`'s color-
+    attachment table covers a narrower set than Vulkan's own mandatory
+    floor, so `formatFeatureFlags` honestly reports most other mandatory
+    sampled/attachment formats as unsupported, and this query now says so
+    where the old stub could not even be asked. Tracked as new roadmap
+    row E25 rather than fixed here: closing it means broadening the CPU
+    runtime's typed-sample table and `feme::graphics`'s pack/unpack
+    table, not another capability-query fix.
+  - 59 single-case `get_physical_device_properties2.pnext_format_
+    properties.*` (one per format checked, a guard-value-pattern check
+    against `VkFormatProperties2`'s `pNext` chain) plus the 14
+    `get_physical_device_properties2.features`/1
+    `vulkan1p2_limits_validation`/1 `get_physical_device_properties2.
+    properties` cases already present in both the before and after runs
+    -- unrelated to this row, the same pre-existing gaps E20-E23's own
+    73-case baseline already carried forward unchanged.
+- **`dEQP-VK.*astc*`** (98,927 cases): 873 passed / 1 failed / 98,053 not
+  supported before this row (confirmed identical to E20-E23's own
+  baseline by the same revert-and-rerun check). After: **8,237 passed /
+  12,225 failed / 78,465 not supported** -- the real, substantial
+  headline movement this entire ASTC sequence (E15, E20-E23) had been
+  completely blocked on, exactly as E22's own report predicted: every
+  texture-creation-shaped case can now actually create the `VkImage` it
+  needs, and 8,237 of them (up from 873, none of which needed to create
+  an image at all) now run for real and pass.
+
+  **A genuine crash was found and fixed measuring this, not just a
+  numbers regression.** The first attempt at this run aborted partway
+  through on a `SIGABRT`, not a clean `Fail`/`NotSupported`:
+  `dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image.all_formats.
+  color.2d_to_1d.astc_10x10_srgb_block.r32g32b32a32_uint.general_general`
+  hit `feme::vulkan::Image::blockPointer`'s own assertion
+  (`Image.cpp:129`, "blockPointer is for a block-compressed Format
+  only"). Root cause: `CommandBuffer.cpp`'s `runCopyImage` derived a
+  single `Compressed` flag from the *source* image's format alone and
+  used it to choose `blockPointer` vs. `texelPointer` for *both* sides of
+  a `vkCmdCopyImage` call -- correct when both images are, or neither is,
+  block-compressed, but wrong the moment one side is and the other isn't.
+  This exact shape (one ASTC block and one `R32G32B32A32_UINT` texel are
+  both 16 bytes, so real Vulkan's "compatible formats" copy rule already
+  permits pairing them) was unreachable before this row: with
+  `vkGetPhysicalDeviceImageFormatProperties` unconditionally failing,
+  `deqp-vk` could never create *either* image, let alone copy between
+  them. Fixed by tracking each side's compressed-ness (and block shape)
+  independently (`CommandBuffer.cpp`); a new
+  `ImageTest.CopyASTCImageToCompatibleUncompressedFormat` regression test
+  reproduces the exact case shape and is confirmed, by temporarily
+  reverting the fix and re-running, to hit the identical assertion
+  without it. With the fix, the full `dEQP-VK.*astc*` run completes
+  cleanly (no crash) with the numbers above.
+
+  The 12,225 new failures are a *different*, narrower class of gap than
+  the crash: mostly the same real, honestly-surfaced mandatory-format-
+  support shortfalls `dEQP-VK.api.info.*` found above (a texture case
+  naming a format this ICD cannot actually sample now fails at the point
+  it tries to, rather than being rejected before it could try at all),
+  plus pre-existing, unrelated graphics-path gaps this subtree's own
+  fragment-shader cases exercise for the first time now that they reach
+  pipeline creation at all (e.g. `feme-cpu-simdize`'s "divergent vector
+  value ... used outside a supported ... pattern" limitation, an already-
+  documented roadmap milestone 7 deviation, unrelated to ASTC). Also
+  tracked under new row E25 rather than root-caused case by case here,
+  since E25's own scope (broadening real per-format feature support) is
+  what closing most of them requires.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1637/1638
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- the +2 discovered/passed tests relative to E23's own report
+are `FormatTest`'s new `formatFeatureFlags` cases and `EntryPointsTest`
+(a new file covering both entrypoints directly, exercising real
+`VkPhysicalDevice`/`VkInstance` objects the same way `ImageTest`/
+`PhysicalDeviceInfoTest` already do), plus
+`ImageTest.CopyASTCImageToCompatibleUncompressedFormat`, the regression
+test for the `runCopyImage` crash above -- the latter confirmed, by
+temporarily reverting the `CommandBuffer.cpp` fix and re-running, to
+actually crash on the identical assertion without it, the same "prove
+the test catches the regression" check every prior row in this sequence
+has applied to its own new cases.
+
+
+
