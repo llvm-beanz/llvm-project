@@ -1329,6 +1329,61 @@ public:
   }
 };
 
+/// Converts a `Workgroup`-storage-class `spirv.GlobalVariable` -- a GLSL
+/// `shared`/HLSL `groupshared` variable declared directly in SPIR-V, rather
+/// than raised from DXIL (see `feme::cpu::GroupSharedAddressSpace`'s own
+/// comment) -- to an ordinary `llvm.mlir.global` in address space 3: the
+/// same convention Clang's own HLSL `groupshared` codegen already uses (see
+/// `LangAS::hlsl_groupshared`'s target address space mapping), which is what
+/// lets `feme::cpu::SIMDizePass`/`feme::cpu::EntryWrapperPass` (Phase 4/6,
+/// GroupShared.h) treat a variable imported from either source identically,
+/// with no SPIR-V-specific case of their own. Neither pattern lives in
+/// `feme/lib/Transforms/CPU` -- this file is shared by every FeMe target, not
+/// just the CPU one -- so the address space is spelled as the literal `3`
+/// here rather than including that header.
+///
+/// `zero_initialized` (`VK_KHR_zero_initialize_workgroup_memory`, roadmap
+/// milestone E13) becomes the LLVM global's own `#llvm.zero` initializer:
+/// `feme::cpu::GroupSharedLayout::NeedsZeroInit` reads `hasInitializer()`
+/// back off exactly this global to decide whether the dispatch wrapper needs
+/// to zero this group's groupshared buffer before running (see
+/// GroupShared.h/EntryWrapper.cpp) -- an ordinary groupshared variable with
+/// no zero-initializer of its own (Internal linkage would require a body,
+/// so it is `External`, undefined, matching Clang's own HLSL groupshared
+/// codegen) leaves that flag unset.
+class WorkgroupGlobalVariablePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::GlobalVariableOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GlobalVariableOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GlobalVariableOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
+    if (SrcType.getStorageClass() != mlir::spirv::StorageClass::Workgroup)
+      return Rewriter.notifyMatchFailure(Op, "not a workgroup variable");
+
+    mlir::Type DstType =
+        getTypeConverter()->convertType(SrcType.getPointeeType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    if (Op.getZeroInitialized()) {
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+          Op, DstType, /*isConstant=*/false, mlir::LLVM::Linkage::Internal,
+          Op.getSymName(), mlir::LLVM::ZeroAttr::get(Rewriter.getContext()),
+          /*alignment=*/0, /*addrSpace=*/3);
+      return mlir::success();
+    }
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::GlobalOp>(
+        Op, DstType, /*isConstant=*/false, mlir::LLVM::Linkage::External,
+        Op.getSymName(), mlir::Attribute(), /*alignment=*/0, /*addrSpace=*/3);
+    return mlir::success();
+  }
+};
+
 /// Emits the `llvm.spv.resource.getpointer` call addressing \p Coordinate
 /// within the resource \p Handle. LLVM's SPIRV backend selects
 /// `OpImageRead`/`OpImageWrite` from the ordinary load or store through the
@@ -2142,6 +2197,21 @@ void feme::spirv::populateSPIRVToLLVMTargetTypeConversions(
                                             /*addressSpace=*/13);
   });
 
+  // A `Workgroup` pointer -- `WorkgroupGlobalVariablePattern`'s own global,
+  // or an access chain result reaching into it -- is ordinary memory too, in
+  // address space 3: the same convention Clang's own HLSL `groupshared`
+  // codegen uses (`LangAS::hlsl_groupshared`), rather than MLIR's own
+  // Vulkan-client default of address space 0 (roadmap milestone E13).
+  TypeConverter.addConversion([&TypeConverter](mlir::spirv::PointerType Type)
+                                  -> std::optional<mlir::Type> {
+    if (Type.getStorageClass() != mlir::spirv::StorageClass::Workgroup)
+      return std::nullopt;
+    if (!TypeConverter.convertType(Type.getPointeeType()))
+      return std::nullopt;
+    return mlir::LLVM::LLVMPointerType::get(Type.getContext(),
+                                            /*addressSpace=*/3);
+  });
+
   // MLIR's own runtime array conversion refuses one with an `ArrayStride`
   // decoration (see `convertRuntimeArrayType` in MLIR's `SPIRVToLLVM.cpp`),
   // which every runtime array nested in a real (Vulkan-valid) storage
@@ -2252,23 +2322,22 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables) {
-  Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
-               BuiltInGlobalVariablePattern, BlockAccessChainPattern,
-               CompositeConstructPattern,
-               DemoteToHelperInvocationConversionPattern,
-               DotConversionPattern,
-               ExecutionModePattern, ExecutionModeIdPattern, ImageFetchPattern,
-               ImageFetchLodPattern, ImageSampleExplicitLodPattern,
-               ImageSampleImplicitLodPattern, ImageQuerySizePattern,
-               ImageReadPattern, ImageWritePattern, LoadValuePattern,
-               MatrixCompositeExtractPattern, MatrixCompositeInsertPattern,
-               PushConstantGlobalVariablePattern, SampledImagePattern,
-               SDotConversionPattern, UDotConversionPattern,
-               SUDotConversionPattern, SDotAccSatConversionPattern,
-               UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
-               SpecConstantErasurePattern, StageIOGlobalVariablePattern,
-               SwitchConversionPattern, TerminateInvocationConversionPattern>(
-      Patterns.getContext(), TypeConverter, FeMeBenefit);
+  Patterns.add<
+      ArrayConstantPattern, BuiltInAddressOfPattern,
+      BuiltInGlobalVariablePattern, BlockAccessChainPattern,
+      CompositeConstructPattern, DemoteToHelperInvocationConversionPattern,
+      DotConversionPattern, ExecutionModePattern, ExecutionModeIdPattern,
+      ImageFetchPattern, ImageFetchLodPattern, ImageSampleExplicitLodPattern,
+      ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
+      ImageWritePattern, LoadValuePattern, MatrixCompositeExtractPattern,
+      MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
+      SampledImagePattern, SDotConversionPattern, UDotConversionPattern,
+      SUDotConversionPattern, SDotAccSatConversionPattern,
+      UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
+      SpecConstantErasurePattern, StageIOGlobalVariablePattern,
+      SwitchConversionPattern, TerminateInvocationConversionPattern,
+      WorkgroupGlobalVariablePattern>(Patterns.getContext(), TypeConverter,
+                                      FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
