@@ -794,6 +794,11 @@ enum class AttachmentKind { Color, Depth, Stencil };
 /// exactly what the render pass instance covers.
 Error applyClear(const RenderTargetView &View, uint32_t SampleCount,
                  const VkRect2D &Area, AttachmentKind Kind) {
+  if (!View.View)
+    // (Roadmap E5) `VK_KHR_maintenance5`: an unused
+    // (`VK_NULL_HANDLE`-imageView) dynamic-rendering attachment performs no
+    // load, regardless of what `LoadOp` it was given.
+    return Error::success();
   if (View.LoadOp != VK_ATTACHMENT_LOAD_OP_CLEAR)
     return Error::success();
   Expected<feme::graphics::AttachmentView> Attachment =
@@ -923,6 +928,17 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   std::vector<feme::graphics::AttachmentView> ResolveAttachments;
   bool AnyResolve = false;
   for (const RenderTargetView &View : Gfx.Binding.Colors) {
+    if (!View.View) {
+      // (Roadmap E5) `VK_KHR_maintenance5`: a `VkRenderingAttachmentInfo`
+      // with `imageView == VK_NULL_HANDLE` is a color slot that is present
+      // (it still counts against the pipeline's `colorAttachmentCount`)
+      // but unused -- nothing is read from or written to it, so it needs
+      // neither a bound image nor a sample-count match with the pipeline.
+      // An empty `Data` member is this executor's existing "not bound"
+      // convention (see PreparedDraw.h's `DepthStencilAttachment` comment).
+      Attachments.push_back(feme::graphics::AttachmentView{});
+      continue;
+    }
     Expected<feme::graphics::AttachmentView> Attachment =
         resolveAttachmentView(View.View);
     if (!Attachment)
@@ -936,6 +952,13 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   }
   if (AnyResolve)
     for (const RenderTargetView &View : Gfx.Binding.Colors) {
+      if (!View.View) {
+        // An unused attachment slot never resolves either way (its
+        // `resolveMode` is ignored, per `VkRenderingAttachmentInfo`'s
+        // spec), regardless of whether the others do.
+        ResolveAttachments.push_back(feme::graphics::AttachmentView{});
+        continue;
+      }
       if (!View.ResolveView)
         return createStringError(inconvertibleErrorCode(),
                                  "either every color attachment resolves or "

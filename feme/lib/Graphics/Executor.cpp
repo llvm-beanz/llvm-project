@@ -1108,6 +1108,15 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // are: `FSColors[i]` writes into `Draw.Attachments[i]`.
   SmallVector<const SignatureElement *, 4> FSColors;
   for (uint32_t I = 0; I != Draw.Attachments.size(); ++I) {
+    if (Draw.Attachments[I].Data.empty()) {
+      // (Roadmap E5) `VK_KHR_maintenance5`: this color slot's
+      // `VkRenderingAttachmentInfo::imageView` was `VK_NULL_HANDLE` --
+      // present but unused. The spec requires the fragment shader not to
+      // write here, so no output is required (or consulted) at this
+      // location either.
+      FSColors.push_back(nullptr);
+      continue;
+    }
     const SignatureElement *FSColor =
         findElementByLocation(*FSSig, SignatureDirection::Output, I);
     if (!FSColor)
@@ -1159,9 +1168,33 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                                "4-component floating-point output");
   }
 
-  AttachmentView &Color = Draw.Attachments[0];
+  // (Roadmap E5) The extent used to clamp the scissor rect below: the
+  // first bound (non-unused) color attachment, or else the depth/stencil
+  // attachment, since attachment 0 itself may be an unused
+  // `VK_NULL_HANDLE` slot with no extent of its own.
+  uint32_t ExtentWidth = 0, ExtentHeight = 0;
+  for (const AttachmentView &A : Draw.Attachments)
+    if (!A.Data.empty()) {
+      ExtentWidth = A.Width;
+      ExtentHeight = A.Height;
+      break;
+    }
+  if (ExtentWidth == 0 && ExtentHeight == 0) {
+    if (!Draw.DepthStencil.Depth.Data.empty()) {
+      ExtentWidth = Draw.DepthStencil.Depth.Width;
+      ExtentHeight = Draw.DepthStencil.Depth.Height;
+    } else if (!Draw.DepthStencil.Stencil.Data.empty()) {
+      ExtentWidth = Draw.DepthStencil.Stencil.Width;
+      ExtentHeight = Draw.DepthStencil.Stencil.Height;
+    }
+  }
   SmallVector<uint32_t, 4> ColorElemSizes;
   for (const AttachmentView &A : Draw.Attachments) {
+    if (A.Data.empty()) {
+      // An unused slot has no format/extent to validate against.
+      ColorElemSizes.push_back(0);
+      continue;
+    }
     Expected<uint32_t> ElemSize = getFixtureFormatElementSize(A.Format);
     if (!ElemSize)
       return ElemSize.takeError();
@@ -1204,9 +1237,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   int32_t ScissorMinX = std::max<int32_t>(0, Draw.Scissor.X);
   int32_t ScissorMinY = std::max<int32_t>(0, Draw.Scissor.Y);
   int32_t ScissorMaxX = std::min<int32_t>(
-      Color.Width, Draw.Scissor.X + static_cast<int32_t>(Draw.Scissor.Width));
+      ExtentWidth, Draw.Scissor.X + static_cast<int32_t>(Draw.Scissor.Width));
   int32_t ScissorMaxY = std::min<int32_t>(
-      Color.Height, Draw.Scissor.Y + static_cast<int32_t>(Draw.Scissor.Height));
+      ExtentHeight, Draw.Scissor.Y + static_cast<int32_t>(Draw.Scissor.Height));
 
   uint32_t PrimitiveCounter = 0;
 
@@ -1965,6 +1998,10 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           for (uint32_t AttIdx = 0; AttIdx != Draw.Attachments.size();
                ++AttIdx) {
             AttachmentView &Att = Draw.Attachments[AttIdx];
+            if (Att.Data.empty())
+              // (Roadmap E5) An unused (`VK_NULL_HANDLE`) color slot: the
+              // write is discarded rather than performed.
+              continue;
             std::array<double, 4> RGBA;
             for (unsigned C = 0; C != 4; ++C)
               RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
