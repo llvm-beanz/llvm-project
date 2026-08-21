@@ -2959,3 +2959,79 @@ the 7 newly-sampled integer formats), and `EntryPointsTest`'s new
 comment on `ImageFormatPropertiesRejectsUnsupportedUsage` (the stale "no
 `feme.cpu.image.*` entry point returns an integer vector" claim this
 row's own work made false).
+
+## Roadmap E16: measured impact (targeted, not a full re-run)
+
+E16 closed a host-side (not shader-side) `VK_EXT_image_robustness`/
+`robustImageAccess` gap: `Image::texelPointer`/`Image::blockPointer`
+(Image.{h,cpp}) now return null for any out-of-bounds mip level/array
+layer/texel or block coordinate instead of computing a wild pointer, and
+`ImageOps.cpp`'s `runBlitImage`/`runResolveImage` -- the only two
+operations whose region comes from arbitrary application input rather
+than the image's own dimensions -- now clamp an out-of-bounds source read
+into the mip's real extent and discard an out-of-bounds destination
+write, rather than faulting. This is a pure robustness fix: every
+in-bounds region behaves identically to before, so the expectation going
+in was zero headline movement, confirmed rather than assumed below.
+
+Targeted subset: **`dEQP-VK.api.copy_and_blit.copy_commands2.blit_image.*`**
+and **`dEQP-VK.api.copy_and_blit.copy_commands2.resolve_image.*`**, the two
+groups exercising `runBlitImage`/`runResolveImage` directly.
+
+- **`blit_image.*`**: excluding `*all_remaining_layers*`/
+  `*layercount_6*` (see "A real, pre-existing hang found, and
+  deliberately left open" below), 4,388 cases: 179 passed / 30 failed /
+  4,179 not supported, both before and after this row's own commits
+  (confirmed with a temporary revert of `Image.{h,cpp}`/`ImageOps.cpp` to
+  their pre-E16 state, rebuilt in place, then restored -- not just
+  assumed from the diff's shape). The 30 failures are all `_linear`-filter
+  1D-image cases (`b10g11r11_ufloat_pack32`, `r32_sfloat`,
+  `r32g32_sfloat`, `r32g32b32_sfloat`, `r8g8b8a8_snorm`), each failing
+  identically before and after at `vk.queueSubmit(...)
+  VK_ERROR_INITIALIZATION_FAILED` (`vkCmdUtil.cpp:338`) -- a pre-existing,
+  unrelated gap (1D bilinear blit dispatch), not touched by this row.
+- **`resolve_image.*`** (138 cases): 0 passed / 33 failed / 105 not
+  supported. None of the 33 failures reach `runResolveImage` at all: every
+  one fails earlier, at `vkCreateGraphicsPipelines`, with `feme-cpu-simdize`'s
+  already-documented "divergent vector value ... used outside a supported
+  ... pattern" limitation (roadmap milestone 7's own deviation) --
+  `resolve_image`'s own CTS cases resolve through a render-pass-driven
+  multisample draw, not a standalone `vkCmdResolveImage` call, so this
+  group provides no direct coverage of this row's own `runResolveImage`
+  change either way. The 105 not-supported cases are gated on
+  `fragmentStoresAndAtomics`/an unsupported sample count, both pre-existing
+  and unrelated. Direct coverage of `runResolveImage`'s own clamp/discard
+  path is therefore the five new `ImageOpsTest`/`ImageTest` cases below,
+  not this CTS group.
+
+**A real, pre-existing hang was found, and deliberately left open, as
+out of this row's own scope.** `blit_image.simple_tests.array.
+all_remaining_layers`/`not_all_remaining_layers` (and every
+`layercount_6` case, the same shape at a smaller scale) set
+`VkImageSubresourceLayers::layerCount` to `VK_REMAINING_ARRAY_LAYERS`
+(`VK_KHR_maintenance5`), per the Vulkan spec's own "all layers from
+`baseArrayLayer` to the end" meaning for that sentinel in this struct.
+`runBlitImage`/`runResolveImage`'s `LayerCount = std::min(srcSubresource.
+layerCount, dstSubresource.layerCount)` does not recognize the sentinel
+at all, so `LayerCount` becomes `0xFFFFFFFF` and the per-layer loop runs
+essentially forever (confirmed: still running after minutes of 100% CPU,
+both with a `--deqp-watchdog` -- which cannot preempt a single, synchronous
+in-process `vkQueueSubmit` call -- and, via a temporary revert exactly as
+above, with this row's own commits entirely absent, so this predates E16
+rather than being introduced by it). This is a distinct bug from the one
+this row closes (an unbounded loop count, not an out-of-bounds
+coordinate) and squarely outside `{Image,ImageOps}.cpp`'s own
+`VK_REMAINING_ARRAY_LAYERS`-oblivious `LayerCount` computation this row
+never touched -- tracked here as a finding for a future row (recognizing
+the sentinel the same way `runClearColorImage`/`runClearDepthStencilImage`
+already do for `VK_REMAINING_MIP_LEVELS`/`VK_REMAINING_ARRAY_LAYERS` in a
+`VkImageSubresourceRange`) rather than folded into this one.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1660/1661
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- the five new tests relative to E26's own report are
+`ImageTest`'s `TexelPointerReturnsNullOutOfBounds`/
+`BlockPointerReturnsNullOutOfBounds` and `ImageOpsTest`'s
+`BlitClampsOutOfBoundsSourceRegion`/
+`BlitDiscardsOutOfBoundsDestinationTexels`/`ResolveDiscardsOutOfBoundsRegion`.
