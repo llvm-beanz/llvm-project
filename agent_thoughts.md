@@ -26783,3 +26783,282 @@ footprint than E11's own five-commit shape. Did not fix the pre-existing
 `OpKill` conversion-pattern gap or the `vkGetPhysicalDeviceFormatProperties`
 stub found along the way, since both are corrections to other rows'
 premises, not this row's own scope.
+
+# Milestone E13: VK_KHR_zero_initialize_workgroup_memory/shaderZeroInitializeWorkgroupMemory
+
+## Premise vs. audit
+
+The roadmap row's own premise was narrow and specific: "`Workgroup`-storage-
+class SPIR-V globals need a zero-initializer emitted once per dispatch
+(likely in `feme::cpu::SPIRVResourceLoweringPass` or a small new pass run
+before it) rather than reading whatever the host's memory allocator
+happened to leave behind." That phrasing implicitly assumes a `Workgroup`
+global already imports and lowers correctly today, and that the only
+missing piece is the zero-fill itself.
+
+The audit (grepping every file for `StorageClass::Workgroup` across
+`feme/`, then reading `feme::cpu::GroupShared.h`/`.cpp`/`EntryWrapper.cpp`
+end to end) found that premise false in a more fundamental way than E11/
+E12's own "missing conversion pattern" shape: there is no reference to
+`spirv::StorageClass::Workgroup` anywhere in `feme/lib/Conversion/
+SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` at all, and MLIR's own upstream
+`GlobalVariablePattern` (`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`)
+only converts `Input`/`Private`/`Output`/`StorageBuffer`/`UniformConstant`
+-- its `switch` on storage class has no `Workgroup` case and returns
+`failure()` for anything else. A `spirv.GlobalVariable` in `Workgroup`
+storage class -- a GLSL `shared`/HLSL `groupshared` variable declared
+directly in SPIR-V, as opposed to raised from DXIL, which is how every
+*existing* groupshared test in this repo reaches `GroupShared.h` --
+therefore fails to convert at all, not just fails to zero-initialize.
+`feme::cpu::GroupShared.h`/`GroupSharedInfo.h`/`EntryWrapper.cpp` already
+existed and already worked correctly for the DXIL-raised path (a real,
+substantial roadmap-9-era subsystem, not something this row needed to
+build from scratch), which is presumably why the roadmap row's premise
+undersold the SPIR-V side's own gap -- it read the CPU-target lowering
+machinery and assumed importing a `Workgroup` global was as solved as
+importing anything else.
+
+I confirmed this concretely before writing any feme code, by hand-
+assembling a tiny SPIR-V module with a `Workgroup` `OpVariable` (`spirv-as`
++ `spirv-val`, both available in this environment) and running it through
+`mlir-translate --deserialize-spirv`: it deserialized fine (MLIR's
+generic-op fallback tolerates an unconverted storage class at the
+`spirv.GlobalVariable` op level, since that op itself doesn't care what
+its own storage class is at parse time), but running the result through
+`feme-opt --feme-convert-spirv-to-llvm` before I'd written any pattern
+either left the op unconverted (a conversion failure that would abort a
+real pipeline-compile job) or -- once I'd added a naive pattern with a
+hardcoded address space and nothing else -- produced a pointer/global
+address-space mismatch, which is what led to the second type-converter
+fix below.
+
+## A second, deeper audit: the zero-initializer itself doesn't deserialize
+
+Getting even a genuine zero-initializer *imported* needed going one level
+deeper than "add a conversion pattern," because MLIR's own SPIR-V
+deserializer rejects the SPIR-V shape a zero-initializer actually takes,
+for two independent reasons -- found by hand-assembling a second test
+module (`OpVariable ... Workgroup %null` where `%null = OpConstantNull`)
+and running it through `mlir-translate --deserialize-spirv` before writing
+any MLIR-side code:
+
+1. `processGlobalVariable`'s own Initializer-operand resolution
+   (`Deserializer.cpp`) only accepts an id that resolves to a global
+   variable, specialization constant, or specialization constant
+   composite (`getGlobalVariable`/`getSpecConstant`/
+   `getSpecConstantComposite`) -- never a plain `OpConstantNull`, the
+   *only* value SPIR-V's own spec permits a `Workgroup` variable's
+   Initializer to hold. Every other test the whole repo's own
+   `mlir/test/Target/SPIRV/` directory tries for `spirv.GlobalVariable`'s
+   `initializer(...)` is one of the three accepted shapes; nothing
+   exercises the fourth one at all, which is presumably why this had gone
+   unnoticed.
+2. Even before reaching that check, `processConstantNull` itself only
+   builds a null attribute for a scalar/vector/tensor type -- any
+   composite (`spirv.array`/`spirv.struct`) `OpConstantNull`, the common
+   shape a real `shared`/`groupshared` variable's own type takes (an
+   array of vectors, a struct, ...), hits `emitError("unsupported
+   OpConstantNull type")` and aborts deserialization of the *whole*
+   module, not just that one instruction.
+
+Both are genuine, independent MLIR gaps -- not specific to `Workgroup`
+storage class or to this extension at all (an `OpConstantNull` of array/
+struct type used *anywhere*, e.g. to zero-initialize a `Private`-storage
+local, would hit the same wall) -- so I fixed them in MLIR itself, the
+same "extend MLIR, not just feme" shape E11 (new `spirv.
+DemoteToHelperInvocation` op) and E12 (new `spirv.TerminateInvocation` op)
+already established as this roadmap's own precedent for a prerequisite
+gap one level below feme's own code:
+
+- `spirv.GlobalVariable` gained `zero_initialized`, a new optional unit
+  attribute representing this fourth Initializer shape. I considered
+  making it carry the actual null value (as an `Attribute`, parallel to
+  `initializer`'s `FlatSymbolRefAttr`) but rejected that: `OpConstantNull`
+  has no symbol of its own in the SPIR-V binary to begin with, unlike
+  every other accepted case, so a plain `UnitAttr` is both the more
+  minimal representation and the more honest one -- it says exactly "this
+  variable's Initializer is the one shape with no value to represent,"
+  rather than smuggling a synthesized value through an attribute that
+  looks like it means something more general than it does.
+- `getNullAttrForType` (new, in `Deserializer.cpp`) generalizes
+  `processConstantNull` to recurse into `spirv::ArrayType`/
+  `spirv::StructType` element types, building the same `ArrayAttr`-of-
+  elements shape `processConstantComposite` already uses for an ordinary
+  composite constant -- deliberately reusing an existing representational
+  convention rather than inventing a new one.
+- The serializer's own `processGlobalVariableOp` synthesizes a fresh
+  `OpConstantNull` for the pointee type when serializing a
+  `zero_initialized` global back out, so the round trip is symmetric.
+
+Verified via `mlir-translate --test-spirv-roundtrip` plus the
+`spirv-tools`-gated `spirv-val` check (both already the established
+pattern for this kind of change, see `global-variable.mlir`/
+`constant.mlir`), for a scalar, array, and struct pointee -- the three
+shapes `getNullAttrForType` handles. Ran the full `Target/SPIRV` +
+`Dialect/SPIRV` + `Conversion/SPIRVToLLVM` MLIR lit suites (133 tests)
+before touching feme at all, to confirm this was a pure addition with zero
+regressions to any existing SPIR-V round-trip.
+
+## feme-side: two commits, not one, following the established granularity rule
+
+Split into the smallest independently-testable pieces, per
+`feme/.instructions.md`'s "each change ... individually testable and
+tested":
+
+1. `feme::spirv::WorkgroupGlobalVariablePattern` (SPIRVToLLVMPatterns.cpp):
+   converts a `Workgroup` `spirv.GlobalVariable` to an ordinary
+   `llvm.mlir.global` in address space 3. I did not invent this number:
+   it is the address space Clang's own HLSL `groupshared` codegen already
+   uses for `LangAS::hlsl_groupshared` (confirmed by compiling a trivial
+   HLSL `groupshared` declaration with `clang -cc1 -triple
+   dxil-unknown-shadermodel6.0-compute` and reading the resulting IR:
+   `@x = external hidden addrspace(3) global [8 x float]`), and it is
+   also exactly `feme::cpu::GroupSharedAddressSpace`'s own value
+   (GroupShared.h). Deliberately did *not* include
+   `feme/include/feme/Transforms/CPU/...` from this file to get that
+   constant by name: `feme/lib/Conversion/SPIRVToLLVM` is a target-
+   agnostic library (shared by every FeMe backend, not just the CPU one),
+   and reaching into a CPU-target-private header from it would be a
+   layering violation this repo's own headers/library-layering rule
+   forbids -- the literal `3` with a comment pointing at both conventions
+   is the correct, smaller-footprint choice here, the same kind of
+   "smaller than the alternative" call E11 made for reusing
+   `llvm.spv.discard` instead of adding a new intrinsic.
+
+   A first attempt at this pattern (address space 3 on the global, but no
+   change to the type converter) produced an address-space *mismatch*
+   error at `spirv.mlir.addressof` (`pointer address space must match
+   address space of the referenced global`) -- upstream MLIR's own
+   `storageClassToAddressSpace` only maps `Workgroup` to address space 3
+   for `ClientAPI::OpenCL`, and feme's own `LLVMTypeConverter` construction
+   never sets a `clientAPI` (defaulting to `Unknown`, which returns
+   address space 0 for everything). Fixed by adding a fourth
+   `TypeConverter.addConversion` for `Workgroup` pointers alongside the
+   three already there for `Output`/`StorageBuffer`/`Uniform`/
+   `PushConstant`, mirroring their exact shape rather than introducing a
+   new one.
+
+2. `GroupSharedLayout::NeedsZeroInit` (GroupShared.h/.cpp) +
+   `EntryWrapperPass`'s own `memset` (EntryWrapper.cpp): read directly off
+   `GlobalVariable::hasInitializer()` on the imported global. I checked
+   this signal would not misfire for the existing DXIL-raised path before
+   relying on it (the same `clang -cc1` compile above showed an ordinary
+   `groupshared` variable with no explicit initializer comes out
+   `external`, with no initializer at all -- `hasInitializer()` is false),
+   so this flag stays false for every existing groupshared test in the
+   repo unless a shader genuinely opts in via SPIR-V's own zero-
+   initializer. Chose to zero the *entire* flat groupshared buffer rather
+   than tracking each flagged global's own byte range: every other
+   groupshared global in the same module was already free to read as
+   anything (an uninitialized stack `alloca`, or a previous group's own
+   leftover writes to the reused host buffer -- see `runDispatch` in
+   `CommandBuffer.cpp`, which allocates one `GroupShared` buffer per
+   *dispatch*, reused across every group's `invokeGroup` call), so zeroing
+   more than strictly required changes nothing observable. This is
+   deliberately the smaller, more surgical implementation compared to
+   plumbing a second per-global map through `EntryWrapperPass` just to
+   avoid a handful of extra zeroed bytes in the (already rare) case where
+   a module mixes a zero-initialized and non-zero-initialized groupshared
+   global.
+
+3. The Vulkan feature bit (`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp`),
+   exactly the same three-part shape E9-E12 already established: the
+   aggregate `VkPhysicalDeviceVulkan13Features` case flips to `VK_TRUE`,
+   a new dedicated `VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures`
+   struct case is added alongside it, and
+   `VK_KHR_zero_initialize_workgroup_memory` is listed in
+   `getSupportedDeviceExtensions` for the same "CTS enables it by name
+   regardless of `apiVersion`" reason as every prior E-row. Updated the
+   two existing Vulkan unit tests this flip requires
+   (`PhysicalDeviceInfoTest.cpp`'s aggregate expectation, plus a new
+   dedicated-struct test mirroring E12's own; `DrawTest.cpp`'s extension-
+   count assertion, 10 -> 11, plus a new extension-name check).
+
+Ran `ninja check-feme` (assertions-enabled, ccache build) after every
+commit: 1577/1578 -> 1581/1582 as each change landed (the same 1 pre-
+existing `Unsupported`, unrelated throughout).
+
+## Targeted CTS run, and two further premise corrections
+
+Ran against the actual checkout under `/home/dev/dev/VK-GL-CTS/`, using
+the same `vulkan_headless` `deqp-vk` build and `VK_ICD_FILENAMES`-pointed-
+at-`feme_icd.json` setup a prior pass already established. Rebuilt
+`libfeme_vulkan.so` from this session's HEAD first.
+
+Ran every sub-group under
+`dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.*` (644 cases
+total -- generated via `deqp-vk --deqp-runmode=xml-caselist` for an exact
+count, since one sub-group's own crash, below, makes a single combined run
+unsafe to trust for a full tally). 4 cases (`types.
+{bool,float32_t,int32_t,uint32_t}`) genuinely `Pass`: these compile a real
+`shared TYPE x = {};` scalar variable (GLSL's `GL_EXT_null_initializer`
+extension, which is exactly the shape `zero_initialized`/
+`WorkgroupGlobalVariablePattern`/`GroupSharedLayout::NeedsZeroInit` model)
+and read it back as zero on every lane -- direct, positive confirmation
+this row's own scope works end to end, not just at the unit-test level.
+
+The remaining 640 cases are blocked by two further, independent, pre-
+existing gaps this row's own scope does not cover -- found by reading the
+actual `error:` diagnostics rather than assuming "not implemented yet"
+covers everything, the same discipline E12's own `graphicsfuzz` correction
+used:
+
+1. **`OpTypeArray`'s Length operand must be a normal constant.** Every
+   non-scalar case in this CTS source file sizes its `shared` array from
+   a `layout(constant_id = N) const uint ...` specialization constant
+   (`error: OpTypeArray count <id> ... can only come from normal constant
+   right now`, `mlir::spirv::Deserializer::processConstantArray`'s own
+   pre-existing check) -- the whole module fails to deserialize before
+   `WorkgroupGlobalVariablePattern` ever gets a chance to run, so this is
+   not a zero-initialization problem at all, it is an array-type-
+   deserialization one. This blocks `max_workgroup_memory` (6),
+   `composites` (15), `max_workgroups` (3), most of
+   `specialize_workgroup`/`repeat_pipeline` (512 + 32), and every non-
+   scalar `types` case (71 of 75).
+2. **A vector/matrix element access produces a vector GEP base.** The
+   remaining `types` failures (`uvec2`/`uvec3`/`uvec4`/...) hit `'llvm.
+   getelementptr' op operand #0 must be LLVM pointer type ...` --
+   `spirv.AccessChain` into a vector-typed `shared` variable apparently
+   produces something LLVM's own translation does not accept as a GEP
+   base, a shape this row's own scalar-only scope was never going to
+   cover on its own.
+
+I also found, isolated, and *did not fix* a third, genuine robustness
+gap while investigating `composites.2`: an `i1`-element composite's own
+`getelementptr` crashes the whole `deqp-vk` process outright (`Assertion
+'DL.typeSizeEqualsStoreSize(ElemTy) && "Not byte-addressable"' failed`,
+inside `mlir::translateModuleToLLVMIR`'s constant-folding path), not a
+graceful per-case `Fail`. Confirmed this is deterministic and specific
+(not a flake) with `gdb -batch -ex run -ex bt` against the single
+isolated case -- the same crash-isolation technique a prior pass's own
+"first real Vulkan-CTS run" section established. An ICD process crashing
+outright is a real defect regardless of scope (this repo's own coding
+standards call for `assert`/`llvm_unreachable` on the ICD's *own*
+invariant violations, not on input it merely doesn't support yet), but
+fixing LLVM's own generic constant-folding to tolerate a non-byte-
+addressable GEP element type is a change to shared LLVM infrastructure
+far outside this row's own `feme`/MLIR-SPIRV-dialect scope, and risks
+destabilizing something used well beyond this ICD. Recorded rather than
+fixed, in both `Roadmap.md`'s E13 entry and `VulkanCTSReport.md`'s new
+"Roadmap E13: measured impact" section, the same "correction, not a
+silent narrowing" treatment E12's own `vkGetPhysicalDeviceFormatProperties`
+finding got.
+
+## Scope discipline
+
+Touched: `mlir/include/mlir/Dialect/SPIRV/IR/SPIRVStructureOps.td` (new
+attribute), `mlir/lib/Dialect/SPIRV/IR/SPIRVOps.cpp` (parse/print/
+verify), `mlir/lib/Target/SPIRV/Deserialization/Deserializer.{h,cpp}`
+(the two generalizations above), `mlir/lib/Target/SPIRV/Serialization/
+SerializeOps.cpp` (round-trip), two new/extended MLIR test files,
+`SPIRVToLLVMPatterns.cpp` (new pattern + new type conversion) plus its
+new test, `GroupShared.{h,cpp}`/`EntryWrapper.cpp` (the zero-init flag
+and its `memset`) plus two new lit tests, `EntryPoints.cpp`/
+`PhysicalDeviceInfo.cpp` (feature bit + extension name), the two pre-
+existing Vulkan unit tests this flip required updating, one new
+dedicated-struct test, and the four documents (`Roadmap.md`,
+`FeMeCPUDesign.md`, `VulkanCTSReport.md`, this file) prior E-rows also
+touched. Did not fix the `OpTypeArray`-from-spec-constant gap, the
+vector-GEP-base gap, or the `i1`-composite GEP crash -- all three are
+corrections to gaps this row's own scope does not name, found along the
+way, not this row's own scope to close.
