@@ -26,13 +26,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E22 in the roadmap document?
+Can you implement milestone E23 in the roadmap document?
 
-> **ASTC LDR copy/sampling pipeline wiring**, the scope E20's own closing note
-> split off: rework `ImageOps.cpp`'s copy/blit/resolve paths (and any
-> shader-image-sampling path that reaches one) to address a block-compressed
-> `Image` per block rather than per texel, wire `feme::vulkan::decodeASTCBlock`
-> into whichever of those paths needs decoded texel data, remove
-> `vkCreateImage`'s current outright rejection of an ASTC `VkFormat`, and only
-> then flip `VkPhysicalDeviceFeatures::textureCompressionASTC_LDR` from
-> `VK_FALSE` to `VK_TRUE`
+> **ASTC LDR shader-sampling wiring**, the scope E22's own closing note split
+> off: a shader's `OpImageSample`/`OpImageFetch` of a block-compressed image
+> still reads all-zero (safe, but not real decoded data) because
+> `CommandBuffer.cpp`'s `materializeImageDescriptor` hands the separate CPU
+> runtime (`feme/runtime/CPU/FeMeRuntimeCPU.c`) a raw per-texel `Image::data()`
+> pointer, and that runtime's own
+> `femeRTImageFormatElementSize`/`femeRTFetchTexel2D` have no block-compressed
+> case at all. Needs either a decoder ported into that C runtime module, or the
+> image-descriptor-materialization path bridging back into this C++ one
+> (`ASTCDecode.h`) before a compute shader binds one
