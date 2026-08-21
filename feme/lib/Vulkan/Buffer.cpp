@@ -87,6 +87,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements2(
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
   computeBufferMemoryRequirements(fromHandle<Buffer>(pInfo->buffer)->size(),
                                   Info, pMemoryRequirements->memoryRequirements);
+  fillMemoryRequirements2PNextChain(pMemoryRequirements->pNext);
 }
 
 /// (roadmap E4) `VK_KHR_maintenance4`: computes a `VkBuffer`'s memory
@@ -106,6 +107,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceBufferMemoryRequirements(
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
   computeBufferMemoryRequirements(pInfo->pCreateInfo->size, Info,
                                   pMemoryRequirements->memoryRequirements);
+  fillMemoryRequirements2PNextChain(pMemoryRequirements->pNext);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice, VkBuffer buffer,

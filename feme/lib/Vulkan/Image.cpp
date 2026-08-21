@@ -410,6 +410,7 @@ VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements2(
       fromHandle<Device>(device)->getPhysicalDevice().getInfo();
   fillImageMemoryRequirements(fromHandle<Image>(pInfo->image)->sizeInBytes(),
                               Info, pMemoryRequirements->memoryRequirements);
+  fillMemoryRequirements2PNextChain(pMemoryRequirements->pNext);
 }
 
 /// (roadmap E4) `VK_KHR_maintenance4`: computes a `VkImage`'s memory
@@ -430,10 +431,11 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
       mapVkFormat(CreateInfo.format);
   if (!isValidImageShape(CreateInfo, Info) || !Format) {
     pMemoryRequirements->memoryRequirements = VkMemoryRequirements{};
-    return;
+  } else {
+    fillImageMemoryRequirements(computeImageCreateInfoSize(CreateInfo, *Format),
+                                Info, pMemoryRequirements->memoryRequirements);
   }
-  fillImageMemoryRequirements(computeImageCreateInfoSize(CreateInfo, *Format),
-                              Info, pMemoryRequirements->memoryRequirements);
+  fillMemoryRequirements2PNextChain(pMemoryRequirements->pNext);
 }
 
 /// (roadmap E4) `VK_KHR_maintenance4`: no sparse residency is supported

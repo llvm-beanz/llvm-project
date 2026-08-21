@@ -126,6 +126,45 @@ TEST_F(BufferTest, GetDeviceBufferMemoryRequirementsMatchesLiveBuffer) {
   EXPECT_EQ(Reqs2.memoryRequirements.size, 256u);
 }
 
+/// Roadmap E4: a chained `VkMemoryDedicatedRequirements` must report the
+/// identical answer from `vkGetBufferMemoryRequirements2` (a live
+/// `VkBuffer`) and `vkGetDeviceBufferMemoryRequirements` (a
+/// `VkBufferCreateInfo` alone) -- this ICD never requires or prefers a
+/// dedicated allocation (see "Memory and Buffers"), so both must report
+/// `VK_FALSE` for each field, not merely agree by coincidence.
+TEST_F(BufferTest,
+       DedicatedRequirementsAgreeBetweenLiveAndDeviceEntrypoints) {
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = 64;
+  BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+  VkBuffer Buf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Buf), VK_SUCCESS);
+  VkBufferMemoryRequirementsInfo2 LiveInfo{};
+  LiveInfo.buffer = Buf;
+  VkMemoryDedicatedRequirements LiveDedicated{};
+  LiveDedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS;
+  VkMemoryRequirements2 LiveReqs2{};
+  LiveReqs2.pNext = &LiveDedicated;
+  vkGetBufferMemoryRequirements2(Device, &LiveInfo, &LiveReqs2);
+  vkDestroyBuffer(Device, Buf, nullptr);
+
+  VkDeviceBufferMemoryRequirements DeviceInfo{};
+  DeviceInfo.pCreateInfo = &BufferInfo;
+  VkMemoryDedicatedRequirements DeviceDedicated{};
+  DeviceDedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS;
+  VkMemoryRequirements2 DeviceReqs2{};
+  DeviceReqs2.pNext = &DeviceDedicated;
+  vkGetDeviceBufferMemoryRequirements(Device, &DeviceInfo, &DeviceReqs2);
+
+  EXPECT_EQ(LiveDedicated.prefersDedicatedAllocation, VK_FALSE);
+  EXPECT_EQ(LiveDedicated.requiresDedicatedAllocation, VK_FALSE);
+  EXPECT_EQ(DeviceDedicated.prefersDedicatedAllocation,
+            LiveDedicated.prefersDedicatedAllocation);
+  EXPECT_EQ(DeviceDedicated.requiresDedicatedAllocation,
+            LiveDedicated.requiresDedicatedAllocation);
+}
+
 class BufferViewTest : public BufferTest {
 protected:
   void SetUp() override {

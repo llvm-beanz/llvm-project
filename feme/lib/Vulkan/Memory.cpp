@@ -122,4 +122,25 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceMemoryCommitment(
   *pCommittedMemoryInBytes = fromHandle<DeviceMemory>(memory)->size();
 }
 
+void fillMemoryRequirements2PNextChain(void *PNext) {
+  for (auto *Base = static_cast<VkBaseOutStructure *>(PNext); Base;
+       Base = Base->pNext) {
+    if (Base->sType != VK_STRUCTURE_TYPE_MEMORY_DEDICATED_REQUIREMENTS)
+      continue;
+    // No dedicated allocation of any kind is ever required or preferred:
+    // every `VkBuffer`/`VkImage` binds into a plain suballocation of a
+    // `VkDeviceMemory` the same way (see "Memory and Buffers"), with no
+    // real hardware dedicated-resource requirement to report honestly as
+    // `VK_TRUE` for. `Buffer.cpp`'s `vkGetBufferMemoryRequirements2`/
+    // `vkGetDeviceBufferMemoryRequirements` and `Image.cpp`'s
+    // `vkGetImageMemoryRequirements2`/`vkGetDeviceImageMemoryRequirements`
+    // (roadmap E4) all share this one chain-walk so every one of the four
+    // reports the identical, consistent answer for the same
+    // `VkMemoryDedicatedRequirements` pNext struct.
+    auto *Dedicated = reinterpret_cast<VkMemoryDedicatedRequirements *>(Base);
+    Dedicated->prefersDedicatedAllocation = VK_FALSE;
+    Dedicated->requiresDedicatedAllocation = VK_FALSE;
+  }
+}
+
 } // namespace feme::vulkan

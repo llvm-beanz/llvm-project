@@ -40,6 +40,15 @@ private:
   VkDeviceSize Size;
 };
 
+/// Walks a `VkMemoryRequirements2`-family `pNext` chain (also chained by
+/// `VkDeviceBufferMemoryRequirements`/`VkDeviceImageMemoryRequirements`'
+/// own `VkMemoryRequirements2` output), filling every recognized extension
+/// struct honestly. Shared by Buffer.cpp's and Image.cpp's four
+/// `vkGet*MemoryRequirements(2)`/`vkGetDevice*MemoryRequirements` (roadmap
+/// E4) entrypoints, so all four report the identical answer for the same
+/// chained struct.
+void fillMemoryRequirements2PNextChain(void *PNext);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_MEMORY_H
