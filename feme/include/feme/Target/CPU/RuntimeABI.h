@@ -106,7 +106,54 @@ enum class ResourceFormat : uint32_t {
   D24_UNORM_S8_UINT,
   D32_FLOAT_S8X24_UINT,
   S8_UINT,
+
+  // (Roadmap E20) The 14 LDR-only ASTC block footprints, each with a
+  // `_UNORM`/`_SRGB` pair -- see "Block-compressed formats" below for what
+  // makes these different from every format above. Ordered by block
+  // footprint the same way `VK_FORMAT_ASTC_*` is, smallest (most texels
+  // per byte) first.
+  ASTC_4x4_UNORM,
+  ASTC_4x4_SRGB,
+  ASTC_5x4_UNORM,
+  ASTC_5x4_SRGB,
+  ASTC_5x5_UNORM,
+  ASTC_5x5_SRGB,
+  ASTC_6x5_UNORM,
+  ASTC_6x5_SRGB,
+  ASTC_6x6_UNORM,
+  ASTC_6x6_SRGB,
+  ASTC_8x5_UNORM,
+  ASTC_8x5_SRGB,
+  ASTC_8x6_UNORM,
+  ASTC_8x6_SRGB,
+  ASTC_8x8_UNORM,
+  ASTC_8x8_SRGB,
+  ASTC_10x5_UNORM,
+  ASTC_10x5_SRGB,
+  ASTC_10x6_UNORM,
+  ASTC_10x6_SRGB,
+  ASTC_10x8_UNORM,
+  ASTC_10x8_SRGB,
+  ASTC_10x10_UNORM,
+  ASTC_10x10_SRGB,
+  ASTC_12x10_UNORM,
+  ASTC_12x10_SRGB,
+  ASTC_12x12_UNORM,
+  ASTC_12x12_SRGB,
 };
+
+/// Whether \p Format is one of the ASTC block-compressed formats above.
+/// Every format before this point in the enum addresses one texel at a
+/// time (`formatElementSize` bytes each); a block-compressed format
+/// instead packs a whole `blockWidth(Format) x blockHeight(Format)` tile
+/// of texels into one fixed-size `bytesPerBlock(Format)` block, so
+/// `formatElementSize` (a *texel*'s size) is meaningless for it -- see
+/// "Block-compressed formats" in feme/lib/Vulkan/Format.h for the
+/// block-aware layout math this distinction feeds.
+constexpr bool isBlockCompressedFormat(ResourceFormat Format) {
+  return Format >= ResourceFormat::ASTC_4x4_UNORM &&
+         Format <= ResourceFormat::ASTC_12x12_SRGB;
+}
 
 /// Bits of `FemeDescriptor::Flags`.
 enum FemeDescriptorFlagBits : uint32_t {

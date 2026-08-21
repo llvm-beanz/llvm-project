@@ -614,6 +614,65 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "a8-unorm";
   case ResourceFormat::A1B5G5R5_UNORM:
     return "a1b5g5r5-unorm";
+  // (Roadmap E20) ASTC block-compressed formats: no clear-color/texel
+  // fixture support exists for them yet (see `getFixtureFormatElementSize`
+  // below), but they still need a name for diagnostics.
+  case ResourceFormat::ASTC_4x4_UNORM:
+    return "astc-4x4-unorm";
+  case ResourceFormat::ASTC_4x4_SRGB:
+    return "astc-4x4-srgb";
+  case ResourceFormat::ASTC_5x4_UNORM:
+    return "astc-5x4-unorm";
+  case ResourceFormat::ASTC_5x4_SRGB:
+    return "astc-5x4-srgb";
+  case ResourceFormat::ASTC_5x5_UNORM:
+    return "astc-5x5-unorm";
+  case ResourceFormat::ASTC_5x5_SRGB:
+    return "astc-5x5-srgb";
+  case ResourceFormat::ASTC_6x5_UNORM:
+    return "astc-6x5-unorm";
+  case ResourceFormat::ASTC_6x5_SRGB:
+    return "astc-6x5-srgb";
+  case ResourceFormat::ASTC_6x6_UNORM:
+    return "astc-6x6-unorm";
+  case ResourceFormat::ASTC_6x6_SRGB:
+    return "astc-6x6-srgb";
+  case ResourceFormat::ASTC_8x5_UNORM:
+    return "astc-8x5-unorm";
+  case ResourceFormat::ASTC_8x5_SRGB:
+    return "astc-8x5-srgb";
+  case ResourceFormat::ASTC_8x6_UNORM:
+    return "astc-8x6-unorm";
+  case ResourceFormat::ASTC_8x6_SRGB:
+    return "astc-8x6-srgb";
+  case ResourceFormat::ASTC_8x8_UNORM:
+    return "astc-8x8-unorm";
+  case ResourceFormat::ASTC_8x8_SRGB:
+    return "astc-8x8-srgb";
+  case ResourceFormat::ASTC_10x5_UNORM:
+    return "astc-10x5-unorm";
+  case ResourceFormat::ASTC_10x5_SRGB:
+    return "astc-10x5-srgb";
+  case ResourceFormat::ASTC_10x6_UNORM:
+    return "astc-10x6-unorm";
+  case ResourceFormat::ASTC_10x6_SRGB:
+    return "astc-10x6-srgb";
+  case ResourceFormat::ASTC_10x8_UNORM:
+    return "astc-10x8-unorm";
+  case ResourceFormat::ASTC_10x8_SRGB:
+    return "astc-10x8-srgb";
+  case ResourceFormat::ASTC_10x10_UNORM:
+    return "astc-10x10-unorm";
+  case ResourceFormat::ASTC_10x10_SRGB:
+    return "astc-10x10-srgb";
+  case ResourceFormat::ASTC_12x10_UNORM:
+    return "astc-12x10-unorm";
+  case ResourceFormat::ASTC_12x10_SRGB:
+    return "astc-12x10-srgb";
+  case ResourceFormat::ASTC_12x12_UNORM:
+    return "astc-12x12-unorm";
+  case ResourceFormat::ASTC_12x12_SRGB:
+    return "astc-12x12-srgb";
   }
   llvm_unreachable("unhandled ResourceFormat");
 }

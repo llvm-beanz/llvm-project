@@ -45,6 +45,70 @@ TEST(FormatTest, RejectsUnsupportedFormat) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);
 }
 
+TEST(FormatTest, MapsASTCLDRFormats) {
+  // Roadmap E20: all 14 LDR-only ASTC block footprints, each as a
+  // `_UNORM`/`_SRGB` pair.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_4x4_UNORM_BLOCK),
+            ResourceFormat::ASTC_4x4_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_4x4_SRGB_BLOCK),
+            ResourceFormat::ASTC_4x4_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_5x4_UNORM_BLOCK),
+            ResourceFormat::ASTC_5x4_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_5x4_SRGB_BLOCK),
+            ResourceFormat::ASTC_5x4_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_5x5_UNORM_BLOCK),
+            ResourceFormat::ASTC_5x5_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_5x5_SRGB_BLOCK),
+            ResourceFormat::ASTC_5x5_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_6x5_UNORM_BLOCK),
+            ResourceFormat::ASTC_6x5_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_6x5_SRGB_BLOCK),
+            ResourceFormat::ASTC_6x5_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_6x6_UNORM_BLOCK),
+            ResourceFormat::ASTC_6x6_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_6x6_SRGB_BLOCK),
+            ResourceFormat::ASTC_6x6_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x5_UNORM_BLOCK),
+            ResourceFormat::ASTC_8x5_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x5_SRGB_BLOCK),
+            ResourceFormat::ASTC_8x5_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x6_UNORM_BLOCK),
+            ResourceFormat::ASTC_8x6_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x6_SRGB_BLOCK),
+            ResourceFormat::ASTC_8x6_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x8_UNORM_BLOCK),
+            ResourceFormat::ASTC_8x8_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x8_SRGB_BLOCK),
+            ResourceFormat::ASTC_8x8_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x5_UNORM_BLOCK),
+            ResourceFormat::ASTC_10x5_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x5_SRGB_BLOCK),
+            ResourceFormat::ASTC_10x5_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x6_UNORM_BLOCK),
+            ResourceFormat::ASTC_10x6_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x6_SRGB_BLOCK),
+            ResourceFormat::ASTC_10x6_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x8_UNORM_BLOCK),
+            ResourceFormat::ASTC_10x8_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x8_SRGB_BLOCK),
+            ResourceFormat::ASTC_10x8_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x10_UNORM_BLOCK),
+            ResourceFormat::ASTC_10x10_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x10_SRGB_BLOCK),
+            ResourceFormat::ASTC_10x10_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_12x10_UNORM_BLOCK),
+            ResourceFormat::ASTC_12x10_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_12x10_SRGB_BLOCK),
+            ResourceFormat::ASTC_12x10_SRGB);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_12x12_UNORM_BLOCK),
+            ResourceFormat::ASTC_12x12_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_12x12_SRGB_BLOCK),
+            ResourceFormat::ASTC_12x12_SRGB);
+
+  // ASTC HDR-only formats (`_SFLOAT_BLOCK`, roadmap E21) stay unrecognized.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK_EXT), std::nullopt);
+}
+
 TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::R32_FLOAT), 4u);
   EXPECT_EQ(formatElementSize(ResourceFormat::R32G32_FLOAT), 8u);
@@ -55,6 +119,32 @@ TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   // Roadmap E5.
   EXPECT_EQ(formatElementSize(ResourceFormat::A8_UNORM), 1u);
   EXPECT_EQ(formatElementSize(ResourceFormat::A1B5G5R5_UNORM), 2u);
+  // Roadmap E20: block-compressed formats have no per-texel size.
+  EXPECT_EQ(formatElementSize(ResourceFormat::ASTC_4x4_UNORM), 0u);
+}
+
+TEST(FormatTest, BlockDimensionsMatchASTCFootprint) {
+  // Roadmap E20: every ASTC footprint packs into a 16-byte (128-bit) block
+  // regardless of its width/height.
+  EXPECT_EQ(blockWidth(ResourceFormat::ASTC_4x4_UNORM), 4u);
+  EXPECT_EQ(blockHeight(ResourceFormat::ASTC_4x4_UNORM), 4u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ASTC_4x4_UNORM), 16u);
+
+  EXPECT_EQ(blockWidth(ResourceFormat::ASTC_5x4_SRGB), 5u);
+  EXPECT_EQ(blockHeight(ResourceFormat::ASTC_5x4_SRGB), 4u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ASTC_5x4_SRGB), 16u);
+
+  EXPECT_EQ(blockWidth(ResourceFormat::ASTC_12x12_SRGB), 12u);
+  EXPECT_EQ(blockHeight(ResourceFormat::ASTC_12x12_SRGB), 12u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ASTC_12x12_SRGB), 16u);
+
+  // A non-block-compressed format is always a 1x1 "block" of its own
+  // per-texel size, so callers never need to special-case it.
+  EXPECT_EQ(blockWidth(ResourceFormat::R8G8B8A8_UNORM), 1u);
+  EXPECT_EQ(blockHeight(ResourceFormat::R8G8B8A8_UNORM), 1u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::R8G8B8A8_UNORM), 4u);
+  EXPECT_EQ(blockWidth(ResourceFormat::Unknown), 1u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::Unknown), 0u);
 }
 
 TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
@@ -76,6 +166,19 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   EXPECT_FALSE(
       isTexelBufferFormatSupported(ResourceFormat::R8G8B8A8_UNORM_SRGB));
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::Unknown));
+  // Roadmap E20: block-compressed formats cannot back a texel buffer
+  // either -- there is no per-texel conversion to apply.
+  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::ASTC_4x4_UNORM));
+}
+
+TEST(FormatTest, IsBlockCompressedFormatDistinguishesASTC) {
+  // Roadmap E20.
+  EXPECT_TRUE(feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_4x4_UNORM));
+  EXPECT_TRUE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_12x12_SRGB));
+  EXPECT_FALSE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::R8G8B8A8_UNORM));
+  EXPECT_FALSE(feme::cpu::isBlockCompressedFormat(ResourceFormat::Unknown));
 }
 
 } // namespace
