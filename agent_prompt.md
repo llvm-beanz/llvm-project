@@ -26,12 +26,14 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E5 in the roadmap document?
+Can you implement milestone E6 in the roadmap document?
 
-> **`VK_KHR_maintenance5`/`maintenance5`.** Chiefly
-> `VkRenderingAttachmentInfo::imageView == VK_NULL_HANDLE` (an attachment slot
-> present but unused, needing `RenderPass.cpp`'s dynamic-rendering path to skip
-> rather than reject a null view), `VK_FORMAT_A8_UNORM`/`A1B5G5R5_UNORM_PACK16`,
-> and `vkCmdBindIndexBuffer2` (a `size`-bounded variant of the existing bind,
-> sharing `CommandBuffer.cpp`'s existing validation minus the "whole buffer"
-> assumption)
+> **`VK_KHR_maintenance6`/`maintenance6`.**
+> `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`/`vkCmdPushDescriptorSet2` are
+> shape-compatible wrappers around the existing
+> `Descriptor.cpp`/`CommandBuffer.cpp` entrypoints, taking a `pNext`-extensible
+> info struct instead of a flat argument list;
+> `maxCombinedImageSamplerDescriptorCount`'s reporting is the one new limit (E2
+> already reserves the field) | E2, E12 (push descriptor sets need F12's
+> `pushDescriptor` groundwork first if implemented together, otherwise stub
+> `PushDescriptorSet` count `0`)
