@@ -944,7 +944,12 @@ void fillFeatures2Chain(void *pNext) {
       // `VkPhysicalDevicePipelineCreationCacheControlFeatures` struct case
       // below.
       Features->pipelineCreationCacheControl = VK_TRUE;
-      Features->privateData = VK_FALSE;
+      // (roadmap E10) `PrivateData.{h,cpp}` implements
+      // `vkCreatePrivateDataSlot`/`vkSetPrivateData`/`vkGetPrivateData`/
+      // `vkDestroyPrivateDataSlot`, so this bit -- like
+      // `pipelineCreationCacheControl` above -- must agree with the
+      // dedicated `VkPhysicalDevicePrivateDataFeatures` struct case below.
+      Features->privateData = VK_TRUE;
       Features->shaderDemoteToHelperInvocation = VK_FALSE;
       Features->shaderTerminateInvocation = VK_FALSE;
       // (roadmap E7) `Pipeline.cpp`'s `compileComputePipeline` honors both
@@ -1105,6 +1110,17 @@ void fillFeatures2Chain(void *pNext) {
           reinterpret_cast<VkPhysicalDevicePipelineCreationCacheControlFeatures
                                *>(Base);
       Features->pipelineCreationCacheControl = VK_TRUE;
+      break;
+    }
+    // (roadmap E10) `VK_EXT_private_data`'s own feature struct, whose 1.3
+    // core and `EXT` spellings share one `sType`, exactly like
+    // `pipelineCreationCacheControl` above. `PrivateData.{h,cpp}` implements
+    // all four entrypoints unconditionally, so this bit is unconditionally
+    // true.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDevicePrivateDataFeatures *>(Base);
+      Features->privateData = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:

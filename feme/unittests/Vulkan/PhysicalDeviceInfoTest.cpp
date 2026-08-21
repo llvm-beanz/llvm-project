@@ -527,7 +527,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   // SYNCHRONIZED_BIT), and must agree with the dedicated
   // `VK_EXT_pipeline_creation_cache_control` struct case below.
   EXPECT_EQ(Features13.pipelineCreationCacheControl, VK_TRUE);
-  EXPECT_EQ(Features13.privateData, VK_FALSE);
+  // Roadmap E10: now genuinely implemented (PrivateData.{h,cpp}), and must
+  // agree with the dedicated `VK_EXT_private_data` struct case below.
+  EXPECT_EQ(Features13.privateData, VK_TRUE);
   EXPECT_EQ(Features13.shaderDemoteToHelperInvocation, VK_FALSE);
   EXPECT_EQ(Features13.shaderTerminateInvocation, VK_FALSE);
   // Roadmap E7: now genuinely implemented (Pipeline.cpp honors a chained
@@ -616,6 +618,22 @@ TEST_F(
   Features2.pNext = &CacheControlFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(CacheControlFeatures.pipelineCreationCacheControl, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       PrivateDataIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E10: `VK_EXT_private_data`'s own dedicated feature struct must
+  // agree with the aggregate `VkPhysicalDeviceVulkan13Features` case above,
+  // exactly like `VK_EXT_pipeline_creation_cache_control`'s own struct does.
+  VkPhysicalDevicePrivateDataFeatures PrivateDataFeatures{};
+  PrivateDataFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &PrivateDataFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(PrivateDataFeatures.privateData, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
