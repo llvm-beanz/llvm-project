@@ -26402,3 +26402,117 @@ the two unrelated CTS gaps the targeted run surfaced (the SIMD-lowering
 restriction) -- both are real, but neither is this row's own two bits,
 and fixing either would be its own separate roadmap row with its own
 design discussion, not a drive-by inside E9's diff.
+
+# Milestone E10: VK_EXT_private_data/privateData
+
+## Reading the row before touching anything
+
+Roadmap.md's E10 row names its own scope precisely: `VkPrivateDataSlot` as
+"a new, small object (an opaque per-(object-handle) `uint64_t` map)
+alongside the existing object model in `Objects.h`", with four
+"self-contained entrypoints with no dependency on any other row here".
+Checked `vk.xml` first (the same discipline D1/E4/E8 established) to
+confirm what "core" actually means here: `vkCreatePrivateDataSlot`/
+`vkSetPrivateData`/`vkGetPrivateData`/`vkDestroyPrivateDataSlot` are core,
+non-`EXT`-suffixed `VK_VERSION_1_3` entries `vk_gen_entrypoints.py`'s
+`CORE_FEATURES` already resolves (the `VK_EXT_private_data` spelling only
+adds aliases), so no entrypoint-table regeneration was needed -- only
+`ImplementedEntrypoints.txt`/`EntryPoints.h` additions and real bodies, the
+same "already-generated, just needs an implementation" shape D0/E3/E4
+established for their own core-promoted commands.
+
+## One correction to the row's own premise
+
+The row's own file list says "alongside the existing object model in
+`Objects.h`". Looking at `Objects.h`'s own file comment ("The V0 object
+model... `VkInstance`, one software `VkPhysicalDevice`, `VkDevice`, and
+`VkQueue`"), and at `Icd.h`'s `fromHandle`/`toHandle` helpers, it became
+clear a private data slot never needs to know what kind of object a handle
+names -- `vkSetPrivateData`/`vkGetPrivateData` take a `VkObjectType` plus a
+raw `uint64_t` handle value, and this ICD's own contract (Icd.h's own
+casting helpers) never requires dereferencing a handle to use it as an
+opaque key. So `PrivateDataSlot` needed zero changes to `Objects.h` --
+placing it there would have been an arbitrary coupling this row's own
+"no dependency on any other row" clause already argues against. Corrected
+this in Roadmap.md's own closing note rather than silently deviating from
+the written file list, following the same "note where you deviated from
+the design document" discipline every prior E-row's own closing note used
+(E4's `GroupSize.cpp` -> `SPIRVToLLVMPatterns.cpp` correction, E5's
+`RenderPass.cpp` -> `CommandBuffer.cpp` one, E7's `GroupSize.cpp` ->
+`Pipeline.cpp` one).
+
+## Object design: keying on (VkObjectType, uint64_t), not just uint64_t
+
+Considered keying the map on the raw handle value alone (`uint64_t`), since
+every FeMe-issued handle is a distinct heap pointer and collisions across
+object types would be astronomically unlikely in practice. Rejected this:
+the extension's own spec keys explicitly on `(objectType, objectHandle)`
+pairs, and a test exercising that distinction directly
+(`SameHandleValueDifferentObjectTypesAreDistinctKeys`) is cheap to write and
+removes any reliance on an implementation detail (this ICD's own handle
+allocation strategy) the spec itself does not guarantee. `std::pair<VkObjectType, uint64_t>`
+with a small custom hash (`std::unordered_map`'s default has no
+`std::hash<std::pair<...>>` specialization) was the direct, minimal way to
+express that.
+
+## Feature-bit wiring, mirroring E9's own precedent exactly
+
+`privateData` in the aggregate `VkPhysicalDeviceVulkan13Features` case and a
+new dedicated `VkPhysicalDevicePrivateDataFeatures` struct case both flip to
+`VK_TRUE`, in the same two-sided "must agree with each other" pattern every
+E-row since E1 has followed. `getSupportedDeviceExtensions` gained
+`VK_EXT_private_data` itself: checked first (E3/E5/E6/E8/E9's own
+established reason) whether `dEQP-VK.api.object_management.private_data.*`
+enables the extension by name regardless of `apiVersion` -- it does, via
+the same `requireDeviceFunctionality`-style path the CTS source for this
+group uses -- so it had to be listed, not left to the promoted-name-only
+path D0's `copy_commands2` precedent relied on.
+
+## Two pre-existing tests needed updating, not a new redundant one
+
+`DrawTest.AdvertisesDynamicRenderingExtension`'s hard-coded extension count
+(`Count, 7u`) and `PhysicalDeviceProperties2Test.
+DynamicRenderingIsAdvertisedThroughAggregateVulkan13Features`'s
+`Features13.privateData == VK_FALSE` assertion both needed updating in
+place, exactly the same "update the existing assertion rather than add a
+parallel test" discipline E3/E5/E6/E8/E9 each followed for the same two
+tests in turn. Added one new dedicated-struct test
+(`PrivateDataIsAdvertisedThroughItsOwnDedicatedFeatureStruct`), mirroring
+E9's own `PipelineCreationCacheControlIsAdvertisedThroughItsOwnDedicated
+FeatureStruct`.
+
+## Targeted CTS run, following the same evidentiary bar as E9
+
+`dEQP-VK.api.object_management.private_data.*` (40 cases): 37 `Pass`, 2
+`Fail`, 1 `NotSupported`. Did not wave the two failures away as
+"pre-existing" without checking: `compute_pipeline`'s error text
+(`'llvm.getelementptr' op operand #0 must be LLVM pointer type...`) is
+byte-identical to the gap E6/E9's own measured-impact sections already
+attribute to this CPU target's SIMD-widened dispatch lowering, unrelated to
+private data; `graphics_pipeline`'s `feme-cpu-simdize` divergent-vector
+diagnostic is the identical "roadmap milestone 7 deviation" C3/D3 already
+tracked for `ubo.*.std430`. `image_view_cube_arr`'s `NotSupported` is an
+honest report of an unimplemented, unrelated feature (`imageCubeArray`),
+not a private-data gap. Also ran the three consistency-check groups D1/D3
+already track this bit under (`api.info.get_physical_device_properties2.
+features.private_data_features`, `api.info.vulkan1p3.*`, `api.device_init.
+create_device_unsupported_features.private_data_features`): all pass,
+confirming this closes one more entry in D3's own `api.info.*` regression
+bucket. Recorded the full breakdown in VulkanCTSReport.md's new "Roadmap
+E10: measured impact" section rather than only the headline pass count.
+
+## Scope discipline
+
+Touched `PrivateData.{h,cpp}` (new), `EntryPoints.h`/`EntryPoints.cpp`,
+`ImplementedEntrypoints.txt`, `PhysicalDeviceInfo.cpp`, the `CMakeLists.txt`
+files needed to build and test the new source, `PrivateDataTest.cpp` (new),
+the two pre-existing tests this row's own feature-bit flip and extension
+count required updating, and the four documents (`Roadmap.md`,
+`FeMeVulkanDesign.md`, `VulkanCTSReport.md`, this file) every prior E-row
+also touched. Did not touch `vk_gen_entrypoints.py` (the four entrypoints
+are already-generated core 1.3 names, confirmed via `vk.xml` before
+assuming otherwise), did not add any new object to `Objects.h` (see the
+correction above), and did not attempt to fix the two unrelated CTS gaps
+the targeted run surfaced (the SIMD-lowering `getelementptr` issue and the
+divergent-vector decomposition gap) -- both are real, already tracked by
+prior rows' own reports, and out of this row's own scope.
