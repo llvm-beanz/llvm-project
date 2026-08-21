@@ -26,19 +26,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E26 in the roadmap document?
+Can you implement milestone E16 in the roadmap document?
 
-> **Integer-format image sampling/loading.** No `feme.cpu.image.*` entry point
-> returns an integer vector (every sample/load call is `<4 x float>`), so a
-> mandatory-sampled `_UINT`/`_SINT` format (`R32G32B32A32_UINT`/`_SINT`,
-> `R16G16B16A16_UINT`/`_SINT`, `R8G8B8A8_UINT`/`_SINT`, `R10G10B10A2_UINT`, per
-> the spec's own "Mandatory Format Support" tables, roadmap E25's own
-> investigation) cannot be sampled or `OpImageFetch`-loaded at all today, even
-> though `SPIRVResourceLowering.cpp` already raises an integer
-> `OpImageFetch`/`OpImageRead` to a canonical call. Needs a
-> `feme.cpu.image.load.2d.v4i32` (and, if a filtered integer sample is ever
-> legal in SPIR-V, a decision on what "filtering" even means for one) entry
-> point in `FeMeRuntimeCPU.c`, the matching `ImageCalls.{h,cpp}` builder, and an
-> integer decode table (`femeRTUnpackImageTexelI32`-shaped) analogous to E25's
-> own `femeRTUnpackImageTexel`, before `formatFeatureFlags` can honestly set
-> `SAMPLED_IMAGE_BIT` for any integer format
+> **`VK_EXT_image_robustness`/`robustImageAccess`.** Out-of-bounds image
+> reads/writes must return/discard rather than fault; audit
+> `Image.cpp`'s/`ImageOps.cpp`'s existing bounds handling (Executor's texel
+> read/write path) and add an explicit clamp-or-discard for any coordinate
+> outside the image's declared extent that isn't already handled
