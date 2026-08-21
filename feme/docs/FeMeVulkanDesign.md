@@ -2188,7 +2188,26 @@ dependency on this C++ decoder) a raw per-texel data pointer, and that
 runtime has no block-compressed decode of its own (a sample safely reads
 as all-zero, not real data, rather than crashing or misreading bytes).
 
-### V6: Graphics queue and basic rendering
+**Update (roadmap E23, closed):** rather than porting a second ASTC
+decoder into the CPU runtime, `materializeImageDescriptor`
+(`CommandBuffer.cpp`) now bridges back into this C++ decoder itself: when
+a bound image's format is one of the 28 ASTC LDR footprints
+(`feme::cpu::isASTCLdrFormat`), it decodes every sampled mip level (via a
+new file-local `decodeASTCImageForSampling` helper, one `blockPointer`
+plus `feme::vulkan::decodeASTCBlock` call per block) into a per-texel
+RGBA8 buffer owned by the dispatch's `MaterializedBoundResources`, and
+hands the CPU runtime a descriptor pointing at *that* instead of the
+image's raw compressed bytes -- reporting it as `R8G8B8A8_UNORM` (or
+`_UNORM_SRGB` for a `_SRGB` format, so the runtime's existing sRGB decode
+still applies at sample time) rather than an ASTC `ResourceFormat`. The
+CPU runtime (`feme/runtime/CPU/FeMeRuntimeCPU.c`) needed no changes at
+all: its `R8G8B8A8_UNORM`/`_UNORM_SRGB` unpack path already reads exactly
+this shape of data. An HDR ASTC format is unaffected by this change and
+still samples as all-zero -- `decodeASTCBlockHDR`'s float-producing
+interface does not fit this UNORM8 bridge, and stays outside this row's
+LDR-only scope, same as `runBlitImage`'s own HDR-source restriction (E22).
+
+
 
 The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
 first that may not be partial. It depends on FeMeGraphicsDesign.md's G3 *and*
