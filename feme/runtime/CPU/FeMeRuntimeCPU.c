@@ -82,6 +82,21 @@
 // "mechanical, added on demand" scoping as every other still-missing
 // format, tracked as follow-up rather than a gap this row closes.
 //
+// Update (roadmap E26): `feme.cpu.image.load.2d.v4i32` now exists (see
+// "`<4 x i32>` image load" below), giving an integer format's decoded
+// value somewhere correct to go. `femeRTImageFormatElementSize`/a new
+// `femeRTUnpackImageTexelI32` decode exactly the mandatory-sampled
+// `_UINT`/`_SINT` formats the Vulkan spec's own "Mandatory Format Support"
+// tables list (`R32G32B32A32_UINT`/`_SINT`, `R16G16B16A16_UINT`/`_SINT`,
+// `R8G8B8A8_UINT`/`_SINT`, `R10G10B10A2_UINT`) -- narrower than the full
+// integer format list `feme::cpu::ResourceFormat` has (e.g. the
+// partial-component `R32_UINT`/`R32G32_UINT`/`R32G32B32_UINT` are not
+// mandatory-sampled and are left for whichever call site first needs
+// them, the same "mechanical, added on demand" scoping as every other
+// still-missing format). No filtered-sample counterpart is added: SPIR-V
+// never legalizes `OpImageSample*` against an integer-sampled image, only
+// `OpImageFetch`, so there is nothing for one to mean.
+//
 //===----------------------------------------------------------------------===//
 
 #include <stdint.h>
@@ -644,13 +659,13 @@ femeRTLoadSamplerDescriptor(const FemeRTSamplerDescriptor *Heap,
 // Roadmap E25: broadened from the original three-format table
 // (`R32G32B32A32_FLOAT`/`R8G8B8A8_UNORM`/`_UNORM_SRGB`) to every other
 // non-integer, non-block-compressed, non-depth/stencil format
-// `feme::cpu::ResourceFormat` lists -- the CPU runtime has no
-// `feme.cpu.image.*` entry point that returns an integer vector yet (every
-// sample/load call here is `<4 x float>`), so a `_UINT`/`_SINT` format
-// would have nothing to consume its result even if this table decoded it;
-// that gap is unchanged by this row and left for the entry point that
-// first needs it, the same "mechanical, added on demand" scoping this
-// file's header comment already establishes.
+// `feme::cpu::ResourceFormat` lists.
+//
+// Roadmap E26: also covers the mandatory-sampled `_UINT`/`_SINT` formats
+// (see the file header comment) -- one texel's *byte size* does not
+// depend on whether the caller reads it back as `<4 x float>` or
+// `<4 x i32>`, so this table is shared by both `femeRTUnpackImageTexel`
+// and the new `femeRTUnpackImageTexelI32` below rather than duplicated.
 __attribute__((always_inline)) static uint64_t
 femeRTImageFormatElementSize(uint32_t Format) {
   switch (Format) {
@@ -661,15 +676,22 @@ femeRTImageFormatElementSize(uint32_t Format) {
   case 3:  // R32G32B32_FLOAT
     return 12;
   case 4: // R32G32B32A32_FLOAT
+  case 8: // R32G32B32A32_UINT
+  case 12: // R32G32B32A32_SINT
     return 16;
   case 13: // R8G8B8A8_UNORM
   case 14: // R8G8B8A8_SNORM
+  case 15: // R8G8B8A8_UINT
+  case 16: // R8G8B8A8_SINT
   case 17: // R8G8B8A8_UNORM_SRGB
     return 4;
   case 18: // R16G16B16A16_FLOAT
+  case 21: // R16G16B16A16_UINT
+  case 22: // R16G16B16A16_SINT
     return 8;
   case 23: // R11G11B10_FLOAT (packed into a single 4-byte word)
   case 24: // R10G10B10A2_UNORM (packed into a single 4-byte word)
+  case 25: // R10G10B10A2_UINT (packed into a single 4-byte word)
     return 4;
   case 26: // B8G8R8A8_UNORM
     return 4;
@@ -888,6 +910,94 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
   }
 }
 
+// Unpacks a `R16G16B16A16_UINT` value (four unsigned 16-bit words,
+// little-endian) into a `<4 x i32>` by zero-extending each word.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR16G16B16A16Uint(const uint16_t Raw[4]) {
+  FemeRTv4i32 V;
+  V[0] = (int32_t)Raw[0];
+  V[1] = (int32_t)Raw[1];
+  V[2] = (int32_t)Raw[2];
+  V[3] = (int32_t)Raw[3];
+  return V;
+}
+
+// Unpacks a `R16G16B16A16_SINT` value (four signed 16-bit words,
+// little-endian) into a `<4 x i32>` by sign-extending each word.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR16G16B16A16Sint(const uint16_t Raw[4]) {
+  FemeRTv4i32 V;
+  V[0] = (int32_t)(int16_t)Raw[0];
+  V[1] = (int32_t)(int16_t)Raw[1];
+  V[2] = (int32_t)(int16_t)Raw[2];
+  V[3] = (int32_t)(int16_t)Raw[3];
+  return V;
+}
+
+// Unpacks a `R10G10B10A2_UINT` value
+// (`VK_FORMAT_A2B10G10R10_UINT_PACK32`: from the MSB down, 2 bits of A, 10
+// bits of B, 10 bits of G, 10 bits of R) into a `<4 x i32>` by
+// zero-extending each field -- the integer counterpart of
+// `femeRTUnpackR10G10B10A2Unorm`, with no `[0, 1]` normalization.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackR10G10B10A2Uint(uint32_t Raw) {
+  FemeRTv4i32 V;
+  V[0] = (int32_t)(Raw & 0x3FFu);
+  V[1] = (int32_t)((Raw >> 10) & 0x3FFu);
+  V[2] = (int32_t)((Raw >> 20) & 0x3FFu);
+  V[3] = (int32_t)((Raw >> 30) & 0x3u);
+  return V;
+}
+
+// Unpacks one texel of `Format` at `Ptr` into a `<4 x i32>`, or all-zero
+// for a format this table doesn't know (guarded by
+// `femeRTImageFormatElementSize`'s own 0 return at every call site, so this
+// default is unreachable in practice, but kept total rather than partial).
+//
+// Roadmap E26: the integer counterpart of `femeRTUnpackImageTexel` above,
+// covering exactly the mandatory-sampled `_UINT`/`_SINT` formats -- see the
+// file header comment's scope note for why this list is narrower than
+// `femeRTUnpackImageTexel`'s own. `R32G32B32A32_UINT`/`_SINT` need no
+// scalar conversion: the four 32-bit lanes are reinterpreted directly, the
+// same identity-format shortcut `femeCpuResourceLoadTypedV4I32` already
+// takes for the typed-buffer view.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTUnpackImageTexelI32(uint32_t Format, const unsigned char *Ptr) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  switch (Format) {
+  case 8:  // R32G32B32A32_UINT
+  case 12: // R32G32B32A32_SINT: identity format, no conversion.
+    return (FemeRTv4i32) * (const FemeRTv4i32Unaligned *)Ptr;
+  case 15: { // R8G8B8A8_UINT
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR8G8B8A8Uint(Raw);
+  }
+  case 16: { // R8G8B8A8_SINT
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR8G8B8A8Sint(Raw);
+  }
+  case 21: { // R16G16B16A16_UINT
+    uint16_t Raw[4];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16B16A16Uint(Raw);
+  }
+  case 22: { // R16G16B16A16_SINT
+    uint16_t Raw[4];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR16G16B16A16Sint(Raw);
+  }
+  case 25: { // R10G10B10A2_UINT
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR10G10B10A2Uint(Raw);
+  }
+  default:
+    return Zero;
+  }
+}
+
 // Applies `SamplerAddressMode` `Mode` to one coordinate axis: `Coord` (an
 // integer texel index, possibly outside `[0, Size)`) against axis extent
 // `Size`. Sets `*UseBorder` if the result should be replaced by the
@@ -960,6 +1070,30 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
   return femeRTUnpackImageTexel(Img->Format, Ptr);
+}
+
+// The integer counterpart of `femeRTFetchTexel2D` above, for
+// `feme.cpu.image.load.2d.v4i32` (roadmap E26). Takes no border color: an
+// integer-channel image is only ever reached through `Load2D`/
+// `OpImageFetch` (see ImageCalls.h's `Load2DI32` comment), which -- like
+// its float counterpart -- addresses no sampler and therefore no address
+// mode, so there is no `ClampToBorder` case to honor here either.
+__attribute__((always_inline)) static FemeRTv4i32
+femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
+                      int32_t X, int32_t Y) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Img->Data || Level >= Img->MipLayoutCount)
+    return Zero;
+  uint64_t ElemSize = femeRTImageFormatElementSize(Img->Format);
+  if (ElemSize == 0)
+    return Zero;
+  const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
+  uint64_t Offset =
+      Layout->Offset + (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  if (Offset + ElemSize > Img->SizeInBytes)
+    return Zero;
+  const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
+  return femeRTUnpackImageTexelI32(Img->Format, Ptr);
 }
 
 // Selects the mip level a sample reads from: `Lod` clamped to
@@ -1216,4 +1350,30 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   return femeRTFetchTexel2D(&Img, Mip, X, Y, /*UseBorder=*/0, NoBorder);
+}
+
+// `feme.cpu.image.load.2d.v4i32` (roadmap E26): the integer-format
+// counterpart of `feme.cpu.image.load.2d.v4f32` above -- same bounds
+// checking and no-sampler/no-filtering semantics, decoded through
+// `femeRTUnpackImageTexelI32`'s `_UINT`/`_SINT` table instead of
+// `femeRTUnpackImageTexel`'s float one.
+FemeRTv4i32
+femeCpuImageLoad2DV4I32(const FemeRTImageDescriptor *ImageHeap,
+                        uint32_t ImageHeapCount, uint32_t ImageIndex, int32_t X,
+                        int32_t Y, uint32_t Mip,
+                        _Bool Mask) asm("feme.cpu.image.load.2d.v4i32");
+
+__attribute__((always_inline)) FemeRTv4i32 femeCpuImageLoad2DV4I32(
+    const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Mip, _Bool Mask) {
+  FemeRTv4i32 Zero = {0, 0, 0, 0};
+  if (!Mask)
+    return Zero;
+  FemeRTImageDescriptor Img =
+      femeRTLoadImageDescriptor(ImageHeap, ImageHeapCount, ImageIndex);
+  if (!Img.Data)
+    return Zero;
+  if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
+    return Zero;
+  return femeRTFetchTexel2DI32(&Img, Mip, X, Y);
 }

@@ -113,6 +113,10 @@ using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              void *);
 using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
                         int32_t, int32_t, uint32_t, bool, void *);
+/// The `feme.cpu.image.load.2d.v4i32` (roadmap E26) counterpart of `LoadFn`,
+/// same operand shape but a `<4 x i32>`-shaped `out`.
+using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
+                           int32_t, int32_t, uint32_t, bool, void *);
 
 /// Builds a single-mip-level, single-layer 2D `FemeImageDescriptor` over
 /// \p Storage (assumed row-major, tightly packed at \p Format's element
@@ -571,6 +575,118 @@ TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {
      /*Mask=*/false, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
+}
+
+// Roadmap E26: `feme.cpu.image.load.2d.v4i32`, the integer counterpart of
+// `feme.cpu.image.load.2d.v4f32` above -- each exercises one of the
+// mandatory-sampled `_UINT`/`_SINT` formats `femeRTUnpackImageTexelI32`
+// decodes.
+
+TEST_F(ImageSamplingTest, LoadI32FetchesIdentityFormat) {
+  // `R32G32B32A32_UINT`/`_SINT` need no scalar conversion: the four 32-bit
+  // lanes are reinterpreted directly.
+  int32_t Storage[1][1][4] = {{{1, -2, 3, -4}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32A32_SINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 1);
+  EXPECT_EQ(Out[1], -2);
+  EXPECT_EQ(Out[2], 3);
+  EXPECT_EQ(Out[3], -4);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR8G8B8A8Sint) {
+  int8_t Bytes[4] = {-1, 2, -3, 4};
+  uint32_t Storage[1][1];
+  memcpy(Storage, Bytes, sizeof(Bytes));
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R8G8B8A8_SINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], -1);
+  EXPECT_EQ(Out[1], 2);
+  EXPECT_EQ(Out[2], -3);
+  EXPECT_EQ(Out[3], 4);
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR16G16B16A16Uint) {
+  uint16_t Storage[1][1][4] = {{{1, 2, 3, 65535}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R16G16B16A16_UINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 1);
+  EXPECT_EQ(Out[1], 2);
+  EXPECT_EQ(Out[2], 3);
+  EXPECT_EQ(Out[3], 65535); // Zero-extended, not sign-extended.
+}
+
+TEST_F(ImageSamplingTest, LoadI32FetchesR10G10B10A2Uint) {
+  // From the MSB down: 2 bits of A, 10 bits of B, 10 bits of G, 10 bits of
+  // R -- A = 3, B = 512, G = 256, R = 1.
+  uint32_t Storage[1][1] = {{(3u << 30) | (512u << 20) | (256u << 10) | 1u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R10G10B10A2_UINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_EQ(Out[0], 1);
+  EXPECT_EQ(Out[1], 256);
+  EXPECT_EQ(Out[2], 512);
+  EXPECT_EQ(Out[3], 3);
+}
+
+TEST_F(ImageSamplingTest, LoadI32OutOfRangeCoordinateReadsZero) {
+  int32_t Storage[1][1][4] = {{{1, 2, 3, 4}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32A32_UINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4] = {5, 5, 5, 5};
+  Fn(ImageHeap, 1, 0, /*X=*/1, /*Y=*/0, 0, true, Out);
+  EXPECT_EQ(Out[0], 0);
+  EXPECT_EQ(Out[1], 0);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 0);
+}
+
+TEST_F(ImageSamplingTest, LoadI32InactiveLaneReadsZero) {
+  int32_t Storage[1][1][4] = {{{1, 2, 3, 4}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R32G32B32A32_UINT,
+      Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadI32Fn Fn = resolve<LoadI32Fn>(
+      addWrapper("load_i32", "feme.cpu.image.load.2d.v4i32"));
+  int32_t Out[4] = {9, 9, 9, 9};
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Mask=*/false, Out);
+  EXPECT_EQ(Out[0], 0);
+  EXPECT_EQ(Out[1], 0);
+  EXPECT_EQ(Out[2], 0);
+  EXPECT_EQ(Out[3], 0);
 }
 
 } // namespace
