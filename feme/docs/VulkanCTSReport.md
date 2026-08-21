@@ -2122,6 +2122,58 @@ entry) rather than fixed as a drive-by, the same discipline E12's own
 `vkGetPhysicalDeviceFormatProperties` correction and E6's own
 `secondary_push_constants_2` finding already established for this report.
 
+## Roadmap E14: measured impact
+
+Roadmap E14 (`VK_EXT_inline_uniform_block`/`inlineUniformBlock` +
+`descriptorBindingInlineUniformBlockUpdateAfterBind`) added a third
+per-binding storage kind to `feme::vulkan::DescriptorSet` -- a plain byte
+blob, alongside the existing handle-array buffer/image ones (Descriptor.
+{h,cpp}) -- and a `VkWriteDescriptorSetInlineUniformBlock` pNext case to
+`vkUpdateDescriptorSets`, `vkUpdateDescriptorSetWithTemplate`, and
+`VkCopyDescriptorSet`'s copy path. Per this row's own stated scope, this is
+the descriptor object model only: no `feme::cpu::SPIRVResourceLoweringPass`
+conversion consumes an inline uniform block from a real dispatch yet.
+
+**Targeted CTS run**, against this session's HEAD build, of every case
+under `dEQP-VK.binding_model.inline_uniform_blocks.*` (the dedicated
+group) plus every `*inline_uniform_block*`-named case under
+`dEQP-VK.api.*` and the rest of `dEQP-VK.binding_model.*` (136 cases
+total):
+
+| Result | Count | Detail |
+|---|---:|---|
+| `Pass` | 3 | `api.device_init.create_device_unsupported_features.inline_uniform_block_features`, `api.info.get_physical_device_properties2.features.inline_uniform_block_features`, `api.info.vulkan1p2_limits_validation.ext_inline_uniform_block` -- the feature/property advertisement itself, exactly this row's own scope |
+| `Fail` (`vk.createGraphicsPipelines(...)`) | 17 | Every graphics-shaped case (`descriptor_buffer.*`, `descriptor_copy.graphics*`) fails at graphics pipeline creation -- this ICD is compute-only (`FeMeVulkanDesign.md`'s "Initial Non-Goals"), unrelated to inline uniform blocks specifically |
+| `Fail` (`vk.createComputePipelines(...)`) | 8 | `descriptor_copy.compute.inline_uniform_block_*`: a real compute shader that actually *reads* through an inline-uniform-block binding fails pipeline creation cleanly, because `SPIRVResourceLoweringPass` has no conversion for this resource kind yet -- exactly the "object model only, dispatch consumption deferred" scope this row's own text states, not a regression |
+| `NotSupported` | 108 | 78 need `VK_EXT_descriptor_buffer`, 24 need `VK_EXT_descriptor_indexing`, 6 exceed `maxBoundDescriptorSets` -- none of which this row touches |
+
+**This also found and fixed a genuine, in-scope limits bug**: the first
+run of `dEQP-VK.api.info.vulkan1p2_limits_validation.ext_inline_uniform_block`
+failed, reporting `maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks`/
+`maxDescriptorSetUpdateAfterBindInlineUniformBlocks` as `0` against a
+required `>= 4` floor. Unlike Vulkan 1.2's own descriptor-indexing
+`UpdateAfterBind` limits (which stay `0` alongside a `VK_FALSE`
+`descriptorIndexing`, and are not cross-checked unconditionally), these two
+`VK_EXT_inline_uniform_block` limits are required independent of
+`descriptorBindingInlineUniformBlockUpdateAfterBind`'s own value -- both
+now equal their non-`UpdateAfterBind` counterparts (4) instead of a literal
+`0`, and the same targeted case now passes.
+
+**No case produces a wrong answer**: every failure above is a clean
+rejection (`VK_ERROR_INITIALIZATION_FAILED`) at pipeline creation, not a
+`Pass`-shaped result carrying incorrect descriptor data, matching the
+"must fail before draw time, not silently misbehave" contract every
+FeMeVulkanDesign.md milestone states. A broader regression check --
+`check-feme` (1586 passed, 1 unsupported, unchanged) plus a full
+`dEQP-VK.api.*` (267,222 cases: 8,108 passed, 249 failed, same shape as
+before this row, with `vulkan1p3.feature_extensions_consistency`/
+`property_extensions_consistency` and `get_physical_device_properties2.
+features.inline_uniform_block_features` all newly `Pass`) and full
+`dEQP-VK.binding_model.*` (150,259 cases: 1 passed, 20,379 failed, all
+clean `VK_ERROR_INITIALIZATION_FAILED`/`VK_ERROR_FORMAT_NOT_SUPPORTED`
+rejections, no crash) -- found no regression from advertising this
+extension.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
