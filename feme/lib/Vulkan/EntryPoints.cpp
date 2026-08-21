@@ -407,13 +407,21 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props13->maxSubgroupSize = Info.MaxSubgroupSize;
       Props13->maxComputeWorkgroupSubgroups = Info.MaxComputeWorkgroupSubgroups;
       Props13->requiredSubgroupSizeStages = Info.RequiredSubgroupSizeStages;
-      // `inlineUniformBlock` is unimplemented.
-      Props13->maxInlineUniformBlockSize = 0;
-      Props13->maxPerStageDescriptorInlineUniformBlocks = 0;
+      // (roadmap E14) `inlineUniformBlock` is implemented (Descriptor.{h,cpp}'s
+      // byte-blob descriptor storage); these five limits agree with the
+      // dedicated `VkPhysicalDeviceInlineUniformBlockProperties` case
+      // below, exactly like `subgroupSizeControl`'s four fields above.
+      // The `UpdateAfterBind` variant stays `0`: no update-after-bind/
+      // descriptor-indexing mechanism exists in this ICD at all yet (see
+      // `descriptorBindingInlineUniformBlockUpdateAfterBind` below).
+      Props13->maxInlineUniformBlockSize = Info.MaxInlineUniformBlockSize;
+      Props13->maxPerStageDescriptorInlineUniformBlocks =
+          Info.MaxPerStageDescriptorInlineUniformBlocks;
       Props13->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 0;
-      Props13->maxDescriptorSetInlineUniformBlocks = 0;
+      Props13->maxDescriptorSetInlineUniformBlocks =
+          Info.MaxDescriptorSetInlineUniformBlocks;
       Props13->maxDescriptorSetUpdateAfterBindInlineUniformBlocks = 0;
-      Props13->maxInlineUniformTotalSize = 0;
+      Props13->maxInlineUniformTotalSize = Info.MaxInlineUniformTotalSize;
       // (roadmap E8) All 36 `integerDotProduct*Accelerated` bits: no
       // `OpSDot`/`OpUDot`/`OpSUDot`-family lowering exists yet, so every
       // one is honestly `VK_FALSE` until that row lands.
@@ -632,6 +640,27 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           Info.RequiredSubgroupSizeStages;
       break;
     }
+    // (roadmap E14) `VK_EXT_inline_uniform_block`'s own properties struct,
+    // whose 1.3 core and `EXT` spellings share one `sType`, agreeing with
+    // the aggregate `VkPhysicalDeviceVulkan13Properties` case above exactly
+    // like `VkPhysicalDeviceSubgroupSizeControlProperties` already does for
+    // its own fields.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_PROPERTIES: {
+      auto *InlineUniformBlock =
+          reinterpret_cast<VkPhysicalDeviceInlineUniformBlockProperties *>(
+              Base);
+      InlineUniformBlock->maxInlineUniformBlockSize =
+          Info.MaxInlineUniformBlockSize;
+      InlineUniformBlock->maxPerStageDescriptorInlineUniformBlocks =
+          Info.MaxPerStageDescriptorInlineUniformBlocks;
+      InlineUniformBlock
+          ->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 0;
+      InlineUniformBlock->maxDescriptorSetInlineUniformBlocks =
+          Info.MaxDescriptorSetInlineUniformBlocks;
+      InlineUniformBlock->maxDescriptorSetUpdateAfterBindInlineUniformBlocks =
+          0;
+      break;
+    }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own properties
     // struct, whose 1.3 core and `KHR` spellings share one `sType`,
     // agreeing with the aggregate `VkPhysicalDeviceVulkan13Properties`
@@ -641,21 +670,21 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     // SPIRVToLLVMPatterns.cpp), but it is an ordinary per-lane multiply-add
     // sequence, not a hardware-accelerated one, on this CPU target.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES: {
-      auto *ShaderIntegerDotProduct = reinterpret_cast<
-          VkPhysicalDeviceShaderIntegerDotProductProperties *>(Base);
+      auto *ShaderIntegerDotProduct =
+          reinterpret_cast<VkPhysicalDeviceShaderIntegerDotProductProperties *>(
+              Base);
       ShaderIntegerDotProduct->integerDotProduct8BitUnsignedAccelerated =
           VK_FALSE;
       ShaderIntegerDotProduct->integerDotProduct8BitSignedAccelerated =
           VK_FALSE;
-      ShaderIntegerDotProduct
-          ->integerDotProduct8BitMixedSignednessAccelerated = VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct8BitMixedSignednessAccelerated =
+          VK_FALSE;
       ShaderIntegerDotProduct
           ->integerDotProduct4x8BitPackedUnsignedAccelerated = VK_FALSE;
-      ShaderIntegerDotProduct
-          ->integerDotProduct4x8BitPackedSignedAccelerated = VK_FALSE;
-      ShaderIntegerDotProduct
-          ->integerDotProduct4x8BitPackedMixedSignednessAccelerated =
+      ShaderIntegerDotProduct->integerDotProduct4x8BitPackedSignedAccelerated =
           VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct4x8BitPackedMixedSignednessAccelerated = VK_FALSE;
       ShaderIntegerDotProduct->integerDotProduct16BitUnsignedAccelerated =
           VK_FALSE;
       ShaderIntegerDotProduct->integerDotProduct16BitSignedAccelerated =
@@ -934,7 +963,17 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan13Features *>(Base);
       Features->robustImageAccess = VK_FALSE;
-      Features->inlineUniformBlock = VK_FALSE;
+      // (roadmap E14) `Descriptor.{h,cpp}`'s byte-blob descriptor storage
+      // implements `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK`, so this bit
+      // -- like `dynamicRendering` above -- must agree with the dedicated
+      // `VkPhysicalDeviceInlineUniformBlockFeatures` struct case below.
+      // `descriptorBindingInlineUniformBlockUpdateAfterBind` stays
+      // `VK_FALSE`: it only matters once a binding can be marked
+      // `VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT`
+      // (`VkDescriptorSetLayoutBindingFlagsCreateInfo`), and no
+      // update-after-bind/descriptor-indexing mechanism exists in this ICD
+      // at all yet (`descriptorIndexing` below is likewise `VK_FALSE`).
+      Features->inlineUniformBlock = VK_TRUE;
       Features->descriptorBindingInlineUniformBlockUpdateAfterBind = VK_FALSE;
       // (roadmap E9) `Pipeline.cpp`/`GraphicsPipeline.cpp` honor
       // `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, and
@@ -1090,6 +1129,19 @@ void fillFeatures2Chain(void *pNext) {
       Features->computeFullSubgroups = VK_TRUE;
       break;
     }
+    // (roadmap E14) `VK_EXT_inline_uniform_block`'s own feature struct,
+    // whose 1.3 core and `EXT` spellings share one `sType`, exactly like
+    // `subgroupSizeControl` above.
+    // `descriptorBindingInlineUniformBlockUpdateAfterBind` stays
+    // `VK_FALSE` here too, for the same reason the aggregate
+    // `VkPhysicalDeviceVulkan13Features` case documents.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceInlineUniformBlockFeatures *>(Base);
+      Features->inlineUniformBlock = VK_TRUE;
+      Features->descriptorBindingInlineUniformBlockUpdateAfterBind = VK_FALSE;
+      break;
+    }
     // (roadmap E5) `VK_KHR_maintenance5`'s own feature struct. Unlike
     // `dynamicRendering`/`synchronization2`/`maintenance4` above, this
     // extension's core promotion added no core-spelled alias struct of its
@@ -1132,9 +1184,8 @@ void fillFeatures2Chain(void *pNext) {
     // `subgroupSizeControl` above -- must agree with the aggregate
     // `VkPhysicalDeviceVulkan13Features` case above.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES: {
-      auto *Features =
-          reinterpret_cast<VkPhysicalDevicePipelineCreationCacheControlFeatures
-                               *>(Base);
+      auto *Features = reinterpret_cast<
+          VkPhysicalDevicePipelineCreationCacheControlFeatures *>(Base);
       Features->pipelineCreationCacheControl = VK_TRUE;
       break;
     }
@@ -1157,9 +1208,8 @@ void fillFeatures2Chain(void *pNext) {
     // so this bit -- like those above -- must agree with the aggregate
     // `VkPhysicalDeviceVulkan13Features` case above.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES: {
-      auto *Features =
-          reinterpret_cast<
-              VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures *>(Base);
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures *>(Base);
       Features->shaderDemoteToHelperInvocation = VK_TRUE;
       break;
     }
@@ -1171,8 +1221,9 @@ void fillFeatures2Chain(void *pNext) {
     // -- must agree with the aggregate `VkPhysicalDeviceVulkan13Features`
     // case above.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES: {
-      auto *Features = reinterpret_cast<
-          VkPhysicalDeviceShaderTerminateInvocationFeatures *>(Base);
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceShaderTerminateInvocationFeatures *>(
+              Base);
       Features->shaderTerminateInvocation = VK_TRUE;
       break;
     }

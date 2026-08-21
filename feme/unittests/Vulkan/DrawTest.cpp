@@ -1405,7 +1405,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 11u);
+  ASSERT_EQ(Count, 12u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -1425,21 +1425,22 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   // Roadmap E6.
   EXPECT_TRUE(HasExtension(VK_KHR_MAINTENANCE_6_EXTENSION_NAME));
   // Roadmap E8.
-  EXPECT_TRUE(
-      HasExtension(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME));
+  EXPECT_TRUE(HasExtension(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME));
   // Roadmap E9.
   EXPECT_TRUE(
       HasExtension(VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME));
   // Roadmap E10.
   EXPECT_TRUE(HasExtension(VK_EXT_PRIVATE_DATA_EXTENSION_NAME));
   // Roadmap E11.
-  EXPECT_TRUE(HasExtension(
-      VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME));
+  EXPECT_TRUE(
+      HasExtension(VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME));
   // Roadmap E12.
   EXPECT_TRUE(HasExtension(VK_KHR_SHADER_TERMINATE_INVOCATION_EXTENSION_NAME));
   // Roadmap E13.
   EXPECT_TRUE(
       HasExtension(VK_KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_EXTENSION_NAME));
+  // Roadmap E14.
+  EXPECT_TRUE(HasExtension(VK_EXT_INLINE_UNIFORM_BLOCK_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;

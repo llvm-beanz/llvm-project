@@ -285,8 +285,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   // `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` below uses (a
   // 0xAA fill pattern would otherwise leave an unset field looking like a
   // plausible, but coincidental, non-zero value). Every field but
-  // `maxBufferSize` (roadmap E4) and the four `subgroupSizeControl` fields
-  // (roadmap E7, both real once `VK_EXT_subgroup_size_control` landed, see
+  // `maxBufferSize` (roadmap E4), the four `subgroupSizeControl` fields
+  // (roadmap E7), and the four non-`UpdateAfterBind` `inlineUniformBlock`
+  // fields (roadmap E14, all real once their own extension landed, see
   // below) is `0`/`VK_FALSE`: each one is cross-checked by
   // `dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` against
   // its own still-unimplemented dedicated-extension struct (see
@@ -310,13 +311,18 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Props13.maxComputeWorkgroupSubgroups, 32u);
   EXPECT_EQ(Props13.requiredSubgroupSizeStages,
             static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT));
-  EXPECT_EQ(Props13.maxInlineUniformBlockSize, 0u);
-  EXPECT_EQ(Props13.maxPerStageDescriptorInlineUniformBlocks, 0u);
+  // (roadmap E14) Real once `VK_EXT_inline_uniform_block` landed: see
+  // `InlineUniformBlockPropertiesMatchDedicatedStruct` below for the
+  // dedicated-struct cross-check these must agree with. The two
+  // `UpdateAfterBind` variants stay `0`: no update-after-bind/
+  // descriptor-indexing mechanism exists in this ICD at all yet.
+  EXPECT_EQ(Props13.maxInlineUniformBlockSize, 256u);
+  EXPECT_EQ(Props13.maxPerStageDescriptorInlineUniformBlocks, 4u);
   EXPECT_EQ(Props13.maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks,
             0u);
-  EXPECT_EQ(Props13.maxDescriptorSetInlineUniformBlocks, 0u);
+  EXPECT_EQ(Props13.maxDescriptorSetInlineUniformBlocks, 4u);
   EXPECT_EQ(Props13.maxDescriptorSetUpdateAfterBindInlineUniformBlocks, 0u);
-  EXPECT_EQ(Props13.maxInlineUniformTotalSize, 0u);
+  EXPECT_EQ(Props13.maxInlineUniformTotalSize, 1024u);
   // (roadmap E8) All 36 `integerDotProduct*Accelerated` bits stay
   // `VK_FALSE`: a real `spirv`->`llvm` lowering exists
   // (SPIRVToLLVMPatterns.cpp), but it is an ordinary CPU multiply-add
@@ -518,7 +524,13 @@ TEST_F(PhysicalDeviceProperties2Test,
 
   EXPECT_EQ(Features13.dynamicRendering, VK_TRUE);
   EXPECT_EQ(Features13.robustImageAccess, VK_FALSE);
-  EXPECT_EQ(Features13.inlineUniformBlock, VK_FALSE);
+  // Roadmap E14: now genuinely implemented (Descriptor.{h,cpp}'s byte-blob
+  // descriptor storage), and must agree with the dedicated
+  // `VK_EXT_inline_uniform_block` struct case below.
+  // `descriptorBindingInlineUniformBlockUpdateAfterBind` stays `VK_FALSE`:
+  // no update-after-bind/descriptor-indexing mechanism exists in this ICD
+  // at all yet.
+  EXPECT_EQ(Features13.inlineUniformBlock, VK_TRUE);
   EXPECT_EQ(Features13.descriptorBindingInlineUniformBlockUpdateAfterBind,
             VK_FALSE);
   // Roadmap E9: now genuinely implemented (Pipeline.cpp/GraphicsPipeline.cpp
@@ -612,6 +624,57 @@ TEST_F(
             Props13.maxComputeWorkgroupSubgroups);
   EXPECT_EQ(SubgroupSizeControlProps.requiredSubgroupSizeStages,
             Props13.requiredSubgroupSizeStages);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    InlineUniformBlockIsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs) {
+  // Roadmap E14: `VK_EXT_inline_uniform_block`'s own dedicated
+  // feature/properties structs must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Features`/`Properties` cases above, exactly
+  // like `VK_EXT_subgroup_size_control`'s own structs do.
+  VkPhysicalDeviceInlineUniformBlockFeatures InlineUniformBlockFeatures{};
+  InlineUniformBlockFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &InlineUniformBlockFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(InlineUniformBlockFeatures.inlineUniformBlock, VK_TRUE);
+  EXPECT_EQ(InlineUniformBlockFeatures
+                .descriptorBindingInlineUniformBlockUpdateAfterBind,
+            VK_FALSE);
+
+  VkPhysicalDeviceInlineUniformBlockProperties InlineUniformBlockProps{};
+  InlineUniformBlockProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &InlineUniformBlockProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(InlineUniformBlockProps.maxInlineUniformBlockSize, 256u);
+  EXPECT_EQ(InlineUniformBlockProps.maxPerStageDescriptorInlineUniformBlocks,
+            4u);
+  EXPECT_EQ(InlineUniformBlockProps
+                .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks,
+            0u);
+  EXPECT_EQ(InlineUniformBlockProps.maxDescriptorSetInlineUniformBlocks, 4u);
+  EXPECT_EQ(InlineUniformBlockProps
+                .maxDescriptorSetUpdateAfterBindInlineUniformBlocks,
+            0u);
+
+  VkPhysicalDeviceVulkan13Properties Props13{};
+  Props13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
+  Props2.pNext = &Props13;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(InlineUniformBlockProps.maxInlineUniformBlockSize,
+            Props13.maxInlineUniformBlockSize);
+  EXPECT_EQ(InlineUniformBlockProps.maxPerStageDescriptorInlineUniformBlocks,
+            Props13.maxPerStageDescriptorInlineUniformBlocks);
+  EXPECT_EQ(InlineUniformBlockProps.maxDescriptorSetInlineUniformBlocks,
+            Props13.maxDescriptorSetInlineUniformBlocks);
 }
 
 TEST_F(
@@ -785,8 +848,7 @@ TEST_F(
   Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
   Props2.pNext = &DotProductProps;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
-  EXPECT_EQ(DotProductProps.integerDotProduct8BitUnsignedAccelerated,
-            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct8BitUnsignedAccelerated, VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct8BitSignedAccelerated, VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct8BitMixedSignednessAccelerated,
             VK_FALSE);
@@ -795,35 +857,29 @@ TEST_F(
   EXPECT_EQ(DotProductProps.integerDotProduct4x8BitPackedSignedAccelerated,
             VK_FALSE);
   EXPECT_EQ(
-      DotProductProps
-          .integerDotProduct4x8BitPackedMixedSignednessAccelerated,
+      DotProductProps.integerDotProduct4x8BitPackedMixedSignednessAccelerated,
       VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct16BitUnsignedAccelerated,
             VK_FALSE);
-  EXPECT_EQ(DotProductProps.integerDotProduct16BitSignedAccelerated,
-            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct16BitSignedAccelerated, VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct16BitMixedSignednessAccelerated,
             VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct32BitUnsignedAccelerated,
             VK_FALSE);
-  EXPECT_EQ(DotProductProps.integerDotProduct32BitSignedAccelerated,
-            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct32BitSignedAccelerated, VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct32BitMixedSignednessAccelerated,
             VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct64BitUnsignedAccelerated,
             VK_FALSE);
-  EXPECT_EQ(DotProductProps.integerDotProduct64BitSignedAccelerated,
-            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct64BitSignedAccelerated, VK_FALSE);
   EXPECT_EQ(DotProductProps.integerDotProduct64BitMixedSignednessAccelerated,
             VK_FALSE);
-  EXPECT_EQ(
-      DotProductProps
-          .integerDotProductAccumulatingSaturating8BitUnsignedAccelerated,
-      VK_FALSE);
-  EXPECT_EQ(
-      DotProductProps
-          .integerDotProductAccumulatingSaturating8BitSignedAccelerated,
-      VK_FALSE);
+  EXPECT_EQ(DotProductProps
+                .integerDotProductAccumulatingSaturating8BitUnsignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps
+                .integerDotProductAccumulatingSaturating8BitSignedAccelerated,
+            VK_FALSE);
   EXPECT_EQ(
       DotProductProps
           .integerDotProductAccumulatingSaturating8BitMixedSignednessAccelerated,
@@ -844,10 +900,9 @@ TEST_F(
       DotProductProps
           .integerDotProductAccumulatingSaturating16BitUnsignedAccelerated,
       VK_FALSE);
-  EXPECT_EQ(
-      DotProductProps
-          .integerDotProductAccumulatingSaturating16BitSignedAccelerated,
-      VK_FALSE);
+  EXPECT_EQ(DotProductProps
+                .integerDotProductAccumulatingSaturating16BitSignedAccelerated,
+            VK_FALSE);
   EXPECT_EQ(
       DotProductProps
           .integerDotProductAccumulatingSaturating16BitMixedSignednessAccelerated,
@@ -856,10 +911,9 @@ TEST_F(
       DotProductProps
           .integerDotProductAccumulatingSaturating32BitUnsignedAccelerated,
       VK_FALSE);
-  EXPECT_EQ(
-      DotProductProps
-          .integerDotProductAccumulatingSaturating32BitSignedAccelerated,
-      VK_FALSE);
+  EXPECT_EQ(DotProductProps
+                .integerDotProductAccumulatingSaturating32BitSignedAccelerated,
+            VK_FALSE);
   EXPECT_EQ(
       DotProductProps
           .integerDotProductAccumulatingSaturating32BitMixedSignednessAccelerated,
@@ -868,10 +922,9 @@ TEST_F(
       DotProductProps
           .integerDotProductAccumulatingSaturating64BitUnsignedAccelerated,
       VK_FALSE);
-  EXPECT_EQ(
-      DotProductProps
-          .integerDotProductAccumulatingSaturating64BitSignedAccelerated,
-      VK_FALSE);
+  EXPECT_EQ(DotProductProps
+                .integerDotProductAccumulatingSaturating64BitSignedAccelerated,
+            VK_FALSE);
   EXPECT_EQ(
       DotProductProps
           .integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated,
