@@ -27062,3 +27062,182 @@ touched. Did not fix the `OpTypeArray`-from-spec-constant gap, the
 vector-GEP-base gap, or the `i1`-composite GEP crash -- all three are
 corrections to gaps this row's own scope does not name, found along the
 way, not this row's own scope to close.
+
+# Milestone E14: VK_EXT_inline_uniform_block/inlineUniformBlock
+
+## Premise vs. audit
+
+The row's own premise was narrow and precise, and the audit confirmed
+it needed no correction of shape (unlike E11/E12/E13, each of which
+found the premise's guessed mechanism didn't exist and something had
+to be built first): `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK` really is
+a new `VkDescriptorType` whose descriptor is inline byte storage, and
+`Descriptor.{h,cpp}`'s existing per-binding storage really did just
+need a third, byte-blob variant alongside its handle-array (buffer) and
+image/sampler ones. The one thing the premise's own text didn't spell
+out -- but which followed immediately from reading the existing code
+before touching it -- is that `vkUpdateDescriptorSets` is not the only
+place descriptors get written: `vkUpdateDescriptorSetWithTemplate` and
+`VkCopyDescriptorSet`'s own copy loop (both already in Descriptor.cpp)
+share the same object model and needed the identical byte-ranged
+special case, since Vulkan repurposes `dstArrayElement`/
+`srcArrayElement`/`descriptorCount` as byte offsets/counts for this one
+descriptor type in all three paths, not just the one the premise named.
+
+## Design: `descriptorCount` means bytes, not array elements
+
+Every other descriptor type's `VkDescriptorSetLayoutBinding::
+descriptorCount` is an array length; `DescriptorSetLayoutBinding::Count`
+already existed to hold exactly that. Rather than add a parallel
+"ByteSize" field only inline uniform blocks use (which would leave two
+meanings live on one struct depending on a runtime tag, an easy source
+of "which one did I mean here" bugs later), I kept `Count` as the one
+field and documented in its own doc comment that this one descriptor
+type repurposes it as a byte size -- matching Vulkan's own spec
+language exactly, so a reader who already knows the spec recognizes the
+convention immediately, and a reader who doesn't gets told at the one
+place they'd look. `DescriptorSet`'s constructor already switches on
+descriptor-type category to decide which per-binding map to size into
+(`ImageBindings` vs. `Bindings`); adding a third branch
+(`InlineUniformBlockBindings`) was the natural extension of a pattern
+already there, not a new one.
+
+## Why a helper function for the pNext walk, not inlining it
+
+`vkUpdateDescriptorSets`'s existing image/sampler and feature-struct
+code elsewhere in this codebase (`EntryPoints.cpp`'s `fillFeatures2Chain`/
+`fillProperties2Chain`) both walk a `pNext` chain looking for one
+`sType`; I factored `findInlineUniformBlockInfo` out as its own small
+function in the same `namespace { ... }` block `writeDescriptorFromRaw`
+already lives in, rather than inlining the loop at the call site, since
+it's short, has one clear responsibility ("find this one struct or
+return null"), and reads the same way at both a first glance and a
+"what does this actually check" second one.
+
+## `writeDescriptorFromRaw` deliberately never sees this descriptor type
+
+The shared per-element dispatcher (`writeDescriptorFromRaw`) is called
+from two places (`vkUpdateDescriptorSets`'s write loop,
+`vkUpdateDescriptorSetWithTemplate`) with the exact per-descriptor-type
+switch `vkUpdateDescriptorSets` itself needs. Inline uniform blocks
+don't fit that per-array-element shape at all -- one call covers an
+arbitrary caller-chosen byte range, not `descriptorCount` fixed-size
+elements at `offset + i * stride` -- so I special-cased it *before*
+reaching `writeDescriptorFromRaw` at both call sites, calling
+`DescriptorSet::writeInlineUniformBlock` directly instead of routing
+through the shared dispatcher. This keeps `writeDescriptorFromRaw`'s
+existing per-element contract intact (documented in its own comment,
+which now says explicitly it's never called for this type and why)
+rather than adding a `if (isInlineUniformBlockDescriptorType(Type))`
+branch inside a function whose whole shape assumes one descriptor per
+call.
+
+## `VkCopyDescriptorSet`'s third loop, mirroring the image/sampler precedent
+
+`vkUpdateDescriptorSets`'s copy section already has two loops per
+`VkCopyDescriptorSet` entry -- one for `bindingArray` (buffers/texel
+views), one for `imageBindingArray` (V5's image/sampler bindings) --
+because a binding declared as one type lives in only one of
+`DescriptorSet`'s per-binding maps, and the other accessor returns
+empty for it. Adding a third loop for `inlineUniformBlockData` was the
+same shape again, except the copy itself is one ranged `memcpy`-style
+call (clamped to the source blob's actual remaining length past
+`srcArrayElement`) rather than a per-array-element loop, for the same
+"byte range, not array" reason the write path uses.
+
+## Feature/property wiring, mirroring E7's `subgroupSizeControl` precedent
+
+`inlineUniformBlock` follows the same two-struct pattern established
+since E1: the aggregate `VkPhysicalDeviceVulkan13Features`/`Properties`
+cases and new dedicated `VkPhysicalDeviceInlineUniformBlockFeatures`/
+`Properties` cases must agree, checked by a new unit test mirroring
+`SubgroupSizeControlIsAdvertisedThroughItsOwnDedicatedFeatureAnd
+PropertyStructs`. `descriptorBindingInlineUniformBlockUpdateAfterBind`
+stays `VK_FALSE`: it only matters once a binding can actually be marked
+`VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT` via a chained
+`VkDescriptorSetLayoutBindingFlagsCreateInfo`, and no such mechanism --
+nor any other part of the `VK_EXT_descriptor_indexing` family this
+bit's own name implies -- exists anywhere in this ICD yet (the
+aggregate `descriptorIndexing` bit is likewise `VK_FALSE`). Advertising
+`VK_TRUE` here with no actual update-after-bind enforcement would be
+the "claim first, catch up later" shape this codebase's own
+truthfulness discipline (FeMeVulkanDesign.md, "no case produces a wrong
+answer") explicitly rejects, so I left it false rather than reach for
+the same "vacuously true, since nothing exercises the gap" reasoning
+`subgroupBroadcastDynamicId`/`shaderSubgroupExtendedTypes` use
+elsewhere -- those two are vacuously true because the *operation* they
+gate doesn't exist at all, whereas update-after-bind's absence is a
+missing mechanism a real application could still trip over if it tried
+to combine this bit with the (also unadvertised) rest of descriptor
+indexing.
+
+## A genuine bug the targeted CTS run found, not a design guess
+
+I initially set `maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks`/
+`maxDescriptorSetUpdateAfterBindInlineUniformBlocks` to a literal `0`,
+reasoning by analogy with Vulkan 1.2's own descriptor-indexing
+`UpdateAfterBind` limits (which do stay `0` in this codebase, alongside
+`descriptorIndexing = VK_FALSE`). The first targeted CTS run
+(`dEQP-VK.api.info.vulkan1p2_limits_validation.ext_inline_uniform_block`)
+failed on exactly those two fields, reporting `expected MIN 4`. Checking
+the spec (not just re-reading the ICD's own existing pattern) confirmed
+these two are unconditionally required once `VK_EXT_inline_uniform_block`
+itself is advertised, independent of the update-after-bind feature bit
+-- the analogy to 1.2's descriptor-indexing limits didn't hold, because
+those apparently are not cross-checked the same way (or this ICD simply
+never advertises anything from that family for CTS to check against).
+Fixed by reporting both equal to their non-`UpdateAfterBind`
+counterparts instead of `0`, re-ran the same case, and it passed. This
+is the value of actually running the CTS rather than reasoning from the
+existing code's own precedent alone -- the precedent looked applicable
+but wasn't, and only the real test caught it.
+
+## Targeted CTS run
+
+136 cases: every `dEQP-VK.binding_model.inline_uniform_blocks.*` case (the
+dedicated group, 9 cases) plus every `*inline_uniform_block*`-named case
+under `dEQP-VK.api.*`/the rest of `dEQP-VK.binding_model.*`. 3 genuinely
+`Pass` -- exactly the feature/property advertisement this row's own
+scope covers. 17 fail at `vkCreateGraphicsPipelines`
+(`VK_ERROR_INITIALIZATION_FAILED`): this ICD is compute-only, so every
+graphics-shaped case in this set (`descriptor_buffer.*`,
+`descriptor_copy.graphics*`) was always going to fail there, unrelated
+to inline uniform blocks specifically. 8 (`descriptor_copy.compute.
+inline_uniform_block_*`) fail cleanly at `vkCreateComputePipelines`: a
+real compute shader that actually reads through an inline-uniform-block
+binding needs `feme::cpu::SPIRVResourceLoweringPass` to recognize the
+resource kind, which it does not yet -- exactly the "object model only,
+dispatch consumption deferred" scope this row's own text states, so
+this is the expected, correct failure shape, not a gap to chase. The
+dedicated `inline_uniform_blocks.*` group's own 9 cases are all
+graphics-shaped (`vkCreateGraphicsPipelines`), so none of them reach far
+enough to exercise the object model's write/copy paths at all -- a
+genuine end-to-end pass of this row's own write/copy logic exists only
+in the unit tests, not yet in any passing CTS case, which is honest
+given the milestone's own explicit scope.
+
+A full `dEQP-VK.api.*` run (267,222 cases) and full `dEQP-VK.
+binding_model.*` run (150,259 cases) found no crash and no new failure
+category from advertising this extension -- `vulkan1p3.
+feature_extensions_consistency`/`property_extensions_consistency` and
+`get_physical_device_properties2.features.inline_uniform_block_features`
+all newly `Pass`, and every one of the (large, expected) failure counts
+in both groups remains a clean `VK_ERROR_INITIALIZATION_FAILED`/
+`VK_ERROR_FORMAT_NOT_SUPPORTED` rejection, not a crash or a wrong
+answer.
+
+## Scope discipline
+
+Touched: `Descriptor.{h,cpp}` (byte-blob storage, three write-path
+special cases), `DescriptorTest.cpp` (four new tests), `PhysicalDeviceInfo.
+{h,cpp}` (four new limit fields, extension registration),
+`EntryPoints.cpp` (aggregate + two new dedicated feature/property struct
+cases), `PhysicalDeviceInfoTest.cpp` (updated aggregate-struct
+expectations, one new dedicated-struct test), `DrawTest.cpp` (extension
+count/list), `FeMeVulkanDesign.md` (Descriptor Model table row),
+`Roadmap.md`, `VulkanCTSReport.md`, this file. Did not touch
+`SPIRVResourceLoweringPass` or any other shader-compilation path: a real
+dispatch consuming an inline uniform block binding is out of this row's
+own stated scope, the same "object model first, shader consumption
+later" boundary V5's image/sampler descriptor types already drew and
+documented in `Descriptor.h`'s own file comment.
