@@ -75,6 +75,21 @@
 // sets can *hold* an image/sampler binding (created, updated, copied, bound)
 // but a real dispatch cannot yet consume one.
 //
+// (roadmap E14) `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK` is also accepted.
+// Unlike every other descriptor type above, whose "descriptor" is a handle
+// (a bound buffer/view/sampler record), an inline uniform block's
+// descriptor *is* its data: `vkUpdateDescriptorSets` writes raw bytes
+// directly into the set rather than a handle to storage owned elsewhere.
+// `DescriptorSet` therefore holds a third per-binding storage kind, a plain
+// byte blob (`InlineUniformBlockBindings`), sized from the layout binding's
+// `descriptorCount` -- which for this one descriptor type is the block's
+// byte size, not an array element count (see `DescriptorSetLayoutBinding`'s
+// field comment). Like the image/sampler case above, this milestone's scope
+// is the object model only: a descriptor set can create, update
+// (`VkWriteDescriptorSetInlineUniformBlock`), copy, and bind an inline
+// uniform block, but no `feme::cpu::SPIRVResourceLoweringPass` conversion
+// consumes one from a real dispatch yet.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_DESCRIPTOR_H
@@ -97,9 +112,9 @@ class ImageView;
 class Sampler;
 
 /// Whether \p Type is one of the descriptor types this ICD supports (see
-/// the file comment): the six buffer-oriented types from V2/V3/V4, plus
-/// (V5/C5) `SAMPLED_IMAGE`/`STORAGE_IMAGE`/`SAMPLER`/
-/// `COMBINED_IMAGE_SAMPLER`/`INPUT_ATTACHMENT`.
+/// the file comment): the six buffer-oriented types from V2/V3/V4, (V5/C5)
+/// `SAMPLED_IMAGE`/`STORAGE_IMAGE`/`SAMPLER`/`COMBINED_IMAGE_SAMPLER`/
+/// `INPUT_ATTACHMENT`, plus (roadmap E14) `INLINE_UNIFORM_BLOCK`.
 bool isSupportedDescriptorType(VkDescriptorType Type);
 
 /// Whether \p Type is a uniform/storage texel buffer, i.e. resolves to a
@@ -119,6 +134,11 @@ bool isImageDescriptorType(VkDescriptorType Type);
 /// SAMPLER`, or a `COMBINED_IMAGE_SAMPLER`'s sampler half).
 bool isSamplerDescriptorType(VkDescriptorType Type);
 
+/// (roadmap E14) Whether \p Type is `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_
+/// BLOCK` -- i.e. materialized through `DescriptorSet`'s byte-blob storage
+/// (`InlineUniformBlockBindings`) rather than a handle-array one.
+bool isInlineUniformBlockDescriptorType(VkDescriptorType Type);
+
 /// Whether \p Type consumes a dynamic offset supplied at
 /// `vkCmdBindDescriptorSets` time.
 bool isDynamicDescriptorType(VkDescriptorType Type);
@@ -136,6 +156,11 @@ bool isReadOnlyDescriptorType(VkDescriptorType Type);
 struct DescriptorSetLayoutBinding {
   uint32_t Binding = 0;
   VkDescriptorType Type = VK_DESCRIPTOR_TYPE_MAX_ENUM;
+  /// The declared array element count -- except (roadmap E14) for
+  /// `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK`, where Vulkan repurposes
+  /// `VkDescriptorSetLayoutBinding::descriptorCount` to mean the inline
+  /// block's byte size instead (there is no array of separate descriptors
+  /// to count).
   uint32_t Count = 0;
 };
 
@@ -198,9 +223,10 @@ struct DescriptorImageBinding {
   VkImageLayout Layout = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
-/// A `VkDescriptorSet`: per-binding arrays of `DescriptorBufferBinding` or
-/// (V5) `DescriptorImageBinding`, sized from its `DescriptorSetLayout` at
-/// allocation time. Not dispatchable.
+/// A `VkDescriptorSet`: per-binding arrays of `DescriptorBufferBinding`,
+/// (V5) `DescriptorImageBinding`, or (roadmap E14) a raw byte blob for an
+/// inline uniform block, sized from its `DescriptorSetLayout` at allocation
+/// time. Not dispatchable.
 class DescriptorSet {
 public:
   explicit DescriptorSet(const DescriptorSetLayout &Layout);
@@ -227,6 +253,17 @@ public:
   void write(uint32_t Binding, uint32_t ArrayElement, ImageView *View,
              Sampler *Samp, VkImageLayout Layout);
 
+  /// (roadmap E14) Writes \p DataSize bytes of \p Data into binding
+  /// \p Binding's inline uniform block, starting at byte \p ByteOffset --
+  /// per `VkWriteDescriptorSetInlineUniformBlock`, whose `dstArrayElement`
+  /// is a byte offset rather than an array index for this descriptor type.
+  /// A binding this set's layout does not declare as
+  /// `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK`, or a range that would
+  /// write past the declared block size, is silently ignored, matching the
+  /// same invalid-usage rule the other `write` overloads document.
+  void writeInlineUniformBlock(uint32_t Binding, uint32_t ByteOffset,
+                               uint32_t DataSize, const void *Data);
+
   /// The full declared array for \p Binding, or empty if this set's layout
   /// declares no such binding.
   llvm::ArrayRef<DescriptorBufferBinding> bindingArray(uint32_t Binding) const;
@@ -236,10 +273,15 @@ public:
   llvm::ArrayRef<DescriptorImageBinding>
   imageBindingArray(uint32_t Binding) const;
 
+  /// (roadmap E14) The full inline uniform block byte blob for \p Binding,
+  /// or empty if this set's layout declares no such binding.
+  llvm::ArrayRef<uint8_t> inlineUniformBlockData(uint32_t Binding) const;
+
 private:
   const DescriptorSetLayout *Layout;
   std::map<uint32_t, std::vector<DescriptorBufferBinding>> Bindings;
   std::map<uint32_t, std::vector<DescriptorImageBinding>> ImageBindings;
+  std::map<uint32_t, std::vector<uint8_t>> InlineUniformBlockBindings;
 };
 
 /// A `VkDescriptorUpdateTemplate`: the entry list `vkUpdateDescriptorSet

@@ -14,7 +14,11 @@
 #include "Image.h"
 #include "Objects.h"
 
+#include "llvm/ADT/STLExtras.h"
+
 #include "gtest/gtest.h"
+
+#include <cstring>
 
 using namespace feme::vulkan;
 
@@ -552,6 +556,244 @@ TEST_F(DescriptorTest, CombinedImageSamplerWriteAndReadBack) {
   EXPECT_TRUE(S->bindingArray(0).empty());
 
   vkDestroySampler(Device, Samp, nullptr);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// Roadmap E14 (`VK_EXT_inline_uniform_block`): a layout binding's
+/// `descriptorCount` for this type is a byte size, not an array element
+/// count -- creating the layout, allocating a set from it, and reading
+/// back an (initially zero-filled) byte blob of that exact size must all
+/// succeed.
+TEST_F(DescriptorTest, InlineUniformBlockDescriptorTypeIsAccepted) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+  Binding.descriptorCount = 16; // 16 bytes, not 16 descriptors.
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+  EXPECT_EQ(fromHandle<DescriptorSetLayout>(Layout)->find(0)->Count, 16u);
+  // Never consumes a dynamic offset: it is not a dynamic descriptor type.
+  EXPECT_EQ(fromHandle<DescriptorSetLayout>(Layout)->dynamicOffsetCount(), 0u);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK, 16};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<uint8_t> Data = S->inlineUniformBlockData(0);
+  ASSERT_EQ(Data.size(), 16u);
+  EXPECT_TRUE(llvm::all_of(Data, [](uint8_t B) { return B == 0; }));
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// Roadmap E14: `vkUpdateDescriptorSets` writes an inline uniform block's
+/// bytes from a chained `VkWriteDescriptorSetInlineUniformBlock`, with
+/// `dstArrayElement` as a byte offset and `descriptorCount` matching that
+/// struct's own `dataSize`, per spec.
+TEST_F(DescriptorTest, InlineUniformBlockWriteAndReadBack) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+  Binding.descriptorCount = 16;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK, 16};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  // Write the last 4 bytes of the 16-byte block, leaving the first 12 zero.
+  uint32_t Payload = 0xdeadbeefu;
+  VkWriteDescriptorSetInlineUniformBlock InlineInfo{};
+  InlineInfo.sType =
+      VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK;
+  InlineInfo.dataSize = sizeof(Payload);
+  InlineInfo.pData = &Payload;
+  VkWriteDescriptorSet Write{};
+  Write.pNext = &InlineInfo;
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.dstArrayElement = 12; // Byte offset, not an array index.
+  Write.descriptorCount = sizeof(Payload);
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<uint8_t> Data = S->inlineUniformBlockData(0);
+  ASSERT_EQ(Data.size(), 16u);
+  EXPECT_TRUE(
+      llvm::all_of(Data.take_front(12), [](uint8_t B) { return B == 0; }));
+  uint32_t Readback;
+  std::memcpy(&Readback, Data.data() + 12, sizeof(Readback));
+  EXPECT_EQ(Readback, Payload);
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// Roadmap E14: `vkUpdateDescriptorSetWithTemplate` mirrors
+/// `vkUpdateDescriptorSets`'s inline-uniform-block handling -- a single
+/// ranged byte write, with `stride` ignored, rather than a per-array-
+/// element loop.
+TEST_F(DescriptorTest, InlineUniformBlockUpdateWithTemplateMatchesDirectWrite) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+  Binding.descriptorCount = 8;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK, 8};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+
+  VkDescriptorUpdateTemplateEntry Entry{};
+  Entry.dstBinding = 0;
+  Entry.dstArrayElement = 0;
+  Entry.descriptorCount = 8; // Bytes, not array elements.
+  Entry.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+  Entry.offset = 4; // Skip 4 leading bytes of the source buffer.
+  Entry.stride = 0; // Ignored for this descriptor type.
+  VkDescriptorUpdateTemplateCreateInfo TemplateInfo{};
+  TemplateInfo.descriptorUpdateEntryCount = 1;
+  TemplateInfo.pDescriptorUpdateEntries = &Entry;
+  TemplateInfo.templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET;
+  VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
+                                             &Template),
+            VK_SUCCESS);
+
+  uint8_t SrcBuffer[12] = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8};
+  vkUpdateDescriptorSetWithTemplate(Device, Set, Template, SrcBuffer);
+
+  auto *S = fromHandle<DescriptorSet>(Set);
+  llvm::ArrayRef<uint8_t> Data = S->inlineUniformBlockData(0);
+  ASSERT_EQ(Data.size(), 8u);
+  EXPECT_EQ(std::memcmp(Data.data(), SrcBuffer + 4, 8), 0);
+
+  vkDestroyDescriptorUpdateTemplate(Device, Template, nullptr);
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 1, &Set), VK_SUCCESS);
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
+/// Roadmap E14: `vkCmdCopyDescriptorSet`-issued `VkCopyDescriptorSet`
+/// entries for an inline uniform block copy a byte range, per
+/// `srcArrayElement`/`dstArrayElement`/`descriptorCount` all being byte
+/// counts/offsets for this descriptor type, exactly like the write path.
+TEST_F(DescriptorTest, InlineUniformBlockCopyBetweenSets) {
+  VkDescriptorSetLayoutBinding Binding{};
+  Binding.binding = 0;
+  Binding.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+  Binding.descriptorCount = 8;
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 1;
+  LayoutInfo.pBindings = &Binding;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK, 16};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 2;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetLayout Layouts[2] = {Layout, Layout};
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 2;
+  AllocInfo.pSetLayouts = Layouts;
+  VkDescriptorSet Sets[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  ASSERT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, Sets), VK_SUCCESS);
+
+  uint64_t Payload = 0x0102030405060708ull;
+  VkWriteDescriptorSetInlineUniformBlock InlineInfo{};
+  InlineInfo.sType =
+      VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK;
+  InlineInfo.dataSize = sizeof(Payload);
+  InlineInfo.pData = &Payload;
+  VkWriteDescriptorSet Write{};
+  Write.pNext = &InlineInfo;
+  Write.dstSet = Sets[0];
+  Write.dstBinding = 0;
+  Write.descriptorCount = sizeof(Payload);
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkCopyDescriptorSet Copy{};
+  Copy.srcSet = Sets[0];
+  Copy.srcBinding = 0;
+  Copy.dstSet = Sets[1];
+  Copy.dstBinding = 0;
+  Copy.descriptorCount = 8;
+  vkUpdateDescriptorSets(Device, 0, nullptr, 1, &Copy);
+
+  auto *Dst = fromHandle<DescriptorSet>(Sets[1]);
+  llvm::ArrayRef<uint8_t> Data = Dst->inlineUniformBlockData(0);
+  ASSERT_EQ(Data.size(), 8u);
+  uint64_t Readback;
+  std::memcpy(&Readback, Data.data(), sizeof(Readback));
+  EXPECT_EQ(Readback, Payload);
+
+  ASSERT_EQ(vkFreeDescriptorSets(Device, Pool, 2, Sets), VK_SUCCESS);
   vkDestroyDescriptorPool(Device, Pool, nullptr);
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }

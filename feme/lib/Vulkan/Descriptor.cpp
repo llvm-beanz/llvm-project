@@ -25,7 +25,8 @@ bool feme::vulkan::isSupportedDescriptorType(VkDescriptorType Type) {
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
          isTexelBufferDescriptorType(Type) || isImageDescriptorType(Type) ||
-         Type == VK_DESCRIPTOR_TYPE_SAMPLER;
+         Type == VK_DESCRIPTOR_TYPE_SAMPLER ||
+         isInlineUniformBlockDescriptorType(Type);
 }
 
 bool feme::vulkan::isTexelBufferDescriptorType(VkDescriptorType Type) {
@@ -45,6 +46,10 @@ bool feme::vulkan::isSamplerDescriptorType(VkDescriptorType Type) {
          Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 }
 
+bool feme::vulkan::isInlineUniformBlockDescriptorType(VkDescriptorType Type) {
+  return Type == VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK;
+}
+
 bool feme::vulkan::isDynamicDescriptorType(VkDescriptorType Type) {
   return Type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC ||
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
@@ -56,7 +61,12 @@ bool feme::vulkan::isReadOnlyDescriptorType(VkDescriptorType Type) {
          Type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER ||
          Type == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
          Type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
-         Type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+         Type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT ||
+         // (roadmap E14) Vulkan treats an inline uniform block's contents
+         // as an implicit uniform buffer -- read-only from the shader,
+         // exactly like `UNIFORM_BUFFER` above -- even though no dispatch
+         // consumes one yet (see Descriptor.h's file comment).
+         isInlineUniformBlockDescriptorType(Type);
 }
 
 DescriptorSetLayout::DescriptorSetLayout(
@@ -87,7 +97,9 @@ uint32_t DescriptorSetLayout::dynamicOffsetCount() const {
 DescriptorSet::DescriptorSet(const DescriptorSetLayout &Layout)
     : Layout(&Layout) {
   for (const DescriptorSetLayoutBinding &B : Layout.bindings()) {
-    if (isImageDescriptorType(B.Type) || isSamplerDescriptorType(B.Type))
+    if (isInlineUniformBlockDescriptorType(B.Type))
+      InlineUniformBlockBindings[B.Binding].resize(B.Count);
+    else if (isImageDescriptorType(B.Type) || isSamplerDescriptorType(B.Type))
       ImageBindings[B.Binding].resize(B.Count);
     else
       Bindings[B.Binding].resize(B.Count);
@@ -121,6 +133,19 @@ void DescriptorSet::write(uint32_t Binding, uint32_t ArrayElement,
   It->second[ArrayElement] = DescriptorImageBinding{View, Samp, Layout};
 }
 
+void DescriptorSet::writeInlineUniformBlock(uint32_t Binding,
+                                            uint32_t ByteOffset,
+                                            uint32_t DataSize,
+                                            const void *Data) {
+  auto It = InlineUniformBlockBindings.find(Binding);
+  if (It == InlineUniformBlockBindings.end())
+    return;
+  std::vector<uint8_t> &Blob = It->second;
+  if (ByteOffset > Blob.size() || DataSize > Blob.size() - ByteOffset)
+    return;
+  std::memcpy(Blob.data() + ByteOffset, Data, DataSize);
+}
+
 llvm::ArrayRef<DescriptorBufferBinding>
 DescriptorSet::bindingArray(uint32_t Binding) const {
   auto It = Bindings.find(Binding);
@@ -133,6 +158,14 @@ llvm::ArrayRef<DescriptorImageBinding>
 DescriptorSet::imageBindingArray(uint32_t Binding) const {
   auto It = ImageBindings.find(Binding);
   if (It == ImageBindings.end())
+    return {};
+  return It->second;
+}
+
+llvm::ArrayRef<uint8_t>
+DescriptorSet::inlineUniformBlockData(uint32_t Binding) const {
+  auto It = InlineUniformBlockBindings.find(Binding);
+  if (It == InlineUniformBlockBindings.end())
     return {};
   return It->second;
 }
@@ -271,6 +304,11 @@ namespace {
 /// is an arbitrary caller-supplied byte layout rather than one of the
 /// three typed arrays `VkWriteDescriptorSet` itself carries -- both need
 /// the exact same per-descriptor-type switch, just addressed differently.
+/// (roadmap E14) Never called for `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK`:
+/// unlike every type this dispatches, one inline-uniform-block write covers
+/// a caller-chosen byte range in a single call rather than one array
+/// element at a time, so both call sites special-case it themselves before
+/// reaching here, calling `DescriptorSet::writeInlineUniformBlock` directly.
 void writeDescriptorFromRaw(DescriptorSet &Set, VkDescriptorType Type,
                             uint32_t Binding, uint32_t ArrayElement,
                             const void *Data) {
@@ -299,6 +337,20 @@ void writeDescriptorFromRaw(DescriptorSet &Set, VkDescriptorType Type,
             Info.range);
 }
 
+/// (roadmap E14) The `VkWriteDescriptorSetInlineUniformBlock` chained onto
+/// \p pNext, or null if none is -- the same "walk `pNext` for a specific
+/// `sType`" pattern `EntryPoints.cpp`'s feature/property chain walkers use.
+const VkWriteDescriptorSetInlineUniformBlock *
+findInlineUniformBlockInfo(const void *pNext) {
+  for (const auto *Base = static_cast<const VkBaseInStructure *>(pNext); Base;
+       Base = Base->pNext)
+    if (Base->sType ==
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_INLINE_UNIFORM_BLOCK)
+      return reinterpret_cast<const VkWriteDescriptorSetInlineUniformBlock *>(
+          Base);
+  return nullptr;
+}
+
 } // namespace
 
 VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
@@ -310,6 +362,19 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
     if (!isSupportedDescriptorType(Write.descriptorType))
       continue;
     auto *Set = fromHandle<DescriptorSet>(Write.dstSet);
+    // (roadmap E14) `VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK` is a single
+    // byte-range write, not `descriptorCount` array elements: its source
+    // data comes from a chained `VkWriteDescriptorSetInlineUniformBlock`
+    // (per spec, `descriptorCount` here must equal that struct's own
+    // `dataSize`), and `dstArrayElement` is the starting byte offset
+    // rather than an array index.
+    if (isInlineUniformBlockDescriptorType(Write.descriptorType)) {
+      if (const VkWriteDescriptorSetInlineUniformBlock *Inline =
+              findInlineUniformBlockInfo(Write.pNext))
+        Set->writeInlineUniformBlock(Write.dstBinding, Write.dstArrayElement,
+                                     Inline->dataSize, Inline->pData);
+      continue;
+    }
     for (uint32_t J = 0; J != Write.descriptorCount; ++J) {
       const void *Data;
       if (isTexelBufferDescriptorType(Write.descriptorType))
@@ -355,6 +420,22 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSets(
       const DescriptorImageBinding &B = SrcImageArray[SrcElement];
       Dst->write(Copy.dstBinding, Copy.dstArrayElement + J, B.View, B.Samp,
                  B.Layout);
+    }
+
+    // (roadmap E14) An inline uniform block binding lives in its own byte
+    // blob (see `DescriptorSet`'s constructor), and per spec `descriptorCount`/
+    // `srcArrayElement`/`dstArrayElement` here are all byte counts/offsets
+    // rather than array element counts/indices -- a single ranged copy,
+    // not a per-element loop like the two above.
+    llvm::ArrayRef<uint8_t> SrcInlineData =
+        Src->inlineUniformBlockData(Copy.srcBinding);
+    if (Copy.srcArrayElement < SrcInlineData.size()) {
+      uint32_t Available =
+          static_cast<uint32_t>(SrcInlineData.size() - Copy.srcArrayElement);
+      uint32_t CopyCount = std::min(Copy.descriptorCount, Available);
+      Dst->writeInlineUniformBlock(Copy.dstBinding, Copy.dstArrayElement,
+                                   CopyCount,
+                                   SrcInlineData.data() + Copy.srcArrayElement);
     }
   }
 }
@@ -421,11 +502,23 @@ VKAPI_ATTR void VKAPI_CALL vkUpdateDescriptorSetWithTemplate(
   const auto *Template =
       fromHandle<DescriptorUpdateTemplate>(descriptorUpdateTemplate);
   const auto *Bytes = static_cast<const uint8_t *>(pData);
-  for (const VkDescriptorUpdateTemplateEntry &Entry : Template->entries())
+  for (const VkDescriptorUpdateTemplateEntry &Entry : Template->entries()) {
+    // (roadmap E14) Per spec, an inline uniform block entry updates
+    // `descriptorCount` contiguous bytes starting at byte offset
+    // `dstArrayElement`, reading from `offset` bytes into the source
+    // buffer with `stride` ignored -- the same single-ranged-write shape
+    // `vkUpdateDescriptorSets`'s own inline-uniform-block case uses,
+    // rather than the per-element `offset + i * stride` loop below.
+    if (isInlineUniformBlockDescriptorType(Entry.descriptorType)) {
+      Set->writeInlineUniformBlock(Entry.dstBinding, Entry.dstArrayElement,
+                                   Entry.descriptorCount, Bytes + Entry.offset);
+      continue;
+    }
     for (uint32_t J = 0; J != Entry.descriptorCount; ++J)
       writeDescriptorFromRaw(*Set, Entry.descriptorType, Entry.dstBinding,
                              Entry.dstArrayElement + J,
                              Bytes + Entry.offset + J * Entry.stride);
+  }
 }
 
 } // namespace feme::vulkan
