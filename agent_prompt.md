@@ -26,11 +26,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E13 in the roadmap document?
+Can you implement milestone E14 in the roadmap document?
 
-> **`VK_KHR_zero_initialize_workgroup_memory`/`shaderZeroInitializeWorkgroupMemory`.**
-> `Workgroup`-storage-class SPIR-V globals need a zero-initializer emitted once
-> per dispatch (likely in `feme::cpu::SPIRVResourceLoweringPass` or a small new
-> pass run before it) rather than reading whatever the host's memory allocator
-> happened to leave behind. **Closes D3's
-> `compute.pipeline.zero_initialize_workgroup_memory` 7-case regression**
+> **`VK_EXT_inline_uniform_block`/`inlineUniformBlock` +
+> `descriptorBindingInlineUniformBlockUpdateAfterBind`.** A new
+> `VkDescriptorType` whose "descriptor" is inline byte storage rather than a
+> handle -- `Descriptor.{h,cpp}`'s existing per-binding storage needs a
+> byte-blob variant alongside its current handle-array one, and
+> `VkWriteDescriptorSetInlineUniformBlock` is a new `pNext` case in the existing
+> `vkUpdateDescriptorSets` walk
