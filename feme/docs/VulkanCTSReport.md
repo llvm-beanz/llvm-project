@@ -2550,3 +2550,61 @@ E20's own run were repeated rather than assumed unaffected:
 `LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1609/1610
 passed, 1 unsupported (pre-existing, unrelated), after every commit in
 this row.
+
+## Roadmap E22: measured impact (targeted, not a full re-run) -- a real, pre-existing gap found blocking any headline movement
+
+E22 ("ASTC LDR copy/sampling pipeline wiring") changed `libfeme_vulkan.so`
+more than E20/E21 did: `vkCreateImage` accepts a block-compressed
+`VkFormat`, `Image::blockPointer`/`CommandBuffer.cpp`'s
+`vkCmdCopyImage`/`vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` address
+one a whole block at a time, `ImageOps.cpp`'s `runBlitImage` decodes an
+LDR ASTC source through `decodeASTCBlock`, and `textureCompressionASTC_LDR`
+now reads `VK_TRUE`. The same two targeted subsets E20/E21 used were run
+again to measure the effect:
+
+- `dEQP-VK.api.info.*` (10,484 cases): 5,873 passed / 73 failed / 4,538
+  not supported -- byte-for-byte the same split every prior row in this
+  ASTC sequence recorded. The 73 failures are unchanged (the one
+  ASTC-named failure is still
+  `dEQP-VK.api.info.get_physical_device_properties2.features.
+  texture_compression_astchdr_features`, E15/G4's already-tracked HDR
+  aggregate-struct mismatch, unrelated to this row's LDR-only scope).
+- `dEQP-VK.*astc*` (98,927 cases): 873 passed / 1 failed / 98,053 not
+  supported -- again byte-for-byte the same headline numbers as E20/E21's
+  own runs, despite `textureCompressionASTC_LDR` now being `VK_TRUE`.
+  Every LDR-format-named texture case (e.g.
+  `dEQP-VK.texture.swizzle.texture_coordinate.astc_4x4_unorm_block_2d_pot_xx`)
+  is still `NotSupported (Format not supported at
+  vktTextureTestUtil.cpp:1678)`, unchanged.
+
+**Root-caused rather than assumed unaffected.** `vktTextureTestUtil.cpp:1678`
+is not a format-specific ASTC check: it is this test fixture's own
+capability probe, `vkGetPhysicalDeviceImageFormatProperties`, called
+before creating *any* texture image, of any format. Reading
+`feme/lib/Vulkan/EntryPoints.cpp` found why it never varies: this
+entrypoint unconditionally returns `VK_ERROR_FORMAT_NOT_SUPPORTED` --
+for every `VkFormat`, every `VkImageType`, every usage -- and its sibling
+`vkGetPhysicalDeviceFormatProperties` unconditionally reports an all-zero
+`VkFormatProperties`. Both are stubs whose own comments still read "no
+image is supported yet (images are out of scope before V5)"; `git log`
+confirms this text (and the unconditional rejection it justifies) predates
+E22's own commits by more than 10 -- a real, pre-existing gap E22's CTS
+run surfaced, not one it introduced. Because CTS gates *every* texture-
+creation-shaped case on this same capability probe regardless of format,
+no case shaped like "create a `VkImage` of format X and sample/copy it"
+can ever pass in this CTS build today, independent of whether format X is
+ASTC, `R8G8B8A8_UNORM`, or anything else -- so E22's own real, tested
+functional change (confirmed correct by `FeMeVulkanTests`'
+`ImageTest.{AcceptsASTCFormat,BlockPointerAddressesBlockGrid,
+CopyBufferToASTCImageAndBack,CopyASTCImageToImage}`/`ImageOpsTest.{
+BlitDecodesASTCSource,RejectsBlitToBlockCompressedDestination,
+RejectsBlitOfHDRASTCSource,RejectsResolveOfBlockCompressedImage}`) has no
+way to show up in this report's own headline numbers until that separate,
+much larger gap closes. Tracked as new roadmap row E24 (unlike E23, not a
+narrower follow-up to this row -- it predates E22 entirely and blocks
+every format's texture-shaped CTS case, not only ASTC's).
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1616/1617
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row.

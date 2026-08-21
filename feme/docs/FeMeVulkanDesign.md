@@ -2165,6 +2165,29 @@ above: `vkCreateImage` rejects an HDR ASTC `VkFormat` for the identical
 one, so E22 covers both dynamic ranges' pipeline wiring together rather
 than needing its own HDR-specific follow-up.
 
+**Update (roadmap E22, closed):** `vkCreateImage` no longer rejects a
+block-compressed `VkFormat`. `Image::blockPointer` addresses one a whole
+block at a time (`texelPointer`, meaningless for one, still asserts
+against it), and `CommandBuffer.cpp`'s `vkCmdCopyImage`/
+`vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` use it -- `bytesPerBlock`/
+`blockWidth`/`blockHeight` (Format.h) replace `formatElementSize`
+throughout those paths, a no-op change for a non-block-compressed format,
+so one implementation now covers both families. `ImageOps.cpp`'s
+`runResolveImage` rejects a block-compressed format outright (never
+multisampled in real Vulkan); `runBlitImage` rejects a block-compressed
+*destination* (no ASTC encoder exists) and an HDR ASTC *source*
+(`decodeASTCBlock` is LDR-only), but decodes an LDR ASTC source through
+`decodeASTCBlock` before resampling it -- this milestone's only caller of
+that decoder. `textureCompressionASTC_LDR` (PhysicalDeviceInfo.cpp) now
+reads `VK_TRUE`. Left open, and split off as new roadmap row E23: a
+shader's own *sampling* of a block-compressed image is a wholly separate
+path from the copy/blit/resolve operations above -- `CommandBuffer.cpp`'s
+`materializeImageDescriptor` hands the CPU runtime
+(`feme/runtime/CPU/FeMeRuntimeCPU.c`, a separate C module with no
+dependency on this C++ decoder) a raw per-texel data pointer, and that
+runtime has no block-compressed decode of its own (a sample safely reads
+as all-zero, not real data, rather than crashing or misreading bytes).
+
 ### V6: Graphics queue and basic rendering
 
 The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
