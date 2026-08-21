@@ -2608,3 +2608,43 @@ every format's texture-shaped CTS case, not only ASTC's).
 `LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1616/1617
 passed, 1 unsupported (pre-existing, unrelated), after every commit in
 this row.
+
+## Roadmap E23: measured impact (targeted, not a full re-run) -- unchanged headline, blocked by the same pre-existing E24 gap
+
+E23 ("ASTC LDR shader-sampling wiring") changed only
+`CommandBuffer.cpp`'s `materializeImageDescriptor`: a bound ASTC LDR image
+is now decoded into a per-texel RGBA8 buffer before a compute shader's
+`OpImageSample`/`OpImageFetch` ever reaches it, rather than reading
+all-zero. The same two targeted subsets E20/E21/E22 used were run again:
+
+- `dEQP-VK.api.info.*` (10,484 cases): 5,873 passed / 73 failed / 4,538
+  not supported -- byte-for-byte identical to E22's own run; this row
+  touches no feature/property advertisement at all, so no movement here
+  was ever expected.
+- `dEQP-VK.*astc*` (98,927 cases): 873 passed / 1 failed / 98,053 not
+  supported -- again byte-for-byte identical to every prior row in this
+  ASTC sequence. Every texture-creation-shaped ASTC case is still
+  `NotSupported (Format not supported at vktTextureTestUtil.cpp:1678)`,
+  for the exact reason E22's own report section above already root-caused
+  and tracked as E24: `vkGetPhysicalDeviceImageFormatProperties`
+  unconditionally fails for every `VkFormat` before any texture-shaped
+  case can even create the `VkImage` it would need to sample -- a shader
+  cannot sample an image CTS itself refuses to create. This row's real
+  functional change (a shader that *does* get a live ASTC image bound to
+  it -- which no CTS case can arrange today -- now samples real decoded
+  data) is confirmed correct by `FeMeVulkanTests`'
+  `ASTCSampledImageDispatchTest.SamplesARealDecodedTexelRatherThanAllZero`
+  instead, the same "unit-test the change directly, since CTS can't reach
+  it yet" situation E22's own report already established for its own
+  `ImageTest`/`ImageOpsTest` additions. E24 remains the row that has to
+  close before *any* of E20/E21/E22/E23's real, tested functional changes
+  can show up in this report's own headline numbers.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1617/1618
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- the +1 discovered/passed test relative to E22's own report is
+`ASTCSampledImageDispatchTest`'s new case, confirmed (by temporarily
+reverting `CommandBuffer.cpp`'s change and re-running) to actually fail
+without this row's fix rather than passing vacuously.
+
