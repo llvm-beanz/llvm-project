@@ -26,12 +26,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E3 in the roadmap document?
+Can you implement milestone E4 in the roadmap document?
 
-> **`VK_KHR_synchronization2`/`synchronization2`.**
-> `vkCmdPipelineBarrier2`/`vkCmdWriteTimestamp2`/`vkQueueSubmit2`/`vkCmdSetEvent2`/`vkCmdResetEvent2`/`vkCmdWaitEvents2`
-> translate `VkDependencyInfo`'s per-resource
-> `VkMemoryBarrier2`/`VkBufferMemoryBarrier2`/`VkImageMemoryBarrier2`
-> (2-stage-mask, 2-access-mask shape) down to the existing 1-mask `Sync.{h,cpp}`
-> model, the same "new entrypoint, old backing model" pattern C7 used for queue
-> families | E2 (for the feature bit)
+> **`VK_KHR_maintenance4`/`maintenance4`.**
+> `vkGetDeviceBufferMemoryRequirements`/`vkGetDeviceImageMemoryRequirements`/`vkGetDeviceImageSparseMemoryRequirements`
+> compute requirements from a `VkBufferCreateInfo`/`VkImageCreateInfo` directly
+> (no live object needed) by factoring the existing
+> `vkCreateBuffer`/`vkCreateImage` sizing logic into a shared helper both the
+> live and the info-only entrypoint call; also relaxes `vkCreateShaderModule`'s
+> local-size-id/local-size validation and `VK_KHR_maintenance4`'s
+> zero-size-descriptor-array rule
