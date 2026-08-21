@@ -424,7 +424,10 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Props14.nonStrictSinglePixelWideLinesUseParallelogram, VK_FALSE);
   EXPECT_EQ(Props14.nonStrictWideLinesUseParallelogram, VK_FALSE);
   EXPECT_EQ(Props14.blockTexelViewCompatibleMultipleLayers, VK_FALSE);
-  EXPECT_EQ(Props14.maxCombinedImageSamplerDescriptorCount, 0u);
+  // Roadmap E6: a real value -- with no multi-planar/YCbCr sampler support,
+  // a combined image sampler descriptor always consumes exactly one
+  // descriptor slot.
+  EXPECT_EQ(Props14.maxCombinedImageSamplerDescriptorCount, 1u);
   EXPECT_EQ(Props14.fragmentShadingRateClampCombinerInputs, VK_FALSE);
   EXPECT_EQ(Props14.defaultRobustnessStorageBuffers,
             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
@@ -681,6 +684,36 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &Maintenance6Features;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(Maintenance6Features.maintenance6, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       Maintenance6PropertiesReportARealCombinedImageSamplerCount) {
+  // Roadmap E6: `VK_KHR_maintenance6`'s own dedicated properties struct
+  // must agree with the aggregate `VkPhysicalDeviceVulkan14Properties`
+  // case above. `maxCombinedImageSamplerDescriptorCount` is a real value
+  // (1, since this ICD supports no multi-planar/YCbCr samplers); the other
+  // two fields describe unrelated, still-unimplemented fixed-function
+  // guarantees and stay `VK_FALSE`.
+  VkPhysicalDeviceMaintenance6Properties Maintenance6Props{};
+  Maintenance6Props.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &Maintenance6Props;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(Maintenance6Props.blockTexelViewCompatibleMultipleLayers,
+            VK_FALSE);
+  EXPECT_EQ(Maintenance6Props.maxCombinedImageSamplerDescriptorCount, 1u);
+  EXPECT_EQ(Maintenance6Props.fragmentShadingRateClampCombinerInputs,
+            VK_FALSE);
+
+  VkPhysicalDeviceVulkan14Properties Props14{};
+  Props14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;
+  Props2.pNext = &Props14;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(Maintenance6Props.maxCombinedImageSamplerDescriptorCount,
+            Props14.maxCombinedImageSamplerDescriptorCount);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

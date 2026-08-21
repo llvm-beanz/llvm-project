@@ -533,9 +533,18 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props14->polygonModePointSize = VK_FALSE;
       Props14->nonStrictSinglePixelWideLinesUseParallelogram = VK_FALSE;
       Props14->nonStrictWideLinesUseParallelogram = VK_FALSE;
-      // (roadmap E6's `VK_KHR_maintenance6`) Unimplemented.
+      // (roadmap E6's `VK_KHR_maintenance6`) `blockTexelViewCompatibleMultiple
+      // Layers` and `fragmentShadingRateClampCombinerInputs` describe
+      // fixed-function guarantees this ICD hasn't verified (out of this
+      // row's own scope; block-compressed multi-layer texel views and
+      // fragment shading rate combiners are each their own separate,
+      // unimplemented feature), so they stay the conservative `VK_FALSE`.
+      // `maxCombinedImageSamplerDescriptorCount` is this row's one real
+      // limit: with no multi-planar/YCbCr sampler support (`samplerYcbcr
+      // Conversion` above is `VK_FALSE`), a combined image sampler
+      // descriptor always consumes exactly one descriptor slot.
       Props14->blockTexelViewCompatibleMultipleLayers = VK_FALSE;
-      Props14->maxCombinedImageSamplerDescriptorCount = 0;
+      Props14->maxCombinedImageSamplerDescriptorCount = 1;
       Props14->fragmentShadingRateClampCombinerInputs = VK_FALSE;
       // (roadmap F10) `VK_EXT_pipeline_robustness` is unimplemented: even
       // though buffer bounds checking is unconditionally on elsewhere in
@@ -585,6 +594,19 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Maintenance5->polygonModePointSize = VK_FALSE;
       Maintenance5->nonStrictSinglePixelWideLinesUseParallelogram = VK_FALSE;
       Maintenance5->nonStrictWideLinesUseParallelogram = VK_FALSE;
+      break;
+    }
+    // (roadmap E6) `VK_KHR_maintenance6`'s own properties struct, whose
+    // 1.4 core and `KHR` spellings share one `sType`, agreeing with the
+    // aggregate `VkPhysicalDeviceVulkan14Properties` case above exactly
+    // like `VkPhysicalDeviceMaintenance5PropertiesKHR` already does for
+    // its own fields.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_PROPERTIES: {
+      auto *Maintenance6 =
+          reinterpret_cast<VkPhysicalDeviceMaintenance6Properties *>(Base);
+      Maintenance6->blockTexelViewCompatibleMultipleLayers = VK_FALSE;
+      Maintenance6->maxCombinedImageSamplerDescriptorCount = 1;
+      Maintenance6->fragmentShadingRateClampCombinerInputs = VK_FALSE;
       break;
     }
     default:
