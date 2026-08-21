@@ -993,7 +993,7 @@ Mode11RGB decodeHDRMode11(int V0, int V1, int V2, int V3, int V4, int V5) {
 
   Result.Hi = {clamp12(VA), clamp12(VA - VB0), clamp12(VA - VB1)};
   Result.Lo = {clamp12(VA - VC), clamp12(VA - VB0 - VC - VD0),
-              clamp12(VA - VB1 - VC - VD1)};
+               clamp12(VA - VB1 - VC - VD1)};
   if (MajComp == 1) {
     std::swap(Result.Lo[0], Result.Lo[1]);
     std::swap(Result.Hi[0], Result.Hi[1]);
@@ -1115,8 +1115,8 @@ Endpoint12 decodeHDRColorEndpoints(const std::vector<uint32_t> &Raw,
       std::swap(Red, Blue);
 
     E.Hi = {clamp12(Red), clamp12(Green), clamp12(Blue), 0x780};
-    E.Lo = {clamp12(Red - Scale), clamp12(Green - Scale),
-            clamp12(Blue - Scale), 0x780};
+    E.Lo = {clamp12(Red - Scale), clamp12(Green - Scale), clamp12(Blue - Scale),
+            0x780};
     break;
   }
   case 11: { // HDR RGB, direct.
@@ -1457,8 +1457,8 @@ void feme::vulkan::decodeASTCBlock(const uint8_t Block[16],
 }
 
 void feme::vulkan::decodeASTCBlockHDR(const uint8_t Block[16],
-                                      uint32_t BlockWidth,
-                                      uint32_t BlockHeight, float *Output) {
+                                      uint32_t BlockWidth, uint32_t BlockHeight,
+                                      float *Output) {
   Block128 V = loadBlock(Block);
   unsigned NumTexels = BlockWidth * BlockHeight;
 
@@ -1487,12 +1487,12 @@ void feme::vulkan::decodeASTCBlockHDR(const uint8_t Block[16],
     unsigned A16 = getBits(V, 112, 16);
     if (IsHDRExtent) {
       fillSolid({halfBitsToFloat(static_cast<uint16_t>(R16)),
-                halfBitsToFloat(static_cast<uint16_t>(G16)),
-                halfBitsToFloat(static_cast<uint16_t>(B16)),
-                halfBitsToFloat(static_cast<uint16_t>(A16))});
+                 halfBitsToFloat(static_cast<uint16_t>(G16)),
+                 halfBitsToFloat(static_cast<uint16_t>(B16)),
+                 halfBitsToFloat(static_cast<uint16_t>(A16))});
     } else {
-      fillSolid({R16 / 65535.0f, G16 / 65535.0f, B16 / 65535.0f,
-                A16 / 65535.0f});
+      fillSolid(
+          {R16 / 65535.0f, G16 / 65535.0f, B16 / 65535.0f, A16 / 65535.0f});
     }
     return;
   }
@@ -1506,7 +1506,8 @@ void feme::vulkan::decodeASTCBlockHDR(const uint8_t Block[16],
   unsigned NumPartitions = 1 + getBits(V, 11, 2);
   unsigned NumWeights =
       Mode.WeightWidth * Mode.WeightHeight * (Mode.DualPlane ? 2 : 1);
-  unsigned WeightBits = iseBitCount(NumWeights, iseRangeShape(Mode.WeightRange));
+  unsigned WeightBits =
+      iseBitCount(NumWeights, iseRangeShape(Mode.WeightRange));
   unsigned WeightStartBit = 128 - WeightBits;
 
   unsigned SharedCEMField = NumPartitions == 1 ? 0 : getBits(V, 23, 2);
@@ -1530,8 +1531,8 @@ void feme::vulkan::decodeASTCBlockHDR(const uint8_t Block[16],
     unsigned BaseField = getBits(V, 23, 6);
     unsigned BaseCEM = ((BaseField & 0x3) - 1) * 4;
     unsigned CMBits = BaseField >> 2;
-    uint64_t Extra = getBits(V, DualPlaneStartBit + (Mode.DualPlane ? 2 : 0),
-                             ExtraCEMBits);
+    uint64_t Extra =
+        getBits(V, DualPlaneStartBit + (Mode.DualPlane ? 2 : 0), ExtraCEMBits);
     uint64_t Combined = CMBits | (Extra << 4);
     unsigned C[4] = {0, 0, 0, 0};
     for (unsigned P = 0; P != NumPartitions; ++P) {
@@ -1556,9 +1557,8 @@ void feme::vulkan::decodeASTCBlockHDR(const uint8_t Block[16],
   }
 
   unsigned ColorStartBit = NumPartitions == 1 ? 17 : 29;
-  unsigned MaxColorBits = DualPlaneStartBit > ColorStartBit
-                             ? DualPlaneStartBit - ColorStartBit
-                             : 0;
+  unsigned MaxColorBits =
+      DualPlaneStartBit > ColorStartBit ? DualPlaneStartBit - ColorStartBit : 0;
   unsigned ColorRange = 0;
   for (unsigned Range = 255; Range >= 5; --Range) {
     ISERangeShape Shape = iseRangeShape(Range);
@@ -1628,8 +1628,8 @@ void feme::vulkan::decodeASTCBlockHDR(const uint8_t Block[16],
       const Endpoint12 &E = Endpoint[Part];
       for (unsigned C = 0; C != 4; ++C) {
         unsigned Weight = (Mode.DualPlane && DualPlaneChannel == C)
-                             ? Weights1[Texel]
-                             : Weights0[Texel];
+                              ? Weights1[Texel]
+                              : Weights0[Texel];
         bool IsHDR = E.ChannelIsHDR[C];
         uint32_t C0 = expandTo16Bit(E.Lo[C], IsHDR);
         uint32_t C1 = expandTo16Bit(E.Hi[C], IsHDR);

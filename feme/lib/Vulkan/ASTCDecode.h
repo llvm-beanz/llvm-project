@@ -90,7 +90,7 @@ void decodeASTCBlock(const uint8_t Block[16], uint32_t BlockWidth,
 /// every texel of the block -- see `decodeASTCBlock`'s comment for the
 /// same reasoning applied to this function's own error case.
 void decodeASTCBlockHDR(const uint8_t Block[16], uint32_t BlockWidth,
-                       uint32_t BlockHeight, float *Output);
+                        uint32_t BlockHeight, float *Output);
 
 } // namespace feme::vulkan
 

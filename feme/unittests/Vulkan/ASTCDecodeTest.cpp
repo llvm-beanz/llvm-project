@@ -450,8 +450,7 @@ TEST(ASTCDecodeTest, HDRRGBDirectPlusLDRAlphaCEM14MixesDomains) {
   // values"). V6 = 255 -> alpha low endpoint 1.0 exactly (the UNORM8
   // saturating case); V7 = 128 -> alpha high endpoint (128<<8|128) /
   // 65536 = 32896/65536.
-  auto Block =
-      makeHDRBlock(/*Cem=*/14, {120, 128, 0, 0, 0x80, 0x80, 255, 128});
+  auto Block = makeHDRBlock(/*Cem=*/14, {120, 128, 0, 0, 0x80, 0x80, 255, 128});
 
   std::array<float, 4 * 4 * 4> Out{};
   decodeASTCBlockHDR(Block.data(), 4, 4, Out.data());
