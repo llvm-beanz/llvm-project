@@ -72,6 +72,20 @@ table below).
   integer_dot_product`, closed by roadmap E8 -- see this file's own
   "Advertised" column above for the current count). 20 of 1.3's 23
   promoted extensions and all 16 of 1.4's are unimplemented.
+- **`textureCompressionASTC_HDR`/`VK_EXT_texture_compression_astc_hdr`'s
+  own verify-first gate (roadmap G4) is resolved: `Format.cpp` has no ASTC
+  decode of any kind, LDR or HDR, and no block-compressed format is
+  recognized at all** (`feme::cpu::ResourceFormat`, RuntimeABI.h, has zero
+  compressed entries). The scope gap is wider than either row's own text
+  anticipated: `Image.cpp`'s subresource layout is hard-coded to a
+  per-texel stride, so real ASTC support (LDR or HDR) needs a block-based
+  layout rework in `Image.{h,cpp}` too, not only a new `Format.cpp` decode
+  path. Split into roadmap E20 (the LDR decoder plus that block-layout
+  groundwork, gating the previously-untracked Vulkan 1.0 core
+  `VkPhysicalDeviceFeatures::textureCompressionASTC_LDR` bit -- out of
+  this file's own 1.3/1.4-only scope, so not added as a row here) and E21
+  (the original HDR-only scope, depending on E20). See Roadmap.md's E15/
+  E20/E21 rows and `agent_thoughts.md` for the full investigation.
 
 None of this is new work landing in this milestone -- D1 is deliberately
 scoped to the inventory itself, not closing it (see Roadmap.md's D1 row).
@@ -108,7 +122,7 @@ numeric value rather than a yes/no claim.
 | feature | VK_VERSION_1_3 | `subgroupSizeControl` | no |  |
 | feature | VK_VERSION_1_3 | `computeFullSubgroups` | no |  |
 | feature | VK_VERSION_1_3 | `synchronization2` | no |  |
-| feature | VK_VERSION_1_3 | `textureCompressionASTC_HDR` | no |  |
+| feature | VK_VERSION_1_3 | `textureCompressionASTC_HDR` | no | roadmap G4/E15: verified `Format.cpp` has no ASTC decode of any kind (LDR or HDR), and no block-compressed format is recognized at all; split into E20 (LDR prerequisite + block-layout groundwork) and E21 (this row's original HDR scope, depends on E20) |
 | feature | VK_VERSION_1_3 | `shaderZeroInitializeWorkgroupMemory` | no |  |
 | feature | VK_VERSION_1_3 | `dynamicRendering` | yes |  |
 | feature | VK_VERSION_1_3 | `shaderIntegerDotProduct` | yes |  |
@@ -169,7 +183,7 @@ numeric value rather than a yes/no claim.
 | extension | VK_VERSION_1_3 | `VK_EXT_shader_demote_to_helper_invocation` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_subgroup_size_control` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_texel_buffer_alignment` | no |  |
-| extension | VK_VERSION_1_3 | `VK_EXT_texture_compression_astc_hdr` | no |  |
+| extension | VK_VERSION_1_3 | `VK_EXT_texture_compression_astc_hdr` | no | roadmap G4/E15/E21: see `textureCompressionASTC_HDR` feature row above |
 | extension | VK_VERSION_1_3 | `VK_EXT_tooling_info` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_ycbcr_2plane_444_formats` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_copy_commands2` | no |  |
