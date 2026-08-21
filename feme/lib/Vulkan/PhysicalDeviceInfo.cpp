@@ -510,6 +510,15 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too, or every one of those cases fails `NotSupported` instead
       // of running for real.
       {VK_EXT_PRIVATE_DATA_EXTENSION_NAME, VK_EXT_PRIVATE_DATA_SPEC_VERSION},
+      // (roadmap E11) `OpDemoteToHelperInvocation` now converts
+      // (SPIRVToLLVMPatterns.cpp/CanonicalizeStage.cpp) to
+      // `feme.stage.demote`; like `private_data`/`pipeline_creation_cache_
+      // control` above, CTS's `dEQP-VK.spirv_assembly.instruction.graphics.
+      // demote_to_helper_invocation.*`/`dEQP-VK.shader_execution_
+      // properties.*` enable this extension by name regardless of the
+      // advertised `apiVersion`, so it must be listed here too.
+      {VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME,
+       VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -530,7 +530,13 @@ TEST_F(PhysicalDeviceProperties2Test,
   // Roadmap E10: now genuinely implemented (PrivateData.{h,cpp}), and must
   // agree with the dedicated `VK_EXT_private_data` struct case below.
   EXPECT_EQ(Features13.privateData, VK_TRUE);
-  EXPECT_EQ(Features13.shaderDemoteToHelperInvocation, VK_FALSE);
+  // Roadmap E11: now genuinely implemented (SPIRVToLLVMPatterns.cpp/
+  // CanonicalizeStage.cpp convert OpDemoteToHelperInvocation to
+  // feme.stage.demote), and must agree with the dedicated
+  // `VK_EXT_shader_demote_to_helper_invocation` struct case below.
+  // `OpTerminateInvocation` (roadmap E12) is a separate, still-
+  // unimplemented op, so `shaderTerminateInvocation` remains false.
+  EXPECT_EQ(Features13.shaderDemoteToHelperInvocation, VK_TRUE);
   EXPECT_EQ(Features13.shaderTerminateInvocation, VK_FALSE);
   // Roadmap E7: now genuinely implemented (Pipeline.cpp honors a chained
   // `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and
@@ -634,6 +640,24 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &PrivateDataFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(PrivateDataFeatures.privateData, VK_TRUE);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    ShaderDemoteToHelperInvocationIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E11: `VK_EXT_shader_demote_to_helper_invocation`'s own dedicated
+  // feature struct must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Features` case above, exactly like
+  // `VK_EXT_private_data`'s own struct does.
+  VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures DemoteFeatures{};
+  DemoteFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &DemoteFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(DemoteFeatures.shaderDemoteToHelperInvocation, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

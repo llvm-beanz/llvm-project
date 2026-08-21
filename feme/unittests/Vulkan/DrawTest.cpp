@@ -1405,7 +1405,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 8u);
+  ASSERT_EQ(Count, 9u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -1432,6 +1432,9 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
       HasExtension(VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME));
   // Roadmap E10.
   EXPECT_TRUE(HasExtension(VK_EXT_PRIVATE_DATA_EXTENSION_NAME));
+  // Roadmap E11.
+  EXPECT_TRUE(HasExtension(
+      VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;

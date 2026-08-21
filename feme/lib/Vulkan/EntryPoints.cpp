@@ -950,7 +950,17 @@ void fillFeatures2Chain(void *pNext) {
       // `pipelineCreationCacheControl` above -- must agree with the
       // dedicated `VkPhysicalDevicePrivateDataFeatures` struct case below.
       Features->privateData = VK_TRUE;
-      Features->shaderDemoteToHelperInvocation = VK_FALSE;
+      // (roadmap E11) SPIR-V's `OpDemoteToHelperInvocation` now converts
+      // (SPIRVToLLVMPatterns.cpp/CanonicalizeStage.cpp) to
+      // `feme.stage.demote`, whose reference/SIMD lowering
+      // (ReferenceLowering.cpp/Linearize.cpp/SIMDize.cpp) already existed,
+      // so this bit -- like `pipelineCreationCacheControl`/`privateData`
+      // above -- must agree with the dedicated
+      // `VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures` struct
+      // case below. `OpTerminateInvocation` (roadmap E12) is a separate,
+      // still-unimplemented op, so `shaderTerminateInvocation` remains
+      // false.
+      Features->shaderDemoteToHelperInvocation = VK_TRUE;
       Features->shaderTerminateInvocation = VK_FALSE;
       // (roadmap E7) `Pipeline.cpp`'s `compileComputePipeline` honors both
       // a chained `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and
@@ -1121,6 +1131,20 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDevicePrivateDataFeatures *>(Base);
       Features->privateData = VK_TRUE;
+      break;
+    }
+    // (roadmap E11) `VK_EXT_shader_demote_to_helper_invocation`'s own
+    // feature struct, whose 1.3 core and `EXT` spellings share one
+    // `sType`, exactly like `pipelineCreationCacheControl`/`privateData`
+    // above. `SPIRVToLLVMPatterns.cpp`/`CanonicalizeStage.cpp` convert
+    // `OpDemoteToHelperInvocation` to `feme.stage.demote` unconditionally,
+    // so this bit -- like those above -- must agree with the aggregate
+    // `VkPhysicalDeviceVulkan13Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES: {
+      auto *Features =
+          reinterpret_cast<
+              VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures *>(Base);
+      Features->shaderDemoteToHelperInvocation = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:
