@@ -27,3 +27,11 @@ maintenance4
 # add sequence, not a hardware-accelerated one, so they stay a truthful
 # VK_FALSE.
 shaderIntegerDotProduct
+# pipelineCreationCacheControl: VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_
+# REQUIRED_BIT (Pipeline.cpp/GraphicsPipeline.cpp) and VK_PIPELINE_CACHE_
+# CREATE_EXTERNALLY_SYNCHRONIZED_BIT (PipelineCache.{h,cpp}) are both
+# implemented and, as of roadmap E9, advertised through both the dedicated
+# VkPhysicalDevicePipelineCreationCacheControlFeatures struct and the
+# aggregate VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES case,
+# which now agree.
+pipelineCreationCacheControl

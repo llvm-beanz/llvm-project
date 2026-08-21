@@ -521,7 +521,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features13.inlineUniformBlock, VK_FALSE);
   EXPECT_EQ(Features13.descriptorBindingInlineUniformBlockUpdateAfterBind,
             VK_FALSE);
-  EXPECT_EQ(Features13.pipelineCreationCacheControl, VK_FALSE);
+  // Roadmap E9: now genuinely implemented (Pipeline.cpp/GraphicsPipeline.cpp
+  // honor VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT,
+  // PipelineCache.{h,cpp} honors VK_PIPELINE_CACHE_CREATE_EXTERNALLY_
+  // SYNCHRONIZED_BIT), and must agree with the dedicated
+  // `VK_EXT_pipeline_creation_cache_control` struct case below.
+  EXPECT_EQ(Features13.pipelineCreationCacheControl, VK_TRUE);
   EXPECT_EQ(Features13.privateData, VK_FALSE);
   EXPECT_EQ(Features13.shaderDemoteToHelperInvocation, VK_FALSE);
   EXPECT_EQ(Features13.shaderTerminateInvocation, VK_FALSE);
@@ -593,6 +598,24 @@ TEST_F(
             Props13.maxComputeWorkgroupSubgroups);
   EXPECT_EQ(SubgroupSizeControlProps.requiredSubgroupSizeStages,
             Props13.requiredSubgroupSizeStages);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    PipelineCreationCacheControlIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E9: `VK_EXT_pipeline_creation_cache_control`'s own dedicated
+  // feature struct must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Features` case above, exactly like
+  // `VK_KHR_maintenance4`'s own struct does.
+  VkPhysicalDevicePipelineCreationCacheControlFeatures CacheControlFeatures{};
+  CacheControlFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &CacheControlFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(CacheControlFeatures.pipelineCreationCacheControl, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

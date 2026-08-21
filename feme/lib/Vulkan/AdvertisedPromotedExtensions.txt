@@ -7,3 +7,4 @@
 VK_KHR_dynamic_rendering = every command and the dynamicRendering feature bit are implemented, including (roadmap E1) the aggregate Vulkan13Features struct
 VK_EXT_extended_dynamic_state = roadmap C4c: all 12 dynamic states implemented
 VK_KHR_shader_integer_dot_product = roadmap E8: OpSDot/OpUDot/OpSUDot-family spirv->llvm conversion patterns implemented; the 36 integerDotProduct*Accelerated limit bits remain honestly VK_FALSE (not hardware-accelerated on this CPU target)
+VK_EXT_pipeline_creation_cache_control = roadmap E9: VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT/VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT implemented (Pipeline.cpp/GraphicsPipeline.cpp/PipelineCache.{h,cpp})

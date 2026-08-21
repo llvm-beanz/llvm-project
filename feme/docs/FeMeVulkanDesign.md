@@ -562,8 +562,16 @@ bits follow from this -- this CPU target runs the lowering as an ordinary
 multiply-add sequence, not a hardware-accelerated one, so every one stays
 a truthful `VK_FALSE`, both in the dedicated
 `VkPhysicalDeviceShaderIntegerDotProductProperties` struct and the
-aggregate one) is genuinely implemented too;
-`pipelineCreationCacheControl`,
+aggregate one) is genuinely implemented too; and
+`pipelineCreationCacheControl` (roadmap E9:
+`vkCreateComputePipelines`/`vkCreateGraphicsPipelines` (Pipeline.cpp/
+GraphicsPipeline.cpp) honor `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_
+REQUIRED_BIT`, and `vkCreatePipelineCache` (Pipeline.cpp) honors
+`VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT` by locking
+`PipelineCache`'s internal tables unless that bit was set, likewise
+reported through both its own dedicated
+`VkPhysicalDevicePipelineCreationCacheControlFeatures` struct and the
+aggregate struct) is genuinely implemented as well;
 `pushDescriptor`, and the rest are all confirmed unimplemented, not merely
 unaudited. Roadmap E2 wires the promoted `...Properties` struct's
 `vkGetPhysicalDeviceProperties2` case for both versions, enumerating every
@@ -575,9 +583,9 @@ pre-promotion extension struct (none of which has its own
 `Properties2` case yet), so each field's own later row raises it only
 once that row also adds the matching dedicated-struct case (see the
 inventory doc's own "Findings"). Of 39 extensions `vk.xml` records as
-promoted into 1.3 or 1.4, only the six now listed above are
+promoted into 1.3 or 1.4, only the seven now listed above are
 implemented. See the inventory doc's own "Findings" for the full
-breakdown and Roadmap.md's D1/E1/E2/E3/E6/E8 rows.
+breakdown and Roadmap.md's D1/E1/E2/E3/E6/E8/E9 rows.
 
 ## Shader and Pipeline Compilation
 
@@ -1133,6 +1141,26 @@ data round-trips a key set only, letting a *fresh* process recognize "this
 was known-good before" without letting it skip recompilation; a hit
 within the same process (the same `VkPipelineCache` object) does skip it,
 sharing one `CachedPipelineArtifact`.
+
+**Status (roadmap E9):** `VK_EXT_pipeline_creation_cache_control`'s two
+bits are both honored as flag-only additions to the object model above,
+per this milestone's own scope (Roadmap.md's E9 row). A `VkPipeline`
+creation carrying `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
+BIT` that misses the cache (or has no cache to hit at all) reports
+`VK_PIPELINE_COMPILE_REQUIRED` and leaves that pipeline null instead of
+compiling for real (`vkCreateComputePipelines`/`vkCreateGraphicsPipelines`
+in Pipeline.cpp/GraphicsPipeline.cpp); a more severe result elsewhere in
+the same batch still wins, per the extension's own spec. A
+`VkPipelineCache` created with `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_
+SYNCHRONIZED_BIT` skips `PipelineCache`'s internal mutex entirely (the
+caller has promised there is no concurrent access to synchronize
+against); without it, `lookup`/`insert`/`lookupGraphics`/`insertGraphics`
+-- the four accessors `vkCreateComputePipelines`/
+`vkCreateGraphicsPipelines` call -- take that mutex, since `pipelineCache`
+is not one of those two commands' own externally-synchronized parameters
+by default. `merge`/`keys` (`vkMergePipelineCaches`/
+`vkGetPipelineCacheData`) never lock: their own parameters are always
+host-synchronized by the base spec, with or without this extension's bit.
 
 ## Graphics, Presentation, and Window-System Integration
 

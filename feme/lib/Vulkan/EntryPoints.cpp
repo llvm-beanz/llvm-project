@@ -936,7 +936,14 @@ void fillFeatures2Chain(void *pNext) {
       Features->robustImageAccess = VK_FALSE;
       Features->inlineUniformBlock = VK_FALSE;
       Features->descriptorBindingInlineUniformBlockUpdateAfterBind = VK_FALSE;
-      Features->pipelineCreationCacheControl = VK_FALSE;
+      // (roadmap E9) `Pipeline.cpp`/`GraphicsPipeline.cpp` honor
+      // `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`, and
+      // `PipelineCache.{h,cpp}` honors `VK_PIPELINE_CACHE_CREATE_
+      // EXTERNALLY_SYNCHRONIZED_BIT`, so this bit -- like `dynamicRendering`/
+      // `synchronization2` -- must agree with the dedicated
+      // `VkPhysicalDevicePipelineCreationCacheControlFeatures` struct case
+      // below.
+      Features->pipelineCreationCacheControl = VK_TRUE;
       Features->privateData = VK_FALSE;
       Features->shaderDemoteToHelperInvocation = VK_FALSE;
       Features->shaderTerminateInvocation = VK_FALSE;
@@ -1081,6 +1088,23 @@ void fillFeatures2Chain(void *pNext) {
           reinterpret_cast<VkPhysicalDeviceShaderIntegerDotProductFeatures *>(
               Base);
       Features->shaderIntegerDotProduct = VK_TRUE;
+      break;
+    }
+    // (roadmap E9) `VK_EXT_pipeline_creation_cache_control`'s own feature
+    // struct, whose 1.3 core and `EXT` spellings share one `sType`, exactly
+    // like `subgroupSizeControl` above.
+    // `vkCreateComputePipelines`/`vkCreateGraphicsPipelines` (Pipeline.cpp/
+    // GraphicsPipeline.cpp) honor `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_
+    // COMPILE_REQUIRED_BIT`, and `vkCreatePipelineCache` (Pipeline.cpp)
+    // honors `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`
+    // (PipelineCache.{h,cpp}), so this bit -- like `maintenance4`/
+    // `subgroupSizeControl` above -- must agree with the aggregate
+    // `VkPhysicalDeviceVulkan13Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDevicePipelineCreationCacheControlFeatures
+                               *>(Base);
+      Features->pipelineCreationCacheControl = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:

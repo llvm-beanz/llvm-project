@@ -101,7 +101,7 @@ numeric value rather than a yes/no claim.
 | feature | VK_VERSION_1_3 | `robustImageAccess` | no |  |
 | feature | VK_VERSION_1_3 | `inlineUniformBlock` | no |  |
 | feature | VK_VERSION_1_3 | `descriptorBindingInlineUniformBlockUpdateAfterBind` | no |  |
-| feature | VK_VERSION_1_3 | `pipelineCreationCacheControl` | no |  |
+| feature | VK_VERSION_1_3 | `pipelineCreationCacheControl` | yes |  |
 | feature | VK_VERSION_1_3 | `privateData` | no |  |
 | feature | VK_VERSION_1_3 | `shaderDemoteToHelperInvocation` | no |  |
 | feature | VK_VERSION_1_3 | `shaderTerminateInvocation` | no |  |
@@ -163,7 +163,7 @@ numeric value rather than a yes/no claim.
 | extension | VK_VERSION_1_3 | `VK_EXT_extended_dynamic_state2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_image_robustness` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_inline_uniform_block` | no |  |
-| extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_cache_control` | no |  |
+| extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_cache_control` | yes | roadmap E9: VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT/VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT implemented (Pipeline.cpp/GraphicsPipeline.cpp/PipelineCache.{h,cpp}) |
 | extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_feedback` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_private_data` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_shader_demote_to_helper_invocation` | no |  |

@@ -488,6 +488,18 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // a valid, conformant answer this extension's own spec permits.
       {VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME,
        VK_KHR_SHADER_INTEGER_DOT_PRODUCT_SPEC_VERSION},
+      // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
+      // BIT` (Pipeline.cpp/GraphicsPipeline.cpp) and `VK_PIPELINE_CACHE_
+      // CREATE_EXTERNALLY_SYNCHRONIZED_BIT` (PipelineCache.{h,cpp}) are
+      // both implemented; like `synchronization2`/`maintenance5`/
+      // `maintenance6`/`shader_integer_dot_product` above,
+      // `dEQP-VK.api.pipeline_creation_cache_control.*` and
+      // `dEQP-VK.pipeline.pipeline_creation_cache_control.*` enable this
+      // extension by name regardless of the advertised `apiVersion`, so it
+      // must be listed here too, or every one of them fails `NotSupported`
+      // instead of running for real.
+      {VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_EXTENSION_NAME,
+       VK_EXT_PIPELINE_CREATION_CACHE_CONTROL_SPEC_VERSION},
   };
   return Extensions;
 }
