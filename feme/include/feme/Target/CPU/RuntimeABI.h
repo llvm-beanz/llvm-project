@@ -140,6 +140,27 @@ enum class ResourceFormat : uint32_t {
   ASTC_12x10_SRGB,
   ASTC_12x12_UNORM,
   ASTC_12x12_SRGB,
+
+  // (Roadmap E21) The 14 HDR-only ASTC block footprints
+  // (`VK_FORMAT_ASTC_*_SFLOAT_BLOCK_EXT`, `VK_EXT_texture_compression_
+  // astc_hdr`) -- the same 14 footprints as the LDR pairs above, each
+  // with a single `_SFLOAT` variant instead of an `_UNORM`/`_SRGB` pair
+  // (HDR data has no sRGB curve to apply). Ordered the same
+  // smallest-footprint-first way.
+  ASTC_4x4_SFLOAT,
+  ASTC_5x4_SFLOAT,
+  ASTC_5x5_SFLOAT,
+  ASTC_6x5_SFLOAT,
+  ASTC_6x6_SFLOAT,
+  ASTC_8x5_SFLOAT,
+  ASTC_8x6_SFLOAT,
+  ASTC_8x8_SFLOAT,
+  ASTC_10x5_SFLOAT,
+  ASTC_10x6_SFLOAT,
+  ASTC_10x8_SFLOAT,
+  ASTC_10x10_SFLOAT,
+  ASTC_12x10_SFLOAT,
+  ASTC_12x12_SFLOAT,
 };
 
 /// Whether \p Format is one of the ASTC block-compressed formats above.
@@ -152,7 +173,7 @@ enum class ResourceFormat : uint32_t {
 /// block-aware layout math this distinction feeds.
 constexpr bool isBlockCompressedFormat(ResourceFormat Format) {
   return Format >= ResourceFormat::ASTC_4x4_UNORM &&
-         Format <= ResourceFormat::ASTC_12x12_SRGB;
+         Format <= ResourceFormat::ASTC_12x12_SFLOAT;
 }
 
 /// Bits of `FemeDescriptor::Flags`.

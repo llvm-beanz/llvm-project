@@ -31,6 +31,13 @@
 // these three functions rather than `formatElementSize` directly, so it
 // already generalizes to whichever family `Format` belongs to.
 //
+// Roadmap E21 (`VK_EXT_texture_compression_astc_hdr`): the 14
+// `_SFLOAT_BLOCK_EXT` formats reuse this same block-compressed treatment
+// -- same `blockWidth`/`blockHeight`/`bytesPerBlock` (still 128 bits/block
+// regardless of footprint) as their LDR counterparts, decoded by
+// `feme::vulkan::decodeASTCBlockHDR` (ASTCDecode.h) instead of
+// `decodeASTCBlock`.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_FORMAT_H

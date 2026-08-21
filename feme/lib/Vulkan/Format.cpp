@@ -138,6 +138,35 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::ASTC_12x12_UNORM;
   case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
     return ResourceFormat::ASTC_12x12_SRGB;
+  // (Roadmap E21) The 14 HDR-only ASTC block footprints.
+  case VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_4x4_SFLOAT;
+  case VK_FORMAT_ASTC_5x4_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_5x4_SFLOAT;
+  case VK_FORMAT_ASTC_5x5_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_5x5_SFLOAT;
+  case VK_FORMAT_ASTC_6x5_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_6x5_SFLOAT;
+  case VK_FORMAT_ASTC_6x6_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_6x6_SFLOAT;
+  case VK_FORMAT_ASTC_8x5_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_8x5_SFLOAT;
+  case VK_FORMAT_ASTC_8x6_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_8x6_SFLOAT;
+  case VK_FORMAT_ASTC_8x8_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_8x8_SFLOAT;
+  case VK_FORMAT_ASTC_10x5_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_10x5_SFLOAT;
+  case VK_FORMAT_ASTC_10x6_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_10x6_SFLOAT;
+  case VK_FORMAT_ASTC_10x8_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_10x8_SFLOAT;
+  case VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_10x10_SFLOAT;
+  case VK_FORMAT_ASTC_12x10_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_12x10_SFLOAT;
+  case VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK_EXT:
+    return ResourceFormat::ASTC_12x12_SFLOAT;
   default:
     return std::nullopt;
   }
@@ -220,6 +249,22 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
   case ResourceFormat::ASTC_12x10_SRGB:
   case ResourceFormat::ASTC_12x12_UNORM:
   case ResourceFormat::ASTC_12x12_SRGB:
+  // (Roadmap E21) The 14 HDR-only ASTC block footprints: no single-texel
+  // size either, for the same reason as their LDR counterparts above.
+  case ResourceFormat::ASTC_4x4_SFLOAT:
+  case ResourceFormat::ASTC_5x4_SFLOAT:
+  case ResourceFormat::ASTC_5x5_SFLOAT:
+  case ResourceFormat::ASTC_6x5_SFLOAT:
+  case ResourceFormat::ASTC_6x6_SFLOAT:
+  case ResourceFormat::ASTC_8x5_SFLOAT:
+  case ResourceFormat::ASTC_8x6_SFLOAT:
+  case ResourceFormat::ASTC_8x8_SFLOAT:
+  case ResourceFormat::ASTC_10x5_SFLOAT:
+  case ResourceFormat::ASTC_10x6_SFLOAT:
+  case ResourceFormat::ASTC_10x8_SFLOAT:
+  case ResourceFormat::ASTC_10x10_SFLOAT:
+  case ResourceFormat::ASTC_12x10_SFLOAT:
+  case ResourceFormat::ASTC_12x12_SFLOAT:
     return 0;
   }
   llvm_unreachable("unhandled ResourceFormat");
@@ -281,6 +326,36 @@ BlockShape blockShape(ResourceFormat Format) {
     return {12, 10};
   case ResourceFormat::ASTC_12x12_UNORM:
   case ResourceFormat::ASTC_12x12_SRGB:
+    return {12, 12};
+  // (Roadmap E21) The 14 HDR-only ASTC block footprints -- same
+  // width/height pairing as their LDR counterparts above.
+  case ResourceFormat::ASTC_4x4_SFLOAT:
+    return {4, 4};
+  case ResourceFormat::ASTC_5x4_SFLOAT:
+    return {5, 4};
+  case ResourceFormat::ASTC_5x5_SFLOAT:
+    return {5, 5};
+  case ResourceFormat::ASTC_6x5_SFLOAT:
+    return {6, 5};
+  case ResourceFormat::ASTC_6x6_SFLOAT:
+    return {6, 6};
+  case ResourceFormat::ASTC_8x5_SFLOAT:
+    return {8, 5};
+  case ResourceFormat::ASTC_8x6_SFLOAT:
+    return {8, 6};
+  case ResourceFormat::ASTC_8x8_SFLOAT:
+    return {8, 8};
+  case ResourceFormat::ASTC_10x5_SFLOAT:
+    return {10, 5};
+  case ResourceFormat::ASTC_10x6_SFLOAT:
+    return {10, 6};
+  case ResourceFormat::ASTC_10x8_SFLOAT:
+    return {10, 8};
+  case ResourceFormat::ASTC_10x10_SFLOAT:
+    return {10, 10};
+  case ResourceFormat::ASTC_12x10_SFLOAT:
+    return {12, 10};
+  case ResourceFormat::ASTC_12x12_SFLOAT:
     return {12, 12};
   default:
     return {1, 1};

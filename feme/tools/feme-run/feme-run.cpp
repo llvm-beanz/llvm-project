@@ -534,6 +534,22 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
   case ResourceFormat::ASTC_12x10_SRGB:
   case ResourceFormat::ASTC_12x12_UNORM:
   case ResourceFormat::ASTC_12x12_SRGB:
+  // (Roadmap E21) HDR-only ASTC block-compressed formats: same "no
+  // per-texel size" status as their LDR counterparts above.
+  case ResourceFormat::ASTC_4x4_SFLOAT:
+  case ResourceFormat::ASTC_5x4_SFLOAT:
+  case ResourceFormat::ASTC_5x5_SFLOAT:
+  case ResourceFormat::ASTC_6x5_SFLOAT:
+  case ResourceFormat::ASTC_6x6_SFLOAT:
+  case ResourceFormat::ASTC_8x5_SFLOAT:
+  case ResourceFormat::ASTC_8x6_SFLOAT:
+  case ResourceFormat::ASTC_8x8_SFLOAT:
+  case ResourceFormat::ASTC_10x5_SFLOAT:
+  case ResourceFormat::ASTC_10x6_SFLOAT:
+  case ResourceFormat::ASTC_10x8_SFLOAT:
+  case ResourceFormat::ASTC_10x10_SFLOAT:
+  case ResourceFormat::ASTC_12x10_SFLOAT:
+  case ResourceFormat::ASTC_12x12_SFLOAT:
     return 0;
   }
   llvm_unreachable("unhandled ResourceFormat");

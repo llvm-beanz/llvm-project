@@ -105,8 +105,37 @@ TEST(FormatTest, MapsASTCLDRFormats) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_12x12_SRGB_BLOCK),
             ResourceFormat::ASTC_12x12_SRGB);
 
-  // ASTC HDR-only formats (`_SFLOAT_BLOCK`, roadmap E21) stay unrecognized.
-  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK_EXT), std::nullopt);
+  // ASTC HDR-only formats (`_SFLOAT_BLOCK_EXT`, roadmap E21): a single
+  // `_SFLOAT` variant per footprint, no separate sRGB pair (HDR data has
+  // no sRGB curve to apply).
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_4x4_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_5x4_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_5x4_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_5x5_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_5x5_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_6x5_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_6x5_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_6x6_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_6x6_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x5_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_8x5_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x6_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_8x6_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_8x8_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_8x8_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x5_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_10x5_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x6_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_10x6_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x8_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_10x8_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_10x10_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_10x10_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_12x10_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_12x10_SFLOAT);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK_EXT),
+            ResourceFormat::ASTC_12x12_SFLOAT);
 }
 
 TEST(FormatTest, ElementSizeMatchesFormatWidth) {
@@ -121,6 +150,8 @@ TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::A1B5G5R5_UNORM), 2u);
   // Roadmap E20: block-compressed formats have no per-texel size.
   EXPECT_EQ(formatElementSize(ResourceFormat::ASTC_4x4_UNORM), 0u);
+  // Roadmap E21: same for the HDR-only variants.
+  EXPECT_EQ(formatElementSize(ResourceFormat::ASTC_4x4_SFLOAT), 0u);
 }
 
 TEST(FormatTest, BlockDimensionsMatchASTCFootprint) {
@@ -137,6 +168,15 @@ TEST(FormatTest, BlockDimensionsMatchASTCFootprint) {
   EXPECT_EQ(blockWidth(ResourceFormat::ASTC_12x12_SRGB), 12u);
   EXPECT_EQ(blockHeight(ResourceFormat::ASTC_12x12_SRGB), 12u);
   EXPECT_EQ(bytesPerBlock(ResourceFormat::ASTC_12x12_SRGB), 16u);
+
+  // Roadmap E21: the HDR-only variants share the same footprint/block-size
+  // rules as their LDR counterparts.
+  EXPECT_EQ(blockWidth(ResourceFormat::ASTC_4x4_SFLOAT), 4u);
+  EXPECT_EQ(blockHeight(ResourceFormat::ASTC_4x4_SFLOAT), 4u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ASTC_4x4_SFLOAT), 16u);
+  EXPECT_EQ(blockWidth(ResourceFormat::ASTC_12x12_SFLOAT), 12u);
+  EXPECT_EQ(blockHeight(ResourceFormat::ASTC_12x12_SFLOAT), 12u);
+  EXPECT_EQ(bytesPerBlock(ResourceFormat::ASTC_12x12_SFLOAT), 16u);
 
   // A non-block-compressed format is always a 1x1 "block" of its own
   // per-texel size, so callers never need to special-case it.
@@ -169,6 +209,8 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
   // Roadmap E20: block-compressed formats cannot back a texel buffer
   // either -- there is no per-texel conversion to apply.
   EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::ASTC_4x4_UNORM));
+  // Roadmap E21: neither can an HDR-only variant.
+  EXPECT_FALSE(isTexelBufferFormatSupported(ResourceFormat::ASTC_4x4_SFLOAT));
 }
 
 TEST(FormatTest, IsBlockCompressedFormatDistinguishesASTC) {
@@ -176,6 +218,11 @@ TEST(FormatTest, IsBlockCompressedFormatDistinguishesASTC) {
   EXPECT_TRUE(feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_4x4_UNORM));
   EXPECT_TRUE(
       feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_12x12_SRGB));
+  // Roadmap E21: the HDR-only variants are block-compressed too.
+  EXPECT_TRUE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_4x4_SFLOAT));
+  EXPECT_TRUE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_12x12_SFLOAT));
   EXPECT_FALSE(
       feme::cpu::isBlockCompressedFormat(ResourceFormat::R8G8B8A8_UNORM));
   EXPECT_FALSE(feme::cpu::isBlockCompressedFormat(ResourceFormat::Unknown));

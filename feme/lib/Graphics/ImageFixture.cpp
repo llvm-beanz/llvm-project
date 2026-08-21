@@ -673,6 +673,36 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "astc-12x12-unorm";
   case ResourceFormat::ASTC_12x12_SRGB:
     return "astc-12x12-srgb";
+  // (Roadmap E21) HDR-only ASTC block-compressed formats: same "name only,
+  // no fixture support yet" status as their LDR counterparts above.
+  case ResourceFormat::ASTC_4x4_SFLOAT:
+    return "astc-4x4-sfloat";
+  case ResourceFormat::ASTC_5x4_SFLOAT:
+    return "astc-5x4-sfloat";
+  case ResourceFormat::ASTC_5x5_SFLOAT:
+    return "astc-5x5-sfloat";
+  case ResourceFormat::ASTC_6x5_SFLOAT:
+    return "astc-6x5-sfloat";
+  case ResourceFormat::ASTC_6x6_SFLOAT:
+    return "astc-6x6-sfloat";
+  case ResourceFormat::ASTC_8x5_SFLOAT:
+    return "astc-8x5-sfloat";
+  case ResourceFormat::ASTC_8x6_SFLOAT:
+    return "astc-8x6-sfloat";
+  case ResourceFormat::ASTC_8x8_SFLOAT:
+    return "astc-8x8-sfloat";
+  case ResourceFormat::ASTC_10x5_SFLOAT:
+    return "astc-10x5-sfloat";
+  case ResourceFormat::ASTC_10x6_SFLOAT:
+    return "astc-10x6-sfloat";
+  case ResourceFormat::ASTC_10x8_SFLOAT:
+    return "astc-10x8-sfloat";
+  case ResourceFormat::ASTC_10x10_SFLOAT:
+    return "astc-10x10-sfloat";
+  case ResourceFormat::ASTC_12x10_SFLOAT:
+    return "astc-12x10-sfloat";
+  case ResourceFormat::ASTC_12x12_SFLOAT:
+    return "astc-12x12-sfloat";
   }
   llvm_unreachable("unhandled ResourceFormat");
 }
