@@ -25606,3 +25606,139 @@ is already a plain core 1.4 command name the generator's existing
 `CORE_FEATURES` resolution emits), `vkGetPhysicalDeviceFormatProperties`
 (a separate, pre-existing stub -- see "The two new formats" above), or
 any other roadmap row's own scope.
+
+# Milestone E6: VK_KHR_maintenance6
+
+## Reading the row
+
+Roadmap.md's E6 row asks for `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`/
+`vkCmdPushDescriptorSet2` as "shape-compatible wrappers around the existing
+`Descriptor.cpp`/`CommandBuffer.cpp` entrypoints", plus
+`maxCombinedImageSamplerDescriptorCount`'s reporting as the one new limit
+(E2 already reserved the field). The dependency note explicitly anticipates
+splitting `vkCmdPushDescriptorSet2` out: "push descriptor sets need F12's
+`pushDescriptor` groundwork first if implemented together, otherwise stub
+`PushDescriptorSet` count `0`". F12 (push_descriptor) is not landed in this
+session, so I took the documented fallback: implement the two commands that
+don't need push-descriptor infrastructure, and leave `vkCmdPushDescriptorSet2`
+unimplemented (absent from `ImplementedEntrypoints.txt`, so the generated
+table maps it to null, exactly like every other genuinely-unimplemented
+command).
+
+## Confirming the commands are already core, no `vk_gen_entrypoints.py` change
+
+D1 added `VK_VERSION_1_4` to `CORE_FEATURES`, and checked `/tmp/vksdk`'s
+`vk.xml` (the SDK this build tree's `FEME_VULKAN_XML`/`Vulkan_INCLUDE_DIR`
+actually point at, confirmed from `build/CMakeCache.txt`): `vkCmdBind
+DescriptorSets2`/`vkCmdPushConstants2`/`vkCmdPushDescriptorSet2` are already
+non-`KHR`-suffixed `VK_VERSION_1_4` commands there (the `KHR` spellings are
+plain aliases), promoted from `VK_KHR_maintenance6`'s own `<require>` block.
+So, like E3/E5 before it, no `SUPPORTED_EXTENSIONS`/generator change is
+needed -- only `ImplementedEntrypoints.txt` entries and real bodies.
+
+## The `VkBindDescriptorSetsInfo`/`VkPushConstantsInfo` shape has no bind point
+
+The one thing I checked carefully before writing the wrappers:
+`VkBindDescriptorSetsInfo` replaces `vkCmdBindDescriptorSets`'s
+`pipelineBindPoint` argument with `stageFlags` (a mask), not an equivalent
+enum. I re-read `CommandBuffer::bindDescriptorSets`/`pushConstants` and their
+own non-`2` command's comment ("Both bind points share one set of bound
+descriptor sets here") and confirmed there is no per-bind-point state at all
+in this model -- one shared `BoundDescriptorSets`/push-constant byte range
+serves both compute and graphics. That makes the wrapper trivial: unpack the
+info struct's arrays, ignore `stageFlags`/`layout` (exactly like the non-`2`
+`vkCmdPushConstants`'s own comment already argues for its own `stageFlags`/
+`layout` arguments), and call straight through. No new state, no new
+validation branch.
+
+## `maxCombinedImageSamplerDescriptorCount`: reading E2's own report first
+
+Before picking a value, I reread "Roadmap E2: measured impact" in
+`VulkanCTSReport.md`, since it already tried a real, nonzero value for this
+exact field once (`1`, "since this ICD supports no multi-planar/YCbCr
+sampler formats") and reverted it -- not because `1` was the wrong value,
+but because landing it in the aggregate `VkPhysicalDeviceVulkan14Properties`
+struct alone, with no matching `VkPhysicalDeviceMaintenance6Properties`
+case yet, made `vulkan1p3.property_extensions_consistency` regress
+(comparing the aggregate's new nonzero value against the still-all-zero
+dedicated struct). The fix E2's report already prescribes is exactly what
+E6 is for: add the dedicated struct in the same change as the real value,
+so the two structs can never disagree. That's what I did -- both cases
+write `1` in the same commit -- and a targeted CTS run (below) confirms
+`vulkan1p3.*` stays green (this field is 1.4-only, so it isn't cross-checked
+by the 1.3 consistency case regardless, but the 1.4 one will be safe too,
+once `deqp-vk`'s own `contextSupports(1,4,0)` gap -- also E2-documented --
+stops making that whole subtree `NotSupported` in this environment).
+
+## Root-causing the one real CTS `Fail` before writing it up
+
+`dEQP-VK.api.command_buffers.secondary_push_constants_2` (the CTS case that
+actually exercises `vkCmdPushConstants2`/`vkCmdBindDescriptorSets2`
+together) failed pipeline creation with `VK_ERROR_INITIALIZATION_FAILED`.
+Rather than write that off as "maintenance6 doesn't work" or, worse, guess
+at a fix, I added a one-line temporary `llvm::errs()` print at
+`Pipeline.cpp`'s `compileComputePipeline` error path (reverted before any
+commit -- confirmed `git diff` was clean afterward), rebuilt just that one
+object, and reran the case. The real error: `"unsupported raised operation:
+'llvm.spv.resource.handlefrombinding...' is a register-bound resource
+handle the FeMe CPU target cannot normalize into a heap access or the
+root-constant block"`. That's about the shader's `OutBlock { vec4 value; }`
+storage-buffer declaration -- a non-array, single-field block, a shape none
+of this report's other passing storage-buffer shaders use (they all declare
+an `rtarray`/fixed array) -- and has nothing to do with either new command's
+own argument translation. I confirmed this by running the same CTS group
+(`api.command_buffers.*`, 131 cases) and finding 73 of its 77 failures throw
+the identical error at the identical call site, including all 64
+`indirect_compute_dispatch_offsets_*` cases, none of which touch
+`maintenance6` at all. That's the same "stacked blocker" pattern C1/C2/E5
+already established for this report: a pre-existing, orthogonal gap in
+resource-handle normalization, not a regression this row introduces. I did
+not attempt to fix it -- it is a compiler-pipeline gap well outside E6's own
+scope (a fix would mean auditing how `compileComputePipeline`'s resource-
+normalization pass recognizes storage-buffer "kinds", which is its own
+multi-file undertaking) -- and recorded it plainly in both Roadmap.md's own
+E6 row and a new "Roadmap E6: measured impact" section in
+`VulkanCTSReport.md`, the same way E5's `DrawIndexedTest` pipeline-creation
+failure was recorded rather than silently absorbed.
+
+`vkCmdPushDescriptorSet2`'s own CTS case
+(`secondary_push_descriptor_set_2`) came back a clean `NotSupported
+("VK_KHR_push_descriptor is not supported")`, exactly the expected result
+for a deliberately-unimplemented command guarded by a feature this ICD
+correctly does not advertise.
+
+## Build/test discipline
+
+Every commit was built and unit-tested independently before moving to the
+next (`ninja FeMeVulkanCore`/`FeMeVulkanTests`, then running the relevant
+`--gtest_filter`), with a full `ninja check-feme` (assertions + ccache
+build already configured in this tree, confirmed from `CMakeCache.txt`:
+`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`) after the code changes
+landed: 1551/1552 passed (1 pre-existing unsupported, 0 failed), consistent
+with the pre-E6 baseline plus this row's own two new test cases
+(`CommandBufferTest.BindDescriptorSets2AndPushConstants2ReachTheDispatch`,
+`PhysicalDeviceInfoTest.Maintenance6IsAdvertisedThroughItsOwnDedicatedFeature
+Struct`/`Maintenance6PropertiesReportARealCombinedImageSamplerCount`).
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E6's row, with the scope-correction note
+  (push descriptor sets deferred, per the row's own fallback clause) and
+  CTS-finding summary recorded above.
+- `FeMeVulkanDesign.md`: extended the `getSupportedDeviceExtensions`
+  status paragraph and D1's feature-inventory status note (four
+  extensions genuinely implemented now, not three), and added a "Command
+  Buffers" status note for the two new wrappers' pure argument-shape
+  design.
+- `VulkanCTSReport.md`: new "Roadmap E6: measured impact" section.
+
+## Scope discipline
+
+Touched `CommandBuffer.cpp`, `EntryPoints.{h,cpp}`, `PhysicalDeviceInfo.cpp`,
+`ImplementedEntrypoints.txt`, their unit tests
+(`CommandBufferTest.cpp`/`PhysicalDeviceInfoTest.cpp`/`DrawTest.cpp`), and
+the three documents this change directly affects. Did not touch
+`vk_gen_entrypoints.py` (confirmed unnecessary, as above), `Descriptor.
+{h,cpp}` (no push-descriptor infrastructure added -- correctly out of this
+row's scope until F12), or `Pipeline.cpp` (the one real CTS `Fail` found is
+a separate, pre-existing gap, deliberately not fixed here -- see above).
