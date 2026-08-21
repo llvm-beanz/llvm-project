@@ -69,7 +69,9 @@ PipelineCacheKey feme::vulkan::computePipelineCacheKey(
     const uint8_t (&DeviceUUID)[VK_UUID_SIZE], ArrayRef<uint32_t> ShaderWords,
     StringRef EntryPoint, ArrayRef<SpecializationOverride> Overrides,
     ArrayRef<const DescriptorSetLayout *> SetLayouts,
-    ArrayRef<VkPushConstantRange> PushConstantRanges) {
+    ArrayRef<VkPushConstantRange> PushConstantRanges,
+    uint32_t RequiredSubgroupSize,
+    VkPipelineShaderStageCreateFlags StageCreateFlags) {
   SHA256 Hash;
   Hash.update(ArrayRef(DeviceUUID, VK_UUID_SIZE));
   Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(ShaderWords.data()),
@@ -83,6 +85,13 @@ PipelineCacheKey feme::vulkan::computePipelineCacheKey(
                          sizeof(Override.Value)));
   }
   hashSetLayoutsAndPushConstants(Hash, SetLayouts, PushConstantRanges);
+  // (roadmap E7) `requiredSubgroupSize`/`VK_PIPELINE_SHADER_STAGE_CREATE_
+  // REQUIRE_FULL_SUBGROUPS_BIT` both change what `compileComputePipeline`
+  // compiles, so they must fold into the key like every other input above.
+  Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&RequiredSubgroupSize),
+                       sizeof(RequiredSubgroupSize)));
+  Hash.update(ArrayRef(reinterpret_cast<const uint8_t *>(&StageCreateFlags),
+                       sizeof(StageCreateFlags)));
   return Hash.final();
 }
 

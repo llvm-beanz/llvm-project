@@ -420,7 +420,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
         Key = computePipelineCacheKey(
             DeviceInfo.Properties.pipelineCacheUUID, Module->words(),
             CreateInfo.stage.pName ? CreateInfo.stage.pName : "main",
-            *Overrides, Layout.setLayouts(), Layout.pushConstantRanges());
+            *Overrides, Layout.setLayouts(), Layout.pushConstantRanges(),
+            findRequiredSubgroupSize(CreateInfo.stage.pNext),
+            CreateInfo.stage.flags);
       } else {
         consumeError(Overrides.takeError());
       }

@@ -150,6 +150,56 @@ TEST_F(PipelineCacheTest, NoCacheCompilesIndependentArtifactsEachTime) {
   vkDestroyPipeline(Device, Second, nullptr);
 }
 
+/// Roadmap E7: two otherwise-identical creations that disagree only in
+/// their chained `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` must
+/// not collide on the same cached artifact -- `computePipelineCacheKey`
+/// folds `requiredSubgroupSize` in for exactly this reason.
+TEST_F(PipelineCacheTest,
+       DifferentRequiredSubgroupSizesAreNotSharedAcrossCacheEntries) {
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSizeFour{};
+  RequiredSizeFour.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSizeFour.requiredSubgroupSize = 4;
+  VkComputePipelineCreateInfo CreateInfoFour = makeCreateInfo();
+  CreateInfoFour.stage.pNext = &RequiredSizeFour;
+
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSizeEight{};
+  RequiredSizeEight.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSizeEight.requiredSubgroupSize = 8;
+  VkComputePipelineCreateInfo CreateInfoEight = makeCreateInfo();
+  CreateInfoEight.stage.pNext = &RequiredSizeEight;
+
+  VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, Cache, 1, &CreateInfoFour, nullptr,
+                                     &First),
+            VK_SUCCESS);
+  ASSERT_EQ(vkCreateComputePipelines(Device, Cache, 1, &CreateInfoEight,
+                                     nullptr, &Second),
+            VK_SUCCESS);
+
+  EXPECT_NE(&fromHandle<ComputePipeline>(First)->getStage(),
+            &fromHandle<ComputePipeline>(Second)->getStage());
+
+  // A third, identical-to-`First` creation still hits, though.
+  VkPipeline Third = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, Cache, 1, &CreateInfoFour, nullptr,
+                                     &Third),
+            VK_SUCCESS);
+  EXPECT_EQ(&fromHandle<ComputePipeline>(First)->getStage(),
+            &fromHandle<ComputePipeline>(Third)->getStage());
+
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipeline(Device, Third, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+}
+
 TEST_F(PipelineCacheTest, DataRoundTripsThroughANewCache) {
   VkPipelineCacheCreateInfo CacheInfo{};
   VkPipelineCache Cache = VK_NULL_HANDLE;

@@ -75,14 +75,22 @@ using PipelineCacheKey = std::array<uint8_t, 32>;
 /// `pipelineCacheUUID`, which already folds in FeMe/LLVM versions, the CPU
 /// target triple, CPU feature policy, and wave size -- see
 /// `PhysicalDeviceInfo.cpp`'s `fillUUID` -- so this key does not need to
-/// duplicate any of that).
+/// duplicate any of that). \p RequiredSubgroupSize (roadmap E7, 0 if no
+/// `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` was chained) and
+/// \p StageCreateFlags (whose only bit `compileComputePipeline` currently
+/// consults is `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`)
+/// both change what `Pipeline.cpp` compiles this shader into, so two
+/// otherwise-identical creations that disagree in either must not collide
+/// on the same cached artifact.
 PipelineCacheKey
 computePipelineCacheKey(const uint8_t (&DeviceUUID)[VK_UUID_SIZE],
                         llvm::ArrayRef<uint32_t> ShaderWords,
                         llvm::StringRef EntryPoint,
                         llvm::ArrayRef<SpecializationOverride> Overrides,
                         llvm::ArrayRef<const DescriptorSetLayout *> SetLayouts,
-                        llvm::ArrayRef<VkPushConstantRange> PushConstantRanges);
+                        llvm::ArrayRef<VkPushConstantRange> PushConstantRanges,
+                        uint32_t RequiredSubgroupSize,
+                        VkPipelineShaderStageCreateFlags StageCreateFlags);
 
 /// Computes the strong key for one graphics pipeline creation: the two
 /// stages' SPIR-V words and entry points (a graphics stage has no
