@@ -26,10 +26,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E10 in the roadmap document?
+Can you implement milestone E11 in the roadmap document?
 
-> **`VK_EXT_private_data`/`privateData`.** `VkPrivateDataSlot` is a new, small
-> object (an opaque per-(object-handle) `uint64_t` map) alongside the existing
-> object model in `Objects.h`;
-> `vkCreatePrivateDataSlot`/`vkSetPrivateData`/`vkGetPrivateData`/`vkDestroyPrivateDataSlot`
-> are new, self-contained entrypoints with no dependency on any other row here
+> **`VK_EXT_shader_demote_to_helper_invocation`/`shaderDemoteToHelperInvocation`.**
+> SPIR-V's `OpDemoteToHelperInvocation` needs a new `spirv`->`llvm` conversion
+> pattern (mark the invocation inactive for further side effects, matching HLSL
+> `discard`'s existing non-terminating semantics rather than DXIL's `discard`'s
+> current lowering, if one exists -- audit `SPIRVToLLVMPatterns.cpp` first)
