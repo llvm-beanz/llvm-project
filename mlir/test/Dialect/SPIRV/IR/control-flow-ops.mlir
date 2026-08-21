@@ -1076,6 +1076,18 @@ func.func @kill() {
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.TerminateInvocation
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func @terminate_invocation
+func.func @terminate_invocation() {
+  // CHECK: spirv.TerminateInvocation
+  spirv.TerminateInvocation
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.DemoteToHelperInvocation
 //===----------------------------------------------------------------------===//
 

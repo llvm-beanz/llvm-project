@@ -4687,6 +4687,7 @@ def SPIRV_OC_OpGraphInputARM                  : I32EnumAttrCase<"OpGraphInputARM
 def SPIRV_OC_OpGraphSetOutputARM              : I32EnumAttrCase<"OpGraphSetOutputARM", 4185>;
 def SPIRV_OC_OpGraphEndARM                    : I32EnumAttrCase<"OpGraphEndARM", 4186>;
 def SPIRV_OC_OpTypeGraphARM                   : I32EnumAttrCase<"OpTypeGraphARM", 4190>;
+def SPIRV_OC_OpTerminateInvocation            : I32EnumAttrCase<"OpTerminateInvocation", 4416>;
 def SPIRV_OC_OpSubgroupBallotKHR              : I32EnumAttrCase<"OpSubgroupBallotKHR", 4421>;
 def SPIRV_OC_OpGroupNonUniformRotateKHR       : I32EnumAttrCase<"OpGroupNonUniformRotateKHR", 4431>;
 def SPIRV_OC_OpSDot                           : I32EnumAttrCase<"OpSDot", 4450>;
@@ -4827,6 +4828,7 @@ def SPIRV_OpcodeAttr :
       SPIRV_OC_OpGraphEntryPointARM, SPIRV_OC_OpGraphARM,
       SPIRV_OC_OpGraphInputARM, SPIRV_OC_OpGraphSetOutputARM, SPIRV_OC_OpGraphEndARM,
       SPIRV_OC_OpTypeGraphARM, SPIRV_OC_OpGraphConstantARM,
+      SPIRV_OC_OpTerminateInvocation,
       SPIRV_OC_OpSubgroupBallotKHR,
       SPIRV_OC_OpGroupNonUniformRotateKHR, SPIRV_OC_OpSDot, SPIRV_OC_OpUDot,
       SPIRV_OC_OpSUDot, SPIRV_OC_OpSDotAccSat, SPIRV_OC_OpUDotAccSat,

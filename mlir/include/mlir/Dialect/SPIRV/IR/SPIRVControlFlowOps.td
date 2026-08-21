@@ -392,6 +392,49 @@ def SPIRV_KillOp : SPIRV_Op<"Kill", [Terminator]> {
 
 // -----
 
+def SPIRV_TerminateInvocationOp : SPIRV_Op<"TerminateInvocation", [Terminator]> {
+  let summary = [{
+    Terminate a fragment shader invocation.
+  }];
+
+  let description = [{
+    Ceases all further processing by any invocation that executes it: Only
+    instructions these invocations executed before OpTerminateInvocation
+    have observable side effects. If this instruction is executed in
+    non-uniform control flow, all subsequent control flow is non-uniform
+    (for invocations that continue to execute). Unlike OpKill, this
+    instruction does not deal with fragment shader discard: fragment
+    shader outputs are not necessarily discarded, and depth/stencil tests
+    happen as though this instruction had not been executed.
+
+    This instruction must be the last instruction in a block.
+
+    This instruction is only valid in the Fragment Execution Model.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    spirv.TerminateInvocation
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_0>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[SPV_KHR_terminate_invocation]>,
+    Capability<[SPIRV_C_Shader]>
+  ];
+
+  let arguments = (ins);
+  let results = (outs);
+  let assemblyFormat = "attr-dict";
+  let hasVerifier = 0;
+}
+
+// -----
+
 def SPIRV_DemoteToHelperInvocationOp : SPIRV_Op<"DemoteToHelperInvocation", []> {
   let summary = [{
     Demote fragment shader invocation to a helper invocation.
