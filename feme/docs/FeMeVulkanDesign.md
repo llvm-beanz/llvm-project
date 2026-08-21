@@ -2129,6 +2129,16 @@ either side; and `vkCreateSampler` now explicitly rejects a chained
 `..._CUSTOM_EXT` `VkBorderColor` enumerators it already rejected, since
 neither extension is advertised.
 
+Also confirmed, while investigating roadmap E15/E20/E21 (ASTC texture
+compression): `FemeImageSubresourceLayout`'s stride is per-texel only
+(`Image.cpp`'s `formatElementSize(Format) * SampleCount`-shaped math), so
+no block-compressed `VkFormat` (ASTC, BC, or ETC2) can be accepted by
+`vkCreateImage` yet regardless of `Format.cpp`'s own recognition of one --
+a real block-compressed format needs this layout reworked to a
+block-aligned extent and a bytes-per-block stride first. Tracked as part
+of roadmap E20's scope rather than a narrowing of this milestone, since no
+compressed format was ever in V5's own goals above.
+
 ### V6: Graphics queue and basic rendering
 
 The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
