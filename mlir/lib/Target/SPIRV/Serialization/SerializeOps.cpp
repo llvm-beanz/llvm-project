@@ -756,6 +756,22 @@ Serializer::processGlobalVariableOp(spirv::GlobalVariableOp varOp) {
 
     operands.push_back(initializerID);
     elidedAttrs.push_back(initAttrName);
+  } else if (varOp.getZeroInitialized()) {
+    // `zero_initialized` has no symbol of its own to reference (see the
+    // op's own doc comment) -- synthesize the one, fresh `OpConstantNull`
+    // its Initializer operand needs directly, rather than through the
+    // ordinary per-use `spirv.Constant` materialization path (which expects
+    // a real attribute value; this attribute carries none).
+    uint32_t pointeeTypeID = 0;
+    Type pointeeType =
+        cast<spirv::PointerType>(varOp.getType()).getPointeeType();
+    if (failed(processType(varOp.getLoc(), pointeeType, pointeeTypeID)))
+      return failure();
+    uint32_t nullID = getNextID();
+    encodeInstructionInto(typesGlobalValues, spirv::Opcode::OpConstantNull,
+                          {pointeeTypeID, nullID});
+    operands.push_back(nullID);
+    elidedAttrs.push_back(varOp.getZeroInitializedAttrName().getValue());
   }
 
   if (failed(emitDebugLine(typesGlobalValues, varOp.getLoc())))

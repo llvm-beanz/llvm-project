@@ -485,19 +485,30 @@ def SPIRV_GlobalVariableOp : SPIRV_Op<"GlobalVariable", [InModuleScope, Symbol]>
     `spirv.GlobalVariable` operation in module scope. Initializer must
     have the same type as the type of the defined symbol.
 
+    `zero_initialized` is the one other Initializer shape SPIR-V allows: a
+    plain `OpConstantNull`, the only value a `Workgroup`-storage-class
+    variable's own Initializer may hold
+    (`SPV_KHR_zero_initialize_workgroup_memory`/`VK_KHR_zero_initialize_workgroup_memory`).
+    Unlike `initializer`, it names no symbol -- `OpConstantNull` is an
+    ordinary, unnamed module-scope constant, not a symbol of its own -- so it
+    is represented as a unit attribute instead. `zero_initialized` and
+    `initializer` are mutually exclusive.
+
     <!-- End of AutoGen section -->
 
     ```
     variable-op ::= `spirv.GlobalVariable` spirv-type symbol-ref-id
                     (`initializer(` symbol-ref-id `)`)?
+                    (`zero_initializer`)?
                     (`bind(` integer-literal, integer-literal `)`)?
                     (`built_in(` string-literal `)`)?
                     attribute-dict?
     ```
 
-    where `initializer` specifies initializer and `bind` specifies the
-    descriptor set and binding number. `built_in` specifies SPIR-V
-    BuiltIn decoration associated with the op.
+    where `initializer` specifies initializer, `zero_initializer` specifies
+    a null-constant initializer and `bind` specifies the descriptor set and
+    binding number. `built_in` specifies SPIR-V BuiltIn decoration
+    associated with the op.
 
     #### Example:
 
@@ -506,6 +517,7 @@ def SPIRV_GlobalVariableOp : SPIRV_Op<"GlobalVariable", [InModuleScope, Symbol]>
     spirv.GlobalVariable @var1 initializer(@var0) : !spirv.ptr<f32, Output>
     spirv.GlobalVariable @var2 bind(1, 2) : !spirv.ptr<f32, Uniform>
     spirv.GlobalVariable @var3 built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
+    spirv.GlobalVariable @var4 zero_initializer : !spirv.ptr<f32, Workgroup>
     ```
   }];
 
@@ -513,6 +525,7 @@ def SPIRV_GlobalVariableOp : SPIRV_Op<"GlobalVariable", [InModuleScope, Symbol]>
     TypeAttr:$type,
     StrAttr:$sym_name,
     OptionalAttr<FlatSymbolRefAttr>:$initializer,
+    OptionalAttr<UnitAttr>:$zero_initialized,
     OptionalAttr<I32Attr>:$location,
     OptionalAttr<I32Attr>:$binding,
     OptionalAttr<I32Attr>:$descriptor_set,

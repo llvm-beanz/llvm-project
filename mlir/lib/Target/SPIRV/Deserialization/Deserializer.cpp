@@ -1032,6 +1032,7 @@ spirv::Deserializer::processGlobalVariable(ArrayRef<uint32_t> operands) {
 
   // Initializer.
   FlatSymbolRefAttr initializer = nullptr;
+  bool zeroInitialized = false;
 
   if (wordIndex < operands.size()) {
     Operation *op = nullptr;
@@ -1042,11 +1043,20 @@ spirv::Deserializer::processGlobalVariable(ArrayRef<uint32_t> operands) {
       op = initOp;
     else if (auto initOp = getSpecConstantComposite(operands[wordIndex]))
       op = initOp;
+    else if (nullConstantIDs.contains(operands[wordIndex]))
+      // A plain `OpConstantNull` initializer -- the only value SPIR-V
+      // permits for the `Workgroup`/`Private` storage classes' own
+      // zero-initializer -- has no symbol of its own to reference, so it is
+      // represented as a `zero_initialized` unit attribute instead of the
+      // `initializer` symbol reference every other case above uses (see
+      // `spirv.GlobalVariable`'s own `zero_initialized` attribute).
+      zeroInitialized = true;
     else
       return emitError(unknownLoc, "unknown <id> ")
              << operands[wordIndex] << "used as initializer";
 
-    initializer = SymbolRefAttr::get(op);
+    if (op)
+      initializer = SymbolRefAttr::get(op);
     wordIndex++;
   }
   if (wordIndex != operands.size()) {
@@ -1059,6 +1069,8 @@ spirv::Deserializer::processGlobalVariable(ArrayRef<uint32_t> operands) {
   auto varOp = spirv::GlobalVariableOp::create(
       opBuilder, loc, TypeAttr::get(type),
       opBuilder.getStringAttr(variableName), initializer);
+  if (zeroInitialized)
+    varOp.setZeroInitializedAttr(opBuilder.getUnitAttr());
 
   // Decorations.
   if (decorations.count(variableID)) {
@@ -2161,23 +2173,50 @@ spirv::Deserializer::processConstantNull(ArrayRef<uint32_t> operands) {
   }
 
   auto resultID = operands[1];
-  Attribute attr;
-  if (resultType.isIntOrFloat() || isa<VectorType>(resultType)) {
-    attr = opBuilder.getZeroAttr(resultType);
-  } else if (auto tensorType = dyn_cast<TensorArmType>(resultType)) {
-    if (auto element = opBuilder.getZeroAttr(tensorType.getElementType()))
-      attr = DenseElementsAttr::get(tensorType, element);
-  }
+  Attribute attr = getNullAttrForType(resultType);
 
   if (attr) {
     // For normal constants, we just record the attribute (and its type) for
     // later materialization at use sites.
     constantMap.try_emplace(resultID, attr, resultType);
+    nullConstantIDs.insert(resultID);
     return success();
   }
 
   return emitError(unknownLoc, "unsupported OpConstantNull type: ")
          << resultType;
+}
+
+Attribute spirv::Deserializer::getNullAttrForType(Type type) {
+  if (type.isIntOrFloat() || isa<VectorType>(type))
+    return opBuilder.getZeroAttr(type);
+  if (auto tensorType = dyn_cast<TensorArmType>(type)) {
+    if (auto element = opBuilder.getZeroAttr(tensorType.getElementType()))
+      return DenseElementsAttr::get(tensorType, element);
+    return nullptr;
+  }
+  // An array/struct's null value is the same shape
+  // `processConstantComposite` builds for one of its ordinary composite
+  // constants: an `ArrayAttr` of each member's own null value, recursively.
+  if (auto arrayType = dyn_cast<spirv::ArrayType>(type)) {
+    Attribute elementAttr = getNullAttrForType(arrayType.getElementType());
+    if (!elementAttr)
+      return nullptr;
+    return opBuilder.getArrayAttr(
+        SmallVector<Attribute>(arrayType.getNumElements(), elementAttr));
+  }
+  if (auto structType = dyn_cast<spirv::StructType>(type)) {
+    SmallVector<Attribute, 4> memberAttrs;
+    memberAttrs.reserve(structType.getNumElements());
+    for (Type memberType : structType.getElementTypes()) {
+      Attribute memberAttr = getNullAttrForType(memberType);
+      if (!memberAttr)
+        return nullptr;
+      memberAttrs.push_back(memberAttr);
+    }
+    return opBuilder.getArrayAttr(memberAttrs);
+  }
+  return nullptr;
 }
 
 LogicalResult

@@ -18,6 +18,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/Target/SPIRV/Deserialization.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/ScopedPrinter.h"
@@ -391,6 +392,12 @@ private:
   /// Processes a SPIR-V OpConstantNull instruction with the given `operands`.
   LogicalResult processConstantNull(ArrayRef<uint32_t> operands);
 
+  /// Returns the all-zero attribute `OpConstantNull`'s \p type produces, or
+  /// null if \p type is not (recursively, for an array/struct) one of the
+  /// scalar/vector/tensor/array/struct types this deserializer knows how to
+  /// build a null value for.
+  Attribute getNullAttrForType(Type type);
+
   /// Processes a SPIR-V OpGraphConstantARM instruction with the given
   /// `operands`.
   LogicalResult processGraphConstantARM(ArrayRef<uint32_t> operands);
@@ -639,6 +646,15 @@ private:
 
   // Result <id> to debug location for constants materialized from constantMap.
   DenseMap<uint32_t, LocationAttr> constantLocMap;
+
+  /// Result <id>s of every `OpConstantNull` processed so far. `OpVariable`'s
+  /// Initializer operand is otherwise restricted to a global variable or
+  /// specialization constant symbol (see `processGlobalVariable`); a plain
+  /// module-scope `OpConstantNull` is the one further shape it accepts, since
+  /// that is the only value the `Workgroup`/`Private` storage classes'
+  /// zero-initializer (`SPV_KHR_zero_initialize_workgroup_memory`) ever
+  /// produces.
+  DenseSet<uint32_t> nullConstantIDs;
 
   // Result <id> to replicated constant attribute and type mapping.
   ///

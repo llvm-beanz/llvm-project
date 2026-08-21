@@ -561,6 +561,13 @@ spirv.module Logical GLSL450 {
 
 // -----
 
+spirv.module Logical GLSL450 {
+  // CHECK: spirv.GlobalVariable @var0 zero_initializer : !spirv.ptr<f32, Workgroup>
+  spirv.GlobalVariable @var0 zero_initializer : !spirv.ptr<f32, Workgroup>
+}
+
+// -----
+
 // Allow in other module-like ops
 module {
   // CHECK: spirv.GlobalVariable
@@ -599,6 +606,22 @@ spirv.module Logical GLSL450 {
 spirv.module Logical GLSL450 {
   // expected-error @+1 {{op initializer must be result of a spirv.SpecConstant or spirv.SpecConstantCompositeOp op}}
   spirv.GlobalVariable @var0 initializer(@var1) : !spirv.ptr<f32, Private>
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
+  // expected-error @+1 {{'zero_initialized' is only valid for the 'Workgroup' storage class}}
+  spirv.GlobalVariable @var0 zero_initializer : !spirv.ptr<f32, Private>
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
+  spirv.SpecConstant @sc = 4.0 : f32
+  // expected-error @+1 {{cannot have both an 'initializer' and a 'zero_initialized' attribute}}
+  "spirv.GlobalVariable"() {sym_name = "var0", type = !spirv.ptr<f32, Workgroup>,
+                            initializer = @sc, zero_initialized} : () -> ()
 }
 
 // -----

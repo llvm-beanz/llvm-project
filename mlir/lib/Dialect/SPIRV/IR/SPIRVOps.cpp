@@ -1359,6 +1359,10 @@ ParseResult spirv::GlobalVariableOp::parse(OpAsmParser &parser,
                               result.attributes) ||
         parser.parseRParen())
       return failure();
+  } else if (succeeded(parser.parseOptionalKeyword("zero_initializer"))) {
+    result.addAttribute(
+        spirv::GlobalVariableOp::getZeroInitializedAttrName(result.name),
+        parser.getBuilder().getUnitAttr());
   }
 
   if (parseVariableDecorations(parser, result)) {
@@ -1398,6 +1402,12 @@ void spirv::GlobalVariableOp::print(OpAsmPrinter &printer) {
     elidedAttrs.push_back(initializerAttrName);
   }
 
+  StringRef zeroInitializedAttrName = this->getZeroInitializedAttrName();
+  if (this->getZeroInitialized()) {
+    printer << " zero_initializer";
+    elidedAttrs.push_back(zeroInitializedAttrName);
+  }
+
   StringRef typeAttrName = this->getTypeAttrName();
   elidedAttrs.push_back(typeAttrName);
   spirv::printVariableDecorations(*this, printer, elidedAttrs);
@@ -1424,10 +1434,26 @@ LogicalResult spirv::GlobalVariableOp::verify() {
   if (std::optional<spirv::LinkageAttributesAttr> linkage =
           getLinkageAttributes()) {
     if (linkage->getLinkageType().getValue() == spirv::LinkageType::Import &&
-        getInitializer()) {
+        (getInitializer() || getZeroInitialized())) {
       return emitOpError(
           "with Import linkage type must not have an initializer");
     }
+  }
+
+  if (getInitializer() && getZeroInitialized()) {
+    return emitOpError(
+        "cannot have both an 'initializer' and a 'zero_initialized' "
+        "attribute");
+  }
+
+  // `zero_initialized` represents an `OpConstantNull` Initializer operand
+  // (see the op's own doc comment); SPIR-V only allows one for the
+  // `Workgroup`/`Private` storage classes, and this milestone's own use
+  // (`SPV_KHR_zero_initialize_workgroup_memory`) only ever produces a
+  // `Workgroup` one.
+  if (getZeroInitialized() && storageClass != spirv::StorageClass::Workgroup) {
+    return emitOpError(
+        "'zero_initialized' is only valid for the 'Workgroup' storage class");
   }
 
   if (auto init = (*this)->getAttrOfType<FlatSymbolRefAttr>(
