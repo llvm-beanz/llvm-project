@@ -123,12 +123,12 @@ TEST_F(ImageTest, RejectsUnsupportedFormat) {
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 
-/// Roadmap E20: `mapVkFormat` now recognizes every LDR ASTC `VkFormat`, but
-/// `vkCreateImage` still rejects one outright -- see Image.h's file
-/// comment on why (the copy/blit/resolve and shader-sampling paths that
-/// would need to address a block-compressed `Image` per block, not per
-/// texel, are this milestone's own explicitly deferred scope).
-TEST_F(ImageTest, RejectsASTCFormat) {
+/// Roadmap E22: `vkCreateImage` no longer rejects a block-compressed
+/// `VkFormat` outright (E20 landed the block-aware layout math;
+/// `blockPointer`/`CommandBuffer.cpp`'s copy paths now address one -- see
+/// Image.h's file comment). A live 4x4 ASTC_4x4 image is exactly one
+/// 16-byte block.
+TEST_F(ImageTest, AcceptsASTCFormat) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_2D;
   ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
@@ -136,24 +136,78 @@ TEST_F(ImageTest, RejectsASTCFormat) {
   ImageInfo.mipLevels = 1;
   ImageInfo.arrayLayers = 1;
   ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
   VkImage Img = VK_NULL_HANDLE;
-  EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
-            VK_ERROR_FORMAT_NOT_SUPPORTED);
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  auto *Obj = fromHandle<Image>(Img);
+  EXPECT_EQ(Obj->sizeInBytes(), 16u);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+  EXPECT_TRUE(Obj->isBound());
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+/// `blockPointer` addresses a block-compressed image's storage a whole
+/// block at a time, in block-grid coordinates -- a 6x6 ASTC_4x4 image is a
+/// 2x2 block grid (each block covering a 4x4 texel tile, the last column/
+/// row's block only half-covered by real texels, per `computeSubresourceLayouts`'s
+/// own ceiling-division rounding), so block (1, 1) starts 3 blocks (48
+/// bytes) into the image's 4-block, 64-byte storage.
+TEST_F(ImageTest, BlockPointerAddressesBlockGrid) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+  ImageInfo.extent = {6, 6, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  auto *Obj = fromHandle<Image>(Img);
+  ASSERT_EQ(Obj->sizeInBytes(), 64u);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  auto *Base = static_cast<uint8_t *>(Obj->data());
+  EXPECT_EQ(Obj->blockPointer(0, 0, 0, 0, 0), Base);
+  EXPECT_EQ(Obj->blockPointer(0, 0, 1, 0, 0), Base + 16);
+  EXPECT_EQ(Obj->blockPointer(0, 0, 0, 1, 0), Base + 32);
+  EXPECT_EQ(Obj->blockPointer(0, 0, 1, 1, 0), Base + 48);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
 }
 
 /// Roadmap E20: `computeSubresourceLayouts`' block-based rework, exercised
-/// through the same info-only `vkGetDeviceImageMemoryRequirements` path
-/// `GetDeviceImageMemoryRequirementsMatchesLiveImage` uses for a
-/// non-block-compressed format -- there is no live `Image` to compare
-/// against here since `vkCreateImage` rejects the format (see
-/// `RejectsASTCFormat` above), but this entrypoint computes a
-/// `VkImageCreateInfo`'s size without ever constructing one, so it still
-/// exercises the same `computeSubresourceLayouts` helper. A 6x6 ASTC_4x4
-/// image (3 mips) rounds each level's *block* extent up, not its texel
-/// extent: level 0 is 6x6 texels -> ceil(6/4) = 2x2 blocks (64B); level 1
-/// is 3x3 texels -> still ceil(3/4) = 1x1 block (16B), not empty; level 2
-/// is 1x1 texels -> 1x1 block (16B). Total 96 bytes, every ASTC block
-/// always 16 bytes regardless of footprint (`bytesPerBlock`).
+/// both through the info-only `vkGetDeviceImageMemoryRequirements` path
+/// (matching `GetDeviceImageMemoryRequirementsMatchesLiveImage`'s own
+/// pattern for a non-block-compressed format) and a live `Image` (roadmap
+/// E22 made one constructible). A 6x6 ASTC_4x4 image (3 mips) rounds each
+/// level's *block* extent up, not its texel extent: level 0 is 6x6 texels
+/// -> ceil(6/4) = 2x2 blocks (64B); level 1 is 3x3 texels -> still
+/// ceil(3/4) = 1x1 block (16B), not empty; level 2 is 1x1 texels -> 1x1
+/// block (16B). Total 96 bytes, every ASTC block always 16 bytes
+/// regardless of footprint (`bytesPerBlock`).
 TEST_F(ImageTest, GetDeviceImageMemoryRequirementsForASTCBlockLayout) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -169,6 +223,11 @@ TEST_F(ImageTest, GetDeviceImageMemoryRequirementsForASTCBlockLayout) {
   VkMemoryRequirements2 Reqs2{};
   vkGetDeviceImageMemoryRequirements(Device, &Info, &Reqs2);
   EXPECT_EQ(Reqs2.memoryRequirements.size, 96u);
+
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  EXPECT_EQ(fromHandle<Image>(Img)->sizeInBytes(), 96u);
+  vkDestroyImage(Device, Img, nullptr);
 }
 
 /// Roadmap E4 (`VK_KHR_maintenance4`): the same requirements a live

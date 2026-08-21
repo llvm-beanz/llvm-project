@@ -109,14 +109,29 @@ void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
   if (!isBound())
     return nullptr;
   assert(!feme::cpu::isBlockCompressedFormat(Format) &&
-        "block-compressed images are not addressable per texel -- "
-        "vkCreateImage rejects them (see Image.h's file comment)");
+        "block-compressed images are not addressable per texel -- use "
+        "blockPointer instead (see Image.h's file comment)");
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
   uint64_t TexelStride = formatElementSize(Format) * SampleCount;
   uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +
                         uint64_t(Y) * L.RowPitch + uint64_t(X) * TexelStride +
                         uint64_t(Sample) * formatElementSize(Format);
+  return static_cast<uint8_t *>(data()) + ByteOffset;
+}
+
+void *Image::blockPointer(uint32_t MipLevel, uint32_t ArrayLayer,
+                          uint32_t BlockX, uint32_t BlockY, uint32_t Z) const {
+  if (!isBound())
+    return nullptr;
+  assert(feme::cpu::isBlockCompressedFormat(Format) &&
+        "blockPointer is for a block-compressed Format only -- use "
+        "texelPointer for any other one");
+  const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
+  uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
+  uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +
+                        uint64_t(BlockY) * L.RowPitch +
+                        uint64_t(BlockX) * bytesPerBlock(Format);
   return static_cast<uint8_t *>(data()) + ByteOffset;
 }
 
@@ -354,19 +369,11 @@ vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
       mapVkFormat(pCreateInfo->format);
   if (!Format)
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
-  // Roadmap E20 lands `mapVkFormat`'s ASTC entries and this file's
-  // block-aware subresource layout math (both exercised directly by
-  // ImageTest.cpp/FormatTest.cpp), but not the matching block-granularity
-  // rework of ImageOps.cpp's copy/blit/resolve paths or of any shader
-  // image-sampling path -- an `Image` this constructor creates is always
-  // addressed per-texel elsewhere (see `texelPointer`'s assert). Rejecting
-  // image creation here, the same way an unrecognized format already is,
-  // keeps that invariant true and matches `textureCompressionASTC_LDR`
-  // staying unadvertised (EntryPoints.cpp) until a follow-up roadmap row
-  // wires the rest of the pipeline through and can honestly flip it.
-  if (feme::cpu::isBlockCompressedFormat(*Format))
-    return VK_ERROR_FORMAT_NOT_SUPPORTED;
-
+  // Roadmap E22: a block-compressed `*Format` is no longer rejected here --
+  // `blockPointer` (Image.h) and its `CommandBuffer.cpp`/`ImageOps.cpp`
+  // callers now address one, the last piece `computeSubresourceLayouts`'
+  // own E20 block-layout rework above was waiting on (see this file's own
+  // header comment).
   feme::cpu::ImageDimension Dimension =
       mapImageDimension(pCreateInfo->imageType, pCreateInfo->arrayLayers);
 

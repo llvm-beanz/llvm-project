@@ -176,6 +176,16 @@ constexpr bool isBlockCompressedFormat(ResourceFormat Format) {
          Format <= ResourceFormat::ASTC_12x12_SFLOAT;
 }
 
+/// Whether \p Format is one of the 28 LDR-only ASTC formats (roadmap E20)
+/// rather than one of the 14 HDR-only `_SFLOAT` ones (roadmap E21) --
+/// `feme::vulkan::decodeASTCBlock` (ASTCDecode.h) only decodes this half;
+/// the HDR half needs `decodeASTCBlockHDR`'s float-producing interface
+/// instead (roadmap E22, `ImageOps.cpp`'s `runBlitImage`).
+constexpr bool isASTCLdrFormat(ResourceFormat Format) {
+  return Format >= ResourceFormat::ASTC_4x4_UNORM &&
+         Format <= ResourceFormat::ASTC_12x12_SRGB;
+}
+
 /// Bits of `FemeDescriptor::Flags`.
 enum FemeDescriptorFlagBits : uint32_t {
   /// Set if the descriptor is a UAV (read-write); clear for an SRV

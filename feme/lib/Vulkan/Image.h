@@ -41,16 +41,30 @@
 // stride to a block-based one (`Format.h`'s `blockWidth`/`blockHeight`/
 // `bytesPerBlock`, which fall back to `{1, 1, formatElementSize(Format)}`
 // for a non-block-compressed format, so the same formula now covers both).
-// `vkCreateImage` still rejects a block-compressed `VkFormat` outright,
-// though (`VK_ERROR_FORMAT_NOT_SUPPORTED`, the same result an unrecognized
-// format already got): this milestone's own scope is the layout math and a
-// standalone `feme::vulkan::decodeASTCBlock` (ASTCDecode.h) that nothing
-// yet calls, not a block-granularity rework of `ImageOps.cpp`'s copy/blit/
-// resolve paths or of any shader image-sampling path -- both of which
-// would need to change before a live `Image` could safely hold one (see
-// `texelPointer`'s assert). A follow-up roadmap row is expected to wire
-// those through and only then flip `textureCompressionASTC_LDR`
-// (EntryPoints.cpp) from its current honest `VK_FALSE`.
+//
+// Roadmap E22 ("ASTC LDR copy/sampling pipeline wiring") finishes the rest:
+// `blockPointer` addresses a block-compressed image's storage a whole
+// block at a time (`texelPointer`, which still addresses one texel and
+// still asserts against a block-compressed `Format`, is meaningless for
+// one -- see its own comment), `CommandBuffer.cpp`'s `vkCmdCopyImage`/
+// `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` now use it for a
+// block-compressed image's bit-for-bit copy, `ImageOps.cpp`'s
+// `runBlitImage` decodes an LDR ASTC source through
+// `feme::vulkan::decodeASTCBlock` to resample it (no encoder exists, so a
+// block-compressed *destination* is still rejected), and `vkCreateImage`
+// no longer rejects a block-compressed `VkFormat` outright. This is
+// enough to flip `textureCompressionASTC_LDR` (PhysicalDeviceInfo.cpp)
+// from `VK_FALSE` to `VK_TRUE` -- but not to make an ASTC image's shader
+// *sampling* path decode real data: `CommandBuffer.cpp`'s
+// `materializeImageDescriptor` still hands the CPU runtime
+// (`feme/runtime/CPU/FeMeRuntimeCPU.c`) a raw `Image::data()` pointer for
+// its own per-texel `femeRTFetchTexel2D` to read directly, and that
+// runtime's `femeRTImageFormatElementSize` has no block-compressed case
+// (returns 0, so a sample safely reads as all-zero rather than
+// misinterpreting compressed bytes as uncompressed ones) -- porting a
+// decoder into that separate C runtime module, or bridging it back into
+// this C++ one, is genuinely separate follow-up work this milestone's own
+// file scope (`Image.{h,cpp}`, `ImageOps.{h,cpp}`) never listed.
 //
 //===----------------------------------------------------------------------===//
 
@@ -130,6 +144,19 @@ public:
   /// stride. Null if the image is unbound.
   void *texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
                      uint32_t Y, uint32_t Z, uint32_t Sample = 0) const;
+
+  /// A pointer to the whole compressed block at block-grid coordinates
+  /// (\p BlockX, \p BlockY) -- *not* texel coordinates, unlike
+  /// `texelPointer`; a caller divides by `blockWidth`/`blockHeight`
+  /// (Format.h) itself -- covering array layer/depth slice \p ArrayLayer/
+  /// \p Z of mip level \p MipLevel, for a block-compressed `Format`
+  /// (roadmap E22: `CommandBuffer.cpp`'s `vkCmdCopyImage`/
+  /// `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` and `ImageOps.cpp`'s
+  /// `runBlitImage` are its only callers, since no other operation
+  /// supports a block-compressed image at all). Null if the image is
+  /// unbound.
+  void *blockPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t BlockX,
+                     uint32_t BlockY, uint32_t Z) const;
 
   /// The current `VkImageLayout` of subresource (\p MipLevel, \p ArrayLayer),
   /// or `VK_IMAGE_LAYOUT_UNDEFINED` if never transitioned.
