@@ -54,6 +54,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -134,9 +135,26 @@ serializePipelineCacheBlob(llvm::ArrayRef<PipelineCacheKey> Keys,
 
 /// A `VkPipelineCache`: an in-process key -> compiled-artifact table (see
 /// the file comment). Not dispatchable.
+///
+/// (roadmap E9) `VK_EXT_pipeline_creation_cache_control`'s
+/// `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT` relaxes the
+/// default Vulkan rule that an implementation must itself tolerate
+/// concurrent host access to the same `VkPipelineCache` from multiple
+/// threads (`pipelineCache` is *not* one of `vkCreateGraphicsPipelines`/
+/// `vkCreateComputePipelines`'s externally-synchronized parameters, unlike
+/// `vkMergePipelineCaches`'s `dstCache`/`pSrcCaches` and
+/// `vkGetPipelineCacheData`'s `pipelineCache`, which always are). `lookup`/
+/// `insert`/`lookupGraphics`/`insertGraphics` -- the four accessors
+/// `vkCreateComputePipelines`/`vkCreateGraphicsPipelines` calls -- therefore
+/// take \p Mutex unless \p ExternallySynchronized was set at construction,
+/// in which case the caller has promised there is no concurrent access to
+/// synchronize against, and the lock is skipped; `merge`/`keys` never lock,
+/// since their callers are always externally synchronized regardless of
+/// this flag (see their own comments in PipelineCache.cpp).
 class PipelineCache {
 public:
-  explicit PipelineCache(std::vector<PipelineCacheKey> InitialKeys = {});
+  explicit PipelineCache(std::vector<PipelineCacheKey> InitialKeys = {},
+                         bool ExternallySynchronized = false);
 
   /// The compiled artifact previously `insert`ed for \p Key, or null on a
   /// cache miss.
@@ -171,6 +189,11 @@ public:
   std::vector<PipelineCacheKey> keys() const;
 
 private:
+  /// Guards `Entries`/`GraphicsEntries` below when `!ExternallySynchronized`
+  /// (see the class comment); `mutable` since even `lookup`/`lookupGraphics`
+  /// (logically `const`) must take it.
+  mutable std::mutex Mutex;
+  const bool ExternallySynchronized;
   std::map<PipelineCacheKey, std::shared_ptr<CachedPipelineArtifact>> Entries;
   std::map<PipelineCacheKey, std::shared_ptr<GraphicsPipelineArtifact>>
       GraphicsEntries;

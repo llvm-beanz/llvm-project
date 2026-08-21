@@ -25,6 +25,8 @@
 #include "gtest/gtest.h"
 
 #include <cstring>
+#include <thread>
+#include <vector>
 
 using namespace feme::vulkan;
 
@@ -310,6 +312,72 @@ TEST_F(PipelineCacheTest, MergePipelineCachesAdoptsSourceKeys) {
   vkDestroyPipeline(Device, FromDst, nullptr);
   vkDestroyPipelineCache(Device, Src, nullptr);
   vkDestroyPipelineCache(Device, Dst, nullptr);
+}
+
+/// Roadmap E9: `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT` must be
+/// accepted, and a cache created with it must still behave like any other
+/// (single-threaded) cache -- the bit only ever changes whether this ICD's
+/// own internal locking runs, never the cache's externally observable
+/// lookup/insert behavior.
+TEST_F(PipelineCacheTest, ExternallySynchronizedCacheStillHitsNormally) {
+  VkPipelineCacheCreateInfo CacheInfo{};
+  CacheInfo.flags = VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
+  VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateComputePipelines(Device, Cache, 1, &CreateInfo, nullptr, &First),
+      VK_SUCCESS);
+  ASSERT_EQ(
+      vkCreateComputePipelines(Device, Cache, 1, &CreateInfo, nullptr, &Second),
+      VK_SUCCESS);
+  EXPECT_EQ(&fromHandle<ComputePipeline>(First)->getStage(),
+            &fromHandle<ComputePipeline>(Second)->getStage());
+
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+}
+
+/// Roadmap E9: without `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`
+/// (the default), `vkCreateComputePipelines` must tolerate concurrent
+/// callers sharing one `VkPipelineCache` -- `pipelineCache` is not one of
+/// its own externally-synchronized parameters (see PipelineCache.h's class
+/// comment). This does not prove the absence of a race on its own, but
+/// exercises the same code path a thread sanitizer build would need to
+/// catch a regression here.
+TEST_F(PipelineCacheTest,
+       ConcurrentCreationsAgainstOneCacheAreThreadSafeByDefault) {
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
+  constexpr int kThreads = 8;
+  std::vector<std::thread> Threads;
+  std::vector<VkPipeline> Pipelines(kThreads, VK_NULL_HANDLE);
+  std::vector<VkResult> Results(kThreads, VK_ERROR_UNKNOWN);
+  for (int I = 0; I != kThreads; ++I) {
+    Threads.emplace_back([&, I] {
+      Results[I] = vkCreateComputePipelines(Device, Cache, 1, &CreateInfo,
+                                            nullptr, &Pipelines[I]);
+    });
+  }
+  for (std::thread &T : Threads)
+    T.join();
+
+  for (int I = 0; I != kThreads; ++I) {
+    EXPECT_EQ(Results[I], VK_SUCCESS);
+    EXPECT_NE(Pipelines[I], VK_NULL_HANDLE);
+  }
+  for (VkPipeline P : Pipelines)
+    if (P)
+      vkDestroyPipeline(Device, P, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
 }
 
 } // namespace

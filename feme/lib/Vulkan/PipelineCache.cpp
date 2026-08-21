@@ -208,7 +208,28 @@ feme::vulkan::parsePipelineCacheBlob(
   return Keys;
 }
 
-PipelineCache::PipelineCache(std::vector<PipelineCacheKey> InitialKeys) {
+namespace {
+/// RAII helper that locks \p M unless \p Skip (the cache was constructed
+/// `ExternallySynchronized`, see PipelineCache.h's class comment) -- an
+/// `std::unique_lock` constructed with `std::defer_lock` and conditionally
+/// `lock()`ed, so the mutex is never touched at all in the skip case rather
+/// than merely uncontended.
+class ConditionalLock {
+public:
+  ConditionalLock(std::mutex &M, bool Skip)
+      : Lock(M, std::defer_lock) {
+    if (!Skip)
+      Lock.lock();
+  }
+
+private:
+  std::unique_lock<std::mutex> Lock;
+};
+} // namespace
+
+PipelineCache::PipelineCache(std::vector<PipelineCacheKey> InitialKeys,
+                             bool ExternallySynchronized)
+    : ExternallySynchronized(ExternallySynchronized) {
   // Every initial key is recorded as a placeholder (null artifact) in both
   // tables: a persisted blob does not record whether a key was originally
   // compute's or graphics', and a placeholder never satisfies a lookup (see
@@ -222,17 +243,20 @@ PipelineCache::PipelineCache(std::vector<PipelineCacheKey> InitialKeys) {
 
 std::shared_ptr<CachedPipelineArtifact>
 PipelineCache::lookup(const PipelineCacheKey &Key) const {
+  ConditionalLock L(Mutex, ExternallySynchronized);
   auto It = Entries.find(Key);
   return It == Entries.end() ? nullptr : It->second;
 }
 
 void PipelineCache::insert(const PipelineCacheKey &Key,
                            std::shared_ptr<CachedPipelineArtifact> Artifact) {
+  ConditionalLock L(Mutex, ExternallySynchronized);
   Entries[Key] = std::move(Artifact);
 }
 
 std::shared_ptr<GraphicsPipelineArtifact>
 PipelineCache::lookupGraphics(const PipelineCacheKey &Key) const {
+  ConditionalLock L(Mutex, ExternallySynchronized);
   auto It = GraphicsEntries.find(Key);
   return It == GraphicsEntries.end() ? nullptr : It->second;
 }
@@ -240,10 +264,18 @@ PipelineCache::lookupGraphics(const PipelineCacheKey &Key) const {
 void PipelineCache::insertGraphics(
     const PipelineCacheKey &Key,
     std::shared_ptr<GraphicsPipelineArtifact> Artifact) {
+  ConditionalLock L(Mutex, ExternallySynchronized);
   GraphicsEntries[Key] = std::move(Artifact);
 }
 
 void PipelineCache::merge(const PipelineCache &Other) {
+  // Unlike `lookup`/`insert` above, `vkMergePipelineCaches`'s `dstCache`
+  // (`this`) and `pSrcCaches` (`Other`) are *always* host-synchronized
+  // parameters per the base Vulkan spec, with or without
+  // `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT` -- unlike
+  // `vkCreate{Graphics,Compute}Pipelines`'s `pipelineCache` parameter, this
+  // extension does not relax `vkMergePipelineCaches`'s own synchronization
+  // requirement, so no lock is needed (or taken) here.
   for (const auto &[Key, Artifact] : Other.Entries)
     Entries.try_emplace(Key, Artifact);
   for (const auto &[Key, Artifact] : Other.GraphicsEntries)
@@ -251,6 +283,8 @@ void PipelineCache::merge(const PipelineCache &Other) {
 }
 
 std::vector<PipelineCacheKey> PipelineCache::keys() const {
+  // `vkGetPipelineCacheData`'s `pipelineCache` parameter is likewise always
+  // host-synchronized -- see `merge`'s comment above.
   std::vector<PipelineCacheKey> Result;
   Result.reserve(Entries.size() + GraphicsEntries.size());
   for (const auto &[Key, Artifact] : Entries)

@@ -485,9 +485,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(
     // "Pipeline Cache": "never as an error and never as a partial load".
   }
 
+  // (roadmap E9) `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`:
+  // see PipelineCache.h's class comment for what this changes.
+  bool ExternallySynchronized =
+      pCreateInfo->flags & VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT;
+
   Allocator Alloc(pAllocator);
   PipelineCache *Obj = Alloc.create<PipelineCache>(
-      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(InitialKeys));
+      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(InitialKeys),
+      ExternallySynchronized);
   if (!Obj)
     return VK_ERROR_OUT_OF_HOST_MEMORY;
   *pPipelineCache = toHandle<VkPipelineCache>(Obj);
