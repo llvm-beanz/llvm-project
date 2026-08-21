@@ -19,6 +19,7 @@ add_feme_unittest(FeMeVulkanTests
   PhysicalDeviceInfoTest.cpp
   PipelineTest.cpp
   PipelineCacheTest.cpp
+  PrivateDataTest.cpp
   ProcAddrTest.cpp
   RenderPassTest.cpp
   SyncTest.cpp

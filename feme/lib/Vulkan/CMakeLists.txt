@@ -90,6 +90,7 @@ add_feme_library(FeMeVulkanCore STATIC
   PhysicalDeviceInfo.cpp
   Pipeline.cpp
   PipelineCache.cpp
+  PrivateData.cpp
   ProcAddr.cpp
   QueryPool.cpp
   RenderPass.cpp

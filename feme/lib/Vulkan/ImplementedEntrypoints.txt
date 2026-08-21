@@ -284,3 +284,10 @@ vkDestroySemaphore
 vkGetSemaphoreCounterValue
 vkWaitSemaphores
 vkSignalSemaphore
+
+# Roadmap E10: core Vulkan 1.3 promoted `VK_EXT_private_data`'s four
+# self-contained entrypoints (PrivateData.{h,cpp}).
+vkCreatePrivateDataSlot
+vkDestroyPrivateDataSlot
+vkSetPrivateData
+vkGetPrivateData

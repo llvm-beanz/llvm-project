@@ -727,6 +727,24 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitSemaphores(
 VKAPI_ATTR VkResult VKAPI_CALL
 vkSignalSemaphore(VkDevice device, const VkSemaphoreSignalInfo *pSignalInfo);
 
+// Roadmap E10: core Vulkan 1.3 promoted `VK_EXT_private_data`'s four
+// self-contained entrypoints -- see PrivateData.h for the object model.
+VKAPI_ATTR VkResult VKAPI_CALL vkCreatePrivateDataSlot(
+    VkDevice device, const VkPrivateDataSlotCreateInfo *pCreateInfo,
+    const VkAllocationCallbacks *pAllocator,
+    VkPrivateDataSlot *pPrivateDataSlot);
+VKAPI_ATTR void VKAPI_CALL
+vkDestroyPrivateDataSlot(VkDevice device, VkPrivateDataSlot privateDataSlot,
+                         const VkAllocationCallbacks *pAllocator);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkSetPrivateData(VkDevice device, VkObjectType objectType,
+                 uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                 uint64_t data);
+VKAPI_ATTR void VKAPI_CALL
+vkGetPrivateData(VkDevice device, VkObjectType objectType,
+                 uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                 uint64_t *pData);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_ENTRYPOINTS_H
