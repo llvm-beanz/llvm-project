@@ -1076,6 +1076,20 @@ func.func @kill() {
 // -----
 
 //===----------------------------------------------------------------------===//
+// spirv.DemoteToHelperInvocation
+//===----------------------------------------------------------------------===//
+
+// CHECK-LABEL: func @demote_to_helper_invocation
+func.func @demote_to_helper_invocation() {
+  // CHECK: spirv.DemoteToHelperInvocation
+  spirv.DemoteToHelperInvocation
+  // Unlike spirv.Kill, this op is not a terminator: execution continues.
+  spirv.Return
+}
+
+// -----
+
+//===----------------------------------------------------------------------===//
 // spirv.Switch
 //===----------------------------------------------------------------------===//
 

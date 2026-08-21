@@ -392,6 +392,46 @@ def SPIRV_KillOp : SPIRV_Op<"Kill", [Terminator]> {
 
 // -----
 
+def SPIRV_DemoteToHelperInvocationOp : SPIRV_Op<"DemoteToHelperInvocation", []> {
+  let summary = [{
+    Demote fragment shader invocation to a helper invocation.
+  }];
+
+  let description = [{
+    Any invocation of this instruction will be considered demoted from the
+    point of execution of this instruction, meaning it is treated as a
+    helper invocation for all further execution: further stores to
+    memory are suppressed, and, unlike OpKill, this instruction must not be
+    the last instruction in a block -- execution continues in the demoted
+    invocation, which may still contribute to derivative computations for
+    other invocations in its quad.
+
+    This instruction is only valid in the Fragment Execution Model.
+
+    <!-- End of AutoGen section -->
+
+    #### Example:
+
+    ```mlir
+    spirv.DemoteToHelperInvocation
+    ```
+  }];
+
+  let availability = [
+    MinVersion<SPIRV_V_1_0>,
+    MaxVersion<SPIRV_V_1_6>,
+    Extension<[SPV_EXT_demote_to_helper_invocation]>,
+    Capability<[SPIRV_C_DemoteToHelperInvocation]>
+  ];
+
+  let arguments = (ins);
+  let results = (outs);
+  let assemblyFormat = "attr-dict";
+  let hasVerifier = 0;
+}
+
+// -----
+
 def SPIRV_LoopOp : SPIRV_Op<"mlir.loop", [InFunctionScope]> {
   let summary = "Define a structured loop.";
 

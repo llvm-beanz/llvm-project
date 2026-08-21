@@ -5,7 +5,7 @@
 // RUN: %if spirv-tools %{ mlir-translate --no-implicit-module --serialize-spirv --split-input-file --spirv-save-validation-files-with-prefix=%t/module %s %}
 // RUN: %if spirv-tools %{ spirv-val %t %}
 
-spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage, DemoteToHelperInvocation], [SPV_EXT_demote_to_helper_invocation]> {
   // CHECK-LABEL: @ret
   spirv.func @ret() -> () "None" {
     // CHECK: spirv.Return
@@ -34,5 +34,13 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader, Linkage], []> {
   spirv.func @kill() -> () "None" {
     // CHECK: spirv.Kill
     spirv.Kill
+  }
+
+  // CHECK-LABEL: @demote_to_helper_invocation
+  spirv.func @demote_to_helper_invocation() -> () "None" {
+    // CHECK: spirv.DemoteToHelperInvocation
+    spirv.DemoteToHelperInvocation
+    // CHECK: spirv.Return
+    spirv.Return
   }
 }
