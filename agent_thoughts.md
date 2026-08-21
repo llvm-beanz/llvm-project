@@ -28171,3 +28171,165 @@ The one new test, `ASTCSampledImageDispatchTest.
 SamplesARealDecodedTexelRatherThanAllZero`, was confirmed to actually
 fail without this row's `CommandBuffer.cpp` change (see above) before
 being counted as meaningful coverage rather than a vacuous pass.
+
+# Roadmap E24: real `vkGetPhysicalDeviceFormatProperties`/`vkGetPhysicalDeviceImageFormatProperties`
+
+## Starting point: a stub roadmap E22's own CTS run found, not one this row introduces
+
+E22/E23's own "measured impact" sections already root-caused why the
+whole E15/E20-E23 ASTC sequence had shown zero real CTS headline
+movement despite landing a genuine ASTC decoder, block-aware image
+layout, copy/blit wiring, and shader-sampling bridge: `EntryPoints.cpp`'s
+`vkGetPhysicalDeviceFormatProperties`/
+`vkGetPhysicalDeviceImageFormatProperties` were still exactly the V0-era
+stubs their own comments described ("no image is supported yet (images
+are out of scope before V5)") -- unconditionally reporting an all-zero
+`VkFormatProperties` and an unconditional `VK_ERROR_FORMAT_NOT_SUPPORTED`
+respectively, for *every* `VkFormat`, more than ten commits after V5 gave
+images real support. `git blame` confirmed both predate E22's own
+commits, so this is a pre-existing gap this row closes, not a
+regression anyone introduced. `vktTextureTestUtil.cpp`'s own capability
+probe calls `vkGetPhysicalDeviceImageFormatProperties` before creating
+*any* image, of any format -- so this single stub blocked every
+texture-creation-shaped `dEQP-VK.texture.*` case outright, independent
+of ASTC.
+
+## Design: reuse real, already-tested predicates rather than a fresh guess
+
+The temptation with a query like this is to hand-write a plausible-
+looking `VkFormatFeatureFlags`/`VkImageFormatProperties` answer per
+format. I deliberately avoided that: every bit `formatFeatureFlags`
+(new, `Format.{h,cpp}`) reports traces to a real, already-implemented
+and already-unit-tested code path elsewhere in this ICD, so the answer
+this query gives is *guaranteed* consistent with what the ICD actually
+does, not a second, independently-maintained model of it that could
+drift:
+
+- The two attachment bits reuse `RenderPass.h`'s
+  `isSupportedColorAttachmentFormat`/`isSupportedDepthAttachmentFormat`/
+  `isSupportedStencilAttachmentFormat` -- the exact predicates
+  `vkCreateRenderPass` itself already gates on.
+- The two sampled-image bits are true for exactly three formats
+  (`R32G32B32A32_FLOAT`, `R8G8B8A8_UNORM`, `_UNORM_SRGB`) plus every
+  ASTC LDR format -- read directly off `FeMeRuntimeCPU.c`'s own
+  `femeRTImageFormatElementSize` switch (the CPU runtime's real typed-
+  sample table) and roadmap E23's `materializeImageDescriptor` bridge,
+  not re-derived from the Vulkan spec's own mandatory-format tables.
+- The two blit bits mirror `ImageOps.cpp`'s `runBlitImage` block-
+  compressed-destination/HDR-ASTC-source rejections exactly.
+- `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is *never* set, for any format --
+  deliberately, not an oversight. No `feme.cpu.image.store.*` runtime
+  helper exists yet (V5's own design-doc status note already says so:
+  "a `STORAGE_IMAGE` binding is materialized but not yet writable").
+  Setting this bit would be a capability claim no shader could actually
+  observe, which is exactly the "an unadvertised feature is honest, a
+  partially-wired one risks a CTS `Fail`" principle E15's own
+  investigation established.
+
+For `vkGetPhysicalDeviceImageFormatProperties`, the same reuse
+principle applies to the *shape* half of the answer: rather than
+re-deriving `isValidImageShape`'s flags/samples/mips/array-layer rules
+as a second copy, I exposed it (and its `supportedSampleCounts`
+sibling, and the size-computing `computeImageCreateInfoSize`) from
+`Image.cpp`'s anonymous namespace into `Image.h`, and built a synthetic
+maximal `VkImageCreateInfo` (the device's own real
+`maxImageDimension{1D,2D,3D,Cube}`/`maxImageArrayLayers` limits, mip
+count from `llvm::Log2_32`) to run through those exact same functions.
+This guarantees `vkGetPhysicalDeviceImageFormatProperties`'s answer for
+a shape is *exactly* what `vkCreateImage` would actually accept for
+that shape -- not a second guess that could silently diverge from it
+over time as either function changes.
+
+## A real, pre-existing crash found and fixed along the way
+
+The first full `dEQP-VK.*astc*` run (98,927 cases) aborted partway
+through on a `SIGABRT`, not a clean `Fail`/`NotSupported`:
+`dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image.all_formats.
+color.2d_to_1d.astc_10x10_srgb_block.r32g32b32a32_uint.general_general`
+hit `Image::blockPointer`'s own assertion. Root cause, once I read
+`CommandBuffer.cpp`'s `runCopyImage`: a single `bool Compressed`,
+derived from the *source* image's format alone, was used to choose
+`blockPointer` vs. `texelPointer` for *both* the source and destination
+side of a copy. That's correct whenever both images are, or neither is,
+block-compressed -- which is every case any test could previously
+reach, since `vkGetPhysicalDeviceImageFormatProperties` unconditionally
+failing meant `deqp-vk` could never create *any* image before this row,
+compressed or not. The moment this row's own fix let `deqp-vk` create a
+real ASTC image and a real `R32G32B32A32_UINT` one (both a legal, real-
+Vulkan-permitted "compatible formats" pair -- one 16-byte ASTC block is
+byte-for-byte the same size as one 16-byte `R32G32B32A32_UINT` texel),
+the shared `Compressed` flag chose `Dst->blockPointer` for a
+*non*-compressed destination and asserted.
+
+This is exactly the kind of "genuinely separate, tightly-coupled bug
+your own change makes newly reachable" the task's own instructions call
+out as in-scope to fix, not a scope-creeping fix for something
+unrelated: E24's own honesty is precisely what exposed it, and a crash
+(as opposed to a wrong-but-clean `Fail`) is severe enough that shipping
+E24 without also fixing it would trade one bug (a stub gate blocking
+real coverage) for a worse one (a real crash the moment coverage
+arrives). The fix tracks each side's compressed-ness -- and its own
+block width/height, for the general case where the two sides differ in
+shape -- independently instead of sharing one flag derived from only
+one side.
+
+**Confirmed the regression test actually catches this, not just
+inspection.** I wrote
+`ImageTest.CopyASTCImageToCompatibleUncompressedFormat` (a 4x4
+`VK_FORMAT_ASTC_4x4_UNORM_BLOCK` source copied into a 1x1
+`R32G32B32A32_UINT` destination, the same "one block <-> one texel"
+shape the CTS case above hit), then temporarily reverted only the
+`CommandBuffer.cpp` fix (`git stash push` on that one file) and
+re-ran just that test: it hit the identical
+`feme::vulkan::Image::blockPointer` assertion and aborted, exactly
+reproducing the CTS crash at unit-test scale. Restored the fix and
+confirmed the test (and the rest of `check-feme`) passes again before
+considering this row done.
+
+## CTS run: the real headline movement this whole ASTC sequence had been blocked on
+
+With both the query fix and the crash fix in place, the full
+`dEQP-VK.*astc*` run (98,927 cases) completed cleanly for the first
+time in this sequence: 8,237 passed / 12,225 failed / 78,465 not
+supported, up from E20-E23's own unchanged 873 passed / 1 failed /
+98,053 not supported baseline (re-confirmed identical by temporarily
+reverting this row's changes and re-running, the same "measure the
+delta, don't assume it" discipline every prior row here has applied).
+That is the real, substantial movement E22's own report predicted would
+follow once this query's own gap closed.
+
+`dEQP-VK.api.info.*` moved too, but in the opposite direction on its own
+`Failed` count (73 -> 561) -- not a regression, but this query finally
+being *askable* for combinations that were always going to fail its
+real, honest answer. I did not stop at the raw number: I joined every
+new failure's case name against the prior run to confirm each one is
+either (a) an already-tracked, pre-existing gap unrelated to this row
+(the 14 `get_physical_device_properties2.features`/1
+`vulkan1p2_limits_validation`/1 `get_physical_device_properties2.
+properties` cases already present in both runs), or (b) a newly-
+reachable, genuinely honest mandatory-format-support shortfall (the 432
+`image_format_properties.*`/`unsupported_image_usage.*` cases, plus 59
+new `pnext_format_properties.*` guard-value checks) -- not a bug in
+this row's own query logic. Category (b) is real and worth closing, but
+it means broadening the CPU runtime's typed-sample table and
+`feme::graphics`'s pack/unpack table to the Vulkan mandatory floor, a
+substantially different and larger piece of work than "answer a query
+honestly" -- tracked as new roadmap row E25 rather than folded in here,
+the same "split the follow-up scope out" precedent E15->E20/E21,
+E20->E22, and E22->E24 itself already established.
+
+Full breakdown recorded in "Roadmap E24: measured impact" in
+VulkanCTSReport.md.
+
+## Verification
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, ccache warm from prior rows in this session's
+existing `./build`) passed in full after every commit: 1617 -> 1638
+total tests, 1637 passed, 1 unsupported throughout (pre-existing,
+unrelated to this row). New coverage: `FormatTest`'s `formatFeatureFlags`
+cases, a new `EntryPointsTest.cpp` exercising both replaced entrypoints
+against a real `VkInstance`/`VkPhysicalDevice`, and
+`ImageTest.CopyASTCImageToCompatibleUncompressedFormat` (confirmed, per
+above, to actually catch the `runCopyImage` regression rather than
+passing vacuously).
