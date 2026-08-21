@@ -26660,3 +26660,126 @@ terminator, a different op with different semantics) even though it is
 adjacent. Did not attempt to close the newly-discovered `OpKill`
 conversion-pattern gap, since it is a correction to this row's premise,
 not this row's own scope.
+
+# Milestone E12: VK_KHR_shader_terminate_invocation/shaderTerminateInvocation
+
+## Premise vs. audit
+
+The roadmap row assumed only a new `spirv`->`llvm` conversion pattern was
+needed (`SPIRVToLLVMPatterns.cpp`), since `OpDemoteToHelperInvocation`
+(E11, the immediately preceding row) had just gone through the same
+audit-then-implement cycle. Checked first, exactly as E11's own precedent
+established: grepped `mlir/lib/Conversion/SPIRVToLLVM/`,
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp`, and the whole
+repo for `KillOp`/`TerminateInvocationOp` case-sensitively. Confirmed two
+gaps, the same shape as E11's:
+
+1. No MLIR `spirv.TerminateInvocation` op existed at all (only the
+   `SPV_KHR_terminate_invocation` extension enum case), so
+   `mlir::spirv::deserialize` would reject any real module using it --
+   had to add the op to MLIR itself first, exactly like E11's
+   `spirv.DemoteToHelperInvocation` addition.
+2. No `spirv`->`llvm` pattern exists for `OpKill` either (upstream or in
+   feme), contrary to a comment in E11's own `SPIRVToLLVMPatterns.cpp`
+   that reads as though one does ("mirrors how `llvm.spv.discard`
+   (`OpKill`) is handled the same way"). Did not fix this: it is a
+   pre-existing gap unrelated to `OpTerminateInvocation`'s own semantics,
+   not something this row's own scope covers, and E11's own commit never
+   claimed to add it either -- the comment is describing a shape, not a
+   currently-reachable code path.
+
+## Design choice: no new LLVM intrinsic
+
+E11 needed a new `llvm.spv.demote.to.helper.invocation` intrinsic because
+`OpDemoteToHelperInvocation` has genuinely distinct (non-terminating)
+semantics from anything `llvm.spv.discard` already represents. Considered
+the same move here (`llvm.spv.terminate.invocation`) before writing any
+code, but the roadmap row's own text already specifies the target shape
+precisely: "an unconditional discard-and-return". `llvm.spv.discard`
+already means exactly "unconditional discard" once raised by
+`CanonicalizeStagePass` into `feme.stage.discard(true)`, and
+`OpTerminateInvocation`'s only semantic difference from `OpKill` (no
+discard of fragment outputs, depth/stencil tests still run) is not
+something `feme.stage.discard` distinguishes anyway -- it already means
+"this invocation stops contributing," full stop. So
+`TerminateInvocationConversionPattern` reuses `llvm.spv.discard` verbatim
+and adds an explicit `llvm.return`, needing zero new intrinsics and zero
+changes to `CanonicalizeStage.cpp` (its existing `llvm.spv.discard`
+renaming already covers the raised form). This is a smaller, more
+surgical change than E11's own shape, and it is the literal reading of
+the roadmap row's own words, not a shortcut.
+
+## Verification, phase by phase
+
+1. MLIR op addition: extended `control-flow-ops.mlir` (parse/print round
+   trip) and `terminator.mlir` (serialize/deserialize round trip via
+   `mlir-translate --test-spirv-roundtrip`, plus the `spirv-tools`-gated
+   `spirv-val` check when available) -- the same two files E11's own
+   `spirv.DemoteToHelperInvocation` commit extended. Built `mlir-opt`/
+   `mlir-translate` directly and ran both files through `llvm-lit` to
+   confirm before touching anything downstream in feme.
+2. Conversion pattern:
+   `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-terminate-invocation.mlir`,
+   a real `spirv.module` round-tripped through `feme-opt
+   --feme-convert-spirv-to-llvm`, checked by hand
+   (`bin/feme-opt --feme-convert-spirv-to-llvm ...`) that the output is
+   exactly `llvm.call_intrinsic "llvm.spv.discard"()` followed by
+   `llvm.return`, matching the roadmap row's own words precisely.
+3. Vulkan feature bit: extended `PhysicalDeviceInfoTest.cpp` with a
+   dedicated-struct test (mirroring E11's own
+   `ShaderDemoteToHelperInvocationIsAdvertisedThroughItsOwnDedicatedFeatureStruct`),
+   fixed the aggregate struct's expectation, and fixed `DrawTest.cpp`'s
+   extension-count assertion (9 -> 10) plus added the new extension-name
+   check.
+
+Ran `ninja check-feme` (assertions-enabled, ccache build) after every
+commit: 1576/1577 -> 1577/1578 passed as each change landed (1
+pre-existing `Unsupported`, unrelated throughout).
+
+## Targeted CTS run, and a second premise correction
+
+Ran against the actual checkout under `/home/dev/dev/VK-GL-CTS/`, not
+simulated. The three direct feature-query/consistency cases this row's
+own bits gate now pass. Identified the exact 72 cases the roadmap row's
+"Closes D3's `graphicsfuzz` 72-case regression" text refers to by
+grepping the CTS's own `external/vulkancts/data/vulkan/amber/graphicsfuzz/
+*.amber` sources for `OpTerminateInvocation` (72 files, matching the
+roadmap's own count exactly) and mapping each to its
+`dEQP-VK.graphicsfuzz.*` mustpass case name.
+
+Running those 72 cases found all 72 `Fail` -- but reading the actual
+failure text (`Vulkan color attachment format is not supported`, thrown
+by Amber's own `EngineVulkan::CreatePipeline` before any pipeline is even
+created) showed this is not the "wrong image" mismatch the `graphicsfuzz`
+row's own D3-era text describes. Ran a 20-case control sample of
+`graphicsfuzz` cases that do not reference `OpTerminateInvocation` at all
+and got the identical failure, 20/20 -- confirming this is the same
+pre-existing, already-documented `vkGetPhysicalDeviceFormatProperties`
+stub gap this report's own "Headline"/C1 sections already trace (it
+unconditionally reports zero format support regardless of
+`isSupportedColorAttachmentFormat`), blocking the entire 757-case
+`graphicsfuzz` group uniformly, not something specific to these 72 or to
+this row. Recorded this as a premise correction (to the *other* row's own
+text, not this row's) in both `Roadmap.md`'s E12 entry and
+`VulkanCTSReport.md`'s new "Roadmap E12: measured impact" section, rather
+than either silently reporting a misleading `Fail` or fixing the
+unrelated format-properties stub as a drive-by (explicitly out of this
+row's own scope, and already flagged elsewhere in the report as
+"deliberately left unfixed").
+
+## Scope discipline
+
+Touched: `mlir/include/mlir/Dialect/SPIRV/IR/{SPIRVBase,
+SPIRVControlFlowOps}.td` (new op), two MLIR test files,
+`SPIRVToLLVMPatterns.cpp` (new pattern) plus its new test,
+`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp` (feature bit + extension name),
+the two pre-existing Vulkan unit tests this row's own feature-bit flip
+required updating, one new dedicated-struct test, and the four documents
+(`Roadmap.md`, `FeMeGraphicsDesign.md`, `VulkanCTSReport.md`, this file)
+prior E-rows also touched. Did not add a new LLVM intrinsic (see "Design
+choice" above) or touch `CanonicalizeStage.cpp` at all, since the reused
+`llvm.spv.discard` path already covers the raised form -- a smaller
+footprint than E11's own five-commit shape. Did not fix the pre-existing
+`OpKill` conversion-pattern gap or the `vkGetPhysicalDeviceFormatProperties`
+stub found along the way, since both are corrections to other rows'
+premises, not this row's own scope.
