@@ -36,6 +36,22 @@
 // source/destination today, same as a single-sample one before V5's shader
 // consumption gap closes.
 //
+// Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode")
+// generalized `computeSubresourceLayouts`' per-mip math from a per-texel
+// stride to a block-based one (`Format.h`'s `blockWidth`/`blockHeight`/
+// `bytesPerBlock`, which fall back to `{1, 1, formatElementSize(Format)}`
+// for a non-block-compressed format, so the same formula now covers both).
+// `vkCreateImage` still rejects a block-compressed `VkFormat` outright,
+// though (`VK_ERROR_FORMAT_NOT_SUPPORTED`, the same result an unrecognized
+// format already got): this milestone's own scope is the layout math and a
+// standalone `feme::vulkan::decodeASTCBlock` (ASTCDecode.h) that nothing
+// yet calls, not a block-granularity rework of `ImageOps.cpp`'s copy/blit/
+// resolve paths or of any shader image-sampling path -- both of which
+// would need to change before a live `Image` could safely hold one (see
+// `texelPointer`'s assert). A follow-up roadmap row is expected to wire
+// those through and only then flip `textureCompressionASTC_LDR`
+// (EntryPoints.cpp) from its current honest `VK_FALSE`.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef FEME_LIB_VULKAN_IMAGE_H

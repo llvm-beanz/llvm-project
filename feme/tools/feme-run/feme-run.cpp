@@ -503,6 +503,38 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
     return 1;
   case ResourceFormat::A1B5G5R5_UNORM:
     return 2;
+  // (Roadmap E20) Block-compressed formats have no per-texel size, and
+  // the heap YAML's `images` entries do not support one yet either way
+  // (see this function's own comment).
+  case ResourceFormat::ASTC_4x4_UNORM:
+  case ResourceFormat::ASTC_4x4_SRGB:
+  case ResourceFormat::ASTC_5x4_UNORM:
+  case ResourceFormat::ASTC_5x4_SRGB:
+  case ResourceFormat::ASTC_5x5_UNORM:
+  case ResourceFormat::ASTC_5x5_SRGB:
+  case ResourceFormat::ASTC_6x5_UNORM:
+  case ResourceFormat::ASTC_6x5_SRGB:
+  case ResourceFormat::ASTC_6x6_UNORM:
+  case ResourceFormat::ASTC_6x6_SRGB:
+  case ResourceFormat::ASTC_8x5_UNORM:
+  case ResourceFormat::ASTC_8x5_SRGB:
+  case ResourceFormat::ASTC_8x6_UNORM:
+  case ResourceFormat::ASTC_8x6_SRGB:
+  case ResourceFormat::ASTC_8x8_UNORM:
+  case ResourceFormat::ASTC_8x8_SRGB:
+  case ResourceFormat::ASTC_10x5_UNORM:
+  case ResourceFormat::ASTC_10x5_SRGB:
+  case ResourceFormat::ASTC_10x6_UNORM:
+  case ResourceFormat::ASTC_10x6_SRGB:
+  case ResourceFormat::ASTC_10x8_UNORM:
+  case ResourceFormat::ASTC_10x8_SRGB:
+  case ResourceFormat::ASTC_10x10_UNORM:
+  case ResourceFormat::ASTC_10x10_SRGB:
+  case ResourceFormat::ASTC_12x10_UNORM:
+  case ResourceFormat::ASTC_12x10_SRGB:
+  case ResourceFormat::ASTC_12x12_UNORM:
+  case ResourceFormat::ASTC_12x12_SRGB:
+    return 0;
   }
   llvm_unreachable("unhandled ResourceFormat");
 }

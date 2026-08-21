@@ -41,18 +41,32 @@ ImageDimension mapImageDimension(VkImageType Type, uint32_t ArrayLayers) {
 
 /// Computes a packed, mip-major subresource layout table for an image of
 /// \p Dimension with the given extent/mip/array counts, \p SampleCount and
-/// \p TexelSize -- see Image.h's file comment on why tiling is not
-/// distinguished. Mip level `L`'s slice count is `max(1, Depth >> L)` for a
-/// 3D image (its depth halves per mip, per Vulkan's mip-chain rules) or
-/// `ArrayLayers` for every other dimension (an array image's layer count is
-/// constant across mips). Every sample of one texel is stored contiguously
-/// (`SampleStride == TexelSize`), so a texel's `SampleCount` samples occupy
-/// `SampleCount * TexelSize` bytes and a row is `Width` texels wide of that.
+/// \p BlockWidth/\p BlockHeight/\p BytesPerBlock (roadmap E20; `{1, 1,
+/// formatElementSize(Format)}` for a non-block-compressed format, so this
+/// generalizes the original per-texel math rather than replacing it -- see
+/// Format.h's file comment) -- see Image.h's file comment on why tiling is
+/// not distinguished. Mip level `L`'s slice count is `max(1, Depth >> L)`
+/// for a 3D image (its depth halves per mip, per Vulkan's mip-chain rules)
+/// or `ArrayLayers` for every other dimension (an array image's layer
+/// count is constant across mips). A row is `ceil(Width / BlockWidth)`
+/// blocks wide, `BytesPerBlock` bytes each; `ceil` rather than plain
+/// division because Vulkan requires only the whole *block* grid to be
+/// stored, so a mip level whose texel extent isn't itself a multiple of
+/// the block size (every level below the base one, for almost any
+/// non-power-of-two-friendly footprint) still occupies one full row/column
+/// of blocks at its edge, per `VkImageFormatProperties`' own
+/// `VK_ERROR_FORMAT_NOT_SUPPORTED`-avoiding compressed-format extent
+/// rules. Every sample of one non-block-compressed texel is stored
+/// contiguously (`SampleStride == BytesPerBlock`), so a texel's
+/// `SampleCount` samples occupy `SampleCount * BytesPerBlock` bytes and a
+/// row is `Width` texels wide of that; a block-compressed format is never
+/// multisampled in real Vulkan, so `SampleCount` is always 1 for one.
 std::pair<std::vector<FemeImageSubresourceLayout>, VkDeviceSize>
 computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
                           uint32_t Depth, uint32_t MipLevels,
                           uint32_t ArrayLayers, uint32_t SampleCount,
-                          uint32_t TexelSize) {
+                          uint32_t BlockWidth, uint32_t BlockHeight,
+                          uint32_t BytesPerBlock) {
   std::vector<FemeImageSubresourceLayout> Layouts(MipLevels);
   uint64_t Offset = 0;
   for (uint32_t Level = 0; Level != MipLevels; ++Level) {
@@ -61,12 +75,14 @@ computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
     uint32_t LevelDepth =
         Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> Level) : 1;
     uint32_t SliceCount = Type == VK_IMAGE_TYPE_3D ? LevelDepth : ArrayLayers;
+    uint32_t BlocksWide = (LevelWidth + BlockWidth - 1) / BlockWidth;
+    uint32_t BlocksHigh = (LevelHeight + BlockHeight - 1) / BlockHeight;
 
     FemeImageSubresourceLayout &L = Layouts[Level];
     L.Offset = Offset;
-    L.SampleStride = SampleCount > 1 ? TexelSize : 0;
-    L.RowPitch = uint64_t(LevelWidth) * TexelSize * SampleCount;
-    L.SlicePitch = L.RowPitch * LevelHeight;
+    L.SampleStride = SampleCount > 1 ? BytesPerBlock : 0;
+    L.RowPitch = uint64_t(BlocksWide) * BytesPerBlock * SampleCount;
+    L.SlicePitch = L.RowPitch * BlocksHigh;
     Offset += L.SlicePitch * SliceCount;
   }
   return {std::move(Layouts), Offset};
@@ -81,10 +97,9 @@ Image::Image(VkImageType Type, ImageDimension Dimension, ResourceFormat Format,
     : Type(Type), Dimension(Dimension), Format(Format), Width(Width),
       Height(Height), Depth(Depth), MipLevels(MipLevels),
       ArrayLayers(ArrayLayers), SampleCount(SampleCount), Usage(Usage) {
-  uint32_t TexelSize = formatElementSize(Format);
-  std::tie(MipLayouts, TotalSize) =
-      computeSubresourceLayouts(Type, Width, Height, Depth, MipLevels,
-                                ArrayLayers, SampleCount, TexelSize);
+  std::tie(MipLayouts, TotalSize) = computeSubresourceLayouts(
+      Type, Width, Height, Depth, MipLevels, ArrayLayers, SampleCount,
+      blockWidth(Format), blockHeight(Format), bytesPerBlock(Format));
   Layouts.assign(size_t(MipLevels) * std::max(ArrayLayers, Depth),
                  VK_IMAGE_LAYOUT_UNDEFINED);
 }
@@ -93,6 +108,9 @@ void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
                           uint32_t Y, uint32_t Z, uint32_t Sample) const {
   if (!isBound())
     return nullptr;
+  assert(!feme::cpu::isBlockCompressedFormat(Format) &&
+        "block-compressed images are not addressable per texel -- "
+        "vkCreateImage rejects them (see Image.h's file comment)");
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
   uint64_t TexelStride = formatElementSize(Format) * SampleCount;
@@ -336,6 +354,18 @@ vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
       mapVkFormat(pCreateInfo->format);
   if (!Format)
     return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  // Roadmap E20 lands `mapVkFormat`'s ASTC entries and this file's
+  // block-aware subresource layout math (both exercised directly by
+  // ImageTest.cpp/FormatTest.cpp), but not the matching block-granularity
+  // rework of ImageOps.cpp's copy/blit/resolve paths or of any shader
+  // image-sampling path -- an `Image` this constructor creates is always
+  // addressed per-texel elsewhere (see `texelPointer`'s assert). Rejecting
+  // image creation here, the same way an unrecognized format already is,
+  // keeps that invariant true and matches `textureCompressionASTC_LDR`
+  // staying unadvertised (EntryPoints.cpp) until a follow-up roadmap row
+  // wires the rest of the pipeline through and can honestly flip it.
+  if (feme::cpu::isBlockCompressedFormat(*Format))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
   feme::cpu::ImageDimension Dimension =
       mapImageDimension(pCreateInfo->imageType, pCreateInfo->arrayLayers);
@@ -380,16 +410,16 @@ void fillImageMemoryRequirements(VkDeviceSize TotalSize,
 
 /// Computes a `VkImageCreateInfo`'s total packed byte size, without ever
 /// constructing an `Image` -- the same `computeSubresourceLayouts` helper
-/// `Image`'s own constructor calls, given \p Format's element size (see
+/// `Image`'s own constructor calls, given \p Format's block layout (see
 /// Image.h's file comment on why tiling is not distinguished).
 VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
                                         feme::cpu::ResourceFormat Format) {
-  uint32_t TexelSize = formatElementSize(Format);
   return computeSubresourceLayouts(
              CreateInfo.imageType, CreateInfo.extent.width,
              CreateInfo.extent.height, CreateInfo.extent.depth,
              CreateInfo.mipLevels, CreateInfo.arrayLayers,
-             static_cast<uint32_t>(CreateInfo.samples), TexelSize)
+             static_cast<uint32_t>(CreateInfo.samples), blockWidth(Format),
+             blockHeight(Format), bytesPerBlock(Format))
       .second;
 }
 

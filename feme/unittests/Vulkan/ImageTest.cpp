@@ -123,6 +123,54 @@ TEST_F(ImageTest, RejectsUnsupportedFormat) {
             VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 
+/// Roadmap E20: `mapVkFormat` now recognizes every LDR ASTC `VkFormat`, but
+/// `vkCreateImage` still rejects one outright -- see Image.h's file
+/// comment on why (the copy/blit/resolve and shader-sampling paths that
+/// would need to address a block-compressed `Image` per block, not per
+/// texel, are this milestone's own explicitly deferred scope).
+TEST_F(ImageTest, RejectsASTCFormat) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img),
+            VK_ERROR_FORMAT_NOT_SUPPORTED);
+}
+
+/// Roadmap E20: `computeSubresourceLayouts`' block-based rework, exercised
+/// through the same info-only `vkGetDeviceImageMemoryRequirements` path
+/// `GetDeviceImageMemoryRequirementsMatchesLiveImage` uses for a
+/// non-block-compressed format -- there is no live `Image` to compare
+/// against here since `vkCreateImage` rejects the format (see
+/// `RejectsASTCFormat` above), but this entrypoint computes a
+/// `VkImageCreateInfo`'s size without ever constructing one, so it still
+/// exercises the same `computeSubresourceLayouts` helper. A 6x6 ASTC_4x4
+/// image (3 mips) rounds each level's *block* extent up, not its texel
+/// extent: level 0 is 6x6 texels -> ceil(6/4) = 2x2 blocks (64B); level 1
+/// is 3x3 texels -> still ceil(3/4) = 1x1 block (16B), not empty; level 2
+/// is 1x1 texels -> 1x1 block (16B). Total 96 bytes, every ASTC block
+/// always 16 bytes regardless of footprint (`bytesPerBlock`).
+TEST_F(ImageTest, GetDeviceImageMemoryRequirementsForASTCBlockLayout) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+  ImageInfo.extent = {6, 6, 1};
+  ImageInfo.mipLevels = 3;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+  VkDeviceImageMemoryRequirements Info{};
+  Info.pCreateInfo = &ImageInfo;
+  VkMemoryRequirements2 Reqs2{};
+  vkGetDeviceImageMemoryRequirements(Device, &Info, &Reqs2);
+  EXPECT_EQ(Reqs2.memoryRequirements.size, 96u);
+}
+
 /// Roadmap E4 (`VK_KHR_maintenance4`): the same requirements a live
 /// `VkImage` of this shape would report, computed from its
 /// `VkImageCreateInfo` alone -- no `vkCreateImage` call at all.
