@@ -25944,3 +25944,212 @@ unnecessary -- see above), `SPIRVToLLVMPatterns.cpp` (the one real CTS
 deliberately not fixed here), or `vk_gen_entrypoints.py`/
 `getSupportedDeviceExtensions` (confirmed unnecessary by checking every
 CTS call site, not merely assumed).
+
+# Milestone E8: VK_KHR_shader_integer_dot_product / shaderIntegerDotProduct
+
+## Reading the roadmap row first
+
+E8's own premise was unusually explicit about the expected answer: "likely
+`VK_FALSE` for all 36 [`integerDotProduct*Accelerated` bits] on a CPU
+executor -- a truthful 'supported but not accelerated' is a valid,
+conformant answer and cheaper than claiming acceleration this target
+cannot deliver." That framing decided the shape of this change before any
+code was written: implement real `spirv`->`llvm` lowering for the
+`OpSDot`/`OpUDot`/`OpSUDot` family (so `shaderIntegerDotProduct` itself can
+honestly flip to `VK_TRUE`), but do not attempt to make any of the 36
+`Accelerated` limit bits real -- there is no vectorized/accelerated
+codegen path for these ops on this CPU target, and claiming one would be
+exactly the "claiming acceleration this target cannot deliver" the row
+warned against.
+
+## What the SPIR-V ops actually are
+
+`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVIntegerDotProductOps.td` defines
+six ops: `SDot`/`UDot`/`SUDot` (binary: two vector or scalar-packed
+operands, straight dot product) and `SDotAccSat`/`UDotAccSat`/`SUDotAccSat`
+(ternary: the same dot product plus a saturating add against an
+accumulator). Confirmed via `grep`, no upstream MLIR `SPIRVToLLVM`
+conversion pattern exists for any of the six (unlike, say, `spirv.IAdd`,
+which upstream handles trivially) -- matching the roadmap row's own claim
+("none exist today per `Vulkan14FeatureInventory.md`"). This put these ops
+in the same bucket as `spirv.Dot` (float dot product) and `spirv.Switch`,
+both of which this codebase's own `SPIRVToLLVMPatterns.cpp` already had to
+hand-roll for the identical reason. `DotConversionPattern` (the existing
+`spirv.Dot` pattern, a per-lane `llvm.intr.fmuladd` chain) was the natural
+template to follow, both for code shape and for the comment style
+explaining "MLIR has no pattern for this op at all."
+
+The one piece of real semantic complexity is the packed scalar operand
+path: per `verifyIntegerDotProduct` in MLIR's `DotProductOps.cpp`, a
+scalar 32-bit operand is legal *only* together with the
+`PackedVectorFormat4x8Bit` format attribute (the only format value SPIR-V
+currently defines), and represents four packed 8-bit lanes, byte 0 in the
+low-order bits. This is exactly the same packing HLSL's `dot4add_u8packed`
+family already uses, which made the unpacking logic (shift + truncate +
+extend, four times) unsurprising to write.
+
+## Design: shared helpers, not six duplicated pattern bodies
+
+Six near-identical ops is exactly the case the coding standards' "avoid
+reinventing" and general DRY principle argue for factoring, but this
+file's own existing convention (one `class ... : public
+mlir::SPIRVToLLVMConversion<mlir::spirv::FooOp>` per op, e.g.
+`ImageFetchPattern`/`ImageReadPattern` sharing a `template <typename
+ImageOpTy> class ImageLoadPattern`) suggested a middle path: two small
+free functions (`extractIntegerDotProductLanes`,
+`reduceIntegerDotProductLanes`) doing the actual per-lane work, and two
+template pattern classes (`IntegerDotProductConversionPattern` for the
+three binary ops, `IntegerDotProductAccSatConversionPattern` for the three
+ternary ones) parameterized on which operand is signed and, for the
+`AccSat` family, whether the final saturating add is signed or unsigned.
+Six `using Foo = Template<Op, bool, bool[, bool]>` aliases at the end give
+each op its own named pattern type without six duplicated
+`matchAndRewrite` bodies. This mirrors `ImageLoadPattern`'s own precedent
+closely enough to read as "this codebase's usual shape for a family of
+near-identical ops," not a novel pattern.
+
+`SDotAccSat`/`SUDotAccSat` both use a *signed* saturating add
+(`llvm.intr.sadd.sat`) per the spec's own wording for both ("signed
+saturating addition"), even though `SUDotAccSat`'s dot product itself
+mixes signed/unsigned lanes -- only `UDotAccSat` uses the unsigned
+`uadd.sat`. Missing this distinction (assuming "SU" always means "half
+signed, half unsigned including the final add") would have been the
+easiest mistake to make here; the spec text settled it before writing any
+code.
+
+## Build/test iteration
+
+First build failed on `mlir::LLVM::SAddSatOp`/`UAddSatOp` not existing --
+the generated MLIR classes for LLVM intrinsic ops drop the `Op` suffix
+when the intrinsic name itself doesn't collide with anything (`SAddSat`/
+`UAddSat`, not `SAddSatOp`/`UAddSatOp`), unlike ordinary LLVM dialect ops
+(`AddOp`, `MulOp`). A quick grep of the generated `.h.inc` file settled it.
+
+The lit test (`spirv-to-llvm-integer-dot-product.mlir`) needed two rounds
+of `FileCheck` iteration: first, my hand-guessed instruction order for
+`sdot_vector`'s CHECK lines was wrong (I assumed both elements' extracts
+happen before both sign-extends; the actual pattern extracts-then-extends
+each lane before moving to the next, since `extractIntegerDotProductLanes`
+does exactly that per-lane rather than all-extracts-then-all-extends).
+Second, the `*AccSat` tests' CHECK lines tried to capture a `%[[SUM]]`
+variable from the *first* `llvm.add` in the multi-lane reduction chain
+(there are three `llvm.add`s for a 4-lane dot product, only the last of
+which feeds the saturating add) -- FileCheck matched the first one and
+then failed to find the `sadd.sat` immediately after it. Fixed by dropping
+the `SUM` capture entirely and just matching `llvm.intr.sadd.sat(%{{.*}},
+%arg2)` directly; the exact intermediate SSA name genuinely doesn't matter
+for what this test is checking. Both fixes were caught by actually running
+`feme-opt | FileCheck` against the real output rather than hand-verifying
+the expected IR shape, the same lesson prior milestones' own thoughts
+entries already recorded.
+
+## Vulkan wiring
+
+Followed E3/E5/E6/E7's own precedent closely:
+`shaderIntegerDotProduct = VK_TRUE` in the aggregate
+`VkPhysicalDeviceVulkan13Features` case, a new dedicated
+`VkPhysicalDeviceShaderIntegerDotProductFeatures` case agreeing with it,
+and (since `dEQP-VK.spirv_assembly.instruction.compute`'s own
+`vktSpvAsmIntegerDotProductTests.cpp` explicitly does
+`spec.extensions.push_back("VK_KHR_shader_integer_dot_product")`, confirmed
+by grepping the actual CTS source before assuming it, the same "don't
+guess, check every call site" discipline the E7 entry above already
+recorded) added `VK_KHR_shader_integer_dot_product` to
+`getSupportedDeviceExtensions`. Unlike `VK_KHR_maintenance4` (E4, no
+extension-list entry needed at all, since it added no new commands and no
+CTS call site enables it by name), this extension *does* need the
+`getSupportedDeviceExtensions` entry despite also adding no new commands --
+the deciding factor is whether any CTS call site enables the extension
+name explicitly, not whether the extension has its own commands, a
+distinction E4's and E7's own entries already drew for their respective
+cases and this one reconfirms rather than re-derives.
+
+All 36 `integerDotProduct*Accelerated` bits: left exactly as E2 already set
+them (`VK_FALSE`), and added the dedicated
+`VkPhysicalDeviceShaderIntegerDotProductProperties` case with the same 36
+fields, all `VK_FALSE`, agreeing with the aggregate struct -- mirroring
+E7's own dedicated-properties-struct pattern for `subgroupSizeControl`'s
+four now-real fields, except here *none* of the fields change value, only
+a new struct case is added that must (and does) already agree with what
+E2 wrote.
+
+## Test updates forced by this change
+
+Two pre-existing tests encoded the *old* `shaderIntegerDotProduct ==
+VK_FALSE` expectation and had to be updated once the build caught them:
+`DrawTest.AdvertisesDynamicRenderingExtension` (extension count 5 -> 6,
+plus a new `HasExtension(VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME)`
+check) and `PhysicalDeviceProperties2Test.
+DynamicRenderingIsAdvertisedThroughAggregateVulkan13Features` (the
+`shaderIntegerDotProduct` assertion flipped to `VK_TRUE`). Both failures
+surfaced immediately on the first `FeMeVulkanTests` run after the Vulkan
+wiring commit, confirming the fix was necessary and complete rather than
+merely assumed. Added one new dedicated-struct test,
+`ShaderIntegerDotProductIsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs`,
+mirroring `Maintenance4IsAdvertisedThroughItsOwnDedicatedFeatureAndProperty
+Structs`'s shape. Also fixed a stale `// (roadmap E8) All 30
+integerDotProduct*Accelerated bits` comment (should have said 36 from the
+start -- a typo from whoever wrote E2's own test coverage, caught only
+because this row's own work required reading that exact test closely).
+
+## CTS runs
+
+Two targeted runs rather than the full ~25-minute, 54-group sweep, since
+this row's blast radius is narrow (six new conversion patterns plus one
+feature/extension flip, no changes to any existing command's behavior):
+
+- `dEQP-VK.api.info.*` (10,484 cases): confirmed
+  `get_physical_device_properties2.features.shader_integer_dot_product_features`
+  flips from `Fail` (already known from D1/D3's own bucket) to `Pass`, and
+  both `vulkan1p3.feature_extensions_consistency`/
+  `property_extensions_consistency` still `Pass` (i.e., the new dedicated
+  structs agree with the aggregate ones, not merely by inspection). The
+  other 80 `Fail` cases in this run are pre-existing, unrelated gaps
+  (`format_properties.*`, several other still-unimplemented dedicated
+  feature structs like `8_bit_storage`/`16_bit_storage`/
+  `buffer_device_address`) -- checked by name against this row's own scope
+  before assuming "unrelated."
+- `dEQP-VK.spirv_assembly.instruction.compute.{opsdotkhr,opudotkhr,
+  opsudotkhr,opsdotaccsatkhr,opudotaccsatkhr,opsudotaccsatkhr}.*` (1,248
+  cases, the actual new-pattern test target): 80 `Pass`, 0 `Fail`, 1,168
+  `NotSupported`. Every `NotSupported` traced to `shaderInt16`/
+  `shaderInt64` (both genuinely unimplemented, unrelated to this row) by
+  grepping the `NotSupported` reason strings rather than assuming; zero
+  `Fail` across all six groups is the actual correctness confirmation for
+  the lane-extraction/reduction logic this row adds, not merely "the build
+  succeeded."
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E8's row with a "done, exactly as
+  anticipated" close -- unlike several prior rows (E4/E5/E7), this one
+  needed no correction to its own premise; the CTS numbers confirmed it
+  rather than revised it.
+- `Vulkan14FeatureInventory.md`: regenerated via
+  `vk_gen_feature_inventory.py` after adding `shaderIntegerDotProduct`/
+  `VK_KHR_shader_integer_dot_product` to
+  `AdvertisedPromoted{Features,Extensions}.txt`. Diffed the regenerated
+  table against the checked-in one first to confirm *only* the two E8-
+  relevant rows changed (deliberately did not also backfill E3/E5/E6/E7's
+  own still-missing tracking-file entries, a pre-existing drift out of
+  this row's scope -- see the tracking files' own history).
+- `FeMeVulkanDesign.md`: extended the extension-list narrative and the D1
+  status paragraph; also corrected a stale "only the four [extensions] now
+  listed above are implemented" count that was already wrong before this
+  row (five, after E6 added `maintenance6`) -- fixed while touching this
+  exact paragraph rather than left further out of date.
+- `VulkanCTSReport.md`: new "Roadmap E8: measured impact" section, same
+  format as E4-E7's own sections.
+
+## Scope discipline
+
+Touched `SPIRVToLLVMPatterns.cpp` (+lit test), `PhysicalDeviceInfo.cpp`,
+`EntryPoints.cpp`, their unit tests, the two tracking `.txt` files, and
+the four documents this change directly affects. Did not touch
+`vk_gen_entrypoints.py`/`SUPPORTED_EXTENSIONS` (this extension adds no new
+commands, confirmed by checking `vk.xml`'s own extension definition has no
+`<command>` entries, the same "no entrypoints, no `SUPPORTED_EXTENSIONS`
+entry needed" precedent E4/E7 already established), and did not attempt to
+retrofit any real vectorized/SIMD-accelerated codegen path for the dot
+product ops -- that would contradict this row's own truthful-`VK_FALSE`
+premise, not fulfill it.
