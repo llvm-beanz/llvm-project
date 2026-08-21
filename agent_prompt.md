@@ -26,13 +26,12 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E4 in the roadmap document?
+Can you implement milestone E5 in the roadmap document?
 
-> **`VK_KHR_maintenance4`/`maintenance4`.**
-> `vkGetDeviceBufferMemoryRequirements`/`vkGetDeviceImageMemoryRequirements`/`vkGetDeviceImageSparseMemoryRequirements`
-> compute requirements from a `VkBufferCreateInfo`/`VkImageCreateInfo` directly
-> (no live object needed) by factoring the existing
-> `vkCreateBuffer`/`vkCreateImage` sizing logic into a shared helper both the
-> live and the info-only entrypoint call; also relaxes `vkCreateShaderModule`'s
-> local-size-id/local-size validation and `VK_KHR_maintenance4`'s
-> zero-size-descriptor-array rule
+> **`VK_KHR_maintenance5`/`maintenance5`.** Chiefly
+> `VkRenderingAttachmentInfo::imageView == VK_NULL_HANDLE` (an attachment slot
+> present but unused, needing `RenderPass.cpp`'s dynamic-rendering path to skip
+> rather than reject a null view), `VK_FORMAT_A8_UNORM`/`A1B5G5R5_UNORM_PACK16`,
+> and `vkCmdBindIndexBuffer2` (a `size`-bounded variant of the existing bind,
+> sharing `CommandBuffer.cpp`'s existing validation minus the "whole buffer"
+> assumption)
