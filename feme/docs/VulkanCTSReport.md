@@ -1857,6 +1857,53 @@ CPU-target SIMD-lowering limitation and a monolithic-pipeline single-stage
 restriction, respectively, tracked separately from `VK_EXT_pipeline_
 creation_cache_control`'s own two bits).
 
+## Roadmap E10: measured impact
+
+Roadmap E10 (`VK_EXT_private_data`/`privateData`) is a new, self-contained
+object, exactly as its own premise anticipated: `PrivateDataSlot`
+(`PrivateData.{h,cpp}`) is a map from `(VkObjectType, uint64_t handle)` to
+a `uint64_t`, independent of every other object in `Objects.h`, backing
+`vkCreatePrivateDataSlot`/`vkSetPrivateData`/`vkGetPrivateData`/
+`vkDestroyPrivateDataSlot`. `privateData` now reads `VK_TRUE` from both the
+aggregate `VkPhysicalDeviceVulkan13Features` struct and a new dedicated
+`VkPhysicalDevicePrivateDataFeatures` struct; `getSupportedDeviceExtensions`
+gained `VK_EXT_private_data` itself, the same "CTS enables it by name
+regardless of `apiVersion`" reason E3/E5/E6/E8/E9 already established.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.private_data_features` | `Pass` (previously `Fail`, per D1/D3's own `api.info.*` bucket -- see "Roadmap D3: measured impact" above) |
+| `dEQP-VK.api.info.vulkan1p3.*` (5 total) | 5/5 `Pass`, confirming the new dedicated struct agrees with the aggregate `VkPhysicalDeviceVulkan13Features` case rather than repeating E2's own first-draft regression |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.private_data_features` | `Pass` |
+| `dEQP-VK.api.object_management.private_data.*` (40 total) | 37 `Pass`, 2 `Fail`, 1 `NotSupported` |
+
+**The `NotSupported` case** (`image_view_cube_arr`) is a pre-existing,
+out-of-scope gap: `imageCubeArray` is not implemented by this ICD at all, a
+prerequisite this private-data test case's own object under test happens to
+need, unrelated to any of `VK_EXT_private_data`'s own bits. **Both `Fail`
+cases are likewise pre-existing, out-of-scope gaps, neither one this row's
+own entrypoints:**
+
+- `compute_pipeline` fails identically to E9's own measured-impact section
+  (`'llvm.getelementptr' op operand #0 must be LLVM pointer type ...`), the
+  same "resource handle the FeMe CPU target cannot normalize" class of gap
+  E6/E9 already found -- this test's compute shader indexes a buffer by
+  `gl_GlobalInvocationID.x`, and reproduces whether or not a private data
+  slot is ever attached to the pipeline.
+- `graphics_pipeline` fails with `feme-cpu-simdize`'s own divergent-vector
+  diagnostic, the same "roadmap milestone 7 deviation" C3/D3 already
+  tracked (`ubo.*.std430`'s own 2,650-case bucket, "Roadmap D3: measured
+  impact" above) -- a pre-existing SIMD-widening limitation this test's
+  graphics shader happens to hit, not anything `vkSetPrivateData`/
+  `vkGetPrivateData` themselves touch.
+
+Neither gap is a regression this row introduces: both reproduce for any
+compute/graphics pipeline creation through this ICD today, with or without
+a private data slot attached, and closing either is out of this row's own
+scope.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
