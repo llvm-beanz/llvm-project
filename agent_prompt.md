@@ -26,10 +26,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E11 in the roadmap document?
+Can you implement milestone E12 in the roadmap document?
 
-> **`VK_EXT_shader_demote_to_helper_invocation`/`shaderDemoteToHelperInvocation`.**
-> SPIR-V's `OpDemoteToHelperInvocation` needs a new `spirv`->`llvm` conversion
-> pattern (mark the invocation inactive for further side effects, matching HLSL
-> `discard`'s existing non-terminating semantics rather than DXIL's `discard`'s
-> current lowering, if one exists -- audit `SPIRVToLLVMPatterns.cpp` first)
+> **`VK_KHR_shader_terminate_invocation`/`shaderTerminateInvocation`.** SPIR-V's
+> `OpTerminateInvocation` (a true terminator, unlike
+> `OpDemoteToHelperInvocation`) needs its own conversion pattern lowering to an
+> unconditional discard-and-return. **Closes D3's `graphicsfuzz` 72-case
+> regression** (CTS assumes this promoted-to-1.3 extension is real once
+> `apiVersion >= 1.3`)
