@@ -1554,6 +1554,53 @@ pre-existing `Fail`s both before and after E4 (see the table above's own
 methodology). This thread-safety gap is out of E4's scope and not yet a
 tracked roadmap row.
 
+## Roadmap E5: measured impact
+
+Roadmap E5 (`VK_KHR_maintenance5`/`maintenance5`) skips rather than
+rejects a dynamic-rendering color attachment whose `VkRenderingAttachment
+Info::imageView` is `VK_NULL_HANDLE` (`CommandBuffer.cpp`'s per-attachment
+write/clear/resolve loops, and `Executor.cpp`'s per-attachment fragment
+write loop -- not `RenderPass.cpp`, a correction to this row's own file
+attribution, since `normalizeRenderingAttachment` already produced a null
+`View` for this case; every downstream consumer that unconditionally
+called `resolveAttachmentView` on it needed the fix, not the normalizer),
+adds `VK_FORMAT_A8_UNORM`/`A1B5G5R5_UNORM_PACK16` to `Format.cpp`/
+`ImageFixture.cpp`/`RenderPass.cpp`'s format tables, and adds
+`vkCmdBindIndexBuffer2` (`CommandBuffer.cpp`, sharing `bindIndexBuffer`'s
+recording and `runDraw`/`validateDrawFetchBounds`'s bounds checking, minus
+`vkCmdBindIndexBuffer`'s own "whole buffer" assumption). `maintenance5`
+now reads `VK_TRUE` from both the aggregate `VkPhysicalDeviceVulkan14
+Features` struct and its own dedicated `VkPhysicalDeviceMaintenance5
+FeaturesKHR` struct.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.maintenance5_features` | `Pass` |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.maintenance5_features` | `Pass` |
+| `dEQP-VK.api.maintenance5.*` (10 total: `flags`/`format` × `image_format_props(2)`/`sparse_image_format_props(2)`/`device_format_props(2)`) | 10 `Pass` |
+| `dEQP-VK.draw.renderpass.indexed_draw.draw_indexed_triangle_list*maintenance_5` (12 total) | 12 `Fail` (`vkCreateGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED`), but the identical, non-`maintenance_5`-suffixed baseline case (`draw_indexed_triangle_list`) fails identically -- confirmed by running it in isolation. This whole `DrawIndexedTest` family is blocked by a pre-existing, orthogonal gap in this pipeline's own creation path that has nothing to do with `bindIndexBuffer2`/`maintenance5` (uninvestigated further; out of this row's own scope), so E5 neither causes nor fixes these 12 |
+| `dEQP-VK.robustness.bind_index_buffer2.*` (41 total) | 41 `NotSupported` (`VK_KHR_robustness2`/`VK_EXT_robustness2`, `VK_KHR_draw_indirect_count`, or `VK_EXT_multi_draw` not supported) -- every one of this group's cases needs a second, unrelated, unimplemented extension alongside `vkCmdBindIndexBuffer2` itself; a clean, correct `NotSupported`, not a crash or wrong-shaped result |
+| `dEQP-VK.api.buffer_view.access.uniform_texel_buffer.{a8_unorm,a1b5g5r5_unorm_pack16}` | `NotSupported (Format not supported)` -- `vkGetPhysicalDeviceFormatProperties` unconditionally reports zero support for every format regardless of `mapVkFormat`/`isSupportedColorAttachmentFormat` (the same pre-existing, separate stub C1's own report already traced; these two formats are simply new instances of that same gap, not a new one E5 introduces) |
+
+**A second finding this row's own premise did not anticipate**: even
+though `maintenance5` is genuinely core-promoted at this ICD's advertised
+`apiVersion` (1.4) and the aggregate `VkPhysicalDeviceVulkan14Features`
+struct now honestly reports it, `dEQP-VK.draw.*maintenance_5`/`dEQP-VK.api.
+maintenance5.*`'s own `context.requireDeviceFunctionality
+("VK_KHR_maintenance5")` calls still failed `NotSupported ("VK_KHR_
+maintenance5 is not supported")` until `VK_KHR_MAINTENANCE_5_EXTENSION_
+NAME` was added to `getSupportedDeviceExtensions` -- the exact same "core-
+promoted extension still needs its name listed for `vkCreateDevice` to
+accept it explicitly" gap E3's own `synchronization2` row already found
+(see "Roadmap E3: measured impact" above), now recurring for a different
+extension. Confirmed by the retest: the `dEQP-VK.api.maintenance5.*`/
+`device_init`/`get_physical_device_properties2` rows in the table above
+all failed `NotSupported ("VK_KHR_maintenance5 is not supported")` before
+this fix and pass (or, for the `draw.*` row, reach real pipeline-creation
+failure instead of an early `NotSupported`) after it.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the

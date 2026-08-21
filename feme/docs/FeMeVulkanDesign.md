@@ -512,9 +512,15 @@ aggregate struct), and `maintenance4` (roadmap E4:
 `vkGetDeviceBufferMemoryRequirements`/`vkGetDeviceImageMemoryRequirements`/
 `vkGetDeviceImageSparseMemoryRequirements` in Buffer.cpp/Image.cpp,
 likewise reported through both its own dedicated
-`VkPhysicalDeviceMaintenance4Features` struct and the aggregate struct)
+`VkPhysicalDeviceMaintenance4Features` struct and the aggregate struct),
+and `maintenance5` (roadmap E5: a `VkRenderingAttachmentInfo::imageView ==
+VK_NULL_HANDLE` color slot is skipped rather than rejected
+(RenderPass.h/CommandBuffer.cpp), `VK_FORMAT_A8_UNORM`/
+`A1B5G5R5_UNORM_PACK16` (Format.cpp), and `vkCmdBindIndexBuffer2`
+(CommandBuffer.cpp), likewise reported through both its own dedicated
+`VkPhysicalDeviceMaintenance5FeaturesKHR` struct and the aggregate struct)
 are genuinely implemented;
-`maintenance5`/`6`, `subgroupSizeControl`,
+`maintenance6`, `subgroupSizeControl`,
 `shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
 `pushDescriptor`, and the rest are all confirmed unimplemented, not merely
 unaudited. Roadmap E2 wires the promoted `...Properties` struct's
@@ -1182,6 +1188,22 @@ is exactly as single-layer as a concrete one (`vkCreateFramebuffer`'s
 `multiview` itself did not (see "Physical Device and Capabilities"'s
 "Limits and features" status note).
 
+**Status (roadmap E5): a dynamic-rendering color attachment's
+`VkRenderingAttachmentInfo::imageView == VK_NULL_HANDLE` is a slot that is
+present -- it still counts against the pipeline's `colorAttachmentCount`,
+and toward `Gfx.Binding.Colors.size()`'s own match against it -- but
+unused.** No image needs to be bound for it: `normalizeRenderingAttachment`
+(CommandBuffer.cpp) already produces a `RenderTargetView` with a null
+`View` for it exactly as before, and every place downstream that used to
+unconditionally call `resolveAttachmentView` on it (the render-target
+binding's own load-op clear, and each draw's per-attachment write and
+optional multisample resolve) now skips it instead, in favor of the empty-
+`AttachmentView` "not bound" convention `DepthStencilAttachment` already
+established. A fragment shader may still declare (and even write) an
+output at that location -- the spec says it must not, but nothing about
+this software rasterizer's own correctness depends on enforcing that; the
+write is simply discarded along with everything else about the slot.
+
 ### Graphics pipeline state
 
 `vkCreateGraphicsPipelines` compiles each stage through the same flow the
@@ -1241,6 +1263,17 @@ Secondary command buffers recorded inside a render pass inherit the render-pass
 state through `VkCommandBufferInheritanceInfo` and are interpreted into the
 primary's execution state, with the same immutability rule the compute path
 already requires for simultaneous use.
+
+**Status (roadmap E5): `vkCmdBindIndexBuffer2` (`VK_KHR_maintenance5`)
+adds a `size` bound to the classic `vkCmdBindIndexBuffer`'s always-"through
+the end of the buffer" bind.** Both share the same `GraphicsState`/
+`CommandBuffer::bindIndexBuffer` recording and the same draw-time bounds
+check (`validateDrawFetchBounds`/`runDraw`, CommandBuffer.cpp); `size ==
+VK_WHOLE_SIZE` (what a plain `vkCmdBindIndexBuffer` bind always records)
+keeps the pre-E5 "whole buffer" behavior exactly, while any other `size`
+narrows the readable range to `[offset, offset + size)`, rejecting a draw
+whose index range reaches past it the same way one reaching past the whole
+buffer already was.
 
 ### Window-system integration
 
