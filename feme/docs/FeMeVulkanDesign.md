@@ -323,6 +323,7 @@ externally synchronized lifetime rules remain the application's obligation.
 | `VkCommandBuffer` | Append-only typed command stream while recording |
 | `VkQueryPool` | Result storage and availability state per query |
 | Fence/semaphore/event | Host synchronization state with condition-variable backing |
+| `VkPrivateDataSlot` | Opaque per-(object handle) `uint64_t` map, self-contained (roadmap E10) |
 
 `VkQueryPool` is listed because `vkCreateQueryPool`, `vkCmdResetQueryPool`,
 `vkCmdBeginQuery`/`vkCmdEndQuery`, `vkCmdWriteTimestamp`,
@@ -334,6 +335,12 @@ statistics may be reported unsupported, but the pool cannot be absent.
 `VkImage`, image views, samplers, and WSI objects are not created until their
 features are implemented and advertised. Until then, `vkCreateImage` fails
 cleanly rather than returning a half-initialized object.
+
+`VkPrivateDataSlot` (roadmap E10, `VK_EXT_private_data`/core 1.3
+`privateData`) lives in its own `PrivateData.{h,cpp}`, entirely
+self-contained: it never dereferences the `(VkObjectType, object handle)`
+pair it is keyed on, so it has no dependency on any other object's own
+lifetime or representation, unlike every other row in the table above.
 
 ## Physical Device and Capabilities
 
