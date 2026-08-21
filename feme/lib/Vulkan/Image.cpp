@@ -104,6 +104,22 @@ Image::Image(VkImageType Type, ImageDimension Dimension, ResourceFormat Format,
                  VK_IMAGE_LAYOUT_UNDEFINED);
 }
 
+bool Image::isInBounds(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
+                       uint32_t Y, uint32_t Z, uint32_t UnitWidth,
+                       uint32_t UnitHeight) const {
+  if (MipLevel >= MipLevels)
+    return false;
+  uint32_t LevelWidth = std::max(1u, Width >> MipLevel);
+  uint32_t LevelHeight = std::max(1u, Height >> MipLevel);
+  uint32_t LevelDepth =
+      Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> MipLevel) : 1;
+  uint32_t SlicesAtLevel = Type == VK_IMAGE_TYPE_3D ? LevelDepth : ArrayLayers;
+  uint32_t UnitsWide = (LevelWidth + UnitWidth - 1) / UnitWidth;
+  uint32_t UnitsHigh = (LevelHeight + UnitHeight - 1) / UnitHeight;
+  return X < UnitsWide && Y < UnitsHigh &&
+         uint64_t(ArrayLayer) + Z < SlicesAtLevel;
+}
+
 void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
                           uint32_t Y, uint32_t Z, uint32_t Sample) const {
   if (!isBound())
@@ -111,6 +127,13 @@ void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
   assert(!feme::cpu::isBlockCompressedFormat(Format) &&
          "block-compressed images are not addressable per texel -- use "
          "blockPointer instead (see Image.h's file comment)");
+  // VK_EXT_image_robustness/robustImageAccess (roadmap E16): a coordinate
+  // outside this mip level's declared extent must not fault -- return null
+  // rather than an out-of-bounds pointer, so callers can discard the write
+  // or read back a defined (zero) value instead (see Image.h's comment).
+  if (!isInBounds(MipLevel, ArrayLayer, X, Y, Z, /*UnitWidth=*/1,
+                 /*UnitHeight=*/1))
+    return nullptr;
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
   uint64_t TexelStride = formatElementSize(Format) * SampleCount;
@@ -127,6 +150,11 @@ void *Image::blockPointer(uint32_t MipLevel, uint32_t ArrayLayer,
   assert(feme::cpu::isBlockCompressedFormat(Format) &&
          "blockPointer is for a block-compressed Format only -- use "
          "texelPointer for any other one");
+  // See texelPointer's comment (roadmap E16): the same out-of-bounds ->
+  // null rule applies, in block-grid rather than texel units.
+  if (!isInBounds(MipLevel, ArrayLayer, BlockX, BlockY, Z,
+                 blockWidth(Format), blockHeight(Format)))
+    return nullptr;
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
   uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +

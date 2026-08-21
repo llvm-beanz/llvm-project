@@ -207,6 +207,70 @@ TEST_F(ImageTest, BlockPointerAddressesBlockGrid) {
   vkFreeMemory(Device, Memory, nullptr);
 }
 
+/// Roadmap E16 (`VK_EXT_image_robustness`/`robustImageAccess`): a texel
+/// coordinate, mip level, or array layer outside the image's own declared
+/// extent must not fault -- `texelPointer` returns null instead of an
+/// out-of-bounds pointer.
+TEST_F(ImageTest, TexelPointerReturnsNullOutOfBounds) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(
+      4, 4, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, Memory,
+      /*MipLevels=*/2);
+  auto *Obj = fromHandle<Image>(Img);
+
+  // In-bounds: level 0 is 4x4, level 1 is 2x2.
+  EXPECT_NE(Obj->texelPointer(0, 0, 3, 3, 0), nullptr);
+  EXPECT_NE(Obj->texelPointer(1, 0, 1, 1, 0), nullptr);
+
+  // Out-of-bounds X/Y at level 0.
+  EXPECT_EQ(Obj->texelPointer(0, 0, 4, 0, 0), nullptr);
+  EXPECT_EQ(Obj->texelPointer(0, 0, 0, 4, 0), nullptr);
+  // In-bounds at level 0 but out-of-bounds at level 1's smaller extent.
+  EXPECT_EQ(Obj->texelPointer(1, 0, 2, 0, 0), nullptr);
+  EXPECT_EQ(Obj->texelPointer(1, 0, 0, 2, 0), nullptr);
+  // Out-of-bounds mip level and array layer.
+  EXPECT_EQ(Obj->texelPointer(2, 0, 0, 0, 0), nullptr);
+  EXPECT_EQ(Obj->texelPointer(0, 1, 0, 0, 0), nullptr);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+/// The block-grid peer of `TexelPointerReturnsNullOutOfBounds`: an
+/// out-of-bounds block coordinate returns null rather than an
+/// out-of-bounds pointer (roadmap E16).
+TEST_F(ImageTest, BlockPointerReturnsNullOutOfBounds) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+  ImageInfo.extent = {6, 6, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  auto *Obj = fromHandle<Image>(Img);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  // 6x6 texels is a 2x2 ASTC_4x4 block grid: (1, 1) is the last valid
+  // block, (2, *)/(*, 2) are one block past it.
+  EXPECT_NE(Obj->blockPointer(0, 0, 1, 1, 0), nullptr);
+  EXPECT_EQ(Obj->blockPointer(0, 0, 2, 0, 0), nullptr);
+  EXPECT_EQ(Obj->blockPointer(0, 0, 0, 2, 0), nullptr);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 /// Roadmap E20: `computeSubresourceLayouts`' block-based rework, exercised
 /// both through the info-only `vkGetDeviceImageMemoryRequirements` path
 /// (matching `GetDeviceImageMemoryRequirementsMatchesLiveImage`'s own

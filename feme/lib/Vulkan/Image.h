@@ -158,7 +158,13 @@ public:
   /// nonzero for a supported dimension (a 3D image has exactly one array
   /// layer, and an array image has depth 1), so their sum is always the
   /// correct slice index into `MipLayouts[MipLevel]`'s `SlicePitch`-derived
-  /// stride. Null if the image is unbound.
+  /// stride. Null if the image is unbound, *or* if \p MipLevel or
+  /// `(X, Y, Z)`/`ArrayLayer` falls outside the image's declared extent at
+  /// that mip level (`VK_EXT_image_robustness`'s `robustImageAccess`,
+  /// roadmap E16: an out-of-bounds coordinate must not fault, so this
+  /// returns null instead of computing a wild pointer -- every caller here
+  /// treats null as "read zero" or "discard the write" rather than
+  /// dereferencing it).
   void *texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
                      uint32_t Y, uint32_t Z, uint32_t Sample = 0) const;
 
@@ -171,7 +177,9 @@ public:
   /// `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` and `ImageOps.cpp`'s
   /// `runBlitImage` are its only callers, since no other operation
   /// supports a block-compressed image at all). Null if the image is
-  /// unbound.
+  /// unbound, or (see `texelPointer`'s comment, roadmap E16) if \p MipLevel
+  /// or `(BlockX, BlockY)`/`ArrayLayer`/`Z` falls outside the mip level's
+  /// own block grid.
   void *blockPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t BlockX,
                      uint32_t BlockY, uint32_t Z) const;
 
@@ -186,6 +194,18 @@ public:
                  uint32_t LayerCount, VkImageLayout NewLayout);
 
 private:
+  /// Whether unit coordinates `(X, Y)` -- texel units when
+  /// `UnitWidth == UnitHeight == 1`, block-grid units otherwise -- plus
+  /// slice index `ArrayLayer + Z` fall within mip level \p MipLevel's own
+  /// declared extent, expressed in the same `ceil(extent / unit)` grid
+  /// `computeSubresourceLayouts` (Image.cpp) sizes each level's storage
+  /// with. Shared by `texelPointer` (`UnitWidth == UnitHeight == 1`) and
+  /// `blockPointer` (`UnitWidth`/`UnitHeight` == `blockWidth`/`blockHeight`)
+  /// so both apply the same out-of-bounds check (roadmap E16).
+  bool isInBounds(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
+                  uint32_t Y, uint32_t Z, uint32_t UnitWidth,
+                  uint32_t UnitHeight) const;
+
   VkImageType Type;
   feme::cpu::ImageDimension Dimension;
   feme::cpu::ResourceFormat Format;
