@@ -28611,3 +28611,136 @@ per-format `Load` case in that file is already structured.
   formats are no longer rejected before the mandatory-combination check
   runs), but neither caused nor fixed by this row -- tracked as findings
   in VulkanCTSReport.md rather than folded in.
+
+# Agent thoughts: roadmap E16 (VK_EXT_image_robustness/robustImageAccess)
+
+## Scoping the audit
+
+The roadmap row's own text is an audit instruction ("audit `Image.cpp`'s/
+`ImageOps.cpp`'s existing bounds handling ... and add an explicit
+clamp-or-discard for any coordinate outside the image's declared extent
+that isn't already handled"), not a fixed list of call sites to change --
+so the first step was actually reading every caller of
+`Image::texelPointer`/`Image::blockPointer` before writing anything, not
+just the two files the row names.
+
+That search turned up three call sites outside `Image.cpp`/`ImageOps.cpp`:
+`CommandBuffer.cpp`'s `copyBufferImageRegion`/`runCopyImage` (the
+`vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`/`vkCmdCopyImage` family),
+and the CPU runtime's own `femeRTFetchTexel2D`/`femeRTFetchTexel2DI32`
+(`FeMeRuntimeCPU.c`) -- the latter being what the row's own parenthetical
+"(Executor's texel read/write path)" most plausibly refers to, since that
+is the actual shader-visible image-read path a real `robustImageAccess`
+guarantee is about. Reading it (rather than assuming a gap existed) found
+it already returns all-zero for any out-of-range access -- already
+handled, exactly the row's own "that isn't already handled" carve-out.
+There is no shader-visible texel *write* path to audit at all yet, per
+`Image.h`'s own file comment ("not yet writable").
+
+So the real, unhandled gap was narrower and entirely host-side:
+`Image::texelPointer`/`Image::blockPointer` themselves trusted every
+caller's coordinates unconditionally, and `ImageOps.cpp`'s
+`runBlitImage`/`runResolveImage` are the only two operations in this file
+whose region comes from arbitrary application input (a `VkImageBlit`/
+`VkImageResolve`) rather than being derived from the image's own
+dimensions the way `runClearColorImage`/`runClearDepthStencilImage`
+already are -- those two needed no change at all, confirmed by reading
+`fillSubresource`/`fillDepthStencilSubresource` rather than assuming.
+
+## Design: null-returning accessors, not a separate validation pass
+
+Rather than adding a second, parallel bounds-check function callers would
+have to remember to call before every `texelPointer`/`blockPointer` use, I
+made the accessors themselves return null on an out-of-bounds coordinate
+(alongside their existing unbound-image null return) -- one behavior
+change at the lowest level, rather than duplicating a check at every call
+site. This also means any future caller gets the safety automatically,
+without having to know about roadmap E16 at all. `CommandBuffer.cpp`'s
+copy paths inherit the same underlying protection against a genuinely
+wild pointer for free (they would now discard/no-op an out-of-bounds row
+rather than fault, even though their own *region-vs-extent* validation
+gap -- see below -- is unaudited and out of this row's scope), which is a
+nice side benefit but not itself this row's fix.
+
+`runBlitImage`'s source-read clamp is layered *on top of* its existing
+clamp-into-the-requested-rectangle behavior (`std::clamp` into
+`[SrcMinX, SrcMaxX)`), rather than replacing it: a caller-specified
+rectangle already legitimately clamps a fractional sample position to the
+rectangle's own edge (ordinary edge-repeat sampling within a valid
+region); this row's own clamp additionally re-clamps into the *image's*
+real extent, so a rectangle that itself runs past the image also lands on
+a real texel rather than reading past the allocation. Discarding the
+*destination* write (rather than also clamping it) was the more natural
+choice there: there is no defined "closest valid pixel" to redirect an
+out-of-bounds write to without inventing new semantics, whereas discarding
+matches the write-side half of the `robustImageAccess` contract directly
+("no-op writes", precedent already stated in FeMeVulkanDesign.md's own
+`robustBufferAccess` paragraph, just for images).
+
+## A hang found while measuring, not introduced by this row
+
+Running the two directly-implicated CTS groups
+(`copy_and_blit.copy_commands2.{blit_image,resolve_image}.*`) as
+End-to-end verification turned up `blit_image.simple_tests.array.
+all_remaining_layers` hanging at 100% CPU indefinitely. Before assuming my
+own change caused it, I: (1) confirmed a `--deqp-watchdog` doesn't help,
+since the hang is inside a single synchronous `vkQueueSubmit` call in the
+same thread deqp-vk's own watchdog can't preempt; (2) read the CTS source
+(`vktApiBlittingTests.cpp`) and found the test genuinely sets
+`layerCount = VK_REMAINING_ARRAY_LAYERS` in `VkImageSubresourceLayers`,
+which `runBlitImage`'s `LayerCount = std::min(src..., dst...)` has never
+recognized (making the effective layer count `0xFFFFFFFF`); and (3)
+temporarily reverted `Image.{h,cpp}`/`ImageOps.cpp` to their pre-E16 state
+in the working tree, rebuilt in place, and reproduced the identical hang,
+confirming it predates this row rather than being introduced by it.
+Rather than silently work around it in the CTS run and say nothing, I
+excluded the matching case patterns from the targeted run, recorded the
+finding (with the reproduction method) in VulkanCTSReport.md as a
+deliberately-left-open follow-up, and restored my own changes before
+continuing.
+
+## Deliberately left open
+
+- `CommandBuffer.cpp`'s `vkCmdCopyImage`/`vkCmdCopyBufferToImage`/
+  `vkCmdCopyImageToBuffer`: same unaudited region-vs-extent shape (only a
+  mip level is range-checked, not offset/extent against either image's
+  declared extent) as `runBlitImage`/`runResolveImage` had, but outside
+  this row's own `{Image,ImageOps}.cpp` file scope.
+- `VK_REMAINING_ARRAY_LAYERS` in `VkImageSubresourceLayers::layerCount`
+  (`runBlitImage`/`runResolveImage`): the hang above, a distinct bug
+  (unbounded loop count) from the one this row closes (an out-of-bounds
+  coordinate), confirmed pre-existing and left as a finding for a future
+  row.
+- `VkPhysicalDeviceVulkan13Features::robustImageAccess` (EntryPoints.cpp):
+  left `VK_FALSE`. Flipping it would claim a device-wide guarantee this
+  row's own narrower, two-file audit does not establish, given the
+  `CommandBuffer.cpp` gap above.
+
+## Validation
+
+- `ninja FeMeVulkanTests` after each Image.{h,cpp}/ImageOps.cpp change,
+  to catch a build break or an existing-test regression before adding any
+  new test.
+- `FeMeVulkanTests`' full suite (309 tests before this row's own new
+  ones, 314 after) run after every commit in this row: no existing test
+  needed a behavior change, confirming the new bounds check is additive
+  for every already-covered in-bounds case.
+- Five new regression tests: `ImageTest.TexelPointerReturnsNullOutOfBounds`/
+  `BlockPointerReturnsNullOutOfBounds` (the `Image.{h,cpp}` layer, both
+  texel and block-grid units, mip level and array layer too, not just
+  X/Y) and `ImageOpsTest.BlitClampsOutOfBoundsSourceRegion`/
+  `BlitDiscardsOutOfBoundsDestinationTexels`/
+  `ResolveDiscardsOutOfBoundsRegion` (the `ImageOps.cpp` caller-level
+  behavior, checking the actual clamped/discarded values are correct, not
+  just that nothing crashes).
+- `ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+  `LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1660/1661
+  passed, 1 unsupported (pre-existing, unrelated), after every commit in
+  this row.
+- Targeted `dEQP-VK.api.copy_and_blit.copy_commands2.{blit_image,
+  resolve_image}.*` CTS re-runs against the real `feme_icd.json`,
+  cross-checked with a temporary revert-and-rebuild (not just assumed
+  unchanged from the diff's shape) to confirm every pre-existing failure
+  in both groups is identical before and after this row. Full breakdown,
+  including the hang finding above, in "Roadmap E16: measured impact" in
+  VulkanCTSReport.md.
