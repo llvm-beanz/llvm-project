@@ -28333,3 +28333,139 @@ against a real `VkInstance`/`VkPhysicalDevice`, and
 `ImageTest.CopyASTCImageToCompatibleUncompressedFormat` (confirmed, per
 above, to actually catch the `runCopyImage` regression rather than
 passing vacuously).
+
+# Roadmap E25: broaden real per-format feature support
+
+## Task
+
+E24's own `deqp-vk` run found that this ICD's CPU runtime only actually
+samples three formats (`R32G32B32A32_FLOAT`/`R8G8B8A8_UNORM`/
+`_UNORM_SRGB`, plus ASTC LDR bridged through them) and that
+`RenderPass.cpp`'s color-attachment table covers a narrower set than
+Vulkan's own mandatory floor -- once `formatFeatureFlags` could honestly
+answer a capability query at all (E24), it just as honestly reported
+most Vulkan-mandatory sampled formats as unsupported, and `deqp-vk`'s
+`api.info.*`/`*astc*` subtrees surfaced that as ~500 and ~12,225 new
+failures respectively. This row's job: close that gap for real, not just
+report it more accurately.
+
+## Scoping against the actual spec, not a guess
+
+Rather than guess which formats are "mandatory", I pulled the Vulkan
+spec's own `formats.adoc` ("Mandatory Format Support" tables) and cross-
+checked every `feme::cpu::ResourceFormat` this ICD already lists against
+its 4-byte/10-12-14-bit/16-bit/32-bit/64-bit tables. Two things fell out
+of that check that changed this row's own scope from what its own
+Roadmap.md text assumed:
+
+1. **The CPU runtime's sampled-image table is genuinely extensible today
+   for every non-integer, non-block-compressed, non-depth/stencil
+   format** -- `R32_FLOAT`/`R32G32_FLOAT`/`R32G32B32_FLOAT` (padding a
+   missing component the way `OpImageFetch` does: color channels `0.0`,
+   alpha `1.0`), `R8G8B8A8_SNORM`, `R16G16B16A16_FLOAT` (needing a hand-
+   written binary16-to-`float` conversion, since this freestanding file
+   cannot assume hardware half-float support), and three more packed-word
+   formats (`R11G11B10_FLOAT`, `R10G10B10A2_UNORM`, `B8G8R8A8_UNORM`).
+   `formatFeatureFlags` (Format.cpp) now advertises `SAMPLED_IMAGE_BIT`/
+   `SAMPLED_IMAGE_FILTER_LINEAR_BIT` for exactly that set.
+2. **A `_UINT`/`_SINT` format cannot be closed this way at all today.**
+   Every `feme.cpu.image.*` entry point in `FeMeRuntimeCPU.c` returns
+   `<4 x float>` -- there is no integer-returning counterpart for a
+   shader's `OpImageFetch`/`OpImageSampleImplicitLod` of an integer image
+   to lower to, so decoding an integer format's bits in the sample table
+   would have nothing correct to hand the result to. This is a real,
+   separate subsystem (a new `feme.cpu.image.load.2d.v4i32`-shaped entry
+   point, its own `ImageCalls.{h,cpp}` builder, and the SPIR-V raising
+   pattern that picks it for an integer image type), not a mechanical
+   table extension -- split off as new roadmap row E26 rather than folded
+   in here, following E15/E20/E22/E24's own precedent of splitting a
+   found-but-separate gap into its own row instead of quietly expanding
+   this one's scope.
+3. **`RenderPass.cpp`'s existing `isSupportedColorAttachmentFormat` set
+   already covers every mandatory-attachment format `ResourceFormat` can
+   represent** (`R32G32B32A32_FLOAT` group, `R8G8B8A8_UNORM`/`_SRGB`,
+   `B8G8R8A8_UNORM`, `R10G10B10A2_UNORM`, `R16G16B16A16_SFLOAT`) --
+   `R11G11B10_FLOAT`/`R8G8B8A8_SNORM` are mandatory *sampled*, not
+   mandatory *attachment*, formats per the spec's own tables, so
+   `feme::graphics`'s pack/unpack table needed no new attachment-side
+   case at all. This narrowed the row's own file scope from the three
+   files its Roadmap.md text guessed (`FeMeRuntimeCPU.c`,
+   `ImageFixture.cpp`, `RenderPass.cpp`) to two
+   (`FeMeRuntimeCPU.c`, `Format.cpp`).
+
+## A real regression found measuring this, not introduced by broadening alone
+
+The first `deqp-vk` measurement of the broadened sample table came back
+*worse* than E24's own baseline (587 failed vs. 561), not better. Before
+concluding the broadening itself was wrong, I checked whether any of the
+*already-supported* three formats (unrelated to this row's own changes)
+also newly failed the same checks -- they did
+(`unsupported_image_usage.optimal.sampled_r8g8b8a8_unorm`/
+`sampled_r32g32b32a32_sfloat`, both sampled since long before this row).
+That ruled out a bug in the new format-table entries themselves and
+pointed at something both old and new formats shared: `Context::
+getFormatProperties` (`vktTestCase.cpp`) chains a `VkFormatProperties3`
+onto its own `VkFormatProperties2` query once it sees a >=1.3-capable
+device (a core Vulkan 1.3 struct, not gated on
+`VK_KHR_format_feature_flags2` actually being in this ICD's advertised
+extension list) -- and `vkGetPhysicalDeviceFormatProperties2`
+(EntryPoints.cpp) never walked its own `pNext` chain at all, so every
+caller that chained one read back an untouched, zero-initialized struct
+regardless of what `formatFeatureFlags` actually computed. This bug
+predates this row entirely (it already broke the original three-format
+set), but broadening the sample table is exactly what made its blast
+radius large enough to show up as a net regression in this row's own
+measurement instead of a wash -- "tightly coupled to the code being
+changed" in the instructions' own sense, so I fixed it here rather than
+filing it separately: `vkGetPhysicalDeviceFormatProperties2` now fills
+`VkFormatProperties3`'s three feature fields from the same result it
+already computes for `VkFormatProperties`. `EntryPointsTest.
+FormatProperties2FillsChainedFormatProperties3` is a new regression test
+for this specifically, confirmed (temporarily reverting the fix and
+re-running) to fail without it.
+
+Roadmap E19's own still-open `VK_KHR_format_feature_flags2` row is *not*
+fully closed by this fix -- the extension name itself is still not
+advertised, and the two 64-bit-only feature-flag ranges
+`VkFormatFeatureFlags2` alone defines remain unset (nothing in this ICD
+implements either capability) -- but its remaining scope is narrower now,
+noted in Roadmap.md rather than left stale.
+
+## What measuring found but this row leaves open
+
+`image_format_properties.{1d,2d,3d}.*` actually went up slightly (320
+vs. E24's 310), not down, even after the `VkFormatProperties3` fix --
+confirmed to be a real, pre-existing, *unrelated* gap: every failure is
+`"Required sample counts not supported"`, and the same failure already
+existed pre-E25 for `r8g8b8a8_unorm`/`r32g32b32a32_sfloat` (sampled since
+before this row). The CTS check requires `VkImageFormatProperties::
+sampleCounts` to cover a mandatory minimum whenever a format supports
+`COLOR_ATTACHMENT_BIT`/`DEPTH_STENCIL_ATTACHMENT_BIT` *at all*, for any
+usage-flag subset being queried -- but `Image.cpp`'s
+`supportedSampleCounts` narrows to `VK_SAMPLE_COUNT_1_BIT` for a usage
+subset (e.g. transfer-only) that names none of
+`SAMPLED`/`STORAGE`/`COLOR_ATTACHMENT`/`DEPTH_STENCIL_ATTACHMENT`
+explicitly. This is a `VkImageFormatProperties::sampleCounts`-computation
+gap, not a format-table one -- genuinely separate work from this row's
+own scope, and left as an unaddressed, documented finding rather than
+folded in (it would require changing what "usage" means to
+`supportedSampleCounts`'s own contract, used elsewhere by `vkCreateImage`
+itself, which is a larger and riskier change than this row's own budget
+justified investigating further without dedicated attention).
+
+Full breakdown recorded in "Roadmap E25: measured impact" in
+VulkanCTSReport.md.
+
+## Verification
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, ccache warm from prior rows in this session's
+existing `./build`) passed in full after every commit: 1638 -> 1647
+total tests, 1646 passed, 1 unsupported throughout (pre-existing,
+unrelated to this row). New coverage: nine new `ImageSamplingTest`
+`feme.cpu.image.load.2d.v4f32` cases (one per newly-decoded format),
+`FormatTest`'s updated `FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope`,
+and `EntryPointsTest.FormatProperties2FillsChainedFormatProperties3` (the
+`VkFormatProperties3` regression test), plus a corrected expectation in
+`EntryPointsTest.ImageFormatPropertiesRejectsUnsupportedUsage` (retargeted
+to an integer format, since `R32_SFLOAT` is now honestly sampled).
