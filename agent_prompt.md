@@ -26,14 +26,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E6 in the roadmap document?
+Can you implement milestone E7 in the roadmap document?
 
-> **`VK_KHR_maintenance6`/`maintenance6`.**
-> `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`/`vkCmdPushDescriptorSet2` are
-> shape-compatible wrappers around the existing
-> `Descriptor.cpp`/`CommandBuffer.cpp` entrypoints, taking a `pNext`-extensible
-> info struct instead of a flat argument list;
-> `maxCombinedImageSamplerDescriptorCount`'s reporting is the one new limit (E2
-> already reserves the field) | E2, E12 (push descriptor sets need F12's
-> `pushDescriptor` groundwork first if implemented together, otherwise stub
-> `PushDescriptorSet` count `0`)
+> **`VK_EXT_subgroup_size_control`/`subgroupSizeControl` +
+> `computeFullSubgroups`.**
+> `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` lets a compute pipeline
+> request an explicit subgroup size; `GroupSize.cpp` (already the home of
+> subgroup-size computation, per its name) needs an override path, and
+> `minSubgroupSize`/`maxSubgroupSize`/`maxComputeWorkgroupSubgroups`/`requiredSubgroupSizeStages`
+> (E2's placeholders) become real once this lands
+
