@@ -133,6 +133,25 @@ struct PhysicalDeviceInfo {
   uint32_t MaxSubgroupSize = 0;
   uint32_t MaxComputeWorkgroupSubgroups = 0;
   VkShaderStageFlags RequiredSubgroupSizeStages = 0;
+
+  /// Roadmap E14 (`VK_EXT_inline_uniform_block`/`inlineUniformBlock`): an
+  /// inline uniform block's storage is a plain, arbitrarily-sized byte blob
+  /// inside `feme::vulkan::DescriptorSet` (see Descriptor.h's file
+  /// comment), so these caps are a policy choice, not a real hardware
+  /// constraint -- simple spec-minimum floors, shared between the
+  /// aggregate `VkPhysicalDeviceVulkan13Properties` case and the dedicated
+  /// `VkPhysicalDeviceInlineUniformBlockProperties` case (EntryPoints.cpp)
+  /// so the two always agree, the same reasoning `MaxPerSetDescriptors`
+  /// above already established for `VkPhysicalDeviceMaintenance3Properties`.
+  /// The `UpdateAfterBind` limits are not modeled here: they stay `0`
+  /// literals at both use sites, matching
+  /// `descriptorBindingInlineUniformBlockUpdateAfterBind` staying
+  /// `VK_FALSE` (no update-after-bind/descriptor-indexing mechanism exists
+  /// in this ICD at all yet).
+  uint32_t MaxInlineUniformBlockSize = 0;
+  uint32_t MaxPerStageDescriptorInlineUniformBlocks = 0;
+  uint32_t MaxDescriptorSetInlineUniformBlocks = 0;
+  uint32_t MaxInlineUniformTotalSize = 0;
 };
 
 /// Computes the one physical device's capabilities from the host this

@@ -133,6 +133,15 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.MaxSubgroupSize = feme::cpu::MaxWaveSize;
   Info.RequiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT;
 
+  // (roadmap E14) `inlineUniformBlock`'s own limits: spec-minimum floors
+  // (see PhysicalDeviceInfo.h's field comment) since the underlying
+  // storage (a plain byte blob per binding, Descriptor.h) has no real
+  // hardware-derived cap to report instead.
+  Info.MaxInlineUniformBlockSize = 256;
+  Info.MaxPerStageDescriptorInlineUniformBlocks = 4;
+  Info.MaxDescriptorSetInlineUniformBlocks = 4;
+  Info.MaxInlineUniformTotalSize = 1024;
+
   VkPhysicalDeviceProperties &Props = Info.Properties;
   // Illustrative per "Loader Integration": "The exact advertised API version
   // is selected during implementation from the core command and CTS
@@ -537,6 +546,14 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // `apiVersion`, so it must be listed here too.
       {VK_KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_EXTENSION_NAME,
        VK_KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_SPEC_VERSION},
+      // (roadmap E14) `VkWriteDescriptorSetInlineUniformBlock` and a
+      // per-binding byte-blob descriptor storage (Descriptor.{h,cpp}) are
+      // implemented; unlike `zero_initialize_workgroup_memory` above, no
+      // CTS case is known to enable this one by name outside apiVersion
+      // 1.3 -- it is listed for the same reason every other row here is:
+      // this ICD genuinely implements what it declares.
+      {VK_EXT_INLINE_UNIFORM_BLOCK_EXTENSION_NAME,
+       VK_EXT_INLINE_UNIFORM_BLOCK_SPEC_VERSION},
   };
   return Extensions;
 }
