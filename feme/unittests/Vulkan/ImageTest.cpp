@@ -49,18 +49,16 @@ protected:
   createBoundImage2D(uint32_t Width, uint32_t Height, VkImageUsageFlags Usage,
                      VkDeviceMemory &OutMemory, uint32_t MipLevels = 1,
                      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
-    return createBoundImage2DWithFormat(VK_FORMAT_R8G8B8A8_UNORM, Width,
-                                        Height, Usage, OutMemory, MipLevels,
-                                        Samples);
+    return createBoundImage2DWithFormat(VK_FORMAT_R8G8B8A8_UNORM, Width, Height,
+                                        Usage, OutMemory, MipLevels, Samples);
   }
 
   /// The same as `createBoundImage2D`, but for an arbitrary \p Format --
   /// used by the roadmap E22 ASTC copy tests below, which need a
   /// block-compressed format `createBoundImage2D` itself does not take.
   VkImage createBoundImage2DWithFormat(
-      VkFormat Format, uint32_t Width, uint32_t Height,
-      VkImageUsageFlags Usage, VkDeviceMemory &OutMemory,
-      uint32_t MipLevels = 1,
+      VkFormat Format, uint32_t Width, uint32_t Height, VkImageUsageFlags Usage,
+      VkDeviceMemory &OutMemory, uint32_t MipLevels = 1,
       VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
     VkImageCreateInfo ImageInfo{};
     ImageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -162,8 +160,7 @@ TEST_F(ImageTest, AcceptsASTCFormat) {
   AllocInfo.allocationSize = Reqs.size;
   AllocInfo.memoryTypeIndex = 0;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
   EXPECT_TRUE(Obj->isBound());
 
@@ -174,9 +171,9 @@ TEST_F(ImageTest, AcceptsASTCFormat) {
 /// `blockPointer` addresses a block-compressed image's storage a whole
 /// block at a time, in block-grid coordinates -- a 6x6 ASTC_4x4 image is a
 /// 2x2 block grid (each block covering a 4x4 texel tile, the last column/
-/// row's block only half-covered by real texels, per `computeSubresourceLayouts`'s
-/// own ceiling-division rounding), so block (1, 1) starts 3 blocks (48
-/// bytes) into the image's 4-block, 64-byte storage.
+/// row's block only half-covered by real texels, per
+/// `computeSubresourceLayouts`'s own ceiling-division rounding), so block (1,
+/// 1) starts 3 blocks (48 bytes) into the image's 4-block, 64-byte storage.
 TEST_F(ImageTest, BlockPointerAddressesBlockGrid) {
   VkImageCreateInfo ImageInfo{};
   ImageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -197,8 +194,7 @@ TEST_F(ImageTest, BlockPointerAddressesBlockGrid) {
   AllocInfo.allocationSize = Reqs.size;
   AllocInfo.memoryTypeIndex = 0;
   VkDeviceMemory Memory = VK_NULL_HANDLE;
-  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
-            VK_SUCCESS);
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory), VK_SUCCESS);
   ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
 
   auto *Base = static_cast<uint8_t *>(Obj->data());
@@ -886,13 +882,13 @@ TEST_F(ImageTest, CopyBufferToASTCImageAndBack) {
 /// block-compressed `Format`).
 TEST_F(ImageTest, CopyASTCImageToImage) {
   VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
-  VkImage SrcImg = createBoundImage2DWithFormat(
-      VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 4, 4, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-      SrcMemory);
+  VkImage SrcImg =
+      createBoundImage2DWithFormat(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 4, 4,
+                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT, SrcMemory);
   VkDeviceMemory DstMemory = VK_NULL_HANDLE;
-  VkImage DstImg = createBoundImage2DWithFormat(
-      VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 4, 4, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-      DstMemory);
+  VkImage DstImg =
+      createBoundImage2DWithFormat(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 4, 4,
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT, DstMemory);
 
   auto *SrcObj = fromHandle<Image>(SrcImg);
   ASSERT_EQ(SrcObj->sizeInBytes(), 16u);
@@ -925,6 +921,70 @@ TEST_F(ImageTest, CopyASTCImageToImage) {
   auto *DstObj = fromHandle<Image>(DstImg);
   EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
             0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
+TEST_F(ImageTest, CopyASTCImageToCompatibleUncompressedFormat) {
+  // Roadmap E24 regression: a single ASTC block (16 bytes) and a single
+  // `R32G32B32A32_UINT` texel (16 bytes) are the same size, so real Vulkan
+  // permits copying between them (`vkCmdCopyImage`'s "compatible formats"
+  // rule) even though only one side is block-compressed --
+  // `dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image.all_formats.
+  // color.2d_to_1d.astc_10x10_srgb_block.r32g32b32a32_uint.*` hit exactly
+  // this shape once E24 let CTS create the images at all. `runCopyImage`
+  // (CommandBuffer.cpp) used to derive a single `Compressed` flag from the
+  // source alone and apply it to both sides, asserting inside
+  // `Dst->blockPointer` the moment the destination was not actually
+  // block-compressed.
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  VkImage SrcImg =
+      createBoundImage2DWithFormat(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 4, 4,
+                                   VK_IMAGE_USAGE_TRANSFER_SRC_BIT, SrcMemory);
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  VkImage DstImg =
+      createBoundImage2DWithFormat(VK_FORMAT_R32G32B32A32_UINT, 1, 1,
+                                   VK_IMAGE_USAGE_TRANSFER_DST_BIT, DstMemory);
+
+  auto *SrcObj = fromHandle<Image>(SrcImg);
+  ASSERT_EQ(SrcObj->sizeInBytes(), 16u);
+  for (uint32_t I = 0; I != SrcObj->sizeInBytes(); ++I)
+    static_cast<uint8_t *>(SrcObj->data())[I] = static_cast<uint8_t>(I + 5);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  // One whole 4x4 ASTC block <-> one `R32G32B32A32_UINT` texel: the
+  // region's extent is always expressed in the source image's own
+  // texel/block units (real Vulkan's rule for a compressed/uncompressed
+  // copy), so `{4, 4, 1}` here names exactly one source block.
+  Region.extent = {4, 4, 1};
+  vkCmdCopyImage(CmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DstImg,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  auto *DstObj = fromHandle<Image>(DstImg);
+  ASSERT_EQ(DstObj->sizeInBytes(), 16u);
+  EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), 16u), 0);
 
   vkDestroyCommandPool(Device, Pool, nullptr);
   vkDestroyImage(Device, SrcImg, nullptr);

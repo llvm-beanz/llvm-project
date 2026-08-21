@@ -753,7 +753,19 @@ Error runCopyImage(Image *Src, Image *Dst,
   if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "image copy source/destination is not bound");
-  bool Compressed = feme::cpu::isBlockCompressedFormat(Src->format());
+  // Roadmap E24: `SrcCompressed`/`DstCompressed` are now tracked
+  // independently -- a single `Compressed` flag derived from `Src` alone
+  // and applied to *both* sides asserted inside `Dst->blockPointer` the
+  // moment a real `dEQP-VK.api.copy_and_blit.*` case (unreachable before
+  // E24 made `vkGetPhysicalDeviceImageFormatProperties` answer honestly
+  // enough for CTS to create a compressed/uncompressed image pair at all)
+  // copied a block-compressed source into an uncompressed destination of
+  // matching block/texel byte size (e.g. one ASTC block <-> one
+  // `R32G32B32A32_UINT` texel, both 16 bytes) -- a real Vulkan-legal copy
+  // this ICD's own "compatible formats" support (this file's own comment)
+  // already claimed to allow.
+  bool SrcCompressed = feme::cpu::isBlockCompressedFormat(Src->format());
+  bool DstCompressed = feme::cpu::isBlockCompressedFormat(Dst->format());
   uint32_t UnitSize = bytesPerBlock(Src->format());
   if (UnitSize != bytesPerBlock(Dst->format()))
     return createStringError(inconvertibleErrorCode(),
@@ -763,8 +775,16 @@ Error runCopyImage(Image *Src, Image *Dst,
     return createStringError(inconvertibleErrorCode(),
                              "vkCmdCopyImage between images of differing "
                              "sample counts is not supported");
-  uint32_t BlockW = blockWidth(Src->format());
-  uint32_t BlockH = blockHeight(Src->format());
+  // `Region.extent`/`srcOffset` are always in the source image's own
+  // texel/block units (Vulkan's own rule for a copy between a compressed
+  // and an uncompressed format); `dstOffset` is in the destination's own
+  // units, which only differ from the source's when the two block shapes
+  // differ (e.g. a block-compressed source paired with an uncompressed,
+  // or differently-shaped block-compressed, destination).
+  uint32_t SrcBlockW = blockWidth(Src->format());
+  uint32_t SrcBlockH = blockHeight(Src->format());
+  uint32_t DstBlockW = blockWidth(Dst->format());
+  uint32_t DstBlockH = blockHeight(Dst->format());
   // Every sample of one texel is stored contiguously
   // (`FemeImageSubresourceLayout::SampleStride == TexelSize`, see Image.cpp's
   // `computeSubresourceLayouts`), so one row's `SampleCount` samples of a
@@ -779,18 +799,18 @@ Error runCopyImage(Image *Src, Image *Dst,
         Region.dstSubresource.mipLevel >= Dst->mipLevels())
       return createStringError(inconvertibleErrorCode(),
                                "image copy mip level is out of range");
-    uint32_t WidthUnits = (Region.extent.width + BlockW - 1) / BlockW;
-    uint32_t HeightUnits = (Region.extent.height + BlockH - 1) / BlockH;
-    uint32_t SrcOffsetXUnits = uint32_t(Region.srcOffset.x) / BlockW;
-    uint32_t SrcOffsetYUnits = uint32_t(Region.srcOffset.y) / BlockH;
-    uint32_t DstOffsetXUnits = uint32_t(Region.dstOffset.x) / BlockW;
-    uint32_t DstOffsetYUnits = uint32_t(Region.dstOffset.y) / BlockH;
+    uint32_t WidthUnits = (Region.extent.width + SrcBlockW - 1) / SrcBlockW;
+    uint32_t HeightUnits = (Region.extent.height + SrcBlockH - 1) / SrcBlockH;
+    uint32_t SrcOffsetXUnits = uint32_t(Region.srcOffset.x) / SrcBlockW;
+    uint32_t SrcOffsetYUnits = uint32_t(Region.srcOffset.y) / SrcBlockH;
+    uint32_t DstOffsetXUnits = uint32_t(Region.dstOffset.x) / DstBlockW;
+    uint32_t DstOffsetYUnits = uint32_t(Region.dstOffset.y) / DstBlockH;
     uint64_t RowBytes = uint64_t(WidthUnits) * UnitSize * SampleCount;
     for (uint32_t Layer = 0; Layer != Region.srcSubresource.layerCount;
          ++Layer) {
       for (uint32_t Z = 0; Z != Region.extent.depth; ++Z) {
         for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
-          void *SrcRow = Compressed
+          void *SrcRow = SrcCompressed
                              ? Src->blockPointer(
                                    Region.srcSubresource.mipLevel,
                                    Region.srcSubresource.baseArrayLayer + Layer,
@@ -801,7 +821,7 @@ Error runCopyImage(Image *Src, Image *Dst,
                                    Region.srcSubresource.baseArrayLayer + Layer,
                                    SrcOffsetXUnits, SrcOffsetYUnits + Y,
                                    Region.srcOffset.z + Z);
-          void *DstRow = Compressed
+          void *DstRow = DstCompressed
                              ? Dst->blockPointer(
                                    Region.dstSubresource.mipLevel,
                                    Region.dstSubresource.baseArrayLayer + Layer,
