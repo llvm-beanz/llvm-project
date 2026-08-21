@@ -2139,6 +2139,23 @@ block-aligned extent and a bytes-per-block stride first. Tracked as part
 of roadmap E20's scope rather than a narrowing of this milestone, since no
 compressed format was ever in V5's own goals above.
 
+**Update (roadmap E20, closed):** that block-aligned layout rework has
+landed. `computeSubresourceLayouts` (Image.cpp) now takes a block
+width/height/bytes-per-block triple (`Format.h`'s `blockWidth`/
+`blockHeight`/`bytesPerBlock`, which fall back to `{1, 1,
+formatElementSize(Format)}` for a non-block-compressed format) instead of
+a bare texel size, so the same formula this milestone's own per-texel math
+used now generalizes to either family without special-casing. This is
+still not enough to accept a block-compressed image, though: `Image::
+texelPointer` (and every `ImageOps.cpp`/`CommandBuffer.cpp` caller of it)
+still addresses one texel at a time, which is meaningless for compressed
+storage, so `vkCreateImage` keeps rejecting every ASTC `VkFormat` outright
+-- the same "object model first, shader/copy consumption later" boundary
+this milestone's own R30 follow-up already drew for image/sampler
+descriptors, now drawn again one layer down. Roadmap E22 is the follow-up
+that reworks the copy/blit/resolve paths to address a block-compressed
+image per block and removes that rejection.
+
 ### V6: Graphics queue and basic rendering
 
 The first milestone that advertises `VK_QUEUE_GRAPHICS_BIT`, and therefore the
