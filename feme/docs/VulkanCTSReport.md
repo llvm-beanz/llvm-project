@@ -1786,6 +1786,77 @@ confirms the per-lane extend/multiply/add/saturate sequence
 `SPIRVToLLVMPatterns.cpp`) is correct for every shape CTS actually
 exercises against it, not merely plausible by inspection.
 
+## Roadmap E9: measured impact
+
+Roadmap E9 (`VK_EXT_pipeline_creation_cache_control`/
+`pipelineCreationCacheControl`) is a flag-only addition, exactly as its
+own premise anticipated: `vkCreateComputePipelines`/
+`vkCreateGraphicsPipelines` (Pipeline.cpp/GraphicsPipeline.cpp) now honor
+`VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` on a cache
+miss (or with no cache at all), reporting `VK_PIPELINE_COMPILE_REQUIRED`
+and leaving that pipeline null instead of compiling for real; a
+`VkPipelineCache` created with `VK_PIPELINE_CACHE_CREATE_EXTERNALLY_
+SYNCHRONIZED_BIT` (PipelineCache.{h,cpp}) skips the new internal mutex
+guarding `lookup`/`insert`/`lookupGraphics`/`insertGraphics` entirely.
+`pipelineCreationCacheControl` now reads `VK_TRUE` from both the
+aggregate `VkPhysicalDeviceVulkan13Features` struct and a new dedicated
+`VkPhysicalDevicePipelineCreationCacheControlFeatures` struct.
+`getSupportedDeviceExtensions` gained
+`VK_EXT_pipeline_creation_cache_control` itself, the same "CTS enables it
+by name regardless of `apiVersion`" reason E3/E5/E6/E8 already
+established.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.pipeline_creation_cache_control_features` | `Pass` (previously `Fail`, per D1/D3's own `api.info.*` bucket -- see "Roadmap D3: measured impact" above) |
+| `dEQP-VK.api.info.vulkan1p3.feature_extensions_consistency` | `Pass`, confirming the new dedicated `VkPhysicalDevicePipelineCreationCacheControlFeatures` struct agrees with the aggregate `VkPhysicalDeviceVulkan13Features` case rather than repeating E2's own first-draft regression |
+| `dEQP-VK.pipeline.monolithic.creation_cache_control.*` (18 total) | 1 `Pass`, 17 `InternalError` |
+
+**The single `Pass`,
+`creation_cache_control.compute_pipelines.single_pipeline_no_compile`, is
+this row's own actual scope working correctly:** a lone
+`VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` compute
+pipeline creation with no cache reports
+`VK_PIPELINE_COMPILE_REQUIRED`, exactly as expected. **The 17
+`InternalError` cases are two pre-existing, out-of-scope gaps, neither
+one this row's own bits:**
+
+- 8 of the 9 `compute_pipelines.*` cases beyond `single_pipeline_no_compile`
+  fail identically, with `error: 'llvm.getelementptr' op operand #0 must
+  be LLVM pointer type or LLVM dialect-compatible vector of LLVM
+  pointer type, but got 'vector<3xi32>'` -- this group's shared compute
+  shader indexes an output buffer by `gl_GlobalInvocationID.x`, and this
+  ICD's SIMD-widened dispatch lowering produces a vector-of-addresses GEP
+  base this particular access pattern does not expect, the same
+  "resource handle the FeMe CPU target cannot normalize" class of gap
+  E6's own measured-impact section already found (73 of that section's
+  77 failures). It reproduces identically whether or not
+  `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` is present
+  on any `VkComputePipelineCreateInfo` in the batch: the batch/derivative
+  tests this affects only differ from the passing case in *how many*
+  pipelines they create and in what order, never in this row's own flag
+  handling.
+- All 9 `graphics_pipelines.*` cases, including
+  `single_pipeline_no_compile` itself, fail with `vkCreateGraphicsPipelines:
+  a graphics pipeline needs both a vertex and a fragment stage` --
+  `compileGraphicsPipeline` (GraphicsPipeline.cpp) has always required
+  both stages to be present (a pre-existing, unrelated structural
+  requirement of the monolithic graphics-pipeline-creation path, not
+  something this row narrows or widens), and this CTS group's own
+  graphics pipelines are deliberately minimal (built only to exercise
+  cache-control bookkeeping, not to render), so every one of them is
+  rejected before this row's own `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_
+  COMPILE_REQUIRED_BIT` check is ever reached.
+
+Neither gap is a regression this row introduces -- both reproduce for any
+compute/graphics pipeline creation through this ICD today, cache-control
+bits or not -- and closing either is out of this row's own scope (a
+CPU-target SIMD-lowering limitation and a monolithic-pipeline single-stage
+restriction, respectively, tracked separately from `VK_EXT_pipeline_
+creation_cache_control`'s own two bits).
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
