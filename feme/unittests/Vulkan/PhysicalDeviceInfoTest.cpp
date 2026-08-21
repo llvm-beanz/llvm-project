@@ -105,32 +105,34 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
   EXPECT_TRUE(Flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 }
 
-TEST(PhysicalDeviceInfo, OnlyRobustBufferAccessAndDualSrcBlendAreAdvertised) {
-  // (V4/C4) `robustBufferAccess`/`dualSrcBlend` are the only core features
-  // this milestone can honestly claim (see PhysicalDeviceInfo.cpp's
-  // comment); every other `VkBool32` stays false, since nothing else has
-  // been implemented that could back one yet.
+TEST(PhysicalDeviceInfo, OnlyRobustBufferAccessDualSrcBlendAndASTCLDRAreAdvertised) {
+  // (V4/C4/E22) `robustBufferAccess`/`dualSrcBlend`/
+  // `textureCompressionASTC_LDR` are the only core features this
+  // milestone can honestly claim (see PhysicalDeviceInfo.cpp's comment);
+  // every other `VkBool32` stays false, since nothing else has been
+  // implemented that could back one yet.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_EQ(Info.Features.robustBufferAccess, VK_TRUE);
   EXPECT_EQ(Info.Features.dualSrcBlend, VK_TRUE);
+  EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_TRUE);
 
   VkPhysicalDeviceFeatures Cleared = Info.Features;
   Cleared.robustBufferAccess = VK_FALSE;
   Cleared.dualSrcBlend = VK_FALSE;
+  Cleared.textureCompressionASTC_LDR = VK_FALSE;
   VkPhysicalDeviceFeatures Zero{};
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
 
-TEST(PhysicalDeviceInfo, TextureCompressionASTCLDRStaysUnadvertised) {
-  // Roadmap E20: `Format.h`/`Image.{h,cpp}`/`ASTCDecode.h` now recognize
-  // and can decode LDR ASTC data, but `vkCreateImage` still rejects
-  // every ASTC `VkFormat` outright (see Image.h's file comment), so this
-  // Vulkan 1.0 core feature bit stays honestly `VK_FALSE` -- now tracked
-  // explicitly (PhysicalDeviceInfo.cpp) rather than merely defaulting to
-  // it via zero-initialization, the same way `textureCompressionASTC_HDR`
-  // is tracked in EntryPoints.cpp's aggregate feature struct case.
+TEST(PhysicalDeviceInfo, TextureCompressionASTCLDRIsAdvertised) {
+  // Roadmap E22: `vkCreateImage` now accepts a block-compressed
+  // `VkFormat`, and `ImageOps.cpp`'s `runBlitImage` decodes an LDR ASTC
+  // source through `ASTCDecode.h`'s `decodeASTCBlock` -- this Vulkan 1.0
+  // core feature bit (tracked explicitly since roadmap E20, the same way
+  // `textureCompressionASTC_HDR` is tracked in EntryPoints.cpp's
+  // aggregate feature struct case) can now honestly flip to `VK_TRUE`.
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
-  EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_FALSE);
+  EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_TRUE);
 }
 
 TEST(PhysicalDeviceInfo, DeviceAndPipelineCacheUUIDsDiffer) {

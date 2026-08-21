@@ -348,21 +348,29 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.Features = VkPhysicalDeviceFeatures{};
   Info.Features.robustBufferAccess = VK_TRUE;
   Info.Features.dualSrcBlend = VK_TRUE;
-  // Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode"):
-  // this Vulkan 1.0 core feature bit was previously left implicitly
-  // false by the zero-initialization above rather than tracked
-  // explicitly (unlike `textureCompressionASTC_HDR`'s own dedicated
-  // line in EntryPoints.cpp's `VkPhysicalDeviceVulkan13Features` case),
-  // which is what let it go unnoticed until roadmap E15's investigation
-  // -- see Vulkan14FeatureInventory.md's own hand-added row. `Format.h`/
-  // `Image.{h,cpp}` now recognize every LDR ASTC `VkFormat` and lay out
-  // its block-based subresource size correctly, and `ASTCDecode.h`'s
-  // `decodeASTCBlock` is a real, tested decoder -- but `vkCreateImage`
-  // still rejects every one of those formats outright (see Image.h's
-  // file comment), and nothing calls `decodeASTCBlock` from any live
-  // copy/sampling path yet, so this bit stays honestly `VK_FALSE` until
-  // a follow-up roadmap row wires the rest of the pipeline through.
-  Info.Features.textureCompressionASTC_LDR = VK_FALSE;
+  // Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode")
+  // first tracked this Vulkan 1.0 core feature bit explicitly (previously
+  // left implicitly false by the zero-initialization above, unlike
+  // `textureCompressionASTC_HDR`'s own dedicated line in EntryPoints.cpp's
+  // `VkPhysicalDeviceVulkan13Features` case -- see
+  // Vulkan14FeatureInventory.md's own hand-added row), but kept it
+  // `VK_FALSE`: `vkCreateImage` rejected every LDR ASTC `VkFormat`
+  // outright, and nothing called `ASTCDecode.h`'s `decodeASTCBlock` from
+  // any live copy/sampling path. Roadmap E22 closed both gaps
+  // (`vkCreateImage` accepts a block-compressed format, and
+  // `ImageOps.cpp`'s `runBlitImage` decodes an LDR ASTC source through
+  // `decodeASTCBlock`), so this can now honestly flip to `VK_TRUE` -- the
+  // same "advertise once the pipeline actually works, not before" gate
+  // this ICD's own precedent set for `textureCompressionASTC_LDR`'s
+  // sibling bits. `vkCmdCopyImage`/`vkCmdCopyBufferToImage`/
+  // `vkCmdCopyImageToBuffer` (`CommandBuffer.cpp`) address a
+  // block-compressed image a whole block at a time; a shader's own
+  // *sampling* of one still reads all-zero (the separate CPU runtime,
+  // `feme/runtime/CPU/FeMeRuntimeCPU.c`, has no block-compressed decode of
+  // its own yet -- a real gap, but a safe one, not a crash or silent
+  // corruption -- see Image.h's file comment), which is a real content
+  // gap this milestone's own file scope did not include closing.
+  Info.Features.textureCompressionASTC_LDR = VK_TRUE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;
