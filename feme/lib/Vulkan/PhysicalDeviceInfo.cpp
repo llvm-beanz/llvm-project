@@ -348,6 +348,21 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.Features = VkPhysicalDeviceFeatures{};
   Info.Features.robustBufferAccess = VK_TRUE;
   Info.Features.dualSrcBlend = VK_TRUE;
+  // Roadmap E20 ("Block-compressed image groundwork + ASTC LDR decode"):
+  // this Vulkan 1.0 core feature bit was previously left implicitly
+  // false by the zero-initialization above rather than tracked
+  // explicitly (unlike `textureCompressionASTC_HDR`'s own dedicated
+  // line in EntryPoints.cpp's `VkPhysicalDeviceVulkan13Features` case),
+  // which is what let it go unnoticed until roadmap E15's investigation
+  // -- see Vulkan14FeatureInventory.md's own hand-added row. `Format.h`/
+  // `Image.{h,cpp}` now recognize every LDR ASTC `VkFormat` and lay out
+  // its block-based subresource size correctly, and `ASTCDecode.h`'s
+  // `decodeASTCBlock` is a real, tested decoder -- but `vkCreateImage`
+  // still rejects every one of those formats outright (see Image.h's
+  // file comment), and nothing calls `decodeASTCBlock` from any live
+  // copy/sampling path yet, so this bit stays honestly `VK_FALSE` until
+  // a follow-up roadmap row wires the rest of the pipeline through.
+  Info.Features.textureCompressionASTC_LDR = VK_FALSE;
 
   VkPhysicalDeviceMemoryProperties &MemProps = Info.MemoryProperties;
   MemProps.memoryTypeCount = 1;

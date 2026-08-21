@@ -121,6 +121,18 @@ TEST(PhysicalDeviceInfo, OnlyRobustBufferAccessAndDualSrcBlendAreAdvertised) {
   EXPECT_EQ(std::memcmp(&Cleared, &Zero, sizeof(Zero)), 0);
 }
 
+TEST(PhysicalDeviceInfo, TextureCompressionASTCLDRStaysUnadvertised) {
+  // Roadmap E20: `Format.h`/`Image.{h,cpp}`/`ASTCDecode.h` now recognize
+  // and can decode LDR ASTC data, but `vkCreateImage` still rejects
+  // every ASTC `VkFormat` outright (see Image.h's file comment), so this
+  // Vulkan 1.0 core feature bit stays honestly `VK_FALSE` -- now tracked
+  // explicitly (PhysicalDeviceInfo.cpp) rather than merely defaulting to
+  // it via zero-initialization, the same way `textureCompressionASTC_HDR`
+  // is tracked in EntryPoints.cpp's aggregate feature struct case.
+  PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
+  EXPECT_EQ(Info.Features.textureCompressionASTC_LDR, VK_FALSE);
+}
+
 TEST(PhysicalDeviceInfo, DeviceAndPipelineCacheUUIDsDiffer) {
   PhysicalDeviceInfo Info = computePhysicalDeviceInfo();
   EXPECT_NE(std::memcmp(Info.DeviceUUID, Info.Properties.pipelineCacheUUID,
