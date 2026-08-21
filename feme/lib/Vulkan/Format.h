@@ -97,8 +97,10 @@ bool isTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
 /// code path rather than a blanket guess: `isSupportedColorAttachmentFormat`/
 /// `isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat`
 /// (RenderPass.h) for the two attachment bits, the CPU runtime's own
-/// three-format sampling table (`femeRTImageFormatElementSize`,
-/// feme/runtime/CPU/FeMeRuntimeCPU.c) -- plus the ASTC LDR bridge
+/// sampling table (`femeRTImageFormatElementSize`/`femeRTUnpackImageTexel`,
+/// feme/runtime/CPU/FeMeRuntimeCPU.c, broadened by roadmap E25 from its
+/// original three-format scope to every non-integer, non-block-compressed,
+/// non-depth/stencil format) -- plus the ASTC LDR bridge
 /// `materializeImageDescriptor` (CommandBuffer.cpp) builds on top of it --
 /// for the two sampled-image bits, and `ImageOps.cpp`'s `runBlitImage`
 /// block-compressed-destination/HDR-ASTC-source rejections for the two

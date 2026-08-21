@@ -252,24 +252,33 @@ TEST(FormatTest, FormatFeatureFlagsEveryRecognizedFormatTransfers) {
 }
 
 TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
-  // Roadmap E24: only the three formats the CPU runtime's texel-unpack
-  // table (femeRTImageFormatElementSize, FeMeRuntimeCPU.c) implements, plus
-  // every ASTC LDR format (bridged to one of those three by
+  // Roadmap E25: every non-integer, non-block-compressed,
+  // non-depth/stencil format the CPU runtime's texel-unpack table
+  // (femeRTImageFormatElementSize/femeRTUnpackImageTexel, FeMeRuntimeCPU.c)
+  // now implements, plus every ASTC LDR format (bridged to one of those by
   // materializeImageDescriptor, roadmap E23), can actually be sampled.
   for (ResourceFormat Format :
-       {ResourceFormat::R32G32B32A32_FLOAT, ResourceFormat::R8G8B8A8_UNORM,
-        ResourceFormat::R8G8B8A8_UNORM_SRGB, ResourceFormat::ASTC_4x4_UNORM,
-        ResourceFormat::ASTC_12x12_SRGB}) {
+       {ResourceFormat::R32_FLOAT, ResourceFormat::R32G32_FLOAT,
+        ResourceFormat::R32G32B32_FLOAT, ResourceFormat::R32G32B32A32_FLOAT,
+        ResourceFormat::R8G8B8A8_UNORM, ResourceFormat::R8G8B8A8_SNORM,
+        ResourceFormat::R8G8B8A8_UNORM_SRGB,
+        ResourceFormat::R16G16B16A16_FLOAT, ResourceFormat::R11G11B10_FLOAT,
+        ResourceFormat::R10G10B10A2_UNORM, ResourceFormat::B8G8R8A8_UNORM,
+        ResourceFormat::A8_UNORM, ResourceFormat::A1B5G5R5_UNORM,
+        ResourceFormat::ASTC_4x4_UNORM, ResourceFormat::ASTC_12x12_SRGB}) {
     VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
     EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
   }
   // An HDR ASTC format samples as all-zero (the RGBA8 bridge is LDR-only),
-  // so it is honestly left unset, same as every other unimplemented
-  // sampled format.
+  // and an integer format has no `feme.cpu.image.*` entry point that could
+  // consume a decoded value yet (roadmap E25's own scope note,
+  // FeMeRuntimeCPU.c), so both are honestly left unset, same as every
+  // other unimplemented sampled format.
   for (ResourceFormat Format :
-       {ResourceFormat::R8G8B8A8_SNORM, ResourceFormat::R16G16B16A16_FLOAT,
-        ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
+       {ResourceFormat::R32G32B32A32_UINT, ResourceFormat::R8G8B8A8_UINT,
+        ResourceFormat::R16G16B16A16_UINT, ResourceFormat::D32_FLOAT,
+        ResourceFormat::ASTC_4x4_SFLOAT}) {
     EXPECT_FALSE(formatFeatureFlags(Format) &
                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
   }

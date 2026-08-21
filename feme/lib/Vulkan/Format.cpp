@@ -430,19 +430,40 @@ VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
   if (!BlockCompressed)
     Flags |= VK_FORMAT_FEATURE_BLIT_DST_BIT;
 
-  // Only the three formats the CPU runtime's texel-unpack table
-  // (`femeRTImageFormatElementSize`, feme/runtime/CPU/FeMeRuntimeCPU.c)
-  // implements can actually be sampled by a shader; every ASTC LDR format
-  // is sampled too, since `materializeImageDescriptor` (CommandBuffer.cpp)
-  // decodes one into `R8G8B8A8_UNORM`/`_UNORM_SRGB` before the runtime ever
-  // sees it (roadmap E23). An HDR ASTC format samples as all-zero (that
-  // bridge is LDR-only), so it is honestly left unset like every other
-  // unimplemented format.
-  if (Format == ResourceFormat::R32G32B32A32_FLOAT ||
-      Format == ResourceFormat::R8G8B8A8_UNORM ||
-      Format == ResourceFormat::R8G8B8A8_UNORM_SRGB || ASTCLdr)
+  // The formats the CPU runtime's texel-unpack table
+  // (`femeRTImageFormatElementSize`/`femeRTUnpackImageTexel`,
+  // feme/runtime/CPU/FeMeRuntimeCPU.c) implements can actually be sampled
+  // by a shader; every ASTC LDR format is sampled too, since
+  // `materializeImageDescriptor` (CommandBuffer.cpp) decodes one into
+  // `R8G8B8A8_UNORM`/`_UNORM_SRGB` before the runtime ever sees it (roadmap
+  // E23). An HDR ASTC format samples as all-zero (that bridge is LDR-only)
+  // and a `_UINT`/`_SINT` format is not in this list at all -- no
+  // `feme.cpu.image.*` entry point returns an integer vector yet (roadmap
+  // E25's own scope note, FeMeRuntimeCPU.c) -- so both are honestly left
+  // unset like every other unimplemented format.
+  switch (Format) {
+  case ResourceFormat::R32_FLOAT:
+  case ResourceFormat::R32G32_FLOAT:
+  case ResourceFormat::R32G32B32_FLOAT:
+  case ResourceFormat::R32G32B32A32_FLOAT:
+  case ResourceFormat::R8G8B8A8_UNORM:
+  case ResourceFormat::R8G8B8A8_SNORM:
+  case ResourceFormat::R8G8B8A8_UNORM_SRGB:
+  case ResourceFormat::R16G16B16A16_FLOAT:
+  case ResourceFormat::R11G11B10_FLOAT:
+  case ResourceFormat::R10G10B10A2_UNORM:
+  case ResourceFormat::B8G8R8A8_UNORM:
+  case ResourceFormat::A8_UNORM:
+  case ResourceFormat::A1B5G5R5_UNORM:
     Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    break;
+  default:
+    if (ASTCLdr)
+      Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+               VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+    break;
+  }
 
   // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is deliberately never set: no
   // format has a `feme.cpu.image.store.*` runtime helper yet (see "V5:
