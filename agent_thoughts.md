@@ -27975,3 +27975,199 @@ whose own premise this row inverted). The two targeted `dEQP-VK` subsets
 (`api.info.*`, 10,484 cases; `*astc*`, 98,927 cases) were re-run and their
 full breakdown, including the E24 root-cause investigation, is recorded
 in "Roadmap E22: measured impact" in VulkanCTSReport.md.
+
+# Roadmap E23: ASTC LDR shader-sampling wiring
+
+## The gap, restated precisely
+
+E22's own closing note split this off exactly right: `vkCreateImage`,
+`vkCmdCopyImage`/`vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`, and
+`vkCmdBlitImage` all genuinely handle a block-compressed `Image` after
+E22, but none of those is the path a compute shader's own
+`OpImageSample`/`OpImageFetch` takes. That path is
+`CommandBuffer.cpp`'s `materializeImageDescriptor`, which builds the
+`feme::cpu::FemeImageDescriptor` the CPU runtime
+(`feme/runtime/CPU/FeMeRuntimeCPU.c`) reads from inside a compiled
+shader. Before this row, it handed that runtime a raw `Image::data()`
+pointer and the image's own (possibly ASTC) `ResourceFormat` verbatim --
+and that separate C module's `femeRTImageFormatElementSize` returns 0 for
+every ASTC format, so `femeRTFetchTexel2D` safely bails out to an
+all-zero result rather than misinterpreting compressed bytes as
+uncompressed ones. Safe, but not real data.
+
+## Choosing between the row's own two options
+
+The row's own text offered two options: port a second decoder into the
+C runtime, or bridge `materializeImageDescriptor` back into the existing
+C++ `ASTCDecode.h` before a shader ever binds the image. I chose the
+second, for a few reasons that became clearer while reading both files
+side by side:
+
+- `ASTCDecode.cpp` is a real, from-specification bitstream decoder --
+  integer-sequence (bit/trit/quint) decoding, every color-endpoint mode,
+  1-4 partitions, dual-plane weights, void-extent blocks -- already
+  covered by `ASTCDecodeTest.cpp`'s dozens of hand-verified cases (E20's
+  own commit even found and fixed a real ISE-range-shape bug via that
+  test suite). Porting an equivalent decoder into
+  `feme/runtime/CPU/FeMeRuntimeCPU.c` -- a plain-C file with no
+  dependency on any C++ code in this tree, by design (this file's own
+  header comment; it's what a compiled shader's object file links
+  against directly) -- would mean either duplicating that whole decoder
+  in C (doubling the surface area needing its own independent test
+  coverage to trust, and now needing to stay in sync with the C++ one
+  forever), or breaking the "plain C, no C++ dependency" invariant that
+  module was deliberately built around. Neither felt like the right
+  tradeoff for what turns out to be a bounded, one-time cost the other
+  option avoids entirely.
+- The bridging option, by contrast, needed zero changes to
+  `FeMeRuntimeCPU.c`. Its `R8G8B8A8_UNORM`/`_UNORM_SRGB` unpack case
+  already reads exactly the per-texel RGBA8 shape a decoded ASTC image
+  becomes once `materializeImageDescriptor` runs it through
+  `feme::vulkan::decodeASTCBlock` ahead of time. The runtime doesn't need
+  to know ASTC exists at all -- it just sees a slightly unusual
+  `R8G8B8A8_UNORM` image, which it already handles correctly.
+- This also matches the precedent E22's own `runBlitImage` already set:
+  decode an LDR ASTC source's fetched texels through `decodeASTCBlock`
+  and reinterpret the result as `R8G8B8A8_UNORM` for the rest of that
+  function's existing per-format unpack/pack pipeline, rather than
+  teaching every consumer format-specific ASTC-awareness.
+
+## Design: decode whole mip levels once per dispatch, not once per texel
+
+`runBlitImage`'s own ASTC-source path decodes one block per *sampled*
+texel, on the fly, inside its own per-texel resample loop -- reasonable
+there, since a blit only ever touches the region a `VkImageBlit`
+actually names. A compute shader's image binding has no such
+region-of-interest ahead of time: any invocation may fetch any texel of
+the bound view. So `decodeASTCImageForSampling` (new, file-local to
+`CommandBuffer.cpp`) decodes every block of every *sampled* mip level
+(respecting the view's own base-mip/level-count subrange, the same as
+the pre-existing per-texel path already did) exactly once, when the
+descriptor set is bound, rather than redundantly on every texel fetch a
+dispatch might perform. The result is a per-texel RGBA8 buffer with its
+own from-scratch `FemeImageSubresourceLayout` table (tightly packed,
+`width * 4`-byte rows -- no relationship to the source image's own
+block-based layout), both owned by the dispatch's
+`MaterializedBoundResources` for exactly as long as every other
+descriptor array it already owns.
+
+I initially wrote `materializeImageDescriptor` calling the decode helper
+twice -- once to move its `Texels` field into one storage vector, once
+more to move `MipLayouts` into another -- before catching that this
+silently decodes the whole image twice for no reason. Fixed by holding
+the single `DecodedASTCImage` return value in a local and moving each
+field out of it once. Caught this myself while re-reading the diff
+before running anything, not via a test failure -- worth calling out
+since it's exactly the kind of bug a passing test suite would never
+surface (both calls produce the same correct bytes, just twice as much
+work), the same category of issue this project's own review conventions
+ask to watch for.
+
+## sRGB handling: a genuinely reusable existing distinction, not a new one
+
+An ASTC `_SRGB` block format decodes through the identical
+`decodeASTCBlock` function as its `_UNORM` counterpart -- the ASTC
+specification's own color-endpoint-mode decode makes no UNORM/SRGB
+distinction; that distinction is purely how the *consumer* interprets
+the resulting bytes (apply the sRGB-to-linear curve on read, or don't).
+`FeMeRuntimeCPU.c` already draws exactly this distinction for
+`R8G8B8A8_UNORM` vs. `R8G8B8A8_UNORM_SRGB` (case 17 in
+`femeRTUnpackImageTexel` applies `femeRTSRGBToLinear` per channel; case
+13 doesn't). So reporting a decoded ASTC image's descriptor as
+`R8G8B8A8_UNORM_SRGB` when the source was one of the 14 `_SRGB` block
+formats, or `R8G8B8A8_UNORM` otherwise, gets the correct sampling
+behavior for free through machinery that already existed -- no new sRGB
+logic anywhere in this row's own diff. `isASTCSRGBFormat` (new,
+file-local) is a plain switch over the 14 `_SRGB` `ResourceFormat`
+values rather than a numeric-parity trick on their enum ordinals (they
+do happen to alternate UNORM/SRGB/UNORM/SRGB... in `RuntimeABI.h`'s
+declaration order, but relying on that felt like exactly the kind of
+implicit coupling to an incidental detail that breaks silently the next
+time someone reorders or inserts an enumerator).
+
+## HDR stays out of scope, on purpose
+
+`isASTCLdrFormat`, not `isBlockCompressedFormat`, gates this row's new
+decode path -- an HDR ASTC (`_SFLOAT_BLOCK_EXT`) image is left sampling
+as all-zero, unchanged from its pre-E23 behavior. This mirrors
+`runBlitImage`'s own identical restriction (E22): `decodeASTCBlockHDR`
+returns full-precision floats through a different interface than the
+UNORM8 pipeline every other format (including this row's own bridge)
+shares, and bridging *that* into a shader-visible descriptor is a
+different, and larger, shape of problem than this row's LDR-only text
+ever asked for.
+
+## Testing: an end-to-end dispatch test, following this project's own precedent
+
+`ASTCDecodeTest.cpp` already exhaustively covers `decodeASTCBlock`
+itself at the unit level; that coverage isn't what this row needed to
+add. What needed a new test was the *plumbing* -- does a real compute
+dispatch, sampling a real bound ASTC image through a real bound
+sampler, actually receive decoded data now, rather than the previous
+all-zero result? `CommandBufferTest.cpp` already had exactly this
+shaped fixture for an uncompressed image (`SampledImageDispatchTest`,
+added for R30/V5's own image/sampler consumption work) with every other
+piece (pipeline creation, descriptor set layout, shader module,
+descriptor writes, command buffer recording/execution) already
+factored out into its own methods -- only `createImage` differs between
+an uncompressed and an ASTC-format image. Rather than duplicate that
+whole fixture, I made `createImage` virtual and added
+`ASTCSampledImageDispatchTest : public SampledImageDispatchTest`
+overriding just that one method to build a single-block
+`VK_FORMAT_ASTC_4x4_UNORM_BLOCK` image instead, reusing everything else
+unchanged.
+
+For deterministic content, I reused the same void-extent (solid-fill)
+block encoding `ASTCDecodeTest.cpp`'s own
+`VoidExtentDecodesToSolidColor` test already uses (hand-set specific bit
+ranges encoding R=65535/G=0/B=32767/A=65535, which decode to RGBA8
+{255, 0, 127, 255}) -- a block whose every texel decodes to the same
+known color regardless of which weight grid a wrong block-mode
+interpretation might produce, so the test does not depend on getting
+the exact (u, v) -> texel addressing right, only on whether real
+decoded data reaches the shader at all instead of zero.
+
+**Confirmed the test actually catches the regression it's meant to,
+rather than trusting it by inspection**: I temporarily reverted only
+`CommandBuffer.cpp`'s change (`git stash` on that one file) and re-ran
+`ninja check-feme` -- the new
+`ASTCSampledImageDispatchTest.SamplesARealDecodedTexelRatherThanAllZero`
+failed, reading back exactly `{0, 0, 0, 0}` (the pre-fix all-zero
+result), while every other test still passed. Restored the fix and
+re-ran to confirm the full suite passes again before considering this
+row done. This is the same "prove the test is not vacuous" discipline
+E20's own ISE-range-shape bug-catch demonstrated, applied here even
+though this particular change introduced no bug of its own to catch --
+the goal was confirming the *test*, not the implementation, actually
+distinguishes the two behaviors.
+
+## CTS run: unchanged headline, for the exact reason already on record
+
+Following this project's own precedent of measuring CTS impact rather
+than assuming "closed" means "no CTS effect either way", I re-ran the
+same two targeted `dEQP-VK` subsets every prior row in this ASTC
+sequence used (`api.info.*`, 10,484 cases; `*astc*`, 98,927 cases).
+Both produced byte-for-byte identical headline numbers to E22's own
+report. This was expected, not just tolerated: E22's own report already
+root-caused why (tracked as roadmap row E24) --
+`vkGetPhysicalDeviceImageFormatProperties` unconditionally fails for
+every `VkFormat`, so no texture-creation-shaped CTS case can create the
+`VkImage` it would need in order to reach a shader-sampling path at all,
+regardless of which format or feature this ICD actually implements
+underneath. I did not need to re-derive that finding -- it already
+covers this row's own lack of CTS movement exactly -- but I did confirm
+the specific failure text (`NotSupported (Format not supported at
+vktTextureTestUtil.cpp:1678)`) is still the one every ASTC case hits,
+rather than assuming it without checking. Full breakdown recorded in
+"Roadmap E23: measured impact" in VulkanCTSReport.md.
+
+## Verification
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, ccache warm from prior rows in this session's
+existing `./build`) passed in full after every commit: 1616 -> 1617
+passed, 1 unsupported throughout (pre-existing, unrelated to this row).
+The one new test, `ASTCSampledImageDispatchTest.
+SamplesARealDecodedTexelRatherThanAllZero`, was confirmed to actually
+fail without this row's `CommandBuffer.cpp` change (see above) before
+being counted as meaningful coverage rather than a vacuous pass.
