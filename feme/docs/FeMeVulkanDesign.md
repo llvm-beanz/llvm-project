@@ -505,11 +505,16 @@ the generated checklist (`feme/utils/vk_gen_feature_inventory.py`, reading
 `CORE_FEATURES` transitively): of 1.3/1.4's 36 mandatory feature bits,
 `dynamicRendering` (roadmap E1: now reported through both its pre-promotion
 `VK_KHR_dynamic_rendering` feature struct and the aggregate
-`VkPhysicalDeviceVulkan13Features` struct) and `synchronization2` (roadmap
+`VkPhysicalDeviceVulkan13Features` struct), `synchronization2` (roadmap
 E3: `CommandBuffer.cpp`/`Sync.cpp`, likewise reported through both its
 pre-promotion `VkPhysicalDeviceSynchronization2Features` struct and the
-aggregate struct) are genuinely implemented;
-`maintenance4`/`5`/`6`, `subgroupSizeControl`,
+aggregate struct), and `maintenance4` (roadmap E4:
+`vkGetDeviceBufferMemoryRequirements`/`vkGetDeviceImageMemoryRequirements`/
+`vkGetDeviceImageSparseMemoryRequirements` in Buffer.cpp/Image.cpp,
+likewise reported through both its own dedicated
+`VkPhysicalDeviceMaintenance4Features` struct and the aggregate struct)
+are genuinely implemented;
+`maintenance5`/`6`, `subgroupSizeControl`,
 `shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
 `pushDescriptor`, and the rest are all confirmed unimplemented, not merely
 unaudited. Roadmap E2 wires the promoted `...Properties` struct's

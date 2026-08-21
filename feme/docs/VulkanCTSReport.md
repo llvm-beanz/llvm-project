@@ -13,14 +13,18 @@ and this file is a measurement instead.
   revision's full 54-group run: roadmap D1 (audit-only, no advertised
   feature/limit/extension changed) is not re-measured in full -- see its
   own "Roadmap D1: measured impact" section for the targeted subset run
-  that *is* new in this edition. Roadmap E1/E2/E3 (aggregate 1.3/1.4
-  feature/property struct wiring and `synchronization2`) are likewise
-  measured only over the targeted case sets each of their own "measured
-  impact" sections names, not a full re-run -- see those sections.
-- `check-feme`: 1533 passed, 1 unsupported as of roadmap E3 (see "Roadmap
-  E3: measured impact" below); the headline table above predates E1/E2/E3
-  and is not affected by any of the three (no crash, timeout, or full
-  54-group case-count change).
+  that *is* new in this edition. Roadmap E1/E2/E3/E4 (aggregate 1.3/1.4
+  feature/property struct wiring, `synchronization2`, and `maintenance4`)
+  are likewise measured only over the targeted case sets each of their own
+  "measured impact" sections names, not a full re-run -- see those
+  sections. Roadmap E4's own session additionally re-ran the full 54-group
+  sweep once (see "Roadmap E4: measured impact"'s own closing note); that
+  full-sweep total is cumulative across every session since D0's own
+  headline run below, not attributable to E4 alone.
+- `check-feme`: 1541 passed, 1 unsupported as of roadmap E4 (see "Roadmap
+  E4: measured impact" below); the headline table above predates
+  E1/E2/E3/E4 and is not affected by any of the four (no crash, timeout,
+  or full 54-group case-count change).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-412-g716301541136` plus two local
   fixes (`7163015`, "Guard `dEQP-VK.api.invariance.random` against empty
   image format lists"; and a second one added by roadmap C7's own pass,
@@ -1455,6 +1459,100 @@ is not something a synchronous ICD can resolve), not specific to
 read_copy_buffer.buffer_16384` case fails with the exact same error at the
 exact same call site. None of these 872 crashed, timed out, or produced a
 `Pass`-shaped result with wrong data.
+
+## Roadmap E4: measured impact
+
+Roadmap E4 (`VK_KHR_maintenance4`/`maintenance4`) adds
+`vkGetDeviceBufferMemoryRequirements`/`vkGetDeviceImageMemoryRequirements`/
+`vkGetDeviceImageSparseMemoryRequirements` (Buffer.cpp/Image.cpp share their
+sizing/validation with the live `vkGetBufferMemoryRequirements(2)`/
+`vkGetImageMemoryRequirements(2)` entrypoints), flips `maintenance4` to
+`VK_TRUE` in the aggregate `VkPhysicalDeviceVulkan13Features` struct and
+adds its own dedicated `VkPhysicalDeviceMaintenance4Features`/`Properties`
+cases (`maxBufferSize` now reads the same real host-memory-size value
+`VkPhysicalDeviceMaintenance3Properties::maxMemoryAllocationSize` already
+did), and fixes a `SPIRVToLLVMPatterns.cpp` legalization gap that
+previously rejected any `LocalSizeId` compute shader outright (see
+"The LocalSizeId compilation gap" below). Auditing the row's own claimed
+"relaxes ... the zero-size-descriptor-array rule" found no code to
+relax -- `vkCreateDescriptorSetLayout`/`vkAllocateDescriptorSets` already
+accept a `descriptorCount == 0` binding with no special-casing needed --
+so that part of this row is closed by a regression test alone
+(`DescriptorTest.AcceptsZeroSizeReservedBinding`), the same
+"row's own premise gets corrected" outcome E2/E3 each recorded.
+
+**Targeted before/after run**, built pre-E4 (`git checkout` every touched
+`feme/lib/Vulkan/{Buffer,Image,Memory,EntryPoints}.{cpp,h}`/
+`feme/lib/Conversion/SPIRVToLLVM/SPIRVToLLVMPatterns.cpp` file back to
+`55d8fb02b4b3`, keeping tests at HEAD) and post-E4, each run in isolation:
+
+| Case(s) | Before | After |
+|---|---|---|
+| `dEQP-VK.api.buffer_memory_requirements.*` (240 total) | 12 `Pass`, 228 `NotSupported` | 24 `Pass`, 216 `NotSupported` (the `method2`, i.e. `vkGetDeviceBufferMemoryRequirements`, variant of every case `method1` already covered) |
+| `dEQP-VK.api.invariance.memory_requirements_matching` | `Pass` (no `VkMemoryDedicatedRequirements` chained) | `Pass` |
+| `dEQP-VK.api.invariance.memory_dedicated_requirements_matching` | `NotSupported` (`VK_KHR_maintenance4` not advertised) | `Fail` on a first pass (see "The dedicated-requirements pNext gap" below), `Pass` once fixed |
+| `api.info.get_physical_device_properties2.features.maintenance4_features` | `Fail` (struct mismatch) | `Pass` |
+| `api.info.vulkan1p3_limits_validation.khr_maintenance4` | `NotSupported` | `Pass` |
+| `api.device_init.create_device_unsupported_features.maintenance4_features` | `Pass` (device creation already correctly rejects an unsupported feature bit request) | `Pass` |
+| `dEQP-VK.binding_model.*` (150,259 total; zero-size-descriptor-array coverage lives here, not under a `maintenance4`-named case) | 1 `Pass`, 10,318 `Fail`, 139,940 `NotSupported` | identical (1/10,318/139,940) -- confirms the zero-size-descriptor-array audit's finding that nothing needed to change |
+
+**The dedicated-requirements pNext gap.** A first pass landed the three
+new entrypoints and the feature-bit wiring without touching
+`vkGet{Buffer,Image}MemoryRequirements2`'s own `pNext`-chain handling
+(neither had ever walked one at all). `dEQP-VK.api.invariance.
+memory_dedicated_requirements_matching` (the same
+`vktApiMemoryRequirementInvarianceTests.cpp` file already named in
+"Deviations from a stock CTS" below) chains a `VkMemoryDedicatedRequirements`
+onto both the live and info-only calls and requires them to agree; since
+neither touched it, each retained whatever sentinel value the test itself
+pre-filled, and the two disagreed by construction, not because either
+computed a different answer. `Memory.h`/`.cpp`'s new
+`fillMemoryRequirements2PNextChain` (shared by all four
+`vkGet*MemoryRequirements(2)`/`vkGetDevice*MemoryRequirements`
+entrypoints, reporting `VK_FALSE` for both
+`prefersDedicatedAllocation`/`requiresDedicatedAllocation` -- this ICD
+never requires or prefers a dedicated allocation) fixed it, confirmed by
+the retest in the table above.
+
+**The `LocalSizeId` compilation gap.** `GroupSize.cpp`'s
+`resolveComputeGroupSize` already resolved a `LocalSizeId` entry point's
+group size correctly and was already unit-tested doing so
+(`GroupSizeTest.ResolvesFromLocalSizeIdDefaults`), but no test exercised
+`LocalSizeId` through the *whole* `vkCreateShaderModule`/
+`vkCreateComputePipelines` pipeline until this row's own
+`PipelineTest.CompilesLocalSizeIdComputeShader` did, and it failed
+legalization: neither `spirv.SpecConstant` (`LocalSizeId`'s only way to
+spell its three operands) nor `spirv.ExecutionModeId` itself has a
+conversion pattern in upstream MLIR's SPIRVToLLVM conversion, unlike plain
+`spirv.ExecutionMode`, which FeMe's own `ExecutionModePattern` already
+erases (its contents are read from the raw SPIR-V word stream before this
+pass runs, same as `LocalSizeId`'s). `SPIRVToLLVMPatterns.cpp`'s new
+`ExecutionModeIdPattern`/`SpecConstantErasurePattern` erase both, mirroring
+that same precedent; no dedicated CTS case for this exists under a
+`local_size_id`-named path in this VK-GL-CTS revision (confirmed empty:
+`dEQP-VK.pipeline.spirv_assembly.instruction.compute.local_size_id.*` has
+0 cases), so `PipelineTest.CompilesLocalSizeIdComputeShader` is this fix's
+only regression coverage.
+
+**Full 54-group re-run** (this session's own, not attributed to E4 alone
+-- see the caveat in "Headline" above): 3,237,000 total cases, 11,542
+`Pass`, 31,436 `Fail`, 3,194,021 `NotSupported`, no crash, hang, or
+truncated group across the whole sweep. `dEQP-VK.api.*`'s own
+267,222-case run needed one adjustment: run alone rather than alongside
+the other 53 groups, since (independent of E4, reproduced identically
+against the pre-E4 baseline) `dEQP-VK.api.object_management.
+multithreaded_per_thread_resources.*`'s concurrent pipeline/device
+creation intermittently corrupts this ICD's single shared MLIR/JIT state
+when run under the six-way concurrent load the documented recipe uses
+(`error: 'llvm.getelementptr' op operand #0 must be LLVM pointer
+type...`, garbled/interleaved diagnostic text) -- a pre-existing,
+unrelated thread-safety gap (this ICD's compilation path is not
+documented anywhere as thread-safe against concurrent `vkCreate*Pipelines`
+calls across independent `VkDevice`s), not anything E4 touched. Isolated,
+`api.*`'s own multithreaded subgroup completes cleanly with the same 2
+pre-existing `Fail`s both before and after E4 (see the table above's own
+methodology). This thread-safety gap is out of E4's scope and not yet a
+tracked roadmap row.
 
 ## What the 3,199,421 `Not supported` results mean
 

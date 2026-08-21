@@ -41,7 +41,11 @@ table below).
   `subgroupSizeControl`, `shaderIntegerDotProduct`,
   `pipelineCreationCacheControl`, `pushDescriptor`, and the rest of the
   roadmap D1 prompt's own list are all confirmed unimplemented (no
-  reference to any of their names exists anywhere in `feme/lib`).
+  reference to any of their names exists anywhere in `feme/lib`). (Since
+  closed for `maintenance4` by roadmap E4 and for `synchronization2` by
+  roadmap E3 -- see this file's own "Advertised" column above, regenerated
+  after each row landed, for the current count rather than this bullet's
+  own D1-era snapshot.)
 - **70 mandatory 1.3/1.4 limit fields, all enumerated (roadmap E2).**
   `EntryPoints.cpp`'s `VkPhysicalDeviceVulkan13Properties`/
   `Vulkan14Properties` cases now exist, writing every field explicitly
@@ -106,7 +110,7 @@ numeric value rather than a yes/no claim.
 | feature | VK_VERSION_1_3 | `shaderZeroInitializeWorkgroupMemory` | no |  |
 | feature | VK_VERSION_1_3 | `dynamicRendering` | yes |  |
 | feature | VK_VERSION_1_3 | `shaderIntegerDotProduct` | no |  |
-| feature | VK_VERSION_1_3 | `maintenance4` | no |  |
+| feature | VK_VERSION_1_3 | `maintenance4` | yes |  |
 | limit | VK_VERSION_1_3 | `minSubgroupSize` | n/a |  |
 | limit | VK_VERSION_1_3 | `maxSubgroupSize` | n/a |  |
 | limit | VK_VERSION_1_3 | `maxComputeWorkgroupSubgroups` | n/a |  |

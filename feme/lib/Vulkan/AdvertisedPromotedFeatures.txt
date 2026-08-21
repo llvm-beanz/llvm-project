@@ -10,3 +10,10 @@
 # aggregate VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES case, which
 # now agree.
 dynamicRendering
+# maintenance4: implemented (Buffer.cpp's vkGetDeviceBufferMemoryRequirements,
+# Image.cpp's vkGetDeviceImageMemoryRequirements/
+# vkGetDeviceImageSparseMemoryRequirements) and, as of roadmap E4, advertised
+# through both its own dedicated VkPhysicalDeviceMaintenance4Features
+# feature struct and the aggregate VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+# VULKAN_1_3_FEATURES case, which now agree.
+maintenance4
