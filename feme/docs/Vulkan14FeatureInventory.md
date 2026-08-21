@@ -43,9 +43,9 @@ table below).
   roadmap D1 prompt's own list are all confirmed unimplemented (no
   reference to any of their names exists anywhere in `feme/lib`). (Since
   closed for `maintenance4` by roadmap E4 and for `synchronization2` by
-  roadmap E3 -- see this file's own "Advertised" column above, regenerated
-  after each row landed, for the current count rather than this bullet's
-  own D1-era snapshot.)
+  roadmap E3, and for `shaderIntegerDotProduct` by roadmap E8 -- see this
+  file's own "Advertised" column above, regenerated after each row landed,
+  for the current count rather than this bullet's own D1-era snapshot.)
 - **70 mandatory 1.3/1.4 limit fields, all enumerated (roadmap E2).**
   `EntryPoints.cpp`'s `VkPhysicalDeviceVulkan13Properties`/
   `Vulkan14Properties` cases now exist, writing every field explicitly
@@ -66,9 +66,11 @@ table below).
   caught this. Each field's own later row (E4, E6, E7, E8, E18, F5, F6,
   F8, F10, F11, F12) raises it once that row also adds the matching
   dedicated-struct case, keeping the two honestly in sync.
-- **39 extensions promoted into 1.3/1.4, 2 advertised** (`VK_KHR_dynamic_
+- **39 extensions promoted into 1.3/1.4, 3 advertised** (`VK_KHR_dynamic_
   rendering` and `VK_EXT_extended_dynamic_state`, both already promoted
-  into 1.3 core and already implemented pre-promotion). 21 of 1.3's 23
+  into 1.3 core and already implemented pre-promotion; `VK_KHR_shader_
+  integer_dot_product`, closed by roadmap E8 -- see this file's own
+  "Advertised" column above for the current count). 20 of 1.3's 23
   promoted extensions and all 16 of 1.4's are unimplemented.
 
 None of this is new work landing in this milestone -- D1 is deliberately
@@ -109,7 +111,7 @@ numeric value rather than a yes/no claim.
 | feature | VK_VERSION_1_3 | `textureCompressionASTC_HDR` | no |  |
 | feature | VK_VERSION_1_3 | `shaderZeroInitializeWorkgroupMemory` | no |  |
 | feature | VK_VERSION_1_3 | `dynamicRendering` | yes |  |
-| feature | VK_VERSION_1_3 | `shaderIntegerDotProduct` | no |  |
+| feature | VK_VERSION_1_3 | `shaderIntegerDotProduct` | yes |  |
 | feature | VK_VERSION_1_3 | `maintenance4` | yes |  |
 | limit | VK_VERSION_1_3 | `minSubgroupSize` | n/a |  |
 | limit | VK_VERSION_1_3 | `maxSubgroupSize` | n/a |  |
@@ -174,7 +176,7 @@ numeric value rather than a yes/no claim.
 | extension | VK_VERSION_1_3 | `VK_KHR_dynamic_rendering` | yes | every command and the dynamicRendering feature bit are implemented, including (roadmap E1) the aggregate Vulkan13Features struct |
 | extension | VK_VERSION_1_3 | `VK_KHR_format_feature_flags2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_maintenance4` | no |  |
-| extension | VK_VERSION_1_3 | `VK_KHR_shader_integer_dot_product` | no |  |
+| extension | VK_VERSION_1_3 | `VK_KHR_shader_integer_dot_product` | yes | roadmap E8: OpSDot/OpUDot/OpSUDot-family spirv->llvm conversion patterns implemented; the 36 integerDotProduct*Accelerated limit bits remain honestly VK_FALSE (not hardware-accelerated on this CPU target) |
 | extension | VK_VERSION_1_3 | `VK_KHR_shader_non_semantic_info` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_shader_terminate_invocation` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_synchronization2` | no |  |

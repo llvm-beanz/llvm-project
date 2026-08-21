@@ -6,3 +6,4 @@
 # audit, feme/utils/vk_gen_feature_inventory.py --advertised-extensions).
 VK_KHR_dynamic_rendering = every command and the dynamicRendering feature bit are implemented, including (roadmap E1) the aggregate Vulkan13Features struct
 VK_EXT_extended_dynamic_state = roadmap C4c: all 12 dynamic states implemented
+VK_KHR_shader_integer_dot_product = roadmap E8: OpSDot/OpUDot/OpSUDot-family spirv->llvm conversion patterns implemented; the 36 integerDotProduct*Accelerated limit bits remain honestly VK_FALSE (not hardware-accelerated on this CPU target)

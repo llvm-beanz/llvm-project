@@ -17,3 +17,13 @@ dynamicRendering
 # feature struct and the aggregate VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
 # VULKAN_1_3_FEATURES case, which now agree.
 maintenance4
+# shaderIntegerDotProduct: OpSDot/OpUDot/OpSUDot-family spirv->llvm
+# conversion patterns (SPIRVToLLVMPatterns.cpp) and, as of roadmap E8,
+# advertised through both the dedicated
+# VkPhysicalDeviceShaderIntegerDotProductFeatures struct and the aggregate
+# VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES case, which now
+# agree. None of the 36 integerDotProduct*Accelerated limit bits follow
+# from this -- this CPU target runs the lowering as an ordinary multiply-
+# add sequence, not a hardware-accelerated one, so they stay a truthful
+# VK_FALSE.
+shaderIntegerDotProduct
