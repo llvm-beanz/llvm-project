@@ -26,10 +26,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E21 in the roadmap document?
+Can you implement milestone E22 in the roadmap document?
 
-> **`VK_EXT_texture_compression_astc_hdr`/`textureCompressionASTC_HDR`** (E15's
-> original scope, unchanged): the 14 additional HDR block formats
-> (`VK_FORMAT_ASTC_{4x4,...,12x12}_SFLOAT_BLOCK_EXT`), reusing E20's shared
-> bit-unpacking/weight-grid decode and adding the HDR-only float color-endpoint
-> decode path
+> **ASTC LDR copy/sampling pipeline wiring**, the scope E20's own closing note
+> split off: rework `ImageOps.cpp`'s copy/blit/resolve paths (and any
+> shader-image-sampling path that reaches one) to address a block-compressed
+> `Image` per block rather than per texel, wire `feme::vulkan::decodeASTCBlock`
+> into whichever of those paths needs decoded texel data, remove
+> `vkCreateImage`'s current outright rejection of an ASTC `VkFormat`, and only
+> then flip `VkPhysicalDeviceFeatures::textureCompressionASTC_LDR` from
+> `VK_FALSE` to `VK_TRUE`
