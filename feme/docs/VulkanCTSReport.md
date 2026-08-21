@@ -2510,3 +2510,43 @@ rather than assume it:
 `LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1599/1600
 passed, 1 unsupported (pre-existing, unrelated), after every commit in
 this row.
+
+## Roadmap E21: measured impact (targeted, not a full re-run)
+
+Same shape as "Roadmap E20: measured impact" above, and for the same
+reason: this row's own code changed `libfeme_vulkan.so` (14 new
+`mapVkFormat` entries for the `_SFLOAT_BLOCK_EXT` formats, plus a new
+`feme::vulkan::decodeASTCBlockHDR`), but `vkCreateImage` still rejects
+every ASTC `VkFormat` outright and `textureCompressionASTC_HDR` stays
+`VK_FALSE` -- both unchanged from `libfeme_vulkan`'s pre-E21 behavior
+(see Roadmap.md's E21/E22 rows). The same two targeted subsets from
+E20's own run were repeated rather than assumed unaffected:
+
+- `dEQP-VK.api.info.*` (10,484 cases): 5,873 passed / 73 failed / 4,538
+  not supported -- byte-for-byte the same split E20's own run recorded,
+  confirming this row did not touch anything that subtree exercises.
+- `dEQP-VK.*astc*` (98,927 cases): 873 passed / 1 failed / 98,053 not
+  supported -- again the identical headline numbers to E20's own run.
+  The one failure is the same already-tracked
+  `dEQP-VK.api.info.get_physical_device_properties2.features.
+  texture_compression_astchdr_features` mismatch E20's report recorded
+  (roadmap E15/G4's aggregate-vs-dedicated-struct gap, unrelated to
+  this row). No case name in this subtree matches any of the 14 2D
+  `astc_*_sfloat_block_ext` footprints this row's own `mapVkFormat`
+  change added -- this CTS revision's case generator only emits
+  `*_sfloat_block_ext`-named cases for the separate 3D "full profile"
+  ASTC footprints (`astc_3x3x3_sfloat_block_ext`, ...), which
+  `VK_EXT_texture_compression_astc_hdr` itself does not define (see
+  that extension's own text: "additional ASTC formats (the 'Full
+  profile') exist which support 3D data... not defined by either the
+  LDR or HDR profiles") -- so this row's own new formats have no
+  matching case at all yet in this CTS build, gated behind the
+  extension advertisement CTS's 2D case generator apparently requires
+  and this ICD does not yet provide. Every one of the 5,540
+  3D-footprint `*_sfloat_block_ext` cases present is `NotSupported`,
+  unchanged from before this row.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1609/1610
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row.
