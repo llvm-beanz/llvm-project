@@ -109,8 +109,8 @@ void *Image::texelPointer(uint32_t MipLevel, uint32_t ArrayLayer, uint32_t X,
   if (!isBound())
     return nullptr;
   assert(!feme::cpu::isBlockCompressedFormat(Format) &&
-        "block-compressed images are not addressable per texel -- use "
-        "blockPointer instead (see Image.h's file comment)");
+         "block-compressed images are not addressable per texel -- use "
+         "blockPointer instead (see Image.h's file comment)");
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
   uint64_t TexelStride = formatElementSize(Format) * SampleCount;
@@ -125,8 +125,8 @@ void *Image::blockPointer(uint32_t MipLevel, uint32_t ArrayLayer,
   if (!isBound())
     return nullptr;
   assert(feme::cpu::isBlockCompressedFormat(Format) &&
-        "blockPointer is for a block-compressed Format only -- use "
-        "texelPointer for any other one");
+         "blockPointer is for a block-compressed Format only -- use "
+         "texelPointer for any other one");
   const FemeImageSubresourceLayout &L = MipLayouts[MipLevel];
   uint64_t SliceIndex = uint64_t(ArrayLayer) + Z;
   uint64_t ByteOffset = L.Offset + SliceIndex * L.SlicePitch +
@@ -285,8 +285,6 @@ Sampler::Sampler(const VkSamplerCreateInfo &CreateInfo) : Descriptor{} {
 
 namespace feme::vulkan {
 
-namespace {
-
 /// The `VkSampleCountFlags` mask `pCreateInfo->samples` must intersect for
 /// \p Usage, mirroring how real Vulkan intersects the per-usage sample-count
 /// limits (`VkPhysicalDeviceLimits`' `sampledImageColorSampleCounts`/
@@ -295,7 +293,10 @@ namespace {
 /// these (e.g. transfer-only) is conservatively restricted to
 /// `VK_SAMPLE_COUNT_1_BIT`: nothing downstream (copy, shader, render target)
 /// needs more than one sample for such an image, so there is no limit field
-/// to honestly report a wider mask from.
+/// to honestly report a wider mask from. Exposed (roadmap E24) so
+/// `vkGetPhysicalDeviceImageFormatProperties` (EntryPoints.cpp) reports the
+/// same `sampleCounts` mask `vkCreateImage` itself actually honors, rather
+/// than a second, independently-maintained guess.
 VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
                                          VkImageUsageFlags Usage) {
   const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
@@ -328,7 +329,10 @@ VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
 /// still sharing this validation with roadmap E4's `VK_KHR_maintenance4`
 /// `vkGetDeviceImageMemoryRequirements`/
 /// `vkGetDeviceImageSparseMemoryRequirements`, which report their result
-/// through a `void`-returning entrypoint with no error code of their own.
+/// through a `void`-returning entrypoint with no error code of their own,
+/// and (roadmap E24) `vkGetPhysicalDeviceImageFormatProperties`
+/// (EntryPoints.cpp), which needs the same shape check to decide whether a
+/// `format`/`type`/`tiling`/`usage`/`flags` combination is supported at all.
 /// A multisample `samples` is accepted at the object-model level -- see
 /// Image.h's file comment -- as long as it is one this device's limits
 /// actually advertise for the image's usage (`supportedSampleCounts`);
@@ -354,8 +358,6 @@ bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
     return false;
   return true;
 }
-
-} // namespace
 
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
@@ -415,10 +417,16 @@ void fillImageMemoryRequirements(VkDeviceSize TotalSize,
   Reqs.memoryTypeBits = 0x1;
 }
 
+} // namespace
+
 /// Computes a `VkImageCreateInfo`'s total packed byte size, without ever
 /// constructing an `Image` -- the same `computeSubresourceLayouts` helper
 /// `Image`'s own constructor calls, given \p Format's block layout (see
-/// Image.h's file comment on why tiling is not distinguished).
+/// Image.h's file comment on why tiling is not distinguished). Exposed
+/// (roadmap E24) so `vkGetPhysicalDeviceImageFormatProperties`
+/// (EntryPoints.cpp) can report a real `VkImageFormatProperties::
+/// maxResourceSize` for the maximal shape it validates through
+/// `isValidImageShape`/`supportedSampleCounts` above.
 VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
                                         feme::cpu::ResourceFormat Format) {
   return computeSubresourceLayouts(
@@ -429,8 +437,6 @@ VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
              blockHeight(Format), bytesPerBlock(Format))
       .second;
 }
-
-} // namespace
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
     VkDevice device, VkImage image, VkMemoryRequirements *pMemoryRequirements) {

@@ -72,6 +72,7 @@
 #define FEME_LIB_VULKAN_IMAGE_H
 
 #include "Memory.h"
+#include "PhysicalDeviceInfo.h"
 
 #include "feme/Target/CPU/RuntimeABI.h"
 
@@ -83,6 +84,22 @@
 #include <vector>
 
 namespace feme::vulkan {
+
+/// The `VkSampleCountFlags` mask a `VkImageCreateInfo::samples` naming
+/// \p Usage must intersect to be creatable -- see Image.cpp's own comment.
+VkSampleCountFlags supportedSampleCounts(const PhysicalDeviceInfo &Info,
+                                         VkImageUsageFlags Usage);
+
+/// Whether \p CreateInfo's shape (flags/samples/mips/array layers), *not
+/// counting* its `format`, is one this ICD can create -- see Image.cpp's
+/// own comment.
+bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
+                       const PhysicalDeviceInfo &Info);
+
+/// \p CreateInfo's total packed byte size for \p Format, without
+/// constructing an `Image` -- see Image.cpp's own comment.
+VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
+                                        feme::cpu::ResourceFormat Format);
 
 /// A `VkImage`. Not dispatchable. Owns the packed subresource layout table
 /// (`feme::cpu::FemeImageSubresourceLayout`, one entry per mip level) its
