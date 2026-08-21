@@ -237,6 +237,113 @@ TEST_F(ImageOpsTest, ResolvesMultisampleImage) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
+/// Roadmap E16 (`VK_EXT_image_robustness`/`robustImageAccess`): a blit
+/// region naming a source rectangle far larger than the source image's own
+/// declared extent must clamp every fetch to the image's edge rather than
+/// reading past it.
+TEST_F(ImageOpsTest, BlitClampsOutOfBoundsSourceRegion) {
+  VkImage Src = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  for (uint32_t Y = 0; Y != 2; ++Y)
+    for (uint32_t X = 0; X != 2; ++X) {
+      uint8_t Value = uint8_t(0x40 * (Y * 2 + X));
+      std::array<uint8_t, 4> Texel{Value, Value, Value, 0xFF};
+      std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, X, Y, 0),
+                  Texel.data(), 4);
+    }
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  // A source rectangle 50x larger than Src's real 2x2 extent: every
+  // destination texel's fractional position lands well past (1, 1), so
+  // without the E16 clamp this would read out of bounds.
+  Region.srcOffsets[1] = {100, 100, 1};
+  Region.dstOffsets[1] = {2, 2, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  // Every destination texel's source position clamps to the image's last
+  // valid texel, (1, 1).
+  for (uint32_t Y = 0; Y != 2; ++Y)
+    for (uint32_t X = 0; X != 2; ++X)
+      EXPECT_EQ(texel(Dst, X, Y)[0], 0xC0);
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// The write-side peer of `BlitClampsOutOfBoundsSourceRegion`: a blit
+/// region naming a destination rectangle larger than the destination
+/// image's own declared extent must discard the out-of-bounds texels
+/// rather than fault, while still writing every in-bounds one correctly
+/// (roadmap E16).
+TEST_F(ImageOpsTest, BlitDiscardsOutOfBoundsDestinationTexels) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      uint8_t Value = uint8_t(0x10 * (Y * 4 + X));
+      std::array<uint8_t, 4> Texel{Value, Value, Value, 0xFF};
+      std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, X, Y, 0),
+                  Texel.data(), 4);
+    }
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  // A 4x4 destination rectangle against a real 2x2 destination image:
+  // without the E16 discard, the (2, *)/(*, 2)/(3, *)/(*, 3) destination
+  // texels below would write out of bounds.
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  // The in-bounds corner still copies the correct (same-format, nearest)
+  // source texel.
+  EXPECT_EQ(texel(Dst, 0, 0)[0], texel(Src, 0, 0)[0]);
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap E16: `vkCmdResolveImage`'s peer of the two blit tests above -- a
+/// region whose extent runs past either image's real extent discards the
+/// out-of-bounds texels (both the multisample read and the resolved
+/// write) rather than faulting, while still resolving every in-bounds
+/// texel correctly.
+TEST_F(ImageOpsTest, ResolveDiscardsOutOfBoundsRegion) {
+  VkImage Src =
+      createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_4_BIT);
+  VkImage Dst = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM);
+  for (uint32_t Y = 0; Y != 2; ++Y)
+    for (uint32_t X = 0; X != 2; ++X)
+      for (uint32_t S = 0; S != 4; ++S) {
+        uint8_t Value = S < 2 ? 0x00 : 0xFF;
+        std::array<uint8_t, 4> Texel{Value, Value, Value, 0xFF};
+        std::memcpy(fromHandle<Image>(Src)->texelPointer(0, 0, X, Y, 0, S),
+                    Texel.data(), 4);
+      }
+
+  VkImageResolve Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  // Requests resolving a 4x4 region though both images are only 2x2.
+  Region.extent = {4, 4, 1};
+
+  ASSERT_FALSE(
+      runResolveImage(fromHandle<Image>(Src), fromHandle<Image>(Dst), Region));
+  for (uint32_t Y = 0; Y != 2; ++Y)
+    for (uint32_t X = 0; X != 2; ++X) {
+      EXPECT_NEAR(texel(Dst, X, Y)[0], 0x80, 1);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 0xFF);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
 /// Roadmap E22: a block-compressed format is never multisampled in real
 /// Vulkan, so resolving one is rejected outright rather than falling
 /// through to `texelPointer`, which asserts against a block-compressed

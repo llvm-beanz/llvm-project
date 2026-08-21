@@ -361,6 +361,16 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     if (SrcLevel >= Src->mipLevels() || DstLevel >= Dst->mipLevels())
       return createStringError(inconvertibleErrorCode(),
                                "a blit region names a mip level out of range");
+    // VK_EXT_image_robustness/robustImageAccess (roadmap E16): a region
+    // naming a source/destination coordinate beyond this mip level's own
+    // declared extent must read a defined value or discard the write,
+    // never fault -- the source rectangle's own corners below are clamped
+    // into `[0, SrcLevelWidth)`/`[0, SrcLevelHeight)` before every texel
+    // fetch, and a destination coordinate outside `[0, DstLevelWidth)`/
+    // `[0, DstLevelHeight)` (`texelPointer` returning null) discards that
+    // texel's write.
+    uint32_t SrcLevelWidth = std::max(1u, Src->width() >> SrcLevel);
+    uint32_t SrcLevelHeight = std::max(1u, Src->height() >> SrcLevel);
     // Signed corner-to-corner extents: a negative one mirrors that axis
     // ("Blits" in feme/docs/FeMeVulkanDesign.md), matching Vulkan's own
     // "opposite corners flip the region" rule.
@@ -396,10 +406,20 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
           void *DstTexel = Dst->texelPointer(DstLevel, DstLayer, uint32_t(DstX),
                                              uint32_t(DstY),
                                              uint32_t(Region.dstOffsets[0].z));
+          // Roadmap E16: a destination coordinate outside the image's
+          // declared extent discards this texel's write rather than
+          // faulting through a null pointer.
+          if (!DstTexel)
+            continue;
 
           auto srcTexel = [&](int64_t SX, int64_t SY) {
             SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
             SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
+            // Roadmap E16: clamp again into the mip's own declared extent,
+            // so a source rectangle naming out-of-bounds coordinates still
+            // reads a defined (edge-clamped) texel instead of faulting.
+            SX = std::clamp<int64_t>(SX, 0, int64_t(SrcLevelWidth) - 1);
+            SY = std::clamp<int64_t>(SY, 0, int64_t(SrcLevelHeight) - 1);
             return Src->texelPointer(SrcLevel, SrcLayer, uint32_t(SX),
                                      uint32_t(SY),
                                      uint32_t(Region.srcOffsets[0].z));
@@ -417,6 +437,10 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
                               std::array<double, 4> &Out) -> Error {
             SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
             SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
+            // Roadmap E16: same additional clamp into the mip's own
+            // declared extent as `srcTexel` above.
+            SX = std::clamp<int64_t>(SX, 0, int64_t(SrcLevelWidth) - 1);
+            SY = std::clamp<int64_t>(SY, 0, int64_t(SrcLevelHeight) - 1);
             if (!SrcCompressed)
               return feme::graphics::unpackColor(
                   Src->format(),
@@ -520,12 +544,30 @@ Error runResolveImage(Image *Src, Image *Dst,
       for (uint32_t Z = 0; Z != Region.extent.depth; ++Z)
         for (uint32_t Y = 0; Y != Region.extent.height; ++Y)
           for (uint32_t X = 0; X != Region.extent.width; ++X) {
+            void *DstTexel = Dst->texelPointer(
+                DstLevel, Region.dstSubresource.baseArrayLayer + Layer,
+                Region.dstOffset.x + X, Region.dstOffset.y + Y,
+                Region.dstOffset.z + Z);
+            // Roadmap E16 (VK_EXT_image_robustness/robustImageAccess): a
+            // destination coordinate beyond Dst's declared extent
+            // discards this whole texel (read and write) rather than
+            // faulting through a null pointer.
+            if (!DstTexel)
+              continue;
+
             std::array<double, 4> Accum{};
+            bool SrcOutOfBounds = false;
             for (uint32_t S = 0; S != Samples; ++S) {
               const void *SrcTexel = Src->texelPointer(
                   SrcLevel, Region.srcSubresource.baseArrayLayer + Layer,
                   Region.srcOffset.x + X, Region.srcOffset.y + Y,
                   Region.srcOffset.z + Z, S);
+              // Same discard for a source coordinate beyond Src's own
+              // declared extent.
+              if (!SrcTexel) {
+                SrcOutOfBounds = true;
+                break;
+              }
               std::array<double, 4> Sample{};
               if (Error E = feme::graphics::unpackColor(
                       Src->format(),
@@ -536,12 +578,10 @@ Error runResolveImage(Image *Src, Image *Dst,
               for (unsigned C = 0; C != 4; ++C)
                 Accum[C] += Sample[C];
             }
+            if (SrcOutOfBounds)
+              continue;
             for (unsigned C = 0; C != 4; ++C)
               Accum[C] /= Samples;
-            void *DstTexel = Dst->texelPointer(
-                DstLevel, Region.dstSubresource.baseArrayLayer + Layer,
-                Region.dstOffset.x + X, Region.dstOffset.y + Y,
-                Region.dstOffset.z + Z);
             MutableArrayRef<uint8_t> Out(static_cast<uint8_t *>(DstTexel),
                                          TexelSize);
             if (Error E =
