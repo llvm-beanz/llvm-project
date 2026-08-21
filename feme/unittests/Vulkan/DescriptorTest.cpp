@@ -90,6 +90,53 @@ TEST_F(DescriptorTest, InputAttachmentDescriptorTypeIsAccepted) {
   vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
 }
 
+/// Roadmap E4 (`VK_KHR_maintenance4`'s zero-size-descriptor-array rule):
+/// a `VkDescriptorSetLayoutBinding` with `descriptorCount == 0` is a valid,
+/// "reserved" binding no shader may access -- creating the layout,
+/// allocating a set from it, and reading back its (empty) binding array
+/// must all succeed rather than reject the zero count.
+TEST_F(DescriptorTest, AcceptsZeroSizeReservedBinding) {
+  VkDescriptorSetLayoutBinding Bindings[2]{};
+  Bindings[0].binding = 0;
+  Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[0].descriptorCount = 1;
+  Bindings[1].binding = 1;
+  Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Bindings[1].descriptorCount = 0; // Reserved: no shader may access this.
+
+  VkDescriptorSetLayoutCreateInfo LayoutInfo{};
+  LayoutInfo.bindingCount = 2;
+  LayoutInfo.pBindings = Bindings;
+  VkDescriptorSetLayout Layout = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &Layout),
+            VK_SUCCESS);
+
+  auto *L = fromHandle<DescriptorSetLayout>(Layout);
+  ASSERT_NE(L->find(1), nullptr);
+  EXPECT_EQ(L->find(1)->Count, 0u);
+
+  VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+  VkDescriptorPoolCreateInfo PoolInfo{};
+  PoolInfo.maxSets = 1;
+  PoolInfo.poolSizeCount = 1;
+  PoolInfo.pPoolSizes = &PoolSize;
+  VkDescriptorPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+
+  VkDescriptorSetAllocateInfo AllocInfo{};
+  AllocInfo.descriptorPool = Pool;
+  AllocInfo.descriptorSetCount = 1;
+  AllocInfo.pSetLayouts = &Layout;
+  VkDescriptorSet Set = VK_NULL_HANDLE;
+  EXPECT_EQ(vkAllocateDescriptorSets(Device, &AllocInfo, &Set), VK_SUCCESS);
+  ASSERT_NE(Set, VK_NULL_HANDLE);
+  EXPECT_TRUE(fromHandle<DescriptorSet>(Set)->bindingArray(1).empty());
+
+  vkDestroyDescriptorPool(Device, Pool, nullptr);
+  vkDestroyDescriptorSetLayout(Device, Layout, nullptr);
+}
+
 TEST_F(DescriptorTest, GetLayoutSupportReportsSupportedBindings) {
   VkDescriptorSetLayoutBinding Binding{};
   Binding.binding = 0;
