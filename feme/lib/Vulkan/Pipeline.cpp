@@ -78,6 +78,23 @@ buildSpecializationOverrides(const VkSpecializationInfo *Info) {
   return Overrides;
 }
 
+/// The explicit subgroup size a `VkPipelineShaderStageRequiredSubgroupSize
+/// CreateInfo` chained onto \p Next requests (roadmap E7,
+/// `VK_EXT_subgroup_size_control`/`subgroupSizeControl`), or 0 if none is
+/// chained -- the same "0 resolves from the shader/host, else forces this
+/// value" convention `feme::cpu::JITOptions::WaveSize` already uses.
+uint32_t findRequiredSubgroupSize(const void *Next) {
+  for (const auto *Header = static_cast<const VkBaseInStructure *>(Next);
+       Header; Header = Header->pNext)
+    if (Header->sType ==
+        VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO)
+      return reinterpret_cast<
+                 const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo *>(
+                 Header)
+          ->requiredSubgroupSize;
+  return 0;
+}
+
 } // namespace
 
 namespace feme::vulkan {
@@ -319,10 +336,34 @@ compileComputePipeline(const VkComputePipelineCreateInfo &CreateInfo,
 
   feme::cpu::JITOptions Opts;
   Opts.EntryPoint = EntryPoint;
+  // (roadmap E7) A chained
+  // `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` forces this pipeline
+  // to compile at that explicit subgroup size instead of the host-derived
+  // default `feme::cpu::resolveWaveSize` would otherwise pick;
+  // `resolveWaveSize` itself validates it (power of two, in
+  // `[MinSubgroupSize, MaxSubgroupSize]`), so no separate check is needed
+  // here.
+  Opts.WaveSize = findRequiredSubgroupSize(CreateInfo.stage.pNext);
   Expected<std::unique_ptr<feme::cpu::CompiledStage>> Stage =
       feme::cpu::CompiledStage::create(*Ctx, std::move(*AsLLVMIR), Opts);
   if (!Stage)
     return Stage.takeError();
+
+  // (roadmap E7) `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`
+  // promises every subgroup launched in this stage is fully populated (no
+  // masked-off lane); the only way this CPU target's SIMD-widened dispatch
+  // can honor that promise is for the workgroup's X dimension to itself be
+  // a multiple of the resolved subgroup size, so pipeline creation must
+  // reject anything that isn't rather than silently mask partial groups.
+  if ((CreateInfo.stage.flags &
+       VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT) &&
+      GroupSize->at(0) % (*Stage)->getWaveSize() != 0)
+    return createStringError(
+        inconvertibleErrorCode(),
+        "VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT requires "
+        "the workgroup's local size in the X dimension (%u) to be a "
+        "multiple of the resolved subgroup size (%u)",
+        GroupSize->at(0), (*Stage)->getWaveSize());
 
   // (V5, completed by roadmap R30's SPIR-V image lowering) A shader that
   // samples an image is no longer rejected here: `feme::cpu::

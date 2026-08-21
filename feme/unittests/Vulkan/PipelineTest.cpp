@@ -7,10 +7,14 @@
 //===----------------------------------------------------------------------===//
 
 #define VK_NO_PROTOTYPES
+#include "Pipeline.h"
 #include "Descriptor.h"
 #include "EntryPoints.h"
 #include "Icd.h"
 #include "Objects.h"
+
+#include "feme/Target/CPU/CompiledStage.h"
+#include "feme/Target/CPU/WaveSize.h"
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
@@ -134,6 +138,33 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// A `void main()` `GLCompute` entry point whose `LocalSize` execution mode
+/// is a multiple of `feme::cpu::MinWaveSize` (4) in the X dimension --
+/// roadmap E7's `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`
+/// test fixtures use this shape (a multiple) and the one below (not a
+/// multiple) to exercise both sides of that flag's validation.
+const char *kLocalSizeXEightComputeShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main
+  spirv.ExecutionMode @main "LocalSize", 8, 1, 1
+}
+)mlir";
+
+/// The same shape, but with a local size X that is *not* a multiple of
+/// `feme::cpu::MinWaveSize` (4).
+const char *kLocalSizeXFiveComputeShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main
+  spirv.ExecutionMode @main "LocalSize", 5, 1, 1
+}
+)mlir";
+
 class PipelineTest : public ::testing::Test {
 protected:
   void SetUp() override {
@@ -235,6 +266,133 @@ TEST_F(PipelineTest, RejectsMissingGroupSizeInformation) {
             VK_ERROR_INITIALIZATION_FAILED);
   EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
 
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// Roadmap E7 (`VK_EXT_subgroup_size_control`): a
+/// `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` chained onto the
+/// compute stage forces `compileComputePipeline` to compile at that exact
+/// subgroup size instead of the host-derived default.
+TEST_F(PipelineTest, HonorsRequiredSubgroupSizeOverride) {
+  VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSize{};
+  RequiredSize.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSize.requiredSubgroupSize = feme::cpu::MinWaveSize;
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.pNext = &RequiredSize;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_EQ(fromHandle<ComputePipeline>(Pipeline)->getStage().getWaveSize(),
+            feme::cpu::MinWaveSize);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// A `requiredSubgroupSize` that is not a power of two in
+/// `[MinSubgroupSize, MaxSubgroupSize]` must fail pipeline creation rather
+/// than silently clamp -- the same validation
+/// `feme::cpu::resolveWaveSize` already applies to `--wave-size`.
+TEST_F(PipelineTest, RejectsInvalidRequiredSubgroupSize) {
+  VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSize{};
+  RequiredSize.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSize.requiredSubgroupSize = 3; // Not a power of two.
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.pNext = &RequiredSize;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT` promises
+/// every subgroup launched is fully populated; this CPU target can only
+/// honor that if the workgroup's X dimension is itself a multiple of the
+/// resolved subgroup size, so pipeline creation must reject a shader whose
+/// local size X isn't.
+TEST_F(PipelineTest,
+       RequireFullSubgroupsRejectsGroupSizeNotAMultipleOfSubgroupSize) {
+  VkShaderModule Module = createShaderModule(kLocalSizeXFiveComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSize{};
+  RequiredSize.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSize.requiredSubgroupSize = feme::cpu::MinWaveSize;
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.flags =
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+  CreateInfo.stage.pNext = &RequiredSize;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  // 5 is not a multiple of the required subgroup size (4).
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// The converse of the rejection test above: a local size X that *is* a
+/// multiple of the resolved subgroup size compiles successfully with
+/// `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT` set.
+TEST_F(PipelineTest,
+       RequireFullSubgroupsAcceptsGroupSizeThatIsAMultipleOfSubgroupSize) {
+  VkShaderModule Module = createShaderModule(kLocalSizeXEightComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkPipelineShaderStageRequiredSubgroupSizeCreateInfo RequiredSize{};
+  RequiredSize.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO;
+  RequiredSize.requiredSubgroupSize = feme::cpu::MinWaveSize;
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.flags =
+      VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT;
+  CreateInfo.stage.pNext = &RequiredSize;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  // 8 is a multiple of the required subgroup size (4).
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
   vkDestroyShaderModule(Device, Module, nullptr);
 }
 
