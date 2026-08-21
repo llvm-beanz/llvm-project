@@ -2874,3 +2874,88 @@ regression test above), plus a corrected expectation in
 `EntryPointsTest.ImageFormatPropertiesRejectsUnsupportedUsage` (retargeted
 from `R32_SFLOAT`, now sampled by this row, to an integer format, still
 correctly rejected per roadmap E26).
+
+## Roadmap E26: measured impact (targeted, not a full re-run)
+
+E26 raised an integer 2D `OpImageFetch` to a new
+`feme.cpu.image.load.2d.v4i32` entry point (`feme::cpu::ImageCalls`'
+`ImageCallKind::Load2DI32`), backed by a new `femeRTUnpackImageTexelI32`
+decode table (`FeMeRuntimeCPU.c`) covering the mandatory-sampled
+`_UINT`/`_SINT` formats the Vulkan spec's own "Mandatory Format Support"
+tables list (`R32G32B32A32_UINT`/`_SINT`, `R16G16B16A16_UINT`/`_SINT`,
+`R8G8B8A8_UINT`/`_SINT`, `R10G10B10A2_UINT`), and `formatFeatureFlags`
+(Format.cpp) now advertises `SAMPLED_IMAGE_BIT` (never
+`_FILTER_LINEAR_BIT`) for exactly that set. The same two targeted subsets
+E24/E25 used were re-run against this build, with E25's own final
+"after" numbers as the baseline (E26 makes no version/extension/feature-
+advertisement change of its own, so, per this report's established
+practice, a revert-and-rerun re-confirmation was not repeated for that
+unrelated portion of the diff):
+
+- **`dEQP-VK.api.info.*`** (10,484 cases): 5,556 passed / 390 failed /
+  4,538 not supported before this row (E25's own final "after" figure).
+  After: **5,542 passed / 404 failed / 4,538 not supported** -- "not
+  supported" exactly unchanged, +14 failing / -14 passing, all of it
+  concentrated in `image_format_properties.{1d,2d,3d}.{optimal,linear}`
+  (320 -> 334). Attributing precisely: exactly 42 of this bucket's cases
+  newly fail for the 7 formats this row's own `formatFeatureFlags` change
+  touches (`r8g8b8a8_{u,s}int`, `r16g16b16a16_{u,s}int`,
+  `a2b10g10r10_uint_pack32`, `r32g32b32a32_{u,s}int`, each across six
+  `{1d,2d,3d} x {optimal,linear}` variants), offset by 28 cases elsewhere
+  in the same bucket that now pass instead (a `VkImageFormatProperties`
+  query result that changed shape without becoming wholly disqualified,
+  once these formats stopped being rejected outright before reaching any
+  usage-flag-specific check). The 42 new fails are a **different**
+  failure reason than E24/E25's own already-documented
+  `image_format_properties` gap ("Required sample counts not supported"):
+  every one of these instead fails with `VK_ERROR_FORMAT_NOT_SUPPORTED
+  returned for required image parameter combination` (confirmed via
+  `dEQP-VK.api.info.image_format_properties.2d.optimal.r8g8b8a8_uint`/
+  `r32g32b32a32_sint`, both spot-checked in the raw log). Cross-checked
+  against `vktApiFeatureInfo.cpp`'s own mandatory-format table
+  (`{VK_FORMAT_R8G8B8A8_UINT, SAIM | BLSR | TRSR | TRDS | COAT | BLDS |
+  STIM}`, similarly for the other six): every one of these formats is
+  *also* mandatory `COAT` (color-attachment) and `STIM` (storage-image)
+  per this CTS's own table, neither of which `formatFeatureFlags`
+  advertises for *any* integer format (`RenderPass.cpp`'s
+  `isSupportedColorAttachmentFormat` has no integer-format case, and
+  `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is deliberately never set for any
+  format at all -- "V5: Images and sampling"'s own already-documented "not
+  yet writable" deviation). So this test's own mandatory-combination
+  check now runs (where it used to be rejected before reaching it) and
+  correctly fails on two genuinely separate, already-known gaps neither
+  this row nor E25 touch: integer-format color-attachment support (an
+  extension of `isSupportedColorAttachmentFormat`'s own table, not this
+  row's `feme.cpu.image.*` sampling path) and storage-image support in
+  general (needs a `feme.cpu.image.store.*` runtime helper that does not
+  exist yet, for any format). Both are left as their own follow-up rather
+  than folded into this row, the same "verify before assuming a
+  regression" practice E25's own `pNext` investigation established.
+  `format_properties.*` (54, unchanged from E25's own baseline --
+  `bufferFeatures` is untouched by this row) and the remaining
+  `get_physical_device_properties2.features`/`vulkan1p2_limits_
+  validation`/`get_physical_device_properties2.properties` cases (16,
+  same pre-existing gaps E24/E25's own reports already carried forward)
+  are exactly unchanged.
+- **`dEQP-VK.*astc*`** (98,927 cases): **8,349 passed / 12,113 failed /
+  78,465 not supported**, byte-for-byte identical to E25's own final
+  figure -- expected and confirmed rather than assumed: no ASTC format is
+  integer-channel, so this row's own scope (an integer-format sampling
+  path) cannot touch any ASTC-format case, and the run above confirms it
+  did not.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1655/1656
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- the new tests relative to E25's own report are
+`SPIRVResourceLoweringTest`'s `LowersIntegerImageFetchToImageLoadV4I32`/
+`LeavesAnIntegerSampledImageHandleUsedForSampleAlone`,
+`ImageSamplingTest`'s six new `feme.cpu.image.load.2d.v4i32` cases (one
+per newly-decoded format shape, plus out-of-range/inactive-lane zero-read
+coverage), `FormatTest`'s updated
+`FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope` (now covering
+the 7 newly-sampled integer formats), and `EntryPointsTest`'s new
+`ImageFormatPropertiesAcceptsMandatoryIntegerFormat` plus a corrected
+comment on `ImageFormatPropertiesRejectsUnsupportedUsage` (the stale "no
+`feme.cpu.image.*` entry point returns an integer vector" claim this
+row's own work made false).
