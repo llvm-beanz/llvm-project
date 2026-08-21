@@ -101,16 +101,27 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnrecognizedFormat) {
 }
 
 TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsUnsupportedUsage) {
-  // (Roadmap E25) An integer format cannot actually be sampled by a
-  // shader -- no `feme.cpu.image.*` entry point returns an integer vector
-  // yet, only the broadened `<4 x float>` typed sample table -- so
-  // requesting `SAMPLED_BIT` for one must fail rather than silently
+  // (Roadmap E26) `R32_UINT` is not one of the mandatory-sampled integer
+  // formats `femeRTUnpackImageTexelI32` decodes (only its four-component
+  // `R32G32B32A32_UINT`/`_SINT` sibling and the packed formats are), so
+  // requesting `SAMPLED_BIT` for it must still fail rather than silently
   // succeed with a descriptor that would sample as all-zero.
   VkImageFormatProperties Props{};
   EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
                 Physical, VK_FORMAT_R32_UINT, VK_IMAGE_TYPE_2D,
                 VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
             VK_ERROR_FORMAT_NOT_SUPPORTED);
+}
+
+TEST_F(EntryPointsTest, ImageFormatPropertiesAcceptsMandatoryIntegerFormat) {
+  // (Roadmap E26) `R8G8B8A8_UINT` -- one of the mandatory-sampled integer
+  // formats `feme.cpu.image.load.2d.v4i32` can now actually fetch -- must
+  // be accepted for `SAMPLED_BIT`, unlike `R32_UINT` above.
+  VkImageFormatProperties Props{};
+  EXPECT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R8G8B8A8_UINT, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_SUCCESS);
 }
 
 TEST_F(EntryPointsTest, ImageFormatPropertiesRejectsStorageUsage) {
