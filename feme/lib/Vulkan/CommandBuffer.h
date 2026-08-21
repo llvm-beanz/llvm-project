@@ -569,13 +569,18 @@ public:
     Cmd.VertexBufferStrides = std::move(Strides);
     Commands.push_back(std::move(Cmd));
   }
-  /// (V6) `vkCmdBindIndexBuffer`.
-  void bindIndexBuffer(Buffer *Buf, VkDeviceSize Offset, VkIndexType Type) {
+  /// (V6) `vkCmdBindIndexBuffer`, and (roadmap E5) `vkCmdBindIndexBuffer2`'s
+  /// `size`-bounded variant when \p Size is not `VK_WHOLE_SIZE` (`DstSize`
+  /// reused, the same way it already is for `FillBuffer`'s size and
+  /// `CopyQueryPoolResults`'/`DrawIndirect`'s stride).
+  void bindIndexBuffer(Buffer *Buf, VkDeviceSize Offset, VkIndexType Type,
+                       VkDeviceSize Size = VK_WHOLE_SIZE) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::BindIndexBuffer;
     Cmd.SrcBuffer = Buf;
     Cmd.IndirectOffset = Offset;
     Cmd.IndexType = Type;
+    Cmd.DstSize = Size;
     Commands.push_back(Cmd);
   }
   /// (V6) `vkCmdSetViewport`/`vkCmdSetScissor`.

@@ -504,6 +504,12 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,
                                                 VkBuffer buffer,
                                                 VkDeviceSize offset,
                                                 VkIndexType indexType);
+// (Roadmap E5) `VK_KHR_maintenance5`'s `size`-bounded index buffer bind.
+VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer2(VkCommandBuffer commandBuffer,
+                                                 VkBuffer buffer,
+                                                 VkDeviceSize offset,
+                                                 VkDeviceSize size,
+                                                 VkIndexType indexType);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer,
                                             uint32_t firstViewport,
                                             uint32_t viewportCount,

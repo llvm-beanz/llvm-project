@@ -168,6 +168,9 @@ vkCmdNextSubpass2
 vkCmdEndRenderPass2
 vkCmdBindVertexBuffers
 vkCmdBindIndexBuffer
+# Roadmap E5: VK_KHR_maintenance5's `size`-bounded index buffer bind,
+# sharing vkCmdBindIndexBuffer's own validation (CommandBuffer.cpp).
+vkCmdBindIndexBuffer2
 vkCmdSetViewport
 vkCmdSetScissor
 vkCmdSetBlendConstants

@@ -700,6 +700,10 @@ struct GraphicsState {
   std::vector<VkDeviceSize> VertexBufferStrides;
   Buffer *IndexBuffer = nullptr;
   VkDeviceSize IndexBufferOffset = 0;
+  /// (Roadmap E5) `vkCmdBindIndexBuffer2`'s `size`, or `VK_WHOLE_SIZE` for
+  /// a plain `vkCmdBindIndexBuffer` -- matching that command's own "bind
+  /// through the end of the buffer" behavior.
+  VkDeviceSize IndexBufferSize = VK_WHOLE_SIZE;
   VkIndexType IndexType = VK_INDEX_TYPE_UINT32;
 
   DynamicGraphicsState Dynamic;
@@ -1037,13 +1041,26 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
       return createStringError(inconvertibleErrorCode(),
                                "the index buffer's offset is out of range of "
                                "its buffer");
+    // (Roadmap E5) `vkCmdBindIndexBuffer2`'s `size` bounds how much of the
+    // buffer past `offset` is actually bound; `VK_WHOLE_SIZE` (also what a
+    // plain `vkCmdBindIndexBuffer` bind always uses) means "through the
+    // end of the buffer", matching that command's pre-existing "whole
+    // buffer" assumption.
+    VkDeviceSize BoundSize =
+        Gfx.IndexBufferSize == VK_WHOLE_SIZE
+            ? Gfx.IndexBuffer->size() - Gfx.IndexBufferOffset
+            : Gfx.IndexBufferSize;
+    if (Gfx.IndexBufferOffset + BoundSize > Gfx.IndexBuffer->size())
+      return createStringError(inconvertibleErrorCode(),
+                               "the index buffer's bound offset/size range "
+                               "is out of range of its buffer");
     IndexBinding.Type = Gfx.IndexType == VK_INDEX_TYPE_UINT16
                             ? feme::graphics::IndexType::UInt16
                             : feme::graphics::IndexType::UInt32;
     IndexBinding.Data = llvm::ArrayRef<uint8_t>(
         static_cast<const uint8_t *>(Gfx.IndexBuffer->data()) +
             Gfx.IndexBufferOffset,
-        static_cast<size_t>(Gfx.IndexBuffer->size() - Gfx.IndexBufferOffset));
+        static_cast<size_t>(BoundSize));
   }
 
   MaterializedBoundResources Materialized = buildBoundResources(BoundSets);
@@ -1108,10 +1125,17 @@ Error validateDrawFetchBounds(const GraphicsPipeline &Pipeline,
     if (!Gfx.IndexBuffer || !Gfx.IndexBuffer->isBound())
       return createStringError(inconvertibleErrorCode(),
                                "an indexed draw has no bound index buffer");
+    // (Roadmap E5) A `vkCmdBindIndexBuffer2` bind narrows the readable
+    // range to `offset + size` rather than the whole buffer; `VK_WHOLE_
+    // SIZE` (also what a plain `vkCmdBindIndexBuffer` bind always uses)
+    // keeps this the buffer's own end.
+    uint64_t BoundEnd = Gfx.IndexBufferSize == VK_WHOLE_SIZE
+                            ? Gfx.IndexBuffer->size()
+                            : Gfx.IndexBufferOffset + Gfx.IndexBufferSize;
     uint64_t IndexSize = Gfx.IndexType == VK_INDEX_TYPE_UINT16 ? 2 : 4;
     uint64_t End = (uint64_t(Draw.FirstIndex) + Draw.VertexCount) * IndexSize +
                    Gfx.IndexBufferOffset;
-    if (End > Gfx.IndexBuffer->size())
+    if (End > BoundEnd)
       return createStringError(inconvertibleErrorCode(),
                                "the indexed draw's index range overruns its "
                                "bound index buffer");
@@ -1502,6 +1526,7 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       Gfx.IndexBuffer = Cmd.SrcBuffer;
       Gfx.IndexBufferOffset = Cmd.IndirectOffset;
       Gfx.IndexType = Cmd.IndexType;
+      Gfx.IndexBufferSize = Cmd.DstSize;
       break;
     case RecordedCommand::Kind::SetViewport:
       Gfx.Dynamic.Viewport = feme::graphics::ViewportState{
@@ -2310,6 +2335,22 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer(VkCommandBuffer commandBuffer,
                                                 VkIndexType indexType) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->bindIndexBuffer(fromHandle<vulkan::Buffer>(buffer), offset, indexType);
+}
+
+// (Roadmap E5) `vkCmdBindIndexBuffer2`: the same bind as
+// `vkCmdBindIndexBuffer` above, plus a `size` bounding how much of the
+// buffer past `offset` is actually readable -- sharing every other piece
+// of `bindIndexBuffer`'s state and `runDraw`/`validateDrawFetchBounds`'s
+// bounds checking, minus `vkCmdBindIndexBuffer`'s "the rest of the
+// buffer" assumption (`VK_WHOLE_SIZE` still means exactly that).
+VKAPI_ATTR void VKAPI_CALL vkCmdBindIndexBuffer2(VkCommandBuffer commandBuffer,
+                                                 VkBuffer buffer,
+                                                 VkDeviceSize offset,
+                                                 VkDeviceSize size,
+                                                 VkIndexType indexType) {
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->bindIndexBuffer(fromHandle<vulkan::Buffer>(buffer), offset, indexType,
+                        size);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetViewport(VkCommandBuffer commandBuffer,

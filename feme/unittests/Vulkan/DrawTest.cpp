@@ -865,7 +865,73 @@ TEST_F(DrawTest, RendersIndexedDraw) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// A `VK_VERTEX_INPUT_RATE_INSTANCE` binding advances once per instance
+/// Roadmap E5 (`VK_KHR_maintenance5`): `vkCmdBindIndexBuffer2` is the same
+/// bind as `vkCmdBindIndexBuffer` above when its own `size` covers the
+/// whole remaining buffer.
+TEST_F(DrawTest, RendersIndexedDrawThroughBindIndexBuffer2) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory IndexMemory = VK_NULL_HANDLE;
+  VkBuffer IndexBuffer = createBuffer(3 * sizeof(uint32_t), IndexMemory,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+  uint32_t Indices[3] = {0, 1, 2};
+  std::memcpy(fromHandle<Buffer>(IndexBuffer)->data(), Indices,
+              sizeof(Indices));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindIndexBuffer2(Cmd, IndexBuffer, 0, VK_WHOLE_SIZE,
+                        VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(Cmd, 3, 1, 0, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0xFF);
+  EXPECT_EQ(texel(2, 2)[3], 0xFF);
+
+  vkDestroyBuffer(Device, IndexBuffer, nullptr);
+  vkFreeMemory(Device, IndexMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap E5: `vkCmdBindIndexBuffer2`'s `size` bounds the readable index
+/// range to less than the whole buffer -- a draw whose index range would
+/// have fit the whole buffer, but not the narrower bound `size` gives it,
+/// is rejected.
+TEST_F(DrawTest, RejectsIndexRangeBeyondBindIndexBuffer2Size) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory IndexMemory = VK_NULL_HANDLE;
+  VkBuffer IndexBuffer = createBuffer(3 * sizeof(uint32_t), IndexMemory,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+  uint32_t Indices[3] = {0, 1, 2};
+  std::memcpy(fromHandle<Buffer>(IndexBuffer)->data(), Indices,
+              sizeof(Indices));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Only the first 2 indices are bound; drawing all 3 overruns that bound.
+  vkCmdBindIndexBuffer2(Cmd, IndexBuffer, 0, 2 * sizeof(uint32_t),
+                        VK_INDEX_TYPE_UINT32);
+  vkCmdDrawIndexed(Cmd, 3, 1, 0, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyBuffer(Device, IndexBuffer, nullptr);
+  vkFreeMemory(Device, IndexMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// rather than once per vertex: `firstInstance` selects the buffer's second
 /// element (green), not its first (red) -- a per-vertex-rate fetch would
 /// instead read vertex index 0 and always see the first element.
