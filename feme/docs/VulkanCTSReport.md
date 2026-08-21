@@ -2442,3 +2442,27 @@ additional evidence over the two checks already made. `ninja check-feme`
 (includes `FeMeVulkanTests` and `libfeme_vulkan` itself in its dependency
 graph): 1495/1496 passed, 1 unsupported (pre-existing, unrelated), after
 both commits.
+
+## Roadmap E15: no CTS run (verify-first gate resolved by a documentation-only split)
+
+E15's own text gated implementation on first verifying LDR ASTC's
+status in `Format.cpp`; that verification found no ASTC decode of any
+kind (LDR or HDR), no block-compressed format support at all, and a
+second, independent gap in `Image.cpp`'s per-texel (not block-based)
+subresource layout. Per the row's own instruction ("should be split")
+and roadmap G4, this pass's only output is the split itself -- new
+Roadmap.md rows E20 (LDR prerequisite + block-layout groundwork) and
+E21 (E15's original HDR-only scope) -- plus the corresponding
+`Vulkan14FeatureInventory.md`/`FeMeVulkanDesign.md` notes recording the
+finding. See `agent_thoughts.md` for the full investigation.
+
+No production code changed (`mapVkFormat` still returns `std::nullopt`
+for every ASTC format, `textureCompressionASTC_HDR` stays `VK_FALSE` --
+both already the correct, honest answer). `ninja lib/libfeme_vulkan.so`
+reported `ninja: no work to do` after this change, the same
+stronger-than-a-rebuild evidence the "SPIR-V `spirv.Image`/
+`spirv.VulkanBuffer` AMDGPU-lowering fix" addendum above used: no
+`dEQP-VK` run (full or spot-check) was performed, since every existing
+case in this report already exercises the exact binary this change did
+not touch. `ninja check-feme`: 1586/1587 passed, 1 unsupported
+(pre-existing, unrelated), before and after.
