@@ -26,15 +26,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E8 in the roadmap document?
+Can you implement milestone E9 in the roadmap document?
 
-> **`VK_KHR_shader_integer_dot_product`/`shaderIntegerDotProduct`.** The largest
-> single limit cluster in E2's placeholder set (36 of the 70 fields are
-> `integerDotProduct*Accelerated` bits): decide, measure, and report truthfully
-> whether this CPU target's `OpSDot`/`OpUDot`/`OpSUDot`-family lowering (new
-> `spirv`->`llvm` conversion patterns, since none exist today per
-> `Vulkan14FeatureInventory.md`) is actually hardware-accelerated (likely
-> `VK_FALSE` for all 36 on a CPU executor -- a truthful "supported but not
-> accelerated" is a valid, conformant answer and cheaper than claiming
-> acceleration this target cannot deliver) | E2, §1.2 (new `spirv` dialect
-> conversion patterns)
+>  **`VK_EXT_pipeline_creation_cache_control`/`pipelineCreationCacheControl`.**
+>  `VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`/`VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`
+>  are flag-only additions to `GraphicsPipeline.cpp`/`Pipeline.cpp`'s existing
+>  creation path and `PipelineCache.{h,cpp}`'s existing cache object -- no new
+>  object model, purely accepting and honoring two new bits
