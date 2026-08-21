@@ -26516,3 +26516,147 @@ correction above), and did not attempt to fix the two unrelated CTS gaps
 the targeted run surfaced (the SIMD-lowering `getelementptr` issue and the
 divergent-vector decomposition gap) -- both are real, already tracked by
 prior rows' own reports, and out of this row's own scope.
+
+# Milestone E11: VK_EXT_shader_demote_to_helper_invocation/shaderDemoteToHelperInvocation
+
+## Audit first, per the row's own instruction
+
+The row's premise was "SPIR-V's `OpDemoteToHelperInvocation` needs a new
+`spirv`->`llvm` conversion pattern... audit `SPIRVToLLVMPatterns.cpp`
+first." The audit found more than that premise anticipated:
+
+- No discard/demote/terminate pattern of any kind exists in
+  `SPIRVToLLVMPatterns.cpp` -- not for `OpDemoteToHelperInvocation`, and
+  not for the older `OpKill` either. The existing
+  `spirv-canonicalize-stage-raised.ll` test that already exercises
+  `llvm.spv.discard` -> `feme.stage.discard` is a hand-synthesized
+  unit-style test of `CanonicalizeStagePass` in isolation, not an
+  end-to-end regression test through a real SPIR-V binary -- there was no
+  such end-to-end path to test.
+- `feme.stage.demote` (`StageOpKind::Demote`) already exists, fully wired
+  through `ReferenceLowering.cpp`/`Linearize.cpp`/`SIMDize.cpp` -- someone
+  (a prior DXIL-focused milestone, or in anticipation of this one) had
+  already done the harder half of this work. Only the SPIR-V import side
+  was missing.
+- The real blocker: **MLIR's own upstream SPIR-V dialect has no op at all
+  for `OpDemoteToHelperInvocation`**, despite already carrying its
+  Capability/Extension enum cases (`SPIRV_C_DemoteToHelperInvocation`,
+  `SPV_EXT_demote_to_helper_invocation`). `mlir::spirv::deserialize`
+  (which `feme::SPIRVImporter` calls directly, with no custom binary
+  parsing of its own, unlike DXSA's hand-rolled `BinaryParser`) would
+  reject any real SPIR-V module using this op today. This is not a feme
+  gap at all; it is an upstream MLIR gap this milestone had to fix first.
+
+This changed the shape of the work: instead of "add one conversion
+pattern," it became "add the missing MLIR op, add a matching LLVM
+intrinsic, then add the conversion pattern feme's own audit expected."
+
+## Why a new op instead of reusing `spirv.Kill`
+
+`spirv.Kill` (`OpKill`) is a `Terminator` in MLIR's own trait system --
+correctly, since `OpKill` must be the last instruction in a block per the
+SPIR-V spec. `OpDemoteToHelperInvocation` is a different instruction with
+a different opcode (5380 vs. 252) and, crucially, is not a terminator:
+the invocation continues executing afterwards, just with its side
+effects suppressed. Reusing `spirv.Kill` for both would either make it a
+terminator (wrong for demote) or a non-terminator (wrong for kill), so
+the correct fix is a second, distinct op -- exactly what upstream would
+do if this were contributed as a standalone MLIR patch.
+
+## Why a new LLVM intrinsic instead of reusing `llvm.spv.discard`
+
+`llvm.spv.discard` already exists upstream, and this target's own SPIR-V
+backend (`SPIRVInstructionSelector.cpp`'s `selectDiscard`) deliberately
+collapses the kill/demote distinction on the emit side: it lowers
+`llvm.spv.discard` to `OpDemoteToHelperInvocation` when the target
+capability allows it, falling back to `OpKill` otherwise. That collapse
+is fine for the emit direction (HLSL's `discard` genuinely doesn't care
+which one the backend picks), but wrong for feme's import direction:
+feme needs to recover which one the input SPIR-V binary actually used,
+not guess. A new `llvm.spv.demote.to.helper.invocation` intrinsic
+(mirroring `int_spv_discard`'s own `DefaultAttrsIntrinsic<[], [], []>`
+shape) preserves that distinction cleanly, and needs no SPIR-V backend
+codegen support to be legal -- feme's own `CanonicalizeStagePass` consumes
+and erases it long before any SPIR-V-target codegen would ever see it.
+
+## Design correction: audit found no existing SPIR-V discard path at all
+
+Filed as a correction to this row's own premise (see Roadmap.md's closing
+note): the row assumed a `spirv`->`llvm` pattern gap only for demote, on
+the theory that discard's path already existed. It didn't -- `OpKill`
+itself has no conversion pattern either, only the later-stage
+`CanonicalizeStagePass` test coverage of the intrinsic it would eventually
+consume. That gap (closing `OpKill` -> `llvm.spv.discard` ->
+`feme.stage.discard`) is explicitly out of this row's scope (it is not
+`OpDemoteToHelperInvocation`), so it is left as a follow-on, not fixed
+here, but recorded so it isn't rediscovered as a surprise.
+
+## Testing discipline, mirroring E9/E10
+
+Each of the five commits is independently testable:
+
+1. MLIR op addition: `mlir/test/Dialect/SPIRV/IR/control-flow-ops.mlir`
+   (parse/print round-trip) and `mlir/test/Target/SPIRV/terminator.mlir`
+   (binary serialize/deserialize round-trip, gated by `spirv-tools` via
+   `spirv-val` when available). Built `MLIRSPIRVOpsIncGen`/
+   `MLIRSPIRVDialect` first to confirm the tablegen-generated
+   serialization dispatch picked up the new op with zero hand-written
+   C++ (verified by grepping the generated `SPIRVSerialization.inc`).
+2. LLVM intrinsic addition: built `intrinsics_gen` to confirm
+   `IntrinsicsSPIRV.td` still generates cleanly and the new enumerator
+   (`Intrinsic::spv_demote_to_helper_invocation`) exists in the generated
+   header.
+3. feme conversion pattern:
+   `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-demote-to-helper-
+   invocation.mlir`, a real `spirv.module` round-tripped through
+   `feme-opt --feme-convert-spirv-to-llvm`, plus a full run of the
+   existing 23 Conversion/SPIRVToLLVM tests to check for regressions.
+4. `CanonicalizeStagePass` raising: extended the existing
+   `spirv-canonicalize-stage-raised.ll` with a second intrinsic case,
+   mirroring `llvm.spv.discard`'s existing one exactly.
+5. Vulkan feature bit: extended `PhysicalDeviceInfoTest.cpp` with a
+   dedicated-struct test (mirroring E9/E10's own), fixed the aggregate
+   struct's expectation, and fixed `DrawTest.cpp`'s extension-count
+   assertion (8 -> 9) plus added the new extension-name check.
+
+Ran `ninja check-feme` (assertions-enabled, ccache build) after all five
+commits: 1575/1576 passed (1 pre-existing `Unsupported`, unrelated).
+
+## Targeted CTS run
+
+Ran against the actual checkout under `/home/dev/dev/VK-GL-CTS/`, not
+simulated. The two direct feature-query/consistency cases this row's own
+bits gate now pass (previously `Fail`, part of D3's tracked `api.info.*`
+bucket). Wildcarded across every CTS group naming this concept `demote` or
+`helper_invocation` (60 + 94 cases) rather than guessing which specific
+buckets mattered: every non-passing case traced to a prerequisite this row
+does not touch (unsupported depth/stencil formats,
+`VK_EXT_shader_stencil_export`, fragment-shader stores/atomics, fragment-
+stage subgroup ops, `VK_KHR_acceleration_structure`, or an unrelated
+render-pass-format failure at `vkCreateRenderPass` before any
+demote/helper-invocation-specific shader code even runs). Recorded the
+full breakdown in VulkanCTSReport.md's new "Roadmap E11: measured impact"
+section, following E9/E10's own precedent of attributing every non-pass
+rather than only reporting the headline numbers.
+
+## Scope discipline
+
+Touched: `mlir/include/mlir/Dialect/SPIRV/IR/{SPIRVBase,
+SPIRVControlFlowOps}.td` (new op), two MLIR test files,
+`llvm/include/llvm/IR/IntrinsicsSPIRV.td` (new intrinsic),
+`SPIRVToLLVMPatterns.cpp` (new pattern) plus its new test,
+`CanonicalizeStage.cpp` (new raising rule) plus its extended test,
+`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp` (feature bit + extension name),
+the two pre-existing Vulkan unit tests this row's own feature-bit flip
+required updating, one new dedicated-struct test, and the four documents
+(`Roadmap.md`, `FeMeGraphicsDesign.md`, `VulkanCTSReport.md`, this file)
+prior E-rows also touched. Did not implement the same extension's other
+op (its helper-invocation query op) since the row's own text scopes this
+milestone to `OpDemoteToHelperInvocation` specifically, and
+`StageOpKind::IsHelper` already exists for DXIL's `IsHelperLane` -- wiring
+the SPIR-V query op is a small, separable follow-on, not folded into this
+row. Did not implement `OpTerminateInvocation` (roadmap E12, a true
+terminator, a different op with different semantics) even though it is
+adjacent. Did not attempt to close the newly-discovered `OpKill`
+conversion-pattern gap, since it is a correction to this row's premise,
+not this row's own scope.
