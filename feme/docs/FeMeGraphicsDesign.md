@@ -574,7 +574,14 @@ validation passes this section calls for:
   `spirv.DemoteToHelperInvocation` op upstream before it could even be
   imported at all) to this same renaming, onto a constant-true
   `feme.stage.demote` -- unconditional exactly like `discard`, but not a
-  terminator, matching the op's own non-terminating semantics.
+  terminator, matching the op's own non-terminating semantics. Roadmap E12
+  similarly needed a new MLIR `spirv.TerminateInvocation` op for SPIR-V's
+  `OpTerminateInvocation`, but that op's own `SPIRVToLLVMPatterns.cpp`
+  conversion (not this pass) already lowers it directly to the same
+  `llvm.spv.discard` call `OpKill` uses, followed by an explicit
+  `llvm.return` (`OpTerminateInvocation`, unlike `OpDemoteToHelperInvocation`,
+  is a true terminator), so this pass needs no changes of its own: the
+  existing `llvm.spv.discard` renaming above already covers it.
 - `feme::graphics::ValidateStagePass` (`feme-graphics-validate-stage`)
   diagnoses (through `LLVMContext::emitError`, never rewrites) a
   `feme.stage.*` call whose element/row/component operands are non-constant,

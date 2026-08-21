@@ -1959,6 +1959,66 @@ format these particular tests happen to need, the same class of
 pre-existing `Format.cpp` gap several earlier rows in this report already
 found, unrelated to `OpDemoteToHelperInvocation`.
 
+## Roadmap E12: measured impact
+
+Roadmap E12 (`VK_KHR_shader_terminate_invocation`/
+`shaderTerminateInvocation`) needed the same shape of prerequisite gap E11
+found: the audit found no `spirv`->`llvm` conversion pattern for SPIR-V's
+`OpTerminateInvocation` at all, and MLIR's own upstream SPIR-V dialect had
+no op for it either (despite the `SPV_KHR_terminate_invocation` extension
+enum case already existing), so `mlir::spirv::deserialize` would reject
+any real module using it. This row added `spirv.TerminateInvocation` to
+MLIR itself (a true terminator, unlike `spirv.DemoteToHelperInvocation`,
+requiring no capability beyond the existing `Shader` one) and
+`SPIRVToLLVMPatterns.cpp`'s new `TerminateInvocationConversionPattern`,
+converting the op into exactly the unconditional discard-and-return the
+roadmap row's own premise specified: a call to the same `llvm.spv.discard`
+intrinsic `OpKill` itself would use (already raised into
+`feme.stage.discard(true)` by the existing `CanonicalizeStagePass`
+renaming, unmodified by this milestone), followed by an `llvm.return`.
+`shaderTerminateInvocation` now reads `VK_TRUE` from both the aggregate
+`VkPhysicalDeviceVulkan13Features` struct and a new dedicated
+`VkPhysicalDeviceShaderTerminateInvocationFeatures` struct;
+`getSupportedDeviceExtensions` gained `VK_KHR_shader_terminate_invocation`
+itself, the same "CTS enables it by name regardless of `apiVersion`"
+reason E3/E5/E6/E8/E9/E10/E11 already established.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.shader_terminate_invocation_features` | `Pass` |
+| `dEQP-VK.api.info.vulkan1p3.{features,properties,feature_extensions_consistency}` (3 total) | 3/3 `Pass`, confirming the new dedicated `VkPhysicalDeviceShaderTerminateInvocationFeatures` struct agrees with the aggregate `VkPhysicalDeviceVulkan13Features` case |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.shader_terminate_invocation_features` | `Pass` |
+| The 72 `dEQP-VK.graphicsfuzz.*` cases this table's own `graphicsfuzz` row above (72, "closes D3's `graphicsfuzz` 72-case regression") names, identified directly from the 72 `*.amber` source files under `external/vulkancts/data/vulkan/amber/graphicsfuzz/` that reference `OpTerminateInvocation` | 0/72 `Pass`, 72/72 `Fail` -- see correction below |
+
+**This is a premise correction to the `graphicsfuzz` row's own D3-era
+characterization above ("run ... and produce a wrong image, an
+image-comparison mismatch, not a pipeline-creation error"), not a sign
+this row's own conversion pattern is wrong.** All 72 cases fail identically
+at Amber's own pre-flight check, before any pipeline is created or shader
+executed: `Vulkan color attachment format is not supported`
+(`external/amber/src/src/vulkan/engine_vulkan.cc`'s `CreatePipeline`,
+querying `vkGetPhysicalDeviceFormatProperties`). This is not new, and not
+specific to `OpTerminateInvocation`: a control sample of 20 arbitrary
+`graphicsfuzz` cases that do not reference `OpTerminateInvocation` at all
+fails identically, 20/20, at the same check -- confirming this is the
+same pre-existing, already-documented `vkGetPhysicalDeviceFormatProperties`
+stub gap this report's own "Headline"/C1 sections trace (it unconditionally
+reports zero format-feature support regardless of `isSupportedColorAttachmentFormat`,
+a gap "deliberately left unfixed" per this report's own later note), which
+blocks the entire 757-case `graphicsfuzz` group uniformly, not just these
+72. That gap is out of this milestone's own scope (§1.2's SPIR-V
+conversion patterns, not `vkGetPhysicalDeviceFormatProperties`) and
+unrelated to `OpTerminateInvocation`, so it is not fixed here. This
+milestone's own actual scope -- the `OpTerminateInvocation` conversion
+pattern itself -- is instead verified directly at the SPIR-V/LLVM IR level
+by `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-terminate-invocation.mlir`
+(new this row), which confirms the exact `llvm.call_intrinsic
+"llvm.spv.discard"()` + `llvm.return` shape the roadmap row's own premise
+specified, and the feature/extension advertisement is verified end-to-end
+by the three passing `api.info`/`device_init` cases above.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
