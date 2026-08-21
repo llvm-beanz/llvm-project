@@ -617,7 +617,10 @@ TEST_F(PhysicalDeviceProperties2Test,
   // CommandBuffer.cpp/Format.cpp), and must agree with the dedicated
   // `VK_KHR_maintenance5` struct case below.
   EXPECT_EQ(Features14.maintenance5, VK_TRUE);
-  EXPECT_EQ(Features14.maintenance6, VK_FALSE);
+  // Roadmap E6: now genuinely implemented (vkCmdBindDescriptorSets2/
+  // vkCmdPushConstants2 in CommandBuffer.cpp), and must agree with the
+  // dedicated `VK_KHR_maintenance6` struct case below.
+  EXPECT_EQ(Features14.maintenance6, VK_TRUE);
   EXPECT_EQ(Features14.pipelineProtectedAccess, VK_FALSE);
   EXPECT_EQ(Features14.pipelineRobustness, VK_FALSE);
   EXPECT_EQ(Features14.hostImageCopy, VK_FALSE);
@@ -662,6 +665,22 @@ TEST_F(
   EXPECT_EQ(Maintenance5Props.nonStrictSinglePixelWideLinesUseParallelogram,
             VK_FALSE);
   EXPECT_EQ(Maintenance5Props.nonStrictWideLinesUseParallelogram, VK_FALSE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       Maintenance6IsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E6: `VK_KHR_maintenance6`'s own dedicated feature struct must
+  // agree with the aggregate `VkPhysicalDeviceVulkan14Features` case above,
+  // exactly like `VK_KHR_maintenance5`'s own struct does.
+  VkPhysicalDeviceMaintenance6Features Maintenance6Features{};
+  Maintenance6Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Maintenance6Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(Maintenance6Features.maintenance6, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

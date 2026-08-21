@@ -856,7 +856,11 @@ void fillFeatures2Chain(void *pNext) {
       Features->indexTypeUint8 = VK_FALSE;
       Features->dynamicRenderingLocalRead = VK_FALSE;
       Features->maintenance5 = VK_TRUE;
-      Features->maintenance6 = VK_FALSE;
+      // (roadmap E6) `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`
+      // (CommandBuffer.cpp) are implemented, so this bit -- like
+      // `maintenance5` -- must agree with the dedicated
+      // `VkPhysicalDeviceMaintenance6Features` struct case below.
+      Features->maintenance6 = VK_TRUE;
       Features->pipelineProtectedAccess = VK_FALSE;
       Features->pipelineRobustness = VK_FALSE;
       Features->hostImageCopy = VK_FALSE;
@@ -897,6 +901,17 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceMaintenance5FeaturesKHR *>(Base);
       Features->maintenance5 = VK_TRUE;
+      break;
+    }
+    // (roadmap E6) `VK_KHR_maintenance6`'s own feature struct, whose 1.4
+    // core and `KHR` spellings share one `sType` (unlike `maintenance5`
+    // above, this extension's core promotion did add a core-spelled
+    // alias), agreeing with the aggregate `VkPhysicalDeviceVulkan14Features`
+    // case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceMaintenance6Features *>(Base);
+      Features->maintenance6 = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:
