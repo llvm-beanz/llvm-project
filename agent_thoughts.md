@@ -27561,3 +27561,188 @@ regression and no newly-failing case, in place of a full 3-million-
 case re-run this row's own observable-behavior-unchanged design (see
 above) does not warrant -- see "Roadmap E20: measured impact" in
 VulkanCTSReport.md for the full breakdown.
+
+# Roadmap E21: `VK_EXT_texture_compression_astc_hdr` -- the 14 HDR block formats
+
+## Task as given
+
+"Implement milestone E21 in the roadmap document": the row E15 split off
+for its own HDR-specific scope once E20 (the LDR prerequisite +
+block-layout groundwork) landed -- the 14 `VK_FORMAT_ASTC_{4x4,...,
+12x12}_SFLOAT_BLOCK_EXT` formats, reusing E20's shared bit-unpacking/
+weight-grid decode and adding the HDR-only float color-endpoint decode
+path. Explicitly unchanged from E15's own original scope text.
+
+## Reading the specification before writing anything
+
+Unlike most of this codebase's decisions, the ASTC HDR endpoint-decode
+formulas are not a FeMe-specific design choice -- they are a fixed part
+of the Khronos specification, the same way E20's LDR decode was. Rather
+than rely on memory (this milestone's own scope note explicitly calls
+out the "silently wrong pixel, not a crash" risk a rushed HDR decoder
+would carry, the same risk E15's investigation flagged for the decoder
+as a whole), I fetched the actual normative text --
+`KHR_texture_compression_astc_hdr`'s extension specification from
+`registry.khronos.org` -- and read "HDR Endpoint Decoding" (section
+C.2.15, all six modes' pseudocode verbatim) and "Weight Application"
+(C.2.19, the LDR-vs-HDR interpolation/finalization split) in full before
+writing `decodeHDRColorEndpoints`/`finalizeChannel`.
+
+## Design: one shared interpolation pipeline, not two
+
+The specification's own C.2.19 text is explicit that LDR and HDR
+components share the same shape of pipeline: both endpoints get
+shifted/expanded to a 16-bit value, interpolated by the identical
+`(C0*(64-i) + C1*i + 32)/64` formula, and only then does the final
+step diverge (LDR: divide by 65536, saturating at 1.0; HDR: decompose
+into a 5-bit exponent / 11-bit mantissa, recombine through a
+piecewise-logarithmic mantissa adjustment, and reinterpret the result
+as an IEEE half). I represented every endpoint value -- whether it came
+from one of the 10 LDR modes or one of these 6 new HDR ones -- in a
+single `Endpoint12` struct (an 8-bit "LDR domain" or 12-bit "HDR domain"
+int per channel, plus a per-channel `IsHDR` bool) and wrote
+`expandTo16Bit`/`finalizeChannel` once, branching only on that bool.
+This was not just an implementation convenience: CEM 14 ("HDR RGB,
+direct + LDR alpha") genuinely mixes domains *within one endpoint pair*
+(RGB is 12-bit HDR, alpha is an 8-bit LDR value used as-is), so a
+per-partition-only LDR/HDR distinction would have been wrong, not just
+less elegant. `decodeColorEndpointsAny` dispatches the 6 HDR-only CEM
+values (2, 3, 7, 11, 14, 15) to the new `decodeHDRColorEndpoints` and
+reuses the existing (unmodified) `decodeColorEndpoints` for the other
+10, tagging every one of its channels non-HDR -- so `decodeASTCBlockHDR`
+correctly decodes a block whose CEM happens to be LDR too, exactly as
+the specification allows and as this file's own header comment now
+documents ("still decodes every LDR mode too").
+
+## Why a new `decodeASTCBlockHDR` entry point, not a flag on the existing one
+
+`decodeASTCBlock` (E20) returns `uint8_t*` RGBA8 texels; an HDR channel
+value is an arbitrary non-negative float (potentially `+Inf`), which has
+no honest RGBA8 representation. Rather than force a lossy cast or an
+awkward `bool` return convention, `decodeASTCBlockHDR` is a parallel
+function with a `float*` output, mirroring the specification's own
+"Vector of FP16 values" HDR result type (Table C.2.1). Both share every
+one of E20's helpers (`getBits`, `decodeISESequence`,
+`unquantizeColorValue`, `decodeBlockMode`, `selectPartition`,
+`infillWeights`) completely unchanged -- the row's own "reusing E20's
+shared bit-unpacking/weight-grid decode" text, taken literally.
+
+## HDR mode 11's `shamt` formula: resolving an apparent spec typo
+
+The published pseudocode for HDR endpoint mode 11 ends with
+`int shamt = (modeval >> 1) ^ 3;` -- but `modeval` is never defined
+anywhere in mode 11's own text (it *is* defined in mode 7's, a few pages
+earlier, as the pre-split combined mode-selector value). Copying that
+line verbatim would not compile, let alone be correct for mode 11's own
+5-bits-of-mode-selector `mode` variable it actually does define. Rather
+than guess, I cross-checked against mode 11's own bit-allocation table
+(Table C.2.23, "Number of bits" columns for `a`/`b`/`c`/`d` per mode
+0-7): the `a` field's own width goes 9, 9, 10, 10, 11, 11, 12, 12 bits
+for modes 0-7, and shifting `va` (whose top bit should land at bit 11
+of the 12-bit output domain) up to that width requires
+`shamt = 12 - a_bits(mode)`, i.e. `{3, 3, 2, 2, 1, 1, 0, 0}` -- which is
+exactly `(mode >> 1) ^ 3` for `mode` in `[0, 7]` (a 2-bit XOR-with-3 is
+the same as `3 - x` for a 2-bit `x`). That derivation, not a guess at
+what "modeval" might have meant, is what `Shamt = (Mode >> 1) ^ 3;`
+in `decodeHDRMode11` is based on, and I verified it against every
+`HDRRGBDirect*` test case's own hand-computed expected value rather
+than trusting the derivation alone.
+
+## A real bug the tests caught, not just confirmed absent
+
+`decodeHDRMode11`'s `MajComp == 3` ("specify RGB directly") shortcut
+initially read:
+
+```
+Result.Hi = {V0 << 4, V2 << 4, (V4 & 0x7F) << 5};
+Result.Lo = {V1 << 4, V3 << 4, (V5 & 0x7F) << 5};
+```
+
+-- i.e. the specification's `e0` (built from `v0, v2, v4`) assigned to
+this decoder's `Hi`, and `e1` (`v1, v3, v5`) to `Lo`. That is backwards:
+the specification's own convention is `e0` is the *low* endpoint and
+`e1` the *high* one (matching the general, non-direct path a few lines
+below, which already had `Hi` built from the unshifted-major-component
+value and `Lo` from the same value minus an offset -- the "low = base
+minus something" shape a low endpoint should have). I wrote
+`HDRRGBDirectCEM11MajorComponentThreeDirectPath` with hand-derived,
+round-number inputs specifically so weight-0 and weight-64 decodes would
+land on easy-to-verify values (1.0/2.0 for the red channel, 0.0 for
+green/blue) -- and the weight-0 case failed, reporting the *high*
+endpoint's value (2.0) where the *low* one (1.0) was expected. Tracing
+it to the swapped assignment above and fixing it (`Lo` gets `e0`'s
+values, `Hi` gets `e1`'s) made every hand-verified test pass, including
+the two downstream modes (14, 15) that reuse this same helper for their
+own RGB channels and would otherwise have inherited the same swap
+silently.
+
+## Test derivation: picking round numbers, not fighting the math
+
+Every `HDR*` test in `ASTCDecodeTest.cpp` was constructed by choosing
+raw 8-bit color values specifically so the resulting 12-bit endpoint
+(or, for mode 7/11, several bit-field-selected sub-values) lands on a
+value whose 16-bit-expanded, exponent/mantissa-decomposed, half-float
+result is an exact power-of-two-scaled dyadic rational (e.g. `0x780`,
+the mode 2/3/7/11 alpha constant, decodes to exactly `1.0`; doubling the
+pre-expansion value by construction gives exactly `2.0`; etc.) -- this
+made hand-verification of the *specification's* formula tractable
+without also silently re-deriving (and so risking correlated bugs with)
+this decoder's own implementation. Where an exact power-of-two landing
+point was not achievable without a much more contrived input (CEM 3's
+base value, CEM 7's scaled base, CEM 15's second alpha value), I instead
+computed the expected float as a literal dyadic-rational expression
+(e.g. `1.4375f / 256.0f`) directly from the specification's own
+intermediate values (`E`, `M`, `Mt`, `Cf`) shown in each test's own
+comment, rather than copying this file's `finalizeChannel`/
+`halfBitsToFloat` implementation into the test.
+
+One test-authoring mistake worth recording (not a decoder bug): I first
+hand-computed the CEM 2 test's high-endpoint expected value by
+mis-copying a *different* test's already-computed 16-bit value instead
+of re-deriving it for CEM 2's own inputs -- a Python one-off script,
+not another read of my own C++ code, caught the mismatch (`1024.0`,
+not the `1.6875` I had mistakenly transcribed) before it could mask the
+real mode-11 bug above by coincidentally still passing.
+
+## Scope: format mapping and void-extent HDR handling, verified
+
+`Format.cpp`/`RuntimeABI.h` gained the 14 `ASTC_*_SFLOAT` entries plus
+`mapVkFormat` cases the same mechanical way E20's own 28 LDR/SRGB
+entries landed (single-footprint-per-format, `bytesPerBlock` still
+128 bits regardless of footprint). `decodeASTCBlockHDR`'s void-extent
+handling branches on bit 9 (specification "Dynamic Range flag"): LDR
+void extent divides the stored UNORM16 value by 65535 (verified against
+`decodeASTCBlock`'s own already-tested LDR void-extent case, reused
+through the new entry point in
+`LDRVoidExtentThroughHDREntryPointMatchesUnormValues`); HDR void extent
+reinterprets the same 16-bit fields as FP16 bit patterns directly
+(`HDRVoidExtentDecodesStoredHalfFloats`, using the well-known bit
+patterns `0x3C00`/`0x0000`/`0x4000` for 1.0/0.0/2.0 rather than an
+opaque arbitrary value).
+
+## What did not change, and why
+
+`vkCreateImage` still rejects every ASTC `VkFormat` outright (LDR or
+HDR) -- E20's own `ImageOps.cpp`/copy-path scope note applies
+identically here, and `textureCompressionASTC_HDR` stays `VK_FALSE` for
+the same "an unadvertised feature is honest, a partially-wired one risks
+a CTS regression instead of a clean NotSupported" reasoning both E15 and
+E20 already established. Roadmap E22 (previously scoped as "ASTC LDR
+copy/sampling pipeline wiring") now covers both dynamic ranges' pipeline
+wiring together, since `decodeASTCBlock` and `decodeASTCBlockHDR` are
+both ready and waiting for the same copy/sampling rework to consume
+them -- recorded as an update to that row's own scope note rather than
+adding a redundant new row.
+
+## Verification
+
+`ninja check-feme` (this session's existing `./build`, `RelWithDebInfo`
++ `LLVM_ENABLE_ASSERTIONS=ON` + `LLVM_CCACHE_BUILD=ON`) passed in full
+after every commit (1609/1610 passed, 1 unsupported, unrelated,
+throughout). The same two targeted `dEQP-VK` subsets E20's own run used
+(`api.info.*` and `*astc*`) were repeated and produced byte-for-byte
+identical headline numbers to E20's own report, with no case in this
+CTS revision yet named after any of the 14 new 2D `_sfloat_block_ext`
+formats (only the unrelated 3D "full profile" footprints the extension
+itself does not define appear under that name) -- see "Roadmap E21:
+measured impact" in VulkanCTSReport.md for the full breakdown.
