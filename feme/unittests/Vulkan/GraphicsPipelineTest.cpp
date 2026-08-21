@@ -896,4 +896,62 @@ TEST_F(GraphicsPipelineTest, DifferingFixedFunctionStateIsACacheMiss) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap E9: `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`
+/// with no cache at all must always report `VK_PIPELINE_COMPILE_REQUIRED`
+/// and leave the pipeline null, the same as the compute path (see
+/// `PipelineCacheTest.FailOnCompileRequiredWithNoCacheAlwaysFails`).
+TEST_F(GraphicsPipelineTest, FailOnCompileRequiredWithNoCacheAlwaysFails) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Pipeline), VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// Roadmap E9: with a cache, a first creation carrying the bit misses (the
+/// cache starts empty) without populating it; an ordinary creation then
+/// compiles and populates it; a third creation with the bit set again now
+/// hits and succeeds, reusing the second creation's compiled stages.
+TEST_F(GraphicsPipelineTest, FailOnCompileRequiredSucceedsOnceCachePopulated) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo NoCompileInfo = makeCreateInfo(Vertex, Fragment);
+  NoCompileInfo.flags =
+      VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+  VkPipeline Missed = VK_NULL_HANDLE;
+  EXPECT_EQ(create(NoCompileInfo, Missed, Cache), VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Missed, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo NormalInfo = makeCreateInfo(Vertex, Fragment);
+  VkPipeline Compiled = VK_NULL_HANDLE;
+  ASSERT_EQ(create(NormalInfo, Compiled, Cache), VK_SUCCESS);
+
+  VkGraphicsPipelineCreateInfo HitInfo = makeCreateInfo(Vertex, Fragment);
+  HitInfo.flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+  VkPipeline Hit = VK_NULL_HANDLE;
+  ASSERT_EQ(create(HitInfo, Hit, Cache), VK_SUCCESS);
+
+  auto *CompiledPipe =
+      static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Compiled));
+  auto *HitPipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Hit));
+  EXPECT_EQ(&CompiledPipe->vertexStage(), &HitPipe->vertexStage());
+
+  vkDestroyPipeline(Device, Compiled, nullptr);
+  vkDestroyPipeline(Device, Hit, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 } // namespace

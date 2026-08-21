@@ -1135,7 +1135,7 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
   return Artifact;
 }
 
-Expected<GraphicsPipelineState>
+Expected<std::optional<GraphicsPipelineState>>
 compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         const PhysicalDeviceInfo &DeviceInfo,
                         PipelineCache *Cache) {
@@ -1172,6 +1172,12 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
   std::shared_ptr<GraphicsPipelineArtifact> Artifact =
       Key ? Cache->lookupGraphics(*Key) : nullptr;
   if (!Artifact) {
+    // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
+    // BIT`: this pipeline missed the cache (or none was given), and the
+    // caller asked to be told rather than pay for a real compile here.
+    if (CreateInfo.flags &
+        VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT)
+      return std::nullopt;
     Expected<std::shared_ptr<GraphicsPipelineArtifact>> Compiled =
         compileAndValidateStages(
             *VertexInfo, *FragmentInfo, Layout, DeviceInfo.Properties.limits,
@@ -1261,15 +1267,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
   VkResult Result = VK_SUCCESS;
   for (uint32_t I = 0; I != createInfoCount; ++I) {
     pPipelines[I] = VK_NULL_HANDLE;
-    Expected<GraphicsPipelineState> Compiled =
+    Expected<std::optional<GraphicsPipelineState>> Compiled =
         compileGraphicsPipeline(pCreateInfos[I], DeviceInfo, Cache);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       Result = VK_ERROR_INITIALIZATION_FAILED;
       continue;
     }
+    if (!*Compiled) {
+      // (roadmap E9) A cache miss with
+      // `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` set --
+      // see `compileGraphicsPipeline`'s own comment. Not an error a more
+      // severe one (a real compile failure, or out-of-memory below) should
+      // ever be masked by.
+      if (Result == VK_SUCCESS)
+        Result = VK_PIPELINE_COMPILE_REQUIRED;
+      continue;
+    }
     GraphicsPipeline *Obj = Alloc.create<GraphicsPipeline>(
-        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(*Compiled));
+        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(**Compiled));
     if (!Obj) {
       Result = VK_ERROR_OUT_OF_HOST_MEMORY;
       continue;
