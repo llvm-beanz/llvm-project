@@ -317,8 +317,10 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Props13.maxDescriptorSetInlineUniformBlocks, 0u);
   EXPECT_EQ(Props13.maxDescriptorSetUpdateAfterBindInlineUniformBlocks, 0u);
   EXPECT_EQ(Props13.maxInlineUniformTotalSize, 0u);
-  // (roadmap E8) All 30 `integerDotProduct*Accelerated` bits stay
-  // `VK_FALSE` until that row lands.
+  // (roadmap E8) All 36 `integerDotProduct*Accelerated` bits stay
+  // `VK_FALSE`: a real `spirv`->`llvm` lowering exists
+  // (SPIRVToLLVMPatterns.cpp), but it is an ordinary CPU multiply-add
+  // sequence, not a hardware-accelerated one.
   EXPECT_EQ(Props13.integerDotProduct8BitUnsignedAccelerated, VK_FALSE);
   EXPECT_EQ(Props13.integerDotProduct8BitSignedAccelerated, VK_FALSE);
   EXPECT_EQ(Props13.integerDotProduct8BitMixedSignednessAccelerated, VK_FALSE);
@@ -536,7 +538,14 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features13.synchronization2, VK_TRUE);
   EXPECT_EQ(Features13.textureCompressionASTC_HDR, VK_FALSE);
   EXPECT_EQ(Features13.shaderZeroInitializeWorkgroupMemory, VK_FALSE);
-  EXPECT_EQ(Features13.shaderIntegerDotProduct, VK_FALSE);
+  // Roadmap E8: now genuinely implemented (SPIRVToLLVMPatterns.cpp's
+  // OpSDot/OpUDot/OpSUDot-family patterns), and must agree with the
+  // dedicated `VK_KHR_shader_integer_dot_product` struct case below. This
+  // does not raise any of the 36 `integerDotProduct*Accelerated` limit
+  // bits (`Vulkan13PropertiesEnumerateEveryMandatoryLimitConservatively`
+  // above): a real lowering exists, but it is an ordinary CPU multiply-add
+  // sequence, not a hardware-accelerated one.
+  EXPECT_EQ(Features13.shaderIntegerDotProduct, VK_TRUE);
   // Roadmap E4: now genuinely implemented (Buffer.cpp/Image.cpp), and must
   // agree with the dedicated `VK_KHR_maintenance4` struct case below.
   EXPECT_EQ(Features13.maintenance4, VK_TRUE);
@@ -635,6 +644,131 @@ TEST_F(
   Props2.pNext = &Props13;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
   EXPECT_EQ(Maintenance4Props.maxBufferSize, Props13.maxBufferSize);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    ShaderIntegerDotProductIsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs) {
+  // Roadmap E8: `VK_KHR_shader_integer_dot_product`'s own dedicated
+  // feature/properties structs must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Features`/`Properties` cases above, exactly
+  // like `VK_KHR_maintenance4`'s own structs do above. The feature bit is
+  // genuinely `VK_TRUE` (a real `spirv`->`llvm` lowering exists), but
+  // every `integerDotProduct*Accelerated` limit stays `VK_FALSE`: this CPU
+  // target executes the lowering as an ordinary multiply-add sequence,
+  // not a hardware-accelerated one, and a truthful "supported but not
+  // accelerated" answer is fully conformant.
+  VkPhysicalDeviceShaderIntegerDotProductFeatures DotProductFeatures{};
+  DotProductFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &DotProductFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(DotProductFeatures.shaderIntegerDotProduct, VK_TRUE);
+
+  VkPhysicalDeviceShaderIntegerDotProductProperties DotProductProps;
+  std::memset(&DotProductProps, 0xAA, sizeof(DotProductProps));
+  DotProductProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES;
+  DotProductProps.pNext = nullptr;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &DotProductProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(DotProductProps.integerDotProduct8BitUnsignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct8BitSignedAccelerated, VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct8BitMixedSignednessAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct4x8BitPackedUnsignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct4x8BitPackedSignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProduct4x8BitPackedMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct16BitUnsignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct16BitSignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct16BitMixedSignednessAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct32BitUnsignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct32BitSignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct32BitMixedSignednessAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct64BitUnsignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct64BitSignedAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(DotProductProps.integerDotProduct64BitMixedSignednessAccelerated,
+            VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating8BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating8BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating8BitMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating4x8BitPackedUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating4x8BitPackedSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating4x8BitPackedMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating16BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating16BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating16BitMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating32BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating32BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating32BitMixedSignednessAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating64BitUnsignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating64BitSignedAccelerated,
+      VK_FALSE);
+  EXPECT_EQ(
+      DotProductProps
+          .integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated,
+      VK_FALSE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

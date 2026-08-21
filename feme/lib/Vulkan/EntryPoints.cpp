@@ -632,6 +632,95 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           Info.RequiredSubgroupSizeStages;
       break;
     }
+    // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own properties
+    // struct, whose 1.3 core and `KHR` spellings share one `sType`,
+    // agreeing with the aggregate `VkPhysicalDeviceVulkan13Properties`
+    // case above exactly like `VkPhysicalDeviceSubgroupSizeControlProperties`
+    // already does for its own fields: every one of these 36 bits stays
+    // `VK_FALSE` -- a genuine `spirv`->`llvm` lowering exists (see
+    // SPIRVToLLVMPatterns.cpp), but it is an ordinary per-lane multiply-add
+    // sequence, not a hardware-accelerated one, on this CPU target.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES: {
+      auto *ShaderIntegerDotProduct = reinterpret_cast<
+          VkPhysicalDeviceShaderIntegerDotProductProperties *>(Base);
+      ShaderIntegerDotProduct->integerDotProduct8BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct8BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct8BitMixedSignednessAccelerated = VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct4x8BitPackedUnsignedAccelerated = VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct4x8BitPackedSignedAccelerated = VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct4x8BitPackedMixedSignednessAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct16BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct16BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct16BitMixedSignednessAccelerated = VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct32BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct32BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct32BitMixedSignednessAccelerated = VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct64BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct->integerDotProduct64BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProduct64BitMixedSignednessAccelerated = VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating8BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating8BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating8BitMixedSignednessAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating4x8BitPackedUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating4x8BitPackedSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating4x8BitPackedMixedSignednessAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating16BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating16BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating16BitMixedSignednessAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating32BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating32BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating32BitMixedSignednessAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating64BitUnsignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating64BitSignedAccelerated =
+          VK_FALSE;
+      ShaderIntegerDotProduct
+          ->integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated =
+          VK_FALSE;
+      break;
+    }
     default:
       break;
     }
@@ -869,7 +958,16 @@ void fillFeatures2Chain(void *pNext) {
       Features->textureCompressionASTC_HDR = VK_FALSE;
       Features->shaderZeroInitializeWorkgroupMemory = VK_FALSE;
       Features->dynamicRendering = VK_TRUE;
-      Features->shaderIntegerDotProduct = VK_FALSE;
+      // (roadmap E8) `spirv.SDot`/`spirv.UDot`/`spirv.SUDot`/`*AccSat`
+      // (SPIRVToLLVMPatterns.cpp) are implemented, so this bit -- like
+      // `dynamicRendering`/`synchronization2` -- must agree with the
+      // dedicated `VK_KHR_shader_integer_dot_product` feature struct case
+      // below. None of the 36 `integerDotProduct*Accelerated` limit bits
+      // (`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES` above)
+      // follow from this: this feature bit only claims the operations are
+      // supported, not that any of them run faster than the equivalent
+      // scalar sequence on this CPU target.
+      Features->shaderIntegerDotProduct = VK_TRUE;
       // (roadmap E4) `vkGetDeviceBufferMemoryRequirements`/
       // `vkGetDeviceImageMemoryRequirements`/
       // `vkGetDeviceImageSparseMemoryRequirements` (Buffer.cpp/Image.cpp)
@@ -973,6 +1071,16 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceMaintenance6Features *>(Base);
       Features->maintenance6 = VK_TRUE;
+      break;
+    }
+    // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature
+    // struct, whose 1.3 core and `KHR` spellings share one `sType`, exactly
+    // like `maintenance4` above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceShaderIntegerDotProductFeatures *>(
+              Base);
+      Features->shaderIntegerDotProduct = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:

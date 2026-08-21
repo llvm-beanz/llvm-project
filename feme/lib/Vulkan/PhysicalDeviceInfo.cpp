@@ -473,6 +473,21 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // listed here too, or every one of them fails `NotSupported`
       // instead of running for real.
       {VK_KHR_MAINTENANCE_6_EXTENSION_NAME, VK_KHR_MAINTENANCE_6_SPEC_VERSION},
+      // (roadmap E8) `spirv.SDot`/`spirv.UDot`/`spirv.SUDot` and their
+      // `*AccSat` counterparts now have real `spirv`->`llvm` conversion
+      // patterns (SPIRVToLLVMPatterns.cpp); like `synchronization2`/
+      // `maintenance5`/`maintenance6` above,
+      // `dEQP-VK.spirv_assembly.instruction.compute`'s own integer-dot-
+      // product tests (`vktSpvAsmIntegerDotProductTests.cpp`) enable this
+      // extension by name regardless of the advertised `apiVersion`, so it
+      // must be listed here too, or every one of them fails
+      // `VK_ERROR_EXTENSION_NOT_PRESENT` instead of running for real. None
+      // of the 36 `integerDotProduct*Accelerated` limit bits are claimed,
+      // however: this is a real CPU multiply-add sequence, not a genuinely
+      // accelerated one, and a truthful "supported but not accelerated" is
+      // a valid, conformant answer this extension's own spec permits.
+      {VK_KHR_SHADER_INTEGER_DOT_PRODUCT_EXTENSION_NAME,
+       VK_KHR_SHADER_INTEGER_DOT_PRODUCT_SPEC_VERSION},
   };
   return Extensions;
 }
