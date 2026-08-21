@@ -285,6 +285,39 @@ public:
   }
 };
 
+/// Converts `spirv.DemoteToHelperInvocation` -- which, like `spirv.Switch`
+/// above, MLIR has no pattern for at all (indeed no op at all, until this
+/// same roadmap milestone added one) -- into a call to the
+/// `llvm.spv.demote.to.helper.invocation` intrinsic.
+/// `feme::graphics::CanonicalizeStagePass` later raises that intrinsic call
+/// into `feme.stage.demote(true)`: the unconditional form, since SPIR-V's
+/// `OpDemoteToHelperInvocation` -- unlike `feme.stage.demote`'s own
+/// conditional HLSL `discard`-family origin -- always demotes
+/// unconditionally when reached. This mirrors how `llvm.spv.discard`
+/// (SPIR-V's `OpKill`) is handled the same way, except that op is a
+/// terminator and this one, matching HLSL `discard`'s own non-terminating
+/// semantics, is not: execution continues in the now-demoted invocation.
+class DemoteToHelperInvocationConversionPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::DemoteToHelperInvocationOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::DemoteToHelperInvocationOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::DemoteToHelperInvocationOp Op,
+                  OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::LLVM::CallIntrinsicOp::create(
+        Rewriter, Op.getLoc(),
+        mlir::StringAttr::get(Rewriter.getContext(),
+                              "llvm.spv.demote.to.helper.invocation"),
+        mlir::ValueRange{});
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -2190,7 +2223,9 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const StageIOInfoMap &StageIOVariables) {
   Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
                BuiltInGlobalVariablePattern, BlockAccessChainPattern,
-               CompositeConstructPattern, DotConversionPattern,
+               CompositeConstructPattern,
+               DemoteToHelperInvocationConversionPattern,
+               DotConversionPattern,
                ExecutionModePattern, ExecutionModeIdPattern, ImageFetchPattern,
                ImageFetchLodPattern, ImageSampleExplicitLodPattern,
                ImageSampleImplicitLodPattern, ImageQuerySizePattern,
