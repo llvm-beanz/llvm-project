@@ -1811,6 +1811,33 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
       ->bindDescriptorSets(firstSet, std::move(Sets), std::move(Offsets));
 }
 
+// (roadmap E6) `VK_KHR_maintenance6`'s `vkCmdBindDescriptorSets2`: the same
+// arguments as `vkCmdBindDescriptorSets` above, wrapped in a single
+// `pNext`-extensible `VkBindDescriptorSetsInfo` in place of a
+// `pipelineBindPoint` argument plus five flat array arguments. Unlike
+// `vkCmdBindDescriptorSets`'s own `pipelineBindPoint`, this struct instead
+// carries a `stageFlags` mask -- but `CommandBuffer::bindDescriptorSets`
+// already stores one shared set of bound descriptor sets for every bind
+// point (see the non-`2` command's own comment above), so neither
+// `stageFlags` nor `layout` changes what gets recorded here, the same way
+// `vkCmdPushConstants`'s own `stageFlags`/`layout` need no validation.
+VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
+    VkCommandBuffer commandBuffer,
+    const VkBindDescriptorSetsInfo *pBindDescriptorSetsInfo) {
+  std::vector<DescriptorSet *> Sets;
+  Sets.reserve(pBindDescriptorSetsInfo->descriptorSetCount);
+  for (uint32_t I = 0; I != pBindDescriptorSetsInfo->descriptorSetCount; ++I)
+    Sets.push_back(
+        fromHandle<DescriptorSet>(pBindDescriptorSetsInfo->pDescriptorSets[I]));
+  std::vector<uint32_t> Offsets(
+      pBindDescriptorSetsInfo->pDynamicOffsets,
+      pBindDescriptorSetsInfo->pDynamicOffsets +
+          pBindDescriptorSetsInfo->dynamicOffsetCount);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet,
+                           std::move(Sets), std::move(Offsets));
+}
+
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
                                          uint32_t groupCountX,
                                          uint32_t groupCountY,
@@ -2042,6 +2069,24 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
   const auto *Bytes = static_cast<const uint8_t *>(pValues);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->pushConstants(offset, std::vector<uint8_t>(Bytes, Bytes + size));
+}
+
+// (roadmap E6) `VK_KHR_maintenance6`'s `vkCmdPushConstants2`: the same
+// `offset`/`size`/`pValues` triple as `vkCmdPushConstants` above, wrapped in
+// a single `pNext`-extensible `VkPushConstantsInfo` in place of the
+// `layout`/`stageFlags` argument pair -- both of which need no validation
+// here for the same reason the non-`2` command's own comment gives.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushConstants2(VkCommandBuffer commandBuffer,
+                    const VkPushConstantsInfo *pPushConstantsInfo) {
+  if (pPushConstantsInfo->size == 0 || pPushConstantsInfo->offset % 4 != 0 ||
+      pPushConstantsInfo->size % 4 != 0)
+    return;
+  const auto *Bytes =
+      static_cast<const uint8_t *>(pPushConstantsInfo->pValues);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pushConstants(pPushConstantsInfo->offset,
+                      std::vector<uint8_t>(Bytes, Bytes + pPushConstantsInfo->size));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetEvent(VkCommandBuffer commandBuffer,

@@ -1803,6 +1803,65 @@ TEST_F(PushConstantDispatchTest, UnpushedBytesReadAsZero) {
   vkFreeMemory(Device, Buf.Memory, nullptr);
 }
 
+// Roadmap E6: `VK_KHR_maintenance6`'s `vkCmdBindDescriptorSets2`/
+// `vkCmdPushConstants2` are shape-compatible `pNext`-extensible wrappers
+// around `vkCmdBindDescriptorSets`/`vkCmdPushConstants`; this exercises both
+// together through the same dispatch the non-`2` equivalents above already
+// cover, confirming they reach the identical `CommandBuffer` state.
+TEST_F(PushConstantDispatchTest, BindDescriptorSets2AndPushConstants2ReachTheDispatch) {
+  HostBuffer Buf = createStorageBuffer(4);
+  uint32_t InitialValue = 10;
+  std::memcpy(Buf.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo BufInfo{Buf.Buf, 0, 4};
+  VkWriteDescriptorSet Write{};
+  Write.dstSet = Set;
+  Write.dstBinding = 0;
+  Write.descriptorCount = 1;
+  Write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Write.pBufferInfo = &BufInfo;
+  vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+
+  VkBindDescriptorSetsInfo BindInfo{};
+  BindInfo.sType = VK_STRUCTURE_TYPE_BIND_DESCRIPTOR_SETS_INFO;
+  BindInfo.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  BindInfo.layout = Layout;
+  BindInfo.firstSet = 0;
+  BindInfo.descriptorSetCount = 1;
+  BindInfo.pDescriptorSets = &Set;
+  BindInfo.dynamicOffsetCount = 0;
+  BindInfo.pDynamicOffsets = nullptr;
+  vkCmdBindDescriptorSets2(CmdBuf, &BindInfo);
+
+  uint32_t PushValue = 32;
+  VkPushConstantsInfo PushInfo{};
+  PushInfo.sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO;
+  PushInfo.layout = Layout;
+  PushInfo.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  PushInfo.offset = 0;
+  PushInfo.size = sizeof(PushValue);
+  PushInfo.pValues = &PushValue;
+  vkCmdPushConstants2(CmdBuf, &PushInfo);
+
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Buf.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + PushValue);
+
+  vkDestroyBuffer(Device, Buf.Buf, nullptr);
+  vkFreeMemory(Device, Buf.Memory, nullptr);
+}
+
 TEST_F(CommandBufferTest, QueryPoolWriteTimestampThenGetResults) {
   VkQueryPoolCreateInfo PoolInfo{};
   PoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;

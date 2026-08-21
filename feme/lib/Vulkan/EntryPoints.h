@@ -290,6 +290,14 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
     VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount,
     const VkDescriptorSet *pDescriptorSets, uint32_t dynamicOffsetCount,
     const uint32_t *pDynamicOffsets);
+// Roadmap E6: core Vulkan 1.4 promoted `VK_KHR_maintenance6`'s
+// `vkCmdBindDescriptorSets2` (a `pNext`-extensible `VkBindDescriptorSetsInfo`
+// in place of `vkCmdBindDescriptorSets`'s `pipelineBindPoint` argument plus
+// five flat array arguments -- see `CommandBuffer.cpp`'s comment for why
+// `stageFlags` needs no bind-point translation here).
+VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
+    VkCommandBuffer commandBuffer,
+    const VkBindDescriptorSetsInfo *pBindDescriptorSetsInfo);
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
                                          uint32_t groupCountX,
                                          uint32_t groupCountY,
@@ -387,6 +395,14 @@ VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
                                               VkShaderStageFlags stageFlags,
                                               uint32_t offset, uint32_t size,
                                               const void *pValues);
+
+// Roadmap E6: core Vulkan 1.4 promoted `VK_KHR_maintenance6`'s
+// `vkCmdPushConstants2` (the same `offset`/`size`/`pValues` triple wrapped in
+// a `pNext`-extensible `VkPushConstantsInfo`, in place of the `layout`/
+// `stageFlags` argument pair).
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushConstants2(VkCommandBuffer commandBuffer,
+                    const VkPushConstantsInfo *pPushConstantsInfo);
 
 // V3: events (see "Command Buffers" and "Queues, Scheduling, and
 // Synchronization").

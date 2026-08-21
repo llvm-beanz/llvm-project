@@ -122,6 +122,9 @@ vkEndCommandBuffer
 vkResetCommandBuffer
 vkCmdBindPipeline
 vkCmdBindDescriptorSets
+# Roadmap E6: VK_KHR_maintenance6's pNext-extensible wrapper, sharing
+# vkCmdBindDescriptorSets's own recording (CommandBuffer.cpp).
+vkCmdBindDescriptorSets2
 vkCmdDispatch
 vkCmdDispatchBase
 vkCmdDispatchIndirect
@@ -130,6 +133,9 @@ vkCmdFillBuffer
 vkCmdUpdateBuffer
 vkCmdPipelineBarrier
 vkCmdPushConstants
+# Roadmap E6: VK_KHR_maintenance6's pNext-extensible wrapper, sharing
+# vkCmdPushConstants's own recording (CommandBuffer.cpp).
+vkCmdPushConstants2
 
 # V5: image/buffer copies (see "V5: Images and sampling").
 vkCmdCopyBufferToImage
