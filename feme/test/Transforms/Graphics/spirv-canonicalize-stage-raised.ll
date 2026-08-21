@@ -6,7 +6,9 @@
 ; dxil-canonicalize-stage-raised.ll's DXIL-derived forms (roadmap R20).
 ; `llvm.spv.discard` (SPIR-V's unconditional `OpKill`) becomes a
 ; constant-true `feme.stage.discard`, since that op family always takes a
-; condition operand.
+; condition operand. `llvm.spv.demote.to.helper.invocation` (SPIR-V's
+; unconditional, non-terminating `OpDemoteToHelperInvocation`, roadmap E11)
+; becomes a constant-true `feme.stage.demote` the same way.
 
 target triple = "spirv-unknown-vulkan1.3-pixel"
 
@@ -14,6 +16,9 @@ target triple = "spirv-unknown-vulkan1.3-pixel"
 define void @main() #0 {
   ; CHECK: call void @feme.stage.discard(i1 true)
   call void @llvm.spv.discard()
+
+  ; CHECK: call void @feme.stage.demote(i1 true)
+  call void @llvm.spv.demote.to.helper.invocation()
 
   %v = fadd float 1.0, 2.0
 
@@ -35,6 +40,7 @@ define void @main() #0 {
 }
 
 declare void @llvm.spv.discard()
+declare void @llvm.spv.demote.to.helper.invocation()
 declare float @llvm.spv.ddx.f32(float)
 declare float @llvm.spv.ddy.f32(float)
 declare float @llvm.spv.ddx.coarse.f32(float)
@@ -43,3 +49,4 @@ declare float @llvm.spv.quad.read.across.x.f32(float)
 declare float @llvm.spv.quad.read.across.diagonal.f32(float)
 
 attributes #0 = { "feme.shader.stage"="fragment" }
+

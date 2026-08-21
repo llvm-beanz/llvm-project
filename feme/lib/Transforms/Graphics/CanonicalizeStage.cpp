@@ -632,6 +632,20 @@ bool canonicalizeSPIRVStage(Function &F) {
     return true;
   });
 
+  // `llvm.spv.demote.to.helper.invocation` (SPIR-V's
+  // `OpDemoteToHelperInvocation`, roadmap E11) is likewise unconditional,
+  // and -- unlike `llvm.spv.discard`/`OpKill` -- non-terminating: it only
+  // narrows the invocation's side-effect mask, matching
+  // `feme.stage.demote`'s own semantics exactly (see StageOps.h), so it
+  // needs no further adjustment beyond the same constant-true condition.
+  Changed |= forEachIntrinsicCall(
+      F, Intrinsic::spv_demote_to_helper_invocation, [](CallInst &CI) {
+        IRBuilder<> B(&CI);
+        createStageDemote(B, B.getTrue());
+        CI.eraseFromParent();
+        return true;
+      });
+
   // SPIR-V's plain `OpDPdx`/`OpDPdy` (raised as `llvm.spv.ddx`/`.ddy`) leave
   // fine-vs-coarse precision to the implementation; this conservatively
   // maps them to the fine variant, matching `feme.stage.derivative.*`'s two
