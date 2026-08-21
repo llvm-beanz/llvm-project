@@ -581,11 +581,13 @@ TEST_F(
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
-       Vulkan14FeaturesAreExplicitlyFalseNotLeftUnwritten) {
-  // Roadmap E1: no 1.4-introduced feature bit is implemented yet, so every
-  // member of the aggregate struct must still be an explicit `VK_FALSE`,
-  // guarded the same way `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten`
-  // below guards `VkPhysicalDeviceMultiviewFeatures`.
+       Maintenance5IsAdvertisedThroughAggregateVulkan14Features) {
+  // Roadmap E5: `VkPhysicalDeviceVulkan14Features.maintenance5` must agree
+  // with the dedicated `VK_KHR_maintenance5` struct case below it -- every
+  // other 1.4 bit remains an explicit `VK_FALSE`, pre-filled with a
+  // non-zero pattern first (the same unwritten-field guard
+  // `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` below uses) so
+  // each one is verified rather than merely a pre-existing zero.
   VkPhysicalDeviceVulkan14Features Features14;
   std::memset(&Features14, 0xAA, sizeof(Features14));
   Features14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
@@ -611,12 +613,55 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features14.vertexAttributeInstanceRateZeroDivisor, VK_FALSE);
   EXPECT_EQ(Features14.indexTypeUint8, VK_FALSE);
   EXPECT_EQ(Features14.dynamicRenderingLocalRead, VK_FALSE);
-  EXPECT_EQ(Features14.maintenance5, VK_FALSE);
+  // Roadmap E5: now genuinely implemented (RenderPass.cpp/
+  // CommandBuffer.cpp/Format.cpp), and must agree with the dedicated
+  // `VK_KHR_maintenance5` struct case below.
+  EXPECT_EQ(Features14.maintenance5, VK_TRUE);
   EXPECT_EQ(Features14.maintenance6, VK_FALSE);
   EXPECT_EQ(Features14.pipelineProtectedAccess, VK_FALSE);
   EXPECT_EQ(Features14.pipelineRobustness, VK_FALSE);
   EXPECT_EQ(Features14.hostImageCopy, VK_FALSE);
   EXPECT_EQ(Features14.pushDescriptor, VK_FALSE);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    Maintenance5IsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs) {
+  // Roadmap E5: `VK_KHR_maintenance5`'s own dedicated feature/properties
+  // structs must agree with the aggregate `VkPhysicalDeviceVulkan14
+  // Features`/`Properties` cases above, exactly like `VK_KHR_maintenance4`'s
+  // own structs do for the 1.3 aggregate.
+  VkPhysicalDeviceMaintenance5FeaturesKHR Maintenance5Features{};
+  Maintenance5Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &Maintenance5Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(Maintenance5Features.maintenance5, VK_TRUE);
+
+  // None of `VkPhysicalDeviceMaintenance5PropertiesKHR`'s fixed-function
+  // rasterizer guarantees are verified for this software rasterizer yet,
+  // matching the aggregate `VkPhysicalDeviceVulkan14Properties` case.
+  VkPhysicalDeviceMaintenance5PropertiesKHR Maintenance5Props{};
+  Maintenance5Props.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES_KHR;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &Maintenance5Props;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(
+      Maintenance5Props.earlyFragmentMultisampleCoverageAfterSampleCounting,
+      VK_FALSE);
+  EXPECT_EQ(Maintenance5Props.earlyFragmentSampleMaskTestBeforeSampleCounting,
+            VK_FALSE);
+  EXPECT_EQ(Maintenance5Props.depthStencilSwizzleOneSupport, VK_FALSE);
+  EXPECT_EQ(Maintenance5Props.polygonModePointSize, VK_FALSE);
+  EXPECT_EQ(Maintenance5Props.nonStrictSinglePixelWideLinesUseParallelogram,
+            VK_FALSE);
+  EXPECT_EQ(Maintenance5Props.nonStrictWideLinesUseParallelogram, VK_FALSE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

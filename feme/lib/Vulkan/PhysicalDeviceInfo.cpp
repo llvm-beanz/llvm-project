@@ -435,6 +435,20 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // "Roadmap E3: measured impact" in VulkanCTSReport.md).
       {VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,
        VK_KHR_SYNCHRONIZATION_2_SPEC_VERSION},
+      // (roadmap E5) A null dynamic-rendering color attachment view
+      // (RenderPass.h/CommandBuffer.cpp), `VK_FORMAT_A8_UNORM`/
+      // `A1B5G5R5_UNORM_PACK16` (Format.cpp), and `vkCmdBindIndexBuffer2`
+      // (CommandBuffer.cpp) are all implemented; like `synchronization2`
+      // above (an exception to the "mirrored by `SUPPORTED_EXTENSIONS`"
+      // rule, since `vkCmdBindIndexBuffer2` is already a core, non-`KHR`-
+      // suffixed `VK_VERSION_1_4` entry `vk_gen_entrypoints.py`'s
+      // `CORE_FEATURES` resolves), `dEQP-VK.draw.*maintenance_5` and
+      // `dEQP-VK.api.maintenance5.*`'s own `requireDeviceFunctionality
+      // ("VK_KHR_maintenance5")` calls enable this extension by name
+      // regardless of the advertised `apiVersion`, so it must be listed
+      // here too, or every one of them fails `NotSupported` instead of
+      // running for real.
+      {VK_KHR_MAINTENANCE_5_EXTENSION_NAME, VK_KHR_MAINTENANCE_5_SPEC_VERSION},
   };
   return Extensions;
 }

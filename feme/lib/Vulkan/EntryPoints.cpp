@@ -520,9 +520,13 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // (roadmap F8) `dynamicRenderingLocalRead` is unimplemented.
       Props14->dynamicRenderingLocalReadDepthStencilAttachments = VK_FALSE;
       Props14->dynamicRenderingLocalReadMultisampledAttachments = VK_FALSE;
-      // (roadmap F5's `VK_KHR_maintenance5`) None of this group's fixed-
+      // (roadmap E5's `VK_KHR_maintenance5`) None of this group's fixed-
       // function guarantees have been verified for this software
-      // rasterizer yet.
+      // rasterizer yet -- E5 itself only lands a null dynamic-rendering
+      // attachment view, two new formats, and `vkCmdBindIndexBuffer2`,
+      // none of which this properties group's own fields describe; see
+      // the dedicated `VkPhysicalDeviceMaintenance5PropertiesKHR` case
+      // below, which this must agree with.
       Props14->earlyFragmentMultisampleCoverageAfterSampleCounting = VK_FALSE;
       Props14->earlyFragmentSampleMaskTestBeforeSampleCounting = VK_FALSE;
       Props14->depthStencilSwizzleOneSupport = VK_FALSE;
@@ -561,6 +565,26 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props14->pCopyDstLayouts = nullptr;
       std::memset(Props14->optimalTilingLayoutUUID, 0, VK_UUID_SIZE);
       Props14->identicalMemoryTypeRequirements = VK_FALSE;
+      break;
+    }
+    // (roadmap E5) `VK_KHR_maintenance5`'s own properties struct, agreeing
+    // with the aggregate `VkPhysicalDeviceVulkan14Properties` case above
+    // exactly like `VkPhysicalDeviceMaintenance4Properties` (1.3) already
+    // does for its own fields: every one of this group's fixed-function
+    // rasterizer guarantees remains an honest `VK_FALSE` -- E5 itself adds
+    // a null dynamic-rendering attachment view, two new formats, and
+    // `vkCmdBindIndexBuffer2`, none of which this struct's own fields
+    // describe.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES_KHR: {
+      auto *Maintenance5 =
+          reinterpret_cast<VkPhysicalDeviceMaintenance5PropertiesKHR *>(Base);
+      Maintenance5->earlyFragmentMultisampleCoverageAfterSampleCounting =
+          VK_FALSE;
+      Maintenance5->earlyFragmentSampleMaskTestBeforeSampleCounting = VK_FALSE;
+      Maintenance5->depthStencilSwizzleOneSupport = VK_FALSE;
+      Maintenance5->polygonModePointSize = VK_FALSE;
+      Maintenance5->nonStrictSinglePixelWideLinesUseParallelogram = VK_FALSE;
+      Maintenance5->nonStrictWideLinesUseParallelogram = VK_FALSE;
       break;
     }
     default:
@@ -805,10 +829,14 @@ void fillFeatures2Chain(void *pNext) {
       break;
     }
     // (roadmap E1) The aggregate `VkPhysicalDeviceVulkan14Features` struct:
-    // no 1.4-introduced bit is implemented yet, so every member is an
-    // explicit `VK_FALSE` for the same guard-pattern reason documented
-    // above -- mirroring `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_
-    // FEATURES`'s all-false case rather than 1.2/1.3's mixed one.
+    // every member is written explicitly, true or false, for the same
+    // guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_
+    // FEATURES` above documents. (roadmap E5) `maintenance5` is the one bit
+    // this ICD genuinely implements (a null dynamic-rendering attachment
+    // view, `VK_FORMAT_A8_UNORM`/`A1B5G5R5_UNORM_PACK16`, and
+    // `vkCmdBindIndexBuffer2`) -- see the dedicated
+    // `VkPhysicalDeviceMaintenance5FeaturesKHR` struct case below, which
+    // this must agree with; every other 1.4 bit remains unimplemented.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan14Features *>(Base);
@@ -827,7 +855,7 @@ void fillFeatures2Chain(void *pNext) {
       Features->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
       Features->indexTypeUint8 = VK_FALSE;
       Features->dynamicRenderingLocalRead = VK_FALSE;
-      Features->maintenance5 = VK_FALSE;
+      Features->maintenance5 = VK_TRUE;
       Features->maintenance6 = VK_FALSE;
       Features->pipelineProtectedAccess = VK_FALSE;
       Features->pipelineRobustness = VK_FALSE;
@@ -859,6 +887,16 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceMaintenance4Features *>(Base);
       Features->maintenance4 = VK_TRUE;
+      break;
+    }
+    // (roadmap E5) `VK_KHR_maintenance5`'s own feature struct. Unlike
+    // `dynamicRendering`/`synchronization2`/`maintenance4` above, this
+    // extension's core promotion added no core-spelled alias struct of its
+    // own, so only the `KHR`-suffixed `sType`/type exist.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceMaintenance5FeaturesKHR *>(Base);
+      Features->maintenance5 = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:
