@@ -26,10 +26,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E9 in the roadmap document?
+Can you implement milestone E10 in the roadmap document?
 
->  **`VK_EXT_pipeline_creation_cache_control`/`pipelineCreationCacheControl`.**
->  `VK_PIPELINE_CREATE_2_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`/`VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT`
->  are flag-only additions to `GraphicsPipeline.cpp`/`Pipeline.cpp`'s existing
->  creation path and `PipelineCache.{h,cpp}`'s existing cache object -- no new
->  object model, purely accepting and honoring two new bits
+> **`VK_EXT_private_data`/`privateData`.** `VkPrivateDataSlot` is a new, small
+> object (an opaque per-(object-handle) `uint64_t` map) alongside the existing
+> object model in `Objects.h`;
+> `vkCreatePrivateDataSlot`/`vkSetPrivateData`/`vkGetPrivateData`/`vkDestroyPrivateDataSlot`
+> are new, self-contained entrypoints with no dependency on any other row here
