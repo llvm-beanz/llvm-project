@@ -67,6 +67,27 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 }
 )mlir";
 
+/// Roadmap E4 (`VK_KHR_maintenance4`): the same minimal entry point, but
+/// using SPIR-V 1.2's `LocalSizeId` execution mode -- three specialization
+/// constants, not a plain `LocalSize` literal -- instead of `LocalSize`.
+/// `maintenance4` adds no new opcode of its own here; it is the group-size
+/// *resolution* path (`GroupSize.cpp`'s `resolveComputeGroupSize`) that
+/// must accept this alternative spelling with no `LocalSize` present at
+/// all, per `VK_KHR_maintenance4`'s own description ("Add support for the
+/// SPIR-V 1.2 LocalSizeId execution mode").
+const char *kLocalSizeIdComputeShader = R"mlir(
+spirv.module Logical GLSL450 requires #spirv.vce<v1.2, [Shader], []> {
+  spirv.SpecConstant @wg_x = 4 : i32
+  spirv.SpecConstant @wg_y = 1 : i32
+  spirv.SpecConstant @wg_z = 1 : i32
+  spirv.func @main() -> () "None" {
+    spirv.Return
+  }
+  spirv.EntryPoint "GLCompute" @main
+  spirv.ExecutionModeId @main "LocalSizeId" @wg_x, @wg_y, @wg_z
+}
+)mlir";
+
 /// A `void main()` that reads and increments a `StorageBuffer` block bound
 /// at (descriptor set 0, binding 0) -- V2's own "run a Vulkan compute
 /// shader that reads and writes storage buffers" scenario, using a flat
@@ -155,6 +176,31 @@ protected:
 
 TEST_F(PipelineTest, CompilesEmptyComputeShader) {
   VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  EXPECT_NE(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// Roadmap E4: an entry point declaring only `LocalSizeId` (no `LocalSize`
+/// at all) compiles end to end -- `resolveComputeGroupSize` (GroupSize.cpp)
+/// already resolves it from its three specialization constants' default
+/// values, and `compileComputePipeline` (Pipeline.cpp) stamps the result
+/// onto the compiled entry point exactly like a plain `LocalSize` shader.
+TEST_F(PipelineTest, CompilesLocalSizeIdComputeShader) {
+  VkShaderModule Module = createShaderModule(kLocalSizeIdComputeShader);
   ASSERT_NE(Module, VK_NULL_HANDLE);
 
   VkComputePipelineCreateInfo CreateInfo{};

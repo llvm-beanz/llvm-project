@@ -1684,6 +1684,57 @@ public:
   }
 };
 
+/// (roadmap E4) Drops `spirv.ExecutionModeId` (`VK_KHR_maintenance4`'s
+/// `LocalSizeId`, among others): like plain `spirv.ExecutionMode` above,
+/// `GroupSize.cpp`'s `resolveComputeGroupSize` already reads its operands
+/// from the raw SPIR-V word stream before this pass ever runs, and
+/// `Pipeline.cpp`'s `compileComputePipeline` stamps the resolved group
+/// size onto the entry point itself -- upstream MLIR has no conversion
+/// pattern for this op at all (only plain `ExecutionMode`), so leaving it
+/// in place would otherwise fail legalization for every `LocalSizeId`
+/// shader, the exact opposite of `maintenance4`'s own "add support for
+/// LocalSizeId" intent.
+class ExecutionModeIdPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ExecutionModeIdOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ExecutionModeIdOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ExecutionModeIdOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
+/// (roadmap E4) Drops `spirv.SpecConstant`: upstream MLIR has no
+/// conversion pattern for it at all, so a `LocalSizeId` shader's
+/// supporting specialization constants (there is no other way to spell
+/// `LocalSizeId`'s three operands) would otherwise fail legalization even
+/// though nothing in the entry point's own body ever references them --
+/// `ExecutionModeIdPattern` above already erased their only reference.
+/// A specialization constant genuinely read by the shader body (via
+/// `spirv.mlir.referenceof`, not an execution mode) is a distinct,
+/// still-unimplemented feature: erasing its declaration here does not
+/// paper over that gap, since `spirv.mlir.referenceof` itself has no
+/// conversion pattern either and fails legalization on its own, now with
+/// a more precise "unresolved symbol" diagnostic instead of a spurious one
+/// pointing at the declaration.
+class SpecConstantErasurePattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::SpecConstantOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::SpecConstantOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::SpecConstantOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.eraseOp(Op);
+    return mlir::success();
+  }
+};
+
 /// Converts a storage buffer block pointer to the `spirv.VulkanBuffer`
 /// handle type LLVM's SPIRV backend materializes it from, mirroring
 /// convertImageTypeAs's role for image/sampler resources: the type
@@ -1967,12 +2018,14 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<ArrayConstantPattern, BuiltInAddressOfPattern,
                BuiltInGlobalVariablePattern, BlockAccessChainPattern,
                CompositeConstructPattern, DotConversionPattern,
-               ExecutionModePattern, ImageFetchPattern, ImageFetchLodPattern,
+               ExecutionModePattern, ExecutionModeIdPattern,
+               ImageFetchPattern, ImageFetchLodPattern,
                ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
                ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
                LoadValuePattern, MatrixCompositeExtractPattern,
                MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
-               SampledImagePattern, StageIOGlobalVariablePattern,
+               SampledImagePattern, SpecConstantErasurePattern,
+               StageIOGlobalVariablePattern,
                SwitchConversionPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
