@@ -745,3 +745,69 @@ TEST(SPIRVResourceLoweringTest, LeavesANonZeroTexelOffsetSampleAlone) {
   EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
+
+TEST(SPIRVResourceLoweringTest, LowersIntegerImageFetchToImageLoadV4I32) {
+  // Roadmap E26: an `OpImageFetch` against an integer-channel 2D sampled
+  // image (`i32` sampled type, mirroring `OpTypeImage`'s own per-channel,
+  // never-a-vector, "Sampled Type" operand) lowers to the integer
+  // `feme.cpu.image.load.2d.v4i32` entry point rather than the float one.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<2 x i32> %coord) {
+      %img = call target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %p = call ptr @llvm.spv.resource.getpointer.timg(
+          target("spirv.Image", i32, 1, 0, 0, 0, 1, 0) %img, <2 x i32> %coord)
+      %v = load <4 x i32>, ptr %p
+      ret <4 x i32> %v
+    }
+    declare target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer.timg(
+        target("spirv.Image", i32, 1, 0, 0, 0, 1, 0), <2 x i32>)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  CallInst *Load = findImageCall(*F, "feme.cpu.image.load.2d.v4i32");
+  ASSERT_TRUE(Load);
+  EXPECT_TRUE(Load->getType()->isVectorTy());
+  EXPECT_EQ(Load->getArgOperand(0)->getName(), "image_heap");
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.load.2d.v4f32"));
+}
+
+TEST(SPIRVResourceLoweringTest,
+     LeavesAnIntegerSampledImageHandleUsedForSampleAlone) {
+  // SPIR-V never legalizes a filtered `OpImageSample*` against an integer-
+  // sampled image, so this pass does not try to lower one either -- the
+  // whole handle (and therefore the whole function) is left unrewritten,
+  // matching `LeavesAnArrayedImageHandleAlone`'s own "no partial lowering"
+  // contract.
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define <4 x i32> @main(<2 x float> %coord) {
+      %img = call target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+          @llvm.spv.resource.handlefrombinding.timg(i32 0, i32 0, i32 1, i32 0, ptr null)
+      %samp = call target("spirv.Sampler")
+          @llvm.spv.resource.handlefrombinding.tsamp(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %r = call <4 x i32> @llvm.spv.resource.sample(
+          target("spirv.Image", i32, 1, 0, 0, 0, 1, 0) %img,
+          target("spirv.Sampler") %samp, <2 x float> %coord, <2 x i32> zeroinitializer)
+      ret <4 x i32> %r
+    }
+    declare target("spirv.Image", i32, 1, 0, 0, 0, 1, 0)
+        @llvm.spv.resource.handlefrombinding.timg(i32, i32, i32, i32, ptr)
+    declare target("spirv.Sampler")
+        @llvm.spv.resource.handlefrombinding.tsamp(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(findImageCall(*F, "feme.cpu.image.sample.2d.v4f32"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+

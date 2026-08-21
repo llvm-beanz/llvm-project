@@ -279,12 +279,16 @@ classifyTexelBufferHandle(const CallInst &Handle) {
 constexpr unsigned SPIRVDim2D = 1;
 
 /// Returns \p Handle's classification if its type is a single-sampled,
-/// non-arrayed, floating-point 2D `spirv.Image`/`spirv.SignedImage` handle
-/// used *with* a sampler -- the one image shape `runtime/CPU`'s sampling
-/// helpers implement (see ImageCalls.h's own scope note). Every other
-/// dimension, an arrayed or multisampled image, and a storage image
-/// (`Sampled == 2`, which would need a `feme.cpu.image.store.*` helper that
-/// does not exist yet) return `std::nullopt`.
+/// non-arrayed, floating-point or 32-bit-integer 2D `spirv.Image`/
+/// `spirv.SignedImage` handle used *with* a sampler -- the one image shape
+/// `runtime/CPU`'s sampling/fetch helpers implement (see ImageCalls.h's own
+/// scope note). Every other dimension, an arrayed or multisampled image,
+/// and a storage image (`Sampled == 2`, which would need a
+/// `feme.cpu.image.store.*` helper that does not exist yet) return
+/// `std::nullopt`. An integer-channel handle is classified the same as a
+/// float one here -- `hasOnlySupportedImageUses` (roadmap E26) is what
+/// narrows its *uses* to fetch only, since SPIR-V never legalizes a
+/// filtered sample against an integer-sampled image.
 std::optional<HandleClassification>
 classifySampledImage2DHandle(const CallInst &Handle) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
@@ -304,8 +308,8 @@ classifySampledImage2DHandle(const CallInst &Handle) {
     return std::nullopt;
 
   Type *ChannelType = HandleTy->getTypeParameter(0);
-  if (!ChannelType->isFloatTy())
-    return std::nullopt; // Only `<4 x float>`-returning samples today.
+  if (!ChannelType->isFloatTy() && !ChannelType->isIntegerTy(32))
+    return std::nullopt; // No other channel shape is decodable today.
   return HandleClassification{HandleKind::SampledImage2D, 0, nullptr,
                               ChannelType};
 }
@@ -351,6 +355,14 @@ bool isVectorOf(const Type *Ty, unsigned N, bool (Type::*Is)() const) {
 /// operation produces.
 bool isV4F32(const Type *Ty) { return isVectorOf(Ty, 4, &Type::isFloatTy); }
 
+/// Whether \p Ty is the `<4 x i32>` texel `feme.cpu.image.load.2d.v4i32`
+/// (roadmap E26) produces for an integer-format fetch.
+bool isV4I32(const Type *Ty) {
+  const auto *VecTy = dyn_cast<FixedVectorType>(Ty);
+  return VecTy && VecTy->getNumElements() == 4 &&
+         VecTy->getElementType()->isIntegerTy(32);
+}
+
 /// Whether \p Coord is a two-component coordinate of the right element type
 /// for \p Float (normalized `<2 x float>` for a sample, integer
 /// `<2 x i32>` for a fetch).
@@ -376,8 +388,14 @@ bool isZeroOffset(const Value *Offset) {
 /// `samplelevel` whose coordinate, offset and result shapes the CPU
 /// runtime's 2D helpers implement, or an `llvm.spv.resource.getpointer`
 /// texel fetch (`OpImageFetch`, see `feme::spirv::ImageLoadPattern`) whose
-/// pointer is only loaded from.
-bool hasOnlySupportedImageUses(const CallInst &Handle) {
+/// pointer is only loaded from. \p IsInteger (roadmap E26) is
+/// `classifySampledImage2DHandle`'s own channel-type test, repeated by the
+/// caller rather than re-derived here: an integer-channel handle rejects
+/// every sample intrinsic outright (SPIR-V never legalizes a filtered
+/// sample against an integer-sampled image, so there is no shape to
+/// accept), and expects each fetch's loaded type to be `<4 x i32>` instead
+/// of `<4 x float>`.
+bool hasOnlySupportedImageUses(const CallInst &Handle, bool IsInteger) {
   for (const User *U : Handle.users()) {
     const auto *CI = dyn_cast<CallInst>(U);
     if (!CI)
@@ -385,6 +403,8 @@ bool hasOnlySupportedImageUses(const CallInst &Handle) {
 
     bool ExplicitLod = false;
     if (isSampleIntrinsic(*CI, ExplicitLod)) {
+      if (IsInteger)
+        return false; // No filtered sample over an integer-channel image.
       if (CI->getArgOperand(0) != &Handle)
         return false;
       unsigned OffsetIdx = ExplicitLod ? 4 : 3;
@@ -401,7 +421,7 @@ bool hasOnlySupportedImageUses(const CallInst &Handle) {
       return false;
     for (const User *PU : CI->users()) {
       const auto *LI = dyn_cast<LoadInst>(PU);
-      if (!LI || !isV4F32(LI->getType()))
+      if (!LI || !(IsInteger ? isV4I32(LI->getType()) : isV4F32(LI->getType())))
         return false;
     }
   }
@@ -542,7 +562,8 @@ std::optional<SmallVector<BoundHandle, 4>> collectHandles(Function &F) {
 
     switch (Classification->Kind) {
     case HandleKind::SampledImage2D:
-      if (!hasOnlySupportedImageUses(*CI))
+      if (!hasOnlySupportedImageUses(
+              *CI, Classification->TexelElementType->isIntegerTy(32)))
         return std::nullopt;
       break;
     case HandleKind::Sampler:
@@ -850,10 +871,18 @@ void lowerImageAccesses(const MapVector<CallInst *, Value *> &HeapIndices,
         IRBuilder<> LoadBuilder(LI);
         // Mip level 0: `feme::spirv::ImageLoadPattern` does not thread
         // `OpImageFetch`'s optional `Lod` image operand through today, so
-        // there is no level operand to honor here yet.
+        // there is no level operand to honor here yet. The loaded type --
+        // `<4 x i32>` or `<4 x float>`, `hasOnlySupportedImageUses`'s own
+        // per-handle check already guaranteed one or the other -- selects
+        // the integer (roadmap E26) or float `feme.cpu.image.load.2d.*`
+        // entry point.
+        bool IsInteger = isV4I32(LI->getType());
         CallInst *Loaded =
-            createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
-                         LoadBuilder.getInt32(0), Mask, LI->getName());
+            IsInteger
+                ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X, Y,
+                                  LoadBuilder.getInt32(0), Mask, LI->getName())
+                : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
+                               LoadBuilder.getInt32(0), Mask, LI->getName());
         LI->replaceAllUsesWith(Loaded);
         LI->eraseFromParent();
       }
