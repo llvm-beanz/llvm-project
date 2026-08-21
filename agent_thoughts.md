@@ -27378,3 +27378,186 @@ code-untouched change. No `dEQP-VK` run was performed for the same
 reason: every one of `VulkanCTSReport.md`'s existing cases already
 exercises the exact `libfeme_vulkan.so` this change did not rebuild, so a
 re-run could only reproduce the existing headline numbers verbatim.
+
+# Roadmap E20: Block-compressed image groundwork + ASTC LDR decode
+
+## Task as given
+
+"Implement milestone E20 in the roadmap document": the row E15's own
+investigation split off -- (1) generalize `feme::cpu::ResourceFormat`/
+`Image.{h,cpp}`'s subresource layout math from a per-texel stride to a
+block-based one, and (2) a real ASTC bitstream decoder (integer
+sequence/trit-quint decoding, every weight-grid/color-endpoint-mode
+combination, 1-or-2 partitions, dual-plane, void-extent blocks) for
+the 14 LDR-only block footprints, gating the previously-untracked
+`textureCompressionASTC_LDR` bit. The row's own text explicitly warns
+this is "the largest single new subsystem in this whole roadmap...
+comparable in scope to a from-spec software codec" and should not be
+treated as a small extension.
+
+## Planning the scope boundary
+
+Before writing any decode logic, I re-read every call site of
+`Image::texelPointer`/`formatElementSize` (`ImageOps.cpp`,
+`CommandBuffer.cpp`, `RenderPass.cpp`) to understand how far a
+block-compressed format's implications actually reach. Every one of
+those call sites addresses a bound image *per texel* -- computing a
+byte offset from `(MipLevel, Layer, X, Y, Z, Sample)` via
+`formatElementSize(Format) * SampleCount`-shaped strides. That
+addressing scheme is fundamentally incompatible with block-compressed
+storage: a single ASTC block's 16 bytes encode up to 144 texels
+(12x12) jointly, so there is no such thing as "the byte address of
+texel (3, 2) within a block" the way there is for an uncompressed
+format. Making `vkCmdCopyImage`/`vkCmdCopyBufferToImage`/
+`vkCmdCopyImageToBuffer` (and the render-pass/command-buffer paths
+that also touch a bound image) address a block-compressed image
+correctly would mean reworking every one of those functions to
+iterate in block coordinates and either reject non-block-aligned
+copy regions or handle the partial-block edge case Vulkan's own
+compressed-format copy rules define -- a second large, independent
+piece of work the roadmap row's own file scope (`{Format,Image}.
+{h,cpp}`, new `ASTCDecode.{h,cpp}`) never listed.
+
+Given that, and given this codebase's own repeatedly-applied "object
+model first, shader/copy consumption later" sequencing (V5's image/
+sampler descriptors landed this way, then R30 wired dispatch
+consumption in a dedicated follow-up; E14's inline uniform block did
+the same), I made an explicit decision up front: land the block-aware
+layout math and a real, standalone, directly-tested ASTC decoder, but
+keep `vkCreateImage` rejecting every ASTC `VkFormat` outright (the
+same `VK_ERROR_FORMAT_NOT_SUPPORTED` an unrecognized format already
+produces), so no live `Image` object can ever exist whose bytes the
+per-texel addressing code would misinterpret. This is not a
+retreat from the roadmap row's own stated scope so much as a
+precise re-statement of it: the row's own text says "groundwork
++ decode", and "groundwork" for an object model this codebase already
+treats as "creation-time correctness first, consumption-time wiring
+later" means exactly this. I recorded the narrowing as a Roadmap.md
+strikethrough + new row E22 (the copy/sampling pipeline wiring),
+mirroring how E15 itself split into E20/E21 -- the same "note the
+finding in place, do not silently rewrite the row" convention this
+document has followed throughout.
+
+The same reasoning applied to `textureCompressionASTC_LDR`: since
+`vkCreateImage` still rejects the format, and no copy or shader-
+sampling path can consume a decoded ASTC block yet, advertising the
+feature bit as `VK_TRUE` would be dishonest -- an application (or the
+CTS) that queries the feature and finds it true is entitled to expect
+image creation and normal use to work. I set it explicitly to
+`VK_FALSE` (previously it was only implicitly false via
+`VkPhysicalDeviceFeatures{}`'s zero-initialization, which is precisely
+what let it go untracked until E15's investigation), the same
+"tracked, not defaulted" treatment `textureCompressionASTC_HDR`
+already has.
+
+## Partition count: exceeding the row's own "1-or-2" text
+
+The roadmap row's own scope text says "1-or-2 partitions" for the
+decoder. While implementing the partition-selection hash function
+(`selectPartition`, from the ASTC specification's own procedural hash
+-- not a lookup table, which is why this decoder needs no partition
+table despite covering up to 4 partitions) and the color-endpoint-mode
+decoding for more than one partition, I found that both are already
+fully parameterized by partition count with no additional special
+casing needed for 3 or 4 versus 1 or 2: the hash formula's own
+`if (partitioncount <= 3) d = 0; if (partitioncount <= 2) c = 0;`
+structure and the "extra CEM bits" table
+(`{0, 2, 5, 8}` indexed by `num_partitions - 1`) are both already
+general. Implementing only 1-2 and rejecting 3-4 would have meant
+*adding* a special-case rejection path for no implementation-size
+benefit, and would silently misdecode any real ASTC-compressed
+texture whose encoder chose 3 or 4 partitions (a legal, unremarkable
+choice a real encoder makes based on image content, not something
+that only appears in adversarial or malformed data). I implemented
+the full 1-4 partition range and documented the deviation from the
+row's own text in place (Roadmap.md's E20 closing note), rather than
+silently exceeding scope without a record.
+
+## Cross-checking the algorithm
+
+The ASTC bitstream format is a Khronos-specified algorithm (also
+documented, less completely for this purpose, in the Vulkan spec's own
+compressed-format appendix) -- implementing it correctly requires
+getting dozens of exact bit positions, table values, and formulas
+right, none of which are a FeMe-specific design choice the way most of
+this codebase's decisions are. Rather than attempt this purely from
+memory (which risks exactly the kind of subtle, silent-wrong-answer
+bug this milestone's own text and E15's prior investigation both
+flagged as worse than no decoder at all), I cloned Google's
+Apache-2.0-licensed `astc-codec` reference decoder locally (a
+clean-room, independently-written implementation of the same public
+specification, not Khronos's own reference code) and read its
+`physical_astc_block.cc`, `integer_sequence_codec.cc`,
+`quantization.cc`, `partition.cc`, `weight_infill.cc`, and
+`endpoint_codec.cc` in full to confirm every bit position, table, and
+formula before writing FeMe's own implementation. `ASTCDecode.cpp` is
+not a port or adaptation of that code -- it is restructured
+end-to-end into this codebase's own style (a single procedural
+`decodeASTCBlock` entry point rather than that project's layered
+`PhysicalASTCBlock`/`IntermediateBlockData`/`LogicalASTCBlock` class
+hierarchy, different bit-reading primitives, different variable
+names and comments throughout) -- but I want to record explicitly,
+for anyone reviewing this later, that its correctness is owed to that
+cross-check, not to my own unaided recall of the ASTC specification.
+
+## A real bug the tests caught
+
+While hand-constructing `ASTCDecodeTest.cpp`'s test blocks (see that
+file's own comments for the bit-level derivation of the one block
+mode/weight-grid configuration reused across most of its cases), the
+very first non-void-extent test failed: a block whose 6 raw RGB-direct
+color values were stored at ISE range 255 (plain 8-bit values, chosen
+specifically because it needs no trit/quint math to hand-encode)
+decoded to values roughly double what was written. Tracing it back to
+`iseRangeShape` found the bug: its `for (unsigned K = 0; K != 8; ++K)`
+loop checked only `K` in `[0, 7]`, so `Range + 1 == 1 << K` could never
+match `Range == 255` (which needs `K == 8`). Every 8-bit color range
+search therefore silently fell through to the *next-narrower* valid
+range, 191 (a trit-based 7-bit-ish range), and decoded the raw ISE
+bits as if they were quantized at range 191 instead of 255 -- a wrong
+but plausible-looking color, not a crash or an assertion. I confirmed
+the fix (loop to `K != 9`, i.e. `K` in `[0, 8]`) against `astc-codec`'s
+own `kLog2MaxRangeForBits = 8` constant and its range-table-building
+loop's `i <= kLog2MaxRangeForBits` bound, which is the exact off-by-
+one this decoder's own loop had gotten wrong.
+
+This is precisely the risk E15's own investigation named as the reason
+a rushed/partial ASTC decoder would be worse than none at all: a
+silently wrong pixel color an application cannot detect. Catching it
+required an actual hand-constructed, independently-verified test
+exercising the affected code path -- a case where "the code compiles
+and doesn't crash" would not have been sufficient evidence of
+correctness, and a reminder of why this milestone's own "the largest
+single new subsystem" framing was not overstated.
+
+## What landed, in commit order
+
+1. `Format.{h,cpp}`/`RuntimeABI.h`: 28 new `ResourceFormat` entries (14
+   LDR ASTC footprints x `_UNORM`/`_SRGB`), `mapVkFormat` cases,
+   `isBlockCompressedFormat`, `blockWidth`/`blockHeight`/
+   `bytesPerBlock`. `ImageFixture.cpp`'s `formatFixtureName` and
+   `feme-run.cpp`'s `imageFormatElementSize` both needed matching
+   switch cases purely to keep `-Wswitch` clean (neither gained real
+   ASTC support, both already fail safely for an unrecognized format).
+2. `Image.{h,cpp}`: `computeSubresourceLayouts` generalized to block
+   dimensions; `vkCreateImage` explicitly rejects a block-compressed
+   format (see "Planning the scope boundary" above).
+3. `ASTCDecode.{h,cpp}` (new): the decoder itself, plus
+   `ASTCDecodeTest.cpp`.
+4. `PhysicalDeviceInfo.cpp`: `textureCompressionASTC_LDR` tracked
+   explicitly as `VK_FALSE`.
+5. Docs: `Roadmap.md` (E20 closed, new E22), `Vulkan14FeatureInventory.md`
+   (hand-added row), `FeMeVulkanDesign.md` (V5 status update),
+   `VulkanCTSReport.md` (targeted run, see below).
+
+## Verification
+
+`ninja check-feme` (this session's existing `./build`, `RelWithDebInfo`
++ `LLVM_ENABLE_ASSERTIONS=ON` + `LLVM_CCACHE_BUILD=ON`) passed in full
+after every commit (1599/1600 passed, 1 unsupported, unrelated,
+throughout). Two targeted `dEQP-VK` subsets (`api.info.*` and
+`*astc*`, 10,484 and 98,927 cases respectively) confirmed no
+regression and no newly-failing case, in place of a full 3-million-
+case re-run this row's own observable-behavior-unchanged design (see
+above) does not warrant -- see "Roadmap E20: measured impact" in
+VulkanCTSReport.md for the full breakdown.
