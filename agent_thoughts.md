@@ -28469,3 +28469,145 @@ and `EntryPointsTest.FormatProperties2FillsChainedFormatProperties3` (the
 `VkFormatProperties3` regression test), plus a corrected expectation in
 `EntryPointsTest.ImageFormatPropertiesRejectsUnsupportedUsage` (retargeted
 to an integer format, since `R32_SFLOAT` is now honestly sampled).
+
+# Agent thoughts: roadmap E26 (integer-format image sampling/loading)
+
+## Starting point
+
+E25's own text left a specific, named gap: no `feme.cpu.image.*` entry
+point returns an integer vector -- every sample/load call is
+`<4 x float>` -- so a mandatory-sampled `_UINT`/`_SINT` format
+(`R32G32B32A32_UINT`/`_SINT`, `R16G16B16A16_UINT`/`_SINT`,
+`R8G8B8A8_UINT`/`_SINT`, `R10G10B10A2_UINT`, per the Vulkan spec's own
+"Mandatory Format Support" tables, cross-checked against
+`vktApiFeatureInfo.cpp`'s own table rather than re-guessed) cannot be
+sampled or `OpImageFetch`-loaded at all. The roadmap row itself asked two
+questions: does a canonical call exist for this (no), and does
+`SPIRVResourceLowering.cpp` already raise an integer `OpImageFetch` to a
+canonical call (only half true -- see below)?
+
+## Investigating the "already raises" premise before trusting it
+
+Before writing any code I read `SPIRVResourceLowering.cpp` end to end.
+The premise turned out to be only half right: `classifyTexelBufferHandle`
+(a `Dim::Buffer` SPIR-V image, i.e. `Buffer<T>`/`RWBuffer<T>`) already
+accepted an `i32` channel type and lowered through the typed-buffer
+`v4i32` calls -- that path really was already integer-aware, confirmed by
+the existing `LowersIntegerStorageTexelBufferToV4I32Calls` test.
+`classifySampledImage2DHandle` (the actual 2D-sampled-image path this
+milestone is about) did *not*: it hard-rejected any non-float channel
+type outright (`if (!ChannelType->isFloatTy()) return std::nullopt;`).
+So the real gap was two-layered -- no integer canonical call, *and* the
+2D handle classifier wouldn't have recognized one even if it existed.
+Worth recording precisely rather than assuming the roadmap text's
+"already raises" applied uniformly; it didn't, and the design-doc/roadmap
+updates say so explicitly rather than silently fixing it and moving on.
+
+## Design decisions
+
+- **`ImageCallKind::Load2DI32`, not a positional variant.** Mirrors the
+  existing `Load2D` exactly (same operand shape, same builder pattern),
+  just `<4 x i32>`-returning -- `ImageCalls.h`'s own file comment already
+  explains why an image call gets its own module rather than being forced
+  into `ResourceCallKind`'s fixed shape, and the same reasoning argues for
+  a new enumerator over parameterizing `Load2D` by result type.
+- **No filtered-sample `ImageCallKind` for integers.** SPIR-V only
+  legalizes `OpImageFetch` against an integer-sampled image, never
+  `OpImageSample*` (filtering an integer format's texel makes no defined
+  sense: there's nothing to interpolate between raw integer values the
+  way there is for normalized/float samples). The roadmap row's own text
+  flagged this as an open question ("if a filtered integer sample is ever
+  legal in SPIR-V, a decision on what filtering even means for one") --
+  investigating settled it: it isn't legal, so there's a definite answer
+  (nothing) rather than a design choice to defer. `hasOnlySupportedImageUses`
+  now takes an explicit `IsInteger` flag and rejects every sample
+  intrinsic outright when set, rather than silently accepting one that
+  would need to mean something undefined.
+- **Shared `femeRTImageFormatElementSize`, not a separate size table.** A
+  texel's byte size doesn't depend on whether the caller reads it back as
+  `<4 x float>` or `<4 x i32>` -- only `femeRTUnpackImageTexel` vs.
+  `femeRTUnpackImageTexelI32` need to differ. Adding the int format cases
+  to the existing size table (rather than a parallel one) avoids
+  duplicating a switch that's otherwise identical in structure.
+- **Scope narrower than "every integer format".** Only the 7
+  mandatory-sampled formats are decoded, matching this row's own text and
+  E25's "mechanical, added on demand" precedent -- `R32_UINT`/
+  `R32G32_UINT`/`R32G32B32_UINT` (and their `_SINT` siblings) are real
+  `ResourceFormat` enumerators but not mandatory-sampled, so they're left
+  for whichever future milestone needs one specifically, the same way E25
+  left every integer format for this one.
+- **`SIMDize.cpp` needed no change.** `widenImageCall` was already
+  written generically over its scalar helper's result element type
+  (`VecTy->getElementType()`), not hardcoded to float -- confirmed by
+  reading it rather than assuming, and by running `SIMDizeTest` after the
+  change (no new test needed there since the existing generic-widening
+  tests already exercise the code path a `v4i32` call would take;
+  `matchImageCall` recognizing `Load2DI32` is what makes it reachable at
+  all, and that's covered by the `ImageCalls`/`SPIRVResourceLowering`
+  tests).
+
+## Where tests landed, and a self-correction mid-task
+
+My first pass wrote new `femeCpuImageLoad2DV4I32` runtime tests directly
+into `RuntimeCPUTest.cpp`, including a hand-rolled image-descriptor
+wrapper helper -- duplicating infrastructure I hadn't yet discovered.
+Building and running turned up a second test suite in the same binary,
+`ImageSamplingTest` (a dedicated `ImageSamplingTest.cpp` with its own
+`makeImage2D`/generic `addWrapper` helpers, purpose-built for
+`feme.cpu.image.*` calls). Rather than leave the duplicate tests in
+place, I reverted the `RuntimeCPUTest.cpp` addition (`git checkout --`)
+and rewrote the same coverage against `ImageSamplingTest.cpp`'s own
+conventions instead -- less code, and consistent with how every other
+per-format `Load` case in that file is already structured.
+
+## Validation
+
+- `ninja FeMeTransformsCPU`/`FeMeRuntimeCPU`/`FeMeVulkanCore` after each
+  change, to catch build breaks before running any test.
+- `FeMeTransformsCPUTests` (167 tests, including two new
+  `SPIRVResourceLoweringTest` cases:
+  `LowersIntegerImageFetchToImageLoadV4I32`,
+  `LeavesAnIntegerSampledImageHandleUsedForSampleAlone`) and
+  `SIMDizeTest`'s 19 cases specifically, to confirm the generic widening
+  claim above rather than assume it.
+- `FeMeRuntimeCPUTests` (44 tests: 26 `RuntimeCPUTest` unchanged, 23
+  `ImageSamplingTest` including 6 new integer-load cases covering the
+  identity format, `R8G8B8A8_SINT`, `R16G16B16A16_UINT`,
+  `R10G10B10A2_UINT`, and out-of-range/inactive-lane zero-reads).
+- `FeMeVulkanTests`' `FormatTest`/`EntryPointsTest` suites (16 and 15
+  cases respectively), including a new
+  `ImageFormatPropertiesAcceptsMandatoryIntegerFormat` and a corrected
+  comment on the pre-existing `ImageFormatPropertiesRejectsUnsupportedUsage`
+  (still passes: `R32_UINT` isn't one of the 7 formats this row adds).
+- `ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+  `LLVM_CCACHE_BUILD=ON`): 1655/1656 passed, 1 unsupported (pre-existing,
+  unrelated), after every commit in this row.
+- Targeted `dEQP-VK.api.info.*`/`dEQP-VK.*astc*` CTS re-runs against the
+  real `feme_icd.json`, following this report's own established
+  methodology. `api.info` moved from E25's 5,556/390/4,538 to
+  5,542/404/4,538 -- investigated rather than assumed benign: all 14 net
+  new failures are `image_format_properties.*` cases for the 7
+  newly-sampled formats, failing on a *different* reason than the
+  already-documented sample-count gap
+  (`VK_ERROR_FORMAT_NOT_SUPPORTED returned for required image parameter
+  combination`), traced to `vktApiFeatureInfo.cpp`'s own mandatory-format
+  table requiring these same formats support `COLOR_ATTACHMENT_BIT`/
+  `STORAGE_IMAGE_BIT` too -- neither of which any integer format (color
+  attachment) or any format at all (storage image) gets from
+  `formatFeatureFlags` yet, both already-documented, genuinely separate
+  gaps this row correctly does not touch. `astc` is byte-for-byte
+  unchanged from E25, confirmed rather than assumed (no ASTC format is
+  integer-channel). Full breakdown in "Roadmap E26: measured impact" in
+  VulkanCTSReport.md.
+
+## Deliberately left open
+
+- `R32_UINT`/`R32G32_UINT`/`R32G32B32_UINT` (and `_SINT` siblings): real
+  `ResourceFormat` values, not mandatory-sampled, left undecoded.
+- A filtered integer sample: does not exist in SPIR-V, so no
+  `ImageCallKind` or runtime helper is added for one.
+- Integer-format color-attachment support and storage-image support in
+  general: both newly *reachable* by this row's CTS run (since these
+  formats are no longer rejected before the mandatory-combination check
+  runs), but neither caused nor fixed by this row -- tracked as findings
+  in VulkanCTSReport.md rather than folded in.
