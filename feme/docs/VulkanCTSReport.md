@@ -2763,3 +2763,114 @@ has applied to its own new cases.
 
 
 
+
+## Roadmap E25: measured impact (targeted, not a full re-run)
+
+E25 broadened the CPU runtime's typed sample table
+(`femeRTImageFormatElementSize`/`femeRTUnpackImageTexel`,
+FeMeRuntimeCPU.c) from three formats to every non-integer,
+non-block-compressed, non-depth/stencil format `feme::cpu::ResourceFormat`
+lists, and `formatFeatureFlags` (Format.cpp) now advertises
+`SAMPLED_IMAGE_BIT`/`SAMPLED_IMAGE_FILTER_LINEAR_BIT` for that broadened
+set. The same two targeted subsets E24 used were re-run against this
+build, with E24's own "after" numbers as the baseline (E25 makes no
+version/extension/feature-advertisement change, so, per this report's own
+established practice, a revert-and-rerun re-confirmation was not repeated
+for that unrelated portion of the diff):
+
+- **`dEQP-VK.api.info.*`** (10,484 cases): 5,385 passed / 561 failed /
+  4,538 not supported before this row (E24's own "after" figure). After
+  broadening the sample table alone (before the pNext fix below): 5,359
+  passed / 587 failed -- **worse**, not better, and confirmed to be a
+  real regression this row's own broadening surfaced rather than a
+  measurement artifact (see "A real, pre-existing bug found and fixed"
+  below for why).
+
+  **A real, pre-existing bug was found and fixed measuring this, not
+  introduced by it.** `vkGetPhysicalDeviceFormatProperties2`
+  (EntryPoints.cpp) never walked its own `pNext` chain: `VkFormatProperties3`
+  (a core Vulkan 1.3 struct, always chainable once an ICD's advertised
+  `apiVersion` is >= 1.3, whether or not it also lists
+  `VK_KHR_format_feature_flags2` as an advertised extension name, which
+  this one still does not -- roadmap E19) was left completely untouched,
+  silently discarding every bit `formatFeatureFlags` computed for any
+  caller that chained one. `dEQP-VK.api.info.unsupported_image_usage.*`'s
+  own `Context::getFormatProperties` helper chains exactly this struct
+  once it sees a >=1.3-capable device, so every one of its checks was
+  comparing a real `vkGetPhysicalDeviceImageFormatProperties` answer
+  against an all-zero "what the format supports" baseline it read back --
+  already true, and already silently wrong, for every format this ICD
+  supported *before* this row (confirmed: `sampled_r8g8b8a8_unorm`/
+  `sampled_r32g32b32a32_sfloat`, sampled since the original three-format
+  table, already failed this exact check pre-E25). E25's own broadening
+  simply added more formats reaching the same already-broken check, which
+  is why the raw failure count went up rather than down on the first
+  measurement. Fixed by filling `VkFormatProperties3`'s three feature
+  fields from the same `VkFormatProperties` result
+  `vkGetPhysicalDeviceFormatProperties2` already computes
+  (`EntryPoints.cpp`); a new `EntryPointsTest.
+  FormatProperties2FillsChainedFormatProperties3` regression test checks
+  the chained struct now matches, and (per this report's established
+  "prove the test catches the regression" practice) was confirmed to fail
+  against a temporarily-reverted build before the fix landed.
+
+  After both changes: **5,556 passed / 390 failed / 4,538 not supported**
+  -- a net improvement of +171 passing cases over the E24 baseline, not
+  just a recovery of this row's own broadening. Breaking down the
+  remaining 390 failures by joining each against the case-name buckets
+  E24's own report already used:
+  - 0 `unsupported_image_usage.*` and 0
+    `get_physical_device_properties2.pnext_format_properties.*` -- both
+    fully closed by the `VkFormatProperties3` fix above (down from 138
+    and 59 respectively, mid-fix).
+  - 320 `image_format_properties.{1d,2d,3d}.*` (up from E24's 310: ten
+    more of this row's own newly-sampled formats now reach this
+    unrelated, still-open check rather than being rejected before they
+    could). Every one of these fails with `"Required sample counts not
+    supported"`, confirmed (via `dEQP-VK.api.info.image_format_properties.
+    2d.optimal.r8g8b8a8_unorm`/`r32g32b32a32_sfloat`, both sampled since
+    before this row) to be a real, pre-existing gap unrelated to this
+    row's own format broadening: `vktApiFeatureInfo.cpp`'s own check
+    requires `VkImageFormatProperties::sampleCounts` cover a mandatory
+    minimum whenever a format supports `COLOR_ATTACHMENT_BIT`/
+    `DEPTH_STENCIL_ATTACHMENT_BIT` at all, for *any* usage-flag subset
+    being queried (not only one that itself requests one of those two
+    usages) -- `Image.cpp`'s `supportedSampleCounts` instead narrows to
+    `VK_SAMPLE_COUNT_1_BIT` for a usage subset (e.g. transfer-only) that
+    names none of `SAMPLED`/`STORAGE`/`COLOR_ATTACHMENT`/
+    `DEPTH_STENCIL_ATTACHMENT`. Genuinely separate work from per-format
+    feature support (a `VkImageFormatProperties::sampleCounts`-computation
+    gap, not a format-table gap), left as a follow-up rather than folded
+    into this row.
+  - 54 `format_properties.*` (unchanged from E24's own baseline -- this
+    row's broadening does not touch `bufferFeatures`, the reason every
+    one of these already failed).
+  - 14 `get_physical_device_properties2.features`/1
+    `vulkan1p2_limits_validation`/1 `get_physical_device_properties2.
+    properties` (unchanged pre-existing gaps, same as E24's own report).
+- **`dEQP-VK.*astc*`** (98,927 cases): 8,237 passed / 12,225 failed /
+  78,465 not supported before this row (E24's own "after" figure). After:
+  **8,349 passed / 12,113 failed / 78,465 not supported** -- +112 passing,
+  -112 failing, "not supported" unchanged (no new format became
+  recognized/rejected outright by this row). Roughly half the remaining
+  failures (5,916 of 12,113) are still `feme-cpu-simdize`'s "divergent
+  vector value ... used outside a supported ... pattern" limitation
+  (roadmap milestone 7's own already-documented deviation, unrelated to
+  per-format feature support and not touched by this row); the rest are
+  the same mandatory-sampled-format and sample-count gaps the
+  `api.info.*` breakdown above already accounts for, reached through a
+  texture test rather than a capability-query one.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1646/1647
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- the new tests relative to E24's own report are
+`ImageSamplingTest`'s nine new per-format `feme.cpu.image.load.2d.v4f32`
+cases (one per format this row added to the CPU runtime's sample table),
+`FormatTest`'s updated `FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope`
+(now covering the broadened set), and `EntryPointsTest`'s
+`FormatProperties2FillsChainedFormatProperties3` (the `VkFormatProperties3`
+regression test above), plus a corrected expectation in
+`EntryPointsTest.ImageFormatPropertiesRejectsUnsupportedUsage` (retargeted
+from `R32_SFLOAT`, now sampled by this row, to an integer format, still
+correctly rejected per roadmap E26).
