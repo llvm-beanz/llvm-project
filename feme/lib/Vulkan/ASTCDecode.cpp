@@ -8,8 +8,11 @@
 
 #include "ASTCDecode.h"
 
+#include "llvm/Support/ErrorHandling.h"
+
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -889,6 +892,370 @@ unsigned numExtraCEMBits(unsigned NumPartitions, unsigned SharedCEMField) {
   return ExtraBits[NumPartitions - 1];
 }
 
+//===----------------------------------------------------------------------===//
+// Roadmap E21 (`VK_EXT_texture_compression_astc_hdr`): HDR color endpoint
+// decoding and the shared LDR/HDR weight-interpolation pipeline
+// (specification "HDR Endpoint Decoding"/"Weight Application"). Every
+// endpoint value below -- LDR or HDR -- ends up in a common "pre-16-bit"
+// domain (an LDR channel's raw 8-bit value, or an HDR channel's 12-bit
+// pseudo-logarithmic one) that `expandTo16Bit`/`finalizeChannel` turn into
+// a final float uniformly, mirroring the specification's own text: "the
+// color components from each endpoint... are initially shifted left...
+// and these are interpolated in the same way" regardless of LDR/HDR.
+//===----------------------------------------------------------------------===//
+
+/// One partition's decoded RGBA endpoint pair, each channel value still in
+/// its own "pre-16-bit" domain (see this section's own comment) together
+/// with whether that channel's domain is HDR (12-bit) or LDR (8-bit) --
+/// mode 14 needs this per-channel, not just per-partition, since it pairs
+/// an HDR RGB with an LDR alpha.
+struct Endpoint12 {
+  std::array<int, 4> Lo{};
+  std::array<int, 4> Hi{};
+  std::array<bool, 4> ChannelIsHDR{};
+};
+
+/// Sign-extends the low \p Bits bits of \p V.
+int signExtend(int V, unsigned Bits) {
+  int SignBit = 1 << (Bits - 1);
+  return (V ^ SignBit) - SignBit;
+}
+
+int clamp12(int V) { return std::clamp(V, 0, 0xFFF); }
+
+/// HDR endpoint mode 11 ("HDR RGB, direct" -- specification "HDR
+/// Endpoint Mode 11"), reused as-is by modes 14 and 15 for their own RGB
+/// channels.
+struct Mode11RGB {
+  std::array<int, 3> Lo{}, Hi{};
+};
+
+Mode11RGB decodeHDRMode11(int V0, int V1, int V2, int V3, int V4, int V5) {
+  unsigned MajComp = ((V4 & 0x80) >> 7) | ((V5 & 0x80) >> 6);
+  Mode11RGB Result;
+  if (MajComp == 3) {
+    // Specification: "e0 = (v0<<4, v2<<4, (v4&0x7f)<<5, 0x780); e1 =
+    // (v1<<4, v3<<4, (v5&0x7f)<<5, 0x780)" -- e0 is the low endpoint, e1
+    // the high one, matching the general (non-direct) path below's own
+    // e1-is-`Hi`/e0-is-`Lo` orientation.
+    Result.Lo = {V0 << 4, V2 << 4, (V4 & 0x7F) << 5};
+    Result.Hi = {V1 << 4, V3 << 4, (V5 & 0x7F) << 5};
+    return Result;
+  }
+
+  unsigned Mode = ((V1 & 0x80) >> 7) | ((V2 & 0x80) >> 6) | ((V3 & 0x80) >> 5);
+  int VA = V0 | ((V1 & 0x40) << 2);
+  int VB0 = V2 & 0x3F, VB1 = V3 & 0x3F;
+  int VC = V1 & 0x3F;
+  constexpr unsigned DBits[8] = {7, 6, 7, 6, 5, 6, 5, 6};
+  int VD0 = signExtend(V4 & 0x7F, DBits[Mode]);
+  int VD1 = signExtend(V5 & 0x7F, DBits[Mode]);
+
+  int X0 = (V2 >> 6) & 1, X1 = (V3 >> 6) & 1;
+  int X2 = (V4 >> 6) & 1, X3 = (V5 >> 6) & 1;
+  int X4 = (V4 >> 5) & 1, X5 = (V5 >> 5) & 1;
+
+  unsigned Ohm = 1u << Mode;
+  if (Ohm & 0xA4)
+    VA |= X0 << 9;
+  if (Ohm & 0x08)
+    VA |= X2 << 9;
+  if (Ohm & 0x50)
+    VA |= X4 << 9;
+  if (Ohm & 0x50)
+    VA |= X5 << 10;
+  if (Ohm & 0xA0)
+    VA |= X1 << 10;
+  if (Ohm & 0xC0)
+    VA |= X2 << 11;
+  if (Ohm & 0x04)
+    VC |= X1 << 6;
+  if (Ohm & 0xE8)
+    VC |= X3 << 6;
+  if (Ohm & 0x20)
+    VC |= X2 << 7;
+  if (Ohm & 0x5B)
+    VB0 |= X0 << 6;
+  if (Ohm & 0x5B)
+    VB1 |= X1 << 6;
+  if (Ohm & 0x12)
+    VB0 |= X2 << 7;
+  if (Ohm & 0x12)
+    VB1 |= X3 << 7;
+
+  unsigned Shamt = (Mode >> 1) ^ 3;
+  VA <<= Shamt;
+  VB0 <<= Shamt;
+  VB1 <<= Shamt;
+  VC <<= Shamt;
+  VD0 <<= Shamt;
+  VD1 <<= Shamt;
+
+  Result.Hi = {clamp12(VA), clamp12(VA - VB0), clamp12(VA - VB1)};
+  Result.Lo = {clamp12(VA - VC), clamp12(VA - VB0 - VC - VD0),
+              clamp12(VA - VB1 - VC - VD1)};
+  if (MajComp == 1) {
+    std::swap(Result.Lo[0], Result.Lo[1]);
+    std::swap(Result.Hi[0], Result.Hi[1]);
+  } else if (MajComp == 2) {
+    std::swap(Result.Lo[0], Result.Lo[2]);
+    std::swap(Result.Hi[0], Result.Hi[2]);
+  }
+  return Result;
+}
+
+/// Decodes the six HDR-only color endpoint modes (specification "HDR
+/// Endpoint Decoding"); \p Mode must be one of 2, 3, 7, 11, 14, 15.
+Endpoint12 decodeHDRColorEndpoints(const std::vector<uint32_t> &Raw,
+                                   unsigned Range, unsigned Mode) {
+  std::array<int, 8> V{};
+  for (unsigned I = 0; I != Raw.size() && I != V.size(); ++I)
+    V[I] = static_cast<int>(unquantizeColorValue(Raw[I], Range));
+
+  Endpoint12 E;
+  E.ChannelIsHDR = {true, true, true, true};
+  switch (Mode) {
+  case 2: { // HDR luminance, large range.
+    int Y0, Y1;
+    if (V[1] >= V[0]) {
+      Y0 = V[0] << 4;
+      Y1 = V[1] << 4;
+    } else {
+      Y0 = (V[1] << 4) + 8;
+      Y1 = (V[0] << 4) - 8;
+    }
+    E.Lo = {Y0, Y0, Y0, 0x780};
+    E.Hi = {Y1, Y1, Y1, 0x780};
+    break;
+  }
+  case 3: { // HDR luminance, small range.
+    int Y0, D;
+    if (V[0] & 0x80) {
+      Y0 = ((V[1] & 0xE0) << 4) | ((V[0] & 0x7F) << 2);
+      D = (V[1] & 0x1F) << 2;
+    } else {
+      Y0 = ((V[1] & 0xF0) << 4) | ((V[0] & 0x7F) << 1);
+      D = (V[1] & 0xF) << 1;
+    }
+    int Y1 = std::min(Y0 + D, 0xFFF);
+    E.Lo = {Y0, Y0, Y0, 0x780};
+    E.Hi = {Y1, Y1, Y1, 0x780};
+    break;
+  }
+  case 7: { // HDR RGB, base + scale.
+    int V0 = V[0], V1 = V[1], V2 = V[2], V3 = V[3];
+    int ModeVal = ((V0 & 0xC0) >> 6) | ((V1 & 0x80) >> 5) | ((V2 & 0x80) >> 4);
+    unsigned MajComp, SubMode;
+    if ((ModeVal & 0xC) != 0xC) {
+      MajComp = ModeVal >> 2;
+      SubMode = ModeVal & 3;
+    } else if (ModeVal != 0xF) {
+      MajComp = ModeVal & 3;
+      SubMode = 4;
+    } else {
+      MajComp = 0;
+      SubMode = 5;
+    }
+
+    int Red = V0 & 0x3F, Green = V1 & 0x1F, Blue = V2 & 0x1F, Scale = V3 & 0x1F;
+    int X0 = (V1 >> 6) & 1, X1 = (V1 >> 5) & 1;
+    int X2 = (V2 >> 6) & 1, X3 = (V2 >> 5) & 1;
+    int X4 = (V3 >> 7) & 1, X5 = (V3 >> 6) & 1, X6 = (V3 >> 5) & 1;
+
+    unsigned Ohm = 1u << SubMode;
+    if (Ohm & 0x30)
+      Green |= X0 << 6;
+    if (Ohm & 0x3A)
+      Green |= X1 << 5;
+    if (Ohm & 0x30)
+      Blue |= X2 << 6;
+    if (Ohm & 0x3A)
+      Blue |= X3 << 5;
+    if (Ohm & 0x3D)
+      Scale |= X6 << 5;
+    if (Ohm & 0x2D)
+      Scale |= X5 << 6;
+    if (Ohm & 0x04)
+      Scale |= X4 << 7;
+    if (Ohm & 0x3B)
+      Red |= X4 << 6;
+    if (Ohm & 0x04)
+      Red |= X3 << 6;
+    if (Ohm & 0x10)
+      Red |= X5 << 7;
+    if (Ohm & 0x0F)
+      Red |= X2 << 7;
+    if (Ohm & 0x05)
+      Red |= X1 << 8;
+    if (Ohm & 0x0A)
+      Red |= X0 << 8;
+    if (Ohm & 0x05)
+      Red |= X0 << 9;
+    if (Ohm & 0x02)
+      Red |= X6 << 9;
+    if (Ohm & 0x01)
+      Red |= X3 << 10;
+    if (Ohm & 0x02)
+      Red |= X5 << 10;
+
+    constexpr int Shamts[6] = {1, 1, 2, 3, 4, 5};
+    unsigned Shamt = Shamts[SubMode];
+    Red <<= Shamt;
+    Green <<= Shamt;
+    Blue <<= Shamt;
+    Scale <<= Shamt;
+
+    if (SubMode != 5) {
+      Green = Red - Green;
+      Blue = Red - Blue;
+    }
+    if (MajComp == 1)
+      std::swap(Red, Green);
+    else if (MajComp == 2)
+      std::swap(Red, Blue);
+
+    E.Hi = {clamp12(Red), clamp12(Green), clamp12(Blue), 0x780};
+    E.Lo = {clamp12(Red - Scale), clamp12(Green - Scale),
+            clamp12(Blue - Scale), 0x780};
+    break;
+  }
+  case 11: { // HDR RGB, direct.
+    Mode11RGB RGB = decodeHDRMode11(V[0], V[1], V[2], V[3], V[4], V[5]);
+    E.Lo = {RGB.Lo[0], RGB.Lo[1], RGB.Lo[2], 0x780};
+    E.Hi = {RGB.Hi[0], RGB.Hi[1], RGB.Hi[2], 0x780};
+    break;
+  }
+  case 14: { // HDR RGB, direct + LDR alpha.
+    Mode11RGB RGB = decodeHDRMode11(V[0], V[1], V[2], V[3], V[4], V[5]);
+    E.Lo = {RGB.Lo[0], RGB.Lo[1], RGB.Lo[2], V[6]};
+    E.Hi = {RGB.Hi[0], RGB.Hi[1], RGB.Hi[2], V[7]};
+    E.ChannelIsHDR[3] = false; // Alpha stays in the LDR (8-bit) domain.
+    break;
+  }
+  case 15: { // HDR RGB, direct + HDR alpha.
+    Mode11RGB RGB = decodeHDRMode11(V[0], V[1], V[2], V[3], V[4], V[5]);
+    int V6 = V[6], V7 = V[7];
+    unsigned AlphaMode = ((V6 >> 7) & 1) | ((V7 >> 6) & 2);
+    V6 &= 0x7F;
+    V7 &= 0x7F;
+    int A0, A1;
+    if (AlphaMode == 3) {
+      A0 = V6 << 5;
+      A1 = V7 << 5;
+    } else {
+      V6 |= (V7 << (AlphaMode + 1)) & 0x780;
+      V7 &= (0x3F >> AlphaMode);
+      V7 ^= 0x20 >> AlphaMode;
+      V7 -= 0x20 >> AlphaMode;
+      V6 <<= (4 - AlphaMode);
+      V7 <<= (4 - AlphaMode);
+      V7 += V6;
+      A0 = V6;
+      A1 = clamp12(V7);
+    }
+    E.Lo = {RGB.Lo[0], RGB.Lo[1], RGB.Lo[2], A0};
+    E.Hi = {RGB.Hi[0], RGB.Hi[1], RGB.Hi[2], A1};
+    break;
+  }
+  default:
+    llvm_unreachable("not one of the six HDR-only color endpoint modes");
+  }
+  return E;
+}
+
+/// Decodes any of the 16 color endpoint modes (LDR or HDR) into the
+/// common `Endpoint12` representation `decodeASTCBlockHDR` interpolates
+/// uniformly -- LDR modes reuse `decodeColorEndpoints`'s existing 8-bit
+/// decode, tagging every channel as non-HDR.
+Endpoint12 decodeColorEndpointsAny(const std::vector<uint32_t> &Raw,
+                                   unsigned Range, unsigned Mode) {
+  switch (Mode) {
+  case 2:
+  case 3:
+  case 7:
+  case 11:
+  case 14:
+  case 15:
+    return decodeHDRColorEndpoints(Raw, Range, Mode);
+  default: {
+    auto [Lo, Hi] = decodeColorEndpoints(Raw, Range, Mode);
+    Endpoint12 E;
+    E.Lo = Lo;
+    E.Hi = Hi;
+    E.ChannelIsHDR = {false, false, false, false};
+    return E;
+  }
+  }
+}
+
+/// Widens one endpoint channel value from its own "pre-16-bit" domain
+/// (see this section's comment) to the common 16-bit domain
+/// interpolation happens in (specification "Weight Application"): an LDR
+/// (8-bit) value is expanded by bit replication, an HDR (12-bit) one by a
+/// plain 4-bit left shift.
+uint32_t expandTo16Bit(int V, bool IsHDR) {
+  if (IsHDR)
+    return static_cast<uint32_t>(V) << 4;
+  return (static_cast<uint32_t>(V) << 8) | static_cast<uint32_t>(V);
+}
+
+/// Reinterprets \p Bits as an IEEE-754 half-precision value and widens it
+/// to `float`.
+float halfBitsToFloat(uint16_t Bits) {
+  uint32_t Sign = static_cast<uint32_t>(Bits & 0x8000) << 16;
+  uint32_t Exp = (Bits >> 10) & 0x1F;
+  uint32_t Mantissa = Bits & 0x3FF;
+  uint32_t Result;
+  if (Exp == 0) {
+    if (Mantissa == 0) {
+      Result = Sign;
+    } else {
+      // Subnormal half: normalize into a normal float exponent/mantissa.
+      unsigned E = 1;
+      while ((Mantissa & 0x400) == 0) {
+        Mantissa <<= 1;
+        --E;
+      }
+      Mantissa &= 0x3FF;
+      Result = Sign | ((E + (127 - 15)) << 23) | (Mantissa << 13);
+    }
+  } else if (Exp == 0x1F) {
+    Result = Sign | 0x7F800000 | (Mantissa << 13); // Inf or NaN.
+  } else {
+    Result = Sign | ((Exp + (127 - 15)) << 23) | (Mantissa << 13);
+  }
+  float F;
+  std::memcpy(&F, &Result, sizeof(F));
+  return F;
+}
+
+/// Finalizes one interpolated 16-bit channel value \p C into its output
+/// float, per specification "Weight Application": an LDR channel divides
+/// down to `[0, 1]` (saturating at 1.0 for the maximum value); an HDR
+/// channel's 16-bit value is decomposed into a 5-bit exponent/11-bit
+/// mantissa pair, recombined through the specification's own
+/// piecewise-logarithmic mantissa adjustment, and the resulting bit
+/// pattern reinterpreted as a half-precision float (clamped to the
+/// largest finite half if that recombination produced +Inf or a NaN).
+float finalizeChannel(uint32_t C, bool IsHDR) {
+  if (!IsHDR)
+    return C == 65535 ? 1.0f : static_cast<float>(C) / 65536.0f;
+
+  unsigned E = (C & 0xF800) >> 11;
+  unsigned M = C & 0x7FF;
+  unsigned Mt;
+  if (M < 512)
+    Mt = 3 * M;
+  else if (M >= 1536)
+    Mt = 5 * M - 2048;
+  else
+    Mt = 4 * M - 512;
+  unsigned Cf = (E << 10) + (Mt >> 3);
+  if (((Cf >> 10) & 0x1F) == 0x1F)
+    Cf = 0x7BFF; // +Inf or NaN: clamp to the largest finite half.
+  return halfBitsToFloat(static_cast<uint16_t>(Cf));
+}
+
 } // namespace
 
 void feme::vulkan::decodeASTCBlock(const uint8_t Block[16],
@@ -1084,6 +1451,190 @@ void feme::vulkan::decodeASTCBlock(const uint8_t Block[16],
         unsigned Interp = (C0 * (64 - Weight) + C1 * Weight + 32) / 64;
         Output[Texel * 4 + C] =
             static_cast<uint8_t>((Interp * 255 + 32767) / 65536);
+      }
+    }
+  }
+}
+
+void feme::vulkan::decodeASTCBlockHDR(const uint8_t Block[16],
+                                      uint32_t BlockWidth,
+                                      uint32_t BlockHeight, float *Output) {
+  Block128 V = loadBlock(Block);
+  unsigned NumTexels = BlockWidth * BlockHeight;
+
+  auto fillSolid = [&](std::array<float, 4> Color) {
+    for (unsigned I = 0; I != NumTexels; ++I)
+      for (unsigned C = 0; C != 4; ++C)
+        Output[I * 4 + C] = Color[C];
+  };
+  // Specification "LDR and HDR Modes": the HDR error result is opaque
+  // fully-saturated magenta.
+  auto fillError = [&] { fillSolid({1.0f, 0.0f, 1.0f, 1.0f}); };
+
+  // Void extent (specification "Void Extent Blocks"): a solid fill for
+  // the whole block. Unlike `decodeASTCBlock` (LDR-only), this function
+  // handles both the LDR (UNORM16-stored) and HDR (FP16-stored) dynamic
+  // range bit, per the specification's own bit 9 ("Dynamic Range flag").
+  if (getBits(V, 0, 9) == 0x1FC) {
+    if (getBits(V, 10, 2) != 0x3) {
+      fillError(); // Reserved bits not both 1.
+      return;
+    }
+    bool IsHDRExtent = getBits(V, 9, 1) != 0;
+    unsigned R16 = getBits(V, 64, 16);
+    unsigned G16 = getBits(V, 80, 16);
+    unsigned B16 = getBits(V, 96, 16);
+    unsigned A16 = getBits(V, 112, 16);
+    if (IsHDRExtent) {
+      fillSolid({halfBitsToFloat(static_cast<uint16_t>(R16)),
+                halfBitsToFloat(static_cast<uint16_t>(G16)),
+                halfBitsToFloat(static_cast<uint16_t>(B16)),
+                halfBitsToFloat(static_cast<uint16_t>(A16))});
+    } else {
+      fillSolid({R16 / 65535.0f, G16 / 65535.0f, B16 / 65535.0f,
+                A16 / 65535.0f});
+    }
+    return;
+  }
+
+  BlockModeInfo Mode = decodeBlockMode(V);
+  if (Mode.Illegal) {
+    fillError();
+    return;
+  }
+
+  unsigned NumPartitions = 1 + getBits(V, 11, 2);
+  unsigned NumWeights =
+      Mode.WeightWidth * Mode.WeightHeight * (Mode.DualPlane ? 2 : 1);
+  unsigned WeightBits = iseBitCount(NumWeights, iseRangeShape(Mode.WeightRange));
+  unsigned WeightStartBit = 128 - WeightBits;
+
+  unsigned SharedCEMField = NumPartitions == 1 ? 0 : getBits(V, 23, 2);
+  unsigned ExtraCEMBits = numExtraCEMBits(NumPartitions, SharedCEMField);
+  unsigned DualPlaneStartBit =
+      WeightStartBit - ExtraCEMBits - (Mode.DualPlane ? 2 : 0);
+
+  if (NumPartitions == 4 && Mode.DualPlane) {
+    fillError();
+    return;
+  }
+
+  std::array<unsigned, 4> CEM = {0, 0, 0, 0};
+  if (NumPartitions == 1) {
+    CEM[0] = getBits(V, 13, 4);
+  } else if (ExtraCEMBits == 0) {
+    unsigned Shared = getBits(V, 25, 4);
+    for (unsigned P = 0; P != NumPartitions; ++P)
+      CEM[P] = Shared;
+  } else {
+    unsigned BaseField = getBits(V, 23, 6);
+    unsigned BaseCEM = ((BaseField & 0x3) - 1) * 4;
+    unsigned CMBits = BaseField >> 2;
+    uint64_t Extra = getBits(V, DualPlaneStartBit + (Mode.DualPlane ? 2 : 0),
+                             ExtraCEMBits);
+    uint64_t Combined = CMBits | (Extra << 4);
+    unsigned C[4] = {0, 0, 0, 0};
+    for (unsigned P = 0; P != NumPartitions; ++P) {
+      C[P] = Combined & 0x1;
+      Combined >>= 1;
+    }
+    unsigned M[4] = {0, 0, 0, 0};
+    for (unsigned P = 0; P != NumPartitions; ++P) {
+      M[P] = Combined & 0x3;
+      Combined >>= 2;
+    }
+    for (unsigned P = 0; P != NumPartitions; ++P)
+      CEM[P] = BaseCEM + 4 * C[P] + M[P];
+  }
+
+  unsigned NumColorValues = 0;
+  for (unsigned P = 0; P != NumPartitions; ++P)
+    NumColorValues += numColorValuesForMode(CEM[P]);
+  if (NumColorValues > 18) {
+    fillError();
+    return;
+  }
+
+  unsigned ColorStartBit = NumPartitions == 1 ? 17 : 29;
+  unsigned MaxColorBits = DualPlaneStartBit > ColorStartBit
+                             ? DualPlaneStartBit - ColorStartBit
+                             : 0;
+  unsigned ColorRange = 0;
+  for (unsigned Range = 255; Range >= 5; --Range) {
+    ISERangeShape Shape = iseRangeShape(Range);
+    if (!Shape.Valid)
+      continue;
+    if (iseBitCount(NumColorValues, Shape) <= MaxColorBits) {
+      ColorRange = Range;
+      break;
+    }
+  }
+  if (ColorRange < 5) {
+    fillError();
+    return;
+  }
+
+  std::vector<uint32_t> ColorVals =
+      decodeISESequence(V, ColorStartBit, NumColorValues, ColorRange);
+
+  std::array<Endpoint12, 4> Endpoint{};
+  unsigned ColorPos = 0;
+  for (unsigned P = 0; P != NumPartitions; ++P) {
+    unsigned N = numColorValuesForMode(CEM[P]);
+    std::vector<uint32_t> PartVals(ColorVals.begin() + ColorPos,
+                                   ColorVals.begin() + ColorPos + N);
+    ColorPos += N;
+    Endpoint[P] = decodeColorEndpointsAny(PartVals, ColorRange, CEM[P]);
+  }
+
+  unsigned NumGridWeights = Mode.WeightWidth * Mode.WeightHeight;
+  std::vector<uint32_t> RawWeights;
+  {
+    Block128 Reversed;
+    for (unsigned I = 0; I != WeightBits; ++I) {
+      uint32_t Bit = getBitsFromEnd(V, I, 1);
+      if (I < 64)
+        Reversed.Lo |= uint64_t(Bit) << I;
+      else
+        Reversed.Hi |= uint64_t(Bit) << (I - 64);
+    }
+    RawWeights = decodeISESequence(Reversed, 0, NumWeights, Mode.WeightRange);
+  }
+
+  std::vector<unsigned> Grid0(NumGridWeights), Grid1(NumGridWeights);
+  unsigned Stride = Mode.DualPlane ? 2 : 1;
+  for (unsigned I = 0; I != NumGridWeights; ++I)
+    Grid0[I] = unquantizeWeight(RawWeights[I * Stride], Mode.WeightRange);
+  if (Mode.DualPlane)
+    for (unsigned I = 0; I != NumGridWeights; ++I)
+      Grid1[I] = unquantizeWeight(RawWeights[I * Stride + 1], Mode.WeightRange);
+
+  std::vector<unsigned> Weights0 = infillWeights(
+      Grid0, Mode.WeightWidth, Mode.WeightHeight, BlockWidth, BlockHeight);
+  std::vector<unsigned> Weights1;
+  unsigned DualPlaneChannel = 4; // 4 == "no dual plane".
+  if (Mode.DualPlane) {
+    Weights1 = infillWeights(Grid1, Mode.WeightWidth, Mode.WeightHeight,
+                             BlockWidth, BlockHeight);
+    DualPlaneChannel = getBits(V, DualPlaneStartBit, 2);
+  }
+
+  unsigned PartitionID = NumPartitions == 1 ? 0 : getBits(V, 13, 10);
+  for (unsigned Y = 0; Y != BlockHeight; ++Y) {
+    for (unsigned X = 0; X != BlockWidth; ++X) {
+      unsigned Texel = Y * BlockWidth + X;
+      unsigned Part =
+          selectPartition(PartitionID, X, Y, NumPartitions, NumTexels);
+      const Endpoint12 &E = Endpoint[Part];
+      for (unsigned C = 0; C != 4; ++C) {
+        unsigned Weight = (Mode.DualPlane && DualPlaneChannel == C)
+                             ? Weights1[Texel]
+                             : Weights0[Texel];
+        bool IsHDR = E.ChannelIsHDR[C];
+        uint32_t C0 = expandTo16Bit(E.Lo[C], IsHDR);
+        uint32_t C1 = expandTo16Bit(E.Hi[C], IsHDR);
+        uint32_t Interp = (C0 * (64 - Weight) + C1 * Weight + 32) / 64;
+        Output[Texel * 4 + C] = finalizeChannel(Interp, IsHDR);
       }
     }
   }
