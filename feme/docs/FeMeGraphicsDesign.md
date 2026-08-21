@@ -1584,6 +1584,32 @@ documented reason rather than an oversight:
   as an unraised `llvm.dx.resource.*`/`llvm.spv.resource.*` call rather
   than silently dropped.
 
+**Update (roadmap E26, closed):** an integer-format image can now be
+fetched. `feme::cpu::ImageCalls` gained `ImageCallKind::Load2DI32`/
+`createLoad2DI32`, the canonical `feme.cpu.image.load.2d.v4i32` call --
+same shape as the existing float `Load2D`, just `<4 x i32>`-returning.
+`feme::cpu::SPIRVResourceLoweringPass::classifySampledImage2DHandle` now
+accepts an `i32`-channel 2D sampled-image handle alongside the existing
+float one (SPIR-V's `OpTypeImage` "Sampled Type" operand is always a
+single scalar, never a vector, so the channel type alone decides), and
+`hasOnlySupportedImageUses` narrows an integer-channel handle's uses to
+`OpImageFetch` only -- SPIR-V never legalizes a filtered
+`OpImageSample*` against an integer-sampled image, so a filtered-sample
+`ImageCallKind` for one is deliberately not added; there is nothing for it
+to mean. `FeMeRuntimeCPU.c`'s `femeRTImageFormatElementSize` (shared with
+the float path -- a texel's byte size does not depend on which vector
+type reads it back) and a new `femeRTUnpackImageTexelI32` decode the
+mandatory-sampled `_UINT`/`_SINT` formats the Vulkan spec's own
+"Mandatory Format Support" tables list (`R32G32B32A32_UINT`/`_SINT`,
+`R16G16B16A16_UINT`/`_SINT`, `R8G8B8A8_UINT`/`_SINT`,
+`R10G10B10A2_UINT`), and `formatFeatureFlags` (Format.cpp) now advertises
+`SAMPLED_IMAGE_BIT` (never `_FILTER_LINEAR_BIT`, for the same "no filtered
+integer sample" reason) for exactly that set. `SIMDize.cpp`'s
+`widenImageCall` needed no change at all: it was already generic over its
+scalar helper's result element type, so a divergent
+`feme.cpu.image.load.2d.v4i32` call widens the same way a divergent
+`v4f32` one already did.
+
 ### Texture layout and formats
 
 The API-neutral image descriptor supports linear and FeMe-private tiled

@@ -2215,6 +2215,29 @@ decoded value, so this row leaves that gap for whichever future milestone
 adds one, the same "mechanical, added on demand" scoping this row's own
 predecessors used.
 
+**Update (roadmap E26, closed):** that integer-format gap is closed for
+the mandatory-sampled subset the Vulkan spec's own "Mandatory Format
+Support" tables require. A new `feme.cpu.image.load.2d.v4i32` entry point
+(`feme::cpu::ImageCalls`' `ImageCallKind::Load2DI32`) and a new
+`femeRTUnpackImageTexelI32` decode table (feme/runtime/CPU/
+FeMeRuntimeCPU.c, sharing `femeRTImageFormatElementSize` with the float
+path -- a texel's byte size does not depend on which vector type reads it
+back) give `R32G32B32A32_UINT`/`_SINT`, `R16G16B16A16_UINT`/`_SINT`,
+`R8G8B8A8_UINT`/`_SINT`, and `R10G10B10A2_UINT` somewhere correct to go.
+`feme::cpu::SPIRVResourceLoweringPass` raises an integer 2D
+`OpImageFetch` to it the same way it already raised a float one, but
+raises no filtered-sample counterpart: SPIR-V never legalizes
+`OpImageSample*` against an integer-sampled image, only `OpImageFetch`,
+so "what would filtering even mean for one" -- this row's own open
+question -- has a definite answer: nothing, there is no such op to lower.
+`formatFeatureFlags` (Format.cpp) now advertises `SAMPLED_IMAGE_BIT` (never
+`_FILTER_LINEAR_BIT`, for the same reason) for exactly that mandatory-
+sampled integer set. Left open, and narrower than "every integer format":
+the non-mandatory partial-component integer formats (`R32_UINT`/
+`R32G32_UINT`/`R32G32B32_UINT` and their `_SINT` counterparts) are not
+decoded either, the same "mechanical, added on demand" scoping this row's
+own predecessor used.
+
 **Update (roadmap E20, closed):** that block-aligned layout rework has
 landed. `computeSubresourceLayouts` (Image.cpp) now takes a block
 width/height/bytes-per-block triple (`Format.h`'s `blockWidth`/
