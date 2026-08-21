@@ -2019,6 +2019,109 @@ by `feme/test/Conversion/SPIRVToLLVM/spirv-to-llvm-terminate-invocation.mlir`
 specified, and the feature/extension advertisement is verified end-to-end
 by the three passing `api.info`/`device_init` cases above.
 
+## Roadmap E13: measured impact
+
+Roadmap E13 (`VK_KHR_zero_initialize_workgroup_memory`/
+`shaderZeroInitializeWorkgroupMemory`) needed a different shape of
+prerequisite gap than E11/E12's own missing conversion patterns: the audit
+found SPIR-V `Workgroup`-storage-class globals (GLSL `shared`/HLSL
+`groupshared` declared directly in SPIR-V, as opposed to raised from DXIL)
+had *no* conversion pattern at all -- MLIR's own upstream `GlobalVariablePattern`
+only supports `Input`/`Private`/`Output`/`StorageBuffer`/`UniformConstant`,
+so any real SPIR-V module declaring one failed to convert entirely,
+regardless of zero-initialization. `feme::spirv::WorkgroupGlobalVariablePattern`
+(SPIRVToLLVMPatterns.cpp) fills that gap, converting one to an ordinary
+`llvm.mlir.global` in address space 3 (the same convention Clang's own HLSL
+`groupshared` codegen already uses), plus a new pointer-type conversion
+routing an ordinary access chain through the same address space.
+
+Getting the zero-initializer itself imported needed a second, independent
+MLIR gap fixed first: `spirv.GlobalVariable`'s own `Initializer` operand
+resolution (`processGlobalVariable` in the deserializer) only accepted a
+global variable, specialization constant, or specialization constant
+composite symbol -- not the plain `OpConstantNull` this feature's own
+zero-initializer always is (`Workgroup`'s Initializer may hold no other
+value per spec) -- and `processConstantNull` itself only built a null
+value for a scalar/vector/tensor type, erroring out for the composite
+(`spirv.array`/`spirv.struct`) shapes a real `shared` variable's own type
+usually takes. Both are fixed in MLIR itself (`zero_initialized`, a new
+unit attribute on `spirv.GlobalVariable`, and `getNullAttrForType`'s
+recursive generalization), with the same "extend MLIR, not just feme"
+shape E11/E12's own audits already established. `GroupSharedLayout` gains
+`NeedsZeroInit` (GroupShared.h), read off `hasInitializer()` on the
+imported global; `feme::cpu::EntryWrapperPass` `memset`s the flat
+groupshared buffer to zero, once per group, when it is set
+(EntryWrapper.cpp). `shaderZeroInitializeWorkgroupMemory` now reads
+`VK_TRUE` from both the aggregate `VkPhysicalDeviceVulkan13Features`
+struct and a new dedicated
+`VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures` struct;
+`getSupportedDeviceExtensions` gained
+`VK_KHR_zero_initialize_workgroup_memory` itself, the same "CTS enables it
+by name regardless of `apiVersion`" reason E3/E5/E6/E8/E9/E10/E11/E12
+already established.
+
+**Targeted CTS run**, against this session's HEAD build, of every
+sub-group under `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.*`
+(the row's own named 7-case regression -- see below for why the real
+count is much larger once the extension is genuinely advertised):
+
+| Sub-group | Result |
+|---|---|
+| `types.{bool,float32_t,int32_t,uint32_t}` (4 cases) | **`Pass`** -- a scalar `shared TYPE x = {};` variable, the exact shape this row's own scope targets, reads back zero on every lane |
+| `types.*` (remaining 71 of 75) | `Fail`/`NotSupported` -- see correction below |
+| `max_workgroup_memory.*` (6), `composites.*` (15), `max_workgroups.*` (3), `specialize_workgroup.*` (512), `repeat_pipeline.*` (32) | `Fail`, blocked before any zero-initialization is even exercised -- see correction below |
+| `shared_memory_blocks.*` (1) | `Fail` -- same shape as `composites.*` below |
+
+**This is a premise correction to the row's own "Closes D3's
+`compute.pipeline.zero_initialize_workgroup_memory` 7-case regression"
+text, not a sign this row's own zero-initialization is wrong**: the 4
+genuine passes above confirm the actual feature works end-to-end for a
+scalar variable. Every other sub-case is blocked by one of two further,
+pre-existing gaps this row's own scope does not cover, found by the same
+audit-first discipline E11/E12 already established:
+
+- **`OpTypeArray`'s Length operand must come from a normal constant**
+  (`mlir::spirv::Deserializer::processConstantArray`'s own pre-existing
+  check, unmodified by this row): every non-scalar case in this CTS
+  source file (`vktComputeZeroInitializeWorkgroupMemoryTests.cpp`) sizes
+  its `shared` array from a `layout(constant_id = N) const uint ...`
+  specialization constant, not a plain constant, so the whole module fails
+  to deserialize (`OpTypeArray count <id> ... can only come from normal
+  constant right now`) before this row's own `WorkgroupGlobalVariablePattern`
+  ever runs. This blocks `max_workgroup_memory`, `composites`,
+  `max_workgroups`, most of `specialize_workgroup`/`repeat_pipeline`, and
+  every non-scalar `types` case.
+- **A vector/matrix `shared` variable's own element-indexed
+  `spirv.AccessChain` produces a `<3 x i32>`-vector (not scalar) GEP base**
+  for `uvec3`/`ivec3`/... element types (`'llvm.getelementptr' op operand
+  #0 must be LLVM pointer type ...`) -- a divergent-index shape this row's
+  own scope (a flat scalar zero-init) does not model, the same class of
+  gap `feme::cpu::SIMDizePass`'s own groupshared canonicalization narrows
+  around (see GroupShared.h). This blocks every vector/matrix `types` case
+  (`uvec2`/`uvec3`/`uvec4`/...).
+- **A boolean-typed composite's `getelementptr` crashes `mlir::translateModuleToLLVMIR`**
+  with an LLVM-side assertion (`Not byte-addressable`,
+  `GetElementPtrTypeIterator.h`'s `getSequentialElementStride`) rather than
+  failing gracefully -- an `i1`-element `spirv.array`/`spirv.struct` GEP's
+  constant-folding path assumes every element type is byte-addressable,
+  which `i1` is not. This is a real, pre-existing robustness gap (an ICD
+  should never abort a CTS *process*, only fail a case), found via
+  `composites.2`; isolated with `gdb -batch -ex run -ex bt` against the
+  single case, confirming it is deterministic and specific to a
+  boolean/composite shape, not a flake.
+
+Both are out of this row's own scope (§1.2/§1.6, a zero-initializer for an
+already-importable `Workgroup` global -- not `OpTypeArray`'s own Length
+operand or LLVM's own GEP constant-folding) and unrelated to
+zero-initialization itself: the identical `OpTypeArray`
+specialization-constant gap would block these same shaders' import even
+with `shaderZeroInitializeWorkgroupMemory` left `VK_FALSE`, since
+`WorkgroupGlobalVariablePattern` never gets a chance to run before
+deserialization itself fails. Recorded here (and in `Roadmap.md`'s E13
+entry) rather than fixed as a drive-by, the same discipline E12's own
+`vkGetPhysicalDeviceFormatProperties` correction and E6's own
+`secondary_push_constants_2` finding already established for this report.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the

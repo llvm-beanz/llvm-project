@@ -1518,7 +1518,19 @@ allocated per group by the wrapper (or supplied by the caller through the
 dispatch arguments if it is too large for the stack), with the address space
 cast away. It is shared by all waves of the group, which is exactly right —
 the wave loop is sequential, so no synchronization is needed beyond the
-barrier semantics above.
+barrier semantics above. A SPIR-V `Workgroup`-storage-class global (a GLSL
+`shared`/HLSL `groupshared` variable declared directly in SPIR-V, rather
+than raised from DXIL) is imported into the identical `addrspace(3)`
+convention by `feme::spirv::WorkgroupGlobalVariablePattern`
+(SPIRVToLLVMPatterns.cpp), so this section's own layout/allocation
+machinery needs no SPIR-V-specific case of its own (roadmap milestone E13).
+`VK_KHR_zero_initialize_workgroup_memory`'s own zero-initializer -- a SPIR-V
+`OpConstantNull` Initializer, only ever legal for this storage class --
+becomes the imported global's own `#llvm.zero` initializer; the wrapper
+`memset`s the whole flat groupshared buffer to zero, once per group, right
+after allocating/loading it whenever any groupshared global in the module
+requested one (`GroupSharedLayout::NeedsZeroInit`), rather than tracking
+each flagged global's own byte range individually.
 
 **Group loops.** Whether the wrapper iterates groups too, or the host does,
 is an ABI decision: this design puts *one group* per wrapper call and lets
