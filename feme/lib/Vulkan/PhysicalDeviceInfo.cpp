@@ -528,6 +528,15 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too.
       {VK_KHR_SHADER_TERMINATE_INVOCATION_EXTENSION_NAME,
        VK_KHR_SHADER_TERMINATE_INVOCATION_SPEC_VERSION},
+      // (roadmap E13) A `zero_initializer`'d SPIR-V `Workgroup` variable's
+      // groupshared buffer is zeroed once per group
+      // (GroupShared.h/EntryWrapper.cpp); like
+      // `shader_terminate_invocation` above,
+      // `dEQP-VK.compute.pipeline.zero_initialize_workgroup_memory.*`
+      // enables this extension by name regardless of the advertised
+      // `apiVersion`, so it must be listed here too.
+      {VK_KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_EXTENSION_NAME,
+       VK_KHR_ZERO_INITIALIZE_WORKGROUP_MEMORY_SPEC_VERSION},
   };
   return Extensions;
 }

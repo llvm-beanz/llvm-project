@@ -984,7 +984,17 @@ void fillFeatures2Chain(void *pNext) {
       // the dedicated `VK_KHR_synchronization2` feature struct case below.
       Features->synchronization2 = VK_TRUE;
       Features->textureCompressionASTC_HDR = VK_FALSE;
-      Features->shaderZeroInitializeWorkgroupMemory = VK_FALSE;
+      // (roadmap E13) `feme::spirv::WorkgroupGlobalVariablePattern`
+      // (SPIRVToLLVMPatterns.cpp) imports a `zero_initializer`'d
+      // `Workgroup` variable's own `#llvm.zero`, and
+      // `feme::cpu::EntryWrapperPass` zeros the whole groupshared buffer
+      // once per group whenever one is present
+      // (`GroupSharedLayout::NeedsZeroInit`, GroupShared.h/EntryWrapper.cpp),
+      // so this bit -- like `shaderTerminateInvocation` above -- must
+      // agree with the dedicated
+      // `VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures` struct
+      // case below.
+      Features->shaderZeroInitializeWorkgroupMemory = VK_TRUE;
       Features->dynamicRendering = VK_TRUE;
       // (roadmap E8) `spirv.SDot`/`spirv.UDot`/`spirv.SUDot`/`*AccSat`
       // (SPIRVToLLVMPatterns.cpp) are implemented, so this bit -- like
@@ -1164,6 +1174,19 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features = reinterpret_cast<
           VkPhysicalDeviceShaderTerminateInvocationFeatures *>(Base);
       Features->shaderTerminateInvocation = VK_TRUE;
+      break;
+    }
+    // (roadmap E13) `VK_KHR_zero_initialize_workgroup_memory`'s own
+    // feature struct, whose 1.3 core and `KHR` spellings share one
+    // `sType`, exactly like `shaderTerminateInvocation` above. A
+    // `zero_initializer`'d SPIR-V `Workgroup` variable's groupshared
+    // buffer is zeroed once per group (GroupShared.h/EntryWrapper.cpp),
+    // so this bit -- like the one above -- must agree with the aggregate
+    // `VkPhysicalDeviceVulkan13Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_WORKGROUP_MEMORY_FEATURES: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures *>(Base);
+      Features->shaderZeroInitializeWorkgroupMemory = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:

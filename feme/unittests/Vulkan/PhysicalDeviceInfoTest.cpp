@@ -552,7 +552,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   // case below.
   EXPECT_EQ(Features13.synchronization2, VK_TRUE);
   EXPECT_EQ(Features13.textureCompressionASTC_HDR, VK_FALSE);
-  EXPECT_EQ(Features13.shaderZeroInitializeWorkgroupMemory, VK_FALSE);
+  // Roadmap E13: now genuinely implemented
+  // (WorkgroupGlobalVariablePattern/GroupSharedLayout::NeedsZeroInit), and
+  // must agree with the dedicated
+  // `VK_KHR_zero_initialize_workgroup_memory` struct case below.
+  EXPECT_EQ(Features13.shaderZeroInitializeWorkgroupMemory, VK_TRUE);
   // Roadmap E8: now genuinely implemented (SPIRVToLLVMPatterns.cpp's
   // OpSDot/OpUDot/OpSUDot-family patterns), and must agree with the
   // dedicated `VK_KHR_shader_integer_dot_product` struct case below. This
@@ -678,6 +682,24 @@ TEST_F(
   Features2.pNext = &TerminateFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(TerminateFeatures.shaderTerminateInvocation, VK_TRUE);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    ShaderZeroInitializeWorkgroupMemoryIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E13: `VK_KHR_zero_initialize_workgroup_memory`'s own dedicated
+  // feature struct must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Features` case above, exactly like
+  // `VK_KHR_shader_terminate_invocation`'s own struct does.
+  VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures ZeroInitFeatures{};
+  ZeroInitFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ZERO_INITIALIZE_WORKGROUP_MEMORY_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &ZeroInitFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(ZeroInitFeatures.shaderZeroInitializeWorkgroupMemory, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
