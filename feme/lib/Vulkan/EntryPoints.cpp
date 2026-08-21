@@ -408,19 +408,26 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props13->maxComputeWorkgroupSubgroups = Info.MaxComputeWorkgroupSubgroups;
       Props13->requiredSubgroupSizeStages = Info.RequiredSubgroupSizeStages;
       // (roadmap E14) `inlineUniformBlock` is implemented (Descriptor.{h,cpp}'s
-      // byte-blob descriptor storage); these five limits agree with the
+      // byte-blob descriptor storage); these six limits agree with the
       // dedicated `VkPhysicalDeviceInlineUniformBlockProperties` case
-      // below, exactly like `subgroupSizeControl`'s four fields above.
-      // The `UpdateAfterBind` variant stays `0`: no update-after-bind/
-      // descriptor-indexing mechanism exists in this ICD at all yet (see
-      // `descriptorBindingInlineUniformBlockUpdateAfterBind` below).
+      // below, exactly like `subgroupSizeControl`'s four fields above. The
+      // two `UpdateAfterBind` variants equal their non-`UpdateAfterBind`
+      // counterparts (rather than `0`) even though
+      // `descriptorBindingInlineUniformBlockUpdateAfterBind` stays
+      // `VK_FALSE` below: per spec, both are required limits independent
+      // of that feature bit --
+      // `dEQP-VK.api.info.vulkan1p2_limits_validation.ext_inline_uniform_
+      // block` enforces the same `>= 4` floor on them unconditionally
+      // once this extension is advertised, `0` or not.
       Props13->maxInlineUniformBlockSize = Info.MaxInlineUniformBlockSize;
       Props13->maxPerStageDescriptorInlineUniformBlocks =
           Info.MaxPerStageDescriptorInlineUniformBlocks;
-      Props13->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 0;
+      Props13->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks =
+          Info.MaxPerStageDescriptorInlineUniformBlocks;
       Props13->maxDescriptorSetInlineUniformBlocks =
           Info.MaxDescriptorSetInlineUniformBlocks;
-      Props13->maxDescriptorSetUpdateAfterBindInlineUniformBlocks = 0;
+      Props13->maxDescriptorSetUpdateAfterBindInlineUniformBlocks =
+          Info.MaxDescriptorSetInlineUniformBlocks;
       Props13->maxInlineUniformTotalSize = Info.MaxInlineUniformTotalSize;
       // (roadmap E8) All 36 `integerDotProduct*Accelerated` bits: no
       // `OpSDot`/`OpUDot`/`OpSUDot`-family lowering exists yet, so every
@@ -653,12 +660,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           Info.MaxInlineUniformBlockSize;
       InlineUniformBlock->maxPerStageDescriptorInlineUniformBlocks =
           Info.MaxPerStageDescriptorInlineUniformBlocks;
+      // Equal to the non-`UpdateAfterBind` field above, not `0`: per spec
+      // these two are required limits independent of
+      // `descriptorBindingInlineUniformBlockUpdateAfterBind` (see the
+      // aggregate `VkPhysicalDeviceVulkan13Properties` case above).
       InlineUniformBlock
-          ->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks = 0;
+          ->maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks =
+          Info.MaxPerStageDescriptorInlineUniformBlocks;
       InlineUniformBlock->maxDescriptorSetInlineUniformBlocks =
           Info.MaxDescriptorSetInlineUniformBlocks;
       InlineUniformBlock->maxDescriptorSetUpdateAfterBindInlineUniformBlocks =
-          0;
+          Info.MaxDescriptorSetInlineUniformBlocks;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own properties

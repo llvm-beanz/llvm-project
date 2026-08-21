@@ -143,11 +143,16 @@ struct PhysicalDeviceInfo {
   /// `VkPhysicalDeviceInlineUniformBlockProperties` case (EntryPoints.cpp)
   /// so the two always agree, the same reasoning `MaxPerSetDescriptors`
   /// above already established for `VkPhysicalDeviceMaintenance3Properties`.
-  /// The `UpdateAfterBind` limits are not modeled here: they stay `0`
-  /// literals at both use sites, matching
-  /// `descriptorBindingInlineUniformBlockUpdateAfterBind` staying
-  /// `VK_FALSE` (no update-after-bind/descriptor-indexing mechanism exists
-  /// in this ICD at all yet).
+  /// Each of these two doubles as its own `UpdateAfterBind` limit at both
+  /// use sites (`maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks`/
+  /// `maxDescriptorSetUpdateAfterBindInlineUniformBlocks`): per spec those
+  /// are required limits independent of
+  /// `descriptorBindingInlineUniformBlockUpdateAfterBind` (which stays
+  /// `VK_FALSE` -- no update-after-bind/descriptor-indexing mechanism
+  /// exists in this ICD at all yet) --
+  /// `dEQP-VK.api.info.vulkan1p2_limits_validation.ext_inline_uniform_block`
+  /// enforces the same floor on them unconditionally once this extension
+  /// is advertised.
   uint32_t MaxInlineUniformBlockSize = 0;
   uint32_t MaxPerStageDescriptorInlineUniformBlocks = 0;
   uint32_t MaxDescriptorSetInlineUniformBlocks = 0;

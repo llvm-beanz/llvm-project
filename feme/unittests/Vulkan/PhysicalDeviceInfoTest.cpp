@@ -286,9 +286,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   // 0xAA fill pattern would otherwise leave an unset field looking like a
   // plausible, but coincidental, non-zero value). Every field but
   // `maxBufferSize` (roadmap E4), the four `subgroupSizeControl` fields
-  // (roadmap E7), and the four non-`UpdateAfterBind` `inlineUniformBlock`
-  // fields (roadmap E14, all real once their own extension landed, see
-  // below) is `0`/`VK_FALSE`: each one is cross-checked by
+  // (roadmap E7), and the six `inlineUniformBlock` fields (roadmap E14,
+  // all real once their own extension landed, see below) is
+  // `0`/`VK_FALSE`: each one is cross-checked by
   // `dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` against
   // its own still-unimplemented dedicated-extension struct (see
   // EntryPoints.cpp's case comment), so a real, nonzero value here would
@@ -314,14 +314,21 @@ TEST_F(PhysicalDeviceProperties2Test,
   // (roadmap E14) Real once `VK_EXT_inline_uniform_block` landed: see
   // `InlineUniformBlockPropertiesMatchDedicatedStruct` below for the
   // dedicated-struct cross-check these must agree with. The two
-  // `UpdateAfterBind` variants stay `0`: no update-after-bind/
-  // descriptor-indexing mechanism exists in this ICD at all yet.
+  // `UpdateAfterBind` variants equal their non-`UpdateAfterBind`
+  // counterparts, not `0`, even though
+  // `descriptorBindingInlineUniformBlockUpdateAfterBind` stays `VK_FALSE`
+  // (no update-after-bind/descriptor-indexing mechanism exists in this
+  // ICD at all yet): per spec both are required limits independent of
+  // that feature bit -- found by a targeted CTS run of
+  // `dEQP-VK.api.info.vulkan1p2_limits_validation.ext_inline_uniform_block`,
+  // which enforces the same `>= 4` floor on them unconditionally once
+  // this extension is advertised.
   EXPECT_EQ(Props13.maxInlineUniformBlockSize, 256u);
   EXPECT_EQ(Props13.maxPerStageDescriptorInlineUniformBlocks, 4u);
   EXPECT_EQ(Props13.maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks,
-            0u);
+            4u);
   EXPECT_EQ(Props13.maxDescriptorSetInlineUniformBlocks, 4u);
-  EXPECT_EQ(Props13.maxDescriptorSetUpdateAfterBindInlineUniformBlocks, 0u);
+  EXPECT_EQ(Props13.maxDescriptorSetUpdateAfterBindInlineUniformBlocks, 4u);
   EXPECT_EQ(Props13.maxInlineUniformTotalSize, 1024u);
   // (roadmap E8) All 36 `integerDotProduct*Accelerated` bits stay
   // `VK_FALSE`: a real `spirv`->`llvm` lowering exists
@@ -657,13 +664,17 @@ TEST_F(
   EXPECT_EQ(InlineUniformBlockProps.maxInlineUniformBlockSize, 256u);
   EXPECT_EQ(InlineUniformBlockProps.maxPerStageDescriptorInlineUniformBlocks,
             4u);
+  // Equal to the non-`UpdateAfterBind` field above, not `0`: per spec
+  // these two are required limits independent of
+  // `descriptorBindingInlineUniformBlockUpdateAfterBind` (see the
+  // aggregate-struct test above).
   EXPECT_EQ(InlineUniformBlockProps
                 .maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks,
-            0u);
+            4u);
   EXPECT_EQ(InlineUniformBlockProps.maxDescriptorSetInlineUniformBlocks, 4u);
   EXPECT_EQ(InlineUniformBlockProps
                 .maxDescriptorSetUpdateAfterBindInlineUniformBlocks,
-            0u);
+            4u);
 
   VkPhysicalDeviceVulkan13Properties Props13{};
   Props13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
