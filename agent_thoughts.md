@@ -25429,3 +25429,180 @@ run found no case that enables `VK_KHR_maintenance4` by name the way
 `VK_KHR_synchronization2` needed for E3 -- both `maintenance4_features`
 and `vulkan1p3_limits_validation.khr_maintenance4` passed without it), or
 any other roadmap row's own scope.
+
+# Roadmap E5: VK_KHR_maintenance5's null dynamic-rendering attachment, two new formats, vkCmdBindIndexBuffer2
+
+## Task
+
+Implement roadmap row E5: "Chiefly `VkRenderingAttachmentInfo::imageView
+== VK_NULL_HANDLE` (an attachment slot present but unused, needing
+`RenderPass.cpp`'s dynamic-rendering path to skip rather than reject a
+null view), `VK_FORMAT_A8_UNORM`/`A1B5G5R5_UNORM_PACK16`, and
+`vkCmdBindIndexBuffer2` (a `size`-bounded variant of the existing bind,
+sharing `CommandBuffer.cpp`'s existing validation minus the "whole
+buffer" assumption)".
+
+## Where the row's own file attribution was wrong
+
+The row named `RenderPass.cpp` as the file needing the null-view fix, but
+dynamic rendering's own attachment normalization
+(`normalizeRenderingAttachment`) already lives in `CommandBuffer.cpp`, not
+`RenderPass.cpp` (`RenderPass.cpp`/`.h` is the classic-`VkRenderPass`
+object model plus the shared `RenderTargetView`/`RenderTargetBinding`
+*types* both paths produce). Worse, `normalizeRenderingAttachment` was
+already correctly producing a `RenderTargetView` with `View.View ==
+nullptr` for a `VK_NULL_HANDLE` `imageView` -- nothing needed fixing
+there. The actual bug was three downstream call sites in
+`CommandBuffer.cpp`/`Executor.cpp` that unconditionally called
+`resolveAttachmentView`/read `.Data` on that null view and either failed
+outright (`applyClear`'s load-op clear, `runDraw`'s per-attachment
+`Expected<AttachmentView>` resolve and its resolve-attachment
+"either every attachment resolves or none does" check) or would have
+crashed on a null/zero-sized buffer (`Executor.cpp`'s per-pixel write
+loop and its `ColorElemSizes`/extent-clamp setup, once a color slot's
+`Data` is legitimately empty). Fixed each of those four sites instead,
+using the exact same "empty `Data` means not bound" convention
+`DepthStencilAttachment` already established for depth/stencil -- I did
+not introduce a new convention.
+
+## The two new formats
+
+`VK_FORMAT_A8_UNORM_KHR`/`VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR` slot into
+the existing `Format.cpp`/`ImageFixture.cpp`/`RenderPass.cpp` machinery
+exactly like C1's own mandatory-format additions did: `mapVkFormat` and
+`formatElementSize` gained two cases each, `isSupportedColorAttachmentFormat`
+grants both `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT`, and
+`ImageFixture.cpp`'s `getFormatInfo`/`packClearColor`/`unpackColor` treat
+`A1B5G5R5_UNORM` as a single packed 16-bit word (the same "opaque word,
+special-cased ahead of the generic per-component loop" pattern
+`R10G10B10A2_UNORM` already uses, just half the width and alpha at the
+MSB instead of the 2-bit-at-MSB layout `A2B10G10R10` uses) and
+`A8_UNORM` as a single alpha byte (color components ignored on pack, read
+back as `0` on unpack, matching the format's own lack of any). I did not
+touch `vkGetPhysicalDeviceFormatProperties` -- confirmed via C1's own
+report entry that this is a separate, pre-existing stub unconditionally
+reporting zero for every format, unrelated to the render-pass/pipeline
+path these two formats actually need to work through
+(`vkCreateGraphicsPipelines`'s dynamic-rendering format check,
+`vkCreateRenderPass`'s attachment validation).
+
+## vkCmdBindIndexBuffer2
+
+Shares `CommandBuffer::bindIndexBuffer`'s recording: `RecordedCommand`'s
+pre-existing `DstSize` field (already reused for `FillBuffer`'s size and
+`CopyQueryPoolResults`'/`DrawIndirect`'s stride -- I followed that same
+reuse convention rather than adding a new field) now also carries
+`vkCmdBindIndexBuffer2`'s `size`, defaulting to `VK_WHOLE_SIZE` for a
+plain `vkCmdBindIndexBuffer` bind so the pre-existing "whole buffer"
+behavior is unchanged bit-for-bit. `GraphicsState` gained a matching
+`IndexBufferSize` field. `runDraw`'s `IndexBinding.Data` slice and
+`validateDrawFetchBounds`'s bounds check both now compute an effective
+bound end (`offset + size`, or the buffer's own end for `VK_WHOLE_SIZE`)
+instead of always assuming "through the end of the buffer".
+
+No entry in `vk_gen_entrypoints.py`'s `SUPPORTED_EXTENSIONS` was needed:
+`vkCmdBindIndexBuffer2` is already a core, non-`KHR`-suffixed
+`VK_VERSION_1_4` command the generator's `CORE_FEATURES` resolution
+already emits (confirmed in the generated `.inc`), exactly like
+`VK_KHR_copy_commands2` (D0) and `VK_KHR_maintenance4` (E4) before it.
+
+## Feature/property struct wiring
+
+`Features->maintenance5` flips to `VK_TRUE` in the aggregate
+`VkPhysicalDeviceVulkan14Features` case, plus a new dedicated
+`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR` case --
+unlike `dynamicRendering`/`synchronization2`/`maintenance4`, this
+extension's core promotion added no core-spelled alias struct of its own
+(confirmed by grepping `vulkan_core.h`: only the `KHR`-suffixed `sType`
+exists), so the dedicated case uses the `KHR` name unconditionally. Also
+fixed a pre-existing typo in the aggregate `VkPhysicalDeviceVulkan14
+Properties` case's own comment (it said "roadmap F5's `VK_KHR_
+maintenance5`", but the roadmap table itself assigns `maintenance5` to
+E5, not F5) while touching that exact comment block for the new dedicated
+`VkPhysicalDeviceMaintenance5PropertiesKHR` case.
+
+## A second finding the row's own premise did not anticipate
+
+A targeted CTS run of `dEQP-VK.draw.renderpass.indexed_draw.
+draw_indexed_triangle_list*maintenance_5` and `dEQP-VK.api.maintenance5.*`
+initially reported `NotSupported ("VK_KHR_maintenance5 is not
+supported")` even after `maintenance5` read `VK_TRUE` from both feature
+structs -- the exact same gap E3's own `synchronization2` row already
+found and documented: `dEQP-VK.api.maintenance5.*`/`device_init`/
+`get_physical_device_properties2`'s own `context.requireDeviceFunctionality
+("VK_KHR_maintenance5")` calls still need the extension *name* itself
+listed in `getSupportedDeviceExtensions`, even though it is core-promoted
+at this ICD's advertised `apiVersion` (1.4), because these tests'
+underlying `isDeviceFunctionalitySupported` check falls back to a plain
+name lookup whenever the negotiated `usedApiVersion` for that specific
+test context is below 1.4. Added `VK_KHR_MAINTENANCE_5_EXTENSION_NAME` to
+`getSupportedDeviceExtensions` (which required bumping
+`DrawTest.AdvertisesDynamicRenderingExtension`'s expected extension count
+from 3 to 4) and re-ran: all of `dEQP-VK.api.maintenance5.*` (10/10),
+`get_physical_device_properties2.features.maintenance5_features`, and
+`device_init.create_device_unsupported_features.maintenance5_features`
+now pass; the `draw.renderpass.indexed_draw` cases reach a real
+`vkCreateGraphicsPipelines` failure instead of an early `NotSupported`
+-- and the identical, non-`maintenance_5`-suffixed baseline case fails
+identically, confirming that failure is a pre-existing, orthogonal gap in
+this whole `DrawIndexedTest` pipeline-creation path, not anything E5
+touches or regresses.
+
+## Unit tests added
+
+- `FormatTest.MapsMaintenance5Formats`,
+  `FormatTest.ElementSizeMatchesFormatWidth`'s two new assertions.
+- `ImageFixtureTest.PacksAndUnpacksA8Unorm`,
+  `ImageFixtureTest.PacksAndUnpacksA1B5G5R5Unorm`.
+- `GraphicsPipelineTest.AcceptsMandatoryColorAttachmentFormats`'s two new
+  formats (reusing the existing pipeline-creation-through-dynamic-
+  rendering-formats test rather than adding a new one, since the two new
+  formats exercise the identical code path C1's own mandatory formats
+  already do).
+- `DrawTest.DynamicRenderingSkipsNullColorAttachment`: two color
+  attachments via `vkCmdBeginRenderingKHR`, the second's `imageView ==
+  VK_NULL_HANDLE`; a dual-output fragment shader still writes both
+  `SV_Target0`/`SV_Target1`, and only the first (bound) attachment's
+  result is checked -- the second needs no image at all, confirming the
+  skip rather than a crash or a rejected draw.
+- `DrawTest.RendersIndexedDrawThroughBindIndexBuffer2` (mirrors the
+  pre-existing `RendersIndexedDraw` with `VK_WHOLE_SIZE`, confirming
+  parity with the classic bind) and
+  `DrawTest.RejectsIndexRangeBeyondBindIndexBuffer2Size` (a `size` bound
+  narrower than the buffer rejects a draw that would have fit the whole
+  buffer).
+- `PhysicalDeviceProperties2Test.Maintenance5IsAdvertisedThroughAggregate
+  Vulkan14Features` (replaces the old "all `VK_FALSE`" test, following
+  the exact rename/restructure precedent E1's own
+  `DynamicRenderingIsAdvertisedThroughAggregateVulkan13Features` set) and
+  `...ThroughItsOwnDedicatedFeatureAndPropertyStructs` (mirrors E4's
+  `Maintenance4IsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs`).
+
+`ninja check-feme`: 1548/1549 passed (1 pre-existing unsupported, 0
+failed), up from the 1540/1541 pre-E5 baseline (8 new tests, all passing).
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E5's row, with the file-attribution
+  correction and format/index-buffer/feature-struct summary recorded
+  above.
+- `FeMeVulkanDesign.md`: new status notes under "Render passes and
+  dynamic rendering" (the null-attachment skip) and "Draw commands and
+  vertex data" (`vkCmdBindIndexBuffer2`); D1's status note moves
+  `maintenance5` from the unimplemented list to the implemented one.
+- `VulkanCTSReport.md`: new "Roadmap E5: measured impact" section,
+  recording both the targeted-case table and the `getSupportedDevice
+  Extensions` finding above.
+
+## Scope discipline
+
+Touched `RuntimeABI.h`, `Format.cpp`, `RenderPass.cpp`, `CommandBuffer.
+{h,cpp}`, `Executor.cpp`, `ImageFixture.cpp`, `EntryPoints.{h,cpp}`,
+`PhysicalDeviceInfo.cpp`, `ImplementedEntrypoints.txt`, `feme-run.cpp`
+(one `-Wswitch` fix for the two new `ResourceFormat` enumerators), their
+unit tests, and the three documents this change directly affects. Did not
+touch `vk_gen_entrypoints.py` (confirmed unnecessary: `vkCmdBindIndexBuffer2`
+is already a plain core 1.4 command name the generator's existing
+`CORE_FEATURES` resolution emits), `vkGetPhysicalDeviceFormatProperties`
+(a separate, pre-existing stub -- see "The two new formats" above), or
+any other roadmap row's own scope.
