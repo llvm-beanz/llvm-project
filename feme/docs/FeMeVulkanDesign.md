@@ -1522,7 +1522,11 @@ implements every command needed for the acceptance-test scenario in
 (`vkGetPhysicalDeviceImageFormatProperties`/
 `vkGetPhysicalDeviceSparseImageFormatProperties`, honestly unsupported since
 no image exists yet, but present because the loader refuses to load an ICD
-missing them). `feme/tools/feme-vulkan/VulkanICD.cpp` defines the four
+missing them -- `vkGetPhysicalDeviceImageFormatProperties` itself, and its
+sibling `vkGetPhysicalDeviceFormatProperties`, stayed unconditional stubs
+long after V5 added real image support; roadmap E24 replaced both with
+real, format-accurate answers -- see "V5: Images and sampling"'s own
+status note below). `feme/tools/feme-vulkan/VulkanICD.cpp` defines the four
 loader-facing symbols (`vk_icdNegotiateLoaderICDInterfaceVersion`,
 `vk_icdGetInstanceProcAddr`, `vk_icdGetPhysicalDeviceProcAddr`, the legacy
 `vkGetInstanceProcAddr`) with explicit default visibility, restoring it
@@ -2138,6 +2142,58 @@ a real block-compressed format needs this layout reworked to a
 block-aligned extent and a bytes-per-block stride first. Tracked as part
 of roadmap E20's scope rather than a narrowing of this milestone, since no
 compressed format was ever in V5's own goals above.
+
+**Roadmap E24 closed a separate, pre-existing gap this milestone's own
+scope never covered: `vkGetPhysicalDeviceFormatProperties`/
+`vkGetPhysicalDeviceImageFormatProperties` themselves.** Both had stayed
+V0-era stubs (`vkGetPhysicalDeviceFormatProperties` unconditionally
+reporting an all-zero `VkFormatProperties`, `vkGetPhysicalDeviceImage
+FormatProperties` unconditionally returning `VK_ERROR_FORMAT_NOT_
+SUPPORTED`) for every `VkFormat`, more than ten commits after this
+milestone gave images real support -- roadmap E22's own CTS run found
+this blocked every texture-creation-shaped `dEQP-VK.texture.*` case
+outright, since `vktTextureTestUtil.cpp`'s own capability probe calls
+`vkGetPhysicalDeviceImageFormatProperties` before creating any image, of
+any format. `feme::vulkan::formatFeatureFlags` (Format.h) now computes
+the real `VkFormatFeatureFlags` this ICD implements per format, reusing
+existing, already-tested predicates rather than a fresh guess:
+`RenderPass.h`'s `isSupportedColorAttachmentFormat`/
+`isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat`
+for the two attachment bits, the CPU runtime's own three-format sampling
+table (plus the ASTC LDR bridge `materializeImageDescriptor` builds on
+top of it, roadmap E23) for the two sampled-image bits, and
+`ImageOps.cpp`'s `runBlitImage` block-compressed-destination/HDR-ASTC-
+source rejections for the two blit bits.
+`VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is never set for any format: no
+`feme.cpu.image.store.*` runtime helper exists yet (this milestone's own
+"Writing a storage image from a shader needs a `feme.cpp.image.store.*`
+runtime helper that does not exist yet" narrowing above), so a
+`STORAGE_IMAGE` binding stays materialized-but-not-writable exactly as
+already documented; advertising the feature bit anyway would have been a
+capability claim no shader could actually exercise.
+`vkGetPhysicalDeviceImageFormatProperties` rejects any `usage` this
+`VkFormatFeatureFlags` result has no matching bit for, then reports real
+`maxExtent`/`maxMipLevels`/`maxArrayLayers`/`sampleCounts`/
+`maxResourceSize` values computed by reusing `vkCreateImage`'s own shape
+validation (`isValidImageShape`/`supportedSampleCounts`, now exposed from
+Image.cpp for exactly this) and subresource-size math
+(`computeImageCreateInfoSize`) against the maximal shape this device's
+own limits allow -- so a real application, or `deqp-vk`, gets the same
+answer `vkCreateImage` itself would give for that shape, not an
+independently-maintained second guess. Measuring this against `deqp-vk`
+found (and this row's own fix closed) a real, `blockPointer`-assertion
+crash in `CommandBuffer.cpp`'s `runCopyImage`: a single `Compressed` flag
+derived from the *source* image alone and applied to both sides of a
+`vkCmdCopyImage` call asserted the moment a real
+`dEQP-VK.api.copy_and_blit.*` case -- unreachable before this row made
+the capability query answer honestly enough for `deqp-vk` to create a
+compressed/uncompressed image pair at all -- copied a block-compressed
+source into a same-byte-size uncompressed destination (one ASTC block
+<-> one `R32G32B32A32_UINT` texel, both 16 bytes), a copy real Vulkan's
+own "compatible formats" rule already permits. `runCopyImage` now tracks
+each side's compressed-ness (and block shape) independently; see
+VulkanCTSReport.md's "Roadmap E24: measured impact" for the CTS numbers
+this unblocked.
 
 **Update (roadmap E20, closed):** that block-aligned layout rework has
 landed. `computeSubresourceLayouts` (Image.cpp) now takes a block
