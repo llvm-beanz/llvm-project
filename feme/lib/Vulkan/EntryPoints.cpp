@@ -7,10 +7,16 @@
 //===----------------------------------------------------------------------===//
 
 #include "EntryPoints.h"
+#include "Format.h"
 #include "Icd.h"
+#include "Image.h"
 #include "Objects.h"
 #include "ProcAddr.h"
 
+#include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/MathExtras.h"
+
+#include <algorithm>
 #include <cstring>
 
 using namespace feme::vulkan;
@@ -1322,29 +1328,146 @@ feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties2(
 }
 
 VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties(
-    VkPhysicalDevice, VkFormat, VkFormatProperties *pFormatProperties) {
-  // No buffer or image format is supported yet (V0 does no shader
-  // execution and V1-V4 add buffers before V5 adds images); every feature
-  // flag is honestly zero.
-  *pFormatProperties = VkFormatProperties{};
+    VkPhysicalDevice, VkFormat format, VkFormatProperties *pFormatProperties) {
+  // Roadmap E24: this used to unconditionally report an all-zero
+  // `VkFormatProperties` for every format ("no image is supported yet"),
+  // stale since V5 added real image support. `formatFeatureFlags`
+  // (Format.h) now reports the real, already-implemented feature set for
+  // any format `mapVkFormat` recognizes; an unrecognized format still gets
+  // the honest all-zero result. `VK_IMAGE_TILING_LINEAR`/`_OPTIMAL` are not
+  // distinguished anywhere in this ICD (see Image.h's file comment), so
+  // both tiling fields are identical.
+  std::optional<feme::cpu::ResourceFormat> Format = mapVkFormat(format);
+  VkFormatFeatureFlags ImageFeatures =
+      Format ? formatFeatureFlags(*Format) : VkFormatFeatureFlags(0);
+  pFormatProperties->linearTilingFeatures = ImageFeatures;
+  pFormatProperties->optimalTilingFeatures = ImageFeatures;
+  // `isTexelBufferFormatSupported` (Format.h) gates `vkCreateBufferView`
+  // (Descriptor.h's file comment): the CPU runtime's typed load *and*
+  // store helpers exist for exactly that same format set, so both texel
+  // buffer feature bits apply together.
+  pFormatProperties->bufferFeatures =
+      Format && isTexelBufferFormatSupported(*Format)
+          ? (VK_FORMAT_FEATURE_UNIFORM_TEXEL_BUFFER_BIT |
+             VK_FORMAT_FEATURE_STORAGE_TEXEL_BUFFER_BIT)
+          : VkFormatFeatureFlags(0);
 }
 
 VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
-    VkPhysicalDevice, VkFormat, VkFormatProperties2 *pFormatProperties) {
-  pFormatProperties->formatProperties = VkFormatProperties{};
+    VkPhysicalDevice physicalDevice, VkFormat format,
+    VkFormatProperties2 *pFormatProperties) {
+  feme::vulkan::vkGetPhysicalDeviceFormatProperties(
+      physicalDevice, format, &pFormatProperties->formatProperties);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
 feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
-    VkPhysicalDevice, VkFormat, VkImageType, VkImageTiling, VkImageUsageFlags,
-    VkImageCreateFlags, VkImageFormatProperties *) {
-  // No image is supported yet (see "Initial Non-Goals": images are out of
-  // scope before V5); every combination is honestly unsupported. This
-  // command is still implemented -- rather than omitted -- because it is a
-  // required loader entrypoint regardless of feature support (see
-  // "Initial Non-Goals": "An advertised core version may report a feature
-  // as unsupported; it may not omit a command").
-  return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    VkPhysicalDevice physicalDevice, VkFormat format, VkImageType type,
+    VkImageTiling, VkImageUsageFlags usage, VkImageCreateFlags flags,
+    VkImageFormatProperties *pImageFormatProperties) {
+  // Roadmap E24: this used to unconditionally return
+  // `VK_ERROR_FORMAT_NOT_SUPPORTED` for every format/type/usage/flags
+  // combination ("no image is supported yet"), stale since V5 added real
+  // image support -- and the reason E22's own CTS run measured zero
+  // headline movement despite `textureCompressionASTC_LDR` reading
+  // `VK_TRUE`: `dEQP-VK.texture.*`'s own capability probe calls this
+  // command before creating any image at all, of any format.
+  const PhysicalDeviceInfo &Info =
+      fromHandle<PhysicalDevice>(physicalDevice)->getInfo();
+  std::optional<feme::cpu::ResourceFormat> Format = mapVkFormat(format);
+  if (!Format)
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+  // A requested `usage` bit this format has no matching feature for is
+  // unsupported outright -- matching real Vulkan's own
+  // `VUID-vkGetPhysicalDeviceImageFormatProperties-usage-parameter`-adjacent
+  // rule that an application must not use a format/usage combination this
+  // query reported unsupported.
+  VkFormatFeatureFlags Features = formatFeatureFlags(*Format);
+  if ((usage & VK_IMAGE_USAGE_SAMPLED_BIT) &&
+      !(Features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+      !(Features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  if ((usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+      !(Features & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  if ((usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
+      !(Features & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  if ((usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) &&
+      !(Features & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  if ((usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT) &&
+      !(Features & VK_FORMAT_FEATURE_TRANSFER_DST_BIT))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+  // An input attachment reuses the same read-only image-view + layout
+  // record as a sampled color or depth/stencil attachment (see "V5: Images
+  // and sampling"'s status note), so it needs one of those two feature
+  // bits, not a dedicated one of its own.
+  if ((usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) &&
+      !(Features & (VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                    VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+  // The shape (flags/type/usage) validated here is otherwise the exact
+  // same check `vkCreateImage` itself applies (`isValidImageShape`,
+  // Image.h) to a maximal single-mip, single-layer, single-sample image of
+  // this shape -- an unsupported shape (an unadvertised `flags` bit, or a
+  // `usage` this device's sample-count limits reject at 1 sample, which
+  // never happens) is reported as unsupported rather than silently
+  // ignored.
+  VkImageCreateInfo ShapeProbe{};
+  ShapeProbe.imageType = type;
+  ShapeProbe.flags = flags;
+  ShapeProbe.usage = usage;
+  ShapeProbe.samples = VK_SAMPLE_COUNT_1_BIT;
+  ShapeProbe.mipLevels = 1;
+  ShapeProbe.arrayLayers = 1;
+  if (!isValidImageShape(ShapeProbe, Info))
+    return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
+  const VkPhysicalDeviceLimits &Limits = Info.Properties.limits;
+  uint32_t MaxExtentXY;
+  uint32_t MaxDepth = 1;
+  switch (type) {
+  case VK_IMAGE_TYPE_1D:
+    MaxExtentXY = Limits.maxImageDimension1D;
+    break;
+  case VK_IMAGE_TYPE_2D:
+    MaxExtentXY = (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)
+                      ? Limits.maxImageDimensionCube
+                      : Limits.maxImageDimension2D;
+    break;
+  case VK_IMAGE_TYPE_3D:
+    MaxExtentXY = Limits.maxImageDimension3D;
+    MaxDepth = Limits.maxImageDimension3D;
+    break;
+  default:
+    llvm_unreachable("unhandled VkImageType");
+  }
+
+  VkImageCreateInfo MaxProbe = ShapeProbe;
+  MaxProbe.extent = {MaxExtentXY, MaxExtentXY, MaxDepth};
+  MaxProbe.mipLevels = llvm::Log2_32(std::max(MaxExtentXY, MaxDepth)) + 1;
+  MaxProbe.arrayLayers =
+      type == VK_IMAGE_TYPE_3D ? 1 : Limits.maxImageArrayLayers;
+  VkSampleCountFlags SampleCounts = supportedSampleCounts(Info, usage);
+  // A multisample image is only ever a single-mip 2D one (`isValidImageShape`
+  // above), so a type/mip combination that cannot be multisampled reports
+  // only `VK_SAMPLE_COUNT_1_BIT`, matching the shape this query's other
+  // maxima (`maxMipLevels`, `maxArrayLayers`) already assume.
+  if (type != VK_IMAGE_TYPE_2D || MaxProbe.mipLevels != 1)
+    SampleCounts = VK_SAMPLE_COUNT_1_BIT;
+
+  pImageFormatProperties->maxExtent = MaxProbe.extent;
+  pImageFormatProperties->maxMipLevels = MaxProbe.mipLevels;
+  pImageFormatProperties->maxArrayLayers = MaxProbe.arrayLayers;
+  pImageFormatProperties->sampleCounts = SampleCounts;
+  pImageFormatProperties->maxResourceSize =
+      computeImageCreateInfoSize(MaxProbe, *Format);
+  return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL
