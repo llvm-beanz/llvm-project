@@ -396,11 +396,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES: {
       auto *Props13 =
           reinterpret_cast<VkPhysicalDeviceVulkan13Properties *>(Base);
-      // (roadmap E7) `subgroupSizeControl` is unimplemented.
-      Props13->minSubgroupSize = 0;
-      Props13->maxSubgroupSize = 0;
-      Props13->maxComputeWorkgroupSubgroups = 0;
-      Props13->requiredSubgroupSizeStages = 0;
+      // (roadmap E7) `subgroupSizeControl` is implemented (Pipeline.cpp's
+      // `compileComputePipeline` honors a chained
+      // `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`), so these
+      // four agree with the dedicated
+      // `VkPhysicalDeviceSubgroupSizeControlProperties` case below, exactly
+      // like `maxCombinedImageSamplerDescriptorCount`/E6 already does for
+      // its own field.
+      Props13->minSubgroupSize = Info.MinSubgroupSize;
+      Props13->maxSubgroupSize = Info.MaxSubgroupSize;
+      Props13->maxComputeWorkgroupSubgroups = Info.MaxComputeWorkgroupSubgroups;
+      Props13->requiredSubgroupSizeStages = Info.RequiredSubgroupSizeStages;
       // `inlineUniformBlock` is unimplemented.
       Props13->maxInlineUniformBlockSize = 0;
       Props13->maxPerStageDescriptorInlineUniformBlocks = 0;
@@ -607,6 +613,23 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Maintenance6->blockTexelViewCompatibleMultipleLayers = VK_FALSE;
       Maintenance6->maxCombinedImageSamplerDescriptorCount = 1;
       Maintenance6->fragmentShadingRateClampCombinerInputs = VK_FALSE;
+      break;
+    }
+    // (roadmap E7) `VK_EXT_subgroup_size_control`'s own properties struct,
+    // whose 1.3 core and `EXT` spellings share one `sType`, agreeing with
+    // the aggregate `VkPhysicalDeviceVulkan13Properties` case above exactly
+    // like `VkPhysicalDeviceMaintenance6Properties` already does for its
+    // own fields.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES: {
+      auto *SubgroupSizeControl =
+          reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlProperties *>(
+              Base);
+      SubgroupSizeControl->minSubgroupSize = Info.MinSubgroupSize;
+      SubgroupSizeControl->maxSubgroupSize = Info.MaxSubgroupSize;
+      SubgroupSizeControl->maxComputeWorkgroupSubgroups =
+          Info.MaxComputeWorkgroupSubgroups;
+      SubgroupSizeControl->requiredSubgroupSizeStages =
+          Info.RequiredSubgroupSizeStages;
       break;
     }
     default:
@@ -828,8 +851,14 @@ void fillFeatures2Chain(void *pNext) {
       Features->privateData = VK_FALSE;
       Features->shaderDemoteToHelperInvocation = VK_FALSE;
       Features->shaderTerminateInvocation = VK_FALSE;
-      Features->subgroupSizeControl = VK_FALSE;
-      Features->computeFullSubgroups = VK_FALSE;
+      // (roadmap E7) `Pipeline.cpp`'s `compileComputePipeline` honors both
+      // a chained `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and
+      // `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`, so
+      // these two bits -- like `synchronization2`/`maintenance4` below --
+      // must agree with the dedicated
+      // `VkPhysicalDeviceSubgroupSizeControlFeatures` struct case below.
+      Features->subgroupSizeControl = VK_TRUE;
+      Features->computeFullSubgroups = VK_TRUE;
       // (roadmap E3) `vkCmdPipelineBarrier2`/`vkCmdWriteTimestamp2`/
       // `vkQueueSubmit2`/`vkCmdSetEvent2`/`vkCmdResetEvent2`/
       // `vkCmdWaitEvents2` (CommandBuffer.cpp/Sync.cpp) translate
@@ -913,6 +942,16 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceMaintenance4Features *>(Base);
       Features->maintenance4 = VK_TRUE;
+      break;
+    }
+    // (roadmap E7) `VK_EXT_subgroup_size_control`'s own feature struct,
+    // whose 1.3 core and `EXT` spellings share one `sType`, exactly like
+    // `maintenance4` above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlFeatures *>(Base);
+      Features->subgroupSizeControl = VK_TRUE;
+      Features->computeFullSubgroups = VK_TRUE;
       break;
     }
     // (roadmap E5) `VK_KHR_maintenance5`'s own feature struct. Unlike

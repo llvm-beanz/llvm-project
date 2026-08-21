@@ -126,6 +126,13 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Info.SubgroupSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT;
   Info.SubgroupSupportedOperations = VK_SUBGROUP_FEATURE_BASIC_BIT;
 
+  // (roadmap E7) `subgroupSizeControl`'s own range: every power-of-two wave
+  // size `feme::cpu::resolveWaveSize` itself accepts, reused rather than
+  // re-derived (see PhysicalDeviceInfo.h's field comment).
+  Info.MinSubgroupSize = feme::cpu::MinWaveSize;
+  Info.MaxSubgroupSize = feme::cpu::MaxWaveSize;
+  Info.RequiredSubgroupSizeStages = VK_SHADER_STAGE_COMPUTE_BIT;
+
   VkPhysicalDeviceProperties &Props = Info.Properties;
   // Illustrative per "Loader Integration": "The exact advertised API version
   // is selected during implementation from the core command and CTS
@@ -216,6 +223,11 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
   Limits.maxComputeWorkGroupSize[0] = 128;
   Limits.maxComputeWorkGroupSize[1] = 128;
   Limits.maxComputeWorkGroupSize[2] = 64;
+  // (roadmap E7) The worst case for `maxComputeWorkgroupSubgroups`: every
+  // subgroup launched at the smallest allowed size still fits within one
+  // workgroup's invocation limit.
+  Info.MaxComputeWorkgroupSubgroups =
+      Limits.maxComputeWorkGroupInvocations / Info.MinSubgroupSize;
   Limits.subPixelPrecisionBits = 4;
   Limits.subTexelPrecisionBits = 4;
   Limits.mipmapPrecisionBits = 4;

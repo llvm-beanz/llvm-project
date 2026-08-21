@@ -285,8 +285,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   // `MultiviewFeaturesAreExplicitlyFalseNotLeftUnwritten` below uses (a
   // 0xAA fill pattern would otherwise leave an unset field looking like a
   // plausible, but coincidental, non-zero value). Every field but
-  // `maxBufferSize` (roadmap E4: real once `VK_KHR_maintenance4` landed,
-  // see below) is `0`/`VK_FALSE`: each one is cross-checked by
+  // `maxBufferSize` (roadmap E4) and the four `subgroupSizeControl` fields
+  // (roadmap E7, both real once `VK_EXT_subgroup_size_control` landed, see
+  // below) is `0`/`VK_FALSE`: each one is cross-checked by
   // `dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` against
   // its own still-unimplemented dedicated-extension struct (see
   // EntryPoints.cpp's case comment), so a real, nonzero value here would
@@ -301,10 +302,14 @@ TEST_F(PhysicalDeviceProperties2Test,
   Props2.pNext = &Props13;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
 
-  EXPECT_EQ(Props13.minSubgroupSize, 0u);
-  EXPECT_EQ(Props13.maxSubgroupSize, 0u);
-  EXPECT_EQ(Props13.maxComputeWorkgroupSubgroups, 0u);
-  EXPECT_EQ(Props13.requiredSubgroupSizeStages, 0u);
+  // (roadmap E7) Real once `VK_EXT_subgroup_size_control` landed: see
+  // `SubgroupSizeControlPropertiesMatchDedicatedStruct` below for the
+  // dedicated-struct cross-check these must agree with.
+  EXPECT_EQ(Props13.minSubgroupSize, 4u);
+  EXPECT_EQ(Props13.maxSubgroupSize, 128u);
+  EXPECT_EQ(Props13.maxComputeWorkgroupSubgroups, 32u);
+  EXPECT_EQ(Props13.requiredSubgroupSizeStages,
+            static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT));
   EXPECT_EQ(Props13.maxInlineUniformBlockSize, 0u);
   EXPECT_EQ(Props13.maxPerStageDescriptorInlineUniformBlocks, 0u);
   EXPECT_EQ(Props13.maxPerStageDescriptorUpdateAfterBindInlineUniformBlocks,
@@ -518,8 +523,13 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features13.privateData, VK_FALSE);
   EXPECT_EQ(Features13.shaderDemoteToHelperInvocation, VK_FALSE);
   EXPECT_EQ(Features13.shaderTerminateInvocation, VK_FALSE);
-  EXPECT_EQ(Features13.subgroupSizeControl, VK_FALSE);
-  EXPECT_EQ(Features13.computeFullSubgroups, VK_FALSE);
+  // Roadmap E7: now genuinely implemented (Pipeline.cpp honors a chained
+  // `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and
+  // `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`), and must
+  // agree with the dedicated `VK_EXT_subgroup_size_control` struct case
+  // below.
+  EXPECT_EQ(Features13.subgroupSizeControl, VK_TRUE);
+  EXPECT_EQ(Features13.computeFullSubgroups, VK_TRUE);
   // Roadmap E3: now genuinely implemented (CommandBuffer.cpp/Sync.cpp),
   // and must agree with the dedicated `VK_KHR_synchronization2` struct
   // case below.
@@ -530,6 +540,50 @@ TEST_F(PhysicalDeviceProperties2Test,
   // Roadmap E4: now genuinely implemented (Buffer.cpp/Image.cpp), and must
   // agree with the dedicated `VK_KHR_maintenance4` struct case below.
   EXPECT_EQ(Features13.maintenance4, VK_TRUE);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    SubgroupSizeControlIsAdvertisedThroughItsOwnDedicatedFeatureAndPropertyStructs) {
+  // Roadmap E7: `VK_EXT_subgroup_size_control`'s own dedicated
+  // feature/properties structs must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Features`/`Properties` cases above, exactly
+  // like `VK_KHR_maintenance4`'s own structs do.
+  VkPhysicalDeviceSubgroupSizeControlFeatures SubgroupSizeControlFeatures{};
+  SubgroupSizeControlFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &SubgroupSizeControlFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(SubgroupSizeControlFeatures.subgroupSizeControl, VK_TRUE);
+  EXPECT_EQ(SubgroupSizeControlFeatures.computeFullSubgroups, VK_TRUE);
+
+  VkPhysicalDeviceSubgroupSizeControlProperties SubgroupSizeControlProps{};
+  SubgroupSizeControlProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &SubgroupSizeControlProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(SubgroupSizeControlProps.minSubgroupSize, 4u);
+  EXPECT_EQ(SubgroupSizeControlProps.maxSubgroupSize, 128u);
+  EXPECT_EQ(SubgroupSizeControlProps.maxComputeWorkgroupSubgroups, 32u);
+  EXPECT_EQ(SubgroupSizeControlProps.requiredSubgroupSizeStages,
+            static_cast<VkShaderStageFlags>(VK_SHADER_STAGE_COMPUTE_BIT));
+
+  VkPhysicalDeviceVulkan13Properties Props13{};
+  Props13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
+  Props2.pNext = &Props13;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(SubgroupSizeControlProps.minSubgroupSize, Props13.minSubgroupSize);
+  EXPECT_EQ(SubgroupSizeControlProps.maxSubgroupSize, Props13.maxSubgroupSize);
+  EXPECT_EQ(SubgroupSizeControlProps.maxComputeWorkgroupSubgroups,
+            Props13.maxComputeWorkgroupSubgroups);
+  EXPECT_EQ(SubgroupSizeControlProps.requiredSubgroupSizeStages,
+            Props13.requiredSubgroupSizeStages);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
@@ -702,11 +756,9 @@ TEST_F(PhysicalDeviceProperties2Test,
   Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
   Props2.pNext = &Maintenance6Props;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
-  EXPECT_EQ(Maintenance6Props.blockTexelViewCompatibleMultipleLayers,
-            VK_FALSE);
+  EXPECT_EQ(Maintenance6Props.blockTexelViewCompatibleMultipleLayers, VK_FALSE);
   EXPECT_EQ(Maintenance6Props.maxCombinedImageSamplerDescriptorCount, 1u);
-  EXPECT_EQ(Maintenance6Props.fragmentShadingRateClampCombinerInputs,
-            VK_FALSE);
+  EXPECT_EQ(Maintenance6Props.fragmentShadingRateClampCombinerInputs, VK_FALSE);
 
   VkPhysicalDeviceVulkan14Properties Props14{};
   Props14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;

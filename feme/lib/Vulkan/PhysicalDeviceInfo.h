@@ -112,6 +112,27 @@ struct PhysicalDeviceInfo {
   uint32_t MaxMultiviewViewCount = 0;
   uint32_t MaxMultiviewInstanceIndex = 0;
   uint64_t MaxTimelineSemaphoreValueDifference = 0;
+
+  /// Roadmap E7 (`VK_EXT_subgroup_size_control`/`subgroupSizeControl` +
+  /// `computeFullSubgroups`): unlike `SubgroupSize` above (the one pinned
+  /// device-wide default), a compute pipeline may request any power-of-two
+  /// wave size in `[MinSubgroupSize, MaxSubgroupSize]` through a
+  /// `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` chained onto its
+  /// `VkComputePipelineCreateInfo` -- `Pipeline.cpp`'s
+  /// `compileComputePipeline` forwards it straight to
+  /// `feme::cpu::JITOptions::WaveSize`, which `feme::cpu::resolveWaveSize`
+  /// already validates against exactly this range (see WaveSize.h), so
+  /// `MinSubgroupSize`/`MaxSubgroupSize` are simply
+  /// `feme::cpu::MinWaveSize`/`MaxWaveSize` reported through the Vulkan API.
+  /// `MaxComputeWorkgroupSubgroups` is the worst case (every subgroup at the
+  /// smallest allowed size) that still fits within one compute workgroup's
+  /// `maxComputeWorkGroupInvocations`. `RequiredSubgroupSizeStages` is
+  /// `VK_SHADER_STAGE_COMPUTE_BIT` only: no other stage's pipeline creation
+  /// consults a required-subgroup-size override yet.
+  uint32_t MinSubgroupSize = 0;
+  uint32_t MaxSubgroupSize = 0;
+  uint32_t MaxComputeWorkgroupSubgroups = 0;
+  VkShaderStageFlags RequiredSubgroupSizeStages = 0;
 };
 
 /// Computes the one physical device's capabilities from the host this
