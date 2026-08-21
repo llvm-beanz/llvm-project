@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ImageOps.h"
+#include "ASTCDecode.h"
 #include "Format.h"
 #include "Image.h"
 
@@ -17,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 using namespace feme::vulkan;
 using namespace llvm;
@@ -318,11 +320,35 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     return createStringError(inconvertibleErrorCode(),
                              "only nearest and linear blit filters are "
                              "implemented");
-  uint32_t SrcTexelSize = formatElementSize(Src->format());
+  // Roadmap E22: a block-compressed *destination* is rejected outright --
+  // this ICD's ASTC support is decode-only (ASTCDecode.h), and a blit's
+  // own resample-then-repack pipeline has no encoder to repack into one.
+  // A block-compressed *source* is supported, but only the LDR half:
+  // `decodeASTCBlock` is LDR-only (its HDR counterpart,
+  // `decodeASTCBlockHDR`, produces floats through a different interface
+  // than the UNORM8 one every other format's unpack/pack path here
+  // shares), so an HDR ASTC source is rejected the same "not implemented"
+  // way.
+  if (feme::cpu::isBlockCompressedFormat(Dst->format()))
+    return createStringError(inconvertibleErrorCode(),
+                             "blitting to a block-compressed destination is "
+                             "not implemented (no ASTC encoder exists)");
+  bool SrcCompressed = feme::cpu::isBlockCompressedFormat(Src->format());
+  if (SrcCompressed && !feme::cpu::isASTCLdrFormat(Src->format()))
+    return createStringError(inconvertibleErrorCode(),
+                             "blitting an HDR ASTC source is not "
+                             "implemented (decodeASTCBlock is LDR-only)");
+  uint32_t SrcTexelSize = SrcCompressed ? 0 : formatElementSize(Src->format());
   uint32_t DstTexelSize = formatElementSize(Dst->format());
+  uint32_t SrcBlockW = blockWidth(Src->format());
+  uint32_t SrcBlockH = blockHeight(Src->format());
+  // Reused across every decoded source texel a compressed blit's own
+  // region loop below fetches, rather than reallocated per texel.
+  std::vector<uint8_t> DecodeBuf(size_t(SrcBlockW) * SrcBlockH * 4);
   // A same-format nearest blit copies raw bytes verbatim (no unpack/repack
   // rounding); anything else goes through the central pack table, exactly
-  // as the bilinear path always has.
+  // as the bilinear path always has. Never true when `SrcCompressed` (its
+  // destination is always rejected above, so the formats can never match).
   bool SameFormat = Src->format() == Dst->format();
 
   for (const VkImageBlit &Region : Regions) {
@@ -379,6 +405,41 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
                                      uint32_t(Region.srcOffsets[0].z));
           };
 
+          // Unpacks the source texel at (\p SX, \p SY) (clamped into the
+          // source rectangle) into a normalized color: through
+          // `feme::vulkan::decodeASTCBlock` and then `R8G8B8A8_UNORM`'s
+          // own unpack case when `SrcCompressed` (roadmap E22's only
+          // caller of `decodeASTCBlock` -- a copy never decodes, it
+          // reinterprets whole blocks verbatim; see `runCopyImage`'s
+          // comment), or through the ordinary per-format unpack table
+          // otherwise.
+          auto srcColor = [&](int64_t SX, int64_t SY,
+                              std::array<double, 4> &Out) -> Error {
+            SX = std::clamp<int64_t>(SX, SrcMinX, SrcMaxX - 1);
+            SY = std::clamp<int64_t>(SY, SrcMinY, SrcMaxY - 1);
+            if (!SrcCompressed)
+              return feme::graphics::unpackColor(
+                  Src->format(),
+                  ArrayRef<uint8_t>(
+                      static_cast<const uint8_t *>(Src->texelPointer(
+                          SrcLevel, SrcLayer, uint32_t(SX), uint32_t(SY),
+                          uint32_t(Region.srcOffsets[0].z))),
+                      SrcTexelSize),
+                  Out);
+            uint32_t TX = uint32_t(SX), TY = uint32_t(SY);
+            uint32_t BlockX = TX / SrcBlockW, BlockY = TY / SrcBlockH;
+            const auto *Block = static_cast<const uint8_t *>(
+                Src->blockPointer(SrcLevel, SrcLayer, BlockX, BlockY,
+                                  uint32_t(Region.srcOffsets[0].z)));
+            decodeASTCBlock(Block, SrcBlockW, SrcBlockH, DecodeBuf.data());
+            uint32_t InBlockX = TX % SrcBlockW, InBlockY = TY % SrcBlockH;
+            const uint8_t *Texel =
+                &DecodeBuf[(size_t(InBlockY) * SrcBlockW + InBlockX) * 4];
+            return feme::graphics::unpackColor(
+                feme::cpu::ResourceFormat::R8G8B8A8_UNORM,
+                ArrayRef<uint8_t>(Texel, 4), Out);
+          };
+
           if (Filter == VK_FILTER_NEAREST) {
             if (SameFormat) {
               std::memcpy(DstTexel, srcTexel(int64_t(U), int64_t(V)),
@@ -386,12 +447,7 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
               continue;
             }
             std::array<double, 4> Sample{};
-            if (Error E = feme::graphics::unpackColor(
-                    Src->format(),
-                    ArrayRef<uint8_t>(static_cast<const uint8_t *>(
-                                          srcTexel(int64_t(U), int64_t(V))),
-                                      SrcTexelSize),
-                    Sample))
+            if (Error E = srcColor(int64_t(U), int64_t(V), Sample))
               return E;
             MutableArrayRef<uint8_t> Out(static_cast<uint8_t *>(DstTexel),
                                          DstTexelSize);
@@ -413,13 +469,8 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
                                      (1 - WX) * WY, WX * WY};
           for (unsigned N = 0; N != 4; ++N) {
             std::array<double, 4> Sample{};
-            if (Error E = feme::graphics::unpackColor(
-                    Src->format(),
-                    ArrayRef<uint8_t>(
-                        static_cast<const uint8_t *>(
-                            srcTexel(Neighbors[N].first, Neighbors[N].second)),
-                        SrcTexelSize),
-                    Sample))
+            if (Error E = srcColor(Neighbors[N].first, Neighbors[N].second,
+                                   Sample))
               return E;
             for (unsigned C = 0; C != 4; ++C)
               Accum[C] += Sample[C] * Weights[N];
@@ -443,6 +494,16 @@ Error runResolveImage(Image *Src, Image *Dst,
   if (Dst->sampleCount() != 1)
     return createStringError(inconvertibleErrorCode(),
                              "a resolve destination must be single-sample");
+  // Roadmap E22: a block-compressed format is never multisampled in real
+  // Vulkan (`Image.h`'s file comment already relied on this to keep
+  // `computeSubresourceLayouts`'s `SampleStride` math simple), so a
+  // resolve of one is meaningless input rather than a case this ICD
+  // silently mishandles by calling the now block-compressed-unaware
+  // `texelPointer` below.
+  if (feme::cpu::isBlockCompressedFormat(Src->format()))
+    return createStringError(inconvertibleErrorCode(),
+                             "resolving a block-compressed image is not "
+                             "meaningful (never multisampled)");
   uint32_t Samples = Src->sampleCount();
   uint32_t TexelSize = formatElementSize(Src->format());
 

@@ -237,4 +237,134 @@ TEST_F(ImageOpsTest, ResolvesMultisampleImage) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
+/// Roadmap E22: a block-compressed format is never multisampled in real
+/// Vulkan, so resolving one is rejected outright rather than falling
+/// through to `texelPointer`, which asserts against a block-compressed
+/// `Format` (see Image.h's file comment).
+TEST_F(ImageOpsTest, RejectsResolveOfBlockCompressedImage) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_ASTC_4x4_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_ASTC_4x4_UNORM_BLOCK);
+
+  VkImageResolve Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {4, 4, 1};
+
+  llvm::Error E =
+      runResolveImage(fromHandle<Image>(Src), fromHandle<Image>(Dst), Region);
+  EXPECT_TRUE(static_cast<bool>(E));
+  llvm::consumeError(std::move(E));
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Roadmap E22: no ASTC encoder exists (`ASTCDecode.h` is decode-only), so
+/// blitting *to* a block-compressed destination is rejected outright,
+/// regardless of the source's own format.
+TEST_F(ImageOpsTest, RejectsBlitToBlockCompressedDestination) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_ASTC_4x4_UNORM_BLOCK);
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  llvm::Error E = runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                               Region, VK_FILTER_NEAREST);
+  EXPECT_TRUE(static_cast<bool>(E));
+  llvm::consumeError(std::move(E));
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// Sets bits `[Start, Start + Len)` of \p Block (bit 0 the LSB of byte 0)
+/// to \p Value's low \p Len bits -- the same hand-construction convention
+/// `ASTCDecodeTest.cpp`'s own `setBits` uses, duplicated here rather than
+/// shared since it is test-only code with no production caller.
+void setAstcBits(uint8_t Block[16], unsigned Start, unsigned Len,
+                 uint32_t Value) {
+  for (unsigned I = 0; I != Len; ++I) {
+    unsigned BitIndex = Start + I;
+    unsigned Byte = BitIndex / 8, Bit = BitIndex % 8;
+    if ((Value >> I) & 1)
+      Block[Byte] |= uint8_t(1u << Bit);
+    else
+      Block[Byte] &= uint8_t(~(1u << Bit));
+  }
+}
+
+/// A void-extent (solid-fill) ASTC block encoding opaque red -- the same
+/// bit layout `ASTCDecodeTest.cpp`'s `VoidExtentDecodesToSolidColor` test
+/// constructs, reused here to exercise `runBlitImage`'s own ASTC-decoding
+/// path end to end rather than `decodeASTCBlock` in isolation.
+std::array<uint8_t, 16> makeOpaqueRedBlock() {
+  std::array<uint8_t, 16> Block{};
+  setAstcBits(Block.data(), 0, 9, 0x1FC); // Void extent signature.
+  setAstcBits(Block.data(), 9, 1, 0);     // LDR.
+  setAstcBits(Block.data(), 10, 2, 0x3);  // Reserved bits, both 1.
+  setAstcBits(Block.data(), 64, 16, 65535); // R.
+  setAstcBits(Block.data(), 80, 16, 0);     // G.
+  setAstcBits(Block.data(), 96, 16, 0);     // B.
+  setAstcBits(Block.data(), 112, 16, 65535); // A.
+  return Block;
+}
+
+/// Roadmap E22: a nearest blit from an ASTC LDR source decodes each
+/// fetched texel through `feme::vulkan::decodeASTCBlock` (`runBlitImage`'s
+/// own `srcColor`) rather than reinterpreting compressed bytes as if they
+/// were the destination's own format.
+TEST_F(ImageOpsTest, BlitDecodesASTCSource) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_ASTC_4x4_UNORM_BLOCK);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+  std::array<uint8_t, 16> Block = makeOpaqueRedBlock();
+  std::memcpy(fromHandle<Image>(Src)->blockPointer(0, 0, 0, 0, 0),
+              Block.data(), Block.size());
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+  for (uint32_t Y = 0; Y != 4; ++Y)
+    for (uint32_t X = 0; X != 4; ++X) {
+      EXPECT_EQ(texel(Dst, X, Y)[0], 255);
+      EXPECT_EQ(texel(Dst, X, Y)[1], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[2], 0);
+      EXPECT_EQ(texel(Dst, X, Y)[3], 255);
+    }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// The HDR-only ASTC formats (roadmap E21) are rejected as a blit source:
+/// `decodeASTCBlock` is LDR-only, and `decodeASTCBlockHDR`'s
+/// float-producing interface does not fit the UNORM8 unpack/pack path
+/// every blit here shares (`runBlitImage`'s own comment).
+TEST_F(ImageOpsTest, RejectsBlitOfHDRASTCSource) {
+  VkImage Src = createImage(4, 4, VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK_EXT);
+  VkImage Dst = createImage(4, 4, VK_FORMAT_R8G8B8A8_UNORM);
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.srcOffsets[1] = {4, 4, 1};
+  Region.dstOffsets[1] = {4, 4, 1};
+
+  llvm::Error E = runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                               Region, VK_FILTER_NEAREST);
+  EXPECT_TRUE(static_cast<bool>(E));
+  llvm::consumeError(std::move(E));
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
 } // namespace
