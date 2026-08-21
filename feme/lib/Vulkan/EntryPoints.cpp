@@ -957,11 +957,17 @@ void fillFeatures2Chain(void *pNext) {
       // so this bit -- like `pipelineCreationCacheControl`/`privateData`
       // above -- must agree with the dedicated
       // `VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures` struct
-      // case below. `OpTerminateInvocation` (roadmap E12) is a separate,
-      // still-unimplemented op, so `shaderTerminateInvocation` remains
-      // false.
+      // case below.
       Features->shaderDemoteToHelperInvocation = VK_TRUE;
-      Features->shaderTerminateInvocation = VK_FALSE;
+      // (roadmap E12) SPIR-V's `OpTerminateInvocation` -- a true
+      // terminator, unlike `OpDemoteToHelperInvocation` above -- now
+      // converts (SPIRVToLLVMPatterns.cpp) to an unconditional
+      // discard-and-return reusing `feme.stage.discard`'s own existing
+      // reference/SIMD lowering, so this bit -- like
+      // `shaderDemoteToHelperInvocation` above -- must agree with the
+      // dedicated `VkPhysicalDeviceShaderTerminateInvocationFeatures`
+      // struct case below.
+      Features->shaderTerminateInvocation = VK_TRUE;
       // (roadmap E7) `Pipeline.cpp`'s `compileComputePipeline` honors both
       // a chained `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and
       // `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`, so
@@ -1145,6 +1151,19 @@ void fillFeatures2Chain(void *pNext) {
           reinterpret_cast<
               VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures *>(Base);
       Features->shaderDemoteToHelperInvocation = VK_TRUE;
+      break;
+    }
+    // (roadmap E12) `VK_KHR_shader_terminate_invocation`'s own feature
+    // struct, whose 1.3 core and `KHR` spellings share one `sType`, exactly
+    // like `shaderDemoteToHelperInvocation` above.
+    // `SPIRVToLLVMPatterns.cpp` converts `OpTerminateInvocation` to an
+    // unconditional discard-and-return, so this bit -- like the one above
+    // -- must agree with the aggregate `VkPhysicalDeviceVulkan13Features`
+    // case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceShaderTerminateInvocationFeatures *>(Base);
+      Features->shaderTerminateInvocation = VK_TRUE;
       break;
     }
     // (roadmap C4c) `VK_EXT_extended_dynamic_state`'s own feature struct:

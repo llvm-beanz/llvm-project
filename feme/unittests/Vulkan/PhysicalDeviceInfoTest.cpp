@@ -534,10 +534,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   // CanonicalizeStage.cpp convert OpDemoteToHelperInvocation to
   // feme.stage.demote), and must agree with the dedicated
   // `VK_EXT_shader_demote_to_helper_invocation` struct case below.
-  // `OpTerminateInvocation` (roadmap E12) is a separate, still-
-  // unimplemented op, so `shaderTerminateInvocation` remains false.
   EXPECT_EQ(Features13.shaderDemoteToHelperInvocation, VK_TRUE);
-  EXPECT_EQ(Features13.shaderTerminateInvocation, VK_FALSE);
+  // Roadmap E12: now genuinely implemented (SPIRVToLLVMPatterns.cpp
+  // converts OpTerminateInvocation to an unconditional discard-and-return),
+  // and must agree with the dedicated `VK_KHR_shader_terminate_invocation`
+  // struct case below.
+  EXPECT_EQ(Features13.shaderTerminateInvocation, VK_TRUE);
   // Roadmap E7: now genuinely implemented (Pipeline.cpp honors a chained
   // `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and
   // `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`), and must
@@ -658,6 +660,24 @@ TEST_F(
   Features2.pNext = &DemoteFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(DemoteFeatures.shaderDemoteToHelperInvocation, VK_TRUE);
+}
+
+TEST_F(
+    PhysicalDeviceProperties2Test,
+    ShaderTerminateInvocationIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E12: `VK_KHR_shader_terminate_invocation`'s own dedicated
+  // feature struct must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Features` case above, exactly like
+  // `VK_EXT_shader_demote_to_helper_invocation`'s own struct does.
+  VkPhysicalDeviceShaderTerminateInvocationFeatures TerminateFeatures{};
+  TerminateFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &TerminateFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(TerminateFeatures.shaderTerminateInvocation, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

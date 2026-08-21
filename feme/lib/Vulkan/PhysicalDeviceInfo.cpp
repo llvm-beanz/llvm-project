@@ -519,6 +519,15 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // advertised `apiVersion`, so it must be listed here too.
       {VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_EXTENSION_NAME,
        VK_EXT_SHADER_DEMOTE_TO_HELPER_INVOCATION_SPEC_VERSION},
+      // (roadmap E12) `OpTerminateInvocation` now converts
+      // (SPIRVToLLVMPatterns.cpp) to an unconditional discard-and-return;
+      // like `shader_demote_to_helper_invocation` above, CTS's
+      // `graphicsfuzz`/`dEQP-VK.spirv_assembly.instruction.graphics.
+      // terminate_invocation.*` cases enable this extension by name
+      // regardless of the advertised `apiVersion`, so it must be listed
+      // here too.
+      {VK_KHR_SHADER_TERMINATE_INVOCATION_EXTENSION_NAME,
+       VK_KHR_SHADER_TERMINATE_INVOCATION_SPEC_VERSION},
   };
   return Extensions;
 }
