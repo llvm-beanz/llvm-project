@@ -89,6 +89,15 @@ enum class ResourceFormat : uint32_t {
   R10G10B10A2_UINT,
   B8G8R8A8_UNORM,
 
+  // (Roadmap E5, `VK_KHR_maintenance5`) `VK_FORMAT_A8_UNORM`: a single
+  // 8-bit alpha-only component, no color components at all.
+  A8_UNORM,
+  // (Roadmap E5) `VK_FORMAT_A1B5G5R5_UNORM_PACK16`: the same 1-bit-alpha,
+  // 5-bit-per-color-component packing `B5G5R5A1_UNORM` already has, but
+  // with alpha moved to the most significant bit instead of the least
+  // significant one (legacy D3D/OpenGL "ABGR1555" compatibility).
+  A1B5G5R5_UNORM,
+
   // Depth/stencil formats (roadmap R33, "the format expansion the first
   // advertised profile needs"): used only for a `GraphicsPipeline`/
   // `PreparedDraw` depth/stencil attachment, never for a typed buffer.

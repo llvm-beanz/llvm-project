@@ -211,6 +211,52 @@ TEST(ImageFixtureTest, PacksAndUnpacksR10G10B10A2Unorm) {
   EXPECT_NEAR(Unpacked[3], 1.0, 0.01);
 }
 
+// Roadmap E5's `VK_FORMAT_A8_UNORM`: a single alpha byte -- the clear
+// color's R/G/B components are ignored on pack and read back as `0` on
+// unpack.
+TEST(ImageFixtureTest, PacksAndUnpacksA8Unorm) {
+  std::array<uint8_t, 1> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::A8_UNORM,
+                                   {1.0, 1.0, 1.0, 0.5}, Texel),
+                    Succeeded());
+  EXPECT_NEAR(Texel[0], 128, 2);
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(unpackColor(cpu::ResourceFormat::A8_UNORM, Texel, Unpacked),
+                    Succeeded());
+  EXPECT_EQ(Unpacked[0], 0.0);
+  EXPECT_EQ(Unpacked[1], 0.0);
+  EXPECT_EQ(Unpacked[2], 0.0);
+  EXPECT_NEAR(Unpacked[3], 0.5, 0.01);
+}
+
+// Roadmap E5's `VK_FORMAT_A1B5G5R5_UNORM_PACK16`: all four components
+// packed into one 16-bit word, 1 bit of alpha at the top down to 5 bits of
+// red at the bottom -- the same packing `R10G10B10A2_UNORM` above uses,
+// just half the width and with alpha moved to the MSB.
+TEST(ImageFixtureTest, PacksAndUnpacksA1B5G5R5Unorm) {
+  std::array<uint8_t, 2> Texel{};
+  ASSERT_THAT_ERROR(packClearColor(cpu::ResourceFormat::A1B5G5R5_UNORM,
+                                   {1.0, 0.0, 0.5, 1.0}, Texel),
+                    Succeeded());
+  uint16_t Word;
+  memcpy(&Word, Texel.data(), 2);
+  EXPECT_EQ(static_cast<uint32_t>(Word) & 0x1Fu, 31u);       // R = 1.0
+  EXPECT_EQ((static_cast<uint32_t>(Word) >> 5) & 0x1Fu, 0u); // G = 0.0
+  EXPECT_NEAR((static_cast<uint32_t>(Word) >> 10) & 0x1Fu, 16,
+              1);                                            // B = 0.5
+  EXPECT_EQ((static_cast<uint32_t>(Word) >> 15) & 0x1u, 1u); // A = 1.0
+
+  std::array<double, 4> Unpacked{};
+  ASSERT_THAT_ERROR(
+      unpackColor(cpu::ResourceFormat::A1B5G5R5_UNORM, Texel, Unpacked),
+      Succeeded());
+  EXPECT_NEAR(Unpacked[0], 1.0, 0.05);
+  EXPECT_NEAR(Unpacked[1], 0.0, 0.05);
+  EXPECT_NEAR(Unpacked[2], 0.5, 0.05);
+  EXPECT_NEAR(Unpacked[3], 1.0, 0.01);
+}
+
 // Roadmap C1's combined depth+stencil format: `packDepthClear`/
 // `packStencilClear` must be independent read-modify-writes of the same
 // 4-byte word, and `unpackDepth`/`unpackStencil` their inverse.

@@ -33,6 +33,13 @@ TEST(FormatTest, MapsDepthStencilFormats) {
             ResourceFormat::D24_UNORM_S8_UINT);
 }
 
+TEST(FormatTest, MapsMaintenance5Formats) {
+  // Roadmap E5: `VK_KHR_maintenance5`'s two new formats.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A8_UNORM_KHR), ResourceFormat::A8_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR),
+            ResourceFormat::A1B5G5R5_UNORM);
+}
+
 TEST(FormatTest, RejectsUnsupportedFormat) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK), std::nullopt);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);
@@ -45,6 +52,9 @@ TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   EXPECT_EQ(formatElementSize(ResourceFormat::R32G32B32A32_FLOAT), 16u);
   EXPECT_EQ(formatElementSize(ResourceFormat::R8G8B8A8_UNORM), 4u);
   EXPECT_EQ(formatElementSize(ResourceFormat::Unknown), 0u);
+  // Roadmap E5.
+  EXPECT_EQ(formatElementSize(ResourceFormat::A8_UNORM), 1u);
+  EXPECT_EQ(formatElementSize(ResourceFormat::A1B5G5R5_UNORM), 2u);
 }
 
 TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {

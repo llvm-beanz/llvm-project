@@ -781,11 +781,16 @@ TEST_F(GraphicsPipelineTest, AcceptsDynamicRenderingFormats) {
 /// Roadmap C1 ("Mandatory formats"): every format
 /// `isSupportedColorAttachmentFormat` grants Vulkan 1.2's mandatory
 /// `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` status to must build
-/// a pipeline the same way `VK_FORMAT_R8G8B8A8_UNORM` already does.
+/// a pipeline the same way `VK_FORMAT_R8G8B8A8_UNORM` already does. Roadmap
+/// E5 extends this same acceptance to `VK_KHR_maintenance5`'s two new
+/// formats, `A8_UNORM`/`A1B5G5R5_UNORM_PACK16`, which are not mandatory but
+/// are `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` capable.
 TEST_F(GraphicsPipelineTest, AcceptsMandatoryColorAttachmentFormats) {
   for (VkFormat Format :
        {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM,
-        VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT}) {
+        VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT,
+        // Roadmap E5: `VK_KHR_maintenance5`'s two new formats.
+        VK_FORMAT_A8_UNORM_KHR, VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR}) {
     VkShaderModule Vertex = createModule(VertexSource);
     VkShaderModule Fragment = createModule(FragmentSource);
 

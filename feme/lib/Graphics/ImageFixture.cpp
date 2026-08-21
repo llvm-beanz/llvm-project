@@ -120,6 +120,16 @@ Expected<FormatInfo> getFormatInfo(ResourceFormat Format) {
     return FormatInfo{2, 4, false};
   case ResourceFormat::S8_UINT:
     return FormatInfo{1, 1, false};
+  case ResourceFormat::A8_UNORM:
+    // A single 8-bit alpha component (roadmap E5); still described as a
+    // 4-logical-component clear color by `packClearColor`/`unpackColor`
+    // below, exactly like `R10G10B10A2_UNORM`'s own opaque-word case.
+    return FormatInfo{1, 1, false};
+  case ResourceFormat::A1B5G5R5_UNORM:
+    // Packed into a single 2-byte word (roadmap E5); not a per-component
+    // layout, so it is described as one opaque 2-byte "component" here,
+    // the same convention `R10G10B10A2_UNORM` above uses.
+    return FormatInfo{1, 2, false};
   default:
     return createStringError(inconvertibleErrorCode(),
                              "image fixture format is not yet supported "
@@ -169,6 +179,8 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("d24-unorm-s8-uint", ResourceFormat::D24_UNORM_S8_UINT)
           .Case("d32-float-s8x24-uint", ResourceFormat::D32_FLOAT_S8X24_UINT)
           .Case("s8-uint", ResourceFormat::S8_UINT)
+          .Case("a8-unorm", ResourceFormat::A8_UNORM)
+          .Case("a1b5g5r5-unorm", ResourceFormat::A1B5G5R5_UNORM)
           .Default(ResourceFormat::Unknown);
   if (Result == ResourceFormat::Unknown)
     return createStringError(inconvertibleErrorCode(),
@@ -214,6 +226,38 @@ Error packClearColor(ResourceFormat Format, ArrayRef<double> Clear,
                     (Norm(Clear[2]) << 20) | (Norm(Clear[1]) << 10) |
                     Norm(Clear[0]);
     memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
+  // (Roadmap E5) `VK_FORMAT_A1B5G5R5_UNORM_PACK16`: the same
+  // single-packed-word special case as `R10G10B10A2_UNORM` above, just
+  // 16 bits wide with alpha at the MSB rather than the LSB.
+  if (Format == ResourceFormat::A1B5G5R5_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    auto Norm5 = [](double V) -> uint16_t {
+      return static_cast<uint16_t>(std::lround(std::clamp(V, 0.0, 1.0) * 31.0));
+    };
+    // From the MSB down: 1 bit of A, 5 bits of B, 5 bits of G, 5 bits of R.
+    uint16_t Word = static_cast<uint16_t>(
+        (static_cast<uint16_t>(std::lround(std::clamp(Clear[3], 0.0, 1.0)))
+         << 15) |
+        (Norm5(Clear[2]) << 10) | (Norm5(Clear[1]) << 5) | Norm5(Clear[0]));
+    memcpy(Texel.data(), &Word, sizeof(Word));
+    return Error::success();
+  }
+
+  // (Roadmap E5) `VK_FORMAT_A8_UNORM`: a single alpha byte -- the clear
+  // color's other three (unused) components are simply ignored.
+  if (Format == ResourceFormat::A8_UNORM) {
+    if (Clear.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "clear color has %zu component(s), expected 4",
+                               Clear.size());
+    Texel[0] = static_cast<uint8_t>(
+        std::lround(std::clamp(Clear[3], 0.0, 1.0) * 255.0));
     return Error::success();
   }
 
@@ -305,6 +349,37 @@ Error unpackColor(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Out[1] = ((Word >> 10) & 0x3FF) / 1023.0;
     Out[2] = ((Word >> 20) & 0x3FF) / 1023.0;
     Out[3] = ((Word >> 30) & 0x3) / 3.0;
+    return Error::success();
+  }
+
+  // (Roadmap E5) `VK_FORMAT_A1B5G5R5_UNORM_PACK16`: the inverse of
+  // `packClearColor`'s special case above.
+  if (Format == ResourceFormat::A1B5G5R5_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    uint16_t Word;
+    memcpy(&Word, Texel.data(), sizeof(Word));
+    Out[0] = (Word & 0x1F) / 31.0;
+    Out[1] = ((Word >> 5) & 0x1F) / 31.0;
+    Out[2] = ((Word >> 10) & 0x1F) / 31.0;
+    Out[3] = ((Word >> 15) & 0x1) / 1.0;
+    return Error::success();
+  }
+
+  // (Roadmap E5) `VK_FORMAT_A8_UNORM`: the inverse of `packClearColor`'s
+  // special case above -- the color components read back as `0`, matching
+  // this format's lack of any.
+  if (Format == ResourceFormat::A8_UNORM) {
+    if (Out.size() != 4)
+      return createStringError(inconvertibleErrorCode(),
+                               "unpack destination has %zu component(s), "
+                               "expected 4",
+                               Out.size());
+    Out[0] = Out[1] = Out[2] = 0.0;
+    Out[3] = Texel[0] / 255.0;
     return Error::success();
   }
 
@@ -535,6 +610,10 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "d32-float-s8x24-uint";
   case ResourceFormat::S8_UINT:
     return "s8-uint";
+  case ResourceFormat::A8_UNORM:
+    return "a8-unorm";
+  case ResourceFormat::A1B5G5R5_UNORM:
+    return "a1b5g5r5-unorm";
   }
   llvm_unreachable("unhandled ResourceFormat");
 }

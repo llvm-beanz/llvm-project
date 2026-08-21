@@ -38,6 +38,12 @@ bool isSupportedColorAttachmentFormat(feme::cpu::ResourceFormat Format) {
     // every conformant implementation must support (roadmap C1) --
     // backed by real pack/unpack paths in `feme::graphics`.
     return true;
+  case feme::cpu::ResourceFormat::A8_UNORM:
+  case feme::cpu::ResourceFormat::A1B5G5R5_UNORM:
+    // (Roadmap E5) `VK_KHR_maintenance5`'s two new formats are both
+    // `COLOR_ATTACHMENT_BIT | COLOR_ATTACHMENT_BLEND_BIT` capable, backed
+    // by their own `feme::graphics::packClearColor`/`unpackColor` cases.
+    return true;
   default:
     // Every other format is either unknown to the executor's own
     // pack/unpack table (`feme::graphics::packClearColor`) or an integer

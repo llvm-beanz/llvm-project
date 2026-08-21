@@ -498,6 +498,11 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
     return 8;
   case ResourceFormat::S8_UINT:
     return 1;
+  // (Roadmap E5) `VK_FORMAT_A8_UNORM`/`A1B5G5R5_UNORM_PACK16`.
+  case ResourceFormat::A8_UNORM:
+    return 1;
+  case ResourceFormat::A1B5G5R5_UNORM:
+    return 2;
   }
   llvm_unreachable("unhandled ResourceFormat");
 }

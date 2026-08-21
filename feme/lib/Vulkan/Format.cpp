@@ -76,6 +76,11 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::D32_FLOAT_S8X24_UINT;
   case VK_FORMAT_S8_UINT:
     return ResourceFormat::S8_UINT;
+  // (Roadmap E5) `VK_KHR_maintenance5`'s two new formats.
+  case VK_FORMAT_A8_UNORM_KHR:
+    return ResourceFormat::A8_UNORM;
+  case VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR:
+    return ResourceFormat::A1B5G5R5_UNORM;
   default:
     return std::nullopt;
   }
@@ -122,6 +127,12 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
     return 2;
   case ResourceFormat::S8_UINT:
     return 1;
+  // (Roadmap E5) `VK_FORMAT_A8_UNORM`: one byte, one component.
+  case ResourceFormat::A8_UNORM:
+    return 1;
+  // (Roadmap E5) `VK_FORMAT_A1B5G5R5_UNORM_PACK16`: packed into 2 bytes.
+  case ResourceFormat::A1B5G5R5_UNORM:
+    return 2;
   }
   llvm_unreachable("unhandled ResourceFormat");
 }
