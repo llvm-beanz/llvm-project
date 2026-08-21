@@ -26,22 +26,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E20 in the roadmap document?
+Can you implement milestone E21 in the roadmap document?
 
-> **Block-compressed image groundwork + ASTC LDR decode**, the prerequisite
-> E15's own investigation found missing: (1) extend
-> `feme::cpu::ResourceFormat`/`Image.{h,cpp}`'s subresource layout math from its
-> current per-texel stride to a block-based one (block-dimension-aligned extent,
-> bytes-per-block instead of `formatElementSize`, still computed once at
-> `vkCreateImage` time per V5's existing "packed table" design); (2) a real ASTC
-> bitstream decoder (integer sequence/trit-quint decoding, all weight grid and
-> color-endpoint-mode combinations, 1-or-2 partitions, dual-plane, void-extent
-> blocks) for the 14 LDR-only block footprints
-> (`VK_FORMAT_ASTC_{4x4,5x4,5x5,6x5,6x6,8x5,8x6,8x8,10x5,10x6,10x8,10x10,12x10,12x12}_UNORM/SRGB_BLOCK`),
-> gating the previously-untracked
-> `VkPhysicalDeviceFeatures::textureCompressionASTC_LDR` bit (a Vulkan 1.0 core,
-> not 1.3/1.4-promoted, feature — add it to `Vulkan14FeatureInventory.md`'s
-> tracked set since this investigation is what surfaced that it had no row at
-> all). This is the largest single new subsystem in this whole roadmap
-> (comparable in scope to a from-spec software codec) and should be scheduled as
-> such rather than folded into a "small extension" lane
+> **`VK_EXT_texture_compression_astc_hdr`/`textureCompressionASTC_HDR`** (E15's
+> original scope, unchanged): the 14 additional HDR block formats
+> (`VK_FORMAT_ASTC_{4x4,...,12x12}_SFLOAT_BLOCK_EXT`), reusing E20's shared
+> bit-unpacking/weight-grid decode and adding the HDR-only float color-endpoint
+> decode path
