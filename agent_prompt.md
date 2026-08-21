@@ -26,12 +26,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E14 in the roadmap document?
+Can you implement milestone E15 in the roadmap document?
 
-> **`VK_EXT_inline_uniform_block`/`inlineUniformBlock` +
-> `descriptorBindingInlineUniformBlockUpdateAfterBind`.** A new
-> `VkDescriptorType` whose "descriptor" is inline byte storage rather than a
-> handle -- `Descriptor.{h,cpp}`'s existing per-binding storage needs a
-> byte-blob variant alongside its current handle-array one, and
-> `VkWriteDescriptorSetInlineUniformBlock` is a new `pNext` case in the existing
-> `vkUpdateDescriptorSets` walk
+> **`VK_EXT_texture_compression_astc_hdr`/`textureCompressionASTC_HDR`.** A new
+> decode path in `Format.{h,cpp}` for the 14 ASTC HDR block formats, reusing
+> whatever LDR ASTC decode already exists (check `Format.cpp` first — if LDR
+> ASTC is itself unimplemented, this row's scope grows to include it and should
+> be split) | none (verify LDR ASTC status first)
