@@ -26,22 +26,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E25 in the roadmap document?
+Can you implement milestone E26 in the roadmap document?
 
-> **Broaden real per-format feature support**, the gap roadmap E24's own
-> `deqp-vk` run surfaced rather than introduced:
-> `dEQP-VK.api.info.format_properties.*`/`image_format_properties.*`/`unsupported_image_usage.*`
-> now fail ~500 cases (up from `format_properties`'s own smaller pre-existing
-> baseline) purely because `formatFeatureFlags` (Format.h) honestly reports most
-> Vulkan-mandatory sampled/attachment formats as unsupported -- this ICD's CPU
-> runtime only actually samples
-> `R32G32B32A32_FLOAT`/`R8G8B8A8_UNORM`/`_UNORM_SRGB` (plus ASTC LDR, bridged)
-> and its render-target pack/unpack table (`RenderPass.cpp`'s
-> `isSupportedColorAttachmentFormat`) covers a narrower set than the Vulkan 1.0
-> mandatory floor. Similarly, `dEQP-VK.*astc*`'s new 12,225 failures are mostly
-> real texture-path gaps (e.g. `feme-cpu-simdize`'s divergent-vector limitation
-> blocking `vktTextureTestUtil`'s fragment-shader cases), not query-accuracy
-> ones. Closing this means extending the CPU runtime's typed sample table and
-> `feme::graphics`'s pack/unpack table to the full mandatory format list -- a
-> substantial, separate broadening of existing subsystems, not a single
-> mechanical fix
+> **Integer-format image sampling/loading.** No `feme.cpu.image.*` entry point
+> returns an integer vector (every sample/load call is `<4 x float>`), so a
+> mandatory-sampled `_UINT`/`_SINT` format (`R32G32B32A32_UINT`/`_SINT`,
+> `R16G16B16A16_UINT`/`_SINT`, `R8G8B8A8_UINT`/`_SINT`, `R10G10B10A2_UINT`, per
+> the spec's own "Mandatory Format Support" tables, roadmap E25's own
+> investigation) cannot be sampled or `OpImageFetch`-loaded at all today, even
+> though `SPIRVResourceLowering.cpp` already raises an integer
+> `OpImageFetch`/`OpImageRead` to a canonical call. Needs a
+> `feme.cpu.image.load.2d.v4i32` (and, if a filtered integer sample is ever
+> legal in SPIR-V, a decision on what "filtering" even means for one) entry
+> point in `FeMeRuntimeCPU.c`, the matching `ImageCalls.{h,cpp}` builder, and an
+> integer decode table (`femeRTUnpackImageTexelI32`-shaped) analogous to E25's
+> own `femeRTUnpackImageTexel`, before `formatFeatureFlags` can honestly set
+> `SAMPLED_IMAGE_BIT` for any integer format
