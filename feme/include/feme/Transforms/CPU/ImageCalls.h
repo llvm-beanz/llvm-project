@@ -51,6 +51,13 @@ enum class ImageCallKind : uint8_t {
   SampleCmp2D,
   /// `feme.cpu.image.load.2d.v4f32`: explicit-mip, no-sampler texel fetch.
   Load2D,
+  /// `feme.cpu.image.load.2d.v4i32` (roadmap E26): the integer-format
+  /// counterpart of `Load2D` -- an explicit-mip, no-sampler texel fetch of
+  /// a `_UINT`/`_SINT` image, returning `<4 x i32>` instead of
+  /// `<4 x float>`. No filtered-sample counterpart exists: SPIR-V only
+  /// legalizes `OpImageFetch` (never `OpImageSample*`) against an integer-
+  /// sampled image, so there is nothing for a `SampleImage2DI32` to mean.
+  Load2DI32,
 };
 
 /// The image/sampler heap operands every `feme.cpu.image.*` call carries.
@@ -71,18 +78,18 @@ struct MatchedImageCall {
   ImageCallEnv Env;
   llvm::Value *ImageIndex = nullptr;
   /// The sampler descriptor index, for `Sample2D`/`SampleCmp2D`; null for
-  /// `Load2D`.
+  /// `Load2D`/`Load2DI32`.
   llvm::Value *SamplerIndex = nullptr;
   /// `Sample2D`/`SampleCmp2D`: normalized U/V coordinates.
-  /// `Load2D`: integer X/Y texel coordinates.
+  /// `Load2D`/`Load2DI32`: integer X/Y texel coordinates.
   llvm::Value *U = nullptr;
   llvm::Value *V = nullptr;
   /// The LOD/mip operand: `Sample2D`/`SampleCmp2D`'s explicit-or-ignored LOD
-  /// float, or `Load2D`'s integer mip level.
+  /// float, or `Load2D`/`Load2DI32`'s integer mip level.
   llvm::Value *Lod = nullptr;
   /// `Sample2D`/`SampleCmp2D` only: whether `Lod` is an explicit LOD (true)
   /// or should be ignored in favor of implicit level 0 (false); null for
-  /// `Load2D`, which always names its mip explicitly.
+  /// `Load2D`/`Load2DI32`, which always name their mip explicitly.
   llvm::Value *UseExplicitLod = nullptr;
   /// `SampleCmp2D` only: the depth-comparison reference value.
   llvm::Value *Dref = nullptr;
@@ -118,6 +125,14 @@ llvm::CallInst *createLoad2D(llvm::IRBuilderBase &Builder,
                              const ImageCallEnv &Env, llvm::Value *ImageIndex,
                              llvm::Value *X, llvm::Value *Y, llvm::Value *Mip,
                              llvm::Value *Mask, const llvm::Twine &Name = "");
+
+/// Builds a `feme.cpu.image.load.2d.v4i32` call (roadmap E26).
+llvm::CallInst *createLoad2DI32(llvm::IRBuilderBase &Builder,
+                                const ImageCallEnv &Env,
+                                llvm::Value *ImageIndex, llvm::Value *X,
+                                llvm::Value *Y, llvm::Value *Mip,
+                                llvm::Value *Mask,
+                                const llvm::Twine &Name = "");
 
 /// Recognizes \p CI as one of the canonical `feme.cpu.image.*` calls,
 /// returning its decoded operands, or `std::nullopt` if \p CI's callee isn't
