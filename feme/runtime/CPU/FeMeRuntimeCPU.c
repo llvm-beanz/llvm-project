@@ -63,11 +63,24 @@
 // common compute-shader case) and only approximate otherwise, since this
 // runtime does not yet compute fragment derivatives (see
 // feme/docs/FeMeGraphicsDesign.md's "Canonical image operations"). The
-// format table covers `R32G32B32A32_FLOAT` (identity) and
-// `R8G8B8A8_UNORM`/`R8G8B8A8_UNORM_SRGB` (packed, the latter sRGB-decoded on
-// every sample/load per "Texture layout and formats"); every other format
-// `feme::cpu::ResourceFormat` lists is the same mechanical extension the
-// typed-buffer note above describes.
+// format table (roadmap E25, broadened from the original three-format
+// table this comment used to describe) covers every non-integer,
+// non-block-compressed, non-depth/stencil format `feme::cpu::ResourceFormat`
+// lists: the identity `R32*_FLOAT` formats (`R32_FLOAT`/`R32G32_FLOAT`/
+// `R32G32B32_FLOAT`/`R32G32B32A32_FLOAT`, padding a missing component the
+// way `OpImageFetch` does: unread color channels `0.0`, an unread alpha
+// channel `1.0`), the packed 8-bit formats (`R8G8B8A8_UNORM`/`_SNORM`/
+// `_UNORM_SRGB`, the latter sRGB-decoded on every sample/load per "Texture
+// layout and formats", and `B8G8R8A8_UNORM`), `R16G16B16A16_FLOAT` (a
+// hand-written binary16-to-`float` conversion, since this file cannot
+// assume hardware half-float support), and three more packed-word formats
+// (`R11G11B10_FLOAT`, `R10G10B10A2_UNORM`, `A8_UNORM`, `A1B5G5R5_UNORM`).
+// `_UINT`/`_SINT` formats are deliberately left out: every `feme.cpu.image.*`
+// entry point below returns `<4 x float>`, and no integer-returning
+// counterpart exists yet to consume an integer format's decoded value, so
+// decoding one here would have nothing correct to feed it to -- the same
+// "mechanical, added on demand" scoping as every other still-missing
+// format, tracked as follow-up rather than a gap this row closes.
 //
 //===----------------------------------------------------------------------===//
 
@@ -627,14 +640,43 @@ femeRTLoadSamplerDescriptor(const FemeRTSamplerDescriptor *Heap,
 // The byte size of one texel of `Format` (`feme::cpu::ResourceFormat`), or 0
 // for a format this file does not (yet) decode -- see the file header
 // comment's format-table scope note.
+//
+// Roadmap E25: broadened from the original three-format table
+// (`R32G32B32A32_FLOAT`/`R8G8B8A8_UNORM`/`_UNORM_SRGB`) to every other
+// non-integer, non-block-compressed, non-depth/stencil format
+// `feme::cpu::ResourceFormat` lists -- the CPU runtime has no
+// `feme.cpu.image.*` entry point that returns an integer vector yet (every
+// sample/load call here is `<4 x float>`), so a `_UINT`/`_SINT` format
+// would have nothing to consume its result even if this table decoded it;
+// that gap is unchanged by this row and left for the entry point that
+// first needs it, the same "mechanical, added on demand" scoping this
+// file's header comment already establishes.
 __attribute__((always_inline)) static uint64_t
 femeRTImageFormatElementSize(uint32_t Format) {
   switch (Format) {
+  case 1:  // R32_FLOAT
+    return 4;
+  case 2:  // R32G32_FLOAT
+    return 8;
+  case 3:  // R32G32B32_FLOAT
+    return 12;
   case 4: // R32G32B32A32_FLOAT
     return 16;
   case 13: // R8G8B8A8_UNORM
+  case 14: // R8G8B8A8_SNORM
   case 17: // R8G8B8A8_UNORM_SRGB
     return 4;
+  case 18: // R16G16B16A16_FLOAT
+    return 8;
+  case 23: // R11G11B10_FLOAT (packed into a single 4-byte word)
+  case 24: // R10G10B10A2_UNORM (packed into a single 4-byte word)
+    return 4;
+  case 26: // B8G8R8A8_UNORM
+    return 4;
+  case 27: // A8_UNORM
+    return 1;
+  case 28: // A1B5G5R5_UNORM (packed into a single 2-byte word)
+    return 2;
   default:
     return 0;
   }
@@ -649,14 +691,146 @@ __attribute__((always_inline)) static float femeRTSRGBToLinear(float C) {
                        : __builtin_powf((C + 0.055f) / 1.055f, 2.4f);
 }
 
+// Converts one IEEE 754 binary16 ("half float") bit pattern to a `float`,
+// by hand rather than via a hardware/`_Float16` conversion instruction --
+// this file is compiled freestanding for whatever host runs the JIT/AOT
+// backend (see the file header comment), so it cannot assume the target
+// has (or that this build enables) F16C-style hardware half-float support.
+// Handles zero, subnormal, normal, infinity and NaN inputs.
+__attribute__((always_inline)) static float femeRTHalfToFloat(uint16_t H) {
+  uint32_t Sign = (uint32_t)(H & 0x8000u) << 16;
+  uint32_t Exp = (H >> 10) & 0x1Fu;
+  uint32_t Mant = H & 0x3FFu;
+  uint32_t Bits;
+  if (Exp == 0) {
+    if (Mant == 0) {
+      Bits = Sign; // +/- zero.
+    } else {
+      // Subnormal half: normalize the mantissa into a normal float's
+      // implicit-leading-1 form, adjusting the exponent for each shift.
+      int32_t E = -1;
+      uint32_t M = Mant;
+      do {
+        M <<= 1;
+        ++E;
+      } while (!(M & 0x400u));
+      M &= 0x3FFu;
+      Bits = Sign | ((uint32_t)(127 - 15 - E) << 23) | (M << 13);
+    }
+  } else if (Exp == 0x1Fu) {
+    Bits = Sign | 0x7F800000u | (Mant << 13); // Infinity or NaN.
+  } else {
+    Bits = Sign | ((Exp - 15u + 127u) << 23) | (Mant << 13);
+  }
+  float F;
+  __builtin_memcpy(&F, &Bits, sizeof(F));
+  return F;
+}
+
+// Unpacks a `B8G8R8A8_UNORM` value (four normalized `[0, 255]` bytes,
+// little-endian: B, G, R, A) into a `<4 x float>` in `[0.0, 1.0]` -- the
+// same conversion as `femeRTUnpackR8G8B8A8Unorm`, just with the red and
+// blue channels swapped in memory.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackB8G8R8A8Unorm(uint32_t Raw) {
+  FemeRTv4f32 V = femeRTUnpackR8G8B8A8Unorm(Raw);
+  float R = V[0];
+  V[0] = V[2];
+  V[2] = R;
+  return V;
+}
+
+// Unpacks a `R10G10B10A2_UNORM` value (`VK_FORMAT_A2B10G10R10_UNORM_PACK32`:
+// from the MSB down, 2 bits of A, 10 bits of B, 10 bits of G, 10 bits of R)
+// into a `<4 x float>` in `[0.0, 1.0]`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR10G10B10A2Unorm(uint32_t Raw) {
+  FemeRTv4f32 V;
+  V[0] = (float)(Raw & 0x3FFu) / 1023.0f;
+  V[1] = (float)((Raw >> 10) & 0x3FFu) / 1023.0f;
+  V[2] = (float)((Raw >> 20) & 0x3FFu) / 1023.0f;
+  V[3] = (float)((Raw >> 30) & 0x3u) / 3.0f;
+  return V;
+}
+
+// Unpacks a `R11G11B10_FLOAT` value (`VK_FORMAT_B10G11R11_UFLOAT_PACK32`:
+// from the LSB up, an unsigned 6-bit-mantissa/5-bit-exponent 11-bit float
+// for R, another for G, then a 5-bit-mantissa/5-bit-exponent 10-bit float
+// for B) into a `<4 x float>`, alpha always `1.0` (this format carries no
+// alpha channel).
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackR11G11B10Float(uint32_t Raw) {
+  // An unsigned 5-bit-exponent minifloat with `MantBits` mantissa bits
+  // shares binary16's exponent bias (15) and special-value encoding, so
+  // `femeRTHalfToFloat` decodes it once its mantissa is left-shifted into
+  // binary16's own 10-bit mantissa field.
+  uint32_t R10 = ((Raw & 0x7FFu) << 5) & 0xFFFFu;    // 6-bit mantissa -> 10.
+  uint32_t G10 = (((Raw >> 11) & 0x7FFu) << 5) & 0xFFFFu;
+  uint32_t B10 = (((Raw >> 22) & 0x3FFu) << 6) & 0xFFFFu; // 5-bit mantissa.
+  FemeRTv4f32 V;
+  V[0] = femeRTHalfToFloat((uint16_t)R10);
+  V[1] = femeRTHalfToFloat((uint16_t)G10);
+  V[2] = femeRTHalfToFloat((uint16_t)B10);
+  V[3] = 1.0f;
+  return V;
+}
+
+// Unpacks an `A8_UNORM` value (a single normalized `[0, 255]` alpha byte,
+// no color channels at all) into a `<4 x float>`, color channels `0.0`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackA8Unorm(uint8_t Raw) {
+  FemeRTv4f32 V = {0.0f, 0.0f, 0.0f, (float)Raw / 255.0f};
+  return V;
+}
+
+// Unpacks an `A1B5G5R5_UNORM` value
+// (`VK_FORMAT_A1B5G5R5_UNORM_PACK16`: from the MSB down, 1 bit of A, 5
+// bits of B, 5 bits of G, 5 bits of R) into a `<4 x float>` in
+// `[0.0, 1.0]`.
+__attribute__((always_inline)) static FemeRTv4f32
+femeRTUnpackA1B5G5R5Unorm(uint16_t Raw) {
+  FemeRTv4f32 V;
+  V[0] = (float)(Raw & 0x1Fu) / 31.0f;
+  V[1] = (float)((Raw >> 5) & 0x1Fu) / 31.0f;
+  V[2] = (float)((Raw >> 10) & 0x1Fu) / 31.0f;
+  V[3] = (float)((Raw >> 15) & 0x1u);
+  return V;
+}
+
 // Unpacks one texel of `Format` at `Ptr` into a linear-light `<4 x float>`,
 // or all-zero for a format `femeRTImageFormatElementSize` doesn't know
 // (guarded by that function's 0 return at every call site below, so this
 // default is unreachable in practice, but kept total rather than partial).
+//
+// Roadmap E25: extended alongside `femeRTImageFormatElementSize` above --
+// see that function's comment for the scope this row does (and does not)
+// cover. A format with fewer than four logical components (`R32_FLOAT`,
+// `R32G32_FLOAT`, `R32G32B32_FLOAT`) pads the missing components the same
+// way SPIR-V's own `OpImageFetch`/`OpImageSampleImplicitLod` do for a
+// partial-component image format: an unread color channel reads `0.0`, an
+// unread alpha channel reads `1.0`.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   switch (Format) {
+  case 1: { // R32_FLOAT
+    float R;
+    __builtin_memcpy(&R, Ptr, sizeof(R));
+    FemeRTv4f32 V = {R, 0.0f, 0.0f, 1.0f};
+    return V;
+  }
+  case 2: { // R32G32_FLOAT
+    float RG[2];
+    __builtin_memcpy(RG, Ptr, sizeof(RG));
+    FemeRTv4f32 V = {RG[0], RG[1], 0.0f, 1.0f};
+    return V;
+  }
+  case 3: { // R32G32B32_FLOAT
+    float RGB[3];
+    __builtin_memcpy(RGB, Ptr, sizeof(RGB));
+    FemeRTv4f32 V = {RGB[0], RGB[1], RGB[2], 1.0f};
+    return V;
+  }
   case 4: { // R32G32B32A32_FLOAT: identity format, no conversion.
     return (FemeRTv4f32) * (const FemeRTv4f32Unaligned *)Ptr;
   }
@@ -664,6 +838,11 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     uint32_t Raw;
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackR8G8B8A8Unorm(Raw);
+  }
+  case 14: { // R8G8B8A8_SNORM
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR8G8B8A8Snorm(Raw);
   }
   case 17: { // R8G8B8A8_UNORM_SRGB
     uint32_t Raw;
@@ -673,6 +852,36 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     V[1] = femeRTSRGBToLinear(V[1]);
     V[2] = femeRTSRGBToLinear(V[2]);
     return V;
+  }
+  case 18: { // R16G16B16A16_FLOAT
+    uint16_t Raw[4];
+    __builtin_memcpy(Raw, Ptr, sizeof(Raw));
+    FemeRTv4f32 V = {femeRTHalfToFloat(Raw[0]), femeRTHalfToFloat(Raw[1]),
+                     femeRTHalfToFloat(Raw[2]), femeRTHalfToFloat(Raw[3])};
+    return V;
+  }
+  case 23: { // R11G11B10_FLOAT
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR11G11B10Float(Raw);
+  }
+  case 24: { // R10G10B10A2_UNORM
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackR10G10B10A2Unorm(Raw);
+  }
+  case 26: { // B8G8R8A8_UNORM
+    uint32_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackB8G8R8A8Unorm(Raw);
+  }
+  case 27: { // A8_UNORM
+    return femeRTUnpackA8Unorm(*Ptr);
+  }
+  case 28: { // A1B5G5R5_UNORM
+    uint16_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    return femeRTUnpackA1B5G5R5Unorm(Raw);
   }
   default:
     return Zero;

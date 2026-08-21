@@ -374,6 +374,186 @@ TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {
   EXPECT_FLOAT_EQ(Out[3], 16.0f);
 }
 
+// Roadmap E25: the CPU runtime's typed sample table broadened beyond its
+// original three formats -- each of these exercises one newly-decoded
+// format through `feme.cpu.image.load.2d.v4f32` (an exact, unfiltered
+// fetch, so the expected values are the format's own decode, not a
+// filtered blend).
+
+TEST_F(ImageSamplingTest, LoadFetchesPartialComponentFloatFormats) {
+  // A missing color component reads 0.0 and a missing alpha reads 1.0,
+  // matching `OpImageFetch`'s own convention for a partial-component
+  // format.
+  float R32Storage[1][1] = {{7.0f}};
+  FemeImageSubresourceLayout R32Layout;
+  FemeImageDescriptor R32Img = makeImage2D(
+      R32Storage, sizeof(R32Storage), 1, 1, ResourceFormat::R32_FLOAT, R32Layout);
+  FemeImageDescriptor R32Heap[1] = {R32Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(R32Heap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 7.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+
+  float RG32Storage[1][1][2] = {{{3.0f, 4.0f}}};
+  FemeImageSubresourceLayout RG32Layout;
+  FemeImageDescriptor RG32Img =
+      makeImage2D(RG32Storage, sizeof(RG32Storage), 1, 1,
+                  ResourceFormat::R32G32_FLOAT, RG32Layout);
+  FemeImageDescriptor RG32Heap[1] = {RG32Img};
+  Fn(RG32Heap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 3.0f);
+  EXPECT_FLOAT_EQ(Out[1], 4.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+
+  float RGB32Storage[1][1][3] = {{{1.0f, 2.0f, 3.0f}}};
+  FemeImageSubresourceLayout RGB32Layout;
+  FemeImageDescriptor RGB32Img =
+      makeImage2D(RGB32Storage, sizeof(RGB32Storage), 1, 1,
+                  ResourceFormat::R32G32B32_FLOAT, RGB32Layout);
+  FemeImageDescriptor RGB32Heap[1] = {RGB32Img};
+  Fn(RGB32Heap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 2.0f);
+  EXPECT_FLOAT_EQ(Out[2], 3.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesR8G8B8A8Snorm) {
+  // Little-endian bytes -127, 0, 127, -128 -> R=-1.0, G=0.0, B=1.0,
+  // A=-1.0 (clamped, per the Vulkan SNORM conversion this format's typed-
+  // buffer helper already implements).
+  uint8_t Bytes[4] = {(uint8_t)-127, 0, 127, (uint8_t)-128};
+  uint32_t Storage[1][1];
+  memcpy(Storage, Bytes, sizeof(Bytes));
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R8G8B8A8_SNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], -1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 1.0f);
+  EXPECT_FLOAT_EQ(Out[3], -1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesB8G8R8A8Unorm) {
+  // Memory order B, G, R, A -- must read back swizzled to logical R, G, B,
+  // A, the same swizzle `feme::graphics::unpackColor` applies for this
+  // format's render-target path. Little-endian bytes are B=0xFF, G=0x00,
+  // R=0x00, A=0xFF, so logical R=0, G=0, B=1.0, A=1.0.
+  uint32_t Storage[1][1] = {{0xFF0000FFu}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::B8G8R8A8_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f); // R
+  EXPECT_FLOAT_EQ(Out[1], 0.0f); // G
+  EXPECT_FLOAT_EQ(Out[2], 1.0f); // B
+  EXPECT_FLOAT_EQ(Out[3], 1.0f); // A
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesR10G10B10A2Unorm) {
+  // From the MSB down: 2 bits A, 10 bits B, 10 bits G, 10 bits R. Set
+  // R=1023 (max), G=0, B=0, A=3 (max) so each field is unambiguous.
+  uint32_t Storage[1][1] = {{(3u << 30) | 1023u}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R10G10B10A2_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesR11G11B10Float) {
+  // An all-zero-bits texel decodes to (0, 0, 0, 1.0): every field's
+  // exponent and mantissa are zero, i.e. positive zero, and this format
+  // carries no alpha channel (always reads 1.0).
+  uint32_t Storage[1][1] = {{0}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::R11G11B10_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Float) {
+  // binary16 1.0 is 0x3C00; -2.0 is 0xC000.
+  uint16_t Storage[1][1][4] = {{{0x3C00, 0x0000, 0xC000, 0x3C00}}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img =
+      makeImage2D(Storage, sizeof(Storage), 1, 1,
+                  ResourceFormat::R16G16B16A16_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], -2.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesA8Unorm) {
+  uint8_t Storage[1][1] = {{128}}; // ~0.502.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::A8_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_NEAR(Out[3], 128.0f / 255.0f, 1e-6f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesA1B5G5R5Unorm) {
+  // From the MSB down: 1 bit A, 5 bits B, 5 bits G, 5 bits R. Set R=31
+  // (max), G=0, B=0, A=1 (set) so each field is unambiguous.
+  uint16_t Storage[1][1] = {{(uint16_t)((1u << 15) | 31u)}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(
+      Storage, sizeof(Storage), 1, 1, ResourceFormat::A1B5G5R5_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
 TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {
   float Storage[1][1][4] = {{{1, 1, 1, 1}}};
   FemeImageSubresourceLayout Layout;
