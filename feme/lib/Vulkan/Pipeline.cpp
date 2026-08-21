@@ -431,6 +431,15 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
     std::shared_ptr<CachedPipelineArtifact> Artifact =
         Key ? Cache->lookup(*Key) : nullptr;
     if (!Artifact) {
+      // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
+      // BIT`: this pipeline missed the cache (or none was given), and the
+      // caller asked to be told rather than pay for a real compile here.
+      if (CreateInfo.flags &
+          VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) {
+        if (Result == VK_SUCCESS)
+          Result = VK_PIPELINE_COMPILE_REQUIRED;
+        continue;
+      }
       Expected<std::shared_ptr<CachedPipelineArtifact>> Compiled =
           compileComputePipeline(CreateInfo, DeviceInfo);
       if (!Compiled) {

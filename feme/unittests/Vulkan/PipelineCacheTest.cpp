@@ -380,4 +380,80 @@ TEST_F(PipelineCacheTest,
   vkDestroyPipelineCache(Device, Cache, nullptr);
 }
 
+/// Roadmap E9: `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT`
+/// with no cache at all -- there is never a hit to have, so creation must
+/// always report `VK_PIPELINE_COMPILE_REQUIRED` and leave the pipeline
+/// null rather than compile it for real.
+TEST_F(PipelineCacheTest, FailOnCompileRequiredWithNoCacheAlwaysFails) {
+  VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
+  CreateInfo.flags = VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+}
+
+/// Roadmap E9: with a cache, a first creation carrying
+/// `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` misses (the
+/// cache starts empty) and must fail without populating the cache; a
+/// second, ordinary creation actually compiles and populates it; a third
+/// creation with the bit set again now hits and must succeed, reusing the
+/// artifact the second creation inserted.
+TEST_F(PipelineCacheTest, FailOnCompileRequiredSucceedsOnceCachePopulated) {
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkComputePipelineCreateInfo NoCompileInfo = makeCreateInfo();
+  NoCompileInfo.flags =
+      VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+  VkPipeline Missed = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, Cache, 1, &NoCompileInfo, nullptr,
+                                     &Missed),
+            VK_PIPELINE_COMPILE_REQUIRED);
+  EXPECT_EQ(Missed, VK_NULL_HANDLE);
+
+  VkComputePipelineCreateInfo NormalInfo = makeCreateInfo();
+  VkPipeline Compiled = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, Cache, 1, &NormalInfo, nullptr,
+                                     &Compiled),
+            VK_SUCCESS);
+  ASSERT_NE(Compiled, VK_NULL_HANDLE);
+
+  VkPipeline Hit = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, Cache, 1, &NoCompileInfo, nullptr,
+                                     &Hit),
+            VK_SUCCESS);
+  ASSERT_NE(Hit, VK_NULL_HANDLE);
+  EXPECT_EQ(&fromHandle<ComputePipeline>(Compiled)->getStage(),
+            &fromHandle<ComputePipeline>(Hit)->getStage());
+
+  vkDestroyPipeline(Device, Compiled, nullptr);
+  vkDestroyPipeline(Device, Hit, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+}
+
+/// Roadmap E9: in a batch, a real compile failure elsewhere must still be
+/// reported (`VK_ERROR_INITIALIZATION_FAILED`) rather than masked by a
+/// sibling's `VK_PIPELINE_COMPILE_REQUIRED` -- the more severe result wins,
+/// per the extension's own spec.
+TEST_F(PipelineCacheTest, RealFailureOutranksPipelineCompileRequired) {
+  VkComputePipelineCreateInfo NoCompileInfo = makeCreateInfo();
+  NoCompileInfo.flags =
+      VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+
+  VkComputePipelineCreateInfo BadInfo = makeCreateInfo();
+  BadInfo.layout = VK_NULL_HANDLE; // Invalid: compilation always fails.
+
+  VkComputePipelineCreateInfo CreateInfos[] = {NoCompileInfo, BadInfo};
+  VkPipeline Pipelines[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 2, CreateInfos,
+                                     nullptr, Pipelines),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipelines[0], VK_NULL_HANDLE);
+  EXPECT_EQ(Pipelines[1], VK_NULL_HANDLE);
+}
+
 } // namespace
