@@ -49,9 +49,22 @@ protected:
   createBoundImage2D(uint32_t Width, uint32_t Height, VkImageUsageFlags Usage,
                      VkDeviceMemory &OutMemory, uint32_t MipLevels = 1,
                      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
+    return createBoundImage2DWithFormat(VK_FORMAT_R8G8B8A8_UNORM, Width,
+                                        Height, Usage, OutMemory, MipLevels,
+                                        Samples);
+  }
+
+  /// The same as `createBoundImage2D`, but for an arbitrary \p Format --
+  /// used by the roadmap E22 ASTC copy tests below, which need a
+  /// block-compressed format `createBoundImage2D` itself does not take.
+  VkImage createBoundImage2DWithFormat(
+      VkFormat Format, uint32_t Width, uint32_t Height,
+      VkImageUsageFlags Usage, VkDeviceMemory &OutMemory,
+      uint32_t MipLevels = 1,
+      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
     VkImageCreateInfo ImageInfo{};
     ImageInfo.imageType = VK_IMAGE_TYPE_2D;
-    ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ImageInfo.format = Format;
     ImageInfo.extent = {Width, Height, 1};
     ImageInfo.mipLevels = MipLevels;
     ImageInfo.arrayLayers = 1;
@@ -775,6 +788,141 @@ TEST_F(ImageTest, CopyMultisampleImagePreservesEverySample) {
 
   auto *DstObj = fromHandle<Image>(DstImg);
   EXPECT_EQ(SrcObj->sizeInBytes(), DstObj->sizeInBytes());
+  EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
+            0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
+/// Roadmap E22: `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` now
+/// address a block-compressed image a whole block at a time
+/// (`CommandBuffer.cpp`'s `copyBufferImageRegion`) instead of asserting on
+/// `texelPointer`. An 8x8 ASTC_4x4 image is a 2x2 block grid, 4 blocks
+/// (64 bytes) total; the buffer's own bytes are never decoded, only moved
+/// verbatim (real Vulkan's own "compressed copies reinterpret bits"
+/// rule -- see `runCopyImage`'s comment for the same rule applied to an
+/// image-to-image copy).
+TEST_F(ImageTest, CopyBufferToASTCImageAndBack) {
+  VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(
+      VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 8, 8,
+      VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      ImageMemory);
+  ASSERT_EQ(fromHandle<Image>(Img)->sizeInBytes(), 64u);
+
+  std::vector<uint8_t> SrcBlocks(64);
+  for (size_t I = 0; I != SrcBlocks.size(); ++I)
+    SrcBlocks[I] = static_cast<uint8_t>(I + 1);
+
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = SrcBlocks.size();
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VkBuffer SrcBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &SrcBuf), VK_SUCCESS);
+  VkMemoryAllocateInfo SrcAllocInfo{};
+  SrcAllocInfo.allocationSize = SrcBlocks.size();
+  SrcAllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &SrcAllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, SrcBuf, SrcMemory, 0), VK_SUCCESS);
+  std::memcpy(fromHandle<Buffer>(SrcBuf)->data(), SrcBlocks.data(),
+              SrcBlocks.size());
+
+  VkBufferCreateInfo DstBufferInfo{};
+  DstBufferInfo.size = SrcBlocks.size();
+  DstBufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+  VkBuffer DstBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &DstBufferInfo, nullptr, &DstBuf),
+            VK_SUCCESS);
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &SrcAllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, DstBuf, DstMemory, 0), VK_SUCCESS);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkBufferImageCopy Region{};
+  Region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.imageExtent = {8, 8, 1};
+  vkCmdCopyBufferToImage(CmdBuf, SrcBuf, Img,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  vkCmdCopyImageToBuffer(CmdBuf, Img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         DstBuf, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+  EXPECT_EQ(std::memcmp(fromHandle<Buffer>(DstBuf)->data(), SrcBlocks.data(),
+                        SrcBlocks.size()),
+            0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyBuffer(Device, SrcBuf, nullptr);
+  vkDestroyBuffer(Device, DstBuf, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, ImageMemory, nullptr);
+}
+
+/// Roadmap E22: `vkCmdCopyImage` between two block-compressed images now
+/// uses `bytesPerBlock`/`blockPointer` instead of `formatElementSize`/
+/// `texelPointer` (which are meaningless/asserting, respectively, for a
+/// block-compressed `Format`).
+TEST_F(ImageTest, CopyASTCImageToImage) {
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  VkImage SrcImg = createBoundImage2DWithFormat(
+      VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 4, 4, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+      SrcMemory);
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  VkImage DstImg = createBoundImage2DWithFormat(
+      VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 4, 4, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      DstMemory);
+
+  auto *SrcObj = fromHandle<Image>(SrcImg);
+  ASSERT_EQ(SrcObj->sizeInBytes(), 16u);
+  for (uint32_t I = 0; I != SrcObj->sizeInBytes(); ++I)
+    static_cast<uint8_t *>(SrcObj->data())[I] = static_cast<uint8_t>(I + 5);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {4, 4, 1};
+  vkCmdCopyImage(CmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DstImg,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  auto *DstObj = fromHandle<Image>(DstImg);
   EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
             0);
 

@@ -462,24 +462,50 @@ Error runUpdateBuffer(Buffer *Dst, VkDeviceSize Offset,
   return Error::success();
 }
 
-/// (V5) One `VkBufferImageCopy` region's texel-per-texel byte copy between
-/// \p Img's own packed subresource layout and a flat buffer region, in
-/// either direction (\p ToImage selects which). `bufferRowLength`/
-/// `bufferImageHeight` of 0 mean "tightly packed to the copy's own extent",
-/// per the specification. Copies row by row rather than as one contiguous
-/// `memcpy`, since the image's row/slice pitch need not match the buffer's
-/// (a non-zero `bufferRowLength`/`bufferImageHeight`, or simply a
-/// mip level narrower than level 0, both make them differ).
+/// (V5) One `VkBufferImageCopy` region's byte copy between \p Img's own
+/// packed subresource layout and a flat buffer region, in either direction
+/// (\p ToImage selects which). `bufferRowLength`/`bufferImageHeight` of 0
+/// mean "tightly packed to the copy's own extent", per the specification.
+/// Copies row by row rather than as one contiguous `memcpy`, since the
+/// image's row/slice pitch need not match the buffer's (a non-zero
+/// `bufferRowLength`/`bufferImageHeight`, or simply a mip level narrower
+/// than level 0, both make them differ).
+///
+/// Roadmap E22: for a block-compressed `Img`, a "row" is a row of whole
+/// blocks rather than of texels -- `UnitSize` (`bytesPerBlock`, Format.h)
+/// stands in for a texel's `formatElementSize` either way (the two are
+/// equal for a non-block-compressed format, so this generalizes rather
+/// than branches: `blockWidth`/`blockHeight` fall back to `{1, 1}`, making
+/// every `.../BlockWidth`-shaped ceiling division below a no-op), and
+/// `Img.blockPointer` addresses each row's first block instead of
+/// `texelPointer`'s first texel. Real Vulkan requires a block-compressed
+/// copy's own offset/extent to already be block-aligned
+/// (`VUID-vkCmdCopyBufferToImage-imageOffset-07738`'s family); this ICD
+/// does not re-validate that any more than it validates other VUIDs (see
+/// Image.h's file comment on that precedent), so the ceiling division here
+/// is exact for spec-conformant input and only "generously" rounds up an
+/// out-of-spec one rather than under-copying it.
 Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
                             VkDeviceSize BufferSize,
                             const VkBufferImageCopy &Region) {
-  uint32_t TexelSize = formatElementSize(Img.format());
+  bool Compressed = feme::cpu::isBlockCompressedFormat(Img.format());
+  uint32_t BlockW = blockWidth(Img.format());
+  uint32_t BlockH = blockHeight(Img.format());
+  uint32_t UnitSize = bytesPerBlock(Img.format());
   uint32_t RowLength = Region.bufferRowLength ? Region.bufferRowLength
                                               : Region.imageExtent.width;
   uint32_t ImageHeight = Region.bufferImageHeight ? Region.bufferImageHeight
                                                   : Region.imageExtent.height;
-  uint64_t BufferRowBytes = uint64_t(RowLength) * TexelSize;
-  uint64_t BufferSliceBytes = BufferRowBytes * ImageHeight;
+  uint32_t RowUnits = (RowLength + BlockW - 1) / BlockW;
+  uint32_t HeightUnits = (ImageHeight + BlockH - 1) / BlockH;
+  uint32_t ExtentWidthUnits = (Region.imageExtent.width + BlockW - 1) / BlockW;
+  uint32_t ExtentHeightUnits =
+      (Region.imageExtent.height + BlockH - 1) / BlockH;
+  uint32_t OffsetXUnits = uint32_t(Region.imageOffset.x) / BlockW;
+  uint32_t OffsetYUnits = uint32_t(Region.imageOffset.y) / BlockH;
+
+  uint64_t BufferRowBytes = uint64_t(RowUnits) * UnitSize;
+  uint64_t BufferSliceBytes = BufferRowBytes * HeightUnits;
   uint32_t MipLevel = Region.imageSubresource.mipLevel;
   if (MipLevel >= Img.mipLevels())
     return createStringError(inconvertibleErrorCode(),
@@ -490,19 +516,22 @@ Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
     uint32_t ArrayLayer = Region.imageSubresource.baseArrayLayer + Layer;
     for (uint32_t Z = 0; Z != Region.imageExtent.depth; ++Z) {
       uint64_t SliceIndex = uint64_t(Layer) * Region.imageExtent.depth + Z;
-      for (uint32_t Y = 0; Y != Region.imageExtent.height; ++Y) {
+      for (uint32_t Y = 0; Y != ExtentHeightUnits; ++Y) {
         uint64_t BufferOffset = Region.bufferOffset +
                                 SliceIndex * BufferSliceBytes +
                                 uint64_t(Y) * BufferRowBytes;
-        uint64_t RowBytes = uint64_t(Region.imageExtent.width) * TexelSize;
+        uint64_t RowBytes = uint64_t(ExtentWidthUnits) * UnitSize;
         if (BufferOffset + RowBytes > BufferSize)
           return createStringError(inconvertibleErrorCode(),
                                    "buffer/image copy region is out of "
                                    "range of its buffer");
         auto *BufferRow = static_cast<uint8_t *>(BufferBase) + BufferOffset;
-        void *ImageRow = Img.texelPointer(
-            MipLevel, ArrayLayer, Region.imageOffset.x,
-            Region.imageOffset.y + Y, Region.imageOffset.z + Z);
+        void *ImageRow =
+            Compressed
+                ? Img.blockPointer(MipLevel, ArrayLayer, OffsetXUnits,
+                                   OffsetYUnits + Y, Region.imageOffset.z + Z)
+                : Img.texelPointer(MipLevel, ArrayLayer, OffsetXUnits,
+                                   OffsetYUnits + Y, Region.imageOffset.z + Z);
         if (ToImage)
           std::memcpy(ImageRow, BufferRow, RowBytes);
         else
@@ -553,53 +582,90 @@ Error runCopyImageToBuffer(Image *Src, Buffer *Dst,
 }
 
 /// `vkCmdCopyImage`: copies each region's texels from \p Src to \p Dst.
-/// Both images must share the same texel size and sample count, matching
-/// real Vulkan's own "compatible formats" copy rule
+/// Both images must share the same texel/block size and sample count,
+/// matching real Vulkan's own "compatible formats" copy rule
 /// (`VUID-vkCmdCopyImage-srcImage-01548`): no value conversion takes place
 /// on either side, in this ICD or a real one -- `vkCmdCopyImage` reinterprets
 /// bits, it never converts them (that is what a shader's format-aware
 /// load/store or a blit does). Every sample of a multisample region is
 /// copied verbatim; there is no resolve here either (that is
 /// `vkCmdResolveImage`, not yet implemented -- V6+).
+///
+/// Roadmap E22: `UnitSize` (`bytesPerBlock`, Format.h) replaces
+/// `formatElementSize` so a block-compressed pair copies correctly (its
+/// `formatElementSize` is meaningless, always 0 -- see
+/// `isBlockCompressedFormat`'s comment); `blockWidth`/`blockHeight` convert
+/// \p Region's texel extent/offset to the block grid `blockPointer`
+/// addresses, falling back to `{1, 1}` (a no-op ceiling division) for a
+/// non-block-compressed format, so this one implementation now covers
+/// both families, exactly the pattern Format.h's own helpers are designed
+/// for.
 Error runCopyImage(Image *Src, Image *Dst,
                    llvm::ArrayRef<VkImageCopy> Regions) {
   if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
     return createStringError(inconvertibleErrorCode(),
                              "image copy source/destination is not bound");
-  uint32_t TexelSize = formatElementSize(Src->format());
-  if (TexelSize != formatElementSize(Dst->format()))
+  bool Compressed = feme::cpu::isBlockCompressedFormat(Src->format());
+  uint32_t UnitSize = bytesPerBlock(Src->format());
+  if (UnitSize != bytesPerBlock(Dst->format()))
     return createStringError(inconvertibleErrorCode(),
                              "vkCmdCopyImage between formats of differing "
-                             "texel size is not supported");
+                             "texel/block size is not supported");
   if (Src->sampleCount() != Dst->sampleCount())
     return createStringError(inconvertibleErrorCode(),
                              "vkCmdCopyImage between images of differing "
                              "sample counts is not supported");
+  uint32_t BlockW = blockWidth(Src->format());
+  uint32_t BlockH = blockHeight(Src->format());
   // Every sample of one texel is stored contiguously
   // (`FemeImageSubresourceLayout::SampleStride == TexelSize`, see Image.cpp's
   // `computeSubresourceLayouts`), so one row's `SampleCount` samples of a
   // region's texels are themselves one contiguous span -- a single
   // `memcpy` per row moves every sample, there is no need to loop over
-  // samples separately the way looping over `Y`/`Z`/array layer does.
+  // samples separately the way looping over `Y`/`Z`/array layer does. A
+  // block-compressed image's `SampleCount` is always 1 (never
+  // multisampled in real Vulkan), so this multiplies by 1 for one.
   uint32_t SampleCount = Src->sampleCount();
   for (const VkImageCopy &Region : Regions) {
     if (Region.srcSubresource.mipLevel >= Src->mipLevels() ||
         Region.dstSubresource.mipLevel >= Dst->mipLevels())
       return createStringError(inconvertibleErrorCode(),
                                "image copy mip level is out of range");
-    uint64_t RowBytes = uint64_t(Region.extent.width) * TexelSize * SampleCount;
+    uint32_t WidthUnits = (Region.extent.width + BlockW - 1) / BlockW;
+    uint32_t HeightUnits = (Region.extent.height + BlockH - 1) / BlockH;
+    uint32_t SrcOffsetXUnits = uint32_t(Region.srcOffset.x) / BlockW;
+    uint32_t SrcOffsetYUnits = uint32_t(Region.srcOffset.y) / BlockH;
+    uint32_t DstOffsetXUnits = uint32_t(Region.dstOffset.x) / BlockW;
+    uint32_t DstOffsetYUnits = uint32_t(Region.dstOffset.y) / BlockH;
+    uint64_t RowBytes = uint64_t(WidthUnits) * UnitSize * SampleCount;
     for (uint32_t Layer = 0; Layer != Region.srcSubresource.layerCount;
          ++Layer) {
       for (uint32_t Z = 0; Z != Region.extent.depth; ++Z) {
-        for (uint32_t Y = 0; Y != Region.extent.height; ++Y) {
-          void *SrcRow = Src->texelPointer(
-              Region.srcSubresource.mipLevel,
-              Region.srcSubresource.baseArrayLayer + Layer, Region.srcOffset.x,
-              Region.srcOffset.y + Y, Region.srcOffset.z + Z);
-          void *DstRow = Dst->texelPointer(
-              Region.dstSubresource.mipLevel,
-              Region.dstSubresource.baseArrayLayer + Layer, Region.dstOffset.x,
-              Region.dstOffset.y + Y, Region.dstOffset.z + Z);
+        for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
+          void *SrcRow =
+              Compressed
+                  ? Src->blockPointer(Region.srcSubresource.mipLevel,
+                                      Region.srcSubresource.baseArrayLayer +
+                                          Layer,
+                                      SrcOffsetXUnits, SrcOffsetYUnits + Y,
+                                      Region.srcOffset.z + Z)
+                  : Src->texelPointer(Region.srcSubresource.mipLevel,
+                                      Region.srcSubresource.baseArrayLayer +
+                                          Layer,
+                                      SrcOffsetXUnits, SrcOffsetYUnits + Y,
+                                      Region.srcOffset.z + Z);
+          void *DstRow =
+              Compressed
+                  ? Dst->blockPointer(Region.dstSubresource.mipLevel,
+                                      Region.dstSubresource.baseArrayLayer +
+                                          Layer,
+                                      DstOffsetXUnits, DstOffsetYUnits + Y,
+                                      Region.dstOffset.z + Z)
+                  : Dst->texelPointer(Region.dstSubresource.mipLevel,
+                                      Region.dstSubresource.baseArrayLayer +
+                                          Layer,
+                                      DstOffsetXUnits, DstOffsetYUnits + Y,
+                                      Region.dstOffset.z + Z);
           std::memcpy(DstRow, SrcRow, RowBytes);
         }
       }
