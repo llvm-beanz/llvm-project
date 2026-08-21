@@ -25742,3 +25742,205 @@ the three documents this change directly affects. Did not touch
 {h,cpp}` (no push-descriptor infrastructure added -- correctly out of this
 row's scope until F12), or `Pipeline.cpp` (the one real CTS `Fail` found is
 a separate, pre-existing gap, deliberately not fixed here -- see above).
+
+# Milestone E7: VK_EXT_subgroup_size_control / subgroupSizeControl + computeFullSubgroups
+
+## Reading the roadmap row and finding its own premise was wrong
+
+The row itself claimed `GroupSize.cpp` was "already the home of
+subgroup-size computation, per its name" and needed an override path added
+there. That is a name pun, not a fact: `GroupSize.cpp`'s own file comment
+(and `GroupSize.h`'s) describe it as resolving a shader's *workgroup* size
+(`LocalSize`/`LocalSizeId`/`BuiltIn WorkgroupSize` -- the `x,y,z` thread
+group dimensions), a completely different Vulkan concept from a dispatch's
+*subgroup* (wave) size. Grepping for `SubgroupSize`/`WaveSize` across
+`feme/lib/Vulkan` and `feme/lib/Target/CPU` before writing any code found
+where subgroup/wave size actually already lives:
+
+- `PhysicalDeviceInfo.cpp` computes one pinned device-wide default via
+  `feme::cpu::resolveWaveSize(std::nullopt, std::nullopt, HostVectorBits)`.
+- `feme::cpu::JITOptions::WaveSize` (0 = auto-resolve, nonzero = force) is
+  the existing per-compilation override knob `feme::cpu::CompiledStage::
+  create` already threads through `resolveWaveSize` again, this time with
+  a real `UserWaveSize` option.
+- `Pipeline.cpp`'s `compileComputePipeline` builds a `JITOptions` for every
+  compute pipeline but never set `WaveSize` at all (left at its default 0),
+  so every pipeline today silently falls back to the same host default
+  `PhysicalDeviceInfo.cpp` computed.
+
+That's the actual gap: `compileComputePipeline` needed to read a chained
+`VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and forward its value
+to `Opts.WaveSize`. `feme::cpu::resolveWaveSize` already validates exactly
+the "power of two in `[MinWaveSize, MaxWaveSize]`" rule this extension's own
+`minSubgroupSize`/`maxSubgroupSize` need to report, so no new validation
+logic was needed for that half -- reuse, not reinvention.
+
+## `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`
+
+Had to check the actual Vulkan semantics rather than guess: the flag
+promises every subgroup launched in the stage is fully populated (no
+masked-off lane). Web search on the exact VUID confirmed the concrete rule:
+the workgroup's local size in the *X* dimension specifically (not the total
+X*Y*Z invocation count) must be a multiple of the subgroup size in effect,
+whether that's the device default or an explicit `requiredSubgroupSize`
+override. `dEQP-VK.subgroups.size_control`'s own
+`testRequireFullSubgroups`/`testRequireSubgroupSize` confirm this
+independently: every `localSizesToTest` entry in both puts the (candidate)
+subgroup size in the X slot specifically when the full-subgroups flag is in
+play.
+
+Since this CPU target's SIMD-widened dispatch has no existing masking for a
+"partial final subgroup" (`SIMDize.cpp`'s widening pass assumes the group
+divides evenly, or doesn't -- either way there's no defined "these lanes are
+padding" story it exposes to Vulkan today), the only honest way to satisfy
+this flag's promise is to reject pipeline creation outright when the
+resolved subgroup size doesn't evenly divide the workgroup's local size X,
+rather than silently accept and let the promise go unverified. This is
+checked *after* `CompiledStage::create` succeeds, using
+`getWaveSize()`'s actual resolved value (not the requested one, which could
+be 0/"auto") -- important, since `ALLOW_VARYING_SUBGROUP_SIZE_BIT` (which
+this row does not need to give any special handling, since this ICD's wave
+size is a single fixed-per-pipeline value already) can combine with
+`REQUIRE_FULL_SUBGROUPS_BIT` and the CTS test fixtures exercise that
+combination.
+
+## Pipeline cache key: a bug tightly coupled to this change, fixed in the same commit
+
+While wiring the override through `compileComputePipeline`, noticed
+`vkCreateComputePipelines`'s pipeline-cache lookup path
+(`computePipelineCacheKey`) hashes the shader words, entry point,
+specialization overrides, and pipeline-layout shape -- but nothing from
+`VkPipelineShaderStageCreateInfo::pNext`/`flags`. Two creations from the
+*same* `VkComputePipelineCreateInfo` in every other respect but a different
+`requiredSubgroupSize` (or a different `REQUIRE_FULL_SUBGROUPS_BIT` setting)
+would have collided on the same cache key and returned whichever one
+compiled first, silently wrong. This is not a pre-existing bug I went
+looking for -- it's a direct, mechanical consequence of adding a new input
+`compileComputePipeline` consults without also teaching the cache key about
+it, so I fixed it in the same commit rather than filing it as a follow-up:
+added `RequiredSubgroupSize`/`StageCreateFlags` parameters to
+`computePipelineCacheKey`, folded both into the SHA-256 digest, and updated
+the one call site. Added a dedicated regression test
+(`PipelineCacheTest.DifferentRequiredSubgroupSizesAreNotSharedAcrossCache
+Entries`) proving two different `requiredSubgroupSize` values compile
+independent artifacts while an identical third creation still hits.
+
+## CTS run and its one real finding
+
+Ran `dEQP-VK.subgroups.size_control.*` (63 cases), `dEQP-VK.api.info.*`
+(10,484 cases), and the two dedicated `api.info.get_physical_device_
+properties2.{features,properties}.subgroup_size_control_*`/`api.info.
+vulkan1p3.*`/`api.device_init.create_device_unsupported_features.
+subgroup_size_control_features` cases individually, against a fresh
+assertions+ccache build (`ninja -C build check-feme` first, clean).
+
+- `generic.subgroup_size_properties`: `Pass`.
+- `vulkan1p3.*` (5 total): all `Pass` -- confirms the four newly-real
+  `VkPhysicalDeviceVulkan13Properties` fields agree with the new dedicated
+  `VkPhysicalDeviceSubgroupSizeControlProperties` struct rather than
+  repeating E2's own first-draft "aggregate disagrees with still-zero
+  dedicated struct" regression.
+- 37 non-compute-stage cases (`framebuffer`/`mesh`/`ray_tracing`/
+  `graphics.required_subgroup_size_*`): correctly `NotSupported` --
+  `requiredSubgroupSizeStages` truthfully advertises `VK_SHADER_STAGE_
+  COMPUTE_BIT` only.
+- 9 `compute.require_full_subgroups*` cases: correctly `NotSupported`
+  ("Device does not support subgroup ballot operations") -- a pre-existing,
+  unrelated gap (`SubgroupSupportedOperations` is `VK_SUBGROUP_FEATURE_
+  BASIC_BIT` only), not something this row's scope touches.
+- 8 `Fail` cases (`compute.allow_varying_subgroup_size*`,
+  `compute.required_subgroup_size_{max,min}`, and three
+  `graphics.allow_varying_subgroup_size*` that reach the identical failure
+  through an internal compute-pipeline probe): all fail identically on
+  `spirv.SpecConstantComposite` legalization. Root-caused before writing
+  this up rather than left as a mystery: these shaders declare their
+  workgroup size via `local_size_{x,y,z}_id` *and* read the
+  `gl_WorkGroupSize` builtin from the shader body to report the resolved
+  size back to the host -- a `BuiltIn WorkgroupSize`-decorated
+  `SpecConstantComposite` genuinely referenced by the entry point, not
+  merely present as `LocalSizeId`'s supporting operands the way roadmap
+  E4's `SpecConstantErasurePattern` already safely erases (that pattern
+  only drops the *scalar* `spirv.SpecConstant` operands, and only because
+  nothing in the entry point's body references them once `ExecutionModeId`
+  itself is erased -- `GroupSize.h`'s own file comment already flags a
+  spec constant genuinely read by the shader body as "a distinct, still-
+  unimplemented feature"). This is not a regression this row introduces:
+  before E7, every one of these 8 cases failed a clean `NotSupported
+  ("VK_EXT_subgroup_size_control is not supported")` before ever reaching
+  pipeline creation, so the underlying gap in `SPIRVToLLVMPatterns.cpp` was
+  simply unreached -- the same "advertising a real capability exposes a
+  previously-unreached gap instead of introducing one" shape D3/E4/E6
+  already established for this report. Recorded as an explicit follow-up in
+  "Roadmap E7: measured impact" (VulkanCTSReport.md) rather than attempted
+  here: a real `spirv.SpecConstantComposite` lowering (to an LLVM constant
+  vector, honoring `VkSpecializationInfo` overrides on its constituent
+  scalars) is new `SPIRVToLLVMPatterns.cpp` work orthogonal to this row's
+  `GroupSize.cpp`/`Pipeline.cpp`/`EntryPoints.cpp` scope, and belongs to
+  whichever future row first needs a shader body to read `gl_WorkGroupSize`
+  (or any other spec-constant-composite builtin) for real.
+
+Whether `VK_EXT_subgroup_size_control` needed adding to
+`getSupportedDeviceExtensions`/`vk_gen_entrypoints.py`'s
+`SUPPORTED_EXTENSIONS` was checked directly rather than assumed either way:
+`vktTestCase.cpp`'s `isDeviceFunctionalitySupported` treats this extension
+as a *core* device extension once `apiVersion >= 1.3` and checks
+`VkPhysicalDeviceVulkan13Features.subgroupSizeControl` instead of the
+enumerated extension-name list; every CTS call site found
+(`vktApiFeatureInfo.cpp`'s own `checkExtension(...) || contextSupports(1,
+3, 0)` pattern, `context.requireDeviceFunctionality(...)` in the subgroups
+and untyped-pointers test files) has the same "or core-promoted" fallback,
+unlike `VK_KHR_synchronization2`'s own multi-queue/custom-device cases
+(roadmap E3) that enable extensions by name regardless of `apiVersion`. No
+extension-list or `vk_gen_entrypoints.py` change was made, mirroring roadmap
+E4's `VK_KHR_maintenance4` precedent (an extension with no new commands of
+its own) rather than E3/E5/E6's.
+
+## Unit tests added
+
+- `PhysicalDeviceInfoTest.cpp`: updated the two tests whose pre-existing
+  assertions encoded the *old*, placeholder `0` values for
+  `minSubgroupSize`/`maxSubgroupSize`/`maxComputeWorkgroupSubgroups`/
+  `requiredSubgroupSizeStages`/`subgroupSizeControl`/`computeFullSubgroups`
+  (they now correctly fail until updated to the real values -- caught by
+  `check-feme` immediately after the first build), and added
+  `SubgroupSizeControlIsAdvertisedThroughItsOwnDedicatedFeatureAndProperty
+  Structs`, mirroring the existing `Maintenance4IsAdvertisedThrough...`
+  dedicated-struct-agreement test shape.
+- `PipelineTest.cpp`: four new tests --
+  `HonorsRequiredSubgroupSizeOverride` (the override actually changes
+  `getStage().getWaveSize()`), `RejectsInvalidRequiredSubgroupSize` (a
+  non-power-of-two value fails cleanly), and the
+  `RequireFullSubgroups{Rejects,Accepts}GroupSize{Not,}AMultipleOfSubgroup
+  Size` pair (both sides of the new validation).
+- `PipelineCacheTest.cpp`: one new test for the cache-key fix described
+  above.
+
+Full `check-feme` (assertions + ccache, matching this tree's existing
+`CMakeCache.txt` configuration) after every change: 1557/1558 passed (1
+pre-existing unsupported, 0 failed) -- the pre-E7 baseline (1552 total)
+plus this row's own 6 new test cases (1 `PhysicalDeviceInfoTest` +
+4 `PipelineTest` + 1 `PipelineCacheTest`).
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E7's row with a correction to its own file
+  attribution (the real change is in `Pipeline.cpp`/`PipelineCache.{h,cpp}`,
+  not `GroupSize.cpp`) and a CTS-finding summary.
+- `FeMeVulkanDesign.md`: extended the "Subgroup size" section (this row
+  fulfills the "per-pipeline wave sizes are only permissible if ... later
+  implements `VK_EXT_subgroup_size_control`" note it had deferred) and D1's
+  feature-inventory status paragraph (`subgroupSizeControl` moved from the
+  confirmed-unimplemented list to the genuinely-implemented one).
+- `VulkanCTSReport.md`: new "Roadmap E7: measured impact" section, in the
+  same format as E4/E5/E6's own sections.
+
+## Scope discipline
+
+Touched `PhysicalDeviceInfo.{h,cpp}`, `EntryPoints.cpp`, `Pipeline.cpp`,
+`PipelineCache.{h,cpp}`, their unit tests, and the three documents this
+change directly affects. Did not touch `GroupSize.{h,cpp}` (confirmed
+unnecessary -- see above), `SPIRVToLLVMPatterns.cpp` (the one real CTS
+`Fail` cluster found is a separate, pre-existing, out-of-scope gap,
+deliberately not fixed here), or `vk_gen_entrypoints.py`/
+`getSupportedDeviceExtensions` (confirmed unnecessary by checking every
+CTS call site, not merely assumed).
