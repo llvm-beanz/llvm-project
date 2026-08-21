@@ -215,7 +215,8 @@ TEST(FormatTest, TexelBufferFormatSupportMatchesRuntimeConversionScope) {
 
 TEST(FormatTest, IsBlockCompressedFormatDistinguishesASTC) {
   // Roadmap E20.
-  EXPECT_TRUE(feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_4x4_UNORM));
+  EXPECT_TRUE(
+      feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_4x4_UNORM));
   EXPECT_TRUE(
       feme::cpu::isBlockCompressedFormat(ResourceFormat::ASTC_12x12_SRGB));
   // Roadmap E21: the HDR-only variants are block-compressed too.
@@ -226,6 +227,101 @@ TEST(FormatTest, IsBlockCompressedFormatDistinguishesASTC) {
   EXPECT_FALSE(
       feme::cpu::isBlockCompressedFormat(ResourceFormat::R8G8B8A8_UNORM));
   EXPECT_FALSE(feme::cpu::isBlockCompressedFormat(ResourceFormat::Unknown));
+}
+
+TEST(FormatTest, FormatFeatureFlagsRejectsUnknownFormat) {
+  // Roadmap E24.
+  EXPECT_EQ(formatFeatureFlags(ResourceFormat::Unknown),
+            VkFormatFeatureFlags(0));
+}
+
+TEST(FormatTest, FormatFeatureFlagsEveryRecognizedFormatTransfers) {
+  // Roadmap E24: `vkCmdCopyImage`/`vkCmdCopyBufferToImage`/
+  // `vkCmdCopyImageToBuffer` never convert values and address every
+  // recognized format -- block-compressed included -- a whole texel/block
+  // at a time (roadmap E22), so every one is a legal transfer source and
+  // destination.
+  for (ResourceFormat Format :
+       {ResourceFormat::R32_FLOAT, ResourceFormat::R8G8B8A8_UNORM,
+        ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_UNORM,
+        ResourceFormat::ASTC_4x4_SFLOAT}) {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_DST_BIT);
+  }
+}
+
+TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
+  // Roadmap E24: only the three formats the CPU runtime's texel-unpack
+  // table (femeRTImageFormatElementSize, FeMeRuntimeCPU.c) implements, plus
+  // every ASTC LDR format (bridged to one of those three by
+  // materializeImageDescriptor, roadmap E23), can actually be sampled.
+  for (ResourceFormat Format :
+       {ResourceFormat::R32G32B32A32_FLOAT, ResourceFormat::R8G8B8A8_UNORM,
+        ResourceFormat::R8G8B8A8_UNORM_SRGB, ResourceFormat::ASTC_4x4_UNORM,
+        ResourceFormat::ASTC_12x12_SRGB}) {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT);
+  }
+  // An HDR ASTC format samples as all-zero (the RGBA8 bridge is LDR-only),
+  // so it is honestly left unset, same as every other unimplemented
+  // sampled format.
+  for (ResourceFormat Format :
+       {ResourceFormat::R8G8B8A8_SNORM, ResourceFormat::R16G16B16A16_FLOAT,
+        ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
+    EXPECT_FALSE(formatFeatureFlags(Format) &
+                 VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+  }
+}
+
+TEST(FormatTest, FormatFeatureFlagsNeverAdvertisesStorageImage) {
+  // Roadmap E24: no `feme.cpu.image.store.*` runtime helper exists for any
+  // format yet (see "V5: Images and sampling" in FeMeVulkanDesign.md), so
+  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is never set, even for a format
+  // every other feature bit is set for.
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R32G32B32A32_FLOAT) &
+               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
+               VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+}
+
+TEST(FormatTest, FormatFeatureFlagsAttachmentBitsMatchRenderPassSupport) {
+  // Roadmap E24: matches RenderPass.cpp's own
+  // `isSupportedColorAttachmentFormat`/`isSupportedDepthAttachmentFormat`/
+  // `isSupportedStencilAttachmentFormat`, which `vkCreateRenderPass` itself
+  // already gates on.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
+              VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
+              VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::D32_FLOAT) &
+              VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::S8_UINT) &
+              VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::R32G32B32A32_UINT) &
+               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::D32_FLOAT) &
+               VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
+}
+
+TEST(FormatTest, FormatFeatureFlagsBlitBitsMatchImageOpsRejections) {
+  // Roadmap E24: `ImageOps.cpp`'s `runBlitImage` rejects a
+  // block-compressed *destination* outright and an HDR ASTC *source*, but
+  // accepts an LDR ASTC source and every non-block-compressed format
+  // either way.
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::R8G8B8A8_UNORM) &
+              VK_FORMAT_FEATURE_BLIT_DST_BIT);
+  EXPECT_TRUE(formatFeatureFlags(ResourceFormat::ASTC_4x4_UNORM) &
+              VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::ASTC_4x4_UNORM) &
+               VK_FORMAT_FEATURE_BLIT_DST_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::ASTC_4x4_SFLOAT) &
+               VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+  EXPECT_FALSE(formatFeatureFlags(ResourceFormat::ASTC_4x4_SFLOAT) &
+               VK_FORMAT_FEATURE_BLIT_DST_BIT);
 }
 
 } // namespace

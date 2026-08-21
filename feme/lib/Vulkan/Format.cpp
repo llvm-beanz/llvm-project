@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Format.h"
+#include "RenderPass.h"
 
 #include "llvm/Support/ErrorHandling.h"
 
@@ -404,4 +405,56 @@ bool feme::vulkan::isTexelBufferFormatSupported(ResourceFormat Format) {
   default:
     return false;
   }
+}
+
+VkFormatFeatureFlags feme::vulkan::formatFeatureFlags(ResourceFormat Format) {
+  if (Format == ResourceFormat::Unknown)
+    return 0;
+
+  // A copy (`vkCmdCopyImage`/`vkCmdCopyBufferToImage`/
+  // `vkCmdCopyImageToBuffer`) never converts values, and roadmap E22 made
+  // every recognized format -- block-compressed included -- addressable a
+  // whole block/texel at a time by those paths, so every recognized format
+  // is a legal transfer source and destination.
+  VkFormatFeatureFlags Flags =
+      VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+
+  bool BlockCompressed = isBlockCompressedFormat(Format);
+  bool ASTCLdr = isASTCLdrFormat(Format);
+  // `ImageOps.cpp`'s `runBlitImage` rejects a block-compressed
+  // *destination* outright (no ASTC encoder exists to repack into one) and
+  // an HDR ASTC *source* (`decodeASTCBlock` is LDR-only), but accepts every
+  // other combination either way.
+  if (!BlockCompressed || ASTCLdr)
+    Flags |= VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+  if (!BlockCompressed)
+    Flags |= VK_FORMAT_FEATURE_BLIT_DST_BIT;
+
+  // Only the three formats the CPU runtime's texel-unpack table
+  // (`femeRTImageFormatElementSize`, feme/runtime/CPU/FeMeRuntimeCPU.c)
+  // implements can actually be sampled by a shader; every ASTC LDR format
+  // is sampled too, since `materializeImageDescriptor` (CommandBuffer.cpp)
+  // decodes one into `R8G8B8A8_UNORM`/`_UNORM_SRGB` before the runtime ever
+  // sees it (roadmap E23). An HDR ASTC format samples as all-zero (that
+  // bridge is LDR-only), so it is honestly left unset like every other
+  // unimplemented format.
+  if (Format == ResourceFormat::R32G32B32A32_FLOAT ||
+      Format == ResourceFormat::R8G8B8A8_UNORM ||
+      Format == ResourceFormat::R8G8B8A8_UNORM_SRGB || ASTCLdr)
+    Flags |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+
+  // `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is deliberately never set: no
+  // format has a `feme.cpu.image.store.*` runtime helper yet (see "V5:
+  // Images and sampling" in FeMeVulkanDesign.md), so a `STORAGE_IMAGE`
+  // binding is materialized but never actually writable by a shader.
+
+  if (isSupportedColorAttachmentFormat(Format))
+    Flags |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+             VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+  if (isSupportedDepthAttachmentFormat(Format) ||
+      isSupportedStencilAttachmentFormat(Format))
+    Flags |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+
+  return Flags;
 }

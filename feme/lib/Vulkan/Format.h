@@ -90,6 +90,25 @@ uint32_t bytesPerBlock(feme::cpu::ResourceFormat Format);
 /// misconverting it.
 bool isTexelBufferFormatSupported(feme::cpu::ResourceFormat Format);
 
+/// The `VkFormatFeatureFlags` this ICD actually supports for \p Format --
+/// backs `vkGetPhysicalDeviceFormatProperties`/
+/// `vkGetPhysicalDeviceImageFormatProperties` (EntryPoints.cpp, roadmap
+/// E24). Every bit reported here traces to a real, already-implemented
+/// code path rather than a blanket guess: `isSupportedColorAttachmentFormat`/
+/// `isSupportedDepthAttachmentFormat`/`isSupportedStencilAttachmentFormat`
+/// (RenderPass.h) for the two attachment bits, the CPU runtime's own
+/// three-format sampling table (`femeRTImageFormatElementSize`,
+/// feme/runtime/CPU/FeMeRuntimeCPU.c) -- plus the ASTC LDR bridge
+/// `materializeImageDescriptor` (CommandBuffer.cpp) builds on top of it --
+/// for the two sampled-image bits, and `ImageOps.cpp`'s `runBlitImage`
+/// block-compressed-destination/HDR-ASTC-source rejections for the two
+/// blit bits. `VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT` is never set: no
+/// `feme.cpu.image.store.*` runtime helper exists yet for any format (see
+/// "V5: Images and sampling" in FeMeVulkanDesign.md), so advertising it
+/// would claim a capability no shader could actually observe. Returns 0 for
+/// a format `mapVkFormat` does not recognize (`ResourceFormat::Unknown`).
+VkFormatFeatureFlags formatFeatureFlags(feme::cpu::ResourceFormat Format);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_FORMAT_H
