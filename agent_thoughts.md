@@ -26153,3 +26153,252 @@ entry needed" precedent E4/E7 already established), and did not attempt to
 retrofit any real vectorized/SIMD-accelerated codegen path for the dot
 product ops -- that would contradict this row's own truthful-`VK_FALSE`
 premise, not fulfill it.
+
+# Milestone E9: VK_EXT_pipeline_creation_cache_control / pipelineCreationCacheControl
+
+## Reading the roadmap row
+
+E9's own text was unusually explicit about scope: "flag-only additions to
+`GraphicsPipeline.cpp`/`Pipeline.cpp`'s existing creation path and
+`PipelineCache.{h,cpp}`'s existing cache object -- no new object model,
+purely accepting and honoring two new bits." Two bits, two call sites
+(compute and graphics creation) plus the cache object itself, and (per the
+established E-series pattern) the aggregate/dedicated feature-struct
+wiring and extension advertisement that every prior row in this series
+also needed. I split the work into four small, independently-testable
+commits along exactly those lines: the cache object's own change first
+(nothing else depends on anything else, so it made sense to land the
+piece with the widest blast radius -- touching the constructor signature
+-- before the two call sites that consume it), then compute, then
+graphics, then advertisement.
+
+## VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT: what "honoring" actually means
+
+This bit was the more interesting of the two, because "accept and honor"
+undersells how little the *existing* code did before this row: there was
+no locking anywhere in `PipelineCache` at all. That's not a pre-existing
+bug this row needs to fix incidentally -- it's the exact gap this
+extension's bit is *about*. I looked up the actual Vulkan host-
+synchronization rules rather than assuming, because the two plausible
+readings of "externally synchronized" point in opposite directions:
+
+- Naive reading: the bit means the app promises to synchronize, so
+  *without* it the ICD is off the hook and doesn't need to do anything.
+- Correct reading (confirmed via the spec's own host-sync tables): a
+  `VkPipelineCache` used as `vkCreateComputePipelines`/
+  `vkCreateGraphicsPipelines`'s `pipelineCache` parameter is *not* one of
+  those commands' externally-synchronized parameters by default -- the
+  ICD must already tolerate concurrent multi-threaded use unless the app
+  opts out by setting this bit at creation. It's the reverse of the naive
+  reading: the bit *removes* a guarantee the ICD would otherwise have to
+  provide, rather than *adding* a requirement on the app that was already
+  there.
+
+Getting this backwards would have meant either (a) adding a mutex that's
+now redundant with an app-side lock the app was never asked to hold, or
+(b) leaving the default (no-bit) case still unsynchronized, which is
+exactly the pre-existing gap the extension exists to close. I fetched the
+actual `vkCreateGraphicsPipelines`/`vkMergePipelineCaches` host-
+synchronization semantics via two separate web searches before writing
+any code, specifically to nail down that `vkMergePipelineCaches`'
+`dstCache`/`pSrcCaches` and `vkGetPipelineCacheData`'s `pipelineCache`
+are, unlike the two pipeline-creation commands, *always* host-
+synchronized regardless of this bit -- a asymmetry I would not have
+guessed from the extension's name alone, and one that matters concretely:
+it means `merge`/`keys` need no lock at all, while `lookup`/`insert`/
+`lookupGraphics`/`insertGraphics` do (conditionally). Getting this
+wrong in the other direction (locking `merge` too) would have introduced
+a real deadlock risk for no benefit: `vkMergePipelineCaches(A, {B})` and
+a concurrent `vkMergePipelineCaches(B, {A})` locking two different
+`PipelineCache` mutexes in opposite orders is a classic lock-ordering
+bug, and since the base spec already prohibits the concurrency that would
+trigger it, adding the lock would only have added risk with no
+correctness upside. I wrote it, caught the ordering issue while
+reasoning through the diff, then re-checked the *spec* rather than just
+picking a fixed lock order -- the spec-driven fix (no lock, since
+`merge`/`keys`'s parameters are always host-synchronized already) is both
+simpler and more clearly correct than a two-mutex-with-address-ordering
+scheme would have been.
+
+The unit test for this (`ConcurrentCreationsAgainstOneCacheAreThreadSafeByDefault`)
+is a smoke test, not a proof: eight threads racing
+`vkCreateComputePipelines` against one cache, asserting every call
+succeeds and returns a non-null pipeline. It would not, on its own, catch
+every possible race (that needs a thread sanitizer build this repo does
+not currently have wired into `check-feme`), but it does exercise the
+exact code path a regression would need to break, and it is a real
+regression test in the sense that it fails immediately if the locking is
+ever removed and re-run under `-fsanitize=thread` (verified manually,
+outside `check-feme`'s own build, since TSan is not this project's default
+build config and adding it is out of this row's own scope).
+
+## VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT: the graphics-path signature change
+
+The compute path already computed its cache key and looked up the cache
+*before* calling into the (separate, `namespace {}`-local) compile
+function, so adding the "don't compile, report compile-required" check
+was a one-line insertion at the existing miss branch. The graphics path
+is structured differently: `compileGraphicsPipeline` does fixed-function
+translation, key computation, *and* the cache lookup all inside one
+function, returning `Expected<GraphicsPipelineState>` to its one caller.
+A `llvm::Error` alone can't distinguish "compile skipped by request" from
+"compile failed for real" without inventing a new `ErrorInfo` subclass --
+and this codebase's existing convention throughout `CommandBuffer.cpp`/
+`GraphicsPipeline.cpp`/etc. is uniformly `createStringError
+(inconvertibleErrorCode(), ...)`, with no custom `ErrorInfo` type
+anywhere I could find (checked via grep across `lib/Vulkan` before
+deciding). Introducing one for a single call site would have been a
+heavier, less-consistent change than the alternative I picked: change the
+return type to `Expected<std::optional<GraphicsPipelineState>>`, where
+`std::nullopt` means "no error, but nothing to install either" and an
+`Error` still means a real failure. This keeps every existing error path
+completely unchanged and adds exactly one new, explicit branch at the one
+call site. `vkCreateGraphicsPipelines` then mirrors the compute path's own
+"a more severe result never gets overwritten by
+`VK_PIPELINE_COMPILE_REQUIRED`" precedence rule, which I wrote as `if
+(Result == VK_SUCCESS) Result = VK_PIPELINE_COMPILE_REQUIRED;` -- an
+unconditional-overwrite `Result = VK_ERROR_INITIALIZATION_FAILED;` for
+real failures already existed and needed no change, since it always
+overwrites regardless of what came before, which is exactly the "more
+severe wins" rule the spec asks for.
+
+Test coverage mirrors the compute side almost exactly (no-cache-always-
+fails, cache-miss-then-populate-then-hit, real-failure-outranks-compile-
+required for compute; the no-cache and populate-then-hit cases for
+graphics, skipping the real-failure-outranks case there since it would
+just be re-testing the same `Result`-precedence logic already proven at
+the compute call site with a different, more expensive-to-set-up
+pipeline shape).
+
+## Feature/extension advertisement: same pattern as E3/E5/E6/E7/E8, one deliberate scope boundary
+
+Wiring `pipelineCreationCacheControl` into the aggregate
+`VkPhysicalDeviceVulkan13Features` case, adding the dedicated
+`VkPhysicalDevicePipelineCreationCacheControlFeatures` struct case, and
+adding `VK_EXT_pipeline_creation_cache_control` to
+`getSupportedDeviceExtensions` followed the exact template E7/E8 already
+established (aggregate bit flips from `VK_FALSE` to `VK_TRUE` with a
+comment pointing at the dedicated struct case; the dedicated struct case
+itself is new; the extension name is added with a comment explaining
+*why* it needs listing even though this extension adds no new commands
+-- CTS enables extensions by name via `requireDeviceFunctionality`
+regardless of the negotiated `apiVersion`, the same mechanism D1/E3/E5/E6
+already found).
+
+When I regenerated `Vulkan14FeatureInventory.md` via
+`vk_gen_feature_inventory.py`, I diffed the freshly generated table
+against the checked-in one *before* overwriting it, specifically to
+check whether regenerating would silently "fix" (or disagree with) any
+of the rows for E3/E5/E6/E7's already-implemented bits (`synchronization2`,
+`maintenance5`, `maintenance6`, `subgroupSizeControl`), which I noticed
+were *not* actually present in `AdvertisedPromotedFeatures.txt` despite
+being genuinely implemented and advertised per `EntryPoints.cpp` and each
+row's own roadmap closing note. That's real, pre-existing drift in a
+tracking file from an earlier row -- not something E9 caused or need
+fix. The diff came back showing *only* the two rows I actually touched
+(`pipelineCreationCacheControl`/`VK_EXT_pipeline_creation_cache_control`)
+changed, confirming the regeneration was safe to apply without
+incidentally papering over or amplifying that pre-existing gap. I left it
+alone rather than "fixing while I'm in here," per this project's own
+"don't fix unrelated pre-existing issues" rule -- it's a separate,
+nameable cleanup (updating four tracking-file entries) that deserves its
+own row/commit with its own CTS check, not a drive-by inside E9's diff.
+
+I found the correct vk.xml to run the generator against by trial: the
+system-installed `/usr/share/vulkan/registry/vk.xml` on this host predates
+`VkPhysicalDeviceVulkan14Features` and the script failed outright;
+`VK-GL-CTS/external/vulkan-docs/src/xml/vk.xml` (the copy CTS itself
+vendors) is current enough and is what I used instead.
+
+## CTS run: confirms the code path works, finds two unrelated gaps
+
+Ran the ICD against `dEQP-VK.pipeline.monolithic.creation_cache_control.*`
+(18 cases; the pre-existing `groups.txt`-driven full-suite recipe was
+overkill for a single targeted row, so I ran this one group directly,
+matching the E3/E5-E8 precedent of a scoped run over the full 25-minute
+sweep) plus the two `api.info.*` consistency cases E1-E8 already used as
+the standard "did the aggregate/dedicated structs actually agree" check.
+The group name took one wrong guess to find --
+`dEQP-VK.pipeline.creation_cache_control.*` and
+`dEQP-VK.pipeline.pipeline_creation_cache_control.*` both silently
+matched zero cases (0/0 totals, not an error) before I found the actual
+name (`monolithic.creation_cache_control`) by grepping the CTS mustpass
+list directly rather than guessing again.
+
+Result: 1 `Pass`
+(`compute_pipelines.single_pipeline_no_compile`, the one case that
+actually exercises this row's own bit in isolation -- one pipeline, no
+batch, no derivative, just "cache miss + FAIL_ON_PIPELINE_COMPILE_
+REQUIRED_BIT should report VK_PIPELINE_COMPILE_REQUIRED"), 17
+`InternalError`. I did not stop at "83% still fail" without attributing
+why: reran the two representative failing cases with
+`FEME_VULKAN_LOG_CREATION_ERRORS=1` (an existing opt-in env var this ICD
+already had for exactly this purpose) to get the real underlying error
+string rather than deqp-vk's own generic wrapper message. That surfaced
+two distinct, pre-existing causes, neither one this row's own two bits:
+
+1. Every other `compute_pipelines.*` case shares one GLSL compute shader
+   that indexes its output buffer by `gl_GlobalInvocationID.x`, which hits
+   a `'llvm.getelementptr' op operand #0 ... got 'vector<3xi32>'` error in
+   this ICD's SIMD-widened lowering -- the same class of "resource handle
+   the CPU target cannot normalize" gap E6's own measured-impact section
+   already documented (73 of 77 failures there). Confirmed this reproduces
+   identically regardless of whether any pipeline in the batch carries
+   `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT` -- the
+   failing cases differ from the one passing case only in batch size and
+   derivative-pipeline usage, never in this row's own flag logic, which is
+   exactly what "unrelated" needs to mean before writing it down as such.
+2. Every `graphics_pipelines.*` case, including `single_pipeline_no_compile`
+   itself, fails before ever reaching this row's own check, because
+   `compileGraphicsPipeline` has always required both a vertex and a
+   fragment stage (a pre-existing, load-bearing structural assumption of
+   the monolithic graphics pipeline path, unrelated to cache control), and
+   this CTS group's own graphics pipelines are deliberately minimal
+   (built to exercise cache bookkeeping only, not to render a real
+   triangle).
+
+Both are genuine, attributable, out-of-scope gaps rather than hand-waved
+"pre-existing issues" -- I confirmed the exact error text and reasoned
+about why the row's own two bits could not be the cause before writing
+either bullet in VulkanCTSReport.md's new "Roadmap E9: measured impact"
+section, following the same evidentiary bar D3/E2/E4 already set for
+attributing a failure bucket instead of guessing.
+
+## Documentation updates
+
+- `Roadmap.md`: struck through E9's row; unlike E4/E5/E7, its own premise
+  needed no correction -- the two bits really were flag-only additions,
+  confirmed rather than revised by the implementation and the CTS run.
+- `Vulkan14FeatureInventory.md`: regenerated as described above.
+- `FeMeVulkanDesign.md`: extended the "Limits and features" status
+  paragraph's implemented-bits list, and added a new status paragraph to
+  the existing "Pipeline Cache" section (V4's own home) describing both
+  bits' behavior and the locking asymmetry between the two pipeline-
+  creation commands and `merge`/`keys`.
+- `VulkanCTSReport.md`: new "Roadmap E9: measured impact" section.
+- `PhysicalDeviceInfoTest.cpp`/`DrawTest.cpp`: updated the existing
+  aggregate-struct and extension-count assertions (`Count == 6` ->
+  `Count == 7`) rather than adding a parallel, redundant test -- the
+  existing tests already existed for exactly this purpose (E3/E5/E6/E8
+  each updated the same two tests in turn).
+
+## Scope discipline
+
+Touched `Pipeline.cpp`, `GraphicsPipeline.cpp`, `PipelineCache.{h,cpp}`,
+`EntryPoints.cpp`, `PhysicalDeviceInfo.cpp`, their unit tests, the two
+tracking `.txt` files, and the four documents this change directly
+affects -- exactly the file list the roadmap row itself named, plus the
+feature-inventory tracking files and design-doc status notes every prior
+E-row also touched. Did not touch `vk_gen_entrypoints.py`/
+`SUPPORTED_EXTENSIONS` (this extension adds no new commands at all --
+confirmed via `vk.xml`, the same "no entrypoints" precedent E4/E7
+established), did not add a `VkPipelineCreateFlags2CreateInfo`/64-bit
+flags-chain path (`VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
+BIT`'s value fits within the first 32 bits, so the existing 32-bit
+`VkPipelineCreateFlags` field already carries it -- verified against
+`vulkan_core.h` before assuming otherwise), and did not attempt to fix
+the two unrelated CTS gaps the targeted run surfaced (the SIMD-lowering
+`getelementptr` issue and the single-stage graphics pipeline
+restriction) -- both are real, but neither is this row's own two bits,
+and fixing either would be its own separate roadmap row with its own
+design discussion, not a drive-by inside E9's diff.
