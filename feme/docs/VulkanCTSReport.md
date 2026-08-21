@@ -1601,6 +1601,57 @@ all failed `NotSupported ("VK_KHR_maintenance5 is not supported")` before
 this fix and pass (or, for the `draw.*` row, reach real pipeline-creation
 failure instead of an early `NotSupported`) after it.
 
+## Roadmap E6: measured impact
+
+Roadmap E6 (`VK_KHR_maintenance6`/`maintenance6`) adds `vkCmdBindDescriptorSets2`/
+`vkCmdPushConstants2` (`CommandBuffer.cpp`), each a pure argument-shape wrapper
+around `vkCmdBindDescriptorSets`/`vkCmdPushConstants`'s own recording --
+`VkBindDescriptorSetsInfo`'s `stageFlags` and `VkPushConstantsInfo`'s
+`layout`/`stageFlags` need no translation, since this model already stores one
+shared set of bound descriptor sets/push-constant bytes across every pipeline
+bind point. `vkCmdPushDescriptorSet2` is deliberately left unimplemented,
+per this row's own fallback clause, since F12's `pushDescriptor` groundwork
+has not landed. `maintenance6` now reads `VK_TRUE` from both the aggregate
+`VkPhysicalDeviceVulkan14Features` struct and a new dedicated
+`VkPhysicalDeviceMaintenance6Features` struct; `maxCombinedImageSampler
+DescriptorCount` is a real `1` (this ICD supports no multi-planar/YCbCr
+samplers, so a combined image sampler descriptor always consumes exactly one
+slot) in both the aggregate `VkPhysicalDeviceVulkan14Properties` case and a
+new dedicated `VkPhysicalDeviceMaintenance6Properties` case.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.maintenance6_features` | `Pass` |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.maintenance6_features` | `Pass` |
+| `dEQP-VK.api.maintenance6_check.maintenance6_properties` | `Pass` |
+| `dEQP-VK.api.info.vulkan1p3.*` (5 total: `feature_bits_influence`/`feature_extensions_consistency`/`features`/`properties`/`property_extensions_consistency`) | 5 `Pass`, confirming `maxCombinedImageSamplerDescriptorCount`'s new nonzero value does not repeat E2's own first-draft regression -- this field is 1.4-only, and `vulkan1p4.*`'s own consistency case never runs in this environment (see below), so nothing cross-checks it against the dedicated struct yet regardless; landing both the aggregate and dedicated structs in the same commit means they can never disagree once that case does run |
+| `dEQP-VK.api.info.vulkan1p4.*` (5 total) | 5 `NotSupported ("At least Vulkan 1.4 required to run test")` -- a pre-existing, E2-documented environment gap ("Roadmap E2: measured impact" above): `Context::contextSupports(1, 4, 0)` returns false here even though this ICD's own `vkGetPhysicalDeviceProperties` truthfully reports `apiVersion == VK_API_VERSION_1_4`; `deqp-vk`'s own `usedApiVersion` negotiation, not this ICD, is the limiting factor, and out of this row's scope to chase further |
+| `dEQP-VK.api.command_buffers.secondary_push_descriptor_set_2` | `NotSupported ("VK_KHR_push_descriptor is not supported")` -- a clean, correct rejection: `vkCmdPushDescriptorSet2` is unimplemented this row, and the test's own `secCmdExtraCaseSupportCheck` requires `VK_KHR_push_descriptor` (deferred to F12) before attempting it |
+| `dEQP-VK.api.command_buffers.secondary_push_constants_2` | `Fail (vk.createComputePipelines(...): VK_ERROR_INITIALIZATION_FAILED)` |
+| `dEQP-VK.api.command_buffers.*` (131 total) | 38 `Pass`, 77 `Fail`, 16 `NotSupported` |
+
+**The one `Fail` this row's own scope touches, root-caused before closing
+the row.** A temporary debug print at `Pipeline.cpp`'s `compileComputePipeline`
+error path (reverted before landing) showed `secondary_push_constants_2`'s
+real failure: `"unsupported raised operation: 'llvm.spv.resource.
+handlefrombinding...' is a register-bound resource handle the FeMe CPU target
+cannot normalize into a heap access or the root-constant block"`. The test's
+own compute shader (`vktApiCommandBuffersTests.cpp`) declares its output as
+`layout (set=0, binding=0, std430) buffer OutBlock { vec4 value; }` -- a
+storage buffer block with a single, non-array `vec4` field, not the
+`rtarray`/fixed-array shape every other passing storage-buffer shader in this
+report uses. This is not a regression `vkCmdPushConstants2` introduces: the
+identical `VK_ERROR_INITIALIZATION_FAILED` at the identical call site accounts
+for 73 of this same CTS group's 77 failures, including all 64
+`indirect_compute_dispatch_offsets_*` cases (confirmed pre-existing and
+unrelated to any command this row adds, by inspection of their own,
+E6-independent shader sources) -- a pre-existing, orthogonal gap in this
+compiler's resource-handle normalization for a non-array-typed storage
+buffer, the same "stacked blockers" pattern C1/C2/E5 already established for
+this report, out of this row's own scope to fix.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
