@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "CommandBuffer.h"
+#include "ASTCDecode.h"
 #include "Buffer.h"
 #include "Descriptor.h"
 #include "Format.h"
@@ -180,7 +181,123 @@ struct MaterializedBoundResources {
   std::vector<feme::cpu::BoundImageBinding> ImageBindings;
   std::vector<std::vector<feme::cpu::FemeSamplerDescriptor>> SamplerStorage;
   std::vector<feme::cpu::BoundSamplerBinding> SamplerBindings;
+
+  /// (Roadmap E23) Per-texel RGBA8 storage `materializeImageDescriptor`
+  /// decodes an ASTC LDR-format image into, since the CPU runtime
+  /// (feme/runtime/CPU/FeMeRuntimeCPU.c) has no block-compressed case of
+  /// its own. Element order has no relationship to `ImageStorage`'s; a
+  /// descriptor's `Dst.Data` simply points into whichever entry here
+  /// backs it. `std::vector`'s move (on this outer vector's own growth)
+  /// never invalidates a pointer into an inner vector's buffer, so an
+  /// already-materialized descriptor stays valid regardless of how many
+  /// more entries are appended afterward.
+  std::vector<std::vector<uint8_t>> DecodedImageStorage;
+  std::vector<std::vector<feme::cpu::FemeImageSubresourceLayout>>
+      DecodedImageLayoutStorage;
 };
+
+/// Whether \p Format is one of the 14 `_SRGB` ASTC LDR footprints rather
+/// than its `_UNORM` counterpart -- decides which already-supported
+/// `feme::cpu::ResourceFormat` `decodeASTCImageForSampling` below reports
+/// its decoded, per-texel RGBA8 output as (`R8G8B8A8_UNORM_SRGB` applies
+/// the sRGB decode curve at sample time the same way it already does for a
+/// real `R8G8B8A8_UNORM_SRGB` image; `R8G8B8A8_UNORM` does not).
+bool isASTCSRGBFormat(feme::cpu::ResourceFormat Format) {
+  switch (Format) {
+  case feme::cpu::ResourceFormat::ASTC_4x4_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_5x4_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_5x5_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_6x5_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_6x6_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_8x5_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_8x6_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_8x8_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_10x5_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_10x6_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_10x8_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_10x10_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_12x10_SRGB:
+  case feme::cpu::ResourceFormat::ASTC_12x12_SRGB:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/// The per-texel RGBA8 image a `decodeASTCImageForSampling` call produces:
+/// decoded texel bytes plus the per-texel `FemeImageSubresourceLayout`
+/// table describing them, both owned by whichever
+/// `MaterializedBoundResources` storage vector they get moved into.
+struct DecodedASTCImage {
+  std::vector<uint8_t> Texels;
+  std::vector<feme::cpu::FemeImageSubresourceLayout> MipLayouts;
+};
+
+/// (Roadmap E23) Decodes mip levels `[BaseMip, BaseMip + LevelCount)`,
+/// array layer 0 only (matching `materializeImageDescriptor`'s own
+/// Texture2D-only, layer-0-only scope), of ASTC LDR-format image \p Img
+/// into a per-texel RGBA8 buffer `feme::vulkan::decodeASTCBlock` produces
+/// one block at a time -- the "bridge the image-descriptor-materialization
+/// path back into ASTCDecode.h" option this row's own roadmap text
+/// describes, chosen over porting a second decoder into the CPU runtime
+/// (feme/runtime/CPU/FeMeRuntimeCPU.c) since that runtime's existing
+/// `R8G8B8A8_UNORM`/`_UNORM_SRGB` unpack path already reads exactly this
+/// shape of data unmodified.
+DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
+                                            uint32_t LevelCount) {
+  DecodedASTCImage Result;
+  uint32_t BlockW = blockWidth(Img->format());
+  uint32_t BlockH = blockHeight(Img->format());
+
+  // First pass: lay out every level's offset/pitch so `Texels` can be
+  // allocated once, rather than grown level by level.
+  std::vector<std::pair<uint32_t, uint32_t>> LevelExtents(LevelCount);
+  Result.MipLayouts.resize(LevelCount);
+  uint64_t Offset = 0;
+  for (uint32_t L = 0; L != LevelCount; ++L) {
+    uint32_t Level = BaseMip + L;
+    uint32_t W = std::max(1u, Img->width() >> Level);
+    uint32_t H = std::max(1u, Img->height() >> Level);
+    LevelExtents[L] = {W, H};
+    uint64_t RowPitch = uint64_t(W) * 4;
+    uint64_t SlicePitch = RowPitch * H;
+    Result.MipLayouts[L] = {Offset, RowPitch, SlicePitch, SlicePitch};
+    Offset += SlicePitch;
+  }
+  Result.Texels.resize(Offset);
+
+  // Reused across every block decoded below, rather than reallocated per
+  // block -- the same pattern `ImageOps.cpp`'s `runBlitImage` uses for its
+  // own `decodeASTCBlock` calls.
+  std::vector<uint8_t> BlockBuf(size_t(BlockW) * BlockH * 4);
+  for (uint32_t L = 0; L != LevelCount; ++L) {
+    auto [W, H] = LevelExtents[L];
+    uint32_t BlocksX = (W + BlockW - 1) / BlockW;
+    uint32_t BlocksY = (H + BlockH - 1) / BlockH;
+    uint8_t *LevelBase = Result.Texels.data() + Result.MipLayouts[L].Offset;
+    uint64_t RowPitch = Result.MipLayouts[L].RowPitch;
+    for (uint32_t BY = 0; BY != BlocksY; ++BY) {
+      for (uint32_t BX = 0; BX != BlocksX; ++BX) {
+        const auto *Block = static_cast<const uint8_t *>(
+            Img->blockPointer(BaseMip + L, /*ArrayLayer=*/0, BX, BY, /*Z=*/0));
+        decodeASTCBlock(Block, BlockW, BlockH, BlockBuf.data());
+        // A non-integer-multiple mip extent's rightmost/bottommost block
+        // only partially covers the image -- copy just the in-bounds
+        // rows/columns of it, per the specification's own "a block may
+        // extend past the image edge" allowance.
+        uint32_t CopyW = std::min(BlockW, W - BX * BlockW);
+        uint32_t CopyH = std::min(BlockH, H - BY * BlockH);
+        for (uint32_t Y = 0; Y != CopyH; ++Y) {
+          uint8_t *DstRow = LevelBase + uint64_t(BY * BlockH + Y) * RowPitch +
+                            uint64_t(BX) * BlockW * 4;
+          const uint8_t *SrcRow = &BlockBuf[size_t(Y) * BlockW * 4];
+          std::memcpy(DstRow, SrcRow, size_t(CopyW) * 4);
+        }
+      }
+    }
+  }
+  return Result;
+}
 
 /// Resolves one `VkImageView` binding into the `feme::cpu::
 /// FemeImageDescriptor` a compiled stage's image heap holds (V5's remaining
@@ -197,8 +314,21 @@ struct MaterializedBoundResources {
 /// per mip level, and the ABI has no base-layer field -- so it, like every
 /// non-2D view, is left unwritten rather than silently addressed as layer 0
 /// (see FeMeVulkanDesign.md's V5 status note).
+///
+/// Roadmap E23: an ASTC LDR-format image is decoded whole (every sampled
+/// mip level) into `Result`'s own per-texel RGBA8 storage before this
+/// function returns, and \p Dst points into *that* rather than \p Img's
+/// own raw block-compressed bytes -- the CPU runtime
+/// (feme/runtime/CPU/FeMeRuntimeCPU.c) that eventually reads \p Dst has no
+/// block-compressed case of its own (see this file's header comment), so a
+/// shader-visible descriptor must already be decoded before it gets there.
+/// An HDR ASTC format (`feme::cpu::isASTCLdrFormat` false) is left
+/// unsupported the same "reads as all-zero" way it already was -- outside
+/// this row's own LDR-only scope (`decodeASTCBlockHDR`'s float-producing
+/// interface does not fit this RGBA8 bridge).
 void materializeImageDescriptor(const DescriptorImageBinding &Src,
                                 VkDescriptorType Type,
+                                MaterializedBoundResources &Result,
                                 feme::cpu::FemeImageDescriptor &Dst) {
   ImageView *View = Src.View;
   if (!View || !View->image() || !View->image()->isBound())
@@ -219,10 +349,7 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   if (LevelCount == 0)
     return;
 
-  Dst.Data = Img->data();
-  Dst.SizeInBytes = Img->sizeInBytes();
   Dst.Dimension = static_cast<uint32_t>(feme::cpu::ImageDimension::Texture2D);
-  Dst.Format = static_cast<uint32_t>(View->format());
   Dst.Width = std::max(1u, Img->width() >> Range.baseMipLevel);
   Dst.Height = std::max(1u, Img->height() >> Range.baseMipLevel);
   Dst.Depth = 1;
@@ -232,6 +359,26 @@ void materializeImageDescriptor(const DescriptorImageBinding &Src,
   Dst.SampleCount = Img->sampleCount();
   Dst.Flags = isReadOnlyDescriptorType(Type) ? feme::cpu::FEME_IMAGE_SAMPLED
                                              : feme::cpu::FEME_IMAGE_STORAGE;
+
+  if (feme::cpu::isASTCLdrFormat(Img->format())) {
+    DecodedASTCImage Decoded =
+        decodeASTCImageForSampling(Img, Range.baseMipLevel, LevelCount);
+    Result.DecodedImageStorage.push_back(std::move(Decoded.Texels));
+    Result.DecodedImageLayoutStorage.push_back(std::move(Decoded.MipLayouts));
+    Dst.Data = Result.DecodedImageStorage.back().data();
+    Dst.SizeInBytes = Result.DecodedImageStorage.back().size();
+    Dst.Format = static_cast<uint32_t>(
+        isASTCSRGBFormat(Img->format())
+            ? feme::cpu::ResourceFormat::R8G8B8A8_UNORM_SRGB
+            : feme::cpu::ResourceFormat::R8G8B8A8_UNORM);
+    Dst.MipLayouts = Result.DecodedImageLayoutStorage.back().data();
+    Dst.MipLayoutCount = LevelCount;
+    return;
+  }
+
+  Dst.Data = Img->data();
+  Dst.SizeInBytes = Img->sizeInBytes();
+  Dst.Format = static_cast<uint32_t>(View->format());
   Dst.MipLayouts = Img->mipLayouts().data() + Range.baseMipLevel;
   Dst.MipLayoutCount = LevelCount;
 }
@@ -249,7 +396,8 @@ void buildImageAndSamplerBinding(uint32_t SetIdx,
   if (isImageDescriptorType(BindingDecl.Type)) {
     std::vector<feme::cpu::FemeImageDescriptor> Descriptors(Array.size());
     for (size_t J = 0; J != Array.size(); ++J)
-      materializeImageDescriptor(Array[J], BindingDecl.Type, Descriptors[J]);
+      materializeImageDescriptor(Array[J], BindingDecl.Type, Result,
+                                 Descriptors[J]);
     Result.ImageStorage.push_back(std::move(Descriptors));
     Result.ImageBindings.push_back(feme::cpu::BoundImageBinding{
         SetIdx, BindingDecl.Binding, Result.ImageStorage.back()});
@@ -642,30 +790,28 @@ Error runCopyImage(Image *Src, Image *Dst,
          ++Layer) {
       for (uint32_t Z = 0; Z != Region.extent.depth; ++Z) {
         for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
-          void *SrcRow =
-              Compressed
-                  ? Src->blockPointer(Region.srcSubresource.mipLevel,
-                                      Region.srcSubresource.baseArrayLayer +
-                                          Layer,
-                                      SrcOffsetXUnits, SrcOffsetYUnits + Y,
-                                      Region.srcOffset.z + Z)
-                  : Src->texelPointer(Region.srcSubresource.mipLevel,
-                                      Region.srcSubresource.baseArrayLayer +
-                                          Layer,
-                                      SrcOffsetXUnits, SrcOffsetYUnits + Y,
-                                      Region.srcOffset.z + Z);
-          void *DstRow =
-              Compressed
-                  ? Dst->blockPointer(Region.dstSubresource.mipLevel,
-                                      Region.dstSubresource.baseArrayLayer +
-                                          Layer,
-                                      DstOffsetXUnits, DstOffsetYUnits + Y,
-                                      Region.dstOffset.z + Z)
-                  : Dst->texelPointer(Region.dstSubresource.mipLevel,
-                                      Region.dstSubresource.baseArrayLayer +
-                                          Layer,
-                                      DstOffsetXUnits, DstOffsetYUnits + Y,
-                                      Region.dstOffset.z + Z);
+          void *SrcRow = Compressed
+                             ? Src->blockPointer(
+                                   Region.srcSubresource.mipLevel,
+                                   Region.srcSubresource.baseArrayLayer + Layer,
+                                   SrcOffsetXUnits, SrcOffsetYUnits + Y,
+                                   Region.srcOffset.z + Z)
+                             : Src->texelPointer(
+                                   Region.srcSubresource.mipLevel,
+                                   Region.srcSubresource.baseArrayLayer + Layer,
+                                   SrcOffsetXUnits, SrcOffsetYUnits + Y,
+                                   Region.srcOffset.z + Z);
+          void *DstRow = Compressed
+                             ? Dst->blockPointer(
+                                   Region.dstSubresource.mipLevel,
+                                   Region.dstSubresource.baseArrayLayer + Layer,
+                                   DstOffsetXUnits, DstOffsetYUnits + Y,
+                                   Region.dstOffset.z + Z)
+                             : Dst->texelPointer(
+                                   Region.dstSubresource.mipLevel,
+                                   Region.dstSubresource.baseArrayLayer + Layer,
+                                   DstOffsetXUnits, DstOffsetYUnits + Y,
+                                   Region.dstOffset.z + Z);
           std::memcpy(DstRow, SrcRow, RowBytes);
         }
       }
@@ -1900,8 +2046,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
       pBindDescriptorSetsInfo->pDynamicOffsets +
           pBindDescriptorSetsInfo->dynamicOffsetCount);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet,
-                           std::move(Sets), std::move(Offsets));
+      ->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet, std::move(Sets),
+                           std::move(Offsets));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
@@ -2007,9 +2153,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage(VkCommandBuffer commandBuffer,
 // delegate to the identical `vulkan::CommandBuffer` method its non-`2`
 // counterpart above already calls; see "V5: image/buffer copies".
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdCopyBuffer2(VkCommandBuffer commandBuffer,
-                 const VkCopyBufferInfo2 *pCopyBufferInfo) {
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyBuffer2(
+    VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *pCopyBufferInfo) {
   std::vector<VkBufferCopy> Regions;
   Regions.reserve(pCopyBufferInfo->regionCount);
   for (uint32_t I = 0; I < pCopyBufferInfo->regionCount; ++I) {
@@ -2022,9 +2167,8 @@ vkCmdCopyBuffer2(VkCommandBuffer commandBuffer,
                    std::move(Regions));
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdCopyImage2(VkCommandBuffer commandBuffer,
-                const VkCopyImageInfo2 *pCopyImageInfo) {
+VKAPI_ATTR void VKAPI_CALL vkCmdCopyImage2(
+    VkCommandBuffer commandBuffer, const VkCopyImageInfo2 *pCopyImageInfo) {
   std::vector<VkImageCopy> Regions;
   Regions.reserve(pCopyImageInfo->regionCount);
   for (uint32_t I = 0; I < pCopyImageInfo->regionCount; ++I) {
@@ -2046,9 +2190,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyBufferToImage2(
   for (uint32_t I = 0; I < pCopyBufferToImageInfo->regionCount; ++I) {
     const VkBufferImageCopy2 &R = pCopyBufferToImageInfo->pRegions[I];
     Regions.push_back(VkBufferImageCopy{R.bufferOffset, R.bufferRowLength,
-                                        R.bufferImageHeight,
-                                        R.imageSubresource, R.imageOffset,
-                                        R.imageExtent});
+                                        R.bufferImageHeight, R.imageSubresource,
+                                        R.imageOffset, R.imageExtent});
   }
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->copyBufferToImage(
@@ -2065,9 +2208,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdCopyImageToBuffer2(
   for (uint32_t I = 0; I < pCopyImageToBufferInfo->regionCount; ++I) {
     const VkBufferImageCopy2 &R = pCopyImageToBufferInfo->pRegions[I];
     Regions.push_back(VkBufferImageCopy{R.bufferOffset, R.bufferRowLength,
-                                        R.bufferImageHeight,
-                                        R.imageSubresource, R.imageOffset,
-                                        R.imageExtent});
+                                        R.bufferImageHeight, R.imageSubresource,
+                                        R.imageOffset, R.imageExtent});
   }
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->copyImageToBuffer(
@@ -2148,11 +2290,11 @@ vkCmdPushConstants2(VkCommandBuffer commandBuffer,
   if (pPushConstantsInfo->size == 0 || pPushConstantsInfo->offset % 4 != 0 ||
       pPushConstantsInfo->size % 4 != 0)
     return;
-  const auto *Bytes =
-      static_cast<const uint8_t *>(pPushConstantsInfo->pValues);
+  const auto *Bytes = static_cast<const uint8_t *>(pPushConstantsInfo->pValues);
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
-      ->pushConstants(pPushConstantsInfo->offset,
-                      std::vector<uint8_t>(Bytes, Bytes + pPushConstantsInfo->size));
+      ->pushConstants(
+          pPushConstantsInfo->offset,
+          std::vector<uint8_t>(Bytes, Bytes + pPushConstantsInfo->size));
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetEvent(VkCommandBuffer commandBuffer,
@@ -2714,9 +2856,8 @@ VKAPI_ATTR void VKAPI_CALL vkCmdResolveImage(VkCommandBuffer commandBuffer,
           std::vector<VkImageResolve>(pRegions, pRegions + regionCount));
 }
 
-VKAPI_ATTR void VKAPI_CALL
-vkCmdBlitImage2(VkCommandBuffer commandBuffer,
-                const VkBlitImageInfo2 *pBlitImageInfo) {
+VKAPI_ATTR void VKAPI_CALL vkCmdBlitImage2(
+    VkCommandBuffer commandBuffer, const VkBlitImageInfo2 *pBlitImageInfo) {
   std::vector<VkImageBlit> Regions;
   Regions.reserve(pBlitImageInfo->regionCount);
   for (uint32_t I = 0; I < pBlitImageInfo->regionCount; ++I) {
@@ -2740,8 +2881,7 @@ vkCmdResolveImage2(VkCommandBuffer commandBuffer,
   for (uint32_t I = 0; I < pResolveImageInfo->regionCount; ++I) {
     const VkImageResolve2 &R = pResolveImageInfo->pRegions[I];
     Regions.push_back(VkImageResolve{R.srcSubresource, R.srcOffset,
-                                     R.dstSubresource, R.dstOffset,
-                                     R.extent});
+                                     R.dstSubresource, R.dstOffset, R.extent});
   }
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->resolveImage(fromHandle<Image>(pResolveImageInfo->srcImage),

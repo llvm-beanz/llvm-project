@@ -1808,7 +1808,8 @@ TEST_F(PushConstantDispatchTest, UnpushedBytesReadAsZero) {
 // around `vkCmdBindDescriptorSets`/`vkCmdPushConstants`; this exercises both
 // together through the same dispatch the non-`2` equivalents above already
 // cover, confirming they reach the identical `CommandBuffer` state.
-TEST_F(PushConstantDispatchTest, BindDescriptorSets2AndPushConstants2ReachTheDispatch) {
+TEST_F(PushConstantDispatchTest,
+       BindDescriptorSets2AndPushConstants2ReachTheDispatch) {
   HostBuffer Buf = createStorageBuffer(4);
   uint32_t InitialValue = 10;
   std::memcpy(Buf.Data, &InitialValue, sizeof(InitialValue));
@@ -2062,7 +2063,7 @@ protected:
     vkDestroyInstance(Instance, nullptr);
   }
 
-  void createImage() {
+  virtual void createImage() {
     VkImageCreateInfo ImageInfo{};
     ImageInfo.imageType = VK_IMAGE_TYPE_2D;
     ImageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -2312,4 +2313,106 @@ TEST_F(SampledImageDispatchTest, RejectsAPipelineLayoutOfTheWrongClass) {
 
   vkDestroyPipelineLayout(Device, WrongLayout, nullptr);
   vkDestroyDescriptorSetLayout(Device, WrongSetLayout, nullptr);
+}
+
+namespace {
+
+/// Sets bits `[Start, Start + Len)` of \p Block (bit 0 the LSB of byte 0,
+/// matching ASTCDecode.cpp's own convention -- see ASTCDecodeTest.cpp's
+/// identical helper) to \p Value's low \p Len bits, used here only to
+/// hand-construct one void-extent (solid-fill) ASTC block for
+/// `ASTCSampledImageDispatchTest`.
+void setASTCBits(uint8_t Block[16], unsigned Start, unsigned Len,
+                 uint32_t Value) {
+  for (unsigned I = 0; I != Len; ++I) {
+    unsigned BitIndex = Start + I;
+    unsigned Byte = BitIndex / 8, Bit = BitIndex % 8;
+    if ((Value >> I) & 1)
+      Block[Byte] |= uint8_t(1u << Bit);
+    else
+      Block[Byte] &= uint8_t(~(1u << Bit));
+  }
+}
+
+/// (Roadmap E23) The same scenario `SampledImageDispatchTest` exercises --
+/// a dispatch sampling a bound image through a bound sampler -- but with a
+/// single-block `VK_FORMAT_ASTC_4x4_UNORM_BLOCK` image in place of an
+/// uncompressed one, verifying `materializeImageDescriptor`'s new decode
+/// path actually reaches a shader rather than the previous all-zero read.
+/// Only `createImage` differs, so this reuses every other fixture method
+/// (pipeline/descriptor/command-buffer setup, `kSampledImageShader`) as
+/// is.
+class ASTCSampledImageDispatchTest : public SampledImageDispatchTest {
+protected:
+  void createImage() override {
+    VkImageCreateInfo ImageInfo{};
+    ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+    ImageInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+    ImageInfo.extent = {4, 4, 1};
+    ImageInfo.mipLevels = 1;
+    ImageInfo.arrayLayers = 1;
+    ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = 16; // One 4x4 ASTC block, 128 bits.
+    AllocInfo.memoryTypeIndex = 0;
+    ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &ImageMemory),
+              VK_SUCCESS);
+    ASSERT_EQ(vkBindImageMemory(Device, Img, ImageMemory, 0), VK_SUCCESS);
+    ASSERT_EQ(vkMapMemory(Device, ImageMemory, 0, VK_WHOLE_SIZE, 0, &Texels),
+              VK_SUCCESS);
+
+    // A void-extent (solid-fill) block -- the same bit layout
+    // ASTCDecodeTest.cpp's `VoidExtentDecodesToSolidColor` test uses --
+    // decodes to R=255, G=0, B=127 (32767 -> 255 scale, truncated), A=255
+    // at every one of the block's 16 texels, so the exact (u, v) this
+    // fixture's shader samples at does not matter.
+    auto *Bytes = static_cast<uint8_t *>(Texels);
+    std::memset(Bytes, 0, 16);
+    setASTCBits(Bytes, 0, 9, 0x1FC);
+    setASTCBits(Bytes, 9, 1, 0); // LDR.
+    setASTCBits(Bytes, 10, 2, 0x3);
+    setASTCBits(Bytes, 64, 16, 65535);
+    setASTCBits(Bytes, 80, 16, 0);
+    setASTCBits(Bytes, 96, 16, 32767);
+    setASTCBits(Bytes, 112, 16, 65535);
+
+    VkImageViewCreateInfo ViewInfo{};
+    ViewInfo.image = Img;
+    ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    ViewInfo.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+    ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ViewInfo.subresourceRange.levelCount = 1;
+    ViewInfo.subresourceRange.layerCount = 1;
+    ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+  }
+};
+
+} // namespace
+
+TEST_F(ASTCSampledImageDispatchTest,
+       SamplesARealDecodedTexelRatherThanAllZero) {
+  ASSERT_EQ(createPipeline(), VK_SUCCESS);
+  writeDescriptorSet();
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdBindDescriptorSets(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                          &Set, 0, nullptr);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  float Result[4] = {};
+  std::memcpy(Result, Out.Data, sizeof(Result));
+  EXPECT_FLOAT_EQ(Result[0], 1.0f);
+  EXPECT_FLOAT_EQ(Result[1], 0.0f);
+  EXPECT_FLOAT_EQ(Result[2], 127.0f / 255.0f);
+  EXPECT_FLOAT_EQ(Result[3], 1.0f);
 }
