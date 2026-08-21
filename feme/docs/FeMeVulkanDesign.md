@@ -391,9 +391,25 @@ compilation from `{
   4, 8, 16, 32, 64, 128}`. The driver must therefore pin one
 wave size device-wide, derive it from the host SIMD width once at physical
 device initialization, report it as `subgroupSize`, and fold it into the device
-and pipeline cache UUIDs. Per-pipeline wave sizes are only permissible if the
-driver later implements `VK_EXT_subgroup_size_control` and honors its required
-and full-subgroup semantics.
+and pipeline cache UUIDs.
+
+Roadmap E7 adds the permissible per-pipeline exception this section
+originally deferred: `VK_EXT_subgroup_size_control`/`subgroupSizeControl` +
+`computeFullSubgroups` are now implemented. A `VkPipelineShaderStage
+RequiredSubgroupSizeCreateInfo` chained onto a compute pipeline's stage
+overrides that pipeline's own compiled wave size to any power-of-two value
+in `[minSubgroupSize, maxSubgroupSize]` (`feme::cpu::MinWaveSize`/
+`MaxWaveSize`, `4`/`128`) -- `Pipeline.cpp`'s `compileComputePipeline`
+forwards it to `feme::cpu::JITOptions::WaveSize`, already validated by
+`feme::cpu::resolveWaveSize`'s existing power-of-two/range check, so no new
+validation logic was needed. `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_
+FULL_SUBGROUPS_BIT`'s "every subgroup is fully populated" promise is honored
+by rejecting pipeline creation outright when the workgroup's local size in
+X is not a multiple of the resolved subgroup size, the only way this CPU
+target's SIMD-widened dispatch could otherwise guarantee it. Per-pipeline
+overrides are compute-only (`requiredSubgroupSizeStages ==
+VK_SHADER_STAGE_COMPUTE_BIT`); no other stage's pipeline creation consults
+one yet.
 
 `subgroupSupportedStages` is compute-only, and `subgroupSupportedOperations`
 starts at `VK_SUBGROUP_FEATURE_BASIC_BIT` and grows only as
@@ -527,8 +543,13 @@ around `vkCmdBindDescriptorSets`/`vkCmdPushConstants`'s own recording,
 likewise reported through both its own dedicated
 `VkPhysicalDeviceMaintenance6Features` struct and the aggregate struct;
 `vkCmdPushDescriptorSet2` remains unimplemented, deferred to roadmap F12's
-`pushDescriptor` groundwork) are genuinely implemented;
-`subgroupSizeControl`,
+`pushDescriptor` groundwork), and `subgroupSizeControl` (roadmap E7:
+`Pipeline.cpp`'s `compileComputePipeline` honors a chained
+`VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` and
+`VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`, likewise
+reported through both its own dedicated
+`VkPhysicalDeviceSubgroupSizeControlFeatures` struct and the aggregate
+struct) are genuinely implemented;
 `shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
 `pushDescriptor`, and the rest are all confirmed unimplemented, not merely
 unaudited. Roadmap E2 wires the promoted `...Properties` struct's

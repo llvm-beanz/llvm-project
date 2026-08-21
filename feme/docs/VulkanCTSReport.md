@@ -1652,6 +1652,84 @@ compiler's resource-handle normalization for a non-array-typed storage
 buffer, the same "stacked blockers" pattern C1/C2/E5 already established for
 this report, out of this row's own scope to fix.
 
+## Roadmap E7: measured impact
+
+Roadmap E7 (`VK_EXT_subgroup_size_control`/`subgroupSizeControl` +
+`computeFullSubgroups`) adds the override path `GroupSize.cpp`'s own file
+comment anticipated a future row would need: `Pipeline.cpp`'s
+`compileComputePipeline` now reads a
+`VkPipelineShaderStageRequiredSubgroupSizeCreateInfo` chained onto a compute
+stage and forwards its `requiredSubgroupSize` straight to
+`feme::cpu::JITOptions::WaveSize` (which `feme::cpu::resolveWaveSize` already
+validates against exactly the same power-of-two-in-`[MinWaveSize,
+MaxWaveSize]` range this row reports as `minSubgroupSize`/`maxSubgroupSize`),
+and rejects a `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT`
+pipeline whose workgroup's local size in X is not a multiple of the
+resolved subgroup size (the only way this CPU target's SIMD-widened
+dispatch can honor that flag's "every subgroup is fully populated" promise).
+`PipelineCache.cpp`'s `computePipelineCacheKey` now folds in both
+`requiredSubgroupSize` and the stage's `VkPipelineShaderStageCreateFlags`,
+so two otherwise-identical creations that disagree in either no longer
+collide on the same cached artifact. `minSubgroupSize`/`maxSubgroupSize`/
+`maxComputeWorkgroupSubgroups`/`requiredSubgroupSizeStages` (E2's
+placeholders) are now real (`4`/`128`/`32`/`VK_SHADER_STAGE_COMPUTE_BIT`),
+in both the aggregate `VkPhysicalDeviceVulkan13Properties` case and a new
+dedicated `VkPhysicalDeviceSubgroupSizeControlProperties` case;
+`subgroupSizeControl`/`computeFullSubgroups` read `VK_TRUE` from both the
+aggregate `VkPhysicalDeviceVulkan13Features` case and a new dedicated
+`VkPhysicalDeviceSubgroupSizeControlFeatures` case.
+
+Unlike E2's own file attribution guess ("`GroupSize.cpp` ... needs an
+override path"), the override actually lives in `Pipeline.cpp`:
+`GroupSize.cpp`'s `resolveComputeGroupSize` resolves a shader's *workgroup*
+size (`LocalSize`/`LocalSizeId`/`BuiltIn WorkgroupSize`) from its SPIR-V
+words, an entirely different quantity from a compute dispatch's *subgroup*
+(wave) size, which was already resolved elsewhere (`PhysicalDeviceInfo.cpp`'s
+device-wide default, `feme::cpu::CompiledStage::create`'s per-pipeline
+resolution) before this row touched anything -- the roadmap's own name-pun
+premise ("`GroupSize.cpp` ... per its name") conflated the two. No change to
+`GroupSize.cpp` itself was needed or made.
+
+**Targeted CTS runs**, against this session's HEAD build:
+
+| Case(s) | Result |
+|---|---|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.subgroup_size_control_features` | `Pass` |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.subgroup_size_control_features` | `Pass` |
+| `dEQP-VK.api.info.vulkan1p3.*` (5 total) | 5 `Pass`, confirming the four newly-real `VkPhysicalDeviceVulkan13Properties` fields agree with the new dedicated `VkPhysicalDeviceSubgroupSizeControlProperties` struct rather than repeating E2's own first-draft regression |
+| `dEQP-VK.subgroups.size_control.*` (63 total) | 1 `Pass` (`generic.subgroup_size_properties`), 54 `NotSupported`, 8 `Fail` (all pre-existing, see below) |
+| `dEQP-VK.subgroups.size_control.{framebuffer,mesh,ray_tracing}.*` and `graphics.required_subgroup_size_{max,min}` (37 total) | `NotSupported ("Shader stage is required to support subgroup operations!")` -- a correct rejection: `requiredSubgroupSizeStages` truthfully advertises `VK_SHADER_STAGE_COMPUTE_BIT` only, since no other stage's pipeline creation consults a required-subgroup-size override yet |
+| `dEQP-VK.subgroups.size_control.compute.require_full_subgroups*` (9 total) | `NotSupported ("Device does not support subgroup ballot operations")` -- a pre-existing, correct rejection unrelated to this row: `SubgroupSupportedOperations` is `VK_SUBGROUP_FEATURE_BASIC_BIT` only (no ballot ops), from before this row landed |
+
+**The 8 `Fail` cases, root-caused before closing the row.** Every one
+(`compute.allow_varying_subgroup_size*`, `compute.required_subgroup_size_
+{max,min}`, and the three `graphics.allow_varying_subgroup_size*` cases,
+which reach the identical failure through an internal compute-pipeline
+capability probe before ever creating a graphics pipeline) fails identically:
+`error: failed to legalize operation 'spirv.SpecConstantComposite' that was
+explicitly marked illegal`. These shaders declare their workgroup size via
+`local_size_{x,y,z}_id` (spec constants) *and* read the `gl_WorkGroupSize`
+builtin from the shader body to report the resolved size back to the host --
+a `BuiltIn WorkgroupSize`-decorated `spirv.SpecConstantComposite` genuinely
+referenced by the entry point, not merely present as `LocalSizeId`'s
+supporting operands (`GroupSize.h`'s own file comment already distinguishes
+these: "a specialization constant genuinely read by the shader body ... is a
+distinct, still-unimplemented feature"). Roadmap E4's `SpecConstantErasurePattern`
+only erases the scalar `spirv.SpecConstant` operands `LocalSizeId` needs
+(safe to drop since nothing in the entry point's own body references them);
+no conversion pattern exists for `spirv.SpecConstantComposite` at all, erased
+or otherwise, and this row's own scope (`GroupSize.cpp`/`Pipeline.cpp`/
+`EntryPoints.cpp`) never touches `SPIRVToLLVMPatterns.cpp`. This is not a
+regression this row introduces -- before E7, every one of these 8 cases
+failed `NotSupported ("VK_EXT_subgroup_size_control is not supported")`
+before ever reaching pipeline creation, so the underlying gap was simply
+unreached, the same "advertising a real capability exposes a
+previously-unreached gap instead of introducing one" pattern D3/E4/E6 above
+already established. Lowering a genuinely-read `BuiltIn WorkgroupSize`
+specialization-constant composite to a real LLVM constant vector is a
+distinct, out-of-scope follow-up for whichever future row needs
+`gl_WorkGroupSize` read from a shader body at all.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
