@@ -495,7 +495,9 @@ core, non-`KHR`-suffixed `VK_VERSION_1_3` entries `vk_gen_entrypoints.py`'s
 roadmap D0); it is listed here purely so `vkCreateDevice` accepts the name
 itself, which `dEQP-VK.synchronization2`'s own multi-queue/custom-device
 cases enable explicitly regardless of the advertised `apiVersion` (see
-"Roadmap E3: measured impact" in VulkanCTSReport.md).
+"Roadmap E3: measured impact" in VulkanCTSReport.md). Roadmap E5 and E6 add
+`VK_KHR_maintenance5`/`VK_KHR_maintenance6` the same way, for the same
+"CTS enables it by name regardless of `apiVersion`" reason.
 
 **Status (roadmap D1, "An accurate 1.3/1.4 mandatory-feature/limit/
 extension inventory"):** the audit itself is done; closing what it found is
@@ -518,9 +520,15 @@ VK_NULL_HANDLE` color slot is skipped rather than rejected
 (RenderPass.h/CommandBuffer.cpp), `VK_FORMAT_A8_UNORM`/
 `A1B5G5R5_UNORM_PACK16` (Format.cpp), and `vkCmdBindIndexBuffer2`
 (CommandBuffer.cpp), likewise reported through both its own dedicated
-`VkPhysicalDeviceMaintenance5FeaturesKHR` struct and the aggregate struct)
-are genuinely implemented;
-`maintenance6`, `subgroupSizeControl`,
+`VkPhysicalDeviceMaintenance5FeaturesKHR` struct and the aggregate struct),
+and `maintenance6` (roadmap E6: `vkCmdBindDescriptorSets2`/
+`vkCmdPushConstants2` (CommandBuffer.cpp), pure argument-shape wrappers
+around `vkCmdBindDescriptorSets`/`vkCmdPushConstants`'s own recording,
+likewise reported through both its own dedicated
+`VkPhysicalDeviceMaintenance6Features` struct and the aggregate struct;
+`vkCmdPushDescriptorSet2` remains unimplemented, deferred to roadmap F12's
+`pushDescriptor` groundwork) are genuinely implemented;
+`subgroupSizeControl`,
 `shaderIntegerDotProduct`, `pipelineCreationCacheControl`,
 `pushDescriptor`, and the rest are all confirmed unimplemented, not merely
 unaudited. Roadmap E2 wires the promoted `...Properties` struct's
@@ -533,9 +541,9 @@ pre-promotion extension struct (none of which has its own
 `Properties2` case yet), so each field's own later row raises it only
 once that row also adds the matching dedicated-struct case (see the
 inventory doc's own "Findings"). Of 39 extensions `vk.xml` records as
-promoted into 1.3 or 1.4, only the three now listed above are
+promoted into 1.3 or 1.4, only the four now listed above are
 implemented. See the inventory doc's own "Findings" for the full
-breakdown and Roadmap.md's D1/E1/E2/E3 rows.
+breakdown and Roadmap.md's D1/E1/E2/E3/E6 rows.
 
 ## Shader and Pipeline Compilation
 
@@ -982,6 +990,15 @@ debugging aid). `executeCommandBuffer`'s per-command interpretation loop is
 state by reference so `vkCmdExecuteCommands` recurses into it for a
 secondary buffer's own commands without any state living on the command
 buffer object itself.
+
+**Status (roadmap E6): `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`
+(`VK_KHR_maintenance6`) are pure argument-shape wrappers around
+`vkCmdBindDescriptorSets`/`vkCmdPushConstants` above, recording into the
+identical shared state -- neither `VkBindDescriptorSetsInfo`'s `stageFlags`
+nor `VkPushConstantsInfo`'s `layout`/`stageFlags` changes what gets
+recorded, since this state is already shared across every pipeline bind
+point rather than kept per-bind-point. `vkCmdPushDescriptorSet2` remains
+unimplemented, deferred to roadmap F12's `pushDescriptor` groundwork.
 
 ## Queues, Scheduling, and Synchronization
 
