@@ -26,13 +26,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E19 in the roadmap document?
+Can you do a full CTS run against FeMe, then based on the results update
+Vulkan14FeatureInventory.md?
 
-> **Texel-buffer-format/robustness inconsistency** (D3's `robustness.oob_access`
-> 6-case regression, not yet root-caused past "format/robustness mismatch" --
-> this row starts with tracing it to a specific line, the way D3 did for its
-> other five buckets, before fixing it) plus `VK_EXT_texel_buffer_alignment`'s
-> two limit fields
-> (`storageTexelBufferOffsetAlignmentBytes`/`SingleTexelAlignment`,
-> `uniformTexelBufferOffsetAlignmentBytes`/`SingleTexelAlignment`, already
-> reserved by E2)
+Also, can you create a VulkanExtensionInventory.md that lists every KHR and EXT
+extension supported on Vulkan today, and lists the status of each extension in
+FeMe?
