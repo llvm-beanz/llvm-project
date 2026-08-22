@@ -1300,6 +1300,21 @@ void fillFeatures2Chain(void *pNext) {
       Features->extendedDynamicState = VK_TRUE;
       break;
     }
+    // (roadmap E18) `VK_EXT_texel_buffer_alignment`'s own feature struct
+    // (there is no aggregate 1.3/1.4 feature-struct field to agree with --
+    // only this extension's *properties* struct was promoted to core
+    // 1.3, per the Vulkan specification -- unlike every other row's
+    // feature bit above). `vkCreateBufferView` (Buffer.cpp) needs no
+    // stricter offset alignment than the dedicated
+    // `VkPhysicalDeviceTexelBufferAlignmentProperties` case
+    // (`fillProperties2Chain` above) already reports, so this is
+    // unconditionally true, exactly like `extendedDynamicState` above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT: {
+      auto *Features = reinterpret_cast<
+          VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT *>(Base);
+      Features->texelBufferAlignment = VK_TRUE;
+      break;
+    }
     default:
       break;
     }

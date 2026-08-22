@@ -709,6 +709,24 @@ TEST_F(
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
+       TexelBufferAlignmentIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap E18: `VK_EXT_texel_buffer_alignment`'s own dedicated feature
+  // struct is unconditionally `VK_TRUE` -- unlike every other row's
+  // feature bit, this extension has no aggregate 1.3/1.4 feature-struct
+  // field to agree with, since only its *properties* struct was promoted
+  // to core 1.3.
+  VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT TexelBufferAlignmentFeatures{};
+  TexelBufferAlignmentFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &TexelBufferAlignmentFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(TexelBufferAlignmentFeatures.texelBufferAlignment, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
        TexelBufferAlignmentIsAdvertisedThroughItsOwnDedicatedPropertyStruct) {
   // Roadmap E18: `VK_EXT_texel_buffer_alignment`'s own dedicated
   // properties struct must agree with the aggregate
