@@ -1,5 +1,5 @@
 ---
-model: claude-sonnet-5
+model: claude-opus-5
 ---
 # Initial Guidelines
 
@@ -26,9 +26,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you do a full CTS run against FeMe, then based on the results update
-Vulkan14FeatureInventory.md?
+Please update the design and implementation tracking documentation under the
+docs folder to expand scope to a full Vulkan 1.4 conformance including compute,
+graphics and raytracing, and eventually equivalent for the WARP/Direct3D
+implementation.
 
-Also, can you create a VulkanExtensionInventory.md that lists every KHR and EXT
-extension supported on Vulkan today, and lists the status of each extension in
-FeMe?
+After doing that please revisit the VulkanExtensionInventory,
+Vulkan14featureinvetnory, and roadmap to have full Vulkan 1.4 conformance well
+planned.
