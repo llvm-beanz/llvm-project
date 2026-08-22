@@ -200,26 +200,26 @@ numeric value rather than a yes/no claim.
 | limit | VK_VERSION_1_3 | `uniformTexelBufferOffsetAlignmentBytes` | n/a |  |
 | limit | VK_VERSION_1_3 | `uniformTexelBufferOffsetSingleTexelAlignment` | n/a |  |
 | limit | VK_VERSION_1_3 | `maxBufferSize` | n/a |  |
-| extension | VK_VERSION_1_3 | `VK_EXT_4444_formats` | no |  |
+| extension | VK_VERSION_1_3 | `VK_EXT_4444_formats` | yes | roadmap E19: VK_FORMAT_A4R4G4B4_UNORM_PACK16/A4B4G4R4_UNORM_PACK16 recognized VkFormat values (Format.cpp) |
 | extension | VK_VERSION_1_3 | `VK_EXT_extended_dynamic_state` | yes | roadmap C4c: all 12 dynamic states implemented |
 | extension | VK_VERSION_1_3 | `VK_EXT_extended_dynamic_state2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_image_robustness` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_inline_uniform_block` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_cache_control` | yes | roadmap E9: VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT/VK_PIPELINE_CACHE_CREATE_EXTERNALLY_SYNCHRONIZED_BIT implemented (Pipeline.cpp/GraphicsPipeline.cpp/PipelineCache.{h,cpp}) |
-| extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_feedback` | no |  |
+| extension | VK_VERSION_1_3 | `VK_EXT_pipeline_creation_feedback` | yes | roadmap E19: VkPipelineCreationFeedbackCreateInfo filled for vkCreateGraphicsPipelines/vkCreateComputePipelines (Pipeline.cpp's fillPipelineCreationFeedback) |
 | extension | VK_VERSION_1_3 | `VK_EXT_private_data` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_shader_demote_to_helper_invocation` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_subgroup_size_control` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_texel_buffer_alignment` | no |  |
 | extension | VK_VERSION_1_3 | `VK_EXT_texture_compression_astc_hdr` | no | roadmap G4/E15/E21: see `textureCompressionASTC_HDR` feature row above |
-| extension | VK_VERSION_1_3 | `VK_EXT_tooling_info` | no |  |
-| extension | VK_VERSION_1_3 | `VK_EXT_ycbcr_2plane_444_formats` | no |  |
+| extension | VK_VERSION_1_3 | `VK_EXT_tooling_info` | yes | roadmap E19: vkGetPhysicalDeviceToolProperties implemented, truthfully reporting zero tools |
+| extension | VK_VERSION_1_3 | `VK_EXT_ycbcr_2plane_444_formats` | no | roadmap E19: declined -- `samplerYcbcrConversion` (EntryPoints.cpp) is unconditionally VK_FALSE, no multi-planar/YCbCr sampler support exists at all, and this extension's one new format is meaningless without it |
 | extension | VK_VERSION_1_3 | `VK_KHR_copy_commands2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_dynamic_rendering` | yes | every command and the dynamicRendering feature bit are implemented, including (roadmap E1) the aggregate Vulkan13Features struct |
 | extension | VK_VERSION_1_3 | `VK_KHR_format_feature_flags2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_maintenance4` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_shader_integer_dot_product` | yes | roadmap E8: OpSDot/OpUDot/OpSUDot-family spirv->llvm conversion patterns implemented; the 36 integerDotProduct*Accelerated limit bits remain honestly VK_FALSE (not hardware-accelerated on this CPU target) |
-| extension | VK_VERSION_1_3 | `VK_KHR_shader_non_semantic_info` | no |  |
+| extension | VK_VERSION_1_3 | `VK_KHR_shader_non_semantic_info` | yes | roadmap E19: NonSemantic.* OpExtInst instructions stripped before MLIR deserialization (SPIRVImporter.cpp's stripNonSemanticExtInst) |
 | extension | VK_VERSION_1_3 | `VK_KHR_shader_terminate_invocation` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_synchronization2` | no |  |
 | extension | VK_VERSION_1_3 | `VK_KHR_zero_initialize_workgroup_memory` | no |  |

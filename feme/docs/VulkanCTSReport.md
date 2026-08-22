@@ -2344,6 +2344,90 @@ no regression elsewhere in that group. A broader regression check,
 `check-feme` (1,663 passed, 1 unsupported), confirms no regression from
 either commit.
 
+## Roadmap E19: measured impact (targeted, not a full re-run)
+
+E19 closed four of its six named items (`VK_EXT_4444_formats`,
+`VK_EXT_pipeline_creation_feedback`, `VK_KHR_shader_non_semantic_info`,
+`VK_EXT_tooling_info`; `VK_KHR_format_feature_flags2` was already closed
+by roadmap E25 -- see that row's own inline note) and declined the sixth
+(`VK_EXT_ycbcr_2plane_444_formats`, per this row's own "decline if YCbCr
+sampling itself is unimplemented" instruction: `samplerYcbcrConversion`
+is unconditionally `VK_FALSE` and no multi-planar/YCbCr sampler support
+exists anywhere in this ICD). Each closed item is small and independent,
+so this section runs one targeted group per item rather than a full
+re-run, the same discipline E16 used.
+
+**`dEQP-VK.api.info.*` (10,484 cases, full group)**: 5,542 `Pass` / 404
+`Fail` / 4,538 `NotSupported` -- the identical 404-`Fail` total E18's own
+re-run recorded, confirming no regression from this row's four commits.
+`dEQP-VK.api.info.get_physical_device_properties2.features.
+4444_formats_features_ext` (new, unlisted at E18's own pass since the
+extension did not exist yet) is `Pass`, and every `vulkan1p3.*`
+consistency case (`feature_bits_influence`, `feature_extensions_
+consistency`, `features`, `properties`, `property_extensions_
+consistency`) stays `Pass`, confirming the new `VkPhysicalDevice
+4444FormatsFeaturesEXT` case agrees with `Format.cpp`'s two new
+`mapVkFormat` entries.
+
+**`dEQP-VK.api.tooling_info.*` (2 cases, full group)**:
+`validate_getter`/`validate_tools_properties` both `Pass` -- the new
+`vkGetPhysicalDeviceToolProperties` (reporting zero tools) satisfies both
+the query-succeeds and structural-validation checks.
+
+**`dEQP-VK.pipeline.monolithic.creation_feedback.*` (13 cases, full
+group)**: 3 `Pass` (`compute_tests.compute_stage`/
+`compute_stage_delayed_destroy`/`compute_stage_no_cache`, directly
+exercising `fillPipelineCreationFeedback`'s compute path), 4 `Fail`, 6
+`NotSupported` (`geometryShader`/`tessellationShader` not implemented,
+pre-existing and unrelated). All 4 failures are the identical, already-
+documented `feme-cpu-simdize` "divergent vector value ... used outside a
+supported ... pattern" error (roadmap milestone 7's own deviation,
+D3/E16's "Roadmap D3: measured impact" own regression bucket) on every
+`graphics_tests.vertex_stage_fragment_stage*` case -- the vertex/fragment
+shader pair these tests share fails to compile at all, before
+`vkCreateGraphicsPipelines` ever reaches this row's own
+`fillPipelineCreationFeedback` call, so none of the four are attributable
+to this row.
+
+**`dEQP-VK.spirv_assembly.instruction.compute.non_semantic_info.*` (8
+cases, full group)**: 4 `Pass` (`basic`, `dummy_instruction_set`,
+`large_instruction_number`, `many_parameters`) -- **before this row's own
+fix, all 8 of this group's cases fail identically** with MLIR's
+`dispatchToExtensionSetAutogenDeserialization`'s "unhandled deserialization
+of extended instruction set" error at `vkCreateShaderModule`/pipeline-
+creation time (reproduced directly: a hand-assembled `OpExtInst` into a
+`NonSemantic.DebugPrintf` set fails pre-fix and succeeds post-fix, the
+`SPIRVImporterTest.StripsNonSemanticExtInst` unit test added by this row).
+The remaining 4 failures are on three *different*, unrelated, pre-existing
+gaps this row's own `stripNonSemanticExtInst` scope never touches:
+`any_constant_type`/`any_constant_type_used` fail on `"OpConstantComposite
+component <id> 30 must come from a normal constant"` (an MLIR SPIR-V
+deserializer constant-folding check, unrelated to which extended-
+instruction-set a `NonSemantic.*` `OpExtInst` operand belongs to);
+`any_non_constant_type` fails to legalize a `Function`-storage-class
+struct containing a `vector<3xf32>` member (`SPIRVToLLVM`'s own struct/
+vector conversion, independent of this row's scope); `placement` fails on
+`feme-cpu-simdize`'s "unsupported divergent call" (the same milestone-7
+deviation the pipeline-creation-feedback failures above hit). None of the
+four re-produce the "unhandled deserialization of extended instruction
+set" error this row's own fix targets, confirming the fix's own scope is
+fully closed and these four are pre-existing, independently-tracked gaps.
+
+**`dEQP-VK.api.buffer_view.access.{uniform_storage_texel_buffer.
+bind_as_uniform,uniform_texel_buffer}.{a4r4g4b4,a4b4g4r4}_unorm_pack16`
+(4 cases)** and **`dEQP-VK.api.copy_and_blit.copy_commands2.blit_image.
+all_formats.color.2d.a4r4g4b4_unorm_pack16.*` (30 cases)**: all
+`NotSupported` (`"Format not supported"`/`"VK_FORMAT_FEATURE_STORAGE_
+TEXEL_BUFFER_BIT not supported"`/`"Destination format not supported"`),
+confirming the two new formats are correctly left out of
+`isTexelBufferFormatSupported` and every sampled-image/color-attachment
+`VkFormatFeatureFlags` bit -- exactly this row's own "recognized but not
+yet backed by a pack/unpack case" scope, with no crash on either format
+in either group.
+
+`check-feme` (1,670 passed, 1 unsupported): no regression from any of
+this row's commits.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
