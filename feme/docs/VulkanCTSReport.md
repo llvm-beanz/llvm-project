@@ -2174,6 +2174,94 @@ clean `VK_ERROR_INITIALIZATION_FAILED`/`VK_ERROR_FORMAT_NOT_SUPPORTED`
 rejections, no crash) -- found no regression from advertising this
 extension.
 
+## Roadmap E17: measured impact
+
+Roadmap E17 (SPIR-V 1.6's `Nontemporal` image-operand bit) adds a
+`hasExactImageOperands` helper alongside the existing `hasImageOperands`
+in `SPIRVToLLVMPatterns.cpp`, both now masking out the `ImageOperands::
+Nontemporal` bit (a pure cache hint with no defined effect on the
+result) before checking whether anything else in the mask is
+unsupported. `ImageFetchPattern`/`ImageReadPattern`/`ImageWritePattern`
+(via `hasImageOperands`) and `ImageFetchLodPattern`/
+`ImageSampleExplicitLodPattern` (via the new `hasExactImageOperands`)
+all accept a lone `Nontemporal` bit, or `Lod|Nontemporal`, exactly as
+they already accept `None` or a lone `Lod`.
+
+**Targeted CTS run**, against this session's HEAD build, of every case
+under `dEQP-VK.spirv_assembly.instruction.compute.*` (19,904 cases,
+the group "Roadmap D3: measured impact" attributed its 422-case
+`Nontemporal` bucket to), run twice: once against a build with this
+row's own `SPIRVToLLVMPatterns.cpp` change reverted (`git stash`) and
+once against this session's HEAD, both from the identical CTS build
+and identical `feme-vulkan` ICD build flags (assertions + ccache):
+
+| | Passed | Failed | Not supported |
+|---|---:|---:|---:|
+| Before this row | 264 | 1,387 | 18,253 |
+| After this row | 264 | 1,387 | 18,253 |
+
+Identical totals, and a full per-case `Fail`-set diff between the two
+runs is empty -- **zero cases flip from `Fail` to `Pass`**, unlike
+every other closed row in this document. Tracing why, rather than
+stopping at the headline number:
+
+- 351 of the 1,387 `Fail` cases (183 under `imagefetchlod`/explicit-LOD
+  sampling, i.e. `spirv.ImageSampleExplicitLod`; 126 under
+  `imagefetch`, i.e. `spirv.ImageFetch`; 42 under `imageread`, i.e.
+  `spirv.ImageRead`) fail *before* this row's fix with exactly the
+  `ImageOperands::Nontemporal`-mask legalization error this row's own
+  roadmap text describes (`failed to legalize operation 'spirv.
+  ImageFetch'/'spirv.ImageSampleExplicitLod'/'spirv.ImageRead' that was
+  explicitly marked illegal ... image_operands = #spirv.image_
+  operands<Nontemporal>` or `<Lod|Nontemporal>`). *After* this row's
+  fix, every one of those 351 legalizes past that point cleanly -- the
+  `Nontemporal`-specific error is gone from all of them -- but every
+  one still fails `vkCreateComputePipelines`, now on a different,
+  pre-existing error surfacing later in the same lowering:
+  `'llvm.getelementptr' op operand #0 must be LLVM pointer type or LLVM
+  dialect-compatible vector of LLVM pointer type, but got
+  'vector<3xi32>'`. This is not something this row's fix introduces:
+  the exact same error, at the exact same case shape, reproduces
+  identically on the *non*-`nontemporal`-suffixed sibling case in the
+  same log (e.g. `...combined_image_sampler_separate_descriptors.
+  all_local_variables.depth_property.depth`, no `_nontemporal` suffix,
+  already `Fail` with this same `getelementptr` error before this row's
+  change touched anything) -- an address-computation bug in the
+  `combined_image_sampler_separate_descriptors` shader variant that
+  long predates this row and is untouched by it, now visible in these
+  351 cases only because this row's fix cleared the *earlier*,
+  `Nontemporal`-specific error that used to mask it.
+- The remaining 3 (`memory_access.{nontemporal,aligned_nontemporal,
+  aligned_volatile}`) fail on a different, unrelated bit this row never
+  touched: `spirv.CopyMemory`'s own `memory_access` operand, spelled
+  with `MemoryAccess::Nontemporal` (SPIRVBase.td's `SPIRV_MA_
+  Nontemporal`, bit 2) rather than `ImageOperands::Nontemporal`
+  (`SPIRV_IO_Nontemporal`, bit 14) -- a same-named but distinct bit in a
+  different SPIR-V bit-enum, on an op none of this row's three named
+  patterns (or `ImageReadPattern`/`ImageWritePattern`) handle at all.
+  These 3 fail identically before and after this row's change, for a
+  reason outside its scope.
+
+**This row's fix is real and correctly scoped** -- confirmed directly
+by the disappearance of the `ImageOperands::Nontemporal` legalization
+error from all 351 relevant cases, and by the three targeted `.mlir`
+lit tests added alongside it (`fetch_level_nontemporal`,
+`sample_level_nontemporal`, `read_write_nontemporal`, plus a negative
+`spirv-to-llvm-image-access-invalid.mlir` case confirming
+`Bias|Nontemporal` still correctly fails to legalize, since `Bias`
+itself has no pattern here) -- but its measured CTS payoff in this
+tree's *current* state is nil, entirely masked by the pre-existing
+`combined_image_sampler_separate_descriptors` address-computation bug
+above. That bug is a real, newly-surfaced (to this measurement, not
+newly-introduced) gap, left open as follow-up work for a future
+roadmap row rather than fixed here, being outside `SPIRVToLLVMPatterns.
+cpp`'s `ImageFetchPattern`/`ImageFetchLodPattern`/
+`ImageSampleExplicitLodPattern`/`ImageReadPattern`/`ImageWritePattern`
+scope this row's own text names.
+
+A broader regression check, `check-feme` (1,661 passed, 1 unsupported),
+confirms no regression from this row's change.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
