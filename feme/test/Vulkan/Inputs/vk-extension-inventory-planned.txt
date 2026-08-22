@@ -1,0 +1,3 @@
+# Fixture for vk-gen-extension-inventory.test: one unimplemented extension
+# that is nonetheless inside the declared conformance scope.
+VK_KHR_ray_query = fixture-only roadmap row

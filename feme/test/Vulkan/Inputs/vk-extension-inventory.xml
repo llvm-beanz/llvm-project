@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Minimal vk.xml fixture for vk-gen-extension-inventory.test: one
+     VK_KHR_*/VK_EXT_* extension per status the generator can report, plus
+     the two shapes it must exclude entirely (a `supported="disabled"`
+     extension and a VulkanSC-only one) and a vendor-prefixed extension
+     that is outside the file's own KHR/EXT scope. -->
+<registry>
+  <extensions>
+    <extension name="VK_KHR_synchronization2" number="1" type="device"
+               supported="vulkan" promotedto="VK_VERSION_1_3">
+    </extension>
+    <extension name="VK_KHR_copy_commands2" number="2" type="device"
+               supported="vulkan" promotedto="VK_VERSION_1_3">
+    </extension>
+    <extension name="VK_KHR_ray_query" number="3" type="device"
+               supported="vulkan">
+    </extension>
+    <extension name="VK_EXT_transform_feedback" number="4" type="device"
+               supported="vulkan">
+    </extension>
+    <extension name="VK_EXT_withdrawn_extension" number="5" type="device"
+               supported="disabled">
+    </extension>
+    <extension name="VK_EXT_vulkansc_only_extension" number="6"
+               type="device" supported="vulkansc">
+    </extension>
+    <extension name="VK_NV_vendor_extension" number="7" type="device"
+               supported="vulkan">
+    </extension>
+  </extensions>
+</registry>

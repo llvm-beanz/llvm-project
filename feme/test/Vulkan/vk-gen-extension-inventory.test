@@ -1,0 +1,53 @@
+// vk_gen_extension_inventory.py (see feme/docs/VulkanExtensionInventory.md)
+// must enumerate every non-disabled VK_KHR_*/VK_EXT_* extension straight
+// from vk.xml and report each in exactly one of four states, the fourth of
+// which -- "Planned (in scope, not implemented)" -- is what separates a
+// tracked conformance gap from a deliberate non-goal now that the declared
+// scope is full Vulkan 1.4 including graphics and ray tracing.
+//
+// RUN: %python %S/../../utils/vk_gen_extension_inventory.py \
+// RUN:   %S/Inputs/vk-extension-inventory.xml \
+// RUN:   --advertised %S/Inputs/vk-extension-inventory-advertised.txt \
+// RUN:   --core-promoted %S/Inputs/vk-extension-inventory-core-promoted.txt \
+// RUN:   --planned %S/Inputs/vk-extension-inventory-planned.txt -o %t.md
+// RUN: FileCheck %s < %t.md
+
+// Each of the three list files selects its own status, and a listed note
+// is surfaced verbatim.
+// CHECK-DAG: | `VK_KHR_synchronization2` | Advertised | fixture-only note |
+// CHECK-DAG: | `VK_KHR_copy_commands2` | Implemented (core, not advertised by name) | |
+// CHECK-DAG: | `VK_KHR_ray_query` | Planned (in scope, not implemented) | fixture-only roadmap row |
+
+// An extension named by none of them is "Not implemented".
+// CHECK-DAG: | `VK_EXT_transform_feedback` | Not implemented | |
+
+// A withdrawn (`supported="disabled"`) extension, a VulkanSC-only one, and
+// a vendor-prefixed one are all outside this file's own scope.
+// CHECK-NOT: VK_EXT_withdrawn_extension
+// CHECK-NOT: VK_EXT_vulkansc_only_extension
+// CHECK-NOT: VK_NV_vendor_extension
+
+// --planned is optional: omitting it leaves every previously-planned
+// extension in the "Not implemented" state.
+//
+// RUN: %python %S/../../utils/vk_gen_extension_inventory.py \
+// RUN:   %S/Inputs/vk-extension-inventory.xml \
+// RUN:   --advertised %S/Inputs/vk-extension-inventory-advertised.txt \
+// RUN:   --core-promoted %S/Inputs/vk-extension-inventory-core-promoted.txt \
+// RUN:   -o %t.no-planned.md
+// RUN: FileCheck --check-prefix=CHECK-NO-PLANNED %s < %t.no-planned.md
+
+// CHECK-NO-PLANNED: | `VK_KHR_ray_query` | Not implemented | |
+
+// A status is exclusive: naming one extension in two list files is a hard
+// error rather than a silent precedence rule.
+//
+// RUN: not %python %S/../../utils/vk_gen_extension_inventory.py \
+// RUN:   %S/Inputs/vk-extension-inventory.xml \
+// RUN:   --advertised %S/Inputs/vk-extension-inventory-advertised.txt \
+// RUN:   --core-promoted %S/Inputs/vk-extension-inventory-core-promoted.txt \
+// RUN:   --planned %S/Inputs/vk-extension-inventory-core-promoted.txt 2>&1 \
+// RUN:   | FileCheck --check-prefix=CHECK-OVERLAP %s
+
+// CHECK-OVERLAP: only one status
+// CHECK-OVERLAP-SAME: VK_KHR_copy_commands2

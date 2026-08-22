@@ -1,0 +1,3 @@
+# Fixture for vk-gen-extension-inventory.test: one extension implemented
+# only through its promoted core entry points.
+VK_KHR_copy_commands2
