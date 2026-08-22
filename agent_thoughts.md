@@ -28744,3 +28744,123 @@ continuing.
   in both groups is identical before and after this row. Full breakdown,
   including the hang finding above, in "Roadmap E16: measured impact" in
   VulkanCTSReport.md.
+
+# Agent thoughts: roadmap E17 (SPIR-V 1.6 `Nontemporal` image-operand bit)
+
+## Locating the exact gap
+
+The roadmap row's own text names the three patterns and the file
+precisely, so the first step was just reading them
+(`SPIRVToLLVMPatterns.cpp`): `ImageLoadPattern` (backing both
+`ImageReadPattern` and `ImageFetchPattern`) and `ImageWritePattern` both
+gate on a shared `hasImageOperands` helper that rejects any
+`image_operands` value other than absent or `None`;
+`ImageFetchLodPattern`/`ImageSampleExplicitLodPattern` separately gate
+on an exact `== ImageOperands::Lod` comparison. Both shapes reject
+`ImageOperands::Nontemporal` (SPIRVBase.td's `SPIRV_IO_Nontemporal`,
+bit 14, SPIR-V 1.6+) whether alone or combined with `Lod`, since
+neither is `None` nor exactly `Lod`.
+
+## Design: mask the bit out, don't special-case it per pattern
+
+Rather than adding a fourth accepted value to each comparison (`Lod`,
+`Lod|Nontemporal`, `None`, `Nontemporal` -- four cases growing to eight
+once a second discardable bit ever shows up), I added one shared
+concept: `Nontemporal` is unconditionally cleared from the mask before
+either existing check runs. `hasImageOperands` now clears it before
+its `!= None` check; a new `hasExactImageOperands(operands, Required)`
+clears it before comparing against `Required`, replacing the two
+Lod-only patterns' direct `!=` comparisons. This scales to a future
+"also-discardable" bit (if SPIR-V ever adds one with no correctness
+effect this converter still won't model) by widening one constant
+(`NontemporalBit`, currently just that one bit) rather than touching
+four call sites again.
+
+Deliberately did **not** thread `Nontemporal` through to the emitted
+`llvm.spv.resource.*` intrinsic calls in any form (e.g. as a
+`nontemporal` attribute on the `llvm.load`/`llvm.store` for the plain
+read/write case, or a variant intrinsic name for the sample/fetch
+cases) -- there is no such parameter on any of these intrinsics today,
+and the roadmap row's own text is explicit that this is a hint with
+"no correctness effect," so silently dropping it is the correct
+behavior, not a stopgap pending a future "model caching" follow-up.
+
+## Tests
+
+Three positive `.mlir` FileCheck cases, one per pattern family, mirroring
+each existing test's structure exactly but requiring `v1.6` (the actual
+SPIR-V version gate CTS uses) and adding `Nontemporal` (alone for
+read/write, `Lod|Nontemporal` for fetch/sample-with-LOD) to the
+`image_operands` mask: `read_write_nontemporal` (image-access.mlir),
+`fetch_level_nontemporal`, `sample_level_nontemporal` (sampling.mlir).
+Also added one negative case in a new
+`spirv-to-llvm-image-access-invalid.mlir`: `Bias|Nontemporal` on
+`spirv.ImageSampleImplicitLod` (a pattern with no `Bias` support at
+all) must still fail legalization -- proving the new masking logic
+only discards `Nontemporal` specifically, not any bit combined with it,
+which a less careful implementation (e.g. "accept anything if
+`Nontemporal` is set") could get wrong silently.
+
+## The CTS measurement told a more interesting story than "closes 422 cases"
+
+The roadmap row's own text claimed this closes "D3's
+`spirv_assembly.instruction.compute` 422-case regression, the largest
+single item in this section." Measuring rather than assuming: a
+targeted CTS run of that exact group, before and after this fix
+(before = this same tree with the `SPIRVToLLVMPatterns.cpp` change
+`git stash`-ed out, to isolate exactly this row's own diff rather than
+comparing against some earlier commit that also differs in other
+ways), shows **identical** Pass/Fail/NotSupported totals and an empty
+per-case `Fail`-set diff. Zero cases flip to `Pass`.
+
+Tracing *why*, instead of stopping at "the fix apparently did nothing":
+grepping the pre-fix log for the specific `Nontemporal`-mask
+legalization error found 354 matching cases (351 `ImageOperands::
+Nontemporal` on `ImageFetch`/`ImageSampleExplicitLod`/`ImageRead`, plus
+3 unrelated `CopyMemory` cases using a same-named but different bit,
+`MemoryAccess::Nontemporal` -- SPIRVBase.td's `SPIRV_MA_Nontemporal`,
+bit 2, on an op this row's patterns don't touch at all). Re-running the
+*post*-fix log for those same 351 case names confirmed the
+`Nontemporal` error is gone from every one of them -- the fix works
+exactly as designed -- but all 351 now fail one step later, on
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but
+got 'vector<3xi32>'`. Checking whether this row's own change could
+somehow have introduced *that* new error: no -- the identical error, at
+the identical shader shape, already exists pre-fix on the
+non-`nontemporal`-suffixed sibling case (found by grepping the *same*
+pre-fix log for the same shader family minus the `_nontemporal` name
+suffix). That confirms it's a pre-existing `combined_image_
+sampler_separate_descriptors` address-computation bug this row's fix
+merely stopped masking, not one it created -- the same "closing one gap
+unmasks a different, older one" pattern several earlier rows in this
+roadmap (E4, E7, D0/D1) already established, now recurring here.
+
+This is exactly the kind of thing `.instructions.md`'s "measure, don't
+assume" discipline (implicit in every "measured impact" section this
+report already contains) exists to catch: a roadmap row's own written
+justification ("closes ... 422-case regression") can be wrong about the
+*payoff* even when the fix it describes is entirely correct, and the
+only way to know is an actual before/after CTS diff, not just "the
+code now looks right." Updated both `Roadmap.md`'s E17 entry and this
+file's own new "Roadmap E17: measured impact" section in
+`VulkanCTSReport.md` to record the corrected picture, per the design
+doc's "when you deviate from the design, update it" instruction --
+followed here even though the deviation is in a measured *outcome*, not
+a design decision, because the roadmap text's own factual claim (422
+cases closed) needed the same correction discipline as a wrong design
+premise would.
+
+## Validation
+
+- `ninja FeMeConversionSPIRVToLLVM` after the source change, to catch a
+  build break before touching any test.
+- `ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+  `LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1661/1662
+  passed, 1 unsupported (pre-existing, unrelated), after adding all four
+  new `.mlir` test cases.
+- Targeted `dEQP-VK.spirv_assembly.instruction.compute.*` CTS re-run
+  (19,904 cases) against the real `feme_icd.json`, run both before and
+  after this row's own change (isolated with `git stash`, not diffed
+  against an unrelated earlier commit) to get a clean, single-variable
+  before/after comparison. Full breakdown in "Roadmap E17: measured
+  impact" in VulkanCTSReport.md.
