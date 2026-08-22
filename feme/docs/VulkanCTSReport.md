@@ -7,71 +7,132 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `2f27e5bd85a5` (roadmap D0, "advertise apiVersion 1.4" +
-  "implement VK_KHR_copy_commands2's core names" -- see "Roadmap D0:
-  measured impact" below). The headline table below is this same D0
-  revision's full 54-group run: roadmap D1 (audit-only, no advertised
-  feature/limit/extension changed) is not re-measured in full -- see its
-  own "Roadmap D1: measured impact" section for the targeted subset run
-  that *is* new in this edition. Roadmap E1/E2/E3/E4 (aggregate 1.3/1.4
-  feature/property struct wiring, `synchronization2`, and `maintenance4`)
-  are likewise measured only over the targeted case sets each of their own
-  "measured impact" sections names, not a full re-run -- see those
-  sections. Roadmap E4's own session additionally re-ran the full 54-group
-  sweep once (see "Roadmap E4: measured impact"'s own closing note); that
-  full-sweep total is cumulative across every session since D0's own
-  headline run below, not attributable to E4 alone.
-- `check-feme`: 1541 passed, 1 unsupported as of roadmap E4 (see "Roadmap
-  E4: measured impact" below); the headline table above predates
-  E1/E2/E3/E4 and is not affected by any of the four (no crash, timeout,
-  or full 54-group case-count change).
-- VK-GL-CTS revision: `vulkan-cts-1.4.6.2-412-g716301541136` plus two local
-  fixes (`7163015`, "Guard `dEQP-VK.api.invariance.random` against empty
-  image format lists"; and a second one added by roadmap C7's own pass,
-  "Check `VK_KHR_copy_commands2` support in
-  `image_to_image_transfer_queue.misc.ms_then_ss*`" -- see "Deviations from
-  a stock CTS" below).
+- FeMe revision: `69aa4606e516` (this session: roadmap E27, "fix the
+  `VK_REMAINING_ARRAY_LAYERS` infinite loop in copy/blit/resolve", and E28,
+  "fix the 2D-array/3D-image `vkCmdCopyImage` `SIGSEGV`" -- see "Full run,
+  roadmap E27/E28" below). The headline table below is this same E28
+  revision's full 54-group run, the first full re-run since D0's own
+  headline run above -- every intervening row (D1, E1-E26) was measured
+  only over its own targeted case subset, per each row's own "measured
+  impact" section, not folded into a new full-run headline until now.
+- `check-feme`: 1675 passed, 1 unsupported as of roadmap E28 (see "Full
+  run, roadmap E27/E28" below); up from D0's 1541 by every roadmap row's
+  own new regression tests since, not just this session's four.
+- VK-GL-CTS revision: `vulkan-cts-1.4.6.2-413-ge4b225a7d7cd2c53630f0de3f0912c4d33a816f2`,
+  plus the same two local fixes D0's own edition already recorded (see
+  "Deviations from a stock CTS" below).
 - Host: AArch64 Linux, `LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
   `RelWithDebInfo`.
 
 ## Headline
 
-This is a genuine full 54-group re-run (unlike roadmap C7's own targeted
-groups-only re-run) -- the first since roadmap C1 -- taken *after* both D0
-commits (the apiVersion bump and the copy_commands2 fix it made
-necessary). See "Roadmap D0: measured impact" below for the before/after
-comparison against the previous (apiVersion 1.2) edition of this table.
+This is a genuine full 54-group re-run (the same "every group, six at a
+time, per-group crash isolation" methodology "Reproducing this report"
+below describes), the first since D0's own headline above. It is **not**
+directly comparable to D0's own numbers: roadmap E1-E26 landed a large
+number of real feature/format/limit implementations in between (aggregate
+1.3/1.4 struct wiring, `synchronization2`, `maintenance4`-`6`,
+`shaderIntegerDotProduct`, ASTC LDR/HDR, broadened per-format sampled/
+attachment support, integer-format image sampling, ...), so a much larger
+fraction of cases are now genuinely *exercised* (`Pass`/`Fail`) rather than
+`NotSupported` -- a **rising** failure count here is largely the expected,
+honest cost of advertising more capability, the same pattern D1/E-series's
+own targeted runs already showed one bucket at a time; see each of their
+own "measured impact" sections for the per-feature detail this table does
+not re-derive.
 
 | | Count | Share |
 |---|---|---|
-| Total cases | 3,236,772 (of 3,237,000 possible: see below) | |
-| Passed | 11,040 | 0.34% |
-| Failed | 29,647 | 0.92% |
-| Not supported | 3,196,084 | 98.74% |
+| Total cases | 3,002,485 (of 3,237,000 possible: see below) | |
+| Passed | 27,313 | 0.91% |
+| Failed | 126,457 | 4.21% |
+| Not supported | 2,848,714 | 94.88% |
 | Quality warning | 1 | |
-| **Crashed / timed out** | **1 group (`api`), 228 cases short** | |
+| **Crashed / timed out** | **7 groups, 234,498 cases short (see below)** | |
 
-53 of the 54 top-level `dEQP-VK.<group>.*` groups run to completion; `api`
-aborts partway through on a genuine `SIGSEGV`, unrelated to any FeMe code
-(see "Roadmap D0: measured impact"). 28 of the 54 groups have **zero**
-failures (`conditional_rendering`, `cooperative_vector`,
-`data_graph`, `depth`, `descriptor_indexing`, `dgc`,
+47 of the 54 top-level `dEQP-VK.<group>.*` groups run to completion; seven
+crash partway through -- two are this session's own `roadmap E27`/`E28`
+fixes (see "Full run, roadmap E27/E28" below for what each was and how it
+was found and fixed), the other five are **new, untriaged findings**, not
+yet root-caused past their own crash-site log line:
+
+| Group | Cases measured (of total) | Crash |
+|---|---|---|
+| `api` | 208,840 (of 267,222) | `SIGSEGV` in `api.granularity.in_dynamic_render_pass.*` |
+| `compute` | 19,642 (of 60,811) | `GetElementPtrTypeIterator.h` assertion (`Not byte-addressable`) in `compute.pipeline.zero_initialize_workgroup_memory.*` |
+| `glsl` | 16,003 (of 26,808) | `SIGSEGV` in `glsl.texture_functions.query.texturesamples.*` |
+| `image` | 127,574 (of 142,991) | `SIGSEGV` in `image.subresource_layout.*` |
+| `renderpasses` | 2,317 (of 80,880) | `llvm::Value::setNameImpl` assertion (`Cannot assign a name to void values`) in `renderpasses.dynamic_rendering.*` |
+| `spirv_assembly` | 43,300 (of 68,734) | `llvm_unreachable` in `ResourceCalls.cpp` (`unsupported feme.cpu.resource.* element type`) in `spirv_assembly.instruction.spirv1p4.opselect.array_select` |
+| `synchronization` | 60,144 (of 64,872) | `SIGSEGV` in `synchronization.timeline_semaphore.device_host.*` |
+
+26 of the 54 groups have **zero** failures (`conditional_rendering`,
+`cooperative_vector`, `data_graph`, `depth`, `descriptor_indexing`, `dgc`,
 `drm_format_modifiers`, `fragment_shader_interlock`,
 `fragment_shading_barycentric`, `fragment_shading_rate`, `geometry`,
-`imageless_framebuffer`, `image_processing`, `mesh_shader`, `multiview`,
-`postmortem`, `protected_memory`, `ray_query`, `ray_tracing_pipeline`,
-`reconvergence`, `shader_object`, `sparse_resources`, `synchronization2`,
-`tensor`, `tessellation`, `transform_feedback`, `video`, `wsi`) -- almost
-all of them because the feature they cover is not advertised at all, which
-is the correct, truthful outcome for this ICD's declared scope.
+`image_processing`, `mesh_shader`, `multiview`, `postmortem`,
+`protected_memory`, `ray_query`, `ray_tracing_pipeline`, `reconvergence`,
+`shader_object`, `sparse_resources`, `tensor`, `tessellation`,
+`transform_feedback`, `video`, `wsi`) -- almost all of them because the
+feature they cover is not advertised at all, which is the correct,
+truthful outcome for this ICD's declared scope; a handful (`shader_object`,
+`transform_feedback`) are large groups (243,853 and 133,719 cases
+respectively) cleanly rejected outright rather than genuinely exercised.
 
-**No case produces a wrong answer.** Every one of the 26,925 failures was
-traced to a *clean rejection* -- a pipeline that failed to create, a format
-or descriptor type the ICD does not advertise, or a `deqp-vk` check of a
-mandatory capability the ICD does not claim. Not one is a `Pass`-shaped
-result carrying incorrect data. That is the "must fail before draw time,
-not silently misbehave" contract every FeMeVulkanDesign.md milestone states,
-holding across three million cases.
+**Every failure this table's own `Fail` count includes was, as far as this
+run's own per-group logs show, a clean rejection or a genuinely wrong
+result attributable to a real, named implementation gap** (a format/limit/
+feature this ICD does not yet support, per the E-series rows above) -- **not**
+re-audited case-by-case for this edition the way D0's own headline was
+(126,457 is roughly 4x D0's 29,647, driven by the much larger surface
+E1-E26 now actually exercises), so that specific claim should be treated as
+inherited from those rows' own individual audits rather than freshly
+re-verified here.
+
+## Full run, roadmap E27/E28: measured impact
+
+A full 54-group sweep (this section) is what actually found both bugs --
+neither was reachable by a targeted single-group run the way most E-series
+rows above used, since both are hangs/crashes a narrower run would either
+not have exercised or would have mistaken for one more `api`-style,
+"unrelated" crash.
+
+**E27** (`VK_REMAINING_ARRAY_LAYERS` infinite loop): the first full sweep
+attempt hung indefinitely (30+ minutes of 100% CPU with zero log output)
+on `dEQP-VK.api.copy_and_blit.copy_commands2.blit_image.simple_tests.
+array.all_remaining_layers`, then, once excluded, on `...array.
+not_all_remaining_layers` -- both from the `array_*remaining_layers`
+family `maintenance5` (roadmap E5) legalizes. Before this fix, 538 cases
+across the `api` group name `remaining_layers`; every one of them would
+have hung the same way if reached (most are `buffer_to_image`/
+`image_to_buffer` cases the `blit_image` ones above happened to reach
+first, alphabetically). After the fix, the full `api` group case list
+completes (modulo E28's own separate crash, below) with no hang anywhere
+in the 538-case family.
+
+**E28** (`SIGSEGV` copying a 2D-array image into/out of a 3D image): with
+E27 fixed, the same `api` group re-run crashed instead of hung, on
+`dEQP-VK.api.copy_and_blit.copy_commands2.image_to_image.3d_images.
+2d_to_3d_whole`; `gdb` placed the fault inside `runCopyImage`'s own
+`memcpy` (CommandBuffer.cpp:838, pre-fix), confirming it as a genuine
+FeMe-side bug rather than an "unrelated" one the way D0's original edition
+of this report described the (different, unrelated) `api`-group crash it
+found. 22,806 cases in the `api` group's own filtered case list name
+`2d_to_3d`/`3d_to_2d` (every one of them exercising this same code path);
+after the fix, the specific crashing case above passes (`Pass
+(CopiesAndBlitting test)`) under a direct, isolated re-run, and the full
+`api` group re-run no longer crashes at this case (it instead runs to
+completion past it, up to the separate, new `granularity.*` crash the
+headline table above catalogs as an untriaged E29 finding).
+
+Both fixes are covered by new, targeted unit tests (`ImageTest.
+CopyBufferToImageWithRemainingArrayLayers`, `ImageTest.
+CopyImageWithRemainingArrayLayers`, `ImageOpsTest.
+BlitsWithRemainingArrayLayers`, `ImageOpsTest.
+ResolvesWithRemainingArrayLayers` for E27; `ImageTest.
+CopyImage2DArrayToImage3D` for E28), each confirmed to hang/crash without
+its respective fix and pass with it; `check-feme` is 1675 passed/1
+unsupported after both (up from 1670/1 before this session).
 
 ## Roadmap C1: measured impact
 

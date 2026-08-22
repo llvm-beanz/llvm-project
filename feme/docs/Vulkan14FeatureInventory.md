@@ -113,6 +113,22 @@ table below).
   all-zero reads, not real data) -- tracked as new roadmap row E23. See
   Roadmap.md's E15/E20/E21/E22/E23 rows and `agent_thoughts.md` for the
   full investigation and implementation.
+- **A full `deqp-vk` run (roadmap E27/E28) found two crashes/hangs
+  reachable through this file's own advertised `VK_KHR_maintenance5`
+  scope**, neither a mandatory-floor gap itself (both are pre-existing
+  bugs in already-*advertised* functionality, not an unadvertised
+  feature): `VK_REMAINING_ARRAY_LAYERS` (the sentinel `maintenance5`
+  itself legalizes for a copy/blit/resolve region) hung every one of
+  `copyBufferImageRegion`/`runCopyImage`/`runBlitImage`/`runResolveImage`
+  instead of resolving it against the image's own layer count (E27,
+  closed), and `runCopyImage` `SIGSEGV`ed copying between a 2D-array and a
+  3D image, a copy real Vulkan explicitly allows (E28, closed). Neither
+  changes this file's own Advertised column -- `maintenance5` already read
+  `VK_TRUE` before and after, both fixes are copy/blit/resolve
+  *correctness* work, not new feature surface -- see VulkanCTSReport.md's
+  "Full run, roadmap E27/E28" section for the CTS numbers, and
+  Roadmap.md's E27-E29 rows (E29 catalogs five more crashes the same run
+  found, untriaged) for the full investigation.
 
 None of this is new work landing in this milestone -- D1 is deliberately
 scoped to the inventory itself, not closing it (see Roadmap.md's D1 row).
