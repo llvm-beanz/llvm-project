@@ -530,7 +530,10 @@ extension inventory"):** the audit itself is done; closing what it found is
 in progress. [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) is
 the generated checklist (`feme/utils/vk_gen_feature_inventory.py`, reading
 `vk.xml` directly the same way `vk_gen_entrypoints.py` already resolves
-`CORE_FEATURES` transitively): of 1.3/1.4's 36 mandatory feature bits,
+`CORE_FEATURES` transitively) for the mandatory 1.3/1.4 floor specifically;
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) is the same idea
+at the full `VK_KHR_*`/`VK_EXT_*` extension scope, mandatory or not (roadmap
+E27/E28's own session). Of 1.3/1.4's 36 mandatory feature bits,
 `dynamicRendering` (roadmap E1: now reported through both its pre-promotion
 `VK_KHR_dynamic_rendering` feature struct and the aggregate
 `VkPhysicalDeviceVulkan13Features` struct), `synchronization2` (roadmap

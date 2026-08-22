@@ -1,0 +1,14 @@
+# Extension names whose functionality is implemented but which
+# getSupportedDeviceExtensions does *not* list by name -- an application
+# reading only vkEnumerateDeviceExtensionProperties will not see these, but
+# one that uses the equivalent core VK_VERSION_1_x entry points (this ICD
+# advertises apiVersion 1.4) gets the real implementation regardless, since
+# Vulkan promotion rules make a promoted extension's functionality available
+# through core entry points without enabling it by name. Each note cites the
+# roadmap row that implemented it and, where relevant, why the name itself
+# was never added (usually: no `deqp-vk` case was found that enables it by
+# name regardless of apiVersion, the one reason this ICD's other promoted
+# extensions -- see AdvertisedExtensions.txt -- needed the name added too).
+VK_KHR_copy_commands2 = roadmap D0: vkCmdCopyBuffer2/vkCmdCopyImage2/vkCmdBlitImage2/vkCmdCopyBufferToImage2/vkCmdCopyImageToBuffer2/vkCmdResolveImage2 all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case
+VK_KHR_maintenance4 = roadmap E4: vkGetDeviceBufferMemoryRequirements/vkGetDeviceImageMemoryRequirements/vkGetDeviceImageSparseMemoryRequirements, maxBufferSize, all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case
+VK_EXT_subgroup_size_control = roadmap E7: VkPipelineShaderStageRequiredSubgroupSizeCreateInfo/VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT and the four related limit fields (minSubgroupSize/maxSubgroupSize/maxComputeWorkgroupSubgroups/requiredSubgroupSizeStages) implemented via the promoted VK_VERSION_1_3 aggregate struct; extension string itself never added to getSupportedDeviceExtensions (unlike VK_KHR_synchronization2/maintenance5/maintenance6/shader_integer_dot_product, no known CTS case was found requiring it by name regardless of apiVersion)
