@@ -26,13 +26,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E17 in the roadmap document?
+Can you implement milestone E18 in the roadmap document?
 
-> **SPIR-V 1.6 `Nontemporal` image-operand bit.** Not a feature-bit gap but a
-> shader-compilation one:
-> `ImageFetchPattern`/`ImageFetchLodPattern`/`ImageSampleExplicitLodPattern`
-> (`SPIRVToLLVMPatterns.cpp`) reject any image operand mask they don't recognize
-> exactly, and SPIR-V 1.6's cache hint bit has no case. Since it has no
-> correctness effect, the fix is to accept and discard it rather than model
-> caching. **Closes D3's `spirv_assembly.instruction.compute` 422-case
-> regression**, the largest single item in this section
+> **Texel-buffer-format/robustness inconsistency** (D3's `robustness.oob_access`
+> 6-case regression, not yet root-caused past "format/robustness mismatch" --
+> this row starts with tracing it to a specific line, the way D3 did for its
+> other five buckets, before fixing it) plus `VK_EXT_texel_buffer_alignment`'s
+> two limit fields
+> (`storageTexelBufferOffsetAlignmentBytes`/`SingleTexelAlignment`,
+> `uniformTexelBufferOffsetAlignmentBytes`/`SingleTexelAlignment`, already
+> reserved by E2)
