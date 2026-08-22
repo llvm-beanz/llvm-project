@@ -577,6 +577,17 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // this ICD genuinely implements what it declares.
       {VK_EXT_INLINE_UNIFORM_BLOCK_EXTENSION_NAME,
        VK_EXT_INLINE_UNIFORM_BLOCK_SPEC_VERSION},
+      // (roadmap E18) `storageTexelBufferOffsetAlignmentBytes`/
+      // `uniformTexelBufferOffsetAlignmentBytes` (and their
+      // `SingleTexelAlignment` companions) are now real, non-placeholder
+      // values, agreeing with the dedicated
+      // `VkPhysicalDeviceTexelBufferAlignmentProperties` case
+      // (EntryPoints.cpp); like `inline_uniform_block` above, no CTS case
+      // is known to enable this one by name outside apiVersion 1.3 -- it
+      // is listed for the same reason every other row here is: this ICD
+      // genuinely implements what it declares.
+      {VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME,
+       VK_EXT_TEXEL_BUFFER_ALIGNMENT_SPEC_VERSION},
   };
   return Extensions;
 }

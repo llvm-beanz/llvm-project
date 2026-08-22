@@ -416,10 +416,16 @@ TEST_F(PhysicalDeviceProperties2Test,
       Props13
           .integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated,
       VK_FALSE);
-  EXPECT_EQ(Props13.storageTexelBufferOffsetAlignmentBytes, 0u);
-  EXPECT_EQ(Props13.storageTexelBufferOffsetSingleTexelAlignment, VK_FALSE);
-  EXPECT_EQ(Props13.uniformTexelBufferOffsetAlignmentBytes, 0u);
-  EXPECT_EQ(Props13.uniformTexelBufferOffsetSingleTexelAlignment, VK_FALSE);
+  // Roadmap E18: real once `VK_EXT_texel_buffer_alignment` landed --
+  // `vkCreateBufferView` never enforces an offset alignment stricter than
+  // the core 1.0 `minTexelBufferOffsetAlignment` limit, and a
+  // single-texel-sized offset is always sufficient too. Must agree with
+  // the dedicated `VkPhysicalDeviceTexelBufferAlignmentProperties` case
+  // below.
+  EXPECT_EQ(Props13.storageTexelBufferOffsetAlignmentBytes, 256u);
+  EXPECT_EQ(Props13.storageTexelBufferOffsetSingleTexelAlignment, VK_TRUE);
+  EXPECT_EQ(Props13.uniformTexelBufferOffsetAlignmentBytes, 256u);
+  EXPECT_EQ(Props13.uniformTexelBufferOffsetSingleTexelAlignment, VK_TRUE);
   // (roadmap E4) Real once `VK_KHR_maintenance4` landed: agrees with
   // `VkPhysicalDeviceMaintenance3Properties::maxMemoryAllocationSize`
   // (there is no further, buffer-specific limit beyond the host memory
@@ -700,6 +706,47 @@ TEST_F(
             Props13.maxPerStageDescriptorInlineUniformBlocks);
   EXPECT_EQ(InlineUniformBlockProps.maxDescriptorSetInlineUniformBlocks,
             Props13.maxDescriptorSetInlineUniformBlocks);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       TexelBufferAlignmentIsAdvertisedThroughItsOwnDedicatedPropertyStruct) {
+  // Roadmap E18: `VK_EXT_texel_buffer_alignment`'s own dedicated
+  // properties struct must agree with the aggregate
+  // `VkPhysicalDeviceVulkan13Properties` case above, exactly like
+  // `VK_EXT_inline_uniform_block`'s own struct does.
+  VkPhysicalDeviceTexelBufferAlignmentProperties TexelBufferAlignmentProps{};
+  TexelBufferAlignmentProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &TexelBufferAlignmentProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(TexelBufferAlignmentProps.storageTexelBufferOffsetAlignmentBytes,
+            256u);
+  EXPECT_EQ(
+      TexelBufferAlignmentProps.storageTexelBufferOffsetSingleTexelAlignment,
+      VK_TRUE);
+  EXPECT_EQ(TexelBufferAlignmentProps.uniformTexelBufferOffsetAlignmentBytes,
+            256u);
+  EXPECT_EQ(
+      TexelBufferAlignmentProps.uniformTexelBufferOffsetSingleTexelAlignment,
+      VK_TRUE);
+
+  VkPhysicalDeviceVulkan13Properties Props13{};
+  Props13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES;
+  Props2.pNext = &Props13;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(TexelBufferAlignmentProps.storageTexelBufferOffsetAlignmentBytes,
+            Props13.storageTexelBufferOffsetAlignmentBytes);
+  EXPECT_EQ(
+      TexelBufferAlignmentProps.storageTexelBufferOffsetSingleTexelAlignment,
+      Props13.storageTexelBufferOffsetSingleTexelAlignment);
+  EXPECT_EQ(TexelBufferAlignmentProps.uniformTexelBufferOffsetAlignmentBytes,
+            Props13.uniformTexelBufferOffsetAlignmentBytes);
+  EXPECT_EQ(
+      TexelBufferAlignmentProps.uniformTexelBufferOffsetSingleTexelAlignment,
+      Props13.uniformTexelBufferOffsetSingleTexelAlignment);
 }
 
 TEST_F(

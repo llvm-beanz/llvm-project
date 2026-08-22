@@ -491,12 +491,24 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props13
           ->integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated =
           VK_FALSE;
-      // Texel buffer views (`VK_EXT_texel_buffer_alignment`/E18) remain
-      // unimplemented.
-      Props13->storageTexelBufferOffsetAlignmentBytes = 0;
-      Props13->storageTexelBufferOffsetSingleTexelAlignment = VK_FALSE;
-      Props13->uniformTexelBufferOffsetAlignmentBytes = 0;
-      Props13->uniformTexelBufferOffsetSingleTexelAlignment = VK_FALSE;
+      // (roadmap E18) `VK_EXT_texel_buffer_alignment`: `vkCreateBufferView`
+      // (Buffer.cpp) never enforces an offset alignment stricter than the
+      // core 1.0 `minTexelBufferOffsetAlignment` limit already does, and
+      // the CPU runtime's typed texel buffer load/store helpers
+      // (`femeCpuResourceLoadTypedV4*`/`StoreTypedV4*`,
+      // FeMeRuntimeCPU.c) read and write through `__builtin_memcpy`, which
+      // imposes no stricter alignment of its own -- so both the storage
+      // and uniform variants genuinely need no more than that same
+      // byte alignment, and a single-texel-sized offset (e.g. 4 bytes for
+      // `R32_UINT`) is always sufficient too. These four agree with the
+      // dedicated `VkPhysicalDeviceTexelBufferAlignmentProperties` case
+      // below, exactly like `subgroupSizeControl`'s four fields above.
+      Props13->storageTexelBufferOffsetAlignmentBytes =
+          Info.Properties.limits.minTexelBufferOffsetAlignment;
+      Props13->storageTexelBufferOffsetSingleTexelAlignment = VK_TRUE;
+      Props13->uniformTexelBufferOffsetAlignmentBytes =
+          Info.Properties.limits.minTexelBufferOffsetAlignment;
+      Props13->uniformTexelBufferOffsetSingleTexelAlignment = VK_TRUE;
       // (roadmap E4) `VK_KHR_maintenance4`: the largest single buffer
       // allocation this ICD can create is bounded by the same host memory
       // size `VkPhysicalDeviceMaintenance3Properties::maxMemoryAllocationSize`
@@ -766,6 +778,25 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       ShaderIntegerDotProduct
           ->integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated =
           VK_FALSE;
+      break;
+    }
+    // (roadmap E18) `VK_EXT_texel_buffer_alignment`'s own properties
+    // struct, whose 1.3 core and `EXT` spellings share one `sType`,
+    // agreeing with the aggregate `VkPhysicalDeviceVulkan13Properties`
+    // case above exactly like `VkPhysicalDeviceSubgroupSizeControlProperties`
+    // already does for its own fields.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_PROPERTIES: {
+      auto *TexelBufferAlignment =
+          reinterpret_cast<VkPhysicalDeviceTexelBufferAlignmentProperties *>(
+              Base);
+      TexelBufferAlignment->storageTexelBufferOffsetAlignmentBytes =
+          Info.Properties.limits.minTexelBufferOffsetAlignment;
+      TexelBufferAlignment->storageTexelBufferOffsetSingleTexelAlignment =
+          VK_TRUE;
+      TexelBufferAlignment->uniformTexelBufferOffsetAlignmentBytes =
+          Info.Properties.limits.minTexelBufferOffsetAlignment;
+      TexelBufferAlignment->uniformTexelBufferOffsetSingleTexelAlignment =
+          VK_TRUE;
       break;
     }
     default:
