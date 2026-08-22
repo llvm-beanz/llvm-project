@@ -195,6 +195,20 @@ V6–V8 — and nothing below is permanently excluded except where it says so.
   submission, which is why each stays out of scope; if a mandatory CTS case
   is ever traced to one, that trace promotes it into scope rather than
   excusing the failure.
+
+  **Deviation, found while re-scoping for conformance: the last clause is
+  not true today.** None of `vkEnumeratePhysicalDeviceGroups`,
+  `vkGetDeviceGroupPeerMemoryFeatures`,
+  `vkGetPhysicalDeviceExternal{Buffer,Fence,Semaphore}Properties`,
+  `vkGetPhysicalDeviceImageFormatProperties2`,
+  `vkGetPhysicalDeviceSparseImageFormatProperties2`,
+  `vkGetImageSparseMemoryRequirements2` or
+  `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion` is
+  implemented — each is a core 1.1 command, and an unimplemented one is a
+  null loader dispatch-table entry, i.e. a crash rather than the truthful
+  degenerate answer this bullet promises. [Roadmap.md](Roadmap.md)
+  §1.9.10's K1 is the row that closes it, and it is P0 for exactly that
+  reason.
 - Images, sampling, and samplers in the first executing milestone. These are
   required for broader Vulkan compute compatibility, but FeMe's current CPU
   resource runtime is buffer-oriented and deliberately does not implement

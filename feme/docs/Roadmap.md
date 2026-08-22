@@ -910,6 +910,59 @@ Milestone V9 in [FeMeVulkanDesign.md](FeMeVulkanDesign.md) owns turning
 this into an actual submission (driver ID, conformance version, submission
 package).
 
+#### 1.9.10 The 1.1/1.2 floor this ICD skipped (K-series)
+
+§1.9.4 and §1.9.5 close 1.3 and 1.4. They assume the versions *below*
+them are closed, because roadmap C6 closed the 1.2 floor — but C6 closed
+it as a list of *feature bits and limits*, derived by hand, and never
+checked which promoted *extensions* those bits belonged to. Regenerating
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) over 1.0-1.4
+rather than 1.3/1.4 is what surfaced the difference:
+
+- **Zero of Vulkan 1.1's twelve feature bits are advertised**
+  (`multiview`, `variablePointers`/`variablePointersStorageBuffer`, the
+  four 16-bit storage bits, `samplerYcbcrConversion`,
+  `shaderDrawParameters`, `protectedMemory`, and the two multiview stage
+  bits). A 1.4 claim inherits all of them.
+- **Seven of 1.2's 47 are**, so 40 remain — the whole descriptor-indexing
+  cluster, 8-bit storage, `shaderFloat16`/`shaderInt8`, `scalarBlockLayout`,
+  `bufferDeviceAddress`, the Vulkan memory model, `drawIndirectCount`,
+  `samplerFilterMinmax`, `samplerMirrorClampToEdge`,
+  `shaderOutputViewportIndex`/`shaderOutputLayer`, the int64 atomics.
+- **Eleven core-promoted extensions are only partially implemented**, which
+  neither inventory can express and which reads as a bare "no" in both:
+  `VK_KHR_dedicated_allocation`, `VK_KHR_device_group`,
+  `VK_KHR_get_memory_requirements2`,
+  `VK_KHR_get_physical_device_properties2`, `VK_KHR_maintenance2`,
+  `VK_KHR_multiview`, `VK_KHR_shader_draw_parameters`,
+  `VK_EXT_sampler_filter_minmax`, `VK_KHR_sampler_mirror_clamp_to_edge`,
+  `VK_KHR_separate_depth_stencil_layouts`, `VK_KHR_spirv_1_4`.
+
+The distinction that orders this series: a promoted extension's *commands*
+are mandatory even when its *feature* may be reported false. This ICD's
+own rule already says so — FeMeVulkanDesign.md's "Initial Non-Goals": "An
+advertised core version may report a feature as unsupported; it may not
+omit a command." K1 is that rule applied; the rest are features.
+
+| # | Task | Depends on | Files | Priority |
+|---|---|---|---|---|
+| K1 | **The missing mandatory commands, regardless of feature support.** `vkGetPhysicalDeviceImageFormatProperties2`, `vkGetPhysicalDeviceSparseImageFormatProperties2`, `vkGetImageSparseMemoryRequirements2`, `vkEnumeratePhysicalDeviceGroups`, `vkGetDeviceGroupPeerMemoryFeatures`, `vkGetPhysicalDeviceExternal{Buffer,Fence,Semaphore}Properties`, and `vkCreateSamplerYcbcrConversion`/`vkDestroySamplerYcbcrConversion` are all core 1.1 commands this ICD does not implement. Each may report a degenerate/empty result truthfully; none may be absent. Highest priority in this section because an absent command is a null dispatch-table entry, i.e. a crash, not a rejection — the exact failure mode roadmap D0 hit with `VK_KHR_copy_commands2` | none | `feme/lib/Vulkan/{EntryPoints,Image,Memory,Sync}.cpp`, `ImplementedEntrypoints.txt` | P0 |
+| K2 | **`VK_KHR_get_physical_device_properties2`/`VK_KHR_get_memory_requirements2` completion**, the two partials K1's command list mostly covers; close the row explicitly once every query in each extension exists, so the inventory can move it out of "planned" | K1 | same as K1 | P0 |
+| K3 | **`multiview`**, the 1.1 bit with the largest dependency: it is §1.9.7's H2 (layered rendering) seen from the version-floor side, and closes roadmap C6's one deliberate exception. Tracked in both places on purpose; land it once, cite both | H2 | `feme/lib/Vulkan/{RenderPass,PhysicalDeviceInfo}.cpp` | P0 |
+| K4 | **The storage/arithmetic width clusters**: 16-bit storage (four bits), 8-bit storage (three), `shaderFloat16`/`shaderInt8`, and the int64 atomics. All four are `spirv`→`llvm` conversion and CPU-target questions rather than API ones, and all four are what a shader corpus reaches for long before an API test does. Assign as one lane, not one row | §1.2 | `feme/lib/Conversion/SPIRVToLLVM`, `feme/lib/Target/CPU` | P1 |
+| K5 | **Descriptor indexing** (the 1.2 cluster: `runtimeDescriptorArray`, `descriptorBindingPartiallyBound`, `descriptorBindingVariableDescriptorCount`, the update-after-bind bits, the non-uniform indexing bits). Identical scope to §1.9.8's J2, which needs it for the ray-tracing corpus; whichever series reaches it first closes both | R26 | `feme/lib/Vulkan/Descriptor.{h,cpp}`, `feme/lib/Target/CPU` | P1 |
+| K6 | **`variablePointers`, `shaderDrawParameters`, `scalarBlockLayout`, `samplerFilterMinmax`, `samplerMirrorClampToEdge`, `drawIndirectCount`, `shaderOutputViewportIndex`/`shaderOutputLayer`, `VK_KHR_depth_stencil_resolve`, `VK_KHR_image_format_list`, `VK_EXT_separate_stencil_usage`, `VK_KHR_shader_float_controls`.** Each is small and independent; several are nearly free (`shaderDrawParameters`' builtins are already mapped by `CanonicalizeStage.cpp`; `samplerMirrorClampToEdge`'s address mode is already implemented in `Image.cpp` and merely reported false). Split per bit when assigned | none | mixed | P1 |
+| K7 | **`samplerYcbcrConversion` and `VK_EXT_ycbcr_2plane_444_formats`.** Roadmap E19 declined the format extension because no YCbCr sampling exists at all; that reasoning is correct for the *format* and wrong for the *floor* — the conversion object's commands are core 1.1 (K1), and the feature bit may stay false only if nothing depends on it. Decide explicitly here whether multi-planar sampling is implemented or the bit stays a truthful false forever | K1 | `feme/lib/Vulkan/{Format,Image}.cpp` | P2 |
+| K8 | **`bufferDeviceAddress`**, identical to §1.9.8's J1 — listed here too because it is a core 1.2 bit, not only a ray-tracing prerequisite, and its own CTS coverage exists independently of any ray-tracing group | none | `feme/lib/Vulkan/{Memory,Buffer}.{h,cpp}` | P1 |
+| K9 | **The Vulkan memory model** (`vulkanMemoryModel`, `...DeviceScope`, `...AvailabilityVisibilityChains`) and `protectedMemory`. Both are deliberately last: the memory model needs a real answer about what this CPU target's memory ordering guarantees are (not a bit flip), and protected memory is listed as a non-goal in FeMeVulkanDesign.md — this row is where that non-goal is either confirmed on the record or overturned | none | `feme/lib/Vulkan/EntryPoints.cpp`, FeMeVulkanDesign.md | P2 |
+
+Sequencing: K1 first and alone (it is the only row in this section whose
+absence is a crash rather than a `NotSupported`), then K2/K3 in parallel,
+then K4/K5/K6 as independent lanes, K7-K9 last. Nothing in §1.9.5 (F) or
+§1.9.7 (H) is blocked by this section — but a conformance *submission*
+(§1.9.9) is blocked by all of it, which is why it is P0-heavy despite
+being about versions two releases old.
+
 ### 1.10 Direct3D software adapter
 
 Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md). Nothing exists.
