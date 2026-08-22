@@ -1315,6 +1315,18 @@ void fillFeatures2Chain(void *pNext) {
       Features->texelBufferAlignment = VK_TRUE;
       break;
     }
+    // (roadmap E19) `VK_EXT_4444_formats`'s own feature struct; like
+    // `maintenance5` above, this extension's core promotion added no
+    // core-spelled alias struct of its own, only the `EXT`-suffixed one.
+    // Both formats it names (`Format.cpp`'s `mapVkFormat`) are recognized
+    // `VkFormat` values, so both bits are unconditionally true.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_4444_FORMATS_FEATURES_EXT: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDevice4444FormatsFeaturesEXT *>(Base);
+      Features->formatA4R4G4B4 = VK_TRUE;
+      Features->formatA4B4G4R4 = VK_TRUE;
+      break;
+    }
     default:
       break;
     }

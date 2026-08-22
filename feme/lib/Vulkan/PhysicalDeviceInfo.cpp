@@ -588,6 +588,13 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // genuinely implements what it declares.
       {VK_EXT_TEXEL_BUFFER_ALIGNMENT_EXTENSION_NAME,
        VK_EXT_TEXEL_BUFFER_ALIGNMENT_SPEC_VERSION},
+      // (roadmap E19) `VK_FORMAT_A4R4G4B4_UNORM_PACK16`/
+      // `A4B4G4R4_UNORM_PACK16` (Format.cpp) are both recognized `VkFormat`
+      // values; like `inline_uniform_block`/`texel_buffer_alignment`
+      // above, no CTS case is known to enable this one by name outside
+      // apiVersion 1.3 -- it is listed for the same reason every other row
+      // here is: this ICD genuinely implements what it declares.
+      {VK_EXT_4444_FORMATS_EXTENSION_NAME, VK_EXT_4444_FORMATS_SPEC_VERSION},
   };
   return Extensions;
 }

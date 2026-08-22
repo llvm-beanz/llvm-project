@@ -98,6 +98,16 @@ enum class ResourceFormat : uint32_t {
   // significant one (legacy D3D/OpenGL "ABGR1555" compatibility).
   A1B5G5R5_UNORM,
 
+  // (Roadmap E19, `VK_EXT_4444_formats`) Two 16-bit-packed, 4-bit-per-
+  // component formats -- recognized as a legal `VkFormat` (so an image may
+  // be created with one, and copied/blitted like any other recognized
+  // format) but not yet backed by a `feme::graphics::packClearColor`/
+  // `unpackColor` case, so `isSupportedColorAttachmentFormat` and
+  // `formatFeatureFlags`'s sampled-image bits correctly leave both unset
+  // (see Format.cpp's `formatFeatureFlags` comment).
+  A4R4G4B4_UNORM,
+  A4B4G4R4_UNORM,
+
   // Depth/stencil formats (roadmap R33, "the format expansion the first
   // advertised profile needs"): used only for a `GraphicsPipeline`/
   // `PreparedDraw` depth/stencil attachment, never for a typed buffer.

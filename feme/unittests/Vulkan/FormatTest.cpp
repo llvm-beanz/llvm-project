@@ -40,6 +40,14 @@ TEST(FormatTest, MapsMaintenance5Formats) {
             ResourceFormat::A1B5G5R5_UNORM);
 }
 
+TEST(FormatTest, Maps4444Formats) {
+  // Roadmap E19: `VK_EXT_4444_formats`'s two new packed formats.
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A4R4G4B4_UNORM_PACK16_EXT),
+            ResourceFormat::A4R4G4B4_UNORM);
+  EXPECT_EQ(mapVkFormat(VK_FORMAT_A4B4G4R4_UNORM_PACK16_EXT),
+            ResourceFormat::A4B4G4R4_UNORM);
+}
+
 TEST(FormatTest, RejectsUnsupportedFormat) {
   EXPECT_EQ(mapVkFormat(VK_FORMAT_BC1_RGB_UNORM_BLOCK), std::nullopt);
   EXPECT_EQ(mapVkFormat(VK_FORMAT_UNDEFINED), std::nullopt);
@@ -148,6 +156,9 @@ TEST(FormatTest, ElementSizeMatchesFormatWidth) {
   // Roadmap E5.
   EXPECT_EQ(formatElementSize(ResourceFormat::A8_UNORM), 1u);
   EXPECT_EQ(formatElementSize(ResourceFormat::A1B5G5R5_UNORM), 2u);
+  // Roadmap E19: `VK_EXT_4444_formats`'s two new packed formats.
+  EXPECT_EQ(formatElementSize(ResourceFormat::A4R4G4B4_UNORM), 2u);
+  EXPECT_EQ(formatElementSize(ResourceFormat::A4B4G4R4_UNORM), 2u);
   // Roadmap E20: block-compressed formats have no per-texel size.
   EXPECT_EQ(formatElementSize(ResourceFormat::ASTC_4x4_UNORM), 0u);
   // Roadmap E21: same for the HDR-only variants.
@@ -296,6 +307,25 @@ TEST(FormatTest, FormatFeatureFlagsSampledImageMatchesRuntimeUnpackScope) {
         ResourceFormat::D32_FLOAT, ResourceFormat::ASTC_4x4_SFLOAT}) {
     EXPECT_FALSE(formatFeatureFlags(Format) &
                  VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+  }
+}
+
+TEST(FormatTest, FormatFeatureFlags4444FormatsAreTransferAndBlitOnly) {
+  // Roadmap E19: `VK_EXT_4444_formats`'s two new formats are recognized
+  // `VkFormat` values (so a copy/blit -- which never converts values --
+  // can address them a whole texel at a time), but neither is backed by
+  // a `feme::graphics::packClearColor`/`unpackColor` case yet, so the
+  // sampled-image and color-attachment bits are honestly left unset,
+  // same as any other recognized-but-unbacked format.
+  for (ResourceFormat Format :
+       {ResourceFormat::A4R4G4B4_UNORM, ResourceFormat::A4B4G4R4_UNORM}) {
+    VkFormatFeatureFlags Flags = formatFeatureFlags(Format);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_TRANSFER_DST_BIT);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_BLIT_SRC_BIT);
+    EXPECT_TRUE(Flags & VK_FORMAT_FEATURE_BLIT_DST_BIT);
+    EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT);
+    EXPECT_FALSE(Flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT);
   }
 }
 

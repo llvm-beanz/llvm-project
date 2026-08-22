@@ -181,6 +181,8 @@ Expected<ResourceFormat> parseFixtureFormat(StringRef Format) {
           .Case("s8-uint", ResourceFormat::S8_UINT)
           .Case("a8-unorm", ResourceFormat::A8_UNORM)
           .Case("a1b5g5r5-unorm", ResourceFormat::A1B5G5R5_UNORM)
+          .Case("a4r4g4b4-unorm", ResourceFormat::A4R4G4B4_UNORM)
+          .Case("a4b4g4r4-unorm", ResourceFormat::A4B4G4R4_UNORM)
           .Default(ResourceFormat::Unknown);
   if (Result == ResourceFormat::Unknown)
     return createStringError(inconvertibleErrorCode(),
@@ -614,6 +616,13 @@ StringRef formatFixtureName(ResourceFormat Format) {
     return "a8-unorm";
   case ResourceFormat::A1B5G5R5_UNORM:
     return "a1b5g5r5-unorm";
+  // (Roadmap E19) `VK_EXT_4444_formats`: no clear-color/texel fixture
+  // support exists for them yet (see `getFormatInfo` above), same as
+  // E20's ASTC formats below, but they still need a name for diagnostics.
+  case ResourceFormat::A4R4G4B4_UNORM:
+    return "a4r4g4b4-unorm";
+  case ResourceFormat::A4B4G4R4_UNORM:
+    return "a4b4g4r4-unorm";
   // (Roadmap E20) ASTC block-compressed formats: no clear-color/texel
   // fixture support exists for them yet (see `getFixtureFormatElementSize`
   // below), but they still need a name for diagnostics.

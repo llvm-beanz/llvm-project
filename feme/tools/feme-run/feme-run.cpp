@@ -503,6 +503,11 @@ uint32_t imageFormatElementSize(ResourceFormat Format) {
     return 1;
   case ResourceFormat::A1B5G5R5_UNORM:
     return 2;
+  // (Roadmap E19) `VK_EXT_4444_formats`: packed into 2 bytes, same as
+  // `A1B5G5R5_UNORM` above.
+  case ResourceFormat::A4R4G4B4_UNORM:
+  case ResourceFormat::A4B4G4R4_UNORM:
+    return 2;
   // (Roadmap E20) Block-compressed formats have no per-texel size, and
   // the heap YAML's `images` entries do not support one yet either way
   // (see this function's own comment).

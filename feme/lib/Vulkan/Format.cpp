@@ -82,6 +82,12 @@ std::optional<ResourceFormat> feme::vulkan::mapVkFormat(VkFormat Format) {
     return ResourceFormat::A8_UNORM;
   case VK_FORMAT_A1B5G5R5_UNORM_PACK16_KHR:
     return ResourceFormat::A1B5G5R5_UNORM;
+  // (Roadmap E19) `VK_EXT_4444_formats`'s two new packed 4-bit-per-
+  // component formats.
+  case VK_FORMAT_A4R4G4B4_UNORM_PACK16_EXT:
+    return ResourceFormat::A4R4G4B4_UNORM;
+  case VK_FORMAT_A4B4G4R4_UNORM_PACK16_EXT:
+    return ResourceFormat::A4B4G4R4_UNORM;
   // (Roadmap E20) The 14 LDR-only ASTC block footprints.
   case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
     return ResourceFormat::ASTC_4x4_UNORM;
@@ -219,6 +225,11 @@ uint32_t feme::vulkan::formatElementSize(ResourceFormat Format) {
     return 1;
   // (Roadmap E5) `VK_FORMAT_A1B5G5R5_UNORM_PACK16`: packed into 2 bytes.
   case ResourceFormat::A1B5G5R5_UNORM:
+    return 2;
+  // (Roadmap E19) `VK_EXT_4444_formats`'s two formats: also packed into
+  // 2 bytes (4 components x 4 bits each).
+  case ResourceFormat::A4R4G4B4_UNORM:
+  case ResourceFormat::A4B4G4R4_UNORM:
     return 2;
   // (Roadmap E20) Block-compressed formats have no single-texel size --
   // see `bytesPerBlock` for their whole-block size instead.
