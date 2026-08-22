@@ -2262,6 +2262,88 @@ scope this row's own text names.
 A broader regression check, `check-feme` (1,661 passed, 1 unsupported),
 confirms no regression from this row's change.
 
+## Roadmap E18: measured impact
+
+Roadmap E18 had two independent halves: tracing D3's `robustness.
+oob_access` 6-case bucket to a specific line before fixing it, and
+raising `VK_EXT_texel_buffer_alignment`'s two limit fields from E2's
+placeholder `0`/`VK_FALSE`.
+
+**First half -- the `robustness.oob_access` trace.** Re-running the
+exact repro D3 named (`rba_texel_buffer_uniform_r32_uint_*`, the format/
+usage combination its own text points at) against this session's HEAD
+build finds it does not reproduce: every one of those 12 cases reports
+`NotSupported ("Format not supported for uniform texel buffers")`, the
+same *pre*-D0 result D3's own text describes, not the post-D0 `Fail`
+it named. Widening the run to the entire `dEQP-VK.robustness.
+oob_access.*` group (121 cases, not just the 6 D3 named) confirms this
+is not a narrower fluke of the one format re-tested:
+
+| | Passed | Failed | Not supported |
+|---|---:|---:|---:|
+| `dEQP-VK.robustness.oob_access.*` | 1 | 0 | 120 |
+
+Zero `Fail`. Reading `Buffer.cpp`'s `vkCreateBufferView` and
+`EntryPoints.cpp`'s `vkGetPhysicalDeviceFormatProperties` explains why:
+both already gate on the exact same `feme::vulkan::
+isTexelBufferFormatSupported` predicate (`Format.cpp`) -- one directly,
+one through `formatFeatureFlags`'s `bufferFeatures` computation. That
+sharing did not exist when D3 made its own pass; it is a side effect of
+roadmap E24/E25 landing afterward (`formatFeatureFlags`'s introduction
+and its wiring into `vkGetPhysicalDeviceFormatProperties`/`
+Properties2`). The two call sites cannot disagree by construction now,
+so the "format/robustness mismatch" this row's own text names has
+already been closed as an unintended side effect of unrelated work --
+the same "traced, and does not survive re-verification" outcome D3
+itself recorded for two of its own five other buckets (`ubo.*.std430`,
+`synchronization.op.*`). No further code change was needed or made for
+this half.
+
+**Second half -- the two limit fields.** `storageTexelBufferOffset
+AlignmentBytes`/`uniformTexelBufferOffsetAlignmentBytes` (both the
+aggregate `VkPhysicalDeviceVulkan13Properties` case and a new dedicated
+`VkPhysicalDeviceTexelBufferAlignmentProperties` case, `EntryPoints.
+cpp`) are now the real `minTexelBufferOffsetAlignment` (256):
+`vkCreateBufferView` never enforces anything stricter, and the CPU
+runtime's typed texel-buffer load/store helpers
+(`femeCpuResourceLoadTypedV4*`/`StoreTypedV4*`, `FeMeRuntimeCPU.c`)
+read and write through `__builtin_memcpy`, which has no alignment
+requirement of its own -- so both `SingleTexelAlignment` companions are
+truthfully `VK_TRUE` too. `VK_EXT_texel_buffer_alignment` is now listed
+in `getSupportedDeviceExtensions` (`PhysicalDeviceInfo.cpp`).
+
+**This second half's first draft was not complete, and a targeted CTS
+run is why a follow-up commit was needed.** That draft added only the
+properties-side plumbing above; running
+`dEQP-VK.*texel_buffer_alignment*` against it found:
+
+| | Passed | Failed |
+|---|---:|---:|
+| `dEQP-VK.api.info.get_physical_device_properties2.features.texel_buffer_alignment_features_ext` | `Fail` (`"Mismatch between VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT"`) |
+| `dEQP-VK.api.device_init.create_device_unsupported_features.texel_buffer_alignment_features_ext` | `Fail` (`"Enabling unsupported features didn't return VK_ERROR_FEATURE_NOT_PRESENT"`) |
+
+Unlike every other extension this document tracks, `VK_EXT_
+texel_buffer_alignment` promoted only its *properties* struct to core
+1.3 (per the Vulkan specification); its features struct,
+`VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT`, stays extension-only
+with no aggregate `VkPhysicalDeviceVulkan13Features` field to read
+through instead, and `vkGetPhysicalDeviceFeatures2` had no case for it
+at all. A follow-up commit added one, `texelBufferAlignment =
+VK_TRUE` unconditionally (this ICD needs no more than the dedicated
+properties case above already promises), closing both cases:
+
+| | Before | After |
+|---|---|---|
+| `dEQP-VK.*texel_buffer_alignment*` (2 cases) | 2 `Fail` | 2 `Pass` |
+| `dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` | `Pass` | `Pass` (unaffected -- agrees with the dedicated struct, exactly as E2's own note anticipated) |
+
+A full `dEQP-VK.api.info.*` re-run (10,484 cases) after both commits
+shows the same 404 `Fail` total as before this row, with none of them
+naming `texel`/`alignment` -- this row's own scope closes cleanly with
+no regression elsewhere in that group. A broader regression check,
+`check-feme` (1,663 passed, 1 unsupported), confirms no regression from
+either commit.
+
 ## What the 3,199,421 `Not supported` results mean
 
 A `NotSupported` result is a *pass* for conformance purposes when the
