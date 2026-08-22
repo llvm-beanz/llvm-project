@@ -46,6 +46,19 @@ no image or sampler descriptor, and no `lib/Graphics`, `lib/RayTracing`,
 relative *within that track*: a P0 there does not outrank a P1 in §1.1–§1.7,
 it means "the graphics/runtime work stalls until this lands".
 
+Since §1.9.2, both tracks answer to a third thing that is neither a
+subsystem nor a milestone: the **conformance target**. Per
+[FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Conformance Target", the
+Vulkan ICD now aims at full Vulkan 1.4 conformance covering compute,
+graphics *and* ray tracing (and, eventually, the Direct3D equivalent —
+§1.10.1). That changes what "done" means for the graphics/runtime track: a
+CTS group reporting zero failures because nothing behind it is advertised
+used to be a correct end state, and is now a measured gap (§1.9.7, §1.9.8).
+It does not reorder the tracks — the graphics core still has to exist
+before it can be conformant — but every P-priority below is now read
+against §1.9.9's definition of done rather than against "the design says
+so".
+
 The two tracks are not independent. Four compute-track narrowings recorded in
 §1.6 are load-bearing prerequisites for graphics milestones
 (FeMeGraphicsDesign.md, "Prerequisites from the compute CPU target"), and
@@ -587,6 +600,17 @@ Every one is optional for Vulkan 1.2 conformance, every one is correctly
 reported `NotSupported` today, and each remains scheduled by its own V or G
 milestone rather than by conformance.
 
+**That paragraph no longer holds in full, and is kept as written because
+the C-series was planned under it.** The declared scope is now full Vulkan
+1.4 conformance including graphics and ray tracing
+([FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Conformance Target"), so
+WSI, ray tracing, mesh shading, tessellation and geometry are tracked gaps
+with assigned rows (§1.9.7's H-series, §1.9.8's J-series) rather than
+milestone-scheduled options. Sparse resources, YCbCr, transform feedback,
+`VK_EXT_shader_object` and cooperative matrix/vector are still out of
+scope, and §1.9.7's H12 is the row that has to say so once, on the record,
+instead of leaving it to be re-decided per CTS run.
+
 #### 1.9.2 The road to Vulkan 1.4 conformance
 
 §1.9.1's own framing decision -- "Conformance target version... This
@@ -763,7 +787,12 @@ after E16): F9, F10. **Lane 6** (new subsystems, largest single items,
 good candidates for a dedicated owner rather than a quick task): F1, F8,
 F11.
 
-#### 1.9.6 Cross-cutting tasks, not gated on any single E/F row
+#### 1.9.6 Cross-cutting tasks, not gated on any single E/F/H/J row
+
+(This table's own rows are numbered G1-G5 for historical reasons and are
+*not* the FeMeGraphicsDesign.md milestones G0-G8 that §1.8, §1.9.7 and
+§1.9.8 cite. Where a row below says "G", read "this table"; everywhere
+else in this document, "G0"-"G8" is a graphics milestone.)
 
 | # | Task | Priority |
 |---|---|---|
@@ -772,6 +801,114 @@ F11.
 | G3 | **A per-row CTS re-measurement discipline**, matching D1-D3's own precedent: every E/F row's PR should cite the specific `dEQP-VK` group(s) it targets and the actual before/after count for that group — not the whole 54-group suite unless the change plausibly touches more than one (the same "targeted, real, not simulated" scoping D1 used for its own no-op entrypoint-table change) | P0 |
 | G4 | ~~**Re-triage `Vulkan14FeatureInventory.md`'s two verify-first rows** (E15's ASTC HDR depends on LDR ASTC's own status, F3's `shaderFloatControls2` depends on the unpromoted `shaderFloatControls`'s own status) before assigning them, since each may expand into its own separate row once checked~~ (E15 half done: confirmed no ASTC decode of any kind, LDR or HDR, and no block-compressed format support at all -- split into E20 (LDR prerequisite plus the block-layout groundwork the investigation also found missing in `Image.cpp`) and E21 (E15's original HDR-specific scope, now depending on E20); see E15/E20/E21 above and `agent_thoughts.md`. F3's `shaderFloatControls2` half remains open) | P1 |
 | G5 | **Once §1.9.4 (1.3) is fully closed under Strategy A, or continuously under Strategy B, re-run and update this section's own "not yet measured" rows** with real CTS deltas, the same way §1.9.1's C-rows each grew a "measured impact" parenthetical as they closed | P1 |
+
+#### 1.9.7 Closing the graphics conformance surface (H-series)
+
+§1.9.4 and §1.9.5 close the *core version* floor: the feature bits, limit
+fields and promoted extensions a device claiming `VK_API_VERSION_1_4` must
+report truthfully. They do not, on their own, make this a graphics device.
+[FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Conformance Target" now
+declares graphics part of the conformance claim rather than a capability
+that may or may not be added, so the gaps below stop being "correctly
+`NotSupported`" and become tracked rows.
+
+The evidence this section is derived from is
+[VulkanCTSReport.md](VulkanCTSReport.md)'s own headline: of the 26 groups
+with **zero** failures, `tessellation`, `geometry`, `multiview`,
+`mesh_shader`, `wsi`, `transform_feedback`, `fragment_shading_rate`,
+`fragment_shader_interlock`, `fragment_shading_barycentric`, `depth` and
+`shader_object` are zero precisely because nothing behind them is
+advertised. Under the old scope that was the correct end state; under this
+one it is the measurement of how much graphics surface is missing.
+
+Same granularity and testing discipline as §1.9.4: one row, one owner, one
+commit series, one lit/unittest addition, and one targeted `deqp-vk`
+before/after per §1.9.6's G3. "G5"/"G6"/"G7"/"G8" in the Depends-on column
+are FeMeGraphicsDesign.md milestones (§1.8.5), not §1.9.6's own G-rows.
+
+| # | Task | Depends on | Files | Priority |
+|---|---|---|---|---|
+| H1 | **Triage the graphics half of E29's crash list first.** Two of the seven crashed groups in the current full run are graphics: `renderpasses.dynamic_rendering.*` (an `llvm::Value::setNameImpl` assertion, "Cannot assign a name to void values") and `glsl.texture_functions.query.texturesamples.*` (`SIGSEGV`). A crashed group's totals are unusable, so every H-row below is measured against a baseline these two corrupt; fixing them is what makes the rest of this section's numbers mean anything | E29 | `feme/lib/Vulkan/RenderPass.cpp`, `feme/lib/Graphics` | P0 |
+| H2 | **Layered rendering + `multiview`.** `vkCreateFramebuffer` rejects `layers != 1` (`RenderPass.cpp:383`) and `vkCreateRenderPass2` rejects any nonzero `viewMask` (`RenderPass.cpp:274`); the executor renders one layer. Add a layer dimension to the render-target binding and the raster loop, then `gl_Layer`/`ViewIndex` as stage system values, and only then advertise `multiview` — the one 1.2 feature roadmap C6 deliberately left unadvertised for exactly this reason. Closes C6's open exception and the whole `dEQP-VK.multiview` group | G-track layered rendering | `feme/lib/Vulkan/{RenderPass,CommandBuffer}.cpp`, `feme/lib/Graphics/Executor.cpp` | P0 |
+| H3 | **Multiple viewports and scissors.** `maxViewports` is hard-coded to 1 (`PhysicalDeviceInfo.cpp:247`) and `vkCmdSetViewportWithCount` and the pipeline path both reject anything else (`GraphicsPipeline.cpp:825`). Needs a per-primitive viewport index in the executor, `ViewportIndex` as a stage output, and `shaderOutputViewportIndex`/`shaderOutputLayer` (both `VK_FALSE` in the aggregate 1.2 struct today) raised in lockstep with H2 | H2 | `feme/lib/Vulkan/{PhysicalDeviceInfo,GraphicsPipeline,CommandBuffer}.cpp`, `feme/lib/Graphics/Executor.cpp` | P1 |
+| H4 | **Tessellation stages.** `GraphicsPipeline.cpp` accepts exactly `VK_SHADER_STAGE_VERTEX_BIT` and `VK_SHADER_STAGE_FRAGMENT_BIT` (its `mapStage`/stage-mask check, ~lines 983-1118); everything else is rejected. Needs G5's hull/domain wrappers, patch storage, and tessellator, then the `tessellationShader` feature bit, `maxTessellation*` limits, and the `VkPipelineTessellationStateCreateInfo`/patch-list topology path. Whole `dEQP-VK.tessellation` group | G5 | `feme/lib/Vulkan/GraphicsPipeline.cpp`, `feme/lib/Graphics` | P1 |
+| H5 | **Geometry stage.** Same rejection as H4, same milestone (G5), but an independent feature bit (`geometryShader`), an independent limit block (`maxGeometry*`), stream output, and `multiviewGeometryShader` once H2 lands. Whole `dEQP-VK.geometry` group | G5, H4 (shared wrapper work) | `feme/lib/Vulkan/GraphicsPipeline.cpp`, `feme/lib/Graphics` | P1 |
+| H6 | **Mesh and task (amplification) shading**, `VK_EXT_mesh_shader`: G6's stage model plus the Vulkan-side pipeline/draw entry points (`vkCmdDrawMeshTasks*`), bounded payload/output limits reported truthfully, and the mesh path through the same prepared-draw code. Whole `dEQP-VK.mesh_shader` group | G6 | `feme/lib/Vulkan/{GraphicsPipeline,CommandBuffer,PhysicalDeviceInfo}.cpp`, `feme/lib/Graphics` | P2 |
+| H7 | **The optional core 1.0 graphics feature bits.** `PhysicalDeviceInfo.cpp` reports exactly three `VkPhysicalDeviceFeatures` bits `VK_TRUE` (`robustBufferAccess`, `dualSrcBlend`, `textureCompressionASTC_LDR`, lines 349-373); the other ~52 are all `VK_FALSE`. Each is *optional* for a 1.4 submission, so none blocks a conformance claim — but each is a block of mandatory-list cases reported `NotSupported`, and several are cheap on a software device (`imageCubeArray`, `independentBlend`, `fillModeNonSolid`, `depthClamp`, `depthBiasClamp`, `depthBounds`, `wideLines`/`largePoints` once F5's line rasterization lands, `sampleRateShading`, `alphaToOne`, `logicOp`, `occlusionQueryPrecise`, `multiDrawIndirect`, `drawIndirectFirstInstance`, `vertexPipelineStoresAndAtomics`, `fragmentStoresAndAtomics`, `shaderClipDistance`, `shaderCullDistance`, `samplerAnisotropy`, `shaderStorageImage*`). Split into sub-rows per cluster when assigned; do **not** land as one commit | G-track per cluster | `feme/lib/Vulkan/PhysicalDeviceInfo.cpp`, `feme/lib/Graphics` | P1 |
+| H8 | **Format table completeness for the graphics profile.** Roadmap C1/E24/E25 grew `vkGetPhysicalDeviceFormatProperties`/`ImageFormatProperties` from a stub to real per-format support, but the advertised set is still far short of Vulkan's mandatory format table for a graphics-capable device (BC/ETC2 compressed sampling, the full vertex-buffer format list, the mandatory blit/filter bits, multisample capability per format). This is the graphics analogue of C1 and, like C1, it unblocks whole Amber-based groups rather than single cases | E25 | `feme/lib/Vulkan/Format.cpp`, `feme/lib/Graphics` | P0 |
+| H9 | **Query and pipeline-statistics breadth.** `VK_QUERY_TYPE_PIPELINE_STATISTICS` is still declined (roadmap C5's own remaining exception) because no truthful counter existed; once the raster pipeline owns primitive/invocation counts per stage, the counters become real. Also covers inherited-render-pass secondary command buffers if that path is ever advertised | H4/H5 (for the per-stage counters) | `feme/lib/Vulkan/QueryPool.cpp`, `feme/lib/Graphics/Executor.cpp` | P2 |
+| H10 | **WSI**: `VK_EXT_headless_surface` plus the full swapchain state machine first, then exactly one CI-exercisable platform surface, per FeMeVulkanDesign.md's "Window-system integration" decision. Requires this ICD to distinguish an instance-level extension list from the device-level one for the first time (`vkEnumerateInstanceExtensionProperties` currently returns the same list). Whole `dEQP-VK.wsi` group | V8 | `feme/lib/Vulkan/{EntryPoints,PhysicalDeviceInfo}.cpp`, new `Surface.{h,cpp}`/`Swapchain.{h,cpp}` | P2 |
+| H11 | **Secondary command buffers inside a render pass**, and the render-pass state inheritance they carry — recorded as part of V7 but independently testable, and a prerequisite for several `renderpasses`/`dynamic_rendering` cases rather than a feature bit of its own | none | `feme/lib/Vulkan/CommandBuffer.cpp` | P2 |
+| H12 | **Decide, once, which large optional extension groups stay out of scope**, and record the decision here rather than rediscovering it per run: `transform_feedback` (133,719 cases), `shader_object` (243,853), `fragment_shading_rate`, `fragment_shader_interlock`, `fragment_shading_barycentric`, `conditional_rendering`, `descriptor_indexing`, `sparse_resources`, `protected_memory`, `video`. None is required for a 1.4 submission; `descriptor_indexing` is the one with a real conformance consequence, since J-series ray tracing needs a large part of it (see §1.9.8's J2). Everything else defaults to out of scope, per Part 4 | none | this file | P1 |
+
+Sequencing: H1 first (it is what makes every other row measurable), then H8
+and H2 in parallel (the two largest unlocks, in disjoint files), then H4/H5
+behind G5, H7's clusters continuously alongside, and H3/H6/H9/H10/H11
+after. H12 is a decision, not an implementation, and should be settled
+before anyone starts a row it would have excluded.
+
+#### 1.9.8 Ray tracing (J-series)
+
+Ray tracing is not part of the Vulkan 1.4 core floor: `VK_KHR_ray_query`,
+`VK_KHR_ray_tracing_pipeline` and `VK_KHR_acceleration_structure` are
+optional extensions, and a 1.4 conformance submission is valid without any
+of them. They are in scope anyway, per
+[FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Conformance Target": the CTS's
+ray-tracing groups are the only conformance-grade tests that exist for the
+traversal and continuation machinery
+[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md)'s G7/G8 design, and both
+report zero failures today only because nothing is advertised.
+
+Two properties make this series different from every other one in §1.9,
+and both change how it should be distributed:
+
+- **It is a dependency chain, not a set of independent rows.** Nothing can
+  be advertised until J1-J4 all land, because the extension set's own
+  `requires` graph forbids advertising a member without its prerequisites
+  (see FeMeVulkanDesign.md's "Mesh shading and ray tracing exposure").
+- **Most of the work is in `feme::graphics`/a new `feme::raytracing`, not
+  in `lib/Vulkan`.** The Vulkan rows below are the API mapping; G7/G8 are
+  the engine. Direct3D's DXR (FeMeWARPDesign.md's W6) reuses the same
+  engine, which is why it is worth building once, carefully, rather than
+  twice.
+
+| # | Task | Depends on | Files | Priority |
+|---|---|---|---|---|
+| J1 | **Buffer device address** (`bufferDeviceAddress`, core since 1.2, currently `VK_FALSE` in the aggregate `VkPhysicalDeviceVulkan12Features` case). Every acceleration-structure build input and shader binding table is addressed by `VkDeviceAddress`, so this is the true first row: `vkGetBufferDeviceAddress`, a device-address space over this ICD's own allocations, and the bounds model that turns an attacker-supplied address back into a checked allocation + offset. Also unblocks `VK_KHR_buffer_device_address`'s own CTS coverage independently of ray tracing | none | `feme/lib/Vulkan/{Memory,Buffer}.{h,cpp}`, `EntryPoints.cpp` | P0 |
+| J2 | **Descriptor indexing** (the core 1.2 `descriptorIndexing` cluster: `runtimeDescriptorArray`, `descriptorBindingPartiallyBound`, `descriptorBindingVariableDescriptorCount`, the `shader*ArrayNonUniformIndexing` bits — all `VK_FALSE` today). Not ray tracing itself, but the `dEQP-VK.ray_tracing_pipeline` corpus leans on it heavily, and the shader-side non-uniform indexing is a `feme::cpu` question (a divergent descriptor index through the existing heap model) rather than an API one | §1.2, R26 | `feme/lib/Vulkan/Descriptor.{h,cpp}`, `feme/lib/Target/CPU` | P1 |
+| J3 | **`VK_KHR_deferred_host_operations`.** A prerequisite of `VK_KHR_acceleration_structure` with no traversal content of its own: `VkDeferredOperationKHR` plus the join/status protocol. This ICD already owns a worker pool (roadmap R21), so a truthful implementation is either a real deferral onto it or an honest "everything completes immediately"; both are legal, and the second is a good first row for a new contributor | none | new `feme/lib/Vulkan/DeferredOperation.{h,cpp}` | P1 |
+| J4 | **`VK_KHR_acceleration_structure`.** The API mapping of G7's canonical acceleration structures: `vkCreateAccelerationStructureKHR`, host and device builds, `VkAccelerationStructureBuildRangeInfo`/geometry validation (attacker-controlled counts and strides — FeMeVulkanDesign.md's "Mesh shading and ray tracing exposure" owns this obligation), copies/compaction, and `vkWriteAccelerationStructuresPropertiesKHR`. Ships with the build-input fuzzer that document's rule requires | J1, J3, G7 | new `feme/lib/Vulkan/AccelerationStructure.{h,cpp}`, `feme/lib/RayTracing` | P1 |
+| J5 | **`VK_KHR_ray_query`.** SPIR-V's `OpRayQuery*` family needs `spirv`->`llvm` conversion patterns and a CPU-side implementation over G7's traversal, with no new pipeline type at all — which is what makes it the *first advertisable* ray-tracing capability, and the one that validates traversal independently of the continuation transform. Whole `dEQP-VK.ray_query` group | J4, G7 | `feme/lib/Conversion/SPIRVToLLVM`, `feme/lib/RayTracing` | P1 |
+| J6 | **`VK_KHR_ray_tracing_pipeline`.** All six stage kinds, hit-group linkage, `vkCreateRayTracingPipelinesKHR`, shader binding tables with checked strides and alignments (plus their own fuzzer), `vkCmdTraceRaysKHR`/`Indirect`, and recursion depth enforced at pipeline creation. Depends on G8's continuation transform, the largest single piece of new compiler work left in this document. Whole `dEQP-VK.ray_tracing_pipeline` group | J5, G8 | new `feme/lib/Vulkan/RayTracingPipeline.{h,cpp}`, `feme/lib/RayTracing` | P2 |
+| J7 | **`VK_KHR_pipeline_library`** for library-linked ray-tracing pipelines, and `VK_KHR_ray_tracing_maintenance1` (`vkCmdTraceRaysIndirect2`, the ray-query-side feature bits) — separable follow-ons that several CTS cases require by name once J6 advertises anything | J6 | `feme/lib/Vulkan/RayTracingPipeline.cpp` | P2 |
+| J8 | **`VK_KHR_ray_tracing_position_fetch`** and the remaining small ray-tracing extensions the CTS enables by name; assign only after J6's own measured run shows which ones its cases actually require, the same "measure, then assign" discipline E19 used for 1.3's small extensions | J6 | `feme/lib/RayTracing` | P2 |
+| J9 | **A ray-tracing conformance measurement**, matching §1.9.6's G3 but for a group that is currently 100% `NotSupported`: `dEQP-VK.ray_query` and `dEQP-VK.ray_tracing_pipeline` must each be run and recorded in VulkanCTSReport.md as a real baseline (case counts, not zeros) *before* J5/J6 land, so their own before/after has something to compare against | none | `feme/utils`, VulkanCTSReport.md | P1 |
+
+#### 1.9.9 What "full Vulkan 1.4 conformance" is done against
+
+A single, checkable definition, so that "are we conformant yet" never
+becomes a matter of opinion. All five must hold simultaneously:
+
+1. **Zero `Fail`** in the mandatory `deqp-vk` list for
+   `VK_API_VERSION_1_4`, plus zero `Fail` in `dEQP-VK.ray_query` and
+   `dEQP-VK.ray_tracing_pipeline` for the advertised ray-tracing set
+   (§1.9.8's own criterion; not required for the submission itself).
+2. **Zero crashed or truncated groups.** The current run has seven
+   (headline table, VulkanCTSReport.md); a crashed group's totals are not
+   a result at all.
+3. **Every mandatory feature, limit, format and queue capability
+   advertised and truthful** — §1.9.4 (E), §1.9.5 (F) and §1.9.7 (H)
+   closed, cross-checked against
+   [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) regenerated
+   from the registry rather than from this tree's notes.
+4. **A stock, unpatched CTS** (roadmap C9), on a build with assertions
+   enabled.
+5. **Reproduced by the continuous job** (C10/D4/G1-G2), not by a
+   hand-run sweep, so that the claim survives the next commit.
+
+Milestone V9 in [FeMeVulkanDesign.md](FeMeVulkanDesign.md) owns turning
+this into an actual submission (driver ID, conformance version, submission
+package).
 
 ### 1.10 Direct3D software adapter
 
@@ -787,13 +924,44 @@ Owned by [FeMeWARPDesign.md](FeMeWARPDesign.md). Nothing exists.
 | Textures, sampling, copy footprints, views, format matrix | W3 | P1 (blocked on G2) |
 | Raster, output merge, tessellation/geometry, pipeline libraries, persistent cache, HLK | W4–W5 | P2 (blocked on G3–G5) |
 | DXGI presentation, shared resources/fences, D3D11-on-12 evaluation | W6 | P2 |
+| DXR (state objects, ray-tracing pipelines, shader tables, inline ray tracing at `D3D12_RAYTRACING_TIER_1_1`) and mesh/amplification shading, both now inside the declared scope rather than "evaluate later" | W6 | P2 (blocked on G6–G8, and on §1.9.8 proving the shared engine against the Vulkan CTS first) |
+| No conformance measurement of any kind is possible in this tree: the HLK is Windows-only and there is no Windows CI, so the shared graphics/ray-tracing core's conformance evidence comes from the Vulkan side until W0 solves that | W7 | P1 |
 
-The Direct3D track needs no new milestones of its own — W4–W6 are already
-scheduled — only the dependency on G2–G8 that the graphics design records.
 Its portable half (command execution, resource layout, software graphics) is
 required to stay unit-testable on non-Windows hosts, which is what makes W1–W5
 partially reviewable in this tree at all; only `lib/Direct3D/Windows` is
 genuinely Windows-only.
+
+#### 1.10.1 The equivalent conformance scope
+
+[FeMeWARPDesign.md](FeMeWARPDesign.md)'s "Conformance Target" now states the
+Direct3D counterpart of §1.9.9's definition: feature level 12_2 in full
+(DXR 1.1, mesh shaders, sampler feedback, variable-rate shading, binding
+tier 3), measured by the HLK Direct3D 12 suites and this project's own
+portable execution tests, with the same "advertise only what passes" rule.
+Two scheduling facts follow, and both are the reason this stays a §1.10
+note rather than its own E/F/H/J-style series:
+
+- **The work is mostly already scheduled, under other names.** Everything
+  the Direct3D target needs from the shared core is a G-row (G2–G8) or,
+  transitively, a §1.9.7/§1.9.8 row that drives one. Adding a parallel
+  Direct3D row per capability would double-track the same engine work; what
+  is genuinely Direct3D-specific stays in W0–W7.
+- **It is deliberately behind Vulkan, not beside it.** The Vulkan CTS runs
+  on this project's hosts today and the HLK does not, so the shared core
+  reaches conformance quality through §1.9 first. "Eventually equivalent"
+  is a scope statement, not a schedule one — and W7 is the milestone that
+  makes it checkable rather than aspirational.
+
+The one thing this section *does* add is an obligation on §1.9.7/§1.9.8
+rows: a fix landed in `feme::graphics`/`feme::raytracing` for a Vulkan CTS
+failure must not be written as if Vulkan were its only consumer, because
+W4–W7 will re-run the same code under Direct3D semantics. Where the two
+APIs genuinely differ (raster rules, coordinate origins, precision
+requirements), the difference belongs in the API runtime, per
+FeMeGraphicsDesign.md's "Architectural Boundary" — recording which of the
+two it is, in the fix itself, is what keeps the Direct3D side from
+rediscovering it as a bug.
 
 ## Part 2: End-to-end testing roadmap
 
@@ -1223,6 +1391,18 @@ ordered by measured CTS cost rather than by feature dependency, and C1/C4a
 in particular should be done *before* the next V milestone, since they are
 what makes the next CTS run's output readable.
 
+The same is true of every later conformance series, and increasingly so:
+§1.9.4's E-rows and §1.9.5's F-rows cut across V4–V6, §1.9.7's H-rows cut
+across V6–V8 (H2/H3 are V7 work, H6/H10 are V8 work, H1/H7/H8 belong to no
+milestone at all), and §1.9.8's J-rows are V8's ray-tracing content
+re-expressed as an ordered dependency chain. Read the milestone tables for
+*what a coherent device looks like at each step*, and §1.9's series for
+*what to do next*; where they disagree about ordering, the series wins,
+because it is the one derived from measurement. V9 (conformance
+submission) and W7 (its Direct3D counterpart) are the two milestones that
+only exist because of the conformance target, and neither has a §3.2
+dependency of its own beyond "everything else".
+
 The capability rule from FeMeGraphicsDesign.md applies to both tables and is
 the one scheduling constraint that cannot be traded away: neither runtime may
 advertise a graphics-capable queue, `VK_QUEUE_GRAPHICS_BIT`, or a
@@ -1279,8 +1459,15 @@ what was decided, since the decisions are what the later steps build on:
   needs its own design.
 - A native Direct3D 11 DDI (FeMeWARPDesign.md W6): evaluate D3D11-on-12
   coverage first.
-- Vulkan video, sparse resources, and any extension outside the advertised
-  manifest (FeMeVulkanDesign.md Initial Non-Goals).
+- Vulkan video, sparse residency, protected memory, device groups, external
+  memory/synchronization, YCbCr sampling, transform feedback,
+  `VK_EXT_shader_object`, and cooperative matrix/vector (FeMeVulkanDesign.md
+  Initial Non-Goals). Each is optional for a Vulkan 1.4 submission, which is
+  the test this list now applies: an optional capability stays here, and
+  anything a *mandatory* CTS case is traced to leaves this list for §1.9.7
+  instead. Ray tracing, mesh shading, tessellation, geometry and WSI were
+  all on this list under the previous, compute-first scope and are not any
+  more — see §1.9.7 and §1.9.8.
 - Transparent substitution for Microsoft's WARP binary or
   `D3D_DRIVER_TYPE_WARP`/`EnumWarpAdapter` interception (FeMeWARPDesign.md
   Status): those are Windows-owned selection paths, and a separately
