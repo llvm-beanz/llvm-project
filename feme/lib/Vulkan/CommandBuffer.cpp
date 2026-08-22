@@ -659,8 +659,10 @@ Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
     return createStringError(inconvertibleErrorCode(),
                              "buffer/image copy mip level is out of range");
 
-  for (uint32_t Layer = 0; Layer != Region.imageSubresource.layerCount;
-       ++Layer) {
+  uint32_t LayerCount =
+      Img.resolvedLayerCount(Region.imageSubresource.baseArrayLayer,
+                             Region.imageSubresource.layerCount);
+  for (uint32_t Layer = 0; Layer != LayerCount; ++Layer) {
     uint32_t ArrayLayer = Region.imageSubresource.baseArrayLayer + Layer;
     for (uint32_t Z = 0; Z != Region.imageExtent.depth; ++Z) {
       uint64_t SliceIndex = uint64_t(Layer) * Region.imageExtent.depth + Z;
@@ -806,8 +808,9 @@ Error runCopyImage(Image *Src, Image *Dst,
     uint32_t DstOffsetXUnits = uint32_t(Region.dstOffset.x) / DstBlockW;
     uint32_t DstOffsetYUnits = uint32_t(Region.dstOffset.y) / DstBlockH;
     uint64_t RowBytes = uint64_t(WidthUnits) * UnitSize * SampleCount;
-    for (uint32_t Layer = 0; Layer != Region.srcSubresource.layerCount;
-         ++Layer) {
+    uint32_t LayerCount = Src->resolvedLayerCount(
+        Region.srcSubresource.baseArrayLayer, Region.srcSubresource.layerCount);
+    for (uint32_t Layer = 0; Layer != LayerCount; ++Layer) {
       for (uint32_t Z = 0; Z != Region.extent.depth; ++Z) {
         for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
           void *SrcRow = SrcCompressed

@@ -48,9 +48,11 @@ protected:
   VkImage
   createBoundImage2D(uint32_t Width, uint32_t Height, VkImageUsageFlags Usage,
                      VkDeviceMemory &OutMemory, uint32_t MipLevels = 1,
-                     VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
+                     VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT,
+                     uint32_t ArrayLayers = 1) {
     return createBoundImage2DWithFormat(VK_FORMAT_R8G8B8A8_UNORM, Width, Height,
-                                        Usage, OutMemory, MipLevels, Samples);
+                                        Usage, OutMemory, MipLevels, Samples,
+                                        ArrayLayers);
   }
 
   /// The same as `createBoundImage2D`, but for an arbitrary \p Format --
@@ -59,13 +61,14 @@ protected:
   VkImage createBoundImage2DWithFormat(
       VkFormat Format, uint32_t Width, uint32_t Height, VkImageUsageFlags Usage,
       VkDeviceMemory &OutMemory, uint32_t MipLevels = 1,
-      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
+      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT,
+      uint32_t ArrayLayers = 1) {
     VkImageCreateInfo ImageInfo{};
     ImageInfo.imageType = VK_IMAGE_TYPE_2D;
     ImageInfo.format = Format;
     ImageInfo.extent = {Width, Height, 1};
     ImageInfo.mipLevels = MipLevels;
-    ImageInfo.arrayLayers = 1;
+    ImageInfo.arrayLayers = ArrayLayers;
     ImageInfo.samples = Samples;
     ImageInfo.usage = Usage;
     VkImage Img = VK_NULL_HANDLE;
@@ -643,6 +646,77 @@ TEST_F(ImageTest, CopyBufferToImageAndBack) {
   vkFreeMemory(Device, ImageMemory, nullptr);
 }
 
+/// Roadmap: `VK_KHR_maintenance5` (advertised -- PhysicalDeviceInfo.cpp)
+/// allows `VkImageSubresourceLayers::layerCount` to be
+/// `VK_REMAINING_ARRAY_LAYERS`, meaning "every layer from `baseArrayLayer`
+/// to the image's own last one". `copyBufferImageRegion` (CommandBuffer.cpp)
+/// used to loop `Layer != Region.imageSubresource.layerCount` directly --
+/// with the sentinel's literal `0xFFFFFFFF` value, that is an effectively
+/// infinite loop (confirmed hanging `deqp-vk`'s own
+/// `buffer_to_image.*.array_all_remaining_layers` cases), not a large but
+/// finite one. This only reaches layers 1 and 2 of a 3-layer image (never
+/// layer 0, and never runs anywhere near 0xFFFFFFFF iterations), directly
+/// exercising `Image::resolvedLayerCount`'s subtraction.
+TEST_F(ImageTest, CopyBufferToImageWithRemainingArrayLayers) {
+  VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(2, 2, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                   ImageMemory, /*MipLevels=*/1,
+                                   VK_SAMPLE_COUNT_1_BIT, /*ArrayLayers=*/3);
+  auto *ImgObj = fromHandle<Image>(Img);
+
+  std::vector<uint8_t> SrcPixels(2 * 2 * 4 * 2); // Two layers' worth.
+  for (size_t I = 0; I != SrcPixels.size(); ++I)
+    SrcPixels[I] = static_cast<uint8_t>(I + 1);
+
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = SrcPixels.size();
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VkBuffer SrcBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &SrcBuf), VK_SUCCESS);
+  VkMemoryAllocateInfo SrcAllocInfo{};
+  SrcAllocInfo.allocationSize = SrcPixels.size();
+  SrcAllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &SrcAllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, SrcBuf, SrcMemory, 0), VK_SUCCESS);
+  std::memcpy(fromHandle<Buffer>(SrcBuf)->data(), SrcPixels.data(),
+              SrcPixels.size());
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkBufferImageCopy Region{};
+  Region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, /*baseArrayLayer=*/1,
+                             VK_REMAINING_ARRAY_LAYERS};
+  Region.imageExtent = {2, 2, 1};
+  vkCmdCopyBufferToImage(CmdBuf, SrcBuf, Img,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  EXPECT_EQ(std::memcmp(ImgObj->texelPointer(0, 1, 0, 0, 0), SrcPixels.data(),
+                        SrcPixels.size()),
+            0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyBuffer(Device, SrcBuf, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, ImageMemory, nullptr);
+}
+
 TEST_F(ImageTest, CopyImageToImage) {
   VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
   VkImage SrcImg =
@@ -680,6 +754,62 @@ TEST_F(ImageTest, CopyImageToImage) {
 
   auto *DstObj = fromHandle<Image>(DstImg);
   EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
+            0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
+/// `runCopyImage`'s own `srcSubresource.layerCount` loop had the same
+/// unresolved-`VK_REMAINING_ARRAY_LAYERS` bug `runCopyBufferToImage`'s
+/// regression test above documents; this is its `vkCmdCopyImage` peer,
+/// copying the last two of a three-layer image's layers into a
+/// same-sized two-layer destination.
+TEST_F(ImageTest, CopyImageWithRemainingArrayLayers) {
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  VkImage SrcImg = createBoundImage2D(2, 2, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                      SrcMemory, /*MipLevels=*/1,
+                                      VK_SAMPLE_COUNT_1_BIT, /*ArrayLayers=*/3);
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  VkImage DstImg = createBoundImage2D(2, 2, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                      DstMemory, /*MipLevels=*/1,
+                                      VK_SAMPLE_COUNT_1_BIT, /*ArrayLayers=*/2);
+
+  auto *SrcObj = fromHandle<Image>(SrcImg);
+  for (uint32_t I = 0; I != SrcObj->sizeInBytes(); ++I)
+    static_cast<uint8_t *>(SrcObj->data())[I] = static_cast<uint8_t>(I + 5);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, /*baseArrayLayer=*/1,
+                           VK_REMAINING_ARRAY_LAYERS};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
+                           VK_REMAINING_ARRAY_LAYERS};
+  Region.extent = {2, 2, 1};
+  vkCmdCopyImage(CmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DstImg,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  auto *DstObj = fromHandle<Image>(DstImg);
+  EXPECT_EQ(std::memcmp(SrcObj->texelPointer(0, 1, 0, 0, 0), DstObj->data(),
+                        DstObj->sizeInBytes()),
             0);
 
   vkDestroyCommandPool(Device, Pool, nullptr);

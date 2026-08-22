@@ -46,13 +46,14 @@ protected:
   }
 
   VkImage createImage(uint32_t Width, uint32_t Height, VkFormat Format,
-                      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT) {
+                      VkSampleCountFlagBits Samples = VK_SAMPLE_COUNT_1_BIT,
+                      uint32_t ArrayLayers = 1) {
     VkImageCreateInfo Info{};
     Info.imageType = VK_IMAGE_TYPE_2D;
     Info.format = Format;
     Info.extent = {Width, Height, 1};
     Info.mipLevels = 1;
-    Info.arrayLayers = 1;
+    Info.arrayLayers = ArrayLayers;
     Info.samples = Samples;
     Info.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                  VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -72,9 +73,9 @@ protected:
   }
 
   static std::array<uint8_t, 4> texel(VkImage Img, uint32_t X, uint32_t Y,
-                                      uint32_t Sample = 0) {
+                                      uint32_t Sample = 0, uint32_t Layer = 0) {
     const void *Ptr =
-        fromHandle<Image>(Img)->texelPointer(0, 0, X, Y, 0, Sample);
+        fromHandle<Image>(Img)->texelPointer(0, Layer, X, Y, 0, Sample);
     std::array<uint8_t, 4> Result{};
     std::memcpy(Result.data(), Ptr, 4);
     return Result;
@@ -204,6 +205,46 @@ TEST_F(ImageOpsTest, MirrorsBlitRegion) {
   vkDestroyImage(Device, Dst, nullptr);
 }
 
+/// `runBlitImage`'s own `LayerCount` (`min` of both subresources'
+/// `layerCount`) had the same unresolved-`VK_REMAINING_ARRAY_LAYERS` bug
+/// `ImageTest.cpp`'s `CopyBufferToImageWithRemainingArrayLayers` documents
+/// for `runCopyBufferToImage` -- confirmed hanging `deqp-vk`'s own
+/// `blit_image.simple_tests.array.*_remaining_layers` cases. This blits the
+/// last two of a three-layer source into a two-layer destination.
+TEST_F(ImageOpsTest, BlitsWithRemainingArrayLayers) {
+  VkImage Src = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_SAMPLE_COUNT_1_BIT, /*ArrayLayers=*/3);
+  VkImage Dst = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_SAMPLE_COUNT_1_BIT, /*ArrayLayers=*/2);
+  for (uint32_t Layer = 1; Layer != 3; ++Layer)
+    for (uint32_t Y = 0; Y != 2; ++Y)
+      for (uint32_t X = 0; X != 2; ++X) {
+        uint8_t Value = uint8_t(0x40 * (Layer * 4 + Y * 2 + X));
+        std::array<uint8_t, 4> Texel{Value, Value, Value, 0xFF};
+        std::memcpy(fromHandle<Image>(Src)->texelPointer(0, Layer, X, Y, 0),
+                    Texel.data(), 4);
+      }
+
+  VkImageBlit Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, /*baseArrayLayer=*/1,
+                           VK_REMAINING_ARRAY_LAYERS};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
+                           VK_REMAINING_ARRAY_LAYERS};
+  Region.srcOffsets[1] = {2, 2, 1};
+  Region.dstOffsets[1] = {2, 2, 1};
+  ASSERT_FALSE(runBlitImage(fromHandle<Image>(Src), fromHandle<Image>(Dst),
+                            Region, VK_FILTER_NEAREST));
+
+  for (uint32_t Layer = 0; Layer != 2; ++Layer)
+    for (uint32_t Y = 0; Y != 2; ++Y)
+      for (uint32_t X = 0; X != 2; ++X)
+        EXPECT_EQ(texel(Dst, X, Y, /*Sample=*/0, Layer)[0],
+                  texel(Src, X, Y, /*Sample=*/0, Layer + 1)[0]);
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
 /// Resolving a 4-sample image averages its samples, the same box filter the
 /// executor's own resolve attachments use.
 TEST_F(ImageOpsTest, ResolvesMultisampleImage) {
@@ -232,6 +273,44 @@ TEST_F(ImageOpsTest, ResolvesMultisampleImage) {
       EXPECT_NEAR(texel(Dst, X, Y)[0], 0x80, 1);
       EXPECT_EQ(texel(Dst, X, Y)[3], 0xFF);
     }
+
+  vkDestroyImage(Device, Src, nullptr);
+  vkDestroyImage(Device, Dst, nullptr);
+}
+
+/// `runResolveImage`'s own `LayerCount` had the same bug the two
+/// regression tests above document for `runCopyBufferToImage`/
+/// `runBlitImage`; this is its peer, resolving the last two of a
+/// three-layer multisample source into a two-layer destination.
+TEST_F(ImageOpsTest, ResolvesWithRemainingArrayLayers) {
+  VkImage Src = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_SAMPLE_COUNT_4_BIT, /*ArrayLayers=*/3);
+  VkImage Dst = createImage(2, 2, VK_FORMAT_R8G8B8A8_UNORM,
+                            VK_SAMPLE_COUNT_1_BIT, /*ArrayLayers=*/2);
+  for (uint32_t Layer = 1; Layer != 3; ++Layer)
+    for (uint32_t Y = 0; Y != 2; ++Y)
+      for (uint32_t X = 0; X != 2; ++X)
+        for (uint32_t S = 0; S != 4; ++S) {
+          uint8_t Value = S < 2 ? 0x00 : 0xFF;
+          std::array<uint8_t, 4> Texel{Value, Value, Value, 0xFF};
+          std::memcpy(
+              fromHandle<Image>(Src)->texelPointer(0, Layer, X, Y, 0, S),
+              Texel.data(), 4);
+        }
+
+  VkImageResolve Region{};
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, /*baseArrayLayer=*/1,
+                           VK_REMAINING_ARRAY_LAYERS};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0,
+                           VK_REMAINING_ARRAY_LAYERS};
+  Region.extent = {2, 2, 1};
+
+  ASSERT_FALSE(
+      runResolveImage(fromHandle<Image>(Src), fromHandle<Image>(Dst), Region));
+  for (uint32_t Layer = 0; Layer != 2; ++Layer)
+    for (uint32_t Y = 0; Y != 2; ++Y)
+      for (uint32_t X = 0; X != 2; ++X)
+        EXPECT_NEAR(texel(Dst, X, Y, /*Sample=*/0, Layer)[0], 0x80, 1);
 
   vkDestroyImage(Device, Src, nullptr);
   vkDestroyImage(Device, Dst, nullptr);

@@ -120,6 +120,22 @@ public:
   uint32_t depth() const { return Depth; }
   uint32_t mipLevels() const { return MipLevels; }
   uint32_t arrayLayers() const { return ArrayLayers; }
+
+  /// Resolves a `VkImageSubresourceLayers`/`VkImageSubresourceRange`
+  /// `layerCount` field against this image's own layer count: the
+  /// `VK_KHR_maintenance5`/long-standing `VkImageSubresourceRange` sentinel
+  /// `VK_REMAINING_ARRAY_LAYERS` means "every layer from \p BaseArrayLayer
+  /// to the end", not the literal `0xFFFFFFFF` value -- looping to that
+  /// value directly (as every copy/blit/resolve region loop over
+  /// `layerCount` once did) is an effectively infinite loop, not a
+  /// deliberately large one. Callers must not use \p LayerCount without
+  /// passing it through this first.
+  uint32_t resolvedLayerCount(uint32_t BaseArrayLayer,
+                              uint32_t LayerCount) const {
+    return LayerCount == VK_REMAINING_ARRAY_LAYERS
+               ? ArrayLayers - BaseArrayLayer
+               : LayerCount;
+  }
   /// Samples per texel (`VkSampleCountFlagBits`'s numeric value, e.g. 1, 2,
   /// 4...). Only meaningful as an object-model/copy-source-of-truth today
   /// -- no shader or render-target path consumes a sample index yet (see

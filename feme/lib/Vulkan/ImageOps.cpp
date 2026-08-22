@@ -384,8 +384,11 @@ Error runBlitImage(Image *Src, Image *Dst, ArrayRef<VkImageBlit> Regions,
     uint32_t DstHeight = uint32_t(std::abs(DstY1 - DstY0));
     int64_t DstStepX = DstX1 >= DstX0 ? 1 : -1;
     int64_t DstStepY = DstY1 >= DstY0 ? 1 : -1;
-    uint32_t LayerCount = std::min(Region.srcSubresource.layerCount,
-                                   Region.dstSubresource.layerCount);
+    uint32_t LayerCount =
+        std::min(Src->resolvedLayerCount(Region.srcSubresource.baseArrayLayer,
+                                         Region.srcSubresource.layerCount),
+                 Dst->resolvedLayerCount(Region.dstSubresource.baseArrayLayer,
+                                         Region.dstSubresource.layerCount));
 
     for (uint32_t Layer = 0; Layer != LayerCount; ++Layer) {
       uint32_t SrcLayer = Region.srcSubresource.baseArrayLayer + Layer;
@@ -538,8 +541,11 @@ Error runResolveImage(Image *Src, Image *Dst,
       return createStringError(inconvertibleErrorCode(),
                                "a resolve region names a mip level out of "
                                "range");
-    uint32_t LayerCount = std::min(Region.srcSubresource.layerCount,
-                                   Region.dstSubresource.layerCount);
+    uint32_t LayerCount =
+        std::min(Src->resolvedLayerCount(Region.srcSubresource.baseArrayLayer,
+                                         Region.srcSubresource.layerCount),
+                 Dst->resolvedLayerCount(Region.dstSubresource.baseArrayLayer,
+                                         Region.dstSubresource.layerCount));
     for (uint32_t Layer = 0; Layer != LayerCount; ++Layer)
       for (uint32_t Z = 0; Z != Region.extent.depth; ++Z)
         for (uint32_t Y = 0; Y != Region.extent.height; ++Y)
