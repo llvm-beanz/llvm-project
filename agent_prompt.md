@@ -26,7 +26,7 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E18 in the roadmap document?
+Can you implement milestone E19 in the roadmap document?
 
 > **Texel-buffer-format/robustness inconsistency** (D3's `robustness.oob_access`
 > 6-case regression, not yet root-caused past "format/robustness mismatch" --
