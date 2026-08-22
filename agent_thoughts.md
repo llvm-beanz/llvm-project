@@ -29279,3 +29279,145 @@ caught, defaulting instead to "Not implemented" -- which understates,
 never overstates, this ICD's real capability, the same "narrow, don't
 widen" safety bias the file's own "Findings" section states explicitly
 rather than leaving implicit.
+
+# Expanding the declared scope to full Vulkan 1.4 conformance (compute, graphics, ray tracing) and its Direct3D equivalent
+
+## What the request actually asked for
+
+Two things, in order: (1) widen the *scope* recorded in the design and
+tracking docs from a headless compute ICD to full Vulkan 1.4 conformance
+including compute, graphics and ray tracing, with an eventual equivalent
+for the Direct3D/WARP adapter; then (2) revisit the two inventories and the
+roadmap so that "full Vulkan 1.4 conformance" is actually *planned* rather
+than merely declared. The second half is where the work is. A scope
+statement nobody can act on is a wish; the thing that makes it actionable
+is knowing, per feature/limit/extension, what is true today.
+
+## The first surprise: the docs were describing a device that no longer exists
+
+`FeMeVulkanDesign.md` listed "Vulkan conformance" itself under Initial
+Non-Goals, and `VulkanCTSReport.md`'s headline called 26 zero-failure
+groups "the correct, truthful outcome for this ICD's declared scope". Both
+were written for the compute-only device and neither had been revisited
+when apiVersion went to 1.4 (roadmap D0) or when the E-series started
+closing a mandatory floor. So the first commit is mostly *deletion of a
+stale frame*: a real "Conformance Target" section with three honesty rules
+(advertise only what passes; zero conformance claim until submission;
+measure, don't assume), and the milestone that turns passing tests into a
+submission (V9, plus W7 on the Direct3D side).
+
+I also repaired the Status/Non-Goals prose in `FeMeVulkanDesign.md`, which
+had at some point been run through a C++ formatter -- sentences were broken
+mid-word across lines with C-style indentation. It was unreadable, and I
+was editing those exact sections anyway.
+
+On the Direct3D side the honest framing is "equivalent in scope, later in
+schedule". The Vulkan CTS runs on this project's Linux hosts; the HLK does
+not, and there is no Windows CI in this tree at all. Saying "equivalent"
+without saying "Vulkan-first, because that is the only suite we can run"
+would have been a plan that cannot start.
+
+## The second surprise: both inventories were stale, and one was stale in a way that mattered
+
+`AdvertisedPromotedFeatures.txt` listed four feature bits. `EntryPoints.cpp`
+actually reports fourteen `VK_TRUE` in the aggregate 1.3/1.4 structs, plus
+ten more across the core 1.0/1.2 structs. Every E-row since E5 had
+implemented a feature and updated the *code* without updating the
+generator's input file, so the generated checklist had been quietly
+under-reporting this ICD's own capability for a dozen milestones.
+
+The previous session's own notes (above, in this file) flagged the matching
+weakness on the extension side: `--core-promoted` was "a small,
+hand-curated list of exactly three extensions I found by name in the
+Roadmap's own prose", with the explicit caveat that more plausibly belonged
+there. I closed that by auditing every core-promoted extension against the
+sources rather than against the roadmap's prose -- 14 more turned out to be
+genuinely implemented (mostly roadmap C6/V3-era work whose extension-name
+consequences were never written down), and 11 more turned out to be
+*partially* implemented, which is the interesting category.
+
+"Partial" is a state neither inventory can express, and I deliberately did
+not add it as a fourth status to the feature/extension generators. A
+partial implementation is a conformance *gap*, not a status: listing
+`VK_KHR_get_physical_device_properties2` as anything other than "not
+implemented" would let five-of-seven queries read as done. So partial rows
+stay "no"/"Planned" and are enumerated in prose plus a roadmap series.
+
+## Why the extension inventory needed a fourth state and the feature inventory did not
+
+Under the old scope, "Not implemented" honestly covered both "we will never
+do this" (video) and "this is next quarter's work" (ray query). Under the
+new one those are opposite meanings, and the file is used for planning
+precisely where they differ. Hence `--planned`, backed by
+`PlannedExtensions.txt` whose header carries a *membership rule* rather
+than a list of opinions: every core-promoted extension not implemented,
+plus the ray-tracing dependency set, plus the graphics/WSI set. Anything
+else is out of scope by construction. Without that rule the file becomes a
+wish list within two edits.
+
+The feature inventory needed a different change: it only knew about 1.3 and
+1.4, but a 1.4 conformance claim inherits 1.0-1.2 as well. Generalizing the
+generator to any core version (1.0 lives in the pre-aggregate
+`VkPhysicalDeviceFeatures`/`VkPhysicalDeviceLimits` pair, which needed its
+own case) is what produced the single most useful number in this whole
+session: **zero of Vulkan 1.1's twelve feature bits are advertised**.
+Roadmap C6 closed "the 1.2 floor" as a hand-derived list of bits and never
+looked one version down. That is now the K-series.
+
+I added the `:feature,extension` category filter rather than inventorying
+1.0's ~110 limit fields, because those are already written and cross-checked
+by `dEQP-VK.api.info.vulkan1p1`/`vulkan1p2` -- unlike 1.3/1.4's, which
+roadmap E2 had to add from nothing. Enumerating them would have tripled the
+table to prove something already proven elsewhere.
+
+## Planning the graphics and ray-tracing work
+
+I resisted writing the H- and J-series from the Vulkan spec's table of
+contents. Every row is instead derived from something measurable in this
+tree: a rejection in `GraphicsPipeline.cpp` (only vertex and fragment
+stages are accepted), a hard-coded limit (`maxViewports = 1`), an explicit
+rejection (`layers != 1`, `viewMask != 0`), a `VK_FALSE` in
+`PhysicalDeviceInfo.cpp`, or a CTS group that is 100% `NotSupported`.
+
+That last one is why I ran the CTS over the seven newly-in-scope groups
+before writing the sections rather than after. 139,043 cases, zero
+executed. Two facts fell out that would otherwise have been discovered the
+expensive way:
+
+- 70% of `ray_query`'s cases are gated on `VK_KHR_acceleration_structure`,
+  not on ray query itself -- so the acceleration-structure row unblocks
+  more than either shader-side row, and the series is ordered J4 -> J5 ->
+  J6 accordingly.
+- 766 of `multiview`'s 838 cases gate on the *extension name*, even though
+  multiview has been core since 1.1. Advertising the feature bit alone
+  would move nothing. That is the identical trap roadmap E3/E5/E6 each hit
+  and had to fix after the fact; here it is predicted in the row.
+
+Ray tracing also needed an honest framing that the request's phrasing does
+not supply on its own: it is *not* part of the Vulkan 1.4 core floor, and a
+1.4 submission is valid without a single ray-tracing extension. I wrote
+that explicitly in both the design and the roadmap rather than quietly
+folding ray tracing into "the 1.4 floor", because a plan that misstates
+what is mandatory will misprioritize the moment it is under time pressure.
+The justification for keeping it in scope is separate and stands on its
+own: the CTS's ray-tracing groups are the only conformance-grade tests that
+exist for machinery this project is going to build anyway (and that the
+Direct3D side reuses for DXR).
+
+## What I deliberately did not do
+
+- **No `lib/Vulkan` source changes.** The request was a documentation and
+  planning one, and mixing an implementation into it would have made both
+  harder to review. The only code changed is the two generator scripts,
+  each with lit coverage (the extension-inventory generator had none at
+  all before; now it does).
+- **No full 54-group CTS re-run.** Nothing this change touches can move the
+  compute numbers, and a 25-minute sweep to prove a documentation change
+  did nothing is not a measurement, it is theatre. The targeted seven-group
+  run *is* new information, and it is recorded as a baseline rather than as
+  an impact.
+- **No renaming of `Vulkan14FeatureInventory.md`** despite its scope now
+  being 1.0-1.4. Roadmap, design docs and prior CTS report sections all
+  cite it by name; the churn would outweigh the accuracy, and the title
+  inside the file says what it now covers.
+- **No fourth "partial" status**, per above.
