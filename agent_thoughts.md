@@ -28864,3 +28864,118 @@ premise would.
   against an unrelated earlier commit) to get a clean, single-variable
   before/after comparison. Full breakdown in "Roadmap E17: measured
   impact" in VulkanCTSReport.md.
+
+# Agent thoughts: roadmap E18 (texel-buffer-format/robustness inconsistency + VK_EXT_texel_buffer_alignment)
+
+## Two independent halves, and starting with the trace, not the fix
+
+This row's own text is explicit that its first half is unfinished
+work, not a known fix: "not yet root-caused past 'format/robustness
+mismatch' -- this row starts with tracing it to a specific line...
+before fixing it." So the first step was reading D3's own note for the
+`robustness.oob_access` bucket (`VulkanCTSReport.md`'s "Roadmap D3:
+measured impact" table) rather than guessing at a fix: it names
+`rba_texel_buffer_uniform_*`, describes a pre-D0 `NotSupported` turning
+into a post-D0 `Fail` at `vkCreateBufferView` ("an internal
+inconsistency between what this ICD's format-support query reports and
+what its own `vkCreateBufferView` accepts"), and stops there.
+
+## Reading the code before running anything
+
+Before reaching for the CTS at all, I read `Buffer.cpp`'s
+`vkCreateBufferView` and `EntryPoints.cpp`'s
+`vkGetPhysicalDeviceFormatProperties` side by side. Both already call
+`feme::vulkan::isTexelBufferFormatSupported` (`Format.cpp`) -- one
+directly, one through `formatFeatureFlags`'s `bufferFeatures`
+computation, itself just `isTexelBufferFormatSupported(*Format) ?
+(UNIFORM_TEXEL_BUFFER_BIT | STORAGE_TEXEL_BUFFER_BIT) : 0`. Two call
+sites sharing one predicate cannot disagree by construction. That was
+enough to suspect D3's bucket no longer reproduces, but "the code looks
+consistent now" is not the same as "the CTS agrees" -- this document's
+own repeated lesson (most recently E17's) is that a plausible-looking
+fix or non-fix needs an actual before/after run, not just a read of the
+diff.
+
+## Confirming with the CTS, not just the code read
+
+`git log -L` on the relevant `EntryPoints.cpp` lines found exactly when
+this sharing was introduced: roadmap E24 (`formatFeatureFlags`) and E25
+(wiring it into `vkGetPhysicalDeviceFormatProperties`), both landed
+*after* D3's own pass. That is circumstantial, not proof, so I ran the
+actual CTS test the roadmap row names
+(`rba_texel_buffer_uniform_r32_uint_*`, 12 cases) against this
+session's HEAD build first -- all 12 report the pre-D0 `NotSupported`,
+not the post-D0 `Fail` D3 described -- then widened to the entire
+`dEQP-VK.robustness.oob_access.*` group (121 cases, not just the 6 D3
+named, in case the fix only moved the failure to a sibling case): zero
+`Fail`, 120 `NotSupported`, 1 `Pass`. This is the same "traced, and
+does not survive re-verification" outcome D3 itself recorded for two
+of its own five other buckets (`ubo.*.std430`,
+`synchronization.op.*`), so I recorded it the same way in both
+`Roadmap.md` and `VulkanCTSReport.md` rather than inventing a fix for a
+bug that measurably no longer exists. No code change was needed or
+made for this half -- the row's own file-scope guess
+(`feme/lib/Vulkan/{Format,Buffer}.cpp`) never got touched, and the
+roadmap entry says so explicitly rather than silently dropping the
+attribution.
+
+## The second half: real values, not a validation feature
+
+The two limit fields (`storageTexelBufferOffsetAlignmentBytes`/
+`uniformTexelBufferOffsetAlignmentBytes`, plus their
+`SingleTexelAlignment` companions) needed a value, not new enforcement
+code. I checked whether `vkCreateBufferView` enforces any offset
+alignment today (it does not) and whether the CPU runtime's typed
+texel-buffer load/store helpers need one for correctness (they read
+and write through `__builtin_memcpy`, so they don't). That makes the
+existing core-1.0 `minTexelBufferOffsetAlignment` (256, already
+advertised and already never enforced) the honest floor to repeat here,
+and makes `SingleTexelAlignment = VK_TRUE` truthful too -- a
+single-texel-sized offset genuinely is sufficient, since nothing in
+this ICD requires more. I deliberately did not add new alignment
+*validation* to `vkCreateBufferView`: this row's own scope, like E2's
+before it, is about reporting a truthful limit, not inventing a new
+rejection path nothing here currently needs.
+
+## A self-correction mid-task, the same shape as E4/E7's own
+
+The first draft of the second half only touched the properties side
+(the aggregate `VkPhysicalDeviceVulkan13Properties` fields and a new
+dedicated `VkPhysicalDeviceTexelBufferAlignmentProperties` case) plus
+`getSupportedDeviceExtensions`. A targeted CTS run of
+`dEQP-VK.*texel_buffer_alignment*` before declaring the row done (the
+same discipline E2/E7's own reports used) found two real `Fail` cases:
+`api.info...features.texel_buffer_alignment_features_ext` and
+`api.device_init.create_device_unsupported_features....`. Reading
+`vktApiFeatureInfo.cpp`'s failure message pointed at
+`VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT`, a struct my first
+draft never touched. Checking the Vulkan header confirmed why: unlike
+every other extension `Roadmap.md`'s E-series tracks so far, this one
+promoted only its *properties* struct to core 1.3 -- its features
+struct has no `VkPhysicalDeviceVulkan13Features` field to read through
+instead, so leaving it unhandled meant `vkGetPhysicalDeviceFeatures2`
+silently left it at whatever the caller pre-zeroed it to. A second,
+small commit added the missing case (`texelBufferAlignment = VK_TRUE`
+unconditionally, mirroring `extendedDynamicState`'s own unconditional
+`VK_TRUE`), closing both cases. Landed as two commits rather than
+folding the fix into the first, since the first commit's own build and
+unit tests were already green and independently meaningful before the
+gap was found.
+
+## Validation
+
+- `ninja check-feme` (this session's existing `./build`,
+  `LLVM_ENABLE_ASSERTIONS=ON` + `LLVM_CCACHE_BUILD=ON`) after each of
+  the three commits: 1662/1663, then 1663/1664 (new unit tests added
+  along the way), 1 pre-existing unsupported throughout.
+- Targeted CTS runs against the real `feme_icd.json`:
+  `dEQP-VK.robustness.oob_access.*` (121 cases, 0 Fail, confirming the
+  first half's non-reproduction); `dEQP-VK.*texel_buffer_alignment*` (2
+  cases, Fail before the features-struct fix, Pass after);
+  `dEQP-VK.api.info.vulkan1p3.property_extensions_consistency` (Pass,
+  unaffected, exactly as E2's own note anticipated once a dedicated
+  struct exists); a full `dEQP-VK.api.info.*` re-run (10,484 cases, 404
+  Fail both before and after this row, none naming
+  `texel`/`alignment`) confirming no regression elsewhere in that
+  group. Full breakdown in "Roadmap E18: measured impact" in
+  `VulkanCTSReport.md`.
