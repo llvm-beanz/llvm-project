@@ -796,6 +796,8 @@ Error runCopyImage(Image *Src, Image *Dst,
   // block-compressed image's `SampleCount` is always 1 (never
   // multisampled in real Vulkan), so this multiplies by 1 for one.
   uint32_t SampleCount = Src->sampleCount();
+  bool SrcIs3D = Src->type() == VK_IMAGE_TYPE_3D;
+  bool DstIs3D = Dst->type() == VK_IMAGE_TYPE_3D;
   for (const VkImageCopy &Region : Regions) {
     if (Region.srcSubresource.mipLevel >= Src->mipLevels() ||
         Region.dstSubresource.mipLevel >= Dst->mipLevels())
@@ -810,33 +812,38 @@ Error runCopyImage(Image *Src, Image *Dst,
     uint64_t RowBytes = uint64_t(WidthUnits) * UnitSize * SampleCount;
     uint32_t LayerCount = Src->resolvedLayerCount(
         Region.srcSubresource.baseArrayLayer, Region.srcSubresource.layerCount);
-    for (uint32_t Layer = 0; Layer != LayerCount; ++Layer) {
-      for (uint32_t Z = 0; Z != Region.extent.depth; ++Z) {
-        for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
-          void *SrcRow = SrcCompressed
-                             ? Src->blockPointer(
-                                   Region.srcSubresource.mipLevel,
-                                   Region.srcSubresource.baseArrayLayer + Layer,
-                                   SrcOffsetXUnits, SrcOffsetYUnits + Y,
-                                   Region.srcOffset.z + Z)
-                             : Src->texelPointer(
-                                   Region.srcSubresource.mipLevel,
-                                   Region.srcSubresource.baseArrayLayer + Layer,
-                                   SrcOffsetXUnits, SrcOffsetYUnits + Y,
-                                   Region.srcOffset.z + Z);
-          void *DstRow = DstCompressed
-                             ? Dst->blockPointer(
-                                   Region.dstSubresource.mipLevel,
-                                   Region.dstSubresource.baseArrayLayer + Layer,
-                                   DstOffsetXUnits, DstOffsetYUnits + Y,
-                                   Region.dstOffset.z + Z)
-                             : Dst->texelPointer(
-                                   Region.dstSubresource.mipLevel,
-                                   Region.dstSubresource.baseArrayLayer + Layer,
-                                   DstOffsetXUnits, DstOffsetYUnits + Y,
-                                   Region.dstOffset.z + Z);
-          std::memcpy(DstRow, SrcRow, RowBytes);
-        }
+    // A copy between a 3D image and a 2D (array) image treats the 3D
+    // image's `extent.depth` slices as the 2D image's `layerCount` layers
+    // (real Vulkan's own "Image Copies" rule): whichever side is 3D steps
+    // through `Region.*Offset.z`, and whichever side is not steps through
+    // its own `baseArrayLayer` instead -- never both, and never neither,
+    // since exactly one of `LayerCount`/`Region.extent.depth` is greater
+    // than 1 for any legal region. A same-dimensionality (2D-to-2D or
+    // 3D-to-3D) copy is the special case where both sides agree, which
+    // this same formula also computes correctly.
+    uint32_t SliceCount =
+        (SrcIs3D || DstIs3D) ? Region.extent.depth : LayerCount;
+    for (uint32_t S = 0; S != SliceCount; ++S) {
+      uint32_t SrcLayer =
+          Region.srcSubresource.baseArrayLayer + (SrcIs3D ? 0 : S);
+      uint32_t SrcZ = Region.srcOffset.z + (SrcIs3D ? S : 0);
+      uint32_t DstLayer =
+          Region.dstSubresource.baseArrayLayer + (DstIs3D ? 0 : S);
+      uint32_t DstZ = Region.dstOffset.z + (DstIs3D ? S : 0);
+      for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
+        void *SrcRow =
+            SrcCompressed
+                ? Src->blockPointer(Region.srcSubresource.mipLevel, SrcLayer,
+                                    SrcOffsetXUnits, SrcOffsetYUnits + Y, SrcZ)
+                : Src->texelPointer(Region.srcSubresource.mipLevel, SrcLayer,
+                                    SrcOffsetXUnits, SrcOffsetYUnits + Y, SrcZ);
+        void *DstRow =
+            DstCompressed
+                ? Dst->blockPointer(Region.dstSubresource.mipLevel, DstLayer,
+                                    DstOffsetXUnits, DstOffsetYUnits + Y, DstZ)
+                : Dst->texelPointer(Region.dstSubresource.mipLevel, DstLayer,
+                                    DstOffsetXUnits, DstOffsetYUnits + Y, DstZ);
+        std::memcpy(DstRow, SrcRow, RowBytes);
       }
     }
   }

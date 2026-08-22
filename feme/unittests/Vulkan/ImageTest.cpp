@@ -819,6 +819,79 @@ TEST_F(ImageTest, CopyImageWithRemainingArrayLayers) {
   vkFreeMemory(Device, DstMemory, nullptr);
 }
 
+/// Real Vulkan allows copying between a 2D-array image and a 3D one: each
+/// of the 3D image's `extent.depth` slices corresponds to one of the 2D
+/// array's layers (`vkCmdCopyImage`'s own "Image Copies" rule) -- this
+/// used to `SIGSEGV` (`runCopyImage`'s `Z`-only loop applied `srcOffset.z`
+/// to the 2D array side too, walking off the end of its single depth
+/// slice), confirmed hanging/crashing `deqp-vk`'s own
+/// `image_to_image.3d_images.2d_to_3d_whole` case.
+TEST_F(ImageTest, CopyImage2DArrayToImage3D) {
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  VkImage SrcImg = createBoundImage2D(2, 2, VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                                      SrcMemory, /*MipLevels=*/1,
+                                      VK_SAMPLE_COUNT_1_BIT, /*ArrayLayers=*/3);
+
+  VkImageCreateInfo DstInfo{};
+  DstInfo.imageType = VK_IMAGE_TYPE_3D;
+  DstInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  DstInfo.extent = {2, 2, 3};
+  DstInfo.mipLevels = 1;
+  DstInfo.arrayLayers = 1;
+  DstInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  DstInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+  VkImage DstImg = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &DstInfo, nullptr, &DstImg), VK_SUCCESS);
+  VkMemoryRequirements DstReqs{};
+  vkGetImageMemoryRequirements(Device, DstImg, &DstReqs);
+  VkMemoryAllocateInfo DstAllocInfo{};
+  DstAllocInfo.allocationSize = DstReqs.size;
+  DstAllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory DstMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &DstAllocInfo, nullptr, &DstMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, DstImg, DstMemory, 0), VK_SUCCESS);
+
+  auto *SrcObj = fromHandle<Image>(SrcImg);
+  for (uint32_t I = 0; I != SrcObj->sizeInBytes(); ++I)
+    static_cast<uint8_t *>(SrcObj->data())[I] = static_cast<uint8_t>(I + 5);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkImageCopy Region{};
+  // Both images' own array-layer/depth counts (3 each): every layer of the
+  // source maps to the correspondingly numbered slice of the destination.
+  Region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 3};
+  Region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  Region.extent = {2, 2, 3};
+  vkCmdCopyImage(CmdBuf, SrcImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, DstImg,
+                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  ASSERT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Succeeded());
+
+  auto *DstObj = fromHandle<Image>(DstImg);
+  EXPECT_EQ(std::memcmp(SrcObj->data(), DstObj->data(), SrcObj->sizeInBytes()),
+            0);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImage(Device, SrcImg, nullptr);
+  vkDestroyImage(Device, DstImg, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkFreeMemory(Device, DstMemory, nullptr);
+}
+
 TEST_F(ImageTest, CopyImageBetweenCompatibleFormats) {
   // `vkCmdCopyImage` requires matching texel size, not matching `VkFormat`
   // (see CommandBuffer.cpp's `runCopyImage`): `R8G8B8A8_UNORM` and
