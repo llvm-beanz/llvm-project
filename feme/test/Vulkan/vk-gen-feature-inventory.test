@@ -36,3 +36,39 @@
 // VK_fake_unpromoted_extension has no `promotedto` attribute at all, so it
 // must not appear in the 1.3 inventory.
 // CHECK-NOT: VK_fake_unpromoted_extension
+
+// A Vulkan 1.4 conformance claim covers every earlier version's surface
+// too, so 1.0 must be inventoriable as well -- out of the pre-aggregate
+// VkPhysicalDeviceFeatures/VkPhysicalDeviceLimits pair rather than an
+// aggregate VkPhysicalDeviceVulkan1xFeatures struct -- and a `--version`
+// value's optional `:`-separated category filter must drop the categories
+// it does not name (here 1.0's own limit fields, which are wired and
+// cross-checked elsewhere).
+//
+// RUN: %python %S/../../utils/vk_gen_feature_inventory.py \
+// RUN:   %S/Inputs/vk-feature-inventory.xml \
+// RUN:   --version VK_VERSION_1_0:feature,extension -o %t.1p0.md
+// RUN: FileCheck --check-prefix=CHECK-1P0 %s < %t.1p0.md
+
+// CHECK-1P0-DAG: | feature | VK_VERSION_1_0 | `tessellationShader` | no | |
+// CHECK-1P0-DAG: | feature | VK_VERSION_1_0 | `dualSrcBlend` | no | |
+// CHECK-1P0-NOT: maxImageDimension2D
+
+// Without the filter, the same version's limit fields are enumerated
+// (never judged: "n/a", exactly like every other version's).
+//
+// RUN: %python %S/../../utils/vk_gen_feature_inventory.py \
+// RUN:   %S/Inputs/vk-feature-inventory.xml --version VK_VERSION_1_0 \
+// RUN:   -o %t.1p0-limits.md
+// RUN: FileCheck --check-prefix=CHECK-1P0-LIMITS %s < %t.1p0-limits.md
+
+// CHECK-1P0-LIMITS: | limit | VK_VERSION_1_0 | `maxImageDimension2D` | n/a | |
+
+// An unknown category name is a hard error rather than a silently empty
+// section.
+//
+// RUN: not %python %S/../../utils/vk_gen_feature_inventory.py \
+// RUN:   %S/Inputs/vk-feature-inventory.xml --version VK_VERSION_1_0:queue \
+// RUN:   2>&1 | FileCheck --check-prefix=CHECK-BAD-CATEGORY %s
+
+// CHECK-BAD-CATEGORY: unknown categor(ies) queue

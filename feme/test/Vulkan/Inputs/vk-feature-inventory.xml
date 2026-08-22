@@ -2,9 +2,19 @@
 <!-- Minimal vk.xml fixture for vk-gen-feature-inventory.test: a
      VkPhysicalDeviceVulkan13Features/Properties struct pair (each with two
      real members plus the sType/pNext header vk_gen_feature_inventory.py
-     must exclude) and one extension `promotedto="VK_VERSION_1_3"`. -->
+     must exclude), the pre-aggregate Vulkan 1.0
+     VkPhysicalDeviceFeatures/VkPhysicalDeviceLimits pair (neither of which
+     carries that header at all), and one extension
+     `promotedto="VK_VERSION_1_3"`. -->
 <registry>
   <types>
+    <type category="struct" name="VkPhysicalDeviceFeatures">
+      <member><type>VkBool32</type><name>tessellationShader</name></member>
+      <member><type>VkBool32</type><name>dualSrcBlend</name></member>
+    </type>
+    <type category="struct" name="VkPhysicalDeviceLimits">
+      <member><type>uint32_t</type><name>maxImageDimension2D</name></member>
+    </type>
     <type category="struct" name="VkPhysicalDeviceVulkan13Features">
       <member><type>VkStructureType</type><name>sType</name></member>
       <member><type>void</type>*<name>pNext</name></member>

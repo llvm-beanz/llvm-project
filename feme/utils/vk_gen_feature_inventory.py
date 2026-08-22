@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Enumerates Vulkan's mandatory 1.3/1.4 feature/limit/extension surface
-straight from vk.xml, and cross-checks it against what this ICD actually
-advertises (see roadmap D1, "An accurate 1.3/1.4 mandatory-feature/limit/
-extension inventory", in feme/docs/Roadmap.md).
+"""Enumerates Vulkan's core feature/limit/extension surface straight from
+vk.xml, and cross-checks it against what this ICD actually advertises (see
+roadmap D1, "An accurate 1.3/1.4 mandatory-feature/limit/extension
+inventory", in feme/docs/Roadmap.md).
 
 Once a core version's own aggregate struct
-(`VkPhysicalDeviceVulkan{13,14}Features`/`...Properties`) exists, a
+(`VkPhysicalDeviceVulkan{11,12,13,14}Features`/`...Properties`, or plain
+`VkPhysicalDeviceFeatures`/`VkPhysicalDeviceLimits` for 1.0) exists, a
 conformant implementation of that version must report every one of its
 struct members truthfully, and must implement every extension `vk.xml`
 records as `promotedto` that version -- this is the audit "measure
@@ -14,10 +15,20 @@ honestly" turned into a checklist, so it is derived the same way
 of vk.xml rather than re-derived by hand (which is what roadmap C6 did for
 1.2's much shorter list).
 
+Every version from 1.0 to 1.4 can be inventoried, because a Vulkan 1.4
+conformance claim covers every earlier version's surface too, not only the
+two versions roadmap D1 originally audited.
+
 Usage:
     vk_gen_feature_inventory.py <vk.xml> [--version VK_VERSION_1_3 ...]
         [--advertised-features <file>] [--advertised-extensions <file>]
         [-o <output.md>]
+
+A `--version` value may carry an optional `:`-separated category filter --
+`--version VK_VERSION_1_0:feature,extension` inventories 1.0's feature bits
+and promoted extensions but not its ~110 limit fields -- for versions whose
+limits are already wired and cross-checked elsewhere. Without a filter,
+every category is inventoried.
 
 `--advertised-features`/`--advertised-extensions` each name a file listing
 one `name` or `name = note` per line ('#' comments allowed) that this
@@ -39,6 +50,10 @@ import xml.etree.ElementTree as ET
 # `...Properties` type declares before its first real field -- present in
 # every Vulkan structure, never a feature or limit in their own right.
 STRUCT_HEADER_MEMBERS = {"sType", "pNext"}
+
+# The three categories a version's surface decomposes into, in the order
+# they are emitted for each version.
+CATEGORIES = ("feature", "limit", "extension")
 
 
 def struct_members(root, type_name):
@@ -97,24 +112,57 @@ def version_suffix(version):
     return major + minor
 
 
+def version_structs(version):
+    """Returns the (feature struct, limit struct) type names carrying
+    \\p version's own core surface. Vulkan 1.0 predates the aggregate
+    `VkPhysicalDeviceVulkan1xFeatures` convention: its feature bits live in
+    `VkPhysicalDeviceFeatures` and its limits in `VkPhysicalDeviceLimits`,
+    neither of which is a chainable structure at all."""
+    if version == "VK_VERSION_1_0":
+        return "VkPhysicalDeviceFeatures", "VkPhysicalDeviceLimits"
+    suffix = version_suffix(version)
+    return (
+        f"VkPhysicalDeviceVulkan{suffix}Features",
+        f"VkPhysicalDeviceVulkan{suffix}Properties",
+    )
+
+
+def parse_version(spec):
+    """Parses a `--version` value -- `VK_VERSION_1_3` or
+    `VK_VERSION_1_0:feature,extension` -- into (version, categories)."""
+    version, _, categories = spec.partition(":")
+    if not categories:
+        return version, CATEGORIES
+    selected = tuple(name.strip() for name in categories.split(","))
+    unknown = [name for name in selected if name not in CATEGORIES]
+    if unknown:
+        raise SystemExit(
+            "vk_gen_feature_inventory.py: --version names unknown "
+            "categor(ies) " + ", ".join(unknown) + "; expected one or more "
+            "of " + ", ".join(CATEGORIES)
+        )
+    return version, selected
+
+
 def build_inventory(vk_xml_path, versions):
     """Returns a list of (category, version, name) tuples: one per
     mandatory feature-struct member, limit-struct member, and promoted
-    extension, for every version in `versions`."""
+    extension, for every (version, categories) pair in `versions`."""
     tree = ET.parse(vk_xml_path)
     root = tree.getroot()
 
     inventory = []
-    for version in versions:
-        suffix = version_suffix(version)
-        for name in struct_members(root, f"VkPhysicalDeviceVulkan{suffix}Features"):
-            inventory.append(("feature", version, name))
-        for name in struct_members(
-            root, f"VkPhysicalDeviceVulkan{suffix}Properties"
-        ):
-            inventory.append(("limit", version, name))
-        for name in promoted_extensions(root, version):
-            inventory.append(("extension", version, name))
+    for version, categories in versions:
+        feature_struct, limit_struct = version_structs(version)
+        if "feature" in categories:
+            for name in struct_members(root, feature_struct):
+                inventory.append(("feature", version, name))
+        if "limit" in categories:
+            for name in struct_members(root, limit_struct):
+                inventory.append(("limit", version, name))
+        if "extension" in categories:
+            for name in promoted_extensions(root, version):
+                inventory.append(("extension", version, name))
     return inventory
 
 
@@ -145,8 +193,11 @@ def main():
         dest="versions",
         action="append",
         default=[],
-        help="A VK_VERSION_1_x feature name to inventory (repeatable); "
-        "defaults to VK_VERSION_1_3 and VK_VERSION_1_4",
+        help="A VK_VERSION_1_x feature name to inventory, optionally "
+        "followed by ':' and a comma-separated category subset "
+        "(feature, limit, extension) -- e.g. "
+        "VK_VERSION_1_0:feature,extension. Repeatable; defaults to "
+        "VK_VERSION_1_3 and VK_VERSION_1_4",
     )
     parser.add_argument(
         "--advertised-features",
@@ -166,7 +217,10 @@ def main():
     )
     args = parser.parse_args()
 
-    versions = args.versions or ["VK_VERSION_1_3", "VK_VERSION_1_4"]
+    versions = [
+        parse_version(spec)
+        for spec in (args.versions or ["VK_VERSION_1_3", "VK_VERSION_1_4"])
+    ]
     inventory = build_inventory(args.vk_xml, versions)
     advertised_features = read_names(args.advertised_features)
     advertised_extensions = read_names(args.advertised_extensions)
