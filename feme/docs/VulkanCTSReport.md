@@ -79,6 +79,17 @@ truthful outcome for this ICD's declared scope; a handful (`shader_object`,
 `transform_feedback`) are large groups (243,853 and 133,719 cases
 respectively) cleanly rejected outright rather than genuinely exercised.
 
+**"Correct for this ICD's declared scope" no longer covers all 26.** The
+declared scope is now full Vulkan 1.4 conformance including graphics and
+ray tracing (FeMeVulkanDesign.md's "Conformance Target"), so seven of
+those groups -- `ray_query`, `ray_tracing_pipeline`, `mesh_shader`, `wsi`,
+`tessellation`, `geometry` and `multiview`, 139,043 cases between them --
+are now measured gaps rather than truthful abstentions. See "Scope
+expansion: the graphics and ray-tracing baseline" immediately below for
+the per-group totals and the reason each is `NotSupported`. The remaining
+19 (video, sparse residency, protected memory, transform feedback,
+`shader_object`, ...) stay correct abstentions, per Roadmap.md's Part 4.
+
 **Every failure this table's own `Fail` count includes was, as far as this
 run's own per-group logs show, a clean rejection or a genuinely wrong
 result attributable to a real, named implementation gap** (a format/limit/
@@ -88,6 +99,75 @@ re-audited case-by-case for this edition the way D0's own headline was
 E1-E26 now actually exercises), so that specific claim should be treated as
 inherited from those rows' own individual audits rather than freshly
 re-verified here.
+
+## Scope expansion: the graphics and ray-tracing baseline
+
+This section is not a roadmap row's "measured impact". It is the baseline
+the *scope change* needs: [FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s new
+"Conformance Target" makes graphics and ray tracing part of the
+conformance claim, which reclassifies a specific set of numbers in the
+headline above. The 26 groups with zero failures are not all the same
+kind of zero:
+
+- a zero because every case *passes* is a result;
+- a zero because every case is `NotSupported` for a capability that is a
+  declared non-goal (video, sparse residency, protected memory) is also a
+  result;
+- a zero because every case is `NotSupported` for a capability now inside
+  the scope is a **gap of exactly that size**, and used to read as neither.
+
+Measured directly (this session, same ICD revision as the headline run,
+each group run in isolation per "Reproducing this report"):
+
+| Group | Cases | Pass | Fail | NotSupported | Dominant `NotSupported` reason |
+|---|---:|---:|---:|---:|---|
+| `ray_query` | 49,311 | 0 | 0 | 49,311 (100%) | `VK_KHR_acceleration_structure is not supported` (34,765), `VK_KHR_ray_query is not supported` (14,546) |
+| `wsi` | 36,880 | 0 | 0 | 36,880 (100%) | `VK_KHR_surface is not supported` |
+| `mesh_shader` | 28,044 | 0 | 0 | 28,044 (100%) | `VK_EXT_mesh_shader is not supported` (26,909), `VK_NV_mesh_shader` (1,123) |
+| `ray_tracing_pipeline` | 22,656 | 0 | 0 | 22,656 (100%) | `VK_KHR_acceleration_structure is not supported` (21,817), `VK_KHR_ray_tracing_pipeline` (604) |
+| `tessellation` | 1,114 | 0 | 0 | 1,114 (100%) | `Requested core feature is not supported: tessellationShader` (658), `Tessellation shader not supported` (456) |
+| `multiview` | 838 | 0 | 0 | 838 (100%) | `VK_KHR_multiview is not supported` (766), `geometryShader` (72) |
+| `geometry` | 200 | 0 | 0 | 200 (100%) | `Requested core feature is not supported: geometryShader` (200) |
+| **total** | **139,043** | **0** | **0** | **139,043 (100%)** | |
+
+**139,043 cases, none of which this ICD has ever executed a single
+instruction of.** That is the number roadmap §1.9.7 (H-series) and
+§1.9.8 (J-series) exist to move, and it is deliberately reported here as
+a *baseline* rather than a failure count: none of these is a `Fail`
+today, and each will become one before it becomes a `Pass`, exactly as
+every E-series row's own measurement showed for the compute surface (the
+headline's own note: "a rising failure count is largely the expected,
+honest cost of advertising more capability").
+
+Three details worth carrying into those rows rather than rediscovering:
+
+- **`ray_query` is 2.2x `ray_tracing_pipeline`, and 70% of it is gated on
+  `VK_KHR_acceleration_structure` alone.** The acceleration-structure row
+  (J4) therefore unblocks more than either shader-side row, and inline ray
+  query (J5) is both the smaller and the earlier of the two consumers —
+  which is why §1.9.8 orders them J4 → J5 → J6 rather than by API surface
+  size.
+- **`multiview`'s cases are gated on the *extension name*, not the feature
+  bit** (766 of 838 report `VK_KHR_multiview is not supported`), even
+  though multiview is core since 1.1. Advertising the feature without
+  adding the name to `getSupportedDeviceExtensions` would move nothing —
+  the same "a `deqp-vk` case enables it by name regardless of
+  `apiVersion`" pattern roadmap E3/E5/E6 hit, now predicted in advance for
+  H2/K3 rather than found afterwards.
+- **`tessellation`/`geometry` are small groups (1,114 and 200), and that is
+  misleading.** Both stages also gate cases counted under `draw`,
+  `pipeline`, `renderpasses` and `graphicsfuzz`, which this measurement
+  does not attribute; H4/H5's own before/after must be measured across
+  those groups too, not only the eponymous ones.
+
+This measurement changes nothing in the headline table above: the seven
+groups here are the same 100%-`NotSupported` groups it already counted,
+re-run to establish per-group totals and reasons rather than to detect a
+change. It also, deliberately, does not re-run the compute surface --
+this change is documentation and generator-script only (no `lib/Vulkan`
+source is touched), so the compute numbers cannot have moved, and
+`check-feme` is 1676 passed / 1 unsupported (up from 1675 by the
+extension-inventory generator's own new lit test).
 
 ## Full run, roadmap E27/E28: measured impact
 
@@ -2599,6 +2679,13 @@ this measurement into an ordered, costed plan: which of the buckets above
 to close in which order, what each is worth in cases, and what "full
 conformance" additionally requires beyond driving this run's failure count
 to zero.
+
+§1.9.1 was written for a compute-only device and a 1.2 claim. The plan has
+since grown four more series against the current, wider scope: §1.9.4 (E,
+the 1.3 floor), §1.9.5 (F, the 1.4 floor), §1.9.7 (H, the graphics
+surface), §1.9.8 (J, ray tracing) and §1.9.10 (K, the 1.1/1.2 floor an
+apiVersion 1.4 claim inherits). §1.9.9 is the five-part definition of done
+all of them are measured against, and it starts with this report.
 
 ## Addendum: DXIL `GetDimensions.xy`/AMDGPU change (out of this report's scope)
 
