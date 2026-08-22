@@ -28,6 +28,8 @@ vkGetPhysicalDeviceImageFormatProperties
 vkGetPhysicalDeviceSparseImageFormatProperties
 vkEnumerateDeviceExtensionProperties
 vkEnumerateDeviceLayerProperties
+# (roadmap E19) VK_EXT_tooling_info.
+vkGetPhysicalDeviceToolProperties
 vkCreateDevice
 
 vkDestroyDevice

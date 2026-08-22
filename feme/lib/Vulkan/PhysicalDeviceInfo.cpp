@@ -612,6 +612,10 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // one opcode at a time.
       {VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
        VK_KHR_SHADER_NON_SEMANTIC_INFO_SPEC_VERSION},
+      // (roadmap E19) `vkGetPhysicalDeviceToolProperties` (EntryPoints.cpp)
+      // truthfully reports zero tools: this ICD is not itself a layer or
+      // debugging tool, and wraps no such tool internally.
+      {VK_EXT_TOOLING_INFO_EXTENSION_NAME, VK_EXT_TOOLING_INFO_SPEC_VERSION},
   };
   return Extensions;
 }

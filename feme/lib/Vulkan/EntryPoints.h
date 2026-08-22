@@ -79,6 +79,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceExtensionProperties(
 VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceLayerProperties(
     VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount,
     VkLayerProperties *pProperties);
+VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceToolProperties(
+    VkPhysicalDevice physicalDevice, uint32_t *pToolCount,
+    VkPhysicalDeviceToolProperties *pToolProperties);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkDevice *pDevice);

@@ -1584,6 +1584,18 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkEnumerateDeviceLayerProperties(
   return enumerate<VkLayerProperties>(0, nullptr, pPropertyCount, pProperties);
 }
 
+// (roadmap E19) `VK_EXT_tooling_info`: this ICD is not itself a layer or
+// debugging tool, and wraps no such tool internally (unlike e.g. a
+// validation-layer-aware driver, which might report the validation layer
+// here), so the truthful answer is the same "zero" `vkEnumerateDeviceLayer
+// Properties` above already reports for its own, differently-shaped list.
+VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceToolProperties(
+    VkPhysicalDevice, uint32_t *pToolCount,
+    VkPhysicalDeviceToolProperties *pToolProperties) {
+  return enumerate<VkPhysicalDeviceToolProperties>(0, nullptr, pToolCount,
+                                                   pToolProperties);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateDevice(
     VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkDevice *pDevice) {

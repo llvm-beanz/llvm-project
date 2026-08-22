@@ -231,4 +231,21 @@ TEST_F(EntryPointsTest, FormatProperties2FillsChainedFormatProperties3) {
               VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT);
 }
 
+/// Roadmap E19 (`VK_EXT_tooling_info`): this ICD wraps no debugging tool,
+/// so it truthfully reports zero, following the same "enumerate" query
+/// convention (`pToolProperties == nullptr` reports the true count) as
+/// every other `vkEnumerate*`/`vkGetPhysicalDevice*Properties*` command.
+TEST_F(EntryPointsTest, ToolPropertiesReportsNoTools) {
+  uint32_t Count = 1234;
+  EXPECT_EQ(vkGetPhysicalDeviceToolProperties(Physical, &Count, nullptr),
+            VK_SUCCESS);
+  EXPECT_EQ(Count, 0u);
+
+  Count = 1;
+  VkPhysicalDeviceToolProperties Tool{};
+  EXPECT_EQ(vkGetPhysicalDeviceToolProperties(Physical, &Count, &Tool),
+            VK_SUCCESS);
+  EXPECT_EQ(Count, 0u);
+}
+
 } // namespace
