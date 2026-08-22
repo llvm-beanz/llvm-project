@@ -12,3 +12,27 @@
 VK_KHR_copy_commands2 = roadmap D0: vkCmdCopyBuffer2/vkCmdCopyImage2/vkCmdBlitImage2/vkCmdCopyBufferToImage2/vkCmdCopyImageToBuffer2/vkCmdResolveImage2 all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case
 VK_KHR_maintenance4 = roadmap E4: vkGetDeviceBufferMemoryRequirements/vkGetDeviceImageMemoryRequirements/vkGetDeviceImageSparseMemoryRequirements, maxBufferSize, all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case
 VK_EXT_subgroup_size_control = roadmap E7: VkPipelineShaderStageRequiredSubgroupSizeCreateInfo/VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT and the four related limit fields (minSubgroupSize/maxSubgroupSize/maxComputeWorkgroupSubgroups/requiredSubgroupSizeStages) implemented via the promoted VK_VERSION_1_3 aggregate struct; extension string itself never added to getSupportedDeviceExtensions (unlike VK_KHR_synchronization2/maintenance5/maintenance6/shader_integer_dot_product, no known CTS case was found requiring it by name regardless of apiVersion)
+#
+# The block below is the result of auditing *every* core-promoted
+# VK_KHR_*/VK_EXT_* extension against this ICD's own sources, rather than
+# only the ones a roadmap row happened to name (the 1.1/1.2 promotions
+# predate this file: roadmap C6 implemented much of the 1.2 floor without
+# recording which extension names it thereby satisfied). Each note cites
+# the file and function that justifies the entry. Extensions the same
+# audit found only *partially* implemented are deliberately absent -- a
+# partial implementation is a gap, tracked by roadmap 1.9.10's K-series,
+# not a status this file may claim.
+VK_KHR_bind_memory2 = vkBindBufferMemory2/vkBindImageMemory2 implemented (Buffer.cpp, Image.cpp)
+VK_KHR_descriptor_update_template = descriptor-set update templates implemented; the push-descriptor template type is explicitly rejected as the separate, unimplemented VK_KHR_push_descriptor (Descriptor.cpp's vkCreateDescriptorUpdateTemplate/vkUpdateDescriptorSetWithTemplate)
+VK_KHR_maintenance1 = vkTrimCommandPool implemented (CommandBuffer.cpp)
+VK_KHR_maintenance3 = vkGetDescriptorSetLayoutSupport plus VkPhysicalDeviceMaintenance3Properties (Descriptor.cpp, EntryPoints.cpp's fillProperties2Chain)
+VK_KHR_relaxed_block_layout = SPIR-V block access uses each member's declared offset/stride rather than imposing or validating a std140 re-layout (SPIRVToLLVMPatterns.cpp's getUniformBlockElement)
+VK_KHR_storage_buffer_storage_class = the StorageBuffer storage class is accepted directly (SPIRVToLLVMPatterns.cpp's isBufferBlockStorage)
+VK_EXT_host_query_reset = roadmap C6: vkResetQueryPool implemented and hostQueryReset reported true (QueryPool.cpp, EntryPoints.cpp)
+VK_KHR_create_renderpass2 = vkCreateRenderPass2 and vkCmdBeginRenderPass2/vkCmdNextSubpass2/vkCmdEndRenderPass2 implemented (RenderPass.cpp, CommandBuffer.cpp)
+VK_KHR_driver_properties = roadmap C5: VkPhysicalDeviceDriverProperties filled, with a truthful zero VkConformanceVersion and no impersonated VkDriverId (EntryPoints.cpp's fillDriverProperties)
+VK_KHR_imageless_framebuffer = roadmap C6: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT and VkRenderPassAttachmentBeginInfo both honored (RenderPass.cpp's vkCreateFramebuffer, CommandBuffer.cpp's vkCmdBeginRenderPass)
+VK_KHR_shader_subgroup_extended_types = roadmap C6: reported true, and vacuously so -- no OpGroupNonUniform* operation is converted at all yet (EntryPoints.cpp's fillFeatures2Chain)
+VK_KHR_timeline_semaphore = V3: vkGetSemaphoreCounterValue/vkWaitSemaphores/vkSignalSemaphore plus the feature and limit cases (Sync.cpp, EntryPoints.cpp)
+VK_KHR_uniform_buffer_standard_layout = roadmap C6: reported true, and honest -- no std140 layout restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp)
+VK_KHR_format_feature_flags2 = roadmap E24/E25: vkGetPhysicalDeviceFormatProperties2 fills a chained VkFormatProperties3 (EntryPoints.cpp)

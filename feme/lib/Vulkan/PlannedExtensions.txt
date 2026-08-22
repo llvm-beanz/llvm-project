@@ -1,0 +1,88 @@
+# Extension names that are inside this ICD's declared conformance scope --
+# full Vulkan 1.4 including compute, graphics and ray tracing, see
+# feme/docs/FeMeVulkanDesign.md's "Conformance Target" -- but are not
+# implemented today. Consumed by
+# feme/utils/vk_gen_extension_inventory.py --planned, which renders each as
+# "Planned (in scope, not implemented)" rather than the bare "Not
+# implemented" it shares with every deliberate non-goal.
+#
+# Membership rule, so this file does not drift into a wish list:
+#
+#  1. every extension vk.xml records as promoted into core 1.1-1.4 that
+#     this ICD does not already implement (a core version's own mandatory
+#     floor is inherited by any later version's claim), plus
+#  2. the ray-tracing extension set and its dependencies (roadmap 1.9.8),
+#     plus
+#  3. the graphics/WSI extensions roadmap 1.9.7 assigns.
+#
+# Anything else -- video, sparse residency, protected memory, external
+# memory/synchronization, transform feedback, VK_EXT_shader_object,
+# cooperative matrix/vector -- is optional for a 1.4 submission and stays
+# out of scope (Roadmap.md, Part 4), so it must NOT be listed here.
+# A partially-implemented extension belongs here too: partial is a gap,
+# not a status.
+
+VK_EXT_descriptor_indexing = roadmap J2: needed in large part by the ray-tracing CTS corpus, independent of ray tracing itself
+VK_EXT_extended_dynamic_state2 = roadmap 1.9.4 (E-series): the 1.3 floor's remaining dynamic states
+VK_EXT_headless_surface = roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision
+VK_EXT_host_image_copy = roadmap F11
+VK_EXT_image_robustness = roadmap E16
+VK_EXT_mesh_shader = roadmap H6
+VK_EXT_pipeline_protected_access = roadmap F9
+VK_EXT_pipeline_robustness = roadmap F10
+VK_EXT_sampler_filter_minmax = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_EXT_scalar_block_layout = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_EXT_separate_stencil_usage = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_EXT_shader_viewport_index_layer = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_EXT_texture_compression_astc_hdr = roadmap E21: HDR block formats and decodeASTCBlockHDR exist, but no copy/blit/sampling path consumes one, so the feature bit stays false (E22's own closing note)
+VK_EXT_ycbcr_2plane_444_formats = roadmap E19 declined it while samplerYcbcrConversion is unimplemented; still part of the 1.3 mandatory floor, so it returns as roadmap 1.9.10 K-series work alongside VK_KHR_sampler_ycbcr_conversion
+VK_KHR_16bit_storage = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_8bit_storage = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_acceleration_structure = roadmap J4
+VK_KHR_buffer_device_address = roadmap J1
+VK_KHR_dedicated_allocation = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_deferred_host_operations = roadmap J3
+VK_KHR_depth_stencil_resolve = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_device_group = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_device_group_creation = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_draw_indirect_count = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_dynamic_rendering_local_read = roadmap F8
+VK_KHR_external_fence = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_external_fence_capabilities = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_external_memory = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_external_memory_capabilities = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_external_semaphore = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_external_semaphore_capabilities = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_get_memory_requirements2 = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_get_physical_device_properties2 = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_get_surface_capabilities2 = roadmap H10 (V8)
+VK_KHR_global_priority = roadmap F1
+VK_KHR_image_format_list = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_index_type_uint8 = roadmap F7
+VK_KHR_line_rasterization = roadmap F5
+VK_KHR_load_store_op_none = roadmap F13
+VK_KHR_maintenance2 = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_map_memory2 = roadmap F14
+VK_KHR_multiview = roadmap H2: layered rendering first; deqp-vk's own multiview cases enable this by name
+VK_KHR_pipeline_library = roadmap J7
+VK_KHR_push_descriptor = roadmap F12
+VK_KHR_ray_query = roadmap J5
+VK_KHR_ray_tracing_maintenance1 = roadmap J7
+VK_KHR_ray_tracing_pipeline = roadmap J6
+VK_KHR_ray_tracing_position_fetch = roadmap J8
+VK_KHR_sampler_mirror_clamp_to_edge = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_sampler_ycbcr_conversion = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_separate_depth_stencil_layouts = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_shader_atomic_int64 = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_shader_draw_parameters = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_shader_expect_assume = roadmap F4
+VK_KHR_shader_float16_int8 = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_shader_float_controls = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_shader_float_controls2 = roadmap F3
+VK_KHR_shader_subgroup_rotate = roadmap F2
+VK_KHR_spirv_1_4 = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_surface = roadmap H10 (V8): headless surface first
+VK_KHR_swapchain = roadmap H10 (V8)
+VK_KHR_variable_pointers = core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
+VK_KHR_vertex_attribute_divisor = roadmap F6
+VK_KHR_vulkan_memory_model = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)

@@ -13,89 +13,121 @@ prefixes, and the `VK_KHR_*`/`VK_EXT_*` extensions `vk.xml` itself marks
 `supported="disabled"` (withdrawn or never shipped) or as VulkanSC-only, are
 out of scope and not listed below.
 
+Each extension is in exactly one of four states:
+
+- **Advertised** — `getSupportedDeviceExtensions` (`PhysicalDeviceInfo.cpp`)
+  lists it by name.
+- **Implemented (core, not advertised by name)** — its functionality exists
+  through the promoted core `VK_VERSION_1_x` entry points this ICD's
+  advertised `apiVersion` (1.4) already provides, but the name itself is
+  never listed. A real, Vulkan-legal state: an application using the core
+  name gets the real implementation regardless.
+- **Planned (in scope, not implemented)** — nothing of it exists yet, but it
+  is inside the declared conformance scope (full Vulkan 1.4 including
+  graphics and ray tracing, see
+  [FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Conformance Target") and has
+  an assigned [Roadmap.md](Roadmap.md) row, cited in its note.
+- **Not implemented** — none of the above, and, per the membership rule in
+  `feme/lib/Vulkan/PlannedExtensions.txt`, outside the declared scope rather
+  than merely unfinished.
+
+The third state is new, and is the whole point of regenerating this file:
+under the previous compute-only scope, "not implemented" covered both a
+tracked gap and a deliberate non-goal, which made the table unusable for
+planning exactly where planning mattered most.
+
 To regenerate this file after a `PhysicalDeviceInfo.cpp`/
 `getSupportedDeviceExtensions` change, update
 `feme/lib/Vulkan/AdvertisedExtensions.txt`/
-`feme/lib/Vulkan/CorePromotedNotAdvertisedExtensions.txt` to match and
-re-run:
+`CorePromotedNotAdvertisedExtensions.txt`/`PlannedExtensions.txt` to match
+and re-run:
 
 ```shell
 python3 feme/utils/vk_gen_extension_inventory.py <path-to-vk.xml> \
     --advertised feme/lib/Vulkan/AdvertisedExtensions.txt \
     --core-promoted feme/lib/Vulkan/CorePromotedNotAdvertisedExtensions.txt \
+    --planned feme/lib/Vulkan/PlannedExtensions.txt \
     -o feme/docs/VulkanExtensionInventory.md
 ```
 
 (then re-add this intro section by hand -- the script only emits the table
-below).
+below). Use the `vk.xml` from the VK-GL-CTS checkout under test
+(`external/vulkan-docs/src/xml/vk.xml`, `VK_HEADER_VERSION` 358), not the
+system package: the system one is older and declares 26 fewer extensions.
 
 ## Findings
 
-- **300 non-disabled `VK_KHR_*`/`VK_EXT_*` extensions exist in the current
-  Vulkan registry (149 `KHR`, 151 `EXT`). 17 are advertised by name**
-  (`getSupportedDeviceExtensions`, `PhysicalDeviceInfo.cpp`) -- 3 of the 17
-  are also part of [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)'s
-  own "39 extensions promoted into 1.3/1.4, 3 advertised" finding
-  (`VK_KHR_dynamic_rendering`, `VK_EXT_extended_dynamic_state`,
-  `VK_KHR_shader_integer_dot_product`); the other 14 are advertised only
-  because a `deqp-vk` case enables them by name regardless of the
-  advertised `apiVersion`, per each roadmap E-row's own "measured impact"
-  note: `VK_KHR_synchronization2` (E3), `VK_KHR_maintenance5` (E5),
-  `VK_KHR_maintenance6` (E6), `VK_EXT_pipeline_creation_cache_control` (E9),
-  `VK_EXT_private_data` (E10),
+**300 non-disabled `VK_KHR_*`/`VK_EXT_*` extensions exist in the current
+Vulkan registry (149 `KHR`, 151 `EXT`):**
+
+| Status | Count |
+|---|---:|
+| Advertised | 17 |
+| Implemented (core, not advertised by name) | 17 |
+| Planned (in scope, not implemented) | 64 |
+| Not implemented (out of scope) | 202 |
+
+- **The 17 advertised** are the ones a `deqp-vk` case enables by name
+  regardless of the advertised `apiVersion`, plus the three that predate
+  that discipline: `VK_KHR_dynamic_rendering`,
+  `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
+  `VK_KHR_synchronization2` (E3), `VK_KHR_maintenance5` (E5),
+  `VK_KHR_maintenance6` (E6), `VK_EXT_pipeline_creation_cache_control`
+  (E9), `VK_EXT_private_data` (E10),
   `VK_EXT_shader_demote_to_helper_invocation` (E11),
   `VK_KHR_shader_terminate_invocation` (E12),
   `VK_KHR_zero_initialize_workgroup_memory` (E13),
   `VK_EXT_inline_uniform_block` (E14), `VK_EXT_texel_buffer_alignment`
-  (E18), `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
+  (E18), and `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
   `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19).
-- **3 more are implemented but not advertised by name**
-  (`VK_KHR_copy_commands2`, roadmap D0; `VK_KHR_maintenance4`, roadmap E4;
-  `VK_EXT_subgroup_size_control`, roadmap E7): each is real, `apiVersion`
-  1.4 promotes each into core, and this ICD's own `vk_gen_entrypoints.py`
-  resolves every one of their commands as a core `VK_VERSION_1_x` name an
-  application can call without enabling the extension by name -- but unlike
-  the 14 "enabled by name regardless of `apiVersion`" extensions above, no
-  known `deqp-vk` case requires these three specifically by name, so
-  `getSupportedDeviceExtensions` was never grown to include them (nothing
-  in this ICD's own test suite -- `check-feme`'s `FeMeVulkanTests`, or the
-  targeted CTS runs each of D0/E4/E7's own "measured impact" sections
-  describes -- currently depends on `vkEnumerateDeviceExtensionProperties`
-  reporting these three).
-- **The remaining 280 are not implemented at all.** Most are entirely
-  outside this ICD's declared scope (a compute-only, headless, single-GPU
-  software ICD -- see
-  [FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Initial Non-Goals"): every
-  surface/swapchain/display extension (`VK_KHR_surface`,
-  `VK_KHR_swapchain`, `VK_EXT_full_screen_exclusive`, ...; this ICD has no
-  presentation engine and, per `EntryPoints.cpp`'s
-  `vkEnumerateInstanceExtensionProperties`, does not even distinguish an
-  instance-level extension list from the device-level one above), every
-  ray-tracing extension (`VK_KHR_ray_tracing_pipeline`,
-  `VK_KHR_acceleration_structure`, ...; `dEQP-VK.ray_tracing_pipeline`/
-  `ray_query` both report zero failures in
-  [VulkanCTSReport.md](VulkanCTSReport.md)'s current headline precisely
-  because nothing in that space is advertised), every
-  video-decode/encode extension (`VK_KHR_video_*`), every multi-GPU/
-  external-memory/external-synchronization extension
-  (`VK_KHR_external_memory_*`, `VK_KHR_device_group*`, ...; this ICD is
-  single-device and in-process), and graphics-pipeline extensions this
-  ICD's own compute-first roadmap has not reached yet (mesh shaders,
-  transform feedback, conservative rasterization, blend/line-rasterization
-  extensions, ...). A handful are within scope but simply not yet
-  implemented (e.g. `VK_EXT_descriptor_buffer`, `VK_EXT_shader_object`,
-  `VK_EXT_robustness2`) -- unlike the mandatory 1.3/1.4 floor
-  [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) tracks,
-  closing any of these 280 is optional roadmap work, not gap-closing
-  against a required floor, so none is currently an assigned roadmap row;
-  see [Roadmap.md](Roadmap.md) for what *is* assigned.
-- **This file's "Advertised"/"Implemented (core, not advertised by name)"
-  distinction only ever narrows an extension's own real status, never
-  widens it**: every extension row below reflects exactly what
-  `getSupportedDeviceExtensions`/a core `VK_VERSION_1_x` entry point
-  provides today, cross-checked directly against `PhysicalDeviceInfo.cpp`
-  (not inferred from `Vulkan14FeatureInventory.md`'s own, narrower,
-  1.3/1.4-promoted-only scope) -- a "Not implemented" row here is not a
+- **The 17 core-but-unadvertised** were 3 until this edition. A full audit
+  of every core-promoted extension against this ICD's own sources (rather
+  than only the ones a roadmap row happened to name) found 14 more that
+  are genuinely implemented through their promoted core entry points and
+  had simply never been recorded: `VK_KHR_bind_memory2`,
+  `VK_KHR_descriptor_update_template`, `VK_KHR_maintenance1`,
+  `VK_KHR_maintenance3`, `VK_KHR_relaxed_block_layout`,
+  `VK_KHR_storage_buffer_storage_class`, `VK_EXT_host_query_reset`,
+  `VK_KHR_create_renderpass2`, `VK_KHR_driver_properties`,
+  `VK_KHR_imageless_framebuffer`,
+  `VK_KHR_shader_subgroup_extended_types`, `VK_KHR_timeline_semaphore`,
+  `VK_KHR_uniform_buffer_standard_layout` and
+  `VK_KHR_format_feature_flags2`. Most are roadmap C6/V3-era work whose
+  extension-name consequences were never written down. None is newly
+  implemented by this edition.
+- **The 64 planned** decompose into three groups, and the membership rule
+  is enforced by `PlannedExtensions.txt`'s own header rather than by
+  judgement per row: every core-promoted (1.1-1.4) extension this ICD does
+  not implement (the mandatory floor a 1.4 claim inherits, including the
+  eleven [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)
+  records as only *partially* implemented -- partial is a gap, not a
+  status); the ray-tracing set and its dependencies
+  (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`,
+  `VK_KHR_ray_tracing_pipeline`, `VK_KHR_deferred_host_operations`,
+  `VK_KHR_pipeline_library`, `VK_KHR_buffer_device_address`,
+  `VK_KHR_ray_tracing_maintenance1`,
+  `VK_KHR_ray_tracing_position_fetch`, roadmap &sect;1.9.8); and the
+  graphics/WSI set (`VK_EXT_mesh_shader`, `VK_KHR_multiview`,
+  `VK_KHR_surface`, `VK_KHR_swapchain`, `VK_EXT_headless_surface`,
+  `VK_KHR_get_surface_capabilities2`, roadmap &sect;1.9.7).
+- **The 202 out of scope** are what remains after that rule: every
+  vendor-neutral extension for a capability class this ICD does not intend
+  to provide -- video decode/encode, sparse residency, protected memory,
+  device groups, external memory/synchronization/fences beyond the
+  core-promoted entry points, YCbCr sampling beyond its core-promoted
+  floor, transform feedback, `VK_EXT_shader_object`, cooperative
+  matrix/vector, display/DRM/platform-specific surfaces beyond the one
+  planned platform surface, and the long tail of optional
+  performance/debug extensions. Every one is optional for a Vulkan 1.4
+  submission; that, not "we have not got to it", is why it is out of
+  scope. If a *mandatory* CTS case is ever traced to one of them, it moves
+  to "Planned" and gains a roadmap row rather than excusing the failure
+  (Roadmap.md &sect;1.9.7's H12 owns that decision).
+- **This file's own states only ever narrow an extension's real status,
+  never widen it**: every row is cross-checked directly against
+  `PhysicalDeviceInfo.cpp` and the implementing source file, not inferred
+  from [Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md)'s own,
+  narrower, promoted-only scope -- and a "Not implemented" row is not a
   claim that *nothing* related exists (e.g. `VK_EXT_debug_utils` is
   unimplemented, but `vkEnumerateInstanceLayerProperties`/an unsupported
   `pNext` chain link are still handled gracefully elsewhere), only that
@@ -129,7 +161,7 @@ below).
 | `VK_EXT_depth_range_unrestricted` | Not implemented |  |
 | `VK_EXT_descriptor_buffer` | Not implemented |  |
 | `VK_EXT_descriptor_heap` | Not implemented |  |
-| `VK_EXT_descriptor_indexing` | Not implemented |  |
+| `VK_EXT_descriptor_indexing` | Planned (in scope, not implemented) | roadmap J2: needed in large part by the ray-tracing CTS corpus, independent of ray tracing itself |
 | `VK_EXT_device_address_binding_report` | Not implemented |  |
 | `VK_EXT_device_fault` | Not implemented |  |
 | `VK_EXT_device_generated_commands` | Not implemented |  |
@@ -141,7 +173,7 @@ below).
 | `VK_EXT_display_surface_counter` | Not implemented |  |
 | `VK_EXT_dynamic_rendering_unused_attachments` | Not implemented |  |
 | `VK_EXT_extended_dynamic_state` | Advertised |  |
-| `VK_EXT_extended_dynamic_state2` | Not implemented |  |
+| `VK_EXT_extended_dynamic_state2` | Planned (in scope, not implemented) | roadmap 1.9.4 (E-series): the 1.3 floor's remaining dynamic states |
 | `VK_EXT_extended_dynamic_state3` | Not implemented |  |
 | `VK_EXT_external_memory_acquire_unmodified` | Not implemented |  |
 | `VK_EXT_external_memory_dma_buf` | Not implemented |  |
@@ -158,14 +190,14 @@ below).
 | `VK_EXT_global_priority_query` | Not implemented |  |
 | `VK_EXT_graphics_pipeline_library` | Not implemented |  |
 | `VK_EXT_hdr_metadata` | Not implemented |  |
-| `VK_EXT_headless_surface` | Not implemented |  |
-| `VK_EXT_host_image_copy` | Not implemented |  |
-| `VK_EXT_host_query_reset` | Not implemented |  |
+| `VK_EXT_headless_surface` | Planned (in scope, not implemented) | roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision |
+| `VK_EXT_host_image_copy` | Planned (in scope, not implemented) | roadmap F11 |
+| `VK_EXT_host_query_reset` | Implemented (core, not advertised by name) | roadmap C6: vkResetQueryPool implemented and hostQueryReset reported true (QueryPool.cpp, EntryPoints.cpp) |
 | `VK_EXT_image_2d_view_of_3d` | Not implemented |  |
 | `VK_EXT_image_compression_control` | Not implemented |  |
 | `VK_EXT_image_compression_control_swapchain` | Not implemented |  |
 | `VK_EXT_image_drm_format_modifier` | Not implemented |  |
-| `VK_EXT_image_robustness` | Not implemented |  |
+| `VK_EXT_image_robustness` | Planned (in scope, not implemented) | roadmap E16 |
 | `VK_EXT_image_sliced_view_of_3d` | Not implemented |  |
 | `VK_EXT_image_tiling_control` | Not implemented |  |
 | `VK_EXT_image_view_min_lod` | Not implemented |  |
@@ -180,7 +212,7 @@ below).
 | `VK_EXT_memory_budget` | Not implemented |  |
 | `VK_EXT_memory_decompression` | Not implemented |  |
 | `VK_EXT_memory_priority` | Not implemented |  |
-| `VK_EXT_mesh_shader` | Not implemented |  |
+| `VK_EXT_mesh_shader` | Planned (in scope, not implemented) | roadmap H6 |
 | `VK_EXT_metal_objects` | Not implemented |  |
 | `VK_EXT_metal_surface` | Not implemented |  |
 | `VK_EXT_multi_draw` | Not implemented |  |
@@ -197,8 +229,8 @@ below).
 | `VK_EXT_pipeline_creation_feedback` | Advertised |  |
 | `VK_EXT_pipeline_library_group_handles` | Not implemented |  |
 | `VK_EXT_pipeline_properties` | Not implemented |  |
-| `VK_EXT_pipeline_protected_access` | Not implemented |  |
-| `VK_EXT_pipeline_robustness` | Not implemented |  |
+| `VK_EXT_pipeline_protected_access` | Planned (in scope, not implemented) | roadmap F9 |
+| `VK_EXT_pipeline_robustness` | Planned (in scope, not implemented) | roadmap F10 |
 | `VK_EXT_post_depth_coverage` | Not implemented |  |
 | `VK_EXT_present_mode_fifo_latest_ready` | Not implemented |  |
 | `VK_EXT_present_timing` | Not implemented |  |
@@ -213,9 +245,9 @@ below).
 | `VK_EXT_rgba10x6_formats` | Not implemented |  |
 | `VK_EXT_robustness2` | Not implemented |  |
 | `VK_EXT_sample_locations` | Not implemented |  |
-| `VK_EXT_sampler_filter_minmax` | Not implemented |  |
-| `VK_EXT_scalar_block_layout` | Not implemented |  |
-| `VK_EXT_separate_stencil_usage` | Not implemented |  |
+| `VK_EXT_sampler_filter_minmax` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_EXT_scalar_block_layout` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_EXT_separate_stencil_usage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_EXT_shader_64bit_indexing` | Not implemented |  |
 | `VK_EXT_shader_atomic_float` | Not implemented |  |
 | `VK_EXT_shader_atomic_float2` | Not implemented |  |
@@ -234,7 +266,7 @@ below).
 | `VK_EXT_shader_subgroup_vote` | Not implemented |  |
 | `VK_EXT_shader_tile_image` | Not implemented |  |
 | `VK_EXT_shader_uniform_buffer_unsized_array` | Not implemented |  |
-| `VK_EXT_shader_viewport_index_layer` | Not implemented |  |
+| `VK_EXT_shader_viewport_index_layer` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_EXT_subgroup_size_control` | Implemented (core, not advertised by name) | roadmap E7: VkPipelineShaderStageRequiredSubgroupSizeCreateInfo/VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT and the four related limit fields (minSubgroupSize/maxSubgroupSize/maxComputeWorkgroupSubgroups/requiredSubgroupSizeStages) implemented via the promoted VK_VERSION_1_3 aggregate struct; extension string itself never added to getSupportedDeviceExtensions (unlike VK_KHR_synchronization2/maintenance5/maintenance6/shader_integer_dot_product, no known CTS case was found requiring it by name regardless of apiVersion) |
 | `VK_EXT_subpass_merge_feedback` | Not implemented |  |
 | `VK_EXT_surface_maintenance1` | Not implemented |  |
@@ -242,7 +274,7 @@ below).
 | `VK_EXT_swapchain_maintenance1` | Not implemented |  |
 | `VK_EXT_texel_buffer_alignment` | Advertised |  |
 | `VK_EXT_texture_compression_astc_3d` | Not implemented |  |
-| `VK_EXT_texture_compression_astc_hdr` | Not implemented |  |
+| `VK_EXT_texture_compression_astc_hdr` | Planned (in scope, not implemented) | roadmap E21: HDR block formats and decodeASTCBlockHDR exist, but no copy/blit/sampling path consumes one, so the feature bit stays false (E22's own closing note) |
 | `VK_EXT_tooling_info` | Advertised |  |
 | `VK_EXT_transform_feedback` | Not implemented |  |
 | `VK_EXT_validation_cache` | Not implemented |  |
@@ -251,82 +283,82 @@ below).
 | `VK_EXT_vertex_attribute_divisor` | Not implemented |  |
 | `VK_EXT_vertex_attribute_robustness` | Not implemented |  |
 | `VK_EXT_vertex_input_dynamic_state` | Not implemented |  |
-| `VK_EXT_ycbcr_2plane_444_formats` | Not implemented |  |
+| `VK_EXT_ycbcr_2plane_444_formats` | Planned (in scope, not implemented) | roadmap E19 declined it while samplerYcbcrConversion is unimplemented; still part of the 1.3 mandatory floor, so it returns as roadmap 1.9.10 K-series work alongside VK_KHR_sampler_ycbcr_conversion |
 | `VK_EXT_ycbcr_image_arrays` | Not implemented |  |
 | `VK_EXT_zero_initialize_device_memory` | Not implemented |  |
-| `VK_KHR_16bit_storage` | Not implemented |  |
-| `VK_KHR_8bit_storage` | Not implemented |  |
-| `VK_KHR_acceleration_structure` | Not implemented |  |
+| `VK_KHR_16bit_storage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_8bit_storage` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_acceleration_structure` | Planned (in scope, not implemented) | roadmap J4 |
 | `VK_KHR_android_surface` | Not implemented |  |
-| `VK_KHR_bind_memory2` | Not implemented |  |
-| `VK_KHR_buffer_device_address` | Not implemented |  |
+| `VK_KHR_bind_memory2` | Implemented (core, not advertised by name) | vkBindBufferMemory2/vkBindImageMemory2 implemented (Buffer.cpp, Image.cpp) |
+| `VK_KHR_buffer_device_address` | Planned (in scope, not implemented) | roadmap J1 |
 | `VK_KHR_calibrated_timestamps` | Not implemented |  |
 | `VK_KHR_compute_shader_derivatives` | Not implemented |  |
 | `VK_KHR_cooperative_matrix` | Not implemented |  |
 | `VK_KHR_copy_commands2` | Implemented (core, not advertised by name) | roadmap D0: vkCmdCopyBuffer2/vkCmdCopyImage2/vkCmdBlitImage2/vkCmdCopyBufferToImage2/vkCmdCopyImageToBuffer2/vkCmdResolveImage2 all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case |
 | `VK_KHR_copy_memory_indirect` | Not implemented |  |
-| `VK_KHR_create_renderpass2` | Not implemented |  |
-| `VK_KHR_dedicated_allocation` | Not implemented |  |
-| `VK_KHR_deferred_host_operations` | Not implemented |  |
+| `VK_KHR_create_renderpass2` | Implemented (core, not advertised by name) | vkCreateRenderPass2 and vkCmdBeginRenderPass2/vkCmdNextSubpass2/vkCmdEndRenderPass2 implemented (RenderPass.cpp, CommandBuffer.cpp) |
+| `VK_KHR_dedicated_allocation` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_deferred_host_operations` | Planned (in scope, not implemented) | roadmap J3 |
 | `VK_KHR_depth_clamp_zero_one` | Not implemented |  |
-| `VK_KHR_depth_stencil_resolve` | Not implemented |  |
-| `VK_KHR_descriptor_update_template` | Not implemented |  |
+| `VK_KHR_depth_stencil_resolve` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_descriptor_update_template` | Implemented (core, not advertised by name) | descriptor-set update templates implemented; the push-descriptor template type is explicitly rejected as the separate, unimplemented VK_KHR_push_descriptor (Descriptor.cpp's vkCreateDescriptorUpdateTemplate/vkUpdateDescriptorSetWithTemplate) |
 | `VK_KHR_device_address_commands` | Not implemented |  |
 | `VK_KHR_device_fault` | Not implemented |  |
-| `VK_KHR_device_group` | Not implemented |  |
-| `VK_KHR_device_group_creation` | Not implemented |  |
+| `VK_KHR_device_group` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_device_group_creation` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_display` | Not implemented |  |
 | `VK_KHR_display_swapchain` | Not implemented |  |
-| `VK_KHR_draw_indirect_count` | Not implemented |  |
-| `VK_KHR_driver_properties` | Not implemented |  |
+| `VK_KHR_draw_indirect_count` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_driver_properties` | Implemented (core, not advertised by name) | roadmap C5: VkPhysicalDeviceDriverProperties filled, with a truthful zero VkConformanceVersion and no impersonated VkDriverId (EntryPoints.cpp's fillDriverProperties) |
 | `VK_KHR_dynamic_rendering` | Advertised |  |
-| `VK_KHR_dynamic_rendering_local_read` | Not implemented |  |
+| `VK_KHR_dynamic_rendering_local_read` | Planned (in scope, not implemented) | roadmap F8 |
 | `VK_KHR_extended_flags` | Not implemented |  |
-| `VK_KHR_external_fence` | Not implemented |  |
-| `VK_KHR_external_fence_capabilities` | Not implemented |  |
+| `VK_KHR_external_fence` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_external_fence_capabilities` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_external_fence_fd` | Not implemented |  |
 | `VK_KHR_external_fence_win32` | Not implemented |  |
-| `VK_KHR_external_memory` | Not implemented |  |
-| `VK_KHR_external_memory_capabilities` | Not implemented |  |
+| `VK_KHR_external_memory` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_external_memory_capabilities` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_external_memory_fd` | Not implemented |  |
 | `VK_KHR_external_memory_win32` | Not implemented |  |
-| `VK_KHR_external_semaphore` | Not implemented |  |
-| `VK_KHR_external_semaphore_capabilities` | Not implemented |  |
+| `VK_KHR_external_semaphore` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_external_semaphore_capabilities` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_external_semaphore_fd` | Not implemented |  |
 | `VK_KHR_external_semaphore_win32` | Not implemented |  |
-| `VK_KHR_format_feature_flags2` | Not implemented |  |
+| `VK_KHR_format_feature_flags2` | Implemented (core, not advertised by name) | roadmap E24/E25: vkGetPhysicalDeviceFormatProperties2 fills a chained VkFormatProperties3 (EntryPoints.cpp) |
 | `VK_KHR_fragment_shader_barycentric` | Not implemented |  |
 | `VK_KHR_fragment_shading_rate` | Not implemented |  |
 | `VK_KHR_get_display_properties2` | Not implemented |  |
-| `VK_KHR_get_memory_requirements2` | Not implemented |  |
-| `VK_KHR_get_physical_device_properties2` | Not implemented |  |
-| `VK_KHR_get_surface_capabilities2` | Not implemented |  |
-| `VK_KHR_global_priority` | Not implemented |  |
-| `VK_KHR_image_format_list` | Not implemented |  |
-| `VK_KHR_imageless_framebuffer` | Not implemented |  |
+| `VK_KHR_get_memory_requirements2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_get_physical_device_properties2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_get_surface_capabilities2` | Planned (in scope, not implemented) | roadmap H10 (V8) |
+| `VK_KHR_global_priority` | Planned (in scope, not implemented) | roadmap F1 |
+| `VK_KHR_image_format_list` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_imageless_framebuffer` | Implemented (core, not advertised by name) | roadmap C6: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT and VkRenderPassAttachmentBeginInfo both honored (RenderPass.cpp's vkCreateFramebuffer, CommandBuffer.cpp's vkCmdBeginRenderPass) |
 | `VK_KHR_incremental_present` | Not implemented |  |
-| `VK_KHR_index_type_uint8` | Not implemented |  |
+| `VK_KHR_index_type_uint8` | Planned (in scope, not implemented) | roadmap F7 |
 | `VK_KHR_internally_synchronized_queues` | Not implemented |  |
-| `VK_KHR_line_rasterization` | Not implemented |  |
-| `VK_KHR_load_store_op_none` | Not implemented |  |
-| `VK_KHR_maintenance1` | Not implemented |  |
+| `VK_KHR_line_rasterization` | Planned (in scope, not implemented) | roadmap F5 |
+| `VK_KHR_load_store_op_none` | Planned (in scope, not implemented) | roadmap F13 |
+| `VK_KHR_maintenance1` | Implemented (core, not advertised by name) | vkTrimCommandPool implemented (CommandBuffer.cpp) |
 | `VK_KHR_maintenance10` | Not implemented |  |
 | `VK_KHR_maintenance11` | Not implemented |  |
-| `VK_KHR_maintenance2` | Not implemented |  |
-| `VK_KHR_maintenance3` | Not implemented |  |
+| `VK_KHR_maintenance2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_maintenance3` | Implemented (core, not advertised by name) | vkGetDescriptorSetLayoutSupport plus VkPhysicalDeviceMaintenance3Properties (Descriptor.cpp, EntryPoints.cpp's fillProperties2Chain) |
 | `VK_KHR_maintenance4` | Implemented (core, not advertised by name) | roadmap E4: vkGetDeviceBufferMemoryRequirements/vkGetDeviceImageMemoryRequirements/vkGetDeviceImageSparseMemoryRequirements, maxBufferSize, all implemented as core VK_VERSION_1_3 names; extension string never needed by any known CTS case |
 | `VK_KHR_maintenance5` | Advertised |  |
 | `VK_KHR_maintenance6` | Advertised |  |
 | `VK_KHR_maintenance7` | Not implemented |  |
 | `VK_KHR_maintenance8` | Not implemented |  |
 | `VK_KHR_maintenance9` | Not implemented |  |
-| `VK_KHR_map_memory2` | Not implemented |  |
-| `VK_KHR_multiview` | Not implemented |  |
+| `VK_KHR_map_memory2` | Planned (in scope, not implemented) | roadmap F14 |
+| `VK_KHR_multiview` | Planned (in scope, not implemented) | roadmap H2: layered rendering first; deqp-vk's own multiview cases enable this by name |
 | `VK_KHR_opacity_micromap` | Not implemented |  |
 | `VK_KHR_performance_query` | Not implemented |  |
 | `VK_KHR_pipeline_binary` | Not implemented |  |
 | `VK_KHR_pipeline_executable_properties` | Not implemented |  |
-| `VK_KHR_pipeline_library` | Not implemented |  |
+| `VK_KHR_pipeline_library` | Planned (in scope, not implemented) | roadmap J7 |
 | `VK_KHR_portability_enumeration` | Not implemented |  |
 | `VK_KHR_portability_subset` | Not implemented |  |
 | `VK_KHR_present_id` | Not implemented |  |
@@ -334,52 +366,52 @@ below).
 | `VK_KHR_present_mode_fifo_latest_ready` | Not implemented |  |
 | `VK_KHR_present_wait` | Not implemented |  |
 | `VK_KHR_present_wait2` | Not implemented |  |
-| `VK_KHR_push_descriptor` | Not implemented |  |
-| `VK_KHR_ray_query` | Not implemented |  |
-| `VK_KHR_ray_tracing_maintenance1` | Not implemented |  |
-| `VK_KHR_ray_tracing_pipeline` | Not implemented |  |
-| `VK_KHR_ray_tracing_position_fetch` | Not implemented |  |
-| `VK_KHR_relaxed_block_layout` | Not implemented |  |
+| `VK_KHR_push_descriptor` | Planned (in scope, not implemented) | roadmap F12 |
+| `VK_KHR_ray_query` | Planned (in scope, not implemented) | roadmap J5 |
+| `VK_KHR_ray_tracing_maintenance1` | Planned (in scope, not implemented) | roadmap J7 |
+| `VK_KHR_ray_tracing_pipeline` | Planned (in scope, not implemented) | roadmap J6 |
+| `VK_KHR_ray_tracing_position_fetch` | Planned (in scope, not implemented) | roadmap J8 |
+| `VK_KHR_relaxed_block_layout` | Implemented (core, not advertised by name) | SPIR-V block access uses each member's declared offset/stride rather than imposing or validating a std140 re-layout (SPIRVToLLVMPatterns.cpp's getUniformBlockElement) |
 | `VK_KHR_robustness2` | Not implemented |  |
-| `VK_KHR_sampler_mirror_clamp_to_edge` | Not implemented |  |
-| `VK_KHR_sampler_ycbcr_conversion` | Not implemented |  |
-| `VK_KHR_separate_depth_stencil_layouts` | Not implemented |  |
+| `VK_KHR_sampler_mirror_clamp_to_edge` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_sampler_ycbcr_conversion` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_separate_depth_stencil_layouts` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_abort` | Not implemented |  |
-| `VK_KHR_shader_atomic_int64` | Not implemented |  |
+| `VK_KHR_shader_atomic_int64` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_bfloat16` | Not implemented |  |
 | `VK_KHR_shader_clock` | Not implemented |  |
 | `VK_KHR_shader_constant_data` | Not implemented |  |
-| `VK_KHR_shader_draw_parameters` | Not implemented |  |
-| `VK_KHR_shader_expect_assume` | Not implemented |  |
-| `VK_KHR_shader_float16_int8` | Not implemented |  |
-| `VK_KHR_shader_float_controls` | Not implemented |  |
-| `VK_KHR_shader_float_controls2` | Not implemented |  |
+| `VK_KHR_shader_draw_parameters` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_shader_expect_assume` | Planned (in scope, not implemented) | roadmap F4 |
+| `VK_KHR_shader_float16_int8` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_shader_float_controls` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F3 |
 | `VK_KHR_shader_fma` | Not implemented |  |
 | `VK_KHR_shader_integer_dot_product` | Advertised |  |
 | `VK_KHR_shader_maximal_reconvergence` | Not implemented |  |
 | `VK_KHR_shader_non_semantic_info` | Advertised |  |
 | `VK_KHR_shader_quad_control` | Not implemented |  |
 | `VK_KHR_shader_relaxed_extended_instruction` | Not implemented |  |
-| `VK_KHR_shader_subgroup_extended_types` | Not implemented |  |
-| `VK_KHR_shader_subgroup_rotate` | Not implemented |  |
+| `VK_KHR_shader_subgroup_extended_types` | Implemented (core, not advertised by name) | roadmap C6: reported true, and vacuously so -- no OpGroupNonUniform* operation is converted at all yet (EntryPoints.cpp's fillFeatures2Chain) |
+| `VK_KHR_shader_subgroup_rotate` | Planned (in scope, not implemented) | roadmap F2 |
 | `VK_KHR_shader_subgroup_uniform_control_flow` | Not implemented |  |
 | `VK_KHR_shader_terminate_invocation` | Advertised |  |
 | `VK_KHR_shader_untyped_pointers` | Not implemented |  |
 | `VK_KHR_shared_presentable_image` | Not implemented |  |
-| `VK_KHR_spirv_1_4` | Not implemented |  |
-| `VK_KHR_storage_buffer_storage_class` | Not implemented |  |
-| `VK_KHR_surface` | Not implemented |  |
+| `VK_KHR_spirv_1_4` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_storage_buffer_storage_class` | Implemented (core, not advertised by name) | the StorageBuffer storage class is accepted directly (SPIRVToLLVMPatterns.cpp's isBufferBlockStorage) |
+| `VK_KHR_surface` | Planned (in scope, not implemented) | roadmap H10 (V8): headless surface first |
 | `VK_KHR_surface_maintenance1` | Not implemented |  |
 | `VK_KHR_surface_protected_capabilities` | Not implemented |  |
-| `VK_KHR_swapchain` | Not implemented |  |
+| `VK_KHR_swapchain` | Planned (in scope, not implemented) | roadmap H10 (V8) |
 | `VK_KHR_swapchain_maintenance1` | Not implemented |  |
 | `VK_KHR_swapchain_mutable_format` | Not implemented |  |
 | `VK_KHR_synchronization2` | Advertised |  |
-| `VK_KHR_timeline_semaphore` | Not implemented |  |
+| `VK_KHR_timeline_semaphore` | Implemented (core, not advertised by name) | V3: vkGetSemaphoreCounterValue/vkWaitSemaphores/vkSignalSemaphore plus the feature and limit cases (Sync.cpp, EntryPoints.cpp) |
 | `VK_KHR_unified_image_layouts` | Not implemented |  |
-| `VK_KHR_uniform_buffer_standard_layout` | Not implemented |  |
-| `VK_KHR_variable_pointers` | Not implemented |  |
-| `VK_KHR_vertex_attribute_divisor` | Not implemented |  |
+| `VK_KHR_uniform_buffer_standard_layout` | Implemented (core, not advertised by name) | roadmap C6: reported true, and honest -- no std140 layout restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp) |
+| `VK_KHR_variable_pointers` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
+| `VK_KHR_vertex_attribute_divisor` | Planned (in scope, not implemented) | roadmap F6 |
 | `VK_KHR_video_decode_av1` | Not implemented |  |
 | `VK_KHR_video_decode_h264` | Not implemented |  |
 | `VK_KHR_video_decode_h265` | Not implemented |  |
@@ -395,7 +427,7 @@ below).
 | `VK_KHR_video_maintenance1` | Not implemented |  |
 | `VK_KHR_video_maintenance2` | Not implemented |  |
 | `VK_KHR_video_queue` | Not implemented |  |
-| `VK_KHR_vulkan_memory_model` | Not implemented |  |
+| `VK_KHR_vulkan_memory_model` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_wayland_surface` | Not implemented |  |
 | `VK_KHR_win32_keyed_mutex` | Not implemented |  |
 | `VK_KHR_win32_surface` | Not implemented |  |

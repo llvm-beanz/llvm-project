@@ -1,7 +1,56 @@
 # Feature-struct member names, from vk_gen_feature_inventory.py's inventoried
-# VkPhysicalDeviceVulkan{13,14}Features, that this ICD's PhysicalDeviceInfo
-# genuinely implements today -- used by roadmap D1's audit
+# core VkPhysicalDeviceFeatures/VkPhysicalDeviceVulkan{11,12,13,14}Features
+# structs, that this ICD's PhysicalDeviceInfo/EntryPoints genuinely
+# implements and reports VK_TRUE today -- used by roadmap D1's audit
 # (feme/utils/vk_gen_feature_inventory.py --advertised-features).
+#
+# Every name below must be reported VK_TRUE by both its dedicated
+# pre-promotion feature struct (where one exists) and the aggregate
+# VkPhysicalDeviceVulkan1xFeatures case in EntryPoints.cpp; the two
+# disagreeing is what dEQP-VK.api.info.*.feature_extensions_consistency
+# catches, so this file tracks the pair, not either one alone.
+#
+# --- Core Vulkan 1.0 (VkPhysicalDeviceFeatures, PhysicalDeviceInfo.cpp's
+# --- Info.Features). Every other 1.0 bit is a truthful VK_FALSE; roadmap
+# --- 1.9.7's H7 is the row that grows this list.
+#
+# robustBufferAccess: bounds checking is a first-class part of the CPU
+# target's resource model (FeMeCPUDesign.md, "Bounds checking").
+robustBufferAccess
+# dualSrcBlend: roadmap C4e -- an Index=1 fragment output reaches
+# executeDraws' VK_BLEND_FACTOR_SRC1_* handling.
+dualSrcBlend
+# textureCompressionASTC_LDR: roadmap E20/E22 -- Format.h/Image.{h,cpp}/
+# ASTCDecode.h recognize, lay out and decode LDR ASTC data, and the
+# copy/blit/resolve paths address such an image a block at a time.
+textureCompressionASTC_LDR
+#
+# --- Core Vulkan 1.1 (VkPhysicalDeviceVulkan11Features): nothing yet.
+# `multiview` is the notable absence -- roadmap C6 left it deliberately
+# unadvertised because layered rendering does not exist, and roadmap
+# 1.9.7's H2 owns closing it.
+#
+# --- Core Vulkan 1.2 (VkPhysicalDeviceVulkan12Features): roadmap C6,
+# --- plus timelineSemaphore from V3.
+#
+# imagelessFramebuffer: vkCreateFramebuffer/vkCmdBeginRenderPass defer a
+# framebuffer's attachment views to VkRenderPassAttachmentBeginInfo.
+imagelessFramebuffer
+# uniformBufferStandardLayout/separateDepthStencilLayouts: each relaxes a
+# default restriction this ICD never enforced in the first place.
+uniformBufferStandardLayout
+separateDepthStencilLayouts
+# shaderSubgroupExtendedTypes/subgroupBroadcastDynamicId: vacuously true --
+# no OpGroupNonUniform* operation is converted at all yet.
+shaderSubgroupExtendedTypes
+subgroupBroadcastDynamicId
+# hostQueryReset: vkResetQueryPool (QueryPool.cpp) implements the host-side
+# reset directly.
+hostQueryReset
+# timelineSemaphore: V3's Sync.{h,cpp} timeline semaphores.
+timelineSemaphore
+#
+# --- Core Vulkan 1.3 (VkPhysicalDeviceVulkan13Features).
 #
 # dynamicRendering: implemented (RenderPass.cpp/GraphicsPipeline.cpp) and,
 # as of roadmap E1, advertised through both its pre-promotion
@@ -35,3 +84,37 @@ shaderIntegerDotProduct
 # aggregate VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES case,
 # which now agree.
 pipelineCreationCacheControl
+# synchronization2: roadmap E3 -- vkCmdPipelineBarrier2/vkQueueSubmit2 and
+# their four peers translate the 2-stage-mask/2-access-mask barrier shape
+# down to Sync.cpp's existing 1-mask model.
+synchronization2
+# privateData: roadmap E10 -- VkPrivateDataSlot and its four commands.
+privateData
+# shaderDemoteToHelperInvocation/shaderTerminateInvocation: roadmap E11/E12
+# -- OpDemoteToHelperInvocation and OpTerminateInvocation each have a real
+# spirv->llvm conversion pattern.
+shaderDemoteToHelperInvocation
+shaderTerminateInvocation
+# subgroupSizeControl/computeFullSubgroups: roadmap E7 --
+# VkPipelineShaderStageRequiredSubgroupSizeCreateInfo is honored where the
+# subgroup size is selected (GroupSize.cpp).
+subgroupSizeControl
+computeFullSubgroups
+# shaderZeroInitializeWorkgroupMemory: roadmap E13 -- Workgroup-storage-class
+# globals are zero-initialized once per dispatch.
+shaderZeroInitializeWorkgroupMemory
+# inlineUniformBlock: roadmap E14 -- VK_DESCRIPTOR_TYPE_INLINE_UNIFORM_BLOCK
+# is materialized out of Descriptor.{h,cpp}'s per-binding storage.
+# descriptorBindingInlineUniformBlockUpdateAfterBind stays VK_FALSE: no
+# update-after-bind path exists at all.
+inlineUniformBlock
+#
+# --- Core Vulkan 1.4 (VkPhysicalDeviceVulkan14Features).
+#
+# maintenance5: roadmap E5 -- null VkRenderingAttachmentInfo image views,
+# VK_REMAINING_ARRAY_LAYERS in a copy/blit/resolve region (E27's fix), and
+# the rest of that group's fixed-function relaxations.
+maintenance5
+# maintenance6: roadmap E6 -- vkCmdBindDescriptorSets2/vkCmdPushConstants2/
+# vkCmdPushDescriptorSet2 over the existing Descriptor.cpp entry points.
+maintenance6
