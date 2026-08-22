@@ -26,10 +26,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement milestone E16 in the roadmap document?
+Can you implement milestone E17 in the roadmap document?
 
-> **`VK_EXT_image_robustness`/`robustImageAccess`.** Out-of-bounds image
-> reads/writes must return/discard rather than fault; audit
-> `Image.cpp`'s/`ImageOps.cpp`'s existing bounds handling (Executor's texel
-> read/write path) and add an explicit clamp-or-discard for any coordinate
-> outside the image's declared extent that isn't already handled
+> **SPIR-V 1.6 `Nontemporal` image-operand bit.** Not a feature-bit gap but a
+> shader-compilation one:
+> `ImageFetchPattern`/`ImageFetchLodPattern`/`ImageSampleExplicitLodPattern`
+> (`SPIRVToLLVMPatterns.cpp`) reject any image operand mask they don't recognize
+> exactly, and SPIR-V 1.6's cache hint bit has no case. Since it has no
+> correctness effect, the fix is to accept and discard it rather than model
+> caching. **Closes D3's `spirv_assembly.instruction.compute` 422-case
+> regression**, the largest single item in this section
