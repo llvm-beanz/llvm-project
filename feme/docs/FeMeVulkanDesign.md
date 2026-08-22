@@ -1,31 +1,29 @@
-#FeMe Vulkan Runtime Design
+# FeMe Vulkan Runtime Design
 
 ## Status
 
-This is an initial design for a Vulkan installable client driver (ICD)
-backed by FeMe's CPU target. The first implementation target is a headless, compute - only Vulkan device
-    .It is intended to sit below the standard Vulkan loader in the same position
-        as Mesa 's lavapipe, but it does not initially aim to match lavapipe' s
-            graphics,
-    WSI,
-    or extension coverage
-            .
+This is the design for a Vulkan installable client driver (ICD) backed by
+FeMe's CPU target. The *first implementation target* was a headless,
+compute-only Vulkan device; the *scope* is now full Vulkan 1.4 conformance
+covering compute, graphics and ray tracing (see "Conformance Target"
+below). It is intended to sit below the standard Vulkan loader in the same
+position as Mesa's lavapipe.
 
-        The CPU shader compiler and
-            execution machinery described in[FeMeCPUDesign.md](FeMeCPUDesign.md)
-                already exists.The work designed here is the runtime layer which
-        translates Vulkan objects and commands into that machinery,
-    plus the FeMe changes needed to make the CPU target usable by a driver.
+The CPU shader compiler and execution machinery described in
+[FeMeCPUDesign.md](FeMeCPUDesign.md) already exists. The work designed here
+is the runtime layer which translates Vulkan objects and commands into that
+machinery, plus the FeMe changes needed to make the CPU target usable by a
+driver.
 
-    The shared compiler,
-    stage ABI, image / sampler,
-    and software - rasterization work needed to extend
-                   this compute device to graphics is designed
-                   separately in[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md)
-                       .This document retains ownership of Vulkan pipeline,
-    render - pass, command, synchronization, and WSI semantics; those are specified in "Graphics, Presentation, and Window-System
-Integration" below and scheduled as milestones V6–V8. Everything before V6 is
-a compute-only device.
+The shared compiler, stage ABI, image/sampler, software-rasterization and
+ray-traversal work needed to extend this compute device to graphics and ray
+tracing is designed separately in
+[FeMeGraphicsDesign.md](FeMeGraphicsDesign.md). This document retains
+ownership of Vulkan pipeline, render-pass, command, synchronization,
+acceleration-structure and WSI semantics; those are specified in "Graphics,
+Presentation, and Window-System Integration" below and scheduled as
+milestones V6–V8, with V9 owning the conformance submission itself.
+Everything before V6 is a compute-only device.
 
 Those FeMe changes are not incidental, and this design does not treat them as
 such. Four of them gate the first executing milestone:
@@ -97,12 +95,14 @@ semantics. In particular, the CPU target must not acquire knowledge of
 ## Goals
 
 - Load through the standard Khronos Vulkan loader using a driver manifest.
-- Present a useful, compute-only Vulkan physical device on Linux first.
-- Accept Vulkan SPIR-V compute shaders without translating through NIR,
-  Gallium, or Mesa.
+- Present a useful Vulkan physical device on Linux first — compute-only
+  through V5, graphics from V6, ray tracing from V8.
+- Accept Vulkan SPIR-V without translating through NIR, Gallium, or Mesa.
 - Reuse FeMe's import, optimization, CPU lowering, runtime helper, and JIT/AOT
   infrastructure.
 - Make all advertised limits, features, formats, and extensions truthful.
+- **Reach full Vulkan 1.4 conformance**, covering compute, graphics and ray
+  tracing, under the discipline in "Conformance Target" below.
 - Support multiple devices, queues, and pipeline compilations without mutable
   process-global FeMe state.
 - Coexist in one process with other installed Vulkan drivers, including other
@@ -112,38 +112,89 @@ semantics. In particular, the CPU target must not acquire knowledge of
 - Make malformed SPIR-V and hostile Vulkan object sizes fail cleanly rather
   than becoming host memory corruption.
 
+## Conformance Target
+
+The target is **full Vulkan 1.4 conformance**: the mandatory `deqp-vk` list
+for `VK_API_VERSION_1_4` running with zero `Fail` against a stock
+(unpatched) CTS, on a device that advertises every mandatory feature, limit,
+format and queue capability of Vulkan 1.0 through 1.4. That claim is not
+compute-only in any of its three parts:
+
+- **Compute.** The original V0–V5 surface, already the most complete part of
+  this ICD.
+- **Graphics.** A `VK_QUEUE_GRAPHICS_BIT` queue family with the full core
+  raster pipeline behind it, including the optional-but-in-scope stages
+  (tessellation, geometry, mesh/task) and layered/multiview rendering, plus
+  WSI. Nothing in Vulkan 1.4 core lets a device claim the version while
+  rejecting graphics: `VkPhysicalDeviceLimits`, the format table and the
+  render-pass object model are all mandatory whether or not any queue is
+  advertised as graphics-capable, and the mandatory CTS list exercises them.
+- **Ray tracing.** `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`,
+  `VK_KHR_ray_tracing_pipeline` and their dependency set
+  (`VK_KHR_deferred_host_operations`, `VK_KHR_pipeline_library`, buffer
+  device address) are *optional* extensions rather than part of the 1.4 core
+  floor, so they are not required for a 1.4 submission. They are nonetheless
+  in scope here: a software device whose whole purpose is a complete,
+  deterministic reference implementation is not complete while the entire
+  ray-tracing CTS reports `NotSupported`, and the CTS's own ray-tracing
+  groups are the only conformance-grade tests that exist for the traversal
+  and continuation machinery [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md)
+  designs. Their conformance criterion is the same one core uses: zero
+  `Fail` in `dEQP-VK.ray_query` and `dEQP-VK.ray_tracing_pipeline` for
+  exactly the extensions advertised.
+
+Three rules keep the claim honest, and none of them is traded away for
+schedule:
+
+1. **Advertise only what passes.** No feature bit, extension name, queue
+   capability or `apiVersion` is advertised before the CTS coverage behind
+   it passes. The one deliberate, recorded violation of this rule — roadmap
+   D0's `apiVersion` jump to 1.4 ahead of the 1.3/1.4 floor — is the reason
+   [Roadmap.md](Roadmap.md) §1.9.3 exists, and it is not a precedent.
+2. **Zero conformance claim until submission.** Until a mandatory CTS list
+   passes in full, the driver reports a zero `VkConformanceVersion`, must not
+   imply Khronos conformance in its device name, driver name, or
+   documentation, and must not be distributed under a name that asserts a
+   conformant Vulkan implementation.
+3. **Measure, don't assume.** Every capability added for conformance carries
+   its own before/after CTS measurement in
+   [VulkanCTSReport.md](VulkanCTSReport.md); a group reporting zero failures
+   because it is entirely `NotSupported` is a *gap*, not a result, once the
+   capability it covers is in scope.
+
+The gap between this target and what exists is inventoried in
+[Vulkan14FeatureInventory.md](Vulkan14FeatureInventory.md) (the core
+feature/limit/extension floor) and
+[VulkanExtensionInventory.md](VulkanExtensionInventory.md) (every
+`VK_KHR_*`/`VK_EXT_*` extension, with the in-scope ones distinguished from
+the deliberate non-goals), and scheduled in [Roadmap.md](Roadmap.md) §1.9.
+
 ## Initial Non-Goals
 
-These are non-goals for the *initial*, compute-only device (V0–V5). Graphics,
-mesh shading, ray tracing, and WSI are designed in "Graphics, Presentation,
-and Window-System Integration" and scheduled as V6–V8; nothing below is
-permanently excluded except where it says so.
+These are non-goals for the *initial*, compute-only device (V0–V5).
+Graphics, mesh shading, ray tracing, and WSI are all in scope — designed in
+"Graphics, Presentation, and Window-System Integration" and scheduled as
+V6–V8 — and nothing below is permanently excluded except where it says so.
 
-- Graphics, ray tracing, mesh shading, and video queues. Video queues are
-  permanently out of scope;
-the rest are V6–V8.- Window - system integration, surfaces, swapchains,
-    and presentation(V8).- Vulkan
-                           conformance.Until the relevant CTS coverage passes,
-    the driver must report a zero `VkConformanceVersion`,
-    must not imply Khronos conformance in its device name, driver name,
-    or documentation,
-    and must not be distributed under a name that asserts a conformant Vulkan
-            implementation.-
-            Matching all lavapipe extensions
-        or performance.-
-               Reusing Mesa's NIR, Gallium, llvmpipe, or common Vulkan runtime as a link-time dependency
-                   .-
-               Device group execution,
-    sparse residency, protected memory, external memory,
-    and external synchronization handles.Their *features *report false and their
-            capability queries return empty
-        or degenerate results,
-    but the core entrypoints that carry them-- `vkEnumeratePhysicalDeviceGroups`,
+- Graphics, ray tracing, mesh shading, and video queues, in V0–V5. Video
+  queues are permanently out of scope; the rest are V6–V8.
+- Window-system integration, surfaces, swapchains, and presentation (V8).
+- Matching all lavapipe extensions or performance. The conformance target
+  above is a *floor plus ray tracing*, not extension parity with another
+  driver.
+- Reusing Mesa's NIR, Gallium, llvmpipe, or common Vulkan runtime as a
+  link-time dependency.
+- Device group execution, sparse residency, protected memory, external
+  memory, and external synchronization handles. Their *features* report
+  false and their capability queries return empty or degenerate results, but
+  the core entrypoints that carry them — `vkEnumeratePhysicalDeviceGroups`,
   `vkGetPhysicalDeviceSparseImageFormatProperties2`,
-  `vkGetPhysicalDeviceExternalBufferProperties`,
-    and their peers-- are still implemented.An
-        advertised core version may report a feature as unsupported;
-  it may not omit a command.
+  `vkGetPhysicalDeviceExternalBufferProperties`, and their peers — are still
+  implemented. An advertised core version may report a feature as
+  unsupported; it may not omit a command. Each is optional for a 1.4
+  submission, which is why each stays out of scope; if a mandatory CTS case
+  is ever traced to one, that trace promotes it into scope rather than
+  excusing the failure.
 - Images, sampling, and samplers in the first executing milestone. These are
   required for broader Vulkan compute compatibility, but FeMe's current CPU
   resource runtime is buffer-oriented and deliberately does not implement
@@ -1427,6 +1478,18 @@ Mesh shading (`VK_EXT_mesh_shader`) and ray tracing (`VK_KHR_ray_query`,
 through the same rule as everything else: not until the corresponding graphics
 milestone's completion test passes, and never partially.
 
+Both are inside this document's declared conformance scope (see "Conformance
+Target"), so "not advertised" is a tracked gap rather than a settled
+non-goal. Ray tracing in particular is not one extension but a dependency
+set, and advertising any member of it without the rest is exactly the
+partial exposure the rule above forbids:
+`VK_KHR_acceleration_structure` requires `VK_KHR_deferred_host_operations`
+and buffer device address (core since 1.2, currently reported false);
+`VK_KHR_ray_tracing_pipeline` additionally requires `VK_KHR_pipeline_library`
+for library-linked pipelines. `VK_KHR_ray_tracing_maintenance1` and
+`VK_KHR_ray_tracing_position_fetch` are separable follow-ons, not
+prerequisites.
+
 Two Vulkan-specific obligations do not come from the graphics core and are
 owned here:
 
@@ -2582,6 +2645,34 @@ display.
 
 Video queues, sparse residency, external memory, and cross-driver image
 sharing remain out of scope; see "Initial Non-Goals".
+
+### V9: Conformance submission readiness
+
+Depends on V6–V8 and on [Roadmap.md](Roadmap.md) §1.9's E/F/H/J series
+being closed. This milestone implements nothing new: it is the step that
+turns "every capability we advertise passes its own tests" into a
+submittable Vulkan 1.4 conformance result, and it exists as a milestone
+because each of its parts has been discovered, the hard way, to be
+someone's job rather than a by-product of the previous one.
+
+- Run the mandatory `deqp-vk` list for `VK_API_VERSION_1_4` against a
+  **stock** VK-GL-CTS checkout, with every local patch this project
+  currently relies on either upstreamed or proven unnecessary (roadmap C9).
+- Reconcile the three inventories with the device one last time:
+  every `VkPhysicalDeviceVulkan1xFeatures` member, every limit field, and
+  every advertised extension name re-derived from the registry rather than
+  from this tree's own notes.
+- Obtain a Khronos-assigned `VkDriverId`, and only then replace the
+  deliberate `VK_DRIVER_ID_MAX_ENUM`/zero `VkConformanceVersion` this ICD
+  reports today.
+- Record the submission package (CTS revision, build configuration, result
+  logs) alongside [VulkanCTSReport.md](VulkanCTSReport.md), which stays the
+  measurement of record.
+
+Completion test: a zero-`Fail` mandatory-list run on a stock CTS, plus
+zero-`Fail` `dEQP-VK.ray_query`/`ray_tracing_pipeline` runs for the
+advertised ray-tracing extension set, reproduced by the continuous job
+roadmap C10/D4 owns rather than by hand.
 
 ## Testing Strategy
 

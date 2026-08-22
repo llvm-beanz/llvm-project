@@ -51,6 +51,15 @@ Primary driving use cases:
 2. **Offline cross-compilation / translation tools** — e.g. translating
    DXIL to SPIR-V (or vice versa) for portability layers, without a full
    round-trip through source.
+3. **Complete software implementations of the graphics APIs themselves** —
+   [FeMeVulkanDesign.md](FeMeVulkanDesign.md) and
+   [FeMeWARPDesign.md](FeMeWARPDesign.md) build a Vulkan ICD and a Direct3D
+   software adapter on top of FeMe's CPU target, and both now target *full
+   API conformance* covering compute, graphics and ray tracing. This is the
+   most demanding consumer of FeMe's importers by a wide margin: a
+   conformance suite exercises every corner of the source IR, so importer
+   and CPU-target breadth gaps surface there as test failures long before
+   any other use case notices them.
 
 Both use cases require FeMe to work well embedded in another process (a
 driver, a build tool), which is why it is designed as a library first.

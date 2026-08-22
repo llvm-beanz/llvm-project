@@ -153,17 +153,32 @@ There are three ownership layers:
 - Keep one definition of each runtime structure. FeMe has not shipped, so
   graphics should correct the existing compute ABI in place rather than
   growing parallel versioned variants beside it.
+- **Be sufficient for API conformance, not only for demos.** Both API
+  runtimes now target full conformance for their respective APIs
+  ([FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Conformance Target": full
+  Vulkan 1.4 including graphics and ray tracing;
+  [FeMeWARPDesign.md](FeMeWARPDesign.md)'s equivalent Direct3D 12 target).
+  Every milestone from G3 onward is therefore on a conformance critical
+  path rather than optional: G5's tessellation/geometry stages, G6's
+  mesh/task stages and G7/G8's ray query and ray-tracing pipelines each
+  back an entire CTS group that reports zero failures today only because
+  nothing is advertised. "Correctly `NotSupported`" stops being an
+  acceptable end state for anything this document designs.
 
 ## Initial Non-Goals
 
 - Tessellation, geometry, mesh/amplification, and ray tracing in the first
-  executing graphics milestone. They are later milestones in this design, not
+  executing graphics milestone. They are later milestones in this design
+  (G5–G8), on the conformance critical path per the last Goal above, not
   permanently out of scope.
 - Work graphs, video, or programmable blending.
-- Presentation, swapchains, DXGI integration, or window-system integration.
-- Claiming Vulkan or Direct3D conformance. Neither runtime may assert
-  conformance, and the Vulkan ICD must continue to report a zero
-  `VkConformanceVersion`, until the corresponding suites pass.
+- Presentation, swapchains, DXGI integration, or window-system integration:
+  in scope for the API runtimes (Vulkan V8), but never in this core.
+- Claiming Vulkan or Direct3D conformance *before it is measured*. Neither
+  runtime may assert conformance, and the Vulkan ICD must continue to report
+  a zero `VkConformanceVersion`, until the corresponding suites pass. This
+  is a sequencing rule, not a scope limit: reaching those suites is the
+  declared target of both runtimes.
 - Performance parity with llvmpipe, SwiftShader, or WARP.
 - A public cross-vendor shader ABI. These interfaces are internal FeMe
   implementation contracts and remain free to change until FeMe ships.

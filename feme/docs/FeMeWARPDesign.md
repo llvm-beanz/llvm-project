@@ -5,7 +5,10 @@
 This is an initial design for using FeMe's CPU target as the shader execution
 engine of a Direct3D software adapter. The long-term goal is to serve the same
 reference, compatibility, testing, and headless execution use cases for which
-applications select the Windows Advanced Rasterization Platform (WARP).
+applications select the Windows Advanced Rasterization Platform (WARP), at a
+capability level equivalent to the Vulkan ICD's own conformance target — full
+compute, graphics and ray-tracing coverage, reached later and measured in
+Direct3D's own terms (see "Conformance Target" below).
 
 This document uses "WARP replacement" as shorthand for that role. It does not
 assume that a third-party component can replace Microsoft's WARP binary or
@@ -134,6 +137,57 @@ DXGI adapters, command allocators, or Windows presentation objects.
   without exposing arbitrary host memory.
 - Grow to the graphics and resource coverage needed by representative WARP
   workloads without coupling shader lowering to the rasterizer.
+- **Reach a Direct3D 12 conformance target equivalent to the Vulkan ICD's**
+  ([FeMeVulkanDesign.md](FeMeVulkanDesign.md)'s "Conformance Target": full
+  Vulkan 1.4 including compute, graphics and ray tracing) — see
+  "Conformance Target" below.
+
+## Conformance Target
+
+The Vulkan ICD's target is full Vulkan 1.4 conformance across compute,
+graphics and ray tracing. This adapter's *eventual* target is the Direct3D
+equivalent of that claim, stated in Direct3D's own terms because Direct3D
+has no `deqp`-style single mandatory list and no Khronos-style submission:
+
+- **Compute.** A D3D12 device that passes the compute portions of the
+  Windows Hardware Lab Kit (HLK) Direct3D 12 tests and the
+  `offload-test-suite`/`d3d12-conformance`-style execution tests this
+  project can run in CI, on Shader Model 6.x DXIL. This is W1–W2's scope.
+- **Graphics.** Feature level **12_2** in full — the level that bundles
+  DXR 1.1, mesh shaders, sampler feedback, variable-rate shading,
+  resource binding tier 3 and D3D12_RESOURCE_HEAP_TIER_2 — reported only
+  when every capability the level implies actually works, matching the
+  Vulkan side's "advertise only what passes" rule. Reporting a lower
+  feature level truthfully is always preferred to reporting 12_2 partially.
+  This is W4–W5's scope.
+- **Ray tracing.** DXR (`ID3D12Device5::CreateStateObject`, ray-tracing
+  pipelines, `D3D12_RAYTRACING_TIER_1_1` inline ray tracing), sharing the
+  acceleration-structure and continuation machinery
+  [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md) G7/G8 designs with the
+  Vulkan ray-tracing extensions rather than reimplementing it. This is the
+  Direct3D counterpart of the Vulkan ray-tracing scope and is scheduled at
+  W6.
+
+Three consequences follow, and they are the reason this section exists
+rather than a single "be conformant" bullet:
+
+1. **The equivalence is in the graphics/ray-tracing core, not the API
+   layer.** G3–G8 are shared; what is Direct3D-specific is the object
+   model, root signatures/descriptor heaps, resource states, DXGI, and the
+   capability-reporting rules above. A Vulkan conformance gap traced into
+   `feme::graphics`/`feme::raytracing` is a Direct3D gap too, and vice
+   versa; the roadmap tracks it once.
+2. **Sequencing is Vulkan-first, deliberately.** The Vulkan CTS is
+   runnable on this project's Linux hosts today, and the HLK is not
+   (there is no Windows CI in this tree at all — see
+   [Roadmap.md](Roadmap.md) §1.10). Driving the shared core to conformance
+   through the CTS first is what makes the Direct3D target reachable at
+   all; "eventually equivalent" means equivalent in scope, reached later,
+   not equivalent in schedule.
+3. **The honesty rules are identical.** No feature level, capability bit,
+   or tier is reported before the tests behind it pass; no conformance is
+   claimed in the adapter description string, documentation, or
+   distribution name before an HLK-equivalent run exists to back it.
 
 ## Initial Non-Goals
 
@@ -145,9 +199,12 @@ DXGI adapters, command allocators, or Windows presentation objects.
   support is a separate design if that route proves insufficient.
 - Hardware acceleration or forwarding work to another GPU.
 - Graphics, ray tracing, mesh/amplification shaders, video, DirectML-specific
-  acceleration, and presentation in the first executing milestone.
-- Full D3D12 conformance or WARP performance parity before the corresponding
-  tests pass.
+  acceleration, and presentation in the first executing milestone. All but
+  video and DirectML are in the eventual scope above; they are excluded from
+  W1–W3, not permanently.
+- Claiming D3D12 conformance, a feature level, or WARP performance parity
+  before the corresponding tests pass. Reaching that conformance is the
+  target of the section above; asserting it early is what is forbidden.
 - Matching WARP's undocumented scheduling, floating-point implementation
   details, or output in cases where Direct3D permits multiple results.
 - Supporting arbitrary application-supplied native code in pipeline libraries
@@ -658,13 +715,38 @@ would invalidate most object-layer work.
 - Implement pipeline libraries and a validated persistent cache.
 - Begin the applicable Windows conformance and HLK suites.
 
-### W6: Interoperability and broader APIs
+### W6: Interoperability, ray tracing, and broader APIs
 
 - Prototype DXGI swap-chain or cross-adapter presentation.
 - Add shared-resource and shared-fence support where the OS contract permits.
 - Evaluate D3D11-on-12 coverage before considering a native D3D11 DDI.
-- Evaluate mesh shaders and ray tracing as separate designs; neither is a
-  mechanical extension of the raster pipeline.
+- Map mesh/amplification shaders onto the shared G6 stage model, and DXR
+  (state objects, ray-tracing pipelines, shader tables, and
+  `D3D12_RAYTRACING_TIER_1_1` inline ray tracing) onto the shared G7/G8
+  acceleration-structure, traversal, and continuation machinery. Neither is
+  a mechanical extension of the raster pipeline, and each needs its own
+  Direct3D-side mapping design — but both are inside this document's
+  declared "Conformance Target" scope rather than open questions about
+  whether to support them at all.
+- Report feature level 12_2 only once every capability it implies (DXR 1.1,
+  mesh shaders, sampler feedback, variable-rate shading, binding tier 3)
+  passes its own tests; until then report the highest level that is
+  truthful.
+
+### W7: Conformance readiness
+
+The Direct3D counterpart of the Vulkan ICD's V9, and the milestone that
+makes "eventually equivalent" measurable rather than aspirational.
+
+- Run the applicable HLK Direct3D 12 test suites, and this project's own
+  portable execution tests, against the exact capability set the adapter
+  reports.
+- Reconcile every reported capability (feature level, tiers, format
+  support table, shader model) against what is actually implemented, the
+  same way roadmap V9 reconciles the Vulkan inventories.
+- Record the result alongside the Vulkan measurement of record, so a
+  regression in the shared `feme::graphics`/`feme::raytracing` core is
+  visible from either API's side.
 
 ## Testing Strategy
 
