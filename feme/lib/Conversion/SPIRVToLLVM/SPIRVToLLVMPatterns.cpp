@@ -1398,14 +1398,35 @@ mlir::Value createResourcePointer(mlir::ConversionPatternRewriter &Rewriter,
       {Handle, Coordinate});
 }
 
+/// SPIR-V 1.6's `Nontemporal` image-operand bit is a cache hint with no
+/// correctness effect (see the SPIR-V spec's Image Operands table); this
+/// converter has no caching model to honor it with, so every pattern below
+/// accepts and discards it rather than rejecting it like an unmodeled
+/// modifier or threading it through as if it changed the access performed.
+constexpr mlir::spirv::ImageOperands NontemporalBit =
+    mlir::spirv::ImageOperands::Nontemporal;
+
 /// Returns true if \p ImageOperands names any actual modifier (e.g. `Lod`,
-/// `Bias`) rather than being absent or the empty `None` bit-enum value --
-/// real `dxc`-compiled SPIR-V spells "no modifiers" as an explicit
-/// `#spirv.image_operands<None>` attribute rather than omitting the
-/// (optional) attribute entirely, so a presence check alone rejects every
-/// image access real SPIR-V input produces.
+/// `Bias`) rather than being absent, the empty `None` bit-enum value, or the
+/// discarded `Nontemporal` cache hint -- real `dxc`-compiled SPIR-V spells
+/// "no modifiers" as an explicit `#spirv.image_operands<None>` attribute
+/// rather than omitting the (optional) attribute entirely, so a presence
+/// check alone rejects every image access real SPIR-V input produces.
 bool hasImageOperands(std::optional<mlir::spirv::ImageOperands> ImageOperands) {
-  return ImageOperands && *ImageOperands != mlir::spirv::ImageOperands::None;
+  if (!ImageOperands)
+    return false;
+  return mlir::spirv::bitEnumClear(*ImageOperands, NontemporalBit) !=
+         mlir::spirv::ImageOperands::None;
+}
+
+/// Returns true if \p ImageOperands is exactly \p Required, optionally
+/// combined with the discarded `Nontemporal` cache hint (see above).
+bool hasExactImageOperands(
+    std::optional<mlir::spirv::ImageOperands> ImageOperands,
+    mlir::spirv::ImageOperands Required) {
+  if (!ImageOperands)
+    return false;
+  return mlir::spirv::bitEnumClear(*ImageOperands, NontemporalBit) == Required;
 }
 
 /// Converts `spirv.ImageRead` or `spirv.ImageFetch` into a load through the
@@ -1440,8 +1461,9 @@ public:
 using ImageReadPattern = ImageLoadPattern<mlir::spirv::ImageReadOp>;
 using ImageFetchPattern = ImageLoadPattern<mlir::spirv::ImageFetchOp>;
 
-/// Converts a `spirv.ImageFetch` with exactly the `Lod` image operand into
-/// the `llvm.spv.resource.load.level` intrinsic call, mirroring
+/// Converts a `spirv.ImageFetch` with the `Lod` image operand (optionally
+/// combined with the discarded `Nontemporal` bit, see `hasImageOperands`
+/// above) into the `llvm.spv.resource.load.level` intrinsic call, mirroring
 /// `ImageFetchPattern`'s unmodified case above but threading the explicit
 /// mip level through instead of rejecting it -- see
 /// `llvm/test/CodeGen/SPIRV/hlsl-resources/LoadLevel.ll` for the backend
@@ -1459,7 +1481,8 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageFetchOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (Op.getImageOperands() != mlir::spirv::ImageOperands::Lod ||
+    if (!hasExactImageOperands(Op.getImageOperands(),
+                               mlir::spirv::ImageOperands::Lod) ||
         Adaptor.getOperandArguments().size() != 1)
       return Rewriter.notifyMatchFailure(
           Op, "only a lone Lod image operand is supported");
@@ -1634,8 +1657,9 @@ public:
     return mlir::success();
   }
 };
-/// Converts a `spirv.ImageSampleExplicitLod` with exactly the `Lod` image
-/// operand (not `Grad`, and not combined with any other modifier) into the
+/// Converts a `spirv.ImageSampleExplicitLod` with the `Lod` image operand
+/// (not `Grad`, and not combined with any other modifier besides the
+/// discarded `Nontemporal` bit, see `hasImageOperands` above) into the
 /// `llvm.spv.resource.samplelevel` intrinsic call, mirroring
 /// `ImageSampleImplicitLodPattern` above but threading the explicit LOD
 /// operand through instead of defaulting it (see roadmap R30, "SPIR-V
@@ -1653,7 +1677,8 @@ public:
   mlir::LogicalResult
   matchAndRewrite(mlir::spirv::ImageSampleExplicitLodOp Op, OpAdaptor Adaptor,
                   mlir::ConversionPatternRewriter &Rewriter) const override {
-    if (Op.getImageOperands() != mlir::spirv::ImageOperands::Lod ||
+    if (!hasExactImageOperands(Op.getImageOperands(),
+                               mlir::spirv::ImageOperands::Lod) ||
         Adaptor.getOperandArguments().size() != 1)
       return Rewriter.notifyMatchFailure(
           Op, "only a lone Lod image operand is supported");
