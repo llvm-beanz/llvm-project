@@ -617,6 +617,48 @@ TEST_F(PipelineTest, RejectsNonComputeVisiblePushConstantRange) {
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
+/// Roadmap E19 (`VK_EXT_pipeline_creation_feedback`): a chained
+/// `VkPipelineCreationFeedbackCreateInfo` with one stage-feedback slot (a
+/// compute pipeline has exactly one stage) gets a `VALID_BIT`-only overall
+/// and per-stage feedback -- no `VkPipelineCache` is involved here, so
+/// `PipelineCacheTest.CreationFeedbackReportsCacheHitOnSecondCreation`
+/// covers the cache-hit flag instead.
+TEST_F(PipelineTest, ReportsPipelineCreationFeedback) {
+  VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkPipelineCreationFeedback Feedback{};
+  Feedback.flags = 0xdeadbeef; // Must be overwritten, not merely OR'd into.
+  VkPipelineCreationFeedback StageFeedback{};
+  VkPipelineCreationFeedbackCreateInfo FeedbackInfo{};
+  FeedbackInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+  FeedbackInfo.pPipelineCreationFeedback = &Feedback;
+  FeedbackInfo.pipelineStageCreationFeedbackCount = 1;
+  FeedbackInfo.pPipelineStageCreationFeedbacks = &StageFeedback;
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.pNext = &FeedbackInfo;
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+
+  EXPECT_EQ(Feedback.flags, static_cast<VkPipelineCreationFeedbackFlags>(
+                                VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT));
+  EXPECT_EQ(Feedback.duration, 0u);
+  EXPECT_EQ(StageFeedback.flags, static_cast<VkPipelineCreationFeedbackFlags>(
+                                     VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT));
+  EXPECT_EQ(StageFeedback.duration, 0u);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
 TEST(ShaderModuleTest, RejectsMisalignedCodeSize) {
   VkShaderModuleCreateInfo CreateInfo{};
   uint32_t Code[1] = {0};

@@ -13,6 +13,7 @@
 #include "Icd.h"
 #include "Objects.h"
 #include "PhysicalDeviceInfo.h"
+#include "Pipeline.h"
 #include "PipelineCache.h"
 #include "RenderPass.h"
 
@@ -1138,7 +1139,8 @@ Expected<std::shared_ptr<GraphicsPipelineArtifact>> compileAndValidateStages(
 Expected<std::optional<GraphicsPipelineState>>
 compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
                         const PhysicalDeviceInfo &DeviceInfo,
-                        PipelineCache *Cache) {
+                        PipelineCache *Cache, bool &CacheHit) {
+  CacheHit = false;
   if (!CreateInfo.layout)
     return createStringError(inconvertibleErrorCode(),
                              "graphics pipeline requires a VkPipelineLayout");
@@ -1171,6 +1173,7 @@ compileGraphicsPipeline(const VkGraphicsPipelineCreateInfo &CreateInfo,
 
   std::shared_ptr<GraphicsPipelineArtifact> Artifact =
       Key ? Cache->lookupGraphics(*Key) : nullptr;
+  CacheHit = Artifact != nullptr;
   if (!Artifact) {
     // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
     // BIT`: this pipeline missed the cache (or none was given), and the
@@ -1267,8 +1270,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
   VkResult Result = VK_SUCCESS;
   for (uint32_t I = 0; I != createInfoCount; ++I) {
     pPipelines[I] = VK_NULL_HANDLE;
+    bool CacheHit = false;
     Expected<std::optional<GraphicsPipelineState>> Compiled =
-        compileGraphicsPipeline(pCreateInfos[I], DeviceInfo, Cache);
+        compileGraphicsPipeline(pCreateInfos[I], DeviceInfo, Cache, CacheHit);
     if (!Compiled) {
       logCreationFailure(Compiled.takeError(), "vkCreateGraphicsPipelines");
       Result = VK_ERROR_INITIALIZATION_FAILED;
@@ -1284,6 +1288,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateGraphicsPipelines(
         Result = VK_PIPELINE_COMPILE_REQUIRED;
       continue;
     }
+    // (roadmap E19) `VK_EXT_pipeline_creation_feedback`: one feedback slot
+    // per `pStages` entry.
+    fillPipelineCreationFeedback(pCreateInfos[I].pNext,
+                                 pCreateInfos[I].stageCount, CacheHit);
     GraphicsPipeline *Obj = Alloc.create<GraphicsPipeline>(
         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, std::move(**Compiled));
     if (!Obj) {

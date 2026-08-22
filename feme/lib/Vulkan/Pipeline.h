@@ -158,6 +158,24 @@ bool pushConstantsCoverRootConstantSize(const PipelineLayout &Layout,
 llvm::Error validateBoundRanges(const feme::cpu::ResourceInfo &Info,
                                 const PipelineLayout &Layout);
 
+/// Fills a `VkPipelineCreationFeedbackCreateInfo` chained onto \p pNext (if
+/// any), for `VK_EXT_pipeline_creation_feedback`/its core-1.3 promotion
+/// (roadmap E19). This ICD has no real per-stage compile-timing
+/// instrumentation, so every `duration` is honestly reported as `0` rather
+/// than a fabricated estimate; `VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT` is
+/// always set (a pipeline that reaches this call always finished
+/// successfully -- an error return skips it entirely), with
+/// `VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT` added
+/// when \p CacheHit reflects a `VkPipelineCache` hit. \p StageCount is
+/// `VkGraphicsPipelineCreateInfo::stageCount` (one call per stage) or `1`
+/// for a compute pipeline's single stage; a chained
+/// `pipelineStageCreationFeedbackCount` that disagrees with it is clamped
+/// to the smaller of the two, matching the specification's own "must be
+/// stageCount" requirement being an application bug this ICD survives
+/// rather than crashes on.
+void fillPipelineCreationFeedback(const void *pNext, uint32_t StageCount,
+                                  bool CacheHit);
+
 } // namespace feme::vulkan
 
 #endif // FEME_LIB_VULKAN_PIPELINE_H

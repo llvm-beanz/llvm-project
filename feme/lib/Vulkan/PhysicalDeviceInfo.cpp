@@ -595,6 +595,13 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // apiVersion 1.3 -- it is listed for the same reason every other row
       // here is: this ICD genuinely implements what it declares.
       {VK_EXT_4444_FORMATS_EXTENSION_NAME, VK_EXT_4444_FORMATS_SPEC_VERSION},
+      // (roadmap E19) `VkPipelineCreationFeedbackCreateInfo`, chained onto
+      // `vkCreateGraphicsPipelines`/`vkCreateComputePipelines`, is now
+      // filled (Pipeline.cpp's `fillPipelineCreationFeedback`); like
+      // `4444_formats` above, no CTS case is known to enable this one by
+      // name outside apiVersion 1.3.
+      {VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME,
+       VK_EXT_PIPELINE_CREATION_FEEDBACK_SPEC_VERSION},
   };
   return Extensions;
 }

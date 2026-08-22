@@ -289,6 +289,43 @@ TEST_F(GraphicsPipelineTest, CompilesVertexAndFragmentStages) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// Roadmap E19 (`VK_EXT_pipeline_creation_feedback`): two stages (vertex +
+/// fragment) get two feedback slots, both `VALID_BIT`-only on a cache
+/// miss, matching `PipelineTest.ReportsPipelineCreationFeedback`'s compute
+/// counterpart.
+TEST_F(GraphicsPipelineTest, ReportsPipelineCreationFeedback) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+  ASSERT_NE(Vertex, VK_NULL_HANDLE);
+  ASSERT_NE(Fragment, VK_NULL_HANDLE);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  VkPipelineCreationFeedback Feedback{};
+  VkPipelineCreationFeedback StageFeedbacks[2]{};
+  VkPipelineCreationFeedbackCreateInfo FeedbackInfo{};
+  FeedbackInfo.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+  FeedbackInfo.pPipelineCreationFeedback = &Feedback;
+  FeedbackInfo.pipelineStageCreationFeedbackCount = 2;
+  FeedbackInfo.pPipelineStageCreationFeedbacks = StageFeedbacks;
+  Info.pNext = &FeedbackInfo;
+
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Pipe), VK_SUCCESS);
+
+  EXPECT_EQ(Feedback.flags,
+            static_cast<VkPipelineCreationFeedbackFlags>(
+                VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT));
+  for (const VkPipelineCreationFeedback &StageFeedback : StageFeedbacks)
+    EXPECT_EQ(StageFeedback.flags,
+              static_cast<VkPipelineCreationFeedbackFlags>(
+                  VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT));
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 // roadmap C4: `mapTopology` beyond `TriangleList`/`TriangleStrip`. Every
 // `VkPrimitiveTopology` this milestone's executor implements
 // (point/line/line-strip/triangle-fan) creates successfully and translates

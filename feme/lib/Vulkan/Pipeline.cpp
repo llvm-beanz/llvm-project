@@ -28,6 +28,7 @@
 #include "llvm/Support/MemoryBufferRef.h"
 #include "llvm/TargetParser/Triple.h"
 
+#include <algorithm>
 #include <cstring>
 
 using namespace feme::vulkan;
@@ -98,6 +99,34 @@ uint32_t findRequiredSubgroupSize(const void *Next) {
 } // namespace
 
 namespace feme::vulkan {
+
+void fillPipelineCreationFeedback(const void *pNext, uint32_t StageCount,
+                                  bool CacheHit) {
+  for (const auto *Header = static_cast<const VkBaseInStructure *>(pNext);
+       Header; Header = Header->pNext) {
+    if (Header->sType !=
+        VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO)
+      continue;
+    const auto *Info =
+        reinterpret_cast<const VkPipelineCreationFeedbackCreateInfo *>(Header);
+    VkPipelineCreationFeedbackFlags Flags =
+        VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
+    if (CacheHit)
+      Flags |= VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT;
+    if (Info->pPipelineCreationFeedback) {
+      Info->pPipelineCreationFeedback->flags = Flags;
+      Info->pPipelineCreationFeedback->duration = 0;
+    }
+    uint32_t StageFeedbackCount =
+        std::min(Info->pipelineStageCreationFeedbackCount, StageCount);
+    for (uint32_t I = 0; I != StageFeedbackCount; ++I) {
+      Info->pPipelineStageCreationFeedbacks[I].flags =
+          VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT;
+      Info->pPipelineStageCreationFeedbacks[I].duration = 0;
+    }
+    return;
+  }
+}
 
 Pipeline::~Pipeline() = default;
 
@@ -430,6 +459,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
 
     std::shared_ptr<CachedPipelineArtifact> Artifact =
         Key ? Cache->lookup(*Key) : nullptr;
+    bool CacheHit = Artifact != nullptr;
     if (!Artifact) {
       // (roadmap E9) `VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_
       // BIT`: this pipeline missed the cache (or none was given), and the
@@ -451,6 +481,10 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
       if (Key)
         Cache->insert(*Key, Artifact);
     }
+
+    // (roadmap E19) `VK_EXT_pipeline_creation_feedback`: a compute pipeline
+    // has exactly one stage.
+    fillPipelineCreationFeedback(CreateInfo.pNext, /*StageCount=*/1, CacheHit);
 
     ComputePipeline *Obj = Alloc.create<ComputePipeline>(
         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Artifact);

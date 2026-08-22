@@ -135,6 +135,48 @@ TEST_F(PipelineCacheTest, CachedPipelineIsSharedAcrossCreations) {
   vkDestroyPipelineCache(Device, Cache, nullptr);
 }
 
+/// Roadmap E19 (`VK_EXT_pipeline_creation_feedback`): the first creation
+/// misses the cache (no `APPLICATION_PIPELINE_CACHE_HIT_BIT`), the second
+/// (identical) creation hits it -- exercising
+/// `fillPipelineCreationFeedback`'s (Pipeline.cpp) two different flag
+/// outcomes against the exact cache-hit/-miss pair
+/// `CachedPipelineIsSharedAcrossCreations` above already establishes.
+TEST_F(PipelineCacheTest, CreationFeedbackReportsCacheHitOnSecondCreation) {
+  VkPipelineCacheCreateInfo CacheInfo{};
+  VkPipelineCache Cache = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreatePipelineCache(Device, &CacheInfo, nullptr, &Cache),
+            VK_SUCCESS);
+
+  VkPipelineCreationFeedback Feedback{};
+  VkPipelineCreationFeedbackCreateInfo FeedbackInfo{};
+  FeedbackInfo.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO;
+  FeedbackInfo.pPipelineCreationFeedback = &Feedback;
+
+  VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
+  CreateInfo.pNext = &FeedbackInfo;
+  VkPipeline First = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateComputePipelines(Device, Cache, 1, &CreateInfo, nullptr, &First),
+      VK_SUCCESS);
+  EXPECT_TRUE(Feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT);
+  EXPECT_FALSE(Feedback.flags &
+               VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT);
+
+  Feedback = VkPipelineCreationFeedback{};
+  VkPipeline Second = VK_NULL_HANDLE;
+  ASSERT_EQ(
+      vkCreateComputePipelines(Device, Cache, 1, &CreateInfo, nullptr, &Second),
+      VK_SUCCESS);
+  EXPECT_TRUE(Feedback.flags & VK_PIPELINE_CREATION_FEEDBACK_VALID_BIT);
+  EXPECT_TRUE(Feedback.flags &
+              VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT);
+
+  vkDestroyPipeline(Device, First, nullptr);
+  vkDestroyPipeline(Device, Second, nullptr);
+  vkDestroyPipelineCache(Device, Cache, nullptr);
+}
+
 TEST_F(PipelineCacheTest, NoCacheCompilesIndependentArtifactsEachTime) {
   VkComputePipelineCreateInfo CreateInfo = makeCreateInfo();
   VkPipeline First = VK_NULL_HANDLE, Second = VK_NULL_HANDLE;
