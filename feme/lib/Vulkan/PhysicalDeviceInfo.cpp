@@ -602,6 +602,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // name outside apiVersion 1.3.
       {VK_EXT_PIPELINE_CREATION_FEEDBACK_EXTENSION_NAME,
        VK_EXT_PIPELINE_CREATION_FEEDBACK_SPEC_VERSION},
+      // (roadmap E19) `VK_KHR_shader_non_semantic_info` adds no new
+      // opcode of its own to convert: `SPIRVImporter.cpp`'s
+      // `stripNonSemanticExtInst` strips every `NonSemantic.*` `OpExtInst`
+      // out of the binary before MLIR's SPIR-V deserializer (which has no
+      // case for such a set name at all) ever sees it, honoring the SPIR-V
+      // specification's own "instructions with no semantic effect may be
+      // ignored" contract for the whole family this extension names, not
+      // one opcode at a time.
+      {VK_KHR_SHADER_NON_SEMANTIC_INFO_EXTENSION_NAME,
+       VK_KHR_SHADER_NON_SEMANTIC_INFO_SPEC_VERSION},
   };
   return Extensions;
 }
