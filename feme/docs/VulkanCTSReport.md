@@ -3786,3 +3786,49 @@ this row -- two new lit tests relative to F3's own report
 (`spirv-to-llvm-rounding-mode-rtz.mlir`, replacing the now-stale
 `spirv-to-llvm-rounding-mode-rtz-invalid.mlir`, and
 `spirv-backend-rounding-mode-rtz.mlir`).
+
+## Roadmap F15b: measured impact (targeted, not a full re-run)
+
+F15b closed F15a's own remaining half: `DenormFlushToZero` now genuinely
+flushes any subnormal operand or result of its declared bit width's
+arithmetic FP ops to a same-signed zero (`llvm.is.fpclass`/`llvm.copysign`/
+`llvm.select`, unified with F15a's `RoundingModeRTZ` handling into one
+`FloatControlArithmeticPattern`, `SPIRVToLLVMPatterns.cpp`), rather than
+`collectEntryPoints`'s former hard diagnostic. Every
+`VK_KHR_shader_float_controls` execution mode is now genuinely honored.
+
+Targeted subset: the same
+**`dEQP-VK.spirv_assembly.instruction.compute.float_controls.*`**
+(2,569 cases; the CTS checkout's own case count grew by 14 relative to
+F15a's report, an unrelated version-to-version difference, not something
+this row's change caused) F15a's own section measured.
+
+- Baseline (this row's code landed, `shaderDenormFlushToZeroFloat{16,32,64}`
+  still `VK_FALSE`): **1 passed / 0 failed / 2,568 not supported**,
+  identical to F15a's own baseline/reverted-to result -- the new codegen is
+  real and tested (via the new lit tests), but stays dormant for CTS until
+  advertised.
+- Flipped `shaderDenormFlushToZeroFloat{16,32,64}` (both
+  `VkPhysicalDeviceFloatControlsProperties` and its
+  `VkPhysicalDeviceVulkan12Properties` promoted twin) to `VK_TRUE`: **1
+  passed / 171 failed / 2,397 not supported** -- the exact same regression
+  shape F15a's row found for `RoundingModeRTZ`. Spot-checked one failure
+  (`dEQP-VK.spirv_assembly.instruction.compute.float_controls.fp32.
+  generated_args.abs_denorm_flush_to_zero`): `vkCreateComputePipelines`
+  fails with `VK_ERROR_INITIALIZATION_FAILED`, the identical
+  `feme::cpu` resource-lowering gap (small, 2-element runtime-sized
+  storage-buffer bindings) F15a's report already attributes its own 18
+  failures to -- not a new gap this row introduces, and not investigated
+  further here for the same reason F15a's row gave (out of scope; trading
+  a graceful skip for a hard failure is a regression, not progress).
+- Reverted the flag flip (see `EntryPoints.cpp`'s own comment and the git
+  history) and re-ran the same subset: **1 passed / 0 failed / 2,568 not
+  supported**, matching the baseline exactly.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1699/1700
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- one new lit test relative to F15a's own report
+(`spirv-to-llvm-denorm-flush-to-zero.mlir`, replacing the now-stale
+`spirv-to-llvm-denorm-flush-to-zero-invalid.mlir`).
+
