@@ -26,13 +26,11 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Plese work on roadmap step F1:
+Plese work on roadmap step F2:
 
-> **`VK_KHR_global_priority`/`globalPriorityQuery`.**
-> `VkDeviceQueueGlobalPriorityCreateInfo` at `vkCreateDevice` and
-> `vkGetPhysicalDeviceQueueFamilyProperties2`'s
-> `VkQueueFamilyGlobalPriorityProperties` chain; since this ICD has one worker
-> pool with no real OS-level scheduling priority, report the full mandatory
-> priority list as supported and treat the create-time hint as a no-op (matching
-> the "single logical queue, narrowed by capability flags only" precedent C7
-> set)
+> **`VK_KHR_shader_subgroup_rotate`/`shaderSubgroupRotate`(+`Clustered`).** New
+> `spirv`->`llvm` conversion patterns for `OpGroupNonUniformRotateKHR`; note
+> `Vulkan14FeatureInventory.md`'s existing finding that no `OpGroupNonUniform*`
+> operation converts at all yet (`shaderSubgroupExtendedTypes` is vacuously true
+> for the same reason) — this row should audit and likely close that whole
+> family together rather than add one more vacuous bit
