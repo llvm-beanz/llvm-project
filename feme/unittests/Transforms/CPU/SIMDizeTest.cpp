@@ -196,6 +196,42 @@ TEST(SIMDizeTest, ScalarizesAtomicRMWFallback) {
   EXPECT_EQ(AtomicRMWCount, 4u);
 }
 
+// Roadmap E29: a divergent `store` -- like `atomicrmw` above, void-typed,
+// and reaching the same generic `widenScalarizedFallback` since it is
+// neither a masked-store intrinsic call nor a groupshared address -- must
+// not be named: `Builder.Insert` used to pass `I.getName() + ".lane"`
+// unconditionally, asserting (`Value::setNameImpl`'s "Cannot assign a name
+// to void values!") once a real divergent store reached it
+// (dEQP-VK.renderpasses.dynamic_rendering...low_resolution_z.blend.
+// color_masked_after_color_depth's own crash, through a masked color write
+// that lowers to a plain divergent store rather than the masked-output-
+// store intrinsic).
+TEST(SIMDizeTest, ScalarizesDivergentStoreFallbackWithoutCrashing) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() #0 {
+      %tid = call i32 @llvm.dx.thread.id(i32 0)
+      %buf = alloca i32
+      store i32 %tid, ptr %buf
+      ret void
+    }
+    declare i32 @llvm.dx.thread.id(i32)
+    attributes #0 = { "hlsl.shader"="compute" "hlsl.numthreads"="4,1,1" }
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(verifyModule(*M, &errs()));
+
+  unsigned StoreCount = 0;
+  for (Instruction &I : instructions(F))
+    if (isa<StoreInst>(&I))
+      ++StoreCount;
+  EXPECT_EQ(StoreCount, 4u);
+}
+
 // A divergent `atomicrmw nand` (unlike `add`/`and`/... -- see
 // `ScalarizesAtomicRMWFallback` above and `getAtomicRMWIdentity`'s comment
 // in SIMDize.cpp) has no identity element a masked-off lane's operand can

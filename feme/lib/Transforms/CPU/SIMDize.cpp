@@ -1320,7 +1320,11 @@ void FunctionWidener::widenScalarizedFallback(Instruction &I,
       Clone->setOperand(OpIdx,
                         Builder.CreateExtractElement(
                             WideOps[OpIdx], Builder.getInt32(Lane), "lane.op"));
-    Builder.Insert(Clone, I.getName() + ".lane");
+    // A void-typed `I` (e.g. a masked output store with no widened handler
+    // of its own) clones to a void `Clone`: naming it would assert (`Value::
+    // setNameImpl`'s "Cannot assign a name to void values!"), so only a
+    // `HasResult` clone gets the ".lane" name.
+    Builder.Insert(Clone, HasResult ? I.getName() + ".lane" : Twine());
     if (Result)
       Result =
           Builder.CreateInsertElement(Result, Clone, Builder.getInt32(Lane));
