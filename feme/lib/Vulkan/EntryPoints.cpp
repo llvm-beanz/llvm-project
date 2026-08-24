@@ -244,10 +244,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES: {
-      // (roadmap C6) The promoted twin of the float-controls half of
+      // (roadmap C6, F3) The promoted twin of the float-controls half of
       // `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES` below;
       // both must agree -- see that case's comment for why every field is
-      // the conservative "no independent float-controls handling" value.
+      // the conservative "no independent per-bit-width float-controls
+      // handling" value. `VK_KHR_shader_float_controls` itself remains
+      // unadvertised even though `DenormPreserve`/`RoundingModeRTE`/
+      // `SignedZeroInfNanPreserve` execution modes are now honored (see
+      // `ExecutionModePattern`/`collectEntryPoints` in
+      // feme/lib/Conversion/SPIRVToLLVM), since a conformant implementation
+      // must support every mode it advertises and `DenormFlushToZero`/
+      // `RoundingModeRTZ` are only diagnosed there, not produced (F15).
       auto *FloatControls =
           reinterpret_cast<VkPhysicalDeviceFloatControlsProperties *>(Base);
       FloatControls->denormBehaviorIndependence =
