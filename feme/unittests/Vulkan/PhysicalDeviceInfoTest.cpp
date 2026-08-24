@@ -106,7 +106,8 @@ TEST(PhysicalDeviceInfo, MemoryHeapReflectsRealHostMemory) {
   EXPECT_TRUE(Flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
 }
 
-TEST(PhysicalDeviceInfo, OnlyRobustBufferAccessDualSrcBlendAndASTCLDRAreAdvertised) {
+TEST(PhysicalDeviceInfo,
+     OnlyRobustBufferAccessDualSrcBlendAndASTCLDRAreAdvertised) {
   // (V4/C4/E22) `robustBufferAccess`/`dualSrcBlend`/
   // `textureCompressionASTC_LDR` are the only core features this
   // milestone can honestly claim (see PhysicalDeviceInfo.cpp's comment);
@@ -716,7 +717,8 @@ TEST_F(PhysicalDeviceProperties2Test,
   // feature bit, this extension has no aggregate 1.3/1.4 feature-struct
   // field to agree with, since only its *properties* struct was promoted
   // to core 1.3.
-  VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT TexelBufferAlignmentFeatures{};
+  VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT
+      TexelBufferAlignmentFeatures{};
   TexelBufferAlignmentFeatures.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT;
 

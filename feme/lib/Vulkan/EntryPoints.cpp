@@ -1225,8 +1225,7 @@ void fillFeatures2Chain(void *pNext) {
     // `VkPhysicalDeviceVulkan14Features` case above.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES: {
       auto *Features =
-          reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeatures *>(
-              Base);
+          reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeatures *>(Base);
       Features->globalPriorityQuery = VK_TRUE;
       break;
     }
@@ -1328,8 +1327,9 @@ void fillFeatures2Chain(void *pNext) {
     // (`fillProperties2Chain` above) already reports, so this is
     // unconditionally true, exactly like `extendedDynamicState` above.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT: {
-      auto *Features = reinterpret_cast<
-          VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT *>(Base);
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT *>(
+              Base);
       Features->texelBufferAlignment = VK_TRUE;
       break;
     }
@@ -1365,7 +1365,8 @@ void fillFeatures2Chain(void *pNext) {
 void fillQueueFamilyGlobalPriorityProperties(void *pNext) {
   for (auto *Base = static_cast<VkBaseOutStructure *>(pNext); Base;
        Base = Base->pNext) {
-    if (Base->sType != VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES)
+    if (Base->sType !=
+        VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES)
       continue;
     auto *Priority =
         reinterpret_cast<VkQueueFamilyGlobalPriorityProperties *>(Base);
@@ -1477,8 +1478,7 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
   // sets today has an identical numeric value in both) fixes that for any
   // caller of this entry point, not just the format-broadening this row
   // otherwise does.
-  for (auto *Base =
-           static_cast<VkBaseOutStructure *>(pFormatProperties->pNext);
+  for (auto *Base = static_cast<VkBaseOutStructure *>(pFormatProperties->pNext);
        Base; Base = Base->pNext) {
     if (Base->sType != VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3)
       continue;
@@ -1487,8 +1487,7 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
         pFormatProperties->formatProperties.linearTilingFeatures;
     Props3->optimalTilingFeatures =
         pFormatProperties->formatProperties.optimalTilingFeatures;
-    Props3->bufferFeatures =
-        pFormatProperties->formatProperties.bufferFeatures;
+    Props3->bufferFeatures = pFormatProperties->formatProperties.bufferFeatures;
   }
 }
 
@@ -1656,6 +1655,17 @@ VKAPI_ATTR VkResult VKAPI_CALL feme::vulkan::vkCreateDevice(
   // Only an extension this driver actually implements may be enabled (see
   // `getSupportedDeviceExtensions`); anything else is refused rather than
   // silently accepted and then not honored.
+  //
+  // (roadmap F1) A `VkDeviceQueueGlobalPriorityCreateInfo` chained onto a
+  // `pQueueCreateInfos` entry's `pNext` is deliberately never inspected
+  // here: this ICD has one worker pool with no real OS-level scheduling
+  // priority to raise or lower, and every priority the mandatory list
+  // permits (`fillQueueFamilyGlobalPriorityProperties` in this file) is
+  // reported as supported for every queue family, so there is nothing this
+  // hint could honestly cause device creation to refuse. Treating it as a
+  // no-op is therefore truthful, not merely convenient -- the same
+  // "single logical queue, narrowed by capability flags only" precedent
+  // roadmap C7 set for `queueFlags` itself.
   for (uint32_t I = 0; I != pCreateInfo->enabledExtensionCount; ++I) {
     bool Supported = false;
     for (const VkExtensionProperties &Extension :

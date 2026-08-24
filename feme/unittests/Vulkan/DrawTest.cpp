@@ -1487,6 +1487,47 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
             VK_ERROR_EXTENSION_NOT_PRESENT);
 }
 
+/// Roadmap F1: `VkDeviceQueueGlobalPriorityCreateInfo`'s `globalPriority`
+/// hint is a no-op at device creation -- this ICD has one worker pool with
+/// no real OS-level scheduling priority, so every mandatory priority level
+/// (all four the query above reports as supported) is honored the same
+/// way, matching the "single logical queue, narrowed by capability flags
+/// only" precedent roadmap C7 set.
+TEST_F(DrawTest, GlobalPriorityCreateInfoIsANoOpAtDeviceCreation) {
+  const char *Enabled = VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME;
+  const float QueuePriority = 1.0f;
+  const VkQueueGlobalPriority Priorities[] = {
+      VK_QUEUE_GLOBAL_PRIORITY_LOW, VK_QUEUE_GLOBAL_PRIORITY_MEDIUM,
+      VK_QUEUE_GLOBAL_PRIORITY_HIGH, VK_QUEUE_GLOBAL_PRIORITY_REALTIME};
+  for (VkQueueGlobalPriority Priority : Priorities) {
+    VkDeviceQueueGlobalPriorityCreateInfo GlobalPriorityInfo{};
+    GlobalPriorityInfo.sType =
+        VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO;
+    GlobalPriorityInfo.globalPriority = Priority;
+
+    VkDeviceQueueCreateInfo QueueInfo{};
+    QueueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    QueueInfo.pNext = &GlobalPriorityInfo;
+    QueueInfo.queueFamilyIndex = 0;
+    QueueInfo.queueCount = 1;
+    QueueInfo.pQueuePriorities = &QueuePriority;
+
+    VkDeviceCreateInfo DevInfo{};
+    DevInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    DevInfo.queueCreateInfoCount = 1;
+    DevInfo.pQueueCreateInfos = &QueueInfo;
+    DevInfo.enabledExtensionCount = 1;
+    DevInfo.ppEnabledExtensionNames = &Enabled;
+
+    VkDevice Second = VK_NULL_HANDLE;
+    EXPECT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Second), VK_SUCCESS);
+    VkQueue Queue = VK_NULL_HANDLE;
+    vkGetDeviceQueue(Second, 0, 0, &Queue);
+    EXPECT_NE(Queue, VK_NULL_HANDLE);
+    vkDestroyDevice(Second, nullptr);
+  }
+}
+
 /// `vkCmdClearAttachments` clears the bound attachment over its rectangles,
 /// inside the render pass instance, after a draw has already written it.
 TEST_F(DrawTest, ClearsAttachmentInsideRenderPass) {
