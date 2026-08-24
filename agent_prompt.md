@@ -33,21 +33,33 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F15c?
+Can you implement roadmap milestone F15d?
 
-> **`VK_KHR_shader_float_controls2`/`shaderFloatControls2`**: per-instruction
-> (rather than only per-entry-point) `FPRoundingMode` decorations -- MLIR's
-> `spirv` dialect already models the decoration (`SPIRV_FPRoundingModeAttr`), so
-> this is "read a decoration on the individual `spirv.FAdd`/etc. op, not a
-> whole-entry-point `spirv.ExecutionMode`, then reuse F15a's
-> `ConstrainedRoundTowardZeroPattern`-shaped lowering" rather than a new
-> lowering strategy -- plus the extension's own
-> `FPFastMathMode`/`FPFastMathDefault` decorations
-> (contraction/reassociation/etc. fast-math bits), which are a separate,
-> additive mechanism (LLVM's ordinary fast-math flags) rather than another
-> constrained-intrinsics consumer. `VK_KHR_shader_float_controls2` does **not**
-> add a per-instruction denorm-mode decoration at all (confirmed against the
-> SPIR-V spec and LLVM's own `SPIRVSymbolicOperands.td`, which has no
-> `FPDenormMode` decoration whatsoever) -- F15's original text assumed one
-> existed; F15b's whole-execution-mode `DenormFlushToZero` remains the only way
-> to ask for flushed denormals
+> **`VK_KHR_shader_float_controls2`'s `FPFastMathDefault` execution mode, and
+> the missing `FloatControls2` capability** (F15c's own remaining half): a
+> targeted CTS run
+> (`dEQP-VK.spirv_assembly.instruction.compute.float_controls2.*`, see
+> `VulkanCTSReport.md`) found a second, more fundamental gap alongside
+> `FPFastMathDefault` itself: MLIR's `spirv` dialect has no `FloatControls2`
+> capability enumerant at all (SPIR-V capability 6029; absent from
+> `SPIRVBase.td`'s `SPIRV_C_*` list), so a real CTS-generated shader declaring
+> `OpCapability FloatControls2` -- which every shader using this extension's own
+> decorations does -- fails to deserialize at all ("unknown capability: 6029"),
+> regardless of how correct F15c's own decoration handling is. This row needs,
+> in order: (1) the `FloatControls2` capability enumerant itself, so real
+> shaders using this extension can be imported in the first place; (2) the
+> `FPFastMathDefault` execution-mode enumerant (also absent from
+> `SPIRVBase.td`'s `SPIRV_EM_*` list), which sets a per-floating-point-type
+> default `FPFastMathMode` for every otherwise-undecorated instruction in an
+> entry point, via `OpExecutionModeId` naming a spec constant; (3) the newer,
+> non-INTEL `AllowContract`/`AllowReassoc`/`AllowTransform` `FPFastMathMode`
+> bits the extension itself adds (distinct from this dialect's existing
+> `AllowContractFastINTEL`/`AllowReassocINTEL` vendor pair, which F15c's own
+> `FPFastMathMode` decoration support already maps); (4)
+> `FloatControlArithmeticPattern`/collectEntryPoints
+> (SPIRVToLLVMPatterns.cpp/ConvertSPIRVToLLVMPass.cpp) to apply an entry point's
+> declared default, per floating-point type, to every arithmetic op of that type
+> lacking its own `FPFastMathMode` decoration -- the same "decoration overrides
+> entry-point-wide default" precedence F15c's own `FPRoundingMode` override
+> already established for `RoundingModeRTZ`. (1)-(3) are dialect-level gaps
+> outside `feme/lib/Conversion/SPIRVToLLVM`'s own layering to fix
