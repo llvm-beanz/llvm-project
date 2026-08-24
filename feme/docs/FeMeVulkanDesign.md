@@ -54,12 +54,16 @@ scheduled against the rest of FeMe in [Roadmap.md](Roadmap.md) (§1.9 and
 
 FeMe should provide a shared library, tentatively `libfeme_vulkan`, which
 implements the Vulkan loader-driver interface and exposes one software
-`VkPhysicalDevice`. The device has one compute-only queue family. A compute
-pipeline imports the application's SPIR-V with `feme::SPIRVImporter`,
-translates it to raised LLVM IR, and compiles it with the FeMe CPU pipeline.
-A queue submission interprets recorded command buffers, snapshots the bound
-pipeline and descriptor state at each dispatch, translates Vulkan descriptors
-into `feme::cpu::FemeDescriptor` values, and invokes the compiled entry point.
+`VkPhysicalDevice`. The device has one universal queue family — compute-only
+through V5, and `VK_QUEUE_GRAPHICS_BIT`-capable from V6 onward (see "Graphics
+queue family" below); a single software device with one worker pool has no
+independent graphics engine, so graphics support grows that one family rather
+than adding a second. A compute or graphics pipeline imports the application's
+SPIR-V with `feme::SPIRVImporter`, translates it to raised LLVM IR, and
+compiles it with the FeMe CPU pipeline. A queue submission interprets
+recorded command buffers, snapshots the bound pipeline and descriptor state
+at each dispatch or draw, translates Vulkan descriptors into
+`feme::cpu::FemeDescriptor` values, and invokes the compiled entry point(s).
 
 The central architectural boundary is:
 
@@ -1336,6 +1340,18 @@ Consequences that must land with the bit, not after it:
   every one of them is checked at pipeline creation and at draw time.
 - `subgroupSupportedStages` grows beyond compute only as the corresponding
   stage's wave lowering is demonstrated by tests.
+
+  **Deviation, found while re-scoping for a full graphics implementation:
+  this did not land with the bit.** V6 shipped `VK_QUEUE_GRAPHICS_BIT`
+  (`PhysicalDeviceInfo.cpp`) with `SubgroupSupportedStages` still hardcoded
+  to `VK_SHADER_STAGE_COMPUTE_BIT`, even though vertex/fragment stages
+  already share `feme::cpu::WaveLoweringPass` with compute (no stage gating
+  exists in that pass; only the derivative/quad ops it lowers are restricted
+  to wave sizes 4 and 8, per roadmap R28). Advertising the vertex/fragment
+  bits truthfully still needs its own CTS-measured demonstration before the
+  bits are set, per "Advertise only what passes" — this note exists so the
+  gap is tracked rather than assumed closed by V6, and roadmap V7 is where
+  it is scheduled to close (see Roadmap.md).
 
 ### Render passes and dynamic rendering
 
