@@ -29548,3 +29548,134 @@ methodology) to confirm the aggregate picture: 53/54 groups clean, `api`
 down to one already-documented, out-of-scope crash instead of the
 granularity bug. Each fix landed in its own commit, per the project's own
 discipline.
+
+# Agent thoughts: roadmap F1 (VK_KHR_global_priority/globalPriorityQuery)
+
+## Starting point
+
+F1 is the first row of the F-series (the 1.4 floor's tail). Its own text
+already picks the shape: since this ICD has one worker pool with no real
+OS-level scheduling priority, report the full mandatory priority list as
+supported and treat the create-time hint as a no-op, "matching the
+precedent C7 set" for `queueFlags` -- narrow by capability, not by
+inventing a resource the executor doesn't have. Read C7's own comments in
+`PhysicalDeviceInfo.h`/`FeMeVulkanDesign.md` first to make sure this new
+row's own comments used the same vocabulary rather than drifting.
+
+## What the extension actually needs
+
+`VK_KHR_global_priority` (promoted to core at Vulkan 1.4, so the structs
+this ICD's own `/tmp/vksdk` headers declare are the un-suffixed core
+spellings, `KHR` an alias) touches three surfaces, none of which are new
+commands:
+
+- `VkDeviceQueueGlobalPriorityCreateInfo` chained onto a
+  `VkDeviceQueueCreateInfo::pNext` at `vkCreateDevice` -- a hint, not a
+  command.
+- `VkPhysicalDeviceGlobalPriorityQueryFeatures`/the aggregate
+  `VkPhysicalDeviceVulkan14Features.globalPriorityQuery` bit at
+  `vkGetPhysicalDeviceFeatures2`.
+- `VkQueueFamilyGlobalPriorityProperties` chained onto a
+  `VkQueueFamilyProperties2` at `vkGetPhysicalDeviceQueueFamilyProperties2`.
+
+Because none of these are new entrypoints (`vkCreateDevice`/
+`vkGetPhysicalDeviceFeatures2`/`vkGetPhysicalDeviceQueueFamilyProperties2`
+are already core-implemented), `vk_gen_entrypoints.py`'s
+`SUPPORTED_EXTENSIONS` needed no change -- the same "already-core-command
+extension" shape `synchronization2`/`maintenance6`/
+`shader_integer_dot_product` established, confirmed by checking each of
+those rows' own reasoning before assuming it applied here too rather than
+guessing from the name alone.
+
+## Reading the CTS source before writing anything
+
+Before touching `PhysicalDeviceInfo.cpp`, read
+`vktGlobalPriorityQueueTests.cpp`/`vktGlobalPriorityQueueUtils.cpp`/
+`vktApiDeviceInitializationTests.cpp`/`vktApiFeatureInfo.cpp` in the local
+VK-GL-CTS checkout, since the roadmap row's own English ("full mandatory
+priority list") doesn't say *which* four values or in what order. Three
+findings drove the implementation directly:
+
+- `vktApiDeviceInitializationTests.cpp`'s `checkGlobalPriorityProperties`
+  asserts each `priorities[i] == priorities[i-1] << 1` -- so the four
+  `VkQueueGlobalPriority` enumerants (`LOW=128`, `MEDIUM=256`, `HIGH=512`,
+  `REALTIME=1024`) must be reported in exactly that ascending order, which
+  they conveniently already are as left-shifted powers of two.
+- `createDeviceWithQueriedGlobalPriorityTest` creates a device at every
+  one of the four priorities and requires success (or, for
+  priority > `MEDIUM`, tolerates `VK_ERROR_NOT_PERMITTED_KHR` as an
+  alternative valid outcome) *unless* the queried priority list doesn't
+  contain the requested value, in which case
+  `VK_ERROR_INITIALIZATION_FAILED` also becomes acceptable. Since this row
+  reports every value as supported, that escape hatch never triggers, and
+  a no-op `vkCreateDevice` (accept unconditionally) is a valid choice
+  under this test's own rules.
+- Two distinct CTS families gate on two distinct extension name sets:
+  `GPQCase` (`api.device_init.create_device_global_priority[_query]`,
+  `synchronization.global_priority_transition.*` non-preemption cases)
+  requires the *EXT* names (`VK_EXT_global_priority[_query]`); only
+  `PreemptionCase` (the `*_khr` device-init variants,
+  `global_priority_transition.preemption.*`) requires the *KHR* name.
+  This row's own title is `VK_KHR_global_priority` only, so advertising
+  just that extension deliberately leaves the EXT-gated half
+  `NotSupported` -- correct, not a gap, per the row's own scope.
+
+## Implementation, four small commits
+
+1. Advertise `VK_KHR_global_priority` in `getSupportedDeviceExtensions`
+   (bumped `DrawTest`'s hardcoded extension count 17 -> 18, the same
+   mechanical fixup every prior extension-adding row needed).
+2. Flip `VkPhysicalDeviceVulkan14Features.globalPriorityQuery` to
+   `VK_TRUE` and add the dedicated
+   `VkPhysicalDeviceGlobalPriorityQueryFeatures` struct case, agreeing
+   with each other the same way `maintenance5`/`maintenance6` do.
+3. Add `fillQueueFamilyGlobalPriorityProperties`, walking each
+   `VkQueueFamilyProperties2` element's own `pNext` in
+   `vkGetPhysicalDeviceQueueFamilyProperties2` (which previously ignored
+   `pNext` entirely) and filling in the four-entry ascending list for
+   every queue family, unconditionally -- there is no real per-family
+   distinction to make, so all three families (universal, dedicated
+   transfer, dedicated compute) report the identical list.
+4. Document (with a comment, not a behavior change) that
+   `vkCreateDevice` already ignored an unrecognized
+   `pQueueCreateInfos[i].pNext` entry, so
+   `VkDeviceQueueGlobalPriorityCreateInfo`'s hint was already a no-op; add
+   a `DrawTest` case creating a device at each of the four priorities to
+   pin that down as deliberate and tested, not merely an accident of what
+   the code didn't yet parse.
+
+Each commit was built and `check-feme`-tested independently before moving
+to the next, per the project's own "break into small, individually
+tested commits" discipline.
+
+## Targeted CTS run instead of a full 54-group sweep
+
+A full sweep is a ~25-minute, 3.2-million-case exercise this row's own
+scope (three structs, no new commands) doesn't warrant re-running in
+full for -- the same judgment call several E-series "targeted, not a full
+re-run" sections already made. Ran
+`dEQP-VK.api.device_init.*`/`dEQP-VK.synchronization.
+global_priority_transition.*` instead (the two groups this row's own
+surfaces are reachable from) and read every failure's own reason string
+rather than trusting the pass/fail counts alone:
+
+- The four `api.device_init.create_device_unsupported_features.*`
+  failures predate this row entirely (`vkCreateDevice` never validates a
+  requested feature against the advertised set for *any* feature, not
+  just `globalPriorityQuery`'s own sibling case, which passes).
+- All 252 `synchronization.global_priority_transition.*` failures are
+  `PreemptionCase` variants that only became reachable because this row's
+  extension/feature/query changes stopped short-circuiting them to
+  `NotSupported` -- and every one traces to one of two already-documented,
+  unrelated shader-lowering gaps (`feme-cpu-simdize`'s divergent-vector
+  limitation from "Roadmap E16: measured impact", and a `getelementptr`
+  operand-type mismatch on a `vector<3xi32>` local-invocation-ID value in
+  the compute path). Neither is fixable from this row's own
+  `PhysicalDeviceInfo.cpp`/`EntryPoints.cpp` scope, and the 48 passing
+  variants confirm the priority mechanism itself -- the only thing this
+  row implements -- works correctly whenever a test's shader doesn't hit
+  either gap.
+
+Recorded all of this as a new "Roadmap F1: measured impact" section in
+`VulkanCTSReport.md`, in its own commit, following the file's own
+established structure.
