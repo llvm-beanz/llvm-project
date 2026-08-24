@@ -30698,3 +30698,191 @@ same subset to confirm the baseline was restored exactly (0/0/1,977).
 `ninja check-feme` (assertions-enabled, ccache build, this session's
 existing `./build`): 1702/1703 passed, 1 unsupported (pre-existing,
 unrelated), after every commit in this row.
+
+# Agent thoughts: roadmap F15d (VK_KHR_shader_float_controls2's FPFastMathDefault, and the missing FloatControls2 capability)
+
+## Scope
+
+F15c's own report left two things open: `FPFastMathDefault` (an execution
+mode, not a decoration) itself, and, more fundamentally, the `FloatControls2`
+capability enumerant MLIR's `spirv` dialect had no case for at all -- found
+by F15c's own CTS probe, which showed every real, CTS-generated
+`float_controls2` shader (every one of them declares `OpCapability
+FloatControls2`, since any use of `FPFastMathMode`/`FPRoundingMode` requires
+it) fails to deserialize before this conversion's own decoration-handling
+code ever runs. F15d's own text broke this into four ordered pieces: the
+capability, the execution mode, the extension's own non-vendor
+`FPFastMathMode` bits, and finally the conversion-side consumption of the
+per-type default.
+
+## The capability and fast-math bits are ordinary tablegen additions --
+   except where they are not
+
+`SPIRV_C_FloatControls2` (6029) and `SPIRV_EM_FPFastMathDefault` (6028) are
+exactly the kind of addition `SPIRVBase.td` already has hundreds of: a new
+`I32EnumAttrCase` in the right master list, gated by the right
+`Extension`/`Capability` `Availability`. Needed a new `SPV_KHR_float_controls2`
+extension enumerant too, alongside the KHR one -- and the naming was a real
+trap: I first guessed `SPV_KHR_shader_float_controls2` (matching the
+Vulkan-side `VK_KHR_shader_float_controls2` name), which compiled fine but
+failed `spirv-val` with "requires one of these extensions:
+SPV_KHR_float_controls2" -- the actual SPIR-V registry name drops
+`shader_`, matching `SPV_KHR_float_controls` itself (the non-`2` extension
+already in this file). Caught this by actually round-tripping through
+`spirv-val`, not just `mlir-opt`/`mlir-translate` -- the extension name
+string only matters to a real validator or driver, never to this dialect's
+own parser/printer, so a purely in-tree test would never have caught it.
+
+The three new `FPFastMathMode` bits were not as simple as three more
+`I32BitEnumAttrCaseBit`s. I initially added `AllowContract`/`AllowReassoc`
+as brand-new enumerants at bit positions 16/17 -- the positions the SPIR-V
+registry's own extension text says they occupy -- without checking that
+those bits were already spoken for by the existing `AllowContractFastINTEL`/
+`AllowReassocINTEL` vendor pair. This built the `.td` file fine but failed
+to *compile the generated C++* with "duplicate case value: 'AllowContractFastINTEL'
+and 'AllowContract' both equal '65536'" in `SPIRVEnumAvailability.cpp.inc` --
+an MLIR bit-enum case is keyed by its underlying value for switch-based
+codegen (both the availability lookup and the printer's own bit-to-string
+table), so two enumerants at the same value is a hard compile error, not a
+distinguishable pair the way it is in the binary encoding itself (where the
+same bit, set once, is genuinely ambiguous between two names -- which
+capability declared it is the only way to know which name a disassembler
+"should" print, and neither this dialect nor the binary format itself
+carries that distinction once the module is parsed). Fixed by widening the
+existing `AllowContractFastINTEL`/`AllowReassocINTEL` enumerants' own
+`Capability` list to include `FloatControls2` alongside `FPFastMathModeINTEL`,
+rather than adding same-valued siblings -- a real design constraint, not a
+workaround: it means a Vulkan shader using this extension's own
+`AllowContract` bit decodes to the same enumerant name an `OpenCL` kernel's
+`FPFastMathModeINTEL`-gated `AllowContractFastINTEL` would, which
+`getFastMathFlagsDecoration`'s own pre-existing comment already anticipated
+("mapped anyway since Vulkan shaders can't spell the capability that would
+set them"). `AllowTransform` (bit 18) has no such conflict -- genuinely new,
+no `INTEL` bit ever used that position -- so it is its own ordinary
+enumerant.
+
+## FPFastMathDefault's own operand shape does not fit ExecutionModeIdOp as-is
+
+This was the part F15d's own roadmap text underestimated ("via
+`OpExecutionModeId` naming a spec constant", implying the same shape as
+`LocalSizeId`). Checking the real SPIR-V spec text (fetched from the
+Khronos registry directly) found `FPFastMathDefault`'s two `OpExecutionModeId`
+operands are a **Target Type** <id> (a type, with no module-scope symbol to
+point at in this dialect at all -- types are not symbol-bearing ops here)
+and a **Fast-Math Mode** <id> that the spec explicitly requires *not* be a
+specialization constant (unlike `LocalSizeId`'s operands, which are always
+spec constants) -- so its value is fully known at parse time, not something
+needing a later symbol lookup. `ExecutionModeIdOp`'s existing shape --
+`values : SymbolRefArrayAttr`, plus a hand-written `verify()`/`parse()`/
+`print()` that treat every element as a `FlatSymbolRefAttr` unconditionally
+-- has no way to represent either operand as-is.
+
+Considered and discarded a "new dedicated op for this one execution mode"
+design: `OpExecutionModeId` is one SPIR-V opcode, and this dialect's
+deserializer dispatches purely by opcode to exactly one op type via
+generated tables (`dispatchToAutogenDeserialization`) -- there is no
+per-execution-mode dispatch hook to peek at the mode value first and choose
+a different op type, so a second op for the same opcode is not
+straightforwardly pluggable without changing that dispatch mechanism, a
+larger and riskier change than this row's own scope warranted. Instead,
+widened `values` from `SymbolRefArrayAttr` to a plain `ArrayAttr` (removing
+the built-in "every element must be a `FlatSymbolRefAttr`" structural
+constraint `TypedArrayAttrBase` would otherwise enforce before even reaching
+the hand-written `verify()`), and branched `parse()`/`print()`/`verify()`/
+the (de)serializer on the execution mode: `FPFastMathDefault` stores a
+`TypeAttr`/`IntegerAttr` pair (the type read via the deserializer's own type
+table, the literal value via the pre-existing `getConstantInt` helper,
+already built for exactly this "must not be a spec constant" case
+elsewhere), every other mode keeps the symbol-reference shape unchanged.
+Mirrored the same split on the serializer side (`processType`/
+`prepareConstant`, materializing the constant if the module has no matching
+one already), so the round trip is genuinely symmetric, not import-only.
+
+## Verification order: textual, then real binary, then spirv-val
+
+Followed the same escalating-confidence order F15a's own report favored:
+first `mlir-opt` round-trip (parses, prints back unchanged), then a real
+binary round trip through `mlir-translate --serialize-spirv`/
+`--deserialize-spirv`, then `spirv-val` on the serialized binary -- which
+passed outright, confirming both the capability and execution mode are
+genuinely recognized by a real, independent SPIR-V validator, not just
+this dialect's own (possibly self-consistent-but-wrong) parser/printer.
+Added this as two upstream MLIR tests
+(`mlir/test/Target/SPIRV/execution-mode-id.mlir`'s new `-----`-split
+module, `mlir/test/Dialect/SPIRV/IR/structure-ops.mlir`'s new cases) rather
+than only a feme-level one, since the gap being fixed is a dialect gap, not
+a feme-specific one -- ran the full `Dialect/SPIRV`/`Target/SPIRV` mlir
+lit suites (133 and then 110/52+58 after further edits, all passing) to
+confirm no regression to the ~30 other execution modes/capabilities this
+same shared code handles.
+
+## Consuming FPFastMathDefault in the conversion
+
+Once the dialect could represent it, the feme-side change was small and
+followed F15a/F15b/F15c's own established shape closely: a new
+`FastMathDefaultMap` (keyed by entry point, then by bit width, holding the
+raw `spirv::FPFastMathMode`) collected by `collectEntryPoints` from
+`spirv.ExecutionModeId` ops the same way `RoundingModeRTZWidths` is
+collected from `spirv.ExecutionMode` ops, and consumed by
+`FloatControlArithmeticPattern` as a fallback when an arithmetic op carries
+no `fp_fast_math_mode` decoration of its own -- reusing (rather than
+duplicating) F15c's own bit-translation logic by factoring it out into a
+free `translateFastMathMode` function, since the entry-point default and a
+per-instruction decoration both end up needing the exact same
+bits-to-LLVM-flags mapping, just fed from different sources (a raw
+`spirv::FPFastMathMode` value collected before conversion, versus an
+attribute read directly off the op). `AllowTransform` maps to LLVM's `afn`
+flag -- not a literal bit-for-bit match (nothing in LLVM corresponds
+exactly to "superset of contract+reassoc, arbitrary real-number-rule
+transforms"), but the closest existing flag for that broader license,
+documented as a deliberate approximation rather than an oversight.
+
+## The CTS run confirmed the capability fix, then found something new
+
+Repeated F15c's own "temporarily flip every feature/property/extension
+gate and see" experiment against `dEQP-VK.spirv_assembly.instruction.
+compute.float_controls2.fp32.*` (719 cases). The previously-blocking
+"unknown capability: 6029" is completely gone -- of the 276 cases that ran
+before a crash truncated the session, 263 now reach the already-known
+`feme::cpu` resource-lowering gap (`vkCreateComputePipelines` failing,
+exactly what F15a/F15b's own probes found for `VK_KHR_shader_float_controls`
+itself), not an import-time failure -- genuine, if indirect, confirmation
+that the capability/execution-mode fix works as intended.
+
+The session did not run to completion, though: one case
+(`frexp_st_testedWithout_NSZ_...`) crashed `deqp-vk` itself with an
+assertion failure in `mlir::spirv::Deserializer::processStructType`
+(`decoration.has_value()`), deserializing the two-member struct
+`FrexpStruct`/`ModfStruct` (a GLSL.std.450 extended instruction) returns --
+nothing to do with float controls, and the first time this whole F15
+family's own probes got real per-instruction `float_controls2` shaders far
+enough into genuine CTS territory to hit it at all. Did not chase this
+further: it is a different capability entirely, out of this row's own
+scope, and instead split off as its own roadmap row (F16), the same way
+F15c split its own capability finding off as this row rather than trying to
+close everything in one PR. Reverted every temporary flip immediately
+after (feature bit, three per-width property fields, dedicated struct case,
+extension listing -- none committed); re-ran the full, untruncated
+1,977-case baseline afterward to confirm it matched the very first
+baseline run exactly (0/0/1,977), not just a partial re-check.
+
+## Documentation updates
+
+- `feme/docs/Roadmap.md`: struck through F15d, added F16 for the
+  `FrexpStruct`/`ModfStruct` deserializer crash, and updated the Lane 1
+  grouping (F15d no longer waiting on anything; F16 added in its place).
+- `feme/docs/Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+  updated `shaderFloatControls2`/`VK_KHR_shader_float_controls2` rows to
+  describe what F15d closed and what still blocks a conformant claim.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap F15d: measured impact"
+  section, including the capability-fix confirmation and the F16 finding.
+
+## Testing
+
+`ninja check-feme` (assertions-enabled, ccache build, this session's
+existing `./build`): 1704 discovered, 1703 passed, 1 unsupported
+(pre-existing, unrelated), after every commit in this row -- one new feme
+lit test (`spirv-to-llvmir-fp-fast-math-default.mlir`). Also ran the
+upstream `mlir` `Dialect/SPIRV`/`Target/SPIRV` lit suites (via
+`check-mlir-dialect-spirv`/`check-mlir-target-spirv`), both 100% passing,
+for the two new dialect-level tests this row's own dialect changes needed.
