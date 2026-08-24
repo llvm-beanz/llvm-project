@@ -12,6 +12,7 @@ add_feme_unittest(FeMeGraphicsTests
   GeometryStreamTest.cpp
   ImageFixtureTest.cpp
   LayeredRenderingTest.cpp
+  PatchPipelineTest.cpp
   PatchTest.cpp
   PipelineTest.cpp
   PreparedDrawTest.cpp
