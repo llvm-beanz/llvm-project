@@ -3832,3 +3832,83 @@ this row -- one new lit test relative to F15a's own report
 (`spirv-to-llvm-denorm-flush-to-zero.mlir`, replacing the now-stale
 `spirv-to-llvm-denorm-flush-to-zero-invalid.mlir`).
 
+
+## Roadmap F15c: measured impact (targeted, not a full re-run)
+
+F15c closed `VK_KHR_shader_float_controls2`'s per-instruction decorations:
+`FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp, F15a/F15b's own
+pattern) now also reads `FPRoundingMode`/`FPFastMathMode` directly off the
+individual `spirv.FAdd`/`FSub`/`FMul`/`FDiv`/`FRem` op they decorate, rather
+than only F15a/F15b's whole-entry-point execution modes. Verified two ways
+independent of this conversion's own IR: `FPRoundingMode`'s `RTP` direction
+(neither `VK_KHR_shader_float_controls`'s execution mode nor F15a's own test
+can express `RTP`/`RTN` at all) round-trips through LLVM's real, in-tree
+SPIRV backend back into `fp_rounding_mode = #spirv.fp_rounding_mode<RTP>`
+(`spirv-backend-per-instruction-rounding-mode.mlir`); `FPFastMathMode`
+produces real `nnan ninf nsz` flags in the actual translated LLVM IR
+(`spirv-to-llvmir-per-instruction-fast-math.mlir`), though LLVM's own SPIRV
+backend does not currently re-emit an `FPFastMathMode` decoration from those
+flags on the way back to SPIR-V text (a gap in LLVM's SPIRV backend itself,
+confirmed empirically, not in this conversion).
+
+Targeted subset:
+**`dEQP-VK.spirv_assembly.instruction.compute.float_controls2.*`** (1,977
+cases in this session's CTS checkout, the group this extension's own CTS
+tests live under, distinct from F15a/F15b's
+`...float_controls.*` group). Baseline (this row's code landed, nothing
+advertised): 0 passed / 0 failed / 1,977 not supported, unchanged by this
+row -- every case is gated by `isFloatControls2FeaturesSupported`
+(`vktSpvAsmUtils.cpp`) on `shaderFloatControls2` itself, still `VK_FALSE`.
+
+Went one step further than F15a/b's own probes to see how close the new
+per-instruction codegen actually is to CTS-ready, since simply flipping the
+aggregate `VkPhysicalDeviceVulkan14Features::shaderFloatControls2` bit (the
+obvious first move) was not enough on its own:
+
+- `isFloatControlsFeaturesSupported` (the same gate F15a/F15b's own probes
+  hit) additionally requires per-width `VkPhysicalDeviceFloatControlsProperties`
+  fields (`shaderRoundingModeRTEFloat32`/`shaderRoundingModeRTZFloat32`/
+  `shaderSignedZeroInfNanPreserveFloat32`) to be `VK_TRUE`, matched to what
+  each generated test case actually declares.
+- `isFloatControls2FeaturesSupported` reads a *dedicated*
+  `VkPhysicalDeviceShaderFloatControls2Features` struct via CTS's own
+  `DeviceFeatures` machinery, not the aggregate `VkPhysicalDeviceVulkan14Features`
+  one -- `EntryPoints.cpp` has no case for that dedicated struct's `sType` at
+  all (correctly so: the convention here, confirmed against every other
+  still-`VK_FALSE` feature in this file, is that only *advertised* features
+  get their own dedicated-struct case) -- and CTS's own `DeviceFeatures` only
+  populates that dedicated struct's query at all once the extension is also
+  listed in `vkEnumerateDeviceExtensionProperties`'s output
+  (`PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions`), independent of
+  the struct being 1.4-core-promoted.
+
+Temporarily flipped all of the above (aggregate feature bit, the three
+per-width property fields for `fp32`, a temporary dedicated-struct case, and
+temporarily listing `VK_KHR_shader_float_controls2` as a supported
+extension) to see how far the `fp32` subset (719 cases) could get:
+**0 passed / 707 failed / 12 not supported** -- past every feature gate this
+time (unlike F15a/F15b's own probes, which reached `vkCreateComputePipelines`
+directly), every one of the 707 failures is instead
+**`error: unknown capability: 6029`** at SPIR-V *import* time, before this
+conversion or its new per-instruction decoration handling ever runs at all:
+capability 6029 is `FloatControls2` itself, and MLIR's `spirv` dialect has no
+enumerant for it whatsoever (confirmed against `SPIRVBase.td`'s full
+`SPIRV_C_*` list) -- every CTS-generated shader exercising this extension's
+own decorations necessarily declares `OpCapability FloatControls2`, so none
+of them can even be deserialized today, regardless of how correct F15c's own
+decoration-handling code is. This is a more fundamental, dialect-level gap
+than the `feme::cpu` resource-lowering one F15a/F15b's own probes found (this
+one blocks *import*, not just pipeline creation), and, combined with the
+already-known `FPFastMathDefault` execution-mode gap, is exactly why F15c
+splits its own remaining scope off as F15d rather than closing it here.
+Reverted every temporary flip (feature bit, property fields, dedicated
+struct case, extension listing) rather than leave any of them in place; none
+of it is committed.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1702/1703
+passed, 1 unsupported (pre-existing, unrelated), after every commit in this
+row -- three new lit tests relative to F15b's own report
+(`spirv-to-llvm-per-instruction-float-controls.mlir`,
+`spirv-backend-per-instruction-rounding-mode.mlir`,
+`spirv-to-llvmir-per-instruction-fast-math.mlir`).

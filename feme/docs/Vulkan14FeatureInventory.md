@@ -484,7 +484,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `globalPriorityQuery` | yes | roadmap F1: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceGlobalPriorityQueryFeatures struct |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotate` | yes |  |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | yes |  |
-| feature | VK_VERSION_1_4 | `shaderFloatControls2` | no | roadmap F15c (F15's per-instruction scope, split off once F15a closed the shared constrained-FP-intrinsics prerequisite): needs per-instruction `FPRoundingMode` decorations (MLIR's `spirv` dialect already has the attribute; F15a/F15b's `FloatControlArithmeticPattern` only reads a whole-entry-point execution mode, not a per-op decoration) plus `FPFastMathMode`/`FPFastMathDefault` |
+| feature | VK_VERSION_1_4 | `shaderFloatControls2` | no | roadmap F15c: per-instruction `FPRoundingMode` (all four rounding directions, not just `RTZ`) and `FPFastMathMode` decorations are now genuinely honored by `FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp), verified against LLVM's real, in-tree SPIRV backend (`spirv-backend-per-instruction-rounding-mode.mlir`) and the real translated LLVM IR (`spirv-to-llvmir-per-instruction-fast-math.mlir`). Still not advertised: `FPFastMathDefault` (a whole-entry-point default `FPFastMathMode`, distinct from the per-instruction decoration) remains unimplemented -- this MLIR fork's `spirv` dialect has no execution-mode enumerant for it at all (roadmap F15d) -- and the same unrelated `feme::cpu` resource-lowering CTS gap `shaderFloatControls`/F15a/F15b's rows already found (small runtime-sized storage-buffer bindings) still blocks a conformant claim even for the parts that are done |
 | feature | VK_VERSION_1_4 | `shaderExpectAssume` | no |  |
 | feature | VK_VERSION_1_4 | `rectangularLines` | no |  |
 | feature | VK_VERSION_1_4 | `bresenhamLines` | no |  |
@@ -540,6 +540,6 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no | roadmap F15c: see the `shaderFloatControls2` feature row above |
+| extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no | roadmap F15c/F15d: see the `shaderFloatControls2` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | yes | roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) |
 | extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | no |  |
