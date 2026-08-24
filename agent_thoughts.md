@@ -29916,3 +29916,118 @@ than only reporting that it didn't.
 
 `ninja check-feme`: 1696/1697 passed, 1 unsupported (pre-existing,
 unrelated) after every commit in this row.
+
+# Agent thoughts: removing compute-only assumptions from FeMeVulkanDesign.md/FeMeCPUDesign.md, and a fresh full CTS run
+
+## Framing the task
+
+The request was two things: (1) a docs pass over the FeMe design documents
+looking for places where the *planned scope* was still limited to a
+compute-only device, now that FeMe's declared scope is full Vulkan 1.4
+conformance including graphics and ray tracing, and (2) a fresh full
+Vulkan-CTS run with the report's top-of-file numbers brought current.
+
+The specific example given, `subgroupSupportedStages` being pinned to
+`VK_SHADER_STAGE_COMPUTE_BIT`, turned out to already be *tracked* as
+something that should grow (FeMeVulkanDesign.md's "Graphics queue family"
+section already said "`subgroupSupportedStages` grows beyond compute only
+as the corresponding stage's wave lowering is demonstrated by tests"), but
+the growth had not actually happened even though V6 (the graphics queue
+bit, `VK_QUEUE_GRAPHICS_BIT`) had already shipped, and nothing recorded
+that gap. That is the general shape this pass found: not permanent
+compute-only design decisions that needed un-doing, but stale statements
+and one real, undocumented deviation from the design's own stated rule.
+
+## What I did and did not change
+
+I did **not** touch closed roadmap rows (e.g. R27/R28's own text, V3's
+query-pool note, E14's CTS breakdown) even though several call the device
+"compute-only" -- those are accurate as of when they were written, and this
+project's own convention (Roadmap.md's `~~struck-through~~` closed rows) is
+an append-only ledger, not a document to retroactively edit for a later
+scope change. Rewriting history there would make the ledger less useful,
+not more accurate.
+
+I *did* change:
+
+- **FeMeCPUDesign.md**'s "Graphics pipeline stages" Non-Goals bullet and the
+  "Accounting for Graphics Later" section/heading. Vertex/fragment stage
+  compilation is not hypothetical any more -- `StageCompileOptions`,
+  `VertexWrapperPass`/`FragmentWrapperPass`, and `CompiledStage`'s
+  `invokeVertices`/`invokeFragments` all landed via roadmap R27/R28, built
+  directly on this document's stage-agnostic phases 2-5. The bullet and
+  section previously read as if graphics were still a speculative "later";
+  reworded both to say compute was *this document's own* v1 scope, not
+  FeMe's overall planned scope, and to point at FeMeGraphicsDesign.md/
+  Roadmap.md for the in-progress work. Renamed the section (dropping
+  "Later") since graphics work is actively landing, and updated the only
+  cross-reference to that heading.
+- **FeMeVulkanDesign.md**'s Summary paragraph, which flatly stated "The
+  device has one compute-only queue family" as if that were a fixed
+  property of the design, when the very same document's own "Graphics
+  queue family" section describes that family growing to
+  `VK_QUEUE_GRAPHICS_BIT` at V6 rather than staying compute-only or gaining
+  a second family. Reworded to describe the family as universal and
+  growing, matching the rest of the document.
+- **FeMeVulkanDesign.md**'s "consequences that must land with the bit"
+  list, where I found the actual, real gap: V6 shipped
+  `VK_QUEUE_GRAPHICS_BIT` (confirmed in `PhysicalDeviceInfo.cpp`) without
+  `subgroupSupportedStages` growing to include vertex/fragment, even though
+  `feme::cpu::WaveLoweringPass` has no stage gating on its basic subgroup
+  lowering (only the derivative/quad ops it lowers are wave-size-restricted,
+  per R28) -- so the design's own stated rule ("must land with the bit, not
+  after it") did not hold. I did not flip the capability bit myself: doing
+  so without a CTS-measured demonstration would violate this document's own
+  "Advertise only what passes" rule, and confirming real behavior across
+  every wave op in every graphics stage is exactly the kind of thing that
+  rule exists to gate. Instead I added a Deviation note recording the gap
+  and scheduled closing it under roadmap V7 (which already covers
+  "graphics completeness").
+- **`filter_vulkan_cts_cases.py`**'s docstring, which called the whole ICD
+  "compute-only" -- it only ever filtered to the V0-V4 object-model subset,
+  predating V5's images/samplers and V6's graphics. Reworded as a
+  historical snapshot rather than a scope statement, and pointed at
+  VulkanCTSReport.md's full 54-group run as the up-to-date measurement.
+  No functional change; this script and its gated lit test
+  (`cts-compute-subset.test`) are legacy in-tree coverage, not what
+  generates the report's own headline.
+
+I read through Design.md, FeMeGraphicsDesign.md, FeMeWARPDesign.md,
+Vulkan14FeatureInventory.md and VulkanExtensionInventory.md's own
+"compute-only" mentions too. FeMeGraphicsDesign.md's and the inventories'
+uses are accurate historical/scope-boundary statements (e.g. "the Vulkan
+design's compute-only device stops at V5" correctly describes what V5 was).
+FeMeWARPDesign.md's Direct3D/WARP design has its own, separate set of
+"compute-only" framing (its own W0 milestone, its own DXGI/feature-level
+concerns) that the task did not ask about and that would need its own,
+separate pass against FeMeWARPDesign.md's actual scope questions (feature
+levels, DXGI adapter identity) rather than this one's Vulkan-specific
+findings; left untouched rather than guessing at scope there.
+
+## The full CTS run
+
+Ran the full 54-group sweep exactly as "Reproducing this report" documents:
+regenerated the case list against the current `libfeme_vulkan` build (no
+functional change since roadmap F3, confirmed via `git log`), then the
+six-at-a-time per-group isolated run with the `vulkan -> data/vulkan`
+symlink workaround for Amber/graphicsfuzz/pipeline assets.
+
+The headline barely moved relative to roadmap E29's own last full run
+(within a few hundred cases either way), which is expected: only F1
+(`VK_KHR_global_priority`), F2 (`VK_KHR_shader_subgroup_rotate`), and F3
+(rejecting two unhonored float-controls execution modes) landed in
+between, and each of their own targeted runs already found little to no
+headline-level movement. The one new finding was a second crashing group,
+`synchronization2` (previously not separately isolated in E29's own run),
+segfaulting in the same `timeline_semaphore.device_host` family as the
+already-known, already-documented `synchronization` crash -- same
+mechanism, different exact case, now also reachable through
+`VK_KHR_synchronization2`'s own entry points. Recorded it in the crash
+table and a new "measured impact" section rather than root-causing it:
+that is a real debugging task in its own right, out of scope for a
+docs-and-measurement pass, and is now at least tracked instead of hiding
+inside an unmeasured crash the way it was before this run.
+
+`ninja check-feme` (RelWithDebInfo, `LLVM_ENABLE_ASSERTIONS=ON`,
+`LLVM_CCACHE_BUILD=ON`, ccache): 1696/1697 passed, 1 unsupported,
+unchanged throughout this session, since no code changed.
