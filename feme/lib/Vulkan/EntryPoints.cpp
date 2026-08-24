@@ -244,17 +244,19 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES: {
-      // (roadmap C6, F3, F15a) The promoted twin of the float-controls half
-      // of `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES` below;
-      // both must agree. `DenormPreserve`/`RoundingModeRTE`/
+      // (roadmap C6, F3, F15a, F15b) The promoted twin of the float-controls
+      // half of `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES`
+      // below; both must agree. `DenormPreserve`/`RoundingModeRTE`/
       // `SignedZeroInfNanPreserve` execution modes are honored by
       // construction (see `ExecutionModePattern`/`collectEntryPoints` in
-      // feme/lib/Conversion/SPIRVToLLVM) and `ConstrainedRoundTowardZeroPattern`
+      // feme/lib/Conversion/SPIRVToLLVM), and `FloatControlArithmeticPattern`
       // (SPIRVToLLVMPatterns.cpp) now actually produces truncating-rounding-
-      // mode code for `RoundingModeRTZ`, at every width, rather than only
-      // diagnosing a shader that asks for it -- but every field here stays
-      // conservatively `VK_FALSE`, `RoundingModeRTZ`'s three included: a
-      // targeted CTS run flipping them to `VK_TRUE` found every
+      // mode code for `RoundingModeRTZ` and flushed-denormal code for
+      // `DenormFlushToZero`, at every width, rather than only diagnosing (or,
+      // for `DenormFlushToZero`, rejecting outright) a shader that asks for
+      // either -- but every field here stays conservatively `VK_FALSE`,
+      // `RoundingModeRTZ`'s three included: a targeted CTS run flipping them
+      // to `VK_TRUE` found every
       // `dEQP-VK.spirv_assembly.instruction.compute.float_controls.fp32.*`
       // case that reaches pipeline creation (i.e. is not already
       // `NotSupported` on an unrelated missing feature) fails there instead
@@ -266,7 +268,7 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // nothing to do with float controls at all. Advertising `VK_TRUE`
       // would trade a graceful `NotSupported` skip for an outright CTS
       // `Fail` until that gap closes, so every field remains `VK_FALSE`
-      // pending it; see agent_thoughts.md's F15a entry.
+      // pending it; see agent_thoughts.md's F15a and F15b entries.
       auto *FloatControls =
           reinterpret_cast<VkPhysicalDeviceFloatControlsProperties *>(Base);
       FloatControls->denormBehaviorIndependence =
@@ -330,8 +332,9 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // bit a real `VK_KHR_depth_stencil_resolve` implementation would
       // need to support. See `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
       // FLOAT_CONTROLS_PROPERTIES` above's comment for why
-      // `shaderRoundingModeRTZFloat{16,32,64}` stay `VK_FALSE` too, despite
-      // roadmap F15a's `ConstrainedRoundTowardZeroPattern` now genuinely
+      // `shaderRoundingModeRTZFloat{16,32,64}`/
+      // `shaderDenormFlushToZeroFloat{16,32,64}` stay `VK_FALSE` too, despite
+      // roadmap F15a/F15b's `FloatControlArithmeticPattern` now genuinely
       // producing that code.
       Props12->denormBehaviorIndependence =
           VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
