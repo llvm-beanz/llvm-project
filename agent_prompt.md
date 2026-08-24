@@ -1,5 +1,5 @@
 ---
-model: claude-opus-5
+model: claude-sonnet-5
 ---
 # Initial Guidelines
 
@@ -26,11 +26,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Please update the design and implementation tracking documentation under the
-docs folder to expand scope to a full Vulkan 1.4 conformance including compute,
-graphics and raytracing, and eventually equivalent for the WARP/Direct3D
-implementation.
+Plese work on roadmap step E29:
 
-After doing that please revisit the VulkanExtensionInventory,
-Vulkan14featureinvetnory, and roadmap to have full Vulkan 1.4 conformance well
-planned.
+> **The same full run (E27/E28) found six more distinct, reproducible crashes**
+> (`SIGSEGV` in `api.granularity.*`,
+> `glsl.texture_functions.query.texturesamples.*`, `image.subresource_layout.*`,
+> and `synchronization.timeline_semaphore.*`; an `llvm_unreachable` in
+> `ResourceCalls.cpp` for an unsupported `feme.cpu.resource.*` element type
+> reached from `spirv_assembly.instruction.spirv1p4.opselect.array_select`; an
+> `llvm::Value::setNameImpl` assertion from `renderpasses.dynamic_rendering.*`;
+> and a `GetElementPtrTypeIterator.h` assertion from
+> `compute.pipeline.zero_initialize_workgroup_memory.*`), each aborting its own
+> top-level `dEQP-VK` group partway through the same way the long-documented
+> `api` crash already did. None investigated past its own crash-site log line
+> (see VulkanCTSReport.md's "Full run, roadmap E27/E28" section for what is
+> known about each) -- unlike E27/E28, no root cause is confirmed yet for any of
+> these six, so none is claimed fixed here. Six independently assignable rows
+> once triaged, the same granularity as every other row in this section | none
+> (six independent crashes; split into per-crash rows once triaged)
