@@ -28,16 +28,6 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-A bunch of the FeMeVulkanDesign has backed into odd corners as we've extended
-the scope. Like the limiting of `subgroupSupportedStages` to compute-only. Since
-FeMe should support Vulkan as a first-class runtime, we need to remove all the
-assumptions in the FeMeVulkan design document around a compute-only device and
-the assumptions in the FeMeCPUDesign as well.
-
-Please do a pass over all the FeMe docs finding places where the scope was
-limited to compute-only and adjusting the planned scope appropriately to support
-a full graphics implementation.
-
-Also please do a full Vulkan CTS run and update the CTS report with the current
-state. Make sure that the current pass/fail/unsupported numbers are accurate on
-the top of the CTS report file.
+In the Roadmap document the R-series and V-series milestones were not updated
+with strikethrough when they were completed. Can you review those and all other
+milestones to ensure the strikethroughs are accurate?
