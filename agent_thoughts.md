@@ -29421,3 +29421,130 @@ Direct3D side reuses for DXR).
   cite it by name; the churn would outweigh the accuracy, and the title
   inside the file says what it now covers.
 - **No fourth "partial" status**, per above.
+
+# Agent thoughts: roadmap E29, six crash triage/fixes
+
+## Starting point
+
+Roadmap E29 recorded seven crashes the E27/E28 full run found, none
+root-caused. My job: triage each, fix what's fixable, split into
+per-crash rows, and update both docs. Set up the same "one directory per
+group, `vulkan -> data/vulkan` symlink, isolated `deqp-vk` invocation"
+methodology "Reproducing this report" already documents, under
+`/tmp/cts/<group>` per group.
+
+## Crash 1: `api.granularity.in_dynamic_render_pass.*` SIGSEGV
+
+Reproduced under `gdb`: a null virtual-dispatch call inside
+`GranularityInstance::iterate()`, landing at `pc=0`. Initially
+misdiagnosed this as `vkGetRenderingAreaGranularity` (the core 1.3 name)
+being unimplemented -- true, but fixing *that* name alone didn't fix the
+crash. Cross-checked with `nm`/vtable-slot arithmetic against CTS's own
+`vkVirtualDeviceInterface.inl` (counted declaration order to confirm slot
+458 really is `getRenderingAreaGranularity`) and a `core` dump, which
+showed the vtable slot itself held a *valid* address -- meaning the crash
+wasn't the virtual dispatch itself, but one level deeper: CTS's
+`DeviceDriver::getRenderingAreaGranularity` tail-calls
+`m_vk.getRenderingAreaGranularity`, a plain C function pointer populated
+by trying the core name first, then falling back to the `KHR`-suffixed
+one (`vkInitDeviceFunctionPointers.inl`). `ImplementedEntrypoints.txt`
+already had a standing note that this ICD implements dynamic-rendering's
+KHR-suffixed names specifically because the loader's `icd.json`
+`api_version` (1.1) refuses to route a direct query for a command newer
+than that -- I should have followed that established pattern from the
+start instead of re-deriving it the hard way. Once I did (added
+`VK_KHR_maintenance5` to the entrypoint generator's
+`SUPPORTED_EXTENSIONS`, implemented `vkGetRenderingAreaGranularityKHR`),
+the crash vanished and the full 650-case group ran clean.
+
+## Crash 2: `image.subresource_layout.*` SIGSEGV
+
+Same root cause shape as crash 1 (maintenance5 commands advertised but
+never implemented), plus `vkGetImageSubresourceLayout` itself -- a plain
+Vulkan 1.0 command -- had never been implemented at all, independent of
+any loader quirk. Implemented all three (the core query, its `KHR`
+`pNext`-extensible wrapper, and the info-only variant), sharing one
+`Image::subresourceLayout`/`computeImageCreateInfoSubresourceLayout` pair
+of helpers so a live image and a from-`VkImageCreateInfo` query can't
+disagree. The one real subtlety: a 3D image's subresource size is its
+whole depth range, not one slice, since it has exactly one array layer
+covering every depth slice -- a 2D(-array) image's is one layer. Full
+3,537-case group now clean.
+
+## Crash 3: `glsl.texture_functions.query.texturesamples.*` SIGSEGV
+
+This one was a straight code-reading find, not a `gdb` session:
+`vkGetPhysicalDeviceImageFormatProperties`'s `sampleCounts` result was
+gated on `MaxProbe.mipLevels != 1` -- the *maximal* single-sample image's
+own mip-chain length, which for almost any real 2D format is always > 1,
+so this silently collapsed `sampleCounts` to 1 for nearly every 2D
+sampled/storage image regardless of what `PhysicalDeviceInfo.cpp`'s own
+limits actually allow. CTS assumes a 2D image can report >1 samples and
+hits an omitted `DE_ASSERT(false)` (compiled out here) before indexing an
+empty vector when it can't. Fixed the gate to check only what Vulkan
+actually restricts multisampling to (2D, any mip count), matching
+`isValidImageShape`'s own rule -- the two checks were supposed to agree
+and didn't.
+
+## Crash 4: `spirv_assembly...opselect.array_select` `llvm_unreachable`
+
+`hasOnlySupportedUses` in `SPIRVResourceLowering.cpp` validated a
+texel-buffer load/store's element type but not a storage/uniform one's,
+so an `OpSelect` between two array-typed constants, stored to an SSBO,
+sailed through to `createRawStore` and crashed in
+`mangleResourceCallName`'s `appendScalarMangling`, which only handles
+scalars/vectors. Added the missing check (mirroring the texel-buffer one)
+so this now fails to legalize cleanly instead -- a `Fail`, not a crash.
+
+## Crash 5: `renderpasses.dynamic_rendering...color_masked_after_color_depth` `setNameImpl` assertion
+
+Found via `gdb` immediately: `SIMDize.cpp`'s `widenScalarizedFallback`
+already computed `HasResult = !I.getType()->isVoidTy()` but unconditionally
+named the cloned instruction anyway. A divergent `store` (not a call --
+`widenElementwise`'s call-specific path always errors instead) reaching
+this generic fallback is void-typed, and naming a void value asserts.
+One-line fix (only name a `HasResult` clone); confirmed by reverting it
+and re-running the new unit test, which crashed as expected.
+
+## Crash 6: `compute...zero_initialize_workgroup_memory.composites.*` GEP assertion
+
+A `Workgroup`-storage `shared`/`groupshared` struct mixing a `bool` field
+in with real scalars converts its `bool` (SPIR-V's `OpTypeBool`, which is
+just a plain `i1` -- there's no dedicated `spirv::BoolType` in this MLIR
+version, learned the hard way via a build error) straight through to an
+addressable LLVM aggregate. `i1` is fine as a pure SSA value but not
+byte-addressable once GEP'd as part of an aggregate. Rather than build
+real bool-in-memory support (needs load/store-boundary zext/trunc, a
+bigger job), rejected the shape at `WorkgroupGlobalVariablePattern` with a
+new `containsAddressableBool` check -- MLIR upstream's own
+`GlobalVariablePattern` already refuses the `Workgroup` storage class
+outright, so nothing else picks up the failed match. A `feme-opt`-level
+lit test can't reproduce the *original* assertion (that only fires during
+later LLVM IR translation, a step `feme-opt`'s own pass doesn't run), but
+it does confirm the defensive rejection fires even with a real
+`spirv.AccessChain`/`Store` into the bool field, which is what matters.
+
+## Crash 7: `synchronization.timeline_semaphore...buffer_262144` SIGSEGV, no diagnostic
+
+Never reproduced. The named case passes/fails cleanly alone; the full
+`timeline_semaphore` subgroup (2,880 cases) and the full `synchronization`
+group (64,872 cases) both ran clean, twice (once under `gdb`, once
+plain) -- after an earlier plain run of the same full group *did* die
+silently mid-log with no crash message, the same "long single-process
+run, doesn't reproduce standalone" shape already documented for an
+unrelated `api`-group flake in this report's own "Roadmap C1: measured
+impact" section. Closed as an unreproducible environmental flake (E29g)
+rather than left open or falsely claimed fixed.
+
+## Verification discipline
+
+For each of the six real fixes: reproduced the crash first (`gdb`,
+sometimes `valgrind`/a core dump), fixed it, added a unit or lit test,
+confirmed `check-feme` still passes in full, then re-ran that crash's own
+*entire* top-level CTS group end-to-end to confirm it now completes
+(not just that the one named case stops crashing) before moving to the
+next. Finished with a fresh full 54-group sweep (the report's own
+methodology) to confirm the aggregate picture: 53/54 groups clean, `api`
+down to one already-documented, out-of-scope crash instead of the
+granularity bug. Each fix landed in its own commit, per the project's own
+discipline.
