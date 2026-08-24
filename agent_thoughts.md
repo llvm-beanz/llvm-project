@@ -30549,3 +30549,152 @@ measured impact" section, `EntryPoints.cpp`'s own comment, and
   `FloatControlArithmeticPattern`.
 - `feme/docs/VulkanCTSReport.md`: new "Roadmap F15b: measured impact"
   section, mirroring F15a's own.
+
+# Agent thoughts: roadmap F15c (VK_KHR_shader_float_controls2's per-instruction decorations)
+
+## Scope
+
+F15c's own text bundles two things: `FPRoundingMode`, a per-instruction
+decoration overriding `VK_KHR_shader_float_controls`'s whole-entry-point
+`RoundingModeRTZ` execution mode (F15a) for one op, and `FPFastMathMode`/
+`FPFastMathDefault`, a separate additive fast-math mechanism. F15's own
+original text also assumed a per-instruction denorm-mode decoration
+existed; F15c's own row already corrected that (confirmed no such thing
+exists in the SPIR-V spec or LLVM's `SPIRVSymbolicOperands.td`), so I did
+not re-investigate it.
+
+## Finding the decoration is already attribute-shaped
+
+Before writing any lowering code, I checked how MLIR's own SPIR-V
+deserializer actually represents `FPRoundingMode`/`FPFastMathMode`:
+`Deserializer.cpp`'s `processDecoration` attaches both straight onto the
+op carrying the decorated result ID, as plain attributes
+(`fp_rounding_mode`/`fp_fast_math_mode` -- confirmed by testing round-trips
+through `mlir-opt` directly, and cross-checked against MLIR's own
+`test/Target/SPIRV/decorations.mlir`). This is the key simplification F15c's
+own text predicted ("reuse F15a's pattern-shaped lowering" rather than a
+new strategy): no separate before-conversion collection pass is needed the
+way `RoundingModeRTZWidths`/`DenormFlushToZeroWidths` need one, since the
+op's own pattern sees the attribute directly, with no risk of the
+information being legalized away first.
+
+## Implementation
+
+Extended `FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp) rather
+than writing a new pattern: an op's own `fp_rounding_mode` decoration, if
+present, now takes priority over the entry point's whole-module
+`RoundingModeRTZ` for that one instruction, including an explicit `RTE`
+overriding an entry point's `RoundingModeRTZ` back to plain code. Generalized
+the earlier hardcoded "toward zero" constrained-intrinsics path to any of
+LLVM's four rounding-mode enum values, since the decoration (unlike
+`RoundingModeRTZ`) can request `RTP`/`RTN` too. `fp_fast_math_mode` maps each
+bit to LLVM's own fast-math-flags enum (`nnan`/`ninf`/`nsz`/`arcp`/`fast`,
+plus the INTEL-vendor `AllowContractFastINTEL`/`AllowReassocINTEL` pair,
+mapped anyway since Vulkan shaders can't spell the capability that would set
+them, so honoring them costs nothing) and attaches them to the plain op --
+dropped instead if the same instruction also needs a non-default rounding
+mode, since LLVM's constrained intrinsics have no fast-math flags of their
+own (`requiresFastmath=0` in `LLVMIntrinsicOps.td`).
+
+Two mistakes I caught before committing, both by testing every combination
+by hand with `feme-opt`/`mlir-opt` rather than trusting the design on paper:
+
+1. **Missing `strictfp`.** A per-instruction decoration can add a
+   constrained-intrinsic call to a function `RoundingModeRTZWidths` never
+   mentions (no whole-entry-point execution mode declared at all), and
+   `applyEntryPointAttributes` (ConvertSPIRVToLLVMPass.cpp) only added
+   `strictfp` off that map. Added a small `hasNonDefaultPerInstructionRoundingMode`
+   scan over each entry point's own arithmetic ops, so `strictfp` is added
+   whenever *either* source requires it.
+2. **Stale attribute leakage.** My first match condition treated an
+   explicit `RTE` decoration (which changes nothing about the generated
+   code) as a non-match, falling through to MLIR's own lower-benefit
+   `DirectConversionPattern` -- which forwards every attribute an op
+   carries verbatim (`op->getAttrs()`, upstream `SPIRVToLLVM.cpp`), leaving
+   the now-meaningless `fp_rounding_mode = RTE` attribute stuck on the
+   resulting `llvm.fadd`. Fixed by matching (and thus consuming) *any*
+   `FPRoundingMode`/`FPFastMathMode` decoration a matched op carries, even
+   one that resolves to no lowering change at all.
+
+## Verification
+
+- `spirv-to-llvm-per-instruction-float-controls.mlir`: seven cases --
+  `RTZ` alone, `RTP`/`RTN` (neither expressible via the whole-entry-point
+  execution mode at all), an `RTE` override of an entry point's own
+  `RoundingModeRTZ` (checking the stale-attribute fix directly, via
+  `CHECK-NOT: fp_rounding_mode`), plain `FPFastMathMode`, the `Fast` bit's
+  group semantics, a rounding-mode-and-fast-math combination on one
+  instruction (checking fast-math is dropped, not silently miscompiled),
+  and `DenormFlushToZero` (F15b, unaffected by any of this) alongside a
+  per-instruction rounding-mode decoration.
+- `spirv-backend-per-instruction-rounding-mode.mlir`: the same "real,
+  in-tree SPIRV backend agrees" round-trip F15a's own report calls out as
+  its strongest evidence, this time for `RTP` -- a direction neither
+  `VK_KHR_shader_float_controls`'s execution mode nor F15a's own test
+  could reach at all.
+- `spirv-to-llvmir-per-instruction-fast-math.mlir`: checks the real,
+  translated LLVM IR (not just this conversion's own `llvm` dialect IR)
+  carries genuine `nnan ninf nsz` flags. Stops short of a full backend
+  round trip: LLVM's SPIRV backend does not currently re-emit an
+  `FPFastMathMode` decoration from a callee's fast-math flags at all
+  (confirmed empirically -- the round trip silently drops it), a backend
+  gap, not one in this conversion.
+
+## The CTS run went further than F15a/F15b's own probes, and found a
+   more fundamental gap
+
+Following this session's own standing instruction to run the actual
+Vulkan CTS after each change, I ran
+`dEQP-VK.spirv_assembly.instruction.compute.float_controls2.*` (1,977
+cases) -- baseline unchanged (0/0/1,977, all `NotSupported`, since nothing
+here changes feature advertisement). To measure whether the new codegen is
+actually CTS-ready (mirroring F15a/F15b's own "temporarily flip the bit and
+see" methodology), flipping just the aggregate `shaderFloatControls2`
+feature bit was not enough: `isFloatControlsFeaturesSupported` additionally
+gates on per-width `VkPhysicalDeviceFloatControlsProperties` fields, and
+`isFloatControls2FeaturesSupported` reads a *separate*, dedicated
+`VkPhysicalDeviceShaderFloatControls2Features` struct that CTS's own
+`DeviceFeatures` machinery only populates once the extension is also listed
+in `vkEnumerateDeviceExtensionProperties`'s output -- independent of the
+struct being Vulkan-1.4-core-promoted. (Confirmed this is *not* a latent bug
+in `EntryPoints.cpp`: the convention there, checked against every other
+still-unadvertised feature in the file, is that a dedicated struct case is
+added only once a feature is actually advertised, not pre-emptively.)
+
+Temporarily flipping all four of those (feature bit, three per-width
+property fields, a temporary dedicated-struct case, and a temporary
+extension listing) got the `fp32` subset (719 cases) past every feature gate
+for the first time in this whole F15 family of rows -- and found something
+past `vkCreateComputePipelines`'s resource-lowering gap this time:
+**every one of 707 cases fails at SPIR-V import itself**, with
+`error: unknown capability: 6029` (`FloatControls2`, confirmed against the
+SPIR-V spec's capability table) -- MLIR's `spirv` dialect has no enumerant
+for this capability at all, so a real shader exercising this extension's own
+decorations cannot even be deserialized, regardless of how correct F15c's
+own decoration-handling code is. This is a more fundamental gap than the
+`feme::cpu` resource-lowering one F15a/F15b's own probes found (blocking
+*import*, not just pipeline creation), and, combined with the already-known
+`FPFastMathDefault` execution-mode gap, is why F15c's own remaining scope
+splits off as F15d rather than being closed here. Reverted every one of the
+four temporary flips immediately after (none are committed); re-ran the
+same subset to confirm the baseline was restored exactly (0/0/1,977).
+
+## Documentation updates
+
+- `feme/docs/Roadmap.md`: struck through F15c, broadened F15d (previously
+  scoped to `FPFastMathDefault` alone) to also cover the newly-found
+  `FloatControls2` capability gap, and updated the Lane 1 grouping.
+- `feme/docs/Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+  updated `shaderFloatControls2`/`VK_KHR_shader_float_controls2` rows to
+  describe what F15c closed and point at F15d for the rest.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap F15c: measured impact"
+  section, including the capability-gap finding.
+- `feme/include/feme/Conversion/SPIRVToLLVM/SPIRVToLLVM.h`: updated
+  `FloatControlInfoMap`'s own doc comment to explain why this decoration
+  needs no map of that kind at all.
+
+## Testing
+
+`ninja check-feme` (assertions-enabled, ccache build, this session's
+existing `./build`): 1702/1703 passed, 1 unsupported (pre-existing,
+unrelated), after every commit in this row.
