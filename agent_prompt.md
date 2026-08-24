@@ -26,11 +26,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Plese work on roadmap step F2:
+Plese work on roadmap step F3:
 
-> **`VK_KHR_shader_subgroup_rotate`/`shaderSubgroupRotate`(+`Clustered`).** New
-> `spirv`->`llvm` conversion patterns for `OpGroupNonUniformRotateKHR`; note
-> `Vulkan14FeatureInventory.md`'s existing finding that no `OpGroupNonUniform*`
-> operation converts at all yet (`shaderSubgroupExtendedTypes` is vacuously true
-> for the same reason) — this row should audit and likely close that whole
-> family together rather than add one more vacuous bit
+>  **`VK_KHR_shader_float_controls2`/`shaderFloatControls2`.** Per-instruction
+>  (rather than per-module) rounding-mode/denorm-preservation execution modes;
+>  audit whether `VK_KHR_shader_float_controls`'s per-module form is implemented
+>  at all first (`Vulkan14FeatureInventory.md` doesn't list it, so check
+>  `SPIRVToLLVMPatterns.cpp`/`ImportSPIRV` before scoping this row)
