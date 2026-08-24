@@ -31,6 +31,7 @@
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
@@ -124,6 +125,24 @@ StageIOInfoMap prepareStageIOVariables(mlir::spirv::ModuleOp Module);
 /// before-conversion collection pass needed.
 using FloatControlInfoMap = llvm::StringMap<llvm::SmallVector<unsigned, 3>>;
 
+/// `VK_KHR_shader_float_controls2`'s own `FPFastMathDefault` execution mode
+/// (roadmap F15d): unlike `FPRoundingMode`/`FPFastMathMode` above, this is a
+/// whole-entry-point default -- one `spirv.ExecutionModeId` per
+/// floating-point type the entry point declares a default `FPFastMathMode`
+/// for -- rather than a per-instruction decoration, so it does need a
+/// before-conversion collection pass the same way `RoundingModeRTZWidths`
+/// does: an arithmetic op's own conversion pattern only ever sees the op
+/// itself, not the module-level `spirv.ExecutionModeId` that names its
+/// type's default. Keyed by entry point, then by that type's bit width
+/// (16/32/64); absent from the inner map entirely for a width the entry
+/// point declared no default for. An arithmetic op of that width carrying
+/// its own `fp_fast_math_mode` decoration still takes priority over this
+/// default for that one instruction, the same "decoration overrides
+/// entry-point-wide default" precedence `RoundingModeRTZWidths`/
+/// `FPRoundingMode` already established for `RoundingModeRTZ`.
+using FastMathDefaultMap =
+    llvm::StringMap<llvm::DenseMap<unsigned, mlir::spirv::FPFastMathMode>>;
+
 /// Adds the type conversions the patterns below rely on to \p TypeConverter,
 /// which must already have been populated with
 /// `mlir::populateSPIRVToLLVMTypeConversion`: they take precedence over the
@@ -144,12 +163,16 @@ void populateSPIRVToLLVMTargetTypeConversions(
 /// ConvertSPIRVToLLVMPass.cpp's collectEntryPoints -- FeMe's own pass, not
 /// this file, since they are read from `spirv.ExecutionMode`, an op outside
 /// a `spirv.func` body these per-op conversion patterns otherwise never see.
+/// \p FastMathDefaults, likewise recovered by collectEntryPoints (this time
+/// from `spirv.ExecutionModeId`), is `FPFastMathDefault`'s own per-type
+/// default (roadmap F15d).
 void populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables,
     const FloatControlInfoMap &RoundingModeRTZWidths,
-    const FloatControlInfoMap &DenormFlushToZeroWidths);
+    const FloatControlInfoMap &DenormFlushToZeroWidths,
+    const FastMathDefaultMap &FastMathDefaults);
 
 /// Creates the pass converting every `spirv.module` nested in a builtin
 /// module into the `llvm` dialect, targeting LLVM's in-tree `SPIRV` backend.

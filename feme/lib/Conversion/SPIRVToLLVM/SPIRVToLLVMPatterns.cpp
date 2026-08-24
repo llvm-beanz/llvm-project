@@ -2207,26 +2207,13 @@ getRoundingModeDecoration(mlir::Operation *Op) {
   llvm_unreachable("unhandled spirv::FPRoundingMode");
 }
 
-/// Returns the LLVM fast-math flags \p Op's own `fp_fast_math_mode`
-/// decoration (`FPFastMathMode`, roadmap F15c) requests, translating each
-/// bit `float_controls2`'s core (non-vendor) profile can express to its
-/// LLVM equivalent. This is a separate, additive mechanism from
-/// `FPRoundingMode` above -- ordinary LLVM fast-math flags rather than
-/// another constrained-intrinsics consumer -- applied only to the plain
-/// (round-to-nearest-even) op below: LLVM's constrained intrinsics carry no
-/// fast-math flags of their own (`LLVM_ConstrainedIntr`,
-/// `LLVMIntrinsicOps.td`, sets `requiresFastmath=0`), so a shader that
-/// combines a non-default rounding mode with fast-math on the very same
-/// instruction keeps the rounding behavior and drops the fast-math request,
-/// an intentional scoping decision rather than an oversight -- Vulkan
-/// shaders needing both would need to request the rounding mode and
-/// fast-math flags on two different instructions.
-mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
-  auto Attr =
-      Op->getAttrOfType<mlir::spirv::FPFastMathModeAttr>("fp_fast_math_mode");
-  if (!Attr)
-    return mlir::LLVM::FastmathFlags::none;
-  mlir::spirv::FPFastMathMode Mode = Attr.getValue();
+/// Translates \p Mode, a decorated instruction's own `fp_fast_math_mode`
+/// (roadmap F15c) or an entry point's per-type `FPFastMathDefault` (roadmap
+/// F15d), to the LLVM fast-math flags it requests, mapping each bit
+/// `float_controls2`'s core (non-vendor) profile can express to its LLVM
+/// equivalent.
+mlir::LLVM::FastmathFlags
+translateFastMathMode(mlir::spirv::FPFastMathMode Mode) {
   auto Has = [&](mlir::spirv::FPFastMathMode Bit) {
     return (Mode & Bit) != mlir::spirv::FPFastMathMode::None;
   };
@@ -2241,17 +2228,48 @@ mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
     Flags = Flags | mlir::LLVM::FastmathFlags::nsz;
   if (Has(mlir::spirv::FPFastMathMode::AllowRecip))
     Flags = Flags | mlir::LLVM::FastmathFlags::arcp;
-  // `AllowContractFastINTEL`/`AllowReassocINTEL` are a vendor (INTEL) pair
-  // of bits reusing `contract`/`reassoc` semantics under an
-  // `FPFastMathModeINTEL`-gated capability rather than
-  // `VK_KHR_shader_float_controls2` itself; mapped anyway since Vulkan
-  // shaders (this conversion's only real caller) cannot express the
-  // capability that would set them, so honoring them costs nothing.
+  // `AllowContractFastINTEL`/`AllowReassocINTEL` map both the `INTEL`
+  // vendor pair and `VK_KHR_shader_float_controls2`'s own, non-vendor
+  // `AllowContract`/`AllowReassoc` bits (roadmap F15d): the two extensions
+  // share the same bit positions (see `SPIRVBase.td`'s own comment on
+  // these enumerants), so a Vulkan shader setting either bit -- it can
+  // only ever be this extension's own, since Vulkan shaders have no way
+  // to declare `FPFastMathModeINTEL` -- decodes to these same enumerant
+  // names.
   if (Has(mlir::spirv::FPFastMathMode::AllowContractFastINTEL))
     Flags = Flags | mlir::LLVM::FastmathFlags::contract;
   if (Has(mlir::spirv::FPFastMathMode::AllowReassocINTEL))
     Flags = Flags | mlir::LLVM::FastmathFlags::reassoc;
+  // `AllowTransform` (roadmap F15d) is a superset of `AllowContract`/
+  // `AllowReassoc` (the SPIR-V spec requires both bits set alongside it),
+  // permitting arbitrary real-number-rule transformations rather than just
+  // contraction/reassociation -- LLVM's `afn` ("approximate functions")
+  // flag is the closest match for that broader license, rather than a
+  // literal one-bit-to-one-flag correspondence.
+  if (Has(mlir::spirv::FPFastMathMode::AllowTransform))
+    Flags = Flags | mlir::LLVM::FastmathFlags::afn;
   return Flags;
+}
+
+/// Returns the LLVM fast-math flags \p Op's own `fp_fast_math_mode`
+/// decoration (`FPFastMathMode`, roadmap F15c) requests. This is a
+/// separate, additive mechanism from `FPRoundingMode` above -- ordinary
+/// LLVM fast-math flags rather than another constrained-intrinsics
+/// consumer -- applied only to the plain (round-to-nearest-even) op below:
+/// LLVM's constrained intrinsics carry no fast-math flags of their own
+/// (`LLVM_ConstrainedIntr`, `LLVMIntrinsicOps.td`, sets
+/// `requiresFastmath=0`), so a shader that combines a non-default rounding
+/// mode with fast-math on the very same instruction keeps the rounding
+/// behavior and drops the fast-math request, an intentional scoping
+/// decision rather than an oversight -- Vulkan shaders needing both would
+/// need to request the rounding mode and fast-math flags on two different
+/// instructions.
+mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
+  auto Attr =
+      Op->getAttrOfType<mlir::spirv::FPFastMathModeAttr>("fp_fast_math_mode");
+  if (!Attr)
+    return mlir::LLVM::FastmathFlags::none;
+  return translateFastMathMode(Attr.getValue());
 }
 
 /// Converts an arithmetic FP `spirv` op that would otherwise become MLIR's
@@ -2289,6 +2307,13 @@ mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
 ///   dropped, rather than applied to \p ConstrainedIntrOp, if this
 ///   instruction also ends up with a non-default rounding mode, since
 ///   LLVM's constrained intrinsics carry no fast-math flags of their own.
+/// - `FPFastMathDefault` (F15d, a whole-entry-point default, one per
+///   floating-point type): translated the same way as an explicit
+///   `FPFastMathMode` decoration above, but only for an arithmetic op of
+///   the matching bit width that carries no such decoration of its own --
+///   a decoration always overrides its own entry point's default for that
+///   one instruction, the same precedence `FPRoundingMode` already has
+///   over `RoundingModeRTZ`.
 ///
 /// All three may apply to the same instruction at once (flushing subnormal
 /// operands, rounding in a non-default direction, then flushing a
@@ -2312,10 +2337,12 @@ public:
       mlir::MLIRContext *Context, const mlir::LLVMTypeConverter &TypeConverter,
       mlir::PatternBenefit Benefit,
       const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths,
-      const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths)
+      const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths,
+      const feme::spirv::FastMathDefaultMap &FastMathDefaults)
       : mlir::SPIRVToLLVMConversion<SPIRVOp>(Context, TypeConverter, Benefit),
         RoundingModeRTZWidths(RoundingModeRTZWidths),
-        DenormFlushToZeroWidths(DenormFlushToZeroWidths) {}
+        DenormFlushToZeroWidths(DenormFlushToZeroWidths),
+        FastMathDefaults(FastMathDefaults) {}
 
   mlir::LogicalResult
   matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
@@ -2352,6 +2379,19 @@ public:
     bool HasFastMathDecoration = static_cast<bool>(
         Op->template getAttrOfType<mlir::spirv::FPFastMathModeAttr>(
             "fp_fast_math_mode"));
+    // Absent its own decoration, an arithmetic op falls back to its entry
+    // point's `FPFastMathDefault` for its own bit width (roadmap F15d), if
+    // one was declared -- the same "decoration overrides entry-point-wide
+    // default" precedence `FPRoundingMode` above already gets over
+    // `RoundingModeRTZ`.
+    if (!HasFastMathDecoration) {
+      auto EntryIt = FastMathDefaults.find(Func.getName());
+      if (EntryIt != FastMathDefaults.end()) {
+        auto WidthIt = EntryIt->second.find(Width);
+        if (WidthIt != EntryIt->second.end())
+          FastMath = translateFastMathMode(WidthIt->second);
+      }
+    }
     // Even an `fp_rounding_mode` decoration that resolves to no override at
     // all (an explicit `RTE` with nothing else applying) still has to match
     // here rather than fall through: MLIR's own lower-benefit
@@ -2363,10 +2403,10 @@ public:
         FastMath == mlir::LLVM::FastmathFlags::none && !PerOpRounding &&
         !HasFastMathDecoration)
       return Rewriter.notifyMatchFailure(
-          Op, "enclosing entry point declared neither RoundingModeRTZ nor "
-              "DenormFlushToZero for this bit width, and this instruction "
-              "has neither an FPRoundingMode nor an FPFastMathMode "
-              "decoration of its own");
+          Op, "enclosing entry point declared neither RoundingModeRTZ, "
+              "DenormFlushToZero, nor an FPFastMathDefault for this bit "
+              "width, and this instruction has neither an FPRoundingMode "
+              "nor an FPFastMathMode decoration of its own");
 
     mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
     if (!DstType)
@@ -2412,6 +2452,7 @@ private:
 
   const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths;
   const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths;
+  const feme::spirv::FastMathDefaultMap &FastMathDefaults;
 };
 
 /// (roadmap E4) Drops `spirv.ExecutionModeId` (`VK_KHR_maintenance4`'s
@@ -2761,7 +2802,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables,
     const FloatControlInfoMap &RoundingModeRTZWidths,
-    const FloatControlInfoMap &DenormFlushToZeroWidths) {
+    const FloatControlInfoMap &DenormFlushToZeroWidths,
+    const FastMathDefaultMap &FastMathDefaults) {
   Patterns.add<
       ArrayConstantPattern, BuiltInAddressOfPattern,
       BuiltInGlobalVariablePattern, BlockAccessChainPattern,
@@ -2796,6 +2838,6 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       FloatControlArithmeticPattern<mlir::spirv::FRemOp, mlir::LLVM::FRemOp,
                                     mlir::LLVM::ConstrainedFRemIntr>>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, RoundingModeRTZWidths,
-      DenormFlushToZeroWidths);
+      DenormFlushToZeroWidths, FastMathDefaults);
 }
 

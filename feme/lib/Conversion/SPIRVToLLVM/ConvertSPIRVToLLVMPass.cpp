@@ -120,6 +120,14 @@ struct EntryPointInfo {
   /// `llvm.experimental.constrained.*` intrinsic -- independent of whether
   /// the entry point declared `RoundingModeRTZ` itself.
   bool NeedsStrictFPForPerInstructionRounding = false;
+  /// `VK_KHR_shader_float_controls2`'s own `FPFastMathDefault` execution
+  /// mode (roadmap F15d): the per-type default `FPFastMathMode`
+  /// `FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp) applies to
+  /// an arithmetic op of the matching bit width that carries no
+  /// `fp_fast_math_mode` decoration of its own. Keyed by bit width
+  /// (16/32/64); absent entirely for a width the entry point declared no
+  /// default for.
+  llvm::DenseMap<unsigned, mlir::spirv::FPFastMathMode> FastMathDefaults;
 };
 
 /// Everything about a `spirv.module` that the conversion consumes but does
@@ -246,6 +254,30 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
         hasNonDefaultPerInstructionRoundingMode(Func))
       It->second.NeedsStrictFPForPerInstructionRounding = true;
   }
+
+  // `FPFastMathDefault` (roadmap F15d) is a whole-entry-point default, one
+  // `spirv.ExecutionModeId` per floating-point type, so -- like
+  // `RoundingModeRTZ`/`DenormFlushToZero` above, and unlike the
+  // per-instruction decorations F15c reads straight off their own op -- it
+  // does need collecting here, before the conversion drops it.
+  for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeIdOp>()) {
+    if (Mode.getExecutionMode() != mlir::spirv::ExecutionMode::FPFastMathDefault)
+      continue;
+    auto It = EntryPoints.find(Mode.getFn());
+    if (It == EntryPoints.end())
+      continue;
+    llvm::ArrayRef<mlir::Attribute> Values = Mode.getValues().getValue();
+    assert(Values.size() == 2 &&
+           "verified FPFastMathDefault has a target type and a fast-math "
+           "mode operand");
+    unsigned Width = mlir::cast<mlir::TypeAttr>(Values[0])
+                         .getValue()
+                         .getIntOrFloatBitWidth();
+    auto Mask = static_cast<uint32_t>(
+        mlir::cast<mlir::IntegerAttr>(Values[1]).getInt());
+    It->second.FastMathDefaults[Width] =
+        static_cast<mlir::spirv::FPFastMathMode>(Mask);
+  }
   return mlir::success();
 }
 
@@ -342,6 +374,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   feme::spirv::StageIOInfoMap StageIOVariables;
   feme::spirv::FloatControlInfoMap RoundingModeRTZWidths;
   feme::spirv::FloatControlInfoMap DenormFlushToZeroWidths;
+  feme::spirv::FastMathDefaultMap FastMathDefaults;
   unsigned Index = 0;
   for (mlir::Operation &Op :
        llvm::make_early_inc_range(Module.getBody()->getOperations())) {
@@ -363,6 +396,9 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
         if (!EntryPoint.second.DenormFlushToZeroWidths.empty())
           DenormFlushToZeroWidths[EntryPoint.getKey()] =
               EntryPoint.second.DenormFlushToZeroWidths;
+        if (!EntryPoint.second.FastMathDefaults.empty())
+          FastMathDefaults[EntryPoint.getKey()] =
+              EntryPoint.second.FastMathDefaults;
       }
       Modules.push_back(std::move(Info));
       // Materializes the resource name strings the handle intrinsics refer
@@ -391,7 +427,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::populateSPIRVToLLVMFunctionConversionPatterns(TypeConverter, Patterns);
   feme::spirv::populateSPIRVToLLVMTargetPatterns(
       TypeConverter, Patterns, Resources, StageIOVariables,
-      RoundingModeRTZWidths, DenormFlushToZeroWidths);
+      RoundingModeRTZWidths, DenormFlushToZeroWidths, FastMathDefaults);
 
   mlir::ConversionTarget Target(*Ctx);
   Target.addIllegalDialect<mlir::spirv::SPIRVDialect>();
