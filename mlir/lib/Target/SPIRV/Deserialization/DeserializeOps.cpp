@@ -620,8 +620,40 @@ Deserializer::processOp<spirv::ExecutionModeIdOp>(ArrayRef<uint32_t> words) {
   if (wordIndex >= wordsSize)
     return emitError(unknownLoc, "missing Execution Mode in OpExecutionModeId");
 
-  ExecutionModeAttr execMode = spirv::ExecutionModeAttr::get(
-      context, static_cast<spirv::ExecutionMode>(words[wordIndex++]));
+  auto execModeValue = static_cast<spirv::ExecutionMode>(words[wordIndex++]);
+  ExecutionModeAttr execMode =
+      spirv::ExecutionModeAttr::get(context, execModeValue);
+
+  // `FPFastMathDefault`'s two <id> operands (roadmap F15d) are a Target
+  // Type and a Fast-Math Mode constant, not symbol references like every
+  // other execution mode this op represents: the Target Type is a type
+  // <id>, which has no module-scope symbol to point at, and the Fast-Math
+  // Mode must not name a specialization constant (per the SPIR-V spec), so
+  // its value is already known here rather than needing to be resolved
+  // later the way a genuine specialization constant's would be.
+  if (execModeValue == spirv::ExecutionMode::FPFastMathDefault) {
+    if (wordIndex + 2 != wordsSize)
+      return emitError(unknownLoc,
+                       "OpExecutionModeId FPFastMathDefault expects exactly "
+                       "a target type and a fast-math mode operand");
+    Type targetType = getType(words[wordIndex++]);
+    if (!targetType)
+      return emitError(unknownLoc,
+                       "unknown target type <id> in OpExecutionModeId "
+                       "FPFastMathDefault");
+    IntegerAttr fastMathMode = getConstantInt(words[wordIndex++]);
+    if (!fastMathMode)
+      return emitError(unknownLoc,
+                       "OpExecutionModeId FPFastMathDefault's fast-math "
+                       "mode operand must be a plain integer constant");
+    ArrayAttr values = opBuilder.getArrayAttr(
+        {TypeAttr::get(targetType), fastMathMode});
+    spirv::ExecutionModeIdOp::create(
+        opBuilder, unknownLoc,
+        SymbolRefAttr::get(opBuilder.getContext(), fn.getName()), execMode,
+        values);
+    return success();
+  }
 
   // Get the values.
   SmallVector<Attribute, 4> attrListElems;

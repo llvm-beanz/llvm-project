@@ -991,13 +991,26 @@ ParseResult spirv::ExecutionModeIdOp::parse(OpAsmParser &parser,
   }
 
   SmallVector<Attribute, 4> values;
-  if (parser.parseCommaSeparatedList([&]() -> ParseResult {
-        FlatSymbolRefAttr attr;
-        if (parser.parseAttribute(attr))
-          return failure();
-        values.push_back(attr);
-        return success();
-      })) {
+  if (execMode == ExecutionMode::FPFastMathDefault) {
+    // Target Type, then the (already-resolved, since it must not be a
+    // specialization constant -- see this op's own class comment) literal
+    // Fast-Math Mode value, rather than the symbol references every other
+    // <id>-operand execution mode uses.
+    Type targetType;
+    APInt fastMathMode;
+    if (parser.parseType(targetType) || parser.parseComma() ||
+        parser.parseInteger(fastMathMode))
+      return failure();
+    values.push_back(TypeAttr::get(targetType));
+    values.push_back(parser.getBuilder().getI32IntegerAttr(
+        static_cast<int32_t>(fastMathMode.getZExtValue())));
+  } else if (parser.parseCommaSeparatedList([&]() -> ParseResult {
+               FlatSymbolRefAttr attr;
+               if (parser.parseAttribute(attr))
+                 return failure();
+               values.push_back(attr);
+               return success();
+             })) {
     return failure();
   }
 
@@ -1012,6 +1025,13 @@ void spirv::ExecutionModeIdOp::print(OpAsmPrinter &printer) {
   printer.printSymbolName(getFn());
   printer << " \"" << stringifyExecutionMode(getExecutionMode()) << "\" ";
 
+  if (getExecutionMode() == ExecutionMode::FPFastMathDefault) {
+    ArrayRef<Attribute> values = getValues().getValue();
+    printer << cast<TypeAttr>(values[0]).getValue() << ", "
+            << cast<IntegerAttr>(values[1]).getValue().getZExtValue();
+    return;
+  }
+
   llvm::interleaveComma(
       getValues().getAsValueRange<FlatSymbolRefAttr>(), printer,
       [&](StringRef value) { printer.printSymbolName(value); });
@@ -1023,11 +1043,30 @@ LogicalResult spirv::ExecutionModeIdOp::verify() {
   case ExecutionMode::SubgroupsPerWorkgroupId:
   case ExecutionMode::LocalSizeId:
   case ExecutionMode::LocalSizeHintId:
+  case ExecutionMode::FPFastMathDefault:
     break;
   default:
     return emitOpError("expected ExecutionMode that takes extra operands that "
                        "are <id> operands, got: ")
            << stringifyExecutionMode(getExecutionMode());
+  }
+
+  // `FPFastMathDefault` (roadmap F15d) is a Target Type / literal
+  // Fast-Math Mode pair (see this op's own class comment), not a list of
+  // symbol references like every other <id>-operand execution mode.
+  if (getExecutionMode() == ExecutionMode::FPFastMathDefault) {
+    if (getValues().size() != 2)
+      return emitOpError(
+          "expected FPFastMathDefault to have a target type and a "
+          "fast-math mode operand, got ")
+             << getValues().size() << " operand(s)";
+    if (!isa<TypeAttr>(getValues()[0]))
+      return emitOpError("expected FPFastMathDefault's first operand to be "
+                         "a target type");
+    if (!isa<IntegerAttr>(getValues()[1]))
+      return emitOpError("expected FPFastMathDefault's second operand to be "
+                         "a fast-math mode integer");
+    return success();
   }
 
   if (getValues().empty())

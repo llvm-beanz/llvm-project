@@ -1086,6 +1086,31 @@ Serializer::processOp<spirv::ExecutionModeIdOp>(spirv::ExecutionModeIdOp op) {
   operands.push_back(funcID);
   operands.push_back(static_cast<uint32_t>(op.getExecutionMode()));
 
+  // `FPFastMathDefault`'s two operands (roadmap F15d) are a Target Type and
+  // a literal Fast-Math Mode value (see `ExecutionModeIdOp`'s own class
+  // comment), not symbol references: serialize the type directly, and
+  // materialize (or reuse) a plain `OpConstant` for the literal, since the
+  // SPIR-V spec requires this operand not be a specialization constant.
+  if (op.getExecutionMode() == spirv::ExecutionMode::FPFastMathDefault) {
+    ArrayRef<Attribute> values = op.getValues().getValue();
+    Type targetType = cast<TypeAttr>(values[0]).getValue();
+    uint32_t typeID = 0;
+    if (failed(processType(op.getLoc(), targetType, typeID)))
+      return failure();
+    operands.push_back(typeID);
+
+    auto fastMathMode = cast<IntegerAttr>(values[1]);
+    uint32_t constID = prepareConstant(
+        op.getLoc(), fastMathMode.getType(), fastMathMode);
+    if (!constID)
+      return failure();
+    operands.push_back(constID);
+
+    encodeInstructionInto(executionModes, spirv::Opcode::OpExecutionModeId,
+                          operands);
+    return success();
+  }
+
   for (Attribute refVal : op.getValues().getValue()) {
     uint32_t id = getSpecConstID(cast<FlatSymbolRefAttr>(refVal).getValue());
     if (!id)

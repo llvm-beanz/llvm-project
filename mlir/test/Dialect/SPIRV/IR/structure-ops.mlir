@@ -373,6 +373,30 @@ spirv.module Logical GLSL450 {
 
 // -----
 
+// `FPFastMathDefault` (roadmap F15d): a target type and a literal fast-math
+// mode, not symbol references.
+spirv.module Logical GLSL450 {
+   spirv.func @do_nothing() -> () "None" {
+     spirv.Return
+   }
+   spirv.EntryPoint "GLCompute" @do_nothing
+   // CHECK: spirv.ExecutionModeId {{@.*}} "FPFastMathDefault" f32, 65536
+   spirv.ExecutionModeId @do_nothing "FPFastMathDefault" f32, 65536
+}
+
+// -----
+
+spirv.module Logical GLSL450 {
+   spirv.func @do_nothing() -> () "None" {
+     spirv.Return
+   }
+   spirv.EntryPoint "GLCompute" @do_nothing
+   // expected-error @+1 {{expected non-function type}}
+   spirv.ExecutionModeId @do_nothing "FPFastMathDefault" "not a type", 65536
+}
+
+// -----
+
 spirv.module Logical GLSL450 {
    spirv.func @do_nothing() -> () "None" {
      spirv.Return

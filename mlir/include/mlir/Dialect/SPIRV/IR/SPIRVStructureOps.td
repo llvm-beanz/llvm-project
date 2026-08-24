@@ -306,6 +306,15 @@ def SPIRV_ExecutionModeIdOp : SPIRV_Op<"ExecutionModeId", []> {
     that takes Extra Operands that are <id> operands. Otherwise, use
     OpExecutionMode.
 
+    `FPFastMathDefault` (`VK_KHR_shader_float_controls2`, roadmap F15d) is
+    the one execution mode of this kind whose two <id> operands do not
+    each name a module-scope symbol the way `LocalSizeId`'s do: its first
+    operand is a *type* <id> (the floating-point type the default applies
+    to), and its second must be a plain (non-specialization) constant <id>,
+    whose value is therefore already known at parse/deserialization time.
+    \p values spells that one mode's operand pair as a `TypeAttr` followed
+    by an `IntegerAttr` instead of two symbol references.
+
     <!-- End of AutoGen section -->
 
     ```
@@ -313,6 +322,8 @@ def SPIRV_ExecutionModeIdOp : SPIRV_Op<"ExecutionModeId", []> {
                            <and other SPIR-V execution modes...>
     execution-mode-id-op ::= `spirv.ExecutionMode ` ssa-use execution-mode
                               symbol-reference (`, ` symbol-reference)*
+                            | `spirv.ExecutionMode ` ssa-use
+                              `"FPFastMathDefault"` type `, ` integer-literal
     ```
 
     #### Example:
@@ -320,6 +331,7 @@ def SPIRV_ExecutionModeIdOp : SPIRV_Op<"ExecutionModeId", []> {
     ```mlir
     spirv.ExecutionModeId @foo "LocalSizeId" @var0, @var1, @var2
     spirv.ExecutionModeId @bar "LocalSizeHintId" @x, @y, @z
+    spirv.ExecutionModeId @baz "FPFastMathDefault" f32, 65536
     ```
   }];
 
@@ -332,8 +344,12 @@ def SPIRV_ExecutionModeIdOp : SPIRV_Op<"ExecutionModeId", []> {
 
   let arguments = (ins
     FlatSymbolRefAttr:$fn,
-    SPIRV_ExecutionModeAttr:$execution_mode, 
-    SymbolRefArrayAttr:$values
+    SPIRV_ExecutionModeAttr:$execution_mode,
+    // Not `SymbolRefArrayAttr`: `FPFastMathDefault` (see above) stores a
+    // `TypeAttr`/`IntegerAttr` pair rather than symbol references, so this
+    // has to accept either shape; `verify()` enforces the right one for
+    // the execution mode actually in use.
+    ArrayAttr:$values
   );
 
   let results = (outs);
