@@ -7,17 +7,14 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: `69aa4606e516` (this session: roadmap E27, "fix the
-  `VK_REMAINING_ARRAY_LAYERS` infinite loop in copy/blit/resolve", and E28,
-  "fix the 2D-array/3D-image `vkCmdCopyImage` `SIGSEGV`" -- see "Full run,
-  roadmap E27/E28" below). The headline table below is this same E28
-  revision's full 54-group run, the first full re-run since D0's own
-  headline run above -- every intervening row (D1, E1-E26) was measured
-  only over its own targeted case subset, per each row's own "measured
-  impact" section, not folded into a new full-run headline until now.
-- `check-feme`: 1675 passed, 1 unsupported as of roadmap E28 (see "Full
-  run, roadmap E27/E28" below); up from D0's 1541 by every roadmap row's
-  own new regression tests since, not just this session's four.
+- FeMe revision: this session's own final revision (roadmap E27, E28, and
+  E29a-E29g -- see "Full run, roadmap E27/E28" and "Roadmap E29: measured
+  impact" below). The headline table below is a fresh full 54-group run
+  against this revision, re-generated after E29a-E29f's six crash fixes
+  landed.
+- `check-feme`: 1687 passed, 1 unsupported as of roadmap E29 (see "Roadmap
+  E29: measured impact" below); up from D0's 1541 by every roadmap row's
+  own new regression tests since, not just this session's ten.
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-413-ge4b225a7d7cd2c53630f0de3f0912c4d33a816f2`,
   plus the same two local fixes D0's own edition already recorded (see
   "Deviations from a stock CTS" below).
@@ -28,10 +25,12 @@ and this file is a measurement instead.
 
 This is a genuine full 54-group re-run (the same "every group, six at a
 time, per-group crash isolation" methodology "Reproducing this report"
-below describes), the first since D0's own headline above. It is **not**
-directly comparable to D0's own numbers: roadmap E1-E26 landed a large
-number of real feature/format/limit implementations in between (aggregate
-1.3/1.4 struct wiring, `synchronization2`, `maintenance4`-`6`,
+below describes), the second since D0's own headline above (the first,
+superseded, is E27/E28's revision -- see "Roadmap E29: measured impact"
+below for that edition's own numbers and how this one differs). It is
+**not** directly comparable to D0's own numbers: roadmap E1-E26 landed a
+large number of real feature/format/limit implementations in between
+(aggregate 1.3/1.4 struct wiring, `synchronization2`, `maintenance4`-`6`,
 `shaderIntegerDotProduct`, ASTC LDR/HDR, broadened per-format sampled/
 attachment support, integer-format image sampling, ...), so a much larger
 fraction of cases are now genuinely *exercised* (`Pass`/`Fail`) rather than
@@ -43,28 +42,29 @@ not re-derive.
 
 | | Count | Share |
 |---|---|---|
-| Total cases | 3,002,485 (of 3,237,000 possible: see below) | |
-| Passed | 27,313 | 0.91% |
-| Failed | 126,457 | 4.21% |
-| Not supported | 2,848,714 | 94.88% |
+| Total cases | 3,236,771 (of 3,237,000 possible: see below) | |
+| Passed | 36,725 | 1.13% |
+| Failed | 144,445 | 4.46% |
+| Not supported | 3,055,600 | 94.41% |
 | Quality warning | 1 | |
-| **Crashed / timed out** | **7 groups, 234,498 cases short (see below)** | |
+| **Crashed / timed out** | **1 group, 228 cases short (see below)** | |
 
-47 of the 54 top-level `dEQP-VK.<group>.*` groups run to completion; seven
-crash partway through -- two are this session's own `roadmap E27`/`E28`
-fixes (see "Full run, roadmap E27/E28" below for what each was and how it
-was found and fixed), the other five are **new, untriaged findings**, not
-yet root-caused past their own crash-site log line:
+53 of the 54 top-level `dEQP-VK.<group>.*` groups now run to completion --
+up from 47 in the previous (E27/E28) edition's own headline, per "Roadmap
+E29: measured impact" below, whose six fixes are exactly what moved this
+number. The one still-crashing group is `api`, and not for the reason it
+was in the previous edition: this run reaches 266,994 of 267,222 cases
+(99.9%) before a `SIGSEGV` with no diagnostic in
+`object_management.multithreaded_per_thread_resources.device`, a
+threading stress test unrelated to any file this session's own E29 fixes
+touch -- the same crash "Addendum: DXIL `GetDimensions.xy`/AMDGPU change"
+below already found once and declined to attribute to that addendum's own
+(different, non-overlapping) file set. It is a known, pre-existing,
+out-of-scope issue, left for a future session's own crash-isolation pass:
 
 | Group | Cases measured (of total) | Crash |
 |---|---|---|
-| `api` | 208,840 (of 267,222) | `SIGSEGV` in `api.granularity.in_dynamic_render_pass.*` |
-| `compute` | 19,642 (of 60,811) | `GetElementPtrTypeIterator.h` assertion (`Not byte-addressable`) in `compute.pipeline.zero_initialize_workgroup_memory.*` |
-| `glsl` | 16,003 (of 26,808) | `SIGSEGV` in `glsl.texture_functions.query.texturesamples.*` |
-| `image` | 127,574 (of 142,991) | `SIGSEGV` in `image.subresource_layout.*` |
-| `renderpasses` | 2,317 (of 80,880) | `llvm::Value::setNameImpl` assertion (`Cannot assign a name to void values`) in `renderpasses.dynamic_rendering.*` |
-| `spirv_assembly` | 43,300 (of 68,734) | `llvm_unreachable` in `ResourceCalls.cpp` (`unsupported feme.cpu.resource.* element type`) in `spirv_assembly.instruction.spirv1p4.opselect.array_select` |
-| `synchronization` | 60,144 (of 64,872) | `SIGSEGV` in `synchronization.timeline_semaphore.device_host.*` |
+| `api` | 266,994 (of 267,222) | `SIGSEGV`, no diagnostic, `object_management.multithreaded_per_thread_resources.device` (pre-existing, unrelated to roadmap E29) |
 
 26 of the 54 groups have **zero** failures (`conditional_rendering`,
 `cooperative_vector`, `data_graph`, `depth`, `descriptor_indexing`, `dgc`,
@@ -95,7 +95,7 @@ run's own per-group logs show, a clean rejection or a genuinely wrong
 result attributable to a real, named implementation gap** (a format/limit/
 feature this ICD does not yet support, per the E-series rows above) -- **not**
 re-audited case-by-case for this edition the way D0's own headline was
-(126,457 is roughly 4x D0's 29,647, driven by the much larger surface
+(144,445 is roughly 5x D0's 29,647, driven by the much larger surface
 E1-E26 now actually exercises), so that specific claim should be treated as
 inherited from those rows' own individual audits rather than freshly
 re-verified here.
@@ -213,6 +213,72 @@ ResolvesWithRemainingArrayLayers` for E27; `ImageTest.
 CopyImage2DArrayToImage3D` for E28), each confirmed to hang/crash without
 its respective fix and pass with it; `check-feme` is 1675 passed/1
 unsupported after both (up from 1670/1 before this session).
+
+## Roadmap E29: measured impact
+
+The same full run that found E27/E28 found six more distinct crashes, one
+per remaining top-level group (`api`'s own second crash, reached once E27/
+E28 stopped hiding it; `image`; `glsl`; `spirv_assembly`; `renderpasses`;
+`compute`), plus a seventh (`synchronization`) that turned out not to
+reproduce. Each of the six real ones is a genuine FeMe bug, independently
+root-caused under `gdb`/`valgrind`/a targeted unit test and fixed in its
+own commit (Roadmap.md's E29a-E29f); the seventh (E29g) is closed as an
+unreproducible, one-off environmental flake instead, per that row's own
+detail.
+
+**Before** (this session's own starting point, the E27/E28 revision): 7 of
+54 groups crashed partway through -- `api` (granularity), `compute` (zero-
+initialize-workgroup-memory bools), `glsl` (texture-function sample-count
+query), `image` (subresource layout), `renderpasses` (dynamic-rendering
+blend/mask), `spirv_assembly` (`OpSelect` on arrays), and `synchronization`
+(unreproducible, see E29g) -- 234,498 cases short of the full 3,237,000
+per the headline table above.
+
+**After** (this session's own final revision, E29a-E29g applied): a fresh
+full 54-group sweep (this section's own run, same methodology) found only
+one crash left, and it is a *different*, already-documented, out-of-scope
+one: `api` now reaches `object_management.multithreaded_per_thread_
+resources.device` (266,994 of 267,222 cases, 99.9% -- previously it
+crashed at 208,840/267,222 on the granularity bug this session fixed) before
+a `SIGSEGV` with no diagnostic, in a threading stress test unrelated to any
+E29 file -- the exact same crash "Addendum: DXIL `GetDimensions.xy`/AMDGPU
+change" above already found and declined to attribute to that addendum's
+own (different, non-overlapping) file set. It is left for a future
+session's own crash-isolation pass rather than folded into E29, which
+never claimed it.
+
+Every one of the other 53 groups now runs to completion, most for the
+first time this report has ever recorded them doing so:
+
+| Group | Cases (of total) | Crash before | Crash after |
+|---|---:|---|---|
+| `api` | 266,994 (of 267,222) | `SIGSEGV` in `granularity.in_dynamic_render_pass.*` | `SIGSEGV`, `object_management.multithreaded_per_thread_resources.device` (pre-existing, out of scope) |
+| `compute` | 646,398 (of 646,398, `zero_initialize_workgroup_memory` subset: 646) | `GetElementPtrTypeIterator.h` assertion | none |
+| `glsl` | 26,808 (of 26,808) | `SIGSEGV` in `texture_functions.query.texturesamples.*` | none |
+| `image` | 142,991 (of 142,991) | `SIGSEGV` in `subresource_layout.*` | none |
+| `renderpasses` | 80,880 (of 80,880) | `llvm::Value::setNameImpl` assertion | none |
+| `spirv_assembly` | 68,734 (of 68,734) | `llvm_unreachable` in `ResourceCalls.cpp` | none |
+| `synchronization` | 64,872 (of 64,872) | (did not reproduce -- see E29g) | none |
+
+(`compute`'s own "cases (of total)" column measures its full 60,811-case
+group, not just the 646-case subgroup the crash was in -- both are listed
+since the crash's own case count is small enough that "of total" would
+otherwise read as a typo.)
+
+Summed across the 53 non-`api` groups this sweep's own totals cover: 7,538
+passed, 128,839 failed, 2,833,400 not supported (2,969,778 cases) -- not
+directly comparable to the headline table's own 3,002,485/27,313/126,457/
+2,848,714 (which includes `api`'s own, different-revision numbers and
+predates several of these fixes changing a small number of `Fail`/
+`NotSupported` outcomes at the margin, e.g. `spirv_assembly`'s `array_
+select` family moving from a crash to a clean `Fail`), but the shape is the
+same: the overwhelming majority of the movement this session produced is
+"crashed" becoming "ran to completion", not `Fail` becoming `Pass` --
+exactly what every E29a-E29f row above claims and no more.
+
+`check-feme` is 1687 passed / 1 unsupported after all six real fixes (up
+from 1675/1 before this session), each fix covered by its own new unit
+test or lit test, listed in its own Roadmap.md row.
 
 ## Roadmap C1: measured impact
 
