@@ -865,15 +865,22 @@ what makes the JIT flow a v1 deliverable rather than a follow-up.
   target is correct, reasonably vectorized code, not beating ISPC. Notably,
   this design does no lane-reordering, no repacking of divergent work, and
   no dynamic wave compaction.
-- **Graphics pipeline stages.** Compute (`hlsl.shader = "compute"` /
-  SPIR-V `GLCompute`) only, at least initially. Vertex/pixel shaders need a
-  pipeline around them (rasterization, interpolation, blending) that is a
-  much larger project than the shader transform itself, and none of FeMe's
-  driving use cases need it yet. The transform is stage-agnostic; the
-  *wrapper* and resource model are not. "Accounting for Graphics Later"
-  below records what this design would have to grow, and which of its
-  present choices would have to change, so that the compute-only v1 does not
-  paint the graphics case into a corner.
+- **Graphics pipeline stages, for this document's own v1.** Compute
+  (`hlsl.shader = "compute"` / SPIR-V `GLCompute`) is the stage this design's
+  eleven milestones above build and test end to end; vertex/pixel shaders need
+  a pipeline around them (rasterization, interpolation, blending) that is out
+  of scope *here*. That pipeline is no longer hypothetical: it is designed and
+  landing in [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md) and
+  [Roadmap.md](Roadmap.md)'s R-series (stage-aware `StageCompileOptions`,
+  `VertexWrapperPass`/`FragmentWrapperPass`, and the `CompiledStage`
+  vertex/fragment entry points are done as of roadmap R27/R28), directly on
+  top of the stage-agnostic phases 2-5 this document owns. The transform was
+  kept stage-agnostic, and the *wrapper* and resource model were kept
+  extensible, for exactly this reason — see "Accounting for Graphics"
+  below for what changed and what did not once graphics work actually started,
+  and do not read this bullet as FeMe having a compute-only scope: the CPU
+  target's planned scope is every graphics stage Vulkan/Direct3D require, with
+  compute simply first through this document's own milestones.
 - **Unbounded traditional binding ranges.** A finite register/set binding or
   binding array is emulated through a reserved descriptor-heap range. An
   unbounded range has no finite prefix to reserve and must use the source
@@ -2212,12 +2219,16 @@ regardless of host object format.
 It deliberately does **not** contain a math library: `llvm.sin` and friends
 lower through the host's normal vector-math handling.
 
-## Accounting for Graphics Later
+## Accounting for Graphics
 
-Compute-only is the v1 scope, but graphics stages are plausible enough
-longer term to be worth designing *around* rather than into a corner. This
-section records what would change, what would not, and the few decisions
-being made now specifically to keep the door open.
+Compute was this document's own v1 scope, and graphics stages were designed
+*around* rather than into a corner from the start. That plan is no longer
+speculative: graphics is an active, in-progress part of FeMe's planned scope,
+not a "later" this document merely leaves room for, and the section title is
+kept only because it still records the original decision points. This section
+records what changed, what did not, and the few decisions made in v1
+specifically to keep the door open — the door FeMeGraphicsDesign.md and
+Roadmap.md's R-series are now walking through.
 
 [FeMeGraphicsDesign.md](FeMeGraphicsDesign.md) develops this outline into the
 shared core, CPU-target, image/sampler, and software-executor design used by
