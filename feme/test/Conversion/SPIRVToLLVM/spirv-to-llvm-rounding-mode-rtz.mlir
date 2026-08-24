@@ -6,9 +6,10 @@
 // `llvm.experimental.constrained.*` intrinsics with an explicit
 // round-toward-zero rounding mode, and the entry point gains `strictfp` (the
 // function attribute LLVM's verifier requires of any function containing a
-// constrained-FP-intrinsic call). See spirv-to-llvm-denorm-flush-to-zero-invalid.mlir
-// for the one `VK_KHR_shader_float_controls` mode (`DenormFlushToZero`) that
-// remains rejected outright (roadmap F15b).
+// constrained-FP-intrinsic call). See spirv-to-llvm-denorm-flush-to-zero.mlir
+// for `DenormFlushToZero` (roadmap F15b), the one `VK_KHR_shader_float_controls`
+// mode this uses a materially different, software-flush lowering strategy for
+// rather than a constrained intrinsic.
 
 // CHECK-NOT: __spv__
 // CHECK-LABEL: llvm.func @rounding_mode_rtz

@@ -5,11 +5,11 @@
 // -- `DenormPreserve`, `RoundingModeRTE` and `SignedZeroInfNanPreserve`,
 // which describe the strict, denormal-preserving, round-to-nearest-even
 // code every FP op pattern produces by default -- are accepted and dropped
-// like any other `spirv.ExecutionMode`, at every declared bit width, rather
-// than rejected the way spirv-to-llvm-denorm-flush-to-zero-invalid.mlir
-// shows `DenormFlushToZero` (roadmap F15b) is. `RoundingModeRTZ` (roadmap
-// F3/F15a) is also honored now, not merely accepted-and-dropped -- see
-// spirv-to-llvm-rounding-mode-rtz.mlir.
+// like any other `spirv.ExecutionMode`, at every declared bit width.
+// `RoundingModeRTZ` (roadmap F3/F15a) and `DenormFlushToZero` (roadmap
+// F3/F15b) are also honored now, not merely accepted-and-dropped -- see
+// spirv-to-llvm-rounding-mode-rtz.mlir and
+// spirv-to-llvm-denorm-flush-to-zero.mlir, respectively.
 
 // CHECK-NOT: __spv__
 // CHECK: llvm.func @denorm_preserve()
