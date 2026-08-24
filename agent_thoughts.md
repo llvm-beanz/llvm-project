@@ -29810,3 +29810,109 @@ concrete example of what closing the rest of the family would require.
 
 `ninja check-feme`: 1693/1694 passed, 1 unsupported (pre-existing,
 unrelated) after every commit in this row.
+
+# Agent thoughts: roadmap F3 (VK_KHR_shader_float_controls2/shaderFloatControls2)
+
+F3's own text asked for an audit first: it wanted the per-instruction
+`VK_KHR_shader_float_controls2` scoped, but only after checking whether
+the per-module `VK_KHR_shader_float_controls` it supersedes is
+implemented at all, since `Vulkan14FeatureInventory.md` didn't (at the
+time F3 was written) list that row. By the time I looked, the inventory
+*did* list it (`VK_VERSION_1_2` / `VK_KHR_shader_float_controls` / "no"),
+so the audit's real question was narrower: is "no" actually true, or is
+it silently working/broken?
+
+Traced every one of the five float-controls execution modes
+(`DenormPreserve`, `DenormFlushToZero`, `SignedZeroInfNanPreserve`,
+`RoundingModeRTE`, `RoundingModeRTZ`) through `feme/lib/Import/SPIRV`
+(no mention at all) and `feme/lib/Conversion/SPIRVToLLVM` and found
+`ExecutionModePattern` in `SPIRVToLLVMPatterns.cpp` erases *every*
+`spirv.ExecutionMode` op unconditionally -- the same pattern that already
+reads `LocalSize` in `ConvertSPIRVToLLVMPass.cpp`'s `collectEntryPoints`
+before the op is dropped, this time reading nothing for any float-controls
+mode. `EntryPoints.cpp` correctly reports every related property/feature
+bit as unsupported (`VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE`, every
+`shader*Float{16,32,64}` bit `VK_FALSE`), so the *advertising* half was
+already honest. The gap was purely a silent-miscompile hazard: a shader
+that actually declares one of these execution modes (legal SPIR-V even
+without the corresponding Vulkan extension enabled, since the modes
+themselves only need the SPIR-V capability, and `requires` clauses in
+this codebase's own test corpus show they're reachable) got silently
+whatever the default conversion produces instead of a diagnostic.
+
+Key realization that shaped the fix: none of the FP op conversion
+patterns in this file (`FAdd`/`FMul`/etc., wherever they live) ever set
+LLVM fast-math flags or a non-default rounding mode -- confirmed by
+grepping for `FastMathFlags`/`fastmath`/`denormal` across
+`lib/Conversion/SPIRVToLLVM` and finding zero matches (the only
+"fast-math" plumbing anywhere in `feme/lib` is in the unrelated DXIL/DXSA
+paths, which if anything *clear* fast-math flags rather than set them).
+That means every `llvm` dialect FP op this conversion emits is already
+the strict, round-to-nearest-even, denormal-preserving code
+`DenormPreserve`/`RoundingModeRTE`/`SignedZeroInfNanPreserve` ask for, at
+every bit width, unconditionally -- so silently accepting (and continuing
+to erase) those three specific modes is not a gap at all, just an
+undocumented coincidence worth writing down. `DenormFlushToZero` and
+`RoundingModeRTZ` ask for the opposite of that default, and nothing
+downstream can produce it, so those two needed to become a hard error
+instead of a silent drop.
+
+Implementation: added `rejectUnhonoredFloatControls` next to
+`collectEntryPoints` in `ConvertSPIRVToLLVMPass.cpp` (same file, same
+"read before the erasing pattern drops it" shape `LocalSize` already
+uses), called from the same loop that already walks every
+`spirv.ExecutionModeOp` for `LocalSize`. It switches on the execution
+mode and only the two unsupported ones produce a diagnostic
+(`Mode.emitOpError()`), returned as `mlir::failure()` which
+`collectEntryPoints`'s caller already turns into `signalPassFailure()` --
+reusing the exact "diagnose here rather than let the pattern's own
+`return mlir::success()` erase-and-forget it" wiring the stage-mismatch
+check right above it in the same function already established, and the
+exact same test-observable shape (`not feme-opt ... | FileCheck`) as
+`spirv-to-llvm-entry-point-stage-mismatch.mlir` already uses.
+
+Considered, and rejected, actually implementing flush-to-zero/RTZ
+support in this row: LLVM has no per-instruction rounding-mode control on
+ordinary FP ops at all (only the `llvm.experimental.constrained.*`
+intrinsic family, needing every arithmetic FP conversion pattern rerouted
+through them plus a `strictfp` function attribute), and no per-bit-width
+denormal-mode attribute finer than `denormal-fp-math`/
+`denormal-fp-math-f32` (no `-f16`/`-f64` equivalents) -- a genuinely
+large, separate lowering-strategy change touching every arithmetic FP
+conversion pattern in the file, not a natural extension of this row's
+"read an execution mode, thread it through" pattern. Rather than either
+silently expand scope or leave the miscompile-hazard half of the finding
+undocumented, split it into F15 (new row, depends on F3, folds in F3's
+`VK_KHR_shader_float_controls2` per-instruction scope too, since both
+need the same constrained-intrinsics prerequisite) and updated G4's
+existing "re-triage two verify-first rows" note to record both this
+row's own finding and F15's follow-on scope, matching E15/E20/E21's
+precedent from the same G4 row for the ASTC HDR half.
+
+Added three new lit tests under `feme/test/Conversion/SPIRVToLLVM/`:
+`spirv-to-llvm-float-controls.mlir` (three `--split-input-file` cases,
+one per accepted mode, each declaring it at every bit width the SPIR-V
+spec allows) and two single-module invalid tests --
+`spirv-to-llvm-denorm-flush-to-zero-invalid.mlir`/
+`spirv-to-llvm-rounding-mode-rtz-invalid.mlir` -- one per rejected mode,
+matching `spirv-to-llvm-entry-point-stage-mismatch.mlir`'s existing
+`not feme-opt ... | FileCheck` shape rather than the
+`--verify-diagnostics` shape `spirv-to-llvm-rotate-invalid.mlir` uses
+(that shape fits a *pattern* returning `failure()` mid-legalization; this
+diagnostic instead comes from `collectEntryPoints`, which runs, and can
+fail, before any pattern is ever applied).
+
+Ran the targeted CTS subset
+(`dEQP-VK.spirv_assembly.instruction.compute.float_controls.*`, 2,569
+cases) and found a genuine, measured zero-effect result: every case
+except one is `NotSupported` on `shaderFloat16`/`shaderFloat64` before
+`vkCreateDevice` even succeeds, so none of them ever reach
+`feme-convert-spirv-to-llvm` at all -- this row's new diagnostic is
+correct and tested (via the new lit tests) but not yet CTS-observable
+until fp16/fp64 storage support (an unrelated, pre-existing gap) closes.
+Documented as a new "Roadmap F3: measured impact" section in
+`VulkanCTSReport.md`, explicit about *why* the count didn't move rather
+than only reporting that it didn't.
+
+`ninja check-feme`: 1696/1697 passed, 1 unsupported (pre-existing,
+unrelated) after every commit in this row.
