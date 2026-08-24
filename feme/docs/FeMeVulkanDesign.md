@@ -455,6 +455,17 @@ families a caller sees. `feme::vulkan::PhysicalDeviceInfo::NumQueueFamilies`
 that used to hardcode "queue family index 0 is the only one" now checks
 against that count instead.
 
+Roadmap F1 (`VK_KHR_global_priority`/`globalPriorityQuery`) reuses this same
+"restrict, don't invent an engine" reasoning for scheduling priority rather
+than queue capability: every queue family's `VkQueueFamilyGlobalPriority
+Properties` reports the full mandatory priority list (`LOW`, `MEDIUM`,
+`HIGH`, `REALTIME`, ascending) as supported, since FeMe's single worker
+pool has no real OS-level scheduling priority to raise or lower in the
+first place -- there is nothing for a narrower family to restrict here, so
+unlike the two families above, no new family was needed. A
+`VkDeviceQueueGlobalPriorityCreateInfo` chained at `vkCreateDevice` is a
+no-op for the same reason.
+
 ### Subgroup size
 
 Core Vulkan 1.1 requires a single `VkPhysicalDeviceSubgroupProperties::subgroupSize`

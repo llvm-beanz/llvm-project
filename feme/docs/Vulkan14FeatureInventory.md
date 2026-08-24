@@ -452,7 +452,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_3 | `VK_KHR_shader_terminate_invocation` | yes | roadmap E12: OpTerminateInvocation conversion pattern (SPIRVToLLVMPatterns.cpp) |
 | extension | VK_VERSION_1_3 | `VK_KHR_synchronization2` | yes | roadmap E3: vkCmdPipelineBarrier2/vkQueueSubmit2 and their four peers translate down to Sync.cpp's existing 1-mask model |
 | extension | VK_VERSION_1_3 | `VK_KHR_zero_initialize_workgroup_memory` | yes | roadmap E13: Workgroup-storage-class globals zero-initialized once per dispatch |
-| feature | VK_VERSION_1_4 | `globalPriorityQuery` | no |  |
+| feature | VK_VERSION_1_4 | `globalPriorityQuery` | yes | roadmap F1: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceGlobalPriorityQueryFeatures struct |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotate` | no |  |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | no |  |
 | feature | VK_VERSION_1_4 | `shaderFloatControls2` | no |  |
@@ -502,7 +502,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | no |  |
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | yes | roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family |
 | extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_line_rasterization` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_load_store_op_none` | no |  |

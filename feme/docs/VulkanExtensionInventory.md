@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 17 |
+| Advertised | 18 |
 | Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 64 |
+| Planned (in scope, not implemented) | 63 |
 | Not implemented (out of scope) | 202 |
 
-- **The 17 advertised** are the ones a `deqp-vk` case enables by name
+- **The 18 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -78,8 +78,9 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_shader_terminate_invocation` (E12),
   `VK_KHR_zero_initialize_workgroup_memory` (E13),
   `VK_EXT_inline_uniform_block` (E14), `VK_EXT_texel_buffer_alignment`
-  (E18), and `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
-  `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19).
+  (E18), `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
+  `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19), and
+  `VK_KHR_global_priority` (F1).
 - **The 17 core-but-unadvertised** were 3 until this edition. A full audit
   of every core-promoted extension against this ICD's own sources (rather
   than only the ones a roadmap row happened to name) found 14 more that
@@ -333,7 +334,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_get_memory_requirements2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_get_physical_device_properties2` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_get_surface_capabilities2` | Planned (in scope, not implemented) | roadmap H10 (V8) |
-| `VK_KHR_global_priority` | Planned (in scope, not implemented) | roadmap F1 |
+| `VK_KHR_global_priority` | Advertised |  |
 | `VK_KHR_image_format_list` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_imageless_framebuffer` | Implemented (core, not advertised by name) | roadmap C6: VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT and VkRenderPassAttachmentBeginInfo both honored (RenderPass.cpp's vkCreateFramebuffer, CommandBuffer.cpp's vkCmdBeginRenderPass) |
 | `VK_KHR_incremental_present` | Not implemented |  |
