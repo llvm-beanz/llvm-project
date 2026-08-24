@@ -29679,3 +29679,134 @@ rather than trusting the pass/fail counts alone:
 Recorded all of this as a new "Roadmap F1: measured impact" section in
 `VulkanCTSReport.md`, in its own commit, following the file's own
 established structure.
+
+# Agent thoughts: roadmap F2 (VK_KHR_shader_subgroup_rotate/shaderSubgroupRotate)
+
+## Framing the task
+
+The row's own text is explicit that it isn't just "add one more feature
+bit": `Vulkan14FeatureInventory.md` already found that *no*
+`spirv.GroupNonUniform*` op converts at all (making
+`shaderSubgroupExtendedTypes`'s `VK_TRUE` vacuous), and the row says this
+should be audited and "likely closed" as a whole family rather than adding
+one more vacuous bit alongside Rotate. So the first job was sizing that
+family honestly before writing any code: MLIR's SPIR-V dialect
+(`SPIRVNonUniformOps.td`) models roughly 30 `GroupNonUniform*` ops besides
+Rotate (vote: `Elect`/`All`/`Any`/`AllEqual`; ballot:
+`Ballot`/`BallotFindLSB`/`BallotFindMSB`/`BallotBitCount`; broadcast:
+`Broadcast`/`BroadcastFirst`; shuffle:
+`Shuffle`/`ShuffleXor`/`ShuffleUp`/`ShuffleDown`; 15 arithmetic
+reduce/scan ops; `QuadSwap`). Auditing what mechanism *each* would need to
+reach LLVM's SPIR-V backend (see below) made clear that closing the whole
+family for real -- with the same "real conversion + FileCheck tests +
+feature bits + CTS measurement" discipline every other row in this
+project gets -- is a separate effort roughly the size of an entire other
+E/F-series row, not a small addition alongside Rotate. I chose to do
+Rotate properly (the row's own literal title) and document the audit
+findings/scope decision explicitly in `Vulkan14FeatureInventory.md` and
+here, rather than either silently expanding scope to a multi-day rewrite
+or silently doing only Rotate without addressing the row's own "audit the
+whole family" instruction at all.
+
+## How Rotate itself reaches LLVM
+
+`spirv.GroupNonUniformRotateKHR` already exists in MLIR's SPIR-V dialect
+(added upstream), so the deserializer/import side was never the gap for
+this one op specifically -- only the `spirv`->`llvm` conversion pattern
+was missing, confirming `Vulkan14FeatureInventory.md`'s finding. The
+interesting design question was *how* to reach LLVM's SPIR-V backend at
+all, since (unlike `spirv.Dot`/`spirv.TerminateInvocation`, which map to
+existing `llvm.spv.*` intrinsics) I found no generic intrinsic for rotate
+in `llvm/include/llvm/IR/IntrinsicsSPIRV.td`. Grepping the SPIR-V
+backend's own `SPIRVBuiltins.td` found the *only* path to
+`OpGroupNonUniformRotateKHR` is through OpenCL C builtin function calls
+(`sub_group_rotate`/`sub_group_clustered_rotate`, or the
+`__spirv_GroupNonUniformRotateKHR`-prefixed spelling, matched by
+`getOclOrSpirvBuiltinDemangledName`'s "any plain, non-mangled name is used
+as-is" rule) -- a mechanism no other pattern in `SPIRVToLLVMPatterns.cpp`
+uses (every one calls an `llvm.spv.*` intrinsic directly via
+`llvm.call_intrinsic`, never declares an external function). Introducing
+that one-off, different-shaped mechanism just for this op felt like the
+wrong precedent to set in this file, so instead I expanded the op into
+the SPIR-V spec's own invocation-id arithmetic (`RotationGroupSize`/
+`InvocationId` formula, copied verbatim from the op's own summary in
+`SPIRVNonUniformOps.td`) plus a shuffle to that invocation via the
+*already-generic* `llvm.spv.wave.readlane` intrinsic (which the backend
+already lowers straight to `OpGroupNonUniformShuffle`) -- mirroring how
+`DotConversionPattern` above expands `spirv.Dot` into equivalent IR rather
+than relying on a call. Verified the exact expansion manually with
+`feme-opt` before writing the FileCheck test, for both the plain and
+`cluster_size` forms, then added a third `--verify-diagnostics` test
+confirming `Workgroup` scope (not implemented -- no real HLSL/GLSL source
+in this ICD's frontend surface ever requests it) fails cleanly rather
+than being silently miscompiled, since the dialect conversion here is
+`applyPartialConversion` with the whole `spirv` dialect marked illegal, so
+an unconverted op is a real, diagnosable pass failure, not a silent pass-
+through.
+
+## Feature bits and a stale-doc side quest
+
+Wiring `shaderSubgroupRotate`/`shaderSubgroupRotateClustered` and
+`VK_KHR_shader_subgroup_rotate` followed F1's own precedent exactly: both
+the aggregate `VkPhysicalDeviceVulkan14Features` case and a new dedicated
+`VkPhysicalDeviceShaderSubgroupRotateFeatures` struct case in
+`EntryPoints.cpp`, plus the extension in
+`PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions`. This broke two
+existing unit tests that hard-code the total advertised extension count
+and the aggregate 1.4 feature values -- updated both, and added a new
+dedicated-struct test mirroring F1's own
+`GlobalPriorityQueryIsAdvertisedThroughItsOwnDedicatedFeatureStruct`.
+
+Regenerating `Vulkan14FeatureInventory.md` surfaced a pre-existing gap
+unrelated to this row: F1's own `globalPriorityQuery`/
+`VK_KHR_global_priority` entries were never added to
+`AdvertisedPromotedFeatures.txt`/`AdvertisedPromotedExtensions.txt`, so a
+regeneration right now would have *regressed* those two rows from "yes"
+back to "no" in the committed table, even though F1 is genuinely done and
+the table already (correctly) said "yes" for both -- someone must have
+hand-edited the committed `.md` for F1 without updating its `.txt` inputs.
+Fixed both files' inputs (F1's entries plus this row's own two) before
+regenerating, so the regeneration is a real regeneration rather than a
+silent step backward, and preserved F1's own original note wording rather
+than paraphrasing it. Recomputed the summary table's per-version counts
+by hand from the regenerated output rather than trusting the old numbers.
+
+## CTS run
+
+Targeted `dEQP-VK.subgroups.shuffle.*rotate*` (2,732 cases -- the group
+name is `subgroups.shuffle`, not `subgroups.rotate`; found this by
+generating a `--deqp-runmode=txt-caselist` case list first rather than
+guessing). Result: 0 passed, 128 failed, 2,604 not supported. All 128
+failures are compute-stage (this ICD's subgroup support is compute-only)
+and every one -- across every value type tested (`bool` through `vec4`,
+not just the boolean-typed cases I initially suspected) -- fails
+identically at `vkCreateComputePipelines` with `error: unhandled opcode
+341` (`OpGroupNonUniformBallotBitExtract`) out of MLIR's own SPIR-V
+deserializer. That op is not modeled in MLIR's SPIR-V dialect at all
+(unlike `GroupNonUniformRotateKHR`, which already was), so this is a
+deserialization-time failure before any `feme` conversion pattern -- mine
+or otherwise -- ever runs.
+
+The key question was whether this is a regression this row introduces.
+Reproduced the identical `vkCreateComputePipelines` failure shape on a
+completely unrelated, pre-existing case
+(`dEQP-VK.subgroups.basic.compute.subgroupbarrier`, which needs no
+rotate/ballot functionality at all and fails for its own unrelated
+`OpTypeArray` spec-constant gap) to confirm
+`dEQP-VK.subgroups.*.compute.*` was not a passing category before this
+row at all -- so F2 does not turn a passing case into a failing one, it
+makes 128 previously-`NotSupported` cases newly reach (and fail at) a
+pre-existing, unrelated import gap, the same shape F1's own report found
+for `synchronization.global_priority_transition.*`. `glslang` apparently
+emits the ballot-bit-extract-based active-invocation-mask helper into
+*every* subgroup compute shader in this module regardless of which op is
+under test, which is why every value type hit the identical failure
+rather than only the boolean-typed ones. Documented this as a new
+"Roadmap F2: measured impact" section in `VulkanCTSReport.md`, and folded
+the specific finding (`OpGroupNonUniformBallotBitExtract` needs a new
+MLIR SPIR-V dialect op upstream before it can even be a `feme` conversion
+pattern) into `Vulkan14FeatureInventory.md`'s own audit note as one
+concrete example of what closing the rest of the family would require.
+
+`ninja check-feme`: 1693/1694 passed, 1 unsupported (pre-existing,
+unrelated) after every commit in this row.
