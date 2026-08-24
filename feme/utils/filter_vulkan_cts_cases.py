@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""Filters a Vulkan-CTS (`deqp-vk`) case list down to the subset FeMe's
-Vulkan ICD advertises support for (see "V4: ... first CTS runs over the
-advertised subset" in feme/docs/FeMeVulkanDesign.md).
+"""Filters a Vulkan-CTS (`deqp-vk`) case list down to the V0-V4 object-model
+subset FeMe's Vulkan ICD advertised support for at the time this script was
+written (see "V4: ... first CTS runs over the advertised subset" in
+feme/docs/FeMeVulkanDesign.md).
 
-FeMe's ICD is compute-only (see "Initial Non-Goals": no graphics, no
-sampled/storage images or samplers -- V5+) with V0-V4's own object-model
-scope (instance/device/queue, memory/buffers/(V4) buffer views, descriptor
-sets, command buffers, synchronization, pipeline caches). Running the CTS's
-*entire* mustpass list against it would report an overwhelming majority of
-failures for functionality this ICD does not implement at all -- of no use
-for regression detection -- rather than the "intentionally advertised
-subset" the design calls for. This script keeps exactly the dEQP-VK test
-groups relevant to that subset and drops everything else (graphics,
-sampling, ray tracing, sparse binding, ...), so a CTS run's pass/fail
-signal is actually meaningful against what FeMe claims to support.
+This is *not* a description of FeMe's overall planned scope, which is full
+Vulkan 1.4 conformance including graphics and ray tracing (see
+FeMeVulkanDesign.md's "Conformance Target"); it is a fixed, historical
+snapshot of V0-V4's object-model scope (instance/device/queue,
+memory/buffers/(V4) buffer views, descriptor sets, command buffers,
+synchronization, pipeline caches), predating V5's images/samplers and V6's
+graphics pipeline. Running the CTS's *entire* mustpass list against that
+early revision would have reported an overwhelming majority of failures for
+functionality not implemented at all yet -- of no use for regression
+detection -- rather than the "intentionally advertised subset" the design
+called for at the time. This script keeps exactly the dEQP-VK test groups
+relevant to that early subset and drops everything else (graphics, sampling,
+ray tracing, sparse binding, ...), so a CTS run's pass/fail signal was
+actually meaningful against what FeMe claimed to support back then.
+
+The full-scope, up-to-date measurement is the genuine 54-group `deqp-vk` run
+described in feme/docs/VulkanCTSReport.md, which this script's narrower,
+in-tree/`lit`-gated counterpart (`test/Vulkan/cts-compute-subset.test`) does
+not attempt to replace.
 
 Usage:
     filter_vulkan_cts_cases.py <full-case-list.txt> [-o <filtered.txt>]
@@ -26,8 +35,8 @@ The input is a plain-text case list in `deqp-vk`'s own format (one
 import argparse
 import sys
 
-# Prefixes naming the dEQP-VK top-level groups this ICD's advertised
-# subset covers. A case is kept if its name starts with any of these.
+# Prefixes naming the dEQP-VK top-level groups this early, V0-V4 subset
+# covers. A case is kept if its name starts with any of these.
 # Ordered and commented to match the object-model rows this covers.
 ADVERTISED_GROUP_PREFIXES = (
     # V0-V1: instance/device/queue/memory/buffer creation and queries.
