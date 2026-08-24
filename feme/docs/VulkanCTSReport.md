@@ -3736,3 +3736,53 @@ findings from it:
 `ninja check-feme` (`RelWithDebInfo`, `LLVM_ENABLE_ASSERTIONS=ON`,
 `LLVM_CCACHE_BUILD=ON`): 1696/1697 passed, 1 unsupported, unchanged by this
 session's docs-only commits.
+
+## Roadmap F15a: measured impact (targeted, not a full re-run)
+
+F15a closed the constrained-FP-intrinsics-plumbing prerequisite F3's own
+audit split off as F15: `ConstrainedRoundTowardZeroPattern`
+(SPIRVToLLVMPatterns.cpp) now routes an entry point's declared
+`RoundingModeRTZ` bit width(s) through `llvm.experimental.constrained.*`
+intrinsics with an explicit round-toward-zero rounding mode, rather than
+F3's hard diagnostic. Verified against LLVM's real, in-tree SPIRV backend
+(`spirv-backend-rounding-mode-rtz.mlir`): the round trip produces an
+`spirv.FAdd` carrying `fp_rounding_mode = #spirv.fp_rounding_mode<RTZ>`,
+concrete evidence of genuinely truncating-rounding-mode code, not just a
+passing FileCheck pattern.
+
+Targeted subset: the same
+**`dEQP-VK.spirv_assembly.instruction.compute.float_controls.*`**
+(2,569 cases) F3's own section measured.
+
+- First run, with `shaderRoundingModeRTZFloat{16,32,64}` flipped to
+  `VK_TRUE` (the natural next step once the codegen worked): **1 passed /
+  18 failed / 2,550 not supported** -- a *regression* from F3's own
+  1/0/2,568. Every one of the 18 new failures is a
+  `fp32.{input_args,generated_args}.rounding_rtz_*` case that now reaches
+  `vkCreateComputePipelines` (rather than being skipped on the advertised
+  feature bit) and fails there on a completely unrelated, pre-existing
+  gap: `feme::cpu`'s resource-lowering cannot raise the small,
+  2-element runtime-sized storage-buffer bindings these generated shaders
+  declare ("register-bound resource handle ... cannot normalize into a
+  heap access or the root-constant block" -- confirmed by temporarily
+  instrumenting `vkCreateComputePipelines`'s error path, normally
+  `consumeError`-silenced). A handful of the 18 are additionally blocked
+  on `spirv.CompositeConstruct`/`spirv.OuterProduct` (matrix ops) having
+  no conversion pattern at all, also unrelated to float controls.
+- Reverted the feature-bit flip (see `EntryPoints.cpp`'s own comment and
+  the git history) rather than chase the unrelated resource-lowering gap
+  under this row's own scope. Re-ran the same subset after reverting:
+  **1 passed / 0 failed / 2,568 not supported**, matching F3's own
+  zero-effect baseline exactly -- the codegen fix is real and tested (via
+  the new lit tests, independent of CTS), but stays dormant for CTS
+  until either the resource-lowering gap closes or `RoundingModeRTZ` is
+  advertised anyway (not done here, deliberately: trading a graceful
+  skip for a hard failure is a regression, not progress).
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1699/1700
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- two new lit tests relative to F3's own report
+(`spirv-to-llvm-rounding-mode-rtz.mlir`, replacing the now-stale
+`spirv-to-llvm-rounding-mode-rtz-invalid.mlir`, and
+`spirv-backend-rounding-mode-rtz.mlir`).
