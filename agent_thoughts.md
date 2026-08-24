@@ -30115,3 +30115,135 @@ only markup. Re-ran the anomaly scan afterward and confirmed the only two
 remaining `(done`/`(closed`/`(status:` matches without a strikethrough are
 the two deliberately-excluded rows above (F8, R34). This is a documentation-
 only change with no impact on code, so `check-feme`/CTS were not re-run.
+
+# Agent thoughts: roadmap R34, chaining hull/patch-constant/domain into a real per-patch pipeline
+
+## Starting point
+
+R34's roadmap row already described an enormous amount of previously-landed
+work (signature/stage-op model, fixed-function tessellator, patch storage,
+adjacency, geometry streams, and four "wrapper" passes -- hull control-point
+phase, patch-constant phase, domain stage, geometry stage -- each compiled
+through the CPU lowering pipeline into an invokable batch via
+`CompiledStage::invokePatch`/`invokePatchConstant`/`invokeDomain`/
+`invokeGeometry`). Its own row explicitly named what remained open: "actually
+chaining the four compiled stage invocations ... together per patch/
+primitive and wiring the result into `executeDraws`/`feme-render`" -- as of
+this session's starting commit, `feme::graphics::Executor` did not call any
+of those four `invoke*` methods.
+
+That remaining item is large (real cross-stage attribute linking, geometry
+assembly from tessellator connectivity, and integrating all of it into the
+executor's draw loop and `feme-render`'s CLI). Rather than attempt all of it
+in one session -- risking a half-working, poorly-tested integration -- I
+scoped this session to the same "standalone, unit-tested core" pattern every
+earlier R34 follow-up session used: a new, real, but still standalone host-
+side chaining function, leaving the executor/CLI wiring for a later session.
+
+## What I built
+
+`feme::graphics::runPatchPipeline` (new PatchPipeline.h/.cpp) chains, for one
+patch:
+
+1. `CompiledStage::invokePatch` (the hull control-point phase), producing the
+   completed `OutputPatch`.
+2. `CompiledStage::invokePatchConstant` against that `OutputPatch`, producing
+   patch constants and tessellation factors.
+3. `feme::graphics::tessellate`, fed by `TessFactors` this function extracts
+   itself from the patch-constant phase's own attached `EntrySignature` --
+   scanning for `SignatureSystemValue::TessFactorEdge`/`TessFactorInside`
+   elements and reading their row/component values directly out of the
+   patch-constant output buffer via the caller-supplied `FemeStageLayout`.
+   This is the piece I consider most "real" about this session's work: it is
+   not the caller precomputing tessellation factors and handing them in, it
+   is the actual compiled patch-constant shader's output driving the
+   tessellator, exactly as the roadmap's stage-op model intends.
+4. `CompiledStage::invokeDomain`, batched one invocation per generated domain
+   point via the existing `buildDomainInvocations`.
+
+## The cross-stage linking problem, and how I scoped around it
+
+The hard part of "chaining" is that the hull control-point phase, the patch-
+constant phase, and the domain stage are three *independently compiled*
+entry points, each with its own `EntrySignature`/`ElementID` numbering. "The
+completed patch's control points" is one concept but three different
+`ElementID`s in three different signatures; nothing today generalizes
+`feme::graphics::Executor`'s existing `Location`-based VS-output-to-FS-input
+linking to these three stages.
+
+Building that generalized linker felt like its own multi-session-sized item,
+so I made a narrower, explicitly-documented simplification instead:
+`runPatchPipeline` requires its caller to build one shared `FemeStageLayout`
+object for "the completed patch's control points" (used as the hull phase's
+own output layout, the patch-constant phase's own input layout, *and* the
+domain stage's own input layout, literally the same C++ object passed to all
+three), and another shared layout for "the patch constants" (the patch-
+constant phase's own output layout and the domain stage's own patch-constant
+input layout). This sidesteps needing real signature-to-signature linking
+while still exercising the genuine ABI boundary each `invoke*` call crosses --
+I was explicit in both the header comment and the design doc that this is a
+documented stand-in, not the real linker, so a future session doesn't mistake
+it for one.
+
+## What I deliberately left out of this session
+
+- Chaining the geometry stage on top of this function's result (assembling
+  primitives from the tessellator's connectivity, gathering domain-stage
+  outputs into `FemeGeometryArgs::Inputs` via the existing
+  `buildGeometryInputs`, and replaying `collectGeometryStreams`). This is a
+  reasonably scoped "next" increment and I preferred to land a correct,
+  well-tested three-stage chain rather than a rushed four-stage one.
+- Wiring any of this into `feme::graphics::Executor`/`feme-render`. That
+  needs real multi-patch orchestration (which patches come from which
+  vertex/index buffers), the general cross-stage linker discussed above (a
+  caller manually building shared layouts does not scale to arbitrary
+  compiled shaders the way `feme-render` needs), and rasterizing/streaming
+  the geometry stage's output -- all left for later sessions, same as prior
+  ones left it.
+- Generalizing `EntryWrapperPass`'s barrier-region splitting to the control-
+  point batch ABI (HullWrapper.cpp's own long-standing deferred item,
+  untouched this session).
+
+## Testing
+
+New `unittests/Graphics/PatchPipelineTest.cpp`, two cases:
+- `ChainsHullPatchConstantTessellatorAndDomain`: compiles real (tiny, hand-
+  written IR) hull/patch-constant/domain entry points, doubles two input
+  control points through the hull phase, checks the patch-constant phase's
+  computed isoline factor is genuinely derived from that doubled output
+  (`sum == 8.0`, not a hand-fed constant), and checks every generated domain
+  point's evaluated output against the hand-computed blend/scale formula.
+- `RejectsOutOfRangeControlPointCounts`: an out-of-range control point count
+  is rejected before any stage is invoked (via
+  `validatePatchControlPointCounts`) rather than invoking any stage with bad
+  batch sizes.
+
+Ran `ninja FeMeGraphicsTests` and the filtered test binary first, then the
+full `ninja check-feme` (assertions-enabled, ccache build already configured
+in this checkout's `build/` directory): 1698/1698 passed (1 unsupported, pre-
+existing and unrelated to this change) both before writing this file and
+after clang-format + a final rebuild.
+
+## Documentation updates
+
+- `feme/docs/Roadmap.md`'s R34 row: appended a new sentence recording this
+  session's `runPatchPipeline` addition and its remaining follow-ups, in the
+  same "And, added in a further follow-up session to ..." style every prior
+  R34 addition already used.
+- `feme/docs/FeMeGraphicsDesign.md`'s "Patch and geometry wrappers" section:
+  added a paragraph after the geometry wrapper's own "Landed" paragraph
+  describing `runPatchPipeline`'s role and its linking simplification, in
+  the section's existing "Landed, ..." style.
+
+## Vulkan CTS
+
+This session's change is entirely new host-side CPU-target graphics glue
+(`feme::graphics::runPatchPipeline`) with no Vulkan-visible behavior change:
+it adds a new function nothing else calls yet (not wired into the Vulkan ICD,
+`feme::Driver`, or any existing compiled pipeline path), so it cannot affect
+`libfeme_vulkan.so`'s behavior or any CTS case's outcome. Per the same
+reasoning prior purely-additive/non-Vulkan-visible R34 follow-up sessions
+used, I did not re-run the full Vulkan CTS suite for this change, and left
+`VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+unchanged, since none of their tracked features/extensions/measured results
+are affected.
