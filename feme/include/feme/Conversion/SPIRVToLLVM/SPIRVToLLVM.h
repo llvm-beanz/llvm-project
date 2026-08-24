@@ -114,6 +114,14 @@ StageIOInfoMap prepareStageIOVariables(mlir::spirv::ModuleOp Module);
 /// widths (roadmap F15b) are recovered into a distinct map of this same
 /// type, since an entry point may declare either, both (for the same or
 /// different widths), or neither.
+///
+/// `VK_KHR_shader_float_controls2`'s own `FPRoundingMode`/`FPFastMathMode`
+/// decorations (roadmap F15c) need no map of this kind at all: unlike this
+/// whole-entry-point execution mode, they are per-instruction decorations
+/// MLIR's deserializer already attaches directly to the individual
+/// `spirv.FAdd`/etc. op they decorate, so the arithmetic op conversion
+/// patterns below read them straight off \p Op, with no separate
+/// before-conversion collection pass needed.
 using FloatControlInfoMap = llvm::StringMap<llvm::SmallVector<unsigned, 3>>;
 
 /// Adds the type conversions the patterns below rely on to \p TypeConverter,

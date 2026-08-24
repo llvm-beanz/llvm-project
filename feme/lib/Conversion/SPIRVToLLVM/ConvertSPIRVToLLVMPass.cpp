@@ -110,6 +110,16 @@ struct EntryPointInfo {
   /// FloatControlArithmeticPattern, SPIRVToLLVMPatterns.cpp) rather than
   /// preserving it. Empty for an entry point that never declared the mode.
   llvm::SmallVector<unsigned, 3> DenormFlushToZeroWidths;
+  /// Whether this entry point's body contains an arithmetic FP op carrying
+  /// a non-default `fp_rounding_mode` decoration
+  /// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
+  /// roadmap F15c): like `RoundingModeRTZWidths` above, this also needs
+  /// `strictfp` on the entry point, since `FloatControlArithmeticPattern`
+  /// (SPIRVToLLVMPatterns.cpp) honors this decoration the same way --
+  /// routing that one instruction through a
+  /// `llvm.experimental.constrained.*` intrinsic -- independent of whether
+  /// the entry point declared `RoundingModeRTZ` itself.
+  bool NeedsStrictFPForPerInstructionRounding = false;
 };
 
 /// Everything about a `spirv.module` that the conversion consumes but does
@@ -143,6 +153,31 @@ std::string formatLocalSize(mlir::ArrayAttr Values) {
 unsigned getFloatControlWidth(mlir::spirv::ExecutionModeOp Mode) {
   return static_cast<unsigned>(
       mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
+}
+
+/// Returns whether \p Func's body contains an arithmetic FP op
+/// (`spirv.FAdd`/`FSub`/`FMul`/`FDiv`/`FRem`) carrying an `fp_rounding_mode`
+/// decoration (`VK_KHR_shader_float_controls2`'s per-instruction
+/// `FPRoundingMode`, roadmap F15c) that requests anything other than
+/// round-to-nearest-even: `FloatControlArithmeticPattern`
+/// (SPIRVToLLVMPatterns.cpp) routes that one instruction through a
+/// constrained `llvm.experimental.constrained.*` intrinsic for exactly
+/// this reason, needing `strictfp` on the enclosing entry point just as
+/// much as a whole-entry-point `RoundingModeRTZ` execution mode does (see
+/// EntryPointInfo::RoundingModeRTZWidths).
+bool hasNonDefaultPerInstructionRoundingMode(mlir::spirv::FuncOp Func) {
+  bool Found = false;
+  Func.walk([&](mlir::Operation *Op) {
+    if (Found || !mlir::isa<mlir::spirv::FAddOp, mlir::spirv::FSubOp,
+                            mlir::spirv::FMulOp, mlir::spirv::FDivOp,
+                            mlir::spirv::FRemOp>(Op))
+      return;
+    auto Mode =
+        Op->getAttrOfType<mlir::spirv::FPRoundingModeAttr>("fp_rounding_mode");
+    if (Mode && Mode.getValue() != mlir::spirv::FPRoundingMode::RTE)
+      Found = true;
+  });
+  return Found;
 }
 
 /// Collects \p Module's entry points into \p EntryPoints, keyed by the
@@ -197,6 +232,20 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
     if (It != EntryPoints.end())
       It->second.LocalSize = formatLocalSize(Mode.getValues());
   }
+
+  // Unlike the whole-module maps above, `FPRoundingMode` (roadmap F15c) is
+  // a per-instruction decoration read directly off the individual
+  // arithmetic op it decorates (see FloatControlArithmeticPattern,
+  // SPIRVToLLVMPatterns.cpp), so this pass need not collect its own widths
+  // the way it does for `RoundingModeRTZ`/`DenormFlushToZero` above --
+  // except for whether the entry point needs `strictfp`, which has to be
+  // known before this function's body is legalized away.
+  for (auto Func : Module.getOps<mlir::spirv::FuncOp>()) {
+    auto It = EntryPoints.find(Func.getName());
+    if (It != EntryPoints.end() &&
+        hasNonDefaultPerInstructionRoundingMode(Func))
+      It->second.NeedsStrictFPForPerInstructionRounding = true;
+  }
   return mlir::success();
 }
 
@@ -243,11 +292,14 @@ void applyEntryPointAttributes(
     if (!It->second.LocalSize.empty())
       addPassthroughAttribute(Func, "hlsl.numthreads", It->second.LocalSize);
     // A function containing any `llvm.experimental.constrained.*` intrinsic
-    // call -- which ConstrainedRoundTowardZeroPattern
+    // call -- which `FloatControlArithmeticPattern`
     // (SPIRVToLLVMPatterns.cpp) emits for this entry point's
-    // `RoundingModeRTZ`-width arithmetic (roadmap F15a) -- must itself carry
-    // `strictfp`, or LLVM's verifier rejects the module.
-    if (!It->second.RoundingModeRTZWidths.empty())
+    // `RoundingModeRTZ`-width arithmetic (roadmap F15a) or for one
+    // instruction's own non-default `FPRoundingMode` decoration (roadmap
+    // F15c) -- must itself carry `strictfp`, or LLVM's verifier rejects the
+    // module.
+    if (!It->second.RoundingModeRTZWidths.empty() ||
+        It->second.NeedsStrictFPForPerInstructionRounding)
       addBarePassthroughAttribute(Func, "strictfp");
   });
 }

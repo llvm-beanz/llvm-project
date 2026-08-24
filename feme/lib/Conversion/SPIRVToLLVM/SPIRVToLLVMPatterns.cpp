@@ -2173,35 +2173,130 @@ mlir::Value flushSubnormalToZero(mlir::ConversionPatternRewriter &Rewriter,
                                        SignedZero, V);
 }
 
+/// Returns the rounding mode \p Op's own `fp_rounding_mode` decoration
+/// (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`,
+/// roadmap F15c) requests, or none if \p Op carries no such decoration.
+/// MLIR's SPIR-V deserializer already attaches a decorated instruction's
+/// `FPRoundingMode` straight onto the op it decorates as this attribute
+/// (`Deserializer.cpp`'s `processDecoration`, keyed by
+/// `llvm::convertToSnakeFromCamelCase` of the decoration's own name), so,
+/// unlike `RoundingModeRTZ`/`DenormFlushToZero` (roadmap F15a/F15b), no
+/// separate collection pass is needed: by the time this op's own pattern
+/// runs, the decoration is already a plain attribute on it. Unlike those
+/// two execution modes (which only ever ask for round-toward-zero), this
+/// per-instruction decoration can name any of the four IEEE rounding
+/// directions, including `RTE` explicitly overriding an enclosing entry
+/// point's own `RoundingModeRTZ` back to round-to-nearest-even for one
+/// instruction.
+std::optional<mlir::LLVM::RoundingMode>
+getRoundingModeDecoration(mlir::Operation *Op) {
+  auto Attr =
+      Op->getAttrOfType<mlir::spirv::FPRoundingModeAttr>("fp_rounding_mode");
+  if (!Attr)
+    return std::nullopt;
+  switch (Attr.getValue()) {
+  case mlir::spirv::FPRoundingMode::RTE:
+    return mlir::LLVM::RoundingMode::NearestTiesToEven;
+  case mlir::spirv::FPRoundingMode::RTZ:
+    return mlir::LLVM::RoundingMode::TowardZero;
+  case mlir::spirv::FPRoundingMode::RTP:
+    return mlir::LLVM::RoundingMode::TowardPositive;
+  case mlir::spirv::FPRoundingMode::RTN:
+    return mlir::LLVM::RoundingMode::TowardNegative;
+  }
+  llvm_unreachable("unhandled spirv::FPRoundingMode");
+}
+
+/// Returns the LLVM fast-math flags \p Op's own `fp_fast_math_mode`
+/// decoration (`FPFastMathMode`, roadmap F15c) requests, translating each
+/// bit `float_controls2`'s core (non-vendor) profile can express to its
+/// LLVM equivalent. This is a separate, additive mechanism from
+/// `FPRoundingMode` above -- ordinary LLVM fast-math flags rather than
+/// another constrained-intrinsics consumer -- applied only to the plain
+/// (round-to-nearest-even) op below: LLVM's constrained intrinsics carry no
+/// fast-math flags of their own (`LLVM_ConstrainedIntr`,
+/// `LLVMIntrinsicOps.td`, sets `requiresFastmath=0`), so a shader that
+/// combines a non-default rounding mode with fast-math on the very same
+/// instruction keeps the rounding behavior and drops the fast-math request,
+/// an intentional scoping decision rather than an oversight -- Vulkan
+/// shaders needing both would need to request the rounding mode and
+/// fast-math flags on two different instructions.
+mlir::LLVM::FastmathFlags getFastMathFlagsDecoration(mlir::Operation *Op) {
+  auto Attr =
+      Op->getAttrOfType<mlir::spirv::FPFastMathModeAttr>("fp_fast_math_mode");
+  if (!Attr)
+    return mlir::LLVM::FastmathFlags::none;
+  mlir::spirv::FPFastMathMode Mode = Attr.getValue();
+  auto Has = [&](mlir::spirv::FPFastMathMode Bit) {
+    return (Mode & Bit) != mlir::spirv::FPFastMathMode::None;
+  };
+  mlir::LLVM::FastmathFlags Flags = mlir::LLVM::FastmathFlags::none;
+  if (Has(mlir::spirv::FPFastMathMode::Fast))
+    Flags = Flags | mlir::LLVM::FastmathFlags::fast;
+  if (Has(mlir::spirv::FPFastMathMode::NotNaN))
+    Flags = Flags | mlir::LLVM::FastmathFlags::nnan;
+  if (Has(mlir::spirv::FPFastMathMode::NotInf))
+    Flags = Flags | mlir::LLVM::FastmathFlags::ninf;
+  if (Has(mlir::spirv::FPFastMathMode::NSZ))
+    Flags = Flags | mlir::LLVM::FastmathFlags::nsz;
+  if (Has(mlir::spirv::FPFastMathMode::AllowRecip))
+    Flags = Flags | mlir::LLVM::FastmathFlags::arcp;
+  // `AllowContractFastINTEL`/`AllowReassocINTEL` are a vendor (INTEL) pair
+  // of bits reusing `contract`/`reassoc` semantics under an
+  // `FPFastMathModeINTEL`-gated capability rather than
+  // `VK_KHR_shader_float_controls2` itself; mapped anyway since Vulkan
+  // shaders (this conversion's only real caller) cannot express the
+  // capability that would set them, so honoring them costs nothing.
+  if (Has(mlir::spirv::FPFastMathMode::AllowContractFastINTEL))
+    Flags = Flags | mlir::LLVM::FastmathFlags::contract;
+  if (Has(mlir::spirv::FPFastMathMode::AllowReassocINTEL))
+    Flags = Flags | mlir::LLVM::FastmathFlags::reassoc;
+  return Flags;
+}
+
 /// Converts an arithmetic FP `spirv` op that would otherwise become MLIR's
 /// plain, round-to-nearest-even, denormal-preserving `PlainOp` (upstream
 /// `SPIRVToLLVM.cpp`'s `DirectConversionPattern`) into whichever of the
 /// following \p Op's own bit width was declared for by the enclosing entry
-/// point's `VK_KHR_shader_float_controls` execution modes (the concrete,
-/// "actually produces the requested code" half of these modes this
-/// conversion previously could only diagnose, not honor -- see roadmap
-/// F15a/F15b and (historically) rejectUnhonoredFloatControls,
-/// ConvertSPIRVToLLVMPass.cpp):
+/// point's `VK_KHR_shader_float_controls` execution modes, or \p Op's own
+/// `VK_KHR_shader_float_controls2` per-instruction decorations, requests
+/// (the concrete, "actually produces the requested code" half of these
+/// modes this conversion previously could only diagnose, not honor -- see
+/// roadmap F15a/F15b/F15c and (historically)
+/// rejectUnhonoredFloatControls, ConvertSPIRVToLLVMPass.cpp):
 ///
-/// - `RoundingModeRTZ` (F15a): the operation itself becomes LLVM's
-///   constrained `llvm.experimental.constrained.*` intrinsic
-///   (\p ConstrainedIntrOp) with an explicit round-toward-zero rounding
-///   mode, rather than \p PlainOp. The exception behavior is always
-///   "ignore": Vulkan shaders have no floating-point trap mechanism to
-///   honor a stricter one, and \p PlainOp does not honor one either.
-/// - `DenormFlushToZero` (F15b): both operands, and the operation's result,
-///   are each flushed to a same-signed zero first if subnormal (see
-///   flushSubnormalToZero) -- LLVM has no constrained-intrinsics equivalent
-///   for flush-to-zero, so this is an explicit software flush around an
-///   ordinary operation rather than a different intrinsic, a materially
-///   different lowering strategy from `RoundingModeRTZ`'s.
+/// - `RoundingModeRTZ` (F15a), a whole-entry-point execution mode, and
+///   `FPRoundingMode` (F15c), a per-instruction decoration that overrides
+///   it for the one instruction it decorates (including explicitly naming
+///   `RTE` to opt an instruction back out of an entry point's own
+///   `RoundingModeRTZ`): the operation itself becomes LLVM's constrained
+///   `llvm.experimental.constrained.*` intrinsic (\p ConstrainedIntrOp)
+///   with an explicit, non-default rounding mode, rather than \p PlainOp.
+///   The exception behavior is always "ignore": Vulkan shaders have no
+///   floating-point trap mechanism to honor a stricter one, and \p
+///   PlainOp does not honor one either.
+/// - `DenormFlushToZero` (F15b, a whole-entry-point execution mode only --
+///   `VK_KHR_shader_float_controls2` does not add a per-instruction denorm
+///   decoration at all, confirmed against the SPIR-V spec and LLVM's own
+///   `SPIRVSymbolicOperands.td`): both operands, and the operation's
+///   result, are each flushed to a same-signed zero first if subnormal
+///   (see flushSubnormalToZero) -- LLVM has no constrained-intrinsics
+///   equivalent for flush-to-zero, so this is an explicit software flush
+///   around an ordinary operation rather than a different intrinsic, a
+///   materially different lowering strategy from `RoundingModeRTZ`'s.
+/// - `FPFastMathMode` (F15c, a per-instruction decoration): translated to
+///   LLVM fast-math flags on \p PlainOp (see getFastMathFlagsDecoration);
+///   dropped, rather than applied to \p ConstrainedIntrOp, if this
+///   instruction also ends up with a non-default rounding mode, since
+///   LLVM's constrained intrinsics carry no fast-math flags of their own.
 ///
-/// Both may apply to the same width at once (flushing subnormal operands,
-/// rounding toward zero, then flushing a subnormal result), independently
-/// of each other. Any bit width neither mode was declared for, and any
-/// entry point that declared neither, falls through (a match failure, the
-/// same as any other pattern that does not apply) to MLIR's own
-/// lower-benefit `DirectConversionPattern`, unchanged.
+/// All three may apply to the same instruction at once (flushing subnormal
+/// operands, rounding in a non-default direction, then flushing a
+/// subnormal result -- fast-math flags aside, per above), independently of
+/// each other. Any bit width neither whole-entry-point mode was declared
+/// for, on an op with neither per-instruction decoration either, falls
+/// through (a match failure, the same as any other pattern that does not
+/// apply) to MLIR's own lower-benefit `DirectConversionPattern`, unchanged.
 ///
 /// `spirv.FNegate` is deliberately not one of the ops this pattern (or any
 /// sibling of it) handles: negation is an exact sign-bit flip with no
@@ -2238,12 +2333,40 @@ public:
 
     unsigned Width =
         mlir::getElementTypeOrSelf(Op.getType()).getIntOrFloatBitWidth();
-    bool RoundTowardZero = declaresWidth(RoundingModeRTZWidths, Func, Width);
     bool FlushDenormals = declaresWidth(DenormFlushToZeroWidths, Func, Width);
-    if (!RoundTowardZero && !FlushDenormals)
+
+    // A per-instruction `FPRoundingMode` decoration (F15c) overrides the
+    // entry point's own whole-module `RoundingModeRTZ` (F15a) for this one
+    // instruction; absent one, fall back to that entry-point-wide mode
+    // (round-to-nearest-even, i.e. no override at all, if it did not
+    // declare `RoundingModeRTZ` for this width either).
+    std::optional<mlir::LLVM::RoundingMode> PerOpRounding =
+        getRoundingModeDecoration(Op);
+    std::optional<mlir::LLVM::RoundingMode> Rounding = PerOpRounding;
+    if (!Rounding && declaresWidth(RoundingModeRTZWidths, Func, Width))
+      Rounding = mlir::LLVM::RoundingMode::TowardZero;
+    bool NeedsConstrainedOp =
+        Rounding && *Rounding != mlir::LLVM::RoundingMode::NearestTiesToEven;
+
+    mlir::LLVM::FastmathFlags FastMath = getFastMathFlagsDecoration(Op);
+    bool HasFastMathDecoration = static_cast<bool>(
+        Op->template getAttrOfType<mlir::spirv::FPFastMathModeAttr>(
+            "fp_fast_math_mode"));
+    // Even an `fp_rounding_mode` decoration that resolves to no override at
+    // all (an explicit `RTE` with nothing else applying) still has to match
+    // here rather than fall through: MLIR's own lower-benefit
+    // `DirectConversionPattern` forwards every attribute an op carries
+    // verbatim (`op->getAttrs()`, upstream `SPIRVToLLVM.cpp`), which would
+    // otherwise leave the now-meaningless decoration attribute stuck on the
+    // resulting `llvm.fadd`/etc. rather than actually being consumed.
+    if (!NeedsConstrainedOp && !FlushDenormals &&
+        FastMath == mlir::LLVM::FastmathFlags::none && !PerOpRounding &&
+        !HasFastMathDecoration)
       return Rewriter.notifyMatchFailure(
           Op, "enclosing entry point declared neither RoundingModeRTZ nor "
-              "DenormFlushToZero for this bit width");
+              "DenormFlushToZero for this bit width, and this instruction "
+              "has neither an FPRoundingMode nor an FPFastMathMode "
+              "decoration of its own");
 
     mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
     if (!DstType)
@@ -2258,14 +2381,17 @@ public:
     }
 
     mlir::Value Result;
-    if (RoundTowardZero) {
+    if (NeedsConstrainedOp) {
       mlir::MLIRContext *Ctx = Rewriter.getContext();
-      auto RoundingMode = mlir::LLVM::RoundingModeAttr::get(
-          Ctx, mlir::LLVM::RoundingMode::TowardZero);
+      auto RoundingAttr = mlir::LLVM::RoundingModeAttr::get(Ctx, *Rounding);
       auto ExceptionBehavior = mlir::LLVM::FPExceptionBehaviorAttr::get(
           Ctx, mlir::LLVM::FPExceptionBehavior::Ignore);
       Result = ConstrainedIntrOp::create(Rewriter, Loc, DstType, Lhs, Rhs,
-                                         RoundingMode, ExceptionBehavior);
+                                         RoundingAttr, ExceptionBehavior);
+    } else if (FastMath != mlir::LLVM::FastmathFlags::none) {
+      auto FastMathAttr =
+          mlir::LLVM::FastmathFlagsAttr::get(Rewriter.getContext(), FastMath);
+      Result = PlainOp::create(Rewriter, Loc, DstType, Lhs, Rhs, FastMathAttr);
     } else {
       Result = PlainOp::create(Rewriter, Loc, DstType, Lhs, Rhs);
     }
