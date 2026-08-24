@@ -30247,3 +30247,178 @@ used, I did not re-run the full Vulkan CTS suite for this change, and left
 `VulkanCTSReport.md`/`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
 unchanged, since none of their tracked features/extensions/measured results
 are affected.
+
+# Agent thoughts: roadmap F15 (VK_KHR_shader_float_controls2/shaderFloatControls2, plus F3's deferred DenormFlushToZero/RoundingModeRTZ)
+
+F15 was F3's own audit split, explicitly flagged as "the largest single
+row F3's own audit produced" with a suggestion baked into its own text:
+split the constrained-intrinsics plumbing (shared prerequisite for both
+`VK_KHR_shader_float_controls`'s deferred `DenormFlushToZero`/
+`RoundingModeRTZ` halves) from `VK_KHR_shader_float_controls2`'s newer
+per-instruction decorations. I took that suggestion literally rather
+than trying to land the whole row in one pass.
+
+## Investigation: the plumbing already exists
+
+Before writing any code I audited what LLVM and MLIR upstream already
+have for constrained FP, since F3's own comment ("LLVM has no
+per-instruction rounding-mode control on ordinary FP ops at all... a
+genuinely large, separate lowering-strategy change") turned out to be
+about *feme* having none of the wiring, not about the underlying LLVM
+machinery being missing:
+
+- `llvm/lib/Target/SPIRV/SPIRVEmitIntrinsics.cpp`'s `useRoundingMode`
+  already reads a constrained FP intrinsic's rounding-mode metadata and
+  emits a SPIR-V `FPRoundingMode` decoration for it automatically.
+- `llvm/lib/Target/SPIRV/SPIRVInstrInfo.td` already selects
+  `strict_fadd`/`strict_fsub`/`strict_fmul`/`strict_fdiv`/`strict_frem`
+  (the SelectionDAG nodes constrained intrinsics eventually become)
+  straight onto ordinary `OpFAdd`/`OpFSub`/etc -- SPIR-V's own arithmetic
+  ops carry no separate "constrained" opcode; the rounding mode lives
+  entirely in the decoration.
+- `mlir/include/mlir/Dialect/LLVMIR/LLVMIntrinsicOps.td` already defines
+  `LLVM_ConstrainedFAddIntr`/`FSub`/`FMul`/`FDiv`/`FRem` (plus `FMA`,
+  `UIToFP`/`SIToFP`, `FPTrunc`/`FPExt`) with the exact rounding-mode/
+  exception-behavior operand shape F15 asked for.
+
+None of this needed building; it needed *using*. That reframed F15's
+scope from "invent a lowering strategy" to "wire feme's own conversion
+patterns through machinery that already exists" -- much smaller than
+the row's own text assumed, which is why I could close a real slice of
+it (F15a) rather than only re-auditing and re-splitting.
+
+## What F15a does
+
+`collectEntryPoints` (`ConvertSPIRVToLLVMPass.cpp`) now records
+`RoundingModeRTZ`'s declared bit width(s) per entry point instead of
+rejecting the mode outright (only `DenormFlushToZero` still is).
+`ConstrainedRoundTowardZeroPattern` (`SPIRVToLLVMPatterns.cpp`),
+templated over `spirv::FAddOp`/`FSubOp`/`FMulOp`/`FDivOp`/`FRemOp` paired
+with the matching `LLVM_ConstrainedF*Intr` op, takes over from MLIR's own
+`DirectConversionPattern` (a higher `FeMeBenefit`, falling back via a
+match failure everywhere else) for exactly the width(s) the enclosing
+entry point declared, and the entry point gains `strictfp` via a new
+`addBarePassthroughAttribute` alongside the existing key/value
+`addPassthroughAttribute`.
+
+One correction to F15's own text: it listed `FNegate` among the ops
+needing this treatment. It does not -- IEEE 754 negation is an exact
+sign-bit flip with no rounding or exception behavior of its own, and
+LLVM has no `llvm.experimental.constrained.fneg` intrinsic at all (I
+checked `llvm/include/llvm/IR/ConstrainedOps.def`, the authoritative
+list). Left a comment on `ConstrainedRoundTowardZeroPattern` recording
+this rather than silently dropping the op from scope with no
+explanation.
+
+One important subtlety the pattern had to account for: by the time an
+individual `spirv.FAdd`'s own conversion pattern runs,
+`populateSPIRVToLLVMFunctionConversionPatterns`'s own function-op pattern
+may already have converted the enclosing `spirv.func` into an
+`llvm.func` (moving the body over rather than waiting for every op
+inside it to legalize first) -- so `Op->getParentOfType<spirv::FuncOp>()`
+sometimes returned null even for an op that syntactically looks nested
+inside one in the *input*. Looked up the entry point via
+`mlir::FunctionOpInterface` instead (both `spirv::FuncOp` and
+`LLVM::LLVMFuncOp` implement it, and the symbol name survives the
+conversion either way) -- found this the hard way via a failing test
+where the "wrong width falls back to the plain op" case correctly fell
+back, but so did the "right width" case, until I added debug output and
+saw `llvm.fadd` for both.
+
+## Verification
+
+Two layers, matching the "FileCheck lit tests for the compiler,
+plus a real end-to-end backend round-trip" pattern this codebase already
+uses for other conversion patterns:
+
+- `spirv-to-llvm-rounding-mode-rtz.mlir`: `feme-opt
+  --feme-convert-spirv-to-llvm`, checking the constrained-intrinsic chain
+  and `strictfp` attribute for the declared width, and the plain
+  `llvm.fadd` (no `strictfp` needed off that op, though the function
+  still gets it since it's a whole-entry-point attribute) for a
+  differently-sized op in a sibling entry point.
+- `spirv-backend-rounding-mode-rtz.mlir`: the same "null pipeline"
+  round-trip `spirv-backend-null-pipeline-split.mlir` already
+  establishes (SPIR-V binary -> `spirv` dialect -> `llvm` dialect -> LLVM
+  IR -> LLVM's real, in-tree SPIRV backend -> SPIR-V binary -> `spirv`
+  dialect again), checking the round-tripped `spirv.FAdd` carries
+  `fp_rounding_mode = #spirv.fp_rounding_mode<RTZ>`. This is the
+  strongest evidence in this row: it is not a FileCheck pattern matching
+  my own conversion's output, it is LLVM's *actual, unmodified* SPIRV
+  backend independently agreeing the constrained intrinsic means what I
+  think it means.
+
+## The Vulkan CTS caught a real mistake
+
+My first instinct after the codegen worked was to also flip
+`shaderRoundingModeRTZFloat{16,32,64}` to `VK_TRUE` in both
+`VkPhysicalDeviceFloatControlsProperties` and
+`VkPhysicalDeviceVulkan12Properties` -- the natural "we can produce this
+now, so advertise it" next step, and I committed it as a second, separate
+commit per this session's own "small, separately committed changes"
+discipline.
+
+Running only the CTS's `independence_settings` case (the one F3's own
+report noted as the sole `Pass` in this whole subset) would have looked
+fine, since that case only checks the advertised properties are
+internally consistent. But the task's instruction to run the *actual*
+Vulkan CTS after each change, not just spot-check the one case I
+expected to be interesting, is what caught the real problem: running the
+full `dEQP-VK.spirv_assembly.instruction.compute.float_controls.*`
+subset (2,569 cases) after that flip found **18 new failures** -- every
+`fp32.*` case that isn't `NotSupported` on some *other* unrelated missing
+feature now reaches `vkCreateComputePipelines` and fails there, on a
+completely unrelated, pre-existing gap: `feme::cpu`'s resource-lowering
+cannot raise the small, 2-element runtime-sized storage-buffer bindings
+these generated shaders declare. I confirmed this by temporarily
+replacing `vkCreateComputePipelines`'s `consumeError(Compiled.
+takeError())` with a print (the error text is normally swallowed
+entirely, on purpose, which is why nothing showed up in the CTS log
+until I did this), saw the exact same "register-bound resource handle
+... cannot normalize into a heap access or the root-constant block"
+message for four different cases, and reverted the temporary print
+immediately after.
+
+This is *not* a bug in the RTZ codegen itself -- the same shaders would
+fail this way regardless of what float-controls execution mode they
+declared, since the failure happens in resource lowering, before the
+float-controls-specific code ever runs. But advertising the feature
+turned a graceful, CTS-neutral `NotSupported` skip into an outright
+`Fail`, which is a real regression in measured CTS results even though
+no line of code I wrote is incorrect. I reverted that one commit's
+field flips (third commit in this row) rather than either leaving the
+regression in place or scope-creeping this row into also fixing the
+unrelated resource-lowering gap, and documented the finding in both
+`EntryPoints.cpp`'s own comment and `VulkanCTSReport.md`'s new F15a
+section so a future session does not repeat the mistake without first
+checking whether that gap has closed.
+
+## Documentation updates
+
+- `feme/docs/Roadmap.md`: struck through F15, added F15b (`DenormFlushToZero`'s
+  own still-needed software-flush lowering) and F15c
+  (`VK_KHR_shader_float_controls2`'s per-instruction `FPRoundingMode`
+  decoration, reusing F15a's pattern shape, plus its `FPFastMathMode`/
+  `FPFastMathDefault` fast-math decorations -- and a correction that the
+  extension adds no per-instruction denorm decoration at all, contrary to
+  F15's own original text, confirmed against LLVM's
+  `SPIRVSymbolicOperands.td`). Updated the Lane grouping and G4's own
+  re-triage note to match.
+- `feme/docs/Vulkan14FeatureInventory.md`: updated the
+  `VK_KHR_shader_float_controls`/`shaderFloatControls2`/
+  `VK_KHR_shader_float_controls2` rows to point at F15a (closed, not yet
+  advertised) and F15b/F15c (open) respectively.
+- `feme/docs/VulkanExtensionInventory.md`: `VK_KHR_shader_float_controls2`'s
+  row now points at F15c instead of the closed F3.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap F15a: measured impact"
+  section recording both the regression the CTS run caught and the
+  reverted-back-to-baseline result after fixing it.
+
+## Testing
+
+`ninja check-feme` (assertions-enabled, ccache build, this session's
+existing `./build`): 1699/1700 passed, 1 unsupported (pre-existing,
+unrelated), after every commit in this row. Two new lit tests
+(`spirv-to-llvm-rounding-mode-rtz.mlir`, replacing the now-stale
+`spirv-to-llvm-rounding-mode-rtz-invalid.mlir`, and
+`spirv-backend-rounding-mode-rtz.mlir`).
