@@ -26,21 +26,13 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Plese work on roadmap step E29:
+Plese work on roadmap step F1:
 
-> **The same full run (E27/E28) found six more distinct, reproducible crashes**
-> (`SIGSEGV` in `api.granularity.*`,
-> `glsl.texture_functions.query.texturesamples.*`, `image.subresource_layout.*`,
-> and `synchronization.timeline_semaphore.*`; an `llvm_unreachable` in
-> `ResourceCalls.cpp` for an unsupported `feme.cpu.resource.*` element type
-> reached from `spirv_assembly.instruction.spirv1p4.opselect.array_select`; an
-> `llvm::Value::setNameImpl` assertion from `renderpasses.dynamic_rendering.*`;
-> and a `GetElementPtrTypeIterator.h` assertion from
-> `compute.pipeline.zero_initialize_workgroup_memory.*`), each aborting its own
-> top-level `dEQP-VK` group partway through the same way the long-documented
-> `api` crash already did. None investigated past its own crash-site log line
-> (see VulkanCTSReport.md's "Full run, roadmap E27/E28" section for what is
-> known about each) -- unlike E27/E28, no root cause is confirmed yet for any of
-> these six, so none is claimed fixed here. Six independently assignable rows
-> once triaged, the same granularity as every other row in this section | none
-> (six independent crashes; split into per-crash rows once triaged)
+> **`VK_KHR_global_priority`/`globalPriorityQuery`.**
+> `VkDeviceQueueGlobalPriorityCreateInfo` at `vkCreateDevice` and
+> `vkGetPhysicalDeviceQueueFamilyProperties2`'s
+> `VkQueueFamilyGlobalPriorityProperties` chain; since this ICD has one worker
+> pool with no real OS-level scheduling priority, report the full mandatory
+> priority list as supported and treat the create-time hint as a no-op (matching
+> the "single logical queue, narrowed by capability flags only" precedent C7
+> set)
