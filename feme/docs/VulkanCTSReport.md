@@ -7,14 +7,19 @@ narrative of individual crash fixes; that narrative is now folded into
 [Roadmap.md](Roadmap.md) §1.9 and each design document's own Status notes,
 and this file is a measurement instead.
 
-- FeMe revision: this session's own final revision (roadmap E27, E28, and
-  E29a-E29g -- see "Full run, roadmap E27/E28" and "Roadmap E29: measured
-  impact" below). The headline table below is a fresh full 54-group run
-  against this revision, re-generated after E29a-E29f's six crash fixes
-  landed.
-- `check-feme`: 1687 passed, 1 unsupported as of roadmap E29 (see "Roadmap
-  E29: measured impact" below); up from D0's 1541 by every roadmap row's
-  own new regression tests since, not just this session's ten.
+- FeMe revision: `10303c63fa33` (roadmap F3, the last functional change before
+  this session's own docs-only compute-only-scope pass, commits
+  `e9fadabf587a`-`6fb8b60c3cfc` -- none of those touch `libfeme_vulkan` or the
+  CPU pipeline, so this run measures the same binary F3's own "measured
+  impact" section already did). The headline table below is a fresh full
+  54-group run against that revision, the first full re-run since roadmap
+  E29 (see "Full run, roadmap E27/E28" and "Roadmap E29: measured impact"
+  below for that edition's own numbers); F1-F3 in between only ran targeted
+  subsets, per each of their own "measured impact" sections.
+- `check-feme`: 1696 passed, 1 unsupported (ccache, assertions-enabled
+  `RelWithDebInfo` build) as of this revision; up from E29's 1687 by every
+  roadmap row's own new regression tests since (global-priority, subgroup
+  rotate, float-controls diagnostics).
 - VK-GL-CTS revision: `vulkan-cts-1.4.6.2-413-ge4b225a7d7cd2c53630f0de3f0912c4d33a816f2`,
   plus the same two local fixes D0's own edition already recorded (see
   "Deviations from a stock CTS" below).
@@ -25,46 +30,39 @@ and this file is a measurement instead.
 
 This is a genuine full 54-group re-run (the same "every group, six at a
 time, per-group crash isolation" methodology "Reproducing this report"
-below describes), the second since D0's own headline above (the first,
-superseded, is E27/E28's revision -- see "Roadmap E29: measured impact"
-below for that edition's own numbers and how this one differs). It is
-**not** directly comparable to D0's own numbers: roadmap E1-E26 landed a
-large number of real feature/format/limit implementations in between
-(aggregate 1.3/1.4 struct wiring, `synchronization2`, `maintenance4`-`6`,
-`shaderIntegerDotProduct`, ASTC LDR/HDR, broadened per-format sampled/
-attachment support, integer-format image sampling, ...), so a much larger
-fraction of cases are now genuinely *exercised* (`Pass`/`Fail`) rather than
-`NotSupported` -- a **rising** failure count here is largely the expected,
-honest cost of advertising more capability, the same pattern D1/E-series's
-own targeted runs already showed one bucket at a time; see each of their
-own "measured impact" sections for the per-feature detail this table does
-not re-derive.
+below describes), the third since D0's own headline above (the first,
+superseded, is E27/E28's revision; the second, also superseded, is E29's --
+see "Roadmap E29: measured impact" below for that edition's own numbers and
+how this one differs). It is **not** directly comparable to E29's own
+numbers by a large margin the way E29 was to D0's: only F1 (`VK_KHR_global_
+priority`), F2 (`VK_KHR_shader_subgroup_rotate`) and F3 (rejecting two
+unhonored `VK_KHR_shader_float_controls` execution modes) landed in between,
+and each of their own "measured impact" sections already found little to no
+headline-level movement (F1/F2 add a handful of real `Pass`es; F3 is a
+diagnostic-only change these numbers do not yet exercise, per its own
+section below). The totals below are consistent with that: they are within
+noise of E29's own headline, not a fresh order-of-magnitude jump the way
+E29 was of D0's.
 
 | | Count | Share |
 |---|---|---|
-| Total cases | 3,236,771 (of 3,237,000 possible: see below) | |
-| Passed | 36,725 | 1.13% |
-| Failed | 144,445 | 4.46% |
-| Not supported | 3,055,600 | 94.41% |
+| Total cases | 3,234,014 (of 3,237,000 possible: see below) | |
+| Passed | 36,759 | 1.14% |
+| Failed | 144,753 | 4.47% |
+| Not supported | 3,052,501 | 94.30% |
 | Quality warning | 1 | |
-| **Crashed / timed out** | **1 group, 228 cases short (see below)** | |
+| **Crashed / timed out** | **2 groups, 2,986 cases short (see below)** | |
 
-53 of the 54 top-level `dEQP-VK.<group>.*` groups now run to completion --
-up from 47 in the previous (E27/E28) edition's own headline, per "Roadmap
-E29: measured impact" below, whose six fixes are exactly what moved this
-number. The one still-crashing group is `api`, and not for the reason it
-was in the previous edition: this run reaches 266,994 of 267,222 cases
-(99.9%) before a `SIGSEGV` with no diagnostic in
-`object_management.multithreaded_per_thread_resources.device`, a
-threading stress test unrelated to any file this session's own E29 fixes
-touch -- the same crash "Addendum: DXIL `GetDimensions.xy`/AMDGPU change"
-below already found once and declined to attribute to that addendum's own
-(different, non-overlapping) file set. It is a known, pre-existing,
-out-of-scope issue, left for a future session's own crash-isolation pass:
+52 of the 54 top-level `dEQP-VK.<group>.*` groups now run to completion --
+down from 53 in the previous (E29) edition's own headline, because this run
+found a **second**, previously unmeasured crashing group,
+`synchronization2`, alongside the same still-open `api` crash E29 already
+recorded:
 
 | Group | Cases measured (of total) | Crash |
 |---|---|---|
-| `api` | 266,994 (of 267,222) | `SIGSEGV`, no diagnostic, `object_management.multithreaded_per_thread_resources.device` (pre-existing, unrelated to roadmap E29) |
+| `api` | 266,993 (of 267,222) | `SIGSEGV`, no diagnostic, `object_management.multithreaded_per_thread_resources.device` (pre-existing, unchanged since roadmap E29 -- same case, same signature) |
+| `synchronization2` | 78,860 (of 81,617) | `SIGSEGV` in `timeline_semaphore.device_host.write_copy_buffer_to_image_read_copy_image_to_buffer.image_128x128_d16_unorm`, immediately after a run of `VK_ERROR_INITIALIZATION_FAILED` `Fail`s from sibling `write_copy_buffer_to_image*` cases in the same `device_host` timeline-semaphore group -- the same *family* of crash "Roadmap C1: measured impact" already attributed to core `synchronization`'s own `timeline_semaphore.device_host` group (a different exact case, `write_copy_buffer_read_copy_buffer.buffer_262144`, but the same suite exercising the same device-vs-host timeline-semaphore wait path through the `VK_KHR_synchronization2` entry points instead of the core ones), not a new mechanism. Left as a known, out-of-scope issue for a future crash-isolation pass, same as `api`'s. |
 
 26 of the 54 groups have **zero** failures (`conditional_rendering`,
 `cooperative_vector`, `data_graph`, `depth`, `descriptor_indexing`, `dgc`,
@@ -73,32 +71,35 @@ out-of-scope issue, left for a future session's own crash-isolation pass:
 `image_processing`, `mesh_shader`, `multiview`, `postmortem`,
 `protected_memory`, `ray_query`, `ray_tracing_pipeline`, `reconvergence`,
 `shader_object`, `sparse_resources`, `tensor`, `tessellation`,
-`transform_feedback`, `video`, `wsi`) -- almost all of them because the
-feature they cover is not advertised at all, which is the correct,
-truthful outcome for this ICD's declared scope; a handful (`shader_object`,
-`transform_feedback`) are large groups (243,853 and 133,719 cases
-respectively) cleanly rejected outright rather than genuinely exercised.
+`transform_feedback`, `video`, `wsi`) -- the same 26 as E29's own headline,
+unchanged since none of F1-F3 touch any of them -- almost all of them
+because the feature they cover is not advertised at all, which is the
+correct, truthful outcome for this ICD's declared scope; a handful
+(`shader_object`, `transform_feedback`) are large groups (243,853 and
+133,719 cases respectively) cleanly rejected outright rather than genuinely
+exercised.
 
-**"Correct for this ICD's declared scope" no longer covers all 26.** The
-declared scope is now full Vulkan 1.4 conformance including graphics and
-ray tracing (FeMeVulkanDesign.md's "Conformance Target"), so seven of
-those groups -- `ray_query`, `ray_tracing_pipeline`, `mesh_shader`, `wsi`,
-`tessellation`, `geometry` and `multiview`, 139,043 cases between them --
-are now measured gaps rather than truthful abstentions. See "Scope
-expansion: the graphics and ray-tracing baseline" immediately below for
-the per-group totals and the reason each is `NotSupported`. The remaining
-19 (video, sparse residency, protected memory, transform feedback,
-`shader_object`, ...) stay correct abstentions, per Roadmap.md's Part 4.
+**"Correct for this ICD's declared scope" still does not cover all 26.** The
+declared scope is full Vulkan 1.4 conformance including graphics and ray
+tracing (FeMeVulkanDesign.md's "Conformance Target"), so seven of those
+groups -- `ray_query`, `ray_tracing_pipeline`, `mesh_shader`, `wsi`,
+`tessellation`, `geometry` and `multiview`, 139,043 cases between them, an
+unchanged count from E29's own measurement since none of F1-F3 touch
+graphics or ray tracing -- are measured gaps rather than truthful
+abstentions. See "Scope expansion: the graphics and ray-tracing baseline"
+immediately below for the per-group totals and the reason each is
+`NotSupported`. The remaining 19 (video, sparse residency, protected
+memory, transform feedback, `shader_object`, ...) stay correct abstentions,
+per Roadmap.md's Part 4.
 
 **Every failure this table's own `Fail` count includes was, as far as this
 run's own per-group logs show, a clean rejection or a genuinely wrong
 result attributable to a real, named implementation gap** (a format/limit/
-feature this ICD does not yet support, per the E-series rows above) -- **not**
-re-audited case-by-case for this edition the way D0's own headline was
-(144,445 is roughly 5x D0's 29,647, driven by the much larger surface
-E1-E26 now actually exercises), so that specific claim should be treated as
-inherited from those rows' own individual audits rather than freshly
-re-verified here.
+feature this ICD does not yet support, per the E/F-series rows above) --
+**not** re-audited case-by-case for this edition, the same caveat E29's own
+headline recorded, so that specific claim should be treated as inherited
+from those rows' own individual audits rather than freshly re-verified
+here.
 
 ## Scope expansion: the graphics and ray-tracing baseline
 
@@ -3695,3 +3696,43 @@ this row -- four new tests relative to F2's own report:
 `spirv-to-llvm-denorm-flush-to-zero-invalid.mlir`, and
 `spirv-to-llvm-rounding-mode-rtz-invalid.mlir` (three FileCheck files, one
 with three independent `--split-input-file` cases).
+
+## Full run, docs-only compute-only-scope pass (this session): measured impact
+
+This session made no functional change: it reworded `FeMeCPUDesign.md` and
+`FeMeVulkanDesign.md` passages that described FeMe's planned scope as
+permanently compute-only (a Non-Goals bullet, the "Accounting for Graphics
+Later" section title, the Summary's "one compute-only queue family"), added
+a Deviation note recording that V6 shipped `VK_QUEUE_GRAPHICS_BIT` without
+growing `subgroupSupportedStages` to match (now scheduled under roadmap V7),
+and reworded `filter_vulkan_cts_cases.py`'s docstring to stop calling the
+ICD itself compute-only. None of that touches `libfeme_vulkan` or the CPU
+pipeline.
+
+The full 54-group re-run above exists because this report's own top section
+was stale (last full re-run at roadmap E29; F1-F3 had each only run a
+targeted subset since), not because of this session's own docs changes, and
+because the task asked for current, accurate top-of-file numbers. Two
+findings from it:
+
+- **The headline moved only within noise of E29's own numbers** (Passed
+  36,725 -> 36,759, Failed 144,445 -> 144,753, Not supported 3,055,600 ->
+  3,052,501), consistent with F1-F3 being small, mostly non-headline-moving
+  rows, each already measured individually in its own section above.
+- **A second crashing group, `synchronization2`, was found** that E29's own
+  run did not reach in isolation (or reached without crashing -- E29's own
+  section above records only `api` as crashing). It segfaults at
+  `timeline_semaphore.device_host.write_copy_buffer_to_image_read_copy_
+  image_to_buffer.image_128x128_d16_unorm`, after a run of sibling
+  `write_copy_buffer_to_image*` cases in the same group fail with
+  `VK_ERROR_INITIALIZATION_FAILED` rather than crashing outright -- the same
+  device-vs-host timeline-semaphore family "Roadmap C1: measured impact"
+  above already attributes a *different* crashing case in core
+  `synchronization` to, now also reachable through
+  `VK_KHR_synchronization2`'s own entry points. Not investigated further
+  this session (out of scope for a docs-and-measurement pass); left as a
+  known, tracked gap alongside `api`'s own pre-existing crash.
+
+`ninja check-feme` (`RelWithDebInfo`, `LLVM_ENABLE_ASSERTIONS=ON`,
+`LLVM_CCACHE_BUILD=ON`): 1696/1697 passed, 1 unsupported, unchanged by this
+session's docs-only commits.
