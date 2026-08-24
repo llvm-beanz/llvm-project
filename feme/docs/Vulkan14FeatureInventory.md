@@ -73,20 +73,23 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 | 1.1 | **0 of 12** | n/a (see scope note) | 6 of 23 |
 | 1.2 | 7 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
-| 1.4 | 2 of 21 | 25 | 2 of 16 |
-| **total** | **24 of 150** | **70** | **34 of 86** |
+| 1.4 | 5 of 21 | 25 | 4 of 16 |
+| **total** | **27 of 150** | **70** | **36 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
-  until now, and the 1.4 floor has barely started.** Roadmap E1-E28 drove
+  until now, and the 1.4 floor has only just started.** Roadmap E1-E28 drove
   1.3 from 1 advertised feature bit to 12 of 15 (only `robustImageAccess`,
   `descriptorBindingInlineUniformBlockUpdateAfterBind` and
-  `textureCompressionASTC_HDR` remain), but 1.4's own F-series has not
-  started (`maintenance5`/`maintenance6` are the only two of its 21 bits
-  advertised) and 1.1 reports **zero** of its 12 bits. That zero is the
-  single most surprising number in this table: `multiview`,
-  `variablePointers`, `samplerYcbcrConversion`, `shaderDrawParameters`,
-  the 16-bit storage cluster and `protectedMemory` are all `VK_FALSE`,
-  and a 1.4 conformance claim inherits every one of them.
+  `textureCompressionASTC_HDR` remain), and the F-series has now closed F1
+  (`globalPriorityQuery`) and F2 (`shaderSubgroupRotate`/
+  `shaderSubgroupRotateClustered`), bringing 1.4 to 5 of its 21 bits
+  (`maintenance5`/`maintenance6`/`globalPriorityQuery`/
+  `shaderSubgroupRotate`/`shaderSubgroupRotateClustered`), while 1.1 still
+  reports **zero** of its 12 bits. That zero is the single most surprising
+  number in this table: `multiview`, `variablePointers`,
+  `samplerYcbcrConversion`, `shaderDrawParameters`, the 16-bit storage
+  cluster and `protectedMemory` are all `VK_FALSE`, and a 1.4 conformance
+  claim inherits every one of them.
 - **17 of the 52 unimplemented 1.0 feature bits are graphics
   capabilities** (`geometryShader`, `tessellationShader`, `multiViewport`,
   `fillModeNonSolid`, `wideLines`, `largePoints`, `sampleRateShading`,
@@ -116,6 +119,32 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   a conformance gap, not a status, so none of them is listed as
   implemented in `AdvertisedPromotedExtensions.txt`; roadmap
   &sect;1.9.10's K-series is where each is assigned.
+- **Roadmap F2's audit of the whole `spirv.GroupNonUniform*` family: one op
+  now converts, the other ~30 do not.** Before F2, no
+  `spirv.GroupNonUniform*` op had a `spirv`->`llvm` conversion pattern at
+  all, making `shaderSubgroupExtendedTypes`'s `VK_TRUE` (see that row's own
+  note above) vacuous -- nothing exercised subgroup operations on 8/16-bit
+  or boolean types because nothing exercised subgroup operations at all.
+  F2 closed `spirv.GroupNonUniformRotateKHR` specifically
+  (`RotateConversionPattern`, `SPIRVToLLVMPatterns.cpp`), covering
+  `VK_KHR_shader_subgroup_rotate`'s own two feature bits, but Rotate's own
+  operand types (a plain value plus a 32-bit `delta`/`cluster_size`) never
+  exercise an 8/16-bit or boolean-typed group operation, so
+  `shaderSubgroupExtendedTypes` remains just as unvalidated as before --
+  closing it for real needs at least one of the arithmetic reduce/scan ops
+  (`GroupNonUniformIAdd`/`FAdd`/`SMin`/... or the logical family) to
+  convert with a non-32-bit-int/non-float operand. The other Vulkan 1.1
+  subgroup feature bits this same family backs
+  (`subgroupBasic`/`Vote`/`Ballot`/`Shuffle`/`ShuffleRelative`/
+  `Arithmetic`/`Clustered`/`Quad`, `VkPhysicalDeviceSubgroupProperties`'s
+  `supportedOperations`/`supportedStages`) are a separate, 1.1-scoped gap
+  this file's 1.3/1.4-only scope does not even enumerate; closing the rest
+  of the family (vote/ballot/broadcast/shuffle/arithmetic-reduce/quad,
+  roughly 30 ops) is tracked as future roadmap work rather than folded
+  into F2, since the size of that closure is comparable to an entire new
+  E/F-series row of its own -- see `agent_thoughts.md`'s F2 entry for the
+  full audit (which builtin-name/intrinsic mechanism each op family would
+  need).
 - **The mandatory limit fields (1.3/1.4) are all enumerated but all
   conservative.** `EntryPoints.cpp`'s
   `VkPhysicalDeviceVulkan13Properties`/`Vulkan14Properties` cases write
@@ -364,7 +393,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_atomic_int64` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_float16_int8` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | no |  |
-| extension | VK_VERSION_1_2 | `VK_KHR_shader_subgroup_extended_types` | yes | core, not advertised by name: roadmap C6, vacuously true until an OpGroupNonUniform* conversion exists (EntryPoints.cpp) |
+| extension | VK_VERSION_1_2 | `VK_KHR_shader_subgroup_extended_types` | yes | core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_spirv_1_4` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_timeline_semaphore` | yes | core, not advertised by name: V3's timeline semaphores (Sync.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_uniform_buffer_standard_layout` | yes | core, not advertised by name: roadmap C6, no std140 restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp) |
@@ -453,8 +482,8 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_3 | `VK_KHR_synchronization2` | yes | roadmap E3: vkCmdPipelineBarrier2/vkQueueSubmit2 and their four peers translate down to Sync.cpp's existing 1-mask model |
 | extension | VK_VERSION_1_3 | `VK_KHR_zero_initialize_workgroup_memory` | yes | roadmap E13: Workgroup-storage-class globals zero-initialized once per dispatch |
 | feature | VK_VERSION_1_4 | `globalPriorityQuery` | yes | roadmap F1: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceGlobalPriorityQueryFeatures struct |
-| feature | VK_VERSION_1_4 | `shaderSubgroupRotate` | no |  |
-| feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | no |  |
+| feature | VK_VERSION_1_4 | `shaderSubgroupRotate` | yes |  |
+| feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | yes |  |
 | feature | VK_VERSION_1_4 | `shaderFloatControls2` | no |  |
 | feature | VK_VERSION_1_4 | `shaderExpectAssume` | no |  |
 | feature | VK_VERSION_1_4 | `rectangularLines` | no |  |
@@ -512,5 +541,5 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | yes | roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) |
 | extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | no |  |

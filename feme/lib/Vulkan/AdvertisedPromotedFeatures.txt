@@ -118,3 +118,11 @@ maintenance5
 # maintenance6: roadmap E6 -- vkCmdBindDescriptorSets2/vkCmdPushConstants2/
 # vkCmdPushDescriptorSet2 over the existing Descriptor.cpp entry points.
 maintenance6
+# globalPriorityQuery: roadmap F1 -- VkQueueFamilyGlobalPriorityProperties
+# reports the full mandatory priority list for every queue family.
+globalPriorityQuery = roadmap F1: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceGlobalPriorityQueryFeatures struct
+# shaderSubgroupRotate/shaderSubgroupRotateClustered: roadmap F2 --
+# spirv.GroupNonUniformRotateKHR has a real spirv->llvm conversion pattern
+# (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) covering both forms.
+shaderSubgroupRotate
+shaderSubgroupRotateClustered

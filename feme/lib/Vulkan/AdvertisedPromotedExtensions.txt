@@ -31,7 +31,7 @@ VK_EXT_host_query_reset = core, not advertised by name: roadmap C6, vkResetQuery
 VK_KHR_create_renderpass2 = core, not advertised by name: vkCreateRenderPass2 and its command family (RenderPass.cpp, CommandBuffer.cpp)
 VK_KHR_driver_properties = core, not advertised by name: roadmap C5, VkPhysicalDeviceDriverProperties with a truthful zero VkConformanceVersion (EntryPoints.cpp)
 VK_KHR_imageless_framebuffer = core, not advertised by name: roadmap C6, VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT + VkRenderPassAttachmentBeginInfo (RenderPass.cpp, CommandBuffer.cpp)
-VK_KHR_shader_subgroup_extended_types = core, not advertised by name: roadmap C6, vacuously true until an OpGroupNonUniform* conversion exists (EntryPoints.cpp)
+VK_KHR_shader_subgroup_extended_types = core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp)
 VK_KHR_timeline_semaphore = core, not advertised by name: V3's timeline semaphores (Sync.cpp)
 VK_KHR_uniform_buffer_standard_layout = core, not advertised by name: roadmap C6, no std140 restriction was ever enforced to relax (EntryPoints.cpp, SPIRVToLLVMPatterns.cpp)
 #
@@ -57,3 +57,5 @@ VK_KHR_copy_commands2 = core, not advertised by name: roadmap D0, all six vkCmd*
 VK_KHR_maintenance4 = core, not advertised by name: roadmap E4, vkGetDevice{Buffer,Image}MemoryRequirements + maxBufferSize
 VK_EXT_subgroup_size_control = core, not advertised by name: roadmap E7, VkPipelineShaderStageRequiredSubgroupSizeCreateInfo and its four limit fields
 VK_KHR_format_feature_flags2 = core, not advertised by name: roadmap E24/E25, chained VkFormatProperties3 (EntryPoints.cpp)
+VK_KHR_global_priority = roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family
+VK_KHR_shader_subgroup_rotate = roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern)
