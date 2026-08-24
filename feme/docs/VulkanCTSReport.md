@@ -3574,3 +3574,67 @@ this row -- four new tests relative to E29's own report:
 `EveryQueueFamilyReportsTheFullMandatoryGlobalPriorityList` and
 `DrawTest`'s `AdvertisesDynamicRenderingExtension` (extended)/
 `GlobalPriorityCreateInfoIsANoOpAtDeviceCreation`.
+
+## Roadmap F2: measured impact (targeted, not a full re-run)
+
+F2 gave `spirv.GroupNonUniformRotateKHR` a real `spirv`->`llvm` conversion
+pattern (`RotateConversionPattern`, `SPIRVToLLVMPatterns.cpp`) and
+advertised `VK_KHR_shader_subgroup_rotate`/`shaderSubgroupRotate`/
+`shaderSubgroupRotateClustered`. Verified first with FileCheck lit tests
+(`spirv-to-llvm-rotate.mlir`/`spirv-to-llvm-rotate-invalid.mlir`), which
+confirm the conversion itself is correct in isolation for both the plain
+and `cluster_size` forms, and that `Workgroup`-scope rotate (not
+implemented) is declined rather than silently miscompiled.
+
+Targeted subset: **`dEQP-VK.subgroups.shuffle.*rotate*`** (2,732 cases,
+every `subgroupRotate`/`subgroupClusteredRotate` case across every stage
+and value type this row's own feature bits gate).
+
+- **0 passed / 128 failed / 2,604 not supported.** All 128 failures are
+  `compute`-stage cases (framebuffer/graphics/mesh/ray_tracing are all
+  `NotSupported` for unrelated, pre-existing reasons -- this ICD's
+  subgroup support is compute-only, per `FeMeVulkanDesign.md`'s
+  "Subgroup size" section), and every one of the 128 -- across every
+  value type tested, not just `bool`/`bvec` -- fails identically at
+  `vkCreateComputePipelines` with `error: unhandled opcode 341`
+  (`OpGroupNonUniformBallotBitExtract`) from MLIR's own SPIR-V
+  deserializer (`mlir-tblgen`-generated, `SPIRVUtilsGen.cpp`'s "unhandled
+  opcode" case; the op itself is not modeled in MLIR's SPIR-V dialect at
+  all, unlike `spirv.GroupNonUniformRotateKHR` which already existed
+  there). This is `glslang`'s own shared "active invocation mask" helper
+  -- used by every subgroup compute shader in this CTS module regardless
+  of which specific op is under test, not something `subgroupRotate`
+  itself requires -- confirmed by reproducing the identical failure on an
+  entirely unrelated, pre-existing case
+  (`dEQP-VK.subgroups.basic.compute.subgroupbarrier`, which needs no
+  rotate/ballot functionality at all, fails at the same
+  `vkCreateComputePipelines` step for its own unrelated pre-existing
+  reason -- an `OpTypeArray` spec-constant-count gap). In other words:
+  `dEQP-VK.subgroups.*.compute.*` was not a passing category before this
+  row, and F2 does not regress a previously-passing one -- it makes 128
+  previously-`NotSupported` cases newly reach (and fail at) a
+  pre-existing, unrelated import gap, exactly the same shape "Roadmap F1:
+  measured impact" above found for `synchronization.
+  global_priority_transition.*`'s `PreemptionCase` failures. Per this
+  row's own audit (`Vulkan14FeatureInventory.md`'s new F2 finding),
+  `OpGroupNonUniformBallotBitExtract` is one of the ~30 other
+  `GroupNonUniform*` ops left unconverted; closing it (which needs a new
+  MLIR SPIR-V dialect op added upstream first, since deserialization
+  itself fails before any `feme` conversion pattern ever runs) is tracked
+  as future work rather than folded into this row.
+- The 2,604 not-supported cases are a mix of expected gates unrelated to
+  this row: `mesh`/`ray_tracing`-stage cases (no mesh shader/ray tracing
+  pipeline support), `graphics`/`framebuffer`-stage cases (no fragment- or
+  vertex-stage subgroup support advertised), `int64`/`float64`-typed
+  cases (no 64-bit subgroup type support), and the
+  `_requiredsubgroupsize` compute variants whose requested size the
+  device does not report supporting.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1693/1694
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- new tests relative to F1's own report: three new
+`spirv-to-llvm-rotate*.mlir` FileCheck tests,
+`PhysicalDeviceInfoTest`'s
+`ShaderSubgroupRotateIsAdvertisedThroughItsOwnDedicatedFeatureStruct`, and
+`DrawTest`'s `AdvertisesDynamicRenderingExtension` (extended).
