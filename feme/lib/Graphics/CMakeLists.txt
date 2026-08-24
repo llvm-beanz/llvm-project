@@ -7,6 +7,7 @@ add_feme_library(FeMeGraphics
   ImageFixture.cpp
   LayeredRendering.cpp
   Patch.cpp
+  PatchPipeline.cpp
   Pipeline.cpp
   Scene.cpp
   Tessellator.cpp
