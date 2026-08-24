@@ -1329,6 +1329,36 @@ public:
   }
 };
 
+/// Whether \p Type is, or (recursively, through a `spirv::StructType`/
+/// `spirv::ArrayType`) contains, SPIR-V's `OpTypeBool` (represented, like
+/// MLIR's SPIR-V dialect itself, as a plain `i1` -- there is no distinct
+/// `spirv::BoolType`). `OpTypeBool` has no defined memory representation
+/// (its only legal storage classes -- `Workgroup`, `Private`, `Function` --
+/// are exactly the ones this ICD's SPIR-V producers can put one in), and an
+/// `i1` is only sound as a pure SSA value: once addressed by
+/// `getelementptr` as part of an aggregate (any `Workgroup`-storage
+/// `shared`/`groupshared` struct or array containing a `bool`/`bvec*`),
+/// its 1-bit size is not byte-addressable, asserting deep in LLVM's own
+/// `GetElementPtrTypeIterator` ("Not byte-addressable") rather than failing
+/// to legalize (`dEQP-VK.compute.pipeline.
+/// zero_initialize_workgroup_memory.composites.*`, whose per-case struct
+/// mixes a `bool`/`bvec2`/`bvec3`/`bvec4` field in with real scalars).
+/// `WorkgroupGlobalVariablePattern` checks this before converting so the
+/// unsupported shape fails to legalize cleanly instead.
+bool containsAddressableBool(mlir::Type Type) {
+  if (Type.isInteger(1))
+    return true;
+  if (auto StructTy = mlir::dyn_cast<mlir::spirv::StructType>(Type)) {
+    for (unsigned I = 0, E = StructTy.getNumElements(); I != E; ++I)
+      if (containsAddressableBool(StructTy.getElementType(I)))
+        return true;
+    return false;
+  }
+  if (auto ArrayTy = mlir::dyn_cast<mlir::spirv::ArrayType>(Type))
+    return containsAddressableBool(ArrayTy.getElementType());
+  return false;
+}
+
 /// Converts a `Workgroup`-storage-class `spirv.GlobalVariable` -- a GLSL
 /// `shared`/HLSL `groupshared` variable declared directly in SPIR-V, rather
 /// than raised from DXIL (see `feme::cpu::GroupSharedAddressSpace`'s own
@@ -1363,6 +1393,11 @@ public:
     auto SrcType = mlir::cast<mlir::spirv::PointerType>(Op.getType());
     if (SrcType.getStorageClass() != mlir::spirv::StorageClass::Workgroup)
       return Rewriter.notifyMatchFailure(Op, "not a workgroup variable");
+
+    if (containsAddressableBool(SrcType.getPointeeType()))
+      return Rewriter.notifyMatchFailure(
+          Op, "a bool member of a workgroup variable is not yet supported "
+              "(not byte-addressable)");
 
     mlir::Type DstType =
         getTypeConverter()->convertType(SrcType.getPointeeType());
