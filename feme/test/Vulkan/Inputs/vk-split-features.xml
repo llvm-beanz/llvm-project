@@ -7,9 +7,9 @@
      sub-features that do. It also covers alias resolution (`vkAliasCmd`)
      and a `<require depends="...">` block, which vk_gen_entrypoints.py must
      skip since it's conditioned on an optional extension, not the core
-     version itself. It also declares `VK_KHR_dynamic_rendering` and
-     `VK_EXT_extended_dynamic_state`, the two extensions
-     `SUPPORTED_EXTENSIONS` lists, whose commands must be read out
+     version itself. It also declares `VK_KHR_dynamic_rendering`,
+     `VK_EXT_extended_dynamic_state`, and `VK_KHR_maintenance5`, the three
+     extensions `SUPPORTED_EXTENSIONS` lists, whose commands must be read out
      of `<extensions>` rather than out of any core feature. -->
 <registry>
   <commands>
@@ -41,6 +41,10 @@
     <command>
       <proto><type>void</type><name>vkCmdSetCullModeEXT</name></proto>
       <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkGetRenderingAreaGranularityKHR</name></proto>
+      <param><type>VkDevice</type><name>device</name></param>
     </command>
   </commands>
   <feature api="vulkan" name="VK_BASE_VERSION_1_0" number="1.0">
@@ -88,6 +92,12 @@
                supported="vulkan">
       <require>
         <command name="vkCmdSetCullModeEXT"/>
+      </require>
+    </extension>
+    <extension name="VK_KHR_maintenance5" number="470" type="device"
+               supported="vulkan">
+      <require>
+        <command name="vkGetRenderingAreaGranularityKHR"/>
       </require>
     </extension>
   </extensions>

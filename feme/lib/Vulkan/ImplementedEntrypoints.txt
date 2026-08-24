@@ -90,6 +90,13 @@ vkCreateRenderPass
 vkCreateRenderPass2
 vkDestroyRenderPass
 vkGetRenderAreaGranularity
+# Roadmap E29: VK_KHR_maintenance5's dynamic-rendering counterpart, promoted
+# to core in 1.3; advertising maintenance5 without implementing any of its
+# commands left every one of them null, SIGSEGV'ing any caller
+# (dEQP-VK.api.granularity.in_dynamic_render_pass.*). Implemented under its
+# KHR name -- see the entrypoint generator's SUPPORTED_EXTENSIONS comment for
+# why the core name alone is not reachable through the loader.
+vkGetRenderingAreaGranularityKHR
 vkCreateFramebuffer
 vkDestroyFramebuffer
 

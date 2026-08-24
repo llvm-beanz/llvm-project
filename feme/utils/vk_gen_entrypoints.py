@@ -70,11 +70,18 @@ CORE_FEATURES = (
 # this driver advertises 1.2 -- see "Render passes and dynamic rendering" in
 # feme/docs/FeMeVulkanDesign.md; roadmap C4c: `VK_EXT_extended_dynamic_
 # state`'s 12 `vkCmdSet*EXT`/`vkCmdBindVertexBuffers2EXT` commands, closing
-# roadmap C4's "mapDynamicState beyond its six states"). Every name here
-# must also appear in `feme::vulkan::getSupportedDeviceExtensions`.
+# roadmap C4's "mapDynamicState beyond its six states"; roadmap E29:
+# `VK_KHR_maintenance5`'s own commands, for the same reason as dynamic
+# rendering above -- the loader's `icd.json` `api_version` (1.1) makes it
+# reject a direct, non-`KHR`-suffixed query for a command newer than that,
+# so this driver must implement the `KHR` name to be reachable through the
+# loader at all, confirmed by `dEQP-VK.api.granularity.
+# in_dynamic_render_pass.*` SIGSEGV'ing on exactly this gap). Every name
+# here must also appear in `feme::vulkan::getSupportedDeviceExtensions`.
 SUPPORTED_EXTENSIONS = (
     "VK_KHR_dynamic_rendering",
     "VK_EXT_extended_dynamic_state",
+    "VK_KHR_maintenance5",
 )
 
 # First-parameter handle types that make a command dispatched at the

@@ -370,6 +370,16 @@ vkGetRenderAreaGranularity(VkDevice, VkRenderPass, VkExtent2D *pGranularity) {
   pGranularity->height = 1;
 }
 
+VKAPI_ATTR void VKAPI_CALL
+vkGetRenderingAreaGranularityKHR(VkDevice, const VkRenderingAreaInfo *,
+                                VkExtent2D *pGranularity) {
+  // Same answer as vkGetRenderAreaGranularity above, for the same reason: a
+  // software rasterizer has no tile-alignment requirement, dynamic-rendering
+  // or otherwise.
+  pGranularity->width = 1;
+  pGranularity->height = 1;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     VkDevice, const VkFramebufferCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkFramebuffer *pFramebuffer) {

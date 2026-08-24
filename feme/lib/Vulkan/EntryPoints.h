@@ -212,6 +212,22 @@ vkDestroyRenderPass(VkDevice device, VkRenderPass renderPass,
 VKAPI_ATTR void VKAPI_CALL vkGetRenderAreaGranularity(VkDevice device,
                                                       VkRenderPass renderPass,
                                                       VkExtent2D *pGranularity);
+/// `VK_KHR_maintenance5`'s dynamic-rendering counterpart to
+/// `vkGetRenderAreaGranularity` above (promoted to core in 1.3), queryable
+/// before any `VkRenderPass` exists. Exposed under its `KHR` name for the
+/// same reason as `vkCmdBeginRenderingKHR` below: the loader's `icd.json`
+/// `api_version` (1.1) rejects a direct, non-`KHR`-suffixed query for a
+/// command newer than that, leaving `vkGetDeviceProcAddr` to return null for
+/// the core name and fall back to this one (roadmap E29).
+VKAPI_ATTR void VKAPI_CALL vkGetRenderingAreaGranularityKHR(
+    VkDevice device, const VkRenderingAreaInfo *pRenderingAreaInfo,
+    VkExtent2D *pGranularity);
+/// `VK_KHR_maintenance5`'s dynamic-rendering counterpart to
+/// `vkGetRenderAreaGranularity` above (promoted to core in 1.3), queryable
+/// before any `VkRenderPass` exists.
+VKAPI_ATTR void VKAPI_CALL vkGetRenderingAreaGranularity(
+    VkDevice device, const VkRenderingAreaInfo *pRenderingAreaInfo,
+    VkExtent2D *pGranularity);
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFramebuffer(
     VkDevice device, const VkFramebufferCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkFramebuffer *pFramebuffer);

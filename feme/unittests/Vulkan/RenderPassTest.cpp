@@ -459,4 +459,107 @@ TEST_F(RenderPassTest,
   vkDestroyRenderPass(Device, Pass, nullptr);
 }
 
+// Roadmap E29: this entrypoint was previously left unimplemented (a null
+// function pointer) despite VK_KHR_maintenance5 being advertised, SIGSEGV'ing
+// any caller (dEQP-VK.api.granularity.in_dynamic_render_pass.*).
+TEST_F(RenderPassTest, GetRenderingAreaGranularityReportsNonZeroGranularity) {
+  VkRenderingAreaInfo Info{};
+  Info.colorAttachmentCount = 0;
+  Info.pColorAttachmentFormats = nullptr;
+  VkExtent2D Granularity{};
+  vkGetRenderingAreaGranularityKHR(Device, &Info, &Granularity);
+  EXPECT_GE(Granularity.width, 1u);
+  EXPECT_GE(Granularity.height, 1u);
+}
+
+// Roadmap E29: mirrors dEQP-VK.api.granularity.in_dynamic_render_pass's own
+// full sequence (image, view, layout transition, both granularity queries
+// bracketing a dynamic render pass) for a packed 10-bit-per-component
+// format, the first case in that family this driver actually supports.
+TEST_F(RenderPassTest, DynamicRenderPassGranularitySequenceForPacked10BitFormat) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+  ImageInfo.extent = {1, 1, 1};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkMemoryRequirements Reqs{};
+  vkGetImageMemoryRequirements(Device, Img, &Reqs);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = Reqs.size;
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Memory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindImageMemory(Device, Img, Memory, 0), VK_SUCCESS);
+
+  VkImageViewCreateInfo ViewInfo{};
+  ViewInfo.image = Img;
+  ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+  ViewInfo.format = ImageInfo.format;
+  ViewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  VkImageView View = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImageView(Device, &ViewInfo, nullptr, &View), VK_SUCCESS);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool),
+            VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer Cmd = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &Cmd),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  VkImageMemoryBarrier Barrier{};
+  Barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  Barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  Barrier.image = Img;
+  Barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  vkCmdPipelineBarrier(Cmd, VK_PIPELINE_STAGE_HOST_BIT,
+                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &Barrier);
+
+  VkRenderingAreaInfo AreaInfo{};
+  AreaInfo.colorAttachmentCount = 1;
+  AreaInfo.pColorAttachmentFormats = &ImageInfo.format;
+  VkExtent2D PrePassGranularity{};
+  vkGetRenderingAreaGranularityKHR(Device, &AreaInfo, &PrePassGranularity);
+
+  VkRenderingAttachmentInfo ColorAttachment{};
+  ColorAttachment.imageView = View;
+  ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+  ColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+  ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.renderArea = {{0, 0}, {1, 1}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 1;
+  RenderingInfo.pColorAttachments = &ColorAttachment;
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+
+  VkExtent2D Granularity{};
+  vkGetRenderingAreaGranularityKHR(Device, &AreaInfo, &Granularity);
+  EXPECT_EQ(Granularity.width, PrePassGranularity.width);
+  EXPECT_EQ(Granularity.height, PrePassGranularity.height);
+
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyImageView(Device, View, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
 } // namespace
