@@ -349,6 +349,92 @@ public:
   }
 };
 
+/// Converts `spirv.GroupNonUniformRotateKHR` (roadmap F2,
+/// `VK_KHR_shader_subgroup_rotate`) -- the first `spirv.GroupNonUniform*` op
+/// this pass converts at all (`Vulkan14FeatureInventory.md` previously found
+/// none did, making `shaderSubgroupExtendedTypes` vacuously true for the same
+/// reason) -- into the invocation-id arithmetic the SPIR-V spec itself
+/// defines for this op, followed by an `llvm.spv.wave.readlane` shuffle to
+/// that invocation (which already lowers to `OpGroupNonUniformShuffle`).
+/// LLVM's SPIR-V backend has no generic `llvm.spv.*` intrinsic for the
+/// rotate operation itself (unlike `wave.readlane`'s direct mapping); its
+/// only path to `OpGroupNonUniformRotateKHR` is through OpenCL C's
+/// `sub_group[_clustered]_rotate` builtin *function calls*, a mechanism no
+/// other pattern in this file uses (every one calls an `llvm.spv.*`
+/// intrinsic directly, never an external function), so this expands the op
+/// into the equivalent shuffle instead, mirroring how `DotConversionPattern`
+/// below expands `spirv.Dot` into equivalent IR rather than relying on a
+/// call. Only `Subgroup` execution scope is implemented: `Workgroup`-scope
+/// rotate has no real HLSL/GLSL source in this ICD's frontend surface
+/// (`subgroupRotate`/`WaveRotate*`-family intrinsics are subgroup-only) and
+/// would need a different, shared-memory-based lowering this pattern does
+/// not provide.
+class RotateConversionPattern
+    : public mlir::SPIRVToLLVMConversion<
+          mlir::spirv::GroupNonUniformRotateKHROp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::GroupNonUniformRotateKHROp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::GroupNonUniformRotateKHROp Op,
+                  OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    if (Op.getExecutionScope() != mlir::spirv::Scope::Subgroup)
+      return Rewriter.notifyMatchFailure(
+          Op, "workgroup-scope rotate is not supported");
+
+    mlir::Type I32 = Rewriter.getI32Type();
+    if (Adaptor.getDelta().getType() != I32 ||
+        (Adaptor.getClusterSize() &&
+         Adaptor.getClusterSize().getType() != I32))
+      return Rewriter.notifyMatchFailure(
+          Op, "delta/cluster_size must be 32-bit (as every known producer "
+              "of this op emits)");
+
+    mlir::Location Loc = Op.getLoc();
+    // `LocalId`/`RotationGroupSize` and the rest of this arithmetic follow
+    // the SPIR-V spec's own definition of `OpGroupNonUniformRotateKHR`
+    // verbatim (see the op's own summary in SPIRVNonUniformOps.td):
+    //   RotationGroupSize = ClusterSize, if present, else SubgroupSize
+    //   InvocationId = ((LocalId + Delta) & (RotationGroupSize - 1)) +
+    //                  (LocalId & ~(RotationGroupSize - 1))
+    mlir::Value LocalId = createIntrinsicCall(
+        Rewriter, Loc, "llvm.spv.subgroup.local.invocation.id", I32, {});
+    mlir::Value GroupSize =
+        Adaptor.getClusterSize()
+            ? Adaptor.getClusterSize()
+            : createIntrinsicCall(Rewriter, Loc, "llvm.spv.subgroup.size",
+                                  I32, {});
+    mlir::Value One =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, 1);
+    mlir::Value Mask =
+        mlir::LLVM::SubOp::create(Rewriter, Loc, GroupSize, One);
+    mlir::Value AllOnes =
+        mlir::LLVM::ConstantOp::create(Rewriter, Loc, I32, -1);
+    mlir::Value NotMask =
+        mlir::LLVM::XOrOp::create(Rewriter, Loc, Mask, AllOnes);
+    mlir::Value Rotated =
+        mlir::LLVM::AddOp::create(Rewriter, Loc, LocalId, Adaptor.getDelta());
+    mlir::Value RotatedMasked =
+        mlir::LLVM::AndOp::create(Rewriter, Loc, Rotated, Mask);
+    mlir::Value BaseMasked =
+        mlir::LLVM::AndOp::create(Rewriter, Loc, LocalId, NotMask);
+    mlir::Value InvocationId = mlir::LLVM::AddOp::create(
+        Rewriter, Loc, RotatedMasked, BaseMasked);
+
+    mlir::Type ResultType =
+        getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    Rewriter.replaceOp(
+        Op, createIntrinsicCall(Rewriter, Loc, "llvm.spv.wave.readlane",
+                                ResultType,
+                                {Adaptor.getValue(), InvocationId}));
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.Dot` -- which, like `spirv.Switch` above, MLIR has no
 /// pattern for at all -- into a per-lane `llvm.intr.fmuladd` chain, mirroring
 /// `feme::dxil::expandFDot`'s expansion of the analogous (post-raising)
@@ -2391,11 +2477,12 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
       ImageWritePattern, LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
-      SampledImagePattern, SDotConversionPattern, UDotConversionPattern,
-      SUDotConversionPattern, SDotAccSatConversionPattern,
-      UDotAccSatConversionPattern, SUDotAccSatConversionPattern,
-      SpecConstantErasurePattern, StageIOGlobalVariablePattern,
-      SwitchConversionPattern, TerminateInvocationConversionPattern,
+      RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
+      UDotConversionPattern, SUDotConversionPattern,
+      SDotAccSatConversionPattern, UDotAccSatConversionPattern,
+      SUDotAccSatConversionPattern, SpecConstantErasurePattern,
+      StageIOGlobalVariablePattern, SwitchConversionPattern,
+      TerminateInvocationConversionPattern,
       WorkgroupGlobalVariablePattern>(Patterns.getContext(), TypeConverter,
                                       FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
