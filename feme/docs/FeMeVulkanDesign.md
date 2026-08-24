@@ -552,8 +552,12 @@ one deliberate exception. `hostQueryReset` (`vkResetQueryPool` already
 existed), `uniformBufferStandardLayout`/`separateDepthStencilLayouts`
 (neither restriction they relax was ever enforced), and
 `shaderSubgroupExtendedTypes`/`subgroupBroadcastDynamicId` (vacuously true:
-no `OpGroupNonUniform*` operation is converted at all yet, so neither bit
-unlocks an untested code path) are now advertised, each through both its
+`subgroupBroadcastDynamicId` unlocks nothing this ICD checks either way,
+and although roadmap F2 later gave `spirv.GroupNonUniformRotateKHR` a real
+conversion pattern, that op's own operand types never exercise an
+8/16-bit/bool group operation, so `shaderSubgroupExtendedTypes` still
+unlocks no untested code path -- see `Vulkan14FeatureInventory.md`'s F2
+finding) are now advertised, each through both its
 dedicated feature struct and the aggregate `VkPhysicalDeviceVulkan12Features`
 chain. `maxMemoryAllocationSize` (mirrors the real memory heap size),
 `maxPerSetDescriptors`, `maxMultiviewViewCount`/`maxMultiviewInstanceIndex`,
