@@ -33,15 +33,21 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F15b?
+Can you implement roadmap milestone F15c?
 
-> **Actually produce `DenormFlushToZero` code for
-> `VK_KHR_shader_float_controls`** (F15a's own remaining half; still only
-> diagnosed, per F3). Unlike `RoundingModeRTZ`, LLVM has no
-> constrained-intrinsics equivalent for flush-to-zero --
-> `denormal-fp-math`/`denormal-fp-math-f32` are whole-function attributes
-> covering `f32` only, not `f16`/`f64` independently -- so honoring this
-> execution mode's own per-width operand likely needs an explicit software flush
-> (zero any subnormal operand/result of the declared width's arithmetic ops)
-> rather than an intrinsic swap, a materially different lowering strategy than
-> F15a's
+> **`VK_KHR_shader_float_controls2`/`shaderFloatControls2`**: per-instruction
+> (rather than only per-entry-point) `FPRoundingMode` decorations -- MLIR's
+> `spirv` dialect already models the decoration (`SPIRV_FPRoundingModeAttr`), so
+> this is "read a decoration on the individual `spirv.FAdd`/etc. op, not a
+> whole-entry-point `spirv.ExecutionMode`, then reuse F15a's
+> `ConstrainedRoundTowardZeroPattern`-shaped lowering" rather than a new
+> lowering strategy -- plus the extension's own
+> `FPFastMathMode`/`FPFastMathDefault` decorations
+> (contraction/reassociation/etc. fast-math bits), which are a separate,
+> additive mechanism (LLVM's ordinary fast-math flags) rather than another
+> constrained-intrinsics consumer. `VK_KHR_shader_float_controls2` does **not**
+> add a per-instruction denorm-mode decoration at all (confirmed against the
+> SPIR-V spec and LLVM's own `SPIRVSymbolicOperands.td`, which has no
+> `FPDenormMode` decoration whatsoever) -- F15's original text assumed one
+> existed; F15b's whole-execution-mode `DenormFlushToZero` remains the only way
+> to ask for flushed denormals
