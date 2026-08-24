@@ -30422,3 +30422,130 @@ unrelated), after every commit in this row. Two new lit tests
 (`spirv-to-llvm-rounding-mode-rtz.mlir`, replacing the now-stale
 `spirv-to-llvm-rounding-mode-rtz-invalid.mlir`, and
 `spirv-backend-rounding-mode-rtz.mlir`).
+# Agent thoughts: roadmap F15b (VK_KHR_shader_float_controls' DenormFlushToZero codegen)
+
+F15b was F15a's own predicted remaining half: F15a's row explicitly called
+out that flush-to-zero would need "a materially different lowering
+strategy" from `RoundingModeRTZ`'s constrained-intrinsics swap, since LLVM
+has no `llvm.experimental.constrained.*` equivalent for denormal handling
+-- `denormal-fp-math`/`denormal-fp-math-f32` are whole-function attributes
+covering `f32` only, not the independent per-width, per-execution-mode
+request `DenormFlushToZero` actually makes. That prediction held up
+exactly: the fix is a software flush, not an intrinsic substitution.
+
+## The lowering
+
+Each of `spirv.FAdd`/`FSub`/`FMul`/`FDiv`/`FRem` gets a new
+`flushSubnormalToZero` helper applied to both operands (before the op) and
+to the op's own result (after it), whenever the enclosing entry point
+declared `DenormFlushToZero` for that op's bit width:
+
+1. `llvm.is.fpclass` with bit mask `0x90` (the two subnormal classes,
+   negative and positive) tests whether the value is subnormal.
+2. `llvm.copysign(0.0, value)` produces a same-signed zero -- needed so a
+   later sign-dependent op (e.g. a subsequent `spirv.FDiv` by the flushed
+   value producing a signed infinity) behaves as if the value had genuinely
+   been zero all along, not just magnitude-zero.
+3. `llvm.select` picks the flushed zero or the original value.
+
+I did not keep `RoundingModeRTZ`'s `ConstrainedRoundTowardZeroPattern` and
+a new, separate `DenormFlushToZeroPattern` as two independent patterns.
+`VK_KHR_shader_float_controls` execution modes are not mutually exclusive:
+a single entry point can legally declare both `RoundingModeRTZ` and
+`DenormFlushToZero` for the same bit width. Two separate patterns at the
+same benefit registered for the same op type would leave the dialect
+conversion framework to arbitrarily pick one (MLIR's pattern-application
+order for equal-benefit patterns is not something I wanted this row's
+correctness to depend on), and neither pattern alone could produce the
+*combined* behavior (flush operands, round toward zero, flush result) a
+shader declaring both actually needs. So I unified both into one
+`FloatControlArithmeticPattern<SPIRVOp, PlainOp, ConstrainedIntrOp>`
+template, taking both widths maps and applying whichever combination of
+"flush operands", "round toward zero (constrained intrinsic) vs. plain op",
+and "flush result" the declared modes call for -- verified with a
+dedicated combined-mode lit test case
+(`spirv-to-llvm-denorm-flush-to-zero.mlir`'s third split, `RUN` block).
+This did require renaming the old `ConstrainedRoundTowardZeroPattern` and
+folding its logic in, rather than leaving it untouched and purely additive
+-- a slightly larger diff than a from-scratch new pattern would have been,
+but the alternative (two patterns that silently conflict on the rare
+"both modes, same width" input) felt like the wrong trade for a Vulkan
+extension whose own spec explicitly allows that combination.
+
+`collectEntryPoints`'s `rejectUnhonoredFloatControls` diagnostic -- the
+one piece of F3/F15's original scope that hard-rejected a shader for
+declaring `DenormFlushToZero` -- is gone entirely now that nothing needs
+rejecting: every `VK_KHR_shader_float_controls` execution mode this
+conversion sees is genuinely honored (three by construction, two by an
+explicit lowering pattern), so there is no longer any mode left for that
+function to diagnose. I deleted it, and its now-unused
+`getFloatControlModeName` helper, rather than leaving dead code behind.
+
+## Testing
+
+Replaced the now-stale `spirv-to-llvm-denorm-flush-to-zero-invalid.mlir`
+(which asserted the hard-rejection diagnostic that no longer exists) with
+`spirv-to-llvm-denorm-flush-to-zero.mlir`, three split `RUN` cases:
+straight-line codegen for a single `DenormFlushToZero`-declared width,
+a wrong-bit-width case confirming the plain, unflushed op survives for a
+width the mode was not declared for (mirroring
+`spirv-to-llvm-rounding-mode-rtz.mlir`'s own wrong-width case), and a
+combined `DenormFlushToZero` + `RoundingModeRTZ` case confirming the two
+modes compose. Generated every `CHECK` line's exact expected IR shape by
+first running `feme-opt --feme-convert-spirv-to-llvm` on the same input
+manually and inspecting the real output, rather than guessing at
+`llvm.is.fpclass`/`llvm.copysign`'s exact MLIR spelling. Updated the two
+sibling tests' (`spirv-to-llvm-float-controls.mlir`,
+`spirv-to-llvm-rounding-mode-rtz.mlir`) doc comments that cross-referenced
+the now-deleted invalid test.
+
+`ninja check-feme` (assertions-enabled, ccache build, this session's
+existing `./build`): 1699/1700 passed, 1 unsupported (pre-existing,
+unrelated), both before and after every commit in this row.
+
+One clang-format false start worth recording: running `clang-format -i` on
+the full modified files reformatted a lot of pre-existing, unrelated code
+elsewhere in the same files (whose line lengths were already right at the
+80-column boundary, and apparently formatted by a slightly different
+clang-format version than the one available in this session) -- a diff
+far larger than this row's own change. I reverted that and hand-verified
+80-column compliance for only the lines I actually touched instead, rather
+than let clang-format silently expand this row's diff into an unrelated,
+whole-file reformatting.
+
+## CTS run
+
+Same targeted subset F15a's own report used:
+`dEQP-VK.spirv_assembly.instruction.compute.float_controls.*` (2,569 cases
+in this session's CTS checkout; F15a's report recorded 2,569 as well, so
+the count is stable release-to-release here even though the checkout has
+moved forward). Baseline (this row's code landed, `VK_FALSE` still
+advertised): 1/0/2,568, unchanged. Temporarily flipped
+`shaderDenormFlushToZeroFloat{16,32,64}` to `VK_TRUE` (both the dedicated
+`VkPhysicalDeviceFloatControlsProperties` struct and its
+`VkPhysicalDeviceVulkan12Properties` promoted twin) to check whether the
+new codegen is CTS-ready: found the exact same regression shape F15a's own
+row found for `RoundingModeRTZ` -- 171 new failures, all reaching
+`vkCreateComputePipelines` and failing there on the identical, unrelated,
+pre-existing `feme::cpu` resource-lowering gap (confirmed by spot-checking
+one failing case's error). Reverted the flip rather than either leave the
+regression in place or scope-creep this row into fixing the unrelated
+gap, matching F15a's own precedent exactly, and documented both the
+finding and the revert in `VulkanCTSReport.md`'s new "Roadmap F15b:
+measured impact" section, `EntryPoints.cpp`'s own comment, and
+`Vulkan14FeatureInventory.md`'s `VK_KHR_shader_float_controls` row.
+
+## Documentation updates
+
+- `feme/docs/Roadmap.md`: struck through F15b, and removed it from the
+  Lane 1 recommended-independent-lanes list (only F15c remains gated on
+  F15a there now).
+- `feme/docs/Vulkan14FeatureInventory.md`: `VK_KHR_shader_float_controls`'s
+  row now describes both `RoundingModeRTZ` and `DenormFlushToZero` as
+  genuinely honored (rather than the latter being hard-rejected), still
+  not advertised for the same unrelated resource-lowering reason.
+  `shaderFloatControls2`'s F15c row's cross-reference to the old
+  `ConstrainedRoundTowardZeroPattern` name updated to
+  `FloatControlArithmeticPattern`.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap F15b: measured impact"
+  section, mirroring F15a's own.
