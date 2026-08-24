@@ -1539,11 +1539,18 @@ feme::vulkan::vkGetPhysicalDeviceImageFormatProperties(
   MaxProbe.arrayLayers =
       type == VK_IMAGE_TYPE_3D ? 1 : Limits.maxImageArrayLayers;
   VkSampleCountFlags SampleCounts = supportedSampleCounts(Info, usage);
-  // A multisample image is only ever a single-mip 2D one (`isValidImageShape`
-  // above), so a type/mip combination that cannot be multisampled reports
-  // only `VK_SAMPLE_COUNT_1_BIT`, matching the shape this query's other
-  // maxima (`maxMipLevels`, `maxArrayLayers`) already assume.
-  if (type != VK_IMAGE_TYPE_2D || MaxProbe.mipLevels != 1)
+  // A multisample image is only ever a single-mip 2D one
+  // (`isValidImageShape`'s own `VUID-VkImageCreateInfo-samples-02257` check
+  // above), but that is a property of *a* multisample image's own shape
+  // (samples > 1 implies mipLevels == 1), not of `MaxProbe`'s unrelated
+  // maximal, non-multisampled mip chain -- checking `MaxProbe.mipLevels`
+  // here instead reported `VK_SAMPLE_COUNT_1_BIT` for essentially every 2D
+  // format (whose maximal image always has more than one mip level),
+  // permanently hiding every wider sample count `supportedSampleCounts`
+  // above already computes correctly (`dEQP-VK.glsl.texture_functions.
+  // query.texturesamples.*`, whose `OpImageQuerySamples` case list assumes
+  // a 2D sampled image can report more than one).
+  if (type != VK_IMAGE_TYPE_2D)
     SampleCounts = VK_SAMPLE_COUNT_1_BIT;
 
   pImageFormatProperties->maxExtent = MaxProbe.extent;

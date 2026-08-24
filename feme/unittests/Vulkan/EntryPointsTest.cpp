@@ -159,6 +159,39 @@ TEST_F(EntryPointsTest, ImageFormatPropertiesReportsRealLimitsFor2DSampled) {
   EXPECT_GT(Props.maxResourceSize, VkDeviceSize(0));
 }
 
+// Roadmap E29: this query's own sampleCounts result was gated on
+// MaxProbe.mipLevels != 1 -- the *maximal, single-sample* image's own mip
+// chain length, which is unrelated to whether *a* single-mip multisample
+// image of this type/usage can exist -- so it collapsed to
+// VK_SAMPLE_COUNT_1_BIT for essentially every 2D format (whose maximal
+// image always has more than one mip level), permanently hiding every
+// wider sample count PhysicalDeviceInfo.cpp's own limits already advertise.
+// dEQP-VK.glsl.texture_functions.query.texturesamples.* SIGSEGV'd on this:
+// it assumes a 2D sampled image can report more than one sample and
+// indexes an empty vector (an omitted `DE_ASSERT(false)`, compiled out in
+// this build) when none is offered.
+TEST_F(EntryPointsTest, ImageFormatPropertiesReportsMultisampleFor2DSampled) {
+  VkImageFormatProperties Props{};
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_2D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_SUCCESS);
+  EXPECT_TRUE(Props.sampleCounts & VK_SAMPLE_COUNT_2_BIT);
+  EXPECT_TRUE(Props.sampleCounts & VK_SAMPLE_COUNT_4_BIT);
+}
+
+// A 1D/3D image can never be multisampled in real Vulkan
+// (`VUID-VkImageCreateInfo-samples-02257`, `isValidImageShape`'s own
+// check), unlike 2D above.
+TEST_F(EntryPointsTest, ImageFormatPropertiesReportsSingleSampleFor3D) {
+  VkImageFormatProperties Props{};
+  ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
+                Physical, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_TYPE_3D,
+                VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_SAMPLED_BIT, 0, &Props),
+            VK_SUCCESS);
+  EXPECT_EQ(Props.sampleCounts, VkSampleCountFlags(VK_SAMPLE_COUNT_1_BIT));
+}
+
 TEST_F(EntryPointsTest, ImageFormatProperties3DReportsSingleArrayLayer) {
   VkImageFormatProperties Props{};
   ASSERT_EQ(vkGetPhysicalDeviceImageFormatProperties(
