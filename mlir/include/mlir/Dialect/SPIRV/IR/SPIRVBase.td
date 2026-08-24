@@ -345,6 +345,7 @@ def SPV_KHR_non_semantic_info                : I32EnumAttrCase<"SPV_KHR_non_sema
 def SPV_KHR_terminate_invocation             : I32EnumAttrCase<"SPV_KHR_terminate_invocation", 30>;
 def SPV_KHR_cooperative_matrix               : I32EnumAttrCase<"SPV_KHR_cooperative_matrix", 31>;
 def SPV_KHR_bfloat16                         : I32EnumAttrCase<"SPV_KHR_bfloat16", 32>;
+def SPV_KHR_float_controls2                  : I32EnumAttrCase<"SPV_KHR_float_controls2", 33>;
 
 def SPV_EXT_demote_to_helper_invocation  : I32EnumAttrCase<"SPV_EXT_demote_to_helper_invocation", 1000>;
 def SPV_EXT_descriptor_indexing          : I32EnumAttrCase<"SPV_EXT_descriptor_indexing", 1001>;
@@ -445,7 +446,7 @@ def SPIRV_ExtensionAttr :
       SPV_KHR_fragment_shader_barycentric, SPV_KHR_ray_cull_mask,
       SPV_KHR_uniform_group_instructions, SPV_KHR_subgroup_rotate,
       SPV_KHR_non_semantic_info, SPV_KHR_terminate_invocation,
-      SPV_KHR_cooperative_matrix, SPV_KHR_bfloat16,
+      SPV_KHR_cooperative_matrix, SPV_KHR_bfloat16, SPV_KHR_float_controls2,
       SPV_EXT_demote_to_helper_invocation, SPV_EXT_descriptor_indexing,
       SPV_EXT_fragment_fully_covered, SPV_EXT_fragment_invocation_density,
       SPV_EXT_fragment_shader_interlock, SPV_EXT_physical_storage_buffer,
@@ -866,6 +867,11 @@ def SPIRV_C_ReplicatedCompositesEXT                     : I32EnumAttrCase<"Repli
 def SPIRV_C_BitInstructions                             : I32EnumAttrCase<"BitInstructions", 6025> {
   list<Availability> availability = [
     Extension<[SPV_KHR_bit_instructions]>
+  ];
+}
+def SPIRV_C_FloatControls2                              : I32EnumAttrCase<"FloatControls2", 6029> {
+  list<Availability> availability = [
+    Extension<[SPV_KHR_float_controls2]>
   ];
 }
 def SPIRV_C_AtomicFloat32AddEXT                         : I32EnumAttrCase<"AtomicFloat32AddEXT", 6033> {
@@ -1552,7 +1558,8 @@ def SPIRV_CapabilityAttr :
       SPIRV_C_FPGARegINTEL, SPIRV_C_DotProductInputAll,
       SPIRV_C_DotProductInput4x8BitPacked, SPIRV_C_DotProduct, SPIRV_C_RayCullMaskKHR,
       SPIRV_C_CooperativeMatrixKHR, SPIRV_C_ReplicatedCompositesEXT,
-      SPIRV_C_BitInstructions, SPIRV_C_AtomicFloat32AddEXT, SPIRV_C_AtomicFloat64AddEXT,
+      SPIRV_C_BitInstructions, SPIRV_C_FloatControls2,
+      SPIRV_C_AtomicFloat32AddEXT, SPIRV_C_AtomicFloat64AddEXT,
       SPIRV_C_LongCompositesINTEL, SPIRV_C_OptNoneINTEL,
       SPIRV_C_AtomicFloat16AddEXT, SPIRV_C_DebugInfoModuleINTEL, SPIRV_C_SplitBarrierINTEL,
       SPIRV_C_GroupUniformArithmeticKHR, SPIRV_C_Shader, SPIRV_C_Vector16,
@@ -2351,7 +2358,10 @@ def SPIRV_D_FuncParamAttr                      : I32EnumAttrCase<"FuncParamAttr"
 def SPIRV_D_FPRoundingMode                     : I32EnumAttrCase<"FPRoundingMode", 39>;
 def SPIRV_D_FPFastMathMode                     : I32EnumAttrCase<"FPFastMathMode", 40> {
   list<Availability> availability = [
-    Capability<[SPIRV_C_Kernel]>
+    // `VK_KHR_shader_float_controls2` lifts the `Kernel`-only restriction:
+    // its own `AllowContract`/`AllowReassoc`/`AllowTransform` bits (below)
+    // are enabled by `FloatControls2` instead (roadmap F15d).
+    Capability<[SPIRV_C_Kernel, SPIRV_C_FloatControls2]>
   ];
 }
 def SPIRV_D_LinkageAttributes                  : I32EnumAttrCase<"LinkageAttributes", 41> {
@@ -3014,6 +3024,12 @@ def SPIRV_EM_RoundingModeRTZ                  : I32EnumAttrCase<"RoundingModeRTZ
     Capability<[SPIRV_C_RoundingModeRTZ]>
   ];
 }
+def SPIRV_EM_FPFastMathDefault                : I32EnumAttrCase<"FPFastMathDefault", 6028> {
+  list<Availability> availability = [
+    Extension<[SPV_KHR_float_controls2]>,
+    Capability<[SPIRV_C_FloatControls2]>
+  ];
+}
 def SPIRV_EM_EarlyAndLateFragmentTestsAMD     : I32EnumAttrCase<"EarlyAndLateFragmentTestsAMD", 5017> {
   list<Availability> availability = [
     Extension<[SPV_AMD_shader_early_and_late_fragment_tests]>,
@@ -3210,7 +3226,8 @@ def SPIRV_ExecutionModeAttr :
       SPIRV_EM_SubgroupUniformControlFlowKHR, SPIRV_EM_PostDepthCoverage,
       SPIRV_EM_DenormPreserve, SPIRV_EM_DenormFlushToZero,
       SPIRV_EM_SignedZeroInfNanPreserve, SPIRV_EM_RoundingModeRTE,
-      SPIRV_EM_RoundingModeRTZ, SPIRV_EM_EarlyAndLateFragmentTestsAMD,
+      SPIRV_EM_RoundingModeRTZ, SPIRV_EM_FPFastMathDefault,
+      SPIRV_EM_EarlyAndLateFragmentTestsAMD,
       SPIRV_EM_StencilRefReplacingEXT, SPIRV_EM_StencilRefUnchangedFrontAMD,
       SPIRV_EM_StencilRefGreaterFrontAMD, SPIRV_EM_StencilRefLessFrontAMD,
       SPIRV_EM_StencilRefUnchangedBackAMD, SPIRV_EM_StencilRefGreaterBackAMD,
@@ -5018,14 +5035,35 @@ def SPIRV_FPFMM_NotInf       : I32BitEnumAttrCaseBit<"NotInf", 1>;
 def SPIRV_FPFMM_NSZ          : I32BitEnumAttrCaseBit<"NSZ", 2>;
 def SPIRV_FPFMM_AllowRecip   : I32BitEnumAttrCaseBit<"AllowRecip", 3>;
 def SPIRV_FPFMM_Fast         : I32BitEnumAttrCaseBit<"Fast", 4>;
+// `VK_KHR_shader_float_controls2` (roadmap F15d) reuses these same two bit
+// positions for its own, non-vendor `AllowContract`/`AllowReassoc` names
+// (confirmed against the SPIR-V registry's own extension text) rather than
+// adding new ones -- an MLIR bit-enum case is keyed by its underlying value
+// for switch-based codegen (`SPIRVEnumAvailability.cpp.inc`), so a second
+// enumerant at the same bit position is a duplicate-case compile error, not
+// a distinguishable name the way it is in the SPIR-V binary encoding itself.
+// Widening this one enumerant's own capability list (rather than adding a
+// same-valued sibling) is the only way to model that reuse: a module
+// setting this bit is accepted whether it declared `FPFastMathModeINTEL` or
+// `FloatControls2`, and the deserializer -- which only ever sees the raw
+// bit, never either capability's own name -- reads it as this enumerant
+// either way.
 def SPIRV_FPFMM_AllowContractFastINTEL : I32BitEnumAttrCaseBit<"AllowContractFastINTEL", 16> {
   list<Availability> availability = [
-    Capability<[SPIRV_C_FPFastMathModeINTEL]>
+    Capability<[SPIRV_C_FPFastMathModeINTEL, SPIRV_C_FloatControls2]>
   ];
 }
 def SPIRV_FPFMM_AllowReassocINTEL : I32BitEnumAttrCaseBit<"AllowReassocINTEL", 17> {
   list<Availability> availability = [
-    Capability<[SPIRV_C_FPFastMathModeINTEL]>
+    Capability<[SPIRV_C_FPFastMathModeINTEL, SPIRV_C_FloatControls2]>
+  ];
+}
+// `AllowTransform`, unlike the pair above, has no `INTEL` vendor bit at all
+// to share a position with: it is genuinely new, added directly by
+// `VK_KHR_shader_float_controls2`.
+def SPIRV_FPFMM_AllowTransform : I32BitEnumAttrCaseBit<"AllowTransform", 18> {
+  list<Availability> availability = [
+    Capability<[SPIRV_C_FloatControls2]>
   ];
 }
 
@@ -5033,7 +5071,7 @@ def SPIRV_FPFastMathModeAttr :
     SPIRV_BitEnumAttr<"FPFastMathMode", "Indicates a floating-point fast math flag", "fastmath_mode", [
       SPIRV_FPFMM_None, SPIRV_FPFMM_NotNaN, SPIRV_FPFMM_NotInf, SPIRV_FPFMM_NSZ,
       SPIRV_FPFMM_AllowRecip, SPIRV_FPFMM_Fast, SPIRV_FPFMM_AllowContractFastINTEL,
-      SPIRV_FPFMM_AllowReassocINTEL
+      SPIRV_FPFMM_AllowReassocINTEL, SPIRV_FPFMM_AllowTransform
     ]>;
 
 //===----------------------------------------------------------------------===//
