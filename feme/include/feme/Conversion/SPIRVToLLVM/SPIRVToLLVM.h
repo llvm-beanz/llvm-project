@@ -110,7 +110,10 @@ StageIOInfoMap prepareStageIOVariables(mlir::spirv::ModuleOp Module);
 /// `spirv.ExecutionMode` before the conversion drops it (see
 /// ConvertSPIRVToLLVMPass.cpp's collectEntryPoints), since by the time an
 /// arithmetic FP op's own conversion pattern runs, the execution mode may
-/// already have been legalized away.
+/// already have been legalized away. `DenormFlushToZero`'s own declared
+/// widths (roadmap F15b) are recovered into a distinct map of this same
+/// type, since an entry point may declare either, both (for the same or
+/// different widths), or neither.
 using FloatControlInfoMap = llvm::StringMap<llvm::SmallVector<unsigned, 3>>;
 
 /// Adds the type conversions the patterns below rely on to \p TypeConverter,
@@ -128,16 +131,17 @@ void populateSPIRVToLLVMTargetTypeConversions(
 /// `mlir::populateSPIRVToLLVMConversionPatterns`.
 /// \p Resources must have been collected by prepareResourceVariables, and
 /// \p StageIOVariables by prepareStageIOVariables; both must outlive
-/// \p Patterns. \p RoundingModeRTZWidths, likewise outliving \p Patterns, is
-/// recovered by ConvertSPIRVToLLVMPass.cpp's collectEntryPoints -- FeMe's own
-/// pass, not this file, since it is read from `spirv.ExecutionMode`, an op
-/// outside a `spirv.func` body these per-op conversion patterns otherwise
-/// never see.
+/// \p Patterns. \p RoundingModeRTZWidths and \p DenormFlushToZeroWidths,
+/// likewise outliving \p Patterns, are recovered by
+/// ConvertSPIRVToLLVMPass.cpp's collectEntryPoints -- FeMe's own pass, not
+/// this file, since they are read from `spirv.ExecutionMode`, an op outside
+/// a `spirv.func` body these per-op conversion patterns otherwise never see.
 void populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables,
-    const FloatControlInfoMap &RoundingModeRTZWidths);
+    const FloatControlInfoMap &RoundingModeRTZWidths,
+    const FloatControlInfoMap &DenormFlushToZeroWidths);
 
 /// Creates the pass converting every `spirv.module` nested in a builtin
 /// module into the `llvm` dialect, targeting LLVM's in-tree `SPIRV` backend.

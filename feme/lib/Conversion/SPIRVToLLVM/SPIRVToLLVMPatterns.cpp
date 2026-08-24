@@ -2117,12 +2117,11 @@ public:
 /// modes: they already describe the strict, denormal-preserving,
 /// round-to-nearest-even code every FP op conversion pattern produces by
 /// default, so, like `LocalSize`, they need only be read (which
-/// `collectEntryPoints`'s `rejectUnhonoredFloatControls` does) before being
-/// dropped here with everything else. `RoundingModeRTZ` is read the same
-/// way, into the widths ConstrainedRoundTowardZeroPattern below consults
-/// (roadmap F15a); `DenormFlushToZero` (roadmap F15b) is the one mode
-/// `rejectUnhonoredFloatControls` still rejects outright, since nothing
-/// downstream can honor it.
+/// `collectEntryPoints` does) before being dropped here with everything
+/// else. `RoundingModeRTZ` and `DenormFlushToZero` are read the same way,
+/// into the widths FloatControlArithmeticPattern below consults to honor
+/// them (roadmap F15a/F15b): every `VK_KHR_shader_float_controls` execution
+/// mode is now genuinely honored rather than merely diagnosed.
 class ExecutionModePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ExecutionModeOp> {
 public:
@@ -2137,36 +2136,91 @@ public:
   }
 };
 
+/// Returns a bool-typed (`i1`) value with the same shape as \p Ty: `i1`
+/// itself for a scalar float type, or a vector of `i1` with the same shape
+/// for a vector one. This is the result type `llvm.is.fpclass` (see
+/// flushSubnormalToZero) needs alongside \p Ty's own arithmetic operands.
+mlir::Type getBoolTypeLike(mlir::Type Ty) {
+  mlir::Type I1 = mlir::IntegerType::get(Ty.getContext(), 1);
+  if (auto Shaped = mlir::dyn_cast<mlir::ShapedType>(Ty))
+    return Shaped.clone(I1);
+  return I1;
+}
+
+/// Returns a same-signed zero of \p V's type if \p V is subnormal, or \p V
+/// itself otherwise: the "software flush-to-zero" `DenormFlushToZero`
+/// (roadmap F15b) needs in place of an intrinsic swap, since, unlike
+/// `RoundingModeRTZ`, LLVM has no constrained-intrinsics equivalent for
+/// flush-to-zero, and its `denormal-fp-math`/`denormal-fp-math-f32`
+/// function attributes cover only `f32` as a whole function, not this
+/// execution mode's own independent per-width, per-operation request.
+/// `llvm.is.fpclass`'s bit mask `0x90` is the two subnormal classes (`0x10`
+/// negative, `0x80` positive; see LLVM's LangRef, "'llvm.is.fpclass'
+/// Intrinsic"); `llvm.copysign` then gives the flushed zero \p V's own sign
+/// so a subsequent operation's sign-dependent behavior (e.g. `spirv.FDiv`
+/// by it producing a signed infinity) is unaffected by the flush itself.
+mlir::Value flushSubnormalToZero(mlir::ConversionPatternRewriter &Rewriter,
+                                  mlir::Location Loc, mlir::Value V) {
+  constexpr uint32_t SubnormalClassMask = 0x90;
+  mlir::Type Ty = V.getType();
+  mlir::Value IsSubnormal = mlir::LLVM::IsFPClass::create(
+      Rewriter, Loc, getBoolTypeLike(Ty), V, SubnormalClassMask);
+  mlir::Value Zero = mlir::LLVM::ConstantOp::create(
+      Rewriter, Loc, Ty, Rewriter.getZeroAttr(Ty));
+  mlir::Value SignedZero =
+      mlir::LLVM::CopySignOp::create(Rewriter, Loc, Ty, Zero, V);
+  return mlir::LLVM::SelectOp::create(Rewriter, Loc, Ty, IsSubnormal,
+                                       SignedZero, V);
+}
+
 /// Converts an arithmetic FP `spirv` op that would otherwise become MLIR's
-/// plain, round-to-nearest-even `LLVMOp` (upstream `SPIRVToLLVM.cpp`'s
-/// `DirectConversionPattern`) into LLVM's constrained
-/// `llvm.experimental.constrained.*` intrinsic instead, with an explicit
-/// round-toward-zero rounding mode, whenever \p Op's own bit width is one
-/// the enclosing entry point declared `RoundingModeRTZ` for (roadmap F15a)
-/// -- the concrete, "actually produces truncating-rounding code" half of
-/// that execution mode this conversion previously could only diagnose, not
-/// honor (see rejectUnhonoredFloatControls, ConvertSPIRVToLLVMPass.cpp).
-/// Every other bit width, and every entry point that never declared the
-/// mode, falls through (a match failure, the same as any other pattern that
-/// does not apply) to MLIR's own lower-benefit `DirectConversionPattern`,
-/// unchanged. The exception behavior is always "ignore": Vulkan shaders have
-/// no floating-point trap mechanism to honor a stricter one, and this
-/// conversion's default (unconstrained) ops do not honor one either.
+/// plain, round-to-nearest-even, denormal-preserving `PlainOp` (upstream
+/// `SPIRVToLLVM.cpp`'s `DirectConversionPattern`) into whichever of the
+/// following \p Op's own bit width was declared for by the enclosing entry
+/// point's `VK_KHR_shader_float_controls` execution modes (the concrete,
+/// "actually produces the requested code" half of these modes this
+/// conversion previously could only diagnose, not honor -- see roadmap
+/// F15a/F15b and (historically) rejectUnhonoredFloatControls,
+/// ConvertSPIRVToLLVMPass.cpp):
+///
+/// - `RoundingModeRTZ` (F15a): the operation itself becomes LLVM's
+///   constrained `llvm.experimental.constrained.*` intrinsic
+///   (\p ConstrainedIntrOp) with an explicit round-toward-zero rounding
+///   mode, rather than \p PlainOp. The exception behavior is always
+///   "ignore": Vulkan shaders have no floating-point trap mechanism to
+///   honor a stricter one, and \p PlainOp does not honor one either.
+/// - `DenormFlushToZero` (F15b): both operands, and the operation's result,
+///   are each flushed to a same-signed zero first if subnormal (see
+///   flushSubnormalToZero) -- LLVM has no constrained-intrinsics equivalent
+///   for flush-to-zero, so this is an explicit software flush around an
+///   ordinary operation rather than a different intrinsic, a materially
+///   different lowering strategy from `RoundingModeRTZ`'s.
+///
+/// Both may apply to the same width at once (flushing subnormal operands,
+/// rounding toward zero, then flushing a subnormal result), independently
+/// of each other. Any bit width neither mode was declared for, and any
+/// entry point that declared neither, falls through (a match failure, the
+/// same as any other pattern that does not apply) to MLIR's own
+/// lower-benefit `DirectConversionPattern`, unchanged.
 ///
 /// `spirv.FNegate` is deliberately not one of the ops this pattern (or any
 /// sibling of it) handles: negation is an exact sign-bit flip with no
-/// rounding or exception behavior of its own, so it needs no constrained
-/// form at all -- LLVM has none.
-template <typename SPIRVOp, typename ConstrainedIntrOp>
-class ConstrainedRoundTowardZeroPattern
+/// rounding behavior of its own, and can only ever produce a subnormal
+/// result if its operand already was one (which the operand's own
+/// producer, if any, already flushed), so it needs neither a constrained
+/// form (LLVM has none) nor a software flush of its own.
+template <typename SPIRVOp, typename PlainOp, typename ConstrainedIntrOp>
+class FloatControlArithmeticPattern
     : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
 public:
-  ConstrainedRoundTowardZeroPattern(
+  FloatControlArithmeticPattern(
       mlir::MLIRContext *Context, const mlir::LLVMTypeConverter &TypeConverter,
       mlir::PatternBenefit Benefit,
-      const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths)
+      const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths,
+      const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths)
       : mlir::SPIRVToLLVMConversion<SPIRVOp>(Context, TypeConverter, Benefit),
-        RoundingModeRTZWidths(RoundingModeRTZWidths) {}
+        RoundingModeRTZWidths(RoundingModeRTZWidths),
+        DenormFlushToZeroWidths(DenormFlushToZeroWidths) {}
 
   mlir::LogicalResult
   matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
@@ -2181,34 +2235,57 @@ public:
     auto Func = Op->template getParentOfType<mlir::FunctionOpInterface>();
     if (!Func)
       return Rewriter.notifyMatchFailure(Op, "not inside a function");
-    auto It = RoundingModeRTZWidths.find(Func.getName());
-    if (It == RoundingModeRTZWidths.end())
-      return Rewriter.notifyMatchFailure(
-          Op, "enclosing entry point did not declare RoundingModeRTZ");
 
     unsigned Width =
         mlir::getElementTypeOrSelf(Op.getType()).getIntOrFloatBitWidth();
-    if (!llvm::is_contained(It->second, Width))
+    bool RoundTowardZero = declaresWidth(RoundingModeRTZWidths, Func, Width);
+    bool FlushDenormals = declaresWidth(DenormFlushToZeroWidths, Func, Width);
+    if (!RoundTowardZero && !FlushDenormals)
       return Rewriter.notifyMatchFailure(
-          Op, "RoundingModeRTZ was declared for a different bit width");
+          Op, "enclosing entry point declared neither RoundingModeRTZ nor "
+              "DenormFlushToZero for this bit width");
 
     mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
     if (!DstType)
       return Rewriter.notifyMatchFailure(Op, "type conversion failed");
 
-    mlir::MLIRContext *Ctx = Rewriter.getContext();
-    auto RoundingMode = mlir::LLVM::RoundingModeAttr::get(
-        Ctx, mlir::LLVM::RoundingMode::TowardZero);
-    auto ExceptionBehavior = mlir::LLVM::FPExceptionBehaviorAttr::get(
-        Ctx, mlir::LLVM::FPExceptionBehavior::Ignore);
-    Rewriter.template replaceOpWithNewOp<ConstrainedIntrOp>(
-        Op, DstType, Adaptor.getOperand1(), Adaptor.getOperand2(),
-        RoundingMode, ExceptionBehavior);
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Lhs = Adaptor.getOperand1();
+    mlir::Value Rhs = Adaptor.getOperand2();
+    if (FlushDenormals) {
+      Lhs = flushSubnormalToZero(Rewriter, Loc, Lhs);
+      Rhs = flushSubnormalToZero(Rewriter, Loc, Rhs);
+    }
+
+    mlir::Value Result;
+    if (RoundTowardZero) {
+      mlir::MLIRContext *Ctx = Rewriter.getContext();
+      auto RoundingMode = mlir::LLVM::RoundingModeAttr::get(
+          Ctx, mlir::LLVM::RoundingMode::TowardZero);
+      auto ExceptionBehavior = mlir::LLVM::FPExceptionBehaviorAttr::get(
+          Ctx, mlir::LLVM::FPExceptionBehavior::Ignore);
+      Result = ConstrainedIntrOp::create(Rewriter, Loc, DstType, Lhs, Rhs,
+                                         RoundingMode, ExceptionBehavior);
+    } else {
+      Result = PlainOp::create(Rewriter, Loc, DstType, Lhs, Rhs);
+    }
+    if (FlushDenormals)
+      Result = flushSubnormalToZero(Rewriter, Loc, Result);
+
+    Rewriter.replaceOp(Op, Result);
     return mlir::success();
   }
 
 private:
+  /// Returns whether \p Widths declares \p Width for \p Func.
+  static bool declaresWidth(const feme::spirv::FloatControlInfoMap &Widths,
+                             mlir::FunctionOpInterface Func, unsigned Width) {
+    auto It = Widths.find(Func.getName());
+    return It != Widths.end() && llvm::is_contained(It->second, Width);
+  }
+
   const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths;
+  const feme::spirv::FloatControlInfoMap &DenormFlushToZeroWidths;
 };
 
 /// (roadmap E4) Drops `spirv.ExecutionModeId` (`VK_KHR_maintenance4`'s
@@ -2557,7 +2634,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
     const StageIOInfoMap &StageIOVariables,
-    const FloatControlInfoMap &RoundingModeRTZWidths) {
+    const FloatControlInfoMap &RoundingModeRTZWidths,
+    const FloatControlInfoMap &DenormFlushToZeroWidths) {
   Patterns.add<
       ArrayConstantPattern, BuiltInAddressOfPattern,
       BuiltInGlobalVariablePattern, BlockAccessChainPattern,
@@ -2581,16 +2659,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit, StageIOVariables);
   Patterns.add<
-      ConstrainedRoundTowardZeroPattern<mlir::spirv::FAddOp,
-                                        mlir::LLVM::ConstrainedFAddIntr>,
-      ConstrainedRoundTowardZeroPattern<mlir::spirv::FSubOp,
-                                        mlir::LLVM::ConstrainedFSubIntr>,
-      ConstrainedRoundTowardZeroPattern<mlir::spirv::FMulOp,
-                                        mlir::LLVM::ConstrainedFMulIntr>,
-      ConstrainedRoundTowardZeroPattern<mlir::spirv::FDivOp,
-                                        mlir::LLVM::ConstrainedFDivIntr>,
-      ConstrainedRoundTowardZeroPattern<mlir::spirv::FRemOp,
-                                        mlir::LLVM::ConstrainedFRemIntr>>(
-      Patterns.getContext(), TypeConverter, FeMeBenefit, RoundingModeRTZWidths);
+      FloatControlArithmeticPattern<mlir::spirv::FAddOp, mlir::LLVM::FAddOp,
+                                    mlir::LLVM::ConstrainedFAddIntr>,
+      FloatControlArithmeticPattern<mlir::spirv::FSubOp, mlir::LLVM::FSubOp,
+                                    mlir::LLVM::ConstrainedFSubIntr>,
+      FloatControlArithmeticPattern<mlir::spirv::FMulOp, mlir::LLVM::FMulOp,
+                                    mlir::LLVM::ConstrainedFMulIntr>,
+      FloatControlArithmeticPattern<mlir::spirv::FDivOp, mlir::LLVM::FDivOp,
+                                    mlir::LLVM::ConstrainedFDivIntr>,
+      FloatControlArithmeticPattern<mlir::spirv::FRemOp, mlir::LLVM::FRemOp,
+                                    mlir::LLVM::ConstrainedFRemIntr>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit, RoundingModeRTZWidths,
+      DenormFlushToZeroWidths);
 }
 
