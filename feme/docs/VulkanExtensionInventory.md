@@ -386,7 +386,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_shader_expect_assume` | Planned (in scope, not implemented) | roadmap F4 |
 | `VK_KHR_shader_float16_int8` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_float_controls` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F15c (per-instruction decorations closed)/F15d (`FPFastMathDefault`, still open) |
+| `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F15c/F15d (per-instruction decorations and `FPFastMathDefault` codegen closed; still blocked from a conformant claim by the unrelated `feme::cpu` resource-lowering gap F15a/F15b found, and by roadmap F16's unrelated deserializer crash) |
 | `VK_KHR_shader_fma` | Not implemented |  |
 | `VK_KHR_shader_integer_dot_product` | Advertised |  |
 | `VK_KHR_shader_maximal_reconvergence` | Not implemented |  |

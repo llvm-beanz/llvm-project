@@ -3912,3 +3912,66 @@ row -- three new lit tests relative to F15b's own report
 (`spirv-to-llvm-per-instruction-float-controls.mlir`,
 `spirv-backend-per-instruction-rounding-mode.mlir`,
 `spirv-to-llvmir-per-instruction-fast-math.mlir`).
+
+## Roadmap F15d: measured impact (targeted, not a full re-run)
+
+F15d closed F15c's own remaining scope: the `FloatControls2` capability and
+`FPFastMathDefault` execution-mode enumerants MLIR's `spirv` dialect was
+missing entirely (dialect-level changes, `mlir/include/mlir/Dialect/SPIRV/IR`
+and `mlir/lib/Target/SPIRV`), plus `FloatControlArithmeticPattern`/
+`collectEntryPoints` (SPIRVToLLVMPatterns.cpp/ConvertSPIRVToLLVMPass.cpp)
+applying an entry point's declared per-type `FPFastMathDefault` to every
+undecorated arithmetic op of that type.
+
+Targeted subset, same as F15c's own:
+**`dEQP-VK.spirv_assembly.instruction.compute.float_controls2.*`** (1,977
+cases). Baseline (this row's code landed, nothing advertised): 0 passed / 0
+failed / 1,977 not supported, unchanged from F15c's own baseline -- the
+same `shaderFloatControls2`/`isFloatControls2FeaturesSupported` gates F15c's
+report describes are still `VK_FALSE`/ungated by this row, which touches
+codegen and dialect plumbing, not feature advertisement.
+
+Repeated F15c's own "temporarily flip every gate and see" experiment
+(aggregate feature bit, the three per-width `fp32` property fields, a
+temporary dedicated-struct case, and temporarily listing
+`VK_KHR_shader_float_controls2` as a supported extension) against the
+`fp32` subset (719 cases) to measure whether the dialect-level fix this row
+made actually unblocks import the way it should. It (partially) does: of
+276 cases run before an unrelated crash (see below) truncated the session,
+**0** now fail with `unknown capability: 6029` -- F15c's own blocking
+finding is gone -- and **263** instead reach the already-known
+`feme::cpu` resource-lowering gap F15a/F15b's own probes first found
+(`vk.createComputePipelines(...): VK_ERROR_INITIALIZATION_FAILED`, small
+runtime-sized storage-buffer bindings), with the remaining 12 `NotSupported`
+for unrelated missing features (e.g. `shaderFloat16`/`shaderFloat64` on
+cases outside the `fp32` subset's own filter). This is the same shape
+F15a/F15b's own probes found for `VK_KHR_shader_float_controls` itself --
+codegen and import both now genuinely work, blocked from a conformant claim
+only by the unrelated resource-lowering gap those rows already tracked.
+
+The session was truncated by a **new, unrelated** discovery rather than
+running to completion: case
+`float_controls2.fp32.input_args.frexp_st_testedWithout_NSZ_arg1_minusZero_
+arg2_one_res_minusZero_deco` crashed `deqp-vk` itself with
+`Deserializer.cpp:1506: LogicalResult
+mlir::spirv::Deserializer::processStructType(ArrayRef<uint32_t>): Assertion
+`decoration.has_value()' failed` -- an assertion failure deserializing the
+two-member struct `OpExtInst ... FrexpStruct`/`ModfStruct` (GLSL.std.450)
+return, nothing to do with float controls at all, and the first time this
+whole F15 family of rows' own probes got far enough into real,
+CTS-generated shaders to hit it. Split off as its own row, F16 (see
+`Roadmap.md`), rather than investigated further here, since it is out of
+this row's own scope. Reverted every temporary flip (feature bit, property
+fields, dedicated struct case, extension listing) immediately after; a
+second baseline run (excluding nothing, the full 1,977-case group) confirmed
+the exact same 0/0/1,977 as the first, so no partial revert leaked through.
+
+`ninja check-feme` (assertions-enabled, ccache build, this session's
+existing `./build`): 1704 discovered, 1703 passed, 1 unsupported
+(pre-existing, unrelated) -- one new lit test relative to F15c's own report
+(`spirv-to-llvmir-fp-fast-math-default.mlir`), plus two new upstream MLIR
+lit tests (`mlir/test/Dialect/SPIRV/IR/structure-ops.mlir`'s and
+`mlir/test/Target/SPIRV/execution-mode-id.mlir`'s own new cases, run as part
+of `check-mlir-dialect-spirv`/`check-mlir-target-spirv` rather than
+`check-feme`, both 100% passing).
+
