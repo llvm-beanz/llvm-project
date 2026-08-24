@@ -616,6 +616,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // truthfully reports zero tools: this ICD is not itself a layer or
       // debugging tool, and wraps no such tool internally.
       {VK_EXT_TOOLING_INFO_EXTENSION_NAME, VK_EXT_TOOLING_INFO_SPEC_VERSION},
+      // (roadmap F1) `VkDeviceQueueGlobalPriorityCreateInfo`'s `globalPriority`
+      // hint (EntryPoints.cpp's `vkCreateDevice`) and `VkQueueFamilyGlobal
+      // PriorityProperties` (`vkGetPhysicalDeviceQueueFamilyProperties2`)
+      // are both implemented; like `maintenance5`/`maintenance6` above,
+      // `dEQP-VK.api.device_init.create_device_with_*_global_priority_khr`
+      // and the global-priority-query cases enable this extension by name
+      // regardless of the advertised `apiVersion`, so it must be listed
+      // here too.
+      {VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
+       VK_KHR_GLOBAL_PRIORITY_SPEC_VERSION},
   };
   return Extensions;
 }
