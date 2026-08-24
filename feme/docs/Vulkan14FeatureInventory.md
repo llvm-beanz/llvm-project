@@ -392,7 +392,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_2 | `VK_KHR_separate_depth_stencil_layouts` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_atomic_int64` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_float16_int8` | no |  |
-| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | no |  |
+| extension | VK_VERSION_1_2 | `VK_KHR_shader_float_controls` | no | roadmap F3: every per-entry-point float-controls execution mode was previously silently dropped by `ExecutionModePattern` (SPIRVToLLVMPatterns.cpp); a shader declaring `DenormFlushToZero`/`RoundingModeRTZ` now gets a hard diagnostic instead of silent miscompilation, since no FP op conversion pattern produces that behavior, but `DenormPreserve`/`RoundingModeRTE`/`SignedZeroInfNanPreserve` are accepted (and still erased) because they already describe the strict, denormal-preserving, round-to-nearest-even code every FP op pattern always emits -- still not advertised, since a conformant implementation must support every mode it claims and the flush-to-zero/RTZ halves are only diagnosed, not produced (see F15) |
 | extension | VK_VERSION_1_2 | `VK_KHR_shader_subgroup_extended_types` | yes | core, not advertised by name: roadmap C6; roadmap F2 closed "no OpGroupNonUniform* conversion exists" for spirv.GroupNonUniformRotateKHR specifically, but Rotate exercises no 8/16-bit/bool-typed operand, so this bit's own "extended types" claim is still unvalidated by any real conversion (EntryPoints.cpp) |
 | extension | VK_VERSION_1_2 | `VK_KHR_spirv_1_4` | no |  |
 | extension | VK_VERSION_1_2 | `VK_KHR_timeline_semaphore` | yes | core, not advertised by name: V3's timeline semaphores (Sync.cpp) |
@@ -484,7 +484,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `globalPriorityQuery` | yes | roadmap F1: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceGlobalPriorityQueryFeatures struct |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotate` | yes |  |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | yes |  |
-| feature | VK_VERSION_1_4 | `shaderFloatControls2` | no |  |
+| feature | VK_VERSION_1_4 | `shaderFloatControls2` | no | roadmap F15 (depends on F3, closed): needs per-instruction `FPRoundingMode`/`FPDenormMode` decorations, which need the same constrained-FP-intrinsic plumbing F15 also needs for `VK_KHR_shader_float_controls`'s own still-unproduced `DenormFlushToZero`/`RoundingModeRTZ` modes |
 | feature | VK_VERSION_1_4 | `shaderExpectAssume` | no |  |
 | feature | VK_VERSION_1_4 | `rectangularLines` | no |  |
 | feature | VK_VERSION_1_4 | `bresenhamLines` | no |  |
@@ -540,6 +540,6 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no | roadmap F15 (depends on F3, closed): see the `shaderFloatControls2` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | yes | roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) |
 | extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | no |  |
