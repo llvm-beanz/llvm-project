@@ -1141,6 +1141,28 @@ milestone's `FemeGeometryArgs` only carries storage for stream 0), and a
 group-sync barrier (geometry invocations are independent, like the domain
 stage's). See GeometryWrapper.cpp's file comment for the full design.
 
+Landed, beginning to close R34's remaining "chain the four compiled stage
+invocations together per patch/primitive" open item for its tessellation
+stages (`feme::graphics::runPatchPipeline`, new PatchPipeline.h/.cpp): given
+one patch's input control points and the three compiled stages above, it runs
+`invokePatch`, `invokePatchConstant`, extracts `TessFactorEdge`/
+`TessFactorInside` from the patch-constant phase's own attached signature to
+feed `feme::graphics::tessellate`, and `invokeDomain` (via
+`buildDomainInvocations`), returning the domain stage's per-vertex outputs
+alongside the tessellator's connectivity. Because the hull control-point
+phase, patch-constant phase, and domain stage are three independently
+compiled entry points, each with its own `EntrySignature`/`ElementID`
+numbering, this function does not itself link "the completed patch's control
+points"/"the patch constants" across them by `Location` the way
+`feme::graphics::Executor` already does for the vertex/fragment stages (that
+generalization remains a documented follow-up); it instead requires its
+caller to build one shared `FemeStageLayout` for each of those two concepts,
+used by every stage that reads or writes it. Chaining the geometry stage on
+top of this function's result, and wiring any of this into
+`executeDraws`/`feme-render`, remain open (`feme::graphics::Executor` still
+does not call `invokePatch`/`invokePatchConstant`/`invokeDomain`/
+`invokeGeometry` at all).
+
 ### Amplification and mesh wrappers
 
 These wrappers extend the compute group ABI with immutable payload input and a
