@@ -14,6 +14,7 @@
 
 #include <cstring>
 #include <limits>
+#include <vector>
 
 using namespace feme::vulkan;
 
@@ -1142,6 +1143,38 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &GlobalPriorityQueryFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(GlobalPriorityQueryFeatures.globalPriorityQuery, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       EveryQueueFamilyReportsTheFullMandatoryGlobalPriorityList) {
+  // Roadmap F1: this ICD has one worker pool with no real OS-level
+  // scheduling priority, so every queue family reports every priority
+  // level the spec defines as supported, sorted ascending -- the same
+  // "single logical queue, narrowed by capability flags only" precedent
+  // roadmap C7 set for `queueFlags` applies equally here: there is no real
+  // per-priority distinction for this executor to narrow.
+  uint32_t Count = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties2(Physical, &Count, nullptr);
+  ASSERT_EQ(Count, PhysicalDeviceInfo::NumQueueFamilies);
+
+  std::vector<VkQueueFamilyGlobalPriorityProperties> Priorities(Count);
+  std::vector<VkQueueFamilyProperties2> Families(Count);
+  for (uint32_t I = 0; I < Count; ++I) {
+    Priorities[I].sType =
+        VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES;
+    Priorities[I].pNext = nullptr;
+    Families[I].sType = VK_STRUCTURE_TYPE_QUEUE_FAMILY_PROPERTIES_2;
+    Families[I].pNext = &Priorities[I];
+  }
+  vkGetPhysicalDeviceQueueFamilyProperties2(Physical, &Count, Families.data());
+
+  for (uint32_t I = 0; I < Count; ++I) {
+    ASSERT_EQ(Priorities[I].priorityCount, 4u);
+    EXPECT_EQ(Priorities[I].priorities[0], VK_QUEUE_GLOBAL_PRIORITY_LOW);
+    EXPECT_EQ(Priorities[I].priorities[1], VK_QUEUE_GLOBAL_PRIORITY_MEDIUM);
+    EXPECT_EQ(Priorities[I].priorities[2], VK_QUEUE_GLOBAL_PRIORITY_HIGH);
+    EXPECT_EQ(Priorities[I].priorities[3], VK_QUEUE_GLOBAL_PRIORITY_REALTIME);
+  }
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

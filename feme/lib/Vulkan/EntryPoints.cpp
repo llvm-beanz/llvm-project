@@ -1350,6 +1350,33 @@ void fillFeatures2Chain(void *pNext) {
     }
   }
 }
+
+/// Fills a queue family's `VkQueueFamilyGlobalPriorityProperties` chain
+/// entry (roadmap F1, `VK_KHR_global_priority`/`globalPriorityQuery`): this
+/// ICD has one worker pool with no real OS-level scheduling priority (see
+/// "Queue families" in FeMeVulkanDesign.md), so every priority level the
+/// spec defines is reported as supported for every queue family, the same
+/// "single logical queue, narrowed by capability flags only" precedent
+/// roadmap C7 set for `queueFlags` itself -- there is no real per-priority
+/// distinction for this executor to narrow. An application must not chain
+/// a struct for a feature it didn't enable, so any unrecognized `sType` is
+/// left untouched, matching `fillProperties2Chain`/`fillFeatures2Chain`
+/// above.
+void fillQueueFamilyGlobalPriorityProperties(void *pNext) {
+  for (auto *Base = static_cast<VkBaseOutStructure *>(pNext); Base;
+       Base = Base->pNext) {
+    if (Base->sType != VK_STRUCTURE_TYPE_QUEUE_FAMILY_GLOBAL_PRIORITY_PROPERTIES)
+      continue;
+    auto *Priority =
+        reinterpret_cast<VkQueueFamilyGlobalPriorityProperties *>(Base);
+    Priority->priorityCount = 4;
+    Priority->priorities[0] = VK_QUEUE_GLOBAL_PRIORITY_LOW;
+    Priority->priorities[1] = VK_QUEUE_GLOBAL_PRIORITY_MEDIUM;
+    Priority->priorities[2] = VK_QUEUE_GLOBAL_PRIORITY_HIGH;
+    Priority->priorities[3] = VK_QUEUE_GLOBAL_PRIORITY_REALTIME;
+  }
+}
+
 } // namespace
 
 VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFeatures2(
@@ -1398,8 +1425,10 @@ feme::vulkan::vkGetPhysicalDeviceQueueFamilyProperties2(
   uint32_t ToCopy = *pQueueFamilyPropertyCount < TrueCount
                         ? *pQueueFamilyPropertyCount
                         : TrueCount;
-  for (uint32_t I = 0; I < ToCopy; ++I)
+  for (uint32_t I = 0; I < ToCopy; ++I) {
     pQueueFamilyProperties[I].queueFamilyProperties = Info.QueueFamilies[I];
+    fillQueueFamilyGlobalPriorityProperties(pQueueFamilyProperties[I].pNext);
+  }
   *pQueueFamilyPropertyCount = ToCopy;
 }
 
