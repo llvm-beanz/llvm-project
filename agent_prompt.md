@@ -33,25 +33,15 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F15?
+Can you implement roadmap milestone F15b?
 
-> **`VK_KHR_shader_float_controls2`/`shaderFloatControls2`** (per-instruction
-> rounding-mode/denorm-preservation, superseding F3's per-module
-> `VK_KHR_shader_float_controls`) **, plus actually producing
-> `DenormFlushToZero`/`RoundingModeRTZ` code for `VK_KHR_shader_float_controls`
-> itself** (F3 only diagnoses a shader that declares either rather than
-> producing them). Both need every arithmetic FP op conversion pattern
-> (`FAdd`/`FSub`/`FMul`/`FDiv`/`FRem`/`FNegate`/converts) to route through
-> LLVM's `llvm.experimental.constrained.*` intrinsics with an explicit
-> rounding-mode/exception-behavior metadata operand and the enclosing function
-> marked `strictfp`, rather than the plain unconstrained ops they emit today,
-> plus a way to represent flush-to-zero (LLVM's
-> `denormal-fp-math`/`denormal-fp-math-f32` function attributes cover `f32`
-> only, not `f16`/`f64` independently, so `float_controls2`'s explicit
-> `FPDenormMode`/`FPRoundingMode` *decorations* on individual instructions --
-> rather than only a whole-function execution mode -- may need a different
-> lowering strategy entirely). The largest single row F3's own audit produced;
-> consider splitting the constrained-intrinsics plumbing (a prerequisite both
-> the flush-to-zero and rounding-mode-RTZ halves of
-> `VK_KHR_shader_float_controls` share) from the newer `float_controls2`
-> decorations themselves
+> **Actually produce `DenormFlushToZero` code for
+> `VK_KHR_shader_float_controls`** (F15a's own remaining half; still only
+> diagnosed, per F3). Unlike `RoundingModeRTZ`, LLVM has no
+> constrained-intrinsics equivalent for flush-to-zero --
+> `denormal-fp-math`/`denormal-fp-math-f32` are whole-function attributes
+> covering `f32` only, not `f16`/`f64` independently -- so honoring this
+> execution mode's own per-width operand likely needs an explicit software flush
+> (zero any subnormal operand/result of the declared width's arithmetic ops)
+> rather than an intrinsic swap, a materially different lowering strategy than
+> F15a's
