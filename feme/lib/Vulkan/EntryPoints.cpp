@@ -1115,7 +1115,14 @@ void fillFeatures2Chain(void *pNext) {
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES: {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceVulkan14Features *>(Base);
-      Features->globalPriorityQuery = VK_FALSE;
+      // (roadmap F1) `vkGetPhysicalDeviceQueueFamilyProperties2`'s
+      // `VkQueueFamilyGlobalPriorityProperties` chain now reports the full
+      // mandatory priority list for every queue family (see
+      // `fillQueueFamilyGlobalPriorityProperties` below), so this bit --
+      // like `maintenance5`/`maintenance6` above -- must agree with the
+      // dedicated `VkPhysicalDeviceGlobalPriorityQueryFeatures` struct case
+      // below.
+      Features->globalPriorityQuery = VK_TRUE;
       Features->shaderSubgroupRotate = VK_FALSE;
       Features->shaderSubgroupRotateClustered = VK_FALSE;
       Features->shaderFloatControls2 = VK_FALSE;
@@ -1210,6 +1217,17 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceMaintenance6Features *>(Base);
       Features->maintenance6 = VK_TRUE;
+      break;
+    }
+    // (roadmap F1) `VK_KHR_global_priority`'s own feature struct, whose 1.4
+    // core and `KHR` spellings share one `sType`, exactly like
+    // `maintenance6` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeatures *>(
+              Base);
+      Features->globalPriorityQuery = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

@@ -1039,7 +1039,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &Features14;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
 
-  EXPECT_EQ(Features14.globalPriorityQuery, VK_FALSE);
+  // Roadmap F1: now genuinely implemented (a full, mandatory priority list
+  // reported for every queue family through `VkQueueFamilyGlobalPriority
+  // Properties`), and must agree with the dedicated
+  // `VkPhysicalDeviceGlobalPriorityQueryFeatures` struct case below.
+  EXPECT_EQ(Features14.globalPriorityQuery, VK_TRUE);
   EXPECT_EQ(Features14.shaderSubgroupRotate, VK_FALSE);
   EXPECT_EQ(Features14.shaderSubgroupRotateClustered, VK_FALSE);
   EXPECT_EQ(Features14.shaderFloatControls2, VK_FALSE);
@@ -1122,6 +1126,22 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &Maintenance6Features;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(Maintenance6Features.maintenance6, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       GlobalPriorityQueryIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap F1: `VK_KHR_global_priority`'s own dedicated feature struct
+  // must agree with the aggregate `VkPhysicalDeviceVulkan14Features` case
+  // above, exactly like `VK_KHR_maintenance6`'s own struct does.
+  VkPhysicalDeviceGlobalPriorityQueryFeatures GlobalPriorityQueryFeatures{};
+  GlobalPriorityQueryFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &GlobalPriorityQueryFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(GlobalPriorityQueryFeatures.globalPriorityQuery, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
