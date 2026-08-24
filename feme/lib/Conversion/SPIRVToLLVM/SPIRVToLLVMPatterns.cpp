@@ -14,9 +14,12 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/IR/TypeUtilities.h"
 #include "mlir/Interfaces/DataLayoutInterfaces.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/APInt.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/MathExtras.h"
@@ -2112,11 +2115,14 @@ public:
 /// This also covers `VK_KHR_shader_float_controls`'s (roadmap F3)
 /// `DenormPreserve`/`RoundingModeRTE`/`SignedZeroInfNanPreserve` execution
 /// modes: they already describe the strict, denormal-preserving,
-/// round-to-nearest-even code every FP op conversion pattern always
-/// produces, so, like `LocalSize`, they need only be read (which
-/// `collectEntryPoints`'s `rejectUnhonoredFloatControls` does, to instead
-/// reject the two modes -- `DenormFlushToZero`, `RoundingModeRTZ` -- this
-/// conversion cannot honor) before being dropped here with everything else.
+/// round-to-nearest-even code every FP op conversion pattern produces by
+/// default, so, like `LocalSize`, they need only be read (which
+/// `collectEntryPoints`'s `rejectUnhonoredFloatControls` does) before being
+/// dropped here with everything else. `RoundingModeRTZ` is read the same
+/// way, into the widths ConstrainedRoundTowardZeroPattern below consults
+/// (roadmap F15a); `DenormFlushToZero` (roadmap F15b) is the one mode
+/// `rejectUnhonoredFloatControls` still rejects outright, since nothing
+/// downstream can honor it.
 class ExecutionModePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ExecutionModeOp> {
 public:
@@ -2129,6 +2135,80 @@ public:
     Rewriter.eraseOp(Op);
     return mlir::success();
   }
+};
+
+/// Converts an arithmetic FP `spirv` op that would otherwise become MLIR's
+/// plain, round-to-nearest-even `LLVMOp` (upstream `SPIRVToLLVM.cpp`'s
+/// `DirectConversionPattern`) into LLVM's constrained
+/// `llvm.experimental.constrained.*` intrinsic instead, with an explicit
+/// round-toward-zero rounding mode, whenever \p Op's own bit width is one
+/// the enclosing entry point declared `RoundingModeRTZ` for (roadmap F15a)
+/// -- the concrete, "actually produces truncating-rounding code" half of
+/// that execution mode this conversion previously could only diagnose, not
+/// honor (see rejectUnhonoredFloatControls, ConvertSPIRVToLLVMPass.cpp).
+/// Every other bit width, and every entry point that never declared the
+/// mode, falls through (a match failure, the same as any other pattern that
+/// does not apply) to MLIR's own lower-benefit `DirectConversionPattern`,
+/// unchanged. The exception behavior is always "ignore": Vulkan shaders have
+/// no floating-point trap mechanism to honor a stricter one, and this
+/// conversion's default (unconstrained) ops do not honor one either.
+///
+/// `spirv.FNegate` is deliberately not one of the ops this pattern (or any
+/// sibling of it) handles: negation is an exact sign-bit flip with no
+/// rounding or exception behavior of its own, so it needs no constrained
+/// form at all -- LLVM has none.
+template <typename SPIRVOp, typename ConstrainedIntrOp>
+class ConstrainedRoundTowardZeroPattern
+    : public mlir::SPIRVToLLVMConversion<SPIRVOp> {
+public:
+  ConstrainedRoundTowardZeroPattern(
+      mlir::MLIRContext *Context, const mlir::LLVMTypeConverter &TypeConverter,
+      mlir::PatternBenefit Benefit,
+      const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths)
+      : mlir::SPIRVToLLVMConversion<SPIRVOp>(Context, TypeConverter, Benefit),
+        RoundingModeRTZWidths(RoundingModeRTZWidths) {}
+
+  mlir::LogicalResult
+  matchAndRewrite(SPIRVOp Op, typename SPIRVOp::Adaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    // Looked up via `FunctionOpInterface` (rather than `mlir::spirv::FuncOp`
+    // specifically) because by the time this op's own pattern runs, the
+    // enclosing `spirv.func` may already have been legalized into an
+    // `llvm.func` -- `populateSPIRVToLLVMFunctionConversionPatterns` moves
+    // this op's region into the new function rather than waiting for every
+    // op inside it to convert first -- and both implement the interface
+    // under the same, conversion-preserved symbol name.
+    auto Func = Op->template getParentOfType<mlir::FunctionOpInterface>();
+    if (!Func)
+      return Rewriter.notifyMatchFailure(Op, "not inside a function");
+    auto It = RoundingModeRTZWidths.find(Func.getName());
+    if (It == RoundingModeRTZWidths.end())
+      return Rewriter.notifyMatchFailure(
+          Op, "enclosing entry point did not declare RoundingModeRTZ");
+
+    unsigned Width =
+        mlir::getElementTypeOrSelf(Op.getType()).getIntOrFloatBitWidth();
+    if (!llvm::is_contained(It->second, Width))
+      return Rewriter.notifyMatchFailure(
+          Op, "RoundingModeRTZ was declared for a different bit width");
+
+    mlir::Type DstType = this->getTypeConverter()->convertType(Op.getType());
+    if (!DstType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+
+    mlir::MLIRContext *Ctx = Rewriter.getContext();
+    auto RoundingMode = mlir::LLVM::RoundingModeAttr::get(
+        Ctx, mlir::LLVM::RoundingMode::TowardZero);
+    auto ExceptionBehavior = mlir::LLVM::FPExceptionBehaviorAttr::get(
+        Ctx, mlir::LLVM::FPExceptionBehavior::Ignore);
+    Rewriter.template replaceOpWithNewOp<ConstrainedIntrOp>(
+        Op, DstType, Adaptor.getOperand1(), Adaptor.getOperand2(),
+        RoundingMode, ExceptionBehavior);
+    return mlir::success();
+  }
+
+private:
+  const feme::spirv::FloatControlInfoMap &RoundingModeRTZWidths;
 };
 
 /// (roadmap E4) Drops `spirv.ExecutionModeId` (`VK_KHR_maintenance4`'s
@@ -2476,7 +2556,8 @@ feme::spirv::prepareStageIOVariables(mlir::spirv::ModuleOp Module) {
 void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
-    const StageIOInfoMap &StageIOVariables) {
+    const StageIOInfoMap &StageIOVariables,
+    const FloatControlInfoMap &RoundingModeRTZWidths) {
   Patterns.add<
       ArrayConstantPattern, BuiltInAddressOfPattern,
       BuiltInGlobalVariablePattern, BlockAccessChainPattern,
@@ -2499,4 +2580,17 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit, StageIOVariables);
+  Patterns.add<
+      ConstrainedRoundTowardZeroPattern<mlir::spirv::FAddOp,
+                                        mlir::LLVM::ConstrainedFAddIntr>,
+      ConstrainedRoundTowardZeroPattern<mlir::spirv::FSubOp,
+                                        mlir::LLVM::ConstrainedFSubIntr>,
+      ConstrainedRoundTowardZeroPattern<mlir::spirv::FMulOp,
+                                        mlir::LLVM::ConstrainedFMulIntr>,
+      ConstrainedRoundTowardZeroPattern<mlir::spirv::FDivOp,
+                                        mlir::LLVM::ConstrainedFDivIntr>,
+      ConstrainedRoundTowardZeroPattern<mlir::spirv::FRemOp,
+                                        mlir::LLVM::ConstrainedFRemIntr>>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit, RoundingModeRTZWidths);
 }
+

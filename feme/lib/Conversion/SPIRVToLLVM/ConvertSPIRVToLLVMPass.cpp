@@ -92,6 +92,16 @@ void setTargetAttributes(mlir::ModuleOp Module, llvm::StringRef TargetTriple) {
 struct EntryPointInfo {
   feme::ShaderStage Stage;
   std::string LocalSize;
+  /// The bit widths (16/32/64) `VK_KHR_shader_float_controls`'s
+  /// `RoundingModeRTZ` execution mode was declared for (roadmap F15a): each
+  /// arithmetic FP op conversion pattern of that width in this entry point
+  /// routes through a `llvm.experimental.constrained.*` intrinsic with an
+  /// explicit round-toward-zero rounding mode instead of the plain,
+  /// round-to-nearest-even op MLIR's own pattern would otherwise produce
+  /// (see feme::spirv::populateSPIRVToLLVMTargetPatterns's
+  /// ConstrainedRoundTowardZeroPattern, SPIRVToLLVMPatterns.cpp). Empty for
+  /// an entry point that never declared the mode.
+  llvm::SmallVector<unsigned, 3> RoundingModeRTZWidths;
 };
 
 /// Everything about a `spirv.module` that the conversion consumes but does
@@ -117,6 +127,14 @@ std::string formatLocalSize(mlir::ArrayAttr Values) {
       },
       ",");
   return Result;
+}
+
+/// Returns `RoundingModeRTZ`'s single literal operand: the bit width (16,
+/// 32, or 64) the entry point asks for truncating rather than
+/// round-to-nearest-even arithmetic at.
+unsigned getRoundingModeRTZWidth(mlir::spirv::ExecutionModeOp Mode) {
+  return static_cast<unsigned>(
+      mlir::cast<mlir::IntegerAttr>(Mode.getValues()[0]).getInt());
 }
 
 /// Returns a human-readable name for one of the `VK_KHR_shader_float_controls`
@@ -152,26 +170,28 @@ llvm::StringRef getFloatControlModeName(mlir::spirv::ExecutionMode Mode) {
 /// that is precisely what `DenormPreserve`, `RoundingModeRTE` and
 /// `SignedZeroInfNanPreserve` ask for, at every bit width, so declaring any
 /// of them is accepted (and, like every other execution mode, subsequently
-/// erased) below. `DenormFlushToZero` and `RoundingModeRTZ` ask for the
-/// opposite of that default and nothing downstream of this conversion knows
-/// how to produce it, so accepting one and then silently erasing it, the
-/// same as every other mode, would silently miscompile the entry point
-/// instead: report it as an error instead.
+/// erased) below. `RoundingModeRTZ` is also honored now (roadmap F15a): the
+/// caller (collectEntryPoints) records which bit widths it was declared for,
+/// and `feme::spirv::populateSPIRVToLLVMTargetPatterns`'s
+/// ConstrainedRoundTowardZeroPattern (SPIRVToLLVMPatterns.cpp) routes those
+/// widths' arithmetic FP ops through `llvm.experimental.constrained.*`
+/// intrinsics instead. `DenormFlushToZero` (roadmap F15b) is the one
+/// remaining mode nothing downstream of this conversion can honor -- LLVM's
+/// `denormal-fp-math`/`denormal-fp-math-f32` function attributes cover only
+/// `f32`, not the `f16`/`f64` widths this execution mode may equally ask
+/// for -- so accepting it and then silently erasing it, the same as every
+/// other mode, would silently miscompile the entry point: report it as an
+/// error instead.
 mlir::LogicalResult
 rejectUnhonoredFloatControls(mlir::spirv::ExecutionModeOp Mode) {
-  switch (Mode.getExecutionMode()) {
-  case mlir::spirv::ExecutionMode::DenormFlushToZero:
-  case mlir::spirv::ExecutionMode::RoundingModeRTZ:
-    return Mode.emitOpError()
-           << "execution mode '"
-           << getFloatControlModeName(Mode.getExecutionMode())
-           << "' is not supported: FeMe's SPIR-V to LLVM conversion never "
-              "produces flushed-denormal or truncating-rounding-mode "
-              "floating-point code, so this entry point's request for it "
-              "cannot be honored";
-  default:
+  if (Mode.getExecutionMode() != mlir::spirv::ExecutionMode::DenormFlushToZero)
     return mlir::success();
-  }
+  return Mode.emitOpError()
+         << "execution mode '"
+         << getFloatControlModeName(Mode.getExecutionMode())
+         << "' is not supported: FeMe's SPIR-V to LLVM conversion never "
+            "produces flushed-denormal floating-point code, so this entry "
+            "point's request for it cannot be honored";
 }
 
 /// Collects \p Module's entry points into \p EntryPoints, keyed by the
@@ -207,6 +227,13 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
   for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeOp>()) {
     if (mlir::failed(rejectUnhonoredFloatControls(Mode)))
       return mlir::failure();
+    if (Mode.getExecutionMode() == mlir::spirv::ExecutionMode::RoundingModeRTZ) {
+      auto It = EntryPoints.find(Mode.getFn());
+      if (It != EntryPoints.end())
+        It->second.RoundingModeRTZWidths.push_back(
+            getRoundingModeRTZWidth(Mode));
+      continue;
+    }
     if (Mode.getExecutionMode() != mlir::spirv::ExecutionMode::LocalSize)
       continue;
     auto It = EntryPoints.find(Mode.getFn());
@@ -231,6 +258,18 @@ void addPassthroughAttribute(mlir::LLVM::LLVMFuncOp Func, llvm::StringRef Key,
   Func.setPassthroughAttr(mlir::ArrayAttr::get(Ctx, Passthrough));
 }
 
+/// Adds the value-less function attribute \p Attr to \p Func's passthrough
+/// list, the same way addPassthroughAttribute does for a `key = value` one.
+void addBarePassthroughAttribute(mlir::LLVM::LLVMFuncOp Func,
+                                 llvm::StringRef Attr) {
+  mlir::MLIRContext *Ctx = Func.getContext();
+  llvm::SmallVector<mlir::Attribute> Passthrough;
+  if (mlir::ArrayAttr Existing = Func.getPassthroughAttr())
+    llvm::append_range(Passthrough, Existing);
+  Passthrough.push_back(mlir::StringAttr::get(Ctx, Attr));
+  Func.setPassthroughAttr(mlir::ArrayAttr::get(Ctx, Passthrough));
+}
+
 /// Re-attaches \p EntryPoints to the converted functions they describe.
 void applyEntryPointAttributes(
     mlir::ModuleOp Module, const llvm::StringMap<EntryPointInfo> &EntryPoints) {
@@ -246,6 +285,13 @@ void applyEntryPointAttributes(
                             feme::getShaderStageName(It->second.Stage));
     if (!It->second.LocalSize.empty())
       addPassthroughAttribute(Func, "hlsl.numthreads", It->second.LocalSize);
+    // A function containing any `llvm.experimental.constrained.*` intrinsic
+    // call -- which ConstrainedRoundTowardZeroPattern
+    // (SPIRVToLLVMPatterns.cpp) emits for this entry point's
+    // `RoundingModeRTZ`-width arithmetic (roadmap F15a) -- must itself carry
+    // `strictfp`, or LLVM's verifier rejects the module.
+    if (!It->second.RoundingModeRTZWidths.empty())
+      addBarePassthroughAttribute(Func, "strictfp");
   });
 }
 
@@ -285,6 +331,7 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   llvm::SmallVector<SPIRVModuleInfo> Modules;
   feme::spirv::ResourceInfoMap Resources;
   feme::spirv::StageIOInfoMap StageIOVariables;
+  feme::spirv::FloatControlInfoMap RoundingModeRTZWidths;
   unsigned Index = 0;
   for (mlir::Operation &Op :
        llvm::make_early_inc_range(Module.getBody()->getOperations())) {
@@ -294,6 +341,15 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
       if (mlir::failed(collectEntryPoints(SPIRVModule, Info.TargetTriple,
                                           Info.EntryPoints)))
         return signalPassFailure();
+      // The conversion patterns below key their own lookup by function
+      // symbol, which collectEntryPoints has already recovered per entry
+      // point; merge it into one map across every `spirv.module` up front
+      // rather than re-deriving it from the converted `llvm` dialect module
+      // later on.
+      for (auto &EntryPoint : Info.EntryPoints)
+        if (!EntryPoint.second.RoundingModeRTZWidths.empty())
+          RoundingModeRTZWidths[EntryPoint.getKey()] =
+              EntryPoint.second.RoundingModeRTZWidths;
       Modules.push_back(std::move(Info));
       // Materializes the resource name strings the handle intrinsics refer
       // to, so it has to run before the conversion drops the declarations
@@ -319,8 +375,9 @@ void ConvertSPIRVToLLVMPass::runOnOperation() {
   mlir::populateSPIRVToLLVMModuleConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMConversionPatterns(TypeConverter, Patterns);
   mlir::populateSPIRVToLLVMFunctionConversionPatterns(TypeConverter, Patterns);
-  feme::spirv::populateSPIRVToLLVMTargetPatterns(TypeConverter, Patterns,
-                                                 Resources, StageIOVariables);
+  feme::spirv::populateSPIRVToLLVMTargetPatterns(
+      TypeConverter, Patterns, Resources, StageIOVariables,
+      RoundingModeRTZWidths);
 
   mlir::ConversionTarget Target(*Ctx);
   Target.addIllegalDialect<mlir::spirv::SPIRVDialect>();

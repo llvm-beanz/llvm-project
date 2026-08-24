@@ -31,6 +31,7 @@
 
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -102,6 +103,16 @@ using StageIOInfoMap = llvm::StringMap<unsigned>;
 /// not reliable -- see StageIOAddressOfPattern.
 StageIOInfoMap prepareStageIOVariables(mlir::spirv::ModuleOp Module);
 
+/// The `VK_KHR_shader_float_controls` `RoundingModeRTZ` execution mode's
+/// declared bit widths (16/32/64), keyed by the entry point (`spirv.func`
+/// symbol) that declared it (roadmap F15a). Absent from the map entirely for
+/// an entry point that never declared the mode. Recovered from
+/// `spirv.ExecutionMode` before the conversion drops it (see
+/// ConvertSPIRVToLLVMPass.cpp's collectEntryPoints), since by the time an
+/// arithmetic FP op's own conversion pattern runs, the execution mode may
+/// already have been legalized away.
+using FloatControlInfoMap = llvm::StringMap<llvm::SmallVector<unsigned, 3>>;
+
 /// Adds the type conversions the patterns below rely on to \p TypeConverter,
 /// which must already have been populated with
 /// `mlir::populateSPIRVToLLVMTypeConversion`: they take precedence over the
@@ -117,11 +128,16 @@ void populateSPIRVToLLVMTargetTypeConversions(
 /// `mlir::populateSPIRVToLLVMConversionPatterns`.
 /// \p Resources must have been collected by prepareResourceVariables, and
 /// \p StageIOVariables by prepareStageIOVariables; both must outlive
-/// \p Patterns.
+/// \p Patterns. \p RoundingModeRTZWidths, likewise outliving \p Patterns, is
+/// recovered by ConvertSPIRVToLLVMPass.cpp's collectEntryPoints -- FeMe's own
+/// pass, not this file, since it is read from `spirv.ExecutionMode`, an op
+/// outside a `spirv.func` body these per-op conversion patterns otherwise
+/// never see.
 void populateSPIRVToLLVMTargetPatterns(
     const mlir::LLVMTypeConverter &TypeConverter,
     mlir::RewritePatternSet &Patterns, const ResourceInfoMap &Resources,
-    const StageIOInfoMap &StageIOVariables);
+    const StageIOInfoMap &StageIOVariables,
+    const FloatControlInfoMap &RoundingModeRTZWidths);
 
 /// Creates the pass converting every `spirv.module` nested in a builtin
 /// module into the `llvm` dialect, targeting LLVM's in-tree `SPIRV` backend.
