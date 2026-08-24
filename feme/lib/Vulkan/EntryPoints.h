@@ -185,6 +185,20 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSparseMemoryRequirements(
     VkDevice device, const VkDeviceImageMemoryRequirements *pInfo,
     uint32_t *pSparseMemoryRequirementCount,
     VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements);
+// Roadmap E29: VK_KHR_maintenance5's image-subresource-layout queries. A
+// live image's own byte layout (core since Vulkan 1.0), its pNext-
+// extensible counterpart, and an info-only variant computed from a
+// VkImageCreateInfo alone (no VkImage needed) -- see Image.cpp's own
+// comment for why the latter two are exposed under their KHR names.
+VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout(
+    VkDevice device, VkImage image, const VkImageSubresource *pSubresource,
+    VkSubresourceLayout *pLayout);
+VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout2KHR(
+    VkDevice device, VkImage image, const VkImageSubresource2 *pSubresource,
+    VkSubresourceLayout2 *pLayout);
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSubresourceLayoutKHR(
+    VkDevice device, const VkDeviceImageSubresourceInfo *pInfo,
+    VkSubresourceLayout2 *pLayout);
 VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateImageView(VkDevice device, const VkImageViewCreateInfo *pCreateInfo,
                   const VkAllocationCallbacks *pAllocator, VkImageView *pView);

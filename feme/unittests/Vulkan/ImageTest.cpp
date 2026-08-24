@@ -1282,4 +1282,112 @@ TEST_F(ImageTest, RejectsCustomBorderColorSwizzlePNext) {
             VK_ERROR_FEATURE_NOT_PRESENT);
 }
 
+// Roadmap E29: vkGetImageSubresourceLayout was never implemented at all
+// (a null function pointer, unrelated to any loader/KHR-suffix quirk since
+// it is core Vulkan 1.0), SIGSEGV'ing any caller
+// (dEQP-VK.image.subresource_layout.*). One row/column/mip of a multi-level
+// 2D image: level 1 starts right after level 0's whole byte range.
+TEST_F(ImageTest, GetImageSubresourceLayoutMatchesMipChain) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory,
+                                   /*MipLevels=*/2);
+
+  VkImageSubresource Level0{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+  VkSubresourceLayout Layout0{};
+  vkGetImageSubresourceLayout(Device, Img, &Level0, &Layout0);
+  EXPECT_EQ(Layout0.offset, 0u);
+  EXPECT_EQ(Layout0.rowPitch, 16u); // 4 texels * 4 bytes (RGBA8).
+  EXPECT_EQ(Layout0.size, 64u);     // 4x4 texels * 4 bytes.
+
+  VkImageSubresource Level1{VK_IMAGE_ASPECT_COLOR_BIT, 1, 0};
+  VkSubresourceLayout Layout1{};
+  vkGetImageSubresourceLayout(Device, Img, &Level1, &Layout1);
+  EXPECT_EQ(Layout1.offset, 64u); // Right after level 0's whole range.
+  EXPECT_EQ(Layout1.rowPitch, 8u);
+  EXPECT_EQ(Layout1.size, 16u); // 2x2 texels * 4 bytes.
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+// Roadmap E29: VK_KHR_maintenance5's pNext-extensible counterpart, for the
+// same live image, must agree with the plain query above.
+TEST_F(ImageTest, GetImageSubresourceLayout2KHRMatchesGetImageSubresourceLayout) {
+  VkDeviceMemory Memory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2D(4, 4, VK_IMAGE_USAGE_SAMPLED_BIT, Memory);
+
+  VkImageSubresource Plain{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+  VkSubresourceLayout PlainLayout{};
+  vkGetImageSubresourceLayout(Device, Img, &Plain, &PlainLayout);
+
+  VkImageSubresource2 Sub2{};
+  Sub2.imageSubresource = Plain;
+  VkSubresourceLayout2 Layout2{};
+  vkGetImageSubresourceLayout2KHR(Device, Img, &Sub2, &Layout2);
+  EXPECT_EQ(Layout2.subresourceLayout.offset, PlainLayout.offset);
+  EXPECT_EQ(Layout2.subresourceLayout.size, PlainLayout.size);
+  EXPECT_EQ(Layout2.subresourceLayout.rowPitch, PlainLayout.rowPitch);
+
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, Memory, nullptr);
+}
+
+// Roadmap E29: VK_KHR_maintenance5's info-only counterpart -- computed from
+// a VkImageCreateInfo alone -- must agree with a live image's own query,
+// mirroring GetDeviceImageMemoryRequirementsMatchesLiveImage above.
+TEST_F(ImageTest, GetDeviceImageSubresourceLayoutKHRMatchesLiveImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_2D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 1};
+  ImageInfo.mipLevels = 2;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+  VkImageSubresource Level1{VK_IMAGE_ASPECT_COLOR_BIT, 1, 0};
+  VkSubresourceLayout LiveLayout{};
+  vkGetImageSubresourceLayout(Device, Img, &Level1, &LiveLayout);
+  vkDestroyImage(Device, Img, nullptr);
+
+  VkImageSubresource2 Sub2{};
+  Sub2.imageSubresource = Level1;
+  VkDeviceImageSubresourceInfo Info{};
+  Info.pCreateInfo = &ImageInfo;
+  Info.pSubresource = &Sub2;
+  VkSubresourceLayout2 Layout2{};
+  vkGetDeviceImageSubresourceLayoutKHR(Device, &Info, &Layout2);
+  EXPECT_EQ(Layout2.subresourceLayout.offset, LiveLayout.offset);
+  EXPECT_EQ(Layout2.subresourceLayout.size, LiveLayout.size);
+  EXPECT_EQ(Layout2.subresourceLayout.rowPitch, LiveLayout.rowPitch);
+}
+
+// A 3D image's subresource size spans every depth slice at that mip level
+// (Image.h's ImageSubresourceLayout comment), unlike a 2D array image's own
+// one-layer-at-a-time size (GetImageSubresourceLayoutMatchesMipChain above).
+TEST_F(ImageTest, GetImageSubresourceLayoutCoversWholeDepthRangeFor3DImage) {
+  VkImageCreateInfo ImageInfo{};
+  ImageInfo.imageType = VK_IMAGE_TYPE_3D;
+  ImageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ImageInfo.extent = {4, 4, 2};
+  ImageInfo.mipLevels = 1;
+  ImageInfo.arrayLayers = 1;
+  ImageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+  ImageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+  VkImage Img = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateImage(Device, &ImageInfo, nullptr, &Img), VK_SUCCESS);
+
+  VkImageSubresource Sub{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0};
+  VkSubresourceLayout Layout{};
+  vkGetImageSubresourceLayout(Device, Img, &Sub, &Layout);
+  EXPECT_EQ(Layout.rowPitch, 16u);
+  EXPECT_EQ(Layout.depthPitch, 64u); // One 4x4 slice, 64 bytes.
+  EXPECT_EQ(Layout.arrayPitch, 0u); // Not an array image.
+  EXPECT_EQ(Layout.size, 128u);    // Both depth slices.
+
+  vkDestroyImage(Device, Img, nullptr);
+}
+
 } // namespace

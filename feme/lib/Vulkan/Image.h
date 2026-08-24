@@ -101,6 +101,32 @@ bool isValidImageShape(const VkImageCreateInfo &CreateInfo,
 VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
                                         feme::cpu::ResourceFormat Format);
 
+/// `vkGetImageSubresourceLayout`'s own result shape: the byte layout of one
+/// `(MipLevel, ArrayLayer)` subresource. `Size` is one array layer's own
+/// byte range for a 2D(-array) image, but the *whole* depth range for a 3D
+/// image (since a 3D image has exactly one array layer covering every
+/// depth slice) -- matching the real Vulkan spec's own "size of the image
+/// subresource" rule for `VkSubresourceLayout`. Shared by `Image::
+/// subresourceLayout` (a live, bound image) and
+/// `computeImageCreateInfoSubresourceLayout` below (`VK_KHR_maintenance5`'s
+/// info-only `vkGetDeviceImageSubresourceLayoutKHR`, mirroring
+/// `computeImageCreateInfoSize`'s own relationship to
+/// `vkGetDeviceImageMemoryRequirements` above).
+struct ImageSubresourceLayout {
+  VkDeviceSize Offset;
+  VkDeviceSize Size;
+  VkDeviceSize RowPitch;
+  VkDeviceSize ArrayPitch;
+  VkDeviceSize DepthPitch;
+};
+
+/// The info-only counterpart to `Image::subresourceLayout`: \p CreateInfo's
+/// `(MipLevel, ArrayLayer)` subresource layout for \p Format, without
+/// constructing an `Image` -- see `ImageSubresourceLayout`'s own comment.
+ImageSubresourceLayout computeImageCreateInfoSubresourceLayout(
+    const VkImageCreateInfo &CreateInfo, feme::cpu::ResourceFormat Format,
+    uint32_t MipLevel, uint32_t ArrayLayer);
+
 /// A `VkImage`. Not dispatchable. Owns the packed subresource layout table
 /// (`feme::cpu::FemeImageSubresourceLayout`, one entry per mip level) its
 /// bound storage is laid out with, computed once at creation time from the
@@ -151,6 +177,12 @@ public:
   llvm::ArrayRef<feme::cpu::FemeImageSubresourceLayout> mipLayouts() const {
     return MipLayouts;
   }
+
+  /// `vkGetImageSubresourceLayout`'s own result for this (already bound)
+  /// image's `(MipLevel, ArrayLayer)` subresource -- see
+  /// `ImageSubresourceLayout`'s own comment above.
+  ImageSubresourceLayout subresourceLayout(uint32_t MipLevel,
+                                           uint32_t ArrayLayer) const;
 
   /// Records the `(VkDeviceMemory, offset)` pair `vkBindImageMemory` binds
   /// this image to. Must be called exactly once, mirroring `Buffer::bind`.

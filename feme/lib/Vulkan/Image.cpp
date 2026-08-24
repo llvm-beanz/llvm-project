@@ -88,6 +88,24 @@ computeSubresourceLayouts(VkImageType Type, uint32_t Width, uint32_t Height,
   return {std::move(Layouts), Offset};
 }
 
+/// Shared by `Image::subresourceLayout` (a live image, whose per-level
+/// table is already computed) and `computeImageCreateInfoSubresourceLayout`
+/// below (an info-only `VkImageCreateInfo`, whose per-level table is
+/// computed on the fly) -- see `ImageSubresourceLayout`'s own comment in
+/// Image.h for the `Size`/`ArrayPitch`/`DepthPitch` rules this implements.
+ImageSubresourceLayout
+computeSubresourceLayout(VkImageType Type, uint32_t Depth,
+                         const FemeImageSubresourceLayout &L,
+                         uint32_t MipLevel, uint32_t ArrayLayer) {
+  uint32_t LevelDepth =
+      Type == VK_IMAGE_TYPE_3D ? std::max(1u, Depth >> MipLevel) : 1;
+  VkDeviceSize Size =
+      Type == VK_IMAGE_TYPE_3D ? L.SlicePitch * LevelDepth : L.SlicePitch;
+  return {L.Offset + uint64_t(ArrayLayer) * L.SlicePitch, Size, L.RowPitch,
+          /*ArrayPitch=*/Type == VK_IMAGE_TYPE_3D ? 0 : L.SlicePitch,
+          /*DepthPitch=*/Type == VK_IMAGE_TYPE_3D ? L.SlicePitch : 0};
+}
+
 } // namespace
 
 Image::Image(VkImageType Type, ImageDimension Dimension, ResourceFormat Format,
@@ -167,6 +185,13 @@ VkImageLayout Image::layout(uint32_t MipLevel, uint32_t ArrayLayer) const {
   size_t SlicesPerLevel = std::max(ArrayLayers, Depth);
   return Layouts[size_t(MipLevel) * SlicesPerLevel + ArrayLayer];
 }
+
+ImageSubresourceLayout Image::subresourceLayout(uint32_t MipLevel,
+                                                uint32_t ArrayLayer) const {
+  return computeSubresourceLayout(Type, Depth, MipLayouts[MipLevel], MipLevel,
+                                  ArrayLayer);
+}
+
 
 void Image::setLayout(uint32_t BaseMip, uint32_t MipCount, uint32_t BaseLayer,
                       uint32_t LayerCount, VkImageLayout NewLayout) {
@@ -466,6 +491,22 @@ VkDeviceSize computeImageCreateInfoSize(const VkImageCreateInfo &CreateInfo,
       .second;
 }
 
+ImageSubresourceLayout computeImageCreateInfoSubresourceLayout(
+    const VkImageCreateInfo &CreateInfo, feme::cpu::ResourceFormat Format,
+    uint32_t MipLevel, uint32_t ArrayLayer) {
+  std::vector<FemeImageSubresourceLayout> Layouts =
+      computeSubresourceLayouts(
+          CreateInfo.imageType, CreateInfo.extent.width,
+          CreateInfo.extent.height, CreateInfo.extent.depth,
+          CreateInfo.mipLevels, CreateInfo.arrayLayers,
+          static_cast<uint32_t>(CreateInfo.samples), blockWidth(Format),
+          blockHeight(Format), bytesPerBlock(Format))
+          .first;
+  return computeSubresourceLayout(CreateInfo.imageType,
+                                  CreateInfo.extent.depth, Layouts[MipLevel],
+                                  MipLevel, ArrayLayer);
+}
+
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(
     VkDevice device, VkImage image, VkMemoryRequirements *pMemoryRequirements) {
   const PhysicalDeviceInfo &Info =
@@ -508,6 +549,60 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageMemoryRequirements(
                                 Info, pMemoryRequirements->memoryRequirements);
   }
   fillMemoryRequirements2PNextChain(pMemoryRequirements->pNext);
+}
+
+/// Fills \p pLayout from \p L, sharing the field mapping between the live
+/// `vkGetImageSubresourceLayout` and info-only
+/// `vkGetDeviceImageSubresourceLayoutKHR` entrypoints below.
+static void fillSubresourceLayout(const ImageSubresourceLayout &L,
+                                  VkSubresourceLayout &pLayout) {
+  pLayout.offset = L.Offset;
+  pLayout.size = L.Size;
+  pLayout.rowPitch = L.RowPitch;
+  pLayout.arrayPitch = L.ArrayPitch;
+  pLayout.depthPitch = L.DepthPitch;
+}
+
+VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout(
+    VkDevice, VkImage image, const VkImageSubresource *pSubresource,
+    VkSubresourceLayout *pLayout) {
+  fillSubresourceLayout(fromHandle<Image>(image)->subresourceLayout(
+                            pSubresource->mipLevel, pSubresource->arrayLayer),
+                        *pLayout);
+}
+
+/// `VK_KHR_maintenance5`'s `pNext`-extensible counterpart to
+/// `vkGetImageSubresourceLayout` above, for a live image.
+VKAPI_ATTR void VKAPI_CALL vkGetImageSubresourceLayout2KHR(
+    VkDevice device, VkImage image, const VkImageSubresource2 *pSubresource,
+    VkSubresourceLayout2 *pLayout) {
+  feme::vulkan::vkGetImageSubresourceLayout(
+      device, image, &pSubresource->imageSubresource,
+      &pLayout->subresourceLayout);
+}
+
+/// `VK_KHR_maintenance5`: the info-only counterpart to
+/// `vkGetImageSubresourceLayout2KHR` above, computed from a
+/// `VkImageCreateInfo` alone (mirroring `vkGetDeviceImageMemoryRequirements`'s
+/// own relationship to `vkGetImageMemoryRequirements`). An unsupported
+/// format reports an all-zero layout, the same convention
+/// `vkGetDeviceImageMemoryRequirements` uses.
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceImageSubresourceLayoutKHR(
+    VkDevice, const VkDeviceImageSubresourceInfo *pInfo,
+    VkSubresourceLayout2 *pLayout) {
+  const VkImageCreateInfo &CreateInfo = *pInfo->pCreateInfo;
+  const VkImageSubresource &Subresource =
+      pInfo->pSubresource->imageSubresource;
+  std::optional<feme::cpu::ResourceFormat> Format =
+      mapVkFormat(CreateInfo.format);
+  if (!Format) {
+    pLayout->subresourceLayout = VkSubresourceLayout{};
+    return;
+  }
+  fillSubresourceLayout(
+      computeImageCreateInfoSubresourceLayout(
+          CreateInfo, *Format, Subresource.mipLevel, Subresource.arrayLayer),
+      pLayout->subresourceLayout);
 }
 
 /// (roadmap E4) `VK_KHR_maintenance4`: no sparse residency is supported

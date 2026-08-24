@@ -84,6 +84,16 @@ vkDestroySampler
 vkGetDeviceImageMemoryRequirements
 vkGetDeviceImageSparseMemoryRequirements
 
+# Roadmap E29: VK_KHR_maintenance5's image-subresource-layout queries. The
+# core vkGetImageSubresourceLayout was never implemented at all (a pure
+# gap unrelated to any loader quirk, since it is Vulkan 1.0); the other two
+# are advertised-but-unimplemented maintenance5 commands, both SIGSEGV'ing
+# any caller the same way the granularity commands above did
+# (dEQP-VK.image.subresource_layout.*).
+vkGetImageSubresourceLayout
+vkGetImageSubresourceLayout2KHR
+vkGetDeviceImageSubresourceLayoutKHR
+
 # V6: render passes and framebuffers (see "Render passes and dynamic
 # rendering").
 vkCreateRenderPass
