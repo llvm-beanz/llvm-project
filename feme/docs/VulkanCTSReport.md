@@ -3638,3 +3638,60 @@ this row -- new tests relative to F1's own report: three new
 `PhysicalDeviceInfoTest`'s
 `ShaderSubgroupRotateIsAdvertisedThroughItsOwnDedicatedFeatureStruct`, and
 `DrawTest`'s `AdvertisesDynamicRenderingExtension` (extended).
+
+## Roadmap F3: measured impact (targeted, not a full re-run)
+
+F3 audited `VK_KHR_shader_float_controls`'s per-module execution modes
+(`DenormPreserve`/`DenormFlushToZero`/`SignedZeroInfNanPreserve`/
+`RoundingModeRTE`/`RoundingModeRTZ`) and found `ExecutionModePattern`
+(`SPIRVToLLVMPatterns.cpp`) unconditionally erased every one of them with
+no diagnostic. Since no FP op conversion pattern ever sets fast-math
+flags or a non-default rounding mode, `DenormPreserve`/`RoundingModeRTE`/
+`SignedZeroInfNanPreserve` already describe the code this conversion
+always produces and are still silently accepted; `collectEntryPoints`
+(`ConvertSPIRVToLLVMPass.cpp`) now instead rejects `DenormFlushToZero`/
+`RoundingModeRTZ` with a hard diagnostic, since nothing downstream can
+produce flushed-denormal or truncating-rounding code. Verified first with
+FileCheck lit tests (`spirv-to-llvm-float-controls.mlir` for the three
+accepted modes at every declared bit width,
+`spirv-to-llvm-denorm-flush-to-zero-invalid.mlir`/
+`spirv-to-llvm-rounding-mode-rtz-invalid.mlir` for the two rejected ones).
+`VK_KHR_shader_float_controls`/`VK_KHR_shader_float_controls2` remain
+unadvertised (see `Vulkan14FeatureInventory.md`'s updated rows and
+roadmap F15).
+
+Targeted subset: **`dEQP-VK.spirv_assembly.instruction.compute.float_controls.*`**
+(2,569 cases; the only group this session's case-list regeneration found
+under `float_control`/`float_controls`, alongside two unrelated
+`api.info`/`api.device_init` bit-advertisement cases this row's `EntryPoints.cpp`
+changes do not touch).
+
+- **1 passed / 0 failed / 2,568 not supported**, both before and after
+  this row's commits -- a genuine, measured **zero-effect** result, not
+  merely an expectation. The single pass
+  (`independence_settings.independence_settings`) only checks that the
+  advertised independence/feature-bit values are internally consistent,
+  which `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE` plus all-`VK_FALSE`
+  already satisfies (both before and after this row: this row changed
+  *diagnostics* inside SPIR-V-to-LLVM conversion, not any advertised
+  property). Every other case is `NotSupported` at
+  `vktSpvAsmComputeShaderCase.cpp:491` on `shaderFloat16`/`shaderFloat64`
+  (the fp16/fp64 storage-class-plus-arithmetic features these generated
+  cases require and this ICD does not advertise) before `vkCreateDevice`
+  ever runs, let alone before a shader reaches
+  `feme-convert-spirv-to-llvm`'s `collectEntryPoints`/`ExecutionModePattern` --
+  so this session's new rejection path is not exercised by any case in
+  this CTS build at all; it is unreachable until `VK_KHR_16bit_storage`+
+  `shaderFloat16`/`shaderFloat64` (an unrelated, pre-existing gap) is
+  implemented, or a future `dEQP-VK` build adds an fp32-only float-controls
+  case, or a hand-written unit/lit test exercises it directly (which this
+  row's own new FileCheck tests do).
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1696/1697
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- four new tests relative to F2's own report:
+`spirv-to-llvm-float-controls.mlir`,
+`spirv-to-llvm-denorm-flush-to-zero-invalid.mlir`, and
+`spirv-to-llvm-rounding-mode-rtz-invalid.mlir` (three FileCheck files, one
+with three independent `--split-input-file` cases).
