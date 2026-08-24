@@ -3503,3 +3503,74 @@ this row -- the five new tests relative to E26's own report are
 `BlockPointerReturnsNullOutOfBounds` and `ImageOpsTest`'s
 `BlitClampsOutOfBoundsSourceRegion`/
 `BlitDiscardsOutOfBoundsDestinationTexels`/`ResolveDiscardsOutOfBoundsRegion`.
+
+## Roadmap F1: measured impact (targeted, not a full re-run)
+
+F1 advertised `VK_KHR_global_priority`, flipped `globalPriorityQuery` to
+`VK_TRUE` (both the aggregate `VkPhysicalDeviceVulkan14Features` struct and
+a new dedicated `VkPhysicalDeviceGlobalPriorityQueryFeatures` struct), and
+filled `VkQueueFamilyGlobalPriorityProperties` with the full mandatory
+priority list for every queue family; `vkCreateDevice` already ignored an
+unrecognized `pQueueCreateInfos[i].pNext` entry, so the create-time hint
+was already a no-op.
+
+Targeted subset: **`dEQP-VK.api.device_init.*`** (246 cases, the group
+this row's `vkCreateDevice`/query-feature change is most directly
+reachable from) and **`dEQP-VK.synchronization.global_priority_transition.*`**
+(396 cases, the group that actually creates queues at each priority level
+and exercises priority-based preemption).
+
+- **`api.device_init.*`**: 231 passed / 4 failed / 11 not supported. The
+  four `create_device_global_priority`/`create_device_global_priority_query`
+  cases' *KHR-suffixed* variants (`create_device_global_priority_khr`,
+  `create_device_global_priority_query_khr`) both now `Pass`; their
+  *EXT-suffixed* siblings (`create_device_global_priority`,
+  `create_device_global_priority_query`) remain `NotSupported
+  (VK_EXT_global_priority[_query] is not supported)`, correctly -- this
+  row's own scope is `VK_KHR_global_priority` only (per the roadmap row's
+  own title), and neither `VK_EXT_global_priority` nor
+  `VK_EXT_global_priority_query` is advertised.
+  `create_device_unsupported_features.global_priority_query_features`
+  (requests `globalPriorityQuery = VK_TRUE` with every other 1.4 feature
+  left `VK_FALSE`, expecting success) also `Pass`es. The 4 failures
+  (`create_device_unsupported_features.{core,vulkan11_features,
+  vulkan12_features,vulkan13_features}`) are a pre-existing, unrelated
+  gap: `vkCreateDevice` does not validate a requested feature against
+  `vkGetPhysicalDeviceFeatures2`'s own advertised set at all (e.g.
+  `fullDrawIndexUint32`, a 1.0 feature `create_device_unsupported_features.
+  core` deliberately requests despite it being unsupported, expecting
+  `VK_ERROR_FEATURE_NOT_PRESENT`), a gap this row's own 1.4-scoped change
+  neither introduces nor is positioned to close.
+- **`synchronization.global_priority_transition.*`**: 48 passed / 252
+  failed / 96 not supported. The 96 not-supported cases are the
+  `VK_EXT_global_priority_query`-gated `GPQCase` variants (out of this
+  row's scope, same reasoning as `api.device_init.*` above). Every one of
+  the 252 failures is a pipeline-creation failure
+  (`vk.create{Compute,Graphics}Pipelines(...): VK_ERROR_INITIALIZATION_
+  FAILED`) in the `VK_KHR_global_priority`-gated `PreemptionCase` variants,
+  reached only because this row's own extension/feature/property changes
+  now let them run at all; every one traces to a pre-existing, unrelated
+  shader-lowering gap already documented elsewhere in this report --
+  `feme-cpu-simdize`'s "divergent vector value ... used outside a
+  supported ... pattern" limitation (roadmap milestone 7's own deviation,
+  the same one "Roadmap E16: measured impact" above found blocking
+  `resolve_image.*`) for the graphics-pipeline failures, and an
+  `'llvm.getelementptr' op operand #0 must be LLVM pointer type ...` (a
+  `vector<3xi32>` local-invocation-ID value reaching a GEP base operand
+  that expects a pointer) for the compute-pipeline ones -- neither is
+  reachable from, or fixable within, this row's own `PhysicalDeviceInfo.
+  cpp`/`EntryPoints.cpp` scope. The 48 passes are exactly the
+  `PreemptionCase` variants whose shaders happen not to trigger either
+  gap, confirming the priority-transition mechanism this row implements
+  (advertise the full list, accept every priority at `vkCreateDevice`)
+  behaves correctly once a test actually reaches it.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1690/1691
+passed, 1 unsupported (pre-existing, unrelated), after every commit in
+this row -- four new tests relative to E29's own report:
+`PhysicalDeviceInfoTest`'s
+`GlobalPriorityQueryIsAdvertisedThroughItsOwnDedicatedFeatureStruct`/
+`EveryQueueFamilyReportsTheFullMandatoryGlobalPriorityList` and
+`DrawTest`'s `AdvertisesDynamicRenderingExtension` (extended)/
+`GlobalPriorityCreateInfoIsANoOpAtDeviceCreation`.
