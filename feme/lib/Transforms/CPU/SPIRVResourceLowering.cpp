@@ -241,6 +241,24 @@ bool isSupportedTexelElementType(Type *Ty) {
   return ElemTy->isFloatTy() || ElemTy->isIntegerTy(32);
 }
 
+/// Whether \p Ty is a shape `feme::cpu::mangleResourceCallName`'s own
+/// `appendScalarMangling` (ResourceCalls.cpp) can mangle: a scalar
+/// half/float/double/integer, or a fixed vector of one. A storage/uniform
+/// buffer load or store of anything else -- most notably a SPIR-V
+/// aggregate (array or struct) value, e.g. `OpSelect`'s result when its
+/// operands are themselves arrays -- is left unclassified by
+/// `hasOnlySupportedUses` below rather than reaching
+/// `createRawLoad`/`createRawStore` and hitting `appendScalarMangling`'s own
+/// `llvm_unreachable` (`dEQP-VK.spirv_assembly.instruction.spirv1p4.
+/// opselect.array_select`'s own crash).
+bool isSupportedRawElementType(Type *Ty) {
+  Type *ElemTy = Ty;
+  if (auto *VecTy = dyn_cast<FixedVectorType>(Ty))
+    ElemTy = VecTy->getElementType();
+  return ElemTy->isHalfTy() || ElemTy->isFloatTy() || ElemTy->isDoubleTy() ||
+         ElemTy->isIntegerTy();
+}
+
 /// Returns \p Handle's buffer classification if its type is a `Dim::Buffer`
 /// `target("spirv.Image", ElemTy, [Dim, Depth, Arrayed, MS, Sampled,
 /// Format])` handle. `ElemTy` here is SPIR-V's own per-*channel* sampled
@@ -457,7 +475,11 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
 /// statically typed. For a texel-buffer kind, every load's result type (or
 /// store's stored-value type) must be one of the shapes
 /// `isSupportedTexelElementType` accepts -- see `classifyTexelBufferHandle`'s
-/// comment for why that check belongs here rather than on the handle type.
+/// comment for why that check belongs here rather than on the handle type;
+/// for a storage/uniform kind, it must instead be one
+/// `isSupportedRawElementType` accepts, since that is what
+/// `createRawLoad`/`createRawStore` (and, transitively,
+/// `feme::cpu::mangleResourceCallName`) can mangle a runtime call name for.
 /// Any further `getelementptr` into the element's own fields (a
 /// structured-buffer field access, or a nested uniform-buffer field) is
 /// left unmodeled, matching
@@ -475,7 +497,8 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
       return false;
     for (const User *PU : GetPtr->users()) {
       if (const auto *LI = dyn_cast<LoadInst>(PU)) {
-        if (IsTexel && !isSupportedTexelElementType(LI->getType()))
+        if (IsTexel ? !isSupportedTexelElementType(LI->getType())
+                    : !isSupportedRawElementType(LI->getType()))
           return false;
         continue;
       }
@@ -483,8 +506,9 @@ bool hasOnlySupportedUses(const CallInst &Handle, HandleKind Kind) {
         if (const auto *SI = dyn_cast<StoreInst>(PU)) {
           if (SI->getPointerOperand() != GetPtr)
             return false;
-          if (IsTexel &&
-              !isSupportedTexelElementType(SI->getValueOperand()->getType()))
+          if (IsTexel
+                  ? !isSupportedTexelElementType(SI->getValueOperand()->getType())
+                  : !isSupportedRawElementType(SI->getValueOperand()->getType()))
             return false;
           continue;
         }

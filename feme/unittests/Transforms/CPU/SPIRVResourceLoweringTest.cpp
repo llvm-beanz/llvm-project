@@ -237,6 +237,39 @@ TEST(SPIRVResourceLoweringTest, LeavesConflictingRangeSizeUnchanged) {
   EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
 }
 
+// Roadmap E29: a storage-buffer store of an aggregate (here, an array --
+// the shape `OpSelect` produces choosing between two array-typed operands,
+// dEQP-VK.spirv_assembly.instruction.spirv1p4.opselect.array_select's own
+// case) is left un-normalized rather than reaching
+// `feme::cpu::createRawStore`/`mangleResourceCallName`, which cannot mangle
+// a runtime call name for anything but a scalar or fixed vector of
+// half/float/double/integer (see `isSupportedRawElementType`'s comment) --
+// hitting `appendScalarMangling`'s own `llvm_unreachable` otherwise.
+TEST(SPIRVResourceLoweringTest, LeavesStorageBufferArrayStoreUnchanged) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main(i32 %idx, [4 x i32] %v) {
+      %h = call target("spirv.VulkanBuffer", [0 x [4 x i32]], 12, 1)
+          @llvm.spv.resource.handlefrombinding(i32 0, i32 1, i32 1, i32 0, ptr null)
+      %ptr = call ptr
+          @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x [4 x i32]], 12, 1) %h, i32 %idx)
+      store [4 x i32] %v, ptr %ptr
+      ret void
+    }
+    declare target("spirv.VulkanBuffer", [0 x [4 x i32]], 12, 1)
+        @llvm.spv.resource.handlefrombinding(i32, i32, i32, i32, ptr)
+    declare ptr @llvm.spv.resource.getpointer(target("spirv.VulkanBuffer", [0 x [4 x i32]], 12, 1), i32)
+  )");
+  ASSERT_TRUE(M);
+  runPass(*M);
+
+  Function *F = M->getFunction("main");
+  ASSERT_TRUE(F);
+  EXPECT_FALSE(hasResourceLoadCall(*F));
+  EXPECT_FALSE(hasResourceTypedCall(*F, "feme.cpu.resource.store.raw"));
+  EXPECT_FALSE(M->getNamedMetadata("feme.cpu.bound_resources"));
+}
+
 // V3: a uniform buffer block (`cbuffer`/`ConstantBuffer<T>`) shares the same
 // `spirv.VulkanBuffer` handle representation a storage buffer does, but its
 // sole type parameter is the block's own field struct directly (see
