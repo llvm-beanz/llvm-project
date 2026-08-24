@@ -249,20 +249,24 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // both must agree. `DenormPreserve`/`RoundingModeRTE`/
       // `SignedZeroInfNanPreserve` execution modes are honored by
       // construction (see `ExecutionModePattern`/`collectEntryPoints` in
-      // feme/lib/Conversion/SPIRVToLLVM) but their properties are left
-      // conservatively `VK_FALSE` pending a closer look at what
-      // `*Independence` reporting they would additionally require;
-      // `RoundingModeRTZ`'s three width fields are the one set flipped to
-      // `VK_TRUE` here, now that `ConstrainedRoundTowardZeroPattern`
-      // (SPIRVToLLVMPatterns.cpp) actually produces truncating-rounding-mode
-      // code for it, at every width, rather than only diagnosing a shader
-      // that asks for it. `DenormFlushToZero` remains unsupported (roadmap
-      // F15b: LLVM's `denormal-fp-math`/`denormal-fp-math-f32` function
-      // attributes cover only `f32`, not `f16`/`f64`), so its three fields,
-      // and both independence fields (pending the same closer look
-      // `RoundingModeRTZ`'s own get once `DenormFlushToZero` exists to
-      // compare against), stay the conservative "not independently
-      // supported" value.
+      // feme/lib/Conversion/SPIRVToLLVM) and `ConstrainedRoundTowardZeroPattern`
+      // (SPIRVToLLVMPatterns.cpp) now actually produces truncating-rounding-
+      // mode code for `RoundingModeRTZ`, at every width, rather than only
+      // diagnosing a shader that asks for it -- but every field here stays
+      // conservatively `VK_FALSE`, `RoundingModeRTZ`'s three included: a
+      // targeted CTS run flipping them to `VK_TRUE` found every
+      // `dEQP-VK.spirv_assembly.instruction.compute.float_controls.fp32.*`
+      // case that reaches pipeline creation (i.e. is not already
+      // `NotSupported` on an unrelated missing feature) fails there instead
+      // of passing, on a completely unrelated, pre-existing gap:
+      // `feme::cpu`'s resource-lowering cannot yet raise the small,
+      // 2-element runtime-sized storage-buffer bindings these generated
+      // shaders declare ("register-bound resource handle ... cannot
+      // normalize into a heap access or the root-constant block") --
+      // nothing to do with float controls at all. Advertising `VK_TRUE`
+      // would trade a graceful `NotSupported` skip for an outright CTS
+      // `Fail` until that gap closes, so every field remains `VK_FALSE`
+      // pending it; see agent_thoughts.md's F15a entry.
       auto *FloatControls =
           reinterpret_cast<VkPhysicalDeviceFloatControlsProperties *>(Base);
       FloatControls->denormBehaviorIndependence =
@@ -281,9 +285,9 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       FloatControls->shaderRoundingModeRTEFloat16 = VK_FALSE;
       FloatControls->shaderRoundingModeRTEFloat32 = VK_FALSE;
       FloatControls->shaderRoundingModeRTEFloat64 = VK_FALSE;
-      FloatControls->shaderRoundingModeRTZFloat16 = VK_TRUE;
-      FloatControls->shaderRoundingModeRTZFloat32 = VK_TRUE;
-      FloatControls->shaderRoundingModeRTZFloat64 = VK_TRUE;
+      FloatControls->shaderRoundingModeRTZFloat16 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTZFloat32 = VK_FALSE;
+      FloatControls->shaderRoundingModeRTZFloat64 = VK_FALSE;
       break;
     }
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES: {
@@ -312,20 +316,23 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
                   sizeof(Info.DriverName));
       std::memcpy(Props12->driverInfo, Info.DriverInfo,
                   sizeof(Info.DriverInfo));
-      // (roadmap C6, F15a) Every remaining field is written explicitly, for
-      // the same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
-      // VULKAN_1_2_FEATURES` documents. Most of these do not reflect a real
-      // capability this ICD implements (no `VK_EXT_descriptor_indexing`, no
-      // `VK_KHR_depth_stencil_resolve`), so remain the conservative "least
-      // capable, always-safe" value rather than an aspirational one --
-      // `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE` and
+      // (roadmap C6) Every remaining field is written explicitly, for the
+      // same guard-pattern reason `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+      // VULKAN_1_2_FEATURES` documents. None of these reflect a real
+      // capability this ICD implements (no explicit SPIR-V float-controls
+      // handling, no `VK_EXT_descriptor_indexing`, no
+      // `VK_KHR_depth_stencil_resolve`), so every one is the conservative
+      // "least capable, always-safe" value rather than an aspirational
+      // one -- `VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE` (every bit
+      // width must share the same float-controls execution mode) and
       // `VK_RESOLVE_MODE_NONE` (no resolve mode beyond the ordinary color
       // resolve this ICD already implements) rather than the `SAMPLE_ZERO`
-      // bit a real `VK_KHR_depth_stencil_resolve` implementation would need
-      // to support. `shaderRoundingModeRTZFloat{16,32,64}` are the
-      // exception, matching `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
-      // FLOAT_CONTROLS_PROPERTIES` above's own comment on why they (and
-      // only they) are `VK_TRUE`.
+      // bit a real `VK_KHR_depth_stencil_resolve` implementation would
+      // need to support. See `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_
+      // FLOAT_CONTROLS_PROPERTIES` above's comment for why
+      // `shaderRoundingModeRTZFloat{16,32,64}` stay `VK_FALSE` too, despite
+      // roadmap F15a's `ConstrainedRoundTowardZeroPattern` now genuinely
+      // producing that code.
       Props12->denormBehaviorIndependence =
           VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
       Props12->roundingModeIndependence =
@@ -342,9 +349,9 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props12->shaderRoundingModeRTEFloat16 = VK_FALSE;
       Props12->shaderRoundingModeRTEFloat32 = VK_FALSE;
       Props12->shaderRoundingModeRTEFloat64 = VK_FALSE;
-      Props12->shaderRoundingModeRTZFloat16 = VK_TRUE;
-      Props12->shaderRoundingModeRTZFloat32 = VK_TRUE;
-      Props12->shaderRoundingModeRTZFloat64 = VK_TRUE;
+      Props12->shaderRoundingModeRTZFloat16 = VK_FALSE;
+      Props12->shaderRoundingModeRTZFloat32 = VK_FALSE;
+      Props12->shaderRoundingModeRTZFloat64 = VK_FALSE;
       Props12->maxUpdateAfterBindDescriptorsInAllPools = 0;
       Props12->shaderUniformBufferArrayNonUniformIndexingNative = VK_FALSE;
       Props12->shaderSampledImageArrayNonUniformIndexingNative = VK_FALSE;
