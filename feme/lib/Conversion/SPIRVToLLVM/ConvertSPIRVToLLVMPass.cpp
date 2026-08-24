@@ -119,6 +119,61 @@ std::string formatLocalSize(mlir::ArrayAttr Values) {
   return Result;
 }
 
+/// Returns a human-readable name for one of the `VK_KHR_shader_float_controls`
+/// execution modes, for use in the diagnostic `rejectUnhonoredFloatControls`
+/// emits.
+llvm::StringRef getFloatControlModeName(mlir::spirv::ExecutionMode Mode) {
+  switch (Mode) {
+  case mlir::spirv::ExecutionMode::DenormPreserve:
+    return "DenormPreserve";
+  case mlir::spirv::ExecutionMode::DenormFlushToZero:
+    return "DenormFlushToZero";
+  case mlir::spirv::ExecutionMode::SignedZeroInfNanPreserve:
+    return "SignedZeroInfNanPreserve";
+  case mlir::spirv::ExecutionMode::RoundingModeRTE:
+    return "RoundingModeRTE";
+  case mlir::spirv::ExecutionMode::RoundingModeRTZ:
+    return "RoundingModeRTZ";
+  default:
+    llvm_unreachable("not a float-controls execution mode");
+  }
+}
+
+/// Diagnoses \p Mode, one of `VK_KHR_shader_float_controls`'s per-entry-point
+/// execution modes (roadmap F3), if honoring it would require behavior this
+/// conversion does not produce, rather than silently accepting and then
+/// dropping it the way `ExecutionModePattern` (SPIRVToLLVMPatterns.cpp) drops
+/// every other execution mode.
+///
+/// None of the FP op conversion patterns ever set fast-math flags or a
+/// non-default rounding mode, so every `spirv.FAdd`/`FMul`/etc. they produce
+/// is already the strict, round-to-nearest-even, denormal-preserving `llvm`
+/// dialect op the CPU (and other) targets execute with no further attribute:
+/// that is precisely what `DenormPreserve`, `RoundingModeRTE` and
+/// `SignedZeroInfNanPreserve` ask for, at every bit width, so declaring any
+/// of them is accepted (and, like every other execution mode, subsequently
+/// erased) below. `DenormFlushToZero` and `RoundingModeRTZ` ask for the
+/// opposite of that default and nothing downstream of this conversion knows
+/// how to produce it, so accepting one and then silently erasing it, the
+/// same as every other mode, would silently miscompile the entry point
+/// instead: report it as an error instead.
+mlir::LogicalResult
+rejectUnhonoredFloatControls(mlir::spirv::ExecutionModeOp Mode) {
+  switch (Mode.getExecutionMode()) {
+  case mlir::spirv::ExecutionMode::DenormFlushToZero:
+  case mlir::spirv::ExecutionMode::RoundingModeRTZ:
+    return Mode.emitOpError()
+           << "execution mode '"
+           << getFloatControlModeName(Mode.getExecutionMode())
+           << "' is not supported: FeMe's SPIR-V to LLVM conversion never "
+              "produces flushed-denormal or truncating-rounding-mode "
+              "floating-point code, so this entry point's request for it "
+              "cannot be honored";
+  default:
+    return mlir::success();
+  }
+}
+
 /// Collects \p Module's entry points into \p EntryPoints, keyed by the
 /// function each names, and validates each one's stage against \p
 /// TargetTriple -- the triple the converted module will carry, whose
@@ -150,6 +205,8 @@ collectEntryPoints(mlir::spirv::ModuleOp Module, llvm::StringRef TargetTriple,
   }
 
   for (auto Mode : Module.getOps<mlir::spirv::ExecutionModeOp>()) {
+    if (mlir::failed(rejectUnhonoredFloatControls(Mode)))
+      return mlir::failure();
     if (Mode.getExecutionMode() != mlir::spirv::ExecutionMode::LocalSize)
       continue;
     auto It = EntryPoints.find(Mode.getFn());

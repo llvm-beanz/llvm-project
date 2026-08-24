@@ -2108,6 +2108,15 @@ public:
 /// feme::spirv::createConvertSPIRVToLLVMPass). MLIR's own pattern turns it
 /// into a `__spv__<entry>_execution_mode_info_<mode>` global describing the
 /// mode to the SPIR-V *runner*, which LLVM's SPIRV backend has no notion of.
+///
+/// This also covers `VK_KHR_shader_float_controls`'s (roadmap F3)
+/// `DenormPreserve`/`RoundingModeRTE`/`SignedZeroInfNanPreserve` execution
+/// modes: they already describe the strict, denormal-preserving,
+/// round-to-nearest-even code every FP op conversion pattern always
+/// produces, so, like `LocalSize`, they need only be read (which
+/// `collectEntryPoints`'s `rejectUnhonoredFloatControls` does, to instead
+/// reject the two modes -- `DenormFlushToZero`, `RoundingModeRTZ` -- this
+/// conversion cannot honor) before being dropped here with everything else.
 class ExecutionModePattern
     : public mlir::SPIRVToLLVMConversion<mlir::spirv::ExecutionModeOp> {
 public:
