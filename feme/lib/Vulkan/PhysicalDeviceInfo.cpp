@@ -626,6 +626,14 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too.
       {VK_KHR_GLOBAL_PRIORITY_EXTENSION_NAME,
        VK_KHR_GLOBAL_PRIORITY_SPEC_VERSION},
+      // (roadmap F2) `spirv.GroupNonUniformRotateKHR` now converts
+      // (SPIRVToLLVMPatterns.cpp's `RotateConversionPattern`); like
+      // `VK_KHR_global_priority` above,
+      // `dEQP-VK.subgroups.rotate.*`/`dEQP-VK.subgroups.clustered_rotate.*`
+      // enable this extension by name regardless of the advertised
+      // `apiVersion`, so it must be listed here too.
+      {VK_KHR_SHADER_SUBGROUP_ROTATE_EXTENSION_NAME,
+       VK_KHR_SHADER_SUBGROUP_ROTATE_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -1123,8 +1123,14 @@ void fillFeatures2Chain(void *pNext) {
       // dedicated `VkPhysicalDeviceGlobalPriorityQueryFeatures` struct case
       // below.
       Features->globalPriorityQuery = VK_TRUE;
-      Features->shaderSubgroupRotate = VK_FALSE;
-      Features->shaderSubgroupRotateClustered = VK_FALSE;
+      // (roadmap F2) `spirv.GroupNonUniformRotateKHR` now converts
+      // (SPIRVToLLVMPatterns.cpp's `RotateConversionPattern`), covering both
+      // the plain and `cluster_size` (clustered) forms with the same
+      // pattern, so these two bits -- like `globalPriorityQuery` above --
+      // must agree with the dedicated
+      // `VkPhysicalDeviceShaderSubgroupRotateFeatures` struct case below.
+      Features->shaderSubgroupRotate = VK_TRUE;
+      Features->shaderSubgroupRotateClustered = VK_TRUE;
       Features->shaderFloatControls2 = VK_FALSE;
       Features->shaderExpectAssume = VK_FALSE;
       Features->rectangularLines = VK_FALSE;
@@ -1227,6 +1233,18 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceGlobalPriorityQueryFeatures *>(Base);
       Features->globalPriorityQuery = VK_TRUE;
+      break;
+    }
+    // (roadmap F2) `VK_KHR_shader_subgroup_rotate`'s own feature struct,
+    // whose 1.4 core and `KHR` spellings share one `sType`, exactly like
+    // `globalPriorityQuery` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_ROTATE_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceShaderSubgroupRotateFeatures *>(
+              Base);
+      Features->shaderSubgroupRotate = VK_TRUE;
+      Features->shaderSubgroupRotateClustered = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

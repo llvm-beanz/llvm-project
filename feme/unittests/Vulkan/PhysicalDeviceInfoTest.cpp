@@ -1047,8 +1047,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   // Properties`), and must agree with the dedicated
   // `VkPhysicalDeviceGlobalPriorityQueryFeatures` struct case below.
   EXPECT_EQ(Features14.globalPriorityQuery, VK_TRUE);
-  EXPECT_EQ(Features14.shaderSubgroupRotate, VK_FALSE);
-  EXPECT_EQ(Features14.shaderSubgroupRotateClustered, VK_FALSE);
+  // Roadmap F2: `spirv.GroupNonUniformRotateKHR` now converts
+  // (SPIRVToLLVMPatterns.cpp's `RotateConversionPattern`), covering both
+  // forms with the same pattern, and must agree with the dedicated
+  // `VkPhysicalDeviceShaderSubgroupRotateFeatures` struct case below.
+  EXPECT_EQ(Features14.shaderSubgroupRotate, VK_TRUE);
+  EXPECT_EQ(Features14.shaderSubgroupRotateClustered, VK_TRUE);
   EXPECT_EQ(Features14.shaderFloatControls2, VK_FALSE);
   EXPECT_EQ(Features14.shaderExpectAssume, VK_FALSE);
   EXPECT_EQ(Features14.rectangularLines, VK_FALSE);
@@ -1145,6 +1149,24 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &GlobalPriorityQueryFeatures;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(GlobalPriorityQueryFeatures.globalPriorityQuery, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       ShaderSubgroupRotateIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap F2: `VK_KHR_shader_subgroup_rotate`'s own dedicated feature
+  // struct must agree with the aggregate `VkPhysicalDeviceVulkan14Features`
+  // case above, exactly like `VK_KHR_global_priority`'s own struct does.
+  VkPhysicalDeviceShaderSubgroupRotateFeatures ShaderSubgroupRotateFeatures{};
+  ShaderSubgroupRotateFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_ROTATE_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &ShaderSubgroupRotateFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(ShaderSubgroupRotateFeatures.shaderSubgroupRotate, VK_TRUE);
+  EXPECT_EQ(ShaderSubgroupRotateFeatures.shaderSubgroupRotateClustered,
+            VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
