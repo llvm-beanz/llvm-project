@@ -233,6 +233,10 @@ struct GraphicsPipelineState {
   feme::graphics::ViewportState Viewport;
   feme::graphics::ScissorRect Scissor;
   uint32_t DynamicStates = 0;
+  /// (roadmap F10) Each stage's own resolved `PipelineRobustness` -- see
+  /// that struct's own comment in Pipeline.h.
+  PipelineRobustness VertexRobustness;
+  PipelineRobustness FragmentRobustness;
 };
 
 /// A `VkPipeline` graphics pipeline: the compiled stages plus the
@@ -293,6 +297,13 @@ public:
   }
   const feme::cpu::CompiledStage &fragmentStage() const {
     return *State.Artifact->FragmentStage;
+  }
+  /// (roadmap F10) See `PipelineRobustness`'s own comment in Pipeline.h.
+  const PipelineRobustness &vertexRobustness() const {
+    return State.VertexRobustness;
+  }
+  const PipelineRobustness &fragmentRobustness() const {
+    return State.FragmentRobustness;
   }
 
 private:

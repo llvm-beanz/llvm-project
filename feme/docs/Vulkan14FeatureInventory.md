@@ -73,8 +73,8 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
 | 1.1 | **0 of 12** | n/a (see scope note) | 6 of 23 |
 | 1.2 | 7 of 47 | n/a (see scope note) | 7 of 24 |
 | 1.3 | 12 of 15 | 45 | 19 of 23 |
-| 1.4 | 14 of 21 | 25 | 7 of 16 |
-| **total** | **36 of 150** | **70** | **39 of 86** |
+| 1.4 | 15 of 21 | 25 | 8 of 16 |
+| **total** | **37 of 150** | **70** | **40 of 86** |
 
 - **The 1.3 floor is nearly closed; the 1.1/1.2 floor was never audited
   until now, and the 1.4 floor is well underway.** Roadmap E1-E28 drove
@@ -83,9 +83,10 @@ Current state, regenerated against VK-GL-CTS's own `vk.xml`
   `textureCompressionASTC_HDR` remain), and the F-series has so far closed
   F1 (`globalPriorityQuery`), F2 (`shaderSubgroupRotate`/
   `shaderSubgroupRotateClustered`), F4 (`shaderExpectAssume`), F5 (the six
-  line-rasterization bits) and F6
-  (`vertexAttributeInstanceRateDivisor`/`vertexAttributeInstanceRateZeroDivisor`),
-  bringing 1.4 to 14 of its 21 bits, while 1.1 still reports **zero** of
+  line-rasterization bits), F6
+  (`vertexAttributeInstanceRateDivisor`/`vertexAttributeInstanceRateZeroDivisor`)
+  and F10 (`pipelineRobustness`),
+  bringing 1.4 to 15 of its 21 bits, while 1.1 still reports **zero** of
   its 12 bits. That zero is the single most surprising number in this
   table: `multiview`, `variablePointers`, `samplerYcbcrConversion`,
   `shaderDrawParameters`, the 16-bit storage
@@ -500,7 +501,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `maintenance5` | yes |  |
 | feature | VK_VERSION_1_4 | `maintenance6` | yes |  |
 | feature | VK_VERSION_1_4 | `pipelineProtectedAccess` | yes | roadmap F9: this ICD has no protected-memory model at all (`protectedMemory` stays `VK_FALSE`), but `Pipeline::createFlags` (`Pipeline.h`) now records `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`/`VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT` verbatim, and `vkCmdBindPipeline` (`CommandBuffer.cpp`) silently rejects binding a `PROTECTED_ACCESS_ONLY_BIT` pipeline (no `VkCommandBuffer` this ICD hands out is ever protected, per `VUID-vkCmdBindPipeline-pipelineProtectedAccess-07409`); see the dedicated `VkPhysicalDevicePipelineProtectedAccessFeatures` row below |
-| feature | VK_VERSION_1_4 | `pipelineRobustness` | no |  |
+| feature | VK_VERSION_1_4 | `pipelineRobustness` | yes | roadmap F10: `VkPipelineRobustnessCreateInfo` accepted and validated at both compute and graphics pipeline creation (`Pipeline.cpp`'s `resolvePipelineRobustness`, `GraphicsPipeline.cpp`'s `translateFixedFunctionState`); see the dedicated `VkPhysicalDevicePipelineRobustnessFeatures`/`...Properties` rows below |
 | feature | VK_VERSION_1_4 | `hostImageCopy` | no |  |
 | feature | VK_VERSION_1_4 | `pushDescriptor` | no |  |
 | limit | VK_VERSION_1_4 | `lineSubPixelPrecisionBits` | n/a | roadmap F5: 4, the same conservative floor subPixelPrecisionBits/subTexelPrecisionBits already use (both the aggregate and dedicated VkPhysicalDeviceLineRasterizationPropertiesKHR struct) |
@@ -518,10 +519,10 @@ Every row cites the specific feature/limit/extension name it closes.
 | limit | VK_VERSION_1_4 | `blockTexelViewCompatibleMultipleLayers` | n/a |  |
 | limit | VK_VERSION_1_4 | `maxCombinedImageSamplerDescriptorCount` | n/a |  |
 | limit | VK_VERSION_1_4 | `fragmentShadingRateClampCombinerInputs` | n/a |  |
-| limit | VK_VERSION_1_4 | `defaultRobustnessStorageBuffers` | n/a |  |
-| limit | VK_VERSION_1_4 | `defaultRobustnessUniformBuffers` | n/a |  |
-| limit | VK_VERSION_1_4 | `defaultRobustnessVertexInputs` | n/a |  |
-| limit | VK_VERSION_1_4 | `defaultRobustnessImages` | n/a |  |
+| limit | VK_VERSION_1_4 | `defaultRobustnessStorageBuffers` | n/a | roadmap F10: `VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS` -- storage buffer bounds checking is unconditionally on regardless of any feature (see `robustBufferAccess`'s own row above), always reading zero rather than "zero or any in-bounds value"; not the stronger `..._2` value, since that additionally requires a null descriptor to read as zero too (`VK_EXT_robustness2`, unimplemented) |
+| limit | VK_VERSION_1_4 | `defaultRobustnessUniformBuffers` | n/a | roadmap F10: same reasoning and value as `defaultRobustnessStorageBuffers` above -- uniform buffers go through the same bounds-checked descriptor read |
+| limit | VK_VERSION_1_4 | `defaultRobustnessVertexInputs` | n/a | roadmap F10: same value as `defaultRobustnessStorageBuffers` above; closing this row required fixing two real gaps first -- `Executor.cpp`'s vertex-attribute fetch used to fail the whole draw on an out-of-bounds read instead of reading zero per component, and `CommandBuffer.cpp`'s `validateDrawFetchBounds` used to pre-reject any such draw before the executor even ran -- both contradicted `robustBufferAccess` being unconditionally on |
+| limit | VK_VERSION_1_4 | `defaultRobustnessImages` | n/a | roadmap F10: `VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS` -- `Image.cpp`'s shader-visible texel fetch already returns all-zero for any out-of-range access (roadmap E16), one of this behavior's own explicitly permitted "(0,0,0,0) or (0,0,0,1)" results; not the stronger `..._2` value, for the same null-descriptor reasoning as the buffer rows above |
 | limit | VK_VERSION_1_4 | `copySrcLayoutCount` | n/a |  |
 | limit | VK_VERSION_1_4 | `pCopySrcLayouts` | n/a |  |
 | limit | VK_VERSION_1_4 | `copyDstLayoutCount` | n/a |  |
@@ -530,7 +531,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | limit | VK_VERSION_1_4 | `identicalMemoryTypeRequirements` | n/a |  |
 | extension | VK_VERSION_1_4 | `VK_EXT_host_image_copy` | no |  |
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | yes | roadmap F9 (closed): see the `pipelineProtectedAccess` feature row above |
-| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | no |  |
+| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | yes | roadmap F10 (closed): see the `pipelineRobustness` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | yes | roadmap F8/F8a/F8b/F8c (closed): see the `dynamicRenderingLocalRead` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | yes | roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family |
 | extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | yes | roadmap F7: see the `indexTypeUint8` feature row above |

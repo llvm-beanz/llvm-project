@@ -96,9 +96,70 @@ uint32_t findRequiredSubgroupSize(const void *Next) {
   return 0;
 }
 
+/// The `VkPipelineRobustnessCreateInfo` chained onto \p Next, or `nullptr`
+/// if none is -- the same pNext-walk shape `findRequiredSubgroupSize` above
+/// uses.
+const VkPipelineRobustnessCreateInfo *
+findPipelineRobustnessCreateInfo(const void *Next) {
+  for (const auto *Header = static_cast<const VkBaseInStructure *>(Next);
+       Header; Header = Header->pNext)
+    if (Header->sType == VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO)
+      return reinterpret_cast<const VkPipelineRobustnessCreateInfo *>(Header);
+  return nullptr;
+}
+
+bool isValidRobustnessBufferBehavior(VkPipelineRobustnessBufferBehavior V) {
+  switch (V) {
+  case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT:
+  case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED:
+  case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS:
+  case VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool isValidRobustnessImageBehavior(VkPipelineRobustnessImageBehavior V) {
+  switch (V) {
+  case VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT:
+  case VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED:
+  case VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS:
+  case VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2:
+    return true;
+  default:
+    return false;
+  }
+}
+
 } // namespace
 
 namespace feme::vulkan {
+
+llvm::Expected<PipelineRobustness>
+resolvePipelineRobustness(const void *PipelinePNext, const void *StagePNext) {
+  const VkPipelineRobustnessCreateInfo *Info =
+      findPipelineRobustnessCreateInfo(StagePNext);
+  if (!Info)
+    Info = findPipelineRobustnessCreateInfo(PipelinePNext);
+  if (!Info)
+    return PipelineRobustness{};
+  if (!isValidRobustnessBufferBehavior(Info->storageBuffers) ||
+      !isValidRobustnessBufferBehavior(Info->uniformBuffers) ||
+      !isValidRobustnessBufferBehavior(Info->vertexInputs) ||
+      !isValidRobustnessImageBehavior(Info->images))
+    return createStringError(
+        inconvertibleErrorCode(),
+        "VkPipelineRobustnessCreateInfo names an out-of-range "
+        "VkPipelineRobustnessBufferBehavior/VkPipelineRobustnessImageBehavior "
+        "value");
+  PipelineRobustness Result;
+  Result.StorageBuffers = Info->storageBuffers;
+  Result.UniformBuffers = Info->uniformBuffers;
+  Result.VertexInputs = Info->vertexInputs;
+  Result.Images = Info->images;
+  return Result;
+}
 
 void fillPipelineCreationFeedback(const void *pNext, uint32_t StageCount,
                                   bool CacheHit) {
@@ -482,12 +543,25 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateComputePipelines(
         Cache->insert(*Key, Artifact);
     }
 
+    // (roadmap F10) `VK_EXT_pipeline_robustness`: validated (and, for a
+    // cache hit, still validated -- unlike the compile above, this is
+    // cheap and independent of the cached artifact) regardless of whether
+    // this pipeline missed the cache.
+    Expected<PipelineRobustness> Robustness = resolvePipelineRobustness(
+        CreateInfo.pNext, CreateInfo.stage.pNext);
+    if (!Robustness) {
+      consumeError(Robustness.takeError());
+      Result = VK_ERROR_INITIALIZATION_FAILED;
+      continue;
+    }
+
     // (roadmap E19) `VK_EXT_pipeline_creation_feedback`: a compute pipeline
     // has exactly one stage.
     fillPipelineCreationFeedback(CreateInfo.pNext, /*StageCount=*/1, CacheHit);
 
     ComputePipeline *Obj = Alloc.create<ComputePipeline>(
-        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Artifact, CreateInfo.flags);
+        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT, Artifact, CreateInfo.flags,
+        *Robustness);
     if (!Obj) {
       Result = VK_ERROR_OUT_OF_HOST_MEMORY;
       continue;

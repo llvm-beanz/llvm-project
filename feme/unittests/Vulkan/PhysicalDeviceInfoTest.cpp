@@ -480,14 +480,17 @@ TEST_F(PhysicalDeviceProperties2Test,
   // descriptor slot.
   EXPECT_EQ(Props14.maxCombinedImageSamplerDescriptorCount, 1u);
   EXPECT_EQ(Props14.fragmentShadingRateClampCombinerInputs, VK_FALSE);
+  // (roadmap F10) Real once `VK_EXT_pipeline_robustness` landed: agrees
+  // with `VkPhysicalDevicePipelineRobustnessProperties`'s own
+  // dedicated-struct test below.
   EXPECT_EQ(Props14.defaultRobustnessStorageBuffers,
-            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS);
   EXPECT_EQ(Props14.defaultRobustnessUniformBuffers,
-            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS);
   EXPECT_EQ(Props14.defaultRobustnessVertexInputs,
-            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS);
   EXPECT_EQ(Props14.defaultRobustnessImages,
-            VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT);
+            VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS);
   EXPECT_EQ(Props14.copySrcLayoutCount, 0u);
   EXPECT_EQ(Props14.pCopySrcLayouts, nullptr);
   EXPECT_EQ(Props14.copyDstLayoutCount, 0u);
@@ -1109,7 +1112,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   // NO_PROTECTED_ACCESS_BIT`, and must agree with the dedicated
   // `VkPhysicalDevicePipelineProtectedAccessFeatures` struct case below.
   EXPECT_EQ(Features14.pipelineProtectedAccess, VK_TRUE);
-  EXPECT_EQ(Features14.pipelineRobustness, VK_FALSE);
+  // Roadmap F10: `VkPipelineRobustnessCreateInfo` now accepted/validated
+  // at both compute and graphics pipeline creation, and must agree with
+  // the dedicated `VkPhysicalDevicePipelineRobustnessFeatures` struct case
+  // below.
+  EXPECT_EQ(Features14.pipelineRobustness, VK_TRUE);
   EXPECT_EQ(Features14.hostImageCopy, VK_FALSE);
   EXPECT_EQ(Features14.pushDescriptor, VK_FALSE);
 }
@@ -1373,6 +1380,63 @@ TEST_F(PhysicalDeviceProperties2Test,
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
   EXPECT_EQ(Maintenance6Props.maxCombinedImageSamplerDescriptorCount,
             Props14.maxCombinedImageSamplerDescriptorCount);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       PipelineRobustnessIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap F10: `VK_EXT_pipeline_robustness`'s own dedicated feature
+  // struct must agree with the aggregate `VkPhysicalDeviceVulkan14Features`
+  // case, exactly like `VK_KHR_global_priority`'s own struct does.
+  VkPhysicalDevicePipelineRobustnessFeatures PipelineRobustnessFeatures{};
+  PipelineRobustnessFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &PipelineRobustnessFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(PipelineRobustnessFeatures.pipelineRobustness, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       PipelineRobustnessPropertiesReportRealDefaultBehaviors) {
+  // Roadmap F10: `VK_EXT_pipeline_robustness`'s own dedicated properties
+  // struct must agree with the aggregate `VkPhysicalDeviceVulkan14Properties`
+  // case above, exactly like `VK_KHR_maintenance6`'s own struct does. Every
+  // field is a real, non-`..._DEVICE_DEFAULT` value describing this
+  // device's actual out-of-bounds behavior with no robustness feature
+  // enabled (see EntryPoints.cpp's own comment for why `..._ROBUST_BUFFER_
+  // ACCESS`/`..._ROBUST_IMAGE_ACCESS` rather than their stronger `..._2`
+  // siblings).
+  VkPhysicalDevicePipelineRobustnessProperties PipelineRobustnessProps{};
+  PipelineRobustnessProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &PipelineRobustnessProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessStorageBuffers,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessUniformBuffers,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessVertexInputs,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessImages,
+            VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS);
+
+  VkPhysicalDeviceVulkan14Properties Props14{};
+  Props14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;
+  Props2.pNext = &Props14;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessStorageBuffers,
+            Props14.defaultRobustnessStorageBuffers);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessUniformBuffers,
+            Props14.defaultRobustnessUniformBuffers);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessVertexInputs,
+            Props14.defaultRobustnessVertexInputs);
+  EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessImages,
+            Props14.defaultRobustnessImages);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

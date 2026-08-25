@@ -138,3 +138,4 @@ shaderExpectAssume
 # including 0 ("every instance reads firstInstance").
 vertexAttributeInstanceRateDivisor
 vertexAttributeInstanceRateZeroDivisor
+pipelineRobustness = roadmap F10: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDevicePipelineRobustnessFeatures struct

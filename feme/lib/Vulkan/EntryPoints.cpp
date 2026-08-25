@@ -643,20 +643,37 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props14->blockTexelViewCompatibleMultipleLayers = VK_FALSE;
       Props14->maxCombinedImageSamplerDescriptorCount = 1;
       Props14->fragmentShadingRateClampCombinerInputs = VK_FALSE;
-      // (roadmap F10) `VK_EXT_pipeline_robustness` is unimplemented: even
-      // though buffer bounds checking is unconditionally on elsewhere in
-      // this ICD (see the Vulkan 1.0 core feature comment above), claiming
-      // `ROBUST_BUFFER_ACCESS` here without a matching
-      // `VkPhysicalDevicePipelineRobustnessPropertiesEXT` case would
-      // disagree with that still-unfilled dedicated struct.
+      // (roadmap F10) `VK_EXT_pipeline_robustness` is now implemented
+      // (`Pipeline.h`'s `PipelineRobustness`/`resolvePipelineRobustness`,
+      // `Pipeline.cpp`/`GraphicsPipeline.cpp`); these four fields describe
+      // this device's own out-of-bounds behavior "when no robustness
+      // features are enabled" (the struct's own spec text) -- not
+      // `..._DEVICE_DEFAULT`, which would be circular here. Buffer bounds
+      // checking is unconditionally on for every storage/uniform buffer
+      // and (since this row's own vertex-fetch fix, Executor.cpp) vertex
+      // input regardless of any feature (see the Vulkan 1.0 core feature
+      // comment above), always reading zero rather than "zero or any
+      // in-bounds value" -- a strictly stronger guarantee than
+      // `..._ROBUST_BUFFER_ACCESS` requires, but `..._ROBUST_BUFFER_
+      // ACCESS_2` additionally requires a null descriptor to read as zero
+      // too (`VK_EXT_robustness2`, unimplemented), which this ICD has not
+      // verified, so the weaker, honest value is claimed instead of
+      // over-claiming. The same reasoning applies to
+      // `defaultRobustnessImages`: `Image.cpp`'s shader-visible texel
+      // fetch already returns all-zero for any out-of-range access
+      // (roadmap E16), one of `..._ROBUST_IMAGE_ACCESS`'s own explicitly
+      // permitted "(0,0,0,0) or (0,0,0,1)" results, but its null-
+      // descriptor guarantee is equally unverified. Must agree with the
+      // dedicated `VkPhysicalDevicePipelineRobustnessProperties` case
+      // below.
       Props14->defaultRobustnessStorageBuffers =
-          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
       Props14->defaultRobustnessUniformBuffers =
-          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
       Props14->defaultRobustnessVertexInputs =
-          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
       Props14->defaultRobustnessImages =
-          VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT;
+          VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS;
       // (roadmap F11) `hostImageCopy` is unimplemented: no supported
       // source/destination layout list exists yet, and
       // `identicalMemoryTypeRequirements` -- though a real, honest
@@ -728,6 +745,27 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Maintenance6->blockTexelViewCompatibleMultipleLayers = VK_FALSE;
       Maintenance6->maxCombinedImageSamplerDescriptorCount = 1;
       Maintenance6->fragmentShadingRateClampCombinerInputs = VK_FALSE;
+      break;
+    }
+    // (roadmap F10) `VK_EXT_pipeline_robustness`'s own properties struct,
+    // whose 1.4 core and `EXT` spellings share one `sType`, agreeing with
+    // the aggregate `VkPhysicalDeviceVulkan14Properties` case above exactly
+    // like `VkPhysicalDeviceMaintenance6Properties` already does for its
+    // own fields -- see that case's own comment for why each value here is
+    // the weaker, honest `..._ROBUST_BUFFER_ACCESS`/`..._ROBUST_IMAGE_
+    // ACCESS` rather than the stronger `..._2` siblings.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_PROPERTIES: {
+      auto *PipelineRobustness =
+          reinterpret_cast<VkPhysicalDevicePipelineRobustnessProperties *>(
+              Base);
+      PipelineRobustness->defaultRobustnessStorageBuffers =
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
+      PipelineRobustness->defaultRobustnessUniformBuffers =
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
+      PipelineRobustness->defaultRobustnessVertexInputs =
+          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
+      PipelineRobustness->defaultRobustnessImages =
+          VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS;
       break;
     }
     // (roadmap E7) `VK_EXT_subgroup_size_control`'s own properties struct,
@@ -1284,7 +1322,14 @@ void fillFeatures2Chain(void *pNext) {
       // what it *does* honestly implement is the per-pipeline restriction
       // those two flags describe -- see `vkCmdBindPipeline`'s own comment.
       Features->pipelineProtectedAccess = VK_TRUE;
-      Features->pipelineRobustness = VK_FALSE;
+      // (roadmap F10) `VkPipelineRobustnessCreateInfo` is now accepted and
+      // validated at both compute and graphics pipeline creation
+      // (`Pipeline.cpp`'s `resolvePipelineRobustness`, called from
+      // `vkCreateComputePipelines`/`GraphicsPipeline.cpp`'s
+      // `translateFixedFunctionState`), so this bit -- like
+      // `pipelineProtectedAccess` above -- must agree with the dedicated
+      // `VkPhysicalDevicePipelineRobustnessFeatures` struct case below.
+      Features->pipelineRobustness = VK_TRUE;
       Features->hostImageCopy = VK_FALSE;
       Features->pushDescriptor = VK_FALSE;
       break;
@@ -1448,6 +1493,16 @@ void fillFeatures2Chain(void *pNext) {
           reinterpret_cast<VkPhysicalDevicePipelineProtectedAccessFeatures *>(
               Base);
       Features->pipelineProtectedAccess = VK_TRUE;
+      break;
+    }
+    // (roadmap F10) `VK_EXT_pipeline_robustness`'s own feature struct,
+    // whose 1.4 core and `EXT` spellings share one `sType`, exactly like
+    // `pipelineProtectedAccess` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDevicePipelineRobustnessFeatures *>(Base);
+      Features->pipelineRobustness = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

@@ -694,6 +694,13 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // advertised `apiVersion`.
       {VK_EXT_PIPELINE_PROTECTED_ACCESS_EXTENSION_NAME,
        VK_EXT_PIPELINE_PROTECTED_ACCESS_SPEC_VERSION},
+      // (roadmap F10) `VkPipelineRobustnessCreateInfo` is accepted and
+      // validated at both compute and graphics pipeline creation
+      // (`Pipeline.cpp`'s `resolvePipelineRobustness`); like every other
+      // post-`maintenance5` entry above, this extension must be listed
+      // here too regardless of the advertised `apiVersion`.
+      {VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME,
+       VK_EXT_PIPELINE_ROBUSTNESS_SPEC_VERSION},
   };
   return Extensions;
 }

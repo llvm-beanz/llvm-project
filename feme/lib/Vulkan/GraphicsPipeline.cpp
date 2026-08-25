@@ -1130,6 +1130,22 @@ Error translateFixedFunctionState(
                              "a graphics pipeline needs both a vertex and a "
                              "fragment stage");
 
+  // (roadmap F10) `VK_EXT_pipeline_robustness`: each stage's own
+  // `VkPipelineRobustnessCreateInfo` (falling back to the pipeline-level
+  // one, see `PipelineRobustness`'s own comment) is resolved and validated
+  // independently, since the extension's own spec text scopes it "to all
+  // accesses emanating from the shader code of this shader stage".
+  Expected<PipelineRobustness> VertexRobustness =
+      resolvePipelineRobustness(CreateInfo.pNext, VertexInfo->pNext);
+  if (!VertexRobustness)
+    return VertexRobustness.takeError();
+  Expected<PipelineRobustness> FragmentRobustness =
+      resolvePipelineRobustness(CreateInfo.pNext, FragmentInfo->pNext);
+  if (!FragmentRobustness)
+    return FragmentRobustness.takeError();
+  Result.VertexRobustness = *VertexRobustness;
+  Result.FragmentRobustness = *FragmentRobustness;
+
   Expected<PipelineRenderTargets> Targets = getRenderTargets(CreateInfo);
   if (!Targets)
     return Targets.takeError();

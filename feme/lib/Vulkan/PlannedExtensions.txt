@@ -29,7 +29,6 @@ VK_EXT_host_image_copy = roadmap F11
 VK_EXT_image_robustness = roadmap E16
 VK_EXT_mesh_shader = roadmap H6
 VK_EXT_pipeline_protected_access = roadmap F9
-VK_EXT_pipeline_robustness = roadmap F10
 VK_EXT_sampler_filter_minmax = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_EXT_scalar_block_layout = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)
 VK_EXT_separate_stencil_usage = core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series)

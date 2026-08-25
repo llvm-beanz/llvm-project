@@ -1208,4 +1208,68 @@ TEST_F(GraphicsPipelineTest, FailOnCompileRequiredSucceedsOnceCachePopulated) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
+/// (roadmap F10) `VkPipelineRobustnessCreateInfo` is resolved independently
+/// per stage: the vertex stage's own chained struct is honored for the
+/// vertex stage, the pipeline-level one is the fragment stage's fallback
+/// (it names no struct of its own here), matching the extension's own
+/// "scoped to all accesses emanating from the shader code of this shader
+/// stage" spec text.
+TEST_F(GraphicsPipelineTest, ResolvesPipelineRobustnessPerStage) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkPipelineRobustnessCreateInfo PipelineRobustnessInfo{};
+  PipelineRobustnessInfo.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO;
+  PipelineRobustnessInfo.images =
+      VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED;
+
+  VkPipelineRobustnessCreateInfo VertexRobustnessInfo{};
+  VertexRobustnessInfo.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO;
+  VertexRobustnessInfo.vertexInputs =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2;
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Info.pNext = &PipelineRobustnessInfo;
+  Stages[0].pNext = &VertexRobustnessInfo;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  ASSERT_EQ(create(Info, Handle), VK_SUCCESS);
+
+  auto *Pipe = static_cast<GraphicsPipeline *>(fromHandle<Pipeline>(Handle));
+  EXPECT_EQ(Pipe->vertexRobustness().VertexInputs,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2);
+  EXPECT_EQ(Pipe->vertexRobustness().Images,
+            VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT);
+  EXPECT_EQ(Pipe->fragmentRobustness().Images,
+            VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED);
+
+  vkDestroyPipeline(Device, Handle, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// An out-of-range behavior value in either the pipeline-level or a
+/// stage-level `VkPipelineRobustnessCreateInfo` must fail pipeline
+/// creation.
+TEST_F(GraphicsPipelineTest, RejectsInvalidPipelineRobustnessBehavior) {
+  VkShaderModule Vertex = createModule(VertexSource);
+  VkShaderModule Fragment = createModule(FragmentSource);
+
+  VkPipelineRobustnessCreateInfo Robustness{};
+  Robustness.sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO;
+  Robustness.images = static_cast<VkPipelineRobustnessImageBehavior>(0xFFFF);
+
+  VkGraphicsPipelineCreateInfo Info = makeCreateInfo(Vertex, Fragment);
+  Stages[1].pNext = &Robustness;
+
+  VkPipeline Handle = VK_NULL_HANDLE;
+  EXPECT_EQ(create(Info, Handle), VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Handle, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 } // namespace

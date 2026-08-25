@@ -329,7 +329,86 @@ TEST_F(PipelineTest, RejectsInvalidRequiredSubgroupSize) {
   vkDestroyShaderModule(Device, Module, nullptr);
 }
 
-/// `VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT` promises
+/// (roadmap F10) `VkPipelineRobustnessCreateInfo` chained onto either the
+/// pipeline or its single stage is accepted, with the stage's own chain
+/// taking precedence over the pipeline's per the extension's own spec
+/// text -- neither changes this ICD's actual (already fully robust)
+/// behavior, but both must be structurally accepted and validated rather
+/// than rejected outright.
+TEST_F(PipelineTest, AcceptsPipelineRobustnessCreateInfo) {
+  VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkPipelineRobustnessCreateInfo StageRobustness{};
+  StageRobustness.sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO;
+  StageRobustness.storageBuffers =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED;
+  StageRobustness.uniformBuffers =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2;
+  StageRobustness.vertexInputs =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+  StageRobustness.images = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED;
+
+  VkPipelineRobustnessCreateInfo PipelineRobustnessInfo{};
+  PipelineRobustnessInfo.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO;
+  PipelineRobustnessInfo.storageBuffers =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.pNext = &PipelineRobustnessInfo;
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.pNext = &StageRobustness;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_SUCCESS);
+  const PipelineRobustness &Robustness =
+      fromHandle<ComputePipeline>(Pipeline)->robustness();
+  // The stage's own chain takes precedence over the pipeline-level one.
+  EXPECT_EQ(Robustness.StorageBuffers,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED);
+  EXPECT_EQ(Robustness.UniformBuffers,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2);
+  EXPECT_EQ(Robustness.VertexInputs,
+            VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT);
+  EXPECT_EQ(Robustness.Images, VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED);
+
+  vkDestroyPipeline(Device, Pipeline, nullptr);
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
+
+/// An out-of-range `VkPipelineRobustnessBufferBehavior`/
+/// `VkPipelineRobustnessImageBehavior` value must fail pipeline creation
+/// rather than silently accept or misinterpret it.
+TEST_F(PipelineTest, RejectsInvalidPipelineRobustnessBehavior) {
+  VkShaderModule Module = createShaderModule(kEmptyComputeShader);
+  ASSERT_NE(Module, VK_NULL_HANDLE);
+
+  VkPipelineRobustnessCreateInfo Robustness{};
+  Robustness.sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO;
+  Robustness.storageBuffers =
+      static_cast<VkPipelineRobustnessBufferBehavior>(0xFFFF);
+
+  VkComputePipelineCreateInfo CreateInfo{};
+  CreateInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  CreateInfo.stage.pNext = &Robustness;
+  CreateInfo.stage.module = Module;
+  CreateInfo.stage.pName = "main";
+  CreateInfo.layout = Layout;
+
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  EXPECT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &CreateInfo,
+                                     nullptr, &Pipeline),
+            VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(Pipeline, VK_NULL_HANDLE);
+
+  vkDestroyShaderModule(Device, Module, nullptr);
+}
 /// every subgroup launched is fully populated; this CPU target can only
 /// honor that if the workgroup's X dimension is itself a multiple of the
 /// resolved subgroup size, so pipeline creation must reject a shader whose

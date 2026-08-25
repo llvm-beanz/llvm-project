@@ -98,6 +98,47 @@ struct CachedPipelineArtifact {
   std::unique_ptr<feme::cpu::CompiledStage> Stage;
 };
 
+/// (roadmap F10) One `VkPipelineRobustnessCreateInfo`'s four per-binding-
+/// class fields, recorded verbatim -- like `Pipeline::createFlags()` -- for
+/// whichever of a pipeline's own `pNext` chain or (taking precedence, per
+/// the extension's own spec text: "If `VkPipelineRobustnessCreateInfo` is
+/// specified for both a pipeline and a pipeline stage, the ... pipeline
+/// stage will take precedence") an individual stage's own chain named one.
+/// Every field defaults to `..._DEVICE_DEFAULT`, matching an application
+/// that never chains this struct at all.
+///
+/// Not yet consulted for any behavioral difference: this ICD's actual
+/// bounds checking is already unconditionally at least as strong as
+/// `..._ROBUST_BUFFER_ACCESS`/`..._ROBUST_IMAGE_ACCESS` regardless of what
+/// a pipeline requests here (see `PhysicalDeviceInfo.cpp`'s
+/// `robustBufferAccess` comment, `Executor.cpp`'s vertex-attribute fetch,
+/// and this row's own `VkPhysicalDevicePipelineRobustnessProperties` case
+/// in EntryPoints.cpp), so honoring a weaker request -- even
+/// `..._DISABLED` -- with a strictly stronger, still-conformant guarantee
+/// is always legal.
+struct PipelineRobustness {
+  VkPipelineRobustnessBufferBehavior StorageBuffers =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+  VkPipelineRobustnessBufferBehavior UniformBuffers =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+  VkPipelineRobustnessBufferBehavior VertexInputs =
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT;
+  VkPipelineRobustnessImageBehavior Images =
+      VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DEVICE_DEFAULT;
+};
+
+/// Resolves the effective `PipelineRobustness` for one pipeline stage from
+/// \p PipelinePNext (a `VkGraphicsPipelineCreateInfo`/
+/// `VkComputePipelineCreateInfo::pNext`) and \p StagePNext (that stage's
+/// own `VkPipelineShaderStageCreateInfo::pNext`, precedence per the file
+/// comment above on `PipelineRobustness`). Fails if either chain names an
+/// out-of-range `VkPipelineRobustnessBufferBehavior`/
+/// `VkPipelineRobustnessImageBehavior` value, matching this codebase's
+/// existing "malformed input fails cleanly" convention (see
+/// `buildSpecializationOverrides`'s own comment in Pipeline.cpp).
+llvm::Expected<PipelineRobustness>
+resolvePipelineRobustness(const void *PipelinePNext, const void *StagePNext);
+
 /// The common base of every `VkPipeline` object, so the single Vulkan
 /// handle type can carry either bind point (V6 adds the graphics one) and
 /// `vkDestroyPipeline` can free either without knowing which it holds.
@@ -136,13 +177,20 @@ private:
 class ComputePipeline : public Pipeline {
 public:
   explicit ComputePipeline(std::shared_ptr<CachedPipelineArtifact> Artifact,
-                           VkPipelineCreateFlags CreateFlags = 0)
-      : Pipeline(Kind::Compute, CreateFlags), Artifact(std::move(Artifact)) {}
+                           VkPipelineCreateFlags CreateFlags = 0,
+                           PipelineRobustness Robustness = {})
+      : Pipeline(Kind::Compute, CreateFlags), Artifact(std::move(Artifact)),
+        Robustness(Robustness) {}
 
   feme::cpu::CompiledStage &getStage() const { return *Artifact->Stage; }
 
+  /// (roadmap F10) This pipeline's resolved `PipelineRobustness` -- see
+  /// that struct's own comment.
+  const PipelineRobustness &robustness() const { return Robustness; }
+
 private:
   std::shared_ptr<CachedPipelineArtifact> Artifact;
+  PipelineRobustness Robustness;
 };
 
 /// Imports \p Words (a `VkShaderModule`'s SPIR-V) into \p Ctx and translates
