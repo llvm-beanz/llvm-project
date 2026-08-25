@@ -85,6 +85,7 @@ add_feme_library(FeMeVulkanCore STATIC
   Format.cpp
   GraphicsPipeline.cpp
   GroupSize.cpp
+  HostImageCopy.cpp
   Image.cpp
   ImageOps.cpp
   Memory.cpp

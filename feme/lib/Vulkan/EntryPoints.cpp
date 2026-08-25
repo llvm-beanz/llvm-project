@@ -9,6 +9,7 @@
 #include "EntryPoints.h"
 #include "Format.h"
 #include "GraphicsPipeline.h"
+#include "HostImageCopy.h"
 #include "Icd.h"
 #include "Image.h"
 #include "Objects.h"
@@ -566,13 +567,14 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
     // `VkPhysicalDeviceMaintenance6PropertiesKHR`,
     // `VkPhysicalDevicePushDescriptorPropertiesKHR`,
     // `VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR`,
-    // `VkPhysicalDeviceHostImageCopyPropertiesEXT`,
-    // `VkPhysicalDevicePipelineRobustnessPropertiesEXT`), none of which
-    // this ICD implements yet -- so every field here is the conservative,
-    // honest `0`/`VK_FALSE`/`nullptr` that agrees with each of those
-    // still-unfilled dedicated structs, for each later row (F5, F6, F8,
-    // F10, F11, F12, E6) to raise together with its own dedicated-struct
-    // case.
+    // `VkPhysicalDevicePipelineRobustnessPropertiesEXT`), most of which
+    // this ICD does not implement yet -- each unimplemented field stays
+    // the conservative, honest `0`/`VK_FALSE`/`nullptr` that agrees with
+    // its own still-unfilled dedicated struct, for each later row (F5, F6,
+    // F8, F10, F12, E6) to raise together with its own dedicated-struct
+    // case. F11's own six `hostImageCopy` fields (below) and
+    // `VkPhysicalDeviceHostImageCopyProperties` are implemented, agreeing
+    // with each other already.
     case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES: {
       auto *Props14 =
           reinterpret_cast<VkPhysicalDeviceVulkan14Properties *>(Base);
@@ -674,20 +676,27 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
       Props14->defaultRobustnessImages =
           VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS;
-      // (roadmap F11) `hostImageCopy` is unimplemented: no supported
-      // source/destination layout list exists yet, and
-      // `identicalMemoryTypeRequirements` -- though a real, honest
-      // `VK_TRUE` this ICD's single memory type could otherwise support
-      // today -- is this same struct's own field
-      // (`VkPhysicalDeviceHostImageCopyPropertiesEXT`), so it stays
-      // `VK_FALSE` in lockstep with the rest of this group until F11 adds
-      // that dedicated case.
-      Props14->copySrcLayoutCount = 0;
-      Props14->pCopySrcLayouts = nullptr;
-      Props14->copyDstLayoutCount = 0;
-      Props14->pCopyDstLayouts = nullptr;
-      std::memset(Props14->optimalTilingLayoutUUID, 0, VK_UUID_SIZE);
-      Props14->identicalMemoryTypeRequirements = VK_FALSE;
+      // (roadmap F11) `HostImageCopy.cpp` implements `hostImageCopy`'s own
+      // four commands: `getSupportedHostImageCopySrcLayouts`/`DstLayouts`
+      // (HostImageCopy.h) are this list's single source of truth, reused
+      // verbatim by the dedicated `VkPhysicalDeviceHostImageCopyProperties`
+      // case below. `identicalMemoryTypeRequirements` is a real, honest
+      // `VK_TRUE`: this ICD has exactly one memory type
+      // (`vkGetPhysicalDeviceMemoryProperties`, PhysicalDeviceInfo.cpp), so
+      // "the same memory type(s) support both an image created with `VK_
+      // IMAGE_CREATE_HOST_IMAGE_COPY_BIT` and one without it" trivially
+      // holds.
+      Props14->copySrcLayoutCount =
+          static_cast<uint32_t>(getSupportedHostImageCopySrcLayouts().size());
+      Props14->pCopySrcLayouts = const_cast<VkImageLayout *>(
+          getSupportedHostImageCopySrcLayouts().data());
+      Props14->copyDstLayoutCount =
+          static_cast<uint32_t>(getSupportedHostImageCopyDstLayouts().size());
+      Props14->pCopyDstLayouts = const_cast<VkImageLayout *>(
+          getSupportedHostImageCopyDstLayouts().data());
+      std::memcpy(Props14->optimalTilingLayoutUUID,
+                  Info.OptimalTilingLayoutUUID, VK_UUID_SIZE);
+      Props14->identicalMemoryTypeRequirements = VK_TRUE;
       break;
     }
     // (roadmap F5) `VK_KHR_line_rasterization`'s own properties struct,
@@ -766,6 +775,28 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS;
       PipelineRobustness->defaultRobustnessImages =
           VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS;
+      break;
+    }
+    // (roadmap F11) `VK_EXT_host_image_copy`'s own properties struct, whose
+    // 1.4 core and `EXT` spellings share one `sType`, agreeing with the
+    // aggregate `VkPhysicalDeviceVulkan14Properties` case above exactly
+    // like `VkPhysicalDevicePipelineRobustnessProperties` already does for
+    // its own fields -- see that struct's own comment for each field's
+    // reasoning.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_PROPERTIES: {
+      auto *HostImageCopy =
+          reinterpret_cast<VkPhysicalDeviceHostImageCopyProperties *>(Base);
+      HostImageCopy->copySrcLayoutCount =
+          static_cast<uint32_t>(getSupportedHostImageCopySrcLayouts().size());
+      HostImageCopy->pCopySrcLayouts = const_cast<VkImageLayout *>(
+          getSupportedHostImageCopySrcLayouts().data());
+      HostImageCopy->copyDstLayoutCount =
+          static_cast<uint32_t>(getSupportedHostImageCopyDstLayouts().size());
+      HostImageCopy->pCopyDstLayouts = const_cast<VkImageLayout *>(
+          getSupportedHostImageCopyDstLayouts().data());
+      std::memcpy(HostImageCopy->optimalTilingLayoutUUID,
+                  Info.OptimalTilingLayoutUUID, VK_UUID_SIZE);
+      HostImageCopy->identicalMemoryTypeRequirements = VK_TRUE;
       break;
     }
     // (roadmap E7) `VK_EXT_subgroup_size_control`'s own properties struct,
@@ -1330,7 +1361,12 @@ void fillFeatures2Chain(void *pNext) {
       // `pipelineProtectedAccess` above -- must agree with the dedicated
       // `VkPhysicalDevicePipelineRobustnessFeatures` struct case below.
       Features->pipelineRobustness = VK_TRUE;
-      Features->hostImageCopy = VK_FALSE;
+      // (roadmap F11) `vkCopyMemoryToImage`/`vkCopyImageToMemory`/
+      // `vkCopyImageToImage`/`vkTransitionImageLayout` (HostImageCopy.cpp)
+      // are implemented, so this bit -- like `pipelineRobustness` above --
+      // must agree with the dedicated `VkPhysicalDeviceHostImageCopyFeatures`
+      // struct case below.
+      Features->hostImageCopy = VK_TRUE;
       Features->pushDescriptor = VK_FALSE;
       break;
     }
@@ -1503,6 +1539,16 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDevicePipelineRobustnessFeatures *>(Base);
       Features->pipelineRobustness = VK_TRUE;
+      break;
+    }
+    // (roadmap F11) `VK_EXT_host_image_copy`'s own feature struct, whose
+    // 1.4 core and `EXT` spellings share one `sType`, exactly like
+    // `pipelineRobustness` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceHostImageCopyFeatures *>(Base);
+      Features->hostImageCopy = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature
@@ -1754,15 +1800,33 @@ VKAPI_ATTR void VKAPI_CALL feme::vulkan::vkGetPhysicalDeviceFormatProperties2(
   // sets today has an identical numeric value in both) fixes that for any
   // caller of this entry point, not just the format-broadening this row
   // otherwise does.
+  // (roadmap F11) `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` has no
+  // 32-bit `VkFormatFeatureFlags` equivalent at all (added to
+  // `VkFormatFeatureFlagBits2` only, after the 32-bit enum had already
+  // closed), so it can never be set by the widen-from-32-bit path just
+  // above -- it is set here, directly, instead.
+  // `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`
+  // (HostImageCopy.cpp) reuse the identical format-agnostic byte copy
+  // `vkCmdCopyBufferToImage`/`vkCmdCopyImage` already support for every
+  // recognized format (`copyBufferImageRegion`/`runCopyImage`,
+  // ImageOps.cpp), so this bit tracks `VK_FORMAT_FEATURE_TRANSFER_SRC_BIT`/
+  // `_DST_BIT` above exactly: set together for any recognized format,
+  // unset together for an unrecognized one.
+  std::optional<feme::cpu::ResourceFormat> Format = mapVkFormat(format);
+  VkFormatFeatureFlags2 HostImageTransfer =
+      Format ? VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT
+             : VkFormatFeatureFlags2(0);
   for (auto *Base = static_cast<VkBaseOutStructure *>(pFormatProperties->pNext);
        Base; Base = Base->pNext) {
     if (Base->sType != VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3)
       continue;
     auto *Props3 = reinterpret_cast<VkFormatProperties3 *>(Base);
     Props3->linearTilingFeatures =
-        pFormatProperties->formatProperties.linearTilingFeatures;
+        pFormatProperties->formatProperties.linearTilingFeatures |
+        HostImageTransfer;
     Props3->optimalTilingFeatures =
-        pFormatProperties->formatProperties.optimalTilingFeatures;
+        pFormatProperties->formatProperties.optimalTilingFeatures |
+        HostImageTransfer;
     Props3->bufferFeatures = pFormatProperties->formatProperties.bufferFeatures;
   }
 }

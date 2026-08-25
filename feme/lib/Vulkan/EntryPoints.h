@@ -422,6 +422,22 @@ VKAPI_ATTR void VKAPI_CALL
 vkCmdResolveImage2(VkCommandBuffer commandBuffer,
                    const VkResolveImageInfo2 *pResolveImageInfo);
 
+// Roadmap F11: core Vulkan 1.4 promoted `VK_EXT_host_image_copy`'s four
+// commands (HostImageCopy.cpp), each `vkCmd*` copy/transition's own
+// host-side, no-`VkCommandBuffer` counterpart.
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCopyMemoryToImage(VkDevice device,
+                    const VkCopyMemoryToImageInfo *pCopyMemoryToImageInfo);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCopyImageToMemory(VkDevice device,
+                    const VkCopyImageToMemoryInfo *pCopyImageToMemoryInfo);
+VKAPI_ATTR VkResult VKAPI_CALL
+vkCopyImageToImage(VkDevice device,
+                   const VkCopyImageToImageInfo *pCopyImageToImageInfo);
+VKAPI_ATTR VkResult VKAPI_CALL vkTransitionImageLayout(
+    VkDevice device, uint32_t transitionCount,
+    const VkHostImageLayoutTransitionInfo *pTransitions);
+
 // V3: push constants (see "Descriptor Model" and "Command Buffers").
 VKAPI_ATTR void VKAPI_CALL vkCmdPushConstants(VkCommandBuffer commandBuffer,
                                               VkPipelineLayout layout,

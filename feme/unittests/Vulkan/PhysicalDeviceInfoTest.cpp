@@ -491,14 +491,21 @@ TEST_F(PhysicalDeviceProperties2Test,
             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS);
   EXPECT_EQ(Props14.defaultRobustnessImages,
             VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS);
-  EXPECT_EQ(Props14.copySrcLayoutCount, 0u);
-  EXPECT_EQ(Props14.pCopySrcLayouts, nullptr);
-  EXPECT_EQ(Props14.copyDstLayoutCount, 0u);
-  EXPECT_EQ(Props14.pCopyDstLayouts, nullptr);
+  // (roadmap F11) Real once `VK_EXT_host_image_copy` landed: agrees with
+  // `VkPhysicalDeviceHostImageCopyProperties`'s own dedicated-struct test
+  // below.
+  EXPECT_EQ(Props14.copySrcLayoutCount, 2u);
+  ASSERT_NE(Props14.pCopySrcLayouts, nullptr);
+  EXPECT_EQ(Props14.pCopySrcLayouts[0], VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(Props14.pCopySrcLayouts[1], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  EXPECT_EQ(Props14.copyDstLayoutCount, 2u);
+  ASSERT_NE(Props14.pCopyDstLayouts, nullptr);
+  EXPECT_EQ(Props14.pCopyDstLayouts[0], VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(Props14.pCopyDstLayouts[1], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
   uint8_t ZeroUUID[VK_UUID_SIZE] = {};
-  EXPECT_EQ(
+  EXPECT_NE(
       std::memcmp(Props14.optimalTilingLayoutUUID, ZeroUUID, VK_UUID_SIZE), 0);
-  EXPECT_EQ(Props14.identicalMemoryTypeRequirements, VK_FALSE);
+  EXPECT_EQ(Props14.identicalMemoryTypeRequirements, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,
@@ -1117,7 +1124,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   // the dedicated `VkPhysicalDevicePipelineRobustnessFeatures` struct case
   // below.
   EXPECT_EQ(Features14.pipelineRobustness, VK_TRUE);
-  EXPECT_EQ(Features14.hostImageCopy, VK_FALSE);
+  // Roadmap F11: `vkCopyMemoryToImage`/`vkCopyImageToMemory`/
+  // `vkCopyImageToImage`/`vkTransitionImageLayout` (HostImageCopy.cpp) are
+  // now implemented, and must agree with the dedicated
+  // `VkPhysicalDeviceHostImageCopyFeatures` struct case below.
+  EXPECT_EQ(Features14.hostImageCopy, VK_TRUE);
   EXPECT_EQ(Features14.pushDescriptor, VK_FALSE);
 }
 
@@ -1437,6 +1448,69 @@ TEST_F(PhysicalDeviceProperties2Test,
             Props14.defaultRobustnessVertexInputs);
   EXPECT_EQ(PipelineRobustnessProps.defaultRobustnessImages,
             Props14.defaultRobustnessImages);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       HostImageCopyIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap F11: `VK_EXT_host_image_copy`'s own dedicated feature struct
+  // must agree with the aggregate `VkPhysicalDeviceVulkan14Features` case,
+  // exactly like `VK_EXT_pipeline_robustness`'s own struct does.
+  VkPhysicalDeviceHostImageCopyFeatures HostImageCopyFeatures{};
+  HostImageCopyFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &HostImageCopyFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(HostImageCopyFeatures.hostImageCopy, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       HostImageCopyPropertiesReportSupportedLayoutsAndRealDefaults) {
+  // Roadmap F11: `VK_EXT_host_image_copy`'s own dedicated properties struct
+  // must agree with the aggregate `VkPhysicalDeviceVulkan14Properties` case
+  // above, exactly like `VK_EXT_pipeline_robustness`'s own struct does.
+  VkPhysicalDeviceHostImageCopyProperties HostImageCopyProps{};
+  HostImageCopyProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_HOST_IMAGE_COPY_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &HostImageCopyProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  ASSERT_EQ(HostImageCopyProps.copySrcLayoutCount, 2u);
+  ASSERT_NE(HostImageCopyProps.pCopySrcLayouts, nullptr);
+  EXPECT_EQ(HostImageCopyProps.pCopySrcLayouts[0], VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(HostImageCopyProps.pCopySrcLayouts[1],
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+  ASSERT_EQ(HostImageCopyProps.copyDstLayoutCount, 2u);
+  ASSERT_NE(HostImageCopyProps.pCopyDstLayouts, nullptr);
+  EXPECT_EQ(HostImageCopyProps.pCopyDstLayouts[0], VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(HostImageCopyProps.pCopyDstLayouts[1],
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+  // This ICD has exactly one memory type, so an image created with or
+  // without `VK_IMAGE_CREATE_HOST_IMAGE_COPY_BIT` always has identical
+  // memory type requirements.
+  EXPECT_EQ(HostImageCopyProps.identicalMemoryTypeRequirements, VK_TRUE);
+  uint8_t ZeroUUID[VK_UUID_SIZE] = {};
+  EXPECT_NE(std::memcmp(HostImageCopyProps.optimalTilingLayoutUUID, ZeroUUID,
+                        VK_UUID_SIZE),
+            0);
+
+  VkPhysicalDeviceVulkan14Properties Props14{};
+  Props14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;
+  Props2.pNext = &Props14;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(HostImageCopyProps.copySrcLayoutCount, Props14.copySrcLayoutCount);
+  EXPECT_EQ(HostImageCopyProps.pCopySrcLayouts, Props14.pCopySrcLayouts);
+  EXPECT_EQ(HostImageCopyProps.copyDstLayoutCount, Props14.copyDstLayoutCount);
+  EXPECT_EQ(HostImageCopyProps.pCopyDstLayouts, Props14.pCopyDstLayouts);
+  EXPECT_EQ(std::memcmp(HostImageCopyProps.optimalTilingLayoutUUID,
+                        Props14.optimalTilingLayoutUUID, VK_UUID_SIZE),
+            0);
+  EXPECT_EQ(HostImageCopyProps.identicalMemoryTypeRequirements,
+            Props14.identicalMemoryTypeRequirements);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

@@ -502,7 +502,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `maintenance6` | yes |  |
 | feature | VK_VERSION_1_4 | `pipelineProtectedAccess` | yes | roadmap F9: this ICD has no protected-memory model at all (`protectedMemory` stays `VK_FALSE`), but `Pipeline::createFlags` (`Pipeline.h`) now records `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`/`VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT` verbatim, and `vkCmdBindPipeline` (`CommandBuffer.cpp`) silently rejects binding a `PROTECTED_ACCESS_ONLY_BIT` pipeline (no `VkCommandBuffer` this ICD hands out is ever protected, per `VUID-vkCmdBindPipeline-pipelineProtectedAccess-07409`); see the dedicated `VkPhysicalDevicePipelineProtectedAccessFeatures` row below |
 | feature | VK_VERSION_1_4 | `pipelineRobustness` | yes | roadmap F10: `VkPipelineRobustnessCreateInfo` accepted and validated at both compute and graphics pipeline creation (`Pipeline.cpp`'s `resolvePipelineRobustness`, `GraphicsPipeline.cpp`'s `translateFixedFunctionState`); see the dedicated `VkPhysicalDevicePipelineRobustnessFeatures`/`...Properties` rows below |
-| feature | VK_VERSION_1_4 | `hostImageCopy` | no |  |
+| feature | VK_VERSION_1_4 | `hostImageCopy` | yes | roadmap F11: `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`/`vkTransitionImageLayout` (`HostImageCopy.cpp`) copy/transition images with no `VkCommandBuffer`, reusing `ImageOps.h`'s `copyBufferImageRegion`/`runCopyImage`; see the six dedicated limit rows below and the dedicated `VkPhysicalDeviceHostImageCopyFeatures`/`...Properties` rows |
 | feature | VK_VERSION_1_4 | `pushDescriptor` | no |  |
 | limit | VK_VERSION_1_4 | `lineSubPixelPrecisionBits` | n/a | roadmap F5: 4, the same conservative floor subPixelPrecisionBits/subTexelPrecisionBits already use (both the aggregate and dedicated VkPhysicalDeviceLineRasterizationPropertiesKHR struct) |
 | limit | VK_VERSION_1_4 | `maxVertexAttribDivisor` | n/a |  |
@@ -523,13 +523,13 @@ Every row cites the specific feature/limit/extension name it closes.
 | limit | VK_VERSION_1_4 | `defaultRobustnessUniformBuffers` | n/a | roadmap F10: same reasoning and value as `defaultRobustnessStorageBuffers` above -- uniform buffers go through the same bounds-checked descriptor read |
 | limit | VK_VERSION_1_4 | `defaultRobustnessVertexInputs` | n/a | roadmap F10: same value as `defaultRobustnessStorageBuffers` above; closing this row required fixing two real gaps first -- `Executor.cpp`'s vertex-attribute fetch used to fail the whole draw on an out-of-bounds read instead of reading zero per component, and `CommandBuffer.cpp`'s `validateDrawFetchBounds` used to pre-reject any such draw before the executor even ran -- both contradicted `robustBufferAccess` being unconditionally on |
 | limit | VK_VERSION_1_4 | `defaultRobustnessImages` | n/a | roadmap F10: `VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS` -- `Image.cpp`'s shader-visible texel fetch already returns all-zero for any out-of-range access (roadmap E16), one of this behavior's own explicitly permitted "(0,0,0,0) or (0,0,0,1)" results; not the stronger `..._2` value, for the same null-descriptor reasoning as the buffer rows above |
-| limit | VK_VERSION_1_4 | `copySrcLayoutCount` | n/a |  |
-| limit | VK_VERSION_1_4 | `pCopySrcLayouts` | n/a |  |
-| limit | VK_VERSION_1_4 | `copyDstLayoutCount` | n/a |  |
-| limit | VK_VERSION_1_4 | `pCopyDstLayouts` | n/a |  |
-| limit | VK_VERSION_1_4 | `optimalTilingLayoutUUID` | n/a |  |
-| limit | VK_VERSION_1_4 | `identicalMemoryTypeRequirements` | n/a |  |
-| extension | VK_VERSION_1_4 | `VK_EXT_host_image_copy` | no |  |
+| limit | VK_VERSION_1_4 | `copySrcLayoutCount` | n/a | roadmap F11: 2 (`VK_IMAGE_LAYOUT_GENERAL`, `VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL`) -- `HostImageCopy.h`'s `getSupportedHostImageCopySrcLayouts` |
+| limit | VK_VERSION_1_4 | `pCopySrcLayouts` | n/a | roadmap F11: see `copySrcLayoutCount` above |
+| limit | VK_VERSION_1_4 | `copyDstLayoutCount` | n/a | roadmap F11: 2 (`VK_IMAGE_LAYOUT_GENERAL`, `VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL`) -- `HostImageCopy.h`'s `getSupportedHostImageCopyDstLayouts` |
+| limit | VK_VERSION_1_4 | `pCopyDstLayouts` | n/a | roadmap F11: see `copyDstLayoutCount` above |
+| limit | VK_VERSION_1_4 | `optimalTilingLayoutUUID` | n/a | roadmap F11: derived the same way as `VkPhysicalDeviceIDProperties::deviceUUID` (`PhysicalDeviceInfo.cpp`'s `fillUUID`, "Device identity") -- `VK_IMAGE_TILING_OPTIMAL`/`_LINEAR` already resolve to one identical packed layout on this software rasterizer, making this ICD its own, and only, point of comparison |
+| limit | VK_VERSION_1_4 | `identicalMemoryTypeRequirements` | n/a | roadmap F11: `VK_TRUE` -- this ICD has exactly one memory type, so an image created with or without `VK_IMAGE_CREATE_HOST_IMAGE_COPY_BIT` always has identical memory type requirements |
+| extension | VK_VERSION_1_4 | `VK_EXT_host_image_copy` | yes | roadmap F11 (closed): see the `hostImageCopy` feature row above |
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | yes | roadmap F9 (closed): see the `pipelineProtectedAccess` feature row above |
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | yes | roadmap F10 (closed): see the `pipelineRobustness` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | yes | roadmap F8/F8a/F8b/F8c (closed): see the `dynamicRenderingLocalRead` feature row above |

@@ -62,3 +62,4 @@ VK_KHR_shader_subgroup_rotate = roadmap F2: spirv.GroupNonUniformRotateKHR conve
 VK_KHR_shader_expect_assume = roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp's AssumeTrueConversionPattern/ExpectConversionPattern)
 VK_KHR_vertex_attribute_divisor = roadmap F6: VkPipelineVertexInputDivisorStateCreateInfo's per-binding divisor, including the 0 ("every instance reads firstInstance") case (GraphicsPipeline.cpp's translateVertexInput, Executor.cpp's fetch-index formula)
 VK_EXT_pipeline_robustness = roadmap F10: VkPipelineRobustnessCreateInfo accepted and validated at both compute and graphics pipeline creation (Pipeline.cpp's resolvePipelineRobustness)
+VK_EXT_host_image_copy = roadmap F11: vkCopyMemoryToImage/vkCopyImageToMemory/vkCopyImageToImage/vkTransitionImageLayout (HostImageCopy.cpp) copy/transition images with no VkCommandBuffer

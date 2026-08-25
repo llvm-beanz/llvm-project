@@ -65,6 +65,17 @@ struct PhysicalDeviceInfo {
   /// the same inputs (see "Device identity").
   uint8_t DeviceUUID[VK_UUID_SIZE]{};
 
+  /// Roadmap F11 (`VK_EXT_host_image_copy`/`hostImageCopy`):
+  /// `VkPhysicalDeviceHostImageCopyProperties::optimalTilingLayoutUUID`,
+  /// which "must be equal for two physical devices... if and only if" the
+  /// same `VkImageCreateInfo` produces the same optimal-tiling memory
+  /// layout on both -- derived the same way as `DeviceUUID` above (see
+  /// "Device identity"), since `VK_IMAGE_TILING_OPTIMAL`/`_LINEAR` already
+  /// resolve to the identical packed layout on this software rasterizer
+  /// (Image.h's own file comment), making this ICD its own, and only,
+  /// point of comparison today.
+  uint8_t OptimalTilingLayoutUUID[VK_UUID_SIZE]{};
+
   /// Pinned device-wide wave size (see "Subgroup size"): FeMe's wave size is
   /// a compile-time constant chosen once per compilation from
   /// `{4, 8, 16, 32, 64, 128}`; Vulkan 1.1 requires a single

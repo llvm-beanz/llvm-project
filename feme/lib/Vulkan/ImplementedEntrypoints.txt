@@ -242,6 +242,14 @@ vkCmdCopyImageToBuffer2
 vkCmdBlitImage2
 vkCmdResolveImage2
 
+# Roadmap F11: core Vulkan 1.4 promoted `VK_EXT_host_image_copy`'s four
+# commands, each a host-side, no-command-buffer copy/transition
+# (HostImageCopy.cpp).
+vkCopyMemoryToImage
+vkCopyImageToMemory
+vkCopyImageToImage
+vkTransitionImageLayout
+
 # Roadmap E3: core Vulkan 1.3 promoted `VK_KHR_synchronization2`'s six
 # commands, translating `VkDependencyInfo`'s 2-stage/2-access-mask shape
 # down to the existing 1-mask Sync.{h,cpp}/CommandBuffer.cpp model (see

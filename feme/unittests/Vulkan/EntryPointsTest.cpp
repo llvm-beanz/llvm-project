@@ -253,15 +253,50 @@ TEST_F(EntryPointsTest, FormatProperties2FillsChainedFormatProperties3) {
   Props2.pNext = &Props3;
   vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R8G8B8A8_UNORM,
                                        &Props2);
+  // (roadmap F11) `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` has no
+  // 32-bit `VkFormatFeatureFlags` equivalent, so `Props3` carries it in
+  // addition to every bit the widened 32-bit `Props2.formatProperties`
+  // already reports, rather than being exactly equal to it.
   EXPECT_EQ(Props3.linearTilingFeatures,
-            (VkFormatFeatureFlags2)Props2.formatProperties.linearTilingFeatures);
+            (VkFormatFeatureFlags2)Props2.formatProperties.linearTilingFeatures |
+                VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
   EXPECT_EQ(
       Props3.optimalTilingFeatures,
-      (VkFormatFeatureFlags2)Props2.formatProperties.optimalTilingFeatures);
+      (VkFormatFeatureFlags2)Props2.formatProperties.optimalTilingFeatures |
+          VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
   EXPECT_EQ(Props3.bufferFeatures,
             (VkFormatFeatureFlags2)Props2.formatProperties.bufferFeatures);
   EXPECT_TRUE(Props3.optimalTilingFeatures &
               VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT);
+}
+
+TEST_F(EntryPointsTest,
+       FormatProperties3ReportsHostImageTransferForRecognizedFormatOnly) {
+  // Roadmap F11: `vkCopyMemoryToImage`/`vkCopyImageToMemory`/
+  // `vkCopyImageToImage` (HostImageCopy.cpp) reuse the identical
+  // format-agnostic byte copy every other transfer command already
+  // supports, so this bit must track `VK_FORMAT_FEATURE_TRANSFER_SRC_BIT`/
+  // `_DST_BIT` exactly: set for a recognized format, unset for one
+  // `mapVkFormat` does not recognize.
+  VkFormatProperties3 Props3{};
+  Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+  VkFormatProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+  Props2.pNext = &Props3;
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_R8G8B8A8_UNORM,
+                                       &Props2);
+  EXPECT_TRUE(Props3.linearTilingFeatures &
+              VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+  EXPECT_TRUE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+
+  Props3 = VkFormatProperties3{};
+  Props3.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3;
+  vkGetPhysicalDeviceFormatProperties2(Physical, VK_FORMAT_UNDEFINED, &Props2);
+  EXPECT_FALSE(Props3.linearTilingFeatures &
+              VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
+  EXPECT_FALSE(Props3.optimalTilingFeatures &
+              VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT);
 }
 
 /// Roadmap E19 (`VK_EXT_tooling_info`): this ICD wraps no debugging tool,

@@ -194,7 +194,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_graphics_pipeline_library` | Not implemented |  |
 | `VK_EXT_hdr_metadata` | Not implemented |  |
 | `VK_EXT_headless_surface` | Planned (in scope, not implemented) | roadmap H10 (V8): the first surface this ICD implements, per FeMeVulkanDesign.md's WSI decision |
-| `VK_EXT_host_image_copy` | Planned (in scope, not implemented) | roadmap F11 |
+| `VK_EXT_host_image_copy` | Advertised | roadmap F11 (closed): `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`/`vkTransitionImageLayout` (`HostImageCopy.cpp`) copy/transition images with no `VkCommandBuffer`, reusing `ImageOps.h`'s `copyBufferImageRegion`/`runCopyImage`, see Vulkan14FeatureInventory.md's `hostImageCopy` row |
 | `VK_EXT_host_query_reset` | Implemented (core, not advertised by name) | roadmap C6: vkResetQueryPool implemented and hostQueryReset reported true (QueryPool.cpp, EntryPoints.cpp) |
 | `VK_EXT_image_2d_view_of_3d` | Not implemented |  |
 | `VK_EXT_image_compression_control` | Not implemented |  |

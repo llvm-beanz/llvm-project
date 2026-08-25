@@ -160,6 +160,8 @@ PhysicalDeviceInfo feme::vulkan::computePhysicalDeviceInfo() {
                sizeof(Props.deviceName) - 1);
   fillUUID(Props.pipelineCacheUUID, "pipeline-cache-uuid", Info.SubgroupSize);
   fillUUID(Info.DeviceUUID, "device-uuid", Info.SubgroupSize);
+  fillUUID(Info.OptimalTilingLayoutUUID, "optimal-tiling-layout-uuid",
+           Info.SubgroupSize);
 
   VkPhysicalDeviceLimits &Limits = Props.limits;
   // Vulkan 1.0/1.1 core "Required Limits" minima (vkspec appendix), except
@@ -701,6 +703,13 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too regardless of the advertised `apiVersion`.
       {VK_EXT_PIPELINE_ROBUSTNESS_EXTENSION_NAME,
        VK_EXT_PIPELINE_ROBUSTNESS_SPEC_VERSION},
+      // (roadmap F11) `vkCopyMemoryToImage`/`vkCopyImageToMemory`/
+      // `vkCopyImageToImage`/`vkTransitionImageLayout` (HostImageCopy.cpp)
+      // copy/transition images without a command buffer; like every other
+      // post-`maintenance5` entry above, this extension must be listed
+      // here too regardless of the advertised `apiVersion`.
+      {VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME,
+       VK_EXT_HOST_IMAGE_COPY_SPEC_VERSION},
   };
   return Extensions;
 }

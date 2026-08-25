@@ -139,3 +139,4 @@ shaderExpectAssume
 vertexAttributeInstanceRateDivisor
 vertexAttributeInstanceRateZeroDivisor
 pipelineRobustness = roadmap F10: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDevicePipelineRobustnessFeatures struct
+hostImageCopy = roadmap F11: reported through both the aggregate VkPhysicalDeviceVulkan14Features struct and the dedicated VkPhysicalDeviceHostImageCopyFeatures struct
