@@ -612,6 +612,143 @@ TEST(ExecutorTest, HonorsPrimitiveRestartOnIndexedLineStrip) {
   EXPECT_EQ(texel(0, 2)[3], 0);
 }
 
+// roadmap F5: `RasterState::LineWidth` generalizes the fixed 1-pixel
+// rectangular line quad to an arbitrary width, covering every screen row
+// whose pixel center falls within the centerline's `LineWidth / 2` on
+// either side.
+TEST(ExecutorTest, RendersAWideRectangularLine) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.LineWidth = 3.0f;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // Same horizontal line as `RendersAHorizontalLineList`: centerline at
+  // screen row 1's pixel center (y = 1.5), now 3 pixels wide so its
+  // [0, 3) extent covers rows 0-2 and stops just short of row 3.
+  Scene.VertexData = {
+      -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t Y : {0u, 1u, 2u})
+    for (uint32_t X = 0; X != 4; ++X)
+      EXPECT_EQ(texel(X, Y)[3], 255) << "x=" << X << " y=" << Y;
+  for (uint32_t X = 0; X != 4; ++X)
+    EXPECT_EQ(texel(X, 3)[3], 0) << "x=" << X;
+}
+
+// roadmap F5: `LineRasterizationMode::Bresenham` walks the integer pixel
+// grid directly rather than expanding a width-dependent quad, so a
+// perfectly diagonal line lights exactly the diagonal pixels.
+TEST(ExecutorTest, RendersABresenhamDiagonalLine) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.LineMode = LineRasterizationMode::Bresenham;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // NDC endpoints chosen so the viewport transform lands their screen
+  // positions exactly on pixel (0, 0)'s and (3, 3)'s centers.
+  Scene.VertexData = {
+      -0.75f, 0.75f,  0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      0.75f,  -0.75f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  for (uint32_t D = 0; D != 4; ++D)
+    EXPECT_EQ(texel(D, D)[3], 255) << "d=" << D;
+  // A pixel off the diagonal is untouched.
+  EXPECT_EQ(texel(0, 3)[3], 0);
+  EXPECT_EQ(texel(3, 0)[3], 0);
+}
+
+// roadmap F5: a stippled line rejects a covered fragment whose position
+// along the line's length falls in one of `StipplePattern`'s "off" bits.
+TEST(ExecutorTest, RendersAStippledLine) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.StippledLineEnable = true;
+  Raster.StippleFactor = 1;
+  Raster.StipplePattern = 0b1010; // columns 0/2 off, 1/3 on
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // A horizontal line starting exactly at the target's left edge, so each
+  // pixel column's arc-length distance from the line's start equals its
+  // own column index plus one half (its pixel center).
+  Scene.VertexData = {
+      -1.0f, 0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,  0.25f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  EXPECT_EQ(texel(0, 1)[3], 0);
+  EXPECT_EQ(texel(1, 1)[3], 255);
+  EXPECT_EQ(texel(2, 1)[3], 0);
+  EXPECT_EQ(texel(3, 1)[3], 255);
+}
+
+// roadmap F5: `LineRasterizationMode::RectangularSmooth` feathers the
+// line's edge over 1 pixel, writing a fractional coverage into the
+// fragment's alpha instead of `Rectangular`'s binary in/out test.
+TEST(ExecutorTest, RectangularSmoothLineAntialiasesItsEdge) {
+  Context Ctx;
+  RasterState Raster{CullMode::None, FrontFace::CounterClockwise};
+  Raster.LineMode = LineRasterizationMode::RectangularSmooth;
+  Raster.LineWidth = 1.0f;
+  Expected<GraphicsPipeline> Pipeline =
+      buildPipeline(Ctx, Raster, PrimitiveTopology::LineList);
+  ASSERT_THAT_EXPECTED(Pipeline, Succeeded());
+
+  TriangleScene Scene;
+  // A horizontal line whose centerline sits at screen y = 1.75, 0.25
+  // pixels off of row 1's center -- close enough to fully light row 1
+  // were this `Rectangular`, but chosen here specifically so neither
+  // covered row's coverage falls exactly on a 0.0/1.0 clamp boundary.
+  Scene.VertexData = {
+      -1.0f, 0.125f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+      1.0f,  0.125f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f,
+  };
+  PreparedDraw Draw = Scene.prepare();
+
+  ASSERT_THAT_ERROR(executeDraws(*Pipeline, Draw), Succeeded());
+
+  auto texel = [&](uint32_t X, uint32_t Y) {
+    return Scene.AttachmentStorage.data() + (Y * 4 + X) * 4;
+  };
+  // Row 1 (center 1.5, |edge| = 0.25): coverage = 1 - 0.25 = 0.75.
+  EXPECT_NEAR(texel(0, 1)[3], 0.75 * 255, 2);
+  // Row 2 (center 2.5, |edge| = 0.75): coverage = 1 - 0.75 = 0.25.
+  EXPECT_NEAR(texel(0, 2)[3], 0.25 * 255, 2);
+  // Row 0 (center 0.5, |edge| = 1.25) and row 3 (center 3.5, |edge| =
+  // 2.25) are both fully outside the 1-pixel feather and get no coverage.
+  EXPECT_EQ(texel(0, 0)[3], 0);
+  EXPECT_EQ(texel(0, 3)[3], 0);
+}
+
 TEST(ExecutorTest, InterpolatesColorAcrossTheTriangle) {
   Context Ctx;
   Expected<GraphicsPipeline> Pipeline = buildPipeline(

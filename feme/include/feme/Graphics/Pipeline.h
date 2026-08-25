@@ -306,10 +306,53 @@ struct DepthState {
   CompareOp Compare = CompareOp::Less;
 };
 
+/// How a line primitive's width is turned into covered pixels, matching
+/// `VK_KHR_line_rasterization`'s `VkLineRasterizationMode` one-for-one
+/// (roadmap F5). `Rectangular` generalizes the fixed 1-pixel-wide quad
+/// expansion roadmap C4d built (`executeDraws`' line-topology path) to
+/// `RasterState::LineWidth`'s actual value: a screen-space rectangle
+/// `LineWidth` pixels wide, binary-covered exactly like a triangle.
+/// `Bresenham` instead walks the integer pixel grid with Bresenham's own
+/// algorithm, always exactly 1 pixel wide regardless of `LineWidth` (per
+/// the spec, "the width of the line is not adjustable, and it is always
+/// as if it were 1.0"). `RectangularSmooth` is `Rectangular` with a 1-pixel
+/// antialiasing feather: fragments near the line's edge get fractional
+/// coverage (`ScreenTriangle::EdgeDistance`) instead of a binary in/out
+/// test, and that coverage multiplies into the written alpha (see
+/// "Smooth line antialiasing" in feme/docs/FeMeGraphicsDesign.md).
+enum class LineRasterizationMode : uint8_t {
+  Rectangular,
+  Bresenham,
+  RectangularSmooth,
+};
+
 /// Fixed-function rasterization state that does not vary per draw.
 struct RasterState {
   CullMode Cull = CullMode::None;
   FrontFace Front = FrontFace::CounterClockwise;
+  /// (roadmap F5) Which of the three `VK_KHR_line_rasterization` styles a
+  /// line-topology primitive is drawn with; meaningless for point/triangle
+  /// primitives.
+  LineRasterizationMode LineMode = LineRasterizationMode::Rectangular;
+  /// (roadmap F5) A line primitive's screen-space width in pixels
+  /// (`VkPipelineRasterizationStateCreateInfo::lineWidth`, or
+  /// `vkCmdSetLineWidth`'s value when dynamic). Ignored entirely by
+  /// `Bresenham` mode, which is always 1 pixel wide.
+  float LineWidth = 1.0f;
+  /// (roadmap F5) Whether a line primitive is stippled -- rejected in a
+  /// per-fragment repeating on/off pattern along the line's length --
+  /// per `VkPipelineRasterizationLineStateCreateInfo::stippledLineEnable`.
+  bool StippledLineEnable = false;
+  /// (roadmap F5) The stipple pattern's repeat factor in pixels, `[1,
+  /// 256]` (`VkPipelineRasterizationLineStateCreateInfo::
+  /// lineStippleFactor`, or `vkCmdSetLineStippleKHR`'s value when
+  /// dynamic): each of `StipplePattern`'s 16 bits covers this many pixels
+  /// of the line's length before the pattern advances to its next bit.
+  uint32_t StippleFactor = 1;
+  /// (roadmap F5) The 16-bit repeating on/off pattern itself
+  /// (`VkPipelineRasterizationLineStateCreateInfo::lineStipplePattern`):
+  /// bit 0 is tested first, at the line's starting end.
+  uint16_t StipplePattern = 0xFFFF;
 };
 
 /// One attachment's format/extent identity, part of the pipeline's cache key

@@ -495,6 +495,23 @@ struct ScreenTriangle {
   std::array<const uint32_t *, 3> Varyings; // pointer into owning storage
   bool FrontFacing;
   uint32_t PrimitiveID;
+  /// (roadmap F5) Whether this synthetic triangle is one half of a line
+  /// primitive's quad expansion: gates whether `EdgeDistance`/`ArcLength`
+  /// below are consulted at all (a point or real triangle primitive
+  /// leaves them at 0, meaningless).
+  bool IsLine = false;
+  /// (roadmap F5) Each corner's signed perpendicular distance in pixels
+  /// from the line's centerline (positive on one side, negative on the
+  /// other): interpolated per-pixel to drive `RectangularSmooth`'s
+  /// antialiasing coverage (see `LineRasterizationMode`'s comment).
+  std::array<float, 3> EdgeDistance{0.0f, 0.0f, 0.0f};
+  /// (roadmap F5) Each corner's distance in pixels along the line's
+  /// length from the start of its containing line-list segment or
+  /// line-strip (a strip's distance keeps accumulating across its
+  /// segments, matching Vulkan's "continuously stippled" connected-strip
+  /// behavior): interpolated per-sample to drive the stipple pattern
+  /// test.
+  std::array<float, 3> ArcLength{0.0f, 0.0f, 0.0f};
 };
 
 } // namespace
@@ -1580,21 +1597,37 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
     // at or below `clipTriangle`'s own `ClipEpsilon` guard), since
     // Vulkan's own point/line clipping rules are a documented deviation
     // this milestone accepts (see FeMeGraphicsDesign.md's status note).
-    // `pointSizeRange`/`lineWidthRange` (`PhysicalDeviceInfo.cpp`) are
-    // fixed at "1.0 is the only legal size" (`largePoints`/`wideLines` are
-    // not advertised device features), so both are a fixed 1-pixel
-    // screen-space extent here rather than a `SV_PointSize` shader output
-    // or `vkCmdSetLineWidth` value this milestone threads through.
-    auto pushQuadTriangle = [&](std::array<float, 2> A, float InvWA,
-                                float DepthA, const RasterVertex &VtxA,
-                                std::array<float, 2> B, float InvWB,
-                                float DepthB, const RasterVertex &VtxB,
-                                std::array<float, 2> C, float InvWC,
-                                float DepthC, const RasterVertex &VtxC) {
-      std::array<std::array<float, 2>, 3> Screen = {A, B, C};
-      std::array<float, 3> InvW = {InvWA, InvWB, InvWC};
-      std::array<float, 3> Depth = {DepthA, DepthB, DepthC};
-      std::array<const RasterVertex *, 3> Src = {&VtxA, &VtxB, &VtxC};
+    // `pointSizeRange` (`PhysicalDeviceInfo.cpp`) is fixed at "1.0 is the
+    // only legal size" (`largePoints` is not an advertised device
+    // feature), so a point's quad expansion still hardcodes a 0.5-pixel
+    // half-extent. A line's width/style is no longer hardcoded the same
+    // way: roadmap F5 threads `RasterState::LineWidth`/`LineMode`/stipple
+    // fields (`vkCmdSetLineWidth`/`VkPipelineRasterizationLineStateCreate
+    // Info`'s values) through the expansion below -- see
+    // `LineRasterizationMode`'s own comment (feme/include/feme/Graphics/
+    // Pipeline.h) for the three styles' shapes.
+    //
+    /// One corner of a synthetic point/line quad triangle, bundling every
+    /// per-vertex value `pushQuadTriangle` needs: `Edge`/`Arc` (roadmap
+    /// F5's per-corner perpendicular/arc-length distance, 0 and
+    /// meaningless for a point) ride along the same varying-interpolation
+    /// path `Depth`/`InvW` already use.
+    struct QuadCorner {
+      std::array<float, 2> Pos;
+      float InvW;
+      float Depth;
+      const RasterVertex *Vtx;
+      float Edge = 0.0f;
+      float Arc = 0.0f;
+    };
+    auto pushQuadTriangle = [&](QuadCorner A, QuadCorner B, QuadCorner C,
+                                bool IsLine) {
+      std::array<std::array<float, 2>, 3> Screen = {A.Pos, B.Pos, C.Pos};
+      std::array<float, 3> InvW = {A.InvW, B.InvW, C.InvW};
+      std::array<float, 3> Depth = {A.Depth, B.Depth, C.Depth};
+      std::array<float, 3> Edge = {A.Edge, B.Edge, C.Edge};
+      std::array<float, 3> Arc = {A.Arc, B.Arc, C.Arc};
+      std::array<const RasterVertex *, 3> Src = {A.Vtx, B.Vtx, C.Vtx};
       float SArea = edgeFn(Screen[0], Screen[1], Screen[2]);
       if (SArea == 0.0f)
         return;
@@ -1602,6 +1635,8 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         std::swap(Screen[1], Screen[2]);
         std::swap(InvW[1], InvW[2]);
         std::swap(Depth[1], Depth[2]);
+        std::swap(Edge[1], Edge[2]);
+        std::swap(Arc[1], Arc[2]);
         std::swap(Src[1], Src[2]);
       }
       auto VaryingBits = std::make_unique<SmallVector<uint32_t, 8>>();
@@ -1611,6 +1646,9 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       ST.Pos = Screen;
       ST.InvW = InvW;
       ST.Depth = Depth;
+      ST.IsLine = IsLine;
+      ST.EdgeDistance = Edge;
+      ST.ArcLength = Arc;
       size_t Stride = Src[0]->Varyings.size();
       for (unsigned K = 0; K != 3; ++K)
         ST.Varyings[K] = VaryingBits->data() + K * Stride;
@@ -1634,20 +1672,33 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           float InvW, Depth;
           projectVertex(V, P, InvW, Depth);
           constexpr float Half = 0.5f; // fixed 1-pixel point size
-          std::array<float, 2> TL{P[0] - Half, P[1] - Half};
-          std::array<float, 2> TR{P[0] + Half, P[1] - Half};
-          std::array<float, 2> BR{P[0] + Half, P[1] + Half};
-          std::array<float, 2> BL{P[0] - Half, P[1] + Half};
-          pushQuadTriangle(TL, InvW, Depth, V, TR, InvW, Depth, V, BR, InvW,
-                           Depth, V);
-          pushQuadTriangle(TL, InvW, Depth, V, BR, InvW, Depth, V, BL, InvW,
-                           Depth, V);
+          QuadCorner TL{{P[0] - Half, P[1] - Half}, InvW, Depth, &V};
+          QuadCorner TR{{P[0] + Half, P[1] - Half}, InvW, Depth, &V};
+          QuadCorner BR{{P[0] + Half, P[1] + Half}, InvW, Depth, &V};
+          QuadCorner BL{{P[0] - Half, P[1] + Half}, InvW, Depth, &V};
+          pushQuadTriangle(TL, TR, BR, /*IsLine=*/false);
+          pushQuadTriangle(TL, BR, BL, /*IsLine=*/false);
         }
       }
     } else if (Pipeline.getTopology() == PrimitiveTopology::LineList ||
                Pipeline.getTopology() == PrimitiveTopology::LineStrip) {
+      const RasterState &Raster = Pipeline.getRasterState();
       for (uint32_t Inst = 0; Inst != Cmd.InstanceCount; ++Inst) {
+        // (roadmap F5) The stipple pattern's arc-length parameter keeps
+        // accumulating across a `LineStrip`'s consecutive segments
+        // (Vulkan's "continuously stippled" rule for connected strips);
+        // a `LineList`'s independent segments -- and a strip's own
+        // restart boundary, which also breaks segment contiguity --
+        // instead each restart at 0. `LineIndices` preserves assembly
+        // order, so "the next segment's first vertex is the previous
+        // segment's second" is exactly the contiguity test needed, with
+        // no separate restart bookkeeping here.
+        float ArcAccum = 0.0f;
+        std::optional<uint32_t> PrevEnd;
         for (std::array<uint32_t, 2> Ln : LineIndices) {
+          if (!PrevEnd || *PrevEnd != Ln[0])
+            ArcAccum = 0.0f;
+          PrevEnd = Ln[1];
           RasterVertex V0 = vertexAt(Inst * PerInstance + Ln[0]);
           RasterVertex V1 = vertexAt(Inst * PerInstance + Ln[1]);
           if (V0.Clip[3] <= ClipEpsilon || V1.Clip[3] <= ClipEpsilon)
@@ -1660,17 +1711,105 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
           float Len = std::sqrt(Dx * Dx + Dy * Dy);
           if (Len == 0.0f)
             continue;
-          constexpr float HalfWidth = 0.5f; // fixed 1-pixel line width
-          std::array<float, 2> Perp{-Dy / Len * HalfWidth,
-                                    Dx / Len * HalfWidth};
-          std::array<float, 2> A{P0[0] + Perp[0], P0[1] + Perp[1]};
-          std::array<float, 2> B{P0[0] - Perp[0], P0[1] - Perp[1]};
-          std::array<float, 2> C{P1[0] - Perp[0], P1[1] - Perp[1]};
-          std::array<float, 2> D{P1[0] + Perp[0], P1[1] + Perp[1]};
-          pushQuadTriangle(A, InvW0, Depth0, V0, B, InvW0, Depth0, V0, C, InvW1,
-                           Depth1, V1);
-          pushQuadTriangle(A, InvW0, Depth0, V0, C, InvW1, Depth1, V1, D, InvW1,
-                           Depth1, V1);
+          float ArcEnd = ArcAccum + Len;
+
+          if (Raster.LineMode == LineRasterizationMode::Bresenham) {
+            // `Bresenham` mode walks the integer pixel grid directly
+            // (`LineRasterizationMode`'s comment): the line's width is
+            // never consulted, and each covered pixel becomes its own
+            // 1x1 axis-aligned quad, shaded/interpolated at the line
+            // parameter `T` nearest that pixel's center -- there is no
+            // per-pixel width to expand, unlike the rectangular styles
+            // below.
+            int32_t X0 = static_cast<int32_t>(std::floor(P0[0]));
+            int32_t Y0 = static_cast<int32_t>(std::floor(P0[1]));
+            int32_t X1 = static_cast<int32_t>(std::floor(P1[0]));
+            int32_t Y1 = static_cast<int32_t>(std::floor(P1[1]));
+            int32_t StepDx = std::abs(X1 - X0), Sx = X0 < X1 ? 1 : -1;
+            int32_t StepDy = -std::abs(Y1 - Y0), Sy = Y0 < Y1 ? 1 : -1;
+            int32_t Err = StepDx + StepDy;
+            int32_t X = X0, Y = Y0;
+            for (;;) {
+              std::array<float, 2> Center{X + 0.5f, Y + 0.5f};
+              float T = ((Center[0] - P0[0]) * Dx + (Center[1] - P0[1]) * Dy) /
+                        (Len * Len);
+              T = std::clamp(T, 0.0f, 1.0f);
+              RasterVertex Vt = lerpVertex(V0, V1, T, Varyings);
+              float InvWt = InvW0 + (InvW1 - InvW0) * T;
+              float Deptht = Depth0 + (Depth1 - Depth0) * T;
+              float Arc = ArcAccum + T * Len;
+              QuadCorner TL{{float(X), float(Y)}, InvWt, Deptht, &Vt, 0.0f,
+                            Arc};
+              QuadCorner TR{
+                  {float(X + 1), float(Y)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+              QuadCorner BR{{float(X + 1), float(Y + 1)},
+                            InvWt,
+                            Deptht,
+                            &Vt,
+                            0.0f,
+                            Arc};
+              QuadCorner BL{
+                  {float(X), float(Y + 1)}, InvWt, Deptht, &Vt, 0.0f, Arc};
+              pushQuadTriangle(TL, TR, BR, /*IsLine=*/true);
+              pushQuadTriangle(TL, BR, BL, /*IsLine=*/true);
+              if (X == X1 && Y == Y1)
+                break;
+              int32_t E2 = 2 * Err;
+              if (E2 >= StepDy) {
+                Err += StepDy;
+                X += Sx;
+              }
+              if (E2 <= StepDx) {
+                Err += StepDx;
+                Y += Sy;
+              }
+            }
+          } else {
+            // `Rectangular`/`RectangularSmooth`: a screen-space rectangle
+            // `Raster.LineWidth` pixels wide, generalizing the fixed
+            // 1-pixel-wide quad roadmap C4d built. `RectangularSmooth`
+            // additionally feathers the quad 1 pixel wider than the
+            // nominal width on each side so a fragment near the true
+            // edge gets a fractional `EdgeDistance` to antialias against
+            // (see "Smooth line antialiasing" in
+            // feme/docs/FeMeGraphicsDesign.md), rather than the binary
+            // in/out test `Rectangular` still uses.
+            float HalfWidth = Raster.LineWidth * 0.5f;
+            float Feather = Raster.LineMode ==
+                                    LineRasterizationMode::RectangularSmooth
+                                ? 1.0f
+                                : 0.0f;
+            float HalfExtent = HalfWidth + Feather;
+            std::array<float, 2> Perp{-Dy / Len * HalfExtent,
+                                      Dx / Len * HalfExtent};
+            QuadCorner QA{{P0[0] + Perp[0], P0[1] + Perp[1]},
+                          InvW0,
+                          Depth0,
+                          &V0,
+                          HalfExtent,
+                          ArcAccum};
+            QuadCorner QB{{P0[0] - Perp[0], P0[1] - Perp[1]},
+                          InvW0,
+                          Depth0,
+                          &V0,
+                          -HalfExtent,
+                          ArcAccum};
+            QuadCorner QC{{P1[0] - Perp[0], P1[1] - Perp[1]},
+                          InvW1,
+                          Depth1,
+                          &V1,
+                          -HalfExtent,
+                          ArcEnd};
+            QuadCorner QD{{P1[0] + Perp[0], P1[1] + Perp[1]},
+                          InvW1,
+                          Depth1,
+                          &V1,
+                          HalfExtent,
+                          ArcEnd};
+            pushQuadTriangle(QA, QB, QC, /*IsLine=*/true);
+            pushQuadTriangle(QA, QC, QD, /*IsLine=*/true);
+          }
+          ArcAccum = ArcEnd;
         }
       }
     }
@@ -1736,9 +1875,17 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         std::array<int32_t, 4> PixelY;
         uint32_t TriIdx = 0;
         std::array<float, 4> Bary0, Bary1, Bary2;
+        // (roadmap F5) Each lane's `RectangularSmooth` antialiasing
+        // coverage (`1.0` for every non-line/non-smooth triangle,
+        // computed from `ScreenTriangle::EdgeDistance` otherwise): an
+        // extra alpha multiplier applied only when writing a line
+        // primitive's color in `RectangularSmooth` mode (see the merge
+        // loop below).
+        std::array<float, 4> LineCoverage{1.0f, 1.0f, 1.0f, 1.0f};
       };
       std::vector<PendingQuad> Quads;
       std::vector<cpu::FemeFragmentInvocation> QuadInvocations;
+      const RasterState &Raster = Pipeline.getRasterState();
 
       for (uint32_t TriIdx : Bin) {
         const ScreenTriangle &Tri = ScreenTris[TriIdx];
@@ -1762,6 +1909,11 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
         int32_t QStartY = QMinY - (QMinY & 1);
 
         float Area = edgeFn(Tri.Pos[0], Tri.Pos[1], Tri.Pos[2]);
+        // (roadmap F5) Whether a covered sample of this triangle also
+        // needs to pass the stipple pattern test: only a line
+        // primitive's synthetic triangle carries a meaningful
+        // `ArcLength`, and only when the pipeline actually stipples.
+        bool NeedsStippleTest = Tri.IsLine && Raster.StippledLineEnable;
         for (int32_t QY = QStartY; QY < QMaxY; QY += 2) {
           for (int32_t QX = QStartX; QX < QMaxX; QX += 2) {
             PendingQuad Quad;
@@ -1798,8 +1950,26 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
                   bool In2 =
                       E2 > 0.0f ||
                       (E2 == 0.0f && isTopLeftEdge(Tri.Pos[0], Tri.Pos[1]));
-                  if (In0 && In1 && In2)
-                    SampleMask |= (1u << S);
+                  if (!(In0 && In1 && In2))
+                    continue;
+                  // (roadmap F5) The stipple test rejects an otherwise-
+                  // covered sample whose position along the line
+                  // (`ArcLength`, interpolated the same way as the
+                  // coverage test's own barycentric weights) falls in
+                  // one of `StipplePattern`'s "off" bits: bit `floor(
+                  // Arc / StippleFactor) % 16` gates this exact sample,
+                  // matching a real stipple's per-sample granularity.
+                  if (NeedsStippleTest) {
+                    float B0 = E0 / Area, B1 = E1 / Area, B2 = E2 / Area;
+                    float Arc = B0 * Tri.ArcLength[0] + B1 * Tri.ArcLength[1] +
+                                B2 * Tri.ArcLength[2];
+                    uint32_t Bit =
+                        static_cast<uint32_t>(Arc / float(Raster.StippleFactor)) %
+                        16;
+                    if (((Raster.StipplePattern >> Bit) & 1u) == 0)
+                      continue;
+                  }
+                  SampleMask |= (1u << S);
                 }
               }
               if (SampleMask) {
@@ -1815,6 +1985,24 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
               Quad.Bary0[Lane] = edgeFn(Tri.Pos[1], Tri.Pos[2], Center) / Area;
               Quad.Bary1[Lane] = edgeFn(Tri.Pos[2], Tri.Pos[0], Center) / Area;
               Quad.Bary2[Lane] = edgeFn(Tri.Pos[0], Tri.Pos[1], Center) / Area;
+              // (roadmap F5) `RectangularSmooth`'s antialiasing coverage:
+              // the pixel-center perpendicular distance from the line's
+              // centerline (interpolated the same way `Depth` is), turned
+              // into a 0..1 falloff across the 1-pixel feather region
+              // `Rectangular`'s exact-half-width quad does not have.
+              // Every other triangle (points, real polygons, and lines in
+              // `Rectangular`/`Bresenham` mode) keeps the default `1.0`.
+              if (Tri.IsLine &&
+                  Raster.LineMode == LineRasterizationMode::RectangularSmooth) {
+                float B0 = Quad.Bary0[Lane], B1 = Quad.Bary1[Lane],
+                      B2 = Quad.Bary2[Lane];
+                float EdgeDist = B0 * Tri.EdgeDistance[0] +
+                                 B1 * Tri.EdgeDistance[1] +
+                                 B2 * Tri.EdgeDistance[2];
+                float HalfWidth = Raster.LineWidth * 0.5f;
+                Quad.LineCoverage[Lane] = std::clamp(
+                    HalfWidth + 0.5f - std::abs(EdgeDist), 0.0f, 1.0f);
+              }
             }
             if (!AnyCovered)
               continue;
@@ -2006,6 +2194,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             for (unsigned C = 0; C != 4; ++C)
               RGBA[C] = FSOutput->readFloat(FSColors[AttIdx]->ElementID, C,
                                             Q * 4 + Lane);
+            // (roadmap F5) `RectangularSmooth`'s antialiasing coverage
+            // (`Quad.LineCoverage`, `1.0` for every non-line/non-smooth
+            // triangle) multiplies into the written alpha so a partially-
+            // covered edge fragment blends proportionally rather than
+            // writing fully opaque or not at all.
+            RGBA[3] *= Quad.LineCoverage[Lane];
             // Only attachment 0 ever has a second source color to read:
             // Vulkan requires exactly one color attachment for a pipeline
             // using a dual-source blend factor (see `FSColor1`'s own
