@@ -4293,3 +4293,53 @@ every commit in this row -- new tests relative to F6's own report:
 `DrawTest`'s `RendersIndexedDrawWithEightBitIndices` plus
 `AdvertisesDynamicRenderingExtension` (extended again, now 23), plus the
 new `Tools/feme-render/draw-indexed-uint8.test` lit test.
+
+## Roadmap F8: measured impact (confirmed-unsupported, not a full run)
+
+F8 implemented `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRendering
+InputAttachmentIndices` as real, validated commands -- the former's
+attachment-location remap genuinely honored by the executor -- but left
+`dynamicRenderingLocalRead`/`VK_KHR_dynamic_rendering_local_read` and its
+two limit fields unadvertised, since no shader-side SPIR-V `subpassInput`
+local-read consumption exists yet (split off as roadmap F8a; see this
+row's own status note in `feme/docs/FeMeVulkanDesign.md`'s "Render passes
+and dynamic rendering" section).
+
+Every CTS case that actually exercises local-read rendering
+(`dEQP-VK.renderpasses.dynamic_rendering.*.local_read.*`,
+`vktDynamicRenderingLocalReadTests.cpp`/
+`vktDynamicRenderingLocalReadMaint10Tests.cpp`) calls
+`requireDeviceFunctionality("VK_KHR_dynamic_rendering_local_read")` before
+doing anything else, so with the extension unadvertised every one of them
+reports `NotSupported` rather than exercising any of this row's own code --
+confirmed, not assumed, by running one such case
+(`dEQP-VK.renderpasses.dynamic_rendering.partial_secondary_cmd_buff.
+local_read.depth_mapping_stencil_not`) against this session's built
+`feme_icd.json`:
+
+```
+NotSupported (VK_KHR_dynamic_rendering_local_read is not supported at vktTestCase.cpp:1393)
+```
+
+The two `dEQP-VK.api.*` cases that query the dedicated feature struct
+directly (not gated behind `requireDeviceFunctionality`, since querying an
+unsupported feature is itself the point) both pass, confirming
+`dynamicRenderingLocalRead` is truthfully reported `VK_FALSE` everywhere
+CTS looks for it:
+
+```
+dEQP-VK.api.info.get_physical_device_properties2.features.dynamic_rendering_local_read_features
+  Pass (Querying not supported)
+```
+
+Since no CTS case reaches any of this row's own new code with the
+extension unadvertised, this row's actual behavior -- the attachment-
+location remap's real effect, and every validation path the two commands
+add -- is instead verified through the eleven new tests described in
+`agent_thoughts.md`'s F8 entry (two `ExecutorTest` cases, five `DrawTest`
+end-to-end cases, all through the real ICD entry points). `ninja
+check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`, this
+session's existing `./build`): 1735 discovered, 1734 passed, 1 unsupported
+(pre-existing, unrelated), matching the pre-F8 baseline exactly (no
+existing case regressed, none newly passed since none reach this row's own
+new code).
