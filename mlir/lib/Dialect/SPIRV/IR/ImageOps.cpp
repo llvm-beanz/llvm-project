@@ -180,10 +180,39 @@ static LogicalResult verifyImageOperands(Operation *imageOp,
     index += 2;
   }
 
+  if (spirv::bitEnumContainsAny(attr.getValue(), spirv::ImageOperands::Sample)) {
+    // "Sample ... Only valid with an image type that has an MS of 1." --
+    // valid on the non-sampling ops that address a multisampled image
+    // directly (fetch/read/write), unlike Lod/Grad/Bias above, which are
+    // sampling-op-only.
+    auto fetchOp = dyn_cast<spirv::FetchOpInterface>(imageOp);
+    auto readOp = dyn_cast<spirv::ImageReadOp>(imageOp);
+    auto writeOp = dyn_cast<spirv::ImageWriteOp>(imageOp);
+    if (!fetchOp && !readOp && !writeOp)
+      return imageOp->emitError(
+          "Sample is only valid with fetch, read, and write instructions");
+
+    if (index + 1 > operands.size())
+      return imageOp->emitError("Sample operand requires 1 argument");
+
+    if (!isa<mlir::IntegerType>(operands[index].getType()))
+      return imageOp->emitError("Sample must be an integer type scalar");
+
+    spirv::ImageType imageType =
+        fetchOp ? cast<spirv::ImageType>(fetchOp.getImage().getType())
+        : readOp ? cast<spirv::ImageType>(readOp.getImage().getType())
+                 : cast<spirv::ImageType>(writeOp.getImage().getType());
+    if (imageType.getSamplingInfo() != spirv::ImageSamplingInfo::MultiSampled)
+      return imageOp->emitError("Sample must only be used with an image "
+                                "type that has a MS operand of 1");
+
+    ++index;
+  }
+
   // TODO: Add the validation rules for the following Image Operands.
   spirv::ImageOperands noSupportOperands =
       spirv::ImageOperands::ConstOffset | spirv::ImageOperands::Offset |
-      spirv::ImageOperands::ConstOffsets | spirv::ImageOperands::Sample |
+      spirv::ImageOperands::ConstOffsets |
       spirv::ImageOperands::MinLod | spirv::ImageOperands::MakeTexelAvailable |
       spirv::ImageOperands::MakeTexelVisible |
       spirv::ImageOperands::SignExtend | spirv::ImageOperands::ZeroExtend;
