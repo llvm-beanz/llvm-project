@@ -33,14 +33,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F5?
+Can you implement roadmap milestone F6?
 
-> **`VK_KHR_line_rasterization`**
-> (`rectangularLines`/`bresenhamLines`/`smoothLines` + their `stippled*`
-> variants) **+ its 2 limit fields.** C4d already built a line-topology
-> rasterizer (1-pixel-wide quad expansion); this row generalizes it to variable
-> width and the three line styles, then adds stippling as a per-fragment pattern
-> test against `VkPipelineRasterizationLineStateCreateInfo`'s stipple
-> factor/pattern. The largest single G-track item in this section — consider
-> splitting rectangular/bresenham/smooth from the three `stippled*` variants
-> into two separately assignable pieces
+> **`VK_KHR_vertex_attribute_divisor`/`vertexAttributeInstanceRateDivisor`(+`Zero`)
+> + `maxVertexAttribDivisor`.** `VkVertexInputBindingDivisorDescription` extends
+> the existing per-binding instance-rate stepping already implied by instanced
+> draws; a divisor of 0 (every instance reads vertex 0) is the one new case, not
+> a new mechanism
