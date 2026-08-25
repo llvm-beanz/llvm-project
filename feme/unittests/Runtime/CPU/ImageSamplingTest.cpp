@@ -558,6 +558,103 @@ TEST_F(ImageSamplingTest, LoadFetchesA1B5G5R5Unorm) {
   EXPECT_FLOAT_EQ(Out[3], 1.0f);
 }
 
+// Roadmap F8b: the single-component depth/stencil formats
+// `feme::vulkan::buildSubpassInputHeap` feeds a depth/stencil subpass
+// input attachment through -- these were the format-decode gap that left
+// every such `subpassLoad` reading zero (see FeMeRuntimeCPU.c's own
+// roadmap F8b comment).
+
+TEST_F(ImageSamplingTest, LoadFetchesD16Unorm) {
+  uint16_t Storage[1][1] = {{32768}}; // 32768 / 65535 ~= 0.5000076.
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::D16_UNORM, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_NEAR(Out[0], 32768.0f / 65535.0f, 1e-6f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesD32Float) {
+  // The identity case, like R32_FLOAT: no conversion, just an unread
+  // color/alpha component pad.
+  float Storage[1][1] = {{0.25f}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::D32_FLOAT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 0.25f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+TEST_F(ImageSamplingTest, LoadFetchesS8Uint) {
+  // A stencil reference value, normalized to `[0.0, 1.0]` (matching
+  // `A8_UNORM`'s own normalized-component convention): 64 / 255 ~= 0.251.
+  uint8_t Storage[1][1] = {{64}};
+  FemeImageSubresourceLayout Layout;
+  FemeImageDescriptor Img = makeImage2D(Storage, sizeof(Storage), 1, 1,
+                                        ResourceFormat::S8_UINT, Layout);
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_NEAR(Out[0], 64.0f / 255.0f, 1e-6f);
+  EXPECT_FLOAT_EQ(Out[1], 0.0f);
+  EXPECT_FLOAT_EQ(Out[2], 0.0f);
+  EXPECT_FLOAT_EQ(Out[3], 1.0f);
+}
+
+// Roadmap F8b: a multisampled image (`SampleCount > 1`) packs every
+// sample of one texel contiguously; `femeRTFetchTexel2D`'s addressing
+// must skip `SampleCount` samples' worth of bytes per texel step along a
+// row, not one, or texel (1, 0) below would alias sample 1 of texel
+// (0, 0). This always reads sample 0 (no caller yet threads an explicit
+// sample index through -- see FeMeRuntimeCPU.c's own comment).
+TEST_F(ImageSamplingTest, LoadFetchesSample0OfMultisampledTexel) {
+  // A 2x1, 4-sample R32_FLOAT image: texel (0, 0)'s 4 samples are 1, 2,
+  // 3, 4; texel (1, 0)'s are 5, 6, 7, 8.
+  float Storage[1][2][4] = {{{1, 2, 3, 4}, {5, 6, 7, 8}}};
+  FemeImageSubresourceLayout Layout{};
+  Layout.RowPitch = 2 * 4 * sizeof(float);
+  Layout.SlicePitch = Layout.RowPitch;
+  Layout.SampleStride = sizeof(float);
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Img.Width = 2;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 4;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 1.0f);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 5.0f);
+}
+
 TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {
   float Storage[1][1][4] = {{{1, 1, 1, 1}}};
   FemeImageSubresourceLayout Layout;

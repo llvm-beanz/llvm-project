@@ -97,6 +97,30 @@
 // never legalizes `OpImageSample*` against an integer-sampled image, only
 // `OpImageFetch`, so there is nothing for one to mean.
 //
+// Update (roadmap F8b): the single-component depth (`D16_UNORM`/
+// `D32_FLOAT`) and stencil (`S8_UINT`) formats are now decoded too --
+// `feme::vulkan::buildSubpassInputHeap` (CommandBuffer.cpp) has been
+// feeding a depth/stencil attachment's own `FemeImageDescriptor` into this
+// same `feme.cpu.image.load.2d.v4f32` path since roadmap F8a, but every
+// such fetch read back all-zero until now: neither
+// `femeRTImageFormatElementSize` nor `femeRTUnpackImageTexel` had a case
+// for any of the three, so the format-guarded `ElemSize == 0` check in
+// `femeRTFetchTexel2D` silently rejected every access. `D16_UNORM`/
+// `S8_UINT` normalize to `[0.0, 1.0]` in component 0 (matching
+// `A8_UNORM`'s own normalized-component-0 convention above); `D32_FLOAT`
+// is the identity case, like `R32_FLOAT`. A missing color/alpha component
+// pads the same way every other single- or few-component format above
+// does. `femeRTFetchTexel2D` also now derives its per-texel stride from
+// `SampleStride`/`SampleCount` rather than assuming `SampleCount == 1`
+// (`FemeImageSubresourceLayout::SampleStride`, previously unused --
+// `buildSubpassInputHeap` now populates a multisample attachment's heap
+// slot too), always reading sample 0 of a multisampled texel: no caller
+// yet threads an explicit sample index through (`feme::StageOpKind::
+// SubpassLoad` has no `Sample` operand, and `SubpassLoadPattern`
+// (SPIRVToLLVMPatterns.cpp) rejects any `spirv.ImageRead` that carries
+// one), so `dynamicRenderingLocalReadMultisampledAttachments` stays
+// `VK_FALSE` -- tracked as roadmap F8c.
+//
 //===----------------------------------------------------------------------===//
 
 #include <stdint.h>
@@ -699,6 +723,16 @@ femeRTImageFormatElementSize(uint32_t Format) {
     return 1;
   case 28: // A1B5G5R5_UNORM (packed into a single 2-byte word)
     return 2;
+  // (Roadmap F8b) Single-component depth/stencil formats, as
+  // `feme::vulkan::buildSubpassInputHeap` feeds them: a pure depth or
+  // pure stencil attachment is one of these, never a combined format (see
+  // `feme::graphics::DepthStencilAttachment`'s own comment).
+  case 31: // D16_UNORM
+    return 2;
+  case 32: // D32_FLOAT
+    return 4;
+  case 35: // S8_UINT
+    return 1;
   default:
     return 0;
   }
@@ -905,6 +939,22 @@ femeRTUnpackImageTexel(uint32_t Format, const unsigned char *Ptr) {
     __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
     return femeRTUnpackA1B5G5R5Unorm(Raw);
   }
+  case 31: { // D16_UNORM (roadmap F8b)
+    uint16_t Raw;
+    __builtin_memcpy(&Raw, Ptr, sizeof(Raw));
+    FemeRTv4f32 V = {(float)Raw / 65535.0f, 0.0f, 0.0f, 1.0f};
+    return V;
+  }
+  case 32: { // D32_FLOAT (roadmap F8b): the identity case, like R32_FLOAT.
+    float F;
+    __builtin_memcpy(&F, Ptr, sizeof(F));
+    FemeRTv4f32 V = {F, 0.0f, 0.0f, 1.0f};
+    return V;
+  }
+  case 35: { // S8_UINT (roadmap F8b)
+    FemeRTv4f32 V = {(float)*Ptr / 255.0f, 0.0f, 0.0f, 1.0f};
+    return V;
+  }
   default:
     return Zero;
   }
@@ -1049,6 +1099,13 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
 // an access `femeRTImageFormatElementSize`/the mip layout's own
 // `SizeInBytes` bound rejects) -- the same "out-of-range reads zero" rule
 // buffers use (see "Bounds checking").
+//
+// Roadmap F8b: a multisampled `Img` (`SampleCount > 1`) packs every sample
+// of one texel contiguously (`Layout->SampleStride == ElemSize`, see
+// Image.cpp's `computeSubresourceLayouts`), so stepping to the next texel
+// along a row has to skip `SampleCount` samples, not one -- this always
+// reads sample 0 of the texel at `(X, Y)`, since no caller yet threads an
+// explicit sample index through (see this file's own header comment).
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
                    int32_t Y, _Bool UseBorder, const float BorderColor[4]) {
@@ -1064,8 +1121,11 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
   if (ElemSize == 0)
     return Zero;
   const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
-  uint64_t Offset =
-      Layout->Offset + (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t Offset = Layout->Offset + (uint64_t)Y * Layout->RowPitch +
+                    (uint64_t)X * TexelStride;
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
@@ -1077,7 +1137,9 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
 // integer-channel image is only ever reached through `Load2D`/
 // `OpImageFetch` (see ImageCalls.h's `Load2DI32` comment), which -- like
 // its float counterpart -- addresses no sampler and therefore no address
-// mode, so there is no `ClampToBorder` case to honor here either.
+// mode, so there is no `ClampToBorder` case to honor here either. Shares
+// `femeRTFetchTexel2D`'s roadmap F8b multisample-stride fix (see that
+// function's own comment).
 __attribute__((always_inline)) static FemeRTv4i32
 femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
                       int32_t X, int32_t Y) {
@@ -1088,8 +1150,11 @@ femeRTFetchTexel2DI32(const FemeRTImageDescriptor *Img, uint32_t Level,
   if (ElemSize == 0)
     return Zero;
   const FemeRTImageSubresourceLayout *Layout = &Img->MipLayouts[Level];
-  uint64_t Offset =
-      Layout->Offset + (uint64_t)Y * Layout->RowPitch + (uint64_t)X * ElemSize;
+  uint64_t TexelStride = Layout->SampleStride != 0
+                             ? (uint64_t)Img->SampleCount * Layout->SampleStride
+                             : ElemSize;
+  uint64_t Offset = Layout->Offset + (uint64_t)Y * Layout->RowPitch +
+                    (uint64_t)X * TexelStride;
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
