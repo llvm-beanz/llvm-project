@@ -156,9 +156,20 @@ TEST_F(StageOpsTest, SubpassLoadCarriesAttachmentIndexAndComponent) {
   EXPECT_TRUE(CI->getType()->isFloatTy());
   ASSERT_EQ(getStageOpConstantOperand(*CI, 0), 2u);
   ASSERT_EQ(getStageOpConstantOperand(*CI, 1), 1u);
+  // Roadmap F8c: an absent `Sample` argument defaults to a constant 0, so
+  // single-sample callers that predate this operand see the same behavior
+  // as before.
+  ASSERT_EQ(getStageOpConstantOperand(*CI, 2), 0u);
   StageOpKind Kind;
   ASSERT_TRUE(isStageOpCall(*CI, &Kind));
   EXPECT_EQ(Kind, StageOpKind::SubpassLoad);
+}
+
+TEST_F(StageOpsTest, SubpassLoadCarriesExplicitSample) {
+  Value *Sample = ConstantInt::get(Type::getInt32Ty(Ctx), 3);
+  CallInst *CI = createStageSubpassLoad(B, /*AttachmentIndex=*/0,
+                                       /*Component=*/2, Sample);
+  ASSERT_EQ(getStageOpConstantOperand(*CI, 2), 3u);
 }
 
 TEST_F(StageOpsTest, NonStageOpCallIsRejected) {

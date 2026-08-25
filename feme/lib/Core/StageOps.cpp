@@ -232,11 +232,12 @@ CallInst *feme::createStageStreamCut(IRBuilderBase &B, uint32_t Stream) {
 
 CallInst *feme::createStageSubpassLoad(IRBuilderBase &B,
                                        uint32_t AttachmentIndex,
-                                       uint32_t Component) {
+                                       uint32_t Component, Value *Sample) {
   Value *IndexVal = ConstantInt::get(B.getInt32Ty(), AttachmentIndex);
   Value *ComponentVal = ConstantInt::get(B.getInt32Ty(), Component);
+  Value *SampleVal = Sample ? Sample : ConstantInt::get(B.getInt32Ty(), 0);
   return createCall(B, StageOpKind::SubpassLoad, B.getFloatTy(),
-                    {IndexVal, ComponentVal});
+                    {IndexVal, ComponentVal, SampleVal});
 }
 
 std::optional<uint64_t> feme::getStageOpConstantOperand(const CallInst &CI,

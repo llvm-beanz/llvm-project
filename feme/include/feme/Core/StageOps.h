@@ -110,19 +110,24 @@ enum class StageOpKind : uint8_t {
   /// -- terminates the current primitive strip on output stream \c stream
   /// without emitting a vertex.
   StreamCut,
-  /// `feme.stage.subpass.load(attachment_index, component)`: roadmap F8a's
-  /// dynamic-rendering-local-read consumption of a SPIR-V `subpassInput`
-  /// (`OpTypeImage` with `Dim::SubpassData`, read through `OpImageRead`'s
-  /// subpass-local form). Reads one scalar component of the
-  /// currently-bound color/depth/stencil render-target attachment mapped to
-  /// \c attachment_index at the invocation's own fragment location -- not a
-  /// descriptor-set image, and per-lane always `f32` -- like `InputLoad`,
-  /// it is marked overloaded (StageOps.cpp's table) purely so
-  /// `feme::cpu::SIMDizePass`'s widened `<W x f32>` form gets a distinct
-  /// symbol from the scalar declaration `feme::spirv::SubpassLoadPattern`
-  /// (SPIRVToLLVMPatterns.cpp) creates, not because a real shader ever
-  /// requests a different result type (see FragmentWrapper.cpp's
-  /// `lowerFragmentSubpassLoad`).
+  /// `feme.stage.subpass.load(attachment_index, component, sample)`:
+  /// roadmap F8a's dynamic-rendering-local-read consumption of a SPIR-V
+  /// `subpassInput`/`subpassInputMS` (`OpTypeImage` with
+  /// `Dim::SubpassData`, read through `OpImageRead`'s subpass-local form).
+  /// Reads one scalar component of the currently-bound color/depth/stencil
+  /// render-target attachment mapped to \c attachment_index at the
+  /// invocation's own fragment location -- not a descriptor-set image, and
+  /// per-lane always `f32` -- like `InputLoad`, it is marked overloaded
+  /// (StageOps.cpp's table) purely so `feme::cpu::SIMDizePass`'s widened
+  /// `<W x f32>` form gets a distinct symbol from the scalar declaration
+  /// `feme::spirv::SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) creates,
+  /// not because a real shader ever requests a different result type (see
+  /// FragmentWrapper.cpp's `lowerFragmentSubpassLoad`). \c sample (roadmap
+  /// F8c) selects which sample of a multisampled attachment to read,
+  /// always a constant `0` for a single-sample one -- GLSL's plain
+  /// `subpassInput`'s implicit form has no sample of its own to name, so
+  /// `SubpassLoadPattern` synthesizes that constant when a real
+  /// `OpImageRead` carries no `Sample` image operand at all.
   SubpassLoad,
   // Keep last: the number of stage op kinds, for range checks.
   NumStageOpKinds,
@@ -216,12 +221,16 @@ llvm::CallInst *createStageStreamEmit(llvm::IRBuilderBase &B,
 /// `feme.stage.stream.cut(stream)`.
 llvm::CallInst *createStageStreamCut(llvm::IRBuilderBase &B, uint32_t Stream);
 
-/// `feme.stage.subpass.load(attachment_index, component)`; both operands
-/// are `i32` compile-time constants (see `StageOpKind::SubpassLoad`'s
-/// comment). Always returns `f32`.
+/// `feme.stage.subpass.load(attachment_index, component, sample)`;
+/// \p AttachmentIndex/\p Component are `i32` compile-time constants (see
+/// `StageOpKind::SubpassLoad`'s comment). \p Sample defaults (when null)
+/// to a constant `i32 0`, so single-sample callers are unaffected; pass a
+/// real (constant or divergent) `i32` value to read another sample of a
+/// multisampled attachment (roadmap F8c). Always returns `f32`.
 llvm::CallInst *createStageSubpassLoad(llvm::IRBuilderBase &B,
                                        uint32_t AttachmentIndex,
-                                       uint32_t Component);
+                                       uint32_t Component,
+                                       llvm::Value *Sample = nullptr);
 ///@}
 
 /// Reads back \p CI's operand \p Idx as a constant `i32`/`i8`/`i1`, or
