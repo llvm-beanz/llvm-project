@@ -1063,6 +1063,53 @@ public:
   }
 };
 
+/// Converts `spirv.AccessChain` selecting a single lane of a builtin
+/// `Input` vector variable (e.g. `gl_GlobalInvocationID.x`) -- the shape
+/// glslang emits when only one component of such a variable is ever read,
+/// distinct from the whole-vector load BuiltInAddressOfPattern/
+/// LoadValuePattern already handle. That base operand converts to the
+/// vector value itself rather than to a real pointer (see
+/// BuiltInAddressOfPattern), so MLIR's own `AccessChainPattern` -- which
+/// assumes any base operand converts to `!llvm.ptr` -- cannot handle it: it
+/// would build a `getelementptr` treating that raw vector as if it were a
+/// pointer instead. This rewrites the access chain directly to an
+/// `llvm.extractelement`, mirroring how MatrixCompositeExtractPattern
+/// selects one lane of a value-modeled matrix column rather than
+/// navigating real memory. The `spirv.Load` that always follows such an
+/// access chain then collapses to the identity via LoadValuePattern, the
+/// same as a direct load of the whole builtin variable already does.
+class BuiltInAccessChainPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::AccessChainOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::AccessChainOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::AccessChainOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto VectorTy =
+        mlir::dyn_cast<mlir::VectorType>(Adaptor.getBasePtr().getType());
+    if (!VectorTy)
+      return Rewriter.notifyMatchFailure(
+          Op, "base is not a value-modeled builtin vector");
+
+    mlir::ValueRange Indices = Adaptor.getIndices();
+    if (Indices.size() != 1)
+      return Rewriter.notifyMatchFailure(Op, "expected a single lane index");
+
+    mlir::Type ResultType =
+        getTypeConverter()->convertType(Op.getComponentPtr().getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    if (ResultType != VectorTy.getElementType())
+      return Rewriter.notifyMatchFailure(Op, "not selecting a scalar lane");
+
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::ExtractElementOp>(
+        Op, ResultType, Adaptor.getBasePtr(), Indices[0]);
+    return mlir::success();
+  }
+};
+
 /// Replaces `spirv.mlir.addressof` of a resource variable with the
 /// `llvm.spv.resource.handlefrombinding` call producing its handle. As for
 /// builtin variables, there is no LLVM global to address: LLVM's SPIRV
@@ -3087,13 +3134,14 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const FastMathDefaultMap &FastMathDefaults) {
   Patterns.add<
       ArrayConstantPattern, AssumeTrueConversionPattern,
-      BuiltInAddressOfPattern, BuiltInGlobalVariablePattern,
-      BlockAccessChainPattern, CompositeConstructPattern,
-      DemoteToHelperInvocationConversionPattern, DotConversionPattern,
-      ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
-      ImageFetchPattern, ImageFetchLodPattern, ImageSampleExplicitLodPattern,
-      ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
-      ImageWritePattern, LoadValuePattern, MatrixCompositeExtractPattern,
+      BuiltInAddressOfPattern, BuiltInAccessChainPattern,
+      BuiltInGlobalVariablePattern, BlockAccessChainPattern,
+      CompositeConstructPattern, DemoteToHelperInvocationConversionPattern,
+      DotConversionPattern, ExecutionModePattern, ExecutionModeIdPattern,
+      ExpectConversionPattern, ImageFetchPattern, ImageFetchLodPattern,
+      ImageSampleExplicitLodPattern, ImageSampleImplicitLodPattern,
+      ImageQuerySizePattern, ImageReadPattern, ImageWritePattern,
+      LoadValuePattern, MatrixCompositeExtractPattern,
       MatrixCompositeInsertPattern, PushConstantGlobalVariablePattern,
       RotateConversionPattern, SampledImagePattern, SDotConversionPattern,
       UDotConversionPattern, SUDotConversionPattern,

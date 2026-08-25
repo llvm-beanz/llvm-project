@@ -32,6 +32,34 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // -----
 
+// An `spirv.AccessChain` selecting a single lane of a builtin `Input`
+// vector (e.g. `gl_GlobalInvocationID.x`) -- the shape glslang emits when
+// only one component is ever read -- converts directly to an
+// `llvm.extractelement` on the intrinsic-built vector, rather than falling
+// through to MLIR's own `spirv.AccessChain` pattern, which would otherwise
+// try to GEP into that vector value as if it were a real pointer.
+
+// CHECK-LABEL: llvm.func @read_global_invocation_id_x
+// CHECK: %[[XI:.*]] = llvm.call_intrinsic "llvm.spv.thread.id"
+// CHECK: %[[XVEC:.*]] = llvm.insertelement %[[XI]]
+// CHECK: llvm.insertelement %{{.*}}, %[[XVEC]]
+// CHECK: %[[FULLVEC:.*]] = llvm.insertelement %{{.*}}, %{{.*}}
+// CHECK: %[[LANEIDX:.*]] = llvm.mlir.constant(0 : i32) : i32
+// CHECK: %[[LANE:.*]] = llvm.extractelement %[[FULLVEC]][%[[LANEIDX]] : i32] : vector<3xi32>
+// CHECK: llvm.return %[[LANE]]
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @gid built_in("GlobalInvocationId") : !spirv.ptr<vector<3xi32>, Input>
+  spirv.func @read_global_invocation_id_x() -> i32 "None" {
+    %0 = spirv.mlir.addressof @gid : !spirv.ptr<vector<3xi32>, Input>
+    %c0 = spirv.Constant 0 : i32
+    %1 = spirv.AccessChain %0[%c0] : !spirv.ptr<vector<3xi32>, Input>, i32 -> !spirv.ptr<i32, Input>
+    %2 = spirv.Load "Input" %1 : i32
+    spirv.ReturnValue %2 : i32
+  }
+}
+
+// -----
+
 // A scalar builtin whose intrinsic takes no operand at all.
 
 // CHECK-LABEL: llvm.func @read_local_invocation_index
