@@ -31047,3 +31047,144 @@ cases in `gl-ops.mlir`), `check-mlir-target-spirv` (58 tests, new
 `gl-ops.mlir`/`decorations.mlir`) and `check-mlir-conversion` (411 tests,
 new `FrexpStruct`/`ModfStruct` conversion cases in
 `gl-ops-to-llvm.mlir`) suites, all 100% passing.
+
+# Agent thoughts: roadmap F4 (VK_KHR_shader_expect_assume/shaderExpectAssume)
+
+## Framing the task
+
+The row's own text calls this one of the smallest in the whole breakdown,
+a good first task -- and unlike F2/F3 (which each first had to audit
+whether their own family/predecessor existed at all in MLIR's SPIR-V
+dialect), `spirv.KHR.AssumeTrue`/`spirv.KHR.Expect` already exist there
+(`SPIRVMiscOps.td`'s `SPIRV_KHRAssumeTrueOp`/`SPIRV_KHRExpectOp`), so
+there was no dialect-level prerequisite to size or split off first. The
+whole row really is just "add the two `spirv`->`llvm` conversion
+patterns, wire the feature bit, verify."
+
+## The two conversion patterns
+
+`spirv.KHR.AssumeTrue`'s `condition` operand is a scalar `SPIRV_Bool`
+only (checked the op's own tablegen `arguments` line before assuming
+otherwise), matching `mlir::LLVM::AssumeOp`'s own `I1:$cond` exactly --
+`AssumeTrueConversionPattern` is a one-line `replaceOpWithNewOp`, no
+expansion needed, mirroring `DemoteToHelperInvocationConversionPattern`'s
+own shape for a no-result op.
+
+`spirv.KHR.Expect` is the more interesting half: its `value`/
+`expectedValue` operands may be a *vector* of integer/bool, not just a
+scalar (`SPIRV_ScalarOrVectorOf<...>`), but I confirmed LLVM's own
+`LLVM_ExpectOp` tablegen def only accepts `AnySignlessInteger` (a scalar
+constraint, no vector variant, unlike e.g. `LLVM_FAddOp`) -- consistent
+with `llvm.expect`'s LangRef documentation ("You can use `llvm.expect` on
+any integer bit width") never mentioning a vector form. So a vector
+operand needs decomposing into one `llvm.expect` call per lane,
+reassembled into the result vector -- mirrored `DotConversionPattern`'s
+own per-lane `ExtractElementOp`/`ConstantOp` shape for the loop, and
+`CompositeConstructPattern`'s `PoisonOp`-then-`InsertElementOp` shape
+(rather than `UndefOp`, to match this file's existing convention) for
+building the result.
+
+One process note: my first attempt at running `clang-format` over the
+whole modified file reformatted ~150 unrelated lines elsewhere in it (the
+installed `clang-format` 18.1.3 apparently disagrees in some details with
+whatever version originally formatted this file). Reverted and instead
+used `clang-format -lines=<range>` scoped to exactly the lines I added,
+which kept the diff minimal -- worth remembering for any future row
+touching this same file.
+
+## Verification
+
+FileCheck lit tests first (`spirv-to-llvm-expect-assume.mlir`): the
+scalar `assume`/`expect` forms, plus a vector-of-`i32` `expect` case
+confirming the per-lane expansion's exact IR shape. Then, following F16's
+own "don't just parse it back, actually run it through the tool" bar: a
+hand-assembled real SPIR-V binary (`spirv-as`/`spirv-val` against
+`--target-env vulkan1.3`) deserialized through `mlir-translate
+--deserialize-spirv` (not just hand-written `spirv` dialect text) and fed
+through `feme-opt --feme-convert-spirv-to-llvm`, confirming the real
+importer's output converts identically to the hand-written test's.
+
+Then one level further, mirroring F15a's `spirv-backend-rounding-mode-
+rtz.mlir` precedent of round-tripping through LLVM's *real*, in-tree
+SPIRV backend rather than stopping at MLIR's own conversion: grepped
+`SPIRVPrepareFunctions.cpp` and found the backend already has a
+`lowerExpectAssume` that turns `llvm.assume`/`llvm.expect` straight back
+into `OpAssumeTrueKHR`/`OpExpectKHR`, gated behind
+`STI.canUseExtension(SPV_KHR_expect_assume)`. My first version of
+`spirv-backend-expect-assume.mlir` silently lost both intrinsics with no
+diagnostic at all -- confusing, since every other backend round-trip test
+in this file needs no extra flag. Root cause: `SPIRVSubtarget`'s
+`-spirv-ext` allow-list is empty by default (`AvailableExtensions` is
+populated only from that global `cl::opt`, not implied by target
+triple/version), so `canUseExtension` was always false and
+`lowerExpectAssume` was never even called -- the backend's own comment
+confirms this is deliberate ("ignore the intrinsic ... removed later by
+LLVM"). Fixed by passing `-spirv-ext=+SPV_KHR_expect_assume` to
+`feme-translate --llvm-backend` in the test's own `RUN` line, which is
+itself worth documenting since it is the first capability this backend
+round-trip family has needed an explicit extension flag for.
+
+## Feature bits
+
+Followed F1/F2's own precedent exactly: `shaderExpectAssume` flipped in
+both the aggregate `VkPhysicalDeviceVulkan14Features` case and a new
+dedicated `VkPhysicalDeviceShaderExpectAssumeFeatures` struct case
+(`EntryPoints.cpp`), `VK_KHR_shader_expect_assume` added to
+`PhysicalDeviceInfo.cpp`'s `getSupportedDeviceExtensions`. This broke the
+same two existing unit tests F1/F2 each had to update (the hard-coded
+aggregate-1.4-features test and the hard-coded advertised-extension-count
+test) -- updated both and added a new dedicated-struct test mirroring
+F2's own `ShaderSubgroupRotateIsAdvertisedThroughItsOwnDedicatedFeatureStruct`.
+Updated the `.txt` inputs (`AdvertisedPromotedExtensions.txt`/
+`AdvertisedPromotedFeatures.txt`, removed from `PlannedExtensions.txt`)
+and regenerated `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`
+by hand (flip + bump the advertised/planned counts + note lists), the same
+"regenerate by hand, following the exact diff shape F1's own commit made"
+approach used since no automated regeneration wrapper exists for the real
+(non-fixture) inputs. Noted, but did not fix (out of this row's own
+scope), a pre-existing inconsistency this reminded me of:
+`VK_KHR_shader_subgroup_rotate`'s own `VulkanExtensionInventory.md` row is
+still "Planned" rather than "Advertised" even though F2 is done and its
+feature-inventory row already says "yes" -- someone's F2 doc update
+touched the feature inventory but missed the extension inventory's own
+per-extension row. Left as-is rather than silently fixing something
+outside F4's own diff.
+
+## CTS run
+
+Targeted `dEQP-VK.glsl.shader_expect_assume.*` (141 cases -- the
+dedicated CTS module for this extension). Result: 0 passed, 69 failed, 72
+not supported (the 72 are `int8`/`int16`/`int64` data-class cases gated
+on storage features this ICD does not advertise, unrelated to this row).
+All 69 failures split cleanly into two *different* pre-existing gaps by
+shader stage:
+
+- 23 `compute`-stage cases all fail identically at
+  `vkCreateComputePipelines` on `'llvm.getelementptr' op operand #0 must
+  be LLVM pointer type ..., but got 'vector<3xi32>'`. Reproduced the
+  identical failure on `dEQP-VK.glsl.builtin.function.integer.
+  bitcount.int_highp_compute` -- an entirely unrelated, long-implemented
+  builtin-function test that needs no `assume`/`expect` at all -- proving
+  this is a pre-existing gap in this ICD's storage-buffer access-chain
+  lowering for the `RuntimeArray-of-vecN` buffer shape CTS's shared
+  `ShaderExecutor` compute harness always uses, not anything this row's
+  patterns touch.
+- 46 `vertex`/`fragment`-stage cases all fail at
+  `vkCreateGraphicsPipelines` with a bare `VK_ERROR_INITIALIZATION_
+  FAILED` and no stderr diagnostic by default. Re-ran one case with
+  `FEME_VULKAN_LOG_CREATION_ERRORS=1` (found by grepping `Diagnostics.cpp`
+  for an env-var gate, rather than assuming there was none) and got the
+  real reason: "color attachment 0 names a format this driver cannot
+  render into" -- again a pre-existing, unrelated graphics-pipeline gap.
+
+Same shape as every prior F-row's own CTS section: previously-
+`NotSupported` cases newly reaching (and failing at) pre-existing,
+unrelated gaps is not a regression this row causes. Neither gap was
+folded into this row -- both are comparably-sized efforts of their own
+(a real `ArrayedBlockAccessChainPattern` vector-element-indexing fix; an
+audit of this ICD's supported render-target formats against what
+`ShaderExecutor`'s fragment harness requests) -- documented as a new
+"Roadmap F4: measured impact" section in `VulkanCTSReport.md`.
+
+`ninja check-feme`: 1709 discovered, 1708 passed, 1 unsupported
+(pre-existing, unrelated) after every commit in this row.
