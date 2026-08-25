@@ -4750,3 +4750,66 @@ case, `HostImageCopyTest`'s six new cases, `EntryPointsTest`'s new
 `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` case, and
 `PhysicalDeviceInfoTest`'s two new dedicated feature/properties cases),
 no regressions.
+
+## Roadmap F12: measured impact (`VK_KHR_push_descriptor`)
+
+`dEQP-VK.pipeline.monolithic.push_descriptor.*` (`--deqp-case`, same
+reproduction recipe as F9/F10/F11's own sections above): 76 cases
+discovered.
+
+```
+Passed:        0/76 (0.0%)
+Failed:        76/76 (100.0%)
+Not supported: 0/76 (0.0%)
+```
+
+Zero `Not supported`, confirming the extension gate itself is genuinely
+passed (`VK_KHR_push_descriptor` advertised, every `checkSupport` in this
+group's own test source accepted it) -- but every one of the 76 cases still
+fails, all before this row's own new commands ever run: every failure is at
+`vkCreateComputePipelines`/pipeline construction, not at
+`vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate` themselves.
+None is a crash, hang, or memory corruption; every one is a clean
+`VkResult`/MLIR diagnostic propagated to `tcu::TestStatus::fail`, matching
+this codebase's "an unimplemented capability fails cleanly" convention.
+
+| Reason | Count | Cause |
+|---|---|---|
+| `vk.createComputePipelines(...): VK_ERROR_INITIALIZATION_FAILED` (`vkRefUtil.cpp:46`), no diagnostic printed | 33 | The same pre-existing, orthogonal gap "Roadmap E6: measured impact" already root-caused (a temporary debug print at `Pipeline.cpp`'s `compileComputePipeline` error path, that section's own methodology) for `secondary_push_constants_2`'s sibling `writeonly buffer Output { vec4 color; }`: a storage/uniform buffer block with one or two non-array `vec4` fields, not the `rtarray`/fixed-array shape this compiler's resource-handle normalization actually supports. Every `compute.binding*` buffer/image/sampler/texel-buffer case in this group declares its `Output`/`Input` block exactly that way, unrelated to push descriptors themselves -- all 33 are `compute.*` cases |
+| `error: failed to legalize operation 'spirv.AccessChain' that was explicitly marked illegal` | 4 | A newly-found, unrelated gap (split off as roadmap F12a below), all 4 the `compute.incremental_updates*` cases: modeled by this report's own `PushDescriptorSetDispatchTest.WritesToOneBindingAccumulateAcrossPushes` unit test, minus the exact SPIR-V shape that trips this. The shader dynamically indexes a `layout(std140) uniform Input { uint data[16]; }` block by `gl_GlobalInvocationID.x`; the equivalent `std430 buffer` (storage buffer) array indexes dynamically without issue everywhere else in this report, so `std140`'s own wider (16-byte, vs. `std430`'s 4-byte) per-scalar-element array stride is the one shape difference this SPIR-V->LLVM lowering does not yet handle |
+| `error: feme-cpu-simdize: ... divergent vector value ... (roadmap milestone 7 deviation)` | 39 | The same pre-existing SIMDize decomposition gap F5-F8's own sections already document repeatedly (e.g. "Roadmap F8: measured impact") -- every one of this group's `graphics.*` cases (all 39 of them) drives a per-quad fragment color through a divergent (per-invocation) value this compiler cannot yet decompose outside the small set of patterns it already handles |
+
+**This row's own new mechanism was verified end to end a different way**,
+since every CTS case in this group is blocked by one of the three
+pre-existing, orthogonal gaps above before ever reaching it: `CommandBuffer.cpp`'s
+`unittests/Vulkan/CommandBufferTest.cpp` gained a dedicated
+`PushDescriptorSetDispatchTest` fixture -- reusing `kStorageBufferCopyShader`'s
+own already-working `rtarray`-shaped storage buffers rather than a
+CTS-shaped single-field block -- with five new cases proving `vkCmdPushDescriptorSet`
+reads/writes through no `VkDescriptorSet` object at all, that a second push to
+the same slot only rewriting one binding leaves the other's earlier push in
+place (`WritesToOneBindingAccumulateAcrossPushes`, modeled on
+`PushDescriptorIncrementalUpdatesComputeTest`'s own scenario, since that exact
+CTS case is one of the four blocked by F12a above), that
+`vkCmdPushDescriptorSetWithTemplate` and `vkCmdPushDescriptorSet2` produce the
+same result, and that `vkBeginCommandBuffer` drops every push descriptor set
+from the previous recording.
+
+A targeted re-run of `dEQP-VK.api.command_buffers.secondary_push_descriptor_set_2`/
+`secondary_push_descriptor_set_with_template` -- `NotSupported ("VK_KHR_push_descriptor
+is not supported")` in "Roadmap E6: measured impact" above -- now attempts
+both for real and hits the same non-array-block gap (`VK_ERROR_INITIALIZATION_FAILED`
+at `vkCreateComputePipelines`) as `secondary_push_constants_2` already does,
+not a new one: `VK_KHR_push_descriptor` is genuinely advertised and consumed,
+even though this particular pre-existing shader-compilation gap still blocks
+a `Pass`.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`, this
+session's existing `./build`): 1780 discovered, 1779 passed, 1 unsupported
+(pre-existing, unrelated) -- 7 more passing than F11's own 1772-passed
+baseline (`CommandBufferTest`'s five new `PushDescriptorSetDispatchTest`
+cases, `DescriptorTest`'s template-type-acceptance/rejection cases, and
+`PhysicalDeviceInfoTest`'s new dedicated `VkPhysicalDevicePushDescriptorProperties`
+case, netting one fewer than the eight new test names since one, `Descriptor
+Test.PushDescriptorTemplateTypeIsRejected`, was renamed/repurposed to `...
+IsAccepted` rather than added), no regressions.
