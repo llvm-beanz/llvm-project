@@ -465,6 +465,15 @@ Error packDepthClear(ResourceFormat Format, double Depth,
     memcpy(Texel.data(), &Word, sizeof(Word));
     return Error::success();
   }
+  case ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    // Unlike `D24_UNORM_S8_UINT`, depth and stencil are two entirely
+    // separate 4-byte words (`getFormatInfo`'s own comment), not bits of
+    // one shared word, so this is a plain write of the first word rather
+    // than a read-modify-write.
+    float F = static_cast<float>(Clamped);
+    memcpy(Texel.data(), &F, sizeof(F));
+    return Error::success();
+  }
   default:
     return createStringError(inconvertibleErrorCode(),
                              "depth clear is not yet supported for this "
@@ -493,6 +502,12 @@ Error unpackDepth(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Depth = (Word & 0x00FFFFFFu) / 16777215.0;
     return Error::success();
   }
+  case ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    float F;
+    memcpy(&F, Texel.data(), sizeof(F));
+    Depth = F;
+    return Error::success();
+  }
   default:
     return createStringError(inconvertibleErrorCode(),
                              "depth unpack is not yet supported for this "
@@ -518,6 +533,16 @@ Error packStencilClear(ResourceFormat Format, uint32_t Stencil,
     memcpy(Texel.data(), &Word, sizeof(Word));
     return Error::success();
   }
+  case ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    // Stencil lives in the low byte of the second 4-byte word
+    // (`getFormatInfo`'s own comment); a read-modify-write of that word
+    // preserves its own upper, otherwise-unused bytes.
+    uint32_t Word;
+    memcpy(&Word, Texel.data() + 4, sizeof(Word));
+    Word = (Word & 0xFFFFFF00u) | static_cast<uint32_t>(S);
+    memcpy(Texel.data() + 4, &Word, sizeof(Word));
+    return Error::success();
+  }
   default:
     return createStringError(inconvertibleErrorCode(),
                              "stencil clear is not yet supported for this "
@@ -537,11 +562,163 @@ Error unpackStencil(ResourceFormat Format, ArrayRef<uint8_t> Texel,
     Stencil = Word >> 24;
     return Error::success();
   }
+  case ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    uint32_t Word;
+    memcpy(&Word, Texel.data() + 4, sizeof(Word));
+    Stencil = Word & 0xFFu;
+    return Error::success();
+  }
   default:
     return createStringError(inconvertibleErrorCode(),
                              "stencil unpack is not yet supported for this "
                              "format");
   }
+}
+
+namespace {
+
+/// Copies one texel's depth aspect between \p Buffer (\p Format's own
+/// per-texel depth-aspect encoding, `getDepthAspectBufferSize`) and
+/// \p ImageTexel (a full, interleaved combined depth/stencil texel), in
+/// whichever direction \p ToImage selects, as a read-modify-write that
+/// leaves the texel's stencil bits untouched on a buffer-to-image copy.
+/// Shared per-texel body of `copyDepthAspectRegion`'s loop below.
+Error copyOneDepthAspectTexel(ResourceFormat Format, bool ToImage,
+                              MutableArrayRef<uint8_t> Buffer,
+                              MutableArrayRef<uint8_t> ImageTexel) {
+  switch (Format) {
+  case ResourceFormat::D24_UNORM_S8_UINT: {
+    // Both the buffer's depth-aspect word and the image's combined texel
+    // use the same 32-bit-word layout (D24 in the low 24 bits, Vulkan
+    // spec "Buffer and Image Addressing"); only the stencil aspect's high
+    // byte must be preserved on a buffer-to-image write.
+    uint32_t BufferWord;
+    memcpy(&BufferWord, Buffer.data(), sizeof(BufferWord));
+    if (ToImage) {
+      uint32_t ImageWord;
+      memcpy(&ImageWord, ImageTexel.data(), sizeof(ImageWord));
+      ImageWord = (ImageWord & 0xFF000000u) | (BufferWord & 0x00FFFFFFu);
+      memcpy(ImageTexel.data(), &ImageWord, sizeof(ImageWord));
+    } else {
+      memcpy(Buffer.data(), ImageTexel.data(), sizeof(uint32_t));
+    }
+    return Error::success();
+  }
+  case ResourceFormat::D32_FLOAT_S8X24_UINT:
+    // The depth aspect is its own standalone 4-byte float word (the first
+    // of the format's two 4-byte words, `getFormatInfo`'s own comment),
+    // never interleaved with stencil at all, so this is a plain copy.
+    if (ToImage)
+      memcpy(ImageTexel.data(), Buffer.data(), 4);
+    else
+      memcpy(Buffer.data(), ImageTexel.data(), 4);
+    return Error::success();
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "depth-aspect region copy is not yet "
+                             "supported for this format");
+  }
+}
+
+/// The stencil-aspect peer of `copyOneDepthAspectTexel`.
+Error copyOneStencilAspectTexel(ResourceFormat Format, bool ToImage,
+                                MutableArrayRef<uint8_t> Buffer,
+                                MutableArrayRef<uint8_t> ImageTexel) {
+  switch (Format) {
+  case ResourceFormat::D24_UNORM_S8_UINT: {
+    uint32_t ImageWord;
+    memcpy(&ImageWord, ImageTexel.data(), sizeof(ImageWord));
+    if (ToImage) {
+      ImageWord =
+          (ImageWord & 0x00FFFFFFu) | (static_cast<uint32_t>(Buffer[0]) << 24);
+      memcpy(ImageTexel.data(), &ImageWord, sizeof(ImageWord));
+    } else {
+      Buffer[0] = static_cast<uint8_t>(ImageWord >> 24);
+    }
+    return Error::success();
+  }
+  case ResourceFormat::D32_FLOAT_S8X24_UINT: {
+    uint32_t Word1;
+    memcpy(&Word1, ImageTexel.data() + 4, sizeof(Word1));
+    if (ToImage) {
+      Word1 = (Word1 & 0xFFFFFF00u) | static_cast<uint32_t>(Buffer[0]);
+      memcpy(ImageTexel.data() + 4, &Word1, sizeof(Word1));
+    } else {
+      Buffer[0] = static_cast<uint8_t>(Word1 & 0xFFu);
+    }
+    return Error::success();
+  }
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "stencil-aspect region copy is not yet "
+                             "supported for this format");
+  }
+}
+
+} // namespace
+
+Expected<uint32_t> getDepthAspectBufferSize(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::D24_UNORM_S8_UINT:
+  case ResourceFormat::D32_FLOAT_S8X24_UINT:
+    return 4;
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "format has no separate depth-aspect buffer "
+                             "encoding (only a combined depth/stencil "
+                             "format's single-aspect copy needs one)");
+  }
+}
+
+Expected<uint32_t> getStencilAspectBufferSize(ResourceFormat Format) {
+  switch (Format) {
+  case ResourceFormat::D24_UNORM_S8_UINT:
+  case ResourceFormat::D32_FLOAT_S8X24_UINT:
+    return 1;
+  default:
+    return createStringError(inconvertibleErrorCode(),
+                             "format has no separate stencil-aspect buffer "
+                             "encoding (only a combined depth/stencil "
+                             "format's single-aspect copy needs one)");
+  }
+}
+
+Error copyDepthAspectRegion(ResourceFormat Format, bool ToImage,
+                            MutableArrayRef<uint8_t> Buffer,
+                            MutableArrayRef<uint8_t> Image,
+                            uint32_t TexelCount) {
+  Expected<uint32_t> BufferElemSize = getDepthAspectBufferSize(Format);
+  if (!BufferElemSize)
+    return BufferElemSize.takeError();
+  Expected<uint32_t> ImageElemSize = getFixtureFormatElementSize(Format);
+  if (!ImageElemSize)
+    return ImageElemSize.takeError();
+  for (uint32_t I = 0; I != TexelCount; ++I) {
+    if (Error E = copyOneDepthAspectTexel(
+            Format, ToImage, Buffer.slice(I * *BufferElemSize, *BufferElemSize),
+            Image.slice(I * *ImageElemSize, *ImageElemSize)))
+      return E;
+  }
+  return Error::success();
+}
+
+Error copyStencilAspectRegion(ResourceFormat Format, bool ToImage,
+                              MutableArrayRef<uint8_t> Buffer,
+                              MutableArrayRef<uint8_t> Image,
+                              uint32_t TexelCount) {
+  Expected<uint32_t> BufferElemSize = getStencilAspectBufferSize(Format);
+  if (!BufferElemSize)
+    return BufferElemSize.takeError();
+  Expected<uint32_t> ImageElemSize = getFixtureFormatElementSize(Format);
+  if (!ImageElemSize)
+    return ImageElemSize.takeError();
+  for (uint32_t I = 0; I != TexelCount; ++I) {
+    if (Error E = copyOneStencilAspectTexel(
+            Format, ToImage, Buffer.slice(I * *BufferElemSize, *BufferElemSize),
+            Image.slice(I * *ImageElemSize, *ImageElemSize)))
+      return E;
+  }
+  return Error::success();
 }
 
 namespace {

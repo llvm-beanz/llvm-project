@@ -21,6 +21,7 @@
 
 #include <array>
 #include <cstring>
+#include <vector>
 
 using namespace feme;
 using namespace feme::graphics;
@@ -321,6 +322,137 @@ TEST(ImageFixtureTest, PackStencilClearStillSupportsPureStencilFormat) {
       unpackStencil(cpu::ResourceFormat::S8_UINT, Texel, Stencil),
       Succeeded());
   EXPECT_EQ(Stencil, 200u);
+}
+
+// Roadmap F11a: `D32_FLOAT_S8X24_UINT` never had its own case in
+// `packDepthClear`/`unpackDepth`/`packStencilClear`/`unpackStencil` -- only
+// `D24_UNORM_S8_UINT` did -- even for the existing
+// `vkCmdClearDepthStencilImage`. Unlike `D24_UNORM_S8_UINT`'s single
+// shared 32-bit word, this format's depth and stencil are two entirely
+// separate 4-byte words (`getFormatInfo`'s own comment), so a depth pack
+// is a plain write of the first word, not a read-modify-write.
+TEST(ImageFixtureTest, PacksDepthAndStencilForD32FloatS8X24Uint) {
+  std::array<uint8_t, 8> Texel{0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA};
+  ASSERT_THAT_ERROR(
+      packDepthClear(cpu::ResourceFormat::D32_FLOAT_S8X24_UINT, 0.5, Texel),
+      Succeeded());
+  float DepthWord;
+  memcpy(&DepthWord, Texel.data(), sizeof(DepthWord));
+  EXPECT_FLOAT_EQ(DepthWord, 0.5f);
+  // The second word (stencil) must be unaffected by a depth-only pack.
+  EXPECT_EQ(Texel[4], 0xAA);
+  EXPECT_EQ(Texel[7], 0xAA);
+
+  ASSERT_THAT_ERROR(
+      packStencilClear(cpu::ResourceFormat::D32_FLOAT_S8X24_UINT, 0x5C, Texel),
+      Succeeded());
+  EXPECT_EQ(Texel[4], 0x5C);
+  // The upper 3 bytes of the second word are untouched by the stencil pack.
+  EXPECT_EQ(Texel[5], 0xAA);
+  EXPECT_EQ(Texel[6], 0xAA);
+  EXPECT_EQ(Texel[7], 0xAA);
+
+  double Depth = -1.0;
+  ASSERT_THAT_ERROR(
+      unpackDepth(cpu::ResourceFormat::D32_FLOAT_S8X24_UINT, Texel, Depth),
+      Succeeded());
+  EXPECT_NEAR(Depth, 0.5, 1e-6);
+
+  uint32_t Stencil = 0;
+  ASSERT_THAT_ERROR(
+      unpackStencil(cpu::ResourceFormat::D32_FLOAT_S8X24_UINT, Texel, Stencil),
+      Succeeded());
+  EXPECT_EQ(Stencil, 0x5Cu);
+}
+
+// Roadmap F11a: `copyDepthAspectRegion`/`copyStencilAspectRegion` generalize
+// `packDepthClear`/`packStencilClear`'s single repeated clear value to an
+// arbitrary per-texel buffer region, as `copyBufferImageRegion`
+// (ImageOps.cpp) needs for a single-aspect `VkBufferImageCopy` of a
+// combined depth/stencil image.
+TEST(ImageFixtureTest, CopiesDepthAspectRegionPreservingStencilForD24) {
+  // Two texels, each the combined format's own 4-byte word; stencil bits
+  // (high byte) pre-seeded to a recognizable, distinct value per texel.
+  std::array<uint8_t, 8> Image{0, 0, 0, 0x11, 0, 0, 0, 0x22};
+  std::array<uint8_t, 8> BufferToImage{0x01, 0x02, 0x03, 0xFF,
+                                       0x04, 0x05, 0x06, 0xFF};
+  ASSERT_THAT_ERROR(
+      copyDepthAspectRegion(cpu::ResourceFormat::D24_UNORM_S8_UINT,
+                            /*ToImage=*/true, BufferToImage, Image,
+                            /*TexelCount=*/2),
+      Succeeded());
+  EXPECT_EQ(Image[0], 0x01);
+  EXPECT_EQ(Image[1], 0x02);
+  EXPECT_EQ(Image[2], 0x03);
+  EXPECT_EQ(Image[3], 0x11); // Stencil untouched.
+  EXPECT_EQ(Image[4], 0x04);
+  EXPECT_EQ(Image[5], 0x05);
+  EXPECT_EQ(Image[6], 0x06);
+  EXPECT_EQ(Image[7], 0x22); // Stencil untouched.
+
+  std::array<uint8_t, 8> ImageToBuffer{};
+  ASSERT_THAT_ERROR(
+      copyDepthAspectRegion(cpu::ResourceFormat::D24_UNORM_S8_UINT,
+                            /*ToImage=*/false, ImageToBuffer, Image,
+                            /*TexelCount=*/2),
+      Succeeded());
+  EXPECT_EQ(ImageToBuffer[0], 0x01);
+  EXPECT_EQ(ImageToBuffer[1], 0x02);
+  EXPECT_EQ(ImageToBuffer[2], 0x03);
+  EXPECT_EQ(ImageToBuffer[4], 0x04);
+  EXPECT_EQ(ImageToBuffer[5], 0x05);
+  EXPECT_EQ(ImageToBuffer[6], 0x06);
+}
+
+TEST(ImageFixtureTest, CopiesStencilAspectRegionPreservingDepthForD24) {
+  std::array<uint8_t, 8> Image{0x01, 0x02, 0x03, 0, 0x04, 0x05, 0x06, 0};
+  std::array<uint8_t, 2> BufferToImage{0x7B, 0x2A};
+  ASSERT_THAT_ERROR(
+      copyStencilAspectRegion(cpu::ResourceFormat::D24_UNORM_S8_UINT,
+                              /*ToImage=*/true, BufferToImage, Image,
+                              /*TexelCount=*/2),
+      Succeeded());
+  EXPECT_EQ(Image[0], 0x01); // Depth untouched.
+  EXPECT_EQ(Image[1], 0x02);
+  EXPECT_EQ(Image[2], 0x03);
+  EXPECT_EQ(Image[3], 0x7B);
+  EXPECT_EQ(Image[4], 0x04);
+  EXPECT_EQ(Image[5], 0x05);
+  EXPECT_EQ(Image[6], 0x06);
+  EXPECT_EQ(Image[7], 0x2A);
+
+  std::array<uint8_t, 2> ImageToBuffer{};
+  ASSERT_THAT_ERROR(
+      copyStencilAspectRegion(cpu::ResourceFormat::D24_UNORM_S8_UINT,
+                              /*ToImage=*/false, ImageToBuffer, Image,
+                              /*TexelCount=*/2),
+      Succeeded());
+  EXPECT_EQ(ImageToBuffer[0], 0x7B);
+  EXPECT_EQ(ImageToBuffer[1], 0x2A);
+}
+
+TEST(ImageFixtureTest, CopiesDepthAspectRegionForD32FloatS8X24Uint) {
+  // Two texels, each the combined format's own 8-byte pair of words;
+  // stencil's low byte (second word) pre-seeded distinctly per texel.
+  std::array<uint8_t, 16> Image{};
+  Image[4] = 0x11;
+  Image[12] = 0x22;
+  std::vector<float> DepthValues = {1.5f, -2.25f};
+  std::array<uint8_t, 8> Buffer{};
+  memcpy(Buffer.data(), DepthValues.data(), Buffer.size());
+
+  ASSERT_THAT_ERROR(
+      copyDepthAspectRegion(cpu::ResourceFormat::D32_FLOAT_S8X24_UINT,
+                            /*ToImage=*/true, Buffer, Image,
+                            /*TexelCount=*/2),
+      Succeeded());
+  float Depth0, Depth1;
+  memcpy(&Depth0, Image.data(), sizeof(Depth0));
+  memcpy(&Depth1, Image.data() + 8, sizeof(Depth1));
+  EXPECT_FLOAT_EQ(Depth0, 1.5f);
+  EXPECT_FLOAT_EQ(Depth1, -2.25f);
+  EXPECT_EQ(Image[4], 0x11); // Stencil untouched.
+  EXPECT_EQ(Image[12], 0x22);
 }
 
 // The fixture text format also round-trips the two new formats, using the

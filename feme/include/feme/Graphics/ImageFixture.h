@@ -146,6 +146,47 @@ llvm::Error packStencilClear(cpu::ResourceFormat Format, uint32_t Stencil,
 llvm::Error unpackStencil(cpu::ResourceFormat Format,
                           llvm::ArrayRef<uint8_t> Texel, uint32_t &Stencil);
 
+/// The buffer-side byte size of one texel of \p Format's depth aspect
+/// alone, the layout a `VkBufferImageCopy`/`VkMemoryToImageCopy`/
+/// `VkImageToMemoryCopy` naming `VK_IMAGE_ASPECT_DEPTH_BIT` uses (Vulkan
+/// spec "Buffer and Image Addressing"): 4 bytes for both
+/// `D24_UNORM_S8_UINT` (a 32-bit word, the D24 value in the low 24 bits,
+/// the upper 8 undefined) and `D32_FLOAT_S8X24_UINT` (an IEEE float) --
+/// never the combined format's own, larger `getFixtureFormatElementSize`,
+/// which describes a copy of *both* aspects together. An `Error` for any
+/// other format: a single-aspect depth copy is only meaningful for a
+/// combined depth/stencil format (roadmap F11a).
+llvm::Expected<uint32_t> getDepthAspectBufferSize(cpu::ResourceFormat Format);
+
+/// The stencil-aspect peer of `getDepthAspectBufferSize`: always 1 byte
+/// (`S8_UINT`'s own tightly packed size) for either combined format.
+llvm::Expected<uint32_t> getStencilAspectBufferSize(cpu::ResourceFormat Format);
+
+/// Copies \p TexelCount texels' depth aspect between \p Buffer (tightly
+/// packed, one `getDepthAspectBufferSize`-sized element per texel) and
+/// \p Image (tightly packed, one full interleaved combined depth/stencil
+/// texel per texel, in \p Format's storage encoding), in whichever
+/// direction \p ToImage selects. A buffer-to-image copy is a per-texel
+/// read-modify-write that leaves each image texel's existing stencil bits
+/// untouched -- the two aspects share one texel's worth of storage, see
+/// `packDepthClear`'s own comment -- while an image-to-buffer copy simply
+/// reads the depth bits back out. The per-region generalization of
+/// `packDepthClear`/`unpackDepth`'s single repeated clear value to an
+/// arbitrary buffer region (roadmap F11a), used by `copyBufferImageRegion`
+/// (ImageOps.cpp) for a single-aspect `VkBufferImageCopy`/
+/// `VkMemoryToImageCopy`/`VkImageToMemoryCopy` of a combined depth/stencil
+/// image.
+llvm::Error copyDepthAspectRegion(cpu::ResourceFormat Format, bool ToImage,
+                                  llvm::MutableArrayRef<uint8_t> Buffer,
+                                  llvm::MutableArrayRef<uint8_t> Image,
+                                  uint32_t TexelCount);
+
+/// The stencil-aspect peer of `copyDepthAspectRegion`.
+llvm::Error copyStencilAspectRegion(cpu::ResourceFormat Format, bool ToImage,
+                                    llvm::MutableArrayRef<uint8_t> Buffer,
+                                    llvm::MutableArrayRef<uint8_t> Image,
+                                    uint32_t TexelCount);
+
 } // namespace feme::graphics
 
 #endif // FEME_GRAPHICS_IMAGEFIXTURE_H
