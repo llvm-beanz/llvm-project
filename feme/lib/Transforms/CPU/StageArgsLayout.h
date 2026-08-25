@@ -54,7 +54,9 @@ enum ShaderResourcesField : unsigned {
   ShaderResourcesFieldSamplerHeapCount = 5,
   ShaderResourcesFieldRootConstants = 6,
   ShaderResourcesFieldRootConstantSize = 7,
-  ShaderResourcesFieldReserved = 8,
+  ShaderResourcesFieldSubpassInputHeap = 8,
+  ShaderResourcesFieldSubpassInputHeapCount = 9,
+  ShaderResourcesFieldReserved = 10,
 };
 
 enum VertexInvocationField : unsigned {
@@ -202,7 +204,7 @@ inline llvm::StructType *getShaderResourcesType(llvm::LLVMContext &Ctx) {
   llvm::Type *I32Ty = llvm::Type::getInt32Ty(Ctx);
   return llvm::StructType::get(Ctx,
                                {PtrTy, I32Ty, PtrTy, I32Ty, PtrTy, I32Ty, PtrTy,
-                                I32Ty, llvm::ArrayType::get(PtrTy, 2)});
+                                I32Ty, PtrTy, I32Ty, llvm::ArrayType::get(PtrTy, 2)});
 }
 
 inline llvm::StructType *getVertexInvocationType(llvm::LLVMContext &Ctx) {

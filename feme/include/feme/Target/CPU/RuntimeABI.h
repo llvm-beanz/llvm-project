@@ -593,6 +593,18 @@ struct FemeShaderResources {
   const void *RootConstants;
   /// Size of the root constant block in bytes.
   uint32_t RootConstantSize;
+  /// (roadmap F8a) The subpass-input heap: `feme.stage.subpass.load`'s
+  /// `attachment_index` operand selects a slot here directly (not through
+  /// `feme::cpu::BoundResourceNormalizationPass`'s heap-base/range-size
+  /// scheme -- every slot is one currently-bound render-target attachment,
+  /// resolved by the CPU executor from `feme::vulkan::GraphicsState`'s
+  /// `ColorAttachmentInputIndices`/`DepthInputAttachmentIndex`/
+  /// `StencilInputAttachmentIndex` for every draw, not from `VkDescriptorSet`
+  /// state -- see "Render passes and dynamic rendering" in
+  /// feme/docs/FeMeVulkanDesign.md).
+  const FemeImageDescriptor *SubpassInputHeap;
+  /// Number of descriptors in `SubpassInputHeap`.
+  uint32_t SubpassInputHeapCount;
   /// ABI headroom for resource-model extensions.
   void *Reserved[2];
 };

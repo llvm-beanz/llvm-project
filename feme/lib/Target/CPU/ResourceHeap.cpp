@@ -204,11 +204,13 @@ PreparedFragmentBatch::PreparedFragmentBatch(
     ArrayRef<uint8_t> RootConstants, const FemeStageLayout *InputLayout,
     const void *Inputs, const FemeStageLayout *OutputLayout, void *Outputs,
     ArrayRef<FemeFragmentInvocation> Invocations,
-    MutableArrayRef<FemeFragmentResult> Results)
+    MutableArrayRef<FemeFragmentResult> Results,
+    ArrayRef<FemeImageDescriptor> SubpassInputHeap)
     : ResourceHeap(std::move(ResourceHeap)), ImageHeap(std::move(ImageHeap)),
       SamplerHeap(std::move(SamplerHeap)), RootConstants(RootConstants),
       InputLayout(InputLayout), Inputs(Inputs), OutputLayout(OutputLayout),
-      Outputs(Outputs), Invocations(Invocations), Results(Results) {
+      Outputs(Outputs), Invocations(Invocations), Results(Results),
+      SubpassInputHeap(SubpassInputHeap) {
   ShaderResources.ResourceHeap = this->ResourceHeap.data();
   ShaderResources.ResourceHeapCount =
       static_cast<uint32_t>(this->ResourceHeap.size());
@@ -221,6 +223,9 @@ PreparedFragmentBatch::PreparedFragmentBatch(
   ShaderResources.RootConstants = this->RootConstants.data();
   ShaderResources.RootConstantSize =
       static_cast<uint32_t>(this->RootConstants.size());
+  ShaderResources.SubpassInputHeap = this->SubpassInputHeap.data();
+  ShaderResources.SubpassInputHeapCount =
+      static_cast<uint32_t>(this->SubpassInputHeap.size());
 }
 
 PreparedFragmentBatch
@@ -234,7 +239,7 @@ PreparedFragmentBatch::create(const ResourceInfo &Info,
                              Resources.SamplerHeap),
       Resources.RootConstants, Resources.InputLayout, Resources.Inputs,
       Resources.OutputLayout, Resources.Outputs, Resources.Invocations,
-      Resources.Results);
+      Resources.Results, Resources.SubpassInputHeap);
 }
 
 FemeFragmentArgs PreparedFragmentBatch::args() const {

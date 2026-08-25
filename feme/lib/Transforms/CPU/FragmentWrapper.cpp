@@ -15,6 +15,7 @@
 #include "feme/Core/StageOps.h"
 #include "feme/Target/CPU/RuntimeABI.h"
 #include "feme/Transforms/CPU/EntryWrapper.h"
+#include "feme/Transforms/CPU/ImageCalls.h"
 #include "feme/Transforms/CPU/SIMDize.h"
 #include "feme/Transforms/DXIL/SignatureImport.h"
 
@@ -297,6 +298,92 @@ Value *lowerFragmentInputLoad(CallInst &CI, const SignatureElement &Elt,
   return Result;
 }
 
+/// Reads scalar fragment-invocation `Position` component \p Component
+/// (0 for X, 1 for Y) for \p Lane, by building a throwaway `SignatureElement`
+/// with `SystemValue = Position` -- `loadFragmentSystemValue`'s existing
+/// `Position` case reads exactly `Elt.FirstComponent`, so this needs no
+/// dedicated helper of its own.
+Value *loadFragmentPositionComponent(IRBuilder<> &Builder,
+                                     Value *InvocationsArg,
+                                     Value *InvocationIndex, unsigned Lane,
+                                     uint32_t Component) {
+  SignatureElement PositionElt;
+  PositionElt.SystemValue = SignatureSystemValue::Position;
+  PositionElt.FirstComponent = Component;
+  return loadFragmentSystemValue(Builder, PositionElt, InvocationsArg,
+                                 InvocationIndex, Lane);
+}
+
+/// Roadmap F8a: lowers `feme.stage.subpass.load(attachment_index,
+/// component)` (see `feme::StageOpKind::SubpassLoad`) into a
+/// `feme.cpu.image.load.2d.v4f32` call against \p F's own
+/// `subpass_input_heap`/`subpass_input_heap_count` parameters (added by
+/// `feme::cpu::SPIRVSubpassLoweringPass`, surviving `feme::cpu::SIMDizePass`
+/// widening unchanged, exactly like `image_heap`), at the invocation's own
+/// fragment location -- `subpassLoad`'s coordinate is always relative to the
+/// current fragment (see SPIRVToLLVMPatterns.cpp's `SubpassLoadPattern`,
+/// which never threads a coordinate operand through at all), truncated
+/// towards zero: `FemeFragmentInvocation::Position` is always a pixel
+/// center (`x + 0.5`, `y + 0.5`), so simple truncation recovers the integer
+/// texel address, matching every other fragment-position-derived texel
+/// address in this file. Mip is always 0 (a render-target attachment has no
+/// mip chain of its own), and the returned `<4 x float>` texel is narrowed
+/// to the requested component -- mirroring `lowerFragmentInputLoad`'s own
+/// per-lane, masked-select shape above.
+Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
+                                const WaveBodyEnv &WEnv,
+                                const FragmentStageEnv &FEnv) {
+  Value *SubpassInputHeap = nullptr;
+  Value *SubpassInputHeapCount = nullptr;
+  for (Argument &Arg : F.args()) {
+    if (Arg.getName() == "subpass_input_heap")
+      SubpassInputHeap = &Arg;
+    else if (Arg.getName() == "subpass_input_heap_count")
+      SubpassInputHeapCount = &Arg;
+  }
+  if (!SubpassInputHeap || !SubpassInputHeapCount) {
+    F.getContext().emitError(
+        &CI, "feme-cpu-wrap-fragment: subpass load with no subpass input "
+             "heap parameter (feme::cpu::SPIRVSubpassLoweringPass did not "
+             "run?)");
+    return nullptr;
+  }
+
+  unsigned WaveSize = cast<FixedVectorType>(CI.getType())->getNumElements();
+  IRBuilder<> Builder(&CI);
+  Value *Result = PoisonValue::get(CI.getType());
+  for (unsigned Lane = 0; Lane != WaveSize; ++Lane) {
+    Value *Active =
+        Builder.CreateExtractElement(WEnv.EntryMask, Builder.getInt32(Lane));
+    Value *AttachmentIndex =
+        extractLaneOrScalar(Builder, CI.getArgOperand(0), Lane);
+    Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
+    Value *InvocationIndex =
+        getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
+    Value *PosX = loadFragmentPositionComponent(Builder, FEnv.Invocations,
+                                                InvocationIndex, Lane, 0);
+    Value *PosY = loadFragmentPositionComponent(Builder, FEnv.Invocations,
+                                                InvocationIndex, Lane, 1);
+    Value *X = Builder.CreateFPToSI(PosX, Builder.getInt32Ty());
+    Value *Y = Builder.CreateFPToSI(PosY, Builder.getInt32Ty());
+    feme::cpu::ImageCallEnv ImgEnv;
+    ImgEnv.ImageHeap = SubpassInputHeap;
+    ImgEnv.ImageHeapCount = SubpassInputHeapCount;
+    CallInst *Texel = feme::cpu::createLoad2D(
+        Builder, ImgEnv, AttachmentIndex, X, Y, Builder.getInt32(0), Active);
+    auto *IndexConst = dyn_cast<ConstantInt>(Component);
+    Value *LaneResult =
+        IndexConst
+            ? Builder.CreateExtractElement(Texel, IndexConst->getZExtValue())
+            : Builder.CreateExtractElement(Texel, Component);
+    LaneResult = Builder.CreateSelect(Active, LaneResult,
+                                      Constant::getNullValue(LaneResult->getType()));
+    Result =
+        Builder.CreateInsertElement(Result, LaneResult, Builder.getInt32(Lane));
+  }
+  return Result;
+}
+
 void lowerFragmentOutputStore(CallInst &CI, const SignatureElement &Elt,
                               const WaveBodyEnv &WEnv,
                               const FragmentStageEnv &FEnv) {
@@ -451,6 +538,14 @@ bool lowerFragmentStageOps(Function &F) {
       CI->eraseFromParent();
       break;
     }
+    case StageOpKind::SubpassLoad: {
+      Value *Lowered = lowerFragmentSubpassLoad(*CI, F, *WEnv, *FEnv);
+      if (!Lowered)
+        return false;
+      CI->replaceAllUsesWith(Lowered);
+      CI->eraseFromParent();
+      break;
+    }
     case StageOpKind::InterpolateAtCentroid:
     case StageOpKind::InterpolateAtSample:
     case StageOpKind::InterpolateAtOffset:
@@ -477,6 +572,9 @@ struct WrapperEnv {
   Value *RootConstantSize = nullptr;
   Value *ImageHeap = nullptr;
   Value *ImageHeapCount = nullptr;
+  /// (roadmap F8a) See `FemeShaderResources::SubpassInputHeap`'s comment.
+  Value *SubpassInputHeap = nullptr;
+  Value *SubpassInputHeapCount = nullptr;
   Value *InputLayout = nullptr;
   Value *Inputs = nullptr;
   Value *OutputLayout = nullptr;
@@ -532,6 +630,12 @@ WrapperEnv buildWrapperEnv(IRBuilder<> &Builder, StructType *ArgsTy,
   Env.ImageHeapCount =
       loadStructField(Builder, ResourcesTy, Resources,
                       ShaderResourcesFieldImageHeapCount, I32Ty);
+  Env.SubpassInputHeap =
+      loadStructField(Builder, ResourcesTy, Resources,
+                      ShaderResourcesFieldSubpassInputHeap, PtrTy);
+  Env.SubpassInputHeapCount =
+      loadStructField(Builder, ResourcesTy, Resources,
+                      ShaderResourcesFieldSubpassInputHeapCount, I32Ty);
   return Env;
 }
 
@@ -640,6 +744,10 @@ Function *buildWrapper(Function &Body) {
       CallArgs.push_back(Env.ImageHeap);
     else if (Arg.getName() == "image_heap_count")
       CallArgs.push_back(Env.ImageHeapCount);
+    else if (Arg.getName() == "subpass_input_heap")
+      CallArgs.push_back(Env.SubpassInputHeap);
+    else if (Arg.getName() == "subpass_input_heap_count")
+      CallArgs.push_back(Env.SubpassInputHeapCount);
     else if (Arg.getName() == "wave_group_id_x" ||
              Arg.getName() == "wave_group_id_y" ||
              Arg.getName() == "wave_group_id_z")

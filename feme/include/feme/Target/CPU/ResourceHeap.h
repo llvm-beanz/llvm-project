@@ -189,6 +189,14 @@ struct FragmentResources {
   void *Outputs = nullptr;
   llvm::ArrayRef<FemeFragmentInvocation> Invocations;
   llvm::MutableArrayRef<FemeFragmentResult> Results;
+  /// (roadmap F8a) One `FemeImageDescriptor` per logical input-attachment
+  /// index, built fresh for every draw from the currently-bound
+  /// dynamic-rendering color/depth/stencil attachments (not from
+  /// `VkDescriptorSet` state) -- see `FemeShaderResources::
+  /// SubpassInputHeap`'s comment. Passed straight through, unlike
+  /// `ImageHeap` above: there is no compile-time-declared bound range to
+  /// materialize a reserved prefix for.
+  llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap;
 };
 
 /// One prepared fragment batch: materialized resources plus borrowed stage
@@ -208,7 +216,8 @@ private:
                         const FemeStageLayout *InputLayout, const void *Inputs,
                         const FemeStageLayout *OutputLayout, void *Outputs,
                         llvm::ArrayRef<FemeFragmentInvocation> Invocations,
-                        llvm::MutableArrayRef<FemeFragmentResult> Results);
+                        llvm::MutableArrayRef<FemeFragmentResult> Results,
+                        llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap);
 
   std::vector<FemeDescriptor> ResourceHeap;
   std::vector<FemeImageDescriptor> ImageHeap;
@@ -221,6 +230,7 @@ private:
   void *Outputs = nullptr;
   llvm::ArrayRef<FemeFragmentInvocation> Invocations;
   llvm::MutableArrayRef<FemeFragmentResult> Results;
+  llvm::ArrayRef<FemeImageDescriptor> SubpassInputHeap;
 };
 
 /// Caller-owned storage for one control-point batch (roadmap R34's
