@@ -57,10 +57,21 @@ Error checkSupportedRaisedOps(const Module &M) {
     case Intrinsic::dx_resource_handlefromimplicitbinding:
     case Intrinsic::spv_resource_handlefrombinding:
     case Intrinsic::spv_resource_handlefromimplicitbinding: {
+      // (Roadmap F8a) A handle call whose own result has no uses at all is
+      // not a resource access this target needs to normalize -- just dead
+      // code -- the shape a SPIR-V `subpassInput` variable's `Dim::
+      // SubpassData` handle is always left in once `feme::spirv::
+      // SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) consumes its
+      // `ImageRead` directly, without ever referencing the descriptor
+      // handle the variable's own `handlefrombinding` still produces (a
+      // subpass input is read from the currently-bound render-target
+      // attachment, not that descriptor's image memory).
       bool AllAcceptedAsRootConstants =
           llvm::all_of(F.users(), [&](const User *U) {
             const auto *CI = dyn_cast<CallInst>(U);
-            return CI && AcceptedRootConstantHandles.contains(CI);
+            if (!CI)
+              return false;
+            return CI->use_empty() || AcceptedRootConstantHandles.contains(CI);
           });
       if (AllAcceptedAsRootConstants)
         continue;

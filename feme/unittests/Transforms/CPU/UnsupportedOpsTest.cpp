@@ -58,10 +58,10 @@ TEST(UnsupportedOpsTest, RejectsUnraisedDXOpCall) {
 TEST(UnsupportedOpsTest, RejectsRegisterBoundDXHandle) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define void @main() {
+    define target("dx.TypedBuffer", <4 x float>, 1, 0, 0) @main() {
       %h = call target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
           @llvm.dx.resource.handlefrombinding(i32 0, i32 0, i32 1, i32 0, ptr null)
-      ret void
+      ret target("dx.TypedBuffer", <4 x float>, 1, 0, 0) %h
     }
     declare target("dx.TypedBuffer", <4 x float>, 1, 0, 0)
         @llvm.dx.resource.handlefrombinding(i32, i32, i32, i32, ptr)
@@ -77,9 +77,9 @@ TEST(UnsupportedOpsTest, RejectsRegisterBoundDXHandle) {
 TEST(UnsupportedOpsTest, RejectsRegisterBoundSPIRVHandle) {
   LLVMContext Ctx;
   std::unique_ptr<Module> M = parseIR(Ctx, R"(
-    define void @main() {
+    define i32 @main() {
       %h = call i32 @llvm.spv.resource.handlefrombinding.i32(i32 0, i32 0, i32 1, i32 0, ptr null)
-      ret void
+      ret i32 %h
     }
     declare i32 @llvm.spv.resource.handlefrombinding.i32(i32, i32, i32, i32, ptr)
   )");
@@ -89,6 +89,27 @@ TEST(UnsupportedOpsTest, RejectsRegisterBoundSPIRVHandle) {
                     Failed<StringError>(testing::Property(
                         &StringError::getMessage,
                         testing::HasSubstr("register-bound resource handle"))));
+}
+
+/// (Roadmap F8a) A SPIR-V `subpassInput` variable's own `handlefrombinding`
+/// call is always left completely unreferenced by `feme::spirv::
+/// SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp): a subpass input is read
+/// from the currently-bound render-target attachment, never from that
+/// descriptor's own image memory. Such a call is dead code, not an
+/// unsupported resource access this target needs to normalize -- it must
+/// not fail the whole shader the way an actually-read register-bound
+/// handle (the two tests above) does.
+TEST(UnsupportedOpsTest, AcceptsUnusedRegisterBoundHandle) {
+  LLVMContext Ctx;
+  std::unique_ptr<Module> M = parseIR(Ctx, R"(
+    define void @main() {
+      %h = call i32 @llvm.spv.resource.handlefrombinding.i32(i32 0, i32 0, i32 1, i32 0, ptr null)
+      ret void
+    }
+    declare i32 @llvm.spv.resource.handlefrombinding.i32(i32, i32, i32, i32, ptr)
+  )");
+  ASSERT_TRUE(M);
+  EXPECT_THAT_ERROR(checkSupportedRaisedOps(*M), Succeeded());
 }
 
 TEST(UnsupportedOpsTest, AcceptsBindlessDXHandle) {
