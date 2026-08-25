@@ -305,7 +305,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_deferred_host_operations` | Planned (in scope, not implemented) | roadmap J3 |
 | `VK_KHR_depth_clamp_zero_one` | Not implemented |  |
 | `VK_KHR_depth_stencil_resolve` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_descriptor_update_template` | Implemented (core, not advertised by name) | descriptor-set update templates implemented; the push-descriptor template type is explicitly rejected as the separate, unimplemented VK_KHR_push_descriptor (Descriptor.cpp's vkCreateDescriptorUpdateTemplate/vkUpdateDescriptorSetWithTemplate) |
+| `VK_KHR_descriptor_update_template` | Implemented (core, not advertised by name) | descriptor-set update templates implemented; roadmap F12: `VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS` is now also accepted (`vkCreateDescriptorUpdateTemplate` in Descriptor.cpp), consumed by `vkCmdPushDescriptorSetWithTemplate` |
 | `VK_KHR_device_address_commands` | Not implemented |  |
 | `VK_KHR_device_fault` | Not implemented |  |
 | `VK_KHR_device_group` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
@@ -369,7 +369,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_present_mode_fifo_latest_ready` | Not implemented |  |
 | `VK_KHR_present_wait` | Not implemented |  |
 | `VK_KHR_present_wait2` | Not implemented |  |
-| `VK_KHR_push_descriptor` | Planned (in scope, not implemented) | roadmap F12 |
+| `VK_KHR_push_descriptor` | Advertised | roadmap F12: `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate` (`CommandBuffer.{h,cpp}`) write descriptors directly into a command buffer's own owned `DescriptorSet` snapshot -- no `VkDescriptorSet` object -- reusing `Descriptor.{h,cpp}`'s existing binding-to-heap-slot translation; `VK_KHR_maintenance6`'s deferred `vkCmdPushDescriptorSet2`/`vkCmdPushDescriptorSetWithTemplate2` are thin wrappers around the same mechanism |
 | `VK_KHR_ray_query` | Planned (in scope, not implemented) | roadmap J5 |
 | `VK_KHR_ray_tracing_maintenance1` | Planned (in scope, not implemented) | roadmap J7 |
 | `VK_KHR_ray_tracing_pipeline` | Planned (in scope, not implemented) | roadmap J6 |

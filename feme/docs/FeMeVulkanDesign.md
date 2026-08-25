@@ -1068,6 +1068,27 @@ descriptor update templates before advertising those features. The first
 version should omit those features and snapshot all used descriptors into a
 prepared dispatch before worker execution.
 
+**Push descriptors (roadmap F12).** `VK_KHR_push_descriptor`'s
+`vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate` write
+descriptors directly into a command buffer's own recorded state, with no
+`VkDescriptorSetLayout`-allocated `VkDescriptorSet` object at all: the target
+set's layout comes from the bound `VkPipelineLayout` instead. This ICD
+implements the mechanism as an ordinary `DescriptorSet` the *command buffer*
+owns (`CommandBuffer::PushDescriptorSetStorage`) rather than a pool, applying
+writes through the same `applyDescriptorWrites`/`applyDescriptorUpdateTemplate`
+helpers `vkUpdateDescriptorSets`/`vkUpdateDescriptorSetWithTemplate` use, then
+recording an ordinary `bindDescriptorSets`-shaped bind of it -- reusing the
+existing binding-to-heap-slot translation with no new dispatch-preparation
+path. Because commands only take effect later, when the recorded stream is
+replayed at execution, and pushes accumulate onto a slot's own previous
+contents ("can be updated incrementally" until the slot is disturbed by an
+incompatible layout), each push must snapshot a fresh copy rather than mutate
+one shared object in place -- otherwise a `BindDescriptorSets` recorded before
+a later push in the same stream would observe that later push's writes too
+once execution reached it. `VK_KHR_maintenance6`'s `vkCmdPushDescriptorSet2`/
+`vkCmdPushDescriptorSetWithTemplate2` are thin `pNext`-extensible wrappers
+around the same mechanism.
+
 Push constants are copied into command-buffer state by `vkCmdPushConstants`
 (done, V3). Each dispatch snapshots the bytes visible through its pipeline
 layout and passes them as `RootConstants`. Vulkan push-constant members carry
