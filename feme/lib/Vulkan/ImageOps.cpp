@@ -178,6 +178,29 @@ namespace feme::vulkan {
 Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
                             VkDeviceSize BufferSize,
                             const VkBufferImageCopy &Region) {
+  // A combined depth/stencil format (`D24_UNORM_S8_UINT`/
+  // `D32_FLOAT_S8X24_UINT`) packs both aspects into one interleaved texel,
+  // but a buffer/image copy of one always names exactly one aspect (real
+  // Vulkan forbids combining `VK_IMAGE_ASPECT_DEPTH_BIT`/`STENCIL_BIT` in a
+  // single copy region's `aspectMask`) with a *buffer*-side layout that is
+  // that single aspect's own tightly-packed size, not the combined
+  // texel's -- e.g. `D32_FLOAT_S8X24_UINT`'s depth aspect is 4 buffer
+  // bytes per texel, its stencil aspect 1, never this format's own 8-byte
+  // `bytesPerBlock`. Neither the buffer-side sizing below nor the
+  // image-side `texelPointer` write single out one aspect's own bytes
+  // within the shared interleaved texel (only `packDepthClear`/
+  // `packStencilClear`, ImageFixture.cpp, do that today, and only for a
+  // single repeated clear value, not an arbitrary per-texel buffer
+  // region) -- so rather than silently mis-sizing the copy (previously a
+  // wild out-of-bounds read/write once a caller had no bound `VkBuffer`
+  // size of its own to catch it against, roadmap F11's own host-copy
+  // path), this rejects the case cleanly.
+  if (Img.format() == feme::cpu::ResourceFormat::D24_UNORM_S8_UINT ||
+      Img.format() == feme::cpu::ResourceFormat::D32_FLOAT_S8X24_UINT)
+    return createStringError(inconvertibleErrorCode(),
+                             "a buffer/image copy naming a single aspect of "
+                             "a combined depth/stencil format is not yet "
+                             "supported");
   bool Compressed = feme::cpu::isBlockCompressedFormat(Img.format());
   uint32_t BlockW = blockWidth(Img.format());
   uint32_t BlockH = blockHeight(Img.format());

@@ -1013,6 +1013,64 @@ TEST_F(ImageTest, CopyImageRejectsIncompatibleTexelSize) {
   vkFreeMemory(Device, DstMemory, nullptr);
 }
 
+/// Roadmap F11: `copyBufferImageRegion`'s buffer-side sizing always uses
+/// `Img.format()`'s own combined `bytesPerBlock`, but a copy region for a
+/// combined depth/stencil format (`D24_UNORM_S8_UINT`/
+/// `D32_FLOAT_S8X24_UINT`) always names exactly one aspect, whose own
+/// buffer-side size differs from the combined texel's (e.g.
+/// `D32_FLOAT_S8X24_UINT`'s depth aspect is 4 bytes, not 8) -- this used to
+/// silently mis-size the copy rather than reject it, discovered as an
+/// out-of-bounds host-memory read/write once `HostImageCopy.cpp`'s
+/// `vkCopyMemoryToImage` had no bound `VkBuffer` size of its own to catch
+/// it against first.
+TEST_F(ImageTest, CopyBufferToImageRejectsCombinedDepthStencilFormat) {
+  VkDeviceMemory ImageMemory = VK_NULL_HANDLE;
+  VkImage Img = createBoundImage2DWithFormat(
+      VK_FORMAT_D32_SFLOAT_S8_UINT, 2, 2, VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+      ImageMemory);
+
+  std::vector<uint8_t> SrcPixels(2 * 2 * 4); // Depth-aspect-only sizing.
+  VkBufferCreateInfo BufferInfo{};
+  BufferInfo.size = SrcPixels.size();
+  BufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VkBuffer SrcBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &SrcBuf), VK_SUCCESS);
+  VkMemoryAllocateInfo AllocInfo{};
+  AllocInfo.allocationSize = SrcPixels.size();
+  AllocInfo.memoryTypeIndex = 0;
+  VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &SrcMemory),
+            VK_SUCCESS);
+  ASSERT_EQ(vkBindBufferMemory(Device, SrcBuf, SrcMemory, 0), VK_SUCCESS);
+
+  VkCommandPoolCreateInfo PoolInfo{};
+  VkCommandPool Pool = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateCommandPool(Device, &PoolInfo, nullptr, &Pool), VK_SUCCESS);
+  VkCommandBufferAllocateInfo CmdAllocInfo{};
+  CmdAllocInfo.commandPool = Pool;
+  CmdAllocInfo.commandBufferCount = 1;
+  VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+  ASSERT_EQ(vkAllocateCommandBuffers(Device, &CmdAllocInfo, &CmdBuf),
+            VK_SUCCESS);
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(CmdBuf, &BeginInfo), VK_SUCCESS);
+  VkBufferImageCopy Region{};
+  Region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+  Region.imageExtent = {2, 2, 1};
+  vkCmdCopyBufferToImage(CmdBuf, SrcBuf, Img,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Region);
+  ASSERT_EQ(vkEndCommandBuffer(CmdBuf), VK_SUCCESS);
+
+  EXPECT_THAT_ERROR(executeCommandBuffer(*fromHandle<CommandBuffer>(CmdBuf)),
+                    llvm::Failed());
+
+  vkDestroyCommandPool(Device, Pool, nullptr);
+  vkDestroyBuffer(Device, SrcBuf, nullptr);
+  vkFreeMemory(Device, SrcMemory, nullptr);
+  vkDestroyImage(Device, Img, nullptr);
+  vkFreeMemory(Device, ImageMemory, nullptr);
+}
+
 TEST_F(ImageTest, CopyMultisampleImagePreservesEverySample) {
   VkDeviceMemory SrcMemory = VK_NULL_HANDLE;
   VkImage SrcImg = createBoundImage2D(
