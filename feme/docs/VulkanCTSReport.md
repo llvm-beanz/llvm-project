@@ -4619,3 +4619,46 @@ unsupported (pre-existing, unrelated) -- 5 more passing than F8c's own
 1750-passed baseline (`PipelineTest`'s two new create-flag tests,
 `GraphicsPipelineTest`'s own, and `CommandBufferTest`'s two new
 bind-time-rejection tests), no regressions.
+
+## Roadmap F10: measured impact (`VK_EXT_pipeline_robustness`)
+
+`dEQP-VK.api.info.get_physical_device_properties2.features.pipeline_robustness_features`
+passes cleanly:
+
+```
+Test case 'dEQP-VK.api.info.get_physical_device_properties2.features.pipeline_robustness_features'..
+  Pass (Querying succeeded)
+```
+
+`dEQP-VK.robustness.pipeline_robustness.*` (`--deqp-case`, same reproduction
+recipe as F9's own section above; 1667 cases actually executed under that
+glob) is the CTS suite gated on `context.requireDeviceFunctionality
+("VK_EXT_pipeline_robustness")`. Every one of its `NotSupported` reasons
+is a *different*, already-documented prerequisite this ICD doesn't
+implement -- never "VK_EXT_pipeline_robustness is not supported" itself,
+confirming this row's own extension gate is genuinely passed, not
+silently short-circuiting the whole suite:
+
+| Reason | Count | Cause |
+|---|---|---|
+| `Scalar block layout not supported` | 996 | `scalarBlockLayout` (core 1.2, `VK_EXT_scalar_block_layout`) is unimplemented -- roadmap 1.9.10's K-series, unrelated to this row |
+| `VK_EXT_graphics_pipeline_library not supported` | 534 | Not in this ICD's declared 1.4 conformance scope (an optional extension); every `_fast_gpl`/`_optimized_gpl` case variant needs it |
+| `VK_EXT_shader_image_atomic_int64 is not supported` | 173 | Also not in scope; a 64-bit image-atomic capability this software rasterizer does not implement |
+| `robustImageAccess not supported` | 24 | Roadmap E16's own deliberate scoping decision (`robustImageAccess` stays `VK_FALSE` pending an audit of `CommandBuffer.cpp`'s copy-command paths) -- this row does not reopen that decision, since `VkPipelineRobustnessCreateInfo::images` and the whole-device `robustImageAccess` feature are different, independently gateable things per the Vulkan spec |
+| `Vertex pipeline stores and atomics not supported` | 22 | `vertexPipelineStoresAndAtomics` (core 1.0) unimplemented, unrelated |
+| `Fragment shader stores not supported` | 12 | `fragmentStoresAndAtomics` (core 1.0) unimplemented, unrelated |
+| `robustBufferAccess2 not supported` | 2 | `VK_EXT_robustness2` itself is unimplemented -- exactly the reason `EntryPoints.cpp`'s new `defaultRobustness*` values claim the weaker, non-`..._2` behavior rather than over-claiming it (see this row's own comment) |
+
+None of these 1667 cases reach a `Pass` or `Fail` for this ICD today,
+since every one needs at least one of the prerequisites above alongside
+`VK_EXT_pipeline_robustness` itself; that is an honest reflection of this
+ICD's current feature surface, not a defect in this row's own change --
+each prerequisite is already tracked as its own separate roadmap item
+(K-series, E16) rather than folded into F10.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1763 discovered, 1762 passed, 1
+unsupported (pre-existing, unrelated) -- 7 more passing than F9's own
+1755-passed baseline (the new `DrawTest` vertex-fetch-robustness case,
+plus `PipelineTest`'s/`GraphicsPipelineTest`'s/`PhysicalDeviceInfoTest`'s
+new pipeline-robustness cases), no regressions.
