@@ -407,12 +407,14 @@ encodeVertexBufferData(const SceneVertexBuffer &VB,
   return Attrs;
 }
 
-/// Encodes \p IB's `uint16`/`uint32` index list into \p Storage's raw byte
-/// form.
+/// Encodes \p IB's `uint8`/`uint16`/`uint32` index list into \p Storage's
+/// raw byte form.
 Expected<IndexType> encodeIndexBufferData(const SceneIndexBuffer &IB,
                                           std::vector<uint8_t> &Storage) {
   IndexType Type;
-  if (IB.Format == "uint16")
+  if (IB.Format == "uint8")
+    Type = IndexType::UInt8;
+  else if (IB.Format == "uint16")
     Type = IndexType::UInt16;
   else if (IB.Format == "uint32")
     Type = IndexType::UInt32;
@@ -421,10 +423,15 @@ Expected<IndexType> encodeIndexBufferData(const SceneIndexBuffer &IB,
                              "unknown index-buffer 'format: %s'",
                              IB.Format.c_str());
 
-  size_t ElemSize = Type == IndexType::UInt16 ? 2 : 4;
+  size_t ElemSize = Type == IndexType::UInt8    ? 1
+                    : Type == IndexType::UInt16 ? 2
+                                                : 4;
   Storage.assign(IB.Data.size() * ElemSize, 0);
   for (size_t I = 0; I != IB.Data.size(); ++I) {
-    if (Type == IndexType::UInt16) {
+    if (Type == IndexType::UInt8) {
+      uint8_t V = static_cast<uint8_t>(IB.Data[I]);
+      memcpy(Storage.data() + I * ElemSize, &V, ElemSize);
+    } else if (Type == IndexType::UInt16) {
       uint16_t V = static_cast<uint16_t>(IB.Data[I]);
       memcpy(Storage.data() + I * ElemSize, &V, ElemSize);
     } else {

@@ -1,0 +1,69 @@
+; RUN: split-file %s %t
+; RUN: feme-render %t/scene.yaml | FileCheck %s
+
+; Roadmap F7 (`VK_KHR_index_type_uint8`): the same scene as
+; draw-indexed.test, but through an 8-bit index buffer -- exercising
+; `feme-render`'s own `uint8` index-buffer format and the executor's 8-bit
+; index-fetch path (Executor.cpp). The expected output is identical to
+; draw-indexed.test's since the same index list and vertex-offset are used.
+
+; CHECK: image color0 4x4 r8g8b8a8-unorm
+; CHECK-NEXT: y=0: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=1: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=2: ff0000ff ff0000ff ff0000ff ff0000ff
+; CHECK-NEXT: y=3: ff0000ff ff0000ff ff0000ff ff0000ff
+
+;--- scene.yaml
+attachments:
+  - name: color0
+    format: r8g8b8a8-unorm
+    extent: [4, 4]
+    clear: [0.0, 0.0, 0.0, 1.0]
+pipeline:
+  vertex: { module: vs.ll, entry: vs_main }
+  fragment: { module: fs.ll, entry: fs_main }
+  cull: none
+  front-face: ccw
+index-buffer:
+  format: uint8
+  data: [1, 2, 3]
+draws:
+  - { vertices: 3, indexed: true, first-index: 0, vertex-offset: -1 }
+
+;--- vs.ll
+
+; Same "select a hardcoded oversized-triangle corner by SV_VertexID" shader
+; as draw-triangle.test/draw-indexed.test.
+define void @vs_main() #0 !feme.signature !0 {
+  %vid = call i32 @feme.stage.input.load.i32(i32 0, i32 0, i32 0, i32 0)
+  %is0 = icmp eq i32 %vid, 0
+  %is1 = icmp eq i32 %vid, 1
+  %xb = select i1 %is1, float 3.0, float -1.0
+  %x = select i1 %is0, float -1.0, float %xb
+  %yb = select i1 %is1, float -1.0, float 3.0
+  %y = select i1 %is0, float -1.0, float %yb
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 0, float %x, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 1, float %y, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 2, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 1, i32 0, i32 3, float 1.0, i32 0)
+  ret void
+}
+declare i32 @feme.stage.input.load.i32(i32, i32, i32, i32)
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="vertex" }
+
+!0 = !{[144 x i8] c"\03\00\00\00\02\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\04\00\00\00\02\00\00\00 \00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\01\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00"}
+
+;--- fs.ll
+
+define void @fs_main() #0 !feme.signature !0 {
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 0, float 1.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 1, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 2, float 0.0, i32 0)
+  call void @feme.stage.output.store.f32(i32 0, i32 0, i32 3, float 1.0, i32 0)
+  ret void
+}
+declare void @feme.stage.output.store.f32(i32, i32, i32, float, i32)
+attributes #0 = { "feme.shader.stage"="fragment" }
+
+!0 = !{[76 x i8] c"\03\00\00\00\01\00\00\00\00\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00 \00\00\00\00\00\00\00\04\00\00\00\01\00\00\00\01\00\00\00\00\00\00\00\00\00\00\00\00\00\00\00"}
