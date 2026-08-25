@@ -498,17 +498,20 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too, or every one of them fails `NotSupported` instead of
       // running for real.
       {VK_KHR_MAINTENANCE_5_EXTENSION_NAME, VK_KHR_MAINTENANCE_5_SPEC_VERSION},
-      // (roadmap E6) `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`
-      // (CommandBuffer.cpp) are implemented; `vkCmdPushDescriptorSet2`
-      // is not (deferred to roadmap F12's `pushDescriptor` groundwork).
-      // Like `synchronization2`/`maintenance5` above, this extension's
-      // commands are already core, non-`KHR`-suffixed `VK_VERSION_1_4`
-      // entries `vk_gen_entrypoints.py`'s `CORE_FEATURES` resolves, but
-      // `dEQP-VK.api.maintenance6.*`'s own `requireDeviceFunctionality
-      // ("VK_KHR_maintenance6")` calls still enable this extension by
-      // name regardless of the advertised `apiVersion`, so it must be
-      // listed here too, or every one of them fails `NotSupported`
-      // instead of running for real.
+      // (roadmap E6, completed by F12) `vkCmdBindDescriptorSets2`/
+      // `vkCmdPushConstants2`/`vkCmdPushDescriptorSet2`/`vkCmdPushDescriptor
+      // SetWithTemplate2` (CommandBuffer.cpp) are all implemented now --
+      // the latter two, sharing `Descriptor.{h,cpp}`'s push-descriptor
+      // mechanism with `VK_KHR_push_descriptor` itself, were deferred until
+      // roadmap F12 built that mechanism (see this row's own dependency
+      // note in Roadmap.md). Like `synchronization2`/`maintenance5` above,
+      // this extension's commands are already core, non-`KHR`-suffixed
+      // `VK_VERSION_1_4` entries `vk_gen_entrypoints.py`'s `CORE_FEATURES`
+      // resolves, but `dEQP-VK.api.maintenance6.*`'s own
+      // `requireDeviceFunctionality("VK_KHR_maintenance6")` calls still
+      // enable this extension by name regardless of the advertised
+      // `apiVersion`, so it must be listed here too, or every one of them
+      // fails `NotSupported` instead of running for real.
       {VK_KHR_MAINTENANCE_6_EXTENSION_NAME, VK_KHR_MAINTENANCE_6_SPEC_VERSION},
       // (roadmap E8) `spirv.SDot`/`spirv.UDot`/`spirv.SUDot` and their
       // `*AccSat` counterparts now have real `spirv`->`llvm` conversion
@@ -710,6 +713,15 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // here too regardless of the advertised `apiVersion`.
       {VK_EXT_HOST_IMAGE_COPY_EXTENSION_NAME,
        VK_EXT_HOST_IMAGE_COPY_SPEC_VERSION},
+      // (roadmap F12) `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWith
+      // Template` (CommandBuffer.cpp) write descriptors directly into a
+      // command buffer's own recorded state, with no `VkDescriptorSet`
+      // object at all, reusing `Descriptor.{h,cpp}`'s existing
+      // binding-to-heap-slot translation; like every other
+      // post-`maintenance5` entry above, this extension must be listed
+      // here too regardless of the advertised `apiVersion`.
+      {VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+       VK_KHR_PUSH_DESCRIPTOR_SPEC_VERSION},
   };
   return Extensions;
 }

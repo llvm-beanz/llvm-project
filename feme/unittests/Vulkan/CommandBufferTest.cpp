@@ -1096,6 +1096,373 @@ TEST_F(CommandBufferTest, SubgroupBuiltinsWriteThroughStorageBuffer) {
   vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
 }
 
+/// (roadmap F12) End-to-end `VK_KHR_push_descriptor` scenario: no
+/// `VkDescriptorPool`/`VkDescriptorSet` object exists at all -- every write
+/// goes straight into the command buffer's own recorded state through
+/// `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWithTemplate`, sharing
+/// `kStorageBufferCopyShader`'s own two-binding (`in`/`out` storage buffer)
+/// layout with `StorageBufferDispatchTest` above.
+class PushDescriptorSetDispatchTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    VkInstanceCreateInfo InstInfo{};
+    ASSERT_EQ(vkCreateInstance(&InstInfo, nullptr, &Instance), VK_SUCCESS);
+    uint32_t Count = 1;
+    ASSERT_EQ(vkEnumeratePhysicalDevices(Instance, &Count, &Physical),
+              VK_SUCCESS);
+    VkDeviceCreateInfo DevInfo{};
+    ASSERT_EQ(vkCreateDevice(Physical, &DevInfo, nullptr, &Device), VK_SUCCESS);
+
+    VkDescriptorSetLayoutBinding Bindings[2]{};
+    Bindings[0].binding = 0;
+    Bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[0].descriptorCount = 1;
+    Bindings[1].binding = 1;
+    Bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    Bindings[1].descriptorCount = 1;
+    VkDescriptorSetLayoutCreateInfo SetLayoutInfo{};
+    SetLayoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT;
+    SetLayoutInfo.bindingCount = 2;
+    SetLayoutInfo.pBindings = Bindings;
+    ASSERT_EQ(vkCreateDescriptorSetLayout(Device, &SetLayoutInfo, nullptr,
+                                          &SetLayout),
+              VK_SUCCESS);
+
+    VkPipelineLayoutCreateInfo LayoutInfo{};
+    LayoutInfo.setLayoutCount = 1;
+    LayoutInfo.pSetLayouts = &SetLayout;
+    ASSERT_EQ(vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &Layout),
+              VK_SUCCESS);
+
+    std::vector<uint32_t> Words = assembleSPIRV(kStorageBufferCopyShader);
+    ASSERT_FALSE(Words.empty());
+    VkShaderModuleCreateInfo ShaderInfo{};
+    ShaderInfo.codeSize = Words.size() * sizeof(uint32_t);
+    ShaderInfo.pCode = Words.data();
+    ASSERT_EQ(vkCreateShaderModule(Device, &ShaderInfo, nullptr, &Module),
+              VK_SUCCESS);
+
+    VkComputePipelineCreateInfo PipelineInfo{};
+    PipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    PipelineInfo.stage.module = Module;
+    PipelineInfo.stage.pName = "main";
+    PipelineInfo.layout = Layout;
+    ASSERT_EQ(vkCreateComputePipelines(Device, VK_NULL_HANDLE, 1, &PipelineInfo,
+                                       nullptr, &Pipeline),
+              VK_SUCCESS);
+
+    VkCommandPoolCreateInfo CmdPoolInfo{};
+    CmdPoolInfo.queueFamilyIndex = 0;
+    ASSERT_EQ(vkCreateCommandPool(Device, &CmdPoolInfo, nullptr, &Pool),
+              VK_SUCCESS);
+  }
+  void TearDown() override {
+    vkDestroyCommandPool(Device, Pool, nullptr);
+    vkDestroyPipeline(Device, Pipeline, nullptr);
+    vkDestroyShaderModule(Device, Module, nullptr);
+    vkDestroyPipelineLayout(Device, Layout, nullptr);
+    vkDestroyDescriptorSetLayout(Device, SetLayout, nullptr);
+    vkDestroyDevice(Device, nullptr);
+    vkDestroyInstance(Instance, nullptr);
+  }
+
+  VkCommandBuffer allocateCommandBuffer() {
+    VkCommandBufferAllocateInfo AllocInfo{};
+    AllocInfo.commandPool = Pool;
+    AllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    AllocInfo.commandBufferCount = 1;
+    VkCommandBuffer CmdBuf = VK_NULL_HANDLE;
+    EXPECT_EQ(vkAllocateCommandBuffers(Device, &AllocInfo, &CmdBuf),
+              VK_SUCCESS);
+    return CmdBuf;
+  }
+
+  HostBuffer createStorageBuffer(VkDeviceSize Size) {
+    HostBuffer Result;
+    VkBufferCreateInfo BufferInfo{};
+    BufferInfo.size = Size;
+    BufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    EXPECT_EQ(vkCreateBuffer(Device, &BufferInfo, nullptr, &Result.Buf),
+              VK_SUCCESS);
+    VkMemoryAllocateInfo AllocInfo{};
+    AllocInfo.allocationSize = Size;
+    AllocInfo.memoryTypeIndex = 0;
+    EXPECT_EQ(vkAllocateMemory(Device, &AllocInfo, nullptr, &Result.Memory),
+              VK_SUCCESS);
+    EXPECT_EQ(vkBindBufferMemory(Device, Result.Buf, Result.Memory, 0),
+              VK_SUCCESS);
+    EXPECT_EQ(
+        vkMapMemory(Device, Result.Memory, 0, VK_WHOLE_SIZE, 0, &Result.Data),
+        VK_SUCCESS);
+    return Result;
+  }
+
+  VkInstance Instance = VK_NULL_HANDLE;
+  VkPhysicalDevice Physical = VK_NULL_HANDLE;
+  VkDevice Device = VK_NULL_HANDLE;
+  VkDescriptorSetLayout SetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout Layout = VK_NULL_HANDLE;
+  VkShaderModule Module = VK_NULL_HANDLE;
+  VkPipeline Pipeline = VK_NULL_HANDLE;
+  VkCommandPool Pool = VK_NULL_HANDLE;
+};
+
+TEST_F(PushDescriptorSetDispatchTest, ReadsAndWritesWithNoDescriptorSetObject) {
+  HostBuffer In = createStorageBuffer(4);
+  HostBuffer Out = createStorageBuffer(4);
+  uint32_t InitialValue = 41;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo InInfo{In.Buf, 0, 4};
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[0].pBufferInfo = &InInfo;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[1].pBufferInfo = &OutInfo;
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdPushDescriptorSet(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 2,
+                         Writes);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + 1);
+
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// Per `vkCmdPushDescriptorSet`'s own spec text, pushes "can be updated
+/// incrementally": a second push to the same slot that only rewrites
+/// binding 1 must leave binding 0's earlier write in place, rather than the
+/// whole slot reverting to undefined -- matching VK-GL-CTS's own
+/// `PushDescriptorIncrementalUpdatesComputeTest` scenario.
+TEST_F(PushDescriptorSetDispatchTest,
+       WritesToOneBindingAccumulateAcrossPushes) {
+  HostBuffer In = createStorageBuffer(4);
+  HostBuffer Out1 = createStorageBuffer(4);
+  HostBuffer Out2 = createStorageBuffer(4);
+  uint32_t InitialValue = 7;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo InInfo{In.Buf, 0, 4};
+  VkDescriptorBufferInfo Out1Info{Out1.Buf, 0, 4};
+  VkDescriptorBufferInfo Out2Info{Out2.Buf, 0, 4};
+  VkWriteDescriptorSet FirstWrites[2]{};
+  FirstWrites[0].dstBinding = 0;
+  FirstWrites[0].descriptorCount = 1;
+  FirstWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  FirstWrites[0].pBufferInfo = &InInfo;
+  FirstWrites[1].dstBinding = 1;
+  FirstWrites[1].descriptorCount = 1;
+  FirstWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  FirstWrites[1].pBufferInfo = &Out1Info;
+  VkWriteDescriptorSet SecondWrite{};
+  SecondWrite.dstBinding = 1;
+  SecondWrite.descriptorCount = 1;
+  SecondWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  SecondWrite.pBufferInfo = &Out2Info;
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdPushDescriptorSet(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 2,
+                         FirstWrites);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  // Only binding 1 is rewritten; binding 0 (the `in` buffer) must still be
+  // whatever the first push left there.
+  vkCmdPushDescriptorSet(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                         &SecondWrite);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result1 = 0, Result2 = 0;
+  std::memcpy(&Result1, Out1.Data, sizeof(Result1));
+  std::memcpy(&Result2, Out2.Data, sizeof(Result2));
+  EXPECT_EQ(Result1, InitialValue + 1);
+  EXPECT_EQ(Result2, InitialValue + 1);
+
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out1.Buf, nullptr);
+  vkDestroyBuffer(Device, Out2.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out1.Memory, nullptr);
+  vkFreeMemory(Device, Out2.Memory, nullptr);
+}
+
+TEST_F(PushDescriptorSetDispatchTest, WithTemplateReadsAndWrites) {
+  HostBuffer In = createStorageBuffer(4);
+  HostBuffer Out = createStorageBuffer(4);
+  uint32_t InitialValue = 99;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorUpdateTemplateEntry Entries[2] = {
+      {0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 0,
+       sizeof(VkDescriptorBufferInfo)},
+      {1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+       sizeof(VkDescriptorBufferInfo), sizeof(VkDescriptorBufferInfo)},
+  };
+  VkDescriptorUpdateTemplateCreateInfo TemplateInfo{};
+  TemplateInfo.descriptorUpdateEntryCount = 2;
+  TemplateInfo.pDescriptorUpdateEntries = Entries;
+  TemplateInfo.templateType =
+      VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_PUSH_DESCRIPTORS;
+  VkDescriptorUpdateTemplate Template = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateDescriptorUpdateTemplate(Device, &TemplateInfo, nullptr,
+                                             &Template),
+            VK_SUCCESS);
+
+  struct {
+    VkDescriptorBufferInfo In;
+    VkDescriptorBufferInfo Out;
+  } Data{{In.Buf, 0, 4}, {Out.Buf, 0, 4}};
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdPushDescriptorSetWithTemplate(CmdBuf, Template, Layout, 0, &Data);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + 1);
+
+  vkDestroyDescriptorUpdateTemplate(Device, Template, nullptr);
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+TEST_F(PushDescriptorSetDispatchTest, PushDescriptorSet2ProducesTheSameResult) {
+  HostBuffer In = createStorageBuffer(4);
+  HostBuffer Out = createStorageBuffer(4);
+  uint32_t InitialValue = 12;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo InInfo{In.Buf, 0, 4};
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[0].pBufferInfo = &InInfo;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[1].pBufferInfo = &OutInfo;
+
+  VkPushDescriptorSetInfo PushInfo{};
+  PushInfo.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+  PushInfo.layout = Layout;
+  PushInfo.set = 0;
+  PushInfo.descriptorWriteCount = 2;
+  PushInfo.pDescriptorWrites = Writes;
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdPushDescriptorSet2(CmdBuf, &PushInfo);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result, InitialValue + 1);
+
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
+/// (roadmap F12) "When a command buffer begins recording, all push
+/// descriptors are undefined" (`vkCmdPushDescriptorSet`'s own spec text):
+/// re-beginning a command buffer must drop a previously-pushed binding
+/// entirely, not merely leave it stale -- pushing only binding 1 the
+/// second time around must see binding 0 (`in`) read back as zero, the
+/// same "unwritten descriptor reads zero" behavior an ordinary,
+/// never-written `DescriptorSet` binding already has (see
+/// `StorageBufferDispatchTest`'s file-level scope), rather than the first
+/// recording's own `in` value leaking through.
+TEST_F(PushDescriptorSetDispatchTest,
+       BeginCommandBufferDropsEveryPushDescriptorSet) {
+  HostBuffer In = createStorageBuffer(4);
+  HostBuffer Out = createStorageBuffer(4);
+  uint32_t InitialValue = 5;
+  std::memcpy(In.Data, &InitialValue, sizeof(InitialValue));
+
+  VkDescriptorBufferInfo InInfo{In.Buf, 0, 4};
+  VkDescriptorBufferInfo OutInfo{Out.Buf, 0, 4};
+  VkWriteDescriptorSet Writes[2]{};
+  Writes[0].dstBinding = 0;
+  Writes[0].descriptorCount = 1;
+  Writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[0].pBufferInfo = &InInfo;
+  Writes[1].dstBinding = 1;
+  Writes[1].descriptorCount = 1;
+  Writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+  Writes[1].pBufferInfo = &OutInfo;
+
+  VkCommandBuffer CmdBuf = allocateCommandBuffer();
+  VkCommandBufferBeginInfo BeginInfo{};
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdPushDescriptorSet(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 2,
+                         Writes);
+  vkEndCommandBuffer(CmdBuf);
+
+  // Re-begin and push only binding 1 this time; if binding 0's push from
+  // the recording above survived, `in` would still read `InitialValue`
+  // instead of the zero an unwritten binding produces.
+  vkBeginCommandBuffer(CmdBuf, &BeginInfo);
+  vkCmdBindPipeline(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Pipeline);
+  vkCmdPushDescriptorSet(CmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, Layout, 0, 1,
+                         &Writes[1]);
+  vkCmdDispatch(CmdBuf, 1, 1, 1);
+  vkEndCommandBuffer(CmdBuf);
+
+  auto *Recorded = fromHandle<CommandBuffer>(CmdBuf);
+  ASSERT_THAT_ERROR(executeCommandBuffer(*Recorded), llvm::Succeeded());
+
+  uint32_t Result = 0;
+  std::memcpy(&Result, Out.Data, sizeof(Result));
+  EXPECT_EQ(Result, 0u + 1); // in reads zero: not the earlier InitialValue.
+
+  vkDestroyBuffer(Device, In.Buf, nullptr);
+  vkDestroyBuffer(Device, Out.Buf, nullptr);
+  vkFreeMemory(Device, In.Memory, nullptr);
+  vkFreeMemory(Device, Out.Memory, nullptr);
+}
+
 /// End-to-end V4 scenario: bind a uniform texel buffer and a storage texel
 /// buffer over `VK_FORMAT_R32G32B32A32_SFLOAT` `VkBufferView`s, dispatch a
 /// shader that reads one texel, adds a constant, and writes it to the

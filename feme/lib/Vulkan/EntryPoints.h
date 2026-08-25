@@ -331,6 +331,29 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets(
 VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
     VkCommandBuffer commandBuffer,
     const VkBindDescriptorSetsInfo *pBindDescriptorSetsInfo);
+// Roadmap F12: `VK_KHR_push_descriptor`'s `vkCmdPushDescriptorSet`/
+// `vkCmdPushDescriptorSetWithTemplate`, and (sharing the same mechanism,
+// per Roadmap.md's F12/E6 dependency notes) `VK_KHR_maintenance6`'s
+// `pNext`-extensible `vkCmdPushDescriptorSet2`/
+// `vkCmdPushDescriptorSetWithTemplate2` wrappers -- see
+// `CommandBuffer.cpp`'s comments for each one's own translation.
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSet(
+    VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet *pDescriptorWrites);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushDescriptorSetWithTemplate(VkCommandBuffer commandBuffer,
+                                   VkDescriptorUpdateTemplate
+                                       descriptorUpdateTemplate,
+                                   VkPipelineLayout layout, uint32_t set,
+                                   const void *pData);
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer,
+                        const VkPushDescriptorSetInfo *pPushDescriptorSetInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate2(
+    VkCommandBuffer commandBuffer,
+    const VkPushDescriptorSetWithTemplateInfo
+        *pPushDescriptorSetWithTemplateInfo);
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
                                          uint32_t groupCountX,
                                          uint32_t groupCountY,

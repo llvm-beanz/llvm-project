@@ -144,6 +144,16 @@ vkCmdBindDescriptorSets
 # Roadmap E6: VK_KHR_maintenance6's pNext-extensible wrapper, sharing
 # vkCmdBindDescriptorSets's own recording (CommandBuffer.cpp).
 vkCmdBindDescriptorSets2
+# Roadmap F12: VK_KHR_push_descriptor's own descriptor path, sharing
+# vkCmdBindDescriptorSets's own binding-to-heap-slot translation through
+# CommandBuffer::bindDescriptorSets (CommandBuffer.cpp).
+vkCmdPushDescriptorSet
+vkCmdPushDescriptorSetWithTemplate
+# Roadmap F12 (closing roadmap E6's own deferred item): VK_KHR_maintenance6's
+# pNext-extensible wrappers, sharing vkCmdPushDescriptorSet/
+# vkCmdPushDescriptorSetWithTemplate's own recording above.
+vkCmdPushDescriptorSet2
+vkCmdPushDescriptorSetWithTemplate2
 vkCmdDispatch
 vkCmdDispatchBase
 vkCmdDispatchIndirect

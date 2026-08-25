@@ -34,6 +34,7 @@
 
 #include <array>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -44,6 +45,8 @@ class Buffer;
 class CommandBuffer;
 class ComputePipeline;
 class DescriptorSet;
+class DescriptorSetLayout;
+class DescriptorUpdateTemplate;
 class Event;
 class Framebuffer;
 class GraphicsPipeline;
@@ -320,14 +323,27 @@ struct RecordedCommand {
 /// per-command-buffer dispatch table.
 class CommandBuffer : public DispatchableBase {
 public:
+  // (roadmap F12) Both declared here but defined out of line
+  // (CommandBuffer.cpp, which includes Descriptor.h) rather than left
+  // implicit/inline: `PushDescriptorSets` below needs `DescriptorSet`'s
+  // complete type to construct/destroy, which this header only
+  // forward-declares (see "Headers & Library Layering": "Include
+  // minimally; use forward declarations where possible").
   explicit CommandBuffer(
-      VkCommandBufferLevel Level = VK_COMMAND_BUFFER_LEVEL_PRIMARY)
-      : Level(Level) {}
+      VkCommandBufferLevel Level = VK_COMMAND_BUFFER_LEVEL_PRIMARY);
+  ~CommandBuffer();
 
   VkCommandBufferLevel level() const { return Level; }
 
   void begin() {
     Commands.clear();
+    // (roadmap F12) "When a command buffer begins recording, all push
+    // descriptors are undefined" (`vkCmdPushDescriptorSet`'s own spec
+    // text): drop every push descriptor set this command buffer's previous
+    // recording ever allocated, exactly like `Commands` above. Out of
+    // line (see the constructor/destructor's own comment) since
+    // `PushDescriptorSets` needs `DescriptorSet`'s complete type to clear.
+    clearPushDescriptorSets();
     Recording = true;
   }
   void end() { Recording = false; }
@@ -335,6 +351,7 @@ public:
   /// matching Vulkan's "reset to the initial state" semantics.
   void reset() {
     Commands.clear();
+    clearPushDescriptorSets();
     Recording = false;
   }
 
@@ -355,6 +372,27 @@ public:
     Cmd.DynamicOffsets = std::move(DynamicOffsets);
     Commands.push_back(std::move(Cmd));
   }
+  /// (roadmap F12) `vkCmdPushDescriptorSet`: applies \p Writes (per
+  /// `vkUpdateDescriptorSets`'s own dispatch, each entry's `dstSet` ignored
+  /// -- see `applyDescriptorWrites`'s comment) to this command buffer's own
+  /// push descriptor set for slot \p Set, allocated against \p Layout on
+  /// first use, then records a `bindDescriptorSets`-shaped bind of it --
+  /// sharing that call's own binding-to-heap-slot translation exactly like
+  /// "Descriptor Model" requires of this new, lighter-weight descriptor
+  /// path. Writes to the same slot accumulate across calls ("can be updated
+  /// incrementally", `vkCmdPushDescriptorSet`'s own spec text) for as long
+  /// as \p Layout keeps agreeing with whatever slot \p Set last held --
+  /// see `getOrCreatePushDescriptorSet`.
+  void pushDescriptorSet(uint32_t Set, const DescriptorSetLayout &Layout,
+                         llvm::ArrayRef<VkWriteDescriptorSet> Writes);
+  /// (roadmap F12) `vkCmdPushDescriptorSetWithTemplate`: same as
+  /// `pushDescriptorSet` above, but applying \p Template's entries against
+  /// \p Data (per `vkUpdateDescriptorSetWithTemplate`'s own dispatch)
+  /// instead of a `VkWriteDescriptorSet` array.
+  void pushDescriptorSetWithTemplate(uint32_t Set,
+                                     const DescriptorSetLayout &Layout,
+                                     const DescriptorUpdateTemplate &Template,
+                                     const void *Data);
   void dispatch(std::array<uint32_t, 3> Count) {
     RecordedCommand Cmd;
     Cmd.Op = RecordedCommand::Kind::Dispatch;
@@ -834,7 +872,42 @@ public:
   const PhysicalDeviceInfo *getPhysicalDeviceInfo() const { return Info; }
 
 private:
+  /// (roadmap F12) Returns a new push descriptor set snapshot for slot
+  /// \p Set: a fresh copy of whatever slot \p Set's own most-recently
+  /// pushed snapshot held, if its layout matches \p Layout ("can be
+  /// updated incrementally", `vkCmdPushDescriptorSet`'s own spec text --
+  /// each push must build on the previous one's writes rather than starting
+  /// over), or an empty one otherwise: a different layout for the same
+  /// slot "disturbs" its push descriptor set exactly like binding an
+  /// incompatible real descriptor set does, so its previous contents must
+  /// not leak into the new layout's own binding numbers. A *copy* rather
+  /// than the same mutated-in-place object is required because commands
+  /// only take effect when this command buffer is later executed
+  /// (`executeCommandBuffer`), by which time every recorded push has
+  /// already happened -- an earlier `BindDescriptorSets` command recorded
+  /// against the previous snapshot must keep seeing that snapshot's own
+  /// point-in-time contents, not whatever a later push in the same
+  /// recording went on to add.
+  DescriptorSet *
+  getOrCreatePushDescriptorSet(uint32_t Set, const DescriptorSetLayout &Layout);
+  /// (roadmap F12) Clears both push-descriptor-set members below, out of
+  /// line for the same reason the constructor/destructor are
+  /// (`DescriptorSet`'s complete type). Called by `begin`/`reset`.
+  void clearPushDescriptorSets();
+
   std::vector<RecordedCommand> Commands;
+  /// (roadmap F12) Owns every push descriptor set snapshot this command
+  /// buffer's current recording has ever created via `pushDescriptorSet`/
+  /// `pushDescriptorSetWithTemplate` -- kept alive because an earlier
+  /// `BindDescriptorSets` command may still reference an earlier snapshot
+  /// (see `getOrCreatePushDescriptorSet`'s own comment), not just the
+  /// latest one. Cleared by `begin`/`reset`.
+  std::vector<std::unique_ptr<DescriptorSet>> PushDescriptorSetStorage;
+  /// (roadmap F12) Slot number -> that slot's own most-recently created
+  /// snapshot (a non-owning pointer into `PushDescriptorSetStorage`),
+  /// consulted by `getOrCreatePushDescriptorSet` to decide what the next
+  /// push to that slot should copy forward. Cleared by `begin`/`reset`.
+  std::map<uint32_t, DescriptorSet *> CurrentPushDescriptorSets;
   bool Recording = false;
   const PhysicalDeviceInfo *Info = nullptr;
   VkCommandBufferLevel Level;

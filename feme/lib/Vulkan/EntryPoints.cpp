@@ -600,8 +600,18 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // case below.
       Props14->maxVertexAttribDivisor = MaxVertexAttribDivisor;
       Props14->supportsNonZeroFirstInstance = VK_TRUE;
-      // (roadmap F12) `pushDescriptor` is unimplemented.
-      Props14->maxPushDescriptors = 0;
+      // (roadmap F12) `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWith
+      // Template` (CommandBuffer.cpp) are implemented, reusing
+      // `Descriptor.{h,cpp}`'s own binding-to-heap-slot translation
+      // through `bindDescriptorSets`; `32` is the spec-mandated minimum
+      // `maxPushDescriptors`, matching every other per-descriptor-type
+      // limit above (`maxDescriptorSetSamplers`, ...) that is a real,
+      // enforced value equal to its own mandatory floor rather than a
+      // larger, unverified one -- this ICD's push descriptor set is an
+      // ordinary `DescriptorSet` object with no smaller heap of its own to
+      // cap it further. Must agree with the dedicated
+      // `VkPhysicalDevicePushDescriptorProperties` case below.
+      Props14->maxPushDescriptors = 32;
       // (roadmap F8b) `buildSubpassInputHeap` (CommandBuffer.cpp) feeds a
       // depth (`D16_UNORM`/`D32_FLOAT`) or stencil (`S8_UINT`) attachment
       // into `feme.stage.subpass.load` exactly like a color one, and the
@@ -797,6 +807,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       std::memcpy(HostImageCopy->optimalTilingLayoutUUID,
                   Info.OptimalTilingLayoutUUID, VK_UUID_SIZE);
       HostImageCopy->identicalMemoryTypeRequirements = VK_TRUE;
+      break;
+    }
+    // (roadmap F12) `VK_KHR_push_descriptor`'s own properties struct, whose
+    // 1.4 core and `KHR` spellings share one `sType`, agreeing with the
+    // aggregate `VkPhysicalDeviceVulkan14Properties` case above exactly
+    // like `VkPhysicalDeviceHostImageCopyProperties` already does for its
+    // own fields.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES: {
+      auto *PushDescriptor =
+          reinterpret_cast<VkPhysicalDevicePushDescriptorProperties *>(Base);
+      PushDescriptor->maxPushDescriptors = 32;
       break;
     }
     // (roadmap E7) `VK_EXT_subgroup_size_control`'s own properties struct,
@@ -1367,7 +1388,18 @@ void fillFeatures2Chain(void *pNext) {
       // must agree with the dedicated `VkPhysicalDeviceHostImageCopyFeatures`
       // struct case below.
       Features->hostImageCopy = VK_TRUE;
-      Features->pushDescriptor = VK_FALSE;
+      // (roadmap F12) `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWith
+      // Template` (CommandBuffer.cpp) are implemented, so this bit -- like
+      // `hostImageCopy` above -- is now `VK_TRUE`. Unlike every other
+      // feature bit this aggregate case sets, `pushDescriptor` has no
+      // dedicated `VkPhysicalDevicePushDescriptor*Features` struct of its
+      // own to agree with (`VK_KHR_push_descriptor`'s own promotion added
+      // only a dedicated *properties* struct, `VkPhysicalDevicePush
+      // DescriptorProperties` -- see its case below -- since the feature
+      // bit itself is new as of this 1.4 promotion, not carried forward
+      // from a pre-existing extension-specific features struct the way
+      // `hostImageCopy`/`pipelineRobustness` above were).
+      Features->pushDescriptor = VK_TRUE;
       break;
     }
     // (V6) `VK_KHR_dynamic_rendering`'s own feature struct, whose 1.3 core

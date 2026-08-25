@@ -461,7 +461,10 @@ TEST_F(PhysicalDeviceProperties2Test,
   // dedicated-struct test below.
   EXPECT_EQ(Props14.maxVertexAttribDivisor, 0xFFFFFFFFu);
   EXPECT_EQ(Props14.supportsNonZeroFirstInstance, VK_TRUE);
-  EXPECT_EQ(Props14.maxPushDescriptors, 0u);
+  // (roadmap F12) Real once `VK_KHR_push_descriptor` landed: agrees with
+  // `VkPhysicalDevicePushDescriptorProperties`'s own dedicated-struct test
+  // below.
+  EXPECT_EQ(Props14.maxPushDescriptors, 32u);
   // (roadmap F8c) `dynamicRenderingLocalRead` now covers a depth/stencil
   // attachment (F8b) and a multisample one (F8c, agrees with the
   // dedicated-struct feature bit's own comment) -- both flip to `VK_TRUE`.
@@ -1129,7 +1132,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   // now implemented, and must agree with the dedicated
   // `VkPhysicalDeviceHostImageCopyFeatures` struct case below.
   EXPECT_EQ(Features14.hostImageCopy, VK_TRUE);
-  EXPECT_EQ(Features14.pushDescriptor, VK_FALSE);
+  // Roadmap F12: `vkCmdPushDescriptorSet`/`vkCmdPushDescriptorSetWith
+  // Template` (CommandBuffer.cpp) are now implemented; unlike the fields
+  // above, `pushDescriptor` has no dedicated features struct of its own to
+  // agree with (see `EntryPoints.cpp`'s own comment) -- only the dedicated
+  // `VkPhysicalDevicePushDescriptorProperties` limit struct exists.
+  EXPECT_EQ(Features14.pushDescriptor, VK_TRUE);
 }
 
 TEST_F(
@@ -1511,6 +1519,31 @@ TEST_F(PhysicalDeviceProperties2Test,
             0);
   EXPECT_EQ(HostImageCopyProps.identicalMemoryTypeRequirements,
             Props14.identicalMemoryTypeRequirements);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       PushDescriptorPropertiesReportTheMandatoryMinimum) {
+  // Roadmap F12: `VK_KHR_push_descriptor`'s own dedicated properties
+  // struct must agree with the aggregate `VkPhysicalDeviceVulkan14Properties`
+  // case above, exactly like `VK_EXT_host_image_copy`'s own struct does.
+  VkPhysicalDevicePushDescriptorProperties PushDescriptorProps{};
+  PushDescriptorProps.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &PushDescriptorProps;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  // 32 is the spec-mandated minimum `maxPushDescriptors`; this ICD's push
+  // descriptor set is an ordinary `DescriptorSet` with no smaller heap of
+  // its own to cap it further, so the minimum is also the real value.
+  EXPECT_EQ(PushDescriptorProps.maxPushDescriptors, 32u);
+
+  VkPhysicalDeviceVulkan14Properties Props14{};
+  Props14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES;
+  Props2.pNext = &Props14;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(PushDescriptorProps.maxPushDescriptors, Props14.maxPushDescriptors);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

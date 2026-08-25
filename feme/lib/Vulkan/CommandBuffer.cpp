@@ -1922,6 +1922,10 @@ llvm::Error feme::vulkan::executeCommandBuffer(const CommandBuffer &CmdBuf) {
 
 namespace feme::vulkan {
 
+// (roadmap F12) See the declarations' own comment in CommandBuffer.h.
+CommandBuffer::CommandBuffer(VkCommandBufferLevel Level) : Level(Level) {}
+CommandBuffer::~CommandBuffer() = default;
+
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(
     VkDevice device, const VkCommandPoolCreateInfo *pCreateInfo,
     const VkAllocationCallbacks *pAllocator, VkCommandPool *pCommandPool) {
@@ -2082,6 +2086,126 @@ VKAPI_ATTR void VKAPI_CALL vkCmdBindDescriptorSets2(
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->bindDescriptorSets(pBindDescriptorSetsInfo->firstSet, std::move(Sets),
                            std::move(Offsets));
+}
+
+// (roadmap F12) `VK_KHR_push_descriptor`'s own binding-to-heap-slot
+// translation, shared with `vkCmdBindDescriptorSets` above via
+// `bindDescriptorSets` itself: a push descriptor set is just a
+// `DescriptorSet` snapshot this command buffer owns instead of a pool,
+// bound the same way once its writes are applied (see
+// `CommandBuffer::pushDescriptorSet`'s own comment in CommandBuffer.h).
+DescriptorSet *
+CommandBuffer::getOrCreatePushDescriptorSet(uint32_t Set,
+                                            const DescriptorSetLayout &Layout) {
+  auto It = CurrentPushDescriptorSets.find(Set);
+  std::unique_ptr<DescriptorSet> NewSet =
+      (It != CurrentPushDescriptorSets.end() &&
+       &It->second->getLayout() == &Layout)
+          ? std::make_unique<DescriptorSet>(*It->second)
+          : std::make_unique<DescriptorSet>(Layout);
+  DescriptorSet *Result = NewSet.get();
+  PushDescriptorSetStorage.push_back(std::move(NewSet));
+  CurrentPushDescriptorSets[Set] = Result;
+  return Result;
+}
+
+void CommandBuffer::clearPushDescriptorSets() {
+  PushDescriptorSetStorage.clear();
+  CurrentPushDescriptorSets.clear();
+}
+
+void CommandBuffer::pushDescriptorSet(
+    uint32_t Set, const DescriptorSetLayout &Layout,
+    llvm::ArrayRef<VkWriteDescriptorSet> Writes) {
+  DescriptorSet *Target = getOrCreatePushDescriptorSet(Set, Layout);
+  applyDescriptorWrites(*Target, Writes);
+  bindDescriptorSets(Set, {Target}, {});
+}
+
+void CommandBuffer::pushDescriptorSetWithTemplate(
+    uint32_t Set, const DescriptorSetLayout &Layout,
+    const DescriptorUpdateTemplate &Template, const void *Data) {
+  DescriptorSet *Target = getOrCreatePushDescriptorSet(Set, Layout);
+  applyDescriptorUpdateTemplate(*Target, Template, Data);
+  bindDescriptorSets(Set, {Target}, {});
+}
+
+// (roadmap F12) `VK_KHR_push_descriptor`'s `vkCmdPushDescriptorSet`: unlike
+// every other descriptor-set entry point, \p layout's own descriptor set
+// layout for slot \p set is what a push descriptor set is created *from*
+// (there is no `VkDescriptorSetLayout` handle argument here at all -- see
+// "Descriptor Model"'s push-descriptor note), so \p layout must be
+// resolved even though `vkCmdBindDescriptorSets` above never needs its own
+// `VkPipelineLayout` argument for anything.
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSet(
+    VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
+    VkPipelineLayout layout, uint32_t set, uint32_t descriptorWriteCount,
+    const VkWriteDescriptorSet *pDescriptorWrites) {
+  if (pipelineBindPoint != VK_PIPELINE_BIND_POINT_COMPUTE &&
+      pipelineBindPoint != VK_PIPELINE_BIND_POINT_GRAPHICS)
+    return; // Ray tracing is V8.
+  const auto *Layout = fromHandle<PipelineLayout>(layout);
+  if (set >= Layout->setLayouts().size())
+    return;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pushDescriptorSet(
+          set, *Layout->setLayouts()[set],
+          llvm::ArrayRef(pDescriptorWrites, descriptorWriteCount));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate(
+    VkCommandBuffer commandBuffer,
+    VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout, uint32_t set, const void *pData) {
+  const auto *Layout = fromHandle<PipelineLayout>(layout);
+  if (set >= Layout->setLayouts().size())
+    return;
+  const auto *Template =
+      fromHandle<DescriptorUpdateTemplate>(descriptorUpdateTemplate);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pushDescriptorSetWithTemplate(set, *Layout->setLayouts()[set],
+                                      *Template, pData);
+}
+
+// (roadmap F12) `VK_KHR_maintenance6`'s `vkCmdPushDescriptorSet2`: the same
+// arguments as `vkCmdPushDescriptorSet` above, wrapped in a single
+// `pNext`-extensible `VkPushDescriptorSetInfo` in place of a
+// `pipelineBindPoint` argument plus four flat ones -- sharing the same
+// underlying mechanism these two rows agreed to be sequenced or implemented
+// together over (see Roadmap.md's F12/E6 dependency notes), exactly like
+// `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2` already share
+// `vkCmdBindDescriptorSets`/`vkCmdPushConstants`'s own recording above.
+// `stageFlags` needs no validation here, the same way `vkCmdBindDescriptorSets2
+// `'s own comment documents for its sibling field.
+VKAPI_ATTR void VKAPI_CALL
+vkCmdPushDescriptorSet2(VkCommandBuffer commandBuffer,
+                        const VkPushDescriptorSetInfo *pPushDescriptorSetInfo) {
+  const auto *Layout =
+      fromHandle<PipelineLayout>(pPushDescriptorSetInfo->layout);
+  if (pPushDescriptorSetInfo->set >= Layout->setLayouts().size())
+    return;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pushDescriptorSet(
+          pPushDescriptorSetInfo->set,
+          *Layout->setLayouts()[pPushDescriptorSetInfo->set],
+          llvm::ArrayRef(pPushDescriptorSetInfo->pDescriptorWrites,
+                         pPushDescriptorSetInfo->descriptorWriteCount));
+}
+
+VKAPI_ATTR void VKAPI_CALL vkCmdPushDescriptorSetWithTemplate2(
+    VkCommandBuffer commandBuffer, const VkPushDescriptorSetWithTemplateInfo
+                                       *pPushDescriptorSetWithTemplateInfo) {
+  const auto *Layout =
+      fromHandle<PipelineLayout>(pPushDescriptorSetWithTemplateInfo->layout);
+  if (pPushDescriptorSetWithTemplateInfo->set >= Layout->setLayouts().size())
+    return;
+  const auto *Template = fromHandle<DescriptorUpdateTemplate>(
+      pPushDescriptorSetWithTemplateInfo->descriptorUpdateTemplate);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->pushDescriptorSetWithTemplate(
+          pPushDescriptorSetWithTemplateInfo->set,
+          *Layout->setLayouts()[pPushDescriptorSetWithTemplateInfo->set],
+          *Template, pPushDescriptorSetWithTemplateInfo->pData);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdDispatch(VkCommandBuffer commandBuffer,
