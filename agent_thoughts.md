@@ -32965,3 +32965,124 @@ Executor.cpp's own, separate `readDepth`/`writeDepth`/`readStencil`/`writeStenci
 this row's own scope covers) and FeMeGraphicsDesign.md's/FeMeVulkanDesign.md's own
 notes about `D32_FLOAT_S8X24_UINT` remaining unsupported *there* untouched, since
 that is a genuinely different subsystem this row's own scope does not touch.
+
+# Agent thoughts: roadmap F12a (std140 uniform buffer array stride)
+
+**Root cause.** `dEQP-VK.pipeline.monolithic.push_descriptor.compute.
+incremental_updates*`'s own shader indexes `layout(std140) uniform Input {
+uint data[16]; } ubo;` by `gl_GlobalInvocationID.x`. glslang emits this
+block directly (no FeMe upstream wrapper struct): `!spirv.ptr<!spirv.struct<
+(!spirv.array<16 x i32, stride=16> [0]), Block>, Uniform>`. Tracing
+`BlockAccessChainPattern`/`getUniformBlockElement` in
+SPIRVToLLVMPatterns.cpp, this single-member block did not match either of
+`getUniformBlockElement`'s two existing shapes (a wrapped field *struct*, or
+the direct multi-member case), so it fell to the direct/unwrapped path:
+`Content = Struct{Array}`, navigated by first getting a pointer to the
+struct's sole member (a compile-time-constant `0` selector) and then an
+ordinary `getelementptr` into that member's own converted `spirv::ArrayType`.
+That conversion is exactly where it broke: MLIR's own `convertArrayType`
+(`SPIRVToLLVM.cpp`) refuses to convert an array at all unless its declared
+`ArrayStride` equals its element's own natural size -- true for a std430
+storage buffer array (stride == size, always, by construction) but not a
+std140 one, which widens every array element to a 16-byte-aligned stride
+regardless of its own size (4 bytes for a scalar `uint` here). Type
+conversion failing there is what surfaced as "failed to legalize operation
+'spirv.AccessChain'" one level up, since the whole pattern's `matchAndRewrite`
+bails out once `TypeConverter.convertType` returns null.
+
+**Why the RuntimeArrayType fix (already in place for `std430` storage
+buffers) can't just be copied verbatim.** A storage buffer's own sole
+runtime-array member is already special-cased as a *wrapper* (`BlockElement::
+HasWrapper`), whose dynamic index reaches `llvm.spv.resource.getpointer`
+directly -- no typed GEP at all, so the stride-vs-natural-size mismatch never
+arises, because `feme::cpu::SPIRVResourceLoweringPass::lowerAccesses`
+recomputes the byte offset itself (`index * stride`) using the *element
+type's own natural size*, which is always correct for std430 by the spec's
+own layout rules. For a std140 fixed array, that same "derive stride from
+natural size" shortcut is wrong: the real stride (16) has to come from
+somewhere else, since it doesn't equal the natural size (4) the way
+std430's always does.
+
+**The fix.** Two coordinated changes:
+1. `getUniformBlockElement` (SPIRVToLLVMPatterns.cpp) now recognizes a
+   uniform block whose sole member is a *fixed-size* array the same way a
+   storage buffer's sole runtime array already is -- `Content = Array`,
+   `HasWrapper = true` -- so its dynamic index reaches
+   `llvm.spv.resource.getpointer` directly too, with no typed GEP (and so no
+   need to convert the mismatched-stride array type at all on that path).
+2. Since the real stride (16) still has to be communicated to
+   `feme::cpu::SPIRVResourceLoweringPass` somehow, `convertUniformBlockType`
+   now builds the handle's `ContentType` as the same `!llvm.array<0 x T>`
+   marker a storage buffer's own wrapper already uses (from just the
+   *element* type, which always converts fine -- `i32` here), and adds the
+   real stride as `spirv.VulkanBuffer`'s own new **third** integer parameter
+   (present only for this shape; every other shape keeps its existing two).
+   `classifyVulkanBufferHandle` reads that third parameter back into a new
+   `HandleKind::UniformArray`, and `lowerAccesses` multiplies the dynamic
+   index by it exactly like `HandleKind::Storage` already does -- the only
+   difference from a storage buffer being that the stride comes from the
+   handle type instead of the element's own natural size, and that
+   `hasOnlySupportedUses` still rejects a `store` through it (Vulkan
+   disallows writing a uniform buffer).
+
+Since `LLVMTargetExtType` allows different instantiations of the same named
+type with different arities (existing 2-int-param `spirv.VulkanBuffer`
+handles are untouched), this needed zero changes to any pre-existing test
+using the ordinary 2-parameter shape -- only the new 3-parameter shape is
+new. One existing lit test did need updating regardless:
+`spirv-to-llvm-glslang-blocks.mlir`'s own `read_element` case (`uniform UBO {
+float data[4]; }`, a *naturally*-strided sized array, stride == size) used
+to be recognized as the direct/unwrapped shape and navigated with a typed
+GEP; it is now recognized as this new wrapper shape uniformly regardless of
+whether the stride happens to be natural, which changes its expected output
+shape (no more GEP -- straight to `getpointer`) without changing its actual
+behavior at all (multiplying by a stride equal to the natural size is
+exactly what the GEP was already doing).
+
+**A second, unrelated bug the CTS run uncovered.** Fixing the reported
+`spirv.AccessChain` diagnostic did not turn any of the 4 CTS cases green:
+re-running them surfaced a *different*, previously-masked error --
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but got
+'vector<3xi32>'` -- from the exact same shader's own `gl_GlobalInvocationID.x`.
+Confirmed by hand with a minimal standalone repro (no uniform/storage buffer
+involved at all): an `spirv.AccessChain` selecting one lane of a builtin
+`Input` variable FeMe already models as a plain SSA value (not memory, see
+`BuiltInAddressOfPattern`/`LoadValuePattern`'s own comment) has no dedicated
+conversion pattern of its own, and falls through to MLIR's default
+`AccessChainPattern`, which assumes its base operand converted to a real
+`!llvm.ptr` and builds a `getelementptr` treating the raw vector value as
+one instead. This is unrelated to F12a's own std140 stride scope (it
+reproduces with a storage buffer array and no uniform buffer in the
+picture at all), so rather than silently expanding this task's scope, split
+it off as a new roadmap row (F12b) with the root cause and a suggested fix
+direction recorded there, matching the exact same "split off" precedent
+F12a's own row was itself created under.
+
+**Verification.** `ninja check-feme` (assertions + ccache): 1790 discovered,
+1789 passed, 1 pre-existing unsupported (10 more discovered than before this
+change: 4 new `SPIRVResourceLoweringTest` cases, a new
+`spirv-resource-lowering-uniform-array.ll` lit test, plus the new
+`read_std140_element` case appended to `spirv-to-llvm-glslang-blocks.mlir`
+-- that file's total case count grows by one net new `CHECK-LABEL`). Ran
+`dEQP-VK.pipeline.monolithic.push_descriptor.*` (the same 76-case group F12's
+own report measured) before and after: identical 0/76/0 totals, but `grep -c
+"failed to legalize operation 'spirv.AccessChain'"` on the log dropped from 4
+to 0, confirming the fix without introducing any new failure category or
+regressing any of the other 72 already-failing cases (verified the 33-silent
++ 39-divergent-vector counts are exactly unchanged). Also stashed the change
+entirely and re-ran `dEQP-VK.ubo.*` (13240 cases, already 0% passing in this
+ICD for unrelated pre-existing reasons -- `shaderUniformBufferUnsizedArray`
+not supported plus a large pre-existing shader-compilation gap) both before
+and after: byte-for-byte identical 0/5687/7553 totals either way, confirming
+no regression in that much larger, adjacent CTS surface either.
+
+Updated Design.md (a new "Deviation: a std140 uniform buffer array needs its
+own explicit stride" subsection, right after the existing storage-buffer
+runtime-array-stride deviation note it parallels), Roadmap.md (F12a struck
+through and closed, with a new F12b row recording the second bug this row's
+own CTS re-run uncovered), and VulkanCTSReport.md (F12's own table row now
+cross-references F12a's closure, plus a new "Roadmap F12a: measured impact"
+section with the before/after numbers above). Left
+Vulkan14FeatureInventory.md/VulkanExtensionInventory.md untouched: F12a is a
+pure shader-compilation bug fix, not a feature/extension enablement change,
+so neither document has anything to say about it.
