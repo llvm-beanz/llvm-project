@@ -4691,7 +4691,7 @@ Every one of the 1496 `Fail`s breaks down as:
 |---|---|---|
 | `retcode: VK_ERROR_INITIALIZATION_FAILED` (`vk.createGraphicsPipelines`), `error: feme-graphics-validate-stage: 'feme.stage.input.load' ... refers to element N with the wrong direction` | 1468 | A pre-existing vertex-input-direction gap in shader compilation, unrelated to this row -- the `depth_stencil` subgroup's own render-pass-based test draws a full-screen triangle, hitting a shader-compilation class of failure this ICD already has outside host image copy entirely (the same "resource handle this ICD's CPU target cannot normalize" class E6/F8's own reports note) |
 | `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` | 4 | `feme-cpu-simdize`'s own divergent-value rejection, the same pre-existing pipeline-creation-class gap as the row above, coincidentally hit by four more `depth_stencil` cases |
-| `Depth copy failed` | 24 | This row's own real, documented gap (roadmap F11a, split off below): `copyBufferImageRegion` (`ImageOps.cpp`) now cleanly *rejects* a single-aspect copy of a combined depth/stencil format (`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`) rather than mis-sizing or crashing on it (see this row's own "two real, pre-existing gaps" note in Roadmap.md) -- these 24 `simple.{d16_unorm_s8_uint,d24_unorm_s8_uint,d32_sfloat_s8_uint}.*` cases are exactly that rejection surfacing as a clean `Fail` instead of `NotSupported`, since `HostImageCopyTestCase::checkSupport` has no way to know in advance that this ICD cannot yet copy one aspect of a combined format |
+| ~~`Depth copy failed`~~ | ~~24~~ | This row's own real, documented gap at the time -- `copyBufferImageRegion` (`ImageOps.cpp`) used to cleanly *reject* a single-aspect copy of a combined depth/stencil format (`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`) rather than mis-sizing or crashing on it (see this row's own "two real, pre-existing gaps" note in Roadmap.md) -- these 24 `simple.{d16_unorm_s8_uint,d24_unorm_s8_uint,d32_sfloat_s8_uint}.*` cases were exactly that rejection surfacing as a clean `Fail` instead of `NotSupported`. **Fixed by roadmap F11a**, which implements the real per-aspect read-modify-write this row's own finding called for; see "Roadmap F11a: measured impact" below for the confirming re-run (all 24 now `Passed`, `Failed` down to 1472/73289 from this row's own original 1496/73289) |
 
 None of the 1496 failures is a crash, a hang, or memory corruption --
 every one is a clean `VkResult`/`llvm::Error` propagated back to a
@@ -4750,6 +4750,50 @@ case, `HostImageCopyTest`'s six new cases, `EntryPointsTest`'s new
 `VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` case, and
 `PhysicalDeviceInfoTest`'s two new dedicated feature/properties cases),
 no regressions.
+
+## Roadmap F11a: measured impact (combined depth/stencil aspect copy)
+
+`dEQP-VK.image.host_image_copy.*` (`--deqp-case`, same reproduction recipe
+as F9/F10/F11's own sections above, and the same environment/loader
+workaround F11's own section documents -- `LD_LIBRARY_PATH` pointed at a
+current, 1.4.328 `Vulkan-Loader` built from source, since this
+environment's installed system loader (1.3.275) still silently no-ops the
+purely-1.4-core commands this group also calls): 73289 cases discovered,
+re-run against the exact same group F11's own section measured.
+
+```
+Passed:        1145/73289 (1.6%)
+Failed:        1472/73289 (2.0%)
+Not supported: 70672/73289 (96.4%)
+```
+
+`Passed` is up by exactly 24 and `Failed` down by exactly 24 from F11's
+own 1121/1496 baseline -- precisely the 24 `Depth copy failed` cases F11's
+own table attributed to `copyBufferImageRegion`'s clean rejection of a
+single-aspect combined-depth/stencil copy. None of the 24
+`simple.{d16_unorm_s8_uint,d24_unorm_s8_uint,d32_sfloat_s8_uint}.*` cases
+appear anywhere in this re-run's failure list any more (`grep -c "Depth
+copy failed"` on the new log is `0`); the remaining 1472 failures are
+exactly F11's own two pre-existing, unrelated shader-compilation gaps
+(1468 + 4, the same `vk.createGraphicsPipelines`-class failures F11's own
+table already attributed to a gap this row's own scope does not touch),
+confirming this row's fix neither missed a case nor introduced a
+regression anywhere else in the group.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1786 discovered, 1785 passed, 1
+unsupported (pre-existing, unrelated) -- 6 more discovered than an
+intermediate rebuild with only this row's production-code fix applied and
+its two old rejection-expecting tests (`ImageTest`'s
+`CopyBufferToImageRejectsCombinedDepthStencilFormat`,
+`HostImageCopyTest`'s `CopyMemoryToImageRejectsCombinedDepthStencilFormat`)
+still in place, which failed for the expected reason (the rejection they
+asserted no longer happens): `ImageFixtureTest` gains four new
+`D32_FLOAT_S8X24_UINT`/region-copy cases, `ImageTest` replaces its one old
+rejection case with two new real depth/stencil-aspect-copy cases plus one
+new ambiguous-aspect-mask rejection case, and `HostImageCopyTest` replaces
+its own one old rejection case with one new round-trip case, for a net six
+more discovered and zero failing.
 
 ## Roadmap F12: measured impact (`VK_KHR_push_descriptor`)
 
