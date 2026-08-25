@@ -144,6 +144,19 @@ TEST_F(StageOpsTest, StreamEmitAndCutCarryStreamIndex) {
   EXPECT_EQ(Kind, StageOpKind::StreamEmit);
 }
 
+TEST_F(StageOpsTest, SubpassLoadCarriesAttachmentIndexAndComponent) {
+  CallInst *CI = createStageSubpassLoad(B, /*AttachmentIndex=*/2,
+                                       /*Component=*/1);
+  EXPECT_EQ(CI->getCalledFunction()->getName(), "feme.stage.subpass.load");
+  EXPECT_FALSE(isStageOpKindOverloaded(StageOpKind::SubpassLoad));
+  EXPECT_TRUE(CI->getType()->isFloatTy());
+  ASSERT_EQ(getStageOpConstantOperand(*CI, 0), 2u);
+  ASSERT_EQ(getStageOpConstantOperand(*CI, 1), 1u);
+  StageOpKind Kind;
+  ASSERT_TRUE(isStageOpCall(*CI, &Kind));
+  EXPECT_EQ(Kind, StageOpKind::SubpassLoad);
+}
+
 TEST_F(StageOpsTest, NonStageOpCallIsRejected) {
   FunctionCallee Callee =
       M->getOrInsertFunction("not.a.stage.op", B.getVoidTy());

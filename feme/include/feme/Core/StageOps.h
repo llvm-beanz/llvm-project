@@ -212,6 +212,13 @@ llvm::CallInst *createStageStreamEmit(llvm::IRBuilderBase &B,
 
 /// `feme.stage.stream.cut(stream)`.
 llvm::CallInst *createStageStreamCut(llvm::IRBuilderBase &B, uint32_t Stream);
+
+/// `feme.stage.subpass.load(attachment_index, component)`; both operands
+/// are `i32` compile-time constants (see `StageOpKind::SubpassLoad`'s
+/// comment). Always returns `f32`.
+llvm::CallInst *createStageSubpassLoad(llvm::IRBuilderBase &B,
+                                       uint32_t AttachmentIndex,
+                                       uint32_t Component);
 ///@}
 
 /// Reads back \p CI's operand \p Idx as a constant `i32`/`i8`/`i1`, or
