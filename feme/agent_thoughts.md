@@ -320,3 +320,147 @@ follow-on row than a re-split of F8b itself). `Vulkan14FeatureInventory.md`
 and `VulkanExtensionInventory.md` updated to match: `dynamicRenderingLocal
 ReadDepthStencilAttachments` real, `dynamicRenderingLocalReadMultisampled
 Attachments` still `n/a`/`VK_FALSE` with its new F8c citation.
+
+## Roadmap F8c: explicit-sample subpass-input local read (closes F8)
+
+### Plan
+
+F8b left one gap open: `buildSubpassInputHeap` lays out a multisampled
+attachment's heap slot correctly, but nothing could address a sample other
+than 0. The roadmap row's own four-step order was followed exactly:
+
+1. `feme::StageOpKind::SubpassLoad` (`StageOps.h`/`StageOps.cpp`) gains a
+   third `sample` operand. `createStageSubpassLoad` takes it as an
+   optional `llvm::Value *`, defaulting to a constant `i32 0` when null --
+   every existing (single-sample) caller/test passes nothing and is
+   unaffected. Docs on the enumerator and the builder both updated.
+2. `SubpassLoadPattern` (`SPIRVToLLVMPatterns.cpp`) accepts a lone
+   `Sample` image operand instead of unconditionally rejecting any image
+   operand at all: `hasExactImageOperands(..., Sample)` recognizes it,
+   and its one `operand_arguments` value becomes the third argument to
+   `feme.stage.subpass.load` (a synthesized constant `0` when no `Sample`
+   operand is present, keeping the implicit `subpassInput` case
+   unchanged).
+3. `lowerFragmentSubpassLoad` (`FragmentWrapper.cpp`) extracts that third
+   operand per-lane and threads it through `feme::cpu::createLoad2D`'s new
+   `Sample` parameter (`ImageCalls.h`/`.cpp`) into `feme.cpu.image.load.
+   2d.v4f32`/`femeRTFetchTexel2D` (`FeMeRuntimeCPU.c`), which now adds
+   `Sample * Layout->SampleStride` to the texel address -- the exact
+   `SampleStride`-aware stride F8b already built but nothing read a
+   non-zero index from. Every other caller of `createLoad2D`/
+   `femeRTFetchTexel2D` (point/bilinear sampling, the non-subpass
+   `OpImageFetch` path in `ResourceLowering.cpp`/`SPIRVResourceLowering.
+   cpp`) passes a constant `0`, unaffected.
+4. A CTS-shaped `DrawTest` proves the whole path end to end before the
+   limit flips (see below).
+
+### The two blockers step 4 actually hit
+
+Writing the CTS-shaped test surfaced two things neither this row's own
+four-step plan nor F8b's own status note anticipated:
+
+**MLIR's own image-operand verifier had no path for `Sample` at all.**
+`mlir/lib/Dialect/SPIRV/IR/ImageOps.cpp`'s `verifyImageOperands` has a
+`noSupportOperands` bitset that includes `Sample`, guarded by a plain
+`assert(...)` -- not a diagnosed verification failure, an actual process
+abort the moment any op (not just `spirv.ImageRead`) carries that bit.
+This is a real, pre-existing MLIR-core gap, not something scoped to this
+ICD's own conversion pattern: a `Dim::SubpassData`, `MultiSampled`
+`spirv.ImageRead` with a `["Sample"]` operand could not even be
+constructed and verified before this fix, so `SubpassLoadPattern`'s own
+step 2 above had nothing legal to consume yet. Fixed by adding a real,
+minimal validation case for `Sample` -- integer-scalar operand, legal only
+on a fetch/read/write op whose image type has `MS=1` -- mirroring the
+existing `Lod` case's own shape exactly (same "which interface/op kind is
+this legal on" structure, same "must be an integer/float scalar" check,
+same "must match the image type's own MS bit" check). This is squarely in
+"discovered a bug directly caused by or tightly coupled to the code you're
+changing" territory per this project's own working rules: without it,
+step 2's own pattern change is dead code that can never actually match
+anything a real (or even hand-written textual) SPIR-V module produces.
+Verified the fix doesn't regress anything else by running the *entire*
+`check-mlir` suite (not just `check-feme`), not only because this is core
+MLIR code shared far outside this ICD, but because the fix touches a
+function eight different image ops route through -- 4459 tests, zero
+regressions, same pre-existing skip/unsupported/xfail counts as before.
+
+**A dynamic-rendering multisample pipeline had never been created before
+in this codebase, and its creation path had a latent bug.**
+`GraphicsPipeline.cpp`'s `getRenderTargets` computes a `PipelineRenderTargets
+::SampleCount` used for a creation-time consistency check against
+`VkPipelineMultisampleStateCreateInfo::rasterizationSamples`. For a legacy
+`VkRenderPass`, that field comes from the render pass's own
+`VkAttachmentDescription::samples`; for dynamic rendering, there is no
+such field in `VkPipelineRenderingCreateInfo` at all (real Vulkan only
+learns a dynamic-rendering pipeline's real sample count from whatever gets
+bound at `vkCmdBeginRendering` time), so the code left it at its
+single-sample struct default unconditionally. Every dynamic-rendering
+pipeline with `rasterizationSamples > 1` was therefore rejected at
+creation with "the pipeline's rasterization sample count disagrees with
+its render target's" -- a latent bug with no test to trip it until this
+row's own multisample subpass test needed exactly that combination
+(`ResolvesMultisampleColorDuringRenderPass`, the only prior multisample
+pipeline test, uses a legacy `VkRenderPass`). Fixed by trusting the
+pipeline's own declared `rasterizationSamples` for the dynamic-rendering
+branch instead of the stale default; the real per-draw sample-count check
+against the actually-bound attachment (`CommandBuffer.cpp`) already
+existed, is unaffected, and is what actually enforces correctness at
+`vkCmdBeginRendering`/draw time -- this fix only stops the creation-time
+check from rejecting a case draw time would have accepted anyway. Also
+squarely "tightly coupled": without it, no dynamic-rendering multisample
+pipeline could ever be created at all, which is exactly the shape F8c's
+own limit field requires demonstrating.
+
+### The CTS-shaped test itself
+
+`DrawTest.SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`
+needed one more piece of thought: a real draw cannot *produce* four
+distinct per-sample values to read back distinctly in this rasterizer.
+`ResolvesMultisampleColorDuringRenderPass`'s own comment already says why
+-- "every sample of every covered pixel is the same solid color", since
+there is no per-sample shading model (`VkPipelineMultisampleStateCreateInfo
+::sampleShadingEnable`/a partial `pSampleMask` are both explicitly
+rejected, `GraphicsPipeline.cpp`). So the test seeds a multisample color
+attachment's backing memory directly (`fromHandle<Image>(...)->data()`,
+the same white-box technique `texelOf`/the index/instance-buffer tests
+already use elsewhere in this file) with 4 distinct per-sample values,
+then a draw's fragment shader reads sample 2 specifically back through
+`subpassLoad`'s explicit-sample form and re-stores it. Because the
+draw's own output write lands identically in every sample of the same
+attachment (the same "no per-sample shading" fact, working in the test's
+favor this time), reading back any one sample after the draw recovers the
+shader's result -- no separate resolve/output attachment needed, avoiding
+an entirely different rabbit hole (mixed-sample-count attachments bound
+in one `vkCmdBeginRendering` call, which the draw-time sample-count check
+would reject anyway).
+
+### Tests added
+
+- `StageOpsTest.SubpassLoadCarriesExplicitSample`: confirms
+  `createStageSubpassLoad`'s new `Sample` argument round-trips as the call's
+  third operand, and the existing `SubpassLoadCarriesAttachmentIndexAndComponent`
+  test gained an assertion that an absent one defaults to constant `0`.
+- `ImageSamplingTest.LoadFetchesExplicitSampleOfMultisampledTexel`:
+  direct JIT-and-call coverage of `femeRTFetchTexel2D`'s new `Sample`
+  parameter against all 4 samples of one texel, alongside the renamed/
+  re-commented `LoadFetchesSample0OfMultisampledTexel` (F8b's own test,
+  now describing itself as the default-sample-0 case rather than "the
+  only case that exists").
+- A new lit test case in `spirv-to-llvm-subpass-load.mlir`
+  (`load_subpass_multisample`) exercising `SubpassLoadPattern`'s new
+  `Sample`-image-operand path directly against a `MultiSampled` subpass
+  image and an explicit `["Sample"]` operand.
+- `DrawTest.SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`,
+  described above -- the CTS-shaped end-to-end proof the roadmap row
+  itself asked for.
+
+### Roadmap bookkeeping
+
+F8c is struck through as done. Since F8c was F8b's own last open piece,
+and F8/F8a/F8b were already struck through as done, F8's own milestone
+(`VK_KHR_dynamic_rendering_local_read`'s full scope, including both
+`dynamicRenderingLocalReadDepthStencilAttachments`/
+`dynamicRenderingLocalReadMultisampledAttachments`) is now fully closed --
+no further split-off row is needed. `Vulkan14FeatureInventory.md` and
+`VulkanExtensionInventory.md` updated to match: both limit fields and the
+extension row now say "closed"/`VK_TRUE` throughout.
