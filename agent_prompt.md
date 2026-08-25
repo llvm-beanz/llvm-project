@@ -33,21 +33,31 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F12a?
+Can you implement roadmap milestone F12b?
 
-> **A `std140` uniform buffer array's `spirv.AccessChain` fails SPIR-V->LLVM
-> legalization when dynamically indexed, split off F12's own measured-impact
-> finding.**
-> `dEQP-VK.pipeline.monolithic.push_descriptor.compute.incremental_updates*` (4
-> cases) all fail `vkCreateComputePipelines` with `failed to legalize operation
-> 'spirv.AccessChain' that was explicitly marked illegal`, indexing a
-> `layout(std140) uniform Input { uint data[16]; } ubo;` block by
-> `gl_GlobalInvocationID.x` (`!spirv.ptr<!spirv.struct<(!spirv.array<16 x i32,
-> stride=16> [0]), Block>, Uniform>`) -- unlike the equivalent `std430 buffer`
-> (storage buffer) array, which every other passing shader in this report's own
-> scope already indexes dynamically without issue. `std140`'s own 16-byte array
-> stride for a scalar element (as opposed to `std430`'s 4-byte one) is the one
-> shape difference a uniform-buffer array's own lowering must additionally
-> handle that a storage-buffer array's does not; root-causing needs comparing
-> the two paths in `feme::cpu::SPIRVResourceLoweringPass`/the SPIR-V->LLVM
-> conversion patterns to find where the `std140` stride case is unhandled
+> **A builtin `Input` vector's `spirv.AccessChain` (selecting one lane, e.g.
+> `gl_GlobalInvocationID.x`) fails SPIR-V->LLVM legalization, split off F12a's
+> own measured-impact finding.**
+> `dEQP-VK.pipeline.monolithic.push_descriptor.compute.incremental_updates*`
+> (the same 4 cases F12a's own text names) now fail `vkCreateComputePipelines`
+> with `'llvm.getelementptr' op operand #0 must be LLVM pointer type or LLVM
+> dialect-compatible vector of LLVM pointer type, but got 'vector<3xi32>'` once
+> F12a's own std140 fix is applied. `BuiltInAddressOfPattern`/`LoadValuePattern`
+> (SPIRVToLLVMPatterns.cpp) already model a builtin `Input` variable like
+> `gl_GlobalInvocationID` as a plain SSA value rather than memory, and handle a
+> *direct* load of the whole variable correctly, but an `spirv.AccessChain`
+> selecting a single lane first (`gl_GlobalInvocationID.x`'s own `OpAccessChain
+> %ptr_uint_Input %gl_GlobalInvocationID %uint_0` -- the shape glslang emits
+> when only one component is ever read, apparently distinct from the shape it
+> emits when the whole vector or more than one lane is read, which is presumably
+> why every other passing shader in this report's own scope indexes by
+> `gl_GlobalInvocationID.x`/`.xy`/etc. without issue) has no dedicated pattern
+> of its own and falls through to MLIR's own default `AccessChainPattern`, which
+> assumes its base operand converted to a real `!llvm.ptr` the way every other
+> (memory-backed) `spirv.AccessChain` base does, and builds a `getelementptr`
+> treating the raw vector value as if it were one instead. Root-causing needs a
+> new pattern recognizing an `spirv.AccessChain` whose base is one of these
+> value-modeled builtin variables and rewriting it (plus the `spirv.Load` that
+> always follows it) to an ordinary `llvm.extractelement`, mirroring how
+> `MatrixCompositeExtractPattern`'s own lane-selecting logic already works for a
+> value rather than memory
