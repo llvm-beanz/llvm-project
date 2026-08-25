@@ -197,6 +197,15 @@ struct PreparedDraw {
   /// attachment index`), the default every `vkCmdBeginRendering` instance
   /// resets to.
   llvm::ArrayRef<uint32_t> ColorAttachmentLocations;
+  /// (roadmap F8a) One `cpu::FemeImageDescriptor` per logical input-
+  /// attachment index a fragment shader's `subpassLoad()` may name,
+  /// resolved by `feme::vulkan::runDraw` (CommandBuffer.cpp) from the
+  /// currently-bound color/depth/stencil attachments through
+  /// `vkCmdSetRenderingInputAttachmentIndices`'s mapping -- see
+  /// `cpu::FemeShaderResources::SubpassInputHeap`'s comment. Empty when no
+  /// input-attachment index is mapped at all (the common case for a draw
+  /// that never calls `vkCmdSetRenderingInputAttachmentIndices`).
+  llvm::ArrayRef<cpu::FemeImageDescriptor> SubpassInputHeap;
 };
 
 } // namespace feme::graphics

@@ -1166,6 +1166,102 @@ uint32_t resolveVertexBindingStride(const GraphicsPipeline &Pipeline,
 /// graphics executor. The ICD never acquires knowledge of rasterization,
 /// and `FeMeGraphics` never acquires knowledge of `VkRenderPass` (see
 /// "Ownership boundary").
+/// Roadmap F8a: builds one `feme::cpu::FemeImageDescriptor` per logical
+/// input-attachment index a fragment shader's `subpassLoad()` may name,
+/// directly from the currently-bound render-target attachments -- not a
+/// descriptor-set image -- resolved through `Gfx.ColorAttachmentInputIndices`/
+/// `DepthInputAttachmentIndex`/`StencilInputAttachmentIndex`
+/// (`vkCmdSetRenderingInputAttachmentIndices`'s mapping, or that command's
+/// own identity/absent default: a color attachment maps to its own index
+/// when `ColorAttachmentInputIndices` is empty; depth/stencil map to no
+/// index at all -- and so are left out of \p Heap entirely -- unless
+/// explicitly set, per `VkRenderingInputAttachmentIndexInfo`'s own man
+/// page). \p Layouts backs each populated descriptor's single-mip
+/// `MipLayouts` entry and must outlive \p Heap.
+///
+/// Scoped to a single-sample draw (`SampleCount == 1`) for now: a
+/// multisample attachment's slot is left unpopulated (reads as zero)
+/// rather than guessing at a per-sample layout no test yet demonstrates --
+/// roadmap F8b tracks the multisample- and depth-stencil-specific CTS
+/// coverage `dynamicRenderingLocalReadMultisampledAttachments`/
+/// `dynamicRenderingLocalReadDepthStencilAttachments` need before either
+/// limit can honestly flip to `VK_TRUE`.
+Error buildSubpassInputHeap(
+    const GraphicsState &Gfx,
+    llvm::ArrayRef<feme::graphics::AttachmentView> Attachments,
+    const feme::graphics::DepthStencilAttachment &DepthStencil,
+    uint32_t SampleCount, std::vector<feme::cpu::FemeImageDescriptor> &Heap,
+    std::vector<feme::cpu::FemeImageSubresourceLayout> &Layouts) {
+  auto ColorIndexFor = [&](size_t I) -> uint32_t {
+    return I < Gfx.ColorAttachmentInputIndices.size()
+               ? Gfx.ColorAttachmentInputIndices[I]
+               : static_cast<uint32_t>(I);
+  };
+
+  uint32_t MaxIndex = 0;
+  bool Any = false;
+  auto considerIndex = [&](uint32_t Idx) {
+    if (Idx == VK_ATTACHMENT_UNUSED)
+      return;
+    Any = true;
+    MaxIndex = std::max(MaxIndex, Idx);
+  };
+  for (size_t I = 0; I != Attachments.size(); ++I)
+    considerIndex(ColorIndexFor(I));
+  if (Gfx.DepthInputAttachmentIndex)
+    considerIndex(*Gfx.DepthInputAttachmentIndex);
+  if (Gfx.StencilInputAttachmentIndex)
+    considerIndex(*Gfx.StencilInputAttachmentIndex);
+  if (!Any)
+    return Error::success();
+
+  Heap.assign(MaxIndex + 1, feme::cpu::FemeImageDescriptor{});
+  Layouts.assign(MaxIndex + 1, feme::cpu::FemeImageSubresourceLayout{});
+
+  auto populate = [&](uint32_t Idx,
+                      const feme::graphics::AttachmentView &View) -> Error {
+    if (Idx == VK_ATTACHMENT_UNUSED || View.Data.empty() || SampleCount != 1)
+      return Error::success();
+    Expected<uint32_t> ElemSize =
+        feme::graphics::getFixtureFormatElementSize(View.Format);
+    if (!ElemSize)
+      return ElemSize.takeError();
+    feme::cpu::FemeImageDescriptor &Dst = Heap[Idx];
+    Dst.Data = View.Data.data();
+    Dst.SizeInBytes = View.Data.size();
+    Dst.Dimension = static_cast<uint32_t>(feme::cpu::ImageDimension::Texture2D);
+    Dst.Format = static_cast<uint32_t>(View.Format);
+    Dst.Width = View.Width;
+    Dst.Height = View.Height;
+    Dst.Depth = 1;
+    Dst.MipLevels = 1;
+    Dst.ArrayLayers = 1;
+    Dst.PlaneCount = 1;
+    Dst.SampleCount = 1;
+    Dst.Flags = feme::cpu::FEME_IMAGE_SAMPLED;
+    feme::cpu::FemeImageSubresourceLayout &Layout = Layouts[Idx];
+    Layout.Offset = 0;
+    Layout.RowPitch = uint64_t(View.Width) * *ElemSize;
+    Layout.SlicePitch = Layout.RowPitch * View.Height;
+    Layout.SampleStride = 0;
+    Dst.MipLayouts = &Layout;
+    Dst.MipLayoutCount = 1;
+    return Error::success();
+  };
+
+  for (size_t I = 0; I != Attachments.size(); ++I)
+    if (Error E = populate(ColorIndexFor(I), Attachments[I]))
+      return E;
+  if (Gfx.DepthInputAttachmentIndex)
+    if (Error E = populate(*Gfx.DepthInputAttachmentIndex, DepthStencil.Depth))
+      return E;
+  if (Gfx.StencilInputAttachmentIndex)
+    if (Error E =
+            populate(*Gfx.StencilInputAttachmentIndex, DepthStencil.Stencil))
+      return E;
+  return Error::success();
+}
+
 Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
               const feme::graphics::DrawCommand &Draw,
               llvm::ArrayRef<BoundSetState> BoundSets,
@@ -1369,6 +1465,14 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   // empty (the identity default) unless a dynamic-rendering instance's own
   // `vkCmdSetRenderingAttachmentLocations` call set one.
   Prepared.ColorAttachmentLocations = Gfx.ColorAttachmentLocations;
+
+  std::vector<feme::cpu::FemeImageDescriptor> SubpassInputHeap;
+  std::vector<feme::cpu::FemeImageSubresourceLayout> SubpassInputLayouts;
+  if (Error E = buildSubpassInputHeap(Gfx, Attachments, DepthStencil,
+                                      Pipeline.sampleCount(), SubpassInputHeap,
+                                      SubpassInputLayouts))
+    return E;
+  Prepared.SubpassInputHeap = SubpassInputHeap;
 
   if (Error E = feme::graphics::executeDraws(
           Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared))

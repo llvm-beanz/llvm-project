@@ -2173,6 +2173,7 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       FRes.ImageHeap = Draw.Resources.ImageHeap;
       FRes.SamplerHeap = Draw.Resources.SamplerHeap;
       FRes.RootConstants = Draw.Resources.RootConstants;
+      FRes.SubpassInputHeap = Draw.SubpassInputHeap;
       FRes.InputLayout = &FSInLayout;
       FRes.Inputs = FSInput->Data.data();
       FRes.OutputLayout = &FSOutLayout;
