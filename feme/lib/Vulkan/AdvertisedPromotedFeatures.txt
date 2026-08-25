@@ -131,3 +131,10 @@ shaderSubgroupRotateClustered
 # AssumeTrueConversionPattern/ExpectConversionPattern), lowering directly
 # to llvm.assume/llvm.expect.
 shaderExpectAssume
+# vertexAttributeInstanceRateDivisor/vertexAttributeInstanceRateZeroDivisor:
+# roadmap F6 -- VkPipelineVertexInputDivisorStateCreateInfo's per-binding
+# divisor (GraphicsPipeline.cpp's translateVertexInput) and the executor's
+# fetch-index formula (Executor.cpp) both honor a non-default divisor,
+# including 0 ("every instance reads firstInstance").
+vertexAttributeInstanceRateDivisor
+vertexAttributeInstanceRateZeroDivisor

@@ -456,8 +456,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   // with `VkPhysicalDeviceLineRasterizationPropertiesKHR::
   // lineSubPixelPrecisionBits`'s own dedicated-struct test below.
   EXPECT_EQ(Props14.lineSubPixelPrecisionBits, 4u);
-  EXPECT_EQ(Props14.maxVertexAttribDivisor, 0u);
-  EXPECT_EQ(Props14.supportsNonZeroFirstInstance, VK_FALSE);
+  // (roadmap F6) Real once `VK_KHR_vertex_attribute_divisor` landed: agrees
+  // with `VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR`'s own
+  // dedicated-struct test below.
+  EXPECT_EQ(Props14.maxVertexAttribDivisor, 0xFFFFFFFFu);
+  EXPECT_EQ(Props14.supportsNonZeroFirstInstance, VK_TRUE);
   EXPECT_EQ(Props14.maxPushDescriptors, 0u);
   EXPECT_EQ(Props14.dynamicRenderingLocalReadDepthStencilAttachments, VK_FALSE);
   EXPECT_EQ(Props14.dynamicRenderingLocalReadMultisampledAttachments, VK_FALSE);
@@ -1073,8 +1076,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Features14.stippledRectangularLines, VK_TRUE);
   EXPECT_EQ(Features14.stippledBresenhamLines, VK_TRUE);
   EXPECT_EQ(Features14.stippledSmoothLines, VK_TRUE);
-  EXPECT_EQ(Features14.vertexAttributeInstanceRateDivisor, VK_FALSE);
-  EXPECT_EQ(Features14.vertexAttributeInstanceRateZeroDivisor, VK_FALSE);
+  // Roadmap F6: `VkPipelineVertexInputDivisorStateCreateInfo`'s per-binding
+  // divisor is now honored (`GraphicsPipeline.cpp`'s `translateVertexInput`,
+  // Executor.cpp's fetch-index formula), and must agree with the dedicated
+  // `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` struct case below.
+  EXPECT_EQ(Features14.vertexAttributeInstanceRateDivisor, VK_TRUE);
+  EXPECT_EQ(Features14.vertexAttributeInstanceRateZeroDivisor, VK_TRUE);
   EXPECT_EQ(Features14.indexTypeUint8, VK_FALSE);
   EXPECT_EQ(Features14.dynamicRenderingLocalRead, VK_FALSE);
   // Roadmap E5: now genuinely implemented (RenderPass.cpp/
@@ -1228,6 +1235,35 @@ TEST_F(PhysicalDeviceProperties2Test,
   Props2.pNext = &LineProperties;
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
   EXPECT_EQ(LineProperties.lineSubPixelPrecisionBits, 4u);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       VertexAttributeDivisorIsAdvertisedThroughItsOwnDedicatedStructs) {
+  // Roadmap F6: `VK_KHR_vertex_attribute_divisor`'s own dedicated feature
+  // and properties structs must agree with the aggregate
+  // `VkPhysicalDeviceVulkan14Features`/`...Vulkan14Properties` cases above,
+  // exactly like `VK_KHR_line_rasterization`'s own structs do.
+  VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR DivisorFeatures{};
+  DivisorFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_KHR;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &DivisorFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(DivisorFeatures.vertexAttributeInstanceRateDivisor, VK_TRUE);
+  EXPECT_EQ(DivisorFeatures.vertexAttributeInstanceRateZeroDivisor, VK_TRUE);
+
+  VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR DivisorProperties{};
+  DivisorProperties.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES_KHR;
+
+  VkPhysicalDeviceProperties2 Props2{};
+  Props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  Props2.pNext = &DivisorProperties;
+  vkGetPhysicalDeviceProperties2(Physical, &Props2);
+  EXPECT_EQ(DivisorProperties.maxVertexAttribDivisor, 0xFFFFFFFFu);
+  EXPECT_EQ(DivisorProperties.supportsNonZeroFirstInstance, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

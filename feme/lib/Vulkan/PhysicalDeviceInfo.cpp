@@ -656,6 +656,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // it must be listed here too.
       {VK_KHR_LINE_RASTERIZATION_EXTENSION_NAME,
        VK_KHR_LINE_RASTERIZATION_SPEC_VERSION},
+      // (roadmap F6) `VkPipelineVertexInputDivisorStateCreateInfo`'s
+      // per-binding instance-rate divisor is implemented
+      // (`GraphicsPipeline.cpp`'s `translateVertexInput`, the executor's
+      // fetch-index formula in `Executor.cpp`); like
+      // `VK_KHR_shader_subgroup_rotate`/`VK_KHR_shader_expect_assume`/
+      // `VK_KHR_line_rasterization` above, `dEQP-VK.pipeline.vertex_input.
+      // instance_rate_divisor.*` enables this extension by name regardless
+      // of the advertised `apiVersion`, so it must be listed here too.
+      {VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME,
+       VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -8,6 +8,7 @@
 
 #include "EntryPoints.h"
 #include "Format.h"
+#include "GraphicsPipeline.h"
 #include "Icd.h"
 #include "Image.h"
 #include "Objects.h"
@@ -584,9 +585,19 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // verified. Must agree with the dedicated
       // `VkPhysicalDeviceLineRasterizationPropertiesKHR` case below.
       Props14->lineSubPixelPrecisionBits = 4;
-      // (roadmap F6) `vertexAttributeInstanceRateDivisor` is unimplemented.
-      Props14->maxVertexAttribDivisor = 0;
-      Props14->supportsNonZeroFirstInstance = VK_FALSE;
+      // (roadmap F6) `maxVertexAttribDivisor` is a real, verified limit --
+      // the fetch-index division it bounds is a plain 32-bit integer
+      // divide with no narrower bound of its own (see
+      // `GraphicsPipeline.h`'s `MaxVertexAttribDivisor`) -- and
+      // `supportsNonZeroFirstInstance` is genuinely `VK_TRUE`: the fetch
+      // formula both `GraphicsPipeline.cpp`/`Executor.cpp` implement is
+      // `firstInstance + (instanceIndex - firstInstance) / divisor`, not
+      // the simpler `instanceIndex / divisor` a driver restricted to
+      // `firstInstance == 0` could get away with. Must agree with the
+      // dedicated `VkPhysicalDeviceVertexAttributeDivisorPropertiesKHR`
+      // case below.
+      Props14->maxVertexAttribDivisor = MaxVertexAttribDivisor;
+      Props14->supportsNonZeroFirstInstance = VK_TRUE;
       // (roadmap F12) `pushDescriptor` is unimplemented.
       Props14->maxPushDescriptors = 0;
       // (roadmap F8) `dynamicRenderingLocalRead` is unimplemented.
@@ -658,6 +669,18 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
           reinterpret_cast<VkPhysicalDeviceLineRasterizationPropertiesKHR *>(
               Base);
       LineRasterization->lineSubPixelPrecisionBits = 4;
+      break;
+    }
+    // (roadmap F6) `VK_KHR_vertex_attribute_divisor`'s own properties
+    // struct, agreeing with the aggregate `VkPhysicalDeviceVulkan14Properties`
+    // case above exactly like `VkPhysicalDeviceLineRasterizationPropertiesKHR`
+    // already does for its own field.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_PROPERTIES: {
+      auto *VertexAttributeDivisor =
+          reinterpret_cast<VkPhysicalDeviceVertexAttributeDivisorProperties *>(
+              Base);
+      VertexAttributeDivisor->maxVertexAttribDivisor = MaxVertexAttribDivisor;
+      VertexAttributeDivisor->supportsNonZeroFirstInstance = VK_TRUE;
       break;
     }
     // (roadmap E5) `VK_KHR_maintenance5`'s own properties struct, agreeing
@@ -1198,8 +1221,16 @@ void fillFeatures2Chain(void *pNext) {
       Features->stippledRectangularLines = VK_TRUE;
       Features->stippledBresenhamLines = VK_TRUE;
       Features->stippledSmoothLines = VK_TRUE;
-      Features->vertexAttributeInstanceRateDivisor = VK_FALSE;
-      Features->vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
+      // (roadmap F6) `VkPipelineVertexInputDivisorStateCreateInfo`'s
+      // per-binding divisor -- including the `0` case, "every instance
+      // reads `firstInstance`" -- is now honored by both
+      // `GraphicsPipeline.cpp`'s `translateVertexInput` and the executor's
+      // fetch-index formula (Executor.cpp), so these two bits -- like
+      // `rectangularLines` above -- must agree with the dedicated
+      // `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` struct case
+      // below.
+      Features->vertexAttributeInstanceRateDivisor = VK_TRUE;
+      Features->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
       Features->indexTypeUint8 = VK_FALSE;
       Features->dynamicRenderingLocalRead = VK_FALSE;
       Features->maintenance5 = VK_TRUE;
@@ -1329,6 +1360,18 @@ void fillFeatures2Chain(void *pNext) {
       Features->stippledRectangularLines = VK_TRUE;
       Features->stippledBresenhamLines = VK_TRUE;
       Features->stippledSmoothLines = VK_TRUE;
+      break;
+    }
+    // (roadmap F6) `VK_KHR_vertex_attribute_divisor`'s own feature struct,
+    // whose 1.4 core and `KHR` spellings share one `sType`, exactly like
+    // `rectangularLines` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceVertexAttributeDivisorFeatures *>(
+              Base);
+      Features->vertexAttributeInstanceRateDivisor = VK_TRUE;
+      Features->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

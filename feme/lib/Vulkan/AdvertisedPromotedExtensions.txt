@@ -60,3 +60,4 @@ VK_KHR_format_feature_flags2 = core, not advertised by name: roadmap E24/E25, ch
 VK_KHR_global_priority = roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family
 VK_KHR_shader_subgroup_rotate = roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern)
 VK_KHR_shader_expect_assume = roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp's AssumeTrueConversionPattern/ExpectConversionPattern)
+VK_KHR_vertex_attribute_divisor = roadmap F6: VkPipelineVertexInputDivisorStateCreateInfo's per-binding divisor, including the 0 ("every instance reads firstInstance") case (GraphicsPipeline.cpp's translateVertexInput, Executor.cpp's fetch-index formula)
