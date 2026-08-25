@@ -59,11 +59,11 @@ Function *feme::cpu::getOrInsertImageCall(Module &M, ImageCallKind Kind) {
                             /*isVarArg=*/false);
     break;
   case ImageCallKind::Load2D:
-    // (image_heap, image_heap_count, image_index, x, y, mip, mask)
+    // (image_heap, image_heap_count, image_index, x, y, mip, sample, mask)
     // -> <4 x float>
-    FTy = FunctionType::get(V4F32Ty,
-                            {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
-                            /*isVarArg=*/false);
+    FTy = FunctionType::get(
+        V4F32Ty, {PtrTy, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I32Ty, I1Ty},
+        /*isVarArg=*/false);
     break;
   case ImageCallKind::Load2DI32:
     // Same shape as Load2D, but returns <4 x i32> (roadmap E26).
@@ -117,13 +117,15 @@ CallInst *feme::cpu::createSampleCmp2D(IRBuilderBase &Builder,
 
 CallInst *feme::cpu::createLoad2D(IRBuilderBase &Builder,
                                   const ImageCallEnv &Env, Value *ImageIndex,
-                                  Value *X, Value *Y, Value *Mip, Value *Mask,
+                                  Value *X, Value *Y, Value *Mip,
+                                  Value *Sample, Value *Mask,
                                   const Twine &Name) {
   Module *M = Builder.GetInsertBlock()->getModule();
   Function *F = getOrInsertImageCall(*M, ImageCallKind::Load2D);
-  return Builder.CreateCall(
-      F, {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X, Y, Mip, Mask},
-      Name);
+  return Builder.CreateCall(F,
+                            {Env.ImageHeap, Env.ImageHeapCount, ImageIndex, X,
+                             Y, Mip, Sample, Mask},
+                            Name);
 }
 
 CallInst *feme::cpu::createLoad2DI32(IRBuilderBase &Builder,
@@ -196,7 +198,7 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.Mask = CI.getArgOperand(11);
     break;
   case ImageCallKind::Load2D:
-    if (CI.arg_size() != 7)
+    if (CI.arg_size() != 8)
       return std::nullopt;
     Result.Env.ImageHeap = CI.getArgOperand(0);
     Result.Env.ImageHeapCount = CI.getArgOperand(1);
@@ -204,7 +206,8 @@ std::optional<MatchedImageCall> feme::cpu::matchImageCall(const CallInst &CI) {
     Result.U = CI.getArgOperand(3);
     Result.V = CI.getArgOperand(4);
     Result.Lod = CI.getArgOperand(5);
-    Result.Mask = CI.getArgOperand(6);
+    Result.Sample = CI.getArgOperand(6);
+    Result.Mask = CI.getArgOperand(7);
     break;
   case ImageCallKind::Load2DI32:
     if (CI.arg_size() != 7)

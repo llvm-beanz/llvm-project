@@ -895,18 +895,22 @@ void lowerImageAccesses(const MapVector<CallInst *, Value *> &HeapIndices,
         IRBuilder<> LoadBuilder(LI);
         // Mip level 0: `feme::spirv::ImageLoadPattern` does not thread
         // `OpImageFetch`'s optional `Lod` image operand through today, so
-        // there is no level operand to honor here yet. The loaded type --
-        // `<4 x i32>` or `<4 x float>`, `hasOnlySupportedImageUses`'s own
-        // per-handle check already guaranteed one or the other -- selects
-        // the integer (roadmap E26) or float `feme.cpu.image.load.2d.*`
-        // entry point.
+        // there is no level operand to honor here yet. Sample 0: this is
+        // an ordinary (non-subpass) `OpImageFetch`, which `ImageLoadPattern`
+        // likewise never threads a `Sample` image operand through for --
+        // only `SubpassLoadPattern`'s `Dim::SubpassData` case does (roadmap
+        // F8c). The loaded type -- `<4 x i32>` or `<4 x float>`,
+        // `hasOnlySupportedImageUses`'s own per-handle check already
+        // guaranteed one or the other -- selects the integer (roadmap E26)
+        // or float `feme.cpu.image.load.2d.*` entry point.
         bool IsInteger = isV4I32(LI->getType());
         CallInst *Loaded =
             IsInteger
                 ? createLoad2DI32(LoadBuilder, Env, ImageIndex, X, Y,
                                   LoadBuilder.getInt32(0), Mask, LI->getName())
                 : createLoad2D(LoadBuilder, Env, ImageIndex, X, Y,
-                               LoadBuilder.getInt32(0), Mask, LI->getName());
+                               LoadBuilder.getInt32(0), LoadBuilder.getInt32(0),
+                               Mask, LI->getName());
         LI->replaceAllUsesWith(Loaded);
         LI->eraseFromParent();
       }

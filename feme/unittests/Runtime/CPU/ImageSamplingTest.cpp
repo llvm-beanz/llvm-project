@@ -112,7 +112,7 @@ using SampleCmpFn = void (*)(const FemeImageDescriptor *, uint32_t,
                              uint32_t, float, float, float, bool, float, bool,
                              void *);
 using LoadFn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
-                        int32_t, int32_t, uint32_t, bool, void *);
+                        int32_t, int32_t, uint32_t, uint32_t, bool, void *);
 /// The `feme.cpu.image.load.2d.v4i32` (roadmap E26) counterpart of `LoadFn`,
 /// same operand shape but a `<4 x i32>`-shaped `out`.
 using LoadI32Fn = void (*)(const FemeImageDescriptor *, uint32_t, uint32_t,
@@ -371,7 +371,7 @@ TEST_F(ImageSamplingTest, ExplicitLoadFetchesExactTexel) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 1, 1, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 1, 1, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 13.0f);
   EXPECT_FLOAT_EQ(Out[1], 14.0f);
   EXPECT_FLOAT_EQ(Out[2], 15.0f);
@@ -396,7 +396,7 @@ TEST_F(ImageSamplingTest, LoadFetchesPartialComponentFloatFormats) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(R32Heap, 1, 0, 0, 0, 0, true, Out);
+  Fn(R32Heap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 7.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -408,7 +408,7 @@ TEST_F(ImageSamplingTest, LoadFetchesPartialComponentFloatFormats) {
       makeImage2D(RG32Storage, sizeof(RG32Storage), 1, 1,
                   ResourceFormat::R32G32_FLOAT, RG32Layout);
   FemeImageDescriptor RG32Heap[1] = {RG32Img};
-  Fn(RG32Heap, 1, 0, 0, 0, 0, true, Out);
+  Fn(RG32Heap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 3.0f);
   EXPECT_FLOAT_EQ(Out[1], 4.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -420,7 +420,7 @@ TEST_F(ImageSamplingTest, LoadFetchesPartialComponentFloatFormats) {
       makeImage2D(RGB32Storage, sizeof(RGB32Storage), 1, 1,
                   ResourceFormat::R32G32B32_FLOAT, RGB32Layout);
   FemeImageDescriptor RGB32Heap[1] = {RGB32Img};
-  Fn(RGB32Heap, 1, 0, 0, 0, 0, true, Out);
+  Fn(RGB32Heap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
   EXPECT_FLOAT_EQ(Out[1], 2.0f);
   EXPECT_FLOAT_EQ(Out[2], 3.0f);
@@ -441,7 +441,7 @@ TEST_F(ImageSamplingTest, LoadFetchesR8G8B8A8Snorm) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], -1.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 1.0f);
@@ -461,7 +461,7 @@ TEST_F(ImageSamplingTest, LoadFetchesB8G8R8A8Unorm) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f); // R
   EXPECT_FLOAT_EQ(Out[1], 0.0f); // G
   EXPECT_FLOAT_EQ(Out[2], 1.0f); // B
@@ -480,7 +480,7 @@ TEST_F(ImageSamplingTest, LoadFetchesR10G10B10A2Unorm) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -499,7 +499,7 @@ TEST_F(ImageSamplingTest, LoadFetchesR11G11B10Float) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -517,7 +517,7 @@ TEST_F(ImageSamplingTest, LoadFetchesR16G16B16A16Float) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], -2.0f);
@@ -533,7 +533,7 @@ TEST_F(ImageSamplingTest, LoadFetchesA8Unorm) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -551,7 +551,7 @@ TEST_F(ImageSamplingTest, LoadFetchesA1B5G5R5Unorm) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -573,7 +573,7 @@ TEST_F(ImageSamplingTest, LoadFetchesD16Unorm) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_NEAR(Out[0], 32768.0f / 65535.0f, 1e-6f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -591,7 +591,7 @@ TEST_F(ImageSamplingTest, LoadFetchesD32Float) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 0.25f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -609,7 +609,7 @@ TEST_F(ImageSamplingTest, LoadFetchesS8Uint) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_NEAR(Out[0], 64.0f / 255.0f, 1e-6f);
   EXPECT_FLOAT_EQ(Out[1], 0.0f);
   EXPECT_FLOAT_EQ(Out[2], 0.0f);
@@ -620,8 +620,9 @@ TEST_F(ImageSamplingTest, LoadFetchesS8Uint) {
 // sample of one texel contiguously; `femeRTFetchTexel2D`'s addressing
 // must skip `SampleCount` samples' worth of bytes per texel step along a
 // row, not one, or texel (1, 0) below would alias sample 1 of texel
-// (0, 0). This always reads sample 0 (no caller yet threads an explicit
-// sample index through -- see FeMeRuntimeCPU.c's own comment).
+// (0, 0). Sample 0 of each texel is the default `femeCpuImageLoad2DV4F32`
+// reads when a caller passes a constant `0` `Sample` argument (every
+// caller except `lowerFragmentSubpassLoad` still does).
 TEST_F(ImageSamplingTest, LoadFetchesSample0OfMultisampledTexel) {
   // A 2x1, 4-sample R32_FLOAT image: texel (0, 0)'s 4 samples are 1, 2,
   // 3, 4; texel (1, 0)'s are 5, 6, 7, 8.
@@ -649,10 +650,50 @@ TEST_F(ImageSamplingTest, LoadFetchesSample0OfMultisampledTexel) {
   LoadFn Fn =
       resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
   float Out[4];
-  Fn(ImageHeap, 1, 0, 0, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 1.0f);
-  Fn(ImageHeap, 1, 0, 1, 0, 0, true, Out);
+  Fn(ImageHeap, 1, 0, 1, 0, 0, /*Sample=*/0, true, Out);
   EXPECT_FLOAT_EQ(Out[0], 5.0f);
+}
+
+// Roadmap F8c: an explicit, non-zero `Sample` argument reads another
+// sample of the same texel -- the addressing `femeRTFetchTexel2D` gained
+// in F8b (above) is exercised for real, not just at the default sample 0.
+// Same image layout as `LoadFetchesSample0OfMultisampledTexel` above, but
+// every one of texel (0, 0)'s 4 samples is checked individually.
+TEST_F(ImageSamplingTest, LoadFetchesExplicitSampleOfMultisampledTexel) {
+  float Storage[1][1][4] = {{{10, 20, 30, 40}}};
+  FemeImageSubresourceLayout Layout{};
+  Layout.RowPitch = 4 * sizeof(float);
+  Layout.SlicePitch = Layout.RowPitch;
+  Layout.SampleStride = sizeof(float);
+  FemeImageDescriptor Img{};
+  Img.Data = Storage;
+  Img.SizeInBytes = sizeof(Storage);
+  Img.Dimension = static_cast<uint32_t>(ImageDimension::Texture2D);
+  Img.Format = static_cast<uint32_t>(ResourceFormat::R32_FLOAT);
+  Img.Width = 1;
+  Img.Height = 1;
+  Img.Depth = 1;
+  Img.MipLevels = 1;
+  Img.ArrayLayers = 1;
+  Img.PlaneCount = 1;
+  Img.SampleCount = 4;
+  Img.Flags = FEME_IMAGE_SAMPLED;
+  Img.MipLayouts = &Layout;
+  Img.MipLayoutCount = 1;
+  FemeImageDescriptor ImageHeap[1] = {Img};
+  LoadFn Fn =
+      resolve<LoadFn>(addWrapper("load", "feme.cpu.image.load.2d.v4f32"));
+  float Out[4];
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/0, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 10.0f);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/1, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 20.0f);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/2, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 30.0f);
+  Fn(ImageHeap, 1, 0, 0, 0, 0, /*Sample=*/3, true, Out);
+  EXPECT_FLOAT_EQ(Out[0], 40.0f);
 }
 
 TEST_F(ImageSamplingTest, InactiveLaneReadsZero) {

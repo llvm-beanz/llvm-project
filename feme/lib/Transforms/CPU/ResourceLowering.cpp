@@ -378,9 +378,15 @@ bool lowerImageAccesses(Function &F, const ImageCallEnv &Env) {
       Value *X = Builder.CreateExtractElement(Coord, uint64_t{0});
       Value *Y = Builder.CreateExtractElement(Coord, uint64_t{1});
       Value *ImageIndex = Img->HandleFromHeap->getArgOperand(0);
-      CallInst *NewCall =
-          createLoad2D(Builder, Env, ImageIndex, X, Y, CI->getArgOperand(2),
-                       Mask, CI->getName());
+      // DXIL's `Load`/`LoadLevel` has no multisample-index operand of its
+      // own here (a real multisampled `Texture2DMS` load always goes
+      // through `llvm.dx.resource.load_level`'s own sample argument
+      // elsewhere, not this level-only path), so this always reads sample
+      // 0 -- like `feme.stage.subpass.load`'s own default (roadmap F8c).
+      CallInst *NewCall = createLoad2D(Builder, Env, ImageIndex, X, Y,
+                                       CI->getArgOperand(2),
+                                       Builder.getInt32(0), Mask,
+                                       CI->getName());
       CI->replaceAllUsesWith(NewCall);
       CI->eraseFromParent();
       Changed = true;

@@ -93,6 +93,10 @@ struct MatchedImageCall {
   llvm::Value *UseExplicitLod = nullptr;
   /// `SampleCmp2D` only: the depth-comparison reference value.
   llvm::Value *Dref = nullptr;
+  /// `Load2D` only (roadmap F8c): the multisample index a `subpassLoad`'s
+  /// explicit-sample form threads through; null for `Sample2D`/
+  /// `SampleCmp2D`/`Load2DI32`, which never carry one.
+  llvm::Value *Sample = nullptr;
   llvm::Value *Mask = nullptr;
 };
 
@@ -120,11 +124,16 @@ createSampleCmp2D(llvm::IRBuilderBase &Builder, const ImageCallEnv &Env,
                   llvm::Value *UseExplicitLod, llvm::Value *Dref,
                   llvm::Value *Mask, const llvm::Twine &Name = "");
 
-/// Builds a `feme.cpu.image.load.2d.v4f32` call.
+/// Builds a `feme.cpu.image.load.2d.v4f32` call. \p Sample (roadmap F8c)
+/// selects which sample of a multisampled image to read; pass a constant
+/// `0` for a single-sample image or a caller with no sample of its own to
+/// name (every caller except `FragmentWrapper.cpp`'s
+/// `lowerFragmentSubpassLoad` does this today).
 llvm::CallInst *createLoad2D(llvm::IRBuilderBase &Builder,
                              const ImageCallEnv &Env, llvm::Value *ImageIndex,
                              llvm::Value *X, llvm::Value *Y, llvm::Value *Mip,
-                             llvm::Value *Mask, const llvm::Twine &Name = "");
+                             llvm::Value *Sample, llvm::Value *Mask,
+                             const llvm::Twine &Name = "");
 
 /// Builds a `feme.cpu.image.load.2d.v4i32` call (roadmap E26).
 llvm::CallInst *createLoad2DI32(llvm::IRBuilderBase &Builder,

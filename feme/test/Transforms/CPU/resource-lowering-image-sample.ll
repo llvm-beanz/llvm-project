@@ -80,7 +80,7 @@ define <4 x float> @load_2d(i32 %idx, i32 %x, i32 %y, i32 %mip) {
   ; CHECK: [[X:%.*]] = extractelement <2 x i32> [[COORD2:%.*]], i64 0
   ; CHECK: [[Y:%.*]] = extractelement <2 x i32> [[COORD2]], i64 1
   ; CHECK: call <4 x float> @feme.cpu.image.load.2d.v4f32(
-  ; CHECK-SAME: ptr %image_heap, i32 %image_heap_count, i32 %idx, i32 [[X]], i32 [[Y]], i32 %mip, i1 true)
+  ; CHECK-SAME: ptr %image_heap, i32 %image_heap_count, i32 %idx, i32 [[X]], i32 [[Y]], i32 %mip, i32 0, i1 true)
   %h = call target("dx.Texture", <4 x float>, 0, 0, 1, 2) @llvm.dx.resource.handlefromheap.tdx.Texture_v4f32_0_0_1_2t(i32 %idx, i1 false)
   %coord0 = insertelement <2 x i32> poison, i32 %x, i32 0
   %coord = insertelement <2 x i32> %coord0, i32 %y, i32 1

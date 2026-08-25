@@ -61,7 +61,7 @@ define <4 x float> @fetch(<2 x i32> %coord) {
       target("spirv.Image", float, 1, 0, 0, 0, 1, 0) %img, <2 x i32> %coord)
   ; CHECK: %[[X:.*]] = extractelement <2 x i32> %coord, i64 0
   ; CHECK: %[[Y:.*]] = extractelement <2 x i32> %coord, i64 1
-  ; CHECK: call <4 x float> @feme.cpu.image.load.2d.v4f32(ptr %image_heap, i32 %image_heap_count, i32 1, i32 %[[X]], i32 %[[Y]], i32 0, i1 true)
+  ; CHECK: call <4 x float> @feme.cpu.image.load.2d.v4f32(ptr %image_heap, i32 %image_heap_count, i32 1, i32 %[[X]], i32 %[[Y]], i32 0, i32 0, i1 true)
   %v = load <4 x float>, ptr %ptr
   ret <4 x float> %v
 }

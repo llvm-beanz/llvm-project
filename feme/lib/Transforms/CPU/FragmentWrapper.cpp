@@ -315,7 +315,7 @@ Value *loadFragmentPositionComponent(IRBuilder<> &Builder,
 }
 
 /// Roadmap F8a: lowers `feme.stage.subpass.load(attachment_index,
-/// component)` (see `feme::StageOpKind::SubpassLoad`) into a
+/// component, sample)` (see `feme::StageOpKind::SubpassLoad`) into a
 /// `feme.cpu.image.load.2d.v4f32` call against \p F's own
 /// `subpass_input_heap`/`subpass_input_heap_count` parameters (added by
 /// `feme::cpu::SPIRVSubpassLoweringPass`, surviving `feme::cpu::SIMDizePass`
@@ -327,9 +327,13 @@ Value *loadFragmentPositionComponent(IRBuilder<> &Builder,
 /// center (`x + 0.5`, `y + 0.5`), so simple truncation recovers the integer
 /// texel address, matching every other fragment-position-derived texel
 /// address in this file. Mip is always 0 (a render-target attachment has no
-/// mip chain of its own), and the returned `<4 x float>` texel is narrowed
-/// to the requested component -- mirroring `lowerFragmentInputLoad`'s own
-/// per-lane, masked-select shape above.
+/// mip chain of its own); \p CI's own `sample` operand (roadmap F8c) is
+/// threaded straight through to `createLoad2D`'s own `Sample` parameter,
+/// rather than the constant 0 every other caller of it still passes,
+/// since this is the one caller that can genuinely address another sample
+/// of a multisampled attachment. The returned `<4 x float>` texel is
+/// narrowed to the requested component -- mirroring
+/// `lowerFragmentInputLoad`'s own per-lane, masked-select shape above.
 Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
                                 const WaveBodyEnv &WEnv,
                                 const FragmentStageEnv &FEnv) {
@@ -358,6 +362,7 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
     Value *AttachmentIndex =
         extractLaneOrScalar(Builder, CI.getArgOperand(0), Lane);
     Value *Component = extractLaneOrScalar(Builder, CI.getArgOperand(1), Lane);
+    Value *Sample = extractLaneOrScalar(Builder, CI.getArgOperand(2), Lane);
     Value *InvocationIndex =
         getFlatInvocationIndex(Builder, WEnv, WaveSize, Lane);
     Value *PosX = loadFragmentPositionComponent(Builder, FEnv.Invocations,
@@ -370,7 +375,8 @@ Value *lowerFragmentSubpassLoad(CallInst &CI, Function &F,
     ImgEnv.ImageHeap = SubpassInputHeap;
     ImgEnv.ImageHeapCount = SubpassInputHeapCount;
     CallInst *Texel = feme::cpu::createLoad2D(
-        Builder, ImgEnv, AttachmentIndex, X, Y, Builder.getInt32(0), Active);
+        Builder, ImgEnv, AttachmentIndex, X, Y, Builder.getInt32(0), Sample,
+        Active);
     auto *IndexConst = dyn_cast<ConstantInt>(Component);
     Value *LaneResult =
         IndexConst

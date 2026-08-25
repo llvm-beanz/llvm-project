@@ -118,8 +118,19 @@
 // yet threads an explicit sample index through (`feme::StageOpKind::
 // SubpassLoad` has no `Sample` operand, and `SubpassLoadPattern`
 // (SPIRVToLLVMPatterns.cpp) rejects any `spirv.ImageRead` that carries
-// one), so `dynamicRenderingLocalReadMultisampledAttachments` stays
+// one), so `dynamicRenderingLocalReadMultisampledAttachments` stayed
 // `VK_FALSE` -- tracked as roadmap F8c.
+//
+// Update (roadmap F8c): `femeRTFetchTexel2D` and `feme.cpu.image.load.2d.
+// v4f32` both gained an explicit `Sample` parameter, added to
+// `Layout->Offset`'s existing `SampleStride`-aware address as
+// `Sample * Layout->SampleStride` -- every other caller (point/bilinear
+// sampling, the integer `Load2DI32` path) still passes a constant `0`,
+// since none of them has a real per-sample index of its own to thread
+// through; only `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad` (fed by
+// `feme::StageOpKind::SubpassLoad`'s new `sample` operand and
+// `SubpassLoadPattern`'s new `Sample` image-operand case,
+// SPIRVToLLVMPatterns.cpp) now passes a real, possibly non-zero one.
 //
 //===----------------------------------------------------------------------===//
 
@@ -1092,23 +1103,27 @@ femeRTApplyAddressMode(int32_t Coord, int32_t Size, uint32_t Mode,
   }
 }
 
-// Reads one texel at integer coordinates `(X, Y)` of mip level `Level` of
-// `Img`, or `BorderColor` if `UseBorder` is set (a `ClampToBorder` axis
-// resolved out of range), or all-zero for any other unreadable access (no
-// image bound, `Level` beyond `MipLayoutCount`, an unrecognized format, or
-// an access `femeRTImageFormatElementSize`/the mip layout's own
-// `SizeInBytes` bound rejects) -- the same "out-of-range reads zero" rule
-// buffers use (see "Bounds checking").
+// Reads one texel at integer coordinates `(X, Y)`, sample `Sample`, of mip
+// level `Level` of `Img`, or `BorderColor` if `UseBorder` is set (a
+// `ClampToBorder` axis resolved out of range), or all-zero for any other
+// unreadable access (no image bound, `Level` beyond `MipLayoutCount`, an
+// unrecognized format, or an access `femeRTImageFormatElementSize`/the mip
+// layout's own `SizeInBytes` bound rejects) -- the same "out-of-range reads
+// zero" rule buffers use (see "Bounds checking").
 //
-// Roadmap F8b: a multisampled `Img` (`SampleCount > 1`) packs every sample
-// of one texel contiguously (`Layout->SampleStride == ElemSize`, see
+// Roadmap F8b/F8c: a multisampled `Img` (`SampleCount > 1`) packs every
+// sample of one texel contiguously (`Layout->SampleStride == ElemSize`, see
 // Image.cpp's `computeSubresourceLayouts`), so stepping to the next texel
-// along a row has to skip `SampleCount` samples, not one -- this always
-// reads sample 0 of the texel at `(X, Y)`, since no caller yet threads an
-// explicit sample index through (see this file's own header comment).
+// along a row has to skip `SampleCount` samples, not one, and `Sample`
+// (out of range for `Img->SampleCount`, the caller's responsibility to
+// bound -- every caller today either passes a constant `0` or a
+// `subpassLoad`-supplied index already checked against the bound
+// attachment's own real sample count) selects which of those contiguous
+// samples this fetch reads, via `Sample * Layout->SampleStride`.
 __attribute__((always_inline)) static FemeRTv4f32
 femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
-                   int32_t Y, _Bool UseBorder, const float BorderColor[4]) {
+                   int32_t Y, uint32_t Sample, _Bool UseBorder,
+                   const float BorderColor[4]) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (UseBorder) {
     FemeRTv4f32 Border = {BorderColor[0], BorderColor[1], BorderColor[2],
@@ -1124,8 +1139,9 @@ femeRTFetchTexel2D(const FemeRTImageDescriptor *Img, uint32_t Level, int32_t X,
   uint64_t TexelStride = Layout->SampleStride != 0
                              ? (uint64_t)Img->SampleCount * Layout->SampleStride
                              : ElemSize;
+  uint64_t SampleOffset = (uint64_t)Sample * Layout->SampleStride;
   uint64_t Offset = Layout->Offset + (uint64_t)Y * Layout->RowPitch +
-                    (uint64_t)X * TexelStride;
+                    (uint64_t)X * TexelStride + SampleOffset;
   if (Offset + ElemSize > Img->SizeInBytes)
     return Zero;
   const unsigned char *Ptr = (const unsigned char *)Img->Data + Offset;
@@ -1241,8 +1257,8 @@ femeRTSamplePoint2D(const FemeRTImageDescriptor *Img,
       femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp->AddressU, &BorderX);
   int32_t AddrY =
       femeRTApplyAddressMode(Y, (int32_t)LevelHeight, Samp->AddressV, &BorderY);
-  return femeRTFetchTexel2D(Img, Level, AddrX, AddrY, BorderX || BorderY,
-                            Samp->BorderColor);
+  return femeRTFetchTexel2D(Img, Level, AddrX, AddrY, /*Sample=*/0,
+                            BorderX || BorderY, Samp->BorderColor);
 }
 
 // Bilinearly filters `Img` at `(U, V)`, blending the four texels
@@ -1254,13 +1270,17 @@ femeRTSampleLinear2D(const FemeRTImageDescriptor *Img,
   FemeRTBilinearSupport S =
       femeRTComputeBilinearSupport(Img, U, V, Samp, Level);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(
-      Img, Level, S.X0, S.Y0, S.BorderX0 || S.BorderY0, Samp->BorderColor);
+      Img, Level, S.X0, S.Y0, /*Sample=*/0, S.BorderX0 || S.BorderY0,
+      Samp->BorderColor);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(
-      Img, Level, S.X1, S.Y0, S.BorderX1 || S.BorderY0, Samp->BorderColor);
+      Img, Level, S.X1, S.Y0, /*Sample=*/0, S.BorderX1 || S.BorderY0,
+      Samp->BorderColor);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(
-      Img, Level, S.X0, S.Y1, S.BorderX0 || S.BorderY1, Samp->BorderColor);
+      Img, Level, S.X0, S.Y1, /*Sample=*/0, S.BorderX0 || S.BorderY1,
+      Samp->BorderColor);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(
-      Img, Level, S.X1, S.Y1, S.BorderX1 || S.BorderY1, Samp->BorderColor);
+      Img, Level, S.X1, S.Y1, /*Sample=*/0, S.BorderX1 || S.BorderY1,
+      Samp->BorderColor);
   FemeRTv4f32 Top = T00 + (T10 - T00) * S.Wx;
   FemeRTv4f32 Bottom = T01 + (T11 - T01) * S.Wx;
   return Top + (Bottom - Top) * S.Wy;
@@ -1365,7 +1385,7 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
         femeRTApplyAddressMode(X, (int32_t)LevelWidth, Samp.AddressU, &BorderX);
     int32_t AddrY = femeRTApplyAddressMode(Y, (int32_t)LevelHeight,
                                            Samp.AddressV, &BorderY);
-    FemeRTv4f32 T = femeRTFetchTexel2D(&Img, Level, AddrX, AddrY,
+    FemeRTv4f32 T = femeRTFetchTexel2D(&Img, Level, AddrX, AddrY, /*Sample=*/0,
                                        BorderX || BorderY, Samp.BorderColor);
     return femeRTApplyCompare(Samp.CompareFunc, Dref, T[0]);
   }
@@ -1373,13 +1393,17 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
   FemeRTBilinearSupport S =
       femeRTComputeBilinearSupport(&Img, U, V, &Samp, Level);
   FemeRTv4f32 T00 = femeRTFetchTexel2D(
-      &Img, Level, S.X0, S.Y0, S.BorderX0 || S.BorderY0, Samp.BorderColor);
+      &Img, Level, S.X0, S.Y0, /*Sample=*/0, S.BorderX0 || S.BorderY0,
+      Samp.BorderColor);
   FemeRTv4f32 T10 = femeRTFetchTexel2D(
-      &Img, Level, S.X1, S.Y0, S.BorderX1 || S.BorderY0, Samp.BorderColor);
+      &Img, Level, S.X1, S.Y0, /*Sample=*/0, S.BorderX1 || S.BorderY0,
+      Samp.BorderColor);
   FemeRTv4f32 T01 = femeRTFetchTexel2D(
-      &Img, Level, S.X0, S.Y1, S.BorderX0 || S.BorderY1, Samp.BorderColor);
+      &Img, Level, S.X0, S.Y1, /*Sample=*/0, S.BorderX0 || S.BorderY1,
+      Samp.BorderColor);
   FemeRTv4f32 T11 = femeRTFetchTexel2D(
-      &Img, Level, S.X1, S.Y1, S.BorderX1 || S.BorderY1, Samp.BorderColor);
+      &Img, Level, S.X1, S.Y1, /*Sample=*/0, S.BorderX1 || S.BorderY1,
+      Samp.BorderColor);
   float C00 = femeRTApplyCompare(Samp.CompareFunc, Dref, T00[0]);
   float C10 = femeRTApplyCompare(Samp.CompareFunc, Dref, T10[0]);
   float C01 = femeRTApplyCompare(Samp.CompareFunc, Dref, T01[0]);
@@ -1390,20 +1414,23 @@ __attribute__((always_inline)) float femeCpuImageSampleCmp2DF32(
 }
 
 // `feme.cpu.image.load.2d.v4f32`: reads one texel of a 2D image (sampled or
-// storage) at integer coordinates `(X, Y)` and explicit mip `Mip`, with no
-// sampler, no addressing mode and no filtering (DXIL's `Load`/Vulkan's
-// `OpImageFetch`/`OpImageRead`): an out-of-range coordinate reads as zero
-// rather than applying any address mode, since there is no sampler to
-// supply one.
+// storage) at integer coordinates `(X, Y)`, sample `Sample` (roadmap F8c;
+// always `0` for a single-sample image or a caller with no per-sample
+// index of its own -- see `ImageCalls.h`'s `createLoad2D` comment), and
+// explicit mip `Mip`, with no sampler, no addressing mode and no filtering
+// (DXIL's `Load`/Vulkan's `OpImageFetch`/`OpImageRead`): an out-of-range
+// coordinate reads as zero rather than applying any address mode, since
+// there is no sampler to supply one.
 FemeRTv4f32
 femeCpuImageLoad2DV4F32(const FemeRTImageDescriptor *ImageHeap,
                         uint32_t ImageHeapCount, uint32_t ImageIndex, int32_t X,
-                        int32_t Y, uint32_t Mip,
+                        int32_t Y, uint32_t Mip, uint32_t Sample,
                         _Bool Mask) asm("feme.cpu.image.load.2d.v4f32");
 
 __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
     const FemeRTImageDescriptor *ImageHeap, uint32_t ImageHeapCount,
-    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Mip, _Bool Mask) {
+    uint32_t ImageIndex, int32_t X, int32_t Y, uint32_t Mip, uint32_t Sample,
+    _Bool Mask) {
   FemeRTv4f32 Zero = {0.0f, 0.0f, 0.0f, 0.0f};
   if (!Mask)
     return Zero;
@@ -1414,7 +1441,8 @@ __attribute__((always_inline)) FemeRTv4f32 femeCpuImageLoad2DV4F32(
   if (X < 0 || Y < 0 || (uint32_t)X >= Img.Width || (uint32_t)Y >= Img.Height)
     return Zero;
   static const float NoBorder[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-  return femeRTFetchTexel2D(&Img, Mip, X, Y, /*UseBorder=*/0, NoBorder);
+  return femeRTFetchTexel2D(&Img, Mip, X, Y, Sample, /*UseBorder=*/0,
+                            NoBorder);
 }
 
 // `feme.cpu.image.load.2d.v4i32` (roadmap E26): the integer-format
