@@ -1082,7 +1082,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   // `VkPhysicalDeviceVertexAttributeDivisorFeaturesKHR` struct case below.
   EXPECT_EQ(Features14.vertexAttributeInstanceRateDivisor, VK_TRUE);
   EXPECT_EQ(Features14.vertexAttributeInstanceRateZeroDivisor, VK_TRUE);
-  EXPECT_EQ(Features14.indexTypeUint8, VK_FALSE);
+  // Roadmap F7: `vkCmdBindIndexBuffer`'s index read (CommandBuffer.cpp) and
+  // the executor's fetch (Executor.cpp) both gained an 8-bit case, and must
+  // agree with the dedicated `VkPhysicalDeviceIndexTypeUint8FeaturesKHR`
+  // struct case below.
+  EXPECT_EQ(Features14.indexTypeUint8, VK_TRUE);
   EXPECT_EQ(Features14.dynamicRenderingLocalRead, VK_FALSE);
   // Roadmap E5: now genuinely implemented (RenderPass.cpp/
   // CommandBuffer.cpp/Format.cpp), and must agree with the dedicated
@@ -1264,6 +1268,22 @@ TEST_F(PhysicalDeviceProperties2Test,
   vkGetPhysicalDeviceProperties2(Physical, &Props2);
   EXPECT_EQ(DivisorProperties.maxVertexAttribDivisor, 0xFFFFFFFFu);
   EXPECT_EQ(DivisorProperties.supportsNonZeroFirstInstance, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       IndexTypeUint8IsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap F7: `VK_KHR_index_type_uint8`'s own dedicated feature struct
+  // must agree with the aggregate `VkPhysicalDeviceVulkan14Features` case
+  // above, exactly like `VK_KHR_vertex_attribute_divisor`'s own struct does.
+  VkPhysicalDeviceIndexTypeUint8FeaturesKHR IndexTypeUint8Features{};
+  IndexTypeUint8Features.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES_KHR;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &IndexTypeUint8Features;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(IndexTypeUint8Features.indexTypeUint8, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

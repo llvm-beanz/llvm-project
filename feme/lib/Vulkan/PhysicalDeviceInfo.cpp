@@ -666,6 +666,16 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // of the advertised `apiVersion`, so it must be listed here too.
       {VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME,
        VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_SPEC_VERSION},
+      // (roadmap F7) `vkCmdBindIndexBuffer`'s index read (CommandBuffer.cpp)
+      // and the executor's fetch (Executor.cpp) both gained an 8-bit case;
+      // like `VK_KHR_shader_subgroup_rotate`/`VK_KHR_shader_expect_assume`/
+      // `VK_KHR_line_rasterization`/`VK_KHR_vertex_attribute_divisor` above,
+      // `dEQP-VK.pipeline.monolithic.index_type_uint8.*`/
+      // `dEQP-VK.api.info.*.index_type_uint8*` enable this extension by
+      // name regardless of the advertised `apiVersion`, so it must be
+      // listed here too.
+      {VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME,
+       VK_KHR_INDEX_TYPE_UINT8_SPEC_VERSION},
   };
   return Extensions;
 }

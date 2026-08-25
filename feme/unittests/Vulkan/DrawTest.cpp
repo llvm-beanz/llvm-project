@@ -977,7 +977,41 @@ TEST_F(DrawTest, RendersIndexedDraw) {
   vkDestroyShaderModule(Device, Vertex, nullptr);
 }
 
-/// Roadmap E5 (`VK_KHR_maintenance5`): `vkCmdBindIndexBuffer2` is the same
+/// Roadmap F7 (`VK_KHR_index_type_uint8`): the same indexed draw as above,
+/// but through an 8-bit index buffer -- `vkCmdBindIndexBuffer`'s own index
+/// read (`CommandBuffer.cpp`) and the executor's fetch (`Executor.cpp`)
+/// must both honor `VK_INDEX_TYPE_UINT8` exactly like their pre-existing
+/// 16-/32-bit cases.
+TEST_F(DrawTest, RendersIndexedDrawWithEightBitIndices) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  VkDeviceMemory IndexMemory = VK_NULL_HANDLE;
+  VkBuffer IndexBuffer = createBuffer(3 * sizeof(uint8_t), IndexMemory,
+                                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+  uint8_t Indices[3] = {0, 1, 2};
+  std::memcpy(fromHandle<Buffer>(IndexBuffer)->data(), Indices,
+              sizeof(Indices));
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  vkCmdBindIndexBuffer(Cmd, IndexBuffer, 0, VK_INDEX_TYPE_UINT8);
+  vkCmdDrawIndexed(Cmd, 3, 1, 0, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  EXPECT_EQ(texel(2, 2)[0], 0xFF);
+  EXPECT_EQ(texel(2, 2)[3], 0xFF);
+
+  vkDestroyBuffer(Device, IndexBuffer, nullptr);
+  vkFreeMemory(Device, IndexMemory, nullptr);
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 /// bind as `vkCmdBindIndexBuffer` above when its own `size` covers the
 /// whole remaining buffer.
 TEST_F(DrawTest, RendersIndexedDrawThroughBindIndexBuffer2) {
@@ -1729,7 +1763,7 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   ASSERT_EQ(
       vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count, nullptr),
       VK_SUCCESS);
-  ASSERT_EQ(Count, 22u);
+  ASSERT_EQ(Count, 23u);
   std::vector<VkExtensionProperties> Properties(Count);
   ASSERT_EQ(vkEnumerateDeviceExtensionProperties(Physical, nullptr, &Count,
                                                  Properties.data()),
@@ -1780,6 +1814,8 @@ TEST_F(DrawTest, AdvertisesDynamicRenderingExtension) {
   EXPECT_TRUE(HasExtension(VK_KHR_SHADER_EXPECT_ASSUME_EXTENSION_NAME));
   // Roadmap F6.
   EXPECT_TRUE(HasExtension(VK_KHR_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME));
+  // Roadmap F7.
+  EXPECT_TRUE(HasExtension(VK_KHR_INDEX_TYPE_UINT8_EXTENSION_NAME));
 
   VkPhysicalDeviceDynamicRenderingFeatures Features{};
   Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;

@@ -1231,7 +1231,12 @@ void fillFeatures2Chain(void *pNext) {
       // below.
       Features->vertexAttributeInstanceRateDivisor = VK_TRUE;
       Features->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
-      Features->indexTypeUint8 = VK_FALSE;
+      // (roadmap F7) `vkCmdBindIndexBuffer`'s index read (CommandBuffer.cpp)
+      // and the executor's fetch (Executor.cpp) both gained an 8-bit case,
+      // so this bit -- like `vertexAttributeInstanceRateDivisor` above --
+      // must agree with the dedicated `VkPhysicalDeviceIndexTypeUint8
+      // FeaturesKHR` struct case below.
+      Features->indexTypeUint8 = VK_TRUE;
       Features->dynamicRenderingLocalRead = VK_FALSE;
       Features->maintenance5 = VK_TRUE;
       // (roadmap E6) `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`
@@ -1372,6 +1377,16 @@ void fillFeatures2Chain(void *pNext) {
               Base);
       Features->vertexAttributeInstanceRateDivisor = VK_TRUE;
       Features->vertexAttributeInstanceRateZeroDivisor = VK_TRUE;
+      break;
+    }
+    // (roadmap F7) `VK_KHR_index_type_uint8`'s own feature struct, whose
+    // 1.4 core and `KHR`/`EXT` spellings share one `sType`, exactly like
+    // `vertexAttributeInstanceRateDivisor` above, agreeing with the
+    // aggregate `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_INDEX_TYPE_UINT8_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceIndexTypeUint8Features *>(Base);
+      Features->indexTypeUint8 = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature
