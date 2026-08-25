@@ -33,12 +33,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F9?
+Can you implement roadmap milestone F10?
 
-> **`VK_EXT_pipeline_protected_access`/`pipelineProtectedAccess`.** This ICD has
-> no protected-memory model at all (no protected queue/allocation exists); the
-> honest, conformant answer is likely to accept the flag as a no-op restriction
-> (reject creating a protected+unprotected-mixed pipeline, matching the spec's
-> validation rules) without implementing real memory protection — confirm
-> against the spec's exact conformance requirement before assuming this is
-> sufficient
+> **`VK_EXT_pipeline_robustness`/`pipelineRobustness` + its 4
+> `defaultRobustness*` limit fields.** `VkPipelineRobustnessCreateInfo` lets a
+> pipeline opt in/out of robust buffer/image access per-binding-class rather
+> than only device-wide; depends on E16's image-robustness groundwork existing
+> to have something to opt in/out of
