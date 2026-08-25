@@ -33086,3 +33086,153 @@ section with the before/after numbers above). Left
 Vulkan14FeatureInventory.md/VulkanExtensionInventory.md untouched: F12a is a
 pure shader-compilation bug fix, not a feature/extension enablement change,
 so neither document has anything to say about it.
+
+# Agent thoughts: roadmap F12b (builtin `Input` vector lane access chain)
+
+## The task
+
+F12b is the row F12a's own closure text split off: F12a's std140 uniform
+buffer array stride fix closed the `spirv.AccessChain` legalization failure
+its own text named, but doing so uncovered a second, unrelated gap in the
+same 4 `dEQP-VK.pipeline.monolithic.push_descriptor.compute.
+incremental_updates*` cases' own shader -- `gl_GlobalInvocationID.x`
+(`OpAccessChain %ptr_uint_Input %gl_GlobalInvocationID %uint_0`, selecting
+one lane of a builtin `Input` vector) has no dedicated SPIR-V->LLVM
+conversion pattern and falls through to MLIR's own default
+`AccessChainPattern`, which assumes any `spirv.AccessChain` base operand
+converts to a real `!llvm.ptr` -- true for every *memory-backed* access
+chain this ICD already handles, but not for a builtin `Input` variable,
+which `BuiltInAddressOfPattern` models as a plain SSA value (the vector the
+`llvm.spv.thread.id`-family intrinsics build) rather than as memory. The
+result: `'llvm.getelementptr' op operand #0 must be LLVM pointer type ...
+but got 'vector<3xi32>'`.
+
+## Reading the existing code first
+
+`SPIRVToLLVMPatterns.cpp` already had three closely related precedents to
+learn from before writing anything:
+
+- `BuiltInAddressOfPattern`/`BuiltInGlobalVariablePattern`: model a builtin
+  `Input` variable's "address" as the value itself, built from
+  `llvm.spv.*` intrinsics one component at a time via `llvm.insertelement`
+  for a vector-valued builtin like `gl_GlobalInvocationID`.
+- `LoadValuePattern`: collapses any `spirv.Load` whose "pointer" operand
+  already converted to the loaded value itself (exactly what
+  `BuiltInAddressOfPattern` produces) to the identity. This already handles
+  a *direct* load of the whole builtin variable; it does nothing for an
+  access chain in between, since an access chain's own conversion produces
+  a new value, not the same one `BuiltInAddressOfPattern` did.
+- `MatrixCompositeExtractPattern`: the closest existing precedent for
+  "selecting one lane of a value this dialect's default lowering assumes
+  is memory" -- a matrix composite converts to an array of column vectors,
+  and MLIR's own `CompositeExtractPattern` assumes any non-vector container
+  is a pure `llvm.extractvalue`-shaped aggregate, asserting once an index
+  remains past the array level. This pattern's own fix there was exactly
+  the shape F12b's own roadmap text asked to mirror: recognize the
+  vector-valued case and emit `llvm.extractelement` for the scalar-selecting
+  step instead of assuming everything is `llvm.extractvalue`/GEP-shaped.
+
+## The fix
+
+A new `BuiltInAccessChainPattern` (`SPIRVToLLVMPatterns.cpp`), registered at
+the same `FeMeBenefit` as `BuiltInAddressOfPattern` (so it wins over MLIR's
+own default `AccessChainPattern` for the same op): if the access chain's
+base operand converted to a `VectorType` (rather than `!llvm.ptr` --
+exactly the shape `BuiltInAddressOfPattern` produces for a vector-valued
+builtin), and there is exactly one index, rewrite directly to
+`llvm.extractelement`. The result type is checked against the vector's own
+element type (both from the type converter, not assumed) before rewriting,
+so a shape this pattern does not understand declines rather than
+miscompiles. The `spirv.Load` that always follows collapses to the
+identity via the pre-existing `LoadValuePattern`, completely unchanged --
+its own pointer-vs-value check does not care which pattern produced the
+value it is now looking at.
+
+I did not need to touch `LoadValuePattern`, `BuiltInAddressOfPattern`, or
+any type conversion: the type converter's existing `Input`-storage-class
+`spirv::PointerType` conversion (registered in
+`populateSPIRVToLLVMTargetTypeConversions`, converting straight through to
+the pointee type) already gives the right answer for the access chain's
+own result type (a scalar `i32`) with no changes, since that conversion is
+keyed on storage class alone, not on whether a particular pointer type is
+reached via `spirv.mlir.addressof` or `spirv.AccessChain`.
+
+## Testing
+
+Added a new case (`read_global_invocation_id_x`) to the existing
+`spirv-to-llvm-builtin-variables.mlir` lit test, right after the
+whole-vector `read_global_invocation_id` case it complements: an
+`spirv.AccessChain` selecting lane 0 of `gl_GlobalInvocationID`, followed
+by `spirv.Load`, checked to produce a plain `llvm.extractelement` on the
+same `llvm.insertelement`-built vector the existing case already checks,
+rather than any kind of pointer/GEP.
+
+One early iteration of this test's own `CHECK` lines used FileCheck
+variable names (`V2`, `IDX`) that collided with names already bound by the
+*first* test case in the same file when read left-to-right without a
+`--check-prefix` reset between `// -----` blocks (FileCheck variable
+bindings are file-scoped, not scoped to each `--split-input-file` chunk) --
+and, independently, `CHECK: %[[VEC:.*]] = llvm.insertelement` matched the
+*first* `llvm.insertelement` in the function rather than the *last* one
+(three lanes are built in sequence, and a plain `CHECK:` finds the earliest
+match, not the one immediately preceding the extractelement). Fixed by
+renaming the variables to avoid the first case's own names, and by walking
+through all three `llvm.insertelement`s explicitly (mirroring the existing
+`read_global_invocation_id` case's own three-lane `CHECK` sequence) so the
+final one bound is genuinely the one the extractelement reads from.
+
+`ninja check-feme` (assertions + ccache, this session's existing `./build`):
+1790 discovered (unchanged -- a new `CHECK` block inside an
+already-counted lit test file is not a new discovered test of its own),
+1789 passed, 1 pre-existing unsupported.
+
+## Verifying against the actual CTS shader
+
+`Pipeline.cpp`'s `vkCreateComputePipelines` path has no equivalent of
+`GraphicsPipeline.cpp`'s `logCreationFailure`/`FEME_VULKAN_LOG_
+CREATION_ERRORS` hook, so a compute pipeline compilation failure is always
+silently swallowed under `deqp-vk` -- confirmed by running the 4 named
+cases directly (`VK_ERROR_INITIALIZATION_FAILED`, no diagnostic text
+anywhere in stdout/stderr, even with that env var set). Rather than extend
+that path's error handling (out of this row's own scope), I extracted the
+exact shader `PushDescriptorIncrementalUpdatesComputeTest::initPrograms`
+embeds (`vktPipelinePushDescriptorTests.cpp`), compiled it with
+`glslangValidator -V` (installed via `apt install glslang-tools` -- not
+previously present in this environment), and ran the result through the
+standalone `feme` driver instead (`feme --target=x86_64-unknown-linux-gnu`),
+which does print MLIR diagnostics directly to stderr and exits nonzero.
+
+Confirmed the exact regression first: stashing this row's own change and
+re-running reproduces `'llvm.getelementptr' op operand #0 must be LLVM
+pointer type or LLVM dialect-compatible vector of LLVM pointer type, but
+got 'vector<3xi32>'` byte for byte, matching F12b's own roadmap text
+exactly. Restoring the change and re-running: SPIR-V->LLVM legalization now
+succeeds, and the same shader instead hits `feme: unsupported raised
+operation: '...llvm.spv.resource.handlefrombinding...' is a register-bound
+resource handle the FeMe CPU target cannot normalize into a heap access or
+the root-constant block` -- the same pre-existing, already-tracked
+"resource handle the FeMe CPU target cannot normalize" class of gap E6/F8's
+own reports already note (here, a `std140` uniform block reached through a
+runtime `vkCmdPushDescriptorSet` write rather than a statically-bound
+descriptor). This is not a new gap to split off: it is the same bucket that
+already accounts for 33 of this CTS group's other failures, just now
+reached by these 4 cases too instead of a `spirv.AccessChain`/GEP crash.
+
+Also re-ran the full `dEQP-VK.pipeline.monolithic.push_descriptor.*` group
+(the same 76-case group F12/F12a's own sections measured): identical
+0/76/0 totals to F12a's own baseline, `grep -c "getelementptr' op operand"`
+and `grep -c "failed to legalize operation 'spirv.AccessChain'"` on the new
+log both `0` (confirming neither this row's own fix nor F12a's stays
+regressed), and the `vkCreateComputePipelines`-failing count unchanged at
+37 (33 silent + 4, same as F12a's own re-run, just differently reached for
+the 4). See "Roadmap F12b: measured impact" in VulkanCTSReport.md for the
+full writeup.
+
+## Documentation
+
+Struck through Roadmap.md's F12b row (closed, exactly matching its own
+scope -- a legalization bug fix, introducing no new feature/extension bit,
+so `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` need no
+changes) and added a new "Roadmap F12b: measured impact" section to
+VulkanCTSReport.md recording the before/after diagnostic and CTS numbers
+above.
