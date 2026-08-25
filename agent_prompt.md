@@ -33,7 +33,8 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F11?
+Can you implement roadmap milestone F11? Tne last agent prompt left the work
+incomplete, its results are in the git stash at index 0.
 
 > **`VK_EXT_host_image_copy`/`hostImageCopy` + its 6 limit/list fields.** The
 > largest single new mechanism in this section:
