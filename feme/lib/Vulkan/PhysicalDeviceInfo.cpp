@@ -687,6 +687,13 @@ feme::vulkan::getSupportedDeviceExtensions() {
       // `apiVersion`, so it must be listed here too.
       {VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME,
        VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_SPEC_VERSION},
+      // (roadmap F9) `vkCmdBindPipeline` (CommandBuffer.cpp) honors
+      // `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`/`VK_PIPELINE_CREATE_
+      // NO_PROTECTED_ACCESS_BIT`; like every other post-`maintenance5` entry
+      // above, this extension must be listed here too regardless of the
+      // advertised `apiVersion`.
+      {VK_EXT_PIPELINE_PROTECTED_ACCESS_EXTENSION_NAME,
+       VK_EXT_PIPELINE_PROTECTED_ACCESS_SPEC_VERSION},
   };
   return Extensions;
 }

@@ -1273,7 +1273,17 @@ void fillFeatures2Chain(void *pNext) {
       // `maintenance5` -- must agree with the dedicated
       // `VkPhysicalDeviceMaintenance6Features` struct case below.
       Features->maintenance6 = VK_TRUE;
-      Features->pipelineProtectedAccess = VK_FALSE;
+      // (roadmap F9) `vkCmdBindPipeline` (CommandBuffer.cpp) now honors
+      // `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`/`VK_PIPELINE_CREATE_
+      // NO_PROTECTED_ACCESS_BIT` (`Pipeline::createFlags`), so this bit --
+      // like `maintenance6` above -- must agree with the dedicated
+      // `VkPhysicalDevicePipelineProtectedAccessFeatures` struct case below.
+      // This ICD has no protected-memory model at all (`protectedMemory`
+      // stays `VK_FALSE` below), so enabling this feature is "ineffective,
+      // but... nevertheless not incorrect" (the extension's own spec text);
+      // what it *does* honestly implement is the per-pipeline restriction
+      // those two flags describe -- see `vkCmdBindPipeline`'s own comment.
+      Features->pipelineProtectedAccess = VK_TRUE;
       Features->pipelineRobustness = VK_FALSE;
       Features->hostImageCopy = VK_FALSE;
       Features->pushDescriptor = VK_FALSE;
@@ -1427,6 +1437,17 @@ void fillFeatures2Chain(void *pNext) {
           reinterpret_cast<VkPhysicalDeviceDynamicRenderingLocalReadFeatures *>(
               Base);
       Features->dynamicRenderingLocalRead = VK_TRUE;
+      break;
+    }
+    // (roadmap F9) `VK_EXT_pipeline_protected_access`'s own feature struct,
+    // whose 1.4 core and `EXT` spellings share one `sType`, exactly like
+    // `dynamicRenderingLocalRead` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_PROTECTED_ACCESS_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDevicePipelineProtectedAccessFeatures *>(
+              Base);
+      Features->pipelineProtectedAccess = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

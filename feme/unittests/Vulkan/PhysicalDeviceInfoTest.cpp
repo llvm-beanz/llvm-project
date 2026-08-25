@@ -1104,7 +1104,11 @@ TEST_F(PhysicalDeviceProperties2Test,
   // vkCmdPushConstants2 in CommandBuffer.cpp), and must agree with the
   // dedicated `VK_KHR_maintenance6` struct case below.
   EXPECT_EQ(Features14.maintenance6, VK_TRUE);
-  EXPECT_EQ(Features14.pipelineProtectedAccess, VK_FALSE);
+  // Roadmap F9: `vkCmdBindPipeline` (CommandBuffer.cpp) now honors
+  // `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`/`VK_PIPELINE_CREATE_
+  // NO_PROTECTED_ACCESS_BIT`, and must agree with the dedicated
+  // `VkPhysicalDevicePipelineProtectedAccessFeatures` struct case below.
+  EXPECT_EQ(Features14.pipelineProtectedAccess, VK_TRUE);
   EXPECT_EQ(Features14.pipelineRobustness, VK_FALSE);
   EXPECT_EQ(Features14.hostImageCopy, VK_FALSE);
   EXPECT_EQ(Features14.pushDescriptor, VK_FALSE);
