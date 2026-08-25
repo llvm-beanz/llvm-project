@@ -33,25 +33,18 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F8a and close out F8?
+Can you implement roadmap milestone F8b and close out F8?
 
->  **F8's own remaining half: shader-side `subpassInput` local-read
->  consumption.** Needs, in order: (1) `OpTypeImage` with `Dim=SubpassData` and
->  `OpImageRead`'s subpass-local form modeled by the `spirv` dialect if it is
->  not already (unconfirmed as of F8 -- audit first); (2) a `SPIRVToLLVM`
->  conversion pattern reading directly from the currently-bound
->  dynamic-rendering color/depth/stencil attachment
->  (`feme::vulkan::RenderTargetBinding`, not a descriptor-set image) named by
->  the shader's own `InputAttachmentIndex` decoration, resolved through
->  `vkCmdSetRenderingInputAttachmentIndices`' mapping
->  (`GraphicsState::ColorAttachmentInputIndices`/`DepthInputAttachmentIndex`/`StencilInputAttachmentIndex`,
->  F8's own row) or, when that command was never called, the identity default
->  the same row's man-page citation describes; (3) once real local reads produce
->  correct pixels for a CTS-shaped test,
->  `dynamicRenderingLocalRead`/`VK_KHR_dynamic_rendering_local_read` can finally
->  be advertised (`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp`, mirroring every
->  other F-row's dedicated-struct-agrees-with-aggregate precedent); (4)
->  `dynamicRenderingLocalReadDepthStencilAttachments`/`dynamicRenderingLocalReadMultisampledAttachments`
->  need their own depth/stencil- and multisample-attachment local-read cases
->  demonstrated (not just the plain color case (1)-(3) cover) before either
->  limit flips to `VK_TRUE`
+> **F8a's own remaining quarter: depth/stencil and multisample subpass-input
+> local-read coverage.** `feme::vulkan::buildSubpassInputHeap`
+> (`CommandBuffer.cpp`) already resolves
+> `DepthInputAttachmentIndex`/`StencilInputAttachmentIndex` into heap slots, but
+> (a) leaves a `SampleCount > 1` attachment's slot unpopulated rather than
+> addressing its per-sample layout
+> (`FemeImageDescriptor::SampleCount`/`MipLayouts::SampleStride` already model
+> one, unused so far), and (b) has not been exercised against a real depth
+> (`D16_UNORM`/`D32_FLOAT`) or stencil (`S8_UINT`) format at all -- a CTS-shaped
+> test reading a depth/stencil input attachment back through
+> `subpassLoad`/`OpTypeImage(Dim=SubpassData)`'s single-component form is needed
+> to find whatever format-decode gap remains before either limit field can
+> honestly flip to `VK_TRUE`
