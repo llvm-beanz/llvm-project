@@ -32318,3 +32318,213 @@ turned out to be where the real logic lives, not pipeline creation.
 `Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` updated to
 match (`pipelineProtectedAccess`/`VK_EXT_pipeline_protected_access` both
 now "yes"/"Advertised").
+
+# Agent thoughts: roadmap F10 (VK_EXT_pipeline_robustness/pipelineRobustness)
+
+## Scoping
+
+The roadmap row's own text: "`VkPipelineRobustnessCreateInfo` lets a
+pipeline opt in/out of robust buffer/image access per-binding-class
+rather than only device-wide; depends on E16's image-robustness
+groundwork existing to have something to opt in/out of". Two questions
+to answer before writing any code:
+
+1. What does this ICD actually need to *do* differently when a pipeline
+   requests a weaker (or stronger) robustness behavior than the device
+   default?
+2. What are the four `defaultRobustnessStorageBuffers`/
+   `UniformBuffers`/`VertexInputs`/`Images` properties actually supposed
+   to report?
+
+For (1): this ICD's buffer bounds checking is architecturally
+unconditional (`FeMeCPUDesign.md`'s "Bounds checking": "This is **not
+optional**"). `PhysicalDeviceInfo.cpp` already documents exactly this for
+`robustBufferAccess` itself -- advertising it `VK_TRUE` unconditionally
+is "a stronger guarantee than the feature requires ... so advertising it
+unconditionally is honest." The same logic extends cleanly to per-
+pipeline robustness: since this ICD is *always* at least as robust as
+`ROBUST_BUFFER_ACCESS`/`ROBUST_IMAGE_ACCESS` demand, honoring a request
+for something weaker (even `DISABLED`) with the same unconditional
+robust behavior is legal -- Vulkan lets an implementation always be
+*more* robust than requested, never less. So there is no new *bounds-
+checking* logic to write; the real work is (a) accepting, parsing, and
+validating the struct at both a pipeline's own `pNext` and a stage's own
+`pNext` (with the stage's own chain taking precedence, per the
+extension's spec text), and (b) making sure the four `defaultRobustness*`
+properties describe *reality*, not a placeholder.
+
+## The two real bugs (b) uncovered
+
+Filling in (b) honestly meant actually tracing through what happens on
+an out-of-bounds vertex-attribute fetch today, since
+`defaultRobustnessVertexInputs` describes exactly that scenario. Two
+real gaps surfaced, both closed as their own separate, small commit
+before touching any of F10's own new code:
+
+1. `Executor.cpp`'s vertex-fetch loop computed `SrcOff` and rejected the
+   *entire* attribute (and the whole draw, since it returned an `Error`)
+   the instant `SrcOff + size` ran past the bound buffer's end, rather
+   than reading zero for the out-of-range components. This directly
+   contradicted "Out-of-bounds reads return zero ... For a vector access
+   the check is per-component" from `FeMeCPUDesign.md`'s own "Bounds
+   checking" section -- that section is about the *shader-visible
+   descriptor* fetch helper, but the same principle obviously has to
+   apply to the *host-side* vertex-attribute fetch too, since both are
+   covered by the same `robustBufferAccess` feature bit this ICD already
+   claims unconditionally.
+
+2. Even after fixing (1), draws still failed: `CommandBuffer.cpp`'s
+   `validateDrawFetchBounds` pre-rejected any draw whose vertex/instance
+   attribute fetch would land past its bound buffer *before the executor
+   ever ran*, for both direct and indirect draws alike (a deliberate,
+   documented design choice: "the single path every direct and indirect
+   draw goes through, so an indirect command's attacker-controlled
+   arguments are validated exactly like a direct one's"). That policy
+   makes sense for *indirect* draws' untrusted arguments, but applying it
+   uniformly to *direct* draws too means a legitimately undersized vertex
+   buffer -- exactly what `robustBufferAccess` is supposed to make legal
+   -- gets rejected at `vkQueueSubmit` instead of reading zero. Fixed by
+   removing just the vertex/instance-attribute-fetch overrun check
+   (keeping the "binding not bound at all" check, a genuinely different,
+   still-invalid condition, and the *index buffer's own* range check,
+   which is a different resource this row does not touch).
+
+I checked whether removing (2) could reopen a memory-safety hole for
+indirect draws with attacker-controlled huge `FirstInstance`/
+`InstanceCount`: the fetch offset arithmetic in `Executor.cpp` is all
+`uint64_t`, and my own new per-component check
+(`SrcOff < Data.size() ? Data.size() - SrcOff : 0`) is safe for any
+`SrcOff` value, including one that overflowed from a huge multiply --
+there is no unchecked pointer arithmetic left downstream of it. So the
+security property the design doc's own "rejected rather than clamped"
+text cares about (indirect draw arguments) is preserved by the executor's
+own bounds check now being unconditionally safe, not by the pre-check
+this row removed.
+
+Whether to write a test locking in the *old* buggy behavior and then
+flip it, versus just writing the new expected behavior directly: I chose
+the latter, since the old behavior (fail the whole draw) was never
+correct per the extension this row is implementing, and there is no
+scenario where regressing back to it would be desired.
+
+## Choosing `ROBUST_BUFFER_ACCESS`/`ROBUST_IMAGE_ACCESS`, not their `_2`
+## siblings
+
+Both `VkPipelineRobustnessBufferBehavior` and
+`VkPipelineRobustnessImageBehavior` have a plain and a `_2` form. Web
+research (Vulkan spec's own robustness chapter, corroborated by multiple
+independent summaries) settled the distinction cleanly:
+
+- Plain (`ROBUST_BUFFER_ACCESS`/`ROBUST_IMAGE_ACCESS`): out-of-bounds
+  reads return *some* well-defined value (zero, or any in-bounds value
+  for buffers; `(0,0,0,0)` or `(0,0,0,1)` for images), out-of-bounds
+  writes are discarded or land somewhere in-bounds -- but a *null*
+  descriptor (one that was never bound at all) is still undefined
+  behavior.
+- `_2` (from `VK_EXT_robustness2`): the same guarantee, *plus* a null
+  descriptor must also read as zero (and discard writes).
+
+This ICD's actual behavior already satisfies the *plain* guarantee
+comfortably (always literal zero, a valid subset of "zero or any
+in-bounds value"; `(0,0,0,0)` is one of the two explicitly permitted
+image results). But `VK_EXT_robustness2`/null-descriptor handling is
+simply not implemented or verified at all -- there is no dedicated audit
+of what happens today when a shader reads through a descriptor slot that
+was declared in the layout but never written by `vkUpdateDescriptorSets`.
+Rather than assume that also happens to come out as zero (plausible,
+given the heap-index-out-of-range case already does per
+`FeMeCPUDesign.md`, but *unverified* for the "declared but never bound"
+case specifically), I chose the honest, weaker value everywhere. This
+matches the codebase's own established conservative-disclosure culture
+(E2, E16, F3, ... never claim a stronger guarantee than has actually been
+audited).
+
+## Design: where `PipelineRobustness` lives
+
+`VkPipelineRobustnessCreateInfo` is scoped either to a whole pipeline or
+to one shader stage, with the stage's own chain taking precedence over
+the pipeline's own (per the extension's spec text). Since nothing
+downstream actually branches on the resolved value yet (see the
+"unconditionally already robust" reasoning above), I considered skipping
+storage entirely and only validating structurally. I decided against
+that: `Pipeline::createFlags()` (F9's own precedent) already establishes
+the pattern of recording an accepted-but-not-yet-consumed value on the
+`VkPipeline` object itself, both for future use and so a later change
+that *does* need to branch on it has a real, already-wired place to read
+it from, rather than needing to re-thread the `pNext` chain again.
+
+For `ComputePipeline` (exactly one stage), one `PipelineRobustness`
+member is enough. For `GraphicsPipeline` (vertex + fragment stages,
+V6/V7's own current scope), I store one per stage
+(`GraphicsPipelineState::VertexRobustness`/`FragmentRobustness`) rather
+than a single pipeline-wide value, since the extension's own spec text
+explicitly permits per-stage divergence and collapsing that to one value
+would silently discard information a future consumer might need.
+
+## Validation
+
+`resolvePipelineRobustness` rejects an out-of-range
+`VkPipelineRobustnessBufferBehavior`/`VkPipelineRobustnessImageBehavior`
+value (anything other than the four defined enumerators for each),
+matching this codebase's "malformed input fails cleanly" convention
+(`buildSpecializationOverrides`'s own comment is the precedent cited in
+the new code). Validation runs regardless of a pipeline-cache hit for
+the compute path (mirrored from how `VK_PIPELINE_CREATE_FAIL_ON_
+PIPELINE_COMPILE_REQUIRED_BIT`'s own check already runs before/around the
+cache lookup) since it's a cheap, pNext-only check independent of the
+cached compiled artifact.
+
+## Testing
+
+- `Executor.cpp`'s fix: `DrawTest.OutOfBoundsPerInstanceVertexAttribute
+  ReadsZero` -- an undersized per-instance color buffer, 2 instances
+  drawn, the second instance's out-of-bounds fetch must read as zero and
+  the submit must still succeed (added in the same commit as the fix).
+- `resolvePipelineRobustness`'s parsing/precedence/validation:
+  `PipelineTest.AcceptsPipelineRobustnessCreateInfo`/
+  `RejectsInvalidPipelineRobustnessBehavior` (compute, including stage-
+  over-pipeline precedence) and `GraphicsPipelineTest.
+  ResolvesPipelineRobustnessPerStage`/`RejectsInvalidPipelineRobustness
+  Behavior` (graphics, independent per-stage resolution).
+- The feature/properties wiring:
+  `PhysicalDeviceProperties2Test.PipelineRobustnessIsAdvertisedThroughIts
+  OwnDedicatedFeatureStruct`/`PipelineRobustnessPropertiesReportRealDefault
+  Behaviors`, plus updating the three existing tests that hardcoded the
+  old `DEVICE_DEFAULT`/`VK_FALSE` values or extension count
+  (`Vulkan14PropertiesEnumerateEveryMandatoryLimitConservatively`,
+  `Maintenance5IsAdvertisedThroughAggregateVulkan14Features`,
+  `DrawTest.AdvertisesDynamicRenderingExtension`).
+
+`ninja check-feme`: 1763 discovered, 1762 passed, 1 unsupported
+(pre-existing, unrelated) -- no regressions.
+
+## Documentation bookkeeping, and a deliberate choice *not* to regenerate
+
+`Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md` say to
+regenerate via `vk_gen_feature_inventory.py`/`vk_gen_extension_inventory.py`
+after updating the companion `AdvertisedPromoted{Features,Extensions}.txt`/
+`PlannedExtensions.txt` files. I updated the companion `.txt` files (added
+`pipelineRobustness`/`VK_EXT_pipeline_robustness`, removed the now-stale
+`VK_EXT_pipeline_robustness = roadmap F10` line from `PlannedExtensions.txt`
+since it is no longer "not implemented"), then actually ran the
+regeneration script against VK-GL-CTS's own `vk.xml` to see the diff
+before committing to it -- and found the companion `.txt` files are
+already significantly stale relative to the doc's own hand-maintained
+notes column: several rows F5/F7/F8/F9 landed (`rectangularLines`,
+`indexTypeUint8`, `dynamicRenderingLocalRead`, `pipelineProtectedAccess`,
+`VK_KHR_line_rasterization`, `VK_KHR_index_type_uint8`, `VK_KHR_dynamic_
+rendering_local_read`, `VK_EXT_pipeline_protected_access`, ...) never got
+their own entry added to these tracking files, and every "note" column
+entry the script can't source from a `.txt` file (which is every `limit`
+row, and any hand-added prose beyond a bare yes/no) would be silently
+lost by a full regeneration, since the script only emits a bare table
+with no notes column content it wasn't told about. Regenerating wholesale
+right now would *regress* the doc's accuracy (dropping real, previously
+recorded findings) rather than improve it, entirely because of pre-
+existing drift outside this row's own scope. I chose to hand-edit only
+the specific rows this row's own change affects (`pipelineRobustness`'s
+feature/extension rows, the four `defaultRobustness*` limit rows, and the
+summary counts/prose that cite the 1.4 feature/extension totals by
+number) rather than launder that unrelated staleness into this commit --
+fixing the `.txt` files' own broader drift is future bookkeeping work,
+not this row's.
