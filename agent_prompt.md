@@ -33,10 +33,19 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F12?
+Can you implement roadmap milestone F11a?
 
-> **`VK_KHR_push_descriptor`/`pushDescriptor` + `maxPushDescriptors`.**
-> `vkCmdPushDescriptorSet` writes descriptors directly into a command buffer's
-> recorded state without a `VkDescriptorSet` object at all — a new,
-> lighter-weight descriptor path alongside `Descriptor.{h,cpp}`'s existing
-> pool-backed one, sharing its binding-to-heap-slot translation
+> **`copyBufferImageRegion`'s aspect-specific combined depth/stencil copy, split
+> off F11's own measured-impact finding.**
+> `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`/`vkCopyMemoryToImage`/`vkCopyImageToMemory`
+> all reject (rather than mis-copy or crash) a
+> `VkBufferImageCopy`/`VkMemoryToImageCopy`/`VkImageToMemoryCopy` naming a
+> single `VK_IMAGE_ASPECT_DEPTH_BIT`/`STENCIL_BIT` aspect of a combined
+> depth/stencil image (`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`) today; real
+> support needs a per-aspect interleaved read-modify-write into the shared texel
+> (extending
+> `feme::graphics::packDepthClear`/`packStencilClear`/`unpackDepth`/`unpackStencil`,
+> ImageFixture.cpp, from a single repeated clear/reference value to an arbitrary
+> per-texel buffer region, and adding `D32_FLOAT_S8X24_UINT`'s own case to all
+> four, which none of them have yet even for the existing
+> `vkCmdClearDepthStencilImage`)
