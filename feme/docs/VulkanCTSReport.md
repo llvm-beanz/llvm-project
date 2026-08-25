@@ -4486,3 +4486,79 @@ One incidental fix surfaced along the way: making the CPU runtime's
 SamplesARealDecodedTexelRatherThanAllZero` start failing the moment the
 field stopped being ignored; fixed in the same series (see
 agent_thoughts.md for the full trace).
+
+## Roadmap F8c: measured impact (multisample coverage, F8 closed)
+
+F8c closed F8b's own remaining piece: `feme::StageOpKind::SubpassLoad`
+gained a `sample` operand, `SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp)
+now reads a real `spirv.ImageRead` `Sample` image operand instead of
+rejecting one, and `lowerFragmentSubpassLoad`/the CPU runtime's
+`femeRTFetchTexel2D` thread that sample index into the texel address
+`buildSubpassInputHeap`'s own per-sample layout (F8b) already supports.
+`dynamicRenderingLocalReadMultisampledAttachments` is now advertised
+`VK_TRUE`, closing `VK_KHR_dynamic_rendering_local_read`'s scope in full
+(F8/F8a/F8b/F8c all done).
+
+Re-running the identical `dEQP-VK.renderpasses.dynamic_rendering.*.local_read.*`
+suite F8a/F8b's own reports measured produces, again, *identical* totals:
+
+```
+Test run totals:
+  Passed:        0/54 (0.0%)
+  Failed:        38/54 (70.4%)
+  Not supported: 16/54 (29.6%)
+```
+
+Expected, for the same reason F8b's report gave: every one of the 38
+failures is still gated on the pre-existing, unrelated `feme::cpu::
+SIMDizePass` milestone-7 "component decomposition is not yet supported"
+deviation, which rejects pipeline *creation* for these CTS cases' real
+`glslang`-compiled shaders before any of them reach a `subpassLoad` at
+all -- confirmed again by inspecting the failure messages, byte-for-byte
+identical to F8a/F8b's own. This is exactly why the roadmap row asked for
+a dedicated CTS-*shaped* test: `DrawTest.SubpassLoadReadsBackAnExplicit
+SampleOfTheColorAttachmentItWrote` (hand-written, not `glslang`-compiled)
+exercises the same `subpassLoad`/`OpTypeImage(Dim=SubpassData,
+MultiSampled)` explicit-sample path this suite's shaders would, without
+needing the milestone-7 SIMDize gap fixed first.
+
+The `dEQP-VK.api.*` feature-consistency case unaffected by that gap still
+passes:
+
+```
+dEQP-VK.api.info.get_physical_device_properties2.features.dynamic_rendering_local_read_features
+  Pass (Querying succeeded)
+```
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1751 discovered, 1750 passed, 1
+unsupported (pre-existing, unrelated) -- 3 more passing than F8b's own
+1747-passed baseline (`StageOpsTest`'s new explicit-sample case, the two
+new `ImageSamplingTest` sample-addressing cases, and `DrawTest`'s own new
+multisample subpass-load test), no regressions.
+
+Two incidental, tightly-coupled fixes surfaced while writing this row's
+own test and were fixed in the same series:
+
+- MLIR's own generic image-operand verifier (`mlir/lib/Dialect/SPIRV/IR/
+  ImageOps.cpp`) asserted `Sample` was an unimplemented Image Operand
+  unconditionally for *every* `spirv.ImageRead`/`ImageFetch`/`ImageWrite`/
+  `ImageDrefGather`, not just this ICD's own conversion pattern -- a real
+  `Dim::SubpassData`, `MultiSampled` `spirv.ImageRead` with a `["Sample"]`
+  operand could not even be constructed and verified before this fix, let
+  alone converted. A minimal, spec-shaped validation case (integer-scalar
+  operand, legal only on a fetch/read/write op whose image type has
+  `MS=1`) was added, mirroring the existing `Lod` case's own shape.
+- `GraphicsPipeline.cpp`'s `getRenderTargets` always compared a dynamic-
+  rendering pipeline's `VkPipelineMultisampleStateCreateInfo::
+  rasterizationSamples` against a hardcoded single-sample default at
+  pipeline *creation* time, since (unlike a `VkRenderPass`'s
+  `VkAttachmentDescription::samples`) `VkPipelineRenderingCreateInfo`
+  carries no sample-count field of its own. Every genuinely multisampled
+  dynamic-rendering pipeline was rejected at creation before this fix --
+  with no dynamic-rendering multisample pipeline test anywhere in this
+  suite to have caught it until this row's own test needed exactly that
+  combination. The real per-draw sample-count check (`CommandBuffer.cpp`,
+  against the actually bound attachment) already existed and is
+  unaffected; this fix only stops the creation-time check from rejecting
+  a case draw time would have accepted.
