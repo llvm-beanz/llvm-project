@@ -52,42 +52,52 @@
 // whether or not the descriptor behind a given heap slot happens to be a
 // dynamic one.
 //
-// Scope (roadmap steps R10, R26, V3; see feme/docs/Roadmap.md's §1.2/§1.9):
+// Scope (roadmap steps R10, R26, V3, F12a; see feme/docs/Roadmap.md's
+// §1.2/§1.9):
 //
 //  - A `StorageBuffer`-derived `spirv.VulkanBuffer` handle (an
 //    `RWStructuredBuffer<T>`/`StructuredBuffer<T>` in HLSL, see
 //    `feme::spirv::convertBufferBlockType` in SPIRVToLLVMPatterns.cpp) and a
 //    `Uniform`-derived one (a `cbuffer`/`ConstantBuffer<T>`, see
-//    `feme::spirv::convertUniformBlockType`) are both normalized. (V4) A
-//    `Dim::Buffer` image handle (`Buffer<T>`/`RWBuffer<T>` in HLSL --
-//    Vulkan's uniform/storage texel buffer) *is* normalized, but only over
-//    a `<4 x float>` or `<4 x i32>` shader-side element -- see
-//    `isSupportedTexelElementType`'s comment for why this milestone's CPU
-//    runtime only supports those two shapes (every real per-format texel
-//    fetch/write is still a full four-component vector, per SPIR-V's own
-//    `OpImageRead`/`OpImageFetch`/`OpImageWrite` semantics; a physically
-//    narrower channel count needs per-format padding this milestone does
-//    not add).
-//  - For a storage buffer, only the access shape
-//    `feme::spirv::StorageBufferAccessChainPattern` itself produces for a
-//    flat (non-aggregate) buffer element -- a direct
+//    `feme::spirv::convertUniformBlockType`) are both normalized. So is a
+//    uniform buffer whose sole field is itself a fixed-size array (roadmap
+//    F12a: `layout(std140) uniform Input { uint data[16]; }`), normalized
+//    the same way a storage buffer's own runtime array is -- see
+//    `feme::spirv::getUniformBlockElement`'s comment for why this shape
+//    needs its own handling, since a std140 array's declared `ArrayStride`
+//    need not equal its element's own natural size the way a std430
+//    storage buffer array's always does. (V4) A `Dim::Buffer` image handle
+//    (`Buffer<T>`/`RWBuffer<T>` in HLSL -- Vulkan's uniform/storage texel
+//    buffer) *is* normalized, but only over a `<4 x float>` or `<4 x i32>`
+//    shader-side element -- see `isSupportedTexelElementType`'s comment for
+//    why this milestone's CPU runtime only supports those two shapes (every
+//    real per-format texel fetch/write is still a full four-component
+//    vector, per SPIR-V's own `OpImageRead`/`OpImageFetch`/`OpImageWrite`
+//    semantics; a physically narrower channel count needs per-format
+//    padding this milestone does not add).
+//  - For a storage buffer, or a uniform buffer array, only the access shape
+//    `feme::spirv::BlockAccessChainPattern` itself produces for a flat
+//    (non-aggregate) buffer element -- a direct
 //    `llvm.spv.resource.getpointer` followed immediately by an ordinary
-//    `load`/`store`, with no intervening `getelementptr` into the element's
-//    own fields -- is rewritten. A structured-buffer element with fields
-//    accessed individually is left untouched, exactly as
-//    `feme::cpu::ResourceLoweringPass` leaves any access shape it does not
-//    itself model.
-//  - For a uniform buffer, only the analogous shape
-//    `feme::spirv::UniformBufferAccessChainPattern` produces -- a direct
+//    `load`/`store` (a uniform buffer array's own `store` is never actually
+//    produced by a legal shader, but is rejected the same way a plain
+//    uniform buffer's is below regardless), with no intervening
+//    `getelementptr` into the element's own fields -- is rewritten. A
+//    structured-buffer element with fields accessed individually is left
+//    untouched, exactly as `feme::cpu::ResourceLoweringPass` leaves any
+//    access shape it does not itself model.
+//  - For a (non-array) uniform buffer, only the analogous shape
+//    `feme::spirv::BlockAccessChainPattern` produces -- a direct
 //    `llvm.spv.resource.getpointer` selecting one field of the block's own
 //    struct (its index always a compile-time constant, unlike a storage
-//    buffer's array index) followed immediately by an ordinary `load` -- is
-//    rewritten; the field index resolves directly to that field's
-//    compile-time struct-layout byte offset, with no runtime multiplication
-//    needed. There is no `store` case at all: Vulkan disallows writing
-//    `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`. A nested field within one of the
-//    block's own struct- or array-typed fields is left untouched, the same
-//    "flat access only" narrowing the storage-buffer case above uses.
+//    buffer's, or a uniform buffer array's, array index) followed
+//    immediately by an ordinary `load` -- is rewritten; the field index
+//    resolves directly to that field's compile-time struct-layout byte
+//    offset, with no runtime multiplication needed. There is no `store`
+//    case at all: Vulkan disallows writing `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`.
+//    A nested field within one of the block's own struct- or array-typed
+//    fields is left untouched, the same "flat access only" narrowing the
+//    storage-buffer case above uses.
 //  - A binding's range size must be a compile-time constant (matching the
 //    set/binding identity itself); its array index need not be -- a
 //    dynamic index is accepted and clamped at run time, exactly as

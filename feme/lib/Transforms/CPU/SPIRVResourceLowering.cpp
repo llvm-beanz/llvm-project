@@ -43,20 +43,28 @@ namespace {
 
 /// Which kind of resource a bound handle wraps.
 ///
-/// The first four are buffers -- a storage buffer -- a homogeneous,
+/// The first five are buffers -- a storage buffer -- a homogeneous,
 /// dynamically-indexed runtime array (`RWStructuredBuffer<T>`/
 /// `StructuredBuffer<T>`) -- a uniform buffer -- a fixed set of
 /// differently-typed named fields at fixed byte offsets
-/// (`cbuffer`/`ConstantBuffer<T>`) -- or (V4) a texel buffer -- a
-/// `Buffer<T>`/`RWBuffer<T>`-shaped, format-converting view over a
-/// `Dim::Buffer` SPIR-V image. The three need different offset arithmetic
-/// (see `lowerAccesses`): a storage buffer access multiplies a (possibly
-/// dynamic) array index by a fixed element stride, a uniform buffer access
-/// resolves a (always compile-time-constant) field index directly to a
-/// fixed struct-layout byte offset, and a texel buffer access converts
-/// through its format at a fixed element index with no byte-offset
-/// arithmetic of its own (see `feme::cpu::createTypedLoad`/`createTypedStore`
-/// in ResourceCalls.h).
+/// (`cbuffer`/`ConstantBuffer<T>`) -- a uniform buffer array -- a uniform
+/// block whose sole field is itself a fixed-size, homogeneous array
+/// (roadmap F12a's own `layout(std140) uniform Input { uint data[16]; }`
+/// shape) -- or (V4) a texel buffer -- a `Buffer<T>`/`RWBuffer<T>`-shaped,
+/// format-converting view over a `Dim::Buffer` SPIR-V image. Each needs its
+/// own offset arithmetic (see `lowerAccesses`): a storage buffer access
+/// multiplies a (possibly dynamic) array index by a fixed element stride, a
+/// uniform buffer access resolves a (always compile-time-constant) field
+/// index directly to a fixed struct-layout byte offset, a uniform buffer
+/// *array* access multiplies a (possibly dynamic) array index by a fixed
+/// stride exactly like a storage buffer's own -- except that stride is
+/// carried explicitly on the handle type itself (see
+/// `classifyVulkanBufferHandle`'s comment), since a std140 array's stride
+/// (always a multiple of 16 bytes) need not equal its element's own natural
+/// size the way a std430 storage buffer array's always does -- and a texel
+/// buffer access converts through its format at a fixed element index with
+/// no byte-offset arithmetic of its own (see
+/// `feme::cpu::createTypedLoad`/`createTypedStore` in ResourceCalls.h).
 ///
 /// The last two are the image and sampler halves of a texture sample
 /// (roadmap R30's SPIR-V completion): they live in the *image* and
@@ -66,6 +74,7 @@ namespace {
 enum class HandleKind {
   Storage,
   Uniform,
+  UniformArray,
   TexelStorage,
   TexelUniform,
   SampledImage2D,
@@ -88,6 +97,7 @@ BoundResourceClass getResourceClass(HandleKind Kind) {
   switch (Kind) {
   case HandleKind::Storage:
   case HandleKind::Uniform:
+  case HandleKind::UniformArray:
   case HandleKind::TexelStorage:
   case HandleKind::TexelUniform:
     return BoundResourceClass::Buffer;
@@ -180,15 +190,32 @@ struct HandleClassification {
 /// Returns \p Handle's buffer classification if its type is a
 /// `spirv.VulkanBuffer` handle over a flat (non-aggregate-accessed) element
 /// -- see `feme::spirv::convertBufferBlockType`/`convertUniformBlockType`
-/// in SPIRVToLLVMPatterns.cpp for the two handle shapes this recognizes:
-/// one type parameter (either a storage buffer's `!llvm.array<0 x ElemTy>`
-/// runtime array, or a uniform buffer's own field struct directly) and two
-/// integer parameters (storage class, writability), neither of which is
-/// the stride itself -- SPIR-V records that implicitly via `ElemTy`'s own
-/// store size, mirroring how `feme::cpu::ResourceLoweringPass::
-/// classifyHandle` recovers a DXIL `dx.RawBuffer`'s stride from its element
-/// type parameter. Returns `std::nullopt` for any other handle kind (an
-/// image/sampler resource, not yet covered -- see the header comment).
+/// in SPIRVToLLVMPatterns.cpp for the handle shapes this recognizes: one
+/// type parameter (a storage buffer's `!llvm.array<0 x ElemTy>` runtime
+/// array, a uniform buffer's own field struct directly, or a uniform
+/// buffer array's own `!llvm.array<0 x ElemTy>` marker array -- the same
+/// shape a storage buffer's own uses) and either two integer parameters
+/// (storage class, writability) or, for a uniform buffer array only, three
+/// (storage class, writability, and its own explicit `ArrayStride`).
+///
+/// A storage buffer's own stride is never carried explicitly: SPIR-V
+/// records it implicitly via `ElemTy`'s own store size instead, mirroring
+/// how `feme::cpu::ResourceLoweringPass::classifyHandle` recovers a DXIL
+/// `dx.RawBuffer`'s stride from its element type parameter -- valid because
+/// a std430 storage buffer's own `ArrayStride` always equals its element's
+/// natural size. A std140 uniform buffer array's own `ArrayStride` need
+/// not (every array widens its element to a 16-byte multiple regardless of
+/// the element's own size -- e.g. a scalar `uint`'s 4-byte size against a
+/// 16-byte stride, the shape roadmap F12a's own CTS case hits), so its
+/// real stride has nowhere else to come from and is carried as that third
+/// integer parameter instead (see `feme::spirv::convertUniformBlockType`'s
+/// own comment for why the marker array itself cannot carry it). The two
+/// shapes are otherwise indistinguishable from `Param`'s own type alone,
+/// which is why the parameter count -- not `ElemTy` -- is what
+/// distinguishes them here.
+///
+/// Returns `std::nullopt` for any other handle kind (an image/sampler
+/// resource, not yet covered -- see the header comment).
 std::optional<HandleClassification>
 classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
   auto *HandleTy = dyn_cast<TargetExtType>(Handle.getType());
@@ -197,10 +224,14 @@ classifyVulkanBufferHandle(const CallInst &Handle, const DataLayout &DL) {
   if (HandleTy->getNumTypeParameters() != 1)
     return std::nullopt;
   Type *Param = HandleTy->getTypeParameter(0);
-  if (auto *ArrayTy = dyn_cast<ArrayType>(Param))
+  if (auto *ArrayTy = dyn_cast<ArrayType>(Param)) {
+    if (HandleTy->getNumIntParameters() > 2)
+      return HandleClassification{HandleKind::UniformArray,
+                                  HandleTy->getIntParameter(2), nullptr};
     return HandleClassification{HandleKind::Storage,
                                 DL.getTypeStoreSize(ArrayTy->getElementType()),
                                 nullptr};
+  }
   if (auto *StructTy = dyn_cast<StructType>(Param))
     return HandleClassification{HandleKind::Uniform, 0, StructTy};
   return std::nullopt;
@@ -463,16 +494,17 @@ bool hasOnlySupportedSamplerUses(const CallInst &Handle) {
 
 /// Checks that every use of \p Handle is the flat access shape this pass
 /// models for \p Kind: a `llvm.spv.resource.getpointer` call whose own
-/// result is used only by an ordinary `load` (both kinds), or a `store` it
+/// result is used only by an ordinary `load` (every kind), or a `store` it
 /// is the pointer operand (not the stored value) of (`HandleKind::Storage`/
-/// `TexelStorage` only -- a uniform/texel-uniform buffer is always
-/// read-only, matching Vulkan's own restriction on
+/// `TexelStorage` only -- a uniform/uniform-array/texel-uniform buffer is
+/// always read-only, matching Vulkan's own restriction on
 /// `VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER`/`_UNIFORM_TEXEL_BUFFER`) -- see the
 /// header comment's "access shape" bullet. For `HandleKind::Uniform`, the
 /// `getpointer` index (the field selected within the block's struct) must
-/// also be a compile-time constant, unlike a storage buffer's (possibly
-/// dynamic) array index -- a real cbuffer field access is always
-/// statically typed. For a texel-buffer kind, every load's result type (or
+/// also be a compile-time constant, unlike a storage buffer's -- or a
+/// uniform buffer *array*'s (`HandleKind::UniformArray`) -- possibly
+/// dynamic array index: a real cbuffer field access is always statically
+/// typed. For a texel-buffer kind, every load's result type (or
 /// store's stored-value type) must be one of the shapes
 /// `isSupportedTexelElementType` accepts -- see `classifyTexelBufferHandle`'s
 /// comment for why that check belongs here rather than on the handle type;
@@ -768,17 +800,18 @@ Function *addResourceEnvParams(Function &F, ResourceCallEnv &Env) {
 /// once, at \p BH.Handle's own location -- which dominates every use
 /// rewritten below -- rather than once per access.
 ///
-/// The access itself differs by \p BH.Kind: a storage-buffer access
-/// multiplies its `getpointer` array index (re-read per call, since --
-/// unlike the descriptor index above -- a distinct array element may be
-/// read per access) by \p BH.Stride and goes through
-/// `feme::cpu::createRawLoad`/`createRawStore`; a uniform-buffer access
-/// resolves its `getpointer` field index (a compile-time constant,
+/// The access itself differs by \p BH.Kind: a storage-buffer access, or a
+/// uniform-buffer *array*'s (`HandleKind::UniformArray`), multiplies its
+/// `getpointer` array index (re-read per call, since -- unlike the
+/// descriptor index above -- a distinct array element may be read per
+/// access) by \p BH.Stride and goes through
+/// `feme::cpu::createRawLoad`/`createRawStore`; a (non-array) uniform-buffer
+/// access resolves its `getpointer` field index (a compile-time constant,
 /// guaranteed by `hasOnlySupportedUses`) directly to \p BH.ElementStruct's
 /// own declared byte offset for that field, also through the raw family --
 /// no runtime arithmetic needed at all, since a cbuffer's fields have no
-/// dynamic index the way a storage buffer's array elements do. A texel
-/// buffer access (`isTexelHandleKind(BH.Kind)`) needs no byte-offset
+/// dynamic index the way a storage/uniform buffer array's elements do. A
+/// texel buffer access (`isTexelHandleKind(BH.Kind)`) needs no byte-offset
 /// arithmetic either: its `getpointer` "index" is already the image
 /// coordinate `OpImageRead`/`OpImageFetch`/`OpImageWrite` themselves address
 /// by, so it goes through `feme::cpu::createTypedLoad`/`createTypedStore`
@@ -803,7 +836,8 @@ void lowerAccesses(const BoundHandle &BH, const ResourceCallEnv &Env,
     if (IsTexel) {
       IRBuilder<> PtrBuilder(GetPtr);
       ElementIndex = PtrBuilder.CreateZExt(GetPtr->getArgOperand(1), I64Ty);
-    } else if (BH.Kind == HandleKind::Storage) {
+    } else if (BH.Kind == HandleKind::Storage ||
+               BH.Kind == HandleKind::UniformArray) {
       IRBuilder<> PtrBuilder(GetPtr);
       Value *ElemIdx = PtrBuilder.CreateZExt(GetPtr->getArgOperand(1), I64Ty);
       Offset =
