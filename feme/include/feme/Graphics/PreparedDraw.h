@@ -188,6 +188,15 @@ struct PreparedDraw {
   /// fragments leave surviving the final depth/stencil test -- the quantity
   /// `VK_QUERY_TYPE_OCCLUSION` queries report. Null when no caller needs it.
   uint64_t *PassedSampleCounter = nullptr;
+  /// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`'s current mapping,
+  /// in the same shape `VkRenderingAttachmentLocationInfo::
+  /// pColorAttachmentLocations` uses: element `Location` names the
+  /// `Attachments` index that fragment shader output `Location` writes
+  /// into, or `VK_ATTACHMENT_UNUSED` if `Location` writes nowhere (its
+  /// value is discarded). Empty means the identity mapping (`Location ==
+  /// attachment index`), the default every `vkCmdBeginRendering` instance
+  /// resets to.
+  llvm::ArrayRef<uint32_t> ColorAttachmentLocations;
 };
 
 } // namespace feme::graphics

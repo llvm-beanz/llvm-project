@@ -1123,6 +1123,22 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
   // One `SV_TargetN` fragment output per color attachment (roadmap R33's
   // "multiple render targets"), linked by `Location` the same way varyings
   // are: `FSColors[i]` writes into `Draw.Attachments[i]`.
+  //
+  // (roadmap F8) `vkCmdSetRenderingAttachmentLocations` can remap which
+  // output location feeds which attachment index; `Draw.
+  // ColorAttachmentLocations[Location]` names the attachment index (or
+  // `0xFFFFFFFF`/`VK_ATTACHMENT_UNUSED` for "writes nowhere"), the identity
+  // mapping when empty. `locationForAttachment` inverts it once per draw --
+  // attachment index `I`'s own source location -- rather than repeating an
+  // O(N) search per attachment for every draw's every triangle.
+  auto locationForAttachment = [&](uint32_t I) -> std::optional<uint32_t> {
+    if (Draw.ColorAttachmentLocations.empty())
+      return I;
+    for (uint32_t Loc = 0; Loc != Draw.ColorAttachmentLocations.size(); ++Loc)
+      if (Draw.ColorAttachmentLocations[Loc] == I)
+        return Loc;
+    return std::nullopt;
+  };
   SmallVector<const SignatureElement *, 4> FSColors;
   for (uint32_t I = 0; I != Draw.Attachments.size(); ++I) {
     if (Draw.Attachments[I].Data.empty()) {
@@ -1134,19 +1150,28 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
       FSColors.push_back(nullptr);
       continue;
     }
+    std::optional<uint32_t> Loc = locationForAttachment(I);
+    if (!Loc) {
+      // (roadmap F8) No fragment output location is remapped onto this
+      // attachment: it keeps whatever it already held, exactly like an
+      // unused `VkRenderingAttachmentInfo` slot above.
+      FSColors.push_back(nullptr);
+      continue;
+    }
     const SignatureElement *FSColor =
-        findElementByLocation(*FSSig, SignatureDirection::Output, I);
+        findElementByLocation(*FSSig, SignatureDirection::Output, *Loc);
     if (!FSColor)
       return createStringError(inconvertibleErrorCode(),
                                "fragment stage has no output at location %u "
-                               "(SV_Target%u)",
-                               I, I);
+                               "(mapped to color attachment %u)",
+                               *Loc, I);
     if (FSColor->ComponentCount != 4 ||
         FSColor->ComponentType != SignatureComponentType::Float)
       return createStringError(inconvertibleErrorCode(),
-                               "SV_Target%u must be a 4-component "
-                               "floating-point output",
-                               I);
+                               "the fragment output at location %u mapped "
+                               "to color attachment %u must be a "
+                               "4-component floating-point output",
+                               *Loc, I);
     FSColors.push_back(FSColor);
   }
 
@@ -2213,6 +2238,12 @@ Error executeDraws(const GraphicsPipeline &Pipeline, const PreparedDraw &Draw,
             if (Att.Data.empty())
               // (Roadmap E5) An unused (`VK_NULL_HANDLE`) color slot: the
               // write is discarded rather than performed.
+              continue;
+            if (!FSColors[AttIdx])
+              // (roadmap F8) `vkCmdSetRenderingAttachmentLocations` mapped
+              // no fragment output location onto this attachment: it is
+              // left exactly as it was, the same "nothing to write" case
+              // as an unused slot above.
               continue;
             std::array<double, 4> RGBA;
             for (unsigned C = 0; C != 4; ++C)
