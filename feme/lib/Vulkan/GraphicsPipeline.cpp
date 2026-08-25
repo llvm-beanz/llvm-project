@@ -577,6 +577,21 @@ getRenderTargets(const VkGraphicsPipelineCreateInfo &CreateInfo) {
                                "this driver cannot render into");
     Targets.DepthStencil = *Format;
   }
+  // Unlike a `VkRenderPass`'s `VkAttachmentDescription::samples` above,
+  // `VkPipelineRenderingCreateInfo` carries no sample-count field of its
+  // own -- dynamic rendering only ever learns the real render target's
+  // sample count at `vkCmdBeginRendering` time (`CommandBuffer.cpp`'s own
+  // "the render target's sample count disagrees with the bound pipeline's"
+  // check already validates that). The pipeline's own declared
+  // `rasterizationSamples` is the only sample count this creation-time
+  // code can know for a dynamic-rendering pipeline, so trust it here
+  // rather than leaving `Targets.SampleCount` at its single-sample default
+  // -- otherwise the check just below would reject every genuinely
+  // multisampled dynamic-rendering pipeline as "disagreeing" with a
+  // sample count dynamic rendering never actually specified.
+  if (CreateInfo.pMultisampleState)
+    Targets.SampleCount =
+        static_cast<uint32_t>(CreateInfo.pMultisampleState->rasterizationSamples);
   return Targets;
 }
 
