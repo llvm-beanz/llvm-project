@@ -4428,3 +4428,61 @@ this session's existing `./build`): 1742 discovered, 1741 passed, 1
 unsupported (pre-existing, unrelated) -- 8 more passing than F8's own
 1734-passed baseline (the new `StageOpsTest`, lit, and `DrawTest`/
 `PhysicalDeviceInfoTest` cases this series adds), no regressions.
+
+## Roadmap F8b: measured impact (depth/stencil coverage, extension unchanged)
+
+F8b closed the remainder of F8a's own status note for a depth/stencil
+attachment: the CPU runtime's texel-unpack table (FeMeRuntimeCPU.c) now
+decodes `D16_UNORM`/`D32_FLOAT`/`S8_UINT`, and `buildSubpassInputHeap`
+(CommandBuffer.cpp) now populates a multisampled attachment's heap slot with
+a correct per-sample layout too (proven by unit tests, not yet by an
+end-to-end multisample `subpassLoad`, since no caller threads an explicit
+sample index through one -- see agent_thoughts.md and roadmap F8c).
+`dynamicRenderingLocalReadDepthStencilAttachments` is now advertised
+`VK_TRUE`.
+
+Re-running the same `dEQP-VK.renderpasses.dynamic_rendering.*.local_read.*`
+suite F8a's own report measured produces *identical* totals:
+
+```
+Test run totals:
+  Passed:        0/54 (0.0%)
+  Failed:        38/54 (70.4%)
+  Not supported: 16/54 (29.6%)
+```
+
+This is expected, not a sign F8b had no effect: every one of the 38
+failures is still gated on the same pre-existing, unrelated
+`feme::cpu::SIMDizePass` milestone-7 deviation F8a's own report already
+attributed them to (confirmed again by inspecting the failure messages,
+which are byte-for-byte the same `error: feme-cpu-simdize: ... component
+decomposition is not yet supported` text) -- it blocks pipeline *creation*
+for these CTS cases' real `glslang`-compiled shaders regardless of whether
+they touch a depth/stencil `subpassInput` at all, so F8b's own code never
+gets a chance to run inside this particular suite either. This is exactly
+why the roadmap row asked for a dedicated CTS-*shaped* test rather than
+relying on the real suite: `DrawTest.SubpassLoadReadsBackTheDepthAttachment
+ItWrote`/`SubpassLoadReadsBackTheStencilAttachmentItWrote` (hand-written,
+not `glslang`-compiled) exercise the same `subpassLoad`/`OpTypeImage(Dim=
+SubpassData)` path this suite's shaders would, without needing the
+milestone-7 SIMDize gap fixed first.
+
+The two `dEQP-VK.api.*` cases unaffected by that gap still pass:
+
+```
+dEQP-VK.api.info.get_physical_device_properties2.features.dynamic_rendering_local_read_features
+  Pass (Querying succeeded)
+```
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1748 discovered, 1747 passed, 1
+unsupported (pre-existing, unrelated) -- 6 more passing than F8a's own
+1741-passed baseline (the new `ImageSamplingTest` format/multisample cases
+and `DrawTest`'s two depth/stencil subpass-load tests), no regressions.
+One incidental fix surfaced along the way: making the CPU runtime's
+`SampleStride` field load-bearing exposed a latent, previously-inert
+`SampleStride == SlicePitch` mistake in `decodeASTCImageForSampling`
+(CommandBuffer.cpp) that made `ASTCSampledImageDispatchTest.
+SamplesARealDecodedTexelRatherThanAllZero` start failing the moment the
+field stopped being ignored; fixed in the same series (see
+agent_thoughts.md for the full trace).

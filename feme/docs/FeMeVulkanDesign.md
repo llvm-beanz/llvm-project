@@ -1415,9 +1415,9 @@ output at that location -- the spec says it must not, but nothing about
 this software rasterizer's own correctness depends on enforcing that; the
 write is simply discarded along with everything else about the slot.
 
-**Status (roadmap F8/F8a): `vkCmdSetRenderingAttachmentLocations`/
+**Status (roadmap F8/F8a/F8b): `vkCmdSetRenderingAttachmentLocations`/
 `vkCmdSetRenderingInputAttachmentIndices` implemented; `dynamicRendering
-LocalRead` now advertised for a single-sample color attachment.** Both
+LocalRead` now advertised for a color, depth, or stencil attachment.** Both
 commands are restricted to a `vkCmdBeginRendering` instance (a classic
 `VkRenderPass`'s attachment/location correspondence is fixed by its
 `VkSubpassDescription`, which this extension does not touch) and reset to
@@ -1444,11 +1444,19 @@ note (above) had flagged for roadmap C5.
 `dynamicRenderingLocalRead`/`VK_KHR_dynamic_rendering_local_read` are now
 advertised, proven end to end by `DrawTest.
 SubpassLoadReadsBackTheColorAttachmentItWrote`'s real read-after-write pixel
-round-trip -- but only for a single-sample color attachment:
-`dynamicRenderingLocalReadDepthStencilAttachments`/
-`dynamicRenderingLocalReadMultisampledAttachments` stay `VK_FALSE` until a
-depth/stencil or multisampled subpass input has its own demonstrated case,
-tracked as roadmap F8b.
+round-trip. Roadmap F8b closed the depth/stencil half of the remaining gap:
+the CPU runtime's texel-unpack table (FeMeRuntimeCPU.c) now decodes
+`D16_UNORM`/`D32_FLOAT`/`S8_UINT` -- the format-decode gap that had left
+every such fetch reading zero, not anything in `buildSubpassInputHeap`
+itself -- proven by `DrawTest.SubpassLoadReadsBackThe{Depth,Stencil}
+AttachmentItWrote`, so `dynamicRenderingLocalReadDepthStencilAttachments`
+now advertises `VK_TRUE`. F8b also gave `buildSubpassInputHeap` a correct
+per-sample layout for a multisampled attachment's heap slot, but no caller
+threads an explicit sample index through a subpass load yet (`feme::
+StageOpKind::SubpassLoad` has no `Sample` operand, and `SubpassLoadPattern`
+rejects any `spirv.ImageRead` that carries one), so
+`dynamicRenderingLocalReadMultisampledAttachments` stays `VK_FALSE` --
+tracked as roadmap F8c.
 
 ### Graphics pipeline state
 
