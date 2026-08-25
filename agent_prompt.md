@@ -33,22 +33,9 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F16?
+Can you implement roadmap milestone F4?
 
-> **MLIR's SPIR-V deserializer asserts on `FrexpStruct`/`ModfStruct` result
-> types** (`Deserializer::processStructType`, `decoration.has_value()`), found
-> incidentally by F15d's own targeted CTS re-run
-> (`dEQP-VK.spirv_assembly.instruction.compute.float_controls2.fp32.input_args.frexp_st_*`)
-> rather than anything float-controls-specific: these two GLSL.std.450 extended
-> instructions return a two-member struct (fraction and exponent) whose members
-> this dialect's deserializer apparently expects a member decoration on (likely
-> `Offset`, the usual struct-layout one) that a `Function`-storage-class-only
-> local struct like this one's result type has no reason to carry, crashing
-> (`assert`, not a diagnosed error) rather than importing or cleanly rejecting
-> the module. Needs, in order: (1) root-causing exactly which decoration
-> `processStructType` unconditionally expects and why a plain (non-interface)
-> struct type is exempt from needing it per the SPIR-V spec's own layout rules,
-> then (2) a real `spirv.FrexpStruct`/`spirv.ModfStruct`-shaped op
-> (`SPIRVGLSLOps.td` or the CL variant) and its `SPIRVToLLVM` conversion
-> pattern, if this dialect does not already model either instruction at all --
-> unconfirmed as of this row
+> **`VK_KHR_shader_expect_assume`/`shaderExpectAssume`.**
+> `OpAssumeTrueKHR`/`OpExpectKHR` lower directly to `llvm.assume`/`llvm.expect`
+> intrinsics — one of the smallest rows in this whole breakdown, good as a first
+> task for a new contributor
