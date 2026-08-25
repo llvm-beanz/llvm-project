@@ -462,6 +462,10 @@ TEST_F(PhysicalDeviceProperties2Test,
   EXPECT_EQ(Props14.maxVertexAttribDivisor, 0xFFFFFFFFu);
   EXPECT_EQ(Props14.supportsNonZeroFirstInstance, VK_TRUE);
   EXPECT_EQ(Props14.maxPushDescriptors, 0u);
+  // (roadmap F8a) `dynamicRenderingLocalRead` itself is real, but only for
+  // a single-sample color attachment so far -- each of these needs its own
+  // depth/stencil- or multisample-attachment case demonstrated (roadmap
+  // F8b) before it can honestly flip to `VK_TRUE`.
   EXPECT_EQ(Props14.dynamicRenderingLocalReadDepthStencilAttachments, VK_FALSE);
   EXPECT_EQ(Props14.dynamicRenderingLocalReadMultisampledAttachments, VK_FALSE);
   EXPECT_EQ(Props14.earlyFragmentMultisampleCoverageAfterSampleCounting,
@@ -1087,7 +1091,12 @@ TEST_F(PhysicalDeviceProperties2Test,
   // agree with the dedicated `VkPhysicalDeviceIndexTypeUint8FeaturesKHR`
   // struct case below.
   EXPECT_EQ(Features14.indexTypeUint8, VK_TRUE);
-  EXPECT_EQ(Features14.dynamicRenderingLocalRead, VK_FALSE);
+  // Roadmap F8a: `feme::spirv::SubpassLoadPattern`/FragmentWrapper.cpp's
+  // `lowerFragmentSubpassLoad` give a fragment shader's `subpassInput`
+  // local read real pixels, and must agree with the dedicated
+  // `VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR` struct case
+  // below.
+  EXPECT_EQ(Features14.dynamicRenderingLocalRead, VK_TRUE);
   // Roadmap E5: now genuinely implemented (RenderPass.cpp/
   // CommandBuffer.cpp/Format.cpp), and must agree with the dedicated
   // `VK_KHR_maintenance5` struct case below.
@@ -1284,6 +1293,23 @@ TEST_F(PhysicalDeviceProperties2Test,
   Features2.pNext = &IndexTypeUint8Features;
   vkGetPhysicalDeviceFeatures2(Physical, &Features2);
   EXPECT_EQ(IndexTypeUint8Features.indexTypeUint8, VK_TRUE);
+}
+
+TEST_F(PhysicalDeviceProperties2Test,
+       DynamicRenderingLocalReadIsAdvertisedThroughItsOwnDedicatedFeatureStruct) {
+  // Roadmap F8a: `VK_KHR_dynamic_rendering_local_read`'s own dedicated
+  // feature struct must agree with the aggregate
+  // `VkPhysicalDeviceVulkan14Features` case above, exactly like
+  // `VK_KHR_index_type_uint8`'s own struct does.
+  VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR LocalReadFeatures{};
+  LocalReadFeatures.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR;
+
+  VkPhysicalDeviceFeatures2 Features2{};
+  Features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+  Features2.pNext = &LocalReadFeatures;
+  vkGetPhysicalDeviceFeatures2(Physical, &Features2);
+  EXPECT_EQ(LocalReadFeatures.dynamicRenderingLocalRead, VK_TRUE);
 }
 
 TEST_F(PhysicalDeviceProperties2Test,

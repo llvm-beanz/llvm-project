@@ -600,7 +600,12 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       Props14->supportsNonZeroFirstInstance = VK_TRUE;
       // (roadmap F12) `pushDescriptor` is unimplemented.
       Props14->maxPushDescriptors = 0;
-      // (roadmap F8) `dynamicRenderingLocalRead` is unimplemented.
+      // (roadmap F8a) `dynamicRenderingLocalRead` itself is real (see that
+      // feature bit's own comment above), but only for a single-sample
+      // color attachment so far: these two properties each need their own
+      // depth/stencil- and multisample-attachment local-read case
+      // demonstrated (roadmap F8b) before either can honestly flip to
+      // `VK_TRUE`.
       Props14->dynamicRenderingLocalReadDepthStencilAttachments = VK_FALSE;
       Props14->dynamicRenderingLocalReadMultisampledAttachments = VK_FALSE;
       // (roadmap E5's `VK_KHR_maintenance5`) None of this group's fixed-
@@ -1237,7 +1242,21 @@ void fillFeatures2Chain(void *pNext) {
       // must agree with the dedicated `VkPhysicalDeviceIndexTypeUint8
       // FeaturesKHR` struct case below.
       Features->indexTypeUint8 = VK_TRUE;
-      Features->dynamicRenderingLocalRead = VK_FALSE;
+      // (roadmap F8a) `feme::spirv::SubpassLoadPattern` (SPIRVToLLVMPatterns
+      // .cpp) plus FragmentWrapper.cpp's `lowerFragmentSubpassLoad` give a
+      // fragment shader's `subpassInput` local read real pixels, resolved
+      // through `vkCmdSetRenderingInputAttachmentIndices`'s mapping
+      // (CommandBuffer.cpp's `buildSubpassInputHeap`) -- proven end to end
+      // by DrawTest's `SubpassLoadReadsBackTheColorAttachmentItWrote` -- so
+      // this bit, like `indexTypeUint8` above, must agree with the
+      // dedicated `VkPhysicalDeviceDynamicRenderingLocalReadFeatures` case
+      // below. Scoped to a single-sample color attachment for now (roadmap
+      // F8b tracks depth/stencil and multisample coverage), which this
+      // feature bit's own two limit fields
+      // (`dynamicRenderingLocalReadDepthStencilAttachments`/
+      // `dynamicRenderingLocalReadMultisampledAttachments`, still `VK_FALSE`
+      // below) already scope down to.
+      Features->dynamicRenderingLocalRead = VK_TRUE;
       Features->maintenance5 = VK_TRUE;
       // (roadmap E6) `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`
       // (CommandBuffer.cpp) are implemented, so this bit -- like
@@ -1387,6 +1406,17 @@ void fillFeatures2Chain(void *pNext) {
       auto *Features =
           reinterpret_cast<VkPhysicalDeviceIndexTypeUint8Features *>(Base);
       Features->indexTypeUint8 = VK_TRUE;
+      break;
+    }
+    // (roadmap F8a) `VK_KHR_dynamic_rendering_local_read`'s own feature
+    // struct, whose 1.4 core and `KHR` spellings share one `sType`, exactly
+    // like `indexTypeUint8` above, agreeing with the aggregate
+    // `VkPhysicalDeviceVulkan14Features` case above.
+    case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES: {
+      auto *Features =
+          reinterpret_cast<VkPhysicalDeviceDynamicRenderingLocalReadFeatures *>(
+              Base);
+      Features->dynamicRenderingLocalRead = VK_TRUE;
       break;
     }
     // (roadmap E8) `VK_KHR_shader_integer_dot_product`'s own feature

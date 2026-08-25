@@ -8,8 +8,9 @@
      and a `<require depends="...">` block, which vk_gen_entrypoints.py must
      skip since it's conditioned on an optional extension, not the core
      version itself. It also declares `VK_KHR_dynamic_rendering`,
-     `VK_EXT_extended_dynamic_state`, `VK_KHR_maintenance5`, and
-     `VK_KHR_line_rasterization`, the four
+     `VK_EXT_extended_dynamic_state`, `VK_KHR_maintenance5`,
+     `VK_KHR_line_rasterization`, and `VK_KHR_dynamic_rendering_local_read`,
+     the five
      extensions `SUPPORTED_EXTENSIONS` lists, whose commands must be read out
      of `<extensions>` rather than out of any core feature. -->
 <registry>
@@ -49,6 +50,14 @@
     </command>
     <command>
       <proto><type>void</type><name>vkCmdSetLineStippleKHR</name></proto>
+      <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkCmdSetRenderingAttachmentLocationsKHR</name></proto>
+      <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
+    </command>
+    <command>
+      <proto><type>void</type><name>vkCmdSetRenderingInputAttachmentIndicesKHR</name></proto>
       <param><type>VkCommandBuffer</type><name>commandBuffer</name></param>
     </command>
   </commands>
@@ -109,6 +118,13 @@
                supported="vulkan">
       <require>
         <command name="vkCmdSetLineStippleKHR"/>
+      </require>
+    </extension>
+    <extension name="VK_KHR_dynamic_rendering_local_read" number="232"
+               type="device" supported="vulkan">
+      <require>
+        <command name="vkCmdSetRenderingAttachmentLocationsKHR"/>
+        <command name="vkCmdSetRenderingInputAttachmentIndicesKHR"/>
       </require>
     </extension>
   </extensions>

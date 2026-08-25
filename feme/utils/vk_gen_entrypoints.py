@@ -88,6 +88,14 @@ SUPPORTED_EXTENSIONS = (
     # the same reason every other post-`maintenance5` entry in this tuple
     # is listed.
     "VK_KHR_line_rasterization",
+    # (roadmap F8/F8a) `vkCmdSetRenderingAttachmentLocations`/
+    # `vkCmdSetRenderingInputAttachmentIndices` (CommandBuffer.cpp) are both
+    # implemented, and a fragment shader's `subpassInput` local read now
+    # produces real pixels (SPIRVToLLVMPatterns.cpp's `SubpassLoadPattern`,
+    # FragmentWrapper.cpp's `lowerFragmentSubpassLoad`) -- see
+    # `dynamicRenderingLocalRead`'s own feature-bit comment in
+    # EntryPoints.cpp for this row's single-sample-color-attachment scope.
+    "VK_KHR_dynamic_rendering_local_read",
 )
 
 # First-parameter handle types that make a command dispatched at the
