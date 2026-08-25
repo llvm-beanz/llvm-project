@@ -30886,3 +30886,164 @@ lit test (`spirv-to-llvmir-fp-fast-math-default.mlir`). Also ran the
 upstream `mlir` `Dialect/SPIRV`/`Target/SPIRV` lit suites (via
 `check-mlir-dialect-spirv`/`check-mlir-target-spirv`), both 100% passing,
 for the two new dialect-level tests this row's own dialect changes needed.
+
+# Agent thoughts: roadmap F16 (MLIR SPIR-V deserializer crash on FrexpStruct/ModfStruct)
+
+## Scope
+
+F15d's own targeted CTS re-run found an assertion failure deserializing
+`FrexpStruct`/`ModfStruct`'s two-member struct result
+(`Deserializer::processStructType`, `decoration.has_value()`), unrelated to
+float controls, and split it off as this row. Two things to do, in order:
+root-cause the assert, then check whether this dialect actually models both
+instructions and their `SPIRVToLLVM` conversion at all.
+
+## Root-causing the assert: it is not about a missing decoration at all
+
+The roadmap's own phrasing guessed the crash was about a *member*
+decoration (likely `Offset`) a `Function`-storage local struct has no
+reason to carry. That guess was wrong in an instructive way: I reproduced
+the crash directly first, rather than reasoning about it in the abstract,
+by finding the real CTS shader source (`vktSpvAsmFloatControls2Tests.cpp`)
+`frexp_st`'s `OID_FREXP_ST` operation actually generates, and hand-building
+the equivalent SPIR-V text with `spirv-as`. The struct's members
+(`OpMemberDecorate %struct_fi 0/1 Offset ...`) round-trip fine --
+`Offset` is special-cased before ever reaching the code that crashes, and
+member decorations go through a completely different map
+(`memberDecorationMap`) than the one that asserts (`decorations`, keyed by
+mangled attribute name). What actually crashes is that every
+`FLOAT_ARITHMETIC` operation's `deco` test variant decorates the arithmetic
+op's own result with `FPFastMathMode` -- and for `frexp_st`/`modf_st`/
+`modf_st_wh`/`modf_st_fr`, `IDsToDecorate` includes `struct_fi`/`struct_ff`
+themselves (the *type*, since GLSL.std.450 has no way to decorate an
+`OpExtInst`'s own result <id> for a struct-returning instruction the usual
+way): `OpDecorate %struct_fi FPFastMathMode NotNaN`. That is a genuinely
+different code path -- `processStructType`'s struct-level (not per-member)
+decoration handling -- and it is the one with the bug.
+
+`processStructType` recovers the original `spirv::Decoration` enum from the
+attribute's mangled name via
+`symbolizeDecoration(convertToCamelFromSnakeCase(name, true))`. That
+round trip is not reliably reversible: `getSymbolDecoration` mangles
+`FPFastMathMode` to `fp_fast_math_mode` the same way it would mangle the
+*nonexistent* `FpFastMathMode`, so unmangling `fp_fast_math_mode` guesses
+`FpFastMathMode`, which does not symbolize to anything, and the `assert`
+fires unconditionally on `std::nullopt`. This is a real, general dialect
+bug, not something specific to `FrexpStruct`/`ModfStruct` -- any decoration
+whose name has an acronym-then-lowercase-word transition ambiguous under
+naive re-capitalization (`FPFastMathMode`, `FPRoundingMode`) would hit it
+the same way if a real shader ever decorated a struct type with one; these
+two instructions were just the first thing in this whole F15/F16 family's
+own CTS probing that happened to do so.
+
+## Fix: build an exact reverse map, not a guessed one
+
+`Deserializer.cpp` already has precedent for exactly this "given a mangled
+attribute name, which decoration was it" problem: `setFunctionArgAttrs`
+resolves the `Aliased`/`Restrict`/`RelaxedPrecision` ambiguity by comparing
+against `getSymbolDecoration(stringifyDecoration(candidate))` for each
+candidate it cares about, i.e. mangling forward from a known enum value,
+never unmangling an arbitrary string. Generalized that to cover every
+`spirv::Decoration` value at once rather than a hand-picked few: a
+function-local static `llvm::StringMap<spirv::Decoration>`, built once by
+iterating `0..=getMaxEnumValForDecoration()` (6443; a few thousand
+iterations, once per process, not per struct), calling
+`symbolizeDecoration(i)` and mangling the result's own name forward the
+same way `getSymbolDecoration` does. `processStructType` now looks the
+attribute's name up in that map directly; the `assert` becomes a
+`return emitError(...)` for the (now unreachable, since the map is
+exhaustive) case it still fails to find, matching the roadmap's own
+"importing or cleanly rejecting" alternative to crashing, for whatever
+future decoration this reasoning has not anticipated.
+
+## Verification order: hand-built binary, not a live CTS process
+
+Followed the same escalating-confidence order the rest of this F15/F16
+family has used, but starting one step earlier: rather than needing a live
+`deqp-vk` run to hit the exact crash again, I reproduced it directly with a
+minimal, hand-assembled SPIR-V binary matching `struct_fi`'s exact shape
+(`spirv-as`/`spirv-val` confirm it is spec-valid input), which crashed
+`mlir-translate --deserialize-spirv` identically to the CTS-triggered
+failure before the fix, and imported cleanly (`FPFastMathMode` decoration
+included in the printed `spirv.struct`) after it. Then a full binary round
+trip -- `--serialize-spirv` back out, `spirv-val` on the result -- confirmed
+the fix is genuinely symmetric, not import-only, the same standard F15a's
+report first established for this kind of dialect change.
+
+## The second half: this dialect modeled FrexpStruct but not ModfStruct at all
+
+Checked both parts of the roadmap's open question directly rather than
+guessing: `spirv.GL.FrexpStruct` already exists (`SPIRVGLOps.td`), but
+`ModfStruct` (and even plain `Modf`, the out-parameter form) does not exist
+in this dialect at all. Added `SPIRV_GLModfStructOp` (opcode 36, matching
+the GLSL.std.450 registry) mirroring `FrexpStruct`'s own shape -- a
+two-member struct result, both members the same type as the operand -- and
+a verifier following `GLFrexpStructOp::verify`'s own structure.
+
+Neither instruction had a `SPIRVToLLVM` conversion pattern either. Added
+both upstream (`mlir::populateSPIRVToLLVMConversionPatterns`,
+`mlir/lib/Conversion/SPIRVToLLVM/SPIRVToLLVM.cpp`) rather than in feme's own
+conversion, since neither pattern needs anything feme-specific (no
+entry-point/resource/stage-IO maps `feme::spirv::populateSPIRVToLLVMTarget
+Patterns` threads through) -- feme already gets both for free through the
+upstream `populateSPIRVToLLVMConversionPatterns` call its own conversion
+pass makes, the same layering F15d's own capability/execution-mode fix
+established for dialect-level gaps. `FrexpStruct` maps directly onto LLVM's
+own `llvm.intr.frexp` intrinsic via the existing `DirectConversionPattern`
+template -- its result is already a struct of exactly the shape SPIR-V's
+own verifier requires (component type, 32-bit integer exponent), so no
+repacking is needed. `ModfStruct` has no matching LLVM intrinsic (`modf` is
+a libm function, not something LLVM promoted to a real intrinsic the way it
+did `frexp`), so it decomposes by hand: `llvm.intr.trunc` for the integer
+part, `llvm.fsub` for the fractional remainder, then `llvm.mlir.poison`/
+`llvm.insertvalue` to repack -- the same "no single intrinsic, build the
+struct by hand" shape `ArithmeticWithOverflowPattern` already established
+for `IAddCarry`/`ISubBorrow` two members ago in the same file.
+
+## Attempting a CTS re-run: further than expected, but still blocked
+
+Tried to reproduce F15d's own truncated `frexp_st_testedWithout_NSZ_..._deco`
+case running to completion instead of crashing, using the same
+"temporarily flip every gate" methodology F15c/F15d already established
+(`shaderFloatControls2`, the three FP32 float-control property fields, both
+in the dedicated `VkPhysicalDeviceFloatControlsProperties` struct case and
+its `VkPhysicalDeviceVulkan12Properties` twin). It did not get far enough
+to reach the (now-fixed) deserializer at all: CTS also separately checks
+`VkPhysicalDeviceShaderFloatControls2FeaturesKHR`'s own `shaderFloatControls2`
+field through its own dedicated chained struct, which this ICD does not
+handle at all (silently ignored, left zero-initialized) -- a further,
+previously-unrecorded prerequisite the eventual `shaderFloatControls2`
+advertisement work (already tracked as blocked on the unrelated
+`feme::cpu` resource-lowering gap) will also need. Out of this row's own
+scope; reverted every temporary flip immediately, nothing committed, and
+relied instead on the direct hand-built-binary reproduction above, which
+targets the actual crashing code path more precisely than a full CTS run
+would anyway.
+
+## Documentation updates
+
+- `feme/docs/Roadmap.md`: struck through F16 with what was actually wrong
+  (not the guessed member-decoration theory) and what was fixed.
+- `feme/docs/Vulkan14FeatureInventory.md`/`VulkanExtensionInventory.md`:
+  updated the `shaderFloatControls2`/`VK_KHR_shader_float_controls2` rows
+  to record F16 as fixed, and the newly-found dedicated-struct
+  feature-advertisement gap as the next prerequisite.
+- `feme/docs/VulkanCTSReport.md`: new "Roadmap F16: measured impact"
+  section, including the reproduction methodology and the CTS re-run
+  attempt's own finding.
+
+## Testing
+
+`ninja check-feme` (assertions-enabled, ccache build, this session's
+existing `./build`): 1706 discovered, 1705 passed, 1 unsupported
+(pre-existing, unrelated) -- two new feme lit tests
+(`spirv-to-llvm-frexp-modf-struct.mlir` for the conversion patterns,
+`spirv-import-struct-fast-math-mode.mlir` as a direct regression test for
+the crash itself through `feme::SPIRVImporter`, which shares
+`mlir::spirv::deserialize` with upstream). Also ran the upstream
+`check-mlir-dialect-spirv` (52 tests, new `ModfStruct` parsing/verifier
+cases in `gl-ops.mlir`), `check-mlir-target-spirv` (58 tests, new
+`ModfStruct`/`FPFastMathMode`-on-a-struct round-trip cases in
+`gl-ops.mlir`/`decorations.mlir`) and `check-mlir-conversion` (411 tests,
+new `FrexpStruct`/`ModfStruct` conversion cases in
+`gl-ops-to-llvm.mlir`) suites, all 100% passing.
