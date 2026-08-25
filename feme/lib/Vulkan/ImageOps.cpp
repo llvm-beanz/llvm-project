@@ -8,6 +8,7 @@
 
 #include "ImageOps.h"
 #include "ASTCDecode.h"
+#include "Buffer.h"
 #include "Format.h"
 #include "Image.h"
 
@@ -173,6 +174,202 @@ bool isSimpleRegion(const VkOffset3D Offsets[2]) {
 } // namespace
 
 namespace feme::vulkan {
+
+Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
+                            VkDeviceSize BufferSize,
+                            const VkBufferImageCopy &Region) {
+  bool Compressed = feme::cpu::isBlockCompressedFormat(Img.format());
+  uint32_t BlockW = blockWidth(Img.format());
+  uint32_t BlockH = blockHeight(Img.format());
+  uint32_t UnitSize = bytesPerBlock(Img.format());
+  uint32_t RowLength = Region.bufferRowLength ? Region.bufferRowLength
+                                              : Region.imageExtent.width;
+  uint32_t ImageHeight = Region.bufferImageHeight ? Region.bufferImageHeight
+                                                  : Region.imageExtent.height;
+  uint32_t RowUnits = (RowLength + BlockW - 1) / BlockW;
+  uint32_t HeightUnits = (ImageHeight + BlockH - 1) / BlockH;
+  uint32_t ExtentWidthUnits = (Region.imageExtent.width + BlockW - 1) / BlockW;
+  uint32_t ExtentHeightUnits =
+      (Region.imageExtent.height + BlockH - 1) / BlockH;
+  uint32_t OffsetXUnits = uint32_t(Region.imageOffset.x) / BlockW;
+  uint32_t OffsetYUnits = uint32_t(Region.imageOffset.y) / BlockH;
+
+  uint64_t BufferRowBytes = uint64_t(RowUnits) * UnitSize;
+  uint64_t BufferSliceBytes = BufferRowBytes * HeightUnits;
+  uint32_t MipLevel = Region.imageSubresource.mipLevel;
+  if (MipLevel >= Img.mipLevels())
+    return createStringError(inconvertibleErrorCode(),
+                             "buffer/image copy mip level is out of range");
+
+  uint32_t LayerCount =
+      Img.resolvedLayerCount(Region.imageSubresource.baseArrayLayer,
+                             Region.imageSubresource.layerCount);
+  for (uint32_t Layer = 0; Layer != LayerCount; ++Layer) {
+    uint32_t ArrayLayer = Region.imageSubresource.baseArrayLayer + Layer;
+    for (uint32_t Z = 0; Z != Region.imageExtent.depth; ++Z) {
+      uint64_t SliceIndex = uint64_t(Layer) * Region.imageExtent.depth + Z;
+      for (uint32_t Y = 0; Y != ExtentHeightUnits; ++Y) {
+        uint64_t BufferOffset = Region.bufferOffset +
+                                SliceIndex * BufferSliceBytes +
+                                uint64_t(Y) * BufferRowBytes;
+        uint64_t RowBytes = uint64_t(ExtentWidthUnits) * UnitSize;
+        if (BufferOffset + RowBytes > BufferSize)
+          return createStringError(inconvertibleErrorCode(),
+                                   "buffer/image copy region is out of "
+                                   "range of its buffer");
+        auto *BufferRow = static_cast<uint8_t *>(BufferBase) + BufferOffset;
+        void *ImageRow =
+            Compressed
+                ? Img.blockPointer(MipLevel, ArrayLayer, OffsetXUnits,
+                                   OffsetYUnits + Y, Region.imageOffset.z + Z)
+                : Img.texelPointer(MipLevel, ArrayLayer, OffsetXUnits,
+                                   OffsetYUnits + Y, Region.imageOffset.z + Z);
+        if (ToImage)
+          std::memcpy(ImageRow, BufferRow, RowBytes);
+        else
+          std::memcpy(BufferRow, ImageRow, RowBytes);
+      }
+    }
+  }
+  return Error::success();
+}
+
+Error runCopyBufferToImage(Buffer *Src, Image *Dst,
+                          llvm::ArrayRef<VkBufferImageCopy> Regions) {
+  if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "buffer-to-image copy source/destination is "
+                             "not bound");
+  // A multisample image's per-sample data has no linear-buffer layout for
+  // this command to target (`VUID-vkCmdCopyBufferToImage-srcImage-07973`'s
+  // real-Vulkan equivalent): only `vkCmdCopyImage` moves one.
+  if (Dst->sampleCount() != 1)
+    return createStringError(inconvertibleErrorCode(),
+                             "buffer-to-image copy destination must be "
+                             "single-sample");
+  for (const VkBufferImageCopy &Region : Regions)
+    if (Error E = copyBufferImageRegion(*Dst, /*ToImage=*/true, Src->data(),
+                                        Src->size(), Region))
+      return E;
+  return Error::success();
+}
+
+Error runCopyImageToBuffer(Image *Src, Buffer *Dst,
+                          llvm::ArrayRef<VkBufferImageCopy> Regions) {
+  if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "image-to-buffer copy source/destination is "
+                             "not bound");
+  if (Src->sampleCount() != 1)
+    return createStringError(inconvertibleErrorCode(),
+                             "image-to-buffer copy source must be "
+                             "single-sample");
+  for (const VkBufferImageCopy &Region : Regions)
+    if (Error E = copyBufferImageRegion(*Src, /*ToImage=*/false, Dst->data(),
+                                        Dst->size(), Region))
+      return E;
+  return Error::success();
+}
+
+Error runCopyImage(Image *Src, Image *Dst,
+                   llvm::ArrayRef<VkImageCopy> Regions) {
+  if (!Src || !Src->isBound() || !Dst || !Dst->isBound())
+    return createStringError(inconvertibleErrorCode(),
+                             "image copy source/destination is not bound");
+  // Roadmap E24: `SrcCompressed`/`DstCompressed` are now tracked
+  // independently -- a single `Compressed` flag derived from `Src` alone
+  // and applied to *both* sides asserted inside `Dst->blockPointer` the
+  // moment a real `dEQP-VK.api.copy_and_blit.*` case (unreachable before
+  // E24 made `vkGetPhysicalDeviceImageFormatProperties` answer honestly
+  // enough for CTS to create a compressed/uncompressed image pair at all)
+  // copied a block-compressed source into an uncompressed destination of
+  // matching block/texel byte size (e.g. one ASTC block <-> one
+  // `R32G32B32A32_UINT` texel, both 16 bytes) -- a real Vulkan-legal copy
+  // this ICD's own "compatible formats" support (this file's own comment)
+  // already claimed to allow.
+  bool SrcCompressed = feme::cpu::isBlockCompressedFormat(Src->format());
+  bool DstCompressed = feme::cpu::isBlockCompressedFormat(Dst->format());
+  uint32_t UnitSize = bytesPerBlock(Src->format());
+  if (UnitSize != bytesPerBlock(Dst->format()))
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdCopyImage between formats of differing "
+                             "texel/block size is not supported");
+  if (Src->sampleCount() != Dst->sampleCount())
+    return createStringError(inconvertibleErrorCode(),
+                             "vkCmdCopyImage between images of differing "
+                             "sample counts is not supported");
+  // `Region.extent`/`srcOffset` are always in the source image's own
+  // texel/block units (Vulkan's own rule for a copy between a compressed
+  // and an uncompressed format); `dstOffset` is in the destination's own
+  // units, which only differ from the source's when the two block shapes
+  // differ (e.g. a block-compressed source paired with an uncompressed,
+  // or differently-shaped block-compressed, destination).
+  uint32_t SrcBlockW = blockWidth(Src->format());
+  uint32_t SrcBlockH = blockHeight(Src->format());
+  uint32_t DstBlockW = blockWidth(Dst->format());
+  uint32_t DstBlockH = blockHeight(Dst->format());
+  // Every sample of one texel is stored contiguously
+  // (`FemeImageSubresourceLayout::SampleStride == TexelSize`, see Image.cpp's
+  // `computeSubresourceLayouts`), so one row's `SampleCount` samples of a
+  // region's texels are themselves one contiguous span -- a single
+  // `memcpy` per row moves every sample, there is no need to loop over
+  // samples separately the way looping over `Y`/`Z`/array layer does. A
+  // block-compressed image's `SampleCount` is always 1 (never
+  // multisampled in real Vulkan), so this multiplies by 1 for one.
+  uint32_t SampleCount = Src->sampleCount();
+  bool SrcIs3D = Src->type() == VK_IMAGE_TYPE_3D;
+  bool DstIs3D = Dst->type() == VK_IMAGE_TYPE_3D;
+  for (const VkImageCopy &Region : Regions) {
+    if (Region.srcSubresource.mipLevel >= Src->mipLevels() ||
+        Region.dstSubresource.mipLevel >= Dst->mipLevels())
+      return createStringError(inconvertibleErrorCode(),
+                               "image copy mip level is out of range");
+    uint32_t WidthUnits = (Region.extent.width + SrcBlockW - 1) / SrcBlockW;
+    uint32_t HeightUnits = (Region.extent.height + SrcBlockH - 1) / SrcBlockH;
+    uint32_t SrcOffsetXUnits = uint32_t(Region.srcOffset.x) / SrcBlockW;
+    uint32_t SrcOffsetYUnits = uint32_t(Region.srcOffset.y) / SrcBlockH;
+    uint32_t DstOffsetXUnits = uint32_t(Region.dstOffset.x) / DstBlockW;
+    uint32_t DstOffsetYUnits = uint32_t(Region.dstOffset.y) / DstBlockH;
+    uint64_t RowBytes = uint64_t(WidthUnits) * UnitSize * SampleCount;
+    uint32_t LayerCount = Src->resolvedLayerCount(
+        Region.srcSubresource.baseArrayLayer, Region.srcSubresource.layerCount);
+    // A copy between a 3D image and a 2D (array) image treats the 3D
+    // image's `extent.depth` slices as the 2D image's `layerCount` layers
+    // (real Vulkan's own "Image Copies" rule): whichever side is 3D steps
+    // through `Region.*Offset.z`, and whichever side is not steps through
+    // its own `baseArrayLayer` instead -- never both, and never neither,
+    // since exactly one of `LayerCount`/`Region.extent.depth` is greater
+    // than 1 for any legal region. A same-dimensionality (2D-to-2D or
+    // 3D-to-3D) copy is the special case where both sides agree, which
+    // this same formula also computes correctly.
+    uint32_t SliceCount =
+        (SrcIs3D || DstIs3D) ? Region.extent.depth : LayerCount;
+    for (uint32_t S = 0; S != SliceCount; ++S) {
+      uint32_t SrcLayer =
+          Region.srcSubresource.baseArrayLayer + (SrcIs3D ? 0 : S);
+      uint32_t SrcZ = Region.srcOffset.z + (SrcIs3D ? S : 0);
+      uint32_t DstLayer =
+          Region.dstSubresource.baseArrayLayer + (DstIs3D ? 0 : S);
+      uint32_t DstZ = Region.dstOffset.z + (DstIs3D ? S : 0);
+      for (uint32_t Y = 0; Y != HeightUnits; ++Y) {
+        void *SrcRow =
+            SrcCompressed
+                ? Src->blockPointer(Region.srcSubresource.mipLevel, SrcLayer,
+                                    SrcOffsetXUnits, SrcOffsetYUnits + Y, SrcZ)
+                : Src->texelPointer(Region.srcSubresource.mipLevel, SrcLayer,
+                                    SrcOffsetXUnits, SrcOffsetYUnits + Y, SrcZ);
+        void *DstRow =
+            DstCompressed
+                ? Dst->blockPointer(Region.dstSubresource.mipLevel, DstLayer,
+                                    DstOffsetXUnits, DstOffsetYUnits + Y, DstZ)
+                : Dst->texelPointer(Region.dstSubresource.mipLevel, DstLayer,
+                                    DstOffsetXUnits, DstOffsetYUnits + Y, DstZ);
+        std::memcpy(DstRow, SrcRow, RowBytes);
+      }
+    }
+  }
+  return Error::success();
+}
 
 Error runClearColorImage(Image *Img, const VkClearColorValue &Color,
                          ArrayRef<VkImageSubresourceRange> Ranges) {

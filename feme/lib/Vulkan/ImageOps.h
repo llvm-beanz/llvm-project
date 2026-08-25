@@ -30,7 +30,67 @@
 
 namespace feme::vulkan {
 
+class Buffer;
 class Image;
+
+/// (V5) One `VkBufferImageCopy`-shaped region's byte copy between \p Img's
+/// own packed subresource layout and a flat host memory region starting at
+/// \p BufferBase, in either direction (\p ToImage selects which).
+/// \p BufferSize bounds-checks every row this copies against -- a bound
+/// `VkBuffer`'s own size for `runCopyBufferToImage`/`runCopyImageToBuffer`
+/// below, or (roadmap F11's `HostImageCopy.cpp`, which has no `VkBuffer` to
+/// query a size from at all) `UINT64_MAX` so a host-side copy is never
+/// spuriously rejected -- the application, not this ICD, owns the
+/// guarantee that a raw host pointer has enough space, exactly as real
+/// Vulkan's own host-image-copy VUIDs place that obligation on the caller
+/// rather than the driver. `bufferRowLength`/`bufferImageHeight` of 0 mean
+/// "tightly packed to the copy's own extent", per the specification.
+/// Copies row by row rather than as one contiguous `memcpy`, since the
+/// image's row/slice pitch need not match the buffer's (a non-zero
+/// `bufferRowLength`/`bufferImageHeight`, or simply a mip level narrower
+/// than level 0, both make them differ).
+///
+/// Roadmap E22: for a block-compressed `Img`, a "row" is a row of whole
+/// blocks rather than of texels -- `UnitSize` (`bytesPerBlock`, Format.h)
+/// stands in for a texel's `formatElementSize` either way (the two are
+/// equal for a non-block-compressed format, so this generalizes rather
+/// than branches: `blockWidth`/`blockHeight` fall back to `{1, 1}`, making
+/// every `.../BlockWidth`-shaped ceiling division below a no-op), and
+/// `Img.blockPointer` addresses each row's first block instead of
+/// `texelPointer`'s first texel. Real Vulkan requires a block-compressed
+/// copy's own offset/extent to already be block-aligned
+/// (`VUID-vkCmdCopyBufferToImage-imageOffset-07738`'s family); this ICD
+/// does not re-validate that any more than it validates other VUIDs (see
+/// Image.h's file comment on that precedent), so the ceiling division here
+/// is exact for spec-conformant input and only "generously" rounds up an
+/// out-of-spec one rather than under-copying it.
+llvm::Error copyBufferImageRegion(Image &Img, bool ToImage, void *BufferBase,
+                                  VkDeviceSize BufferSize,
+                                  const VkBufferImageCopy &Region);
+
+/// `vkCmdCopyBufferToImage`.
+llvm::Error runCopyBufferToImage(Buffer *Src, Image *Dst,
+                                 llvm::ArrayRef<VkBufferImageCopy> Regions);
+
+/// `vkCmdCopyImageToBuffer`.
+llvm::Error runCopyImageToBuffer(Image *Src, Buffer *Dst,
+                                 llvm::ArrayRef<VkBufferImageCopy> Regions);
+
+/// `vkCmdCopyImage`: copies each region's texels from \p Src to \p Dst.
+/// Both images must share the same texel/block size and sample count,
+/// matching real Vulkan's own "compatible formats" copy rule
+/// (`VUID-vkCmdCopyImage-srcImage-01548`): no value conversion takes place
+/// on either side, in this ICD or a real one -- `vkCmdCopyImage` reinterprets
+/// bits, it never converts them (that is what a shader's format-aware
+/// load/store or a blit does). Every sample of a multisample region is
+/// copied verbatim; there is no resolve here either (that is
+/// `runResolveImage` below). Shared (roadmap F11) by the command-buffer-
+/// recorded `vkCmdCopyImage`/`vkCmdCopyImage2` and the host-side, no-
+/// command-buffer `vkCopyImageToImage` (`HostImageCopy.cpp`), which copies
+/// between two already-bound images exactly the same way, just without an
+/// executor to queue the copy through.
+llvm::Error runCopyImage(Image *Src, Image *Dst,
+                         llvm::ArrayRef<VkImageCopy> Regions);
 
 /// `vkCmdClearColorImage`: fills every texel of every named subresource
 /// with \p Color, converted into each subresource's own format.
