@@ -1648,6 +1648,130 @@ public:
 using ImageReadPattern = ImageLoadPattern<mlir::spirv::ImageReadOp>;
 using ImageFetchPattern = ImageLoadPattern<mlir::spirv::ImageFetchOp>;
 
+/// The `spirv.GlobalVariable` \p Image's `spirv.Load` reads, tracing through
+/// its `spirv.mlir.addressof`, or a null op if \p Image was not produced
+/// that way (every subpassInput read this milestone supports is: GLSL/
+/// glslang always loads the image handle from its own module-scope variable
+/// immediately before reading it, exactly like every other resource image).
+mlir::spirv::GlobalVariableOp getSubpassVariable(mlir::Value Image) {
+  auto Load = Image.getDefiningOp<mlir::spirv::LoadOp>();
+  if (!Load)
+    return nullptr;
+  auto AddrOf = Load.getPtr().getDefiningOp<mlir::spirv::AddressOfOp>();
+  if (!AddrOf)
+    return nullptr;
+  return getReferencedGlobal(AddrOf);
+}
+
+/// Declares (or finds) the `feme.stage.subpass.load` function `SubpassLoad
+/// Pattern` calls: `(i32 attachment_index, i32 component) -> f32`, matching
+/// `feme::StageOpKind::SubpassLoad`'s non-overloaded, always-`f32` shape
+/// (see StageOps.h) -- an ordinary named call, not an `llvm.spv.*`
+/// intrinsic, since `feme.stage.*` calls (StageOps.h's file comment) are
+/// FeMe's own vocabulary rather than a real target-independent LLVM
+/// intrinsic.
+mlir::LLVM::LLVMFuncOp
+getOrInsertSubpassLoadFunc(mlir::ConversionPatternRewriter &Rewriter,
+                           mlir::ModuleOp Module) {
+  constexpr llvm::StringLiteral Name = "feme.stage.subpass.load";
+  if (auto Existing = Module.lookupSymbol<mlir::LLVM::LLVMFuncOp>(Name))
+    return Existing;
+  mlir::OpBuilder::InsertionGuard Guard(Rewriter);
+  Rewriter.setInsertionPointToStart(Module.getBody());
+  auto FuncTy = mlir::LLVM::LLVMFunctionType::get(
+      mlir::Float32Type::get(Rewriter.getContext()),
+      {Rewriter.getI32Type(), Rewriter.getI32Type()});
+  return mlir::LLVM::LLVMFuncOp::create(Rewriter, Module.getLoc(), Name,
+                                        FuncTy, mlir::LLVM::Linkage::External);
+}
+
+/// Converts a `spirv.ImageRead` whose image is `Dim::SubpassData` -- a GLSL
+/// `subpassLoad()`, i.e. roadmap F8a's dynamic-rendering-local-read shader
+/// side -- directly into one `feme.stage.subpass.load` call per result
+/// component, rather than through `ImageReadPattern`'s ordinary resource-
+/// handle load: a subpass input is not read from the bound descriptor's
+/// image memory at all (see `feme::StageOpKind::SubpassLoad`'s comment and
+/// "Render passes and dynamic rendering" in feme/docs/FeMeVulkanDesign.md),
+/// so `Adaptor.getImage()` -- whatever `ResourceGlobalVariablePattern`/
+/// `ResourceAddressOfPattern` converted the variable's own `handlefrom
+/// binding` load to -- is deliberately never referenced; it is left to
+/// become dead code once this pattern consumes every other use of the
+/// `spirv.ImageRead`. The `InputAttachmentIndex` decoration this needs is
+/// read directly off the underlying `spirv.GlobalVariable` (getSubpass
+/// Variable), which the SPIR-V deserializer now preserves as a plain
+/// `input_attachment_index` integer attribute (mlir/lib/Target/SPIRV/
+/// Deserialization/Deserializer.cpp) -- there is no dedicated
+/// `GlobalVariableOp` accessor for it, the same way `component`/`index`
+/// are read as plain attributes elsewhere in this file
+/// (buildStageIODecorationsAttr).
+///
+/// Registered at a higher benefit than `ImageReadPattern` (see
+/// populateSPIRVToLLVMTargetPatterns) so it wins for the `Dim::SubpassData`
+/// case; `ImageReadPattern` still handles every other image dimension.
+class SubpassLoadPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::ImageReadOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::ImageReadOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::ImageReadOp Op, OpAdaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    auto ImageType = mlir::dyn_cast<mlir::spirv::ImageType>(Op.getImage().getType());
+    if (!ImageType || ImageType.getDim() != mlir::spirv::Dim::SubpassData)
+      return Rewriter.notifyMatchFailure(Op, "not a subpass-data image read");
+    if (hasImageOperands(Op.getImageOperands()))
+      return Rewriter.notifyMatchFailure(Op, "image operands are unsupported");
+
+    mlir::spirv::GlobalVariableOp Global = getSubpassVariable(Op.getImage());
+    if (!Global)
+      return Rewriter.notifyMatchFailure(
+          Op, "subpass image is not read directly from its own variable");
+    auto IndexAttr =
+        Global->getAttrOfType<mlir::IntegerAttr>("input_attachment_index");
+    if (!IndexAttr)
+      return Rewriter.notifyMatchFailure(
+          Op, "subpass image variable has no InputAttachmentIndex decoration");
+
+    mlir::Type ResultType = getTypeConverter()->convertType(Op.getType());
+    if (!ResultType)
+      return Rewriter.notifyMatchFailure(Op, "type conversion failed");
+    auto VectorTy = mlir::dyn_cast<mlir::VectorType>(ResultType);
+    unsigned NumComponents = VectorTy ? VectorTy.getNumElements() : 1;
+
+    mlir::Location Loc = Op.getLoc();
+    mlir::LLVM::LLVMFuncOp Callee = getOrInsertSubpassLoadFunc(
+        Rewriter, Op->getParentOfType<mlir::ModuleOp>());
+    mlir::Value IndexConst = mlir::LLVM::ConstantOp::create(
+        Rewriter, Loc, Rewriter.getI32Type(),
+        Rewriter.getI32IntegerAttr(static_cast<int32_t>(IndexAttr.getInt())));
+
+    mlir::Value Result =
+        VectorTy ? mlir::LLVM::PoisonOp::create(Rewriter, Loc, VectorTy)
+                 : mlir::Value();
+    for (unsigned Component = 0; Component != NumComponents; ++Component) {
+      mlir::Value ComponentConst = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI32Type(),
+          Rewriter.getI32IntegerAttr(static_cast<int32_t>(Component)));
+      mlir::Value Scalar =
+          mlir::LLVM::CallOp::create(Rewriter, Loc, Callee,
+                                     mlir::ValueRange{IndexConst, ComponentConst})
+              .getResult();
+      if (!VectorTy) {
+        Result = Scalar;
+        break;
+      }
+      mlir::Value LaneIndex = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(),
+          Rewriter.getI64IntegerAttr(Component));
+      Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result,
+                                                   Scalar, LaneIndex);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Converts a `spirv.ImageFetch` with the `Lod` image operand (optionally
 /// combined with the discarded `Nontemporal` bit, see `hasImageOperands`
 /// above) into the `llvm.spv.resource.load.level` intrinsic call, mirroring
@@ -2887,6 +3011,11 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
+  // Higher benefit than the `FeMeBenefit`-registered `ImageReadPattern`
+  // above, so this wins for a `Dim::SubpassData` image read (roadmap F8a);
+  // `ImageReadPattern` still handles every other dimension.
+  Patterns.add<SubpassLoadPattern>(Patterns.getContext(), TypeConverter,
+                                   FeMeBenefit + 1);
   Patterns.add<StageIOAddressOfPattern>(Patterns.getContext(), TypeConverter,
                                         FeMeBenefit, StageIOVariables);
   Patterns.add<

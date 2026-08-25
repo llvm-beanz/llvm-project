@@ -25,6 +25,7 @@
 #include "feme/Transforms/CPU/SPIRVBuiltinFolding.h"
 #include "feme/Transforms/CPU/SPIRVPushConstantLowering.h"
 #include "feme/Transforms/CPU/SPIRVResourceLowering.h"
+#include "feme/Transforms/CPU/SPIRVSubpassLowering.h"
 #include "feme/Transforms/CPU/UnsupportedOps.h"
 #include "feme/Transforms/CPU/VertexWrapper.h"
 #include "feme/Transforms/CPU/WaveLowering.h"
@@ -291,6 +292,12 @@ Expected<PipelineResult> runPipeline(Module &M,
     // `feme::cpu::SPIRVResourceLoweringPass`'s own responsibility, run just
     // above -- see that pass's header comment).
     Normalize.addPass(SPIRVPushConstantLoweringPass());
+    // Roadmap F8a: gives a fragment shader using `feme.stage.subpass.load`
+    // (a SPIR-V subpassInput local read, created directly by
+    // `feme::spirv::SubpassLoadPattern` -- not a bound resource, so
+    // `SPIRVResourceLoweringPass` above never sees it) its own
+    // `subpass_input_heap`/`subpass_input_heap_count` ABI parameters.
+    Normalize.addPass(SPIRVSubpassLoweringPass());
     Normalize.run(M, MAM);
     if (DiagGuard.sawError())
       return createStringError(inconvertibleErrorCode(),
