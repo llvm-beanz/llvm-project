@@ -4857,3 +4857,50 @@ cases, `DescriptorTest`'s template-type-acceptance/rejection cases, and
 case, netting one fewer than the eight new test names since one, `Descriptor
 Test.PushDescriptorTemplateTypeIsRejected`, was renamed/repurposed to `...
 IsAccepted` rather than added), no regressions.
+
+## Roadmap F12a: measured impact (std140 uniform buffer array stride)
+
+`dEQP-VK.pipeline.monolithic.push_descriptor.*` (`--deqp-case`, same
+reproduction recipe as F9-F11's own sections above), re-run against the
+exact same 76-case group F12's own section measured.
+
+```
+Passed:        0/76 (0.0%)
+Failed:        76/76 (100.0%)
+Not supported: 0/76 (0.0%)
+```
+
+Every count is unchanged from F12's own 0/76/0 baseline, but the *reason*
+for the 4 `compute.incremental_updates*` cases' own failure changed: `grep
+-c "failed to legalize operation 'spirv.AccessChain'"` on the new log is
+`0` (down from 4), confirming this row's fix closes the exact diagnostic
+its own text names. Those same 4 cases still fail `vkCreateComputePipelines`,
+now with a different, previously-masked diagnostic instead --
+`'llvm.getelementptr' op operand #0 must be LLVM pointer type ... but got
+'vector<3xi32>'` -- split off as new roadmap row F12b rather than folded
+into this one (see that row's own text for the root cause: this shader's
+`gl_GlobalInvocationID.x` reaches an `spirv.AccessChain` pattern gap
+entirely unrelated to `std140` array strides). The other two pre-existing
+categories F12's own table already attributed (33 silent
+`vk.createComputePipelines` failures, 39 `feme-cpu-simdize` divergent-vector
+failures) are exactly unchanged in this re-run (`37` total
+`vk.createComputePipelines`-failing cases either way -- 33 silent + 4 now
+diagnosed, instead of 33 silent + 4 differently-diagnosed -- plus the same
+39 `graphics.*` cases), confirming this row's fix neither missed a case
+nor introduced a regression anywhere else in the group.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1790 discovered, 1789 passed, 1
+unsupported (pre-existing, unrelated) -- 10 more discovered than F12's own
+1780-discovered baseline: `SPIRVResourceLoweringTest` gains four new cases
+covering `HandleKind::UniformArray` (a dynamically-indexed load, a rejected
+store, a rejected conflicting-stride re-declaration, and the range-size
+metadata each already-passing case implicitly covers), a new
+`spirv-resource-lowering-uniform-array.ll` lit test covers the same shape
+end to end through `feme::cpu::SPIRVResourceLoweringPass`, and a new
+`read_std140_element` case is added to
+`spirv-to-llvm-glslang-blocks.mlir` (one existing case in that same file,
+`read_element`'s own natural-stride array, changed shape to match --
+recognized as this row's own new wrapper shape too, rather than the
+direct/unwrapped one it used before, since the two are now handled
+identically regardless of whether the stride happens to be natural).
