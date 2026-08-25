@@ -33,13 +33,10 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F11? Tne last agent prompt left the work
-incomplete, its results are in the git stash at index 0.
+Can you implement roadmap milestone F12?
 
-> **`VK_EXT_host_image_copy`/`hostImageCopy` + its 6 limit/list fields.** The
-> largest single new mechanism in this section:
-> `vkCopyMemoryToImage`/`vkCopyImageToMemory`/`vkCopyImageToImage`/`vkTransitionImageLayout`
-> copy/transition without a command buffer at all, needing a host-side (not
-> executor-queued) path into `Image.cpp`'s existing layout/format machinery;
-> `pCopySrcLayouts`/`pCopyDstLayouts` (per D1's own finding, an enumerated list,
-> not a scalar limit) is the supported-layout list this new path accepts
+> **`VK_KHR_push_descriptor`/`pushDescriptor` + `maxPushDescriptors`.**
+> `vkCmdPushDescriptorSet` writes descriptors directly into a command buffer's
+> recorded state without a `VkDescriptorSet` object at all — a new,
+> lighter-weight descriptor path alongside `Descriptor.{h,cpp}`'s existing
+> pool-backed one, sharing its binding-to-heap-slot translation
