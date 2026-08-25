@@ -649,6 +649,41 @@ decoration, which every runtime array nested in a real (Vulkan-valid)
 storage buffer block carries, so FeMe's own conversion drops the stride (the
 resulting `!llvm.array<0 x T>`'s layout comes from `T` alone).
 
+#### Deviation: a std140 uniform buffer array needs its own explicit stride
+
+A *uniform* buffer's own sized (not runtime) array member needed a second,
+related fix (roadmap F12a). MLIR's own `spirv::ArrayType` conversion
+(`convertArrayType` in SPIRVToLLVM.cpp) is stricter than its runtime-array
+counterpart above: it refuses to convert an array at all unless its
+declared `ArrayStride` equals its element's own natural (LLVM ABI) size.
+That is always true for a std430 storage buffer array (the only kind the
+fix above needed to cover), but not for a std140 *uniform* buffer array,
+whose every element is widened to a 16-byte-aligned stride regardless of
+its own size -- e.g. `layout(std140) uniform Input { uint data[16]; }`'s
+own 16-byte stride against its `uint` element's own 4-byte size, the shape
+`dEQP-VK.pipeline.monolithic.push_descriptor.compute.incremental_updates*`
+hits. Dropping the stride the way the runtime-array fix does is not an
+option here: unlike a storage buffer's own dynamically-sized array, whose
+real per-element stride is recovered from its element type's own natural
+size (a std430 invariant), a std140 array's real stride has to come from
+somewhere, and the only place left to carry it is the `spirv.VulkanBuffer`
+handle type itself.
+
+So a uniform block whose sole member is a fixed-size array is recognized
+by `feme::spirv::getUniformBlockElement` as FeMe's own wrapper shape --
+exactly like a storage buffer's own sole runtime-array member already is --
+rather than navigated as an ordinary struct field: its dynamic index
+reaches `llvm.spv.resource.getpointer` directly, with the array's own
+`ContentType` reduced to the same `!llvm.array<0 x T>` marker a storage
+buffer's own wrapper already uses (see `convertUniformArrayContent`), and
+its real stride carried as `spirv.VulkanBuffer`'s own third integer
+parameter -- present only for this shape, absent (and so implicitly
+"derive from the element's own natural size") for every other one.
+`feme::cpu::SPIRVResourceLoweringPass`'s `classifyVulkanBufferHandle` reads
+that third parameter back and multiplies the dynamic array index by it at
+lowering time, exactly the arithmetic a storage buffer's own dynamic array
+access already used.
+
 The right-hand column of that table is deliberately the same representation
 `feme::spirv::RaisedLoweringPass` produces in the DXIL -> SPIR-V direction,
 so both front ends converge on one spelling of a resource handle, a typed
