@@ -4343,3 +4343,88 @@ session's existing `./build`): 1735 discovered, 1734 passed, 1 unsupported
 (pre-existing, unrelated), matching the pre-F8 baseline exactly (no
 existing case regressed, none newly passed since none reach this row's own
 new code).
+
+## Roadmap F8a: measured impact (extension now advertised)
+
+F8a closed F8's remaining gap: `feme.stage.subpass.load` (a new
+`feme::StageOpKind`, created by `feme::spirv::SubpassLoadPattern` in
+SPIRVToLLVMPatterns.cpp from a `Dim::SubpassData` `spirv.ImageRead`) gives
+a fragment shader's `subpassInput` local read real pixels, resolved
+through `vkCmdSetRenderingInputAttachmentIndices`'s mapping
+(`feme::vulkan::runDraw`'s `buildSubpassInputHeap`, CommandBuffer.cpp).
+`dynamicRenderingLocalRead`/`VK_KHR_dynamic_rendering_local_read` are now
+advertised (`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp`), scoped to a
+single-sample color attachment.
+
+Two audit findings surfaced while getting a real `subpassInput` shader
+through the whole pipeline, both fixed in this same series (see git log,
+not repeated here): MLIR's SPIR-V deserializer *and* serializer had no
+case for the `InputAttachmentIndex` decoration at all (an upstream gap,
+not a `feme`-specific one); and `PhysicalDeviceInfo.cpp` keeps a second,
+by-name extension list (separate from `vk_gen_entrypoints.py`'s
+`SUPPORTED_EXTENSIONS`) that real CTS cases enable regardless of
+`apiVersion` -- confirmed missing for this extension by actually running
+a local-read case, which reported `NotSupported` until fixed.
+
+With the extension genuinely enabled, `dEQP-VK.renderpasses.
+dynamic_rendering.*.local_read.*` (54 cases total) now actually attempts
+to run instead of reporting `NotSupported` for every case:
+
+```
+Test run totals:
+  Passed:        0/54 (0.0%)
+  Failed:        38/54 (70.4%)
+  Not supported: 16/54 (29.6%)
+```
+
+The 16 `NotSupported` cases gate on an unrelated, unimplemented extension
+this row never touched (`VK_EXT_graphics_pipeline_library`/
+`VK_EXT_shader_object`, e.g. `remap_single_attachment_fast_lib`/
+`_shader_object`). Every one of the 38 failures is the *same*
+pre-existing, unrelated deviation -- confirmed by inspecting each
+failure's own message, not assumed from the count alone:
+
+```
+error: feme-cpu-simdize: function 'main' has a divergent vector value ''
+used outside a supported insertelement-chain/resource-store/
+extractelement/select/shufflevector/phi/elementwise pattern; component
+decomposition is not yet supported for this use (roadmap milestone 7
+deviation)
+```
+
+This is `feme::cpu::SIMDizePass`'s own documented milestone-7 gap
+(component decomposition for a divergent vector used outside the shapes
+it currently recognizes) -- these CTS cases' real GLSL fragment shaders
+happen to produce that exact shape regardless of whether they read a
+`subpassInput` at all, so it blocks pipeline *creation* before this row's
+own subpass-read code ever runs. Confirmed unrelated to F8a: `feme-render`
+draws (this row's own `DrawTest.
+SubpassLoadReadsBackTheColorAttachmentItWrote`, and every existing
+`ExecutorTest`/`DrawTest` fragment shader, hand-written rather than
+`glslang`-compiled from real GLSL control flow) never exercise this shape,
+which is why the dedicated end-to-end test needed for this row could pass
+while the CTS suite's own shaders cannot yet reach it. Fixing the
+milestone-7 gap itself is out of this row's own scope.
+
+The two `dEQP-VK.api.*` cases that do not depend on rendering a real
+shader both pass:
+
+```
+dEQP-VK.api.info.get_physical_device_properties2.features.dynamic_rendering_local_read_features
+  Pass (Querying succeeded)
+dEQP-VK.api.device_init.create_device_unsupported_features.dynamic_rendering_local_read_features
+  Pass (Pass)
+```
+
+`dEQP-VK.api.info.vulkan1p4.feature_extensions_consistency` (the
+aggregate-vs-dedicated-struct cross-check E2's own note describes)
+reports `NotSupported (At least Vulkan 1.4 required to run test)`: this
+ICD's advertised `apiVersion` is still 1.2, so the check does not apply
+yet, exactly as E2 already found for every other 1.3/1.4-gated
+consistency case.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1742 discovered, 1741 passed, 1
+unsupported (pre-existing, unrelated) -- 8 more passing than F8's own
+1734-passed baseline (the new `StageOpsTest`, lit, and `DrawTest`/
+`PhysicalDeviceInfoTest` cases this series adds), no regressions.
