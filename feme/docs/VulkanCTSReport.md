@@ -3975,3 +3975,50 @@ lit tests (`mlir/test/Dialect/SPIRV/IR/structure-ops.mlir`'s and
 of `check-mlir-dialect-spirv`/`check-mlir-target-spirv` rather than
 `check-feme`, both 100% passing).
 
+## Roadmap F16: measured impact
+
+F16 fixed the `processStructType` assertion F15d's own targeted re-run
+found, and closed the modeling gap it also surfaced: `spirv.GL.ModfStruct`
+did not exist in this dialect at all (only `spirv.GL.FrexpStruct` did), and
+neither instruction had a `SPIRVToLLVM` conversion pattern.
+
+Reproducing the exact crash through a full CTS run was not attempted again
+this row -- F15d's own report above already isolated the single triggering
+case precisely (`frexp_st_testedWithout_NSZ_..._deco`, decorating the
+`struct_fi` *type* itself with `FPFastMathMode`) well enough to construct a
+standalone reproduction directly: a hand-assembled SPIR-V binary
+(`spirv-as`/`spirv-val`) matching that shader's own `struct_fi`
+(`OpMemberDecorate ... Offset` on both members, `OpDecorate %struct_fi
+FPFastMathMode NotNaN` on the type) reproduced
+`Deserializer.cpp:1506: Assertion `decoration.has_value()' failed` exactly,
+letting the fix be verified against `mlir-translate --deserialize-spirv`
+directly (crashes before the fix, imports -- decoration included -- after
+it) and then round-tripped back through `--serialize-spirv` and `spirv-val`
+again, without needing a live CTS process for either step.
+
+A CTS re-run *was* attempted, to see whether F15d's own truncated
+`fp32.input_args.frexp_st_*` cases would now proceed past the crash: same
+methodology as F15d's own (temporarily advertising `shaderFloatControls2`
+plus the three FP32 float-control property fields, both in the dedicated
+`VkPhysicalDeviceFloatControlsProperties` struct case and its 1.2-promoted
+twin). It did not get far enough to reach the fixed code path at all: CTS
+separately requires `VkPhysicalDeviceShaderFloatControls2FeaturesKHR`'s own
+`shaderFloatControls2` field (a distinct, dedicated chained struct this ICD
+does not handle at all, still `NotSupported: ShaderFloatControls2.
+shaderFloatControls2`), which is a new, unrelated feature-advertisement gap
+this row's own scope does not cover (F15d's row already tracks
+`shaderFloatControls2` advertisement as blocked on the unrelated
+`feme::cpu` resource-lowering gap; this dedicated-struct gap is a further,
+so-far-unrecorded prerequisite that same future advertisement work will
+need). Reverted immediately, nothing committed, the same as every "flip
+and see" experiment this F15/F16 family has run.
+
+`ninja check-feme` (assertions-enabled, ccache build): 1706 discovered,
+1705 passed, 1 unsupported (pre-existing, unrelated) -- two new tests this
+row added (`feme/test/Conversion/SPIRVToLLVM/
+spirv-to-llvm-frexp-modf-struct.mlir`, `feme/test/Import/SPIRV/
+spirv-import-struct-fast-math-mode.mlir`), plus new upstream MLIR lit
+coverage run via `check-mlir-dialect-spirv`/`check-mlir-target-spirv`/
+`check-mlir-conversion` (58/52/411 tests respectively, all passing).
+
+
