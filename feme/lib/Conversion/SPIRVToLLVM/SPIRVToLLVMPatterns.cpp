@@ -352,6 +352,69 @@ public:
   }
 };
 
+/// Converts `spirv.KHR.AssumeTrue` (roadmap F4, `VK_KHR_shader_expect_assume`
+/// / `shaderExpectAssume`) directly into the `llvm.assume` intrinsic: both
+/// take a single `i1` condition and produce no result, an exact match
+/// needing no expansion at all.
+class AssumeTrueConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::KHRAssumeTrueOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::KHRAssumeTrueOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::KHRAssumeTrueOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.replaceOpWithNewOp<mlir::LLVM::AssumeOp>(Op,
+                                                      Adaptor.getCondition());
+    return mlir::success();
+  }
+};
+
+/// Converts `spirv.KHR.Expect` (roadmap F4, same extension as
+/// `spirv.KHR.AssumeTrue` above) into the `llvm.expect` intrinsic. Unlike
+/// `AssumeTrue`'s condition, this op's operand may be a vector of
+/// integer/bool, not just a scalar -- but LLVM's `llvm.expect` intrinsic is
+/// only defined for scalar integers (see "`llvm.expect`" in LangRef.md), so
+/// a vector operand is expanded into one `llvm.expect` call per lane,
+/// mirroring `DotConversionPattern`'s own per-lane vector expansion above.
+class ExpectConversionPattern
+    : public mlir::SPIRVToLLVMConversion<mlir::spirv::KHRExpectOp> {
+public:
+  using mlir::SPIRVToLLVMConversion<
+      mlir::spirv::KHRExpectOp>::SPIRVToLLVMConversion;
+
+  mlir::LogicalResult
+  matchAndRewrite(mlir::spirv::KHRExpectOp Op, OpAdaptor Adaptor,
+                  mlir::ConversionPatternRewriter &Rewriter) const override {
+    mlir::Location Loc = Op.getLoc();
+    mlir::Value Value = Adaptor.getValue();
+    mlir::Value ExpectedValue = Adaptor.getExpectedValue();
+
+    auto VectorTy = mlir::dyn_cast<mlir::VectorType>(Value.getType());
+    if (!VectorTy) {
+      Rewriter.replaceOpWithNewOp<mlir::LLVM::ExpectOp>(Op, Value,
+                                                        ExpectedValue);
+      return mlir::success();
+    }
+
+    mlir::Value Result = mlir::LLVM::PoisonOp::create(Rewriter, Loc, VectorTy);
+    for (int64_t I = 0, E = VectorTy.getNumElements(); I != E; ++I) {
+      mlir::Value Index = mlir::LLVM::ConstantOp::create(
+          Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(I));
+      mlir::Value Lane = mlir::LLVM::ExpectOp::create(
+          Rewriter, Loc,
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, Value, Index),
+          mlir::LLVM::ExtractElementOp::create(Rewriter, Loc, ExpectedValue,
+                                               Index));
+      Result = mlir::LLVM::InsertElementOp::create(Rewriter, Loc, Result, Lane,
+                                                   Index);
+    }
+    Rewriter.replaceOp(Op, Result);
+    return mlir::success();
+  }
+};
+
 /// Converts `spirv.GroupNonUniformRotateKHR` (roadmap F2,
 /// `VK_KHR_shader_subgroup_rotate`) -- the first `spirv.GroupNonUniform*` op
 /// this pass converts at all (`Vulkan14FeatureInventory.md` previously found
@@ -2805,10 +2868,11 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
     const FloatControlInfoMap &DenormFlushToZeroWidths,
     const FastMathDefaultMap &FastMathDefaults) {
   Patterns.add<
-      ArrayConstantPattern, BuiltInAddressOfPattern,
-      BuiltInGlobalVariablePattern, BlockAccessChainPattern,
-      CompositeConstructPattern, DemoteToHelperInvocationConversionPattern,
-      DotConversionPattern, ExecutionModePattern, ExecutionModeIdPattern,
+      ArrayConstantPattern, AssumeTrueConversionPattern,
+      BuiltInAddressOfPattern, BuiltInGlobalVariablePattern,
+      BlockAccessChainPattern, CompositeConstructPattern,
+      DemoteToHelperInvocationConversionPattern, DotConversionPattern,
+      ExecutionModePattern, ExecutionModeIdPattern, ExpectConversionPattern,
       ImageFetchPattern, ImageFetchLodPattern, ImageSampleExplicitLodPattern,
       ImageSampleImplicitLodPattern, ImageQuerySizePattern, ImageReadPattern,
       ImageWritePattern, LoadValuePattern, MatrixCompositeExtractPattern,
@@ -2818,9 +2882,8 @@ void feme::spirv::populateSPIRVToLLVMTargetPatterns(
       SDotAccSatConversionPattern, UDotAccSatConversionPattern,
       SUDotAccSatConversionPattern, SpecConstantErasurePattern,
       StageIOGlobalVariablePattern, SwitchConversionPattern,
-      TerminateInvocationConversionPattern,
-      WorkgroupGlobalVariablePattern>(Patterns.getContext(), TypeConverter,
-                                      FeMeBenefit);
+      TerminateInvocationConversionPattern, WorkgroupGlobalVariablePattern>(
+      Patterns.getContext(), TypeConverter, FeMeBenefit);
   Patterns.add<ArrayedBlockAccessChainPattern, ResourceAddressOfPattern,
                ResourceGlobalVariablePattern>(
       Patterns.getContext(), TypeConverter, FeMeBenefit, Resources);
