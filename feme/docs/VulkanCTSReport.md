@@ -4662,3 +4662,91 @@ unsupported (pre-existing, unrelated) -- 7 more passing than F9's own
 1755-passed baseline (the new `DrawTest` vertex-fetch-robustness case,
 plus `PipelineTest`'s/`GraphicsPipelineTest`'s/`PhysicalDeviceInfoTest`'s
 new pipeline-robustness cases), no regressions.
+
+## Roadmap F11: measured impact (`VK_EXT_host_image_copy`)
+
+`dEQP-VK.image.host_image_copy.*` (`--deqp-case`, same reproduction recipe
+as F9/F10's own sections above): 73289 cases discovered.
+
+```
+Passed:        1121/73289 (1.5%)
+Failed:        1496/73289 (2.0%)
+Not supported: 70672/73289 (96.4%)
+```
+
+The `Not supported` majority is this row's own deliberately narrow
+`getSupportedHostImageCopySrcLayouts`/`DstLayouts` list (`{GENERAL,
+TRANSFER_{SRC,DST}_OPTIMAL}`): `HostImageCopyTestCase::checkSupport`
+(`vktImageHostImageCopyTests.cpp`) skips any case whose own
+`srcLayout`/`dstLayout`/`intermediateLayout` parameter isn't in that list
+(e.g. every `color_attachment_optimal`/`depth_stencil_attachment_optimal`/
+`shader_read_only_optimal` variant), never "`VK_EXT_host_image_copy` is
+not supported" itself -- confirming the extension gate is genuinely
+passed, exactly like F9/F10's own sections found for their own
+extensions.
+
+Every one of the 1496 `Fail`s breaks down as:
+
+| Reason | Count | Cause |
+|---|---|---|
+| `retcode: VK_ERROR_INITIALIZATION_FAILED` (`vk.createGraphicsPipelines`), `error: feme-graphics-validate-stage: 'feme.stage.input.load' ... refers to element N with the wrong direction` | 1468 | A pre-existing vertex-input-direction gap in shader compilation, unrelated to this row -- the `depth_stencil` subgroup's own render-pass-based test draws a full-screen triangle, hitting a shader-compilation class of failure this ICD already has outside host image copy entirely (the same "resource handle this ICD's CPU target cannot normalize" class E6/F8's own reports note) |
+| `vk.createGraphicsPipelines(...): VK_ERROR_INITIALIZATION_FAILED` | 4 | `feme-cpu-simdize`'s own divergent-value rejection, the same pre-existing pipeline-creation-class gap as the row above, coincidentally hit by four more `depth_stencil` cases |
+| `Depth copy failed` | 24 | This row's own real, documented gap (roadmap F11a, split off below): `copyBufferImageRegion` (`ImageOps.cpp`) now cleanly *rejects* a single-aspect copy of a combined depth/stencil format (`D24_UNORM_S8_UINT`/`D32_FLOAT_S8X24_UINT`) rather than mis-sizing or crashing on it (see this row's own "two real, pre-existing gaps" note in Roadmap.md) -- these 24 `simple.{d16_unorm_s8_uint,d24_unorm_s8_uint,d32_sfloat_s8_uint}.*` cases are exactly that rejection surfacing as a clean `Fail` instead of `NotSupported`, since `HostImageCopyTestCase::checkSupport` has no way to know in advance that this ICD cannot yet copy one aspect of a combined format |
+
+None of the 1496 failures is a crash, a hang, or memory corruption --
+every one is a clean `VkResult`/`llvm::Error` propagated back to a
+`tcu::TestStatus::fail`, matching this codebase's own "an unimplemented
+capability fails cleanly" convention throughout.
+
+**Two real, pre-existing gaps this row's own first full run against this
+group found** (see Roadmap.md's F11 row for the same finding, condensed
+here with the actual before/after evidence):
+
+1. **An outdated system Vulkan loader silently no-ops a purely-1.4-core
+   command.** The first full run against this group crashed instead of
+   producing any of the numbers above: `vkTransitionImageLayout`/
+   `vkCopyMemoryToImage`/etc. (no pre-promotion `EXT`-suffixed alias any
+   `--deqp-case` here calls) resolve to a *non-null* function pointer
+   through this environment's installed loader (`libvulkan.so.1.3.275`,
+   Ubuntu's `libvulkan1` package) even though this ICD's own
+   `vkGetDeviceProcAddr` (confirmed via a standalone reproduction and
+   temporary instrumentation of `ProcAddr.cpp`) is *never actually
+   called* for any of the four core-spelled names -- the loader recognizes
+   them as "core" from its own compiled-in, 1.3-vintage table and hands
+   back a generic trampoline into a per-device dispatch slot it never
+   populates for a command that postdates 1.3, so the very first call
+   jumps through a null pointer. Building a current (1.4.328)
+   `Vulkan-Loader` from source and re-running the identical failing case
+   with `LD_LIBRARY_PATH` pointed at it instead made it pass cleanly --
+   confirming this is this *environment's* loader version, not an ICD
+   defect. `feme/docs/FeMeVulkanDesign.md`'s own scope already
+   distinguishes the ICD from the loader it runs under (see "Project and
+   Library Boundaries"); this finding is recorded here rather than acted
+   on further, since upgrading the system's installed loader is outside
+   this row's -- or this codebase's -- own scope.
+2. **`copyBufferImageRegion`'s buffer-side sizing ignored a copy's own
+   aspect for a combined depth/stencil format**, silently computing a row
+   size from the *whole* image format (`D32_FLOAT_S8X24_UINT`'s 8 bytes)
+   instead of the single named aspect's own smaller size (its depth
+   aspect's real 4). `vkCmdCopyBufferToImage`'s own bound `VkBuffer` size
+   usually caught the resulting oversized row first (a clean rejection,
+   never previously noticed as a bug); `vkCopyMemoryToImage`'s raw host
+   pointer has no such size to catch it against at all, turning the exact
+   same latent mis-sizing into a real out-of-bounds host-memory read/write
+   (observed as both a segfault inside `memcpy` and, non-deterministically
+   depending on allocation timing, a "corrupted double-linked list" glibc
+   heap-corruption abort). Fixed by rejecting the case cleanly in
+   `copyBufferImageRegion` itself, which benefits the pre-existing
+   `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer` commands too, not just
+   this row's own new ones (the 24 `Depth copy failed` cases in the table
+   above are that rejection); real per-aspect support is split off as
+   roadmap F11a.
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1773 discovered, 1772 passed, 1
+unsupported (pre-existing, unrelated) -- 10 more passing than F10's own
+1762-passed baseline (`ImageTest`'s new combined-depth/stencil-rejection
+case, `HostImageCopyTest`'s six new cases, `EntryPointsTest`'s new
+`VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT` case, and
+`PhysicalDeviceInfoTest`'s two new dedicated feature/properties cases),
+no regressions.
