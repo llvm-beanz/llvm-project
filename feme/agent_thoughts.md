@@ -189,3 +189,134 @@ dedicated hand-written `DrawTest` was necessary to actually prove
 reach that code path yet. Fixing the milestone-7 SIMDize gap is out of this
 row's scope; noted in `VulkanCTSReport.md` as a confirmed, unrelated
 blocker rather than assumed.
+
+## Roadmap F8b: depth/stencil and multisample subpass-input local-read coverage
+
+**Task**: implement roadmap milestone F8b and close out F8.
+
+### Starting point
+
+F8a left two things unfinished, both called out in its own status note:
+`buildSubpassInputHeap` (CommandBuffer.cpp) resolves `DepthInputAttachment
+Index`/`StencilInputAttachmentIndex` into heap slots, but (a) bails out of
+`populate()` entirely for any attachment with `SampleCount != 1`, and (b) had
+never actually been exercised against a real depth or stencil format --
+every subpass-load test so far used a plain color attachment.
+
+### Investigation: where's the gap, actually?
+
+Before writing any fix, I traced what would happen today if a shader read a
+`D32_FLOAT` depth attachment through `subpassLoad`. `buildSubpassInputHeap`'s
+`populate()` already handles this fine at the C++ level: `getFixtureFormat
+ElementSize` (ImageFixture.cpp) already has cases for `D16_UNORM`/`D32_FLOAT`/
+`S8_UINT`, so the descriptor gets built with a correct `Format`/`Width`/
+`Height`/layout. The read itself goes through `feme.cpu.image.load.2d.v4f32`,
+which resolves to `femeRTFetchTexel2D` in the CPU runtime
+(FeMeRuntimeCPU.c) -- and *that* function's format-guarded element-size
+table (`femeRTImageFormatElementSize`) had no case for any of the three
+depth/stencil formats, so `ElemSize == 0` and every such fetch silently read
+back all-zero. So the roadmap's "format-decode gap" was real, and it was in
+the runtime, not in `buildSubpassInputHeap` as the row's own phrasing might
+suggest at first read.
+
+### Fix (b): depth/stencil format decode
+
+Added `D16_UNORM` (case 31, 2 bytes)/`D32_FLOAT` (case 32, 4 bytes)/
+`S8_UINT` (case 35, 1 byte) to `femeRTImageFormatElementSize`, and matching
+decode cases to `femeRTUnpackImageTexel`: `D16_UNORM`/`S8_UINT` normalize to
+`[0.0, 1.0]` in component 0 (the same convention `A8_UNORM` already uses for
+its own single normalized component); `D32_FLOAT` is the identity case, like
+`R32_FLOAT`. This is a deliberately narrow, "just the format table" fix --
+real Vulkan's stencil-aspect `subpassLoad` is actually an unsigned-integer
+read (`usubpassInput`/`OpTypeImage` with an integer sampled type), but
+`SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp) and `feme.stage.subpass.load`
+(StageOps.h) are both hard-wired to `f32` today, with no integer-typed
+counterpart -- adding one is a bigger, separate piece of work than the
+"format-decode gap" this row's own text asked for, so I scoped the fix to
+what makes the existing `f32`-only pipeline produce a correct, honest value
+for a normalized 8-bit stencil reference, not to modeling `usubpassInput`
+itself.
+
+### Fix (a): multisample heap population + a latent bug it uncovered
+
+`buildSubpassInputHeap`'s `populate()` no longer bails out on `SampleCount >
+1`; it now derives `Dst.SampleCount`/`Layout.SampleStride`/`Layout.RowPitch`
+the same way `Image.cpp`'s `computeSubresourceLayouts` already does for a
+real (non-fixture) multisampled image: every sample of one texel is stored
+contiguously (`SampleStride == ElemSize`), and a row is `Width` texels of
+`SampleCount * ElemSize` bytes each. `femeRTFetchTexel2D`/
+`femeRTFetchTexel2DI32` were updated to derive their per-texel addressing
+stride from `SampleStride`/`SampleCount` instead of always assuming
+`SampleCount == 1` -- this always reads sample 0 of a multisampled texel,
+since nothing downstream can request a different one yet (see "what's still
+not done" below).
+
+Making `femeRTFetchTexel2D` actually *read* `SampleStride` (previously an
+inert field nothing consulted) immediately broke an existing, passing test:
+`ASTCSampledImageDispatchTest.SamplesARealDecodedTexelRatherThanAllZero`.
+Tracing it down: `decodeASTCImageForSampling` (CommandBuffer.cpp), which
+pre-decodes an ASTC block-compressed image into per-texel RGBA8 storage
+before handing it to the runtime, had `Result.MipLayouts[L] = {Offset,
+RowPitch, SlicePitch, SlicePitch}` -- the aggregate-initializer's fourth
+field is `SampleStride`, mistakenly set to `SlicePitch` (a large, decidedly
+non-multisample value) instead of `0`. This was harmless for as long as
+`SampleStride` went unread; making it meaningful is exactly what F8b's own
+"already model one, unused so far" phrasing was pointing at, and it
+surfaced a real, pre-existing latent bug the moment it stopped being inert.
+Fixed by setting that field to `0` (an ASTC image is never multisampled in
+real Vulkan, matching `Image.cpp`'s own comment on the same point). Caught
+this by running the full `check-feme`/`FeMeVulkanTests` suite after the
+runtime change, not just the new tests -- worth remembering: a field
+described as "unused so far" is exactly the kind of thing likely to have an
+inconsequential-until-now wrong value sitting somewhere.
+
+### Tests added
+
+- `ImageSamplingTest.LoadFetchesD16Unorm`/`LoadFetchesD32Float`/
+  `LoadFetchesS8Uint` (unittests/Runtime/CPU): direct JIT-and-call tests of
+  the three new runtime decode cases, following the existing per-format test
+  pattern in this file exactly.
+- `ImageSamplingTest.LoadFetchesSample0OfMultisampledTexel`: a 2-texel,
+  4-sample `R32_FLOAT` image, checking that texel (1, 0)'s fetch does not
+  alias one of texel (0, 0)'s samples -- the addressing bug the `SampleStride`
+  fix targets directly.
+- `DrawTest.SubpassLoadReadsBackTheDepthAttachmentItWrote`/
+  `SubpassLoadReadsBackTheStencilAttachmentItWrote`: the CTS-shaped
+  end-to-end tests the roadmap row asked for, following
+  `SubpassLoadReadsBackTheColorAttachmentItWrote`'s own shape closely but
+  clearing the depth/stencil attachment to a known value instead of
+  drawing into it first (no depth-writing shader machinery needed for what
+  this row is actually testing: that a real depth/stencil texel round-trips
+  through `subpassLoad`, not the depth/stencil *test* itself). Picked clear
+  values (`128.0 / 255.0` for depth, `200` for stencil) that are exactly
+  reproducible through the eventual `R8G8B8A8_UNORM` color-store rounding,
+  to keep the pixel assertions exact rather than tolerance-based.
+
+### What F8b does and does not close
+
+Both halves of F8a's own "remaining quarter" note are addressed: depth/
+stencil format decode (b), and a correct multisample heap layout (a). This
+is enough to honestly flip `dynamicRenderingLocalReadDepthStencilAttachments`
+to `VK_TRUE` (`EntryPoints.cpp`, `PhysicalDeviceInfoTest.cpp` expectation
+updated to match). It is *not* enough for
+`dynamicRenderingLocalReadMultisampledAttachments`: no caller threads an
+explicit sample index through a subpass load anywhere in the stack --
+`feme::StageOpKind::SubpassLoad` has no `Sample` operand, and
+`SubpassLoadPattern` explicitly rejects any `spirv.ImageRead` that carries
+one (`hasImageOperands`). Closing that needs a `Sample` operand added to the
+stage op itself, a `SubpassLoadPattern` case that reads it instead of
+rejecting it, and `lowerFragmentSubpassLoad`/the runtime threading it into
+the texel address -- real, separate plumbing through four different files,
+not a mechanical extension of this row's own fix. Split off as roadmap F8c
+rather than claimed as done.
+
+### Roadmap bookkeeping
+
+F8b is struck through as done for its depth/stencil scope, with the
+multisample-specific remainder split off as F8c (per "if you do not [fully]
+complete it, add lettered entries" -- F8c rather than F8bXX, since F8b's own
+letter is already taken and the remaining work is better framed as its own
+follow-on row than a re-split of F8b itself). `Vulkan14FeatureInventory.md`
+and `VulkanExtensionInventory.md` updated to match: `dynamicRenderingLocal
+ReadDepthStencilAttachments` real, `dynamicRenderingLocalReadMultisampled
+Attachments` still `n/a`/`VK_FALSE` with its new F8c citation.
