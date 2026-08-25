@@ -499,7 +499,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `dynamicRenderingLocalRead` | yes | roadmap F8/F8a/F8b/F8c (closed): `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices` are implemented and validated (`CommandBuffer.{h,cpp}`); the attachment-location remap is honored by the executor (`PreparedDraw::ColorAttachmentLocations`, `Executor.cpp`), and a fragment shader's `subpassInput`/`subpassInputMS` local read now produces real pixels for a color, depth (`D16_UNORM`/`D32_FLOAT`), stencil (`S8_UINT`), or explicitly-sampled multisample attachment (`feme::spirv::SubpassLoadPattern` in `SPIRVToLLVMPatterns.cpp`, `FragmentWrapper.cpp`'s `lowerFragmentSubpassLoad`, `CommandBuffer.cpp`'s `buildSubpassInputHeap`, and the CPU runtime's `FeMeRuntimeCPU.c`), proven end to end by `DrawTest.SubpassLoadReadsBackThe{Color,Depth,Stencil}AttachmentItWrote`/`SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`; see the two dedicated limit rows below |
 | feature | VK_VERSION_1_4 | `maintenance5` | yes |  |
 | feature | VK_VERSION_1_4 | `maintenance6` | yes |  |
-| feature | VK_VERSION_1_4 | `pipelineProtectedAccess` | no |  |
+| feature | VK_VERSION_1_4 | `pipelineProtectedAccess` | yes | roadmap F9: this ICD has no protected-memory model at all (`protectedMemory` stays `VK_FALSE`), but `Pipeline::createFlags` (`Pipeline.h`) now records `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`/`VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT` verbatim, and `vkCmdBindPipeline` (`CommandBuffer.cpp`) silently rejects binding a `PROTECTED_ACCESS_ONLY_BIT` pipeline (no `VkCommandBuffer` this ICD hands out is ever protected, per `VUID-vkCmdBindPipeline-pipelineProtectedAccess-07409`); see the dedicated `VkPhysicalDevicePipelineProtectedAccessFeatures` row below |
 | feature | VK_VERSION_1_4 | `pipelineRobustness` | no |  |
 | feature | VK_VERSION_1_4 | `hostImageCopy` | no |  |
 | feature | VK_VERSION_1_4 | `pushDescriptor` | no |  |
@@ -529,7 +529,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | limit | VK_VERSION_1_4 | `optimalTilingLayoutUUID` | n/a |  |
 | limit | VK_VERSION_1_4 | `identicalMemoryTypeRequirements` | n/a |  |
 | extension | VK_VERSION_1_4 | `VK_EXT_host_image_copy` | no |  |
-| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | no |  |
+| extension | VK_VERSION_1_4 | `VK_EXT_pipeline_protected_access` | yes | roadmap F9 (closed): see the `pipelineProtectedAccess` feature row above |
 | extension | VK_VERSION_1_4 | `VK_EXT_pipeline_robustness` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | yes | roadmap F8/F8a/F8b/F8c (closed): see the `dynamicRenderingLocalRead` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | yes | roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family |

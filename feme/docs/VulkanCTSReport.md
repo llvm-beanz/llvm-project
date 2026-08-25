@@ -4562,3 +4562,60 @@ own test and were fixed in the same series:
   against the actually bound attachment) already existed and is
   unaffected; this fix only stops the creation-time check from rejecting
   a case draw time would have accepted.
+
+## Roadmap F9: measured impact (`VK_EXT_pipeline_protected_access`)
+
+F9 confirmed the spec's actual conformance requirement is a *bind-time*
+rule (`VUID-vkCmdBindPipeline-pipelineProtectedAccess-07408`/`-07409`),
+not the roadmap row's own initial guess of a creation-time "mixed
+pipeline" rejection -- see Roadmap.md's F9 row for the full trace.
+`Pipeline::createFlags` now records `VkPipelineCreateInfo::flags`
+verbatim on every `VkPipeline`, and `vkCmdBindPipeline` (CommandBuffer.cpp)
+silently rejects binding a `VK_PIPELINE_CREATE_PROTECTED_ACCESS_ONLY_BIT`
+pipeline, since this ICD's `protectedMemory` feature always reports
+`VK_FALSE` (no protected command buffer ever exists to legally bind one
+in).
+
+The feature-consistency case passes:
+
+```
+dEQP-VK.api.info.get_physical_device_properties2.features.pipeline_protected_access_features
+  Pass (Querying succeeded)
+```
+
+(`dEQP-VK.api.info.get_physical_device_properties2.features.protected_memory_features`
+still fails in this same run, but that is `protectedMemory`'s own
+pre-existing, unrelated gap -- roadmap K9's own row, not F9's -- caused by
+this ICD having no case at all for the dedicated
+`VkPhysicalDeviceProtectedMemoryFeatures` struct; untouched by this
+change.)
+
+`dEQP-VK.pipeline.monolithic.image.*.pipeline_protected_flag_*` (the one
+real CTS suite that exercises `VK_PIPELINE_CREATE_NO_PROTECTED_ACCESS_BIT_EXT`
+without needing `protectedMemory` itself, gated on
+`context.requireDeviceFunctionality("VK_EXT_pipeline_protected_access")`)
+now actually attempts these cases instead of skipping them outright with
+`NotSupported (VK_EXT_pipeline_protected_access is not supported)`, the
+pre-F9 baseline this row re-measured directly (`git stash` back to the
+pre-F9 tree, same case list, same build): every case now reaches real
+pipeline creation, but fails there for the same pre-existing,
+already-documented milestone-7 `feme::cpu::SIMDizePass` "component
+decomposition is not yet supported" deviation F8a/F8b/F8c's own reports
+describe (a real `glslang`-compiled image-sampling shader, not this row's
+own flag logic, is what these cases fail on) -- confirmed by inspecting
+the failure message directly:
+
+```
+error: feme-cpu-simdize: function 'main' has a divergent vector value ''
+used outside a supported insertelement-chain/resource-store/
+extractelement/select/shufflevector/phi/elementwise pattern; component
+decomposition is not yet supported for this use (roadmap milestone 7
+deviation)
+```
+
+`ninja check-feme` (`LLVM_ENABLE_ASSERTIONS=ON`, `LLVM_CCACHE_BUILD=ON`,
+this session's existing `./build`): 1756 discovered, 1755 passed, 1
+unsupported (pre-existing, unrelated) -- 5 more passing than F8c's own
+1750-passed baseline (`PipelineTest`'s two new create-flag tests,
+`GraphicsPipelineTest`'s own, and `CommandBufferTest`'s two new
+bind-time-rejection tests), no regressions.

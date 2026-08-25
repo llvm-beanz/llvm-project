@@ -232,7 +232,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_EXT_pipeline_creation_feedback` | Advertised |  |
 | `VK_EXT_pipeline_library_group_handles` | Not implemented |  |
 | `VK_EXT_pipeline_properties` | Not implemented |  |
-| `VK_EXT_pipeline_protected_access` | Planned (in scope, not implemented) | roadmap F9 |
+| `VK_EXT_pipeline_protected_access` | Advertised | roadmap F9 (closed): `Pipeline::createFlags`/`vkCmdBindPipeline`'s bind-time rejection, see Vulkan14FeatureInventory.md's `pipelineProtectedAccess` row |
 | `VK_EXT_pipeline_robustness` | Planned (in scope, not implemented) | roadmap F10 |
 | `VK_EXT_post_depth_coverage` | Not implemented |  |
 | `VK_EXT_present_mode_fifo_latest_ready` | Not implemented |  |
