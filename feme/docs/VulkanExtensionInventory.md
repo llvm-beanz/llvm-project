@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 19 |
+| Advertised | 20 |
 | Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 62 |
+| Planned (in scope, not implemented) | 61 |
 | Not implemented (out of scope) | 202 |
 
-- **The 19 advertised** are the ones a `deqp-vk` case enables by name
+- **The 20 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -80,7 +80,8 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_EXT_inline_uniform_block` (E14), `VK_EXT_texel_buffer_alignment`
   (E18), `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
   `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19),
-  `VK_KHR_global_priority` (F1), and `VK_KHR_shader_expect_assume` (F4).
+  `VK_KHR_global_priority` (F1), `VK_KHR_shader_expect_assume` (F4), and
+  `VK_KHR_line_rasterization` (F5).
 - **The 17 core-but-unadvertised** were 3 until this edition. A full audit
   of every core-promoted extension against this ICD's own sources (rather
   than only the ones a roadmap row happened to name) found 14 more that
@@ -340,7 +341,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_incremental_present` | Not implemented |  |
 | `VK_KHR_index_type_uint8` | Planned (in scope, not implemented) | roadmap F7 |
 | `VK_KHR_internally_synchronized_queues` | Not implemented |  |
-| `VK_KHR_line_rasterization` | Planned (in scope, not implemented) | roadmap F5 |
+| `VK_KHR_line_rasterization` | Advertised | roadmap F5 |
 | `VK_KHR_load_store_op_none` | Planned (in scope, not implemented) | roadmap F13 |
 | `VK_KHR_maintenance1` | Implemented (core, not advertised by name) | vkTrimCommandPool implemented (CommandBuffer.cpp) |
 | `VK_KHR_maintenance10` | Not implemented |  |

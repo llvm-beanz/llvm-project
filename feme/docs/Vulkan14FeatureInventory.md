@@ -486,12 +486,12 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | yes |  |
 | feature | VK_VERSION_1_4 | `shaderFloatControls2` | no | roadmap F15c: per-instruction `FPRoundingMode` (all four rounding directions, not just `RTZ`) and `FPFastMathMode` decorations are now genuinely honored by `FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp), verified against LLVM's real, in-tree SPIRV backend (`spirv-backend-per-instruction-rounding-mode.mlir`) and the real translated LLVM IR (`spirv-to-llvmir-per-instruction-fast-math.mlir`). F15d closed the rest of the codegen -- `FPFastMathDefault` (a whole-entry-point default `FPFastMathMode`) is now genuinely honored too, and the dialect-level `FloatControls2` capability/`FPFastMathDefault` execution-mode/`AllowTransform` fast-math-mode gaps F15d found are fixed (`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`). Still not advertised: a targeted CTS re-run (temporarily flipping the feature/property/extension gates) found the same unrelated `feme::cpu` resource-lowering gap `shaderFloatControls`/F15a/F15b's rows already found (small runtime-sized storage-buffer bindings) still blocks a conformant claim, and incidentally found a further, unrelated MLIR deserializer crash on `FrexpStruct`/`ModfStruct` result types (roadmap F16). F16 itself is now fixed: the crash was a dialect-level bug (`Deserializer::processStructType` guessing a struct-level decoration's enum back from its mangled attribute name, which is not reliably reversible for names like `FPFastMathMode`), not anything specific to these two instructions, and `spirv.GL.ModfStruct` (which this dialect did not model at all) plus a `SPIRVToLLVM` conversion pattern for both instructions were added alongside it. Still not advertised: the unrelated `feme::cpu` resource-lowering gap F15a/F15b/F15d already found remains the only blocker to a conformant claim |
 | feature | VK_VERSION_1_4 | `shaderExpectAssume` | yes | roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp) |
-| feature | VK_VERSION_1_4 | `rectangularLines` | no |  |
-| feature | VK_VERSION_1_4 | `bresenhamLines` | no |  |
-| feature | VK_VERSION_1_4 | `smoothLines` | no |  |
-| feature | VK_VERSION_1_4 | `stippledRectangularLines` | no |  |
-| feature | VK_VERSION_1_4 | `stippledBresenhamLines` | no |  |
-| feature | VK_VERSION_1_4 | `stippledSmoothLines` | no |  |
+| feature | VK_VERSION_1_4 | `rectangularLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
+| feature | VK_VERSION_1_4 | `bresenhamLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
+| feature | VK_VERSION_1_4 | `smoothLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
+| feature | VK_VERSION_1_4 | `stippledRectangularLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
+| feature | VK_VERSION_1_4 | `stippledBresenhamLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
+| feature | VK_VERSION_1_4 | `stippledSmoothLines` | yes | roadmap F5: feme::graphics::RasterState::LineMode/StippledLineEnable and executeDraws' generalized line-topology quad expansion (Executor.cpp) -- see the dedicated VkPhysicalDeviceLineRasterizationFeaturesKHR row below |
 | feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateDivisor` | no |  |
 | feature | VK_VERSION_1_4 | `vertexAttributeInstanceRateZeroDivisor` | no |  |
 | feature | VK_VERSION_1_4 | `indexTypeUint8` | no |  |
@@ -502,7 +502,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `pipelineRobustness` | no |  |
 | feature | VK_VERSION_1_4 | `hostImageCopy` | no |  |
 | feature | VK_VERSION_1_4 | `pushDescriptor` | no |  |
-| limit | VK_VERSION_1_4 | `lineSubPixelPrecisionBits` | n/a |  |
+| limit | VK_VERSION_1_4 | `lineSubPixelPrecisionBits` | n/a | roadmap F5: 4, the same conservative floor subPixelPrecisionBits/subTexelPrecisionBits already use (both the aggregate and dedicated VkPhysicalDeviceLineRasterizationPropertiesKHR struct) |
 | limit | VK_VERSION_1_4 | `maxVertexAttribDivisor` | n/a |  |
 | limit | VK_VERSION_1_4 | `supportsNonZeroFirstInstance` | n/a |  |
 | limit | VK_VERSION_1_4 | `maxPushDescriptors` | n/a |  |
@@ -533,7 +533,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_dynamic_rendering_local_read` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_global_priority` | yes | roadmap F1: VkDeviceQueueGlobalPriorityCreateInfo is a no-op at vkCreateDevice; VkQueueFamilyGlobalPriorityProperties reports the full mandatory priority list (LOW/MEDIUM/HIGH/REALTIME) for every queue family |
 | extension | VK_VERSION_1_4 | `VK_KHR_index_type_uint8` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_line_rasterization` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_line_rasterization` | yes | roadmap F5: vkCmdSetLineStippleKHR (CommandBuffer.cpp), VkPipelineRasterizationLineStateCreateInfoKHR translation (GraphicsPipeline.cpp) |
 | extension | VK_VERSION_1_4 | `VK_KHR_load_store_op_none` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance5` | yes | roadmap E5: null VkRenderingAttachmentInfo image views, VK_REMAINING_ARRAY_LAYERS in copy/blit/resolve regions (E27), and the rest of the group |
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance6` | yes | roadmap E6: vkCmdBindDescriptorSets2/vkCmdPushConstants2/vkCmdPushDescriptorSet2 (Descriptor.cpp, CommandBuffer.cpp) |

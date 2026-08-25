@@ -1928,6 +1928,70 @@ roadmap C4's "mapDynamicState beyond its six states" item outright; only
 the dual-source-blend gap above remains open, exactly as this section
 already described before C4c (topology is now closed too, per C4d above).
 
+Status (roadmap F5, line rasterization -- generalizing C4d's own "fixed
+1-pixel point size/half-width" note): `feme::graphics::RasterState` gained
+`LineRasterizationMode` (`Rectangular`/`Bresenham`/`RectangularSmooth`,
+matching `VkLineRasterizationModeKHR`), `LineWidth`, and
+`StippledLineEnable`/`StippleFactor`/`StipplePattern`. `executeDraws`'
+line-topology quad expansion (`feme/lib/Graphics/Executor.cpp`) still
+shares the triangle rasterizer C4d's own note describes, but each mode
+now builds a different synthetic quad rather than one fixed 1-pixel-wide
+rectangle: `Rectangular` builds it at `LineWidth` pixels wide (the same
+shape as before, generalized); `RectangularSmooth` additionally feathers
+the quad 1 pixel past its nominal width, carrying each corner's signed
+perpendicular distance from the centerline (`ScreenTriangle::
+EdgeDistance`) through the same per-pixel barycentric interpolation
+`Depth` already uses, turning it into a 0..1 antialiasing coverage that
+multiplies into the written alpha; `Bresenham` does not build a
+width-dependent quad at all -- it walks the integer pixel grid directly
+with Bresenham's own algorithm (always exactly 1 pixel wide, matching the
+spec's own "not adjustable" rule for this mode), emitting a 1x1
+axis-aligned quad per covered pixel, shaded at the line parameter nearest
+that pixel's center. Every mode also carries each corner's distance along
+the line's length (`ScreenTriangle::ArcLength`, accumulating across a
+`LineStrip`'s connected segments per Vulkan's "continuously stippled"
+rule, resetting at a `LineList` segment boundary or a strip's own
+restart) so a stippled line can reject a covered sample whose position
+falls in one of `StipplePattern`'s "off" bits -- tested per sample
+alongside the ordinary triangle coverage test, at the same granularity a
+real stipple test operates at.
+
+On the Vulkan side, `GraphicsPipeline.cpp`'s `translateRasterState` reads
+`VkPipelineRasterizationLineStateCreateInfoKHR` from the rasterization
+state's `pNext` chain (absent entirely, a pipeline keeps `RasterState`'s
+own `Rectangular`/unstippled default, matching
+`VK_LINE_RASTERIZATION_MODE_DEFAULT_KHR`'s documented behavior) and the
+static `lineWidth` field. `VK_DYNAMIC_STATE_LINE_WIDTH` (core 1.0,
+previously a `vkCmdSetLineWidth` no-op stub) and `VK_DYNAMIC_STATE_LINE_
+STIPPLE_KHR` (new, via `vkCmdSetLineStippleKHR`) both flow through
+`DynamicGraphicsState`/`buildExecutorPipeline` exactly like every other
+dynamic state C4c's own note describes. `rectangularLines`/
+`bresenhamLines`/`smoothLines` and their three `stippled*` variants are
+advertised `VK_TRUE` (the aggregate `VkPhysicalDeviceVulkan14Features`
+struct and the dedicated `VkPhysicalDeviceLineRasterizationFeaturesKHR`
+struct), and `lineSubPixelPrecisionBits` is a real `4` in both the
+aggregate `VkPhysicalDeviceVulkan14Properties` struct and the dedicated
+`VkPhysicalDeviceLineRasterizationPropertiesKHR` struct -- the same
+conservative floor `subPixelPrecisionBits`/`subTexelPrecisionBits`
+(`PhysicalDeviceInfo.cpp`) already use, honest since this software
+rasterizer's line positions are full `float` screen-space coordinates
+with no separate fixed-point snapping grid of their own to report a
+tighter bound for.
+
+One deliberate scope boundary, not a deviation: `wideLines`/`largePoints`
+stay `VK_FALSE` and `lineWidthRange`/`pointSizeRange` stay their existing
+fixed values -- claiming those is roadmap H7's row, not this one's, even
+though the line rasterizer above now genuinely honors whatever
+`LineWidth` it is given (a conformant caller just cannot legally request
+anything other than `1.0` yet). See `unittests/Graphics/ExecutorTest.cpp`'s
+`RendersAWideRectangularLine`/`RendersABresenhamDiagonalLine`/
+`RendersAStippledLine`/`RectangularSmoothLineAntialiasesItsEdge` (direct
+`RasterState` coverage) and `unittests/Vulkan/GraphicsPipelineTest.cpp`'s
+`TranslatesLineRasterizationState`/
+`DynamicLineWidthAndStippleOverrideStaticState` plus
+`unittests/Vulkan/DrawTest.cpp`'s `DynamicLineWidthWidensTheLine` (real
+SPIR-V pipeline, end to end) for coverage.
+
 
 The conventional tessellation path inserts patch control, fixed tessellation,
 domain evaluation, and optional geometry execution between vertex shading and
