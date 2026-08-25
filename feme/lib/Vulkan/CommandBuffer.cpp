@@ -1192,14 +1192,13 @@ uint32_t resolveVertexBindingStride(const GraphicsPipeline &Pipeline,
 /// FeMeRuntimeCPU.c), not here. A `SampleCount > 1` attachment's slot is
 /// now populated too, its `MipLayouts` entry addressing every sample of a
 /// texel contiguously (`Layout.SampleStride == *ElemSize`, matching
-/// Image.cpp's `computeSubresourceLayouts`) rather than being left zeroed:
-/// this gives a correct heap for any future sample-index-aware reader, but
-/// no such reader exists yet (`feme::StageOpKind::SubpassLoad` carries no
-/// `Sample` operand, and `SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp)
-/// rejects a `spirv.ImageRead` that has one), so
-/// `dynamicRenderingLocalReadMultisampledAttachments` stays `VK_FALSE`
-/// (tracked as roadmap F8c) even though this function's own multisample
-/// gap is closed.
+/// Image.cpp's `computeSubresourceLayouts`) rather than being left zeroed.
+/// Roadmap F8c then gave this heap a real reader: `feme::StageOpKind::
+/// SubpassLoad`'s new `sample` operand, threaded through `SubpassLoadPattern`
+/// (SPIRVToLLVMPatterns.cpp) and `lowerFragmentSubpassLoad`/
+/// `femeRTFetchTexel2D` (FragmentWrapper.cpp/FeMeRuntimeCPU.c), so
+/// `dynamicRenderingLocalReadMultisampledAttachments` now honestly
+/// advertises `VK_TRUE`.
 Error buildSubpassInputHeap(
     const GraphicsState &Gfx,
     llvm::ArrayRef<feme::graphics::AttachmentView> Attachments,

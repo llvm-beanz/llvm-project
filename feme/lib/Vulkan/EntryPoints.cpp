@@ -606,13 +606,17 @@ void fillProperties2Chain(const PhysicalDeviceInfo &Info, void *pNext) {
       // CPU runtime's texel-unpack table now decodes all three
       // (FeMeRuntimeCPU.c) -- proven end to end by DrawTest's
       // `SubpassLoadReadsBackTheDepthAttachmentItWrote`/
-      // `SubpassLoadReadsBackTheStencilAttachmentItWrote`. Multisample
-      // local-read coverage is not: no caller threads an explicit sample
-      // index through a subpass load yet (`buildSubpassInputHeap`'s own
-      // comment), so `dynamicRenderingLocalReadMultisampledAttachments`
-      // stays `VK_FALSE` (tracked as roadmap F8c).
+      // `SubpassLoadReadsBackTheStencilAttachmentItWrote`. (roadmap F8c)
+      // Multisample local-read coverage is real too now: `feme::StageOpKind
+      // ::SubpassLoad` gained a `sample` operand, `SubpassLoadPattern`
+      // (SPIRVToLLVMPatterns.cpp) reads a real `Sample` image operand
+      // instead of rejecting one, and `lowerFragmentSubpassLoad`/the CPU
+      // runtime's `femeRTFetchTexel2D` thread that sample index into the
+      // texel address `buildSubpassInputHeap`'s own multisample layout
+      // (F8b) already supports -- proven end to end by DrawTest's
+      // `SubpassLoadReadsBackAnExplicitSampleOfTheColorAttachmentItWrote`.
       Props14->dynamicRenderingLocalReadDepthStencilAttachments = VK_TRUE;
-      Props14->dynamicRenderingLocalReadMultisampledAttachments = VK_FALSE;
+      Props14->dynamicRenderingLocalReadMultisampledAttachments = VK_TRUE;
       // (roadmap E5's `VK_KHR_maintenance5`) None of this group's fixed-
       // function guarantees have been verified for this software
       // rasterizer yet -- E5 itself only lands a null dynamic-rendering
@@ -1257,10 +1261,11 @@ void fillFeatures2Chain(void *pNext) {
       // dedicated `VkPhysicalDeviceDynamicRenderingLocalReadFeatures` case
       // below. Roadmap F8b then proved the same true for a depth/stencil
       // attachment too (`SubpassLoadReadsBackTheDepthAttachmentItWrote`/
-      // `SubpassLoadReadsBackTheStencilAttachmentItWrote`); only a
-      // multisample attachment remains unread (roadmap F8c), which this
-      // feature bit's own `dynamicRenderingLocalReadMultisampledAttachments`
-      // limit field (still `VK_FALSE` below) scopes down to.
+      // `SubpassLoadReadsBackTheStencilAttachmentItWrote`), and F8c a
+      // multisample one (`SubpassLoadReadsBackAnExplicitSampleOfThe
+      // ColorAttachmentItWrote`) -- this feature bit's own `dynamicRendering
+      // LocalReadMultisampledAttachments` limit field agrees, now `VK_TRUE`
+      // below too.
       Features->dynamicRenderingLocalRead = VK_TRUE;
       Features->maintenance5 = VK_TRUE;
       // (roadmap E6) `vkCmdBindDescriptorSets2`/`vkCmdPushConstants2`
