@@ -92,15 +92,19 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
 
 // A sized-array member (rather than a storage buffer's dynamically-sized
 // trailing one), the shape a plain GLSL `uniform UBO { float data[4]; };`
-// compiles to: a single member, but a sized `spirv.array` rather than the
-// homogeneous struct FeMe's own wrapper convention expects, so it is the
-// direct (unwrapped) shape too.
+// compiles to: a single member, so it is recognized as FeMe's own wrapper
+// shape (roadmap F12a) exactly the way a storage buffer's sole runtime-
+// array member already is, dynamically indexed directly through
+// `llvm.spv.resource.getpointer` rather than through a `getelementptr` --
+// which, unlike a storage buffer's own runtime array, cannot always
+// reproduce a std140 array's own stride (see
+// `feme::spirv::convertUniformArrayContent`'s comment) -- with that
+// stride carried as the handle's own third integer parameter instead.
 
 // CHECK-LABEL: llvm.func @read_element
 // CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
-// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.struct<(array<4 x f32>)>, 2, 0>
-// CHECK: %[[MEMBER:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
-// CHECK: %[[ELEM:.*]] = llvm.getelementptr inbounds %[[MEMBER]][0, %{{.*}}]
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x f32>, 2, 0, 4>
+// CHECK: %[[ELEM:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
 // CHECK: llvm.load %[[ELEM]] : !llvm.ptr<12> -> f32
 spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
   spirv.GlobalVariable @ubo bind(0, 4) : !spirv.ptr<!spirv.struct<(!spirv.array<4 x f32, stride=4> [0]), Block>, Uniform>
@@ -138,5 +142,37 @@ spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
     %ac = spirv.AccessChain %0[%c0, %c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.struct<(!spirv.array<4 x f32, stride=4> [0])> [0])>, Uniform>, i32, i32, i32 -> !spirv.ptr<f32, Uniform>
     %v = spirv.Load "Uniform" %ac : f32
     spirv.ReturnValue %v : f32
+  }
+}
+
+// -----
+
+// Roadmap F12a: a std140 uniform buffer array's own element stride (16
+// bytes for this scalar `uint`) does not equal its element's own natural
+// size (4 bytes) the way a std430 storage buffer array's always does --
+// unlike every other case in this file, MLIR's own `spirv::ArrayType`
+// conversion (`convertArrayType` in SPIRVToLLVM.cpp) refuses to convert an
+// array whose stride mismatches its element's natural size at all, so this
+// used to fail `spirv.AccessChain` legalization outright
+// (`dEQP-VK.pipeline.monolithic.push_descriptor.compute.
+// incremental_updates*`). The real stride is instead carried as the
+// handle's own third integer parameter (see
+// `feme::spirv::convertUniformArrayContent`'s comment), read back by
+// `feme::cpu::SPIRVResourceLoweringPass` to multiply the dynamic array
+// index by, exactly as a storage buffer's own dynamic index already is.
+
+// CHECK-LABEL: llvm.func @read_std140_element
+// CHECK: %[[HANDLE:.*]] = llvm.call_intrinsic "llvm.spv.resource.handlefrombinding"
+// CHECK-SAME: -> !llvm.target<"spirv.VulkanBuffer", !llvm.array<0 x i32>, 2, 0, 16>
+// CHECK: %[[ELEM:.*]] = llvm.call_intrinsic "llvm.spv.resource.getpointer"(%[[HANDLE]], %{{.*}})
+// CHECK: llvm.load %[[ELEM]] : !llvm.ptr<12> -> i32
+spirv.module Logical GLSL450 requires #spirv.vce<v1.0, [Shader], []> {
+  spirv.GlobalVariable @ubo bind(0, 5) : !spirv.ptr<!spirv.struct<(!spirv.array<16 x i32, stride=16> [0]), Block>, Uniform>
+  spirv.func @read_std140_element(%idx : i32) -> i32 "None" {
+    %0 = spirv.mlir.addressof @ubo : !spirv.ptr<!spirv.struct<(!spirv.array<16 x i32, stride=16> [0]), Block>, Uniform>
+    %c0 = spirv.Constant 0 : i32
+    %ac = spirv.AccessChain %0[%c0, %idx] : !spirv.ptr<!spirv.struct<(!spirv.array<16 x i32, stride=16> [0]), Block>, Uniform>, i32, i32 -> !spirv.ptr<i32, Uniform>
+    %v = spirv.Load "Uniform" %ac : i32
+    spirv.ReturnValue %v : i32
   }
 }
