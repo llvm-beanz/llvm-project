@@ -62,12 +62,12 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 
 | Status | Count |
 |---|---:|
-| Advertised | 18 |
+| Advertised | 19 |
 | Implemented (core, not advertised by name) | 17 |
-| Planned (in scope, not implemented) | 63 |
+| Planned (in scope, not implemented) | 62 |
 | Not implemented (out of scope) | 202 |
 
-- **The 18 advertised** are the ones a `deqp-vk` case enables by name
+- **The 19 advertised** are the ones a `deqp-vk` case enables by name
   regardless of the advertised `apiVersion`, plus the three that predate
   that discipline: `VK_KHR_dynamic_rendering`,
   `VK_EXT_extended_dynamic_state`, `VK_KHR_shader_integer_dot_product`,
@@ -79,8 +79,8 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
   `VK_KHR_zero_initialize_workgroup_memory` (E13),
   `VK_EXT_inline_uniform_block` (E14), `VK_EXT_texel_buffer_alignment`
   (E18), `VK_EXT_4444_formats`/`VK_EXT_pipeline_creation_feedback`/
-  `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19), and
-  `VK_KHR_global_priority` (F1).
+  `VK_KHR_shader_non_semantic_info`/`VK_EXT_tooling_info` (E19),
+  `VK_KHR_global_priority` (F1), and `VK_KHR_shader_expect_assume` (F4).
 - **The 17 core-but-unadvertised** were 3 until this edition. A full audit
   of every core-promoted extension against this ICD's own sources (rather
   than only the ones a roadmap row happened to name) found 14 more that
@@ -383,7 +383,7 @@ Vulkan registry (149 `KHR`, 151 `EXT`):**
 | `VK_KHR_shader_clock` | Not implemented |  |
 | `VK_KHR_shader_constant_data` | Not implemented |  |
 | `VK_KHR_shader_draw_parameters` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.1: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
-| `VK_KHR_shader_expect_assume` | Planned (in scope, not implemented) | roadmap F4 |
+| `VK_KHR_shader_expect_assume` | Advertised |  |
 | `VK_KHR_shader_float16_int8` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_float_controls` | Planned (in scope, not implemented) | core-promoted into Vulkan 1.2: part of the mandatory floor a 1.4 claim inherits (roadmap 1.9.10, K-series) |
 | `VK_KHR_shader_float_controls2` | Planned (in scope, not implemented) | roadmap F15c/F15d (per-instruction decorations and `FPFastMathDefault` codegen closed) and F16 (the unrelated `FrexpStruct`/`ModfStruct` deserializer crash F15d's own CTS re-run found is fixed, along with modeling `spirv.GL.ModfStruct` and both instructions' `SPIRVToLLVM` conversion patterns); still blocked from a conformant claim by the unrelated `feme::cpu` resource-lowering gap F15a/F15b found |

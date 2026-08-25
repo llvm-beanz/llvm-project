@@ -4022,3 +4022,80 @@ coverage run via `check-mlir-dialect-spirv`/`check-mlir-target-spirv`/
 `check-mlir-conversion` (58/52/411 tests respectively, all passing).
 
 
+
+## Roadmap F4: measured impact (targeted, not a full re-run)
+
+F4 gave `spirv.KHR.AssumeTrue`/`spirv.KHR.Expect` (already modeled by
+MLIR's own `spirv` dialect, needing no dialect-level work first, unlike
+several other F-rows) real `spirv`->`llvm` conversion patterns
+(`AssumeTrueConversionPattern`/`ExpectConversionPattern`,
+`SPIRVToLLVMPatterns.cpp`), lowering directly to `llvm.assume`/
+`llvm.expect`, and advertised `VK_KHR_shader_expect_assume`/
+`shaderExpectAssume`. Verified first with FileCheck lit tests
+(`spirv-to-llvm-expect-assume.mlir`, covering the scalar `assume`/`expect`
+forms and `spirv.KHR.Expect`'s vector-of-integer form, which -- unlike
+`spirv.KHR.AssumeTrue`'s scalar-only condition -- LLVM's own `llvm.expect`
+intrinsic cannot represent directly and this row expands into one
+`llvm.expect` call per lane instead), then against a real, hand-assembled
+SPIR-V binary (`spirv-as`/`spirv-val`) deserialized through MLIR's own
+importer (not just textual `spirv` dialect parsing), and finally against
+LLVM's real, in-tree SPIRV backend (`spirv-backend-expect-assume.mlir`),
+which already lowers both intrinsics back to `OpAssumeTrueKHR`/
+`OpExpectKHR` (`SPIRVPrepareFunctions.cpp`'s `lowerExpectAssume`) once its
+own `-spirv-ext` allow-list enables `SPV_KHR_expect_assume` (empty by
+default, unlike every capability every other backend round-trip test in
+this repository exercises so far, discovered when the first version of
+this test silently lost both intrinsics with no diagnostic).
+
+Targeted subset: **`dEQP-VK.glsl.shader_expect_assume.*`** (141 cases, the
+dedicated CTS module for this extension, shared by all three
+`vertex`/`fragment`/`compute` stages).
+
+- **0 passed / 69 failed / 72 not supported.** The 72 not-supported cases
+  are `int8`/`int16`/`int64` data-class cases this ICD does not advertise
+  storage support for (`uniformAndStorageBuffer8/16BitAccess`,
+  `shaderInt64`) -- expected, unrelated gates. All 69 failures split into
+  two pre-existing, unrelated gaps, neither touched by this row's own
+  patterns (confirmed by reproducing each on an entirely unrelated
+  sibling case that needs no `assume`/`expect` functionality at all):
+  - **23 `compute`-stage failures** all fail identically at
+    `vkCreateComputePipelines` with `'llvm.getelementptr' op operand #0
+    must be LLVM pointer type or LLVM dialect-compatible vector of LLVM
+    pointer type, but got 'vector<3xi32>'` -- a pre-existing gap in this
+    ICD's storage-buffer access-chain lowering for the
+    `RuntimeArray-of-vecN` layout CTS's shared `ShaderExecutor` compute
+    harness always uses to marshal results (every op-under-test writes
+    through this same buffer shape, regardless of which op), not
+    anything specific to `assume`/`expect`. Reproduced identically on
+    `dEQP-VK.glsl.builtin.function.integer.bitcount.int_highp_compute`
+    (an entirely unrelated, long-implemented builtin function test using
+    the same harness), confirming this is a `ShaderExecutor`-framework-
+    wide compute gap this row's own patterns do not cause and do not fix.
+  - **46 `vertex`/`fragment`-stage failures** all fail at
+    `vkCreateGraphicsPipelines` with `VK_ERROR_INITIALIZATION_FAILED`
+    (`FEME_VULKAN_LOG_CREATION_ERRORS=1` reveals the real reason: "color
+    attachment 0 names a format this driver cannot render into") --
+    a pre-existing, unrelated gap in this ICD's graphics-pipeline
+    color-attachment-format support, not anything `assume`/`expect`-
+    specific either.
+  - In other words: `dEQP-VK.glsl.shader_expect_assume.*` was not a
+    passing category before this row, and F4 does not regress a
+    previously-passing one -- it makes 69 previously-`NotSupported`
+    cases newly reach (and fail at) two pre-existing, unrelated gaps,
+    the same shape "Roadmap F1/F2: measured impact" above found. Neither
+    gap is folded into this row: the access-chain one needs a real
+    `ArrayedBlockAccessChainPattern` fix (`SPIRVToLLVMPatterns.cpp`) for
+    vector-element sub-indexing, and the color-attachment one needs
+    auditing this ICD's supported render-target format list
+    (`Image.cpp`/`Format.cpp`) against what `ShaderExecutor`'s fragment
+    harness actually requests -- both comparably-sized, unrelated efforts
+    of their own, left as future work.
+
+`ninja check-feme` (`RelWithDebInfo` + `LLVM_ENABLE_ASSERTIONS=ON` +
+`LLVM_CCACHE_BUILD=ON`, this session's existing `./build`): 1709
+discovered, 1708 passed, 1 unsupported (pre-existing, unrelated), after
+every commit in this row -- new tests relative to F16's own report:
+`spirv-to-llvm-expect-assume.mlir` and `spirv-backend-expect-assume.mlir`
+(both FileCheck), `PhysicalDeviceInfoTest`'s
+`ShaderExpectAssumeIsAdvertisedThroughItsOwnDedicatedFeatureStruct`, and
+`DrawTest`'s `AdvertisesDynamicRenderingExtension` (extended).

@@ -485,7 +485,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotate` | yes |  |
 | feature | VK_VERSION_1_4 | `shaderSubgroupRotateClustered` | yes |  |
 | feature | VK_VERSION_1_4 | `shaderFloatControls2` | no | roadmap F15c: per-instruction `FPRoundingMode` (all four rounding directions, not just `RTZ`) and `FPFastMathMode` decorations are now genuinely honored by `FloatControlArithmeticPattern` (SPIRVToLLVMPatterns.cpp), verified against LLVM's real, in-tree SPIRV backend (`spirv-backend-per-instruction-rounding-mode.mlir`) and the real translated LLVM IR (`spirv-to-llvmir-per-instruction-fast-math.mlir`). F15d closed the rest of the codegen -- `FPFastMathDefault` (a whole-entry-point default `FPFastMathMode`) is now genuinely honored too, and the dialect-level `FloatControls2` capability/`FPFastMathDefault` execution-mode/`AllowTransform` fast-math-mode gaps F15d found are fixed (`mlir/include/mlir/Dialect/SPIRV/IR/SPIRVBase.td`). Still not advertised: a targeted CTS re-run (temporarily flipping the feature/property/extension gates) found the same unrelated `feme::cpu` resource-lowering gap `shaderFloatControls`/F15a/F15b's rows already found (small runtime-sized storage-buffer bindings) still blocks a conformant claim, and incidentally found a further, unrelated MLIR deserializer crash on `FrexpStruct`/`ModfStruct` result types (roadmap F16). F16 itself is now fixed: the crash was a dialect-level bug (`Deserializer::processStructType` guessing a struct-level decoration's enum back from its mangled attribute name, which is not reliably reversible for names like `FPFastMathMode`), not anything specific to these two instructions, and `spirv.GL.ModfStruct` (which this dialect did not model at all) plus a `SPIRVToLLVM` conversion pattern for both instructions were added alongside it. Still not advertised: the unrelated `feme::cpu` resource-lowering gap F15a/F15b/F15d already found remains the only blocker to a conformant claim |
-| feature | VK_VERSION_1_4 | `shaderExpectAssume` | no |  |
+| feature | VK_VERSION_1_4 | `shaderExpectAssume` | yes | roadmap F4: spirv.KHR.AssumeTrue/spirv.KHR.Expect conversion patterns (SPIRVToLLVMPatterns.cpp) |
 | feature | VK_VERSION_1_4 | `rectangularLines` | no |  |
 | feature | VK_VERSION_1_4 | `bresenhamLines` | no |  |
 | feature | VK_VERSION_1_4 | `smoothLines` | no |  |
@@ -539,7 +539,7 @@ Every row cites the specific feature/limit/extension name it closes.
 | extension | VK_VERSION_1_4 | `VK_KHR_maintenance6` | yes | roadmap E6: vkCmdBindDescriptorSets2/vkCmdPushConstants2/vkCmdPushDescriptorSet2 (Descriptor.cpp, CommandBuffer.cpp) |
 | extension | VK_VERSION_1_4 | `VK_KHR_map_memory2` | no |  |
 | extension | VK_VERSION_1_4 | `VK_KHR_push_descriptor` | no |  |
-| extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | no |  |
+| extension | VK_VERSION_1_4 | `VK_KHR_shader_expect_assume` | yes | roadmap F4: see the `shaderExpectAssume` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_float_controls2` | no | roadmap F15c/F15d: see the `shaderFloatControls2` feature row above |
 | extension | VK_VERSION_1_4 | `VK_KHR_shader_subgroup_rotate` | yes | roadmap F2: spirv.GroupNonUniformRotateKHR conversion pattern (SPIRVToLLVMPatterns.cpp's RotateConversionPattern) |
 | extension | VK_VERSION_1_4 | `VK_KHR_vertex_attribute_divisor` | no |  |
