@@ -315,3 +315,9 @@ vkGetPrivateData
 # stipple factor/pattern VK_DYNAMIC_STATE_LINE_STIPPLE_KHR declares
 # dynamic (GraphicsPipeline.cpp/CommandBuffer.cpp).
 vkCmdSetLineStippleKHR
+
+# Roadmap F8: VK_KHR_dynamic_rendering_local_read's two commands,
+# already core (non-KHR-suffixed) in this driver's advertised 1.4
+# apiVersion (CommandBuffer.cpp).
+vkCmdSetRenderingAttachmentLocations
+vkCmdSetRenderingInputAttachmentIndices

@@ -949,6 +949,26 @@ struct GraphicsState {
   VkIndexType IndexType = VK_INDEX_TYPE_UINT32;
 
   DynamicGraphicsState Dynamic;
+
+  /// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`'s current mapping
+  /// (see PreparedDraw.h's own comment on the shape); empty is the
+  /// identity mapping `vkCmdBeginRendering` resets to.
+  std::vector<uint32_t> ColorAttachmentLocations;
+  /// (roadmap F8) `vkCmdSetRenderingInputAttachmentIndices`'s current
+  /// mapping: `ColorAttachmentInputIndices[I]` names the `InputAttachment
+  /// Index` color attachment `I` maps to in shader code, or `VK_ATTACHMENT_
+  /// UNUSED`; empty is the identity mapping. `DepthInputAttachmentIndex`/
+  /// `StencilInputAttachmentIndex` distinguish "no `InputAttachmentIndex`
+  /// decoration" (`std::nullopt`, the reset default) from "not used as an
+  /// input attachment" (`VK_ATTACHMENT_UNUSED`) from a real index (any
+  /// other value) -- see `VkRenderingInputAttachmentIndexInfo`'s own three-
+  /// way distinction. Stored for a future shader-side `subpassInput` local-
+  /// read consumer to use once one exists (`SPIRVToLLVM`'s conversion has
+  /// none yet -- see FeMeVulkanDesign.md's "shader-side SPIR-V subpassInput
+  /// read is still unlowered" finding); not yet consulted by any draw.
+  std::vector<uint32_t> ColorAttachmentInputIndices;
+  std::optional<uint32_t> DepthInputAttachmentIndex;
+  std::optional<uint32_t> StencilInputAttachmentIndex;
 };
 
 /// Builds the normalized render-target binding \p Subpass of \p Pass
@@ -1345,6 +1365,10 @@ Error runDraw(const GraphicsPipeline &Pipeline, const GraphicsState &Gfx,
   Prepared.Draws = llvm::ArrayRef<feme::graphics::DrawCommand>(Draw);
   Prepared.ResolveAttachments = ResolveAttachments;
   Prepared.PassedSampleCounter = &PassedSamples;
+  // (roadmap F8) `vkCmdSetRenderingAttachmentLocations`'s current mapping;
+  // empty (the identity default) unless a dynamic-rendering instance's own
+  // `vkCmdSetRenderingAttachmentLocations` call set one.
+  Prepared.ColorAttachmentLocations = Gfx.ColorAttachmentLocations;
 
   if (Error E = feme::graphics::executeDraws(
           Pipeline.buildExecutorPipeline(Gfx.Dynamic), Prepared))
@@ -1723,6 +1747,17 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
         return Binding.takeError();
       Gfx.Binding = std::move(*Binding);
       Gfx.Rendering = true;
+      // (roadmap F8) These two mappings are only ever set by
+      // `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInput
+      // AttachmentIndices`, both of which the extension restricts to a
+      // dynamic-rendering instance (rejected below when `Gfx.Pass` is
+      // non-null); reset here anyway so a stale mapping from an earlier
+      // `vkCmdBeginRendering` instance in the same command buffer can never
+      // leak into a classic render pass instance's own draws.
+      Gfx.ColorAttachmentLocations.clear();
+      Gfx.ColorAttachmentInputIndices.clear();
+      Gfx.DepthInputAttachmentIndex.reset();
+      Gfx.StencilInputAttachmentIndex.reset();
       if (Error E = applyLoadOps(Gfx.Binding))
         return E;
       break;
@@ -1735,6 +1770,14 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       Gfx.Binding = Cmd.RenderingBinding;
       Gfx.RenderArea = Gfx.Binding.RenderArea;
       Gfx.Rendering = true;
+      // (roadmap F8) `vkCmdSetRenderingInputAttachmentIndices`'s own man
+      // page: "This state is reset whenever vkCmdBeginRendering is
+      // called" -- `vkCmdSetRenderingAttachmentLocations` resets the same
+      // way, back to each's identity-mapping default.
+      Gfx.ColorAttachmentLocations.clear();
+      Gfx.ColorAttachmentInputIndices.clear();
+      Gfx.DepthInputAttachmentIndex.reset();
+      Gfx.StencilInputAttachmentIndex.reset();
       if (Error E = applyLoadOps(Gfx.Binding))
         return E;
       break;
@@ -1863,6 +1906,70 @@ Error executeCommandsInto(llvm::ArrayRef<RecordedCommand> Commands,
       Gfx.Dynamic.StippleFactor = Cmd.LineStippleFactorValue;
       Gfx.Dynamic.StipplePattern = Cmd.LineStipplePatternValue;
       break;
+    case RecordedCommand::Kind::SetRenderingAttachmentLocations: {
+      // (roadmap F8) Restricted to a dynamic-rendering instance: a classic
+      // `VkRenderPass`'s attachment/location correspondence is fixed by its
+      // `VkSubpassDescription`, which this extension does not touch.
+      if (!Gfx.Rendering || Gfx.Pass)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdSetRenderingAttachmentLocations is "
+                                 "only valid inside a vkCmdBeginRendering "
+                                 "instance");
+      const std::vector<uint32_t> &Locations =
+          Cmd.ColorAttachmentLocationsValue;
+      if (!Locations.empty() && Locations.size() != Gfx.Binding.Colors.size())
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdSetRenderingAttachmentLocations' "
+                                 "colorAttachmentCount (%zu) disagrees with "
+                                 "the current rendering instance's (%zu)",
+                                 Locations.size(), Gfx.Binding.Colors.size());
+      std::vector<bool> Seen(Gfx.Binding.Colors.size(), false);
+      for (uint32_t Index : Locations) {
+        if (Index == VK_ATTACHMENT_UNUSED)
+          continue;
+        if (Index >= Gfx.Binding.Colors.size())
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdSetRenderingAttachmentLocations "
+                                   "named out-of-range color attachment %u",
+                                   Index);
+        if (Seen[Index])
+          return createStringError(inconvertibleErrorCode(),
+                                   "vkCmdSetRenderingAttachmentLocations "
+                                   "mapped more than one location onto "
+                                   "color attachment %u",
+                                   Index);
+        Seen[Index] = true;
+      }
+      Gfx.ColorAttachmentLocations = Locations;
+      break;
+    }
+    case RecordedCommand::Kind::SetRenderingInputAttachmentIndices: {
+      // (roadmap F8) Same dynamic-rendering-only restriction as
+      // `vkCmdSetRenderingAttachmentLocations` above.
+      if (!Gfx.Rendering || Gfx.Pass)
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdSetRenderingInputAttachmentIndices is "
+                                 "only valid inside a vkCmdBeginRendering "
+                                 "instance");
+      const std::vector<uint32_t> &Indices =
+          Cmd.ColorAttachmentInputIndicesValue;
+      if (!Indices.empty() && Indices.size() != Gfx.Binding.Colors.size())
+        return createStringError(inconvertibleErrorCode(),
+                                 "vkCmdSetRenderingInputAttachmentIndices' "
+                                 "colorAttachmentCount (%zu) disagrees with "
+                                 "the current rendering instance's (%zu)",
+                                 Indices.size(), Gfx.Binding.Colors.size());
+      Gfx.ColorAttachmentInputIndices = Indices;
+      Gfx.DepthInputAttachmentIndex =
+          Cmd.HasDepthInputAttachmentIndex
+              ? std::optional<uint32_t>(Cmd.DepthInputAttachmentIndexValue)
+              : std::nullopt;
+      Gfx.StencilInputAttachmentIndex =
+          Cmd.HasStencilInputAttachmentIndex
+              ? std::optional<uint32_t>(Cmd.StencilInputAttachmentIndexValue)
+              : std::nullopt;
+      break;
+    }
     case RecordedCommand::Kind::Draw:
     case RecordedCommand::Kind::DrawIndexed: {
       if (!BoundGraphicsPipeline)
@@ -2846,6 +2953,54 @@ vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
                        uint16_t lineStipplePattern) {
   fromHandle<vulkan::CommandBuffer>(commandBuffer)
       ->setLineStipple(lineStippleFactor, lineStipplePattern);
+}
+
+// (roadmap F8) `VK_KHR_dynamic_rendering_local_read`'s
+// `vkCmdSetRenderingAttachmentLocations`: a null `pColorAttachmentLocations`
+// is the identity-mapping default (see `VkRenderingAttachmentLocationInfo`'s
+// own spec text), captured here as an empty vector rather than a
+// `colorAttachmentCount`-sized identity array, so `CommandBuffer::
+// setRenderingAttachmentLocations`'s caller can tell "explicitly reset to
+// identity" from "never called" apart if it ever needs to (it does not
+// today, but an empty vector costs nothing extra to keep either way).
+VKAPI_ATTR void VKAPI_CALL vkCmdSetRenderingAttachmentLocations(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingAttachmentLocationInfo *pLocationInfo) {
+  std::vector<uint32_t> Locations;
+  if (pLocationInfo->pColorAttachmentLocations)
+    Locations.assign(pLocationInfo->pColorAttachmentLocations,
+                     pLocationInfo->pColorAttachmentLocations +
+                         pLocationInfo->colorAttachmentCount);
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setRenderingAttachmentLocations(std::move(Locations));
+}
+
+// (roadmap F8) `VK_KHR_dynamic_rendering_local_read`'s
+// `vkCmdSetRenderingInputAttachmentIndices`: like the command above, a null
+// `pColorAttachmentInputIndices` is captured as an empty vector (the
+// identity-mapping default); `pDepthInputAttachmentIndex`/
+// `pStencilInputAttachmentIndex` are each read into an `optional`,
+// distinguishing a null pointer ("no `InputAttachmentIndex` decoration")
+// from a pointed-to value (which may itself be `VK_ATTACHMENT_UNUSED`) --
+// see `CommandBuffer::setRenderingInputAttachmentIndices`'s own comment.
+VKAPI_ATTR void VKAPI_CALL vkCmdSetRenderingInputAttachmentIndices(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingInputAttachmentIndexInfo *pInputAttachmentIndexInfo) {
+  std::vector<uint32_t> ColorIndices;
+  if (pInputAttachmentIndexInfo->pColorAttachmentInputIndices)
+    ColorIndices.assign(
+        pInputAttachmentIndexInfo->pColorAttachmentInputIndices,
+        pInputAttachmentIndexInfo->pColorAttachmentInputIndices +
+            pInputAttachmentIndexInfo->colorAttachmentCount);
+  std::optional<uint32_t> DepthIndex;
+  if (pInputAttachmentIndexInfo->pDepthInputAttachmentIndex)
+    DepthIndex = *pInputAttachmentIndexInfo->pDepthInputAttachmentIndex;
+  std::optional<uint32_t> StencilIndex;
+  if (pInputAttachmentIndexInfo->pStencilInputAttachmentIndex)
+    StencilIndex = *pInputAttachmentIndexInfo->pStencilInputAttachmentIndex;
+  fromHandle<vulkan::CommandBuffer>(commandBuffer)
+      ->setRenderingInputAttachmentIndices(std::move(ColorIndices), DepthIndex,
+                                           StencilIndex);
 }
 
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer, float, float,

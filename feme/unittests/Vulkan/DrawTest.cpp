@@ -2759,6 +2759,507 @@ TEST_F(DrawTest, RendersToMultipleColorAttachments) {
   vkFreeMemory(Device, SecondMemory, nullptr);
 }
 
+/// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`: remapping location 0
+/// onto attachment 1 and location 1 onto attachment 0 swaps which
+/// attachment each fragment output lands in, relative to the identity
+/// mapping `RendersToMultipleColorAttachments` (and every other MRT test)
+/// exercises by omission.
+TEST_F(DrawTest, RenderingAttachmentLocationsRemapsColorOutputs) {
+  VkImage SecondImage = VK_NULL_HANDLE;
+  VkImageView SecondView = VK_NULL_HANDLE;
+  VkDeviceMemory SecondMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, SecondImage, SecondView, SecondMemory);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(DualOutputFragmentSource);
+
+  VkFormat ColorFormats[2] = {VK_FORMAT_R8G8B8A8_UNORM,
+                              VK_FORMAT_R8G8B8A8_UNORM};
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 2;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachments[2]{};
+  BlendAttachments[0].colorWriteMask = 0xF;
+  BlendAttachments[1].colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.pNext = &Rendering;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  VkRenderingAttachmentInfo ColorAttachments[2]{};
+  ColorAttachments[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[0].imageView = ColorView;
+  ColorAttachments[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachments[0].clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ColorAttachments[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[1].imageView = SecondView;
+  ColorAttachments[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachments[1].clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 2;
+  RenderingInfo.pColorAttachments = ColorAttachments;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Swap: location 0 (solid red) now writes attachment 1, location 1
+  // (solid green) now writes attachment 0.
+  uint32_t Locations[2] = {1, 0};
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 2;
+  LocationInfo.pColorAttachmentLocations = Locations;
+  vkCmdSetRenderingAttachmentLocations(Cmd, &LocationInfo);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel0 = texelOf(ColorImage, X, Y);
+      std::array<uint8_t, 4> Texel1 = texelOf(SecondImage, X, Y);
+      // Attachment 0 now holds location 1's solid green; attachment 1
+      // holds location 0's solid red -- swapped relative to the identity
+      // mapping.
+      EXPECT_EQ(Texel0[0], 0x00) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel0[1], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel1[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel1[1], 0x00) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyImageView(Device, SecondView, nullptr);
+  vkDestroyImage(Device, SecondImage, nullptr);
+  vkFreeMemory(Device, SecondMemory, nullptr);
+}
+
+/// (roadmap F8) `VK_ATTACHMENT_UNUSED` in `pColorAttachmentLocations`
+/// discards whatever the fragment shader wrote to that location: attachment
+/// 1 keeps its clear color rather than receiving location 1's write, since
+/// no location is mapped onto it.
+TEST_F(DrawTest, RenderingAttachmentLocationsUnusedDiscardsWrite) {
+  VkImage SecondImage = VK_NULL_HANDLE;
+  VkImageView SecondView = VK_NULL_HANDLE;
+  VkDeviceMemory SecondMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, SecondImage, SecondView, SecondMemory);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(DualOutputFragmentSource);
+
+  VkFormat ColorFormats[2] = {VK_FORMAT_R8G8B8A8_UNORM,
+                              VK_FORMAT_R8G8B8A8_UNORM};
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 2;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachments[2]{};
+  BlendAttachments[0].colorWriteMask = 0xF;
+  BlendAttachments[1].colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.pNext = &Rendering;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+
+  VkRenderingAttachmentInfo ColorAttachments[2]{};
+  ColorAttachments[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[0].imageView = ColorView;
+  ColorAttachments[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachments[0].clearValue.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+  ColorAttachments[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[1].imageView = SecondView;
+  ColorAttachments[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  // A distinctive clear color (not black, not either shader output) so a
+  // surviving clear is unambiguous.
+  ColorAttachments[1].clearValue.color = {{0.2f, 0.2f, 0.6f, 1.0f}};
+
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 2;
+  RenderingInfo.pColorAttachments = ColorAttachments;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Location 0 still writes attachment 0; location 1 maps nowhere
+  // (`VK_ATTACHMENT_UNUSED`), so attachment 1 keeps its clear color.
+  uint32_t Locations[2] = {0, VK_ATTACHMENT_UNUSED};
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 2;
+  LocationInfo.pColorAttachmentLocations = Locations;
+  vkCmdSetRenderingAttachmentLocations(Cmd, &LocationInfo);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  ASSERT_EQ(submit(), VK_SUCCESS);
+
+  for (uint32_t Y = 0; Y != Extent; ++Y)
+    for (uint32_t X = 0; X != Extent; ++X) {
+      std::array<uint8_t, 4> Texel0 = texelOf(ColorImage, X, Y);
+      std::array<uint8_t, 4> Texel1 = texelOf(SecondImage, X, Y);
+      EXPECT_EQ(Texel0[0], 0xFF) << "at (" << X << ", " << Y << ")";
+      EXPECT_EQ(Texel0[1], 0x00) << "at (" << X << ", " << Y << ")";
+      // Attachment 1's clear color (0.2, 0.2, 0.6) survives, in
+      // R8G8B8A8_UNORM: (0x33, 0x33, 0x99).
+      EXPECT_NEAR(Texel1[0], 0x33, 2) << "at (" << X << ", " << Y << ")";
+      EXPECT_NEAR(Texel1[1], 0x33, 2) << "at (" << X << ", " << Y << ")";
+      EXPECT_NEAR(Texel1[2], 0x99, 2) << "at (" << X << ", " << Y << ")";
+    }
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyImageView(Device, SecondView, nullptr);
+  vkDestroyImage(Device, SecondImage, nullptr);
+  vkFreeMemory(Device, SecondMemory, nullptr);
+}
+
+/// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRendering
+/// InputAttachmentIndices` are only valid inside a `vkCmdBeginRendering`
+/// instance -- a classic `VkRenderPass`'s attachment/location
+/// correspondence is fixed by its `VkSubpassDescription`, which the
+/// extension does not touch.
+TEST_F(DrawTest, RenderingAttachmentLocationsRejectedOutsideDynamicRendering) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkPipeline Pipe = createPipeline(Vertex, Fragment);
+
+  beginRenderPass(VkClearColorValue{{0.0f, 0.0f, 0.0f, 1.0f}});
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  uint32_t Locations[1] = {0};
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 1;
+  LocationInfo.pColorAttachmentLocations = Locations;
+  vkCmdSetRenderingAttachmentLocations(Cmd, &LocationInfo);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderPass(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap F8) `pColorAttachmentLocations`'s `colorAttachmentCount` must
+/// agree with the current dynamic-rendering instance's own color
+/// attachment count.
+TEST_F(DrawTest, RenderingAttachmentLocationsRejectsMismatchedCount) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, &Rendering);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkRenderingAttachmentInfo ColorAttachment{};
+  ColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachment.imageView = ColorView;
+  ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 1;
+  RenderingInfo.pColorAttachments = &ColorAttachment;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Two entries for a one-color-attachment rendering instance.
+  uint32_t Locations[2] = {0, 1};
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 2;
+  LocationInfo.pColorAttachmentLocations = Locations;
+  vkCmdSetRenderingAttachmentLocations(Cmd, &LocationInfo);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
+/// (roadmap F8) Two locations may never map onto the same color attachment:
+/// which fragment output would win is undefined, so this is rejected
+/// rather than silently resolved by picking one.
+TEST_F(DrawTest, RenderingAttachmentLocationsRejectsDuplicateMapping) {
+  VkImage SecondImage = VK_NULL_HANDLE;
+  VkImageView SecondView = VK_NULL_HANDLE;
+  VkDeviceMemory SecondMemory = VK_NULL_HANDLE;
+  createImageAndView(
+      VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_COLOR_BIT, SecondImage, SecondView, SecondMemory);
+
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(DualOutputFragmentSource);
+  VkFormat ColorFormats[2] = {VK_FORMAT_R8G8B8A8_UNORM,
+                              VK_FORMAT_R8G8B8A8_UNORM};
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 2;
+  Rendering.pColorAttachmentFormats = ColorFormats;
+
+  VkPipelineShaderStageCreateInfo Stages[2]{};
+  Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+  Stages[0].module = Vertex;
+  Stages[0].pName = "main";
+  Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  Stages[1].module = Fragment;
+  Stages[1].pName = "main";
+  VkPipelineVertexInputStateCreateInfo VertexInput{};
+  VkPipelineInputAssemblyStateCreateInfo InputAssembly{};
+  InputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+  VkViewport Viewport{0.0f, 0.0f, float(Extent), float(Extent), 0.0f, 1.0f};
+  VkRect2D Scissor{{0, 0}, {Extent, Extent}};
+  VkPipelineViewportStateCreateInfo ViewportState{};
+  ViewportState.viewportCount = 1;
+  ViewportState.pViewports = &Viewport;
+  ViewportState.scissorCount = 1;
+  ViewportState.pScissors = &Scissor;
+  VkPipelineRasterizationStateCreateInfo Raster{};
+  Raster.cullMode = VK_CULL_MODE_NONE;
+  Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  Raster.polygonMode = VK_POLYGON_MODE_FILL;
+  VkPipelineMultisampleStateCreateInfo Multisample{};
+  Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+  VkPipelineColorBlendAttachmentState BlendAttachments[2]{};
+  BlendAttachments[0].colorWriteMask = 0xF;
+  BlendAttachments[1].colorWriteMask = 0xF;
+  VkPipelineColorBlendStateCreateInfo Blend{};
+  Blend.attachmentCount = 2;
+  Blend.pAttachments = BlendAttachments;
+  VkGraphicsPipelineCreateInfo Info{};
+  Info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  Info.stageCount = 2;
+  Info.pStages = Stages;
+  Info.pVertexInputState = &VertexInput;
+  Info.pInputAssemblyState = &InputAssembly;
+  Info.pViewportState = &ViewportState;
+  Info.pRasterizationState = &Raster;
+  Info.pMultisampleState = &Multisample;
+  Info.pColorBlendState = &Blend;
+  Info.layout = Layout;
+  Info.pNext = &Rendering;
+  VkPipeline Pipe = VK_NULL_HANDLE;
+  ASSERT_EQ(vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr,
+                                      &Pipe),
+            VK_SUCCESS);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkRenderingAttachmentInfo ColorAttachments[2]{};
+  ColorAttachments[0].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[0].imageView = ColorView;
+  ColorAttachments[0].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  ColorAttachments[1].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachments[1].imageView = SecondView;
+  ColorAttachments[1].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 2;
+  RenderingInfo.pColorAttachments = ColorAttachments;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  // Both locations claim attachment 0.
+  uint32_t Locations[2] = {0, 0};
+  VkRenderingAttachmentLocationInfo LocationInfo{};
+  LocationInfo.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO;
+  LocationInfo.colorAttachmentCount = 2;
+  LocationInfo.pColorAttachmentLocations = Locations;
+  vkCmdSetRenderingAttachmentLocations(Cmd, &LocationInfo);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_ERROR_INITIALIZATION_FAILED);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+  vkDestroyImageView(Device, SecondView, nullptr);
+  vkDestroyImage(Device, SecondImage, nullptr);
+  vkFreeMemory(Device, SecondMemory, nullptr);
+}
+
+/// (roadmap F8) `vkCmdSetRenderingInputAttachmentIndices`'s state is
+/// recorded and validated the same way (dynamic-rendering-only,
+/// `colorAttachmentCount` must agree); it has no observable effect yet
+/// since no shader-side `subpassInput` local-read consumer exists (a
+/// separate, larger gap FeMeVulkanDesign.md's "Render passes and dynamic
+/// rendering" section documents), but a well-formed call must not fail
+/// the draw it precedes.
+TEST_F(DrawTest, RenderingInputAttachmentIndicesIsRecordedWithoutError) {
+  VkShaderModule Vertex = createModule(FullscreenVertexSource);
+  VkShaderModule Fragment = createModule(RedFragmentSource);
+  VkFormat ColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
+  VkPipelineRenderingCreateInfo Rendering{};
+  Rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  Rendering.colorAttachmentCount = 1;
+  Rendering.pColorAttachmentFormats = &ColorFormat;
+  VkPipeline Pipe = createPipeline(Vertex, Fragment, &Rendering);
+
+  VkCommandBufferBeginInfo BeginInfo{};
+  ASSERT_EQ(vkBeginCommandBuffer(Cmd, &BeginInfo), VK_SUCCESS);
+  VkRenderingAttachmentInfo ColorAttachment{};
+  ColorAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+  ColorAttachment.imageView = ColorView;
+  ColorAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  ColorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+  ColorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+  VkRenderingInfo RenderingInfo{};
+  RenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+  RenderingInfo.renderArea = {{0, 0}, {Extent, Extent}};
+  RenderingInfo.layerCount = 1;
+  RenderingInfo.colorAttachmentCount = 1;
+  RenderingInfo.pColorAttachments = &ColorAttachment;
+
+  vkCmdBeginRenderingKHR(Cmd, &RenderingInfo);
+  vkCmdBindPipeline(Cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipe);
+  uint32_t ColorIndices[1] = {0};
+  uint32_t DepthIndex = 1;
+  VkRenderingInputAttachmentIndexInfo IndexInfo{};
+  IndexInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INPUT_ATTACHMENT_INDEX_INFO;
+  IndexInfo.colorAttachmentCount = 1;
+  IndexInfo.pColorAttachmentInputIndices = ColorIndices;
+  IndexInfo.pDepthInputAttachmentIndex = &DepthIndex;
+  vkCmdSetRenderingInputAttachmentIndices(Cmd, &IndexInfo);
+  vkCmdDraw(Cmd, 3, 1, 0, 0);
+  vkCmdEndRenderingKHR(Cmd);
+  ASSERT_EQ(vkEndCommandBuffer(Cmd), VK_SUCCESS);
+  EXPECT_EQ(submit(), VK_SUCCESS);
+  EXPECT_EQ(texel(0, 0)[0], 0xFF);
+
+  vkDestroyPipeline(Device, Pipe, nullptr);
+  vkDestroyShaderModule(Device, Fragment, nullptr);
+  vkDestroyShaderModule(Device, Vertex, nullptr);
+}
+
 TEST_F(DrawTest, OcclusionQueryCountsPassedSamples) {
   VkShaderModule Vertex = createModule(FullscreenVertexSource);
   VkShaderModule Fragment = createModule(RedFragmentSource);

@@ -618,6 +618,16 @@ VKAPI_ATTR void VKAPI_CALL
 vkCmdSetLineStippleKHR(VkCommandBuffer commandBuffer,
                        uint32_t lineStippleFactor,
                        uint16_t lineStipplePattern);
+// (roadmap F8) Core in 1.4 (this driver's advertised `apiVersion`, unlike
+// dynamic rendering itself -- see the `KHR` comment above), so these two
+// names need no `KHR` suffix, matching `vkCmdBindIndexBuffer2`'s own
+// precedent (roadmap E5).
+VKAPI_ATTR void VKAPI_CALL vkCmdSetRenderingAttachmentLocations(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingAttachmentLocationInfo *pLocationInfo);
+VKAPI_ATTR void VKAPI_CALL vkCmdSetRenderingInputAttachmentIndices(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingInputAttachmentIndexInfo *pInputAttachmentIndexInfo);
 VKAPI_ATTR void VKAPI_CALL vkCmdSetDepthBias(VkCommandBuffer commandBuffer,
                                              float depthBiasConstantFactor,
                                              float depthBiasClamp,

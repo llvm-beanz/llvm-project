@@ -35,6 +35,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 namespace feme::vulkan {
@@ -115,6 +116,11 @@ struct RecordedCommand {
     // `vkCmdSetLineStippleKHR` (`VK_KHR_line_rasterization`).
     SetLineWidth,
     SetLineStipple,
+    // (roadmap F8) `vkCmdSetRenderingAttachmentLocations`/
+    // `vkCmdSetRenderingInputAttachmentIndices` (`VK_KHR_dynamic_rendering_
+    // local_read`).
+    SetRenderingAttachmentLocations,
+    SetRenderingInputAttachmentIndices,
     Draw,
     DrawIndexed,
     DrawIndirect,
@@ -283,6 +289,21 @@ struct RecordedCommand {
   float LineWidthValue = 1.0f;
   uint32_t LineStippleFactorValue = 1;
   uint16_t LineStipplePatternValue = 0xFFFF;
+  /// (roadmap F8) `SetRenderingAttachmentLocations`:
+  /// `vkCmdSetRenderingAttachmentLocations`'s `pColorAttachmentLocations`
+  /// array (empty for a null pointer, the identity-mapping default).
+  std::vector<uint32_t> ColorAttachmentLocationsValue;
+  /// (roadmap F8) `SetRenderingInputAttachmentIndices`:
+  /// `vkCmdSetRenderingInputAttachmentIndices`'s `pColorAttachmentInput
+  /// Indices` array (empty for a null pointer), plus the depth/stencil
+  /// index -- `Has*InputAttachmentIndex` distinguishes a null pointer ("no
+  /// `InputAttachmentIndex` decoration") from a supplied index (which may
+  /// itself be `VK_ATTACHMENT_UNUSED`).
+  std::vector<uint32_t> ColorAttachmentInputIndicesValue;
+  bool HasDepthInputAttachmentIndex = false;
+  uint32_t DepthInputAttachmentIndexValue = 0;
+  bool HasStencilInputAttachmentIndex = false;
+  uint32_t StencilInputAttachmentIndexValue = 0;
   /// (V6) `Draw`/`DrawIndexed`: the draw's own arguments, in the same shape
   /// `feme::graphics::DrawCommand` uses (`FirstQuery` above is reused for
   /// neither -- a draw needs all six of these at once).
@@ -696,6 +717,33 @@ public:
     Cmd.LineStippleFactorValue = Factor;
     Cmd.LineStipplePatternValue = Pattern;
     Commands.push_back(Cmd);
+  }
+  /// (roadmap F8) `vkCmdSetRenderingAttachmentLocations`. \p Locations is
+  /// empty for a null `pColorAttachmentLocations` (the identity-mapping
+  /// default).
+  void setRenderingAttachmentLocations(std::vector<uint32_t> Locations) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetRenderingAttachmentLocations;
+    Cmd.ColorAttachmentLocationsValue = std::move(Locations);
+    Commands.push_back(std::move(Cmd));
+  }
+  /// (roadmap F8) `vkCmdSetRenderingInputAttachmentIndices`. \p ColorIndices
+  /// is empty for a null `pColorAttachmentInputIndices`; \p DepthIndex/
+  /// \p StencilIndex are `std::nullopt` for a null `pDepthInputAttachment
+  /// Index`/`pStencilInputAttachmentIndex` (see the man page's three-way
+  /// distinction, mirrored by `GraphicsState`'s own fields).
+  void
+  setRenderingInputAttachmentIndices(std::vector<uint32_t> ColorIndices,
+                                     std::optional<uint32_t> DepthIndex,
+                                     std::optional<uint32_t> StencilIndex) {
+    RecordedCommand Cmd;
+    Cmd.Op = RecordedCommand::Kind::SetRenderingInputAttachmentIndices;
+    Cmd.ColorAttachmentInputIndicesValue = std::move(ColorIndices);
+    Cmd.HasDepthInputAttachmentIndex = DepthIndex.has_value();
+    Cmd.DepthInputAttachmentIndexValue = DepthIndex.value_or(0);
+    Cmd.HasStencilInputAttachmentIndex = StencilIndex.has_value();
+    Cmd.StencilInputAttachmentIndexValue = StencilIndex.value_or(0);
+    Commands.push_back(std::move(Cmd));
   }
   /// (V6) `vkCmdDraw`.
   void draw(uint32_t VertexCount, uint32_t InstanceCount, uint32_t FirstVertex,
