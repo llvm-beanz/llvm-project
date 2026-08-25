@@ -33,11 +33,25 @@ if it already exists, and commit it in its own commit when you're done.
 
 # Request
 
-Can you implement roadmap milestone F8?
+Can you implement roadmap milestone F8a and close out F8?
 
-> **`VK_KHR_dynamic_rendering_local_read`/`dynamicRenderingLocalRead` + its 2
-> limit fields.**
-> `vkCmdSetRenderingAttachmentLocations`/`vkCmdSetRenderingInputAttachmentIndices`
-> let a fragment shader read the current attachment bindings as input
-> attachments without a render-pass restart; builds on V6's dynamic-rendering
-> render-target binding
+>  **F8's own remaining half: shader-side `subpassInput` local-read
+>  consumption.** Needs, in order: (1) `OpTypeImage` with `Dim=SubpassData` and
+>  `OpImageRead`'s subpass-local form modeled by the `spirv` dialect if it is
+>  not already (unconfirmed as of F8 -- audit first); (2) a `SPIRVToLLVM`
+>  conversion pattern reading directly from the currently-bound
+>  dynamic-rendering color/depth/stencil attachment
+>  (`feme::vulkan::RenderTargetBinding`, not a descriptor-set image) named by
+>  the shader's own `InputAttachmentIndex` decoration, resolved through
+>  `vkCmdSetRenderingInputAttachmentIndices`' mapping
+>  (`GraphicsState::ColorAttachmentInputIndices`/`DepthInputAttachmentIndex`/`StencilInputAttachmentIndex`,
+>  F8's own row) or, when that command was never called, the identity default
+>  the same row's man-page citation describes; (3) once real local reads produce
+>  correct pixels for a CTS-shaped test,
+>  `dynamicRenderingLocalRead`/`VK_KHR_dynamic_rendering_local_read` can finally
+>  be advertised (`EntryPoints.cpp`/`PhysicalDeviceInfo.cpp`, mirroring every
+>  other F-row's dedicated-struct-agrees-with-aggregate precedent); (4)
+>  `dynamicRenderingLocalReadDepthStencilAttachments`/`dynamicRenderingLocalReadMultisampledAttachments`
+>  need their own depth/stencil- and multisample-attachment local-read cases
+>  demonstrated (not just the plain color case (1)-(3) cover) before either
+>  limit flips to `VK_TRUE`
