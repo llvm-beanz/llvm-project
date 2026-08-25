@@ -261,7 +261,13 @@ DecodedASTCImage decodeASTCImageForSampling(const Image *Img, uint32_t BaseMip,
     LevelExtents[L] = {W, H};
     uint64_t RowPitch = uint64_t(W) * 4;
     uint64_t SlicePitch = RowPitch * H;
-    Result.MipLayouts[L] = {Offset, RowPitch, SlicePitch, SlicePitch};
+    // A block-compressed format is never multisampled in real Vulkan (see
+    // Image.cpp's `computeSubresourceLayouts` comment), so `SampleStride`
+    // is always 0 here -- roadmap F8b started actually consulting this
+    // field (`femeRTFetchTexel2D`, FeMeRuntimeCPU.c), which is what
+    // surfaced this row's own pre-existing `SampleStride == SlicePitch`
+    // mistake (harmless while the field went unread).
+    Result.MipLayouts[L] = {Offset, RowPitch, SlicePitch, 0};
     Offset += SlicePitch;
   }
   Result.Texels.resize(Offset);
@@ -1179,13 +1185,21 @@ uint32_t resolveVertexBindingStride(const GraphicsPipeline &Pipeline,
 /// page). \p Layouts backs each populated descriptor's single-mip
 /// `MipLayouts` entry and must outlive \p Heap.
 ///
-/// Scoped to a single-sample draw (`SampleCount == 1`) for now: a
-/// multisample attachment's slot is left unpopulated (reads as zero)
-/// rather than guessing at a per-sample layout no test yet demonstrates --
-/// roadmap F8b tracks the multisample- and depth-stencil-specific CTS
-/// coverage `dynamicRenderingLocalReadMultisampledAttachments`/
-/// `dynamicRenderingLocalReadDepthStencilAttachments` need before either
-/// limit can honestly flip to `VK_TRUE`.
+/// Roadmap F8b: a depth (`D16_UNORM`/`D32_FLOAT`) or stencil (`S8_UINT`)
+/// attachment's slot is populated exactly like a color one -- the format-
+/// decode gap that left every such fetch reading zero was in the CPU
+/// runtime's own texel-unpack table (`femeRTUnpackImageTexel`,
+/// FeMeRuntimeCPU.c), not here. A `SampleCount > 1` attachment's slot is
+/// now populated too, its `MipLayouts` entry addressing every sample of a
+/// texel contiguously (`Layout.SampleStride == *ElemSize`, matching
+/// Image.cpp's `computeSubresourceLayouts`) rather than being left zeroed:
+/// this gives a correct heap for any future sample-index-aware reader, but
+/// no such reader exists yet (`feme::StageOpKind::SubpassLoad` carries no
+/// `Sample` operand, and `SubpassLoadPattern` (SPIRVToLLVMPatterns.cpp)
+/// rejects a `spirv.ImageRead` that has one), so
+/// `dynamicRenderingLocalReadMultisampledAttachments` stays `VK_FALSE`
+/// (tracked as roadmap F8c) even though this function's own multisample
+/// gap is closed.
 Error buildSubpassInputHeap(
     const GraphicsState &Gfx,
     llvm::ArrayRef<feme::graphics::AttachmentView> Attachments,
@@ -1220,7 +1234,7 @@ Error buildSubpassInputHeap(
 
   auto populate = [&](uint32_t Idx,
                       const feme::graphics::AttachmentView &View) -> Error {
-    if (Idx == VK_ATTACHMENT_UNUSED || View.Data.empty() || SampleCount != 1)
+    if (Idx == VK_ATTACHMENT_UNUSED || View.Data.empty())
       return Error::success();
     Expected<uint32_t> ElemSize =
         feme::graphics::getFixtureFormatElementSize(View.Format);
@@ -1237,13 +1251,16 @@ Error buildSubpassInputHeap(
     Dst.MipLevels = 1;
     Dst.ArrayLayers = 1;
     Dst.PlaneCount = 1;
-    Dst.SampleCount = 1;
+    Dst.SampleCount = SampleCount;
     Dst.Flags = feme::cpu::FEME_IMAGE_SAMPLED;
     feme::cpu::FemeImageSubresourceLayout &Layout = Layouts[Idx];
     Layout.Offset = 0;
-    Layout.RowPitch = uint64_t(View.Width) * *ElemSize;
+    // Every sample of one texel is stored contiguously (matching
+    // Image.cpp's `computeSubresourceLayouts`), so a row is `Width`
+    // texels of `SampleCount * *ElemSize` bytes each.
+    Layout.RowPitch = uint64_t(View.Width) * *ElemSize * SampleCount;
     Layout.SlicePitch = Layout.RowPitch * View.Height;
-    Layout.SampleStride = 0;
+    Layout.SampleStride = SampleCount > 1 ? *ElemSize : 0;
     Dst.MipLayouts = &Layout;
     Dst.MipLayoutCount = 1;
     return Error::success();
